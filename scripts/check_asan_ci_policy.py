@@ -18,57 +18,49 @@ EXPECTED_SUPPRESSION = (
 ).encode()
 EXPECTED_COMMAND = """set -euo pipefail
 test -x "/usr/bin/llvm-symbolizer-18"
-cargo_args=(
-  +nightly-2026-07-01 test --all-features --locked -Z build-std
-  --target x86_64-unknown-linux-gnu
-)
 nextest_args=(
-  +nightly-2026-07-01 nextest run --all-features --locked -Z build-std
-  --target x86_64-unknown-linux-gnu
+  +nightly-2026-07-01 nextest run
+  --archive-file "${RUNNER_TEMP}/asan-archive/asan-tests.tar.zst"
+  --extract-to "${GITHUB_WORKSPACE}"
+  --extract-overwrite
   --user-config-file none
   --ignore-default-filter
   --success-output final
   --no-output-indent
+  --test-threads 2
 )
-run_asan_tests() {
-  ASAN_SYMBOLIZER_PATH="/usr/bin/llvm-symbolizer-18" \\
-    RUSTFLAGS="-Z sanitizer=address" \\
-    cargo "${cargo_args[@]}" "$@"
-}
 run_asan_partition() {
   ASAN_SYMBOLIZER_PATH="/usr/bin/llvm-symbolizer-18" \\
-    RUSTFLAGS="-Z sanitizer=address" \\
     cargo "${nextest_args[@]}" "$@"
 }
 case "${ASAN_SHARD}" in
   bundle-coverage)
-    run_asan_tests -p pos-conformance \\
-      --test bundle_contract_coverage_public
+    run_asan_partition \\
+      -E 'binary_id(pos-conformance::bundle_contract_coverage_public)'
     ;;
   bundle-public-1)
-    run_asan_partition -p pos-conformance \\
-      --test bundle_contract_public \\
-      --partition slice:1/2 --run-ignored all --test-threads 2
+    run_asan_partition \\
+      -E 'binary_id(pos-conformance::bundle_contract_public)' \\
+      --partition slice:1/2 --run-ignored all
     ;;
   bundle-public-2)
-    run_asan_partition -p pos-conformance \\
-      --test bundle_contract_public \\
-      --partition slice:2/2 --run-ignored all --test-threads 2
+    run_asan_partition \\
+      -E 'binary_id(pos-conformance::bundle_contract_public)' \\
+      --partition slice:2/2 --run-ignored all
     ;;
   moat-proof)
-    run_asan_tests -p pos-conformance \\
-      --test moat_proof_public
+    run_asan_partition \\
+      -E 'binary_id(pos-conformance::moat_proof_public)'
     ;;
   remainder-1)
-    run_asan_partition --workspace --exclude pos-conformance --tests \\
-      --partition slice:1/2 --test-threads 2
-    run_asan_tests -p pos-conformance --lib --bins \\
-      --test profile_contract_public \\
-      --test provider_contract_public
+    run_asan_partition -E 'not package(pos-conformance)' \\
+      --partition slice:1/2
+    run_asan_partition \\
+      -E 'package(pos-conformance) & (kind(lib) | kind(bin) | binary_id(pos-conformance::profile_contract_public) | binary_id(pos-conformance::provider_contract_public))'
     ;;
   remainder-2)
-    run_asan_partition --workspace --exclude pos-conformance --tests \\
-      --partition slice:2/2 --test-threads 2
+    run_asan_partition -E 'not package(pos-conformance)' \\
+      --partition slice:2/2
     ;;
   *)
     printf 'unknown ASan shard: %s\\n' "${ASAN_SHARD}" >&2
@@ -77,27 +69,88 @@ case "${ASAN_SHARD}" in
 esac 2>&1 | tee "${RUNNER_TEMP}/asan.log"
 python scripts/check_lsan_suppression_report.py "${RUNNER_TEMP}/asan.log"
 """
+ARCHIVE_ARTIFACT = "asan-nextest-archive"
+EXPECTED_BUILD_COMMAND = """set -euo pipefail
+RUSTFLAGS="-Z sanitizer=address" \\
+  cargo +nightly-2026-07-01 nextest archive --workspace --all-features \\
+  --locked -Z build-std --target x86_64-unknown-linux-gnu --tests \\
+  --archive-file "${RUNNER_TEMP}/asan-tests.tar.zst"
+"""
+EXPECTED_BUILD_ENV = {
+    "RUSTC_BOOTSTRAP": "1",
+    "CARGO_BUILD_JOBS": "1",
+    "CARGO_INCREMENTAL": "0",
+    "CARGO_PROFILE_TEST_DEBUG": "line-tables-only",
+}
+EXPECTED_BUILD_JOB = {
+    "name": "asan build (nextest archive)",
+    "needs": ["ci_change_scope", "preflight-gate"],
+    "if": (
+        "${{ !cancelled() && needs.preflight-gate.result == 'success' && "
+        "(needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}"
+    ),
+    "runs-on": "ubuntu-24.04",
+    "timeout-minutes": 60,
+    "steps": [
+        {"uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"},
+        {"run": "rm -f rust-toolchain.toml"},
+        {
+            "uses": "dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de",
+            "with": {"toolchain": "nightly-2026-07-01", "components": "rust-src"},
+        },
+        {
+            "name": "Install cargo-nextest for the ASan archive",
+            "uses": "taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29",
+            "with": {"tool": "cargo-nextest@0.9.146", "fallback": "none"},
+        },
+        {
+            "uses": "Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16",
+            "with": {
+                "shared-key": "asan-nightly-2026-07-01",
+                "save-if": "${{ github.ref == 'refs/heads/main' }}",
+            },
+        },
+        {
+            "name": "cargo nextest archive with ASan",
+            "env": EXPECTED_BUILD_ENV,
+            "run": EXPECTED_BUILD_COMMAND,
+        },
+        {
+            "name": "Upload ASan test archive",
+            "uses": "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+            "with": {
+                "name": ARCHIVE_ARTIFACT,
+                "path": "${{ runner.temp }}/asan-tests.tar.zst",
+                "retention-days": 1,
+                "if-no-files-found": "error",
+                "overwrite": True,
+                "compression-level": 0,
+            },
+        },
+    ],
+}
 EXPECTED_WORKFLOW_ENV = {
     "CARGO_TERM_COLOR": "always",
     "RUSTFLAGS": "-D warnings",
 }
 EXPECTED_STEP_ENV = {
     "ASAN_SHARD": "${{ matrix.shard }}",
-    "RUSTC_BOOTSTRAP": "1",
     "ASAN_OPTIONS": "detect_leaks=1:detect_odr_violation=0",
     "LSAN_OPTIONS": (
         "suppressions=${{ github.workspace }}/scripts/asan/bevy-reflect.lsan:"
         "print_suppressions=1"
     ),
-    "CARGO_BUILD_JOBS": "1",
-    "RUST_TEST_THREADS": "2",
-    "CARGO_INCREMENTAL": "0",
-    "CARGO_PROFILE_TEST_DEBUG": "line-tables-only",
 }
-EXPECTED_SCOPE_JOB = ["ci_change_scope", "standard-gate", "mutation-checks"]
+EXPECTED_SCOPE_JOB = [
+    "ci_change_scope",
+    "standard-gate",
+    "mutation-checks",
+    "asan-build",
+]
 EXPECTED_SCOPE_IF = (
     "${{ !cancelled() && needs.standard-gate.result == 'success' && "
     "(needs.mutation-checks.result == 'success' || needs.mutation-checks.result == 'skipped') && "
+    "needs.asan-build.result == 'success' && "
     "(needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}"
 )
 EXPECTED_JOB_KEYS = {
@@ -154,14 +207,10 @@ EXPECTED_SETUP_STEPS = [
     {"run": "rm -f rust-toolchain.toml"},
     {
         "uses": "dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de",
-        "with": {"toolchain": "nightly-2026-07-01", "components": "rust-src"},
+        "with": {"toolchain": "nightly-2026-07-01"},
     },
     {
         "name": "Install cargo-nextest for partitioned ASan tests",
-        "if": (
-            "${{ startsWith(matrix.shard, 'bundle-public-') || "
-            "startsWith(matrix.shard, 'remainder-') }}"
-        ),
         "uses": "taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29",
         "with": {"tool": "cargo-nextest@0.9.146", "fallback": "none"},
     },
@@ -174,11 +223,9 @@ grep -Fqx "Ubuntu LLVM version 18.1.3" <<<"${symbolizer_version}"
 """,
     },
     {
-        "uses": "Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16",
-        "with": {
-            "shared-key": "asan-nightly-2026-07-01",
-            "save-if": "${{ github.ref == 'refs/heads/main' }}",
-        },
+        "name": "Download ASan test archive",
+        "uses": "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
+        "with": {"name": ARCHIVE_ARTIFACT, "path": "${{ runner.temp }}/asan-archive"},
     },
 ]
 EXPECTED_NEGATIVE_CONTROL_STEP = {
@@ -251,6 +298,12 @@ def check_workflow(
 
     jobs = workflow.get("jobs")
     require(isinstance(jobs, dict), "workflow jobs must be a mapping")
+    build = jobs.get("asan-build")
+    require(isinstance(build, dict), "missing ASan archive build job")
+    require(
+        build == EXPECTED_BUILD_JOB,
+        "ASan archive build job must match the exact trusted job",
+    )
     job = jobs.get("asan")
     require(isinstance(job, dict), "missing ASan shard job")
     require(set(job) == EXPECTED_JOB_KEYS, "ASan shard graph or metadata changed")
