@@ -270,9 +270,8 @@ impl Rig {
         let beta = publish(&mut signed, BETA, 2)?;
         let primary = Implementation::of(&signed, alpha, &swap)?;
         let candidate = Implementation::of(&signed, beta, &swap)?;
-        let sources = (0..8).map(|_| -> BoxResult<Box<dyn ReleaseSourceV1>> {
-            Ok(Box::new(signed.root.store()?))
-        });
+        let sources = (0..8)
+            .map(|_| -> BoxResult<Box<dyn ReleaseSourceV1>> { Ok(Box::new(signed.root.store()?)) });
         let (store, directory) = store_of(kind)?;
         let supply = Supply {
             implementations: vec![primary.clone(), candidate.clone()],
@@ -392,7 +391,9 @@ impl Rig {
             supply: &mut self.supply,
             tick: TICK,
         };
-        let outcomes = self.boundary.run_boundary_v1(&mut context, &mut self.host, outcome);
+        let outcomes = self
+            .boundary
+            .run_boundary_v1(&mut context, &mut self.host, outcome);
         outcomes.map_or_else(
             |error| format!("error:{error:?}"),
             |outcomes| join(outcomes.iter().map(describe)),
@@ -413,8 +414,13 @@ impl Rig {
             tick: TICK,
         };
         let host = &mut self.host;
-        let returned = self.boundary.owner_activate_v1(&mut context, host, &held, ENTRY, &target);
-        returned.map_or_else(|error| format!("error:{error:?}"), |outcome| describe(&outcome))
+        let returned = self
+            .boundary
+            .owner_activate_v1(&mut context, host, &held, ENTRY, &target);
+        returned.map_or_else(
+            |error| format!("error:{error:?}"),
+            |outcome| describe(&outcome),
+        )
     }
 
     /// The Plugin ID text of the implementation the boundary binds the entry to.
@@ -433,10 +439,7 @@ impl Rig {
         let cause = FallbackTriggerCauseV1::from_code(input.trigger_basis.cause);
         Ok(format!(
             "{:?}/{:?}/{:?}/{}",
-            input.trigger_code,
-            cause,
-            input.trigger_basis.origin,
-            input.closing_tenure_ordinal
+            input.trigger_code, cause, input.trigger_basis.origin, input.closing_tenure_ordinal
         ))
     }
 
@@ -444,12 +447,18 @@ impl Rig {
     fn revoke_primary(&mut self) -> BoxResult<()> {
         let release = self.primary.published.release;
         self.signed.advance_revoking_artifacts(&[release])??;
-        self.supply.material.set(Some(trust_material(&self.signed, &self.signed.material()?)));
+        self.supply
+            .material
+            .set(Some(trust_material(&self.signed, &self.signed.material()?)));
         Ok(())
     }
 
     fn ledger_rows(&self) -> BoxResult<usize> {
-        Ok(self.pass.store.fallback_ledger(SCOPE, self.pass.timeline)?.len())
+        Ok(self
+            .pass
+            .store
+            .fallback_ledger(SCOPE, self.pass.timeline)?
+            .len())
     }
 }
 
@@ -473,7 +482,11 @@ fn join(items: impl Iterator<Item = String>) -> String {
 /// A short description of one entry outcome.
 fn describe(outcome: &Outcome) -> String {
     let reasons = |skipped: &[pos_core::FallbackSkippedCandidateV1]| {
-        join(skipped.iter().map(|skipped| format!("{:?}", skipped.reason)))
+        join(
+            skipped
+                .iter()
+                .map(|skipped| format!("{:?}", skipped.reason)),
+        )
     };
     match outcome {
         Outcome::Activated { to, skipped, .. } => {
