@@ -22,7 +22,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         timeout-minutes: 2
         with:
-          ref: f958d197e22e0d48ab05d1cc36159b554a83bfce
+          ref: 64b80bce3dbae2cd59352ccc584277d9d72bf0a4
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         timeout-minutes: 5
@@ -39,7 +39,7 @@ jobs:
           set -euo pipefail
           mkdir -p artifacts
           git rev-parse HEAD | tee artifacts/source-sha.txt
-          test "$(git rev-parse HEAD)" = f958d197e22e0d48ab05d1cc36159b554a83bfce
+          test "$(git rev-parse HEAD)" = 64b80bce3dbae2cd59352ccc584277d9d72bf0a4
           rustc -Vv | tee artifacts/rustc.txt
           cargo llvm-cov --version | tee artifacts/llvm-cov-version.txt
           id | tee artifacts/runner-identity.txt
@@ -90,6 +90,7 @@ jobs:
             sqlite::fork_replay_suffix::tests::native_suffix_function_refusals_preserve_joined_probe_accounting
             sqlite::fork_replay_lineage::tests::metadata_where_redaction_refuses_only_the_raw_fetch_and_preserves_debits
             sqlite::fork_replay_lineage::tests::geographic_where_redaction_refuses_only_the_raw_kind_and_preserves_debits
+            sqlite::fork_replay_lineage::tests::native_lineage_decoder_refuses_short_projections_without_refunding_work
             sqlite::fork_replay_read::tests::projected_sequence_redaction_preserves_the_real_row_and_funded_event_retry
           )
           for test_name in "${tests[@]}"; do
@@ -127,14 +128,17 @@ jobs:
             --json --output-path artifacts/coverage.json \
             -- --include-ignored 2>&1 | tee artifacts/coverage-test.log
           # Exact standalone source inventory, not the PR synthetic merge tree.
-          grep -F 'test result: ok. 1103 passed; 0 failed; 0 ignored;' artifacts/coverage-test.log
+          grep -F 'test result: ok. 1104 passed; 0 failed; 0 ignored;' artifacts/coverage-test.log
           bash scripts/assert-no-ignored-in-test-summary.sh artifacts/coverage-test.log
           python3 - <<'PY' | tee artifacts/target-regions.json
           import json
           from pathlib import Path
           expected = [
               ("fork_replay.rs", 114, 51, ".ok_or(INTERVAL_STORAGE_ERROR)?;"),
+              ("fork_replay_lineage.rs", 29, 74, "context.step(|_| match row.get_ref(column).map_err(|_| STORAGE_ERROR)? {"),
+              ("fork_replay_lineage.rs", 52, 78, "context.step(|_| match row.get_ref(column).map_err(|_| STORAGE_ERROR)? {"),
               ("fork_replay_lineage.rs", 201, 65, ".ok_or(Error::Read(ReadError::CorruptAuthority))?;"),
+              ("fork_replay_lineage.rs", 241, 90, "context.step(|_| match row.get_ref(column).map_err(|_| STORAGE_ERROR)? {"),
               ("fork_replay_lineage.rs", 310, 73, ".ok_or(Error::Read(ReadError::CorruptAuthority))?;"),
               ("fork_replay_read.rs", 104, 69, ".ok_or(Error::Read(ReadError::CorruptAuthority))?;"),
               ("fork_replay_operation.rs", 65, 58, ".map_err(|_| Error::StorageIndeterminate)?"),
