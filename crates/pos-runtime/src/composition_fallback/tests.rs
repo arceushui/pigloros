@@ -125,19 +125,38 @@ struct Fixture {
 
 fn fixture() -> Result<Fixture, Box<dyn Error>> {
     let key = ProjectionKey::new(EntityId::new());
-    let primary_pin = pin("acme.primary", "1.0.0", 1)?;
-    let primary = facts(&plugin("primary", "1.0.0"), primary_pin, &key)?;
-    let candidate_pin = pin("acme.candidate", "2.0.0", 2)?;
-    let candidate = facts(&plugin("candidate", "2.0.0"), candidate_pin, &key)?;
-    let other_pin = community_pin_v1(Hash::from_bytes([3; 32]), vec!["other".to_owned()])?;
-    let other = RequiredPluginV1::try_new(PluginId::new(), "1.0.0", other_pin)?;
-    let primary_required = required_plugin_v1(primary.registry.plugin_id, &primary.pin)?;
-    let composition = RequiredPluginCompositionV1::try_new(LOCAL, vec![primary_required, other])?;
+    let primary = implementation("primary", "acme.primary", "1.0.0", 1, &key)?;
+    let candidate = implementation("candidate", "acme.candidate", "2.0.0", 2, &key)?;
+    let composition = composition_with(&primary)?;
     Ok(Fixture {
         primary,
         candidate,
         composition,
     })
+}
+
+/// The scratch facts of one implementation with the shared settings.
+fn implementation(
+    name: &'static str,
+    plugin_id: &str,
+    version: &'static str,
+    digest: u8,
+    key: &ProjectionKey,
+) -> Result<Facts, Box<dyn Error>> {
+    let pin = pin(plugin_id, version, digest)?;
+    Ok(facts(&plugin(name, version), pin, key)?)
+}
+
+/// The effective composition: the primary and one unrelated Plugin.
+fn composition_with(primary: &Facts) -> Result<RequiredPluginCompositionV1, Box<dyn Error>> {
+    let other = other_required()?;
+    let primary_required = required_plugin_v1(primary.registry.plugin_id, &primary.pin)?;
+    Ok(RequiredPluginCompositionV1::try_new(LOCAL, vec![primary_required, other])?)
+}
+
+fn other_required() -> Result<RequiredPluginV1, Box<dyn Error>> {
+    let other_pin = community_pin_v1(Hash::from_bytes([3; 32]), vec!["other".to_owned()])?;
+    Ok(RequiredPluginV1::try_new(PluginId::new(), "1.0.0", other_pin)?)
 }
 
 impl Fixture {
