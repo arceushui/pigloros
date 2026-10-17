@@ -17,7 +17,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         timeout-minutes: 2
         with:
-          ref: 53fdf96deede1def2c6dd0e6183b21ea2eca9a68
+          ref: bb69188dc7f152653bb64e64916e2e8ff9c5c73f
           persist-credentials: false
       - name: Record exact source and generate the existing guest bindings
         timeout-minutes: 5
@@ -25,7 +25,7 @@ jobs:
           set -euo pipefail
           mkdir -p artifacts
           git rev-parse HEAD | tee artifacts/source-sha.txt
-          test "$(git rev-parse HEAD)" = 53fdf96deede1def2c6dd0e6183b21ea2eca9a68
+          test "$(git rev-parse HEAD)" = bb69188dc7f152653bb64e64916e2e8ff9c5c73f
           test -z "$(git status --porcelain --untracked-files=no)"
           # Reuse the canonical install-tools.sh pin, verified before downloading.
           installer=plugins/community/examples/compatibility-prototype/install-tools.sh
@@ -53,6 +53,33 @@ jobs:
             --out-dir "$generated" plugins/community/wit
           test -s "$generated/community_plugin.rs"
           sha256sum "$generated/community_plugin.rs" | tee artifacts/generated-sha256.txt
+          test -z "$(git diff --name-only HEAD)"
+      - name: Describe the existing standalone sanitizer canary to the extractor
+        timeout-minutes: 1
+        run: |
+          set -euo pipefail
+          test ! -e scripts/asan/Cargo.toml
+          # Analysis-only workspace metadata gives the unchanged rustc canary
+          # a semantic owner; its real sanitizer invocation is untouched.
+          python3 - <<'PY'
+          from pathlib import Path
+
+          manifest = '''[package]
+          name = "pigloros-asan-extraction-canary"
+          version = "0.0.0"
+          edition = "2021"
+
+          [[bin]]
+          name = "intentional-leak"
+          path = "intentional-leak.rs"
+
+          [workspace]
+          '''
+          Path("scripts/asan/Cargo.toml").write_text(manifest)
+          Path("artifacts/canary-manifest.toml").write_text(manifest)
+          PY
+          sha256sum scripts/asan/intentional-leak.rs scripts/asan/Cargo.toml \
+            | tee artifacts/canary-source-and-manifest-sha256.txt
           test -z "$(git diff --name-only HEAD)"
       - uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
         id: codeql
@@ -83,6 +110,7 @@ jobs:
           CODEQL: ${{ steps.codeql.outputs.codeql-path }}
         run: |
           set -euo pipefail
+          test -z "$(git diff --name-only HEAD)"
           results="${RUNNER_TEMP}/561-codeql-databases/rust/results"
           for query in ExtractionErrors ExtractionWarnings \
             NumberOfSuccessfullyExtractedFiles NumberOfFilesExtractedWithErrors; do
