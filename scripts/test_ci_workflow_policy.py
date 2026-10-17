@@ -7,8 +7,11 @@ import ast
 import copy
 import fnmatch
 import hashlib
+import os
 import pathlib
+import shlex
 import subprocess
+import tempfile
 import tomllib
 import unittest
 
@@ -392,7 +395,7 @@ def assert_codeql_preparation_contract(workflow: dict) -> None:
     # Exact reviewed-program snapshots, not a shell semantics oracle. Preserve
     # every byte, including heredoc data; update only with reviewed setup changes.
     required = (
-        (5, "943d3ffdab3272b7663ad6b8cea3eec11799ef54e3b56b5b46b15521114560d0"),
+        (5, "28c278b217fbafce26f3940be27c2dea987e012b986564110dbccb1ad7e21e0c"),
         (1, "8ff9e3fadf283e88daefd380c1de1bdcf915e9ee321bcc8dd9b850c9e6382978"),
     )
     for step, (deadline, digest) in zip(steps[1:3], required):
@@ -476,6 +479,94 @@ class CiWorkflowPolicyTests(unittest.TestCase):
             changed["jobs"]["analyze"]["steps"][1]["run"] = run.replace(checksum, replacement)
             with self.assertRaises(AssertionError):
                 assert_codeql_preparation_contract(changed)
+
+    def test_codeql_generates_bindings_for_each_declared_rust_guest_owner(self) -> None:
+        workflow = load_workflow(CI_WORKFLOW_PATH.with_name("codeql.yml"))
+        run = workflow["jobs"]["analyze"]["steps"][1]["run"]
+        # Execute the real owner-selection/generation section, not downloads.
+        program = run.split('"$tools_dir/wit-bindgen" --version\n', 1)[1]
+        program = program.rsplit('test -z "$(git diff --name-only HEAD)"', 1)[0]
+        prototype = pathlib.Path("plugins/community/examples/compatibility-prototype")
+        cases = (
+            ("legacy", False, True),
+            ("both", True, True),
+            ("partial-probe", True, False),
+            ("missing-required-source", False, False),
+            ("preexisting-output", False, False),
+            ("generator-failure", True, False),
+            ("empty-output", True, False),
+            ("dangling-probe", False, False),
+            ("probe-is-file", False, False),
+            ("linked-probe", False, False),
+        )
+        for case, has_probe, success in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory(
+                prefix="pigloros-codeql-owners-",
+                dir="/dev/shm" if pathlib.Path("/dev/shm").is_dir() else None,
+            ) as temporary:
+                root = pathlib.Path(temporary)
+                tools = root / "tools"
+                tools.mkdir()
+                generator = tools / "wit-bindgen"
+                generator.write_text(
+                    '#!/bin/sh\nset -eu\n'
+                    'test "$#" -eq 6\n'
+                    'test "$1" = rust\n'
+                    'test "$2" = --world\n'
+                    'test "$3" = community-plugin\n'
+                    'test "$4" = --out-dir\n'
+                    'test "$6" = plugins/community/wit\n'
+                    'test -d "$6"\n'
+                    'printf "%s\\n" "$5" >> "$PIGLOROS_CODEQL_OWNER_TRACE"\n'
+                    'case "$PIGLOROS_CODEQL_STUB_MODE" in\n'
+                    '  generator-failure) exit 37 ;;\n'
+                    '  empty-output) : > "$5/community_plugin.rs" ;;\n'
+                    '  *) printf "generated\\n" > "$5/community_plugin.rs" ;;\n'
+                    'esac\n',
+                    encoding="utf-8",
+                )
+                generator.chmod(0o755)
+                (root / "plugins/community/wit").mkdir(parents=True)
+                guests = ["rust-guest", "probe-guest"] if has_probe else ["rust-guest"]
+                for guest in guests:
+                    directory = root / prototype / guest
+                    (directory / "src").mkdir(parents=True)
+                    if case != "partial-probe" or guest != "probe-guest":
+                        (directory / "Cargo.toml").write_text("[package]\n", encoding="utf-8")
+                    if case != "missing-required-source":
+                        (directory / "src/lib.rs").write_text("// owner\n", encoding="utf-8")
+                if case == "preexisting-output":
+                    (root / prototype / "rust-guest/generated").mkdir()
+                elif case == "dangling-probe":
+                    (root / prototype / "probe-guest").symlink_to("absent-owner")
+                elif case == "probe-is-file":
+                    (root / prototype / "probe-guest").write_text("not a directory\n", encoding="utf-8")
+                elif case == "linked-probe":
+                    other = root / "separate-owner"
+                    (other / "src").mkdir(parents=True)
+                    (other / "Cargo.toml").write_text("[package]\n", encoding="utf-8")
+                    (other / "src/lib.rs").write_text("// owner\n", encoding="utf-8")
+                    (root / prototype / "probe-guest").symlink_to(other, target_is_directory=True)
+                trace = root / "owner-trace"
+                result = subprocess.run(
+                    ["bash", "-c", "set -euo pipefail\n"
+                     + "tools_dir=" + shlex.quote(str(tools)) + "\n" + program],
+                    cwd=root,
+                    env=dict(os.environ, PIGLOROS_CODEQL_OWNER_TRACE=str(trace),
+                             PIGLOROS_CODEQL_STUB_MODE=case),
+                    capture_output=True, text=True, check=False, timeout=10,
+                )
+                self.assertEqual(result.returncode == 0, success, result.stderr)
+                if success:
+                    self.assertEqual(
+                        trace.read_text(encoding="utf-8").splitlines(),
+                        [str(prototype / guest / "generated") for guest in guests],
+                    )
+                    for guest in guests:
+                        self.assertEqual(
+                            (root / prototype / guest / "generated/community_plugin.rs")
+                            .read_text(encoding="utf-8"), "generated\n",
+                        )
 
     def test_scope_jobs_use_trusted_base_and_fail_closed(self) -> None:
         workflow = load_workflow(CI_WORKFLOW_PATH)
