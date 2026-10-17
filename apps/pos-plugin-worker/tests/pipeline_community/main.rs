@@ -4,7 +4,8 @@
 //! that proves ADR-021 decision 7 across the two accepted isolation classes: an
 //! operator-trusted native Driver and a governed community Driver that runs a real Component in
 //! the real `pos-plugin-worker`. The cases run here because only this package's tests can launch
-//! the worker binary. They run on `MemoryStore`, the only store of the community pass world.
+//! the worker binary. They run on `MemoryStore`; the community pass world can also run on
+//! in-memory `SQLite`, which this profile does not use yet (#638).
 //!
 //! The runner reuses the fail-closed harness of the first-party profile `PPC1`
 //! (`apps/piglor-gateway/tests/pipeline_conformance/harness.rs`) unchanged: an unknown magic,

@@ -453,7 +453,7 @@ impl Lane {
     pub fn run_lost(&mut self, signed: &SignedWorld) -> BoxResult<CommunityPassOutcomeV1> {
         let mut clock = wall(UTC)?;
         let prepared = self.pass.prepare()?;
-        let mut port = LostPort(&mut self.pass.store);
+        let mut port = LostPort(self.pass.store.as_mut());
         let request = prepared.request(TICK, &mut port);
         let registry = &signed.registry;
         let host = &mut self.host;

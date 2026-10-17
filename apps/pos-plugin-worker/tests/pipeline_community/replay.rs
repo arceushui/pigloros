@@ -235,7 +235,7 @@ fn replayed(signed: &SignedWorld, entries: &[Published], mode: Mode) -> BoxResul
     let live = mixed.pass(signed)?;
     let timeline = mixed.lane.pass.timeline;
     let committed = mixed.lane.pass.events();
-    let ancestry = pos_core::fork_ancestry(&mixed.lane.pass.store, timeline)?;
+    let ancestry = pos_core::fork_ancestry(&*mixed.lane.pass.store, timeline)?;
     add_observer(&mut mixed.lane.pass.registry)?;
     mixed.lane.pass.registry.fold_events(timeline, &committed);
     let (mut replay, twin) = replay_lane(signed, entries, mode)?;
@@ -304,7 +304,7 @@ fn replay() -> BoxResult<Capture> {
 
 /// Recover the pass `lane`'s registry holds in doubt, described as the pass result it settles.
 fn recover(lane: &mut Lane) -> CommunityPassOutcomeV1 {
-    let store = &mut lane.pass.store;
+    let store = &mut *lane.pass.store;
     let recovered = lane.pass.registry.recover_scheduled_pass(store);
     let result = recovered.map_or_else(
         |error| PassResultV1::Failed {
@@ -323,7 +323,7 @@ fn recover(lane: &mut Lane) -> CommunityPassOutcomeV1 {
 
 /// What a second recovery of `lane` finds.
 fn recover_again(lane: &mut Lane) -> String {
-    let store = &mut lane.pass.store;
+    let store = &mut *lane.pass.store;
     match lane.pass.registry.recover_scheduled_pass(store) {
         Ok(receipt) => format!("Recovered({})", receipt.as_ref().map_or(0, events_of)),
         Err(RuntimeError::NoScheduledAdmissionInDoubt) => "NoScheduledAdmissionInDoubt".to_owned(),
