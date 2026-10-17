@@ -436,7 +436,7 @@ impl CompositionBoundaryV1 {
             self.bindings.insert(entry_key.clone(), candidate);
             Outcome::Activated {
                 entry_key,
-                to,
+                to: Box::new(to),
                 skipped,
                 row: Box::new(row),
             }

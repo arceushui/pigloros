@@ -245,7 +245,7 @@ impl RestartV1<'_> {
             composed.revision = row.state_revision();
             composed.outcomes.push(Outcome::Activated {
                 entry_key: request.entry_key,
-                to: request.to,
+                to: Box::new(request.to),
                 skipped: request.skipped,
                 row: Box::new(row),
             });

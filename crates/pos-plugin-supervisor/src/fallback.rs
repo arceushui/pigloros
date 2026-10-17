@@ -185,7 +185,7 @@ pub enum FallbackEntryOutcomeV1 {
         /// The DFP1 entry key.
         entry_key: String,
         /// The implementation the new tenure runs.
-        to: ImplementationKeyV1,
+        to: Box<ImplementationKeyV1>,
         /// The candidates skipped before `to`.
         skipped: Vec<FallbackSkippedCandidateV1>,
         /// The ledger row of the activation.
