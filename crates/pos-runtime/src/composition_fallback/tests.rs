@@ -700,3 +700,9 @@ fn a_reserved_type_is_refused_on_the_facts_only_path() -> TestResult {
     assert!(refused, "{facts:?}");
     Ok(())
 }
+
+#[test]
+fn host_cause_names_are_distinct() {
+    let names: BTreeSet<&str> = trigger::HOST_CAUSES.iter().map(|(name, _)| *name).collect();
+    assert_eq!(names.len(), trigger::HOST_CAUSES.len());
+}

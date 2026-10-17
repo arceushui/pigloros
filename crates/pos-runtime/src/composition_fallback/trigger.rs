@@ -86,14 +86,16 @@ pub enum FallbackTriggerCauseV1 {
 /// recognized before this table is read.
 ///
 /// A table keeps the lookup within the complexity bound: twenty distinct
-/// causes would need twenty match arms. The integration test
-/// `tests/composition_fallback_trigger_public.rs` guards it with two
-/// exhaustive `match`es with no wildcard arm: one gives every variant a
-/// distinct index and one its expected cause. A new variant therefore fails
-/// to compile until both are extended, and the test then fails until a sample
-/// of it classifies through this table to its expected cause; no expected
-/// cause is `Unrelated`, so a variant missing here or renamed fails.
-const HOST_CAUSES: [(&str, Cause); 20] = [
+/// causes would need twenty match arms. This module's public integration test
+/// guards it with two exhaustive `match`es with no wildcard arm: one gives
+/// every variant a distinct index and one its expected cause. A new variant
+/// therefore fails to compile until both are extended, and the test then fails
+/// until a sample of it classifies through this table to its expected cause;
+/// no expected cause is `Unrelated`, so a variant missing here or renamed
+/// fails. A future variant that should be `Unrelated` is still listed here,
+/// with `Cause::Unrelated`. The unit test of the parent module checks that the
+/// names are distinct, so with one row per variant no stale row can remain.
+pub(super) const HOST_CAUSES: [(&str, Cause); 20] = [
     ("InvalidManifest", Cause::InvalidManifest),
     ("ArtifactTrustDenied", Cause::ArtifactTrustDenied),
     ("ArtifactRevoked", Cause::ArtifactRevoked),
