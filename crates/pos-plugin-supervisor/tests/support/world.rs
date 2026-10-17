@@ -23,6 +23,7 @@ use pos_runtime::{
     LocalScheduledAdmissionHostV1, ObservationView, PluginRegistry, RuntimeError,
     ScheduledAdmissionStoreV1, ScheduledPassAdmissionV1,
 };
+use pos_store::composition_fallback_registry::CompositionFallbackRegistryV1;
 use pos_store::memory::MemoryStore;
 use pos_store::plugin_trust_registry::PluginTrustPolicyRegistryV1;
 use pos_store::sqlite::SqliteStore;
@@ -128,6 +129,12 @@ impl InvocationContextSourceV1 for PanickingSource {
     }
 }
 
+/// A store a pass world commits to: the scheduled-admission store, which also hosts the ADR-119
+/// composition fallback registry on its connection.
+pub trait PassStoreV1: ScheduledAdmissionStoreV1 + CompositionFallbackRegistryV1 {}
+
+impl<T: ScheduledAdmissionStoreV1 + CompositionFallbackRegistryV1 + ?Sized> PassStoreV1 for T {}
+
 /// The Event store a pass world commits to.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StoreKind {
@@ -151,7 +158,7 @@ impl StoreKind {
     }
 
     /// A fresh, empty store of this kind.
-    fn open(self) -> Box<dyn ScheduledAdmissionStoreV1> {
+    fn open(self) -> Box<dyn PassStoreV1> {
         match self {
             Self::Memory => Box::new(MemoryStore::new()),
             Self::Sqlite => Box::new(ok(SqliteStore::open(":memory:"))),
@@ -259,7 +266,7 @@ pub struct World {
     fixture_members: Vec<Member>,
     kind: StoreKind,
     /// The store the passes commit to; borrow it as a port with `store.as_mut()`.
-    pub store: Box<dyn ScheduledAdmissionStoreV1>,
+    pub store: Box<dyn PassStoreV1>,
     /// The registry the Drivers are registered in.
     pub registry: PluginRegistry,
     /// The open erasure gate.
@@ -280,11 +287,22 @@ impl World {
     /// A world on a fresh store of `kind` whose Drivers launch the worker at `program`.
     #[must_use]
     pub fn on(kind: StoreKind, program: impl Into<PathBuf>) -> Self {
+        Self::with_store(kind, kind.open(), program)
+    }
+
+    /// A world on `store`, a fresh store of `kind` (for example a file-backed `SQLite` store,
+    /// which the composition fallback registry needs for WAL), whose Drivers launch the worker
+    /// at `program`.
+    #[must_use]
+    pub fn with_store(
+        kind: StoreKind,
+        mut store: Box<dyn PassStoreV1>,
+        program: impl Into<PathBuf>,
+    ) -> Self {
         let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
         // The registry takes the trait object, so this clone must unsize: `Arc::clone(&gate)`
         // would infer the trait object as the clone's type and fail to type-check.
         let shared: Arc<dyn ErasureGate> = gate.clone();
-        let mut store = kind.open();
         let () = ok(store.bind_erasure_gate(Arc::clone(&gate)));
         let timeline = ok(store.create_timeline("community-pass")).id();
         Self {
