@@ -2199,6 +2199,29 @@ mod tests {
         Ok(())
     }
 
+    /// ADR-099 revision 13: the generic delete refuses a published admitted
+    /// Fork, changes no row, and leaves its sidecar readable.
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn sqlite_published_admitted_fork_is_not_deletable() -> Result<(), Box<dyn Error>> {
+        use crate::classified_fork_fixture::database_rows;
+        use pos_core::CoreError;
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("publication-delete.sqlite");
+        let child = durable_publication(&path)?.request.child_timeline_id;
+        let mut store = sqlite_store_at(&path)?;
+        let before = database_rows(&Connection::open(&path)?)?;
+        let refused = store.delete_timeline(child);
+        assert!(
+            matches!(refused, Err(CoreError::AdmittedForkNotDeletable(id)) if id == child),
+            "{refused:?}"
+        );
+        assert_eq!(database_rows(&Connection::open(&path)?)?, before);
+        let committed = store.read_committed(child, 0)?;
+        assert_eq!(committed.receipt.final_logical_head, 0);
+        Ok(())
+    }
+
     #[cfg(feature = "sqlite")]
     #[test]
     fn sqlite_fork_manifest_read_rejects_substituted_admission_source() -> Result<(), Box<dyn Error>>

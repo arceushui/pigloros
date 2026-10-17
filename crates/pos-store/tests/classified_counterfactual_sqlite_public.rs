@@ -17,11 +17,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use classified::{
-    batch, draft, empty_record, facts, hash, node_record, Authority, Fallible, Spec, FIRST_TICK,
-    PARENT_CUT, TICK_KIND, WRITTEN_ROWS_SQL,
+    batch, database_rows, draft, empty_record, facts, hash, node_record, Authority, Fallible, Spec,
+    FIRST_TICK, PARENT_CUT, TICK_KIND, WRITTEN_ROWS_SQL,
 };
 use pos_core::{
-    CanonicalBytes, CounterfactualAdapterSealV1, CounterfactualBasisV1,
+    CanonicalBytes, CoreError, CounterfactualAdapterSealV1, CounterfactualBasisV1,
     CounterfactualInvalidationOutcomeV1, CounterfactualStoreErrorV1, CounterfactualStorePortV1,
     CounterfactualTickOutcomeV1, EntityId, ErasureContainmentGateV1, EventDraft, EventStore, Hash,
     InvalidationConflictV1, Kind, PipelineDraftBatchV1, RecordedNodeOriginV1, Seq,
@@ -161,6 +161,12 @@ fn append_as(
 impl World {
     fn snapshot(&self) -> Fallible<Vec<i64>> {
         snapshot(&self.path, self.fork)
+    }
+
+    /// Every row of every table of the store's file.
+    fn rows(&self) -> Fallible<Vec<String>> {
+        let connection = rusqlite::Connection::open(&self.path)?;
+        database_rows(&connection)
     }
 
     fn host_permit(&self) -> Fallible<ForkAppendSourcePermitV1> {
@@ -625,43 +631,37 @@ fn a_later_record_must_fit_the_stored_set_counts() -> Fallible<()> {
     Ok(())
 }
 
-/// Pins existing ADR-099 behaviour, not a counterfactual-path rule:
-/// `delete_timeline` keeps a classified Fork's FAR1, classifier, EOR1, and
-/// FOP1 rows, so a re-created Fork ID resumes at its generation floor but
-/// cannot append through either classified path.
+/// ADR-099 revision 13: the generic delete refuses a classified Fork with a
+/// committed invalidation and changes no row, so the Fork's id can never be
+/// re-created and its `FOP1` rows never outlive it. The Fork stays usable.
 #[test]
-fn a_recreated_fork_resumes_at_its_floor_and_refuses_its_old_operations() -> Fallible<()> {
+fn a_committed_fork_can_be_neither_deleted_nor_recreated() -> Fallible<()> {
     let mut world = world()?;
     world.committed()?;
     let fork = world.fork;
+    let before = world.rows()?;
+    let refused = world.store.delete_timeline(fork);
+    assert!(
+        matches!(refused, Err(CoreError::AdmittedForkNotDeletable(id)) if id == fork),
+        "{refused:?}"
+    );
+    assert_eq!(world.rows()?, before);
     let meta = world
         .store
         .get_timeline(fork)?
         .ok_or("the Fork exists")?
         .meta;
-    world.store.delete_timeline(fork)?;
-    world.store.create_timeline_with_meta(meta)?;
-    let published = world.store.publish_counterfactual_facts(fork, facts())?;
-    assert_eq!(published.generation, 1);
-    let before = world.snapshot()?;
-    let next = Spec {
-        prior: 1,
-        ..Spec::new(fork)
-    };
-    let record = node_record(FIRST_TICK, "a", 1)?;
-    // Step 8, the orphan-operation guard: a base that re-derives the first
-    // generation's operation IDs finds their retained FOP1 rows.
-    assert_eq!(world.commit(&next, &record)?, Err(CORRUPT_AUTHORITY));
-    // Step 9, the insert: a fresh base passes step 8, but the retained FOP1
-    // rows still hold the Fork's local Seqs, so `UNIQUE (child_id,
-    // local_seq)` refuses the first FOP1 as a conflict and the commit rolls
-    // back.
-    let permit = world.host_permit()?;
-    let lent = world.authority.lend(&permit);
-    let fresh = commit_at(&mut world.store, &lent, &next, &record, hash(0x63))?;
-    assert_eq!(fresh, Err(CORRUPT_AUTHORITY));
-    assert_eq!(world.snapshot()?, before);
+    let recreated = world.store.create_timeline_with_meta(meta).err();
+    let error = recreated.ok_or("re-creating an admitted Fork must fail")?;
+    let duplicate = format!("timeline already exists: {fork}");
+    assert!(
+        matches!(&error, CoreError::Storage(message) if *message == duplicate),
+        "{error:?}"
+    );
+    assert_eq!(world.rows()?, before);
     assert_eq!(world.store.current_fork_generation(fork)?.generation, 1);
+    let appended = world.append(&later_drafts()?, &node_record(18, "b", 2)?)?;
+    assert!(appended.is_ok(), "{appended:?}");
     Ok(())
 }
 

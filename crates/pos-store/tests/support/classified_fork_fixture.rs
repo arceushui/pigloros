@@ -74,6 +74,45 @@ pub const WRITTEN_ROWS_SQL: [&str; 9] = [
     "SELECT count(*) FROM counterfactual_dependency_edges WHERE timeline_id = ?1",
 ];
 
+/// The names of every table of one `SQLite` database, in a stable order.
+const TABLES_SQL: &str = "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name";
+
+/// Every row of every table of one `SQLite` connection, in a stable order.
+///
+/// A refusal that must change nothing compares two of these snapshots.
+///
+/// # Errors
+/// Returns the `SQLite` error.
+pub fn database_rows(connection: &rusqlite::Connection) -> Fallible<Vec<String>> {
+    let mut tables = connection.prepare(TABLES_SQL)?;
+    let names = tables
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut lines = Vec::new();
+    for name in names {
+        table_rows(connection, &name, &mut lines)?;
+    }
+    Ok(lines)
+}
+
+/// Append every row of `table`, each rendered with its table name.
+fn table_rows(
+    connection: &rusqlite::Connection,
+    table: &str,
+    lines: &mut Vec<String>,
+) -> Fallible<()> {
+    let mut statement = connection.prepare(&format!("SELECT * FROM \"{table}\""))?;
+    let width = statement.column_count();
+    let mut cursor = statement.query([])?;
+    while let Some(row) = cursor.next()? {
+        let values = (0..width)
+            .map(|index| row.get::<_, rusqlite::types::Value>(index))
+            .collect::<Result<Vec<_>, _>>()?;
+        lines.push(format!("{table} {values:?}"));
+    }
+    Ok(())
+}
+
 /// A digest of 32 copies of `value`.
 #[must_use]
 pub const fn hash(value: u8) -> Hash {
@@ -256,6 +295,24 @@ impl Authority {
     /// # Errors
     /// Returns the store, signing, or authority error.
     pub fn admit<S: Host>(&self, store: &mut S, seed: u8) -> Fallible<TimelineId> {
+        let fork = self.admit_unregistered(store, seed)?;
+        let registrar = store.issue_classifier_registrar_permit(
+            &self.issuer,
+            &self.session,
+            fork,
+            classifier_source()?,
+        )?;
+        store.register_classifier(&self.session, &registrar, hash(seed ^ 0x80), fork)?;
+        store.publish_counterfactual_facts(fork, facts())?;
+        Ok(fork)
+    }
+
+    /// Create a factual parent with two Events and admit a local Fork at its
+    /// head under FCC1 operation `[seed; 32]`, with no classifier and no facts.
+    ///
+    /// # Errors
+    /// Returns the store, signing, or authority error.
+    pub fn admit_unregistered<S: Host>(&self, store: &mut S, seed: u8) -> Fallible<TimelineId> {
         let parent = store.create_timeline("classified-parent")?.id();
         store.append(parent, &[draft(1, "factual"), draft(2, "factual")])?;
         let fork_fields = vec![
@@ -273,16 +330,7 @@ impl Authority {
         else {
             return Err("FCC1 did not admit a Fork".into());
         };
-        let fork = receipt.child_id;
-        let registrar = store.issue_classifier_registrar_permit(
-            &self.issuer,
-            &self.session,
-            fork,
-            classifier_source()?,
-        )?;
-        store.register_classifier(&self.session, &registrar, hash(seed ^ 0x80), fork)?;
-        store.publish_counterfactual_facts(fork, facts())?;
-        Ok(fork)
+        Ok(receipt.child_id)
     }
 
     /// Issue a host-internal append permit for `fork`.

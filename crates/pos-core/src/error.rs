@@ -7,6 +7,9 @@ pub enum CoreError {
     #[error("timeline not found: {0}")]
     TimelineNotFound(TimelineId),
 
+    #[error("admitted Fork cannot be deleted: {0}")]
+    AdmittedForkNotDeletable(TimelineId),
+
     #[error("seq out of range: requested {requested}, head is {head}")]
     SeqOutOfRange { requested: u64, head: u64 },
 
@@ -86,6 +89,15 @@ mod tests {
         let id = TimelineId::new();
         let e = CoreError::TimelineNotFound(id);
         assert!(e.to_string().contains("timeline not found"));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn admitted_fork_not_deletable_displays() {
+        let id = TimelineId::new();
+        let e = CoreError::AdmittedForkNotDeletable(id);
+        let expected = format!("admitted Fork cannot be deleted: {id}");
+        assert_eq!(e.to_string(), expected);
     }
 
     #[test]
