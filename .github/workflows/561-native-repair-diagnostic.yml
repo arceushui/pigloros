@@ -22,7 +22,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         timeout-minutes: 2
         with:
-          ref: 4ba0318f61fe9a8d61fd6669d909b4609ef7bbee
+          ref: 504d17795083ce4d6f2b3739c52a62dd8bca80ed
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         timeout-minutes: 5
@@ -39,7 +39,7 @@ jobs:
           set -euo pipefail
           mkdir -p artifacts
           git rev-parse HEAD | tee artifacts/source-sha.txt
-          test "$(git rev-parse HEAD)" = 4ba0318f61fe9a8d61fd6669d909b4609ef7bbee
+          test "$(git rev-parse HEAD)" = 504d17795083ce4d6f2b3739c52a62dd8bca80ed
           rustc -Vv | tee artifacts/rustc.txt
           cargo llvm-cov --version | tee artifacts/llvm-cov-version.txt
           id | tee artifacts/runner-identity.txt
@@ -80,6 +80,22 @@ jobs:
             -- --exact --include-ignored 2>&1 | tee artifacts/suffix-length-refusal.log
           grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' artifacts/suffix-length-refusal.log
           bash scripts/assert-no-ignored-in-test-summary.sh artifacts/suffix-length-refusal.log
+      - name: Exercise exact native function refusal and funded retry families
+        timeout-minutes: 2
+        run: |
+          set -euo pipefail
+          tests=(
+            sqlite::fork_replay_operation::tests::native_principal_function_refusals_preserve_probe_accounting
+            sqlite::fork_replay_operation::tests::native_operation_function_refusals_preserve_probe_accounting
+            sqlite::fork_replay_suffix::tests::native_suffix_function_refusals_preserve_joined_probe_accounting
+          )
+          for test_name in "${tests[@]}"; do
+            log="artifacts/${test_name##*::}.log"
+            cargo test -p pos-store --all-features --locked --lib "$test_name" \
+              -- --exact --include-ignored 2>&1 | tee "$log"
+            grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' "$log"
+            bash scripts/assert-no-ignored-in-test-summary.sh "$log"
+          done
       - name: Exercise all native interval-acquisition regressions
         timeout-minutes: 2
         run: |
@@ -108,16 +124,25 @@ jobs:
             --json --output-path artifacts/coverage.json \
             -- --include-ignored 2>&1 | tee artifacts/coverage-test.log
           # Exact standalone source inventory, not the PR synthetic merge tree.
-          grep -F 'test result: ok. 1097 passed; 0 failed; 0 ignored;' artifacts/coverage-test.log
+          grep -F 'test result: ok. 1100 passed; 0 failed; 0 ignored;' artifacts/coverage-test.log
           bash scripts/assert-no-ignored-in-test-summary.sh artifacts/coverage-test.log
           python3 - <<'PY' | tee artifacts/target-regions.json
           import json
           from pathlib import Path
           expected = [
               ("fork_replay.rs", 114, 51, ".ok_or(INTERVAL_STORAGE_ERROR)?;"),
+              ("fork_replay_operation.rs", 65, 58, ".map_err(|_| Error::StorageIndeterminate)?"),
+              ("fork_replay_operation.rs", 71, 58, ".map_err(|_| Error::StorageIndeterminate)?"),
               ("fork_replay_operation.rs", 83, 65, "let row = row.ok_or(Error::CorruptAuthority)?;"),
               ("fork_replay_operation.rs", 89, 66, ".map_err(|_| Error::StorageIndeterminate)?;"),
+              ("fork_replay_operation.rs", 129, 62, ".map_err(|_| Error::StorageIndeterminate)?"),
+              ("fork_replay_operation.rs", 135, 81, "let text: bool = row.get(7).map_err(|_| Error::StorageIndeterminate)?;"),
+              ("fork_replay_operation.rs", 144, 62, ".map_err(|_| Error::StorageIndeterminate)?;"),
+              ("fork_replay_operation.rs", 153, 62, ".map_err(|_| Error::StorageIndeterminate)?;"),
+              ("fork_replay_suffix.rs", 67, 97, "let integer: bool = row.get(1).map_err(|_| CorruptAuthority)?;"),
+              ("fork_replay_suffix.rs", 68, 94, "let text: bool = row.get(3).map_err(|_| CorruptAuthority)?;"),
               ("fork_replay_suffix.rs", 70, 81, "row.get(4).map_err(|_| CorruptAuthority)?;"),
+              ("fork_replay_suffix.rs", 72, 81, "row.get(6).map_err(|_| CorruptAuthority)?;"),
           ]
           report = json.loads(Path("artifacts/coverage.json").read_text())
           results = []
