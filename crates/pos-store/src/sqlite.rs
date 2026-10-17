@@ -14590,6 +14590,7 @@ use pos_core::geo_cell_admission::{
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+    use crate::classified_fork_fixture::database_rows;
     use crate::ErasureRejoinPersistencePortV1;
     use pos_core::{
         event::{CanonicalBytes, EventDraft, Kind},
@@ -22368,7 +22369,6 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn admitted_refusal_leaves_no_open_transaction() -> Result<(), Box<dyn std::error::Error>> {
-        use crate::classified_fork_fixture::database_rows;
         let mut store = new_store();
         let fork = store.create_timeline("admitted-delete-refusal")?.id();
         store.conn.execute(
@@ -22391,25 +22391,26 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn admitted_lookup_failure_is_a_storage_error() -> Result<(), Box<dyn std::error::Error>> {
-        use crate::classified_fork_fixture::database_rows;
-        use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
         let mut store = new_store();
         let timeline = store.create_timeline("admitted-lookup-failure")?.id();
         let before = database_rows(&store.conn)?;
-        store.conn.authorizer(Some(|context: AuthContext<'_>| {
+        store.conn.authorizer(Some(|context: rusqlite::hooks::AuthContext<'_>| {
             if matches!(
                 context.action,
-                AuthAction::Read { table_name, .. } if table_name == "fork_admissions"
+                rusqlite::hooks::AuthAction::Read { table_name, .. }
+                    if table_name == "fork_admissions"
             ) {
-                Authorization::Deny
+                rusqlite::hooks::Authorization::Deny
             } else {
-                Authorization::Allow
+                rusqlite::hooks::Authorization::Allow
             }
         }))?;
         let refused = store.delete_timeline(timeline);
         store
             .conn
-            .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)?;
+            .authorizer(
+                None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>,
+            )?;
         assert!(matches!(refused, Err(CoreError::Storage(_))), "{refused:?}");
         assert!(store.conn.is_autocommit());
         assert_eq!(database_rows(&store.conn)?, before);

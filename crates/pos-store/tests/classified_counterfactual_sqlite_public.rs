@@ -17,8 +17,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use classified::{
-    batch, database_rows, draft, empty_record, facts, hash, node_record, Authority, Fallible, Spec,
-    FIRST_TICK, PARENT_CUT, TICK_KIND, WRITTEN_ROWS_SQL,
+    batch, database_rows_at, draft, empty_record, facts, hash, node_record, Authority, Fallible,
+    Spec, FIRST_TICK, PARENT_CUT, TICK_KIND, WRITTEN_ROWS_SQL,
 };
 use pos_core::{
     CanonicalBytes, CoreError, CounterfactualAdapterSealV1, CounterfactualBasisV1,
@@ -163,11 +163,6 @@ impl World {
         snapshot(&self.path, self.fork)
     }
 
-    /// Every row of every table of the store's file.
-    fn rows(&self) -> Fallible<Vec<String>> {
-        let connection = rusqlite::Connection::open(&self.path)?;
-        database_rows(&connection)
-    }
 
     fn host_permit(&self) -> Fallible<ForkAppendSourcePermitV1> {
         self.authority.host_permit(&self.store, self.fork)
@@ -639,13 +634,13 @@ fn a_committed_fork_can_be_neither_deleted_nor_recreated() -> Fallible<()> {
     let mut world = world()?;
     world.committed()?;
     let fork = world.fork;
-    let before = world.rows()?;
+    let before = database_rows_at(&world.path)?;
     let refused = world.store.delete_timeline(fork);
     assert!(
         matches!(refused, Err(CoreError::AdmittedForkNotDeletable(id)) if id == fork),
         "{refused:?}"
     );
-    assert_eq!(world.rows()?, before);
+    assert_eq!(database_rows_at(&world.path)?, before);
     let meta = world
         .store
         .get_timeline(fork)?
@@ -658,7 +653,7 @@ fn a_committed_fork_can_be_neither_deleted_nor_recreated() -> Fallible<()> {
         matches!(&error, CoreError::Storage(message) if *message == duplicate),
         "{error:?}"
     );
-    assert_eq!(world.rows()?, before);
+    assert_eq!(database_rows_at(&world.path)?, before);
     assert_eq!(world.store.current_fork_generation(fork)?.generation, 1);
     let appended = world.append(&later_drafts()?, &node_record(18, "b", 2)?)?;
     assert!(appended.is_ok(), "{appended:?}");

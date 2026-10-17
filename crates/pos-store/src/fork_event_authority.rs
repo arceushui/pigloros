@@ -1030,12 +1030,16 @@ mod tests {
 
     use super::*;
     #[cfg(feature = "sqlite")]
+    use crate::classified_fork_fixture::database_rows_at;
+    #[cfg(feature = "sqlite")]
     use crate::sqlite::SqliteStore;
     use crate::{
         memory::MemoryStore, ForkAdmissionAuthorityBootstrapPortV1, ForkAdmissionAuthorityPortV1,
         ForkManifestPublicationErrorV1, ForkManifestPublicationPortV1,
         ForkManifestPublicationRequestV1,
     };
+    #[cfg(feature = "sqlite")]
+    use pos_core::CoreError;
 
     fn encode(value: &Value) -> Result<Vec<u8>, Box<dyn Error>> {
         let mut bytes = Vec::new();
@@ -2200,25 +2204,38 @@ mod tests {
     }
 
     /// ADR-099 revision 13: the generic delete refuses a published admitted
-    /// Fork, changes no row, and leaves its sidecar readable.
+    /// Fork, changes no row, and leaves its sidecar readable and the Fork
+    /// appendable.
     #[cfg(feature = "sqlite")]
     #[test]
     fn sqlite_published_admitted_fork_is_not_deletable() -> Result<(), Box<dyn Error>> {
-        use crate::classified_fork_fixture::database_rows;
-        use pos_core::CoreError;
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("publication-delete.sqlite");
-        let child = durable_publication(&path)?.request.child_timeline_id;
         let mut store = sqlite_store_at(&path)?;
-        let before = database_rows(&Connection::open(&path)?)?;
+        let lifecycle = create_lifecycle(&mut store)?;
+        let fixture = publication_fixture(&mut store, &lifecycle, 91, 0)?;
+        commit_fork_publication(&mut store, &fixture, fixture.request.clone())?;
+        let child = lifecycle.fork.child_id;
+        let before = database_rows_at(&path)?;
         let refused = store.delete_timeline(child);
         assert!(
             matches!(refused, Err(CoreError::AdmittedForkNotDeletable(id)) if id == child),
             "{refused:?}"
         );
-        assert_eq!(database_rows(&Connection::open(&path)?)?, before);
+        assert_eq!(database_rows_at(&path)?, before);
         let committed = store.read_committed(child, 0)?;
         assert_eq!(committed.receipt.final_logical_head, 0);
+        let permit = store.issue_append_source_permit(
+            &lifecycle.issuer,
+            &lifecycle.session,
+            child,
+            &lifecycle.source,
+            ForkAppendSourceIdentityV1::HostInternal,
+        )?;
+        let operation = Hash::from_bytes([97; 32]);
+        let event = draft(b"after-refusal");
+        let appended = store.append_classified(&lifecycle.session, &permit, operation, event)?;
+        assert_eq!(appended.operation.input().child_timeline_id, child);
         Ok(())
     }
 

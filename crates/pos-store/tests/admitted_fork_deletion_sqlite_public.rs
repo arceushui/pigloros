@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use classified::{
-    batch, database_rows, draft, empty_record, hash, node_record, Authority, Fallible, Spec,
+    batch, database_rows_at, draft, empty_record, hash, node_record, Authority, Fallible, Spec,
     FIRST_TICK, PARENT_CUT, TICK_KIND,
 };
 use pos_core::{
@@ -60,12 +60,6 @@ fn open(path: &Path) -> Fallible<SqliteStore> {
     Ok(store)
 }
 
-/// Every row of every table of the store file at `path`.
-fn rows(path: &Path) -> Fallible<Vec<String>> {
-    let connection = rusqlite::Connection::open(path)?;
-    database_rows(&connection)
-}
-
 /// Run one raw statement that binds the Timeline `id` as `?1`.
 fn execute(path: &Path, sql: &str, id: TimelineId) -> Fallible<()> {
     let connection = rusqlite::Connection::open(path)?;
@@ -103,12 +97,12 @@ fn assert_delete_fails(
     id: TimelineId,
     expected: &CoreError,
 ) -> Fallible<()> {
-    let before = rows(path)?;
+    let before = database_rows_at(path)?;
     let deleted = store.delete_timeline(id);
     let error = deleted.err().ok_or("the delete must fail")?;
     assert_eq!(discriminant(&error), discriminant(expected));
     assert_eq!(error.to_string(), expected.to_string());
-    assert_eq!(rows(path)?, before);
+    assert_eq!(database_rows_at(path)?, before);
     Ok(())
 }
 
@@ -163,7 +157,7 @@ fn world() -> Fallible<World> {
 }
 
 /// Issue a host-internal append permit for the world's Fork.
-fn permit(world: &World) -> Fallible<ForkAppendSourcePermitV1> {
+fn host_permit(world: &World) -> Fallible<ForkAppendSourcePermitV1> {
     world.authority.host_permit(&world.store, world.fork)
 }
 
@@ -205,7 +199,7 @@ fn tick(
 ) -> Fallible<Result<TickOutcome, Classified>> {
     let fork = world.fork;
     let expected = world.store.current_counterfactual_basis(fork)?;
-    let permit = permit(world)?;
+    let permit = host_permit(world)?;
     let lent = world.authority.lend(&permit);
     let store = &mut world.store;
     Ok(store.append_classified_counterfactual_tick(fork, &expected, drafts, record, &lent, base))
@@ -219,9 +213,9 @@ fn an_admitted_fork_without_a_classifier_is_not_deletable() -> Fallible<()> {
     let store = &mut world.store;
     let bare = world.authority.admit_unregistered(store, 0xb2)?;
     assert_refused(&mut world.store, &world.path, bare)?;
-    let before = rows(&world.path)?;
+    let before = database_rows_at(&world.path)?;
     assert_not_recreatable(&mut world.store, bare)?;
-    assert_eq!(rows(&world.path)?, before);
+    assert_eq!(database_rows_at(&world.path)?, before);
     Ok(())
 }
 
@@ -233,7 +227,7 @@ fn a_registered_fork_is_refused_around_public_appends_and_stays_usable() -> Fall
     let fork = world.fork;
     assert_refused(&mut world.store, &world.path, fork)?;
     assert_not_recreatable(&mut world.store, fork)?;
-    let permit = permit(&world)?;
+    let permit = host_permit(&world)?;
     let first = append_classified(&mut world, &permit, hash(0x71), 30);
     assert_eq!(first, Ok(Seq::from_u64(PARENT_CUT + 1)));
     assert_refused(&mut world.store, &world.path, fork)?;
@@ -251,7 +245,7 @@ fn a_registered_fork_is_refused_around_public_appends_and_stays_usable() -> Fall
 fn a_fork_with_counterfactual_ticks_is_refused_and_keeps_ticking() -> Fallible<()> {
     let mut world = world()?;
     let fork = world.fork;
-    let permit = permit(&world)?;
+    let permit = host_permit(&world)?;
     let record = node_record(FIRST_TICK, "a", 1)?;
     let outcome = commit(&mut world, &permit, &Spec::new(fork), &record, hash(0x61))??;
     assert!(matches!(outcome, Outcome::Committed(_)), "{outcome:?}");
@@ -320,7 +314,8 @@ fn a_gated_store_refuses_before_the_admission_check() -> Fallible<()> {
 fn a_child_fork_is_checked_before_the_admission() -> Fallible<()> {
     let mut world = world()?;
     let fork = world.fork;
-    let child = world.store.fork(fork, Seq::ZERO, "generic-child")?.id();
+    let head = Seq::from_u64(PARENT_CUT);
+    let child = world.store.fork(fork, head, "generic-child")?.id();
     let has_forks = CoreError::Storage(HAS_FORKS.to_owned());
     assert_delete_fails(&mut world.store, &world.path, fork, &has_forks)?;
     world.store.delete_timeline(child)?;
@@ -365,7 +360,7 @@ fn raw_admission_rows_refuse_only_existing_timelines() -> Fallible<()> {
 fn a_tampered_next_operation_is_refused_on_both_classified_paths() -> Fallible<()> {
     let mut world = world()?;
     let fork = world.fork;
-    let permit = permit(&world)?;
+    let permit = host_permit(&world)?;
     let session = &world.authority.session;
     let first = world
         .store
@@ -376,8 +371,27 @@ fn a_tampered_next_operation_is_refused_on_both_classified_paths() -> Fallible<(
     input.operation_id = hash(0x7a);
     input.event_id = EventId::new();
     input.logical_seq = PARENT_CUT + 2;
-    insert_operation(&world.path, &ForkAppendOperationV1::new(input)?, 2)?;
-    let before = rows(&world.path)?;
+    // A second connection's commit changes `PRAGMA data_version`, which the
+    // open store's erasure gate check would refuse, so write while it is closed.
+    let World {
+        _directory: directory,
+        path,
+        store,
+        ..
+    } = world;
+    drop(store);
+    insert_operation(&path, &ForkAppendOperationV1::new(input)?, 2)?;
+    let mut store = open(&path)?;
+    let authority = Authority::reopen(&mut store)?;
+    let mut world = World {
+        _directory: directory,
+        path,
+        store,
+        authority,
+        fork,
+    };
+    let permit = host_permit(&world)?;
+    let before = database_rows_at(&world.path)?;
     let spec = Spec {
         head: PARENT_CUT + 1,
         ..Spec::new(fork)
@@ -387,6 +401,6 @@ fn a_tampered_next_operation_is_refused_on_both_classified_paths() -> Fallible<(
     assert_eq!(committed, Err(CORRUPT_AUTHORITY));
     let appended = append_classified(&mut world, &permit, hash(0x72), 31);
     assert_eq!(appended, Err(AuthorityError::Conflict));
-    assert_eq!(rows(&world.path)?, before);
+    assert_eq!(database_rows_at(&world.path)?, before);
     Ok(())
 }

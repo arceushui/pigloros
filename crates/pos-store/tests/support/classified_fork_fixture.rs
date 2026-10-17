@@ -95,6 +95,15 @@ pub fn database_rows(connection: &rusqlite::Connection) -> Fallible<Vec<String>>
     Ok(lines)
 }
 
+/// Every row of every table of the `SQLite` database file at `path`.
+///
+/// # Errors
+/// Returns the `SQLite` error.
+pub fn database_rows_at(path: &std::path::Path) -> Fallible<Vec<String>> {
+    let connection = rusqlite::Connection::open(path)?;
+    database_rows(&connection)
+}
+
 /// Append every row of `table`, each rendered with its table name.
 fn table_rows(
     connection: &rusqlite::Connection,
