@@ -31,20 +31,19 @@ impl SqliteStore {
         } else {
             IntervalConnectionV1::Writer
         };
-        let reader_observer = Arc::clone(&observer);
-        self.conn
-            .authorizer(Some(move |context: AuthContext<'_>| {
-                authorize(context, reader_kind, reader_observer.as_ref())
-            }))
-            .map_err(observer_error)?;
-        if let Some(writer) = &self.writer_reservation_connection {
-            writer
-                .authorizer(Some(move |context: AuthContext<'_>| {
-                    authorize(context, IntervalConnectionV1::Writer, observer.as_ref())
+        std::iter::once((&self.conn, reader_kind))
+            .chain(
+                self.writer_reservation_connection
+                    .as_ref()
+                    .map(|writer| (writer, IntervalConnectionV1::Writer)),
+            )
+            .try_for_each(|(connection, kind)| {
+                let observer = Arc::clone(&observer);
+                connection.authorizer(Some(move |context: AuthContext<'_>| {
+                    authorize(context, kind, observer.as_ref())
                 }))
-                .map_err(observer_error)?;
-        }
-        Ok(())
+            })
+            .map_err(observer_error)
     }
 
     /// Make a competing test writer report an existing reservation immediately.
@@ -81,21 +80,15 @@ mod tests {
     use pos_core::CoreError;
 
     #[test]
-    fn observer_error_mapping_does_not_expose_native_diagnostics(
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let conn = rusqlite::Connection::open_in_memory()?;
-        let native = conn
-            .execute_batch("SELECT private_observer_detail")
-            .err()
-            .ok_or("invalid native statement unexpectedly succeeded")?;
+    fn observer_error_mapping_does_not_expose_native_diagnostics() {
+        let native = rusqlite::Error::InvalidParameterName("private_observer_detail".to_owned());
         assert!(native.to_string().contains("private_observer_detail"));
-        // Exercise the diagnostic translation with a real SQLite error. This
-        // does not claim a healthy authorizer/busy-timeout installation fails.
+        // The error translation is independent of connection setup. Its typed
+        // input deliberately contains detail that the public message must omit.
         assert!(matches!(
             observer_error(native),
             CoreError::Storage(message)
                 if message == "native test transaction observer unavailable"
         ));
-        Ok(())
     }
 }

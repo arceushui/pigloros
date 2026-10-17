@@ -305,6 +305,38 @@ mod tests {
     use rusqlite::{params, types::Value};
     use std::time::Duration;
 
+    #[test]
+    fn native_suffix_decoder_refuses_a_noninteger_optional_length() -> Fallible<()> {
+        let conn = Connection::open_in_memory()?;
+        let mut statement = conn.prepare("SELECT 1,1,1,1,26,1,1,?1")?;
+        let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+        let start = clock.mark();
+        let limits = ForkReplayReadLimitsV1::new(8, 1, 2, 3, 1_000_000)?;
+        let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+        // Production length() returns an integer or NULL. These real rows
+        // exercise the independent decoder defense against a wrong projection.
+        // Only its joined-FOP visits are counted here; the selected Event row
+        // belongs to the separately tested selected_field_with_context owner.
+        for (length, expected) in [
+            (
+                Value::Text("invalid length".to_owned()),
+                Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority),
+            ),
+            (Value::Integer(3), Ok(Some((1, Some(3), true)))),
+        ] {
+            let mut rows = statement.query([length])?;
+            let row = rows.next()?.ok_or("missing native suffix probe")?;
+            let result = SuffixProbeV1::read(row, &mut NativeReadContextV1::protected(&mut budget))
+                .map(|probe| probe.map(|probe| (probe.seq, probe.fop_bytes, probe.has_fop)));
+            assert_eq!(result, expected);
+            assert_eq!(budget.remaining_native_bytes(), 3);
+            budget.check_time()?;
+        }
+        assert!(budget.charge_rows(1).is_err());
+        assert!(budget.check_time().is_err());
+        Ok(())
+    }
+
     fn fixture(shape: Shape) -> Fallible<(tempfile::TempDir, SqliteStore, World, Built)> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("actual-suffix.sqlite3");
