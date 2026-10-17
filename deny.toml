@@ -16,7 +16,19 @@ yanked = "deny"
 # ships to apps/piglor-world-client. As of 2026-10-13 no released Bevy depends on
 # a fixed ruzstd (Redmine #629). Remove (here and in .cargo/audit.toml) once
 # Cargo.lock resolves ruzstd >= 0.9.1.
-ignore = ["RUSTSEC-2026-0344"]
+# RUSTSEC-2026-0370 (zvariant), -0371 (zbus_names), -0372 (zvariant_derive):
+# "unmaintained" notices, not vulnerabilities. zbus 6.0.0 (2026-10-16) absorbed
+# these crates; they reach us only through apps/pos-sandboxd (zbus_systemd
+# 0.26200 -> zbus 5.19 -> zvariant / zbus_names / zvariant_derive). As of
+# 2026-10-17 no zbus_systemd release supports zbus 6 (Redmine #685). Remove
+# (here and in .cargo/audit.toml) once a zbus_systemd release on zbus 6 lets
+# pos-sandboxd move and Cargo.lock no longer resolves these crates.
+ignore = [
+  "RUSTSEC-2026-0344",
+  "RUSTSEC-2026-0370",
+  "RUSTSEC-2026-0371",
+  "RUSTSEC-2026-0372",
+]
 
 [licenses]
 version = 2
