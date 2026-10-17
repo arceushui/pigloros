@@ -56,7 +56,7 @@ impl SqliteStore {
         let (probe, fetch, maximum) = kind.queries();
         context
             .check()
-            .and_then(|()| self.conn.prepare(probe).map_err(Error::from))
+            .and_then(|()| self.conn.prepare_cached(probe).map_err(Error::from))
             .and_then(|mut statement| {
                 context
                     .check()
@@ -108,7 +108,10 @@ impl SqliteStore {
                         .and_then(|()| context.bytes(length))
                         .and_then(|()| {
                             self.conn
-                                .query_row(fetch, arguments, |row| row.get::<_, Vec<u8>>(0))
+                                .prepare_cached(fetch)
+                                .and_then(|mut statement| {
+                                    statement.query_row(arguments, |row| row.get::<_, Vec<u8>>(0))
+                                })
                                 .map_err(Error::from)
                         })
                         .and_then(|bytes| context.check().map(|()| bytes))
