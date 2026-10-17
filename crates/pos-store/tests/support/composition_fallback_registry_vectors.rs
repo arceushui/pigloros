@@ -641,6 +641,15 @@ fn another_scope_on_the_same_timeline_is_not_folded() -> TestResult {
 }
 
 #[test]
+fn an_unrelated_event_on_the_timeline_is_not_folded() -> TestResult {
+    let (mut h, first) = declared()?;
+    forge(&mut h, "test.unrelated", vec![0xa0])?;
+    let second = policy(vec![h.world.alpha()?], Some(first.policy_digest()))?;
+    assert_eq!(h.declare(&second)??.row().state_revision(), 2);
+    Ok(())
+}
+
+#[test]
 fn a_fork_row_is_initialised_from_its_inherited_events() -> TestResult {
     let (mut h, first) = activated()?;
     let parent = h.store.registry_row(SCOPE, h.timeline)?;
