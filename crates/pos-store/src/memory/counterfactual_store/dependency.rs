@@ -1013,12 +1013,14 @@ impl MemoryStore {
 mod tests {
     use std::sync::Arc;
 
-    use pos_core::counterfactual_store::test_fixtures::{hash_field, text_field, uint};
+    use pos_core::counterfactual_store::test_fixtures::{
+        coord, edge_row, fork_scope, node_row, prefix_scope, record_of,
+    };
     use pos_core::{
         CounterfactualStorePortV1, DependencyNodeCoordinateV1, ErasureContainmentGateV1,
         EventStore, ForkAdmissionRecordInputV1, ForkAdmissionRecordV1, ForkAttributionOriginV1,
-        OwnerIdV1, RecordedDependencyClassV1, RecordedNodeOriginV1, Seq,
-        MAX_RECORDED_DEPENDENCY_EDGES_V1, MAX_RECORDED_DEPENDENCY_NODES_V1,
+        OwnerIdV1, RecordedNodeOriginV1, Seq, MAX_RECORDED_DEPENDENCY_EDGES_V1,
+        MAX_RECORDED_DEPENDENCY_NODES_V1,
     };
 
     use super::super::tests::{command, draft, facts, inject, ok, published_store, snapshot};
@@ -1036,90 +1038,14 @@ mod tests {
     /// One capacity case: stored counts and a record that crosses one bound.
     type CapacityCase = (RecordedSetCountsV1, fn(u64) -> TickDependencyRecordV1);
 
-    const ENDOGENOUS: RecordedDependencyClassV1 = RecordedDependencyClassV1::EndogenousRecomputed;
     const PROVISIONAL: RecordedNodeOriginV1 = RecordedNodeOriginV1::Provisional;
     const COMMITTED: RecordedNodeOriginV1 = RecordedNodeOriginV1::Committed;
-
-    // These builders mirror those of the public test and the `SQLite` adapter's
-    // tests; consolidating them is a follow-up: Redmine #559.
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn coordinate(tick: u64, owner: &str, digest: u8) -> Coordinate {
-        let digest = Hash::from_bytes([digest; 32]);
-        ok(Coordinate::try_new(tick, 0, owner.to_owned(), 0, 7, digest))
-    }
-
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn node(
-        coordinate: &Coordinate,
-        origin: RecordedNodeOriginV1,
-        inputs: Vec<Hash>,
-    ) -> DependencyNodeRecordV1 {
-        let provenance = Hash::from_bytes([99; 32]);
-        ok(DependencyNodeRecordV1::try_new(
-            coordinate.clone(),
-            ENDOGENOUS,
-            origin,
-            inputs,
-            provenance,
-        ))
-    }
-
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn node_bytes(node: &Coordinate) -> Vec<u8> {
-        [
-            vec![0x86],
-            uint(node.tick()),
-            uint(u64::from(node.scheduler_position())),
-            text_field(node.owner_id()),
-            uint(u64::from(node.output_ordinal())),
-            uint(u64::from(node.schema_id())),
-            hash_field(node.artifact_digest()),
-        ]
-        .concat()
-    }
-
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn edge(consumer: &Coordinate, source: &Coordinate) -> DependencyEdgeRecordV1 {
-        let tail = [
-            uint(2),
-            vec![0x82],
-            uint(3),
-            uint(5),
-            hash_field(Hash::from_bytes([0x33; 32])),
-            vec![0x82],
-            text_field("adr064.classification"),
-            uint(1),
-            hash_field(Hash::from_bytes([0x44; 32])),
-        ]
-        .concat();
-        let head = vec![0x89, 0x64, b'I', b'D', b'P', b'1', 0x01];
-        let bytes = [head, node_bytes(consumer), node_bytes(source), tail].concat();
-        ok(DependencyEdgeRecordV1::try_from_canonical(
-            bytes,
-            consumer.clone(),
-            source.artifact_digest(),
-        ))
-    }
-
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn record_of(
-        tick: u64,
-        nodes: Vec<DependencyNodeRecordV1>,
-        edges: Vec<DependencyEdgeRecordV1>,
-    ) -> TickDependencyRecordV1 {
-        ok(TickDependencyRecordV1::try_new(
-            tick,
-            PROVISIONAL,
-            nodes,
-            edges,
-        ))
-    }
 
     /// A record of one provisional node `n` at `tick`, digest `tick`.
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn lone_node(tick: u64) -> TickDependencyRecordV1 {
         let digest = u8::try_from(tick).unwrap_or(u8::MAX);
-        let row = node(&coordinate(tick, "n", digest), PROVISIONAL, Vec::new());
+        let row = node_row(coord(tick, "n", digest), PROVISIONAL, Vec::new());
         record_of(tick, vec![row], Vec::new())
     }
 
@@ -1128,7 +1054,7 @@ mod tests {
     fn input_node(tick: u64) -> TickDependencyRecordV1 {
         let digest = u8::try_from(tick).unwrap_or(u8::MAX);
         let inputs = vec![Hash::from_bytes([200; 32])];
-        let row = node(&coordinate(tick, "n", digest), PROVISIONAL, inputs);
+        let row = node_row(coord(tick, "n", digest), PROVISIONAL, inputs);
         record_of(tick, vec![row], Vec::new())
     }
 
@@ -1136,23 +1062,10 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn edge_node(tick: u64) -> TickDependencyRecordV1 {
         let digest = u8::try_from(tick).unwrap_or(u8::MAX);
-        let consumer = coordinate(tick, "n", digest);
+        let consumer = coord(tick, "n", digest);
         let inputs = vec![Hash::from_bytes([200; 32])];
-        let edges = vec![edge(&consumer, &coordinate(0, "w", 200))];
-        record_of(tick, vec![node(&consumer, PROVISIONAL, inputs)], edges)
-    }
-
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    const fn fork_scope(fork: TimelineId, generation: u64) -> Scope {
-        Scope::ForkGeneration(ForkGenerationV1 { fork, generation })
-    }
-
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    const fn prefix_through(timeline: TimelineId, through_tick: u64) -> Scope {
-        Scope::ParentPrefix {
-            timeline,
-            through_tick,
-        }
+        let edges = vec![edge_row(&consumer, &coord(0, "w", 200))];
+        record_of(tick, vec![node_row(consumer, PROVISIONAL, inputs)], edges)
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -1207,7 +1120,7 @@ mod tests {
     /// bound to that node.
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn seeded_tick(owner: &str, digest: u8) -> SeededFactualTickV1 {
-        let step = node(&coordinate(1, owner, digest), COMMITTED, Vec::new());
+        let step = node_row(coord(1, owner, digest), COMMITTED, Vec::new());
         let seq = Seq::from_u64(2);
         SeededFactualTickV1 {
             record: committed_record(1, vec![step], Vec::new()),
@@ -1391,13 +1304,13 @@ mod tests {
         assert!(append_record(&mut store, fork, &lone_node(2)).is_ok());
         let cut = 0;
         let committed_rows = [
-            node(&coordinate(cut, "p", 61), COMMITTED, Vec::new()),
-            node(&coordinate(cut, "q", 62), COMMITTED, Vec::new()),
+            node_row(coord(cut, "p", 61), COMMITTED, Vec::new()),
+            node_row(coord(cut, "q", 62), COMMITTED, Vec::new()),
         ];
         let prefix = committed_record(cut, committed_rows.to_vec(), Vec::new());
         seed_prefix(&mut store, root, &[prefix]);
         let prefix_of = |at| {
-            let scope = prefix_through(parent_of(&store, at), cut);
+            let scope = prefix_scope(parent_of(&store, at), cut);
             ok(read_nodes(&store, scope, 10))
         };
         let ticks_of = |rows: &[NodeRow]| -> Vec<u64> {
@@ -1424,7 +1337,7 @@ mod tests {
     /// The committed node `p<tick>` at `tick`, digest `tick`.
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn prefix_coordinate(tick: u64) -> Coordinate {
-        coordinate(tick, &format!("p{tick}"), u8::try_from(tick).unwrap_or(0))
+        coord(tick, &format!("p{tick}"), u8::try_from(tick).unwrap_or(0))
     }
 
     /// Committed prefix: nodes `p1`..`p4` at ticks 1 to 4, edges consumed by
@@ -1433,14 +1346,14 @@ mod tests {
     fn seeded_prefix() -> (MemoryStore, TimelineId, TimelineId) {
         let (mut store, fork) = published_store();
         let root = parent_of(&store, fork);
-        let source = coordinate(0, "w", 200);
+        let source = coord(0, "w", 200);
         let inputs = vec![Hash::from_bytes([200; 32])];
         let mut records = Vec::new();
         for tick in 1..=4 {
             let at = prefix_coordinate(tick);
-            let row = node(&at, COMMITTED, inputs.clone());
+            let row = node_row(at.clone(), COMMITTED, inputs.clone());
             let edges = if matches!(tick, 2 | 4) {
-                vec![edge(&at, &source)]
+                vec![edge_row(&at, &source)]
             } else {
                 Vec::new()
             };
@@ -1465,22 +1378,22 @@ mod tests {
             rows.map(|row| row.consumer().tick()).collect()
         };
 
-        assert_eq!(ticks(prefix_through(root, 4), 10), vec![1, 2, 3, 4]);
-        assert_eq!(ticks(prefix_through(root, 3), 10), vec![1, 2, 3]);
-        assert_eq!(ticks(prefix_through(root, 2), 10), vec![1, 2]);
-        assert_eq!(ticks(prefix_through(root, 0), 10), Vec::<u64>::new());
-        assert_eq!(edge_ticks(prefix_through(root, 4)), vec![2, 4]);
-        assert_eq!(edge_ticks(prefix_through(root, 3)), vec![2]);
-        assert_eq!(edge_ticks(prefix_through(root, 1)), Vec::<u64>::new());
+        assert_eq!(ticks(prefix_scope(root, 4), 10), vec![1, 2, 3, 4]);
+        assert_eq!(ticks(prefix_scope(root, 3), 10), vec![1, 2, 3]);
+        assert_eq!(ticks(prefix_scope(root, 2), 10), vec![1, 2]);
+        assert_eq!(ticks(prefix_scope(root, 0), 10), Vec::<u64>::new());
+        assert_eq!(edge_ticks(prefix_scope(root, 4)), vec![2, 4]);
+        assert_eq!(edge_ticks(prefix_scope(root, 3)), vec![2]);
+        assert_eq!(edge_ticks(prefix_scope(root, 1)), Vec::<u64>::new());
         // Another Timeline's prefix and the Fork's own rows are not served.
-        assert_eq!(ticks(prefix_through(fork, 4), 10), Vec::<u64>::new());
+        assert_eq!(ticks(prefix_scope(fork, 4), 10), Vec::<u64>::new());
         let unrecorded = ok(read_nodes(&store, fork_scope(fork, 0), 10));
         assert!(unrecorded.items().is_empty());
         // Paging resumes after the page's last row and stops at the bound.
-        let first = ok(read_nodes(&store, prefix_through(root, 3), 2));
+        let first = ok(read_nodes(&store, prefix_scope(root, 3), 2));
         let after = first.next().cloned();
         let request = ok(DependencyPageRequestV1::try_new(
-            prefix_through(root, 3),
+            prefix_scope(root, 3),
             after,
             2,
         ));
@@ -1495,12 +1408,12 @@ mod tests {
     fn c8_corrupt_stored_rows_read_back_as_corrupt_state() {
         let (mut store, fork) = recorded_store();
         let root = parent_of(&store, fork);
-        let committed = node(&coordinate(30, "q", 31), COMMITTED, Vec::new());
+        let committed = node_row(coord(30, "q", 31), COMMITTED, Vec::new());
         dependency_set(&mut store, fork)
             .rows
             .nodes
             .insert(committed.cursor(), committed);
-        let provisional = node(&coordinate(8, "w", 32), PROVISIONAL, Vec::new());
+        let provisional = node_row(coord(8, "w", 32), PROVISIONAL, Vec::new());
         let corrupt = record_of(8, vec![provisional], Vec::new());
         seed_prefix(&mut store, root, &[corrupt]);
 
@@ -1509,7 +1422,7 @@ mod tests {
             Err(StoreError::CorruptState)
         );
         assert_eq!(
-            read_nodes(&store, prefix_through(root, 9), 5).map(drop),
+            read_nodes(&store, prefix_scope(root, 9), 5).map(drop),
             Err(StoreError::CorruptState)
         );
     }
@@ -1525,7 +1438,7 @@ mod tests {
         store.geographic_timelines.insert(root);
         store.geographic_timelines.insert(fork);
 
-        for scope in [prefix_through(root, 5), fork_scope(fork, 1)] {
+        for scope in [prefix_scope(root, 5), fork_scope(fork, 1)] {
             assert_eq!(
                 read_nodes(&store, scope, 5).map(drop),
                 Err(StoreError::ForkNotFound)

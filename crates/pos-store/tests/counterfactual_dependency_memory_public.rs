@@ -14,20 +14,22 @@
 use std::sync::Arc;
 
 use pos_core::counterfactual_store::test_fixtures::{
-    frontier_frame, hash_field, id_field, invalidation_frame, invalidation_middle, text_field, uint,
+    assert_ok, class_row, collect_rows, coord, coord_at, draft, edge_row as edge, err, facts,
+    fork_scope, frontier_frame, hash, hash_field, id_field, indexed_hash, invalidation_frame,
+    invalidation_middle, ok, prefix_scope, provisional_row, record_of as record, request,
+    typed_draft, uint,
 };
 use pos_core::{
-    CanonicalBytes, CounterfactualBasisV1, CounterfactualDependencyErrorV1,
-    CounterfactualDependencyReadPortV1, CounterfactualDependencyRecordingPortV1,
-    CounterfactualFactsV1, CounterfactualGenerationReceiptV1, CounterfactualInvalidationCommandV1,
-    CounterfactualInvalidationInputV1, CounterfactualInvalidationOutcomeV1,
-    CounterfactualStoreErrorV1, CounterfactualStorePortV1, CounterfactualTickOutcomeV1,
-    DependencyEdgeRecordV1, DependencyNodeCoordinateV1, DependencyNodeRecordV1,
-    DependencyPageCursorV1, DependencyPageRequestV1, DependencyPageV1, DependencyPagedRowV1,
-    DependencyReadScopeV1, EntityId, ErasureContainmentGateV1, EventDraft, ForkGenerationV1, Hash,
-    InvalidationConflictV1, Kind, PipelineDraftBatchV1, RecomputationFrontierBytesV1,
-    RecordedDependencyClassV1, RecordedNodeOriginV1, Seq, SeqRange, SuffixInvalidationBytesV1,
-    TickDependencyRecordV1, TimelineId, TimelineMeta, MAX_DEPENDENCY_PAGE_ROWS_V1,
+    CounterfactualBasisV1, CounterfactualDependencyErrorV1, CounterfactualDependencyReadPortV1,
+    CounterfactualDependencyRecordingPortV1, CounterfactualGenerationReceiptV1,
+    CounterfactualInvalidationCommandV1, CounterfactualInvalidationInputV1,
+    CounterfactualInvalidationOutcomeV1, CounterfactualStoreErrorV1, CounterfactualStorePortV1,
+    CounterfactualTickOutcomeV1, DependencyEdgeRecordV1, DependencyNodeCoordinateV1,
+    DependencyNodeRecordV1, DependencyPageCursorV1, DependencyPageRequestV1, DependencyPagedRowV1,
+    DependencyReadScopeV1, ErasureContainmentGateV1, ForkGenerationV1, InvalidationConflictV1,
+    PipelineDraftBatchV1, RecomputationFrontierBytesV1, RecordedDependencyClassV1,
+    RecordedNodeOriginV1, Seq, SeqRange, SuffixInvalidationBytesV1, TickDependencyRecordV1,
+    TimelineId, TimelineMeta, MAX_DEPENDENCY_PAGE_ROWS_V1,
 };
 use pos_store::{memory::MemoryStore, EventStore};
 
@@ -42,45 +44,9 @@ type Scope = DependencyReadScopeV1;
 const PROVISIONAL: RecordedNodeOriginV1 = RecordedNodeOriginV1::Provisional;
 const COMMITTED: RecordedNodeOriginV1 = RecordedNodeOriginV1::Committed;
 const ROOT_CLASS: RecordedDependencyClassV1 = RecordedDependencyClassV1::InterventionAssigned;
-const EDGE_HEAD: [u8; 7] = [0x89, 0x64, b'I', b'D', b'P', b'1', 0x01];
 
 /// Tick number of every test command's first recomputation Tick.
 const FIRST_TICK: u64 = 17;
-
-fn ok<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
-    result.unwrap_or_else(|error| {
-        std::panic::resume_unwind(Box::new(format!("unexpected test error: {error:?}")))
-    })
-}
-
-fn err<T: std::fmt::Debug, E>(result: Result<T, E>) -> E {
-    result.map_or_else(
-        |error| error,
-        |value| std::panic::resume_unwind(Box::new(format!("unexpected success: {value:?}"))),
-    )
-}
-
-const fn hash(value: u8) -> Hash {
-    Hash::from_bytes([value; 32])
-}
-
-fn indexed_hash(index: usize) -> Hash {
-    let mut bytes = [0_u8; 32];
-    bytes[24..].copy_from_slice(&ok(u64::try_from(index)).to_be_bytes());
-    Hash::from_bytes(bytes)
-}
-
-fn draft(value: u8) -> EventDraft {
-    typed_draft("counterfactual.tick", value)
-}
-
-fn typed_draft(kind: &str, value: u8) -> EventDraft {
-    EventDraft::new(
-        EntityId::new(),
-        Kind::new(kind),
-        CanonicalBytes::from_vec(vec![value]),
-    )
-}
 
 fn tick_drafts(count: u8) -> PipelineDraftBatchV1 {
     let drafts = (0..count).map(draft).collect();
@@ -91,16 +57,6 @@ fn tick_drafts(count: u8) -> PipelineDraftBatchV1 {
 fn guarded_drafts() -> PipelineDraftBatchV1 {
     let guarded = typed_draft("geo.location", 0);
     ok(PipelineDraftBatchV1::try_new(vec![draft(0), guarded]))
-}
-
-const fn facts() -> CounterfactualFactsV1 {
-    CounterfactualFactsV1 {
-        plan_digest: hash(5),
-        dependency_graph_digest: hash(3),
-        trust_epoch: 6,
-        revocation_epoch: 7,
-        erasure_epoch: 8,
-    }
 }
 
 /// An invalidation of `fork` at its logical `head` over generation `prior`,
@@ -178,9 +134,9 @@ struct Fixture {
 fn fixture() -> Fixture {
     let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
     let mut store = MemoryStore::new();
-    ok(store.bind_erasure_gate(Arc::clone(&gate)));
+    assert_ok(store.bind_erasure_gate(Arc::clone(&gate)));
     let root = ok(store.create_timeline("dependency-root")).id();
-    ok(store.append(root, &[draft(100), draft(101)]));
+    assert_ok(store.append(root, &[draft(100), draft(101)]));
     let fork = ok(store.fork(root, Seq::from_u64(1), "dependency-fork")).id();
     Fixture {
         store,
@@ -193,9 +149,11 @@ fn fixture() -> Fixture {
 /// A fixture whose Fork has the default facts published.
 fn published() -> Fixture {
     let mut fixture = fixture();
-    ok(fixture
-        .store
-        .publish_counterfactual_facts(fixture.fork, facts()));
+    assert_ok(
+        fixture
+            .store
+            .publish_counterfactual_facts(fixture.fork, facts()),
+    );
     fixture
 }
 
@@ -207,87 +165,6 @@ fn seqs(store: &MemoryStore, timeline: TimelineId) -> Vec<u64> {
         .collect()
 }
 
-// The coordinate, node, edge, and record builders below mirror the contract's
-// own tests, the in-module tests of this adapter, and the `SQLite` adapter's
-// tests. Consolidating them into the shared `test_fixtures` touches the
-// contract crate, so it is not done here (follow-up: Redmine #559).
-fn coord_at(tick: u64, owner: &str, digest: Hash) -> Coordinate {
-    ok(Coordinate::try_new(tick, 0, owner.to_owned(), 0, 7, digest))
-}
-
-fn coord(tick: u64, owner: &str, digest: u8) -> Coordinate {
-    coord_at(tick, owner, hash(digest))
-}
-
-fn node_of(
-    coordinate: &Coordinate,
-    class: RecordedDependencyClassV1,
-    origin: RecordedNodeOriginV1,
-    inputs: Vec<Hash>,
-) -> NodeRow {
-    ok(NodeRow::try_new(
-        coordinate.clone(),
-        class,
-        origin,
-        inputs,
-        hash(99),
-    ))
-}
-
-fn endogenous(coordinate: &Coordinate, inputs: Vec<Hash>) -> NodeRow {
-    let class = RecordedDependencyClassV1::EndogenousRecomputed;
-    node_of(coordinate, class, PROVISIONAL, inputs)
-}
-
-/// The encoded six-field node array, written independently of the contract.
-fn node_bytes(node: &Coordinate) -> Vec<u8> {
-    [
-        vec![0x86],
-        uint(node.tick()),
-        uint(u64::from(node.scheduler_position())),
-        text_field(node.owner_id()),
-        uint(u64::from(node.output_ordinal())),
-        uint(u64::from(node.schema_id())),
-        hash_field(node.artifact_digest()),
-    ]
-    .concat()
-}
-
-/// The five `IDP1` fields after the source node.
-fn edge_tail() -> Vec<u8> {
-    [
-        uint(2),
-        vec![0x82],
-        uint(3),
-        uint(5),
-        hash_field(hash(0x33)),
-        vec![0x82],
-        text_field("adr064.classification"),
-        uint(1),
-        hash_field(hash(0x44)),
-    ]
-    .concat()
-}
-
-fn edge(consumer: &Coordinate, source: &Coordinate) -> EdgeRow {
-    let bytes = [
-        EDGE_HEAD.to_vec(),
-        node_bytes(consumer),
-        node_bytes(source),
-        edge_tail(),
-    ]
-    .concat();
-    ok(EdgeRow::try_from_canonical(
-        bytes,
-        consumer.clone(),
-        source.artifact_digest(),
-    ))
-}
-
-fn record(tick: u64, nodes: Vec<NodeRow>, edges: Vec<EdgeRow>) -> TickRecord {
-    ok(TickRecord::try_new(tick, PROVISIONAL, nodes, edges))
-}
-
 fn empty_at(tick: u64) -> TickRecord {
     record(tick, Vec::new(), Vec::new())
 }
@@ -297,8 +174,8 @@ fn tick_17() -> TickRecord {
     let node_a = coord(17, "a", 1);
     let node_b = coord(17, "b", 2);
     let nodes = vec![
-        endogenous(&node_a, vec![hash(50)]),
-        endogenous(&node_b, vec![hash(1)]),
+        provisional_row(node_a.clone(), vec![hash(50)]),
+        provisional_row(node_b.clone(), vec![hash(1)]),
     ];
     let edges = vec![edge(&node_a, &coord(10, "w", 50)), edge(&node_b, &node_a)];
     record(FIRST_TICK, nodes, edges)
@@ -307,49 +184,12 @@ fn tick_17() -> TickRecord {
 /// Tick 18: node `c` consumes node `b` of tick 17.
 fn tick_18() -> TickRecord {
     let node_c = coord(18, "c", 3);
-    let nodes = vec![endogenous(&node_c, vec![hash(2)])];
+    let nodes = vec![provisional_row(node_c.clone(), vec![hash(2)])];
     record(18, nodes, vec![edge(&node_c, &coord(17, "b", 2))])
 }
 
 const fn at(fork: TimelineId, generation: u64) -> ForkGenerationV1 {
     ForkGenerationV1 { fork, generation }
-}
-
-const fn fork_scope(fork: TimelineId, generation: u64) -> Scope {
-    Scope::ForkGeneration(at(fork, generation))
-}
-
-const fn prefix_scope(timeline: TimelineId, through_tick: u64) -> Scope {
-    Scope::ParentPrefix {
-        timeline,
-        through_tick,
-    }
-}
-
-fn request(
-    scope: Scope,
-    after: Option<DependencyPageCursorV1>,
-    limit: usize,
-) -> DependencyPageRequestV1 {
-    ok(DependencyPageRequestV1::try_new(scope, after, limit))
-}
-
-/// Read every page of `scope` through `read`.
-fn collect_rows<T: DependencyPagedRowV1 + Clone>(
-    scope: Scope,
-    limit: usize,
-    read: impl Fn(&DependencyPageRequestV1) -> Result<DependencyPageV1<T>, StoreError>,
-) -> Result<Vec<T>, StoreError> {
-    let mut rows = Vec::new();
-    let mut after = None;
-    loop {
-        let page = read(&request(scope, after, limit))?;
-        rows.extend_from_slice(page.items());
-        after = page.next().cloned();
-        if after.is_none() {
-            return Ok(rows);
-        }
-    }
 }
 
 fn collect_nodes(
@@ -418,7 +258,7 @@ fn append(
 /// Commit an invalidation without dependencies.
 fn invalidate(store: &mut MemoryStore, fork: TimelineId, head: u64, prior: u64) {
     let plain = command(fork, head, prior);
-    ok(store.commit_counterfactual_invalidation(&plain));
+    assert_ok(store.commit_counterfactual_invalidation(&plain));
 }
 
 /// A published Fork with the tick 17 record committed at generation 1, whose
@@ -458,7 +298,7 @@ fn c1_repeated_reads_return_identical_bytes() {
     let mut fixture = recorded();
     let fork = fixture.fork;
     let store = &mut fixture.store;
-    ok(append(store, fork, &tick_18()));
+    assert_ok(append(store, fork, &tick_18()));
     let bytes_of = |edges: Vec<EdgeRow>| -> Vec<Vec<u8>> {
         edges.iter().map(|row| row.as_bytes().to_vec()).collect()
     };
@@ -644,9 +484,9 @@ fn c4_position_key_and_digest_collisions_are_rejected_across_records() {
     let fork = fixture.fork;
     let store = &mut fixture.store;
     // The position key of node `a` at tick 17 with another digest.
-    let same_position = node_of(&coord(17, "a", 77), ROOT_CLASS, PROVISIONAL, Vec::new());
+    let same_position = class_row(coord(17, "a", 77), ROOT_CLASS, PROVISIONAL, Vec::new());
     // The digest of node `a` at another position.
-    let same_digest = endogenous(&coord(18, "z", 1), Vec::new());
+    let same_digest = provisional_row(coord(18, "z", 1), Vec::new());
 
     for row in [same_position, same_digest] {
         let outcome = append(store, fork, &record(18, vec![row], Vec::new()));
@@ -733,7 +573,7 @@ fn c5_the_record_tick_is_persisted_apart_from_node_ticks() {
     let fork = fixture.fork;
     let store = &mut fixture.store;
     invalidate(store, fork, 1, 0);
-    let early_root = node_of(&coord(3, "r", 9), ROOT_CLASS, PROVISIONAL, Vec::new());
+    let early_root = class_row(coord(3, "r", 9), ROOT_CLASS, PROVISIONAL, Vec::new());
     let riding = record(20, vec![early_root], Vec::new());
 
     assert!(append(store, fork, &riding).is_ok());
@@ -769,9 +609,9 @@ fn c6_roots_ride_later_records_and_rows_are_ordered_by_position_key() {
     let mut fixture = recorded();
     let fork = fixture.fork;
     let store = &mut fixture.store;
-    let root = node_of(&coord(3, "r", 9), ROOT_CLASS, PROVISIONAL, Vec::new());
+    let root = class_row(coord(3, "r", 9), ROOT_CLASS, PROVISIONAL, Vec::new());
     let node_c = coord(18, "c", 3);
-    let nodes = vec![root, endogenous(&node_c, vec![hash(2)])];
+    let nodes = vec![root, provisional_row(node_c.clone(), vec![hash(2)])];
     let edges = vec![edge(&node_c, &coord(17, "b", 2))];
     let riding = record(18, nodes, edges);
 
@@ -786,8 +626,8 @@ fn c6_roots_ride_later_records_and_rows_are_ordered_by_position_key() {
 
 #[test]
 fn c6_roots_after_the_record_tick_and_other_nodes_off_it_are_not_records() {
-    let late_root = node_of(&coord(18, "r", 9), ROOT_CLASS, PROVISIONAL, Vec::new());
-    let early_node = endogenous(&coord(16, "e", 8), Vec::new());
+    let late_root = class_row(coord(18, "r", 9), ROOT_CLASS, PROVISIONAL, Vec::new());
+    let early_node = provisional_row(coord(16, "e", 8), Vec::new());
 
     for row in [late_root, early_node] {
         let built = TickRecord::try_new(17, PROVISIONAL, vec![row], Vec::new());
@@ -853,7 +693,7 @@ fn c7_a_new_generation_records_its_own_first_tick_record() {
     let store = &mut fixture.store;
     let other = record(
         FIRST_TICK,
-        vec![endogenous(&coord(17, "q", 40), Vec::new())],
+        vec![provisional_row(coord(17, "q", 40), Vec::new())],
         Vec::new(),
     );
 
@@ -1070,7 +910,7 @@ fn c9_deleted_timelines_are_not_found() {
     let mut fixture = recorded();
     let (fork, root) = (fixture.fork, fixture.root);
     let store = &mut fixture.store;
-    ok(store.delete_timeline(fork));
+    assert_ok(store.delete_timeline(fork));
 
     for scope in [fork_scope(fork, 1), prefix_scope(fork, 5)] {
         assert_eq!(
@@ -1078,7 +918,7 @@ fn c9_deleted_timelines_are_not_found() {
             StoreError::ForkNotFound
         );
     }
-    ok(store.delete_timeline(root));
+    assert_ok(store.delete_timeline(root));
     assert_eq!(
         err(collect_edges(store, prefix_scope(root, 5), 2)),
         StoreError::ForkNotFound
@@ -1088,7 +928,7 @@ fn c9_deleted_timelines_are_not_found() {
 /// The coordinate of node `index` of [`numbered`].
 fn numbered_coord(index: usize) -> Coordinate {
     let owner = format!("n{index:05}");
-    coord_at(FIRST_TICK, &owner, indexed_hash(index + 100))
+    coord_at(FIRST_TICK, &owner, 0, indexed_hash(index + 100))
 }
 
 /// `count` provisional nodes at tick 17, each consuming the prefix node `w`.
@@ -1097,7 +937,7 @@ fn numbered(count: usize) -> TickRecord {
     let consumers: Vec<Coordinate> = (0..count).map(numbered_coord).collect();
     let nodes = consumers
         .iter()
-        .map(|consumer| endogenous(consumer, vec![hash(50)]))
+        .map(|consumer| provisional_row(consumer.clone(), vec![hash(50)]))
         .collect();
     let edges = consumers
         .iter()
@@ -1171,7 +1011,7 @@ fn c10_keyset_paging_is_stable_while_later_records_arrive() {
     let first = ok(store.read_dependency_nodes(&request(scope, None, 1)));
     assert_eq!(first.items(), &nodes_of(&[tick_17()])[..1]);
 
-    ok(append(store, fork, &tick_18()));
+    assert_ok(append(store, fork, &tick_18()));
 
     let resumed = request(scope, first.next().cloned(), 5);
     let rest = ok(store.read_dependency_nodes(&resumed));
@@ -1206,7 +1046,7 @@ fn c11_contract_errors_surface_through_the_storage_error_mapping() {
     let mut fixture = recorded();
     let fork = fixture.fork;
     let store = &mut fixture.store;
-    let duplicate = endogenous(&coord(18, "z", 1), Vec::new());
+    let duplicate = provisional_row(coord(18, "z", 1), Vec::new());
 
     let binding = append(store, fork, &empty_at(FIRST_TICK));
     let repeated = append(store, fork, &record(18, vec![duplicate], Vec::new()));
@@ -1226,7 +1066,7 @@ fn c12_deleting_a_fork_purges_its_rows_and_a_recreated_fork_starts_empty() {
     let mut fixture = recorded();
     let (fork, root) = (fixture.fork, fixture.root);
     let store = &mut fixture.store;
-    ok(store.delete_timeline(fork));
+    assert_ok(store.delete_timeline(fork));
 
     assert_eq!(
         err(collect_nodes(store, fork_scope(fork, 1), 2)),
@@ -1234,14 +1074,14 @@ fn c12_deleting_a_fork_purges_its_rows_and_a_recreated_fork_starts_empty() {
     );
     let mut meta = TimelineMeta::forked_from(root, Seq::from_u64(1), "recreated");
     meta.id = fork;
-    ok(store.create_timeline_with_meta(meta));
+    assert_ok(store.create_timeline_with_meta(meta));
     // Unpublished again, so the re-created Fork reads as not found.
     assert_eq!(
         err(collect_nodes(store, fork_scope(fork, 1), 2)),
         StoreError::ForkNotFound
     );
     // Publication resumes at the generation floor and holds none of the rows.
-    ok(store.publish_counterfactual_facts(fork, facts()));
+    assert_ok(store.publish_counterfactual_facts(fork, facts()));
     assert_recorded(store, fork_scope(fork, 1), &[]);
     let events = seqs(store, fork);
     assert_eq!(
@@ -1263,8 +1103,8 @@ fn c12_deleting_a_parent_timeline_makes_its_prefix_unreadable() {
 
     assert!(store.delete_timeline(root).is_err());
     assert_recorded(store, prefix_scope(root, 9), &[]);
-    ok(store.delete_timeline(fork));
-    ok(store.delete_timeline(root));
+    assert_ok(store.delete_timeline(fork));
+    assert_ok(store.delete_timeline(root));
 
     assert_eq!(
         err(collect_nodes(store, prefix_scope(root, 9), 2)),

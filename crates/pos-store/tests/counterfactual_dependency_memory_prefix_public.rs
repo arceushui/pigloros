@@ -8,13 +8,15 @@
 
 use std::sync::Arc;
 
-use pos_core::counterfactual_store::test_fixtures::SeededFactualTickV1;
+use pos_core::counterfactual_store::test_fixtures::{
+    assert_ok, class_row, collect_rows, draft, err, hash, ok, prefix_scope, request,
+    SeededFactualTickV1,
+};
 use pos_core::{
-    CanonicalBytes, CoreError, CounterfactualDependencyReadPortV1, CounterfactualStoreErrorV1,
+    CoreError, CounterfactualDependencyReadPortV1, CounterfactualStoreErrorV1,
     DependencyEdgeRecordV1, DependencyNodeCoordinateV1, DependencyNodeRecordV1,
-    DependencyPageCursorV1, DependencyPageRequestV1, DependencyPageV1, DependencyPagedRowV1,
-    DependencyReadScopeV1, EntityId, ErasureContainmentGateV1, EventDraft, FactualCutV1,
-    FactualHeadV1, FactualOwnerIdV1, FactualPrefixReadPortV1, Hash, Kind,
+    DependencyPagedRowV1, DependencyReadScopeV1, ErasureContainmentGateV1, EventDraft,
+    FactualCutV1, FactualHeadV1, FactualOwnerIdV1, FactualPrefixReadPortV1, Hash,
     RecordedDependencyClassV1, RecordedNodeOriginV1, RecordedSetCountsV1, Seq,
     TickDependencyRecordV1, TimelineId,
 };
@@ -28,83 +30,6 @@ type TickRecord = TickDependencyRecordV1;
 type Scope = DependencyReadScopeV1;
 
 const COMMITTED: RecordedNodeOriginV1 = RecordedNodeOriginV1::Committed;
-
-fn ok<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
-    result.unwrap_or_else(|error| {
-        std::panic::resume_unwind(Box::new(format!("unexpected test error: {error:?}")))
-    })
-}
-
-fn err<T: std::fmt::Debug, E>(result: Result<T, E>) -> E {
-    result.map_or_else(
-        |error| error,
-        |value| std::panic::resume_unwind(Box::new(format!("unexpected success: {value:?}"))),
-    )
-}
-
-const fn hash(value: u8) -> Hash {
-    Hash::from_bytes([value; 32])
-}
-
-fn draft(value: u8) -> EventDraft {
-    typed_draft("counterfactual.tick", value)
-}
-
-fn typed_draft(kind: &str, value: u8) -> EventDraft {
-    EventDraft::new(
-        EntityId::new(),
-        Kind::new(kind),
-        CanonicalBytes::from_vec(vec![value]),
-    )
-}
-
-fn node_of(
-    coordinate: &Coordinate,
-    class: RecordedDependencyClassV1,
-    origin: RecordedNodeOriginV1,
-    inputs: Vec<Hash>,
-) -> NodeRow {
-    ok(NodeRow::try_new(
-        coordinate.clone(),
-        class,
-        origin,
-        inputs,
-        hash(99),
-    ))
-}
-
-const fn prefix_scope(timeline: TimelineId, through_tick: u64) -> Scope {
-    Scope::ParentPrefix {
-        timeline,
-        through_tick,
-    }
-}
-
-fn request(
-    scope: Scope,
-    after: Option<DependencyPageCursorV1>,
-    limit: usize,
-) -> DependencyPageRequestV1 {
-    ok(DependencyPageRequestV1::try_new(scope, after, limit))
-}
-
-/// Read every page of `scope` through `read`.
-fn collect_rows<T: DependencyPagedRowV1 + Clone>(
-    scope: Scope,
-    limit: usize,
-    read: impl Fn(&DependencyPageRequestV1) -> Result<DependencyPageV1<T>, StoreError>,
-) -> Result<Vec<T>, StoreError> {
-    let mut rows = Vec::new();
-    let mut after = None;
-    loop {
-        let page = read(&request(scope, after, limit))?;
-        rows.extend_from_slice(page.items());
-        after = page.next().cloned();
-        if after.is_none() {
-            return Ok(rows);
-        }
-    }
-}
 
 fn collect_nodes(
     store: &MemoryStore,
@@ -149,7 +74,7 @@ fn seeded_node(lane: u8, tick: u8, owner: &str, ordinal: u8) -> NodeRow {
     let made = Coordinate::try_new(at, 1, owner_id, position, 7, digest);
     let coordinate = ok(made);
     let class = RecordedDependencyClassV1::EndogenousRecomputed;
-    node_of(&coordinate, class, COMMITTED, Vec::new())
+    class_row(coordinate, class, COMMITTED, Vec::new())
 }
 
 /// A committed factual Tick owning the `seq` range `first..=last`: a step node
@@ -199,15 +124,15 @@ struct Lineage {
 fn lineage() -> Lineage {
     let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
     let mut store = MemoryStore::new();
-    ok(store.bind_erasure_gate(Arc::clone(&gate)));
+    assert_ok(store.bind_erasure_gate(Arc::clone(&gate)));
     let root = ok(store.create_timeline("factual-root")).id();
     let events: Vec<EventDraft> = (0..14).map(draft).collect();
-    ok(store.append(root, &events));
-    ok(store.seed_factual_prefix(root, &root_ticks()));
+    assert_ok(store.append(root, &events));
+    assert_ok(store.seed_factual_prefix(root, &root_ticks()));
     let mid = fork_at(&mut store, root, 6);
     let own: Vec<EventDraft> = (0..3).map(draft).collect();
-    ok(store.append(mid, &own));
-    ok(store.seed_factual_prefix(mid, &[fork_tick()]));
+    assert_ok(store.append(mid, &own));
+    assert_ok(store.seed_factual_prefix(mid, &[fork_tick()]));
     let deep = fork_at(&mut store, mid, 7);
     Lineage {
         store,
@@ -366,11 +291,11 @@ fn f4_event_nodes_resolve_through_ancestry_and_stop_at_each_cut() {
 fn f4_a_binding_to_an_unrecorded_node_resolves_to_nothing() {
     let mut store = MemoryStore::new();
     let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
-    ok(store.bind_erasure_gate(gate));
+    assert_ok(store.bind_erasure_gate(gate));
     let root = ok(store.create_timeline("factual-dangling")).id();
     let mut tick = seeded_tick(ROOT_LANE, 1, OWNER_A, 1, 1);
     tick.event_nodes = vec![(Seq::from_u64(1), hash(250))];
-    ok(store.seed_factual_prefix(root, &[tick]));
+    assert_ok(store.seed_factual_prefix(root, &[tick]));
 
     let resolved = ok(store.nodes_for_committed_events(root, &seq_list(&[1])));
 
@@ -504,14 +429,14 @@ fn f9_missing_and_deleted_timelines_are_not_found() {
     );
 
     // Deleting a Timeline purges its set; the others stay readable.
-    ok(store.delete_timeline(deep));
-    ok(store.delete_timeline(mid));
+    assert_ok(store.delete_timeline(deep));
+    assert_ok(store.delete_timeline(mid));
     assert!(matches!(
         err(store.factual_set_counts(mid)),
         CoreError::TimelineNotFound(_)
     ));
     assert_eq!(head_of(store, root), head(3, 8));
-    ok(store.delete_timeline(root));
+    assert_ok(store.delete_timeline(root));
     assert!(matches!(
         err(store.last_committed_factual_tick(root)),
         CoreError::TimelineNotFound(_)
@@ -556,7 +481,7 @@ fn f2_cut_tick_at_is_a_boundary_on_a_timeline_without_ticks_and_at_seq_zero() {
     let mut lineage = lineage();
     let bare = ok(lineage.store.create_timeline("factual-bare-cut")).id();
     let events: Vec<EventDraft> = (0..3).map(draft).collect();
-    ok(lineage.store.append(bare, &events));
+    assert_ok(lineage.store.append(bare, &events));
     let store = &lineage.store;
 
     // No Tick is recorded, so every `seq`, beyond the head too, is a boundary.
