@@ -475,7 +475,7 @@ impl<'a> Reader<'a> {
     fn lookup<T>(&mut self, decode: fn(u8) -> Option<T>, field: FallbackFieldV1) -> Outcome<T> {
         self.unsigned()
             .map(|value| u8::try_from(value).unwrap_or(u8::MAX))
-            .and_then(|code| decode(code).ok_or(invalid(field)))
+            .and_then(|code| decode(code).ok_or_else(|| invalid(field)))
     }
 
     fn count(&mut self, maximum: usize, field: FallbackFieldV1) -> Outcome<usize> {
