@@ -16,8 +16,8 @@
 //! PCF-CPH-015 starves the other budgets of a release the same way, as the `PCF1` sub-cases
 //! `res.1`, `res.3` and `res.4` do: one unit of fuel ends the C guest `FuelExhausted`, two host
 //! calls end the Rust guest, which makes three (time, random and log), `HostCallLimitExceeded`,
-//! and one Event byte ends it, since its one Event has an 8-byte payload,
-//! `OutputLimitExceeded`. Each quarantines the Plugin `ResourceExhausted`.
+//! and one Event byte ends it `OutputLimitExceeded`, since its one Event has an 8-byte payload.
+//! Each quarantines the Plugin `ResourceExhausted`.
 //!
 //! A first-party native Driver has no release budget. It is bound by the host Tick draft budget
 //! of the registry: a Driver that stages more drafts than the budget leaves fails the pass
@@ -159,6 +159,7 @@ pub fn over_budget_parity() -> Capture {
     on_every_store(over_budget)
 }
 
+/// PCF-CPH-010 on a `kind` store.
 fn over_budget(kind: StoreKind, capture: &mut StoreCapture<'_>) -> BoxResult<()> {
     let mut signed = SignedWorld::new()?;
     let shape = ALPHA.shape().with_memory_bytes(ONE_PAGE);
@@ -275,6 +276,7 @@ pub fn other_limits_parity() -> Capture {
     on_every_store(other_limits)
 }
 
+/// PCF-CPH-015 on a `kind` store.
 fn other_limits(kind: StoreKind, capture: &mut StoreCapture<'_>) -> BoxResult<()> {
     let mut failed = true;
     let mut within = true;
