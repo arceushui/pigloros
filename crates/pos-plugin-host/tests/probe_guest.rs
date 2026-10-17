@@ -102,7 +102,7 @@ fn unselected_observations_behave_exactly_like_the_rust_guest() {
 fn drafts_the_reserved_type(export: GuestExport, selector: &[u8], reserved: &str) {
     let rust = ok(run(&GUESTS.rust, export, selector), "Rust guest");
     let mut expected = ok(rust.result, "Rust guest output");
-    expected.event_drafts[0].event_type = reserved.to_owned();
+    reserved.clone_into(&mut expected.event_drafts[0].event_type);
     expected.output_digest = plugin_output_digest_v1(&expected);
     let probe = ok(run(&GUESTS.probe, export, selector), "probe guest");
     assert_eq!(probe.operational_log, rust.operational_log, "{export:?}");
