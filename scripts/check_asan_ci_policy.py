@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 import pathlib
 import sys
 
@@ -16,6 +17,11 @@ EXPECTED_SUPPRESSION = (
     "leak:^<bevy_reflect::utility::GenericTypeCell<"
     "bevy_reflect::utility::TypePathComponent>>::get_or_insert_by_type_id::*$\n"
 ).encode()
+EXPECTED_SERIAL_LINKER = b"""#!/bin/sh
+# ASan plus build-std test binaries have very large links. Cargo compiles the
+# ASan archive in parallel; this linker admits only one link at a time.
+exec flock "${RUNNER_TEMP:?}/asan-link.lock" cc "$@"
+"""
 EXPECTED_COMMAND = """set -euo pipefail
 test -x "/usr/bin/llvm-symbolizer-18"
 nextest_args=(
@@ -79,7 +85,10 @@ RUSTFLAGS="-Z sanitizer=address" \\
 """
 EXPECTED_BUILD_ENV = {
     "RUSTC_BOOTSTRAP": "1",
-    "CARGO_BUILD_JOBS": "1",
+    "CARGO_BUILD_JOBS": "4",
+    "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER": (
+        "${{ github.workspace }}/scripts/asan/serial-link.sh"
+    ),
     "CARGO_INCREMENTAL": "0",
     "CARGO_PROFILE_TEST_DEBUG": "line-tables-only",
 }
@@ -278,6 +287,17 @@ def check_suppression_file(suppression_path: pathlib.Path) -> None:
     )
 
 
+def check_serial_linker(linker_path: pathlib.Path) -> None:
+    require(
+        linker_path.read_bytes() == EXPECTED_SERIAL_LINKER,
+        "ASan linker wrapper must serialize every link through one lock",
+    )
+    require(
+        os.access(linker_path, os.X_OK),
+        "ASan linker wrapper must be executable",
+    )
+
+
 def check_repository_nextest_configuration(workspace_root: pathlib.Path) -> None:
     repository_config = workspace_root / ".config" / "nextest.toml"
     require(
@@ -290,6 +310,7 @@ def check_workflow(
     workflow_path: pathlib.Path, workspace_root: pathlib.Path | None = None
 ) -> None:
     check_suppression_file(ROOT / "scripts" / "asan" / "bevy-reflect.lsan")
+    check_serial_linker(ROOT / "scripts" / "asan" / "serial-link.sh")
     check_repository_nextest_configuration(workspace_root or ROOT)
     with workflow_path.open(encoding="utf-8") as stream:
         workflow = yaml.safe_load(stream)

@@ -17,6 +17,7 @@ import yaml
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 CHECKER_PATH = ROOT / "scripts" / "check_asan_ci_policy.py"
 SUPPRESSION_PATH = ROOT / "scripts" / "asan" / "bevy-reflect.lsan"
+SERIAL_LINKER_PATH = ROOT / "scripts" / "asan" / "serial-link.sh"
 NEGATIVE_CONTROL_PATH = ROOT / "scripts" / "asan" / "intentional-leak.rs"
 EXPECTED_SUPPRESSION = (
     "leak:^<bevy_reflect::utility::GenericTypeCell<"
@@ -161,10 +162,45 @@ class AsanCiPolicyTests(unittest.TestCase):
 
         self.assert_rejected(remove_match_assertion)
 
-    def test_rejects_missing_serialization(self) -> None:
+    def test_rejects_unbounded_build_concurrency(self) -> None:
         self.assert_rejected(
             lambda workflow: self.build_step(workflow)["env"].pop("CARGO_BUILD_JOBS")
         )
+
+    def test_rejects_missing_serial_linker(self) -> None:
+        self.assert_rejected(
+            lambda workflow: self.build_step(workflow)["env"].pop(
+                "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER"
+            )
+        )
+
+    def test_rejects_rustflags_linker_override(self) -> None:
+        def override_linker(workflow: dict) -> None:
+            step = self.build_step(workflow)
+            step["run"] = step["run"].replace(
+                '-Z sanitizer=address"', '-Z sanitizer=address -C linker=cc"'
+            )
+
+        self.assert_rejected(override_linker)
+
+    def test_repository_serial_linker_passes(self) -> None:
+        CHECKER.check_serial_linker(SERIAL_LINKER_PATH)
+
+    def test_rejects_unserialized_linker_wrapper(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            linker = pathlib.Path(directory) / "serial-link.sh"
+            linker.write_text('#!/bin/sh\nexec cc "$@"\n', encoding="utf-8")
+            linker.chmod(0o755)
+            with self.assertRaises(CHECKER.PolicyError):
+                CHECKER.check_serial_linker(linker)
+
+    def test_rejects_non_executable_linker_wrapper(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            linker = pathlib.Path(directory) / "serial-link.sh"
+            linker.write_bytes(SERIAL_LINKER_PATH.read_bytes())
+            linker.chmod(0o644)
+            with self.assertRaises(CHECKER.PolicyError):
+                CHECKER.check_serial_linker(linker)
 
     def test_requires_bounded_test_concurrency(self) -> None:
         def remove_test_threads(workflow: dict) -> None:
@@ -398,8 +434,8 @@ class AsanCiPolicyTests(unittest.TestCase):
     def test_rejects_commented_serialization(self) -> None:
         source = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
         source = source.replace(
-            '          CARGO_BUILD_JOBS: "1"',
-            '          # CARGO_BUILD_JOBS: "1"',
+            "          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER:",
+            "          # CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER:",
         )
         with tempfile.TemporaryDirectory() as directory:
             fixture = pathlib.Path(directory) / "ci.yml"
