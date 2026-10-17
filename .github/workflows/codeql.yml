@@ -53,13 +53,27 @@ jobs:
           tar --extract --gzip --file "$archive" --strip-components 1 \
             --no-same-owner --no-same-permissions --directory "$tools_dir"
           "$tools_dir/wit-bindgen" --version
-          generated=plugins/community/examples/compatibility-prototype/rust-guest/generated
-          test ! -e "$generated"
-          mkdir -p "$generated"
-          "$tools_dir/wit-bindgen" rust --world community-plugin \
-            --out-dir "$generated" plugins/community/wit
-          test -s "$generated/community_plugin.rs"
-          sha256sum "$generated/community_plugin.rs"
+          prototype=plugins/community/examples/compatibility-prototype
+          guests=(rust-guest)
+          # Older feature heads have no probe package; any present owner must
+          # have complete inputs and receive its own canonical bindings.
+          if [[ -e "$prototype/probe-guest" || -L "$prototype/probe-guest" ]]; then
+            guests+=(probe-guest)
+          fi
+          for guest in "${guests[@]}"; do
+            guest_dir="$prototype/$guest"
+            test -d "$guest_dir"
+            test ! -L "$guest_dir"
+            test -s "$guest_dir/Cargo.toml"
+            test -s "$guest_dir/src/lib.rs"
+            generated="$guest_dir/generated"
+            test ! -e "$generated"
+            mkdir -p "$generated"
+            "$tools_dir/wit-bindgen" rust --world community-plugin \
+              --out-dir "$generated" plugins/community/wit
+            test -s "$generated/community_plugin.rs"
+            sha256sum "$generated/community_plugin.rs"
+          done
           test -z "$(git diff --name-only HEAD)"
       - name: Describe the unchanged standalone sanitizer fixture to extraction
         timeout-minutes: 1
