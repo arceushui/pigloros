@@ -7,8 +7,8 @@ use std::collections::BTreeSet;
 
 use pos_core::counterfactual_store::test_fixtures;
 use pos_core::counterfactual_store::test_fixtures::{
-    assert_ok, class_row, collect_rows, coord, coord_at, edge_row, edge_tail, edge_tail_with_rule,
-    err, facts, frontier_frame, hash, hash_field, id_field, indexed_hash, invalidation_frame,
+    class_row, collect_rows, coord, coord_at, edge_row, edge_tail, edge_tail_with_rule, err, facts,
+    frontier_frame, hash, hash_field, id_field, indexed_hash, invalidation_frame,
     invalidation_middle, node_bytes, node_row, ok, request, text_field, uint, EDGE_HEAD,
 };
 use pos_core::{
