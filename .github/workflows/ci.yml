@@ -519,9 +519,9 @@ jobs:
       - name: Exercise unsupported recipient export decryption boundary
         run: cargo test -p pos-store --test recipient_export_decryption_unsupported_public --locked -- --include-ignored
 
-  # ADR-061 revision 4 compatibility prototype (#539): rebuild the Rust and C
-  # guest Components from source with pinned toolchains and require the
-  # committed fixtures byte for byte.
+  # ADR-061 revision 4 compatibility prototype (#539): rebuild the
+  # compatibility Components from source with pinned toolchains and require
+  # the committed fixtures byte for byte.
   plugin-component-fixtures:
     name: plugin-component-fixtures
     needs: ci_change_scope
@@ -541,7 +541,19 @@ jobs:
       - name: Rebuild the compatibility Components and compare their bytes
         env:
           PROTOTYPE_TOOLS: ${{ runner.temp }}/component-tools
+          REBUILT_DIR: ${{ runner.temp }}/rebuilt-plugin-fixtures
         run: bash plugins/community/examples/compatibility-prototype/verify-fixtures.sh
+      # On a mismatch, publish the rebuilt Components and SHA256SUMS: download
+      # them with `gh run download -n rebuilt-plugin-fixtures` and commit them
+      # to the prototype's fixtures directory.
+      - name: Upload the rebuilt compatibility Components
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rebuilt-plugin-fixtures
+          path: ${{ runner.temp }}/rebuilt-plugin-fixtures
+          retention-days: 3
+          if-no-files-found: warn
 
   ledger-windows:
     name: ledger-windows
