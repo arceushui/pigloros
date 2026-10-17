@@ -52,7 +52,7 @@ fn open() -> Fallible<MemoryStore> {
 /// What the public ports read of every Timeline, in a stable order: the
 /// Timeline, its own Events, its validated provenance suffix, and its
 /// counterfactual basis and generation, each as its result. A listing that
-/// fails, as on a fail-closed gated store, is recorded as its error.
+/// fails is recorded as its error.
 fn observed(store: &MemoryStore) -> Vec<String> {
     let listed = store.list_timelines();
     let mut lines = vec![format!("{:?}", listed.as_ref().map(Vec::len))];
