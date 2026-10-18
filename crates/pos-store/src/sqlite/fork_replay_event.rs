@@ -1061,21 +1061,24 @@ mod tests {
         Ok(())
     }
 
+    #[cfg_attr(coverage_nightly, coverage(on))]
     fn assert_raw_getter_gate<T: FromSql>(
         column: usize,
         expression: &str,
         length: usize,
         accepts: bool,
-    ) -> Fallible<()> {
+    ) {
+        use pos_core::counterfactual_store::test_fixtures::{assert_ok, ok};
+
         // Real SQLite projections isolate the private getter's contract from
         // earlier probes/later typed decoders; these are not legal Event rows.
-        let conn = Connection::open_in_memory()?;
+        let conn = ok(Connection::open_in_memory());
         let projection = std::iter::repeat_n(expression, 16)
             .collect::<Vec<_>>()
             .join(",");
-        let mut statement = conn.prepare(&format!("SELECT {projection}"))?;
-        let mut rows = statement.query([])?;
-        let row = rows.next()?.ok_or("native projected row")?;
+        let mut statement = ok(conn.prepare(&format!("SELECT {projection}")));
+        let mut rows = ok(statement.query([]));
+        let row = ok(ok(rows.next()).ok_or("native projected row"));
         let mut lengths = EventRowLengthsV1 {
             seq: 1,
             columns: [0; 16],
@@ -1083,8 +1086,8 @@ mod tests {
         lengths.columns[column] = length;
         let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
         let start = clock.mark();
-        let limits = ForkReplayReadLimitsV1::new(1, 1, 1, 1_024, 1_000_000)?;
-        let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+        let limits = ok(ForkReplayReadLimitsV1::new(1, 1, 1, 1_024, 1_000_000));
+        let mut budget = ok(ForkReplayReadBudgetV1::new(limits, start, &mut clock));
         let mut context = NativeReadContextV1::protected(&mut budget);
         let result = EventRowReaderV1::new(row, &mut context, Some(&lengths)).get::<T>(column);
         assert_eq!(result.is_ok(), accepts, "column {column}: {expression}");
@@ -1093,13 +1096,11 @@ mod tests {
         }
         let charged = if accepts { length } else { 0 };
         assert_eq!(budget.remaining_native_bytes(), 1_024 - charged);
-        budget.check_time()?;
-        Ok(())
+        assert_ok(budget.check_time());
     }
 
     #[test]
-    fn raw_getters_refuse_independent_column_width_and_utf8_faults_before_precharge() -> Fallible<()>
-    {
+    fn raw_getters_refuse_independent_column_width_and_utf8_faults_before_precharge() {
         for (column, expression, length, accepts) in [
             (0, "'x'", 1, false),
             (1, "''", 0, false),
@@ -1108,7 +1109,7 @@ mod tests {
             (1, "'x'", 1, true),
             (3, "''", 0, true),
         ] {
-            assert_raw_getter_gate::<String>(column, expression, length, accepts)?;
+            assert_raw_getter_gate::<String>(column, expression, length, accepts);
         }
         for (column, expression, length, accepts) in [
             (0, "X'01'", 1, false),
@@ -1117,12 +1118,11 @@ mod tests {
             (9, "X'01'", 1, true),
             (4, "X''", 0, true),
         ] {
-            assert_raw_getter_gate::<Vec<u8>>(column, expression, length, accepts)?;
+            assert_raw_getter_gate::<Vec<u8>>(column, expression, length, accepts);
         }
         for (column, length, accepts) in [(0, 0, false), (6, 1, false), (6, 0, true)] {
-            assert_raw_getter_gate::<Option<i64>>(column, "NULL", length, accepts)?;
+            assert_raw_getter_gate::<Option<i64>>(column, "NULL", length, accepts);
         }
-        Ok(())
     }
 
     #[test]
