@@ -153,10 +153,10 @@ fn head(major: u8, value: u64) -> Vec<u8> {
     let bytes = value.to_be_bytes();
     match value {
         0..=23 => vec![tag | bytes[7]],
-        24..=0xff => vec![tag | 24, bytes[7]],
-        0x100..=0xffff => [&[tag | 25][..], &bytes[6..]].concat(),
-        0x1_0000..=0xffff_ffff => [&[tag | 26][..], &bytes[4..]].concat(),
-        _ => [&[tag | 27][..], &bytes[..]].concat(),
+        24..=0xff => vec![tag | 0x18, bytes[7]],
+        0x100..=0xffff => [&[tag | 0x19][..], &bytes[6..]].concat(),
+        0x1_0000..=0xffff_ffff => [&[tag | 0x1a][..], &bytes[4..]].concat(),
+        _ => [&[tag | 0x1b][..], &bytes[..]].concat(),
     }
 }
 
