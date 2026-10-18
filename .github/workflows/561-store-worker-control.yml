@@ -44,7 +44,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         timeout-minutes: 2
         with:
-          ref: 3c62c1df8e986df1e635ae48ba760434eb24f320
+          ref: a4adc745c5da6e31798143f94d8731f3182338db
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         timeout-minutes: 5
@@ -65,14 +65,16 @@ jobs:
           PROBE_WORKFLOW_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = 3c62c1df8e986df1e635ae48ba760434eb24f320
-          test "$(git rev-parse 'HEAD^{tree}')" = ce593759eccb467ae5c88fa2843a64689a89972f
+          test "$(git rev-parse HEAD)" = a4adc745c5da6e31798143f94d8731f3182338db
+          test "$(git rev-parse 'HEAD^{tree}')" = 0f8ec0287436abf7f021caca20fec2186301907c
           test -z "$(git status --porcelain --untracked-files=no)"
           mkdir "${RUNNER_TEMP}/561-store-worker-control"
           {
             printf 'workflow=%s\n' "$PROBE_WORKFLOW_SHA"
             git rev-parse HEAD 'HEAD^{tree}'
-            sha256sum Cargo.lock crates/pos-store/src/fork_replay.rs
+            sha256sum Cargo.lock crates/pos-store/src/fork_replay.rs \
+              crates/pos-store/src/memory/tests/classifier_binding.rs \
+              crates/pos-store/tests/fork_replay_lineage_public/refusals.rs
             rustc -Vv
             cargo --version
             cargo mutants --version
@@ -82,7 +84,7 @@ jobs:
             df -h .
             printf 'image=%s version=%s\n' "${ImageOS:-unknown}" "${ImageVersion:-unknown}"
           } > "${RUNNER_TEMP}/561-store-worker-control/environment.txt"
-      - name: Measure complete Store tests and two exact mutants with fixed limits
+      - name: Measure complete Store tests and four exact mutants with fixed limits
         timeout-minutes: 32
         env:
           # Cache setup exports 0; bind 1 at the actual native consumers.
@@ -100,13 +102,15 @@ jobs:
           import sys
           import time
 
-          source = "3c62c1df8e986df1e635ae48ba760434eb24f320"
+          source = "a4adc745c5da6e31798143f94d8731f3182338db"
           artifact = Path(os.environ["RUNNER_TEMP"]) / "561-store-worker-control"
           expected = [
-              "crates/pos-store/src/fork_replay.rs:154:9: replace NativeReadContextV1<'budget, 'clock>::row_available -> Result<(), crate::ForkManifestPublicationErrorV1> with Ok(())",
-              "crates/pos-store/src/fork_replay.rs:358:9: replace ForkReplayRequirementV1::authority_origin_digest -> Option<Hash> with None",
+              "crates/pos-store/src/fork_replay.rs:876:20: replace && with || in within_read_deadline",
+              "crates/pos-store/src/fork_replay.rs:920:29: replace > with == in complete_event_range",
+              "crates/pos-store/src/memory.rs:2317:13: replace || with && in MemoryStore::check_local_classifier_records",
+              "crates/pos-store/src/memory.rs:2319:13: replace || with && in MemoryStore::check_local_classifier_records",
           ]
-          assert len(expected) == len(set(expected)) == 2
+          assert len(expected) == len(set(expected)) == 4
           report = {"source": source, "expected_mutants": expected, "phases": []}
 
           def save():
@@ -156,8 +160,8 @@ jobs:
               if row.startswith("test result:")
           ]
           assert len(summaries) == 55 and all(summaries)
-          assert sum(int(summary[1]) for summary in summaries) == 2090
-          report.update(baseline_roots=55, baseline_passed=2090)
+          assert sum(int(summary[1]) for summary in summaries) == 2092
+          report.update(baseline_roots=55, baseline_passed=2092)
           save()
 
           special = set(r"\.^$|?*+()[]{}")
@@ -165,19 +169,20 @@ jobs:
               "".join("\\" + c if c in special else c for c in name) for name in expected
           ) + ")$"
           # v27.1 may collect unrelated struct-field mutants without --re;
-          # restrict discovery to the expected file, then require exact equality.
+          # restrict discovery to both owner files, then require exact equality.
           mutants = ["cargo", "mutants", "--package=pos-store", "--all-features",
-                     "--file", "crates/pos-store/src/fork_replay.rs", "--re", pattern]
+                     "--file", "crates/pos-store/src/fork_replay.rs",
+                     "--file", "crates/pos-store/src/memory.rs", "--re", pattern]
           with (artifact / "selected.json").open("wb") as output, (artifact / "selection.log").open("wb") as errors:
               subprocess.run(
                   ["timeout", "--kill-after=5s", "60s", *mutants, "--list", "--json"],
                   stdout=output, stderr=errors, check=True,
               )
           selected = json.loads((artifact / "selected.json").read_text())
-          assert len(selected) == len({m["name"] for m in selected}) == 2
+          assert len(selected) == len({m["name"] for m in selected}) == 4
           assert {m["name"] for m in selected} == set(expected)
           selected_ids = {identity(m) for m in selected}
-          assert len(selected_ids) == 2
+          assert len(selected_ids) == 4
 
           failures = []
           for name, workers in [("two-a", 2), ("one-a", 1), ("one-b", 1), ("two-b", 2)]:
@@ -193,13 +198,13 @@ jobs:
               actual = json.loads((result_dir / "mutants.json").read_text())
               outcomes = json.loads((result_dir / "outcomes.json").read_text())
               assert outcomes["cargo_mutants_version"] == "27.1.0"
-              assert len(actual) == len(outcomes["outcomes"]) == outcomes["total_mutants"] == 2
+              assert len(actual) == len(outcomes["outcomes"]) == outcomes["total_mutants"] == 4
               assert {identity(m) for m in actual} == selected_ids
               completed = [o["scenario"]["Mutant"] for o in outcomes["outcomes"]]
-              assert len({identity(m) for m in completed}) == 2
+              assert len({identity(m) for m in completed}) == 4
               assert {identity(m) for m in completed} == selected_ids
               assert all(outcomes[k] == 0 for k in ("missed", "unviable", "success"))
-              assert outcomes["caught"] + outcomes["timeout"] == 2
+              assert outcomes["caught"] + outcomes["timeout"] == 4
               for outcome in outcomes["outcomes"]:
                   phases = outcome["phase_results"]
                   assert len(phases) == 2
