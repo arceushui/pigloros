@@ -20,7 +20,7 @@ env:
   # https://github.com/rust-lang/rust/issues/161748
   RUSTUP_TOOLCHAIN: nightly-2026-07-01
   CARGO_PROFILE_TEST_DEBUG: line-tables-only
-  # Each of the two mutation workers owns one compiler job.
+  # Each mutation runner uses one worker with one compiler job.
   CARGO_BUILD_JOBS: "1"
 
 jobs:
