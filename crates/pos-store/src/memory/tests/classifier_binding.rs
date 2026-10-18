@@ -7,9 +7,9 @@ use super::classified_suffix_store;
 use crate::{ForkEventAuthorityErrorV1, ForkEventProvenanceAuthorityPortV1};
 use pos_core::{
     EventOriginRecordV1, ForkAppendOperationV1, ForkAppendSourceIdentityV1,
-    ForkClassifierRegistrationV1, ForkClassifierSourceV1, ForkClassifierTableV1,
-    ForkEventClassifierV1, ForkEventOriginKindV1, ForkEventProvenanceErrorV1,
-    ForkEventSourceDescriptorV1, ForkExternalInputRouteV1, Hash,
+    ForkClassifierRegistrationInputV1, ForkClassifierRegistrationV1, ForkClassifierSourceV1,
+    ForkClassifierTableV1, ForkEventClassifierV1, ForkEventOriginKindV1,
+    ForkEventProvenanceErrorV1, ForkEventSourceDescriptorV1, ForkExternalInputRouteV1, Hash,
 };
 use std::error::Error;
 
@@ -85,6 +85,61 @@ enum BindingFault {
     RegistrationClassifier,
 }
 
+impl BindingFault {
+    fn changed_records(
+        self,
+        table: &ForkClassifierTableV1,
+        source: &ForkClassifierSourceV1,
+        registration: &ForkClassifierRegistrationV1,
+    ) -> Result<
+        (
+            ForkClassifierSourceV1,
+            ForkClassifierTableV1,
+            ForkClassifierRegistrationInputV1,
+        ),
+        Box<dyn Error>,
+    > {
+        let mut table = table.input().clone();
+        let mut source = source.input().clone();
+        let mut registration = registration.input().clone();
+        let wrong = Hash::from_bytes([0xe1; 32]);
+        match self {
+            // The first binding block: table/admission, then source/table.
+            Self::TableAdmission => table.fork_admission_digest = wrong,
+            Self::TableRoom => {
+                table.room_revision_descriptor_hash = wrong;
+                source.room_revision_descriptor_hash = wrong;
+            }
+            Self::SourceRoom => source.room_revision_descriptor_hash = wrong,
+            Self::SourceRegistrar => source.registrar_identifier.push_str("-foreign"),
+            // The source revision remains exact in the route-only case.
+            Self::SourceRevision => table.source_configuration_revision_digest = wrong,
+            Self::Routes => {
+                table.routes = vec![ForkExternalInputRouteV1::new(
+                    ForkEventSourceDescriptorV1::new("foreign-route", wrong)?,
+                    false,
+                )];
+            }
+            // The selected registration keeps its child and operation identity.
+            Self::RegistrationAdmission => registration.fork_admission_digest = wrong,
+            Self::RegistrationRoom => registration.room_revision_descriptor_hash = wrong,
+            Self::RegistrationClassifier => registration.classifier_revision_digest = wrong,
+        }
+        let changed_source = ForkClassifierSourceV1::new(source)?;
+        if matches!(
+            self,
+            Self::TableRoom | Self::SourceRoom | Self::SourceRegistrar | Self::Routes
+        ) {
+            table.source_configuration_revision_digest = changed_source.digest();
+        }
+        Ok((
+            changed_source,
+            ForkClassifierTableV1::new(table)?,
+            registration,
+        ))
+    }
+}
+
 #[test]
 fn classified_suffix_rejects_each_inconsistent_classifier_binding() -> Result<(), Box<dyn Error>> {
     for fault in [
@@ -116,59 +171,19 @@ fn classified_suffix_rejects_each_inconsistent_classifier_binding() -> Result<()
         let registrations = store.fork_classifier_registrations.clone();
         let origins = store.fork_event_origins.clone();
         let operations = store.fork_append_operations.clone();
-        let mut table = tables
-            .get(&child)
-            .ok_or("missing fixture FCT1")?
-            .input()
-            .clone();
-        let mut source = sources
+        let table = tables.get(&child).ok_or("missing fixture FCT1")?;
+        let source = sources
             .get(&(
-                table.room_revision_descriptor_hash,
-                table.registrar_identifier.clone(),
+                table.input().room_revision_descriptor_hash,
+                table.input().registrar_identifier.clone(),
             ))
-            .ok_or("missing fixture FCS1")?
-            .input()
-            .clone();
-        let mut registration = registrations
+            .ok_or("missing fixture FCS1")?;
+        let registration = registrations
             .values()
             .find(|row| row.input().child_timeline_id == child)
-            .ok_or("missing fixture FCR1")?
-            .input()
-            .clone();
-        let wrong = Hash::from_bytes([0xe1; 32]);
-        match fault {
-            // The first binding block: table/admission, then source/table.
-            BindingFault::TableAdmission => table.fork_admission_digest = wrong,
-            BindingFault::TableRoom => {
-                table.room_revision_descriptor_hash = wrong;
-                source.room_revision_descriptor_hash = wrong;
-            }
-            BindingFault::SourceRoom => source.room_revision_descriptor_hash = wrong,
-            BindingFault::SourceRegistrar => source.registrar_identifier.push_str("-foreign"),
-            // The source revision remains exact in the route-only case.
-            BindingFault::SourceRevision => table.source_configuration_revision_digest = wrong,
-            BindingFault::Routes => {
-                table.routes = vec![ForkExternalInputRouteV1::new(
-                    ForkEventSourceDescriptorV1::new("foreign-route", wrong)?,
-                    false,
-                )];
-            }
-            // The selected registration keeps its child and operation identity.
-            BindingFault::RegistrationAdmission => registration.fork_admission_digest = wrong,
-            BindingFault::RegistrationRoom => registration.room_revision_descriptor_hash = wrong,
-            BindingFault::RegistrationClassifier => registration.classifier_revision_digest = wrong,
-        }
-        let changed_source = ForkClassifierSourceV1::new(source)?;
-        if matches!(
-            fault,
-            BindingFault::TableRoom
-                | BindingFault::SourceRoom
-                | BindingFault::SourceRegistrar
-                | BindingFault::Routes
-        ) {
-            table.source_configuration_revision_digest = changed_source.digest();
-        }
-        let changed_table = ForkClassifierTableV1::new(table)?;
+            .ok_or("missing fixture FCR1")?;
+        let (changed_source, changed_table, mut registration) =
+            fault.changed_records(table, source, registration)?;
         if matches!(
             fault,
             BindingFault::TableAdmission
