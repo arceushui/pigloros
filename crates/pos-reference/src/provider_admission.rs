@@ -121,15 +121,20 @@ impl ProviderImageSnapshot {
         &self.launch
     }
 
-    /// Recheck the same retained image/executable and CMS at fresh host time.
+    /// Recheck the same retained image/executable, the built-in release key in
+    /// the current `keyring` listing and CMS at fresh host time.
     ///
     /// This does not reopen paths or assert that the snapshot's authorities are
     /// still current. Provider control-state fencing remains mandatory.
     ///
     /// # Errors
-    /// Rejects changed image inputs or a proof no longer valid at host time.
-    pub fn recheck_held_image(&self) -> Result<VerifiedSandboxImageProof, SelectorBoundaryError> {
-        check_image(&self.admitted, &self.request, SystemTime::now).map(|(_, proof)| proof)
+    /// Rejects changed image inputs, a release key not held exactly once in the
+    /// built-in keyring, or a proof no longer valid at host time.
+    pub fn recheck_held_image(
+        &self,
+        keyring: &BuiltinKeyringListing,
+    ) -> Result<VerifiedSandboxImageProof, SelectorBoundaryError> {
+        check_image(&self.admitted, &self.request, keyring, SystemTime::now).map(|(_, proof)| proof)
     }
 }
 
@@ -316,7 +321,7 @@ mod tests {
             snapshot.launch_policy().policy_digest,
             request.authority.lps1_digest
         );
-        let (_, proof) = check_image(&snapshot.admitted, &request, fixture_time)?;
+        let (_, proof) = check_image(&snapshot.admitted, &request, &keyring()?, fixture_time)?;
         assert_eq!(snapshot.proof(), &proof);
         Ok(())
     }
@@ -502,7 +507,7 @@ mod tests {
             artifact.file().read_exact_at(&mut byte, 0)?;
             byte[0] ^= 1;
             artifact.file().write_all_at(&byte, 0)?;
-            assert!(snapshot.recheck_held_image().is_err());
+            assert!(snapshot.recheck_held_image(&keyring()?).is_err());
         }
         Ok(())
     }

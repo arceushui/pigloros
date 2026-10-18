@@ -3340,7 +3340,7 @@ mod tests {
                 image.launch_policy().policy_digest,
                 image.request().authority.lps1_digest
             );
-            image.recheck_held_image()?;
+            image.recheck_held_image(&keyring)?;
             let mut input_frames = Vec::new();
             stream.read_to_end(&mut input_frames)?;
             if input_frames.is_empty() {
