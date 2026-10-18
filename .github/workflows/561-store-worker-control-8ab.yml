@@ -1,0 +1,264 @@
+# Diagnostic only: retain full owning-package tests and every native failure.
+# This does not replace any required PR gate or publish a trusted baseline.
+name: 561-store-worker-control-8ab
+
+on:
+  push:
+    branches: [redmine/561-store-worker-control-8ab]
+
+permissions:
+  contents: read
+
+env:
+  RUSTUP_TOOLCHAIN: nightly-2026-07-01
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+  CARGO_BUILD_JOBS: "1"
+  CARGO_TERM_COLOR: never
+
+jobs:
+  store-control:
+    name: same-source two-one-one-two worker control
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        timeout-minutes: 2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        timeout-minutes: 2
+        with:
+          python-version: 3.12.11
+      - name: Validate the actual diagnostic workflow before native setup
+        timeout-minutes: 2
+        env:
+          EXPECTED_WORKFLOW: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_WORKFLOW"
+          python3 -m pip install --require-hashes --only-binary=:all: \
+            --requirement requirements-pinned-dependencies.txt
+          python3 -B scripts/check-pinned-yaml-references.py
+          python3 -B scripts/test_ci_workflow_policy.py
+          python3 -B scripts/test_mutation_workflow_policy.py
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        timeout-minutes: 2
+        with:
+          ref: 8ab59e731480135968502da8bb50cca52b9c626c
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        timeout-minutes: 5
+        with:
+          toolchain: ${{ env.RUSTUP_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        timeout-minutes: 2
+        with:
+          shared-key: mutation
+          save-if: false
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
+        timeout-minutes: 3
+        with:
+          tool: cargo-mutants@27.1.0
+      - name: Record frozen source and native environment
+        timeout-minutes: 1
+        env:
+          PROBE_WORKFLOW_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 8ab59e731480135968502da8bb50cca52b9c626c
+          test "$(git rev-parse 'HEAD^{tree}')" = a0834c523a463ae29c4ad8b9d9a5e84261ec5ddc
+          test -z "$(git status --porcelain --untracked-files=no)"
+          mkdir "${RUNNER_TEMP}/561-store-worker-control-8ab"
+          {
+            printf 'workflow=%s\n' "$PROBE_WORKFLOW_SHA"
+            git rev-parse HEAD 'HEAD^{tree}'
+            sha256sum Cargo.lock crates/pos-store/src/fork_replay.rs \
+              crates/pos-store/src/memory/tests/classifier_binding.rs \
+              crates/pos-store/tests/fork_replay_lineage_public/refusals.rs
+            rustc -Vv
+            cargo --version
+            cargo mutants --version
+            uname -a
+            nproc
+            free -m
+            df -h .
+            printf 'image=%s version=%s\n' "${ImageOS:-unknown}" "${ImageVersion:-unknown}"
+          } > "${RUNNER_TEMP}/561-store-worker-control-8ab/environment.txt"
+      - name: Measure complete Store tests and two current timeout mutants with fixed limits
+        timeout-minutes: 32
+        env:
+          # Cache setup exports 0; bind 1 at the actual native consumers.
+          CARGO_INCREMENTAL: "1"
+        run: |
+          set -euo pipefail
+          test -x /usr/bin/time
+          python3 -B - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import shutil
+          import subprocess
+          import sys
+          import time
+
+          source = "8ab59e731480135968502da8bb50cca52b9c626c"
+          artifact = Path(os.environ["RUNNER_TEMP"]) / "561-store-worker-control-8ab"
+          expected = [
+              "crates/pos-store/src/fork_replay.rs:899:9: replace <impl Drop for ReplayEventStagingV1>::drop with ()",
+              "crates/pos-store/src/fork_replay.rs:920:29: replace > with >= in complete_event_range",
+          ]
+          assert len(expected) == len(set(expected)) == 2
+          report = {"source": source, "tree": "a0834c523a463ae29c4ad8b9d9a5e84261ec5ddc",
+                    "failed_required_run": 39124625639, "expected_mutants": expected, "phases": []}
+
+          def save():
+              (artifact / "phases.json").write_text(json.dumps(report, sort_keys=True, indent=2))
+
+          def run(name, command, seconds, build_jobs):
+              environment = dict(os.environ)
+              environment["CARGO_BUILD_JOBS"] = str(build_jobs)
+              assert environment["CARGO_INCREMENTAL"] == "1"
+              timed = ["timeout", "--kill-after=5s", f"{seconds}s", "/usr/bin/time", "-v", *command]
+              phase = {"name": name, "command": timed, "compiler_jobs": build_jobs,
+                       "start_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+              report["phases"].append(phase)
+              save()
+              print("CONTROL_PHASE_BEGIN", name, flush=True)
+              started = time.monotonic()
+              with (artifact / f"{name}.log").open("wb") as log:
+                  status = subprocess.run(
+                      timed, env=environment, stdout=log, stderr=subprocess.STDOUT, check=False,
+                  ).returncode
+              phase.update(exit_code=status, seconds=time.monotonic() - started,
+                           end_utc=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+              save()
+              print("CONTROL_PHASE_END", name, status, phase["seconds"], flush=True)
+              return phase
+
+          def require_success(phase):
+              if phase["exit_code"] != 0:
+                  sys.exit(phase["exit_code"] if phase["exit_code"] > 0 else 1)
+
+          def identity(mutant):
+              return json.dumps({k: v for k, v in mutant.items() if k != "diff"},
+                                sort_keys=True, separators=(",", ":"))
+
+          base = ["cargo", "test", "--package=pos-store@0.1.0", "--all-features", "--locked"]
+          harness = ["-Zunstable-options", "--fail-fast", "--include-ignored", "--test-threads=4", "--report-time"]
+          require_success(run("build", [*base, "--no-run"], 600, 3))
+          require_success(run("baseline", [*base, "--", *harness], 120, 1))
+          subprocess.run(["bash", "scripts/assert-no-ignored-in-test-summary.sh",
+                          str(artifact / "baseline.log")], check=True)
+          summaries = [
+              re.fullmatch(
+                  r"test result: ok\. (\d+) passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in [0-9.]+s",
+                  row,
+              )
+              for row in (artifact / "baseline.log").read_text().splitlines()
+              if row.startswith("test result:")
+          ]
+          assert len(summaries) == 59 and all(summaries)
+          assert sum(int(summary[1]) for summary in summaries) == 2188
+          report.update(baseline_roots=59, baseline_passed=2188)
+          save()
+
+          special = set(r"\.^$|?*+()[]{}")
+          pattern = "^(?:" + "|".join(
+              "".join("\\" + c if c in special else c for c in name) for name in expected
+          ) + ")$"
+          # v27.1 may collect unrelated struct-field mutants without --re;
+          # restrict discovery to both owner files, then require exact equality.
+          mutants = ["cargo", "mutants", "--package=pos-store", "--all-features",
+                     "--file", "crates/pos-store/src/fork_replay.rs",
+                     "--file", "crates/pos-store/src/memory.rs", "--re", pattern]
+          with (artifact / "selected.json").open("wb") as output, (artifact / "selection.log").open("wb") as errors:
+              subprocess.run(
+                  ["timeout", "--kill-after=5s", "60s", *mutants, "--list", "--json"],
+                  stdout=output, stderr=errors, check=True,
+              )
+          selected = json.loads((artifact / "selected.json").read_text())
+          assert len(selected) == len({m["name"] for m in selected}) == 2
+          assert {m["name"] for m in selected} == set(expected)
+          selected_ids = {identity(m) for m in selected}
+          assert len(selected_ids) == 2
+
+          failures = []
+          for name, workers in [("two-a", 2), ("one-a", 1), ("one-b", 1), ("two-b", 2)]:
+              phase = run(name, [*mutants, "--no-shuffle", "--baseline", "skip", "--jobs", str(workers),
+                                 "--timeout", "120", "--build-timeout", "600", "--cap-lints", "true",
+                                 "--cargo-arg=--locked", "--", "--", *harness], 1020, 1)
+              destination = artifact / name
+              destination.mkdir()
+              # Preserve every phase outside the source tree before the next
+              # worker copies it. No earlier report is rotated away or hidden.
+              shutil.move("mutants.out", destination / "mutants.out")
+              result_dir = destination / "mutants.out"
+              actual = json.loads((result_dir / "mutants.json").read_text())
+              outcomes = json.loads((result_dir / "outcomes.json").read_text())
+              assert outcomes["cargo_mutants_version"] == "27.1.0"
+              assert len(actual) == len(outcomes["outcomes"]) == outcomes["total_mutants"] == 2
+              assert {identity(m) for m in actual} == selected_ids
+              completed = [o["scenario"]["Mutant"] for o in outcomes["outcomes"]]
+              assert len({identity(m) for m in completed}) == 2
+              assert {identity(m) for m in completed} == selected_ids
+              assert all(outcomes[k] == 0 for k in ("unviable", "success"))
+              assert outcomes["caught"] + outcomes["missed"] + outcomes["timeout"] == 2
+              for outcome in outcomes["outcomes"]:
+                  phases = outcome["phase_results"]
+                  assert len(phases) == 2
+                  assert (phases[0]["phase"], phases[0]["process_status"]) == ("Build", "Success")
+                  assert phases[1]["phase"] == "Test"
+                  if outcome["summary"] == "CaughtMutant":
+                      assert phases[1]["process_status"] == {"Failure": 101}
+                      log = (result_dir / outcome["log_path"]).read_text()
+                      rows = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", log).splitlines()
+                      assert any(re.fullmatch(r"test .+ \.\.\. FAILED(?: <[0-9]+\.[0-9]+s>)?", row) for row in rows)
+                  elif outcome["summary"] == "MissedMutant":
+                      assert phases[1]["process_status"] == "Success"
+                      log = (result_dir / outcome["log_path"]).read_text()
+                      rows = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", log).splitlines()
+                      full_summaries = [
+                          re.fullmatch(
+                              r"test result: ok\. (\d+) passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in [0-9.]+s",
+                              row,
+                          )
+                          for row in rows if row.startswith("test result:")
+                      ]
+                      assert len(full_summaries) == 59 and all(full_summaries)
+                      assert sum(int(summary[1]) for summary in full_summaries) == 2188
+                  else:
+                      assert outcome["summary"] == "Timeout" and phases[1]["process_status"] == "Timeout"
+              caught = sum(o["summary"] == "CaughtMutant" for o in outcomes["outcomes"])
+              timed_out = sum(o["summary"] == "Timeout" for o in outcomes["outcomes"])
+              assert (caught, timed_out) == (outcomes["caught"], outcomes["timeout"])
+              missed = sum(o["summary"] == "MissedMutant" for o in outcomes["outcomes"])
+              assert missed == outcomes["missed"]
+              if timed_out or missed:
+                  assert phase["exit_code"] in (2, 3)
+              else:
+                  assert phase["exit_code"] == 0
+              phase.update(workers=workers, caught=outcomes["caught"], missed=missed, timeout=outcomes["timeout"])
+              save()
+              if phase["exit_code"] != 0:
+                  failures.append({"name": name, "exit_code": phase["exit_code"]})
+              subprocess.run(["git", "diff", "--exit-code", "HEAD"], check=True)
+
+          # Collect the comparison after an expected reproduction, but never
+          # turn a native timeout into a successful workflow conclusion.
+          report.update(experiment_complete=True, native_failures=failures,
+                        overall_exit_code=(3 if any(p.get("timeout", 0) for p in report["phases"])
+                                           else 2 if any(p.get("missed", 0) for p in report["phases"]) else 0))
+          save()
+          print(json.dumps(report, sort_keys=True), flush=True)
+          sys.exit(report["overall_exit_code"])
+          PY
+      - name: Preserve every control result including failures
+        if: ${{ always() }}
+        timeout-minutes: 2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: untrusted-561-store-worker-control-8ab-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/561-store-worker-control-8ab/
+          if-no-files-found: error
+          retention-days: 14
