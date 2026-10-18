@@ -32,6 +32,7 @@ const ROOT_OFFSET: u64 = 1_048_576;
 const ROOT_SIZE: u64 = 8_388_608;
 
 /// One `sendmsg` from the fake mountfsd, with fresh root fixture descriptors.
+#[derive(Default)]
 struct Chunk {
     bytes: Vec<u8>,
     descriptors: usize,
@@ -106,7 +107,7 @@ fn single(bytes: Vec<u8>, descriptors: usize) -> Vec<Chunk> {
     vec![Chunk {
         bytes,
         descriptors,
-        extra: Vec::new(),
+        ..Chunk::default()
     }]
 }
 
@@ -392,12 +393,12 @@ async fn every_descriptor_vector_other_than_one_root_mount_is_rejected() -> Test
         Chunk {
             bytes: reply[..16].to_vec(),
             descriptors: 1,
-            extra: Vec::new(),
+            ..Chunk::default()
         },
         Chunk {
             bytes: reply[16..].to_vec(),
             descriptors: 1,
-            extra: Vec::new(),
+            ..Chunk::default()
         },
     ];
     assert_eq!(
@@ -414,12 +415,12 @@ async fn one_descriptor_in_a_later_read_is_still_the_one_vector() -> TestResult 
         Chunk {
             bytes: reply[..16].to_vec(),
             descriptors: 0,
-            extra: Vec::new(),
+            ..Chunk::default()
         },
         Chunk {
             bytes: reply[16..].to_vec(),
             descriptors: 1,
-            extra: Vec::new(),
+            ..Chunk::default()
         },
     ];
     assert!(transact(later).await?.outcome.is_ok());
