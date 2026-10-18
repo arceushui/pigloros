@@ -16,7 +16,7 @@ struct DdiVector {
 }
 
 macro_rules! ddi_vector {
-    ($architecture:literal, $signature_type:expr) => {
+    ($architecture:literal, $signature_type:expr_2021) => {
         DdiVector {
             architecture: $architecture,
             signature_type: $signature_type,
