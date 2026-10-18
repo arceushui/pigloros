@@ -1,9 +1,10 @@
-//! Provider startup check of the kernel's built-in trusted keyring.
+//! Per-admission check of the kernel's built-in trusted keyring.
 //!
 //! The release certificate that signs SIM1 root hashes is compiled into the
-//! appliance kernel's `.builtin_trusted_keys`. Before admission the provider
-//! requires that keyring to hold exactly one key with each TRS1 certificate's
-//! kernel key description, and that key must be asymmetric.
+//! appliance kernel's `.builtin_trusted_keys`. At every provider admission
+//! the keyring must hold exactly one key with the kernel key description of
+//! the TRS1 certificate that matched the image's SIM1, and that key must be
+//! asymmetric.
 //!
 //! A listing is one `(serial, type, description)` member per key serial that
 //! `KEYCTL_READ` returns for the keyring, with type and description from
@@ -11,7 +12,7 @@
 //! supply a listing that admission trusts; this module checks it and has no
 //! kernel bypass of its own.
 
-use super::SandboxTrustSnapshot;
+use super::AdmittedSandboxImage;
 
 const ASYMMETRIC_KEY_TYPE: &str = "asymmetric";
 
@@ -22,14 +23,14 @@ pub enum BuiltinKeyringError {
     /// description.
     #[error("malformed built-in keyring member")]
     Malformed,
-    /// No member carries a TRS1 certificate's key description.
-    #[error("built-in keyring lacks a TRS1 release key")]
+    /// No member carries the image's release key description.
+    #[error("built-in keyring lacks the image release key")]
     Missing,
-    /// The only member carrying a TRS1 key description is not asymmetric.
+    /// The only member carrying the description is not asymmetric.
     #[error("built-in keyring release key has the wrong key type")]
     WrongType,
-    /// More than one member carries the same TRS1 key description.
-    #[error("built-in keyring holds a TRS1 release key more than once")]
+    /// More than one member carries the description.
+    #[error("built-in keyring holds the image release key more than once")]
     Duplicate,
 }
 
@@ -90,40 +91,22 @@ impl BuiltinKeyringListing {
             (Some(_), None) => Ok(()),
         }
     }
-}
 
-/// TRS1 release keys proven present exactly once in the built-in keyring.
-///
-/// Only [`verify_builtin_release_keys`] constructs this value, and it binds the
-/// exact TRS1 snapshot it checked. Provider admission requires it.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BuiltinReleaseKeys {
-    trust_digest: [u8; 32],
-}
-
-impl BuiltinReleaseKeys {
-    /// Whether this check covered exactly this authenticated TRS1 snapshot.
-    #[must_use]
-    pub fn covers(&self, trust: &SandboxTrustSnapshot) -> bool {
-        self.trust_digest == trust.snapshot_digest()
+    /// Require this admitted image's release key in the built-in keyring.
+    ///
+    /// Admission already matched the image's SIM1 signer fingerprint, epoch
+    /// and kernel key description to one authenticated TRS1 certificate.
+    /// Exactly one keyring member, of any type, must carry that description,
+    /// and it must be asymmetric. Other TRS1 certificates are not consulted.
+    ///
+    /// # Errors
+    /// Returns [`BuiltinKeyringError::Missing`],
+    /// [`BuiltinKeyringError::WrongType`] or
+    /// [`BuiltinKeyringError::Duplicate`] when that is not the case.
+    pub fn verify_release_key(
+        &self,
+        image: &AdmittedSandboxImage,
+    ) -> Result<(), BuiltinKeyringError> {
+        self.release_key(&image.manifest().kernel_key_description)
     }
-}
-
-/// Require exactly one asymmetric built-in key for every TRS1 certificate.
-///
-/// # Errors
-/// Returns [`BuiltinKeyringError::Missing`], [`BuiltinKeyringError::WrongType`]
-/// or [`BuiltinKeyringError::Duplicate`] for the first TRS1 certificate whose
-/// key description is not held by exactly one asymmetric key.
-pub fn verify_builtin_release_keys(
-    trust: &SandboxTrustSnapshot,
-    listing: &BuiltinKeyringListing,
-) -> Result<BuiltinReleaseKeys, BuiltinKeyringError> {
-    trust
-        .certificates()
-        .iter()
-        .try_for_each(|certificate| listing.release_key(&certificate.key_description))
-        .map(|()| BuiltinReleaseKeys {
-            trust_digest: trust.snapshot_digest(),
-        })
 }

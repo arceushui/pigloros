@@ -1100,33 +1100,6 @@ pub mod tests {
         "PiglorOS SIM1 interoperability fixture: beb62aa1770ab755e4fe5d9ed9477912a7958633";
     pub(crate) const IMAGE_VERITY_SALT: [u8; 32] = [23; 32];
 
-    /// A root-authenticated TRS1 that differs from the installed one only in
-    /// its built-in release key description.
-    pub(crate) fn foreign_trust(
-    ) -> TestResult<crate::sandbox_provider_protocol::SandboxTrustSnapshot> {
-        let authority = provider_authority();
-        let mut trust = crate::evaluator_protocol::decode_canonical(&provider_trust(&authority)?)?;
-        let Value::Array(wrapper) = &mut trust else {
-            return Err("TRS1 is not an array".into());
-        };
-        let Value::Array(unsigned) = &mut wrapper[0] else {
-            return Err("TRS1-U is not an array".into());
-        };
-        unsigned[4] = Value::Array(vec![Value::Array(vec![
-            digest(Sha256::digest(IMAGE_CERTIFICATE).into()),
-            Value::Text("PiglorOS other release: 00".to_owned()),
-            integer(2),
-        ])]);
-        let encoded = sign_record("TRS1", wrapper[0].clone(), &authority.root)?;
-        Ok(
-            crate::sandbox_provider_protocol::SandboxTrustSnapshot::authenticate(
-                &encoded,
-                "root",
-                &authority.root.verifying_key(),
-            )?,
-        )
-    }
-
     fn provider_trust(authority: &ProviderAuthority) -> TestResult<Vec<u8>> {
         let keys = ordered(vec![
             trust_key("policy", 1, &authority.policy),

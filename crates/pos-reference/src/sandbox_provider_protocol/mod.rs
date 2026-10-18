@@ -82,9 +82,7 @@ pub use authority::{
     ProviderCapability, SandboxArchitecture, SandboxExecutionMode, SandboxLimit,
     SandboxProviderManifest, SandboxSyscallSet, SignedImageManifest,
 };
-pub use builtin_keyring::{
-    verify_builtin_release_keys, BuiltinKeyringError, BuiltinKeyringListing, BuiltinReleaseKeys,
-};
+pub use builtin_keyring::{BuiltinKeyringError, BuiltinKeyringListing};
 pub use execution::{
     AdmissionAuthority, AdmissionGrant, ExecuteAuthority, NetworkExchangePlan, PayloadDescriptor,
     PayloadDirection, PayloadStreamValidator, ReceiptAuthority, SandboxExecuteRequest,
