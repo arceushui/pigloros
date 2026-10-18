@@ -44,7 +44,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         timeout-minutes: 2
         with:
-          ref: 6c91d621b197168c70bf306260f51bd14b73651f
+          ref: 3c62c1df8e986df1e635ae48ba760434eb24f320
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         timeout-minutes: 5
@@ -65,8 +65,8 @@ jobs:
           PROBE_WORKFLOW_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = 6c91d621b197168c70bf306260f51bd14b73651f
-          test "$(git rev-parse 'HEAD^{tree}')" = caa5b06d3cde50c029225f01d7c737b4fb279775
+          test "$(git rev-parse HEAD)" = 3c62c1df8e986df1e635ae48ba760434eb24f320
+          test "$(git rev-parse 'HEAD^{tree}')" = ce593759eccb467ae5c88fa2843a64689a89972f
           test -z "$(git status --porcelain --untracked-files=no)"
           mkdir "${RUNNER_TEMP}/561-store-worker-control"
           {
@@ -100,7 +100,7 @@ jobs:
           import sys
           import time
 
-          source = "6c91d621b197168c70bf306260f51bd14b73651f"
+          source = "3c62c1df8e986df1e635ae48ba760434eb24f320"
           artifact = Path(os.environ["RUNNER_TEMP"]) / "561-store-worker-control"
           expected = [
               "crates/pos-store/src/fork_replay.rs:154:9: replace NativeReadContextV1<'budget, 'clock>::row_available -> Result<(), crate::ForkManifestPublicationErrorV1> with Ok(())",
@@ -156,8 +156,8 @@ jobs:
               if row.startswith("test result:")
           ]
           assert len(summaries) == 55 and all(summaries)
-          assert sum(int(summary[1]) for summary in summaries) == 2087
-          report.update(baseline_roots=55, baseline_passed=2087)
+          assert sum(int(summary[1]) for summary in summaries) == 2090
+          report.update(baseline_roots=55, baseline_passed=2090)
           save()
 
           special = set(r"\.^$|?*+()[]{}")
