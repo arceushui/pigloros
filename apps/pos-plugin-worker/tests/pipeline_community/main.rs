@@ -1,12 +1,17 @@
-//! Cross-path community Plugin-host conformance, profile `PCH1` version 1 (#489, #631).
+//! Cross-path community Plugin-host conformance, profile `PCH1` versions 1 (#489, #631) and 2
+//! (#665).
 //!
 //! The immutable manifest under `fixtures/conformance/pipeline/community/v1` names every case
 //! that proves ADR-021 decision 7 across the two accepted isolation classes: an
 //! operator-trusted native Driver and a governed community Driver that runs a real Component in
-//! the real `pos-plugin-worker`. The cases run here because only this package's tests can launch
-//! the worker binary. Every case runs and records its captures on both stores of the community
-//! pass world, `MemoryStore` and in-memory `SQLite` (#638); the trust registry stays on
-//! `MemoryStore`.
+//! the real `pos-plugin-worker`. Version 2 (`community/v2`) holds every version 1 case
+//! unchanged plus the ADR-119 declaration and reserved-type cases (ADR-119 section 6 cases 4, 5
+//! and the declaration part of 14, #665) and the composition boundary transaction on the real
+//! worker (cases 1, 2, 3 and 13, #667). Both version directories run. The cases run here because
+//! only this package's tests can launch the worker binary. Every case runs and records its
+//! captures on both stores of the community pass world, `MemoryStore` and in-memory `SQLite`
+//! (#638); the trust registry stays on `MemoryStore`. The ADR-119 declaration cases open a
+//! file-backed `SQLite` store, because the composition fallback registry requires WAL.
 //!
 //! The runner reuses the fail-closed harness of the first-party profile `PPC1`
 //! (`apps/piglor-gateway/tests/pipeline_conformance/harness.rs`) unchanged: an unknown magic,
@@ -16,10 +21,12 @@
 //! version are checked here first, then the harness parses the document under its own rules.
 #![cfg(target_os = "linux")]
 
+pub mod activation;
 pub mod authority;
 pub mod budget;
 pub mod fail_closed;
 pub mod failure;
+pub mod fallback;
 pub mod first_party;
 #[path = "../../../piglor-gateway/tests/pipeline_conformance/harness.rs"]
 pub mod harness;
@@ -40,13 +47,20 @@ type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 /// Magic of a community Plugin-host conformance profile manifest.
 const COMMUNITY_MAGIC: &str = "PCH1";
-/// The only supported community profile manifest version.
+/// The version 1 community profile manifest version.
 const COMMUNITY_VERSION: u64 = 1;
+/// The version 2 community profile manifest version (ADR-119, #665).
+const COMMUNITY_VERSION_2: u64 = 2;
 
-/// The immutable profile manifest and its pinned SHA-256.
+/// The immutable version 1 profile manifest and its pinned SHA-256.
 const MANIFEST: &[u8] =
     include_bytes!("../../../../fixtures/conformance/pipeline/community/v1/manifest.json");
 const MANIFEST_SHA256: &str = "b907f1b9134d141697095581a50f7be3d0cc1ddb0782adc7dd3f492aa6c6f2a1";
+
+/// The immutable version 2 profile manifest and its pinned SHA-256.
+const MANIFEST_V2: &[u8] =
+    include_bytes!("../../../../fixtures/conformance/pipeline/community/v2/manifest.json");
+const MANIFEST_V2_SHA256: &str = "728e4cca3fa909bdd0f8472e218a8ff1bf2ee966059dd0bc38e58928737f61c8";
 
 /// Every runner of profile version 1, by case identifier.
 const RUNNERS: [(&str, Runner); 15] = [
@@ -67,19 +81,48 @@ const RUNNERS: [(&str, Runner); 15] = [
     ("PCF-CPH-015", budget::other_limits_parity),
 ];
 
-/// Parse a `PCH1` manifest under the harness rules of `PPC1`.
+/// Every runner of profile version 2, by case identifier: the version 1 runners, in order,
+/// then the ADR-119 cases.
+const RUNNERS_V2: [(&str, Runner); 19] = [
+    ("PCF-CPH-001", parity::single_pass_parity),
+    ("PCF-CPH-002", parity::mixed_registry_order),
+    ("PCF-CPH-003", authority::foreign_proposal_parity),
+    ("PCF-CPH-004", authority::single_lineage_owner),
+    ("PCF-CPH-005", failure::failure_containment),
+    ("PCF-CPH-006", failure::no_fallback_or_retry),
+    ("PCF-CPH-007", fail_closed::missing_implementation),
+    ("PCF-CPH-008", fail_closed::unavailable_implementation),
+    ("PCF-CPH-009", fail_closed::invalid_implementation),
+    ("PCF-CPH-010", budget::over_budget_parity),
+    ("PCF-CPH-011", replay::replay_parity),
+    ("PCF-CPH-012", replay::lost_acknowledgement_recovery),
+    ("PCF-CPH-013", authority::reserved_proposal_parity),
+    ("PCF-CPH-014", fail_closed::invalid_output_and_releases),
+    ("PCF-CPH-015", budget::other_limits_parity),
+    ("PCF-CPH-016", fallback::declaration_refusals),
+    ("PCF-CPH-017", fallback::reserved_fallback_types),
+    ("PCF-CPH-018", fallback::withdrawal_and_rebase),
+    ("PCF-CPH-019", activation::boundary_activation),
+];
+
+/// Parse a `PCH1` version 1 manifest under the harness rules of `PPC1`.
+fn load_community_manifest(bytes: &[u8]) -> Result<Manifest, ConformanceError> {
+    load_community_version(bytes, COMMUNITY_VERSION)
+}
+
+/// Parse a `PCH1` manifest of `version` under the harness rules of `PPC1`.
 ///
 /// The harness pins its own magic, so the community magic and version are checked first with the
 /// harness's `require_version`, and the document is then handed to `load_manifest` under the
 /// magic and version its rule set expects. Every other rule is the harness's own.
-fn load_community_manifest(bytes: &[u8]) -> Result<Manifest, ConformanceError> {
+fn load_community_version(bytes: &[u8], version: u64) -> Result<Manifest, ConformanceError> {
     let invalid = ConformanceError::InvalidManifest;
     let parsed = serde_json::from_slice::<Value>(bytes);
     let mut root = parsed.map_err(|error| invalid(format!("not JSON: {error}")))?;
     let object = root
         .as_object_mut()
         .ok_or_else(|| invalid("the manifest is not an object".to_owned()))?;
-    require_version(object, COMMUNITY_MAGIC, COMMUNITY_VERSION)?;
+    require_version(object, COMMUNITY_MAGIC, version)?;
     object.insert("magic".to_owned(), Value::from(PROFILE_MAGIC));
     object.insert("version".to_owned(), Value::from(PROFILE_VERSION));
     let shared = serde_json::to_vec(&root).map_err(|error| invalid(error.to_string()))?;
@@ -262,6 +305,84 @@ fn pch1_the_v1_directory_holds_exactly_the_pinned_files() -> TestResult {
     }
     files.sort();
     let pinned = ("manifest.json".to_owned(), MANIFEST_SHA256.to_owned());
+    assert_eq!(files, vec![pinned]);
+    Ok(())
+}
+
+// ── Profile version 2 (ADR-119, #665) ───────────────────────────────────────
+
+/// Every mandatory case of `PCH1` version 2 passes on the real worker: the version 1 cases
+/// unchanged and the ADR-119 declaration and reserved-type cases.
+#[test]
+fn pch1_v2_every_mandatory_case_passes_on_the_real_worker() {
+    verify_pinned(MANIFEST_V2, MANIFEST_V2_SHA256).test_ok();
+    let manifest = load_community_version(MANIFEST_V2, COMMUNITY_VERSION_2).test_ok();
+    let report = run_suite(&manifest, &RUNNERS_V2);
+
+    assert!(report.failures.is_empty(), "{:#?}", report.failures);
+    assert!(report.skipped_optional.is_empty());
+    assert!(report.not_applicable.is_empty());
+    assert_eq!(manifest.suite, "pigloros.pipeline-community-host");
+    assert_eq!(report.passed.len(), RUNNERS_V2.len());
+    assert_eq!(manifest.cases.len(), RUNNERS_V2.len());
+    assert!(manifest.cases.iter().all(mandatory_on_both_stores));
+    assert!(manifest.exclusions.is_empty());
+}
+
+/// The case identifiers of `runners`, in order.
+fn runner_ids(runners: &[(&str, Runner)]) -> Vec<String> {
+    runners.iter().map(|(id, _)| (*id).to_owned()).collect()
+}
+
+/// Version 2 holds every version 1 case unchanged, in order, before its own cases, and its
+/// runner table extends the version 1 table.
+#[test]
+fn pch1_v2_holds_every_v1_case_unchanged() {
+    let v1 = load_community_manifest(MANIFEST).test_ok();
+    let v2 = load_community_version(MANIFEST_V2, COMMUNITY_VERSION_2).test_ok();
+    assert_eq!(v2.cases[..v1.cases.len()], v1.cases[..]);
+    let (v1_ids, v2_ids) = (runner_ids(&RUNNERS), runner_ids(&RUNNERS_V2));
+    assert_eq!(v2_ids[..v1_ids.len()], v1_ids[..]);
+    let cases: Vec<String> = v2.cases.iter().map(|case| case.id.clone()).collect();
+    assert_eq!(cases, v2_ids);
+}
+
+/// Each loader accepts only its own version, and an unknown version fails closed.
+#[test]
+fn pch1_each_version_loads_only_its_own_manifest() {
+    assert_eq!(
+        load_community_version(MANIFEST, COMMUNITY_VERSION_2),
+        unsupported("PCH1/1")
+    );
+    assert_eq!(load_community_manifest(MANIFEST_V2), unsupported("PCH1/2"));
+    let mut root = document(&[]);
+    root["version"] = json!(3);
+    let bytes = serde_json::to_vec(&root).test_ok();
+    let three = load_community_version(&bytes, COMMUNITY_VERSION_2);
+    assert_eq!(three, unsupported("PCH1/3"));
+    let mut changed = MANIFEST_V2.to_vec();
+    changed.push(b' ');
+    assert!(matches!(
+        verify_pinned(&changed, MANIFEST_V2_SHA256),
+        Err(ConformanceError::DigestMismatch { .. })
+    ));
+}
+
+/// The version 2 directory holds exactly the pinned manifest.
+#[test]
+fn pch1_the_v2_directory_holds_exactly_the_pinned_files() -> TestResult {
+    let directory = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../fixtures/conformance/pipeline/community/v2"
+    );
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(directory)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        files.push((name, harness::sha256_hex(&std::fs::read(entry.path())?)));
+    }
+    files.sort();
+    let pinned = ("manifest.json".to_owned(), MANIFEST_V2_SHA256.to_owned());
     assert_eq!(files, vec![pinned]);
     Ok(())
 }

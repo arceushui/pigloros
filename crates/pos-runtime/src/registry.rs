@@ -71,6 +71,11 @@ mod factual_dependencies;
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod factual_dependencies_tests;
+mod fallback_facts;
+mod fallback_swap;
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod fallback_swap_tests;
 mod human_admission;
 mod local_seal;
 mod manifest_roster;
@@ -82,6 +87,7 @@ mod pass_state;
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod pass_state_tests;
+mod prepared;
 mod profile_composition;
 mod scheduled_admission;
 mod staged_catalogue;
@@ -100,10 +106,12 @@ pub use catalogue::{
     HostCatalogueEntryV1, InstalledPluginFactoryV1, InstalledPluginProductV1, NoActionApproverV1,
     EMPTY_CONFIGURATION_DETAILS_V1,
 };
+pub use fallback_swap::FallbackSwapRefusalV1;
 pub use human_admission::{
     HumanActionAdmissionErrorV1, HumanActionAdmissionV1, HumanActionReceiptV1,
 };
 pub use manifest_roster::ManifestRosterBuildErrorV1;
+pub use prepared::PreparedRegistrationV1;
 pub use profile_composition::{ScheduledDriverBindingV1, ScheduledProfileErrorV1};
 pub use scheduled_admission::ScheduledPassAdmissionV1;
 #[cfg(any(test, feature = "test-support"))]
@@ -224,6 +232,55 @@ fn driver_visible_event(event: &Event) -> bool {
     !pos_core::is_consent_event_type(&event.event_type)
         && !pos_core::is_geographic_event_type(&event.event_type)
         && event.event_type.as_str() != pos_core::HOST_CONSENT_CLOSED_EVENT_TYPE
+}
+
+/// The Driver-visible Events of a validated prefix, and its restored head.
+fn visible_and_head(events: &[Event]) -> (Vec<Event>, Seq) {
+    let visible = events
+        .iter()
+        .filter(|event| driver_visible_event(event))
+        .cloned()
+        .collect();
+    let restored_head = events.last().map_or(Seq::ZERO, |event| event.seq);
+    (visible, restored_head)
+}
+
+/// Stage one Driver's restore, aborting the stage when the Driver refuses it.
+fn stage_driver_restore(
+    driver: &mut dyn Driver,
+    timeline_segments: &[TimelineHistorySegment],
+    visible_events: &[Event],
+) -> Result<(), RuntimeError> {
+    let evidence =
+        DriverRecoveryEvidence::from_events(timeline_segments, visible_events, |header| {
+            driver.needs_recovery_payload(header)
+        });
+    driver
+        .stage_restore_from_history(&evidence)
+        .inspect_err(|_| driver.abort_restore_from_history())
+}
+
+/// Commit one Driver's staged restore; a panic poisons the registry.
+fn commit_driver_restore(
+    driver: &mut dyn Driver,
+    poisoned: &mut Option<String>,
+) -> Result<(), RuntimeError> {
+    let name = driver.name().to_owned();
+    let committed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        driver.commit_restore_from_history();
+    }));
+    committed.map_err(|_| {
+        *poisoned = Some(name.clone());
+        RuntimeError::DriverRestorePanicked { name }
+    })
+}
+
+/// Reset a restored entry's pass state to the restored head.
+fn reset_restored_entry(entry: &mut PluginEntry, restored_head: Seq, history: HistoryInputV1) {
+    entry.event_cursor = restored_head;
+    entry.pass_state.carried.clear();
+    entry.pass_state.history = history;
+    entry.chain = StepChainV1::Lookup;
 }
 
 /// Whether this pass's consent shows a subscribed committed Event.
@@ -1048,13 +1105,68 @@ fn host_owned_draft_error(draft: &EventDraft) -> Option<RuntimeError> {
         Some(RuntimeError::GeographicDraft {
             event_type: owned(),
         })
-    } else if kind == crate::community_plugin_host::PLUGIN_RELEASE_ACTIVATED_EVENT_TYPE_V1 {
+    } else if is_reserved_host_draft_type(kind) {
         Some(RuntimeError::ReservedHostDraft {
             event_type: owned(),
         })
     } else {
         None
     }
+}
+
+/// The host-owned Event types of ADR-119 (section 4.7): no Plugin may draft
+/// or own them.
+const COMPOSITION_FALLBACK_EVENT_TYPES_V1: [&str; 2] = [
+    pos_core::COMPOSITION_FALLBACK_DECLARED_EVENT_TYPE_V1,
+    pos_core::COMPOSITION_FALLBACK_ACTIVATED_EVENT_TYPE_V1,
+];
+
+/// Whether no Plugin may draft `kind`: the ADR-061 release activation type
+/// and the ADR-119 fallback types.
+fn is_reserved_host_draft_type(kind: &str) -> bool {
+    kind == crate::community_plugin_host::PLUGIN_RELEASE_ACTIVATED_EVENT_TYPE_V1
+        || COMPOSITION_FALLBACK_EVENT_TYPES_V1.contains(&kind)
+}
+
+/// Whether `kind` is an ADR-119 fallback type, which no Plugin may own.
+fn is_composition_fallback_kind(kind: &Kind) -> bool {
+    let kind = kind.as_str();
+    COMPOSITION_FALLBACK_EVENT_TYPES_V1.contains(&kind)
+}
+
+/// One reserved-ownership rule: which types are reserved, and the closed
+/// error for a Plugin that claims one, from its name and the type.
+type ReservedOwnershipV1 = (fn(&Kind) -> bool, fn(String, String) -> RuntimeError);
+
+/// The reserved-ownership rules, checked in order over every owned type.
+const RESERVED_OWNERSHIP_V1: [ReservedOwnershipV1; 3] = [
+    (pos_core::is_geographic_event_type, reserved_geographic),
+    (pos_core::is_consent_event_type, reserved_consent),
+    (is_composition_fallback_kind, reserved_host),
+];
+
+const fn reserved_geographic(name: String, event_type: String) -> RuntimeError {
+    RuntimeError::ReservedGeographicEventType { name, event_type }
+}
+
+const fn reserved_consent(name: String, event_type: String) -> RuntimeError {
+    RuntimeError::ReservedConsentEventType { name, event_type }
+}
+
+const fn reserved_host(name: String, event_type: String) -> RuntimeError {
+    RuntimeError::ReservedHostEventType { name, event_type }
+}
+
+/// The error of the first owned type `rule` reserves, if any.
+fn reserved_ownership_error(
+    name: &str,
+    owned: &[Kind],
+    &(reserved, error): &ReservedOwnershipV1,
+) -> Option<RuntimeError> {
+    owned
+        .iter()
+        .find(|kind| reserved(kind))
+        .map(|kind| error(name.to_owned(), kind.as_str().to_owned()))
 }
 
 fn reject_unowned_plugin_drafts(
@@ -3140,12 +3252,7 @@ impl PluginRegistry {
         // Consent is host control-plane history. Validate the full durable
         // prefix above, then ensure Drivers never receive grant/revocation
         // headers or payloads during recovery.
-        let visible_events: Vec<Event> = events
-            .iter()
-            .filter(|event| driver_visible_event(event))
-            .cloned()
-            .collect();
-        let restored_head = events.last().map_or(Seq::ZERO, |event| event.seq);
+        let (visible_events, restored_head) = visible_and_head(events);
         let history = pass_state::restored_history(&visible_events, restored_head);
         let mut staged_driver_count = 0;
         let mut failure = None;
@@ -3153,12 +3260,8 @@ impl PluginRegistry {
             let Some(driver) = entry.driver.as_mut() else {
                 continue;
             };
-            let evidence =
-                DriverRecoveryEvidence::from_events(timeline_segments, &visible_events, |header| {
-                    driver.needs_recovery_payload(header)
-                });
-            if let Err(error) = driver.stage_restore_from_history(&evidence) {
-                driver.abort_restore_from_history();
+            let staged = stage_driver_restore(driver.as_mut(), timeline_segments, &visible_events);
+            if let Err(error) = staged {
                 failure = Some(error);
                 break;
             }
@@ -3181,19 +3284,8 @@ impl PluginRegistry {
             let Some(driver) = entry.driver.as_mut() else {
                 continue;
             };
-            let name = driver.name().to_owned();
-            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                driver.commit_restore_from_history();
-            }))
-            .is_err()
-            {
-                self.poisoned_driver = Some(name.clone());
-                return Err(RuntimeError::DriverRestorePanicked { name });
-            }
-            entry.event_cursor = restored_head;
-            entry.pass_state.carried.clear();
-            entry.pass_state.history = history.clone();
-            entry.chain = StepChainV1::Lookup;
+            commit_driver_restore(driver.as_mut(), &mut self.poisoned_driver)?;
+            reset_restored_entry(entry, restored_head, history.clone());
         }
         self.restored_binding = timeline_segments
             .last()
@@ -3708,91 +3800,10 @@ impl PluginRegistry {
         binding: OutputPolicyBindingV1,
         reducer: Option<Box<dyn Reducer>>,
         callbacks: PendingRegistrationCallbacksV1<I>,
-        mut options: RegistrationOptions,
+        options: RegistrationOptions,
     ) -> Result<(), RuntimeError> {
-        // A prepared manifest batch admits only installed manifest-slot
-        // registrations, which stay closed until Wave 9.
-        if self.manifest_batch.is_some() {
-            return Err(ManifestRegistrationErrorV1::BatchState.into());
-        }
-        let context = self.owned_registration_context(plugin)?;
-        if !binding.verifies_erased_owner_instance(plugin) {
-            return Err(RuntimeError::OutputAdmission(
-                crate::OutputAdmissionErrorV1::PluginMismatch,
-            ));
-        }
-        if let Some(registration) = options.registration.as_ref() {
-            self.validate_registration_roles(registration)?;
-        }
-        let (output_policy, executable_budget, artifacts, _source, owner_token) =
-            binding.into_parts();
-        let closure = OutputPolicyClosureV1::from_artifacts(
-            &output_policy.to_canonical_cbor(),
-            &executable_budget.to_canonical_cbor(),
-            artifacts.implementation_artifact(),
-            artifacts.configuration_artifact(),
-            artifacts.execution_profile_artifact(),
-            artifacts.retention_policy_artifact(),
-        )?;
-        let output_policy = closure.output_policy().clone();
-        let owned_event_types = &context.2.owned_event_types;
-        if let Some(declaration) =
-            output_policy
-                .fields()
-                .output_declarations
-                .iter()
-                .find(|declaration| {
-                    !owned_event_types
-                        .iter()
-                        .any(|kind| kind.as_str() == declaration.event_type())
-                })
-        {
-            return Err(RuntimeError::CapabilityMismatch {
-                name: plugin.name().to_owned(),
-                reason: format!(
-                    "output policy declares event type '{}' outside the Plugin capability",
-                    declaration.event_type()
-                ),
-            });
-        }
-        if let Some(kind) = owned_event_types.iter().find(|kind| {
-            !output_policy
-                .fields()
-                .output_declarations
-                .iter()
-                .any(|declaration| declaration.event_type() == kind.as_str())
-        }) {
-            return Err(RuntimeError::CapabilityMismatch {
-                name: plugin.name().to_owned(),
-                reason: format!(
-                    "Plugin capability owns event type '{}' without an output-policy declaration",
-                    kind.as_str()
-                ),
-            });
-        }
-        let admission = OutputAdmissionV1::try_new_verified(
-            plugin.id(),
-            plugin.version(),
-            closure,
-            owner_token,
-        )?;
-        debug_assert_eq!(admission.owner_token(), Some(owner_token));
-        options.output_admission = Some(admission);
-        let PendingRegistrationCallbacksV1 {
-            driver,
-            approver,
-            approver_event_types,
-        } = callbacks;
-        let approver_event_types: Vec<Kind> = approver_event_types.into_iter().collect();
-        self.register_with_approver_slice(
-            plugin,
-            reducer,
-            driver,
-            approver,
-            &approver_event_types,
-            context,
-            options,
-        )
+        self.prepare_registration(plugin, binding, reducer, callbacks, options, None)
+            .and_then(|prepared| self.install_prepared(prepared))
     }
 
     fn registration_context(
@@ -3818,14 +3829,19 @@ impl PluginRegistry {
     /// twice reports the duplicate registration, not a duplicate owner of
     /// its own types. Only a distinct registration that claims an owned
     /// type reaches [`PluginCompositionErrorV1::DuplicateEventTypeOwner`].
+    ///
+    /// `replacing` names the registration an ADR-119 swap replaces: the
+    /// ownership check ignores its types, and the `PluginId` check does not.
     fn owned_registration_context(
         &self,
         plugin: &dyn Plugin,
+        replacing: Option<PluginId>,
     ) -> Result<(PluginId, String, Capability), RuntimeError> {
         self.registration_context(plugin).and_then(|context| {
             Self::validate_reserved_owned_event_types(&context.1, &context.2)
                 .and_then(|()| {
-                    self.validate_exclusive_event_types(&context.2.owned_event_types)
+                    let owned = &context.2.owned_event_types;
+                    self.validate_exclusive_event_types(owned, replacing)
                         .map_err(RuntimeError::from)
                 })
                 .map(|()| context)
@@ -3842,9 +3858,12 @@ impl PluginRegistry {
     /// registration already owns, and a host pre-registered type that no
     /// Plugin may claim. It reads the registry only, so a rejection leaves
     /// the registry unchanged, whichever overlapping Plugin registers first.
+    /// An ADR-119 swap passes the primary it replaces as `replacing`, whose
+    /// types the check then ignores.
     fn validate_exclusive_event_types(
         &self,
         owned_event_types: &[Kind],
+        replacing: Option<PluginId>,
     ) -> Result<(), PluginCompositionErrorV1> {
         owned_event_types
             .iter()
@@ -3853,8 +3872,7 @@ impl PluginRegistry {
                 owned_event_types[..index].contains(kind)
                     || !plugin_claimable_event_type(kind)
                     || self
-                        .plugins
-                        .values()
+                        .entries_other_than(replacing)
                         .any(|entry| entry.owned_event_types.contains(kind))
             })
             .map_or(Ok(()), |(_, kind)| {
@@ -3883,19 +3901,22 @@ impl PluginRegistry {
                 .iter()
                 .map(|declaration| Kind::new(declaration.event_type()))
                 .collect();
-            self.validate_exclusive_event_types(&owned_event_types)
+            self.validate_exclusive_event_types(&owned_event_types, None)
                 .and_then(|()| DriverEventObservation::capture_driver(driver))
                 .map_err(RuntimeError::from)
                 .map(|observation| (admission, owned_event_types, observation))
         })
     }
 
+    /// Reject a role another registration holds, ignoring the registration
+    /// an ADR-119 swap replaces (`replacing`).
     fn validate_registration_roles(
         &self,
         registration: &PluginRegistrationV1,
+        replacing: Option<PluginId>,
     ) -> Result<(), PluginCompositionErrorV1> {
         let duplicate = registration.pin().roles().iter().find(|role| {
-            self.plugins.values().any(|entry| {
+            self.entries_other_than(replacing).any(|entry| {
                 entry
                     .registration
                     .as_ref()
@@ -3911,27 +3932,10 @@ impl PluginRegistry {
         name: &str,
         cap: &Capability,
     ) -> Result<(), RuntimeError> {
-        if let Some(kind) = cap
-            .owned_event_types
+        RESERVED_OWNERSHIP_V1
             .iter()
-            .find(|kind| pos_core::is_geographic_event_type(kind))
-        {
-            return Err(RuntimeError::ReservedGeographicEventType {
-                name: name.to_owned(),
-                event_type: kind.as_str().to_owned(),
-            });
-        }
-        if let Some(kind) = cap
-            .owned_event_types
-            .iter()
-            .find(|kind| pos_core::is_consent_event_type(kind))
-        {
-            return Err(RuntimeError::ReservedConsentEventType {
-                name: name.to_owned(),
-                event_type: kind.as_str().to_owned(),
-            });
-        }
-        Ok(())
+            .find_map(|rule| reserved_ownership_error(name, &cap.owned_event_types, rule))
+            .map_or(Ok(()), Err)
     }
 
     fn install_reducer(
@@ -3958,132 +3962,6 @@ impl PluginRegistry {
             }
         }
         Ok(())
-    }
-
-    fn register_with_approver_slice(
-        &mut self,
-        plugin: &dyn Plugin,
-        reducer: Option<Box<dyn Reducer>>,
-        driver: Option<Box<dyn Driver>>,
-        approver: Option<Box<dyn ActionApprover>>,
-        approver_event_types: &[Kind],
-        context: (PluginId, String, Capability),
-        options: RegistrationOptions,
-    ) -> Result<(), RuntimeError> {
-        let (id, name, cap) = context;
-
-        if cap.has_driver != driver.is_some() {
-            return Err(RuntimeError::CapabilityMismatch {
-                name: name.clone(),
-                reason: if cap.has_driver {
-                    "has_driver=true but no driver provided".to_owned()
-                } else {
-                    "has_driver=false but a driver was provided".to_owned()
-                },
-            });
-        }
-        if cap.has_reducer != reducer.is_some() {
-            return Err(RuntimeError::CapabilityMismatch {
-                name: name.clone(),
-                reason: if cap.has_reducer {
-                    "has_reducer=true but no reducer provided".to_owned()
-                } else {
-                    "has_reducer=false but a reducer was provided".to_owned()
-                },
-            });
-        }
-
-        if approver.is_none() && !approver_event_types.is_empty() {
-            return Err(RuntimeError::CapabilityMismatch {
-                name,
-                reason: "approver event types were supplied without an approver".to_owned(),
-            });
-        }
-        if let Some(kind) = approver_event_types
-            .iter()
-            .find(|kind| !cap.owned_event_types.contains(kind))
-        {
-            return Err(RuntimeError::CapabilityMismatch {
-                name,
-                reason: format!("approver event type '{kind}' is not plugin-owned"),
-            });
-        }
-
-        // Approver routes are plugin-owned types, and the shared ownership
-        // check has already rejected any type another registration owns, so
-        // a second approver route for one type cannot reach this point.
-
-        let version = plugin.version().to_owned();
-
-        // The Driver rule and the only fallible commit action run before
-        // schemas or routes mutate.
-        let event_observation = self.admit_driver_and_reducer(
-            id,
-            &name,
-            driver.as_deref(),
-            reducer,
-            options.reducer_slot,
-        )?;
-
-        // Register event type schemas
-        for kind in &cap.owned_event_types {
-            self.schemas.register_claimed(EventTypeSchema {
-                event_type: kind.clone(),
-                description: format!("owned by plugin '{name}'"),
-                json_schema: None,
-            });
-        }
-
-        // Index action approver if present
-        if approver.is_some() {
-            for kind in approver_event_types {
-                self.approver_map.insert(kind.clone(), id);
-            }
-        }
-
-        let owner_id = self.owner_id_for_options(&options, &name);
-        self.plugins.insert(
-            id,
-            PluginEntry {
-                name,
-                version,
-                owned_event_types: cap.owned_event_types,
-                driver,
-                approver,
-                last_tick: None,
-                event_cursor: Seq::ZERO,
-                registration: options.registration,
-                output_admission: options.output_admission,
-                manifest_slot: options.manifest_slot,
-                event_observation,
-                pass_state: PassState::new(owner_id),
-                chain: StepChainV1::Lookup,
-            },
-        );
-        self.registration_revision += 1;
-        self.restored_binding = None;
-        Ok(())
-    }
-
-    /// Capture the Driver's registration snapshot, rejecting a cursor-based
-    /// consent-sensitive subscription, then install the reducer.
-    ///
-    /// The Driver rule runs first, so a rejection leaves the registry
-    /// unchanged (ADR-021 Revision 4 Decision 1).
-    fn admit_driver_and_reducer(
-        &mut self,
-        id: PluginId,
-        name: &str,
-        driver: Option<&dyn Driver>,
-        reducer: Option<Box<dyn Reducer>>,
-        reducer_slot: ReducerSlotV1,
-    ) -> Result<DriverEventObservation, RuntimeError> {
-        DriverEventObservation::capture(driver)
-            .map_err(RuntimeError::from)
-            .and_then(|observation| {
-                self.install_reducer(id, name, reducer, reducer_slot)
-                    .map(|()| observation)
-            })
     }
 
     /// Returns `true` if a plugin with this id is registered.
@@ -5423,24 +5301,26 @@ mod tests {
         let mut registry = gated_registry();
         let schemas_before = registry.schemas.len();
         let context = registry.registration_context(&plugin).test_ok();
+        let callbacks = super::prepared::PreparedCallbacks {
+            driver: None,
+            reducer: Some(Box::new(CountReducer)),
+            approver: None,
+            approver_event_types: Vec::new(),
+        };
+        let options = RegistrationOptions {
+            registration: Some(PluginRegistrationV1::new(
+                pin,
+                PluginAvailabilityV1::Available,
+            )),
+            output_admission: None,
+            reducer_slot: ReducerSlotV1::ByPluginId,
+            manifest_slot: None,
+        };
+        let prepared = registry
+            .prepare_slice(&plugin, callbacks, context, options, None)
+            .test_ok();
         assert!(matches!(
-            registry.register_with_approver_slice(
-                &plugin,
-                Some(Box::new(CountReducer)),
-                None,
-                None,
-                &[],
-                context,
-                RegistrationOptions {
-                    registration: Some(PluginRegistrationV1::new(
-                        pin,
-                        PluginAvailabilityV1::Available,
-                    )),
-                    output_admission: None,
-                    reducer_slot: ReducerSlotV1::ByPluginId,
-                    manifest_slot: None,
-                },
-            ),
+            registry.install_prepared(prepared),
             Err(RuntimeError::CapabilityMismatch { .. })
         ));
         assert_eq!(registry.len(), 0);
@@ -7599,6 +7479,51 @@ mod tests {
                 Err(RuntimeError::ReservedConsentEventType { .. })
             ));
         }
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn plugins_cannot_claim_composition_fallback_event_types() {
+        for reserved in [
+            pos_core::COMPOSITION_FALLBACK_DECLARED_EVENT_TYPE_V1,
+            pos_core::COMPOSITION_FALLBACK_ACTIVATED_EVENT_TYPE_V1,
+        ] {
+            let plugin = simple_plugin("malicious-fallback", &["plugin.allowed.v1", reserved]);
+            let mut registry = PluginRegistry::new();
+            let result = registry.register_generated(&plugin, None, None);
+            let refused = matches!(&result, Err(RuntimeError::ReservedHostEventType { .. }));
+            assert!(
+                refused && format!("{result:?}").contains(reserved),
+                "{result:?}"
+            );
+            assert!(registry.is_empty());
+        }
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn drafts_of_every_reserved_host_type_are_refused() {
+        fn draft(event_type: &str) -> EventDraft {
+            EventDraft::new(
+                EntityId::new(),
+                Kind::new(event_type),
+                CanonicalBytes::from_vec(Vec::new()),
+            )
+        }
+        for reserved in [
+            crate::community_plugin_host::PLUGIN_RELEASE_ACTIVATED_EVENT_TYPE_V1,
+            pos_core::COMPOSITION_FALLBACK_DECLARED_EVENT_TYPE_V1,
+            pos_core::COMPOSITION_FALLBACK_ACTIVATED_EVENT_TYPE_V1,
+        ] {
+            let error = host_owned_draft_error(&draft(reserved));
+            let refused = matches!(&error, Some(RuntimeError::ReservedHostDraft { .. }));
+            assert!(
+                refused && format!("{error:?}").contains(reserved),
+                "{error:?}"
+            );
+        }
+        let allowed = host_owned_draft_error(&draft("plugin.allowed.v1"));
+        assert!(allowed.is_none());
     }
 
     #[test]

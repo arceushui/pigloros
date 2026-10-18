@@ -124,6 +124,9 @@ pub enum RuntimeError {
     #[error("driver emitted host-owned event type '{event_type}'")]
     ReservedHostDraft { event_type: String },
 
+    #[error("plugin '{name}' cannot claim host-owned event type '{event_type}'")]
+    ReservedHostEventType { name: String, event_type: String },
+
     #[error("plugin '{name}' cannot claim Gateway-owned consent event type '{event_type}'")]
     ReservedConsentEventType { name: String, event_type: String },
 
@@ -206,6 +209,10 @@ pub enum RuntimeError {
     /// channel for the closed typed host error.
     #[error(transparent)]
     CommunityPlugin(#[from] crate::community_plugin_host::CommunityPluginHostErrorV1),
+
+    /// A refusal of the ADR-119 registry swap seams.
+    #[error(transparent)]
+    FallbackSwap(#[from] crate::FallbackSwapRefusalV1),
 
     #[error("store error: {0}")]
     Store(#[from] pos_core::CoreError),

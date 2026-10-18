@@ -166,6 +166,33 @@ impl<M: CommunityPluginMemberV1> CommunityPluginHostV1<M> {
         Self { members }
     }
 
+    /// The host schedule index of the member for `plugin`, if the host has one.
+    ///
+    /// The host schedule index is independent of the registry's registration
+    /// order (ADR-119 section 4.4 step 3).
+    #[must_use]
+    pub fn member_index(&self, plugin: PluginId) -> Option<usize> {
+        self.members
+            .iter()
+            .position(|member| member.plugin() == plugin)
+    }
+
+    /// Put `member` at host schedule index `index` and return the member it
+    /// replaces (ADR-119 section 4.4 step 5).
+    ///
+    /// Every other member keeps its index, and nothing is gated or closed.
+    ///
+    /// # Errors
+    /// Returns `member` itself, with the host unchanged, when `index` is not
+    /// a member index.
+    pub fn replace_member(&mut self, index: usize, member: M) -> Result<M, M> {
+        if index < self.members.len() {
+            Ok(std::mem::replace(&mut self.members[index], member))
+        } else {
+            Err(member)
+        }
+    }
+
     /// Run one pass: sample, gate, stage, admit, classify, close and sync.
     ///
     /// One trusted UTC second is sampled for the whole pass. A failed sample refuses every
