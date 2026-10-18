@@ -293,8 +293,9 @@ mod tests {
     }
 
     #[test]
-    fn malformed_public_request_fails_before_installation_open() {
+    fn malformed_public_request_fails_before_installation_open() -> TestResult {
         assert!(ProviderImageSnapshot::open(b"SPX1", &release_keys()?).is_err());
+        Ok(())
     }
 
     #[test]

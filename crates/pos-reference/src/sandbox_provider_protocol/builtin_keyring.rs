@@ -107,14 +107,13 @@ pub fn verify_builtin_release_keys(
     trust
         .certificates()
         .iter()
-        .map(
+        .try_for_each(
             |certificate| match listing.asymmetric_count(&certificate.key_description) {
                 0 => Err(BuiltinKeyringError::Missing),
                 1 => Ok(()),
                 _ => Err(BuiltinKeyringError::Duplicate),
             },
         )
-        .collect::<Result<(), _>>()
         .map(|()| BuiltinReleaseKeys {
             trust_digest: trust.snapshot_digest(),
         })
