@@ -396,22 +396,23 @@ impl<'read, 'statement, 'budget, 'clock> EventRowReaderV1<'read, 'statement, 'bu
     }
 }
 
-pub(super) struct ScopedEventV1(Event);
+/// Scrub the caller-retained native carrier on every exit, including unwind.
+pub(super) struct ScopedEventV1<'event>(&'event mut Event);
 
-impl ScopedEventV1 {
-    pub(super) const fn new(event: Event) -> Self {
+impl<'event> ScopedEventV1<'event> {
+    pub(super) const fn new(event: &'event mut Event) -> Self {
         Self(event)
     }
 
     pub(super) const fn event(&self) -> &Event {
-        &self.0
+        self.0
     }
 }
 
-impl Drop for ScopedEventV1 {
+impl Drop for ScopedEventV1<'_> {
     fn drop(&mut self) {
         let scrubbed =
-            pos_core::store::zeroize_event_plaintext_staging(std::slice::from_mut(&mut self.0));
+            pos_core::store::zeroize_event_plaintext_staging(std::slice::from_mut(self.0));
         debug_assert!(scrubbed);
     }
 }
@@ -466,14 +467,15 @@ impl ParentHashStateV1 {
     }
 }
 
-fn read_probed_event(
+fn read_probed_event<'event>(
     conn: &Connection,
     key: &str,
     lengths: &EventRowLengthsV1,
     timeline: TimelineId,
     prefix: u64,
+    carrier: &'event mut Option<Event>,
     context: &mut NativeReadContextV1<'_, '_>,
-) -> Result<ScopedEventV1> {
+) -> Result<ScopedEventV1<'event>> {
     context
         .require_bytes(lengths.total())
         .map_err(|_| Error::CorruptAuthority)
@@ -486,7 +488,7 @@ fn read_probed_event(
                     let mut reader = EventRowReaderV1::new(row, context, Some(lengths));
                     super::decode_event_row_with_reader(&mut reader)
                         .and_then(|event| super::finalize_sqlite_own_event(event, timeline, prefix))
-                        .map(ScopedEventV1::new)
+                        .map(move |event| ScopedEventV1::new(carrier.insert(event)))
                         .map_err(|_| Error::CorruptAuthority)
                 },
             )
@@ -531,11 +533,12 @@ pub(super) fn origin_prefix_with_context(
 /// Reuse the ordinary classified-Event semantic decoder without collecting a
 /// Vec or releasing plaintext. The caller retains this scrub-on-drop owner
 /// while it validates provenance in the same already-held snapshot.
-pub(super) fn classified_event_with_context(
+pub(super) fn classified_event_with_context<'event>(
     conn: &Connection,
     operation: &ForkAppendOperationV1,
+    carrier: &'event mut Option<Event>,
     context: &mut NativeReadContextV1<'_, '_>,
-) -> std::result::Result<ScopedEventV1, crate::ForkEventAuthorityErrorV1> {
+) -> std::result::Result<ScopedEventV1<'event>, crate::ForkEventAuthorityErrorV1> {
     let input = operation.input();
     origin_prefix_with_context(conn, input.child_timeline_id, context)
         .and_then(|prefix| {
@@ -565,10 +568,11 @@ pub(super) fn classified_event_with_context(
                             &lengths,
                             input.child_timeline_id,
                             prefix,
+                            carrier,
                             context,
                         )
                     })
-                    .and_then(|mut event| {
+                    .and_then(|event| {
                         prefix
                             .checked_add(event.0.seq.as_u64())
                             .ok_or(Error::CorruptAuthority)
@@ -589,13 +593,14 @@ pub(super) fn classified_event_with_context(
         .map_err(|_| crate::ForkEventAuthorityErrorV1::CorruptAuthority)
 }
 
-fn next_event(
+fn next_event<'event>(
     conn: &Connection,
     key: &str,
     cursor: EventCursorV1,
     segment: &BoundedForkSegment,
+    carrier: &'event mut Option<Event>,
     context: &mut NativeReadContextV1<'_, '_>,
-) -> Result<Option<(i64, ScopedEventV1)>> {
+) -> Result<Option<(i64, ScopedEventV1<'event>)>> {
     selected_field_with_context(
         conn,
         SelectedRowV1::EventProbe(key, cursor),
@@ -613,6 +618,7 @@ fn next_event(
                     &lengths,
                     segment.id,
                     segment.fork.map_or(0, Seq::as_u64),
+                    carrier,
                     context,
                 )
                 .map(|event| Some((lengths.seq, event)))
@@ -635,10 +641,11 @@ fn hash_segment(
         .and_then(|()| {
             let key = segment.id.to_string();
             let mut cursor = EventCursorV1 { after: None, to };
+            let mut carrier = None;
             loop {
-                match next_event(conn, &key, cursor, segment, context) {
+                match next_event(conn, &key, cursor, segment, &mut carrier, context) {
                     Ok(Some((seq, event))) => {
-                        let result = state.hash_event(hasher, &event.0, context);
+                        let result = state.hash_event(hasher, event.event(), context);
                         // Preserve full validation after at_seq. Scrub before
                         // the post-batch check; no Event clone or Vec escapes.
                         drop(event);
@@ -1030,6 +1037,95 @@ mod tests {
     }
 
     #[test]
+    fn scoped_native_event_scrubs_the_retained_carrier_on_return_and_unwind() -> Fallible<()> {
+        let (conn, timeline) = raw_fixture()?;
+        let mut statement = conn.prepare(EVENT_FIELDS)?;
+        for unwind in [false, true] {
+            let mut rows = statement.query(params![timeline.to_string(), 1])?;
+            let row = rows.next()?.ok_or("native Event row")?;
+            let mut carrier = super::super::decode_event_row(row)?;
+            let id = carrier.id;
+            assert_eq!(carrier.event_type.as_str(), "raw");
+            assert!(!carrier.payload.is_empty());
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _event = ScopedEventV1::new(&mut carrier);
+                if unwind {
+                    std::panic::resume_unwind(Box::new("native Event unwind control"));
+                }
+            }));
+            assert_eq!(result.is_err(), unwind);
+            assert_eq!(carrier.event_type.as_str(), "");
+            assert!(carrier.payload.is_empty());
+            assert_eq!(carrier.id, id);
+        }
+        Ok(())
+    }
+
+    fn assert_raw_getter_gate<T: FromSql>(
+        column: usize,
+        expression: &str,
+        length: usize,
+        accepts: bool,
+    ) -> Fallible<()> {
+        // Real SQLite projections isolate the private getter's contract from
+        // earlier probes/later typed decoders; these are not legal Event rows.
+        let conn = Connection::open_in_memory()?;
+        let projection = std::iter::repeat_n(expression, 16)
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut statement = conn.prepare(&format!("SELECT {projection}"))?;
+        let mut rows = statement.query([])?;
+        let row = rows.next()?.ok_or("native projected row")?;
+        let mut lengths = EventRowLengthsV1 {
+            seq: 1,
+            columns: [0; 16],
+        };
+        lengths.columns[column] = length;
+        let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+        let start = clock.mark();
+        let limits = ForkReplayReadLimitsV1::new(1, 1, 1, 1_024, 1_000_000)?;
+        let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+        let mut context = NativeReadContextV1::protected(&mut budget);
+        let result = EventRowReaderV1::new(row, &mut context, Some(&lengths)).get::<T>(column);
+        assert_eq!(result.is_ok(), accepts, "column {column}: {expression}");
+        if !accepts {
+            assert!(matches!(result, Err(CoreError::ArtifactUnavailable)));
+        }
+        let charged = if accepts { length } else { 0 };
+        assert_eq!(budget.remaining_native_bytes(), 1_024 - charged);
+        budget.check_time()?;
+        Ok(())
+    }
+
+    #[test]
+    fn raw_getters_refuse_independent_column_width_and_utf8_faults_before_precharge() -> Fallible<()>
+    {
+        for (column, expression, length, accepts) in [
+            (0, "'x'", 1, false),
+            (1, "''", 0, false),
+            (1, "'x'", 2, false),
+            (1, "CAST(X'FF' AS TEXT)", 1, false),
+            (1, "'x'", 1, true),
+            (3, "''", 0, true),
+        ] {
+            assert_raw_getter_gate::<String>(column, expression, length, accepts)?;
+        }
+        for (column, expression, length, accepts) in [
+            (0, "X'01'", 1, false),
+            (9, "X''", 0, false),
+            (9, "X'01'", 2, false),
+            (9, "X'01'", 1, true),
+            (4, "X''", 0, true),
+        ] {
+            assert_raw_getter_gate::<Vec<u8>>(column, expression, length, accepts)?;
+        }
+        for (column, length, accepts) in [(0, 0, false), (6, 1, false), (6, 0, true)] {
+            assert_raw_getter_gate::<Option<i64>>(column, "NULL", length, accepts)?;
+        }
+        Ok(())
+    }
+
+    #[test]
     fn raw_decoder_rejects_native_shape_drift_after_a_valid_probe() -> Fallible<()> {
         let (conn, timeline) = raw_fixture()?;
         let key = timeline.to_string();
@@ -1044,7 +1140,16 @@ mod tests {
             EventRowLengthsV1::probe(rows.next()?.ok_or("missing probe row")?, &mut context)?
                 .ok_or("missing probed Event")?
         };
-        let control = read_probed_event(&conn, &key, &lengths, timeline, 0, &mut context)?;
+        let mut carrier = None;
+        let control = read_probed_event(
+            &conn,
+            &key,
+            &lengths,
+            timeline,
+            0,
+            &mut carrier,
+            &mut context,
+        )?;
         assert_eq!(control.event().seq, Seq::from_u64(1));
         drop(control);
 
@@ -1053,7 +1158,16 @@ mod tests {
         // barrier, not the earlier public reader's type probe.
         conn.execute_batch("UPDATE events SET wall_time = 1.5")?;
         assert_eq!(
-            read_probed_event(&conn, &key, &lengths, timeline, 0, &mut context).err(),
+            read_probed_event(
+                &conn,
+                &key,
+                &lengths,
+                timeline,
+                0,
+                &mut carrier,
+                &mut context
+            )
+            .err(),
             Some(Error::CorruptAuthority)
         );
         {
@@ -1082,7 +1196,15 @@ mod tests {
             ));
         }
         conn.execute_batch("UPDATE events SET wall_time = 0")?;
-        let restored = read_probed_event(&conn, &key, &lengths, timeline, 0, &mut context)?;
+        let restored = read_probed_event(
+            &conn,
+            &key,
+            &lengths,
+            timeline,
+            0,
+            &mut carrier,
+            &mut context,
+        )?;
         assert_eq!(restored.event().seq, Seq::from_u64(1));
         budget.check_time()?;
         Ok(())

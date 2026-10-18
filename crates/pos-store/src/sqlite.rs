@@ -13432,10 +13432,17 @@ fn sqlite_validate_classified_records_with_context(
     context: &mut crate::fork_replay::NativeReadContextV1<'_, '_>,
 ) -> Result<(EventOriginRecordV1, Option<ForkInterventionAdmissionV1>), ForkEventAuthorityErrorV1> {
     let input = operation.input();
+    let mut event_carrier = None;
     let event = if context.is_protected() {
-        fork_replay_event::classified_event_with_context(conn, operation, context)
+        fork_replay_event::classified_event_with_context(
+            conn,
+            operation,
+            &mut event_carrier,
+            context,
+        )
     } else {
-        sqlite_classified_event(conn, operation).map(fork_replay_event::ScopedEventV1::new)
+        sqlite_classified_event(conn, operation)
+            .map(|event| fork_replay_event::ScopedEventV1::new(event_carrier.insert(event)))
     };
     event
         .and_then(|event| {
