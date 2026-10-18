@@ -3324,17 +3324,15 @@ mod tests {
             // The provider independently opens SIC1; no selector proof or FD is
             // transferred by SPX1. This is image evidence, not activation.
             // Fixture built-in keyring listing for the installed TRS1 release key.
-            let record = format!(
-                "asymmetric;0;0;1f010000;{}",
-                crate::selector::installation::tests::IMAGE_KEY_DESCRIPTION
-            );
             let release_keys = crate::sandbox_provider_protocol::verify_builtin_release_keys(
                 crate::selector::installation::InstalledSelectorState::open()?
                     .authenticate_bootstrap()?
                     .trust(),
-                &crate::sandbox_provider_protocol::BuiltinKeyringListing::from_describe_records([
-                    record.as_str(),
-                ])?,
+                &crate::sandbox_provider_protocol::BuiltinKeyringListing::from_members([(
+                    1,
+                    "asymmetric",
+                    crate::selector::installation::tests::IMAGE_KEY_DESCRIPTION,
+                )])?,
             )?;
             let image =
                 crate::provider_admission::ProviderImageSnapshot::open(&spx1, &release_keys)?;

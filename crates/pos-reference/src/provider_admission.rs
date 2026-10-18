@@ -236,10 +236,9 @@ mod tests {
         use crate::selector::installation::tests::IMAGE_KEY_DESCRIPTION;
 
         let bootstrap = admitted_state()?.authenticate_bootstrap()?;
-        let record = format!("asymmetric;0;0;1f010000;{IMAGE_KEY_DESCRIPTION}");
         Ok(verify_builtin_release_keys(
             bootstrap.trust(),
-            &BuiltinKeyringListing::from_describe_records([record.as_str()])?,
+            &BuiltinKeyringListing::from_members([(1, "asymmetric", IMAGE_KEY_DESCRIPTION)])?,
         )?)
     }
 
@@ -329,17 +328,19 @@ mod tests {
 
         // A built-in keyring check of another TRS1 snapshot does not cover this one.
         let foreign = crate::selector::installation::tests::foreign_trust()?;
-        let listing = BuiltinKeyringListing::from_describe_records([
-            "asymmetric;0;0;1f010000;PiglorOS other release: 00",
-        ])?;
+        let listing =
+            BuiltinKeyringListing::from_members([(1, "asymmetric", "PiglorOS other release: 00")])?;
         let keys = verify_builtin_release_keys(&foreign, &listing)?;
-        assert!(ProviderImageSnapshot::from_installation(
-            admitted_state()?,
-            request_fixture()?,
-            &keys,
-            fixture_time
-        )
-        .is_err());
+        assert_eq!(
+            ProviderImageSnapshot::from_installation(
+                admitted_state()?,
+                request_fixture()?,
+                &keys,
+                fixture_time
+            )
+            .err(),
+            Some(SelectorBoundaryError::ArtifactInvalid)
+        );
         Ok(())
     }
 

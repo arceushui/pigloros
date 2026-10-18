@@ -2481,3 +2481,59 @@ fn public_encoders_propagate_nested_validation_failures() -> TestResult {
     );
     Ok(())
 }
+
+#[test]
+fn image_manifest_decoders_require_exact_salt_and_kernel_key_description() -> TestResult {
+    let encoded = image_manifest().sign(&signing_key())?.to_canonical_cbor()?;
+    let decoded: Value = ciborium::from_reader(encoded.as_slice())?;
+    for (field, replacement, expected) in [
+        (
+            11,
+            Value::Bytes(vec![17; 31]),
+            SandboxContractErrorV1::InvalidEncoding,
+        ),
+        (
+            11,
+            Value::Bytes(vec![17; 33]),
+            SandboxContractErrorV1::InvalidEncoding,
+        ),
+        (
+            11,
+            Value::Bytes(Vec::new()),
+            SandboxContractErrorV1::InvalidEncoding,
+        ),
+        (
+            14,
+            Value::Integer(7.into()),
+            SandboxContractErrorV1::InvalidEncoding,
+        ),
+        (
+            14,
+            Value::Text("k".repeat(4096)),
+            SandboxContractErrorV1::FieldOutOfBounds,
+        ),
+        (
+            14,
+            Value::Text("release\nkey".to_owned()),
+            SandboxContractErrorV1::FieldOutOfBounds,
+        ),
+    ] {
+        let mut changed = decoded.clone();
+        let Value::Array(wrapper) = &mut changed else {
+            return Err("SIM1 is not an array".into());
+        };
+        let Value::Array(unsigned) = &mut wrapper[0] else {
+            return Err("SIM1-U is not an array".into());
+        };
+        unsigned[field] = replacement;
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&changed, &mut bytes)?;
+        assert_eq!(
+            SignedImageManifestV1::from_canonical_cbor(&bytes),
+            Err(expected),
+            "field {field}"
+        );
+        assert!(independent::SignedImageManifest::from_canonical_cbor(&bytes).is_err());
+    }
+    Ok(())
+}
