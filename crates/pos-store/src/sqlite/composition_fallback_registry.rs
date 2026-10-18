@@ -9,18 +9,10 @@
 //! # Lock order and durability
 //!
 //! The reads run the poison check and the schema check, then one statement, with no
-//! transaction. A write runs, in this order: the poison check (`StorePoisoned`); for `declare`
-//! and `activate` the erasure fence of the target Timeline (`EventRejected`), which encloses
-//! everything below up to and including the durability restore; the autocommit check
-//! (`NestedTransaction`); the WAL check (`WalRequired`); a read of the connection's current
-//! `synchronous` level; `PRAGMA synchronous=FULL` with a read-back; `BEGIN IMMEDIATE`; the work;
-//! `COMMIT` or `ROLLBACK`; and the restore of the recorded level with a read-back. The steps from
-//! the poison check on, except the fence, are the protocol `super::registry_durability` shares
-//! with the Plugin trust registry: from the moment `FULL` is set, every exit path restores the
-//! recorded level; after a failed `COMMIT` the adapter rolls back and requires autocommit before
-//! it touches the level; a connection still inside a transaction then, or a restore that fails,
-//! poisons the handle, and every later registry call returns `StorePoisoned` until the store is
-//! dropped and reopened.
+//! transaction. A write runs the durability protocol of `super::registry_durability`, shared
+//! with the Plugin trust registry. For `declare` and `activate`, the erasure fence of the target
+//! Timeline (`EventRejected`) is taken after the poison check and encloses the rest of the
+//! protocol, up to and including the durability restore.
 //!
 //! The Event is appended inside the open transaction through the same guard chain as
 //! `EventStore::append` (`guarded_generic_append`), whose savepoint nests inside it. The fold

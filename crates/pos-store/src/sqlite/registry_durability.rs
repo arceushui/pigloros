@@ -15,7 +15,8 @@
 //! The module is adapter-neutral and builds on every target: each registry passes in its own
 //! poison cell through [`DurableRegistryV1`] and maps the protocol's failures to its own error
 //! through [`DurabilityErrorV1`]. The registry-specific parts (the erasure fence, the trust
-//! registry's read transaction) stay in the adapters.
+//! registry's read transaction) stay in the adapters; that read transaction still uses the shared
+//! `committed`, `rollback_to_autocommit` and `poison` steps.
 
 use std::cell::Cell;
 
