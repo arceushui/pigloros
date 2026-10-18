@@ -43,6 +43,7 @@ CORE_CACHE_KEYS = {
     "coverage": "coverage",
 }
 CORE_JOB_NAMES = ("fmt", "feature-matrix", "test", "test-shard", "clippy", "coverage")
+CORE_GATE_JOB_NAMES = ("fmt", "feature-matrix", "test", "test-shards", "clippy", "coverage")
 FEATURE_MATRIX_STEPS = (
     {
         "name": "cargo check (no default features)",
@@ -63,13 +64,16 @@ FEATURE_MATRIX_STEPS = (
         "name": "Prove reference evaluator implementation independence",
         "run": "bash scripts/check-reference-evaluator-independence.sh",
     },
+    {
+        "name": "Prove the conformance adapter dependency graph",
+        "run": "bash scripts/check-adapter-graph.sh",
+    },
 )
-WORKSPACE_TEST_STEP = {
-    "name": "cargo test (all features, no ignored skip)",
+WORKSPACE_DOCTEST_STEP = {
+    "name": "cargo test doctests (all features, ignored included)",
     "run": "set -euo pipefail\n"
-    "cargo test --workspace --all-features --locked -- --include-ignored "
-    "2>&1 | tee /tmp/cargo-test.log\n"
-    "bash scripts/assert-no-ignored-in-test-summary.sh /tmp/cargo-test.log\n",
+    "cargo test --workspace --all-features --locked --doc -- --include-ignored "
+    "2>&1 | tee /tmp/cargo-doctest.log\n",
 }
 MAIN_PUSH_TRIGGER = {"branches": ["main"]}
 PREFLIGHT_GATE_IF = "${{ always() }}"
@@ -301,7 +305,7 @@ def assert_parallel_validation_contract(workflow: dict) -> None:
     jobs = workflow["jobs"]
     for owner, required in (
         ("feature-matrix", FEATURE_MATRIX_STEPS),
-        ("test", (WORKSPACE_TEST_STEP,)),
+        ("test", (WORKSPACE_DOCTEST_STEP,)),
     ):
         job = jobs[owner]
         if job.get("timeout-minutes") != 30 or "continue-on-error" in job:
@@ -317,14 +321,14 @@ def assert_parallel_validation_contract(workflow: dict) -> None:
             if occurrences != [(owner, expected)]:
                 raise AssertionError(f"{owner} must run the exact required step once")
     gate = jobs["core-gate"]
-    if gate.get("needs") != ["ci_change_scope", "preflight-gate", *CORE_JOB_NAMES]:
+    if gate.get("needs") != ["ci_change_scope", "preflight-gate", *CORE_GATE_JOB_NAMES]:
         raise AssertionError("core-gate must require every parallel core job")
     if gate.get("if") != "${{ always() }}" or "continue-on-error" in gate:
         raise AssertionError("core-gate must remain unconditional and blocking")
     step = gate["steps"][0]
     if "if" in step or "continue-on-error" in step:
         raise AssertionError("core-gate result check must remain blocking")
-    for name in CORE_JOB_NAMES:
+    for name in CORE_GATE_JOB_NAMES:
         variable = name.upper().replace("-", "_") + "_RESULT"
         if step["env"].get(variable) != "${{ needs." + name + ".result }}":
             raise AssertionError("core-gate must read every actual job result")
@@ -634,7 +638,7 @@ class CiWorkflowPolicyTests(unittest.TestCase):
         workflow = load_workflow(CI_WORKFLOW_PATH)
         for owner, required in (
             ("feature-matrix", FEATURE_MATRIX_STEPS),
-            ("test", (WORKSPACE_TEST_STEP,)),
+            ("test", (WORKSPACE_DOCTEST_STEP,)),
         ):
             for expected in required:
                 for change in ("remove", "if", "continue-on-error", "run"):
@@ -673,7 +677,7 @@ class CiWorkflowPolicyTests(unittest.TestCase):
         run = workflow["jobs"]["core-gate"]["steps"][0]["run"]
         results = {
             name.upper().replace("-", "_") + "_RESULT": "success"
-            for name in CORE_JOB_NAMES
+            for name in CORE_GATE_JOB_NAMES
         }
         environment = dict(
             results, SCOPE_RESULT="success", PREFLIGHT_RESULT="success", RUST_SCOPE="true"
