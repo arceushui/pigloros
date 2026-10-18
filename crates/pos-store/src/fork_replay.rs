@@ -877,27 +877,85 @@ fn within_read_deadline(deadline: Option<(Instant, u64)>) -> bool {
     })
 }
 
-/// Purpose-specific, exclusively owned plaintext staging. Native owners fund
-/// each Event before pushing it; all failed/post-check/unwind exits scrub it.
-#[derive(Default)]
-pub(crate) struct ReplayEventStagingV1(Vec<pos_core::Event>);
+/// Exclusive plaintext staging over its native caller's carrier. Native owners
+/// fund each Event before pushing it; failed/post-check/unwind exits scrub it
+/// before the caller drops the carrier. Only `into_events` releases plaintext.
+pub(crate) struct ReplayEventStagingV1<'carrier>(&'carrier mut Vec<pos_core::Event>);
 
-impl ReplayEventStagingV1 {
+impl<'carrier> ReplayEventStagingV1<'carrier> {
+    pub(crate) const fn new(events: &'carrier mut Vec<pos_core::Event>) -> Self {
+        Self(events)
+    }
+
     pub(crate) fn push(&mut self, event: pos_core::Event) -> &mut pos_core::Event {
         self.0.push(event);
         let index = self.0.len() - 1;
         &mut self.0[index]
     }
 
-    pub(crate) fn into_events(mut self) -> Vec<pos_core::Event> {
-        std::mem::take(&mut self.0)
+    pub(crate) fn into_events(self) -> Vec<pos_core::Event> {
+        std::mem::take(self.0)
     }
 }
 
-impl Drop for ReplayEventStagingV1 {
+impl Drop for ReplayEventStagingV1<'_> {
     fn drop(&mut self) {
-        let scrubbed = pos_core::store::zeroize_event_plaintext_staging(&mut self.0);
+        let scrubbed = pos_core::store::zeroize_event_plaintext_staging(self.0);
         debug_assert!(scrubbed);
+    }
+}
+
+#[cfg(test)]
+mod staging_tests {
+    use super::ReplayEventStagingV1;
+    use pos_core::{
+        CanonicalBytes, EntityId, Event, EventId, Hash, Kind, SchemaVersion, Seq, WallTime,
+    };
+
+    fn event() -> Event {
+        Event {
+            id: EventId::new(),
+            entity: EntityId::new(),
+            event_type: Kind::new("private.kind"),
+            payload: CanonicalBytes::from_vec(b"private payload".to_vec()),
+            wall_time: WallTime::from_micros(1),
+            seq: Seq::from_u64(1),
+            causation_id: None,
+            correlation_id: None,
+            schema_version: SchemaVersion::V1,
+            signature: None,
+            signature_identity: None,
+            origin: None,
+            payload_hash: Hash::zero(),
+        }
+    }
+
+    #[test]
+    fn native_staging_scrubs_its_carrier_on_return_and_unwind() {
+        for unwind in [false, true] {
+            let mut carrier = vec![event()];
+            let id = carrier[0].id;
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _staging = ReplayEventStagingV1::new(&mut carrier);
+                if unwind {
+                    std::panic::resume_unwind(Box::new("native staging unwind control"));
+                }
+            }));
+            assert_eq!(result.is_err(), unwind);
+            assert_eq!(carrier[0].event_type.as_str(), "");
+            assert!(carrier[0].payload.is_empty());
+            assert_eq!(carrier[0].id, id);
+        }
+    }
+
+    #[test]
+    fn successful_handoff_releases_the_unchanged_owned_plaintext() {
+        let mut carrier = vec![event()];
+        let released = ReplayEventStagingV1::new(&mut carrier).into_events();
+        assert!(carrier.is_empty());
+        assert_eq!(released.len(), 1);
+        assert_eq!(released[0].event_type.as_str(), "private.kind");
+        assert_eq!(released[0].payload.as_slice(), b"private payload");
     }
 }
 

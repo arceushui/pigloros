@@ -39,7 +39,8 @@ impl SqliteStore {
             })?;
         let head = history_head(&history, &mut context)?;
         let (from, to) = complete_event_range(head, range, bounds, &mut context)?;
-        let mut events = ReplayEventStagingV1::default();
+        let mut carrier = Vec::new();
+        let mut events = ReplayEventStagingV1::new(&mut carrier);
         let mut total_bytes = 0_usize;
         for (index, (node, _)) in history.iter().enumerate() {
             let (prefix, length) = history_segment(&history, index, &mut context)?;
@@ -132,7 +133,7 @@ impl SqliteStore {
         key: &str,
         lengths: &EventRowLengthsV1,
         (timeline, prefix, next): (&TimelineId, u64, u64),
-        events: &mut ReplayEventStagingV1,
+        events: &mut ReplayEventStagingV1<'_>,
         context: &mut LineageReadContextV1<'_, '_>,
     ) -> LineageReadResult<()> {
         self.lineage_row(
@@ -317,7 +318,8 @@ mod tests {
             );
             assert_eq!(total, 9);
             assert_eq!(budget.remaining_native_bytes(), 119);
-            let mut events = ReplayEventStagingV1::default();
+            let mut carrier = Vec::new();
+            let mut events = ReplayEventStagingV1::new(&mut carrier);
             store.read_replay_event(
                 &key,
                 &lengths,
