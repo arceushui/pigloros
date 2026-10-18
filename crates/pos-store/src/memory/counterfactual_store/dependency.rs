@@ -1585,8 +1585,16 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn assert_fenced(store: &MemoryStore, scope: Scope) {
         let fenced = Err(StoreError::StorageFailure);
-        assert_eq!(read_nodes(store, scope, 5).map(drop), fenced, "{scope:?}");
-        assert_eq!(read_edges(store, scope, 5).map(drop), fenced, "{scope:?}");
+        assert_eq!(
+            read_nodes(store, scope, 5).map(drop),
+            fenced,
+            "nodes {scope:?}"
+        );
+        assert_eq!(
+            read_edges(store, scope, 5).map(drop),
+            fenced,
+            "edges {scope:?}"
+        );
     }
 
     /// Drive one erasure request over `timeline` to `Complete` on the store's
