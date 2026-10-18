@@ -123,3 +123,51 @@ fn unavailable_event_ranges_are_not_partial_success_or_budget_refusal() -> TestR
     let [root, _, _] = seed_read_history(&mut sqlite)?;
     unavailable_range(&sqlite, root)
 }
+
+fn inclusive_event_caps<S: ForkReplayAuthorityReadPortV1 + ErasureInventoryPersistencePortV1>(
+    store: &S,
+    root: TimelineId,
+) -> TestResult {
+    let interval = store.begin_protected_effect_interval()?;
+    for (from, to, maximum, expected) in [
+        (1, 1, 0, Err(Error::Read(ReadError::BoundsExceeded))),
+        (2, 2, 0, Err(Error::Read(ReadError::BoundsExceeded))),
+        (1, 1, 1, Ok(1)),
+        (2, 2, 1, Ok(1)),
+        (1, 2, 1, Err(Error::Read(ReadError::BoundsExceeded))),
+        (3, 1, 0, Ok(0)),
+        (4, 1, 0, Ok(0)),
+    ] {
+        let bounds =
+            EventReadBounds::new_with_total_bytes_and_elapsed(3, 1, 1, maximum, 8, 1_000_000);
+        let limits = ForkReplayReadLimitsV1::new(1, 8, 64, 4_096, 1_000_000)?;
+        let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+        let start = clock.mark();
+        let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+        let result = store
+            .read_fork_replay_events(
+                root,
+                SeqRange::bounded(Seq::from_u64(from), Seq::from_u64(to)),
+                bounds,
+                &mut budget,
+            )
+            .map(|events| events.len());
+        assert_eq!(result, expected, "range={from}..={to}, cap={maximum}");
+        assert_eq!(budget.check_time().is_ok(), expected.is_ok());
+    }
+    store.finish_protected_effect_interval(
+        interval,
+        ErasureProtectedEffectDispositionV1::Rollback,
+    )?;
+    Ok(())
+}
+
+#[test]
+fn event_caps_include_single_event_ranges_and_accept_disjoint_empty_ranges() -> TestResult {
+    let mut memory = MemoryStore::new();
+    let [root, _, _] = seed_read_history(&mut memory)?;
+    inclusive_event_caps(&memory, root)?;
+    let mut sqlite = SqliteStore::open(":memory:")?;
+    let [root, _, _] = seed_read_history(&mut sqlite)?;
+    inclusive_event_caps(&sqlite, root)
+}
