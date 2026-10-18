@@ -249,6 +249,18 @@ async fn one_call_sends_the_held_image_and_returns_one_sealed_root_mount() -> Te
 }
 
 #[tokio::test]
+async fn the_v260_2_intersected_effective_policy_is_accepted() -> TestResult {
+    // mountfsd returns image_policy_intersect(default, request); neither
+    // default carries filesystem flags (proposed ADR-087 #439 amendment).
+    for policy in ["root=signed:=absent", "root=signed+erofs:=absent"] {
+        let reply = with(|reply| reply["parameters"]["imagePolicy"] = json!(policy));
+        let transaction = transact(single(message(&reply)?, 1)).await?;
+        assert!(transaction.outcome.is_ok(), "{policy}");
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn arm64_and_an_absent_architecture_are_accepted() -> TestResult {
     let arm64 = with(|reply| root_field(reply, "architecture", json!("arm64")));
     let transaction = transact_with(
@@ -313,13 +325,25 @@ async fn a_root_other_than_the_admitted_signed_erofs_root_is_an_evidence_mismatc
         with(|reply| root_field(reply, "size", json!(ROOT_SIZE + 4096))),
         with(|reply| root_field(reply, "architecture", json!("arm64"))),
         with(|reply| reply["parameters"]["singleFileSystem"] = json!(true)),
-        // systemd v260.2 intersects the request with a default that has no
-        // filesystem flags; ADR-087 requires the requested semantics.
-        with(|reply| reply["parameters"]["imagePolicy"] = json!("root=signed:=absent")),
     ];
-    for reply in &cases {
+    let policies = [
+        "root=signed+squashfs:=absent",
+        "root=signed+erofs+squashfs:=absent",
+        "root=verity:=absent",
+        "root=signed+read-only-on:=absent",
+        "root=signed:usr=signed:=absent",
+        "root=signed:root-verity=absent:=absent",
+        "root=signed:=ignore",
+        "=absent",
+    ];
+    let cases = cases.into_iter().chain(
+        policies
+            .iter()
+            .map(|policy| with(|reply| reply["parameters"]["imagePolicy"] = json!(policy))),
+    );
+    for reply in cases {
         assert_eq!(
-            outcome_of(reply, 1).await?,
+            outcome_of(&reply, 1).await?,
             ImageActivationError::EvidenceMismatch,
             "{reply}"
         );

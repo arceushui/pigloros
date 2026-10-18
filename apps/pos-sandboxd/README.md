@@ -56,9 +56,12 @@ the call, but this crate supplies the socket. Every receive requests
 `MSG_CMSG_CLOEXEC`, verifies `FD_CLOEXEC`, rejects ancillary truncation,
 credentials and descriptors in more than one read, and bounds the reply to one
 NUL-terminated message. The captured bytes are then parsed under a closed
-systemd v260.2 schema. The effective image policy must be semantically
-equivalent to the request under ported v260.2 `image_policy_equivalent()`
-rules. Every rejection closes all received descriptors. The result is a
+systemd v260.2 schema. Under ported v260.2 `image_policy_equivalent()` rules,
+the effective image policy must be equivalent to the request or, because
+v260.2 intersects it with a default that carries no filesystem flags, to the
+request with only its filesystem flags removed (proposed ADR-087 #439
+amendment, wiki revision 20). EROFS stays enforced by the SIM1 precheck, the
+reply's `fileSystemType` and kernel readback. Every rejection closes all received descriptors. The result is a
 quarantined root mount, not proof of the image, the mount or its dm-verity
 identity.
 

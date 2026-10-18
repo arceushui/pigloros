@@ -11,6 +11,12 @@
 //! `image_policy_to_string()` never emits those forms, so an honest effective
 //! policy is unaffected.
 //!
+//! Proposed ADR-087 #439 amendment (wiki revision 20): v260.2 mountfsd
+//! returns `image_policy_intersect(default, request)`, and neither default
+//! carries filesystem flags, so the effective policy loses them. The returned
+//! policy is therefore accepted when it is equivalent to the request, or to
+//! the request with only its filesystem flags removed, and to nothing else.
+//!
 //! Every bit operation goes through the small helpers below so that each one
 //! is exercised with overlapping operands.
 
@@ -57,6 +63,8 @@ const VERITY_PROTECTION: u32 = 0x3;
 const DATA_PROTECTION: u32 = 0xf;
 /// `UNUSED | ABSENT`.
 const PRESENCE: u32 = 0x60;
+/// `_PARTITION_POLICY_FSTYPE_MASK`: `btrfs` through `xfs`.
+const FILESYSTEM_MASK: u32 = 0x3_f800;
 
 /// `policy_flag_from_string_one()` and `policy_flag_from_fstype()`.
 const FLAGS: [(&str, u32); 20] = [
@@ -97,11 +105,15 @@ struct ImagePolicy {
     entries: [Option<u32>; DESIGNATORS.len()],
 }
 
-/// Whether mountfsd's effective policy reaches the requested decisions.
+/// Whether mountfsd's effective policy reaches the requested decisions,
+/// either exactly or after v260.2's intersection cleared filesystem flags.
 pub(super) fn matches_requested(effective: &str) -> bool {
     parse(REQUESTED)
         .zip(parse(effective))
-        .is_some_and(|(requested, effective)| equivalent(&requested, &effective))
+        .is_some_and(|(requested, effective)| {
+            equivalent(&requested, &effective)
+                || equivalent(&requested.without_filesystems(), &effective)
+        })
 }
 
 fn parse(text: &str) -> Option<ImagePolicy> {
@@ -152,6 +164,16 @@ impl ImagePolicy {
         Self {
             default,
             entries: [None; DESIGNATORS.len()],
+        }
+    }
+
+    /// The same rules with every filesystem flag cleared.
+    fn without_filesystems(self) -> Self {
+        Self {
+            default: without(self.default, FILESYSTEM_MASK),
+            entries: self
+                .entries
+                .map(|entry| entry.map(|flags| without(flags, FILESYSTEM_MASK))),
         }
     }
 
@@ -279,12 +301,40 @@ mod tests {
             "root=signed+erofs+read-only-on+read-only-off:root-verity=unprotected:=absent"
         ));
         // v260.2 mountfsd intersects with a default lacking filesystem flags.
-        assert!(!matches_requested("root=signed:=absent"));
-        assert!(!matches_requested("root=verity+signed+erofs:=absent"));
-        assert!(!matches_requested("root=signed+erofs:=ignore"));
-        assert!(!matches_requested("root=signed+erofs:usr=signed:=absent"));
-        assert!(!matches_requested("root=signed+erofs:=absent:"));
-        assert!(!matches_requested("root = signed+erofs:=absent"));
+        assert!(matches_requested("root=signed:=absent"));
+        assert!(matches_requested(
+            "root=signed+read-only-on+read-only-off:=absent"
+        ));
+        for rejected in [
+            "root=signed+squashfs:=absent",
+            "root=signed+erofs+squashfs:=absent",
+            "root=verity:=absent",
+            "root=verity+signed:=absent",
+            "root=signed+read-only-on:=absent",
+            "root=signed+growfs-off:=absent",
+            "root=signed:usr=signed:=absent",
+            "root=signed:root-verity=absent:=absent",
+            "root=signed:=ignore",
+            "root=signed+erofs:=ignore",
+            "root=signed+erofs:usr=signed:=absent",
+            "=absent",
+            "~",
+            "*",
+            "root=signed+erofs:=absent:",
+            "root = signed+erofs:=absent",
+        ] {
+            assert!(!matches_requested(rejected), "{rejected}");
+        }
+    }
+
+    #[test]
+    fn removing_filesystems_clears_only_filesystem_flags() {
+        let stripped = parse("root=signed+erofs+read-only-on:usr=absent+xfs:=absent+btrfs")
+            .map(ImagePolicy::without_filesystems);
+        let expected = parse("root=signed+read-only-on:usr=absent:=absent");
+        assert!(stripped
+            .zip(expected)
+            .is_some_and(|(stripped, expected)| equivalent(&stripped, &expected)));
     }
 
     #[test]
