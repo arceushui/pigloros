@@ -12,13 +12,12 @@ publish.workspace = true
 # recorder, for tests only. Never enable in deployable builds;
 # the probe is not a Component worker. Enforced by
 # scripts/check_test_support_features.py in CI. It also compiles the pass harness
-# (`tests/support`), which commits to the optional store dependency: `MemoryStore`, or the
+# (`tests/support`), which commits to the store dependency: `MemoryStore`, or the
 # in-memory SQLite store through `pos-store/sqlite`.
 test-support = [
   "pos-crypto/test-support",
   "pos-core/test-support",
   "pos-runtime/test-support",
-  "dep:pos-store",
   "pos-store/sqlite",
 ]
 
@@ -34,11 +33,12 @@ pos-crypto = { path = "../pos-crypto" }
 # `ContentValidationV1` appears in the invocation receipt.
 pos-plugin-release = { path = "../pos-plugin-release" }
 pos-runtime = { path = "../pos-runtime" }
-# The pass harness (feature `test-support`) commits to `MemoryStore` or in-memory SQLite. The
-# default features stay off to keep this declaration minimal, and `test-support` enables
-# `pos-store/sqlite` explicitly; `pos-runtime` already depends on `pos-store` with its defaults
-# (SQLite included), so the resolved graph is unchanged.
-pos-store = { path = "../pos-store", default-features = false, optional = true }
+# The ADR-119 composition boundary transaction (#667) names the composition fallback registry
+# and Plugin trust registry ports. The pass harness (feature `test-support`) commits to
+# `MemoryStore` or SQLite. The default features stay off to keep this declaration minimal, and
+# `test-support` enables `pos-store/sqlite` explicitly; `pos-runtime` already depends on
+# `pos-store` with its defaults (SQLite included), so the resolved graph is unchanged.
+pos-store = { path = "../pos-store", default-features = false }
 # `process` provides prlimit, PR_SET_PDEATHSIG and getppid as safe calls. The
 # worker lists its open descriptors through `/proc/self/fd` with the `fs`
 # feature, which the workspace dependency already enables. `stdio` is used only
@@ -89,12 +89,16 @@ required-features = ["test-support"]
 name = "community_host_public"
 required-features = ["test-support"]
 
+[[test]]
+name = "composition_fallback_public"
+required-features = ["test-support"]
+
 # cargo-shear classifies everything under `tests/` as test code, so it sees the pass harness only
 # through the feature-gated `#[path]` module in `src/lib.rs`: the root file `tests/support/mod.rs`
 # looks unlinked. That is intended: the harness is a library module that other crates reach
 # through the `test-support` feature, and it lives under `tests/support` to stay outside the
-# production-coverage glob (`**/src/**/*.rs`). The optional `pos-store` is used by the
-# integration tests, so it needs no ignore entry.
+# production-coverage glob (`**/src/**/*.rs`). The `pos-store` dependency is used by
+# `src/fallback`, so it needs no ignore entry.
 [package.metadata.cargo-shear]
 ignored-paths = ["tests/support/mod.rs"]
 

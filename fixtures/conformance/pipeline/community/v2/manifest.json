@@ -1067,6 +1067,41 @@
         "successor.naming-the-withdrawal": "Committed",
         "successor.entry": "2/0/next"
       }
+    },
+    {
+      "id": "PCF-CPH-019",
+      "title": "The ADR-119 composition boundary transaction on the real worker: a trap the host reports Unverified activates nothing; a revoked primary refuses the pass at its gate, the boundary commits one activation Event and one ledger row and swaps the entry and the host member, and the next pass commits the candidate's Event (relief from the revision 7 deadlock); an owner return to the revoked primary is refused at the trust gate. Air-Gapped results equal Local ones (activation records are trigger code/cause/origin/closing tenure)",
+      "sources": [
+        "#661",
+        "#667",
+        "ADR-119 section 6"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory",
+        "sqlite"
+      ],
+      "observation_profile": null,
+      "expected": {
+        "healthy.result": "committed:1",
+        "trap.result": "failed",
+        "trap.failure": "ComponentTrap",
+        "trap.boundary": "none",
+        "revoked.result": "refused",
+        "revoked.failure": "ArtifactRevoked",
+        "revoked.boundary": "activated:plugin-b:none",
+        "revoked.activation": "ArtifactRevoked/Some(ArtifactRevoked)/Automatic/0",
+        "revoked.running": "plugin-b",
+        "ledger.rows": "2",
+        "relief.result": "committed:1",
+        "relief.gate-ok": "Some(true)",
+        "return.revoked-primary": "exhausted:ReleaseNotCurrent",
+        "return.running": "plugin-b",
+        "air-gapped-equals-local": "true"
+      }
     }
   ]
 }
