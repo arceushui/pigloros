@@ -137,11 +137,9 @@ mod tests {
                 assert_eq!(*ok(observed.lock()), expected);
                 let poisoned = Arc::clone(&observed);
                 let worker = std::thread::spawn(move || {
-                    let guard = poisoned.lock();
-                    std::panic::resume_unwind(Box::new({
-                        assert!(guard.is_ok());
-                        "intentional native observer poison"
-                    }));
+                    // Own the lock until unwinding poisons it; do not unlock early.
+                    let _guard = ok(poisoned.lock());
+                    std::panic::resume_unwind(Box::new("intentional native observer poison"));
                 });
                 assert!(worker.join().is_err());
                 assert!(observed.is_poisoned());
