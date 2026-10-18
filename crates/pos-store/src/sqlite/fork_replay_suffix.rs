@@ -897,6 +897,79 @@ mod tests {
     }
 
     #[test]
+    fn selected_suffix_row_rejects_each_binding_before_the_result_cut() -> Fallible<()> {
+        let (_directory, store, world, _built) = fixture(Shape::Mixed)?;
+        let child = world.child_at(0)?.id;
+        let expected = store.read_fork_event_suffix(child, 1)?;
+        let (_, row) = next_row(
+            &store.conn,
+            &child.to_string(),
+            None,
+            &mut NativeReadContextV1::ordinary(),
+        )?
+        .ok_or("fixture selected suffix row")?;
+        let operation =
+            ForkAppendOperationV1::from_canonical_cbor(row.2.as_deref().ok_or("fixture FOP1")?)?;
+        let scope = SuffixReadV1 {
+            store: &store,
+            child,
+            from: crate::fae1_fixture::PARENT_CUT + Shape::Mixed.events() + 1,
+            prefix: origin_prefix_with_context(
+                &store.conn,
+                child,
+                &mut NativeReadContextV1::ordinary(),
+            )?,
+            graph: super::super::sqlite_validated_graph(
+                &store.conn,
+                store.hasher.as_ref(),
+                child,
+                AuthorityValidatorV1::CodeTwoAware,
+                &mut NativeReadContextV1::ordinary(),
+            ),
+        };
+        assert!(scope.graph.is_ok());
+        assert!(operation.input().logical_seq + 1 < scope.from);
+        for fault in 0..5 {
+            let mut input = operation.input().clone();
+            match fault {
+                0 => input.child_timeline_id = TimelineId::new(),
+                1 => input.fork_admission_digest = pos_core::Hash::from_bytes([0x94; 32]),
+                2 => input.classifier_revision_digest = pos_core::Hash::from_bytes([0x94; 32]),
+                3 => input.event_id = pos_core::EventId::new(),
+                _ => input.logical_seq += 1,
+            }
+            let changed = ForkAppendOperationV1::new(input)?;
+            let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+            let start = clock.mark();
+            let limits = ForkReplayReadLimitsV1::new(1, 8, 64, 65_536, 1_000_000)?;
+            let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+            let mut result = Vec::new();
+            // Isolate this selected-row owner from earlier orphan/graph scans
+            // and later provenance joins, which can mask a missing binding.
+            assert_eq!(
+                scope.validate_row(
+                    (row.0.clone(), row.1, Some(changed.to_canonical_cbor())),
+                    &mut result,
+                    &mut NativeReadContextV1::protected(&mut budget),
+                ),
+                Err(Error::CorruptAuthority),
+                "accepted independent suffix binding fault {fault}",
+            );
+            assert!(result.is_empty());
+            budget.check_time()?;
+            scope.validate_row(
+                row.clone(),
+                &mut result,
+                &mut NativeReadContextV1::protected(&mut budget),
+            )?;
+            assert!(result.is_empty());
+            budget.check_time()?;
+        }
+        assert_eq!(store.read_fork_event_suffix(child, 1)?, expected);
+        Ok(())
+    }
+
+    #[test]
     fn protected_publication_rejects_independently_corrupted_operation_digests() -> Fallible<()> {
         use crate::{
             ForkManifestPublicationPortV1, ForkReplayAuthorityReadErrorV1,
