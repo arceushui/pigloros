@@ -1,0 +1,106 @@
+# Branch-only diagnosis: not a required PR gate or a trusted baseline publisher.
+name: 561-helper-coverage-probe
+
+on:
+  push:
+    branches: [redmine/561-helper-coverage-probe]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: 561-helper-coverage-probe-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      RUSTC_BOOTSTRAP: "1"
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+      CARGO_TERM_COLOR: never
+      RUSTFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: e745d54efe268e72ce4ac20620cc199b8ae562b5
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Pin source, tree, review base and non-root execution
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          test "$(git rev-parse HEAD)" = e745d54efe268e72ce4ac20620cc199b8ae562b5
+          test "$(git rev-parse HEAD^{tree})" = 2653c606603e3d31d0cec26a1e1710a7d9e53071
+          test -z "$(git status --porcelain --untracked-files=no)"
+          test "$(git merge-base a0ef016daf36a0024e53e67d3668fc11b555a303 HEAD)" = a0ef016daf36a0024e53e67d3668fc11b555a303
+          git rev-parse HEAD HEAD^{tree} | tee artifacts/source-identity.txt
+          git merge-base a0ef016daf36a0024e53e67d3668fc11b555a303 HEAD | tee artifacts/review-base.txt
+          id | tee artifacts/runner-identity.txt
+          test "$(id -u)" -ne 0
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: 1.97.1
+          components: llvm-tools-preview
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
+        with:
+          tool: cargo-llvm-cov@0.9.1
+          fallback: none
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
+        with:
+          tool: cargo-nextest@0.9.146
+          fallback: none
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
+        with:
+          tool: covgate@0.2.0
+          fallback: none
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        with:
+          shared-key: coverage
+          save-if: false
+      - name: Record native tool versions
+        run: |
+          set -euo pipefail
+          rustc -Vv | tee artifacts/rustc.txt
+          cargo llvm-cov --version | tee artifacts/llvm-cov-version.txt
+          cargo nextest --version | tee artifacts/nextest-version.txt
+          covgate --version | tee artifacts/covgate-version.txt
+      - name: Generate complete native workspace coverage
+        id: coverage
+        run: |
+          set -euo pipefail
+          cargo llvm-cov nextest --workspace --all-features --locked \
+            --json --output-path artifacts/coverage.json \
+            --user-config-file none --ignore-default-filter \
+            --run-ignored all --no-fail-fast 2>&1 | tee artifacts/coverage.log
+      - name: Reject ignored or skipped tests in the complete inventory
+        run: bash scripts/assert-no-ignored-in-test-summary.sh artifacts/coverage.log
+      - name: Enforce changed-code coverage against the fixed review base
+        run: |
+          set -euo pipefail
+          covgate check artifacts/coverage.json \
+            --base a0ef016daf36a0024e53e67d3668fc11b555a303 \
+            --no-github-summary 2>&1 | tee artifacts/changed-code.log
+      - name: Enforce unchanged workspace line and region floors
+        if: ${{ !cancelled() && steps.coverage.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          cargo llvm-cov report --json --summary-only --show-missing-lines \
+            --fail-under-lines 99 --fail-under-regions 99 \
+            > artifacts/coverage-summary.json
+      - name: Retain actual file-level LCOV mapping
+        if: ${{ !cancelled() && steps.coverage.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          cargo llvm-cov report --lcov --output-path artifacts/coverage.lcov
+      - name: Preserve native evidence even on failure
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: untrusted-561-helper-coverage-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 7
