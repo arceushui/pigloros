@@ -273,6 +273,24 @@ mod tests {
             assert_raw_gate_refusal(&store, kind, arguments, Error::PublicationConflict)?;
             store.conn.execute(sql, params!["not-a-blob"])?;
             assert_raw_gate_refusal(&store, kind, arguments, Error::StorageIndeterminate)?;
+            // The raw transport cap is inclusive, independent of subsequent
+            // strict record validation, which would reject this zero padding.
+            let raw = vec![0; maximum];
+            assert_eq!(store.conn.execute(sql, [&raw])?, 1);
+            let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+            let start = clock.mark();
+            let limits = ForkReplayReadLimitsV1::new(1, 1, 2, maximum, 1_000_000)?;
+            let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+            assert_eq!(
+                store.publication_blob_with_context(
+                    kind,
+                    arguments,
+                    &mut NativeReadContextV1::protected(&mut budget)
+                )?,
+                Some(raw)
+            );
+            assert_eq!(budget.remaining_native_bytes(), 0);
+            budget.check_time()?;
         }
         Ok(())
     }
