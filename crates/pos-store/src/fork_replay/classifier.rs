@@ -215,6 +215,64 @@ mod tests {
     }
 
     #[test]
+    fn classifier_caps_are_inclusive_before_malformed_precharges() -> Fallible<()> {
+        let (source, table, registration) = records()?;
+        assert_eq!(source.input().routes, table.input().routes);
+        let route_bytes: usize = source
+            .input()
+            .routes
+            .iter()
+            .map(|route| route.source().route().len() + 32 + 1)
+            .sum();
+        for (codec, valid, fields) in [
+            (
+                Codec::Source,
+                source.to_canonical_cbor(),
+                source.input().registrar_identifier.len() + route_bytes,
+            ),
+            (
+                Codec::Table,
+                table.to_canonical_cbor(),
+                table.input().registrar_identifier.len() + route_bytes,
+            ),
+            (Codec::Registration, registration.to_canonical_cbor(), 0),
+        ] {
+            let maximum = codec.maximum();
+            assert!(valid.len() < maximum);
+            for (length, charge) in [
+                (maximum - 1, maximum - 1 + fields),
+                (maximum, maximum + fields),
+                (maximum + 1, 0),
+            ] {
+                // The carrier still exposes the original bounded fields;
+                // Core independently rejects the corrupt trailing encoding.
+                let mut malformed = valid.clone();
+                malformed.resize(length, 0);
+                assert!(!codec.accepts(&malformed));
+                let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+                let start = clock.mark();
+                let limits = ForkReplayReadLimitsV1::new(1, 1, 1, 1_000_000, 1_000_000)?;
+                let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+                assert_eq!(
+                    codec.decode(&malformed, &mut NativeReadContextV1::protected(&mut budget)),
+                    Err(Error::PublicationConflict),
+                );
+                assert_eq!(
+                    budget.remaining_native_bytes(),
+                    limits.max_native_bytes() - charge,
+                );
+                assert_eq!(budget.check_time(), Ok(()));
+                codec.decode(&valid, &mut NativeReadContextV1::protected(&mut budget))?;
+                assert_eq!(
+                    budget.remaining_native_bytes(),
+                    limits.max_native_bytes() - charge - valid.len() - fields,
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn classifier_carriers_preserve_all_three_strict_native_decoders() -> Fallible<()> {
         let (source, table, registration) = records()?;
         for (codec, bytes) in [
