@@ -146,8 +146,10 @@ shards run the two `pos-conformance` bundle integration targets independently.
 The `moat-proof` shard runs the slow moat integration target independently.
 `remainder-1` and `remainder-2` use cargo-nextest's disjoint `slice:1/2` and
 `slice:2/2` partitions over `not package(pos-conformance)`; `remainder-1` also
-runs the `pos-conformance` library, binaries, and the profile/provider
-integration targets. Each shard bounds test threads at two through the explicit
+runs every other `pos-conformance` target by excluding only the three targets
+assigned to the dedicated bundle and moat shards. Newly added conformance
+targets therefore join the remainder automatically rather than requiring an
+allowlist update. Each shard bounds test threads at two through the explicit
 cargo-nextest `--test-threads 2` cap. The two long remainder shards are
 scheduled first under the five-runner cap, so both begin together while the
 short moat shard waits. The required `asan (address sanitizer)` aggregate runs
