@@ -409,9 +409,7 @@ fn public_durable_records_admit_exactly_the_complete_record_limit(
 #[test]
 fn public_binding_preserves_each_backup_flag_through_the_codec(
 ) -> Result<(), OwnerBridgeCodecError> {
-    let flag_cases: [(bool, bool, [u8; 2]); 2] =
-        [(true, false, [0xf5, 0xf4]), (true, true, [0xf5, 0xf5])];
-    for (backup_eligible, backup_state, flag_bytes) in flag_cases {
+    for (backup_eligible, backup_state, state_byte) in [(true, false, 0xf4), (true, true, 0xf5)] {
         let binding = SubjectCredentialBindingV1::new(SubjectCredentialBindingInputV1 {
             owner_id: "owner",
             subject_id: SUBJECT_ID,
@@ -432,7 +430,8 @@ fn public_binding_preserves_each_backup_flag_through_the_codec(
             encode_subject_credential_binding(&binding, &mut output),
             Ok(187)
         );
-        assert_eq!(output[182..184], flag_bytes);
+        assert_eq!(output[182], 0xf5);
+        assert_eq!(output[183], state_byte);
         let decoded = decode_subject_credential_binding(&output)?;
         assert_eq!(decoded.backup_eligible(), backup_eligible);
         assert_eq!(decoded.backup_state(), backup_state);

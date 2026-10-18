@@ -107,11 +107,8 @@ impl<'a> SubjectCredentialBindingV1<'a> {
         };
         // The record limit is the exact encoder's own output length, so the
         // admitted bound cannot drift from the bytes later written.
-        encode_subject_credential_binding(
-            &binding,
-            &mut [0; MAX_SUBJECT_CREDENTIAL_BINDING_BYTES],
-        )
-        .map_err(|_| OwnerBridgeCodecError::BoundsExceeded)?;
+        encode_subject_credential_binding(&binding, &mut [0; MAX_SUBJECT_CREDENTIAL_BINDING_BYTES])
+            .map_err(|_| OwnerBridgeCodecError::BoundsExceeded)?;
         if backup_state && !backup_eligible {
             return Err(OwnerBridgeCodecError::InvalidPayload);
         }
