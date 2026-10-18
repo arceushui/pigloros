@@ -284,6 +284,32 @@ mod tests {
                 assert_eq!(budget.remaining_native_bytes(), 64 - key_bytes);
                 assert!(budget.check_time().is_ok());
             }
+            // Inclusive raw transport only; these padded bytes need not be a
+            // canonical classifier record and are not passed to its decoder.
+            let raw = vec![0; maximum];
+            assert_eq!(store.conn.execute(sql, [&raw])?, 1);
+            let key_bytes = if matches!(
+                key,
+                ClassifierKeyV1::Table(_) | ClassifierKeyV1::Registration(_)
+            ) {
+                ulid::ULID_LEN
+            } else {
+                0
+            };
+            let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+            let start = clock.mark();
+            let limits = ForkReplayReadLimitsV1::new(1, 1, 2, maximum + key_bytes, 1_000_000)?;
+            let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+            assert_eq!(
+                classifier_blob_with_context(
+                    &store.conn,
+                    key,
+                    &mut NativeReadContextV1::protected(&mut budget)
+                )?,
+                Some(raw)
+            );
+            assert_eq!(budget.remaining_native_bytes(), 0);
+            budget.check_time()?;
         }
         Ok(())
     }

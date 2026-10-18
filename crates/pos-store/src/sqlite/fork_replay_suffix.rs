@@ -621,6 +621,8 @@ mod tests {
                 &mut NativeReadContextV1::protected(&mut budget)
             )
             .is_err());
+            assert_eq!(budget.remaining_native_bytes(), 4096);
+            budget.check_time()?;
             store
                 .conn
                 .execute_batch("ROLLBACK TO suffix_fault; RELEASE suffix_fault")?;
