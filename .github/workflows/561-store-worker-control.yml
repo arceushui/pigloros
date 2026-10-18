@@ -212,7 +212,10 @@ jobs:
                       assert any(re.fullmatch(r"test .+ \.\.\. FAILED(?: <[0-9]+\.[0-9]+s>)?", row) for row in rows)
                   else:
                       assert outcome["summary"] == "Timeout" and phases[1]["process_status"] == "Timeout"
-              expected_status = 3 if outcomes["timeout"] else 0
+              caught = sum(o["summary"] == "CaughtMutant" for o in outcomes["outcomes"])
+              timed_out = sum(o["summary"] == "Timeout" for o in outcomes["outcomes"])
+              assert (caught, timed_out) == (outcomes["caught"], outcomes["timeout"])
+              expected_status = 3 if timed_out else 0
               assert phase["exit_code"] == expected_status
               phase.update(workers=workers, caught=outcomes["caught"], timeout=outcomes["timeout"])
               save()
