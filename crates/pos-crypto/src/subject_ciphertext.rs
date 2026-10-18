@@ -572,8 +572,9 @@ fn associated_data(header: &Header, context_digest: &[u8; 32], counter: u64) -> 
     output
 }
 
+/// The V1 IV: the zero 32-bit fixed field, then the 64-bit counter, which are
+/// exactly the low 96 bits of the counter widened to 128 bits.
 fn nonce(counter: u64) -> [u8; 12] {
-    let mut nonce = [0; 12];
-    nonce[4..].copy_from_slice(&counter.to_be_bytes());
+    let [_, _, _, _, nonce @ ..] = u128::from(counter).to_be_bytes();
     nonce
 }

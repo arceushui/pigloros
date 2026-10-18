@@ -130,9 +130,7 @@ fn hex(text: &str) -> Vec<u8> {
 
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn fixed<const N: usize>(bytes: &[u8]) -> [u8; N] {
-    let mut out = [0; N];
-    out.copy_from_slice(bytes);
-    out
+    std::array::from_fn(|index| bytes[index])
 }
 
 /// `N` ascending bytes starting at `start`.
@@ -408,14 +406,15 @@ fn consent_items() -> Vec<Vec<u8>> {
 
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn nonce(counter: u64) -> [u8; 12] {
-    prefixed_nonce([0; 4], counter)
+    let [_, _, _, _, nonce @ ..] = u128::from(counter).to_be_bytes();
+    nonce
 }
 
+/// The V1 nonce of `counter` with the fixed field `fixed_field` instead.
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn prefixed_nonce(prefix: [u8; 4], counter: u64) -> [u8; 12] {
-    let mut nonce = [0; 12];
-    nonce[..4].copy_from_slice(&prefix);
-    nonce[4..].copy_from_slice(&counter.to_be_bytes());
+fn prefixed_nonce(fixed_field: u32, counter: u64) -> [u8; 12] {
+    let [_, _, _, _, nonce @ ..] =
+        ((u128::from(fixed_field) << 64) | u128::from(counter)).to_be_bytes();
     nonce
 }
 
@@ -1229,8 +1228,8 @@ fn ciphertext_decoder_accepts_only_the_v1_nonce_construction() {
     let items = consent_items();
     let invalid = Err(SubjectCiphertextErrorV1::InvalidField { ordinal: 14 });
     let rejected = [
-        prefixed_nonce([1, 0, 0, 0], 1),
-        prefixed_nonce([0, 0, 0, 1], 1),
+        prefixed_nonce(0x0100_0000, 1),
+        prefixed_nonce(1, 1),
         nonce(0),
         nonce(MAX_SUBJECT_NONCE_COUNTER + 1),
         nonce(u64::MAX),
