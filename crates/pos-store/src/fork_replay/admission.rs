@@ -248,7 +248,10 @@ mod tests {
                     codec.decode(&malformed, &mut NativeReadContextV1::protected(&mut budget)),
                     Err(Error::PublicationConflict),
                 );
-                assert_eq!(budget.remaining_native_bytes(), limits.max_native_bytes() - charge);
+                assert_eq!(
+                    budget.remaining_native_bytes(),
+                    limits.max_native_bytes() - charge
+                );
                 assert_eq!(budget.check_time(), Ok(()));
                 codec.decode(&valid, &mut NativeReadContextV1::protected(&mut budget))?;
             }

@@ -300,7 +300,10 @@ mod tests {
                     codec.decode(&capped, &mut NativeReadContextV1::protected(&mut budget)),
                     Err(Error::PublicationConflict),
                 );
-                assert_eq!(budget.remaining_native_bytes(), limits.max_native_bytes() - maximum);
+                assert_eq!(
+                    budget.remaining_native_bytes(),
+                    limits.max_native_bytes() - maximum
+                );
                 assert_eq!(budget.check_time(), Ok(()));
             }
             // Raw corruption below typed construction, not admitted authority.

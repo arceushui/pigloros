@@ -217,7 +217,10 @@ mod tests {
             assert_eq!(steps.load(Ordering::SeqCst), 1);
             assert_eq!(budget.remaining_native_bytes(), 56);
         }
-        assert_eq!(budget.check_time(), Err(ForkReplayAuthorityReadErrorV1::BoundsExceeded));
+        assert_eq!(
+            budget.check_time(),
+            Err(ForkReplayAuthorityReadErrorV1::BoundsExceeded)
+        );
         Ok(())
     }
 }
