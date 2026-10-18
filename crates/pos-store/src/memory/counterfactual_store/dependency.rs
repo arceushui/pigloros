@@ -1041,6 +1041,11 @@ mod tests {
     /// The rows held for one Timeline: its committed prefix set and its
     /// recorded Fork generation set.
     type HeldRows = (Option<DependencyRowsV1>, Option<(u64, ForkDependencySetV1)>);
+    /// The node page and the edge page of one read scope.
+    type Pages = (
+        Result<DependencyPageV1<NodeRow>, StoreError>,
+        Result<DependencyPageV1<EdgeRow>, StoreError>,
+    );
 
     const PROVISIONAL: RecordedNodeOriginV1 = RecordedNodeOriginV1::Provisional;
     const COMMITTED: RecordedNodeOriginV1 = RecordedNodeOriginV1::Committed;
@@ -1570,24 +1575,60 @@ mod tests {
         assert_eq!([held_rows(&store, root), held_rows(&store, fork)], before);
     }
 
-    /// Erasing the Fork, then (on a fresh store) the root, fences the erased
-    /// Timeline's prefix and keeps every row of both.
+    /// The node page and the edge page of one scope, or their errors.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn pages(store: &MemoryStore, scope: Scope) -> Pages {
+        (read_nodes(store, scope, 5), read_edges(store, scope, 5))
+    }
+
+    /// Both row kinds of `scope` fail closed behind the erasure fence.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn assert_fenced(store: &MemoryStore, scope: Scope) {
+        let fenced = Err(StoreError::StorageFailure);
+        assert_eq!(read_nodes(store, scope, 5).map(drop), fenced, "{scope:?}");
+        assert_eq!(read_edges(store, scope, 5).map(drop), fenced, "{scope:?}");
+    }
+
+    /// Drive one erasure request over `timeline` to `Complete` on the store's
+    /// bound gate.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn complete_erasure(store: &MemoryStore, timeline: TimelineId) {
+        let gate = ok(store.erasure_gate.clone().ok_or("no gate"));
+        let completed = gate.complete_timeline_erasure_for_test(timeline);
+        assert_eq!(completed, Ok(ErasureLifecycleV1::Complete));
+    }
+
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn a_completed_erasure_keeps_every_dependency_row() {
-        for erase_fork in [true, false] {
-            let (store, root, fork) = recorded_lineage();
-            let before = [held_rows(&store, root), held_rows(&store, fork)];
-            let gate = ok(store.erasure_gate.clone().ok_or("no gate"));
-            let erased = if erase_fork { fork } else { root };
+    fn a_completed_fork_erasure_keeps_every_dependency_row() {
+        let (store, root, fork) = recorded_lineage();
+        let before = [held_rows(&store, root), held_rows(&store, fork)];
+        let parent = pages(&store, prefix_scope(root, 9));
+        let served = parent.0.as_ref().map(DependencyPageV1::items);
+        assert!(served.is_ok_and(|items| !items.is_empty()));
 
-            let completed = gate.complete_timeline_erasure_for_test(erased);
+        complete_erasure(&store, fork);
 
-            assert_eq!(completed, Ok(ErasureLifecycleV1::Complete));
-            let fenced = read_nodes(&store, prefix_scope(erased, 9), 5);
-            assert_eq!(fenced.map(drop), Err(StoreError::StorageFailure));
-            assert_eq!([held_rows(&store, root), held_rows(&store, fork)], before);
+        for scope in [fork_scope(fork, 1), prefix_scope(fork, 9)] {
+            assert_fenced(&store, scope);
         }
+        // The Fork's request does not fence its parent's own prefix.
+        assert_eq!(pages(&store, prefix_scope(root, 9)), parent);
+        assert_eq!([held_rows(&store, root), held_rows(&store, fork)], before);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn a_completed_parent_erasure_keeps_every_dependency_row() {
+        let (store, root, fork) = recorded_lineage();
+        let before = [held_rows(&store, root), held_rows(&store, fork)];
+
+        complete_erasure(&store, root);
+
+        for timeline in [root, fork] {
+            assert_fenced(&store, prefix_scope(timeline, 9));
+        }
+        assert_eq!([held_rows(&store, root), held_rows(&store, fork)], before);
     }
 
     #[test]

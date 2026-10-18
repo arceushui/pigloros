@@ -949,6 +949,8 @@ fn c9_a_completed_fork_erasure_fences_the_fork_but_not_its_parent() {
     let (fork, root) = (fixture.fork, fixture.root);
     assert_eq!(served(&fixture.store, fork_scope(fork, 1)), [Ok(2), Ok(2)]);
     let parent = served(&fixture.store, prefix_scope(root, 5));
+    // Empty only because seeding needs pos-store's `test-support` feature;
+    // the in-module test covers a seeded parent prefix.
     assert_eq!(parent, [Ok(0), Ok(0)]);
 
     let completed = fixture.gate.complete_timeline_erasure_for_test(fork);

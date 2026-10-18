@@ -1952,7 +1952,8 @@ fn c12_a_failed_purge_statement_leaves_every_row_and_no_marker() {
 // administrative delete purges them. Raw counts are read after the store is
 // dropped.
 
-/// The child-Fork refusal of the generic delete.
+/// The child-Fork refusal of the generic delete, as in the
+/// `admitted_fork_deletion_*_public` tests.
 const HAS_FORKS: &str = "cannot delete timeline that still has forks";
 
 /// Every dependency row of one Timeline: [`recorded_rows`] then
@@ -2007,10 +2008,8 @@ fn c9_a_completed_fork_erasure_fences_the_fork_but_not_its_parent() {
     assert_eq!(counts(&store, fork_scope(fork, 1)), [Ok(2), Ok(1)]);
     let parent = counts(&store, prefix_scope(root, 9));
     assert_eq!(parent, [Ok(1), Ok(0)]);
-    assert_eq!(
-        gate.complete_timeline_erasure_for_test(fork),
-        Ok(ErasureLifecycleV1::Complete)
-    );
+    let completed = gate.complete_timeline_erasure_for_test(fork);
+    assert_eq!(completed, Ok(ErasureLifecycleV1::Complete));
     for scope in [fork_scope(fork, 1), prefix_scope(fork, 9)] {
         assert_eq!(counts(&store, scope), FAILED, "{scope:?}");
     }
@@ -2027,10 +2026,8 @@ fn c9_a_completed_parent_erasure_fences_its_prefix_and_the_inherited_one() {
     let before = held_rows(&fixture);
     let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
     let store = open_with_gate(&fixture.path, &gate);
-    assert_eq!(
-        gate.complete_timeline_erasure_for_test(root),
-        Ok(ErasureLifecycleV1::Complete)
-    );
+    let completed = gate.complete_timeline_erasure_for_test(root);
+    assert_eq!(completed, Ok(ErasureLifecycleV1::Complete));
     for timeline in [root, fork] {
         let scope = prefix_scope(timeline, 9);
         assert_eq!(counts(&store, scope), FAILED, "{scope:?}");
@@ -2043,6 +2040,8 @@ fn c9_a_completed_parent_erasure_fences_its_prefix_and_the_inherited_one() {
 fn c12_an_admitted_fork_and_its_parent_keep_every_row() {
     let fixture = retained_fixture();
     let (fork, root) = (fixture.fork, fixture.root);
+    // The delete guard checks only that a row exists, so an opaque `FAR1`
+    // blob admits the Fork.
     let admission = "INSERT INTO fork_admissions (child_id, far1_cbor) VALUES";
     let insert = format!("{admission} ('{fork}', X'00');");
     assert_ok(execute(&fixture.path, &insert));
