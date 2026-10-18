@@ -443,9 +443,11 @@ mod tests {
         let start = clock.mark();
         let limits = ForkReplayReadLimitsV1::new(1, 1, 3, bytes, 1_000_000)?;
         let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+        let mut event_carrier = None;
         let actual = super::super::fork_replay_event::classified_event_with_context(
             &store.conn,
             operation,
+            &mut event_carrier,
             &mut NativeReadContextV1::protected(&mut budget),
         )?;
         assert_eq!(actual.event(), &expected);
@@ -541,8 +543,9 @@ mod tests {
             let start = clock.mark();
             let limits = ForkReplayReadLimitsV1::new(1, 1, 16, 16_384, 1_000_000)?;
             let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+            let mut event_carrier = None;
             assert_eq!(super::super::fork_replay_event::classified_event_with_context(
-                &store.conn, operation, &mut NativeReadContextV1::protected(&mut budget)).err(), Some(Error::CorruptAuthority));
+                &store.conn, operation, &mut event_carrier, &mut NativeReadContextV1::protected(&mut budget)).err(), Some(Error::CorruptAuthority));
             store.conn.execute_batch("ROLLBACK TO classified_fault; RELEASE classified_fault")?;
         }
         Ok(())
