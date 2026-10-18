@@ -46,121 +46,6 @@ fn exec_rollback(connection: &Connection) -> rusqlite::Result<()> {
     connection.execute_batch("ROLLBACK")
 }
 
-/// The durability statements the protocol runs. A production build runs the real statements; a
-/// test build substitutes each whole function so a test can make exactly that step fail (the
-/// same seam style as `recipient_owner`). The real statements above are compiled in both.
-#[cfg(not(test))]
-mod seam {
-    pub(super) use super::{
-        exec_commit as commit, exec_restore as restore_statement, exec_rollback as rollback,
-        exec_set_full as set_full_statement, query_journal as journal_mode,
-        query_level as entry_level, query_level as full_read_back,
-        query_level as restore_read_back,
-    };
-}
-
-/// The test seam; both registries' tests drive it through their adapter's `seam` name.
-#[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
-pub(super) mod seam {
-    use std::cell::{Cell, RefCell};
-
-    use rusqlite::Connection;
-
-    use super::{
-        exec_commit, exec_restore, exec_rollback, exec_set_full, query_journal, query_level,
-    };
-
-    /// One step of the durability protocol that a test can make fail.
-    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    pub(in crate::sqlite) enum Step {
-        ReadJournal,
-        ReadEntry,
-        SetFull,
-        ReadBackFull,
-        Restore,
-        ReadBackRestore,
-        /// A `COMMIT` that succeeds but reports failure: a lost acknowledgement.
-        LostAcknowledgement,
-        /// A `ROLLBACK` that never runs, leaving the transaction open.
-        Rollback,
-    }
-
-    thread_local! {
-        /// The one step that fails on this thread.
-        pub(in crate::sqlite) static FAULT: Cell<Option<Step>> = const { Cell::new(None) };
-        /// The `synchronous` level read just before the last `COMMIT`.
-        pub(in crate::sqlite) static LEVEL_AT_COMMIT: Cell<Option<i64>> =
-            const { Cell::new(None) };
-        /// Runs just before the restore statement, while the erasure fence is still held.
-        pub(in crate::sqlite) static RESTORE_PROBE: RefCell<Option<Box<dyn Fn()>>> =
-            const { RefCell::new(None) };
-    }
-
-    fn injected(step: Step) -> bool {
-        FAULT.with(Cell::get) == Some(step)
-    }
-
-    fn fail_if(step: Step) -> rusqlite::Result<()> {
-        if injected(step) {
-            Err(rusqlite::Error::InvalidQuery)
-        } else {
-            Ok(())
-        }
-    }
-
-    pub(super) fn journal_mode(connection: &Connection) -> rusqlite::Result<String> {
-        fail_if(Step::ReadJournal).and_then(|()| query_journal(connection))
-    }
-
-    pub(super) fn entry_level(connection: &Connection) -> rusqlite::Result<i64> {
-        fail_if(Step::ReadEntry).and_then(|()| query_level(connection))
-    }
-
-    pub(super) fn set_full_statement(connection: &Connection) -> rusqlite::Result<()> {
-        fail_if(Step::SetFull).and_then(|()| exec_set_full(connection))
-    }
-
-    /// A failed read-back reads a value that is never a level.
-    pub(super) fn full_read_back(connection: &Connection) -> rusqlite::Result<i64> {
-        if injected(Step::ReadBackFull) {
-            Ok(-1)
-        } else {
-            query_level(connection)
-        }
-    }
-
-    pub(super) fn restore_statement(connection: &Connection, level: i64) -> rusqlite::Result<()> {
-        RESTORE_PROBE.with(|probe| {
-            if let Some(probe) = probe.borrow().as_ref() {
-                probe();
-            }
-        });
-        fail_if(Step::Restore).and_then(|()| exec_restore(connection, level))
-    }
-
-    pub(super) fn restore_read_back(connection: &Connection) -> rusqlite::Result<i64> {
-        fail_if(Step::ReadBackRestore).and_then(|()| query_level(connection))
-    }
-
-    pub(super) fn commit(connection: &Connection) -> rusqlite::Result<()> {
-        LEVEL_AT_COMMIT.with(|level| level.set(query_level(connection).ok()));
-        if injected(Step::LostAcknowledgement) {
-            exec_commit(connection).and(Err(rusqlite::Error::InvalidQuery))
-        } else {
-            exec_commit(connection)
-        }
-    }
-
-    pub(super) fn rollback(connection: &Connection) -> rusqlite::Result<()> {
-        if injected(Step::Rollback) {
-            Ok(())
-        } else {
-            exec_rollback(connection)
-        }
-    }
-}
-
 use seam::{
     commit, entry_level, full_read_back, journal_mode, restore_read_back, restore_statement,
     rollback, set_full_statement,
@@ -311,6 +196,121 @@ impl DurableRegistryV1<'_> {
         match work() {
             Ok(value) => self.commit_and_restore(level).map(|()| value),
             Err(error) => self.abandon_and_restore(level).and(Err(error)),
+        }
+    }
+}
+
+/// The durability statements the protocol runs. A production build runs the real statements; a
+/// test build substitutes each whole function so a test can make exactly that step fail (the
+/// same seam style as `recipient_owner`). The real statements above are compiled in both.
+#[cfg(not(test))]
+mod seam {
+    pub(super) use super::{
+        exec_commit as commit, exec_restore as restore_statement, exec_rollback as rollback,
+        exec_set_full as set_full_statement, query_journal as journal_mode,
+        query_level as entry_level, query_level as full_read_back,
+        query_level as restore_read_back,
+    };
+}
+
+/// The test seam; both registries' tests drive it through their adapter's `seam` name.
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+pub(super) mod seam {
+    use std::cell::{Cell, RefCell};
+
+    use rusqlite::Connection;
+
+    use super::{
+        exec_commit, exec_restore, exec_rollback, exec_set_full, query_journal, query_level,
+    };
+
+    /// One step of the durability protocol that a test can make fail.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub(in crate::sqlite) enum Step {
+        ReadJournal,
+        ReadEntry,
+        SetFull,
+        ReadBackFull,
+        Restore,
+        ReadBackRestore,
+        /// A `COMMIT` that succeeds but reports failure: a lost acknowledgement.
+        LostAcknowledgement,
+        /// A `ROLLBACK` that never runs, leaving the transaction open.
+        Rollback,
+    }
+
+    thread_local! {
+        /// The one step that fails on this thread.
+        pub(in crate::sqlite) static FAULT: Cell<Option<Step>> = const { Cell::new(None) };
+        /// The `synchronous` level read just before the last `COMMIT`.
+        pub(in crate::sqlite) static LEVEL_AT_COMMIT: Cell<Option<i64>> =
+            const { Cell::new(None) };
+        /// Runs just before the restore statement, while the erasure fence is still held.
+        pub(in crate::sqlite) static RESTORE_PROBE: RefCell<Option<Box<dyn Fn()>>> =
+            const { RefCell::new(None) };
+    }
+
+    fn injected(step: Step) -> bool {
+        FAULT.with(Cell::get) == Some(step)
+    }
+
+    fn fail_if(step: Step) -> rusqlite::Result<()> {
+        if injected(step) {
+            Err(rusqlite::Error::InvalidQuery)
+        } else {
+            Ok(())
+        }
+    }
+
+    pub(super) fn journal_mode(connection: &Connection) -> rusqlite::Result<String> {
+        fail_if(Step::ReadJournal).and_then(|()| query_journal(connection))
+    }
+
+    pub(super) fn entry_level(connection: &Connection) -> rusqlite::Result<i64> {
+        fail_if(Step::ReadEntry).and_then(|()| query_level(connection))
+    }
+
+    pub(super) fn set_full_statement(connection: &Connection) -> rusqlite::Result<()> {
+        fail_if(Step::SetFull).and_then(|()| exec_set_full(connection))
+    }
+
+    /// A failed read-back reads a value that is never a level.
+    pub(super) fn full_read_back(connection: &Connection) -> rusqlite::Result<i64> {
+        if injected(Step::ReadBackFull) {
+            Ok(-1)
+        } else {
+            query_level(connection)
+        }
+    }
+
+    pub(super) fn restore_statement(connection: &Connection, level: i64) -> rusqlite::Result<()> {
+        RESTORE_PROBE.with(|probe| {
+            if let Some(probe) = probe.borrow().as_ref() {
+                probe();
+            }
+        });
+        fail_if(Step::Restore).and_then(|()| exec_restore(connection, level))
+    }
+
+    pub(super) fn restore_read_back(connection: &Connection) -> rusqlite::Result<i64> {
+        fail_if(Step::ReadBackRestore).and_then(|()| query_level(connection))
+    }
+
+    pub(super) fn commit(connection: &Connection) -> rusqlite::Result<()> {
+        LEVEL_AT_COMMIT.with(|level| level.set(query_level(connection).ok()));
+        if injected(Step::LostAcknowledgement) {
+            exec_commit(connection).and(Err(rusqlite::Error::InvalidQuery))
+        } else {
+            exec_commit(connection)
+        }
+    }
+
+    pub(super) fn rollback(connection: &Connection) -> rusqlite::Result<()> {
+        if injected(Step::Rollback) {
+            Ok(())
+        } else {
+            exec_rollback(connection)
         }
     }
 }
