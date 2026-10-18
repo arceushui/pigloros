@@ -1087,6 +1087,39 @@ mod canonical_length_mapping_tests {
 
     type Fallible<T> = Result<T, Box<dyn std::error::Error>>;
 
+    #[test]
+    fn expired_event_deadline_refuses_work_while_the_original_guard_is_live() -> Fallible<()> {
+        let started = Instant::now()
+            .checked_sub(Duration::from_secs(1))
+            .ok_or("representable expired Event checkpoint")?;
+        for (limit, succeeds) in [(0, false), (1, false), (u64::MAX, true)] {
+            let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+            let start = clock.mark();
+            let limits = ForkReplayReadLimitsV1::new(1, 1, 1, 1, 1_000_000)?;
+            let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+            let result = {
+                let mut context = LineageReadContextV1::new(&mut budget, 1)?;
+                // This is a real elapsed native checkpoint, not an expired
+                // scripted operation guard. No sleep or scheduling race is needed.
+                context.read_deadline = Some((started, limit));
+                context.step(|_| Ok(()))
+            };
+            assert_eq!(
+                result,
+                if succeeds {
+                    Ok(())
+                } else {
+                    Err(ForkReplayLineageReadErrorV1::Read(
+                        ForkReplayAuthorityReadErrorV1::BoundsExceeded,
+                    ))
+                }
+            );
+            assert_eq!(budget.check_time().is_ok(), succeeds);
+            assert_eq!(budget.remaining_native_bytes(), 1);
+        }
+        Ok(())
+    }
+
     fn admission(identifier: &str) -> Fallible<pos_core::ImportedForkAttributionAdmissionV1> {
         use pos_core::{
             ForkAttributionIssuerV1, ImportedForkAttributionAdmissionInputV1,
