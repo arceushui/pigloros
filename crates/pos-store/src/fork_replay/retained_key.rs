@@ -145,6 +145,26 @@ mod tests {
             };
             over_cap.resize(maximum + 1, 0);
             assert_parity(codec, &over_cap)?;
+            for (length, precharge) in [(maximum, owner.as_str().len() + maximum), (maximum + 1, 0)]
+            {
+                // A real bounded owner survives in the prefix; padding is
+                // malformed encoding, not authenticated retained evidence.
+                let mut malformed = bytes.clone();
+                malformed.resize(length, 0);
+                let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+                let start = clock.mark();
+                let limits = ForkReplayReadLimitsV1::new(1, 1, 1, 4_096, 1_000_000)?;
+                let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+                assert_eq!(
+                    codec.decode(&malformed, &mut NativeReadContextV1::protected(&mut budget)),
+                    Err(Error::PublicationConflict)
+                );
+                assert_eq!(
+                    budget.remaining_native_bytes(),
+                    limits.max_native_bytes() - precharge
+                );
+                budget.check_time()?;
+            }
             let expected = owner.as_str().len() + bytes.len();
             for limit in 1..=expected {
                 let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
