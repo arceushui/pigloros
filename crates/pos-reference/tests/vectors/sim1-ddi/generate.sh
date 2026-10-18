@@ -11,6 +11,10 @@
 # temporary directory and is deleted on exit; it is never a release key.
 set -euo pipefail
 
+if [ "$#" -ne 2 ]; then
+	echo "usage: $0 <x86-64|arm64> <output-directory>" >&2
+	exit 2
+fi
 architecture=$1
 output=$2
 case "${architecture}" in

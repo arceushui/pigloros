@@ -97,6 +97,8 @@ def verity_root(data, hash_partition):
 
 
 def main():
+    if len(sys.argv) != 4 or sys.argv[1] not in TYPES:
+        fail("usage: describe.py <x86-64|arm64> <image.raw> <output-directory>")
     architecture, image_path, output = sys.argv[1], Path(sys.argv[2]), Path(sys.argv[3])
     image = image_path.read_bytes()
     entries = gpt_entries(image)

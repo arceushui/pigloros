@@ -1,8 +1,11 @@
 # SIM1 DDI fixtures from systemd-repart offline signing
 
-These test-only fixtures are the externally generated images required by
+These test-only fixtures are externally generated candidates for
 [Accepted ADR-087](https://redmine.piglor.com/projects/pigloros/wiki/ADR-087_Systemd_mountfsd_SIM1_activation_boundary)'s
-#437 acceptance: one Discoverable Disk Image per supported architecture, each
+#437 fixture acceptance. They cannot satisfy it yet: no valid SIM1 can
+describe them (see the salt finding below). There is one Discoverable Disk
+Image per supported architecture. Directories use systemd-repart's
+`--architecture` names: `x86-64` is SIM1 `x86_64` and `arm64` is `aarch64`. Each
 with an EROFS root, its dm-verity hash partition and a detached RSA-2048,
 SHA-256, no-attributes PKCS#7 signature over the exact 64 lowercase
 hexadecimal root-hash bytes. They were produced outside the Rust verifier by
@@ -71,6 +74,15 @@ has two levels. Certificates are self-signed serial 30 with critical
 2026-10-18 through 2036-10-15. Certificate subjects are
 `CN=PiglorOS SIM1 DDI fixture x86-64` and `CN=PiglorOS SIM1 DDI fixture arm64`.
 
+The producer's actual CMS encodings, as ADR-087 requires them to be recorded:
+SignedData v1 with one SHA-256 digest identifier, id-data with absent
+eContent, one v1 issuer-and-serial SignerInfo, one certificate, and no CRLs or
+signed/unsigned attributes. Every algorithm identifier carries an explicit
+ASN.1 NULL parameter: SHA-256 (digest set and SignerInfo), `rsaEncryption`
+(SignerInfo and SPKI) and `sha256WithRSAEncryption` (certificate). The
+signatures are 256 bytes. The verifier's accepted webpki constant
+(`RSA_PKCS1_2048_8192_SHA256`) verifies them in the public cases below.
+
 | File | Bytes | SHA-256 |
 | --- | ---: | --- |
 | `x86-64/image.raw.gz` | 6809 | `8f231112087613a538253d6a97795c9272c9159730ee030f0a9f1f7a98385f02` |
@@ -98,25 +110,32 @@ expanded image.
 `sandbox_admission_contract_public` verifies each `proof.der` through
 `AdmittedSandboxProvider::verify_image_proof` with independently signed
 SIM1/APT1/TRS1/RVS1 test records pinning that `signer.der` and declaring that
-root hash, at Unix second 1,800,000,000. It also rejects each proof against
-the other architecture's root hash or signer pin, and checks that the
-`root-verity-sig` partition systemd will read embeds the same proof, signer
-fingerprint and root hash.
+root hash, at Unix second 1,800,000,000, and rejects each proof against the
+other architecture's root hash (`InvalidSignature`) or signer pin
+(`UnauthorizedSigner`). The `sim1-proof-risk` workflow runs these public cases
+on a hosted aarch64 runner in addition to the x86-64 workspace gates.
+
+A separate fixture-integrity case runs no production code: it checks that
+the `root-verity-sig` partition, identified by its DPS type, embeds the same
+proof, signer fingerprint and root hash that systemd will read.
 
 ## What these fixtures do not prove
 
-- **No SIM1 for these images.** systemd-repart v260.2, v260.4 and `main` always
-  formats the verity hash partition with a 32-byte salt derived from `--seed`
-  (`derive_salt` and `salt_size = sizeof(p->verity_salt)` in
-  `src/repart/repart.c`); `verity.json` records it. Accepted ADR-069 SIM1
+- **No SIM1 for these images.** In the v260.2, v260.4 and `main` sources,
+  systemd-repart always formats the verity hash partition with a 32-byte salt
+  derived from `--seed` (`derive_salt` and `salt_size = sizeof(p->verity_salt)`
+  in `src/repart/repart.c`). For the 260.5 producer used here, `verity.json`
+  records the salt that `describe.py` read from each verity superblock. Accepted ADR-069 SIM1
   requires a zero-length salt, so no valid SIM1 can describe these images and
   an exact dm-verity table readback against SIM1 could not match them. The proof cases above
   declare the root hash in a test SIM1 only to exercise the CMS verifier. The
   incompatibility is an open owner decision on #437.
-- **No release trust installation.** How the release certificate is made
-  trusted by the supported kernel or systemd verification path, and how the
-  signing key is held, is not settled by the accepted ADRs and is an open owner
-  decision on #437. These fixtures install nothing.
+- **No release trust installation.** ADR-069 already commits SIM1 and TRS1 to
+  an administrator kernel-keyring serial. It does not settle which kernel
+  keyring trusts the release certificate (builtin, secondary or `.platform`),
+  how the certificate is installed there, what the serial identifies across
+  boots, or how the signing key is held. That is an open owner decision on
+  #437. These fixtures install nothing.
 - **No activation evidence.** Nothing here mounts an image, activates
   dm-verity or exercises the kernel keyring. Supported systemd/kernel evidence
   on both architectures runs on the pinned appliance under hosted QEMU TCG in

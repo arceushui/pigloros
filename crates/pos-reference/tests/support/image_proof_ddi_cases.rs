@@ -7,6 +7,7 @@
 
 struct DdiVector {
     architecture: &'static str,
+    signature_type: [u8; 16],
     proof: &'static [u8],
     signer: &'static [u8],
     root_hash: &'static [u8],
@@ -15,9 +16,10 @@ struct DdiVector {
 }
 
 macro_rules! ddi_vector {
-    ($architecture:literal) => {
+    ($architecture:literal, $signature_type:expr) => {
         DdiVector {
             architecture: $architecture,
+            signature_type: $signature_type,
             proof: include_bytes!(concat!("../vectors/sim1-ddi/", $architecture, "/proof.der")),
             signer: include_bytes!(concat!(
                 "../vectors/sim1-ddi/",
@@ -43,7 +45,12 @@ macro_rules! ddi_vector {
     };
 }
 
-const DDI_VECTORS: [DdiVector; 2] = [ddi_vector!("x86-64"), ddi_vector!("arm64")];
+// Directory names use systemd-repart's `--architecture` names for x86_64 and
+// aarch64; the signature type is the DPS root-verity-sig type for each.
+const DDI_VECTORS: [DdiVector; 2] = [
+    ddi_vector!("x86-64", ROOT_SIGNATURE_X86_64),
+    ddi_vector!("arm64", ROOT_PARTITIONS_AARCH64[2]),
+];
 
 fn ddi_root_hash(vector: &DdiVector) -> TestResult<[u8; 32]> {
     let text = std::str::from_utf8(vector.root_hash)?;
@@ -111,20 +118,26 @@ fn public_proof_verification_accepts_systemd_repart_offline_signatures() -> Test
     }
     let [x86_64, aarch64] = &DDI_VECTORS;
     // Each producer signature authorizes only its own root hash and signer pin.
-    assert_eq!(
-        verify(
-            &fixture_for_root(x86_64.proof, x86_64.signer, ddi_root_hash(aarch64)?)?,
-            NOW
-        )?,
-        Err(SandboxImageProofError::InvalidSignature)
-    );
-    assert_eq!(
-        verify(
-            &fixture_for_root(x86_64.proof, aarch64.signer, ddi_root_hash(x86_64)?)?,
-            NOW
-        )?,
-        Err(SandboxImageProofError::UnauthorizedSigner)
-    );
+    for (own, other) in [(x86_64, aarch64), (aarch64, x86_64)] {
+        assert_eq!(
+            verify(
+                &fixture_for_root(own.proof, own.signer, ddi_root_hash(other)?)?,
+                NOW
+            )?,
+            Err(SandboxImageProofError::InvalidSignature),
+            "{}",
+            own.architecture
+        );
+        assert_eq!(
+            verify(
+                &fixture_for_root(own.proof, other.signer, ddi_root_hash(own)?)?,
+                NOW
+            )?,
+            Err(SandboxImageProofError::UnauthorizedSigner),
+            "{}",
+            own.architecture
+        );
+    }
     Ok(())
 }
 
@@ -137,7 +150,8 @@ fn systemd_signature_partitions_embed_the_independently_verified_proof() -> Test
         flate2::read::GzDecoder::new(vector.image).read_to_end(&mut image)?;
         let partitions: [([u8; 16], [u8; 16], u64, u64); 3] =
             serde_json::from_slice(vector.partitions)?;
-        let (_, _, start, length) = partitions[2];
+        let (kind, _, start, length) = partitions[2];
+        assert_eq!(kind, vector.signature_type, "{}", vector.architecture);
         let start = usize::try_from(start)?;
         let content = image
             .get(start..start + usize::try_from(length)?)
