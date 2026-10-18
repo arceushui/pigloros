@@ -3327,8 +3327,10 @@ mod tests {
             let keyring =
                 crate::sandbox_provider_protocol::BuiltinKeyringListing::from_members([(
                     1,
-                    "asymmetric",
-                    crate::selector::installation::tests::IMAGE_KEY_DESCRIPTION,
+                    crate::provider_admission::tests::describe(
+                        "asymmetric",
+                        crate::selector::installation::tests::IMAGE_KEY_DESCRIPTION,
+                    ),
                 )])?;
             let image = crate::provider_admission::ProviderImageSnapshot::open(&spx1, &keyring)?;
             assert_eq!(image.request().to_canonical_cbor()?, spx1);

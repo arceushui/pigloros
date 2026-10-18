@@ -946,17 +946,39 @@ fn cancellation_context_and_acknowledgement_bind_the_exact_attempt_snapshot() ->
 }
 
 #[test]
-fn builtin_keyring_listing_rejects_malformed_members() -> TestResult {
+fn builtin_keyring_listing_parses_full_raw_describe_results() -> TestResult {
+    // The description is everything after the fourth `;`, so a subject that
+    // itself contains `;` is preserved rather than truncated.
     assert_eq!(
-        BuiltinKeyringListing::from_members([(1, "asymmetric", "name; with separator")])?,
-        BuiltinKeyringListing::from_members([(1, "asymmetric", "name; with separator")])?
+        BuiltinKeyringListing::from_members([(
+            1,
+            "asymmetric;0;0;3f010000;name; with; separators"
+        )])?,
+        BuiltinKeyringListing::from_members([(
+            1,
+            "asymmetric;-1;-1;00000000;name; with; separators"
+        )])?
     );
+    for describe in [
+        "",
+        "asymmetric",
+        "asymmetric;0;0;3f010000",
+        "asymmetric;0;0;3f010000;",
+        ";0;0;3f010000;fixture",
+    ] {
+        assert_eq!(
+            BuiltinKeyringListing::from_members([(1, describe)]),
+            Err(BuiltinKeyringError::Malformed),
+            "{describe:?}"
+        );
+    }
     for members in [
-        vec![(0, "asymmetric", "fixture")],
-        vec![(-1, "asymmetric", "fixture")],
-        vec![(1, "", "fixture")],
-        vec![(1, "asymmetric", "")],
-        vec![(1, "asymmetric", "fixture"), (1, "asymmetric", "other")],
+        vec![(0, "asymmetric;0;0;3f010000;fixture")],
+        vec![(-1, "asymmetric;0;0;3f010000;fixture")],
+        vec![
+            (1, "asymmetric;0;0;3f010000;fixture"),
+            (1, "asymmetric;0;0;3f010000;other"),
+        ],
     ] {
         assert_eq!(
             BuiltinKeyringListing::from_members(members.clone()),

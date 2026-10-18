@@ -6,9 +6,11 @@
 //! the TRS1 certificate that matched the image's SIM1, and that key must be
 //! asymmetric.
 //!
-//! A listing is one `(serial, type, description)` member per key serial that
-//! `KEYCTL_READ` returns for the keyring, with type and description from
-//! `KEYCTL_DESCRIBE` of that serial. Only the provider's keyctl reader may
+//! A listing is one member per key serial that `KEYCTL_READ` returns for the
+//! keyring, carrying the full raw `KEYCTL_DESCRIBE` result for that serial:
+//! `type;uid;gid;perm;description`. The type is the text before the first `;`
+//! and the description is everything after the fourth `;`, so a certificate
+//! subject containing `;` is preserved. Only the provider's keyctl reader may
 //! supply a listing that admission trusts; this module checks it and has no
 //! kernel bypass of its own.
 
@@ -19,8 +21,8 @@ const ASYMMETRIC_KEY_TYPE: &str = "asymmetric";
 /// Bounded failures of the built-in keyring check.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum BuiltinKeyringError {
-    /// A member has a non-positive or repeated serial, or an empty type or
-    /// description.
+    /// A member has a non-positive or repeated serial, or a raw describe
+    /// result without four `;` separators, a type or a description.
     #[error("malformed built-in keyring member")]
     Malformed,
     /// No member carries the image's release key description.
@@ -49,23 +51,21 @@ pub struct BuiltinKeyringListing {
 }
 
 impl BuiltinKeyringListing {
-    /// Collect `(serial, type, description)` for every keyring member.
+    /// Collect `(serial, raw KEYCTL_DESCRIBE result)` for every keyring member.
     ///
     /// # Errors
-    /// Rejects a non-positive or repeated serial, or an empty type or
-    /// description.
-    pub fn from_members<'a>(
-        members: impl IntoIterator<Item = (i32, &'a str, &'a str)>,
+    /// Rejects a non-positive or repeated serial, or a describe result without
+    /// a type, four `;` separators and a description.
+    pub fn from_members<S: AsRef<str>>(
+        members: impl IntoIterator<Item = (i32, S)>,
     ) -> Result<Self, BuiltinKeyringError> {
         let mut listing = Self {
             members: Vec::new(),
         };
-        for (serial, key_type, description) in members {
-            if serial <= 0
-                || key_type.is_empty()
-                || description.is_empty()
-                || listing.members.iter().any(|member| member.serial == serial)
-            {
+        for (serial, describe) in members {
+            let (key_type, description) =
+                parse_describe(describe.as_ref()).ok_or(BuiltinKeyringError::Malformed)?;
+            if serial <= 0 || listing.members.iter().any(|member| member.serial == serial) {
                 return Err(BuiltinKeyringError::Malformed);
             }
             listing.members.push(BuiltinKeyringMember {
@@ -109,4 +109,14 @@ impl BuiltinKeyringListing {
     ) -> Result<(), BuiltinKeyringError> {
         self.require_release_key(&image.manifest().kernel_key_description)
     }
+}
+
+/// Split `type;uid;gid;perm;description` at its first and fourth `;`.
+fn parse_describe(describe: &str) -> Option<(&str, &str)> {
+    describe.split_once(';').and_then(|(key_type, rest)| {
+        rest.splitn(4, ';')
+            .nth(3)
+            .filter(|description| !key_type.is_empty() && !description.is_empty())
+            .map(|description| (key_type, description))
+    })
 }
