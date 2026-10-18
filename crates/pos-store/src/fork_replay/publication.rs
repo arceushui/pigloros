@@ -286,6 +286,23 @@ mod tests {
             assert!(valid.len() <= maximum);
             assert!(codec.native_accepts(&valid));
             codec.decode(&valid, &mut NativeReadContextV1::ordinary())?;
+            if matches!(codec, Codec::Binding) {
+                // Exact-cap padding remains corrupt FPB1, but is inside the
+                // transport cap and receives the bounded comparison precharge.
+                let mut capped = valid.clone();
+                capped.resize(maximum, 0);
+                assert!(!codec.native_accepts(&capped));
+                let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+                let started = clock.mark();
+                let limits = ForkReplayReadLimitsV1::new(1, 1, 1, 8 * 1024 * 1024, 1_000_000)?;
+                let mut budget = ForkReplayReadBudgetV1::new(limits, started, &mut clock)?;
+                assert_eq!(
+                    codec.decode(&capped, &mut NativeReadContextV1::protected(&mut budget)),
+                    Err(Error::PublicationConflict),
+                );
+                assert_eq!(budget.remaining_native_bytes(), limits.max_native_bytes() - maximum);
+                assert_eq!(budget.check_time(), Ok(()));
+            }
             // Raw corruption below typed construction, not admitted authority.
             let mut oversized = valid.clone();
             oversized.resize(maximum + 1, 0);
