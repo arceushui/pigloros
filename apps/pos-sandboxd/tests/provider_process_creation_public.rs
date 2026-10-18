@@ -19,9 +19,12 @@ use std::{
 
 type TestResult = Result<(), Box<dyn Error>>;
 
-/// Process-creation APIs and zlink's non-atomic Unix stream.
-const FORBIDDEN: [&str; 13] = [
+/// Process-creation APIs, renamed or grouped `std::process` imports, and
+/// zlink's non-atomic Unix stream.
+const FORBIDDEN: [&str; 15] = [
     "process::Command",
+    "process as",
+    "process::{",
     "Command::new",
     "CommandExt",
     "tokio::process",
@@ -159,9 +162,16 @@ fn provider_manifests_enable_no_process_runtime() -> TestResult {
             .split("\n[dev-dependencies]")
             .next()
             .unwrap_or_default();
+        // Tokio's `process` feature spawns children. rustix's `process`
+        // feature (getpid, getrlimit) creates no process and is not checked.
+        let tokio = dependencies
+            .split("\ntokio = ")
+            .nth(1)
+            .and_then(|entry| entry.split('}').next())
+            .unwrap_or_default();
         assert!(
-            !dependencies.contains("\"process\""),
-            "{} enables a process feature for production",
+            !tokio.contains("\"process\"") && !dependencies.contains("async-process"),
+            "{} enables a process-spawning runtime feature for production",
             manifest.display()
         );
     }

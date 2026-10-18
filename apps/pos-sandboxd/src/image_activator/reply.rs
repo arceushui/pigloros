@@ -3,7 +3,9 @@
 //! The schema follows the systemd v260.2 `io.systemd.MountFileSystem`
 //! definition and `mountwork.c` reply construction. Unknown or duplicate
 //! fields, `continues`, extra partitions and any descriptor that is not the
-//! single root mount at index 0 reject. Optional fields mountfsd may emit are
+//! single root mount at index 0 are malformed. A well-formed reply whose root
+//! differs from the admitted SIM1 or requested policy is an evidence mismatch.
+//! Optional fields mountfsd may emit are
 //! type-checked only; the provider's own SIM1 and kernel readback remain the
 //! authoritative image evidence.
 
@@ -53,8 +55,12 @@ fn root_mount(
 ) -> Result<QuarantinedRootMount, ImageActivationError> {
     let mount = descriptors.pop();
     match (reply.partitions.as_slice(), mount) {
-        ([root], Some(mount)) if descriptors.is_empty() && accepted(reply, root, expected) => {
-            Ok(QuarantinedRootMount { _mount: mount })
+        ([root], Some(mount)) if descriptors.is_empty() && root.mount_file_descriptor == 0 => {
+            if accepted(reply, root, expected) {
+                Ok(QuarantinedRootMount { _mount: mount })
+            } else {
+                Err(ImageActivationError::EvidenceMismatch)
+            }
         }
         _ => Err(ImageActivationError::MalformedReply),
     }
@@ -71,7 +77,6 @@ fn accepted(reply: &MountImageReply, root: &PartitionInfo, expected: &ExpectedRo
             .architecture
             .as_deref()
             .is_none_or(|architecture| architecture == systemd_architecture(expected.architecture))
-        && root.mount_file_descriptor == 0
         && !reply.single_file_system
         && policy::matches_requested(&reply.image_policy)
 }

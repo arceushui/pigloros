@@ -271,23 +271,12 @@ async fn arm64_and_an_absent_architecture_are_accepted() -> TestResult {
 }
 
 #[tokio::test]
-async fn every_reply_value_outside_the_accepted_shape_is_malformed() -> TestResult {
+async fn every_reply_outside_the_accepted_shape_is_malformed() -> TestResult {
     let cases = [
-        with(|reply| root_field(reply, "designator", json!("usr"))),
-        with(|reply| root_field(reply, "writable", json!(true))),
-        with(|reply| root_field(reply, "growFileSystem", json!(true))),
-        with(|reply| root_field(reply, "fileSystemType", json!("squashfs"))),
-        with(|reply| root_field(reply, "offset", json!(ROOT_OFFSET + 4096))),
-        with(|reply| root_field(reply, "size", json!(ROOT_SIZE + 4096))),
-        with(|reply| root_field(reply, "architecture", json!("arm64"))),
         with(|reply| root_field(reply, "mountFileDescriptor", json!(1))),
         with(|reply| root_field(reply, "mountFileDescriptor", json!(-1))),
         with(|reply| root_field(reply, "partitionNumber", json!(0))),
         with(|reply| root_field(reply, "unknown", json!(1))),
-        with(|reply| reply["parameters"]["singleFileSystem"] = json!(true)),
-        // systemd v260.2 intersects the request with a default that has no
-        // filesystem flags; ADR-087 requires the requested semantics.
-        with(|reply| reply["parameters"]["imagePolicy"] = json!("root=signed:=absent")),
         with(|reply| reply["parameters"]["unknown"] = json!(1)),
         with(|reply| reply["parameters"]["partitions"] = json!([])),
         with(|reply| reply["parameters"]["partitions"] = json!(null)),
@@ -307,6 +296,31 @@ async fn every_reply_value_outside_the_accepted_shape_is_malformed() -> TestResu
         assert_eq!(
             outcome_of(reply, 1).await?,
             ImageActivationError::MalformedReply,
+            "{reply}"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_root_other_than_the_admitted_signed_erofs_root_is_an_evidence_mismatch() -> TestResult {
+    let cases = [
+        with(|reply| root_field(reply, "designator", json!("usr"))),
+        with(|reply| root_field(reply, "writable", json!(true))),
+        with(|reply| root_field(reply, "growFileSystem", json!(true))),
+        with(|reply| root_field(reply, "fileSystemType", json!("squashfs"))),
+        with(|reply| root_field(reply, "offset", json!(ROOT_OFFSET + 4096))),
+        with(|reply| root_field(reply, "size", json!(ROOT_SIZE + 4096))),
+        with(|reply| root_field(reply, "architecture", json!("arm64"))),
+        with(|reply| reply["parameters"]["singleFileSystem"] = json!(true)),
+        // systemd v260.2 intersects the request with a default that has no
+        // filesystem flags; ADR-087 requires the requested semantics.
+        with(|reply| reply["parameters"]["imagePolicy"] = json!("root=signed:=absent")),
+    ];
+    for reply in &cases {
+        assert_eq!(
+            outcome_of(reply, 1).await?,
+            ImageActivationError::EvidenceMismatch,
             "{reply}"
         );
     }

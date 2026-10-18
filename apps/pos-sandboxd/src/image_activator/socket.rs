@@ -167,8 +167,9 @@ impl Frame {
 }
 
 fn receive(socket: &UnixStream, buffer: &mut [u8], frame: &mut Frame) -> io::Result<ReadResult> {
-    // Space for one descriptor batch and one credentials message, so that an
-    // unexpected credentials message is observed rather than only truncated.
+    // Space for one credentials message plus a small descriptor batch, so an
+    // unexpected credentials message is decoded rather than only truncated.
+    // Larger batches set MSG_CTRUNC, and any count other than one rejects.
     let mut space =
         [MaybeUninit::<u8>::uninit(); rustix::cmsg_space!(ScmRights(1), ScmCredentials(1))];
     let mut control = RecvAncillaryBuffer::new(&mut space);
@@ -301,7 +302,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn more_descriptors_than_the_control_space_holds_are_refused() -> TestResult {
+    async fn sending_more_descriptors_than_the_control_space_holds_is_refused() -> TestResult {
         let (local, peer) = StdUnixStream::pair()?;
         local.set_nonblocking(true)?;
         peer.set_nonblocking(true)?;

@@ -6,8 +6,10 @@
 //! designator: the defaults are compared extended, each designator is read
 //! exhaustively, and Verity partitions without an explicit rule derive their
 //! policy only from an explicitly listed data partition. The grammar is
-//! closed: no whitespace, unknown designators, unknown flags, empty rules or
-//! duplicate rules are accepted.
+//! deliberately stricter than the C parser: whitespace around names, empty
+//! rules, a trailing `:` or `+`, unknown names and duplicate rules all reject.
+//! `image_policy_to_string()` never emits those forms, so an honest effective
+//! policy is unaffected.
 //!
 //! Every bit operation goes through the small helpers below so that each one
 //! is exercised with overlapping operands.

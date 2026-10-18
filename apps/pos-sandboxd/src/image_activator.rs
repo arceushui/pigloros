@@ -92,6 +92,10 @@ pub enum ImageActivationError {
     /// accepted shape.
     #[error("systemd-mountfsd returned a malformed MountImage reply")]
     MalformedReply,
+    /// A well-formed reply describes a mount other than the admitted SIM1
+    /// signed EROFS root under the requested image policy.
+    #[error("systemd-mountfsd activation evidence differs from the admitted image")]
+    EvidenceMismatch,
 }
 
 /// A connected, root-peer `MountFileSystem` client for one transaction.
