@@ -27,7 +27,10 @@ fn replace_classifier_records(
     assert_eq!(
         store.conn.execute(
             "UPDATE fork_classifier_tables SET fct1_digest=?1, fct1_cbor=?2",
-            params![table.digest().as_bytes().as_slice(), table.to_canonical_cbor()],
+            params![
+                table.digest().as_bytes().as_slice(),
+                table.to_canonical_cbor()
+            ],
         )?,
         1,
     );
