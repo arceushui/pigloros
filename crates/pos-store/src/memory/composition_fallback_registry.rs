@@ -257,3 +257,156 @@ impl CompositionFallbackRegistryV1 for MemoryStore {
             .map(|()| self.composition_fallback.ledger(scope, timeline))
     }
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use std::sync::Arc;
+
+    use pos_core::store::EventStore;
+    use pos_core::{
+        CompositionPinV1, DomainFallbackPolicyV1, EntityId, ErasureContainmentGateV1,
+        FallbackActivationModeV1, FallbackActivationOriginV1, FallbackEntryV1,
+        FallbackTriggerBasisV1, FallbackTriggerCodeV1, ForkAdmissionRecordInputV1,
+        ForkAdmissionRecordV1, ForkAttributionOriginV1, ImplementationKeyV1, OwnerIdV1,
+    };
+
+    use super::*;
+    use crate::composition_fallback_registry::{
+        derived_fallback_state_v1, CompositionFallbackTargetV1, FallbackConformanceSetsV1,
+    };
+
+    type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
+    // These helpers deliberately mirror the supervisor's `src/fallback/tests.rs` helpers: the
+    // two crates cannot share test code, and `pos-store` cannot depend on the supervisor.
+
+    const SCOPE: &str = "counterfactual";
+
+    fn key(plugin_id: &str, byte: u8) -> TestResult<ImplementationKeyV1> {
+        let digest = Hash::from_bytes([byte; 32]);
+        let version = "1.0.0".to_owned();
+        Ok(ImplementationKeyV1::new(
+            plugin_id.to_owned(),
+            version,
+            digest,
+        )?)
+    }
+
+    fn pin(plugin_id: &str, byte: u8) -> TestResult<CompositionPinV1> {
+        let roles = vec!["role".to_owned()];
+        Ok(CompositionPinV1::new(key(plugin_id, byte)?, roles)?)
+    }
+
+    /// One automatic entry whose primary has one candidate, after `previous`.
+    fn policy(previous: Option<Hash>) -> TestResult<DomainFallbackPolicyV1> {
+        let triggers = vec![FallbackTriggerCodeV1::ResourceLimit];
+        let mode = FallbackActivationModeV1::Automatic;
+        let (primary, candidates) = (pin("acme.primary", 1)?, vec![pin("acme.candidate", 2)?]);
+        let entry = FallbackEntryV1::new("entry".to_owned(), primary, candidates, triggers, mode)?;
+        let scope = SCOPE.to_owned();
+        Ok(DomainFallbackPolicyV1::new(scope, vec![entry], previous)?)
+    }
+
+    fn declaration(
+        target: CompositionFallbackTargetV1,
+        revision: u64,
+        head: Seq,
+        policy: &DomainFallbackPolicyV1,
+    ) -> FallbackDeclareRequestV1 {
+        FallbackDeclareRequestV1 {
+            scope: SCOPE.to_owned(),
+            target,
+            expected_state_revision: revision,
+            expected_logical_head: head,
+            policy_bytes: policy.to_canonical_cbor(),
+            conformance: FallbackConformanceSetsV1::default(),
+        }
+    }
+
+    /// The automatic activation of the entry's candidate in tenure 0.
+    fn activation(
+        target: CompositionFallbackTargetV1,
+        revision: u64,
+        head: Seq,
+    ) -> TestResult<FallbackActivateRequestV1> {
+        Ok(FallbackActivateRequestV1 {
+            scope: SCOPE.to_owned(),
+            target,
+            expected_state_revision: revision,
+            expected_logical_head: head,
+            entry_key: "entry".to_owned(),
+            closing_tenure_ordinal: 0,
+            from: key("acme.primary", 1)?,
+            to: key("acme.candidate", 2)?,
+            trigger_code: FallbackTriggerCodeV1::ResourceLimit,
+            trigger_basis: FallbackTriggerBasisV1 {
+                cause: 16,
+                origin: FallbackActivationOriginV1::Automatic,
+            },
+            skipped: Vec::new(),
+            tick: 1,
+        })
+    }
+
+    /// An ADR-099 admission of `fork`, cut from `parent`.
+    fn admission(parent: TimelineId, fork: TimelineId) -> TestResult<ForkAdmissionRecordV1> {
+        let admission = ForkAdmissionRecordV1::new(ForkAdmissionRecordInputV1 {
+            operation_id: Hash::from_bytes([1; 32]),
+            principal_owner_binding_digest: Hash::from_bytes([2; 32]),
+            creator: OwnerIdV1::from_static("test-owner"),
+            parent_timeline_id: parent,
+            child_timeline_id: fork,
+            room_revision_descriptor_hash: Hash::from_bytes([3; 32]),
+            parent_logical_head: 0,
+            parent_chain_head_hash: Hash::from_bytes([4; 32]),
+            completed_fold_cursor: 0,
+            post_fold_tick_boundary: 0,
+            plugin_composition_hash: Hash::from_bytes([5; 32]),
+            attribution_required: false,
+            origin: ForkAttributionOriginV1::Local,
+        });
+        Ok(admission.map_err(|error| format!("{error:?}"))?)
+    }
+
+    /// ADR-119 section 4.6, the counterfactual-suffix constraint: the generic guarded append
+    /// keeps refusing an ADR-099-admitted (counterfactual) Fork, so neither a declaration nor
+    /// an activation commits in its suffix and the policy never fires there; FU-B owns any
+    /// further counterfactual treatment. The Fork's state at its cut still derives from its
+    /// inherited Events.
+    #[test]
+    fn an_admitted_fork_refuses_declarations_and_activations() -> TestResult {
+        let mut store = MemoryStore::new();
+        let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
+        store.bind_erasure_gate(gate)?;
+        let parent = store.create_timeline("parent")?.id();
+        store.provision_fallback_registry()?;
+        let entity = EntityId::new();
+        let target = CompositionFallbackTargetV1 {
+            timeline: parent,
+            entity,
+        };
+        let first = policy(None)?;
+        let _declared = store.declare(&declaration(target, 0, Seq::ZERO, &first))?;
+        let cut = store.logical_head(parent)?;
+        let fork = store.fork(parent, cut, "counterfactual")?.id();
+        store.fork_admissions.insert(fork, admission(parent, fork)?);
+        let inherited = derived_fallback_state_v1(&store, SCOPE, fork)?;
+        let row = store.registry_row(SCOPE, parent)?.ok_or("no parent row")?;
+        assert_eq!(&inherited, row.state());
+        let on_fork = CompositionFallbackTargetV1 {
+            timeline: fork,
+            entity,
+        };
+        let rejected = Some(Error::EventRejected);
+        let activated = store.activate(&activation(on_fork, 1, cut)?);
+        assert_eq!(activated.err(), rejected);
+        let successor = policy(Some(first.policy_digest()))?;
+        let declared = store.declare(&declaration(on_fork, 1, cut, &successor));
+        assert_eq!(declared.err(), rejected);
+        assert_eq!(store.registry_row(SCOPE, fork)?, None);
+        assert_eq!(store.fallback_ledger(SCOPE, fork)?, Vec::new());
+        assert_eq!(store.logical_head(fork)?, cut);
+        Ok(())
+    }
+}

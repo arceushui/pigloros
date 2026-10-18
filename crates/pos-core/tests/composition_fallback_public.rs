@@ -222,6 +222,9 @@ fn imk1_and_ppn1_golden_vectors() -> TestResult<()> {
     assert_eq!(decoded, pinned);
     assert_eq!(pinned.implementation(), &key);
     assert_eq!(pinned.roles(), ["locator", "geo.reader"]);
+    let frozen = pinned.with_implementation(lite_key()?);
+    assert_eq!(frozen.implementation(), &lite_key()?);
+    assert_eq!(frozen.roles(), pinned.roles());
     Ok(())
 }
 

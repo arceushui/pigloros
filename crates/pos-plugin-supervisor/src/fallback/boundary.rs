@@ -16,6 +16,7 @@ use pos_store::composition_fallback_registry::{
 use pos_store::plugin_trust_registry::PluginTrustPolicyRegistryV1;
 
 use super::candidate::{build_in, skip_of, BuiltV1};
+use super::closure::activation_events;
 use super::derive::{
     effective_composition_v1, read_prefix, FallbackEffectiveCompositionV1,
     FallbackEffectiveEntryV1, PrefixV1,
@@ -136,7 +137,8 @@ impl CompositionBoundaryV1 {
     /// Returns [`Error::NotGranted`] without the `composition.fallback.activate` grant, the
     /// derivation's errors, [`Error::UnknownEntry`], [`Error::InvalidTarget`] for a target that
     /// is not another listed implementation, [`Error::NoObservation`] or
-    /// [`Error::TriggerNotDeclared`] for a candidate, and the invariant faults of the commit.
+    /// [`Error::TriggerNotDeclared`] for a candidate, [`Error::StoreUnavailable`] when a
+    /// return cannot read the Timeline's Events, and the invariant faults of the commit.
     pub fn owner_activate_v1<S, T, W>(
         &mut self,
         context: Context<'_, '_, S, T, W>,
@@ -469,21 +471,25 @@ impl CompositionBoundaryV1 {
 
     /// The owner's return trigger: the code and cause of the activation that opened the
     /// closing tenure, with `origin=owner`.
+    ///
+    /// The activation is found among the Timeline's Events, inherited ones included, not in
+    /// its ledger: on a Fork the tenure may have been opened by the parent before the cut
+    /// (ADR-119 section 4.6). Like the pre-commit prefix read, this is O(history) (section
+    /// 5); a Timeline that cannot be read refuses the return with nothing built.
     fn returning<S: FallbackBoundaryStoreV1 + ?Sized>(
         &self,
         store: &S,
         effective: &FallbackEffectiveEntryV1,
     ) -> Result<TriggerV1, Error> {
-        let timeline = self.target.timeline;
         let closing = effective.tenure_ordinal.saturating_sub(1);
         let key = effective.entry.entry_key();
-        let opened = store.lookup_activation(&self.scope, timeline, key, closing);
-        let event = opened
-            .ok()
-            .flatten()
-            .and_then(|row| read_event(store, timeline, &row));
-        let payload = event.and_then(|event| decoded_activation(&event));
-        let trigger = payload.map(|payload| {
+        let events = store.read(self.target.timeline, SeqRange::all());
+        let events = events.or(Err(Error::StoreUnavailable));
+        let payload = events.and_then(|events| {
+            let opening = opening_activation(&events, &self.scope, key, closing);
+            opening.ok_or(TENURE_UNRESOLVED)
+        });
+        payload.map(|payload| {
             let input = payload.as_input();
             TriggerV1 {
                 code: input.trigger_code,
@@ -492,8 +498,7 @@ impl CompositionBoundaryV1 {
                     origin: Origin::Owner,
                 },
             }
-        });
-        trigger.ok_or(TENURE_UNRESOLVED)
+        })
     }
 }
 
@@ -641,6 +646,23 @@ fn read_event<S: FallbackBoundaryStoreV1 + ?Sized>(
 /// The decoded activation payload of `event`.
 fn decoded_activation(event: &Event) -> Option<FallbackActivatedPayloadV1> {
     FallbackActivatedPayloadV1::from_canonical_cbor(event.payload.as_slice()).ok()
+}
+
+/// The activation of `scope` among `events` that closed tenure `closing` of `entry_key`, and
+/// so opened the entry's next tenure.
+fn opening_activation(
+    events: &[Event],
+    scope: &str,
+    entry_key: &str,
+    closing: u64,
+) -> Option<FallbackActivatedPayloadV1> {
+    let activations = activation_events(events);
+    let mut payloads = activations.filter_map(decoded_activation);
+    payloads.find(|payload| {
+        let input = payload.as_input();
+        let opened = input.entry_key == entry_key && input.closing_tenure_ordinal == closing;
+        input.scope == scope && opened
+    })
 }
 
 /// The activation Event the commit returned, which must activate the request's target.

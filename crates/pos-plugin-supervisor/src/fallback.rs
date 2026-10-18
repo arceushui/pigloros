@@ -31,6 +31,11 @@
 //! observation whose code the entry declares; the primary is the bounded return, which needs
 //! no observation and re-runs the trust gate. Observations live in memory and are lost on
 //! restart (#560). The CBT never issues a pass.
+//!
+//! Forks and closure (section 4.6, slice 7, #668): a Timeline with no registry row of its own,
+//! such as an ordinary Fork before its first operation, derives its effective composition from
+//! the fold of its inherited Events; [`fallback_tenures_v1`] names the implementation each
+//! tenure of a slot ran from the Events alone, tenure 0 by the composer's admitted release.
 
 use std::collections::BTreeMap;
 
@@ -58,10 +63,15 @@ use crate::member::CommunityMemberV1;
 
 mod boundary;
 mod candidate;
+mod closure;
 mod derive;
 mod restart;
 mod trigger;
 
+pub use closure::{
+    fallback_tenures_v1, FallbackClosureErrorV1, FallbackTenureEvidenceV1, FallbackTenureV1,
+    FallbackTenuresV1,
+};
 pub use derive::{
     effective_composition_v1, FallbackEffectiveCompositionV1, FallbackEffectiveEntryV1,
 };
@@ -182,7 +192,8 @@ pub enum FallbackBoundaryErrorV1 {
     /// reason and no candidate replaces it.
     #[error("a restart slot cannot be composed: {0:?}")]
     SlotUnavailable(FallbackSkipReasonV1),
-    /// The Event store could not be read before a restart activation's commit.
+    /// The Event store could not be read during a restart composition or an owner return,
+    /// before any commit.
     #[error("the Event store could not be read")]
     StoreUnavailable,
 }

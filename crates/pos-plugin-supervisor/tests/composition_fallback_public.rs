@@ -1,5 +1,5 @@
-//! The ADR-119 composition boundary transaction and chain at its public API (#667, ADR-119
-//! section 6 cases 1-3, 7, 8, 9, 11-15), on the shared signed-release test world of
+//! The ADR-119 composition boundary transaction and chain at its public API (#667 and #668,
+//! ADR-119 section 6 cases 1-3 and 6-15), on the shared signed-release test world of
 //! `pos-plugin-publisher` and the supervisor's pass harness.
 //!
 //! Every vector publishes and installs real signed releases, composes the community slots
@@ -19,8 +19,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use pos_core::{
-    Capability, CompositionPinV1, DomainFallbackPolicyV1, EntityId, ErasureGate,
-    FallbackActivatedInputV1, FallbackActivatedPayloadV1, FallbackActivationModeV1,
+    CanonicalBytes, Capability, CompositionPinV1, DomainFallbackPolicyV1, EntityId, ErasureGate,
+    EventDraft, FallbackActivatedInputV1, FallbackActivatedPayloadV1, FallbackActivationModeV1,
     FallbackActivationOriginV1, FallbackEntryV1, FallbackSkippedCandidateV1,
     FallbackTriggerCodeV1 as Code, Hash, ImplementationKeyV1, Kind, Plugin, PluginId,
     COMPOSITION_FALLBACK_ACTIVATED_EVENT_TYPE_V1,
@@ -37,11 +37,12 @@ use pos_plugin_supervisor::pass_harness::{
 };
 use pos_plugin_supervisor::test_support;
 use pos_plugin_supervisor::{
-    compose_restart_v1, fallback_trigger_cause_v1, CommunityDriverSettingsV1, CommunityMemberV1,
-    CommunityPluginSupervisorV1, CompositionBoundaryV1, FallbackBoundaryContextV1,
-    FallbackBoundaryErrorV1 as BoundaryError, FallbackCandidateInputV1,
+    compose_restart_v1, fallback_tenures_v1, fallback_trigger_cause_v1, CommunityDriverSettingsV1,
+    CommunityMemberV1, CommunityPluginSupervisorV1, CompositionBoundaryV1,
+    FallbackBoundaryContextV1, FallbackBoundaryErrorV1 as BoundaryError, FallbackCandidateInputV1,
     FallbackEntryOutcomeV1 as Outcome, FallbackReferenceV1, FallbackReleaseSupplyV1,
-    FallbackRestartSlotV1, WorkerProgramV1, COMPOSITION_FALLBACK_ACTIVATE_GRANT_V1,
+    FallbackRestartSlotV1, FallbackTenureV1, WorkerProgramV1,
+    COMPOSITION_FALLBACK_ACTIVATE_GRANT_V1,
 };
 use pos_runtime::community_plugin_host::{
     gate_community_release_v1, CommunityPassOutcomeV1, CommunityPassV1,
@@ -558,13 +559,18 @@ impl Rig {
         }
     }
 
-    /// Compose every slot through the restart composer, in recipe order.
-    fn compose(&mut self) -> Result<Vec<Outcome>, BoundaryError> {
+    /// The composer's recipe: the declared entry's slot, then the undeclared sibling's.
+    fn slots(&self) -> [FallbackRestartSlotV1; 2] {
         let slots = [self.primary.slot(ENTRY), self.sibling.slot(SIBLING_SLOT)];
-        let slots = slots.map(|(entry_key, base)| FallbackRestartSlotV1 {
+        slots.map(|(entry_key, base)| FallbackRestartSlotV1 {
             entry_key: entry_key.to_owned(),
             base: base.clone(),
-        });
+        })
+    }
+
+    /// Compose every slot through the restart composer, in recipe order.
+    fn compose(&mut self) -> Result<Vec<Outcome>, BoundaryError> {
+        let slots = self.slots();
         let target = self.target();
         let mut wall = clock();
         let mut context = FallbackBoundaryContextV1 {
@@ -1393,6 +1399,52 @@ fn rebase_and_withdrawal(kind: StoreKind) -> TestResult {
         Vec::<String>::new()
     );
     assert_eq!(withdrawn.running()?, "plugin-b");
+    // A restart composes the entry the withdrawal froze on its frozen implementation (#668).
+    assert_eq!(described(&withdrawn.restart()), Vec::<String>::new());
+    assert_eq!(withdrawn.running()?, "plugin-b");
+    Ok(())
+}
+
+/// The Plugin ID text of each tenure's implementation, in order.
+fn implementations(tenures: &[FallbackTenureV1]) -> Vec<&str> {
+    let keys = tenures.iter().map(|tenure| &tenure.implementation);
+    keys.map(ImplementationKeyV1::plugin_id).collect()
+}
+
+/// Case 10 and case 6: a Fork cut after an activation composes the candidate from its
+/// inherited Events; an owner return on the Fork and one on the parent close the same tenure
+/// without colliding; and the Fork's tenures close from its Events alone.
+#[test]
+fn a_fork_after_an_activation_composes_the_candidate() -> TestResult {
+    on_every_store(fork_after_activation)
+}
+
+fn fork_after_activation(kind: StoreKind) -> TestResult {
+    let mut rig = Rig::declared(kind, FAILING, AUTOMATIC)?;
+    let failed = rig.pass()?;
+    assert_eq!(described(&rig.boundary(&failed)), ["activated:plugin-b:[]"]);
+    let parent = rig.pass.timeline;
+    let cut = rig.pass.store.logical_head(parent)?;
+    let fork = rig.pass.store.fork(parent, cut, "fork")?.id();
+    rig.pass.timeline = fork;
+    assert_eq!(described(&rig.restart()), Vec::<String>::new());
+    assert_eq!(rig.running()?, "plugin-b");
+    let primary = rig.primary.key();
+    let returned = described_one(&rig.owner(&primary, true));
+    assert_eq!(returned, "activated:plugin-a:[]");
+    assert_eq!(rig.running()?, "plugin-a");
+    let tenures = fallback_tenures_v1(SCOPE, &rig.slots(), &rig.pass.events())?;
+    let named = implementations(tenures.tenures(ENTRY));
+    assert_eq!(named, ["plugin-a", "plugin-b", "plugin-a"]);
+    assert_eq!(implementations(tenures.tenures(SIBLING_SLOT)), ["plugin-d"]);
+    rig.pass.timeline = parent;
+    assert_eq!(described(&rig.restart()), Vec::<String>::new());
+    assert_eq!(rig.running()?, "plugin-b");
+    let returned = described_one(&rig.owner(&primary, true));
+    assert_eq!(returned, "activated:plugin-a:[]");
+    let on_fork = rig.pass.store.fallback_ledger(SCOPE, fork)?;
+    let on_parent = rig.pass.store.fallback_ledger(SCOPE, parent)?;
+    assert_eq!((on_fork.len(), on_parent.len()), (1, 3));
     Ok(())
 }
 
@@ -1559,5 +1611,58 @@ fn dropped_observation(kind: StoreKind) -> TestResult {
     assert_eq!(rig.boundary.observation(ENTRY), None);
     let refused = rig.owner(&candidate, true);
     assert_eq!(refused, Err(BoundaryError::NoObservation));
+    Ok(())
+}
+
+/// An owner return whose Timeline Events cannot be read is refused with `StoreUnavailable`
+/// before anything is built, and nothing is committed.
+#[test]
+fn an_unreadable_timeline_refuses_the_owner_return() -> TestResult {
+    on_every_store(unreadable_return)
+}
+
+fn unreadable_return(kind: StoreKind) -> TestResult {
+    let mut rig = Rig::declared(kind, FAILING, AUTOMATIC)?;
+    let failed = rig.pass()?;
+    assert_eq!(described(&rig.boundary(&failed)), ["activated:plugin-b:[]"]);
+    rig.pass.gate.block_timeline(rig.pass.timeline);
+    let primary = rig.primary.key();
+    let refused = rig.owner(&primary, true);
+    assert_eq!(refused, Err(BoundaryError::StoreUnavailable));
+    let row = rig.pass.store.registry_row(SCOPE, rig.pass.timeline)?;
+    let revision = row.map(|row| row.state().state_revision());
+    assert_eq!(revision, Some(2));
+    Ok(())
+}
+
+/// A restart faults when a declared entry's registry state and its Events disagree: an
+/// activation Event the port never folded names a later tenure than the registry's row.
+#[test]
+fn a_registry_that_disagrees_with_its_events_faults_the_restart() -> TestResult {
+    on_every_store(disagreeing)
+}
+
+fn disagreeing(kind: StoreKind) -> TestResult {
+    let mut rig = Rig::declared(kind, HEALTHY, AUTOMATIC)?;
+    let automatic = FallbackActivationOriginV1::Automatic;
+    let input = FallbackActivatedInputV1 {
+        scope: SCOPE.to_owned(),
+        policy_digest: rig.policy.ok_or("nothing declared")?,
+        entry_key: ENTRY.to_owned(),
+        closing_tenure_ordinal: 0,
+        from: rig.primary.key(),
+        to: rig.candidate.key(),
+        skipped: Vec::new(),
+        trigger_code: Code::ResourceLimit,
+        trigger_basis: FallbackTriggerCauseV1::FuelExhausted.basis(automatic),
+        activation_ordinal: 1,
+    };
+    let payload = FallbackActivatedPayloadV1::new(input)?.to_canonical_cbor();
+    let activated = Kind::new(COMPOSITION_FALLBACK_ACTIVATED_EVENT_TYPE_V1);
+    let draft = EventDraft::new(rig.entity, activated, CanonicalBytes::from_vec(payload));
+    let _forged = rig.pass.store.append(rig.pass.timeline, &[draft])?;
+    let faulted = rig.restart();
+    let diverged = matches!(faulted, Err(BoundaryError::InvariantFault(_)));
+    assert!(diverged, "{faulted:?}");
     Ok(())
 }

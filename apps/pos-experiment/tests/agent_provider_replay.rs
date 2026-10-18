@@ -245,7 +245,7 @@ impl HostFixture {
             stop: StopCondition::MaxTicks(2),
             store_config,
         })
-        .with_fork_registry_factory(move || {
+        .with_fork_registry_factory(move |_| {
             let provider = FixtureAgentDecisionProvider::new(child_attempts.clone());
             let driver = ProviderBackedAgentDriver::new(
                 child_host.agent,
