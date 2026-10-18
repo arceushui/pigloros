@@ -712,7 +712,8 @@ mod tests {
                     &mut NativeReadContextV1::protected(&mut budget),
                 );
                 if length <= maximum {
-                    let actual = actual?;
+                    let actual = actual
+                        .map_err(|error| format!("raw retained-key fetch failed: {error:?}"))?;
                     assert_eq!(&actual.record, record);
                     assert_eq!(actual.tombstone.as_deref(), tombstone);
                     assert_eq!(budget.remaining_native_bytes(), 0);
@@ -732,8 +733,8 @@ mod tests {
                 &fixture.store.conn,
                 &fixture.admission,
                 &mut NativeReadContextV1::ordinary(),
-            )?,
-            fixture.expected,
+            ),
+            Ok(fixture.expected),
         );
         Ok(())
     }
