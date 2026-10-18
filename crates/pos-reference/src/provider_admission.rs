@@ -239,7 +239,7 @@ mod tests {
     type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
     /// A raw `KEYCTL_DESCRIBE` result: `type;uid;gid;perm;description`.
-    pub(crate) fn describe(key_type: &str, description: &str) -> String {
+    fn describe(key_type: &str, description: &str) -> String {
         format!("{key_type};0;0;3f010000;{description}")
     }
 
