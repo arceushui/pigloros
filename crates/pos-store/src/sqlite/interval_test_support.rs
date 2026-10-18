@@ -139,8 +139,10 @@ mod tests {
                 let poisoned = Arc::clone(&observed);
                 let worker = std::thread::spawn(move || {
                     let guard = poisoned.lock();
-                    assert!(guard.is_ok());
-                    std::panic::resume_unwind(Box::new("intentional native observer poison"));
+                    std::panic::resume_unwind(Box::new({
+                        assert!(guard.is_ok());
+                        "intentional native observer poison"
+                    }));
                 });
                 assert!(worker.join().is_err());
                 assert!(observed.is_poisoned());
