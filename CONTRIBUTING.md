@@ -247,19 +247,19 @@ flowchart TD
     CR --> E["reference evaluator"]
     CR --> B["conformance bundles"]
     CR --> P["audit → deny → shear"]
-    CR --> U["cargo-geiger"]
     CR --> X["Docker"]
     CR --> W["WASM package"]
     CR --> Q["CodeQL (docs-only PRs start it after the scope job)"]
+    CR --> AB["ASan archive build"]
     W --> BP["browser parity"]
     D --> G["standard-gate"]
     E --> G
     B --> G
     P --> G
-    U --> G
     X --> G
     Q --> G
     BP --> G
+    AB --> G
 ```
 
 `modules-structure` and `depgraph` are reporting-only jobs. They run after a
@@ -282,20 +282,37 @@ flowchart TD
     MG --> A
 ```
 
-ASan remains final. The previously dominant `bundle_contract_public` target is
-split through nextest's native `slice:1/2` partitioning. The non-conformance
-workspace remainder uses the same disjoint slices, while `remainder-1` retains
-the conformance library, binaries, and profile/provider targets. The selected
-packages, features, test targets, and sanitizer scope remain unchanged.
+ASan tests remain final. Their instrumented build runs on one of the eight
+normal-stage runners: `asan-build` compiles every workspace test target once
+with `cargo nextest archive` and uploads the archive, and `standard-gate` and
+`asan-gate` both require it. It compiles crates four at a time while
+`scripts/asan/serial-link.sh` admits one link at a time. Each shard downloads
+the archive and runs its tests without compiling. The archive is extracted
+into the workspace, so `target/` sits at the path compiled into
+`CARGO_BIN_EXE_*`.
+
+The previously dominant `bundle_contract_public` target is split through
+nextest's native `slice:1/2` partitioning. The non-conformance workspace
+remainder uses the same disjoint slices, while `remainder-1` retains the
+conformance library, binaries, and profile/provider targets. Shards select
+their tests with nextest filtersets. The selected packages, features, test
+targets, ignored-test handling, and sanitizer scope are unchanged.
+
+Execution isolation is stricter. `bundle-coverage`, `moat-proof`, and the
+conformance library, binary, profile, and provider tests previously ran under
+libtest, many tests per process. They now run one process per test under
+nextest, so LeakSanitizer checks each test on its own exit.
 
 ```mermaid
 flowchart LR
-    M["Mutation passed or skipped"] --> P1["bundle-public 1/2"]
-    M --> P2["bundle-public 2/2"]
-    M --> C["bundle coverage"]
-    M --> O["moat proof"]
-    M --> R1["remainder-1"]
-    M --> R2["remainder-2"]
+    M["Mutation passed or skipped"] --> J{"Both succeeded"}
+    B["asan-build archive"] --> J
+    J --> P1["bundle-public 1/2"]
+    J --> P2["bundle-public 2/2"]
+    J --> C["bundle coverage"]
+    J --> O["moat proof"]
+    J --> R1["remainder-1"]
+    J --> R2["remainder-2"]
     P1 --> G["asan-gate"]
     P2 --> G
     C --> G

@@ -250,6 +250,49 @@ def assert_pull_requests_never_write_caches(workflow: dict) -> None:
                     raise AssertionError(f"{job_name} Docker cache must save only from main")
 
 
+STANDARD_STAGE_RUNNER_CAP = 8
+# Heavy jobs released by cargo-crap. Browser parity follows WASM packaging on
+# the same budget, and standard-gate is the lightweight fan-in.
+STANDARD_STAGE_JOBS = frozenset(
+    {
+        "rustdoc",
+        "reference-evaluator-release",
+        "materialize-conformance-bundles",
+        "audit",
+        "codeql",
+        "docker-build",
+        "world-client-wasm",
+        "asan-build",
+    }
+)
+
+
+def job_needs(job: dict) -> list[str]:
+    needs = job.get("needs", [])
+    return [needs] if isinstance(needs, str) else list(needs)
+
+
+def assert_standard_stage_runner_cap(workflow: dict) -> None:
+    """Keep the normal stage within its documented concurrent-runner cap."""
+    jobs = workflow["jobs"]
+    started = {
+        name
+        for name, job in jobs.items()
+        if name != "standard-gate" and "cargo-crap" in job_needs(job)
+    }
+    if started != STANDARD_STAGE_JOBS:
+        raise AssertionError("standard stage must start exactly the counted jobs")
+    if len(started) > STANDARD_STAGE_RUNNER_CAP:
+        raise AssertionError("standard stage must start at most eight runners")
+    for name in sorted(started):
+        if "strategy" in jobs[name]:
+            raise AssertionError(f"standard stage job {name} must use one runner")
+    gate_needs = job_needs(jobs.get("standard-gate", {}))
+    missing = sorted(started - set(gate_needs))
+    if missing:
+        raise AssertionError(f"standard-gate must wait for every standard-stage job: {missing}")
+
+
 def excluded(path: str, patterns: list[str]) -> bool:
     return any(
         fnmatch.fnmatchcase(path, pattern[1:])
@@ -533,6 +576,34 @@ class CiWorkflowPolicyTests(unittest.TestCase):
                 mutate(mutated)
                 with self.assertRaisesRegex(AssertionError, message):
                     assert_test_shards_gate(mutated)
+
+    def test_standard_stage_stays_within_runner_cap(self) -> None:
+        assert_standard_stage_runner_cap(load_workflow(CI_WORKFLOW_PATH))
+
+    def test_standard_stage_cap_rejects_mutations(self) -> None:
+        mutations = {
+            "start exactly the counted jobs": lambda w: w["jobs"].update(
+                {
+                    "ninth-heavy-job": {
+                        "needs": ["ci_change_scope", "cargo-crap"],
+                        "runs-on": "ubuntu-latest",
+                        "steps": [{"run": "true"}],
+                    }
+                }
+            ),
+            "must use one runner": lambda w: w["jobs"]["asan-build"].update(
+                {"strategy": {"matrix": {"part": [1, 2]}}}
+            ),
+            "wait for every standard-stage job": lambda w: w["jobs"]["standard-gate"][
+                "needs"
+            ].remove("asan-build"),
+        }
+        for message, mutate in mutations.items():
+            with self.subTest(message=message):
+                mutated = copy.deepcopy(load_workflow(CI_WORKFLOW_PATH))
+                mutate(mutated)
+                with self.assertRaisesRegex(AssertionError, message):
+                    assert_standard_stage_runner_cap(mutated)
 
     def test_pull_requests_never_write_caches(self) -> None:
         for workflow_path in MAIN_WRITER_WORKFLOW_PATHS:

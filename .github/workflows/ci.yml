@@ -11,7 +11,8 @@
 #   cargo-crap   — no CRAP regressions; new functions score ≤30
 #   audit        — cargo-audit (CVE advisories)
 #   deny         — cargo-deny (licenses, bans, sources)
-#   geiger       — no unsafe in own crates
+#   unsafe       — workspace unsafe_code = "forbid" plus the source-based
+#                  owner-bridge unsafe policy (pinned-dependencies job)
 #   asan         — address sanitizer on nightly
 #   docker       — image builds and smoke-tests
 #   wasm         — world-client WASM contract + browser parity
@@ -869,25 +870,6 @@ jobs:
       - name: cargo shear (strict)
         run: cargo shear --deny-warnings
 
-  geiger:
-    name: cargo-geiger (unsafe code audit)
-    needs:
-      - ci_change_scope
-      - cargo-crap
-    if: >-
-      ${{ !cancelled() && needs.ci_change_scope.result == 'success' &&
-      needs.cargo-crap.result == 'success' &&
-      (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 40
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
-        with:
-          tool: cargo-geiger
-      - name: cargo geiger (assert no unsafe in own crates)
-        run: bash scripts/check-geiger.sh
-
   # Always runs, including for documentation-only pull requests: the main
   # ruleset's code_scanning rule needs an uploaded analysis for the head commit,
   # and a skipped job uploads none, which leaves the PR unmergeable. Rust PRs
@@ -926,13 +908,73 @@ jobs:
 
 # ── Platform verification ────────────────────────────────────────────────────
 
+  # ASan compilation took most of each ASan shard's time, so it runs once as a
+  # standard-stage job. Crates compile in parallel while scripts/asan/
+  # serial-link.sh admits one link at a time; the build fails unless the
+  # wrapper's lock file exists afterwards. The archive holds every
+  # workspace test binary; the shards below still run last and only execute
+  # tests from it.
+  asan-build:
+    name: asan build (nextest archive)
+    needs:
+      - ci_change_scope
+      - cargo-crap
+    if: >-
+      ${{ !cancelled() && needs.ci_change_scope.result == 'success' &&
+      needs.cargo-crap.result == 'success' &&
+      (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rm -f rust-toolchain.toml
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: nightly-2026-07-01
+          components: rust-src
+      - name: Install cargo-nextest for the ASan archive
+        uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
+        with:
+          tool: cargo-nextest@0.9.146
+          fallback: none
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        with:
+          shared-key: asan-nightly-2026-07-01
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: cargo nextest archive with ASan
+        env:
+          RUSTC_BOOTSTRAP: "1"
+          CARGO_BUILD_JOBS: "4"
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: ${{ github.workspace }}/scripts/asan/serial-link.sh
+          CARGO_INCREMENTAL: "0"
+          CARGO_PROFILE_TEST_DEBUG: line-tables-only
+        run: |
+          set -euo pipefail
+          RUSTFLAGS="-Z sanitizer=address" \
+            cargo +nightly-2026-07-01 nextest archive --workspace --all-features \
+            --locked -Z build-std --target x86_64-unknown-linux-gnu --tests \
+            --archive-file "${RUNNER_TEMP}/asan-tests.tar.zst"
+          test -f "${RUNNER_TEMP}/asan-link.lock"
+      - name: Upload ASan test archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: asan-nextest-archive
+          path: ${{ runner.temp }}/asan-tests.tar.zst
+          retention-days: 3
+          if-no-files-found: error
+          overwrite: true
+          compression-level: 0
+
+  # Shards do not compile: they run tests from the asan-build archive, so
+  # rust-src and rust-cache are intentionally absent.
   asan:
     name: asan shard (${{ matrix.shard }})
     needs:
       - ci_change_scope
       - standard-gate
       - mutation-checks
-    if: ${{ !cancelled() && needs.standard-gate.result == 'success' && (needs.mutation-checks.result == 'success' || needs.mutation-checks.result == 'skipped') && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
+      - asan-build
+    if: ${{ !cancelled() && needs.standard-gate.result == 'success' && (needs.mutation-checks.result == 'success' || needs.mutation-checks.result == 'skipped') && needs.asan-build.result == 'success' && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     strategy:
@@ -952,9 +994,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
           toolchain: nightly-2026-07-01
-          components: rust-src
       - name: Install cargo-nextest for partitioned ASan tests
-        if: ${{ startsWith(matrix.shard, 'bundle-public-') || startsWith(matrix.shard, 'remainder-') }}
         uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
         with:
           tool: cargo-nextest@0.9.146
@@ -965,10 +1005,11 @@ jobs:
           test -x "${symbolizer}"
           symbolizer_version="$("${symbolizer}" --version)"
           grep -Fqx "Ubuntu LLVM version 18.1.3" <<<"${symbolizer_version}"
-      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+      - name: Download ASan test archive
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          shared-key: asan-nightly-2026-07-01
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          name: asan-nextest-archive
+          path: ${{ runner.temp }}/asan-archive
       - name: Prove unrelated leaks still fail LSan
         env:
           ASAN_OPTIONS: detect_leaks=1:detect_odr_violation=0
@@ -990,70 +1031,60 @@ jobs:
           grep -Fqx "SUMMARY: AddressSanitizer: 1234 byte(s) leaked in 1 allocation(s)." "${log}"
           ! grep -F "Suppressions used:" "${log}"
           ! grep -F "bevy_reflect::utility::GenericTypeCell" "${log}"
+      # Extracting into the workspace puts target/ at the path the archive was
+      # built at, so compile-time env!("CARGO_BIN_EXE_*") paths resolve.
       - name: cargo test with ASan
         env:
           ASAN_SHARD: ${{ matrix.shard }}
-          RUSTC_BOOTSTRAP: "1"
           ASAN_OPTIONS: detect_leaks=1:detect_odr_violation=0
           LSAN_OPTIONS: suppressions=${{ github.workspace }}/scripts/asan/bevy-reflect.lsan:print_suppressions=1
-          CARGO_BUILD_JOBS: "1"
-          RUST_TEST_THREADS: "2"
-          CARGO_INCREMENTAL: "0"
-          CARGO_PROFILE_TEST_DEBUG: line-tables-only
         run: |
           set -euo pipefail
           test -x "/usr/bin/llvm-symbolizer-18"
-          cargo_args=(
-            +nightly-2026-07-01 test --all-features --locked -Z build-std
-            --target x86_64-unknown-linux-gnu
-          )
           nextest_args=(
-            +nightly-2026-07-01 nextest run --all-features --locked -Z build-std
-            --target x86_64-unknown-linux-gnu
+            +nightly-2026-07-01 nextest run
+            --archive-file "${RUNNER_TEMP}/asan-archive/asan-tests.tar.zst"
+            --extract-to "${GITHUB_WORKSPACE}"
+            --extract-overwrite
+            --workspace-remap "${GITHUB_WORKSPACE}"
             --user-config-file none
             --ignore-default-filter
             --success-output final
             --no-output-indent
+            --test-threads 2
           )
-          run_asan_tests() {
-            ASAN_SYMBOLIZER_PATH="/usr/bin/llvm-symbolizer-18" \
-              RUSTFLAGS="-Z sanitizer=address" \
-              cargo "${cargo_args[@]}" "$@"
-          }
           run_asan_partition() {
             ASAN_SYMBOLIZER_PATH="/usr/bin/llvm-symbolizer-18" \
-              RUSTFLAGS="-Z sanitizer=address" \
               cargo "${nextest_args[@]}" "$@"
           }
           case "${ASAN_SHARD}" in
             bundle-coverage)
-              run_asan_tests -p pos-conformance \
-                --test bundle_contract_coverage_public
+              run_asan_partition \
+                -E 'binary_id(pos-conformance::bundle_contract_coverage_public)'
               ;;
             bundle-public-1)
-              run_asan_partition -p pos-conformance \
-                --test bundle_contract_public \
-                --partition slice:1/2 --run-ignored all --test-threads 2
+              run_asan_partition \
+                -E 'binary_id(pos-conformance::bundle_contract_public)' \
+                --partition slice:1/2 --run-ignored all
               ;;
             bundle-public-2)
-              run_asan_partition -p pos-conformance \
-                --test bundle_contract_public \
-                --partition slice:2/2 --run-ignored all --test-threads 2
+              run_asan_partition \
+                -E 'binary_id(pos-conformance::bundle_contract_public)' \
+                --partition slice:2/2 --run-ignored all
               ;;
             moat-proof)
-              run_asan_tests -p pos-conformance \
-                --test moat_proof_public
+              run_asan_partition \
+                -E 'binary_id(pos-conformance::moat_proof_public)'
               ;;
             remainder-1)
-              run_asan_partition --workspace --exclude pos-conformance --tests \
-                --partition slice:1/2 --test-threads 2
-              run_asan_tests -p pos-conformance --lib --bins \
-                --test profile_contract_public \
-                --test provider_contract_public
+              run_asan_partition -E 'not package(pos-conformance)' \
+                --partition slice:1/2
+              run_asan_partition \
+                -E 'package(pos-conformance) & (kind(lib) | kind(bin) | binary_id(pos-conformance::profile_contract_public) | binary_id(pos-conformance::provider_contract_public))'
               ;;
             remainder-2)
-              run_asan_partition --workspace --exclude pos-conformance --tests \
-                --partition slice:2/2 --test-threads 2
+              run_asan_partition -E 'not package(pos-conformance)' \
+                --partition slice:2/2
               ;;
             *)
               printf 'unknown ASan shard: %s\n' "${ASAN_SHARD}" >&2
@@ -1067,6 +1098,7 @@ jobs:
     if: ${{ always() }}
     needs:
       - ci_change_scope
+      - asan-build
       - asan
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -1075,14 +1107,17 @@ jobs:
         env:
           SCOPE_JOB_RESULT: ${{ needs.ci_change_scope.result }}
           RUST_SCOPE_RESULT: ${{ needs.ci_change_scope.outputs.rust }}
+          ASAN_BUILD_RESULT: ${{ needs.asan-build.result }}
           ASAN_SHARDS_RESULT: ${{ needs.asan.result }}
         run: |
           set -euo pipefail
           if [[ "${SCOPE_JOB_RESULT}" == "success" \
             && "${RUST_SCOPE_RESULT}" == "false" \
+            && "${ASAN_BUILD_RESULT}" == "skipped" \
             && "${ASAN_SHARDS_RESULT}" == "skipped" ]]; then
             exit 0
           fi
+          test "${ASAN_BUILD_RESULT}" = success
           test "${ASAN_SHARDS_RESULT}" = success
 
   docker-build:
@@ -1201,12 +1236,12 @@ jobs:
       - reference-evaluator-release
       - materialize-conformance-bundles
       - audit
-      - geiger
       - codeql
       - ledger-windows
       - docker-build
       - world-client-wasm
       - world-client-browser-parity
+      - asan-build
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -1219,12 +1254,12 @@ jobs:
           REFERENCE_RESULT: ${{ needs.reference-evaluator-release.result }}
           MATERIALIZE_RESULT: ${{ needs.materialize-conformance-bundles.result }}
           DEPENDENCY_RESULT: ${{ needs.audit.result }}
-          GEIGER_RESULT: ${{ needs.geiger.result }}
           CODEQL_RESULT: ${{ needs.codeql.result }}
           LEDGER_WINDOWS_RESULT: ${{ needs.ledger-windows.result }}
           DOCKER_RESULT: ${{ needs.docker-build.result }}
           WASM_RESULT: ${{ needs.world-client-wasm.result }}
           BROWSER_RESULT: ${{ needs.world-client-browser-parity.result }}
+          ASAN_BUILD_RESULT: ${{ needs.asan-build.result }}
         run: |
           set -euo pipefail
           test "${CORE_RESULT}" = success
@@ -1235,9 +1270,9 @@ jobs:
           fi
           for result in \
             "${CARGO_CRAP_RESULT}" "${RUSTDOC_RESULT}" "${REFERENCE_RESULT}" \
-            "${MATERIALIZE_RESULT}" "${DEPENDENCY_RESULT}" "${GEIGER_RESULT}" \
+            "${MATERIALIZE_RESULT}" "${DEPENDENCY_RESULT}" \
             "${LEDGER_WINDOWS_RESULT}" "${DOCKER_RESULT}" \
-            "${WASM_RESULT}" "${BROWSER_RESULT}"; do
+            "${WASM_RESULT}" "${BROWSER_RESULT}" "${ASAN_BUILD_RESULT}"; do
             test "${result}" = "${expected}"
           done
 

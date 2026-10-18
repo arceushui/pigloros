@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Keep Cargo build/link work serialized within each hosted ASan shard.
+# Enforce the ASan CI policy: one serialized-link archive build plus
+# archive-consuming test shards.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
