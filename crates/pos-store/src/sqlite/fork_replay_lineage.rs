@@ -543,6 +543,56 @@ mod tests {
     }
 
     #[test]
+    fn public_lineage_refuses_redacted_shape_before_fetching_metadata() -> Fallible<()> {
+        use rusqlite::hooks::{AuthContext, Authorization};
+
+        for ignored in [0, 8] {
+            let (store, root, child) = fixture()?;
+            for (timeline, expected) in [
+                (root, ForkReplayLineageNodeV1::new(root, None)),
+                (
+                    child,
+                    ForkReplayLineageNodeV1::new(child, Some((root, Seq::from_u64(1)))),
+                ),
+            ] {
+                let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+                let healthy = Ok(Some(expected));
+                assert_eq!(read(&store, timeline, &mut clock)?, healthy);
+                // Redact only the shape probe's typeof(id) or typeof(head_seq).
+                // The stored row and later metadata projection remain healthy:
+                // rejecting it must not depend on that second decoder barrier.
+                let observed = redact_read(&store.conn, ignored)?;
+                let failed = read(&store, timeline, &mut clock)?;
+                store
+                    .conn
+                    .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)?;
+                assert_eq!(failed, Err(Error::Read(ReadError::CorruptAuthority)));
+                assert_reads(
+                    &observed,
+                    "timelines",
+                    &[
+                        "id",
+                        "id",
+                        "parent_id",
+                        "fork_seq",
+                        "parent_id",
+                        "parent_id",
+                        "fork_seq",
+                        "fork_seq",
+                        "head_seq",
+                        "head_seq",
+                        "id",
+                    ],
+                    ignored,
+                )?;
+                assert_eq!(read(&store, timeline, &mut clock)?, healthy);
+                assert!(store.conn.is_autocommit());
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn descending_nested_fork_cut_refuses_the_public_logical_head() -> Fallible<()> {
         let (mut store, _, child) = fixture()?;
         let nested = store.fork(child, Seq::from_u64(1), "nested lineage")?.id();
