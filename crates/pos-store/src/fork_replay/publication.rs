@@ -257,55 +257,71 @@ mod tests {
     #[test]
     fn publication_size_caps_refuse_before_owned_decoder_buffers() -> Fallible<()> {
         let committed = committed()?;
+        let owner = committed
+            .operation
+            .input()
+            .signing_identity
+            .owner_id
+            .as_str()
+            .len();
+        let signed_artifact = artifact(&committed)?;
+        let signed = signed_artifact.signed_manifest();
+        let artifact_fields = committed.outer_bytes.len() * 3
+            + signed.manifest_bytes().len() * 3
+            + signed.identity().owner_id.as_str().len()
+            + signed.manifest().input().intervention_sequences.len() * 8;
         let imported = ImportedForkPublicationOperationV1::from_local(
             committed.operation.clone(),
             committed.authority_origin_digest.ok_or("no origin")?,
         );
-        for (codec, valid, maximum) in [
+        for (codec, valid, maximum, cap_charge) in [
             (
                 Codec::Binding,
                 committed.binding.to_canonical_cbor(),
+                MAX_FORK_PUBLICATION_BINDING_BYTES_V1,
                 MAX_FORK_PUBLICATION_BINDING_BYTES_V1,
             ),
             (
                 Codec::Operation,
                 committed.operation.to_canonical_cbor(),
                 MAX_FORK_PUBLICATION_OPERATION_BYTES_V1,
+                (owner + MAX_FORK_PUBLICATION_OPERATION_BYTES_V1) * 2,
             ),
             (
                 Codec::Operation,
                 imported.to_canonical_cbor(),
                 MAX_FORK_PUBLICATION_OPERATION_BYTES_V1,
+                (owner + MAX_FORK_PUBLICATION_OPERATION_BYTES_V1) * 2,
             ),
             (
                 Codec::Artifact,
-                artifact(&committed)?.to_canonical_cbor(),
+                signed_artifact.to_canonical_cbor(),
                 MAX_FORK_PUBLICATION_ARTIFACT_BYTES_V1,
+                artifact_fields + MAX_FORK_PUBLICATION_ARTIFACT_BYTES_V1,
             ),
         ] {
             assert!(valid.len() <= maximum);
             assert!(codec.native_accepts(&valid));
             codec.decode(&valid, &mut NativeReadContextV1::ordinary())?;
-            if matches!(codec, Codec::Binding) {
-                // Exact-cap padding remains corrupt FPB1, but is inside the
-                // transport cap and receives the bounded comparison precharge.
-                let mut capped = valid.clone();
-                capped.resize(maximum, 0);
-                assert!(!codec.native_accepts(&capped));
-                let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
-                let started = clock.mark();
-                let limits = ForkReplayReadLimitsV1::new(1, 1, 1, 8 * 1024 * 1024, 1_000_000)?;
-                let mut budget = ForkReplayReadBudgetV1::new(limits, started, &mut clock)?;
-                assert_eq!(
-                    codec.decode(&capped, &mut NativeReadContextV1::protected(&mut budget)),
-                    Err(Error::PublicationConflict),
-                );
-                assert_eq!(
-                    budget.remaining_native_bytes(),
-                    limits.max_native_bytes() - maximum
-                );
-                assert_eq!(budget.check_time(), Ok(()));
-            }
+            // Exact-cap padding remains corrupt native encoding but receives
+            // bounded precharges before Core refuses it. Padding also removes
+            // the imported tail, so code-2-aware FPO1 retries both local passes.
+            let mut capped = valid.clone();
+            capped.resize(maximum, 0);
+            assert!(!codec.native_accepts(&capped));
+            let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+            let started = clock.mark();
+            let limits = ForkReplayReadLimitsV1::new(1, 1, 1, 8 * 1024 * 1024, 1_000_000)?;
+            let mut budget = ForkReplayReadBudgetV1::new(limits, started, &mut clock)?;
+            assert_eq!(
+                codec.decode(&capped, &mut NativeReadContextV1::protected(&mut budget)),
+                Err(Error::PublicationConflict),
+            );
+            assert_eq!(
+                budget.remaining_native_bytes(),
+                limits.max_native_bytes() - cap_charge
+            );
+            assert_eq!(budget.check_time(), Ok(()));
             // Raw corruption below typed construction, not admitted authority.
             let mut oversized = valid.clone();
             oversized.resize(maximum + 1, 0);
