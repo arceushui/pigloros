@@ -1,16 +1,17 @@
 # Diagnostic only: retain the original required run and benchmark advisories.
-name: 561-paired-memory-9fa-e4c
+# One frozen follow-up to the current CAS512 advisory; do not rerun for a favorable result.
+name: 561-paired-memory-0c55-3b4
 
 on:
   push:
-    branches: [redmine/561-paired-memory-9fa-e4c]
+    branches: [redmine/561-paired-memory-0c55-3b4]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: 561-paired-memory-9fa-e4c-${{ github.ref }}
+  group: 561-paired-memory-0c55-3b4-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -44,10 +45,10 @@ jobs:
           import sys
           import time
 
-          head = "9fa77a49333c6715474899add1c01bfa27b6a6e4"
-          base = "e4c1ae25d48db8e5a51c621543538288c89d1ca3"
+          head = "0c55d75bc7720206b881c49f2db5e21bdd819bbd"
+          base = "3b4d18e0b0b3c79b2e1f6b94f955e11bc8c7c02e"
           workspace = pathlib.Path.cwd()
-          root = pathlib.Path(os.environ["RUNNER_TEMP"]) / "561-paired-memory-9fa-e4c"
+          root = pathlib.Path(os.environ["RUNNER_TEMP"]) / "561-paired-memory-0c55-3b4"
           output = workspace / "561-paired-memory-evidence"
           root.mkdir()
           output.mkdir()
@@ -201,7 +202,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: 561-paired-memory-9fa-e4c-${{ github.run_id }}-${{ github.run_attempt }}
+          name: 561-paired-memory-0c55-3b4-${{ github.run_id }}-${{ github.run_attempt }}
           path: 561-paired-memory-evidence/
           if-no-files-found: error
           retention-days: 14
