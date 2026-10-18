@@ -9,17 +9,10 @@
 //! # Lock order and durability
 //!
 //! The reads run the poison check and the schema check, then one statement, with no
-//! transaction. A write runs, in this order: the poison check (`StorePoisoned`); for `declare`
-//! and `activate` the erasure fence of the target Timeline (`EventRejected`), which encloses
-//! everything below up to and including the durability restore; the autocommit check
-//! (`NestedTransaction`); the WAL check (`WalRequired`); a read of the connection's current
-//! `synchronous` level; `PRAGMA synchronous=FULL` with a read-back; `BEGIN IMMEDIATE`; the work;
-//! `COMMIT` or `ROLLBACK`; and the restore of the recorded level with a read-back. This is the
-//! Plugin trust registry's protocol: from the moment `FULL` is set, every exit path restores the
-//! recorded level; after a failed `COMMIT` the adapter rolls back and requires autocommit before
-//! it touches the level; a connection still inside a transaction then, or a restore that fails,
-//! poisons the handle, and every later registry call returns `StorePoisoned` until the store is
-//! dropped and reopened.
+//! transaction. A write runs the durability protocol of `super::registry_durability`, shared
+//! with the Plugin trust registry. For `declare` and `activate`, the erasure fence of the target
+//! Timeline (`EventRejected`) is taken after the poison check and encloses the rest of the
+//! protocol, up to and including the durability restore.
 //!
 //! The Event is appended inside the open transaction through the same guard chain as
 //! `EventStore::append` (`guarded_generic_append`), whose savepoint nests inside it. The fold
@@ -31,10 +24,11 @@ use rusqlite::Connection;
 
 use super::composition_fallback_registry_rows::{self as rows, storage_error};
 use super::composition_fallback_registry_schema as schema;
+use super::registry_durability::{DurabilityErrorV1, DurableRegistryV1};
 use super::SqliteStore;
 use crate::composition_fallback_registry::logic::{
-    event_identity, payload_digest, plan_activate, plan_declare, require, FallbackPlanV1,
-    FallbackReadsV1, FallbackResult,
+    event_identity, payload_digest, plan_activate, plan_declare, FallbackPlanV1, FallbackReadsV1,
+    FallbackResult,
 };
 use crate::composition_fallback_registry::{
     CompositionFallbackRegistryErrorV1 as Error, CompositionFallbackRegistryV1,
@@ -43,171 +37,18 @@ use crate::composition_fallback_registry::{
     FallbackProvisionOutcomeV1, FallbackRegistryRowV1,
 };
 
-fn query_journal(connection: &Connection) -> rusqlite::Result<String> {
-    connection.query_row("PRAGMA journal_mode", [], |row| row.get(0))
-}
-
-fn query_level(connection: &Connection) -> rusqlite::Result<i64> {
-    connection.query_row("PRAGMA synchronous", [], |row| row.get(0))
-}
-
-fn exec_set_full(connection: &Connection) -> rusqlite::Result<()> {
-    connection.execute_batch("PRAGMA synchronous=FULL")
-}
-
-fn exec_restore(connection: &Connection, level: i64) -> rusqlite::Result<()> {
-    connection.execute_batch(&format!("PRAGMA synchronous={level}"))
-}
-
-fn exec_commit(connection: &Connection) -> rusqlite::Result<()> {
-    connection.execute_batch("COMMIT")
-}
-
-fn exec_rollback(connection: &Connection) -> rusqlite::Result<()> {
-    connection.execute_batch("ROLLBACK")
-}
-
-/// The durability statements the protocol runs. A production build runs the real statements; a
-/// test build substitutes each whole function so a test can make exactly that step fail.
-#[cfg(not(test))]
-mod seam {
-    pub(super) use super::{
-        exec_commit as commit, exec_restore as restore_statement, exec_rollback as rollback,
-        exec_set_full as set_full_statement, query_journal as journal_mode,
-        query_level as entry_level, query_level as full_read_back,
-        query_level as restore_read_back,
-    };
-}
-
 #[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
-mod seam {
-    use std::cell::Cell;
+use super::registry_durability::seam;
 
-    use rusqlite::Connection;
+impl DurabilityErrorV1 for Error {
+    const STORE_POISONED: Self = Self::StorePoisoned;
+    const NESTED_TRANSACTION: Self = Self::NestedTransaction;
+    const WAL_REQUIRED: Self = Self::WalRequired;
+    const STORAGE_INDETERMINATE: Self = Self::StorageIndeterminate;
 
-    use super::{
-        exec_commit, exec_restore, exec_rollback, exec_set_full, query_journal, query_level,
-    };
-
-    /// One step of the durability protocol that a test can make fail.
-    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    pub(super) enum Step {
-        ReadJournal,
-        ReadEntry,
-        SetFull,
-        ReadBackFull,
-        Restore,
-        ReadBackRestore,
-        /// A `COMMIT` that succeeds but reports failure: a lost acknowledgement.
-        LostAcknowledgement,
-        /// A `ROLLBACK` that never runs, leaving the transaction open.
-        Rollback,
+    fn storage(error: &rusqlite::Error) -> Self {
+        storage_error(error)
     }
-
-    thread_local! {
-        /// The one step that fails on this thread.
-        pub(super) static FAULT: Cell<Option<Step>> = const { Cell::new(None) };
-    }
-
-    fn injected(step: Step) -> bool {
-        FAULT.with(Cell::get) == Some(step)
-    }
-
-    fn fail_if(step: Step) -> rusqlite::Result<()> {
-        if injected(step) {
-            Err(rusqlite::Error::InvalidQuery)
-        } else {
-            Ok(())
-        }
-    }
-
-    pub(super) fn journal_mode(connection: &Connection) -> rusqlite::Result<String> {
-        fail_if(Step::ReadJournal).and_then(|()| query_journal(connection))
-    }
-
-    pub(super) fn entry_level(connection: &Connection) -> rusqlite::Result<i64> {
-        fail_if(Step::ReadEntry).and_then(|()| query_level(connection))
-    }
-
-    pub(super) fn set_full_statement(connection: &Connection) -> rusqlite::Result<()> {
-        fail_if(Step::SetFull).and_then(|()| exec_set_full(connection))
-    }
-
-    /// A failed read-back reads a value that is never a level.
-    pub(super) fn full_read_back(connection: &Connection) -> rusqlite::Result<i64> {
-        if injected(Step::ReadBackFull) {
-            Ok(-1)
-        } else {
-            query_level(connection)
-        }
-    }
-
-    pub(super) fn restore_statement(connection: &Connection, level: i64) -> rusqlite::Result<()> {
-        fail_if(Step::Restore).and_then(|()| exec_restore(connection, level))
-    }
-
-    pub(super) fn restore_read_back(connection: &Connection) -> rusqlite::Result<i64> {
-        fail_if(Step::ReadBackRestore).and_then(|()| query_level(connection))
-    }
-
-    pub(super) fn commit(connection: &Connection) -> rusqlite::Result<()> {
-        if injected(Step::LostAcknowledgement) {
-            exec_commit(connection).and(Err(rusqlite::Error::InvalidQuery))
-        } else {
-            exec_commit(connection)
-        }
-    }
-
-    pub(super) fn rollback(connection: &Connection) -> rusqlite::Result<()> {
-        if injected(Step::Rollback) {
-            Ok(())
-        } else {
-            exec_rollback(connection)
-        }
-    }
-}
-
-use seam::{
-    commit, entry_level, full_read_back, journal_mode, restore_read_back, restore_statement,
-    rollback, set_full_statement,
-};
-
-/// The value `PRAGMA synchronous` reads back for `FULL`.
-const SYNCHRONOUS_FULL: i64 = 2;
-
-fn require_wal(connection: &Connection) -> FallbackResult<()> {
-    journal_mode(connection)
-        .map_err(|error| storage_error(&error))
-        .and_then(|mode| require(mode == "wal", Error::WalRequired))
-}
-
-/// Set `synchronous=FULL` and read it back; either failure leaves the outcome unknown.
-fn set_full(connection: &Connection) -> FallbackResult<()> {
-    let full = set_full_statement(connection)
-        .and_then(|()| full_read_back(connection))
-        .is_ok_and(|level| level == SYNCHRONOUS_FULL);
-    require(full, Error::StorageIndeterminate)
-}
-
-/// Whether `level` is the connection's level again, in autocommit, as read back.
-fn restore(connection: &Connection, level: i64) -> bool {
-    connection.is_autocommit()
-        && restore_statement(connection, level)
-            .and_then(|()| restore_read_back(connection))
-            .is_ok_and(|read| read == level)
-}
-
-fn begin(connection: &Connection) -> FallbackResult<()> {
-    connection
-        .execute_batch(super::begin_immediate_sql())
-        .map_err(|error| storage_error(&error))
-}
-
-/// Roll back whatever is open and report whether the connection is in autocommit afterwards.
-fn rollback_to_autocommit(connection: &Connection) -> bool {
-    drop(rollback(connection));
-    connection.is_autocommit()
 }
 
 /// The logic's view of the open transaction; private, so no caller reads Events through it.
@@ -248,52 +89,17 @@ impl FallbackReadsV1 for SqliteFallbackViewV1<'_> {
 }
 
 impl SqliteStore {
+    /// The shared durability protocol on this handle's connection and fallback poison cell.
+    const fn fallback_durability(&self) -> DurableRegistryV1<'_> {
+        DurableRegistryV1 {
+            connection: &self.conn,
+            poisoned: &self.composition_fallback_poisoned,
+        }
+    }
+
     /// A poisoned handle fails every registry call.
     const fn ensure_fallback_usable(&self) -> FallbackResult<()> {
-        let poisoned = self.composition_fallback_poisoned.get();
-        require(!poisoned, Error::StorePoisoned)
-    }
-
-    /// Record a failed restore: the connection's state is unknown until the store is reopened.
-    fn poison_fallback(&self) -> Error {
-        self.composition_fallback_poisoned.set(true);
-        Error::StorageIndeterminate
-    }
-
-    /// Restore the recorded `synchronous` level, or poison the handle.
-    fn restore_fallback_level(&self, level: i64) -> FallbackResult<()> {
-        require(restore(&self.conn, level), Error::StorageIndeterminate)
-            .map_err(|_| self.poison_fallback())
-    }
-
-    /// Everything up to and including `BEGIN IMMEDIATE`; returns the level to restore.
-    fn enter_fallback_durability(&self) -> FallbackResult<i64> {
-        let connection = &self.conn;
-        require(connection.is_autocommit(), Error::NestedTransaction)?;
-        require_wal(connection)?;
-        let entry = entry_level(connection).map_err(|error| storage_error(&error))?;
-        set_full(connection)
-            .and_then(|()| begin(connection))
-            .or_else(|error| self.restore_fallback_level(entry).and(Err(error)))
-            .map(|()| entry)
-    }
-
-    /// Roll back, then restore the recorded level; a connection still in a transaction poisons.
-    fn abandon_fallback(&self, level: i64) -> FallbackResult<()> {
-        let rolled_back = rollback_to_autocommit(&self.conn);
-        require(rolled_back, Error::StorageIndeterminate)
-            .map_err(|_| self.poison_fallback())
-            .and_then(|()| self.restore_fallback_level(level))
-    }
-
-    /// `COMMIT`, then restore the recorded level. A failed `COMMIT` is an unknown outcome.
-    fn commit_fallback(&self, level: i64) -> FallbackResult<()> {
-        match commit(&self.conn) {
-            Ok(()) => self.restore_fallback_level(level),
-            Err(_) => self
-                .abandon_fallback(level)
-                .and(Err(Error::StorageIndeterminate)),
-        }
+        self.fallback_durability().ensure_usable()
     }
 
     /// Run `work` in one `BEGIN IMMEDIATE` transaction at `synchronous=FULL`.
@@ -301,12 +107,7 @@ impl SqliteStore {
         &self,
         work: &impl Fn(&Self) -> FallbackResult<T>,
     ) -> FallbackResult<T> {
-        self.ensure_fallback_usable()?;
-        let level = self.enter_fallback_durability()?;
-        match work(self) {
-            Ok(value) => self.commit_fallback(level).map(|()| value),
-            Err(error) => self.abandon_fallback(level).and(Err(error)),
-        }
+        self.fallback_durability().transaction(|| work(self))
     }
 
     /// Run `work` as a transaction inside the erasure fence of the target Timeline.

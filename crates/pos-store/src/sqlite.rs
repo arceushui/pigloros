@@ -159,6 +159,7 @@ mod plugin_trust_registry;
 mod plugin_trust_registry_rows;
 #[cfg(target_os = "linux")]
 mod plugin_trust_registry_schema;
+mod registry_durability;
 
 use fork_code_two_read::{
     sqlite_retained_key_evidence, sqlite_validated_admission, sqlite_validated_graph,
