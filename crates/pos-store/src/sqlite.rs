@@ -15005,6 +15005,41 @@ mod tests {
         ForkHostSigningKeyV1,
     };
 
+    // Measure the durable rewrite fixture outside the tests/ exporter filter.
+    #[cfg_attr(coverage_nightly, coverage(on))]
+    fn replace_classifier_records(
+        store: &SqliteStore,
+        source: &ForkClassifierSourceV1,
+        table: &ForkClassifierTableV1,
+        registration: &ForkClassifierRegistrationV1,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        store
+            .conn
+            .execute(
+                "UPDATE fork_classifier_sources SET fcs1_cbor=?1",
+                params![source.to_canonical_cbor()],
+            )
+            .and_then(|rows| {
+                assert_eq!(rows, 1);
+                store.conn.execute(
+                    "UPDATE fork_classifier_tables SET fct1_digest=?1, fct1_cbor=?2",
+                    params![
+                        table.digest().as_bytes().as_slice(),
+                        table.to_canonical_cbor()
+                    ],
+                )
+            })
+            .and_then(|rows| {
+                assert_eq!(rows, 1);
+                store.conn.execute(
+                    "UPDATE fork_classifier_registrations SET fcr1_cbor=?1",
+                    params![registration.to_canonical_cbor()],
+                )
+            })
+            .map(|rows| assert_eq!(rows, 1))
+            .map_err(Into::into)
+    }
+
     #[test]
     fn sqlite_manifest_owner_receipt_count_is_checked_and_bounded() {
         assert_eq!(
