@@ -381,6 +381,27 @@ mod tests {
                 let expected = bytes.len() + registrar + "native-route".len() + 32 + 1;
                 byte_boundary(codec, &bytes, expected, expected)?;
                 byte_boundary(codec, &bytes, expected, expected - 1)?;
+                // The last route is [text, bytes32, uint]. Change only its
+                // text major, keeping its length and all later fields exact.
+                let route_head = bytes.len() - ("native-route".len() + 1 + 2 + 32 + 1);
+                assert_eq!(bytes[route_head], 0x6c);
+                assert_eq!(&bytes[route_head + 1..route_head + 13], b"native-route");
+                let mut nontext = bytes.clone();
+                nontext[route_head] = 0x4c;
+                let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+                let start = clock.mark();
+                let limits = ForkReplayReadLimitsV1::new(1, 1, 1, 1_000_000, 1_000_000)?;
+                let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+                assert_eq!(
+                    codec.decode(&nontext, &mut NativeReadContextV1::protected(&mut budget)),
+                    Err(Error::PublicationConflict)
+                );
+                // Refuse before route/equality precharges, not just in Core.
+                assert_eq!(
+                    budget.remaining_native_bytes(),
+                    limits.max_native_bytes() - registrar
+                );
+                budget.check_time()?;
                 for nonnative_flag in [0xf4, 0xf5] {
                     let mut nonnative = bytes.clone();
                     *nonnative.last_mut().ok_or("native route flag")? = nonnative_flag;
