@@ -993,9 +993,19 @@ pub trait EventStore: Send {
     ///
     /// Default fails closed so thin test stubs need not implement Wave 6 APIs.
     ///
+    /// ADR-099 revision 13: an admitted Fork, meaning a Timeline for which the
+    /// store holds a `FAR1` of any origin, is never deleted, so its provenance
+    /// lives as long as the store and its id can never be re-created.
+    ///
     /// # Errors
-    /// Returns [`CoreError::TimelineNotFound`] if the timeline does not exist, or
-    /// [`CoreError::Storage`] if the timeline still has dependent forks / I/O failure.
+    /// Adapters check in this order, and a refusal mutates nothing:
+    /// [`CoreError::ErasureContainmentUnavailable`] when direct topology
+    /// changes need a host permit; geographic concealment as
+    /// [`CoreError::TimelineNotFound`]; [`CoreError::Storage`] if the timeline
+    /// still has dependent forks; [`CoreError::AdmittedForkNotDeletable`] for an
+    /// admitted Fork; then [`CoreError::TimelineNotFound`] if the timeline does
+    /// not exist, even when an orphan `FAR1` names its id. Any I/O failure is
+    /// [`CoreError::Storage`].
     fn delete_timeline(&mut self, _id: TimelineId) -> Result<(), CoreError> {
         Err(CoreError::Storage(
             "delete_timeline not supported by this store".to_owned(),
