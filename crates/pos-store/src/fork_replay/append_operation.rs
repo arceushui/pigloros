@@ -114,6 +114,49 @@ mod tests {
     }
 
     #[test]
+    fn fop_transport_cap_is_inclusive_before_malformed_precharges() -> Fallible<()> {
+        for operation in operations()? {
+            let valid = operation.to_canonical_cbor();
+            let fields = cost(&operation) - valid.len();
+            let maximum = MAX_FORK_EVENT_APPEND_OPERATION_BYTES_V1;
+            assert!(valid.len() < maximum);
+            for (length, charge) in [
+                (maximum - 1, maximum - 1 + fields),
+                (maximum, maximum + fields),
+                (maximum + 1, 0),
+            ] {
+                // Corrupt trailing bytes are not an admitted FOP1. Inside
+                // the inclusive cap, its bounded precharges precede refusal.
+                let mut malformed = valid.clone();
+                malformed.resize(length, 0);
+                assert!(ForkAppendOperationV1::from_canonical_cbor(&malformed).is_err());
+                let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+                let start = clock.mark();
+                let limits = ForkReplayReadLimitsV1::new(1, 1, 1, 8_192, 1_000_000)?;
+                let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+                assert_eq!(
+                    NativeReadContextV1::protected(&mut budget).append_operation(&malformed),
+                    Err(Error::PublicationConflict),
+                );
+                assert_eq!(
+                    budget.remaining_native_bytes(),
+                    limits.max_native_bytes() - charge,
+                );
+                assert_eq!(budget.check_time(), Ok(()));
+                assert_eq!(
+                    NativeReadContextV1::protected(&mut budget).append_operation(&valid)?,
+                    operation,
+                );
+                assert_eq!(
+                    budget.remaining_native_bytes(),
+                    limits.max_native_bytes() - charge - cost(&operation),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn fop_caps_and_malformed_source_carriers_refuse_before_owned_buffers() -> Fallible<()> {
         // These raw decoder faults cannot be constructed as typed FOP1 records.
         // They prove the native preallocation boundary, not an admitted import.
