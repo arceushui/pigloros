@@ -518,49 +518,78 @@ fn raw_archive_profile(
                     raw_value_depth(&profile),
                 )
                 .and_then(|raw_profile| {
-                    raw_archive_selected_caps(&raw_profile.selected_caps, members).and_then(|()| {
-                        if profile_fields[4] != manifest[1] {
-                            return Err(BundleContractErrorV1::LifecycleInvalid);
-                        }
-                        raw_profile_digest(manifest, profile_fields).and_then(|profile_digest| {
-                            raw_profile_support_members(&raw_profile, members).and_then(|()| {
-                                raw_execution_authority_members(&raw_profile, members, mode)
-                                    .and_then(|authority_paths| {
-                                        raw_registry_and_packages(&raw_profile, members, mode)
-                                            .and_then(|registry| {
-                                                raw_expected_results(
-                                                    &manifest[5],
-                                                    &raw_profile,
-                                                    members,
-                                                    mode,
-                                                )
-                                                .and_then(|expected_results| {
-                                                    raw_member_closure(
-                                                        &raw_profile.declared_paths,
-                                                        &expected_results.member_paths,
-                                                        &registry.declared_paths,
-                                                        &authority_paths,
-                                                        members,
-                                                    )
-                                                    .map(|()| RawReleaseArchiveSummary {
-                                                        profile_digest,
-                                                        claim_layer: raw_profile.claim_layer,
-                                                        mode,
-                                                        registry_bytes: registry.bytes,
-                                                        registry_providers: registry.providers,
-                                                        required_providers: registry
-                                                            .required_providers,
-                                                        expected_results: expected_results.results,
-                                                    })
-                                                })
-                                            })
-                                    })
-                            })
-                        })
-                    })
+                    raw_archive_profile_checked(
+                        manifest,
+                        profile_fields,
+                        &raw_profile,
+                        members,
+                        mode,
+                    )
                 })
             })
         })
+    })
+}
+
+fn raw_archive_profile_checked(
+    manifest: &[Value],
+    profile_fields: &[Value],
+    raw_profile: &RawCpf1Summary,
+    members: &[RawArchiveMember<'_>],
+    mode: RawArchiveMode,
+) -> Result<RawReleaseArchiveSummary, BundleContractErrorV1> {
+    raw_archive_selected_caps(&raw_profile.selected_caps, members).and_then(|()| {
+        if profile_fields[4] != manifest[1] {
+            return Err(BundleContractErrorV1::LifecycleInvalid);
+        }
+        raw_profile_digest(manifest, profile_fields).and_then(|profile_digest| {
+            raw_profile_support_members(raw_profile, members).and_then(|()| {
+                raw_execution_authority_members(raw_profile, members, mode).and_then(
+                    |authority_paths| {
+                        raw_archive_profile_summary(
+                            manifest,
+                            raw_profile,
+                            members,
+                            mode,
+                            profile_digest,
+                            &authority_paths,
+                        )
+                    },
+                )
+            })
+        })
+    })
+}
+
+fn raw_archive_profile_summary(
+    manifest: &[Value],
+    raw_profile: &RawCpf1Summary,
+    members: &[RawArchiveMember<'_>],
+    mode: RawArchiveMode,
+    profile_digest: [u8; 32],
+    authority_paths: &BTreeSet<String>,
+) -> Result<RawReleaseArchiveSummary, BundleContractErrorV1> {
+    raw_registry_and_packages(raw_profile, members, mode).and_then(|registry| {
+        raw_expected_results(&manifest[5], raw_profile, members, mode).and_then(
+            |expected_results| {
+                raw_member_closure(
+                    &raw_profile.declared_paths,
+                    &expected_results.member_paths,
+                    &registry.declared_paths,
+                    authority_paths,
+                    members,
+                )
+                .map(|()| RawReleaseArchiveSummary {
+                    profile_digest,
+                    claim_layer: raw_profile.claim_layer,
+                    mode,
+                    registry_bytes: registry.bytes,
+                    registry_providers: registry.providers,
+                    required_providers: registry.required_providers,
+                    expected_results: expected_results.results,
+                })
+            },
+        )
     })
 }
 

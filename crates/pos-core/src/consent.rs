@@ -385,43 +385,78 @@ impl ConsentGrantedV1 {
         decode_array(bytes.as_slice(), 12).and_then(|items| {
             decode_magic(&items[0], MAGIC_CGV1)
                 .and_then(|()| decode_version(&items[1]))
-                .and_then(|()| decode_id(&items[2]))
-                .and_then(|subject_id| {
-                    decode_id(&items[3]).and_then(|grantee_id| {
-                        decode_tstr_max(&items[4], MAX_PURPOSE_BYTES).and_then(|purpose| {
-                            decode_u8(&items[5]).and_then(|modalities| {
-                                decode_u8(&items[6]).and_then(|min_geo_resolution| {
-                                    decode_bool(&items[7]).and_then(|fork_permitted| {
-                                        decode_bool(&items[8]).and_then(|export_permitted| {
-                                            decode_u16(&items[9]).and_then(|retention_days| {
-                                                decode_u32(&items[10]).and_then(|expiry_secs| {
-                                                    decode_u64(&items[11])
-                                                        .map(|grant_seq| Self {
-                                                            subject_id,
-                                                            grantee_id,
-                                                            purpose,
-                                                            modalities,
-                                                            min_geo_resolution,
-                                                            fork_permitted,
-                                                            export_permitted,
-                                                            retention_days,
-                                                            expiry_secs,
-                                                            grant_seq,
-                                                        })
-                                                        .and_then(|grant| {
-                                                            grant.validate().map(|()| grant)
-                                                        })
-                                                })
-                                            })
-                                        })
-                                    })
-                                })
-                            })
+                .and_then(|()| decode_grant_parties(&items))
+                .and_then(|(subject_id, grantee_id, purpose)| {
+                    decode_grant_permissions(&items).and_then(|permissions| {
+                        decode_grant_retention(&items).map(|retention| Self {
+                            subject_id,
+                            grantee_id,
+                            purpose,
+                            modalities: permissions.modalities,
+                            min_geo_resolution: permissions.min_geo_resolution,
+                            fork_permitted: permissions.fork_permitted,
+                            export_permitted: permissions.export_permitted,
+                            retention_days: retention.retention_days,
+                            expiry_secs: retention.expiry_secs,
+                            grant_seq: retention.grant_seq,
                         })
                     })
                 })
+                .and_then(|grant| grant.validate().map(|()| grant))
         })
     }
+}
+
+// Grant fields decode in three groups, in array order.
+fn decode_grant_parties(
+    items: &[Value],
+) -> Result<(EntityId, EntityId, String), ConsentCodecError> {
+    decode_id(&items[2]).and_then(|subject_id| {
+        decode_id(&items[3]).and_then(|grantee_id| {
+            decode_tstr_max(&items[4], MAX_PURPOSE_BYTES)
+                .map(|purpose| (subject_id, grantee_id, purpose))
+        })
+    })
+}
+
+struct GrantPermissions {
+    modalities: u8,
+    min_geo_resolution: u8,
+    fork_permitted: bool,
+    export_permitted: bool,
+}
+
+fn decode_grant_permissions(items: &[Value]) -> Result<GrantPermissions, ConsentCodecError> {
+    decode_u8(&items[5]).and_then(|modalities| {
+        decode_u8(&items[6]).and_then(|min_geo_resolution| {
+            decode_bool(&items[7]).and_then(|fork_permitted| {
+                decode_bool(&items[8]).map(|export_permitted| GrantPermissions {
+                    modalities,
+                    min_geo_resolution,
+                    fork_permitted,
+                    export_permitted,
+                })
+            })
+        })
+    })
+}
+
+struct GrantRetention {
+    retention_days: u16,
+    expiry_secs: u32,
+    grant_seq: u64,
+}
+
+fn decode_grant_retention(items: &[Value]) -> Result<GrantRetention, ConsentCodecError> {
+    decode_u16(&items[9]).and_then(|retention_days| {
+        decode_u32(&items[10]).and_then(|expiry_secs| {
+            decode_u64(&items[11]).map(|grant_seq| GrantRetention {
+                retention_days,
+                expiry_secs,
+                grant_seq,
+            })
+        })
+    })
 }
 
 // ---------------------------------------------------------------------------
