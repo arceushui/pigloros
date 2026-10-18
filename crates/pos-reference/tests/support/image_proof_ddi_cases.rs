@@ -190,14 +190,13 @@ fn ddi_image(vector: &DdiVector) -> TestResult<Vec<u8>> {
 fn ddi_salt(vector: &DdiVector) -> TestResult<[u8; 32]> {
     let verity: serde_json::Value = serde_json::from_slice(vector.verity)?;
     let text = verity["salt"].as_str().ok_or("verity salt is not text")?;
-    let mut salt = [0; 32];
-    if text.len() != 64 {
-        return Err(format!("{}: salt is not 32 bytes", vector.architecture).into());
-    }
-    for (index, byte) in salt.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&text[index * 2..index * 2 + 2], 16)?;
-    }
-    Ok(salt)
+    // Decode the producer's recorded salt; no salt value is written here.
+    (0..text.len())
+        .step_by(2)
+        .map(|index| u8::from_str_radix(text.get(index..index + 2).unwrap_or(""), 16))
+        .collect::<Result<Vec<u8>, _>>()?
+        .try_into()
+        .map_err(|_| format!("{}: salt is not 32 bytes", vector.architecture).into())
 }
 
 // The kernel's x509 key description for these CN-only certificates: the

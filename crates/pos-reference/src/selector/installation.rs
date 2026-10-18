@@ -1098,7 +1098,10 @@ pub mod tests {
     // The kernel's x509 description of IMAGE_CERTIFICATE: subject CN, then SKID.
     pub(crate) const IMAGE_KEY_DESCRIPTION: &str =
         "PiglorOS SIM1 interoperability fixture: beb62aa1770ab755e4fe5d9ed9477912a7958633";
-    pub(crate) const IMAGE_VERITY_SALT: [u8; 32] = [23; 32];
+    /// A synthetic 32-byte verity salt for the synthetic GPT fixtures.
+    pub(crate) fn image_verity_salt() -> [u8; 32] {
+        *blake3::hash(b"PiglorOS synthetic SIM1 verity salt").as_bytes()
+    }
 
     fn provider_trust(authority: &ProviderAuthority) -> TestResult<Vec<u8>> {
         let keys = ordered(vec![
@@ -1348,7 +1351,7 @@ pub mod tests {
                 integer(4096),
                 integer(4096),
                 integer(1),
-                digest(IMAGE_VERITY_SALT),
+                digest(image_verity_salt()),
                 Value::Array(vec![
                     integer(u64::try_from(der.len())?),
                     Value::Bytes(Sha256::digest(der).to_vec()),
