@@ -793,6 +793,19 @@ fn secrets_are_redacted_in_debug_output() -> TestResult {
 
 #[test]
 #[cfg_attr(coverage_nightly, coverage(off))]
+fn v1_limits_are_the_adr_values() {
+    assert_eq!(MAX_SUBJECT_CIPHERTEXT_BYTES, 256 * 1024);
+    assert_eq!(MAX_SUBJECT_PUBLIC_HEADER_BYTES, 64 * 1024);
+    assert_eq!(MAX_SUBJECT_NONCE_COUNTER, (1 << 32) - 1);
+    assert_eq!(MAX_SUBJECT_EVENT_TYPE_BYTES, 256);
+    assert_eq!(MAX_SUBJECT_FIELD_TAG_BYTES, 128);
+    assert_eq!(MAX_SUBJECT_RP_ID_BYTES, 253);
+    assert_eq!(MAX_SUBJECT_CREDENTIAL_ID_BYTES, 1024);
+    assert_eq!(SUBJECT_OWNER_BYTES, 40);
+}
+
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn key_use_codes_are_closed() {
     assert_eq!(SubjectKeyUseV1::Data.code(), 0);
     assert_eq!(SubjectKeyUseV1::Bootstrap.code(), 1);

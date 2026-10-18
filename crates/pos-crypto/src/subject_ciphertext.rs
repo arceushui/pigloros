@@ -17,15 +17,15 @@ use crate::subject_key::{owner_string, SubjectKeyUseV1, SubjectSubkeyV1, SUBJECT
 
 /// The largest `SubjectCiphertextV1` encoding, equal to the 256 KiB Event
 /// payload bound. A plaintext is therefore also below 256 KiB.
-pub const MAX_SUBJECT_CIPHERTEXT_BYTES: usize = 256 * 1024;
+pub const MAX_SUBJECT_CIPHERTEXT_BYTES: usize = 262_144;
 /// The largest canonical public header bound into `context_digest`.
-pub const MAX_SUBJECT_PUBLIC_HEADER_BYTES: usize = 64 * 1024;
+pub const MAX_SUBJECT_PUBLIC_HEADER_BYTES: usize = 65_536;
 /// The longest `event_type`, in UTF-8 bytes.
 pub const MAX_SUBJECT_EVENT_TYPE_BYTES: usize = 256;
 /// The longest `field_tag`, in ASCII bytes.
 pub const MAX_SUBJECT_FIELD_TAG_BYTES: usize = 128;
 /// The project cap on the IV invocation counter; counter zero is never used.
-pub const MAX_SUBJECT_NONCE_COUNTER: u64 = (1 << 32) - 1;
+pub const MAX_SUBJECT_NONCE_COUNTER: u64 = 0xffff_ffff;
 
 const MAGIC: [u8; 4] = *b"SDC1";
 const CONTEXT_MAGIC: [u8; 4] = *b"SEC1";
