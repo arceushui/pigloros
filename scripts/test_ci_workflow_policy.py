@@ -75,6 +75,17 @@ WORKSPACE_DOCTEST_STEP = {
     "cargo test --workspace --all-features --locked --doc -- --include-ignored "
     "2>&1 | tee /tmp/cargo-doctest.log\n",
 }
+WORKSPACE_RUSTDOC_STEP = {
+    "name": "cargo doc (warnings denied)",
+    "env": {"CARGO_INCREMENTAL": "0", "RUSTDOCFLAGS": "-D warnings"},
+    "run": "cargo doc --workspace --all-features --no-deps --locked",
+}
+RUSTDOC_JOB_IF = (
+    "${{ !cancelled() && needs.ci_change_scope.result == 'success' && "
+    "needs.cargo-crap.result == 'success' && "
+    "(needs.ci_change_scope.outputs.rust == 'true' || "
+    "github.event_name != 'pull_request') }}"
+)
 MAIN_PUSH_TRIGGER = {"branches": ["main"]}
 PREFLIGHT_GATE_IF = "${{ always() }}"
 REQUIRED_PREFLIGHT_NEEDS = ("ci_change_scope", "pinned-dependencies")
@@ -349,6 +360,7 @@ def assert_parallel_validation_contract(workflow: dict) -> None:
     for owner, required in (
         ("feature-matrix", FEATURE_MATRIX_STEPS),
         ("test", (WORKSPACE_DOCTEST_STEP,)),
+        ("rustdoc", (WORKSPACE_RUSTDOC_STEP,)),
     ):
         job = jobs[owner]
         if job.get("timeout-minutes") != 30 or "continue-on-error" in job:
@@ -363,6 +375,15 @@ def assert_parallel_validation_contract(workflow: dict) -> None:
             ]
             if occurrences != [(owner, expected)]:
                 raise AssertionError(f"{owner} must run the exact required step once")
+    rustdoc = jobs["rustdoc"]
+    if (rustdoc.get("needs") != ["ci_change_scope", "cargo-crap"]
+            or rustdoc.get("if") != RUSTDOC_JOB_IF):
+        raise AssertionError("rustdoc must retain its successful standard-stage prerequisites")
+    if any(
+        str(step.get("uses", "")).startswith("Swatinem/rust-cache@")
+        for step in rustdoc["steps"]
+    ):
+        raise AssertionError("rustdoc must not restore the broken documentation target cache")
     gate = jobs["core-gate"]
     if gate.get("needs") != ["ci_change_scope", "preflight-gate", *CORE_GATE_JOB_NAMES]:
         raise AssertionError("core-gate must require every parallel core job")
@@ -682,6 +703,7 @@ class CiWorkflowPolicyTests(unittest.TestCase):
         for owner, required in (
             ("feature-matrix", FEATURE_MATRIX_STEPS),
             ("test", (WORKSPACE_DOCTEST_STEP,)),
+            ("rustdoc", (WORKSPACE_RUSTDOC_STEP,)),
         ):
             for expected in required:
                 for change in ("remove", "if", "continue-on-error", "run"):
@@ -695,6 +717,37 @@ class CiWorkflowPolicyTests(unittest.TestCase):
                             step[change] = True if change == "continue-on-error" else "false"
                         with self.assertRaisesRegex(AssertionError, "exact required step"):
                             assert_parallel_validation_contract(mutated)
+
+    def test_rustdoc_contract_rejects_broken_cache_and_weakened_job(self) -> None:
+        changes = (
+            (
+                "steps",
+                [{"uses": RUST_CACHE_ACTION}, WORKSPACE_RUSTDOC_STEP],
+                "broken documentation target cache",
+            ),
+            ("needs", ["ci_change_scope"], "standard-stage prerequisites"),
+            ("if", "${{ always() }}", "standard-stage prerequisites"),
+            ("timeout-minutes", 60, "blocking 30-minute limit"),
+            ("continue-on-error", True, "blocking 30-minute limit"),
+        )
+        for field, value, message in changes:
+            with self.subTest(field=field):
+                mutated = copy.deepcopy(load_workflow(CI_WORKFLOW_PATH))
+                mutated["jobs"]["rustdoc"][field] = value
+                with self.assertRaisesRegex(AssertionError, message):
+                    assert_parallel_validation_contract(mutated)
+
+    def test_rustdoc_contract_rejects_weakened_environment(self) -> None:
+        for variable, value in (("RUSTDOCFLAGS", ""), ("CARGO_INCREMENTAL", "1")):
+            with self.subTest(variable=variable):
+                mutated = copy.deepcopy(load_workflow(CI_WORKFLOW_PATH))
+                step = next(
+                    step for step in mutated["jobs"]["rustdoc"]["steps"]
+                    if step.get("name") == WORKSPACE_RUSTDOC_STEP["name"]
+                )
+                step["env"][variable] = value
+                with self.assertRaisesRegex(AssertionError, "exact required step"):
+                    assert_parallel_validation_contract(mutated)
 
     def test_parallel_validation_rejects_an_omitted_feature_result(self) -> None:
         workflow = load_workflow(CI_WORKFLOW_PATH)
@@ -949,11 +1002,11 @@ class CiWorkflowPolicyTests(unittest.TestCase):
         mutated = copy.deepcopy(load_workflow(CI_WORKFLOW_PATH))
         cache_step = next(
             step
-            for step in mutated["jobs"]["rustdoc"]["steps"]
+            for step in mutated["jobs"]["clippy"]["steps"]
             if str(step.get("uses", "")).startswith("Swatinem/rust-cache@")
         )
         del cache_step["with"]["save-if"]
-        with self.assertRaisesRegex(AssertionError, "rustdoc Rust cache must save only from main"):
+        with self.assertRaisesRegex(AssertionError, "clippy Rust cache must save only from main"):
             assert_pull_requests_never_write_caches(mutated)
 
     def test_cache_write_contract_rejects_pull_request_docker_cache_write(self) -> None:

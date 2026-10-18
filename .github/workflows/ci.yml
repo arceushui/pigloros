@@ -198,12 +198,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
           toolchain: 1.97.1
-      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
-        with:
-          shared-key: rustdoc
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # Partial-cache cleanup mistakes rustdoc source directories named tests
+      # for build directories. Build documentation fresh, without that cache.
       - name: cargo doc (warnings denied)
         env:
+          CARGO_INCREMENTAL: "0"
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --workspace --all-features --no-deps --locked
 
