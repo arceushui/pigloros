@@ -59,7 +59,8 @@ impl ForkReplayAuthorityReadPortV1 for MemoryStore {
         let head = crate::fork_replay::history_head(&history, &mut context)?;
         let (from, to) =
             crate::fork_replay::complete_event_range(head, range, bounds, &mut context)?;
-        let mut events = crate::fork_replay::ReplayEventStagingV1::default();
+        let mut carrier = Vec::new();
+        let mut events = crate::fork_replay::ReplayEventStagingV1::new(&mut carrier);
         let mut total_bytes = 0_usize;
         for (index, (node, _)) in history.iter().enumerate() {
             let (prefix, length) =
