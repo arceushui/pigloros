@@ -220,6 +220,33 @@ mod tests {
     }
 
     #[test]
+    fn metadata_visibility_does_not_certify_a_complete_native_event_stream() -> Fallible<()> {
+        let (mut store, root, _) = fixture()?;
+        // Deliberately sparse native storage, not a legal append. The lineage
+        // port returns metadata/visibility, never Event-stream completeness.
+        let state = store.timelines.get_mut(&root).ok_or("root fixture")?;
+        state.events.first_mut().ok_or("root Event")?.seq = Seq::from_u64(2);
+        assert_eq!(
+            read(&store, root)?,
+            Ok(Some(ForkReplayLineageNodeV1::new(root, None)))
+        );
+        let limits = ForkReplayReadLimitsV1::new(8, 128, 512, 16_384, 1_000_000)?;
+        let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+        let start = clock.mark();
+        let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+        let bounds = pos_core::EventReadBounds::new_with_total_bytes_and_elapsed(
+            128, 128, 8, 4, 1_024, 1_000_000,
+        );
+        assert_eq!(
+            store.read_fork_replay_events(root, pos_core::SeqRange::all(), bounds, &mut budget),
+            Err(Error::Read(
+                ForkReplayAuthorityReadErrorV1::CorruptAuthority
+            ))
+        );
+        Ok(())
+    }
+
+    #[test]
     fn zero_and_duplicate_native_event_cursors_refuse_the_visible_child() -> Fallible<()> {
         for zero in [true, false] {
             let (mut store, root, child) = fixture()?;

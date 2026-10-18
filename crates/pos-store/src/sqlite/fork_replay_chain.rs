@@ -640,6 +640,20 @@ mod tests {
                 Value::Integer(0),
                 Error::StorageIndeterminate,
             ),
+            // A real-width parent distinguishes pre-getter scalar refusal
+            // from the later decoder error by its parent-String precharge.
+            (
+                Value::Text(TimelineId::new().to_string()),
+                Value::Text("0".into()),
+                Value::Integer(0),
+                Error::StorageIndeterminate,
+            ),
+            (
+                Value::Text(TimelineId::new().to_string()),
+                Value::Integer(0),
+                Value::Null,
+                Error::StorageIndeterminate,
+            ),
             (
                 Value::Null,
                 Value::Real(0.0),

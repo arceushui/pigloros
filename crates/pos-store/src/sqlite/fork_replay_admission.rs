@@ -210,6 +210,25 @@ mod tests {
                 assert_eq!(budget.remaining_native_bytes(), 64);
                 assert!(budget.check_time().is_ok());
             }
+            // The raw getter admits the inclusive transport cap without
+            // claiming these zero bytes form a valid native admission.
+            let raw = vec![0; maximum];
+            assert_eq!(conn.execute(sql, [&raw])?, 1);
+            let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+            let start = clock.mark();
+            let limits = ForkReplayReadLimitsV1::new(1, 1, 2, maximum, 1_000_000)?;
+            let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+            assert_eq!(
+                admission_blob_with_context(
+                    &conn,
+                    kind,
+                    key,
+                    &mut NativeReadContextV1::protected(&mut budget)
+                )?,
+                Some(raw)
+            );
+            assert_eq!(budget.remaining_native_bytes(), 0);
+            budget.check_time()?;
         }
         Ok(())
     }

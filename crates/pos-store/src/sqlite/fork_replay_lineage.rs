@@ -927,6 +927,9 @@ mod tests {
     #[test]
     fn an_empty_opaque_event_kind_remains_visible_to_public_lineage() -> Fallible<()> {
         let (mut store, root, _) = fixture()?;
+        store
+            .conn
+            .execute_batch("PRAGMA ignore_check_constraints=OFF")?;
         let appended = store.append(
             root,
             &[EventDraft::new(
