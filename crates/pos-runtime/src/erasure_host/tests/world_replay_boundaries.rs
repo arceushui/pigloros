@@ -6,16 +6,6 @@ use std::{cell::Cell, time::Duration};
 
 mod lineage_budget;
 
-fn intent_for(requested: &WorldReplayUseV1) -> WorldReplayReadIntentV1 {
-    test_ok(WorldReplayReadIntentV1::new(
-        requested.timeline_id(),
-        requested.operation(),
-        requested.range(),
-        requested.consumer_ids().to_vec(),
-        requested.requested_optional_view_roots().to_vec(),
-    ))
-}
-
 #[test]
 fn every_prepared_event_bound_must_be_independently_finite() {
     let (mut host, closure) = world_replay_host(WorldReplayVerifierModeV1::Exact);
@@ -390,37 +380,6 @@ fn fork_source_rejects_attribution_for_a_different_timeline() {
     ));
     assert_eq!(source.timeline_id(), timeline);
     assert_eq!(source.required_attribution(), Some(required));
-}
-
-fn replay_fault_host(fault: FaultModeV1) -> (ErasureExecutionHostV1, WorldReplayClosureV1) {
-    let composition = ErasureCoordinatorCompositionV1::closed()
-        .with_world_replay_verifier(Arc::new(WorldReplayVerifierModeV1::Exact));
-    let mut host = test_ok(ErasureExecutionHostV1::recover_with_composition(
-        Box::new(fault_store(fault)),
-        &composition,
-        ErasureRecoveryLimitsV1::compiled_maximum(),
-    ));
-    let root = {
-        let mut sender = test_ok(host.command_sender());
-        let root = test_ok(sender.create_timeline("replay boundary")).id();
-        test_ok(sender.append(
-            root,
-            &[EventDraft::new(
-                EntityId::new(),
-                Kind::new("host.fixture"),
-                CanonicalBytes::from_vec(Vec::new()),
-            )],
-        ));
-        root
-    };
-    let generation = test_ok(host.gate.inventory_generation());
-    let closure = test_ok(
-        WorldReplayClosureV1::test_fixture_for_timeline_with_inventory_generation(
-            root,
-            Hash::from_bytes(generation.digest()),
-        ),
-    );
-    (host, closure)
 }
 
 #[test]
