@@ -12,39 +12,6 @@ enum ClassifierBindingFault {
     RegistrationChild,
 }
 
-fn replace_classifier_records(
-    store: &SqliteStore,
-    source: &ForkClassifierSourceV1,
-    table: &ForkClassifierTableV1,
-    registration: &ForkClassifierRegistrationV1,
-) -> Result<(), Box<dyn std::error::Error>> {
-    assert_eq!(
-        store.conn.execute(
-            "UPDATE fork_classifier_sources SET fcs1_cbor=?1",
-            params![source.to_canonical_cbor()],
-        )?,
-        1,
-    );
-    assert_eq!(
-        store.conn.execute(
-            "UPDATE fork_classifier_tables SET fct1_digest=?1, fct1_cbor=?2",
-            params![
-                table.digest().as_bytes().as_slice(),
-                table.to_canonical_cbor()
-            ],
-        )?,
-        1,
-    );
-    assert_eq!(
-        store.conn.execute(
-            "UPDATE fork_classifier_registrations SET fcr1_cbor=?1",
-            params![registration.to_canonical_cbor()],
-        )?,
-        1,
-    );
-    Ok(())
-}
-
 #[test]
 fn local_permit_issuer_refuses_independent_classifier_bindings(
 ) -> Result<(), Box<dyn std::error::Error>> {

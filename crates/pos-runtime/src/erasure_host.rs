@@ -4864,6 +4864,7 @@ mod tests {
     use super::*;
     mod world_replay_boundaries;
 
+    use pos_core::trusted_clock::ScriptedGuardMonotonicSourceV1;
     use pos_core::{
         geo_admission::GeoLocationAdmissionInputV1, AppendDedupKey, CanonicalBytes,
         ConsentAuthority, ConsentGrantedV1, ConsentRevokedV1, EntityId,
@@ -4881,6 +4882,7 @@ mod tests {
     };
 
     use pos_store::memory::MemoryStore;
+    use std::{cell::Cell, time::Duration};
     const fn reference(seed: u8) -> ErasureReferenceV1 {
         ErasureReferenceV1::from_digest([seed; 32])
     }
@@ -4908,6 +4910,7 @@ mod tests {
     }
 
     impl WorldReplayVerifierV1 for WorldReplayVerifierModeV1 {
+        #[cfg_attr(coverage_nightly, coverage(on))]
         fn read_profile(
             &self,
             _closure: &WorldReplayClosureV1,
@@ -4927,25 +4930,32 @@ mod tests {
                     65_536, 128, 8, 65_536, 67_108_864, 30_000_000,
                 )
             };
-            pos_store::ForkReplayReadLimitsV1::new(8, 1_024, 262_144, 256 * 1024 * 1024, 30_000_000)
-                .map(|limits| (bounds, limits))
-                .map_err(|_| WorldReplayVerificationErrorV1::EvidenceUnavailable)
+            Ok((
+                bounds,
+                test_ok(pos_store::ForkReplayReadLimitsV1::new(
+                    8,
+                    1_024,
+                    262_144,
+                    256 * 1024 * 1024,
+                    30_000_000,
+                )),
+            ))
         }
 
+        #[cfg_attr(coverage_nightly, coverage(on))]
         fn verify(
             &self,
             closure: &WorldReplayClosureV1,
             requested_use: &WorldReplayUseV1,
             inventory_generation: ErasureReferenceV1,
         ) -> Result<VerifiedWorldReplayV1, WorldReplayVerificationErrorV1> {
-            let limits = pos_store::ForkReplayReadLimitsV1::new(
+            let limits = test_ok(pos_store::ForkReplayReadLimitsV1::new(
                 8,
                 1_024,
                 262_144,
                 256 * 1024 * 1024,
                 30_000_000,
-            )
-            .map_err(|_| WorldReplayVerificationErrorV1::EvidenceUnavailable)?;
+            ));
             match self {
                 Self::Exact => Ok(crate::world_replay::test_verified_world_replay(
                     closure,
@@ -5068,6 +5078,157 @@ mod tests {
             )),
         );
         (host, closure)
+    }
+
+    // Ordinary fixture helpers live here so the tests/ exporter filter cannot hide them.
+    #[cfg_attr(coverage_nightly, coverage(on))]
+    fn intent_for(requested: &WorldReplayUseV1) -> WorldReplayReadIntentV1 {
+        test_ok(WorldReplayReadIntentV1::new(
+            requested.timeline_id(),
+            requested.operation(),
+            requested.range(),
+            requested.consumer_ids().to_vec(),
+            requested.requested_optional_view_roots().to_vec(),
+        ))
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(on))]
+    fn replay_fault_host(fault: FaultModeV1) -> (ErasureExecutionHostV1, WorldReplayClosureV1) {
+        let composition = ErasureCoordinatorCompositionV1::closed()
+            .with_world_replay_verifier(Arc::new(WorldReplayVerifierModeV1::Exact));
+        let mut host = test_ok(ErasureExecutionHostV1::recover_with_composition(
+            Box::new(fault_store(fault)),
+            &composition,
+            ErasureRecoveryLimitsV1::compiled_maximum(),
+        ));
+        let root = {
+            let mut sender = test_ok(host.command_sender());
+            let root = test_ok(sender.create_timeline("replay boundary")).id();
+            test_ok(sender.append(
+                root,
+                &[EventDraft::new(
+                    EntityId::new(),
+                    Kind::new("host.fixture"),
+                    CanonicalBytes::from_vec(Vec::new()),
+                )],
+            ));
+            root
+        };
+        let generation = test_ok(host.gate.inventory_generation());
+        let closure = test_ok(
+            WorldReplayClosureV1::test_fixture_for_timeline_with_inventory_generation(
+                root,
+                Hash::from_bytes(generation.digest()),
+            ),
+        );
+        (host, closure)
+    }
+
+    const GOOD_MARK: Duration = Duration::from_millis(1);
+
+    struct LineageFixture {
+        host: ErasureExecutionHostV1,
+        prepared: PreparedWorldReplayReadV1,
+        classified: VerifiedWorldReplayV1,
+    }
+
+    impl LineageFixture {
+        #[cfg_attr(coverage_nightly, coverage(on))]
+        fn new() -> Self {
+            let (mut host, _) = world_replay_host(WorldReplayVerifierModeV1::Exact);
+            let (root, child) = {
+                let mut commands = test_ok(host.command_sender());
+                let root = test_ok(commands.create_timeline("budget root")).id();
+                let child = test_ok(commands.fork_timeline(root, Seq::ZERO, "budget child")).id();
+                (root, child)
+            };
+            let generation = test_ok(host.gate.inventory_generation());
+            let closure = test_ok(
+                WorldReplayClosureV1::test_fixture_for_timeline_with_inventory_generation(
+                    child,
+                    Hash::from_bytes(generation.digest()),
+                ),
+            );
+            let requested = replay_use(&closure);
+            let mut sender = test_ok(host.read_sender());
+            let prepared =
+                test_ok(sender.prepare_world_replay_read(&closure, intent_for(&requested)));
+            let verified = test_ok(sender.admit_world_replay(&closure, &requested));
+            let sources = [child, root]
+                .map(|timeline| test_ok(crate::WorldReplayForkSourceV1::new(timeline, None)));
+            // Classify the ordinary Fork explicitly to exercise complete native
+            // traversal, without inventing imported authority or adapter failures.
+            let classified = crate::world_replay::test_verified_world_replay_with_fork_attribution(
+                verified,
+                Some(Hash::from_bytes([0xda; 32])),
+                sources.to_vec(),
+                Vec::new(),
+                prepared.fork_read_limits(),
+            );
+            Self {
+                host,
+                prepared,
+                classified,
+            }
+        }
+
+        #[cfg_attr(coverage_nightly, coverage(on))]
+        fn validate(
+            &mut self,
+            budget: &mut ForkReplayReadBudgetV1<'_>,
+        ) -> Result<(), ErasureHostErrorV1> {
+            let mut result = Err(ErasureHostErrorV1::Conflict);
+            let mut sender = test_ok(self.host.read_sender());
+            let fenced = sender.with_protected_ancestry_fence(
+                self.classified.timeline_id(),
+                ErasureProtectedOperationV1::Read,
+                &mut |sender| {
+                    result = sender
+                        .validate_world_replay_forks(&self.classified, budget)
+                        .map(|evidence| assert!(evidence.is_empty()));
+                },
+            );
+            fenced.and(result)
+        }
+
+        #[cfg_attr(coverage_nightly, coverage(on))]
+        fn fence(
+            &mut self,
+            budget: &mut ForkReplayReadBudgetV1<'_>,
+            callbacks: &Cell<usize>,
+            installed: &Cell<bool>,
+        ) -> Result<(), ErasureHostErrorV1> {
+            test_ok(self.host.read_sender()).with_world_replay_read_fence(
+                &[&self.prepared],
+                budget,
+                |_, _| {
+                    callbacks.set(callbacks.get() + 1);
+                    Ok(())
+                },
+                |(), verdict| {
+                    callbacks.set(callbacks.get() + 1);
+                    verdict?;
+                    installed.set(true);
+                    Ok(())
+                },
+            )
+        }
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(on))]
+    fn clock_for(good_marks: Option<usize>, bad_mark: Duration) -> ScriptedGuardMonotonicSourceV1 {
+        let script = good_marks.map_or_else(
+            || vec![GOOD_MARK],
+            |marks| {
+                // g0 and ledger construction remain healthy. After refusal the
+                // good mark stays queued: repeated refusals and unchanged sample
+                // counts prove the latched ledger never reads the clock again.
+                std::iter::repeat_n(GOOD_MARK, marks + 2)
+                    .chain([bad_mark, GOOD_MARK])
+                    .collect()
+            },
+        );
+        ScriptedGuardMonotonicSourceV1::new(script)
     }
 
     #[test]
@@ -5291,6 +5452,7 @@ mod tests {
         );
     }
 
+    #[cfg_attr(coverage_nightly, coverage(on))]
     fn root_lineage_capability(
         host: &ErasureExecutionHostV1,
         root: TimelineId,
@@ -6252,6 +6414,7 @@ mod tests {
     }
 
     impl ForkReplayAuthorityReadPortV1 for FaultStoreV1 {
+        #[cfg_attr(coverage_nightly, coverage(on))]
         fn begin_fork_replay_read_interval(
             &self,
             budget: &mut ForkReplayReadBudgetV1<'_>,
@@ -6263,6 +6426,7 @@ mod tests {
             self.inner.begin_fork_replay_read_interval(budget)
         }
 
+        #[cfg_attr(coverage_nightly, coverage(on))]
         fn fork_replay_logical_head(
             &self,
             timeline: TimelineId,
@@ -6283,6 +6447,7 @@ mod tests {
                 })
         }
 
+        #[cfg_attr(coverage_nightly, coverage(on))]
         fn read_fork_replay_events(
             &self,
             timeline: TimelineId,
@@ -6312,6 +6477,7 @@ mod tests {
                 })
         }
 
+        #[cfg_attr(coverage_nightly, coverage(on))]
         fn read_fork_replay_lineage_node(
             &self,
             timeline_id: TimelineId,
@@ -6350,6 +6516,7 @@ mod tests {
             )
         }
 
+        #[cfg_attr(coverage_nightly, coverage(on))]
         fn validate_fork_replay_authority(
             &self,
             requirement: &pos_store::ForkReplayRequirementV1,
