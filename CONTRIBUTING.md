@@ -275,8 +275,8 @@ successful normal stage on `main`, not on pull requests.
 
 Mutation and ASan cannot begin until every cheaper blocking gate passes.
 Mutation is changed-line scoped and uses sixteen shards on at most eight
-concurrent runners. Each runner uses two mutation workers with one compiler job
-each and four libtest harness threads per worker. These eight configured harness
+concurrent runners. Each runner uses one mutation worker with one compiler job
+and four libtest harness threads. These four configured harness
 slots are not a hard CPU or process limit. The smaller shards retain the full
 selection and the existing 60-minute watchdog, 120-second Test limit and
 600-second Build limit; they do not omit slow tests or extend their deadlines.
