@@ -65,6 +65,16 @@ pub mod classified_fork_fixture;
 #[path = "../tests/support/plugin_trust_registry_fixtures.rs"]
 pub mod plugin_trust_registry_fixtures;
 
+pub mod composition_fallback_registry;
+
+// Test-only. The shared composition fallback registry fixtures under `tests/support` serve the
+// public vectors and the `SQLite` adapter's fault-injection tests; the items are `pub` for the
+// same reason as the `FAE1` fixture above.
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[path = "../tests/support/composition_fallback_fixtures.rs"]
+pub mod composition_fallback_fixtures;
+
 // Public module reachability keeps the crate-only items of the two factual Tick modules
 // compatible with both `unreachable_pub` and Clippy's `redundant_pub_crate` lint.
 #[doc(hidden)]
