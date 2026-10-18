@@ -26,10 +26,10 @@ use pos_core::{
     CounterfactualInvalidationOutcomeV1, CounterfactualStoreErrorV1, CounterfactualStorePortV1,
     CounterfactualTickOutcomeV1, DependencyEdgeRecordV1, DependencyNodeCoordinateV1,
     DependencyNodeRecordV1, DependencyPageCursorV1, DependencyPageRequestV1, DependencyPagedRowV1,
-    DependencyReadScopeV1, ErasureContainmentGateV1, ForkGenerationV1, InvalidationConflictV1,
-    PipelineDraftBatchV1, RecomputationFrontierBytesV1, RecordedDependencyClassV1,
-    RecordedNodeOriginV1, Seq, SeqRange, SuffixInvalidationBytesV1, TickDependencyRecordV1,
-    TimelineId, TimelineMeta, MAX_DEPENDENCY_PAGE_ROWS_V1,
+    DependencyReadScopeV1, ErasureContainmentGateV1, ErasureLifecycleV1, ForkGenerationV1,
+    InvalidationConflictV1, PipelineDraftBatchV1, RecomputationFrontierBytesV1,
+    RecordedDependencyClassV1, RecordedNodeOriginV1, Seq, SeqRange, SuffixInvalidationBytesV1,
+    TickDependencyRecordV1, TimelineId, TimelineMeta, MAX_DEPENDENCY_PAGE_ROWS_V1,
 };
 use pos_store::{memory::MemoryStore, EventStore};
 
@@ -923,6 +923,58 @@ fn c9_deleted_timelines_are_not_found() {
         err(collect_edges(store, prefix_scope(root, 5), 2)),
         StoreError::ForkNotFound
     );
+}
+
+/// The number of nodes and of edges a scope serves, or the first error.
+fn served(store: &MemoryStore, scope: Scope) -> [Result<usize, StoreError>; 2] {
+    [
+        collect_nodes(store, scope, 2).map(|rows| rows.len()),
+        collect_edges(store, scope, 2).map(|rows| rows.len()),
+    ]
+}
+
+/// Both row kinds of a scope behind a closed erasure fence.
+const FENCED: [Result<usize, StoreError>; 2] = [
+    Err(StoreError::StorageFailure),
+    Err(StoreError::StorageFailure),
+];
+
+// ADR-060, 2026-10-18 amendment: a `Complete` erasure keeps the rows of its
+// scope fenced for good, in the direction of the inherited scopes. The rows
+// themselves are kept; the in-module tests count them.
+
+#[test]
+fn c9_a_completed_fork_erasure_fences_the_fork_but_not_its_parent() {
+    let fixture = recorded();
+    let (fork, root) = (fixture.fork, fixture.root);
+    assert_eq!(served(&fixture.store, fork_scope(fork, 1)), [Ok(2), Ok(2)]);
+    let parent = served(&fixture.store, prefix_scope(root, 5));
+    // Empty only because seeding needs pos-store's `test-support` feature;
+    // the in-module test covers a seeded parent prefix.
+    assert_eq!(parent, [Ok(0), Ok(0)]);
+
+    let completed = fixture.gate.complete_timeline_erasure_for_test(fork);
+
+    assert_eq!(completed, Ok(ErasureLifecycleV1::Complete));
+    for scope in [fork_scope(fork, 1), prefix_scope(fork, 5)] {
+        assert_eq!(served(&fixture.store, scope), FENCED, "{scope:?}");
+    }
+    // The Fork's request does not fence its parent's own prefix.
+    assert_eq!(served(&fixture.store, prefix_scope(root, 5)), parent);
+}
+
+#[test]
+fn c9_a_completed_parent_erasure_fences_its_prefix_and_the_inherited_one() {
+    let fixture = recorded();
+    let (fork, root) = (fixture.fork, fixture.root);
+
+    let completed = fixture.gate.complete_timeline_erasure_for_test(root);
+
+    assert_eq!(completed, Ok(ErasureLifecycleV1::Complete));
+    for timeline in [root, fork] {
+        let scope = prefix_scope(timeline, 5);
+        assert_eq!(served(&fixture.store, scope), FENCED, "{scope:?}");
+    }
 }
 
 /// The coordinate of node `index` of [`numbered`].
