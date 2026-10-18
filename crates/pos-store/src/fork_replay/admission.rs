@@ -18,24 +18,32 @@ const BINDING_OWNER_FIELD: u64 = 4;
 const TEXT_MAJOR: u8 = 3;
 const OWNER_MAX_BYTES: usize = 128;
 
+/// Select only Core's allocation-free FAH1 transport, not native validity.
+fn require_fixed_host_carrier(bytes: &[u8]) -> Result<()> {
+    const PREFIX: [u8; 7] = [0x85, 0x64, b'F', b'A', b'H', b'1', 0x01];
+    const HASH_HEAD: [u8; 2] = [0x58, 0x20];
+    if bytes.len() != pos_core::MAX_FORK_ADMISSION_HOST_RECORD_BYTES_V1
+        || bytes[..PREFIX.len()] != PREFIX
+        || [7, 41, 75]
+            .iter()
+            .any(|offset| bytes[*offset..*offset + HASH_HEAD.len()] != HASH_HEAD)
+    {
+        Err(Error::PublicationConflict)
+    } else {
+        Ok(())
+    }
+}
+
 impl NativeReadContextV1<'_, '_> {
     pub(crate) fn host_record(
         &mut self,
         bytes: &[u8],
     ) -> Result<pos_core::ForkAdmissionHostRecordV1> {
-        const PREFIX: [u8; 7] = [0x85, 0x64, b'F', b'A', b'H', b'1', 0x01];
-        const HASH_HEAD: [u8; 2] = [0x58, 0x20];
         self.check().and_then(|()| {
             // Only this exact transport reaches Core's allocation-free FAH1
             // path. Core still validates all three native nonzero fields.
-            if self.is_protected()
-                && (bytes.len() != pos_core::MAX_FORK_ADMISSION_HOST_RECORD_BYTES_V1
-                    || bytes[..PREFIX.len()] != PREFIX
-                    || [7, 41, 75]
-                        .iter()
-                        .any(|offset| bytes[*offset..*offset + HASH_HEAD.len()] != HASH_HEAD))
-            {
-                return Err(Error::PublicationConflict);
+            if self.is_protected() {
+                require_fixed_host_carrier(bytes)?;
             }
             let host = pos_core::ForkAdmissionHostRecordV1::from_canonical_cbor(bytes)
                 .map_err(|_| Error::PublicationConflict);
@@ -132,6 +140,40 @@ mod tests {
     };
     use pos_core::trusted_clock::{GuardMonotonicSourceV1, ScriptedGuardMonotonicSourceV1};
     use std::time::Duration;
+
+    #[test]
+    fn fixed_host_carrier_refuses_each_layout_fault_before_core_fallback() -> Fallible<()> {
+        let host = pos_core::ForkAdmissionHostRecordV1::new(
+            pos_core::Hash::from_bytes([1; 32]),
+            pos_core::PublicKey::from_bytes([2; 32]),
+            pos_core::Hash::from_bytes([3; 32]),
+        )?;
+        let bytes = host.canonical_bytes();
+        assert_eq!(require_fixed_host_carrier(&bytes), Ok(()));
+        // Isolate every envelope byte and each identity's byte-string head.
+        // Core's later refusal alone cannot witness fallback prevention.
+        for offset in [0, 1, 2, 3, 4, 5, 6, 7, 8, 41, 42, 75, 76] {
+            let mut malformed = bytes.clone();
+            malformed[offset] = 0;
+            assert_eq!(
+                require_fixed_host_carrier(&malformed),
+                Err(Error::PublicationConflict)
+            );
+        }
+        for end in 0..bytes.len() {
+            assert_eq!(
+                require_fixed_host_carrier(&bytes[..end]),
+                Err(Error::PublicationConflict)
+            );
+        }
+        let mut oversized = bytes;
+        oversized.push(0);
+        assert_eq!(
+            require_fixed_host_carrier(&oversized),
+            Err(Error::PublicationConflict)
+        );
+        Ok(())
+    }
 
     #[derive(Clone, Copy)]
     enum Codec {
