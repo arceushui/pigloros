@@ -6,9 +6,10 @@
 use super::classified_suffix_store;
 use crate::{ForkEventAuthorityErrorV1, ForkEventProvenanceAuthorityPortV1};
 use pos_core::{
-    ForkAppendOperationV1, ForkAppendSourceIdentityV1, ForkClassifierRegistrationV1,
-    ForkClassifierSourceV1, ForkClassifierTableV1, ForkEventClassifierV1, ForkEventOriginKindV1,
-    ForkEventProvenanceErrorV1, ForkEventSourceDescriptorV1, ForkExternalInputRouteV1, Hash,
+    EventOriginRecordV1, ForkAppendOperationV1, ForkAppendSourceIdentityV1,
+    ForkClassifierRegistrationV1, ForkClassifierSourceV1, ForkClassifierTableV1,
+    ForkEventClassifierV1, ForkEventOriginKindV1, ForkEventProvenanceErrorV1,
+    ForkEventSourceDescriptorV1, ForkExternalInputRouteV1, Hash,
 };
 use std::error::Error;
 
@@ -113,6 +114,8 @@ fn classified_suffix_rejects_each_inconsistent_classifier_binding() -> Result<()
         let tables = store.fork_classifier_tables.clone();
         let sources = store.fork_classifier_sources.clone();
         let registrations = store.fork_classifier_registrations.clone();
+        let origins = store.fork_event_origins.clone();
+        let operations = store.fork_append_operations.clone();
         let mut table = tables
             .get(&child)
             .ok_or("missing fixture FCT1")?
@@ -136,7 +139,10 @@ fn classified_suffix_rejects_each_inconsistent_classifier_binding() -> Result<()
         match fault {
             // The first binding block: table/admission, then source/table.
             BindingFault::TableAdmission => table.fork_admission_digest = wrong,
-            BindingFault::TableRoom => table.room_revision_descriptor_hash = wrong,
+            BindingFault::TableRoom => {
+                table.room_revision_descriptor_hash = wrong;
+                source.room_revision_descriptor_hash = wrong;
+            }
             BindingFault::SourceRoom => source.room_revision_descriptor_hash = wrong,
             BindingFault::SourceRegistrar => source.registrar_identifier.push_str("-foreign"),
             // The source revision remains exact in the route-only case.
@@ -152,18 +158,51 @@ fn classified_suffix_rejects_each_inconsistent_classifier_binding() -> Result<()
             BindingFault::RegistrationRoom => registration.room_revision_descriptor_hash = wrong,
             BindingFault::RegistrationClassifier => registration.classifier_revision_digest = wrong,
         }
+        let changed_source = ForkClassifierSourceV1::new(source)?;
+        if matches!(
+            fault,
+            BindingFault::TableRoom
+                | BindingFault::SourceRoom
+                | BindingFault::SourceRegistrar
+                | BindingFault::Routes
+        ) {
+            table.source_configuration_revision_digest = changed_source.digest();
+        }
+        let changed_table = ForkClassifierTableV1::new(table)?;
+        if matches!(
+            fault,
+            BindingFault::TableAdmission
+                | BindingFault::TableRoom
+                | BindingFault::SourceRoom
+                | BindingFault::SourceRegistrar
+                | BindingFault::SourceRevision
+                | BindingFault::Routes
+        ) {
+            // Keep every downstream digest exact. Otherwise registration or
+            // Event validation could hide a missing independent graph check.
+            registration.classifier_revision_digest = changed_table.digest();
+            let mut origin = before[0].0.input().clone();
+            origin.classifier_revision_digest = changed_table.digest();
+            let changed_origin = EventOriginRecordV1::new(origin)?;
+            let mut changed_operation = operation.input().clone();
+            changed_operation.classifier_revision_digest = changed_table.digest();
+            changed_operation.event_origin_digest = changed_origin.digest();
+            store.fork_event_origins.insert(event.id, changed_origin);
+            store.fork_append_operations.insert(
+                operation.input().operation_id,
+                ForkAppendOperationV1::new(changed_operation)?,
+            );
+        }
         // Preserve the selected lookup even for a changed table descriptor;
         // absence must not intercept the intended cross-record binding check.
         store.fork_classifier_sources.insert(
             (
-                table.room_revision_descriptor_hash,
-                table.registrar_identifier.clone(),
+                changed_table.input().room_revision_descriptor_hash,
+                changed_table.input().registrar_identifier.clone(),
             ),
-            ForkClassifierSourceV1::new(source)?,
+            changed_source,
         );
-        store
-            .fork_classifier_tables
-            .insert(child, ForkClassifierTableV1::new(table)?);
+        store.fork_classifier_tables.insert(child, changed_table);
         store.fork_classifier_registrations.insert(
             registration.operation_id,
             ForkClassifierRegistrationV1::new(registration)?,
@@ -177,6 +216,8 @@ fn classified_suffix_rejects_each_inconsistent_classifier_binding() -> Result<()
         store.fork_classifier_tables = tables;
         store.fork_classifier_sources = sources;
         store.fork_classifier_registrations = registrations;
+        store.fork_event_origins = origins;
+        store.fork_append_operations = operations;
         assert_eq!(
             store.read_fork_event_suffix(child, 1)?,
             before,
