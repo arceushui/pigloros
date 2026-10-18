@@ -161,3 +161,63 @@ pub(super) fn selected_field_with_context<'budget, 'clock, T>(
                 })
         })
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+    use crate::{ForkReplayAuthorityReadErrorV1, ForkReplayReadBudgetV1, ForkReplayReadLimitsV1};
+    use pos_core::trusted_clock::{GuardMonotonicSourceV1, ScriptedGuardMonotonicSourceV1};
+    use rusqlite::functions::FunctionFlags;
+    use std::{
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        },
+        time::Duration,
+    };
+
+    #[test]
+    fn exhausted_rows_refuse_before_the_native_cursor_steps(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let conn = Connection::open_in_memory()?;
+        let steps = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&steps);
+        conn.create_scalar_function("cursor_probe", 0, FunctionFlags::SQLITE_UTF8, move |_| {
+            observed.fetch_add(1, Ordering::SeqCst);
+            Ok(0_i64)
+        })?;
+        // Isolate the cursor owner's VM boundary, not a real Timeline or
+        // admitted authority. This non-deterministic SQL function runs only
+        // when SQLite actually steps the selected view, not during prepare.
+        conn.execute_batch(
+            "CREATE VIEW timelines AS
+             SELECT 'child' AS id, cursor_probe() AS fork_seq",
+        )?;
+        let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+        let started = clock.mark();
+        let limits = ForkReplayReadLimitsV1::new(1, 1, 1, 64, 1_000_000)?;
+        let mut budget = ForkReplayReadBudgetV1::new(limits, started, &mut clock)?;
+        for expected in [Ok(Some(0_i64)), Err(Error::CorruptAuthority)] {
+            assert_eq!(
+                selected_field_with_context(
+                    &conn,
+                    SelectedRowV1::OriginPrefix("child"),
+                    &mut NativeReadContextV1::protected(&mut budget),
+                    |row, context| {
+                        context.bytes(8).map_err(|_| Error::CorruptAuthority)?;
+                        row.get(0).map_err(|_| Error::StorageIndeterminate)
+                    },
+                ),
+                expected,
+            );
+            // First read proves the real VM probe executes. The exhausted
+            // second read must refuse before a second VM evaluation, even
+            // though the later actual-row debit would also return an error.
+            assert_eq!(steps.load(Ordering::SeqCst), 1);
+            assert_eq!(budget.remaining_native_bytes(), 56);
+        }
+        assert_eq!(budget.check_time(), Err(ForkReplayAuthorityReadErrorV1::BoundsExceeded));
+        Ok(())
+    }
+}
