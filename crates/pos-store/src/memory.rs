@@ -7551,6 +7551,78 @@ mod tests {
         Ok(())
     }
 
+    #[derive(Clone, Copy, Debug)]
+    enum BindingFault {
+        TableAdmission,
+        TableRoom,
+        SourceRoom,
+        SourceRegistrar,
+        SourceRevision,
+        Routes,
+        RegistrationAdmission,
+        RegistrationRoom,
+        RegistrationClassifier,
+    }
+
+    impl BindingFault {
+        // Measure this fixture operation outside cargo-llvm-cov's tests/ file filter.
+        #[cfg_attr(coverage_nightly, coverage(on))]
+        fn changed_records(
+            self,
+            table: &ForkClassifierTableV1,
+            source: &ForkClassifierSourceV1,
+            registration: &ForkClassifierRegistrationV1,
+        ) -> (
+            ForkClassifierSourceV1,
+            ForkClassifierTableV1,
+            ForkClassifierRegistrationInputV1,
+        ) {
+            use pos_core::{
+                counterfactual_store::test_fixtures::ok, ForkEventSourceDescriptorV1,
+                ForkExternalInputRouteV1,
+            };
+
+            let mut table = table.input().clone();
+            let mut source = source.input().clone();
+            let mut registration = registration.input().clone();
+            let wrong = Hash::from_bytes([0xe1; 32]);
+            match self {
+                // The first binding block: table/admission, then source/table.
+                Self::TableAdmission => table.fork_admission_digest = wrong,
+                Self::TableRoom => {
+                    table.room_revision_descriptor_hash = wrong;
+                    source.room_revision_descriptor_hash = wrong;
+                }
+                Self::SourceRoom => source.room_revision_descriptor_hash = wrong,
+                Self::SourceRegistrar => source.registrar_identifier.push_str("-foreign"),
+                // The source revision remains exact in the route-only case.
+                Self::SourceRevision => table.source_configuration_revision_digest = wrong,
+                Self::Routes => {
+                    table.routes = vec![ForkExternalInputRouteV1::new(
+                        ok(ForkEventSourceDescriptorV1::new("foreign-route", wrong)),
+                        false,
+                    )];
+                }
+                // The selected registration keeps its child and operation identity.
+                Self::RegistrationAdmission => registration.fork_admission_digest = wrong,
+                Self::RegistrationRoom => registration.room_revision_descriptor_hash = wrong,
+                Self::RegistrationClassifier => registration.classifier_revision_digest = wrong,
+            }
+            let changed_source = ok(ForkClassifierSourceV1::new(source));
+            if matches!(
+                self,
+                Self::TableRoom | Self::SourceRoom | Self::SourceRegistrar | Self::Routes
+            ) {
+                table.source_configuration_revision_digest = changed_source.digest();
+            }
+            (
+                changed_source,
+                ok(ForkClassifierTableV1::new(table)),
+                registration,
+            )
+        }
+    }
+
     /// A store with one valid classified host Event and its FOP1.
     fn classified_suffix_store(
     ) -> Result<(MemoryStore, TimelineId, ForkAppendOperationV1, Event), Box<dyn std::error::Error>>
