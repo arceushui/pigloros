@@ -45,3 +45,27 @@ submission; the generated service proxy then reads back each typed `t` value.
 This is requested-state verification, not ELM1 authentication or proof that the
 kernel enforced the effective limit. Provider admission remains in #437–#438;
 kernel limit reads and signed limit evidence remain in #443.
+
+`MountfsdImageActivator` is the private ADR-087 `ImageActivator` transport
+(#439). It connects only to `/run/systemd/io.systemd.MountFileSystem`,
+requires a root peer, and performs one `MountImage` call per connection: the
+held image descriptor travels as index 0 with the fixed read-only,
+non-interactive `root=signed+erofs:=absent` request, and the reply must return
+exactly one root mount descriptor in the same transaction. zlink 0.7.1 frames
+the call, but this crate supplies the socket. Every receive requests
+`MSG_CMSG_CLOEXEC`, verifies `FD_CLOEXEC`, rejects ancillary truncation,
+credentials and descriptors in more than one read, and bounds the reply to one
+NUL-terminated message. The captured bytes are then parsed under a closed
+systemd v260.2 schema. The effective image policy must be semantically
+equivalent to the request under ported v260.2 `image_policy_equivalent()`
+rules. Every rejection closes all received descriptors. The result is a
+quarantined root mount, not proof of the image, the mount or its dm-verity
+identity.
+
+`ActivationImage` has no public constructor. Only the #438 held-image
+admission composition may create one, so no caller can activate an unadmitted
+descriptor. Attachment and readback (#440), lifecycle cleanup (#442) and
+packaged-build conformance (#444) remain separate. The provider never creates a
+local process; `provider_process_creation_public` enforces this over the
+provider's production sources, because zbus receives system-bus descriptors
+without `MSG_CMSG_CLOEXEC`.
