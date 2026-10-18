@@ -620,7 +620,23 @@ fn trust_snapshot_rejects_each_malformed_field_and_nested_record() -> TestResult
         "root",
         &root.verifying_key(),
     )?;
-    for description in [String::new(), "fixture:\n03".to_owned(), "k".repeat(4096)] {
+    // Unicode Cc spans U+0000-U+001F and U+007F-U+009F; U+00A0 is not Cc.
+    SandboxTrustSnapshot::authenticate(
+        &sign_trust_snapshot(
+            snapshot(vec![], vec![certificate("fixture:\u{a0}03")], "root"),
+            &root,
+        )?,
+        "root",
+        &root.verifying_key(),
+    )?;
+    for description in [
+        String::new(),
+        "fixture:\n03".to_owned(),
+        "fixture:\u{7f}03".to_owned(),
+        "fixture:\u{80}03".to_owned(),
+        "fixture:\u{9f}03".to_owned(),
+        "k".repeat(4096),
+    ] {
         assert_eq!(
             SandboxTrustSnapshot::authenticate(
                 &sign_trust_snapshot(
