@@ -77,7 +77,7 @@ impl BuiltinKeyringListing {
         Ok(listing)
     }
 
-    fn release_key(&self, description: &str) -> Result<(), BuiltinKeyringError> {
+    fn require_release_key(&self, description: &str) -> Result<(), BuiltinKeyringError> {
         let mut matching = self
             .members
             .iter()
@@ -107,6 +107,6 @@ impl BuiltinKeyringListing {
         &self,
         image: &AdmittedSandboxImage,
     ) -> Result<(), BuiltinKeyringError> {
-        self.release_key(&image.manifest().kernel_key_description)
+        self.require_release_key(&image.manifest().kernel_key_description)
     }
 }

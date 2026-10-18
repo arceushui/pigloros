@@ -323,6 +323,18 @@ mod tests {
         );
         let (_, proof) = check_image(&snapshot.admitted, &request, &keyring()?, fixture_time)?;
         assert_eq!(snapshot.proof(), &proof);
+        // The held-image recheck consults the current keyring listing too.
+        snapshot.recheck_held_image(&keyring()?)?;
+        assert_eq!(
+            snapshot
+                .recheck_held_image(&BuiltinKeyringListing::from_members([(
+                    1,
+                    "user",
+                    crate::selector::installation::tests::IMAGE_KEY_DESCRIPTION,
+                )])?)
+                .err(),
+            Some(SelectorBoundaryError::ArtifactInvalid)
+        );
         Ok(())
     }
 
