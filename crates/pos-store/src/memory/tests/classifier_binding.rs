@@ -5,6 +5,7 @@
 
 use super::classified_suffix_store;
 use crate::{ForkEventAuthorityErrorV1, ForkEventProvenanceAuthorityPortV1};
+use pos_core::counterfactual_store::test_fixtures::ok;
 use pos_core::{
     EventOriginRecordV1, ForkAppendOperationV1, ForkAppendSourceIdentityV1,
     ForkClassifierRegistrationInputV1, ForkClassifierRegistrationV1, ForkClassifierSourceV1,
@@ -86,19 +87,18 @@ enum BindingFault {
 }
 
 impl BindingFault {
+    // Measure every fault arm despite the parent test module's coverage setting.
+    #[cfg_attr(coverage_nightly, coverage(on))]
     fn changed_records(
         self,
         table: &ForkClassifierTableV1,
         source: &ForkClassifierSourceV1,
         registration: &ForkClassifierRegistrationV1,
-    ) -> Result<
-        (
-            ForkClassifierSourceV1,
-            ForkClassifierTableV1,
-            ForkClassifierRegistrationInputV1,
-        ),
-        Box<dyn Error>,
-    > {
+    ) -> (
+        ForkClassifierSourceV1,
+        ForkClassifierTableV1,
+        ForkClassifierRegistrationInputV1,
+    ) {
         let mut table = table.input().clone();
         let mut source = source.input().clone();
         let mut registration = registration.input().clone();
@@ -116,7 +116,7 @@ impl BindingFault {
             Self::SourceRevision => table.source_configuration_revision_digest = wrong,
             Self::Routes => {
                 table.routes = vec![ForkExternalInputRouteV1::new(
-                    ForkEventSourceDescriptorV1::new("foreign-route", wrong)?,
+                    ok(ForkEventSourceDescriptorV1::new("foreign-route", wrong)),
                     false,
                 )];
             }
@@ -125,18 +125,18 @@ impl BindingFault {
             Self::RegistrationRoom => registration.room_revision_descriptor_hash = wrong,
             Self::RegistrationClassifier => registration.classifier_revision_digest = wrong,
         }
-        let changed_source = ForkClassifierSourceV1::new(source)?;
+        let changed_source = ok(ForkClassifierSourceV1::new(source));
         if matches!(
             self,
             Self::TableRoom | Self::SourceRoom | Self::SourceRegistrar | Self::Routes
         ) {
             table.source_configuration_revision_digest = changed_source.digest();
         }
-        Ok((
+        (
             changed_source,
-            ForkClassifierTableV1::new(table)?,
+            ok(ForkClassifierTableV1::new(table)),
             registration,
-        ))
+        )
     }
 }
 
@@ -183,7 +183,7 @@ fn classified_suffix_rejects_each_inconsistent_classifier_binding() -> Result<()
             .find(|row| row.input().child_timeline_id == child)
             .ok_or("missing fixture FCR1")?;
         let (changed_source, changed_table, mut registration) =
-            fault.changed_records(table, source, registration)?;
+            fault.changed_records(table, source, registration);
         if matches!(
             fault,
             BindingFault::TableAdmission
