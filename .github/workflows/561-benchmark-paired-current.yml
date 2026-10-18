@@ -25,12 +25,12 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: d5894cb0c27274a7c97a69fb879204f4bc196c21
+          ref: 2c051fa720d40630a8d33fbf6f2719fa0ddabb7f
           path: baseline
           persist-credentials: false
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: 0c6d537d11b1bf43614dd980bb30f49e60a7912f
+          ref: a20d1eb8b53e9198b203d11e87e711b7a341175b
           path: candidate
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master

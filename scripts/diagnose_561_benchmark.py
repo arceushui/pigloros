@@ -14,8 +14,8 @@ import tomllib
 
 
 REVISIONS = {
-    "baseline": "d5894cb0c27274a7c97a69fb879204f4bc196c21",
-    "candidate": "0c6d537d11b1bf43614dd980bb30f49e60a7912f",
+    "baseline": "2c051fa720d40630a8d33fbf6f2719fa0ddabb7f",
+    "candidate": "a20d1eb8b53e9198b203d11e87e711b7a341175b",
 }
 CASES = {
     "manifest-cas": (0, 32, 128, 512),
