@@ -43,8 +43,8 @@ spm1 = [spm1-u,digest32,bytes .size 64]
 
 sim1-u = ["SIM1",1,provider-identifier,architecture,uint,digest32,
   [partition-descriptor,partition-descriptor,partition-descriptor],
-  sha256,4096,4096,1,bytes .size 0,
-  [uint,sha256,bytes .size (1..1048576)],sha256,uint,
+  sha256,4096,4096,1,bytes .size 32,
+  [uint,sha256,bytes .size (1..1048576)],sha256,text .size (1..4095),
   text .size (1..512),digest32,arguments,epoch,key-id]
 sim1 = [sim1-u,digest32,bytes .size 64]
 

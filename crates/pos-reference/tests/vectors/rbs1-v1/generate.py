@@ -68,6 +68,9 @@ def sandbox_limits():
     return [[i, 256 if i == 13 else 2000] for i in range(17)]
 
 
+# Kernel key description of the fixture release certificate (SIM1 14 / TRS1).
+KEY_DESCRIPTION = "PiglorOS SIM1 fixture: " + "09" * 20
+
 keys = {
     n: Ed25519PrivateKey.from_private_bytes(bytes([i]) * 32)
     .public_key()
@@ -96,7 +99,7 @@ trust_u = [
             ]
         ]
     ),
-    [[bytes([9]) * 32, 77, 2]],
+    [[bytes([9]) * 32, KEY_DESCRIPTION, 2]],
     "root",
 ]
 trust = signed_record("TRS1", trust_u)
@@ -181,10 +184,10 @@ for arch, name, parts in [(0, "x86_64", x86), (1, "aarch64", arm)]:
         4096,
         4096,
         1,
-        b"",
+        bytes([23]) * 32,
         [5, hashlib.sha256(b"pkcs7").digest(), b"pkcs7"],
         bytes([9]) * 32,
-        77,
+        KEY_DESCRIPTION,
         "/adapter",
         blake3.blake3(b"adapter executable").digest(),
         [],

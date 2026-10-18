@@ -7,8 +7,8 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::sandbox_provider_protocol::{
-    AdmittedSandboxImage, LaunchPolicy, SandboxExecuteRequest, SignedImageManifest,
-    VerifiedSandboxImageProof,
+    AdmittedSandboxImage, BuiltinReleaseKeys, LaunchPolicy, SandboxExecuteRequest,
+    SignedImageManifest, VerifiedSandboxImageProof,
 };
 use crate::selector::installation::authority::{
     AdmittedSelectorProvider, AuthenticatedSelectorBootstrap,
@@ -36,16 +36,24 @@ pub struct ProviderImageSnapshot {
 impl ProviderImageSnapshot {
     /// Open the fixed installation and independently check SPX1's image inputs.
     ///
+    /// `release_keys` is the provider's startup proof that the kernel's
+    /// built-in trusted keyring holds each TRS1 release key exactly once.
+    /// Admission refuses an installation whose TRS1 that proof does not cover.
+    ///
     /// # Errors
     /// Rejects malformed requests, pending installation recovery, unsafe files,
-    /// unauthenticated or inconsistent authority, invalid image/GPT/executable
-    /// bytes, unaccepted launch policy, and invalid or time-expired CMS proofs.
-    pub fn open(request_bytes: &[u8]) -> Result<Self, SelectorBoundaryError> {
+    /// unauthenticated or inconsistent authority, a TRS1 not covered by the
+    /// built-in keyring check, invalid image/GPT/executable bytes, unaccepted
+    /// launch policy, and invalid or time-expired CMS proofs.
+    pub fn open(
+        request_bytes: &[u8],
+        release_keys: &BuiltinReleaseKeys,
+    ) -> Result<Self, SelectorBoundaryError> {
         SandboxExecuteRequest::from_canonical_cbor(request_bytes)
             .map_err(invalid)
             .and_then(|request| {
                 InstalledSelectorState::open().and_then(|installed| {
-                    Self::from_installation(installed, request, SystemTime::now)
+                    Self::from_installation(installed, request, release_keys, SystemTime::now)
                 })
             })
     }
@@ -53,12 +61,16 @@ impl ProviderImageSnapshot {
     fn from_installation(
         installed: InstalledSelectorState,
         request: SandboxExecuteRequest,
+        release_keys: &BuiltinReleaseKeys,
         clock: fn() -> SystemTime,
     ) -> Result<Self, SelectorBoundaryError> {
         installed
             .authenticate_bootstrap()
             .and_then(AuthenticatedSelectorBootstrap::admit_provider)
             .and_then(|admitted| {
+                if !release_keys.covers(admitted.bootstrap().trust()) {
+                    return Err(SelectorBoundaryError::ArtifactInvalid);
+                }
                 check_authority(&admitted, &request)?;
                 let (image, proof) = check_image(&admitted, &request, clock)?;
                 let launch_bytes = admitted
@@ -217,6 +229,20 @@ mod tests {
 
     type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
+    fn release_keys() -> TestResult<BuiltinReleaseKeys> {
+        use crate::sandbox_provider_protocol::{
+            verify_builtin_release_keys, BuiltinKeyringListing,
+        };
+        use crate::selector::installation::tests::IMAGE_KEY_DESCRIPTION;
+
+        let bootstrap = admitted_state()?.authenticate_bootstrap()?;
+        let record = format!("asymmetric;0;0;1f010000;{IMAGE_KEY_DESCRIPTION}");
+        Ok(verify_builtin_release_keys(
+            bootstrap.trust(),
+            &BuiltinKeyringListing::from_describe_records([record.as_str()])?,
+        )?)
+    }
+
     fn fixture_time() -> SystemTime {
         UNIX_EPOCH + Duration::from_hours(500_000)
     }
@@ -268,7 +294,7 @@ mod tests {
 
     #[test]
     fn malformed_public_request_fails_before_installation_open() {
-        assert!(ProviderImageSnapshot::open(b"SPX1").is_err());
+        assert!(ProviderImageSnapshot::open(b"SPX1", &release_keys()?).is_err());
     }
 
     #[test]
@@ -277,6 +303,7 @@ mod tests {
         let snapshot = ProviderImageSnapshot::from_installation(
             admitted_state()?,
             request.clone(),
+            &release_keys()?,
             fixture_time,
         )?;
         assert_eq!(snapshot.request(), &request);
@@ -290,6 +317,28 @@ mod tests {
         );
         let (_, proof) = check_image(&snapshot.admitted, &request, fixture_time)?;
         assert_eq!(snapshot.proof(), &proof);
+        Ok(())
+    }
+
+    #[test]
+    fn provider_refuses_admission_without_built_in_release_keys_for_its_trs1() -> TestResult {
+        use crate::sandbox_provider_protocol::{
+            verify_builtin_release_keys, BuiltinKeyringListing,
+        };
+
+        // A built-in keyring check of another TRS1 snapshot does not cover this one.
+        let foreign = crate::selector::installation::tests::foreign_trust()?;
+        let listing = BuiltinKeyringListing::from_describe_records([
+            "asymmetric;0;0;1f010000;PiglorOS other release: 00",
+        ])?;
+        let keys = verify_builtin_release_keys(&foreign, &listing)?;
+        assert!(ProviderImageSnapshot::from_installation(
+            admitted_state()?,
+            request_fixture()?,
+            &keys,
+            fixture_time
+        )
+        .is_err());
         Ok(())
     }
 
@@ -317,6 +366,7 @@ mod tests {
             assert!(ProviderImageSnapshot::from_installation(
                 admitted_state()?,
                 request,
+                &release_keys()?,
                 fixture_time
             )
             .is_err());
@@ -336,6 +386,7 @@ mod tests {
             assert!(ProviderImageSnapshot::from_installation(
                 admitted_state()?,
                 canonical_request(request)?,
+                &release_keys()?,
                 fixture_time
             )
             .is_err());
@@ -364,6 +415,7 @@ mod tests {
             assert!(ProviderImageSnapshot::from_installation(
                 state,
                 canonical_request(request)?,
+                &release_keys()?,
                 fixture_time
             )
             .is_err());
@@ -384,6 +436,7 @@ mod tests {
             assert!(ProviderImageSnapshot::from_installation(
                 state,
                 request_fixture()?,
+                &release_keys()?,
                 fixture_time
             )
             .is_err());
@@ -405,9 +458,13 @@ mod tests {
                 request.authority.lps1_digest
             };
             state.artifact(kind, identity)?.file().set_len(0)?;
-            assert!(
-                ProviderImageSnapshot::from_installation(state, request, fixture_time).is_err()
-            );
+            assert!(ProviderImageSnapshot::from_installation(
+                state,
+                request,
+                &release_keys()?,
+                fixture_time
+            )
+            .is_err());
         }
         Ok(())
     }
@@ -422,6 +479,7 @@ mod tests {
             let snapshot = ProviderImageSnapshot::from_installation(
                 admitted_state()?,
                 request_fixture()?,
+                &release_keys()?,
                 fixture_time,
             )?;
             let manifest = snapshot.image().manifest();
@@ -455,6 +513,7 @@ mod tests {
             assert!(ProviderImageSnapshot::from_installation(
                 admitted_state()?,
                 request_fixture()?,
+                &release_keys()?,
                 clock
             )
             .is_err());

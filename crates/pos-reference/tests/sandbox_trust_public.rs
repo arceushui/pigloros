@@ -6,6 +6,7 @@ mod policy_transition;
 use ciborium::value::Value;
 use ed25519_dalek::{Signer, SigningKey};
 use pos_reference::sandbox_provider_protocol::{
+    verify_builtin_release_keys, BuiltinKeyringError, BuiltinKeyringListing,
     RecoveryCancellationContext, RevocationAcknowledgement, RevocationUpdateRequest,
     SandboxAdministratorPolicy, SandboxProviderProtocolError as ProtocolError,
     SandboxRevocationSnapshot, SandboxRevocationUpdateError, SandboxTrustError, SandboxTrustRole,
@@ -95,8 +96,12 @@ fn key_record(id: &str, role: u64) -> Value {
     ])
 }
 
-fn certificate(serial: u64) -> Value {
-    Value::Array(vec![Value::Bytes(vec![8; 32]), integer(serial), integer(2)])
+fn certificate(description: &str) -> Value {
+    Value::Array(vec![
+        Value::Bytes(vec![8; 32]),
+        Value::Text(description.to_owned()),
+        integer(2),
+    ])
 }
 
 fn snapshot(keys: Vec<Value>, certificates: Vec<Value>, signer: &str) -> Value {
@@ -458,7 +463,11 @@ fn authenticates_each_role_and_certificate_with_external_root() -> TestResult {
     ];
     for (code, expected) in (0_u64..).zip(roles) {
         let bytes = sign_trust_snapshot(
-            snapshot(vec![key_record("key", code)], vec![certificate(3)], "root"),
+            snapshot(
+                vec![key_record("key", code)],
+                vec![certificate("fixture: 03")],
+                "root",
+            ),
             &root,
         )?;
         let trusted = SandboxTrustSnapshot::authenticate(&bytes, "root", &root.verifying_key())?;
@@ -468,7 +477,7 @@ fn authenticates_each_role_and_certificate_with_external_root() -> TestResult {
         assert_eq!(trusted.keys()[0].key_id, "key");
         assert_eq!(trusted.keys()[0].epoch, 2);
         assert_eq!(trusted.certificates()[0].fingerprint, [8; 32]);
-        assert_eq!(trusted.certificates()[0].keyring_serial, 3);
+        assert_eq!(trusted.certificates()[0].key_description, "fixture: 03");
         assert_eq!(trusted.certificates()[0].epoch, 2);
     }
     let bytes = sign_trust_snapshot(snapshot(vec![], vec![], "root"), &root)?;
@@ -507,7 +516,11 @@ fn rejects_ambiguous_registry_identities_even_with_valid_root_signature() -> Tes
             vec![],
             "root",
         ),
-        snapshot(vec![], vec![certificate(1), certificate(2)], "root"),
+        snapshot(
+            vec![],
+            vec![certificate("fixture: 01"), certificate("fixture: 02")],
+            "root",
+        ),
         snapshot(vec![key_record("b", 1), key_record("a", 1)], vec![], "root"),
     ] {
         assert_eq!(
@@ -558,9 +571,11 @@ fn rejects_unknown_roles_malformed_fields_and_tampering() -> TestResult {
 #[test]
 fn trust_snapshot_rejects_each_malformed_field_and_nested_record() -> TestResult {
     let root = SigningKey::from_bytes(&[1; 32]);
-    let Value::Array(fields) =
-        snapshot(vec![key_record("policy", 1)], vec![certificate(3)], "root")
-    else {
+    let Value::Array(fields) = snapshot(
+        vec![key_record("policy", 1)],
+        vec![certificate("fixture: 03")],
+        "root",
+    ) else {
         return Err("expected test TRS1 array".into());
     };
     for index in 2..fields.len() {
@@ -586,7 +601,7 @@ fn trust_snapshot_rejects_each_malformed_field_and_nested_record() -> TestResult
         )
         .is_err());
     }
-    let Value::Array(certificate_fields) = certificate(3) else {
+    let Value::Array(certificate_fields) = certificate("fixture: 03") else {
         return Err("expected test certificate array".into());
     };
     for index in 0..certificate_fields.len() {
@@ -599,8 +614,36 @@ fn trust_snapshot_rejects_each_malformed_field_and_nested_record() -> TestResult
         )
         .is_err());
     }
-    let first = Value::Array(vec![Value::Bytes(vec![7; 32]), integer(1), integer(2)]);
-    let second = Value::Array(vec![Value::Bytes(vec![8; 32]), integer(1), integer(2)]);
+    // The kernel key description is non-empty, control-free and at most 4095 bytes.
+    let longest = "k".repeat(4095);
+    SandboxTrustSnapshot::authenticate(
+        &sign_trust_snapshot(snapshot(vec![], vec![certificate(&longest)], "root"), &root)?,
+        "root",
+        &root.verifying_key(),
+    )?;
+    for description in [String::new(), "fixture:\n03".to_owned(), "k".repeat(4096)] {
+        assert_eq!(
+            SandboxTrustSnapshot::authenticate(
+                &sign_trust_snapshot(
+                    snapshot(vec![], vec![certificate(&description)], "root"),
+                    &root
+                )?,
+                "root",
+                &root.verifying_key()
+            ),
+            Err(ProtocolError::FieldOutOfBounds)
+        );
+    }
+    let first = Value::Array(vec![
+        Value::Bytes(vec![7; 32]),
+        Value::Text("fixture: 01".to_owned()),
+        integer(2),
+    ]);
+    let second = Value::Array(vec![
+        Value::Bytes(vec![8; 32]),
+        Value::Text("fixture: 01".to_owned()),
+        integer(2),
+    ]);
     assert_eq!(
         SandboxTrustSnapshot::authenticate(
             &sign_trust_snapshot(snapshot(vec![], vec![second, first], "root"), &root)?,
@@ -672,7 +715,11 @@ fn revocation_rejects_each_malformed_field_collection_and_key_material() -> Test
     );
     let foreign_trust = SandboxTrustSnapshot::authenticate(
         &sign_trust_snapshot(
-            snapshot(vec![key_record("policy", 1)], vec![certificate(9)], "root"),
+            snapshot(
+                vec![key_record("policy", 1)],
+                vec![certificate("fixture: 09")],
+                "root",
+            ),
             &root,
         )?,
         "root",
@@ -896,5 +943,118 @@ fn cancellation_context_and_acknowledgement_bind_the_exact_attempt_snapshot() ->
         next.snapshot_digest(),
     )
     .is_err());
+    Ok(())
+}
+
+fn two_certificate_trust(root: &SigningKey) -> TestResult<SandboxTrustSnapshot> {
+    let mut second = certificate("fixture: 04");
+    if let Value::Array(fields) = &mut second {
+        fields[0] = Value::Bytes(vec![9; 32]);
+    }
+    Ok(SandboxTrustSnapshot::authenticate(
+        &sign_trust_snapshot(
+            snapshot(vec![], vec![certificate("fixture: 03"), second], "root"),
+            root,
+        )?,
+        "root",
+        &root.verifying_key(),
+    )?)
+}
+
+#[test]
+fn builtin_keyring_requires_exactly_one_asymmetric_key_per_trs1_certificate() -> TestResult {
+    let root = SigningKey::from_bytes(&[1; 32]);
+    let trust = two_certificate_trust(&root)?;
+    let present = [
+        "keyring;0;0;1f0b0000;.secondary_trusted_keys",
+        "asymmetric;0;0;1f010000;fixture: 03",
+        "asymmetric;0;0;1f010000;fixture: 04",
+        "asymmetric;0;0;1f010000;Build time autogenerated kernel key: 00",
+    ];
+    let keys = verify_builtin_release_keys(
+        &trust,
+        &BuiltinKeyringListing::from_describe_records(present)?,
+    )?;
+    assert!(keys.covers(&trust));
+    let other = SandboxTrustSnapshot::authenticate(
+        &sign_trust_snapshot(
+            snapshot(vec![], vec![certificate("fixture: 03")], "root"),
+            &root,
+        )?,
+        "root",
+        &root.verifying_key(),
+    )?;
+    assert!(!keys.covers(&other));
+
+    for (records, expected) in [
+        // Missing, or present only under another key type or description.
+        (
+            vec!["asymmetric;0;0;1f010000;fixture: 03"],
+            BuiltinKeyringError::Missing,
+        ),
+        (
+            vec![
+                "asymmetric;0;0;1f010000;fixture: 03",
+                "user;0;0;1f010000;fixture: 04",
+            ],
+            BuiltinKeyringError::Missing,
+        ),
+        (
+            vec![
+                "asymmetric;0;0;1f010000;fixture: 03",
+                "asymmetric;0;0;1f010000;fixture: 04 ",
+            ],
+            BuiltinKeyringError::Missing,
+        ),
+        (Vec::new(), BuiltinKeyringError::Missing),
+        // A duplicate built-in key is ambiguous and refuses admission.
+        (
+            vec![
+                "asymmetric;0;0;1f010000;fixture: 03",
+                "asymmetric;0;0;1f010000;fixture: 04",
+                "asymmetric;0;0;3f010000;fixture: 04",
+            ],
+            BuiltinKeyringError::Duplicate,
+        ),
+    ] {
+        assert_eq!(
+            verify_builtin_release_keys(
+                &trust,
+                &BuiltinKeyringListing::from_describe_records(records)?
+            ),
+            Err(expected)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn builtin_keyring_listing_accepts_only_exact_describe_records() -> TestResult {
+    let listing = BuiltinKeyringListing::from_describe_records([
+        "asymmetric;-1;4294967295;0f0f0f0f;name; with separator",
+    ])?;
+    assert_eq!(
+        listing,
+        BuiltinKeyringListing::from_describe_records([
+            "asymmetric;-1;4294967295;0f0f0f0f;name; with separator"
+        ])?
+    );
+    for record in [
+        "",
+        "asymmetric;0;0;1f010000",
+        ";0;0;1f010000;fixture",
+        "asymmetric;root;0;1f010000;fixture",
+        "asymmetric;0;wheel;1f010000;fixture",
+        "asymmetric;0;0;1f01000;fixture",
+        "asymmetric;0;0;1F010000;fixture",
+        "asymmetric;0;0;1f01000g;fixture",
+        "asymmetric;0;0;1f010000;",
+    ] {
+        assert_eq!(
+            BuiltinKeyringListing::from_describe_records([record]),
+            Err(BuiltinKeyringError::Malformed),
+            "{record:?}"
+        );
+    }
     Ok(())
 }

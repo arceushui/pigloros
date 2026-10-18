@@ -1,17 +1,18 @@
 # SIM1 DDI fixtures from systemd-repart offline signing
 
-These test-only fixtures are externally generated candidates for
-[Accepted ADR-087](https://redmine.piglor.com/projects/pigloros/wiki/ADR-087_Systemd_mountfsd_SIM1_activation_boundary)'s
-#437 fixture acceptance. They cannot satisfy it yet: no valid SIM1 can
-describe them (see the salt finding below). There is one Discoverable Disk
-Image per supported architecture. Directories use systemd-repart's
-`--architecture` names: `x86-64` is SIM1 `x86_64` and `arm64` is `aarch64`. Each
-with an EROFS root, its dm-verity hash partition and a detached RSA-2048,
-SHA-256, no-attributes PKCS#7 signature over the exact 64 lowercase
-hexadecimal root-hash bytes. They were produced outside the Rust verifier by
+These test-only fixtures are the externally generated images for
+[ADR-087](https://redmine.piglor.com/projects/pigloros/wiki/ADR-087_Systemd_mountfsd_SIM1_activation_boundary)'s
+#437 fixture acceptance, under the pending ADR-069/ADR-087 amendments that
+make SIM1 carry the exact 32-byte verity salt and the release certificate's
+kernel key description. There is one Discoverable Disk Image per supported
+architecture. Directories use systemd-repart's `--architecture` names:
+`x86-64` is SIM1 `x86_64` and `arm64` is `aarch64`. Each image has an EROFS
+root, its dm-verity hash partition and a detached RSA-2048, SHA-256,
+no-attributes PKCS#7 signature over the exact 64 lowercase hexadecimal
+root-hash bytes. They were produced by `generate.sh`, which follows
 [systemd-repart(8)](https://www.freedesktop.org/software/systemd/man/latest/systemd-repart.html)'s
 example "Generate a dm-verity signature offline and append it to a pre-built
-image", followed by `generate.sh`.
+image".
 
 The fixture keys are not release keys. Each private key existed only in a
 private temporary directory on the generating runner and was deleted. No
@@ -115,27 +116,31 @@ other architecture's root hash (`InvalidSignature`) or signer pin
 (`UnauthorizedSigner`). The `sim1-proof-risk` workflow runs these public cases
 on a hosted aarch64 runner in addition to the x86-64 workspace gates.
 
+It also admits a complete SIM1 describing each real image: its exact length,
+BLAKE3 digest, three partitions, root hash, the 32-byte salt from
+`verity.json`, the proof and the kernel key description derived from
+`signer.der` (subject common name, `": "`, then the lowercase subject key
+identifier, as the kernel's x509 parser names the key). A TRS1 binding the
+same fingerprint with another description is rejected.
+
 A separate fixture-integrity case runs no production code: it checks that
 the `root-verity-sig` partition, identified by its DPS type, embeds the same
 proof, signer fingerprint and root hash that systemd will read.
 
 ## What these fixtures do not prove
 
-- **No SIM1 for these images.** In the v260.2, v260.4 and `main` sources,
+- **Salt provenance.** In the v260.2, v260.4 and `main` sources,
   systemd-repart always formats the verity hash partition with a 32-byte salt
-  derived from `--seed` (`derive_salt` and `salt_size = sizeof(p->verity_salt)`
-  in `src/repart/repart.c`). For the 260.5 producer used here, `verity.json`
-  records the salt that `describe.py` read from each verity superblock. Accepted ADR-069 SIM1
-  requires a zero-length salt, so no valid SIM1 can describe these images and
-  an exact dm-verity table readback against SIM1 could not match them. The proof cases above
-  declare the root hash in a test SIM1 only to exercise the CMS verifier. The
-  incompatibility is an open owner decision on #437.
-- **No release trust installation.** ADR-069 already commits SIM1 and TRS1 to
-  an administrator kernel-keyring serial. It does not settle which kernel
-  keyring trusts the release certificate (builtin, secondary or `.platform`),
-  how the certificate is installed there, what the serial identifies across
-  boots, or how the signing key is held. That is an open owner decision on
-  #437. These fixtures install nothing.
+  derived from `--seed` (`derive_salt` and
+  `salt_size = sizeof(p->verity_salt)` in `src/repart/repart.c`). For the
+  260.5 producer used here, `verity.json` records the salt that `describe.py`
+  read from each verity superblock. The pending ADR-069 amendment makes SIM1
+  carry that exact salt; checking it against the held image's superblock is
+  #438 and against the live dm-verity table is #440.
+- **No release trust installation.** Under the pending ADR-087 amendment the
+  release certificate is compiled into the appliance kernel's
+  `.builtin_trusted_keys`. These fixture certificates are not, and these
+  fixtures install nothing.
 - **No activation evidence.** Nothing here mounts an image, activates
   dm-verity or exercises the kernel keyring. Supported systemd/kernel evidence
   on both architectures runs on the pinned appliance under hosted QEMU TCG in

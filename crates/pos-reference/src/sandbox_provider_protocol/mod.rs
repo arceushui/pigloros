@@ -6,6 +6,7 @@
 mod admission;
 mod audit;
 mod authority;
+mod builtin_keyring;
 mod codec;
 mod execution;
 mod network;
@@ -80,6 +81,9 @@ pub use authority::{
     LaunchPolicy, NetworkCapability, PartitionDescriptor, PartitionRole, Pkcs7Proof,
     ProviderCapability, SandboxArchitecture, SandboxExecutionMode, SandboxLimit,
     SandboxProviderManifest, SandboxSyscallSet, SignedImageManifest,
+};
+pub use builtin_keyring::{
+    verify_builtin_release_keys, BuiltinKeyringError, BuiltinKeyringListing, BuiltinReleaseKeys,
 };
 pub use execution::{
     AdmissionAuthority, AdmissionGrant, ExecuteAuthority, NetworkExchangePlan, PayloadDescriptor,
