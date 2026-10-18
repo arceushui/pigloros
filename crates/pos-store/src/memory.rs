@@ -7957,6 +7957,58 @@ mod tests {
     }
 
     #[test]
+    fn classified_record_validation_refuses_each_event_coordinate_independently(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (mut store, child, operation, event) = classified_suffix_store()?;
+        let (_, table) = store.validate_classified_authority_graph(
+            child,
+            operation.input().fork_admission_digest,
+            operation.input().classifier_revision_digest,
+        )?;
+        let expected = store.validate_classified_records(
+            &operation,
+            &event,
+            &table,
+            ValidatedOriginV1::Local,
+        )?;
+        let other_id = EventId::new();
+        // Keep lookup and provenance content valid so neither can mask the
+        // independent Event-ID guard at the record validator's own boundary.
+        store
+            .fork_event_origins
+            .insert(other_id, expected.0.clone());
+        for candidate in [
+            Event {
+                id: other_id,
+                ..event.clone()
+            },
+            Event {
+                seq: Seq::from_u64(event.seq.as_u64() + 1),
+                ..event.clone()
+            },
+        ] {
+            assert_eq!(
+                store.validate_classified_records(
+                    &operation,
+                    &candidate,
+                    &table,
+                    ValidatedOriginV1::Local,
+                ),
+                Err(ForkEventAuthorityErrorV1::CorruptAuthority)
+            );
+        }
+        assert_eq!(
+            store.fork_event_origins.remove(&other_id),
+            Some(expected.0.clone())
+        );
+        assert_eq!(
+            store.validate_classified_records(&operation, &event, &table, ValidatedOriginV1::Local),
+            Ok(expected)
+        );
+        Ok(())
+    }
+
+    #[test]
     fn classified_suffix_rejects_missing_registration_and_unrecorded_event(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let (mut store, child_timeline_id, suffix_operation, _) = classified_suffix_store()?;
