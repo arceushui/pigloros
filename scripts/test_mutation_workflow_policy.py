@@ -36,7 +36,7 @@ fi
 # Pin the complete reviewed parsed program, including comments and heredoc data.
 # This policy snapshot is not a shell-semantics oracle; digest changes need review.
 MUTATION_RUN_SHA256 = (
-    "25ebc30ac7f2ce5fc4e858ee3d5e0f907373a6fa7e25b800105a9be5694da79e"
+    "62c26bc0f072da0e357f3f80b4aa8f55da850d50b207fe321c03d928c49786ec"
 )
 
 
@@ -124,7 +124,7 @@ def check_contract(workflow: dict) -> None:
     required = (
         "timeout --foreground 60m cargo mutants --workspace --all-features "
         '--in-diff "${{ runner.temp }}/changes.diff" --no-shuffle '
-        '--shard "${{ matrix.shard }}/16" --baseline skip --jobs 2 '
+        '--shard "${{ matrix.shard }}/16" --baseline skip --jobs 1 '
         "--timeout 120 --build-timeout 600 --cap-lints true --cargo-arg=--locked "
         "-- -- -Zunstable-options --fail-fast --include-ignored --test-threads=4 "
         "mutation_status=$? set -e"
@@ -263,7 +263,9 @@ class MutationWorkflowPolicyTests(unittest.TestCase):
     def test_rejects_worker_harness_and_deadline_drift(self) -> None:
         for before, after in (
             ('--shard "${{ matrix.shard }}/16"', '--shard "${{ matrix.shard }}/8"'),
-            ("--jobs 2", "--jobs 4"),
+            ("--jobs 1", "--jobs 0"),
+            ("--jobs 1", "--jobs 2"),
+            ("--jobs 1", "--jobs 4"),
             ("--test-threads=4", "--test-threads=2"),
             ("--timeout 120", "--timeout 121"),
             ("--build-timeout 600", "--build-timeout 601"),

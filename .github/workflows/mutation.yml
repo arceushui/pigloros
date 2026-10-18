@@ -128,9 +128,9 @@ jobs:
             > "${RUNNER_TEMP}/changes.diff"
       # The blocking baseline above proves this exact nightly harness first.
       # Each mutant retains the owning-package test selection used on main;
-      # Two workers with four harness threads retain eight configured slots
-      # per runner. Sixteen smaller shards split the same full selection across
-      # unchanged watchdogs; at most eight runners execute concurrently.
+      # One worker retains four harness threads without competing with another
+      # owning-package suite or compiler on this runner. Sixteen shards retain
+      # the full selection and unchanged watchdogs; at most eight run together.
       - name: Run mutants in changed lines
         # Reuse each worker's compiler state instead of rebuilding every edit.
         env:
@@ -148,7 +148,7 @@ jobs:
             --no-shuffle \
             --shard "${{ matrix.shard }}/16" \
             --baseline skip \
-            --jobs 2 \
+            --jobs 1 \
             --timeout 120 \
             --build-timeout 600 \
             --cap-lints true \
