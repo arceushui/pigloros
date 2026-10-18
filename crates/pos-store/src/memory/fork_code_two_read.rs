@@ -1808,6 +1808,51 @@ mod tests {
     }
 
     #[test]
+    fn replay_evidence_refuses_each_independently_mismatched_coordinate() -> Fallible<()> {
+        use crate::{
+            ForkReplayAuthorityEvidenceV1, ForkReplayAuthorityReadErrorV1, ForkReplayReadBudgetV1,
+            ForkReplayReadLimitsV1, ForkReplayRequirementV1,
+        };
+        use pos_core::trusted_clock::{GuardMonotonicSourceV1, ScriptedGuardMonotonicSourceV1};
+        use std::time::Duration;
+
+        let state = imported(Shape::EmptyUnclassified)?;
+        let committed = state.store.read_committed(state.child, state.head)?;
+        let record = committed.record_id;
+        let origin = committed.authority_origin_digest;
+        // Exercise the evidence owner's boundary with a real validated native
+        // result. Public adapter reads can reject a wrong lookup earlier and
+        // therefore cannot independently witness these coordinate guards.
+        for (child, head, record, origin, succeeds) in [
+            (state.child, state.head, record, origin, true),
+            (TimelineId::new(), state.head, record, origin, false),
+            (state.child, state.head + 1, record, origin, false),
+            (state.child, state.head, hash(0x99), origin, false),
+            (state.child, state.head, record, None, false),
+        ] {
+            let requirement =
+                ForkReplayRequirementV1::new(child, Seq::from_u64(head), record, origin)?;
+            let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+            let start = clock.mark();
+            let limits = ForkReplayReadLimitsV1::new(8, 128, 4_096, 8 * 1024 * 1024, 1_000_000)?;
+            let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+            let result =
+                ForkReplayAuthorityEvidenceV1::from_committed(requirement, &committed, &mut budget);
+            if succeeds {
+                assert_eq!(result?.requirement(), requirement);
+            } else {
+                assert_eq!(
+                    result,
+                    Err(ForkReplayAuthorityReadErrorV1::CorruptAuthority)
+                );
+                assert_eq!(budget.remaining_native_bytes(), limits.max_native_bytes());
+            }
+            budget.check_time()?;
+        }
+        Ok(())
+    }
+
+    #[test]
     fn protected_publication_refuses_missing_artifact_and_disagreeing_chain() -> Fallible<()> {
         use crate::{
             ForkReplayAuthorityReadErrorV1, ForkReplayAuthorityReadPortV1, ForkReplayReadBudgetV1,
