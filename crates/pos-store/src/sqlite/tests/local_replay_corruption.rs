@@ -5,6 +5,7 @@ use crate::ForkEventPermitIssuerPortV1;
 
 #[derive(Clone, Copy, Debug)]
 enum ClassifierBindingFault {
+    TableAdmissionDigest,
     SourceRoom,
     SourceRegistrar,
     Routes,
@@ -67,6 +68,7 @@ fn local_permit_issuer_refuses_independent_classifier_bindings(
         &mut crate::fork_replay::NativeReadContextV1::ordinary(),
     )?;
     for fault in [
+        ClassifierBindingFault::TableAdmissionDigest,
         ClassifierBindingFault::SourceRoom,
         ClassifierBindingFault::SourceRegistrar,
         ClassifierBindingFault::Routes,
@@ -89,6 +91,9 @@ fn local_permit_issuer_refuses_independent_classifier_bindings(
         let mut registration_input = registration.input().clone();
         let foreign = Hash::from_bytes([0x98; 32]);
         match fault {
+            ClassifierBindingFault::TableAdmissionDigest => {
+                table_input.fork_admission_digest = foreign;
+            }
             ClassifierBindingFault::SourceRoom => {
                 source_input.room_revision_descriptor_hash = foreign;
             }
@@ -108,7 +113,7 @@ fn local_permit_issuer_refuses_independent_classifier_bindings(
         }
         // Corrupt durable bytes, not a legal registration transition. Keep
         // both digest links exact so an incidental digest mismatch cannot
-        // conceal the independent source/route/child binding under test.
+        // conceal the independent admission/source/route/child binding under test.
         let changed_source = ForkClassifierSourceV1::new(source_input)?;
         table_input.source_configuration_revision_digest = changed_source.digest();
         let changed_table = ForkClassifierTableV1::new(table_input)?;
