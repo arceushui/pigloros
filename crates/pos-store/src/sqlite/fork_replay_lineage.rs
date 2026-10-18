@@ -99,10 +99,9 @@ impl SqliteStore {
                 .lineage_row("PRAGMA data_version", [], context, |row, context| {
                     integer(row, 0, context)
                 })
-                .map_err(|error| match error {
-                    Error::Read(ReadError::BoundsExceeded) => error,
-                    _ => Error::ContainmentUnavailable,
-                })?;
+                // The enclosing step post-check preserves every latched
+                // budget refusal before returning this native-error mapping.
+                .map_err(|_| Error::ContainmentUnavailable)?;
             if observed != Some(self.erasure_inventory_data_version) {
                 return Err(Error::ContainmentUnavailable);
             }
@@ -926,6 +925,27 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_opaque_event_kind_remains_visible_to_public_lineage() -> Fallible<()> {
+        let (mut store, root, _) = fixture()?;
+        let appended = store.append(
+            root,
+            &[EventDraft::new(
+                EntityId::new(),
+                Kind::new(""),
+                CanonicalBytes::from_static(b"ordinary empty-kind payload"),
+            )],
+        )?;
+        assert_eq!(appended.len(), 1);
+        assert_eq!(appended[0].event_type.as_str(), "");
+        let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+        assert_eq!(
+            read(&store, root, &mut clock)?,
+            Ok(Some(ForkReplayLineageNodeV1::new(root, None)))
+        );
+        Ok(())
+    }
+
+    #[test]
     fn late_ancestor_presence_and_geographic_events_hide_the_entire_use() -> Fallible<()> {
         for presence in [true, false] {
             for kind in ["geo.cell", "geo.location"] {
@@ -1020,6 +1040,37 @@ mod tests {
         }
         assert!(bounds > 0);
         assert!(storage > 0);
+        Ok(())
+    }
+
+    #[test]
+    fn freshness_query_row_refusal_preserves_the_original_budget_error() -> Fallible<()> {
+        let (store, _, _) = fixture()?;
+        let gate = store.erasure_gate.as_deref().ok_or("bound gate")?;
+        let interval = store.begin_protected_effect_interval()?;
+        for (rows, succeeds) in [(1, false), (2, true)] {
+            let limits = ForkReplayReadLimitsV1::new(8, 1, rows, 1, 1_000_000)?;
+            let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+            let start = clock.mark();
+            let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+            budget.charge_rows(1)?;
+            let result =
+                store.lineage_freshness(gate, &mut LineageReadContextV1::new(&mut budget, 8)?);
+            if succeeds {
+                result?;
+                budget.check_time()?;
+            } else {
+                assert_eq!(result, Err(Error::Read(ReadError::BoundsExceeded)));
+                assert_eq!(budget.check_time(), Err(ReadError::BoundsExceeded));
+            }
+            // One actual PRAGMA row exhausts the healthy boundary as well;
+            // skipping the native query cannot satisfy this positive control.
+            assert_eq!(budget.charge_rows(1), Err(ReadError::BoundsExceeded));
+        }
+        store.finish_protected_effect_interval(
+            interval,
+            ErasureProtectedEffectDispositionV1::Rollback,
+        )?;
         Ok(())
     }
 
