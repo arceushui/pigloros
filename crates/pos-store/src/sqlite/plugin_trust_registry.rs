@@ -31,6 +31,9 @@
 //! handle the same way, but returns the work's error (or `StorageFailed`), because nothing was
 //! written.
 //!
+//! The write protocol from the poison check on, except the fence, is `super::registry_durability`,
+//! which the composition fallback registry shares; the read transaction stays here.
+//!
 //! The activation Event is appended inside the open transaction through the same guard chain as
 //! `EventStore::append` (`guarded_generic_append`); `append_visible` opens a savepoint inside the
 //! open transaction, which is expected.
@@ -44,6 +47,9 @@ use rusqlite::Connection;
 
 use super::plugin_trust_registry_rows::{self as rows, storage_error, RegistryResult};
 use super::plugin_trust_registry_schema as schema;
+use super::registry_durability::{
+    committed, rollback_to_autocommit, DurabilityErrorV1, DurableRegistryV1,
+};
 use super::SqliteStore;
 use crate::plugin_trust_registry::logic::{
     plan_admit, plan_advance, plan_evaluate, plan_provision, plan_rollback, AdmitPlanV1,
@@ -57,78 +63,29 @@ use crate::plugin_trust_registry::{
     RetainedReleaseDecisionV1, TrustedUtcSecondV1,
 };
 
-fn query_journal(connection: &Connection) -> rusqlite::Result<String> {
-    connection.query_row("PRAGMA journal_mode", [], |row| row.get(0))
+impl DurabilityErrorV1 for PluginTrustPolicyRegistryErrorV1 {
+    const STORE_POISONED: Self = Self::StorePoisoned;
+    const NESTED_TRANSACTION: Self = Self::NestedTransaction;
+    const WAL_REQUIRED: Self = Self::WalRequired;
+    const STORAGE_INDETERMINATE: Self = Self::StorageIndeterminate;
+
+    fn storage(error: &rusqlite::Error) -> Self {
+        storage_error(error)
+    }
 }
 
-fn query_level(connection: &Connection) -> rusqlite::Result<i64> {
-    connection.query_row("PRAGMA synchronous", [], |row| row.get(0))
-}
-
-fn exec_set_full(connection: &Connection) -> rusqlite::Result<()> {
-    connection.execute_batch("PRAGMA synchronous=FULL")
-}
-
-fn exec_restore(connection: &Connection, level: i64) -> rusqlite::Result<()> {
-    connection.execute_batch(&format!("PRAGMA synchronous={level}"))
-}
-
-fn exec_commit(connection: &Connection) -> rusqlite::Result<()> {
-    connection.execute_batch("COMMIT")
-}
-
-fn exec_rollback(connection: &Connection) -> rusqlite::Result<()> {
-    connection.execute_batch("ROLLBACK")
-}
-
-/// The durability statements the protocol runs. A production build runs the real statements; a
-/// test build substitutes each whole function so a test can make exactly that step fail (the
-/// same seam style as `recipient_owner`). The real statements above are compiled in both.
-#[cfg(not(test))]
-mod seam {
-    pub(super) use super::{
-        exec_commit as commit, exec_restore as restore_statement, exec_rollback as rollback,
-        exec_set_full as set_full_statement, query_journal as journal_mode,
-        query_level as entry_level, query_level as full_read_back,
-        query_level as restore_read_back,
-    };
-}
-
+/// The test seam: the shared durability seam, plus the snapshot probe of the evaluation's read
+/// transaction, which only this registry has.
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod seam {
-    use std::cell::{Cell, RefCell};
+    use std::cell::RefCell;
 
-    use rusqlite::Connection;
-
-    use super::{
-        exec_commit, exec_restore, exec_rollback, exec_set_full, query_journal, query_level,
+    pub(super) use crate::sqlite::registry_durability::seam::{
+        Step, FAULT, LEVEL_AT_COMMIT, RESTORE_PROBE,
     };
 
-    /// One step of the durability protocol that a test can make fail.
-    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    pub(super) enum Step {
-        ReadJournal,
-        ReadEntry,
-        SetFull,
-        ReadBackFull,
-        Restore,
-        ReadBackRestore,
-        /// A `COMMIT` that succeeds but reports failure: a lost acknowledgement.
-        LostAcknowledgement,
-        /// A `ROLLBACK` that never runs, leaving the transaction open.
-        Rollback,
-    }
-
     thread_local! {
-        /// The one step that fails on this thread.
-        pub(super) static FAULT: Cell<Option<Step>> = const { Cell::new(None) };
-        /// The `synchronous` level read just before the last `COMMIT`.
-        pub(super) static LEVEL_AT_COMMIT: Cell<Option<i64>> =
-            const { Cell::new(None) };
-        /// Runs just before the restore statement, while the erasure fence is still held.
-        pub(super) static RESTORE_PROBE: RefCell<Option<Box<dyn Fn()>>> =
-            const { RefCell::new(None) };
         /// Runs inside an evaluation's read transaction, right after its schema check, so a
         /// test can commit a write through a second handle after the snapshot began.
         pub(super) static SNAPSHOT_PROBE: RefCell<Option<Box<dyn Fn()>>> =
@@ -142,121 +99,6 @@ mod seam {
             }
         });
     }
-
-    fn injected(step: Step) -> bool {
-        FAULT.with(Cell::get) == Some(step)
-    }
-
-    fn fail_if(step: Step) -> rusqlite::Result<()> {
-        if injected(step) {
-            Err(rusqlite::Error::InvalidQuery)
-        } else {
-            Ok(())
-        }
-    }
-
-    pub(super) fn journal_mode(connection: &Connection) -> rusqlite::Result<String> {
-        fail_if(Step::ReadJournal).and_then(|()| query_journal(connection))
-    }
-
-    pub(super) fn entry_level(connection: &Connection) -> rusqlite::Result<i64> {
-        fail_if(Step::ReadEntry).and_then(|()| query_level(connection))
-    }
-
-    pub(super) fn set_full_statement(connection: &Connection) -> rusqlite::Result<()> {
-        fail_if(Step::SetFull).and_then(|()| exec_set_full(connection))
-    }
-
-    /// A failed read-back reads a value that is never a level.
-    pub(super) fn full_read_back(connection: &Connection) -> rusqlite::Result<i64> {
-        if injected(Step::ReadBackFull) {
-            Ok(-1)
-        } else {
-            query_level(connection)
-        }
-    }
-
-    pub(super) fn restore_statement(connection: &Connection, level: i64) -> rusqlite::Result<()> {
-        RESTORE_PROBE.with(|probe| {
-            if let Some(probe) = probe.borrow().as_ref() {
-                probe();
-            }
-        });
-        fail_if(Step::Restore).and_then(|()| exec_restore(connection, level))
-    }
-
-    pub(super) fn restore_read_back(connection: &Connection) -> rusqlite::Result<i64> {
-        fail_if(Step::ReadBackRestore).and_then(|()| query_level(connection))
-    }
-
-    pub(super) fn commit(connection: &Connection) -> rusqlite::Result<()> {
-        LEVEL_AT_COMMIT.with(|level| level.set(query_level(connection).ok()));
-        if injected(Step::LostAcknowledgement) {
-            exec_commit(connection).and(Err(rusqlite::Error::InvalidQuery))
-        } else {
-            exec_commit(connection)
-        }
-    }
-
-    pub(super) fn rollback(connection: &Connection) -> rusqlite::Result<()> {
-        if injected(Step::Rollback) {
-            Ok(())
-        } else {
-            exec_rollback(connection)
-        }
-    }
-}
-
-use seam::{
-    commit, entry_level, full_read_back, journal_mode, restore_read_back, restore_statement,
-    rollback, set_full_statement,
-};
-
-/// The value `PRAGMA synchronous` reads back for `FULL`.
-const SYNCHRONOUS_FULL: i64 = 2;
-
-fn require_wal(connection: &Connection) -> RegistryResult<()> {
-    let mode = journal_mode(connection).map_err(|error| storage_error(&error))?;
-    if mode == "wal" {
-        Ok(())
-    } else {
-        Err(PluginTrustPolicyRegistryErrorV1::WalRequired)
-    }
-}
-
-/// Set `synchronous=FULL` and read it back; either failure leaves the outcome unknown.
-fn set_full(connection: &Connection) -> RegistryResult<()> {
-    let full = set_full_statement(connection)
-        .and_then(|()| full_read_back(connection))
-        .is_ok_and(|level| level == SYNCHRONOUS_FULL);
-    if full {
-        Ok(())
-    } else {
-        Err(PluginTrustPolicyRegistryErrorV1::StorageIndeterminate)
-    }
-}
-
-/// Whether `level` is the connection's level again, in autocommit, as read back.
-fn restore(connection: &Connection, level: i64) -> bool {
-    connection.is_autocommit()
-        && restore_statement(connection, level)
-            .and_then(|()| restore_read_back(connection))
-            .is_ok_and(|read| read == level)
-}
-
-fn begin(connection: &Connection) -> RegistryResult<()> {
-    connection
-        .execute_batch(super::begin_immediate_sql())
-        .map_err(|error| storage_error(&error))
-}
-
-/// Roll back whatever is open and report whether the connection is in autocommit afterwards.
-///
-/// Without an open transaction the reported error carries no information: `SQLite` may already
-/// have rolled the transaction back.
-fn rollback_to_autocommit(connection: &Connection) -> bool {
-    drop(rollback(connection));
-    connection.is_autocommit()
 }
 
 /// The shared decision logic's view of the open transaction.
@@ -295,79 +137,25 @@ impl PluginTrustTransactionV1 for SqliteTransactionV1<'_> {
 }
 
 impl SqliteStore {
+    /// The shared durability protocol on this handle's connection and trust poison cell.
+    const fn plugin_trust_durability(&self) -> DurableRegistryV1<'_> {
+        DurableRegistryV1 {
+            connection: &self.conn,
+            poisoned: &self.plugin_trust_poisoned,
+        }
+    }
+
     /// Step P: a poisoned handle fails every registry call.
     const fn ensure_plugin_trust_usable(&self) -> RegistryResult<()> {
-        if self.plugin_trust_poisoned.get() {
-            Err(PluginTrustPolicyRegistryErrorV1::StorePoisoned)
-        } else {
-            Ok(())
-        }
+        self.plugin_trust_durability().ensure_usable()
     }
 
-    /// Record a failed restore, or a read that could not leave its own transaction: the
-    /// connection's state is unknown until the store is reopened.
-    fn poison_plugin_trust(&self) {
-        self.plugin_trust_poisoned.set(true);
-    }
-
-    /// Restore the recorded `synchronous` level, or poison the handle.
-    fn restore_level(&self, level: i64) -> RegistryResult<()> {
-        if restore(&self.conn, level) {
-            Ok(())
-        } else {
-            self.poison_plugin_trust();
-            Err(PluginTrustPolicyRegistryErrorV1::StorageIndeterminate)
-        }
-    }
-
-    /// Step T up to and including `BEGIN IMMEDIATE`; returns the level to restore.
-    fn enter_full_durability(&self) -> RegistryResult<i64> {
-        let connection = &self.conn;
-        if !connection.is_autocommit() {
-            return Err(PluginTrustPolicyRegistryErrorV1::NestedTransaction);
-        }
-        require_wal(connection)?;
-        let entry = entry_level(connection).map_err(|error| storage_error(&error))?;
-        set_full(connection)
-            .and_then(|()| begin(connection))
-            .or_else(|error| self.restore_level(entry).and(Err(error)))
-            .map(|()| entry)
-    }
-
-    /// Roll back, then restore the recorded level.
-    ///
-    /// A connection that is still inside a transaction after `ROLLBACK` cannot change its level:
-    /// the handle is poisoned instead.
-    fn abandon_and_restore(&self, level: i64) -> RegistryResult<()> {
-        if rollback_to_autocommit(&self.conn) {
-            self.restore_level(level)
-        } else {
-            self.poison_plugin_trust();
-            Err(PluginTrustPolicyRegistryErrorV1::StorageIndeterminate)
-        }
-    }
-
-    /// `COMMIT`, then restore the recorded level. A failed `COMMIT` is an unknown outcome.
-    fn commit_and_restore(&self, level: i64) -> RegistryResult<()> {
-        match commit(&self.conn) {
-            Ok(()) => self.restore_level(level),
-            Err(_) => self
-                .abandon_and_restore(level)
-                .and(Err(PluginTrustPolicyRegistryErrorV1::StorageIndeterminate)),
-        }
-    }
-
-    /// Run `work` in one `BEGIN IMMEDIATE` transaction at `synchronous=FULL`.
+    /// Run `work` in one `BEGIN IMMEDIATE` transaction at `synchronous=FULL` (step T).
     fn plugin_trust_transaction<T>(
         &self,
         work: &impl Fn(&Self) -> RegistryResult<T>,
     ) -> RegistryResult<T> {
-        self.ensure_plugin_trust_usable()?;
-        let level = self.enter_full_durability()?;
-        match work(self) {
-            Ok(value) => self.commit_and_restore(level).map(|()| value),
-            Err(error) => self.abandon_and_restore(level).and(Err(error)),
-        }
+        self.plugin_trust_durability().transaction(|| work(self))
     }
 
     /// Run `work` as a transaction inside the erasure fence of the activation Timeline.
@@ -518,14 +306,14 @@ impl SqliteStore {
     /// `rollback_to_autocommit`.
     fn abandon_read(&self) {
         if !rollback_to_autocommit(&self.conn) {
-            self.poison_plugin_trust();
+            self.plugin_trust_durability().poison();
         }
     }
 
     /// `COMMIT` a read transaction. A failed `COMMIT` is `StorageFailed`: nothing was written,
     /// so there is no unknown outcome, and the transaction is rolled back like a failed work.
     fn finish_read<T>(&self, value: T) -> RegistryResult<T> {
-        if commit(&self.conn).is_ok() {
+        if committed(&self.conn) {
             Ok(value)
         } else {
             self.abandon_read();
