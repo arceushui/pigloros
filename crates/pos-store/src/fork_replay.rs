@@ -1309,6 +1309,38 @@ mod canonical_length_mapping_tests {
     }
 
     #[test]
+    fn imported_decoder_cap_is_checked_before_precharging_oversized_input() -> Fallible<()> {
+        let identifier = "x".repeat(pos_core::MAX_FORK_ATTRIBUTION_ISSUER_ID_BYTES_V1);
+        let record = admission(&identifier)?;
+        let bytes = record.to_canonical_cbor();
+        let cap = pos_core::MAX_IMPORTED_FORK_ATTRIBUTION_ADMISSION_BYTES_V1;
+        let byte_limit = 65_536;
+        assert!(bytes.len() < cap);
+        assert_eq!(decode_with_budget(&bytes, byte_limit)?.value?, record);
+        let issuer_bytes = record.input().issuer.to_canonical_cbor().len();
+        for length in [cap, cap + 1] {
+            let mut candidate = bytes.clone();
+            candidate.resize(length, 0);
+            let outcome = decode_with_budget(&candidate, byte_limit)?;
+            assert_eq!(
+                outcome.value,
+                Err(crate::ForkManifestPublicationErrorV1::PublicationConflict)
+            );
+            // At the inclusive cap the native decoder rejects trailing bytes,
+            // after this bounded batch's allocation precharge. Above the cap
+            // no decoder precharge is allowed, even with a valid issuer prefix.
+            let precharge = if length == cap {
+                identifier.len() + 2 * issuer_bytes + length
+            } else {
+                0
+            };
+            assert_eq!(outcome.remaining, byte_limit - precharge);
+            assert!(outcome.open);
+        }
+        Ok(())
+    }
+
+    #[test]
     fn imported_decoder_checks_original_deadline_before_and_after_its_bounded_batch() -> Fallible<()>
     {
         let bytes = admission("issuer")?.to_canonical_cbor();
@@ -1353,6 +1385,10 @@ mod canonical_length_mapping_tests {
             vec![0x9f],
             vec![0x80],
             vec![0x40],
+            // Each invalid prefix still has a complete parsable text field:
+            // the container major and declared count must refuse separately.
+            vec![0x41, 0x61, b'x'],
+            vec![0x80, 0x61, b'x'],
             vec![0x81, 0x9f],
             vec![0x81, 0x5f],
             vec![0x81, 0x78],
