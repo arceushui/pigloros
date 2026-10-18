@@ -141,13 +141,13 @@ impl Frame {
     fn accept(
         &mut self,
         bytes: &[u8],
-        truncated: bool,
+        flags: ReturnFlags,
         unexpected_control: bool,
         descriptors: Vec<OwnedFd>,
     ) -> io::Result<ReadResult> {
         let terminator = bytes.iter().position(|byte| *byte == 0);
         let body = terminator.map_or(bytes, |end| &bytes[..end]);
-        let defective = truncated
+        let defective = flags.contains(ReturnFlags::CTRUNC)
             || unexpected_control
             || (self.descriptors_received && !descriptors.is_empty())
             || !descriptors.iter().all(is_sealed)
@@ -180,7 +180,7 @@ fn receive(socket: &UnixStream, buffer: &mut [u8], frame: &mut Frame) -> io::Res
             let (descriptors, unexpected_control) = drain(&mut control);
             frame.accept(
                 &buffer[..received.bytes],
-                received.flags.contains(ReturnFlags::CTRUNC),
+                received.flags,
                 unexpected_control,
                 descriptors,
             )
@@ -260,7 +260,7 @@ mod tests {
     #[test]
     fn an_unsealed_descriptor_makes_the_frame_defective() -> TestResult {
         let mut frame = Frame::default();
-        let read = frame.accept(b"{}\0", false, false, vec![unsealed_file()?]);
+        let read = frame.accept(b"{}\0", ReturnFlags::empty(), false, vec![unsealed_file()?]);
         assert_eq!(
             read.err().map(|error| error.kind()),
             Some(io::ErrorKind::InvalidData)
@@ -270,11 +270,20 @@ mod tests {
     }
 
     #[test]
+    fn ancillary_truncation_makes_the_frame_defective() -> TestResult {
+        let mut frame = Frame::default();
+        let read = frame.accept(b"{}\0", ReturnFlags::CTRUNC, false, vec![sealed_file()?]);
+        assert!(read.is_err());
+        assert_eq!(frame.state, FrameState::Defective);
+        Ok(())
+    }
+
+    #[test]
     fn a_message_of_exactly_the_bound_is_accepted() -> TestResult {
         let mut frame = Frame::default();
         let mut message = vec![b' '; MAX_REPLY_BYTES];
         message.push(0);
-        let read = frame.accept(&message, false, false, vec![sealed_file()?])?;
+        let read = frame.accept(&message, ReturnFlags::empty(), false, vec![sealed_file()?])?;
         assert_eq!(read.bytes_read(), MAX_REPLY_BYTES + 1);
         assert_eq!(read.fds().len(), 1);
         assert_eq!(frame.state, FrameState::Complete);
@@ -286,9 +295,13 @@ mod tests {
     fn one_byte_over_the_bound_is_defective() {
         let mut frame = Frame::default();
         let body = vec![b' '; MAX_REPLY_BYTES];
-        assert!(frame.accept(&body, false, false, Vec::new()).is_ok());
+        assert!(frame
+            .accept(&body, ReturnFlags::empty(), false, Vec::new())
+            .is_ok());
         assert_eq!(frame.state, FrameState::Open);
-        assert!(frame.accept(b" \0", false, false, Vec::new()).is_err());
+        assert!(frame
+            .accept(b" \0", ReturnFlags::empty(), false, Vec::new())
+            .is_err());
         assert_eq!(frame.state, FrameState::Defective);
     }
 

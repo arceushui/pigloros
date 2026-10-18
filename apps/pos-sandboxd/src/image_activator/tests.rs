@@ -392,6 +392,7 @@ async fn framing_defects_are_malformed() -> TestResult {
     // The NUL of this fixture is not the last byte of a 256-byte zlink read,
     // so the trailing bytes arrive in the same read as the terminator.
     let mut trailing = message(&valid_reply())?;
+    assert_ne!(trailing.len() % 256, 0);
     trailing.extend_from_slice(b"{}");
     let oversized = with(|reply| {
         reply["parameters"]["imageName"] = json!("x".repeat(70_000));
@@ -496,6 +497,12 @@ async fn only_the_required_peer_identity_is_accepted() -> TestResult {
         Some(ImageActivationError::Transport)
     );
     Ok(())
+}
+
+#[test]
+fn the_fixed_endpoint_is_the_root_mountfsd_socket() {
+    assert_eq!(MOUNTFSD_SOCKET, "/run/systemd/io.systemd.MountFileSystem");
+    assert_eq!(MOUNTFSD_PEER_UID, 0);
 }
 
 #[tokio::test]

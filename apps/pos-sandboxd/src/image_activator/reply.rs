@@ -56,7 +56,7 @@ fn root_mount(
     let mount = descriptors.pop();
     match (reply.partitions.as_slice(), mount) {
         ([root], Some(mount)) if descriptors.is_empty() && root.mount_file_descriptor == 0 => {
-            if accepted(reply, root, expected) {
+            if matches_admitted_root(reply, root, expected) {
                 Ok(QuarantinedRootMount { _mount: mount })
             } else {
                 Err(ImageActivationError::EvidenceMismatch)
@@ -66,7 +66,11 @@ fn root_mount(
     }
 }
 
-fn accepted(reply: &MountImageReply, root: &PartitionInfo, expected: &ExpectedRoot) -> bool {
+fn matches_admitted_root(
+    reply: &MountImageReply,
+    root: &PartitionInfo,
+    expected: &ExpectedRoot,
+) -> bool {
     root.designator == "root"
         && !root.writable
         && !root.grow_file_system

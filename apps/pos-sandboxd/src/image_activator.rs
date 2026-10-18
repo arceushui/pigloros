@@ -124,7 +124,8 @@ impl MountfsdImageActivator {
 
     fn over(stream: UnixStream, peer_uid: u32) -> Result<Self, ImageActivationError> {
         rustix::net::sockopt::socket_peercred(&stream)
-            .map_err(transport_failure)
+            .map_err(rustix::io::Errno::kind)
+            .map_err(connect_failure)
             .and_then(|peer| trusted_peer(peer.uid.as_raw(), peer_uid))
             .map(|()| Self {
                 connection: Connection::new(SealedUnixSocket::new(stream)),
@@ -197,10 +198,6 @@ const fn connect_failure(kind: io::ErrorKind) -> ImageActivationError {
         }
         _ => ImageActivationError::Transport,
     }
-}
-
-fn transport_failure<E>(_: E) -> ImageActivationError {
-    ImageActivationError::Transport
 }
 
 const fn trusted_peer(observed: u32, required: u32) -> Result<(), ImageActivationError> {
