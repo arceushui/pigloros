@@ -43,7 +43,7 @@ fn parameters(message: &[u8]) -> Result<MountImageReply, ImageActivationError> {
 fn rejected(message: &[u8]) -> Result<MountImageReply, ImageActivationError> {
     serde_json::from_slice::<FailureEnvelope>(message)
         .map_err(malformed)
-        .and_then(|_| Err(ImageActivationError::MethodRejected))
+        .and(Err(ImageActivationError::MethodRejected))
 }
 
 fn root_mount(
