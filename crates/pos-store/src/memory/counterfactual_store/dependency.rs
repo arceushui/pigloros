@@ -1019,9 +1019,9 @@ mod tests {
     };
     use pos_core::{
         CounterfactualStorePortV1, DependencyNodeCoordinateV1, ErasureContainmentGateV1,
-        EventStore, ForkAdmissionRecordInputV1, ForkAdmissionRecordV1, ForkAttributionOriginV1,
-        OwnerIdV1, RecordedNodeOriginV1, Seq, MAX_RECORDED_DEPENDENCY_EDGES_V1,
-        MAX_RECORDED_DEPENDENCY_NODES_V1,
+        ErasureLifecycleV1, EventStore, ForkAdmissionRecordInputV1, ForkAdmissionRecordV1,
+        ForkAttributionOriginV1, OwnerIdV1, RecordedNodeOriginV1, Seq,
+        MAX_RECORDED_DEPENDENCY_EDGES_V1, MAX_RECORDED_DEPENDENCY_NODES_V1,
     };
 
     use super::super::tests::{command, draft, facts, inject, ok, published_store, snapshot};
@@ -1038,6 +1038,14 @@ mod tests {
     type Scope = DependencyReadScopeV1;
     /// One capacity case: stored counts and a record that crosses one bound.
     type CapacityCase = (RecordedSetCountsV1, fn(u64) -> TickDependencyRecordV1);
+    /// The rows held for one Timeline: its committed prefix set and its
+    /// recorded Fork generation set.
+    type HeldRows = (Option<DependencyRowsV1>, Option<(u64, ForkDependencySetV1)>);
+    /// The node page and the edge page of one read scope.
+    type Pages = (
+        Result<DependencyPageV1<NodeRow>, StoreError>,
+        Result<DependencyPageV1<EdgeRow>, StoreError>,
+    );
 
     const PROVISIONAL: RecordedNodeOriginV1 = RecordedNodeOriginV1::Provisional;
     const COMMITTED: RecordedNodeOriginV1 = RecordedNodeOriginV1::Committed;
@@ -1452,10 +1460,9 @@ mod tests {
         assert_eq!(snapshot(&store, fork), before);
     }
 
-    #[test]
+    /// Admit `fork` as an ADR-099 Fork by inserting its `FAR1` record.
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn c9_admitted_fork_writes_fail_closed_without_recording() {
-        let (mut store, fork) = recorded_store();
+    fn admit_fork(store: &mut MemoryStore, fork: TimelineId) {
         store.fork_admissions.insert(
             fork,
             ok(ForkAdmissionRecordV1::new(ForkAdmissionRecordInputV1 {
@@ -1474,6 +1481,13 @@ mod tests {
                 origin: ForkAttributionOriginV1::Local,
             })),
         );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn c9_admitted_fork_writes_fail_closed_without_recording() {
+        let (mut store, fork) = recorded_store();
+        admit_fork(&mut store, fork);
         let before = snapshot(&store, fork);
         let first = lone_node(1);
         let invalidation = command(fork);
@@ -1515,6 +1529,136 @@ mod tests {
         assert!(store.dependency_prefixes.contains_key(&root));
         ok(store.delete_timeline(root));
         assert!(store.dependency_prefixes.is_empty());
+    }
+
+    // ADR-060, 2026-10-18 amendment: the rows of a Timeline that is never
+    // deleted are kept. A refused delete and a `Complete` erasure each leave
+    // the committed prefix sets and the Fork generation set unchanged.
+
+    /// The rows held for one Timeline.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn held_rows(store: &MemoryStore, timeline: TimelineId) -> HeldRows {
+        let prefix = store.dependency_prefixes.get(&timeline).cloned();
+        let state = store.counterfactual_forks.get(&timeline);
+        (prefix, state.and_then(|held| held.dependencies.clone()))
+    }
+
+    /// A recorded Fork whose root and the Fork itself also hold a seeded
+    /// committed prefix.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn recorded_lineage() -> (MemoryStore, TimelineId, TimelineId) {
+        let (mut store, fork) = recorded_store();
+        let root = parent_of(&store, fork);
+        ok(store.seed_factual_prefix(root, &[seeded_tick("p", 40)]));
+        ok(store.seed_factual_prefix(fork, &[seeded_tick("p", 41)]));
+        let (root_rows, fork_rows) = (held_rows(&store, root), held_rows(&store, fork));
+        assert!(root_rows.0.is_some());
+        assert!(fork_rows.0.is_some() && fork_rows.1.is_some());
+        (store, root, fork)
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn a_permit_requiring_store_keeps_every_dependency_row() {
+        let (mut store, root, fork) = recorded_lineage();
+        let before = [held_rows(&store, root), held_rows(&store, fork)];
+        // Binding a fail-closed gate sets this flag, but a bound store cannot
+        // be rebound and an unbound one cannot record.
+        store.erasure_topology_requires_permit = true;
+        for timeline in [fork, root] {
+            let refused = store.delete_timeline(timeline);
+            assert!(
+                matches!(refused, Err(CoreError::ErasureContainmentUnavailable)),
+                "{refused:?}"
+            );
+        }
+        assert_eq!([held_rows(&store, root), held_rows(&store, fork)], before);
+    }
+
+    /// The node page and the edge page of one scope, or their errors.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn pages(store: &MemoryStore, scope: Scope) -> Pages {
+        (read_nodes(store, scope, 5), read_edges(store, scope, 5))
+    }
+
+    /// Both row kinds of `scope` fail closed behind the erasure fence.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn assert_fenced(store: &MemoryStore, scope: Scope) {
+        let fenced = Err(StoreError::StorageFailure);
+        assert_eq!(
+            read_nodes(store, scope, 5).map(drop),
+            fenced,
+            "nodes {scope:?}"
+        );
+        assert_eq!(
+            read_edges(store, scope, 5).map(drop),
+            fenced,
+            "edges {scope:?}"
+        );
+    }
+
+    /// Drive one erasure request over `timeline` to `Complete` on the store's
+    /// bound gate.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn complete_erasure(store: &MemoryStore, timeline: TimelineId) {
+        let gate = ok(store.erasure_gate.clone().ok_or("no gate"));
+        let completed = gate.complete_timeline_erasure_for_test(timeline);
+        assert_eq!(completed, Ok(ErasureLifecycleV1::Complete));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn a_completed_fork_erasure_keeps_every_dependency_row() {
+        let (store, root, fork) = recorded_lineage();
+        let before = [held_rows(&store, root), held_rows(&store, fork)];
+        let parent = pages(&store, prefix_scope(root, 9));
+        let served = parent.0.as_ref().map(DependencyPageV1::items);
+        assert!(served.is_ok_and(|items| !items.is_empty()));
+
+        complete_erasure(&store, fork);
+
+        for scope in [fork_scope(fork, 1), prefix_scope(fork, 9)] {
+            assert_fenced(&store, scope);
+        }
+        // The Fork's request does not fence its parent's own prefix.
+        assert_eq!(pages(&store, prefix_scope(root, 9)), parent);
+        assert_eq!([held_rows(&store, root), held_rows(&store, fork)], before);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn a_completed_parent_erasure_keeps_every_dependency_row() {
+        let (store, root, fork) = recorded_lineage();
+        let before = [held_rows(&store, root), held_rows(&store, fork)];
+
+        complete_erasure(&store, root);
+
+        for timeline in [root, fork] {
+            assert_fenced(&store, prefix_scope(timeline, 9));
+        }
+        assert_eq!([held_rows(&store, root), held_rows(&store, fork)], before);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn an_admitted_fork_and_its_parent_keep_every_dependency_row() {
+        let (mut store, root, fork) = recorded_lineage();
+        admit_fork(&mut store, fork);
+        let before = [held_rows(&store, root), held_rows(&store, fork)];
+
+        let refused = store.delete_timeline(fork);
+        let has_forks = store.delete_timeline(root);
+
+        assert!(
+            matches!(refused, Err(CoreError::AdmittedForkNotDeletable(id)) if id == fork),
+            "{refused:?}"
+        );
+        let child_refusal = "cannot delete timeline that still has forks";
+        assert!(
+            matches!(&has_forks, Err(CoreError::Storage(message)) if message == child_refusal),
+            "{has_forks:?}"
+        );
+        assert_eq!([held_rows(&store, root), held_rows(&store, fork)], before);
     }
 
     #[cfg(debug_assertions)]
