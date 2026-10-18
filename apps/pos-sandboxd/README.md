@@ -60,15 +60,17 @@ systemd v260.2 schema. Under ported v260.2 `image_policy_equivalent()` rules,
 the effective image policy must be equivalent to the request or, because
 v260.2 intersects it with a default that carries no filesystem flags, to the
 request with only its filesystem flags removed (proposed ADR-087 #439
-amendment, wiki revision 20). EROFS stays enforced by the SIM1 precheck, the
-reply's `fileSystemType` and kernel readback. Every rejection closes all received descriptors. The result is a
-quarantined root mount, not proof of the image, the mount or its dm-verity
-identity.
+amendment, wiki revision 21). EROFS stays enforced by the SIM1 precheck, the
+reply's `fileSystemType` and kernel readback. Every rejection closes all
+received descriptors. The result is a quarantined root mount, not proof of the
+image, the mount or its dm-verity identity.
 
 `ActivationImage` has no public constructor. Only the #438 held-image
 admission composition may create one, so no caller can activate an unadmitted
 descriptor. Attachment and readback (#440), lifecycle cleanup (#442) and
 packaged-build conformance (#444) remain separate. The provider never creates a
-local process; `provider_process_creation_public` enforces this over the
-provider's production sources, because zbus receives system-bus descriptors
-without `MSG_CMSG_CLOEXEC`.
+local process: `connect_system` accepts only a Unix-socket system-bus address
+(zbus's `unixexec` and `ibus` transports would start one), and
+`provider_process_creation_public` checks the provider's production sources
+and manifests, because zbus receives system-bus descriptors without
+`MSG_CMSG_CLOEXEC`.

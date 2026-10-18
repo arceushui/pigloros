@@ -174,7 +174,11 @@ fn provider_manifests_enable_no_process_runtime() -> TestResult {
         let tokio = dependencies
             .split("\ntokio = ")
             .nth(1)
-            .and_then(|entry| entry.split('}').next())
+            .and_then(|entry| {
+                // An inline table ends at `}`; a plain version string at the line end.
+                let end = if entry.starts_with('{') { '}' } else { '\n' };
+                entry.split(end).next()
+            })
             .unwrap_or_default();
         assert!(
             !tokio.contains("\"process\"") && !dependencies.contains("async-process"),

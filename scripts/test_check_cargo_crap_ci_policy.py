@@ -27,6 +27,7 @@ EXPECTED_TEST_ONLY_EXCLUSIONS = (
     "src/selector/installation/tests/**",
     "src/erasure_tests.rs",
     "src/system_bus/tests.rs",
+    "src/image_activator/tests.rs",
     "src/e2e_determinism.rs",
     "src/action_admission_tests.rs",
 )

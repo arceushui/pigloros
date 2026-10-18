@@ -169,7 +169,8 @@ impl Frame {
 fn receive(socket: &UnixStream, buffer: &mut [u8], frame: &mut Frame) -> io::Result<ReadResult> {
     // Space for one credentials message plus a small descriptor batch, so an
     // unexpected credentials message is decoded rather than only truncated.
-    // Larger batches set MSG_CTRUNC, and any count other than one rejects.
+    // Batches beyond about ten descriptors set MSG_CTRUNC; any received count
+    // other than one is rejected by the reply parser.
     let mut space =
         [MaybeUninit::<u8>::uninit(); rustix::cmsg_space!(ScmRights(1), ScmCredentials(1))];
     let mut control = RecvAncillaryBuffer::new(&mut space);

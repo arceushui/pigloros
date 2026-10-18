@@ -11,7 +11,7 @@
 //! `image_policy_to_string()` never emits those forms, so an honest effective
 //! policy is unaffected.
 //!
-//! Proposed ADR-087 #439 amendment (wiki revision 20): v260.2 mountfsd
+//! Proposed ADR-087 #439 amendment (wiki revision 21): v260.2 mountfsd
 //! returns `image_policy_intersect(default, request)`, and neither default
 //! carries filesystem flags, so the effective policy loses them. The returned
 //! policy is therefore accepted when it is equivalent to the request, or to
@@ -325,6 +325,21 @@ mod tests {
         ] {
             assert!(!matches_requested(rejected), "{rejected}");
         }
+    }
+
+    #[test]
+    fn the_filesystem_mask_is_exactly_the_filesystem_flag_rows() {
+        let filesystems = ["btrfs", "erofs", "ext4", "f2fs", "squashfs", "vfat", "xfs"];
+        let mask = FLAGS
+            .iter()
+            .filter(|(name, _)| filesystems.contains(name))
+            .fold(0, |mask, (_, flag)| union(mask, *flag));
+        assert_eq!(mask, FILESYSTEM_MASK);
+        let others = FLAGS
+            .iter()
+            .filter(|(name, _)| !filesystems.contains(name))
+            .fold(0, |mask, (_, flag)| union(mask, *flag));
+        assert!(!overlaps(others, FILESYSTEM_MASK));
     }
 
     #[test]

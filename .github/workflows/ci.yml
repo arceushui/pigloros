@@ -787,6 +787,7 @@ jobs:
           --exclude 'src/selector/installation/tests/**'
           --exclude 'src/erasure_tests.rs'
           --exclude 'src/system_bus/tests.rs'
+          --exclude 'src/image_activator/tests.rs'
           --exclude 'src/e2e_determinism.rs'
           --exclude 'src/action_admission_tests.rs'
           --format json
@@ -803,6 +804,7 @@ jobs:
           --exclude 'src/selector/installation/tests/**'
           --exclude 'src/erasure_tests.rs'
           --exclude 'src/system_bus/tests.rs'
+          --exclude 'src/image_activator/tests.rs'
           --exclude 'src/e2e_determinism.rs'
           --exclude 'src/action_admission_tests.rs'
           --baseline "${{ runner.temp }}/cargo-crap-baseline.json"

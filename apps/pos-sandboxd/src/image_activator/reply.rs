@@ -5,9 +5,8 @@
 //! fields, `continues`, extra partitions and any descriptor that is not the
 //! single root mount at index 0 are malformed. A well-formed reply whose root
 //! differs from the admitted SIM1 or requested policy is an evidence mismatch.
-//! Optional fields mountfsd may emit are
-//! type-checked only; the provider's own SIM1 and kernel readback remain the
-//! authoritative image evidence.
+//! Optional fields mountfsd may emit are type-checked only; the provider's
+//! own SIM1 and kernel readback remain the authoritative image evidence.
 
 use std::{num::NonZeroU64, os::fd::OwnedFd};
 
