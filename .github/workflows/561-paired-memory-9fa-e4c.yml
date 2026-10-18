@@ -1,0 +1,207 @@
+# Diagnostic only: retain the original required run and benchmark advisories.
+name: 561-paired-memory-9fa-e4c
+
+on:
+  push:
+    branches: [redmine/561-paired-memory-9fa-e4c]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: 561-paired-memory-9fa-e4c-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  paired-measurement:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
+      RUSTFLAGS: -D warnings
+      PIGLOROS_BENCH_SAMPLES: "10"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: 1.97.1
+      - name: Build both frozen binaries, then measure every case in ABBA order
+        run: |
+          set -euo pipefail
+          python3 -B - <<'PY'
+          import hashlib
+          import importlib.util
+          import json
+          import os
+          import pathlib
+          import re
+          import shutil
+          import subprocess
+          import sys
+          import time
+
+          head = "9fa77a49333c6715474899add1c01bfa27b6a6e4"
+          base = "e4c1ae25d48db8e5a51c621543538288c89d1ca3"
+          workspace = pathlib.Path.cwd()
+          root = pathlib.Path(os.environ["RUNNER_TEMP"]) / "561-paired-memory-9fa-e4c"
+          output = workspace / "561-paired-memory-evidence"
+          root.mkdir()
+          output.mkdir()
+          target = root / "target"
+          binaries = root / "binaries"
+          binaries.mkdir()
+          sources = {}
+          toolchain = subprocess.check_output(["rustc", "--version", "--verbose"], text=True)
+          assert toolchain.startswith("rustc 1.97.1 "), toolchain
+          cargo_version = subprocess.check_output(["cargo", "--version", "--verbose"], text=True)
+          allowed_cpus = sorted(os.sched_getaffinity(0))
+          assert allowed_cpus and shutil.which("taskset")
+          cpu = str(allowed_cpus[0])
+          environment = {
+              "run_id": os.environ["GITHUB_RUN_ID"],
+              "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+              "repository": os.environ["GITHUB_REPOSITORY"],
+              "diagnostic_commit": os.environ["GITHUB_SHA"],
+              "head": head,
+              "base": base,
+              "image": os.environ["ImageOS"] + "-" + os.environ["ImageVersion"],
+              "architecture": os.uname().machine,
+              "rustc": toolchain,
+              "cargo": cargo_version,
+              "cpu_inventory": subprocess.check_output(["lscpu"], text=True),
+              "allowed_cpus": allowed_cpus,
+              "measurement_cpu": cpu,
+              "build_jobs": os.environ["CARGO_BUILD_JOBS"],
+              "incremental": os.environ["CARGO_INCREMENTAL"],
+              "rustflags": os.environ["RUSTFLAGS"],
+              "samples_per_case": 10,
+              "order": ["base-first", "head-first", "head-second", "base-last"],
+              "scope": "Diagnostic timing evidence, not required-gate or performance clearance.",
+          }
+          (output / "environment.json").write_text(json.dumps(environment, indent=2) + "\n")
+
+          def git(*arguments):
+              return subprocess.check_output(["git", *arguments], text=True).strip()
+
+          equal_paths = [
+              "Cargo.toml", "rust-toolchain.toml", "crates/pos-core/Cargo.toml",
+              "crates/pos-crypto/Cargo.toml", "crates/pos-store/Cargo.toml",
+              "crates/pos-store/benches/memory_erasure.rs",
+              "crates/pos-core/tests/support/erasure.rs",
+              "scripts/compare_memory_store_benchmarks.py",
+          ]
+          equal_blobs = {path: git("rev-parse", base + ":" + path) for path in equal_paths}
+          assert all(git("rev-parse", head + ":" + path) == sha for path, sha in equal_blobs.items())
+          (output / "equal-inputs.json").write_text(json.dumps(equal_blobs, indent=2) + "\n")
+
+          # Build both sources before timing. Preserve each executable outside
+          # the shared target directory so the second build cannot replace it.
+          for label, commit in [("base", base), ("head", head)]:
+              source = root / label
+              subprocess.run(["git", "worktree", "add", "--detach", str(source), commit], check=True)
+              assert git("-C", str(source), "rev-parse", "HEAD") == commit
+              assert not git("-C", str(source), "status", "--porcelain")
+              command = ["cargo", "bench", "--locked", "-p", "pos-store", "--bench",
+                         "memory_erasure", "--no-run", "--message-format=json"]
+              log = output / (label + "-build.log")
+              env = dict(os.environ, CARGO_TARGET_DIR=str(target))
+              started = time.monotonic()
+              with log.open("wb") as stream:
+                  subprocess.run(command, cwd=source, env=env, stdout=stream,
+                                 stderr=subprocess.STDOUT, check=True, timeout=600)
+              artifacts = []
+              for line in log.read_text().splitlines():
+                  if line.startswith("{"):
+                      message = json.loads(line)
+                      if (message.get("reason") == "compiler-artifact"
+                              and message.get("target", {}).get("name") == "memory_erasure"
+                              and message.get("executable")):
+                          artifacts.append(pathlib.Path(message["executable"]).resolve())
+              assert len(artifacts) == 1, artifacts
+              assert artifacts[0].is_file() and artifacts[0].is_relative_to(target)
+              executable = binaries / label
+              shutil.copy2(artifacts[0], executable)
+              assert not git("-C", str(source), "status", "--porcelain")
+              sources[label] = {
+                  "commit": commit, "tree": git("-C", str(source), "rev-parse", "HEAD^{tree}"),
+                  "build_seconds": time.monotonic() - started,
+                  "build_command": command, "executable": str(executable),
+                  "binary_sha256": hashlib.sha256(executable.read_bytes()).hexdigest(),
+                  "build_log_sha256": hashlib.sha256(log.read_bytes()).hexdigest(),
+              }
+              (output / "builds.json").write_text(json.dumps(sources, indent=2) + "\n")
+
+          spec = importlib.util.spec_from_file_location(
+              "paired_benchmark_contract", root / "head/scripts/compare_memory_store_benchmarks.py")
+          contract = importlib.util.module_from_spec(spec)
+          sys.modules[spec.name] = contract
+          spec.loader.exec_module(contract)
+          assert len(contract.EXPECTED_INVENTORY) == 14 and contract.SAMPLE_COUNT == 10
+          datasets = {}
+          measurements = []
+          for arm, label in [("base-first", "base"), ("head-first", "head"),
+                             ("head-second", "head"), ("base-last", "base")]:
+              built = sources[label]
+              executable = pathlib.Path(built["executable"])
+              assert hashlib.sha256(executable.read_bytes()).hexdigest() == built["binary_sha256"]
+              csv_path = output / (arm + ".csv")
+              log = output / (arm + ".log")
+              env = dict(os.environ, PIGLOROS_BENCH_OUTPUT=str(csv_path))
+              started = time.monotonic()
+              with log.open("wb") as stream:
+                  subprocess.run(["taskset", "--cpu-list", cpu, str(executable)],
+                                 cwd=root / label, env=env, stdout=stream, stderr=subprocess.STDOUT,
+                                 check=True, timeout=120)
+              dataset = contract.parse_benchmark_csv(csv_path.read_text())
+              summaries = re.findall(
+                  r"^scenario=(\S+) cardinality=(\d+) samples=(\d+) median_ns=(\d+) p95_ns=(\d+)$",
+                  log.read_text(), re.MULTILINE)
+              actual = [(key.scenario, str(key.cardinality), "10",
+                         str(dataset.statistics(key).median_ns), str(dataset.statistics(key).p95_ns))
+                        for key in contract.EXPECTED_INVENTORY]
+              assert len(summaries) == 14 and sorted(summaries) == sorted(actual)
+              datasets[arm] = dataset
+              measurements.append({
+                  "arm": arm, "source": built["commit"], "binary_sha256": built["binary_sha256"],
+                  "seconds": time.monotonic() - started, "case_count": len(actual), "sample_count": 140,
+                  "csv_sha256": hashlib.sha256(csv_path.read_bytes()).hexdigest(),
+                  "log_sha256": hashlib.sha256(log.read_bytes()).hexdigest(),
+              })
+              (output / "measurements.json").write_text(json.dumps(measurements, indent=2) + "\n")
+
+          comparisons = []
+          pairs = [(a, b) for a in ["base-first", "base-last"]
+                   for b in ["head-first", "head-second"]]
+          pairs += [("base-first", "base-last"), ("head-first", "head-second")]
+          for baseline, current in pairs:
+              for row in contract.compare_datasets(datasets[baseline], datasets[current]):
+                  comparison = {
+                      "baseline_arm": baseline, "current_arm": current,
+                      "scenario": row.key.scenario, "cardinality": row.key.cardinality,
+                      "baseline_median_ns": row.baseline.median_ns, "median_ns": row.current.median_ns,
+                      "delta": contract.percentage_delta(row.baseline.median_ns, row.current.median_ns),
+                      "original_policy_advisory": row.warning,
+                  }
+                  comparisons.append(comparison)
+                  print(json.dumps(comparison), flush=True)
+          assert len(measurements) == 4 and sum(m["sample_count"] for m in measurements) == 560
+          assert len(comparisons) == 84
+          report = {
+              "measurement_complete": True, "native_arms": measurements, "comparisons": comparisons,
+              "limits": "All560 samples retained. Same-runner ABBA controls source/order partly, not CPU frequency, ASLR or statistical certainty. Original hosted advisories remain; no native gate or performance clearance inferred.",
+          }
+          (output / "report.json").write_text(json.dumps(report, indent=2) + "\n")
+          print("Measured all4 ABBA arms/all14 cases/all560 samples; this is diagnostic evidence only.")
+          PY
+      - name: Retain every build log, raw sample, comparison and failure
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: 561-paired-memory-9fa-e4c-${{ github.run_id }}-${{ github.run_attempt }}
+          path: 561-paired-memory-evidence/
+          if-no-files-found: error
+          retention-days: 14
