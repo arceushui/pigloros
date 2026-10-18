@@ -110,26 +110,29 @@ device creation itself is not portable on GitHub's hosted GPU-less runners.
 
 ## Resource-intensive sanitizer jobs
 
-The complete workspace ASan gate retains all features and test targets, but
-partitions their execution across six hosted shards because Cargo runs separate
-test executables serially. The `bundle-coverage` and `bundle-public` shards run
-the two `pos-conformance` bundle integration targets independently. The
-`moat-proof` shard runs the slow moat integration target independently.
+The complete workspace ASan gate retains all features and test targets. The
+standard-stage `asan-build` job compiles every workspace test target once with
+`cargo nextest archive` and uploads the archive; six hosted shards download it
+and run tests without compiling. The `bundle-coverage` and `bundle-public`
+shards run the two `pos-conformance` bundle integration targets independently.
+The `moat-proof` shard runs the slow moat integration target independently.
 `remainder-1` and `remainder-2` use cargo-nextest's disjoint `slice:1/2` and
-`slice:2/2` partitions over `--workspace --exclude pos-conformance --tests`;
-`remainder-1` also runs the `pos-conformance` library, binaries, and the
-profile/provider integration targets. Each shard serializes Cargo build/link
-jobs and bounds test threads at two, including the explicit cargo-nextest
-`--test-threads 2` cap. The two long remainder shards are scheduled first
-under the five-runner cap, so both begin together while the short moat shard
-waits. The required
-`asan (address sanitizer)` aggregate runs with `always()` and succeeds only when
-every shard succeeds. Partitioning reduces wall-clock time by repeating setup
-and build work on independent runners; it does not remove a package, feature,
-test target, sanitizer, or coverage requirement. ASan plus
+`slice:2/2` partitions over `not package(pos-conformance)`; `remainder-1` also
+runs the `pos-conformance` library, binaries, and the profile/provider
+integration targets. Each shard bounds test threads at two through the explicit
+cargo-nextest `--test-threads 2` cap. The two long remainder shards are
+scheduled first under the five-runner cap, so both begin together while the
+short moat shard waits. The required `asan (address sanitizer)` aggregate runs
+with `always()` and succeeds only when the archive build and every shard
+succeed. Partitioning reduces wall-clock time; it does not remove a package,
+feature, test target, sanitizer, or coverage requirement. ASan plus
 `build-std` produces unusually large test-binary links; concurrent lld workers
 can exhaust the runner's available resources and crash with `SIGBUS` before any
-test executes.
+test executes. The archive build therefore compiles crates four at a time
+(`CARGO_BUILD_JOBS=4`) while `scripts/asan/serial-link.sh` holds one lock
+around every link, so at most one link runs at once. A hosted probe on the
+4-core, 16 GB ubuntu-24.04 runner measured 1937 s fully serialized versus 861 s
+with serialized links, peaking at 5.5 GB memory with about 54 GB disk free.
 
 The ASan nextest commands pin cargo-nextest 0.9.146, disable user
 configuration, and ignore any profile default filter. Repository
@@ -157,15 +160,15 @@ backtraces without full type and variable metadata. This changes artifact size
 only; sanitizer instrumentation, debug assertions, packages, features, test
 targets, and execution scope remain.
 
-`scripts/check_asan_ci_policy.py` enforces the exact shard matrix, target
-partition, per-shard resource settings, fail-closed aggregate, and complete
-ASan scope by parsing the workflow's executable YAML semantics. Adversarial
-fixtures prove that disabled/non-failing steps, environment-based test runners,
-detached sanitizer flags, `--no-run`, shell success overrides, skipped
-prerequisites, injected setup steps, and test-skip arguments are rejected. The
-ASan job graph and pinned setup-step sequence must match exactly, and each test
-step may contain only `name`, `env`, and `run` so it cannot select a nested
-Cargo configuration.
+`scripts/check_asan_ci_policy.py` enforces the exact archive-build job and
+serial linker wrapper, shard matrix and filtersets, test-thread cap,
+fail-closed aggregate, and complete ASan scope by parsing the workflow's
+executable YAML semantics. Adversarial fixtures prove that disabled/non-failing
+steps, environment-based test runners, detached sanitizer flags, `--no-run`,
+shell success overrides, skipped prerequisites, injected setup steps, and
+test-skip arguments are rejected. The ASan job graph and pinned setup-step
+sequence must match exactly, and each test step may contain only `name`, `env`,
+and `run` so it cannot select a nested Cargo configuration.
 
 ### Controlled Bevy reflection metadata roots
 
