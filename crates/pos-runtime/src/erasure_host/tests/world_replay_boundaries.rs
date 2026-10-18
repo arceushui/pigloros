@@ -7,6 +7,43 @@ use std::{cell::Cell, time::Duration};
 mod lineage_budget;
 
 #[test]
+fn fault_store_preserves_native_authority_denial_and_latched_budget_precedence() {
+    use pos_store::{ForkReplayAuthorityReadErrorV1 as ReadError, ForkReplayReadLimitsV1};
+
+    let store = fault_store(FaultModeV1::Passthrough);
+    // A structural coordinate with no publication is a real denial, not
+    // fabricated successful imported authority.
+    let requirement = test_ok(pos_store::ForkReplayRequirementV1::new(
+        TimelineId::new(),
+        Seq::ZERO,
+        Hash::from_bytes([0x96; 32]),
+        None,
+    ));
+    let limits = test_ok(ForkReplayReadLimitsV1::new(8, 128, 512, 16_384, 1_000_000));
+    let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+    let start = clock.mark();
+    let mut budget = test_ok(ForkReplayReadBudgetV1::new(limits, start, &mut clock));
+    assert_eq!(
+        store
+            .validate_fork_replay_authority(&requirement, &mut budget)
+            .err(),
+        Some(ReadError::CorruptAuthority),
+    );
+    test_ok(budget.check_time());
+    assert_eq!(
+        budget.charge_bytes(limits.max_native_bytes() + 1),
+        Err(ReadError::BoundsExceeded),
+    );
+    assert_eq!(
+        store
+            .validate_fork_replay_authority(&requirement, &mut budget)
+            .err(),
+        Some(ReadError::BoundsExceeded),
+    );
+    assert_eq!(budget.check_time(), Err(ReadError::BoundsExceeded));
+}
+
+#[test]
 fn every_prepared_event_bound_must_be_independently_finite() {
     let (mut host, closure) = world_replay_host(WorldReplayVerifierModeV1::Exact);
     let requested = replay_use(&closure);
