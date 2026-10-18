@@ -19,10 +19,17 @@ use std::{
 
 type TestResult = Result<(), Box<dyn Error>>;
 
-/// Process-creation APIs, renamed or grouped `std::process` imports, and
+/// Process-creation APIs, renamed or grouped `std::process` imports, zbus's
+/// unchecked system-bus address (`unixexec` and `ibus` start processes), and
 /// zlink's non-atomic Unix stream.
-const FORBIDDEN: [&str; 15] = [
+const FORBIDDEN: [&str; 21] = [
     "process::Command",
+    "libc::fork",
+    "libc::exec",
+    "libc::system",
+    "libc::popen",
+    "libc::clone",
+    "Connection::system()",
     "process as",
     "process::{",
     "Command::new",

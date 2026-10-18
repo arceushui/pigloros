@@ -35,6 +35,7 @@ const ROOT_SIZE: u64 = 8_388_608;
 struct Chunk {
     bytes: Vec<u8>,
     descriptors: usize,
+    extra: Vec<OwnedFd>,
 }
 
 /// What the fake mountfsd observed and returned.
@@ -102,7 +103,11 @@ fn message(reply: &Value) -> Result<Vec<u8>, BoxError> {
 }
 
 fn single(bytes: Vec<u8>, descriptors: usize) -> Vec<Chunk> {
-    vec![Chunk { bytes, descriptors }]
+    vec![Chunk {
+        bytes,
+        descriptors,
+        extra: Vec::new(),
+    }]
 }
 
 fn receive_call(socket: &StdUnixStream) -> Result<(Value, Vec<OwnedFd>), BoxError> {
@@ -136,7 +141,11 @@ fn send_chunk(socket: &StdUnixStream, chunk: &Chunk, root: &File) -> TestResult 
     let descriptors = (0..chunk.descriptors)
         .map(|_| root.try_clone().map(OwnedFd::from))
         .collect::<Result<Vec<_>, _>>()?;
-    let borrowed: Vec<BorrowedFd<'_>> = descriptors.iter().map(AsFd::as_fd).collect();
+    let borrowed: Vec<BorrowedFd<'_>> = descriptors
+        .iter()
+        .chain(&chunk.extra)
+        .map(AsFd::as_fd)
+        .collect();
     let mut space = vec![MaybeUninit::<u8>::uninit(); rustix::cmsg_space!(ScmRights(32))];
     let mut control = SendAncillaryBuffer::new(&mut space);
     if !borrowed.is_empty() && !control.push(SendAncillaryMessage::ScmRights(&borrowed)) {
@@ -237,13 +246,13 @@ async fn one_call_sends_the_held_image_and_returns_one_sealed_root_mount() -> Te
         })
     );
     assert_eq!(transaction.observed.images, vec![transaction.held]);
-    let mount = transaction.outcome?;
-    assert_eq!(identity(&mount._mount)?, transaction.observed.root);
-    assert!(fcntl_getfd(&mount._mount)?.contains(FdFlags::CLOEXEC));
+    let QuarantinedRootMount { _mount: mount } = transaction.outcome?;
+    assert_eq!(identity(&mount)?, transaction.observed.root);
+    assert!(fcntl_getfd(&mount)?.contains(FdFlags::CLOEXEC));
     // The sealed descriptor is not inherited across exec; an unsealed
     // duplicate of the same mount is, which shows the probe can observe it.
-    assert!(!inherited_by_child(mount._mount.as_raw_fd())?);
-    let unsealed = dup(&mount._mount)?;
+    assert!(!inherited_by_child(mount.as_raw_fd())?);
+    let unsealed = dup(&mount)?;
     assert!(inherited_by_child(unsealed.as_raw_fd())?);
     Ok(())
 }
@@ -331,6 +340,8 @@ async fn a_root_other_than_the_admitted_signed_erofs_root_is_an_evidence_mismatc
         "root=signed+erofs+squashfs:=absent",
         "root=verity:=absent",
         "root=signed+read-only-on:=absent",
+        "root=signed+growfs-on:=absent",
+        "root=signed+unused:=absent",
         "root=signed:usr=signed:=absent",
         "root=signed:root-verity=absent:=absent",
         "root=signed:=ignore",
@@ -381,10 +392,12 @@ async fn every_descriptor_vector_other_than_one_root_mount_is_rejected() -> Test
         Chunk {
             bytes: reply[..16].to_vec(),
             descriptors: 1,
+            extra: Vec::new(),
         },
         Chunk {
             bytes: reply[16..].to_vec(),
             descriptors: 1,
+            extra: Vec::new(),
         },
     ];
     assert_eq!(
@@ -401,13 +414,55 @@ async fn one_descriptor_in_a_later_read_is_still_the_one_vector() -> TestResult 
         Chunk {
             bytes: reply[..16].to_vec(),
             descriptors: 0,
+            extra: Vec::new(),
         },
         Chunk {
             bytes: reply[16..].to_vec(),
             descriptors: 1,
+            extra: Vec::new(),
         },
     ];
     assert!(transact(later).await?.outcome.is_ok());
+    Ok(())
+}
+
+/// A pipe whose write ends the fake mountfsd sends; the read end sees EOF
+/// only once the client has closed every received copy.
+fn closure_probe(copies: usize) -> Result<(std::io::PipeReader, Vec<OwnedFd>), BoxError> {
+    let (reader, writer) = std::io::pipe()?;
+    let writers = (0..copies)
+        .map(|_| writer.try_clone().map(OwnedFd::from))
+        .collect::<Result<Vec<_>, _>>()?;
+    rustix::fs::fcntl_setfl(&reader, rustix::fs::OFlags::NONBLOCK)?;
+    Ok((reader, writers))
+}
+
+#[tokio::test]
+async fn every_rejected_descriptor_is_closed() -> TestResult {
+    let valid = message(&valid_reply())?;
+    let mismatch = message(&with(|reply| root_field(reply, "size", json!(1))))?;
+    let rejected = message(&json!({"error": "io.systemd.MountFileSystem.VerityFailure"}))?;
+    let cases = [
+        (valid.clone(), 2, ImageActivationError::MalformedReply),
+        (valid, 16, ImageActivationError::MalformedReply),
+        (mismatch, 1, ImageActivationError::EvidenceMismatch),
+        (rejected, 1, ImageActivationError::MethodRejected),
+    ];
+    for (bytes, copies, expected) in cases {
+        let (mut reader, extra) = closure_probe(copies)?;
+        let script = vec![Chunk {
+            bytes,
+            descriptors: 0,
+            extra,
+        }];
+        assert_eq!(transact(script).await?.outcome.err(), Some(expected));
+        let mut byte = [0_u8; 1];
+        assert_eq!(
+            std::io::Read::read(&mut reader, &mut byte)?,
+            0,
+            "{expected}"
+        );
+    }
     Ok(())
 }
 

@@ -27,13 +27,21 @@ async fn system_bus_connection_failure_is_classified() -> Result<(), Box<dyn Err
         return Ok(());
     }
 
-    let status = Command::new(std::env::current_exe()?)
-        .args(["--exact", "system_bus_connection_failure_is_classified"])
-        .env(CONNECT_FAILURE_CHILD, "1")
-        .env("DBUS_SYSTEM_BUS_ADDRESS", "unix:path=/dev/null")
-        .status()?;
-    if !status.success() {
-        return Err("connection-failure child test failed".into());
+    // An unusable Unix socket, then transports that would start a local
+    // process: none may connect, and no command may run.
+    for address in [
+        "unix:path=/dev/null",
+        "unixexec:path=/bin/true",
+        "tcp:host=127.0.0.1,port=1",
+    ] {
+        let status = Command::new(std::env::current_exe()?)
+            .args(["--exact", "system_bus_connection_failure_is_classified"])
+            .env(CONNECT_FAILURE_CHILD, "1")
+            .env("DBUS_SYSTEM_BUS_ADDRESS", address)
+            .status()?;
+        if !status.success() {
+            return Err(format!("connection-failure child test failed for {address}").into());
+        }
     }
     Ok(())
 }
