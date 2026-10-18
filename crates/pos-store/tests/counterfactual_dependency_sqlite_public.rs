@@ -25,12 +25,13 @@ use pos_core::{
     DependencyEdgeRecordV1, DependencyNodeCoordinateV1, DependencyNodeRecordV1,
     DependencyPageCursorV1, DependencyPageRequestV1, DependencyPageV1, DependencyPagedRowV1,
     DependencyReadScopeV1, EntityId, ErasureContainmentGateV1, ErasureInventoryPersistencePortV1,
-    ErasureProtectedEffectDispositionV1, EventDraft, EventStore, FactualCutV1, FactualHeadV1,
-    FactualOwnerIdV1, FactualPrefixReadPortV1, ForkGenerationV1, Hash, InvalidationConflictV1,
-    Kind, PipelineDraftBatchV1, RecomputationFrontierBytesV1, RecordedDependencyClassV1,
-    RecordedNodeOriginV1, RecordedSetCountsV1, Seq, SuffixInvalidationBytesV1,
-    TickDependencyRecordV1, TimelineId, TimelineMeta, MAX_DEPENDENCY_PAGE_ROWS_V1,
-    MAX_RECORDED_DEPENDENCY_EDGES_V1, MAX_RECORDED_DEPENDENCY_NODES_V1,
+    ErasureLifecycleV1, ErasureProtectedEffectDispositionV1, EventDraft, EventStore, FactualCutV1,
+    FactualHeadV1, FactualOwnerIdV1, FactualPrefixReadPortV1, ForkGenerationV1, Hash,
+    InvalidationConflictV1, Kind, PipelineDraftBatchV1, RecomputationFrontierBytesV1,
+    RecordedDependencyClassV1, RecordedNodeOriginV1, RecordedSetCountsV1, Seq,
+    SuffixInvalidationBytesV1, TickDependencyRecordV1, TimelineId, TimelineMeta,
+    MAX_DEPENDENCY_PAGE_ROWS_V1, MAX_RECORDED_DEPENDENCY_EDGES_V1,
+    MAX_RECORDED_DEPENDENCY_NODES_V1,
 };
 use pos_store::sqlite::SqliteStore;
 use tempfile::{tempdir, TempDir};
@@ -1944,6 +1945,121 @@ fn c12_a_failed_purge_statement_leaves_every_row_and_no_marker() {
     let mut recovered = open(&fixture.path);
     assert_ok(recovered.delete_timeline(fork));
     assert_eq!(recorded_rows(&fixture.path, fork), [0; 3]);
+}
+
+// ADR-060, 2026-10-18 amendment: dependency rows of Timelines that are never
+// deleted. Erasure fences the rows but never removes them, and only an
+// administrative delete purges them. Raw counts are read after the store is
+// dropped.
+
+/// The child-Fork refusal of the generic delete.
+const HAS_FORKS: &str = "cannot delete timeline that still has forks";
+
+/// Every dependency row of one Timeline: [`recorded_rows`] then
+/// [`factual_rows`].
+fn dependency_rows(path: &Path, timeline: TimelineId) -> Vec<i64> {
+    let mut rows = recorded_rows(path, timeline).to_vec();
+    rows.extend(factual_rows(path, timeline));
+    rows
+}
+
+/// The dependency rows of the root, then of the Fork.
+fn held_rows(fixture: &Fixture) -> [Vec<i64>; 2] {
+    let rows = |timeline| dependency_rows(&fixture.path, timeline);
+    [rows(fixture.root), rows(fixture.fork)]
+}
+
+/// A recorded fixture whose root also holds one committed prefix Tick.
+fn retained_fixture() -> Fixture {
+    let fixture = recorded_fixture();
+    seed_prefix(&fixture.path, fixture.root, &[lone(&coord(3, "p", 71))]);
+    assert_eq!(recorded_rows(&fixture.path, fixture.root), [1, 1, 0]);
+    assert_eq!(recorded_rows(&fixture.path, fixture.fork), [1, 2, 1]);
+    fixture
+}
+
+#[test]
+fn c12_a_fail_closed_gate_refuses_the_delete_and_keeps_every_row() {
+    let fixture = retained_fixture();
+    let before = held_rows(&fixture);
+    let fail_closed = Arc::new(ErasureContainmentGateV1::new_fail_closed());
+    let mut store = open_with_gate(&fixture.path, &fail_closed);
+    for timeline in [fixture.fork, fixture.root] {
+        let refused = err(store.delete_timeline(timeline));
+        assert!(
+            matches!(refused, CoreError::ErasureContainmentUnavailable),
+            "{refused:?}"
+        );
+    }
+    // A fail-closed store with an unbound inventory refuses port reads too,
+    // so the rows are counted in the file.
+    drop(store);
+    assert_eq!(held_rows(&fixture), before);
+}
+
+#[test]
+fn c9_a_completed_fork_erasure_fences_the_fork_but_not_its_parent() {
+    let fixture = retained_fixture();
+    let (fork, root) = (fixture.fork, fixture.root);
+    let before = held_rows(&fixture);
+    let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
+    let store = open_with_gate(&fixture.path, &gate);
+    assert_eq!(counts(&store, fork_scope(fork, 1)), [Ok(2), Ok(1)]);
+    let parent = counts(&store, prefix_scope(root, 9));
+    assert_eq!(parent, [Ok(1), Ok(0)]);
+    assert_eq!(
+        gate.complete_timeline_erasure_for_test(fork),
+        Ok(ErasureLifecycleV1::Complete)
+    );
+    for scope in [fork_scope(fork, 1), prefix_scope(fork, 9)] {
+        assert_eq!(counts(&store, scope), FAILED, "{scope:?}");
+    }
+    // The Fork's request does not fence its parent's own prefix.
+    assert_eq!(counts(&store, prefix_scope(root, 9)), parent);
+    drop(store);
+    assert_eq!(held_rows(&fixture), before);
+}
+
+#[test]
+fn c9_a_completed_parent_erasure_fences_its_prefix_and_the_inherited_one() {
+    let fixture = retained_fixture();
+    let (fork, root) = (fixture.fork, fixture.root);
+    let before = held_rows(&fixture);
+    let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
+    let store = open_with_gate(&fixture.path, &gate);
+    assert_eq!(
+        gate.complete_timeline_erasure_for_test(root),
+        Ok(ErasureLifecycleV1::Complete)
+    );
+    for timeline in [root, fork] {
+        let scope = prefix_scope(timeline, 9);
+        assert_eq!(counts(&store, scope), FAILED, "{scope:?}");
+    }
+    drop(store);
+    assert_eq!(held_rows(&fixture), before);
+}
+
+#[test]
+fn c12_an_admitted_fork_and_its_parent_keep_every_row() {
+    let fixture = retained_fixture();
+    let (fork, root) = (fixture.fork, fixture.root);
+    let admission = "INSERT INTO fork_admissions (child_id, far1_cbor) VALUES";
+    let insert = format!("{admission} ('{fork}', X'00');");
+    assert_ok(execute(&fixture.path, &insert));
+    let before = held_rows(&fixture);
+    let mut store = open(&fixture.path);
+    let refused = err(store.delete_timeline(fork));
+    assert!(
+        matches!(refused, CoreError::AdmittedForkNotDeletable(id) if id == fork),
+        "{refused:?}"
+    );
+    let has_forks = err(store.delete_timeline(root));
+    assert!(
+        matches!(&has_forks, CoreError::Storage(message) if message == HAS_FORKS),
+        "{has_forks:?}"
+    );
+    drop(store);
+    assert_eq!(held_rows(&fixture), before);
 }
 
 #[test]
