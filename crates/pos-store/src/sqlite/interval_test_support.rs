@@ -77,8 +77,85 @@ fn observer_error(_: rusqlite::Error) -> CoreError {
 
 #[cfg(test)]
 mod tests {
-    use super::observer_error;
+    use super::{observer_error, IntervalConnectionV1, SqliteStore, TransactionOperation};
     use pos_core::CoreError;
+    use std::{
+        error::Error,
+        sync::{Arc, Mutex},
+    };
+
+    #[test]
+    fn native_observer_covers_both_connection_shapes_and_can_refuse_begin(
+    ) -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("native-interval-observer.sqlite");
+        let path = path.to_str().ok_or("fixture path")?;
+        let writer = SqliteStore::open(path)?;
+        let reader = SqliteStore::open_read_only(path)?;
+        assert!(writer.writer_reservation_connection.is_none());
+        assert!(reader.writer_reservation_connection.is_some());
+        for store in [&writer, &reader] {
+            let mut connections = vec![(
+                &store.conn,
+                if store.writer_reservation_connection.is_some() {
+                    IntervalConnectionV1::Reader
+                } else {
+                    IntervalConnectionV1::Writer
+                },
+            )];
+            if let Some(connection) = &store.writer_reservation_connection {
+                connections.push((connection, IntervalConnectionV1::Writer));
+            }
+            for allow_begin in [true, false] {
+                let observed = Arc::new(Mutex::new(Vec::new()));
+                let callback_observed = Arc::clone(&observed);
+                store.observe_interval_transactions_for_test(Arc::new(
+                    move |connection, operation| {
+                        let Ok(mut observed) = callback_observed.lock() else {
+                            return false;
+                        };
+                        observed.push((connection, operation));
+                        allow_begin || operation != TransactionOperation::Begin
+                    },
+                ))?;
+                let mut expected = Vec::new();
+                for &(connection, kind) in &connections {
+                    assert_eq!(
+                        connection.query_row("SELECT 7", [], |row| row.get::<_, i64>(0))?,
+                        7
+                    );
+                    let began = connection.execute_batch("BEGIN DEFERRED");
+                    expected.push((kind, TransactionOperation::Begin));
+                    if allow_begin {
+                        began?;
+                        connection.execute_batch("ROLLBACK")?;
+                        expected.push((kind, TransactionOperation::Rollback));
+                    } else {
+                        assert!(began.is_err());
+                    }
+                    assert!(connection.is_autocommit());
+                }
+                assert_eq!(*observed.lock().map_err(|_| "observer poisoned")?, expected);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn nonblocking_test_writer_clears_the_actual_native_busy_timeout() -> Result<(), Box<dyn Error>>
+    {
+        let store = SqliteStore::open(":memory:")?;
+        let initial: i64 = store
+            .conn
+            .query_row("PRAGMA busy_timeout", [], |row| row.get(0))?;
+        assert!(initial > 0);
+        store.use_nonblocking_writer_for_test()?;
+        let actual: i64 = store
+            .conn
+            .query_row("PRAGMA busy_timeout", [], |row| row.get(0))?;
+        assert_eq!(actual, 0);
+        Ok(())
+    }
 
     #[test]
     fn observer_error_mapping_does_not_expose_native_diagnostics() {

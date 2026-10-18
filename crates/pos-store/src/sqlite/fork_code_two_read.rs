@@ -659,6 +659,86 @@ mod tests {
     }
 
     #[test]
+    fn retained_key_raw_caps_are_inclusive_before_strict_record_decoding() -> Fallible<()> {
+        let fixture = fixture(true)?;
+        let import = fixture
+            .admission
+            .as_ref()
+            .map_err(|_| "fixture admission")?
+            .import()
+            .ok_or("fixture imported identity")?;
+        let (original_record, original_tombstone): (Vec<u8>, Option<Vec<u8>>) =
+            fixture.store.conn.query_row(
+                "SELECT ikr1_cbor, ikt1_cbor FROM imported_fork_key_evidence",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+        for (record_column, sql, maximum) in [
+            (
+                true,
+                "UPDATE imported_fork_key_evidence SET ikr1_cbor = ?1",
+                pos_core::MAX_IMPORTED_KEY_RECORD_BYTES_V1,
+            ),
+            (
+                false,
+                "UPDATE imported_fork_key_evidence SET ikt1_cbor = ?1",
+                pos_core::MAX_IMPORTED_KEY_TOMBSTONE_BYTES_V1,
+            ),
+        ] {
+            for length in [maximum - 1, maximum, maximum + 1] {
+                fixture.store.conn.execute_batch("SAVEPOINT raw_key_cap")?;
+                let changed = vec![0; length];
+                assert_eq!(fixture.store.conn.execute(sql, [&changed])?, 1);
+                let record = if record_column {
+                    &changed
+                } else {
+                    &original_record
+                };
+                let tombstone = if record_column {
+                    original_tombstone.as_deref()
+                } else {
+                    Some(changed.as_slice())
+                };
+                let bytes = record.len() + tombstone.map_or(0, <[u8]>::len);
+                let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+                let start = clock.mark();
+                let limits = ForkReplayReadLimitsV1::new(1, 1, 2, bytes, 1_000_000)?;
+                let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+                // Impossible durable bytes isolate the raw probe/fetch owner;
+                // passing its inclusive cap does not authenticate an IKR1/IKT1.
+                let actual = retained_key_bytes_with_context(
+                    &fixture.store.conn,
+                    import,
+                    &mut NativeReadContextV1::protected(&mut budget),
+                );
+                if length <= maximum {
+                    let actual = actual?;
+                    assert_eq!(&actual.record, record);
+                    assert_eq!(actual.tombstone.as_deref(), tombstone);
+                    assert_eq!(budget.remaining_native_bytes(), 0);
+                } else {
+                    assert!(matches!(actual, Err(PublicationSourceErrorV1::Invalid)));
+                    assert_eq!(budget.remaining_native_bytes(), bytes);
+                }
+                budget.check_time()?;
+                fixture
+                    .store
+                    .conn
+                    .execute_batch("ROLLBACK TO raw_key_cap; RELEASE raw_key_cap")?;
+            }
+        }
+        assert_eq!(
+            sqlite_retained_key_evidence(
+                &fixture.store.conn,
+                &fixture.admission,
+                &mut NativeReadContextV1::ordinary(),
+            )?,
+            fixture.expected,
+        );
+        Ok(())
+    }
+
+    #[test]
     fn retained_key_type_and_cap_failures_precede_raw_copies() -> Fallible<()> {
         for (sql, maximum) in [
             (
