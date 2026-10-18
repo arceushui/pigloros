@@ -220,6 +220,43 @@ mod tests {
     }
 
     #[test]
+    fn admission_caps_are_inclusive_before_malformed_input_precharges() -> Fallible<()> {
+        let (local, imported) = records()?;
+        let creator_bytes = local.input().creator.as_str().len();
+        for (codec, valid) in [
+            (Codec::Local, local.to_canonical_cbor()),
+            (Codec::Imported, imported.to_canonical_cbor()),
+        ] {
+            for (length, charge) in [
+                (
+                    MAX_FORK_ADMISSION_RECORD_BYTES_V1,
+                    MAX_FORK_ADMISSION_RECORD_BYTES_V1 + creator_bytes,
+                ),
+                (MAX_FORK_ADMISSION_RECORD_BYTES_V1 + 1, 0),
+            ] {
+                // Padding is corrupt native encoding, not an admitted FAR1.
+                // Within the inclusive transport cap, its bounded creator
+                // and equality-buffer precharges still precede Core refusal.
+                let mut malformed = valid.clone();
+                malformed.resize(length, 0);
+                assert!(!codec.accepts(&malformed));
+                let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+                let started = clock.mark();
+                let limits = ForkReplayReadLimitsV1::new(1, 1, 1, 8_192, 1_000_000)?;
+                let mut budget = ForkReplayReadBudgetV1::new(limits, started, &mut clock)?;
+                assert_eq!(
+                    codec.decode(&malformed, &mut NativeReadContextV1::protected(&mut budget)),
+                    Err(Error::PublicationConflict),
+                );
+                assert_eq!(budget.remaining_native_bytes(), limits.max_native_bytes() - charge);
+                assert_eq!(budget.check_time(), Ok(()));
+                codec.decode(&valid, &mut NativeReadContextV1::protected(&mut budget))?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn principal_binding_carrier_preserves_native_local_rejection_and_allocation_units(
     ) -> Fallible<()> {
         use pos_core::{
