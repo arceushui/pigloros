@@ -568,6 +568,48 @@ fn rejects_unknown_roles_malformed_fields_and_tampering() -> TestResult {
 }
 
 #[test]
+fn trust_snapshot_bounds_each_kernel_key_description() -> TestResult {
+    let root = SigningKey::from_bytes(&[1; 32]);
+    // The kernel key description is non-empty, control-free and at most 4095 bytes.
+    let longest = "k".repeat(4095);
+    SandboxTrustSnapshot::authenticate(
+        &sign_trust_snapshot(snapshot(vec![], vec![certificate(&longest)], "root"), &root)?,
+        "root",
+        &root.verifying_key(),
+    )?;
+    // Unicode Cc spans U+0000-U+001F and U+007F-U+009F; U+00A0 is not Cc.
+    SandboxTrustSnapshot::authenticate(
+        &sign_trust_snapshot(
+            snapshot(vec![], vec![certificate("fixture:\u{a0}03")], "root"),
+            &root,
+        )?,
+        "root",
+        &root.verifying_key(),
+    )?;
+    for description in [
+        String::new(),
+        "fixture:\n03".to_owned(),
+        "fixture:\u{7f}03".to_owned(),
+        "fixture:\u{80}03".to_owned(),
+        "fixture:\u{9f}03".to_owned(),
+        "k".repeat(4096),
+    ] {
+        assert_eq!(
+            SandboxTrustSnapshot::authenticate(
+                &sign_trust_snapshot(
+                    snapshot(vec![], vec![certificate(&description)], "root"),
+                    &root
+                )?,
+                "root",
+                &root.verifying_key()
+            ),
+            Err(ProtocolError::FieldOutOfBounds)
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn trust_snapshot_rejects_each_malformed_field_and_nested_record() -> TestResult {
     let root = SigningKey::from_bytes(&[1; 32]);
     let Value::Array(fields) = snapshot(
@@ -612,42 +654,6 @@ fn trust_snapshot_rejects_each_malformed_field_and_nested_record() -> TestResult
             &root.verifying_key()
         )
         .is_err());
-    }
-    // The kernel key description is non-empty, control-free and at most 4095 bytes.
-    let longest = "k".repeat(4095);
-    SandboxTrustSnapshot::authenticate(
-        &sign_trust_snapshot(snapshot(vec![], vec![certificate(&longest)], "root"), &root)?,
-        "root",
-        &root.verifying_key(),
-    )?;
-    // Unicode Cc spans U+0000-U+001F and U+007F-U+009F; U+00A0 is not Cc.
-    SandboxTrustSnapshot::authenticate(
-        &sign_trust_snapshot(
-            snapshot(vec![], vec![certificate("fixture:\u{a0}03")], "root"),
-            &root,
-        )?,
-        "root",
-        &root.verifying_key(),
-    )?;
-    for description in [
-        String::new(),
-        "fixture:\n03".to_owned(),
-        "fixture:\u{7f}03".to_owned(),
-        "fixture:\u{80}03".to_owned(),
-        "fixture:\u{9f}03".to_owned(),
-        "k".repeat(4096),
-    ] {
-        assert_eq!(
-            SandboxTrustSnapshot::authenticate(
-                &sign_trust_snapshot(
-                    snapshot(vec![], vec![certificate(&description)], "root"),
-                    &root
-                )?,
-                "root",
-                &root.verifying_key()
-            ),
-            Err(ProtocolError::FieldOutOfBounds)
-        );
     }
     let first = Value::Array(vec![
         Value::Bytes(vec![7; 32]),
