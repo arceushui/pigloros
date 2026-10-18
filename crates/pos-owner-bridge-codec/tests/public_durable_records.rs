@@ -407,8 +407,7 @@ fn public_durable_records_admit_exactly_the_complete_record_limit(
 }
 
 #[test]
-fn public_binding_preserves_each_backup_flag_through_the_codec(
-) -> Result<(), OwnerBridgeCodecError> {
+fn public_binding_round_trips_each_backup_flag() -> Result<(), OwnerBridgeCodecError> {
     for (backup_eligible, backup_state, state_byte) in [(true, false, 0xf4), (true, true, 0xf5)] {
         let binding = SubjectCredentialBindingV1::new(SubjectCredentialBindingInputV1 {
             owner_id: "owner",
