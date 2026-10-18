@@ -6690,6 +6690,19 @@ mod tests {
     fn fork_admission_memory_rejects_corrupt_fork_rows_and_child_metadata(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let (store, mut row) = memory_fork_admission_graph("owner")?;
+        let expected = store.stored_fork_admission_result(&row)?;
+        let operation_id = row.operation_id;
+        // Keep the admission digest, child and commitment exact: only the
+        // operation ID disagrees, independently of the adjacent child guard.
+        row.operation_id = Hash::from_bytes([82; 32]);
+        assert_eq!(
+            store.stored_fork_admission_result(&row),
+            Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority)
+        );
+        row.operation_id = operation_id;
+        assert_eq!(store.stored_fork_admission_result(&row), Ok(expected));
+
+        let (store, mut row) = memory_fork_admission_graph("owner")?;
         row.result_digest = Hash::zero();
         assert_eq!(
             store.stored_fork_admission_result(&row),
