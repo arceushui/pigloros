@@ -1092,7 +1092,10 @@ mod tests {
         let result = EventRowReaderV1::new(row, &mut context, Some(&lengths)).get::<T>(column);
         assert_eq!(result.is_ok(), accepts, "column {column}: {expression}");
         if !accepts {
-            assert!(matches!(result, Err(CoreError::ArtifactUnavailable)));
+            assert_eq!(
+                result.as_ref().err().map(std::mem::discriminant),
+                Some(std::mem::discriminant(&CoreError::ArtifactUnavailable))
+            );
         }
         let charged = if accepts { length } else { 0 };
         assert_eq!(budget.remaining_native_bytes(), 1_024 - charged);
