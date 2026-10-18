@@ -26,15 +26,15 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: e745d54efe268e72ce4ac20620cc199b8ae562b5
+          ref: 89c89d8993ca5d1419ac082a40b58af93d457446
           fetch-depth: 0
           persist-credentials: false
       - name: Pin source, tree, review base and non-root execution
         run: |
           set -euo pipefail
           mkdir -p artifacts
-          test "$(git rev-parse HEAD)" = e745d54efe268e72ce4ac20620cc199b8ae562b5
-          test "$(git rev-parse HEAD^{tree})" = 2653c606603e3d31d0cec26a1e1710a7d9e53071
+          test "$(git rev-parse HEAD)" = 89c89d8993ca5d1419ac082a40b58af93d457446
+          test "$(git rev-parse HEAD^{tree})" = b2b53ac24217e682c1a8a979cfb1a20cf6e34d12
           test -z "$(git status --porcelain --untracked-files=no)"
           test "$(git merge-base a0ef016daf36a0024e53e67d3668fc11b555a303 HEAD)" = a0ef016daf36a0024e53e67d3668fc11b555a303
           git rev-parse HEAD HEAD^{tree} | tee artifacts/source-identity.txt
