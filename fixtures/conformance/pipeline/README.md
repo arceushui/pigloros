@@ -180,6 +180,75 @@ Every `PCH1` case (`PCF-CPH-001` to `PCF-CPH-015`) is mandatory and applicable
 and has exactly one runner, in manifest order; the runner asserts that none is
 skipped.
 
+## `community/v2/manifest.json` (`PCH1`, version 2)
+
+Version 2 of the community Plugin-host profile (ADR-119 section 6, #665). It
+holds every version 1 case unchanged and in order, so `PCF-CPH-006` stays the
+"no declaration, no fallback" case, and adds four ADR-119 cases. Version 1 is
+not edited: the same runner runs both directories, each with its own pin and
+runner table, and the version 2 table extends the version 1 table.
+
+`PCF-CPH-016` (case 4) covers the declaration refusals of the runtime
+`declare`. Before the composition fallback registry port is called, it refuses
+a principal without the host-native `composition.fallback.declare` grant, a
+target Timeline that is not the Timeline the community passes step
+(`TargetNotStepped`), DFP1 bytes that break a record rule (an oversized pin or
+policy, a Plugin ID text repeated across entries), a candidate that breaks a
+section 4.1 rule (rule 7 over the case's Stable passing-profile digest sets,
+exact digest match) and a primary that is not the implementation the registry
+runs, which for a tenure-0 entry is the composer's base implementation
+(`PrimaryNotEffective`). The port then refuses an empty first policy,
+`StalePolicy`, `EntityMismatch` and a primary that is not an entry's effective
+candidate. A byte-identical declaration retried after its commit is replayed
+before `StalePolicy` is checked. The runtime `PrimaryNotEffective` names the
+entry; the port's `Registry(PrimaryNotEffective)` covers recorded entries.
+
+The schema, output-policy, profile and configuration-digest rules cannot be
+broken through the facts-only path with one Plugin type. The `pos-runtime` unit
+tests cover them: `registry_fact_rules_are_refused_through_declare`
+(`composition_fallback/declaration_tests.rs`) drives all four through the
+runtime `declare`, and the validator tests in `composition_fallback/tests.rs`
+cover each refusal and its accepted bounds:
+`rule_two_event_types_and_schemas` (schemas), `rule_two_output_policy` and
+`rule_two_output_fidelity_metadata` (output policy),
+`rule_five_profile_and_interval` (profile), and
+`required_plugin_enforcement_binds_version_and_digest` and
+`required_plugin_binding_is_enforced_for_both` (configuration digest).
+
+`PCF-CPH-017` (case 5) covers the two ADR-119 reserved types. The probe guest
+drafts `pigloros.composition.fallback-declared` under the `fallback-declared`
+selector and `pigloros.composition.fallback-activated` under
+`fallback-activated`, and each draft is refused as `PCF-CPH-013` refuses the
+release-activation type. A claim of either type by either class is refused with
+`ReservedHostEventType` before the registry changes.
+
+`PCF-CPH-018` (the declaration part of case 14) covers a re-base and a
+withdrawal declared in a candidate tenure. Entries are recorded as
+`tenure/chain-position/effective implementation`.
+
+The declaration cases record no observation profile: they run no pass. Their
+`sqlite` runs use a file-backed `SqliteStore`, because the registry requires the
+WAL journal, which an in-memory database cannot use. By ADR-119 clarification
+8, the declaration cases (`PCF-CPH-016` and `PCF-CPH-018`) are host-side and
+run no pass, so ADR-119 section 6's "Local results equal to Air-Gapped" clause
+applies only to the pass-running cases, of which `PCF-CPH-017` is run like
+`PCF-CPH-013`.
+
+`PCF-CPH-019` (cases 1, 2, 3 and 13, #667) runs the composition boundary
+transaction of `pos-plugin-supervisor` on the real worker. The entry's primary
+and its candidate are signed releases of the Rust guest, composed through the
+restart composer and declared through the runtime `declare` with the trap and
+revocation codes. A trap the host reports `Unverified` activates nothing until
+FU-7. A revoked primary refuses the pass at its gate (code 4); the boundary
+commits one activation and one ledger row, swaps the registry entry and the
+host member, and the next pass commits the candidate's Event. An owner return
+to the revoked primary is refused at the trust gate (`ReleaseNotCurrent`). The
+case runs in Local and Air-Gapped mode on both stores and records whether the
+Air-Gapped observations equal the Local ones. The remaining case-1 to case-15
+behaviour of slice 6 (codes 1 and 3, the chain, owner actions, manual mode,
+port refusals and pre-commit refusals) runs on the probe worker in
+`crates/pos-plugin-supervisor/tests/composition_fallback_public.rs`.
+
 ## `v1/legacy-eval-history.json` (`PLH1`, version 1)
 
 Legacy `eval.prediction` and `eval.outcome` Events in the form the

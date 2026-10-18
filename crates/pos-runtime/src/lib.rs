@@ -27,6 +27,7 @@
 pub mod authorization_cache;
 pub mod community_plugin_host;
 pub mod composition;
+pub mod composition_fallback;
 #[cfg(target_os = "linux")]
 pub mod counterfactual;
 pub mod driver;
@@ -53,6 +54,12 @@ pub use composition::{
     PluginIsolationV1, PluginPinFieldV1, PluginPinV1, PluginRegistrationV1, RegisteredEventSchema,
     RegisteredPlugin, RequiredPluginCompositionV1, RequiredPluginV1, ResolvedPluginCompositionV1,
     ResolvedPluginV1, MAX_MANIFEST_SLOT_BYTES_V1, MAX_REQUIRED_PLUGINS_V1,
+};
+pub use composition_fallback::{
+    FallbackCandidateFactsV1, FallbackDeclarationV1, FallbackDeclareErrorV1,
+    FallbackDriverSettingsV1, FallbackDriverShellV1, FallbackEntryFactsV1,
+    FallbackExecutionFactsV1, FallbackHostFactsV1, FallbackHostGrantsV1, FallbackRegistryFactsV1,
+    FallbackTriggerCauseV1, FallbackValidationFieldV1, InvalidFallbackPolicyV1,
 };
 pub use driver::{
     CommittedForkHandoff, DeclaredOutputV1, DirectInputRefV1, Driver, DriverRecoveryEvidence,
@@ -82,14 +89,14 @@ pub use registry::is_reviewed_staged_factory;
 pub use registry::{
     fold_detached_candidate_v1, recover_local_cut_owner_retry_v1,
     recover_manifest_owner_admission_retry_v1, AuthorizedDriverViewV1, AuthorizedViewAuthorityV1,
-    ClosedAdapterTranscriptV1, HostCatalogueEntryV1, HostProjectionProviderV1,
-    HumanActionAdmissionErrorV1, HumanActionAdmissionV1, HumanActionReceiptV1,
-    InstalledPluginFactoryV1, InstalledPluginProductV1, LocalAdapterErrorV1,
+    ClosedAdapterTranscriptV1, FallbackSwapRefusalV1, HostCatalogueEntryV1,
+    HostProjectionProviderV1, HumanActionAdmissionErrorV1, HumanActionAdmissionV1,
+    HumanActionReceiptV1, InstalledPluginFactoryV1, InstalledPluginProductV1, LocalAdapterErrorV1,
     LocalAdapterIdempotencyKeyV1, LocalAdapterProviderResponseV1, LocalAdapterProviderV1,
     LocalAdapterSessionV1, ManifestRosterBuildErrorV1, NoActionApproverV1, OperationContext,
-    PluginRegistry, ScheduledDriverBindingV1, ScheduledPassAdmissionV1, ScheduledProfileErrorV1,
-    StagedGrowthBoundV1, StagedReducerAdmissionErrorV1, StagedReducerAdmissionV1,
-    EMPTY_CONFIGURATION_DETAILS_V1, MAX_STAGED_CALLBACK_BOUND_V1,
+    PluginRegistry, PreparedRegistrationV1, ScheduledDriverBindingV1, ScheduledPassAdmissionV1,
+    ScheduledProfileErrorV1, StagedGrowthBoundV1, StagedReducerAdmissionErrorV1,
+    StagedReducerAdmissionV1, EMPTY_CONFIGURATION_DETAILS_V1, MAX_STAGED_CALLBACK_BOUND_V1,
 };
 pub use reviewed_policy::{
     canonical_plugin_configuration_v1, execution_profile_artifact_hash_v1, host_artifact_hash_v1,

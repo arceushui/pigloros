@@ -142,6 +142,9 @@ use crate::{
     ForkManifestPublicationPortV1, ForkManifestPublicationRequestV1, HeldRegistryAuthorizationV1,
 };
 
+mod composition_fallback_registry;
+mod composition_fallback_registry_rows;
+mod composition_fallback_registry_schema;
 mod counterfactual_store;
 mod fork_attribution_authority_import;
 mod fork_attribution_issuer_policy;
@@ -279,6 +282,9 @@ pub struct SqliteStore {
     /// in autocommit has settled that; while set and the connection is inside
     /// a transaction, counterfactual port reads are refused.
     counterfactual_write_in_doubt: Cell<bool>,
+    /// Whether a composition fallback registry durability restore failed on this handle; while
+    /// set, every fallback registry call fails with `StorePoisoned` until the store is reopened.
+    composition_fallback_poisoned: Cell<bool>,
     /// Whether a Plugin trust registry durability restore failed on this handle, or a read
     /// transaction of `evaluate_current_release` could not leave its own transaction; while set,
     /// every registry call fails with `StorePoisoned` until the store is dropped and reopened.
@@ -2046,6 +2052,7 @@ impl SqliteStore {
             fork_admission_authority_enabled: true,
             fork_admission_authority_runtime: ForkAdmissionAuthorityStateV1::default(),
             counterfactual_write_in_doubt: Cell::new(false),
+            composition_fallback_poisoned: Cell::new(false),
             #[cfg(target_os = "linux")]
             plugin_trust_poisoned: Cell::new(false),
             #[cfg(test)]
