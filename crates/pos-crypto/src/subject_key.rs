@@ -1,5 +1,5 @@
 //! ADR-091 subject owner and key custody: the `SubjectKeyWrapV1` (SKW1)
-//! record, its WebAuthn-PRF wrapping key, and the data and consent-bootstrap
+//! record, its `WebAuthn`-PRF wrapping key, and the data and consent-bootstrap
 //! subkeys (ADR-097 revision 3, section 1).
 //!
 //! This module is pure cryptography. Randomness, PRF evaluation, durable
@@ -23,7 +23,7 @@ pub const SUBJECT_OWNER_PREFIX: &str = "subject:";
 pub const SUBJECT_OWNER_BYTES: usize = 40;
 /// The longest accepted RP ID, in bytes.
 pub const MAX_SUBJECT_RP_ID_BYTES: usize = 253;
-/// The longest accepted WebAuthn credential ID, in bytes.
+/// The longest accepted `WebAuthn` credential ID, in bytes.
 pub const MAX_SUBJECT_CREDENTIAL_ID_BYTES: usize = 1024;
 
 const MAGIC: [u8; 4] = *b"SKW1";
@@ -142,7 +142,7 @@ impl fmt::Debug for SubjectRootKeyV1 {
     }
 }
 
-/// The 32-byte WebAuthn PRF output that keys one wrap.
+/// The 32-byte `WebAuthn` PRF output that keys one wrap.
 ///
 /// The bytes are never observable, cloneable, or printed, and they are wiped
 /// on drop.
@@ -259,7 +259,7 @@ pub struct SubjectKeyWrapParamsV1 {
     pub epoch: u64,
     /// The exact registration RP ID in the ADR-091 canonical domain form.
     pub rp_id: String,
-    /// The 1-1024-byte WebAuthn credential ID.
+    /// The 1-1024-byte `WebAuthn` credential ID.
     pub credential_id: Vec<u8>,
     /// The exact 32-byte PRF evaluation input.
     pub prf_input: [u8; 32],
@@ -301,7 +301,12 @@ impl SubjectKeyWrapV1 {
             body.copy_from_slice(root.bytes.as_slice());
             let key = wrapping_key(&params, prf);
             let aad = associated_data(&params);
-            tag.copy_from_slice(&subject_cbor::aes_gcm_seal(&key, &params.wrap_nonce, &aad, body));
+            tag.copy_from_slice(&subject_cbor::aes_gcm_seal(
+                &key,
+                &params.wrap_nonce,
+                &aad,
+                body,
+            ));
             Self {
                 params,
                 wrapped_root,
@@ -468,7 +473,9 @@ fn read_credential(
     reader.at(6);
     let rp_id = reader.text(MAX_SUBJECT_RP_ID_BYTES)?.to_owned();
     reader.at(7);
-    let credential_id = reader.byte_string(MAX_SUBJECT_CREDENTIAL_ID_BYTES)?.to_vec();
+    let credential_id = reader
+        .byte_string(MAX_SUBJECT_CREDENTIAL_ID_BYTES)?
+        .to_vec();
     reader.at(8);
     let prf_input = reader.bytes()?;
     reader.at(9);
@@ -523,7 +530,12 @@ fn associated_data(params: &SubjectKeyWrapParamsV1) -> Vec<u8> {
 }
 
 fn wrapping_key(params: &SubjectKeyWrapParamsV1, prf: &SubjectPrfOutputV1) -> Zeroizing<[u8; 32]> {
-    subject_cbor::hkdf_sha256(&prf.bytes, &params.wrap_salt, WRAP_LABEL, &wrap_context(params))
+    subject_cbor::hkdf_sha256(
+        &prf.bytes,
+        &params.wrap_salt,
+        WRAP_LABEL,
+        &wrap_context(params),
+    )
 }
 
 fn validate(params: &SubjectKeyWrapParamsV1) -> Result<(), SubjectKeyWrapErrorV1> {
@@ -549,7 +561,7 @@ fn validate(params: &SubjectKeyWrapParamsV1) -> Result<(), SubjectKeyWrapErrorV1
 /// no trailing dot. IPv6 literals and Unicode fail the character rule.
 ///
 /// The canonical form is a strict subset of the WHATWG valid domain that
-/// WebAuthn requires, so a last label that the host parser reads as an IPv4
+/// `WebAuthn` requires, so a last label that the host parser reads as an IPv4
 /// number (all decimal digits, or `0x` followed by hexadecimal digits) makes
 /// the string an IPv4 address literal and is rejected.
 fn is_canonical_rp_id(rp_id: &str) -> bool {

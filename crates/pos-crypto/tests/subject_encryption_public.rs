@@ -109,7 +109,6 @@ const CONSENT_PLAINTEXT: &[u8] = b"\x64demo";
 /// The subject field value: the CBOR byte string `h'0102'`.
 const FIELD_PLAINTEXT: &[u8] = b"\x42\x01\x02";
 
-
 // ---------------------------------------------------------------------------
 // Test-side helpers: hex, byte ranges, an independent CBOR builder, fixtures.
 // ---------------------------------------------------------------------------
@@ -270,7 +269,10 @@ fn opened(
 
 /// The SKW1 record `bytes` with its wrapped root replaced by `wrapped_root`.
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn transplanted(bytes: &[u8], wrapped_root: &[u8]) -> Result<SubjectKeyWrapV1, SubjectKeyWrapErrorV1> {
+fn transplanted(
+    bytes: &[u8],
+    wrapped_root: &[u8],
+) -> Result<SubjectKeyWrapV1, SubjectKeyWrapErrorV1> {
     let mut bytes = bytes.to_vec();
     let start = bytes.len() - 48;
     bytes[start..].copy_from_slice(wrapped_root);
@@ -343,7 +345,9 @@ fn consent_with(
 
 /// The subject-field vector's Event after `edit`.
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn field_with(edit: impl FnOnce(&mut TimelineEventEnvelopeInputV1)) -> TimelineEventEnvelopeInputV1 {
+fn field_with(
+    edit: impl FnOnce(&mut TimelineEventEnvelopeInputV1),
+) -> TimelineEventEnvelopeInputV1 {
     let mut event = field_event();
     edit(&mut event);
     event
@@ -494,10 +498,16 @@ fn tampered_tag_or_wrong_prf_releases_no_root() -> TestResult {
     let last = golden.len() - 1;
     let mut tag = golden.clone();
     tag[last] ^= 0x01;
-    assert_eq!(opened(&SubjectKeyWrapV1::from_bytes(&tag)?, &prf()), refused);
+    assert_eq!(
+        opened(&SubjectKeyWrapV1::from_bytes(&tag)?, &prf()),
+        refused
+    );
     let mut body = golden;
     body[last - 20] ^= 0x80;
-    assert_eq!(opened(&SubjectKeyWrapV1::from_bytes(&body)?, &prf()), refused);
+    assert_eq!(
+        opened(&SubjectKeyWrapV1::from_bytes(&body)?, &prf()),
+        refused
+    );
     let wrong = SubjectPrfOutputV1::from_bytes(ascending(0x41));
     assert_eq!(opened(&golden_wrap()?, &wrong), refused);
     Ok(())
@@ -565,7 +575,11 @@ fn wrap_decoder_rejects_every_wrongly_typed_field() {
         let expected = SubjectKeyWrapErrorV1::InvalidEncoding {
             ordinal: ordinal(index),
         };
-        assert_eq!(SubjectKeyWrapV1::from_bytes(&bytes), Err(expected), "{index}");
+        assert_eq!(
+            SubjectKeyWrapV1::from_bytes(&bytes),
+            Err(expected),
+            "{index}"
+        );
     }
 }
 
@@ -580,9 +594,15 @@ fn wrap_decoder_rejects_cardinality_and_noncanonical_forms() {
     let chunked = [vec![0x7f], tstr("localhost"), vec![0xff]].concat();
     let cases = [
         (array(&items[..12]), encoding(13)),
-        (array(&[items.clone(), vec![uint(0)]].concat()), encoding(13)),
+        (
+            array(&[items.clone(), vec![uint(0)]].concat()),
+            encoding(13),
+        ),
         ([golden.clone(), vec![0x00]].concat(), encoding(13)),
-        ([vec![0x9f], items.concat(), vec![0xff]].concat(), encoding(13)),
+        (
+            [vec![0x9f], items.concat(), vec![0xff]].concat(),
+            encoding(13),
+        ),
         ([vec![0xa1], items.concat()].concat(), encoding(13)),
         (Vec::new(), encoding(13)),
         (golden[..golden.len() - 1].to_vec(), encoding(12)),
@@ -591,7 +611,10 @@ fn wrap_decoder_rejects_cardinality_and_noncanonical_forms() {
         (with_item(&items, 8, bstr(&[0; 31])), encoding(8)),
         (with_item(&items, 11, bstr(&[0; 13])), encoding(11)),
         (with_item(&items, 12, bstr(&[0; 47])), encoding(12)),
-        (with_item(&items, 5, [vec![0xc1], uint(1)].concat()), encoding(5)),
+        (
+            with_item(&items, 5, [vec![0xc1], uint(1)].concat()),
+            encoding(5),
+        ),
         (with_item(&items, 6, bad_utf8), encoding(6)),
         (with_item(&items, 6, chunked), encoding(6)),
     ];
@@ -603,27 +626,51 @@ fn wrap_decoder_rejects_cardinality_and_noncanonical_forms() {
 #[test]
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn seal_validates_inputs_at_their_exact_bounds() -> TestResult {
-    let longest = ["a".repeat(63), "b".repeat(63), "c".repeat(63), "d".repeat(61)].join(".");
+    let longest = [
+        "a".repeat(63),
+        "b".repeat(63),
+        "c".repeat(63),
+        "d".repeat(61),
+    ]
+    .join(".");
     assert_eq!(longest.len(), MAX_SUBJECT_RP_ID_BYTES);
     let over = format!("{longest}e");
     let at_bound = seal_with(|params| params.rp_id.clone_from(&longest))?;
-    assert_eq!(SubjectKeyWrapV1::from_bytes(&at_bound.to_bytes())?, at_bound);
+    assert_eq!(
+        SubjectKeyWrapV1::from_bytes(&at_bound.to_bytes())?,
+        at_bound
+    );
     let refused = seal_with(|params| params.rp_id = over);
-    assert_eq!(refused, Err(SubjectKeyWrapErrorV1::BoundsExceeded { ordinal: 6 }));
+    assert_eq!(
+        refused,
+        Err(SubjectKeyWrapErrorV1::BoundsExceeded { ordinal: 6 })
+    );
     let credential = vec![9; MAX_SUBJECT_CREDENTIAL_ID_BYTES];
     let at_bound = seal_with(|params| params.credential_id.clone_from(&credential))?;
-    assert_eq!(SubjectKeyWrapV1::from_bytes(&at_bound.to_bytes())?, at_bound);
+    assert_eq!(
+        SubjectKeyWrapV1::from_bytes(&at_bound.to_bytes())?,
+        at_bound
+    );
     let over = MAX_SUBJECT_CREDENTIAL_ID_BYTES + 1;
     let refused = seal_with(|params| params.credential_id = vec![9; over]);
-    assert_eq!(refused, Err(SubjectKeyWrapErrorV1::BoundsExceeded { ordinal: 7 }));
+    assert_eq!(
+        refused,
+        Err(SubjectKeyWrapErrorV1::BoundsExceeded { ordinal: 7 })
+    );
     let empty = seal_with(|params| params.credential_id.clear());
-    assert_eq!(empty, Err(SubjectKeyWrapErrorV1::InvalidField { ordinal: 7 }));
+    assert_eq!(
+        empty,
+        Err(SubjectKeyWrapErrorV1::InvalidField { ordinal: 7 })
+    );
     let single = seal_with(|params| params.credential_id = vec![9])?;
     assert_eq!(single.to_bytes().len(), hex(WRAP).len() - 15);
     let nil = seal_with(|params| params.subject_id = entity([0; 16]));
     assert_eq!(nil, Err(SubjectKeyWrapErrorV1::InvalidField { ordinal: 3 }));
     let zero = seal_with(|params| params.epoch = 0);
-    assert_eq!(zero, Err(SubjectKeyWrapErrorV1::InvalidField { ordinal: 5 }));
+    assert_eq!(
+        zero,
+        Err(SubjectKeyWrapErrorV1::InvalidField { ordinal: 5 })
+    );
     Ok(())
 }
 
@@ -645,7 +692,10 @@ fn rp_id_grammar_accepts_canonical_domains() {
     ];
     for rp_id in accepted {
         let sealed = seal_with(|params| params.rp_id = rp_id.to_owned());
-        assert_eq!(sealed.map(|wrap| wrap.params().rp_id.clone()), Ok(rp_id.to_owned()));
+        assert_eq!(
+            sealed.map(|wrap| wrap.params().rp_id.clone()),
+            Ok(rp_id.to_owned())
+        );
     }
 }
 
@@ -698,7 +748,10 @@ fn integer_heads_use_shortest_forms_at_every_boundary() -> TestResult {
         (0x1_0000, &[0x1a, 0x00, 0x01, 0x00, 0x00]),
         (0xffff_ffff, &[0x1a, 0xff, 0xff, 0xff, 0xff]),
         (0x1_0000_0000, &[0x1b, 0, 0, 0, 1, 0, 0, 0, 0]),
-        (u64::MAX, &[0x1b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]),
+        (
+            u64::MAX,
+            &[0x1b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+        ),
     ];
     for (epoch, encoded) in cases {
         let wrap = seal_with(|params| params.epoch = epoch)?;
@@ -744,7 +797,10 @@ fn key_use_codes_are_closed() {
     assert_eq!(SubjectKeyUseV1::Data.code(), 0);
     assert_eq!(SubjectKeyUseV1::Bootstrap.code(), 1);
     assert_eq!(SubjectKeyUseV1::from_code(0), Some(SubjectKeyUseV1::Data));
-    assert_eq!(SubjectKeyUseV1::from_code(1), Some(SubjectKeyUseV1::Bootstrap));
+    assert_eq!(
+        SubjectKeyUseV1::from_code(1),
+        Some(SubjectKeyUseV1::Bootstrap)
+    );
     assert_eq!(SubjectKeyUseV1::from_code(2), None);
     assert_eq!(SubjectKeyUseV1::from_code(u64::MAX), None);
 }
@@ -830,7 +886,10 @@ fn two_subjects_under_one_human_have_disjoint_wraps() -> TestResult {
     let swapped = transplanted(&second.to_bytes(), first.wrapped_root())?;
     assert_eq!(opened(&swapped, &prf()), refused);
     assert_eq!(opened(&swapped, &second_prf), refused);
-    assert_eq!(opened(&second, &second_prf), Ok(second_root.material_digest()));
+    assert_eq!(
+        opened(&second, &second_prf),
+        Ok(second_root.material_digest())
+    );
     Ok(())
 }
 
@@ -856,9 +915,18 @@ fn two_subjects_under_one_human_decrypt_only_their_own_fields() -> TestResult {
     let own = released(&mine, &second_key, &second_event, &header, "purpose");
     assert_eq!(own, Ok(plaintext.len()));
     let mismatch = Err(SubjectCiphertextErrorV1::ContextMismatch { ordinal: 3 });
-    assert_eq!(released(&mine, &first_key, &first_event, &header, "purpose"), mismatch);
-    assert_eq!(released(&theirs, &second_key, &second_event, &header, "purpose"), mismatch);
-    assert_eq!(released(&theirs, &second_key, &first_event, &header, "purpose"), mismatch);
+    assert_eq!(
+        released(&mine, &first_key, &first_event, &header, "purpose"),
+        mismatch
+    );
+    assert_eq!(
+        released(&theirs, &second_key, &second_event, &header, "purpose"),
+        mismatch
+    );
+    assert_eq!(
+        released(&theirs, &second_key, &first_event, &header, "purpose"),
+        mismatch
+    );
     Ok(())
 }
 
@@ -941,17 +1009,41 @@ fn decryption_rejects_every_changed_event_coordinate() -> TestResult {
     let correlation = CorrelationId::from_ulid(Ulid::from_bytes(ascending(0x60)));
     let signing = KeyRoleV1::TimelineIntegritySigning;
     let cases = [
-        (consent_with(|event| event.entity_id = entity(ascending(1))), 3),
+        (
+            consent_with(|event| event.entity_id = entity(ascending(1))),
+            3,
+        ),
         (consent_with(|event| event.origin_timeline_id = timeline), 7),
-        (consent_with(|event| event.origin_logical_seq = Seq::from_u64(2)), 8),
+        (
+            consent_with(|event| event.origin_logical_seq = Seq::from_u64(2)),
+            8,
+        ),
         (consent_with(|event| event.event_id = event_id(0x60)), 9),
-        (consent_with(|event| event.event_type = Kind::new("consent.granted.v3")), 10),
+        (
+            consent_with(|event| event.event_type = Kind::new("consent.granted.v3")),
+            10,
+        ),
         (consent_with(|event| event.schema_version = 2), 11),
-        (consent_with(|event| event.wall_time = WallTime::from_micros(2)), 13),
-        (consent_with(|event| event.causation_id = Some(event_id(0x60))), 13),
-        (consent_with(|event| event.correlation_id = Some(correlation)), 13),
-        (consent_with(|event| event.identity = integrity("timeline-other", signing, 1)), 13),
-        (consent_with(|event| event.identity = integrity("timeline-owner", signing, 2)), 13),
+        (
+            consent_with(|event| event.wall_time = WallTime::from_micros(2)),
+            13,
+        ),
+        (
+            consent_with(|event| event.causation_id = Some(event_id(0x60))),
+            13,
+        ),
+        (
+            consent_with(|event| event.correlation_id = Some(correlation)),
+            13,
+        ),
+        (
+            consent_with(|event| event.identity = integrity("timeline-other", signing, 1)),
+            13,
+        ),
+        (
+            consent_with(|event| event.identity = integrity("timeline-owner", signing, 2)),
+            13,
+        ),
     ];
     for (event, ordinal) in cases {
         let refused = released(&ciphertext, &subkey, &event, &header, "purpose");
@@ -960,12 +1052,21 @@ fn decryption_rejects_every_changed_event_coordinate() -> TestResult {
     }
     let event = consent_event();
     let mismatch = |ordinal| Err(SubjectCiphertextErrorV1::ContextMismatch { ordinal });
-    assert_eq!(released(&ciphertext, &subkey, &event, &header, "Purpose"), mismatch(12));
+    assert_eq!(
+        released(&ciphertext, &subkey, &event, &header, "Purpose"),
+        mismatch(12)
+    );
     let mut altered = header.clone();
     altered[33] ^= 1;
-    assert_eq!(released(&ciphertext, &subkey, &event, &altered, "purpose"), mismatch(13));
+    assert_eq!(
+        released(&ciphertext, &subkey, &event, &altered, "purpose"),
+        mismatch(13)
+    );
     let short = &header[..header.len() - 1];
-    assert_eq!(released(&ciphertext, &subkey, &event, short, "purpose"), mismatch(13));
+    assert_eq!(
+        released(&ciphertext, &subkey, &event, short, "purpose"),
+        mismatch(13)
+    );
     Ok(())
 }
 
@@ -978,13 +1079,28 @@ fn decryption_rejects_an_invalid_context_before_comparing_it() -> TestResult {
     let signing = KeyRoleV1::TimelineIntegritySigning;
     let unsigned = consent_with(|event| event.identity = integrity("timeline-owner", signing, 0));
     let refused = released(&ciphertext, &subkey, &unsigned, &header, "purpose");
-    assert_eq!(refused, Err(SubjectCiphertextErrorV1::InvalidField { ordinal: 13 }));
+    assert_eq!(
+        refused,
+        Err(SubjectCiphertextErrorV1::InvalidField { ordinal: 13 })
+    );
     let oversized = vec![0; MAX_SUBJECT_PUBLIC_HEADER_BYTES + 1];
-    let refused = released(&ciphertext, &subkey, &consent_event(), &oversized, "purpose");
-    assert_eq!(refused, Err(SubjectCiphertextErrorV1::BoundsExceeded { ordinal: 13 }));
+    let refused = released(
+        &ciphertext,
+        &subkey,
+        &consent_event(),
+        &oversized,
+        "purpose",
+    );
+    assert_eq!(
+        refused,
+        Err(SubjectCiphertextErrorV1::BoundsExceeded { ordinal: 13 })
+    );
     let nil = consent_with(|event| event.event_id = EventId::from_ulid(Ulid::nil()));
     let refused = released(&ciphertext, &subkey, &nil, &header, "purpose");
-    assert_eq!(refused, Err(SubjectCiphertextErrorV1::InvalidField { ordinal: 9 }));
+    assert_eq!(
+        refused,
+        Err(SubjectCiphertextErrorV1::InvalidField { ordinal: 9 })
+    );
     Ok(())
 }
 
@@ -997,11 +1113,17 @@ fn decryption_rejects_a_subkey_of_another_identity() -> TestResult {
     let bootstrap = SubjectKeyUseV1::Bootstrap;
     let data = golden_subkey(SubjectKeyUseV1::Data)?;
     let refused = released(&ciphertext, &data, &event, &header, "purpose");
-    assert_eq!(refused, Err(SubjectCiphertextErrorV1::ContextMismatch { ordinal: 6 }));
+    assert_eq!(
+        refused,
+        Err(SubjectCiphertextErrorV1::ContextMismatch { ordinal: 6 })
+    );
     let rotated = seal_with(|params| params.epoch = 2)?.derive_subkey(&root(), bootstrap);
     assert_eq!(rotated.epoch(), 2);
     let refused = released(&ciphertext, &rotated, &event, &header, "purpose");
-    assert_eq!(refused, Err(SubjectCiphertextErrorV1::ContextMismatch { ordinal: 5 }));
+    assert_eq!(
+        refused,
+        Err(SubjectCiphertextErrorV1::ContextMismatch { ordinal: 5 })
+    );
     let foreign_root = SubjectRootKeyV1::from_bytes(ascending(1));
     let foreign = golden_wrap()?.derive_subkey(&foreign_root, bootstrap);
     let refused = released(&ciphertext, &foreign, &event, &header, "purpose");
@@ -1041,7 +1163,10 @@ fn tampered_ciphertext_fails_authentication() -> TestResult {
     digest[0] ^= 1;
     let changed = SubjectCiphertextV1::from_bytes(&with_item(&items, 13, bstr(&digest)))?;
     let refused = released(&changed, &subkey, &event, &header, "purpose");
-    assert_eq!(refused, Err(SubjectCiphertextErrorV1::ContextMismatch { ordinal: 13 }));
+    assert_eq!(
+        refused,
+        Err(SubjectCiphertextErrorV1::ContextMismatch { ordinal: 13 })
+    );
     Ok(())
 }
 
@@ -1056,7 +1181,11 @@ fn ciphertext_decoder_rejects_each_invalid_field() {
     let long_tag = "f".repeat(MAX_SUBJECT_FIELD_TAG_BYTES + 1);
     let cases = [
         (0, bstr(b"SDC2"), invalid(0)),
-        (1, uint(2), Err(SubjectCiphertextErrorV1::UnsupportedVersion)),
+        (
+            1,
+            uint(2),
+            Err(SubjectCiphertextErrorV1::UnsupportedVersion),
+        ),
         (2, tstr(foreign), invalid(2)),
         (2, tstr(&format!("{OWNER}0")), exceeded(2)),
         (3, bstr(&[0; 16]), invalid(3)),
@@ -1099,7 +1228,8 @@ fn ciphertext_decoder_accepts_only_the_v1_nonce_construction() {
     }
     for counter in [1, 2, MAX_SUBJECT_NONCE_COUNTER] {
         let bytes = with_item(&items, 14, bstr(&nonce(counter)));
-        let decoded = SubjectCiphertextV1::from_bytes(&bytes).map(|ciphertext| ciphertext.counter());
+        let decoded =
+            SubjectCiphertextV1::from_bytes(&bytes).map(|ciphertext| ciphertext.counter());
         assert_eq!(decoded, Ok(counter));
     }
 }
@@ -1118,7 +1248,8 @@ fn ciphertext_decoder_accepts_fields_at_their_exact_bounds() {
     ];
     for (index, item) in accepted {
         let bytes = with_item(&items, index, item);
-        let decoded = SubjectCiphertextV1::from_bytes(&bytes).map(|ciphertext| ciphertext.as_bytes().to_vec());
+        let decoded = SubjectCiphertextV1::from_bytes(&bytes)
+            .map(|ciphertext| ciphertext.as_bytes().to_vec());
         assert_eq!(decoded, Ok(bytes), "{index}");
     }
 }
@@ -1132,7 +1263,11 @@ fn ciphertext_decoder_rejects_every_wrongly_typed_field() {
         let expected = SubjectCiphertextErrorV1::InvalidEncoding {
             ordinal: ordinal(index),
         };
-        assert_eq!(SubjectCiphertextV1::from_bytes(&bytes), Err(expected), "{index}");
+        assert_eq!(
+            SubjectCiphertextV1::from_bytes(&bytes),
+            Err(expected),
+            "{index}"
+        );
     }
 }
 
@@ -1144,9 +1279,15 @@ fn ciphertext_decoder_rejects_cardinality_and_noncanonical_forms() {
     let golden = hex(CONSENT_CIPHERTEXT);
     let cases = [
         (array(&items[..15]), encoding(16)),
-        (array(&[items.clone(), vec![uint(0)]].concat()), encoding(16)),
+        (
+            array(&[items.clone(), vec![uint(0)]].concat()),
+            encoding(16),
+        ),
         ([golden.clone(), vec![0x00]].concat(), encoding(16)),
-        ([vec![0x9f], items.concat(), vec![0xff]].concat(), encoding(16)),
+        (
+            [vec![0x9f], items.concat(), vec![0xff]].concat(),
+            encoding(16),
+        ),
         (Vec::new(), encoding(16)),
         (golden[..golden.len() - 1].to_vec(), encoding(15)),
         (with_item(&items, 8, vec![0x18, 0x01]), encoding(8)),
@@ -1174,7 +1315,10 @@ fn encryption_rejects_counters_outside_the_project_cap() -> TestResult {
     assert_eq!(encrypt(0), invalid);
     assert_eq!(encrypt(MAX_SUBJECT_NONCE_COUNTER + 1), invalid);
     assert_eq!(encrypt(u64::MAX), invalid);
-    assert_eq!(encrypt(MAX_SUBJECT_NONCE_COUNTER), Ok(nonce(MAX_SUBJECT_NONCE_COUNTER)));
+    assert_eq!(
+        encrypt(MAX_SUBJECT_NONCE_COUNTER),
+        Ok(nonce(MAX_SUBJECT_NONCE_COUNTER))
+    );
     assert_eq!(encrypt(2), Ok(nonce(2)));
     Ok(())
 }
@@ -1195,10 +1339,22 @@ fn encryption_rejects_invalid_event_contexts() -> TestResult {
     let attribution = KeyRoleV1::SubjectAttributionSigning;
     let signing = KeyRoleV1::TimelineIntegritySigning;
     let cases = [
-        (consent_with(|event| event.origin_timeline_id = TimelineId::from_ulid(nil)), invalid(7)),
-        (consent_with(|event| event.origin_logical_seq = Seq::from_u64(0)), invalid(8)),
-        (consent_with(|event| event.event_id = EventId::from_ulid(nil)), invalid(9)),
-        (consent_with(|event| event.event_type = Kind::new("")), invalid(10)),
+        (
+            consent_with(|event| event.origin_timeline_id = TimelineId::from_ulid(nil)),
+            invalid(7),
+        ),
+        (
+            consent_with(|event| event.origin_logical_seq = Seq::from_u64(0)),
+            invalid(8),
+        ),
+        (
+            consent_with(|event| event.event_id = EventId::from_ulid(nil)),
+            invalid(9),
+        ),
+        (
+            consent_with(|event| event.event_type = Kind::new("")),
+            invalid(10),
+        ),
         (
             consent_with(|event| event.event_type = Kind::new(too_long)),
             Err(SubjectCiphertextErrorV1::BoundsExceeded { ordinal: 10 }),
@@ -1207,9 +1363,18 @@ fn encryption_rejects_invalid_event_contexts() -> TestResult {
             consent_with(|event| event.entity_id = entity([0; 16])),
             Err(SubjectCiphertextErrorV1::ContextMismatch { ordinal: 3 }),
         ),
-        (consent_with(|event| event.identity = integrity("timeline-owner", attribution, 1)), invalid(13)),
-        (consent_with(|event| event.identity = integrity("timeline-owner", signing, 0)), invalid(13)),
-        (consent_with(|event| event.event_type = Kind::new(longest)), Ok(1)),
+        (
+            consent_with(|event| event.identity = integrity("timeline-owner", attribution, 1)),
+            invalid(13),
+        ),
+        (
+            consent_with(|event| event.identity = integrity("timeline-owner", signing, 0)),
+            invalid(13),
+        ),
+        (
+            consent_with(|event| event.event_type = Kind::new(longest)),
+            Ok(1),
+        ),
     ];
     for (event, expected) in cases {
         assert_eq!(encrypt(&event), expected);
@@ -1278,7 +1443,10 @@ fn the_public_header_limit_holds_at_its_exact_bound() -> TestResult {
     let bound = encrypt(&widest)?;
     let plaintext = bound.decrypt(&subkey, &event, &widest, "value")?;
     assert_eq!(*plaintext, FIELD_PLAINTEXT);
-    assert_ne!(bound.context_digest(), encrypt(&hex(FIELD_HEADER))?.context_digest());
+    assert_ne!(
+        bound.context_digest(),
+        encrypt(&hex(FIELD_HEADER))?.context_digest()
+    );
     let exceeded = Err(SubjectCiphertextErrorV1::BoundsExceeded { ordinal: 13 });
     assert_eq!(encrypt(&[widest, vec![1]].concat()), exceeded);
     Ok(())
@@ -1325,8 +1493,8 @@ fn causation_and_correlation_are_bound_by_the_context() -> TestResult {
 #[test]
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn large_coordinates_round_trip() -> TestResult {
-    let subkey = seal_with(|params| params.epoch = u64::MAX)?
-        .derive_subkey(&root(), SubjectKeyUseV1::Data);
+    let subkey =
+        seal_with(|params| params.epoch = u64::MAX)?.derive_subkey(&root(), SubjectKeyUseV1::Data);
     let signing = KeyRoleV1::TimelineIntegritySigning;
     let event = field_with(|event| {
         event.origin_logical_seq = Seq::from_u64(u64::MAX);

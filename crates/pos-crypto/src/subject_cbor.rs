@@ -8,21 +8,23 @@ use zeroize::Zeroizing;
 
 /// Append a shortest-form CBOR head for `major` with argument `value`.
 pub(crate) fn head(output: &mut Vec<u8>, major: u8, value: u64) {
+    // The major type occupies the top three bits and the additional
+    // information the low five, so adding them composes the initial byte.
     let bytes = value.to_be_bytes();
     let tag = major << 5;
     match value {
-        0..=23 => output.push(tag | bytes[7]),
-        24..=0xff => output.extend_from_slice(&[tag | 0x18, bytes[7]]),
+        0..=23 => output.push(tag + bytes[7]),
+        24..=0xff => output.extend_from_slice(&[tag + 24, bytes[7]]),
         0x100..=0xffff => {
-            output.push(tag | 0x19);
+            output.push(tag + 25);
             output.extend_from_slice(&bytes[6..]);
         }
         0x1_0000..=0xffff_ffff => {
-            output.push(tag | 0x1a);
+            output.push(tag + 26);
             output.extend_from_slice(&bytes[4..]);
         }
         _ => {
-            output.push(tag | 0x1b);
+            output.push(tag + 27);
             output.extend_from_slice(&bytes);
         }
     }
