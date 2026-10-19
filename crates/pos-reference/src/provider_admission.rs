@@ -451,7 +451,7 @@ impl<'de> Visitor<'de> for JsonObject {
 
 /// Parse exactly one JSON object, with no whitespace before or after it.
 ///
-/// systemd v260.2 rejects a raw DEL (0x7f) that serde_json accepts in a
+/// systemd v260.2 rejects a raw DEL (0x7f) that `serde_json` accepts in a
 /// string, so it rejects here too.
 fn parse_verity_signature(text: &[u8]) -> Result<VeritySignatureJson, SelectorBoundaryError> {
     if text.contains(&0x7f)
