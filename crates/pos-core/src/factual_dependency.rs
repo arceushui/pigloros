@@ -940,7 +940,8 @@ pub struct FactualScheduledTickV1 {
     pub drivers: Vec<FactualDriverStepV1>,
     /// The fold cursor and window, or `None` while the builder supplies no
     /// window: the record then holds no fold node and an empty fold binding.
-    pub fold: Option<FactualFoldSourceV1>,
+    /// Boxed, since a window is far larger than the rest of the shape.
+    pub fold: Option<Box<FactualFoldSourceV1>>,
 }
 
 /// The shape of a factual Tick.
@@ -1279,7 +1280,7 @@ impl<'a> FactualAssembly<'a> {
         for (position, driver) in (1_u32..).zip(&scheduled.drivers) {
             self.driver(&host, position, driver)?;
         }
-        if let Some(source) = &scheduled.fold {
+        if let Some(source) = scheduled.fold.as_deref() {
             self.fold(&mut host, source)?;
         }
         self.renumber_ingress();
@@ -1368,7 +1369,7 @@ impl<'a> FactualAssembly<'a> {
         let mut from = if history.is_some() {
             events
                 .first()
-                .map_or(seq_after(observed_through), |(event, _)| event.seq)
+                .map_or_else(|| seq_after(observed_through), |(event, _)| event.seq)
         } else {
             seq_after(plan.after)
         };

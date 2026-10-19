@@ -1651,7 +1651,7 @@ fn first_window(through: u64, inputs: u64) -> FactualFoldSourceV1 {
 }
 
 fn assemble_folded(mut tick: FactualScheduledTickV1, source: FactualFoldSourceV1) -> Assembled {
-    tick.fold = Some(source);
+    tick.fold = Some(Box::new(source));
     assemble(TICK, &FactualTickShapeV1::Scheduled(tick))
 }
 
