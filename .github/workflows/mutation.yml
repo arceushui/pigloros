@@ -53,6 +53,10 @@ jobs:
     runs-on: ubuntu-latest
     env:
       CARGO_PROFILE_TEST_DEBUG: line-tables-only
+      # rust-toolchain.toml pins stable, and rustup prefers that directory
+      # override to `rustup default`. Without this pin, every mutant runs on
+      # stable, the harness rejects -Z, and each mutant is counted as caught.
+      RUSTUP_TOOLCHAIN: nightly-2026-08-28
     # The shell watchdog below exits with diagnostics before this outer limit.
     timeout-minutes: 70
     strategy:
@@ -75,6 +79,13 @@ jobs:
       - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
         with:
           tool: cargo-mutants
+      - name: Require the pinned nightly in the repository directory
+        run: |
+          set -euo pipefail
+          active="$(rustup show active-toolchain)"
+          echo "$active"
+          [[ "$active" == nightly-2026-08-28-* ]]
+          rustc --version | grep -q -- '-nightly '
       - name: Capture pull-request diff
         run: |
           set -euo pipefail
