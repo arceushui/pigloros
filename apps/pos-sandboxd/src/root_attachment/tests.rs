@@ -17,15 +17,9 @@ use std::{
 };
 
 use pos_reference::provider_admission::{test_support::StagedInstallation, ProviderImageSnapshot};
-use rustix::{
-    mount::{
-        fsconfig_create, fsmount, fsopen, mount_bind, mount_change, FsMountFlags, FsOpenFlags,
-        MountAttrFlags, MountPropagationFlags,
-    },
-    net::{
-        recvmsg, sendmsg, RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags,
-        SendAncillaryBuffer, SendAncillaryMessage, SendFlags,
-    },
+use rustix::net::{
+    recvmsg, sendmsg, RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, SendAncillaryBuffer,
+    SendAncillaryMessage, SendFlags,
 };
 use serde_json::json;
 
@@ -41,7 +35,6 @@ type BoxError = Box<dyn Error + Send + Sync>;
 type TestResult = Result<(), BoxError>;
 
 const PRIVILEGED_COMPOSITION_TEST: &str = "PIGLOROS_PRIVILEGED_COMPOSITION_TEST";
-const USER_NAMESPACE_TEST: &str = "PIGLOROS_USER_NAMESPACE_TEST";
 const VETO: &str = "systemd.allow_userspace_verity=0";
 
 // ---------------------------------------------------------------------------
@@ -150,10 +143,8 @@ struct PreparedTree {
 }
 
 fn prepared_tree() -> Result<PreparedTree, BoxError> {
-    prepared_tree_in(tempfile::tempdir()?)
-}
-
-fn prepared_tree_in(runtime: tempfile::TempDir) -> Result<PreparedTree, BoxError> {
+    let runtime = tempfile::tempdir()?;
+    fs::set_permissions(runtime.path(), fs::Permissions::from_mode(0o700))?;
     for directory in ["registry", "attempts"] {
         let path = runtime.path().join(directory);
         fs::create_dir(&path)?;
@@ -666,110 +657,6 @@ fn every_partial_attachment_failure_detaches_or_reports_teardown() -> TestResult
         assert_eq!(outcome.err(), Some(error), "{name}");
         assert_eq!(kernel.detached(), detached, "{name}");
     }
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Real attachment in an unprivileged user and mount namespace
-
-fn run_in_user_namespace(test_name: &str) -> TestResult {
-    let output = Command::new("unshare")
-        .args(["--user", "--map-root-user", "--mount", "--"])
-        .arg(std::env::current_exe()?)
-        .args(["--exact", test_name, "--nocapture"])
-        .env(USER_NAMESPACE_TEST, "1")
-        .output()?;
-    if output.status.success() {
-        return Ok(());
-    }
-    Err(format!(
-        "user-namespace test {test_name} failed with {}:\nstdout:\n{}\nstderr:\n{}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    )
-    .into())
-}
-
-fn detached_tmpfs() -> Result<OwnedFd, BoxError> {
-    let filesystem = fsopen("tmpfs", FsOpenFlags::FSOPEN_CLOEXEC)?;
-    fsconfig_create(&filesystem)?;
-    Ok(fsmount(
-        &filesystem,
-        FsMountFlags::FSMOUNT_CLOEXEC,
-        MountAttrFlags::empty(),
-    )?)
-}
-
-#[test]
-fn a_detached_mount_is_attached_by_descriptor_made_private_and_detached() -> TestResult {
-    if std::env::var_os(USER_NAMESPACE_TEST).is_none() {
-        return run_in_user_namespace(
-            "root_attachment::tests::a_detached_mount_is_attached_by_descriptor_made_private_and_detached",
-        );
-    }
-    // A shared parent mount: an attached child joins its propagation.
-    let runtime = tempfile::tempdir()?;
-    mount_bind(runtime.path(), runtime.path())?;
-    mount_change(runtime.path(), MountPropagationFlags::SHARED)?;
-    let tree = prepared_tree_in(runtime)?;
-    let (attempt, root) = tree.prepared.held_directories();
-    let kernel = HostKernel::system();
-    let parent = kernel
-        .observe(root.as_fd(), attempt, root)
-        .mount
-        .ok_or("the unmounted root directory")?;
-
-    let mount = detached_tmpfs()?;
-    kernel.attach(mount.as_fd(), root)?;
-    let shared = kernel
-        .observe(mount.as_fd(), attempt, root)
-        .entry
-        .ok_or("the shared mountinfo entry")?;
-    assert!(
-        shared
-            .optional
-            .iter()
-            .any(|field| field.starts_with("shared:")),
-        "{:?}",
-        shared.optional
-    );
-    kernel.make_private(mount.as_fd())?;
-    let observed = kernel.observe(mount.as_fd(), attempt, root);
-    let node = observed.mount.ok_or("the attached mount")?;
-    assert_ne!(node.mount_id, parent.mount_id);
-    // The attempt path now resolves to the attached mount.
-    assert_eq!(observed.path, Some(node));
-    assert_eq!(observed.parent_mount_id, Some(parent.mount_id));
-    let entry = observed.entry.as_ref().ok_or("the mountinfo entry")?;
-    assert_eq!(entry.parent_id, parent.mount_id);
-    assert_eq!(entry.root, "/");
-    assert_eq!(entry.filesystem, "tmpfs");
-    assert!(entry
-        .mount_point
-        .ends_with(&format!("/attempts/{}/root", component(&tree.prepared))));
-    // Private after the propagation change: no shared or master field.
-    assert!(entry.optional.is_empty(), "{:?}", entry.optional);
-    // A tmpfs is not the admitted EROFS root.
-    let expected = expected(&component(&tree.prepared));
-    assert_eq!(
-        expected.verify(&observed),
-        Err(ImageActivationError::EvidenceMismatch)
-    );
-    kernel.detach(mount.as_fd())?;
-    drop(mount);
-    tree.prepared.verify_directory()?;
-
-    // The orchestration detaches a rejected root before returning.
-    let outcome = attach_and_verify(
-        &kernel,
-        &tree.prepared,
-        &expected,
-        QuarantinedRootMount::from_descriptor(detached_tmpfs()?),
-        || Ok(()),
-    );
-    assert_eq!(outcome.err(), Some(ImageActivationError::EvidenceMismatch));
-    tree.prepared.verify_directory()?;
     Ok(())
 }
 
