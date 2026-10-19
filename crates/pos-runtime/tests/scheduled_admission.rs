@@ -4172,7 +4172,11 @@ fn a_saturated_driver_declares_a_step_node_of_exactly_4096_inputs_on_both_adapte
         assert_eq!(basis.dependencies().tick(), 3, "{name}");
         // The backlog's ingress nodes, which the fold part shares, and those of
         // the restored Events, which only the fold part inputs (ADR-064 R4.2).
-        assert_eq!(count_owned_by(&basis, INGRESS), BACKLOG + RESTORED, "{name}");
+        assert_eq!(
+            count_owned_by(&basis, INGRESS),
+            BACKLOG + RESTORED,
+            "{name}"
+        );
         assert_eq!(count_owned_by(&basis, HISTORY), 1, "{name}");
         assert_eq!(count_owned_by(&basis, PREFIX), 1, "{name}");
         let owner = owner_at(&registry, 0);

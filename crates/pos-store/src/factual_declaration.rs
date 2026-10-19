@@ -301,12 +301,10 @@ fn bound_checkpoints<'a>(
     nodes: &'a [DependencyNodeRecordV1],
     fold: &FactualFoldBindingV1,
 ) -> Option<Vec<&'a DependencyNodeRecordV1>> {
-    let named = (0_u32..)
-        .zip(&fold.checkpoints)
-        .map(|(ordinal, index)| {
-            let at = (ordinal, FACTUAL_FOLD_SCHEMA_ID_V1);
-            fold_node_at(nodes, *index, FactualHostOwnerV1::Fold, at)
-        });
+    let named = (0_u32..).zip(&fold.checkpoints).map(|(ordinal, index)| {
+        let at = (ordinal, FACTUAL_FOLD_SCHEMA_ID_V1);
+        fold_node_at(nodes, *index, FactualHostOwnerV1::Fold, at)
+    });
     named.collect()
 }
 
