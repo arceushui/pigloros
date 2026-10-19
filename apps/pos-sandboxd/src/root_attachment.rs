@@ -3,7 +3,7 @@
 //!
 //! Before mountfsd is called, the prepared attempt directory is verified
 //! again. The kernel command line must also veto systemd's userspace Verity
-//! fallback (owner decision Q7.8, ADR-087 amendment, Under Review). One
+//! fallback (ADR-087 Part C.3, accepted revision 31; owner decision Q7.8). One
 //! bounded `MountImage` call then activates the admitted image. Its single
 //! sealed root mount descriptor is attached by descriptor with `move_mount`
 //! onto the held root directory descriptor, so no path is resolved. It is
