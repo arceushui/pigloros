@@ -1451,7 +1451,6 @@ fn a_prior_node_is_read_from_a_recorded_row() {
     assert_eq!(err(next), FactualError::ClassRuleViolation);
 }
 
-
 #[test]
 fn the_digest_binds_the_fold_binding_list_by_list() {
     let dependencies = full_assembly();
@@ -1479,6 +1478,33 @@ fn the_digest_binds_the_fold_binding_list_by_list() {
     let ascending = with_fold(vec![1, 2], Vec::new());
     let descending = with_fold(vec![2, 1], Vec::new());
     assert_ne!(ascending, descending);
+}
+
+/// The digest of an empty record's declaration with `fold`, nothing else
+/// bound.
+fn bare_digest(fold: FactualFoldBindingV1) -> Hash {
+    let origin = RecordedNodeOriginV1::Committed;
+    let record = ok(Record::try_new(TICK, origin, Vec::new(), Vec::new()));
+    let outputs = Vec::new();
+    let events = Vec::new();
+    let declared = FactualTickDependenciesV1::new(TICK, record, outputs, events, fold);
+    declared.digest()
+}
+
+#[test]
+fn the_fold_binding_digest_bytes_are_pinned_by_vector() {
+    assert_eq!(
+        hex(bare_digest(FactualFoldBindingV1::default())),
+        "9733350e64378cdda42519f9be8ef92afb1b5bde51d921e8d401787b64bcc8dd"
+    );
+    let bound = FactualFoldBindingV1 {
+        checkpoints: vec![3, 1],
+        history: vec![2],
+    };
+    assert_eq!(
+        hex(bare_digest(bound)),
+        "db2c8a93a18b0bb983d760f79e60fc1212a5fe6fb5df1cf6fcd7e87d5825c84e"
+    );
 }
 
 fn fold_history(from: u64, through: u64) -> Hash {

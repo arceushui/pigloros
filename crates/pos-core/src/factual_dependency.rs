@@ -1199,6 +1199,7 @@ impl<'a> FoldPlan<'a> {
         if fits(top) {
             return Ok(top);
         }
+        // `low = 0` fits: the reserve guard above leaves room for the minimal part.
         let (mut low, mut high) = (0, top);
         while high - low > 1 {
             let middle = low + (high - low) / 2;
@@ -1379,19 +1380,19 @@ impl<'a> FactualAssembly<'a> {
             .chain(history.map(FactualSource::Node))
             .collect();
         let mut last = 0;
-        for (ordinal, (position, chunk)) in (0_u32..).zip(chunks.into_iter().enumerate()) {
-            let through = match chunk.last() {
+        for (ordinal, (position, piece)) in (0_u32..).zip(chunks.into_iter().enumerate()) {
+            let through = match piece.last() {
                 Some((event, _)) if position + 1 < count => event.seq,
                 _ => observed_through,
             };
-            let refs: Vec<FactualEventRefV1> = chunk
+            let refs: Vec<FactualEventRefV1> = piece
                 .iter()
                 .map(|(event, _)| FactualEventRefV1 {
                     seq: event.seq,
                     payload_hash: event.payload_hash,
                 })
                 .collect();
-            for (event, _) in chunk {
+            for (event, _) in piece {
                 sources.push(self.fold_event_source(host, event)?);
             }
             let content = factual_fold_checkpoint_content_digest(previous, from, through, &refs);
