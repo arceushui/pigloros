@@ -328,8 +328,11 @@ fn exactly_the_admitted_private_read_only_erofs_root_is_accepted() {
     assert_eq!(expected.verify(&observed), Ok(41));
 }
 
+/// A named edit of the matching readback.
+type Mutation = (&'static str, fn(&mut Observations));
+
 /// One named difference from the matching readback per accepted fact.
-fn readback_mutations() -> Vec<(&'static str, fn(&mut Observations))> {
+fn readback_mutations() -> Vec<Mutation> {
     vec![
         ("no mount", |o| o.mount = None),
         ("no path", |o| o.path = None),
@@ -348,7 +351,7 @@ fn readback_mutations() -> Vec<(&'static str, fn(&mut Observations))> {
         ("no mountinfo entry", |o| o.entry = None),
         ("wrong device", |o| edit_entry(o, |e| e.device = (253, 4))),
         ("wrong root", |o| {
-            edit_entry(o, |e| e.root = "/usr".to_owned())
+            edit_entry(o, |e| e.root = "/usr".to_owned());
         }),
         ("replaced path", |o| {
             edit_entry(o, |e| {
@@ -356,13 +359,13 @@ fn readback_mutations() -> Vec<(&'static str, fn(&mut Observations))> {
             });
         }),
         ("rw mount", |o| {
-            edit_entry(o, |e| e.options = "rw,relatime".to_owned())
+            edit_entry(o, |e| e.options = "rw,relatime".to_owned());
         }),
         ("rw superblock", |o| {
-            edit_entry(o, |e| e.super_options = "rw".to_owned())
+            edit_entry(o, |e| e.super_options = "rw".to_owned());
         }),
         ("not erofs", |o| {
-            edit_entry(o, |e| e.filesystem = "squashfs".to_owned())
+            edit_entry(o, |e| e.filesystem = "squashfs".to_owned());
         }),
         ("shared propagation", |o| {
             edit_entry(o, |e| e.optional = vec!["shared:7".to_owned()]);
@@ -373,10 +376,10 @@ fn readback_mutations() -> Vec<(&'static str, fn(&mut Observations))> {
         ("no mapper", |o| o.mapper = None),
         ("no dm uuid", |o| edit_mapper(o, |m| m.uuid = None)),
         ("not dm-verity", |o| {
-            edit_mapper(o, |m| m.uuid = Some("LVM-abc".to_owned()))
+            edit_mapper(o, |m| m.uuid = Some("LVM-abc".to_owned()));
         }),
         ("writable mapper", |o| {
-            edit_mapper(o, |m| m.read_only = Some(0))
+            edit_mapper(o, |m| m.read_only = Some(0));
         }),
         ("no slaves", |o| edit_mapper(o, |m| m.slaves = None)),
         ("one slave", |o| {
@@ -401,25 +404,25 @@ fn readback_mutations() -> Vec<(&'static str, fn(&mut Observations))> {
             });
         }),
         ("wrong root extent", |o| {
-            edit_slaves(o, |s| s[0].start = Some(2049))
+            edit_slaves(o, |s| s[0].start = Some(2049));
         }),
         ("same extent twice", |o| {
-            edit_slaves(o, |s| s[1] = s[0].clone())
+            edit_slaves(o, |s| s[1] = s[0].clone());
         }),
         ("unknown size", |o| edit_slaves(o, |s| s[0].size = None)),
         ("overflowing start", |o| {
-            edit_slaves(o, |s| s[0].start = Some(u64::MAX))
+            edit_slaves(o, |s| s[0].start = Some(u64::MAX));
         }),
         ("no loop device", |o| {
-            edit_slaves(o, |s| s[0].loop_device = None)
+            edit_slaves(o, |s| s[0].loop_device = None);
         }),
         ("substituted image", |o| {
-            edit_loop(o, |d| d.backing = Some((5, 7)))
+            edit_loop(o, |d| d.backing = Some((5, 7)));
         }),
         ("unknown backing", |o| edit_loop(o, |d| d.backing = None)),
         ("offset", |o| edit_loop(o, |d| d.offset = Some(512))),
         ("size limit", |o| {
-            edit_loop(o, |d| d.size_limit = Some(4096))
+            edit_loop(o, |d| d.size_limit = Some(4096));
         }),
         ("no autoclear", |o| edit_loop(o, |d| d.autoclear = Some(0))),
         ("writable loop", |o| edit_loop(o, |d| d.read_only = Some(0))),
@@ -521,10 +524,6 @@ fn the_host_kernel_reads_back_the_mount_loop_and_mapper_by_descriptor() -> TestR
         autoclear: Some(1),
         read_only: Some(1),
     };
-    let missing_device = LoopDevice {
-        backing: None,
-        ..loop_device.clone()
-    };
     assert_eq!(slaves.len(), 3);
     assert_eq!(
         slaves[0],
@@ -543,6 +542,10 @@ fn the_host_kernel_reads_back_the_mount_loop_and_mapper_by_descriptor() -> TestR
         .all(|slave| slave.loop_device.as_ref() == Some(&loop_device)));
 
     // A backing path that no longer names a file is absent, not adopted.
+    let missing_device = LoopDevice {
+        backing: None,
+        ..loop_device
+    };
     write(&device.join("loop/backing_file"), "/nonexistent/held\n")?;
     let observed = kernel.observe(root.as_fd(), attempt, root);
     let slaves = observed
@@ -707,7 +710,7 @@ fn receive_call(socket: &StdUnixStream) -> TestResult {
 }
 
 /// A fake root mountfsd answering `calls` calls for the admitted root extent.
-fn serve(listener: UnixListener, root: Extent, calls: usize) -> TestResult {
+fn serve(listener: &UnixListener, root: Extent, calls: usize) -> TestResult {
     for _ in 0..calls {
         let (socket, _) = listener.accept()?;
         receive_call(&socket)?;
@@ -805,7 +808,7 @@ async fn the_admitted_chain_reaches_attachment_only_through_every_gate() -> Test
     fs::create_dir("/run/systemd")?;
     let listener = UnixListener::bind("/run/systemd/io.systemd.MountFileSystem")?;
     let root = expected.root;
-    let peer = thread::spawn(move || serve(listener, root, 2));
+    let peer = thread::spawn(move || serve(&listener, root, 2));
 
     // Every gate passes: the verified root names the attempt path.
     let verified = activate(
@@ -827,7 +830,8 @@ async fn the_admitted_chain_reaches_attachment_only_through_every_gate() -> Test
             .manifest()
             .root_image_blake3_digest
             .iter()
-            .map(|byte| format!("{byte:02x}"))
+            .flat_map(|byte| [byte >> 4, byte & 0x0f])
+            .map(|nibble| char::from_digit(u32::from(nibble), 16).unwrap_or('0'))
             .collect::<String>(),
     );
     fs::set_permissions(&image, fs::Permissions::from_mode(0o600))?;
