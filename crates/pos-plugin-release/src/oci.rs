@@ -266,7 +266,7 @@ fn member_blob_indices(blobs: &[BlobV1], members: &[BundleMemberV1]) -> Vec<usiz
 /// including the empty config, in digest order. A source fetches those blobs
 /// and then finishes through `verify_oci_closure_v1`, the same verifier as
 /// every other source.
-pub(crate) fn plan_closure_v1(
+pub(super) fn plan_closure_v1(
     address: &BundleAddressV1,
     manifest: &[u8],
 ) -> Result<BTreeMap<String, u64>, ReleaseSourceErrorV1> {

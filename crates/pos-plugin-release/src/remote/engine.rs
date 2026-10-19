@@ -186,7 +186,7 @@ fn read_exact(response: Response<Body>, size: u64) -> Result<Vec<u8>, ReleaseSou
 }
 
 /// Map a transport failure to a closed error, without its upstream message.
-fn transport_error(error: &ureq::Error) -> ReleaseSourceErrorV1 {
+const fn transport_error(error: &ureq::Error) -> ReleaseSourceErrorV1 {
     match error {
         ureq::Error::LargeResponseHeader(..) => ReleaseSourceErrorV1::BoundsExceeded,
         _ => ReleaseSourceErrorV1::Io,

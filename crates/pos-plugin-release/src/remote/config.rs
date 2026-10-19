@@ -59,7 +59,7 @@ impl OriginV1 {
 /// and no insecure mode.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TrustRootsV1 {
-    /// The compiled WebPki root set. It is static: it has no automatic root
+    /// The compiled `WebPki` root set. It is static: it has no automatic root
     /// updates and no online revocation checking.
     WebPki,
     /// An explicit DER root set: 1 to 64 distinct certificates, each at most
@@ -124,7 +124,7 @@ pub struct TransportDeadlinesV1 {
 impl TransportDeadlinesV1 {
     /// The V1 maxima, which are also the defaults.
     pub const MAXIMUM: Self = Self {
-        closure: Duration::from_secs(300),
+        closure: Duration::from_mins(5),
         dns: Duration::from_secs(10),
         connect: Duration::from_secs(10),
         response_headers: Duration::from_secs(30),

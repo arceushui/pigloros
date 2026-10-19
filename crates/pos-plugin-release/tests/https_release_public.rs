@@ -608,7 +608,7 @@ fn three_redirect_hops_are_followed_and_a_fourth_fails_closed() -> TestResult {
     let server = Server::start()?;
     server.publish(&bundle);
     server.route("/hop/1", Reply::redirect(302, "/hop/2"));
-    server.route("/hop/2", Reply::redirect(302, "hop/3"));
+    server.route("/hop/2", Reply::redirect(302, "3"));
     server.route("/hop/3", Reply::ok(bundle.manifest()));
 
     server.route(MANIFEST_PATH, Reply::redirect(302, "/hop/1"));
@@ -1025,7 +1025,7 @@ fn deadlines_are_non_zero_and_within_their_maxima() {
     assert_eq!(
         maximum,
         TransportDeadlinesV1 {
-            closure: Duration::from_secs(300),
+            closure: Duration::from_mins(5),
             dns: Duration::from_secs(10),
             connect: Duration::from_secs(10),
             response_headers: Duration::from_secs(30),
