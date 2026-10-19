@@ -556,6 +556,33 @@ impl World {
         self.add_child_at(self.root, Seq::from_u64(PARENT_CUT), shape)
     }
 
+    /// Build eight valid Mixed Forks in identifier ranges disjoint from the
+    /// default import and `Spec::distinct(1)` used by the selected arms.
+    ///
+    /// # Errors
+    /// Returns the source Fork, encoding, or signing error.
+    pub fn add_unrelated_mixed_forks(&mut self) -> Fallible<Vec<Built>> {
+        let mut unrelated = Vec::with_capacity(8);
+        // Each block reserves every operation and principal ID, including
+        // the four append operations at base+7 through base+10.
+        for base in [0x40_u8, 0x50, 0x70, 0x80, 0xc0, 0xd0, 0xe0, 0xf0] {
+            let child = self.children.len();
+            self.add_child(Shape::Mixed)?;
+            unrelated.push(self.build(&Spec {
+                child,
+                import_seed: base,
+                binding_seed: base + 1,
+                principal_seed: base + 2,
+                admission_seed: base + 3,
+                registration_seed: base + 4,
+                publication_seed: base + 5,
+                operations_seed: base + 6,
+                ..Spec::default()
+            })?);
+        }
+        Ok(unrelated)
+    }
+
     /// Fork a signed child at its actual inherited publication coordinate.
     /// Existing root-child fixtures retain their default parent and cut.
     ///
