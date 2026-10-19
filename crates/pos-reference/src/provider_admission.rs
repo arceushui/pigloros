@@ -11,6 +11,10 @@ use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::fs::FileExt as _;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use serde::de::value::MapAccessDeserializer;
+use serde::de::{MapAccess, Visitor};
+use serde::{Deserialize, Deserializer};
+
 use crate::sandbox_provider_protocol::{
     AdmittedSandboxImage, LaunchPolicy, PartitionDescriptor, SandboxExecuteRequest,
     SignedImageManifest, VerifiedSandboxImageProof,
@@ -36,6 +40,8 @@ const VERITY_ALGORITHM: [u8; 32] = *b"sha256\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0
 // 4096-byte data blocks, then 4096-byte hash blocks.
 const VERITY_BLOCK_SIZES: [u8; 8] = [0, 16, 0, 0, 0, 16, 0, 0];
 const VERITY_SALT_SIZE: [u8; 2] = [32, 0];
+// systemd v260.2 `acquire_sig_for_roothash` refuses larger signature partitions.
+const VERITY_SIGNATURE_LIMIT: usize = 4 * 1024 * 1024;
 
 /// Independently checked image evidence owning a complete installation snapshot.
 ///
@@ -58,8 +64,10 @@ impl ProviderImageSnapshot {
     /// # Errors
     /// Rejects malformed requests, pending installation recovery, unsafe files,
     /// unauthenticated or inconsistent authority, invalid image/GPT/executable
-    /// bytes, a non-EROFS root or mismatched verity superblock, unaccepted
-    /// launch policy, and invalid or time-expired CMS proofs.
+    /// bytes, a non-EROFS root, a mismatched verity superblock, a
+    /// root-verity-sig partition whose JSON is malformed or names another root
+    /// hash or signature than SIM1, unaccepted launch policy, and invalid or
+    /// time-expired CMS proofs.
     pub fn open(request_bytes: &[u8]) -> Result<Self, SelectorBoundaryError> {
         SandboxExecuteRequest::from_canonical_cbor(request_bytes)
             .map_err(invalid)
@@ -140,8 +148,8 @@ impl ProviderImageSnapshot {
     /// before sending any RCU1 and removes it only after installing the
     /// successor SIC1, so at the instants checked a committed newer revocation
     /// is either pending or installed, and both reject. The same retained image,
-    /// GPT, executable, EROFS root, verity superblock and CMS proof are then
-    /// rechecked at fresh host time.
+    /// GPT, executable, EROFS root, verity superblock, root-verity-sig JSON and
+    /// CMS proof are then rechecked at fresh host time.
     ///
     /// This is a point-in-time check against installed selector heads, not a
     /// provider-held RVS1 floor or attempt reservation. A revocation committed
@@ -151,8 +159,8 @@ impl ProviderImageSnapshot {
     ///
     /// # Errors
     /// Rejects pending recovery, stale or substituted authority, changed image
-    /// inputs, a non-EROFS root or mismatched verity superblock, or a proof no
-    /// longer valid at host time.
+    /// inputs, a non-EROFS root, a mismatched verity superblock or
+    /// root-verity-sig JSON, or a proof no longer valid at host time.
     pub fn admit_held_image(&self) -> Result<HeldImageAdmission<'_>, SelectorBoundaryError> {
         self.join_current(InstalledSelectorState::open(), SystemTime::now)
     }
@@ -179,8 +187,8 @@ impl ProviderImageSnapshot {
 ///
 /// Only [`ProviderImageSnapshot::admit_held_image`] constructs this value. It
 /// borrows the snapshot, and [`AsFd`] yields exactly the retained root-image
-/// descriptor that every image, GPT, EROFS, verity superblock and CMS check
-/// read; no caller can supply or substitute a descriptor, proof or authority.
+/// descriptor that every image, GPT, EROFS, verity superblock,
+/// root-verity-sig and CMS check read; no caller can supply or substitute a descriptor, proof or authority.
 /// It has no public constructor, `Clone` or serialization, and grants no
 /// mount, launch or output authority by itself.
 pub struct HeldImageAdmission<'snapshot> {
@@ -300,6 +308,16 @@ fn check_image<'a>(
             .map(|()| image)
         })
         .and_then(|image| {
+            let manifest = image.manifest();
+            check_verity_signature(
+                root_image.file(),
+                &manifest.partitions[2],
+                &manifest.root_hash_sha256,
+                &manifest.root_hash_signature.der_bytes,
+            )
+            .map(|()| image)
+        })
+        .and_then(|image| {
             clock()
                 .duration_since(UNIX_EPOCH)
                 .map_err(invalid)
@@ -375,6 +393,135 @@ fn check_verity_superblock(
             }
             Ok(())
         })
+}
+
+/// systemd's root-verity-sig JSON object, in the shape systemd-repart writes.
+///
+/// systemd v260.2 ignores other keys and takes the first of duplicate keys;
+/// both reject here, as do missing keys, non-string or null values and
+/// trailing data. JSON whitespace and escapes decode as systemd decodes them.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct VeritySignatureJson {
+    root_hash: String,
+    #[serde(default, deserialize_with = "present")]
+    certificate_fingerprint: Option<String>,
+    signature: String,
+}
+
+fn present<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
+    String::deserialize(deserializer).map(Some)
+}
+
+/// Accepts only a JSON object: a derived struct would also accept an array,
+/// which systemd's key lookup rejects.
+struct JsonObject;
+
+impl<'de> Visitor<'de> for JsonObject {
+    type Value = VeritySignatureJson;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a root-verity-sig JSON object")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
+        VeritySignatureJson::deserialize(MapAccessDeserializer::new(map))
+    }
+}
+
+fn parse_verity_signature(text: &[u8]) -> Result<VeritySignatureJson, serde_json::Error> {
+    let mut deserializer = serde_json::Deserializer::from_slice(text);
+    deserializer
+        .deserialize_map(JsonObject)
+        .and_then(|json| deserializer.end().map(|()| json))
+}
+
+/// Pre-activation root-verity-sig check over the same held image.
+///
+/// systemd reads the root hash and PKCS#7 signature it activates with from
+/// the JSON in SIM1's root-verity-sig partition (ordinal 2), not from SIM1.
+/// The partition must hold at most 4 MiB, with only NUL bytes after the first
+/// NUL. Its `rootHash` must equal the lowercase hex SIM1 root hash and its
+/// `signature` the canonical padded base64 of SIM1's PKCS#7 proof bytes:
+/// canonical base64 is a bijection, so this equals a strict decode compared
+/// byte for byte, and any invalid, uppercase, unpadded or whitespace-bearing
+/// encoding rejects. A present `certificateFingerprint` must be 64 lowercase
+/// hexadecimal characters.
+fn check_verity_signature(
+    root_image: &File,
+    signature: &PartitionDescriptor,
+    root_hash: &[u8; 32],
+    proof: &[u8],
+) -> Result<(), SelectorBoundaryError> {
+    usize::try_from(signature.length_bytes)
+        .ok()
+        .filter(|length| *length <= VERITY_SIGNATURE_LIMIT)
+        .ok_or(SelectorBoundaryError::ArtifactInvalid)
+        .and_then(|length| {
+            let mut bytes = vec![0; length];
+            root_image
+                .read_exact_at(&mut bytes, signature.start_bytes)
+                .map(|()| bytes)
+                .map_err(invalid)
+        })
+        .and_then(|bytes| {
+            let end = bytes
+                .iter()
+                .position(|byte| *byte == 0)
+                .unwrap_or(bytes.len());
+            if bytes[end..].iter().any(|byte| *byte != 0) {
+                return Err(SelectorBoundaryError::ArtifactInvalid);
+            }
+            parse_verity_signature(&bytes[..end]).map_err(invalid)
+        })
+        .and_then(|json| {
+            if json.root_hash != lower_hex(root_hash)
+                || json.signature != base64(proof)
+                || json.certificate_fingerprint.is_some_and(|fingerprint| {
+                    fingerprint.len() != 64
+                        || !fingerprint
+                            .bytes()
+                            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+                })
+            {
+                return Err(SelectorBoundaryError::ArtifactInvalid);
+            }
+            Ok(())
+        })
+}
+
+fn lower_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    bytes
+        .iter()
+        .flat_map(|byte| [HEX[usize::from(byte >> 4)], HEX[usize::from(byte & 15)]])
+        .map(char::from)
+        .collect()
+}
+
+/// RFC 4648 standard base64 with padding, as systemd-repart writes it.
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut encoded = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let mut group = [0_u8; 3];
+        group[..chunk.len()].copy_from_slice(chunk);
+        let sextets = [
+            group[0] >> 2,
+            ((group[0] & 3) << 4) | (group[1] >> 4),
+            ((group[1] & 15) << 2) | (group[2] >> 6),
+            group[2] & 63,
+        ];
+        // A chunk of n bytes yields n + 1 symbols, then `=` padding.
+        for (index, sextet) in sextets.into_iter().enumerate() {
+            encoded.push(if index <= chunk.len() {
+                char::from(ALPHABET[usize::from(sextet)])
+            } else {
+                '='
+            });
+        }
+    }
+    encoded
 }
 
 fn invalid<T>(_: T) -> SelectorBoundaryError {
@@ -722,7 +869,7 @@ pub mod tests {
     #[test]
     fn provider_rejects_a_non_erofs_root_before_activation() -> TestResult {
         use crate::selector::installation::tests::{
-            admitted_state_with_salt, ddi_fixture, ddi_partitions, ddi_salt, IMAGE_PROOF,
+            admitted_state_with_salt, ddi_fixture, ddi_partitions, ddi_salt, ImageSigning,
         };
 
         let (mut image, partitions) = ddi_fixture("x86-64")?;
@@ -734,7 +881,7 @@ pub mod tests {
                 &image,
                 b"adapter",
                 &partitions,
-                IMAGE_PROOF,
+                &ImageSigning::ddi("x86-64")?,
                 ddi_salt("x86-64")?
             )?,
             request_fixture()?,
@@ -747,14 +894,15 @@ pub mod tests {
     #[test]
     fn provider_rejects_a_sim1_salt_other_than_the_held_superblock() -> TestResult {
         use crate::selector::installation::tests::{
-            admitted_state_with_salt, ddi_fixture, ddi_salt, IMAGE_PROOF,
+            admitted_state_with_salt, ddi_fixture, ddi_salt, ImageSigning,
         };
 
         let (image, partitions) = ddi_fixture("x86-64")?;
         let mut other_salt = ddi_salt("x86-64")?;
         other_salt[0] ^= 1;
+        let signing = ImageSigning::ddi("x86-64")?;
         assert!(ProviderImageSnapshot::from_installation(
-            admitted_state_with_salt(&image, b"adapter", &partitions, IMAGE_PROOF, other_salt)?,
+            admitted_state_with_salt(&image, b"adapter", &partitions, &signing, other_salt)?,
             request_fixture()?,
             fixture_time
         )
@@ -811,6 +959,255 @@ pub mod tests {
             let mut beyond = verity.clone();
             beyond.start_bytes = u64::try_from(image.len())?;
             assert!(check_verity_superblock(&write(&image)?, &beyond, &salt).is_err());
+        }
+        Ok(())
+    }
+
+    /// The systemd-repart JSON text of a DDI fixture's root-verity-sig partition.
+    fn ddi_signature_json(image: &[u8], signature: &PartitionDescriptor) -> TestResult<Vec<u8>> {
+        let start = usize::try_from(signature.start_bytes)?;
+        let partition = &image[start..start + usize::try_from(signature.length_bytes)?];
+        let end = partition
+            .iter()
+            .position(|byte| *byte == 0)
+            .ok_or("fixture JSON is not NUL-terminated")?;
+        Ok(partition[..end].to_vec())
+    }
+
+    /// `image` with its signature partition replaced by `json` and NUL padding.
+    fn with_signature_json(
+        image: &[u8],
+        signature: &PartitionDescriptor,
+        json: &[u8],
+    ) -> TestResult<Vec<u8>> {
+        let start = usize::try_from(signature.start_bytes)?;
+        let length = usize::try_from(signature.length_bytes)?;
+        let mut padded = json.to_vec();
+        padded.resize(length, 0);
+        let mut changed = image.to_vec();
+        changed[start..start + length].copy_from_slice(&padded);
+        Ok(changed)
+    }
+
+    fn replace_once(json: &[u8], from: &str, to: &str) -> TestResult<Vec<u8>> {
+        let text = std::str::from_utf8(json)?;
+        if text.matches(from).count() != 1 {
+            return Err(format!("{from} does not occur once").into());
+        }
+        Ok(text.replacen(from, to, 1).into_bytes())
+    }
+
+    fn temporary_file(bytes: &[u8]) -> TestResult<File> {
+        use std::io::Write as _;
+
+        let mut file = tempfile::tempfile()?;
+        file.write_all(bytes)?;
+        Ok(file)
+    }
+
+    #[test]
+    fn base64_matches_rfc_4648_vectors() {
+        for (input, encoded) in [
+            ("", ""),
+            ("f", "Zg=="),
+            ("fo", "Zm8="),
+            ("foo", "Zm9v"),
+            ("foob", "Zm9vYg=="),
+            ("fooba", "Zm9vYmE="),
+            ("foobar", "Zm9vYmFy"),
+        ] {
+            assert_eq!(base64(input.as_bytes()), encoded);
+        }
+        assert_eq!(base64(&[0xfb, 0xff, 0xbf]), "+/+/");
+        assert_eq!(lower_hex(&[0x00, 0x9f, 0xa0, 0xff]), "009fa0ff");
+    }
+
+    #[test]
+    fn verity_signature_json_must_equal_sim1_on_both_architectures() -> TestResult {
+        use crate::selector::installation::tests::{ddi_fixture, ImageSigning};
+
+        for architecture in ["x86-64", "arm64"] {
+            let (image, partitions) = ddi_fixture(architecture)?;
+            let signing = ImageSigning::ddi(architecture)?;
+            let signature = &partitions[2];
+            let check = |image: &[u8]| {
+                temporary_file(image).map(|file| {
+                    check_verity_signature(&file, signature, signing.root_hash(), signing.proof())
+                })
+            };
+            // systemd-repart's own partition, unchanged, on both architectures.
+            check(&image)??;
+            let json = ddi_signature_json(&image, signature)?;
+            let text = std::str::from_utf8(&json)?.to_owned();
+            let root_hash = lower_hex(signing.root_hash());
+            let encoded = base64(signing.proof());
+            let root_pair = format!("\"rootHash\":\"{root_hash}\"");
+            let signature_pair = format!("\"signature\":\"{encoded}\"");
+            let fingerprint_start = text
+                .find(",\"certificateFingerprint\"")
+                .ok_or("no fingerprint")?;
+            let fingerprint_pair =
+                &text[fingerprint_start..text.find(",\"signature\"").ok_or("no signature")?];
+            assert!(text.contains(&root_pair) && text.contains(&signature_pair));
+
+            let mut other_root = root_hash.clone().into_bytes();
+            other_root[0] = if other_root[0] == b'0' { b'1' } else { b'0' };
+            let other_root = String::from_utf8(other_root)?;
+            let mut other_signature = encoded.clone().into_bytes();
+            other_signature[10] = if other_signature[10] == b'A' {
+                b'B'
+            } else {
+                b'A'
+            };
+            let other_signature = String::from_utf8(other_signature)?;
+            let unpadded = encoded.trim_end_matches('=');
+            let accepted: Vec<Vec<u8>> = vec![
+                // certificateFingerprint is optional, as systemd-repart
+                // omits it without OpenSSL; insignificant whitespace is JSON.
+                replace_once(&json, fingerprint_pair, "")?,
+                replace_once(&json, "{", "{ \n")?,
+            ];
+            let rejected: Vec<Vec<u8>> = vec![
+                replace_once(&json, &root_hash, &other_root)?,
+                replace_once(&json, &root_hash, &root_hash.to_uppercase())?,
+                replace_once(&json, &encoded, &other_signature)?,
+                replace_once(&json, &encoded, unpadded)?,
+                replace_once(&json, &encoded, &format!("!{}", &encoded[1..]))?,
+                replace_once(
+                    &json,
+                    &encoded,
+                    &format!("{}\\n{}", &encoded[..4], &encoded[4..]),
+                )?,
+                replace_once(&json, &format!("{root_pair},"), "")?,
+                replace_once(&json, &format!(",{signature_pair}"), "")?,
+                replace_once(&json, "}", ",\"extra\":\"\"}")?,
+                replace_once(&json, "{", &format!("{{{root_pair},"))?,
+                replace_once(&json, "}", &format!(",{signature_pair}}}"))?,
+                replace_once(
+                    &json,
+                    fingerprint_pair,
+                    &format!("{fingerprint_pair}{fingerprint_pair}"),
+                )?,
+                replace_once(&json, fingerprint_pair, ",\"certificateFingerprint\":null")?,
+                replace_once(
+                    &json,
+                    fingerprint_pair,
+                    &format!(",\"certificateFingerprint\":\"{}\"", "A".repeat(64)),
+                )?,
+                replace_once(
+                    &json,
+                    fingerprint_pair,
+                    &format!(",\"certificateFingerprint\":\"{}\"", "a".repeat(63)),
+                )?,
+                replace_once(&json, &format!("\"{root_hash}\""), "1")?,
+                format!("[\"{root_hash}\",\"{encoded}\"]").into_bytes(),
+                format!("[\"{root_hash}\",\"{}\",\"{encoded}\"]", "a".repeat(64)).into_bytes(),
+                replace_once(&json, "}", "}x")?,
+                replace_once(&json, "}", "}{}")?,
+                Vec::new(),
+            ];
+            for (variant, accepts) in accepted
+                .iter()
+                .map(|json| (json, true))
+                .chain(rejected.iter().map(|json| (json, false)))
+            {
+                let result = check(&with_signature_json(&image, signature, variant)?)?;
+                assert_eq!(
+                    result.is_ok(),
+                    accepts,
+                    "{architecture}: {}",
+                    String::from_utf8_lossy(variant)
+                );
+            }
+
+            // Only NUL bytes may follow the first NUL.
+            let mut trailing = image.clone();
+            let end = usize::try_from(signature.start_bytes + signature.length_bytes)?;
+            trailing[end - 1] = b' ';
+            assert!(check(&trailing)?.is_err());
+            // A partition that the JSON fills exactly needs no NUL.
+            let mut exact = signature.clone();
+            exact.length_bytes = u64::try_from(json.len())?;
+            let file = temporary_file(&image)?;
+            check_verity_signature(&file, &exact, signing.root_hash(), signing.proof())?;
+            let mut beyond = signature.clone();
+            beyond.start_bytes = u64::try_from(image.len())?;
+            assert!(
+                check_verity_signature(&file, &beyond, signing.root_hash(), signing.proof())
+                    .is_err()
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn verity_signature_partition_is_bounded_at_systemds_four_mib() -> TestResult {
+        use crate::selector::installation::tests::{ddi_fixture, ImageSigning};
+
+        let (image, partitions) = ddi_fixture("x86-64")?;
+        let signing = ImageSigning::ddi("x86-64")?;
+        let mut json = ddi_signature_json(&image, &partitions[2])?;
+        json.resize(VERITY_SIGNATURE_LIMIT + 1, 0);
+        let file = temporary_file(&json)?;
+        let mut signature = partitions[2].clone();
+        signature.start_bytes = 0;
+        signature.length_bytes = u64::try_from(VERITY_SIGNATURE_LIMIT)?;
+        check_verity_signature(&file, &signature, signing.root_hash(), signing.proof())?;
+        signature.length_bytes += 1;
+        assert!(
+            check_verity_signature(&file, &signature, signing.root_hash(), signing.proof())
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn provider_rejects_a_signature_partition_other_than_sim1() -> TestResult {
+        use crate::selector::installation::tests::{
+            admitted_state_with_salt, ddi_fixture, ddi_partitions, ddi_salt, ImageSigning,
+            IMAGE_PROOF,
+        };
+
+        let (image, partitions) = ddi_fixture("x86-64")?;
+        let salt = ddi_salt("x86-64")?;
+        let signing = ImageSigning::ddi("x86-64")?;
+        // A SIM1 whose own root hash and proof verify, over an image whose
+        // signature partition names systemd-repart's root hash and proof.
+        let synthetic = ImageSigning::synthetic(IMAGE_PROOF);
+        let open = |image: &[u8],
+                    partitions: &[PartitionDescriptor; 3],
+                    signing: &ImageSigning|
+         -> TestResult<ProviderImageSnapshot> {
+            let state = admitted_state_with_salt(image, b"adapter", partitions, signing, salt)?;
+            Ok(ProviderImageSnapshot::from_installation(
+                state,
+                request_fixture()?,
+                fixture_time,
+            )?)
+        };
+        assert!(open(&image, &partitions, &synthetic).is_err());
+        // The same image is admitted under the SIM1 its partition names.
+        open(&image, &partitions, &signing)?;
+        // One changed rootHash or signature character, digests recomputed.
+        let json = ddi_signature_json(&image, &partitions[2])?;
+        let root_hash = lower_hex(signing.root_hash());
+        let mut other_root = root_hash.clone().into_bytes();
+        other_root[63] = if other_root[63] == b'0' { b'1' } else { b'0' };
+        let encoded = base64(signing.proof());
+        let mut other_signature = encoded.clone().into_bytes();
+        other_signature[0] = if other_signature[0] == b'A' {
+            b'B'
+        } else {
+            b'A'
+        };
+        for (from, to) in [
+            (root_hash, String::from_utf8(other_root)?),
+            (encoded, String::from_utf8(other_signature)?),
+        ] {
+            let changed =
+                with_signature_json(&image, &partitions[2], &replace_once(&json, &from, &to)?)?;
+            let changed_partitions = ddi_partitions("x86-64", &changed)?;
+            assert!(open(&changed, &changed_partitions, &signing).is_err());
         }
         Ok(())
     }

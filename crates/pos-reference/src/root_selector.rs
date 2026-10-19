@@ -3206,14 +3206,17 @@ mod tests {
     }
 
     /// Held-image admission through the real public entry point, with the
-    /// fixed root-owned installation staged in each rejecting state.
+    /// fixed root-owned installation staged in each rejecting state, after a
+    /// snapshot open rejected for a root-verity-sig partition other than SIM1.
     #[test]
     fn held_image_admission_rejects_each_staged_installation_state() -> TestResult {
         use crate::provider_admission::tests::request_for;
         use crate::provider_admission::ProviderImageSnapshot;
         use crate::selector::installation::tests::updates::{complete_live_update, UpdateFixture};
         use crate::selector::installation::tests::{
-            installed_object_path, materialize_root_selector_state,
+            admitted_state_with_salt, ddi_fixture, ddi_salt, installed_object_path,
+            materialize_installation_state, materialize_root_selector_state, ImageSigning,
+            IMAGE_PROOF,
         };
         use crate::selector::installation::{InstallationObjectKind, SANDBOX_ARTIFACT_ROOT};
 
@@ -3225,8 +3228,28 @@ mod tests {
         ) {
             return Ok(());
         }
-        let _paths = FixedCompositionFixture::create()?;
         let root = Path::new(SANDBOX_ARTIFACT_ROOT);
+        // SIM1's own root hash and proof verify, but its image's
+        // root-verity-sig partition names systemd-repart's: open rejects.
+        {
+            let _paths = FixedCompositionFixture::create()?;
+            let (image, partitions) = ddi_fixture("x86-64")?;
+            let state = admitted_state_with_salt(
+                &image,
+                b"adapter",
+                &partitions,
+                &ImageSigning::synthetic(IMAGE_PROOF),
+                ddi_salt("x86-64")?,
+            )?;
+            let installed = materialize_installation_state(
+                root,
+                &crate::selector_test_support::air_gapped_corpus()?,
+                state,
+            )?;
+            let request = request_for(&installed)?.to_canonical_cbor()?;
+            assert!(ProviderImageSnapshot::open(&request).is_err());
+        }
+        let _paths = FixedCompositionFixture::create()?;
         let installed = materialize_root_selector_state(root)?;
         let request = request_for(&installed)?.to_canonical_cbor()?;
         let snapshot = ProviderImageSnapshot::open(&request)?;
