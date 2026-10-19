@@ -914,6 +914,16 @@ pub struct FactualFoldSourceV1 {
     pub window: FactualFoldWindowV1,
 }
 
+impl FactualFoldSourceV1 {
+    /// The head of the fold cursor: the last fold checkpoint node of the
+    /// inherited prefix, if any.
+    #[must_use]
+    pub fn head(&self) -> Option<&DependencyNodeRecordV1> {
+        let cursor = self.cursor.as_ref();
+        cursor.and_then(|found| found.head.as_ref())
+    }
+}
+
 /// One output draft of a Driver with its draft-specific inputs.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FactualOutputV1 {
@@ -1121,9 +1131,15 @@ fn needs_ingress(event: &FactualFoldEventV1, forwarded: &BTreeSet<Seq>) -> bool 
     event.node.is_none() && !forwarded.contains(&event.seq)
 }
 
-/// One fold input of a window: its index in the window, the Event, and
-/// whether it needs a new ingress node.
-type FoldInput<'a> = (usize, &'a FactualFoldEventV1, bool);
+/// One fold input of a window.
+struct FoldInput<'a> {
+    /// Its index in the window.
+    index: usize,
+    /// The Event.
+    event: &'a FactualFoldEventV1,
+    /// Whether it needs a new ingress node.
+    needs_ingress: bool,
+}
 
 /// The fold inputs of a scheduled Tick's window, before the fit (R4.2).
 struct FoldPlan<'a> {
@@ -1156,12 +1172,16 @@ impl<'a> FoldPlan<'a> {
             .iter()
             .enumerate()
             .filter(|(_, event)| is_factual_fold_input(&event.event_type, event.node_class))
-            .map(|(index, event)| (index, event, needs_ingress(event, forwarded)))
+            .map(|(index, event)| FoldInput {
+                index,
+                event,
+                needs_ingress: needs_ingress(event, forwarded),
+            })
             .collect();
         Ok(Self {
             source,
             after,
-            head: cursor.and_then(|cursor| cursor.head.as_ref()),
+            head: source.head(),
             inputs,
         })
     }
@@ -1188,7 +1208,9 @@ impl<'a> FoldPlan<'a> {
         let chunks = kept
             .div_ceil(MAX_FACTUAL_FOLD_EVENTS_PER_CHECKPOINT_V1)
             .max(1);
-        let ingress = self.newest(kept).iter().filter(|input| input.2).count();
+        let newest = self.newest(kept);
+        let fresh = newest.iter().filter(|input| input.needs_ingress);
+        let ingress = fresh.count();
         (chunks + history + ingress, kept + head + history + chunks)
     }
 
@@ -1233,7 +1255,7 @@ impl<'a> FoldPlan<'a> {
     /// `seq` before the oldest kept fold input, or `observed_through` when
     /// none is kept.
     fn history_content(&self, kept: &[FoldInput<'a>]) -> Hash {
-        let oldest = kept.first().map(|input| input.1.seq);
+        let oldest = kept.first().map(|input| input.event.seq);
         let through = oldest.map_or(self.source.observed_through, seq_before);
         factual_fold_history_content_digest(seq_after(self.after), through)
     }
@@ -1249,14 +1271,14 @@ impl<'a> FoldPlan<'a> {
     ) -> Vec<FactualFoldChunkV1> {
         let observed_through = self.source.observed_through;
         let size = MAX_FACTUAL_FOLD_EVENTS_PER_CHECKPOINT_V1;
-        let pieces: Vec<&[FoldInput<'a>]> = if kept.is_empty() {
+        let groups: Vec<&[FoldInput<'a>]> = if kept.is_empty() {
             vec![kept]
         } else {
             kept.chunks(size).collect()
         };
-        let count = pieces.len();
+        let count = groups.len();
         let mut from = if collapsed {
-            let oldest = kept.first().map(|input| input.1.seq);
+            let oldest = kept.first().map(|input| input.event.seq);
             oldest.unwrap_or_else(|| seq_after(observed_through))
         } else {
             seq_after(self.after)
@@ -1264,16 +1286,16 @@ impl<'a> FoldPlan<'a> {
         let head = self.head.map(|found| found.coordinate().artifact_digest());
         let mut previous = head.unwrap_or_else(Hash::zero);
         let mut chunks = Vec::with_capacity(count);
-        for (ordinal, (position, piece)) in (0_u32..).zip(pieces.into_iter().enumerate()) {
-            let through = match piece.last() {
-                Some(input) if position + 1 < count => input.1.seq,
+        for (ordinal, (position, group)) in (0_u32..).zip(groups.into_iter().enumerate()) {
+            let through = match group.last() {
+                Some(input) if position + 1 < count => input.event.seq,
                 _ => observed_through,
             };
-            let refs: Vec<FactualEventRefV1> = piece
+            let refs: Vec<FactualEventRefV1> = group
                 .iter()
                 .map(|input| FactualEventRefV1 {
-                    seq: input.1.seq,
-                    payload_hash: input.1.payload_hash,
+                    seq: input.event.seq,
+                    payload_hash: input.event.payload_hash,
                 })
                 .collect();
             let content = factual_fold_checkpoint_content_digest(previous, from, through, &refs);
@@ -1286,7 +1308,7 @@ impl<'a> FoldPlan<'a> {
             };
             previous = factual_artifact_digest(node.0, key, content);
             from = seq_after(through);
-            let events = piece.iter().map(|input| input.0).collect();
+            let events = group.iter().map(|input| input.index).collect();
             chunks.push(FactualFoldChunkV1 { content, events });
         }
         chunks
@@ -1473,9 +1495,8 @@ impl<'a> FactualAssembly<'a> {
         };
         let tick = self.context.tick;
         let layout = factual_fold_layout((self.context.timeline_id, tick), source, &rest)?;
-        let cursor = source.cursor.as_ref();
-        let cursor_head = cursor.and_then(|found| found.head.as_ref());
-        let head = cursor_head
+        let head = source
+            .head()
             .map(|node| host.resolve(tick, &prior_input(node)))
             .transpose()?;
         let history = layout.history.map(|found| self.push_fold_history(found));

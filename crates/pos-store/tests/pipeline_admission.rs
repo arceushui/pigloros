@@ -3092,26 +3092,22 @@ fn the_store_recomputes_the_chunks_and_the_collapse_of_large_windows() {
 fn assert_truncated_window(name: &str, store: &mut dyn Harness) {
     let fixture = prepare(store);
     let timeline = fixture.timeline;
-    let ephemeral = OutputAuthorityV1::Ephemeral;
-    // 65,536 Events without a fold input are scanned whole: no fold node.
-    append_many(store, timeline, HOST_CONSENT_CLOSED_EVENT_TYPE, 65_536);
-    let (one, folded) = commit_folded(store, &before_first(&fixture), 65_536, ephemeral);
-    assert!(folded.fold().checkpoints.is_empty(), "{name}");
-    let scanned = Some((65_536, Hash::zero()));
-    assert_eq!(cursor_of(store, timeline), scanned, "{name}");
-    // Tick 1's presentation-only output and 65,536 more: 65,537 Events, the
-    // oldest collapsed with the rest of the range into the fold-history node,
-    // and one fold node with an empty chunk behind it.
-    append_many(store, timeline, HOST_CONSENT_CLOSED_EVENT_TYPE, 65_536);
-    let (_, folded) = commit_folded(store, &one, 131_073, ephemeral);
-    let history = fold_history_digest(timeline, 2, 65_537, 131_073);
+    // 65,537 Events without a fold input: the oldest is left out of the
+    // window and collapsed with the rest of the range into the fold-history
+    // node, and one fold node with an empty chunk stands behind it.
+    append_many(store, timeline, HOST_CONSENT_CLOSED_EVENT_TYPE, 65_537);
+    let first = before_first(&fixture);
+    let authoritative = OutputAuthorityV1::Authoritative;
+    let (_, folded) = commit_folded(store, &first, 65_537, authoritative);
+    let history = fold_history_digest(timeline, 1, 1, 65_537);
     assert_eq!(history_of(&folded), history, "{name}");
     assert_eq!(fold_inputs(&folded, 0), [history], "{name}");
 }
 
-/// ADR-064 R4 conformance test 4, store part: a window of 65,536 Events is
-/// scanned whole, and one of 65,537 Events without a fold input records a
-/// fold-history node and one fold node with an empty chunk.
+/// ADR-064 R4 conformance test 4, store part: a window of 65,537 Events
+/// without a fold input records a fold-history node over the whole range and
+/// one fold node with an empty chunk. (A whole window of 65,536 records no
+/// fold node; the assembly tests of `pos_core` cover that vector.)
 #[test]
 fn the_store_recomputes_the_collapse_of_a_truncated_window() {
     let clock = TestClock::at(1_000);
@@ -3120,10 +3116,9 @@ fn the_store_recomputes_the_collapse_of_a_truncated_window() {
     }
 }
 
-/// The contents of the verified-prefix nodes of a Tick whose step nodes
-/// input them: one fewer than a node's input cap.
-fn prefix_contents() -> Vec<Hash> {
-    (0..MAX_DEPENDENCY_NODE_INPUTS_V1 - 1)
+/// The contents of `count` verified-prefix nodes.
+fn prefix_contents(count: usize) -> Vec<Hash> {
+    (0..count)
         .map(|index| {
             let mut bytes = [0_u8; 32];
             bytes[..8].copy_from_slice(&ok(u64::try_from(index)).to_be_bytes());
@@ -3165,19 +3160,37 @@ fn heavy_drivers(drafts: &[EventDraft], edges: usize) -> Vec<FactualDriverStepV1
         .collect()
 }
 
-/// The declaration of a scheduled `attempt` whose rest holds `edges` step
-/// edges and one output edge per draft, with the fold part of `source`.
+/// The rest of a heavy scheduled record: its verified-prefix nodes, the
+/// edges of its step nodes, and ingress nodes no step or output node inputs.
+struct HeavyRest {
+    prefix: usize,
+    step_edges: usize,
+    orphans: Vec<FactualIngressEventV1>,
+}
+
+/// The rest whose step nodes add `step_edges` edges over the most
+/// verified-prefix nodes one step node can input.
+fn edge_heavy(step_edges: usize) -> HeavyRest {
+    HeavyRest {
+        prefix: MAX_DEPENDENCY_NODE_INPUTS_V1 - 1,
+        step_edges,
+        orphans: Vec::new(),
+    }
+}
+
+/// The declaration of a scheduled `attempt` whose rest is `rest` and one
+/// output edge per draft, with the fold part of `source`.
 fn heavy_declared(
     attempt: &Attempt,
-    edges: usize,
+    rest: HeavyRest,
     source: Option<FactualFoldSourceV1>,
 ) -> FactualTickDependenciesV1 {
     let shape = FactualTickShapeV1::Scheduled(FactualScheduledTickV1 {
         snapshot_digest: hash(61),
-        prefix_contents: prefix_contents(),
+        prefix_contents: prefix_contents(rest.prefix),
         history_contents: Vec::new(),
-        ingress_events: Vec::new(),
-        drivers: heavy_drivers(&attempt.drafts, edges),
+        ingress_events: rest.orphans,
+        drivers: heavy_drivers(&attempt.drafts, rest.step_edges),
         fold: source.map(Box::new),
     });
     declared(attempt, hash(1), &shape)
@@ -3194,16 +3207,16 @@ fn assert_fit_and_reserve(name: &str, store: &mut dyn Harness) {
     // Tick 2's output (4) and 499 plain Events: 500 fold inputs behind the head.
     append_many(store, timeline, "world.action", 499);
     let third = scheduled_after(&second, 3, 503);
-    // A rest of 262,142 edges leaves no room for the minimal fold part.
-    let crowded = heavy_declared(&third, MAX_TICK_DEPENDENCY_EDGES_V1 - 3, None);
+    // A rest of 262,142 edges, one over the 262,141 the reserve leaves it.
+    let over = edge_heavy(MAX_TICK_DEPENDENCY_EDGES_V1 - 3);
+    let crowded = heavy_declared(&third, over, None);
     let case = invalid_for("rest over the reserve", third.clone(), crowded);
     assert_all_refused(name, store, vec![case]);
     // A rest of 262,144 - 103 edges keeps the newest 100 fold inputs.
     let source = fold_source(store, timeline, 503);
-    let cursor = source.cursor.as_ref();
-    let head = cursor.and_then(|found| found.head.clone());
-    let edges = MAX_TICK_DEPENDENCY_EDGES_V1 - 104;
-    let fitted = heavy_declared(&third, edges, Some(source));
+    let head = source.head().cloned();
+    let rest = edge_heavy(MAX_TICK_DEPENDENCY_EDGES_V1 - 104);
+    let fitted = heavy_declared(&third, rest, Some(source));
     let total = fitted.record().edges().len();
     assert_eq!(total, MAX_TICK_DEPENDENCY_EDGES_V1, "{name}");
     let history = fold_history_digest(timeline, 3, 4, 403);
@@ -3228,5 +3241,60 @@ fn the_store_recomputes_the_fit_and_refuses_a_rest_over_the_reserve() {
     let clock = TestClock::at(1_000);
     for (name, mut store) in stores(&clock) {
         assert_fit_and_reserve(name, store.as_mut());
+    }
+}
+
+/// The node part of the reserved headroom, on one store: a rest of 65,535
+/// nodes is refused, and a rest of exactly 65,534 keeps the minimal fold part
+/// plus what needs no new node. The rest holds an orphan: an ingress node no
+/// step or output node inputs. The builder counts it in the rest, as a
+/// forwarded Event, and the store, once it is kept, in the fold part; both
+/// derive the same fit.
+fn assert_node_reserve(name: &str, store: &mut dyn Harness) {
+    let fixture = prepare(store);
+    let timeline = fixture.timeline;
+    append_many(store, timeline, "world.action", 3);
+    let events = ok(store.read(timeline, SeqRange::all()));
+    let first = Attempt {
+        drafts: drafts(&[b"n"]),
+        ..scheduled_after(&before_first(&fixture), 2, 3)
+    };
+    // Snapshot, prefix nodes, one step node and one output node: 65,535.
+    let crowded = HeavyRest {
+        prefix: MAX_TICK_DEPENDENCY_NODES_V1 - 4,
+        step_edges: 1,
+        orphans: Vec::new(),
+    };
+    let over = heavy_declared(&first, crowded, None);
+    let case = invalid_for("rest over the node reserve", first.clone(), over);
+    assert_all_refused(name, store, vec![case]);
+    // The same with one prefix node fewer and the orphan of Event 3: 65,534.
+    // Events 1 and 2 would each need a new node, so only Event 3 is kept,
+    // behind a fold-history node over Events 1 and 2.
+    let boundary = HeavyRest {
+        prefix: MAX_TICK_DEPENDENCY_NODES_V1 - 6,
+        step_edges: 1,
+        orphans: vec![ingress_event(&events[2])],
+    };
+    let source = fold_source(store, timeline, 3);
+    let fitted = heavy_declared(&first, boundary, Some(source));
+    let nodes = fitted.record().nodes().len();
+    assert_eq!(nodes, MAX_TICK_DEPENDENCY_NODES_V1, "{name}");
+    let history = fold_history_digest(timeline, 1, 1, 2);
+    assert_eq!(history_of(&fitted), history, "{name}");
+    let orphan = digest_at(fitted.record(), fitted.event_nodes()[0].node_index);
+    let expected = sorted(vec![history, orphan]);
+    assert_eq!(fold_inputs(&fitted, 0), expected, "{name}");
+    commit_declared(store, &first, fitted);
+}
+
+/// ADR-064 R4.2 reserved headroom, nodes: the store refuses a basis whose
+/// rest exceeds 65,534 nodes and recomputes the fit of one whose rest is
+/// exactly 65,534, an orphan ingress node included.
+#[test]
+fn the_store_refuses_a_rest_over_the_node_reserve_and_fits_one_at_it() {
+    let clock = TestClock::at(1_000);
+    for (name, mut store) in stores(&clock) {
+        assert_node_reserve(name, store.as_mut());
     }
 }

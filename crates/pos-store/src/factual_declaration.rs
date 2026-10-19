@@ -474,7 +474,9 @@ fn driver_inputs(nodes: &[DependencyNodeRecordV1]) -> BTreeSet<Hash> {
 /// fold-only ingress nodes, and every edge but those into the fold checkpoint
 /// nodes and the snapshot node. An ingress node is forwarded-needed iff a
 /// step or output node inputs it; one that only a fold checkpoint node inputs
-/// is the fold part's.
+/// is the fold part's, as it is the builder's (`assemble_factual_tick`
+/// counts every forwarded ingress node in the rest, and every ingress node
+/// it adds for a kept fold input in the fold part).
 fn fold_rest(dependencies: &FactualTickDependenciesV1) -> FactualFoldRestV1 {
     let record = dependencies.record();
     let nodes = record.nodes();
@@ -534,13 +536,6 @@ pub(crate) fn fold_holds(
     layout.is_ok_and(|expected| fold_matches(&check, dependencies, &expected))
 }
 
-/// The artifact digest of the fold-head index's head, if the cursor has one.
-fn cursor_head(source: &FactualFoldSourceV1) -> Option<Hash> {
-    let cursor = source.cursor.as_ref();
-    let head = cursor.and_then(|found| found.head.as_ref());
-    head.map(|node| node.coordinate().artifact_digest())
-}
-
 /// Whether the record's fold-history, fold checkpoint and snapshot nodes are
 /// exactly those of the derived `expected` fold part.
 fn fold_matches(
@@ -552,13 +547,15 @@ fn fold_matches(
     let fold = dependencies.fold();
     let checkpoints = bound_checkpoints(nodes, fold).unwrap_or_default();
     let history = bound_history(nodes, fold).unwrap_or_default();
-    let head = cursor_head(check.source);
+    let found = check.source.head();
+    let head = found.map(|node| node.coordinate().artifact_digest());
     let first = history.first();
     let collapsed = first.map(|node| node.coordinate().artifact_digest());
     let behind: Vec<Hash> = head.into_iter().chain(collapsed).collect();
+    let bare = checkpoints.is_empty();
     history_matches(check, &history, expected.history)
         && chain_matches(check, &checkpoints, &expected.checkpoints, behind)
-        && snapshot_head_holds(nodes, checkpoints.is_empty(), head)
+        && (!bare || snapshot_head_holds(nodes, head))
 }
 
 /// The record holds a fold-history node iff the derivation does, with the
@@ -630,17 +627,16 @@ fn chunk_inputs(
     resolved.map(|found| prefix.chain(found).collect())
 }
 
-/// Check (x) of a `bare` record, one without a fold checkpoint node: the
-/// snapshot node inputs exactly the fold-head index's head, or nothing
-/// without one. With a fold checkpoint node, the shape check already
-/// requires the last.
-fn snapshot_head_holds(nodes: &[DependencyNodeRecordV1], bare: bool, head: Option<Hash>) -> bool {
+/// Check (x) of a record without a fold checkpoint node: the snapshot node
+/// inputs exactly the fold-head index's head, or nothing without one. With a
+/// fold checkpoint node, the shape check already requires the last.
+fn snapshot_head_holds(nodes: &[DependencyNodeRecordV1], head: Option<Hash>) -> bool {
     let expected: Vec<Hash> = head.into_iter().collect();
     let observation = FactualHostOwnerV1::Observation;
     let mut snapshots = nodes
         .iter()
         .filter(|node| is_host_node(node.coordinate(), observation));
-    !bare || snapshots.all(|snapshot| snapshot.input_digests() == expected.as_slice())
+    snapshots.all(|snapshot| snapshot.input_digests() == expected.as_slice())
 }
 
 /// A step node inputs the snapshot node of the record.
