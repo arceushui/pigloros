@@ -262,7 +262,12 @@ fn sqlite_replay_case(
     if let Some(unrelated) = fixture.unrelated {
         pin_policy(&mut store, &unrelated.policy)?;
         store.import_verified(&request_for(world, unrelated))?;
-        assert_eq!(store.read_own(world.child_at(1)?.id, SeqRange::all())?.len(), 4);
+        assert_eq!(
+            store
+                .read_own(world.child_at(1)?.id, SeqRange::all())?
+                .len(),
+            4
+        );
     }
     let child = world.child_at(0)?.id;
     let committed = store.read_committed(child, 4)?;
@@ -385,16 +390,36 @@ fn unrelated_valid_fork_preserves_replay_and_replay_at_exact_budgets() -> Fallib
     let built = world.build(&Spec::default())?;
     let unrelated = world.build(&Spec::distinct(1))?;
     let admission = ImportedForkAttributionAdmissionV1::from_envelope(&built.envelope, 1)?;
-    for access in [SqliteReplayAccess::ReadWrite, SqliteReplayAccess::ReadOnly, SqliteReplayAccess::HeldMemory] {
+    for access in [
+        SqliteReplayAccess::ReadWrite,
+        SqliteReplayAccess::ReadOnly,
+        SqliteReplayAccess::HeldMemory,
+    ] {
         for cut in [None, Some(Seq::from_u64(2))] {
-            let fixture = SqliteReplayFixture { world: &world, built: &built, admission: &admission, unrelated: Some(&unrelated) };
+            let fixture = SqliteReplayFixture {
+                world: &world,
+                built: &built,
+                admission: &admission,
+                unrelated: Some(&unrelated),
+            };
             // The existing independent whole-operation oracle is unchanged:
             // foreign Events/EOR/FIA must add no visits, rows or native copies.
             let folded = usize::try_from(cut.unwrap_or(Seq::from_u64(4)).as_u64())?;
             let (bytes, arm_rows, visits) = whole_sqlite_budget(&fixture, 0, folded)?;
             let rows = arm_rows + 1;
-            for (bytes, rows, visits, succeeds) in [(bytes, rows, visits, true), (bytes - 1, rows, visits, false), (bytes, rows - 1, visits, false), (bytes, rows, visits - 1, false)] {
-                sqlite_replay_case(access, &fixture, cut, ForkReplayReadLimitsV1::new(8, visits, rows, bytes, 30_000_000)?, succeeds)?;
+            for (bytes, rows, visits, succeeds) in [
+                (bytes, rows, visits, true),
+                (bytes - 1, rows, visits, false),
+                (bytes, rows - 1, visits, false),
+                (bytes, rows, visits - 1, false),
+            ] {
+                sqlite_replay_case(
+                    access,
+                    &fixture,
+                    cut,
+                    ForkReplayReadLimitsV1::new(8, visits, rows, bytes, 30_000_000)?,
+                    succeeds,
+                )?;
             }
         }
     }
