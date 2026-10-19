@@ -113,8 +113,10 @@ The bundle covers:
   Before that run, it checks that rust-src's `library/Cargo.lock` and
   `library/std/Cargo.toml` equal the files at the pinned Rust 1.97.1 commit.
   Every crate in that graph must also ship as a `wasm32-unknown-unknown`
-  rlib in the sysroot. The bundle lists the remaining shipped rlibs, which
-  are in-tree library crates covered by the Rust component.
+  rlib in the sysroot. The bundle lists the other shipped rlibs. For Rust
+  1.97.1 these are compiler_builtins, which the Rust component covers, and
+  crates that only `test` and `proc_macro` use, which the guests do not link.
+  Review that list whenever the toolchain is bumped.
 - **Non-Cargo fixture components.** The parts that the committed
   compatibility fixtures statically contain:
   - wasi-libc, including the CC0 dlmalloc, MIT musl and BSD-2-Clause

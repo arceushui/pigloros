@@ -652,7 +652,7 @@ class AssembleTests(WorkspaceTest):
             "Cargo graph: rust-std: Rust 1.97.1 library/Cargo.lock, std with features "
             "backtrace, panic-unwind, wasm32-unknown-unknown",
             "MIT text of dlmalloc",
-            "covered by the Rust component below):\n  core, std",
+            "proc_macro crates, which the guests do not link.\n  core, std",
             "Component: wit-bindgen 0.61.1 generated C bindings",
             "no-guest-exports.wasm: first-party code only",
             "from the crate's LICENSE-MIT",
@@ -663,7 +663,7 @@ class AssembleTests(WorkspaceTest):
             [graph["lockfile"][:20] for graph in parsed["graphs"]],
             ["Cargo.lock", PROBE[:20], GUEST[:20], "rust-std: Rust 1.97."],
         )
-        self.assertEqual(parsed["graphs"][3]["in_tree_rlibs"], ["core", "std"])
+        self.assertEqual(parsed["graphs"][3]["other_rlibs"], ["core", "std"])
         self.assertEqual(parsed["graphs"][3]["lockfile_sha256"], notices.sha256(STD_LOCK.encode()))
         self.assertEqual(
             [component["id"] for component in parsed["components"]],
@@ -709,7 +709,7 @@ class AssembleTests(WorkspaceTest):
         (self.workspace.sysroot / notices.RUST_STD_RLIBS / "liballoc-5e.rlib").write_bytes(b"")
         text, _ = notices.assemble(self.workspace.root, graphs, self.workspace.sysroot)
         self.assertIn("  alloc 0.0.0: MIT", text)
-        self.assertIn("covered by the Rust component below):\n  alloc, core, std", text)
+        self.assertIn("proc_macro crates, which the guests do not link.\n  core, std", text)
         alloc["crates"][0]["package"]["manifest_path"] = str(
             self.workspace.root / "alloc/Cargo.toml"
         )

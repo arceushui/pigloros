@@ -755,19 +755,18 @@ def assemble(root: Path, reports: dict[str, dict], sysroot: Path) -> tuple[str, 
             )
         graph_lines, graph_index = render_report(label, digest, reports[lock])
         if lock == RUST_STD:
-            listed = {
-                c["package"]["name"].replace("-", "_")
-                for c in reports[lock]["crates"]
-                if c["package"].get("source") is not None
-            }
-            in_tree = sorted(rlibs - listed)
+            listed = {c["package"]["name"].replace("-", "_") for c in reports[lock]["crates"]}
+            other = sorted(rlibs - listed)
             graph_lines += [
                 "",
-                "Shipped wasm32-unknown-unknown rlibs that are not crates.io crates of this",
-                "graph (in-tree Rust library crates, covered by the Rust component below):",
-                f"  {', '.join(in_tree)}",
+                "Other wasm32-unknown-unknown rlibs in the toolchain sysroot, which std's",
+                "graph above does not list. None is a crates.io crate that std links:",
+                "Rust's own unpublished crates (such as compiler_builtins) are covered by",
+                "the Rust component below, and the rest serve only the test and",
+                "proc_macro crates, which the guests do not link.",
+                f"  {', '.join(other)}",
             ]
-            graph_index["in_tree_rlibs"] = in_tree
+            graph_index["other_rlibs"] = other
         lines += [*graph_lines, ""]
         index["graphs"].append(graph_index)
     component_lines, index["components"] = render_components(manifest, root / NOTICES_DIR)
