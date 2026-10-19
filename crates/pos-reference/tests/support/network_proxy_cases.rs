@@ -653,7 +653,8 @@ fn proxy_accept(listener: &TcpListener) -> io::Result<TcpStream> {
     listener.set_nonblocking(true)?;
     let deadline = Instant::now() + PROXY_SERVER_TIMEOUT;
     loop {
-        match listener.accept() {
+        let accepted = listener.accept();
+        match accepted {
             Ok((stream, _)) => {
                 stream.set_nonblocking(false)?;
                 return Ok(stream);
