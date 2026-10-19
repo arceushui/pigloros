@@ -106,7 +106,7 @@ impl VerifiedRootMount {
 /// mount could not be detached.
 ///
 /// The caller's Tokio runtime must have its time driver enabled, for the
-/// 60 s bound on the mountfsd connection and call.
+/// separate 60 s bounds on the mountfsd connection and on the `MountImage` call.
 pub async fn activate_admitted_root(
     admission: &HeldImageAdmission<'_>,
     directory: &PreparedAttemptDirectory,
@@ -151,7 +151,7 @@ where
         });
     match prepared {
         Ok((expected, image)) => {
-            // The connection shares the MountImage bound (owner decision Q7.4).
+            // The connection gets its own 60 s bound, like the call (owner decision Q7.4).
             let connected = tokio::time::timeout(MountfsdImageActivator::DEADLINE, connect())
                 .await
                 .unwrap_or(Err(ImageActivationError::Transport));
