@@ -41,7 +41,7 @@ const MOUNTFSD_SOCKET: &str = "/run/systemd/io.systemd.MountFileSystem";
 /// mountfsd runs as root; any other peer is rejected before the call.
 const MOUNTFSD_PEER_UID: u32 = 0;
 /// Owner decision Q7.4: one `MountImage` transaction is bounded to 60 s.
-const MOUNT_IMAGE_DEADLINE: Duration = Duration::from_mins(1);
+pub(crate) const MOUNT_IMAGE_DEADLINE: Duration = Duration::from_mins(1);
 
 /// The ADR-087 activation port between provider lifecycle code and systemd.
 ///

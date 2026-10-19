@@ -40,6 +40,7 @@ use self::{
     observe::{HostKernel, Observations},
     verify::Expected,
 };
+use crate::image_activator::MOUNT_IMAGE_DEADLINE;
 use crate::{
     ActivatedRootDirectory, ActivationImage, ImageActivationError, ImageActivator,
     MountfsdImageActivator, PreparedAttemptDirectory, QuarantinedRootMount,
@@ -146,7 +147,11 @@ where
         });
     match prepared {
         Ok((expected, image)) => {
-            let mounted = match connect().await {
+            // The connection shares the MountImage bound (owner decision Q7.4).
+            let connected = tokio::time::timeout(MOUNT_IMAGE_DEADLINE, connect())
+                .await
+                .unwrap_or(Err(ImageActivationError::Transport));
+            let mounted = match connected {
                 Ok(activator) => activator.mount_image(image).await,
                 Err(error) => Err(error),
             };
