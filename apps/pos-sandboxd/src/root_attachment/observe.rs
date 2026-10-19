@@ -111,7 +111,7 @@ impl HostKernel {
         }
     }
 
-    fn descriptor_path(&self, descriptor: BorrowedFd<'_>) -> PathBuf {
+    pub(super) fn descriptor_path(&self, descriptor: BorrowedFd<'_>) -> PathBuf {
         self.proc
             .join("self/fd")
             .join(descriptor.as_raw_fd().to_string())
@@ -243,12 +243,17 @@ fn node(descriptor: BorrowedFd<'_>) -> Option<Node> {
         StatxFlags::BASIC_STATS | StatxFlags::MNT_ID,
     )
     .ok()
-    .filter(|stat| stat.stx_mask & StatxFlags::MNT_ID.bits() != 0)
+    .filter(|stat| has_mount_id(stat.stx_mask))
     .map(|stat| Node {
         mount_id: stat.stx_mnt_id,
         device: (stat.stx_dev_major, stat.stx_dev_minor),
         inode: stat.stx_ino,
     })
+}
+
+/// Whether a `statx` result mask reports a valid mount ID.
+pub(super) const fn has_mount_id(mask: u32) -> bool {
+    mask & StatxFlags::MNT_ID.bits() != 0
 }
 
 /// One sysfs or procfs text value without its trailing newline.
