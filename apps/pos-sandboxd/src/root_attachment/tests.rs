@@ -26,7 +26,7 @@ use serde_json::json;
 use super::*;
 use super::{
     cmdline::vetoes_userspace_verity,
-    observe::{loop_of, mount_entry, LoopDevice, Mapper, MountEntry, Node, Slave},
+    observe::{has_mount_id, loop_of, mount_entry, LoopDevice, Mapper, MountEntry, Node, Slave},
     verify::Extent,
 };
 use crate::{PlannedAttemptIntent, SystemdAttemptRegistry};
@@ -607,6 +607,38 @@ fn the_host_kernel_reads_back_the_mount_loop_and_mapper_by_descriptor() -> TestR
         .filter(|slave| slave.loop_name.is_some())
         .all(|slave| slave.loop_device.as_ref() == Some(&missing_device)));
     Ok(())
+}
+
+#[test]
+fn only_a_statx_mask_with_the_mount_id_bit_has_a_mount_id() {
+    let bit = rustix::fs::StatxFlags::MNT_ID.bits();
+    assert!(has_mount_id(bit));
+    assert!(has_mount_id(
+        bit | rustix::fs::StatxFlags::BASIC_STATS.bits()
+    ));
+    assert!(!has_mount_id(rustix::fs::StatxFlags::BASIC_STATS.bits()));
+    assert!(!has_mount_id(0));
+}
+
+#[test]
+fn propagation_and_detach_act_on_the_descriptor_link() -> TestResult {
+    let file = tempfile::tempfile()?;
+    let kernel = HostKernel::at(Path::new("/proc"), Path::new("/sys"));
+    assert_eq!(
+        kernel.descriptor_path(file.as_fd()),
+        Path::new("/proc/self/fd").join(std::os::fd::AsRawFd::as_raw_fd(&file).to_string())
+    );
+    Ok(())
+}
+
+#[test]
+fn the_public_activation_future_is_send() {
+    fn assert_send<T: Send>(_: &T) {}
+    // Compile-time only: the future is built but never polled.
+    fn check(admission: &HeldImageAdmission<'_>, directory: &PreparedAttemptDirectory) {
+        assert_send(&activate_admitted_root(admission, directory));
+    }
+    let _checked: fn(&HeldImageAdmission<'_>, &PreparedAttemptDirectory) = check;
 }
 
 #[test]

@@ -5,8 +5,10 @@
 //! again. The kernel command line must also veto systemd's userspace Verity
 //! fallback (owner decision Q7.8, ADR-087 amendment, Under Review). One
 //! bounded `MountImage` call then activates the admitted image. Its single
-//! sealed root mount descriptor is attached with `move_mount` onto the held
-//! root directory descriptor, so no path is resolved, and is made private.
+//! sealed root mount descriptor is attached by descriptor with `move_mount`
+//! onto the held root directory descriptor, so no path is resolved. It is
+//! then made private, and detached on rejection, through that descriptor's
+//! `/proc/self/fd` link.
 //!
 //! The readback then requires, by descriptor:
 //! - the attempt root path resolves to that mount;
@@ -103,6 +105,9 @@ impl VerifiedRootMount {
 /// [`ImageActivationError::EvidenceMismatch`] for any readback or re-admission
 /// difference. [`ImageActivationError::TeardownFailure`] means a rejected
 /// mount could not be detached.
+///
+/// The caller's Tokio runtime must have its time driver enabled, for the
+/// 60 s bound on the mountfsd connection and call.
 pub async fn activate_admitted_root(
     admission: &HeldImageAdmission<'_>,
     directory: &PreparedAttemptDirectory,
