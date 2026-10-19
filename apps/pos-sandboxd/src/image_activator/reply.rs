@@ -56,7 +56,7 @@ fn root_mount(
     match (reply.partitions.as_slice(), mount) {
         ([root], Some(mount)) if descriptors.is_empty() && root.mount_file_descriptor == 0 => {
             if matches_admitted_root(reply, root, expected) {
-                Ok(QuarantinedRootMount { _mount: mount })
+                Ok(QuarantinedRootMount { mount })
             } else {
                 Err(ImageActivationError::EvidenceMismatch)
             }

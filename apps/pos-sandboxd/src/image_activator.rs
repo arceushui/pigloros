@@ -23,6 +23,7 @@ use std::{
     io,
     os::fd::{AsFd, OwnedFd},
     path::Path,
+    time::Duration,
 };
 
 use pos_reference::{
@@ -39,6 +40,8 @@ use self::{reply::ExpectedRoot, socket::SealedUnixSocket};
 const MOUNTFSD_SOCKET: &str = "/run/systemd/io.systemd.MountFileSystem";
 /// mountfsd runs as root; any other peer is rejected before the call.
 const MOUNTFSD_PEER_UID: u32 = 0;
+/// Owner decision Q7.4: one `MountImage` transaction is bounded to 60 s.
+const MOUNT_IMAGE_DEADLINE: Duration = Duration::from_secs(60);
 
 /// The ADR-087 activation port between provider lifecycle code and systemd.
 ///
@@ -108,7 +111,21 @@ impl ActivationImage {
 /// autoclear and deferred dm-verity removal can proceed.
 #[derive(Debug)]
 pub struct QuarantinedRootMount {
-    _mount: OwnedFd,
+    mount: OwnedFd,
+}
+
+impl QuarantinedRootMount {
+    /// Hand the sealed descriptor to the attachment and readback boundary.
+    pub(crate) fn into_descriptor(self) -> OwnedFd {
+        self.mount
+    }
+
+    /// A descriptor-aware fake's root mount, for attachment tests.
+    #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    pub(crate) const fn from_descriptor(mount: OwnedFd) -> Self {
+        Self { mount }
+    }
 }
 
 /// Stable failures of the private `MountImage` transport.
@@ -133,6 +150,13 @@ pub enum ImageActivationError {
     /// signed EROFS root under the requested image policy.
     #[error("systemd-mountfsd activation evidence differs from the admitted image")]
     EvidenceMismatch,
+    /// The held attempt directory changed, or the quarantined root mount
+    /// could not be attached to it.
+    #[error("the quarantined root mount could not be attached")]
+    AttachFailure,
+    /// A rejected, attached root mount could not be detached again.
+    #[error("the rejected root mount could not be detached")]
+    TeardownFailure,
 }
 
 /// A connected, root-peer `MountFileSystem` client for one transaction.
@@ -172,8 +196,22 @@ impl MountfsdImageActivator {
 
 impl ImageActivator for MountfsdImageActivator {
     async fn mount_image(
+        self,
+        image: ActivationImage,
+    ) -> Result<QuarantinedRootMount, ImageActivationError> {
+        self.mount_image_within(image, MOUNT_IMAGE_DEADLINE).await
+    }
+}
+
+impl MountfsdImageActivator {
+    /// One `MountImage` transaction that must complete within `deadline`.
+    ///
+    /// Expiry is a transport failure. Dropping the pending call closes the
+    /// held image duplicate and any partially received reply descriptors.
+    async fn mount_image_within(
         mut self,
         image: ActivationImage,
+        deadline: Duration,
     ) -> Result<QuarantinedRootMount, ImageActivationError> {
         let ActivationImage {
             descriptor,
@@ -183,22 +221,31 @@ impl ImageActivator for MountfsdImageActivator {
         } = image;
         // zlink's typed result only carries the reply descriptors. The exact
         // frame captured by the sealed read half is the authoritative reply.
-        let outcome: zlink::Result<(
-            zlink::reply::Result<IgnoredAny, MountImageFailure>,
-            Vec<OwnedFd>,
-        )> = self
-            .connection
-            .call_method(&mount_image_call(), vec![descriptor])
-            .await;
-        reply::accept(
-            self.connection.read().read_half().frame(),
-            outcome.map(|(_, descriptors)| descriptors),
-            &ExpectedRoot {
-                offset: root_offset,
-                size: root_size,
-                architecture,
-            },
+        let outcome: Result<
+            zlink::Result<(
+                zlink::reply::Result<IgnoredAny, MountImageFailure>,
+                Vec<OwnedFd>,
+            )>,
+            tokio::time::error::Elapsed,
+        > = tokio::time::timeout(
+            deadline,
+            self.connection
+                .call_method(&mount_image_call(), vec![descriptor]),
         )
+        .await;
+        outcome
+            .map_err(|_| ImageActivationError::Transport)
+            .and_then(|outcome| {
+                reply::accept(
+                    self.connection.read().read_half().frame(),
+                    outcome.map(|(_, descriptors)| descriptors),
+                    &ExpectedRoot {
+                        offset: root_offset,
+                        size: root_size,
+                        architecture,
+                    },
+                )
+            })
     }
 }
 
