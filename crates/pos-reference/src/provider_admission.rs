@@ -1064,7 +1064,7 @@ pub mod tests {
             replace_once(json, &encoded, unpadded)?,
             replace_once(json, &encoded, &format!("!{}", &encoded[1..]))?,
             replace_once(
-                &json,
+                json,
                 &encoded,
                 &format!("{}\\n{}", &encoded[..4], &encoded[4..]),
             )?,
@@ -1074,23 +1074,23 @@ pub mod tests {
             replace_once(json, "{", &format!("{{{root_pair},"))?,
             replace_once(json, "}", &format!(",{signature_pair}}}"))?,
             replace_once(
-                &json,
+                json,
                 fingerprint_pair,
                 &format!("{fingerprint_pair}{fingerprint_pair}"),
             )?,
             replace_once(json, fingerprint_pair, ",\"certificateFingerprint\":null")?,
             replace_once(
-                &json,
+                json,
                 fingerprint_pair,
                 &format!(",\"certificateFingerprint\":\"{}\"", "A".repeat(64)),
             )?,
             replace_once(
-                &json,
+                json,
                 fingerprint_pair,
                 &format!(",\"certificateFingerprint\":\"{}\"", "a".repeat(63)),
             )?,
             replace_once(
-                &json,
+                json,
                 fingerprint_pair,
                 &format!(",\"certificateFingerprint\":\"{}\"", "a".repeat(65)),
             )?,
