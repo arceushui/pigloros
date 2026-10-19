@@ -6,7 +6,7 @@ use crate::{
         CborReader, CborWriter, PROTOCOL_VERSION,
     },
     CeremonyId, CoseEs256PublicKey, ImagePathSha256, OwnerBridgeCodecError, OwnerUserHandle,
-    SubjectId, TransportCodes, CANONICAL_COSE_ES256_KEY_BYTES,
+    SubjectId, TransportCodes,
 };
 
 const SUBJECT_CREDENTIAL_BINDING_MAGIC: [u8; 4] = *b"SCB1";
@@ -71,6 +71,9 @@ pub struct SubjectCredentialBindingV1<'a> {
 impl<'a> SubjectCredentialBindingV1<'a> {
     /// Construct a binding only from already validated credential material.
     ///
+    /// The complete-record limit is checked by encoding the binding into a
+    /// 4 KiB stack buffer, so the admitted size is the exact encoded size.
+    ///
     /// # Errors
     ///
     /// Returns [`OwnerBridgeCodecError::BoundsExceeded`] when a borrowed field
@@ -93,22 +96,7 @@ impl<'a> SubjectCredentialBindingV1<'a> {
         } = input;
         require_bounded(owner_id.as_bytes(), 0, MAX_SUBJECT_CREDENTIAL_BINDING_BYTES)?;
         require_bounded(credential_id, 1, MAX_CREDENTIAL_ID_BYTES)?;
-        require_length(
-            subject_credential_binding_length(
-                owner_id,
-                epoch,
-                credential_id,
-                sign_count,
-                transports,
-            ),
-            MAX_SUBJECT_CREDENTIAL_BINDING_BYTES,
-        )?;
-        if backup_state && !backup_eligible {
-            return Err(OwnerBridgeCodecError::InvalidPayload);
-        }
-        VerifyingKey::from_sec1_bytes(&public_key.uncompressed_sec1_bytes())
-            .map_err(|_| OwnerBridgeCodecError::InvalidPayload)?;
-        Ok(Self {
+        let binding = Self {
             owner_id,
             subject_id,
             epoch,
@@ -119,7 +107,18 @@ impl<'a> SubjectCredentialBindingV1<'a> {
             backup_state,
             sign_count,
             transports,
-        })
+        };
+        // The record limit is the exact encoder's own output length, so the
+        // admitted bound cannot drift from the bytes later written.
+        // BufferTooSmall is the only error the writer's finish() can return.
+        encode_subject_credential_binding(&binding, &mut [0; MAX_SUBJECT_CREDENTIAL_BINDING_BYTES])
+            .map_err(|_| OwnerBridgeCodecError::BoundsExceeded)?;
+        if backup_state && !backup_eligible {
+            return Err(OwnerBridgeCodecError::InvalidPayload);
+        }
+        VerifyingKey::from_sec1_bytes(&public_key.uncompressed_sec1_bytes())
+            .map_err(|_| OwnerBridgeCodecError::InvalidPayload)?;
+        Ok(binding)
     }
 
     /// Return the durable owner identifier.
@@ -196,6 +195,9 @@ pub struct CleanupRecordV1<'a> {
 impl<'a> CleanupRecordV1<'a> {
     /// Construct the non-secret process identity retained for cleanup.
     ///
+    /// The complete-record limit is checked by encoding the record into a
+    /// 4 KiB stack buffer, so the admitted size is the exact encoded size.
+    ///
     /// # Errors
     ///
     /// Returns [`OwnerBridgeCodecError::BoundsExceeded`] when `folder_name` or
@@ -209,17 +211,17 @@ impl<'a> CleanupRecordV1<'a> {
         image_path_sha256: ImagePathSha256,
     ) -> Result<Self, OwnerBridgeCodecError> {
         require_bounded(folder_name.as_bytes(), 0, MAX_CLEANUP_RECORD_BYTES)?;
-        require_length(
-            cleanup_record_length(folder_name, browser_pid, creation_filetime),
-            MAX_CLEANUP_RECORD_BYTES,
-        )?;
-        Ok(Self {
+        let record = Self {
             ceremony_id,
             folder_name,
             browser_pid,
             creation_filetime,
             image_path_sha256,
-        })
+        };
+        // BufferTooSmall is the only error the writer's finish() can return.
+        encode_cleanup_record(&record, &mut [0; MAX_CLEANUP_RECORD_BYTES])
+            .map_err(|_| OwnerBridgeCodecError::BoundsExceeded)?;
+        Ok(record)
     }
 
     /// Return the ceremony identifier associated with this process.
@@ -258,22 +260,13 @@ impl<'a> CleanupRecordV1<'a> {
 /// # Errors
 ///
 /// Returns [`OwnerBridgeCodecError::BufferTooSmall`] when `output` cannot
-/// contain the record and [`OwnerBridgeCodecError::BoundsExceeded`] when its
-/// complete encoding would exceed 4,096 bytes.
+/// contain the record; `output` may then be partially written, as with the
+/// payload encoders. A constructed binding always encodes within 4,096
+/// bytes, because [`SubjectCredentialBindingV1::new`] rejects a larger record.
 pub fn encode_subject_credential_binding(
     binding: &SubjectCredentialBindingV1<'_>,
     output: &mut [u8],
 ) -> Result<usize, OwnerBridgeCodecError> {
-    let expected_length = subject_credential_binding_length(
-        binding.owner_id,
-        binding.epoch,
-        binding.credential_id,
-        binding.sign_count,
-        binding.transports,
-    );
-    if output.len() < expected_length {
-        return Err(OwnerBridgeCodecError::BufferTooSmall);
-    }
     let mut writer = CborWriter::new(output);
     writer.array(16);
     writer.bytes(&SUBJECT_CREDENTIAL_BINDING_MAGIC);
@@ -301,7 +294,9 @@ pub fn encode_subject_credential_binding(
 ///
 /// Returns a closed [`OwnerBridgeCodecError`] for a wrong schema, unsupported
 /// role or algorithm, malformed credential key, noncanonical encoding, or
-/// trailing bytes.
+/// trailing bytes. A decoded binding is revalidated by
+/// [`SubjectCredentialBindingV1::new`], which encodes it into a 4 KiB stack
+/// buffer.
 pub fn decode_subject_credential_binding(
     input: &[u8],
 ) -> Result<SubjectCredentialBindingV1<'_>, OwnerBridgeCodecError> {
@@ -350,20 +345,13 @@ pub fn decode_subject_credential_binding(
 /// # Errors
 ///
 /// Returns [`OwnerBridgeCodecError::BufferTooSmall`] when `output` cannot
-/// contain the record and [`OwnerBridgeCodecError::BoundsExceeded`] when its
-/// complete encoding would exceed 4,096 bytes.
+/// contain the record; `output` may then be partially written, as with the
+/// payload encoders. A constructed record always encodes within 4,096
+/// bytes, because [`CleanupRecordV1::new`] rejects a larger record.
 pub fn encode_cleanup_record(
     record: &CleanupRecordV1<'_>,
     output: &mut [u8],
 ) -> Result<usize, OwnerBridgeCodecError> {
-    let expected_length = cleanup_record_length(
-        record.folder_name,
-        record.browser_pid,
-        record.creation_filetime,
-    );
-    if output.len() < expected_length {
-        return Err(OwnerBridgeCodecError::BufferTooSmall);
-    }
     let mut writer = CborWriter::new(output);
     writer.array(7);
     writer.bytes(&CLEANUP_RECORD_MAGIC);
@@ -381,7 +369,8 @@ pub fn encode_cleanup_record(
 /// # Errors
 ///
 /// Returns a closed [`OwnerBridgeCodecError`] for a wrong schema,
-/// noncanonical encoding, or trailing bytes.
+/// noncanonical encoding, or trailing bytes. A decoded record is revalidated
+/// by [`CleanupRecordV1::new`], which encodes it into a 4 KiB stack buffer.
 pub fn decode_cleanup_record(input: &[u8]) -> Result<CleanupRecordV1<'_>, OwnerBridgeCodecError> {
     require_length(input.len(), MAX_CLEANUP_RECORD_BYTES)?;
     let mut reader = CborReader::new(input);
@@ -409,75 +398,4 @@ const fn require_length(length: usize, maximum: usize) -> Result<(), OwnerBridge
         return Err(OwnerBridgeCodecError::BoundsExceeded);
     }
     Ok(())
-}
-
-fn subject_credential_binding_length(
-    owner_id: &str,
-    epoch: u64,
-    credential_id: &[u8],
-    sign_count: u32,
-    transports: TransportCodes,
-) -> usize {
-    cbor_unsigned_length(16)
-        + bounded_cbor_bytes_length(SUBJECT_CREDENTIAL_BINDING_MAGIC.len())
-        + cbor_unsigned_length(PROTOCOL_VERSION)
-        + bounded_cbor_bytes_length(owner_id.len())
-        + bounded_cbor_bytes_length(16)
-        + cbor_unsigned_length(SUBJECT_DATA_ENCRYPTION_ROLE)
-        + cbor_unsigned_length(epoch)
-        + bounded_cbor_bytes_length(RP_ID.len())
-        + bounded_cbor_bytes_length(OWNER_ORIGIN.len())
-        + bounded_cbor_bytes_length(credential_id.len())
-        + bounded_cbor_bytes_length(32)
-        + bounded_cbor_bytes_length(CANONICAL_COSE_ES256_KEY_BYTES)
-        + cbor_unsigned_length(ES256_ALGORITHM_CODE)
-        + 2
-        + cbor_unsigned_length(u64::from(sign_count))
-        + bounded_cbor_head_length(transports.as_slice().len())
-        + transports
-            .as_slice()
-            .iter()
-            .map(|&code| cbor_unsigned_length(u64::from(code)))
-            .sum::<usize>()
-}
-
-fn cleanup_record_length(folder_name: &str, browser_pid: u32, creation_filetime: u64) -> usize {
-    cbor_unsigned_length(7)
-        + bounded_cbor_bytes_length(CLEANUP_RECORD_MAGIC.len())
-        + cbor_unsigned_length(PROTOCOL_VERSION)
-        + bounded_cbor_bytes_length(16)
-        + bounded_cbor_bytes_length(folder_name.len())
-        + cbor_unsigned_length(u64::from(browser_pid))
-        + cbor_unsigned_length(creation_filetime)
-        + bounded_cbor_bytes_length(32)
-}
-
-// Every byte/text field reaches this helper only after the public
-// constructors bound it to at most 4,096 bytes.
-fn bounded_cbor_bytes_length(value_length: usize) -> usize {
-    bounded_cbor_head_length(value_length) + value_length
-}
-
-fn bounded_cbor_head_length(value: usize) -> usize {
-    if value <= 23 {
-        1
-    } else if u8::try_from(value).is_ok() {
-        2
-    } else {
-        3
-    }
-}
-
-fn cbor_unsigned_length(value: u64) -> usize {
-    if value <= 23 {
-        1
-    } else if u8::try_from(value).is_ok() {
-        2
-    } else if u16::try_from(value).is_ok() {
-        3
-    } else if u32::try_from(value).is_ok() {
-        5
-    } else {
-        9
-    }
 }
