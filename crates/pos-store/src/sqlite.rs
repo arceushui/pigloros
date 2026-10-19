@@ -2456,37 +2456,41 @@ impl SqliteStore {
     }
 
     fn prepare_fork_admission_authority_schema(&self) -> Result<(), CoreError> {
-        fork_provenance_indexes::require_autocommit(&self.conn)?;
-        self.conn
-            .execute_batch("BEGIN IMMEDIATE")
-            .map_err(Self::into_storage_error)?;
-        let result = self
-            .conn
-            .execute_batch(&format!(
-                "CREATE TABLE IF NOT EXISTS fork_admission_authority (
-                     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-                     fah1_cbor BLOB,
-                     last_authority_wall_time INTEGER NOT NULL DEFAULT 0
-                 );
-                 {}
-                 CREATE INDEX IF NOT EXISTS idx_imported_pob1_principal
-                     ON imported_fork_principal_owner_bindings(principal_digest);
-                 INSERT OR IGNORE INTO fork_delivery_fence_counter (id, last_fence) VALUES (1, 0);",
-                sqlite_schema_ddl(FORK_ADMISSION_SCHEMA_TABLES)
-            ))
-            .map_err(Self::into_storage_error)
-            .and_then(|()| self.validate_fork_admission_authority_schema())
-            .and_then(|()| fork_provenance_indexes::prepare(&self.conn))
-            .and_then(|()| self.validate_fork_admission_authority_schema())
-            .and_then(|()| fork_provenance_indexes::validate(&self.conn))
+        fork_provenance_indexes::require_autocommit(&self.conn)
             .and_then(|()| {
                 self.conn
-                    .execute_batch("COMMIT")
+                    .execute_batch("BEGIN IMMEDIATE")
                     .map_err(Self::into_storage_error)
-            });
-        // An unsuccessful open drops this unpublished store/connection even
-        // when native rollback could not establish a settled transaction.
-        fork_provenance_indexes::finish_owned_preparation(&self.conn, result)
+            })
+            .and_then(|()| {
+                let result = self
+                    .conn
+                    .execute_batch(&format!(
+                        "CREATE TABLE IF NOT EXISTS fork_admission_authority (
+                             singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                             fah1_cbor BLOB,
+                             last_authority_wall_time INTEGER NOT NULL DEFAULT 0
+                         );
+                         {}
+                         CREATE INDEX IF NOT EXISTS idx_imported_pob1_principal
+                             ON imported_fork_principal_owner_bindings(principal_digest);
+                         INSERT OR IGNORE INTO fork_delivery_fence_counter (id, last_fence) VALUES (1, 0);",
+                        sqlite_schema_ddl(FORK_ADMISSION_SCHEMA_TABLES)
+                    ))
+                    .map_err(Self::into_storage_error)
+                    .and_then(|()| self.validate_fork_admission_authority_schema())
+                    .and_then(|()| fork_provenance_indexes::prepare(&self.conn))
+                    .and_then(|()| self.validate_fork_admission_authority_schema())
+                    .and_then(|()| fork_provenance_indexes::validate(&self.conn))
+                    .and_then(|()| {
+                        self.conn
+                            .execute_batch("COMMIT")
+                            .map_err(Self::into_storage_error)
+                    });
+                // An unsuccessful open drops this unpublished store/connection even
+                // when native rollback could not establish a settled transaction.
+                fork_provenance_indexes::finish_owned_preparation(&self.conn, result)
+            })
     }
 
     fn validate_fork_admission_authority_schema(&self) -> Result<(), CoreError> {

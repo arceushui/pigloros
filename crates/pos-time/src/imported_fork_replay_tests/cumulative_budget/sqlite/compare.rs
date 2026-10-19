@@ -6,7 +6,10 @@ use super::super::super::{
 };
 use super::super::compare::{exercise, import_arm};
 use super::{whole_sqlite_budget, SqliteReplayAccess, SqliteReplayFixture};
-use pos_core::{ErasureRecoveryLimitsV1, ImportedForkAttributionAdmissionV1, TimelineId};
+use pos_core::{
+    store::{EventStore, SeqRange},
+    ErasureRecoveryLimitsV1, ImportedForkAttributionAdmissionV1, TimelineId,
+};
 use pos_runtime::{ErasureCoordinatorCompositionV1, ErasureExecutionHostV1};
 use pos_store::{sqlite::SqliteStore, ForkReplayReadLimitsV1, StoreConfig};
 use std::sync::{atomic::AtomicUsize, Arc};
@@ -15,7 +18,7 @@ struct SqliteCompareFixture<'a> {
     world: &'a World,
     built: &'a [Built; 2],
     admissions: &'a [ImportedForkAttributionAdmissionV1; 2],
-    unrelated: Option<&'a Built>,
+    unrelated: &'a [Built],
 }
 
 fn sqlite_compare_case(
@@ -59,12 +62,18 @@ fn sqlite_compare_case(
     });
     let [left, right] = requirements;
     let requirements = [left?, right?];
-    if let Some(unrelated) = fixture.unrelated {
+    for (index, unrelated) in fixture.unrelated.iter().enumerate() {
         super::pin_policy(&mut store, &unrelated.policy)?;
         pos_store::ForkAttributionAuthorityImportPortV1::import_verified(
             &mut store,
             &super::request_for(fixture.world, unrelated),
         )?;
+        assert_eq!(
+            store
+                .read_own(fixture.world.child_at(index + 2)?.id, SeqRange::all())?
+                .len(),
+            4
+        );
     }
     drop(store);
     let verifier = Arc::new(ImportedVerifier {
@@ -112,7 +121,7 @@ fn sqlite_compare_budget_cases(access: SqliteReplayAccess) -> Fallible<()> {
         world: &world,
         built: &built,
         admissions: &admissions,
-        unrelated: None,
+        unrelated: &[],
     };
     let mut totals = (0, 0, 0);
     for (index, (built, admission)) in built.iter().zip(&admissions).enumerate() {
@@ -120,7 +129,7 @@ fn sqlite_compare_budget_cases(access: SqliteReplayAccess) -> Fallible<()> {
             world: &world,
             built,
             admission,
-            unrelated: None,
+            unrelated: &[],
         };
         let (bytes, rows, visits) = whole_sqlite_budget(&arm, index, 4)?;
         totals.0 += bytes;
@@ -167,25 +176,15 @@ fn imported_sqlite_held_memory_compare_shares_one_exact_budget_across_both_arms(
 }
 
 #[test]
-fn unrelated_valid_fork_preserves_both_compare_arms_exact_budgets() -> Fallible<()> {
+fn unrelated_valid_forks_preserve_both_compare_arms_exact_budgets() -> Fallible<()> {
     let mut world = World::new(Shape::EmptyUnclassified, false)?;
     world.add_child(Shape::EmptyUnclassified)?;
-    world.add_child(Shape::Mixed)?;
     let built = [
         world.build(&Spec::default())?,
         world.build(&Spec::distinct(1))?,
     ];
-    let unrelated = world.build(&Spec {
-        child: 2,
-        import_seed: 0x13,
-        binding_seed: 0x25,
-        principal_seed: 0x26,
-        admission_seed: 0x33,
-        registration_seed: 0x63,
-        publication_seed: 0x93,
-        operations_seed: 0xc0,
-        ..Spec::default()
-    })?;
+    let unrelated = world.add_unrelated_mixed_forks()?;
+    assert_eq!(unrelated.len(), 8);
     let admissions = [
         ImportedForkAttributionAdmissionV1::from_envelope(&built[0].envelope, 1)?,
         ImportedForkAttributionAdmissionV1::from_envelope(&built[1].envelope, 1)?,
@@ -194,7 +193,7 @@ fn unrelated_valid_fork_preserves_both_compare_arms_exact_budgets() -> Fallible<
         world: &world,
         built: &built,
         admissions: &admissions,
-        unrelated: Some(&unrelated),
+        unrelated: &unrelated,
     };
     let mut totals = (0, 0, 0);
     for (index, (built, admission)) in built.iter().zip(&admissions).enumerate() {
@@ -202,7 +201,7 @@ fn unrelated_valid_fork_preserves_both_compare_arms_exact_budgets() -> Fallible<
             world: &world,
             built,
             admission,
-            unrelated: None,
+            unrelated: &[],
         };
         let (bytes, rows, visits) = whole_sqlite_budget(&arm, index, 4)?;
         totals.0 += bytes;

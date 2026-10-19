@@ -188,7 +188,7 @@ struct SqliteReplayFixture<'a> {
     world: &'a World,
     built: &'a Built,
     admission: &'a ImportedForkAttributionAdmissionV1,
-    unrelated: Option<&'a Built>,
+    unrelated: &'a [Built],
 }
 
 fn whole_sqlite_budget(
@@ -259,12 +259,12 @@ fn sqlite_replay_case(
         &store.import_verified(&request_for(world, built))?.admission,
         admission
     );
-    if let Some(unrelated) = fixture.unrelated {
+    for (index, unrelated) in fixture.unrelated.iter().enumerate() {
         pin_policy(&mut store, &unrelated.policy)?;
         store.import_verified(&request_for(world, unrelated))?;
         assert_eq!(
             store
-                .read_own(world.child_at(1)?.id, SeqRange::all())?
+                .read_own(world.child_at(index + 1)?.id, SeqRange::all())?
                 .len(),
             4
         );
@@ -319,7 +319,7 @@ fn sqlite_replay_budget_cases(access: SqliteReplayAccess, cut: Option<Seq>) -> F
         world: &world,
         built: &built,
         admission: &admission,
-        unrelated: None,
+        unrelated: &[],
     };
     let (bytes, arm_rows, visits) = whole_sqlite_budget(&fixture, 0, folded_events)?;
     let rows = arm_rows + 1;
@@ -384,11 +384,11 @@ fn imported_sqlite_held_memory_replay_at_keeps_full_authority_budget_at_both_cut
 }
 
 #[test]
-fn unrelated_valid_fork_preserves_replay_and_replay_at_exact_budgets() -> Fallible<()> {
+fn unrelated_valid_forks_preserve_replay_and_replay_at_exact_budgets() -> Fallible<()> {
     let mut world = World::new(Shape::EmptyUnclassified, false)?;
-    world.add_child(Shape::Mixed)?;
     let built = world.build(&Spec::default())?;
-    let unrelated = world.build(&Spec::distinct(1))?;
+    let unrelated = world.add_unrelated_mixed_forks()?;
+    assert_eq!(unrelated.len(), 8);
     let admission = ImportedForkAttributionAdmissionV1::from_envelope(&built.envelope, 1)?;
     for access in [
         SqliteReplayAccess::ReadWrite,
@@ -400,7 +400,7 @@ fn unrelated_valid_fork_preserves_replay_and_replay_at_exact_budgets() -> Fallib
                 world: &world,
                 built: &built,
                 admission: &admission,
-                unrelated: Some(&unrelated),
+                unrelated: &unrelated,
             };
             // The existing independent whole-operation oracle is unchanged:
             // foreign Events/EOR/FIA must add no visits, rows or native copies.

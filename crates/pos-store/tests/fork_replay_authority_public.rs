@@ -137,12 +137,12 @@ fn sqlite_diagnostic_bridge_requires_an_existing_interval() -> Fallible<()> {
 }
 
 #[test]
-fn unrelated_valid_fork_does_not_change_public_sqlite_authority_evidence_or_copies() -> Fallible<()>
+fn unrelated_valid_forks_do_not_change_public_sqlite_authority_evidence_or_copies() -> Fallible<()>
 {
     let mut world = World::new(Shape::EmptyUnclassified, false)?;
-    world.add_child(Shape::Mixed)?;
     let built = world.build(&Spec::default())?;
-    let unrelated = world.build(&Spec::distinct(1))?;
+    let unrelated = world.add_unrelated_mixed_forks()?;
+    assert_eq!(unrelated.len(), 8);
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("child-local-authority.sqlite");
     let mut store = SqliteStore::open(path.to_str().ok_or("UTF-8 path")?)?;
@@ -160,8 +160,10 @@ fn unrelated_valid_fork_does_not_change_public_sqlite_authority_evidence_or_copi
     let mut results = Vec::new();
     for foreign in [false, true] {
         if foreign {
-            pin_policy(&mut store, &unrelated.policy)?;
-            store.import_verified(&request_for(&world, &unrelated))?;
+            for fork in &unrelated {
+                pin_policy(&mut store, &fork.policy)?;
+                store.import_verified(&request_for(&world, fork))?;
+            }
         }
         let limits = ForkReplayReadLimitsV1::new(8, 128, 4_096, 8 * 1024 * 1024, 1_000_000)?;
         let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
