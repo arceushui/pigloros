@@ -21,7 +21,7 @@ use pos_core::{
     Capability, Plugin, PluginId, Reducer, State,
 };
 use pos_runtime::{
-    check_handoff_reserve, require_staged_release, teardown_signal, ExecutorHealthV1,
+    check_handoff_reserve, require_staged_release, teardown_signal, ExecutorHealthV1, GuardWaitV1,
     GuardedFoldWindowV1, HostProjectionProviderV1, InstalledPluginFactoryV1,
     InstalledPluginProductV1, NoActionApproverV1, StagedFoldErrorV1, StagedFoldExecutorV1,
     StagedFoldPlanV1, GUARD_RELEASE_LATE_SIGNAL, MAX_STAGED_INPUT_BYTES_V1,
@@ -367,6 +367,18 @@ fn guarded(port: &mut TrustedClockFixtureV1) -> ReleaseGuardV1<'_> {
 struct Clocks {
     worker: Option<Vec<Duration>>,
     guard: Option<Duration>,
+    /// Wait for the worker however long the machine takes to run it.
+    patient: bool,
+}
+
+/// A guard wait that ignores the real time left before `g0 + 27 s`.
+#[derive(Debug)]
+struct PatientGuardWait;
+
+impl GuardWaitV1 for PatientGuardWait {
+    fn bound(&self, _remaining: Duration) -> Duration {
+        Duration::from_secs(u64::from(u32::MAX))
+    }
 }
 
 fn fold_in(
@@ -396,6 +408,9 @@ fn fold_through(
     if let Some(offsets) = clocks.worker {
         let worker = ScriptedGuardMonotonicSourceV1::new(offsets);
         plan = plan.with_worker_clock(Box::new(worker));
+    }
+    if clocks.patient {
+        plan = plan.with_guard_wait(Arc::new(PatientGuardWait));
     }
     let mut guard_clock: Box<dyn GuardMonotonicSourceV1> = match clocks.guard {
         Some(at) => Box::new(ScriptedGuardMonotonicSourceV1::new([at])),
@@ -675,7 +690,7 @@ fn each_build_is_checked_against_its_own_callback_bound() {
     let fold_with = |worker: Vec<Duration>| {
         let clocks = Clocks {
             worker: Some(worker),
-            guard: None,
+            ..Clocks::default()
         };
         fold_in(
             &provider,
@@ -774,7 +789,7 @@ fn callback_bounds_and_the_fold_deadline_are_enforced_cooperatively() {
     let fold_with = |worker: Vec<Duration>| {
         let clocks = Clocks {
             worker: Some(worker),
-            guard: None,
+            ..Clocks::default()
         };
         fold_in(&provider, &[consumer], events.clone(), source(), clocks)
     };
@@ -819,6 +834,19 @@ fn callback_bounds_and_the_fold_deadline_are_enforced_cooperatively() {
 fn staged_limits_fail_the_fold_deterministically() {
     let _serial = serial();
     let entity = EntityId::new();
+    // Folding 64 MiB takes real time that a sanitizer stretches past 27 s, so
+    // both the worker's checks and the guard's wait are off the wall clock.
+    // An empty script keeps every worker mark at the origin.
+    let fold = |provider: &Arc<HostProjectionProviderV1>,
+                consumer: RecordedConsumerV1,
+                events: &[Event]| {
+        let clocks = Clocks {
+            worker: Some(Vec::new()),
+            patient: true,
+            ..Clocks::default()
+        };
+        fold_in(provider, &[consumer], events.to_vec(), source(), clocks)
+    };
     let (provider, consumer) = admitted_reducer(|_| Box::new(BlobReducer));
     let exact = test_ok(fold(
         &provider,
@@ -871,7 +899,7 @@ fn exact_passes_run_only_when_the_upper_bound_crosses_the_limit() {
         worker.push(ms(26_900));
         let clocks = Clocks {
             worker: Some(worker),
-            guard: None,
+            ..Clocks::default()
         };
         fold_in(
             &provider,

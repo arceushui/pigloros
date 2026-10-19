@@ -111,7 +111,7 @@ pub use scheduled_admission_host::{ScheduledAdmissionPortsV1, ScheduledAdmission
 pub use scheduler::TickScheduler;
 pub use schema::SchemaRegistry;
 pub use staged_executor::{
-    check_handoff_reserve, require_staged_release, teardown_signal, ExecutorHealthV1,
+    check_handoff_reserve, require_staged_release, teardown_signal, ExecutorHealthV1, GuardWaitV1,
     GuardedFoldWindowV1, StagedFoldErrorV1, StagedFoldExecutorV1, StagedFoldPlanV1,
     GUARD_RELEASE_LATE_SIGNAL, MAX_STAGED_INPUT_BYTES_V1, MEASURED_PREPARE_BOUND_V1,
     MEASURED_TEARDOWN_BOUND_V1, STAGED_ACCOUNTING_PASS_BOUND_V1, STAGED_FOLD_DEADLINE_V1,

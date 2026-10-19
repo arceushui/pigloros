@@ -252,6 +252,27 @@ impl<'w> GuardedFoldWindowV1<'w> {
     }
 }
 
+/// How long the guard thread waits for the worker.
+///
+/// Admission leaves `remaining` before `g0 + 27 s`. Production waits exactly
+/// that long on the real clock. The worker's own checks against `g0` stay on the plan's
+/// worker clock, so a host that scripts both clocks decides the deadline
+/// without depending on how long the machine takes to run the fold.
+pub trait GuardWaitV1: std::fmt::Debug + Send + Sync {
+    /// The real time to wait for the worker's reply.
+    fn bound(&self, remaining: Duration) -> Duration;
+}
+
+/// Production guard wait: the whole remaining time.
+#[derive(Clone, Copy, Debug)]
+struct SystemGuardWaitV1;
+
+impl GuardWaitV1 for SystemGuardWaitV1 {
+    fn bound(&self, remaining: Duration) -> Duration {
+        remaining
+    }
+}
+
 /// One protected fold: the recorded consumers, the verified Events read
 /// inside the guard, and the source they were read from.
 pub struct StagedFoldPlanV1 {
@@ -259,6 +280,7 @@ pub struct StagedFoldPlanV1 {
     events: Vec<Event>,
     source: ProjectionSourceV1,
     clock: Box<dyn GuardMonotonicSourceV1>,
+    wait: Arc<dyn GuardWaitV1>,
     #[cfg(any(test, feature = "test-support"))]
     host_fault: bool,
 }
@@ -279,6 +301,7 @@ impl StagedFoldPlanV1 {
             events,
             source,
             clock: Box::new(SystemGuardMonotonicSourceV1),
+            wait: Arc::new(SystemGuardWaitV1),
             #[cfg(any(test, feature = "test-support"))]
             host_fault: false,
         }
@@ -288,6 +311,13 @@ impl StagedFoldPlanV1 {
     #[must_use]
     pub fn with_worker_clock(mut self, clock: Box<dyn GuardMonotonicSourceV1>) -> Self {
         self.clock = clock;
+        self
+    }
+
+    /// Use `wait` for the guard thread's real wait for the worker.
+    #[must_use]
+    pub fn with_guard_wait(mut self, wait: Arc<dyn GuardWaitV1>) -> Self {
+        self.wait = wait;
         self
     }
 
@@ -355,6 +385,7 @@ impl StagedFoldExecutorV1 {
     ) -> Result<StagedProjectionV1, StagedFoldErrorV1> {
         let remaining = admit_plan(window, guard_clock, &plan)?;
         claim_worker()?;
+        let remaining = plan.wait.bound(remaining);
         let (reply, outcome) = mpsc::sync_channel(1);
         let job = StagedJobV1 {
             plan,
