@@ -371,16 +371,6 @@ struct Clocks {
     patient: bool,
 }
 
-/// A guard wait that ignores the real time left before `g0 + 27 s`.
-#[derive(Debug)]
-struct PatientGuardWait;
-
-impl GuardWaitV1 for PatientGuardWait {
-    fn bound(&self, _remaining: Duration) -> Duration {
-        Duration::from_secs(u64::from(u32::MAX))
-    }
-}
-
 fn fold_in(
     provider: &Arc<HostProjectionProviderV1>,
     consumers: &[RecordedConsumerV1],
@@ -410,7 +400,7 @@ fn fold_through(
         plan = plan.with_worker_clock(Box::new(worker));
     }
     if clocks.patient {
-        plan = plan.with_guard_wait(Arc::new(PatientGuardWait));
+        plan = plan.with_guard_wait(Arc::new(ScriptedGuardWaitV1));
     }
     let mut guard_clock: Box<dyn GuardMonotonicSourceV1> = match clocks.guard {
         Some(at) => Box::new(ScriptedGuardMonotonicSourceV1::new([at])),

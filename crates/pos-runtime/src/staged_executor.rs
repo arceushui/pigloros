@@ -258,14 +258,37 @@ impl<'w> GuardedFoldWindowV1<'w> {
 /// that long on the real clock. The worker's own checks against `g0` stay on the plan's
 /// worker clock, so a host that scripts both clocks decides the deadline
 /// without depending on how long the machine takes to run the fold.
-pub trait GuardWaitV1: std::fmt::Debug + Send + Sync {
+pub trait GuardWaitV1: guard_wait_sealed::Sealed + std::fmt::Debug + Send + Sync {
     /// The real time to wait for the worker's reply.
     fn bound(&self, remaining: Duration) -> Duration;
+}
+
+mod guard_wait_sealed {
+    /// Keeps the guard wait closed: only this crate's waits exist, so no
+    /// host can lengthen the guard thread's wait past `g0 + 27 s`.
+    pub trait Sealed {}
+}
+
+/// Test guard wait that never times out on real time. Test support only.
+#[cfg(feature = "test-support")]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ScriptedGuardWaitV1;
+
+#[cfg(feature = "test-support")]
+impl guard_wait_sealed::Sealed for ScriptedGuardWaitV1 {}
+
+#[cfg(feature = "test-support")]
+impl GuardWaitV1 for ScriptedGuardWaitV1 {
+    fn bound(&self, _remaining: Duration) -> Duration {
+        Duration::from_secs(u64::from(u32::MAX))
+    }
 }
 
 /// Production guard wait: the whole remaining time.
 #[derive(Clone, Copy, Debug)]
 struct SystemGuardWaitV1;
+
+impl guard_wait_sealed::Sealed for SystemGuardWaitV1 {}
 
 impl GuardWaitV1 for SystemGuardWaitV1 {
     fn bound(&self, remaining: Duration) -> Duration {

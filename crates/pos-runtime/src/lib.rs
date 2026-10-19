@@ -110,6 +110,8 @@ pub use scheduled_admission_host::LocalScheduledAdmissionHostV1;
 pub use scheduled_admission_host::{ScheduledAdmissionPortsV1, ScheduledAdmissionStoreV1};
 pub use scheduler::TickScheduler;
 pub use schema::SchemaRegistry;
+#[cfg(feature = "test-support")]
+pub use staged_executor::ScriptedGuardWaitV1;
 pub use staged_executor::{
     check_handoff_reserve, require_staged_release, teardown_signal, ExecutorHealthV1, GuardWaitV1,
     GuardedFoldWindowV1, StagedFoldErrorV1, StagedFoldExecutorV1, StagedFoldPlanV1,
