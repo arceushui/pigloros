@@ -752,6 +752,22 @@ impl pos_core::FactualPrefixReadPortV1 for SharedMemoryAdapter {
     ) -> Result<pos_core::RecordedSetCountsV1, pos_core::CoreError> {
         pos_core::FactualPrefixReadPortV1::factual_set_counts(&*self.store(), timeline)
     }
+
+    fn fold_cursor(
+        &self,
+        timeline: pos_core::TimelineId,
+    ) -> Result<Option<pos_core::FactualFoldCursorV1>, pos_core::CoreError> {
+        pos_core::FactualPrefixReadPortV1::fold_cursor(&*self.store(), timeline)
+    }
+
+    fn fold_window(
+        &self,
+        timeline: pos_core::TimelineId,
+        after: pos_core::Seq,
+        through: pos_core::Seq,
+    ) -> Result<pos_core::FactualFoldWindowV1, pos_core::CoreError> {
+        pos_core::FactualPrefixReadPortV1::fold_window(&*self.store(), timeline, after, through)
+    }
 }
 
 impl PipelineAdmissionFencePublisherV1 for SharedMemoryAdapter {

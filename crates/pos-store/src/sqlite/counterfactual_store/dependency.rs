@@ -182,9 +182,10 @@ use pos_core::{
     CounterfactualTickOutcomeV1, DependencyEdgeRecordV1, DependencyNodeCoordinateV1,
     DependencyNodeRecordV1, DependencyPageCursorV1, DependencyPageRequestV1, DependencyPageV1,
     DependencyPagedRowV1, DependencyReadScopeV1, ErasureProtectedOperationV1, Event, FactualCutV1,
-    FactualHeadV1, FactualOwnerIdV1, FactualPrefixReadPortV1, Hash, PipelineAdmissionBasisV1,
-    PipelineDraftBatchV1, RecordedDependencyClassV1, RecordedNodeOriginV1, RecordedSetCountsV1,
-    Seq, SeqRange, TickDependencyRecordV1, TimelineId,
+    FactualFoldCursorV1, FactualFoldWindowV1, FactualHeadV1, FactualOwnerIdV1,
+    FactualPrefixReadPortV1, Hash, PipelineAdmissionBasisV1, PipelineDraftBatchV1,
+    RecordedDependencyClassV1, RecordedNodeOriginV1, RecordedSetCountsV1, Seq, SeqRange,
+    TickDependencyRecordV1, TimelineId,
 };
 use rusqlite::{params, Connection, OptionalExtension, Params, Row};
 
@@ -1940,6 +1941,21 @@ impl FactualPrefixReadPortV1 for SqliteStore {
 
     fn factual_set_counts(&self, timeline: TimelineId) -> Result<RecordedSetCountsV1, CoreError> {
         self.read_prefix_counts(timeline)
+    }
+
+    /// A stub until ADR-064 R4 slice 3 adds the fold-head reads.
+    fn fold_cursor(&self, _timeline: TimelineId) -> Result<Option<FactualFoldCursorV1>, CoreError> {
+        Ok(None)
+    }
+
+    /// A stub until ADR-064 R4 slice 3 adds the fold-head reads.
+    fn fold_window(
+        &self,
+        _timeline: TimelineId,
+        _after: Seq,
+        _through: Seq,
+    ) -> Result<FactualFoldWindowV1, CoreError> {
+        Ok(FactualFoldWindowV1::default())
     }
 }
 

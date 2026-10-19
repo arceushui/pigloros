@@ -1887,6 +1887,37 @@ pub trait FactualPrefixReadPortV1 {
     /// # Errors
     /// Returns the store's error.
     fn factual_set_counts(&self, timeline: TimelineId) -> Result<RecordedSetCountsV1, CoreError>;
+
+    /// Return the Timeline's fold cursor, or `None` before its first fold-head row.
+    ///
+    /// The cursor is the latest fold-head row visible in the inherited prefix,
+    /// at or below each ancestor's cut Tick (ADR-064 R4.2): its
+    /// `scanned_through` is the `p` of the next scheduled Tick, and its `head`
+    /// is the fold checkpoint node the row's head digest names, or `None` when
+    /// that digest is 32 zero bytes.
+    ///
+    /// # Errors
+    /// Returns the store's error.
+    fn fold_cursor(&self, timeline: TimelineId) -> Result<Option<FactualFoldCursorV1>, CoreError>;
+
+    /// Return the newest Events of the range `(after, through]` as a fold window.
+    ///
+    /// The read covers the Timeline's logical history through its ancestry and
+    /// takes the last at most [`MAX_FACTUAL_FOLD_SCAN_PER_TICK_V1`] Events of
+    /// the range by descending `seq`; the window lists them in ascending `seq`
+    /// and sets `truncated` when older Events of the range were left out
+    /// (ADR-064 R4.3). Each entry carries the Event's type, payload hash, and
+    /// recorded node and class, never its payload. A range with
+    /// `through <= after` yields an empty window.
+    ///
+    /// # Errors
+    /// Returns the store's error.
+    fn fold_window(
+        &self,
+        timeline: TimelineId,
+        after: Seq,
+        through: Seq,
+    ) -> Result<FactualFoldWindowV1, CoreError>;
 }
 
 /// The combined capability the registry's Tick-path admission needs: commit

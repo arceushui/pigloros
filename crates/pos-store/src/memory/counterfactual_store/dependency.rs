@@ -88,9 +88,9 @@ use pos_core::{
     CounterfactualStoreErrorV1, CounterfactualTickOutcomeV1, DependencyEdgeRecordV1,
     DependencyNodeRecordV1, DependencyPageCursorV1, DependencyPageRequestV1, DependencyPageV1,
     DependencyPagedRowV1, DependencyReadScopeV1, ErasureProtectedOperationV1, Event, FactualCutV1,
-    FactualHeadV1, FactualOwnerIdV1, FactualPrefixReadPortV1, ForkGenerationV1, Hash,
-    PipelineAdmissionBasisV1, PipelineDraftBatchV1, RecordedSetCountsV1, Seq, SeqRange,
-    TickDependencyRecordV1, TimelineId,
+    FactualFoldCursorV1, FactualFoldWindowV1, FactualHeadV1, FactualOwnerIdV1,
+    FactualPrefixReadPortV1, ForkGenerationV1, Hash, PipelineAdmissionBasisV1,
+    PipelineDraftBatchV1, RecordedSetCountsV1, Seq, SeqRange, TickDependencyRecordV1, TimelineId,
 };
 
 use super::{fenced_result, stage_tick, CounterfactualForkStateV1, ForkEntriesV1, StagedTickV1};
@@ -824,6 +824,21 @@ impl FactualPrefixReadPortV1 for MemoryStore {
     /// stack) reads the same.
     fn factual_set_counts(&self, timeline: TimelineId) -> Result<RecordedSetCountsV1, CoreError> {
         self.read_fenced(timeline, |store| Ok(store.prefix_rows(timeline).counts))
+    }
+
+    /// A stub until ADR-064 R4 slice 3 adds the fold-head reads.
+    fn fold_cursor(&self, _timeline: TimelineId) -> Result<Option<FactualFoldCursorV1>, CoreError> {
+        Ok(None)
+    }
+
+    /// A stub until ADR-064 R4 slice 3 adds the fold-head reads.
+    fn fold_window(
+        &self,
+        _timeline: TimelineId,
+        _after: Seq,
+        _through: Seq,
+    ) -> Result<FactualFoldWindowV1, CoreError> {
+        Ok(FactualFoldWindowV1::default())
     }
 }
 
