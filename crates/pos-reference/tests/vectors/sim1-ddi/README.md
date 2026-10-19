@@ -129,7 +129,8 @@ proof, signer fingerprint and root hash that systemd will read.
 
 Provider admission (`provider_admission`, #438) reads that partition from the
 held image and requires its JSON `rootHash` and `signature` to equal SIM1's
-root hash and PKCS#7 proof exactly, on both architectures. The in-crate
+root hash and PKCS#7 proof exactly, on both architectures (ADR-087 Part B.4,
+revision 31, accepted in revision 32). The in-crate
 installation fixture therefore binds each image's own `root-hash.txt`,
 `proof.der` and `signer.der` into SIM1 and TRS1. The negative cases edit
 JSON fields in a copy of the expanded image; no signature is regenerated.
