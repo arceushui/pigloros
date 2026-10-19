@@ -1023,6 +1023,87 @@ pub mod tests {
         assert_eq!(lower_hex(&[0x00, 0x9f, 0xa0, 0xff]), "009fa0ff");
     }
 
+    /// Edits of a DDI's systemd-repart JSON that admission accepts and rejects.
+    fn signature_json_variants(
+        json: &[u8],
+        signing: &crate::selector::installation::tests::ImageSigning,
+    ) -> TestResult<(Vec<Vec<u8>>, Vec<Vec<u8>>)> {
+        let text = std::str::from_utf8(json)?.to_owned();
+        let root_hash = lower_hex(signing.root_hash());
+        let encoded = base64(signing.proof());
+        let root_pair = format!("\"rootHash\":\"{root_hash}\"");
+        let signature_pair = format!("\"signature\":\"{encoded}\"");
+        let fingerprint_start = text
+            .find(",\"certificateFingerprint\"")
+            .ok_or("no fingerprint")?;
+        let fingerprint_pair =
+            &text[fingerprint_start..text.find(",\"signature\"").ok_or("no signature")?];
+        assert!(text.contains(&root_pair) && text.contains(&signature_pair));
+
+        let mut other_root = root_hash.clone().into_bytes();
+        other_root[0] = if other_root[0] == b'0' { b'1' } else { b'0' };
+        let other_root = String::from_utf8(other_root)?;
+        let mut other_signature = encoded.clone().into_bytes();
+        other_signature[10] = if other_signature[10] == b'A' {
+            b'B'
+        } else {
+            b'A'
+        };
+        let other_signature = String::from_utf8(other_signature)?;
+        let unpadded = encoded.trim_end_matches('=');
+        let accepted: Vec<Vec<u8>> = vec![
+            // certificateFingerprint is optional, as systemd-repart
+            // omits it without OpenSSL; insignificant whitespace is JSON.
+            replace_once(json, fingerprint_pair, "")?,
+            replace_once(json, "{", "{ \n")?,
+        ];
+        let rejected: Vec<Vec<u8>> = vec![
+            replace_once(json, &root_hash, &other_root)?,
+            replace_once(json, &root_hash, &root_hash.to_uppercase())?,
+            replace_once(json, &encoded, &other_signature)?,
+            replace_once(json, &encoded, unpadded)?,
+            replace_once(json, &encoded, &format!("!{}", &encoded[1..]))?,
+            replace_once(
+                &json,
+                &encoded,
+                &format!("{}\\n{}", &encoded[..4], &encoded[4..]),
+            )?,
+            replace_once(json, &format!("{root_pair},"), "")?,
+            replace_once(json, &format!(",{signature_pair}"), "")?,
+            replace_once(json, "}", ",\"extra\":\"\"}")?,
+            replace_once(json, "{", &format!("{{{root_pair},"))?,
+            replace_once(json, "}", &format!(",{signature_pair}}}"))?,
+            replace_once(
+                &json,
+                fingerprint_pair,
+                &format!("{fingerprint_pair}{fingerprint_pair}"),
+            )?,
+            replace_once(json, fingerprint_pair, ",\"certificateFingerprint\":null")?,
+            replace_once(
+                &json,
+                fingerprint_pair,
+                &format!(",\"certificateFingerprint\":\"{}\"", "A".repeat(64)),
+            )?,
+            replace_once(
+                &json,
+                fingerprint_pair,
+                &format!(",\"certificateFingerprint\":\"{}\"", "a".repeat(63)),
+            )?,
+            replace_once(
+                &json,
+                fingerprint_pair,
+                &format!(",\"certificateFingerprint\":\"{}\"", "a".repeat(65)),
+            )?,
+            replace_once(json, &format!("\"{root_hash}\""), "1")?,
+            format!("[\"{root_hash}\",\"{encoded}\"]").into_bytes(),
+            format!("[\"{root_hash}\",\"{}\",\"{encoded}\"]", "a".repeat(64)).into_bytes(),
+            replace_once(json, "}", "}x")?,
+            replace_once(json, "}", "}{}")?,
+            Vec::new(),
+        ];
+        Ok((accepted, rejected))
+    }
+
     #[test]
     fn verity_signature_json_must_equal_sim1_on_both_architectures() -> TestResult {
         use crate::selector::installation::tests::{ddi_fixture, ImageSigning};
@@ -1039,79 +1120,7 @@ pub mod tests {
             // systemd-repart's own partition, unchanged, on both architectures.
             check(&image)??;
             let json = ddi_signature_json(&image, signature)?;
-            let text = std::str::from_utf8(&json)?.to_owned();
-            let root_hash = lower_hex(signing.root_hash());
-            let encoded = base64(signing.proof());
-            let root_pair = format!("\"rootHash\":\"{root_hash}\"");
-            let signature_pair = format!("\"signature\":\"{encoded}\"");
-            let fingerprint_start = text
-                .find(",\"certificateFingerprint\"")
-                .ok_or("no fingerprint")?;
-            let fingerprint_pair =
-                &text[fingerprint_start..text.find(",\"signature\"").ok_or("no signature")?];
-            assert!(text.contains(&root_pair) && text.contains(&signature_pair));
-
-            let mut other_root = root_hash.clone().into_bytes();
-            other_root[0] = if other_root[0] == b'0' { b'1' } else { b'0' };
-            let other_root = String::from_utf8(other_root)?;
-            let mut other_signature = encoded.clone().into_bytes();
-            other_signature[10] = if other_signature[10] == b'A' {
-                b'B'
-            } else {
-                b'A'
-            };
-            let other_signature = String::from_utf8(other_signature)?;
-            let unpadded = encoded.trim_end_matches('=');
-            let accepted: Vec<Vec<u8>> = vec![
-                // certificateFingerprint is optional, as systemd-repart
-                // omits it without OpenSSL; insignificant whitespace is JSON.
-                replace_once(&json, fingerprint_pair, "")?,
-                replace_once(&json, "{", "{ \n")?,
-            ];
-            let rejected: Vec<Vec<u8>> = vec![
-                replace_once(&json, &root_hash, &other_root)?,
-                replace_once(&json, &root_hash, &root_hash.to_uppercase())?,
-                replace_once(&json, &encoded, &other_signature)?,
-                replace_once(&json, &encoded, unpadded)?,
-                replace_once(&json, &encoded, &format!("!{}", &encoded[1..]))?,
-                replace_once(
-                    &json,
-                    &encoded,
-                    &format!("{}\\n{}", &encoded[..4], &encoded[4..]),
-                )?,
-                replace_once(&json, &format!("{root_pair},"), "")?,
-                replace_once(&json, &format!(",{signature_pair}"), "")?,
-                replace_once(&json, "}", ",\"extra\":\"\"}")?,
-                replace_once(&json, "{", &format!("{{{root_pair},"))?,
-                replace_once(&json, "}", &format!(",{signature_pair}}}"))?,
-                replace_once(
-                    &json,
-                    fingerprint_pair,
-                    &format!("{fingerprint_pair}{fingerprint_pair}"),
-                )?,
-                replace_once(&json, fingerprint_pair, ",\"certificateFingerprint\":null")?,
-                replace_once(
-                    &json,
-                    fingerprint_pair,
-                    &format!(",\"certificateFingerprint\":\"{}\"", "A".repeat(64)),
-                )?,
-                replace_once(
-                    &json,
-                    fingerprint_pair,
-                    &format!(",\"certificateFingerprint\":\"{}\"", "a".repeat(63)),
-                )?,
-                replace_once(
-                    &json,
-                    fingerprint_pair,
-                    &format!(",\"certificateFingerprint\":\"{}\"", "a".repeat(65)),
-                )?,
-                replace_once(&json, &format!("\"{root_hash}\""), "1")?,
-                format!("[\"{root_hash}\",\"{encoded}\"]").into_bytes(),
-                format!("[\"{root_hash}\",\"{}\",\"{encoded}\"]", "a".repeat(64)).into_bytes(),
-                replace_once(&json, "}", "}x")?,
-                replace_once(&json, "}", "}{}")?,
-                Vec::new(),
-            ];
+            let (accepted, rejected) = signature_json_variants(&json, &signing)?;
             for (variant, accepts) in accepted
                 .iter()
                 .map(|json| (json, true))
@@ -1125,12 +1134,31 @@ pub mod tests {
                     String::from_utf8_lossy(variant)
                 );
             }
+        }
+        Ok(())
+    }
 
+    #[test]
+    fn verity_signature_partition_framing_matches_systemd() -> TestResult {
+        use crate::selector::installation::tests::{ddi_fixture, ImageSigning};
+
+        for architecture in ["x86-64", "arm64"] {
+            let (image, partitions) = ddi_fixture(architecture)?;
+            let signing = ImageSigning::ddi(architecture)?;
+            let signature = &partitions[2];
+            let json = ddi_signature_json(&image, signature)?;
             // Only NUL bytes may follow the first NUL.
             let mut trailing = image.clone();
             let end = usize::try_from(signature.start_bytes + signature.length_bytes)?;
             trailing[end - 1] = b' ';
-            assert!(check(&trailing)?.is_err());
+            let trailing_file = temporary_file(&trailing)?;
+            assert!(check_verity_signature(
+                &trailing_file,
+                signature,
+                signing.root_hash(),
+                signing.proof()
+            )
+            .is_err());
             // A partition that the JSON fills exactly needs no NUL.
             let mut exact = signature.clone();
             exact.length_bytes = u64::try_from(json.len())?;
