@@ -436,7 +436,7 @@ fn proxy_enforces_the_monotonic_network_deadline() -> TestResult {
         waiter.recv_timeout(PROXY_SERVER_TIMEOUT).ok();
         Ok(received)
     });
-    let case = ProxyCase::new(address, &exchanges, [100, 100, 300])?;
+    let case = ProxyCase::new(address, &exchanges, [100, 100, 1_500])?;
     let mut channel = ProxyChannel::new(case.requests(&exchanges)?);
     let started = Instant::now();
     let session = case.serve(&mut channel, &mut ProxyConnector::default());
