@@ -825,7 +825,7 @@ impl AdmittedSandboxProvider {
     ) -> Result<(), SandboxAdmissionError> {
         let certificate_matches = self.trust.certificates().iter().any(|certificate| {
             certificate.fingerprint == image.signing_certificate_sha256
-                && certificate.keyring_serial == image.kernel_keyring_serial
+                && certificate.key_description == image.kernel_key_description
                 && certificate.epoch == image.image_trust_epoch
         });
         if !certificate_matches {

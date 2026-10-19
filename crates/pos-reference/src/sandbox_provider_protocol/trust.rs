@@ -4,8 +4,8 @@ use ciborium::value::Value;
 use ed25519_dalek::VerifyingKey;
 
 use super::codec::{
-    array, bounded_array, decode_document, fixed_bytes, key_id, require_canonical_order, signed,
-    uint, verify_digest, verify_signature,
+    array, bounded_array, decode_document, fixed_bytes, kernel_key_description, key_id,
+    require_canonical_order, signed, uint, verify_digest, verify_signature,
 };
 use super::SandboxProviderProtocolError;
 
@@ -70,8 +70,8 @@ impl SandboxTrustKey {
 pub struct SandboxTrustCertificate {
     /// SHA-256 fingerprint of the certificate.
     pub fingerprint: [u8; 32],
-    /// Administrator-installed kernel keyring serial.
-    pub keyring_serial: u64,
+    /// Exact kernel key description of this certificate in the built-in keyring.
+    pub key_description: String,
     /// Epoch carried by this certificate record.
     pub epoch: u64,
 }
@@ -81,7 +81,7 @@ impl SandboxTrustCertificate {
         let fields = array::<3>(value)?;
         Ok(Self {
             fingerprint: fixed_bytes(&fields[0])?,
-            keyring_serial: uint(&fields[1])?,
+            key_description: kernel_key_description(&fields[1])?,
             epoch: uint(&fields[2])?,
         })
     }

@@ -1095,6 +1095,13 @@ pub mod tests {
     pub(crate) const IMAGE_PROOF: &[u8] =
         include_bytes!("../../tests/vectors/sim1-pkcs7/proof.der");
     const IMAGE_CERTIFICATE: &[u8] = include_bytes!("../../tests/vectors/sim1-pkcs7/signer.der");
+    // The kernel's x509 description of IMAGE_CERTIFICATE: subject CN, then SKID.
+    const IMAGE_KEY_DESCRIPTION: &str =
+        "PiglorOS SIM1 interoperability fixture: beb62aa1770ab755e4fe5d9ed9477912a7958633";
+    /// A synthetic 32-byte verity salt for the synthetic GPT fixtures.
+    fn image_verity_salt() -> [u8; 32] {
+        *blake3::hash(b"PiglorOS synthetic SIM1 verity salt").as_bytes()
+    }
 
     fn provider_trust(authority: &ProviderAuthority) -> TestResult<Vec<u8>> {
         let keys = ordered(vec![
@@ -1113,7 +1120,7 @@ pub mod tests {
                 Value::Array(keys),
                 Value::Array(vec![Value::Array(vec![
                     digest(Sha256::digest(IMAGE_CERTIFICATE).into()),
-                    integer(77),
+                    Value::Text(IMAGE_KEY_DESCRIPTION.to_owned()),
                     integer(2),
                 ])]),
                 Value::Text("root".to_owned()),
@@ -1344,14 +1351,14 @@ pub mod tests {
                 integer(4096),
                 integer(4096),
                 integer(1),
-                Value::Bytes(Vec::new()),
+                digest(image_verity_salt()),
                 Value::Array(vec![
                     integer(u64::try_from(der.len())?),
                     Value::Bytes(Sha256::digest(der).to_vec()),
                     Value::Bytes(der.to_vec()),
                 ]),
                 digest(Sha256::digest(IMAGE_CERTIFICATE).into()),
-                integer(77),
+                Value::Text(IMAGE_KEY_DESCRIPTION.to_owned()),
                 Value::Text("/adapter".to_owned()),
                 digest(*blake3::hash(executable).as_bytes()),
                 Value::Array(Vec::new()),
