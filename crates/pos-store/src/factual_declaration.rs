@@ -474,9 +474,11 @@ fn driver_inputs(nodes: &[DependencyNodeRecordV1]) -> BTreeSet<Hash> {
 /// fold-only ingress nodes, and every edge but those into the fold checkpoint
 /// nodes and the snapshot node. An ingress node is forwarded-needed iff a
 /// step or output node inputs it; one that only a fold checkpoint node inputs
-/// is the fold part's, as it is the builder's (`assemble_factual_tick`
-/// counts every forwarded ingress node in the rest, and every ingress node
-/// it adds for a kept fold input in the fold part).
+/// is counted in the fold part. The builder counts such an orphan ingress
+/// node in the rest instead (`assemble_factual_tick` counts every ingress
+/// node it already holds in the rest), so the two splits differ for an
+/// orphan, but their totals agree for the kept set: the derived fold part is
+/// the same.
 fn fold_rest(dependencies: &FactualTickDependenciesV1) -> FactualFoldRestV1 {
     let record = dependencies.record();
     let nodes = record.nodes();

@@ -32,8 +32,8 @@ use pos_core::{
     APPEND_IDENTITY_RETENTION_MICROS, DELEGATE_ACTION_V1, EVENT_TYPE_CONSENT_GRANTED_V1,
     EVENT_TYPE_CONSENT_REVOKED_V1, FACTUAL_FOLD_HISTORY_SCHEMA_ID_V1, GEOGRAPHIC_EVENT_TYPE,
     HOST_CONSENT_CLOSED_EVENT_TYPE, MAX_DEPENDENCY_NODE_INPUTS_V1, MAX_DEPENDENCY_PAGE_ROWS_V1,
-    MAX_RECORDED_DEPENDENCY_NODES_V1, MAX_TICK_DEPENDENCY_EDGES_V1, MODALITY_LOCATION,
-    PIPELINE_CONTRACT_VERSION_V1,
+    MAX_RECORDED_DEPENDENCY_NODES_V1, MAX_TICK_DEPENDENCY_EDGES_V1, MAX_TICK_DEPENDENCY_NODES_V1,
+    MODALITY_LOCATION, PIPELINE_CONTRACT_VERSION_V1,
 };
 use pos_store::{memory::MemoryStore, sqlite::SqliteStore};
 use tempfile::tempdir;
@@ -3265,6 +3265,8 @@ fn assert_node_reserve(name: &str, store: &mut dyn Harness) {
         step_edges: 1,
         orphans: Vec::new(),
     };
+    // A bare record: the reserve guard refuses it before any fold part is
+    // derived (without the guard the bare record would still mismatch).
     let over = heavy_declared(&first, crowded, None);
     let case = invalid_for("rest over the node reserve", first.clone(), over);
     assert_all_refused(name, store, vec![case]);
