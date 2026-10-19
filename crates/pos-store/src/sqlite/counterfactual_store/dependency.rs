@@ -8,7 +8,7 @@
 //!
 //! # Schema
 //!
-//! Five additive tables, two indexes, and seventeen guard triggers, created and
+//! Six additive tables, two indexes, and twenty guard triggers, created and
 //! validated like the rest of the counterfactual schema:
 //!
 //! - `counterfactual_dependency_records` holds one row per recorded Tick
@@ -39,6 +39,11 @@
 //!   artifact digest. Its primary key is `(timeline_id, seq)`, and a second
 //!   unique key on the Timeline and artifact digest serves the bound `seq` of
 //!   a digest lookup.
+//! - `counterfactual_dependency_fold_heads` holds, per Timeline, one row per
+//!   scheduled Tick of the Timeline's own set (ADR-064 R4.4): the Tick, the
+//!   scanned-through `seq`, and the head artifact digest (32 zero bytes when
+//!   there is no head). Its primary key is `(timeline_id, tick)` and serves
+//!   the cursor read. No write path fills it yet (slice 4 does).
 //! - The index `counterfactual_dependency_nodes_by_owner` on the nodes table,
 //!   over `(timeline_id, generation, owner_id, tick)`, serves the latest step
 //!   node of an owner. Both index names carry no `idx_` prefix, on purpose:
@@ -53,7 +58,7 @@
 //! serve them. The keys can never meet: a check ties the origin code to the
 //! key, and generation `0` holds no rows.
 //!
-//! The five tables refuse an update, refuse a delete outside the marked #530
+//! The six tables refuse an update, refuse a delete outside the marked #530
 //! purge (the same `counterfactual_purge_fence` condition as the four delete
 //! guards of the storage tables), and refuse an insert that repeats a key.
 //! The record Tick guard also refuses an insert that is not above every Tick
@@ -117,6 +122,16 @@
 //!   is a storage fault, and so is any read of a pre-schema read-only file,
 //!   which holds none of the tables, even a read with nothing to look up.
 //!   The set counts are the sums of the Timeline's own record rows.
+//! - **Fold reads (ADR-064 R4).** They run under the same fence and read
+//!   point. The fold cursor is the latest fold-head row of the nearest
+//!   segment that holds one at or below its visible Tick (an ancestor's cut
+//!   Tick), with the node its head digest names resolved through the
+//!   segments like a digest lookup; a head of 32 zero bytes names none, and
+//!   one that names no visible node is a storage fault. The fold window reads
+//!   the newest at most 65,537 Events of the logical range through the fork
+//!   chain, one indexed statement per member and newest first, taking the
+//!   `seq`, type, and payload hash but never the payload, and keeps the newest
+//!   65,536 with their Event bindings, resolved like `nodes_for_committed_events`.
 //! - **Install path.** One insert function records a committed Tick: its
 //!   record, nodes, and edges under the prefix key, its commit range, and its
 //!   Event bindings. The pipeline commit calls it inside its own transaction,
@@ -159,11 +174,11 @@
 //!   the tables do not exist there and cannot be created, so the read fails
 //!   closed as not found.
 //! - **Deletion.** The marked purge of a deleted Timeline also deletes its
-//!   edges, nodes, records, commit ranges, and Event bindings, whether they
-//!   are its Fork generations' or its own committed prefix. A re-created
-//!   generic Fork's Timeline ID starts with empty sets. An admitted (ADR-099)
-//!   Fork is never deleted (ADR-099 revision 13), so its sets are never
-//!   purged.
+//!   edges, nodes, records, commit ranges, Event bindings, and fold heads,
+//!   whether they are its Fork generations' or its own committed prefix. A
+//!   re-created generic Fork's Timeline ID starts with empty sets. An
+//!   admitted (ADR-099) Fork is never deleted (ADR-099 revision 13), so its
+//!   sets are never purged.
 //! - **Existing files.** The tables are additive and created with
 //!   `IF NOT EXISTS`; a writable open of a file with the storage tables but
 //!   without these creates them empty, and a read-only open of such a file
@@ -183,7 +198,7 @@ use pos_core::{
     DependencyNodeRecordV1, DependencyPageCursorV1, DependencyPageRequestV1, DependencyPageV1,
     DependencyPagedRowV1, DependencyReadScopeV1, ErasureProtectedOperationV1, Event, FactualCutV1,
     FactualFoldCursorV1, FactualFoldWindowV1, FactualHeadV1, FactualOwnerIdV1,
-    FactualPrefixReadPortV1, Hash, PipelineAdmissionBasisV1, PipelineDraftBatchV1,
+    FactualPrefixReadPortV1, Hash, Kind, PipelineAdmissionBasisV1, PipelineDraftBatchV1,
     RecordedDependencyClassV1, RecordedNodeOriginV1, RecordedSetCountsV1, Seq, SeqRange,
     TickDependencyRecordV1, TimelineId,
 };
@@ -193,7 +208,10 @@ use super::{
     counterfactual_schema_present, lift, read_fork_state, settle, sql_integer, stored_hash,
     stored_u64, then_staged, CounterfactualSchemaObjectV1, Staged, StoreError,
 };
-use crate::factual_tick_plan::{plan_tick, FactualInstallV1, PlannedTickV1, TickPrefixV1};
+use crate::factual_tick_plan::{
+    fold_cursor_of, fold_window_of, plan_tick, FactualInstallV1, FoldEntryV1, PlannedTickV1,
+    TickPrefixV1, FOLD_READ_LIMIT,
+};
 use crate::sqlite::{seq_as_i64, SqliteSchemaColumn, SqliteSchemaTable, SqliteStore};
 use crate::COUNTERFACTUAL_SEAL;
 
@@ -355,10 +373,28 @@ pub(super) const EVENT_NODES_TABLE: SqliteSchemaTable = SqliteSchemaTable {
     ],
 };
 
+/// Fold heads (ADR-064 R4.4): per Timeline, the fold cursor and the head
+/// artifact digest each scheduled Tick of its own set wrote.
+pub(super) const FOLD_HEADS_TABLE: SqliteSchemaTable = SqliteSchemaTable {
+    name: "counterfactual_dependency_fold_heads",
+    columns_query: "PRAGMA table_info(counterfactual_dependency_fold_heads)",
+    columns: &[
+        key_column!("timeline_id", "TEXT"),
+        key_column!("tick", "INTEGER"),
+        data_column!("scanned_through", "INTEGER"),
+        data_column!("head_artifact_digest", "BLOB"),
+    ],
+    constraints: &[
+        "CHECK (tick >= 1)",
+        "CHECK (scanned_through >= 0)",
+        "CHECK (length(head_artifact_digest) = 32)",
+    ],
+};
+
 // The `WHEN NOT EXISTS (... counterfactual_purge_fence ...)` clause is
-// repeated in five trigger bodies here and in four in the parent module, nine
+// repeated in six trigger bodies here and in four in the parent module, ten
 // copies in all, on purpose: the exact-body validation compares literal text,
-// so the nine copies must stay identical.
+// so the ten copies must stay identical.
 pub(super) const RECORDS_RETAINED: CounterfactualSchemaObjectV1 = CounterfactualSchemaObjectV1 {
     kind: "trigger",
     name: "counterfactual_dependency_records_retained",
@@ -541,6 +577,37 @@ pub(super) const BINDINGS_DIGEST_NOT_REPLACED: CounterfactualSchemaObjectV1 =
                WHERE timeline_id = NEW.timeline_id AND artifact_digest = NEW.artifact_digest
            )
            BEGIN SELECT RAISE(ABORT, 'dependency event node digest is already recorded'); END",
+    };
+
+pub(super) const FOLD_HEADS_RETAINED: CounterfactualSchemaObjectV1 = CounterfactualSchemaObjectV1 {
+    kind: "trigger",
+    name: "counterfactual_dependency_fold_heads_retained",
+    body: "BEFORE DELETE ON counterfactual_dependency_fold_heads
+           WHEN NOT EXISTS (
+               SELECT 1 FROM counterfactual_purge_fence WHERE fork_id = OLD.timeline_id
+           )
+           BEGIN SELECT RAISE(ABORT, 'dependency fold head is retained'); END",
+};
+
+pub(super) const FOLD_HEADS_IMMUTABLE: CounterfactualSchemaObjectV1 = CounterfactualSchemaObjectV1 {
+    kind: "trigger",
+    name: "counterfactual_dependency_fold_heads_immutable",
+    body: "BEFORE UPDATE ON counterfactual_dependency_fold_heads
+           BEGIN SELECT RAISE(ABORT, 'dependency fold head is immutable'); END",
+};
+
+/// Guards the Tick key of a fold head, so a replacing insert deletes no fold
+/// head that holds the key.
+pub(super) const FOLD_HEADS_NOT_REPLACED: CounterfactualSchemaObjectV1 =
+    CounterfactualSchemaObjectV1 {
+        kind: "trigger",
+        name: "counterfactual_dependency_fold_heads_not_replaced",
+        body: "BEFORE INSERT ON counterfactual_dependency_fold_heads
+           WHEN EXISTS (
+               SELECT 1 FROM counterfactual_dependency_fold_heads
+               WHERE timeline_id = NEW.timeline_id AND tick = NEW.tick
+           )
+           BEGIN SELECT RAISE(ABORT, 'dependency fold head is already recorded'); END",
     };
 
 /// Serves the head and cut reads: the commit ranges of a Timeline by last `seq`.
@@ -1460,6 +1527,21 @@ const STEP_NODE_SQL: &str = "SELECT tick, scheduler_position, owner_id, output_o
        AND output_ordinal = 0 AND tick <= ?4
      ORDER BY tick DESC, scheduler_position DESC LIMIT 1";
 
+/// The latest fold-head row of a Timeline's own set (`?1`) at or below the
+/// bound (`?2`): its scanned-through `seq` and head digest. The primary key
+/// serves it.
+const FOLD_HEAD_SQL: &str = "SELECT scanned_through, head_artifact_digest
+     FROM counterfactual_dependency_fold_heads
+     WHERE timeline_id = ?1 AND tick <= ?2
+     ORDER BY tick DESC LIMIT 1";
+
+/// The newest own Events of a Timeline (`?1`) in the local `seq` range
+/// (`?2`, `?3`], at most `?4` of them, newest first: the `seq`, the type,
+/// and the payload hash, never the payload. The primary key serves it.
+const FOLD_EVENTS_SQL: &str = "SELECT seq, event_type, payload_hash FROM events
+     WHERE timeline_id = ?1 AND seq > ?2 AND seq <= ?3
+     ORDER BY seq DESC LIMIT ?4";
+
 /// The message of a factual read on a file without the counterfactual schema.
 const SCHEMA_ABSENT: &str = "factual prefix read needs the counterfactual schema";
 
@@ -1832,6 +1914,104 @@ fn last_step(conn: &Connection, path: &[SegmentV1], owner: &FactualOwnerIdV1) ->
     first_found(path.iter().rev(), find)
 }
 
+/// The scanned-through `seq` and head digest columns of a fold-head row.
+fn fold_head_row(row: &Row<'_>) -> rusqlite::Result<(i64, Vec<u8>)> {
+    <(i64, Vec<u8>)>::try_from(row)
+}
+
+/// Decode a fold-head row.
+fn fold_head_of(row: (i64, Vec<u8>)) -> Result<(Seq, Hash), CoreError> {
+    let (scanned, digest) = row;
+    let head = stored_hash(digest).map_err(factual_fault);
+    stored_seq(scanned).and_then(|through| head.map(|found| (through, found)))
+}
+
+/// The latest fold-head row of a segment at or below its visible Tick.
+fn segment_fold_head(
+    conn: &Connection,
+    segment: &SegmentV1,
+) -> Result<Option<(Seq, Hash)>, CoreError> {
+    let query = (&segment.set.timeline, segment.tick_bound);
+    let found = optional_row(conn, FOLD_HEAD_SQL, query, fold_head_row);
+    found.and_then(|row| row.map(fold_head_of).transpose())
+}
+
+/// The node with the artifact digest, the nearest segment first.
+fn node_with_digest(conn: &Connection, path: &[SegmentV1], digest: &Hash) -> NodeLookupV1 {
+    let hits = digest_nodes(conn, path, std::slice::from_ref(digest))?;
+    Ok(hits.into_iter().flatten().next().map(|bound| bound.0))
+}
+
+/// The fold cursor: the latest fold-head row of the nearest segment that
+/// holds one at or below its visible Tick, and the node its head names.
+fn fold_cursor_at(
+    conn: &Connection,
+    path: &[SegmentV1],
+) -> Result<Option<FactualFoldCursorV1>, CoreError> {
+    let fold_head = |segment: &SegmentV1| segment_fold_head(conn, segment);
+    let latest = first_found(path.iter().rev(), fold_head);
+    let lookup = |digest: &Hash| node_with_digest(conn, path, digest);
+    latest.and_then(|found| fold_cursor_of(found, lookup))
+}
+
+/// The local `seq`, type, and payload hash columns of an Event row.
+type FoldRowV1 = (i64, String, Vec<u8>);
+
+/// The columns of an Event row a fold read takes.
+fn fold_row(row: &Row<'_>) -> rusqlite::Result<FoldRowV1> {
+    <FoldRowV1>::try_from(row)
+}
+
+/// Decode an Event row of a Timeline that inherits `prefix` Events.
+fn fold_entry(prefix: u64, row: FoldRowV1) -> Result<FoldEntryV1, CoreError> {
+    let (local, event_type, digest) = row;
+    let payload_hash = stored_hash(digest).map_err(factual_fault);
+    stored_unsigned(local).and_then(|own| {
+        let seq = Seq::from_u64(prefix.saturating_add(own));
+        payload_hash.map(|hash| (seq, Kind::new(event_type), hash))
+    })
+}
+
+/// The newest Events of one member of the fork chain in the logical range
+/// `(after, through]`, at most `room`, newest first. A member shows its own
+/// Events above its fork point and, for an ancestor, at or below the next
+/// member's fork point.
+fn member_fold_events(
+    conn: &Connection,
+    chain: &[(TimelineId, Seq)],
+    index: usize,
+    range: (Seq, Seq),
+    room: usize,
+) -> Result<Vec<FoldEntryV1>, CoreError> {
+    let (member, fork) = chain[index];
+    let prefix = fork.as_u64();
+    let next = chain.get(index + 1);
+    let visible = next.map_or(u64::MAX, |down| down.1.as_u64().saturating_sub(prefix));
+    let low = Seq::from_u64(range.0.as_u64().saturating_sub(prefix));
+    let high = Seq::from_u64(range.1.as_u64().saturating_sub(prefix).min(visible));
+    let id = member.to_string();
+    let query = (id, seq_as_i64(low), seq_as_i64(high), sql_count(room));
+    let rows = all_rows(conn, FOLD_EVENTS_SQL, query, fold_row)?;
+    let decode = |row| fold_entry(prefix, row);
+    rows.into_iter().map(decode).collect()
+}
+
+/// The newest Events of the logical range `(after, through]` of a fork chain,
+/// at most [`FOLD_READ_LIMIT`], newest first: the chain is read from the
+/// Timeline itself up through its ancestors.
+fn newest_fold_events(
+    conn: &Connection,
+    chain: &[(TimelineId, Seq)],
+    range: (Seq, Seq),
+) -> Result<Vec<FoldEntryV1>, CoreError> {
+    let mut newest = Vec::new();
+    for index in (0..chain.len()).rev() {
+        let room = FOLD_READ_LIMIT.saturating_sub(newest.len());
+        newest.extend(member_fold_events(conn, chain, index, range, room)?);
+    }
+    Ok(newest)
+}
+
 /// The stored row counts of the Timeline's own committed prefix set.
 fn prefix_counts(
     conn: &Connection,
@@ -1890,6 +2070,23 @@ impl SqliteStore {
         })
     }
 
+    /// The fold window of `(after, through]`: the newest Events of the
+    /// Timeline's logical history, read through its fork chain, with their
+    /// nodes resolved through the ancestry segments.
+    fn read_fold_window(
+        &self,
+        timeline: TimelineId,
+        range: (Seq, Seq),
+    ) -> Result<FactualFoldWindowV1, CoreError> {
+        self.read_fenced(timeline, |held| {
+            let chain = held.factual_chain(timeline)?;
+            require_schema(&held.conn)?;
+            let path = path_of(&held.conn, timeline, &chain)?;
+            let newest = newest_fold_events(&held.conn, &chain, range)?;
+            fold_window_of(newest, |seqs| event_nodes(&held.conn, &path, seqs))
+        })
+    }
+
     /// The stored counts of the Timeline's own prefix set. It needs the
     /// visibility and the authorization of the whole ancestry, but not the
     /// segments, which the counts ignore.
@@ -1943,19 +2140,17 @@ impl FactualPrefixReadPortV1 for SqliteStore {
         self.read_prefix_counts(timeline)
     }
 
-    /// A stub until ADR-064 R4 slice 3 adds the fold-head reads.
-    fn fold_cursor(&self, _timeline: TimelineId) -> Result<Option<FactualFoldCursorV1>, CoreError> {
-        Ok(None)
+    fn fold_cursor(&self, timeline: TimelineId) -> Result<Option<FactualFoldCursorV1>, CoreError> {
+        self.read_factual(timeline, fold_cursor_at)
     }
 
-    /// A stub until ADR-064 R4 slice 3 adds the fold-head reads.
     fn fold_window(
         &self,
-        _timeline: TimelineId,
-        _after: Seq,
-        _through: Seq,
+        timeline: TimelineId,
+        after: Seq,
+        through: Seq,
     ) -> Result<FactualFoldWindowV1, CoreError> {
-        Ok(FactualFoldWindowV1::default())
+        self.read_fold_window(timeline, (after, through))
     }
 }
 

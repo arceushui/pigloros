@@ -25,12 +25,13 @@ use pos_core::{
     DependencyEdgeRecordV1, DependencyNodeCoordinateV1, DependencyNodeRecordV1,
     DependencyPageCursorV1, DependencyPageRequestV1, DependencyPageV1, DependencyPagedRowV1,
     DependencyReadScopeV1, EntityId, ErasureContainmentGateV1, ErasureInventoryPersistencePortV1,
-    ErasureLifecycleV1, ErasureProtectedEffectDispositionV1, EventDraft, EventStore, FactualCutV1,
-    FactualHeadV1, FactualOwnerIdV1, FactualPrefixReadPortV1, ForkGenerationV1, Hash,
-    InvalidationConflictV1, Kind, PipelineDraftBatchV1, RecomputationFrontierBytesV1,
-    RecordedDependencyClassV1, RecordedNodeOriginV1, RecordedSetCountsV1, Seq,
-    SuffixInvalidationBytesV1, TickDependencyRecordV1, TimelineId, TimelineMeta,
-    MAX_DEPENDENCY_PAGE_ROWS_V1, MAX_RECORDED_DEPENDENCY_EDGES_V1,
+    ErasureLifecycleV1, ErasureProtectedEffectDispositionV1, Event, EventDraft, EventStore,
+    FactualCutV1, FactualFoldCursorV1, FactualFoldEventV1, FactualFoldWindowV1, FactualHeadV1,
+    FactualOwnerIdV1, FactualPrefixReadPortV1, ForkGenerationV1, Hash, InvalidationConflictV1,
+    Kind, PipelineDraftBatchV1, RecomputationFrontierBytesV1, RecordedDependencyClassV1,
+    RecordedNodeOriginV1, RecordedSetCountsV1, Seq, SeqRange, SuffixInvalidationBytesV1,
+    TickDependencyRecordV1, TimelineId, TimelineMeta, MAX_DEPENDENCY_PAGE_ROWS_V1,
+    MAX_FACTUAL_FOLD_SCAN_PER_TICK_V1, MAX_RECORDED_DEPENDENCY_EDGES_V1,
     MAX_RECORDED_DEPENDENCY_NODES_V1,
 };
 use pos_store::sqlite::SqliteStore;
@@ -1956,11 +1957,12 @@ fn c12_a_failed_purge_statement_leaves_every_row_and_no_marker() {
 /// `admitted_fork_deletion_*_public` tests.
 const HAS_FORKS: &str = "cannot delete timeline that still has forks";
 
-/// Every dependency row of one Timeline: [`recorded_rows`] then
-/// [`factual_rows`].
+/// Every dependency row of one Timeline: [`recorded_rows`], then
+/// [`factual_rows`], then its fold heads.
 fn dependency_rows(path: &Path, timeline: TimelineId) -> Vec<i64> {
     let mut rows = recorded_rows(path, timeline).to_vec();
     rows.extend(factual_rows(path, timeline));
+    rows.push(fold_heads(path, timeline));
     rows
 }
 
@@ -2112,6 +2114,7 @@ fn c14_drifted_dependency_tables_are_rejected_on_every_open() {
         ("records", "CHECK (node_count >= 0), "),
         ("commit_ranges", "CHECK (last_seq >= first_seq), "),
         ("event_nodes", "UNIQUE (timeline_id, artifact_digest), "),
+        ("fold_heads", "CHECK (length(head_artifact_digest) = 32), "),
     ] {
         let fixture = fixture();
         let name = format!("counterfactual_dependency_{table}");
@@ -2128,7 +2131,15 @@ fn c14_drifted_dependency_tables_are_rejected_on_every_open() {
         let text = fixture_path_str(&fixture);
         assert!(refuses(text, &name), "{fragment}");
     }
-    for table in ["records", "nodes", "edges", "commit_ranges", "event_nodes"] {
+    let tables = [
+        "records",
+        "nodes",
+        "edges",
+        "commit_ranges",
+        "event_nodes",
+        "fold_heads",
+    ];
+    for table in tables {
         let fixture = fixture();
         let name = format!("counterfactual_dependency_{table}");
         assert_ok(execute(
@@ -2151,7 +2162,8 @@ fn c14_a_file_without_the_dependency_tables_fails_closed_read_only() {
          DROP TABLE counterfactual_dependency_nodes;
          DROP TABLE counterfactual_dependency_edges;
          DROP TABLE counterfactual_dependency_commit_ranges;
-         DROP TABLE counterfactual_dependency_event_nodes;",
+         DROP TABLE counterfactual_dependency_event_nodes;
+         DROP TABLE counterfactual_dependency_fold_heads;",
     ));
     // A read-only open cannot create them, and the storage schema alone is
     // not enough: the file fails the exact validation.
@@ -2183,7 +2195,8 @@ fn c14_a_pre_schema_file_reads_dependencies_as_not_found() {
          DROP TABLE counterfactual_dependency_nodes;
          DROP TABLE counterfactual_dependency_edges;
          DROP TABLE counterfactual_dependency_commit_ranges;
-         DROP TABLE counterfactual_dependency_event_nodes;",
+         DROP TABLE counterfactual_dependency_event_nodes;
+         DROP TABLE counterfactual_dependency_fold_heads;",
     ));
     let mut read_only = ok(SqliteStore::open_read_only(fixture_path_str(&fixture)));
     assert_ok(read_only.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open())));
@@ -2347,6 +2360,8 @@ fn factual_reads_fail(store: &SqliteStore, id: TimelineId) -> bool {
         store.nodes_by_digest(id, &[hash(1)]).is_err(),
         store.last_step_node(id, &step).is_err(),
         store.factual_set_counts(id).is_err(),
+        store.fold_cursor(id).is_err(),
+        store.fold_window(id, Seq::ZERO, seqs[0]).is_err(),
     ];
     failed.iter().all(|one| *one)
 }
@@ -2552,19 +2567,6 @@ fn f7_set_counts_cover_only_the_timelines_own_set() {
     assert_eq!(ok(store.factual_set_counts(lineage.root)), counts(10));
     assert_eq!(ok(store.factual_set_counts(lineage.mid)), counts(2));
     assert_eq!(ok(store.factual_set_counts(lineage.deep)), counts(0));
-}
-
-/// The fold reads are stubs until ADR-064 R4 slice 3 adds the fold-head rows.
-#[test]
-fn f7_fold_reads_have_no_cursor_and_an_empty_window_before_fold_rows() {
-    let lineage = lineage();
-    let store = &lineage.store;
-
-    for timeline in [lineage.root, lineage.mid, lineage.deep] {
-        assert!(ok(store.fold_cursor(timeline)).is_none());
-        let window = ok(store.fold_window(timeline, Seq::ZERO, Seq::from_u64(8)));
-        assert_eq!(window, pos_core::FactualFoldWindowV1::default());
-    }
 }
 
 #[test]
@@ -3002,4 +3004,310 @@ fn f8_paging_resumes_after_a_cursor_inside_an_ancestor_segment() {
         assert_eq!(page.items(), &rest[..rest.len().min(limit)]);
         assert_eq!(page.next().is_some(), rest.len() > limit);
     }
+}
+
+// Fold reads (ADR-064 Revision 4), over fold-head rows seeded by raw SQL: no
+// write path records one yet. A raw write runs while no store holds the file,
+// which is reopened under a fresh gate afterwards.
+
+const FOLD_HEADS: &str = "counterfactual_dependency_fold_heads";
+
+/// Fold-head rows of one Timeline.
+fn fold_heads(path: &Path, timeline: TimelineId) -> i64 {
+    let sql = format!("SELECT count(*) FROM {FOLD_HEADS} WHERE timeline_id = ?1");
+    scalar(path, &sql, timeline)
+}
+
+/// The `VALUES` tuple of one fold-head row.
+fn fold_head(timeline: TimelineId, tick: u64, scanned: u64, digest: Hash) -> String {
+    let head = hex(digest.as_bytes());
+    format!("('{timeline}', {tick}, {scanned}, X'{head}')")
+}
+
+/// Run `sql` on the lineage's file while no store holds it, then reopen it.
+fn rewritten(lineage: &mut Lineage, sql: &str) {
+    let placeholder = ok(SqliteStore::open_in_memory());
+    drop(std::mem::replace(&mut lineage.store, placeholder));
+    assert_ok(execute(&lineage.path, sql));
+    let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
+    lineage.store = open_with_gate(&lineage.path, &gate);
+    lineage.gate = gate;
+}
+
+/// Insert fold-head rows into the lineage's file.
+fn insert_fold_heads(lineage: &mut Lineage, rows: &[String]) {
+    let values = rows.join(", ");
+    rewritten(lineage, &format!("INSERT INTO {FOLD_HEADS} VALUES {values};"));
+}
+
+/// The lineage with fold heads: the root's Ticks 1 to 3 scanned through 3, 5
+/// (no head), and 7, and the middle Fork's own Tick 3 through 8, whose head
+/// is the root's Tick 2 step node.
+fn folded_lineage() -> Lineage {
+    let mut lineage = lineage();
+    let (root, mid) = (lineage.root, lineage.mid);
+    let rows = [
+        fold_head(root, 1, 3, seeded_digest(ROOT_LANE, 1, 0)),
+        fold_head(root, 2, 5, Hash::zero()),
+        fold_head(root, 3, 7, seeded_digest(ROOT_LANE, 3, 0)),
+        fold_head(mid, 3, 8, seeded_digest(ROOT_LANE, 2, 0)),
+    ];
+    insert_fold_heads(&mut lineage, &rows);
+    lineage
+}
+
+/// A fold cursor through `scanned` whose head is the step node of the root's
+/// Tick, if any.
+fn expected_cursor(scanned: u64, head: Option<(u8, &str)>) -> FactualFoldCursorV1 {
+    FactualFoldCursorV1 {
+        scanned_through: Seq::from_u64(scanned),
+        head: head.map(|(tick, owner)| seeded_node(ROOT_LANE, tick, owner, 0)),
+    }
+}
+
+#[test]
+fn f14_the_fold_cursor_is_the_latest_visible_fold_head_through_each_cut() {
+    let mut lineage = folded_lineage();
+    let (root, mid, deep) = (lineage.root, lineage.mid, lineage.deep);
+    let cursor = |store: &SqliteStore, timeline| ok(store.fold_cursor(timeline));
+    let cases = [
+        (root, expected_cursor(7, Some((3, OWNER_C)))),
+        // The middle Fork's own row wins; its head is an inherited node.
+        (mid, expected_cursor(8, Some((2, OWNER_B)))),
+        // The deep Fork has no row and sees none of the middle Fork's Ticks,
+        // so the root's row at its cut Tick 2 is the cursor, without a head.
+        (deep, expected_cursor(5, None)),
+    ];
+    for (timeline, expected) in cases {
+        assert_eq!(cursor(&lineage.store, timeline), Some(expected));
+    }
+    // A Fork of the root at 4 is cut at Tick 1; at 1 it is cut before any.
+    let at_four = fork_at(&mut lineage.store, root, 4);
+    let expected = expected_cursor(3, Some((1, OWNER_A)));
+    assert_eq!(cursor(&lineage.store, at_four), Some(expected));
+    let at_one = fork_at(&mut lineage.store, root, 1);
+    assert_eq!(cursor(&lineage.store, at_one), None);
+    let bare = ok(lineage.store.create_timeline("factual-fold-bare")).id();
+    assert_eq!(cursor(&lineage.store, bare), None);
+}
+
+#[test]
+fn f14_a_fold_head_that_names_no_visible_node_is_a_storage_fault() {
+    let mut lineage = folded_lineage();
+    let (root, deep) = (lineage.root, lineage.deep);
+    // The root's Tick 3 node is past the deep Fork's cut; the other digest is
+    // recorded nowhere.
+    let rows = [
+        fold_head(deep, 1, 6, seeded_digest(ROOT_LANE, 3, 0)),
+        fold_head(root, 4, 9, hash(250)),
+    ];
+    insert_fold_heads(&mut lineage, &rows);
+    for timeline in [deep, root] {
+        let refused = err(lineage.store.fold_cursor(timeline));
+        assert!(matches!(refused, CoreError::Storage(_)), "{refused:?}");
+    }
+}
+
+/// The fold window the public reads predict for `(after, through]`: the
+/// newest Events of the logical range, at most the scan cap, in ascending
+/// `seq`, each with its type, payload hash, and bound node.
+fn predicted_window(
+    store: &SqliteStore,
+    timeline: TimelineId,
+    after: u64,
+    through: u64,
+) -> FactualFoldWindowV1 {
+    let all = ok(store.read(timeline, SeqRange::all()));
+    let range = after + 1..=through;
+    let listed: Vec<&Event> = all
+        .iter()
+        .filter(|event| range.contains(&event.seq.as_u64()))
+        .collect();
+    let cap = MAX_FACTUAL_FOLD_SCAN_PER_TICK_V1;
+    let skipped = listed.len().saturating_sub(cap);
+    let kept = &listed[skipped..];
+    let seqs: Vec<Seq> = kept.iter().map(|event| event.seq).collect();
+    let nodes = ok(store.nodes_for_committed_events(timeline, &seqs));
+    let events = kept
+        .iter()
+        .zip(nodes)
+        .map(|(event, node)| FactualFoldEventV1 {
+            seq: event.seq,
+            event_type: event.event_type.clone(),
+            payload_hash: event.payload_hash,
+            node_class: node.as_ref().map(NodeRow::class),
+            node,
+        })
+        .collect();
+    FactualFoldWindowV1 {
+        events,
+        truncated: skipped > 0,
+    }
+}
+
+/// The `seq`s a fold window lists.
+fn window_seqs(listed: &FactualFoldWindowV1) -> Vec<u64> {
+    let seqs = listed.events.iter().map(|event| event.seq.as_u64());
+    seqs.collect()
+}
+
+#[test]
+fn f15_fold_windows_list_the_logical_range_with_hashes_and_bindings() {
+    let lineage = folded_lineage();
+    let store = &lineage.store;
+    let (root, mid, deep) = (lineage.root, lineage.mid, lineage.deep);
+    let window = |timeline, after, through| {
+        let read = store.fold_window(timeline, Seq::from_u64(after), Seq::from_u64(through));
+        ok(read)
+    };
+
+    let cases = [
+        (root, 1, 9),
+        (root, 0, 14),
+        (mid, 0, 9),
+        (mid, 5, 100),
+        (deep, 5, 100),
+        (deep, 7, 7),
+        (root, 9, 3),
+    ];
+    for (timeline, after, through) in cases {
+        let expected = predicted_window(store, timeline, after, through);
+        let listed = window(timeline, after, through);
+        assert_eq!(listed, expected, "{after} {through}");
+    }
+
+    // The middle Fork inherits `seq` 1 to 6, binds 2 to 5 through the root's
+    // visible Ticks 1 and 2, and its own 9; 6 is in the root's Tick 3, past
+    // the cut.
+    let listed = window(mid, 0, 9);
+    assert_eq!(window_seqs(&listed), (1..=9).collect::<Vec<_>>());
+    let bound = listed.events.iter().map(|event| event.node.is_some());
+    let expected = [false, true, true, true, true, false, false, false, true];
+    assert_eq!(bound.collect::<Vec<_>>(), expected);
+    let mut classes = listed.events.iter().filter_map(|event| event.node_class);
+    assert!(classes.all(|class| class == ENDOGENOUS));
+    assert!(!listed.truncated);
+    // The deep Fork ends at 7; an empty range lists nothing.
+    assert_eq!(window_seqs(&window(deep, 5, 100)), [6, 7]);
+    assert_eq!(window(deep, 7, 7), FactualFoldWindowV1::default());
+}
+
+#[test]
+fn f15_a_fold_window_never_reads_a_payload() {
+    let mut lineage = lineage();
+    let root = lineage.root;
+    let (after, through) = (Seq::ZERO, Seq::from_u64(14));
+    let before = ok(lineage.store.fold_window(root, after, through));
+    let corrupt = format!("UPDATE events SET payload = 'text' WHERE timeline_id = '{root}'");
+    rewritten(&mut lineage, &corrupt);
+
+    assert!(lineage.store.read(root, SeqRange::all()).is_err());
+    assert_eq!(ok(lineage.store.fold_window(root, after, through)), before);
+}
+
+#[test]
+fn f15_a_fold_window_keeps_the_newest_events_up_to_the_scan_cap() {
+    let fixture = fixture();
+    let mut store = open(&fixture.path);
+    let timeline = ok(store.create_timeline("factual-fold-scan")).id();
+    let cap = MAX_FACTUAL_FOLD_SCAN_PER_TICK_V1;
+    let drafts: Vec<EventDraft> = (0..=cap).map(|_| draft(1, "factual")).collect();
+    assert_ok(store.append(timeline, &drafts));
+    // A Fork at the head reads the same range through its parent.
+    let last = ok(u64::try_from(cap + 1));
+    let fork = fork_at(&mut store, timeline, last);
+    let seqs = |listed: &FactualFoldWindowV1| {
+        let first = listed.events.first().map(|event| event.seq.as_u64());
+        let newest = listed.events.last().map(|event| event.seq.as_u64());
+        (listed.events.len(), first, newest, listed.truncated)
+    };
+
+    for reader in [timeline, fork] {
+        let window = |after, through| {
+            let read = store.fold_window(reader, Seq::from_u64(after), Seq::from_u64(through));
+            ok(read)
+        };
+        // One Event past the cap: the oldest is left out.
+        let full = window(0, last);
+        assert_eq!(seqs(&full), (cap, Some(2), Some(last), true));
+        // Exactly the cap, at either end of the history, is not truncated.
+        let exact = window(1, last);
+        assert_eq!(seqs(&exact), (cap, Some(2), Some(last), false));
+        assert_eq!(exact.events, full.events);
+        let below = window(0, last - 1);
+        assert_eq!(seqs(&below), (cap, Some(1), Some(last - 1), false));
+    }
+}
+
+#[test]
+fn f16_deleting_a_timeline_purges_its_fold_heads() {
+    let mut lineage = folded_lineage();
+    let (root, mid, deep) = (lineage.root, lineage.mid, lineage.deep);
+    assert_eq!(fold_heads(&lineage.path, root), 3);
+    assert_eq!(fold_heads(&lineage.path, mid), 1);
+
+    assert_ok(lineage.store.delete_timeline(deep));
+    assert_ok(lineage.store.delete_timeline(mid));
+    assert_eq!(fold_heads(&lineage.path, mid), 0);
+    assert_eq!(fold_heads(&lineage.path, root), 3);
+    assert_ok(lineage.store.delete_timeline(root));
+    assert_eq!(fold_heads(&lineage.path, root), 0);
+}
+
+/// Statements the fold-head guards and checks refuse outside a purge.
+fn refused_fold_statements(root: TimelineId) -> Vec<String> {
+    let zero = hex(Hash::zero().as_bytes());
+    vec![
+        format!("DELETE FROM {FOLD_HEADS}"),
+        format!("UPDATE {FOLD_HEADS} SET scanned_through = 99"),
+        // A replacing insert of a held key.
+        format!("INSERT OR REPLACE INTO {FOLD_HEADS} VALUES ('{root}', 1, 4, X'{zero}')"),
+        // Rows that break a check.
+        format!("INSERT INTO {FOLD_HEADS} VALUES ('{root}', 0, 4, X'{zero}')"),
+        format!("INSERT INTO {FOLD_HEADS} VALUES ('{root}', 9, -1, X'{zero}')"),
+        format!("INSERT INTO {FOLD_HEADS} VALUES ('{root}', 9, 4, X'00')"),
+    ]
+}
+
+#[test]
+fn f16_only_a_marked_purge_passes_the_fold_head_guards() {
+    let mut lineage = folded_lineage();
+    let root = lineage.root;
+    let placeholder = ok(SqliteStore::open_in_memory());
+    drop(std::mem::replace(&mut lineage.store, placeholder));
+    let path = &lineage.path;
+    for statement in refused_fold_statements(root) {
+        assert!(execute(path, &statement).is_err(), "{statement}");
+        // A marker for another Timeline authorizes nothing here.
+        let marked = format!(
+            "BEGIN;
+             INSERT INTO counterfactual_purge_fence (fork_id) VALUES ('another');
+             {statement};
+             COMMIT;"
+        );
+        assert!(execute(path, &marked).is_err(), "{marked}");
+    }
+    assert_eq!(fold_heads(path, root), 3);
+    let texts = [
+        (0, "dependency fold head is retained"),
+        (1, "dependency fold head is immutable"),
+        (2, "dependency fold head is already recorded"),
+    ];
+    let statements = refused_fold_statements(root);
+    for (index, text) in texts {
+        let refusal = err(execute(path, &statements[index])).to_string();
+        assert!(refusal.contains(text), "{refusal}");
+    }
+
+    let purge = format!(
+        "BEGIN;
+         INSERT INTO counterfactual_purge_fence (fork_id) VALUES ('{root}');
+         DELETE FROM {FOLD_HEADS} WHERE timeline_id = '{root}';
+         DELETE FROM counterfactual_purge_fence;
+         COMMIT;"
+    );
+    assert_ok(execute(path, &purge));
+    assert_eq!(fold_heads(path, root), 0);
+    let text = path.to_str().unwrap_or_default();
+    assert_eq!(open_error(SqliteStore::open(text)), "");
 }

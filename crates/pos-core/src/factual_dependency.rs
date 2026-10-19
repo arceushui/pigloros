@@ -1906,9 +1906,11 @@ pub trait FactualPrefixReadPortV1 {
     /// takes the last at most [`MAX_FACTUAL_FOLD_SCAN_PER_TICK_V1`] Events of
     /// the range by descending `seq`; the window lists them in ascending `seq`
     /// and sets `truncated` when older Events of the range were left out
-    /// (ADR-064 R4.3). Each entry carries the Event's type, payload hash, and
-    /// recorded node and class, never its payload. A range with
-    /// `through <= after` yields an empty window.
+    /// (ADR-064 R4.3): a range of exactly
+    /// [`MAX_FACTUAL_FOLD_SCAN_PER_TICK_V1`] Events is not truncated. Each
+    /// entry carries the Event's type, payload hash, and recorded node and
+    /// class, never its payload. A range with `through <= after` yields an
+    /// empty window.
     ///
     /// # Errors
     /// Returns the store's error.
