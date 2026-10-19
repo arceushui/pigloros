@@ -669,9 +669,13 @@ fn invalid_redirects_fail_closed_before_any_connection() -> TestResult {
         "https://[::1".to_owned(),
         overlong,
     ];
-    for location in &invalid {
+    for (case, location) in invalid.iter().enumerate() {
         server.route(MANIFEST_PATH, Reply::redirect(302, location));
-        assert_eq!(read(&server, &bundle)?, Err(S::Io), "{location}");
+        assert_eq!(
+            read(&server, &bundle)?,
+            Err(S::Io),
+            "invalid redirect case {case}"
+        );
     }
     let missing = "HTTP/1.1 302 Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
     let twice = "HTTP/1.1 302 Found\r\nLocation: /a\r\nLocation: /b\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
@@ -732,7 +736,7 @@ fn a_stalled_response_header_or_body_times_out() -> TestResult {
     );
     let (result, elapsed) = read_within(&server, &bundle, deadlines)?;
     assert_eq!(result, Err(S::Io));
-    assert!(elapsed < Duration::from_secs(8), "{elapsed:?}");
+    assert!(elapsed < Duration::from_secs(8));
 
     server.route(
         MANIFEST_PATH,
@@ -740,7 +744,7 @@ fn a_stalled_response_header_or_body_times_out() -> TestResult {
     );
     let (result, elapsed) = read_within(&server, &bundle, deadlines)?;
     assert_eq!(result, Err(S::Io));
-    assert!(elapsed < Duration::from_secs(8), "{elapsed:?}");
+    assert!(elapsed < Duration::from_secs(8));
     Ok(())
 }
 
@@ -766,7 +770,7 @@ fn one_closure_deadline_bounds_every_request() -> TestResult {
     };
     let (result, elapsed) = read_within(&server, &bundle, deadlines)?;
     assert_eq!(result, Err(S::Io));
-    assert!(elapsed < Duration::from_secs(8), "{elapsed:?}");
+    assert!(elapsed < Duration::from_secs(8));
     assert!(server.seen().len() < bundle.blobs().len() + 1);
     Ok(())
 }
