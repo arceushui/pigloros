@@ -604,7 +604,7 @@ fn check_rp_id(rp_id: &str) -> Result<(), SubjectKeyWrapErrorV1> {
     }
 }
 
-fn check_credential_id(credential_id: &[u8]) -> Result<(), SubjectKeyWrapErrorV1> {
+const fn check_credential_id(credential_id: &[u8]) -> Result<(), SubjectKeyWrapErrorV1> {
     if credential_id.len() > MAX_SUBJECT_CREDENTIAL_ID_BYTES {
         Err(SubjectKeyWrapErrorV1::BoundsExceeded { ordinal: 7 })
     } else if credential_id.is_empty() {

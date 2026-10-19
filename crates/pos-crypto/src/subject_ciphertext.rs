@@ -493,7 +493,7 @@ const fn nonzero(value: u64, ordinal: u8) -> Result<u64, SubjectCiphertextErrorV
     }
 }
 
-fn check_event_type(event_type: &str) -> Result<(), SubjectCiphertextErrorV1> {
+const fn check_event_type(event_type: &str) -> Result<(), SubjectCiphertextErrorV1> {
     if event_type.len() > MAX_SUBJECT_EVENT_TYPE_BYTES {
         Err(SubjectCiphertextErrorV1::BoundsExceeded { ordinal: 10 })
     } else if event_type.is_empty() {
@@ -503,7 +503,7 @@ fn check_event_type(event_type: &str) -> Result<(), SubjectCiphertextErrorV1> {
     }
 }
 
-fn check_field_tag(field_tag: &str) -> Result<(), SubjectCiphertextErrorV1> {
+const fn check_field_tag(field_tag: &str) -> Result<(), SubjectCiphertextErrorV1> {
     if field_tag.len() > MAX_SUBJECT_FIELD_TAG_BYTES {
         Err(SubjectCiphertextErrorV1::BoundsExceeded { ordinal: 12 })
     } else if field_tag.is_empty() || !field_tag.is_ascii() {
