@@ -258,6 +258,21 @@ fn member_blob_indices(blobs: &[BlobV1], members: &[BundleMemberV1]) -> Vec<usiz
         .collect()
 }
 
+/// Plan one remote closure from its exact manifest bytes.
+///
+/// The manifest size and SHA-256 are verified against `address` before
+/// parsing, and the declared closure is bounded before any blob is fetched.
+/// The result is every expected blob descriptor (digest and exact size),
+/// including the empty config, in digest order. A source fetches those blobs
+/// and then finishes through `verify_oci_closure_v1`, the same verifier as
+/// every other source.
+pub(crate) fn plan_closure_v1(
+    address: &BundleAddressV1,
+    manifest: &[u8],
+) -> Result<BTreeMap<String, u64>, ReleaseSourceErrorV1> {
+    verify_manifest(address, manifest).map(|plan| plan.expected)
+}
+
 struct ManifestPlan {
     expected: BTreeMap<String, u64>,
     members: Vec<BundleMemberV1>,
