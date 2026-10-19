@@ -25,7 +25,7 @@ use crate::driver::ObservationView;
 pub(super) type Seen = Arc<Mutex<Vec<u64>>>;
 
 const PLAIN: &str = "probe.plain";
-const EPHEMERAL: &str = "probe.ephemeral";
+pub(super) const EPHEMERAL: &str = "probe.ephemeral";
 
 pub(super) fn gated_registry() -> PluginRegistry {
     PluginRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
@@ -366,9 +366,9 @@ fn a_cadence_skipped_driver_keeps_its_carried_set_and_cursor() {
     assert_eq!(registry.plugins[&all[1]].event_cursor, Seq::from_u64(2));
 }
 
-/// Register an Ephemeral-declared producer of `EPHEMERAL` events.
-fn register_ephemeral_producer(registry: &mut PluginRegistry) {
-    let plugin_id = PluginId::new();
+/// The output policy and budget of a test Plugin whose one output type,
+/// `EPHEMERAL`, is declared Ephemeral.
+pub(super) fn ephemeral_policy(plugin_id: PluginId) -> (OutputPolicyV1, ExecutableBudgetPolicyV1) {
     let fidelity = |level, max_events, max_bytes, max_cpu_us| FidelityBudgetV1 {
         level,
         max_events,
@@ -415,6 +415,13 @@ fn register_ephemeral_producer(registry: &mut PluginRegistry) {
         output_declarations: vec![declaration],
     })
     .test_ok();
+    (policy, budget)
+}
+
+/// Register an Ephemeral-declared producer of `EPHEMERAL` events.
+fn register_ephemeral_producer(registry: &mut PluginRegistry) {
+    let plugin_id = PluginId::new();
+    let (policy, budget) = ephemeral_policy(plugin_id);
     let (driver, _) = probe("producer", 99, &[]);
     registry
         .register_test_driver_with_output_policy(

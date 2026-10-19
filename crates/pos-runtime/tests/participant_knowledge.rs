@@ -1061,6 +1061,24 @@ impl pos_core::FactualPrefixReadPortV1 for RecordingPort<'_> {
     ) -> Result<pos_core::RecordedSetCountsV1, pos_core::CoreError> {
         self.inner.factual_set_counts(timeline)
     }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn fold_cursor(
+        &self,
+        timeline: pos_core::TimelineId,
+    ) -> Result<Option<pos_core::FactualFoldCursorV1>, pos_core::CoreError> {
+        self.inner.fold_cursor(timeline)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn fold_window(
+        &self,
+        timeline: pos_core::TimelineId,
+        after: pos_core::Seq,
+        through: pos_core::Seq,
+    ) -> Result<pos_core::FactualFoldWindowV1, pos_core::CoreError> {
+        self.inner.fold_window(timeline, after, through)
+    }
 }
 
 /// A port without a fence that reports a recorded set one node past the
@@ -1153,6 +1171,22 @@ impl pos_core::FactualPrefixReadPortV1 for ExhaustedPort {
             edges: 0,
             inputs: 0,
         })
+    }
+
+    fn fold_cursor(
+        &self,
+        _: pos_core::TimelineId,
+    ) -> Result<Option<pos_core::FactualFoldCursorV1>, pos_core::CoreError> {
+        unreached()
+    }
+
+    fn fold_window(
+        &self,
+        _: pos_core::TimelineId,
+        _: pos_core::Seq,
+        _: pos_core::Seq,
+    ) -> Result<pos_core::FactualFoldWindowV1, pos_core::CoreError> {
+        unreached()
     }
 }
 
@@ -2025,6 +2059,13 @@ fn each_scheduled_driver_observes_only_its_own_authorized_view() {
 const BASE_CUT: u64 = 12;
 /// The owner ID of the observation-snapshot node.
 const OBSERVATION: &str = pos_core::FactualHostOwnerV1::Observation.as_str();
+/// The owners of the fold part of a scheduled record (ADR-064 R4.2): the fold
+/// nodes and the ingress nodes of fold inputs without a node.
+const FOLD_PART: [&str; 3] = [
+    pos_core::FactualHostOwnerV1::Fold.as_str(),
+    pos_core::FactualHostOwnerV1::FoldHistory.as_str(),
+    pos_core::FactualHostOwnerV1::Ingress.as_str(),
+];
 
 /// The authorized-view digest of one view, recomputed independently of the
 /// runtime from its documented layout. The layout is the one the existing
@@ -2067,7 +2108,8 @@ fn node_at<'a>(
 /// ADR-064 R3.4.2 and R3.4.7 (Redmine #628): an authorized pass has no
 /// forwarded Event and no carried set. Its Tick declares the snapshot node,
 /// which carries the authorized-view digest the basis binds, and one step node
-/// and one output node per Driver, with no ingress, history or prefix node. The
+/// and one output node per Driver, with no history or prefix node. Its only
+/// ingress nodes are the fold part's (ADR-064 R4.2), for base Events. The
 /// step node declares the snapshot only, and a later pass chains to it.
 ///
 /// The nodes are found by owner and output ordinal, not by position in the
@@ -2089,11 +2131,19 @@ fn the_authorized_pass_declares_its_view_digest_and_no_host_derived_events() {
         assert_eq!(anchored, bound, "{name}");
         let dependencies = basis.dependencies();
         assert_eq!(dependencies.tick(), 1, "{name}");
-        assert!(dependencies.event_nodes().is_empty(), "{name}");
+        // Only the fold part binds Events: base Events, none forwarded.
+        let base = Seq::from_u64(BASE_CUT);
+        let bindings = dependencies.event_nodes();
+        assert!(bindings.iter().all(|binding| binding.seq <= base), "{name}");
         let nodes = dependencies.record().nodes();
-        assert_eq!(nodes.len(), 3, "{name}");
-        // The snapshot node is the only host node: no ingress, history or prefix node.
-        let host_nodes = nodes
+        let rest: Vec<_> = nodes
+            .iter()
+            .filter(|node| !FOLD_PART.contains(&node.coordinate().owner_id()))
+            .collect();
+        assert_eq!(rest.len(), 3, "{name}");
+        // Outside the fold part the snapshot node is the only host node: no
+        // history or prefix node.
+        let host_nodes = rest
             .iter()
             .filter(|node| node.coordinate().scheduler_position() == 0);
         assert_eq!(host_nodes.count(), 1, "{name}");
@@ -2555,6 +2605,24 @@ impl pos_core::FactualPrefixReadPortV1 for AckPort<'_> {
         timeline: pos_core::TimelineId,
     ) -> Result<pos_core::RecordedSetCountsV1, pos_core::CoreError> {
         self.inner.factual_set_counts(timeline)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn fold_cursor(
+        &self,
+        timeline: pos_core::TimelineId,
+    ) -> Result<Option<pos_core::FactualFoldCursorV1>, pos_core::CoreError> {
+        self.inner.fold_cursor(timeline)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn fold_window(
+        &self,
+        timeline: pos_core::TimelineId,
+        after: pos_core::Seq,
+        through: pos_core::Seq,
+    ) -> Result<pos_core::FactualFoldWindowV1, pos_core::CoreError> {
+        self.inner.fold_window(timeline, after, through)
     }
 }
 

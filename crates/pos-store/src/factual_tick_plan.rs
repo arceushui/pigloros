@@ -8,12 +8,19 @@
 //! implements for its own storage. The order is the ADR's: the grant, the
 //! Tick, the Event bindings, then the record. A refusal is the commit's
 //! outcome; a store fault is an error.
+//!
+//! The adapters' fold reads (ADR-064 R4.3) share their assembly here too: the
+//! cursor from the latest visible fold-head row and the window from the newest
+//! Events of a range. A scheduled Tick's fold part is checked against the same
+//! reads, inside the commit (checks (ix) and (x)).
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use pos_core::{
-    CoreError, DependencyEdgeRecordV1, Event, Hash, PipelineAdmissionBasisV1, PipelineOutcomeV1,
-    RecordedSetCountsV1, Seq, SeqRange, TickDependencyRecordV1, TimelineId,
+    CoreError, DependencyEdgeRecordV1, DependencyNodeRecordV1, Event, FactualFoldCursorV1,
+    FactualFoldEventV1, FactualFoldSourceV1, FactualFoldWindowV1, Hash, Kind,
+    PipelineAdmissionBasisV1, PipelineOutcomeV1, RecordedSetCountsV1, Seq, SeqRange,
+    TickDependencyRecordV1, TimelineId, MAX_FACTUAL_FOLD_SCAN_PER_TICK_V1,
 };
 
 use crate::factual_declaration as declaration;
@@ -47,6 +54,9 @@ pub(crate) struct FactualInstallV1 {
     /// Every Event-backed node of the Tick: the draft nodes and the ingress
     /// nodes it records, by committed `seq` and artifact digest.
     pub(crate) event_nodes: Vec<(Seq, Hash)>,
+    /// The fold-head row of a scheduled Tick (ADR-064 R4.3): its scanned-through
+    /// `seq` and head artifact digest. A human Tick writes none.
+    pub(crate) fold_head: Option<(Seq, Hash)>,
 }
 
 /// What checking a Tick declaration decided.
@@ -79,6 +89,14 @@ pub(crate) trait TickPrefixV1 {
     /// Whether every digest names a node of the visible prefix at a Tick
     /// below `tick`.
     fn sources_below(&self, digests: &[Hash], tick: u64) -> Result<bool, CoreError>;
+
+    /// The fold cursor of the visible prefix: its latest fold-head row and
+    /// the node the row's head digest names (ADR-064 R4.2).
+    fn fold_cursor(&self) -> Result<Option<FactualFoldCursorV1>, CoreError>;
+
+    /// The fold window of the logical range `(after, through]`: its newest
+    /// Events, with their types, payload hashes and visible nodes.
+    fn fold_window(&self, after: Seq, through: Seq) -> Result<FactualFoldWindowV1, CoreError>;
 }
 
 /// Why planning stopped: the declaration is refused, or the store failed.
@@ -278,6 +296,59 @@ fn check_rows<P: TickPrefixV1>(
     demand(declaration::shape_holds(basis, &index), invalid).map_err(PlanHaltV1::from)
 }
 
+/// ADR-064 R4.3, checks (ix) and (x), of a scheduled basis, over the store's
+/// own fold cursor and window: read the cursor `p` and head from the
+/// fold-head index, the window `(p, observed_through]` from the Events, and
+/// compare the fold part they derive with the record's.
+fn scheduled_fold_holds<P: TickPrefixV1>(
+    prefix: &P,
+    timeline: TimelineId,
+    basis: &PipelineAdmissionBasisV1,
+) -> Result<bool, CoreError> {
+    let observed_through = basis.attempt().observation().observed_through();
+    prefix.fold_cursor().and_then(|cursor| {
+        let held = cursor.as_ref();
+        let after = held.map_or(Seq::ZERO, |found| found.scanned_through);
+        let window = prefix.fold_window(after, observed_through);
+        window.map(|read| {
+            let source = FactualFoldSourceV1 {
+                observed_through,
+                cursor,
+                window: read,
+            };
+            declaration::fold_holds(timeline, basis, &source)
+        })
+    })
+}
+
+/// Whether the fold part of the basis holds; a human Tick has none.
+fn fold_judged<P: TickPrefixV1>(
+    prefix: &P,
+    timeline: TimelineId,
+    basis: &PipelineAdmissionBasisV1,
+) -> Result<bool, CoreError> {
+    if declaration::is_scheduled(basis) {
+        scheduled_fold_holds(prefix, timeline, basis)
+    } else {
+        Ok(true)
+    }
+}
+
+/// R3.7.2 (v) to (viii), then ADR-064 R4.3 (ix) and (x): the fold part is
+/// read and recomputed only once the rest of the record holds.
+fn check_rows_and_fold<P: TickPrefixV1>(
+    prefix: &P,
+    timeline: TimelineId,
+    basis: &PipelineAdmissionBasisV1,
+) -> Result<(), PlanHaltV1> {
+    let invalid = TickRefusalV1::InvalidDeclaration;
+    check_rows(prefix, basis).and_then(|()| {
+        let judged = fold_judged(prefix, timeline, basis);
+        let halted = judged.map_err(PlanHaltV1::from);
+        halted.and_then(|holds| refuse_unless(holds, invalid))
+    })
+}
+
 /// The rows the checked Tick installs, with its Event-backed nodes.
 fn install_of(
     basis: &PipelineAdmissionBasisV1,
@@ -290,13 +361,14 @@ fn install_of(
         first_seq,
         last_seq: Seq::from_u64(first_seq.as_u64().saturating_add(spread)),
         event_nodes,
+        fold_head: declaration::fold_head_row(basis),
     }
 }
 
-/// R3.7.2 (i) to (viii), in that order. The grant and the Tick are checked
-/// first, from the basis and the prefix alone. Only then are the Events the
-/// ingress bindings name read, so a store failure there follows those two
-/// refusals and precedes the others.
+/// R3.7.2 (i) to (viii), then ADR-064 R4.3 (ix) and (x), in that order. The
+/// grant and the Tick are checked first, from the basis and the prefix alone.
+/// Only then are the Events the ingress bindings name read, so a store
+/// failure there follows those two refusals and precedes the others.
 fn judge<P: TickPrefixV1>(
     prefix: &P,
     timeline: TimelineId,
@@ -308,7 +380,7 @@ fn judge<P: TickPrefixV1>(
     check_tick(prefix, basis)?;
     let payloads = bound_payloads(prefix, basis)?;
     let nodes = bound_nodes(prefix, timeline, basis, first_seq, &payloads)?;
-    check_rows(prefix, basis)?;
+    check_rows_and_fold(prefix, timeline, basis)?;
     Ok(install_of(basis, first_seq, nodes))
 }
 
@@ -328,5 +400,77 @@ pub(crate) fn plan_tick<P: TickPrefixV1>(
         Ok(install) => Ok(PlannedTickV1::Install(install)),
         Err(PlanHaltV1::Refused(refusal)) => Ok(PlannedTickV1::Refused(refusal)),
         Err(PlanHaltV1::Fault(error)) => Err(error),
+    }
+}
+
+/// One Event of a fold read: its logical `seq`, its type, and its payload
+/// hash, never its payload.
+pub(crate) type FoldEntryV1 = (Seq, Kind, Hash);
+
+/// At most one node, or the store's fault.
+type FoldNodeV1 = Result<Option<DependencyNodeRecordV1>, CoreError>;
+
+/// How many Events a fold read takes: one past the scan cap, so a read that
+/// fills it shows that older Events of the range were left out.
+pub(crate) const FOLD_READ_LIMIT: usize = MAX_FACTUAL_FOLD_SCAN_PER_TICK_V1 + 1;
+
+/// The message of a fold-head row whose head digest names no visible node.
+const DANGLING_FOLD_HEAD: &str = "fold head names no recorded node";
+
+/// The node a fold-head row's head digest names: none for 32 zero bytes, else
+/// the node `lookup` finds in the inherited prefix. A digest that names no
+/// visible node is a storage fault.
+fn fold_head_node(digest: Hash, lookup: impl FnOnce(&Hash) -> FoldNodeV1) -> FoldNodeV1 {
+    if digest == Hash::zero() {
+        return Ok(None);
+    }
+    let dangling = || CoreError::Storage(DANGLING_FOLD_HEAD.to_owned());
+    let found = lookup(&digest);
+    found.and_then(|held| held.map(Some).ok_or_else(dangling))
+}
+
+/// The fold cursor of the latest visible fold-head row, its scanned-through
+/// `seq` and head digest, or `None` without a row (ADR-064 R4.2).
+pub(crate) fn fold_cursor_of(
+    row: Option<(Seq, Hash)>,
+    lookup: impl FnOnce(&Hash) -> FoldNodeV1,
+) -> Result<Option<FactualFoldCursorV1>, CoreError> {
+    let cursor = row.map(|(scanned_through, digest)| {
+        let head = fold_head_node(digest, lookup);
+        head.map(|node| FactualFoldCursorV1 {
+            scanned_through,
+            head: node,
+        })
+    });
+    cursor.transpose()
+}
+
+/// The fold window of the newest Events of a range, read newest first and at
+/// most [`FOLD_READ_LIMIT`]: the last [`MAX_FACTUAL_FOLD_SCAN_PER_TICK_V1`]
+/// of them in ascending `seq`, `truncated` when the read found more, and each
+/// one's node and class from `nodes` (ADR-064 R4.3).
+pub(crate) fn fold_window_of(
+    mut newest: Vec<FoldEntryV1>,
+    nodes: impl FnOnce(&[Seq]) -> Result<Vec<Option<DependencyNodeRecordV1>>, CoreError>,
+) -> Result<FactualFoldWindowV1, CoreError> {
+    let truncated = newest.len() > MAX_FACTUAL_FOLD_SCAN_PER_TICK_V1;
+    newest.truncate(MAX_FACTUAL_FOLD_SCAN_PER_TICK_V1);
+    newest.reverse();
+    let seqs: Vec<Seq> = newest.iter().map(|entry| entry.0).collect();
+    nodes(&seqs).map(|bound| {
+        let events = newest.into_iter().zip(bound).map(fold_event).collect();
+        FactualFoldWindowV1 { events, truncated }
+    })
+}
+
+/// One window entry: the Event's `seq`, type, and payload hash, and its node.
+fn fold_event(pair: (FoldEntryV1, Option<DependencyNodeRecordV1>)) -> FactualFoldEventV1 {
+    let ((seq, event_type, payload_hash), node) = pair;
+    FactualFoldEventV1 {
+        seq,
+        event_type,
+        payload_hash,
+        node_class: node.as_ref().map(DependencyNodeRecordV1::class),
+        node,
     }
 }

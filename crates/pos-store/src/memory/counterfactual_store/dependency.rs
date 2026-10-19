@@ -58,6 +58,18 @@
 //!   prefix (R3.7.2) and installs the Tick's rows with its Events through the
 //!   one install function; the `test-support` seeding function installs Ticks
 //!   through the same function. Deleting the Timeline purges it.
+//! - **Fold reads (ADR-064 R4).** The prefix set also keeps the fold-head
+//!   rows of its scheduled Ticks, by Tick, purged with the set. The pipeline
+//!   commit installs one with every scheduled Tick, and none with a human
+//!   Tick or a seeded one (a seeded Tick stands for one before Revision 4).
+//!   The fold cursor is the latest row of the nearest set that holds one at
+//!   or below its visible Tick (an ancestor's cut Tick, as for every other
+//!   prefix read), with the node its head digest names resolved through the
+//!   visible sets; a head digest of 32 zero bytes names none, and one that
+//!   names no visible node is a storage fault. The fold window reads the
+//!   newest at most 65,537 Events of the logical range through the fork
+//!   chain, newest first, without cloning a payload, and keeps the newest
+//!   65,536 with their visible node bindings.
 //! - **Reads and fences.** A parent-prefix read of an unknown or concealed
 //!   Timeline is `ForkNotFound`, and one of an existing Timeline without rows
 //!   is an empty page. It runs under that Timeline's own erasure read fence
@@ -88,14 +100,17 @@ use pos_core::{
     CounterfactualStoreErrorV1, CounterfactualTickOutcomeV1, DependencyEdgeRecordV1,
     DependencyNodeRecordV1, DependencyPageCursorV1, DependencyPageRequestV1, DependencyPageV1,
     DependencyPagedRowV1, DependencyReadScopeV1, ErasureProtectedOperationV1, Event, FactualCutV1,
-    FactualHeadV1, FactualOwnerIdV1, FactualPrefixReadPortV1, ForkGenerationV1, Hash,
-    PipelineAdmissionBasisV1, PipelineDraftBatchV1, RecordedSetCountsV1, Seq, SeqRange,
-    TickDependencyRecordV1, TimelineId,
+    FactualFoldCursorV1, FactualFoldWindowV1, FactualHeadV1, FactualOwnerIdV1,
+    FactualPrefixReadPortV1, ForkGenerationV1, Hash, PipelineAdmissionBasisV1,
+    PipelineDraftBatchV1, RecordedSetCountsV1, Seq, SeqRange, TickDependencyRecordV1, TimelineId,
 };
 
 use super::{fenced_result, stage_tick, CounterfactualForkStateV1, ForkEntriesV1, StagedTickV1};
-use crate::factual_tick_plan::{plan_tick, FactualInstallV1, PlannedTickV1, TickPrefixV1};
-use crate::memory::MemoryStore;
+use crate::factual_tick_plan::{
+    fold_cursor_of, fold_window_of, plan_tick, FactualInstallV1, FoldEntryV1, PlannedTickV1,
+    TickPrefixV1, FOLD_READ_LIMIT,
+};
+use crate::memory::{ForkChain, MemoryStore};
 
 type StoreError = CounterfactualStoreErrorV1;
 /// Rows are keyed by their own page cursor: the canonical coordinate order of
@@ -153,6 +168,10 @@ pub(in crate::memory) struct DependencyRowsV1 {
     /// Stored row counts of the set. Only the prefix set fills them; they are
     /// the set's own, not the ancestry's.
     counts: RecordedSetCountsV1,
+    /// Fold-head rows of the scheduled Ticks (ADR-064 R4.4), by Tick: the
+    /// scanned-through `seq` and the head artifact digest. The pipeline
+    /// commit writes one per scheduled Tick; seeding writes none.
+    fold_heads: BTreeMap<u64, (Seq, Hash)>,
 }
 
 /// The head of a Timeline without a recorded Tick.
@@ -195,6 +214,7 @@ impl DependencyRowsV1 {
                 edges: 0,
                 inputs: 0,
             },
+            fold_heads: BTreeMap::new(),
         }
     }
 
@@ -291,6 +311,44 @@ impl VisibleSetV1<'_> {
             .and_then(|(_, key)| self.rows.nodes.get(key))
             .cloned()
     }
+}
+
+/// The latest fold-head row of a visible set: its scanned-through `seq` and
+/// head digest. A free function, so it is general over both lifetimes of the
+/// set and can be passed to `first_visible` as it is.
+fn visible_fold_head(set: &VisibleSetV1<'_>) -> Option<(Seq, Hash)> {
+    let mut heads = set.rows.fold_heads.range(..=set.bound);
+    heads.next_back().map(|(_, row)| *row)
+}
+
+/// The fold cursor of the visible sets: the latest visible fold-head row and
+/// the node its head digest names.
+fn fold_cursor_over(sets: &[VisibleSetV1<'_>]) -> Result<Option<FactualFoldCursorV1>, CoreError> {
+    let row = first_visible(sets, visible_fold_head);
+    let lookup = |digest: &Hash| {
+        let found = first_visible(sets, |set| set.digest_node(digest));
+        Ok(found.map(|bound| bound.0))
+    };
+    fold_cursor_of(row, lookup)
+}
+
+/// The fold window of the newest Events of a range, with their nodes
+/// resolved through the visible sets.
+fn fold_window_over(
+    newest: Vec<FoldEntryV1>,
+    sets: &[VisibleSetV1<'_>],
+) -> Result<FactualFoldWindowV1, CoreError> {
+    fold_window_of(newest, |seqs| {
+        let node = |seq: &Seq| first_visible(sets, |set| set.event_node(seq.as_u64()));
+        Ok(seqs.iter().map(node).collect())
+    })
+}
+
+/// The fold read entry of an own Event of a Timeline that inherits `prefix`
+/// Events.
+fn fold_entry(prefix: u64, event: &Event) -> FoldEntryV1 {
+    let seq = Seq::from_u64(prefix.saturating_add(event.seq.as_u64()));
+    (seq, event.event_type.clone(), event.payload_hash)
 }
 
 /// The result `pick` finds in the visible sets, searching from the
@@ -643,6 +701,31 @@ impl MemoryStore {
         })
     }
 
+    /// The newest Events of the logical range `(after, through]` of a fork
+    /// chain, at most [`FOLD_READ_LIMIT`], newest first: the chain is read from
+    /// the Timeline itself up through its ancestors, each member showing its
+    /// own Events above its fork point and, for an ancestor, at or below the
+    /// next member's.
+    fn newest_fold_events(&self, chain: &ForkChain, range: (Seq, Seq)) -> Vec<FoldEntryV1> {
+        let (after, through) = (range.0.as_u64(), range.1.as_u64());
+        let mut newest = Vec::new();
+        for (index, member) in chain.timelines.iter().enumerate().rev() {
+            let parent = index.checked_sub(1);
+            let above = parent.and_then(|up| chain.fork_seqs.get(up));
+            let prefix = above.copied().map_or(0, Seq::as_u64);
+            let below = chain.fork_seqs.get(index);
+            let limit = below.copied().map_or(u64::MAX, Seq::as_u64);
+            let low = after.saturating_sub(prefix);
+            let high = through.min(limit).saturating_sub(prefix);
+            let room = FOLD_READ_LIMIT.saturating_sub(newest.len());
+            let own = self.state(*member).events.iter().rev();
+            let shown = own.skip_while(|event| event.seq.as_u64() > high);
+            let kept = shown.take_while(|event| event.seq.as_u64() > low);
+            newest.extend(kept.take(room).map(|event| fold_entry(prefix, event)));
+        }
+        newest
+    }
+
     /// Run a factual read under the Timeline's erasure read fence and its
     /// inherited scopes.
     fn read_fenced<T>(
@@ -825,6 +908,27 @@ impl FactualPrefixReadPortV1 for MemoryStore {
     fn factual_set_counts(&self, timeline: TimelineId) -> Result<RecordedSetCountsV1, CoreError> {
         self.read_fenced(timeline, |store| Ok(store.prefix_rows(timeline).counts))
     }
+
+    fn fold_cursor(&self, timeline: TimelineId) -> Result<Option<FactualFoldCursorV1>, CoreError> {
+        self.read_fenced(timeline, |store| {
+            let sets = store.visible_sets(timeline);
+            sets.and_then(|found| fold_cursor_over(&found))
+        })
+    }
+
+    fn fold_window(
+        &self,
+        timeline: TimelineId,
+        after: Seq,
+        through: Seq,
+    ) -> Result<FactualFoldWindowV1, CoreError> {
+        self.read_fenced(timeline, |store| {
+            let chain = store.fork_chain(timeline);
+            let sets = store.visible_sets(timeline);
+            let newest = chain.map(|held| store.newest_fold_events(&held, (after, through)));
+            newest.and_then(|read| sets.and_then(|found| fold_window_over(read, &found)))
+        })
+    }
 }
 
 /// The Timeline's visible committed prefix, as the Tick checks read it.
@@ -865,6 +969,18 @@ impl TickPrefixV1 for MemoryPrefixV1<'_> {
         };
         Ok(digests.iter().all(below))
     }
+
+    fn fold_cursor(&self) -> Result<Option<FactualFoldCursorV1>, CoreError> {
+        fold_cursor_over(&self.sets)
+    }
+
+    fn fold_window(&self, after: Seq, through: Seq) -> Result<FactualFoldWindowV1, CoreError> {
+        let chain = self.store.fork_chain(self.timeline);
+        chain.and_then(|held| {
+            let newest = self.store.newest_fold_events(&held, (after, through));
+            fold_window_over(newest, &self.sets)
+        })
+    }
 }
 
 impl MemoryStore {
@@ -888,8 +1004,8 @@ impl MemoryStore {
         })
     }
 
-    /// Install a checked Tick: its rows, commit range and Event bindings.
-    /// Infallible.
+    /// Install a checked Tick: its rows, commit range and Event bindings, and
+    /// the fold-head row of a scheduled Tick (ADR-064 R4.3). Infallible.
     pub(in crate::memory) fn install_planned_factual_tick(
         &mut self,
         timeline: TimelineId,
@@ -903,6 +1019,7 @@ impl MemoryStore {
             planned.last_seq,
             &planned.event_nodes,
         );
+        rows.install_fold_head(record.tick(), planned.fold_head);
     }
 }
 
@@ -917,6 +1034,21 @@ impl MemoryStore {
         counts: RecordedSetCountsV1,
     ) {
         self.dependency_prefixes.entry(timeline).or_default().counts = counts;
+    }
+
+    /// The rows of the Timeline's own committed prefix set: fold heads, nodes,
+    /// edges, commit ranges, then Event bindings. `sizes()` counts maps, not
+    /// the rows inside `dependency_prefixes`.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    pub(in crate::memory) fn dependency_row_counts(&self, timeline: TimelineId) -> [usize; 5] {
+        let rows = self.prefix_rows(timeline);
+        [
+            rows.fold_heads.len(),
+            rows.nodes.len(),
+            rows.edges.len(),
+            rows.commit_ranges.len(),
+            rows.event_nodes.len(),
+        ]
     }
 }
 
@@ -963,6 +1095,14 @@ impl DependencyRowsV1 {
             self.bound_seqs.insert(*digest, seq.as_u64());
         }
         self.counts = counted(self.counts, record);
+    }
+
+    /// Install the fold-head row of a scheduled Tick, if it has one (ADR-064
+    /// R4.3). Infallible.
+    fn install_fold_head(&mut self, tick: u64, row: Option<(Seq, Hash)>) {
+        if let Some(found) = row {
+            self.fold_heads.insert(tick, found);
+        }
     }
 
     /// Index a node by artifact digest and, when its output ordinal is zero,
@@ -1453,6 +1593,9 @@ mod tests {
                 Err(StoreError::ForkNotFound)
             );
         }
+        for timeline in [root, fork] {
+            assert_fold_reads_fenced(&store, timeline);
+        }
         let before = snapshot(&store, fork);
         let appended =
             store.append_counterfactual_tick_with_dependencies(fork, &expected, &drafts, &second);
@@ -1581,6 +1724,14 @@ mod tests {
         (read_nodes(store, scope, 5), read_edges(store, scope, 5))
     }
 
+    /// Both fold reads of `timeline` fail closed.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn assert_fold_reads_fenced(store: &MemoryStore, timeline: TimelineId) {
+        assert!(store.fold_cursor(timeline).is_err(), "{timeline}");
+        let window = store.fold_window(timeline, Seq::ZERO, Seq::from_u64(1));
+        assert!(window.is_err(), "{timeline}");
+    }
+
     /// Both row kinds of `scope` fail closed behind the erasure fence.
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn assert_fenced(store: &MemoryStore, scope: Scope) {
@@ -1620,6 +1771,7 @@ mod tests {
         for scope in [fork_scope(fork, 1), prefix_scope(fork, 9)] {
             assert_fenced(&store, scope);
         }
+        assert_fold_reads_fenced(&store, fork);
         // The Fork's request does not fence its parent's own prefix.
         assert_eq!(pages(&store, prefix_scope(root, 9)), parent);
         assert_eq!([held_rows(&store, root), held_rows(&store, fork)], before);
@@ -1635,6 +1787,7 @@ mod tests {
 
         for timeline in [root, fork] {
             assert_fenced(&store, prefix_scope(timeline, 9));
+            assert_fold_reads_fenced(&store, timeline);
         }
         assert_eq!([held_rows(&store, root), held_rows(&store, fork)], before);
     }
@@ -1705,5 +1858,119 @@ mod tests {
         assert_eq!(appended, Err(over), "the record crosses the node bound");
         assert_eq!(snapshot(&store, fork), full, "nothing was installed");
         Ok(())
+    }
+
+    // Fold reads (ADR-064 Revision 4). These tests insert the fold-head rows
+    // into the prefix sets directly, beside seeded Ticks, which write none.
+
+    /// A committed factual Tick at `tick` of one step node of `owner`, digest
+    /// `digest`, that owns and binds the single `seq`.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn fold_tick(tick: u64, seq: u64, owner: &str, digest: u8) -> SeededFactualTickV1 {
+        let step = fold_step(tick, owner, digest);
+        let at = Seq::from_u64(seq);
+        SeededFactualTickV1 {
+            record: committed_record(tick, vec![step], Vec::new()),
+            first_seq: at,
+            last_seq: at,
+            event_nodes: vec![(at, Hash::from_bytes([digest; 32]))],
+        }
+    }
+
+    /// The step node of `owner` at `tick`, digest `digest`.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn fold_step(tick: u64, owner: &str, digest: u8) -> NodeRow {
+        node_row(coord(tick, owner, digest), COMMITTED, Vec::new())
+    }
+
+    /// Insert one fold-head row into the Timeline's committed prefix set.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn insert_fold_head(
+        store: &mut MemoryStore,
+        timeline: TimelineId,
+        tick: u64,
+        row: (u64, Hash),
+    ) {
+        let rows = store.dependency_prefixes.entry(timeline).or_default();
+        rows.fold_heads.insert(tick, (Seq::from_u64(row.0), row.1));
+    }
+
+    /// A root with six Events, Ticks 1 to 3 owning `seq` 2, 3, and 5 and fold
+    /// heads through 2, 3 (no head), and 5, and a Fork of it at 4, cut at
+    /// Tick 2.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn folded_store() -> (MemoryStore, TimelineId, TimelineId) {
+        let mut store = MemoryStore::new();
+        ok(store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open())));
+        let root = ok(store.create_timeline("fold-root")).id();
+        let drafts: Vec<_> = (0..6).map(draft).collect();
+        ok(store.append(root, &drafts));
+        let ticks = [
+            fold_tick(1, 2, "a", 61),
+            fold_tick(2, 3, "b", 62),
+            fold_tick(3, 5, "c", 63),
+        ];
+        ok(store.seed_factual_prefix(root, &ticks));
+        let fork = ok(store.fork(root, Seq::from_u64(4), "fold-fork")).id();
+        insert_fold_head(&mut store, root, 1, (2, Hash::from_bytes([61; 32])));
+        insert_fold_head(&mut store, root, 2, (3, Hash::zero()));
+        insert_fold_head(&mut store, root, 3, (5, Hash::from_bytes([63; 32])));
+        (store, root, fork)
+    }
+
+    /// The fold cursor through `scanned` with `head`.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn expected_cursor(scanned: u64, head: Option<NodeRow>) -> FactualFoldCursorV1 {
+        FactualFoldCursorV1 {
+            scanned_through: Seq::from_u64(scanned),
+            head,
+        }
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn f14_the_fold_cursor_is_the_latest_visible_fold_head_through_each_cut() {
+        let (mut store, root, fork) = folded_store();
+        let root_head = expected_cursor(5, Some(fold_step(3, "c", 63)));
+        assert_eq!(ok(store.fold_cursor(root)), Some(root_head));
+        // The Fork has no row and sees the root through its cut Tick 2.
+        let inherited = expected_cursor(3, None);
+        assert_eq!(ok(store.fold_cursor(fork)), Some(inherited));
+
+        // The Fork's own row wins; its head is an inherited node.
+        insert_fold_head(&mut store, fork, 3, (6, Hash::from_bytes([61; 32])));
+        let own = expected_cursor(6, Some(fold_step(1, "a", 61)));
+        assert_eq!(ok(store.fold_cursor(fork)), Some(own));
+        let early = ok(store.fork(root, Seq::from_u64(1), "fold-early")).id();
+        assert_eq!(ok(store.fold_cursor(early)), None);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn f14_a_fold_head_that_names_no_visible_node_is_a_storage_fault() {
+        let (mut store, root, fork) = folded_store();
+        // The root's Tick 3 node is past the Fork's cut; the other digest is
+        // recorded nowhere.
+        insert_fold_head(&mut store, fork, 1, (6, Hash::from_bytes([63; 32])));
+        insert_fold_head(&mut store, root, 4, (6, Hash::from_bytes([250; 32])));
+        for timeline in [fork, root] {
+            let refused = store.fold_cursor(timeline);
+            assert!(matches!(refused, Err(CoreError::Storage(_))), "{refused:?}");
+        }
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn f16_deleting_a_timeline_purges_its_fold_heads() {
+        let (mut store, root, fork) = folded_store();
+        insert_fold_head(&mut store, fork, 3, (6, Hash::zero()));
+        assert_eq!(store.dependency_row_counts(root), [3, 3, 0, 3, 3]);
+        assert_eq!(store.dependency_row_counts(fork), [1, 0, 0, 0, 0]);
+
+        ok(store.delete_timeline(fork));
+        assert_eq!(store.dependency_row_counts(fork), [0; 5]);
+        assert_eq!(store.dependency_row_counts(root), [3, 3, 0, 3, 3]);
+        ok(store.delete_timeline(root));
+        assert_eq!(store.dependency_row_counts(root), [0; 5]);
     }
 }

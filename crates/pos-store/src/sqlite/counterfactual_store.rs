@@ -16,14 +16,15 @@
 //! # Schema
 //!
 //! Four additive tables (`counterfactual_forks`, `counterfactual_generations`,
-//! `counterfactual_quarantine`, `counterfactual_artifacts`), five dependency
+//! `counterfactual_quarantine`, `counterfactual_artifacts`), six dependency
 //! record tables (`counterfactual_dependency_records`,
 //! `counterfactual_dependency_nodes`, `counterfactual_dependency_edges`,
 //! `counterfactual_dependency_commit_ranges`,
-//! `counterfactual_dependency_event_nodes`, see the `dependency` module), two
+//! `counterfactual_dependency_event_nodes`,
+//! `counterfactual_dependency_fold_heads`, see the `dependency` module), two
 //! purge tables (`counterfactual_fork_tombstones`,
-//! `counterfactual_purge_fence`), three lookup indexes, and thirty-two guard
-//! triggers (fifteen on the storage and purge tables, seventeen on the
+//! `counterfactual_purge_fence`), three lookup indexes, and thirty-five guard
+//! triggers (fifteen on the storage and purge tables, twenty on the
 //! dependency tables) are created with `IF NOT EXISTS` by every writable
 //! open, so creation is additive and idempotent. This is the one normative
 //! first version of the schema: a file
@@ -48,11 +49,11 @@
 //! counterfactual object that is present must still be complete and exact.
 //! The triggers make the database itself refuse to decrease a Fork
 //! generation, and, outside a purge, to delete a Fork row, a quarantine row,
-//! a recorded generation, an artifact, or a dependency record, node, or edge
-//! (see the Timeline deletion decision below). They also refuse to rewrite a
+//! a recorded generation, an artifact, or a dependency row (see the Timeline
+//! deletion decision below). They also refuse to rewrite a
 //! quarantine row, a recorded generation, an artifact, or a dependency row.
 //! The four tables with a stored history (Forks, quarantine, generations,
-//! artifacts) and the five dependency tables each refuse an insert whose
+//! artifacts) and the six dependency tables each refuse an insert whose
 //! primary key already exists, before conflict resolution, so
 //! `INSERT OR REPLACE`, `REPLACE INTO`, and an upsert cannot delete and
 //! rewrite a row past the delete and update guards. The tombstone table
@@ -155,11 +156,11 @@
 //!   Fork's counterfactual rows in its own transaction, after its other
 //!   per-Timeline cleanup and before the Timeline row goes. The purge first
 //!   inserts a marker row for that Fork into `counterfactual_purge_fence`,
-//!   deletes the Timeline's dependency edge, node, record, commit range, and
-//!   Event node rows (a Fork's generations' and a Timeline's committed
-//!   prefix), the Fork's artifact, quarantine, generation, and Fork rows,
-//!   upserts one `counterfactual_fork_tombstones` row holding only the
-//!   Fork's last generation, and deletes the marker. Only the nine delete
+//!   deletes the Timeline's dependency edge, node, record, commit range,
+//!   Event node, and fold head rows (a Fork's generations' and a Timeline's
+//!   committed prefix), the Fork's artifact, quarantine, generation, and Fork
+//!   rows, upserts one `counterfactual_fork_tombstones` row holding only the
+//!   Fork's last generation, and deletes the marker. Only the ten delete
 //!   guards honor a marker, and only for the marked Timeline, so any other
 //!   delete still aborts. The marker is an accident guard for the generic delete
 //!   path, not an authorization boundary: a client with write access to the
@@ -493,6 +494,7 @@ const COUNTERFACTUAL_SCHEMA_TABLES: &[SqliteSchemaTable] = &[
     dependency::EDGES_TABLE,
     dependency::COMMIT_RANGES_TABLE,
     dependency::EVENT_NODES_TABLE,
+    dependency::FOLD_HEADS_TABLE,
 ];
 
 /// One named index or trigger and the exact body every open requires after
@@ -504,12 +506,12 @@ struct CounterfactualSchemaObjectV1 {
 }
 
 // The `WHEN NOT EXISTS (... counterfactual_purge_fence ...)` clause is
-// repeated in four trigger bodies here and in five in the `dependency`
-// module, nine copies in all, on purpose: the exact-body validation compares
-// literal text, so the nine copies must stay identical.
+// repeated in four trigger bodies here and in six in the `dependency`
+// module, ten copies in all, on purpose: the exact-body validation compares
+// literal text, so the ten copies must stay identical.
 /// The quarantine lookup index and the guards that keep generations
 /// monotonic, quarantine permanent, and recorded bytes immutable, followed by
-/// the seventeen guards and the two indexes of the dependency tables from the
+/// the twenty guards and the two indexes of the dependency tables from the
 /// `dependency` module.
 const COUNTERFACTUAL_SCHEMA_OBJECTS: &[CounterfactualSchemaObjectV1] = &[
     CounterfactualSchemaObjectV1 {
@@ -658,6 +660,9 @@ const COUNTERFACTUAL_SCHEMA_OBJECTS: &[CounterfactualSchemaObjectV1] = &[
     dependency::BINDINGS_IMMUTABLE,
     dependency::BINDINGS_SEQ_NOT_REPLACED,
     dependency::BINDINGS_DIGEST_NOT_REPLACED,
+    dependency::FOLD_HEADS_RETAINED,
+    dependency::FOLD_HEADS_IMMUTABLE,
+    dependency::FOLD_HEADS_NOT_REPLACED,
     dependency::RANGES_BY_LAST_SEQ,
     dependency::NODES_BY_OWNER,
 ];
@@ -669,13 +674,14 @@ const COUNTERFACTUAL_SCHEMA_OBJECTS: &[CounterfactualSchemaObjectV1] = &[
 /// the enclosing transaction commits. The dependency tables are keyed by the
 /// Timeline ID, which is the Fork's own for its generations' rows and a
 /// parent Timeline's for its committed prefix.
-const PURGE_COUNTERFACTUAL_STATEMENTS: [&str; 12] = [
+const PURGE_COUNTERFACTUAL_STATEMENTS: [&str; 13] = [
     "INSERT INTO counterfactual_purge_fence (fork_id) VALUES (?1)",
     "DELETE FROM counterfactual_dependency_edges WHERE timeline_id = ?1",
     "DELETE FROM counterfactual_dependency_nodes WHERE timeline_id = ?1",
     "DELETE FROM counterfactual_dependency_records WHERE timeline_id = ?1",
     "DELETE FROM counterfactual_dependency_event_nodes WHERE timeline_id = ?1",
     "DELETE FROM counterfactual_dependency_commit_ranges WHERE timeline_id = ?1",
+    "DELETE FROM counterfactual_dependency_fold_heads WHERE timeline_id = ?1",
     "DELETE FROM counterfactual_artifacts WHERE fork_id = ?1",
     "DELETE FROM counterfactual_quarantine WHERE fork_id = ?1",
     "DELETE FROM counterfactual_generations WHERE fork_id = ?1",

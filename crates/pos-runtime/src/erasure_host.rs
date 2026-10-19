@@ -5137,6 +5137,22 @@ mod tests {
         ) -> Result<pos_core::RecordedSetCountsV1, CoreError> {
             pos_core::FactualPrefixReadPortV1::factual_set_counts(&self.inner, timeline)
         }
+
+        fn fold_cursor(
+            &self,
+            timeline: TimelineId,
+        ) -> Result<Option<pos_core::FactualFoldCursorV1>, CoreError> {
+            pos_core::FactualPrefixReadPortV1::fold_cursor(&self.inner, timeline)
+        }
+
+        fn fold_window(
+            &self,
+            timeline: TimelineId,
+            after: pos_core::Seq,
+            through: pos_core::Seq,
+        ) -> Result<pos_core::FactualFoldWindowV1, CoreError> {
+            pos_core::FactualPrefixReadPortV1::fold_window(&self.inner, timeline, after, through)
+        }
     }
 
     impl pos_core::PipelineAdmissionFencePublisherV1 for FaultStoreV1 {

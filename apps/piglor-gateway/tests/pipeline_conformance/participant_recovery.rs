@@ -145,6 +145,22 @@ impl pos_core::FactualPrefixReadPortV1 for AckPort<'_> {
     ) -> Result<pos_core::RecordedSetCountsV1, pos_core::CoreError> {
         self.store.factual_set_counts(timeline)
     }
+
+    fn fold_cursor(
+        &self,
+        timeline: pos_core::TimelineId,
+    ) -> Result<Option<pos_core::FactualFoldCursorV1>, pos_core::CoreError> {
+        self.store.fold_cursor(timeline)
+    }
+
+    fn fold_window(
+        &self,
+        timeline: pos_core::TimelineId,
+        after: pos_core::Seq,
+        through: pos_core::Seq,
+    ) -> Result<pos_core::FactualFoldWindowV1, pos_core::CoreError> {
+        self.store.fold_window(timeline, after, through)
+    }
 }
 
 /// One store whose Timeline holds the base cut, the participant's persisted

@@ -904,7 +904,7 @@ fn corrupt_persisted_state_is_rejected_closed() {
 }
 
 /// Every counterfactual index and guard trigger, with a weakened body.
-const SCHEMA_OBJECTS: [(&str, &str, &str); 35] = [
+const SCHEMA_OBJECTS: [(&str, &str, &str); 38] = [
     (
         "INDEX",
         "idx_counterfactual_quarantine_artifact",
@@ -1071,6 +1071,21 @@ const SCHEMA_OBJECTS: [(&str, &str, &str); 35] = [
         "BEFORE INSERT ON counterfactual_dependency_event_nodes BEGIN SELECT 1; END",
     ),
     (
+        "TRIGGER",
+        "counterfactual_dependency_fold_heads_retained",
+        "BEFORE DELETE ON counterfactual_dependency_fold_heads BEGIN SELECT 1; END",
+    ),
+    (
+        "TRIGGER",
+        "counterfactual_dependency_fold_heads_immutable",
+        "BEFORE UPDATE ON counterfactual_dependency_fold_heads BEGIN SELECT 1; END",
+    ),
+    (
+        "TRIGGER",
+        "counterfactual_dependency_fold_heads_not_replaced",
+        "BEFORE INSERT ON counterfactual_dependency_fold_heads BEGIN SELECT 1; END",
+    ),
+    (
         "INDEX",
         "counterfactual_dependency_commit_ranges_by_last_seq",
         "ON counterfactual_dependency_commit_ranges(timeline_id)",
@@ -1110,7 +1125,8 @@ fn the_schema_is_additive_idempotent_and_validated_on_every_open() {
          DROP TABLE counterfactual_dependency_nodes;
          DROP TABLE counterfactual_dependency_edges;
          DROP TABLE counterfactual_dependency_commit_ranges;
-         DROP TABLE counterfactual_dependency_event_nodes;",
+         DROP TABLE counterfactual_dependency_event_nodes;
+         DROP TABLE counterfactual_dependency_fold_heads;",
     ));
     assert_eq!(open_read_only(), "");
     assert_eq!(open_writable(), "");
@@ -1483,7 +1499,8 @@ fn a_pre_schema_file_opens_read_only_without_counterfactual_state() {
          DROP TABLE counterfactual_dependency_nodes;
          DROP TABLE counterfactual_dependency_edges;
          DROP TABLE counterfactual_dependency_commit_ranges;
-         DROP TABLE counterfactual_dependency_event_nodes;",
+         DROP TABLE counterfactual_dependency_event_nodes;
+         DROP TABLE counterfactual_dependency_fold_heads;",
     ));
     let mut read_only = ok(SqliteStore::open_read_only(path_text));
     ok(read_only.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open())));
