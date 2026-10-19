@@ -10,6 +10,7 @@ use pos_core::trusted_clock::{GuardMonotonicSourceV1, ScriptedGuardMonotonicSour
 use pos_core::{ErasureInventoryPersistencePortV1, ErasureProtectedEffectDispositionV1, Hash, Seq};
 use pos_store::{
     memory::MemoryStore, sqlite::SqliteStore, ForkReplayAuthorityReadErrorV1 as Error,
+    ForkAttributionAuthorityImportPortV1, ForkManifestPublicationPortV1,
     ForkReplayAuthorityReadPortV1, ForkReplayReadBudgetV1, ForkReplayReadLimitsV1,
     ForkReplayRequirementV1,
 };
@@ -136,7 +137,8 @@ fn sqlite_diagnostic_bridge_requires_an_existing_interval() -> Fallible<()> {
 }
 
 #[test]
-fn unrelated_valid_fork_does_not_change_public_sqlite_authority_evidence_or_copies() -> Fallible<()> {
+fn unrelated_valid_fork_does_not_change_public_sqlite_authority_evidence_or_copies() -> Fallible<()>
+{
     let mut world = World::new(Shape::EmptyUnclassified, false)?;
     world.add_child(Shape::Mixed)?;
     let built = world.build(&Spec::default())?;
@@ -149,7 +151,12 @@ fn unrelated_valid_fork_does_not_change_public_sqlite_authority_evidence_or_copi
     let imported = store.import_verified(&request_for(&world, &built))?;
     let child = world.child_at(0)?.id;
     let committed = store.read_committed(child, PARENT_CUT)?;
-    let requirement = ForkReplayRequirementV1::new(child, Seq::from_u64(PARENT_CUT), committed.record_id, committed.authority_origin_digest)?;
+    let requirement = ForkReplayRequirementV1::new(
+        child,
+        Seq::from_u64(PARENT_CUT),
+        committed.record_id,
+        committed.authority_origin_digest,
+    )?;
     let mut results = Vec::new();
     for foreign in [false, true] {
         if foreign {
@@ -164,9 +171,15 @@ fn unrelated_valid_fork_does_not_change_public_sqlite_authority_evidence_or_copi
         let evidence = store.validate_fork_replay_authority(&requirement, &mut budget)?;
         budget.check_time()?;
         results.push((evidence, budget.remaining_native_bytes()));
-        store.finish_protected_effect_interval(interval, ErasureProtectedEffectDispositionV1::Rollback)?;
+        store.finish_protected_effect_interval(
+            interval,
+            ErasureProtectedEffectDispositionV1::Rollback,
+        )?;
         // The diagnostic read neither repairs nor rewrites imported authority.
-        assert_eq!(store.import_verified(&request_for(&world, &built))?, imported);
+        assert_eq!(
+            store.import_verified(&request_for(&world, &built))?,
+            imported
+        );
     }
     assert_eq!(results.len(), 2);
     assert_eq!(results[0], results[1]);

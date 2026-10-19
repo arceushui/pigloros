@@ -48,10 +48,10 @@ fn fresh_helper_orders_retained_work_before_indexes_and_commits_once() -> Fallib
     store
         .conn
         .authorizer(Some(move |context: AuthContext<'_>| {
-            observed
-                .lock()
-                .expect("action capture")
-                .push(format!("{:?}", context.action));
+            let Ok(mut actions) = observed.lock() else {
+                return Authorization::Deny;
+            };
+            actions.push(format!("{:?}", context.action));
             Authorization::Allow
         }))?;
     let commits = Arc::new(AtomicUsize::new(0));
@@ -447,5 +447,68 @@ fn private_function_override_is_unsupported_not_detected_as_physical_integrity()
     assert_eq!(direct, vec![0; 16]);
     let stale: String = store.conn.query_row("SELECT event_id FROM fork_event_origins INDEXED BY idx_fork_event_origins_child_v1 WHERE substr(eor1_cbor,9,16)=?1", [vec![7_u8; 16]], |row| row.get(0))?;
     assert_eq!(stale, "probe");
+    Ok(())
+}
+
+#[test]
+fn read_only_open_requires_the_second_index_too() -> Fallible<()> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("missing-fia.sqlite");
+    let path = path.to_str().ok_or("UTF-8 path")?;
+    let store = SqliteStore::open(path)?;
+    store.conn.execute_batch("DROP INDEX idx_fork_intervention_admissions_child_v1")?;
+    drop(store);
+    storage_error(SqliteStore::open_read_only(path));
+    drop(SqliteStore::open(path)?);
+    drop(SqliteStore::open_read_only(path)?);
+    Ok(())
+}
+
+#[test]
+fn native_metadata_is_checked_even_if_the_catalog_sql_claims_the_canonical_ddl() -> Fallible<()> {
+    for expression in [
+        "substr(eor1_cbor,9,16) DESC",
+        "substr(eor1_cbor,9,16) COLLATE NOCASE",
+        "substr(eor1_cbor,9,16),event_id",
+        "event_id",
+    ] {
+        let store = SqliteStore::open(":memory:")?;
+        store.conn.execute_batch(&format!(
+            "DROP INDEX idx_fork_event_origins_child_v1;
+             CREATE INDEX idx_fork_event_origins_child_v1 ON fork_event_origins({expression});
+             PRAGMA writable_schema=ON"
+        ))?;
+        // Impossible through the public opener: the native schema cache and
+        // deliberately corrupted catalog now disagree. Do not reload the cache.
+        store.conn.execute(
+            "UPDATE sqlite_schema SET sql=?1 WHERE name='idx_fork_event_origins_child_v1'",
+            [INDEXES[0].create],
+        )?;
+        assert_eq!(definition(&store.conn, &INDEXES[0])?, Some(INDEXES[0].create.to_owned()));
+        storage_error(validate(&store.conn));
+    }
+    Ok(())
+}
+
+#[test]
+fn final_revalidation_failure_rolls_back_both_new_indexes() -> Fallible<()> {
+    let store = fresh_helper_store()?;
+    let before = schema(&store.conn)?;
+    let reads = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&reads);
+    store.conn.authorizer(Some(move |context: AuthContext<'_>| {
+        if matches!(context.action, AuthAction::Read { table_name: "pragma_index_list", column_name: "name" })
+            && observed.fetch_add(1, Ordering::SeqCst) == 2
+        {
+            Authorization::Deny
+        } else {
+            Authorization::Allow
+        }
+    }))?;
+    storage_error(store.prepare_fork_admission_authority_schema());
+    store.conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)?;
+    assert_eq!(reads.load(Ordering::SeqCst), 3);
+    assert!(store.conn.is_autocommit());
+    assert_eq!(schema(&store.conn)?, before);
     Ok(())
 }
