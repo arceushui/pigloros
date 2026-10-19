@@ -547,7 +547,7 @@ async fn a_peer_closing_without_a_complete_reply_is_a_transport_failure() -> Tes
 
 #[tokio::test]
 async fn a_silent_peer_expires_the_deadline_and_closes_the_held_image() -> TestResult {
-    assert_eq!(MOUNT_IMAGE_DEADLINE, Duration::from_mins(1));
+    assert_eq!(MountfsdImageActivator::DEADLINE, Duration::from_mins(1));
     let (client, server) = StdUnixStream::pair()?;
     client.set_nonblocking(true)?;
     let (release, released) = std::sync::mpsc::channel::<()>();
