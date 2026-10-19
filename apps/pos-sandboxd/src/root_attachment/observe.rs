@@ -187,9 +187,9 @@ impl AttachmentKernel for HostKernel {
     }
 
     fn observe(&self, mount: BorrowedFd<'_>, attempt: &File, root: &File) -> Observations {
-        let node = node(mount);
+        let attached = node(mount);
         Observations {
-            mount: node,
+            mount: attached,
             path: openat2(
                 attempt,
                 "root",
@@ -206,11 +206,11 @@ impl AttachmentKernel for HostKernel {
             read_only: fstatvfs(mount)
                 .ok()
                 .map(|filesystem| filesystem.f_flag.contains(StatVfsMountFlags::RDONLY)),
-            entry: node.and_then(|node| {
+            entry: attached.and_then(|node| {
                 read_text(&self.proc.join("self/mountinfo"))
                     .and_then(|mountinfo| mount_entry(&mountinfo, node.mount_id))
             }),
-            mapper: node.map(|node| self.mapper(node.device)),
+            mapper: attached.map(|node| self.mapper(node.device)),
         }
     }
 
