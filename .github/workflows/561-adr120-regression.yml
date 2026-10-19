@@ -16,7 +16,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: 75ceb965b57676ee0b7dedd77e43369eadda6c44
+          ref: 78e0ec6aca36e7f163329936e00c8f4e7e835575
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
@@ -33,7 +33,7 @@ jobs:
           RUSTFLAGS: -D warnings
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = 75ceb965b57676ee0b7dedd77e43369eadda6c44
+          test "$(git rev-parse HEAD)" = 78e0ec6aca36e7f163329936e00c8f4e7e835575
           git rev-parse HEAD 'HEAD^{tree}'
           cargo test --package pos-store --all-features --locked --lib \
             sqlite::fork_ -- --include-ignored 2>&1 | tee "${RUNNER_TEMP}/adr120-regression.log"
@@ -55,7 +55,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: 75ceb965b57676ee0b7dedd77e43369eadda6c44
+          ref: 78e0ec6aca36e7f163329936e00c8f4e7e835575
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
@@ -85,7 +85,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: 75ceb965b57676ee0b7dedd77e43369eadda6c44
+          ref: 78e0ec6aca36e7f163329936e00c8f4e7e835575
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
@@ -102,7 +102,7 @@ jobs:
           RUSTFLAGS: -D warnings
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = 75ceb965b57676ee0b7dedd77e43369eadda6c44
+          test "$(git rev-parse HEAD)" = 78e0ec6aca36e7f163329936e00c8f4e7e835575
           git rev-parse HEAD 'HEAD^{tree}'
           cargo test --package pos-time --all-features --locked --lib \
             imported_fork_replay_tests::cumulative_budget -- --include-ignored 2>&1 | tee "${RUNNER_TEMP}/adr120-time.log"
