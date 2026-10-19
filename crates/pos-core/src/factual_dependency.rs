@@ -1336,10 +1336,11 @@ pub struct FactualFoldLayoutV1 {
     pub checkpoints: Vec<FactualFoldChunkV1>,
 }
 
-/// The rest of a scheduled record beside its fold part (ADR-064 R4.2): every
-/// node and edge but the fold checkpoint and fold-history nodes, the ingress
-/// nodes only the fold part needs, and the edges into the fold checkpoint
-/// nodes and the snapshot node.
+/// The rest of a scheduled record beside its fold part (ADR-064 R4.2).
+///
+/// It counts every node and edge but the fold checkpoint and fold-history
+/// nodes, the ingress nodes only the fold part needs, and the edges into the
+/// fold checkpoint nodes and the snapshot node.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct FactualFoldRestV1 {
     /// The `seq`s of the forwarded-needed ingress nodes: those a step or
