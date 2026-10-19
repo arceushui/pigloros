@@ -15,6 +15,7 @@ struct SqliteCompareFixture<'a> {
     world: &'a World,
     built: &'a [Built; 2],
     admissions: &'a [ImportedForkAttributionAdmissionV1; 2],
+    unrelated: Option<&'a Built>,
 }
 
 fn sqlite_compare_case(
@@ -58,6 +59,10 @@ fn sqlite_compare_case(
     });
     let [left, right] = requirements;
     let requirements = [left?, right?];
+    if let Some(unrelated) = fixture.unrelated {
+        super::pin_policy(&mut store, &unrelated.policy)?;
+        pos_store::ForkAttributionAuthorityImportPortV1::import_verified(&mut store, &super::request_for(fixture.world, unrelated))?;
+    }
     drop(store);
     let verifier = Arc::new(ImportedVerifier {
         child: requirements[0].child_timeline_id(),
@@ -104,6 +109,7 @@ fn sqlite_compare_budget_cases(access: SqliteReplayAccess) -> Fallible<()> {
         world: &world,
         built: &built,
         admissions: &admissions,
+        unrelated: None,
     };
     let mut totals = (0, 0, 0);
     for (index, (built, admission)) in built.iter().zip(&admissions).enumerate() {
@@ -111,6 +117,7 @@ fn sqlite_compare_budget_cases(access: SqliteReplayAccess) -> Fallible<()> {
             world: &world,
             built,
             admission,
+            unrelated: None,
         };
         let (bytes, rows, visits) = whole_sqlite_budget(&arm, index, 4)?;
         totals.0 += bytes;
@@ -154,4 +161,32 @@ fn imported_sqlite_ro_compare_shares_one_exact_budget_across_both_arms() -> Fall
 #[test]
 fn imported_sqlite_held_memory_compare_shares_one_exact_budget_across_both_arms() -> Fallible<()> {
     sqlite_compare_budget_cases(SqliteReplayAccess::HeldMemory)
+}
+
+#[test]
+fn unrelated_valid_fork_preserves_both_compare_arms_exact_budgets() -> Fallible<()> {
+    let mut world = World::new(Shape::EmptyUnclassified, false)?;
+    world.add_child(Shape::EmptyUnclassified)?;
+    world.add_child(Shape::Mixed)?;
+    let built = [world.build(&Spec::default())?, world.build(&Spec::distinct(1))?];
+    let unrelated = world.build(&Spec { child: 2, import_seed: 0x13, binding_seed: 0x25, principal_seed: 0x26, admission_seed: 0x33, registration_seed: 0x63, publication_seed: 0x93, operations_seed: 0xc0, ..Spec::default() })?;
+    let admissions = [ImportedForkAttributionAdmissionV1::from_envelope(&built[0].envelope, 1)?, ImportedForkAttributionAdmissionV1::from_envelope(&built[1].envelope, 1)?];
+    let fixture = SqliteCompareFixture { world: &world, built: &built, admissions: &admissions, unrelated: Some(&unrelated) };
+    let mut totals = (0, 0, 0);
+    for (index, (built, admission)) in built.iter().zip(&admissions).enumerate() {
+        let arm = SqliteReplayFixture { world: &world, built, admission, unrelated: None };
+        let (bytes, rows, visits) = whole_sqlite_budget(&arm, index, 4)?;
+        totals.0 += bytes;
+        totals.1 += rows;
+        totals.2 += visits;
+    }
+    let (bytes, arm_rows, visits) = totals;
+    let rows = arm_rows + 1;
+    assert_eq!((rows, visits), (381, 42));
+    for access in [SqliteReplayAccess::ReadWrite, SqliteReplayAccess::ReadOnly, SqliteReplayAccess::HeldMemory] {
+        for (bytes, rows, visits, succeeds) in [(bytes, rows, visits, true), (bytes - 1, rows, visits, false), (bytes, rows - 1, visits, false), (bytes, rows, visits - 1, false)] {
+            sqlite_compare_case(access, &fixture, ForkReplayReadLimitsV1::new(8, visits, rows, bytes, 30_000_000)?, succeeds)?;
+        }
+    }
+    Ok(())
 }
