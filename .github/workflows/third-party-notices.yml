@@ -29,6 +29,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
           toolchain: 1.97.1
+          # rust-src carries std's library/Cargo.lock; the wasm32 rlibs show
+          # which crates the release ships for the Rust guests' target.
+          components: rust-src
+          targets: wasm32-unknown-unknown
       - name: Install cargo-about
         uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
         with:
@@ -53,6 +57,9 @@ jobs:
               --output-file "${REPORTS}/guest-${index}.json"
             printf '%s\n' "${lock}=${REPORTS}/guest-${index}.json" >>"${REPORTS}/graphs"
           done < <(find plugins/community/examples -name Cargo.lock -type f | LC_ALL=C sort)
+          python3 scripts/third_party_notices.py rust-std-report \
+            --sysroot "$(rustc --print sysroot)" --output "${REPORTS}/rust-std.json"
+          printf '%s\n' "rust-std=${REPORTS}/rust-std.json" >>"${REPORTS}/graphs"
       - name: Assemble the notice bundle
         env:
           REPORTS: ${{ runner.temp }}/cargo-about
@@ -63,7 +70,8 @@ jobs:
           while IFS= read -r graph; do
             graphs+=(--graph "${graph}")
           done <"${REPORTS}/graphs"
-          python3 scripts/third_party_notices.py assemble "${graphs[@]}" --output "${BUNDLE}"
+          python3 scripts/third_party_notices.py assemble "${graphs[@]}" \
+            --sysroot "$(rustc --print sysroot)" --output "${BUNDLE}"
           sha256sum -- "${BUNDLE}"/*
       - name: Upload the notice bundle
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

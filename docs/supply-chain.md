@@ -105,13 +105,24 @@ The bundle covers:
 - **Guest crates.** The crates in each Rust guest fixture's own `Cargo.lock`
   under `plugins/community/examples`, on `wasm32-unknown-unknown`, using
   `third_party/about-guest.toml`.
+- **Rust std's crates.io dependencies.** The Rust guests link `std`, which
+  brings crates.io crates such as `dlmalloc` and `hashbrown`. The generator
+  runs cargo-about on the toolchain's rust-src `library/std` for
+  `wasm32-unknown-unknown`. It uses the features the Rust release builds std
+  with, which are bootstrap's defaults `backtrace` and `panic-unwind`.
+  Before that run, it checks that rust-src's `library/Cargo.lock` and
+  `library/std/Cargo.toml` equal the files at the pinned Rust 1.97.1 commit.
+  Every crate in that graph must also ship as a `wasm32-unknown-unknown`
+  rlib in the sysroot. The bundle lists the remaining shipped rlibs, which
+  are in-tree library crates covered by the Rust component.
 - **Non-Cargo fixture components.** The parts that the committed
   compatibility fixtures statically contain:
   - wasi-libc, including the CC0 dlmalloc, MIT musl and BSD-2-Clause
     cloudlibc parts;
   - the BLAKE3 C sources;
   - LLVM compiler-rt;
-  - Rust core, alloc and compiler-builtins.
+  - Rust core, alloc and compiler-builtins;
+  - wit-bindgen 0.61.1, whose generated C bindings the C guest links.
 
   Their texts live in `third_party/notices/`. `manifest.toml` there records,
   for each text, the upstream repository, tag or submodule pin, commit, path

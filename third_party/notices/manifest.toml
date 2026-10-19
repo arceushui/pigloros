@@ -173,10 +173,48 @@ path = "library/stdarch/crates/core_arch/LICENSE-MIT"
 local = "rust/library/stdarch/crates/core_arch/LICENSE-MIT"
 sha256 = "29662666b44dff84977b46e05642cdef910bc3a93a17b5fd86e632bafa59cf21"
 
+[[component]]
+id = "wit-bindgen"
+name = "wit-bindgen 0.61.1 generated C bindings"
+licence = "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT"
+repository = "https://github.com/bytecodealliance/wit-bindgen"
+tag = "v0.61.1"
+commit = "0b0069d6c29c605dd2bc8d10d55e49a0c6cb76d8"
+
+[[component.file]]
+path = "LICENSE-APACHE"
+local = "wit-bindgen/LICENSE-APACHE"
+sha256 = "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+
+[[component.file]]
+path = "LICENSE-Apache-2.0_WITH_LLVM-exception"
+local = "wit-bindgen/LICENSE-Apache-2.0_WITH_LLVM-exception"
+sha256 = "268872b9816f90fd8e85db5a28d33f8150ebb8dd016653fb39ef1f94f2686bc5"
+
+[[component.file]]
+path = "LICENSE-MIT"
+local = "wit-bindgen/LICENSE-MIT"
+sha256 = "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+
+# Rust std's crates.io dependencies, which std links into the Rust guests on
+# wasm32-unknown-unknown. `rust-std-report` runs cargo-about on the toolchain's
+# rust-src `library/std` with the features the Rust release builds std with
+# (bootstrap's defaults: `panic-unwind` from rust.std-features and `backtrace`
+# from rust.backtrace), after checking that both files below equal the ones at
+# the `rust` component's commit. Each crate in that graph must also ship as a
+# wasm32-unknown-unknown rlib in the toolchain sysroot.
+[rust_std]
+component = "rust"
+features = ["backtrace", "panic-unwind"]
+lockfile = "library/Cargo.lock"
+lockfile_sha256 = "02120dd57c4c5fd70c81fd92472681c8de5cc2dd78258276da37bb2253666061"
+std_manifest = "library/std/Cargo.toml"
+std_manifest_sha256 = "ff5272b18cb16a9e67256a1045dc35d9d08ae38916a218f684a2ae2f4360f078"
+
 # Every committed compatibility fixture and what it statically contains. A
-# fixture lists the non-Cargo components above and the guest Cargo.lock graphs
-# (by their path) whose code it links. Fixtures assembled from first-party
-# Component text contain no third-party code and list nothing.
+# fixture lists the non-Cargo components above and the Cargo graphs whose code
+# it links: a guest Cargo.lock by its path, or "rust-std". Fixtures assembled
+# from first-party Component text contain no third-party code and list nothing.
 [fixtures]
 directory = "plugins/community/examples/compatibility-prototype/fixtures"
 
@@ -209,7 +247,7 @@ components = []
 cargo = []
 
 [fixtures.contents."c-guest.wasm"]
-components = ["wasi-libc", "blake3-c", "compiler-rt"]
+components = ["wasi-libc", "blake3-c", "compiler-rt", "wit-bindgen"]
 cargo = []
 
 [fixtures.contents."mistyped-host-function.wasm"]
@@ -224,12 +262,14 @@ cargo = []
 components = ["rust"]
 cargo = [
   "plugins/community/examples/compatibility-prototype/probe-guest/Cargo.lock",
+  "rust-std",
 ]
 
 [fixtures.contents."rust-guest.wasm"]
 components = ["rust"]
 cargo = [
   "plugins/community/examples/compatibility-prototype/rust-guest/Cargo.lock",
+  "rust-std",
 ]
 
 [fixtures.contents."undeclared-host-function.wasm"]

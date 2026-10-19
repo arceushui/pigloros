@@ -26,6 +26,31 @@ PROBE = "plugins/community/examples/compatibility-prototype/probe-guest/Cargo.lo
 REUSABLE = ROOT / ".github/workflows/third-party-notices.yml"
 CI = ROOT / ".github/workflows/ci.yml"
 TAKI = "taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29"
+REGISTRY = "registry+https://github.com/rust-lang/crates.io-index"
+# A stand-in for the toolchain's rust-src library/Cargo.lock and std manifest.
+STD_LOCK = f"""version = 4
+
+[[package]]
+name = "dlmalloc"
+version = "0.2.10"
+source = "{REGISTRY}"
+
+[[package]]
+name = "rustc-demangle"
+version = "0.1.27"
+source = "{REGISTRY}"
+
+[[package]]
+name = "std"
+version = "0.0.0"
+"""
+STD_MANIFEST = '[package]\nname = "std"\n'
+STD_RLIBS = (
+    "libcore-1a.rlib",
+    "libstd-2b.rlib",
+    "libdlmalloc-3c.rlib",
+    "librustc_demangle-4d.rlib",
+)
 
 
 def package(name: str, version: str = "1.0.0") -> dict:
@@ -33,8 +58,10 @@ def package(name: str, version: str = "1.0.0") -> dict:
 
 
 def locked(lock: str, name: str) -> str:
+    if lock == "std":
+        return "0.0.0"
     """The version `lock` pins for registry package `name`."""
-    versions = sorted(v for n, v in notices.lock_packages(ROOT, lock) if n == name)
+    versions = sorted(v for n, v in notices.lock_packages(ROOT / lock) if n == name)
     if len(versions) != 1:
         raise AssertionError(f"{lock} pins {name} at {versions}")
     return versions[0]
@@ -46,6 +73,7 @@ def report(*names: str, lock: str | None = None) -> dict:
     With `lock`, each crate takes the version that lockfile pins.
     """
     version = {name: locked(lock, name) if lock else "1.0.0" for name in names}
+    version.update({"dlmalloc": "0.2.10", "rustc-demangle": "0.1.27"} if lock == "std" else {})
     crates = [{"package": package(name, version[name]), "license": "MIT"} for name in names]
     licences = [
         {
@@ -65,6 +93,7 @@ def reports() -> dict[str, dict]:
         "Cargo.lock": report("wasmtime", "anyhow", lock="Cargo.lock"),
         GUEST: report("wit-bindgen", lock=GUEST),
         PROBE: report("blake3", lock=PROBE),
+        notices.RUST_STD: report("dlmalloc", "rustc-demangle", lock="std"),
     }
 
 
@@ -81,6 +110,26 @@ class Workspace:
         shutil.copytree(ROOT / "third_party", self.root / "third_party")
         fixtures = "plugins/community/examples/compatibility-prototype/fixtures"
         shutil.copytree(ROOT / fixtures, self.root / fixtures)
+        self.sysroot = self.root / "sysroot"
+        library = self.sysroot / notices.RUST_SRC / "library"
+        (library / "std").mkdir(parents=True)
+        (library / "Cargo.lock").write_text(STD_LOCK, encoding="utf-8")
+        (library / "std/Cargo.toml").write_text(STD_MANIFEST, encoding="utf-8")
+        rlibs = self.sysroot / notices.RUST_STD_RLIBS
+        rlibs.mkdir(parents=True)
+        for name in STD_RLIBS:
+            (rlibs / name).write_bytes(b"!<arch>\n")
+        manifest = notices.load_toml(ROOT, notices.MANIFEST)["rust_std"]
+        self.edit(
+            str(notices.MANIFEST),
+            manifest["lockfile_sha256"],
+            notices.sha256(STD_LOCK.encode()),
+        )
+        self.edit(
+            str(notices.MANIFEST),
+            manifest["std_manifest_sha256"],
+            notices.sha256(STD_MANIFEST.encode()),
+        )
 
     def path(self, relative: str) -> Path:
         return self.root / relative
@@ -251,6 +300,20 @@ class ManifestTests(WorkspaceTest):
                 'local = "blake3-c/LICENSE_A2"',
             ),
             "needs a non-empty name": ('name = "wasi-libc"\n', ""),
+            "rust_std needs exactly": ('features = ["backtrace", "panic-unwind"]\n', ""),
+            "rust_std features must be a non-empty list": (
+                'features = ["backtrace", "panic-unwind"]',
+                "features = []",
+            ),
+            "must be one tagged component": ('component = "rust"', 'component = "compiler-rt"'),
+            "rust_std lockfile must be a path under library/": (
+                'lockfile = "library/Cargo.lock"',
+                'lockfile = "library/../Cargo.lock"',
+            ),
+            "rust_std std_manifest_sha256 must be a sha256 digest": (
+                'std_manifest_sha256 = "',
+                'std_manifest_sha256 = "x',
+            ),
         }
         for fragment, (old, new) in cases.items():
             with self.subTest(fragment=fragment):
@@ -287,18 +350,19 @@ class FixtureMapTests(WorkspaceTest):
                 '[fixtures.contents."rust-guest.wasm"]\ncomponents = ["rust"]',
                 '[fixtures.contents."rust-guest.wasm"]\ncomponents = ["zlib"]',
             ),
-            "names unknown guest lockfile": (
-                'rust-guest/Cargo.lock",\n]',
-                'other/Cargo.lock",\n]',
+            "names unknown Cargo graph": (
+                'rust-guest/Cargo.lock",\n',
+                'other/Cargo.lock",\n',
             ),
             "are used by no fixture": (
+                'components = ["wasi-libc", "blake3-c", "compiler-rt", "wit-bindgen"]',
                 'components = ["wasi-libc", "blake3-c", "compiler-rt"]',
-                'components = ["wasi-libc", "blake3-c"]',
             ),
-            "guest lockfiles": (
-                'cargo = [\n  "plugins/community/examples/compatibility-prototype/probe-guest/Cargo.lock",\n]',
-                "cargo = []",
+            "Cargo graphs ['plugins/community/examples/compatibility-prototype/probe-guest": (
+                '  "plugins/community/examples/compatibility-prototype/probe-guest/Cargo.lock",\n',
+                "",
             ),
+            "Cargo graphs ['rust-std'] are used by no fixture": ('  "rust-std",\n', ""),
             "needs exactly components and cargo": (
                 '[fixtures.contents."no-guest-exports.wasm"]\ncomponents = []\ncargo = []',
                 '[fixtures.contents."no-guest-exports.wasm"]\ncomponents = []',
@@ -308,7 +372,10 @@ class FixtureMapTests(WorkspaceTest):
             with self.subTest(fragment=fragment):
                 workspace = Workspace()
                 self.addCleanup(workspace.close)
-                workspace.edit(self.manifest, old, new)
+                path = workspace.path(self.manifest)
+                text = path.read_text(encoding="utf-8")
+                self.assertIn(old, text)
+                path.write_text(text.replace(old, new), encoding="utf-8")
                 errors = notices.offline_errors(workspace.root)
                 self.assertTrue(any(fragment in error for error in errors), errors)
 
@@ -332,6 +399,12 @@ class UpstreamTests(WorkspaceTest):
                     data += b"the rest of the upstream file\n"
                     entry["sha256"] = notices.sha256(data)
                 self.upstream[url] = data
+        rust = next(c for c in self.manifest["component"] if c["id"] == "rust")
+        for path, data in (
+            ("library/Cargo.lock", STD_LOCK),
+            ("library/std/Cargo.toml", STD_MANIFEST),
+        ):
+            self.upstream[notices.raw_url(rust["repository"], rust["commit"], path)] = data.encode()
         self.tags = {
             (component["repository"], component["tag"]): component["commit"]
             for component in self.manifest["component"]
@@ -375,6 +448,14 @@ class UpstreamTests(WorkspaceTest):
         url = next(iter(self.upstream))
         self.upstream[url] = b"changed\n"
         self.assertTrue(any("does not match its sha256" in error for error in self.run_check()))
+
+    def test_changed_rust_std_inputs_fail(self) -> None:
+        rust = next(c for c in self.manifest["component"] if c["id"] == "rust")
+        url = notices.raw_url(rust["repository"], rust["commit"], "library/Cargo.lock")
+        self.upstream[url] += b"# changed\n"
+        self.assertIn(
+            "rust_std upstream library/Cargo.lock does not match its sha256", self.run_check()
+        )
 
     def test_excerpt_must_equal_upstream_lines(self) -> None:
         component, entry = self.excerpt_entry()
@@ -435,6 +516,78 @@ class GitTests(unittest.TestCase):
             self.assertEqual(notices.git("ls-remote"), "ok")
 
 
+class RustStdReportTests(WorkspaceTest):
+    def test_runs_cargo_about_on_std_with_the_release_features(self) -> None:
+        calls = []
+
+        def run(command, **kwargs):
+            calls.append((command, kwargs))
+
+        output = self.workspace.root / "rust-std.json"
+        errors = notices.run_rust_std_report(
+            self.workspace.root, self.workspace.sysroot, output, run=run
+        )
+        self.assertEqual(errors, [])
+        ((command, kwargs),) = calls
+        library = self.workspace.sysroot / notices.RUST_SRC / "library"
+        self.assertEqual(
+            command,
+            [
+                "cargo",
+                "about",
+                "generate",
+                "--locked",
+                "--fail",
+                "--manifest-path",
+                str(library / "std/Cargo.toml"),
+                "--features",
+                "backtrace panic-unwind",
+                "--config",
+                str(self.workspace.root / notices.GUEST_ABOUT),
+                "--format",
+                "json",
+                "--output-file",
+                str(output),
+            ],
+        )
+        self.assertEqual(kwargs["env"]["RUSTC_BOOTSTRAP"], "1")
+        self.assertIs(kwargs["check"], True)
+
+    def test_cargo_about_failure_is_reported(self) -> None:
+        def run(command, **kwargs):
+            raise notices.subprocess.CalledProcessError(3, command)
+
+        errors = notices.run_rust_std_report(
+            self.workspace.root, self.workspace.sysroot, Path("out.json"), run=run
+        )
+        self.assertEqual(errors, ["cargo about on Rust std failed with exit status 3"])
+
+    def test_unpinned_rust_src_or_manifest_is_refused_before_running(self) -> None:
+        def run(command, **kwargs):
+            raise AssertionError("cargo about must not run")
+
+        (self.workspace.sysroot / notices.RUST_SRC / "library/std/Cargo.toml").write_text(
+            "[package]\n", encoding="utf-8"
+        )
+        self.assertEqual(
+            notices.run_rust_std_report(
+                self.workspace.root, self.workspace.sysroot, Path("o"), run=run
+            ),
+            ["rust-src library/std/Cargo.toml differs from the pinned Rust tag"],
+        )
+        self.workspace.edit(str(notices.MANIFEST), 'component = "rust"', 'component = "none"')
+        errors = notices.run_rust_std_report(
+            self.workspace.root, self.workspace.sysroot, Path("o"), run=run
+        )
+        self.assertTrue(any("must be one tagged component" in error for error in errors), errors)
+
+    def test_shipped_rlibs_are_named_by_crate(self) -> None:
+        self.assertEqual(
+            notices.shipped_rlibs(self.workspace.sysroot),
+            {"core", "std", "dlmalloc", "rustc_demangle"},
+        )
+
+
 class ReportTests(unittest.TestCase):
     def test_valid_report_passes(self) -> None:
         self.assertEqual(notices.check_report(report("a", "b"), "Cargo.lock"), [])
@@ -473,8 +626,10 @@ class ReportTests(unittest.TestCase):
 
 class AssembleTests(WorkspaceTest):
     def test_bundle_is_deterministic_and_complete(self) -> None:
-        text, index = notices.assemble(self.workspace.root, reports())
-        again, index_again = notices.assemble(self.workspace.root, copy.deepcopy(reports()))
+        text, index = notices.assemble(self.workspace.root, reports(), self.workspace.sysroot)
+        again, index_again = notices.assemble(
+            self.workspace.root, copy.deepcopy(reports()), self.workspace.sysroot
+        )
         self.assertEqual((text, index), (again, index_again))
         for fragment in (
             "Cargo graph: Cargo.lock (SHA-256 ",
@@ -486,56 +641,91 @@ class AssembleTests(WorkspaceTest):
             "libc-bottom-half/cloudlibc/LICENSE",
             "Component: BLAKE3 C implementation 1.8.7",
             "compiler-rt/LICENSE.TXT",
-            "c-guest.wasm: wasi-libc, blake3-c, compiler-rt",
+            "c-guest.wasm: wasi-libc, blake3-c, compiler-rt, wit-bindgen",
+            "rust-guest.wasm: rust, plugins/community/examples/compatibility-prototype/"
+            "rust-guest/Cargo.lock, rust-std",
+            "Cargo graph: rust-std: Rust 1.97.1 library/Cargo.lock, std with features "
+            "backtrace, panic-unwind, wasm32-unknown-unknown",
+            "MIT text of dlmalloc",
+            "covered by the Rust component below): core, std",
+            "Component: wit-bindgen 0.61.1 generated C bindings",
             "no-guest-exports.wasm: first-party code only",
             "from the crate's LICENSE-MIT",
         ):
             self.assertIn(fragment, text)
         parsed = json.loads(index)
         self.assertEqual(
-            [graph["lockfile"] for graph in parsed["graphs"]], ["Cargo.lock", PROBE, GUEST]
+            [graph["lockfile"][:20] for graph in parsed["graphs"]],
+            ["Cargo.lock", PROBE[:20], GUEST[:20], "rust-std: Rust 1.97."],
         )
+        self.assertEqual(parsed["graphs"][3]["in_tree_rlibs"], ["core", "std"])
+        self.assertEqual(parsed["graphs"][3]["lockfile_sha256"], notices.sha256(STD_LOCK.encode()))
         self.assertEqual(
             [component["id"] for component in parsed["components"]],
-            ["wasi-libc", "blake3-c", "compiler-rt", "rust"],
+            ["wasi-libc", "blake3-c", "compiler-rt", "rust", "wit-bindgen"],
         )
 
     def test_canonical_text_source_is_named(self) -> None:
         graphs = reports()
         graphs["Cargo.lock"]["licenses"][0]["source_path"] = None
-        text, _ = notices.assemble(self.workspace.root, graphs)
+        text, _ = notices.assemble(self.workspace.root, graphs, self.workspace.sysroot)
         self.assertIn("from the SPDX licence list text (the crate ships none)", text)
 
     def test_report_from_another_graph_fails(self) -> None:
         graphs = reports()
         graphs[GUEST] = report("wasmtime", lock="Cargo.lock")
         with self.assertRaisesRegex(notices.NoticeError, f"is not a registry package of {GUEST}"):
-            notices.assemble(self.workspace.root, graphs)
+            notices.assemble(self.workspace.root, graphs, self.workspace.sysroot)
 
     def test_licence_texts_are_ordered_by_id_then_digest(self) -> None:
         graphs = reports()
         graphs["Cargo.lock"]["licenses"].reverse()
-        first, _ = notices.assemble(self.workspace.root, graphs)
+        first, _ = notices.assemble(self.workspace.root, graphs, self.workspace.sysroot)
         graphs["Cargo.lock"]["licenses"].reverse()
-        second, _ = notices.assemble(self.workspace.root, graphs)
+        second, _ = notices.assemble(self.workspace.root, graphs, self.workspace.sysroot)
         self.assertEqual(first, second)
+
+    def test_std_crate_without_a_wasm32_rlib_fails(self) -> None:
+        (self.workspace.sysroot / notices.RUST_STD_RLIBS / "libdlmalloc-3c.rlib").unlink()
+        with self.assertRaisesRegex(
+            notices.NoticeError, "rust-std: dlmalloc 0.2.10 has no wasm32-unknown-unknown rlib"
+        ):
+            notices.assemble(self.workspace.root, reports(), self.workspace.sysroot)
+
+    def test_std_report_must_match_the_rust_src_lockfile(self) -> None:
+        graphs = reports()
+        graphs[notices.RUST_STD] = report("wasmtime", lock="Cargo.lock")
+        with self.assertRaisesRegex(notices.NoticeError, "is not a registry package of rust-std"):
+            notices.assemble(self.workspace.root, graphs, self.workspace.sysroot)
+
+    def test_rust_src_must_be_the_pinned_tag(self) -> None:
+        lock = self.workspace.sysroot / notices.RUST_SRC / "library/Cargo.lock"
+        lock.write_text(STD_LOCK + "\n", encoding="utf-8")
+        with self.assertRaisesRegex(notices.NoticeError, "differs from the pinned Rust tag"):
+            notices.assemble(self.workspace.root, reports(), self.workspace.sysroot)
+        lock.unlink()
+        with self.assertRaisesRegex(notices.NoticeError, "library/Cargo.lock is missing"):
+            notices.assemble(self.workspace.root, reports(), self.workspace.sysroot)
+
+    def test_offline_violations_stop_before_the_reports(self) -> None:
+        self.workspace.path("third_party/notices/wit-bindgen/LICENSE-MIT").unlink()
+        with self.assertRaisesRegex(notices.NoticeError, "wit-bindgen/LICENSE-MIT is missing"):
+            notices.assemble(self.workspace.root, {}, self.workspace.sysroot)
 
     def test_every_graph_report_is_required(self) -> None:
         graphs = reports()
         del graphs[PROBE]
         with self.assertRaisesRegex(notices.NoticeError, "must be exactly"):
-            notices.assemble(self.workspace.root, graphs)
+            notices.assemble(self.workspace.root, graphs, self.workspace.sysroot)
 
-    def test_report_and_offline_violations_stop_the_bundle(self) -> None:
+    def test_report_violations_stop_the_bundle(self) -> None:
         graphs = reports()
         graphs[GUEST]["crates"][0]["license"] = "Unknown"
-        self.workspace.path("third_party/notices/rust/COPYRIGHT").write_text(
-            "x\n", encoding="utf-8"
-        )
+        graphs[PROBE]["licenses"][0]["text"] = ""
         with self.assertRaises(notices.NoticeError) as raised:
-            notices.assemble(self.workspace.root, graphs)
+            notices.assemble(self.workspace.root, graphs, self.workspace.sysroot)
         self.assertIn("has an unknown licence", str(raised.exception))
-        self.assertIn("rust/COPYRIGHT does not match its digest", str(raised.exception))
+        self.assertIn("has an empty text", str(raised.exception))
 
 
 class CommandLineTests(WorkspaceTest):
@@ -547,6 +737,15 @@ class CommandLineTests(WorkspaceTest):
             args += ["--graph", f"{lock}={path}"]
         return args
 
+    def sysroot(self) -> list[str]:
+        return ["--sysroot", str(self.workspace.sysroot)]
+
+    def test_rust_std_report_command_refuses_unpinned_rust_src(self) -> None:
+        (self.workspace.sysroot / notices.RUST_SRC / "library/Cargo.lock").unlink()
+        code, stderr = self.run_main(["rust-std-report", *self.sysroot(), "--output", "o.json"])
+        self.assertEqual(code, 1)
+        self.assertIn("rust-src library/Cargo.lock is missing", stderr)
+
     def run_main(self, argv: list[str]) -> tuple[int, str]:
         stderr = io.StringIO()
         with contextlib.redirect_stderr(stderr):
@@ -555,7 +754,9 @@ class CommandLineTests(WorkspaceTest):
 
     def test_assemble_writes_the_bundle(self) -> None:
         output = self.workspace.root / "out"
-        code, stderr = self.run_main(["assemble", *self.write_reports(), "--output", str(output)])
+        code, stderr = self.run_main(
+            ["assemble", *self.write_reports(), *self.sysroot(), "--output", str(output)]
+        )
         self.assertEqual((code, stderr), (0, ""))
         self.assertIn(
             "Component: wasi-libc", (output / notices.TEXT_NAME).read_text(encoding="utf-8")
@@ -566,13 +767,15 @@ class CommandLineTests(WorkspaceTest):
 
     def test_repeated_graph_fails(self) -> None:
         args = self.write_reports()
-        code, stderr = self.run_main(["assemble", *args, *args[:2], "--output", "out"])
+        code, stderr = self.run_main(
+            ["assemble", *args, *args[:2], *self.sysroot(), "--output", "out"]
+        )
         self.assertEqual(code, 1)
         self.assertIn("given twice", stderr)
 
     def test_malformed_graph_argument_is_rejected(self) -> None:
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
-            notices.main(["assemble", "--graph", "Cargo.lock", "--output", "out"])
+            notices.main(["assemble", "--graph", "Cargo.lock", "--sysroot", "s", "--output", "out"])
 
     def test_check_reports_errors(self) -> None:
         self.workspace.path("third_party/notices/rust/COPYRIGHT").write_text(
@@ -615,9 +818,17 @@ class WorkflowContractTests(unittest.TestCase):
             "third_party_notices.py verify-upstream",
             "cargo about generate --locked --fail --workspace --all-features",
             "--config third_party/about-guest.toml",
+            "third_party_notices.py rust-std-report",
+            '"rust-std=${REPORTS}/rust-std.json"',
             "third_party_notices.py assemble",
+            '--sysroot "$(rustc --print sysroot)"',
         ):
             self.assertIn(fragment, script)
+        toolchain = steps[1]["with"]
+        self.assertEqual(
+            (toolchain["toolchain"], toolchain["components"], toolchain["targets"]),
+            ("1.97.1", "rust-src", "wasm32-unknown-unknown"),
+        )
         upload = steps[-1]
         self.assertEqual(upload["with"]["name"], "third-party-notices")
         self.assertEqual(upload["with"]["if-no-files-found"], "error")

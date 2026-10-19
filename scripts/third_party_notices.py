@@ -14,6 +14,10 @@ Commands:
 * ``verify-upstream`` re-fetches every notice text from its recorded upstream
   commit, checks that each tag and submodule still resolves to that commit,
   and compares the digests with the committed bytes. It needs the network.
+* ``rust-std-report`` checks that the toolchain's rust-src ``library/`` lockfile
+  and std manifest are the ones at the pinned Rust tag, then runs cargo-about
+  on std for wasm32-unknown-unknown with the features the Rust release builds
+  std with. That graph is the crates.io code std links into the Rust guests.
 * ``assemble`` runs ``check``, validates each cargo-about JSON report, and
   writes ``THIRD-PARTY-NOTICES.txt`` and ``third-party-notices.json``. It fails
   on an unknown or unaccepted licence and on any crate or component with no
@@ -28,6 +32,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -45,6 +50,17 @@ GUEST_ABOUT = Path("third_party/about-guest.toml")
 HOST_LOCK = "Cargo.lock"
 GUEST_ROOT = Path("plugins/community/examples")
 GUEST_TARGETS = ["wasm32-unknown-unknown"]
+RUST_STD = "rust-std"
+RUST_SRC = Path("lib/rustlib/src/rust")
+RUST_STD_RLIBS = Path("lib/rustlib/wasm32-unknown-unknown/lib")
+RUST_STD_KEYS = [
+    "component",
+    "features",
+    "lockfile",
+    "lockfile_sha256",
+    "std_manifest",
+    "std_manifest_sha256",
+]
 ABOUT_GLOBAL_KEYS = frozenset(
     {
         "accepted",
@@ -226,6 +242,27 @@ def check_manifest(manifest: dict) -> list[str]:
             if local in locals_seen:
                 errors.append(f"notice text {local!r} is listed twice")
             locals_seen.add(local)
+    errors.extend(check_rust_std(manifest))
+    return errors
+
+
+def check_rust_std(manifest: dict) -> list[str]:
+    """The std graph names the pinned Rust component, its files and features."""
+    rust_std = manifest.get("rust_std")
+    if not isinstance(rust_std, dict) or sorted(rust_std) != RUST_STD_KEYS:
+        return [f"notice manifest rust_std needs exactly {RUST_STD_KEYS}"]
+    errors: list[str] = []
+    component = [c for c in manifest.get("component", []) if c.get("id") == rust_std["component"]]
+    if len(component) != 1 or "tag" not in component[0]:
+        errors.append(f"rust_std component {rust_std['component']!r} must be one tagged component")
+    features = rust_std["features"]
+    if not features or not all(isinstance(f, str) and f for f in features):
+        errors.append("rust_std features must be a non-empty list of names")
+    for key in ("lockfile", "std_manifest"):
+        if not str(rust_std[key]).startswith("library/") or ".." in Path(rust_std[key]).parts:
+            errors.append(f"rust_std {key} must be a path under library/")
+        if not is_digest(rust_std[f"{key}_sha256"]):
+            errors.append(f"rust_std {key}_sha256 must be a sha256 digest")
     return errors
 
 
@@ -276,7 +313,7 @@ def check_fixtures(manifest: dict, root: Path) -> list[str]:
             f"fixtures {committed}"
         )
     ids = {component.get("id") for component in manifest.get("component", [])}
-    guests = set(guest_lockfiles(root))
+    guests = {*guest_lockfiles(root), RUST_STD}
     used_components: set[str] = set()
     used_guests: set[str] = set()
     for name, content in sorted(contents.items()):
@@ -289,12 +326,12 @@ def check_fixtures(manifest: dict, root: Path) -> list[str]:
             used_components.add(component)
         for lock in content["cargo"]:
             if lock not in guests:
-                errors.append(f"fixture {name} names unknown guest lockfile {lock!r}")
+                errors.append(f"fixture {name} names unknown Cargo graph {lock!r}")
             used_guests.add(lock)
     if ids - used_components:
         errors.append(f"components {sorted(ids - used_components)} are used by no fixture")
     if guests - used_guests:
-        errors.append(f"guest lockfiles {sorted(guests - used_guests)} are used by no fixture")
+        errors.append(f"Cargo graphs {sorted(guests - used_guests)} are used by no fixture")
     return errors
 
 
@@ -418,7 +455,91 @@ def upstream_errors(
             local = notices_dir / entry["local"]
             if not local.is_file() or local.read_bytes() != expected:
                 errors.append(f"{label} committed {entry['local']} differs from upstream")
+    rust_std = manifest["rust_std"]
+    (component,) = (c for c in manifest["component"] if c["id"] == rust_std["component"])
+    for key in ("lockfile", "std_manifest"):
+        data = fetch(raw_url(component["repository"], component["commit"], rust_std[key]))
+        if sha256(data) != rust_std[f"{key}_sha256"]:
+            errors.append(f"rust_std upstream {rust_std[key]} does not match its sha256")
     return errors
+
+
+# ── Rust std graph ───────────────────────────────────────────────────────────
+
+
+def rust_src_errors(manifest: dict, sysroot: Path) -> list[str]:
+    """The toolchain's rust-src files must be the ones at the pinned Rust tag."""
+    rust_std = manifest["rust_std"]
+    errors = []
+    for key in ("lockfile", "std_manifest"):
+        path = sysroot / RUST_SRC / rust_std[key]
+        if not path.is_file():
+            errors.append(f"rust-src {rust_std[key]} is missing from {sysroot}")
+        elif sha256(path.read_bytes()) != rust_std[f"{key}_sha256"]:
+            errors.append(f"rust-src {rust_std[key]} differs from the pinned Rust tag")
+    return errors
+
+
+def rust_std_command(root: Path, manifest: dict, sysroot: Path, output: Path) -> list[str]:
+    rust_std = manifest["rust_std"]
+    return [
+        "cargo",
+        "about",
+        "generate",
+        "--locked",
+        "--fail",
+        "--manifest-path",
+        str(sysroot / RUST_SRC / rust_std["std_manifest"]),
+        "--features",
+        " ".join(rust_std["features"]),
+        "--config",
+        str(root / GUEST_ABOUT),
+        "--format",
+        "json",
+        "--output-file",
+        str(output),
+    ]
+
+
+def run_rust_std_report(
+    root: Path,
+    sysroot: Path,
+    output: Path,
+    run: Callable[..., object] = subprocess.run,
+) -> list[str]:
+    """Generate the std graph report after checking its rust-src inputs."""
+    manifest = load_toml(root, MANIFEST)
+    errors = check_manifest(manifest)
+    if errors:
+        return errors
+    errors = rust_src_errors(manifest, sysroot)
+    if errors:
+        return errors
+    # The library workspace declares `cargo-features`, which stable Cargo
+    # reads only with RUSTC_BOOTSTRAP=1, as the repository's coverage job does.
+    environment = {**os.environ, "RUSTC_BOOTSTRAP": "1"}
+    try:
+        run(rust_std_command(root, manifest, sysroot, output), check=True, env=environment)
+    except subprocess.CalledProcessError as error:
+        return [f"cargo about on Rust std failed with exit status {error.returncode}"]
+    return []
+
+
+def shipped_rlibs(sysroot: Path) -> set[str]:
+    """Crate names of the rlibs the toolchain ships for wasm32-unknown-unknown."""
+    return {
+        path.name.removeprefix("lib").rsplit("-", 1)[0]
+        for path in (sysroot / RUST_STD_RLIBS).glob("lib*-*.rlib")
+    }
+
+
+def check_std_rlibs(report: dict, rlibs: set[str]) -> list[str]:
+    """Every crate in the std graph must be shipped as a wasm32 rlib."""
+    return [
+        f"{RUST_STD}: {crate_label(crate['package'])} has no wasm32-unknown-unknown rlib"
+        for crate in report.get("crates", [])
+        if crate["package"]["name"].replace("-", "_") not in rlibs
+    ]
 
 
 # ── cargo-about reports ──────────────────────────────────────────────────────
@@ -450,9 +571,10 @@ def check_report(report: dict, label: str) -> list[str]:
     return errors
 
 
-def lock_packages(root: Path, lock: str) -> set[tuple[str, str]]:
+def lock_packages(path: Path) -> set[tuple[str, str]]:
     """Return the (name, version) of every registry package in a lockfile."""
-    packages = load_toml(root, Path(lock)).get("package", [])
+    with path.open("rb") as handle:
+        packages = tomllib.load(handle).get("package", [])
     return {
         (package["name"], package["version"])
         for package in packages
@@ -569,34 +691,60 @@ def render_components(manifest: dict, notices_dir: Path) -> tuple[list[str], lis
     return lines, index
 
 
-def assemble(root: Path, reports: dict[str, dict]) -> tuple[str, str]:
+def assemble(root: Path, reports: dict[str, dict], sysroot: Path) -> tuple[str, str]:
     """Return the bundle text and its JSON index; raise on any violation."""
     errors = offline_errors(root)
-    expected = [HOST_LOCK, *guest_lockfiles(root)]
+    if errors:
+        raise NoticeError("\n".join(errors))
+    manifest = load_toml(root, MANIFEST)
+    errors = rust_src_errors(manifest, sysroot)
+    lockfiles = {lock: root / lock for lock in [HOST_LOCK, *guest_lockfiles(root)]}
+    lockfiles[RUST_STD] = sysroot / RUST_SRC / manifest["rust_std"]["lockfile"]
+    expected = list(lockfiles)
     if sorted(reports) != sorted(expected):
         errors.append(f"cargo-about reports {sorted(reports)} must be exactly {sorted(expected)}")
+    rlibs = shipped_rlibs(sysroot)
     for lock in sorted(reports):
         errors += check_report(reports[lock], lock)
-        if lock in expected:
-            errors += check_report_graph(reports[lock], lock_packages(root, lock), lock)
+        if lock in lockfiles and lockfiles[lock].is_file():
+            errors += check_report_graph(reports[lock], lock_packages(lockfiles[lock]), lock)
+    if RUST_STD in reports:
+        errors += check_std_rlibs(reports[RUST_STD], rlibs)
     if errors:
         raise NoticeError("\n".join(errors))
 
-    manifest = load_toml(root, MANIFEST)
     lines = [
         "PiglorOS third-party notices",
         "",
         "This bundle covers the crates in the non-dev dependency graph of every",
         "PiglorOS workspace binary (x86_64-unknown-linux-gnu), the crates in each",
-        "Rust guest fixture's Cargo.lock (wasm32-unknown-unknown), and the",
-        "non-Cargo components that the committed compatibility fixtures",
-        "statically contain. PiglorOS's own crates are MIT-licensed and not listed.",
+        "Rust guest fixture's Cargo.lock (wasm32-unknown-unknown), the crates.io",
+        "crates that Rust's std links into those guests, and the non-Cargo",
+        "components that the committed compatibility fixtures statically contain.",
+        "PiglorOS's own crates are MIT-licensed and not listed.",
         "",
     ]
     index: dict = {"schema": 1, "graphs": [], "components": [], "fixtures": {}}
     for lock in expected:
-        digest = sha256((root / lock).read_bytes())
-        graph_lines, graph_index = render_report(lock, digest, reports[lock])
+        digest = sha256(lockfiles[lock].read_bytes())
+        label = lock
+        if lock == RUST_STD:
+            rust_std = manifest["rust_std"]
+            (rust,) = (c for c in manifest["component"] if c["id"] == rust_std["component"])
+            label = (
+                f"{RUST_STD}: Rust {rust['tag']} {rust_std['lockfile']}, std with "
+                f"features {', '.join(rust_std['features'])}, wasm32-unknown-unknown"
+            )
+        graph_lines, graph_index = render_report(label, digest, reports[lock])
+        if lock == RUST_STD:
+            listed = {c["package"]["name"].replace("-", "_") for c in reports[lock]["crates"]}
+            in_tree = sorted(rlibs - listed)
+            graph_lines += [
+                "",
+                "Shipped wasm32-unknown-unknown rlibs outside this graph (in-tree Rust",
+                f"library crates, covered by the Rust component below): {', '.join(in_tree)}",
+            ]
+            graph_index["in_tree_rlibs"] = in_tree
         lines += [*graph_lines, ""]
         index["graphs"].append(graph_index)
     component_lines, index["components"] = render_components(manifest, root / NOTICES_DIR)
@@ -628,7 +776,11 @@ def main(argv: list[str] | None = None, root: Path = ROOT) -> int:
     commands.add_parser("verify-upstream")
     assemble_parser = commands.add_parser("assemble")
     assemble_parser.add_argument("--graph", action="append", type=parse_graph, default=[])
+    assemble_parser.add_argument("--sysroot", type=Path, required=True)
     assemble_parser.add_argument("--output", type=Path, required=True)
+    std_parser = commands.add_parser("rust-std-report")
+    std_parser.add_argument("--sysroot", type=Path, required=True)
+    std_parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
 
     try:
@@ -638,13 +790,15 @@ def main(argv: list[str] | None = None, root: Path = ROOT) -> int:
             errors = offline_errors(root) or upstream_errors(
                 load_toml(root, MANIFEST), root / NOTICES_DIR
             )
+        elif args.command == "rust-std-report":
+            errors = run_rust_std_report(root, args.sysroot, args.output)
         else:
             reports = {}
             for lock, path in args.graph:
                 if lock in reports:
                     raise NoticeError(f"cargo-about report for {lock} given twice")
                 reports[lock] = json.loads(path.read_text(encoding="utf-8"))
-            text, index = assemble(root, reports)
+            text, index = assemble(root, reports, args.sysroot)
             args.output.mkdir(parents=True, exist_ok=True)
             (args.output / TEXT_NAME).write_text(text, encoding="utf-8")
             (args.output / INDEX_NAME).write_text(index, encoding="utf-8")
