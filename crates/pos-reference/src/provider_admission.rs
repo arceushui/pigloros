@@ -6,14 +6,14 @@
 //! currently installed authority and yields the descriptor-bearing admission
 //! for later image activation. Neither value is a mount or launch permit.
 
+use std::collections::BTreeSet;
 use std::fs::File;
 use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::fs::FileExt as _;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde::de::value::MapAccessDeserializer;
-use serde::de::{MapAccess, Visitor};
-use serde::{Deserialize, Deserializer};
+use serde::de::{Error as _, IgnoredAny, MapAccess, Visitor};
+use serde::Deserializer as _;
 
 use crate::sandbox_provider_protocol::{
     AdmittedSandboxImage, LaunchPolicy, PartitionDescriptor, SandboxExecuteRequest,
@@ -396,26 +396,19 @@ fn check_verity_superblock(
         })
 }
 
-/// systemd's root-verity-sig JSON object, in the shape systemd-repart writes.
-///
-/// systemd v260.2 ignores other keys and takes the first of duplicate keys;
-/// both reject here, as do missing keys, non-string or null values and
-/// trailing data. JSON whitespace and escapes decode as systemd decodes them.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
+/// The two values systemd activates with, from the root-verity-sig JSON object.
 struct VeritySignatureJson {
     root_hash: String,
-    #[serde(default, deserialize_with = "present")]
-    certificate_fingerprint: Option<String>,
     signature: String,
 }
 
-fn present<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
-    String::deserialize(deserializer).map(Some)
-}
-
-/// Accepts only a JSON object: a derived struct would also accept an array,
-/// which systemd's key lookup rejects.
+/// ADR-087 Part B.4 object shape (rev 31, accepted in rev 32).
+///
+/// Exactly one `rootHash` and one `signature` key, each with a string value.
+/// Other keys, including `certificateFingerprint`, are skipped without being
+/// interpreted, as systemd v260.2 does. Any duplicate key rejects, where
+/// systemd would take the first. Only a JSON object reaches `visit_map`; an
+/// array, which systemd's key lookup also rejects, does not.
 struct JsonObject;
 
 impl<'de> Visitor<'de> for JsonObject {
@@ -425,29 +418,60 @@ impl<'de> Visitor<'de> for JsonObject {
         formatter.write_str("a root-verity-sig JSON object")
     }
 
-    fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
-        VeritySignatureJson::deserialize(MapAccessDeserializer::new(map))
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        let mut keys = BTreeSet::new();
+        let (mut root_hash, mut signature) = (None, None);
+        while let Some(key) = map.next_key::<String>()? {
+            match key.as_str() {
+                "rootHash" => root_hash = Some(map.next_value::<String>()?),
+                "signature" => signature = Some(map.next_value::<String>()?),
+                _ => {
+                    map.next_value::<IgnoredAny>()?;
+                }
+            }
+            if !keys.insert(key) {
+                return Err(A::Error::custom("duplicate root-verity-sig key"));
+            }
+        }
+        root_hash
+            .zip(signature)
+            .map(|(root_hash, signature)| VeritySignatureJson {
+                root_hash,
+                signature,
+            })
+            .ok_or_else(|| A::Error::custom("missing rootHash or signature"))
     }
 }
 
-fn parse_verity_signature(text: &[u8]) -> Result<VeritySignatureJson, serde_json::Error> {
+/// Parse exactly one JSON object, with no whitespace before or after it.
+fn parse_verity_signature(text: &[u8]) -> Result<VeritySignatureJson, SelectorBoundaryError> {
+    if [text.first(), text.last()]
+        .into_iter()
+        .flatten()
+        .any(|byte| matches!(byte, b' ' | b'\t' | b'\n' | b'\r'))
+    {
+        return Err(SelectorBoundaryError::ArtifactInvalid);
+    }
     let mut deserializer = serde_json::Deserializer::from_slice(text);
     deserializer
         .deserialize_map(JsonObject)
         .and_then(|json| deserializer.end().map(|()| json))
+        .map_err(invalid)
 }
 
-/// Pre-activation root-verity-sig check over the same held image.
+/// Pre-activation root-verity-sig binding over the same held image.
 ///
 /// systemd reads the root hash and PKCS#7 signature it activates with from
 /// the JSON in SIM1's root-verity-sig partition (ordinal 2), not from SIM1.
-/// The partition must hold at most 4 MiB, with only NUL bytes after the first
-/// NUL. Its `rootHash` must equal the lowercase hex SIM1 root hash and its
-/// `signature` the canonical padded base64 of SIM1's PKCS#7 proof bytes:
-/// canonical base64 is a bijection, so this equals a strict decode compared
-/// byte for byte, and any invalid, uppercase, unpadded or whitespace-bearing
-/// encoding rejects. A present `certificateFingerprint` must be 64 lowercase
-/// hexadecimal characters.
+/// ADR-087 Part B.4 (rev 31, accepted in rev 32) requires that partition to
+/// be one JSON object followed only by NUL bytes, within systemd's 4 MiB
+/// bound. `rootHash` must be exactly 64 hexadecimal digits that decode to
+/// SIM1's root hash: equality to its hex encoding, ignoring ASCII case.
+/// `signature` must be standard padded base64 without whitespace that
+/// decodes to SIM1's exact PKCS#7 proof bytes: equality to the canonical
+/// encoding of those bytes. Standard base64 with zero pad bits, which
+/// systemd's decoder also requires, has exactly one encoding per byte
+/// string, so this equals a strict decode compared byte for byte.
 fn check_verity_signature(
     root_image: &File,
     signature: &PartitionDescriptor,
@@ -473,17 +497,11 @@ fn check_verity_signature(
             if bytes[end..].iter().any(|byte| *byte != 0) {
                 return Err(SelectorBoundaryError::ArtifactInvalid);
             }
-            parse_verity_signature(&bytes[..end]).map_err(invalid)
+            parse_verity_signature(&bytes[..end])
         })
         .and_then(|json| {
-            if json.root_hash != lower_hex(root_hash)
+            if !json.root_hash.eq_ignore_ascii_case(&lower_hex(root_hash))
                 || json.signature != base64(proof)
-                || json.certificate_fingerprint.is_some_and(|fingerprint| {
-                    fingerprint.len() != 64
-                        || !fingerprint
-                            .bytes()
-                            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
-                })
             {
                 return Err(SelectorBoundaryError::ArtifactInvalid);
             }
@@ -1052,14 +1070,19 @@ pub mod tests {
         let other_signature = String::from_utf8(other_signature)?;
         let unpadded = encoded.trim_end_matches('=');
         let accepted: Vec<Vec<u8>> = vec![
-            // certificateFingerprint is optional, as systemd-repart
-            // omits it without OpenSSL; insignificant whitespace is JSON.
+            // Other keys, certificateFingerprint included, are not
+            // interpreted; whitespace inside the object is JSON; hex digits
+            // may be uppercase (ADR-087 Part B.4).
             replace_once(json, fingerprint_pair, "")?,
+            replace_once(json, fingerprint_pair, ",\"certificateFingerprint\":null")?,
+            replace_once(json, fingerprint_pair, ",\"certificateFingerprint\":\"x\"")?,
+            replace_once(json, "}", ",\"extra\":{\"a\":[1,null,true]}}")?,
             replace_once(json, "{", "{ \n")?,
+            replace_once(json, &root_hash, &root_hash.to_uppercase())?,
         ];
         let rejected: Vec<Vec<u8>> = vec![
             replace_once(json, &root_hash, &other_root)?,
-            replace_once(json, &root_hash, &root_hash.to_uppercase())?,
+            replace_once(json, &root_hash, &format!("{root_hash}00"))?,
             replace_once(json, &encoded, &other_signature)?,
             replace_once(json, &encoded, unpadded)?,
             replace_once(json, &encoded, &format!("!{}", &encoded[1..]))?,
@@ -1070,7 +1093,6 @@ pub mod tests {
             )?,
             replace_once(json, &format!("{root_pair},"), "")?,
             replace_once(json, &format!(",{signature_pair}"), "")?,
-            replace_once(json, "}", ",\"extra\":\"\"}")?,
             replace_once(json, "{", &format!("{{{root_pair},"))?,
             replace_once(json, "}", &format!(",{signature_pair}}}"))?,
             replace_once(
@@ -1078,27 +1100,16 @@ pub mod tests {
                 fingerprint_pair,
                 &format!("{fingerprint_pair}{fingerprint_pair}"),
             )?,
-            replace_once(json, fingerprint_pair, ",\"certificateFingerprint\":null")?,
-            replace_once(
-                json,
-                fingerprint_pair,
-                &format!(",\"certificateFingerprint\":\"{}\"", "A".repeat(64)),
-            )?,
-            replace_once(
-                json,
-                fingerprint_pair,
-                &format!(",\"certificateFingerprint\":\"{}\"", "a".repeat(63)),
-            )?,
-            replace_once(
-                json,
-                fingerprint_pair,
-                &format!(",\"certificateFingerprint\":\"{}\"", "a".repeat(65)),
-            )?,
+            replace_once(json, "}", ",\"x\":1,\"x\":2}")?,
             replace_once(json, &format!("\"{root_hash}\""), "1")?,
+            replace_once(json, &format!("\"{encoded}\""), "1")?,
+            replace_once(json, "}", ",\"extra\":tru}")?,
+            replace_once(json, "}", ",}")?,
             format!("[\"{root_hash}\",\"{encoded}\"]").into_bytes(),
-            format!("[\"{root_hash}\",\"{}\",\"{encoded}\"]", "a".repeat(64)).into_bytes(),
             replace_once(json, "}", "}x")?,
             replace_once(json, "}", "}{}")?,
+            replace_once(json, "{", " {")?,
+            replace_once(json, "}", "}\n")?,
             Vec::new(),
         ];
         Ok((accepted, rejected))
