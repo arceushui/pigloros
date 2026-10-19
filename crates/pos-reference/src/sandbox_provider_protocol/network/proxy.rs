@@ -58,6 +58,7 @@ pub enum LocalNetworkTermination {
 /// adapter closed the channel at a frame boundary. Classifying the attempt and
 /// signing evidence remain the provider lifecycle's responsibility.
 #[derive(Clone, Debug, PartialEq)]
+#[must_use]
 pub struct LocalNetworkSession {
     transcripts: Vec<NetworkExchangeTranscript>,
     termination: Option<LocalNetworkTermination>,
@@ -143,31 +144,32 @@ impl Proxy {
         store: &NetworkCaptureStore,
     ) -> ControlFlow<Option<LocalNetworkTermination>> {
         match self.forward(request, plan, endpoint, connector) {
-            Ok((reply, response_length)) => match store.persist(&reply) {
-                Err(_) => ControlFlow::Break(Some(LocalNetworkTermination::CaptureFailure)),
-                Ok(()) => match reply.write_to(channel) {
-                    Err(_) => ControlFlow::Break(Some(LocalNetworkTermination::ChannelFailure)),
-                    Ok(()) => {
-                        self.request_budget -= plan.request_length;
-                        self.response_budget -= response_length;
-                        self.transcripts.extend(reply.transcript().cloned());
-                        ControlFlow::Continue(())
-                    }
-                },
-            },
-            Err(failure) => {
-                ControlFlow::Break(Some(match request.failed(failure).write_to(channel) {
-                    Err(_) => LocalNetworkTermination::ChannelFailure,
-                    Ok(()) => match failure {
+            Ok((reply, response_length)) => {
+                if store.persist(&reply).is_err() {
+                    return ControlFlow::Break(Some(LocalNetworkTermination::CaptureFailure));
+                }
+                if reply.write_to(channel).is_err() {
+                    return ControlFlow::Break(Some(LocalNetworkTermination::ChannelFailure));
+                }
+                self.request_budget -= plan.request_length;
+                self.response_budget -= response_length;
+                self.transcripts.extend(reply.transcript().cloned());
+                ControlFlow::Continue(())
+            }
+            Err(failure) => ControlFlow::Break(Some(
+                if request.failed(failure).write_to(channel).is_err() {
+                    LocalNetworkTermination::ChannelFailure
+                } else {
+                    match failure {
                         NetworkExchangeFailure::RemoteUnavailable => {
                             LocalNetworkTermination::RemoteUnavailable
                         }
                         NetworkExchangeFailure::DigestMismatch => {
                             LocalNetworkTermination::DigestMismatch
                         }
-                    },
-                }))
-            }
+                    }
+                },
+            )),
         }
     }
 
