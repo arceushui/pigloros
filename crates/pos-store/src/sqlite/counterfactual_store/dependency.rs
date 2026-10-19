@@ -43,7 +43,9 @@
 //!   scheduled Tick of the Timeline's own set (ADR-064 R4.4): the Tick, the
 //!   scanned-through `seq`, and the head artifact digest (32 zero bytes when
 //!   there is no head). Its primary key is `(timeline_id, tick)` and serves
-//!   the cursor read. No write path fills it yet (slice 4 does).
+//!   the cursor read. The pipeline commit inserts one row with every
+//!   scheduled Tick, in the Tick's transaction; a human Tick and a seeded
+//!   Tick insert none.
 //! - The index `counterfactual_dependency_nodes_by_owner` on the nodes table,
 //!   over `(timeline_id, generation, owner_id, tick)`, serves the latest step
 //!   node of an owner. Both index names carry no `idx_` prefix, on purpose:
@@ -2164,6 +2166,9 @@ const INSERT_RANGE_SQL: &str = "INSERT INTO counterfactual_dependency_commit_ran
 const INSERT_BINDING_SQL: &str = "INSERT INTO counterfactual_dependency_event_nodes
      (timeline_id, seq, tick, artifact_digest) VALUES (?1, ?2, ?3, ?4)";
 
+const INSERT_FOLD_HEAD_SQL: &str = "INSERT INTO counterfactual_dependency_fold_heads
+     (timeline_id, tick, scanned_through, head_artifact_digest) VALUES (?1, ?2, ?3, ?4)";
+
 /// Insert the commit range of a Tick.
 fn insert_commit_range(
     conn: &Connection,
@@ -2195,6 +2200,41 @@ fn insert_event_nodes(
             })
         })
         .map_err(SqliteStore::into_storage_error)
+}
+
+/// Insert the fold-head row of a scheduled Tick: its scanned-through `seq`
+/// and head artifact digest.
+fn insert_fold_head(
+    conn: &Connection,
+    timeline: TimelineId,
+    tick: u64,
+    row: (Seq, Hash),
+) -> Result<(), CoreError> {
+    let (scanned, head) = row;
+    let values = params![
+        timeline.to_string(),
+        sql_tick(tick),
+        seq_as_i64(scanned),
+        head.as_bytes().as_slice()
+    ];
+    conn.execute(INSERT_FOLD_HEAD_SQL, values)
+        .map(|_| ())
+        .map_err(SqliteStore::into_storage_error)
+}
+
+/// Install a checked Tick through the one install path, then the fold-head
+/// row of a scheduled Tick (ADR-064 R4.3), in the caller's transaction.
+fn install_planned_rows(
+    conn: &Connection,
+    timeline: TimelineId,
+    record: &TickDependencyRecordV1,
+    planned: &FactualInstallV1,
+) -> Result<(), CoreError> {
+    let range = (planned.first_seq, planned.last_seq);
+    install_factual_tick(conn, timeline, record, range, &planned.event_nodes)?;
+    let tick = record.tick();
+    let insert = |row| insert_fold_head(conn, timeline, tick, row);
+    planned.fold_head.map_or(Ok(()), insert)
 }
 
 /// Install one committed Tick of the Timeline's prefix set: its record,
@@ -2282,16 +2322,16 @@ impl SqliteStore {
         })
     }
 
-    /// Install a checked Tick: its rows, commit range and Event bindings, in
-    /// the caller's transaction.
+    /// Install a checked Tick: its rows, commit range and Event bindings, and
+    /// the fold-head row of a scheduled Tick (ADR-064 R4.3), in the caller's
+    /// transaction.
     pub(in crate::sqlite) fn install_planned_factual_tick(
         &self,
         timeline: TimelineId,
         record: &TickDependencyRecordV1,
         planned: &FactualInstallV1,
     ) -> Result<(), CoreError> {
-        let range = (planned.first_seq, planned.last_seq);
-        install_factual_tick(&self.conn, timeline, record, range, &planned.event_nodes)
+        install_planned_rows(&self.conn, timeline, record, planned)
     }
 }
 

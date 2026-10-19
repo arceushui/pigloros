@@ -59,13 +59,14 @@
 //!   one install function; the `test-support` seeding function installs Ticks
 //!   through the same function. Deleting the Timeline purges it.
 //! - **Fold reads (ADR-064 R4).** The prefix set also keeps the fold-head
-//!   rows of its scheduled Ticks, by Tick, purged with the set. No write path
-//!   fills them yet (slice 4 does), so only in-crate tests hold any. The fold
-//!   cursor is the latest row of the nearest set that holds one at or below
-//!   its visible Tick (an ancestor's cut Tick, as for every other prefix
-//!   read), with the node its head digest names resolved through the visible
-//!   sets; a head digest of 32 zero bytes names none, and one that names no
-//!   visible node is a storage fault. The fold window reads the newest at
+//!   rows of its scheduled Ticks, by Tick, purged with the set. The pipeline
+//!   commit installs one with every scheduled Tick, and none with a human
+//!   Tick or a seeded one (a seeded Tick stands for one before Revision 4).
+//!   The fold cursor is the latest row of the nearest set that holds one at
+//!   or below its visible Tick (an ancestor's cut Tick, as for every other
+//!   prefix read), with the node its head digest names resolved through the
+//!   visible sets; a head digest of 32 zero bytes names none, and one that
+//!   names no visible node is a storage fault. The fold window reads the newest at
 //!   most 65,537 Events of the logical range through the fork chain, newest
 //!   first, without cloning a payload, and keeps the newest 65,536 with
 //!   their visible node bindings.
@@ -168,8 +169,8 @@ pub(in crate::memory) struct DependencyRowsV1 {
     /// the set's own, not the ancestry's.
     counts: RecordedSetCountsV1,
     /// Fold-head rows of the scheduled Ticks (ADR-064 R4.4), by Tick: the
-    /// scanned-through `seq` and the head artifact digest. No write path
-    /// fills them yet (slice 4).
+    /// scanned-through `seq` and the head artifact digest. The pipeline
+    /// commit writes one per scheduled Tick; seeding writes none.
     fold_heads: BTreeMap<u64, (Seq, Hash)>,
 }
 
@@ -991,8 +992,8 @@ impl MemoryStore {
         })
     }
 
-    /// Install a checked Tick: its rows, commit range and Event bindings.
-    /// Infallible.
+    /// Install a checked Tick: its rows, commit range and Event bindings, and
+    /// the fold-head row of a scheduled Tick (ADR-064 R4.3). Infallible.
     pub(in crate::memory) fn install_planned_factual_tick(
         &mut self,
         timeline: TimelineId,
@@ -1006,6 +1007,7 @@ impl MemoryStore {
             planned.last_seq,
             &planned.event_nodes,
         );
+        rows.install_fold_head(record.tick(), planned.fold_head);
     }
 }
 
@@ -1081,6 +1083,14 @@ impl DependencyRowsV1 {
             self.bound_seqs.insert(*digest, seq.as_u64());
         }
         self.counts = counted(self.counts, record);
+    }
+
+    /// Install the fold-head row of a scheduled Tick, if it has one (ADR-064
+    /// R4.3). Infallible.
+    fn install_fold_head(&mut self, tick: u64, row: Option<(Seq, Hash)>) {
+        if let Some(found) = row {
+            self.fold_heads.insert(tick, found);
+        }
     }
 
     /// Index a node by artifact digest and, when its output ordinal is zero,
@@ -1838,8 +1848,8 @@ mod tests {
         Ok(())
     }
 
-    // Fold reads (ADR-064 Revision 4). No write path records a fold-head row
-    // yet, so these tests insert the rows into the prefix sets directly.
+    // Fold reads (ADR-064 Revision 4). These tests insert the fold-head rows
+    // into the prefix sets directly, beside seeded Ticks, which write none.
 
     /// A committed factual Tick at `tick` of one step node of `owner`, digest
     /// `digest`, that owns and binds the single `seq`.

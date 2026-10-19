@@ -16,17 +16,18 @@ use pos_core::{
     CoreError, CounterfactualDependencyReadPortV1, DelegateClassV1, DependencyEdgeRecordV1,
     DependencyNodeCoordinateV1, DependencyNodeRecordV1, DependencyPageRequestV1,
     DependencyReadScopeV1, EntityId, ErasureContainmentGateV1, Event, EventDraft,
-    EventNodeBindingV1, EventStore, FactualCutV1, FactualDriverStepV1, FactualHeadV1,
-    FactualIngressEventV1, FactualInputV1, FactualNodeKeyV1, FactualOutputV1, FactualOwnerIdV1,
-    FactualPrefixReadPortV1, FactualPriorNodeV1, FactualScheduledTickV1, FactualTickContextV1,
-    FactualTickDependenciesV1, FactualTickShapeV1, Hash, Kind, OutputNodeBindingV1,
-    PipelineAdmissionBasisDraftV1, PipelineAdmissionBasisV1, PipelineAdmissionFencePublisherV1,
-    PipelineAdmissionFenceV1, PipelineAdmissionPortV1, PipelineAttemptDraftV1, PipelineAttemptIdV1,
-    PipelineAttemptV1, PipelineCommitReceiptV1, PipelineDraftBatchV1, PipelineEvidenceRefV1,
-    PipelineIngressV1, PipelineObservationAnchorV1, PipelineOutcomeV1, PipelinePreconditionV1,
-    PipelineReceiptLookupV1, PipelineSecurityRevisionsDraftV1, PipelineSecurityRevisionsV1,
-    PrincipalRefV1, RecordedDependencyClassV1, RecordedNodeOriginV1, RecordedSetCountsV1, Seq,
-    SeqRange, TentativePipelineResultV1, TickDependencyRecordV1, TimelineId, WallTime,
+    EventNodeBindingV1, EventStore, FactualCutV1, FactualDriverStepV1, FactualFoldBindingV1,
+    FactualFoldSourceV1, FactualHeadV1, FactualIngressEventV1, FactualInputV1, FactualNodeKeyV1,
+    FactualOutputV1, FactualOwnerIdV1, FactualPrefixReadPortV1, FactualPriorNodeV1,
+    FactualScheduledTickV1, FactualTickContextV1, FactualTickDependenciesV1, FactualTickShapeV1,
+    Hash, Kind, OutputNodeBindingV1, PipelineAdmissionBasisDraftV1, PipelineAdmissionBasisV1,
+    PipelineAdmissionFencePublisherV1, PipelineAdmissionFenceV1, PipelineAdmissionPortV1,
+    PipelineAttemptDraftV1, PipelineAttemptIdV1, PipelineAttemptV1, PipelineCommitReceiptV1,
+    PipelineDraftBatchV1, PipelineEvidenceRefV1, PipelineIngressV1, PipelineObservationAnchorV1,
+    PipelineOutcomeV1, PipelinePreconditionV1, PipelineReceiptLookupV1,
+    PipelineSecurityRevisionsDraftV1, PipelineSecurityRevisionsV1, PrincipalRefV1,
+    RecordedDependencyClassV1, RecordedNodeOriginV1, RecordedSetCountsV1, Seq, SeqRange,
+    TentativePipelineResultV1, TickDependencyRecordV1, TimelineId, WallTime,
     APPEND_IDENTITY_RETENTION_MICROS, DELEGATE_ACTION_V1, GEOGRAPHIC_EVENT_TYPE,
     MAX_DEPENDENCY_PAGE_ROWS_V1, MAX_RECORDED_DEPENDENCY_NODES_V1, PIPELINE_CONTRACT_VERSION_V1,
 };
@@ -2358,4 +2359,268 @@ fn a_fork_binds_only_the_events_of_the_ticks_below_its_cut() {
         ));
         assert_eq!(head_of(store.as_ref(), boundary), head(2, 6), "{name}");
     }
+}
+
+// ── Fold-head rows (ADR-064 Revision 4, Redmine #751) ──────────────────────
+//
+// A scheduled Tick writes one fold-head row with its Events; a human Tick
+// writes none, and a retry nothing new. The store checks the shape of the fold
+// part (the amended check (viii)); slice 5 recomputes its content.
+
+/// The fold source a builder reads for a scheduled Tick observed through
+/// `observed`: the store's fold cursor and the window after it.
+fn fold_source(store: &dyn Harness, timeline: TimelineId, observed: u64) -> FactualFoldSourceV1 {
+    let cursor = ok(store.fold_cursor(timeline));
+    let after = cursor
+        .as_ref()
+        .map_or(Seq::ZERO, |found| found.scanned_through);
+    let observed_through = Seq::from_u64(observed);
+    let window = ok(store.fold_window(timeline, after, observed_through));
+    FactualFoldSourceV1 {
+        observed_through,
+        cursor,
+        window,
+    }
+}
+
+/// The declaration of a scheduled `attempt` whose one Driver outputs its
+/// drafts, with the fold part of `source`.
+fn fold_declared(attempt: &Attempt, source: FactualFoldSourceV1) -> FactualTickDependenciesV1 {
+    let outputs = attempt
+        .drafts
+        .iter()
+        .map(|draft| FactualOutputV1 {
+            draft: draft.clone(),
+            authority: OutputAuthorityV1::Authoritative,
+            direct_inputs: Vec::new(),
+        })
+        .collect();
+    let driver = FactualDriverStepV1 {
+        owner: FactualOwnerIdV1::new("plugin:test".to_owned()),
+        policy_identity: hash(8),
+        step_inputs: Vec::new(),
+        outputs,
+    };
+    let shape = FactualTickShapeV1::Scheduled(FactualScheduledTickV1 {
+        snapshot_digest: hash(61),
+        prefix_contents: Vec::new(),
+        history_contents: Vec::new(),
+        ingress_events: Vec::new(),
+        drivers: vec![driver],
+        fold: Some(Box::new(source)),
+    });
+    declared(attempt, hash(1), &shape)
+}
+
+/// Commit `declaration` for `attempt`, and return the declaration.
+fn commit_declared(
+    store: &mut dyn Harness,
+    attempt: &Attempt,
+    declaration: FactualTickDependenciesV1,
+) -> FactualTickDependenciesV1 {
+    let basis = basis_declaring(attempt, declaration.clone());
+    committed(ok(store.admit_pipeline_batch(&basis)));
+    declaration
+}
+
+/// The artifact digest of the last fold checkpoint node of a declaration.
+fn last_fold_digest(declaration: &FactualTickDependenciesV1) -> Hash {
+    let checkpoints = &declaration.fold().checkpoints;
+    let last = checkpoints.last().copied();
+    let index = last.unwrap_or_else(|| std::panic::resume_unwind(Box::new("no fold node")));
+    digest_at(declaration.record(), index)
+}
+
+/// The Timeline's fold cursor as its scanned-through `seq` and head digest,
+/// 32 zero bytes for no head.
+fn cursor_of(store: &dyn Harness, timeline: TimelineId) -> Option<(u64, Hash)> {
+    let cursor = ok(store.fold_cursor(timeline));
+    cursor.map(|found| {
+        let head = found
+            .head
+            .map_or_else(Hash::zero, |node| node.coordinate().artifact_digest());
+        (found.scanned_through.as_u64(), head)
+    })
+}
+
+/// The declaration with another fold binding, the record unchanged.
+fn with_fold(
+    valid: &FactualTickDependenciesV1,
+    checkpoints: Vec<u32>,
+    history: Vec<u32>,
+) -> FactualTickDependenciesV1 {
+    FactualTickDependenciesV1::new(
+        valid.tick(),
+        valid.record().clone(),
+        valid.output_bindings().to_vec(),
+        valid.event_nodes().to_vec(),
+        FactualFoldBindingV1 {
+            checkpoints,
+            history,
+        },
+    )
+}
+
+/// ADR-064 R4.3: every scheduled Tick writes one fold-head row through its
+/// `observed_through`, naming its last fold node, or the head it keeps when
+/// it records none. A human Tick writes none, and a retry nothing new.
+#[test]
+fn every_scheduled_tick_writes_one_fold_head_row_and_a_human_tick_none() {
+    let clock = TestClock::at(1_000);
+    for (name, mut store) in stores(&clock) {
+        let fixture = prepare(store.as_mut());
+        let timeline = fixture.timeline;
+        let first = attempt(&fixture, 1, 0);
+        committed(ok(admit(store.as_mut(), &first)));
+        assert_eq!(cursor_of(store.as_ref(), timeline), None, "{name}");
+
+        // Tick 2 folds the human Events 1 to 3 through their nodes.
+        let second = Attempt {
+            drafts: drafts(&[b"x"]),
+            ..scheduled_after(&first, 2, 3)
+        };
+        let source = fold_source(store.as_ref(), timeline, 3);
+        let declaration = fold_declared(&second, source);
+        let two = commit_declared(store.as_mut(), &second, declaration);
+        let head_two = last_fold_digest(&two);
+        let row_two = Some((3, head_two));
+        assert_eq!(cursor_of(store.as_ref(), timeline), row_two, "{name}");
+
+        // The retry returns the retained outcome and writes nothing new.
+        let retried = ok(store.admit_pipeline_batch(&basis_declaring(&second, two)));
+        let recovered = matches!(retried, PipelineOutcomeV1::RecoveredDuplicate(_));
+        assert!(recovered, "{name}");
+        assert_eq!(cursor_of(store.as_ref(), timeline), row_two, "{name}");
+
+        // Tick 3 chains its fold node to the head and folds Tick 2's output.
+        let third = scheduled_after(&second, 3, 4);
+        let source = fold_source(store.as_ref(), timeline, 4);
+        let declaration = fold_declared(&third, source);
+        let three = commit_declared(store.as_mut(), &third, declaration);
+        let at = ok(usize::try_from(three.fold().checkpoints[0]));
+        let fold_node = &three.record().nodes()[at];
+        assert!(fold_node.input_digests().contains(&head_two), "{name}");
+        let head_three = last_fold_digest(&three);
+        let row_three = Some((4, head_three));
+        assert_eq!(cursor_of(store.as_ref(), timeline), row_three, "{name}");
+
+        // Tick 4 observes nothing new: no fold node, the snapshot node inputs
+        // the head, and the row keeps the head.
+        let fourth = Attempt {
+            observed_through: 4,
+            ..scheduled_after(&third, 4, 5)
+        };
+        let source = fold_source(store.as_ref(), timeline, 4);
+        let declaration = fold_declared(&fourth, source);
+        let four = commit_declared(store.as_mut(), &fourth, declaration);
+        assert!(four.fold().checkpoints.is_empty(), "{name}");
+        let snapshot = node_of(four.record(), "host.observation");
+        assert_eq!(snapshot.input_digests(), [head_three], "{name}");
+        assert_eq!(cursor_of(store.as_ref(), timeline), row_three, "{name}");
+    }
+}
+
+/// ADR-064 R4.3, check (viii) as amended: the fold binding names exactly the
+/// fold nodes of the record, in chain order and at most five, the fold-history
+/// node at most once, and the snapshot node inputs the last fold node. Each
+/// break is refused before anything is appended; the valid declaration, with
+/// a fold-history node over a truncated window, then commits.
+#[test]
+fn the_store_refuses_a_fold_part_of_the_wrong_shape() {
+    let clock = TestClock::at(1_000);
+    for (name, mut store) in stores(&clock) {
+        let fixture = prepare(store.as_mut());
+        let timeline = fixture.timeline;
+        let first = attempt(&fixture, 1, 0);
+        committed(ok(admit(store.as_mut(), &first)));
+        let second = Attempt {
+            drafts: drafts(&[b"x"]),
+            ..scheduled_after(&first, 2, 3)
+        };
+        let mut source = fold_source(store.as_ref(), timeline, 3);
+        source.window.truncated = true;
+        let valid = fold_declared(&second, source);
+        assert_eq!(valid.fold().history.len(), 1, "{name}");
+        let checkpoint = valid.fold().checkpoints[0];
+        let output = valid.output_bindings()[0].node_index;
+        let record = valid.record();
+        let snapshot = digest_of_host(record, "host.observation");
+        let last = last_fold_digest(&valid);
+        let unfed = |node: &DependencyNodeRecordV1| {
+            if node.coordinate().artifact_digest() == snapshot {
+                Vec::new()
+            } else {
+                inputs_unchanged(node)
+            }
+        };
+        let origin = RecordedNodeOriginV1::Committed;
+        let blind = rebuilt(record, origin, unfed, |edge| edge.source_digest() != last);
+        let history = valid.fold().history.clone();
+        let foreign = with_fold(&valid, vec![output], history.clone());
+        let left_out = with_fold(&valid, Vec::new(), history.clone());
+        let six = with_fold(&valid, vec![checkpoint; 6], history);
+        let misnamed = with_fold(&valid, vec![checkpoint], vec![checkpoint]);
+        let unfed_snapshot = with_record(&valid, blind);
+        let cases = [
+            ("binding of a node that is no fold node", foreign),
+            ("fold node the binding leaves out", left_out),
+            ("six fold nodes", six),
+            ("history binding of a fold node", misnamed),
+            ("snapshot node without the fold node", unfed_snapshot),
+        ];
+        let invalid = PipelineOutcomeV1::InvalidDependencyDeclaration;
+        for (case, declaration) in cases {
+            assert_refused(name, case, store.as_mut(), &second, declaration, &invalid);
+        }
+        assert_eq!(cursor_of(store.as_ref(), timeline), None, "{name}");
+
+        commit_declared(store.as_mut(), &second, valid);
+        let row = Some((3, last));
+        assert_eq!(cursor_of(store.as_ref(), timeline), row, "{name}");
+    }
+}
+
+/// ADR-064 R4.3: the fold-head row commits atomically with the Tick. A failing
+/// insert of the row rolls the whole scheduled Tick back; the retry commits
+/// it with exactly one row.
+#[test]
+fn sqlite_a_failing_fold_head_insert_rolls_back_the_whole_scheduled_tick() {
+    let clock = TestClock::at(1_000);
+    let directory = ok(tempdir());
+    let path = directory.path().join("admission-fold-head-fault.db");
+    let (second, declaration) = {
+        let mut store = ok(SqliteStore::open_with_clock(
+            path.to_str().unwrap_or_default(),
+            Box::new(clock.clone()),
+        ));
+        let fixture = prepare(&mut store);
+        let first = attempt(&fixture, 1, 0);
+        committed(ok(admit(&mut store, &first)));
+        let second = scheduled_after(&first, 2, 3);
+        let source = fold_source(&store, fixture.timeline, 3);
+        let declaration = fold_declared(&second, source);
+        (second, declaration)
+    };
+    let timeline = second.timeline;
+    let basis = basis_declaring(&second, declaration);
+
+    execute(&path, &insert_fault("counterfactual_dependency_fold_heads"));
+    let mut faulted = open_file(&path, &clock);
+    assert!(faulted.admit_pipeline_batch(&basis).is_err());
+    assert_eq!(event_count(&faulted, timeline), 3);
+    assert_eq!(head_of(&faulted, timeline), head(1, 3));
+    assert_eq!(cursor_of(&faulted, timeline), None);
+    drop(faulted);
+    execute(&path, "DROP TRIGGER injected_fault;");
+
+    let mut store = open_file(&path, &clock);
+    committed(ok(store.admit_pipeline_batch(&basis)));
+    assert_eq!(head_of(&store, timeline), head(2, 6));
+    let connection = ok(rusqlite::Connection::open(&path));
+    let rows = connection.query_row(
+        "SELECT COUNT(*) FROM counterfactual_dependency_fold_heads",
+        [],
+        |row| row.get::<_, i64>(0),
+    );
+    assert_eq!(ok(rows), 1);
 }

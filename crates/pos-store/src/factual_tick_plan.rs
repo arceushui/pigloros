@@ -53,6 +53,9 @@ pub(crate) struct FactualInstallV1 {
     /// Every Event-backed node of the Tick: the draft nodes and the ingress
     /// nodes it records, by committed `seq` and artifact digest.
     pub(crate) event_nodes: Vec<(Seq, Hash)>,
+    /// The fold-head row of a scheduled Tick (ADR-064 R4.3): its scanned-through
+    /// `seq` and head artifact digest. A human Tick writes none.
+    pub(crate) fold_head: Option<(Seq, Hash)>,
 }
 
 /// What checking a Tick declaration decided.
@@ -296,6 +299,7 @@ fn install_of(
         first_seq,
         last_seq: Seq::from_u64(first_seq.as_u64().saturating_add(spread)),
         event_nodes,
+        fold_head: declaration::fold_head_row(basis),
     }
 }
 

@@ -1,13 +1,15 @@
 //! ADR-021 scheduled AI Driver passes through atomic host admission (#318).
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use pos_core::{
-    factual_artifact_digest, factual_event_schema_id, factual_history_content_digest,
+    factual_artifact_digest, factual_event_schema_id, factual_fold_checkpoint_content_digest,
+    factual_fold_history_content_digest, factual_history_content_digest,
     factual_ingress_content_digest, factual_verified_prefix_content_digest,
     pipeline_authority_revision_v1, pipeline_delegation_revision_v1, pipeline_erasure_revision_v1,
     AppendDedupKey, AppendDedupScope, AppendIdentity, AuthorityErrorV1, AuthorityGranteeV1,
@@ -17,17 +19,21 @@ use pos_core::{
     CapabilityScopeDraftV1, CapabilityScopeV1, ConsentAuthority, ConsentGrantedV1,
     ConsentRevokedV1, CoreError, CounterfactualDependencyErrorV1, DelegateClassV1,
     DependencyNodeCoordinateV1, DependencyNodeRecordV1, EntityId, ErasureContainmentGateV1, Event,
-    EventDraft, EventStore, FactualDependencyErrorV1, FactualEventRefV1, FactualHostOwnerV1,
-    FactualNodeKeyV1, FactualPrefixReadPortV1, FactualTickDependenciesV1, Hash, Kind,
-    PersistedAuthorityV1, PipelineAdmissionBasisDraftV1, PipelineAdmissionBasisV1,
-    PipelineAdmissionFencePublisherV1, PipelineAdmissionFenceV1, PipelineAdmissionPortV1,
-    PipelineAttemptIdV1, PipelineCommitReceiptV1, PipelineContractErrorV1, PipelineEvidenceRefV1,
-    PipelineOutcomeV1, PipelineSecurityRevisionsDraftV1, PipelineSecurityRevisionsV1, Plugin,
-    PluginId, PrincipalRefV1, RecordedDependencyClassV1, RecordedNodeOriginV1, RecordedSetCountsV1,
-    Reducer, Seq, SeqRange, State, TickDependencyRecordV1, TimelineId, DELEGATE_ACTION_V1,
+    EventDraft, EventStore, FactualDependencyErrorV1, FactualEventRefV1, FactualFoldCursorV1,
+    FactualFoldWindowV1, FactualHostOwnerV1, FactualNodeKeyV1, FactualPrefixReadPortV1,
+    FactualTickDependenciesV1, Hash, Kind, PersistedAuthorityV1, PipelineAdmissionBasisDraftV1,
+    PipelineAdmissionBasisV1, PipelineAdmissionFencePublisherV1, PipelineAdmissionFenceV1,
+    PipelineAdmissionPortV1, PipelineAttemptIdV1, PipelineCommitReceiptV1, PipelineContractErrorV1,
+    PipelineEvidenceRefV1, PipelineOutcomeV1, PipelineSecurityRevisionsDraftV1,
+    PipelineSecurityRevisionsV1, Plugin, PluginId, PrincipalRefV1, RecordedDependencyClassV1,
+    RecordedNodeOriginV1, RecordedSetCountsV1, Reducer, Seq, SeqRange, State,
+    TickDependencyRecordV1, TimelineId, DELEGATE_ACTION_V1, EVENT_TYPE_CONSENT_GRANTED_V1,
+    EVENT_TYPE_CONSENT_REVOKED_V1, FACTUAL_FOLD_HISTORY_SCHEMA_ID_V1, FACTUAL_FOLD_SCHEMA_ID_V1,
     FACTUAL_HISTORY_SCHEMA_ID_V1, FACTUAL_PREFIX_SCHEMA_ID_V1, FACTUAL_SNAPSHOT_SCHEMA_ID_V1,
-    FACTUAL_STEP_SCHEMA_ID_V1, MAX_FORWARDED_EVENTS_PER_DRIVER_V1, MAX_OUTPUT_DIRECT_INPUTS_V1,
-    MAX_STEP_INPUTS_PER_DRIVER_V1, PIPELINE_CONTRACT_VERSION_V1,
+    FACTUAL_STEP_SCHEMA_ID_V1, GEOGRAPHIC_EVENT_TYPE, HOST_CONSENT_CLOSED_EVENT_TYPE,
+    MAX_FACTUAL_FOLD_INPUT_EDGES_PER_TICK_V1, MAX_FACTUAL_FOLD_SCAN_PER_TICK_V1,
+    MAX_FORWARDED_EVENTS_PER_DRIVER_V1, MAX_OUTPUT_DIRECT_INPUTS_V1, MAX_STEP_INPUTS_PER_DRIVER_V1,
+    PIPELINE_CONTRACT_VERSION_V1,
 };
 use pos_runtime::{
     DeclaredOutputV1, DirectInputRefV1, Driver, LocalScheduledAdmissionHostV1, ObservationView,
@@ -3370,7 +3376,9 @@ fn a_seeded_presentation_only_event_node_is_refused_before_any_store_call() {
         let basis = pass_basis(&host, &mut registry, store.as_mut(), &cut, 3);
         assert_eq!(basis.dependencies().tick(), 2, "{name}");
         assert_eq!(count_owned_by(&basis, HISTORY), 1, "{name}");
-        assert_eq!(count_owned_by(&basis, INGRESS), 0, "{name}");
+        // Only the fold part records an ingress node (ADR-064 R4.1): Event 2,
+        // since Event 1's presentation-only node makes it no fold input.
+        assert_eq!(bound_seqs(&basis), [2], "{name}");
     }
 }
 
@@ -3406,7 +3414,9 @@ fn a_full_carried_set_collapses_into_one_history_node_on_both_adapters() {
         let basis = pass_basis(&host, &mut registry, store.as_mut(), &cut, 2);
         assert_eq!(basis.dependencies().tick(), 1, "{name}");
         assert_eq!(count_owned_by(&basis, HISTORY), 1, "{name}");
-        assert_eq!(count_owned_by(&basis, INGRESS), 1, "{name}");
+        // The new Event's ingress node, which the fold part shares, and one
+        // per collapsed Event, which only the fold part inputs (ADR-064 R4.2).
+        assert_eq!(count_owned_by(&basis, INGRESS), full + 1, "{name}");
         let node = node_of(&basis, HISTORY, 0);
         let schema = node.coordinate().schema_id();
         assert_eq!(schema, HISTORY_SCHEMA, "{name}");
@@ -4160,7 +4170,9 @@ fn a_saturated_driver_declares_a_step_node_of_exactly_4096_inputs_on_both_adapte
         let basis = pass_basis(&host, &mut registry, store.as_mut(), &cut, 1);
 
         assert_eq!(basis.dependencies().tick(), 3, "{name}");
-        assert_eq!(count_owned_by(&basis, INGRESS), BACKLOG, "{name}");
+        // The backlog's ingress nodes, which the fold part shares, and those of
+        // the restored Events, which only the fold part inputs (ADR-064 R4.2).
+        assert_eq!(count_owned_by(&basis, INGRESS), BACKLOG + RESTORED, "{name}");
         assert_eq!(count_owned_by(&basis, HISTORY), 1, "{name}");
         assert_eq!(count_owned_by(&basis, PREFIX), 1, "{name}");
         let owner = owner_at(&registry, 0);
@@ -4216,10 +4228,11 @@ fn forwarded_events_are_recorded_once_as_ingress_nodes_on_both_adapters() {
         let cut = all_at(3, &events);
         let basis = pass_basis(&host, &mut registry, store.as_mut(), &cut, 1);
 
-        // The snapshot, three ingress nodes, the step node and the one output.
+        // The snapshot, three ingress nodes, the step node, the one output, and
+        // the fold checkpoint node over the three Events (ADR-064 R4.2).
         let counts = ok(store.factual_set_counts(host.timeline));
         assert_eq!(counts.nodes, declared_nodes(&basis).len(), "{name}");
-        assert_eq!(counts.nodes, 6, "{name}");
+        assert_eq!(counts.nodes, 7, "{name}");
         let seqs = [1, 2, 3, 4].map(Seq::from_u64);
         let bound = ok(store.nodes_for_committed_events(host.timeline, &seqs));
         let owners: Vec<Option<&str>> = bound
@@ -4355,5 +4368,471 @@ fn the_stores_own_refusal_aborts_the_staged_drivers() {
             1,
             "{name}"
         );
+    }
+}
+
+// ── Fold checkpoint nodes (ADR-064 Revision 4, Redmine #751) ──────────────
+//
+// The builder reads the fold cursor and window through the port, and the
+// assembly records the fold part behind the snapshot node; the adapters write
+// one fold-head row per scheduled Tick. The generic append refuses consent and
+// geographic drafts (their own host seams check the payload and the subject),
+// so the exclusion case reports plain Events under those types through
+// `FoldProbePort`: the builder sees only the type, the payload hash and the
+// node of a window Event, never its payload or entity.
+
+const FOLD: &str = FactualHostOwnerV1::Fold.as_str();
+const FOLD_HISTORY: &str = FactualHostOwnerV1::FoldHistory.as_str();
+/// An Event type of an Ephemeral-declared output, appended outside the Tick
+/// path: such an Event has no node.
+const EPHEMERAL_TYPE: &str = "agent.basis.ephemeral";
+
+/// One fold window read: its range and the `seq`s it returned.
+type WindowRead = (u64, u64, Vec<u64>);
+
+/// Port that commits through a real store, keeps every basis it is offered,
+/// logs every fold window read, and reports the Events of `retype` under
+/// another Event type.
+struct FoldProbePort<'a> {
+    inner: &'a mut dyn Harness,
+    retype: BTreeMap<u64, &'static str>,
+    reads: RefCell<Vec<WindowRead>>,
+    bases: Vec<PipelineAdmissionBasisV1>,
+}
+
+impl<'a> FoldProbePort<'a> {
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn over(inner: &'a mut dyn Harness, retype: BTreeMap<u64, &'static str>) -> Self {
+        Self {
+            inner,
+            retype,
+            reads: RefCell::default(),
+            bases: Vec::new(),
+        }
+    }
+}
+
+impl PipelineAdmissionPortV1 for FoldProbePort<'_> {
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn admit_pipeline_batch(
+        &mut self,
+        basis: &PipelineAdmissionBasisV1,
+    ) -> Result<PipelineOutcomeV1, CoreError> {
+        self.bases.push(basis.clone());
+        self.inner.admit_pipeline_batch(basis)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn purge_expired_pipeline_receipts_bounded(
+        &mut self,
+        limit: NonZeroUsize,
+    ) -> Result<pos_core::store::PurgeOutcome, CoreError> {
+        self.inner.purge_expired_pipeline_receipts_bounded(limit)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn lookup_pipeline_receipt(
+        &mut self,
+        timeline: TimelineId,
+        key: AppendDedupKey,
+        attempt_id: PipelineAttemptIdV1,
+    ) -> Result<pos_core::PipelineReceiptLookupV1, CoreError> {
+        self.inner
+            .lookup_pipeline_receipt(timeline, key, attempt_id)
+    }
+}
+
+impl FactualPrefixReadPortV1 for FoldProbePort<'_> {
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn last_committed_factual_tick(
+        &self,
+        timeline: TimelineId,
+    ) -> Result<pos_core::FactualHeadV1, CoreError> {
+        self.inner.last_committed_factual_tick(timeline)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn cut_tick_at(
+        &self,
+        timeline: TimelineId,
+        seq: Seq,
+    ) -> Result<pos_core::FactualCutV1, CoreError> {
+        self.inner.cut_tick_at(timeline, seq)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn nodes_for_committed_events(
+        &self,
+        timeline: TimelineId,
+        seqs: &[Seq],
+    ) -> Result<Vec<Option<DependencyNodeRecordV1>>, CoreError> {
+        self.inner.nodes_for_committed_events(timeline, seqs)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn nodes_by_digest(
+        &self,
+        timeline: TimelineId,
+        digests: &[Hash],
+    ) -> Result<Vec<Option<pos_core::factual_dependency::BoundFactualNodeV1>>, CoreError> {
+        self.inner.nodes_by_digest(timeline, digests)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn last_step_node(
+        &self,
+        timeline: TimelineId,
+        owner: &pos_core::FactualOwnerIdV1,
+    ) -> Result<Option<DependencyNodeRecordV1>, CoreError> {
+        self.inner.last_step_node(timeline, owner)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn factual_set_counts(&self, timeline: TimelineId) -> Result<RecordedSetCountsV1, CoreError> {
+        self.inner.factual_set_counts(timeline)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn fold_cursor(&self, timeline: TimelineId) -> Result<Option<FactualFoldCursorV1>, CoreError> {
+        self.inner.fold_cursor(timeline)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn fold_window(
+        &self,
+        timeline: TimelineId,
+        after: Seq,
+        through: Seq,
+    ) -> Result<FactualFoldWindowV1, CoreError> {
+        let mut window = self.inner.fold_window(timeline, after, through)?;
+        for event in &mut window.events {
+            if let Some(kind) = self.retype.get(&event.seq.as_u64()) {
+                event.event_type = Kind::new(*kind);
+            }
+        }
+        let seqs = window.events.iter().map(|event| event.seq.as_u64());
+        let read = (after.as_u64(), through.as_u64(), seqs.collect());
+        self.reads.borrow_mut().push(read);
+        Ok(window)
+    }
+}
+
+/// Admit the staged pass through `port`, which must commit it, and return the
+/// basis it was offered.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn admit_through(
+    host: &Host,
+    registry: &mut PluginRegistry,
+    port: &mut FoldProbePort<'_>,
+    key: u8,
+) -> PipelineAdmissionBasisV1 {
+    let admission = host.admission(&*port.inner, key);
+    receipt(registry.admit_scheduled_pass(port, &admission));
+    assert_eq!(port.bases.len(), 1);
+    port.bases.remove(0)
+}
+
+/// The fold checkpoint nodes of a basis, in chain order.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn fold_nodes(basis: &PipelineAdmissionBasisV1) -> Vec<DependencyNodeRecordV1> {
+    let nodes = declared_nodes(basis);
+    let node = |index: &u32| nodes[ok(usize::try_from(*index))].clone();
+    let checkpoints = &basis.dependencies().fold().checkpoints;
+    checkpoints.iter().map(node).collect()
+}
+
+/// The artifact digests of the nodes the Event bindings of a basis name, in
+/// ascending `seq`.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn bound_digests(basis: &PipelineAdmissionBasisV1) -> Vec<Hash> {
+    let nodes = declared_nodes(basis);
+    let digest = |index: u32| {
+        let at = ok(usize::try_from(index));
+        nodes[at].coordinate().artifact_digest()
+    };
+    let bindings = basis.dependencies().event_nodes();
+    bindings
+        .iter()
+        .map(|binding| digest(binding.node_index))
+        .collect()
+}
+
+/// The sorted input digests of a node.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn sorted_inputs(node: &DependencyNodeRecordV1) -> Vec<Hash> {
+    let mut inputs = node.input_digests().to_vec();
+    inputs.sort();
+    inputs
+}
+
+/// The Event types the exclusion case reports: Events 1 and 2 as revocations,
+/// one for another subject than its entity and one malformed (the window
+/// shows neither payload nor entity, so they differ only in the store), 3 as
+/// a consent grant, 4 as a geographic Event, 5 as the consent-closed marker
+/// and 7 as an Event of an Ephemeral-declared type appended outside the Tick
+/// path. Event 6 keeps its type: its node is presentation only.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn exclusion_types() -> BTreeMap<u64, &'static str> {
+    BTreeMap::from([
+        (1, EVENT_TYPE_CONSENT_REVOKED_V1),
+        (2, EVENT_TYPE_CONSENT_REVOKED_V1),
+        (3, EVENT_TYPE_CONSENT_GRANTED_V1),
+        (4, GEOGRAPHIC_EVENT_TYPE),
+        (5, HOST_CONSENT_CLOSED_EVENT_TYPE),
+        (7, EPHEMERAL_TYPE),
+    ])
+}
+
+/// ADR-064 R4.1 (conformance test 3): every `consent.revoked.v1` Event is a
+/// fold input, matched by its type alone, and so is an Event of an Ephemeral
+/// type without a node, through an ingress node. A consent grant, a
+/// geographic Event, the consent-closed marker and an Event bound to a
+/// presentation-only node are not.
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn fold_inputs_skip_consent_geographic_and_presentation_only_events_on_both_adapters() {
+    for (name, mut store) in stores() {
+        let host = Host::prepare(store.as_mut(), 1_000);
+        let log = Log::default();
+        let (driver, plan) = BasisDriver::new(FIRST, &log);
+        let mut registry = host.registry();
+        register_basis(&mut registry, driver);
+        emit(&plan, &[b"a"]);
+        append_events(store.as_mut(), &host, INPUT, 7);
+        // Tick 1 owns the seven Events and binds Event 6 to a presentation-only node.
+        let step_node = step_spec(OLD_OWNER, hash(0x51));
+        let shown = event_spec(OLD_OWNER, 1, hash(0x52), PRESENTATION);
+        let nodes = vec![seeded_node(1, &step_node), seeded_node(1, &shown)];
+        let bound = vec![(Seq::from_u64(6), hash(0x52))];
+        store.seed(host.timeline, &[seeded_tick(1, nodes, (1, 7), bound)]);
+
+        ok(stage(&host, &mut registry, &all_at(7, &[])));
+        let mut port = FoldProbePort::over(store.as_mut(), exclusion_types());
+        let basis = admit_through(&host, &mut registry, &mut port, 1);
+        let reads: Vec<WindowRead> = vec![(0, 7, (1..=7).collect())];
+        assert_eq!(port.reads.take(), reads, "{name}");
+        assert_eq!(bound_seqs(&basis), [1, 2, 7], "{name}");
+        let folded = fold_nodes(&basis);
+        assert_eq!(folded.len(), 1, "{name}");
+        assert_eq!(count_owned_by(&basis, FOLD_HISTORY), 0, "{name}");
+        let mut expected = bound_digests(&basis);
+        expected.sort();
+        assert_eq!(sorted_inputs(&folded[0]), expected, "{name}");
+        let last = folded[0].coordinate().artifact_digest();
+        let snapshot = node_of(&basis, OBSERVATION, 0);
+        assert_eq!(snapshot.input_digests(), [last], "{name}");
+    }
+}
+
+/// ADR-064 R4.3 (conformance test 5): an in-doubt attempt resubmits the same
+/// basis, digest included, and gets the retained outcome; the fold-head row
+/// its first submission wrote stays the only one.
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn a_retried_fold_tick_resubmits_its_basis_and_writes_no_second_row() {
+    for (name, mut store) in stores() {
+        let host = Host::prepare(store.as_mut(), 1_000);
+        let log = Log::default();
+        let mut registry = host.registry();
+        register(&mut registry, driver("first", vec![b"a1"], &log));
+        append_events(store.as_mut(), &host, INPUT, 2);
+        let ancestry = root_ancestry(host.timeline);
+        ok(registry.step_all_anchored(host.timeline, &ancestry, Seq::from_u64(2)));
+        let lost = lose_outcome_basis(&host, &mut registry, store.as_mut(), 1);
+        let written = ok(store.fold_cursor(host.timeline));
+        let expected = FactualFoldCursorV1 {
+            scanned_through: Seq::from_u64(2),
+            head: Some(fold_nodes(&lost)[0].clone()),
+        };
+        assert_eq!(written, Some(expected), "{name}");
+
+        let mut port = DigestRecordingPort::over(store.as_mut());
+        let recovered = receipt(registry.recover_scheduled_pass(&mut port));
+        let resubmitted = port.bases.remove(0);
+        let digest = lost.dependencies().digest();
+        assert_eq!(resubmitted.dependencies().digest(), digest, "{name}");
+        assert_eq!(resubmitted, lost, "{name}");
+        assert_eq!(recovered.committed_events().len(), 1, "{name}");
+        assert_eq!(ok(store.fold_cursor(host.timeline)), written, "{name}");
+        let events = committed_events(store.as_ref(), host.timeline);
+        assert_eq!(events.len(), 3, "{name}");
+    }
+}
+
+/// Tick 1 of the recovery case: a fresh registry whose one Driver emits one
+/// draft, over two raw Events. The registry is dropped on return.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn first_recovery_tick(host: &Host, store: &mut dyn Harness) -> PipelineAdmissionBasisV1 {
+    let log = Log::default();
+    let (driver, plan) = BasisDriver::new(FIRST, &log);
+    let mut registry = host.registry();
+    register_basis(&mut registry, driver);
+    emit(&plan, &[b"a"]);
+    append_events(store, host, INPUT, 2);
+    pass_basis(host, &mut registry, store, &all_at(2, &[]), 1)
+}
+
+/// Tick 2 of the recovery case: another fresh registry, over one more raw
+/// Event. Tick 1's output is Event 3 and the raw Event is Event 4.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn second_recovery_tick(host: &Host, store: &mut dyn Harness) -> PipelineAdmissionBasisV1 {
+    let log = Log::default();
+    let (driver, plan) = BasisDriver::new(FIRST, &log);
+    let mut registry = host.registry();
+    register_basis(&mut registry, driver);
+    emit(&plan, &[b"b"]);
+    append_events(store, host, INPUT, 1);
+    pass_basis(host, &mut registry, store, &all_at(4, &[]), 2)
+}
+
+/// The second Tick's fold node chains to the head the first Tick persisted
+/// and starts at the persisted cursor: it covers Events 3 and 4 from `seq` 3.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn assert_chained_to_the_persisted_head(
+    name: &str,
+    host: &Host,
+    store: &dyn Harness,
+    ticks: [&PipelineAdmissionBasisV1; 2],
+) {
+    let [first, second] = ticks;
+    assert_eq!(second.dependencies().tick(), 2, "{name}");
+    let head = fold_nodes(first)[0].coordinate().artifact_digest();
+    let node = fold_nodes(second)[0].clone();
+    assert!(node.input_digests().contains(&head), "{name}");
+    let events = committed_events(store, host.timeline);
+    let covered = event_refs(&events[2..4]);
+    let (from, through) = (Seq::from_u64(3), Seq::from_u64(4));
+    let content = factual_fold_checkpoint_content_digest(head, from, through, &covered);
+    let key = host_key(2, FOLD, 0, FACTUAL_FOLD_SCHEMA_ID_V1);
+    let expected = factual_artifact_digest(host.timeline, key, content);
+    assert_eq!(node.coordinate().artifact_digest(), expected, "{name}");
+}
+
+/// ADR-064 R4.2 (conformance test 6): after the store and the registry are
+/// dropped and reopened between two Ticks, the next fold node chains to the
+/// persisted head and starts at the persisted cursor. The memory adapter
+/// cannot be reopened, so there only the registry is dropped.
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn a_reopened_store_and_registry_chain_the_next_fold_node_to_the_persisted_head() {
+    let directory = ok(tempfile::tempdir());
+    let path = directory.path().join("fold-recovery.db");
+    let file = path.to_string_lossy().into_owned();
+    let mut sqlite = ok(SqliteStore::open(&file));
+    let host = Host::prepare(&mut sqlite, 1_000);
+    let first = first_recovery_tick(&host, &mut sqlite);
+    drop(sqlite);
+    let mut reopened = ok(SqliteStore::open(&file));
+    ok(reopened.bind_erasure_gate(Arc::clone(&host.gate)));
+    ok(reopened.bind_authority_persistence(host.authority.persistence_binding()));
+    let second = second_recovery_tick(&host, &mut reopened);
+    assert_chained_to_the_persisted_head("sqlite", &host, &reopened, [&first, &second]);
+
+    let mut memory = MemoryStore::new();
+    let host = Host::prepare(&mut memory, 1_000);
+    let first = first_recovery_tick(&host, &mut memory);
+    let second = second_recovery_tick(&host, &mut memory);
+    assert_chained_to_the_persisted_head("memory", &host, &memory, [&first, &second]);
+}
+
+/// ADR-064 R4.2 (conformance test 8): the parent's cut Tick committed two
+/// outputs after its own anchor, which no parent Tick scanned, and the Fork
+/// point leaves three unbound parent-tail Events after them. The child's
+/// first fold node inputs the parent's head, the two output nodes through the
+/// inherited bindings, and three new ingress nodes.
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn a_forks_first_fold_node_chains_to_the_parents_head_below_its_cut_on_both_adapters() {
+    for (name, mut store) in stores() {
+        let host = Host::prepare(store.as_mut(), 1_000);
+        let log = Log::default();
+        let (driver, plan) = BasisDriver::new(FIRST, &log);
+        let mut registry = host.registry();
+        register_basis(&mut registry, driver);
+        emit(&plan, &[b"a", b"b"]);
+        append_events(store.as_mut(), &host, INPUT, 1);
+        // Tick 1 scans Event 1; its outputs are Events 2 and 3.
+        let parent = pass_basis(&host, &mut registry, store.as_mut(), &all_at(1, &[]), 1);
+        append_events(store.as_mut(), &host, INPUT, 3);
+        let fork = ok(store.fork(host.timeline, Seq::from_u64(6), "fold-child")).id();
+        let child = host.on(fork);
+        publish(store.as_mut(), fork, host.revisions, 1_000);
+
+        let (driver, plan) = BasisDriver::new(FIRST, &log);
+        let mut forked = child.registry();
+        register_basis(&mut forked, driver);
+        emit(&plan, &[b"c"]);
+        let first = pass_basis(&child, &mut forked, store.as_mut(), &all_at(6, &[]), 2);
+        assert_eq!(first.dependencies().tick(), 2, "{name}");
+        assert_eq!(bound_seqs(&first), [4, 5, 6], "{name}");
+        let owner = owner_at(&registry, 0);
+        let mut expected = vec![
+            digest_of(&parent, FOLD, 0),
+            digest_of(&parent, &owner, 1),
+            digest_of(&parent, &owner, 2),
+        ];
+        expected.extend(bound_digests(&first));
+        expected.sort();
+        assert_eq!(sorted_inputs(&fold_nodes(&first)[0]), expected, "{name}");
+    }
+}
+
+/// The Events of the rollout case.
+const ROLLOUT_EVENTS: usize = 70_000;
+
+/// Three committed Ticks recorded before the builder read a fold window: one
+/// step node each, and no fold-head row.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn pre_rollout_ticks() -> Vec<SeededTick> {
+    let digests = [hash(0x61), hash(0x62), hash(0x63)];
+    (1_u64..)
+        .zip(digests)
+        .map(|(tick, digest)| {
+            let nodes = vec![seeded_node(tick, &step_spec(OLD_OWNER, digest))];
+            seeded_tick(tick, nodes, (tick, tick), Vec::new())
+        })
+        .collect()
+}
+
+/// ADR-064 R4.4 (conformance test 9): the first Tick with a fold window on a
+/// Timeline of three earlier Ticks without a fold-head row and 70,000 Events
+/// starts at `Seq::ZERO`, reads only the newest 65,536 Events, keeps the
+/// newest 16,384 fold inputs in five fold nodes, and collapses the older ones
+/// into one fold-history node over their range.
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn the_first_fold_tick_after_the_rollout_starts_at_zero_on_both_adapters() {
+    for (name, mut store) in stores() {
+        let host = Host::prepare(store.as_mut(), 1_000);
+        append_events(store.as_mut(), &host, INPUT, ROLLOUT_EVENTS);
+        store.seed(host.timeline, &pre_rollout_ticks());
+        assert_eq!(ok(store.fold_cursor(host.timeline)), None, "{name}");
+        let log = Log::default();
+        let mut registry = host.registry();
+        register(&mut registry, driver("first", vec![b"a1"], &log));
+        let through = ok(u64::try_from(ROLLOUT_EVENTS));
+        let ancestry = root_ancestry(host.timeline);
+        let observed = Seq::from_u64(through);
+        ok(registry.step_all_anchored(host.timeline, &ancestry, observed));
+        let mut port = FoldProbePort::over(store.as_mut(), BTreeMap::new());
+        let basis = admit_through(&host, &mut registry, &mut port, 1);
+
+        let reads = port.reads.take();
+        assert_eq!(reads.len(), 1, "{name}");
+        assert_eq!((reads[0].0, reads[0].1), (0, through), "{name}");
+        let scanned = reads[0].2.len();
+        assert_eq!(scanned, MAX_FACTUAL_FOLD_SCAN_PER_TICK_V1, "{name}");
+        assert_eq!(basis.dependencies().tick(), 4, "{name}");
+        assert_eq!(fold_nodes(&basis).len(), 5, "{name}");
+        let kept = MAX_FACTUAL_FOLD_INPUT_EDGES_PER_TICK_V1;
+        let collapsed = through - ok(u64::try_from(kept));
+        let (from, to) = (Seq::from_u64(1), Seq::from_u64(collapsed));
+        let content = factual_fold_history_content_digest(from, to);
+        let key = host_key(4, FOLD_HISTORY, 0, FACTUAL_FOLD_HISTORY_SCHEMA_ID_V1);
+        let expected = factual_artifact_digest(host.timeline, key, content);
+        assert_eq!(digest_of(&basis, FOLD_HISTORY, 0), expected, "{name}");
+        let bound = bound_seqs(&basis);
+        assert_eq!(bound.len(), kept, "{name}");
+        assert_eq!(bound.first(), Some(&(collapsed + 1)), "{name}");
     }
 }

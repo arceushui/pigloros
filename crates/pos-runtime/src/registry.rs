@@ -76,6 +76,9 @@ mod fallback_swap;
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod fallback_swap_tests;
+#[cfg(all(test, feature = "local-admission-host"))]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod fold_tests;
 mod human_admission;
 mod local_seal;
 mod manifest_roster;
