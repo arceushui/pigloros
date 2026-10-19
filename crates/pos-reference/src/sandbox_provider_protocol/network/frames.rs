@@ -70,12 +70,29 @@ impl NetworkExchangeRequest {
         reader: &mut impl Read,
         plan: &NetworkExchangePlan,
     ) -> Result<Self, SandboxProviderProtocolError> {
-        read_document(reader).and_then(|document| {
-            array::<6>(&document).and_then(|fields| {
-                byte_string(&fields[4]).and_then(|bytes| {
-                    Self::new(plan, bytes).and_then(|expected| {
-                        exact_document(&document, &expected.document()).map(|()| expected)
-                    })
+        read_document(reader).and_then(|document| Self::from_document(&document, plan))
+    }
+
+    /// Read the next NXQ1, or `None` at a clean EOF before any frame byte.
+    pub(super) fn read_next(
+        reader: &mut impl Read,
+        plan: &NetworkExchangePlan,
+    ) -> Result<Option<Self>, SandboxProviderProtocolError> {
+        read_optional_document(reader).and_then(|document| {
+            document
+                .map(|document| Self::from_document(&document, plan))
+                .transpose()
+        })
+    }
+
+    fn from_document(
+        document: &Value,
+        plan: &NetworkExchangePlan,
+    ) -> Result<Self, SandboxProviderProtocolError> {
+        array::<6>(document).and_then(|fields| {
+            byte_string(&fields[4]).and_then(|bytes| {
+                Self::new(plan, bytes).and_then(|expected| {
+                    exact_document(document, &expected.document()).map(|()| expected)
                 })
             })
         })
@@ -343,10 +360,16 @@ fn exact_document(actual: &Value, expected: &Value) -> Result<(), SandboxProvide
 }
 
 fn read_document(reader: &mut impl Read) -> Result<Value, SandboxProviderProtocolError> {
+    read_optional_document(reader)
+        .and_then(|document| document.ok_or(SandboxProviderProtocolError::InvalidEncoding))
+}
+
+fn read_optional_document(
+    reader: &mut impl Read,
+) -> Result<Option<Value>, SandboxProviderProtocolError> {
     control_framing::read_frame(reader, MAX_DOCUMENT_BYTES)
         .map_err(|_| SandboxProviderProtocolError::InvalidEncoding)
-        .and_then(|bytes| bytes.ok_or(SandboxProviderProtocolError::InvalidEncoding))
-        .and_then(|bytes| decode_document(&bytes))
+        .and_then(|bytes| bytes.map(|bytes| decode_document(&bytes)).transpose())
 }
 
 fn write_document(
