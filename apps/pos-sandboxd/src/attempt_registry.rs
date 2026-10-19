@@ -183,7 +183,7 @@ impl SystemdAttemptRegistry {
 
     #[cfg(test)]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn from_runtime_directory(
+    pub(crate) fn from_runtime_directory(
         parent: &File,
         owner: u32,
     ) -> Result<Self, SystemdAttemptRegistryError> {

@@ -247,7 +247,7 @@ async fn one_call_sends_the_held_image_and_returns_one_sealed_root_mount() -> Te
         })
     );
     assert_eq!(transaction.observed.images, vec![transaction.held]);
-    let QuarantinedRootMount { _mount: mount } = transaction.outcome?;
+    let QuarantinedRootMount { mount } = transaction.outcome?;
     assert_eq!(identity(&mount)?, transaction.observed.root);
     assert!(fcntl_getfd(&mount)?.contains(FdFlags::CLOEXEC));
     // The sealed descriptor is not inherited across exec; an unsealed
@@ -543,6 +543,37 @@ async fn a_peer_closing_without_a_complete_reply_is_a_transport_failure() -> Tes
         );
     }
     Ok(())
+}
+
+#[tokio::test]
+async fn a_silent_peer_expires_the_deadline_and_closes_the_held_image() -> TestResult {
+    assert_eq!(MOUNT_IMAGE_DEADLINE, Duration::from_secs(60));
+    let (client, server) = StdUnixStream::pair()?;
+    client.set_nonblocking(true)?;
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    // The peer reads the call, closes its image copy and then stays silent
+    // with the connection open until the client has given up.
+    let peer = thread::spawn(move || -> TestResult {
+        drop(receive_call(&server)?);
+        released.recv()?;
+        Ok(())
+    });
+    let activator = MountfsdImageActivator::over(UnixStream::from_std(client)?, own_uid()?)?;
+    let (mut reader, mut writers) = closure_probe(1)?;
+    let image = ActivationImage {
+        descriptor: writers.pop().ok_or("the probe has no write end")?,
+        root_offset: ROOT_OFFSET,
+        root_size: ROOT_SIZE,
+        architecture: SandboxArchitecture::X86_64,
+    };
+    let outcome = activator
+        .mount_image_within(image, Duration::from_millis(50))
+        .await;
+    assert_eq!(outcome.err(), Some(ImageActivationError::Transport));
+    let mut byte = [0_u8; 1];
+    assert_eq!(std::io::Read::read(&mut reader, &mut byte)?, 0);
+    release.send(())?;
+    peer.join().map_err(|_| "the silent peer panicked")?
 }
 
 #[tokio::test]
