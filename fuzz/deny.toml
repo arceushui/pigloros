@@ -27,7 +27,12 @@ allow = [
   "CC0-1.0",
   "MPL-2.0",
 ]
-exceptions = [{ crate = "libfuzzer-sys", allow = ["NCSA"] }]
+# webpki-roots: the same owner licence decision as the workspace deny.toml
+# (2026-10-19, Redmine #426), reached here through piglor-gateway.
+exceptions = [
+  { crate = "libfuzzer-sys", allow = ["NCSA"] },
+  { crate = "webpki-roots", allow = ["CDLA-Permissive-2.0"] },
+]
 
 [licenses.private]
 ignore = true
