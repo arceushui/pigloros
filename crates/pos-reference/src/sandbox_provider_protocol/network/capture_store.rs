@@ -68,20 +68,28 @@ impl NetworkCaptureStore {
     /// writable by its group or others. Missing `responses` and `transcripts`
     /// directories are created with mode `0700`; existing ones must have exactly
     /// that mode and owner. Symbolic links and mount crossings are rejected.
+    /// The root is synchronized so newly created directories are durable.
     ///
     /// # Errors
     /// Returns [`NetworkCaptureStoreError::UnsafeStore`] for an unsafe root or
     /// retention directory and [`NetworkCaptureStoreError::Io`] when a directory
     /// cannot be created or opened.
     pub fn open(root: &File) -> Result<Self, NetworkCaptureStoreError> {
-        checked_directory(root, false).and_then(|()| {
-            retention_directory(root, RESPONSES).and_then(|responses| {
-                retention_directory(root, TRANSCRIPTS).map(|transcripts| Self {
-                    responses,
-                    transcripts,
+        checked_directory(root, false)
+            .and_then(|()| {
+                retention_directory(root, RESPONSES).and_then(|responses| {
+                    retention_directory(root, TRANSCRIPTS).map(|transcripts| Self {
+                        responses,
+                        transcripts,
+                    })
                 })
             })
-        })
+            // Make newly created retention directories durable before any capture.
+            .and_then(|store| {
+                root.sync_all()
+                    .map(|()| store)
+                    .map_err(NetworkCaptureStoreError::Io)
+            })
     }
 
     /// Durably retain a Captured reply's response bytes and NXT1 record.
