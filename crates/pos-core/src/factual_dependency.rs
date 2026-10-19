@@ -163,17 +163,20 @@ pub enum FactualHostOwnerV1 {
 }
 
 impl FactualHostOwnerV1 {
+    /// The literal owner IDs, in declaration order.
+    const OWNER_IDS: [&'static str; 6] = [
+        "host.observation",
+        "host.prefix",
+        "host.history",
+        "host.ingress",
+        "host.fold",
+        "host.fold-history",
+    ];
+
     /// Return the literal owner ID of this host owner.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Observation => "host.observation",
-            Self::Prefix => "host.prefix",
-            Self::History => "host.history",
-            Self::Ingress => "host.ingress",
-            Self::Fold => "host.fold",
-            Self::FoldHistory => "host.fold-history",
-        }
+        Self::OWNER_IDS[self as usize]
     }
 }
 
@@ -291,20 +294,23 @@ impl FactualRuleV1 {
         Self::FoldHistory,
     ];
 
+    /// The lowercase rule identifiers, in declaration order.
+    const RULE_IDS: [&'static str; 9] = [
+        "pos.factual.driver-output",
+        "pos.factual.driver-output.ephemeral",
+        "pos.factual.driver-step",
+        "pos.factual.observation-snapshot",
+        "pos.factual.verified-prefix",
+        "pos.factual.consumed-history",
+        "pos.factual.external-ingress",
+        "pos.factual.fold-checkpoint",
+        "pos.factual.fold-history",
+    ];
+
     /// Return the lowercase rule identifier.
     #[must_use]
     pub const fn rule_id(self) -> &'static str {
-        match self {
-            Self::DriverOutput => "pos.factual.driver-output",
-            Self::DriverOutputEphemeral => "pos.factual.driver-output.ephemeral",
-            Self::DriverStep => "pos.factual.driver-step",
-            Self::ObservationSnapshot => "pos.factual.observation-snapshot",
-            Self::VerifiedPrefix => "pos.factual.verified-prefix",
-            Self::ConsumedHistory => "pos.factual.consumed-history",
-            Self::ExternalIngress => "pos.factual.external-ingress",
-            Self::FoldCheckpoint => "pos.factual.fold-checkpoint",
-            Self::FoldHistory => "pos.factual.fold-history",
-        }
+        Self::RULE_IDS[self as usize]
     }
 
     /// Return the one class this rule assigns.
@@ -1280,8 +1286,18 @@ impl<'a> FactualAssembly<'a> {
         for (position, driver) in (1_u32..).zip(&scheduled.drivers) {
             self.driver(&host, position, driver)?;
         }
-        if let Some(source) = scheduled.fold.as_deref() {
-            self.fold(&mut host, source)?;
+        self.fold_source(&mut host, scheduled.fold.as_deref())
+    }
+
+    /// Record the fold nodes of `source`, if any, then give the ingress nodes
+    /// their ordinals.
+    fn fold_source(
+        &mut self,
+        host: &mut HostNodes,
+        source: Option<&FactualFoldSourceV1>,
+    ) -> Result<(), FactualDependencyErrorV1> {
+        if let Some(source) = source {
+            self.fold(host, source)?;
         }
         self.renumber_ingress();
         Ok(())
@@ -1654,30 +1670,32 @@ impl<'a> FactualAssembly<'a> {
                 node_index: rank[*spec_index],
             })
             .collect();
-        let fold = FactualFoldBindingV1 {
+        let fold = self.fold_binding(&rank);
+        let tick = self.context.tick;
+        let (nodes, edge_groups): (Vec<_>, Vec<Vec<_>>) =
+            built.into_iter().map(|row| (row.node, row.edges)).unzip();
+        TickDependencyRecordV1::try_new(
+            tick,
+            RecordedNodeOriginV1::Committed,
+            nodes,
+            edge_groups.into_iter().flatten().collect(),
+        )
+        .map_err(FactualDependencyErrorV1::from)
+        .map(|record| {
+            FactualTickDependenciesV1::new(tick, record, output_bindings, event_nodes, fold)
+        })
+    }
+
+    /// The fold binding: the record indexes of the fold and fold-history nodes.
+    fn fold_binding(&self, rank: &[u32]) -> FactualFoldBindingV1 {
+        FactualFoldBindingV1 {
             checkpoints: self.fold_specs.iter().map(|index| rank[*index]).collect(),
             history: self
                 .fold_history_specs
                 .iter()
                 .map(|index| rank[*index])
                 .collect(),
-        };
-        let tick = self.context.tick;
-        let (nodes, edge_groups): (Vec<_>, Vec<Vec<_>>) =
-            built.into_iter().map(|row| (row.node, row.edges)).unzip();
-        let record = TickDependencyRecordV1::try_new(
-            tick,
-            RecordedNodeOriginV1::Committed,
-            nodes,
-            edge_groups.into_iter().flatten().collect(),
-        )?;
-        Ok(FactualTickDependenciesV1::new(
-            tick,
-            record,
-            output_bindings,
-            event_nodes,
-            fold,
-        ))
+        }
     }
 }
 
