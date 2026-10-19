@@ -135,6 +135,13 @@ class Workspace:
             manifest["std_manifest_sha256"],
             notices.sha256(STD_MANIFEST.encode()),
         )
+        path = self.path(str(notices.MANIFEST))
+        text = path.read_text(encoding="utf-8")
+        start = text.index("other_rlibs = [")
+        end = text.index("]", start) + 1
+        path.write_text(
+            text[:start] + 'other_rlibs = ["core", "std"]' + text[end:], encoding="utf-8"
+        )
 
     def path(self, relative: str) -> Path:
         return self.root / relative
@@ -314,6 +321,10 @@ class ManifestTests(WorkspaceTest):
             "rust_std lockfile must be a path under library/": (
                 'lockfile = "library/Cargo.lock"',
                 'lockfile = "library/../Cargo.lock"',
+            ),
+            "rust_std other_rlibs must be a sorted list": (
+                'other_rlibs = ["core", "std"]',
+                'other_rlibs = ["std", "core"]',
             ),
             "rust_std std_manifest_sha256 must be a sha256 digest": (
                 'std_manifest_sha256 = "',
@@ -652,7 +663,7 @@ class AssembleTests(WorkspaceTest):
             "Cargo graph: rust-std: Rust 1.97.1 library/Cargo.lock, std with features "
             "backtrace, panic-unwind, wasm32-unknown-unknown",
             "MIT text of dlmalloc",
-            "proc_macro crates, which the guests do not link.\n  core, std",
+            "which the guests do not link.\n  core, std",
             "Component: wit-bindgen 0.61.1 generated C bindings",
             "no-guest-exports.wasm: first-party code only",
             "from the crate's LICENSE-MIT",
@@ -709,7 +720,7 @@ class AssembleTests(WorkspaceTest):
         (self.workspace.sysroot / notices.RUST_STD_RLIBS / "liballoc-5e.rlib").write_bytes(b"")
         text, _ = notices.assemble(self.workspace.root, graphs, self.workspace.sysroot)
         self.assertIn("  alloc 0.0.0: MIT", text)
-        self.assertIn("proc_macro crates, which the guests do not link.\n  core, std", text)
+        self.assertIn("which the guests do not link.\n  core, std", text)
         alloc["crates"][0]["package"]["manifest_path"] = str(
             self.workspace.root / "alloc/Cargo.toml"
         )
@@ -718,6 +729,13 @@ class AssembleTests(WorkspaceTest):
         graphs[notices.RUST_STD]["licenses"] += alloc["licenses"]
         with self.assertRaisesRegex(notices.NoticeError, "alloc 0.0.0 is not a registry package"):
             notices.assemble(self.workspace.root, graphs, self.workspace.sysroot)
+
+    def test_unreviewed_sysroot_rlib_fails(self) -> None:
+        (self.workspace.sysroot / notices.RUST_STD_RLIBS / "libnewcrate-9f.rlib").write_bytes(b"")
+        with self.assertRaisesRegex(
+            notices.NoticeError, r"outside std's graph are \['core', 'newcrate', 'std'\]"
+        ):
+            notices.assemble(self.workspace.root, reports(), self.workspace.sysroot)
 
     def test_std_report_must_match_the_rust_src_lockfile(self) -> None:
         graphs = reports()

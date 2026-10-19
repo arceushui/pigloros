@@ -203,11 +203,28 @@ sha256 = "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
 # from rust.backtrace), after checking that both files below equal the ones at
 # the `rust` component's commit. Each crate in that graph must also ship as a
 # wasm32-unknown-unknown rlib in the toolchain sysroot.
+#
+# `other_rlibs` is the reviewed list of the sysroot's other wasm32 rlibs, which
+# std's graph does not list, and `assemble` requires that exact list:
+# - compiler_builtins: Rust's in-tree crate, covered by the `rust` component;
+# - getopts, rustc_std_workspace_std, test: only the test harness uses them;
+# - proc_macro, rustc_literal_escaper: only proc macros use them;
+# - sysroot: the build aggregate of the crates above.
+# The guests link compiler_builtins through alloc and link none of the others.
 [rust_std]
 component = "rust"
 features = ["backtrace", "panic-unwind"]
 lockfile = "library/Cargo.lock"
 lockfile_sha256 = "02120dd57c4c5fd70c81fd92472681c8de5cc2dd78258276da37bb2253666061"
+other_rlibs = [
+  "compiler_builtins",
+  "getopts",
+  "proc_macro",
+  "rustc_literal_escaper",
+  "rustc_std_workspace_std",
+  "sysroot",
+  "test",
+]
 std_manifest = "library/std/Cargo.toml"
 std_manifest_sha256 = "ff5272b18cb16a9e67256a1045dc35d9d08ae38916a218f684a2ae2f4360f078"
 

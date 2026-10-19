@@ -58,6 +58,7 @@ RUST_STD_KEYS = [
     "features",
     "lockfile",
     "lockfile_sha256",
+    "other_rlibs",
     "std_manifest",
     "std_manifest_sha256",
 ]
@@ -258,6 +259,13 @@ def check_rust_std(manifest: dict) -> list[str]:
     features = rust_std["features"]
     if not features or not all(isinstance(f, str) and f for f in features):
         errors.append("rust_std features must be a non-empty list of names")
+    other = rust_std["other_rlibs"]
+    if (
+        not isinstance(other, list)
+        or other != sorted(set(other))
+        or not all(isinstance(name, str) and name for name in other)
+    ):
+        errors.append("rust_std other_rlibs must be a sorted list of unique crate names")
     for key in ("lockfile", "std_manifest"):
         if not str(rust_std[key]).startswith("library/") or ".." in Path(rust_std[key]).parts:
             errors.append(f"rust_std {key} must be a path under library/")
@@ -533,13 +541,30 @@ def shipped_rlibs(sysroot: Path) -> set[str]:
     }
 
 
-def check_std_rlibs(report: dict, rlibs: set[str]) -> list[str]:
-    """Every crate in the std graph must be shipped as a wasm32 rlib."""
-    return [
+def other_rlibs(report: dict, rlibs: set[str]) -> list[str]:
+    """The shipped wasm32 rlibs that the std graph does not list."""
+    listed = {crate["package"]["name"].replace("-", "_") for crate in report.get("crates", [])}
+    return sorted(rlibs - listed)
+
+
+def check_std_rlibs(report: dict, rlibs: set[str], reviewed: list[str]) -> list[str]:
+    """Every crate in the std graph ships as a wasm32 rlib, and no other rlib is unreviewed.
+
+    Crate names suffice: one std lockfile pins a single version of each crate
+    that the wasm32 sysroot ships.
+    """
+    errors = [
         f"{RUST_STD}: {crate_label(crate['package'])} has no wasm32-unknown-unknown rlib"
         for crate in report.get("crates", [])
         if crate["package"]["name"].replace("-", "_") not in rlibs
     ]
+    other = other_rlibs(report, rlibs)
+    if other != reviewed:
+        errors.append(
+            f"{RUST_STD}: the sysroot rlibs outside std's graph are {other}, but the manifest "
+            f"reviewed {reviewed}; review each new one and update rust_std other_rlibs"
+        )
+    return errors
 
 
 # ── cargo-about reports ──────────────────────────────────────────────────────
@@ -727,7 +752,7 @@ def assemble(root: Path, reports: dict[str, dict], sysroot: Path) -> tuple[str, 
                 reports[lock], lock_packages(lockfiles[lock]), lock, in_tree
             )
     if RUST_STD in reports:
-        errors += check_std_rlibs(reports[RUST_STD], rlibs)
+        errors += check_std_rlibs(reports[RUST_STD], rlibs, manifest["rust_std"]["other_rlibs"])
     if errors:
         raise NoticeError("\n".join(errors))
 
@@ -755,15 +780,14 @@ def assemble(root: Path, reports: dict[str, dict], sysroot: Path) -> tuple[str, 
             )
         graph_lines, graph_index = render_report(label, digest, reports[lock])
         if lock == RUST_STD:
-            listed = {c["package"]["name"].replace("-", "_") for c in reports[lock]["crates"]}
-            other = sorted(rlibs - listed)
+            other = other_rlibs(reports[lock], rlibs)
             graph_lines += [
                 "",
                 "Other wasm32-unknown-unknown rlibs in the toolchain sysroot, which std's",
-                "graph above does not list. None is a crates.io crate that std links:",
-                "Rust's own unpublished crates (such as compiler_builtins) are covered by",
-                "the Rust component below, and the rest serve only the test and",
-                "proc_macro crates, which the guests do not link.",
+                "graph above does not list. The manifest reviews this exact list (rust_std",
+                "other_rlibs): Rust's own in-tree crates such as compiler_builtins, which",
+                "the Rust component below covers, and crates that only the test and",
+                "proc_macro crates use, which the guests do not link.",
                 f"  {', '.join(other)}",
             ]
             graph_index["other_rlibs"] = other
