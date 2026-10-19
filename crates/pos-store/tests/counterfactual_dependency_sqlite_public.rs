@@ -3217,7 +3217,9 @@ fn f15_a_corrupt_event_row_fails_the_fold_window() {
     let corrupt = format!("UPDATE events SET payload_hash = 'x' WHERE timeline_id = '{root}'");
     rewritten(&mut lineage, &corrupt);
 
-    let read = lineage.store.fold_window(root, Seq::ZERO, Seq::from_u64(14));
+    let read = lineage
+        .store
+        .fold_window(root, Seq::ZERO, Seq::from_u64(14));
     assert!(read.is_err());
 }
 
