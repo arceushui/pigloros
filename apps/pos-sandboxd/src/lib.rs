@@ -8,6 +8,8 @@
 #[cfg(target_os = "linux")]
 mod attempt_registry;
 mod hardening;
+#[cfg(target_os = "linux")]
+mod image_activator;
 mod kernel_cgroup;
 mod system_bus;
 mod transient_unit;
@@ -21,6 +23,12 @@ pub use attempt_registry::{
     RecoveredAttemptIntent, RecoveredUnmountedDirectory, RegistryRecoveryEntry,
     SystemdAttemptRecovery, SystemdAttemptRegistry, SystemdAttemptRegistryError,
     UnmountedDirectoryInventory,
+};
+
+#[cfg(target_os = "linux")]
+pub use image_activator::{
+    ActivationImage, ImageActivationError, ImageActivator, MountfsdImageActivator,
+    QuarantinedRootMount,
 };
 
 pub use hardening::{
