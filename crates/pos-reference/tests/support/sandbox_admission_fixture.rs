@@ -2642,27 +2642,15 @@ fn selector_commitment_matches_independent_rbs1_golden_vectors() -> TestResult {
             1,
             include_bytes!("../vectors/rbs1-v1/x86_64-air_gapped.cbor"),
         ),
-        (
-            0,
-            2,
-            include_bytes!("../vectors/rbs1-v1/x86_64-replay.cbor"),
-        ),
+        (0, 2, include_bytes!("../vectors/rbs1-v1/x86_64-replay.cbor")),
         (0, 3, include_bytes!("../vectors/rbs1-v1/x86_64-fork.cbor")),
-        (
-            1,
-            0,
-            include_bytes!("../vectors/rbs1-v1/aarch64-local.cbor"),
-        ),
+        (1, 0, include_bytes!("../vectors/rbs1-v1/aarch64-local.cbor")),
         (
             1,
             1,
             include_bytes!("../vectors/rbs1-v1/aarch64-air_gapped.cbor"),
         ),
-        (
-            1,
-            2,
-            include_bytes!("../vectors/rbs1-v1/aarch64-replay.cbor"),
-        ),
+        (1, 2, include_bytes!("../vectors/rbs1-v1/aarch64-replay.cbor")),
         (1, 3, include_bytes!("../vectors/rbs1-v1/aarch64-fork.cbor")),
     ];
     for (architecture, mode, expected) in vectors {

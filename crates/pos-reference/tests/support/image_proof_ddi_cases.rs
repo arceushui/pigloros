@@ -151,11 +151,8 @@ fn public_proof_verification_accepts_systemd_repart_offline_signatures() -> Test
 
 #[test]
 fn systemd_signature_partitions_embed_the_independently_verified_proof() -> TestResult {
-    use std::io::Read as _;
-
     for vector in &DDI_VECTORS {
-        let mut image = Vec::new();
-        flate2::read::GzDecoder::new(vector.image).read_to_end(&mut image)?;
+        let image = ddi_image(vector)?;
         let partitions: [([u8; 16], [u8; 16], u64, u64); 3] =
             serde_json::from_slice(vector.partitions)?;
         let (kind, _, start, length) = partitions[2];

@@ -2,7 +2,7 @@
 
 These test-only fixtures are the externally generated images for
 [ADR-087](https://redmine.piglor.com/projects/pigloros/wiki/ADR-087_Systemd_mountfsd_SIM1_activation_boundary)'s
-#437 fixture acceptance, under the pending ADR-069/ADR-087 amendments that
+#437 fixture acceptance, under the accepted ADR-069/ADR-087 amendments that
 make SIM1 carry the exact 32-byte verity salt and the release certificate's
 kernel key description. There is one Discoverable Disk Image per supported
 architecture. Directories use systemd-repart's `--architecture` names:
@@ -134,10 +134,10 @@ proof, signer fingerprint and root hash that systemd will read.
   derived from `--seed` (`derive_salt` and
   `salt_size = sizeof(p->verity_salt)` in `src/repart/repart.c`). For the
   260.5 producer used here, `verity.json` records the salt that `describe.py`
-  read from each verity superblock. The pending ADR-069 amendment makes SIM1
+  read from each verity superblock. Accepted ADR-069 makes SIM1
   carry that exact salt; checking it against the held image's superblock is
   #438 and against the live dm-verity table is #440.
-- **No release trust installation.** Under the pending ADR-087 amendment the
+- **No release trust installation.** Under accepted ADR-087 the
   release certificate is compiled into the appliance kernel's
   `.builtin_trusted_keys`. These fixture certificates are not, and these
   fixtures install nothing.

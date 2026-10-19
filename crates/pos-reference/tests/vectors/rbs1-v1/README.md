@@ -10,7 +10,7 @@ definitions.  Fixture inputs deliberately match
 `sandbox_admission_contract_public.rs`: fixed signing seeds 1 through 6, the closed
 16-element host-feature list, `img` root-image bytes, `adapter executable`,
 and the stated BHC1 and attempt-limit values. SIM1 carries the exact 32-byte
-verity salt and the kernel key description that TRS1 also binds (pending
+verity salt and the kernel key description that TRS1 also binds (accepted
 ADR-069 amendment for #437).
 
 `generate.py` is a standalone oracle using Python 3 with `blake3`, `cbor2`,
