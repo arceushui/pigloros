@@ -266,8 +266,7 @@ mod tests {
     }
 
     #[test]
-    fn unrelated_provenance_preserves_the_requested_childs_exact_budget(
-    ) -> Fallible<()> {
+    fn unrelated_provenance_preserves_the_requested_childs_exact_budget() -> Fallible<()> {
         let (_directory, store, world) = fixture(Shape::Mixed)?;
         let child = world.child_at(0)?.id;
         let root_event = store.read(world.root, SeqRange::all())?.remove(0);
@@ -391,8 +390,16 @@ mod tests {
         let child = world.child_at(0)?.id;
         for (kind, table, index) in [
             (OrphanKindV1::Operation, "fork_append_operations", ""),
-            (OrphanKindV1::Origin, "fork_event_origins", "idx_fork_event_origins_child_v1"),
-            (OrphanKindV1::Intervention, "fork_intervention_admissions", "idx_fork_intervention_admissions_child_v1"),
+            (
+                OrphanKindV1::Origin,
+                "fork_event_origins",
+                "idx_fork_event_origins_child_v1",
+            ),
+            (
+                OrphanKindV1::Intervention,
+                "fork_intervention_admissions",
+                "idx_fork_intervention_admissions_child_v1",
+            ),
         ] {
             let (sql, child_bytes) = kind.selection();
             let mut statement = store.conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}"))?;
@@ -411,24 +418,56 @@ mod tests {
             assert!(details
                 .iter()
                 .any(|line| line.contains("SEARCH events USING INDEX idx_events_event_id")));
-            assert!(!details
-                .iter()
-                .any(|line| line.contains("TEMP B-TREE") || line.contains("SCAN events") || line.contains(&format!("SCAN {table}"))));
+            assert!(!details.iter().any(|line| line.contains("TEMP B-TREE")
+                || line.contains("SCAN events")
+                || line.contains(&format!("SCAN {table}"))));
             if matches!(kind, OrphanKindV1::Operation) {
                 assert!(details.iter().any(|line| line
                     .contains("SEARCH fork_append_operations USING INDEX")
                     && line.contains("child_id=?")));
             } else {
-                assert!(details.iter().any(|line| line.contains(&format!("SEARCH {table} USING INDEX {index}")) && line.contains("<expr>=?")), "{details:?}");
+                assert!(
+                    details.iter().any(|line| line
+                        .contains(&format!("SEARCH {table} USING INDEX {index}"))
+                        && line.contains("<expr>=?")),
+                    "{details:?}"
+                );
             }
         }
-        let mut statement = store.conn.prepare(&format!("EXPLAIN QUERY PLAN {}", super::super::fork_provenance_indexes::ORPHANED_PROVENANCE))?;
-        let details = statement.query_map(params![child.to_string(), child.inner().to_bytes().as_slice()], |row| row.get::<_, String>(3))?.collect::<std::result::Result<Vec<_>, _>>()?;
-        for (table, index) in [("fork_event_origins", "idx_fork_event_origins_child_v1"), ("fork_intervention_admissions", "idx_fork_intervention_admissions_child_v1")] {
-            assert!(details.iter().any(|line| line.contains(&format!("SEARCH {table} USING INDEX {index}")) && line.contains("<expr>=?")), "{details:?}");
+        let mut statement = store.conn.prepare(&format!(
+            "EXPLAIN QUERY PLAN {}",
+            super::super::fork_provenance_indexes::ORPHANED_PROVENANCE
+        ))?;
+        let details = statement
+            .query_map(
+                params![child.to_string(), child.inner().to_bytes().as_slice()],
+                |row| row.get::<_, String>(3),
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        for (table, index) in [
+            ("fork_event_origins", "idx_fork_event_origins_child_v1"),
+            (
+                "fork_intervention_admissions",
+                "idx_fork_intervention_admissions_child_v1",
+            ),
+        ] {
+            assert!(
+                details.iter().any(|line| line
+                    .contains(&format!("SEARCH {table} USING INDEX {index}"))
+                    && line.contains("<expr>=?")),
+                "{details:?}"
+            );
         }
-        assert_eq!(details.iter().filter(|line| line.contains("SEARCH events USING INDEX idx_events_event_id")).count(), 2);
-        assert!(!details.iter().any(|line| line.contains("TEMP B-TREE") || line.contains("SCAN events") || line.contains("SCAN fork_")));
+        assert_eq!(
+            details
+                .iter()
+                .filter(|line| line.contains("SEARCH events USING INDEX idx_events_event_id"))
+                .count(),
+            2
+        );
+        assert!(!details.iter().any(|line| line.contains("TEMP B-TREE")
+            || line.contains("SCAN events")
+            || line.contains("SCAN fork_")));
         Ok(())
     }
 }
