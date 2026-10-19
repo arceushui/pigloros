@@ -11,6 +11,10 @@ use crate::oci::{
     VerifiedReleaseBundleV1,
 };
 
+/// A digest of the fixed V1 length, used only to bound blob URL length.
+const LENGTH_PROBE_DIGEST: &str =
+    "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+
 /// A release source over HTTPS, bound to exactly one immutable bundle address.
 ///
 /// The operator supplies the manifest locator and a blob base. The manifest
@@ -48,14 +52,22 @@ impl HttpsReleaseSourceV1 {
         if blob_base.query().is_some() || !blob_base.path().ends_with('/') {
             return Err(RemoteConfigErrorV1::InvalidLocator);
         }
-        Ok(Self {
+        let source = Self {
             address,
             manifest,
             blob_base,
             engine: Engine::new(transport),
-        })
+        };
+        // Every blob URL is the base plus 64 hex digits, so one probe bounds
+        // them all to the request URL limit.
+        if requestable(&source.blob_url(LENGTH_PROBE_DIGEST)) {
+            Ok(source)
+        } else {
+            Err(RemoteConfigErrorV1::InvalidLocator)
+        }
     }
 
+    /// `digest` is a validated `sha256:<64 lowercase hex>` descriptor digest.
     fn blob_url(&self, digest: &str) -> Url {
         let mut url = self.blob_base.clone();
         url.set_path(&format!(

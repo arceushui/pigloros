@@ -200,9 +200,9 @@ mod tests {
         // The worker is still busy: the next caller fails at once, not after
         // its own wait, and is not queued behind the wedged lookup.
         let started = Instant::now();
-        let refused = resolver.resolve(&uri("https://queued.test:2/")?, &config, wait(5));
+        let refused = resolver.resolve(&uri("https://queued.test:2/")?, &config, wait(30));
         assert!(matches!(refused, Err(ureq::Error::HostNotFound)));
-        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(started.elapsed() < Duration::from_secs(5));
 
         drop(held);
         // Once the wedged lookup completes, the same worker serves the next

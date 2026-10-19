@@ -84,6 +84,10 @@ impl ClosureRead<'_> {
     ///
     /// `authorization` is sent to `url` only. A redirect target must be an
     /// allowed origin, receives no credential, and is never revisited.
+    ///
+    /// The per-closure request budget holds structurally: a closure has at
+    /// most 359 objects (the shared planner's bound) and each fetch makes at
+    /// most one content request and three redirect requests.
     pub(super) fn fetch(
         &self,
         url: &Url,
@@ -96,7 +100,7 @@ impl ClosureRead<'_> {
         for _ in 0..=MAX_REDIRECTS {
             let response = self.get(&current, authorization)?;
             match response.status().as_u16() {
-                200 => return read_exact(response, size),
+                200 => return read_sized_body(response, size),
                 301 | 302 | 303 | 307 | 308 => {
                     current = self.redirect_target(&current, &response, &visited)?;
                     visited.push(current.clone());
@@ -155,7 +159,7 @@ impl ClosureRead<'_> {
 }
 
 /// Read exactly `size` identity-coded bytes, with a one-byte excess sentinel.
-fn read_exact(response: Response<Body>, size: u64) -> Result<Vec<u8>, ReleaseSourceErrorV1> {
+fn read_sized_body(response: Response<Body>, size: u64) -> Result<Vec<u8>, ReleaseSourceErrorV1> {
     if response
         .headers()
         .get_all(header::CONTENT_ENCODING)

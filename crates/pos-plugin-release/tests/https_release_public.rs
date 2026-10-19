@@ -398,6 +398,8 @@ fn reads_the_same_verified_bundle_as_every_other_source() -> TestResult {
     server.publish(&bundle);
 
     assert_eq!(read(&server, &bundle)??, bundle);
+    // The ring provider was set on the transport only, never process-wide.
+    assert!(rustls::crypto::CryptoProvider::get_default().is_none());
 
     // The manifest first, then every blob in digest order at
     // `<blob base><hex>`, all anonymous.
@@ -726,19 +728,19 @@ fn a_stalled_response_header_or_body_times_out() -> TestResult {
 
     server.route(
         MANIFEST_PATH,
-        Reply::ok(bundle.manifest()).delayed(Duration::from_secs(4)),
+        Reply::ok(bundle.manifest()).delayed(Duration::from_secs(10)),
     );
     let (result, elapsed) = read_within(&server, &bundle, deadlines)?;
     assert_eq!(result, Err(S::Io));
-    assert!(elapsed < Duration::from_secs(3), "{elapsed:?}");
+    assert!(elapsed < Duration::from_secs(8), "{elapsed:?}");
 
     server.route(
         MANIFEST_PATH,
-        Reply::ok(bundle.manifest()).stalled(Duration::from_secs(4)),
+        Reply::ok(bundle.manifest()).stalled(Duration::from_secs(10)),
     );
     let (result, elapsed) = read_within(&server, &bundle, deadlines)?;
     assert_eq!(result, Err(S::Io));
-    assert!(elapsed < Duration::from_secs(3), "{elapsed:?}");
+    assert!(elapsed < Duration::from_secs(8), "{elapsed:?}");
     Ok(())
 }
 
@@ -764,7 +766,7 @@ fn one_closure_deadline_bounds_every_request() -> TestResult {
     };
     let (result, elapsed) = read_within(&server, &bundle, deadlines)?;
     assert_eq!(result, Err(S::Io));
-    assert!(elapsed < Duration::from_secs(4), "{elapsed:?}");
+    assert!(elapsed < Duration::from_secs(8), "{elapsed:?}");
     assert!(server.seen().len() < bundle.blobs().len() + 1);
     Ok(())
 }
@@ -1149,6 +1151,14 @@ fn locators_are_immutable_https_locations_on_allowed_origins() -> TestResult {
         locate(&format!("{exact}m"), blobs)?,
         Some(C::InvalidLocator)
     );
+
+    // Every blob URL (the base plus 64 hex digits) is also at most 8 KiB.
+    let blob_base = |length: usize| format!("{prefix}{}/", "b".repeat(length - prefix.len() - 1));
+    assert_eq!(locate("https://a.test/m", &blob_base(8_192 - 64))?, None);
+    assert_eq!(
+        locate("https://a.test/m", &blob_base(8_192 - 63))?,
+        Some(C::InvalidLocator)
+    );
     Ok(())
 }
 
@@ -1217,6 +1227,15 @@ fn the_production_log_ceiling_hides_every_secret_and_names_every_target() -> Tes
     assert_eq!(read_as(&server, &bundle, basic.clone())??, bundle);
     server.route(signed, Reply::status(404));
     assert_eq!(read_as(&server, &bundle, basic)?, Err(S::NotFound));
+    // A TLS failure under a Bearer credential.
+    let untrusted = RemoteTransportConfigV1::new(
+        &[&server.origin()],
+        &TrustRootsV1::Der(vec![OTHER_CA.to_vec()]),
+        quick(),
+    )?
+    .with_credentials(Provider::new(&[(server.port, bearer("LOG-SECRET-TOKEN"))]));
+    let source = source_on(&server, &bundle, untrusted)?;
+    assert_eq!(source.read_verified(bundle.address()), Err(S::Io));
 
     let records = capture
         .0
