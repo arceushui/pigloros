@@ -3191,14 +3191,85 @@ mod tests {
     }
 
     fn isolated_composition_role() -> TestResult<IsolatedCompositionRole> {
+        isolated_role("root_selector::tests::activated_public_composition_authenticates_sly1")
+    }
+
+    fn isolated_role(test_name: &str) -> TestResult<IsolatedCompositionRole> {
         if std::env::var_os(PRIVILEGED_COMPOSITION_TEST).is_some() {
             if rustix::process::geteuid().as_raw() != ROOT_UID {
                 return Err("isolated selector composition child is not root".into());
             }
             return Ok(IsolatedCompositionRole::ExecuteBody);
         }
-        run_isolated_test("root_selector::tests::activated_public_composition_authenticates_sly1")?;
+        run_isolated_test(test_name)?;
         Ok(IsolatedCompositionRole::Delegated)
+    }
+
+    /// Held-image admission through the real public entry point, with the
+    /// fixed root-owned installation staged in each rejecting state.
+    #[test]
+    fn held_image_admission_rejects_each_staged_installation_state() -> TestResult {
+        use crate::provider_admission::tests::request_for;
+        use crate::provider_admission::ProviderImageSnapshot;
+        use crate::selector::installation::tests::updates::{complete_live_update, UpdateFixture};
+        use crate::selector::installation::tests::{
+            installed_object_path, materialize_root_selector_state,
+        };
+        use crate::selector::installation::{InstallationObjectKind, SANDBOX_ARTIFACT_ROOT};
+
+        if matches!(
+            isolated_role(
+                "root_selector::tests::held_image_admission_rejects_each_staged_installation_state"
+            )?,
+            IsolatedCompositionRole::Delegated
+        ) {
+            return Ok(());
+        }
+        let _paths = FixedCompositionFixture::create()?;
+        let root = Path::new(SANDBOX_ARTIFACT_ROOT);
+        let installed = materialize_root_selector_state(root)?;
+        let request = request_for(&installed)?.to_canonical_cbor()?;
+        let snapshot = ProviderImageSnapshot::open(&request)?;
+        snapshot.admit_held_image()?;
+
+        // Pending SIR1: the selector committed an update before sending RCU1.
+        let update = UpdateFixture::at(root)?;
+        let committed = update.commit_live_update()?;
+        assert!(snapshot.admit_held_image().is_err());
+
+        // Successor RVS1/APT1 installed: this snapshot's authority is stale.
+        complete_live_update(committed)?;
+        assert!(snapshot.admit_held_image().is_err());
+
+        // Mutated held descriptor under unchanged, current authority.
+        let current = update.admitted()?;
+        let request = request_for(&current)?.to_canonical_cbor()?;
+        let snapshot = ProviderImageSnapshot::open(&request)?;
+        snapshot.admit_held_image()?;
+        let path = installed_object_path(
+            root,
+            InstallationObjectKind::ROOT_IMAGE,
+            snapshot.image().manifest().root_image_blake3_digest,
+        )?;
+        // Keep the exact bytes at the installed path so the reopened
+        // installation still authenticates; only the held inode changes.
+        let held = Path::new(INSTALLATION_PARENT).join("held-root-image");
+        let replacement = path.with_extension("replacement");
+        fs::copy(&path, &replacement)?;
+        fs::set_permissions(&replacement, fs::Permissions::from_mode(0o400))?;
+        fs::rename(&path, &held)?;
+        fs::rename(&replacement, &path)?;
+        let current = update.admitted()?;
+        assert_eq!(request_for(&current)?.to_canonical_cbor()?, request);
+        // Swapping the installed path alone leaves the held image admissible.
+        snapshot.admit_held_image()?;
+        fs::set_permissions(&held, fs::Permissions::from_mode(0o600))?;
+        let writer = fs::OpenOptions::new().write(true).open(&held)?;
+        std::os::unix::fs::FileExt::write_all_at(&writer, &[0xff], 0)?;
+        assert!(snapshot.admit_held_image().is_err());
+        // The same installation still admits through a freshly held image.
+        ProviderImageSnapshot::open(&request)?.admit_held_image()?;
+        Ok(())
     }
 
     fn serve_describe_response(
@@ -3322,7 +3393,7 @@ mod tests {
             stream.set_write_timeout(Some(INITIAL_IO_TIMEOUT))?;
             let spx1 = read_frame(&mut stream)?;
             // The provider independently opens SIC1; no selector proof or FD is
-            // transferred by SPX1. This is image evidence, not activation.
+            // transferred by SPX1. This is image admission, not activation.
             let image = crate::provider_admission::ProviderImageSnapshot::open(&spx1)?;
             assert_eq!(image.request().to_canonical_cbor()?, spx1);
             assert_eq!(
@@ -3333,7 +3404,22 @@ mod tests {
                 image.launch_policy().policy_digest,
                 image.request().authority.lps1_digest
             );
-            image.recheck_held_image()?;
+            // Joined to the fixed installation reopened at this instant.
+            let held = image.admit_held_image()?;
+            assert!(std::ptr::eq(held.snapshot(), &raw const image));
+            let carried = rustix::fs::fstat(std::os::fd::AsFd::as_fd(&held))?;
+            // The fixed installation's immutable object is the same inode.
+            let retained = crate::selector::installation::InstalledSelectorState::open()?
+                .artifact(
+                    crate::selector::installation::InstallationObjectKind::ROOT_IMAGE,
+                    image.image().manifest().root_image_blake3_digest,
+                )?
+                .file()
+                .metadata()?;
+            assert_eq!(
+                (carried.st_dev, carried.st_ino),
+                (retained.dev(), retained.ino())
+            );
             let mut input_frames = Vec::new();
             stream.read_to_end(&mut input_frames)?;
             if input_frames.is_empty() {
