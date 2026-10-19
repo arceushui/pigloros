@@ -41,7 +41,7 @@ const MOUNTFSD_SOCKET: &str = "/run/systemd/io.systemd.MountFileSystem";
 /// mountfsd runs as root; any other peer is rejected before the call.
 const MOUNTFSD_PEER_UID: u32 = 0;
 /// Owner decision Q7.4: one `MountImage` transaction is bounded to 60 s.
-const MOUNT_IMAGE_DEADLINE: Duration = Duration::from_secs(60);
+const MOUNT_IMAGE_DEADLINE: Duration = Duration::from_mins(1);
 
 /// The ADR-087 activation port between provider lifecycle code and systemd.
 ///
@@ -221,13 +221,7 @@ impl MountfsdImageActivator {
         } = image;
         // zlink's typed result only carries the reply descriptors. The exact
         // frame captured by the sealed read half is the authoritative reply.
-        let outcome: Result<
-            zlink::Result<(
-                zlink::reply::Result<IgnoredAny, MountImageFailure>,
-                Vec<OwnedFd>,
-            )>,
-            tokio::time::error::Elapsed,
-        > = tokio::time::timeout(
+        let outcome: Result<MountImageOutcome, tokio::time::error::Elapsed> = tokio::time::timeout(
             deadline,
             self.connection
                 .call_method(&mount_image_call(), vec![descriptor]),
@@ -265,6 +259,12 @@ fn mount_image_call() -> Call<Value> {
         },
     }))
 }
+
+/// zlink's typed outcome of the one call: only its descriptors are used.
+type MountImageOutcome = zlink::Result<(
+    zlink::reply::Result<IgnoredAny, MountImageFailure>,
+    Vec<OwnedFd>,
+)>;
 
 // zlink tries the error envelope before the successful reply. Requiring the
 // Varlink `error` discriminator keeps successful parameters out of this type.
