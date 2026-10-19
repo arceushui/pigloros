@@ -1098,12 +1098,84 @@ pub mod tests {
     // The kernel's x509 description of IMAGE_CERTIFICATE: subject CN, then SKID.
     const IMAGE_KEY_DESCRIPTION: &str =
         "PiglorOS SIM1 interoperability fixture: beb62aa1770ab755e4fe5d9ed9477912a7958633";
+    /// The release signing material one fixture's SIM1 and TRS1 bind.
+    pub(crate) struct ImageSigning {
+        root_hash: [u8; 32],
+        proof: Vec<u8>,
+        certificate: &'static [u8],
+        key_description: &'static str,
+    }
+
+    impl ImageSigning {
+        /// `proof` over the synthetic `sim1-pkcs7` root hash 00..1f.
+        pub(crate) fn synthetic(proof: &[u8]) -> Self {
+            Self {
+                root_hash: std::array::from_fn(|index| u8::try_from(index).unwrap_or(0)),
+                proof: proof.to_vec(),
+                certificate: IMAGE_CERTIFICATE,
+                key_description: IMAGE_KEY_DESCRIPTION,
+            }
+        }
+
+        /// A DDI fixture's own systemd-repart root hash, proof and signer,
+        /// as its root-verity-sig partition embeds them.
+        pub(crate) fn ddi(architecture: &str) -> TestResult<Self> {
+            // The kernel's x509 descriptions of each signer.der: CN, then SKID.
+            let (root_hash, proof, certificate, key_description): (&[u8], &[u8], _, _) =
+                match architecture {
+                    "x86-64" => (
+                        include_bytes!("../../tests/vectors/sim1-ddi/x86-64/root-hash.txt"),
+                        include_bytes!("../../tests/vectors/sim1-ddi/x86-64/proof.der"),
+                        include_bytes!("../../tests/vectors/sim1-ddi/x86-64/signer.der").as_slice(),
+                        "PiglorOS SIM1 DDI fixture x86-64: \
+                         e0b3c91db94dc506da3652b0ace1603e49009f3e",
+                    ),
+                    "arm64" => (
+                        include_bytes!("../../tests/vectors/sim1-ddi/arm64/root-hash.txt"),
+                        include_bytes!("../../tests/vectors/sim1-ddi/arm64/proof.der"),
+                        include_bytes!("../../tests/vectors/sim1-ddi/arm64/signer.der").as_slice(),
+                        "PiglorOS SIM1 DDI fixture arm64: \
+                         cee4947773692d91c1a7e728a9b98d6223ec099d",
+                    ),
+                    _ => return Err("unknown DDI fixture".into()),
+                };
+            Ok(Self {
+                root_hash: hex_digest(root_hash)?,
+                proof: proof.to_vec(),
+                certificate,
+                key_description,
+            })
+        }
+
+        pub(crate) const fn root_hash(&self) -> &[u8; 32] {
+            &self.root_hash
+        }
+
+        pub(crate) fn proof(&self) -> &[u8] {
+            &self.proof
+        }
+    }
+
+    /// Decode the producer's recorded 64 hexadecimal digits; nothing is computed.
+    fn hex_digest(text: &[u8]) -> TestResult<[u8; 32]> {
+        let text = std::str::from_utf8(text)?;
+        (0..text.len())
+            .step_by(2)
+            .map(|index| u8::from_str_radix(text.get(index..index + 2).unwrap_or(""), 16))
+            .collect::<Result<Vec<u8>, _>>()?
+            .try_into()
+            .map_err(|_| "recorded digest is not 32 bytes".into())
+    }
+
     /// A synthetic 32-byte verity salt for the synthetic GPT fixtures.
     fn image_verity_salt() -> [u8; 32] {
         *blake3::hash(b"PiglorOS synthetic SIM1 verity salt").as_bytes()
     }
 
-    fn provider_trust(authority: &ProviderAuthority) -> TestResult<Vec<u8>> {
+    fn provider_trust(
+        authority: &ProviderAuthority,
+        signing: &ImageSigning,
+    ) -> TestResult<Vec<u8>> {
         let keys = ordered(vec![
             trust_key("policy", 1, &authority.policy),
             trust_key("release", 2, &authority.release),
@@ -1119,8 +1191,8 @@ pub mod tests {
                 integer(2),
                 Value::Array(keys),
                 Value::Array(vec![Value::Array(vec![
-                    digest(Sha256::digest(IMAGE_CERTIFICATE).into()),
-                    Value::Text(IMAGE_KEY_DESCRIPTION.to_owned()),
+                    digest(Sha256::digest(signing.certificate).into()),
+                    Value::Text(signing.key_description.to_owned()),
                     integer(2),
                 ])]),
                 Value::Text("root".to_owned()),
@@ -1321,9 +1393,10 @@ pub mod tests {
         root_image: &[u8],
         executable: &[u8],
         descriptors: &[PartitionDescriptor; 3],
-        der: &[u8],
+        signing: &ImageSigning,
         salt: [u8; 32],
     ) -> TestResult<Vec<u8>> {
+        let der = signing.proof.as_slice();
         let partitions = descriptors
             .iter()
             .enumerate()
@@ -1348,7 +1421,7 @@ pub mod tests {
                 integer(u64::try_from(root_image.len())?),
                 digest(*blake3::hash(root_image).as_bytes()),
                 Value::Array(partitions),
-                Value::Bytes((0_u8..32).collect()),
+                digest(signing.root_hash),
                 integer(4096),
                 integer(4096),
                 integer(1),
@@ -1358,8 +1431,8 @@ pub mod tests {
                     Value::Bytes(Sha256::digest(der).to_vec()),
                     Value::Bytes(der.to_vec()),
                 ]),
-                digest(Sha256::digest(IMAGE_CERTIFICATE).into()),
-                Value::Text(IMAGE_KEY_DESCRIPTION.to_owned()),
+                digest(Sha256::digest(signing.certificate).into()),
+                Value::Text(signing.key_description.to_owned()),
                 Value::Text("/adapter".to_owned()),
                 digest(*blake3::hash(executable).as_bytes()),
                 Value::Array(Vec::new()),
@@ -1549,14 +1622,15 @@ pub mod tests {
             .map_err(|_| "DDI salt is not 32 bytes".into())
     }
 
-    /// The real x86-64 systemd-repart image, its partitions and its verity salt.
+    /// The real x86-64 systemd-repart image with its partitions, verity salt,
+    /// root hash, proof and signer.
     pub(crate) fn admitted_state() -> TestResult<InstalledSelectorState> {
         let (image, partitions) = ddi_fixture("x86-64")?;
         admitted_state_with_salt(
             &image,
             b"adapter",
             &partitions,
-            IMAGE_PROOF,
+            &ImageSigning::ddi("x86-64")?,
             ddi_salt("x86-64")?,
         )
     }
@@ -1590,7 +1664,7 @@ pub mod tests {
             root_image,
             executable,
             partitions,
-            proof,
+            &ImageSigning::synthetic(proof),
             image_verity_salt(),
         )
     }
@@ -1599,11 +1673,11 @@ pub mod tests {
         root_image: &[u8],
         executable: &[u8],
         partitions: &[PartitionDescriptor; 3],
-        proof: &[u8],
+        signing: &ImageSigning,
         salt: [u8; 32],
     ) -> TestResult<InstalledSelectorState> {
         let authority = provider_authority();
-        let trust = provider_trust(&authority)?;
+        let trust = provider_trust(&authority, signing)?;
         let trust_digest = signed_record_digest(&trust)?;
         let revocation = provider_revocation(&authority, trust_digest)?;
         let revocation_digest = signed_record_digest(&revocation)?;
@@ -1628,7 +1702,9 @@ pub mod tests {
             host_digest,
         )?;
         let report_digest = signed_record_digest(&report)?;
-        let image = image_manifest(&authority, root_image, executable, partitions, proof, salt)?;
+        let image = image_manifest(
+            &authority, root_image, executable, partitions, signing, salt,
+        )?;
         let image_digest = signed_record_digest(&image)?;
         let launch = launch_policy(image_digest)?;
         let launch_digest = signed_record_digest(&launch)?;
@@ -1705,8 +1781,16 @@ pub mod tests {
         root: &Path,
         corpus: &crate::selector_test_support::Corpus,
     ) -> TestResult<AdmittedSelectorProvider> {
+        materialize_installation_state(root, corpus, admitted_state()?)
+    }
+
+    /// Write `state` and `corpus` as the root-owned installation at `root`.
+    pub(crate) fn materialize_installation_state(
+        root: &Path,
+        corpus: &crate::selector_test_support::Corpus,
+        mut state: InstalledSelectorState,
+    ) -> TestResult<AdmittedSelectorProvider> {
         let request = EvaluationRequest::from_canonical_cbor(&corpus.request)?;
-        let mut state = admitted_state()?;
         retain_case_artifact(
             &mut state,
             14,
