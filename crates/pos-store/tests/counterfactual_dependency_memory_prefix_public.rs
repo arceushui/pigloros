@@ -375,8 +375,9 @@ fn f7_set_counts_cover_only_the_timelines_own_set() {
     assert_eq!(ok(store.factual_set_counts(lineage.deep)), counts(0));
 }
 
-/// No write path records a fold-head row yet (ADR-064 R4 slice 4), so every
-/// cursor is absent; the in-crate tests seed rows and read them back.
+/// Seeded Ticks write no fold-head row (only a pipeline commit of a scheduled
+/// Tick does, ADR-064 R4.3), so every cursor is absent; the in-crate tests
+/// seed rows and read them back.
 #[test]
 fn f7_fold_cursors_are_absent_without_fold_head_rows() {
     let lineage = lineage();

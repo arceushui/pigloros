@@ -340,14 +340,15 @@ mod tests {
     use pos_core::output_policy::OutputAuthorityV1;
     use pos_core::{
         assemble_factual_tick, AppendDedupScope, AppendIdentity, CanonicalBytes, EntityId,
-        ErasureContainmentGateV1, EventDraft, EventStore, FactualDriverStepV1, FactualHeadV1,
-        FactualOutputV1, FactualOwnerIdV1, FactualPrefixReadPortV1, FactualScheduledTickV1,
-        FactualTickContextV1, FactualTickDependenciesV1, FactualTickShapeV1, Kind,
-        PipelineAdmissionBasisDraftV1, PipelineAttemptDraftV1, PipelineAttemptIdV1,
-        PipelineAttemptV1, PipelineDraftBatchV1, PipelineEvidenceRefV1, PipelineIngressV1,
-        PipelineObservationAnchorV1, PipelinePreconditionV1, PipelineSecurityRevisionsDraftV1,
-        PipelineSecurityRevisionsV1, RecordedSetCountsV1, SeqRange, TentativePipelineResultV1,
-        MAX_RECORDED_DEPENDENCY_NODES_V1, PIPELINE_CONTRACT_VERSION_V1,
+        ErasureContainmentGateV1, EventDraft, EventStore, FactualDriverStepV1, FactualFoldCursorV1,
+        FactualHeadV1, FactualOutputV1, FactualOwnerIdV1, FactualPrefixReadPortV1,
+        FactualScheduledTickV1, FactualTickContextV1, FactualTickDependenciesV1,
+        FactualTickShapeV1, Kind, PipelineAdmissionBasisDraftV1, PipelineAttemptDraftV1,
+        PipelineAttemptIdV1, PipelineAttemptV1, PipelineDraftBatchV1, PipelineEvidenceRefV1,
+        PipelineIngressV1, PipelineObservationAnchorV1, PipelinePreconditionV1,
+        PipelineSecurityRevisionsDraftV1, PipelineSecurityRevisionsV1, RecordedSetCountsV1,
+        SeqRange, TentativePipelineResultV1, MAX_RECORDED_DEPENDENCY_NODES_V1,
+        PIPELINE_CONTRACT_VERSION_V1,
     };
     use ulid::Ulid;
 
@@ -543,6 +544,51 @@ mod tests {
                 last_seq: Seq::from_u64(2),
             }
         );
+    }
+
+    /// ADR-064 R4.3: a scheduled Tick installs one fold-head row with its
+    /// rows, through the `observed_through` of its anchor; a human Tick none.
+    /// The basis declares no fold node, so the row names no head.
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn a_scheduled_tick_installs_one_fold_head_row_and_a_human_tick_none() {
+        let ingresses = [
+            (PipelineIngressV1::ScheduledAiDriver, 1),
+            (PipelineIngressV1::HumanProposedAction, 0),
+        ];
+        for (ingress, rows) in ingresses {
+            let mut store = MemoryStore::new();
+            let timeline = ok(store.create_timeline("admission-fold-head")).id();
+            ok(store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open())));
+            let basis = basis_of(timeline, ingress);
+            let fence = ok(PipelineAdmissionFenceV1::try_new(
+                Hash::from_bytes([7; 32]),
+                basis.security_revisions(),
+                None,
+                10,
+            ));
+            ok(store.set_pipeline_admission_fence(timeline, fence));
+            let staged_fence = ok(fence.after_commit(2).ok_or("budget"));
+
+            let outcome = ok(store.install_pipeline_batch(
+                timeline,
+                &basis,
+                WallTime::from_micros(1),
+                0,
+                Seq::from_u64(1),
+                &staged_fence,
+            ));
+
+            assert!(matches!(outcome, PipelineOutcomeV1::Committed(_)));
+            let counts = store.dependency_row_counts(timeline);
+            assert_eq!(counts[0], rows, "{ingress:?}");
+            let cursor = ok(store.fold_cursor(timeline));
+            let expected = (rows == 1).then_some(FactualFoldCursorV1 {
+                scanned_through: Seq::ZERO,
+                head: None,
+            });
+            assert_eq!(cursor, expected, "{ingress:?}");
+        }
     }
 
     #[test]

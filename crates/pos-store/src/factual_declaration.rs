@@ -11,9 +11,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use pos_core::{
     factual_artifact_digest, factual_ingress_content_digest, factual_output_content_digest,
-    DependencyNodeCoordinateV1, DependencyNodeRecordV1, FactualHostOwnerV1, FactualNodeKeyV1,
-    FactualRuleV1, Hash, PipelineAdmissionBasisV1, PipelineIngressV1, RecordedNodeOriginV1, Seq,
-    TickDependencyRecordV1, TimelineId, FACTUAL_SNAPSHOT_SCHEMA_ID_V1,
+    DependencyNodeCoordinateV1, DependencyNodeRecordV1, FactualFoldBindingV1, FactualHostOwnerV1,
+    FactualNodeKeyV1, FactualRuleV1, Hash, PipelineAdmissionBasisV1, PipelineIngressV1,
+    RecordedNodeOriginV1, Seq, TickDependencyRecordV1, TimelineId,
+    FACTUAL_FOLD_HISTORY_SCHEMA_ID_V1, FACTUAL_FOLD_SCHEMA_ID_V1, FACTUAL_SNAPSHOT_SCHEMA_ID_V1,
+    MAX_FACTUAL_FOLD_CHECKPOINTS_PER_TICK_V1,
 };
 
 /// The rule that fixes the class of the host nodes of each host owner: one
@@ -29,6 +31,10 @@ const HOST_RULES: [(FactualHostOwnerV1, FactualRuleV1); 6] = [
     (FactualHostOwnerV1::Fold, FactualRuleV1::FoldCheckpoint),
     (FactualHostOwnerV1::FoldHistory, FactualRuleV1::FoldHistory),
 ];
+
+/// The fold-history nodes one scheduled record may hold (ADR-064 R4.3: the
+/// binding's `history` has zero or one entry).
+const MAX_FOLD_HISTORY_NODES: usize = 1;
 
 /// The artifact digest the store recomputes for the node at `coordinate` from
 /// the content digest of what the node stands for (R3.3.1).
@@ -205,19 +211,29 @@ pub(crate) fn digest_index(record: &TickDependencyRecordV1) -> DigestIndex<'_> {
         .collect()
 }
 
-/// R3.7.2 (viii): the structural shape of the record, over its `by_digest`
-/// index.
+/// R3.7.2 (viii), as amended by ADR-064 R4.3: the structural shape of the
+/// record, over its `by_digest` index.
 ///
 /// Every output node inputs exactly one step node of its Tick, position and
-/// owner; every step node inputs the snapshot node; every host node declares
-/// no input and has the class of its host owner's rule; a human record holds
-/// nothing but its draft nodes. The store cannot check Driver-output classes,
-/// which need the output policy, nor the step-chain, carried-set, history or
-/// verified-prefix content, which need registry state.
+/// owner; every step node inputs the snapshot node; every host node has the
+/// class of its host owner's rule and declares no input, except the snapshot
+/// node and the fold checkpoint nodes; the fold binding names the fold nodes
+/// (see [`fold_shape_holds`]); a human record holds nothing but its draft
+/// nodes. The store cannot check Driver-output classes, which need the output
+/// policy, nor the step-chain, carried-set, history or verified-prefix
+/// content, which need registry state. The fold content and the fold inputs
+/// are not recomputed here.
 pub(crate) fn shape_holds(basis: &PipelineAdmissionBasisV1, by_digest: &DigestIndex<'_>) -> bool {
     let nodes = basis.dependencies().record().nodes();
     (is_scheduled(basis) || nodes.len() == basis.batch().drafts().len())
-        && nodes.iter().all(|node| node_shape_holds(node, by_digest))
+        && nodes_and_fold_hold(basis, by_digest)
+}
+
+/// Every node has the shape its kind requires, and so has the fold part.
+fn nodes_and_fold_hold(basis: &PipelineAdmissionBasisV1, by_digest: &DigestIndex<'_>) -> bool {
+    let nodes = basis.dependencies().record().nodes();
+    let each = nodes.iter().all(|node| node_shape_holds(node, by_digest));
+    each && fold_shape_holds(basis, by_digest)
 }
 
 /// Whether one node has the shape its kind requires.
@@ -232,14 +248,180 @@ fn node_shape_holds(node: &DependencyNodeRecordV1, by_digest: &DigestIndex<'_>) 
     }
 }
 
-/// A host node declares no input and has the class its owner's rule assigns.
+/// A host node has the class its owner's rule assigns, and declares no input
+/// unless it is the snapshot node or a fold checkpoint node, whose inputs
+/// [`fold_shape_holds`] checks.
 fn host_node_shape_holds(node: &DependencyNodeRecordV1) -> bool {
     let owner = node.coordinate().owner_id();
     let rule = HOST_RULES
         .iter()
         .find(|(host, _)| host.as_str() == owner)
         .map(|(_, rule)| *rule);
-    node.input_digests().is_empty() && rule.is_some_and(|found| node.class() == found.class())
+    inputs_allowed(node, rule) && rule.is_some_and(|found| node.class() == found.class())
+}
+
+/// Whether the host node's inputs are allowed by its rule: only the snapshot
+/// node and the fold checkpoint nodes may declare any (ADR-064 R4.3, (viii)).
+fn inputs_allowed(node: &DependencyNodeRecordV1, rule: Option<FactualRuleV1>) -> bool {
+    let may_input = matches!(
+        rule,
+        Some(FactualRuleV1::ObservationSnapshot | FactualRuleV1::FoldCheckpoint)
+    );
+    may_input || node.input_digests().is_empty()
+}
+
+/// The node at `index` if it is the host node of `owner` at the output
+/// ordinal and schema ID `at`.
+fn fold_node_at(
+    nodes: &[DependencyNodeRecordV1],
+    index: u32,
+    owner: FactualHostOwnerV1,
+    at: (u32, u32),
+) -> Option<&DependencyNodeRecordV1> {
+    let (ordinal, schema_id) = at;
+    node_at(nodes, index).filter(|node| {
+        let coordinate = node.coordinate();
+        is_host_node(coordinate, owner)
+            && coordinate.output_ordinal() == ordinal
+            && coordinate.schema_id() == schema_id
+    })
+}
+
+/// How many nodes of the record the host owner holds.
+fn owned_count(nodes: &[DependencyNodeRecordV1], owner: FactualHostOwnerV1) -> usize {
+    nodes
+        .iter()
+        .filter(|node| is_host_node(node.coordinate(), owner))
+        .count()
+}
+
+/// The fold checkpoint nodes the binding names, in chain order, if each is
+/// the fold node at its own ordinal.
+fn bound_checkpoints<'a>(
+    nodes: &'a [DependencyNodeRecordV1],
+    fold: &FactualFoldBindingV1,
+) -> Option<Vec<&'a DependencyNodeRecordV1>> {
+    let named = (0_u32..).zip(&fold.checkpoints).map(|(ordinal, index)| {
+        let at = (ordinal, FACTUAL_FOLD_SCHEMA_ID_V1);
+        fold_node_at(nodes, *index, FactualHostOwnerV1::Fold, at)
+    });
+    named.collect()
+}
+
+/// The fold-history node the binding names, if it is the one at ordinal 0.
+fn bound_history<'a>(
+    nodes: &'a [DependencyNodeRecordV1],
+    fold: &FactualFoldBindingV1,
+) -> Option<Vec<&'a DependencyNodeRecordV1>> {
+    let at = (0, FACTUAL_FOLD_HISTORY_SCHEMA_ID_V1);
+    let named = fold
+        .history
+        .iter()
+        .map(|index| fold_node_at(nodes, *index, FactualHostOwnerV1::FoldHistory, at));
+    named.collect()
+}
+
+/// Whether `node` declares the artifact digest of `source`.
+fn inputs_node(node: &DependencyNodeRecordV1, source: &DependencyNodeRecordV1) -> bool {
+    let digest = source.coordinate().artifact_digest();
+    node.input_digests().contains(&digest)
+}
+
+/// Whether each fold checkpoint node after the first inputs the one before
+/// it, and the first inputs the fold-history node, if there is one.
+fn chain_holds(
+    checkpoints: &[&DependencyNodeRecordV1],
+    history: &[&DependencyNodeRecordV1],
+) -> bool {
+    let linked = checkpoints
+        .windows(2)
+        .all(|pair| inputs_node(pair[1], pair[0]));
+    let first = checkpoints.first();
+    let behind = history
+        .first()
+        .is_none_or(|collapsed| first.is_some_and(|head| inputs_node(head, collapsed)));
+    linked && behind
+}
+
+/// The ADR-064 R4.3 shape of the fold part (the structural half of checks
+/// (ix) and (x); slice 5 recomputes the fold inputs and contents).
+///
+/// The binding names at most five fold checkpoint nodes, in ordinal order,
+/// and at most one fold-history node, and they are every such node of the
+/// record. The checkpoints chain, the first behind the fold-history node. The
+/// snapshot node inputs exactly the last checkpoint; without one it inputs at
+/// most one node, which is no node of the record: the head, a node of the
+/// prefix that check (vii) resolves.
+fn fold_shape_holds(basis: &PipelineAdmissionBasisV1, by_digest: &DigestIndex<'_>) -> bool {
+    let dependencies = basis.dependencies();
+    let nodes = dependencies.record().nodes();
+    let fold = dependencies.fold();
+    let bounded = fold.checkpoints.len() <= MAX_FACTUAL_FOLD_CHECKPOINTS_PER_TICK_V1
+        && fold.history.len() <= MAX_FOLD_HISTORY_NODES;
+    let named = bound_checkpoints(nodes, fold).zip(bound_history(nodes, fold));
+    named.is_some_and(|(checkpoints, history)| {
+        bounded
+            && checkpoints.len() == owned_count(nodes, FactualHostOwnerV1::Fold)
+            && history.len() == owned_count(nodes, FactualHostOwnerV1::FoldHistory)
+            && chain_holds(&checkpoints, &history)
+            && snapshot_input_holds(nodes, checkpoints.last().copied(), by_digest)
+    })
+}
+
+/// The snapshot node inputs exactly the last fold checkpoint node, or, when
+/// the record has none, at most one node outside the record.
+fn snapshot_input_holds(
+    nodes: &[DependencyNodeRecordV1],
+    last: Option<&DependencyNodeRecordV1>,
+    by_digest: &DigestIndex<'_>,
+) -> bool {
+    let outside = |declared: &[Hash]| {
+        let foreign = declared
+            .iter()
+            .all(|digest| !by_digest.contains_key(digest));
+        declared.len() <= 1 && foreign
+    };
+    nodes
+        .iter()
+        .filter(|node| is_host_node(node.coordinate(), FactualHostOwnerV1::Observation))
+        .all(|snapshot| {
+            let declared = snapshot.input_digests();
+            last.map_or_else(
+                || outside(declared),
+                |checkpoint| declared == [checkpoint.coordinate().artifact_digest()],
+            )
+        })
+}
+
+/// The fold-head row a checked scheduled Tick writes (ADR-064 R4.3): the
+/// anchor's `observed_through` and the artifact digest of the head after the
+/// Tick, which is its last fold checkpoint node, else the head the snapshot
+/// node inputs, else 32 zero bytes. A human Tick writes none.
+///
+/// The head is read from the record the shape check accepted; check (x) of
+/// slice 5 adds that a head without a fold node is the persisted one.
+pub(crate) fn fold_head_row(basis: &PipelineAdmissionBasisV1) -> Option<(Seq, Hash)> {
+    is_scheduled(basis).then(|| fold_head_of(basis))
+}
+
+/// The fold-head row of a scheduled basis: its anchor and head digest.
+fn fold_head_of(basis: &PipelineAdmissionBasisV1) -> (Seq, Hash) {
+    let observed = basis.attempt().observation().observed_through();
+    let dependencies = basis.dependencies();
+    let nodes = dependencies.record().nodes();
+    let last = dependencies.fold().checkpoints.last();
+    let checkpoint = last.and_then(|index| node_at(nodes, *index));
+    let snapshot_input = || {
+        nodes
+            .iter()
+            .find(|node| is_host_node(node.coordinate(), FactualHostOwnerV1::Observation))
+            .and_then(|snapshot| snapshot.input_digests().first().copied())
+    };
+    let head = checkpoint
+        .map(|node| node.coordinate().artifact_digest())
+        .or_else(snapshot_input)
+        .unwrap_or_else(Hash::zero);
+    (observed, head)
 }
 
 /// A step node inputs the snapshot node of the record.

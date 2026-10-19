@@ -156,7 +156,14 @@ pub enum FactualHostOwnerV1 {
     History,
     /// The ingress and human-ingress nodes.
     Ingress,
-    /// The fold checkpoint nodes.
+    /// The fold checkpoint nodes, owner ID `host.lineage` (ADR-064 R4.3 as
+    /// corrected on 2026-10-19).
+    ///
+    /// The owner ID sorts after `host.ingress` and `host.fold-history` and
+    /// before `host.observation`, so every edge of the fold part, from an
+    /// ingress or fold-history node of the same Tick into a fold node and
+    /// from a fold node into the snapshot node, has its source before its
+    /// consumer in `IDP1` order.
     Fold,
     /// The fold-history node.
     FoldHistory,
@@ -169,7 +176,7 @@ impl FactualHostOwnerV1 {
         "host.prefix",
         "host.history",
         "host.ingress",
-        "host.fold",
+        "host.lineage",
         "host.fold-history",
     ];
 

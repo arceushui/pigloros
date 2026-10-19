@@ -8,6 +8,12 @@
 //! lacks, and has `assemble_factual_tick` turn the resolved inputs into the
 //! declaration the admission basis binds. Every failure aborts the staged
 //! Drivers before any store call.
+//!
+//! It also reads the Timeline's fold cursor and the fold window after it
+//! through the anchor (ADR-064 Revision 4, R4.2), so the assembly records the
+//! fold checkpoint nodes behind the snapshot node. Before the Timeline's
+//! first fold-head row the window starts at `Seq::ZERO`: the first Tick after
+//! the rollout covers the whole earlier prefix (R4.4).
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -20,10 +26,11 @@ use pos_core::{
     assemble_factual_tick, factual_dependency::BoundFactualNodeV1, factual_event_schema_id,
     factual_verified_prefix_content_digest, CoreError, CounterfactualDependencyErrorV1,
     DependencyNodeRecordV1, Event, EventDraft, FactualDependencyErrorV1, FactualDriverStepV1,
-    FactualEventRefV1, FactualHostOwnerV1, FactualIngressEventV1, FactualInputV1, FactualOutputV1,
-    FactualPrefixReadPortV1, FactualPriorNodeV1, FactualScheduledTickV1, FactualTickContextV1,
-    FactualTickDependenciesV1, FactualTickShapeV1, Hash, Kind, PluginId, Seq,
-    TickDependencyRecordV1, MAX_OUTPUT_DIRECT_INPUTS_V1, MAX_STEP_INPUTS_PER_DRIVER_V1,
+    FactualEventRefV1, FactualFoldSourceV1, FactualFoldWindowV1, FactualHostOwnerV1,
+    FactualIngressEventV1, FactualInputV1, FactualOutputV1, FactualPrefixReadPortV1,
+    FactualPriorNodeV1, FactualScheduledTickV1, FactualTickContextV1, FactualTickDependenciesV1,
+    FactualTickShapeV1, Hash, Kind, PluginId, Seq, TickDependencyRecordV1, TimelineId,
+    MAX_OUTPUT_DIRECT_INPUTS_V1, MAX_STEP_INPUTS_PER_DRIVER_V1,
 };
 
 use super::{
@@ -508,6 +515,7 @@ impl PassBuild {
         self,
         snapshot_digest: Hash,
         drivers: Vec<FactualDriverStepV1>,
+        fold: FactualFoldSourceV1,
     ) -> FactualScheduledTickV1 {
         FactualScheduledTickV1 {
             snapshot_digest,
@@ -515,7 +523,7 @@ impl PassBuild {
             history_contents: self.history_contents.order,
             ingress_events: self.ingress.into_values().collect(),
             drivers,
-            fold: None,
+            fold: Some(Box::new(fold)),
         }
     }
 
@@ -687,13 +695,53 @@ fn prior_input(node: &DependencyNodeRecordV1) -> FactualInputV1 {
     FactualInputV1::Prior(FactualPriorNodeV1::from_record(node))
 }
 
+/// Read the Timeline's fold cursor and the fold window after it through
+/// `observed_through` (ADR-064 R4.2): the window starts after the cursor's
+/// scanned-through `seq`, or at `Seq::ZERO` before the first fold-head row.
+/// A Tick whose window is empty reads only the fold-head row (R4.6).
+fn read_fold_source(
+    port: &dyn FactualPrefixReadPortV1,
+    timeline: TimelineId,
+    observed_through: Seq,
+) -> Result<FactualFoldSourceV1, CoreError> {
+    let read = port.fold_cursor(timeline);
+    read.and_then(|cursor| {
+        let after = cursor
+            .as_ref()
+            .map_or(Seq::ZERO, |found| found.scanned_through);
+        let scanned = read_fold_window(port, timeline, (after, observed_through));
+        scanned.map(|window| FactualFoldSourceV1 {
+            observed_through,
+            cursor,
+            window,
+        })
+    })
+}
+
+/// The fold window of the range `(after, through]`, read only when it is not
+/// empty.
+fn read_fold_window(
+    port: &dyn FactualPrefixReadPortV1,
+    timeline: TimelineId,
+    range: (Seq, Seq),
+) -> Result<FactualFoldWindowV1, CoreError> {
+    let (after, through) = range;
+    if after < through {
+        port.fold_window(timeline, after, through)
+    } else {
+        Ok(FactualFoldWindowV1::default())
+    }
+}
+
 impl PluginRegistry {
     /// Build the factual Tick declaration of a staged scheduled pass.
     ///
     /// It is the builder of ADR-064 R3.8.1: it runs after output admission and
     /// schema validation and before the admission basis, reads the prefix
     /// through the port, and writes the step nodes and history nodes of the
-    /// record into `pending` for `commit_pending_step`.
+    /// record into `pending` for `commit_pending_step`. It reads the fold
+    /// cursor and window through the same port (ADR-064 R4.3), so the step
+    /// phase still holds no port.
     pub(super) fn scheduled_dependencies(
         &self,
         port: &dyn FactualPrefixReadPortV1,
@@ -705,8 +753,8 @@ impl PluginRegistry {
         ensure_declared_caps(&pending.factual).map_err(RuntimeError::DependencyDeclaration)?;
         let timeline = pending.timeline;
         let tick = self.declared_tick(port, pending)?;
-        let lookups = self
-            .read_lookups(port, pending)
+        let (lookups, fold) = self
+            .read_pass_inputs(port, pending, through)
             .map_err(RuntimeError::Store)?;
         let context = FactualTickContextV1 {
             timeline_id: timeline,
@@ -716,7 +764,7 @@ impl PluginRegistry {
             authority_grant: admission.authority_grant,
         };
         let scheduled = self
-            .scheduled_shape(pending, lookups, through, snapshot_digest)
+            .scheduled_shape(pending, lookups, (through, snapshot_digest), fold)
             .map_err(RuntimeError::DependencyDeclaration)?;
         let history_contents = scheduled.history_contents.clone();
         let shape = FactualTickShapeV1::Scheduled(scheduled);
@@ -757,15 +805,32 @@ impl PluginRegistry {
         &self,
         pending: &PendingStep,
         lookups: Lookups,
-        through: Seq,
-        snapshot_digest: Hash,
+        anchor: (Seq, Hash),
+        fold: FactualFoldSourceV1,
     ) -> Result<FactualScheduledTickV1, FactualDependencyErrorV1> {
+        let (through, snapshot_digest) = anchor;
         let mut build = PassBuild::new(self, pending, lookups, through);
         let mut drivers = Vec::with_capacity(pending.driver_ids.len());
         for (index, id) in pending.driver_ids.iter().enumerate() {
             drivers.push(build.driver_step(&self.plugins[id], index, pending)?);
         }
-        Ok(build.finish(snapshot_digest, drivers))
+        Ok(build.finish(snapshot_digest, drivers, fold))
+    }
+
+    /// Read the recorded nodes the pass names, then the fold cursor and window
+    /// through the anchor's `through` (ADR-064 R4.2).
+    fn read_pass_inputs(
+        &self,
+        port: &dyn FactualPrefixReadPortV1,
+        pending: &PendingStep,
+        through: Seq,
+    ) -> Result<(Lookups, FactualFoldSourceV1), CoreError> {
+        let timeline = pending.timeline;
+        let lookups = self.read_lookups(port, pending);
+        lookups.and_then(|found| {
+            let fold = read_fold_source(port, timeline, through);
+            fold.map(|source| (found, source))
+        })
     }
 
     /// Read the recorded nodes the pass names, with one batched read per kind.

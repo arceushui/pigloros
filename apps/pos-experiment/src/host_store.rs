@@ -1047,8 +1047,8 @@ mod host_store_tests {
     }
 
     /// Insert a fold-head row of `timeline` without a head, scanned through
-    /// `seq` 1, into the `SQLite` file while no store holds it: no write path
-    /// records one yet (ADR-064 R4 slice 4).
+    /// `seq` 1, into the `SQLite` file while no store holds it, so the reads
+    /// need no scheduled Tick.
     fn seed_fold_head(path: &std::path::Path, timeline: TimelineId) -> rusqlite::Result<()> {
         let zero = "0".repeat(64);
         let table = "counterfactual_dependency_fold_heads";

@@ -283,7 +283,7 @@ fn host_owners_are_the_documented_literals() {
         (FactualHostOwnerV1::Prefix, "host.prefix"),
         (FactualHostOwnerV1::History, "host.history"),
         (FactualHostOwnerV1::Ingress, "host.ingress"),
-        (FactualHostOwnerV1::Fold, "host.fold"),
+        (FactualHostOwnerV1::Fold, "host.lineage"),
         (FactualHostOwnerV1::FoldHistory, "host.fold-history"),
     ];
     for (owner, literal) in literals {
@@ -1625,7 +1625,7 @@ fn recorded(coordinate: DependencyNodeCoordinateV1, class: RecordedDependencyCla
 
 /// The fold checkpoint node an earlier Tick recorded: the head.
 fn fold_head(tick: u64) -> Node {
-    let owner = "host.fold".to_owned();
+    let owner = "host.lineage".to_owned();
     let schema = FACTUAL_FOLD_SCHEMA_ID_V1;
     let coordinate = DependencyNodeCoordinateV1::try_new(tick, 0, owner, 0, schema, hash(0x91));
     recorded(ok(coordinate), ENDOGENOUS)
@@ -1695,7 +1695,7 @@ fn host_artifact(owner: &str, ordinal: u32, schema_id: u32, content: Hash) -> Ha
 }
 
 fn fold_artifact(ordinal: u32, content: Hash) -> Hash {
-    host_artifact("host.fold", ordinal, FACTUAL_FOLD_SCHEMA_ID_V1, content)
+    host_artifact("host.lineage", ordinal, FACTUAL_FOLD_SCHEMA_ID_V1, content)
 }
 
 fn history_artifact(from: u64, through: u64) -> Hash {
@@ -1771,7 +1771,7 @@ fn a_fold_node_chains_to_the_head_and_inputs_exactly_the_fold_inputs() {
     let provenance = factual_provenance_digest(
         &context(TICK),
         SCHEDULED,
-        "host.fold",
+        "host.lineage",
         Hash::zero(),
         FactualRuleV1::FoldCheckpoint,
     );
