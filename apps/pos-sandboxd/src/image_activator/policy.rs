@@ -11,7 +11,7 @@
 //! `image_policy_to_string()` never emits those forms, so an honest effective
 //! policy is unaffected.
 //!
-//! Proposed ADR-087 #439 effective-policy amendment: v260.2 mountfsd
+//! Accepted ADR-087 Part A.1 effective-policy amendment: v260.2 mountfsd
 //! returns `image_policy_intersect(default, request)`, and neither default
 //! carries filesystem flags, so the effective policy loses them. The returned
 //! policy is therefore accepted when it is equivalent to the request, or to

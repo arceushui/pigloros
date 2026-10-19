@@ -59,8 +59,8 @@ NUL-terminated message. The captured bytes are then parsed under a closed
 systemd v260.2 schema. Under ported v260.2 `image_policy_equivalent()` rules,
 the effective image policy must be equivalent to the request or, because
 v260.2 intersects it with a default that carries no filesystem flags, to the
-request with only its filesystem flags removed (proposed ADR-087 #439
-effective-policy amendment). EROFS stays enforced by the SIM1 precheck, the
+request with only its filesystem flags removed (accepted ADR-087 Part
+A.1 effective-policy amendment). EROFS stays enforced by the SIM1 precheck, the
 reply's `fileSystemType` and kernel readback. Every rejection closes all
 received descriptors. The result is a quarantined root mount, not proof of the
 image, the mount or its dm-verity identity.

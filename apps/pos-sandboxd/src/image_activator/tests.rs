@@ -261,7 +261,7 @@ async fn one_call_sends_the_held_image_and_returns_one_sealed_root_mount() -> Te
 #[tokio::test]
 async fn the_v260_2_intersected_effective_policy_is_accepted() -> TestResult {
     // mountfsd returns image_policy_intersect(default, request); neither
-    // default carries filesystem flags (proposed ADR-087 #439 amendment).
+    // default carries filesystem flags (accepted ADR-087 Part A.1).
     for policy in ["root=signed:=absent", "root=signed+erofs:=absent"] {
         let reply = with(|reply| reply["parameters"]["imagePolicy"] = json!(policy));
         let transaction = transact(single(message(&reply)?, 1)).await?;
