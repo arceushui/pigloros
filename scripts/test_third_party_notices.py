@@ -12,6 +12,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import yaml
 
@@ -31,16 +32,28 @@ def package(name: str, version: str = "1.0.0") -> dict:
     return {"id": f"registry#{name}@{version}", "name": name, "version": version}
 
 
-def report(*names: str) -> dict:
-    """A minimal cargo-about JSON report: each crate MIT with its own text."""
-    crates = [{"package": package(name), "license": "MIT"} for name in names]
+def locked(lock: str, name: str) -> str:
+    """The version `lock` pins for registry package `name`."""
+    versions = sorted(v for n, v in notices.lock_packages(ROOT, lock) if n == name)
+    if len(versions) != 1:
+        raise AssertionError(f"{lock} pins {name} at {versions}")
+    return versions[0]
+
+
+def report(*names: str, lock: str | None = None) -> dict:
+    """A minimal cargo-about JSON report: each crate MIT with its own text.
+
+    With `lock`, each crate takes the version that lockfile pins.
+    """
+    version = {name: locked(lock, name) if lock else "1.0.0" for name in names}
+    crates = [{"package": package(name, version[name]), "license": "MIT"} for name in names]
     licences = [
         {
             "name": "MIT License",
             "id": "MIT",
             "text": f"MIT text of {name}\n",
             "source_path": "LICENSE-MIT",
-            "used_by": [{"crate": package(name), "path": None}],
+            "used_by": [{"crate": package(name, version[name]), "path": None}],
         }
         for name in names
     ]
@@ -49,9 +62,9 @@ def report(*names: str) -> dict:
 
 def reports() -> dict[str, dict]:
     return {
-        "Cargo.lock": report("wasmtime", "anyhow"),
-        GUEST: report("wit-bindgen"),
-        PROBE: report("blake3"),
+        "Cargo.lock": report("wasmtime", "anyhow", lock="Cargo.lock"),
+        GUEST: report("wit-bindgen", lock=GUEST),
+        PROBE: report("blake3", lock=PROBE),
     }
 
 
@@ -151,6 +164,10 @@ class PolicyMirrorTests(WorkspaceTest):
                 "private = { ignore = false }",
             ),
             "must not set workarounds": ("targets =", 'workarounds = ["ring"]\ntargets ='),
+            "must not set ignore-build-dependencies": (
+                "targets =",
+                "ignore-build-dependencies = true\ntargets =",
+            ),
         }
         for fragment, (old, new) in cases.items():
             with self.subTest(fragment=fragment):
@@ -189,6 +206,11 @@ class ManifestTests(WorkspaceTest):
         self.assertTrue(any("LICENSE_CC0 is missing" in error for error in errors), errors)
         self.assertTrue(any("COPYRIGHT is empty" in error for error in errors), errors)
 
+    def test_nested_manifest_name_is_not_exempt(self) -> None:
+        nested = self.workspace.path("third_party/notices/rust/manifest.toml")
+        nested.write_text("schema = 1\n", encoding="utf-8")
+        self.assert_error("rust/manifest.toml is not in the manifest")
+
     def test_unlisted_text_fails(self) -> None:
         self.workspace.path("third_party/notices/rust/EXTRA").write_text("x\n", encoding="utf-8")
         self.assert_error("rust/EXTRA is not in the manifest")
@@ -210,6 +232,7 @@ class ManifestTests(WorkspaceTest):
                 'path = "src/llvm-project", branch = "main" }',
             ),
             "excerpt needs lines": ("lines = [1, 5]", "lines = [5, 1]"),
+            "excerpt needs lines [first": ("lines = [1, 4]", "lines = [true, true]"),
             "needs a sha256 digest": (
                 'sha256 = "00fcc7a934ddbc9ece2a7cc063ac788e284b703b1d705ccbba72d462aa97921e"',
                 'sha256 = "00fc"',
@@ -376,6 +399,42 @@ class UpstreamTests(WorkspaceTest):
         self.assertEqual(notices.excerpt_bytes(b"1\n2\n3\n", [2, 3]), b"2\n3\n")
 
 
+class GitTests(unittest.TestCase):
+    def test_git_retries_then_reports_stderr(self) -> None:
+        calls = []
+
+        def failing(command, **kwargs):
+            calls.append(kwargs["timeout"])
+            raise notices.subprocess.CalledProcessError(128, command, stderr="fatal: no route\n")
+
+        with mock.patch.object(notices.subprocess, "run", failing):
+            with self.assertRaisesRegex(
+                notices.NoticeError, "git ls-remote x failed: fatal: no route"
+            ):
+                notices.git("ls-remote", "x")
+        self.assertEqual(calls, [notices.GIT_TIMEOUT_SECONDS] * notices.FETCH_ATTEMPTS)
+
+    def test_git_reports_a_timeout(self) -> None:
+        def hanging(command, **kwargs):
+            raise notices.subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+        with mock.patch.object(notices.subprocess, "run", hanging):
+            with self.assertRaisesRegex(notices.NoticeError, "timed out"):
+                notices.git("fetch")
+
+    def test_git_succeeds_after_a_transient_failure(self) -> None:
+        results = [notices.subprocess.CalledProcessError(1, "git", stderr="reset"), "ok"]
+
+        def flaky(command, **kwargs):
+            result = results.pop(0)
+            if isinstance(result, Exception):
+                raise result
+            return notices.subprocess.CompletedProcess(command, 0, stdout=result)
+
+        with mock.patch.object(notices.subprocess, "run", flaky):
+            self.assertEqual(notices.git("ls-remote"), "ok")
+
+
 class ReportTests(unittest.TestCase):
     def test_valid_report_passes(self) -> None:
         self.assertEqual(notices.check_report(report("a", "b"), "Cargo.lock"), [])
@@ -393,6 +452,16 @@ class ReportTests(unittest.TestCase):
         self.assertIn(
             "Cargo.lock: b 1.0.0 has no licence text", notices.check_report(bad, "Cargo.lock")
         )
+
+    def test_empty_report_fails(self) -> None:
+        for key in ("crates", "licenses"):
+            with self.subTest(key=key):
+                bad = report("a")
+                bad[key] = []
+                self.assertEqual(
+                    notices.check_report(bad, "Cargo.lock"),
+                    ["Cargo.lock: the cargo-about report lists no crates or no licences"],
+                )
 
     def test_empty_text_fails(self) -> None:
         bad = report("a")
@@ -436,6 +505,20 @@ class AssembleTests(WorkspaceTest):
         graphs["Cargo.lock"]["licenses"][0]["source_path"] = None
         text, _ = notices.assemble(self.workspace.root, graphs)
         self.assertIn("from the SPDX licence list text (the crate ships none)", text)
+
+    def test_report_from_another_graph_fails(self) -> None:
+        graphs = reports()
+        graphs[GUEST] = report("wasmtime", lock="Cargo.lock")
+        with self.assertRaisesRegex(notices.NoticeError, f"is not a registry package of {GUEST}"):
+            notices.assemble(self.workspace.root, graphs)
+
+    def test_licence_texts_are_ordered_by_id_then_digest(self) -> None:
+        graphs = reports()
+        graphs["Cargo.lock"]["licenses"].reverse()
+        first, _ = notices.assemble(self.workspace.root, graphs)
+        graphs["Cargo.lock"]["licenses"].reverse()
+        second, _ = notices.assemble(self.workspace.root, graphs)
+        self.assertEqual(first, second)
 
     def test_every_graph_report_is_required(self) -> None:
         graphs = reports()

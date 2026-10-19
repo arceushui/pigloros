@@ -121,7 +121,12 @@ def check_about_config(about: dict, deny: dict, label: str, targets: list[str]) 
         errors.append(f"{label} must set ignore-dev-dependencies = true")
     if about.get("private") != {"ignore": True}:
         errors.append(f"{label} must set private = {{ ignore = true }}")
-    for key in ("workarounds", "ignore-transitive-dependencies", "max-depth"):
+    for key in (
+        "workarounds",
+        "ignore-build-dependencies",
+        "ignore-transitive-dependencies",
+        "max-depth",
+    ):
         if key in about:
             errors.append(f"{label} must not set {key}")
     return errors
@@ -195,7 +200,7 @@ def check_file_entry(label: str, entry: dict) -> list[str]:
         if (
             not isinstance(lines, list)
             or len(lines) != 2
-            or not all(isinstance(line, int) for line in lines)
+            or not all(type(line) is int for line in lines)
             or not 1 <= lines[0] <= lines[1]
             or not is_digest(entry.get("excerpt_sha256"))
         ):
@@ -245,7 +250,7 @@ def check_local_texts(manifest: dict, notices_dir: Path) -> list[str]:
             if sha256(data) != expected_local_digest(entry):
                 errors.append(f"notice text {entry['local']} does not match its digest")
     for path in sorted(notices_dir.rglob("*")):
-        if path.is_file() and path.name != "manifest.toml" and path not in listed:
+        if path.is_file() and path != notices_dir / MANIFEST.name and path not in listed:
             errors.append(f"notice text {path.relative_to(notices_dir)} is not in the manifest")
     return errors
 
@@ -324,10 +329,27 @@ def fetch_url(url: str) -> bytes:
     raise NoticeError(f"could not fetch {url}: {last}")
 
 
+GIT_TIMEOUT_SECONDS = 300
+
+
 def git(*args: str, cwd: Path | None = None) -> str:
-    return subprocess.run(
-        ["git", *args], cwd=cwd, check=True, capture_output=True, text=True
-    ).stdout
+    """Run git, retrying transient failures; report its stderr on failure."""
+    failure = ""
+    for _ in range(FETCH_ATTEMPTS):
+        try:
+            return subprocess.run(
+                ["git", *args],
+                cwd=cwd,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=GIT_TIMEOUT_SECONDS,
+            ).stdout
+        except subprocess.CalledProcessError as error:
+            failure = error.stderr.strip()
+        except subprocess.TimeoutExpired:
+            failure = f"timed out after {GIT_TIMEOUT_SECONDS} s"
+    raise NoticeError(f"git {' '.join(args)} failed: {failure}")
 
 
 def resolve_tag(repository: str, tag: str) -> str:
@@ -411,6 +433,8 @@ def check_report(report: dict, label: str) -> list[str]:
     errors: list[str] = []
     crates = report.get("crates", [])
     licences = report.get("licenses", [])
+    if not crates or not licences:
+        return [f"{label}: the cargo-about report lists no crates or no licences"]
     covered: set[str] = set()
     for licence in licences:
         if not str(licence.get("text", "")).strip():
@@ -424,6 +448,25 @@ def check_report(report: dict, label: str) -> list[str]:
         elif package["id"] not in covered:
             errors.append(f"{label}: {crate_label(package)} has no licence text")
     return errors
+
+
+def lock_packages(root: Path, lock: str) -> set[tuple[str, str]]:
+    """Return the (name, version) of every registry package in a lockfile."""
+    packages = load_toml(root, Path(lock)).get("package", [])
+    return {
+        (package["name"], package["version"])
+        for package in packages
+        if str(package.get("source", "")).startswith("registry+")
+    }
+
+
+def check_report_graph(report: dict, packages: set[tuple[str, str]], label: str) -> list[str]:
+    """A report may list only registry packages that its lockfile pins."""
+    return [
+        f"{label}: {crate_label(crate['package'])} is not a registry package of {label}"
+        for crate in report.get("crates", [])
+        if (crate["package"]["name"], crate["package"]["version"]) not in packages
+    ]
 
 
 def text_source(licence: dict) -> str:
@@ -444,7 +487,10 @@ def render_report(lock: str, lock_digest: str, report: dict) -> tuple[list[str],
     ]
     lines += [f"  {crate_label(crate['package'])}: {crate['license']}" for crate in crates]
     texts = []
-    for licence in report["licenses"]:
+    licences = sorted(
+        report["licenses"], key=lambda licence: (licence["id"], sha256(licence["text"].encode()))
+    )
+    for licence in licences:
         users = sorted(crate_label(used["crate"]) for used in licence["used_by"])
         lines += [
             "",
@@ -531,6 +577,8 @@ def assemble(root: Path, reports: dict[str, dict]) -> tuple[str, str]:
         errors.append(f"cargo-about reports {sorted(reports)} must be exactly {sorted(expected)}")
     for lock in sorted(reports):
         errors += check_report(reports[lock], lock)
+        if lock in expected:
+            errors += check_report_graph(reports[lock], lock_packages(root, lock), lock)
     if errors:
         raise NoticeError("\n".join(errors))
 
@@ -601,7 +649,7 @@ def main(argv: list[str] | None = None, root: Path = ROOT) -> int:
             (args.output / TEXT_NAME).write_text(text, encoding="utf-8")
             (args.output / INDEX_NAME).write_text(index, encoding="utf-8")
             errors = []
-    except (NoticeError, subprocess.CalledProcessError) as error:
+    except NoticeError as error:
         errors = [str(error)]
     for error in errors:
         print(f"error: {error}", file=sys.stderr)
