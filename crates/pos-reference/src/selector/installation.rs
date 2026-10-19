@@ -1096,10 +1096,10 @@ pub mod tests {
         include_bytes!("../../tests/vectors/sim1-pkcs7/proof.der");
     const IMAGE_CERTIFICATE: &[u8] = include_bytes!("../../tests/vectors/sim1-pkcs7/signer.der");
     // The kernel's x509 description of IMAGE_CERTIFICATE: subject CN, then SKID.
-    pub(crate) const IMAGE_KEY_DESCRIPTION: &str =
+    const IMAGE_KEY_DESCRIPTION: &str =
         "PiglorOS SIM1 interoperability fixture: beb62aa1770ab755e4fe5d9ed9477912a7958633";
     /// A synthetic 32-byte verity salt for the synthetic GPT fixtures.
-    pub(crate) fn image_verity_salt() -> [u8; 32] {
+    fn image_verity_salt() -> [u8; 32] {
         *blake3::hash(b"PiglorOS synthetic SIM1 verity salt").as_bytes()
     }
 

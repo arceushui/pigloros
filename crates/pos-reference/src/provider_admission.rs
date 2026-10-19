@@ -7,8 +7,8 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::sandbox_provider_protocol::{
-    AdmittedSandboxImage, BuiltinKeyringListing, LaunchPolicy, SandboxExecuteRequest,
-    SignedImageManifest, VerifiedSandboxImageProof,
+    AdmittedSandboxImage, LaunchPolicy, SandboxExecuteRequest, SignedImageManifest,
+    VerifiedSandboxImageProof,
 };
 use crate::selector::installation::authority::{
     AdmittedSelectorProvider, AuthenticatedSelectorBootstrap,
@@ -36,24 +36,16 @@ pub struct ProviderImageSnapshot {
 impl ProviderImageSnapshot {
     /// Open the fixed installation and independently check SPX1's image inputs.
     ///
-    /// `keyring` is the provider's current `.builtin_trusted_keys` listing.
-    /// It must hold exactly one key, an asymmetric one, with the kernel key
-    /// description of the TRS1 certificate that matched this image's SIM1.
-    ///
     /// # Errors
     /// Rejects malformed requests, pending installation recovery, unsafe files,
     /// unauthenticated or inconsistent authority, invalid image/GPT/executable
-    /// bytes, a release key not held exactly once in the built-in keyring,
-    /// unaccepted launch policy, and invalid or time-expired CMS proofs.
-    pub fn open(
-        request_bytes: &[u8],
-        keyring: &BuiltinKeyringListing,
-    ) -> Result<Self, SelectorBoundaryError> {
+    /// bytes, unaccepted launch policy, and invalid or time-expired CMS proofs.
+    pub fn open(request_bytes: &[u8]) -> Result<Self, SelectorBoundaryError> {
         SandboxExecuteRequest::from_canonical_cbor(request_bytes)
             .map_err(invalid)
             .and_then(|request| {
                 InstalledSelectorState::open().and_then(|installed| {
-                    Self::from_installation(installed, request, keyring, SystemTime::now)
+                    Self::from_installation(installed, request, SystemTime::now)
                 })
             })
     }
@@ -61,7 +53,6 @@ impl ProviderImageSnapshot {
     fn from_installation(
         installed: InstalledSelectorState,
         request: SandboxExecuteRequest,
-        keyring: &BuiltinKeyringListing,
         clock: fn() -> SystemTime,
     ) -> Result<Self, SelectorBoundaryError> {
         installed
@@ -69,7 +60,7 @@ impl ProviderImageSnapshot {
             .and_then(AuthenticatedSelectorBootstrap::admit_provider)
             .and_then(|admitted| {
                 check_authority(&admitted, &request)?;
-                let (image, proof) = check_image(&admitted, &request, keyring, clock)?;
+                let (image, proof) = check_image(&admitted, &request, clock)?;
                 let launch_bytes = admitted
                     .bootstrap()
                     .installed()
@@ -121,20 +112,15 @@ impl ProviderImageSnapshot {
         &self.launch
     }
 
-    /// Recheck the same retained image/executable, the built-in release key in
-    /// the current `keyring` listing and CMS at fresh host time.
+    /// Recheck the same retained image/executable and CMS at fresh host time.
     ///
     /// This does not reopen paths or assert that the snapshot's authorities are
     /// still current. Provider control-state fencing remains mandatory.
     ///
     /// # Errors
-    /// Rejects changed image inputs, a release key not held exactly once in the
-    /// built-in keyring, or a proof no longer valid at host time.
-    pub fn recheck_held_image(
-        &self,
-        keyring: &BuiltinKeyringListing,
-    ) -> Result<VerifiedSandboxImageProof, SelectorBoundaryError> {
-        check_image(&self.admitted, &self.request, keyring, SystemTime::now).map(|(_, proof)| proof)
+    /// Rejects changed image inputs or a proof no longer valid at host time.
+    pub fn recheck_held_image(&self) -> Result<VerifiedSandboxImageProof, SelectorBoundaryError> {
+        check_image(&self.admitted, &self.request, SystemTime::now).map(|(_, proof)| proof)
     }
 }
 
@@ -172,7 +158,6 @@ fn check_authority(
 fn check_image(
     admitted: &AdmittedSelectorProvider,
     request: &SandboxExecuteRequest,
-    keyring: &BuiltinKeyringListing,
     clock: fn() -> SystemTime,
 ) -> Result<(AdmittedSandboxImage, VerifiedSandboxImageProof), SelectorBoundaryError> {
     let installed = admitted.bootstrap().installed();
@@ -204,12 +189,6 @@ fn check_image(
         )
         .map_err(invalid)
         .and_then(|image| {
-            keyring
-                .verify_release_key(&image)
-                .map_err(invalid)
-                .map(|()| image)
-        })
-        .and_then(|image| {
             clock()
                 .duration_since(UNIX_EPOCH)
                 .map_err(invalid)
@@ -237,24 +216,6 @@ mod tests {
     use crate::selector::installation::tests::admitted_state;
 
     type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
-
-    /// A raw `KEYCTL_DESCRIBE` result: `type;uid;gid;perm;description`.
-    fn describe(key_type: &str, description: &str) -> String {
-        format!("{key_type};0;0;3f010000;{description}")
-    }
-
-    /// Fixture `.builtin_trusted_keys` listing holding the image release key.
-    fn keyring() -> TestResult<BuiltinKeyringListing> {
-        use crate::selector::installation::tests::IMAGE_KEY_DESCRIPTION;
-
-        Ok(BuiltinKeyringListing::from_members([
-            (
-                1,
-                describe("asymmetric", "Build time autogenerated kernel key: 00"),
-            ),
-            (2, describe("asymmetric", IMAGE_KEY_DESCRIPTION)),
-        ])?)
-    }
 
     fn fixture_time() -> SystemTime {
         UNIX_EPOCH + Duration::from_hours(500_000)
@@ -306,9 +267,8 @@ mod tests {
     }
 
     #[test]
-    fn malformed_public_request_fails_before_installation_open() -> TestResult {
-        assert!(ProviderImageSnapshot::open(b"SPX1", &keyring()?).is_err());
-        Ok(())
+    fn malformed_public_request_fails_before_installation_open() {
+        assert!(ProviderImageSnapshot::open(b"SPX1").is_err());
     }
 
     #[test]
@@ -317,7 +277,6 @@ mod tests {
         let snapshot = ProviderImageSnapshot::from_installation(
             admitted_state()?,
             request.clone(),
-            &keyring()?,
             fixture_time,
         )?;
         assert_eq!(snapshot.request(), &request);
@@ -329,48 +288,8 @@ mod tests {
             snapshot.launch_policy().policy_digest,
             request.authority.lps1_digest
         );
-        let (_, proof) = check_image(&snapshot.admitted, &request, &keyring()?, fixture_time)?;
+        let (_, proof) = check_image(&snapshot.admitted, &request, fixture_time)?;
         assert_eq!(snapshot.proof(), &proof);
-        // The held-image recheck consults the current keyring listing too.
-        snapshot.recheck_held_image(&keyring()?)?;
-        assert_eq!(
-            snapshot
-                .recheck_held_image(&BuiltinKeyringListing::from_members([(
-                    1,
-                    describe(
-                        "user",
-                        crate::selector::installation::tests::IMAGE_KEY_DESCRIPTION
-                    ),
-                )])?)
-                .err(),
-            Some(SelectorBoundaryError::ArtifactInvalid)
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn provider_refuses_admission_without_the_image_release_key() -> TestResult {
-        use crate::selector::installation::tests::IMAGE_KEY_DESCRIPTION;
-
-        for members in [
-            vec![(1, describe("asymmetric", "PiglorOS other release: 00"))],
-            vec![(1, describe("user", IMAGE_KEY_DESCRIPTION))],
-            vec![
-                (1, describe("asymmetric", IMAGE_KEY_DESCRIPTION)),
-                (2, describe("asymmetric", IMAGE_KEY_DESCRIPTION)),
-            ],
-        ] {
-            assert_eq!(
-                ProviderImageSnapshot::from_installation(
-                    admitted_state()?,
-                    request_fixture()?,
-                    &BuiltinKeyringListing::from_members(members)?,
-                    fixture_time
-                )
-                .err(),
-                Some(SelectorBoundaryError::ArtifactInvalid)
-            );
-        }
         Ok(())
     }
 
@@ -398,7 +317,6 @@ mod tests {
             assert!(ProviderImageSnapshot::from_installation(
                 admitted_state()?,
                 request,
-                &keyring()?,
                 fixture_time
             )
             .is_err());
@@ -418,7 +336,6 @@ mod tests {
             assert!(ProviderImageSnapshot::from_installation(
                 admitted_state()?,
                 canonical_request(request)?,
-                &keyring()?,
                 fixture_time
             )
             .is_err());
@@ -447,7 +364,6 @@ mod tests {
             assert!(ProviderImageSnapshot::from_installation(
                 state,
                 canonical_request(request)?,
-                &keyring()?,
                 fixture_time
             )
             .is_err());
@@ -468,7 +384,6 @@ mod tests {
             assert!(ProviderImageSnapshot::from_installation(
                 state,
                 request_fixture()?,
-                &keyring()?,
                 fixture_time
             )
             .is_err());
@@ -490,13 +405,9 @@ mod tests {
                 request.authority.lps1_digest
             };
             state.artifact(kind, identity)?.file().set_len(0)?;
-            assert!(ProviderImageSnapshot::from_installation(
-                state,
-                request,
-                &keyring()?,
-                fixture_time
-            )
-            .is_err());
+            assert!(
+                ProviderImageSnapshot::from_installation(state, request, fixture_time).is_err()
+            );
         }
         Ok(())
     }
@@ -511,7 +422,6 @@ mod tests {
             let snapshot = ProviderImageSnapshot::from_installation(
                 admitted_state()?,
                 request_fixture()?,
-                &keyring()?,
                 fixture_time,
             )?;
             let manifest = snapshot.image().manifest();
@@ -529,7 +439,7 @@ mod tests {
             artifact.file().read_exact_at(&mut byte, 0)?;
             byte[0] ^= 1;
             artifact.file().write_all_at(&byte, 0)?;
-            assert!(snapshot.recheck_held_image(&keyring()?).is_err());
+            assert!(snapshot.recheck_held_image().is_err());
         }
         Ok(())
     }
@@ -545,7 +455,6 @@ mod tests {
             assert!(ProviderImageSnapshot::from_installation(
                 admitted_state()?,
                 request_fixture()?,
-                &keyring()?,
                 clock
             )
             .is_err());

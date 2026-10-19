@@ -6,10 +6,10 @@ mod policy_transition;
 use ciborium::value::Value;
 use ed25519_dalek::{Signer, SigningKey};
 use pos_reference::sandbox_provider_protocol::{
-    BuiltinKeyringError, BuiltinKeyringListing, RecoveryCancellationContext,
-    RevocationAcknowledgement, RevocationUpdateRequest, SandboxAdministratorPolicy,
-    SandboxProviderProtocolError as ProtocolError, SandboxRevocationSnapshot,
-    SandboxRevocationUpdateError, SandboxTrustError, SandboxTrustRole, SandboxTrustSnapshot,
+    RecoveryCancellationContext, RevocationAcknowledgement, RevocationUpdateRequest,
+    SandboxAdministratorPolicy, SandboxProviderProtocolError as ProtocolError,
+    SandboxRevocationSnapshot, SandboxRevocationUpdateError, SandboxTrustError, SandboxTrustRole,
+    SandboxTrustSnapshot,
 };
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
@@ -964,49 +964,5 @@ fn cancellation_context_and_acknowledgement_bind_the_exact_attempt_snapshot() ->
         next.snapshot_digest(),
     )
     .is_err());
-    Ok(())
-}
-
-#[test]
-fn builtin_keyring_listing_parses_full_raw_describe_results() -> TestResult {
-    // The description is everything after the fourth `;`, so a subject that
-    // itself contains `;` is preserved rather than truncated.
-    assert_eq!(
-        BuiltinKeyringListing::from_members([(
-            1,
-            "asymmetric;0;0;3f010000;name; with; separators"
-        )])?,
-        BuiltinKeyringListing::from_members([(
-            1,
-            "asymmetric;-1;-1;00000000;name; with; separators"
-        )])?
-    );
-    for describe in [
-        "",
-        "asymmetric",
-        "asymmetric;0;0;3f010000",
-        "asymmetric;0;0;3f010000;",
-        ";0;0;3f010000;fixture",
-    ] {
-        assert_eq!(
-            BuiltinKeyringListing::from_members([(1, describe)]),
-            Err(BuiltinKeyringError::Malformed),
-            "{describe:?}"
-        );
-    }
-    for members in [
-        vec![(0, "asymmetric;0;0;3f010000;fixture")],
-        vec![(-1, "asymmetric;0;0;3f010000;fixture")],
-        vec![
-            (1, "asymmetric;0;0;3f010000;fixture"),
-            (1, "asymmetric;0;0;3f010000;other"),
-        ],
-    ] {
-        assert_eq!(
-            BuiltinKeyringListing::from_members(members.clone()),
-            Err(BuiltinKeyringError::Malformed),
-            "{members:?}"
-        );
-    }
     Ok(())
 }
