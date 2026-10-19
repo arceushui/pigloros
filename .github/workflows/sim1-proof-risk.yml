@@ -62,9 +62,9 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-  # #437 verifier evidence: the SIM1 verifier must accept the systemd-repart
-  # fixtures on aarch64 too. This runs only the public verifier cases; the
-  # systemd/kernel proof-interoperability gate on both architectures is #444.
+  # #437 verifier evidence: the public admission contract cases, including the
+  # SIM1 verifier and systemd-repart fixture cases, must pass on aarch64 too.
+  # No systemd or kernel runs here; that two-architecture gate is #444.
   public-admission-aarch64:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
