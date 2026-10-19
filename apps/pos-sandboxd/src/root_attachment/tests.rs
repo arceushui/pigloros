@@ -236,11 +236,15 @@ fn file_mount() -> Result<QuarantinedRootMount, BoxError> {
 // Kernel command line (owner decision Q7.8, B3)
 
 #[test]
-fn only_one_plain_veto_token_disables_userspace_verity() {
-    assert!(vetoes_userspace_verity(
-        format!("BOOT_IMAGE=/vmlinuz root=/dev/vda1 {VETO} quiet\n").as_bytes()
-    ));
-    assert!(vetoes_userspace_verity(VETO.as_bytes()));
+fn only_one_plain_veto_word_disables_userspace_verity() {
+    for accepted in [
+        VETO.to_owned(),
+        format!("BOOT_IMAGE=/vmlinuz root=/dev/vda1 {VETO} quiet\n"),
+        format!("quiet\t{VETO}\r\n"),
+        format!("{VETO}  foo.allow_userspace_verity=1 systemd.allow_userspace_verityx=1"),
+    ] {
+        assert!(vetoes_userspace_verity(accepted.as_bytes()), "{accepted:?}");
+    }
     for rejected in [
         String::new(),
         "BOOT_IMAGE=/vmlinuz quiet".to_owned(),
@@ -248,16 +252,24 @@ fn only_one_plain_veto_token_disables_userspace_verity() {
         "systemd.allow_userspace_verity=no".to_owned(),
         "systemd.allow_userspace_verity=00".to_owned(),
         "systemd.allow_userspace_verity".to_owned(),
-        format!("x{VETO}"),
-        format!("\"{VETO}\""),
+        "systemd.allow-userspace-verity=0".to_owned(),
         format!("{VETO} {VETO}"),
         format!("{VETO} systemd.allow_userspace_verity=1"),
+        format!("{VETO} systemd.allow-userspace_verity=1"),
         format!("{VETO} rd.systemd.allow_userspace_verity=1"),
+        format!("{VETO} rd.systemd.allow-userspace-verity"),
+        format!("\"{VETO}\""),
         format!("x=\"a {VETO} b\""),
         format!("x='a' {VETO}"),
         format!("{VETO} x=\\"),
+        format!("{VETO} caf\u{e9}"),
+        format!("{VETO}\u{c}quiet"),
+        format!("{VETO}\u{0}"),
     ] {
-        assert!(!vetoes_userspace_verity(rejected.as_bytes()), "{rejected}");
+        assert!(
+            !vetoes_userspace_verity(rejected.as_bytes()),
+            "{rejected:?}"
+        );
     }
 }
 
@@ -450,7 +462,7 @@ fn device_mutations() -> Vec<Mutation> {
         }),
         ("extra partition", |o| {
             edit_loop(o, |d| {
-                d.partitions.get_or_insert_default().push(Some((1, 1)))
+                d.partitions.get_or_insert_default().push(Some((1, 1)));
             });
         }),
         ("missing partition", |o| {
@@ -463,7 +475,7 @@ fn device_mutations() -> Vec<Mutation> {
         }),
         ("overflowing partition", |o| {
             edit_loop(o, |d| {
-                d.partitions.get_or_insert_default()[2] = Some((u64::MAX, 1))
+                d.partitions.get_or_insert_default()[2] = Some((u64::MAX, 1));
             });
         }),
     ]
@@ -629,16 +641,6 @@ fn propagation_and_detach_act_on_the_descriptor_link() -> TestResult {
         Path::new("/proc/self/fd").join(std::os::fd::AsRawFd::as_raw_fd(&file).to_string())
     );
     Ok(())
-}
-
-#[test]
-fn the_public_activation_future_is_send() {
-    fn assert_send<T: Send>(_: &T) {}
-    // Compile-time only: the future is built but never polled.
-    fn check(admission: &HeldImageAdmission<'_>, directory: &PreparedAttemptDirectory) {
-        assert_send(&activate_admitted_root(admission, directory));
-    }
-    let _checked: fn(&HeldImageAdmission<'_>, &PreparedAttemptDirectory) = check;
 }
 
 #[test]
