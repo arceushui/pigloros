@@ -36,6 +36,8 @@ enum AdapterStep {
     Send(Vec<u8>),
     AwaitReply,
     CloseRead,
+    Wait(mpsc::Receiver<()>),
+    Signal(mpsc::Sender<()>),
 }
 
 /// The adapter's end of a real FD 3 socket pair, driven by a script.
@@ -70,6 +72,8 @@ impl ProxyChannel {
                     AdapterStep::Send(bytes) => adapter.write_all(&bytes).is_ok(),
                     AdapterStep::AwaitReply => proxy_read_reply(&mut adapter, &mut output),
                     AdapterStep::CloseRead => adapter.shutdown(Shutdown::Read).is_ok(),
+                    AdapterStep::Wait(signal) => signal.recv_timeout(PROXY_SERVER_TIMEOUT).is_ok(),
+                    AdapterStep::Signal(signal) => signal.send(()).is_ok(),
                 };
                 if !completed {
                     break;
@@ -431,6 +435,74 @@ fn proxy_fails_closed_when_a_second_request_is_already_outstanding() -> TestResu
         assert_eq!(connector.connections, 0);
     }
     assert_eq!(case.retained()?, [0, 0]);
+    Ok(())
+}
+
+#[test]
+fn proxy_fails_closed_when_a_second_request_arrives_during_an_exchange() -> TestResult {
+    let exchanges = [PROXY_FIRST, PROXY_SECOND];
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let address = listener.local_addr()?;
+    let (forwarded, forwarded_wait) = mpsc::channel::<()>();
+    let (queued, queued_wait) = mpsc::channel::<()>();
+    // The peer answers only after the adapter has queued its next request.
+    let server = thread::spawn(move || -> io::Result<Vec<u8>> {
+        let mut stream = proxy_accept(&listener)?;
+        stream.set_read_timeout(Some(PROXY_SERVER_TIMEOUT))?;
+        let mut received = Vec::new();
+        stream.read_to_end(&mut received)?;
+        forwarded.send(()).ok();
+        queued_wait.recv_timeout(PROXY_SERVER_TIMEOUT).ok();
+        stream.write_all(PROXY_FIRST.1)?;
+        Ok(received)
+    });
+    let case = ProxyCase::new(address, &exchanges, [100, 100, PROXY_DEADLINE_MS])?;
+    let frames = case.frames(&exchanges)?;
+    let mut channel = ProxyChannel::scripted(vec![
+        AdapterStep::Send(frames[0].clone()),
+        AdapterStep::Wait(forwarded_wait),
+        AdapterStep::Send(frames[1].clone()),
+        AdapterStep::Signal(queued),
+        AdapterStep::AwaitReply,
+    ])?;
+    let mut connector = ProxyConnector::default();
+    let session = case.serve(&mut channel, &mut connector)?;
+    assert_eq!(
+        session.termination(),
+        Some(LocalNetworkTermination::ProtocolFailure)
+    );
+    assert!(session.transcripts().is_empty());
+    assert!(channel.output.is_empty());
+    assert_eq!(connector.connections, 1);
+    assert_eq!(case.retained()?, [0, 0]);
+    assert_eq!(server.join().map_err(|_| "server thread")??, PROXY_FIRST.0);
+    Ok(())
+}
+
+#[test]
+fn proxy_treats_a_closed_adapter_write_side_as_no_outstanding_request() -> TestResult {
+    let exchanges = [PROXY_FIRST];
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let address = listener.local_addr()?;
+    let server = proxy_server(listener, &exchanges);
+    let case = ProxyCase::new(address, &exchanges, [100, 100, PROXY_DEADLINE_MS])?;
+    // The adapter's write side is already closed before the proxy starts.
+    let (mut provider, mut adapter) = UnixStream::pair()?;
+    adapter.write_all(&case.requests(&exchanges)?)?;
+    adapter.shutdown(Shutdown::Write)?;
+    let session =
+        case.admission
+            .serve_proxy(&mut provider, &mut ProxyConnector::default(), &case.store);
+    assert_eq!(session.termination(), None);
+    assert_eq!(session.transcripts().len(), 1);
+    drop(provider);
+    let mut output = Vec::new();
+    adapter.read_to_end(&mut output)?;
+    assert_eq!(
+        case.replies(&output)?[0].response_bytes(),
+        Some(PROXY_FIRST.1)
+    );
+    server.join().map_err(|_| "server thread")??;
     Ok(())
 }
 

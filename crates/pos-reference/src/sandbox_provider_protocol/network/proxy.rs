@@ -6,6 +6,7 @@
 //! writes exactly those bytes, shuts down its write side and reads to TCP EOF
 //! within the response bound and the attempt's monotonic network deadline. A
 //! response becomes a Captured reply only after its capture is durably retained.
+//! Only one NXQ1 may be outstanding; an early second request fails closed.
 
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpStream};
@@ -92,11 +93,13 @@ impl LocalNetworkAdmission {
     /// current authority heads, namespace and firewall, and FD 3; the channel
     /// itself is bounded by the attempt watchdog, not by the network deadline.
     ///
-    /// The channel must be a stream socket. Before forwarding each request the
-    /// proxy peeks without blocking; a byte already queued behind that request
-    /// means a second NXQ1 is outstanding and fails closed as
-    /// [`LocalNetworkTermination::ProtocolFailure`], as does a channel whose
-    /// queue cannot be inspected.
+    /// The channel must be a stream socket. Only one NXQ1 may be outstanding:
+    /// the proxy peeks without blocking before forwarding each request and
+    /// again before retaining or releasing its response. A byte already queued
+    /// at either point means a second NXQ1 was sent before the reply, and the
+    /// session fails closed as [`LocalNetworkTermination::ProtocolFailure`]
+    /// with no reply; so does a channel whose queue cannot be inspected. Bytes
+    /// that arrive after the second peek are read only after the reply.
     pub fn serve_proxy(
         &self,
         channel: &mut (impl Read + Write + AsFd),
@@ -155,12 +158,17 @@ impl Proxy {
         request: &NetworkExchangeRequest,
         plan: &NetworkExchangePlan,
         endpoint: &NetworkCapability,
-        channel: &mut impl Write,
+        channel: &mut (impl Write + AsFd),
         connector: &mut impl NetworkEndpointConnector,
         store: &NetworkCaptureStore,
     ) -> ControlFlow<Option<LocalNetworkTermination>> {
         match self.forward(request, plan, endpoint, connector) {
             Ok((reply, response_length)) => {
+                // A frame sent while this exchange was in flight was a second
+                // outstanding NXQ1: nothing is retained or released.
+                if request_pending(&*channel) {
+                    return ControlFlow::Break(Some(LocalNetworkTermination::ProtocolFailure));
+                }
                 if store.persist(&reply).is_err() {
                     return ControlFlow::Break(Some(LocalNetworkTermination::CaptureFailure));
                 }
