@@ -127,6 +127,13 @@ A separate fixture-integrity case runs no production code: it checks that
 the `root-verity-sig` partition, identified by its DPS type, embeds the same
 proof, signer fingerprint and root hash that systemd will read.
 
+Provider admission (`provider_admission`, #438) reads that partition from the
+held image and requires its JSON `rootHash` and `signature` to equal SIM1's
+root hash and PKCS#7 proof exactly, on both architectures. The in-crate
+installation fixture therefore binds each image's own `root-hash.txt`,
+`proof.der` and `signer.der` into SIM1 and TRS1. The negative cases edit
+JSON fields in a copy of the expanded image; no signature is regenerated.
+
 ## What these fixtures do not prove
 
 - **Salt provenance.** In the v260.2, v260.4 and `main` sources,
