@@ -407,20 +407,16 @@ fn public_durable_records_admit_exactly_the_complete_record_limit(
 }
 
 #[test]
-fn public_binding_round_trips_each_backup_flag() -> Result<(), OwnerBridgeCodecError> {
-    for (backup_eligible, backup_state, state_byte) in [(true, false, 0xf4), (true, true, 0xf5)] {
-        let binding = SubjectCredentialBindingV1::new(SubjectCredentialBindingInputV1 {
-            owner_id: "owner",
-            subject_id: SUBJECT_ID,
-            epoch: 1,
-            credential_id: &[0x80, 0x81],
-            user_handle: USER_HANDLE,
-            public_key: CoseEs256PublicKey::from_canonical_encoding(&cose_key())?,
-            backup_eligible,
-            backup_state,
-            sign_count: 7,
-            transports: TransportCodes::new(&[0])?,
-        })?;
+fn public_binding_round_trips_each_valid_backup_flag_combination(
+) -> Result<(), OwnerBridgeCodecError> {
+    // The remaining combination, backup state without eligibility, is
+    // rejected in public_durable_codecs_reject_closed_schema_violations.
+    for (backup_eligible, backup_state, eligible_byte, state_byte) in [
+        (false, false, 0xf4, 0xf4),
+        (true, false, 0xf5, 0xf4),
+        (true, true, 0xf5, 0xf5),
+    ] {
+        let binding = binding_with_flags("owner", 1, &[0x80, 0x81], backup_eligible, backup_state)?;
         assert_eq!(binding.backup_eligible(), backup_eligible);
         assert_eq!(binding.backup_state(), backup_state);
 
@@ -429,7 +425,7 @@ fn public_binding_round_trips_each_backup_flag() -> Result<(), OwnerBridgeCodecE
             encode_subject_credential_binding(&binding, &mut output),
             Ok(187)
         );
-        assert_eq!(output[182], 0xf5);
+        assert_eq!(output[182], eligible_byte);
         assert_eq!(output[183], state_byte);
         let decoded = decode_subject_credential_binding(&output)?;
         assert_eq!(decoded.backup_eligible(), backup_eligible);
@@ -571,6 +567,16 @@ fn binding_with<'a>(
     epoch: u64,
     credential_id: &'a [u8],
 ) -> Result<SubjectCredentialBindingV1<'a>, OwnerBridgeCodecError> {
+    binding_with_flags(owner_id, epoch, credential_id, false, false)
+}
+
+fn binding_with_flags<'a>(
+    owner_id: &'a str,
+    epoch: u64,
+    credential_id: &'a [u8],
+    backup_eligible: bool,
+    backup_state: bool,
+) -> Result<SubjectCredentialBindingV1<'a>, OwnerBridgeCodecError> {
     SubjectCredentialBindingV1::new(SubjectCredentialBindingInputV1 {
         owner_id,
         subject_id: SUBJECT_ID,
@@ -578,8 +584,8 @@ fn binding_with<'a>(
         credential_id,
         user_handle: USER_HANDLE,
         public_key: CoseEs256PublicKey::from_canonical_encoding(&cose_key())?,
-        backup_eligible: false,
-        backup_state: false,
+        backup_eligible,
+        backup_state,
         sign_count: 7,
         transports: TransportCodes::new(&[0])?,
     })

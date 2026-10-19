@@ -71,6 +71,9 @@ pub struct SubjectCredentialBindingV1<'a> {
 impl<'a> SubjectCredentialBindingV1<'a> {
     /// Construct a binding only from already validated credential material.
     ///
+    /// The complete-record limit is checked by encoding the binding into a
+    /// 4 KiB stack buffer, so the admitted size is the exact encoded size.
+    ///
     /// # Errors
     ///
     /// Returns [`OwnerBridgeCodecError::BoundsExceeded`] when a borrowed field
@@ -107,6 +110,7 @@ impl<'a> SubjectCredentialBindingV1<'a> {
         };
         // The record limit is the exact encoder's own output length, so the
         // admitted bound cannot drift from the bytes later written.
+        // BufferTooSmall is the only error the writer's finish() can return.
         encode_subject_credential_binding(&binding, &mut [0; MAX_SUBJECT_CREDENTIAL_BINDING_BYTES])
             .map_err(|_| OwnerBridgeCodecError::BoundsExceeded)?;
         if backup_state && !backup_eligible {
@@ -191,6 +195,9 @@ pub struct CleanupRecordV1<'a> {
 impl<'a> CleanupRecordV1<'a> {
     /// Construct the non-secret process identity retained for cleanup.
     ///
+    /// The complete-record limit is checked by encoding the record into a
+    /// 4 KiB stack buffer, so the admitted size is the exact encoded size.
+    ///
     /// # Errors
     ///
     /// Returns [`OwnerBridgeCodecError::BoundsExceeded`] when `folder_name` or
@@ -211,6 +218,7 @@ impl<'a> CleanupRecordV1<'a> {
             creation_filetime,
             image_path_sha256,
         };
+        // BufferTooSmall is the only error the writer's finish() can return.
         encode_cleanup_record(&record, &mut [0; MAX_CLEANUP_RECORD_BYTES])
             .map_err(|_| OwnerBridgeCodecError::BoundsExceeded)?;
         Ok(record)
@@ -252,7 +260,8 @@ impl<'a> CleanupRecordV1<'a> {
 /// # Errors
 ///
 /// Returns [`OwnerBridgeCodecError::BufferTooSmall`] when `output` cannot
-/// contain the record. A constructed binding always encodes within 4,096
+/// contain the record; `output` may then be partially written, as with the
+/// payload encoders. A constructed binding always encodes within 4,096
 /// bytes, because [`SubjectCredentialBindingV1::new`] rejects a larger record.
 pub fn encode_subject_credential_binding(
     binding: &SubjectCredentialBindingV1<'_>,
@@ -285,7 +294,9 @@ pub fn encode_subject_credential_binding(
 ///
 /// Returns a closed [`OwnerBridgeCodecError`] for a wrong schema, unsupported
 /// role or algorithm, malformed credential key, noncanonical encoding, or
-/// trailing bytes.
+/// trailing bytes. A decoded binding is revalidated by
+/// [`SubjectCredentialBindingV1::new`], which encodes it into a 4 KiB stack
+/// buffer.
 pub fn decode_subject_credential_binding(
     input: &[u8],
 ) -> Result<SubjectCredentialBindingV1<'_>, OwnerBridgeCodecError> {
@@ -334,7 +345,8 @@ pub fn decode_subject_credential_binding(
 /// # Errors
 ///
 /// Returns [`OwnerBridgeCodecError::BufferTooSmall`] when `output` cannot
-/// contain the record. A constructed record always encodes within 4,096
+/// contain the record; `output` may then be partially written, as with the
+/// payload encoders. A constructed record always encodes within 4,096
 /// bytes, because [`CleanupRecordV1::new`] rejects a larger record.
 pub fn encode_cleanup_record(
     record: &CleanupRecordV1<'_>,
@@ -357,7 +369,8 @@ pub fn encode_cleanup_record(
 /// # Errors
 ///
 /// Returns a closed [`OwnerBridgeCodecError`] for a wrong schema,
-/// noncanonical encoding, or trailing bytes.
+/// noncanonical encoding, or trailing bytes. A decoded record is revalidated
+/// by [`CleanupRecordV1::new`], which encodes it into a 4 KiB stack buffer.
 pub fn decode_cleanup_record(input: &[u8]) -> Result<CleanupRecordV1<'_>, OwnerBridgeCodecError> {
     require_length(input.len(), MAX_CLEANUP_RECORD_BYTES)?;
     let mut reader = CborReader::new(input);
