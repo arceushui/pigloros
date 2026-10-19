@@ -11,6 +11,7 @@
 #   cargo-crap   — no CRAP regressions; new functions score ≤30
 #   audit        — cargo-audit (CVE advisories)
 #   deny         — cargo-deny (licenses, bans, sources)
+#   notices      — third-party notice bundle from the locked graphs (#545)
 #   unsafe       — workspace unsafe_code = "forbid" plus the source-based
 #                  owner-bridge unsafe policy (pinned-dependencies job)
 #   asan         — address sanitizer on nightly
@@ -126,6 +127,7 @@ jobs:
       - conformance-fixtures
       - conformance-non-linux
       - plugin-component-fixtures
+      - third-party-notices
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -139,6 +141,7 @@ jobs:
           FIXTURES_RESULT: ${{ needs.conformance-fixtures.result }}
           NON_LINUX_RESULT: ${{ needs.conformance-non-linux.result }}
           PLUGIN_FIXTURES_RESULT: ${{ needs.plugin-component-fixtures.result }}
+          NOTICES_RESULT: ${{ needs.third-party-notices.result }}
         run: |
           set -euo pipefail
           test "${SCOPE_RESULT}" = success
@@ -152,9 +155,11 @@ jobs:
           if [[ "${RUST_SCOPE}" = true ]]; then
             test "${POLICY_RESULT}" = success
             test "${PLUGIN_FIXTURES_RESULT}" = success
+            test "${NOTICES_RESULT}" = success
           else
             test "${POLICY_RESULT}" = skipped
             test "${PLUGIN_FIXTURES_RESULT}" = skipped
+            test "${NOTICES_RESULT}" = skipped
           fi
 
   fmt:
@@ -556,6 +561,15 @@ jobs:
           path: ${{ runner.temp }}/rebuilt-plugin-fixtures
           retention-days: 3
           if-no-files-found: warn
+
+  # The third-party notice bundle (#545) from the locked graphs and the
+  # committed third_party/notices texts. The reusable workflow is the one
+  # generator that any future binary release must also call.
+  third-party-notices:
+    name: third-party-notices
+    needs: ci_change_scope
+    if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
+    uses: ./.github/workflows/third-party-notices.yml
 
   ledger-windows:
     name: ledger-windows
@@ -1394,6 +1408,10 @@ jobs:
         run: python scripts/owner_bridge_webauthn_fixtures.py --check
       - name: Test Wasmtime pin checker
         run: python scripts/test_check_wasmtime_feature_pin.py
+      - name: Check and test the third-party notice generator
+        run: |
+          python scripts/third_party_notices.py check
+          python scripts/test_third_party_notices.py
       - name: Check owner-bridge Windows unsafe policy
         run: |
           python scripts/check_owner_bridge_unsafe_policy.py
