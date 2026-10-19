@@ -109,7 +109,7 @@ use crate::factual_tick_plan::{
     fold_cursor_of, fold_window_of, plan_tick, FactualInstallV1, FoldEntryV1, PlannedTickV1,
     TickPrefixV1, FOLD_READ_LIMIT,
 };
-use crate::memory::MemoryStore;
+use crate::memory::{ForkChain, MemoryStore};
 
 type StoreError = CounterfactualStoreErrorV1;
 /// Rows are keyed by their own page cursor: the canonical coordinate order of
@@ -318,6 +318,29 @@ impl VisibleSetV1<'_> {
 fn visible_fold_head(set: &VisibleSetV1<'_>) -> Option<(Seq, Hash)> {
     let mut heads = set.rows.fold_heads.range(..=set.bound);
     heads.next_back().map(|(_, row)| *row)
+}
+
+/// The fold cursor of the visible sets: the latest visible fold-head row and
+/// the node its head digest names.
+fn fold_cursor_over(sets: &[VisibleSetV1<'_>]) -> Result<Option<FactualFoldCursorV1>, CoreError> {
+    let row = first_visible(sets, visible_fold_head);
+    let lookup = |digest: &Hash| {
+        let found = first_visible(sets, |set| set.digest_node(digest));
+        Ok(found.map(|bound| bound.0))
+    };
+    fold_cursor_of(row, lookup)
+}
+
+/// The fold window of the newest Events of a range, with their nodes
+/// resolved through the visible sets.
+fn fold_window_over(
+    newest: Vec<FoldEntryV1>,
+    sets: &[VisibleSetV1<'_>],
+) -> Result<FactualFoldWindowV1, CoreError> {
+    fold_window_of(newest, |seqs| {
+        let node = |seq: &Seq| first_visible(sets, |set| set.event_node(seq.as_u64()));
+        Ok(seqs.iter().map(node).collect())
+    })
 }
 
 /// The fold read entry of an own Event of a Timeline that inherits `prefix`
@@ -677,30 +700,29 @@ impl MemoryStore {
         })
     }
 
-    /// The newest Events of the logical range `(after, through]` of the
-    /// Timeline's fork chain, at most [`FOLD_READ_LIMIT`], newest first: the
-    /// chain is read from the Timeline itself up through its ancestors, each
-    /// member showing its own Events above its fork point and, for an
-    /// ancestor, at or below the next member's.
-    fn newest_fold_events(
-        &self,
-        timeline: TimelineId,
-        range: (Seq, Seq),
-    ) -> Result<Vec<FoldEntryV1>, CoreError> {
-        let chain = self.fork_chain(timeline)?;
+    /// The newest Events of the logical range `(after, through]` of a fork
+    /// chain, at most [`FOLD_READ_LIMIT`], newest first: the chain is read from
+    /// the Timeline itself up through its ancestors, each member showing its
+    /// own Events above its fork point and, for an ancestor, at or below the
+    /// next member's.
+    fn newest_fold_events(&self, chain: &ForkChain, range: (Seq, Seq)) -> Vec<FoldEntryV1> {
+        let (after, through) = (range.0.as_u64(), range.1.as_u64());
         let mut newest = Vec::new();
         for (index, member) in chain.timelines.iter().enumerate().rev() {
-            let prefix = chain.segment_prefix(index)?;
-            let length = chain.segment_length(self, index, *member)?;
-            let low = range.0.as_u64().saturating_sub(prefix);
-            let high = range.1.as_u64().saturating_sub(prefix).min(length);
+            let parent = index.checked_sub(1);
+            let above = parent.and_then(|up| chain.fork_seqs.get(up));
+            let prefix = above.copied().map_or(0, Seq::as_u64);
+            let below = chain.fork_seqs.get(index);
+            let limit = below.copied().map_or(u64::MAX, Seq::as_u64);
+            let low = after.saturating_sub(prefix);
+            let high = through.min(limit).saturating_sub(prefix);
             let room = FOLD_READ_LIMIT.saturating_sub(newest.len());
             let own = self.state(*member).events.iter().rev();
             let shown = own.skip_while(|event| event.seq.as_u64() > high);
             let kept = shown.take_while(|event| event.seq.as_u64() > low);
             newest.extend(kept.take(room).map(|event| fold_entry(prefix, event)));
         }
-        Ok(newest)
+        newest
     }
 
     /// Run a factual read under the Timeline's erasure read fence and its
@@ -888,13 +910,8 @@ impl FactualPrefixReadPortV1 for MemoryStore {
 
     fn fold_cursor(&self, timeline: TimelineId) -> Result<Option<FactualFoldCursorV1>, CoreError> {
         self.read_fenced(timeline, |store| {
-            let sets = store.visible_sets(timeline)?;
-            let row = first_visible(&sets, visible_fold_head);
-            let lookup = |digest: &Hash| {
-                let found = first_visible(&sets, |set| set.digest_node(digest));
-                Ok(found.map(|bound| bound.0))
-            };
-            fold_cursor_of(row, lookup)
+            let sets = store.visible_sets(timeline);
+            sets.and_then(|found| fold_cursor_over(&found))
         })
     }
 
@@ -905,12 +922,10 @@ impl FactualPrefixReadPortV1 for MemoryStore {
         through: Seq,
     ) -> Result<FactualFoldWindowV1, CoreError> {
         self.read_fenced(timeline, |store| {
-            let sets = store.visible_sets(timeline)?;
-            let newest = store.newest_fold_events(timeline, (after, through))?;
-            fold_window_of(newest, |seqs| {
-                let node = |seq: &Seq| first_visible(&sets, |set| set.event_node(seq.as_u64()));
-                Ok(seqs.iter().map(node).collect())
-            })
+            let chain = store.fork_chain(timeline);
+            let sets = store.visible_sets(timeline);
+            let newest = chain.map(|held| store.newest_fold_events(&held, (after, through)));
+            newest.and_then(|read| sets.and_then(|found| fold_window_over(read, &found)))
         })
     }
 }

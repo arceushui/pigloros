@@ -128,10 +128,11 @@
 //!   Tick), with the node its head digest names resolved through the
 //!   segments like a digest lookup; a head of 32 zero bytes names none, and
 //!   one that names no visible node is a storage fault. The fold window reads
-//!   the newest at most 65,537 Events of the logical range through the fork
-//!   chain, one indexed statement per member and newest first, taking the
-//!   `seq`, type, and payload hash but never the payload, and keeps the newest
-//!   65,536 with their Event bindings, resolved like `nodes_for_committed_events`.
+//!   the newest at most 65,537 Events of the logical range through the
+//!   ancestry segments, one indexed statement per segment, newest first, until
+//!   the limit is reached, taking the `seq`, type, and payload hash but never
+//!   the payload, and keeps the newest 65,536 with their Event bindings,
+//!   resolved like `nodes_for_committed_events`.
 //! - **Install path.** One insert function records a committed Tick: its
 //!   record, nodes, and edges under the prefix key, its commit range, and its
 //!   Event bindings. The pipeline commit calls it inside its own transaction,
@@ -1937,10 +1938,14 @@ fn segment_fold_head(
     found.and_then(|row| row.map(fold_head_of).transpose())
 }
 
+/// The node of the first hit of a digest lookup.
+fn first_hit(hits: Vec<Option<BoundFactualNodeV1>>) -> Option<DependencyNodeRecordV1> {
+    hits.into_iter().flatten().next().map(|bound| bound.0)
+}
+
 /// The node with the artifact digest, the nearest segment first.
 fn node_with_digest(conn: &Connection, path: &[SegmentV1], digest: &Hash) -> NodeLookupV1 {
-    let hits = digest_nodes(conn, path, std::slice::from_ref(digest))?;
-    Ok(hits.into_iter().flatten().next().map(|bound| bound.0))
+    digest_nodes(conn, path, std::slice::from_ref(digest)).map(first_hit)
 }
 
 /// The fold cursor: the latest fold-head row of the nearest segment that
@@ -1964,55 +1969,52 @@ fn fold_row(row: &Row<'_>) -> rusqlite::Result<FoldRowV1> {
 }
 
 /// Decode an Event row of a Timeline that inherits `prefix` Events.
-fn fold_entry(prefix: u64, row: FoldRowV1) -> Result<FoldEntryV1, CoreError> {
+fn fold_entry(prefix: i64, row: FoldRowV1) -> Result<FoldEntryV1, CoreError> {
     let (local, event_type, digest) = row;
     let payload_hash = stored_hash(digest).map_err(factual_fault);
-    stored_unsigned(local).and_then(|own| {
-        let seq = Seq::from_u64(prefix.saturating_add(own));
-        payload_hash.map(|hash| (seq, Kind::new(event_type), hash))
-    })
+    let seq = stored_seq(prefix.saturating_add(local));
+    seq.and_then(|at| payload_hash.map(|hash| (at, Kind::new(event_type), hash)))
 }
 
-/// The newest Events of one member of the fork chain in the logical range
-/// `(after, through]`, at most `room`, newest first. A member shows its own
-/// Events above its fork point and, for an ancestor, at or below the next
-/// member's fork point.
+/// The newest own Events of the segment at `index` of a Timeline's ancestry
+/// in the logical range `(after, through]`, at most `room`, newest first. A
+/// segment's Timeline holds its own Events above the previous segment's
+/// limit, its fork point, and shows them through its own limit.
 fn member_fold_events(
     conn: &Connection,
-    chain: &[(TimelineId, Seq)],
+    path: &[SegmentV1],
     index: usize,
     range: (Seq, Seq),
     room: usize,
 ) -> Result<Vec<FoldEntryV1>, CoreError> {
-    let (member, fork) = chain[index];
-    let prefix = fork.as_u64();
-    let next = chain.get(index + 1);
-    let visible = next.map_or(u64::MAX, |down| down.1.as_u64().saturating_sub(prefix));
-    let low = Seq::from_u64(range.0.as_u64().saturating_sub(prefix));
-    let high = Seq::from_u64(range.1.as_u64().saturating_sub(prefix).min(visible));
-    let id = member.to_string();
-    let query = (id, seq_as_i64(low), seq_as_i64(high), sql_count(room));
-    let rows = all_rows(conn, FOLD_EVENTS_SQL, query, fold_row)?;
+    let segment = &path[index];
+    let above = index.checked_sub(1);
+    let prefix = above.map_or(0, |parent| path[parent].last_seq_limit);
+    let low = seq_as_i64(range.0).saturating_sub(prefix);
+    let through = seq_as_i64(range.1).min(segment.last_seq_limit);
+    let high = through.saturating_sub(prefix);
+    let query = (&segment.set.timeline, low, high, sql_count(room));
+    let rows = all_rows(conn, FOLD_EVENTS_SQL, query, fold_row);
     let decode = |row| fold_entry(prefix, row);
-    rows.into_iter().map(decode).collect()
+    rows.and_then(|read| read.into_iter().map(decode).collect())
 }
 
-/// The newest Events of the logical range `(after, through]` of a fork chain,
-/// at most [`FOLD_READ_LIMIT`], newest first: the chain is read from the
-/// Timeline itself up through its ancestors, and no older member is read
-/// once the limit is reached.
+/// The newest Events of the logical range `(after, through]` of a Timeline's
+/// ancestry, at most [`FOLD_READ_LIMIT`], newest first: the segments are read
+/// from the Timeline itself up through its ancestors, and no older segment is
+/// read once the limit is reached.
 fn newest_fold_events(
     conn: &Connection,
-    chain: &[(TimelineId, Seq)],
+    path: &[SegmentV1],
     range: (Seq, Seq),
 ) -> Result<Vec<FoldEntryV1>, CoreError> {
     let mut newest = Vec::new();
-    for index in (0..chain.len()).rev() {
+    for index in (0..path.len()).rev() {
         let room = FOLD_READ_LIMIT.saturating_sub(newest.len());
         if room == 0 {
             break;
         }
-        newest.extend(member_fold_events(conn, chain, index, range, room)?);
+        newest.extend(member_fold_events(conn, path, index, range, room)?);
     }
     Ok(newest)
 }
@@ -2076,19 +2078,16 @@ impl SqliteStore {
     }
 
     /// The fold window of `(after, through]`: the newest Events of the
-    /// Timeline's logical history, read through its fork chain, with their
-    /// nodes resolved through the ancestry segments.
+    /// Timeline's logical history, read through its ancestry segments, with
+    /// their nodes resolved through the same segments.
     fn read_fold_window(
         &self,
         timeline: TimelineId,
         range: (Seq, Seq),
     ) -> Result<FactualFoldWindowV1, CoreError> {
-        self.read_fenced(timeline, |held| {
-            let chain = held.factual_chain(timeline)?;
-            require_schema(&held.conn)?;
-            let path = path_of(&held.conn, timeline, &chain)?;
-            let newest = newest_fold_events(&held.conn, &chain, range)?;
-            fold_window_of(newest, |seqs| event_nodes(&held.conn, &path, seqs))
+        self.read_factual(timeline, |conn, path| {
+            let newest = newest_fold_events(conn, path, range)?;
+            fold_window_of(newest, |seqs| event_nodes(conn, path, seqs))
         })
     }
 

@@ -3208,6 +3208,19 @@ fn f15_a_fold_window_never_reads_a_payload() {
     assert_eq!(ok(lineage.store.fold_window(root, after, through)), before);
 }
 
+/// A stored Event row that fails to decode fails the fold window: its payload
+/// hash is a text here, not a 32-byte blob.
+#[test]
+fn f15_a_corrupt_event_row_fails_the_fold_window() {
+    let mut lineage = lineage();
+    let root = lineage.root;
+    let corrupt = format!("UPDATE events SET payload_hash = 'x' WHERE timeline_id = '{root}'");
+    rewritten(&mut lineage, &corrupt);
+
+    let read = lineage.store.fold_window(root, Seq::ZERO, Seq::from_u64(14));
+    assert!(read.is_err());
+}
+
 #[test]
 fn f15_a_fold_window_keeps_the_newest_events_up_to_the_scan_cap() {
     let fixture = fixture();
