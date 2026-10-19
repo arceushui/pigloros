@@ -406,9 +406,10 @@ struct VeritySignatureJson {
 ///
 /// Exactly one `rootHash` and one `signature` key, each with a string value.
 /// Other keys, including `certificateFingerprint`, are skipped without being
-/// interpreted, as systemd v260.2 does. Any duplicate key rejects, where
-/// systemd would take the first. Only a JSON object reaches `visit_map`; an
-/// array, which systemd's key lookup also rejects, does not.
+/// interpreted, as systemd v260.2 does. Any duplicate key, or a key that
+/// contains U+0000, rejects, where systemd would take the first match. Only
+/// a JSON object reaches `visit_map`; an array, which systemd's key lookup
+/// also rejects, does not.
 struct JsonObject;
 
 impl<'de> Visitor<'de> for JsonObject {
@@ -429,8 +430,13 @@ impl<'de> Visitor<'de> for JsonObject {
                     map.next_value::<IgnoredAny>()?;
                 }
             }
-            if !keys.insert(key) {
-                return Err(A::Error::custom("duplicate root-verity-sig key"));
+            // systemd's tokenizer decodes `\u0000` into a NUL byte and then
+            // truncates the key at it, so `rootHash\u0000` would be the first
+            // `rootHash` systemd finds; reject such keys like duplicates.
+            if key.contains('\0') || !keys.insert(key) {
+                return Err(A::Error::custom(
+                    "duplicate or NUL-bearing root-verity-sig key",
+                ));
             }
         }
         root_hash
@@ -444,11 +450,15 @@ impl<'de> Visitor<'de> for JsonObject {
 }
 
 /// Parse exactly one JSON object, with no whitespace before or after it.
+///
+/// systemd v260.2 rejects a raw DEL (0x7f) that serde_json accepts in a
+/// string, so it rejects here too.
 fn parse_verity_signature(text: &[u8]) -> Result<VeritySignatureJson, SelectorBoundaryError> {
-    if [text.first(), text.last()]
-        .into_iter()
-        .flatten()
-        .any(|byte| matches!(byte, b' ' | b'\t' | b'\n' | b'\r'))
+    if text.contains(&0x7f)
+        || [text.first(), text.last()]
+            .into_iter()
+            .flatten()
+            .any(|byte| matches!(byte, b' ' | b'\t' | b'\n' | b'\r'))
     {
         return Err(SelectorBoundaryError::ArtifactInvalid);
     }
@@ -1109,7 +1119,17 @@ pub mod tests {
             replace_once(json, "}", "}x")?,
             replace_once(json, "}", "}{}")?,
             replace_once(json, "{", " {")?,
+            replace_once(json, "{", "\t{")?,
+            replace_once(
+                json,
+                "{",
+                &format!("{{\"rootHash\\u0000\":\"{other_root}\","),
+            )?,
+            replace_once(json, "{", "{\"signature\\u0000\":\"\",")?,
+            replace_once(json, "{", "{\"x\\u0000\":\"\",")?,
+            replace_once(json, "}", ",\"extra\":\"\u{7f}\"}")?,
             replace_once(json, "}", "}\n")?,
+            replace_once(json, "}", "}\r")?,
             Vec::new(),
         ];
         Ok((accepted, rejected))
