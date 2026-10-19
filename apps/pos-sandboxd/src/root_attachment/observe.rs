@@ -53,6 +53,9 @@ pub(super) struct LoopDevice {
     pub(super) size_limit: Option<u64>,
     pub(super) autoclear: Option<u64>,
     pub(super) read_only: Option<u64>,
+    /// Every `loop<N>p<K>` partition of the device, as 512-byte-sector
+    /// `(start, size)` extents.
+    pub(super) partitions: Option<Vec<Option<(u64, u64)>>>,
 }
 
 /// One device-mapper slave: a loop partition and its 512-byte-sector extent.
@@ -160,6 +163,18 @@ impl HostKernel {
             size_limit: read_number(&device.join("loop/sizelimit")),
             autoclear: read_number(&device.join("loop/autoclear")),
             read_only: read_number(&device.join("ro")),
+            partitions: fs::read_dir(&device).ok().map(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                    .filter(|entry| loop_of(entry).as_deref() == Some(name))
+                    .map(|partition| {
+                        let partition = device.join(partition);
+                        read_number(&partition.join("start"))
+                            .zip(read_number(&partition.join("size")))
+                    })
+                    .collect()
+            }),
         }
     }
 }

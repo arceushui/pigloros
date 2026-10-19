@@ -18,7 +18,7 @@ const VERITY_UUID_PREFIX: &str = "CRYPT-VERITY-";
 const SECTOR: u64 = 512;
 
 /// One admitted SIM1 partition extent, in bytes.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(super) struct Extent {
     pub(super) start: u64,
     pub(super) length: u64,
@@ -39,6 +39,7 @@ pub(super) struct Expected {
     pub(super) root_directory: ActivatedRootDirectory,
     pub(super) root: Extent,
     pub(super) verity: Extent,
+    pub(super) signature: Extent,
     /// Device and inode of the held, admitted image descriptor.
     pub(super) held: (u64, u64),
 }
@@ -52,9 +53,11 @@ impl Expected {
         let manifest = admission.snapshot().image().manifest();
         rustix::fs::fstat(admission).ok().map(|held| Self {
             root_directory,
-            // SIM1 validation fixes ordinals 0 and 1 as root and root-verity.
+            // SIM1 validation fixes ordinals 0, 1 and 2 as root, root-verity
+            // and root-verity-signature.
             root: Extent::of(&manifest.partitions[0]),
             verity: Extent::of(&manifest.partitions[1]),
+            signature: Extent::of(&manifest.partitions[2]),
             held: (held.st_dev, held.st_ino),
         })
     }
@@ -123,20 +126,43 @@ impl Expected {
     }
 
     /// Owner decision Q7.5: the loop device is the held image, from byte 0,
-    /// unbounded, autoclear and read-only.
+    /// unbounded, autoclear and read-only. Its partition table is exactly
+    /// the admitted SIM1 GPT set (ADR-087 §2 step 6).
     fn loop_matches(&self, device: &LoopDevice) -> bool {
         device.backing == Some(self.held)
             && device.offset == Some(0)
             && device.size_limit == Some(0)
             && device.autoclear == Some(1)
             && device.read_only == Some(1)
+            && device
+                .partitions
+                .as_deref()
+                .is_some_and(|partitions| self.partitions_match(partitions))
+    }
+
+    fn partitions_match(&self, partitions: &[Option<(u64, u64)>]) -> bool {
+        let mut observed: Vec<Option<Extent>> = partitions
+            .iter()
+            .map(|partition| partition.and_then(|(start, size)| sectors(start, size)))
+            .collect();
+        let mut admitted = vec![Some(self.root), Some(self.verity), Some(self.signature)];
+        observed.sort_unstable();
+        admitted.sort_unstable();
+        observed == admitted
     }
 }
 
 fn extent_of(slave: &Slave) -> Option<Extent> {
     slave
         .start
-        .and_then(|start| start.checked_mul(SECTOR))
-        .zip(slave.size.and_then(|size| size.checked_mul(SECTOR)))
+        .zip(slave.size)
+        .and_then(|(start, size)| sectors(start, size))
+}
+
+/// A 512-byte-sector extent in bytes; an overflowing extent is absent.
+fn sectors(start: u64, size: u64) -> Option<Extent> {
+    start
+        .checked_mul(SECTOR)
+        .zip(size.checked_mul(SECTOR))
         .map(|(start, length)| Extent { start, length })
 }

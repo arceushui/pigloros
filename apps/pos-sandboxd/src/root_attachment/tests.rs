@@ -51,6 +51,10 @@ fn expected(component: &str) -> Expected {
             start: 9_437_184,
             length: 1_048_576,
         },
+        signature: Extent {
+            start: 10_485_760,
+            length: 16_384,
+        },
         held: (5, 6),
     }
 }
@@ -66,6 +70,12 @@ fn slave(expected: &Expected, extent: Extent) -> Slave {
             size_limit: Some(0),
             autoclear: Some(1),
             read_only: Some(1),
+            partitions: Some(
+                [expected.root, expected.verity, expected.signature]
+                    .iter()
+                    .map(|extent| Some((extent.start / 512, extent.length / 512)))
+                    .collect(),
+            ),
         }),
     }
 }
@@ -243,6 +253,9 @@ fn only_one_plain_veto_token_disables_userspace_verity() {
         format!("{VETO} {VETO}"),
         format!("{VETO} systemd.allow_userspace_verity=1"),
         format!("{VETO} rd.systemd.allow_userspace_verity=1"),
+        format!("x=\"a {VETO} b\""),
+        format!("x='a' {VETO}"),
+        format!("{VETO} x=\\"),
     ] {
         assert!(!vetoes_userspace_verity(rejected.as_bytes()), "{rejected}");
     }
@@ -331,8 +344,8 @@ fn exactly_the_admitted_private_read_only_erofs_root_is_accepted() {
 /// A named edit of the matching readback.
 type Mutation = (&'static str, fn(&mut Observations));
 
-/// One named difference from the matching readback per accepted fact.
-fn readback_mutations() -> Vec<Mutation> {
+/// One named difference per accepted mount and filesystem fact.
+fn mount_mutations() -> Vec<Mutation> {
     vec![
         ("no mount", |o| o.mount = None),
         ("no path", |o| o.path = None),
@@ -373,6 +386,12 @@ fn readback_mutations() -> Vec<Mutation> {
         ("slave propagation", |o| {
             edit_entry(o, |e| e.optional = vec!["master:2".to_owned()]);
         }),
+    ]
+}
+
+/// One named difference per accepted device-mapper and loop fact.
+fn device_mutations() -> Vec<Mutation> {
+    vec![
         ("no mapper", |o| o.mapper = None),
         ("no dm uuid", |o| edit_mapper(o, |m| m.uuid = None)),
         ("not dm-verity", |o| {
@@ -426,7 +445,35 @@ fn readback_mutations() -> Vec<Mutation> {
         }),
         ("no autoclear", |o| edit_loop(o, |d| d.autoclear = Some(0))),
         ("writable loop", |o| edit_loop(o, |d| d.read_only = Some(0))),
+        ("no partition table", |o| {
+            edit_loop(o, |d| d.partitions = None);
+        }),
+        ("extra partition", |o| {
+            edit_loop(o, |d| {
+                d.partitions.get_or_insert_default().push(Some((1, 1)))
+            });
+        }),
+        ("missing partition", |o| {
+            edit_loop(o, |d| {
+                d.partitions.get_or_insert_default().pop();
+            });
+        }),
+        ("unknown partition extent", |o| {
+            edit_loop(o, |d| d.partitions.get_or_insert_default()[2] = None);
+        }),
+        ("overflowing partition", |o| {
+            edit_loop(o, |d| {
+                d.partitions.get_or_insert_default()[2] = Some((u64::MAX, 1))
+            });
+        }),
     ]
+}
+
+/// One named difference from the matching readback per accepted fact.
+fn readback_mutations() -> Vec<Mutation> {
+    let mut mutations = mount_mutations();
+    mutations.extend(device_mutations());
+    mutations
 }
 
 #[test]
@@ -492,13 +539,15 @@ fn the_host_kernel_reads_back_the_mount_loop_and_mapper_by_descriptor() -> TestR
     for name in ["loop7p1", "loop7p2", "sdz1"] {
         fs::create_dir_all(block.join("slaves").join(name))?;
     }
+    // As in sysfs, a loop partition is a directory of its disk.
     let partitions = sys.join("class/block");
-    write(&partitions.join("loop7p1/start"), "2048\n")?;
-    write(&partitions.join("loop7p1/size"), "16384\n")?;
+    let device = partitions.join("loop7");
+    write(&device.join("loop7p1/start"), "2048\n")?;
+    write(&device.join("loop7p1/size"), "16384\n")?;
+    std::os::unix::fs::symlink(device.join("loop7p1"), partitions.join("loop7p1"))?;
     let mut image = tempfile::NamedTempFile::new()?;
     image.write_all(b"held image")?;
     let held = image.as_file().metadata()?;
-    let device = partitions.join("loop7");
     write(
         &device.join("loop/backing_file"),
         &format!("{}\n", image.path().display()),
@@ -523,6 +572,7 @@ fn the_host_kernel_reads_back_the_mount_loop_and_mapper_by_descriptor() -> TestR
         size_limit: Some(0),
         autoclear: Some(1),
         read_only: Some(1),
+        partitions: Some(vec![Some((2048, 16384))]),
     };
     assert_eq!(slaves.len(), 3);
     assert_eq!(
