@@ -2021,6 +2021,18 @@ fn newest_fold_events(
     Ok(newest)
 }
 
+/// The fold window of `(after, through]`: the newest Events of the
+/// Timeline's logical history, read through its ancestry segments, with their
+/// nodes resolved through the same segments.
+fn fold_window_at(
+    conn: &Connection,
+    path: &[SegmentV1],
+    range: (Seq, Seq),
+) -> Result<FactualFoldWindowV1, CoreError> {
+    let newest = newest_fold_events(conn, path, range);
+    newest.and_then(|read| fold_window_of(read, |seqs| event_nodes(conn, path, seqs)))
+}
+
 /// The stored row counts of the Timeline's own committed prefix set.
 fn prefix_counts(
     conn: &Connection,
@@ -2079,18 +2091,14 @@ impl SqliteStore {
         })
     }
 
-    /// The fold window of `(after, through]`: the newest Events of the
-    /// Timeline's logical history, read through its ancestry segments, with
-    /// their nodes resolved through the same segments.
+    /// The fold window of `(after, through]`, under the Timeline's read
+    /// fence.
     fn read_fold_window(
         &self,
         timeline: TimelineId,
         range: (Seq, Seq),
     ) -> Result<FactualFoldWindowV1, CoreError> {
-        self.read_factual(timeline, |conn, path| {
-            let newest = newest_fold_events(conn, path, range)?;
-            fold_window_of(newest, |seqs| event_nodes(conn, path, seqs))
-        })
+        self.read_factual(timeline, |conn, path| fold_window_at(conn, path, range))
     }
 
     /// The stored counts of the Timeline's own prefix set. It needs the
@@ -2295,6 +2303,14 @@ impl TickPrefixV1 for SqlitePrefixV1<'_> {
                     .is_some_and(|(node, _)| node.coordinate().tick() < tick)
             })
         })
+    }
+
+    fn fold_cursor(&self) -> Result<Option<FactualFoldCursorV1>, CoreError> {
+        fold_cursor_at(self.conn, &self.path)
+    }
+
+    fn fold_window(&self, after: Seq, through: Seq) -> Result<FactualFoldWindowV1, CoreError> {
+        fold_window_at(self.conn, &self.path, (after, through))
     }
 }
 

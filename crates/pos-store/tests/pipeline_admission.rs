@@ -7,29 +7,33 @@ use std::sync::{Arc, Barrier, Mutex};
 
 use pos_core::output_policy::OutputAuthorityV1;
 use pos_core::{
-    assemble_factual_tick, factual_artifact_digest, factual_ingress_content_digest,
-    pipeline_authority_revision_v1, pipeline_delegation_revision_v1, pipeline_erasure_revision_v1,
-    AdmissionClock, AppendDedupKey, AppendDedupScope, AppendIdentity, AuthorityGranteeV1,
-    AuthorityPersistenceHostV1, AuthorityPersistencePortV1, AuthorityRegistrySnapshotV1,
-    AuthorityRoleV1, CanonicalBytes, CapabilityGrantDraftV1, CapabilityGrantV1,
-    CapabilityRevocationDraftV1, CapabilityRevocationV1, CapabilityScopeDraftV1, CapabilityScopeV1,
-    CoreError, CounterfactualDependencyReadPortV1, DelegateClassV1, DependencyEdgeRecordV1,
-    DependencyNodeCoordinateV1, DependencyNodeRecordV1, DependencyPageRequestV1,
-    DependencyReadScopeV1, EntityId, ErasureContainmentGateV1, Event, EventDraft,
-    EventNodeBindingV1, EventStore, FactualCutV1, FactualDriverStepV1, FactualFoldBindingV1,
-    FactualFoldSourceV1, FactualHeadV1, FactualIngressEventV1, FactualInputV1, FactualNodeKeyV1,
-    FactualOutputV1, FactualOwnerIdV1, FactualPrefixReadPortV1, FactualPriorNodeV1,
-    FactualScheduledTickV1, FactualTickContextV1, FactualTickDependenciesV1, FactualTickShapeV1,
-    Hash, Kind, OutputNodeBindingV1, PipelineAdmissionBasisDraftV1, PipelineAdmissionBasisV1,
-    PipelineAdmissionFencePublisherV1, PipelineAdmissionFenceV1, PipelineAdmissionPortV1,
-    PipelineAttemptDraftV1, PipelineAttemptIdV1, PipelineAttemptV1, PipelineCommitReceiptV1,
-    PipelineDraftBatchV1, PipelineEvidenceRefV1, PipelineIngressV1, PipelineObservationAnchorV1,
-    PipelineOutcomeV1, PipelinePreconditionV1, PipelineReceiptLookupV1,
-    PipelineSecurityRevisionsDraftV1, PipelineSecurityRevisionsV1, PrincipalRefV1,
-    RecordedDependencyClassV1, RecordedNodeOriginV1, RecordedSetCountsV1, Seq, SeqRange,
-    TentativePipelineResultV1, TickDependencyRecordV1, TimelineId, WallTime,
-    APPEND_IDENTITY_RETENTION_MICROS, DELEGATE_ACTION_V1, GEOGRAPHIC_EVENT_TYPE,
-    MAX_DEPENDENCY_PAGE_ROWS_V1, MAX_RECORDED_DEPENDENCY_NODES_V1, PIPELINE_CONTRACT_VERSION_V1,
+    assemble_factual_tick, factual_artifact_digest, factual_fold_history_content_digest,
+    factual_ingress_content_digest, pipeline_authority_revision_v1,
+    pipeline_delegation_revision_v1, pipeline_erasure_revision_v1, AdmissionClock, AppendDedupKey,
+    AppendDedupScope, AppendIdentity, AuthorityGranteeV1, AuthorityPersistenceHostV1,
+    AuthorityPersistencePortV1, AuthorityRegistrySnapshotV1, AuthorityRoleV1, CanonicalBytes,
+    CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityRevocationDraftV1, CapabilityRevocationV1,
+    CapabilityScopeDraftV1, CapabilityScopeV1, ConsentAuthority, ConsentGrantedV1,
+    ConsentRevokedV1, CoreError, CounterfactualDependencyReadPortV1, DelegateClassV1,
+    DependencyEdgeRecordV1, DependencyNodeCoordinateV1, DependencyNodeRecordV1,
+    DependencyPageRequestV1, DependencyReadScopeV1, EntityId, ErasureContainmentGateV1, Event,
+    EventDraft, EventNodeBindingV1, EventStore, FactualCutV1, FactualDriverStepV1,
+    FactualFoldBindingV1, FactualFoldSourceV1, FactualHeadV1, FactualIngressEventV1,
+    FactualInputV1, FactualNodeKeyV1, FactualOutputV1, FactualOwnerIdV1, FactualPrefixReadPortV1,
+    FactualPriorNodeV1, FactualScheduledTickV1, FactualTickContextV1, FactualTickDependenciesV1,
+    FactualTickShapeV1, Hash, Kind, OutputNodeBindingV1, PipelineAdmissionBasisDraftV1,
+    PipelineAdmissionBasisV1, PipelineAdmissionFencePublisherV1, PipelineAdmissionFenceV1,
+    PipelineAdmissionPortV1, PipelineAttemptDraftV1, PipelineAttemptIdV1, PipelineAttemptV1,
+    PipelineCommitReceiptV1, PipelineDraftBatchV1, PipelineEvidenceRefV1, PipelineIngressV1,
+    PipelineObservationAnchorV1, PipelineOutcomeV1, PipelinePreconditionV1,
+    PipelineReceiptLookupV1, PipelineSecurityRevisionsDraftV1, PipelineSecurityRevisionsV1,
+    PrincipalRefV1, RecordedDependencyClassV1, RecordedNodeOriginV1, RecordedSetCountsV1, Seq,
+    SeqRange, TentativePipelineResultV1, TickDependencyRecordV1, TimelineId, WallTime,
+    APPEND_IDENTITY_RETENTION_MICROS, DELEGATE_ACTION_V1, EVENT_TYPE_CONSENT_GRANTED_V1,
+    EVENT_TYPE_CONSENT_REVOKED_V1, FACTUAL_FOLD_HISTORY_SCHEMA_ID_V1, GEOGRAPHIC_EVENT_TYPE,
+    HOST_CONSENT_CLOSED_EVENT_TYPE, MAX_DEPENDENCY_NODE_INPUTS_V1, MAX_DEPENDENCY_PAGE_ROWS_V1,
+    MAX_RECORDED_DEPENDENCY_NODES_V1, MAX_TICK_DEPENDENCY_EDGES_V1, MAX_TICK_DEPENDENCY_NODES_V1,
+    MODALITY_LOCATION, PIPELINE_CONTRACT_VERSION_V1,
 };
 use pos_store::{memory::MemoryStore, sqlite::SqliteStore};
 use tempfile::tempdir;
@@ -2166,13 +2170,15 @@ fn a_commit_records_nodes_edges_range_and_bindings_with_its_events() {
         assert_eq!(bound[3], None, "{name}");
 
         // A scheduled Tick: a snapshot, a step and three outputs, joined by
-        // four edges that all carry the fence's authority grant.
+        // four edges, and a fold node over Events 1 to 3 that the snapshot
+        // node inputs: four edges more, all carrying the fence's grant.
         let second = scheduled_after(&first, 2, 3);
-        committed(ok(admit(store.as_mut(), &second)));
+        let declaration = folded_declaration(store.as_ref(), &second, Vec::new());
+        commit_declared(store.as_mut(), &second, declaration);
         let counts = RecordedSetCountsV1 {
-            nodes: 8,
-            edges: 4,
-            inputs: 4,
+            nodes: 9,
+            edges: 8,
+            inputs: 8,
         };
         assert_eq!(ok(store.factual_set_counts(timeline)), counts, "{name}");
         assert_eq!(head_of(store.as_ref(), timeline), head(2, 6), "{name}");
@@ -2221,16 +2227,18 @@ fn the_store_refuses_a_malformed_declaration_and_records_nothing() {
         }
 
         // Nothing a refusal touched was consumed: the correct Tick commits and
-        // records the ingress node of Event 4 once, beside its outputs.
-        let valid = valid_declaration(&second, vec![ingress_event(&events[3])]);
+        // records the ingress node of Event 4 once, beside its outputs, and a
+        // fold node over Events 1 to 4 that shares it.
+        let ingress = vec![ingress_event(&events[3])];
+        let valid = folded_declaration(store.as_ref(), &second, ingress);
         let outcome = ok(store.admit_pipeline_batch(&basis_declaring(&second, valid)));
         let receipt = committed(outcome);
         assert_eq!(receipt_positions(&receipt), [5, 6, 7], "{name}");
         assert_eq!(head_of(store.as_ref(), timeline), head(2, 7), "{name}");
         let counts = RecordedSetCountsV1 {
-            nodes: 9,
-            edges: 5,
-            inputs: 5,
+            nodes: 10,
+            edges: 10,
+            inputs: 10,
         };
         assert_eq!(ok(store.factual_set_counts(timeline)), counts, "{name}");
         let ingress = ok(store.nodes_for_committed_events(timeline, &[Seq::from_u64(4)]));
@@ -2328,7 +2336,7 @@ fn a_fork_binds_only_the_events_of_the_ticks_below_its_cut() {
             ..scheduled_after(&first, 2, 2)
         };
         let rebound = vec![ingress_event(&inherited[0]), ingress_event(&inherited[1])];
-        let declaration = valid_declaration(&child, rebound);
+        let declaration = folded_declaration(store.as_ref(), &child, rebound);
         let outcome = ok(store.admit_pipeline_batch(&basis_declaring(&child, declaration)));
         assert_eq!(receipt_positions(&committed(outcome)), [3, 4, 5], "{name}");
         assert_eq!(head_of(store.as_ref(), inside), head(1, 5), "{name}");
@@ -2353,7 +2361,7 @@ fn a_fork_binds_only_the_events_of_the_ticks_below_its_cut() {
         let invalid = PipelineOutcomeV1::InvalidDependencyDeclaration;
         let case = "bound below the cut";
         assert_refused(name, case, store.as_mut(), &later, again, &invalid);
-        let plain = valid_declaration(&later, Vec::new());
+        let plain = folded_declaration(store.as_ref(), &later, Vec::new());
         committed(ok(
             store.admit_pipeline_batch(&basis_declaring(&later, plain))
         ));
@@ -2365,7 +2373,7 @@ fn a_fork_binds_only_the_events_of_the_ticks_below_its_cut() {
 //
 // A scheduled Tick writes one fold-head row with its Events; a human Tick
 // writes none, and a retry nothing new. The store checks the shape of the fold
-// part (the amended check (viii)); slice 5 recomputes its content.
+// part (the amended check (viii)) and recomputes its content (checks (ix), (x)).
 
 /// The fold source a builder reads for a scheduled Tick observed through
 /// `observed`: the store's fold cursor and the window after it.
@@ -2386,12 +2394,21 @@ fn fold_source(store: &dyn Harness, timeline: TimelineId, observed: u64) -> Fact
 /// The declaration of a scheduled `attempt` whose one Driver outputs its
 /// drafts, with the fold part of `source`.
 fn fold_declared(attempt: &Attempt, source: FactualFoldSourceV1) -> FactualTickDependenciesV1 {
+    fold_declared_as(attempt, source, OutputAuthorityV1::Authoritative)
+}
+
+/// [`fold_declared`], every output of the given `authority`.
+fn fold_declared_as(
+    attempt: &Attempt,
+    source: FactualFoldSourceV1,
+    authority: OutputAuthorityV1,
+) -> FactualTickDependenciesV1 {
     let outputs = attempt
         .drafts
         .iter()
         .map(|draft| FactualOutputV1 {
             draft: draft.clone(),
-            authority: OutputAuthorityV1::Authoritative,
+            authority,
             direct_inputs: Vec::new(),
         })
         .collect();
@@ -2523,8 +2540,9 @@ fn every_scheduled_tick_writes_one_fold_head_row_and_a_human_tick_none() {
 /// ADR-064 R4.3, check (viii) as amended: the fold binding names exactly the
 /// fold nodes of the record, in chain order and at most five, the fold-history
 /// node at most once, and the snapshot node inputs the last fold node. Each
-/// break is refused before anything is appended; the valid declaration, with
-/// a fold-history node over a truncated window, then commits.
+/// break is refused before anything is appended; the valid declaration then
+/// commits. A forged truncation is refused too: the store reads its own
+/// window, which holds every Event of the range.
 #[test]
 fn the_store_refuses_a_fold_part_of_the_wrong_shape() {
     let clock = TestClock::at(1_000);
@@ -2537,10 +2555,12 @@ fn the_store_refuses_a_fold_part_of_the_wrong_shape() {
             drafts: drafts(&[b"x"]),
             ..scheduled_after(&first, 2, 3)
         };
-        let mut source = fold_source(store.as_ref(), timeline, 3);
-        source.window.truncated = true;
+        let source = fold_source(store.as_ref(), timeline, 3);
+        let mut forged = source.clone();
+        forged.window.truncated = true;
+        let truncated = fold_declared(&second, forged);
+        assert_eq!(truncated.fold().history.len(), 1, "{name}");
         let valid = fold_declared(&second, source);
-        assert_eq!(valid.fold().history.len(), 1, "{name}");
         let checkpoint = valid.fold().checkpoints[0];
         let output = valid.output_bindings()[0].node_index;
         let record = valid.record();
@@ -2567,6 +2587,7 @@ fn the_store_refuses_a_fold_part_of_the_wrong_shape() {
             ("six fold nodes", six),
             ("history binding of a fold node", misnamed),
             ("snapshot node without the fold node", unfed_snapshot),
+            ("fold-history node over a window that is whole", truncated),
         ];
         let invalid = PipelineOutcomeV1::InvalidDependencyDeclaration;
         for (case, declaration) in cases {
@@ -2623,4 +2644,659 @@ fn sqlite_a_failing_fold_head_insert_rolls_back_the_whole_scheduled_tick() {
         |row| row.get::<_, i64>(0),
     );
     assert_eq!(ok(rows), 1);
+}
+
+// ── Fold recomputation (ADR-064 Revision 4, checks (ix) and (x), #752) ─────
+//
+// The store derives the fold part of a scheduled Tick from the Events it
+// holds, through its own fold cursor and window, and refuses any other.
+
+/// The declaration of a scheduled `attempt` whose one Driver outputs its
+/// drafts and consumes the ingress nodes of `ingress_events`, with the fold
+/// part of the store's own fold cursor and window.
+fn folded_declaration(
+    store: &dyn Harness,
+    attempt: &Attempt,
+    ingress_events: Vec<FactualIngressEventV1>,
+) -> FactualTickDependenciesV1 {
+    let source = fold_source(store, attempt.timeline, attempt.observed_through);
+    let mut shape = scheduled_shape_of(&attempt.drafts, hash(61), ingress_events, Vec::new());
+    if let FactualTickShapeV1::Scheduled(tick) = &mut shape {
+        tick.fold = Some(Box::new(source));
+    }
+    declared(attempt, hash(1), &shape)
+}
+
+fn sorted(mut digests: Vec<Hash>) -> Vec<Hash> {
+    digests.sort();
+    digests
+}
+
+/// The sorted inputs of the fold checkpoint node of ordinal `at`.
+fn fold_inputs(declaration: &FactualTickDependenciesV1, at: usize) -> Vec<Hash> {
+    let index = declaration.fold().checkpoints[at];
+    let node = &declaration.record().nodes()[ok(usize::try_from(index))];
+    sorted(node.input_digests().to_vec())
+}
+
+/// The artifact digest of the node the committed Event at `seq` is bound to.
+fn node_digest(store: &dyn Harness, timeline: TimelineId, seq: u64) -> Hash {
+    let found = ok(store.nodes_for_committed_events(timeline, &[Seq::from_u64(seq)]));
+    let node = found.into_iter().flatten().next();
+    let held = node.unwrap_or_else(|| std::panic::resume_unwind(Box::new("no node")));
+    held.coordinate().artifact_digest()
+}
+
+/// The `seq`s a declaration binds to ingress nodes.
+fn bound_seqs(declaration: &FactualTickDependenciesV1) -> Vec<u64> {
+    let bindings = declaration.event_nodes();
+    let seqs = bindings.iter().map(|binding| binding.seq.as_u64());
+    seqs.collect()
+}
+
+/// Append a consent grant at `first_seq` and its revocation after it through
+/// the Gateway's consent seam: the generic append refuses consent drafts, and
+/// the seam requires each Event's entity to be its subject and its payload
+/// well formed.
+fn append_consent(store: &mut dyn Harness, timeline: TimelineId, first_seq: u64) {
+    let authority = ConsentAuthority::new();
+    ok(store.bind_consent_authority(authority.append_permit()));
+    let subject = entity(50);
+    let grant = ConsentGrantedV1 {
+        subject_id: subject,
+        grantee_id: entity(51),
+        purpose: "fold".to_owned(),
+        modalities: MODALITY_LOCATION,
+        min_geo_resolution: 1,
+        fork_permitted: false,
+        export_permitted: false,
+        retention_days: 1,
+        expiry_secs: 0,
+        grant_seq: first_seq,
+    };
+    let revocation = ConsentRevokedV1 {
+        subject_id: subject,
+        grantee_id: grant.grantee_id,
+        grant_seq: first_seq,
+        fence_seq: first_seq + 1,
+    };
+    let granted = Kind::new(EVENT_TYPE_CONSENT_GRANTED_V1);
+    let revoked = Kind::new(EVENT_TYPE_CONSENT_REVOKED_V1);
+    let consent = [
+        EventDraft::new(subject, granted, ok(grant.encode())),
+        EventDraft::new(subject, revoked, ok(revocation.encode())),
+    ];
+    let permit = authority.append_permit();
+    let appended = ok(store.append_consent_bounded(timeline, &consent, permit, 10));
+    assert_eq!(appended.as_ref().map(Vec::len), Some(2));
+}
+
+/// A Timeline whose Tick 1 is a human action over Events 1 to 3 and whose
+/// scheduled Tick 2 folds them and outputs Event 4; then a consent grant (5),
+/// its revocation (6) and a plain Event (7). Returns Tick 2's declaration and
+/// the attempt of Tick 3, observed through Event 7.
+fn consent_timeline(store: &mut dyn Harness) -> (FactualTickDependenciesV1, Attempt) {
+    let fixture = prepare(store);
+    let timeline = fixture.timeline;
+    let first = attempt(&fixture, 1, 0);
+    committed(ok(admit(store, &first)));
+    let second = Attempt {
+        drafts: drafts(&[b"x"]),
+        ..scheduled_after(&first, 2, 3)
+    };
+    let declaration = folded_declaration(store, &second, Vec::new());
+    let two = commit_declared(store, &second, declaration);
+    append_consent(store, timeline, 5);
+    ok(store.append(timeline, &drafts(&[b"raw"])));
+    let third = Attempt {
+        drafts: drafts(&[b"y"]),
+        ..scheduled_after(&second, 3, 7)
+    };
+    (two, third)
+}
+
+/// Conformance test 1 of ADR-064 R4 on one store: three scheduled Ticks.
+fn assert_three_folded_ticks(name: &str, store: &mut dyn Harness) {
+    let (two, third) = consent_timeline(store);
+    let timeline = third.timeline;
+    // Tick 2's fold node inputs exactly the nodes of the human Events.
+    let reader: &dyn Harness = store;
+    let human: Vec<Hash> = (1..=3)
+        .map(|seq| node_digest(reader, timeline, seq))
+        .collect();
+    assert_eq!(fold_inputs(&two, 0), sorted(human), "{name}");
+    let head_two = last_fold_digest(&two);
+
+    // Tick 3 chains to Tick 2's fold node and inputs Tick 2's output, the
+    // revocation and the plain Event, the last two through new ingress
+    // nodes; the consent grant is no fold input.
+    let declaration = folded_declaration(store, &third, Vec::new());
+    let three = commit_declared(store, &third, declaration);
+    assert_eq!(bound_seqs(&three), [6, 7], "{name}");
+    let output = node_digest(store, timeline, 4);
+    let revoked = node_digest(store, timeline, 6);
+    let plain = node_digest(store, timeline, 7);
+    let expected = sorted(vec![head_two, output, revoked, plain]);
+    assert_eq!(fold_inputs(&three, 0), expected, "{name}");
+    let head_three = last_fold_digest(&three);
+
+    // Tick 4 observes nothing new: no fold node, the snapshot node inputs the
+    // head, and the fold-head row keeps it.
+    let fourth = Attempt {
+        observed_through: 7,
+        ..scheduled_after(&third, 4, 8)
+    };
+    let declaration = folded_declaration(store, &fourth, Vec::new());
+    let four = commit_declared(store, &fourth, declaration);
+    assert!(four.fold().checkpoints.is_empty(), "{name}");
+    let snapshot = node_of(four.record(), "host.observation");
+    assert_eq!(snapshot.input_digests(), [head_three], "{name}");
+    assert_eq!(cursor_of(store, timeline), Some((7, head_three)), "{name}");
+}
+
+/// ADR-064 R4 conformance test 1: three scheduled Ticks chain their fold
+/// nodes over exactly the fold inputs between them, each recomputed and
+/// accepted by the store, real consent Events included; a Tick with no new
+/// fold input records none and writes its fold-head row. `SQLite` holds one
+/// fold-head row per scheduled Tick.
+#[test]
+fn three_scheduled_ticks_chain_their_fold_nodes_over_exactly_the_fold_inputs() {
+    let clock = TestClock::at(1_000);
+    let mut memory = MemoryStore::with_clock(Box::new(clock.clone()));
+    assert_three_folded_ticks("memory", &mut memory);
+    let directory = ok(tempdir());
+    let path = directory.path().join("admission-fold-chain.db");
+    let mut sqlite = ok(SqliteStore::open_with_clock(
+        path.to_str().unwrap_or_default(),
+        Box::new(clock),
+    ));
+    assert_three_folded_ticks("sqlite", &mut sqlite);
+    drop(sqlite);
+    let connection = ok(rusqlite::Connection::open(&path));
+    let rows = connection.query_row(
+        "SELECT COUNT(*) FROM counterfactual_dependency_fold_heads",
+        [],
+        |row| row.get::<_, i64>(0),
+    );
+    assert_eq!(ok(rows), 3);
+}
+
+/// The fold source with the Event at `seq` left out of the window.
+fn without_event(source: &FactualFoldSourceV1, seq: u64) -> FactualFoldSourceV1 {
+    let mut forged = source.clone();
+    forged
+        .window
+        .events
+        .retain(|event| event.seq.as_u64() != seq);
+    forged
+}
+
+/// The fold source with the Event at `seq` reported as a plain Event.
+fn retyped(source: &FactualFoldSourceV1, seq: u64) -> FactualFoldSourceV1 {
+    let mut forged = source.clone();
+    let events = forged.window.events.iter_mut();
+    for event in events.filter(|event| event.seq.as_u64() == seq) {
+        event.event_type = Kind::new("world.action");
+    }
+    forged
+}
+
+/// The fold source with the cursor's head replaced by `head`.
+fn with_head(
+    source: &FactualFoldSourceV1,
+    head: Option<DependencyNodeRecordV1>,
+) -> FactualFoldSourceV1 {
+    let mut forged = source.clone();
+    if let Some(cursor) = forged.cursor.as_mut() {
+        cursor.head = head;
+    }
+    forged
+}
+
+/// The declaration with the snapshot node's input and its edge removed.
+fn without_snapshot_input(valid: &FactualTickDependenciesV1) -> FactualTickDependenciesV1 {
+    let record = valid.record();
+    let snapshot = digest_of_host(record, "host.observation");
+    let unfed = |node: &DependencyNodeRecordV1| {
+        if node.coordinate().artifact_digest() == snapshot {
+            Vec::new()
+        } else {
+            inputs_unchanged(node)
+        }
+    };
+    let origin = RecordedNodeOriginV1::Committed;
+    let kept = |edge: &DependencyEdgeRecordV1| edge.consumer().owner_id() != "host.observation";
+    let blind = rebuilt(record, origin, unfed, kept);
+    with_record(valid, blind)
+}
+
+/// Offer each refused case and require that nothing changed, the fold
+/// cursor included.
+fn assert_all_refused(name: &str, store: &mut dyn Harness, cases: Vec<RefusalCase>) {
+    for (case, offered, declaration, expected) in cases {
+        let cursor = cursor_of(store, offered.timeline);
+        assert_refused(name, case, store, &offered, declaration, &expected);
+        assert_eq!(cursor_of(store, offered.timeline), cursor, "{name}: {case}");
+    }
+}
+
+/// Conformance test 2 of ADR-064 R4 and the refusals of checks (ix) and (x),
+/// on one store.
+fn assert_fold_refusals(name: &str, store: &mut dyn Harness) {
+    let (_, third) = consent_timeline(store);
+    let timeline = third.timeline;
+    let source = fold_source(store, timeline, 7);
+    let stale = Attempt {
+        observed_through: 2,
+        ..third.clone()
+    };
+    let valid = fold_declared(&third, source.clone());
+    let unfed = without_snapshot_input(&valid);
+    let cases = vec![
+        invalid_for(
+            "fold node that omits a fold input",
+            third.clone(),
+            fold_declared(&third, without_event(&source, 7)),
+        ),
+        invalid_for(
+            "fold node that inputs a consent grant",
+            third.clone(),
+            fold_declared(&third, retyped(&source, 5)),
+        ),
+        invalid_for(
+            "fold node without the head edge",
+            third.clone(),
+            fold_declared(&third, with_head(&source, None)),
+        ),
+        invalid_for("snapshot node without its fold node", third.clone(), unfed),
+        invalid_for(
+            "no fold node over unscanned fold inputs",
+            third.clone(),
+            valid_declaration(&third, Vec::new()),
+        ),
+        invalid_for(
+            "anchor below the fold cursor",
+            stale.clone(),
+            valid_declaration(&stale, Vec::new()),
+        ),
+    ];
+    assert_all_refused(name, store, cases);
+    let three = commit_declared(store, &third, valid);
+
+    // Check (x): with no fold node, the snapshot node inputs exactly the head
+    // the fold-head index names, not another prior node, and not nothing.
+    let fourth = Attempt {
+        observed_through: 7,
+        ..scheduled_after(&third, 4, 8)
+    };
+    let source = fold_source(store, timeline, 7);
+    let step = node_of(three.record(), "plugin:test").clone();
+    let cases = vec![
+        invalid_for(
+            "snapshot node that inputs a step node as the head",
+            fourth.clone(),
+            fold_declared(&fourth, with_head(&source, Some(step))),
+        ),
+        invalid_for(
+            "snapshot node without the head",
+            fourth.clone(),
+            fold_declared(&fourth, with_head(&source, None)),
+        ),
+    ];
+    assert_all_refused(name, store, cases);
+    commit_declared(store, &fourth, fold_declared(&fourth, source));
+}
+
+/// ADR-064 R4 conformance test 2 and checks (ix) and (x): a basis that omits
+/// a fold input, adds an excluded Event, omits the head edge or the
+/// snapshot's fold input, records no fold node over unscanned fold inputs,
+/// anchors below the fold cursor, or names another head than the fold-head
+/// index's is refused before anything is appended or recorded.
+#[test]
+fn the_store_refuses_a_fold_part_it_does_not_derive_from_its_events() {
+    let clock = TestClock::at(1_000);
+    for (name, mut store) in stores(&clock) {
+        assert_fold_refusals(name, store.as_mut());
+    }
+}
+
+/// Append `count` Events of type `kind` to the Timeline.
+fn append_many(store: &mut dyn Harness, timeline: TimelineId, kind: &str, count: usize) {
+    let all: Vec<EventDraft> = (0..count)
+        .map(|index| {
+            let payload = CanonicalBytes::from_vec(index.to_be_bytes().to_vec());
+            EventDraft::new(entity(5), Kind::new(kind), payload)
+        })
+        .collect();
+    for batch in all.chunks(1_024) {
+        ok(store.append(timeline, batch));
+    }
+}
+
+/// Commit the scheduled Tick after `previous`, observed through the head
+/// `head`, one draft, with the fold part the store derives, its outputs of
+/// `authority`.
+fn commit_folded(
+    store: &mut dyn Harness,
+    previous: &Attempt,
+    head: u64,
+    authority: OutputAuthorityV1,
+) -> (Attempt, FactualTickDependenciesV1) {
+    let key = previous.key + 1;
+    let next = Attempt {
+        drafts: drafts(&[&[key]]),
+        ..scheduled_after(previous, key, head)
+    };
+    let source = fold_source(store, next.timeline, head);
+    let declaration = fold_declared_as(&next, source, authority);
+    let committed = commit_declared(store, &next, declaration);
+    (next, committed)
+}
+
+/// The artifact digest of the fold-history node over `(from, through)` at
+/// the Tick `tick` of the Timeline.
+fn fold_history_digest(timeline: TimelineId, tick: u64, from: u64, through: u64) -> Hash {
+    let range = (Seq::from_u64(from), Seq::from_u64(through));
+    let content = factual_fold_history_content_digest(range.0, range.1);
+    let key = FactualNodeKeyV1 {
+        tick,
+        scheduler_position: 0,
+        owner: "host.fold-history",
+        output_ordinal: 0,
+        schema_id: FACTUAL_FOLD_HISTORY_SCHEMA_ID_V1,
+    };
+    factual_artifact_digest(timeline, key, content)
+}
+
+/// The artifact digest of the fold-history node of a declaration.
+fn history_of(declaration: &FactualTickDependenciesV1) -> Hash {
+    digest_at(declaration.record(), declaration.fold().history[0])
+}
+
+/// The first scheduled attempt of the fixture's Timeline, as the attempt
+/// before it: Tick 0, observed through nothing.
+fn before_first(fixture: &Fixture) -> Attempt {
+    Attempt {
+        ingress: PipelineIngressV1::ScheduledAiDriver,
+        tick: 0,
+        ..attempt(fixture, 1, 0)
+    }
+}
+
+/// The store part of conformance test 4 of ADR-064 R4, chunking and
+/// collapse, on one store.
+fn assert_chunks_and_collapse(name: &str, store: &mut dyn Harness) {
+    let fixture = prepare(store);
+    let timeline = fixture.timeline;
+    let authoritative = OutputAuthorityV1::Authoritative;
+    // 4,094 fold inputs take one fold node.
+    append_many(store, timeline, "world.action", 4_094);
+    let (one, folded) = commit_folded(store, &before_first(&fixture), 4_094, authoritative);
+    assert_eq!(folded.fold().checkpoints.len(), 1, "{name}");
+    // Tick 1's output and 4,094 more: 4,095 take two.
+    append_many(store, timeline, "world.action", 4_094);
+    let (two, folded) = commit_folded(store, &one, 8_189, authoritative);
+    assert_eq!(folded.fold().checkpoints.len(), 2, "{name}");
+    assert!(folded.fold().history.is_empty(), "{name}");
+    // 16,384 take five, with no fold-history node.
+    append_many(store, timeline, "world.action", 16_383);
+    let (three, folded) = commit_folded(store, &two, 24_573, authoritative);
+    assert_eq!(folded.fold().checkpoints.len(), 5, "{name}");
+    assert!(folded.fold().history.is_empty(), "{name}");
+    // 16,385 collapse exactly the oldest, Tick 3's output at 24,574.
+    append_many(store, timeline, "world.action", 16_384);
+    let fourth = Attempt {
+        drafts: drafts(&[b"d"]),
+        ..scheduled_after(&three, 5, 40_958)
+    };
+    let source = fold_source(store, timeline, 40_958);
+    let valid = fold_declared(&fourth, source);
+    let expected = fold_history_digest(timeline, 4, 24_574, 24_574);
+    assert_eq!(history_of(&valid), expected, "{name}");
+    assert_eq!(valid.fold().checkpoints.len(), 5, "{name}");
+    let mut six = valid.fold().checkpoints.clone();
+    six.push(six[4]);
+    let history = valid.fold().history.clone();
+    let twice = vec![history[0], history[0]];
+    let checkpoints = valid.fold().checkpoints.clone();
+    let cases = vec![
+        invalid_for(
+            "six checkpoints",
+            fourth.clone(),
+            with_fold(&valid, six, history),
+        ),
+        invalid_for(
+            "two history entries",
+            fourth.clone(),
+            with_fold(&valid, checkpoints, twice),
+        ),
+    ];
+    assert_all_refused(name, store, cases);
+    commit_declared(store, &fourth, valid);
+}
+
+/// ADR-064 R4 conformance test 4, store part: the store accepts the fold
+/// part of 4,094 fold inputs in one node, 4,095 in two, 16,384 in five
+/// without a fold-history node, and of 16,385 with a fold-history node over
+/// exactly the oldest, and refuses six checkpoints or two history entries.
+#[test]
+fn the_store_recomputes_the_chunks_and_the_collapse_of_large_windows() {
+    let clock = TestClock::at(1_000);
+    for (name, mut store) in stores(&clock) {
+        assert_chunks_and_collapse(name, store.as_mut());
+    }
+}
+
+/// The store part of conformance test 4 of ADR-064 R4, a truncated window,
+/// on one store.
+fn assert_truncated_window(name: &str, store: &mut dyn Harness) {
+    let fixture = prepare(store);
+    let timeline = fixture.timeline;
+    // 65,537 Events without a fold input: the oldest is left out of the
+    // window and collapsed with the rest of the range into the fold-history
+    // node, and one fold node with an empty chunk stands behind it.
+    append_many(store, timeline, HOST_CONSENT_CLOSED_EVENT_TYPE, 65_537);
+    let first = before_first(&fixture);
+    let authoritative = OutputAuthorityV1::Authoritative;
+    let (_, folded) = commit_folded(store, &first, 65_537, authoritative);
+    let history = fold_history_digest(timeline, 1, 1, 65_537);
+    assert_eq!(history_of(&folded), history, "{name}");
+    assert_eq!(fold_inputs(&folded, 0), [history], "{name}");
+}
+
+/// ADR-064 R4 conformance test 4, store part: a window of 65,537 Events
+/// without a fold input records a fold-history node over the whole range and
+/// one fold node with an empty chunk. (A whole window of 65,536 records no
+/// fold node; the assembly tests of `pos_core` cover that vector.)
+#[test]
+fn the_store_recomputes_the_collapse_of_a_truncated_window() {
+    let clock = TestClock::at(1_000);
+    for (name, mut store) in stores(&clock) {
+        assert_truncated_window(name, store.as_mut());
+    }
+}
+
+/// The contents of `count` verified-prefix nodes.
+fn prefix_contents(count: usize) -> Vec<Hash> {
+    (0..count)
+        .map(|index| {
+            let mut bytes = [0_u8; 32];
+            bytes[..8].copy_from_slice(&ok(u64::try_from(index)).to_be_bytes());
+            Hash::from_bytes(bytes)
+        })
+        .collect()
+}
+
+/// One authoritative output per draft, with no input of its own.
+fn authoritative_outputs(drafts: &[EventDraft]) -> Vec<FactualOutputV1> {
+    let output = |draft: &EventDraft| FactualOutputV1 {
+        draft: draft.clone(),
+        authority: OutputAuthorityV1::Authoritative,
+        direct_inputs: Vec::new(),
+    };
+    drafts.iter().map(output).collect()
+}
+
+/// Drivers whose step nodes input the snapshot node and verified-prefix
+/// nodes, `edges` edges in all; the first also outputs `drafts`.
+fn heavy_drivers(drafts: &[EventDraft], edges: usize) -> Vec<FactualDriverStepV1> {
+    let per_step = MAX_DEPENDENCY_NODE_INPUTS_V1;
+    (0..edges.div_ceil(per_step))
+        .map(|index| {
+            let inputs = (edges - index * per_step).min(per_step) - 1;
+            let prefix = |at: usize| FactualInputV1::PrefixNode(ok(u32::try_from(at)));
+            let outputs = if index == 0 {
+                authoritative_outputs(drafts)
+            } else {
+                Vec::new()
+            };
+            FactualDriverStepV1 {
+                owner: FactualOwnerIdV1::new(format!("plugin:heavy-{index}")),
+                policy_identity: hash(8),
+                step_inputs: (0..inputs).map(prefix).collect(),
+                outputs,
+            }
+        })
+        .collect()
+}
+
+/// The rest of a heavy scheduled record: its verified-prefix nodes, the
+/// edges of its step nodes, and ingress nodes no step or output node inputs.
+struct HeavyRest {
+    prefix: usize,
+    step_edges: usize,
+    orphans: Vec<FactualIngressEventV1>,
+}
+
+/// The rest whose step nodes add `step_edges` edges over the most
+/// verified-prefix nodes one step node can input.
+const fn edge_heavy(step_edges: usize) -> HeavyRest {
+    HeavyRest {
+        prefix: MAX_DEPENDENCY_NODE_INPUTS_V1 - 1,
+        step_edges,
+        orphans: Vec::new(),
+    }
+}
+
+/// The declaration of a scheduled `attempt` whose rest is `rest` and one
+/// output edge per draft, with the fold part of `source`.
+fn heavy_declared(
+    attempt: &Attempt,
+    rest: HeavyRest,
+    source: Option<FactualFoldSourceV1>,
+) -> FactualTickDependenciesV1 {
+    let shape = FactualTickShapeV1::Scheduled(FactualScheduledTickV1 {
+        snapshot_digest: hash(61),
+        prefix_contents: prefix_contents(rest.prefix),
+        history_contents: Vec::new(),
+        ingress_events: rest.orphans,
+        drivers: heavy_drivers(&attempt.drafts, rest.step_edges),
+        fold: source.map(Box::new),
+    });
+    declared(attempt, hash(1), &shape)
+}
+
+/// The store part of conformance test 4 of ADR-064 R4, the fit and the
+/// reserved headroom, on one store.
+fn assert_fit_and_reserve(name: &str, store: &mut dyn Harness) {
+    let fixture = prepare(store);
+    let timeline = fixture.timeline;
+    let first = attempt(&fixture, 1, 0);
+    committed(ok(admit(store, &first)));
+    let (second, _) = commit_folded(store, &first, 3, OutputAuthorityV1::Authoritative);
+    // Tick 2's output (4) and 499 plain Events: 500 fold inputs behind the head.
+    append_many(store, timeline, "world.action", 499);
+    let third = scheduled_after(&second, 3, 503);
+    // A rest of 262,142 edges, one over the 262,141 the reserve leaves it.
+    let over = edge_heavy(MAX_TICK_DEPENDENCY_EDGES_V1 - 3);
+    let crowded = heavy_declared(&third, over, None);
+    let case = invalid_for("rest over the reserve", third.clone(), crowded);
+    assert_all_refused(name, store, vec![case]);
+    // A rest of 262,144 - 103 edges keeps the newest 100 fold inputs.
+    let source = fold_source(store, timeline, 503);
+    let head = source.head().cloned();
+    let rest = edge_heavy(MAX_TICK_DEPENDENCY_EDGES_V1 - 104);
+    let fitted = heavy_declared(&third, rest, Some(source));
+    let total = fitted.record().edges().len();
+    assert_eq!(total, MAX_TICK_DEPENDENCY_EDGES_V1, "{name}");
+    let history = fold_history_digest(timeline, 3, 4, 403);
+    assert_eq!(history_of(&fitted), history, "{name}");
+    let kept: Vec<u64> = (404..=503).collect();
+    assert_eq!(bound_seqs(&fitted), kept, "{name}");
+    let inputs = fold_inputs(&fitted, 0);
+    assert_eq!(inputs.len(), 102, "{name}");
+    let head_digest = head.map(|node| node.coordinate().artifact_digest());
+    let chained = head_digest.is_some_and(|digest| inputs.contains(&digest));
+    assert!(chained, "{name}");
+    commit_declared(store, &third, fitted);
+}
+
+/// ADR-064 R4 conformance test 4, store part, and the reserved headroom: with
+/// a head, a whole window of 500 fold inputs and a rest of 262,144 - 103
+/// edges, the store derives the same fit as the builder (the newest 100 in
+/// one fold node behind a fold-history node) and accepts it; a basis whose
+/// rest exceeds 262,141 edges is refused.
+#[test]
+fn the_store_recomputes_the_fit_and_refuses_a_rest_over_the_reserve() {
+    let clock = TestClock::at(1_000);
+    for (name, mut store) in stores(&clock) {
+        assert_fit_and_reserve(name, store.as_mut());
+    }
+}
+
+/// The node part of the reserved headroom, on one store: a rest of 65,535
+/// nodes is refused, and a rest of exactly 65,534 keeps the minimal fold part
+/// plus what needs no new node. The rest holds an orphan: an ingress node no
+/// step or output node inputs. The builder counts it in the rest, as a
+/// forwarded Event, and the store, once it is kept, in the fold part; both
+/// derive the same fit.
+fn assert_node_reserve(name: &str, store: &mut dyn Harness) {
+    let fixture = prepare(store);
+    let timeline = fixture.timeline;
+    append_many(store, timeline, "world.action", 3);
+    let events = ok(store.read(timeline, SeqRange::all()));
+    let first = Attempt {
+        drafts: drafts(&[b"n"]),
+        ..scheduled_after(&before_first(&fixture), 2, 3)
+    };
+    // Snapshot, prefix nodes, one step node and one output node: 65,535.
+    let crowded = HeavyRest {
+        prefix: MAX_TICK_DEPENDENCY_NODES_V1 - 4,
+        step_edges: 1,
+        orphans: Vec::new(),
+    };
+    // A bare record: the reserve guard refuses it before any fold part is
+    // derived (without the guard the bare record would still mismatch).
+    let over = heavy_declared(&first, crowded, None);
+    let case = invalid_for("rest over the node reserve", first.clone(), over);
+    assert_all_refused(name, store, vec![case]);
+    // The same with one prefix node fewer and the orphan of Event 3: 65,534.
+    // Events 1 and 2 would each need a new node, so only Event 3 is kept,
+    // behind a fold-history node over Events 1 and 2.
+    let boundary = HeavyRest {
+        prefix: MAX_TICK_DEPENDENCY_NODES_V1 - 6,
+        step_edges: 1,
+        orphans: vec![ingress_event(&events[2])],
+    };
+    let source = fold_source(store, timeline, 3);
+    let fitted = heavy_declared(&first, boundary, Some(source));
+    let nodes = fitted.record().nodes().len();
+    assert_eq!(nodes, MAX_TICK_DEPENDENCY_NODES_V1, "{name}");
+    let history = fold_history_digest(timeline, 1, 1, 2);
+    assert_eq!(history_of(&fitted), history, "{name}");
+    let orphan = digest_at(fitted.record(), fitted.event_nodes()[0].node_index);
+    let expected = sorted(vec![history, orphan]);
+    assert_eq!(fold_inputs(&fitted, 0), expected, "{name}");
+    commit_declared(store, &first, fitted);
+}
+
+/// ADR-064 R4.2 reserved headroom, nodes: the store refuses a basis whose
+/// rest exceeds 65,534 nodes and recomputes the fit of one whose rest is
+/// exactly 65,534, an orphan ingress node included.
+#[test]
+fn the_store_refuses_a_rest_over_the_node_reserve_and_fits_one_at_it() {
+    let clock = TestClock::at(1_000);
+    for (name, mut store) in stores(&clock) {
+        assert_node_reserve(name, store.as_mut());
+    }
 }

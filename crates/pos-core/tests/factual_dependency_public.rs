@@ -3,7 +3,7 @@
 //! Public-interface contract tests for the ADR-064 Revision 3 factual Tick
 //! dependency contract and its Revision 4 fold checkpoint nodes.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::num::NonZeroUsize;
 use std::ops::RangeInclusive;
@@ -16,31 +16,32 @@ use pos_core::{
     assemble_factual_tick, ensure_factual_set_headroom, factual_artifact_digest,
     factual_classification_bundle_bytes, factual_classification_bundle_digest,
     factual_event_schema_id, factual_fold_checkpoint_content_digest,
-    factual_fold_history_content_digest, factual_history_content_digest,
+    factual_fold_history_content_digest, factual_fold_layout, factual_history_content_digest,
     factual_ingress_content_digest, factual_output_content_digest, factual_owner_id,
     factual_provenance_digest, factual_step_content_digest, factual_verified_prefix_content_digest,
     is_factual_fold_input, pipeline_draft_vector_digest_v1, AppendDedupKey, CanonicalBytes,
     CoreError, CounterfactualDependencyErrorV1, DependencyNodeCoordinateV1, DependencyNodeRecordV1,
     EntityId, EventDraft, EventNodeBindingV1, FactualAdmissionPortV1, FactualCutV1,
     FactualDependencyErrorV1, FactualDriverStepV1, FactualEventRefV1, FactualFoldBindingV1,
-    FactualFoldCursorV1, FactualFoldEventV1, FactualFoldSourceV1, FactualFoldWindowV1,
-    FactualHeadV1, FactualHostOwnerV1, FactualIngressEventV1, FactualInputV1, FactualNodeKeyV1,
-    FactualOutputV1, FactualOwnerIdV1, FactualOwnerSourceV1, FactualPrefixReadPortV1,
-    FactualPriorNodeV1, FactualRuleV1, FactualScheduledTickV1, FactualTickContextV1,
-    FactualTickDependenciesV1, FactualTickShapeV1, Hash, Kind, OutputNodeBindingV1,
-    PipelineAdmissionBasisV1, PipelineAdmissionPortV1, PipelineAttemptIdV1, PipelineIngressV1,
-    PipelineOutcomeV1, PipelineReceiptLookupV1, PurgeOutcome, RecordedDependencyClassV1,
-    RecordedNodeOriginV1, RecordedSetCountsV1, Seq, TickDependencyRecordV1, TimelineId, WallTime,
-    EVENT_TYPE_CONSENT_GRANTED_V1, EVENT_TYPE_CONSENT_REVOKED_V1,
-    FACTUAL_FOLD_HISTORY_SCHEMA_ID_V1, FACTUAL_FOLD_RESERVED_EDGES_V1,
-    FACTUAL_FOLD_RESERVED_NODES_V1, FACTUAL_FOLD_SCHEMA_ID_V1, FACTUAL_HISTORY_SCHEMA_ID_V1,
-    FACTUAL_PREFIX_SCHEMA_ID_V1, FACTUAL_SNAPSHOT_SCHEMA_ID_V1, FACTUAL_STEP_SCHEMA_ID_V1,
-    GEOGRAPHIC_CELL_EVENT_TYPE, GEOGRAPHIC_EVENT_TYPE, HOST_CONSENT_CLOSED_EVENT_TYPE,
-    MAX_DEPENDENCY_NODE_INPUTS_V1, MAX_FACTUAL_FOLD_CHECKPOINTS_PER_TICK_V1,
-    MAX_FACTUAL_FOLD_EVENTS_PER_CHECKPOINT_V1, MAX_FACTUAL_FOLD_INPUT_EDGES_PER_TICK_V1,
-    MAX_FACTUAL_FOLD_SCAN_PER_TICK_V1, MAX_FACTUAL_FORWARDED_EDGES_PER_TICK_V1,
-    MAX_FACTUAL_FORWARDED_EVENTS_PER_TICK_V1, MAX_FORWARDED_EVENTS_PER_DRIVER_V1,
-    MAX_HOST_DERIVED_STEP_INPUTS_V1, MAX_OUTPUT_DIRECT_INPUTS_V1, MAX_RECORDED_DEPENDENCY_EDGES_V1,
+    FactualFoldChunkV1, FactualFoldCursorV1, FactualFoldEventV1, FactualFoldLayoutV1,
+    FactualFoldRestV1, FactualFoldSourceV1, FactualFoldWindowV1, FactualHeadV1, FactualHostOwnerV1,
+    FactualIngressEventV1, FactualInputV1, FactualNodeKeyV1, FactualOutputV1, FactualOwnerIdV1,
+    FactualOwnerSourceV1, FactualPrefixReadPortV1, FactualPriorNodeV1, FactualRuleV1,
+    FactualScheduledTickV1, FactualTickContextV1, FactualTickDependenciesV1, FactualTickShapeV1,
+    Hash, Kind, OutputNodeBindingV1, PipelineAdmissionBasisV1, PipelineAdmissionPortV1,
+    PipelineAttemptIdV1, PipelineIngressV1, PipelineOutcomeV1, PipelineReceiptLookupV1,
+    PurgeOutcome, RecordedDependencyClassV1, RecordedNodeOriginV1, RecordedSetCountsV1, Seq,
+    TickDependencyRecordV1, TimelineId, WallTime, EVENT_TYPE_CONSENT_GRANTED_V1,
+    EVENT_TYPE_CONSENT_REVOKED_V1, FACTUAL_FOLD_HISTORY_SCHEMA_ID_V1,
+    FACTUAL_FOLD_RESERVED_EDGES_V1, FACTUAL_FOLD_RESERVED_NODES_V1, FACTUAL_FOLD_SCHEMA_ID_V1,
+    FACTUAL_HISTORY_SCHEMA_ID_V1, FACTUAL_PREFIX_SCHEMA_ID_V1, FACTUAL_SNAPSHOT_SCHEMA_ID_V1,
+    FACTUAL_STEP_SCHEMA_ID_V1, GEOGRAPHIC_CELL_EVENT_TYPE, GEOGRAPHIC_EVENT_TYPE,
+    HOST_CONSENT_CLOSED_EVENT_TYPE, MAX_DEPENDENCY_NODE_INPUTS_V1,
+    MAX_FACTUAL_FOLD_CHECKPOINTS_PER_TICK_V1, MAX_FACTUAL_FOLD_EVENTS_PER_CHECKPOINT_V1,
+    MAX_FACTUAL_FOLD_INPUT_EDGES_PER_TICK_V1, MAX_FACTUAL_FOLD_SCAN_PER_TICK_V1,
+    MAX_FACTUAL_FORWARDED_EDGES_PER_TICK_V1, MAX_FACTUAL_FORWARDED_EVENTS_PER_TICK_V1,
+    MAX_FORWARDED_EVENTS_PER_DRIVER_V1, MAX_HOST_DERIVED_STEP_INPUTS_V1,
+    MAX_OUTPUT_DIRECT_INPUTS_V1, MAX_RECORDED_DEPENDENCY_EDGES_V1,
     MAX_RECORDED_DEPENDENCY_NODES_V1, MAX_STEP_INPUTS_PER_DRIVER_V1, MAX_TICK_DEPENDENCY_EDGES_V1,
     MAX_TICK_DEPENDENCY_NODES_V1,
 };
@@ -1999,6 +2000,57 @@ fn the_rest_of_a_record_must_leave_the_minimal_fold_part_free() {
         .collect();
     let crowded_nodes = assemble_folded(full, fold_source(None, 70_000, Vec::new(), false));
     assert_eq!(err(crowded_nodes), out_of_bounds);
+}
+
+/// The published fold layout of a source and a rest (ADR-064 R4.2), at the
+/// Tick of these tests.
+fn layout_of(
+    source: &FactualFoldSourceV1,
+    rest: &FactualFoldRestV1,
+) -> Result<FactualFoldLayoutV1, FactualError> {
+    factual_fold_layout((timeline(), TICK), source, rest)
+}
+
+/// The derivation the store recomputes (ADR-064 R4.3) is the one the
+/// assembly records: the fit keeps the newest fold inputs the rest has room
+/// for, and a forwarded Event's ingress node costs the fold part no node.
+#[test]
+fn the_published_fold_layout_is_the_one_the_assembly_records() {
+    let head = fold_head(TICK - 1);
+    let source = five_hundred_after(&head);
+    let room = FactualFoldRestV1 {
+        forwarded: BTreeSet::new(),
+        nodes: 0,
+        edges: MAX_TICK_DEPENDENCY_EDGES_V1 - 103,
+    };
+    let edge_bound = ok(layout_of(&source, &room));
+    assert_eq!(edge_bound.history, Some(fold_history(1, 400)));
+    let content = checkpoint(artifact(&head), 401, 500, &refs(401..=500));
+    let events = (400..500).collect();
+    let expected = [FactualFoldChunkV1 { content, events }];
+    assert_eq!(edge_bound.checkpoints, expected);
+
+    let crowded = FactualFoldRestV1 {
+        forwarded: BTreeSet::new(),
+        nodes: MAX_TICK_DEPENDENCY_NODES_V1 - 52,
+        edges: 0,
+    };
+    let fresh = ok(layout_of(&source, &crowded));
+    assert_eq!(fresh.checkpoints[0].events.len(), 50);
+    let shared = FactualFoldRestV1 {
+        forwarded: (1..=500).map(Seq::from_u64).collect(),
+        ..crowded
+    };
+    let all = ok(layout_of(&source, &shared));
+    assert_eq!(all.history, None);
+    assert_eq!(all.checkpoints[0].events.len(), 500);
+
+    let quiet = fold_source(Some(cursor(5, None)), 5, Vec::new(), false);
+    let none = ok(layout_of(&quiet, &FactualFoldRestV1::default()));
+    assert_eq!(none, FactualFoldLayoutV1::default());
+    let regressed = fold_source(Some(cursor(5, None)), 4, Vec::new(), false);
+    let out_of_bounds = FactualError::Record(DepError::FieldOutOfBounds);
+    assert_eq!(err(layout_of(&regressed, &room)), out_of_bounds);
 }
 
 #[test]
