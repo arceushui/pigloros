@@ -5,14 +5,18 @@
 //! and the payload hashes of the Events it binds. The adapter combines them
 //! with the persisted prefix, in the order of R3.7.2, before any Event is
 //! appended. The host is the trusted composition root: these checks recompute
-//! what the store can recompute and are defence in depth for the rest.
+//! what the store can recompute and are defence in depth for the rest. The
+//! fold part of a scheduled record (ADR-064 R4.3, checks (ix) and (x)) is
+//! recomputed in full from the store's own fold cursor and window.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use pos_core::{
-    factual_artifact_digest, factual_ingress_content_digest, factual_output_content_digest,
-    DependencyNodeCoordinateV1, DependencyNodeRecordV1, FactualFoldBindingV1, FactualHostOwnerV1,
-    FactualNodeKeyV1, FactualRuleV1, Hash, PipelineAdmissionBasisV1, PipelineIngressV1,
+    factual_artifact_digest, factual_fold_layout, factual_ingress_content_digest,
+    factual_output_content_digest, DependencyNodeCoordinateV1, DependencyNodeRecordV1,
+    FactualFoldBindingV1, FactualFoldChunkV1, FactualFoldLayoutV1, FactualFoldRestV1,
+    FactualFoldSourceV1, FactualHostOwnerV1, FactualNodeKeyV1, FactualRuleV1,
+    FactualTickDependenciesV1, Hash, PipelineAdmissionBasisV1, PipelineIngressV1,
     RecordedNodeOriginV1, Seq, TickDependencyRecordV1, TimelineId,
     FACTUAL_FOLD_HISTORY_SCHEMA_ID_V1, FACTUAL_FOLD_SCHEMA_ID_V1, FACTUAL_SNAPSHOT_SCHEMA_ID_V1,
     MAX_FACTUAL_FOLD_CHECKPOINTS_PER_TICK_V1,
@@ -77,7 +81,7 @@ fn node_at(nodes: &[DependencyNodeRecordV1], index: u32) -> Option<&DependencyNo
 
 /// Whether the basis is that of a scheduled Driver Tick; the other ingress is
 /// a human action.
-const fn is_scheduled(basis: &PipelineAdmissionBasisV1) -> bool {
+pub(crate) const fn is_scheduled(basis: &PipelineAdmissionBasisV1) -> bool {
     matches!(
         basis.attempt().ingress(),
         PipelineIngressV1::ScheduledAiDriver
@@ -222,7 +226,7 @@ pub(crate) fn digest_index(record: &TickDependencyRecordV1) -> DigestIndex<'_> {
 /// nodes. The store cannot check Driver-output classes, which need the output
 /// policy, nor the step-chain, carried-set, history or verified-prefix
 /// content, which need registry state. The fold content and the fold inputs
-/// are not recomputed here.
+/// are recomputed by [`fold_holds`].
 pub(crate) fn shape_holds(basis: &PipelineAdmissionBasisV1, by_digest: &DigestIndex<'_>) -> bool {
     let nodes = basis.dependencies().record().nodes();
     (is_scheduled(basis) || nodes.len() == basis.batch().drafts().len())
@@ -344,7 +348,7 @@ fn chain_holds(
 }
 
 /// The ADR-064 R4.3 shape of the fold part (the structural half of checks
-/// (ix) and (x); slice 5 recomputes the fold inputs and contents).
+/// (ix) and (x); [`fold_holds`] recomputes the fold inputs and contents).
 ///
 /// The binding names at most five fold checkpoint nodes, in ordinal order,
 /// and at most one fold-history node, and they are every such node of the
@@ -398,8 +402,8 @@ fn snapshot_input_holds(
 /// Tick, which is its last fold checkpoint node, else the head the snapshot
 /// node inputs, else 32 zero bytes. A human Tick writes none.
 ///
-/// The head is read from the record the shape check accepted; check (x) of
-/// slice 5 adds that a head without a fold node is the persisted one.
+/// The head is read from the record the checks accepted: check (x) requires
+/// that a head without a fold node is the one the fold-head index names.
 pub(crate) fn fold_head_row(basis: &PipelineAdmissionBasisV1) -> Option<(Seq, Hash)> {
     is_scheduled(basis).then(|| fold_head_of(basis))
 }
@@ -422,6 +426,221 @@ fn fold_head_of(basis: &PipelineAdmissionBasisV1) -> (Seq, Hash) {
         .or_else(snapshot_input)
         .unwrap_or_else(Hash::zero);
     (observed, head)
+}
+
+/// What checks (ix) and (x) compare a scheduled record with: the store's own
+/// fold source, read from the Events it holds, and the Tick's ingress nodes.
+struct FoldCheckV1<'a> {
+    timeline: TimelineId,
+    tick: u64,
+    source: &'a FactualFoldSourceV1,
+    /// The artifact digest of the ingress node this Tick binds each `seq` to.
+    ingress: BTreeMap<Seq, Hash>,
+}
+
+/// The ingress nodes of the Tick, by the `seq` each is bound to.
+fn ingress_digests(dependencies: &FactualTickDependenciesV1) -> BTreeMap<Seq, Hash> {
+    let nodes = dependencies.record().nodes();
+    let bindings = dependencies.event_nodes();
+    let bound = bindings.iter().filter_map(|binding| {
+        let node = node_at(nodes, binding.node_index);
+        node.map(|found| (binding.seq, found.coordinate().artifact_digest()))
+    });
+    bound.collect()
+}
+
+/// The inputs every node of `owner` declares, in node order.
+fn owned_inputs(nodes: &[DependencyNodeRecordV1], owner: FactualHostOwnerV1) -> Vec<Hash> {
+    let owned = nodes
+        .iter()
+        .filter(|node| is_host_node(node.coordinate(), owner));
+    owned
+        .flat_map(|node| node.input_digests().iter().copied())
+        .collect()
+}
+
+/// The inputs the step and output nodes of the record declare.
+fn driver_inputs(nodes: &[DependencyNodeRecordV1]) -> BTreeSet<Hash> {
+    let drivers = nodes
+        .iter()
+        .filter(|node| node.coordinate().scheduler_position() != 0);
+    drivers
+        .flat_map(|node| node.input_digests().iter().copied())
+        .collect()
+}
+
+/// The rest of a scheduled record beside its fold part (ADR-064 R4.2), as
+/// the builder sized it: every node but the fold checkpoint, fold-history and
+/// fold-only ingress nodes, and every edge but those into the fold checkpoint
+/// nodes and the snapshot node. An ingress node is forwarded-needed iff a
+/// step or output node inputs it; one that only a fold checkpoint node inputs
+/// is the fold part's.
+fn fold_rest(dependencies: &FactualTickDependenciesV1) -> FactualFoldRestV1 {
+    let record = dependencies.record();
+    let nodes = record.nodes();
+    let fed = driver_inputs(nodes);
+    let fold_fed = owned_inputs(nodes, FactualHostOwnerV1::Fold);
+    let folded: BTreeSet<Hash> = fold_fed.iter().copied().collect();
+    let ingress = ingress_digests(dependencies);
+    let forwarded = ingress
+        .iter()
+        .filter(|(_, digest)| fed.contains(*digest))
+        .map(|(seq, _)| *seq)
+        .collect();
+    let fold_only = ingress
+        .values()
+        .filter(|digest| !fed.contains(*digest) && folded.contains(*digest))
+        .count();
+    let fold_nodes = owned_count(nodes, FactualHostOwnerV1::Fold);
+    let history = owned_count(nodes, FactualHostOwnerV1::FoldHistory);
+    let snapshot_fed = owned_inputs(nodes, FactualHostOwnerV1::Observation);
+    let part = fold_nodes + history + fold_only;
+    let fold_edges = fold_fed.len() + snapshot_fed.len();
+    FactualFoldRestV1 {
+        forwarded,
+        nodes: nodes.len().saturating_sub(part),
+        edges: record.edges().len().saturating_sub(fold_edges),
+    }
+}
+
+/// ADR-064 R4.3, checks (ix) and (x), of a scheduled basis: the fold part
+/// the store derives from its own fold `source` (the cursor `p` and head of
+/// its fold-head index, and the window `(p, observed_through]` of the Events
+/// it holds) and from the rest of the record is exactly the record's.
+///
+/// The derivation is `pos_core`'s own ([`factual_fold_layout`]): the fold
+/// inputs and their exclusions, the fit to the record, the collapse, the
+/// chunks and the content digests. It refuses an anchor below the cursor
+/// and a rest beyond the reserved headroom, as the builder does. Each kept
+/// fold input is resolved through its persisted node or the ingress node this
+/// Tick binds it to; the head is the fold-head index's, never a node the
+/// record names. A record without a fold node is checked the same way, so a
+/// skipped range is verified, not trusted.
+pub(crate) fn fold_holds(
+    timeline: TimelineId,
+    basis: &PipelineAdmissionBasisV1,
+    source: &FactualFoldSourceV1,
+) -> bool {
+    let dependencies = basis.dependencies();
+    let tick = dependencies.tick();
+    let rest = fold_rest(dependencies);
+    let check = FoldCheckV1 {
+        timeline,
+        tick,
+        source,
+        ingress: ingress_digests(dependencies),
+    };
+    let layout = factual_fold_layout((timeline, tick), source, &rest);
+    layout.is_ok_and(|expected| fold_matches(&check, dependencies, &expected))
+}
+
+/// The artifact digest of the fold-head index's head, if the cursor has one.
+fn cursor_head(source: &FactualFoldSourceV1) -> Option<Hash> {
+    let cursor = source.cursor.as_ref();
+    let head = cursor.and_then(|found| found.head.as_ref());
+    head.map(|node| node.coordinate().artifact_digest())
+}
+
+/// Whether the record's fold-history, fold checkpoint and snapshot nodes are
+/// exactly those of the derived `expected` fold part.
+fn fold_matches(
+    check: &FoldCheckV1<'_>,
+    dependencies: &FactualTickDependenciesV1,
+    expected: &FactualFoldLayoutV1,
+) -> bool {
+    let nodes = dependencies.record().nodes();
+    let fold = dependencies.fold();
+    let checkpoints = bound_checkpoints(nodes, fold).unwrap_or_default();
+    let history = bound_history(nodes, fold).unwrap_or_default();
+    let head = cursor_head(check.source);
+    let first = history.first();
+    let collapsed = first.map(|node| node.coordinate().artifact_digest());
+    let behind: Vec<Hash> = head.into_iter().chain(collapsed).collect();
+    history_matches(check, &history, expected.history)
+        && chain_matches(check, &checkpoints, &expected.checkpoints, behind)
+        && snapshot_head_holds(nodes, checkpoints.is_empty(), head)
+}
+
+/// The record holds a fold-history node iff the derivation does, with the
+/// artifact digest recomputed from the derived range.
+fn history_matches(
+    check: &FoldCheckV1<'_>,
+    history: &[&DependencyNodeRecordV1],
+    expected: Option<Hash>,
+) -> bool {
+    let present = history.len() == usize::from(expected.is_some());
+    let mut pairs = history.iter().zip(expected);
+    present && pairs.all(|(node, content)| node_has(check, node, content))
+}
+
+/// Whether `node` is a node of the checked Tick whose artifact digest is the
+/// one recomputed from `content`.
+fn node_has(check: &FoldCheckV1<'_>, node: &DependencyNodeRecordV1, content: Hash) -> bool {
+    node_matches(check.timeline, check.tick, node.coordinate(), content)
+}
+
+/// The record's fold checkpoint nodes are the derived chain: as many, each
+/// with the recomputed artifact digest, node 0 behind `first` (the head and
+/// the fold-history node) and every later node behind the one before it.
+fn chain_matches(
+    check: &FoldCheckV1<'_>,
+    checkpoints: &[&DependencyNodeRecordV1],
+    chunks: &[FactualFoldChunkV1],
+    first: Vec<Hash>,
+) -> bool {
+    let links = checkpoints
+        .iter()
+        .map(|node| vec![node.coordinate().artifact_digest()]);
+    let behind = std::iter::once(first).chain(links);
+    let mut paired = checkpoints.iter().zip(chunks).zip(behind);
+    checkpoints.len() == chunks.len()
+        && paired.all(|((node, chunk), before)| checkpoint_matches(check, node, chunk, &before))
+}
+
+/// One fold checkpoint node: its artifact digest is recomputed from the
+/// derived content, and it inputs exactly what it chains onto and its chunk.
+fn checkpoint_matches(
+    check: &FoldCheckV1<'_>,
+    node: &DependencyNodeRecordV1,
+    chunk: &FactualFoldChunkV1,
+    before: &[Hash],
+) -> bool {
+    let declared: BTreeSet<Hash> = node.input_digests().iter().copied().collect();
+    let wanted = chunk_inputs(check, chunk, before);
+    node_has(check, node, chunk.content) && wanted.is_some_and(|inputs| inputs == declared)
+}
+
+/// The inputs a fold checkpoint node must declare: `before` and the node of
+/// every Event of its chunk, or `None` when an Event of the chunk has no
+/// node, neither recorded nor bound by this Tick.
+fn chunk_inputs(
+    check: &FoldCheckV1<'_>,
+    chunk: &FactualFoldChunkV1,
+    before: &[Hash],
+) -> Option<BTreeSet<Hash>> {
+    let events = &check.source.window.events;
+    let digests = chunk.events.iter().map(|index| {
+        let event = &events[*index];
+        let recorded = event.node.as_ref();
+        let digest = recorded.map(|found| found.coordinate().artifact_digest());
+        digest.or_else(|| check.ingress.get(&event.seq).copied())
+    });
+    let resolved: Option<Vec<Hash>> = digests.collect();
+    let prefix = before.iter().copied();
+    resolved.map(|found| prefix.chain(found).collect())
+}
+
+/// Check (x) of a `bare` record, one without a fold checkpoint node: the
+/// snapshot node inputs exactly the fold-head index's head, or nothing
+/// without one. With a fold checkpoint node, the shape check already
+/// requires the last.
+fn snapshot_head_holds(nodes: &[DependencyNodeRecordV1], bare: bool, head: Option<Hash>) -> bool {
+    let expected: Vec<Hash> = head.into_iter().collect();
+    let observation = FactualHostOwnerV1::Observation;
+    let mut snapshots = nodes
+        .iter()
+        .filter(|node| is_host_node(node.coordinate(), observation));
+    !bare || snapshots.all(|snapshot| snapshot.input_digests() == expected.as_slice())
 }
 
 /// A step node inputs the snapshot node of the record.

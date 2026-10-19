@@ -969,6 +969,18 @@ impl TickPrefixV1 for MemoryPrefixV1<'_> {
         };
         Ok(digests.iter().all(below))
     }
+
+    fn fold_cursor(&self) -> Result<Option<FactualFoldCursorV1>, CoreError> {
+        fold_cursor_over(&self.sets)
+    }
+
+    fn fold_window(&self, after: Seq, through: Seq) -> Result<FactualFoldWindowV1, CoreError> {
+        let chain = self.store.fork_chain(self.timeline);
+        chain.and_then(|held| {
+            let newest = self.store.newest_fold_events(&held, (after, through));
+            fold_window_over(newest, &self.sets)
+        })
+    }
 }
 
 impl MemoryStore {

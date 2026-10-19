@@ -11,15 +11,16 @@
 //!
 //! The adapters' fold reads (ADR-064 R4.3) share their assembly here too: the
 //! cursor from the latest visible fold-head row and the window from the newest
-//! Events of a range.
+//! Events of a range. A scheduled Tick's fold part is checked against the same
+//! reads, inside the commit (checks (ix) and (x)).
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use pos_core::{
     CoreError, DependencyEdgeRecordV1, DependencyNodeRecordV1, Event, FactualFoldCursorV1,
-    FactualFoldEventV1, FactualFoldWindowV1, Hash, Kind, PipelineAdmissionBasisV1,
-    PipelineOutcomeV1, RecordedSetCountsV1, Seq, SeqRange, TickDependencyRecordV1, TimelineId,
-    MAX_FACTUAL_FOLD_SCAN_PER_TICK_V1,
+    FactualFoldEventV1, FactualFoldSourceV1, FactualFoldWindowV1, Hash, Kind,
+    PipelineAdmissionBasisV1, PipelineOutcomeV1, RecordedSetCountsV1, Seq, SeqRange,
+    TickDependencyRecordV1, TimelineId, MAX_FACTUAL_FOLD_SCAN_PER_TICK_V1,
 };
 
 use crate::factual_declaration as declaration;
@@ -88,6 +89,14 @@ pub(crate) trait TickPrefixV1 {
     /// Whether every digest names a node of the visible prefix at a Tick
     /// below `tick`.
     fn sources_below(&self, digests: &[Hash], tick: u64) -> Result<bool, CoreError>;
+
+    /// The fold cursor of the visible prefix: its latest fold-head row and
+    /// the node the row's head digest names (ADR-064 R4.2).
+    fn fold_cursor(&self) -> Result<Option<FactualFoldCursorV1>, CoreError>;
+
+    /// The fold window of the logical range `(after, through]`: its newest
+    /// Events, with their types, payload hashes and visible nodes.
+    fn fold_window(&self, after: Seq, through: Seq) -> Result<FactualFoldWindowV1, CoreError>;
 }
 
 /// Why planning stopped: the declaration is refused, or the store failed.
@@ -287,6 +296,59 @@ fn check_rows<P: TickPrefixV1>(
     demand(declaration::shape_holds(basis, &index), invalid).map_err(PlanHaltV1::from)
 }
 
+/// ADR-064 R4.3, checks (ix) and (x), of a scheduled basis, over the store's
+/// own fold cursor and window: read the cursor `p` and head from the
+/// fold-head index, the window `(p, observed_through]` from the Events, and
+/// compare the fold part they derive with the record's.
+fn scheduled_fold_holds<P: TickPrefixV1>(
+    prefix: &P,
+    timeline: TimelineId,
+    basis: &PipelineAdmissionBasisV1,
+) -> Result<bool, CoreError> {
+    let observed_through = basis.attempt().observation().observed_through();
+    prefix.fold_cursor().and_then(|cursor| {
+        let held = cursor.as_ref();
+        let after = held.map_or(Seq::ZERO, |found| found.scanned_through);
+        let window = prefix.fold_window(after, observed_through);
+        window.map(|read| {
+            let source = FactualFoldSourceV1 {
+                observed_through,
+                cursor,
+                window: read,
+            };
+            declaration::fold_holds(timeline, basis, &source)
+        })
+    })
+}
+
+/// Whether the fold part of the basis holds; a human Tick has none.
+fn fold_judged<P: TickPrefixV1>(
+    prefix: &P,
+    timeline: TimelineId,
+    basis: &PipelineAdmissionBasisV1,
+) -> Result<bool, CoreError> {
+    if declaration::is_scheduled(basis) {
+        scheduled_fold_holds(prefix, timeline, basis)
+    } else {
+        Ok(true)
+    }
+}
+
+/// R3.7.2 (v) to (viii), then ADR-064 R4.3 (ix) and (x): the fold part is
+/// read and recomputed only once the rest of the record holds.
+fn check_rows_and_fold<P: TickPrefixV1>(
+    prefix: &P,
+    timeline: TimelineId,
+    basis: &PipelineAdmissionBasisV1,
+) -> Result<(), PlanHaltV1> {
+    let invalid = TickRefusalV1::InvalidDeclaration;
+    check_rows(prefix, basis).and_then(|()| {
+        let judged = fold_judged(prefix, timeline, basis);
+        let halted = judged.map_err(PlanHaltV1::from);
+        halted.and_then(|holds| refuse_unless(holds, invalid))
+    })
+}
+
 /// The rows the checked Tick installs, with its Event-backed nodes.
 fn install_of(
     basis: &PipelineAdmissionBasisV1,
@@ -303,10 +365,10 @@ fn install_of(
     }
 }
 
-/// R3.7.2 (i) to (viii), in that order. The grant and the Tick are checked
-/// first, from the basis and the prefix alone. Only then are the Events the
-/// ingress bindings name read, so a store failure there follows those two
-/// refusals and precedes the others.
+/// R3.7.2 (i) to (viii), then ADR-064 R4.3 (ix) and (x), in that order. The
+/// grant and the Tick are checked first, from the basis and the prefix alone.
+/// Only then are the Events the ingress bindings name read, so a store
+/// failure there follows those two refusals and precedes the others.
 fn judge<P: TickPrefixV1>(
     prefix: &P,
     timeline: TimelineId,
@@ -318,7 +380,7 @@ fn judge<P: TickPrefixV1>(
     check_tick(prefix, basis)?;
     let payloads = bound_payloads(prefix, basis)?;
     let nodes = bound_nodes(prefix, timeline, basis, first_seq, &payloads)?;
-    check_rows(prefix, basis)?;
+    check_rows_and_fold(prefix, timeline, basis)?;
     Ok(install_of(basis, first_seq, nodes))
 }
 

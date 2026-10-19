@@ -2,14 +2,14 @@
 //! once (ADR-064 Revision 4, R4.2 and R4.6; conformance test 7).
 //!
 //! The Driver emits only drafts of an Ephemeral-declared type, so their nodes
-//! are presentation only and no fold input. The plain Events appended between
-//! the Ticks are reported as geographic Events by the counting port, because
-//! the generic append refuses geographic drafts: the builder sees only the
-//! type of a window Event, never its payload.
+//! are presentation only and no fold input. The Events appended between the
+//! Ticks are host consent-closed markers, which no fold reads either: real
+//! Events of an excluded type, which the store's own fold check (ADR-064 R4.3,
+//! check (ix)) sees as the builder does. The generic append refuses
+//! geographic and consent drafts, so the marker stands in for them.
 #![cfg(feature = "local-admission-host")]
 
 use std::cell::RefCell;
-use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,7 +21,7 @@ use pos_core::{
     FactualPrefixReadPortV1, Hash, Kind, PipelineAdmissionBasisV1, PipelineAdmissionPortV1,
     PipelineAttemptIdV1, PipelineEvidenceRefV1, PipelineOutcomeV1, PipelineReceiptLookupV1,
     PipelineSecurityRevisionsV1, RecordedSetCountsV1, Seq, TimelineId, TimelineMeta,
-    GEOGRAPHIC_EVENT_TYPE,
+    HOST_CONSENT_CLOSED_EVENT_TYPE,
 };
 use pos_store::{memory::MemoryStore, sqlite::SqliteStore};
 
@@ -54,12 +54,10 @@ impl Driver for QuietDriver {
     }
 }
 
-/// Port over a real store that keeps every basis it is offered, logs the
-/// `seq`s of every fold window read, and reports the `geographic` Events as
-/// geographic Events.
+/// Port over a real store that keeps every basis it is offered and logs the
+/// `seq`s of every fold window read.
 struct CountingPort<'a> {
     inner: &'a mut dyn ScheduledAdmissionStoreV1,
-    geographic: &'a BTreeSet<u64>,
     reads: &'a RefCell<Vec<Vec<u64>>>,
     bases: Vec<PipelineAdmissionBasisV1>,
 }
@@ -141,24 +139,20 @@ impl FactualPrefixReadPortV1 for CountingPort<'_> {
         after: Seq,
         through: Seq,
     ) -> Result<FactualFoldWindowV1, CoreError> {
-        let mut window = self.inner.fold_window(timeline, after, through)?;
-        for event in &mut window.events {
-            if self.geographic.contains(&event.seq.as_u64()) {
-                event.event_type = Kind::new(GEOGRAPHIC_EVENT_TYPE);
-            }
-        }
+        let window = self.inner.fold_window(timeline, after, through)?;
         let seqs = window.events.iter().map(|event| event.seq.as_u64());
         self.reads.borrow_mut().push(seqs.collect());
         Ok(window)
     }
 }
 
-/// Two plain Events, which the counting port reports as geographic.
-fn plain_drafts() -> Vec<EventDraft> {
+/// Two host consent-closed markers: Events no fold reads.
+fn marker_drafts() -> Vec<EventDraft> {
     (0..2_u8)
         .map(|index| {
             let payload = CanonicalBytes::from_vec(vec![index]);
-            EventDraft::new(EntityId::new(), Kind::new("quiet.plain"), payload)
+            let kind = Kind::new(HOST_CONSENT_CLOSED_EVENT_TYPE);
+            EventDraft::new(EntityId::new(), kind, payload)
         })
         .collect()
 }
@@ -213,8 +207,8 @@ fn quiet_registry(gate: Arc<ErasureContainmentGateV1>) -> PluginRegistry {
 }
 
 /// Run `ROUNDS` scheduled Ticks of the quiet Driver. Every round but
-/// `EMPTY_ROUND` first appends two plain Events and observes through the new
-/// head; `EMPTY_ROUND` observes through the previous anchor.
+/// `EMPTY_ROUND` first appends two consent-closed markers and observes
+/// through the new head; `EMPTY_ROUND` observes through the previous anchor.
 fn quiet_run<S: ScheduledAdmissionStoreV1>(store: &mut S) -> QuietRun {
     let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
     store.bind_erasure_gate(Arc::clone(&gate)).test_ok();
@@ -225,13 +219,12 @@ fn quiet_run<S: ScheduledAdmissionStoreV1>(store: &mut S) -> QuietRun {
     }];
     let host = LocalScheduledAdmissionHostV1::shared().test_ok();
     let mut registry = quiet_registry(gate);
-    let (mut geographic, reads) = (BTreeSet::new(), RefCell::default());
+    let reads = RefCell::default();
     let (mut bases, mut cursors) = (Vec::new(), Vec::new());
     let mut through = Seq::ZERO;
     for round in 1..=ROUNDS {
         if round != EMPTY_ROUND {
-            let appended = store.append(timeline, &plain_drafts()).test_ok();
-            geographic.extend(appended.iter().map(|event| event.seq.as_u64()));
+            store.append(timeline, &marker_drafts()).test_ok();
             through = store.logical_head(timeline).test_ok();
         }
         let revisions = host.observe(&registry, store, timeline).test_ok();
@@ -242,7 +235,6 @@ fn quiet_run<S: ScheduledAdmissionStoreV1>(store: &mut S) -> QuietRun {
         let inputs = admission(host, revisions, head, round);
         let mut port = CountingPort {
             inner: &mut *store,
-            geographic: &geographic,
             reads: &reads,
             bases: Vec::new(),
         };

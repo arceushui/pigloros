@@ -951,8 +951,9 @@ pub struct FactualScheduledTickV1 {
     pub ingress_events: Vec<FactualIngressEventV1>,
     /// The stepped Drivers; the Driver at index `i` holds position `i + 1`.
     pub drivers: Vec<FactualDriverStepV1>,
-    /// The fold cursor and window, or `None` while the builder supplies no
-    /// window: the record then holds no fold node and an empty fold binding.
+    /// The fold cursor and window, or `None` for no fold part: the record
+    /// then holds no fold node and an empty fold binding, which the store
+    /// refuses while its own window holds fold inputs (ADR-064 R4.3, (ix)).
     /// Boxed, since a window is far larger than the rest of the shape.
     pub fold: Option<Box<FactualFoldSourceV1>>,
 }
@@ -1115,13 +1116,14 @@ const fn seq_before(seq: Seq) -> Seq {
 }
 
 /// Whether a fold input needs a new ingress node: it has no recorded node and
-/// this Tick records no ingress node for it yet.
-fn needs_ingress(event: &FactualFoldEventV1, ingress: &BTreeMap<Seq, usize>) -> bool {
-    event.node.is_none() && !ingress.contains_key(&event.seq)
+/// the record holds no forwarded-needed ingress node for it.
+fn needs_ingress(event: &FactualFoldEventV1, forwarded: &BTreeSet<Seq>) -> bool {
+    event.node.is_none() && !forwarded.contains(&event.seq)
 }
 
-/// One fold input of a window, with whether it needs a new ingress node.
-type FoldInput<'a> = (&'a FactualFoldEventV1, bool);
+/// One fold input of a window: its index in the window, the Event, and
+/// whether it needs a new ingress node.
+type FoldInput<'a> = (usize, &'a FactualFoldEventV1, bool);
 
 /// The fold inputs of a scheduled Tick's window, before the fit (R4.2).
 struct FoldPlan<'a> {
@@ -1137,7 +1139,7 @@ impl<'a> FoldPlan<'a> {
     /// Check the window against the cursor and derive its fold inputs.
     fn new(
         source: &'a FactualFoldSourceV1,
-        ingress: &BTreeMap<Seq, usize>,
+        forwarded: &BTreeSet<Seq>,
     ) -> Result<Self, FactualDependencyErrorV1> {
         let cursor = source.cursor.as_ref();
         let after = cursor.map_or(Seq::ZERO, |cursor| cursor.scanned_through);
@@ -1152,8 +1154,9 @@ impl<'a> FoldPlan<'a> {
         }
         let inputs = events
             .iter()
-            .filter(|event| is_factual_fold_input(&event.event_type, event.node_class))
-            .map(|event| (event, needs_ingress(event, ingress)))
+            .enumerate()
+            .filter(|(_, event)| is_factual_fold_input(&event.event_type, event.node_class))
+            .map(|(index, event)| (index, event, needs_ingress(event, forwarded)))
             .collect();
         Ok(Self {
             source,
@@ -1185,7 +1188,7 @@ impl<'a> FoldPlan<'a> {
         let chunks = kept
             .div_ceil(MAX_FACTUAL_FOLD_EVENTS_PER_CHECKPOINT_V1)
             .max(1);
-        let ingress = self.newest(kept).iter().filter(|(_, new)| *new).count();
+        let ingress = self.newest(kept).iter().filter(|input| input.2).count();
         (chunks + history + ingress, kept + head + history + chunks)
     }
 
@@ -1225,6 +1228,139 @@ impl<'a> FoldPlan<'a> {
         }
         Ok(low)
     }
+
+    /// The content digest of the fold-history node over `(p, c]`, `c` the
+    /// `seq` before the oldest kept fold input, or `observed_through` when
+    /// none is kept.
+    fn history_content(&self, kept: &[FoldInput<'a>]) -> Hash {
+        let oldest = kept.first().map(|input| input.1.seq);
+        let through = oldest.map_or(self.source.observed_through, seq_before);
+        factual_fold_history_content_digest(seq_after(self.after), through)
+    }
+
+    /// The fold checkpoint chain over the kept fold inputs, at most 4,094 per
+    /// node, behind the fold-history node when `collapsed`; an empty chunk
+    /// stands alone behind a fold-history node.
+    fn chain(
+        &self,
+        node: (TimelineId, u64),
+        kept: &[FoldInput<'a>],
+        collapsed: bool,
+    ) -> Vec<FactualFoldChunkV1> {
+        let observed_through = self.source.observed_through;
+        let size = MAX_FACTUAL_FOLD_EVENTS_PER_CHECKPOINT_V1;
+        let pieces: Vec<&[FoldInput<'a>]> = if kept.is_empty() {
+            vec![kept]
+        } else {
+            kept.chunks(size).collect()
+        };
+        let count = pieces.len();
+        let mut from = if collapsed {
+            let oldest = kept.first().map(|input| input.1.seq);
+            oldest.unwrap_or_else(|| seq_after(observed_through))
+        } else {
+            seq_after(self.after)
+        };
+        let head = self.head.map(|found| found.coordinate().artifact_digest());
+        let mut previous = head.unwrap_or_else(Hash::zero);
+        let mut chunks = Vec::with_capacity(count);
+        for (ordinal, (position, piece)) in (0_u32..).zip(pieces.into_iter().enumerate()) {
+            let through = match piece.last() {
+                Some(input) if position + 1 < count => input.1.seq,
+                _ => observed_through,
+            };
+            let refs: Vec<FactualEventRefV1> = piece
+                .iter()
+                .map(|input| FactualEventRefV1 {
+                    seq: input.1.seq,
+                    payload_hash: input.1.payload_hash,
+                })
+                .collect();
+            let content = factual_fold_checkpoint_content_digest(previous, from, through, &refs);
+            let key = FactualNodeKeyV1 {
+                tick: node.1,
+                scheduler_position: 0,
+                owner: FactualHostOwnerV1::Fold.as_str(),
+                output_ordinal: ordinal,
+                schema_id: FACTUAL_FOLD_SCHEMA_ID_V1,
+            };
+            previous = factual_artifact_digest(node.0, key, content);
+            from = seq_after(through);
+            let events = piece.iter().map(|input| input.0).collect();
+            chunks.push(FactualFoldChunkV1 { content, events });
+        }
+        chunks
+    }
+}
+
+/// One fold checkpoint node of a scheduled Tick (ADR-064 R4.2): its content
+/// digest and its chunk of fold inputs.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FactualFoldChunkV1 {
+    /// The node's content digest.
+    pub content: Hash,
+    /// The chunk: indexes into the window's Events, in ascending `seq`.
+    pub events: Vec<usize>,
+}
+
+/// The fold part of a scheduled Tick (ADR-064 R4.2), after the fit to the
+/// record: the fold-history node, if any, and the fold checkpoint chain.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct FactualFoldLayoutV1 {
+    /// The content digest of the fold-history node, if the Tick records one.
+    pub history: Option<Hash>,
+    /// The fold checkpoint nodes, in chain order; none when the Tick records
+    /// no fold node.
+    pub checkpoints: Vec<FactualFoldChunkV1>,
+}
+
+/// The rest of a scheduled record beside its fold part (ADR-064 R4.2): every
+/// node and edge but the fold checkpoint and fold-history nodes, the ingress
+/// nodes only the fold part needs, and the edges into the fold checkpoint
+/// nodes and the snapshot node.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct FactualFoldRestV1 {
+    /// The `seq`s of the forwarded-needed ingress nodes: those a step or
+    /// output node of the record inputs.
+    pub forwarded: BTreeSet<Seq>,
+    /// The nodes of the rest.
+    pub nodes: usize,
+    /// The edges of the rest.
+    pub edges: usize,
+}
+
+/// Derive the fold part of a scheduled Tick at `node` (its Timeline and Tick)
+/// from its fold source and the rest of its record (ADR-064 R4.2).
+///
+/// This is the one derivation of the fold inputs, the fit, the collapse, the
+/// chunks, and the content digests: [`assemble_factual_tick`] records the
+/// fold part it returns, and the store recomputes it from the Events it holds
+/// to check a declared record (R4.3, checks (ix) and (x)).
+///
+/// # Errors
+/// Returns `Record(FieldOutOfBounds)` for a window out of order, outside the
+/// range after the cursor, or over its scan cap, for an anchor below the
+/// cursor, and for a rest beyond the fold reserve.
+pub fn factual_fold_layout(
+    node: (TimelineId, u64),
+    source: &FactualFoldSourceV1,
+    rest: &FactualFoldRestV1,
+) -> Result<FactualFoldLayoutV1, FactualDependencyErrorV1> {
+    let plan = FoldPlan::new(source, &rest.forwarded)?;
+    let kept = plan.fit(rest.nodes, rest.edges)?;
+    let events = plan.newest(kept);
+    let collapsed = plan.has_history(kept);
+    let history = collapsed.then(|| plan.history_content(events));
+    let quiet = events.is_empty() && history.is_none();
+    let checkpoints = if quiet {
+        Vec::new()
+    } else {
+        plan.chain(node, events, history.is_some())
+    };
+    Ok(FactualFoldLayoutV1 {
+        history,
+        checkpoints,
+    })
 }
 
 struct FactualAssembly<'a> {
@@ -1326,120 +1462,79 @@ impl<'a> FactualAssembly<'a> {
         host: &mut HostNodes,
         source: &FactualFoldSourceV1,
     ) -> Result<(), FactualDependencyErrorV1> {
-        let plan = FoldPlan::new(source, &host.ingress)?;
-        let rest_edges = self
-            .specs
-            .iter()
-            .map(|spec| distinct_sources(&spec.sources))
-            .sum();
-        let kept = plan.fit(self.specs.len(), rest_edges)?;
+        let rest = FactualFoldRestV1 {
+            forwarded: host.ingress.keys().copied().collect(),
+            nodes: self.specs.len(),
+            edges: self
+                .specs
+                .iter()
+                .map(|spec| distinct_sources(&spec.sources))
+                .sum(),
+        };
         let tick = self.context.tick;
-        let head = plan
-            .head
+        let layout = factual_fold_layout((self.context.timeline_id, tick), source, &rest)?;
+        let cursor = source.cursor.as_ref();
+        let cursor_head = cursor.and_then(|found| found.head.as_ref());
+        let head = cursor_head
             .map(|node| host.resolve(tick, &prior_input(node)))
             .transpose()?;
-        let events = plan.newest(kept);
-        let history = plan
-            .has_history(kept)
-            .then(|| self.push_fold_history(&plan, events));
-        if events.is_empty() && history.is_none() {
+        let history = layout.history.map(|found| self.push_fold_history(found));
+        if layout.checkpoints.is_empty() {
             self.specs[host.snapshot].sources.extend(head);
             return Ok(());
         }
-        let last = self.push_fold_chain(host, &plan, events, head, history)?;
+        let (events, chunks) = (&source.window.events, &layout.checkpoints);
+        let last = self.push_fold_chain(host, events, chunks, head, history)?;
         self.specs[host.snapshot]
             .sources
             .push(FactualSource::Node(last));
         Ok(())
     }
 
-    /// Push the fold-history node over `(p, c]`, `c` the `seq` before the
-    /// oldest kept fold input, or `observed_through` when none is kept.
-    fn push_fold_history(&mut self, plan: &FoldPlan<'_>, events: &[FoldInput<'_>]) -> usize {
-        let oldest = events.first().map(|(event, _)| event.seq);
-        let through = oldest.map_or(plan.source.observed_through, seq_before);
+    /// Push the fold-history node of content `content`.
+    fn push_fold_history(&mut self, content: Hash) -> usize {
         let index = self.push(host_spec(
             FactualHostOwnerV1::FoldHistory,
             0,
             FACTUAL_FOLD_HISTORY_SCHEMA_ID_V1,
-            factual_fold_history_content_digest(seq_after(plan.after), through),
+            content,
             FactualRuleV1::FoldHistory,
         ));
         self.fold_history_specs.push(index);
         index
     }
 
-    /// Push the fold checkpoint chain over the kept fold inputs, at most
-    /// 4,094 per node; an empty chunk stands alone behind a fold-history
-    /// node. Returns the index of the last node.
+    /// Push the fold checkpoint chain of `chunks` over the window `events`,
+    /// node 0 behind the head and the fold-history node. Returns the index of
+    /// the last node.
     fn push_fold_chain(
         &mut self,
         host: &mut HostNodes,
-        plan: &FoldPlan<'_>,
-        events: &[FoldInput<'_>],
+        events: &[FactualFoldEventV1],
+        chunks: &[FactualFoldChunkV1],
         head: Option<FactualSource>,
         history: Option<usize>,
     ) -> Result<usize, FactualDependencyErrorV1> {
-        let observed_through = plan.source.observed_through;
-        let chunks: Vec<&[FoldInput<'_>]> = if events.is_empty() {
-            vec![events]
-        } else {
-            events
-                .chunks(MAX_FACTUAL_FOLD_EVENTS_PER_CHECKPOINT_V1)
-                .collect()
-        };
-        let count = chunks.len();
-        let mut from = if history.is_some() {
-            events
-                .first()
-                .map_or_else(|| seq_after(observed_through), |(event, _)| event.seq)
-        } else {
-            seq_after(plan.after)
-        };
-        let mut previous = plan
-            .head
-            .map_or(Hash::zero(), |node| node.coordinate().artifact_digest());
         let mut sources: Vec<FactualSource> = head
             .into_iter()
             .chain(history.map(FactualSource::Node))
             .collect();
         let mut last = 0;
-        for (ordinal, (position, piece)) in (0_u32..).zip(chunks.into_iter().enumerate()) {
-            let through = match piece.last() {
-                Some((event, _)) if position + 1 < count => event.seq,
-                _ => observed_through,
-            };
-            let refs: Vec<FactualEventRefV1> = piece
-                .iter()
-                .map(|(event, _)| FactualEventRefV1 {
-                    seq: event.seq,
-                    payload_hash: event.payload_hash,
-                })
-                .collect();
-            for (event, _) in piece {
-                sources.push(self.fold_event_source(host, event)?);
+        for (ordinal, chunk) in (0_u32..).zip(chunks) {
+            for index in &chunk.events {
+                sources.push(self.fold_event_source(host, &events[*index])?);
             }
-            let content = factual_fold_checkpoint_content_digest(previous, from, through, &refs);
             last = self.push(FactualNodeSpec {
                 sources: std::mem::take(&mut sources),
                 ..host_spec(
                     FactualHostOwnerV1::Fold,
                     ordinal,
                     FACTUAL_FOLD_SCHEMA_ID_V1,
-                    content,
+                    chunk.content,
                     FactualRuleV1::FoldCheckpoint,
                 )
             });
             self.fold_specs.push(last);
-            let key = FactualNodeKeyV1 {
-                tick: self.context.tick,
-                scheduler_position: 0,
-                owner: FactualHostOwnerV1::Fold.as_str(),
-                output_ordinal: ordinal,
-                schema_id: FACTUAL_FOLD_SCHEMA_ID_V1,
-            };
-            previous = factual_artifact_digest(self.context.timeline_id, key, content);
-            from = seq_after(through);
             sources.push(FactualSource::Node(last));
         }
         Ok(last)

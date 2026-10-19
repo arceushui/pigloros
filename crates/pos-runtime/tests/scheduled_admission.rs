@@ -4591,7 +4591,9 @@ fn exclusion_types() -> BTreeMap<u64, &'static str> {
 /// fold input, matched by its type alone, and so is an Event of an Ephemeral
 /// type without a node, through an ingress node. A consent grant, a
 /// geographic Event, the consent-closed marker and an Event bound to a
-/// presentation-only node are not.
+/// presentation-only node are not. The adapters refuse those types on a
+/// plain append, so the probe port retypes plain Events for the builder; the
+/// store, which reads the Events it holds, then refuses the basis.
 #[test]
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn fold_inputs_skip_consent_geographic_and_presentation_only_events_on_both_adapters() {
@@ -4612,7 +4614,12 @@ fn fold_inputs_skip_consent_geographic_and_presentation_only_events_on_both_adap
 
         ok(stage(&host, &mut registry, &all_at(7, &[])));
         let mut port = FoldProbePort::over(store.as_mut(), exclusion_types());
-        let basis = admit_through(&host, &mut registry, &mut port, 1);
+        // The store reads the Events' own types, so its own fold check (ADR-064
+        // R4.3, check (ix)) derives another fold part and refuses the basis.
+        let admission = host.admission(&*port.inner, 1);
+        let refused = rejection(registry.admit_scheduled_pass(&mut port, &admission));
+        assert_eq!(refused, "InvalidDependencyDeclaration", "{name}");
+        let basis = port.bases.remove(0);
         let reads: Vec<WindowRead> = vec![(0, 7, (1..=7).collect())];
         assert_eq!(port.reads.take(), reads, "{name}");
         assert_eq!(bound_seqs(&basis), [1, 2, 7], "{name}");
