@@ -380,7 +380,7 @@ fn proxy_reports_remote_unavailable_for_refused_or_substituted_peers() -> TestRe
     let decoy = TcpListener::bind("127.0.0.1:0")?;
     let decoy_address = decoy.local_addr()?;
     let decoy = thread::spawn(move || -> io::Result<Vec<u8>> {
-        let (mut stream, _) = decoy.accept()?;
+        let mut stream = proxy_accept(&decoy)?;
         stream.set_read_timeout(Some(PROXY_SERVER_TIMEOUT))?;
         let mut received = Vec::new();
         stream.read_to_end(&mut received)?;
@@ -428,7 +428,7 @@ fn proxy_enforces_the_monotonic_network_deadline() -> TestResult {
     let address = listener.local_addr()?;
     let (release, waiter) = mpsc::channel::<()>();
     let server = thread::spawn(move || -> io::Result<Vec<u8>> {
-        let (mut stream, _) = listener.accept()?;
+        let mut stream = proxy_accept(&listener)?;
         stream.set_read_timeout(Some(PROXY_SERVER_TIMEOUT))?;
         let mut received = Vec::new();
         stream.read_to_end(&mut received)?;
@@ -460,7 +460,7 @@ fn proxy_deadline_bounds_a_request_the_peer_never_reads() -> TestResult {
     let address = listener.local_addr()?;
     let (release, waiter) = mpsc::channel::<()>();
     let server = thread::spawn(move || -> io::Result<()> {
-        let (_stream, _) = listener.accept()?;
+        let _stream = proxy_accept(&listener)?;
         waiter.recv_timeout(PROXY_SERVER_TIMEOUT).ok();
         Ok(())
     });
@@ -637,7 +637,7 @@ fn proxy_server(
         responses
             .into_iter()
             .map(|response| {
-                let (mut stream, _) = listener.accept()?;
+                let mut stream = proxy_accept(&listener)?;
                 stream.set_read_timeout(Some(PROXY_SERVER_TIMEOUT))?;
                 let mut received = Vec::new();
                 stream.read_to_end(&mut received)?;
@@ -646,6 +646,26 @@ fn proxy_server(
             })
             .collect()
     })
+}
+
+/// Accept one connection, or fail instead of hanging when none arrives.
+fn proxy_accept(listener: &TcpListener) -> io::Result<TcpStream> {
+    listener.set_nonblocking(true)?;
+    let deadline = Instant::now() + PROXY_SERVER_TIMEOUT;
+    loop {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                stream.set_nonblocking(false)?;
+                return Ok(stream);
+            }
+            Err(error)
+                if error.kind() == io::ErrorKind::WouldBlock && Instant::now() < deadline =>
+            {
+                thread::sleep(Duration::from_millis(5));
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 fn proxy_unused_address() -> TestResult<SocketAddr> {
