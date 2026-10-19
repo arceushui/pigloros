@@ -451,11 +451,10 @@ fn ingress_digests(dependencies: &FactualTickDependenciesV1) -> BTreeMap<Seq, Ha
 
 /// The inputs every node of `owner` declares, in node order.
 fn owned_inputs(nodes: &[DependencyNodeRecordV1], owner: FactualHostOwnerV1) -> Vec<Hash> {
-    let owned = nodes
+    let held = nodes
         .iter()
         .filter(|node| is_host_node(node.coordinate(), owner));
-    owned
-        .flat_map(|node| node.input_digests().iter().copied())
+    held.flat_map(|node| node.input_digests().iter().copied())
         .collect()
 }
 
