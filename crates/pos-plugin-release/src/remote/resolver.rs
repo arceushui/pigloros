@@ -172,11 +172,17 @@ mod tests {
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn resolver(lookup: Lookup) -> BoundedResolver {
+    /// A resolver over its own worker, held in `cell` for the whole test
+    /// process like the production worker (never leaked or respawned).
+    fn resolver(cell: &'static OnceLock<Worker>, lookup: Lookup) -> BoundedResolver {
         BoundedResolver {
-            worker: Box::leak(Box::new(Worker::spawn(lookup))),
+            worker: cell.get_or_init(|| Worker::spawn(lookup)),
         }
     }
+
+    static GATED_WORKER: OnceLock<Worker> = OnceLock::new();
+    static MANY_WORKER: OnceLock<Worker> = OnceLock::new();
+    static EMPTY_WORKER: OnceLock<Worker> = OnceLock::new();
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn uri(text: &str) -> Result<Uri, Box<dyn std::error::Error>> {
@@ -187,7 +193,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn a_wedged_lookup_bounds_the_caller_and_fails_closed_without_a_queue(
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let resolver = resolver(gated_lookup);
+        let resolver = resolver(&GATED_WORKER, gated_lookup);
         let config = Config::default();
         let held = gate();
 
@@ -227,7 +233,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn a_resolution_keeps_at_most_sixteen_addresses() -> Result<(), Box<dyn std::error::Error>> {
-        let resolver = resolver(many_lookup);
+        let resolver = resolver(&MANY_WORKER, many_lookup);
         let addresses =
             resolver.resolve(&uri("https://many.test/")?, &Config::default(), wait(5))?;
         let ports = addresses.iter().map(SocketAddr::port).collect::<Vec<_>>();
@@ -238,7 +244,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn no_address_is_host_not_found() -> Result<(), Box<dyn std::error::Error>> {
-        let resolver = resolver(empty_lookup);
+        let resolver = resolver(&EMPTY_WORKER, empty_lookup);
         let addresses = resolver.resolve(&uri("https://none.test/")?, &Config::default(), wait(5));
         assert!(matches!(addresses, Err(ureq::Error::HostNotFound)));
         Ok(())
