@@ -3231,6 +3231,9 @@ mod tests {
         let root = Path::new(SANDBOX_ARTIFACT_ROOT);
         // SIM1's own root hash and proof verify, but its image's
         // root-verity-sig partition names systemd-repart's: open rejects.
+        // The control is the next stage: the same image under the SIM1 its
+        // partition names opens, as in the in-crate
+        // `provider_rejects_a_signature_partition_other_than_sim1`.
         {
             let _paths = FixedCompositionFixture::create()?;
             let (image, partitions) = ddi_fixture("x86-64")?;

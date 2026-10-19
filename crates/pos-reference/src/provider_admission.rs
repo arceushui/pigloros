@@ -40,7 +40,8 @@ const VERITY_ALGORITHM: [u8; 32] = *b"sha256\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0
 // 4096-byte data blocks, then 4096-byte hash blocks.
 const VERITY_BLOCK_SIZES: [u8; 8] = [0, 16, 0, 0, 0, 16, 0, 0];
 const VERITY_SALT_SIZE: [u8; 2] = [32, 0];
-// systemd v260.2 `acquire_sig_for_roothash` refuses larger signature partitions.
+// systemd v260.2 `acquire_sig_for_roothash` refuses a signature partition
+// larger than this (src/shared/dissect-image.c L744: `partition_size > 4*1024*1024`).
 const VERITY_SIGNATURE_LIMIT: usize = 4 * 1024 * 1024;
 
 /// Independently checked image evidence owning a complete installation snapshot.
@@ -188,9 +189,9 @@ impl ProviderImageSnapshot {
 /// Only [`ProviderImageSnapshot::admit_held_image`] constructs this value. It
 /// borrows the snapshot, and [`AsFd`] yields exactly the retained root-image
 /// descriptor that every image, GPT, EROFS, verity superblock,
-/// root-verity-sig and CMS check read; no caller can supply or substitute a descriptor, proof or authority.
-/// It has no public constructor, `Clone` or serialization, and grants no
-/// mount, launch or output authority by itself.
+/// root-verity-sig and CMS check read; no caller can supply or substitute a
+/// descriptor, proof or authority. It has no public constructor, `Clone` or
+/// serialization, and grants no mount, launch or output authority by itself.
 pub struct HeldImageAdmission<'snapshot> {
     snapshot: &'snapshot ProviderImageSnapshot,
     root_image: &'snapshot File,
@@ -502,14 +503,14 @@ fn lower_hex(bytes: &[u8]) -> String {
 /// RFC 4648 standard base64 with padding, as systemd-repart writes it.
 fn base64(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut encoded = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    let mut encoded = String::new();
     for chunk in bytes.chunks(3) {
         let mut group = [0_u8; 3];
         group[..chunk.len()].copy_from_slice(chunk);
         let sextets = [
             group[0] >> 2,
-            ((group[0] & 3) << 4) | (group[1] >> 4),
-            ((group[1] & 15) << 2) | (group[2] >> 6),
+            ((group[0] & 3) << 4) + (group[1] >> 4),
+            ((group[1] & 15) << 2) + (group[2] >> 6),
             group[2] & 63,
         ];
         // A chunk of n bytes yields n + 1 symbols, then `=` padding.
@@ -1098,6 +1099,11 @@ pub mod tests {
                     &json,
                     fingerprint_pair,
                     &format!(",\"certificateFingerprint\":\"{}\"", "a".repeat(63)),
+                )?,
+                replace_once(
+                    &json,
+                    fingerprint_pair,
+                    &format!(",\"certificateFingerprint\":\"{}\"", "a".repeat(65)),
                 )?,
                 replace_once(&json, &format!("\"{root_hash}\""), "1")?,
                 format!("[\"{root_hash}\",\"{encoded}\"]").into_bytes(),
