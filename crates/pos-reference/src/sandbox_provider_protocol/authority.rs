@@ -3,10 +3,10 @@ use sha2::{Digest, Sha256};
 
 use super::codec::{
     array, bounded_array, byte_string, bytes_value, decode_document, decode_text_list, digest32,
-    fixed_bytes, id16, identifier, key_id, normalized_absolute_path, require_canonical_order,
-    require_signature, self_digested, signed, text, text_value, uint, uint_value, usize_u64,
-    valid_identifier, valid_key_id, verify_digest, verify_signature, MAX_INPUT_BYTES_U64,
-    MAX_LIST_ENTRIES,
+    fixed_bytes, id16, identifier, kernel_key_description, key_id, normalized_absolute_path,
+    require_canonical_order, require_signature, self_digested, signed, text, text_value, uint,
+    uint_value, usize_u64, valid_identifier, valid_kernel_key_description, valid_key_id,
+    verify_digest, verify_signature, MAX_INPUT_BYTES_U64, MAX_LIST_ENTRIES,
 };
 use super::SandboxProviderProtocolError;
 
@@ -404,9 +404,12 @@ pub struct SignedImageManifest {
     pub root_image_blake3_digest: [u8; 32],
     pub partitions: [PartitionDescriptor; 3],
     pub root_hash_sha256: [u8; 32],
+    /// Exact 32-byte dm-verity salt written by systemd-repart.
+    pub verity_salt: [u8; 32],
     pub root_hash_signature: Pkcs7Proof,
     pub signing_certificate_sha256: [u8; 32],
-    pub kernel_keyring_serial: u64,
+    /// Exact kernel key description of the built-in release certificate.
+    pub kernel_key_description: String,
     pub executable_path: String,
     pub executable_blake3_digest: [u8; 32],
     pub arguments: Vec<String>,
@@ -424,11 +427,7 @@ impl SignedImageManifest {
     pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, SandboxProviderProtocolError> {
         let value = decode_document(bytes)?;
         let (fields, manifest_digest, signature) = signed::<20>(&value, "SIM1")?;
-        if uint(&fields[8])? != 4096
-            || uint(&fields[9])? != 4096
-            || uint(&fields[10])? != 1
-            || !byte_string(&fields[11])?.is_empty()
-        {
+        if uint(&fields[8])? != 4096 || uint(&fields[9])? != 4096 || uint(&fields[10])? != 1 {
             return Err(SandboxProviderProtocolError::InvalidEncoding);
         }
         let manifest = Self {
@@ -438,9 +437,10 @@ impl SignedImageManifest {
             root_image_blake3_digest: digest32(&fields[5])?,
             partitions: decode_partitions(&fields[6])?,
             root_hash_sha256: digest32(&fields[7])?,
+            verity_salt: fixed_bytes(&fields[11])?,
             root_hash_signature: decode_pkcs7(&fields[12])?,
             signing_certificate_sha256: digest32(&fields[13])?,
-            kernel_keyring_serial: uint(&fields[14])?,
+            kernel_key_description: kernel_key_description(&fields[14])?,
             executable_path: text(&fields[15])?.to_owned(),
             executable_blake3_digest: digest32(&fields[16])?,
             arguments: decode_text_list(&fields[17])?,
@@ -473,7 +473,7 @@ impl SignedImageManifest {
             || self.root_image_blake3_digest == [0; 32]
             || self.root_hash_sha256 == [0; 32]
             || self.signing_certificate_sha256 == [0; 32]
-            || self.kernel_keyring_serial == 0
+            || !valid_kernel_key_description(&self.kernel_key_description)
             || self.executable_blake3_digest == [0; 32]
             || !normalized_absolute_path(&self.executable_path)
             || self.arguments.len() > MAX_LIST_ENTRIES
@@ -504,10 +504,10 @@ impl SignedImageManifest {
             uint_value(4096),
             uint_value(4096),
             uint_value(1),
-            bytes_value(&[]),
+            bytes_value(&self.verity_salt),
             pkcs7_value(&self.root_hash_signature),
             bytes_value(&self.signing_certificate_sha256),
-            uint_value(self.kernel_keyring_serial),
+            text_value(&self.kernel_key_description),
             text_value(&self.executable_path),
             bytes_value(&self.executable_blake3_digest),
             Value::Array(

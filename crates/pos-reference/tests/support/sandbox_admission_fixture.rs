@@ -21,6 +21,7 @@ public_admission_tests! {
 use pos_reference::sandbox_provider_protocol::{
     AuthenticatedAdmissionGrant, HostCapabilityProfile, NetworkExchangePlan,
     ProviderConformanceReport, SandboxArchitecture, SandboxAuditRecord,
+    SandboxProviderProtocolError as ProtocolError,
 };
 }
 
@@ -45,6 +46,12 @@ const REQUIRED_HOST_FEATURES: [&str; 16] = [
     "user-namespace",
     "uts-namespace",
 ];
+
+// Default kernel key description and verity salt; rbs1-v1/generate.py uses the
+// same values independently.
+const FIXTURE_KEY_DESCRIPTION: &str =
+    "PiglorOS SIM1 fixture: 0909090909090909090909090909090909090909";
+const FIXTURE_VERITY_SALT: [u8; 32] = [23; 32];
 
 const ROOT_DATA_X86_64: [u8; 16] = [
     0x4f, 0x68, 0xbc, 0xe3, 0xe8, 0xcd, 0x4d, 0xb1, 0x96, 0xe7, 0xfb, 0xca, 0xf9, 0x84, 0xb7, 0x09,
@@ -236,6 +243,14 @@ impl SigningAuthority {
     }
 
     fn trust_with_certificate(&self, fingerprint: [u8; 32]) -> TestResult<SandboxTrustSnapshot> {
+        self.trust_with_key(fingerprint, FIXTURE_KEY_DESCRIPTION)
+    }
+
+    fn trust_with_key(
+        &self,
+        fingerprint: [u8; 32],
+        description: &str,
+    ) -> TestResult<SandboxTrustSnapshot> {
         let keys = ordered(vec![
             key_record("policy", 1, &self.policy),
             key_record("release", 2, &self.release),
@@ -243,7 +258,11 @@ impl SigningAuthority {
             key_record("reviewer", 4, &self.reviewer),
             key_record("image", 5, &self.image),
         ])?;
-        let certificate = Value::Array(vec![bytes(fingerprint), integer(77), integer(2)]);
+        let certificate = Value::Array(vec![
+            bytes(fingerprint),
+            Value::Text(description.to_owned()),
+            integer(2),
+        ]);
         let unsigned = Value::Array(vec![
             Value::Text("TRS1".to_owned()),
             integer(1),
@@ -453,14 +472,14 @@ fn image_manifest(
             integer(4096),
             integer(4096),
             integer(1),
-            Value::Bytes(vec![]),
+            bytes(FIXTURE_VERITY_SALT),
             Value::Array(vec![
                 integer(u64::try_from(der.len())?),
                 Value::Bytes(Sha256::digest(der).to_vec()),
                 Value::Bytes(der.to_vec()),
             ]),
             bytes([9; 32]),
-            integer(77),
+            Value::Text(FIXTURE_KEY_DESCRIPTION.to_owned()),
             Value::Text("/adapter".to_owned()),
             bytes(*blake3::hash(executable).as_bytes()),
             Value::Array(vec![]),
@@ -1626,7 +1645,11 @@ fn image_admission_rejects_each_selection_and_authority_substitution() -> TestRe
             bytes([99; 32]),
             SandboxAdmissionError::CertificateMismatch,
         ),
-        (14, integer(78), SandboxAdmissionError::CertificateMismatch),
+        (
+            14,
+            Value::Text("PiglorOS SIM1 fixture: 0a".to_owned()),
+            SandboxAdmissionError::CertificateMismatch,
+        ),
     ] {
         let changed = resign_unsigned_field(
             &fixture.sim1,
@@ -1666,6 +1689,55 @@ fn image_admission_rejects_each_selection_and_authority_substitution() -> TestRe
         selected.admit_image(&unknown_key, &fixture.root_image, &fixture.executable),
         Err(SandboxAdmissionError::Trust(_))
     ));
+    Ok(())
+}
+
+#[test]
+fn image_admission_requires_exact_salt_and_kernel_key_description() -> TestResult {
+    let fixture = Fixture::new()?;
+    let provider = fixture.admit()?;
+    for (field, replacement, expected) in [
+        (11, Value::Bytes(Vec::new()), ProtocolError::InvalidEncoding),
+        (
+            11,
+            Value::Bytes(vec![23; 31]),
+            ProtocolError::InvalidEncoding,
+        ),
+        (
+            11,
+            Value::Bytes(vec![23; 33]),
+            ProtocolError::InvalidEncoding,
+        ),
+        (14, integer(77), ProtocolError::InvalidEncoding),
+        (
+            14,
+            Value::Text(String::new()),
+            ProtocolError::FieldOutOfBounds,
+        ),
+        (
+            14,
+            Value::Text("PiglorOS\0fixture".to_owned()),
+            ProtocolError::FieldOutOfBounds,
+        ),
+        (
+            14,
+            Value::Text("k".repeat(4096)),
+            ProtocolError::FieldOutOfBounds,
+        ),
+    ] {
+        let changed = resign_unsigned_field(
+            &fixture.sim1,
+            "SIM1",
+            field,
+            replacement,
+            &fixture.authority.image,
+        )?;
+        assert_eq!(
+            provider.admit_image(&changed, &fixture.root_image, &fixture.executable),
+            Err(SandboxAdmissionError::Protocol(expected)),
+            "field {field}"
+        );
+    }
     Ok(())
 }
 

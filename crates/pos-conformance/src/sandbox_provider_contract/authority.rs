@@ -18,6 +18,8 @@ const SCS1: &str = "SCS1";
 const LPS1: &str = "LPS1";
 const SIM1: &str = "SIM1";
 const MAX_IMAGE_BYTES: u64 = 16 * 1024 * 1024 * 1024;
+// Longest kernel key description: one page less its terminating NUL.
+const MAX_KERNEL_KEY_DESCRIPTION_BYTES: usize = 4095;
 const MAX_SIGNATURE_DER_BYTES: usize = 1024 * 1024;
 const MAX_EXECUTABLE_PATH_BYTES: usize = 512;
 const MAX_ARGUMENT_BYTES: usize = 256;
@@ -533,12 +535,14 @@ pub struct SignedImageManifestV1 {
     pub partitions: [PartitionDescriptorV1; 3],
     /// Exact dm-verity root hash.
     pub root_hash_sha256: [u8; 32],
+    /// Exact 32-byte dm-verity salt written by systemd-repart.
+    pub verity_salt: [u8; 32],
     /// Exact DER PKCS#7 proof.
     pub root_hash_signature: Pkcs7ProofV1,
     /// SHA-256 fingerprint of the signing certificate.
     pub signing_certificate_sha256: [u8; 32],
-    /// Administrator-selected kernel-keyring serial.
-    pub kernel_keyring_serial: u64,
+    /// Exact kernel key description of the built-in release certificate.
+    pub kernel_key_description: String,
     /// Normalized absolute executable path within the image.
     pub executable_path: String,
     /// BLAKE3 digest of exact executable bytes.
@@ -615,11 +619,7 @@ impl SignedImageManifestV1 {
         let fields = array::<3>(&value)?;
         let unsigned = array::<20>(&fields[0])?;
         validate_magic(unsigned, SIM1)?;
-        if uint(&unsigned[8])? != 4096
-            || uint(&unsigned[9])? != 4096
-            || uint(&unsigned[10])? != 1
-            || !bytes(&unsigned[11])?.is_empty()
-        {
+        if uint(&unsigned[8])? != 4096 || uint(&unsigned[9])? != 4096 || uint(&unsigned[10])? != 1 {
             return Err(SandboxContractErrorV1::InvalidEncoding);
         }
         let manifest = Self {
@@ -629,9 +629,10 @@ impl SignedImageManifestV1 {
             root_image_blake3_digest: fixed(&unsigned[5])?,
             partitions: decode_partitions(&unsigned[6])?,
             root_hash_sha256: fixed(&unsigned[7])?,
+            verity_salt: fixed(&unsigned[11])?,
             root_hash_signature: decode_pkcs7(&unsigned[12])?,
             signing_certificate_sha256: fixed(&unsigned[13])?,
-            kernel_keyring_serial: uint(&unsigned[14])?,
+            kernel_key_description: text(&unsigned[14])?.to_owned(),
             executable_path: text(&unsigned[15])?.to_owned(),
             executable_blake3_digest: fixed(&unsigned[16])?,
             arguments: decode_texts(&unsigned[17])?,
@@ -650,7 +651,7 @@ impl SignedImageManifestV1 {
             || self.root_image_blake3_digest == [0; 32]
             || self.root_hash_sha256 == [0; 32]
             || self.signing_certificate_sha256 == [0; 32]
-            || self.kernel_keyring_serial == 0
+            || !valid_kernel_key_description(&self.kernel_key_description)
             || self.executable_blake3_digest == [0; 32]
             || !normalized_absolute_path(&self.executable_path)
             || self.arguments.len() > MAX_SANDBOX_PROVIDER_ENTRIES_V1
@@ -680,10 +681,10 @@ impl SignedImageManifestV1 {
             value_uint(4096),
             value_uint(4096),
             value_uint(1),
-            value_bytes(&[]),
+            value_bytes(&self.verity_salt),
             pkcs7_value(&self.root_hash_signature),
             value_bytes(&self.signing_certificate_sha256),
-            value_uint(self.kernel_keyring_serial),
+            value_text(&self.kernel_key_description),
             value_text(&self.executable_path),
             value_bytes(&self.executable_blake3_digest),
             Value::Array(
@@ -979,6 +980,11 @@ fn decode_texts(value: &Value) -> Result<Vec<String>, SandboxContractErrorV1> {
         .iter()
         .map(|value| text(value).map(ToOwned::to_owned))
         .collect()
+}
+
+/// Non-empty, control-free kernel key description within one page.
+fn valid_kernel_key_description(value: &str) -> bool {
+    bounded_text(value, MAX_KERNEL_KEY_DESCRIPTION_BYTES) && !value.chars().any(char::is_control)
 }
 
 fn normalized_absolute_path(value: &str) -> bool {
