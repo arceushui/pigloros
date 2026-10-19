@@ -66,6 +66,35 @@ impl UpdateFixture {
             .admit_provider()?)
     }
 
+    /// Reopen the installation through the provider's recovery-aware path.
+    pub(crate) fn installed(
+        &self,
+    ) -> Result<InstalledSelectorState, crate::selector::SelectorBoundaryError> {
+        File::open(self.directory.path())
+            .map_err(|_| crate::selector::SelectorBoundaryError::Io)
+            .and_then(|root| InstalledSelectorState::open_at_for_test(&root))
+    }
+
+    /// Durably commit the next RVS1/APT1 transaction, leaving SIR1 pending.
+    pub(crate) fn commit_live_update(
+        &self,
+    ) -> TestResult<crate::selector::installation::authority::CommittedInstallationUpdate> {
+        let admitted = self.admitted()?;
+        let challenge = admitted.bootstrap().issue_update_challenge()?;
+        let request = self.request(&challenge, None)?;
+        let update = admitted.bootstrap().validate_update(challenge, &request)?;
+        let runtime = ProviderRuntimeSlot::allocate(&admitted)?.bind_observed_process(100, 200)?;
+        let snapshot = InstallationRecoverySnapshot::seal(
+            &admitted,
+            &runtime,
+            &self.recovery_directory()?,
+            fs::metadata(self.directory.path())?.uid(),
+            Vec::new(),
+            Vec::new(),
+        )?;
+        Ok(Arc::new(admitted).commit_update(update, snapshot)?)
+    }
+
     fn recovery_directory(&self) -> TestResult<File> {
         fs::set_permissions(self.directory.path(), fs::Permissions::from_mode(0o700))?;
         Ok(File::open(self.directory.path())?)
@@ -271,6 +300,19 @@ fn live_acknowledgement(
         ]),
         signer,
     )
+}
+
+/// Acknowledge a committed update and install its successor SIC1.
+pub(crate) fn complete_live_update(
+    committed: crate::selector::installation::authority::CommittedInstallationUpdate,
+) -> TestResult {
+    let acknowledgement = committed.authenticate_live_acknowledgement(&live_acknowledgement(
+        &committed,
+        &SigningKey::from_bytes(&[4; 32]),
+        Vec::new(),
+    )?)?;
+    committed.complete_live_update(&acknowledgement)?;
+    Ok(())
 }
 
 fn replace_nested_unsigned_field(
