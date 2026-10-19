@@ -16,7 +16,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: fdf7cba9e6a828bc3a30b15f068659469063d62a
+          ref: 75ceb965b57676ee0b7dedd77e43369eadda6c44
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
@@ -33,14 +33,12 @@ jobs:
           RUSTFLAGS: -D warnings
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = fdf7cba9e6a828bc3a30b15f068659469063d62a
+          test "$(git rev-parse HEAD)" = 75ceb965b57676ee0b7dedd77e43369eadda6c44
           git rev-parse HEAD 'HEAD^{tree}'
           cargo test --package pos-store --all-features --locked --lib \
             sqlite::fork_ -- --include-ignored 2>&1 | tee "${RUNNER_TEMP}/adr120-regression.log"
           cargo test --package pos-store --all-features --locked --test fork_replay_authority_public \
             -- --include-ignored 2>&1 | tee -a "${RUNNER_TEMP}/adr120-regression.log"
-          cargo test --package pos-time --all-features --locked --lib \
-            imported_fork_replay_tests::cumulative_budget -- --include-ignored 2>&1 | tee -a "${RUNNER_TEMP}/adr120-regression.log"
       - name: Preserve the actual diagnostic result including expected red failure
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -57,7 +55,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: fdf7cba9e6a828bc3a30b15f068659469063d62a
+          ref: 75ceb965b57676ee0b7dedd77e43369eadda6c44
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
@@ -77,5 +75,42 @@ jobs:
         with:
           name: untrusted-adr120-format-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/adr120-format.patch
+          if-no-files-found: error
+          retention-days: 14
+
+  time:
+    name: frozen whole-operation Replay and Compare regressions
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: 75ceb965b57676ee0b7dedd77e43369eadda6c44
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: 1.97.1
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        with:
+          shared-key: test
+          save-if: false
+      - name: Exercise unchanged exact whole-operation oracles
+        env:
+          CARGO_BUILD_JOBS: "2"
+          CARGO_PROFILE_TEST_DEBUG: line-tables-only
+          CARGO_TERM_COLOR: never
+          RUSTFLAGS: -D warnings
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 75ceb965b57676ee0b7dedd77e43369eadda6c44
+          git rev-parse HEAD 'HEAD^{tree}'
+          cargo test --package pos-time --all-features --locked --lib \
+            imported_fork_replay_tests::cumulative_budget -- --include-ignored 2>&1 | tee "${RUNNER_TEMP}/adr120-time.log"
+      - name: Preserve native whole-operation diagnostic
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: untrusted-adr120-time-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/adr120-time.log
           if-no-files-found: error
           retention-days: 14
