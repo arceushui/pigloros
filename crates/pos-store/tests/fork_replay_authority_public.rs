@@ -9,8 +9,8 @@ use fixture::{pin_policy, request_for, Fallible, Port, Shape, Spec, World, PAREN
 use pos_core::trusted_clock::{GuardMonotonicSourceV1, ScriptedGuardMonotonicSourceV1};
 use pos_core::{ErasureInventoryPersistencePortV1, ErasureProtectedEffectDispositionV1, Hash, Seq};
 use pos_store::{
-    memory::MemoryStore, sqlite::SqliteStore, ForkReplayAuthorityReadErrorV1 as Error,
-    ForkAttributionAuthorityImportPortV1, ForkManifestPublicationPortV1,
+    memory::MemoryStore, sqlite::SqliteStore, ForkAttributionAuthorityImportPortV1,
+    ForkManifestPublicationPortV1, ForkReplayAuthorityReadErrorV1 as Error,
     ForkReplayAuthorityReadPortV1, ForkReplayReadBudgetV1, ForkReplayReadLimitsV1,
     ForkReplayRequirementV1,
 };

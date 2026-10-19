@@ -314,17 +314,37 @@ mod tests {
     fn malformed_binary_child_claims_remain_selected_and_rejected() -> Fallible<()> {
         let (_directory, store, world) = fixture(Shape::EmptyUnclassified)?;
         let child = world.child_at(0)?.id;
-        let root = store.read(world.root, SeqRange::all())?.remove(0).id.to_string();
-        for (table, offset) in [("fork_event_origins", 8), ("fork_intervention_admissions", 42)] {
+        let root = store
+            .read(world.root, SeqRange::all())?
+            .remove(0)
+            .id
+            .to_string();
+        for (table, offset) in [
+            ("fork_event_origins", 8),
+            ("fork_intervention_admissions", 42),
+        ] {
             for event in [pos_core::EventId::new().to_string(), root.clone()] {
                 let mut malformed = vec![0_u8; offset + 16];
                 malformed[offset..].copy_from_slice(&child.inner().to_bytes());
-                store.conn.execute_batch("SAVEPOINT malformed_child_claim")?;
-                store.conn.execute(&format!("INSERT INTO {table} VALUES (?1, ?2)"), params![event, malformed])?;
-                assert!(super::super::sqlite_has_orphaned_fork_provenance(&store.conn, child)?);
+                store
+                    .conn
+                    .execute_batch("SAVEPOINT malformed_child_claim")?;
+                store.conn.execute(
+                    &format!("INSERT INTO {table} VALUES (?1, ?2)"),
+                    params![event, malformed],
+                )?;
+                assert!(super::super::sqlite_has_orphaned_fork_provenance(
+                    &store.conn,
+                    child
+                )?);
                 assert!(super::super::sqlite_fork_suffix_rows(&store.conn, child).is_err());
-                assert_eq!(read(&store.conn, child, 32, 78)?.0, Err(Error::CorruptAuthority));
-                store.conn.execute_batch("ROLLBACK TO malformed_child_claim; RELEASE malformed_child_claim")?;
+                assert_eq!(
+                    read(&store.conn, child, 32, 78)?.0,
+                    Err(Error::CorruptAuthority)
+                );
+                store.conn.execute_batch(
+                    "ROLLBACK TO malformed_child_claim; RELEASE malformed_child_claim",
+                )?;
             }
         }
         Ok(())
