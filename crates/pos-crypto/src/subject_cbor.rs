@@ -8,12 +8,12 @@ use sha2::Sha256;
 use zeroize::Zeroizing;
 
 /// The record version of both `SubjectKeyWrapV1` and `SubjectCiphertextV1`.
-pub(super) const VERSION: u64 = 1;
+pub(crate) const VERSION: u64 = 1;
 /// The role code both records carry: `KeyRoleV1::SubjectDataEncryption`.
-pub(super) const ROLE: u8 = KeyRoleV1::SubjectDataEncryption.code();
+pub(crate) const ROLE: u8 = KeyRoleV1::SubjectDataEncryption.code();
 
 /// Append a shortest-form CBOR head for `major` with argument `value`.
-pub(super) fn head(output: &mut Vec<u8>, major: u8, value: u64) {
+pub(crate) fn head(output: &mut Vec<u8>, major: u8, value: u64) {
     // The major type occupies the top three bits and the additional
     // information the low five, so adding them composes the initial byte.
     let bytes = value.to_be_bytes();
@@ -37,18 +37,18 @@ pub(super) fn head(output: &mut Vec<u8>, major: u8, value: u64) {
 }
 
 /// Append an unsigned integer.
-pub(super) fn unsigned(output: &mut Vec<u8>, value: u64) {
+pub(crate) fn unsigned(output: &mut Vec<u8>, value: u64) {
     head(output, 0, value);
 }
 
 /// Append a definite byte string.
-pub(super) fn byte_string(output: &mut Vec<u8>, bytes: &[u8]) {
+pub(crate) fn byte_string(output: &mut Vec<u8>, bytes: &[u8]) {
     head(output, 2, bytes.len() as u64);
     output.extend_from_slice(bytes);
 }
 
 /// Append definite UTF-8 text.
-pub(super) fn text(output: &mut Vec<u8>, value: &str) {
+pub(crate) fn text(output: &mut Vec<u8>, value: &str) {
     head(output, 3, value.len() as u64);
     output.extend_from_slice(value.as_bytes());
 }
@@ -61,7 +61,7 @@ pub(super) fn text(output: &mut Vec<u8>, value: &str) {
 /// zero key. The output is wiped on drop. The pseudorandom key and HMAC
 /// state inside `hkdf 0.13.0` are not wiped: that release has no `zeroize`
 /// support, and this crate does not clear them.
-pub(super) fn hkdf_sha256(
+pub(crate) fn hkdf_sha256(
     ikm: &[u8; 32],
     salt: &[u8; 32],
     label: &[u8],
@@ -80,7 +80,7 @@ pub(super) fn hkdf_sha256(
 /// AES-GCM refuses only a plaintext above 2^36 - 32 bytes or associated data
 /// above 2^61 - 1 bytes. Every caller bounds both to 256 KiB first; the
 /// refusal still fails closed rather than yielding a zero tag.
-pub(super) fn aes_gcm_seal(
+pub(crate) fn aes_gcm_seal(
     key: &[u8; 32],
     nonce: &[u8; 12],
     associated_data: &[u8],
@@ -93,7 +93,7 @@ pub(super) fn aes_gcm_seal(
 }
 
 /// Authenticate and decrypt `buffer` in place; `false` releases nothing.
-pub(super) fn aes_gcm_open(
+pub(crate) fn aes_gcm_open(
     key: &[u8; 32],
     nonce: &[u8; 12],
     associated_data: &[u8],

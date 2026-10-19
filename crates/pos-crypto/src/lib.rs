@@ -23,9 +23,11 @@ pub mod signing;
 #[doc(hidden)]
 pub mod strict_cbor;
 // The CBOR writer and AEAD/HKDF helpers shared by the subject key wrap and
-// ciphertext modules. Its items are `pub(super)`, which satisfies both
-// `unreachable_pub` and Clippy's `redundant_pub_crate`.
-mod subject_cbor;
+// ciphertext modules. Its items are crate-only, but in a private module Clippy's
+// `redundant_pub_crate` rejects `pub(crate)` and `pub(super)` while `pub` trips
+// `unreachable_pub`; public module reachability satisfies both.
+#[doc(hidden)]
+pub mod subject_cbor;
 pub mod subject_ciphertext;
 pub mod subject_key;
 pub mod timeline_erasure;

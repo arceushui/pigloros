@@ -18,9 +18,9 @@ use pos_crypto::subject_ciphertext::{
     MAX_SUBJECT_PUBLIC_HEADER_BYTES,
 };
 use pos_crypto::subject_key::{
-    parse_subject_owner_id, subject_owner_id, SubjectKeyUseV1, SubjectKeyWrapErrorV1, SubjectKeyWrapParamsV1,
-    SubjectKeyWrapV1, SubjectPrfOutputV1, SubjectRootKeyV1, SubjectSubkeyV1,
-    MAX_SUBJECT_CREDENTIAL_ID_BYTES, MAX_SUBJECT_RP_ID_BYTES, SUBJECT_OWNER_BYTES,
+    parse_subject_owner_id, subject_owner_id, SubjectKeyUseV1, SubjectKeyWrapErrorV1,
+    SubjectKeyWrapParamsV1, SubjectKeyWrapV1, SubjectPrfOutputV1, SubjectRootKeyV1,
+    SubjectSubkeyV1, MAX_SUBJECT_CREDENTIAL_ID_BYTES, MAX_SUBJECT_RP_ID_BYTES, SUBJECT_OWNER_BYTES,
     SUBJECT_OWNER_PREFIX,
 };
 use ulid::Ulid;
@@ -385,7 +385,8 @@ fn reference_seal(key: &str, nonce: &[u8], aad: &str, plaintext: &[u8]) -> Optio
     let nonce: [u8; 12] = fixed(nonce);
     let mut buffer = plaintext.to_vec();
     let cipher = Aes256Gcm::new((&key).into());
-    let tag = cipher.encrypt_inout_detached((&nonce).into(), &hex(aad), buffer.as_mut_slice().into());
+    let tag =
+        cipher.encrypt_inout_detached((&nonce).into(), &hex(aad), buffer.as_mut_slice().into());
     tag.ok().map(|tag| [buffer, tag.to_vec()].concat())
 }
 
@@ -851,7 +852,8 @@ fn two_subjects_under_one_human_decrypt_only_their_own_fields() -> TestResult {
     let second_prf = SubjectPrfOutputV1::from_bytes(ascending(0x90));
     let second_params = params_with(|params| params.subject_id = second_id);
     let second = SubjectKeyWrapV1::seal(second_params, &second_root, &second_prf)?;
-    let second_key = second.derive_subkey(&second.open(&second_prf)?, SubjectKeyUseV1::Bootstrap)?;
+    let second_key =
+        second.derive_subkey(&second.open(&second_prf)?, SubjectKeyUseV1::Bootstrap)?;
     let first_key = golden_subkey(SubjectKeyUseV1::Bootstrap)?;
     let second_event = consent_with(|event| event.entity_id = second_id);
     let first_event = consent_event();
@@ -1423,8 +1425,8 @@ fn causation_and_correlation_are_bound_by_the_context() -> TestResult {
 
 #[test]
 fn large_coordinates_round_trip() -> TestResult {
-    let subkey =
-        seal_with(|params| params.epoch = u64::MAX)?.derive_subkey(&root(), SubjectKeyUseV1::Data)?;
+    let subkey = seal_with(|params| params.epoch = u64::MAX)?
+        .derive_subkey(&root(), SubjectKeyUseV1::Data)?;
     let signing = KeyRoleV1::TimelineIntegritySigning;
     let event = field_with(|event| {
         event.origin_logical_seq = Seq::from_u64(u64::MAX);
@@ -1480,23 +1482,35 @@ fn decoders_report_the_lowest_malformed_field() {
     items[3] = bstr(&[0; 16]);
     items[5] = vec![0xf6];
     let refused = SubjectKeyWrapV1::from_bytes(&array(&items));
-    assert_eq!(refused, Err(SubjectKeyWrapErrorV1::InvalidField { ordinal: 3 }));
+    assert_eq!(
+        refused,
+        Err(SubjectKeyWrapErrorV1::InvalidField { ordinal: 3 })
+    );
     items[3] = bstr(&ascending::<16>(0));
     items[5] = uint(0);
     items[6] = tstr("Localhost");
     let refused = SubjectKeyWrapV1::from_bytes(&array(&items));
-    assert_eq!(refused, Err(SubjectKeyWrapErrorV1::InvalidField { ordinal: 5 }));
+    assert_eq!(
+        refused,
+        Err(SubjectKeyWrapErrorV1::InvalidField { ordinal: 5 })
+    );
     let mut items = consent_items();
     items[3] = bstr(&[0; 16]);
     items[12] = vec![0xf6];
     let refused = SubjectCiphertextV1::from_bytes(&array(&items));
-    assert_eq!(refused, Err(SubjectCiphertextErrorV1::InvalidField { ordinal: 3 }));
+    assert_eq!(
+        refused,
+        Err(SubjectCiphertextErrorV1::InvalidField { ordinal: 3 })
+    );
     let mut items = consent_items();
     items[8] = uint(0);
     items[10] = tstr("");
     items[15] = bstr(&[0; 3]);
     let refused = SubjectCiphertextV1::from_bytes(&array(&items));
-    assert_eq!(refused, Err(SubjectCiphertextErrorV1::InvalidField { ordinal: 8 }));
+    assert_eq!(
+        refused,
+        Err(SubjectCiphertextErrorV1::InvalidField { ordinal: 8 })
+    );
 }
 
 #[test]
