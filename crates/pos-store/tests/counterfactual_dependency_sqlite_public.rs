@@ -3208,8 +3208,8 @@ fn f15_a_fold_window_never_reads_a_payload() {
     assert_eq!(ok(lineage.store.fold_window(root, after, through)), before);
 }
 
-/// A stored Event row that fails to decode fails the fold window: its payload
-/// hash is a text here, not a 32-byte blob.
+/// A stored Event row that fails to read fails the fold window: its payload
+/// hash is a text here, not a blob, so the row query itself fails.
 #[test]
 fn f15_a_corrupt_event_row_fails_the_fold_window() {
     let mut lineage = lineage();

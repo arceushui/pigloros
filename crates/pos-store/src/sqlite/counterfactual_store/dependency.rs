@@ -1980,7 +1980,7 @@ fn fold_entry(prefix: i64, row: FoldRowV1) -> Result<FoldEntryV1, CoreError> {
 /// in the logical range `(after, through]`, at most `room`, newest first. A
 /// segment's Timeline holds its own Events above the previous segment's
 /// limit, its fork point, and shows them through its own limit.
-fn member_fold_events(
+fn segment_fold_events(
     conn: &Connection,
     path: &[SegmentV1],
     index: usize,
@@ -2014,7 +2014,7 @@ fn newest_fold_events(
         if room == 0 {
             break;
         }
-        newest.extend(member_fold_events(conn, path, index, range, room)?);
+        newest.extend(segment_fold_events(conn, path, index, range, room)?);
     }
     Ok(newest)
 }
