@@ -232,7 +232,8 @@ fn fold_head() -> TestResult<DependencyNodeRecordV1> {
     let class = RecordedDependencyClassV1::EndogenousRecomputed;
     let origin = RecordedNodeOriginV1::Committed;
     let provenance = Hash::from_bytes([0x82; 32]);
-    Ok(DependencyNodeRecordV1::try_new(coordinate, class, origin, Vec::new(), provenance)?)
+    DependencyNodeRecordV1::try_new(coordinate, class, origin, Vec::new(), provenance)
+        .map_err(Into::into)
 }
 
 /// A truncated fold window of `count` Events without a node after the head:
