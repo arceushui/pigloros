@@ -2554,6 +2554,19 @@ fn f7_set_counts_cover_only_the_timelines_own_set() {
     assert_eq!(ok(store.factual_set_counts(lineage.deep)), counts(0));
 }
 
+/// The fold reads are stubs until ADR-064 R4 slice 3 adds the fold-head rows.
+#[test]
+fn f7_fold_reads_have_no_cursor_and_an_empty_window_before_fold_rows() {
+    let lineage = lineage();
+    let store = &lineage.store;
+
+    for timeline in [lineage.root, lineage.mid, lineage.deep] {
+        assert!(ok(store.fold_cursor(timeline)).is_none());
+        let window = ok(store.fold_window(timeline, Seq::ZERO, Seq::from_u64(8)));
+        assert_eq!(window, pos_core::FactualFoldWindowV1::default());
+    }
+}
+
 #[test]
 fn f8_parent_prefix_reads_stitch_ancestors_through_their_cuts() {
     let lineage = lineage();

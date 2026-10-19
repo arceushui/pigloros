@@ -1299,6 +1299,22 @@ impl<B: FactualPrefixReadPortV1> FactualPrefixReadPortV1 for Shared<B> {
     fn factual_set_counts(&self, timeline: TimelineId) -> Result<RecordedSetCountsV1, CoreError> {
         self.lock().factual_set_counts(timeline)
     }
+
+    fn fold_cursor(
+        &self,
+        timeline: TimelineId,
+    ) -> Result<Option<pos_core::FactualFoldCursorV1>, CoreError> {
+        self.lock().fold_cursor(timeline)
+    }
+
+    fn fold_window(
+        &self,
+        timeline: TimelineId,
+        after: Seq,
+        through: Seq,
+    ) -> Result<pos_core::FactualFoldWindowV1, CoreError> {
+        self.lock().fold_window(timeline, after, through)
+    }
 }
 
 /// A store adapter that records and reads dependency records and the

@@ -461,6 +461,24 @@ impl pos_core::FactualPrefixReadPortV1 for LostOutcomePort<'_> {
     ) -> Result<pos_core::RecordedSetCountsV1, pos_core::CoreError> {
         self.0.factual_set_counts(timeline)
     }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn fold_cursor(
+        &self,
+        timeline: pos_core::TimelineId,
+    ) -> Result<Option<pos_core::FactualFoldCursorV1>, pos_core::CoreError> {
+        self.0.fold_cursor(timeline)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn fold_window(
+        &self,
+        timeline: pos_core::TimelineId,
+        after: pos_core::Seq,
+        through: pos_core::Seq,
+    ) -> Result<pos_core::FactualFoldWindowV1, pos_core::CoreError> {
+        self.0.fold_window(timeline, after, through)
+    }
 }
 
 /// A port whose basis-free lookup never finds a receipt, so only the
@@ -557,6 +575,24 @@ impl pos_core::FactualPrefixReadPortV1 for ForgetfulLookupPort<'_> {
     ) -> Result<pos_core::RecordedSetCountsV1, pos_core::CoreError> {
         self.store.factual_set_counts(timeline)
     }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn fold_cursor(
+        &self,
+        timeline: pos_core::TimelineId,
+    ) -> Result<Option<pos_core::FactualFoldCursorV1>, pos_core::CoreError> {
+        self.store.fold_cursor(timeline)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn fold_window(
+        &self,
+        timeline: pos_core::TimelineId,
+        after: pos_core::Seq,
+        through: pos_core::Seq,
+    ) -> Result<pos_core::FactualFoldWindowV1, pos_core::CoreError> {
+        self.store.fold_window(timeline, after, through)
+    }
 }
 
 /// A port whose lookup fails before any approval.
@@ -645,6 +681,24 @@ impl pos_core::FactualPrefixReadPortV1 for UnavailablePort {
         _: pos_core::TimelineId,
     ) -> Result<pos_core::RecordedSetCountsV1, pos_core::CoreError> {
         Ok(pos_core::RecordedSetCountsV1::default())
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn fold_cursor(
+        &self,
+        _: pos_core::TimelineId,
+    ) -> Result<Option<pos_core::FactualFoldCursorV1>, pos_core::CoreError> {
+        Ok(None)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn fold_window(
+        &self,
+        _: pos_core::TimelineId,
+        _: pos_core::Seq,
+        _: pos_core::Seq,
+    ) -> Result<pos_core::FactualFoldWindowV1, pos_core::CoreError> {
+        Ok(pos_core::FactualFoldWindowV1::default())
     }
 }
 
@@ -891,6 +945,24 @@ impl pos_core::FactualPrefixReadPortV1 for SetCountsPort<'_> {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn factual_set_counts(&self, _: TimelineId) -> Result<RecordedSetCountsV1, CoreError> {
         Ok(self.counts)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn fold_cursor(
+        &self,
+        timeline: TimelineId,
+    ) -> Result<Option<pos_core::FactualFoldCursorV1>, CoreError> {
+        self.inner.fold_cursor(timeline)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn fold_window(
+        &self,
+        timeline: TimelineId,
+        after: Seq,
+        through: Seq,
+    ) -> Result<pos_core::FactualFoldWindowV1, CoreError> {
+        self.inner.fold_window(timeline, after, through)
     }
 }
 

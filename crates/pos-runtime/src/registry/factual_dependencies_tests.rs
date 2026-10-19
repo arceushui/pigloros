@@ -195,6 +195,22 @@ impl FactualPrefixReadPortV1 for FakePrefix {
     fn factual_set_counts(&self, _: TimelineId) -> Result<RecordedSetCountsV1, CoreError> {
         Ok(RecordedSetCountsV1::default())
     }
+
+    fn fold_cursor(
+        &self,
+        _: TimelineId,
+    ) -> Result<Option<pos_core::FactualFoldCursorV1>, CoreError> {
+        Ok(None)
+    }
+
+    fn fold_window(
+        &self,
+        _: TimelineId,
+        _: Seq,
+        _: Seq,
+    ) -> Result<pos_core::FactualFoldWindowV1, CoreError> {
+        Ok(pos_core::FactualFoldWindowV1::default())
+    }
 }
 
 type Script = Arc<Mutex<Vec<&'static [u8]>>>;
@@ -1231,6 +1247,22 @@ impl FactualPrefixReadPortV1 for RecordingPort {
 
     fn factual_set_counts(&self, timeline: TimelineId) -> Result<RecordedSetCountsV1, CoreError> {
         self.prefix.factual_set_counts(timeline)
+    }
+
+    fn fold_cursor(
+        &self,
+        timeline: TimelineId,
+    ) -> Result<Option<pos_core::FactualFoldCursorV1>, CoreError> {
+        self.prefix.fold_cursor(timeline)
+    }
+
+    fn fold_window(
+        &self,
+        timeline: TimelineId,
+        after: Seq,
+        through: Seq,
+    ) -> Result<pos_core::FactualFoldWindowV1, CoreError> {
+        self.prefix.fold_window(timeline, after, through)
     }
 }
 

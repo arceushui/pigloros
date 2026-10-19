@@ -1283,6 +1283,22 @@ impl FactualPrefixReadPortV1 for FakeStore {
     fn factual_set_counts(&self, _timeline: TimelineId) -> Result<RecordedSetCountsV1, CoreError> {
         Ok(self.counts)
     }
+
+    fn fold_cursor(
+        &self,
+        _timeline: TimelineId,
+    ) -> Result<Option<pos_core::FactualFoldCursorV1>, CoreError> {
+        Ok(None)
+    }
+
+    fn fold_window(
+        &self,
+        _timeline: TimelineId,
+        _after: Seq,
+        _through: Seq,
+    ) -> Result<pos_core::FactualFoldWindowV1, CoreError> {
+        Ok(pos_core::FactualFoldWindowV1::default())
+    }
 }
 
 impl PipelineAdmissionPortV1 for FakeStore {

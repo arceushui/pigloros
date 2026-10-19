@@ -571,6 +571,22 @@ impl<B: RecordingBackend> FactualPrefixReadPortV1 for Faulty<B> {
     fn factual_set_counts(&self, timeline: TimelineId) -> Result<RecordedSetCountsV1, CoreError> {
         self.inner.factual_set_counts(timeline)
     }
+
+    fn fold_cursor(
+        &self,
+        timeline: TimelineId,
+    ) -> Result<Option<pos_core::FactualFoldCursorV1>, CoreError> {
+        self.inner.fold_cursor(timeline)
+    }
+
+    fn fold_window(
+        &self,
+        timeline: TimelineId,
+        after: Seq,
+        through: Seq,
+    ) -> Result<pos_core::FactualFoldWindowV1, CoreError> {
+        self.inner.fold_window(timeline, after, through)
+    }
 }
 
 impl<B: Backend> EventStore for Faulty<B> {

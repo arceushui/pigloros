@@ -85,6 +85,24 @@ macro_rules! forward_factual_prefix_reads {
                 let reads = crate::FactualReadsV1::factual_reads(&self.$field);
                 reads.factual_set_counts(timeline)
             }
+
+            fn fold_cursor(
+                &self,
+                timeline: pos_core::TimelineId,
+            ) -> Result<Option<pos_core::FactualFoldCursorV1>, pos_core::CoreError> {
+                let reads = crate::FactualReadsV1::factual_reads(&self.$field);
+                reads.fold_cursor(timeline)
+            }
+
+            fn fold_window(
+                &self,
+                timeline: pos_core::TimelineId,
+                after: pos_core::Seq,
+                through: pos_core::Seq,
+            ) -> Result<pos_core::FactualFoldWindowV1, pos_core::CoreError> {
+                let reads = crate::FactualReadsV1::factual_reads(&self.$field);
+                reads.fold_window(timeline, after, through)
+            }
         }
     };
 }
@@ -323,6 +341,24 @@ impl pos_core::FactualPrefixReadPortV1 for HostedExperimentStore {
         timeline: TimelineId,
     ) -> Result<pos_core::RecordedSetCountsV1, CoreError> {
         self.with_admission(|store| store.factual_set_counts(timeline))
+            .and_then(std::convert::identity)
+    }
+
+    fn fold_cursor(
+        &self,
+        timeline: TimelineId,
+    ) -> Result<Option<pos_core::FactualFoldCursorV1>, CoreError> {
+        self.with_admission(|store| store.fold_cursor(timeline))
+            .and_then(std::convert::identity)
+    }
+
+    fn fold_window(
+        &self,
+        timeline: TimelineId,
+        after: Seq,
+        through: Seq,
+    ) -> Result<pos_core::FactualFoldWindowV1, CoreError> {
+        self.with_admission(|store| store.fold_window(timeline, after, through))
             .and_then(std::convert::identity)
     }
 }
@@ -992,6 +1028,11 @@ mod host_store_tests {
         assert_eq!(
             store.factual_set_counts(timeline)?,
             pos_core::RecordedSetCountsV1::default()
+        );
+        assert!(store.fold_cursor(timeline)?.is_none());
+        assert_eq!(
+            store.fold_window(timeline, Seq::ZERO, Seq::from_u64(1))?,
+            pos_core::FactualFoldWindowV1::default()
         );
         Ok(())
     }
