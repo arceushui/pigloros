@@ -307,6 +307,7 @@ fn scheduled_shape(drafts: &[EventDraft]) -> FactualTickShapeV1 {
         history_contents: Vec::new(),
         ingress_events: Vec::new(),
         drivers: vec![driver],
+        fold: None,
     })
 }
 
@@ -1448,6 +1449,7 @@ fn scheduled_shape_of(
         history_contents: Vec::new(),
         ingress_events,
         drivers: vec![driver],
+        fold: None,
     })
 }
 
@@ -1495,6 +1497,7 @@ fn with_record(
         record,
         declaration.output_bindings().to_vec(),
         declaration.event_nodes().to_vec(),
+        declaration.fold().clone(),
     )
 }
 
@@ -1684,7 +1687,7 @@ fn rebound(
             node_index: index(binding.node_index),
         })
         .collect();
-    FactualTickDependenciesV1::new(valid.tick(), record, outputs, events)
+    FactualTickDependenciesV1::new(valid.tick(), record, outputs, events, valid.fold().clone())
 }
 
 /// The declaration with `node` added to its record, unbound.
@@ -1707,6 +1710,7 @@ fn redeclared(
         valid.record().clone(),
         outputs,
         valid.event_nodes().to_vec(),
+        valid.fold().clone(),
     )
 }
 
@@ -1720,6 +1724,7 @@ fn with_events(
         valid.record().clone(),
         valid.output_bindings().to_vec(),
         events,
+        valid.fold().clone(),
     )
 }
 
@@ -1956,6 +1961,7 @@ fn grant_and_tick_cases(r: &Refusals<'_>) -> Vec<RefusalCase> {
         record.clone(),
         valid.output_bindings().to_vec(),
         valid.event_nodes().to_vec(),
+        valid.fold().clone(),
     );
     let origin = RecordedNodeOriginV1::Provisional;
     let provisional_record = rebuilt(record, origin, inputs_unchanged, |_| true);

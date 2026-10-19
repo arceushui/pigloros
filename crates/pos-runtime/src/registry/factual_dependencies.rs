@@ -515,6 +515,7 @@ impl PassBuild {
             history_contents: self.history_contents.order,
             ingress_events: self.ingress.into_values().collect(),
             drivers,
+            fold: None,
         }
     }
 

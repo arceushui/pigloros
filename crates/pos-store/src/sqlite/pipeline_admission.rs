@@ -848,6 +848,7 @@ mod tests {
             history_contents: Vec::new(),
             ingress_events,
             drivers: vec![driver],
+            fold: None,
         })
     }
 
