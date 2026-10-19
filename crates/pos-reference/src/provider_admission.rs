@@ -1051,11 +1051,14 @@ pub mod tests {
         assert_eq!(lower_hex(&[0x00, 0x9f, 0xa0, 0xff]), "009fa0ff");
     }
 
+    /// Accepted, then rejected, edits of one signature partition's JSON.
+    type JsonVariants = (Vec<Vec<u8>>, Vec<Vec<u8>>);
+
     /// Edits of a DDI's systemd-repart JSON that admission accepts and rejects.
     fn signature_json_variants(
         json: &[u8],
         signing: &crate::selector::installation::tests::ImageSigning,
-    ) -> TestResult<(Vec<Vec<u8>>, Vec<Vec<u8>>)> {
+    ) -> TestResult<JsonVariants> {
         let text = std::str::from_utf8(json)?.to_owned();
         let root_hash = lower_hex(signing.root_hash());
         let encoded = base64(signing.proof());
