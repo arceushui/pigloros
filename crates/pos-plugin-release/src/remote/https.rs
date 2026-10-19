@@ -7,7 +7,7 @@ use url::Url;
 use super::config::{requestable, RemoteConfigErrorV1, RemoteTransportConfigV1};
 use super::engine::Engine;
 use crate::oci::{
-    plan_closure_v1, verify_oci_closure_v1, BundleAddressV1, ReleaseSourceErrorV1, ReleaseSourceV1,
+    verify_oci_closure_v1, BundleAddressV1, ReleaseSourceErrorV1, ReleaseSourceV1,
     VerifiedReleaseBundleV1,
 };
 
@@ -102,7 +102,7 @@ impl ReleaseSourceV1 for HttpsReleaseSourceV1 {
             self.address.size(),
         )?;
         let mut blobs = BTreeMap::new();
-        for (digest, size) in plan_closure_v1(&self.address, &manifest)? {
+        for (digest, size) in self.address.plan_closure(&manifest)? {
             let bytes = read.fetch(&self.blob_url(&digest), blob_authorization.as_deref(), size)?;
             blobs.insert(digest, bytes);
         }
