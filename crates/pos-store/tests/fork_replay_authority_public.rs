@@ -134,3 +134,41 @@ fn sqlite_diagnostic_bridge_requires_an_existing_interval() -> Fallible<()> {
     );
     Ok(())
 }
+
+#[test]
+fn unrelated_valid_fork_does_not_change_public_sqlite_authority_evidence_or_copies() -> Fallible<()> {
+    let mut world = World::new(Shape::EmptyUnclassified, false)?;
+    world.add_child(Shape::Mixed)?;
+    let built = world.build(&Spec::default())?;
+    let unrelated = world.build(&Spec::distinct(1))?;
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("child-local-authority.sqlite");
+    let mut store = SqliteStore::open(path.to_str().ok_or("UTF-8 path")?)?;
+    world.seed_destination(&mut store)?;
+    pin_policy(&mut store, &built.policy)?;
+    let imported = store.import_verified(&request_for(&world, &built))?;
+    let child = world.child_at(0)?.id;
+    let committed = store.read_committed(child, PARENT_CUT)?;
+    let requirement = ForkReplayRequirementV1::new(child, Seq::from_u64(PARENT_CUT), committed.record_id, committed.authority_origin_digest)?;
+    let mut results = Vec::new();
+    for foreign in [false, true] {
+        if foreign {
+            pin_policy(&mut store, &unrelated.policy)?;
+            store.import_verified(&request_for(&world, &unrelated))?;
+        }
+        let limits = ForkReplayReadLimitsV1::new(8, 128, 4_096, 8 * 1024 * 1024, 1_000_000)?;
+        let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+        let started = clock.mark();
+        let mut budget = ForkReplayReadBudgetV1::new(limits, started, &mut clock)?;
+        let interval = store.begin_protected_effect_interval()?;
+        let evidence = store.validate_fork_replay_authority(&requirement, &mut budget)?;
+        budget.check_time()?;
+        results.push((evidence, budget.remaining_native_bytes()));
+        store.finish_protected_effect_interval(interval, ErasureProtectedEffectDispositionV1::Rollback)?;
+        // The diagnostic read neither repairs nor rewrites imported authority.
+        assert_eq!(store.import_verified(&request_for(&world, &built))?, imported);
+    }
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0], results[1]);
+    Ok(())
+}
