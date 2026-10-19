@@ -79,6 +79,12 @@ httparse = { version = "=1.10.1", default-features = false }
 base64 = { version = "=0.23.1", default-features = false }
 p256 = { version = "=0.14.0", default-features = false, features = ["ecdsa"] }
 getrandom = "=0.4.3"
+# ADR-091/097 subject key wrap and subject ciphertext (ADR-110 §3 pins).
+aes-gcm = { version = "=0.11.1", default-features = false, features = [
+  "aes",
+  "zeroize",
+] }
+hkdf = "=0.13.0"
 
 # Error handling
 thiserror = "2"

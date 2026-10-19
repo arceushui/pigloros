@@ -229,9 +229,8 @@ impl<'a, E: StrictCborError> Reader<'a, E> {
         if major != 2 || usize::try_from(length) != Ok(N) {
             return Err(self.invalid());
         }
-        let mut value = [0; N];
-        value.copy_from_slice(self.take(N)?);
-        Ok(value)
+        self.take(N)
+            .map(|bytes| std::array::from_fn(|index| bytes[index]))
     }
 
     /// Consume a CBOR `null` when it is the next item.

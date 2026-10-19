@@ -444,6 +444,57 @@ fn public_http_admission_rejects_parser_limit_violations() {
 }
 
 #[test]
+fn public_http_admission_accepts_each_parser_limit_exactly() {
+    for (path_bytes, expected) in [
+        (240, Ok(LoopbackRequestDisposition::NotFound)),
+        (241, Err(OwnerBridgeCodecError::BoundsExceeded)),
+    ] {
+        let mut request = Vec::from(b"GET /".as_slice());
+        request.extend(core::iter::repeat_n(b'x', path_bytes));
+        request.extend_from_slice(
+            b" HTTP/1.1\r\nHost: localhost:49291\r\nSec-Fetch-Dest: document\r\nSec-Fetch-Mode: navigate\r\n\r\n",
+        );
+        assert_eq!(
+            request.windows(2).position(|pair| pair == b"\r\n"),
+            Some(path_bytes + 14)
+        );
+        assert_eq!(
+            admit_loopback_http_request(&request),
+            expected,
+            "request line {path_bytes}"
+        );
+    }
+
+    let mut header_name_at_limit = Vec::from(DOCUMENT_REQUEST);
+    header_name_at_limit.splice(
+        header_name_at_limit.len() - 2..header_name_at_limit.len() - 2,
+        core::iter::repeat_n(b'n', 32).chain(*b": x\r\n"),
+    );
+    assert_eq!(
+        admit_loopback_http_request(&header_name_at_limit),
+        Ok(LoopbackRequestDisposition::OwnerDocument)
+    );
+
+    // Fifteen 512-byte header values and one 329-byte value fill the
+    // 103-byte document request to exactly the 8,192-byte header block.
+    let mut block_at_limit = Vec::from(DOCUMENT_REQUEST);
+    for value_bytes in [512; 15].into_iter().chain([329]) {
+        block_at_limit.splice(
+            block_at_limit.len() - 2..block_at_limit.len() - 2,
+            (*b"X: ")
+                .into_iter()
+                .chain(core::iter::repeat_n(b'v', value_bytes))
+                .chain(*b"\r\n"),
+        );
+    }
+    assert_eq!(block_at_limit.len(), 8_192);
+    assert_eq!(
+        admit_loopback_http_request(&block_at_limit),
+        Ok(LoopbackRequestDisposition::OwnerDocument)
+    );
+}
+
+#[test]
 fn public_http_admission_preserves_the_fixed_document_and_not_found_split() {
     assert_eq!(
         admit_loopback_http_request(DOCUMENT_REQUEST),
