@@ -518,12 +518,15 @@ mod tests {
         store
             .conn
             .execute_batch("BEGIN; CREATE TABLE caller_owned (id)")?;
+        // A nested BEGIN also fails, so witness the native ownership guard itself.
+        storage_error(&require_autocommit(&store.conn));
         storage_error(&store.prepare_fork_admission_authority_schema());
         assert!(!store.conn.is_autocommit());
         assert!(schema(&store.conn)?
             .iter()
             .any(|(name, _)| name == "caller_owned"));
         store.conn.execute_batch("ROLLBACK")?;
+        require_autocommit(&store.conn)?;
         store.conn.authorizer(Some(|context: AuthContext<'_>| {
             if matches!(context.action, AuthAction::Transaction { .. }) {
                 Authorization::Deny
@@ -674,12 +677,30 @@ mod tests {
             );
             storage_error(&validate(&store.conn));
         }
-        for corruption in ["sql=NULL", "sql=x'ff'", "type=x'ff'", "tbl_name=x'ff'"] {
+        for corruption in [
+            "sql=NULL",
+            "sql=x'ff'",
+            "type=x'ff'",
+            "tbl_name=x'ff'",
+            "type='trigger'",
+            "name='IDX_FORK_EVENT_ORIGINS_CHILD_V1'",
+            "tbl_name='FORK_EVENT_ORIGINS'",
+        ] {
             let store = SqliteStore::open(":memory:")?;
-            store.conn.execute_batch(&format!(
-                "PRAGMA writable_schema=ON;
-                 UPDATE sqlite_schema SET {corruption} WHERE name='idx_fork_event_origins_child_v1'"
-            ))?;
+            // Keep canonical SQL and the native cache intact while independently
+            // invalidating each durable identity field, including NOCASE matches.
+            store.conn.execute_batch("PRAGMA writable_schema=ON")?;
+            assert_eq!(
+                store.conn.execute(
+                    &format!(
+                        "UPDATE sqlite_schema SET {corruption}
+                         WHERE name='idx_fork_event_origins_child_v1'"
+                    ),
+                    [],
+                )?,
+                1,
+                "{corruption}"
+            );
             storage_error(&validate(&store.conn));
         }
         Ok(())
