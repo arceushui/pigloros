@@ -393,6 +393,7 @@ mod tests {
             history_contents: Vec::new(),
             ingress_events: Vec::new(),
             drivers: vec![driver],
+            fold: None,
         };
         let shape = FactualTickShapeV1::Scheduled(scheduled);
         ok(assemble_factual_tick(&context, &shape))

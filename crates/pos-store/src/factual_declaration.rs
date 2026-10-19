@@ -16,8 +16,9 @@ use pos_core::{
     TickDependencyRecordV1, TimelineId, FACTUAL_SNAPSHOT_SCHEMA_ID_V1,
 };
 
-/// The rule that fixes the class of the host nodes of each host owner.
-const HOST_RULES: [(FactualHostOwnerV1, FactualRuleV1); 4] = [
+/// The rule that fixes the class of the host nodes of each host owner: one
+/// rule per owner (ADR-064 R4.3).
+const HOST_RULES: [(FactualHostOwnerV1, FactualRuleV1); 6] = [
     (
         FactualHostOwnerV1::Observation,
         FactualRuleV1::ObservationSnapshot,
@@ -25,6 +26,8 @@ const HOST_RULES: [(FactualHostOwnerV1, FactualRuleV1); 4] = [
     (FactualHostOwnerV1::Prefix, FactualRuleV1::VerifiedPrefix),
     (FactualHostOwnerV1::History, FactualRuleV1::ConsumedHistory),
     (FactualHostOwnerV1::Ingress, FactualRuleV1::ExternalIngress),
+    (FactualHostOwnerV1::Fold, FactualRuleV1::FoldCheckpoint),
+    (FactualHostOwnerV1::FoldHistory, FactualRuleV1::FoldHistory),
 ];
 
 /// The artifact digest the store recomputes for the node at `coordinate` from

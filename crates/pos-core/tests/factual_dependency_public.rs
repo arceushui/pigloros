@@ -1,11 +1,12 @@
 #![cfg(feature = "test-support")]
 
 //! Public-interface contract tests for the ADR-064 Revision 3 factual Tick
-//! dependency contract.
+//! dependency contract and its Revision 4 fold checkpoint nodes.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::num::NonZeroUsize;
+use std::ops::RangeInclusive;
 
 use pos_core::counterfactual_store::test_fixtures::{
     assert_ok, err, hash, hash_field, indexed_hash, node_bytes, ok, text_field, uint,
@@ -14,24 +15,32 @@ use pos_core::output_policy::OutputAuthorityV1;
 use pos_core::{
     assemble_factual_tick, ensure_factual_set_headroom, factual_artifact_digest,
     factual_classification_bundle_bytes, factual_classification_bundle_digest,
-    factual_event_schema_id, factual_history_content_digest, factual_ingress_content_digest,
-    factual_output_content_digest, factual_owner_id, factual_provenance_digest,
-    factual_step_content_digest, factual_verified_prefix_content_digest,
-    pipeline_draft_vector_digest_v1, AppendDedupKey, CanonicalBytes, CoreError,
-    CounterfactualDependencyErrorV1, DependencyNodeCoordinateV1, DependencyNodeRecordV1, EntityId,
-    EventDraft, EventNodeBindingV1, FactualAdmissionPortV1, FactualCutV1, FactualDependencyErrorV1,
-    FactualDriverStepV1, FactualEventRefV1, FactualHeadV1, FactualHostOwnerV1,
-    FactualIngressEventV1, FactualInputV1, FactualNodeKeyV1, FactualOutputV1, FactualOwnerIdV1,
-    FactualOwnerSourceV1, FactualPrefixReadPortV1, FactualPriorNodeV1, FactualRuleV1,
-    FactualScheduledTickV1, FactualTickContextV1, FactualTickDependenciesV1, FactualTickShapeV1,
-    Hash, Kind, OutputNodeBindingV1, PipelineAdmissionBasisV1, PipelineAdmissionPortV1,
-    PipelineAttemptIdV1, PipelineIngressV1, PipelineOutcomeV1, PipelineReceiptLookupV1,
-    PurgeOutcome, RecordedDependencyClassV1, RecordedSetCountsV1, Seq, TickDependencyRecordV1,
-    TimelineId, WallTime, FACTUAL_HISTORY_SCHEMA_ID_V1, FACTUAL_PREFIX_SCHEMA_ID_V1,
-    FACTUAL_SNAPSHOT_SCHEMA_ID_V1, FACTUAL_STEP_SCHEMA_ID_V1, MAX_DEPENDENCY_NODE_INPUTS_V1,
-    MAX_FACTUAL_FORWARDED_EDGES_PER_TICK_V1, MAX_FACTUAL_FORWARDED_EVENTS_PER_TICK_V1,
-    MAX_FORWARDED_EVENTS_PER_DRIVER_V1, MAX_HOST_DERIVED_STEP_INPUTS_V1,
-    MAX_OUTPUT_DIRECT_INPUTS_V1, MAX_RECORDED_DEPENDENCY_EDGES_V1,
+    factual_event_schema_id, factual_fold_checkpoint_content_digest,
+    factual_fold_history_content_digest, factual_history_content_digest,
+    factual_ingress_content_digest, factual_output_content_digest, factual_owner_id,
+    factual_provenance_digest, factual_step_content_digest, factual_verified_prefix_content_digest,
+    is_factual_fold_input, pipeline_draft_vector_digest_v1, AppendDedupKey, CanonicalBytes,
+    CoreError, CounterfactualDependencyErrorV1, DependencyNodeCoordinateV1, DependencyNodeRecordV1,
+    EntityId, EventDraft, EventNodeBindingV1, FactualAdmissionPortV1, FactualCutV1,
+    FactualDependencyErrorV1, FactualDriverStepV1, FactualEventRefV1, FactualFoldBindingV1,
+    FactualFoldCursorV1, FactualFoldEventV1, FactualFoldSourceV1, FactualFoldWindowV1,
+    FactualHeadV1, FactualHostOwnerV1, FactualIngressEventV1, FactualInputV1, FactualNodeKeyV1,
+    FactualOutputV1, FactualOwnerIdV1, FactualOwnerSourceV1, FactualPrefixReadPortV1,
+    FactualPriorNodeV1, FactualRuleV1, FactualScheduledTickV1, FactualTickContextV1,
+    FactualTickDependenciesV1, FactualTickShapeV1, Hash, Kind, OutputNodeBindingV1,
+    PipelineAdmissionBasisV1, PipelineAdmissionPortV1, PipelineAttemptIdV1, PipelineIngressV1,
+    PipelineOutcomeV1, PipelineReceiptLookupV1, PurgeOutcome, RecordedDependencyClassV1,
+    RecordedNodeOriginV1, RecordedSetCountsV1, Seq, TickDependencyRecordV1, TimelineId, WallTime,
+    EVENT_TYPE_CONSENT_GRANTED_V1, EVENT_TYPE_CONSENT_REVOKED_V1,
+    FACTUAL_FOLD_HISTORY_SCHEMA_ID_V1, FACTUAL_FOLD_RESERVED_EDGES_V1,
+    FACTUAL_FOLD_RESERVED_NODES_V1, FACTUAL_FOLD_SCHEMA_ID_V1, FACTUAL_HISTORY_SCHEMA_ID_V1,
+    FACTUAL_PREFIX_SCHEMA_ID_V1, FACTUAL_SNAPSHOT_SCHEMA_ID_V1, FACTUAL_STEP_SCHEMA_ID_V1,
+    GEOGRAPHIC_CELL_EVENT_TYPE, GEOGRAPHIC_EVENT_TYPE, HOST_CONSENT_CLOSED_EVENT_TYPE,
+    MAX_DEPENDENCY_NODE_INPUTS_V1, MAX_FACTUAL_FOLD_CHECKPOINTS_PER_TICK_V1,
+    MAX_FACTUAL_FOLD_EVENTS_PER_CHECKPOINT_V1, MAX_FACTUAL_FOLD_INPUT_EDGES_PER_TICK_V1,
+    MAX_FACTUAL_FOLD_SCAN_PER_TICK_V1, MAX_FACTUAL_FORWARDED_EDGES_PER_TICK_V1,
+    MAX_FACTUAL_FORWARDED_EVENTS_PER_TICK_V1, MAX_FORWARDED_EVENTS_PER_DRIVER_V1,
+    MAX_HOST_DERIVED_STEP_INPUTS_V1, MAX_OUTPUT_DIRECT_INPUTS_V1, MAX_RECORDED_DEPENDENCY_EDGES_V1,
     MAX_RECORDED_DEPENDENCY_NODES_V1, MAX_STEP_INPUTS_PER_DRIVER_V1, MAX_TICK_DEPENDENCY_EDGES_V1,
     MAX_TICK_DEPENDENCY_NODES_V1,
 };
@@ -40,6 +49,7 @@ use ulid::Ulid;
 type DepError = CounterfactualDependencyErrorV1;
 type FactualError = FactualDependencyErrorV1;
 type Record = TickDependencyRecordV1;
+type Node = DependencyNodeRecordV1;
 type Assembled = Result<FactualTickDependenciesV1, FactualError>;
 
 const TICK: u64 = 4;
@@ -150,6 +160,7 @@ const fn scheduled(drivers: Vec<FactualDriverStepV1>) -> FactualScheduledTickV1 
         history_contents: Vec::new(),
         ingress_events: Vec::new(),
         drivers,
+        fold: None,
     }
 }
 
@@ -197,6 +208,27 @@ fn the_budgets_partition_the_step_node_input_cap() {
     assert_eq!(FACTUAL_SNAPSHOT_SCHEMA_ID_V1, 2);
     assert_eq!(FACTUAL_PREFIX_SCHEMA_ID_V1, 3);
     assert_eq!(FACTUAL_HISTORY_SCHEMA_ID_V1, 4);
+    assert_eq!(FACTUAL_FOLD_SCHEMA_ID_V1, 5);
+    assert_eq!(FACTUAL_FOLD_HISTORY_SCHEMA_ID_V1, 6);
+}
+
+#[test]
+fn the_fold_budgets_partition_the_fold_part_of_a_record() {
+    assert_eq!(MAX_FACTUAL_FOLD_SCAN_PER_TICK_V1, 65_536);
+    assert_eq!(MAX_FACTUAL_FOLD_INPUT_EDGES_PER_TICK_V1, 16_384);
+    assert_eq!(MAX_FACTUAL_FOLD_EVENTS_PER_CHECKPOINT_V1, 4_094);
+    assert_eq!(MAX_FACTUAL_FOLD_CHECKPOINTS_PER_TICK_V1, 5);
+    assert_eq!(FACTUAL_FOLD_RESERVED_NODES_V1, 2);
+    assert_eq!(FACTUAL_FOLD_RESERVED_EDGES_V1, 3);
+    assert_eq!(
+        MAX_FACTUAL_FOLD_EVENTS_PER_CHECKPOINT_V1 + 2,
+        MAX_DEPENDENCY_NODE_INPUTS_V1
+    );
+    let edges = MAX_FACTUAL_FOLD_INPUT_EDGES_PER_TICK_V1;
+    assert_eq!(
+        edges.div_ceil(MAX_FACTUAL_FOLD_EVENTS_PER_CHECKPOINT_V1),
+        MAX_FACTUAL_FOLD_CHECKPOINTS_PER_TICK_V1
+    );
 }
 
 #[test]
@@ -251,6 +283,8 @@ fn host_owners_are_the_documented_literals() {
         (FactualHostOwnerV1::Prefix, "host.prefix"),
         (FactualHostOwnerV1::History, "host.history"),
         (FactualHostOwnerV1::Ingress, "host.ingress"),
+        (FactualHostOwnerV1::Fold, "host.fold"),
+        (FactualHostOwnerV1::FoldHistory, "host.fold-history"),
     ];
     for (owner, literal) in literals {
         assert_eq!(owner.as_str(), literal);
@@ -259,7 +293,7 @@ fn host_owners_are_the_documented_literals() {
 }
 
 #[test]
-fn the_rule_registry_lists_seven_rules_with_one_class_each() {
+fn the_rule_registry_lists_nine_rules_with_one_class_each() {
     let table = [
         (
             FactualRuleV1::DriverOutput,
@@ -295,6 +329,16 @@ fn the_rule_registry_lists_seven_rules_with_one_class_each() {
             FactualRuleV1::ExternalIngress,
             "pos.factual.external-ingress",
             EXOGENOUS,
+        ),
+        (
+            FactualRuleV1::FoldCheckpoint,
+            "pos.factual.fold-checkpoint",
+            ENDOGENOUS,
+        ),
+        (
+            FactualRuleV1::FoldHistory,
+            "pos.factual.fold-history",
+            ENDOGENOUS,
         ),
     ];
     assert_eq!(FactualRuleV1::ALL.len(), table.len());
@@ -332,18 +376,20 @@ fn the_classification_bundle_is_pinned_by_vector() {
     assert_eq!(
         bytes_hex(&factual_classification_bundle_bytes()),
         concat!(
-            "8783781c706f732e6661637475616c2e636f6e73756d65642d686973746f727901028378",
+            "8983781c706f732e6661637475616c2e636f6e73756d65642d686973746f727901028378",
             "19706f732e6661637475616c2e6472697665722d6f75747075740102837823706f732e66",
             "61637475616c2e6472697665722d6f75747075742e657068656d6572616c01048377706f",
             "732e6661637475616c2e6472697665722d73746570010283781c706f732e666163747561",
-            "6c2e65787465726e616c2d696e67726573730100837820706f732e6661637475616c2e6f",
-            "62736572766174696f6e2d736e617073686f74010283781b706f732e6661637475616c2e",
-            "76657269666965642d7072656669780102"
+            "6c2e65787465726e616c2d696e6772657373010083781b706f732e6661637475616c2e66",
+            "6f6c642d636865636b706f696e740102837818706f732e6661637475616c2e666f6c642d",
+            "686973746f72790102837820706f732e6661637475616c2e6f62736572766174696f6e2d",
+            "736e617073686f74010283781b706f732e6661637475616c2e76657269666965642d7072",
+            "656669780102"
         )
     );
     assert_eq!(
         hex(factual_classification_bundle_digest()),
-        "40b3e5df233b7877d691669b3848a7fa56367af3d22bb851257cb9347026f836"
+        "fe9d314c97471c02a9d099a3f876ffd756b3ff61049ee362426695abafc9baf6"
     );
 }
 
@@ -556,6 +602,7 @@ fn full_tick() -> FactualScheduledTickV1 {
         history_contents: vec![hash(0x62)],
         ingress_events: vec![ingress(2, 0x71), ingress(5, 0x72)],
         drivers: vec![first_driver, second_driver],
+        fold: None,
     }
 }
 
@@ -867,7 +914,13 @@ fn assembly_is_deterministic_and_the_digest_binds_every_part() {
     let events = dependencies.event_nodes().to_vec();
     let rebuilt =
         |tick, record: &Record, bindings: &[OutputNodeBindingV1], events: &[EventNodeBindingV1]| {
-            FactualTickDependenciesV1::new(tick, record.clone(), bindings.to_vec(), events.to_vec())
+            FactualTickDependenciesV1::new(
+                tick,
+                record.clone(),
+                bindings.to_vec(),
+                events.to_vec(),
+                FactualFoldBindingV1::default(),
+            )
         };
     assert_eq!(rebuilt(TICK, &record, &bindings, &events).digest(), digest);
     assert_ne!(
@@ -1396,4 +1449,532 @@ fn a_prior_node_is_read_from_a_recorded_row() {
         )])),
     );
     assert_eq!(err(next), FactualError::ClassRuleViolation);
+}
+
+
+#[test]
+fn the_digest_binds_the_fold_binding_list_by_list() {
+    let dependencies = full_assembly();
+    assert_eq!(dependencies.fold(), &FactualFoldBindingV1::default());
+    let digest = dependencies.digest();
+    let with_fold = |checkpoints: Vec<u32>, history: Vec<u32>| {
+        FactualTickDependenciesV1::new(
+            TICK,
+            dependencies.record().clone(),
+            dependencies.output_bindings().to_vec(),
+            dependencies.event_nodes().to_vec(),
+            FactualFoldBindingV1 {
+                checkpoints,
+                history,
+            },
+        )
+        .digest()
+    };
+    assert_eq!(with_fold(Vec::new(), Vec::new()), digest);
+    let as_checkpoint = with_fold(vec![1], Vec::new());
+    let as_history = with_fold(Vec::new(), vec![1]);
+    assert_ne!(as_checkpoint, digest);
+    assert_ne!(as_history, digest);
+    assert_ne!(as_checkpoint, as_history);
+    let ascending = with_fold(vec![1, 2], Vec::new());
+    let descending = with_fold(vec![2, 1], Vec::new());
+    assert_ne!(ascending, descending);
+}
+
+fn fold_history(from: u64, through: u64) -> Hash {
+    factual_fold_history_content_digest(Seq::from_u64(from), Seq::from_u64(through))
+}
+
+fn checkpoint(previous: Hash, from: u64, through: u64, events: &[FactualEventRefV1]) -> Hash {
+    factual_fold_checkpoint_content_digest(
+        previous,
+        Seq::from_u64(from),
+        Seq::from_u64(through),
+        events,
+    )
+}
+
+#[test]
+fn fold_content_digests_are_pinned_by_vector() {
+    assert_eq!(
+        hex(fold_history(1, 9)),
+        "b9660d15d450ffac79f57b3317abca55f4c90e5acfdc3ee1d2746cb0ce268ff3"
+    );
+    let listed = events(&[(1, 0x41), (3, 0x42)]);
+    assert_eq!(
+        hex(checkpoint(Hash::zero(), 1, 3, &listed)),
+        "2ed747f9c163c0256f921c35065e82497f51485082e118449c576cd8005fb77e"
+    );
+    assert_eq!(
+        hex(checkpoint(hash(0x21), 10, 9, &[])),
+        "c477b8c20c5602155043de4db7b3bc823b3799264a4212c197b8ab8b0642c014"
+    );
+    assert_ne!(fold_history(1, 9), fold_history(2, 9));
+    let unchained = checkpoint(Hash::zero(), 1, 3, &listed);
+    assert_ne!(unchained, checkpoint(hash(0x21), 1, 3, &listed));
+}
+
+#[test]
+fn fold_inputs_exclude_gating_and_presentation_only_events() {
+    let input = |kind: &str, class: Option<RecordedDependencyClassV1>| {
+        is_factual_fold_input(&Kind::new(kind), class)
+    };
+    assert!(input("world.input", None));
+    assert!(input("world.input", Some(ENDOGENOUS)));
+    assert!(input(EVENT_TYPE_CONSENT_REVOKED_V1, None));
+    assert!(input(EVENT_TYPE_CONSENT_REVOKED_V1, Some(EXOGENOUS)));
+    assert!(!input(EVENT_TYPE_CONSENT_GRANTED_V1, None));
+    assert!(!input("consent.other.v1", None));
+    assert!(!input(GEOGRAPHIC_EVENT_TYPE, None));
+    assert!(!input(GEOGRAPHIC_CELL_EVENT_TYPE, None));
+    assert!(!input(HOST_CONSENT_CLOSED_EVENT_TYPE, None));
+    assert!(!input("world.view", Some(PRESENTATION)));
+    assert!(!input(EVENT_TYPE_CONSENT_REVOKED_V1, Some(PRESENTATION)));
+}
+
+const FOLD_TYPE: &str = "world.input";
+
+/// A window Event of `kind` with no recorded node; its payload hash is its
+/// `seq`.
+fn typed_fold_event(seq: u64, kind: &str) -> FactualFoldEventV1 {
+    FactualFoldEventV1 {
+        seq: Seq::from_u64(seq),
+        event_type: Kind::new(kind),
+        payload_hash: indexed_hash(ok(usize::try_from(seq))),
+        node_class: None,
+        node: None,
+    }
+}
+
+fn fold_event(seq: u64) -> FactualFoldEventV1 {
+    typed_fold_event(seq, FOLD_TYPE)
+}
+
+fn fold_events(seqs: RangeInclusive<u64>) -> Vec<FactualFoldEventV1> {
+    seqs.map(fold_event).collect()
+}
+
+fn event_ref(seq: u64) -> FactualEventRefV1 {
+    let event = fold_event(seq);
+    FactualEventRefV1 {
+        seq: event.seq,
+        payload_hash: event.payload_hash,
+    }
+}
+
+fn refs(seqs: RangeInclusive<u64>) -> Vec<FactualEventRefV1> {
+    seqs.map(event_ref).collect()
+}
+
+/// A window Event bound to a node of an earlier Tick.
+fn noded_fold_event(seq: u64, kind: &str, node: Node) -> FactualFoldEventV1 {
+    FactualFoldEventV1 {
+        node_class: Some(node.class()),
+        node: Some(node),
+        ..typed_fold_event(seq, kind)
+    }
+}
+
+fn recorded(coordinate: DependencyNodeCoordinateV1, class: RecordedDependencyClassV1) -> Node {
+    let origin = RecordedNodeOriginV1::Committed;
+    let inputs = Vec::new();
+    ok(Node::try_new(coordinate, class, origin, inputs, hash(0x92)))
+}
+
+/// The fold checkpoint node an earlier Tick recorded: the head.
+fn fold_head(tick: u64) -> Node {
+    let owner = "host.fold".to_owned();
+    let schema = FACTUAL_FOLD_SCHEMA_ID_V1;
+    let coordinate = DependencyNodeCoordinateV1::try_new(tick, 0, owner, 0, schema, hash(0x91));
+    recorded(ok(coordinate), ENDOGENOUS)
+}
+
+/// An output node of an earlier Tick, bound to an Event.
+fn event_node(tick: u64, digest: u8, class: RecordedDependencyClassV1) -> Node {
+    recorded(coordinate(tick, OWNER_A, 1, hash(digest)), class)
+}
+
+const fn artifact(node: &Node) -> Hash {
+    node.coordinate().artifact_digest()
+}
+
+const fn cursor(after: u64, head: Option<Node>) -> Option<FactualFoldCursorV1> {
+    Some(FactualFoldCursorV1 {
+        scanned_through: Seq::from_u64(after),
+        head,
+    })
+}
+
+const fn fold_source(
+    cursor: Option<FactualFoldCursorV1>,
+    observed_through: u64,
+    events: Vec<FactualFoldEventV1>,
+    truncated: bool,
+) -> FactualFoldSourceV1 {
+    FactualFoldSourceV1 {
+        observed_through: Seq::from_u64(observed_through),
+        cursor,
+        window: FactualFoldWindowV1 { events, truncated },
+    }
+}
+
+/// The fold inputs `1..=inputs`, observed through `through`, of a Timeline
+/// with no fold cursor yet.
+fn first_window(through: u64, inputs: u64) -> FactualFoldSourceV1 {
+    fold_source(None, through, fold_events(1..=inputs), false)
+}
+
+fn assemble_folded(mut tick: FactualScheduledTickV1, source: FactualFoldSourceV1) -> Assembled {
+    tick.fold = Some(source);
+    assemble(TICK, &FactualTickShapeV1::Scheduled(tick))
+}
+
+/// A lone Driver with no input of its own, and the fold source.
+fn folded(source: FactualFoldSourceV1) -> FactualTickDependenciesV1 {
+    let lone = driver(OWNER_A, Vec::new(), Vec::new());
+    ok(assemble_folded(scheduled(vec![lone]), source))
+}
+
+fn refused(source: FactualFoldSourceV1) -> FactualError {
+    let lone = driver(OWNER_A, Vec::new(), Vec::new());
+    err(assemble_folded(scheduled(vec![lone]), source))
+}
+
+/// The artifact digest of a host node of this Tick.
+fn host_artifact(owner: &str, ordinal: u32, schema_id: u32, content: Hash) -> Hash {
+    let key = FactualNodeKeyV1 {
+        tick: TICK,
+        scheduler_position: 0,
+        owner,
+        output_ordinal: ordinal,
+        schema_id,
+    };
+    factual_artifact_digest(timeline(), key, content)
+}
+
+fn fold_artifact(ordinal: u32, content: Hash) -> Hash {
+    host_artifact("host.fold", ordinal, FACTUAL_FOLD_SCHEMA_ID_V1, content)
+}
+
+fn history_artifact(from: u64, through: u64) -> Hash {
+    let content = fold_history(from, through);
+    let schema = FACTUAL_FOLD_HISTORY_SCHEMA_ID_V1;
+    host_artifact("host.fold-history", 0, schema, content)
+}
+
+fn node_at(dependencies: &FactualTickDependenciesV1, index: u32) -> &Node {
+    &dependencies.record().nodes()[ok(usize::try_from(index))]
+}
+
+/// The fold checkpoint nodes of a Tick, in chain order.
+fn fold_nodes(dependencies: &FactualTickDependenciesV1) -> Vec<&Node> {
+    let checkpoints = &dependencies.fold().checkpoints;
+    checkpoints
+        .iter()
+        .map(|index| node_at(dependencies, *index))
+        .collect()
+}
+
+/// The artifact digest of the fold-history node of a Tick.
+fn history_digest(dependencies: &FactualTickDependenciesV1) -> Hash {
+    let history = &dependencies.fold().history;
+    assert_eq!(history.len(), 1);
+    artifact(node_at(dependencies, history[0]))
+}
+
+/// The artifact digest of the node bound to the Event at `seq`.
+fn event_digest(dependencies: &FactualTickDependenciesV1, seq: u64) -> Hash {
+    let target = Seq::from_u64(seq);
+    let bindings = dependencies.event_nodes();
+    let bound = bindings.iter().find(|binding| binding.seq == target);
+    let index = ok(bound.ok_or("the Event is unbound")).node_index;
+    artifact(node_at(dependencies, index))
+}
+
+fn bound_seqs(dependencies: &FactualTickDependenciesV1) -> Vec<u64> {
+    let bindings = dependencies.event_nodes();
+    bindings.iter().map(|bound| bound.seq.as_u64()).collect()
+}
+
+fn sorted(mut digests: Vec<Hash>) -> Vec<Hash> {
+    digests.sort();
+    digests
+}
+
+#[test]
+fn a_fold_node_chains_to_the_head_and_inputs_exactly_the_fold_inputs() {
+    let revoked = event_node(2, 0xa1, EXOGENOUS);
+    let window = vec![
+        fold_event(11),
+        typed_fold_event(12, EVENT_TYPE_CONSENT_GRANTED_V1),
+        noded_fold_event(13, EVENT_TYPE_CONSENT_REVOKED_V1, revoked),
+        typed_fold_event(14, GEOGRAPHIC_CELL_EVENT_TYPE),
+        noded_fold_event(15, "world.view", event_node(2, 0xa2, PRESENTATION)),
+        typed_fold_event(16, HOST_CONSENT_CLOSED_EVENT_TYPE),
+        typed_fold_event(18, EVENT_TYPE_CONSENT_REVOKED_V1),
+    ];
+    let head = fold_head(TICK - 1);
+    let head_digest = artifact(&head);
+    let source = fold_source(cursor(10, Some(head.clone())), 20, window, false);
+    let dependencies = folded(source);
+    let record = dependencies.record();
+    assert!(dependencies.fold().history.is_empty());
+    let nodes = fold_nodes(&dependencies);
+    assert_eq!(nodes.len(), 1);
+    let node = nodes[0];
+    let kept = [event_ref(11), event_ref(13), event_ref(18)];
+    let content = checkpoint(head_digest, 11, 20, &kept);
+    assert_eq!(artifact(node), fold_artifact(0, content));
+    assert_eq!(node.class(), ENDOGENOUS);
+    let provenance = factual_provenance_digest(
+        &context(TICK),
+        SCHEDULED,
+        "host.fold",
+        Hash::zero(),
+        FactualRuleV1::FoldCheckpoint,
+    );
+    assert_eq!(node.provenance_digest(), provenance);
+    let expected = sorted(vec![
+        head_digest,
+        hash(0xa1),
+        event_digest(&dependencies, 11),
+        event_digest(&dependencies, 18),
+    ]);
+    assert_eq!(node.input_digests(), expected.as_slice());
+    assert_eq!(bound_seqs(&dependencies), [11, 18]);
+    let ingress_content = factual_ingress_content_digest(indexed_hash(18), Seq::from_u64(18));
+    let schema = factual_event_schema_id(EVENT_TYPE_CONSENT_REVOKED_V1);
+    let ingress_digest = host_artifact("host.ingress", 1, schema, ingress_content);
+    assert_eq!(event_digest(&dependencies, 18), ingress_digest);
+    let snapshot = find(record, "host.observation", 0);
+    assert_eq!(snapshot.input_digests(), [artifact(node)]);
+    let rule = FactualRuleV1::FoldCheckpoint;
+    assert_eq!(
+        edge_bytes_between(record, node, head_digest),
+        expected_edge(node, head.coordinate(), ENDOGENOUS, rule).as_slice()
+    );
+    assert_eq!(record.uncovered_input_count(), 0);
+}
+
+#[test]
+fn a_fold_input_shares_the_ingress_node_of_a_forwarded_event_and_ordinals_follow_seq() {
+    let forwarded = vec![FactualInputV1::IngressEvent(Seq::from_u64(12))];
+    let mut tick = scheduled(vec![driver(OWNER_A, forwarded, Vec::new())]);
+    tick.ingress_events = vec![FactualIngressEventV1 {
+        seq: Seq::from_u64(12),
+        event_type: FOLD_TYPE.to_owned(),
+        payload_hash: indexed_hash(12),
+    }];
+    let source = fold_source(None, 12, fold_events(11..=12), false);
+    let dependencies = ok(assemble_folded(tick, source));
+    let record = dependencies.record();
+    assert_eq!(bound_seqs(&dependencies), [11, 12]);
+    let eleven = event_digest(&dependencies, 11);
+    let twelve = event_digest(&dependencies, 12);
+    assert_eq!(digest_of(record, "host.ingress", 0), eleven);
+    assert_eq!(digest_of(record, "host.ingress", 1), twelve);
+    let ingress_nodes = record
+        .nodes()
+        .iter()
+        .filter(|node| node.coordinate().owner_id() == "host.ingress")
+        .count();
+    assert_eq!(ingress_nodes, 2);
+    let step_inputs = find(record, OWNER_A, 0).input_digests();
+    assert!(step_inputs.contains(&twelve));
+    let node = fold_nodes(&dependencies)[0];
+    let content = checkpoint(Hash::zero(), 1, 12, &refs(11..=12));
+    assert_eq!(artifact(node), fold_artifact(0, content));
+    let expected = sorted(vec![eleven, twelve]);
+    assert_eq!(node.input_digests(), expected.as_slice());
+}
+
+#[test]
+fn a_window_without_fold_inputs_records_no_fold_node_and_the_snapshot_inputs_the_head() {
+    let head = fold_head(TICK - 2);
+    let head_digest = artifact(&head);
+    let excluded = vec![
+        typed_fold_event(11, EVENT_TYPE_CONSENT_GRANTED_V1),
+        typed_fold_event(12, GEOGRAPHIC_EVENT_TYPE),
+    ];
+    let source = fold_source(cursor(10, Some(head.clone())), 12, excluded.clone(), false);
+    let with_head = folded(source);
+    assert_eq!(with_head.fold(), &FactualFoldBindingV1::default());
+    let record = with_head.record();
+    assert_eq!(record.nodes().len(), 2);
+    let snapshot = find(record, "host.observation", 0);
+    assert_eq!(snapshot.input_digests(), [head_digest]);
+    let rule = FactualRuleV1::ObservationSnapshot;
+    assert_eq!(
+        edge_bytes_between(record, snapshot, head_digest),
+        expected_edge(snapshot, head.coordinate(), ENDOGENOUS, rule).as_slice()
+    );
+    assert_eq!(record.edges().len(), 2);
+    let headless = folded(fold_source(cursor(10, None), 12, excluded, false));
+    assert_eq!(headless.fold(), &FactualFoldBindingV1::default());
+    let record = headless.record();
+    let snapshot = find(record, "host.observation", 0);
+    assert!(snapshot.input_digests().is_empty());
+    assert_eq!(record.edges().len(), 1);
+    let fresh = folded(fold_source(None, 0, Vec::new(), false));
+    assert_eq!(fresh.record().nodes().len(), 2);
+}
+
+#[test]
+fn fold_inputs_split_into_chunks_of_4094_chained_in_seq_order() {
+    let one = folded(first_window(4_094, 4_094));
+    let nodes = fold_nodes(&one);
+    assert_eq!(nodes.len(), 1);
+    assert!(one.fold().history.is_empty());
+    assert_eq!(nodes[0].input_digests().len(), 4_094);
+    let only = fold_artifact(0, checkpoint(Hash::zero(), 1, 4_094, &refs(1..=4_094)));
+    assert_eq!(artifact(nodes[0]), only);
+    let two = folded(first_window(4_100, 4_095));
+    let nodes = fold_nodes(&two);
+    assert_eq!(nodes.len(), 2);
+    assert_eq!(artifact(nodes[0]), only);
+    let second = fold_artifact(1, checkpoint(only, 4_095, 4_100, &refs(4_095..=4_095)));
+    assert_eq!(artifact(nodes[1]), second);
+    let expected = sorted(vec![only, event_digest(&two, 4_095)]);
+    assert_eq!(nodes[1].input_digests(), expected.as_slice());
+    let snapshot = find(two.record(), "host.observation", 0);
+    assert_eq!(snapshot.input_digests(), [second]);
+}
+
+#[test]
+fn a_full_fold_part_is_five_nodes_and_one_more_input_collapses_the_oldest() {
+    let full = folded(first_window(16_384, 16_384));
+    let nodes = fold_nodes(&full);
+    assert_eq!(nodes.len(), MAX_FACTUAL_FOLD_CHECKPOINTS_PER_TICK_V1);
+    assert!(full.fold().history.is_empty());
+    assert_eq!(nodes[4].input_digests().len(), 8 + 1);
+    let over = folded(first_window(16_385, 16_385));
+    let nodes = fold_nodes(&over);
+    assert_eq!(nodes.len(), MAX_FACTUAL_FOLD_CHECKPOINTS_PER_TICK_V1);
+    let history = history_digest(&over);
+    assert_eq!(history, history_artifact(1, 1));
+    let history_node = node_at(&over, over.fold().history[0]);
+    assert_eq!(history_node.class(), ENDOGENOUS);
+    assert!(history_node.input_digests().is_empty());
+    let first = nodes[0];
+    assert_eq!(first.input_digests().len(), 4_095);
+    assert!(first.input_digests().contains(&history));
+    let content = checkpoint(Hash::zero(), 2, 4_095, &refs(2..=4_095));
+    assert_eq!(artifact(first), fold_artifact(0, content));
+    assert_eq!(over.event_nodes().len(), 16_384);
+    assert_eq!(bound_seqs(&over).first(), Some(&2));
+}
+
+#[test]
+fn a_truncated_window_collapses_its_unscanned_range_into_the_fold_history_node() {
+    let granted = |seq| typed_fold_event(seq, EVENT_TYPE_CONSENT_GRANTED_V1);
+    let scanned = (1..=65_536).map(granted).collect();
+    let all = folded(fold_source(None, 65_536, scanned, false));
+    assert_eq!(all.fold(), &FactualFoldBindingV1::default());
+    let newest = (2..=65_537).map(granted).collect();
+    let collapsed = folded(fold_source(None, 65_537, newest, true));
+    let history = history_digest(&collapsed);
+    assert_eq!(history, history_artifact(1, 65_537));
+    let nodes = fold_nodes(&collapsed);
+    assert_eq!(nodes.len(), 1);
+    let empty = fold_artifact(0, checkpoint(Hash::zero(), 65_538, 65_537, &[]));
+    assert_eq!(artifact(nodes[0]), empty);
+    assert_eq!(nodes[0].input_digests(), [history]);
+    let tail_source = fold_source(cursor(10, None), 17, fold_events(15..=17), true);
+    let tail = folded(tail_source);
+    assert_eq!(history_digest(&tail), history_artifact(11, 14));
+    let content = checkpoint(Hash::zero(), 15, 17, &refs(15..=17));
+    assert_eq!(artifact(fold_nodes(&tail)[0]), fold_artifact(0, content));
+    let oversized = (1..=65_537).map(granted).collect();
+    assert_eq!(
+        refused(fold_source(None, 65_537, oversized, true)),
+        FactualError::Record(DepError::FieldOutOfBounds)
+    );
+}
+
+/// Drivers whose step nodes add exactly `edges` edges to a record.
+fn edge_heavy_drivers(edges: usize) -> Vec<FactualDriverStepV1> {
+    let per_step = MAX_DEPENDENCY_NODE_INPUTS_V1;
+    (0..edges.div_ceil(per_step))
+        .map(|index| {
+            let inputs = (edges - index * per_step).min(per_step) - 1;
+            let owner = format!("plugin:{index}");
+            driver(&owner, distinct_priors(inputs), Vec::new())
+        })
+        .collect()
+}
+
+/// Five hundred fold inputs behind `head`, all in one scanned window.
+fn five_hundred_after(head: &Node) -> FactualFoldSourceV1 {
+    let events = fold_events(1..=500);
+    fold_source(cursor(0, Some(head.clone())), 500, events, false)
+}
+
+#[test]
+fn the_fit_keeps_the_newest_fold_inputs_the_record_has_room_for() {
+    let head = fold_head(TICK - 1);
+    let head_digest = artifact(&head);
+    let rest = edge_heavy_drivers(MAX_TICK_DEPENDENCY_EDGES_V1 - 103);
+    let dependencies = ok(assemble_folded(scheduled(rest), five_hundred_after(&head)));
+    let edges = dependencies.record().edges().len();
+    assert_eq!(edges, MAX_TICK_DEPENDENCY_EDGES_V1);
+    assert_eq!(history_digest(&dependencies), history_artifact(1, 400));
+    let nodes = fold_nodes(&dependencies);
+    assert_eq!(nodes.len(), 1);
+    assert_eq!(nodes[0].input_digests().len(), 100 + 2);
+    assert!(nodes[0].input_digests().contains(&head_digest));
+    let content = checkpoint(head_digest, 401, 500, &refs(401..=500));
+    assert_eq!(artifact(nodes[0]), fold_artifact(0, content));
+    assert_eq!(bound_seqs(&dependencies), (401..=500).collect::<Vec<_>>());
+}
+
+#[test]
+fn the_rest_of_a_record_must_leave_the_minimal_fold_part_free() {
+    let head = fold_head(TICK - 1);
+    let head_digest = artifact(&head);
+    let reserve = MAX_TICK_DEPENDENCY_EDGES_V1 - FACTUAL_FOLD_RESERVED_EDGES_V1;
+    let rest = edge_heavy_drivers(reserve);
+    let minimal = ok(assemble_folded(scheduled(rest), five_hundred_after(&head)));
+    let edges = minimal.record().edges().len();
+    assert_eq!(edges, MAX_TICK_DEPENDENCY_EDGES_V1);
+    assert!(minimal.event_nodes().is_empty());
+    let history = history_digest(&minimal);
+    assert_eq!(history, history_artifact(1, 500));
+    let nodes = fold_nodes(&minimal);
+    assert_eq!(nodes.len(), 1);
+    let empty = fold_artifact(0, checkpoint(head_digest, 501, 500, &[]));
+    assert_eq!(artifact(nodes[0]), empty);
+    let expected = sorted(vec![head_digest, history]);
+    assert_eq!(nodes[0].input_digests(), expected.as_slice());
+    let out_of_bounds = FactualError::Record(DepError::FieldOutOfBounds);
+    let crowded = edge_heavy_drivers(reserve + 1);
+    let over = assemble_folded(scheduled(crowded), five_hundred_after(&head));
+    assert_eq!(err(over), out_of_bounds);
+    let mut full = scheduled(Vec::new());
+    let node_reserve = MAX_TICK_DEPENDENCY_NODES_V1 - FACTUAL_FOLD_RESERVED_NODES_V1;
+    full.ingress_events = (1..=node_reserve)
+        .map(|seq| ingress(ok(u64::try_from(seq)), 7))
+        .collect();
+    let crowded_nodes = assemble_folded(full, fold_source(None, 70_000, Vec::new(), false));
+    assert_eq!(err(crowded_nodes), out_of_bounds);
+}
+
+#[test]
+fn a_fold_window_out_of_order_or_outside_its_range_is_refused() {
+    let out_of_bounds = FactualError::Record(DepError::FieldOutOfBounds);
+    let descending = fold_source(None, 9, vec![fold_event(3), fold_event(2)], false);
+    assert_eq!(refused(descending), out_of_bounds);
+    let rescanned = fold_source(cursor(5, None), 9, vec![fold_event(5)], false);
+    assert_eq!(refused(rescanned), out_of_bounds);
+    let unobserved = fold_source(None, 9, vec![fold_event(10)], false);
+    assert_eq!(refused(unobserved), out_of_bounds);
+    let regressed = fold_source(cursor(5, None), 4, Vec::new(), false);
+    assert_eq!(refused(regressed), out_of_bounds);
+    let unchanged = folded(fold_source(cursor(5, None), 5, Vec::new(), false));
+    assert_eq!(unchanged.fold(), &FactualFoldBindingV1::default());
+    let later = noded_fold_event(3, FOLD_TYPE, event_node(TICK, 0xa3, EXOGENOUS));
+    let unresolved = FactualError::UnresolvedInput;
+    let unrecorded = fold_source(None, 9, vec![later], false);
+    assert_eq!(refused(unrecorded), unresolved);
+    let own_head = fold_source(cursor(0, Some(fold_head(TICK))), 9, Vec::new(), false);
+    assert_eq!(refused(own_head), unresolved);
 }

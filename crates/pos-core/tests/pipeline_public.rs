@@ -98,6 +98,7 @@ fn scheduled_tick(drafts: &[EventDraft]) -> FactualScheduledTickV1 {
         history_contents: Vec::new(),
         ingress_events: Vec::new(),
         drivers: vec![driver],
+        fold: None,
     }
 }
 

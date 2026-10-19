@@ -158,6 +158,7 @@ fn scheduled_tick() -> TestResult<FactualScheduledTickV1> {
             step_inputs,
             outputs,
         }],
+        fold: None,
     })
 }
 

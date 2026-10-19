@@ -1711,6 +1711,7 @@ fn skewed(basis: &PipelineAdmissionBasisV1, skew: u64) -> PipelineAdmissionBasis
         declared.record().clone(),
         declared.output_bindings().to_vec(),
         declared.event_nodes().to_vec(),
+        declared.fold().clone(),
     );
     ok(PipelineAdmissionBasisV1::try_from_draft(
         PipelineAdmissionBasisDraftV1 {
