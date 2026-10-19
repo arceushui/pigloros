@@ -1624,11 +1624,11 @@ const fn artifact(node: &Node) -> Hash {
     node.coordinate().artifact_digest()
 }
 
-const fn cursor(after: u64, head: Option<Node>) -> Option<FactualFoldCursorV1> {
-    Some(FactualFoldCursorV1 {
+const fn cursor(after: u64, head: Option<Node>) -> FactualFoldCursorV1 {
+    FactualFoldCursorV1 {
         scanned_through: Seq::from_u64(after),
         head,
-    })
+    }
 }
 
 const fn fold_source(
@@ -1741,7 +1741,7 @@ fn a_fold_node_chains_to_the_head_and_inputs_exactly_the_fold_inputs() {
     ];
     let head = fold_head(TICK - 1);
     let head_digest = artifact(&head);
-    let source = fold_source(cursor(10, Some(head.clone())), 20, window, false);
+    let source = fold_source(Some(cursor(10, Some(head.clone()))), 20, window, false);
     let dependencies = folded(source);
     let record = dependencies.record();
     assert!(dependencies.fold().history.is_empty());
@@ -1822,7 +1822,8 @@ fn a_window_without_fold_inputs_records_no_fold_node_and_the_snapshot_inputs_the
         typed_fold_event(11, EVENT_TYPE_CONSENT_GRANTED_V1),
         typed_fold_event(12, GEOGRAPHIC_EVENT_TYPE),
     ];
-    let source = fold_source(cursor(10, Some(head.clone())), 12, excluded.clone(), false);
+    let at = Some(cursor(10, Some(head.clone())));
+    let source = fold_source(at, 12, excluded.clone(), false);
     let with_head = folded(source);
     assert_eq!(with_head.fold(), &FactualFoldBindingV1::default());
     let record = with_head.record();
@@ -1835,7 +1836,7 @@ fn a_window_without_fold_inputs_records_no_fold_node_and_the_snapshot_inputs_the
         expected_edge(snapshot, head.coordinate(), ENDOGENOUS, rule).as_slice()
     );
     assert_eq!(record.edges().len(), 2);
-    let headless = folded(fold_source(cursor(10, None), 12, excluded, false));
+    let headless = folded(fold_source(Some(cursor(10, None)), 12, excluded, false));
     assert_eq!(headless.fold(), &FactualFoldBindingV1::default());
     let record = headless.record();
     let snapshot = find(record, "host.observation", 0);
@@ -1905,7 +1906,7 @@ fn a_truncated_window_collapses_its_unscanned_range_into_the_fold_history_node()
     let empty = fold_artifact(0, checkpoint(Hash::zero(), 65_538, 65_537, &[]));
     assert_eq!(artifact(nodes[0]), empty);
     assert_eq!(nodes[0].input_digests(), [history]);
-    let tail_source = fold_source(cursor(10, None), 17, fold_events(15..=17), true);
+    let tail_source = fold_source(Some(cursor(10, None)), 17, fold_events(15..=17), true);
     let tail = folded(tail_source);
     assert_eq!(history_digest(&tail), history_artifact(11, 14));
     let content = checkpoint(Hash::zero(), 15, 17, &refs(15..=17));
@@ -1932,7 +1933,7 @@ fn edge_heavy_drivers(edges: usize) -> Vec<FactualDriverStepV1> {
 /// Five hundred fold inputs behind `head`, all in one scanned window.
 fn five_hundred_after(head: &Node) -> FactualFoldSourceV1 {
     let events = fold_events(1..=500);
-    fold_source(cursor(0, Some(head.clone())), 500, events, false)
+    fold_source(Some(cursor(0, Some(head.clone()))), 500, events, false)
 }
 
 #[test]
@@ -1989,18 +1990,19 @@ fn a_fold_window_out_of_order_or_outside_its_range_is_refused() {
     let out_of_bounds = FactualError::Record(DepError::FieldOutOfBounds);
     let descending = fold_source(None, 9, vec![fold_event(3), fold_event(2)], false);
     assert_eq!(refused(descending), out_of_bounds);
-    let rescanned = fold_source(cursor(5, None), 9, vec![fold_event(5)], false);
+    let rescanned = fold_source(Some(cursor(5, None)), 9, vec![fold_event(5)], false);
     assert_eq!(refused(rescanned), out_of_bounds);
     let unobserved = fold_source(None, 9, vec![fold_event(10)], false);
     assert_eq!(refused(unobserved), out_of_bounds);
-    let regressed = fold_source(cursor(5, None), 4, Vec::new(), false);
+    let regressed = fold_source(Some(cursor(5, None)), 4, Vec::new(), false);
     assert_eq!(refused(regressed), out_of_bounds);
-    let unchanged = folded(fold_source(cursor(5, None), 5, Vec::new(), false));
+    let unchanged = folded(fold_source(Some(cursor(5, None)), 5, Vec::new(), false));
     assert_eq!(unchanged.fold(), &FactualFoldBindingV1::default());
     let later = noded_fold_event(3, FOLD_TYPE, event_node(TICK, 0xa3, EXOGENOUS));
     let unresolved = FactualError::UnresolvedInput;
     let unrecorded = fold_source(None, 9, vec![later], false);
     assert_eq!(refused(unrecorded), unresolved);
-    let own_head = fold_source(cursor(0, Some(fold_head(TICK))), 9, Vec::new(), false);
+    let own = Some(cursor(0, Some(fold_head(TICK))));
+    let own_head = fold_source(own, 9, Vec::new(), false);
     assert_eq!(refused(own_head), unresolved);
 }
