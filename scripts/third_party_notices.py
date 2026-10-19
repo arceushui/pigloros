@@ -582,12 +582,27 @@ def lock_packages(path: Path) -> set[tuple[str, str]]:
     }
 
 
-def check_report_graph(report: dict, packages: set[tuple[str, str]], label: str) -> list[str]:
-    """A report may list only registry packages that its lockfile pins."""
+def is_in_tree(package: dict, in_tree: Path | None) -> bool:
+    """A path package whose manifest lies under `in_tree` (Rust's library/)."""
+    if in_tree is None or package.get("source") is not None:
+        return False
+    manifest = Path(str(package.get("manifest_path", ""))).resolve()
+    return manifest.is_relative_to(in_tree.resolve())
+
+
+def check_report_graph(
+    report: dict, packages: set[tuple[str, str]], label: str, in_tree: Path | None = None
+) -> list[str]:
+    """A report may list only registry packages that its lockfile pins.
+
+    The std graph may also list Rust's own in-tree library crates, such as
+    `alloc`, which the Rust component's texts cover.
+    """
     return [
         f"{label}: {crate_label(crate['package'])} is not a registry package of {label}"
         for crate in report.get("crates", [])
         if (crate["package"]["name"], crate["package"]["version"]) not in packages
+        and not is_in_tree(crate["package"], in_tree)
     ]
 
 
@@ -707,7 +722,10 @@ def assemble(root: Path, reports: dict[str, dict], sysroot: Path) -> tuple[str, 
     for lock in sorted(reports):
         errors += check_report(reports[lock], lock)
         if lock in lockfiles and lockfiles[lock].is_file():
-            errors += check_report_graph(reports[lock], lock_packages(lockfiles[lock]), lock)
+            in_tree = lockfiles[lock].parent if lock == RUST_STD else None
+            errors += check_report_graph(
+                reports[lock], lock_packages(lockfiles[lock]), lock, in_tree
+            )
     if RUST_STD in reports:
         errors += check_std_rlibs(reports[RUST_STD], rlibs)
     if errors:
@@ -737,12 +755,17 @@ def assemble(root: Path, reports: dict[str, dict], sysroot: Path) -> tuple[str, 
             )
         graph_lines, graph_index = render_report(label, digest, reports[lock])
         if lock == RUST_STD:
-            listed = {c["package"]["name"].replace("-", "_") for c in reports[lock]["crates"]}
+            listed = {
+                c["package"]["name"].replace("-", "_")
+                for c in reports[lock]["crates"]
+                if c["package"].get("source") is not None
+            }
             in_tree = sorted(rlibs - listed)
             graph_lines += [
                 "",
-                "Shipped wasm32-unknown-unknown rlibs outside this graph (in-tree Rust",
-                f"library crates, covered by the Rust component below): {', '.join(in_tree)}",
+                "Shipped wasm32-unknown-unknown rlibs that are not crates.io crates of this",
+                "graph (in-tree Rust library crates, covered by the Rust component below):",
+                f"  {', '.join(in_tree)}",
             ]
             graph_index["in_tree_rlibs"] = in_tree
         lines += [*graph_lines, ""]

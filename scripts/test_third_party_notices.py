@@ -54,7 +54,12 @@ STD_RLIBS = (
 
 
 def package(name: str, version: str = "1.0.0") -> dict:
-    return {"id": f"registry#{name}@{version}", "name": name, "version": version}
+    return {
+        "id": f"registry#{name}@{version}",
+        "name": name,
+        "version": version,
+        "source": "registry+https://github.com/rust-lang/crates.io-index",
+    }
 
 
 def locked(lock: str, name: str) -> str:
@@ -647,7 +652,7 @@ class AssembleTests(WorkspaceTest):
             "Cargo graph: rust-std: Rust 1.97.1 library/Cargo.lock, std with features "
             "backtrace, panic-unwind, wasm32-unknown-unknown",
             "MIT text of dlmalloc",
-            "covered by the Rust component below): core, std",
+            "covered by the Rust component below):\n  core, std",
             "Component: wit-bindgen 0.61.1 generated C bindings",
             "no-guest-exports.wasm: first-party code only",
             "from the crate's LICENSE-MIT",
@@ -691,6 +696,28 @@ class AssembleTests(WorkspaceTest):
             notices.NoticeError, "rust-std: dlmalloc 0.2.10 has no wasm32-unknown-unknown rlib"
         ):
             notices.assemble(self.workspace.root, reports(), self.workspace.sysroot)
+
+    def test_std_graph_may_list_in_tree_library_crates_only(self) -> None:
+        library = self.workspace.sysroot / notices.RUST_SRC / "library"
+        graphs = reports()
+        alloc = report("alloc", lock="std")
+        alloc["crates"][0]["package"].update(
+            {"source": None, "manifest_path": str(library / "alloc/Cargo.toml")}
+        )
+        graphs[notices.RUST_STD]["crates"] += alloc["crates"]
+        graphs[notices.RUST_STD]["licenses"] += alloc["licenses"]
+        (self.workspace.sysroot / notices.RUST_STD_RLIBS / "liballoc-5e.rlib").write_bytes(b"")
+        text, _ = notices.assemble(self.workspace.root, graphs, self.workspace.sysroot)
+        self.assertIn("  alloc 0.0.0: MIT", text)
+        self.assertIn("covered by the Rust component below):\n  alloc, core, std", text)
+        alloc["crates"][0]["package"]["manifest_path"] = str(
+            self.workspace.root / "alloc/Cargo.toml"
+        )
+        graphs = reports()
+        graphs[notices.RUST_STD]["crates"] += alloc["crates"]
+        graphs[notices.RUST_STD]["licenses"] += alloc["licenses"]
+        with self.assertRaisesRegex(notices.NoticeError, "alloc 0.0.0 is not a registry package"):
+            notices.assemble(self.workspace.root, graphs, self.workspace.sysroot)
 
     def test_std_report_must_match_the_rust_src_lockfile(self) -> None:
         graphs = reports()
