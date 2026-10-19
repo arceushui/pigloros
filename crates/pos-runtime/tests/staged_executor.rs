@@ -21,10 +21,10 @@ use pos_core::{
     Capability, Plugin, PluginId, Reducer, State,
 };
 use pos_runtime::{
-    check_handoff_reserve, require_staged_release, teardown_signal, ExecutorHealthV1, GuardWaitV1,
+    check_handoff_reserve, require_staged_release, teardown_signal, ExecutorHealthV1,
     GuardedFoldWindowV1, HostProjectionProviderV1, InstalledPluginFactoryV1,
-    InstalledPluginProductV1, NoActionApproverV1, StagedFoldErrorV1, StagedFoldExecutorV1,
-    StagedFoldPlanV1, GUARD_RELEASE_LATE_SIGNAL, MAX_STAGED_INPUT_BYTES_V1,
+    InstalledPluginProductV1, NoActionApproverV1, ScriptedGuardWaitV1, StagedFoldErrorV1,
+    StagedFoldExecutorV1, StagedFoldPlanV1, GUARD_RELEASE_LATE_SIGNAL, MAX_STAGED_INPUT_BYTES_V1,
 };
 use pos_state::{
     CandidateBuildV1, InitialStateV1, ProjectionCandidateErrorV1, ProtectedProjectionProviderV1,
