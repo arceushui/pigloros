@@ -10,7 +10,11 @@
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpStream};
 use std::ops::ControlFlow;
+use std::os::fd::AsFd;
 use std::time::{Duration, Instant};
+
+use rustix::io::Errno;
+use rustix::net::{recv, RecvFlags};
 
 use super::{
     NetworkCaptureStore, NetworkExchangeFailure, NetworkExchangeReply, NetworkExchangeRequest,
@@ -43,7 +47,8 @@ pub enum LocalNetworkTermination {
     /// An NXY1 `DigestMismatch` reply was written; the attempt terminates.
     DigestMismatch,
     /// A zero, oversized, truncated, malformed, unplanned or mismatched frame
-    /// arrived. No reply was written.
+    /// arrived, or another frame was already waiting behind an unanswered
+    /// NXQ1. No reply was written.
     ProtocolFailure,
     /// A verified capture could not be durably retained. No reply was written.
     CaptureFailure,
@@ -86,9 +91,15 @@ impl LocalNetworkAdmission {
     /// provider must already have bound this admission to its active attempt,
     /// current authority heads, namespace and firewall, and FD 3; the channel
     /// itself is bounded by the attempt watchdog, not by the network deadline.
+    ///
+    /// The channel must be a stream socket. Before forwarding each request the
+    /// proxy peeks without blocking; a byte already queued behind that request
+    /// means a second NXQ1 is outstanding and fails closed as
+    /// [`LocalNetworkTermination::ProtocolFailure`], as does a channel whose
+    /// queue cannot be inspected.
     pub fn serve_proxy(
         &self,
-        channel: &mut (impl Read + Write),
+        channel: &mut (impl Read + Write + AsFd),
         connector: &mut impl NetworkEndpointConnector,
         store: &NetworkCaptureStore,
     ) -> LocalNetworkSession {
@@ -103,6 +114,11 @@ impl LocalNetworkAdmission {
         let served =
             self.exchanges().try_for_each(
                 |(plan, endpoint)| match NetworkExchangeRequest::read_next(channel, plan) {
+                    // Only one NXQ1 may be outstanding: any byte already waiting
+                    // behind this request ends the session before forwarding.
+                    Ok(Some(_)) if request_pending(&*channel) => {
+                        ControlFlow::Break(Some(LocalNetworkTermination::ProtocolFailure))
+                    }
                     Ok(Some(request)) => {
                         proxy.exchange(&request, plan, endpoint, channel, connector, store)
                     }
@@ -268,6 +284,14 @@ impl Read for DeadlineReader<'_> {
             .and_then(|timeout| self.stream.set_read_timeout(Some(timeout)))
             .and_then(|()| self.stream.read(buffer))
     }
+}
+
+/// Whether bytes already wait behind the request just read. A channel that
+/// cannot be peeked counts as pending, so the check fails closed.
+fn request_pending(channel: &impl AsFd) -> bool {
+    let mut byte = [0_u8; 1];
+    recv(channel, &mut byte, RecvFlags::PEEK | RecvFlags::DONTWAIT)
+        .map_or_else(|errno| errno != Errno::AGAIN, |(read, _)| read != 0)
 }
 
 fn remaining(deadline: Instant) -> io::Result<Duration> {

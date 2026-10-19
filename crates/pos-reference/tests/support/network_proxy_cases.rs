@@ -1,7 +1,7 @@
 // Public Local FD 3 proxy sessions over authenticated admission and loopback-only TCP.
 use std::fs::File;
 use std::io::{self, Cursor, Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::os::unix::net::UnixStream;
 use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
@@ -32,40 +32,79 @@ impl NetworkEndpointConnector for ProxyConnector {
     }
 }
 
+enum AdapterStep {
+    Send(Vec<u8>),
+    AwaitReply,
+    CloseRead,
+}
+
+/// The adapter's end of a real FD 3 socket pair, driven by a script.
 struct ProxyChannel {
-    input: Cursor<Vec<u8>>,
+    provider: UnixStream,
+    adapter: Option<JoinHandle<Vec<u8>>>,
     output: Vec<u8>,
-    writable: bool,
 }
 
 impl ProxyChannel {
-    const fn new(input: Vec<u8>) -> Self {
-        Self {
-            input: Cursor::new(input),
+    /// Send every byte at once, then close the adapter's write side.
+    fn new(input: Vec<u8>) -> TestResult<Self> {
+        Self::scripted(vec![AdapterStep::Send(input)])
+    }
+
+    /// Keep one NXQ1 outstanding: send each frame only after the last reply.
+    fn interactive(frames: Vec<Vec<u8>>) -> TestResult<Self> {
+        Self::scripted(
+            frames
+                .into_iter()
+                .flat_map(|frame| [AdapterStep::Send(frame), AdapterStep::AwaitReply])
+                .collect(),
+        )
+    }
+
+    fn scripted(steps: Vec<AdapterStep>) -> TestResult<Self> {
+        let (provider, mut adapter) = UnixStream::pair()?;
+        let handle = thread::spawn(move || {
+            let mut output = Vec::new();
+            for step in steps {
+                let completed = match step {
+                    AdapterStep::Send(bytes) => adapter.write_all(&bytes).is_ok(),
+                    AdapterStep::AwaitReply => proxy_read_reply(&mut adapter, &mut output),
+                    AdapterStep::CloseRead => adapter.shutdown(Shutdown::Read).is_ok(),
+                };
+                if !completed {
+                    break;
+                }
+            }
+            adapter.shutdown(Shutdown::Write).ok();
+            adapter.read_to_end(&mut output).ok();
+            output
+        });
+        Ok(Self {
+            provider,
+            adapter: Some(handle),
             output: Vec::new(),
-            writable: true,
-        }
+        })
+    }
+
+    /// Close the provider end and collect every byte the adapter received.
+    fn finish(&mut self) -> TestResult {
+        self.provider.shutdown(Shutdown::Both).ok();
+        let adapter = self.adapter.take().ok_or("adapter already finished")?;
+        self.output = adapter.join().map_err(|_| "adapter thread")?;
+        Ok(())
     }
 }
 
-impl Read for ProxyChannel {
-    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        self.input.read(buffer)
+fn proxy_read_reply(adapter: &mut UnixStream, output: &mut Vec<u8>) -> bool {
+    let mut prefix = [0_u8; 4];
+    if adapter.read_exact(&mut prefix).is_err() {
+        return false;
     }
-}
-
-impl Write for ProxyChannel {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        if self.writable {
-            self.output.write(bytes)
-        } else {
-            Err(io::ErrorKind::BrokenPipe.into())
-        }
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        self.output.flush()
-    }
+    let mut body = vec![0_u8; usize::try_from(u32::from_be_bytes(prefix)).unwrap_or_default()];
+    let completed = adapter.read_exact(&mut body).is_ok();
+    output.extend(prefix);
+    output.extend(body);
+    completed
 }
 
 struct ProxyCase {
@@ -134,12 +173,28 @@ impl ProxyCase {
         Ok(frames)
     }
 
+    fn frames(&self, exchanges: &[(&[u8], &[u8])]) -> TestResult<Vec<Vec<u8>>> {
+        self.plans
+            .iter()
+            .zip(exchanges)
+            .map(|(plan, (request, _))| {
+                let mut frame = Vec::new();
+                NetworkExchangeRequest::new(plan, request)?.write_to(&mut frame)?;
+                Ok(frame)
+            })
+            .collect()
+    }
+
     fn serve(
         &self,
         channel: &mut ProxyChannel,
         connector: &mut ProxyConnector,
-    ) -> LocalNetworkSession {
-        self.admission.serve_proxy(channel, connector, &self.store)
+    ) -> TestResult<LocalNetworkSession> {
+        let session = self
+            .admission
+            .serve_proxy(&mut channel.provider, connector, &self.store);
+        channel.finish()?;
+        Ok(session)
     }
 
     fn replies(&self, output: &[u8]) -> TestResult<Vec<NetworkExchangeReply>> {
@@ -250,9 +305,9 @@ fn proxy_serves_every_plan_within_larger_ceilings() -> TestResult {
     let address = listener.local_addr()?;
     let server = proxy_server(listener, &exchanges);
     let case = ProxyCase::new(address, &exchanges, [100, 100, PROXY_DEADLINE_MS])?;
-    let mut channel = ProxyChannel::new(case.requests(&exchanges)?);
+    let mut channel = ProxyChannel::interactive(case.frames(&exchanges)?)?;
     let mut connector = ProxyConnector::default();
-    let session = case.serve(&mut channel, &mut connector);
+    let session = case.serve(&mut channel, &mut connector)?;
     assert_eq!(session.termination(), None);
     assert_eq!(session.transcripts().len(), 2);
     let replies = case.replies(&channel.output)?;
@@ -272,8 +327,8 @@ fn proxy_reaches_exact_ipv6_endpoints() -> TestResult {
     let address = listener.local_addr()?;
     let server = proxy_server(listener, &exchanges);
     let case = ProxyCase::new(address, &exchanges, [100, 100, PROXY_DEADLINE_MS])?;
-    let mut channel = ProxyChannel::new(case.requests(&exchanges)?);
-    let session = case.serve(&mut channel, &mut ProxyConnector::default());
+    let mut channel = ProxyChannel::new(case.requests(&exchanges)?)?;
+    let session = case.serve(&mut channel, &mut ProxyConnector::default())?;
     assert_eq!(session.termination(), None);
     assert_eq!(session.transcripts().len(), 1);
     let replies = case.replies(&channel.output)?;
@@ -292,9 +347,9 @@ fn proxy_ends_cleanly_when_the_adapter_closes_before_later_plans() -> TestResult
     let address = listener.local_addr()?;
     let server = proxy_server(listener, &exchanges[..1]);
     let case = ProxyCase::new(address, &exchanges, [100, 100, PROXY_DEADLINE_MS])?;
-    let mut channel = ProxyChannel::new(case.requests(&exchanges[..1])?);
+    let mut channel = ProxyChannel::new(case.requests(&exchanges[..1])?)?;
     let mut connector = ProxyConnector::default();
-    let session = case.serve(&mut channel, &mut connector);
+    let session = case.serve(&mut channel, &mut connector)?;
     assert_eq!(session.termination(), None);
     assert_eq!(session.transcripts().len(), 1);
     assert_eq!(case.replies(&channel.output)?.len(), 1);
@@ -302,12 +357,11 @@ fn proxy_ends_cleanly_when_the_adapter_closes_before_later_plans() -> TestResult
     server.join().map_err(|_| "server thread")??;
 
     // A channel closed before any frame serves nothing.
-    let mut channel = ProxyChannel::new(Vec::new());
-    let session = case.serve(&mut channel, &mut connector);
+    let mut channel = ProxyChannel::new(Vec::new())?;
+    let session = case.serve(&mut channel, &mut connector)?;
     assert_eq!(session.termination(), None);
     assert!(session.transcripts().is_empty());
     assert!(channel.output.is_empty());
-    channel.flush()?;
     Ok(())
 }
 
@@ -335,9 +389,9 @@ fn proxy_rejects_frames_that_do_not_match_the_next_plan_before_connecting() -> T
         substituted,
         reply,
     ] {
-        let mut channel = ProxyChannel::new(input);
+        let mut channel = ProxyChannel::new(input)?;
         let mut connector = ProxyConnector::default();
-        let session = case.serve(&mut channel, &mut connector);
+        let session = case.serve(&mut channel, &mut connector)?;
         assert_eq!(
             session.termination(),
             Some(LocalNetworkTermination::ProtocolFailure)
@@ -351,6 +405,64 @@ fn proxy_rejects_frames_that_do_not_match_the_next_plan_before_connecting() -> T
 }
 
 #[test]
+fn proxy_fails_closed_when_a_second_request_is_already_outstanding() -> TestResult {
+    let exchanges = [PROXY_FIRST, PROXY_SECOND];
+    let case = ProxyCase::new(
+        proxy_unused_address()?,
+        &exchanges,
+        [100, 100, PROXY_DEADLINE_MS],
+    )?;
+    let frames = case.frames(&exchanges)?;
+    let mut partial = frames[1].clone();
+    partial.truncate(2);
+    // The next NXQ1, or even one byte of it, queued before the first is answered.
+    for early in [frames[1].clone(), partial] {
+        let mut input = frames[0].clone();
+        input.extend(early);
+        let mut channel = ProxyChannel::new(input)?;
+        let mut connector = ProxyConnector::default();
+        let session = case.serve(&mut channel, &mut connector)?;
+        assert_eq!(
+            session.termination(),
+            Some(LocalNetworkTermination::ProtocolFailure)
+        );
+        assert!(session.transcripts().is_empty());
+        assert!(channel.output.is_empty());
+        assert_eq!(connector.connections, 0);
+    }
+    assert_eq!(case.retained()?, [0, 0]);
+    Ok(())
+}
+
+#[test]
+fn proxy_fails_closed_on_a_channel_whose_queue_cannot_be_inspected() -> TestResult {
+    let exchanges = [PROXY_FIRST];
+    let case = ProxyCase::new(
+        proxy_unused_address()?,
+        &exchanges,
+        [100, 100, PROXY_DEADLINE_MS],
+    )?;
+    // A regular file reads like a channel but cannot be peeked as a socket.
+    let path = case.root.path().join("channel");
+    std::fs::write(&path, case.requests(&exchanges)?)?;
+    let mut channel = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)?;
+    let mut connector = ProxyConnector::default();
+    let session = case
+        .admission
+        .serve_proxy(&mut channel, &mut connector, &case.store);
+    assert_eq!(
+        session.termination(),
+        Some(LocalNetworkTermination::ProtocolFailure)
+    );
+    assert_eq!(connector.connections, 0);
+    assert_eq!(std::fs::read(&path)?, case.requests(&exchanges)?);
+    Ok(())
+}
+
+#[test]
 fn proxy_rejects_any_frame_after_every_plan_was_served() -> TestResult {
     let exchanges = [PROXY_FIRST];
     for trailing in [vec![0, 0, 0, 1, 0], vec![0]] {
@@ -358,10 +470,13 @@ fn proxy_rejects_any_frame_after_every_plan_was_served() -> TestResult {
         let address = listener.local_addr()?;
         let server = proxy_server(listener, &exchanges);
         let case = ProxyCase::new(address, &exchanges, [100, 100, PROXY_DEADLINE_MS])?;
-        let mut input = case.requests(&exchanges)?;
-        input.extend(trailing);
-        let mut channel = ProxyChannel::new(input);
-        let session = case.serve(&mut channel, &mut ProxyConnector::default());
+        // The trailing bytes arrive only after the last reply was received.
+        let mut channel = ProxyChannel::scripted(vec![
+            AdapterStep::Send(case.requests(&exchanges)?),
+            AdapterStep::AwaitReply,
+            AdapterStep::Send(trailing),
+        ])?;
+        let session = case.serve(&mut channel, &mut ProxyConnector::default())?;
         assert_eq!(
             session.termination(),
             Some(LocalNetworkTermination::ProtocolFailure)
@@ -388,12 +503,12 @@ fn proxy_reports_remote_unavailable_for_refused_or_substituted_peers() -> TestRe
     });
     for redirect in [None, Some(decoy_address)] {
         let case = ProxyCase::new(address, &exchanges, [100, 100, PROXY_DEADLINE_MS])?;
-        let mut channel = ProxyChannel::new(case.requests(&exchanges)?);
+        let mut channel = ProxyChannel::new(case.requests(&exchanges)?)?;
         let mut connector = ProxyConnector {
             redirect,
             ..ProxyConnector::default()
         };
-        let session = case.serve(&mut channel, &mut connector);
+        let session = case.serve(&mut channel, &mut connector)?;
         proxy_assert_failed(
             &case,
             &session,
@@ -412,9 +527,9 @@ fn proxy_enforces_the_monotonic_network_deadline() -> TestResult {
     let exchanges = [PROXY_FIRST];
     // A zero deadline denies every exchange before any connection is attempted.
     let case = ProxyCase::new(proxy_unused_address()?, &exchanges, [100, 100, 0])?;
-    let mut channel = ProxyChannel::new(case.requests(&exchanges)?);
+    let mut channel = ProxyChannel::new(case.requests(&exchanges)?)?;
     let mut connector = ProxyConnector::default();
-    let session = case.serve(&mut channel, &mut connector);
+    let session = case.serve(&mut channel, &mut connector)?;
     proxy_assert_failed(
         &case,
         &session,
@@ -437,9 +552,9 @@ fn proxy_enforces_the_monotonic_network_deadline() -> TestResult {
         Ok(received)
     });
     let case = ProxyCase::new(address, &exchanges, [100, 100, 1_500])?;
-    let mut channel = ProxyChannel::new(case.requests(&exchanges)?);
+    let mut channel = ProxyChannel::new(case.requests(&exchanges)?)?;
     let started = Instant::now();
-    let session = case.serve(&mut channel, &mut ProxyConnector::default());
+    let session = case.serve(&mut channel, &mut ProxyConnector::default())?;
     assert!(started.elapsed() < PROXY_SERVER_TIMEOUT / 2);
     release.send(())?;
     proxy_assert_failed(
@@ -466,9 +581,9 @@ fn proxy_deadline_bounds_a_request_the_peer_never_reads() -> TestResult {
     });
     let plan = proxy_plan(0, &request, response, 16)?;
     let case = ProxyCase::with_plans(address, vec![plan], [32 << 20, 100, 500])?;
-    let mut channel = ProxyChannel::new(case.requests(&[(request.as_slice(), response)])?);
+    let mut channel = ProxyChannel::new(case.requests(&[(request.as_slice(), response)])?)?;
     let started = Instant::now();
-    let session = case.serve(&mut channel, &mut ProxyConnector::default());
+    let session = case.serve(&mut channel, &mut ProxyConnector::default())?;
     assert!(started.elapsed() < PROXY_SERVER_TIMEOUT / 2);
     release.send(())?;
     proxy_assert_failed(
@@ -492,9 +607,9 @@ fn proxy_enforces_cumulative_request_and_response_ceilings() -> TestResult {
         let address = listener.local_addr()?;
         let server = proxy_server(listener, &exchanges[..connections]);
         let case = ProxyCase::new(address, &exchanges, limits)?;
-        let mut channel = ProxyChannel::new(case.requests(&exchanges)?);
+        let mut channel = ProxyChannel::interactive(case.frames(&exchanges)?)?;
         let mut connector = ProxyConnector::default();
-        let session = case.serve(&mut channel, &mut connector);
+        let session = case.serve(&mut channel, &mut connector)?;
         assert_eq!(
             session.termination(),
             Some(LocalNetworkTermination::RemoteUnavailable)
@@ -523,8 +638,8 @@ fn proxy_reports_digest_mismatch_without_retaining_evidence() -> TestResult {
         let address = listener.local_addr()?;
         let server = proxy_server(listener, &[(request, served.as_slice())]);
         let case = ProxyCase::new(address, &[PROXY_FIRST], [100, 100, PROXY_DEADLINE_MS])?;
-        let mut channel = ProxyChannel::new(case.requests(&[PROXY_FIRST])?);
-        let session = case.serve(&mut channel, &mut ProxyConnector::default());
+        let mut channel = ProxyChannel::new(case.requests(&[PROXY_FIRST])?)?;
+        let session = case.serve(&mut channel, &mut ProxyConnector::default())?;
         proxy_assert_failed(
             &case,
             &session,
@@ -544,8 +659,8 @@ fn proxy_rejects_a_response_whose_reply_exceeds_the_control_frame_ceiling() -> T
     let server = proxy_server(listener, &[(PROXY_FIRST.0, response.as_slice())]);
     let plan = proxy_plan(0, PROXY_FIRST.0, &response, response.len() as u64)?;
     let case = ProxyCase::with_plans(address, vec![plan], [100, 32 << 20, PROXY_DEADLINE_MS])?;
-    let mut channel = ProxyChannel::new(case.requests(&[(PROXY_FIRST.0, response.as_slice())])?);
-    let session = case.serve(&mut channel, &mut ProxyConnector::default());
+    let mut channel = ProxyChannel::new(case.requests(&[(PROXY_FIRST.0, response.as_slice())])?)?;
+    let session = case.serve(&mut channel, &mut ProxyConnector::default())?;
     proxy_assert_failed(
         &case,
         &session,
@@ -570,8 +685,8 @@ fn proxy_withholds_replies_whose_capture_cannot_be_retained() -> TestResult {
         .map(|nibble| char::from(b"0123456789abcdef"[usize::from(nibble)]))
         .collect::<String>();
     std::fs::write(case.root.path().join("responses").join(name), b"conflict")?;
-    let mut channel = ProxyChannel::new(case.requests(&exchanges)?);
-    let session = case.serve(&mut channel, &mut ProxyConnector::default());
+    let mut channel = ProxyChannel::new(case.requests(&exchanges)?)?;
+    let session = case.serve(&mut channel, &mut ProxyConnector::default())?;
     assert_eq!(
         session.termination(),
         Some(LocalNetworkTermination::CaptureFailure)
@@ -591,9 +706,11 @@ fn proxy_reports_channel_failure_when_a_reply_cannot_be_written() -> TestResult 
     let server = proxy_server(listener, &exchanges);
     for endpoint in [address, proxy_unused_address()?] {
         let case = ProxyCase::new(endpoint, &exchanges, [100, 100, PROXY_DEADLINE_MS])?;
-        let mut channel = ProxyChannel::new(case.requests(&exchanges)?);
-        channel.writable = false;
-        let session = case.serve(&mut channel, &mut ProxyConnector::default());
+        let mut channel = ProxyChannel::scripted(vec![
+            AdapterStep::CloseRead,
+            AdapterStep::Send(case.requests(&exchanges)?),
+        ])?;
+        let session = case.serve(&mut channel, &mut ProxyConnector::default())?;
         assert_eq!(
             session.termination(),
             Some(LocalNetworkTermination::ChannelFailure)
