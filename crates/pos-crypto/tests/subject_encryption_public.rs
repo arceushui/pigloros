@@ -208,7 +208,7 @@ fn params() -> SubjectKeyWrapParamsV1 {
         prf_input: ascending(0xa0),
         wrap_salt: ascending(0x60),
         subkey_salt: ascending(0x20),
-        wrap_nonce: fixed(&hex("000000000000000000000001")),
+        wrap_nonce: nonce(1),
     }
 }
 
@@ -1121,6 +1121,7 @@ fn ciphertext_decoder_rejects_each_invalid_field() {
     let invalid = |ordinal| Err(SubjectCiphertextErrorV1::InvalidField { ordinal });
     let exceeded = |ordinal| Err(SubjectCiphertextErrorV1::BoundsExceeded { ordinal });
     let foreign = "subject:0102030405060708090a0b0c0d0e0f10";
+    let upper = "subject:000102030405060708090A0B0C0D0E0F";
     let long_type = "e".repeat(MAX_SUBJECT_EVENT_TYPE_BYTES + 1);
     let long_tag = "f".repeat(MAX_SUBJECT_FIELD_TAG_BYTES + 1);
     let cases = [
@@ -1131,6 +1132,7 @@ fn ciphertext_decoder_rejects_each_invalid_field() {
             Err(SubjectCiphertextErrorV1::UnsupportedVersion),
         ),
         (2, tstr(foreign), invalid(2)),
+        (2, tstr(upper), invalid(2)),
         (2, tstr(&format!("{OWNER}0")), exceeded(2)),
         (3, bstr(&[0; 16]), invalid(3)),
         (4, uint(2), invalid(4)),
