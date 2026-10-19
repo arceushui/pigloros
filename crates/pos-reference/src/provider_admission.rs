@@ -805,9 +805,12 @@ pub mod tests {
                     "{architecture} offset {offset}"
                 );
             }
-            let mut short = verity.clone();
-            short.length_bytes = u64::try_from(VERITY_SUPERBLOCK_PREFIX)? - 1;
-            assert!(check_verity_superblock(&write(&image)?, &short, &salt).is_err());
+            // The superblock prefix must lie inside the admitted partition.
+            let mut bounded = verity.clone();
+            bounded.length_bytes = u64::try_from(VERITY_SUPERBLOCK_PREFIX)?;
+            check_verity_superblock(&write(&image)?, &bounded, &salt)?;
+            bounded.length_bytes -= 1;
+            assert!(check_verity_superblock(&write(&image)?, &bounded, &salt).is_err());
             let mut beyond = verity.clone();
             beyond.start_bytes = u64::try_from(image.len())?;
             assert!(check_verity_superblock(&write(&image)?, &beyond, &salt).is_err());
