@@ -32,6 +32,10 @@ const HOST_RULES: [(FactualHostOwnerV1, FactualRuleV1); 6] = [
     (FactualHostOwnerV1::FoldHistory, FactualRuleV1::FoldHistory),
 ];
 
+/// The fold-history nodes one scheduled record may hold (ADR-064 R4.3: the
+/// binding's `history` has zero or one entry).
+const MAX_FOLD_HISTORY_NODES: usize = 1;
+
 /// The artifact digest the store recomputes for the node at `coordinate` from
 /// the content digest of what the node stands for (R3.3.1).
 fn recomputed(
@@ -335,10 +339,9 @@ fn chain_holds(
         .windows(2)
         .all(|pair| inputs_node(pair[1], pair[0]));
     let first = checkpoints.first();
-    let behind = match history.first() {
-        Some(collapsed) => first.is_some_and(|head| inputs_node(head, collapsed)),
-        None => true,
-    };
+    let behind = history
+        .first()
+        .is_none_or(|collapsed| first.is_some_and(|head| inputs_node(head, collapsed)));
     linked && behind
 }
 
@@ -356,7 +359,7 @@ fn fold_shape_holds(basis: &PipelineAdmissionBasisV1, by_digest: &DigestIndex<'_
     let nodes = dependencies.record().nodes();
     let fold = dependencies.fold();
     let bounded = fold.checkpoints.len() <= MAX_FACTUAL_FOLD_CHECKPOINTS_PER_TICK_V1
-        && fold.history.len() <= 1;
+        && fold.history.len() <= MAX_FOLD_HISTORY_NODES;
     let named = bound_checkpoints(nodes, fold).zip(bound_history(nodes, fold));
     named.is_some_and(|(checkpoints, history)| {
         bounded
@@ -400,6 +403,11 @@ fn snapshot_input_holds(
 /// The head is read from the record the shape check accepted; check (x) of
 /// slice 5 adds that a head without a fold node is the persisted one.
 pub(crate) fn fold_head_row(basis: &PipelineAdmissionBasisV1) -> Option<(Seq, Hash)> {
+    is_scheduled(basis).then(|| fold_head_of(basis))
+}
+
+/// The fold-head row of a scheduled basis: its anchor and head digest.
+fn fold_head_of(basis: &PipelineAdmissionBasisV1) -> (Seq, Hash) {
     let observed = basis.attempt().observation().observed_through();
     let dependencies = basis.dependencies();
     let nodes = dependencies.record().nodes();
@@ -415,7 +423,7 @@ pub(crate) fn fold_head_row(basis: &PipelineAdmissionBasisV1) -> Option<(Seq, Ha
         .map(|node| node.coordinate().artifact_digest())
         .or_else(snapshot_input)
         .unwrap_or_else(Hash::zero);
-    is_scheduled(basis).then_some((observed, head))
+    (observed, head)
 }
 
 /// A step node inputs the snapshot node of the record.

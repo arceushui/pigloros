@@ -704,20 +704,33 @@ fn read_fold_source(
     timeline: TimelineId,
     observed_through: Seq,
 ) -> Result<FactualFoldSourceV1, CoreError> {
-    let cursor = port.fold_cursor(timeline)?;
-    let after = cursor
-        .as_ref()
-        .map_or(Seq::ZERO, |found| found.scanned_through);
-    let window = if after < observed_through {
-        port.fold_window(timeline, after, observed_through)?
-    } else {
-        FactualFoldWindowV1::default()
-    };
-    Ok(FactualFoldSourceV1 {
-        observed_through,
-        cursor,
-        window,
+    let read = port.fold_cursor(timeline);
+    read.and_then(|cursor| {
+        let after = cursor
+            .as_ref()
+            .map_or(Seq::ZERO, |found| found.scanned_through);
+        let scanned = read_fold_window(port, timeline, (after, observed_through));
+        scanned.map(|window| FactualFoldSourceV1 {
+            observed_through,
+            cursor,
+            window,
+        })
     })
+}
+
+/// The fold window of the range `(after, through]`, read only when it is not
+/// empty.
+fn read_fold_window(
+    port: &dyn FactualPrefixReadPortV1,
+    timeline: TimelineId,
+    range: (Seq, Seq),
+) -> Result<FactualFoldWindowV1, CoreError> {
+    let (after, through) = range;
+    if after < through {
+        port.fold_window(timeline, after, through)
+    } else {
+        Ok(FactualFoldWindowV1::default())
+    }
 }
 
 impl PluginRegistry {
@@ -812,9 +825,12 @@ impl PluginRegistry {
         pending: &PendingStep,
         through: Seq,
     ) -> Result<(Lookups, FactualFoldSourceV1), CoreError> {
-        let lookups = self.read_lookups(port, pending)?;
-        let fold = read_fold_source(port, pending.timeline, through)?;
-        Ok((lookups, fold))
+        let timeline = pending.timeline;
+        let lookups = self.read_lookups(port, pending);
+        lookups.and_then(|found| {
+            let fold = read_fold_source(port, timeline, through);
+            fold.map(|source| (found, source))
+        })
     }
 
     /// Read the recorded nodes the pass names, with one batched read per kind.

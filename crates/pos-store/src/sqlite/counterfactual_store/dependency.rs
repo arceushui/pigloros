@@ -2231,10 +2231,10 @@ fn install_planned_rows(
     planned: &FactualInstallV1,
 ) -> Result<(), CoreError> {
     let range = (planned.first_seq, planned.last_seq);
-    install_factual_tick(conn, timeline, record, range, &planned.event_nodes)?;
     let tick = record.tick();
     let insert = |row| insert_fold_head(conn, timeline, tick, row);
-    planned.fold_head.map_or(Ok(()), insert)
+    install_factual_tick(conn, timeline, record, range, &planned.event_nodes)
+        .and_then(|()| planned.fold_head.map_or(Ok(()), insert))
 }
 
 /// Install one committed Tick of the Timeline's prefix set: its record,

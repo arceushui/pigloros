@@ -6,6 +6,7 @@
 //! the Ticks are reported as geographic Events by the counting port, because
 //! the generic append refuses geographic drafts: the builder sees only the
 //! type of a window Event, never its payload.
+#![cfg(feature = "local-admission-host")]
 
 use std::cell::RefCell;
 use std::collections::BTreeSet;

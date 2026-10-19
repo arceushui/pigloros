@@ -66,10 +66,10 @@
 //!   or below its visible Tick (an ancestor's cut Tick, as for every other
 //!   prefix read), with the node its head digest names resolved through the
 //!   visible sets; a head digest of 32 zero bytes names none, and one that
-//!   names no visible node is a storage fault. The fold window reads the newest at
-//!   most 65,537 Events of the logical range through the fork chain, newest
-//!   first, without cloning a payload, and keeps the newest 65,536 with
-//!   their visible node bindings.
+//!   names no visible node is a storage fault. The fold window reads the
+//!   newest at most 65,537 Events of the logical range through the fork
+//!   chain, newest first, without cloning a payload, and keeps the newest
+//!   65,536 with their visible node bindings.
 //! - **Reads and fences.** A parent-prefix read of an unknown or concealed
 //!   Timeline is `ForkNotFound`, and one of an existing Timeline without rows
 //!   is an empty page. It runs under that Timeline's own erasure read fence
