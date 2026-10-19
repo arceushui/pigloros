@@ -2808,7 +2808,7 @@ fn three_scheduled_ticks_chain_their_fold_nodes_over_exactly_the_fold_inputs() {
     let path = directory.path().join("admission-fold-chain.db");
     let mut sqlite = ok(SqliteStore::open_with_clock(
         path.to_str().unwrap_or_default(),
-        Box::new(clock.clone()),
+        Box::new(clock),
     ));
     assert_three_folded_ticks("sqlite", &mut sqlite);
     drop(sqlite);
@@ -3170,7 +3170,7 @@ struct HeavyRest {
 
 /// The rest whose step nodes add `step_edges` edges over the most
 /// verified-prefix nodes one step node can input.
-fn edge_heavy(step_edges: usize) -> HeavyRest {
+const fn edge_heavy(step_edges: usize) -> HeavyRest {
     HeavyRest {
         prefix: MAX_DEPENDENCY_NODE_INPUTS_V1 - 1,
         step_edges,
