@@ -85,3 +85,62 @@ Use a reviewed dependency update rather than editing a tag in place.
 
 Cargo builds in `Dockerfile` use `--locked`, so the image build fails if
 `Cargo.lock` does not resolve the workspace dependencies.
+
+## Third-party notice bundle
+
+Binary distributions must carry the upstream licence texts and notices of
+everything they link (#545, from the #539 licence review). The reusable
+workflow `.github/workflows/third-party-notices.yml` generates them as the
+`third-party-notices` artifact: `THIRD-PARTY-NOTICES.txt` plus the
+`third-party-notices.json` index. CI calls it on every Rust-affecting change,
+and `preflight-gate` requires it to pass.
+
+The bundle covers:
+
+- **Workspace crates.** The non-dev dependency graph of every workspace
+  binary on `x86_64-unknown-linux-gnu`, from `Cargo.lock`. This includes
+  the Wasmtime tree that `pos-plugin-host` links. `cargo about generate
+  --workspace --all-features` with `about.toml` scans the whole workspace,
+  which is a superset of each binary's graph.
+- **Guest crates.** The crates in each Rust guest fixture's own `Cargo.lock`
+  under `plugins/community/examples`, on `wasm32-unknown-unknown`, using
+  `third_party/about-guest.toml`.
+- **Non-Cargo fixture components.** The parts that the committed
+  compatibility fixtures statically contain:
+  - wasi-libc, including the CC0 dlmalloc, MIT musl and BSD-2-Clause
+    cloudlibc parts;
+  - the BLAKE3 C sources;
+  - LLVM compiler-rt;
+  - Rust core, alloc and compiler-builtins.
+
+  Their texts live in `third_party/notices/`. `manifest.toml` there records,
+  for each text, the upstream repository, tag or submodule pin, commit, path
+  and SHA-256. It also maps every committed fixture to the components and
+  guest lockfiles it contains.
+
+The generator is `cargo-about` 0.9.2, pinned exactly, plus
+`scripts/third_party_notices.py`. The job fails when:
+
+- a crate's licence is unknown or not accepted;
+- a crate or component has no licence text;
+- a committed text differs from its upstream file at the recorded commit;
+- a tag or submodule no longer resolves to the recorded commit;
+- a fixture or guest lockfile is not mapped;
+- the `about.toml` or `about-guest.toml` accepted lists drift from the
+  `deny.toml` allow list and its crate-scoped exceptions.
+
+Never edit a notice text by hand. To bump a component, update its pin in
+`install-tools.sh` or the guest toolchain, re-fetch every file from the new
+upstream commit, and update the manifest in the same reviewed change.
+
+**Release requirement.** No binary release workflow exists today: `deploy.yml`
+publishes only the `piglor-gateway` image, which links neither
+`pos-plugin-host` nor the fixtures. Any future workflow that releases
+`pos-plugin-worker` (the only binary that links `pos-plugin-host`) or the
+compatibility fixtures must:
+
+1. call `third-party-notices.yml` as a required job;
+2. ship the `third-party-notices` artifact from the same commit with the
+   release.
+
+Shipping notices in the gateway image is tracked separately in Redmine #798.

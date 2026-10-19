@@ -1,0 +1,237 @@
+# Provenance of the third-party notice texts that no Cargo.lock describes (#545).
+#
+# Every text under this directory is an exact upstream file, or an exact line
+# range of one, fetched from the commit recorded below. `sha256` is the digest
+# of the complete upstream file. An excerpt also gives the 1-based inclusive
+# `lines` it keeps and `excerpt_sha256`, the digest of the committed text.
+#
+# `python3 scripts/third_party_notices.py verify-upstream` re-fetches every
+# file, checks that each tag and submodule still resolves to the recorded
+# commit, and compares the digests and the committed bytes. Never edit a text
+# by hand: bump the version in one reviewed change and re-fetch every file.
+
+schema = 1
+
+[[component]]
+id = "wasi-libc"
+name = "wasi-libc"
+licence = "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT, with CC0-1.0 (dlmalloc), MIT (musl, emmalloc), BSD-2-Clause (cloudlibc) and BSD-3-Clause (musl-fts) parts"
+repository = "https://github.com/WebAssembly/wasi-libc"
+tag = "wasi-sdk-34"
+commit = "2e6fb9d8ee0cdf9e431fbcabe8af3115de000a13"
+# The wasi-sdk-34 release of install-tools.sh builds its sysroot from this
+# submodule commit.
+submodule = { repository = "https://github.com/WebAssembly/wasi-sdk", tag = "wasi-sdk-34", path = "src/wasi-libc" }
+
+[[component.file]]
+path = "LICENSE"
+local = "wasi-libc/LICENSE"
+sha256 = "2711a8b5a5cdfef0e639f96c1aca12ae23d7d64a02d0507f1bdf14d2b27bbc3a"
+
+[[component.file]]
+path = "LICENSE-APACHE"
+local = "wasi-libc/LICENSE-APACHE"
+sha256 = "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+
+[[component.file]]
+path = "LICENSE-APACHE-LLVM"
+local = "wasi-libc/LICENSE-APACHE-LLVM"
+sha256 = "268872b9816f90fd8e85db5a28d33f8150ebb8dd016653fb39ef1f94f2686bc5"
+
+[[component.file]]
+path = "LICENSE-MIT"
+local = "wasi-libc/LICENSE-MIT"
+sha256 = "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+
+[[component.file]]
+path = "dlmalloc/src/malloc.c"
+local = "wasi-libc/dlmalloc-malloc.c.lines-1-5"
+sha256 = "9e7ce51d813331ae87ef235f6ca2d5ce2167692e30bb51a173513e3754a67f8f"
+lines = [1, 5]
+excerpt_sha256 = "f80aba12fcd278868e69814d5b42e93fe91567ae4fd77a774f832162030986b8"
+
+[[component.file]]
+path = "emmalloc/emmalloc.c"
+local = "wasi-libc/emmalloc-emmalloc.c.lines-1-4"
+sha256 = "c5b52c424c9101ba9b2d1338997e1758c9fdf369ab0450d9b72e9544fe482166"
+lines = [1, 4]
+excerpt_sha256 = "6044d8a2335c980987d605fb841121bb0e0b98d90f906c69f8d32760488c5e79"
+
+[[component.file]]
+path = "libc-bottom-half/cloudlibc/LICENSE"
+local = "wasi-libc/libc-bottom-half/cloudlibc/LICENSE"
+sha256 = "c8b789cf5a746611e6300a0cc7750dbf92b61912a709d04e639245f7290656d0"
+
+[[component.file]]
+path = "libc-top-half/musl/COPYRIGHT"
+local = "wasi-libc/libc-top-half/musl/COPYRIGHT"
+sha256 = "b870108ec5e7790e9f9919064f1b9421d62d5f9b0e6c230c6adf7ea2da62e97b"
+
+[[component.file]]
+path = "fts/musl-fts/COPYING"
+local = "wasi-libc/fts/musl-fts/COPYING"
+sha256 = "55af87e4017668f54467a3380e7ebbac5e672d8c763bfe95e6fc882a6fdc4046"
+
+[[component.file]]
+path = "fts/musl-fts/NOTICE.wasi-libc.md"
+local = "wasi-libc/fts/musl-fts/NOTICE.wasi-libc.md"
+sha256 = "6aa429513e3e883111aceab81f80f9da38613b7f74c966393ff33470c93a9daa"
+
+[[component.file]]
+path = "tools/wasi-headers/LICENSE"
+local = "wasi-libc/tools/wasi-headers/LICENSE"
+sha256 = "268872b9816f90fd8e85db5a28d33f8150ebb8dd016653fb39ef1f94f2686bc5"
+
+[[component]]
+id = "blake3-c"
+name = "BLAKE3 C implementation 1.8.7"
+licence = "CC0-1.0 OR Apache-2.0 OR Apache-2.0 WITH LLVM-exception"
+repository = "https://github.com/BLAKE3-team/BLAKE3"
+tag = "1.8.7"
+commit = "f3149ec5bb5449af877ba20377a11008ff499fa2"
+
+[[component.file]]
+path = "LICENSE_A2"
+local = "blake3-c/LICENSE_A2"
+sha256 = "00fcc7a934ddbc9ece2a7cc063ac788e284b703b1d705ccbba72d462aa97921e"
+
+[[component.file]]
+path = "LICENSE_A2LLVM"
+local = "blake3-c/LICENSE_A2LLVM"
+sha256 = "a5695f57ea0c221e0e8b7d784ff774c35e88c3d3270353646a925880bb3492cc"
+
+[[component.file]]
+path = "LICENSE_CC0"
+local = "blake3-c/LICENSE_CC0"
+sha256 = "a2010f343487d3f7618affe54f789f5487602331c0a8d03f49e9a7c547cf0499"
+
+[[component]]
+id = "compiler-rt"
+name = "LLVM compiler-rt builtins (wasi-sdk-34)"
+licence = "Apache-2.0 WITH LLVM-exception"
+repository = "https://github.com/llvm/llvm-project"
+commit = "895aa2c896ada719451be2e3673c83da8ddf1141"
+# No llvm-project tag names this commit; the wasi-sdk-34 tag pins it as its
+# src/llvm-project submodule.
+submodule = { repository = "https://github.com/WebAssembly/wasi-sdk", tag = "wasi-sdk-34", path = "src/llvm-project" }
+
+[[component.file]]
+path = "compiler-rt/LICENSE.TXT"
+local = "compiler-rt/LICENSE.TXT"
+sha256 = "1a8f1058753f1ba890de984e48f0242a3a5c29a6a8f2ed9fd813f36985387e8d"
+
+[[component]]
+id = "rust"
+name = "Rust 1.97.1 core, alloc and compiler-builtins (wasm32-unknown-unknown)"
+licence = "MIT OR Apache-2.0; compiler-builtins MIT AND Apache-2.0 WITH LLVM-exception; libm MIT"
+repository = "https://github.com/rust-lang/rust"
+tag = "1.97.1"
+commit = "8bab26f4f68e0e26f0bb7960be334d5b520ea452"
+
+[[component.file]]
+path = "COPYRIGHT"
+local = "rust/COPYRIGHT"
+sha256 = "172020dbfd5b53a226dfde77616190a48dcff519b0bc0e6deb91a8450782c4af"
+
+[[component.file]]
+path = "LICENSE-APACHE"
+local = "rust/LICENSE-APACHE"
+sha256 = "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
+
+[[component.file]]
+path = "LICENSE-MIT"
+local = "rust/LICENSE-MIT"
+sha256 = "b71bd43a069ca0641a9ecfe585ca7b3c53b5cc1608f8b68321168698e28b5ea1"
+
+[[component.file]]
+path = "library/compiler-builtins/LICENSE.txt"
+local = "rust/library/compiler-builtins/LICENSE.txt"
+sha256 = "ab6eec6caf0fa5775e411c7a8bc6a45c4ef2956b0980b157ab74fc5cd62a928b"
+
+[[component.file]]
+path = "library/compiler-builtins/libm/LICENSE.txt"
+local = "rust/library/compiler-builtins/libm/LICENSE.txt"
+sha256 = "3823dda7cf046602f4b4e77ec8e227863dc4736037cc85bb33d9f19febe16bb7"
+
+[[component.file]]
+path = "library/portable-simd/crates/core_simd/LICENSE-APACHE"
+local = "rust/library/portable-simd/crates/core_simd/LICENSE-APACHE"
+sha256 = "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+
+[[component.file]]
+path = "library/portable-simd/crates/core_simd/LICENSE-MIT"
+local = "rust/library/portable-simd/crates/core_simd/LICENSE-MIT"
+sha256 = "eb07d497d26e6d68fbc76e793f5e5c9cfa197df2a580e47383569c287a55edf9"
+
+[[component.file]]
+path = "library/stdarch/crates/core_arch/LICENSE-APACHE"
+local = "rust/library/stdarch/crates/core_arch/LICENSE-APACHE"
+sha256 = "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+
+[[component.file]]
+path = "library/stdarch/crates/core_arch/LICENSE-MIT"
+local = "rust/library/stdarch/crates/core_arch/LICENSE-MIT"
+sha256 = "29662666b44dff84977b46e05642cdef910bc3a93a17b5fd86e632bafa59cf21"
+
+# Every committed compatibility fixture and what it statically contains. A
+# fixture lists the non-Cargo components above and the guest Cargo.lock graphs
+# (by their path) whose code it links. Fixtures assembled from first-party
+# Component text contain no third-party code and list nothing.
+[fixtures]
+directory = "plugins/community/examples/compatibility-prototype/fixtures"
+
+[fixtures.contents."ambient-environment-import.wasm"]
+components = []
+cargo = []
+
+[fixtures.contents."ambient-filesystem-import.wasm"]
+components = []
+cargo = []
+
+[fixtures.contents."ambient-process-exit-import.wasm"]
+components = []
+cargo = []
+
+[fixtures.contents."ambient-sockets-import.wasm"]
+components = []
+cargo = []
+
+[fixtures.contents."ambient-thread-spawn-import.wasm"]
+components = []
+cargo = []
+
+[fixtures.contents."ambient-wall-clock-import.wasm"]
+components = []
+cargo = []
+
+[fixtures.contents."ambient-wasi-import.wasm"]
+components = []
+cargo = []
+
+[fixtures.contents."c-guest.wasm"]
+components = ["wasi-libc", "blake3-c", "compiler-rt"]
+cargo = []
+
+[fixtures.contents."mistyped-host-function.wasm"]
+components = []
+cargo = []
+
+[fixtures.contents."no-guest-exports.wasm"]
+components = []
+cargo = []
+
+[fixtures.contents."probe-guest.wasm"]
+components = ["rust"]
+cargo = [
+  "plugins/community/examples/compatibility-prototype/probe-guest/Cargo.lock",
+]
+
+[fixtures.contents."rust-guest.wasm"]
+components = ["rust"]
+cargo = [
+  "plugins/community/examples/compatibility-prototype/rust-guest/Cargo.lock",
+]
+
+[fixtures.contents."undeclared-host-function.wasm"]
+components = []
+cargo = []

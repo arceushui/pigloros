@@ -1,0 +1,73 @@
+# Third-party notice bundle (#545): the reusable generator.
+#
+# It builds THIRD-PARTY-NOTICES.txt and third-party-notices.json from the
+# locked graphs and the committed third_party/notices texts, and uploads them
+# as the `third-party-notices` artifact. It fails on an unknown or unaccepted
+# licence, on a crate or component with no licence text, and on any notice
+# text that no longer matches its recorded upstream commit and digest.
+#
+# CI calls it on every Rust-affecting change. Any release workflow that ships
+# pos-plugin-worker (the only binary that links pos-plugin-host) or the
+# compatibility fixtures must call it and ship its artifact; see
+# docs/supply-chain.md.
+
+name: third-party-notices
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  notices:
+    name: generate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: 1.97.1
+      - name: Install cargo-about
+        uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
+        with:
+          tool: cargo-about@0.9.2
+      - name: Check the committed notice texts against their upstream commits
+        run: python3 scripts/third_party_notices.py verify-upstream
+      - name: Generate the cargo-about reports from the locked graphs
+        env:
+          REPORTS: ${{ runner.temp }}/cargo-about
+        run: |
+          set -euo pipefail
+          mkdir -p -- "${REPORTS}"
+          cargo about generate --locked --fail --workspace --all-features \
+            --config about.toml --format json --output-file "${REPORTS}/workspace.json"
+          printf '%s\n' "Cargo.lock=${REPORTS}/workspace.json" >"${REPORTS}/graphs"
+          index=0
+          while IFS= read -r lock; do
+            index=$((index + 1))
+            cargo about generate --locked --fail \
+              --manifest-path "$(dirname -- "${lock}")/Cargo.toml" \
+              --config third_party/about-guest.toml --format json \
+              --output-file "${REPORTS}/guest-${index}.json"
+            printf '%s\n' "${lock}=${REPORTS}/guest-${index}.json" >>"${REPORTS}/graphs"
+          done < <(find plugins/community/examples -name Cargo.lock -type f | LC_ALL=C sort)
+      - name: Assemble the notice bundle
+        env:
+          REPORTS: ${{ runner.temp }}/cargo-about
+          BUNDLE: ${{ runner.temp }}/third-party-notices
+        run: |
+          set -euo pipefail
+          graphs=()
+          while IFS= read -r graph; do
+            graphs+=(--graph "${graph}")
+          done <"${REPORTS}/graphs"
+          python3 scripts/third_party_notices.py assemble "${graphs[@]}" --output "${BUNDLE}"
+          sha256sum -- "${BUNDLE}"/*
+      - name: Upload the notice bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: third-party-notices
+          path: ${{ runner.temp }}/third-party-notices
+          if-no-files-found: error
