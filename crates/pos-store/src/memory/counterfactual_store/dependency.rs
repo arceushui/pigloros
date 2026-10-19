@@ -89,8 +89,8 @@ use pos_core::{
     DependencyNodeRecordV1, DependencyPageCursorV1, DependencyPageRequestV1, DependencyPageV1,
     DependencyPagedRowV1, DependencyReadScopeV1, ErasureProtectedOperationV1, Event, FactualCutV1,
     FactualFoldCursorV1, FactualFoldWindowV1, FactualHeadV1, FactualOwnerIdV1,
-    FactualPrefixReadPortV1, ForkGenerationV1, Hash, PipelineAdmissionBasisV1, PipelineDraftBatchV1,
-    RecordedSetCountsV1, Seq, SeqRange, TickDependencyRecordV1, TimelineId,
+    FactualPrefixReadPortV1, ForkGenerationV1, Hash, PipelineAdmissionBasisV1,
+    PipelineDraftBatchV1, RecordedSetCountsV1, Seq, SeqRange, TickDependencyRecordV1, TimelineId,
 };
 
 use super::{fenced_result, stage_tick, CounterfactualForkStateV1, ForkEntriesV1, StagedTickV1};
