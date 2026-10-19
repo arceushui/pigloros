@@ -1,4 +1,3 @@
-#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 //! ADR-091 and ADR-097 revision 3 (sections 1, 2 and 6) subject key wrap and
 //! subject ciphertext vectors at the public `pos-crypto` seam.
 //!
@@ -19,7 +18,7 @@ use pos_crypto::subject_ciphertext::{
     MAX_SUBJECT_PUBLIC_HEADER_BYTES,
 };
 use pos_crypto::subject_key::{
-    subject_owner_id, SubjectKeyUseV1, SubjectKeyWrapErrorV1, SubjectKeyWrapParamsV1,
+    parse_subject_owner_id, subject_owner_id, SubjectKeyUseV1, SubjectKeyWrapErrorV1, SubjectKeyWrapParamsV1,
     SubjectKeyWrapV1, SubjectPrfOutputV1, SubjectRootKeyV1, SubjectSubkeyV1,
     MAX_SUBJECT_CREDENTIAL_ID_BYTES, MAX_SUBJECT_RP_ID_BYTES, SUBJECT_OWNER_BYTES,
     SUBJECT_OWNER_PREFIX,
@@ -113,7 +112,6 @@ const FIELD_PLAINTEXT: &[u8] = b"\x42\x01\x02";
 // Test-side helpers: hex, byte ranges, an independent CBOR builder, fixtures.
 // ---------------------------------------------------------------------------
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn hex(text: &str) -> Vec<u8> {
     let nibble = |digit: u8| {
         if digit.is_ascii_digit() {
@@ -128,13 +126,11 @@ fn hex(text: &str) -> Vec<u8> {
         .collect()
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn fixed<const N: usize>(bytes: &[u8]) -> [u8; N] {
     std::array::from_fn(|index| bytes[index])
 }
 
 /// `N` ascending bytes starting at `start`.
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn ascending<const N: usize>(start: u8) -> [u8; N] {
     let mut out = [0; N];
     let mut value = start;
@@ -145,7 +141,6 @@ fn ascending<const N: usize>(start: u8) -> [u8; N] {
     out
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn head(major: u8, value: u64) -> Vec<u8> {
     let tag = major << 5;
     let bytes = value.to_be_bytes();
@@ -158,69 +153,52 @@ fn head(major: u8, value: u64) -> Vec<u8> {
     }
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn uint(value: u64) -> Vec<u8> {
     head(0, value)
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn bstr(bytes: &[u8]) -> Vec<u8> {
     [head(2, bytes.len() as u64), bytes.to_vec()].concat()
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn tstr(text: &str) -> Vec<u8> {
     [head(3, text.len() as u64), text.as_bytes().to_vec()].concat()
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn array(items: &[Vec<u8>]) -> Vec<u8> {
     [head(4, items.len() as u64), items.concat()].concat()
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn with_item(items: &[Vec<u8>], ordinal: usize, item: Vec<u8>) -> Vec<u8> {
     let mut items = items.to_vec();
     items[ordinal] = item;
     array(&items)
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
-fn ordinal(index: usize) -> u8 {
-    u8::try_from(index).unwrap_or(u8::MAX)
-}
-
-#[cfg_attr(coverage_nightly, coverage(off))]
 const fn entity(bytes: [u8; 16]) -> EntityId {
     EntityId::from_ulid(Ulid::from_bytes(bytes))
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn subject() -> EntityId {
     entity(ascending(0))
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn event_id(start: u8) -> EventId {
     EventId::from_ulid(Ulid::from_bytes(ascending(start)))
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn integrity(owner: &'static str, role: KeyRoleV1, epoch: u64) -> KeyIdentityV1 {
     KeyIdentityV1::new(owner, role, epoch)
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn root() -> SubjectRootKeyV1 {
     SubjectRootKeyV1::from_bytes(ascending(0))
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn prf() -> SubjectPrfOutputV1 {
     SubjectPrfOutputV1::from_bytes(ascending(0x40))
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn params() -> SubjectKeyWrapParamsV1 {
     SubjectKeyWrapParamsV1 {
         subject_id: subject(),
@@ -235,7 +213,6 @@ fn params() -> SubjectKeyWrapParamsV1 {
 }
 
 /// The golden wrap inputs after `edit`.
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn params_with(edit: impl FnOnce(&mut SubjectKeyWrapParamsV1)) -> SubjectKeyWrapParamsV1 {
     let mut params = params();
     edit(&mut params);
@@ -243,7 +220,6 @@ fn params_with(edit: impl FnOnce(&mut SubjectKeyWrapParamsV1)) -> SubjectKeyWrap
 }
 
 /// The golden root and PRF sealed over the golden inputs after `edit`.
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn seal_with(
     edit: impl FnOnce(&mut SubjectKeyWrapParamsV1),
 ) -> Result<SubjectKeyWrapV1, SubjectKeyWrapErrorV1> {
@@ -251,13 +227,11 @@ fn seal_with(
 }
 
 /// The golden wrap, sealed through the public API.
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn golden_wrap() -> Result<SubjectKeyWrapV1, SubjectKeyWrapErrorV1> {
     seal_with(|_| ())
 }
 
 /// The fingerprint of the root that `wrap` releases to `prf`.
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn opened(
     wrap: &SubjectKeyWrapV1,
     prf: &SubjectPrfOutputV1,
@@ -266,7 +240,6 @@ fn opened(
 }
 
 /// The SKW1 record `bytes` with its wrapped root replaced by `wrapped_root`.
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn transplanted(
     bytes: &[u8],
     wrapped_root: &[u8],
@@ -278,7 +251,6 @@ fn transplanted(
 }
 
 /// The 13 golden SKW1 items, built from the ADR inputs alone.
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn wrap_items() -> Vec<Vec<u8>> {
     vec![
         bstr(b"SKW1"),
@@ -298,14 +270,12 @@ fn wrap_items() -> Vec<Vec<u8>> {
 }
 
 /// The golden root's subkey for `key_use`, unwrapped from the golden wrap.
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn golden_subkey(key_use: SubjectKeyUseV1) -> Result<SubjectSubkeyV1, SubjectKeyWrapErrorV1> {
     let wrap = SubjectKeyWrapV1::from_bytes(&hex(WRAP))?;
     let root = wrap.open(&prf())?;
-    Ok(wrap.derive_subkey(&root, key_use))
+    wrap.derive_subkey(&root, key_use)
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn event(event_start: u8, seq: u64, event_type: &str) -> TimelineEventEnvelopeInputV1 {
     TimelineEventEnvelopeInputV1 {
         identity: integrity("timeline-owner", KeyRoleV1::TimelineIntegritySigning, 1),
@@ -321,18 +291,15 @@ fn event(event_start: u8, seq: u64, event_type: &str) -> TimelineEventEnvelopeIn
     }
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn consent_event() -> TimelineEventEnvelopeInputV1 {
     event(0x30, 1, "consent.granted.v2")
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn field_event() -> TimelineEventEnvelopeInputV1 {
     event(0x40, 2, "subject.data.v1")
 }
 
 /// The consent vector's Event after `edit`.
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn consent_with(
     edit: impl FnOnce(&mut TimelineEventEnvelopeInputV1),
 ) -> TimelineEventEnvelopeInputV1 {
@@ -342,7 +309,6 @@ fn consent_with(
 }
 
 /// The subject-field vector's Event after `edit`.
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn field_with(
     edit: impl FnOnce(&mut TimelineEventEnvelopeInputV1),
 ) -> TimelineEventEnvelopeInputV1 {
@@ -352,7 +318,6 @@ fn field_with(
 }
 
 /// The golden consent ciphertext, encrypted through the public API.
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn consent_ciphertext() -> Result<SubjectCiphertextV1, Box<dyn std::error::Error>> {
     let subkey = golden_subkey(SubjectKeyUseV1::Bootstrap)?;
     let header = hex(CONSENT_HEADER);
@@ -368,7 +333,6 @@ fn consent_ciphertext() -> Result<SubjectCiphertextV1, Box<dyn std::error::Error
 }
 
 /// The plaintext length that `ciphertext` releases, or the refusal.
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn released(
     ciphertext: &SubjectCiphertextV1,
     subkey: &SubjectSubkeyV1,
@@ -382,7 +346,6 @@ fn released(
 }
 
 /// The 16 golden consent SDC1 items, built from the ADR inputs alone.
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn consent_items() -> Vec<Vec<u8>> {
     vec![
         bstr(b"SDC1"),
@@ -404,14 +367,12 @@ fn consent_items() -> Vec<Vec<u8>> {
     ]
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn nonce(counter: u64) -> [u8; 12] {
     let [_, _, _, _, nonce @ ..] = u128::from(counter).to_be_bytes();
     nonce
 }
 
 /// The V1 nonce of `counter` with the fixed field `fixed_field` instead.
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn prefixed_nonce(fixed_field: u32, counter: u64) -> [u8; 12] {
     let [_, _, _, _, nonce @ ..] =
         ((u128::from(fixed_field) << 64) | u128::from(counter)).to_be_bytes();
@@ -419,17 +380,13 @@ fn prefixed_nonce(fixed_field: u32, counter: u64) -> [u8; 12] {
 }
 
 /// AES-256-GCM computed with the `aes-gcm` crate directly.
-#[cfg_attr(coverage_nightly, coverage(off))]
-fn reference_seal(key: &str, nonce: &[u8], aad: &str, plaintext: &[u8]) -> Vec<u8> {
+fn reference_seal(key: &str, nonce: &[u8], aad: &str, plaintext: &[u8]) -> Option<Vec<u8>> {
     let key: [u8; 32] = fixed(&hex(key));
     let nonce: [u8; 12] = fixed(nonce);
     let mut buffer = plaintext.to_vec();
     let cipher = Aes256Gcm::new((&key).into());
-    match cipher.encrypt_inout_detached((&nonce).into(), &hex(aad), buffer.as_mut_slice().into()) {
-        Ok(tag) => buffer.extend_from_slice(&tag),
-        Err(_) => buffer.clear(),
-    }
-    buffer
+    let tag = cipher.encrypt_inout_detached((&nonce).into(), &hex(aad), buffer.as_mut_slice().into());
+    tag.ok().map(|tag| [buffer, tag.to_vec()].concat())
 }
 
 // ---------------------------------------------------------------------------
@@ -437,7 +394,6 @@ fn reference_seal(key: &str, nonce: &[u8], aad: &str, plaintext: &[u8]) -> Vec<u
 // ---------------------------------------------------------------------------
 
 #[test]
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn golden_wrap_reproduces_every_published_byte() -> TestResult {
     let wrap = golden_wrap()?;
     assert_eq!(wrap.wrap_context(), hex(WRAP_CONTEXT));
@@ -454,7 +410,6 @@ fn golden_wrap_reproduces_every_published_byte() -> TestResult {
 }
 
 #[test]
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn golden_wrap_decodes_opens_and_round_trips() -> TestResult {
     let wrap = SubjectKeyWrapV1::from_bytes(&hex(WRAP))?;
     assert_eq!(wrap, golden_wrap()?);
@@ -464,22 +419,20 @@ fn golden_wrap_decodes_opens_and_round_trips() -> TestResult {
 }
 
 #[test]
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn published_derived_keys_produce_the_published_ciphertexts() {
     // The crate never exposes a derived key. These reference encryptions
     // under the published wrapping key and subkeys produce exactly the bytes
     // that the crate produces in the vector tests, binding each published key.
     let wrap_nonce = hex("000000000000000000000001");
     let wrapped = reference_seal(WRAPPING_KEY, &wrap_nonce, WRAP_AAD, &ascending::<32>(0));
-    assert_eq!(wrapped, hex(WRAPPED_ROOT));
+    assert_eq!(wrapped, Some(hex(WRAPPED_ROOT)));
     let consent = reference_seal(BOOTSTRAP_SUBKEY, &nonce(1), CONSENT_AAD, CONSENT_PLAINTEXT);
-    assert_eq!(consent, hex(CONSENT_SEALED));
+    assert_eq!(consent, Some(hex(CONSENT_SEALED)));
     let field = reference_seal(DATA_SUBKEY, &nonce(1), FIELD_AAD, FIELD_PLAINTEXT);
-    assert_eq!(field, hex(FIELD_SEALED));
+    assert_eq!(field, Some(hex(FIELD_SEALED)));
 }
 
 #[test]
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn owner_derivation_is_the_exact_lowercase_bijection() {
     let mixed = entity(fixed(&hex("0123456789abcdeffedcba9876543210")));
     let expected = "subject:0123456789abcdeffedcba9876543210".to_owned();
@@ -490,7 +443,6 @@ fn owner_derivation_is_the_exact_lowercase_bijection() {
 }
 
 #[test]
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn tampered_tag_or_wrong_prf_releases_no_root() -> TestResult {
     let refused = Err(SubjectKeyWrapErrorV1::AuthenticationFailed);
     let golden = hex(WRAP);
@@ -513,7 +465,6 @@ fn tampered_tag_or_wrong_prf_releases_no_root() -> TestResult {
 }
 
 #[test]
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn every_changed_wrap_field_fails_authentication() -> TestResult {
     let changes: [fn(&mut SubjectKeyWrapParamsV1); 8] = [
         |params| params.subject_id = entity(ascending(1)),
@@ -537,7 +488,6 @@ fn every_changed_wrap_field_fails_authentication() -> TestResult {
 }
 
 #[test]
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn wrap_decoder_rejects_each_invalid_field() {
     let items = wrap_items();
     let invalid = |ordinal| Err(SubjectKeyWrapErrorV1::InvalidField { ordinal });
@@ -566,14 +516,12 @@ fn wrap_decoder_rejects_each_invalid_field() {
 }
 
 #[test]
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn wrap_decoder_rejects_every_wrongly_typed_field() {
     let items = wrap_items();
-    for index in 0..13 {
+    for ordinal in 0..13_u8 {
+        let index = usize::from(ordinal);
         let bytes = with_item(&items, index, vec![0xf6]);
-        let expected = SubjectKeyWrapErrorV1::InvalidEncoding {
-            ordinal: ordinal(index),
-        };
+        let expected = SubjectKeyWrapErrorV1::InvalidEncoding { ordinal };
         assert_eq!(
             SubjectKeyWrapV1::from_bytes(&bytes),
             Err(expected),
@@ -583,7 +531,6 @@ fn wrap_decoder_rejects_every_wrongly_typed_field() {
 }
 
 #[test]
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn wrap_decoder_rejects_cardinality_and_noncanonical_forms() {
     let items = wrap_items();
     let encoding = |ordinal| Err(SubjectKeyWrapErrorV1::InvalidEncoding { ordinal });
@@ -623,7 +570,6 @@ fn wrap_decoder_rejects_cardinality_and_noncanonical_forms() {
 }
 
 #[test]
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn seal_validates_inputs_at_their_exact_bounds() -> TestResult {
     let longest = [
         "a".repeat(63),
@@ -674,7 +620,6 @@ fn seal_validates_inputs_at_their_exact_bounds() -> TestResult {
 }
 
 #[test]
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn rp_id_grammar_accepts_canonical_domains() {
     let longest_label = "z".repeat(63);
     let accepted = [
@@ -699,7 +644,6 @@ fn rp_id_grammar_accepts_canonical_domains() {
 }
 
 #[test]
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn rp_id_grammar_rejects_everything_else() {
     let long_label = "z".repeat(64);
     let rejected = [
@@ -719,6 +663,8 @@ fn rp_id_grammar_rejects_everything_else() {
         "0",
         "example.123",
         "0x7f",
+        "0x10",
+        "example.0x10",
         "a.0x",
         "0x",
         "::1",
@@ -734,7 +680,6 @@ fn rp_id_grammar_rejects_everything_else() {
 }
 
 #[test]
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn integer_heads_use_shortest_forms_at_every_boundary() -> TestResult {
     // Field 5 (epoch) starts at byte 67 of the record.
     let cases: [(u64, &[u8]); 10] = [
@@ -768,7 +713,6 @@ fn integer_heads_use_shortest_forms_at_every_boundary() -> TestResult {
 }
 
 #[test]
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn secrets_are_redacted_in_debug_output() -> TestResult {
     assert_eq!(format!("{:?}", root()), "SubjectRootKeyV1(<redacted>)");
     assert_eq!(format!("{:?}", prf()), "SubjectPrfOutputV1(<redacted>)");
@@ -791,7 +735,6 @@ fn secrets_are_redacted_in_debug_output() -> TestResult {
 }
 
 #[test]
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn v1_limits_are_the_adr_values() {
     assert_eq!(MAX_SUBJECT_CIPHERTEXT_BYTES, 256 * 1024);
     assert_eq!(MAX_SUBJECT_PUBLIC_HEADER_BYTES, 64 * 1024);
@@ -804,7 +747,6 @@ fn v1_limits_are_the_adr_values() {
 }
 
 #[test]
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn key_use_codes_are_closed() {
     assert_eq!(SubjectKeyUseV1::Data.code(), 0);
     assert_eq!(SubjectKeyUseV1::Bootstrap.code(), 1);
@@ -818,7 +760,6 @@ fn key_use_codes_are_closed() {
 }
 
 #[test]
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn wrap_error_messages_carry_only_the_field() {
     let cases = [
         (
@@ -848,7 +789,6 @@ fn wrap_error_messages_carry_only_the_field() {
 }
 
 #[test]
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn ciphertext_error_messages_carry_only_the_field() {
     let cases = [
         (
@@ -882,7 +822,6 @@ fn ciphertext_error_messages_carry_only_the_field() {
 }
 
 #[test]
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn two_subjects_under_one_human_have_disjoint_wraps() -> TestResult {
     let second_root = SubjectRootKeyV1::from_bytes(ascending(0x70));
     let second_prf = SubjectPrfOutputV1::from_bytes(ascending(0x90));
@@ -906,14 +845,13 @@ fn two_subjects_under_one_human_have_disjoint_wraps() -> TestResult {
 }
 
 #[test]
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn two_subjects_under_one_human_decrypt_only_their_own_fields() -> TestResult {
     let second_id = entity(ascending(0x50));
     let second_root = SubjectRootKeyV1::from_bytes(ascending(0x70));
     let second_prf = SubjectPrfOutputV1::from_bytes(ascending(0x90));
     let second_params = params_with(|params| params.subject_id = second_id);
     let second = SubjectKeyWrapV1::seal(second_params, &second_root, &second_prf)?;
-    let second_key = second.derive_subkey(&second.open(&second_prf)?, SubjectKeyUseV1::Bootstrap);
+    let second_key = second.derive_subkey(&second.open(&second_prf)?, SubjectKeyUseV1::Bootstrap)?;
     let first_key = golden_subkey(SubjectKeyUseV1::Bootstrap)?;
     let second_event = consent_with(|event| event.entity_id = second_id);
     let first_event = consent_event();
@@ -947,7 +885,6 @@ fn two_subjects_under_one_human_decrypt_only_their_own_fields() -> TestResult {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn consent_vector_reproduces_every_published_byte() -> TestResult {
     let ciphertext = consent_ciphertext()?;
     assert_eq!(ciphertext.as_bytes(), hex(CONSENT_CIPHERTEXT));
@@ -974,7 +911,6 @@ fn consent_vector_reproduces_every_published_byte() -> TestResult {
 }
 
 #[test]
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn subject_field_vector_reproduces_every_published_byte() -> TestResult {
     let subkey = golden_subkey(SubjectKeyUseV1::Data)?;
     let header = hex(FIELD_HEADER);
@@ -998,7 +934,6 @@ fn subject_field_vector_reproduces_every_published_byte() -> TestResult {
 }
 
 #[test]
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn golden_ciphertexts_decode_to_the_encrypted_values() -> TestResult {
     let decoded = SubjectCiphertextV1::from_bytes(&hex(CONSENT_CIPHERTEXT))?;
     assert_eq!(decoded, consent_ciphertext()?);
@@ -1012,7 +947,6 @@ fn golden_ciphertexts_decode_to_the_encrypted_values() -> TestResult {
 }
 
 #[test]
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn decryption_rejects_every_changed_event_coordinate() -> TestResult {
     let ciphertext = consent_ciphertext()?;
     let subkey = golden_subkey(SubjectKeyUseV1::Bootstrap)?;
@@ -1083,7 +1017,6 @@ fn decryption_rejects_every_changed_event_coordinate() -> TestResult {
 }
 
 #[test]
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn decryption_rejects_an_invalid_context_before_comparing_it() -> TestResult {
     let ciphertext = consent_ciphertext()?;
     let subkey = golden_subkey(SubjectKeyUseV1::Bootstrap)?;
@@ -1117,7 +1050,6 @@ fn decryption_rejects_an_invalid_context_before_comparing_it() -> TestResult {
 }
 
 #[test]
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn decryption_rejects_a_subkey_of_another_identity() -> TestResult {
     let ciphertext = consent_ciphertext()?;
     let header = hex(CONSENT_HEADER);
@@ -1129,7 +1061,7 @@ fn decryption_rejects_a_subkey_of_another_identity() -> TestResult {
         refused,
         Err(SubjectCiphertextErrorV1::ContextMismatch { ordinal: 6 })
     );
-    let rotated = seal_with(|params| params.epoch = 2)?.derive_subkey(&root(), bootstrap);
+    let rotated = seal_with(|params| params.epoch = 2)?.derive_subkey(&root(), bootstrap)?;
     assert_eq!(rotated.epoch(), 2);
     let refused = released(&ciphertext, &rotated, &event, &header, "purpose");
     assert_eq!(
@@ -1137,18 +1069,17 @@ fn decryption_rejects_a_subkey_of_another_identity() -> TestResult {
         Err(SubjectCiphertextErrorV1::ContextMismatch { ordinal: 5 })
     );
     let foreign_root = SubjectRootKeyV1::from_bytes(ascending(1));
-    let foreign = golden_wrap()?.derive_subkey(&foreign_root, bootstrap);
+    let foreign = golden_wrap()?.derive_subkey(&foreign_root, bootstrap)?;
     let refused = released(&ciphertext, &foreign, &event, &header, "purpose");
     assert_eq!(refused, Err(SubjectCiphertextErrorV1::AuthenticationFailed));
     let resalted = seal_with(|params| params.subkey_salt = ascending(0x21))?;
-    let resalted = resalted.derive_subkey(&root(), bootstrap);
+    let resalted = resalted.derive_subkey(&root(), bootstrap)?;
     let refused = released(&ciphertext, &resalted, &event, &header, "purpose");
     assert_eq!(refused, Err(SubjectCiphertextErrorV1::AuthenticationFailed));
     Ok(())
 }
 
 #[test]
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn tampered_ciphertext_fails_authentication() -> TestResult {
     let subkey = golden_subkey(SubjectKeyUseV1::Bootstrap)?;
     let header = hex(CONSENT_HEADER);
@@ -1183,7 +1114,6 @@ fn tampered_ciphertext_fails_authentication() -> TestResult {
 }
 
 #[test]
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn ciphertext_decoder_rejects_each_invalid_field() {
     let items = consent_items();
     let invalid = |ordinal| Err(SubjectCiphertextErrorV1::InvalidField { ordinal });
@@ -1223,7 +1153,6 @@ fn ciphertext_decoder_rejects_each_invalid_field() {
 }
 
 #[test]
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn ciphertext_decoder_accepts_only_the_v1_nonce_construction() {
     let items = consent_items();
     let invalid = Err(SubjectCiphertextErrorV1::InvalidField { ordinal: 14 });
@@ -1247,7 +1176,6 @@ fn ciphertext_decoder_accepts_only_the_v1_nonce_construction() {
 }
 
 #[test]
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn ciphertext_decoder_accepts_fields_at_their_exact_bounds() {
     let items = consent_items();
     let accepted = [
@@ -1267,14 +1195,12 @@ fn ciphertext_decoder_accepts_fields_at_their_exact_bounds() {
 }
 
 #[test]
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn ciphertext_decoder_rejects_every_wrongly_typed_field() {
     let items = consent_items();
-    for index in 0..16 {
+    for ordinal in 0..16_u8 {
+        let index = usize::from(ordinal);
         let bytes = with_item(&items, index, vec![0xf6]);
-        let expected = SubjectCiphertextErrorV1::InvalidEncoding {
-            ordinal: ordinal(index),
-        };
+        let expected = SubjectCiphertextErrorV1::InvalidEncoding { ordinal };
         assert_eq!(
             SubjectCiphertextV1::from_bytes(&bytes),
             Err(expected),
@@ -1284,7 +1210,6 @@ fn ciphertext_decoder_rejects_every_wrongly_typed_field() {
 }
 
 #[test]
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn ciphertext_decoder_rejects_cardinality_and_noncanonical_forms() {
     let items = consent_items();
     let encoding = |ordinal| Err(SubjectCiphertextErrorV1::InvalidEncoding { ordinal });
@@ -1314,7 +1239,6 @@ fn ciphertext_decoder_rejects_cardinality_and_noncanonical_forms() {
 }
 
 #[test]
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn encryption_rejects_counters_outside_the_project_cap() -> TestResult {
     let subkey = golden_subkey(SubjectKeyUseV1::Bootstrap)?;
     let header = hex(CONSENT_HEADER);
@@ -1336,7 +1260,6 @@ fn encryption_rejects_counters_outside_the_project_cap() -> TestResult {
 }
 
 #[test]
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn encryption_rejects_invalid_event_contexts() -> TestResult {
     let subkey = golden_subkey(SubjectKeyUseV1::Bootstrap)?;
     let header = hex(CONSENT_HEADER);
@@ -1395,7 +1318,6 @@ fn encryption_rejects_invalid_event_contexts() -> TestResult {
 }
 
 #[test]
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn encryption_rejects_invalid_field_tags() -> TestResult {
     let subkey = golden_subkey(SubjectKeyUseV1::Bootstrap)?;
     let header = hex(CONSENT_HEADER);
@@ -1416,7 +1338,6 @@ fn encryption_rejects_invalid_field_tags() -> TestResult {
 }
 
 #[test]
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn the_encoding_limit_holds_at_its_exact_bound() -> TestResult {
     let subkey = golden_subkey(SubjectKeyUseV1::Data)?;
     let event = field_event();
@@ -1444,7 +1365,6 @@ fn the_encoding_limit_holds_at_its_exact_bound() -> TestResult {
 }
 
 #[test]
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn the_public_header_limit_holds_at_its_exact_bound() -> TestResult {
     let subkey = golden_subkey(SubjectKeyUseV1::Data)?;
     let event = field_event();
@@ -1465,7 +1385,6 @@ fn the_public_header_limit_holds_at_its_exact_bound() -> TestResult {
 }
 
 #[test]
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn causation_and_correlation_are_bound_by_the_context() -> TestResult {
     let subkey = golden_subkey(SubjectKeyUseV1::Data)?;
     let header = hex(FIELD_HEADER);
@@ -1503,10 +1422,9 @@ fn causation_and_correlation_are_bound_by_the_context() -> TestResult {
 }
 
 #[test]
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn large_coordinates_round_trip() -> TestResult {
     let subkey =
-        seal_with(|params| params.epoch = u64::MAX)?.derive_subkey(&root(), SubjectKeyUseV1::Data);
+        seal_with(|params| params.epoch = u64::MAX)?.derive_subkey(&root(), SubjectKeyUseV1::Data)?;
     let signing = KeyRoleV1::TimelineIntegritySigning;
     let event = field_with(|event| {
         event.origin_logical_seq = Seq::from_u64(u64::MAX);
@@ -1528,4 +1446,61 @@ fn large_coordinates_round_trip() -> TestResult {
     let plaintext = decoded.decrypt(&subkey, &event, &header, "value")?;
     assert_eq!(*plaintext, FIELD_PLAINTEXT);
     Ok(())
+}
+
+#[test]
+fn owner_parsing_accepts_only_the_exact_spelling() {
+    assert_eq!(parse_subject_owner_id(OWNER), Ok(subject()));
+    let mixed = "subject:0123456789abcdeffedcba9876543210";
+    let parsed = parse_subject_owner_id(mixed);
+    assert_eq!(parsed.and_then(subject_owner_id), Ok(mixed.to_owned()));
+    let invalid = Err(SubjectKeyWrapErrorV1::InvalidField { ordinal: 2 });
+    let rejected = [
+        "subject:00000000000000000000000000000000",
+        "subject:000102030405060708090A0B0C0D0E0F",
+        "Subject:000102030405060708090a0b0c0d0e0f",
+        "subjects000102030405060708090a0b0c0d0e0f",
+        "000102030405060708090a0b0c0d0e0f",
+        "subject:000102030405060708090a0b0c0d0e0",
+        "subject:000102030405060708090a0b0c0d0e0f0",
+        "subject:00102030405060708090a0b0c0d0e0f",
+        "subject:+00102030405060708090a0b0c0d0e0f",
+        "subject:000102030405060708090a0b0c0d0e0g",
+        "subject: 00102030405060708090a0b0c0d0e0f",
+        "",
+    ];
+    for owner in rejected {
+        assert_eq!(parse_subject_owner_id(owner), invalid, "{owner}");
+    }
+}
+
+#[test]
+fn decoders_report_the_lowest_malformed_field() {
+    let mut items = wrap_items();
+    items[3] = bstr(&[0; 16]);
+    items[5] = vec![0xf6];
+    let refused = SubjectKeyWrapV1::from_bytes(&array(&items));
+    assert_eq!(refused, Err(SubjectKeyWrapErrorV1::InvalidField { ordinal: 3 }));
+    items[3] = bstr(&ascending::<16>(0));
+    items[5] = uint(0);
+    items[6] = tstr("Localhost");
+    let refused = SubjectKeyWrapV1::from_bytes(&array(&items));
+    assert_eq!(refused, Err(SubjectKeyWrapErrorV1::InvalidField { ordinal: 5 }));
+    let mut items = consent_items();
+    items[3] = bstr(&[0; 16]);
+    items[12] = vec![0xf6];
+    let refused = SubjectCiphertextV1::from_bytes(&array(&items));
+    assert_eq!(refused, Err(SubjectCiphertextErrorV1::InvalidField { ordinal: 3 }));
+    let mut items = consent_items();
+    items[8] = uint(0);
+    items[10] = tstr("");
+    items[15] = bstr(&[0; 3]);
+    let refused = SubjectCiphertextV1::from_bytes(&array(&items));
+    assert_eq!(refused, Err(SubjectCiphertextErrorV1::InvalidField { ordinal: 8 }));
+}
+
+#[test]
+fn refused_primitive_errors_carry_no_material() {
+    let message = SubjectKeyWrapErrorV1::PrimitiveRefused.to_string();
+    assert_eq!(message, "SKW1 key derivation or sealing refused its input");
 }

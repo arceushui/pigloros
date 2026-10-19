@@ -5,6 +5,16 @@
 //! This module is pure cryptography. Randomness, PRF evaluation, durable
 //! storage, registry authorization and destruction belong to the trusted
 //! owner adapter that calls it.
+//!
+//! The root, PRF output, wrapping key and subkeys held by this module are
+//! wiped on drop. The HKDF pseudorandom key and HMAC state inside
+//! `hkdf 0.13.0` are not: that release has no `zeroize` support, and this
+//! crate does not clear them.
+//!
+//! The RP ID grammar reads ADR-091's "strict subset of the `WebAuthn` valid
+//! domain string" with the WHATWG host parser's rule: a last label that is
+//! all decimal digits, or `0x` followed by hexadecimal digits, is an IPv4
+//! number, so the RP ID is an IPv4 literal and is rejected.
 
 use std::fmt;
 
@@ -15,7 +25,7 @@ use zeroize::Zeroizing;
 
 use crate::key_roles::key_material_digest;
 use crate::strict_cbor::{Reader, StrictCborError};
-use crate::subject_cbor;
+use crate::subject_cbor::{self, ROLE, VERSION};
 
 /// The ASCII prefix of every subject key owner (ADR-091).
 pub const SUBJECT_OWNER_PREFIX: &str = "subject:";
@@ -27,9 +37,6 @@ pub const MAX_SUBJECT_RP_ID_BYTES: usize = 253;
 pub const MAX_SUBJECT_CREDENTIAL_ID_BYTES: usize = 1024;
 
 const MAGIC: [u8; 4] = *b"SKW1";
-const VERSION: u64 = 1;
-/// `KeyRoleV1::SubjectDataEncryption`.
-const ROLE: u64 = 0;
 const WRAP_LABEL: &[u8] = b"pigloros.subject.wrap.v1\0";
 const DATA_LABEL: &[u8] = b"pigloros.subject.data.v1\0";
 const BOOTSTRAP_LABEL: &[u8] = b"pigloros.subject.bootstrap.v1\0";
@@ -73,6 +80,11 @@ pub enum SubjectKeyWrapErrorV1 {
     /// released.
     #[error("SKW1 wrapped root failed authentication")]
     AuthenticationFailed,
+    /// HKDF-SHA-256 or AES-256-GCM refused its input lengths. The fixed V1
+    /// lengths make this unreachable; it is reported, never replaced by a
+    /// zero key or tag.
+    #[error("SKW1 key derivation or sealing refused its input")]
+    PrimitiveRefused,
 }
 
 impl StrictCborError for SubjectKeyWrapErrorV1 {
@@ -98,6 +110,26 @@ pub fn subject_owner_id(subject_id: EntityId) -> Result<String, SubjectKeyWrapEr
     } else {
         Ok(owner_string(&bytes))
     }
+}
+
+/// Parse an exact ADR-091 subject key owner back to its subject.
+///
+/// The owner must be the 40-byte string `subject:` followed by the 32
+/// lowercase hexadecimal digits of a non-nil subject, exactly as
+/// [`subject_owner_id`] spells it.
+///
+/// # Errors
+/// Returns [`SubjectKeyWrapErrorV1::InvalidField`] at ordinal 2 for a wrong
+/// prefix or length, a non-hexadecimal or uppercase digit, or the nil
+/// subject.
+pub fn parse_subject_owner_id(owner: &str) -> Result<EntityId, SubjectKeyWrapErrorV1> {
+    owner
+        .strip_prefix(SUBJECT_OWNER_PREFIX)
+        .and_then(|digits| u128::from_str_radix(digits, 16).ok())
+        .map(u128::to_be_bytes)
+        .filter(|subject| *subject != [0; 16] && owner_string(subject) == owner)
+        .map(|subject| EntityId::from_ulid(Ulid::from_bytes(subject)))
+        .ok_or(SubjectKeyWrapErrorV1::InvalidField { ordinal: 2 })
 }
 
 /// The owner string of non-nil subject bytes.
@@ -289,24 +321,25 @@ impl SubjectKeyWrapV1 {
     /// (3), epoch zero (5), an RP ID outside the canonical domain grammar (6),
     /// or an empty credential ID (7), and
     /// [`SubjectKeyWrapErrorV1::BoundsExceeded`] for an RP ID above 253 bytes
-    /// (6) or a credential ID above 1024 bytes (7).
+    /// (6) or a credential ID above 1024 bytes (7). The unreachable
+    /// [`SubjectKeyWrapErrorV1::PrimitiveRefused`] fails closed instead of
+    /// producing a zero key or tag.
     pub fn seal(
         params: SubjectKeyWrapParamsV1,
         root: &SubjectRootKeyV1,
         prf: &SubjectPrfOutputV1,
     ) -> Result<Self, SubjectKeyWrapErrorV1> {
-        validate(&params).map(|()| {
-            let mut wrapped_root = [0; 48];
-            let (body, tag) = wrapped_root.split_at_mut(32);
-            body.copy_from_slice(root.bytes.as_slice());
-            let key = wrapping_key(&params, prf);
+        validate(&params)?;
+        let mut body = Zeroizing::new(*root.bytes);
+        let tag = wrapping_key(&params, prf).and_then(|key| {
             let aad = associated_data(&params);
-            tag.copy_from_slice(&subject_cbor::aes_gcm_seal(
-                &key,
-                &params.wrap_nonce,
-                &aad,
-                body,
-            ));
+            subject_cbor::aes_gcm_seal(&key, &params.wrap_nonce, &aad, body.as_mut_slice())
+                .ok_or(SubjectKeyWrapErrorV1::PrimitiveRefused)
+        });
+        tag.map(|tag| {
+            let mut wrapped_root = [0; 48];
+            wrapped_root[..32].copy_from_slice(body.as_slice());
+            wrapped_root[32..].copy_from_slice(&tag);
             Self {
                 params,
                 wrapped_root,
@@ -325,48 +358,49 @@ impl SubjectKeyWrapV1 {
     ) -> Result<SubjectRootKeyV1, SubjectKeyWrapErrorV1> {
         let mut root = Zeroizing::new([0; 32]);
         root.copy_from_slice(&self.wrapped_root[..32]);
-        let mut tag = [0; 16];
-        tag.copy_from_slice(&self.wrapped_root[32..]);
-        let key = wrapping_key(&self.params, prf);
-        let aad = associated_data(&self.params);
-        if subject_cbor::aes_gcm_open(
-            &key,
-            &self.params.wrap_nonce,
-            &aad,
-            root.as_mut_slice(),
-            &tag,
-        ) {
-            Ok(SubjectRootKeyV1 { bytes: root })
-        } else {
-            Err(SubjectKeyWrapErrorV1::AuthenticationFailed)
-        }
+        let tag: [u8; 16] = std::array::from_fn(|index| self.wrapped_root[32 + index]);
+        wrapping_key(&self.params, prf).and_then(move |key| {
+            let aad = associated_data(&self.params);
+            if subject_cbor::aes_gcm_open(
+                &key,
+                &self.params.wrap_nonce,
+                &aad,
+                root.as_mut_slice(),
+                &tag,
+            ) {
+                Ok(SubjectRootKeyV1 { bytes: root })
+            } else {
+                Err(SubjectKeyWrapErrorV1::AuthenticationFailed)
+            }
+        })
     }
 
     /// Derive the data or consent-bootstrap subkey of this wrap's root.
     ///
     /// The caller passes the root that [`Self::open`] or enrollment produced
     /// for this exact record.
-    #[must_use]
+    ///
+    /// # Errors
+    /// Returns [`SubjectKeyWrapErrorV1::PrimitiveRefused`] if HKDF refuses
+    /// the fixed 32-byte output, which it never does.
     pub fn derive_subkey(
         &self,
         root: &SubjectRootKeyV1,
         key_use: SubjectKeyUseV1,
-    ) -> SubjectSubkeyV1 {
+    ) -> Result<SubjectSubkeyV1, SubjectKeyWrapErrorV1> {
         let mut context = Vec::new();
         context.push(0x83);
         write_owner_subject(&self.params, &mut context);
         subject_cbor::unsigned(&mut context, self.params.epoch);
-        SubjectSubkeyV1 {
-            key: subject_cbor::hkdf_sha256(
-                &root.bytes,
-                &self.params.subkey_salt,
-                key_use.label(),
-                &context,
-            ),
-            subject_id: self.params.subject_id,
-            epoch: self.params.epoch,
-            key_use,
-        }
+        let salt = &self.params.subkey_salt;
+        subject_cbor::hkdf_sha256(&root.bytes, salt, key_use.label(), &context)
+            .ok_or(SubjectKeyWrapErrorV1::PrimitiveRefused)
+            .map(|key| SubjectSubkeyV1 {
+                key,
+                subject_id: self.params.subject_id,
+                epoch: self.params.epoch,
+                key_use,
+            })
     }
 
     /// Decode exactly one canonical SKW1 record.
@@ -376,21 +410,16 @@ impl SubjectKeyWrapV1 {
     /// noncanonical, unsupported, or invalid field.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, SubjectKeyWrapErrorV1> {
         let mut reader = Reader::new(bytes);
-        let (owner, subject, epoch) = read_identity(&mut reader)?;
+        let (subject, epoch) = read_identity(&mut reader)?;
         let params = read_credential(&mut reader, subject, epoch)?;
         reader.at(12);
         let wrapped_root = reader.bytes()?;
         reader.at(DOCUMENT);
         reader.finish()?;
-        validate(&params)?;
-        if owner == owner_string(&subject) {
-            Ok(Self {
-                params,
-                wrapped_root,
-            })
-        } else {
-            Err(SubjectKeyWrapErrorV1::InvalidField { ordinal: 2 })
-        }
+        Ok(Self {
+            params,
+            wrapped_root,
+        })
     }
 
     /// The canonical 13-element SKW1 encoding.
@@ -435,12 +464,11 @@ impl SubjectKeyWrapV1 {
     }
 }
 
-type Identity<'a> = (&'a str, [u8; 16], u64);
-
-/// Fields 0-5: the framing, magic, version, owner, subject, role and epoch.
-fn read_identity<'a>(
-    reader: &mut Reader<'a, SubjectKeyWrapErrorV1>,
-) -> Result<Identity<'a>, SubjectKeyWrapErrorV1> {
+/// Fields 0-5: the framing, magic, version, owner, subject, role and epoch,
+/// each validated as soon as it is read.
+fn read_identity(
+    reader: &mut Reader<'_, SubjectKeyWrapErrorV1>,
+) -> Result<(EntityId, u64), SubjectKeyWrapErrorV1> {
     reader.at(DOCUMENT);
     reader.fixed_array(13)?;
     reader.at(0);
@@ -452,30 +480,35 @@ fn read_identity<'a>(
         return Err(SubjectKeyWrapErrorV1::UnsupportedVersion);
     }
     reader.at(2);
-    let owner = reader.text(SUBJECT_OWNER_BYTES)?;
+    let owner = parse_subject_owner_id(reader.text(SUBJECT_OWNER_BYTES)?)?;
     reader.at(3);
-    let subject = reader.bytes()?;
+    let subject = check_subject(EntityId::from_ulid(Ulid::from_bytes(reader.bytes()?)))?;
+    if subject != owner {
+        return Err(SubjectKeyWrapErrorV1::InvalidField { ordinal: 2 });
+    }
     reader.at(4);
-    if reader.unsigned()? != ROLE {
+    if reader.unsigned()? != u64::from(ROLE) {
         return Err(SubjectKeyWrapErrorV1::InvalidField { ordinal: 4 });
     }
     reader.at(5);
-    let epoch = reader.unsigned()?;
-    Ok((owner, subject, epoch))
+    let epoch = check_epoch(reader.unsigned()?)?;
+    Ok((subject, epoch))
 }
 
 /// Fields 6-11: the RP ID, credential ID, PRF input, salts and nonce.
 fn read_credential(
     reader: &mut Reader<'_, SubjectKeyWrapErrorV1>,
-    subject: [u8; 16],
+    subject_id: EntityId,
     epoch: u64,
 ) -> Result<SubjectKeyWrapParamsV1, SubjectKeyWrapErrorV1> {
     reader.at(6);
     let rp_id = reader.text(MAX_SUBJECT_RP_ID_BYTES)?.to_owned();
+    check_rp_id(&rp_id)?;
     reader.at(7);
     let credential_id = reader
         .byte_string(MAX_SUBJECT_CREDENTIAL_ID_BYTES)?
         .to_vec();
+    check_credential_id(&credential_id)?;
     reader.at(8);
     let prf_input = reader.bytes()?;
     reader.at(9);
@@ -485,7 +518,7 @@ fn read_credential(
     reader.at(11);
     let wrap_nonce = reader.bytes()?;
     Ok(SubjectKeyWrapParamsV1 {
-        subject_id: EntityId::from_ulid(Ulid::from_bytes(subject)),
+        subject_id,
         epoch,
         rp_id,
         credential_id,
@@ -518,7 +551,7 @@ fn associated_data(params: &SubjectKeyWrapParamsV1) -> Vec<u8> {
     subject_cbor::byte_string(&mut output, &MAGIC);
     subject_cbor::unsigned(&mut output, VERSION);
     write_owner_subject(params, &mut output);
-    subject_cbor::unsigned(&mut output, ROLE);
+    subject_cbor::unsigned(&mut output, u64::from(ROLE));
     subject_cbor::unsigned(&mut output, params.epoch);
     subject_cbor::text(&mut output, &params.rp_id);
     subject_cbor::byte_string(&mut output, &params.credential_id);
@@ -529,27 +562,52 @@ fn associated_data(params: &SubjectKeyWrapParamsV1) -> Vec<u8> {
     output
 }
 
-fn wrapping_key(params: &SubjectKeyWrapParamsV1, prf: &SubjectPrfOutputV1) -> Zeroizing<[u8; 32]> {
-    subject_cbor::hkdf_sha256(
-        &prf.bytes,
-        &params.wrap_salt,
-        WRAP_LABEL,
-        &wrap_context(params),
-    )
+fn wrapping_key(
+    params: &SubjectKeyWrapParamsV1,
+    prf: &SubjectPrfOutputV1,
+) -> Result<Zeroizing<[u8; 32]>, SubjectKeyWrapErrorV1> {
+    let context = wrap_context(params);
+    subject_cbor::hkdf_sha256(&prf.bytes, &params.wrap_salt, WRAP_LABEL, &context)
+        .ok_or(SubjectKeyWrapErrorV1::PrimitiveRefused)
 }
 
 fn validate(params: &SubjectKeyWrapParamsV1) -> Result<(), SubjectKeyWrapErrorV1> {
-    if params.subject_id.inner().to_bytes() == [0; 16] {
+    check_subject(params.subject_id)?;
+    check_epoch(params.epoch)?;
+    check_rp_id(&params.rp_id)?;
+    check_credential_id(&params.credential_id)
+}
+
+fn check_subject(subject: EntityId) -> Result<EntityId, SubjectKeyWrapErrorV1> {
+    if subject.inner().to_bytes() == [0; 16] {
         Err(SubjectKeyWrapErrorV1::InvalidField { ordinal: 3 })
-    } else if params.epoch == 0 {
+    } else {
+        Ok(subject)
+    }
+}
+
+const fn check_epoch(epoch: u64) -> Result<u64, SubjectKeyWrapErrorV1> {
+    if epoch == 0 {
         Err(SubjectKeyWrapErrorV1::InvalidField { ordinal: 5 })
-    } else if params.rp_id.len() > MAX_SUBJECT_RP_ID_BYTES {
+    } else {
+        Ok(epoch)
+    }
+}
+
+fn check_rp_id(rp_id: &str) -> Result<(), SubjectKeyWrapErrorV1> {
+    if rp_id.len() > MAX_SUBJECT_RP_ID_BYTES {
         Err(SubjectKeyWrapErrorV1::BoundsExceeded { ordinal: 6 })
-    } else if !is_canonical_rp_id(&params.rp_id) {
+    } else if is_canonical_rp_id(rp_id) {
+        Ok(())
+    } else {
         Err(SubjectKeyWrapErrorV1::InvalidField { ordinal: 6 })
-    } else if params.credential_id.len() > MAX_SUBJECT_CREDENTIAL_ID_BYTES {
+    }
+}
+
+fn check_credential_id(credential_id: &[u8]) -> Result<(), SubjectKeyWrapErrorV1> {
+    if credential_id.len() > MAX_SUBJECT_CREDENTIAL_ID_BYTES {
         Err(SubjectKeyWrapErrorV1::BoundsExceeded { ordinal: 7 })
-    } else if params.credential_id.is_empty() {
+    } else if credential_id.is_empty() {
         Err(SubjectKeyWrapErrorV1::InvalidField { ordinal: 7 })
     } else {
         Ok(())
@@ -565,7 +623,7 @@ fn validate(params: &SubjectKeyWrapParamsV1) -> Result<(), SubjectKeyWrapErrorV1
 /// number (all decimal digits, or `0x` followed by hexadecimal digits) makes
 /// the string an IPv4 address literal and is rejected.
 fn is_canonical_rp_id(rp_id: &str) -> bool {
-    let last = rp_id.rsplit('.').next().unwrap_or(rp_id);
+    let last = rp_id.rsplit_once('.').map_or(rp_id, |(_, last)| last);
     let ipv4_number = last.bytes().all(|byte| byte.is_ascii_digit())
         || last
             .strip_prefix("0x")

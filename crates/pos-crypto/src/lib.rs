@@ -22,11 +22,10 @@ pub mod signing;
 // public for that one consumer and hidden from the documented API.
 #[doc(hidden)]
 pub mod strict_cbor;
-// Public module reachability keeps the crate-only CBOR writer and AEAD/HKDF
-// helpers shared by the subject key wrap and ciphertext modules compatible
-// with both `unreachable_pub` and Clippy's `redundant_pub_crate` lint.
-#[doc(hidden)]
-pub mod subject_cbor;
+// The CBOR writer and AEAD/HKDF helpers shared by the subject key wrap and
+// ciphertext modules. Its items are `pub(super)`, which satisfies both
+// `unreachable_pub` and Clippy's `redundant_pub_crate`.
+mod subject_cbor;
 pub mod subject_ciphertext;
 pub mod subject_key;
 pub mod timeline_erasure;

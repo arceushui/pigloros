@@ -3,8 +3,15 @@
 //! canonical clear header (ADR-097 revision 3, section 2).
 //!
 //! This module is pure cryptography. Reserving the nonce counter durably
-//! before encryption, Event schema registration, and the Gateway and store
-//! integration belong to the owner adapter and #399's later seams.
+//! before encryption, and the Gateway and store integration, belong to the
+//! owner adapter. Event schemas belong to #399's schema seam and are not
+//! enforced here: that the public header is the schema's exact clear-field
+//! subset, and that `event_type` and `field_tag` are registered.
+//!
+//! Two project readings of the ADR text apply. The 256 KiB limit is applied
+//! to the whole SDC1 encoding, which is stricter than a plaintext bound. A
+//! decoded nonce must be the V1 construction `0x00000000 || counter_u64_be`
+//! with a counter from 1 through 2^32 - 1 (ADR-097 section 4).
 
 use pos_core::{EntityId, EventId, KeyRoleV1, TimelineEventEnvelopeInputV1, TimelineId};
 use thiserror::Error;
@@ -12,11 +19,14 @@ use ulid::Ulid;
 use zeroize::Zeroizing;
 
 use crate::strict_cbor::{Reader, StrictCborError};
-use crate::subject_cbor;
-use crate::subject_key::{owner_string, SubjectKeyUseV1, SubjectSubkeyV1, SUBJECT_OWNER_BYTES};
+use crate::subject_cbor::{self, ROLE, VERSION};
+use crate::subject_key::{
+    owner_string, parse_subject_owner_id, SubjectKeyUseV1, SubjectSubkeyV1, SUBJECT_OWNER_BYTES,
+};
 
 /// The largest `SubjectCiphertextV1` encoding, equal to the 256 KiB Event
-/// payload bound. A plaintext is therefore also below 256 KiB.
+/// payload bound. It applies to the whole encoding, so a plaintext is
+/// strictly shorter.
 pub const MAX_SUBJECT_CIPHERTEXT_BYTES: usize = 262_144;
 /// The largest canonical public header bound into `context_digest`.
 pub const MAX_SUBJECT_PUBLIC_HEADER_BYTES: usize = 65_536;
@@ -29,9 +39,6 @@ pub const MAX_SUBJECT_NONCE_COUNTER: u64 = 0xffff_ffff;
 
 const MAGIC: [u8; 4] = *b"SDC1";
 const CONTEXT_MAGIC: [u8; 4] = *b"SEC1";
-const VERSION: u64 = 1;
-/// `KeyRoleV1::SubjectDataEncryption`.
-const ROLE: u64 = 0;
 const CONTEXT_DOMAIN: &[u8] = b"pigloros/subject-context/v1\0";
 const TAG_BYTES: usize = 16;
 /// The error ordinal of the whole SDC1 encoding and its outer framing.
@@ -155,7 +162,8 @@ impl SubjectCiphertextV1 {
         let header = expected_header(subkey, event, field_tag)?;
         let context_digest = context_digest(event, public_header)?;
         let aad = associated_data(&header, &context_digest, counter);
-        let sealed_len = plaintext.len().saturating_add(TAG_BYTES);
+        // A slice is at most `isize::MAX` bytes, so these sums cannot overflow.
+        let sealed_len = plaintext.len() + TAG_BYTES;
         let mut length_head = Vec::new();
         subject_cbor::head(&mut length_head, 2, sealed_len as u64);
         if aad.len() + length_head.len() + sealed_len > MAX_SUBJECT_CIPHERTEXT_BYTES {
@@ -163,24 +171,23 @@ impl SubjectCiphertextV1 {
         }
         let mut ciphertext_and_tag = Vec::with_capacity(sealed_len);
         ciphertext_and_tag.extend_from_slice(plaintext);
-        let tag = subject_cbor::aes_gcm_seal(
-            subkey.key(),
-            &nonce(counter),
-            &aad,
-            &mut ciphertext_and_tag,
-        );
-        ciphertext_and_tag.extend_from_slice(&tag);
-        let mut bytes = aad;
-        bytes[0] = 0x90;
-        bytes.extend_from_slice(&length_head);
-        bytes.extend_from_slice(&ciphertext_and_tag);
-        Ok(Self {
-            header,
-            context_digest,
-            counter,
-            ciphertext_and_tag,
-            bytes,
-        })
+        let key = subkey.key();
+        subject_cbor::aes_gcm_seal(key, &nonce(counter), &aad, &mut ciphertext_and_tag)
+            .ok_or(SubjectCiphertextErrorV1::BoundsExceeded { ordinal: DOCUMENT })
+            .map(|tag| {
+                ciphertext_and_tag.extend_from_slice(&tag);
+                let mut bytes = aad;
+                bytes[0] = 0x90;
+                bytes.extend_from_slice(&length_head);
+                bytes.extend_from_slice(&ciphertext_and_tag);
+                Self {
+                    header,
+                    context_digest,
+                    counter,
+                    ciphertext_and_tag,
+                    bytes,
+                }
+            })
     }
 
     /// Authenticate and decrypt this field of the verified committed Event
@@ -238,7 +245,7 @@ impl SubjectCiphertextV1 {
             return Err(SubjectCiphertextErrorV1::BoundsExceeded { ordinal: DOCUMENT });
         }
         let mut reader = Reader::new(bytes);
-        let (owner, subject, epoch, key_use) = read_identity(&mut reader)?;
+        let (subject, epoch, key_use) = read_identity(&mut reader)?;
         let header = read_event(&mut reader, subject, epoch, key_use)?;
         reader.at(13);
         let context_digest = reader.bytes()?;
@@ -246,15 +253,11 @@ impl SubjectCiphertextV1 {
         let counter = read_counter(&mut reader)?;
         reader.at(15);
         let ciphertext_and_tag = reader.byte_string(MAX_SUBJECT_CIPHERTEXT_BYTES)?.to_vec();
-        reader.at(DOCUMENT);
-        reader.finish()?;
-        validate_header(&header)?;
-        if owner != owner_string(&subject) {
-            return Err(SubjectCiphertextErrorV1::InvalidField { ordinal: 2 });
-        }
         if ciphertext_and_tag.len() < TAG_BYTES {
             return Err(SubjectCiphertextErrorV1::InvalidField { ordinal: 15 });
         }
+        reader.at(DOCUMENT);
+        reader.finish()?;
         Ok(Self {
             header,
             context_digest,
@@ -356,13 +359,11 @@ impl SubjectCiphertextV1 {
     }
 }
 
-type Identity<'a> = (&'a str, [u8; 16], u64, SubjectKeyUseV1);
-
 /// Fields 0-6: the framing, magic, version, owner, subject, role, epoch and
-/// use.
-fn read_identity<'a>(
-    reader: &mut Reader<'a, SubjectCiphertextErrorV1>,
-) -> Result<Identity<'a>, SubjectCiphertextErrorV1> {
+/// use, each validated as soon as it is read.
+fn read_identity(
+    reader: &mut Reader<'_, SubjectCiphertextErrorV1>,
+) -> Result<([u8; 16], u64, SubjectKeyUseV1), SubjectCiphertextErrorV1> {
     reader.at(DOCUMENT);
     reader.fixed_array(16)?;
     reader.at(0);
@@ -374,22 +375,27 @@ fn read_identity<'a>(
         return Err(SubjectCiphertextErrorV1::UnsupportedVersion);
     }
     reader.at(2);
-    let owner = reader.text(SUBJECT_OWNER_BYTES)?;
+    let owner = parse_subject_owner_id(reader.text(SUBJECT_OWNER_BYTES)?)
+        .map_err(|_| SubjectCiphertextErrorV1::InvalidField { ordinal: 2 })?;
     reader.at(3);
-    let subject = reader.bytes()?;
+    let subject = nonzero_id(reader.bytes()?, 3)?;
+    if subject != owner.inner().to_bytes() {
+        return Err(SubjectCiphertextErrorV1::InvalidField { ordinal: 2 });
+    }
     reader.at(4);
-    if reader.unsigned()? != ROLE {
+    if reader.unsigned()? != u64::from(ROLE) {
         return Err(SubjectCiphertextErrorV1::InvalidField { ordinal: 4 });
     }
     reader.at(5);
-    let epoch = reader.unsigned()?;
+    let epoch = nonzero(reader.unsigned()?, 5)?;
     reader.at(6);
     let key_use = SubjectKeyUseV1::from_code(reader.unsigned()?)
         .ok_or(SubjectCiphertextErrorV1::InvalidField { ordinal: 6 })?;
-    Ok((owner, subject, epoch, key_use))
+    Ok((subject, epoch, key_use))
 }
 
-/// Fields 7-12: the Event coordinates and the field tag.
+/// Fields 7-12: the Event coordinates and the field tag, each validated as
+/// soon as it is read.
 fn read_event(
     reader: &mut Reader<'_, SubjectCiphertextErrorV1>,
     subject: [u8; 16],
@@ -397,18 +403,20 @@ fn read_event(
     key_use: SubjectKeyUseV1,
 ) -> Result<Header, SubjectCiphertextErrorV1> {
     reader.at(7);
-    let origin_timeline = reader.bytes()?;
+    let origin_timeline = nonzero_id(reader.bytes()?, 7)?;
     reader.at(8);
-    let origin_logical_seq = reader.unsigned()?;
+    let origin_logical_seq = nonzero(reader.unsigned()?, 8)?;
     reader.at(9);
-    let event_id = reader.bytes()?;
+    let event_id = nonzero_id(reader.bytes()?, 9)?;
     reader.at(10);
     let event_type = reader.text(MAX_SUBJECT_EVENT_TYPE_BYTES)?.to_owned();
+    check_event_type(&event_type)?;
     reader.at(11);
     let schema_version = u32::try_from(reader.unsigned()?)
         .map_err(|_| SubjectCiphertextErrorV1::InvalidField { ordinal: 11 })?;
     reader.at(12);
     let field_tag = reader.text(MAX_SUBJECT_FIELD_TAG_BYTES)?.to_owned();
+    check_field_tag(&field_tag)?;
     Ok(Header {
         subject,
         epoch,
@@ -459,31 +467,46 @@ fn expected_header(
     validate_header(&header).map(|()| header)
 }
 
+/// The Event fields of a header built from a subkey: its subject and epoch
+/// are already the subkey's validated identity.
 fn validate_header(header: &Header) -> Result<(), SubjectCiphertextErrorV1> {
-    let ordinal = if header.subject == [0; 16] {
-        3
-    } else if header.epoch == 0 {
-        5
-    } else if header.origin_timeline == [0; 16] {
-        7
-    } else if header.origin_logical_seq == 0 {
-        8
-    } else if header.event_id == [0; 16] {
-        9
-    } else {
-        return validate_names(header);
-    };
-    Err(SubjectCiphertextErrorV1::InvalidField { ordinal })
+    nonzero_id(header.origin_timeline, 7)?;
+    nonzero(header.origin_logical_seq, 8)?;
+    nonzero_id(header.event_id, 9)?;
+    check_event_type(&header.event_type)?;
+    check_field_tag(&header.field_tag)
 }
 
-fn validate_names(header: &Header) -> Result<(), SubjectCiphertextErrorV1> {
-    if header.event_type.len() > MAX_SUBJECT_EVENT_TYPE_BYTES {
+fn nonzero_id(id: [u8; 16], ordinal: u8) -> Result<[u8; 16], SubjectCiphertextErrorV1> {
+    if id == [0; 16] {
+        Err(SubjectCiphertextErrorV1::InvalidField { ordinal })
+    } else {
+        Ok(id)
+    }
+}
+
+const fn nonzero(value: u64, ordinal: u8) -> Result<u64, SubjectCiphertextErrorV1> {
+    if value == 0 {
+        Err(SubjectCiphertextErrorV1::InvalidField { ordinal })
+    } else {
+        Ok(value)
+    }
+}
+
+fn check_event_type(event_type: &str) -> Result<(), SubjectCiphertextErrorV1> {
+    if event_type.len() > MAX_SUBJECT_EVENT_TYPE_BYTES {
         Err(SubjectCiphertextErrorV1::BoundsExceeded { ordinal: 10 })
-    } else if header.event_type.is_empty() {
+    } else if event_type.is_empty() {
         Err(SubjectCiphertextErrorV1::InvalidField { ordinal: 10 })
-    } else if header.field_tag.len() > MAX_SUBJECT_FIELD_TAG_BYTES {
+    } else {
+        Ok(())
+    }
+}
+
+fn check_field_tag(field_tag: &str) -> Result<(), SubjectCiphertextErrorV1> {
+    if field_tag.len() > MAX_SUBJECT_FIELD_TAG_BYTES {
         Err(SubjectCiphertextErrorV1::BoundsExceeded { ordinal: 12 })
-    } else if header.field_tag.is_empty() || !header.field_tag.is_ascii() {
+    } else if field_tag.is_empty() || !field_tag.is_ascii() {
         Err(SubjectCiphertextErrorV1::InvalidField { ordinal: 12 })
     } else {
         Ok(())
@@ -558,7 +581,7 @@ fn associated_data(header: &Header, context_digest: &[u8; 32], counter: u64) -> 
     subject_cbor::unsigned(&mut output, VERSION);
     subject_cbor::text(&mut output, &owner_string(&header.subject));
     subject_cbor::byte_string(&mut output, &header.subject);
-    subject_cbor::unsigned(&mut output, ROLE);
+    subject_cbor::unsigned(&mut output, u64::from(ROLE));
     subject_cbor::unsigned(&mut output, header.epoch);
     subject_cbor::unsigned(&mut output, u64::from(header.key_use.code()));
     subject_cbor::byte_string(&mut output, &header.origin_timeline);

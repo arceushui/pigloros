@@ -3,11 +3,17 @@
 
 use aes_gcm::{AeadInOut, Aes256Gcm, KeyInit};
 use hkdf::Hkdf;
+use pos_core::KeyRoleV1;
 use sha2::Sha256;
 use zeroize::Zeroizing;
 
+/// The record version of both `SubjectKeyWrapV1` and `SubjectCiphertextV1`.
+pub(super) const VERSION: u64 = 1;
+/// The role code both records carry: `KeyRoleV1::SubjectDataEncryption`.
+pub(super) const ROLE: u8 = KeyRoleV1::SubjectDataEncryption.code();
+
 /// Append a shortest-form CBOR head for `major` with argument `value`.
-pub(crate) fn head(output: &mut Vec<u8>, major: u8, value: u64) {
+pub(super) fn head(output: &mut Vec<u8>, major: u8, value: u64) {
     // The major type occupies the top three bits and the additional
     // information the low five, so adding them composes the initial byte.
     let bytes = value.to_be_bytes();
@@ -31,56 +37,63 @@ pub(crate) fn head(output: &mut Vec<u8>, major: u8, value: u64) {
 }
 
 /// Append an unsigned integer.
-pub(crate) fn unsigned(output: &mut Vec<u8>, value: u64) {
+pub(super) fn unsigned(output: &mut Vec<u8>, value: u64) {
     head(output, 0, value);
 }
 
 /// Append a definite byte string.
-pub(crate) fn byte_string(output: &mut Vec<u8>, bytes: &[u8]) {
+pub(super) fn byte_string(output: &mut Vec<u8>, bytes: &[u8]) {
     head(output, 2, bytes.len() as u64);
     output.extend_from_slice(bytes);
 }
 
 /// Append definite UTF-8 text.
-pub(crate) fn text(output: &mut Vec<u8>, value: &str) {
+pub(super) fn text(output: &mut Vec<u8>, value: &str) {
     head(output, 3, value.len() as u64);
     output.extend_from_slice(value.as_bytes());
 }
 
-/// `HKDF-SHA-256(IKM = ikm, salt, info = label || context, L = 32)`.
-pub(crate) fn hkdf_sha256(
+/// `HKDF-SHA-256(IKM = ikm, salt, info = label || context, L = 32)`, or
+/// `None` when HKDF refuses the output length.
+///
+/// HKDF-Expand refuses only an output above 255 hash lengths, so `L = 32`
+/// always succeeds; the refusal still fails closed rather than yielding a
+/// zero key. The output is wiped on drop. The pseudorandom key and HMAC
+/// state inside `hkdf 0.13.0` are not wiped: that release has no `zeroize`
+/// support, and this crate does not clear them.
+pub(super) fn hkdf_sha256(
     ikm: &[u8; 32],
     salt: &[u8; 32],
     label: &[u8],
     context: &[u8],
-) -> Zeroizing<[u8; 32]> {
+) -> Option<Zeroizing<[u8; 32]>> {
     let mut okm = Zeroizing::new([0; 32]);
-    // HKDF-Expand fails only when L exceeds 255 hash lengths; L = 32 cannot.
     Hkdf::<Sha256>::new(Some(salt), ikm)
         .expand_multi_info(&[label, context], okm.as_mut_slice())
-        .unwrap_or_default();
-    okm
+        .ok()
+        .map(|()| okm)
 }
 
-/// Encrypt `buffer` in place under AES-256-GCM and return the full tag.
+/// Encrypt `buffer` in place under AES-256-GCM and return the full tag, or
+/// `None` when AES-GCM refuses the input lengths.
 ///
-/// AES-GCM fails only for a plaintext above 2^36 - 32 bytes or associated
-/// data above 2^61 - 1 bytes. Every caller bounds both to 256 KiB before
-/// calling, so the zero-tag fallback is unreachable.
-pub(crate) fn aes_gcm_seal(
+/// AES-GCM refuses only a plaintext above 2^36 - 32 bytes or associated data
+/// above 2^61 - 1 bytes. Every caller bounds both to 256 KiB first; the
+/// refusal still fails closed rather than yielding a zero tag.
+pub(super) fn aes_gcm_seal(
     key: &[u8; 32],
     nonce: &[u8; 12],
     associated_data: &[u8],
     buffer: &mut [u8],
-) -> [u8; 16] {
+) -> Option<[u8; 16]> {
     Aes256Gcm::new(key.into())
         .encrypt_inout_detached(nonce.into(), associated_data, buffer.into())
-        .unwrap_or_default()
-        .into()
+        .ok()
+        .map(Into::into)
 }
 
 /// Authenticate and decrypt `buffer` in place; `false` releases nothing.
-pub(crate) fn aes_gcm_open(
+pub(super) fn aes_gcm_open(
     key: &[u8; 32],
     nonce: &[u8; 12],
     associated_data: &[u8],
