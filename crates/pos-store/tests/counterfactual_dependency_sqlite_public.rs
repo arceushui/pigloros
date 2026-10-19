@@ -3037,7 +3037,10 @@ fn rewritten(lineage: &mut Lineage, sql: &str) {
 /// Insert fold-head rows into the lineage's file.
 fn insert_fold_heads(lineage: &mut Lineage, rows: &[String]) {
     let values = rows.join(", ");
-    rewritten(lineage, &format!("INSERT INTO {FOLD_HEADS} VALUES {values};"));
+    rewritten(
+        lineage,
+        &format!("INSERT INTO {FOLD_HEADS} VALUES {values};"),
+    );
 }
 
 /// The lineage with fold heads: the root's Ticks 1 to 3 scanned through 3, 5

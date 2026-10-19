@@ -589,12 +589,13 @@ pub(super) const FOLD_HEADS_RETAINED: CounterfactualSchemaObjectV1 = Counterfact
            BEGIN SELECT RAISE(ABORT, 'dependency fold head is retained'); END",
 };
 
-pub(super) const FOLD_HEADS_IMMUTABLE: CounterfactualSchemaObjectV1 = CounterfactualSchemaObjectV1 {
-    kind: "trigger",
-    name: "counterfactual_dependency_fold_heads_immutable",
-    body: "BEFORE UPDATE ON counterfactual_dependency_fold_heads
+pub(super) const FOLD_HEADS_IMMUTABLE: CounterfactualSchemaObjectV1 =
+    CounterfactualSchemaObjectV1 {
+        kind: "trigger",
+        name: "counterfactual_dependency_fold_heads_immutable",
+        body: "BEFORE UPDATE ON counterfactual_dependency_fold_heads
            BEGIN SELECT RAISE(ABORT, 'dependency fold head is immutable'); END",
-};
+    };
 
 /// Guards the Tick key of a fold head, so a replacing insert deletes no fold
 /// head that holds the key.
