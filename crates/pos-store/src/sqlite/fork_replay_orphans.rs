@@ -15,14 +15,16 @@ const OPERATIONS: &str = "SELECT 1,
         WHERE event_id = fork_append_operations.event_id)
     FROM fork_append_operations WHERE child_id = ?1
     UNION ALL SELECT NULL, NULL";
-const ORIGINS: &str = "SELECT coalesce(substr(eor1_cbor, ?3, 16) = ?2, 0),
+const ORIGINS: &str = "SELECT 1,
     (SELECT CASE WHEN timeline_id = ?1 THEN 1 ELSE 2 END FROM events
         WHERE event_id = fork_event_origins.event_id)
-    FROM fork_event_origins UNION ALL SELECT NULL, NULL";
-const INTERVENTIONS: &str = "SELECT coalesce(substr(fia1_cbor, ?3, 16) = ?2, 0),
+    FROM fork_event_origins INDEXED BY idx_fork_event_origins_child_v1
+    WHERE substr(eor1_cbor, 9, 16) = ?2 UNION ALL SELECT NULL, NULL";
+const INTERVENTIONS: &str = "SELECT 1,
     (SELECT CASE WHEN timeline_id = ?1 THEN 1 ELSE 2 END FROM events
         WHERE event_id = fork_intervention_admissions.event_id)
-    FROM fork_intervention_admissions UNION ALL SELECT NULL, NULL";
+    FROM fork_intervention_admissions INDEXED BY idx_fork_intervention_admissions_child_v1
+    WHERE substr(fia1_cbor, 43, 16) = ?2 UNION ALL SELECT NULL, NULL";
 
 #[derive(Clone, Copy)]
 enum OrphanKindV1 {
@@ -32,11 +34,11 @@ enum OrphanKindV1 {
 }
 
 impl OrphanKindV1 {
-    const fn selection(self) -> (&'static str, Option<i64>) {
+    const fn selection(self) -> (&'static str, bool) {
         match self {
-            Self::Operation => (OPERATIONS, None),
-            Self::Origin => (ORIGINS, Some(super::EOR1_CHILD_TIMELINE_OFFSET)),
-            Self::Intervention => (INTERVENTIONS, Some(super::FIA1_CHILD_TIMELINE_OFFSET)),
+            Self::Operation => (OPERATIONS, false),
+            Self::Origin => (ORIGINS, true),
+            Self::Intervention => (INTERVENTIONS, true),
         }
     }
 }
@@ -75,7 +77,7 @@ fn scan(
         .map_err(|_| Error::CorruptAuthority)
         .and_then(|()| {
             let key = child.to_string();
-            let (sql, offset) = kind.selection();
+            let (sql, child_bytes) = kind.selection();
             context
                 .check()
                 .map_err(|_| Error::CorruptAuthority)
@@ -85,13 +87,10 @@ fn scan(
                         .check()
                         .map_err(|_| Error::CorruptAuthority)
                         .and_then(|()| {
-                            match offset {
-                                None => statement.query([&key]),
-                                Some(offset) => statement.query(params![
-                                    key,
-                                    child.inner().to_bytes().as_slice(),
-                                    offset
-                                ]),
+                            if child_bytes {
+                                statement.query(params![key, child.inner().to_bytes().as_slice()])
+                            } else {
+                                statement.query([&key])
                             }
                             .map_err(|_| Error::CorruptAuthority)
                         })
@@ -390,20 +389,20 @@ mod tests {
     fn pinned_backend_orphan_queries_use_indexed_event_seeks_without_sorting() -> Fallible<()> {
         let (_directory, store, world) = fixture(Shape::Mixed)?;
         let child = world.child_at(0)?.id;
-        for kind in [
-            OrphanKindV1::Operation,
-            OrphanKindV1::Origin,
-            OrphanKindV1::Intervention,
+        for (kind, table, index) in [
+            (OrphanKindV1::Operation, "fork_append_operations", ""),
+            (OrphanKindV1::Origin, "fork_event_origins", "idx_fork_event_origins_child_v1"),
+            (OrphanKindV1::Intervention, "fork_intervention_admissions", "idx_fork_intervention_admissions_child_v1"),
         ] {
-            let (sql, offset) = kind.selection();
+            let (sql, child_bytes) = kind.selection();
             let mut statement = store.conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}"))?;
-            let mut rows = match offset {
-                None => statement.query([child.to_string()])?,
-                Some(offset) => statement.query(params![
+            let mut rows = if child_bytes {
+                statement.query(params![
                     child.to_string(),
-                    child.inner().to_bytes().as_slice(),
-                    offset
-                ])?,
+                    child.inner().to_bytes().as_slice()
+                ])?
+            } else {
+                statement.query([child.to_string()])?
             };
             let mut details = Vec::new();
             while let Some(row) = rows.next()? {
@@ -414,13 +413,22 @@ mod tests {
                 .any(|line| line.contains("SEARCH events USING INDEX idx_events_event_id")));
             assert!(!details
                 .iter()
-                .any(|line| line.contains("TEMP B-TREE") || line.contains("SCAN events")));
+                .any(|line| line.contains("TEMP B-TREE") || line.contains("SCAN events") || line.contains(&format!("SCAN {table}"))));
             if matches!(kind, OrphanKindV1::Operation) {
                 assert!(details.iter().any(|line| line
                     .contains("SEARCH fork_append_operations USING INDEX")
                     && line.contains("child_id=?")));
+            } else {
+                assert!(details.iter().any(|line| line.contains(&format!("SEARCH {table} USING INDEX {index}")) && line.contains("<expr>=?")), "{details:?}");
             }
         }
+        let mut statement = store.conn.prepare(&format!("EXPLAIN QUERY PLAN {}", super::super::fork_provenance_indexes::ORPHANED_PROVENANCE))?;
+        let details = statement.query_map(params![child.to_string(), child.inner().to_bytes().as_slice()], |row| row.get::<_, String>(3))?.collect::<std::result::Result<Vec<_>, _>>()?;
+        for (table, index) in [("fork_event_origins", "idx_fork_event_origins_child_v1"), ("fork_intervention_admissions", "idx_fork_intervention_admissions_child_v1")] {
+            assert!(details.iter().any(|line| line.contains(&format!("SEARCH {table} USING INDEX {index}")) && line.contains("<expr>=?")), "{details:?}");
+        }
+        assert_eq!(details.iter().filter(|line| line.contains("SEARCH events USING INDEX idx_events_event_id")).count(), 2);
+        assert!(!details.iter().any(|line| line.contains("TEMP B-TREE") || line.contains("SCAN events") || line.contains("SCAN fork_")));
         Ok(())
     }
 }

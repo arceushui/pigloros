@@ -150,6 +150,7 @@ mod counterfactual_store;
 mod fork_attribution_authority_import;
 mod fork_attribution_issuer_policy;
 mod fork_code_two_read;
+mod fork_provenance_indexes;
 mod fork_replay;
 mod fork_replay_admission;
 mod fork_replay_binding;
@@ -1474,11 +1475,6 @@ type ForkEventSuffixV1 = Vec<(
     ForkAppendOperationV1,
 )>;
 
-/// Canonical `EOR1` field 3 starts after the array, magic, version, and bstr heads.
-const EOR1_CHILD_TIMELINE_OFFSET: i64 = 9;
-/// Canonical `FIA1` field 4 follows its 32-byte operation ID.
-const FIA1_CHILD_TIMELINE_OFFSET: i64 = 43;
-
 impl SqliteStore {
     pub(crate) fn require_live_fork_event_session(
         &self,
@@ -2157,6 +2153,7 @@ impl SqliteStore {
                 if read_only {
                     self.validate_authority_schema_and_state()
                         .and_then(|()| self.validate_fork_admission_authority_schema())
+                        .and_then(|()| fork_provenance_indexes::validate(&self.conn))
                         .and_then(|()| self.validate_pipeline_admission_schema())
                         .and_then(|()| self.validate_present_counterfactual_schema())
                 } else {
@@ -2459,10 +2456,13 @@ impl SqliteStore {
     }
 
     fn prepare_fork_admission_authority_schema(&self) -> Result<(), CoreError> {
+        fork_provenance_indexes::require_autocommit(&self.conn)?;
         self.conn
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(Self::into_storage_error)?;
+        let result = self.conn
             .execute_batch(&format!(
-                "BEGIN IMMEDIATE;
-                 CREATE TABLE IF NOT EXISTS fork_admission_authority (
+                "CREATE TABLE IF NOT EXISTS fork_admission_authority (
                      singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
                      fah1_cbor BLOB,
                      last_authority_wall_time INTEGER NOT NULL DEFAULT 0
@@ -2470,12 +2470,18 @@ impl SqliteStore {
                  {}
                  CREATE INDEX IF NOT EXISTS idx_imported_pob1_principal
                      ON imported_fork_principal_owner_bindings(principal_digest);
-                 INSERT OR IGNORE INTO fork_delivery_fence_counter (id, last_fence) VALUES (1, 0);
-                 COMMIT;",
+                 INSERT OR IGNORE INTO fork_delivery_fence_counter (id, last_fence) VALUES (1, 0);",
                 sqlite_schema_ddl(FORK_ADMISSION_SCHEMA_TABLES)
             ))
             .map_err(Self::into_storage_error)
             .and_then(|()| self.validate_fork_admission_authority_schema())
+            .and_then(|()| fork_provenance_indexes::prepare(&self.conn))
+            .and_then(|()| self.validate_fork_admission_authority_schema())
+            .and_then(|()| fork_provenance_indexes::validate(&self.conn))
+            .and_then(|()| self.conn.execute_batch("COMMIT").map_err(Self::into_storage_error));
+        // An unsuccessful open drops this unpublished store/connection even
+        // when native rollback could not establish a settled transaction.
+        fork_provenance_indexes::finish_owned_preparation(&self.conn, result)
     }
 
     fn validate_fork_admission_authority_schema(&self) -> Result<(), CoreError> {
@@ -12750,24 +12756,10 @@ fn sqlite_has_orphaned_fork_provenance(
     child_timeline_id: TimelineId,
 ) -> Result<bool, ForkEventAuthorityErrorV1> {
     conn.query_row(
-        "SELECT EXISTS(
-             SELECT 1 FROM fork_event_origins
-             LEFT JOIN events ON events.timeline_id = ?1
-                 AND events.event_id = fork_event_origins.event_id
-             WHERE substr(fork_event_origins.eor1_cbor, ?3, 16) = ?2
-                 AND events.event_id IS NULL
-         ) OR EXISTS(
-             SELECT 1 FROM fork_intervention_admissions
-             LEFT JOIN events ON events.timeline_id = ?1
-                 AND events.event_id = fork_intervention_admissions.event_id
-             WHERE substr(fork_intervention_admissions.fia1_cbor, ?4, 16) = ?2
-                 AND events.event_id IS NULL
-         )",
+        fork_provenance_indexes::ORPHANED_PROVENANCE,
         params![
             child_timeline_id.to_string(),
-            child_timeline_id.inner().to_bytes().as_slice(),
-            EOR1_CHILD_TIMELINE_OFFSET,
-            FIA1_CHILD_TIMELINE_OFFSET
+            child_timeline_id.inner().to_bytes().as_slice()
         ],
         |row| row.get(0),
     )
