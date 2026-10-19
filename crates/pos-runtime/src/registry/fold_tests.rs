@@ -202,6 +202,12 @@ fn quiet_registry(gate: Arc<ErasureContainmentGateV1>) -> PluginRegistry {
     registry
         .register_test_driver_with_output_policy(plugin_id, "test", policy, budget, driver)
         .test_ok();
+    // The test registration records no schema; admission validates one.
+    registry.schemas.register_claimed(EventTypeSchema {
+        event_type: Kind::new(EPHEMERAL),
+        description: "the quiet Driver's Ephemeral output".to_owned(),
+        json_schema: None,
+    });
     registry.compose_non_participant_drivers().test_ok();
     registry
 }

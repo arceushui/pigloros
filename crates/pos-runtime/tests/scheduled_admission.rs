@@ -4726,11 +4726,15 @@ fn a_reopened_store_and_registry_chain_the_next_fold_node_to_the_persisted_head(
     let host = Host::prepare(&mut sqlite, 1_000);
     let first = first_recovery_tick(&host, &mut sqlite);
     drop(sqlite);
+    // A gate binds one store only, so the reopened store gets a fresh one.
     let mut reopened = ok(SqliteStore::open(&file));
-    ok(reopened.bind_erasure_gate(Arc::clone(&host.gate)));
+    let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
+    ok(reopened.bind_erasure_gate(Arc::clone(&gate)));
     ok(reopened.bind_authority_persistence(host.authority.persistence_binding()));
-    let second = second_recovery_tick(&host, &mut reopened);
-    assert_chained_to_the_persisted_head("sqlite", &host, &reopened, [&first, &second]);
+    let restarted = Host { gate, ..host };
+    let second = second_recovery_tick(&restarted, &mut reopened);
+    let ticks = [&first, &second];
+    assert_chained_to_the_persisted_head("sqlite", &restarted, &reopened, ticks);
 
     let mut memory = MemoryStore::new();
     let host = Host::prepare(&mut memory, 1_000);
