@@ -2460,7 +2460,8 @@ impl SqliteStore {
         self.conn
             .execute_batch("BEGIN IMMEDIATE")
             .map_err(Self::into_storage_error)?;
-        let result = self.conn
+        let result = self
+            .conn
             .execute_batch(&format!(
                 "CREATE TABLE IF NOT EXISTS fork_admission_authority (
                      singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
@@ -2478,7 +2479,11 @@ impl SqliteStore {
             .and_then(|()| fork_provenance_indexes::prepare(&self.conn))
             .and_then(|()| self.validate_fork_admission_authority_schema())
             .and_then(|()| fork_provenance_indexes::validate(&self.conn))
-            .and_then(|()| self.conn.execute_batch("COMMIT").map_err(Self::into_storage_error));
+            .and_then(|()| {
+                self.conn
+                    .execute_batch("COMMIT")
+                    .map_err(Self::into_storage_error)
+            });
         // An unsuccessful open drops this unpublished store/connection even
         // when native rollback could not establish a settled transaction.
         fork_provenance_indexes::finish_owned_preparation(&self.conn, result)
