@@ -94,7 +94,6 @@ fn definition(conn: &Connection, index: &ProvenanceIndexV1) -> Result<Option<Str
             .transpose()
     })
 }
-}
 
 fn validate_index(conn: &Connection, index: &ProvenanceIndexV1, sql: &str) -> Result<()> {
     if normalize(sql) != normalize(index.create) {
