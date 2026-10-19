@@ -15,10 +15,11 @@ use pos_core::counterfactual_store::test_fixtures::{
 use pos_core::{
     CoreError, CounterfactualDependencyReadPortV1, CounterfactualStoreErrorV1,
     DependencyEdgeRecordV1, DependencyNodeCoordinateV1, DependencyNodeRecordV1,
-    DependencyPagedRowV1, DependencyReadScopeV1, ErasureContainmentGateV1, EventDraft,
-    FactualCutV1, FactualHeadV1, FactualOwnerIdV1, FactualPrefixReadPortV1, Hash,
-    RecordedDependencyClassV1, RecordedNodeOriginV1, RecordedSetCountsV1, Seq,
-    TickDependencyRecordV1, TimelineId,
+    DependencyPagedRowV1, DependencyReadScopeV1, ErasureContainmentGateV1, Event, EventDraft,
+    FactualCutV1, FactualFoldEventV1, FactualFoldWindowV1, FactualHeadV1, FactualOwnerIdV1,
+    FactualPrefixReadPortV1, Hash, RecordedDependencyClassV1, RecordedNodeOriginV1,
+    RecordedSetCountsV1, Seq, SeqRange, TickDependencyRecordV1, TimelineId,
+    MAX_FACTUAL_FOLD_SCAN_PER_TICK_V1,
 };
 use pos_store::{memory::MemoryStore, EventStore};
 
@@ -374,17 +375,137 @@ fn f7_set_counts_cover_only_the_timelines_own_set() {
     assert_eq!(ok(store.factual_set_counts(lineage.deep)), counts(0));
 }
 
-/// The fold reads are stubs until ADR-064 R4 slice 3 adds the fold-head rows.
+/// No write path records a fold-head row yet (ADR-064 R4 slice 4), so every
+/// cursor is absent; the in-crate tests seed rows and read them back.
 #[test]
-fn f7_fold_reads_have_no_cursor_and_an_empty_window_before_fold_rows() {
+fn f7_fold_cursors_are_absent_without_fold_head_rows() {
+    let lineage = lineage();
+    for timeline in [lineage.root, lineage.mid, lineage.deep] {
+        assert!(ok(lineage.store.fold_cursor(timeline)).is_none());
+    }
+}
+
+/// The fold window the public reads predict for `(after, through]`: the
+/// newest Events of the logical range, at most the scan cap, in ascending
+/// `seq`, each with its type, payload hash, and bound node.
+fn predicted_window(
+    store: &MemoryStore,
+    timeline: TimelineId,
+    after: u64,
+    through: u64,
+) -> FactualFoldWindowV1 {
+    let all = ok(store.read(timeline, SeqRange::all()));
+    let range = after + 1..=through;
+    let listed: Vec<&Event> = all
+        .iter()
+        .filter(|event| range.contains(&event.seq.as_u64()))
+        .collect();
+    let cap = MAX_FACTUAL_FOLD_SCAN_PER_TICK_V1;
+    let skipped = listed.len().saturating_sub(cap);
+    let kept = &listed[skipped..];
+    let seqs: Vec<Seq> = kept.iter().map(|event| event.seq).collect();
+    let nodes = ok(store.nodes_for_committed_events(timeline, &seqs));
+    let events = kept
+        .iter()
+        .zip(nodes)
+        .map(|(event, node)| FactualFoldEventV1 {
+            seq: event.seq,
+            event_type: event.event_type.clone(),
+            payload_hash: event.payload_hash,
+            node_class: node.as_ref().map(NodeRow::class),
+            node,
+        })
+        .collect();
+    FactualFoldWindowV1 {
+        events,
+        truncated: skipped > 0,
+    }
+}
+
+/// The `seq`s a fold window lists.
+fn window_seqs(listed: &FactualFoldWindowV1) -> Vec<u64> {
+    let seqs = listed.events.iter().map(|event| event.seq.as_u64());
+    seqs.collect()
+}
+
+#[test]
+fn f7_fold_windows_list_the_logical_range_with_hashes_and_bindings() {
     let lineage = lineage();
     let store = &lineage.store;
+    let (root, mid, deep) = (lineage.root, lineage.mid, lineage.deep);
+    let window = |timeline, after, through| {
+        let read = store.fold_window(timeline, Seq::from_u64(after), Seq::from_u64(through));
+        ok(read)
+    };
 
-    for timeline in [lineage.root, lineage.mid, lineage.deep] {
-        assert!(ok(store.fold_cursor(timeline)).is_none());
-        let window = ok(store.fold_window(timeline, Seq::ZERO, Seq::from_u64(8)));
-        assert_eq!(window, pos_core::FactualFoldWindowV1::default());
+    let cases = [
+        (root, 1, 9),
+        (root, 0, 14),
+        (mid, 0, 9),
+        (mid, 5, 100),
+        (deep, 5, 100),
+        (deep, 7, 7),
+        (root, 9, 3),
+    ];
+    for (timeline, after, through) in cases {
+        let expected = predicted_window(store, timeline, after, through);
+        let listed = window(timeline, after, through);
+        assert_eq!(listed, expected, "{after} {through}");
     }
+
+    // The middle Fork inherits `seq` 1 to 6, binds 2 to 5 through the root's
+    // visible Ticks 1 and 2, and its own 9; 6 is in the root's Tick 3, past
+    // the cut.
+    let listed = window(mid, 0, 9);
+    assert_eq!(window_seqs(&listed), (1..=9).collect::<Vec<_>>());
+    let bound = listed.events.iter().map(|event| event.node.is_some());
+    let expected = [false, true, true, true, true, false, false, false, true];
+    assert_eq!(bound.collect::<Vec<_>>(), expected);
+    let endogenous = RecordedDependencyClassV1::EndogenousRecomputed;
+    let mut classes = listed.events.iter().filter_map(|event| event.node_class);
+    assert!(classes.all(|class| class == endogenous));
+    assert!(!listed.truncated);
+    // The deep Fork ends at 7; an empty range lists nothing.
+    assert_eq!(window_seqs(&window(deep, 5, 100)), [6, 7]);
+    assert_eq!(window(deep, 7, 7), FactualFoldWindowV1::default());
+}
+
+#[test]
+fn f7_a_fold_window_keeps_the_newest_events_up_to_the_scan_cap() {
+    let mut store = MemoryStore::new();
+    let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
+    assert_ok(store.bind_erasure_gate(gate));
+    let root = ok(store.create_timeline("factual-fold-scan")).id();
+    assert_ok(store.append(root, &[draft(1)]));
+    // The Fork holds the cap and one more Event of its own above the root's.
+    let fork = fork_at(&mut store, root, 1);
+    let cap = MAX_FACTUAL_FOLD_SCAN_PER_TICK_V1;
+    let drafts: Vec<EventDraft> = (0..=cap).map(|_| draft(1)).collect();
+    assert_ok(store.append(fork, &drafts));
+    let last = ok(u64::try_from(cap + 2));
+    let seqs = |listed: &FactualFoldWindowV1| {
+        let first = listed.events.first().map(|event| event.seq.as_u64());
+        let newest = listed.events.last().map(|event| event.seq.as_u64());
+        (listed.events.len(), first, newest, listed.truncated)
+    };
+    let window = |after, through| {
+        let read = store.fold_window(fork, Seq::from_u64(after), Seq::from_u64(through));
+        ok(read)
+    };
+
+    // One Event past the cap, all the Fork's own: the oldest is left out and
+    // the root is not read.
+    let full = window(0, last);
+    assert_eq!(seqs(&full), (cap, Some(3), Some(last), true));
+    // Exactly the cap is not truncated, wherever the range ends.
+    let exact = window(2, last);
+    assert_eq!(seqs(&exact), (cap, Some(3), Some(last), false));
+    assert_eq!(exact.events, full.events);
+    let inside = window(1, last - 1);
+    assert_eq!(seqs(&inside), (cap, Some(2), Some(last - 1), false));
+    // One past the cap across the Fork point: the root's Event fills it.
+    let across = window(0, last - 1);
+    assert_eq!(seqs(&across), (cap, Some(2), Some(last - 1), true));
 }
 
 #[test]
@@ -474,6 +595,8 @@ fn f9_factual_reads_fail_closed_without_a_gate_or_past_a_blocked_ancestor() {
         assert!(store.nodes_for_committed_events(timeline, &seqs).is_err());
         assert!(store.last_step_node(timeline, &step).is_err());
         assert!(store.factual_set_counts(timeline).is_err());
+        assert!(store.fold_cursor(timeline).is_err());
+        assert!(store.fold_window(timeline, Seq::ZERO, seqs[0]).is_err());
     }
 
     let open = lineage();
