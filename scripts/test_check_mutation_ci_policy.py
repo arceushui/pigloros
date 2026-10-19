@@ -29,7 +29,7 @@ def toolchain_step(job: dict) -> dict:
     return next(
         step
         for step in job["steps"]
-        if str(step.get("uses", "")).startswith(CHECKER.TOOLCHAIN_ACTION)
+        if str(step.get("uses", "")).startswith("dtolnay/rust-toolchain@")
     )
 
 
@@ -67,8 +67,34 @@ class MutationCiPolicyTests(unittest.TestCase):
 
     def test_stable_toolchain_is_rejected(self) -> None:
         def mutate(job: dict) -> None:
-            toolchain_step(job)["with"]["toolchain"] = "1.97.1"
-            job["env"]["RUSTUP_TOOLCHAIN"] = "1.97.1"
+            toolchain_step(job)["with"]["toolchain"] = "stable"
+            job["env"]["RUSTUP_TOOLCHAIN"] = "stable"
+
+        self.assert_rejected(mutate)
+
+    def test_undated_nightly_is_rejected(self) -> None:
+        def mutate(job: dict) -> None:
+            toolchain_step(job)["with"]["toolchain"] = "nightly-latest"
+            job["env"]["RUSTUP_TOOLCHAIN"] = "nightly-latest"
+
+        self.assert_rejected(mutate)
+
+    def test_empty_job_env_is_rejected(self) -> None:
+        self.assert_rejected(lambda job: job.update(env=None))
+
+    def test_empty_toolchain_inputs_are_rejected(self) -> None:
+        self.assert_rejected(lambda job: toolchain_step(job).update({"with": None}))
+
+    def test_step_level_toolchain_override_is_rejected(self) -> None:
+        def mutate(job: dict) -> None:
+            step_running(job, "cargo mutants")["env"] = {"RUSTUP_TOOLCHAIN": "stable"}
+
+        self.assert_rejected(mutate)
+
+    def test_plus_toolchain_mutants_invocation_is_rejected(self) -> None:
+        def mutate(job: dict) -> None:
+            run = step_running(job, "cargo mutants")
+            run["run"] = run["run"].replace("cargo mutants", "cargo +stable mutants")
 
         self.assert_rejected(mutate)
 
@@ -91,6 +117,27 @@ class MutationCiPolicyTests(unittest.TestCase):
 
         self.assert_rejected(mutate)
 
+    def test_commented_out_guard_is_rejected(self) -> None:
+        def mutate(job: dict) -> None:
+            guard = step_running(job, "rustup show active-toolchain")
+            guard["run"] = guard["run"].replace("[[ ", "# [[ ")
+
+        self.assert_rejected(mutate)
+
+    def test_non_fatal_guard_is_rejected(self) -> None:
+        def mutate(job: dict) -> None:
+            guard = step_running(job, "rustup show active-toolchain")
+            guard["run"] = guard["run"].replace("-* ]]", "-* ]] || true")
+
+        self.assert_rejected(mutate)
+
+    def test_guard_without_errexit_is_rejected(self) -> None:
+        def mutate(job: dict) -> None:
+            guard = step_running(job, "rustup show active-toolchain")
+            guard["run"] = guard["run"].replace("set -euo pipefail\n", "")
+
+        self.assert_rejected(mutate)
+
     def test_guard_after_mutants_is_rejected(self) -> None:
         def mutate(job: dict) -> None:
             guard = step_running(job, "rustup show active-toolchain")
@@ -109,6 +156,20 @@ class MutationCiPolicyTests(unittest.TestCase):
         def mutate(job: dict) -> None:
             run = step_running(job, "cargo mutants")
             run["run"] = run["run"].replace("-Zunstable-options", "--quiet")
+
+        self.assert_rejected(mutate)
+
+    def test_dropped_fail_fast_is_rejected(self) -> None:
+        def mutate(job: dict) -> None:
+            run = step_running(job, "cargo mutants")
+            run["run"] = run["run"].replace("--fail-fast", "--quiet")
+
+        self.assert_rejected(mutate)
+
+    def test_commented_out_mutants_run_is_rejected(self) -> None:
+        def mutate(job: dict) -> None:
+            run = step_running(job, "cargo mutants")
+            run["run"] = "# " + run["run"].replace("\n", "\n# ")
 
         self.assert_rejected(mutate)
 
