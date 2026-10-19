@@ -10,10 +10,12 @@ use pos_conformance::{DependencyClassV1, DependencyNodeV1};
 use pos_core::output_policy::OutputAuthorityV1;
 use pos_core::{
     assemble_factual_tick, factual_classification_bundle_bytes, CanonicalBytes,
-    DependencyNodeCoordinateV1, EntityId, EventDraft, FactualDriverStepV1, FactualIngressEventV1,
-    FactualInputV1, FactualOutputV1, FactualOwnerIdV1, FactualPriorNodeV1, FactualRuleV1,
-    FactualScheduledTickV1, FactualTickContextV1, FactualTickShapeV1, Hash, Kind,
-    PipelineAttemptIdV1, RecordedDependencyClassV1, Seq, TimelineId,
+    DependencyNodeCoordinateV1, DependencyNodeRecordV1, EntityId, EventDraft, FactualDriverStepV1,
+    FactualFoldCursorV1, FactualFoldEventV1, FactualFoldSourceV1, FactualFoldWindowV1,
+    FactualHostOwnerV1, FactualIngressEventV1, FactualInputV1, FactualOutputV1, FactualOwnerIdV1,
+    FactualPriorNodeV1, FactualRuleV1, FactualScheduledTickV1, FactualTickContextV1,
+    FactualTickShapeV1, Hash, Kind, PipelineAttemptIdV1, RecordedDependencyClassV1,
+    RecordedNodeOriginV1, Seq, TickDependencyRecordV1, TimelineId, FACTUAL_FOLD_SCHEMA_ID_V1,
 };
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
@@ -158,6 +160,7 @@ fn scheduled_tick() -> TestResult<FactualScheduledTickV1> {
             step_inputs,
             outputs,
         }],
+        fold: None,
     })
 }
 
@@ -206,5 +209,97 @@ fn assembled_edges_decode_in_the_conformance_codec_with_registered_rules() -> Te
     for item in record.nodes() {
         assert_eq!(item.origin().code(), 0);
     }
+    Ok(())
+}
+
+/// The context of the Tick the fold-part case assembles.
+fn fold_context() -> TestResult<FactualTickContextV1> {
+    Ok(FactualTickContextV1 {
+        timeline_id: TimelineId::new(),
+        tick: 4,
+        attempt_id: PipelineAttemptIdV1::try_new([2; 16])?,
+        evidence_digest: Hash::from_bytes([0x0e; 32]),
+        authority_grant: Hash::from_bytes(GRANT),
+    })
+}
+
+/// The fold checkpoint node Tick 3 recorded: the head of the fold chain.
+fn fold_head() -> TestResult<DependencyNodeRecordV1> {
+    let owner = FactualHostOwnerV1::Fold.as_str().to_owned();
+    let schema = FACTUAL_FOLD_SCHEMA_ID_V1;
+    let digest = Hash::from_bytes([0x81; 32]);
+    let coordinate = DependencyNodeCoordinateV1::try_new(3, 0, owner, 0, schema, digest)?;
+    let class = RecordedDependencyClassV1::EndogenousRecomputed;
+    let origin = RecordedNodeOriginV1::Committed;
+    let provenance = Hash::from_bytes([0x82; 32]);
+    DependencyNodeRecordV1::try_new(coordinate, class, origin, Vec::new(), provenance)
+        .map_err(Into::into)
+}
+
+/// A truncated fold window of `count` Events without a node after the head:
+/// a fold-history node, a chain of fold checkpoint nodes, and one ingress
+/// node per Event that only the fold part inputs.
+fn fold_source(count: u64) -> TestResult<FactualFoldSourceV1> {
+    let event = |seq: u64| FactualFoldEventV1 {
+        seq: Seq::from_u64(seq),
+        event_type: Kind::new("world.fact"),
+        payload_hash: Hash::from_bytes([0x91; 32]),
+        node_class: None,
+        node: None,
+    };
+    let cursor = FactualFoldCursorV1 {
+        scanned_through: Seq::from_u64(2),
+        head: Some(fold_head()?),
+    };
+    Ok(FactualFoldSourceV1 {
+        observed_through: Seq::from_u64(10 + count),
+        cursor: Some(cursor),
+        window: FactualFoldWindowV1 {
+            events: (11..=10 + count).map(event).collect(),
+            truncated: true,
+        },
+    })
+}
+
+/// The owner IDs of the source and the consumer of every edge of a record,
+/// after each edge decodes in the conformance codec in `IDP1` order.
+fn decoded_owner_pairs(record: &TickDependencyRecordV1) -> TestResult<Vec<(String, String)>> {
+    let mut pairs = Vec::new();
+    for edge in record.edges() {
+        let decoded = InputDependencyV1::from_canonical_cbor(edge.as_bytes())?;
+        let (source, consumer) = (decoded.source, decoded.consumer);
+        assert!(source.coordinate_key() < consumer.coordinate_key());
+        pairs.push((source.owner_id, consumer.owner_id));
+    }
+    Ok(pairs)
+}
+
+/// ADR-064 R4.2 and R4.3: every edge of the fold part decodes in the
+/// conformance codec, so its source sorts before its consumer. The fold-only
+/// ingress nodes feed their fold node, the head and the fold-history node of
+/// the same Tick feed the first, the fold nodes chain, and the last feeds the
+/// snapshot node. A fold owner ID that sorts before `host.ingress` or
+/// `host.fold-history` fails here.
+#[test]
+fn assembled_fold_part_edges_decode_in_the_conformance_codec() -> TestResult {
+    let mut tick = scheduled_tick()?;
+    tick.fold = Some(Box::new(fold_source(4_095)?));
+    let shape = FactualTickShapeV1::Scheduled(tick);
+    let assembled = assemble_factual_tick(&fold_context()?, &shape)?;
+    assert_eq!(assembled.fold().checkpoints.len(), 2);
+    assert_eq!(assembled.fold().history.len(), 1);
+    let pairs = decoded_owner_pairs(assembled.record())?;
+    let fold = FactualHostOwnerV1::Fold.as_str();
+    let fed_by = |owner: FactualHostOwnerV1| {
+        let into_fold = |pair: &&(String, String)| pair.0 == owner.as_str() && pair.1 == fold;
+        pairs.iter().filter(into_fold).count()
+    };
+    assert_eq!(fed_by(FactualHostOwnerV1::Ingress), 4_095);
+    assert_eq!(fed_by(FactualHostOwnerV1::FoldHistory), 1);
+    // The head into the first fold node, and the first into the second.
+    assert_eq!(fed_by(FactualHostOwnerV1::Fold), 2);
+    let observation = FactualHostOwnerV1::Observation.as_str();
+    let into_snapshot = (fold.to_owned(), observation.to_owned());
+    assert!(pairs.contains(&into_snapshot));
     Ok(())
 }

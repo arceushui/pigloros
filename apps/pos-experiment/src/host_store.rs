@@ -85,6 +85,24 @@ macro_rules! forward_factual_prefix_reads {
                 let reads = crate::FactualReadsV1::factual_reads(&self.$field);
                 reads.factual_set_counts(timeline)
             }
+
+            fn fold_cursor(
+                &self,
+                timeline: pos_core::TimelineId,
+            ) -> Result<Option<pos_core::FactualFoldCursorV1>, pos_core::CoreError> {
+                let reads = crate::FactualReadsV1::factual_reads(&self.$field);
+                reads.fold_cursor(timeline)
+            }
+
+            fn fold_window(
+                &self,
+                timeline: pos_core::TimelineId,
+                after: pos_core::Seq,
+                through: pos_core::Seq,
+            ) -> Result<pos_core::FactualFoldWindowV1, pos_core::CoreError> {
+                let reads = crate::FactualReadsV1::factual_reads(&self.$field);
+                reads.fold_window(timeline, after, through)
+            }
         }
     };
 }
@@ -323,6 +341,24 @@ impl pos_core::FactualPrefixReadPortV1 for HostedExperimentStore {
         timeline: TimelineId,
     ) -> Result<pos_core::RecordedSetCountsV1, CoreError> {
         self.with_admission(|store| store.factual_set_counts(timeline))
+            .and_then(std::convert::identity)
+    }
+
+    fn fold_cursor(
+        &self,
+        timeline: TimelineId,
+    ) -> Result<Option<pos_core::FactualFoldCursorV1>, CoreError> {
+        self.with_admission(|store| store.fold_cursor(timeline))
+            .and_then(std::convert::identity)
+    }
+
+    fn fold_window(
+        &self,
+        timeline: TimelineId,
+        after: Seq,
+        through: Seq,
+    ) -> Result<pos_core::FactualFoldWindowV1, CoreError> {
+        self.with_admission(|store| store.fold_window(timeline, after, through))
             .and_then(std::convert::identity)
     }
 }
@@ -993,6 +1029,90 @@ mod host_store_tests {
             store.factual_set_counts(timeline)?,
             pos_core::RecordedSetCountsV1::default()
         );
+        assert!(store.fold_cursor(timeline)?.is_none());
+        assert_eq!(
+            store.fold_window(timeline, Seq::ZERO, Seq::from_u64(1))?,
+            pos_core::FactualFoldWindowV1::default()
+        );
+        Ok(())
+    }
+
+    /// One ordinary experiment Event draft.
+    fn fold_read_draft(value: u8) -> EventDraft {
+        EventDraft::new(
+            EntityId::new(),
+            Kind::new("experiment.host.test"),
+            CanonicalBytes::from_vec(vec![value]),
+        )
+    }
+
+    /// Insert a fold-head row of `timeline` without a head, scanned through
+    /// `seq` 1, into the `SQLite` file while no store holds it, so the reads
+    /// need no scheduled Tick.
+    fn seed_fold_head(path: &std::path::Path, timeline: TimelineId) -> rusqlite::Result<()> {
+        let zero = "0".repeat(64);
+        let table = "counterfactual_dependency_fold_heads";
+        let sql = format!("INSERT INTO {table} VALUES ('{timeline}', 1, 1, X'{zero}');");
+        rusqlite::Connection::open(path)?.execute_batch(&sql)
+    }
+
+    /// A seeded fold-head row and appended Events reach the caller through
+    /// the hosted forwarders and the decorator forwarders alike, so neither
+    /// forwards to a stub.
+    #[test]
+    fn hosted_and_decorated_stores_forward_non_empty_fold_reads(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use pos_core::{FactualFoldCursorV1, FactualPrefixReadPortV1};
+
+        let directory = tempfile::tempdir()?;
+        let cursor = Some(FactualFoldCursorV1 {
+            scanned_through: Seq::from_u64(1),
+            head: None,
+        });
+        let (after, through) = (Seq::ZERO, Seq::from_u64(2));
+        let drafts = [fold_read_draft(1), fold_read_draft(2)];
+
+        let hosted_path = directory.path().join("hosted.db");
+        let hosted_text = hosted_path.to_string_lossy().into_owned();
+        let config = || pos_store::StoreConfig::Sqlite {
+            path: hosted_text.clone(),
+        };
+        let mut hosted = HostedExperimentStore::open(config())?;
+        let timeline = hosted.create_timeline("hosted-fold-reads")?.id();
+        hosted.append(timeline, &drafts)?;
+        drop(hosted);
+        seed_fold_head(&hosted_path, timeline)?;
+        let hosted = HostedExperimentStore::open(config())?;
+        assert_eq!(hosted.fold_cursor(timeline)?, cursor);
+        let window = hosted.fold_window(timeline, after, through)?;
+        let listed = window.events.iter().map(|event| event.payload_hash);
+        let events = hosted.read(timeline, SeqRange::all())?;
+        let appended = events.iter().map(|event| event.payload_hash);
+        assert_eq!(listed.collect::<Vec<_>>(), appended.collect::<Vec<_>>());
+        assert_eq!(window.events.len(), 2);
+
+        let inner_path = directory.path().join("inner.db");
+        let inner_text = inner_path.to_string_lossy().into_owned();
+        let open_inner = || -> Result<pos_store::sqlite::SqliteStore, CoreError> {
+            let mut store = pos_store::sqlite::SqliteStore::open(&inner_text)?;
+            let gate = Arc::new(pos_core::ErasureContainmentGateV1::new_test_open());
+            store.bind_erasure_gate(gate)?;
+            Ok(store)
+        };
+        let mut inner = open_inner()?;
+        let timeline = inner.create_timeline("decorated-fold-reads")?.id();
+        inner.append(timeline, &drafts)?;
+        drop(inner);
+        seed_fold_head(&inner_path, timeline)?;
+        let inner = open_inner()?;
+        let expected = inner.fold_window(timeline, after, through)?;
+        assert_eq!(expected.events.len(), 2);
+        let decorated = FailSecondTimelineLookupStore {
+            inner: Box::new(inner),
+            lookups: Cell::new(0),
+        };
+        assert_eq!(decorated.fold_cursor(timeline)?, cursor);
+        assert_eq!(decorated.fold_window(timeline, after, through)?, expected);
         Ok(())
     }
 
