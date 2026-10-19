@@ -126,13 +126,12 @@ fn validate_index(conn: &Connection, index: &ProvenanceIndexV1, sql: &str) -> Re
 
 pub(super) fn prepare(conn: &Connection) -> Result<()> {
     INDEXES.iter().try_for_each(|index| {
-        let sql = match definition(conn, index)? {
-            Some(sql) => sql,
-            None => {
-                conn.execute_batch(index.create)
-                    .map_err(super::SqliteStore::into_storage_error)?;
-                definition(conn, index)?.ok_or_else(|| incompatible(index))?
-            }
+        let sql = if let Some(sql) = definition(conn, index)? {
+            sql
+        } else {
+            conn.execute_batch(index.create)
+                .map_err(super::SqliteStore::into_storage_error)?;
+            definition(conn, index)?.ok_or_else(|| incompatible(index))?
         };
         validate_index(conn, index, &sql)
     })

@@ -16,7 +16,7 @@ fn remove_indexes(conn: &Connection) -> rusqlite::Result<()> {
     )
 }
 
-fn storage_error<T>(result: Result<T>) {
+fn storage_error<T>(result: &Result<T>) {
     assert!(matches!(result, Err(CoreError::Storage(_))));
 }
 
@@ -141,7 +141,7 @@ fn read_only_open_refuses_legacy_indexes_until_one_writable_preparation() -> Fal
     drop(store);
     match SqliteStore::open_read_only(path) {
         Err(CoreError::Storage(message)) => {
-            assert!(message.contains("prepare once using read-write open"))
+            assert!(message.contains("prepare once using read-write open"));
         }
         _ => return Err("read-only legacy open must refuse".into()),
     }
@@ -192,8 +192,8 @@ fn incompatible_definitions_are_rejected_not_repaired_by_public_open() -> Fallib
         store.conn.execute_batch(ddl)?;
         let before = schema(&store.conn)?;
         drop(store);
-        storage_error(SqliteStore::open_read_only(path));
-        storage_error(SqliteStore::open(path));
+        storage_error(&SqliteStore::open_read_only(path));
+        storage_error(&SqliteStore::open(path));
         let raw = Connection::open(path)?;
         assert_eq!(schema(&raw)?, before, "{ddl}");
     }
@@ -251,7 +251,7 @@ fn every_retained_create_and_new_index_failure_rolls_back_the_entire_helper() ->
                     Authorization::Allow
                 }
             }))?;
-        storage_error(store.prepare_fork_admission_authority_schema());
+        storage_error(&store.prepare_fork_admission_authority_schema());
         store
             .conn
             .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)?;
@@ -313,7 +313,7 @@ fn seed_validation_commit_and_rollback_faults_fail_closed() -> Fallible<()> {
             );
             assert!(!store.conn.is_autocommit());
         }
-        storage_error(result);
+        storage_error(&result);
         store
             .conn
             .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)?;
@@ -327,7 +327,7 @@ fn seed_validation_commit_and_rollback_faults_fail_closed() -> Fallible<()> {
     let store = fresh_helper_store()?;
     let before = schema(&store.conn)?;
     store.conn.commit_hook(Some(|| true))?;
-    storage_error(store.prepare_fork_admission_authority_schema());
+    storage_error(&store.prepare_fork_admission_authority_schema());
     store.conn.commit_hook::<fn() -> bool>(None)?;
     assert!(store.conn.is_autocommit());
     assert_eq!(schema(&store.conn)?, before);
@@ -340,7 +340,7 @@ fn helper_never_rolls_back_a_transaction_it_did_not_acquire() -> Fallible<()> {
     store
         .conn
         .execute_batch("BEGIN; CREATE TABLE caller_owned (id)")?;
-    storage_error(store.prepare_fork_admission_authority_schema());
+    storage_error(&store.prepare_fork_admission_authority_schema());
     assert!(!store.conn.is_autocommit());
     assert!(schema(&store.conn)?
         .iter()
@@ -353,7 +353,7 @@ fn helper_never_rolls_back_a_transaction_it_did_not_acquire() -> Fallible<()> {
             Authorization::Allow
         }
     }))?;
-    storage_error(store.prepare_fork_admission_authority_schema());
+    storage_error(&store.prepare_fork_admission_authority_schema());
     store
         .conn
         .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)?;
@@ -460,7 +460,7 @@ fn read_only_open_requires_the_second_index_too() -> Fallible<()> {
         .conn
         .execute_batch("DROP INDEX idx_fork_intervention_admissions_child_v1")?;
     drop(store);
-    storage_error(SqliteStore::open_read_only(path));
+    storage_error(&SqliteStore::open_read_only(path));
     drop(SqliteStore::open(path)?);
     drop(SqliteStore::open_read_only(path)?);
     Ok(())
@@ -490,7 +490,7 @@ fn native_metadata_is_checked_even_if_the_catalog_sql_claims_the_canonical_ddl()
             definition(&store.conn, &INDEXES[0])?,
             Some(INDEXES[0].create.to_owned())
         );
-        storage_error(validate(&store.conn));
+        storage_error(&validate(&store.conn));
     }
     Ok(())
 }
@@ -517,7 +517,7 @@ fn final_revalidation_failure_rolls_back_both_new_indexes() -> Fallible<()> {
                 Authorization::Allow
             }
         }))?;
-    storage_error(store.prepare_fork_admission_authority_schema());
+    storage_error(&store.prepare_fork_admission_authority_schema());
     store
         .conn
         .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)?;
