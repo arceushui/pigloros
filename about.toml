@@ -26,3 +26,8 @@ accepted = [
   "CC0-1.0",
   "MPL-2.0",
 ]
+
+# Owner licence decision, 2026-10-19, Redmine #426: mirrors the crate-scoped
+# webpki-roots exception in deny.toml.
+[webpki-roots]
+accepted = ["CDLA-Permissive-2.0"]
