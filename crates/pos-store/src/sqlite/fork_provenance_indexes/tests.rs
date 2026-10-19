@@ -456,7 +456,9 @@ fn read_only_open_requires_the_second_index_too() -> Fallible<()> {
     let path = directory.path().join("missing-fia.sqlite");
     let path = path.to_str().ok_or("UTF-8 path")?;
     let store = SqliteStore::open(path)?;
-    store.conn.execute_batch("DROP INDEX idx_fork_intervention_admissions_child_v1")?;
+    store
+        .conn
+        .execute_batch("DROP INDEX idx_fork_intervention_admissions_child_v1")?;
     drop(store);
     storage_error(SqliteStore::open_read_only(path));
     drop(SqliteStore::open(path)?);
@@ -484,7 +486,10 @@ fn native_metadata_is_checked_even_if_the_catalog_sql_claims_the_canonical_ddl()
             "UPDATE sqlite_schema SET sql=?1 WHERE name='idx_fork_event_origins_child_v1'",
             [INDEXES[0].create],
         )?;
-        assert_eq!(definition(&store.conn, &INDEXES[0])?, Some(INDEXES[0].create.to_owned()));
+        assert_eq!(
+            definition(&store.conn, &INDEXES[0])?,
+            Some(INDEXES[0].create.to_owned())
+        );
         storage_error(validate(&store.conn));
     }
     Ok(())
@@ -496,17 +501,26 @@ fn final_revalidation_failure_rolls_back_both_new_indexes() -> Fallible<()> {
     let before = schema(&store.conn)?;
     let reads = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&reads);
-    store.conn.authorizer(Some(move |context: AuthContext<'_>| {
-        if matches!(context.action, AuthAction::Read { table_name: "pragma_index_list", column_name: "name" })
-            && observed.fetch_add(1, Ordering::SeqCst) == 2
-        {
-            Authorization::Deny
-        } else {
-            Authorization::Allow
-        }
-    }))?;
+    store
+        .conn
+        .authorizer(Some(move |context: AuthContext<'_>| {
+            if matches!(
+                context.action,
+                AuthAction::Read {
+                    table_name: "pragma_index_list",
+                    column_name: "name"
+                }
+            ) && observed.fetch_add(1, Ordering::SeqCst) == 2
+            {
+                Authorization::Deny
+            } else {
+                Authorization::Allow
+            }
+        }))?;
     storage_error(store.prepare_fork_admission_authority_schema());
-    store.conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)?;
+    store
+        .conn
+        .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)?;
     assert_eq!(reads.load(Ordering::SeqCst), 3);
     assert!(store.conn.is_autocommit());
     assert_eq!(schema(&store.conn)?, before);
