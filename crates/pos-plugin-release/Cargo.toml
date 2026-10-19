@@ -11,7 +11,7 @@ base64 = { workspace = true, features = ["alloc"] }
 # HTTPS release sources (ADR-061 amendment revision 1): exact pins with the
 # accepted features only. The ring provider is set on each transport's own TLS
 # configuration, never as a process-wide default.
-rustls = { version = "=0.23.45", default-features = false, features = [
+rustls = { version = "=0.23.46", default-features = false, features = [
   "ring",
   "std",
   "tls12",
