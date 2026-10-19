@@ -40,8 +40,6 @@ use self::{reply::ExpectedRoot, socket::SealedUnixSocket};
 const MOUNTFSD_SOCKET: &str = "/run/systemd/io.systemd.MountFileSystem";
 /// mountfsd runs as root; any other peer is rejected before the call.
 const MOUNTFSD_PEER_UID: u32 = 0;
-/// Owner decision Q7.4: one `MountImage` transaction is bounded to 60 s.
-pub(super) const MOUNT_IMAGE_DEADLINE: Duration = Duration::from_mins(1);
 
 /// The ADR-087 activation port between provider lifecycle code and systemd.
 ///
@@ -166,6 +164,9 @@ pub struct MountfsdImageActivator {
 }
 
 impl MountfsdImageActivator {
+    /// Owner decision Q7.4: one `MountImage` transaction is bounded to 60 s.
+    pub(crate) const DEADLINE: Duration = Duration::from_mins(1);
+
     /// Connect to the fixed mountfsd socket and require a root peer.
     ///
     /// # Errors
@@ -199,7 +200,7 @@ impl ImageActivator for MountfsdImageActivator {
         self,
         image: ActivationImage,
     ) -> Result<QuarantinedRootMount, ImageActivationError> {
-        self.mount_image_within(image, MOUNT_IMAGE_DEADLINE).await
+        self.mount_image_within(image, Self::DEADLINE).await
     }
 }
 
