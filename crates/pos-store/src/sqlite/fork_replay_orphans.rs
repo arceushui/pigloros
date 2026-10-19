@@ -267,7 +267,7 @@ mod tests {
     }
 
     #[test]
-    fn unindexed_unrelated_provenance_rows_count_without_becoming_authority_dependencies(
+    fn unrelated_provenance_preserves_the_requested_childs_exact_budget(
     ) -> Fallible<()> {
         let (_directory, store, world) = fixture(Shape::Mixed)?;
         let child = world.child_at(0)?.id;
@@ -299,12 +299,14 @@ mod tests {
             child
         )?);
         let bytes = 3 * child.to_string().len();
-        // Three actual provenance rows, plus one indexed root Event visit.
-        let (result, remaining, open) = read(&store.conn, child, 23 + 4, bytes)?;
+        // Only this child's four operations/origins, two interventions and
+        // three boundary rows belong to this read. Foreign provenance is not
+        // a reason to enlarge the independently derived 23-visit allowance.
+        let (result, remaining, open) = read(&store.conn, child, 23, bytes)?;
         result?;
         assert_eq!(remaining, 0);
         assert!(open);
-        let (result, _, open) = read(&store.conn, child, 23 + 3, bytes)?;
+        let (result, _, open) = read(&store.conn, child, 22, bytes)?;
         assert_eq!(result, Err(Error::CorruptAuthority));
         assert!(!open);
         Ok(())
