@@ -16,8 +16,8 @@ use std::time::Duration;
 
 use pos_core::{
     AppendDedupKey, AppendDedupScope, AppendIdentity, CanonicalBytes, CoreError,
-    DependencyNodeRecordV1, EntityId, ErasureContainmentGateV1, EventDraft, EventStore,
-    FactualCutV1, FactualFoldCursorV1, FactualFoldWindowV1, FactualHeadV1, FactualOwnerIdV1,
+    DependencyNodeRecordV1, EntityId, ErasureContainmentGateV1, EventDraft, FactualCutV1,
+    FactualFoldCursorV1, FactualFoldWindowV1, FactualHeadV1, FactualOwnerIdV1,
     FactualPrefixReadPortV1, Hash, Kind, PipelineAdmissionBasisV1, PipelineAdmissionPortV1,
     PipelineAttemptIdV1, PipelineEvidenceRefV1, PipelineOutcomeV1, PipelineReceiptLookupV1,
     PipelineSecurityRevisionsV1, RecordedSetCountsV1, Seq, TimelineId, TimelineMeta,

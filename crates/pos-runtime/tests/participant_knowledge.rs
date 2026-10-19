@@ -2133,8 +2133,8 @@ fn the_authorized_pass_declares_its_view_digest_and_no_host_derived_events() {
         assert_eq!(dependencies.tick(), 1, "{name}");
         // Only the fold part binds Events: base Events, none forwarded.
         let base = Seq::from_u64(BASE_CUT);
-        let bound = dependencies.event_nodes();
-        assert!(bound.iter().all(|binding| binding.seq <= base), "{name}");
+        let bindings = dependencies.event_nodes();
+        assert!(bindings.iter().all(|binding| binding.seq <= base), "{name}");
         let nodes = dependencies.record().nodes();
         let rest: Vec<_> = nodes
             .iter()
