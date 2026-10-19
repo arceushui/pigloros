@@ -228,9 +228,9 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn a_resolution_keeps_at_most_sixteen_addresses() -> Result<(), Box<dyn std::error::Error>> {
         let resolver = resolver(many_lookup);
-        let resolved =
+        let addresses =
             resolver.resolve(&uri("https://many.test/")?, &Config::default(), wait(5))?;
-        let ports = resolved.iter().map(SocketAddr::port).collect::<Vec<_>>();
+        let ports = addresses.iter().map(SocketAddr::port).collect::<Vec<_>>();
         assert_eq!(ports, (1..=16).collect::<Vec<_>>());
         Ok(())
     }
@@ -239,8 +239,8 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn no_address_is_host_not_found() -> Result<(), Box<dyn std::error::Error>> {
         let resolver = resolver(empty_lookup);
-        let resolved = resolver.resolve(&uri("https://none.test/")?, &Config::default(), wait(5));
-        assert!(matches!(resolved, Err(ureq::Error::HostNotFound)));
+        let addresses = resolver.resolve(&uri("https://none.test/")?, &Config::default(), wait(5));
+        assert!(matches!(addresses, Err(ureq::Error::HostNotFound)));
         Ok(())
     }
 
