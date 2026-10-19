@@ -302,13 +302,6 @@ impl VisibleSetV1<'_> {
         })
     }
 
-    /// The latest visible fold-head row: its scanned-through `seq` and head
-    /// digest.
-    fn fold_head(&self) -> Option<(Seq, Hash)> {
-        let heads = self.rows.fold_heads.range(..=self.bound);
-        heads.next_back().map(|(_, row)| *row)
-    }
-
     /// The latest visible step node of the owner.
     fn step_node(&self, owner: &FactualOwnerIdV1) -> Option<DependencyNodeRecordV1> {
         let ticks = self.rows.owners.get(owner);
@@ -317,6 +310,14 @@ impl VisibleSetV1<'_> {
             .and_then(|(_, key)| self.rows.nodes.get(key))
             .cloned()
     }
+}
+
+/// The latest fold-head row of a visible set: its scanned-through `seq` and
+/// head digest. A free function, so it is general over both lifetimes of the
+/// set and can be passed to `first_visible` as it is.
+fn visible_fold_head(set: &VisibleSetV1<'_>) -> Option<(Seq, Hash)> {
+    let mut heads = set.rows.fold_heads.range(..=set.bound);
+    heads.next_back().map(|(_, row)| *row)
 }
 
 /// The fold read entry of an own Event of a Timeline that inherits `prefix`
@@ -888,7 +889,7 @@ impl FactualPrefixReadPortV1 for MemoryStore {
     fn fold_cursor(&self, timeline: TimelineId) -> Result<Option<FactualFoldCursorV1>, CoreError> {
         self.read_fenced(timeline, |store| {
             let sets = store.visible_sets(timeline)?;
-            let row = first_visible(&sets, VisibleSetV1::fold_head);
+            let row = first_visible(&sets, visible_fold_head);
             let lookup = |digest: &Hash| {
                 let found = first_visible(&sets, |set| set.digest_node(digest));
                 Ok(found.map(|bound| bound.0))
@@ -1555,6 +1556,9 @@ mod tests {
                 Err(StoreError::ForkNotFound)
             );
         }
+        for timeline in [root, fork] {
+            assert_fold_reads_fenced(&store, timeline);
+        }
         let before = snapshot(&store, fork);
         let appended =
             store.append_counterfactual_tick_with_dependencies(fork, &expected, &drafts, &second);
@@ -1683,6 +1687,14 @@ mod tests {
         (read_nodes(store, scope, 5), read_edges(store, scope, 5))
     }
 
+    /// Both fold reads of `timeline` fail closed.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn assert_fold_reads_fenced(store: &MemoryStore, timeline: TimelineId) {
+        assert!(store.fold_cursor(timeline).is_err(), "{timeline}");
+        let window = store.fold_window(timeline, Seq::ZERO, Seq::from_u64(1));
+        assert!(window.is_err(), "{timeline}");
+    }
+
     /// Both row kinds of `scope` fail closed behind the erasure fence.
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn assert_fenced(store: &MemoryStore, scope: Scope) {
@@ -1722,6 +1734,7 @@ mod tests {
         for scope in [fork_scope(fork, 1), prefix_scope(fork, 9)] {
             assert_fenced(&store, scope);
         }
+        assert_fold_reads_fenced(&store, fork);
         // The Fork's request does not fence its parent's own prefix.
         assert_eq!(pages(&store, prefix_scope(root, 9)), parent);
         assert_eq!([held_rows(&store, root), held_rows(&store, fork)], before);
@@ -1737,6 +1750,7 @@ mod tests {
 
         for timeline in [root, fork] {
             assert_fenced(&store, prefix_scope(timeline, 9));
+            assert_fold_reads_fenced(&store, timeline);
         }
         assert_eq!([held_rows(&store, root), held_rows(&store, fork)], before);
     }
@@ -1816,7 +1830,7 @@ mod tests {
     /// `digest`, that owns and binds the single `seq`.
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn fold_tick(tick: u64, seq: u64, owner: &str, digest: u8) -> SeededFactualTickV1 {
-        let step = node_row(coord(tick, owner, digest), COMMITTED, Vec::new());
+        let step = fold_step(tick, owner, digest);
         let at = Seq::from_u64(seq);
         SeededFactualTickV1 {
             record: committed_record(tick, vec![step], Vec::new()),
@@ -1826,7 +1840,7 @@ mod tests {
         }
     }
 
-    /// The step node `fold_tick` seeds.
+    /// The step node of `owner` at `tick`, digest `digest`.
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn fold_step(tick: u64, owner: &str, digest: u8) -> NodeRow {
         node_row(coord(tick, owner, digest), COMMITTED, Vec::new())

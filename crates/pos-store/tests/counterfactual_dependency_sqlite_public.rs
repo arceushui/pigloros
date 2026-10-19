@@ -3212,34 +3212,37 @@ fn f15_a_fold_window_never_reads_a_payload() {
 fn f15_a_fold_window_keeps_the_newest_events_up_to_the_scan_cap() {
     let fixture = fixture();
     let mut store = open(&fixture.path);
-    let timeline = ok(store.create_timeline("factual-fold-scan")).id();
+    let root = ok(store.create_timeline("factual-fold-scan")).id();
+    assert_ok(store.append(root, &[draft(1, "factual")]));
+    // The Fork holds the cap and one more Event of its own above the root's.
+    let fork = fork_at(&mut store, root, 1);
     let cap = MAX_FACTUAL_FOLD_SCAN_PER_TICK_V1;
     let drafts: Vec<EventDraft> = (0..=cap).map(|_| draft(1, "factual")).collect();
-    assert_ok(store.append(timeline, &drafts));
-    // A Fork at the head reads the same range through its parent.
-    let last = ok(u64::try_from(cap + 1));
-    let fork = fork_at(&mut store, timeline, last);
+    assert_ok(store.append(fork, &drafts));
+    let last = ok(u64::try_from(cap + 2));
     let seqs = |listed: &FactualFoldWindowV1| {
         let first = listed.events.first().map(|event| event.seq.as_u64());
         let newest = listed.events.last().map(|event| event.seq.as_u64());
         (listed.events.len(), first, newest, listed.truncated)
     };
+    let window = |after, through| {
+        let read = store.fold_window(fork, Seq::from_u64(after), Seq::from_u64(through));
+        ok(read)
+    };
 
-    for reader in [timeline, fork] {
-        let window = |after, through| {
-            let read = store.fold_window(reader, Seq::from_u64(after), Seq::from_u64(through));
-            ok(read)
-        };
-        // One Event past the cap: the oldest is left out.
-        let full = window(0, last);
-        assert_eq!(seqs(&full), (cap, Some(2), Some(last), true));
-        // Exactly the cap, at either end of the history, is not truncated.
-        let exact = window(1, last);
-        assert_eq!(seqs(&exact), (cap, Some(2), Some(last), false));
-        assert_eq!(exact.events, full.events);
-        let below = window(0, last - 1);
-        assert_eq!(seqs(&below), (cap, Some(1), Some(last - 1), false));
-    }
+    // One Event past the cap, all the Fork's own: the oldest is left out and
+    // the root is not read.
+    let full = window(0, last);
+    assert_eq!(seqs(&full), (cap, Some(3), Some(last), true));
+    // Exactly the cap is not truncated, wherever the range ends.
+    let exact = window(2, last);
+    assert_eq!(seqs(&exact), (cap, Some(3), Some(last), false));
+    assert_eq!(exact.events, full.events);
+    let inside = window(1, last - 1);
+    assert_eq!(seqs(&inside), (cap, Some(2), Some(last - 1), false));
+    // One past the cap across the Fork point: the root's Event fills it.
+    let across = window(0, last - 1);
+    assert_eq!(seqs(&across), (cap, Some(2), Some(last - 1), true));
 }
 
 #[test]

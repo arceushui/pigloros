@@ -1999,7 +1999,8 @@ fn member_fold_events(
 
 /// The newest Events of the logical range `(after, through]` of a fork chain,
 /// at most [`FOLD_READ_LIMIT`], newest first: the chain is read from the
-/// Timeline itself up through its ancestors.
+/// Timeline itself up through its ancestors, and no older member is read
+/// once the limit is reached.
 fn newest_fold_events(
     conn: &Connection,
     chain: &[(TimelineId, Seq)],
@@ -2008,6 +2009,9 @@ fn newest_fold_events(
     let mut newest = Vec::new();
     for index in (0..chain.len()).rev() {
         let room = FOLD_READ_LIMIT.saturating_sub(newest.len());
+        if room == 0 {
+            break;
+        }
         newest.extend(member_fold_events(conn, chain, index, range, room)?);
     }
     Ok(newest)
