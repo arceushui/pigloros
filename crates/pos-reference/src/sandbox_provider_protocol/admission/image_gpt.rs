@@ -293,3 +293,62 @@ fn read_at(file: &File, bytes: &mut [u8], offset: u64) -> Result<(), SandboxAdmi
     }
     file.read_exact_at(bytes, offset).map_err(io_error)
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use std::io::Write as _;
+
+    use super::*;
+    use crate::sandbox_provider_protocol::{Pkcs7Proof, SandboxArchitecture};
+
+    type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
+    // Only the length and partition table are read by GPT admission.
+    fn layout_manifest(
+        architecture: SandboxArchitecture,
+        image: &[u8],
+        partitions: [crate::sandbox_provider_protocol::PartitionDescriptor; 3],
+    ) -> TestResult<SignedImageManifest> {
+        Ok(SignedImageManifest {
+            image_id: "systemd-repart-ddi".to_owned(),
+            architecture,
+            root_image_length: u64::try_from(image.len())?,
+            root_image_blake3_digest: *blake3::hash(image).as_bytes(),
+            partitions,
+            root_hash_sha256: [1; 32],
+            verity_salt: [1; 32],
+            root_hash_signature: Pkcs7Proof {
+                der_length: 1,
+                der_sha256: [1; 32],
+                der_bytes: vec![0],
+            },
+            signing_certificate_sha256: [1; 32],
+            kernel_key_description: "PiglorOS fixture: 01".to_owned(),
+            executable_path: "/usr/bin/adapter".to_owned(),
+            executable_blake3_digest: [1; 32],
+            arguments: Vec::new(),
+            image_trust_epoch: 1,
+            image_project_key_id: "image".to_owned(),
+            manifest_digest: [1; 32],
+            signature: [1; 64],
+        })
+    }
+
+    #[test]
+    fn systemd_repart_layouts_pass_gpt_admission_on_both_architectures() -> TestResult {
+        for (name, architecture) in [
+            ("x86-64", SandboxArchitecture::X86_64),
+            ("arm64", SandboxArchitecture::Aarch64),
+        ] {
+            let (image, partitions) = crate::selector::installation::tests::ddi_fixture(name)?;
+            let mut file = tempfile::tempfile()?;
+            file.write_all(&image)?;
+            let mut manifest = layout_manifest(architecture, &image, partitions)?;
+            verify(&file, &manifest)?;
+            manifest.partitions[2].content_blake3_digest[0] ^= 1;
+            assert!(verify(&file, &manifest).is_err());
+        }
+        Ok(())
+    }
+}

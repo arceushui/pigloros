@@ -1322,6 +1322,7 @@ pub mod tests {
         executable: &[u8],
         descriptors: &[PartitionDescriptor; 3],
         der: &[u8],
+        salt: [u8; 32],
     ) -> TestResult<Vec<u8>> {
         let partitions = descriptors
             .iter()
@@ -1351,7 +1352,7 @@ pub mod tests {
                 integer(4096),
                 integer(4096),
                 integer(1),
-                digest(image_verity_salt()),
+                digest(salt),
                 Value::Array(vec![
                     integer(u64::try_from(der.len())?),
                     Value::Bytes(Sha256::digest(der).to_vec()),
@@ -1435,8 +1436,57 @@ pub mod tests {
     }
 
     pub(crate) fn gpt_partitions(name: &str, image: &[u8]) -> TestResult<[PartitionDescriptor; 3]> {
-        let declared: [([u8; 16], [u8; 16], u64, u64); 3] =
-            serde_json::from_slice(gpt_vector(name)?.1)?;
+        sidecar_partitions(gpt_vector(name)?.1, image)
+    }
+
+    /// Expanded systemd-repart DDI and its independently described partitions.
+    pub(crate) fn ddi_fixture(
+        architecture: &str,
+    ) -> TestResult<(Vec<u8>, [PartitionDescriptor; 3])> {
+        macro_rules! vector {
+            ($architecture:literal) => {
+                (
+                    include_bytes!(concat!(
+                        "../../tests/vectors/sim1-ddi/",
+                        $architecture,
+                        "/image.raw.gz"
+                    ))
+                    .as_slice(),
+                    include_bytes!(concat!(
+                        "../../tests/vectors/sim1-ddi/",
+                        $architecture,
+                        "/partitions.json"
+                    ))
+                    .as_slice(),
+                )
+            };
+        }
+        let (compressed, sidecar) = match architecture {
+            "x86-64" => vector!("x86-64"),
+            "arm64" => vector!("arm64"),
+            _ => return Err("unknown DDI fixture".into()),
+        };
+        let mut image = Vec::new();
+        flate2::read::GzDecoder::new(compressed).read_to_end(&mut image)?;
+        let partitions = sidecar_partitions(sidecar, &image)?;
+        Ok((image, partitions))
+    }
+
+    /// A DDI fixture's declared partitions with digests of `image`'s bytes.
+    pub(crate) fn ddi_partitions(
+        architecture: &str,
+        image: &[u8],
+    ) -> TestResult<[PartitionDescriptor; 3]> {
+        let sidecar: &[u8] = match architecture {
+            "x86-64" => include_bytes!("../../tests/vectors/sim1-ddi/x86-64/partitions.json"),
+            "arm64" => include_bytes!("../../tests/vectors/sim1-ddi/arm64/partitions.json"),
+            _ => return Err("unknown DDI fixture".into()),
+        };
+        sidecar_partitions(sidecar, image)
+    }
+
+    fn sidecar_partitions(sidecar: &[u8], image: &[u8]) -> TestResult<[PartitionDescriptor; 3]> {
+        let declared: [([u8; 16], [u8; 16], u64, u64); 3] = serde_json::from_slice(sidecar)?;
         let mut partitions = Vec::new();
         for (role, (partition_type_uuid, partition_instance_uuid, start_bytes, length_bytes)) in [
             PartitionRole::RootData,
@@ -1463,8 +1513,52 @@ pub mod tests {
             .map_err(|_| "fixture partition count".into())
     }
 
+    /// Path of one installed immutable object below an artifact root.
+    pub(crate) fn installed_object_path(
+        root: &Path,
+        kind: InstallationObjectKind,
+        identity: [u8; 32],
+    ) -> TestResult<std::path::PathBuf> {
+        let state = InstalledSelectorState::open_at_for_test(&File::open(root)?)?;
+        let object = state
+            .manifest()
+            .objects()
+            .iter()
+            .find(|object| object.kind() == kind && object.identity() == identity)
+            .ok_or("installed object missing")?;
+        Ok(root
+            .join(kind.directory())
+            .join(hex_name(object.content_digest())))
+    }
+
+    /// The 32-byte verity salt systemd-repart wrote into a DDI fixture.
+    pub(crate) fn ddi_salt(architecture: &str) -> TestResult<[u8; 32]> {
+        let verity: &[u8] = match architecture {
+            "x86-64" => include_bytes!("../../tests/vectors/sim1-ddi/x86-64/verity.json"),
+            "arm64" => include_bytes!("../../tests/vectors/sim1-ddi/arm64/verity.json"),
+            _ => return Err("unknown DDI fixture".into()),
+        };
+        let verity: serde_json::Value = serde_json::from_slice(verity)?;
+        let text = verity["salt"].as_str().ok_or("DDI salt is not text")?;
+        // Decode the producer's recorded salt; no salt value is written here.
+        (0..text.len())
+            .step_by(2)
+            .map(|index| u8::from_str_radix(text.get(index..index + 2).unwrap_or(""), 16))
+            .collect::<Result<Vec<u8>, _>>()?
+            .try_into()
+            .map_err(|_| "DDI salt is not 32 bytes".into())
+    }
+
+    /// The real x86-64 systemd-repart image, its partitions and its verity salt.
     pub(crate) fn admitted_state() -> TestResult<InstalledSelectorState> {
-        admitted_state_with_image(&gpt_fixture("512-128")?, b"adapter")
+        let (image, partitions) = ddi_fixture("x86-64")?;
+        admitted_state_with_salt(
+            &image,
+            b"adapter",
+            &partitions,
+            IMAGE_PROOF,
+            ddi_salt("x86-64")?,
+        )
     }
 
     pub(crate) fn admitted_state_with_image(
@@ -1492,6 +1586,22 @@ pub mod tests {
         partitions: &[PartitionDescriptor; 3],
         proof: &[u8],
     ) -> TestResult<InstalledSelectorState> {
+        admitted_state_with_salt(
+            root_image,
+            executable,
+            partitions,
+            proof,
+            image_verity_salt(),
+        )
+    }
+
+    pub(crate) fn admitted_state_with_salt(
+        root_image: &[u8],
+        executable: &[u8],
+        partitions: &[PartitionDescriptor; 3],
+        proof: &[u8],
+        salt: [u8; 32],
+    ) -> TestResult<InstalledSelectorState> {
         let authority = provider_authority();
         let trust = provider_trust(&authority)?;
         let trust_digest = signed_record_digest(&trust)?;
@@ -1518,7 +1628,7 @@ pub mod tests {
             host_digest,
         )?;
         let report_digest = signed_record_digest(&report)?;
-        let image = image_manifest(&authority, root_image, executable, partitions, proof)?;
+        let image = image_manifest(&authority, root_image, executable, partitions, proof, salt)?;
         let image_digest = signed_record_digest(&image)?;
         let launch = launch_policy(image_digest)?;
         let launch_digest = signed_record_digest(&launch)?;
