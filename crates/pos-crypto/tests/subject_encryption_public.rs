@@ -202,7 +202,7 @@ fn prf() -> SubjectPrfOutputV1 {
 fn params() -> SubjectKeyWrapParamsV1 {
     SubjectKeyWrapParamsV1 {
         subject_id: subject(),
-        epoch: 1,
+        epoch: u64::from(hex("01")[0]),
         rp_id: "localhost".to_owned(),
         credential_id: ascending::<16>(0x80).to_vec(),
         prf_input: ascending(0xa0),
