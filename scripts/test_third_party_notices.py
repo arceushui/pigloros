@@ -195,18 +195,18 @@ class PolicyMirrorTests(WorkspaceTest):
         self.assert_error("must equal deny.toml allow")
 
     def test_crate_exception_must_be_mirrored(self) -> None:
-        exception = 'exceptions = [{ crate = "webpki-roots", allow = ["CDLA-Permissive-2.0"] }]'
-        self.workspace.edit("deny.toml", "exceptions = []", exception)
-        self.assert_error("crate-scoped accepted {} must equal deny.toml exceptions")
-        for config in ("about.toml", "third_party/about-guest.toml"):
-            path = self.workspace.path(config)
-            with path.open("a", encoding="utf-8") as handle:
-                handle.write('\n[webpki-roots]\naccepted = ["CDLA-Permissive-2.0"]\n')
+        # deny.toml carries the crate-scoped webpki-roots exception (#426).
+        section = '[webpki-roots]\naccepted = ["CDLA-Permissive-2.0"]\n'
         self.assertEqual(self.errors(), [])
+        self.workspace.edit("about.toml", section, "")
+        self.assert_error("about.toml crate-scoped accepted {} must equal deny.toml exceptions")
+        self.workspace.edit("about.toml", "MPL-2.0\",\n]\n", 'MPL-2.0",\n]\n' + section)
+        self.assertEqual(self.errors(), [])
+        self.workspace.edit("third_party/about-guest.toml", section, "")
+        self.assert_error("about-guest.toml crate-scoped accepted {} must equal deny.toml exceptions")
 
     def test_versioned_crate_exception_is_rejected(self) -> None:
-        exception = 'exceptions = [{ crate = "webpki-roots@1.0.0", allow = ["ISC"] }]'
-        self.workspace.edit("deny.toml", "exceptions = []", exception)
+        self.workspace.edit("deny.toml", 'crate = "webpki-roots"', 'crate = "webpki-roots@1.0.0"')
         with self.assertRaisesRegex(notices.NoticeError, "without a version"):
             self.errors()
 
