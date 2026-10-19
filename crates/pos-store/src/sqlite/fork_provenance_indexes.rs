@@ -543,8 +543,8 @@ mod tests {
     fn canonical_encoders_select_the_exact_binary_child_in_both_indexes() -> Fallible<()> {
         use pos_core::{
             EventId, EventOriginRecordInputV1, EventOriginRecordV1, ForkEventClassificationV1,
-            ForkEventOriginKindV1, ForkInterventionAdmissionInputV1, ForkInterventionAdmissionV1, Hash,
-            TimelineId,
+            ForkEventOriginKindV1, ForkInterventionAdmissionInputV1, ForkInterventionAdmissionV1,
+            Hash, TimelineId,
         };
 
         for child_bytes in [
@@ -569,17 +569,18 @@ mod tests {
                 fork_admission_digest: hash,
             })?
             .to_canonical_cbor();
-            let intervention = ForkInterventionAdmissionV1::new(ForkInterventionAdmissionInputV1 {
-                operation_id: hash,
-                fork_timeline_id: child,
-                logical_seq: 1,
-                event_id: event,
-                payload_hash: hash,
-                room_revision_descriptor_hash: hash,
-                classifier_revision_digest: hash,
-                fork_admission_digest: hash,
-            })?
-            .to_canonical_cbor();
+            let intervention =
+                ForkInterventionAdmissionV1::new(ForkInterventionAdmissionInputV1 {
+                    operation_id: hash,
+                    fork_timeline_id: child,
+                    logical_seq: 1,
+                    event_id: event,
+                    payload_hash: hash,
+                    room_revision_descriptor_hash: hash,
+                    classifier_revision_digest: hash,
+                    fork_admission_digest: hash,
+                })?
+                .to_canonical_cbor();
             assert_eq!(&origin[8..24], &child_bytes);
             assert_eq!(&intervention[42..58], &child_bytes);
             let store = SqliteStore::open(":memory:")?;
@@ -602,7 +603,8 @@ mod tests {
     }
 
     #[test]
-    fn private_function_override_is_unsupported_not_detected_as_physical_integrity() -> Fallible<()> {
+    fn private_function_override_is_unsupported_not_detected_as_physical_integrity() -> Fallible<()>
+    {
         use rusqlite::functions::FunctionFlags;
 
         let store = SqliteStore::open(":memory:")?;
@@ -611,11 +613,12 @@ mod tests {
             "INSERT INTO fork_event_origins VALUES ('probe',?1)",
             [&bytes],
         )?;
-        store
-            .conn
-            .create_scalar_function("substr", 3, FunctionFlags::SQLITE_DETERMINISTIC, |_| {
-                Ok(vec![0_u8; 16])
-            })?;
+        store.conn.create_scalar_function(
+            "substr",
+            3,
+            FunctionFlags::SQLITE_DETERMINISTIC,
+            |_| Ok(vec![0_u8; 16]),
+        )?;
         // This deliberate private violation demonstrates the documented limitation:
         // structural qualification cannot prove unchanged native function semantics.
         validate(&store.conn)?;
@@ -645,7 +648,8 @@ mod tests {
     }
 
     #[test]
-    fn native_metadata_is_checked_even_if_the_catalog_sql_claims_the_canonical_ddl() -> Fallible<()> {
+    fn native_metadata_is_checked_even_if_the_catalog_sql_claims_the_canonical_ddl() -> Fallible<()>
+    {
         for expression in [
             "substr(eor1_cbor,9,16) DESC",
             "substr(eor1_cbor,9,16) COLLATE NOCASE",
