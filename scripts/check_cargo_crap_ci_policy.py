@@ -33,6 +33,23 @@ TEST_ONLY_EXCLUSIONS = (
     "src/image_activator/tests.rs",
     "src/e2e_determinism.rs",
     "src/action_admission_tests.rs",
+    "src/fork_event_authority/tests/local_replay.rs",
+    "src/sqlite/tests/protected_interval_cleanup.rs",
+    "src/sqlite/fork_replay/interval_tests.rs",
+    "src/imported_fork_replay_tests.rs",
+    "src/imported_fork_replay_tests/lifecycle.rs",
+    "src/imported_fork_replay_tests/lifecycle/begin.rs",
+    "src/imported_fork_replay_tests/cumulative_budget.rs",
+    "src/imported_fork_replay_tests/cumulative_budget/compare.rs",
+    "src/imported_fork_replay_tests/cumulative_budget/read_bounds.rs",
+    "src/imported_fork_replay_tests/cumulative_budget/sqlite.rs",
+    "src/imported_fork_replay_tests/cumulative_budget/sqlite/compare.rs",
+    "src/imported_fork_replay_tests/runtime_budget.rs",
+    "src/imported_fork_replay_tests/runtime_budget/deadline.rs",
+    "src/imported_fork_replay_tests/runtime_budget/repeat.rs",
+    "src/nested_imported_fork_replay_tests.rs",
+    "src/nested_imported_fork_replay_tests/intermediate_privacy.rs",
+    "src/ordinary_fork_lineage_tests.rs",
 )
 EXCLUSION_ARGS = "".join(f"--exclude '{path}' " for path in TEST_ONLY_EXCLUSIONS)
 GENERATE_BASELINE_COMMAND = (

@@ -418,8 +418,15 @@ class AsanCiPolicyTests(unittest.TestCase):
                 "binary_id(pos-conformance::moat_proof_public) & test(=none)",
             ),
             ("--partition slice:1/2 --run-ignored all", "--partition slice:1/2"),
-            (" | kind(bin)", ""),
-            (" | binary_id(pos-conformance::provider_contract_public)", ""),
+            (
+                "package(pos-conformance) & not (",
+                "package(pos-conformance) & (",
+            ),
+            (
+                "binary_id(pos-conformance::moat_proof_public))",
+                "binary_id(pos-conformance::moat_proof_public) | "
+                "binary_id(pos-conformance::provider_contract_public))",
+            ),
             (
                 "binary_id(pos-conformance::bundle_contract_coverage_public)",
                 "binary_id(pos-conformance::bundle_contract_public)",
@@ -430,9 +437,30 @@ class AsanCiPolicyTests(unittest.TestCase):
                     workflow: dict, before: str = old, after: str = new
                 ) -> None:
                     step = self.asan_step(workflow)
+                    self.assertIn(before, step["run"])
                     step["run"] = step["run"].replace(before, after, 1)
 
                 self.assert_rejected(change_filter)
+
+    def test_rejects_partial_conformance_target_allowlist(self) -> None:
+        def restore_partial_allowlist(workflow: dict) -> None:
+            step = self.asan_step(workflow)
+            complete = (
+                "package(pos-conformance) & not ("
+                "binary_id(pos-conformance::bundle_contract_coverage_public) | "
+                "binary_id(pos-conformance::bundle_contract_public) | "
+                "binary_id(pos-conformance::moat_proof_public))"
+            )
+            partial = (
+                "package(pos-conformance) & (kind(lib) | kind(bin) | "
+                "binary_id(pos-conformance::profile_contract_public) | "
+                "binary_id(pos-conformance::provider_contract_public))"
+            )
+            # This fixture must also reject the historically accepted workflow.
+            step["run"] = step["run"].replace(complete, partial)
+            self.assertIn(partial, step["run"])
+
+        self.assert_rejected(restore_partial_allowlist)
 
     def test_requires_all_asan_shards(self) -> None:
         self.assert_rejected(

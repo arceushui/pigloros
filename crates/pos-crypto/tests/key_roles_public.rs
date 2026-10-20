@@ -1,9 +1,9 @@
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
-use ed25519_dalek::SigningKey;
+use ed25519_dalek::{Signer, SigningKey};
 use pos_core::{
     CanonicalBytes, KeyDestructionOutcomeV1, KeyIdentityV1, KeyRegistrationV1, KeyRegistryStateV1,
-    KeyRoleV1,
+    KeyRoleV1, OwnerIdV1, Signature,
 };
 use pos_crypto::key_roles::{
     destroy_registered_encryption_key, destroy_registered_signing_key, key_material_digest,
@@ -14,6 +14,82 @@ use pos_crypto::key_roles::{
 use pos_crypto::signing::public_key_from_verifying_key;
 
 struct FailingDestruction(&'static str);
+
+#[test]
+fn public_role_verification_preserves_independent_contiguous_framing(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let signing_key = SigningKey::from_bytes(&[71; 32]);
+    let verifying_key = signing_key.verifying_key();
+    let public_key = public_key_from_verifying_key(&verifying_key);
+    let material = SigningKeyMaterial::new(signing_key.clone());
+    let owners = ["o".to_owned(), "π".to_owned(), "界".repeat(42) + "ab"];
+    let payloads = [
+        Vec::new(),
+        b"FRM1-shaped payload".to_vec(),
+        vec![91; 65_536],
+    ];
+    for owner in owners {
+        let owner_id = OwnerIdV1::new(owner.clone())?;
+        for (role, code) in [
+            (KeyRoleV1::SubjectAttributionSigning, 1),
+            (KeyRoleV1::TimelineIntegritySigning, 2),
+            (KeyRoleV1::PluginReleaseSigning, 3),
+        ] {
+            for epoch in [1, 256, u64::from(u32::MAX) + 1, u64::MAX] {
+                let identity = KeyIdentityV1::from_parts(owner_id, role, epoch);
+                let mut registry = KeyRegistryStateV1::new();
+                registry.register_key(KeyRegistrationV1::new(
+                    identity,
+                    material.material_digest(),
+                    Some(public_key),
+                ))?;
+                for bytes in &payloads {
+                    // Independent ADR-065 framing, not the production helper.
+                    let mut message = b"pigloros/role-signature/v1".to_vec();
+                    message.extend_from_slice(&u32::try_from(owner.len())?.to_be_bytes());
+                    message.extend_from_slice(owner.as_bytes());
+                    message.push(code);
+                    message.extend_from_slice(&epoch.to_be_bytes());
+                    message.extend_from_slice(bytes);
+                    let signature = Signature::from_bytes(signing_key.sign(&message).to_bytes());
+                    let payload = CanonicalBytes::from_vec(bytes.clone());
+                    verify_for_role(&verifying_key, identity, &payload, &signature)?;
+                    assert_eq!(
+                        sign_for_registered_role(&mut registry, &material, identity, &payload)?,
+                        signature
+                    );
+                    let other_owner = KeyIdentityV1::new("other-owner", role, epoch);
+                    assert!(
+                        verify_for_role(&verifying_key, other_owner, &payload, &signature).is_err()
+                    );
+                    let other_epoch = KeyIdentityV1::from_parts(owner_id, role, epoch ^ 1);
+                    assert!(
+                        verify_for_role(&verifying_key, other_epoch, &payload, &signature).is_err()
+                    );
+                    let mut altered = bytes.clone();
+                    altered.push(0);
+                    assert!(verify_for_role(
+                        &verifying_key,
+                        identity,
+                        &CanonicalBytes::from_vec(altered),
+                        &signature,
+                    )
+                    .is_err());
+                    let mut altered_signature = *signature.as_bytes();
+                    altered_signature[0] ^= 1;
+                    assert!(verify_for_role(
+                        &verifying_key,
+                        identity,
+                        &payload,
+                        &Signature::from_bytes(altered_signature),
+                    )
+                    .is_err());
+                }
+            }
+        }
+    }
+    Ok(())
+}
 
 impl KeyDestructionPersistence for FailingDestruction {
     type Error = &'static str;
