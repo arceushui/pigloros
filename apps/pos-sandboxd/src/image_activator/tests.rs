@@ -570,10 +570,12 @@ async fn a_silent_peer_expires_the_deadline_and_closes_the_held_image() -> TestR
         .mount_image_within(image, Duration::from_millis(50))
         .await;
     assert_eq!(outcome.err(), Some(ImageActivationError::Transport));
+    // Join the peer first, so that its received copy is closed too.
+    release.send(())?;
+    peer.join().map_err(|_| "the silent peer panicked")??;
     let mut byte = [0_u8; 1];
     assert_eq!(std::io::Read::read(&mut reader, &mut byte)?, 0);
-    release.send(())?;
-    peer.join().map_err(|_| "the silent peer panicked")?
+    Ok(())
 }
 
 #[tokio::test]
