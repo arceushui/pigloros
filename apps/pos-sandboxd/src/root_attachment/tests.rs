@@ -26,7 +26,10 @@ use serde_json::json;
 use super::*;
 use super::{
     cmdline::vetoes_userspace_verity,
-    observe::{has_mount_id, loop_of, mount_entry, LoopDevice, Mapper, MountEntry, Node, Slave},
+    observe::{
+        has_mount_id, loop_of, mount_entry, LoopDevice, Mapper, MountEntry, Node, Slave,
+        ATTACH_BY_DESCRIPTOR, ATTEMPT_ROOT_OPEN, ATTEMPT_ROOT_RESOLVE, BACKING_OPEN, STATX_REQUEST,
+    },
     verify::Extent,
 };
 use crate::{PlannedAttemptIntent, SystemdAttemptRegistry};
@@ -148,7 +151,7 @@ fn edit_loop(observed: &mut Observations, edit: impl FnOnce(&mut LoopDevice)) {
 
 /// A prepared attempt directory below a private temporary runtime tree.
 struct PreparedTree {
-    _runtime: tempfile::TempDir,
+    runtime: tempfile::TempDir,
     prepared: PreparedAttemptDirectory,
 }
 
@@ -166,10 +169,7 @@ fn prepared_tree() -> Result<PreparedTree, BoxError> {
     let prepared = registry
         .commit_planned(&PlannedAttemptIntent::new([7; 16], [9; 32])?)?
         .prepare_directory()?;
-    Ok(PreparedTree {
-        _runtime: runtime,
-        prepared,
-    })
+    Ok(PreparedTree { runtime, prepared })
 }
 
 fn component(prepared: &PreparedAttemptDirectory) -> String {
@@ -242,6 +242,8 @@ fn only_one_plain_veto_word_disables_userspace_verity() {
         format!("BOOT_IMAGE=/vmlinuz root=/dev/vda1 {VETO} quiet\n"),
         format!("quiet\t{VETO}\r\n"),
         format!("{VETO}  foo.allow_userspace_verity=1 systemd.allow_userspace_verityx=1"),
+        // Same length as the key, different text: not the option.
+        format!("{VETO} systemd.allow_userspace_verify=1 systemd.allow-userspace-verify"),
     ] {
         assert!(vetoes_userspace_verity(accepted.as_bytes()), "{accepted:?}");
     }
@@ -640,6 +642,63 @@ fn propagation_and_detach_act_on_the_descriptor_link() -> TestResult {
         kernel.descriptor_path(file.as_fd()),
         Path::new("/proc/self/fd").join(std::os::fd::AsRawFd::as_raw_fd(&file).to_string())
     );
+    Ok(())
+}
+
+#[test]
+fn descriptor_bound_flag_sets_are_pinned() {
+    use rustix::fs::{OFlags, ResolveFlags, StatxFlags};
+    use rustix::mount::MoveMountFlags;
+    assert_eq!(
+        BACKING_OPEN,
+        OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC
+    );
+    assert_eq!(
+        ATTEMPT_ROOT_OPEN,
+        OFlags::PATH | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC
+    );
+    assert_eq!(
+        ATTEMPT_ROOT_RESOLVE,
+        ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS
+    );
+    assert_eq!(
+        ATTACH_BY_DESCRIPTOR,
+        MoveMountFlags::MOVE_MOUNT_F_EMPTY_PATH | MoveMountFlags::MOVE_MOUNT_T_EMPTY_PATH
+    );
+    assert_eq!(STATX_REQUEST, StatxFlags::BASIC_STATS | StatxFlags::MNT_ID);
+}
+
+#[test]
+fn symlinks_never_lead_to_the_backing_image_or_the_attempt_root() -> TestResult {
+    // A loop backing path that is a symlink names the link, not the image.
+    let sys = tempfile::tempdir()?;
+    let image = tempfile::NamedTempFile::new()?;
+    let link = sys.path().join("held-link");
+    std::os::unix::fs::symlink(image.path(), &link)?;
+    write(
+        &sys.path().join("class/block/loop9/loop/backing_file"),
+        &format!("{}\n", link.display()),
+    )?;
+    let kernel = HostKernel::at(sys.path(), sys.path());
+    let backing = kernel.loop_device("loop9").backing;
+    let link = fs::symlink_metadata(&link)?;
+    let target = image.as_file().metadata()?;
+    assert_eq!(backing, Some((link.dev(), link.ino())));
+    assert_ne!(backing, Some((target.dev(), target.ino())));
+
+    // An attempt root replaced by a symlink is not resolved.
+    let tree = prepared_tree()?;
+    let (attempt, root) = tree.prepared.held_directories();
+    let attempt_path = tree
+        .runtime
+        .path()
+        .join("attempts")
+        .join(component(&tree.prepared));
+    fs::rename(attempt_path.join("root"), attempt_path.join("real"))?;
+    std::os::unix::fs::symlink("real", attempt_path.join("root"))?;
+    let observed = kernel.observe(root.as_fd(), attempt, root);
+    assert!(observed.mount.is_some());
+    assert_eq!(observed.path, None);
     Ok(())
 }
 
