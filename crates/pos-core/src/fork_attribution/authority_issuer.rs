@@ -3,6 +3,8 @@
 //! Both are exact portable values only. Neither installs, pins, or advances
 //! local issuer trust; the operator-pinned policy floor is a separate seam.
 
+use crate::crypto::{CanonicalEmit, CanonicalSink};
+
 use std::collections::BTreeSet;
 
 use super::{
@@ -80,13 +82,16 @@ impl ForkAttributionIssuerV1 {
     #[must_use]
     pub fn to_canonical_cbor(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(192);
-        array(&mut out, 5);
-        text(&mut out, "FAI1");
-        uint(&mut out, 1);
-        text(&mut out, &self.issuer_id);
-        uint(&mut out, self.epoch);
-        bytes(&mut out, self.public_key.as_bytes());
+        self.emit(&mut out);
         out
+    }
+
+    /// Measure these exact canonical bytes without allocating an encoding buffer.
+    ///
+    /// # Errors
+    /// Returns `LengthOverflow` if checked arithmetic cannot fit the target's `usize`.
+    pub fn canonical_cbor_len(&self) -> Result<usize, crate::CanonicalLengthErrorV1> {
+        crate::crypto::measure(self)
     }
 
     /// Decode exact canonical `FAI1` bytes.
@@ -308,5 +313,16 @@ fn validate_policy_entries(entries: &[ForkAttributionIssuerPolicyEntryV1]) -> Re
         Ok(())
     } else {
         Err(Error::FieldMismatch)
+    }
+}
+
+impl CanonicalEmit for ForkAttributionIssuerV1 {
+    fn emit(&self, out: &mut impl CanonicalSink) {
+        array(out, 5);
+        text(out, "FAI1");
+        uint(out, 1);
+        text(out, &self.issuer_id);
+        uint(out, self.epoch);
+        bytes(out, self.public_key.as_bytes());
     }
 }

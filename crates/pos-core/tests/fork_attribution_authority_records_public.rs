@@ -76,6 +76,7 @@ fn mutated<T>(
 fn fai1_matches_independent_vector_and_round_trips() -> TestResult {
     let issuer = issuer()?;
     let bytes = issuer.to_canonical_cbor();
+    assert_eq!(issuer.canonical_cbor_len(), Ok(bytes.len()));
     assert_eq!(bytes, unhex(FAI1_HEX)?);
     assert_eq!(
         ForkAttributionIssuerV1::from_canonical_cbor(&bytes)?,
@@ -411,6 +412,7 @@ fn ikr1_and_ikt1_round_trip_and_project_source_registry_values() -> TestResult {
     let destroyed = destroyed_key()?;
     let ended = tombstone(1)?;
     for key in [live, destroyed] {
+        assert_eq!(key.canonical_cbor_len(), Ok(key.to_canonical_cbor().len()));
         assert_eq!(
             ImportedKeyRecordV1::from_canonical_cbor(&key.to_canonical_cbor())?,
             key
@@ -421,6 +423,7 @@ fn ikr1_and_ikt1_round_trip_and_project_source_registry_values() -> TestResult {
         );
     }
     let ended_bytes = ended.to_canonical_cbor();
+    assert_eq!(ended.canonical_cbor_len(), Ok(ended_bytes.len()));
     assert_eq!(&ended_bytes[..6], &[0x88, 0x64, b'I', b'K', b'T', b'1']);
     assert_eq!(
         ImportedKeyTombstoneV1::from_canonical_cbor(&ended_bytes)?,

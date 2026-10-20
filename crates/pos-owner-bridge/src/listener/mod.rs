@@ -117,7 +117,7 @@ struct Shared {
 impl Shared {
     fn try_acquire(&self) -> bool {
         self.active
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |active| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |active| {
                 (active < MAX_CONCURRENT_CONNECTIONS).then_some(active + 1)
             })
             .is_ok()

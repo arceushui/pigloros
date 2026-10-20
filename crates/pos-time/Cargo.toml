@@ -23,10 +23,21 @@ pos-conformance = { path = "../pos-conformance" }
 ulid = { workspace = true }
 
 [dev-dependencies]
+ed25519-dalek = { workspace = true }
+pos-crypto = { path = "../pos-crypto" }
+tempfile = { workspace = true }
 pos-core = { path = "../pos-core", features = ["test-support"] }
 pos-runtime = { path = "../pos-runtime", features = ["test-support"] }
 pos-plugin-world = { path = "../../plugins/world" }
 pos-store = { path = "../pos-store", features = ["sqlite", "test-support"] }
+pos-state = { path = "../pos-state", features = ["test-support"] }
+
+# The imported Fork Replay tests include pos-store's tests/support/fae1_fixture.rs
+# via #[path]. Its signing imports compile in this crate, but cargo-shear does
+# not attribute the external fixture's imports to pos-time. Keep these required
+# dev-dependencies; restrict the false-positive exception to this package.
+[package.metadata.cargo-shear]
+ignored = ["ed25519-dalek", "pos-crypto"]
 
 [lints]
 workspace = true

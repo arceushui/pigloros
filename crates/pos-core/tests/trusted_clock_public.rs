@@ -317,12 +317,16 @@ fn scripted_sources_replay_through_the_conversions() -> TestResult {
     assert_eq!(wall.sample(), Err(Fence::SourceUnavailable));
     let mut mono = mono_at(&[Duration::from_secs(2)]);
     mono.push(Duration::from_secs(1));
+    assert_eq!(mono.samples_taken(), 0);
     let later = mono.mark();
+    assert_eq!(mono.samples_taken(), 1);
     let earlier = mono.mark();
+    assert_eq!(mono.samples_taken(), 2);
     let elapsed = later.checked_elapsed_since(earlier);
     assert_eq!(elapsed, Some(Duration::from_secs(1)));
     assert_eq!(earlier.checked_elapsed_since(later), None);
     assert_eq!(mono.mark(), earlier);
+    assert_eq!(mono.samples_taken(), 3);
     Ok(())
 }
 

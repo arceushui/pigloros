@@ -22,7 +22,8 @@ use fixture::{
 use pos_core::{
     store::{EventStore, SeqRange},
     ForkAppendSourceIdentityV1, ForkAttributionImportClosureV1, ForkClassifierSourceInputV1,
-    ForkClassifierSourceV1, ForkEventSourceDescriptorV1, ImportedForkAttributionAdmissionV1,
+    ForkClassifierSourceV1, ForkEventSourceDescriptorV1, ForkPublicationBindingInputV1,
+    ForkPublicationBindingV1, ForkPublicationReceiptV1, ImportedForkAttributionAdmissionV1,
     ImportedForkPublicationOperationV1, ImportedKeyRecordV1, PublicKey, Signature, TimelineId,
 };
 use pos_store::{
@@ -81,6 +82,10 @@ fn assert_reads_accept<S: Port>(
     assert_eq!(committed.authority_origin_digest, Some(origin));
     assert_eq!(committed.receipt.child_timeline_id, child);
     assert_eq!(committed.receipt.final_logical_head, head);
+    assert_eq!(
+        committed.receipt,
+        ForkPublicationReceiptV1::from_records(&committed.operation, &committed.binding)?
+    );
     assert_eq!(committed.operation.input().child_timeline_id, child);
     Ok(())
 }
@@ -344,8 +349,8 @@ const fn event_tamper(name: &'static str, sql: &'static str) -> Tamper {
     }
 }
 
-/// An edit of the stored retained key or its selection: only the publication
-/// read consults it (ADR-105 erratum E12), and it refuses it as a conflict.
+/// An edit of a publication-only row or its selection. The suffix read does
+/// not consult it; the publication read refuses it as a conflict.
 const fn publication_tamper(
     name: &'static str,
     sql: &'static str,
@@ -398,6 +403,49 @@ fn retained_key_tampers() -> Fallible<Vec<Tamper>> {
     ])
 }
 
+/// Independently alter each receipt field in an otherwise canonical FPB1.
+fn publication_binding_tampers(binding: ForkPublicationBindingInputV1) -> Fallible<Vec<Tamper>> {
+    let mut tampers = Vec::new();
+    for (name, input) in [
+        (
+            "FPB1 naming another operation",
+            ForkPublicationBindingInputV1 {
+                operation_id: hash(0xa1),
+                ..binding
+            },
+        ),
+        (
+            "FPB1 naming another child",
+            ForkPublicationBindingInputV1 {
+                child_timeline_id: TimelineId::new(),
+                ..binding
+            },
+        ),
+        (
+            "FPB1 naming another head",
+            ForkPublicationBindingInputV1 {
+                final_logical_head: binding.final_logical_head + 1,
+                ..binding
+            },
+        ),
+        (
+            "FPB1 naming another signed manifest",
+            ForkPublicationBindingInputV1 {
+                signed_manifest_record_id: hash(0xa2),
+                ..binding
+            },
+        ),
+    ] {
+        assert_ne!(input, binding, "{name} must alter the selected binding");
+        tampers.push(publication_tamper(
+            name,
+            "UPDATE fork_publication_bindings SET fpb1_cbor = ?1",
+            Some(ForkPublicationBindingV1::new(input)?.to_canonical_cbor()),
+        ));
+    }
+    Ok(tampers)
+}
+
 /// The tampers of one committed mixed import.
 fn tampers(
     admission: &ImportedForkAttributionAdmissionV1,
@@ -418,6 +466,9 @@ fn tampers(
         hash(0x99),
     );
     let mut tampers = retained_key_tampers()?;
+    tampers.extend(publication_binding_tampers(
+        *closure.publication_binding().input(),
+    )?);
     tampers.extend(vec![
         refused_by_both(
             "missing import admission",
@@ -531,6 +582,56 @@ fn every_tampered_imported_row_fails_both_sqlite_reads_closed() -> Fallible<()> 
         assert_tampered_reads(path, child, tamper)?;
     }
     Ok(())
+}
+
+#[test]
+fn missing_imported_fork_admission_refuses_both_reads_until_restored() -> Fallible<()> {
+    let world = World::new(Shape::Mixed, false)?;
+    let built = world.build(&Spec::default())?;
+    let child = world.child_at(0)?.id;
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("missing-far1.sqlite");
+    let path = path.to_str().ok_or("utf-8 path")?;
+    let receipt = imported(&mut SqliteStore::open(path)?, &world, &built)?;
+    let origin = receipt.admission.input().authority_origin_digest;
+    assert_reads_accept(&reopen(path)?, &world, Shape::Mixed, origin)?;
+    let key = child.to_string();
+    let bytes: Vec<u8> = {
+        let connection = rusqlite::Connection::open(path)?;
+        let bytes = connection.query_row(
+            "SELECT far1_cbor FROM fork_admissions WHERE child_id = ?1",
+            [&key],
+            |row| row.get(0),
+        )?;
+        assert_eq!(
+            connection.execute("DELETE FROM fork_admissions WHERE child_id = ?1", [&key])?,
+            1,
+        );
+        bytes
+    };
+    {
+        let store = reopen(path)?;
+        assert_eq!(
+            store.read_fork_event_suffix(child, PARENT_CUT + 1).err(),
+            Some(ForkEventAuthorityErrorV1::CorruptAuthority),
+        );
+        assert_eq!(
+            store.read_committed(child, PARENT_CUT + 4).err(),
+            Some(ForkManifestPublicationErrorV1::PublicationConflict),
+        );
+    }
+    {
+        let connection = rusqlite::Connection::open(path)?;
+        assert_eq!(
+            connection.execute(
+                "INSERT INTO fork_admissions (child_id, far1_cbor) VALUES (?1, ?2)",
+                rusqlite::params![key, bytes],
+            )?,
+            1,
+        );
+    }
+    let store = reopen(path)?;
+    assert_reads_accept(&store, &world, Shape::Mixed, origin)
 }
 
 #[test]
