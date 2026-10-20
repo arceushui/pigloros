@@ -55,7 +55,7 @@ use pos_store::{
 
 pub type Fallible<T> = Result<T, Box<dyn Error>>;
 
-/// The parent cut of every fixture Fork.
+/// The default root-child cut; nested fixtures carry their actual cut.
 pub const PARENT_CUT: u64 = 4;
 /// The issuer-policy scope every fixture destination pins.
 pub const POLICY_SCOPE: &str = "destination-a";
@@ -187,6 +187,8 @@ impl Spec {
 /// One source Fork child with its exact own-segment export.
 pub struct Child {
     pub id: TimelineId,
+    pub parent: TimelineId,
+    pub parent_cut: u64,
     pub shape: Shape,
     pub export: TimelineExport,
     pub final_hash: Hash,
@@ -551,11 +553,44 @@ impl World {
     /// # Errors
     /// Returns the construction error of any fixture record.
     pub fn add_child(&mut self, shape: Shape) -> Fallible<()> {
+        self.add_child_at(self.root, Seq::from_u64(PARENT_CUT), shape)
+    }
+
+    /// Build eight valid Mixed Forks in identifier ranges disjoint from the
+    /// default import and `Spec::distinct(1)` used by the selected arms.
+    ///
+    /// # Errors
+    /// Returns the source Fork, encoding, or signing error.
+    pub fn add_unrelated_mixed_forks(&mut self) -> Fallible<Vec<Built>> {
+        let mut unrelated = Vec::with_capacity(8);
+        // Each block reserves every operation and principal ID, including
+        // the four append operations at base+7 through base+10.
+        for base in [0x40_u8, 0x50, 0x70, 0x80, 0xc0, 0xd0, 0xe0, 0xf0] {
+            let child = self.children.len();
+            self.add_child(Shape::Mixed)?;
+            unrelated.push(self.build(&Spec {
+                child,
+                import_seed: base,
+                binding_seed: base + 1,
+                principal_seed: base + 2,
+                admission_seed: base + 3,
+                registration_seed: base + 4,
+                publication_seed: base + 5,
+                operations_seed: base + 6,
+                ..Spec::default()
+            })?);
+        }
+        Ok(unrelated)
+    }
+
+    /// Fork a signed child at its actual inherited publication coordinate.
+    /// Existing root-child fixtures retain their default parent and cut.
+    ///
+    /// # Errors
+    /// Returns the source Fork, signing or export error.
+    pub fn add_child_at(&mut self, parent: TimelineId, cut: Seq, shape: Shape) -> Fallible<()> {
         let name = format!("fae1-child-{}", self.children.len());
-        let child = self
-            .source
-            .fork(self.root, Seq::from_u64(PARENT_CUT), &name)?
-            .id();
+        let child = self.source.fork(parent, cut, &name)?.id();
         for index in 1..=shape.events() {
             let payload = format!("child-{index}").into_bytes();
             append_signed(
@@ -569,10 +604,12 @@ impl World {
         }
         let evaluation = export_evaluation()?;
         let export = export_timeline_own(&self.source, child, EXPORT_DIGEST, &evaluation)?;
-        let final_head = Seq::from_u64(PARENT_CUT + shape.events());
+        let final_head = Seq::from_u64(cut.as_u64() + shape.events());
         let final_hash = self.source.chain_hash_at(child, final_head)?;
         self.children.push(Child {
             id: child,
+            parent,
+            parent_cut: cut.as_u64(),
             shape,
             export,
             final_hash,
@@ -676,10 +713,10 @@ impl World {
             import_operation_id,
             &issuer,
             policy_digest,
-            self.root,
+            child.parent,
             child.id,
         );
-        let records = self.records(child, spec, origin)?;
+        let records = Self::records(child, spec, origin)?;
         let input = ForkAttributionAuthorityEnvelopeInputV1 {
             import_operation_id,
             issuer: issuer.clone(),
@@ -706,10 +743,10 @@ impl World {
         })
     }
 
-    fn records(&self, child: &Child, spec: &Spec, origin: Hash) -> Fallible<BuiltRecords> {
+    fn records(child: &Child, spec: &Spec, origin: Hash) -> Fallible<BuiltRecords> {
         let exported_hash = child.export.parent_fork_hash.ok_or("no parent hash")?;
         let parent_hash = spec.parent_hash.unwrap_or(exported_hash);
-        let authority = self.authority(child, spec, origin, parent_hash)?;
+        let authority = Self::authority(child, spec, origin, parent_hash)?;
         let graph = (child.shape != Shape::EmptyUnclassified)
             .then(|| classifier(child.id, authority.digest, spec))
             .transpose()?;
@@ -722,7 +759,7 @@ impl World {
                 .collect::<Fallible<Vec<_>>>()?,
             None => Vec::new(),
         };
-        let publication = self.publication(child, spec, origin, &authority, &derived)?;
+        let publication = Self::publication(child, spec, origin, &authority, &derived)?;
         let attribution = material(0x71);
         let (key_record, key_tombstone) =
             key_evidence(&attribution, spec.destroyed_key, spec.creator)?;
@@ -763,7 +800,6 @@ impl World {
 
     /// The code-2 `POB1` and `FAR1` of one import.
     fn authority(
-        &self,
         child: &Child,
         spec: &Spec,
         origin: Hash,
@@ -782,13 +818,13 @@ impl World {
             operation_id: hash(spec.admission_seed),
             principal_owner_binding_digest: binding.digest(),
             creator: owner(spec.creator)?,
-            parent_timeline_id: self.root,
+            parent_timeline_id: child.parent,
             child_timeline_id: child.id,
             room_revision_descriptor_hash: hash(0x41),
-            parent_logical_head: PARENT_CUT,
+            parent_logical_head: child.parent_cut,
             parent_chain_head_hash: parent_hash,
-            completed_fold_cursor: PARENT_CUT,
-            post_fold_tick_boundary: PARENT_CUT,
+            completed_fold_cursor: child.parent_cut,
+            post_fold_tick_boundary: child.parent_cut,
             plugin_composition_hash: hash(0x42),
             attribution_required: true,
             origin: ForkAttributionOriginV1::Local,
@@ -803,7 +839,6 @@ impl World {
 
     /// The signed `FSM1` with its `FPO1`, `FPB1`, and `FPA1`.
     fn publication(
-        &self,
         child: &Child,
         spec: &Spec,
         origin: Hash,
@@ -812,7 +847,7 @@ impl World {
     ) -> Fallible<Publication> {
         let exported_hash = child.export.parent_fork_hash.ok_or("no parent hash")?;
         let parent_hash = spec.parent_hash.unwrap_or(exported_hash);
-        let final_head = PARENT_CUT + child.shape.events();
+        let final_head = child.parent_cut + child.shape.events();
         let final_hash = spec.final_hash.unwrap_or(child.final_hash);
         let sequences = derived
             .iter()
@@ -821,13 +856,13 @@ impl World {
             .collect::<Vec<_>>();
         let manifest = Self::signed_manifest(
             ForkReproManifestInputV1 {
-                parent_timeline_id: self.root,
+                parent_timeline_id: child.parent,
                 fork_timeline_id: child.id,
                 admission_digest: authority.digest,
                 room_revision_descriptor_hash: hash(0x41),
-                parent_logical_head: PARENT_CUT,
+                parent_logical_head: child.parent_cut,
                 parent_chain_head_hash: parent_hash,
-                post_fold_tick_boundary: PARENT_CUT,
+                post_fold_tick_boundary: child.parent_cut,
                 plugin_composition_hash: hash(0x42),
                 intervention_sequences: sequences,
                 final_fork_logical_head: final_head,

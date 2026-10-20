@@ -273,6 +273,28 @@ fn a_refused_handoff_leaves_the_registry_unchanged() {
     assert_eq!(count_of(&registry, timeline, &entity), Some(1));
 }
 
+#[cfg(feature = "test-support")]
+#[test]
+fn retained_state_diagnostic_preserves_real_names_entities_and_values() {
+    let (timeline, entity) = (TimelineId::new(), EntityId::new());
+    let mut registry = live(consumer(), timeline, entity);
+    let retained = registry.retained_state_for_test();
+    assert_eq!(retained.len(), 1);
+    let states = test_some(retained.get(NAME));
+    assert_eq!(states.len(), 1);
+    assert_eq!(
+        test_some(states.get(&entity)).get("count"),
+        Some(&serde_json::json!(1))
+    );
+    // This is an owned diagnostic snapshot, not a live alias.
+    registry.apply_event(timeline, &counted(entity, 2));
+    assert_eq!(
+        test_some(states.get(&entity)).get("count"),
+        Some(&serde_json::json!(1))
+    );
+    assert_eq!(count_of(&registry, timeline, &entity), Some(2));
+}
+
 #[test]
 fn stale_sources_and_slots_fail_before_any_change() {
     let (timeline, entity) = (TimelineId::new(), EntityId::new());
