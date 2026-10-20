@@ -4,8 +4,12 @@
 mod capture_store;
 mod frames;
 #[cfg(target_os = "linux")]
+mod proxy;
+#[cfg(target_os = "linux")]
 pub use capture_store::{NetworkCaptureStore, NetworkCaptureStoreError, ReplayedNetworkExchange};
 pub use frames::{NetworkExchangeFailure, NetworkExchangeReply, NetworkExchangeRequest};
+#[cfg(target_os = "linux")]
+pub use proxy::{LocalNetworkSession, LocalNetworkTermination, NetworkEndpointConnector};
 
 use ciborium::value::Value;
 
