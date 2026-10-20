@@ -1053,6 +1053,14 @@ impl ProjectionRegistry {
         snapshot
     }
 
+    /// Inspect retained State after a fixture deliberately poisons its gate.
+    /// This diagnostic is absent from deployable builds and grants no release.
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn retained_state_for_test(&self) -> std::collections::HashMap<String, StateRegistry> {
+        self.snapshot_unfenced()
+    }
+
     /// Compare this registry's accumulated state against a previously captured
     /// snapshot map (as returned by [`Self::state_snapshot`]).
     ///

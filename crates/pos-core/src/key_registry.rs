@@ -13,6 +13,14 @@ use thiserror::Error;
 
 use crate::{Hash, PublicKey};
 
+mod durable_cbor;
+mod read_guard;
+
+pub use read_guard::{
+    KeyRegistryReadErrorV1, KeyRegistryReadGuardV1, KeyRegistryReadRefusedV1, KeyRegistryReadWorkV1,
+};
+use read_guard::{OrdinaryReadGuard, ReadContext};
+
 /// The five independent key roles required by the Wave 8 boundary.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 pub enum KeyRoleV1 {
@@ -100,10 +108,20 @@ impl OwnerIdV1 {
     /// or one longer than 128 UTF-8 bytes.
     pub fn new(value: impl Into<String>) -> Result<Self, KeyRegistryErrorV1> {
         let value = value.into();
-        let length = value.len();
-        if !(1..=128).contains(&length) {
-            return Err(KeyRegistryErrorV1::InvalidOwnerId);
+        Self::from_borrowed(&value)
+    }
+
+    fn validate_text(value: &str) -> Result<(), KeyRegistryErrorV1> {
+        if (1..=128).contains(&value.len()) {
+            Ok(())
+        } else {
+            Err(KeyRegistryErrorV1::InvalidOwnerId)
         }
+    }
+
+    fn from_borrowed(value: &str) -> Result<Self, KeyRegistryErrorV1> {
+        Self::validate_text(value)?;
+        let length = value.len();
         let mut bytes = [0; 128];
         bytes[..length].copy_from_slice(value.as_bytes());
         Ok(Self { bytes, length })
@@ -586,6 +604,23 @@ pub struct KeyRegistryStateV1 {
 }
 
 impl KeyRegistryStateV1 {
+    /// Decode the existing durable V1 CBOR snapshot with native work guards.
+    ///
+    /// The guard receives only checkpoints and exact logical materialization
+    /// quantities. The result is structural registry data, not signing or
+    /// protected-release authority. Ordinary `Deserialize` remains unchanged.
+    ///
+    /// # Errors
+    /// Returns [`KeyRegistryReadErrorV1::InvalidSnapshot`] for a native parse or
+    /// invariant fault, or [`KeyRegistryReadErrorV1::ReadRefused`] immediately
+    /// after the first refusal. No further read work follows a refusal.
+    pub fn from_durable_cbor_with_read_guard(
+        bytes: &[u8],
+        guard: &mut dyn KeyRegistryReadGuardV1,
+    ) -> Result<Self, KeyRegistryReadErrorV1> {
+        durable_cbor::read(bytes, &mut ReadContext::new(guard))
+    }
+
     /// Construct an empty registry.
     #[must_use]
     pub const fn new() -> Self {
@@ -624,91 +659,164 @@ impl KeyRegistryStateV1 {
     /// Returns [`KeyRegistryErrorV1::InvalidState`] when a durable snapshot
     /// violates tombstone, active/high-water, or material-uniqueness rules.
     pub fn validate(&self) -> Result<(), KeyRegistryErrorV1> {
+        self.validate_with_read_context(&mut ReadContext::new(&mut OrdinaryReadGuard))
+            .map_err(|_| KeyRegistryErrorV1::InvalidState)
+    }
+
+    fn validate_with_read_context(
+        &self,
+        context: &mut ReadContext<'_>,
+    ) -> Result<(), KeyRegistryReadErrorV1> {
+        context.step(|context| self.validate_native_invariants(context))
+    }
+
+    fn validate_native_invariants(
+        &self,
+        context: &mut ReadContext<'_>,
+    ) -> Result<(), KeyRegistryReadErrorV1> {
         let mut reserved_material = HashSet::new();
+        self.validate_records(context, &mut reserved_material)?;
+        self.validate_pending_destructions(context)?;
+        self.validate_high_water_maxima(context)?;
+        self.validate_active(context)?;
+        self.validate_latest_epochs(context)?;
+        self.validate_tombstones(context, &mut reserved_material)
+    }
+
+    fn validate_records(
+        &self,
+        context: &mut ReadContext<'_>,
+        reserved_material: &mut HashSet<Hash>,
+    ) -> Result<(), KeyRegistryReadErrorV1> {
         for (identity, record) in &self.records {
-            if record.identity != *identity {
-                return Err(KeyRegistryErrorV1::InvalidState);
-            }
-            if OwnerIdV1::new(identity.owner_id.as_str()).is_err() || identity.epoch == 0 {
-                return Err(KeyRegistryErrorV1::InvalidState);
-            }
-            if identity.role.is_signing() != record.public_verification_key.is_some() {
-                return Err(KeyRegistryErrorV1::InvalidState);
-            }
-            if !self
-                .highest_epoch
-                .contains_key(&(identity.owner_id, identity.role))
-            {
-                return Err(KeyRegistryErrorV1::InvalidState);
-            }
-            if let Some(private_material_digest) = record.private_material_digest {
-                if !reserved_material.insert(private_material_digest) {
-                    return Err(KeyRegistryErrorV1::InvalidState);
+            context.step(|context| {
+                if record.identity != *identity {
+                    return Err(KeyRegistryReadErrorV1::InvalidSnapshot);
                 }
-            }
-            if record.private_material_digest.is_none() && !self.tombstones.contains_key(identity) {
-                return Err(KeyRegistryErrorV1::InvalidState);
-            }
+                if OwnerIdV1::validate_text(identity.owner_id.as_str()).is_err()
+                    || identity.epoch == 0
+                {
+                    return Err(KeyRegistryReadErrorV1::InvalidSnapshot);
+                }
+                if identity.role.is_signing() != record.public_verification_key.is_some() {
+                    return Err(KeyRegistryReadErrorV1::InvalidSnapshot);
+                }
+                let scope = context.scope(&identity.owner_id, identity.role)?;
+                if !self.highest_epoch.contains_key(&scope) {
+                    return Err(KeyRegistryReadErrorV1::InvalidSnapshot);
+                }
+                if let Some(digest) = record.private_material_digest.as_ref() {
+                    reserve_material(reserved_material, digest, context)?;
+                }
+                if record.private_material_digest.is_none()
+                    && !self.tombstones.contains_key(identity)
+                {
+                    return Err(KeyRegistryReadErrorV1::InvalidSnapshot);
+                }
+                Ok(())
+            })?;
         }
-        self.validate_pending_destructions()?;
+        Ok(())
+    }
+
+    fn validate_high_water_maxima(
+        &self,
+        context: &mut ReadContext<'_>,
+    ) -> Result<(), KeyRegistryReadErrorV1> {
         for ((owner_id, role), highest_epoch) in &self.highest_epoch {
-            let Some(maximum) = self
-                .records
-                .keys()
-                .filter(|identity| {
-                    identity.owner_id.as_str() == owner_id.as_str() && identity.role == *role
-                })
-                .map(|identity| identity.epoch)
-                .max()
-            else {
-                return Err(KeyRegistryErrorV1::InvalidState);
-            };
-            if maximum != *highest_epoch {
-                return Err(KeyRegistryErrorV1::InvalidState);
-            }
+            context.step(|context| {
+                let mut maximum = None;
+                for identity in self.records.keys() {
+                    context.step(|_| {
+                        if identity.owner_id.as_str() == owner_id.as_str() && identity.role == *role
+                        {
+                            maximum = Some(maximum.map_or(identity.epoch, |previous: u64| {
+                                previous.max(identity.epoch)
+                            }));
+                        }
+                        Ok(())
+                    })?;
+                }
+                if maximum != Some(*highest_epoch) {
+                    return Err(KeyRegistryReadErrorV1::InvalidSnapshot);
+                }
+                Ok(())
+            })?;
         }
+        Ok(())
+    }
+
+    fn validate_active(&self, context: &mut ReadContext<'_>) -> Result<(), KeyRegistryReadErrorV1> {
         for ((owner_id, role), identity) in &self.active {
-            if OwnerIdV1::new(owner_id.as_str()).is_err() {
-                return Err(KeyRegistryErrorV1::InvalidState);
-            }
-            if identity.role != *role {
-                return Err(KeyRegistryErrorV1::InvalidState);
-            }
-            if identity.owner_id.as_str() != owner_id.as_str() {
-                return Err(KeyRegistryErrorV1::InvalidState);
-            }
-            if self.tombstones.contains_key(identity) {
-                return Err(KeyRegistryErrorV1::InvalidState);
-            }
-            if !self.records.contains_key(identity) {
-                return Err(KeyRegistryErrorV1::InvalidState);
-            }
-            if self.highest_epoch.get(&(*owner_id, *role)) != Some(&identity.epoch) {
-                return Err(KeyRegistryErrorV1::InvalidState);
-            }
+            context.step(|context| {
+                if OwnerIdV1::validate_text(owner_id.as_str()).is_err() {
+                    return Err(KeyRegistryReadErrorV1::InvalidSnapshot);
+                }
+                if identity.role != *role {
+                    return Err(KeyRegistryReadErrorV1::InvalidSnapshot);
+                }
+                if identity.owner_id.as_str() != owner_id.as_str() {
+                    return Err(KeyRegistryReadErrorV1::InvalidSnapshot);
+                }
+                if self.tombstones.contains_key(identity) {
+                    return Err(KeyRegistryReadErrorV1::InvalidSnapshot);
+                }
+                if !self.records.contains_key(identity) {
+                    return Err(KeyRegistryReadErrorV1::InvalidSnapshot);
+                }
+                let scope = context.scope(owner_id, *role)?;
+                if self.highest_epoch.get(&scope) != Some(&identity.epoch) {
+                    return Err(KeyRegistryReadErrorV1::InvalidSnapshot);
+                }
+                Ok(())
+            })?;
         }
+        Ok(())
+    }
+
+    fn validate_latest_epochs(
+        &self,
+        context: &mut ReadContext<'_>,
+    ) -> Result<(), KeyRegistryReadErrorV1> {
         for ((owner_id, role), highest_epoch) in &self.highest_epoch {
-            let identity = KeyIdentityV1::new(*owner_id, *role, *highest_epoch);
-            if !self.tombstones.contains_key(&identity)
-                && !self.pending_destructions.contains_key(&identity)
-                && self.active.get(&(*owner_id, *role)) != Some(&identity)
-            {
-                return Err(KeyRegistryErrorV1::InvalidState);
-            }
+            context.step(|context| {
+                let identity = context.identity(owner_id, *role, *highest_epoch)?;
+                if !self.tombstones.contains_key(&identity)
+                    && !self.pending_destructions.contains_key(&identity)
+                {
+                    let scope = context.scope(owner_id, *role)?;
+                    if self.active.get(&scope) != Some(&identity) {
+                        return Err(KeyRegistryReadErrorV1::InvalidSnapshot);
+                    }
+                }
+                Ok(())
+            })?;
         }
+        Ok(())
+    }
+
+    fn validate_tombstones(
+        &self,
+        context: &mut ReadContext<'_>,
+        reserved_material: &mut HashSet<Hash>,
+    ) -> Result<(), KeyRegistryReadErrorV1> {
         for (identity, tombstone) in &self.tombstones {
-            let Some(record) = self.records.get(identity) else {
-                return Err(KeyRegistryErrorV1::InvalidState);
-            };
-            if tombstone.identity != *identity {
-                return Err(KeyRegistryErrorV1::InvalidState);
-            }
-            if record.private_material_digest.is_some() {
-                return Err(KeyRegistryErrorV1::InvalidState);
-            }
-            if !reserved_material.insert(tombstone.destroyed_material_digest) {
-                return Err(KeyRegistryErrorV1::InvalidState);
-            }
+            context.step(|context| {
+                let Some(record) = self.records.get(identity) else {
+                    return Err(KeyRegistryReadErrorV1::InvalidSnapshot);
+                };
+                if tombstone.identity != *identity {
+                    return Err(KeyRegistryReadErrorV1::InvalidSnapshot);
+                }
+                if record.private_material_digest.is_some() {
+                    return Err(KeyRegistryReadErrorV1::InvalidSnapshot);
+                }
+                reserve_material(
+                    reserved_material,
+                    &tombstone.destroyed_material_digest,
+                    context,
+                )
+            })?;
         }
         Ok(())
     }
@@ -1149,24 +1257,46 @@ impl KeyRegistryStateV1 {
                 .any(|tombstone| tombstone.destroyed_material_digest == digest)
     }
 
-    fn validate_pending_destructions(&self) -> Result<(), KeyRegistryErrorV1> {
+    fn validate_pending_destructions(
+        &self,
+        context: &mut ReadContext<'_>,
+    ) -> Result<(), KeyRegistryReadErrorV1> {
         for (identity, request) in &self.pending_destructions {
-            let Some(record) = self.records.get(identity) else {
-                return Err(KeyRegistryErrorV1::InvalidState);
-            };
-            if request.identity != *identity
-                || request.expected_material_digest
-                    != record
-                        .private_material_digest
-                        .ok_or(KeyRegistryErrorV1::InvalidState)?
-                || self.tombstones.contains_key(identity)
-                || self.active.get(&(identity.owner_id, identity.role)) == Some(identity)
-            {
-                return Err(KeyRegistryErrorV1::InvalidState);
-            }
+            context.step(|context| {
+                let Some(record) = self.records.get(identity) else {
+                    return Err(KeyRegistryReadErrorV1::InvalidSnapshot);
+                };
+                if request.identity != *identity
+                    || record.private_material_digest.as_ref()
+                        != Some(&request.expected_material_digest)
+                    || self.tombstones.contains_key(identity)
+                {
+                    return Err(KeyRegistryReadErrorV1::InvalidSnapshot);
+                }
+                let scope = context.scope(&identity.owner_id, identity.role)?;
+                if self.active.get(&scope) == Some(identity) {
+                    return Err(KeyRegistryReadErrorV1::InvalidSnapshot);
+                }
+                Ok(())
+            })?;
         }
         Ok(())
     }
+}
+
+fn reserve_material(
+    reserved: &mut HashSet<Hash>,
+    digest: &Hash,
+    context: &mut ReadContext<'_>,
+) -> Result<(), KeyRegistryReadErrorV1> {
+    context.step(|context| {
+        if reserved.contains(digest) {
+            return Err(KeyRegistryReadErrorV1::InvalidSnapshot);
+        }
+        context.materialize(32).map(|()| {
+            reserved.insert(*digest);
+        })
+    })
 }
 
 impl KeyRegistryPortV1 for KeyRegistryStateV1 {

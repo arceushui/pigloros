@@ -110,12 +110,14 @@ use pos_core::{
 
 use crate::fork_admission_authority::{
     admitted_fork_context_containment, admitted_fork_may_have_changed_topology, advance_wall_fence,
-    begin_initialize, begin_open, finalize_initialize, finalize_open, fork_commitment,
-    principal_owner_commitment, validate_live_session, verify_command, verify_recovery_proof,
-    with_unfenced_fork_containment, ForkAdmissionAuthorityBootstrapPortV1,
+    begin_initialize, begin_open, finalize_initialize, finalize_open, fork_commitment_with_context,
+    principal_owner_commitment_with_context, validate_live_session, verify_command,
+    verify_recovery_proof, with_unfenced_fork_containment, ForkAdmissionAuthorityBootstrapPortV1,
     ForkAdmissionAuthorityErrorV1, ForkAdmissionAuthorityPortV1, ForkAdmissionAuthoritySessionV1,
     ForkAdmissionAuthorityStateV1, ForkAdmissionOperationRowV1, VerifiedForkAdmissionCommandV1,
 };
+#[cfg(test)]
+use crate::fork_admission_authority::{fork_commitment, principal_owner_commitment};
 use crate::fork_delivery_journal::{
     fork_delivery_execution, fork_delivery_may_have_changed_topology,
     ForkAdmissionDeliveryJournalPortV1, ForkDeliveryClaimOutcomeV1, ForkDeliveryClaimV1,
@@ -128,12 +130,11 @@ use crate::fork_event_authority::{
     ValidatedAdmissionV1, ValidatedOriginV1,
 };
 use crate::fork_manifest_publication::{
-    authorize_publication, publication_operation_decoder, publication_parent_head,
-    publication_sources, recovered_publication_receipt, require_absent_publication_graph,
-    sign_publication, trusted_committed_manifest, validate_publication_request,
-    AbsentPublicationPreflightV1, CommittedPublicationRowsV1, CommittedPublicationSourcesV1,
-    PublicationGraphV1, PublicationSourceErrorV1, PublicationSourceResultV1, PublicationSourcesV1,
-    PublicationSuffixV1,
+    authorize_publication, publication_parent_head, publication_sources,
+    recovered_publication_receipt, require_absent_publication_graph, sign_publication,
+    trusted_committed_manifest_with_context, validate_publication_request,
+    AbsentPublicationPreflightV1, CommittedPublicationSourcesV1, PublicationGraphV1,
+    PublicationSourceErrorV1, PublicationSourceResultV1, PublicationSourcesV1, PublicationSuffixV1,
 };
 use crate::{
     ForkAppendSourcePermitV1, ForkClassifiedAppendReceiptV1, ForkClassifierRegistrarPermitV1,
@@ -149,6 +150,27 @@ mod counterfactual_store;
 mod fork_attribution_authority_import;
 mod fork_attribution_issuer_policy;
 mod fork_code_two_read;
+mod fork_provenance_indexes;
+mod fork_replay;
+mod fork_replay_admission;
+mod fork_replay_binding;
+mod fork_replay_chain;
+mod fork_replay_child;
+mod fork_replay_classifier;
+mod fork_replay_event;
+mod fork_replay_host;
+mod fork_replay_lineage;
+mod fork_replay_operation;
+mod fork_replay_orphans;
+mod fork_replay_provenance;
+mod fork_replay_publication;
+mod fork_replay_read;
+mod fork_replay_registry;
+mod fork_replay_row;
+mod fork_replay_suffix;
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub mod interval_test_support;
 mod local_cut_owner;
 mod pipeline_admission;
 // The Plugin trust registry needs `pos-conformance`, which builds only on Linux, so non-Linux
@@ -1453,11 +1475,6 @@ type ForkEventSuffixV1 = Vec<(
     ForkAppendOperationV1,
 )>;
 
-/// Canonical `EOR1` field 3 starts after the array, magic, version, and bstr heads.
-const EOR1_CHILD_TIMELINE_OFFSET: i64 = 9;
-/// Canonical `FIA1` field 4 follows its 32-byte operation ID.
-const FIA1_CHILD_TIMELINE_OFFSET: i64 = 43;
-
 impl SqliteStore {
     pub(crate) fn require_live_fork_event_session(
         &self,
@@ -1687,6 +1704,31 @@ impl SqliteStore {
         from_logical_seq: u64,
         validator: AuthorityValidatorV1,
     ) -> Result<ForkEventSuffixV1, ForkEventAuthorityErrorV1> {
+        self.read_fork_event_suffix_in_transaction_with_context(
+            child_timeline_id,
+            from_logical_seq,
+            validator,
+            &mut crate::fork_replay::NativeReadContextV1::ordinary(),
+        )
+    }
+
+    fn read_fork_event_suffix_in_transaction_with_context(
+        &self,
+        child_timeline_id: TimelineId,
+        from_logical_seq: u64,
+        validator: AuthorityValidatorV1,
+        context: &mut crate::fork_replay::NativeReadContextV1<'_, '_>,
+    ) -> Result<ForkEventSuffixV1, ForkEventAuthorityErrorV1> {
+        if context.is_protected() {
+            return fork_replay_suffix::read_suffix_with_context(
+                self,
+                child_timeline_id,
+                from_logical_seq,
+                validator,
+                context,
+            );
+        }
+        // Only ordinary contexts reach this path; they have no budget or clock.
         let prefix = read_origin_prefix(&self.conn, child_timeline_id)
             .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)?;
         let rows = sqlite_fork_suffix_rows(&self.conn, child_timeline_id)?;
@@ -1697,6 +1739,7 @@ impl SqliteStore {
             self.hasher.as_ref(),
             child_timeline_id,
             validator,
+            context,
         );
         let mut result = Vec::new();
         for row in rows {
@@ -1714,11 +1757,12 @@ impl SqliteStore {
             if logical_seq < from_logical_seq {
                 continue;
             }
-            let (origin, intervention) = sqlite_validate_classified_records(
+            let (origin, intervention) = sqlite_validate_classified_records_with_context(
                 &self.conn,
                 &operation,
                 &graph.table,
                 graph.admission.origin(),
+                context,
             )?;
             result.push((origin, intervention, operation));
         }
@@ -2109,6 +2153,7 @@ impl SqliteStore {
                 if read_only {
                     self.validate_authority_schema_and_state()
                         .and_then(|()| self.validate_fork_admission_authority_schema())
+                        .and_then(|()| fork_provenance_indexes::validate(&self.conn))
                         .and_then(|()| self.validate_pipeline_admission_schema())
                         .and_then(|()| self.validate_present_counterfactual_schema())
                 } else {
@@ -2411,23 +2456,41 @@ impl SqliteStore {
     }
 
     fn prepare_fork_admission_authority_schema(&self) -> Result<(), CoreError> {
-        self.conn
-            .execute_batch(&format!(
-                "BEGIN IMMEDIATE;
-                 CREATE TABLE IF NOT EXISTS fork_admission_authority (
-                     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-                     fah1_cbor BLOB,
-                     last_authority_wall_time INTEGER NOT NULL DEFAULT 0
-                 );
-                 {}
-                 CREATE INDEX IF NOT EXISTS idx_imported_pob1_principal
-                     ON imported_fork_principal_owner_bindings(principal_digest);
-                 INSERT OR IGNORE INTO fork_delivery_fence_counter (id, last_fence) VALUES (1, 0);
-                 COMMIT;",
-                sqlite_schema_ddl(FORK_ADMISSION_SCHEMA_TABLES)
-            ))
-            .map_err(Self::into_storage_error)
-            .and_then(|()| self.validate_fork_admission_authority_schema())
+        fork_provenance_indexes::require_autocommit(&self.conn)
+            .and_then(|()| {
+                self.conn
+                    .execute_batch("BEGIN IMMEDIATE")
+                    .map_err(Self::into_storage_error)
+            })
+            .and_then(|()| {
+                let result = self
+                    .conn
+                    .execute_batch(&format!(
+                        "CREATE TABLE IF NOT EXISTS fork_admission_authority (
+                             singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                             fah1_cbor BLOB,
+                             last_authority_wall_time INTEGER NOT NULL DEFAULT 0
+                         );
+                         {}
+                         CREATE INDEX IF NOT EXISTS idx_imported_pob1_principal
+                             ON imported_fork_principal_owner_bindings(principal_digest);
+                         INSERT OR IGNORE INTO fork_delivery_fence_counter (id, last_fence) VALUES (1, 0);",
+                        sqlite_schema_ddl(FORK_ADMISSION_SCHEMA_TABLES)
+                    ))
+                    .map_err(Self::into_storage_error)
+                    .and_then(|()| self.validate_fork_admission_authority_schema())
+                    .and_then(|()| fork_provenance_indexes::prepare(&self.conn))
+                    .and_then(|()| self.validate_fork_admission_authority_schema())
+                    .and_then(|()| fork_provenance_indexes::validate(&self.conn))
+                    .and_then(|()| {
+                        self.conn
+                            .execute_batch("COMMIT")
+                            .map_err(Self::into_storage_error)
+                    });
+                // An unsuccessful open drops this unpublished store/connection even
+                // when native rollback could not establish a settled transaction.
+                fork_provenance_indexes::finish_owned_preparation(&self.conn, result)
+            })
     }
 
     fn validate_fork_admission_authority_schema(&self) -> Result<(), CoreError> {
@@ -3272,19 +3335,12 @@ impl SqliteStore {
     ) -> Result<u64, CoreError> {
         let prefix = chain[index].1.as_u64();
         let local_head = Self::get_head_seq_on(conn, timeline)?.as_u64();
-        let length = chain.get(index + 1).map_or(Ok(local_head), |(_, fork)| {
-            fork.as_u64().checked_sub(prefix).ok_or_else(|| {
-                CoreError::Storage(format!(
-                    "Fork point precedes inherited history for timeline {timeline}"
-                ))
-            })
-        })?;
-        if length > local_head {
-            return Err(CoreError::Storage(format!(
-                "Fork point exceeds parent logical Event head for timeline {timeline}"
-            )));
-        }
-        Ok(length)
+        fork_segment_length(
+            prefix,
+            local_head,
+            chain.get(index + 1).map(|(_, fork)| fork.as_u64()),
+        )
+        .map_err(|error| error.into_core(timeline))
     }
 
     fn add_logical_segment(logical_head: u64, segment: u64) -> Result<u64, CoreError> {
@@ -3416,6 +3472,73 @@ enum DecodedForkChainRow {
     },
 }
 
+enum ForkChainRowError<'row> {
+    NegativeHead,
+    RootForkSequence,
+    InvalidParent(&'row str),
+    NegativeForkSequence,
+    MissingForkSequence,
+}
+
+impl ForkChainRowError<'_> {
+    fn into_core(self, current: TimelineId) -> CoreError {
+        match self {
+            Self::NegativeHead => {
+                CoreError::Storage(format!("timeline {current} has a negative Event head"))
+            }
+            Self::RootForkSequence => CoreError::Storage(format!(
+                "root timeline {current} has Fork sequence metadata"
+            )),
+            Self::InvalidParent(parent) => {
+                CoreError::Serialization(format!("invalid ULID: {parent}"))
+            }
+            Self::NegativeForkSequence => CoreError::Storage(format!(
+                "Fork timeline {current} has a negative Fork sequence"
+            )),
+            Self::MissingForkSequence => CoreError::Storage(format!(
+                "Fork timeline {current} is missing its Fork sequence"
+            )),
+        }
+    }
+}
+
+enum ForkSegmentError {
+    BeforeInheritedHistory,
+    BeyondParentHead,
+}
+
+impl ForkSegmentError {
+    fn into_core(self, timeline: TimelineId) -> CoreError {
+        match self {
+            Self::BeforeInheritedHistory => CoreError::Storage(format!(
+                "Fork point precedes inherited history for timeline {timeline}"
+            )),
+            Self::BeyondParentHead => CoreError::Storage(format!(
+                "Fork point exceeds parent logical Event head for timeline {timeline}"
+            )),
+        }
+    }
+}
+
+fn fork_segment_length(
+    prefix: u64,
+    local_head: u64,
+    next_cut: Option<u64>,
+) -> Result<u64, ForkSegmentError> {
+    next_cut
+        .map_or(Ok(local_head), |cut| {
+            cut.checked_sub(prefix)
+                .ok_or(ForkSegmentError::BeforeInheritedHistory)
+        })
+        .and_then(|length| {
+            if length > local_head {
+                Err(ForkSegmentError::BeyondParentHead)
+            } else {
+                Ok(length)
+            }
+        })
+}
+
 impl ForkChainRow {
     fn read(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
         row.get(0).and_then(|parent_id| {
@@ -3430,31 +3553,34 @@ impl ForkChainRow {
     }
 
     fn decode(self, current: TimelineId) -> Result<DecodedForkChainRow, CoreError> {
-        let head = u64::try_from(self.head_seq).map_err(|_| {
-            CoreError::Storage(format!("timeline {current} has a negative Event head"))
-        })?;
-        match (self.parent_id, self.fork_seq) {
-            (None, None) => Ok(DecodedForkChainRow::Root { head }),
-            (None, Some(_)) => Err(CoreError::Storage(format!(
-                "root timeline {current} has Fork sequence metadata"
-            ))),
-            (Some(parent), Some(fork_seq)) => {
-                let parent = parse_timeline_id(&parent)?;
-                let fork = u64::try_from(fork_seq).map_err(|_| {
-                    CoreError::Storage(format!(
-                        "Fork timeline {current} has a negative Fork sequence"
-                    ))
-                })?;
-                Ok(DecodedForkChainRow::Fork {
-                    parent,
-                    fork: Seq::from_u64(fork),
-                    head,
-                })
-            }
-            (Some(_), None) => Err(CoreError::Storage(format!(
-                "Fork timeline {current} is missing its Fork sequence"
-            ))),
-        }
+        self.decode_fields()
+            .map_err(|error| error.into_core(current))
+    }
+
+    /// One semantic owner for ordinary and protected metadata. The closed
+    /// borrowed cause lets the protected reader avoid diagnostic allocations;
+    /// ordinary callers retain their historical messages and precedence.
+    fn decode_fields(&self) -> Result<DecodedForkChainRow, ForkChainRowError<'_>> {
+        u64::try_from(self.head_seq)
+            .map_err(|_| ForkChainRowError::NegativeHead)
+            .and_then(|head| match (self.parent_id.as_deref(), self.fork_seq) {
+                (None, None) => Ok(DecodedForkChainRow::Root { head }),
+                (None, Some(_)) => Err(ForkChainRowError::RootForkSequence),
+                (Some(parent), Some(fork_seq)) => parent
+                    .parse::<ulid::Ulid>()
+                    .map(TimelineId::from_ulid)
+                    .map_err(|_| ForkChainRowError::InvalidParent(parent))
+                    .and_then(|parent| {
+                        u64::try_from(fork_seq)
+                            .map_err(|_| ForkChainRowError::NegativeForkSequence)
+                            .map(|fork| DecodedForkChainRow::Fork {
+                                parent,
+                                fork: Seq::from_u64(fork),
+                                head,
+                            })
+                    }),
+                (Some(_), None) => Err(ForkChainRowError::MissingForkSequence),
+            })
     }
 }
 
@@ -5171,6 +5297,27 @@ impl SqliteStore {
         timeline: TimelineId,
         at_seq: Seq,
     ) -> Result<Hash, CoreError> {
+        Self::compute_chain_hash_at_with_context_on(
+            conn,
+            hasher,
+            timeline,
+            at_seq,
+            &mut crate::fork_replay::NativeReadContextV1::ordinary(),
+        )
+    }
+
+    fn compute_chain_hash_at_with_context_on(
+        conn: &Connection,
+        hasher: &dyn Hasher,
+        timeline: TimelineId,
+        at_seq: Seq,
+        context: &mut crate::fork_replay::NativeReadContextV1<'_, '_>,
+    ) -> Result<Hash, CoreError> {
+        if context.is_protected() {
+            return fork_replay_event::chain_hash_with_context(
+                conn, hasher, timeline, at_seq, context,
+            );
+        }
         let logical_head = Self::logical_head_unchecked_on(conn, timeline)?;
         if at_seq > logical_head {
             return Err(CoreError::ForkBeyondHead {
@@ -9512,6 +9659,112 @@ fn rollback_stale_protected_effect_interval(conn: &Connection) -> ErasureErrorV1
     }
 }
 
+/// The reservation and optional reader snapshot used by one protected interval.
+/// Cleanup is explicit: dropping this borrowed selection never executes SQL.
+struct ProtectedIntervalConnectionsV1<'a> {
+    interval: &'a Connection,
+    reader: Option<&'a Connection>,
+}
+
+impl<'a> ProtectedIntervalConnectionsV1<'a> {
+    fn new(store: &'a SqliteStore) -> Self {
+        Self {
+            interval: store
+                .writer_reservation_connection
+                .as_ref()
+                .unwrap_or(&store.conn),
+            reader: store
+                .writer_reservation_connection
+                .as_ref()
+                .map(|_| &store.conn),
+        }
+    }
+
+    fn begin_reader_snapshot(&self) -> Result<(), ErasureErrorV1> {
+        if let Some(reader) = self.reader {
+            // Never reuse a snapshot that predates the writer reservation.
+            if !reader.is_autocommit() || reader.execute_batch("BEGIN DEFERRED").is_err() {
+                drop(self.interval.execute_batch("ROLLBACK"));
+                return Err(ErasureErrorV1::ReceiptCommitFailed);
+            }
+        }
+        Ok(())
+    }
+
+    fn observed_data_version(&self) -> Result<i64, ErasureErrorV1> {
+        sqlite_data_version(self.reader.unwrap_or(self.interval)).map_err(|_| {
+            self.rollback_reader();
+            drop(self.interval.execute_batch("ROLLBACK"));
+            ErasureErrorV1::ReceiptCommitFailed
+        })
+    }
+
+    fn rollback_reader(&self) {
+        if let Some(reader) = self.reader {
+            drop(reader.execute_batch("ROLLBACK"));
+        }
+    }
+
+    fn reject_stale(&self) -> ErasureErrorV1 {
+        self.rollback_reader();
+        rollback_stale_protected_effect_interval(self.interval)
+    }
+
+    fn finish_reader_snapshot(&self) -> Result<(), ErasureErrorV1> {
+        self.reader.map_or(Ok(()), |reader| {
+            reader.execute_batch("ROLLBACK").map_err(|_| {
+                drop(self.interval.execute_batch("ROLLBACK"));
+                ErasureErrorV1::ReceiptCommitFailed
+            })
+        })
+    }
+
+    /// Consume the selected owned interval, settling the reader before its writer.
+    fn finish(
+        self,
+        disposition: ErasureProtectedEffectDispositionV1,
+    ) -> Result<(), ErasureErrorV1> {
+        self.finish_reader_snapshot().and_then(|()| {
+            let statement = match disposition {
+                ErasureProtectedEffectDispositionV1::Commit => "COMMIT",
+                ErasureProtectedEffectDispositionV1::Rollback => "ROLLBACK",
+            };
+            self.interval.execute_batch(statement).map_err(|_| {
+                drop(self.interval.execute_batch("ROLLBACK"));
+                ErasureErrorV1::ReceiptCommitFailed
+            })
+        })
+    }
+}
+
+impl SqliteStore {
+    /// Refuse stale inventory only after the held interval's data-version read.
+    fn require_current_protected_inventory(
+        &self,
+        observed: i64,
+        connections: &ProtectedIntervalConnectionsV1<'_>,
+    ) -> Result<(), ErasureErrorV1> {
+        if self.erasure_gate_bound && observed != self.erasure_inventory_data_version {
+            return Err(connections.reject_stale());
+        }
+        if self.erasure_gate_bound {
+            let Some(gate) = self.erasure_gate.as_deref() else {
+                return Err(connections.reject_stale());
+            };
+            if crate::validate_bound_erasure_inventory_generation(
+                self.erasure_gate_bound,
+                gate,
+                self.erasure_inventory_generation,
+            )
+            .is_err()
+            {
+                return Err(connections.reject_stale());
+            }
+        }
+        Ok(())
+    }
+}
+
 impl ErasureInventoryPersistencePortV1 for SqliteStore {
     fn complete_erasure_inventory_snapshot(
         &mut self,
@@ -9537,43 +9790,17 @@ impl ErasureInventoryPersistencePortV1 for SqliteStore {
     ) -> Result<ErasureProtectedEffectIntervalV1, ErasureErrorV1> {
         // A new interval starts after the previous transaction settled.
         self.settle_counterfactual_doubt();
-        let interval_connection = self
-            .writer_reservation_connection
-            .as_ref()
-            .unwrap_or(&self.conn);
-        if !interval_connection.is_autocommit() {
+        let connections = ProtectedIntervalConnectionsV1::new(self);
+        if !connections.interval.is_autocommit() {
             return Ok(ErasureProtectedEffectIntervalV1::Unowned);
         }
-        interval_connection
+        connections
+            .interval
             .execute_batch(begin_immediate_sql())
             .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
-        let Ok(observed) = sqlite_data_version(&self.conn) else {
-            drop(interval_connection.execute_batch("ROLLBACK"));
-            return Err(ErasureErrorV1::ReceiptCommitFailed);
-        };
-        if self.erasure_gate_bound && observed != self.erasure_inventory_data_version {
-            return Err(rollback_stale_protected_effect_interval(
-                interval_connection,
-            ));
-        }
-        if self.erasure_gate_bound {
-            let Some(gate) = self.erasure_gate.as_deref() else {
-                return Err(rollback_stale_protected_effect_interval(
-                    interval_connection,
-                ));
-            };
-            if crate::validate_bound_erasure_inventory_generation(
-                self.erasure_gate_bound,
-                gate,
-                self.erasure_inventory_generation,
-            )
-            .is_err()
-            {
-                return Err(rollback_stale_protected_effect_interval(
-                    interval_connection,
-                ));
-            }
-        }
+        connections.begin_reader_snapshot()?;
+        let observed = connections.observed_data_version()?;
+        self.require_current_protected_inventory(observed, &connections)?;
         Ok(ErasureProtectedEffectIntervalV1::Owned)
     }
 
@@ -9585,18 +9812,7 @@ impl ErasureInventoryPersistencePortV1 for SqliteStore {
         if interval == ErasureProtectedEffectIntervalV1::Unowned {
             return Ok(());
         }
-        let interval_connection = self
-            .writer_reservation_connection
-            .as_ref()
-            .unwrap_or(&self.conn);
-        let statement = match disposition {
-            ErasureProtectedEffectDispositionV1::Commit => "COMMIT",
-            ErasureProtectedEffectDispositionV1::Rollback => "ROLLBACK",
-        };
-        interval_connection.execute_batch(statement).map_err(|_| {
-            drop(interval_connection.execute_batch("ROLLBACK"));
-            ErasureErrorV1::ReceiptCommitFailed
-        })
+        ProtectedIntervalConnectionsV1::new(self).finish(disposition)
     }
 }
 
@@ -12369,28 +12585,6 @@ pub(crate) fn sqlite_fork_classifier_source(
     })
 }
 
-/// Read and strictly decode the one durable FCT1 selected for a child Fork.
-pub(crate) fn sqlite_fork_classifier_table(
-    conn: &Connection,
-    child_id: TimelineId,
-) -> Result<Option<ForkClassifierTableV1>, CoreError> {
-    conn.query_row(
-        "SELECT fct1_cbor FROM fork_classifier_tables WHERE child_id = ?1",
-        params![child_id.to_string()],
-        |row| row.get::<_, Vec<u8>>(0),
-    )
-    .optional()
-    .map_err(SqliteStore::into_storage_error)
-    .and_then(|bytes| {
-        bytes
-            .map(|bytes| {
-                ForkClassifierTableV1::from_canonical_cbor(&bytes)
-                    .map_err(|_| CoreError::Storage("invalid persisted FCT1".to_owned()))
-            })
-            .transpose()
-    })
-}
-
 /// Read and strictly decode the FCR1 retained for one registration operation.
 pub(crate) fn sqlite_fork_classifier_registration(
     conn: &Connection,
@@ -12535,6 +12729,18 @@ fn sqlite_decode_fork_suffix_row(
     prefix: u64,
     row: SqliteForkSuffixRowV1,
 ) -> Option<(EventId, u64, ForkAppendOperationV1)> {
+    sqlite_decode_fork_suffix_row_with_context(
+        prefix,
+        row,
+        &mut crate::fork_replay::NativeReadContextV1::ordinary(),
+    )
+}
+
+fn sqlite_decode_fork_suffix_row_with_context(
+    prefix: u64,
+    row: SqliteForkSuffixRowV1,
+    context: &mut crate::fork_replay::NativeReadContextV1<'_, '_>,
+) -> Option<(EventId, u64, ForkAppendOperationV1)> {
     let (event_id, local_seq, fop1) = row;
     event_id
         .parse::<ulid::Ulid>()
@@ -12544,7 +12750,7 @@ fn sqlite_decode_fork_suffix_row(
                 .ok()
                 .and_then(|local_seq| prefix.checked_add(local_seq)),
         )
-        .zip(fop1.and_then(|bytes| ForkAppendOperationV1::from_canonical_cbor(&bytes).ok()))
+        .zip(fop1.and_then(|bytes| context.append_operation(&bytes).ok()))
         .map(|((event_id, logical_seq), operation)| {
             (EventId::from_ulid(event_id), logical_seq, operation)
         })
@@ -12559,24 +12765,10 @@ fn sqlite_has_orphaned_fork_provenance(
     child_timeline_id: TimelineId,
 ) -> Result<bool, ForkEventAuthorityErrorV1> {
     conn.query_row(
-        "SELECT EXISTS(
-             SELECT 1 FROM fork_event_origins
-             LEFT JOIN events ON events.timeline_id = ?1
-                 AND events.event_id = fork_event_origins.event_id
-             WHERE substr(fork_event_origins.eor1_cbor, ?3, 16) = ?2
-                 AND events.event_id IS NULL
-         ) OR EXISTS(
-             SELECT 1 FROM fork_intervention_admissions
-             LEFT JOIN events ON events.timeline_id = ?1
-                 AND events.event_id = fork_intervention_admissions.event_id
-             WHERE substr(fork_intervention_admissions.fia1_cbor, ?4, 16) = ?2
-                 AND events.event_id IS NULL
-         )",
+        fork_provenance_indexes::ORPHANED_PROVENANCE,
         params![
             child_timeline_id.to_string(),
-            child_timeline_id.inner().to_bytes().as_slice(),
-            EOR1_CHILD_TIMELINE_OFFSET,
-            FIA1_CHILD_TIMELINE_OFFSET
+            child_timeline_id.inner().to_bytes().as_slice()
         ],
         |row| row.get(0),
     )
@@ -12657,55 +12849,6 @@ impl SqliteStore {
         )
     }
 
-    /// Read the `FPO1` stored for one operation ID with the authority origin it
-    /// carries, for a trusted read; a noncanonical row is `invalid`.
-    fn fork_publication_operation_with_origin(
-        &self,
-        operation_id: Hash,
-        invalid: ForkManifestPublicationErrorV1,
-        validator: AuthorityValidatorV1,
-    ) -> Result<
-        Option<(pos_core::ForkPublicationOperationV1, ValidatedOriginV1)>,
-        ForkManifestPublicationErrorV1,
-    > {
-        self.fork_publication_row(
-            FORK_PUBLICATION_OPERATION_SQL,
-            params![operation_id.as_bytes().as_slice()],
-            publication_operation_decoder(validator),
-            invalid,
-        )
-    }
-
-    /// Read and strictly decode the `FPB1` stored for one Fork/head key.
-    fn fork_publication_binding(
-        &self,
-        child_timeline_id: TimelineId,
-        final_logical_head: u64,
-    ) -> Result<Option<pos_core::ForkPublicationBindingV1>, ForkManifestPublicationErrorV1> {
-        self.fork_publication_row(
-            FORK_PUBLICATION_BINDING_SQL,
-            params![
-                child_timeline_id.to_string(),
-                sqlite_publication_head(final_logical_head)
-            ],
-            pos_core::ForkPublicationBindingV1::from_canonical_cbor,
-            ForkManifestPublicationErrorV1::PublicationConflict,
-        )
-    }
-
-    /// Read and strictly decode the `FPA1` stored for one record ID.
-    fn fork_publication_artifact(
-        &self,
-        record_id: Hash,
-    ) -> Result<Option<pos_core::ForkPublicationArtifactV1>, ForkManifestPublicationErrorV1> {
-        self.fork_publication_row(
-            FORK_PUBLICATION_ARTIFACT_SQL,
-            params![record_id.as_bytes().as_slice()],
-            pos_core::ForkPublicationArtifactV1::from_canonical_cbor,
-            ForkManifestPublicationErrorV1::PublicationConflict,
-        )
-    }
-
     /// Read the admitted Fork's immutable `FAR1` in the open transaction under
     /// one explicit R6.9 validator: issuance and recovery pass validator (a),
     /// which requires the `Local` origin and its `FCC1` row, and only a read
@@ -12715,11 +12858,25 @@ impl SqliteStore {
         child_timeline_id: TimelineId,
         validator: AuthorityValidatorV1,
     ) -> PublicationSourceResultV1<ValidatedAdmissionV1> {
+        self.fork_publication_admission_with_context(
+            child_timeline_id,
+            validator,
+            &mut crate::fork_replay::NativeReadContextV1::ordinary(),
+        )
+    }
+
+    fn fork_publication_admission_with_context(
+        &self,
+        child_timeline_id: TimelineId,
+        validator: AuthorityValidatorV1,
+        context: &mut crate::fork_replay::NativeReadContextV1<'_, '_>,
+    ) -> PublicationSourceResultV1<ValidatedAdmissionV1> {
         sqlite_validated_admission(
             &self.conn,
             self.hasher.as_ref(),
             child_timeline_id,
             validator,
+            context,
         )
         .map_err(PublicationSourceErrorV1::from)
     }
@@ -12731,11 +12888,27 @@ impl SqliteStore {
         parent_logical_head: PublicationSourceResultV1<u64>,
         validator: AuthorityValidatorV1,
     ) -> PublicationSourceResultV1<PublicationSuffixV1> {
+        self.fork_publication_suffix_with_context(
+            child_timeline_id,
+            parent_logical_head,
+            validator,
+            &mut crate::fork_replay::NativeReadContextV1::ordinary(),
+        )
+    }
+
+    fn fork_publication_suffix_with_context(
+        &self,
+        child_timeline_id: TimelineId,
+        parent_logical_head: PublicationSourceResultV1<u64>,
+        validator: AuthorityValidatorV1,
+        context: &mut crate::fork_replay::NativeReadContextV1<'_, '_>,
+    ) -> PublicationSourceResultV1<PublicationSuffixV1> {
         parent_logical_head.and_then(|parent_logical_head| {
-            self.read_fork_event_suffix_in_transaction(
+            self.read_fork_event_suffix_in_transaction_with_context(
                 child_timeline_id,
                 parent_logical_head.saturating_add(1),
                 validator,
+                context,
             )
             .map_err(PublicationSourceErrorV1::from)
         })
@@ -12905,40 +13078,6 @@ impl SqliteStore {
         })
     }
 
-    /// Join the committed `FPB1`, `FPO1`, and `FPA1` rows for one key.
-    fn committed_fork_publication_rows(
-        &self,
-        child_timeline_id: TimelineId,
-        final_logical_head: u64,
-        validator: AuthorityValidatorV1,
-    ) -> Result<CommittedPublicationRowsV1, ForkManifestPublicationErrorV1> {
-        self.fork_publication_binding(child_timeline_id, final_logical_head)
-            .and_then(|binding| binding.ok_or(ForkManifestPublicationErrorV1::PublicationMissing))
-            .and_then(|binding| {
-                let input = binding.input();
-                self.fork_publication_operation_with_origin(
-                    input.operation_id,
-                    ForkManifestPublicationErrorV1::PublicationConflict,
-                    validator,
-                )
-                .and_then(|operation| {
-                    self.fork_publication_artifact(input.signed_manifest_record_id)
-                        .map(|artifact| operation.zip(artifact))
-                })
-                .and_then(|rows| rows.ok_or(ForkManifestPublicationErrorV1::PublicationConflict))
-                .map(|((operation, origin), artifact)| {
-                    CommittedPublicationRowsV1 {
-                        child_timeline_id,
-                        final_logical_head,
-                        binding,
-                        operation,
-                        origin,
-                        artifact,
-                    }
-                })
-            })
-    }
-
     /// Trusted read of one committed graph inside the caller's transaction.
     fn read_committed_fork_publication(
         &self,
@@ -12946,33 +13085,64 @@ impl SqliteStore {
         final_logical_head: u64,
         validator: AuthorityValidatorV1,
     ) -> Result<crate::CommittedForkManifestV1, ForkManifestPublicationErrorV1> {
-        self.committed_fork_publication_rows(child_timeline_id, final_logical_head, validator)
-            .and_then(|rows| {
-                let admission = self.fork_publication_admission(child_timeline_id, validator);
-                let retained = sqlite_retained_key_evidence(&self.conn, &admission);
-                let suffix = self.fork_publication_suffix(
-                    child_timeline_id,
-                    publication_parent_head(&admission),
-                    validator,
-                );
-                let final_chain_head_hash = Self::compute_chain_hash_at_unchecked_on(
-                    &self.conn,
-                    self.hasher.as_ref(),
-                    child_timeline_id,
-                    Seq::from_u64(final_logical_head),
-                )
-                .map_err(PublicationSourceErrorV1::from);
-                let registry =
-                    sqlite_load_key_registry(&self.conn).map_err(PublicationSourceErrorV1::from);
-                let sources = CommittedPublicationSourcesV1 {
-                    admission,
-                    retained,
-                    final_chain_head_hash,
-                    suffix,
-                    registry,
-                };
-                trusted_committed_manifest(&rows, sources)
-            })
+        self.read_committed_fork_publication_with_context(
+            child_timeline_id,
+            final_logical_head,
+            validator,
+            &mut crate::fork_replay::NativeReadContextV1::ordinary(),
+        )
+    }
+
+    fn read_committed_fork_publication_with_context(
+        &self,
+        child_timeline_id: TimelineId,
+        final_logical_head: u64,
+        validator: AuthorityValidatorV1,
+        context: &mut crate::fork_replay::NativeReadContextV1<'_, '_>,
+    ) -> Result<crate::CommittedForkManifestV1, ForkManifestPublicationErrorV1> {
+        context.check()?;
+        self.committed_publication_rows_with_context(
+            child_timeline_id,
+            final_logical_head,
+            validator,
+            context,
+        )
+        .and_then(|rows| {
+            let admission =
+                self.fork_publication_admission_with_context(child_timeline_id, validator, context);
+            context.check()?;
+            let retained = sqlite_retained_key_evidence(&self.conn, &admission, context);
+            context.check()?;
+            let suffix = self.fork_publication_suffix_with_context(
+                child_timeline_id,
+                publication_parent_head(&admission),
+                validator,
+                context,
+            );
+            context.check()?;
+            let final_chain_head_hash = Self::compute_chain_hash_at_with_context_on(
+                &self.conn,
+                self.hasher.as_ref(),
+                child_timeline_id,
+                Seq::from_u64(final_logical_head),
+                context,
+            )
+            .map_err(PublicationSourceErrorV1::from);
+            context.check()?;
+            let registry = sqlite_load_key_registry_with_context(&self.conn, context);
+            context.check()?;
+            let sources = CommittedPublicationSourcesV1 {
+                admission,
+                retained,
+                final_chain_head_hash,
+                suffix,
+                registry: registry
+                    .as_ref()
+                    .map(Option::as_ref)
+                    .map_err(|error| *error),
+            };
+            trusted_committed_manifest_with_context(&rows, sources, context)
+        })
     }
 }
 
@@ -13045,14 +13215,34 @@ fn sqlite_local_fork_admission(
     hasher: &dyn Hasher,
     child_timeline_id: TimelineId,
 ) -> Result<ForkAdmissionRecordV1, ForkEventAuthorityErrorV1> {
-    conn.query_row(
-        FORK_ADMISSION_FAR1_SQL,
-        params![child_timeline_id.to_string()],
-        |row| row.get::<_, Vec<u8>>(0),
+    sqlite_local_fork_admission_with_context(
+        conn,
+        hasher,
+        child_timeline_id,
+        &mut crate::fork_replay::NativeReadContextV1::ordinary(),
     )
-    .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)
+}
+
+fn sqlite_local_fork_admission_with_context(
+    conn: &Connection,
+    hasher: &dyn Hasher,
+    child_timeline_id: TimelineId,
+    context: &mut crate::fork_replay::NativeReadContextV1<'_, '_>,
+) -> Result<ForkAdmissionRecordV1, ForkEventAuthorityErrorV1> {
+    context
+        .bytes(ulid::ULID_LEN)
+        .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)?;
+    let key = child_timeline_id.to_string();
+    fork_replay_admission::admission_blob_with_context(
+        conn,
+        fork_replay_admission::AdmissionRowV1::Fork,
+        &key,
+        context,
+    )
+    .and_then(|bytes| bytes.ok_or(ForkEventAuthorityErrorV1::CorruptAuthority))
     .and_then(|bytes| {
-        ForkAdmissionRecordV1::from_canonical_cbor(&bytes)
+        context
+            .local_admission_record(&bytes)
             .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)
     })
     .and_then(|admission| {
@@ -13064,21 +13254,32 @@ fn sqlite_local_fork_admission(
     .and_then(|admission| {
         // A missing or unreadable FCC1 row and a receipt naming another FAR1
         // are all corrupt authority.
+        context
+            .canonical(admission.canonical_cbor_len())
+            .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)?;
         let expected = ForkAdmissionOperationResultV1::Fork(ForkAdmissionReceiptV1 {
             child_id: child_timeline_id,
             admission_digest: admission.digest(),
         });
-        sqlite_fork_admission_operation(
+        context
+            .check()
+            .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)?;
+        let accepted = fork_replay_operation::operation_with_context(
             conn,
             ForkAdmissionOperationKindV1::Fork,
             admission.input().operation_id,
+            context,
         )
         .ok()
         .flatten()
-        .and_then(|row| sqlite_fork_admission_result(conn, hasher, &row).ok())
+        .and_then(|row| sqlite_fork_admission_result_with_context(conn, hasher, &row, context).ok())
         .filter(|result| *result == expected)
         .map(|_| admission)
-        .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority)
+        .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority);
+        context
+            .check()
+            .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)?;
+        accepted
     })
 }
 
@@ -13216,36 +13417,118 @@ fn sqlite_validate_classified_records(
     table: &ForkClassifierTableV1,
     origin: ValidatedOriginV1,
 ) -> Result<(EventOriginRecordV1, Option<ForkInterventionAdmissionV1>), ForkEventAuthorityErrorV1> {
+    sqlite_validate_classified_records_with_context(
+        conn,
+        operation,
+        table,
+        origin,
+        &mut crate::fork_replay::NativeReadContextV1::ordinary(),
+    )
+}
+
+fn sqlite_validate_classified_records_with_context(
+    conn: &Connection,
+    operation: &ForkAppendOperationV1,
+    table: &ForkClassifierTableV1,
+    origin: ValidatedOriginV1,
+    context: &mut crate::fork_replay::NativeReadContextV1<'_, '_>,
+) -> Result<(EventOriginRecordV1, Option<ForkInterventionAdmissionV1>), ForkEventAuthorityErrorV1> {
     let input = operation.input();
-    sqlite_classified_event(conn, operation)
+    let mut event_carrier = None;
+    let event = if context.is_protected() {
+        fork_replay_event::classified_event_with_context(
+            conn,
+            operation,
+            &mut event_carrier,
+            context,
+        )
+    } else {
+        sqlite_classified_event(conn, operation)
+            .map(|event| fork_replay_event::ScopedEventV1::new(event_carrier.insert(event)))
+    };
+    event
         .and_then(|event| {
-            sqlite_event_origin(conn, input.event_id)
-                .and_then(|origin| {
+            let record = if context.is_protected() {
+                fork_replay_provenance::event_origin_with_context(conn, input.event_id, context)
+            } else {
+                sqlite_event_origin(conn, input.event_id)
+                    .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)
+            };
+            record.and_then(|origin| {
+                let intervention = if context.is_protected() {
+                    fork_replay_provenance::intervention_with_context(conn, input.event_id, context)
+                } else {
                     sqlite_intervention_admission(conn, input.event_id)
-                        .map(|intervention| (event, origin, intervention))
-                })
-                .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)
+                        .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)
+                };
+                intervention.map(|intervention| (event, origin, intervention))
+            })
         })
         .and_then(|(event, record, intervention)| {
             // An unclassifiable FOP1 source is corrupt authority, exactly like
             // any record that differs from its expected provenance.
-            ForkEventClassifierV1::from_table(table)
-                .classify_identity(&input.source)
-                .ok()
-                .filter(|classification| {
-                    let (expected_origin, expected_intervention) =
-                        operation.expected_provenance(table, *classification);
-                    classified_event_matches_operation(&event, operation, origin)
-                        && record == expected_origin
-                        && record.digest() == input.event_origin_digest
-                        && intervention == expected_intervention
-                        && intervention
-                            .as_ref()
-                            .map(ForkInterventionAdmissionV1::digest)
-                            == input.intervention_admission_digest
+            context
+                .classifier_from_table(table)
+                .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)
+                .and_then(|classifier| {
+                    classifier
+                        .classify_identity(&input.source)
+                        .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)
                 })
-                .map(|_| (record, intervention))
-                .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority)
+                .and_then(|classification| {
+                    let (expected_origin, expected_intervention) =
+                        operation.expected_provenance(table, classification);
+                    if !classified_event_matches_operation(event.event(), operation, origin)
+                        || record != expected_origin
+                    {
+                        return Err(ForkEventAuthorityErrorV1::CorruptAuthority);
+                    }
+                    context
+                        .canonical(record.canonical_cbor_len())
+                        .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)
+                        .and_then(|()| {
+                            let digest = record.digest();
+                            context
+                                .check()
+                                .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)
+                                .and_then(|()| {
+                                    if digest != input.event_origin_digest
+                                        || intervention != expected_intervention
+                                    {
+                                        return Err(ForkEventAuthorityErrorV1::CorruptAuthority);
+                                    }
+                                    intervention
+                                        .as_ref()
+                                        .map(|admission| {
+                                            context
+                                                .canonical(admission.canonical_cbor_len())
+                                                .map_err(|_| {
+                                                    ForkEventAuthorityErrorV1::CorruptAuthority
+                                                })
+                                                .and_then(|()| {
+                                                    let digest = admission.digest();
+                                                    context.check().map(|()| digest).map_err(|_| {
+                                                        ForkEventAuthorityErrorV1::CorruptAuthority
+                                                    })
+                                                })
+                                        })
+                                        .transpose()
+                                        .and_then(|digest| {
+                                            if digest == input.intervention_admission_digest {
+                                                Ok((record, intervention))
+                                            } else {
+                                                Err(ForkEventAuthorityErrorV1::CorruptAuthority)
+                                            }
+                                        })
+                                })
+                        })
+                })
+        })
+        .and_then(|records| {
+            context
+                .check()
+                .map(|()| records)
+                .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)
         })
 }
 
@@ -13265,44 +13548,92 @@ fn sqlite_classified_authority_graph(
     ),
     ForkEventAuthorityErrorV1,
 > {
-    let admission = sqlite_local_fork_admission(conn, hasher, child_id)?;
-    let table = sqlite_fork_classifier_table(conn, child_id)
-        .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)?
-        .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority)?;
-    let registration_bytes = conn
-        .query_row(
-            FORK_CLASSIFIER_REGISTRATION_SQL,
-            params![child_id.to_string()],
-            |row| row.get::<_, Vec<u8>>(0),
-        )
-        .optional()
-        .ok()
-        .flatten()
-        .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority)?;
-    let registration = ForkClassifierRegistrationV1::from_canonical_cbor(&registration_bytes)
-        .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)?;
-    let source = sqlite_fork_classifier_source(
+    sqlite_classified_authority_graph_with_context(
         conn,
-        table.input().room_revision_descriptor_hash,
-        &table.input().registrar_identifier,
+        hasher,
+        child_id,
+        &mut crate::fork_replay::NativeReadContextV1::ordinary(),
     )
-    .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)?
-    .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority)?;
-    (table.input().fork_admission_digest == admission.digest()
-        && table.input().room_revision_descriptor_hash
-            == admission.input().room_revision_descriptor_hash
-        && source.input().room_revision_descriptor_hash
-            == table.input().room_revision_descriptor_hash
-        && source.input().registrar_identifier == table.input().registrar_identifier
-        && table.input().source_configuration_revision_digest == source.digest()
-        && table.input().routes == source.input().routes
-        && registration.input().child_timeline_id == child_id
-        && registration.input().fork_admission_digest == admission.digest()
-        && registration.input().room_revision_descriptor_hash
-            == admission.input().room_revision_descriptor_hash
-        && registration.input().classifier_revision_digest == table.digest())
-    .then_some((admission, table, registration))
-    .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority)
+}
+
+fn sqlite_classified_authority_graph_with_context(
+    conn: &Connection,
+    hasher: &dyn Hasher,
+    child_id: TimelineId,
+    context: &mut crate::fork_replay::NativeReadContextV1<'_, '_>,
+) -> Result<
+    (
+        ForkAdmissionRecordV1,
+        ForkClassifierTableV1,
+        ForkClassifierRegistrationV1,
+    ),
+    ForkEventAuthorityErrorV1,
+> {
+    use fork_replay_classifier::{
+        classifier_registration_with_context, classifier_source_with_context,
+        classifier_table_with_context, ClassifierKeyV1,
+    };
+    use ForkEventAuthorityErrorV1::CorruptAuthority;
+    let admission = sqlite_local_fork_admission_with_context(conn, hasher, child_id, context)?;
+    context.check().map_err(|_| CorruptAuthority)?;
+    let table = classifier_table_with_context(conn, child_id, context)?;
+    let registration = classifier_registration_with_context(conn, child_id, context)?;
+    let source = classifier_source_with_context(
+        conn,
+        ClassifierKeyV1::LocalSource {
+            descriptor: table.input().room_revision_descriptor_hash,
+            registrar: &table.input().registrar_identifier,
+        },
+        context,
+    )?;
+    context
+        .canonical(admission.canonical_cbor_len())
+        .map_err(|_| CorruptAuthority)?;
+    let admission_digest = admission.digest();
+    context.check().map_err(|_| CorruptAuthority)?;
+    if table.input().fork_admission_digest != admission_digest
+        || table.input().room_revision_descriptor_hash
+            != admission.input().room_revision_descriptor_hash
+        || source.input().room_revision_descriptor_hash
+            != table.input().room_revision_descriptor_hash
+        || source.input().registrar_identifier != table.input().registrar_identifier
+    {
+        return Err(CorruptAuthority);
+    }
+    context
+        .canonical(source.canonical_cbor_len())
+        .map_err(|_| CorruptAuthority)?;
+    let source_digest = source.digest();
+    context.check().map_err(|_| CorruptAuthority)?;
+    if table.input().source_configuration_revision_digest != source_digest
+        || table.input().routes != source.input().routes
+        || registration.input().child_timeline_id != child_id
+    {
+        return Err(CorruptAuthority);
+    }
+    context
+        .canonical(admission.canonical_cbor_len())
+        .map_err(|_| CorruptAuthority)?;
+    let repeated_admission_digest = admission.digest();
+    context.check().map_err(|_| CorruptAuthority)?;
+    if registration.input().fork_admission_digest != repeated_admission_digest
+        || registration.input().room_revision_descriptor_hash
+            != admission.input().room_revision_descriptor_hash
+    {
+        return Err(CorruptAuthority);
+    }
+    context
+        .canonical(table.canonical_cbor_len())
+        .map_err(|_| CorruptAuthority)?;
+    let table_digest = table.digest();
+    context.check().map_err(|_| CorruptAuthority)?;
+    let result = (registration.input().classifier_revision_digest == table_digest)
+        .then_some((admission, table, registration))
+        .ok_or(CorruptAuthority);
+    context
+        .check()
+        .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)?;
+    result
 }
 
 /// Validate the child's authority closure against digests retained by evidence.
@@ -13645,46 +13976,12 @@ fn sqlite_fork_admission_operation(
     kind: ForkAdmissionOperationKindV1,
     operation_id: Hash,
 ) -> Result<Option<ForkAdmissionOperationRowV1>, pos_core::ForkAdmissionErrorV1> {
-    conn.query_row(
-        "SELECT evidence_digest, commitment, result_digest, child_id
-         FROM fork_admission_operations
-         WHERE kind = ?1 AND operation_id = ?2",
-        params![i64::from(kind.wire()), operation_id.as_bytes().as_slice()],
-        |row| {
-            Ok((
-                row.get::<_, Vec<u8>>(0)?,
-                row.get::<_, Vec<u8>>(1)?,
-                row.get::<_, Vec<u8>>(2)?,
-                row.get::<_, Option<String>>(3)?,
-            ))
-        },
+    fork_replay_operation::operation_with_context(
+        conn,
+        kind,
+        operation_id,
+        &mut crate::fork_replay::NativeReadContextV1::ordinary(),
     )
-    .optional()
-    .map_err(|_| pos_core::ForkAdmissionErrorV1::StorageIndeterminate)
-    .and_then(|record| {
-        record.map_or(
-            Ok(None),
-            |(evidence_digest, commitment, result_digest, child_id)| {
-                child_id
-                    .map(|id| {
-                        id.parse::<ulid::Ulid>()
-                            .map(TimelineId::from_ulid)
-                            .map_err(|_| pos_core::ForkAdmissionErrorV1::CorruptAuthority)
-                    })
-                    .transpose()
-                    .and_then(|child_id| {
-                        Ok(Some(ForkAdmissionOperationRowV1 {
-                            kind,
-                            operation_id,
-                            evidence_digest: sqlite_hash(evidence_digest)?,
-                            commitment: sqlite_hash(commitment)?,
-                            result_digest: sqlite_hash(result_digest)?,
-                            child_id,
-                        }))
-                    })
-            },
-        )
-    })
 }
 
 fn sqlite_insert_fork_admission_operation(
@@ -13737,56 +14034,87 @@ fn sqlite_fork_admission_result(
     hasher: &dyn Hasher,
     row: &ForkAdmissionOperationRowV1,
 ) -> Result<ForkAdmissionOperationResultV1, pos_core::ForkAdmissionErrorV1> {
-    let store_id = sqlite_fork_admission_store_id(conn)?;
+    sqlite_fork_admission_result_with_context(
+        conn,
+        hasher,
+        row,
+        &mut crate::fork_replay::NativeReadContextV1::ordinary(),
+    )
+}
+
+fn sqlite_fork_admission_result_with_context(
+    conn: &Connection,
+    hasher: &dyn Hasher,
+    row: &ForkAdmissionOperationRowV1,
+    context: &mut crate::fork_replay::NativeReadContextV1<'_, '_>,
+) -> Result<ForkAdmissionOperationResultV1, pos_core::ForkAdmissionErrorV1> {
+    context
+        .check()
+        .map_err(|_| pos_core::ForkAdmissionErrorV1::CorruptAuthority)?;
+    let store_id = sqlite_fork_admission_store_id_with_context(conn, context)?;
+    context
+        .check()
+        .map_err(|_| pos_core::ForkAdmissionErrorV1::CorruptAuthority)?;
     match (row.kind, row.child_id) {
         (ForkAdmissionOperationKindV1::PrincipalOwner, None) => {
-            sqlite_principal_owner_result(conn, store_id, row)
+            sqlite_principal_owner_result_with_context(conn, store_id, row, context)
                 .map(ForkAdmissionOperationResultV1::PrincipalOwner)
         }
         (ForkAdmissionOperationKindV1::Fork, Some(child_id)) => {
-            let bytes = conn
-                .query_row(
-                    "SELECT far1_cbor FROM fork_admissions WHERE child_id = ?1",
-                    params![child_id.to_string()],
-                    |record| record.get::<_, Vec<u8>>(0),
-                )
-                .optional()
-                .map_err(|_| pos_core::ForkAdmissionErrorV1::StorageIndeterminate)?
-                .ok_or(pos_core::ForkAdmissionErrorV1::CorruptAuthority)?;
-            let admission = ForkAdmissionRecordV1::from_canonical_cbor(&bytes)
+            context
+                .bytes(ulid::ULID_LEN)
                 .map_err(|_| pos_core::ForkAdmissionErrorV1::CorruptAuthority)?;
-            if admission.digest() != row.result_digest
+            let child_key = child_id.to_string();
+            let bytes = fork_replay_admission::recovery_admission_blob_with_context(
+                conn, &child_key, context,
+            )?
+            .ok_or(pos_core::ForkAdmissionErrorV1::CorruptAuthority)?;
+            let admission = context
+                .local_admission_record(&bytes)
+                .map_err(|_| pos_core::ForkAdmissionErrorV1::CorruptAuthority)?;
+            context
+                .canonical(admission.canonical_cbor_len())
+                .map_err(|_| pos_core::ForkAdmissionErrorV1::CorruptAuthority)?;
+            let digest = admission.digest();
+            context
+                .check()
+                .map_err(|_| pos_core::ForkAdmissionErrorV1::CorruptAuthority)?;
+            if digest != row.result_digest
                 || admission.input().operation_id != row.operation_id
                 || admission.input().child_timeline_id != child_id
             {
                 return Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority);
             }
-            let binding = sqlite_fork_principal_owner_binding(
+            let binding = sqlite_fork_principal_owner_binding_with_context(
                 conn,
                 admission.input().principal_owner_binding_digest,
+                context,
             )?;
             if binding.input().owner != admission.input().creator {
                 return Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority);
             }
-            let parent_chain_head = SqliteStore::compute_chain_hash_at_unchecked_on(
+            let parent_chain_head = SqliteStore::compute_chain_hash_at_with_context_on(
                 conn,
                 hasher,
                 admission.input().parent_timeline_id,
                 Seq::from_u64(admission.input().parent_logical_head),
+                context,
             )
             .map_err(|_| pos_core::ForkAdmissionErrorV1::CorruptAuthority)?;
             if parent_chain_head != admission.input().parent_chain_head_hash {
                 return Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority);
             }
-            let child_name = sqlite_fork_admission_child_name(conn, &admission)?
-                .ok_or(pos_core::ForkAdmissionErrorV1::CorruptAuthority)?;
-            if fork_commitment(
+            let child_name =
+                sqlite_fork_admission_child_name_with_context(conn, &admission, context)?
+                    .ok_or(pos_core::ForkAdmissionErrorV1::CorruptAuthority)?;
+            if fork_commitment_with_context(
                 store_id,
                 binding.input().principal_digest,
                 row.evidence_digest,
                 &admission,
                 &child_name,
-            ) != row.commitment
+                context,
+            )? != row.commitment
             {
                 return Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority);
             }
@@ -13803,33 +14131,26 @@ fn sqlite_fork_admission_result(
 
 /// Validate one POB1 operation row against its keyed binding and the
 /// reconstructed commitment.
-fn sqlite_principal_owner_result(
+fn sqlite_principal_owner_result_with_context(
     conn: &Connection,
     store_id: Hash,
     row: &ForkAdmissionOperationRowV1,
+    context: &mut crate::fork_replay::NativeReadContextV1<'_, '_>,
 ) -> Result<PrincipalOwnerBindingV1, pos_core::ForkAdmissionErrorV1> {
-    // The key column equals the row's operation ID, so only the other
-    // columns are read back from durable state.
-    let binding = conn
-        .query_row(
-            "SELECT principal_digest, pob1_cbor
-             FROM fork_principal_owner_bindings
-             WHERE operation_id = ?1",
-            params![row.operation_id.as_bytes().as_slice()],
-            |record| {
-                Ok((
-                    row.operation_id.as_bytes().to_vec(),
-                    record.get::<_, Vec<u8>>(0)?,
-                    record.get::<_, Vec<u8>>(1)?,
-                ))
-            },
-        )
-        .optional()
-        .map_err(|_| pos_core::ForkAdmissionErrorV1::StorageIndeterminate)?
-        .ok_or(pos_core::ForkAdmissionErrorV1::CorruptAuthority)
-        .and_then(sqlite_decode_principal_owner_binding)?;
-    if binding.digest() != row.result_digest
-        || principal_owner_commitment(store_id, &binding, row.evidence_digest) != row.commitment
+    let binding = fork_replay_binding::binding_with_context(conn, row.operation_id, context)?
+        .ok_or(pos_core::ForkAdmissionErrorV1::CorruptAuthority)?;
+    context
+        .canonical(binding.canonical_cbor_len())
+        .map_err(|_| pos_core::ForkAdmissionErrorV1::CorruptAuthority)?;
+    let digest = binding.digest();
+    context
+        .check()
+        .map_err(|_| pos_core::ForkAdmissionErrorV1::CorruptAuthority)?;
+    if digest != row.result_digest {
+        return Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority);
+    }
+    if principal_owner_commitment_with_context(store_id, &binding, row.evidence_digest, context)?
+        != row.commitment
     {
         return Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority);
     }
@@ -13845,32 +14166,37 @@ fn sqlite_fork_principal_owner_binding(
     conn: &Connection,
     binding_digest: Hash,
 ) -> Result<PrincipalOwnerBindingV1, pos_core::ForkAdmissionErrorV1> {
-    conn.query_row(
-        "SELECT operation_id FROM fork_admission_operations
-         WHERE kind = 1 AND result_digest = ?1",
-        params![binding_digest.as_bytes().as_slice()],
-        |record| record.get::<_, Vec<u8>>(0),
+    sqlite_fork_principal_owner_binding_with_context(
+        conn,
+        binding_digest,
+        &mut crate::fork_replay::NativeReadContextV1::ordinary(),
     )
-    .optional()
-    .map_err(|_| pos_core::ForkAdmissionErrorV1::StorageIndeterminate)
-    .and_then(|operation_id| operation_id.ok_or(pos_core::ForkAdmissionErrorV1::CorruptAuthority))
-    .and_then(sqlite_hash)
-    .and_then(|operation_id| {
-        sqlite_fork_admission_operation(
-            conn,
-            ForkAdmissionOperationKindV1::PrincipalOwner,
-            operation_id,
-        )
-    })
-    .and_then(|binding_row| {
-        binding_row
-            .filter(|binding_row| binding_row.child_id.is_none())
-            .ok_or(pos_core::ForkAdmissionErrorV1::CorruptAuthority)
-    })
-    .and_then(|binding_row| {
-        sqlite_fork_admission_store_id(conn)
-            .and_then(|store_id| sqlite_principal_owner_result(conn, store_id, &binding_row))
-    })
+}
+
+fn sqlite_fork_principal_owner_binding_with_context(
+    conn: &Connection,
+    binding_digest: Hash,
+    context: &mut crate::fork_replay::NativeReadContextV1<'_, '_>,
+) -> Result<PrincipalOwnerBindingV1, pos_core::ForkAdmissionErrorV1> {
+    fork_replay_operation::principal_operation_id_with_context(conn, binding_digest, context)
+        .and_then(|operation_id| {
+            fork_replay_operation::operation_with_context(
+                conn,
+                ForkAdmissionOperationKindV1::PrincipalOwner,
+                operation_id,
+                context,
+            )
+        })
+        .and_then(|binding_row| {
+            binding_row
+                .filter(|binding_row| binding_row.child_id.is_none())
+                .ok_or(pos_core::ForkAdmissionErrorV1::CorruptAuthority)
+        })
+        .and_then(|binding_row| {
+            sqlite_fork_admission_store_id_with_context(conn, context).and_then(|store_id| {
+                sqlite_principal_owner_result_with_context(conn, store_id, &binding_row, context)
+            })
+        })
 }
 
 fn sqlite_fork_admission_store_id(
@@ -13881,6 +14207,21 @@ fn sqlite_fork_admission_store_id(
         .host
         .map(|host| host.store_id())
         .ok_or(pos_core::ForkAdmissionErrorV1::CorruptAuthority)
+}
+
+fn sqlite_fork_admission_store_id_with_context(
+    conn: &Connection,
+    context: &mut crate::fork_replay::NativeReadContextV1<'_, '_>,
+) -> Result<Hash, pos_core::ForkAdmissionErrorV1> {
+    if context.is_protected() {
+        fork_replay_host::host_with_context(conn, context)
+            .and_then(|host| host.ok_or(pos_core::ForkAdmissionErrorV1::CorruptAuthority))
+            .map(|host| host.store_id())
+    } else {
+        // Retain the ordinary SqlValue getter/error table, including invalid
+        // UTF-8 TEXT errors. This branch never borrows a protected ledger.
+        sqlite_fork_admission_store_id(conn)
+    }
 }
 
 fn sqlite_decode_principal_owner_binding(
@@ -13947,6 +14288,18 @@ fn sqlite_fork_admission_child_name(
         }
         _ => None,
     })
+}
+
+fn sqlite_fork_admission_child_name_with_context(
+    conn: &Connection,
+    admission: &ForkAdmissionRecordV1,
+    context: &mut crate::fork_replay::NativeReadContextV1<'_, '_>,
+) -> Result<Option<String>, pos_core::ForkAdmissionErrorV1> {
+    if context.is_protected() {
+        fork_replay_child::child_name_with_context(conn, admission, context)
+    } else {
+        sqlite_fork_admission_child_name(conn, admission)
+    }
 }
 
 fn finish_fork_authority_transaction<T>(
@@ -14154,7 +14507,21 @@ fn sqlite_load_key_registry(conn: &Connection) -> Result<Option<KeyRegistryState
         Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
         Err(error) => return Err(CoreError::Storage(error.to_string())),
     };
-    ciborium::from_reader(state_cbor.as_slice())
+    sqlite_decode_key_registry(&state_cbor).map(Some)
+}
+
+fn sqlite_load_key_registry_with_context(
+    conn: &Connection,
+    context: &mut crate::fork_replay::NativeReadContextV1<'_, '_>,
+) -> PublicationSourceResultV1<Option<KeyRegistryStateV1>> {
+    if !context.is_protected() {
+        return sqlite_load_key_registry(conn).map_err(PublicationSourceErrorV1::from);
+    }
+    fork_replay_registry::loaded_registry_with_context(conn, context)
+}
+
+fn sqlite_decode_key_registry(state_cbor: &[u8]) -> Result<KeyRegistryStateV1, CoreError> {
+    ciborium::from_reader(state_cbor)
         .map_err(|error| CoreError::Serialization(error.to_string()))
         .and_then(|registry: KeyRegistryStateV1| {
             registry
@@ -14162,7 +14529,6 @@ fn sqlite_load_key_registry(conn: &Connection) -> Result<Option<KeyRegistryState
                 .map(|()| registry)
                 .map_err(|error| CoreError::Serialization(error.to_string()))
         })
-        .map(Some)
 }
 
 struct SqliteRollbackOnDrop<'a>(&'a Connection);
@@ -14294,7 +14660,14 @@ fn decode_own_event(
     timeline: TimelineId,
     inherited_prefix: u64,
 ) -> Result<Event, CoreError> {
-    let mut event = decode_event_row(row)?;
+    finalize_sqlite_own_event(decode_event_row(row)?, timeline, inherited_prefix)
+}
+
+fn finalize_sqlite_own_event(
+    mut event: Event,
+    timeline: TimelineId,
+    inherited_prefix: u64,
+) -> Result<Event, CoreError> {
     crate::finalize_committed_origins(timeline, inherited_prefix, std::slice::from_mut(&mut event))
         .inspect_err(|_| {
             let scrubbed =
@@ -14395,19 +14768,24 @@ fn require_event_security_columns(columns: &HashSet<String>) -> Result<(), CoreE
     Ok(())
 }
 
-fn decode_signature(bytes: Option<Vec<u8>>) -> Result<Option<pos_core::Signature>, CoreError> {
-    bytes
-        .map(|bytes| {
-            bytes
-                .try_into()
-                .map(pos_core::Signature::from_bytes)
-                .map_err(|_| CoreError::Serialization("bad signature length".to_owned()))
-        })
-        .transpose()
+fn decode_signature(
+    bytes: Option<Vec<u8>>,
+    reader: &mut fork_replay_event::EventRowReaderV1<'_, '_, '_, '_>,
+) -> Result<Option<pos_core::Signature>, CoreError> {
+    reader.step(|reader| {
+        bytes
+            .map(|bytes| {
+                bytes
+                    .try_into()
+                    .map(pos_core::Signature::from_bytes)
+                    .map_err(|_| reader.serialization("bad signature length"))
+            })
+            .transpose()
+    })
 }
 
 fn decode_event_security_context(
-    row: &rusqlite::Row<'_>,
+    reader: &mut fork_replay_event::EventRowReaderV1<'_, '_, '_, '_>,
 ) -> Result<
     (
         Option<pos_core::Signature>,
@@ -14416,33 +14794,23 @@ fn decode_event_security_context(
     ),
     CoreError,
 > {
-    let signature_bytes: Option<Vec<u8>> = row
-        .get(10)
-        .map_err(|error| CoreError::Storage(error.to_string()))?;
-    let owner_id: Option<String> = row
-        .get(11)
-        .map_err(|error| CoreError::Storage(error.to_string()))?;
-    let role: Option<i64> = row
-        .get(12)
-        .map_err(|error| CoreError::Storage(error.to_string()))?;
-    let epoch: Option<i64> = row
-        .get(13)
-        .map_err(|error| CoreError::Storage(error.to_string()))?;
-    let origin_timeline_id: String = row
-        .get(14)
-        .map_err(|error| CoreError::Storage(error.to_string()))?;
-    let origin_logical_seq: i64 = row
-        .get(15)
-        .map_err(|error| CoreError::Storage(error.to_string()))?;
-    let origin_logical_seq = u64::try_from(origin_logical_seq)
-        .ok()
-        .filter(|seq| *seq >= 1)
-        .ok_or_else(|| CoreError::Serialization("invalid Event origin sequence".to_owned()))?;
+    let signature_bytes: Option<Vec<u8>> = reader.get(10)?;
+    let owner_id: Option<String> = reader.get(11)?;
+    let role: Option<i64> = reader.get(12)?;
+    let epoch: Option<i64> = reader.get(13)?;
+    let origin_timeline_id: String = reader.get(14)?;
+    let origin_logical_seq: i64 = reader.get(15)?;
+    let origin_logical_seq = reader.step(|reader| {
+        u64::try_from(origin_logical_seq)
+            .ok()
+            .filter(|seq| *seq >= 1)
+            .ok_or_else(|| reader.serialization("invalid Event origin sequence"))
+    })?;
     Ok((
-        decode_signature(signature_bytes)?,
-        decode_signature_identity(owner_id, role, epoch)?,
+        decode_signature(signature_bytes, reader)?,
+        decode_signature_identity(owner_id, role, epoch, reader)?,
         EventOriginV1 {
-            origin_timeline_id: parse_timeline_id(&origin_timeline_id)?,
+            origin_timeline_id: TimelineId::from_ulid(reader.parse_ulid(&origin_timeline_id)?),
             origin_logical_seq: Seq::from_u64(origin_logical_seq),
         },
     ))
@@ -14460,22 +14828,34 @@ struct RawEventRow {
     schema_version: i64,
 }
 
-fn read_event_row_fields(row: &rusqlite::Row<'_>) -> Result<RawEventRow, CoreError> {
-    let storage_error = |error: rusqlite::Error| CoreError::Storage(error.to_string());
+fn read_event_row_fields(
+    reader: &mut fork_replay_event::EventRowReaderV1<'_, '_, '_, '_>,
+) -> Result<RawEventRow, CoreError> {
     Ok(RawEventRow {
-        seq: row.get(0).map_err(storage_error)?,
-        event_id: row.get(1).map_err(storage_error)?,
-        entity_id: row.get(2).map_err(storage_error)?,
-        event_type: Zeroizing::new(row.get(3).map_err(storage_error)?),
-        payload: Zeroizing::new(row.get(4).map_err(storage_error)?),
-        wall_time: row.get(5).map_err(storage_error)?,
-        causation_id: row.get(6).map_err(storage_error)?,
-        correlation_id: row.get(7).map_err(storage_error)?,
-        schema_version: row.get(8).map_err(storage_error)?,
+        seq: reader.get(0)?,
+        event_id: reader.get(1)?,
+        entity_id: reader.get(2)?,
+        event_type: reader.plaintext(3)?,
+        payload: reader.plaintext(4)?,
+        wall_time: reader.get(5)?,
+        causation_id: reader.get(6)?,
+        correlation_id: reader.get(7)?,
+        schema_version: reader.get(8)?,
     })
 }
 
 fn decode_event_row(row: &rusqlite::Row<'_>) -> Result<Event, CoreError> {
+    let mut context = crate::fork_replay::NativeReadContextV1::ordinary();
+    decode_event_row_with_reader(&mut fork_replay_event::EventRowReaderV1::new(
+        row,
+        &mut context,
+        None,
+    ))
+}
+
+fn decode_event_row_with_reader(
+    reader: &mut fork_replay_event::EventRowReaderV1<'_, '_, '_, '_>,
+) -> Result<Event, CoreError> {
     let RawEventRow {
         seq,
         event_id,
@@ -14486,27 +14866,40 @@ fn decode_event_row(row: &rusqlite::Row<'_>) -> Result<Event, CoreError> {
         causation_id,
         correlation_id,
         schema_version,
-    } = read_event_row_fields(row)?;
-    if schema_version != i64::from(SchemaVersion::V1.as_u32()) {
-        return Err(CoreError::Serialization(
-            "unsupported event schema version".to_owned(),
-        ));
-    }
-    let ph_bytes: Vec<u8> = row.get(9).map_err(|e| CoreError::Storage(e.to_string()))?;
-    let ph_arr: [u8; 32] = ph_bytes
-        .try_into()
-        .map_err(|_| CoreError::Serialization("bad hash".to_owned()))?;
-    let (signature, signature_identity, origin) = decode_event_security_context(row)?;
-    let seq = u64::try_from(seq)
-        .map_err(|_| CoreError::Serialization("bad event sequence".to_owned()))?;
-    let wall_time = u64::try_from(wall_time)
-        .map_err(|_| CoreError::Serialization("bad event wall time".to_owned()))?;
-    let id = parse_event_id(&event_id)?;
-    let entity = parse_entity_id(&entity_id)?;
-    let causation_id = causation_id.as_deref().map(parse_event_id).transpose()?;
+    } = read_event_row_fields(reader)?;
+    reader.step(|reader| {
+        if schema_version == i64::from(SchemaVersion::V1.as_u32()) {
+            Ok(())
+        } else {
+            Err(reader.serialization("unsupported event schema version"))
+        }
+    })?;
+    let ph_bytes: Vec<u8> = reader.get(9)?;
+    let ph_arr: [u8; 32] = reader.step(|reader| {
+        ph_bytes
+            .try_into()
+            .map_err(|_| reader.serialization("bad hash"))
+    })?;
+    let (signature, signature_identity, origin) = decode_event_security_context(reader)?;
+    let seq = reader.step(|reader| {
+        u64::try_from(seq).map_err(|_| reader.serialization("bad event sequence"))
+    })?;
+    let wall_time = reader.step(|reader| {
+        u64::try_from(wall_time).map_err(|_| reader.serialization("bad event wall time"))
+    })?;
+    let id = EventId::from_ulid(reader.parse_ulid(&event_id)?);
+    let entity = EntityId::from_ulid(reader.parse_ulid(&entity_id)?);
+    let causation_id = causation_id
+        .as_deref()
+        .map(|id| reader.parse_ulid(id).map(EventId::from_ulid))
+        .transpose()?;
     let correlation_id = correlation_id
         .as_deref()
-        .map(parse_correlation_id)
+        .map(|id| {
+            reader
+                .parse_ulid(id)
+                .map(pos_core::CorrelationId::from_ulid)
+        })
         .transpose()?;
     let mut event = Event {
         id,
@@ -14523,11 +14916,13 @@ fn decode_event_row(row: &rusqlite::Row<'_>) -> Result<Event, CoreError> {
         origin: Some(origin),
         payload_hash: pos_core::Hash::from_bytes(ph_arr),
     };
-    pos_core::store::validate_event_signature(&event).inspect_err(|_| {
-        let scrubbed =
-            pos_core::store::zeroize_event_plaintext_staging(std::slice::from_mut(&mut event));
-        debug_assert!(scrubbed);
-    })?;
+    reader
+        .step(|_| pos_core::store::validate_event_signature(&event))
+        .inspect_err(|_| {
+            let scrubbed =
+                pos_core::store::zeroize_event_plaintext_staging(std::slice::from_mut(&mut event));
+            debug_assert!(scrubbed);
+        })?;
     Ok(event)
 }
 
@@ -14535,26 +14930,26 @@ fn decode_signature_identity(
     owner_id: Option<String>,
     role: Option<i64>,
     epoch: Option<i64>,
+    reader: &mut fork_replay_event::EventRowReaderV1<'_, '_, '_, '_>,
 ) -> Result<Option<KeyIdentityV1>, CoreError> {
     match (owner_id, role, epoch) {
         (None, None, None) => Ok(None),
         (Some(owner_id), Some(role), Some(epoch)) => {
-            let owner_id = OwnerIdV1::new(owner_id)
-                .map_err(|_| CoreError::Serialization("bad signature owner".to_owned()))?;
-            Ok(Some(KeyIdentityV1::new(
-                owner_id,
+            let owner_id = reader.step(|reader| {
+                OwnerIdV1::new(owner_id).map_err(|_| reader.serialization("bad signature owner"))
+            })?;
+            let role = reader.step(|reader| {
                 KeyRoleV1::from_code(
-                    u8::try_from(role)
-                        .map_err(|_| CoreError::Serialization("bad signature role".to_owned()))?,
+                    u8::try_from(role).map_err(|_| reader.serialization("bad signature role"))?,
                 )
-                .map_err(|_| CoreError::Serialization("bad signature role".to_owned()))?,
-                u64::try_from(epoch)
-                    .map_err(|_| CoreError::Serialization("bad signature epoch".to_owned()))?,
-            )))
+                .map_err(|_| reader.serialization("bad signature role"))
+            })?;
+            let epoch = reader.step(|reader| {
+                u64::try_from(epoch).map_err(|_| reader.serialization("bad signature epoch"))
+            })?;
+            Ok(Some(KeyIdentityV1::new(owner_id, role, epoch)))
         }
-        _ => Err(CoreError::Serialization(
-            "signature identity is incomplete".to_owned(),
-        )),
+        _ => Err(reader.serialization("signature identity is incomplete")),
     }
 }
 
@@ -14579,13 +14974,6 @@ fn parse_entity_id(s: &str) -> Result<EntityId, CoreError> {
     Ok(EntityId::from_ulid(ulid))
 }
 
-fn parse_correlation_id(s: &str) -> Result<pos_core::CorrelationId, CoreError> {
-    let ulid = s
-        .parse::<ulid::Ulid>()
-        .map_err(|_| CoreError::Serialization(format!("invalid ULID: {s}")))?;
-    Ok(pos_core::CorrelationId::from_ulid(ulid))
-}
-
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(4);
 
 #[cfg(test)]
@@ -14597,6 +14985,9 @@ use pos_core::geo_cell_admission::{
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    mod local_replay_corruption;
+    mod protected_interval_cleanup;
+
     use super::*;
     use crate::classified_fork_fixture::database_rows;
     use crate::ErasureRejoinPersistencePortV1;
@@ -14614,6 +15005,41 @@ mod tests {
         verify_authenticated_principal_evidence_v1, ForkAuthenticationAdapterSigningKeyV1,
         ForkHostSigningKeyV1,
     };
+
+    // Measure the durable rewrite fixture outside the tests/ exporter filter.
+    #[cfg_attr(coverage_nightly, coverage(on))]
+    fn replace_classifier_records(
+        store: &SqliteStore,
+        source: &ForkClassifierSourceV1,
+        table: &ForkClassifierTableV1,
+        registration: &ForkClassifierRegistrationV1,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        store
+            .conn
+            .execute(
+                "UPDATE fork_classifier_sources SET fcs1_cbor=?1",
+                params![source.to_canonical_cbor()],
+            )
+            .and_then(|rows| {
+                assert_eq!(rows, 1);
+                store.conn.execute(
+                    "UPDATE fork_classifier_tables SET fct1_digest=?1, fct1_cbor=?2",
+                    params![
+                        table.digest().as_bytes().as_slice(),
+                        table.to_canonical_cbor()
+                    ],
+                )
+            })
+            .and_then(|rows| {
+                assert_eq!(rows, 1);
+                store.conn.execute(
+                    "UPDATE fork_classifier_registrations SET fcr1_cbor=?1",
+                    params![registration.to_canonical_cbor()],
+                )
+            })
+            .map(|rows| assert_eq!(rows, 1))
+            .map_err(Into::into)
+    }
 
     #[test]
     fn sqlite_manifest_owner_receipt_count_is_checked_and_bounded() {
@@ -14720,7 +15146,12 @@ mod tests {
         let operation_id = Hash::from_bytes([2; 32]);
         let event_id = EventId::new();
         assert!(sqlite_fork_classifier_source(&conn, descriptor_hash, "registrar").is_err());
-        assert!(sqlite_fork_classifier_table(&conn, child_id).is_err());
+        assert!(fork_replay_classifier::classifier_table_with_context(
+            &conn,
+            child_id,
+            &mut crate::fork_replay::NativeReadContextV1::ordinary()
+        )
+        .is_err());
         assert!(sqlite_fork_classifier_registration(&conn, operation_id).is_err());
         assert!(sqlite_event_origin(&conn, event_id).is_err());
         assert!(sqlite_intervention_admission(&conn, event_id).is_err());
@@ -14760,7 +15191,12 @@ mod tests {
         )?;
 
         assert!(sqlite_fork_classifier_source(&conn, descriptor_hash, "registrar").is_err());
-        assert!(sqlite_fork_classifier_table(&conn, child_id).is_err());
+        assert!(fork_replay_classifier::classifier_table_with_context(
+            &conn,
+            child_id,
+            &mut crate::fork_replay::NativeReadContextV1::ordinary()
+        )
+        .is_err());
         assert!(sqlite_fork_classifier_registration(&conn, operation_id).is_err());
         assert!(sqlite_event_origin(&conn, event_id).is_err());
         assert!(sqlite_intervention_admission(&conn, event_id).is_err());
@@ -15341,7 +15777,7 @@ mod tests {
                 "UPDATE fork_principal_owner_bindings SET {column} = 'wrong-type'"
             ))?;
             let observed = if column == "principal_digest" {
-                sqlite_principal_owner_result(
+                sqlite_principal_owner_result_with_context(
                     &conn,
                     Hash::from_bytes([48; 32]),
                     &ForkAdmissionOperationRowV1 {
@@ -15352,6 +15788,7 @@ mod tests {
                         result_digest: binding.digest(),
                         child_id: None,
                     },
+                    &mut crate::fork_replay::NativeReadContextV1::ordinary(),
                 )
                 .map(|_| ())
             } else {
@@ -20517,7 +20954,6 @@ mod tests {
         assert!(parse_timeline_id("nope").is_err());
         assert!(parse_event_id("nope").is_err());
         assert!(parse_entity_id("nope").is_err());
-        assert!(parse_correlation_id("nope").is_err());
     }
 
     #[test]
