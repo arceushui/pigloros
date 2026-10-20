@@ -23,6 +23,23 @@ use rustix::{
 use super::{cmdline, AttachmentKernel};
 use crate::ImageActivationError;
 
+/// The loop backing path is opened only as a path, never through a symlink.
+pub(super) const BACKING_OPEN: OFlags = OFlags::PATH.union(OFlags::NOFOLLOW).union(OFlags::CLOEXEC);
+/// The attempt root is reopened only as a directory path, beneath the held
+/// attempt directory and never through a symlink.
+pub(super) const ATTEMPT_ROOT_OPEN: OFlags = OFlags::PATH
+    .union(OFlags::DIRECTORY)
+    .union(OFlags::NOFOLLOW)
+    .union(OFlags::CLOEXEC);
+pub(super) const ATTEMPT_ROOT_RESOLVE: ResolveFlags =
+    ResolveFlags::BENEATH.union(ResolveFlags::NO_SYMLINKS);
+/// `move_mount` from the sealed mount descriptor onto the held directory
+/// descriptor; neither side names a path.
+pub(super) const ATTACH_BY_DESCRIPTOR: MoveMountFlags =
+    MoveMountFlags::MOVE_MOUNT_F_EMPTY_PATH.union(MoveMountFlags::MOVE_MOUNT_T_EMPTY_PATH);
+/// `statx` request: basic stats plus the mount ID.
+pub(super) const STATX_REQUEST: StatxFlags = StatxFlags::BASIC_STATS.union(StatxFlags::MNT_ID);
+
 /// One mount-visible inode: its mount ID, device and inode number.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct Node {
@@ -146,18 +163,14 @@ impl HostKernel {
         }
     }
 
-    fn loop_device(&self, name: &str) -> LoopDevice {
+    pub(super) fn loop_device(&self, name: &str) -> LoopDevice {
         let device = self.sys.join("class/block").join(name);
         LoopDevice {
             backing: read_text(&device.join("loop/backing_file")).and_then(|path| {
-                open(
-                    path.as_str(),
-                    OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-                    Mode::empty(),
-                )
-                .ok()
-                .and_then(|file| fstat(file).ok())
-                .map(|stat| (stat.st_dev, stat.st_ino))
+                open(path.as_str(), BACKING_OPEN, Mode::empty())
+                    .ok()
+                    .and_then(|file| fstat(file).ok())
+                    .map(|stat| (stat.st_dev, stat.st_ino))
             }),
             offset: read_number(&device.join("loop/offset")),
             size_limit: read_number(&device.join("loop/sizelimit")),
@@ -186,14 +199,8 @@ impl AttachmentKernel for HostKernel {
     }
 
     fn attach(&self, mount: BorrowedFd<'_>, root: &File) -> Result<(), ImageActivationError> {
-        move_mount(
-            mount,
-            "",
-            root,
-            "",
-            MoveMountFlags::MOVE_MOUNT_F_EMPTY_PATH | MoveMountFlags::MOVE_MOUNT_T_EMPTY_PATH,
-        )
-        .map_err(|_| ImageActivationError::AttachFailure)
+        move_mount(mount, "", root, "", ATTACH_BY_DESCRIPTOR)
+            .map_err(|_| ImageActivationError::AttachFailure)
     }
 
     fn make_private(&self, mount: BorrowedFd<'_>) -> Result<(), ImageActivationError> {
@@ -208,9 +215,9 @@ impl AttachmentKernel for HostKernel {
             path: openat2(
                 attempt,
                 "root",
-                OFlags::PATH | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                ATTEMPT_ROOT_OPEN,
                 Mode::empty(),
-                ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS,
+                ATTEMPT_ROOT_RESOLVE,
             )
             .ok()
             .and_then(|path| node(path.as_fd())),
@@ -236,19 +243,14 @@ impl AttachmentKernel for HostKernel {
 }
 
 fn node(descriptor: BorrowedFd<'_>) -> Option<Node> {
-    statx(
-        descriptor,
-        "",
-        AtFlags::EMPTY_PATH,
-        StatxFlags::BASIC_STATS | StatxFlags::MNT_ID,
-    )
-    .ok()
-    .filter(|stat| has_mount_id(stat.stx_mask))
-    .map(|stat| Node {
-        mount_id: stat.stx_mnt_id,
-        device: (stat.stx_dev_major, stat.stx_dev_minor),
-        inode: stat.stx_ino,
-    })
+    statx(descriptor, "", AtFlags::EMPTY_PATH, STATX_REQUEST)
+        .ok()
+        .filter(|stat| has_mount_id(stat.stx_mask))
+        .map(|stat| Node {
+            mount_id: stat.stx_mnt_id,
+            device: (stat.stx_dev_major, stat.stx_dev_minor),
+            inode: stat.stx_ino,
+        })
 }
 
 /// Whether a `statx` result mask reports a valid mount ID.
