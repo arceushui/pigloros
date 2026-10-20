@@ -554,12 +554,14 @@ fn import_decoders_round_trip_exact_code_two_bytes() -> TestResult {
     assert_eq!(decoded.authority_origin_digest(), digest);
     let admission = ImportedForkAdmissionRecordV1::from_local(fixture.admission, digest);
     let bytes = admission.to_canonical_cbor();
+    assert_eq!(admission.canonical_cbor_len(), Ok(bytes.len()));
     assert!(bytes.ends_with(&origin));
     let decoded = ImportedForkAdmissionRecordV1::from_canonical_cbor(&bytes)?;
     assert_eq!(decoded, admission);
     assert_eq!(decoded.authority_origin_digest(), digest);
     let publication = ImportedForkPublicationOperationV1::from_local(fixture.publication, digest);
     let bytes = publication.to_canonical_cbor();
+    assert_eq!(publication.canonical_cbor_len(), Ok(bytes.len()));
     assert!(bytes.ends_with(&origin));
     let decoded = ImportedForkPublicationOperationV1::from_canonical_cbor(&bytes)?;
     assert_eq!(decoded, publication);
