@@ -11,7 +11,7 @@ blake3 = { workspace = true }
 ciborium = { workspace = true }
 ciborium-ll = "0.2.2"
 cms = { version = "=0.2.3", features = ["std"] }
-der = { version = "=0.7.10", features = ["std"] }
+der = { version = "=0.8.2", features = ["std"] }
 ed25519-dalek = { workspace = true }
 flate2 = "1"
 ring = "=0.17.14"
