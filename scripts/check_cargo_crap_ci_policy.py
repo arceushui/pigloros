@@ -31,6 +31,8 @@ TEST_ONLY_EXCLUSIONS = (
     "src/erasure_tests.rs",
     "src/system_bus/tests.rs",
     "src/image_activator/tests.rs",
+    "src/selector/installation/fixture.rs",
+    "src/provider_admission/test_support.rs",
     "src/e2e_determinism.rs",
     "src/action_admission_tests.rs",
 )

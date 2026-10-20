@@ -802,6 +802,8 @@ jobs:
           --exclude 'src/erasure_tests.rs'
           --exclude 'src/system_bus/tests.rs'
           --exclude 'src/image_activator/tests.rs'
+          --exclude 'src/selector/installation/fixture.rs'
+          --exclude 'src/provider_admission/test_support.rs'
           --exclude 'src/e2e_determinism.rs'
           --exclude 'src/action_admission_tests.rs'
           --format json
@@ -819,6 +821,8 @@ jobs:
           --exclude 'src/erasure_tests.rs'
           --exclude 'src/system_bus/tests.rs'
           --exclude 'src/image_activator/tests.rs'
+          --exclude 'src/selector/installation/fixture.rs'
+          --exclude 'src/provider_admission/test_support.rs'
           --exclude 'src/e2e_determinism.rs'
           --exclude 'src/action_admission_tests.rs'
           --baseline "${{ runner.temp }}/cargo-crap-baseline.json"
@@ -1378,6 +1382,8 @@ jobs:
         run: |
           python scripts/check_test_support_features.py
           python scripts/test_check_test_support_features.py
+      - name: Test rust-test-policy test-code classification
+        run: python scripts/test_rust_test_policy.py
       - name: Check counterfactual adapter seal policy
         run: |
           python scripts/check_counterfactual_adapter_seal.py
