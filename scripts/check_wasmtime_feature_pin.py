@@ -25,8 +25,8 @@ from pathlib import Path
 
 CRATE = "wasmtime"
 HOST_PACKAGE = "pos-plugin-host"
-VERSION = "49.0.3"
-REQUIREMENT = "=49.0.3"
+VERSION = "49.0.4"
+REQUIREMENT = "=49.0.4"
 SOURCE = "registry+https://github.com/rust-lang/crates.io-index"
 REQUESTED_FEATURES = ["component-model", "cranelift", "runtime"]
 RESOLVED_FEATURES = [
