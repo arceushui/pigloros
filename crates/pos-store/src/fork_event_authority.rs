@@ -998,6 +998,8 @@ where
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    mod local_replay;
+
     use std::error::Error;
     #[cfg(feature = "sqlite")]
     use std::path::Path;
