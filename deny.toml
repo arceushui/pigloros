@@ -48,7 +48,10 @@ allow = [
   "CC0-1.0",
   "MPL-2.0",
 ]
-exceptions = []
+# Owner licence decision, 2026-10-19, Redmine #426: the compiled WebPki root
+# set that ADR-061's pinned `ureq` `rustls` feature selects is CDLA-Permissive-2.0
+# data. The exception is scoped to this one crate only.
+exceptions = [{ crate = "webpki-roots", allow = ["CDLA-Permissive-2.0"] }]
 
 [licenses.private]
 ignore = true

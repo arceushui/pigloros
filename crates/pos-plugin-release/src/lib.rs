@@ -5,15 +5,17 @@
 
 //! Bounded, source-neutral Plugin release transport and local OCI publication.
 //!
-//! This crate verifies and builds OCI transport closures only. It deliberately
-//! does not parse PMF1 or make signing, trust-admission, installation, or
-//! activation decisions.
+//! This crate verifies and builds OCI transport closures and reads them from
+//! local and immutable-descriptor HTTPS sources. It deliberately does not
+//! parse PMF1 or make signing, trust-admission, installation, or activation
+//! decisions.
 
 mod build;
 mod in_memory;
 #[cfg(target_os = "linux")]
 mod local;
 mod oci;
+mod remote;
 
 use sha2::{Digest as _, Sha256};
 
@@ -75,6 +77,10 @@ pub use local::{LocalOciPublicationErrorV1, LocalOciPublisherV1};
 pub use oci::{
     verify_oci_closure_v1, BlobV1, BundleAddressV1, BundleMemberV1, ReleaseSourceErrorV1,
     ReleaseSourceV1, VerifiedReleaseBundleV1,
+};
+pub use remote::{
+    CredentialProviderV1, CredentialV1, HttpsReleaseSourceV1, OriginV1, RemoteConfigErrorV1,
+    RemoteTransportConfigV1, TransportDeadlinesV1, TrustRootsV1, TRANSPORT_LOG_TARGETS_V1,
 };
 
 /// What the installer did and did not check about the release content.
