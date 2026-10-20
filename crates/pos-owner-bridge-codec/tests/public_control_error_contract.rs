@@ -23,6 +23,15 @@ fn public_control_headers_round_trip_every_closed_state_and_accessor(
     assert_eq!(request.state(), ControlState::Ready);
     assert_eq!(OwnerBridgeControlV1::decode(&request.encode()), Ok(request));
 
+    let full_request =
+        OwnerBridgeControlV1::new_request(CeremonyKind::Get, 0x0a0b_0c0d, CEREMONY_ID, 4_032)?;
+    assert_eq!(full_request.generation(), 0x0a0b_0c0d);
+    assert_eq!(full_request.payload_len(), 4_032);
+    assert_eq!(
+        OwnerBridgeControlV1::decode(&full_request.encode()),
+        Ok(full_request)
+    );
+
     for (kind, capacity) in [
         (CeremonyKind::Create, CREATE_REPLY_BUFFER_CAPACITY),
         (CeremonyKind::Get, GET_REPLY_BUFFER_CAPACITY),
@@ -43,6 +52,7 @@ fn public_control_headers_round_trip_every_closed_state_and_accessor(
         ] {
             let transitioned = reply.with_reply_state(payload_len, state)?;
             assert_eq!(transitioned.state(), state);
+            assert_eq!(transitioned.payload_len(), payload_len);
             assert_eq!(
                 OwnerBridgeControlV1::decode(&transitioned.encode()),
                 Ok(transitioned)
@@ -92,6 +102,12 @@ fn public_control_headers_reject_constructor_state_and_capacity_violations(
     assert_eq!(
         reply.with_reply_state(0, ControlState::Ready),
         Err(OwnerBridgeCodecError::InvalidPayload)
+    );
+    assert_eq!(
+        reply
+            .with_reply_state(GET_REPLY_BUFFER_CAPACITY - 64, ControlState::Writing)
+            .map(OwnerBridgeControlV1::payload_len),
+        Ok(GET_REPLY_BUFFER_CAPACITY - 64)
     );
     assert_eq!(
         reply.with_reply_state(GET_REPLY_BUFFER_CAPACITY - 63, ControlState::Writing),

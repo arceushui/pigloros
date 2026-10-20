@@ -294,26 +294,28 @@ impl<'a> CborWriter<'a> {
     }
 
     fn head(&mut self, major: u8, value: u64) {
+        // The major type fills the high three bits and the additional
+        // information the low five, so their sum is the exact initial byte.
         let prefix = major << 5;
         if value <= 23 {
-            self.write(&[prefix | value.to_be_bytes()[7]]);
+            self.write(&[prefix + value.to_be_bytes()[7]]);
             return;
         }
         if let Ok(value) = u8::try_from(value) {
-            self.write(&[prefix | 0x18, value]);
+            self.write(&[prefix + 0x18, value]);
             return;
         }
         if let Ok(value) = u16::try_from(value) {
-            self.write(&[prefix | 0x19]);
+            self.write(&[prefix + 0x19]);
             self.write(&value.to_be_bytes());
             return;
         }
         if let Ok(value) = u32::try_from(value) {
-            self.write(&[prefix | 0x1a]);
+            self.write(&[prefix + 0x1a]);
             self.write(&value.to_be_bytes());
             return;
         }
-        self.write(&[prefix | 0x1b]);
+        self.write(&[prefix + 0x1b]);
         self.write(&value.to_be_bytes());
     }
 
