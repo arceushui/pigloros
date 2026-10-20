@@ -21,7 +21,7 @@ fn runtime() -> PinnedComponentRuntimeV1 {
         consume_fuel: true,
         epoch_interruption: true,
     };
-    PinnedComponentRuntimeV1::new("49.0.3".to_owned(), Vec::new(), engine, Vec::new())
+    PinnedComponentRuntimeV1::new("49.0.4".to_owned(), Vec::new(), engine, Vec::new())
         .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))))
 }
 
