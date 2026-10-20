@@ -5,12 +5,58 @@
 //! The runtime owns the installed verifier boundary and the opaque verified
 //! result used by protected Replay, Snapshot, and comparison operations.
 
+use std::sync::Arc;
+
 use pos_core::{
     store::{EventReadBounds, SeqRange},
     world_consumer_set::{validate_consumer_id_selection, validate_optional_view_selection},
     ErasureProtectedOperationV1, ErasureReferenceV1, ErasureReplayClaimV1, Hash, Seq, TimelineId,
     WorldReplayClosureV1,
 };
+use pos_store::{ForkReplayReadLimitsV1, ForkReplayRequirementV1};
+
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub mod test_support;
+
+/// One source in an owner-verified complete Fork ancestry classification.
+/// This structural value cannot mint a protected-use capability.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorldReplayForkSourceV1 {
+    timeline: TimelineId,
+    required_attribution: Option<ForkReplayRequirementV1>,
+}
+
+impl WorldReplayForkSourceV1 {
+    /// Bind an optional required publication to its exact source Timeline.
+    ///
+    /// # Errors
+    /// Rejects a publication naming a different Timeline.
+    pub fn new(
+        timeline: TimelineId,
+        required_attribution: Option<ForkReplayRequirementV1>,
+    ) -> Result<Self, WorldReplayVerificationErrorV1> {
+        if required_attribution.is_some_and(|required| required.child_timeline_id() != timeline) {
+            return Err(WorldReplayVerificationErrorV1::RequestMismatch);
+        }
+        Ok(Self {
+            timeline,
+            required_attribution,
+        })
+    }
+
+    /// The source selected by the installed native owner.
+    #[must_use]
+    pub const fn timeline_id(&self) -> TimelineId {
+        self.timeline
+    }
+
+    /// Required evidence, never inferred from a missing sidecar.
+    #[must_use]
+    pub const fn required_attribution(&self) -> Option<ForkReplayRequirementV1> {
+        self.required_attribution
+    }
+}
 
 #[cfg(any(test, feature = "test-support"))]
 const TEST_WORLD_REPLAY_READ_BOUNDS: EventReadBounds =
@@ -37,6 +83,165 @@ pub enum WorldReplayVerificationErrorV1 {
     /// The verified evidence does not support authoritative use.
     #[error("World Replay evidence does not support authoritative use")]
     ClaimUnavailable,
+}
+
+/// Structural selection for preparing installed policy before any Store read.
+///
+/// Unlike a head-bound use, an intent contains no observed logical head and
+/// grants no claim or release authority (ADR-118).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorldReplayReadIntentV1 {
+    timeline_id: TimelineId,
+    operation: ErasureProtectedOperationV1,
+    range: SeqRange,
+    consumer_ids: Vec<String>,
+    requested_optional_view_roots: Vec<Hash>,
+}
+
+impl WorldReplayReadIntentV1 {
+    /// Canonicalize structural selections without reading an unobserved head.
+    ///
+    /// # Errors
+    /// Rejects inverted bounded ranges and invalid consumer or view selections.
+    pub fn new(
+        timeline_id: TimelineId,
+        operation: ErasureProtectedOperationV1,
+        range: SeqRange,
+        mut consumer_ids: Vec<String>,
+        mut requested_optional_view_roots: Vec<Hash>,
+    ) -> Result<Self, WorldReplayVerificationErrorV1> {
+        consumer_ids.sort_unstable();
+        requested_optional_view_roots.sort_unstable_by_key(|root| *root.as_bytes());
+        let valid_range = range.to.is_none_or(|to| range.from <= to);
+        if valid_range
+            && validate_consumer_id_selection(&consumer_ids).is_ok()
+            && validate_optional_view_selection(&requested_optional_view_roots).is_ok()
+        {
+            Ok(Self {
+                timeline_id,
+                operation,
+                range,
+                consumer_ids,
+                requested_optional_view_roots,
+            })
+        } else {
+            Err(WorldReplayVerificationErrorV1::RequestMismatch)
+        }
+    }
+
+    /// The selected Timeline, not an observed native coordinate.
+    #[must_use]
+    pub const fn timeline_id(&self) -> TimelineId {
+        self.timeline_id
+    }
+
+    /// The protected operation whose gates must remain held.
+    #[must_use]
+    pub const fn operation(&self) -> ErasureProtectedOperationV1 {
+        self.operation
+    }
+
+    /// The inclusive logical range to observe after preparation.
+    #[must_use]
+    pub const fn range(&self) -> SeqRange {
+        self.range
+    }
+
+    /// The canonical consumer selection.
+    #[must_use]
+    pub fn consumer_ids(&self) -> &[String] {
+        &self.consumer_ids
+    }
+
+    /// The canonical optional-view selection.
+    #[must_use]
+    pub fn requested_optional_view_roots(&self) -> &[Hash] {
+        &self.requested_optional_view_roots
+    }
+
+    pub(crate) fn is_covered_by(&self, closure: &WorldReplayClosureV1) -> bool {
+        selection_is_covered_by(
+            self.timeline_id,
+            &self.consumer_ids,
+            &self.requested_optional_view_roots,
+            closure,
+        )
+    }
+
+    pub(crate) fn matches_use(&self, requested: &WorldReplayUseV1) -> bool {
+        self.timeline_id == requested.timeline_id
+            && self.operation == requested.operation
+            && self.range == requested.range
+            && self.consumer_ids == requested.consumer_ids
+            && self.requested_optional_view_roots == requested.requested_optional_view_roots
+    }
+}
+
+/// Installed read policy bound to its exact verifier allocation and generation.
+///
+/// Only the host constructs this value. It is not a verified claim, cannot be
+/// cloned into a detached authority token, and performs no native cleanup on drop.
+pub struct PreparedWorldReplayReadV1 {
+    closure_digest: Hash,
+    intent: WorldReplayReadIntentV1,
+    generation: ErasureReferenceV1,
+    owner: Arc<dyn WorldReplayVerifierV1>,
+    read_bounds: EventReadBounds,
+    fork_read_limits: ForkReplayReadLimitsV1,
+}
+
+impl PreparedWorldReplayReadV1 {
+    pub(crate) fn new(
+        closure: &WorldReplayClosureV1,
+        intent: WorldReplayReadIntentV1,
+        generation: ErasureReferenceV1,
+        owner: Arc<dyn WorldReplayVerifierV1>,
+        read_bounds: EventReadBounds,
+        fork_read_limits: ForkReplayReadLimitsV1,
+    ) -> Result<Self, WorldReplayVerificationErrorV1> {
+        if finite_read_bounds(read_bounds) {
+            Ok(Self {
+                closure_digest: closure.digest(),
+                intent,
+                generation,
+                owner,
+                read_bounds,
+                fork_read_limits,
+            })
+        } else {
+            Err(WorldReplayVerificationErrorV1::RequestMismatch)
+        }
+    }
+
+    /// Borrow the exact structural selection prepared by the installed owner.
+    #[must_use]
+    pub const fn intent(&self) -> &WorldReplayReadIntentV1 {
+        &self.intent
+    }
+
+    /// The installed arm-specific Event envelope.
+    #[must_use]
+    pub const fn read_bounds(&self) -> EventReadBounds {
+        self.read_bounds
+    }
+
+    /// The installed operation-wide cumulative ceilings.
+    #[must_use]
+    pub const fn fork_read_limits(&self) -> ForkReplayReadLimitsV1 {
+        self.fork_read_limits
+    }
+
+    pub(crate) const fn closure_digest(&self) -> Hash {
+        self.closure_digest
+    }
+
+    pub(crate) const fn generation(&self) -> ErasureReferenceV1 {
+        self.generation
+    }
+
+    pub(crate) fn owner(&self) -> &Arc<dyn WorldReplayVerifierV1> {
+        &self.owner
+    }
 }
 
 /// Exact protected use presented to the installed World Replay verifier.
@@ -138,21 +343,35 @@ impl WorldReplayUseV1 {
     /// bound by the installed verifier, whose result must echo this exact use,
     /// and by protected reads, which require the logical head to be unchanged.
     pub(crate) fn is_covered_by(&self, closure: &WorldReplayClosureV1) -> bool {
-        self.timeline_id == closure.timeline_id()
-            && self.consumer_ids.iter().all(|requested| {
-                closure
-                    .consumer_set()
-                    .consumers()
-                    .iter()
-                    .any(|recorded| recorded.consumer_id() == requested)
-            })
-            && self.requested_optional_view_roots.iter().all(|requested| {
-                closure
-                    .consumer_set()
-                    .optional_view_roots()
-                    .contains(requested)
-            })
+        selection_is_covered_by(
+            self.timeline_id,
+            &self.consumer_ids,
+            &self.requested_optional_view_roots,
+            closure,
+        )
     }
+}
+
+fn selection_is_covered_by(
+    timeline: TimelineId,
+    consumers: &[String],
+    views: &[Hash],
+    closure: &WorldReplayClosureV1,
+) -> bool {
+    timeline == closure.timeline_id()
+        && consumers.iter().all(|requested| {
+            closure
+                .consumer_set()
+                .consumers()
+                .iter()
+                .any(|recorded| recorded.consumer_id() == requested)
+        })
+        && views.iter().all(|requested| {
+            closure
+                .consumer_set()
+                .optional_view_roots()
+                .contains(requested)
+        })
 }
 
 /// An opaque host-issued World Replay result.
@@ -170,6 +389,13 @@ pub struct VerifiedWorldReplayV1 {
     requested_use: WorldReplayUseV1,
     authorized_optional_view_roots: Vec<Hash>,
     read_bounds: EventReadBounds,
+    // An installed native source profile must attest complete classification.
+    // None is never a deployment capability. Test constructors explicitly
+    // attest an ordinary non-human fixture history unless given a full set.
+    fork_source_profile: Option<Hash>,
+    fork_sources: Option<Vec<WorldReplayForkSourceV1>>,
+    fork_requirements: Vec<ForkReplayRequirementV1>,
+    fork_read_limits: ForkReplayReadLimitsV1,
 }
 
 impl VerifiedWorldReplayV1 {
@@ -203,15 +429,32 @@ impl VerifiedWorldReplayV1 {
         self.read_bounds
     }
 
-    pub(crate) const fn has_finite_read_bounds(&self) -> bool {
-        let bounds = self.read_bounds;
-        finite_usize(bounds.max_payload_bytes())
-            && finite_usize(bounds.max_event_type_bytes())
-            && finite_usize(bounds.max_fork_depth())
-            && finite_usize(bounds.max_events())
-            && finite_usize(bounds.max_total_bytes())
-            && bounds.max_elapsed_micros() != 0
-            && bounds.max_elapsed_micros() != u64::MAX
+    /// Immutable operation-wide attribution/Event ceilings from the owner.
+    #[must_use]
+    pub const fn fork_read_limits(&self) -> ForkReplayReadLimitsV1 {
+        self.fork_read_limits
+    }
+
+    /// The complete required set, selected by the native verifier.
+    #[must_use]
+    pub fn fork_requirements(&self) -> &[ForkReplayRequirementV1] {
+        &self.fork_requirements
+    }
+
+    /// Explicit ancestry classification, or the owner's ordinary-history proof.
+    pub(crate) fn fork_sources(&self) -> Option<&[WorldReplayForkSourceV1]> {
+        self.fork_sources.as_deref()
+    }
+
+    pub(crate) const fn fork_source_profile(&self) -> Option<Hash> {
+        self.fork_source_profile
+    }
+
+    pub(crate) fn has_finite_read_bounds(&self) -> bool {
+        finite_read_bounds(self.read_bounds)
+            && self
+                .fork_source_profile
+                .is_some_and(|profile| profile != Hash::zero())
     }
 
     /// Require an Exact claim before protected materialization.
@@ -246,11 +489,25 @@ const fn finite_usize(value: usize) -> bool {
     value != 0 && value != usize::MAX
 }
 
+const fn finite_u64(value: u64) -> bool {
+    value != 0 && value != u64::MAX
+}
+
+const fn finite_read_bounds(bounds: EventReadBounds) -> bool {
+    finite_usize(bounds.max_payload_bytes())
+        && finite_usize(bounds.max_event_type_bytes())
+        && finite_usize(bounds.max_fork_depth())
+        && finite_usize(bounds.max_events())
+        && finite_usize(bounds.max_total_bytes())
+        && finite_u64(bounds.max_elapsed_micros())
+}
+
 /// Construct a verified result for an explicitly enabled downstream seam
 /// test.
 ///
 /// This helper is unavailable from the normal dependency graph. Production
 /// code receives [`VerifiedWorldReplayV1`] only from an installed verifier.
+/// The caller supplies limits validated by [`ForkReplayReadLimitsV1::new`].
 #[cfg(any(test, feature = "test-support"))]
 #[must_use]
 pub fn test_verified_world_replay(
@@ -258,6 +515,7 @@ pub fn test_verified_world_replay(
     requested_use: &WorldReplayUseV1,
     inventory_generation: ErasureReferenceV1,
     replay_claim: ErasureReplayClaimV1,
+    fork_read_limits: ForkReplayReadLimitsV1,
 ) -> VerifiedWorldReplayV1 {
     test_verified_world_replay_with_fields_and_bounds(
         closure.digest(),
@@ -266,7 +524,7 @@ pub fn test_verified_world_replay(
         requested_use.clone(),
         inventory_generation,
         replay_claim,
-        TEST_WORLD_REPLAY_READ_BOUNDS,
+        (TEST_WORLD_REPLAY_READ_BOUNDS, fork_read_limits),
     )
 }
 
@@ -274,6 +532,7 @@ pub fn test_verified_world_replay(
 ///
 /// The function is available only to the crate's tests or to a dependency
 /// that explicitly enables the `test-support` feature.
+/// The caller supplies limits validated by [`ForkReplayReadLimitsV1::new`].
 #[cfg(any(test, feature = "test-support"))]
 #[must_use]
 pub const fn test_verified_world_replay_with_fields(
@@ -283,6 +542,7 @@ pub const fn test_verified_world_replay_with_fields(
     requested_use: WorldReplayUseV1,
     inventory_generation: ErasureReferenceV1,
     replay_claim: ErasureReplayClaimV1,
+    fork_read_limits: ForkReplayReadLimitsV1,
 ) -> VerifiedWorldReplayV1 {
     test_verified_world_replay_with_fields_and_bounds(
         closure_digest,
@@ -291,12 +551,14 @@ pub const fn test_verified_world_replay_with_fields(
         requested_use,
         inventory_generation,
         replay_claim,
-        TEST_WORLD_REPLAY_READ_BOUNDS,
+        (TEST_WORLD_REPLAY_READ_BOUNDS, fork_read_limits),
     )
 }
 
-/// Construct a verifier result with explicit bindings and read bounds for
-/// downstream seam tests.
+/// Construct an explicitly bound verifier result for downstream seam tests.
+///
+/// The profile carries caller-validated Fork limits;
+/// Event bounds may remain deliberately invalid for rejection tests.
 #[cfg(any(test, feature = "test-support"))]
 #[must_use]
 pub const fn test_verified_world_replay_with_fields_and_bounds(
@@ -306,8 +568,9 @@ pub const fn test_verified_world_replay_with_fields_and_bounds(
     requested_use: WorldReplayUseV1,
     inventory_generation: ErasureReferenceV1,
     replay_claim: ErasureReplayClaimV1,
-    read_bounds: EventReadBounds,
+    read_profile: (EventReadBounds, ForkReplayReadLimitsV1),
 ) -> VerifiedWorldReplayV1 {
+    let (read_bounds, fork_read_limits) = read_profile;
     VerifiedWorldReplayV1 {
         closure_digest,
         timeline_id,
@@ -317,7 +580,43 @@ pub const fn test_verified_world_replay_with_fields_and_bounds(
         requested_use,
         authorized_optional_view_roots: Vec::new(),
         read_bounds,
+        fork_source_profile: Some(Hash::from_bytes([0xf1; 32])),
+        fork_sources: None,
+        fork_requirements: Vec::new(),
+        fork_read_limits,
     }
+}
+
+/// Attach a complete explicit source classification for downstream seam tests.
+///
+/// The constructor deliberately permits inconsistent sets to test host rejection;
+/// it is absent from the deployment dependency graph.
+#[cfg(any(test, feature = "test-support"))]
+#[must_use]
+pub fn test_verified_world_replay_with_fork_attribution(
+    mut verified: VerifiedWorldReplayV1,
+    source_profile: Option<Hash>,
+    sources: Vec<WorldReplayForkSourceV1>,
+    requirements: Vec<ForkReplayRequirementV1>,
+    limits: ForkReplayReadLimitsV1,
+) -> VerifiedWorldReplayV1 {
+    verified.fork_source_profile = source_profile;
+    verified.fork_sources = Some(sources);
+    verified.fork_requirements = requirements;
+    verified.fork_read_limits = limits;
+    verified
+}
+
+/// Model an inconsistent owner result for Runtime's private boundary tests.
+#[cfg(test)]
+#[must_use]
+pub(crate) fn test_with_unclassified_fork_requirement(
+    mut verified: VerifiedWorldReplayV1,
+    requirement: ForkReplayRequirementV1,
+) -> VerifiedWorldReplayV1 {
+    verified.fork_sources = None;
+    verified.fork_requirements = vec![requirement];
+    verified
 }
 
 /// Attach explicit per-view authorization to a downstream seam-test result.
@@ -351,10 +650,28 @@ pub fn test_verified_world_replay_with_authorized_views(
 /// - derive the claim and the optional-view roots it authorizes only through
 ///   [`WorldReplayClosureV1::evaluate`], never by relabelling a degraded
 ///   claim as Exact.
+/// - prove the source profile's complete ancestry classification and exact
+///   required Fork publication coordinates, including code-2 imports. A missing
+///   sidecar never selects ordinary history. Unsupported native extraction is
+///   closed; its deployment completeness/activation owner remains #433.
 ///
 /// The concrete native verifier and its minting path are owned by Redmine
 /// #396 and #397.
 pub trait WorldReplayVerifierV1: Send + Sync {
+    /// Select immutable installed policy before any native Store access.
+    ///
+    /// This structural selection performs no native/artifact/network I/O,
+    /// signing, clock acquisition or materialization and grants no claim.
+    ///
+    /// # Errors
+    /// Rejects unsupported policy, structural selection or generation.
+    fn read_profile(
+        &self,
+        closure: &WorldReplayClosureV1,
+        intent: &WorldReplayReadIntentV1,
+        inventory_generation: ErasureReferenceV1,
+    ) -> Result<(EventReadBounds, ForkReplayReadLimitsV1), WorldReplayVerificationErrorV1>;
+
     /// Verify the complete native closure against the installed generation.
     ///
     /// # Errors
@@ -388,8 +705,64 @@ mod tests {
     }
 
     #[test]
+    fn read_intent_canonicalizes_structural_selection_without_observing_a_head() {
+        let closure = WorldReplayClosureV1::test_fixture().test_ok();
+        let root = closure.consumer_set().optional_view_roots()[0];
+        let range = SeqRange::bounded(Seq::from_u64(2), Seq::from_u64(3));
+        let intent = WorldReplayReadIntentV1::new(
+            closure.timeline_id(),
+            ErasureProtectedOperationV1::Read,
+            range,
+            vec!["count".to_owned()],
+            vec![root],
+        )
+        .test_ok();
+        assert_eq!(intent.timeline_id(), closure.timeline_id());
+        assert_eq!(intent.operation(), ErasureProtectedOperationV1::Read);
+        assert_eq!(intent.range(), range);
+        assert_eq!(intent.consumer_ids(), &["count".to_owned()]);
+        assert_eq!(intent.requested_optional_view_roots(), &[root]);
+        assert_eq!(intent.clone(), intent);
+        let observed = WorldReplayUseV1::new(
+            intent.timeline_id(),
+            intent.operation(),
+            intent.range(),
+            Seq::from_u64(3),
+            intent.consumer_ids().to_vec(),
+            intent.requested_optional_view_roots().to_vec(),
+        )
+        .test_ok();
+        assert_eq!(observed.source_logical_head(), Seq::from_u64(3));
+        for (range, consumers, views) in [
+            (
+                SeqRange::bounded(Seq::from_u64(3), Seq::from_u64(2)),
+                vec!["count".to_owned()],
+                Vec::new(),
+            ),
+            (
+                SeqRange::all(),
+                vec!["count".to_owned(), "count".to_owned()],
+                Vec::new(),
+            ),
+            (SeqRange::all(), vec!["count".to_owned()], vec![root, root]),
+        ] {
+            assert_eq!(
+                WorldReplayReadIntentV1::new(
+                    closure.timeline_id(),
+                    ErasureProtectedOperationV1::Read,
+                    range,
+                    consumers,
+                    views,
+                ),
+                Err(WorldReplayVerificationErrorV1::RequestMismatch)
+            );
+        }
+    }
+
+    #[test]
     fn verified_result_exposes_bindings_and_requires_an_exact_claim() {
         let closure = WorldReplayClosureV1::test_fixture().test_ok();
+        let limits = ForkReplayReadLimitsV1::new(2, 7, 11, 4_096, 1_000).test_ok();
         let generation = ErasureReferenceV1::from_digest([63; 32]);
         let requested_use = WorldReplayUseV1::new(
             closure.timeline_id(),
@@ -406,6 +779,7 @@ mod tests {
             &requested_use,
             generation,
             ErasureReplayClaimV1::Exact,
+            limits,
         );
         assert_eq!(exact.closure_digest(), closure.digest());
         assert_eq!(exact.timeline_id(), closure.timeline_id());
@@ -413,6 +787,7 @@ mod tests {
         assert_eq!(exact.inventory_generation(), generation);
         assert_eq!(exact.requested_use(), &requested_use);
         assert_eq!(exact.read_bounds(), TEST_WORLD_REPLAY_READ_BOUNDS);
+        assert_eq!(exact.fork_read_limits(), limits);
         assert!(exact.has_finite_read_bounds());
         assert_eq!(exact.require_authoritative_use(), Ok(()));
 
@@ -421,7 +796,9 @@ mod tests {
             &requested_use,
             generation,
             ErasureReplayClaimV1::ExactAuthoritativeWithRedactedViews,
+            limits,
         );
+        assert_eq!(redacted.fork_read_limits(), limits);
         assert_eq!(redacted.require_authoritative_use(), Ok(()));
 
         let structural = test_verified_world_replay_with_fields(
@@ -431,7 +808,9 @@ mod tests {
             requested_use,
             generation,
             ErasureReplayClaimV1::StructuralOnly,
+            limits,
         );
+        assert_eq!(structural.fork_read_limits(), limits);
         assert_eq!(
             structural.require_authoritative_use(),
             Err(WorldReplayVerificationErrorV1::ClaimUnavailable)
@@ -514,6 +893,7 @@ mod tests {
     #[test]
     fn optional_view_use_requires_exact_per_root_authorization() {
         let closure = WorldReplayClosureV1::test_fixture().test_ok();
+        let limits = ForkReplayReadLimitsV1::new(2, 7, 11, 4_096, 1_000).test_ok();
         let generation = ErasureReferenceV1::from_digest([63; 32]);
         let root = closure.consumer_set().optional_view_roots()[0];
         let request = WorldReplayUseV1::new(
@@ -527,8 +907,13 @@ mod tests {
         .test_ok();
         assert_eq!(request.requested_optional_view_roots(), &[root]);
         assert!(request.is_covered_by(&closure));
-        let unverified =
-            test_verified_world_replay(&closure, &request, generation, ErasureReplayClaimV1::Exact);
+        let unverified = test_verified_world_replay(
+            &closure,
+            &request,
+            generation,
+            ErasureReplayClaimV1::Exact,
+            limits,
+        );
         assert_eq!(
             unverified.require_authoritative_use(),
             Err(WorldReplayVerificationErrorV1::ClaimUnavailable)
@@ -539,6 +924,7 @@ mod tests {
                 &request,
                 generation,
                 ErasureReplayClaimV1::ExactAuthoritativeWithRedactedViews,
+                limits,
             ),
             vec![root],
         );
@@ -549,6 +935,7 @@ mod tests {
                 &request,
                 generation,
                 ErasureReplayClaimV1::StructuralOnly,
+                limits,
             ),
             vec![root],
         );

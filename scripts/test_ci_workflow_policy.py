@@ -3,9 +3,16 @@
 
 from __future__ import annotations
 
+import ast
 import copy
 import fnmatch
+import hashlib
+import os
 import pathlib
+import shlex
+import subprocess
+import tempfile
+import tomllib
 import unittest
 
 import yaml
@@ -29,12 +36,56 @@ TRUSTED_MAIN_DOCKER_CACHE_TO = (
     "${{ github.ref == 'refs/heads/main' && 'type=gha,mode=max' || '' }}"
 )
 CORE_CACHE_KEYS = {
+    "feature-matrix": "feature-matrix",
     "test": "test",
     "test-shard": "test-nextest",
     "clippy": "clippy",
     "coverage": "coverage",
 }
-CORE_JOB_NAMES = ("fmt", "test", "test-shard", "clippy", "coverage")
+CORE_JOB_NAMES = ("fmt", "feature-matrix", "test", "test-shard", "clippy", "coverage")
+CORE_GATE_JOB_NAMES = ("fmt", "feature-matrix", "test", "test-shards", "clippy", "coverage")
+FEATURE_MATRIX_STEPS = (
+    {
+        "name": "cargo check (no default features)",
+        "run": "cargo check --workspace --all-targets --no-default-features --locked",
+    },
+    {
+        "name": "Plugin trust registry Memory vectors (no default features)",
+        "run": "cargo test -p pos-store --no-default-features "
+        "--test plugin_trust_registry_memory_public "
+        "--test plugin_trust_registry_memory_policy_public "
+        "--test plugin_trust_registry_memory_evaluation_public --locked\n",
+    },
+    {
+        "name": "cargo check (all features, all targets)",
+        "run": "cargo check --workspace --all-targets --all-features --locked",
+    },
+    {
+        "name": "Prove reference evaluator implementation independence",
+        "run": "bash scripts/check-reference-evaluator-independence.sh",
+    },
+    {
+        "name": "Prove the conformance adapter dependency graph",
+        "run": "bash scripts/check-adapter-graph.sh",
+    },
+)
+WORKSPACE_DOCTEST_STEP = {
+    "name": "cargo test doctests (all features, ignored included)",
+    "run": "set -euo pipefail\n"
+    "cargo test --workspace --all-features --locked --doc -- --include-ignored "
+    "2>&1 | tee /tmp/cargo-doctest.log\n",
+}
+WORKSPACE_RUSTDOC_STEP = {
+    "name": "cargo doc (warnings denied)",
+    "env": {"CARGO_INCREMENTAL": "0", "RUSTDOCFLAGS": "-D warnings"},
+    "run": "cargo doc --workspace --all-features --no-deps --locked",
+}
+RUSTDOC_JOB_IF = (
+    "${{ !cancelled() && needs.ci_change_scope.result == 'success' && "
+    "needs.cargo-crap.result == 'success' && "
+    "(needs.ci_change_scope.outputs.rust == 'true' || "
+    "github.event_name != 'pull_request') }}"
+)
 MAIN_PUSH_TRIGGER = {"branches": ["main"]}
 PREFLIGHT_GATE_IF = "${{ always() }}"
 REQUIRED_PREFLIGHT_NEEDS = ("ci_change_scope", "pinned-dependencies")
@@ -302,8 +353,81 @@ def excluded(path: str, patterns: list[str]) -> bool:
     )
 
 
+def assert_parallel_validation_contract(workflow: dict) -> None:
+    """Moving checks may change scheduling, never scope or failure semantics."""
+    assert_core_jobs_run_on_main_push(workflow)
+    jobs = workflow["jobs"]
+    for owner, required in (
+        ("feature-matrix", FEATURE_MATRIX_STEPS),
+        ("test", (WORKSPACE_DOCTEST_STEP,)),
+        ("rustdoc", (WORKSPACE_RUSTDOC_STEP,)),
+    ):
+        job = jobs[owner]
+        if job.get("timeout-minutes") != 30 or "continue-on-error" in job:
+            raise AssertionError(f"{owner} must keep its blocking 30-minute limit")
+        for expected in required:
+            occurrences = [
+                (name, step)
+                for name, candidate in jobs.items()
+                for step in candidate.get("steps", [])
+                if step.get("name") == expected["name"]
+                or step.get("run") == expected["run"]
+            ]
+            if occurrences != [(owner, expected)]:
+                raise AssertionError(f"{owner} must run the exact required step once")
+    rustdoc = jobs["rustdoc"]
+    if (rustdoc.get("needs") != ["ci_change_scope", "cargo-crap"]
+            or rustdoc.get("if") != RUSTDOC_JOB_IF):
+        raise AssertionError("rustdoc must retain its successful standard-stage prerequisites")
+    if any(
+        str(step.get("uses", "")).startswith("Swatinem/rust-cache@")
+        for step in rustdoc["steps"]
+    ):
+        raise AssertionError("rustdoc must not restore the broken documentation target cache")
+    gate = jobs["core-gate"]
+    if gate.get("needs") != ["ci_change_scope", "preflight-gate", *CORE_GATE_JOB_NAMES]:
+        raise AssertionError("core-gate must require every parallel core job")
+    if gate.get("if") != "${{ always() }}" or "continue-on-error" in gate:
+        raise AssertionError("core-gate must remain unconditional and blocking")
+    step = gate["steps"][0]
+    if "if" in step or "continue-on-error" in step:
+        raise AssertionError("core-gate result check must remain blocking")
+    for name in CORE_GATE_JOB_NAMES:
+        variable = name.upper().replace("-", "_") + "_RESULT"
+        if step["env"].get(variable) != "${{ needs." + name + ".result }}":
+            raise AssertionError("core-gate must read every actual job result")
+        if f'test "${{{variable}}}" = "${{expected}}"' not in step["run"]:
+            raise AssertionError("core-gate must enforce every actual job result")
+
+
 def rust_gate_required(paths: list[str], patterns: list[str]) -> bool:
     return any(not excluded(path, patterns) for path in paths)
+
+
+def assert_codeql_preparation_contract(workflow: dict) -> None:
+    """Prepare real missing inputs without narrowing the native analysis."""
+    job = workflow["jobs"]["analyze"]
+    steps = job["steps"]
+    if job["timeout-minutes"] != 30 or len(steps) != 5:
+        raise AssertionError("retain the analysis deadline and complete step inventory")
+    if steps[3:] != [
+        {"uses": "github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2",
+         "with": {"languages": "rust", "build-mode": "none"}},
+        {"uses": "github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2",
+         "with": {"category": "/language:rust"}},
+    ]:
+        raise AssertionError("retain the unchanged full CodeQL initialization and analysis")
+    # Exact reviewed-program snapshots, not a shell semantics oracle. Preserve
+    # every byte, including heredoc data; update only with reviewed setup changes.
+    required = (
+        (5, "28c278b217fbafce26f3940be27c2dea987e012b986564110dbccb1ad7e21e0c"),
+        (1, "8ff9e3fadf283e88daefd380c1de1bdcf915e9ee321bcc8dd9b850c9e6382978"),
+    )
+    for step, (deadline, digest) in zip(steps[1:3], required):
+        if set(step) != {"name", "run", "timeout-minutes"} or step["timeout-minutes"] != deadline:
+            raise AssertionError("source preparation must remain bounded, unconditional and blocking")
+        if hashlib.sha256(step["run"].encode()).hexdigest() != digest:
+            raise AssertionError("source preparation must retain its real inputs and refusal checks")
 
 
 class CiWorkflowPolicyTests(unittest.TestCase):
@@ -314,6 +438,160 @@ class CiWorkflowPolicyTests(unittest.TestCase):
     def test_filter_has_conservative_positive_default(self) -> None:
         self.assertEqual(self.patterns[0], "**")
         self.assertEqual(set(self.patterns[1:]), EXPECTED_EXCLUDES)
+
+    def test_codeql_prepares_inputs_before_unchanged_analysis(self) -> None:
+        workflow = load_workflow(CI_WORKFLOW_PATH.with_name("codeql.yml"))
+        assert_codeql_preparation_contract(workflow)
+        steps = workflow["jobs"]["analyze"]["steps"]
+        installer = (ROOT / "plugins/community/examples/compatibility-prototype/install-tools.sh").read_text()
+        for prefix in ("url=", "digest="):
+            value = next(line[len(prefix):] for line in steps[1]["run"].splitlines()
+                         if line.startswith(prefix))
+            self.assertIn(value, installer)
+        for step in steps[1:3]:
+            subprocess.run(["bash", "-n"], input=step["run"], text=True, check=True)
+        source = steps[2]["run"].split("python3 - <<'PY'\n")[1].split("\nPY\n")[0]
+        tree = ast.parse(source)
+        self.assertEqual(len(tree.body), 2)
+        call = tree.body[1].value
+        self.assertEqual(call.func.attr, "write_text")
+        self.assertEqual(ast.literal_eval(call.func.value.args[0]), "scripts/asan/Cargo.toml")
+        self.assertEqual(tomllib.loads(ast.literal_eval(call.args[0])), {
+            "package": {"name": "pigloros-asan-extraction-canary", "version": "0.0.0", "edition": "2021"},
+            "bin": [{"name": "intentional-leak", "path": "intentional-leak.rs"}],
+            "workspace": {},
+        })
+
+    def test_codeql_preparation_refuses_missing_or_weakened_inputs(self) -> None:
+        workflow = load_workflow(CI_WORKFLOW_PATH.with_name("codeql.yml"))
+        for index in (1, 2):
+            for key, value in (("if", "false"), ("continue-on-error", True), ("env", {})):
+                changed = copy.deepcopy(workflow)
+                changed["jobs"]["analyze"]["steps"][index][key] = value
+                with self.assertRaises(AssertionError):
+                    assert_codeql_preparation_contract(changed)
+            changed = copy.deepcopy(workflow)
+            del changed["jobs"]["analyze"]["steps"][index]
+            with self.assertRaises(AssertionError):
+                assert_codeql_preparation_contract(changed)
+        for original, replacement in (("sha256sum --check --strict -", "true"),
+                                      ("test ! -e scripts/asan/Cargo.toml", "true"),
+                                      ("test -s", "test -e")):
+            changed = copy.deepcopy(workflow)
+            for step in changed["jobs"]["analyze"]["steps"][1:3]:
+                step["run"] = step["run"].replace(original, replacement)
+            with self.assertRaises(AssertionError):
+                assert_codeql_preparation_contract(changed)
+        changed = copy.deepcopy(workflow)
+        changed["jobs"]["analyze"]["steps"][3]["with"]["config"] = "paths-ignore: [scripts]"
+        with self.assertRaises(AssertionError):
+            assert_codeql_preparation_contract(changed)
+        changed = copy.deepcopy(workflow)
+        changed["jobs"]["analyze"]["steps"][1]["run"] += "true || true\n"
+        with self.assertRaises(AssertionError):
+            assert_codeql_preparation_contract(changed)
+
+    def test_codeql_preparation_refuses_non_executing_checksum_text(self) -> None:
+        workflow = load_workflow(CI_WORKFLOW_PATH.with_name("codeql.yml"))
+        run = workflow["jobs"]["analyze"]["steps"][1]["run"]
+        checksum = next(line for line in run.splitlines()
+                        if line.startswith("printf ") and "sha256sum --check" in line)
+        quoted = "'" + checksum.replace("'", "'\\''") + "'"
+        for replacement in ("# " + checksum, ": " + quoted, "echo " + quoted,
+                            "if false; then\n" + checksum + "\nfi",
+                            "unused_checksum() {\n" + checksum + "\n}"):
+            changed = copy.deepcopy(workflow)
+            changed["jobs"]["analyze"]["steps"][1]["run"] = run.replace(checksum, replacement)
+            with self.assertRaises(AssertionError):
+                assert_codeql_preparation_contract(changed)
+
+    def test_codeql_generates_bindings_for_each_declared_rust_guest_owner(self) -> None:
+        workflow = load_workflow(CI_WORKFLOW_PATH.with_name("codeql.yml"))
+        run = workflow["jobs"]["analyze"]["steps"][1]["run"]
+        # Execute the real owner-selection/generation section, not downloads.
+        program = run.split('"$tools_dir/wit-bindgen" --version\n', 1)[1]
+        program = program.rsplit('test -z "$(git diff --name-only HEAD)"', 1)[0]
+        prototype = pathlib.Path("plugins/community/examples/compatibility-prototype")
+        cases = (
+            ("legacy", False, True),
+            ("both", True, True),
+            ("partial-probe", True, False),
+            ("missing-required-source", False, False),
+            ("preexisting-output", False, False),
+            ("generator-failure", True, False),
+            ("empty-output", True, False),
+            ("dangling-probe", False, False),
+            ("probe-is-file", False, False),
+            ("linked-probe", False, False),
+        )
+        for case, has_probe, success in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory(
+                prefix="pigloros-codeql-owners-",
+                dir="/dev/shm" if pathlib.Path("/dev/shm").is_dir() else None,
+            ) as temporary:
+                root = pathlib.Path(temporary)
+                tools = root / "tools"
+                tools.mkdir()
+                generator = tools / "wit-bindgen"
+                generator.write_text(
+                    '#!/bin/sh\nset -eu\n'
+                    'test "$#" -eq 6\n'
+                    'test "$1" = rust\n'
+                    'test "$2" = --world\n'
+                    'test "$3" = community-plugin\n'
+                    'test "$4" = --out-dir\n'
+                    'test "$6" = plugins/community/wit\n'
+                    'test -d "$6"\n'
+                    'printf "%s\\n" "$5" >> "$PIGLOROS_CODEQL_OWNER_TRACE"\n'
+                    'case "$PIGLOROS_CODEQL_STUB_MODE" in\n'
+                    '  generator-failure) exit 37 ;;\n'
+                    '  empty-output) : > "$5/community_plugin.rs" ;;\n'
+                    '  *) printf "generated\\n" > "$5/community_plugin.rs" ;;\n'
+                    'esac\n',
+                    encoding="utf-8",
+                )
+                generator.chmod(0o755)
+                (root / "plugins/community/wit").mkdir(parents=True)
+                guests = ["rust-guest", "probe-guest"] if has_probe else ["rust-guest"]
+                for guest in guests:
+                    directory = root / prototype / guest
+                    (directory / "src").mkdir(parents=True)
+                    if case != "partial-probe" or guest != "probe-guest":
+                        (directory / "Cargo.toml").write_text("[package]\n", encoding="utf-8")
+                    if case != "missing-required-source":
+                        (directory / "src/lib.rs").write_text("// owner\n", encoding="utf-8")
+                if case == "preexisting-output":
+                    (root / prototype / "rust-guest/generated").mkdir()
+                elif case == "dangling-probe":
+                    (root / prototype / "probe-guest").symlink_to("absent-owner")
+                elif case == "probe-is-file":
+                    (root / prototype / "probe-guest").write_text("not a directory\n", encoding="utf-8")
+                elif case == "linked-probe":
+                    other = root / "separate-owner"
+                    (other / "src").mkdir(parents=True)
+                    (other / "Cargo.toml").write_text("[package]\n", encoding="utf-8")
+                    (other / "src/lib.rs").write_text("// owner\n", encoding="utf-8")
+                    (root / prototype / "probe-guest").symlink_to(other, target_is_directory=True)
+                trace = root / "owner-trace"
+                result = subprocess.run(
+                    ["bash", "-c", "set -euo pipefail\n"
+                     + "tools_dir=" + shlex.quote(str(tools)) + "\n" + program],
+                    cwd=root,
+                    env=dict(os.environ, PIGLOROS_CODEQL_OWNER_TRACE=str(trace),
+                             PIGLOROS_CODEQL_STUB_MODE=case),
+                    capture_output=True, text=True, check=False, timeout=10,
+                )
+                self.assertEqual(result.returncode == 0, success, result.stderr)
+                if success:
+                    self.assertEqual(
+                        trace.read_text(encoding="utf-8").splitlines(),
+                        [str(prototype / guest / "generated") for guest in guests],
+                    )
+                    for guest in guests:
+                        self.assertEqual(
+                            (root / prototype / guest / "generated/community_plugin.rs")
+                            .read_text(encoding="utf-8"), "generated\n",
+                        )
 
     def test_scope_jobs_use_trusted_base_and_fail_closed(self) -> None:
         workflow = load_workflow(CI_WORKFLOW_PATH)
@@ -404,6 +682,116 @@ class CiWorkflowPolicyTests(unittest.TestCase):
     def test_core_gates_run_after_successful_preflight_on_push(self) -> None:
         workflow = load_workflow(CI_WORKFLOW_PATH)
         assert_core_jobs_run_on_main_push(workflow)
+
+    def test_parallel_validation_preserves_every_required_command(self) -> None:
+        assert_parallel_validation_contract(load_workflow(CI_WORKFLOW_PATH))
+
+    def test_native_width_counter_runs_on_the_actual_narrower_target(self) -> None:
+        expected = {
+            "name": "Exercise native-width canonical length arithmetic",
+            "run": "cargo test -p pos-core --target i686-pc-windows-msvc --lib --locked "
+            "canonical_length_tests -- --include-ignored",
+        }
+        steps = load_workflow(CI_WORKFLOW_PATH)["jobs"]["ledger-windows"]["steps"]
+        self.assertEqual(
+            [step for step in steps if step.get("name") == expected["name"]],
+            [expected],
+        )
+
+    def test_parallel_validation_rejects_missing_or_weakened_commands(self) -> None:
+        workflow = load_workflow(CI_WORKFLOW_PATH)
+        for owner, required in (
+            ("feature-matrix", FEATURE_MATRIX_STEPS),
+            ("test", (WORKSPACE_DOCTEST_STEP,)),
+            ("rustdoc", (WORKSPACE_RUSTDOC_STEP,)),
+        ):
+            for expected in required:
+                for change in ("remove", "if", "continue-on-error", "run"):
+                    with self.subTest(owner=owner, step=expected["name"], change=change):
+                        mutated = copy.deepcopy(workflow)
+                        steps = mutated["jobs"][owner]["steps"]
+                        step = next(s for s in steps if s.get("name") == expected["name"])
+                        if change == "remove":
+                            steps.remove(step)
+                        else:
+                            step[change] = True if change == "continue-on-error" else "false"
+                        with self.assertRaisesRegex(AssertionError, "exact required step"):
+                            assert_parallel_validation_contract(mutated)
+
+    def test_rustdoc_contract_rejects_broken_cache_and_weakened_job(self) -> None:
+        changes = (
+            (
+                "steps",
+                [{"uses": RUST_CACHE_ACTION}, WORKSPACE_RUSTDOC_STEP],
+                "broken documentation target cache",
+            ),
+            ("needs", ["ci_change_scope"], "standard-stage prerequisites"),
+            ("if", "${{ always() }}", "standard-stage prerequisites"),
+            ("timeout-minutes", 60, "blocking 30-minute limit"),
+            ("continue-on-error", True, "blocking 30-minute limit"),
+        )
+        for field, value, message in changes:
+            with self.subTest(field=field):
+                mutated = copy.deepcopy(load_workflow(CI_WORKFLOW_PATH))
+                mutated["jobs"]["rustdoc"][field] = value
+                with self.assertRaisesRegex(AssertionError, message):
+                    assert_parallel_validation_contract(mutated)
+
+    def test_rustdoc_contract_rejects_weakened_environment(self) -> None:
+        for variable, value in (("RUSTDOCFLAGS", ""), ("CARGO_INCREMENTAL", "1")):
+            with self.subTest(variable=variable):
+                mutated = copy.deepcopy(load_workflow(CI_WORKFLOW_PATH))
+                step = next(
+                    step for step in mutated["jobs"]["rustdoc"]["steps"]
+                    if step.get("name") == WORKSPACE_RUSTDOC_STEP["name"]
+                )
+                step["env"][variable] = value
+                with self.assertRaisesRegex(AssertionError, "exact required step"):
+                    assert_parallel_validation_contract(mutated)
+
+    def test_parallel_validation_rejects_an_omitted_feature_result(self) -> None:
+        workflow = load_workflow(CI_WORKFLOW_PATH)
+        for change in ("needs", "env", "run"):
+            with self.subTest(change=change):
+                mutated = copy.deepcopy(workflow)
+                gate = mutated["jobs"]["core-gate"]
+                if change == "needs":
+                    gate["needs"].remove("feature-matrix")
+                elif change == "env":
+                    gate["steps"][0]["env"]["FEATURE_MATRIX_RESULT"] = "success"
+                else:
+                    gate["steps"][0]["run"] = gate["steps"][0]["run"].replace(
+                        'test "${FEATURE_MATRIX_RESULT}" = "${expected}"', "true"
+                    )
+                with self.assertRaisesRegex(AssertionError, "core-gate must"):
+                    assert_parallel_validation_contract(mutated)
+
+    def test_parallel_core_gate_executes_fail_closed_for_every_result(self) -> None:
+        workflow = load_workflow(CI_WORKFLOW_PATH)
+        assert_parallel_validation_contract(workflow)
+        # Execute only the inspected shell result checker, never Cargo commands.
+        run = workflow["jobs"]["core-gate"]["steps"][0]["run"]
+        results = {
+            name.upper().replace("-", "_") + "_RESULT": "success"
+            for name in CORE_GATE_JOB_NAMES
+        }
+        environment = dict(
+            results, SCOPE_RESULT="success", PREFLIGHT_RESULT="success", RUST_SCOPE="true"
+        )
+
+        def verdict(env: dict[str, str]) -> int:
+            return subprocess.run(
+                ["/bin/bash", "-c", run], env=env, capture_output=True, check=False
+            ).returncode
+
+        self.assertEqual(verdict(environment), 0)
+        for result in results:
+            for state in ("failure", "cancelled", "skipped", ""):
+                with self.subTest(result=result, state=state):
+                    self.assertNotEqual(verdict(dict(environment, **{result: state})), 0)
+        scoped = dict(environment, RUST_SCOPE="false")
+        scoped.update(dict.fromkeys(results, "skipped"))
+        self.assertEqual(verdict(scoped), 0)
 
     def test_core_rust_caches_restore_on_prs_and_save_only_from_main(self) -> None:
         workflow = load_workflow(CI_WORKFLOW_PATH)
@@ -614,11 +1002,11 @@ class CiWorkflowPolicyTests(unittest.TestCase):
         mutated = copy.deepcopy(load_workflow(CI_WORKFLOW_PATH))
         cache_step = next(
             step
-            for step in mutated["jobs"]["rustdoc"]["steps"]
+            for step in mutated["jobs"]["clippy"]["steps"]
             if str(step.get("uses", "")).startswith("Swatinem/rust-cache@")
         )
         del cache_step["with"]["save-if"]
-        with self.assertRaisesRegex(AssertionError, "rustdoc Rust cache must save only from main"):
+        with self.assertRaisesRegex(AssertionError, "clippy Rust cache must save only from main"):
             assert_pull_requests_never_write_caches(mutated)
 
     def test_cache_write_contract_rejects_pull_request_docker_cache_write(self) -> None:

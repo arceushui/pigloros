@@ -112,6 +112,27 @@ impl InstalledPluginFactoryV1 for BlockingPlugin {
 struct CountingVerifier(Arc<AtomicUsize>);
 
 impl WorldReplayVerifierV1 for CountingVerifier {
+    fn read_profile(
+        &self,
+        _closure: &WorldReplayClosureV1,
+        _intent: &pos_runtime::WorldReplayReadIntentV1,
+        _generation: ErasureReferenceV1,
+    ) -> Result<
+        (pos_core::EventReadBounds, pos_store::ForkReplayReadLimitsV1),
+        WorldReplayVerificationErrorV1,
+    > {
+        pos_store::ForkReplayReadLimitsV1::new(8, 1_024, 262_144, 256 * 1024 * 1024, 30_000_000)
+            .map(|limits| {
+                (
+                    pos_core::EventReadBounds::new_with_total_bytes_and_elapsed(
+                        65_536, 128, 8, 65_536, 67_108_864, 30_000_000,
+                    ),
+                    limits,
+                )
+            })
+            .map_err(|_| WorldReplayVerificationErrorV1::EvidenceUnavailable)
+    }
+
     fn verify(
         &self,
         closure: &WorldReplayClosureV1,
@@ -124,6 +145,14 @@ impl WorldReplayVerifierV1 for CountingVerifier {
             requested_use,
             inventory_generation,
             ErasureReplayClaimV1::Exact,
+            pos_store::ForkReplayReadLimitsV1::new(
+                8,
+                1_024,
+                262_144,
+                256 * 1024 * 1024,
+                30_000_000,
+            )
+            .map_err(|_| WorldReplayVerificationErrorV1::EvidenceUnavailable)?,
         ))
     }
 }
@@ -225,6 +254,81 @@ fn blocking_registry(
     registry
 }
 
+/// The library is compiled without `cfg(test)` in this integration target,
+/// so both operations use their production monotonic source. Only verifier
+/// authority, projection admission and the release-clock port are fixtures.
+fn assert_healthy_release(
+    provider: &Arc<HostProjectionProviderV1>,
+    executor: &StagedFoldExecutorV1,
+    consumer: RecordedConsumerV1,
+) {
+    let composition = ErasureCoordinatorCompositionV1::closed()
+        .with_world_replay_verifier(Arc::new(CountingVerifier(Arc::new(AtomicUsize::new(0)))));
+    let mut host = test_ok(ErasureExecutionHostV1::open_with_authority(
+        StoreConfig::Memory,
+        &composition,
+        pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
+    ));
+    let gate = host.containment_gate();
+    let entity = EntityId::new();
+    let timeline = {
+        let mut commands = test_ok(host.command_sender());
+        let timeline = test_ok(commands.create_timeline("healthy release")).id();
+        test_ok(commands.append(
+            timeline,
+            &[EventDraft::new(
+                entity,
+                Kind::new("test.tick"),
+                CanonicalBytes::from_vec(Vec::new()),
+            )],
+        ));
+        timeline
+    };
+    let generation = test_ok(gate.inventory_generation());
+    let closure = test_ok(WorldReplayClosureV1::test_fixture_for_timeline_consumer(
+        timeline,
+        Hash::from_bytes(generation.digest()),
+        "count",
+    ));
+    let mut registry = blocking_registry(&consumer, Arc::clone(&gate));
+    let mut other = blocking_registry(&consumer, gate);
+    let consumers = [consumer];
+    let fold = ProtectedFoldV1 {
+        executor,
+        provider,
+        consumers: &consumers,
+    };
+    let mut reads = test_ok(host.read_sender());
+    let health = ReleaseHealthV1::new();
+    let mut port = TrustedClockFixtureV1::new();
+    test_ok(pos_time::replay(
+        &mut reads,
+        timeline,
+        &mut registry,
+        &closure,
+        release(&mut port, &health),
+        &fold,
+    ));
+    assert!(test_ok(registry.state_for(timeline, &entity)).is_some());
+    assert!(test_ok(other.state_for(timeline, &entity)).is_none());
+    let mut port = TrustedClockFixtureV1::new();
+    let diff = test_ok(pos_time::compare(
+        &mut reads,
+        [timeline, timeline],
+        Seq::from_u64(1),
+        [&mut registry, &mut other],
+        [&closure, &closure],
+        release(&mut port, &health),
+        [&fold, &fold],
+    ));
+    assert!(diff.diverged_entities.is_empty());
+    assert_eq!(
+        test_ok(registry.state_for(timeline, &entity)),
+        test_ok(other.state_for(timeline, &entity))
+    );
+    assert_eq!(ExecutorHealthV1::current(), ExecutorHealthV1::Ready);
+}
+
 #[test]
 fn protected_release_fails_closed_before_any_premise_read_while_quarantined() {
     let released = Arc::new(AtomicBool::new(false));
@@ -233,6 +337,10 @@ fn protected_release_fails_closed_before_any_premise_read_while_quarantined() {
         test_ok(provider.admit_fixture::<BlockingPlugin>(Arc::new(Arc::clone(&released))));
     let provider = Arc::new(provider);
     let executor = test_ok(StagedFoldExecutorV1::acquire());
+
+    released.store(true, Ordering::SeqCst);
+    assert_healthy_release(&provider, &executor, consumer);
+    released.store(false, Ordering::SeqCst);
 
     // Abandon one fold at its deadline.
     let mut port = TrustedClockFixtureV1::new();

@@ -3,6 +3,8 @@
 //! Decoding proves deterministic-CBOR structure only. The trusted host proof
 //! must be verified under the pinned host key before a store uses a value.
 
+use crate::crypto::{self as canonical_length, CanonicalEmit, CanonicalSink};
+
 use std::io::Cursor;
 
 use ciborium::value::Value;
@@ -166,16 +168,17 @@ impl PrincipalOwnerCommitmentInputV1 {
     /// Return `BLAKE3("pigloros/principal-owner-command/v1" || canonical array)`.
     #[must_use]
     pub fn commitment(&self) -> Hash {
-        digest(
-            PRINCIPAL_OWNER_COMMITMENT_DOMAIN,
-            &canonical_bytes(&Value::Array(vec![
-                hash_value(self.store_id),
-                hash_value(self.operation_id),
-                hash_value(self.evidence_digest),
-                hash_value(self.principal_digest),
-                Value::Text(self.owner.as_str().to_owned()),
-            ])),
-        )
+        let mut out = Vec::new();
+        self.emit(&mut out);
+        digest(PRINCIPAL_OWNER_COMMITMENT_DOMAIN, &out)
+    }
+
+    /// Measure the exact commitment array, excluding the hash domain prefix.
+    ///
+    /// # Errors
+    /// Returns `LengthOverflow` if the preimage length cannot fit `usize`.
+    pub fn canonical_preimage_len(&self) -> Result<usize, crate::CanonicalLengthErrorV1> {
+        canonical_length::measure(self)
     }
 }
 
@@ -212,22 +215,17 @@ impl ForkCreateCommitmentInputV1<'_> {
     /// Return `BLAKE3("pigloros/fork-create-command/v1" || canonical array)`.
     #[must_use]
     pub fn commitment(&self) -> Hash {
-        digest(
-            FORK_CREATE_COMMITMENT_DOMAIN,
-            &canonical_bytes(&Value::Array(vec![
-                hash_value(self.store_id),
-                hash_value(self.operation_id),
-                hash_value(self.evidence_digest),
-                hash_value(self.principal_digest),
-                Value::Bytes(self.parent_id.inner().to_bytes().to_vec()),
-                Value::Integer(self.cut.into()),
-                Value::Integer(self.cut.into()),
-                hash_value(self.descriptor_hash),
-                hash_value(self.composition_hash),
-                Value::Integer(u8::from(self.attribution_required).into()),
-                Value::Text(self.child_name.to_owned()),
-            ])),
-        )
+        let mut out = Vec::new();
+        self.emit(&mut out);
+        digest(FORK_CREATE_COMMITMENT_DOMAIN, &out)
+    }
+
+    /// Measure the exact commitment array, excluding the hash domain prefix.
+    ///
+    /// # Errors
+    /// Returns `LengthOverflow` if the preimage length cannot fit `usize`.
+    pub fn canonical_preimage_len(&self) -> Result<usize, crate::CanonicalLengthErrorV1> {
+        canonical_length::measure(self)
     }
 }
 
@@ -606,10 +604,6 @@ pub(crate) fn canonical_bytes(value: &Value) -> Vec<u8> {
         .unwrap_or_default()
 }
 
-fn hash_value(hash: Hash) -> Value {
-    Value::Bytes(hash.as_bytes().to_vec())
-}
-
 fn bounded_bytes(value: &Value, maximum: usize) -> Result<&[u8], ForkAdmissionCommandCodecErrorV1> {
     match value {
         Value::Bytes(value) if !value.is_empty() && value.len() <= maximum => Ok(value),
@@ -672,5 +666,33 @@ fn text(value: &Value) -> Result<String, ForkAdmissionCommandCodecErrorV1> {
         Ok(value.clone())
     } else {
         Err(ForkAdmissionCommandCodecErrorV1::FieldOutOfBounds)
+    }
+}
+
+impl CanonicalEmit for PrincipalOwnerCommitmentInputV1 {
+    fn emit(&self, out: &mut impl CanonicalSink) {
+        canonical_length::head(out, 4, 5);
+        canonical_length::bytes(out, self.store_id.as_bytes());
+        canonical_length::bytes(out, self.operation_id.as_bytes());
+        canonical_length::bytes(out, self.evidence_digest.as_bytes());
+        canonical_length::bytes(out, self.principal_digest.as_bytes());
+        canonical_length::text(out, self.owner.as_str());
+    }
+}
+
+impl CanonicalEmit for ForkCreateCommitmentInputV1<'_> {
+    fn emit(&self, out: &mut impl CanonicalSink) {
+        canonical_length::head(out, 4, 11);
+        canonical_length::bytes(out, self.store_id.as_bytes());
+        canonical_length::bytes(out, self.operation_id.as_bytes());
+        canonical_length::bytes(out, self.evidence_digest.as_bytes());
+        canonical_length::bytes(out, self.principal_digest.as_bytes());
+        canonical_length::bytes(out, &self.parent_id.inner().to_bytes());
+        canonical_length::head(out, 0, self.cut);
+        canonical_length::head(out, 0, self.cut);
+        canonical_length::bytes(out, self.descriptor_hash.as_bytes());
+        canonical_length::bytes(out, self.composition_hash.as_bytes());
+        canonical_length::head(out, 0, u64::from(self.attribution_required));
+        canonical_length::text(out, self.child_name);
     }
 }

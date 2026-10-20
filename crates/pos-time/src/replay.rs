@@ -6,12 +6,12 @@
 
 use pos_core::staged_install::PreparedInstallV1;
 use pos_core::store::SeqRange;
-use pos_core::trusted_clock::{ApplicableExpiriesV1, ReleaseGuardV1, StagedProtectedOutputV1};
+use pos_core::trusted_clock::{ReleaseGuardV1, StagedProtectedOutputV1};
 use pos_core::{CoreError, ErasureProtectedOperationV1, Seq, TimelineId, WorldReplayClosureV1};
 use pos_runtime::ErasureReadSenderV1;
 use pos_state::{ProjectionRegistry, RevokedSubjectsV1};
 
-use crate::{ProtectedFoldV1, ProtectedReleaseV1, ReleaseHealthV1};
+use crate::{ProtectedFoldV1, ProtectedReleaseV1};
 
 /// Replay **all** events on `timeline` and install the resulting State in
 /// `registry`.
@@ -82,77 +82,69 @@ fn replay_range(
     registry: &mut ProjectionRegistry,
     release: ProtectedReleaseV1<'_>,
 ) -> Result<(), CoreError> {
-    let consumer_ids = pos_runtime::require_staged_release()
-        .map_err(crate::unavailable)
-        .and_then(|()| crate::consumer_selection(registry))?;
     let ProtectedReleaseV1 {
         guard,
         expiries,
         health,
     } = release;
-    let mut guard = Some(guard);
+    let started = guard.guard_started_at();
+    let guard = crate::PendingReplayGuardV1::new(guard, health);
     let mut revoked = None;
-    let mut outcome = Err(CoreError::ArtifactUnavailable);
-    let mut effect = |sender: &mut ErasureReadSenderV1<'_>| {
-        if let Some(held) = guard.take() {
-            let target = ReplayTargetV1 {
-                registry: &mut *registry,
-                guard: held,
-                expiries: &expiries,
-                health,
-                revoked: &mut revoked,
-            };
-            outcome = replay_in_fence(sender, request, &consumer_ids, target);
-        }
-    };
-    let fenced = sender
-        .with_protected_ancestry_fence(
+    let result = (|| {
+        pos_runtime::require_staged_release().map_err(crate::unavailable)?;
+        let intent = crate::read_intent(
             request.timeline,
             ErasureProtectedOperationV1::Read,
-            &mut effect,
-        )
-        .map_err(crate::host_error_to_core);
-    // P2 and teardown of a guard the effect never took, before the
-    // failure-path forget.
-    crate::teardown(guard, health);
-    crate::forget_on_failure(fenced.and(outcome), registry, revoked.as_ref())
-}
-
-/// The visible registry, the held guard and the failure-path record of one
-/// Replay inside its fence.
-struct ReplayTargetV1<'t, 'g> {
-    registry: &'t mut ProjectionRegistry,
-    guard: ReleaseGuardV1<'g>,
-    expiries: &'t ApplicableExpiriesV1,
-    health: &'t ReleaseHealthV1,
-    revoked: &'t mut Option<RevokedSubjectsV1>,
-}
-
-/// Stage one Replay inside its fence, then hand it over; on any failure
-/// before the handoff, run P2 and tear the guard down.
-fn replay_in_fence(
-    sender: &mut ErasureReadSenderV1<'_>,
-    request: &ReplayRequestV1<'_>,
-    consumer_ids: &[String],
-    target: ReplayTargetV1<'_, '_>,
-) -> Result<(), CoreError> {
-    let ReplayTargetV1 {
-        registry,
-        guard,
-        expiries,
-        health,
-        revoked,
-    } = target;
-    let prepared = match prepare_replay(sender, request, consumer_ids, &guard, revoked, registry) {
-        Ok(prepared) => prepared,
-        Err(error) => {
-            crate::teardown(Some(guard), health);
-            return Err(error);
-        }
-    };
-    // ADR-112's overrun signal is recorded, and the displaced maps are
-    // dropped, after the handoff returns; a refused handoff runs P2.
-    crate::handoff_with_p2(guard, expiries, prepared, health)
+            request.range,
+            registry,
+        )?;
+        let prepared = sender
+            .prepare_world_replay_read(request.closure, intent)
+            .map_err(crate::host_error_to_core)?;
+        let mut clock = pos_core::trusted_clock::SystemGuardMonotonicSourceV1;
+        #[cfg(test)]
+        let mut scripted = crate::imported_fork_replay_tests::lifecycle::operation_clock();
+        #[cfg(test)]
+        let clock: &mut dyn pos_core::trusted_clock::GuardMonotonicSourceV1 =
+            match scripted.as_mut() {
+                Some(script) => script,
+                None => &mut clock,
+            };
+        #[cfg(not(test))]
+        let clock = &mut clock;
+        let mut budget =
+            pos_store::ForkReplayReadBudgetV1::new(prepared.fork_read_limits(), started, clock)
+                .map_err(crate::unavailable)?;
+        let target_registry = &mut *registry;
+        let revoked = &mut revoked;
+        let preparation = &prepared;
+        sender
+            .with_world_replay_read_fence(
+                &[&prepared],
+                &mut budget,
+                move |sender, budget| {
+                    let registry = target_registry;
+                    let held = guard;
+                    let staged = prepare_replay(
+                        sender,
+                        request,
+                        preparation,
+                        budget,
+                        held.held(),
+                        revoked,
+                        registry,
+                    )
+                    .map_err(|error| crate::core_error_to_host(&error))?;
+                    Ok((held, staged))
+                },
+                |(held, staged), verdict| {
+                    held.handoff(&expiries, staged, verdict)
+                        .map_err(|error| crate::core_error_to_host(&error))
+                },
+            )
+            .map_err(crate::host_error_to_core)
+    })();
+    crate::forget_on_failure(result, registry, revoked.as_ref())
 }
 
 /// Verify, read, fold and re-verify one Replay inside its fence, check the
@@ -160,29 +152,68 @@ fn replay_in_fence(
 fn prepare_replay<'r>(
     sender: &mut ErasureReadSenderV1<'_>,
     request: &ReplayRequestV1<'_>,
-    consumer_ids: &[String],
+    prepared: &pos_runtime::PreparedWorldReplayReadV1,
+    budget: &mut pos_store::ForkReplayReadBudgetV1<'_>,
     guard: &ReleaseGuardV1<'_>,
     revoked: &mut Option<RevokedSubjectsV1>,
     registry: &'r mut ProjectionRegistry,
 ) -> Result<StagedProtectedOutputV1<PreparedInstallV1<'r>>, CoreError> {
-    let requested_use = crate::observed_world_replay_use(
-        sender,
-        request.timeline,
-        ErasureProtectedOperationV1::Read,
-        request.range,
-        consumer_ids,
-    )?;
-    let read_bounds = crate::require_world_replay(sender, request.closure, &requested_use)?;
-    let events = crate::read_complete_world_replay(sender, &requested_use, read_bounds)?;
+    let (requested_use, verified) = sender
+        .observe_world_replay_use(prepared, budget)
+        .map_err(crate::host_error_to_core)
+        .and_then(|requested_use| {
+            crate::require_prepared_world_replay(
+                sender,
+                prepared,
+                request.closure,
+                &requested_use,
+                budget,
+            )
+            .map(|verified| (requested_use, verified))
+        })?;
+    let evidence = sender
+        .validate_world_replay_forks(&verified, budget)
+        .map_err(crate::host_error_to_core)?;
+    let events = sender
+        .read_world_replay_events(&verified, budget)
+        .map_err(crate::host_error_to_core)?;
     *revoked = Some(RevokedSubjectsV1::from_verified_events(&events));
     let source = crate::verified_source(request.timeline, request.closure);
     let staged = crate::fold_staged(request.fold, guard, events, source)?;
-    let final_bounds = crate::require_world_replay(sender, request.closure, &requested_use)?;
-    if final_bounds != read_bounds {
+    revalidate_replay(
+        sender,
+        prepared,
+        request.closure,
+        &requested_use,
+        &verified,
+        &evidence,
+        budget,
+    )
+    .and_then(|()| crate::handoff_reserve(guard))?;
+    registry.prepare_install(staged).map_err(crate::unavailable)
+}
+
+/// Recheck the complete authorization and native proof on the original ledger.
+fn revalidate_replay(
+    sender: &mut ErasureReadSenderV1<'_>,
+    prepared: &pos_runtime::PreparedWorldReplayReadV1,
+    closure: &WorldReplayClosureV1,
+    requested_use: &pos_runtime::WorldReplayUseV1,
+    verified: &pos_runtime::VerifiedWorldReplayV1,
+    evidence: &[pos_store::ForkReplayAuthorityEvidenceV1],
+    budget: &mut pos_store::ForkReplayReadBudgetV1<'_>,
+) -> Result<(), CoreError> {
+    let final_verified =
+        crate::require_prepared_world_replay(sender, prepared, closure, requested_use, budget)?;
+    if final_verified != *verified {
         return Err(CoreError::ArtifactUnavailable);
     }
-    crate::handoff_reserve(guard)?;
-    registry.prepare_install(staged).map_err(crate::unavailable)
+    let final_evidence = sender
+        .validate_world_replay_forks(&final_verified, budget)
+        .map_err(crate::host_error_to_core)?;
+    (final_evidence.as_slice() == evidence)
+        .then_some(())
+        .ok_or(CoreError::ArtifactUnavailable)
 }
 
 #[cfg(test)]
@@ -1072,7 +1103,9 @@ mod tests {
     fn public_replay_enforces_verified_read_bounds() {
         let fixture = count_fixture();
         let composition = pos_runtime::ErasureCoordinatorCompositionV1::closed()
-            .with_world_replay_verifier(Arc::new(OneEventWorldReplayVerifier));
+            .with_world_replay_verifier(Arc::new(FixedBoundsWorldReplayVerifier(
+                ONE_EVENT_READ_BOUNDS,
+            )));
         let mut host = pos_runtime::ErasureExecutionHostV1::open_with_authority(
             StoreConfig::Memory,
             &composition,
@@ -1138,6 +1171,126 @@ mod tests {
         );
     }
 
+    fn replay_field_bound_case(config: StoreConfig, read_only: bool, bounds: EventReadBounds) {
+        let fixture = count_fixture();
+        let composition = pos_runtime::ErasureCoordinatorCompositionV1::closed()
+            .with_world_replay_verifier(Arc::new(FixedBoundsWorldReplayVerifier(bounds)));
+        let mut host = ErasureExecutionHostV1::open_with_authority(
+            config.clone(),
+            &composition,
+            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
+        )
+        .test_ok();
+        let entity = EntityId::new();
+        let timeline = {
+            let mut commands = host.command_sender().test_ok();
+            let timeline = commands.create_timeline("field-bounds").test_ok().id();
+            // A canonical three-byte CBOR byte string: four payload bytes.
+            let event = EventDraft::new(
+                entity,
+                Kind::new("test.tick"),
+                CanonicalBytes::from_vec(vec![0x43, 1, 2, 3]),
+            );
+            commands.append(timeline, &[event]).test_ok();
+            timeline
+        };
+        if read_only {
+            let path = match config {
+                StoreConfig::Sqlite { path } => Some(path),
+                _ => None,
+            }
+            .test_ok();
+            drop(host);
+            host = ErasureExecutionHostV1::recover_sqlite_fixture_with_authority(
+                pos_store::sqlite::SqliteStore::open_read_only(&path).test_ok(),
+                &composition,
+                pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
+            )
+            .test_ok();
+        }
+        let closure = crate::test_support::closure_for_host(&mut host, timeline);
+        let mut registry = fixture.registry(host.containment_gate());
+        let before = registry.retained_state_for_test();
+        let result = replay_with(
+            &fixture,
+            &mut host.read_sender().test_ok(),
+            timeline,
+            &mut registry,
+            &closure,
+        );
+        if bounds.max_payload_bytes() == 4 && bounds.max_event_type_bytes() == 9 {
+            result.test_ok();
+            assert_eq!(count_for(&registry, timeline, &entity), 1);
+        } else {
+            assert!(matches!(result, Err(CoreError::ArtifactUnavailable)));
+            assert_eq!(registry.retained_state_for_test(), before);
+        }
+        assert_eq!(host.status(), pos_runtime::ErasureHostStatusV1::Ready);
+    }
+
+    #[test]
+    fn public_replay_enforces_exact_payload_and_kind_bounds_on_native_owners() {
+        for (payload, kind) in [(4, 9), (3, 9), (4, 8)] {
+            let bounds = EventReadBounds::new_with_total_bytes_and_elapsed(
+                payload, kind, 8, 1, 65_536, 30_000_000,
+            );
+            replay_field_bound_case(StoreConfig::Memory, false, bounds);
+            replay_field_bound_case(StoreConfig::SqliteInMemory, false, bounds);
+            for read_only in [false, true] {
+                let directory = tempfile::tempdir().test_ok();
+                let path = directory.path().join("field-bounds.sqlite");
+                replay_field_bound_case(
+                    StoreConfig::Sqlite {
+                        path: path.to_str().test_ok().to_owned(),
+                    },
+                    read_only,
+                    bounds,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn public_replay_preserves_containment_refusal_for_an_unknown_timeline() {
+        let fixture = count_fixture();
+        let mut host = crate::test_support::open_exact_host();
+        let entity = EntityId::new();
+        let timeline = {
+            let mut commands = host.command_sender().test_ok();
+            let timeline = commands.create_timeline("present-control").test_ok().id();
+            commands.append(timeline, &[draft(entity)]).test_ok();
+            timeline
+        };
+        let closure = crate::test_support::closure_for_host(&mut host, timeline);
+        let gate = host.containment_gate();
+        let missing = TimelineId::new();
+        // Matching closure metadata does not put an unknown Timeline into the
+        // host's recovered inventory. Containment must refuse before reading it.
+        assert_eq!(
+            gate.authorize(missing, pos_core::ErasureProtectedOperationV1::Read),
+            Err(pos_core::ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
+        let absent = WorldReplayClosureV1::test_fixture_for_timeline_with_inventory_generation(
+            missing,
+            pos_core::Hash::from_bytes(gate.inventory_generation().test_ok().digest()),
+        )
+        .test_ok();
+        let mut registry = fixture.registry(gate);
+        let mut reads = host.read_sender().test_ok();
+        replay_with(&fixture, &mut reads, timeline, &mut registry, &closure).test_ok();
+        assert_eq!(count_for(&registry, timeline, &entity), 1);
+        let before = registry.retained_state_for_test();
+        let refused = replay_with(&fixture, &mut reads, missing, &mut registry, &absent);
+        assert!(
+            matches!(refused, Err(CoreError::ErasureContainmentUnavailable)),
+            "unknown Timeline lost its containment refusal: {refused:?}"
+        );
+        assert_eq!(registry.retained_state_for_test(), before);
+        replay_with(&fixture, &mut reads, timeline, &mut registry, &closure).test_ok();
+        assert_eq!(count_for(&registry, timeline, &entity), 1);
+        assert_eq!(host.status(), pos_runtime::ErasureHostStatusV1::Ready);
+    }
+
     /// Mirrors the installed-verifier contract: a closure's source head is
     /// accepted only for the logical head at which the closure was recorded.
     struct RecordedHeadVerifier {
@@ -1145,6 +1298,18 @@ mod tests {
     }
 
     impl pos_runtime::WorldReplayVerifierV1 for RecordedHeadVerifier {
+        fn read_profile(
+            &self,
+            _closure: &pos_core::WorldReplayClosureV1,
+            _intent: &pos_runtime::WorldReplayReadIntentV1,
+            _generation: pos_core::ErasureReferenceV1,
+        ) -> Result<
+            (pos_core::EventReadBounds, pos_store::ForkReplayReadLimitsV1),
+            pos_runtime::WorldReplayVerificationErrorV1,
+        > {
+            crate::test_support::ordinary_read_profile()
+        }
+
         fn verify(
             &self,
             closure: &pos_core::WorldReplayClosureV1,
@@ -1158,6 +1323,7 @@ mod tests {
                     requested_use,
                     inventory_generation,
                     pos_core::ErasureReplayClaimV1::Exact,
+                    crate::test_support::ordinary_read_profile()?.1,
                 ))
             } else {
                 Err(pos_runtime::WorldReplayVerificationErrorV1::EvidenceUnavailable)
@@ -1236,9 +1402,21 @@ mod tests {
         calls: AtomicUsize,
     }
 
-    struct OneEventWorldReplayVerifier;
+    struct FixedBoundsWorldReplayVerifier(EventReadBounds);
 
-    impl pos_runtime::WorldReplayVerifierV1 for OneEventWorldReplayVerifier {
+    impl pos_runtime::WorldReplayVerifierV1 for FixedBoundsWorldReplayVerifier {
+        fn read_profile(
+            &self,
+            _closure: &pos_core::WorldReplayClosureV1,
+            _intent: &pos_runtime::WorldReplayReadIntentV1,
+            _generation: pos_core::ErasureReferenceV1,
+        ) -> Result<
+            (pos_core::EventReadBounds, pos_store::ForkReplayReadLimitsV1),
+            pos_runtime::WorldReplayVerificationErrorV1,
+        > {
+            crate::test_support::ordinary_read_profile().map(|(_, limits)| (self.0, limits))
+        }
+
         fn verify(
             &self,
             closure: &pos_core::WorldReplayClosureV1,
@@ -1254,13 +1432,25 @@ mod tests {
                     requested_use.clone(),
                     inventory_generation,
                     pos_core::ErasureReplayClaimV1::Exact,
-                    ONE_EVENT_READ_BOUNDS,
+                    (self.0, crate::test_support::ordinary_read_profile()?.1),
                 ),
             )
         }
     }
 
     impl pos_runtime::WorldReplayVerifierV1 for ChangeBoundsOnSecondVerification {
+        fn read_profile(
+            &self,
+            _closure: &pos_core::WorldReplayClosureV1,
+            _intent: &pos_runtime::WorldReplayReadIntentV1,
+            _generation: pos_core::ErasureReferenceV1,
+        ) -> Result<
+            (pos_core::EventReadBounds, pos_store::ForkReplayReadLimitsV1),
+            pos_runtime::WorldReplayVerificationErrorV1,
+        > {
+            crate::test_support::ordinary_read_profile()
+        }
+
         fn verify(
             &self,
             closure: &pos_core::WorldReplayClosureV1,
@@ -1274,6 +1464,7 @@ mod tests {
                     requested_use,
                     inventory_generation,
                     pos_core::ErasureReplayClaimV1::Exact,
+                    crate::test_support::ordinary_read_profile()?.1,
                 ))
             } else {
                 Ok(
@@ -1284,7 +1475,10 @@ mod tests {
                         requested_use.clone(),
                         inventory_generation,
                         pos_core::ErasureReplayClaimV1::Exact,
-                        ONE_EVENT_READ_BOUNDS,
+                        (
+                            ONE_EVENT_READ_BOUNDS,
+                            crate::test_support::ordinary_read_profile()?.1,
+                        ),
                     ),
                 )
             }

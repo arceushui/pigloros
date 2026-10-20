@@ -65,8 +65,10 @@ reply's `fileSystemType` and kernel readback. Every rejection closes all
 received descriptors. The result is a quarantined root mount, not proof of the
 image, the mount or its dm-verity identity.
 
-`ActivationImage` has no public constructor. Only the #438 held-image
-admission composition may create one, so no caller can activate an unadmitted
+`ActivationImage`'s only constructor is
+`ActivationImage::from_admission(&HeldImageAdmission)`. It duplicates exactly
+the held image that #438 admitted, close-on-exec, and takes the root partition
+and architecture from the same SIM1, so no caller can activate an unadmitted
 descriptor. Attachment and readback (#440), lifecycle cleanup (#442) and
 packaged-build conformance (#444) remain separate. The provider never creates a
 local process: `connect_system` accepts only a Unix-socket system-bus address
