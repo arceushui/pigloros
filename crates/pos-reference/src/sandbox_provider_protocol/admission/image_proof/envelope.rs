@@ -11,11 +11,11 @@ const MAX_CERTIFICATE_BYTES: usize = 64 * 1024;
 
 const IMPLICIT_ZERO: Tag = Tag::ContextSpecific {
     constructed: true,
-    number: TagNumber::N0,
+    number: TagNumber(0),
 };
 const IMPLICIT_ONE: Tag = Tag::ContextSpecific {
     constructed: true,
-    number: TagNumber::N1,
+    number: TagNumber(1),
 };
 
 pub(super) fn validate(content: &Any) -> Result<(), Error> {
@@ -41,7 +41,7 @@ pub(super) fn validate(content: &Any) -> Result<(), Error> {
     for signer in bounded_elements(next.value(), 1, Error::UnsupportedProfile)? {
         reject_attributes(signer)?;
     }
-    reader.finish(())?;
+    reader.finish()?;
     Ok(())
 }
 

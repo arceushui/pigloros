@@ -68,7 +68,7 @@ mod envelope_cases {
                 if marker == 0 {
                     selected = encoded;
                 }
-                choices.push(CertificateChoices::Certificate(certificate));
+                choices.push(CertificateChoices::Certificate(certificate.to_x509()?));
             }
             cms_data.certificates = Some(choices.try_into()?);
             Ok(())
@@ -234,7 +234,7 @@ mod envelope_cases {
             let attributes = der::Any::new(
                 Tag::ContextSpecific {
                     constructed: true,
-                    number: der::TagNumber::N1,
+                    number: der::TagNumber(1),
                 },
                 vec![0; 1024 * 1024 - 4096],
             )?;
