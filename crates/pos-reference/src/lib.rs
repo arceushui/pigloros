@@ -1,7 +1,10 @@
 #![forbid(unsafe_code)]
 #![deny(clippy::all)]
 #![warn(clippy::pedantic)]
-#![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
+#![cfg_attr(
+    all(coverage_nightly, any(test, feature = "test-support")),
+    feature(coverage_attribute)
+)]
 
 //! A deliberately dependency-light second evaluator for Wave 8 evidence.
 //!
