@@ -117,19 +117,20 @@ fn has_duplicate_keys(json: &[u8]) -> bool {
     // array.
     let mut frames: Vec<Option<BTreeSet<String>>> = Vec::new();
     let mut expect_key = false;
-    let mut index = 0;
-    while index < json.len() {
-        match json[index] {
-            b'"' => {
-                let start = index;
-                index += 1;
-                while json[index] != b'"' {
-                    index += if json[index] == b'\\' { 2 } else { 1 };
-                }
+    // The bytes of the string literal being read, from its opening quote.
+    let mut literal: Option<Vec<u8>> = None;
+    let mut escaped = false;
+    for &byte in json {
+        if let Some(text) = &mut literal {
+            text.push(byte);
+            let closing = byte == b'"' && !escaped;
+            escaped = byte == b'\\' && !escaped;
+            if closing {
+                let text = std::mem::take(text);
+                literal = None;
                 if expect_key {
                     expect_key = false;
-                    let key =
-                        serde_json::from_slice::<String>(&json[start..=index]).unwrap_or_default();
+                    let key = serde_json::from_slice::<String>(&text).unwrap_or_default();
                     if frames
                         .last_mut()
                         .and_then(Option::as_mut)
@@ -139,6 +140,10 @@ fn has_duplicate_keys(json: &[u8]) -> bool {
                     }
                 }
             }
+            continue;
+        }
+        match byte {
+            b'"' => literal = Some(vec![byte]),
             b'{' => {
                 frames.push(Some(BTreeSet::new()));
                 expect_key = true;
@@ -150,7 +155,6 @@ fn has_duplicate_keys(json: &[u8]) -> bool {
             b',' => expect_key = frames.last().is_some_and(Option::is_some),
             _ => {}
         }
-        index += 1;
     }
     false
 }

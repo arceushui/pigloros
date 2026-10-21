@@ -316,13 +316,6 @@ fn read_body(
     } else {
         ReleaseSourceErrorV1::BoundsExceeded
     };
-    if response
-        .body()
-        .content_length()
-        .is_some_and(|length| length > size || (exact && length < size))
-    {
-        return Err(mismatch);
-    }
     let mut bytes = Vec::new();
     response
         .into_body()

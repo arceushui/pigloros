@@ -181,36 +181,22 @@ fn valid_repository(name: &str) -> bool {
 }
 
 fn valid_component(component: &str) -> bool {
-    let bytes = component.as_bytes();
-    let mut index = 0;
-    loop {
-        let start = index;
-        while bytes
-            .get(index)
-            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
-        {
-            index += 1;
-        }
-        if index == start {
-            return false;
-        }
-        match bytes.get(index) {
-            None => return true,
-            Some(b'.') => index += 1,
-            Some(b'_') => {
-                index += 1;
-                if bytes.get(index) == Some(&b'_') {
-                    index += 1;
-                }
+    let is_run = |byte: &u8| byte.is_ascii_lowercase() || byte.is_ascii_digit();
+    // Alternating runs of alphanumerics and separators: the first and the
+    // last run are alphanumeric, and every separator run is `.`, `_`, `__`
+    // or only `-`.
+    let chunks = component
+        .as_bytes()
+        .chunk_by(|left, right| is_run(left) == is_run(right))
+        .collect::<Vec<_>>();
+    chunks.len() % 2 == 1
+        && chunks.iter().enumerate().all(|(index, chunk)| {
+            if index.is_multiple_of(2) {
+                chunk.iter().all(is_run)
+            } else {
+                matches!(*chunk, b"." | b"_" | b"__") || chunk.iter().all(|byte| *byte == b'-')
             }
-            Some(b'-') => {
-                while bytes.get(index) == Some(&b'-') {
-                    index += 1;
-                }
-            }
-            Some(_) => return false,
-        }
-    }
+        })
 }
 
 impl ReleaseSourceV1 for OciReleaseSourceV1 {
