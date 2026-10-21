@@ -69,10 +69,28 @@ image, the mount or its dm-verity identity.
 `ActivationImage::from_admission(&HeldImageAdmission)`. It duplicates exactly
 the held image that #438 admitted, close-on-exec, and takes the root partition
 and architecture from the same SIM1, so no caller can activate an unadmitted
-descriptor. Attachment and readback (#440), lifecycle cleanup (#442) and
-packaged-build conformance (#444) remain separate. The provider never creates a
-local process: `connect_system` accepts only a Unix-socket system-bus address
-(zbus's `unixexec` and `ibus` transports would start one), and
+descriptor.
+
+`activate_admitted_root(&HeldImageAdmission, &PreparedAttemptDirectory)` (#440)
+composes the attempt:
+
+- It requires the kernel command line to carry the one plain
+  `systemd.allow_userspace_verity=0` word (ADR-087 Part C.3); otherwise it
+  returns host feature unavailable before mountfsd is called.
+- It bounds the connection and the `MountImage` call to 60 s each.
+- It attaches the sealed root mount by descriptor onto the held attempt root
+  and makes it private.
+- It reads the mount back by descriptor: path, mountinfo, EROFS and
+  read-only, the dm-verity device and its loop partitions, and the loop
+  backing identity. It then re-admits the held image.
+- Any failure after attachment detaches the mount.
+
+The live dm-verity table is #444 evidence, not a runtime check. Lifecycle
+cleanup (#442) and packaged-build conformance (#444) remain separate.
+
+The provider never creates a local process: `connect_system` accepts only a
+Unix-socket system-bus address (zbus's `unixexec` and `ibus` transports would
+start one), and
 `provider_process_creation_public` checks the provider's production sources
 and manifests, because zbus receives system-bus descriptors without
 `MSG_CMSG_CLOEXEC`.

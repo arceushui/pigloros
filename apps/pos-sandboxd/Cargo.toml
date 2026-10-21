@@ -11,6 +11,7 @@ futures-util = { version = "0.3", default-features = false }
 pos-reference = { path = "../../crates/pos-reference" }
 rustix = { version = "1.1.4", default-features = false, features = [
   "fs",
+  "mount",
   "net",
   "std",
   "time",
@@ -18,7 +19,7 @@ rustix = { version = "1.1.4", default-features = false, features = [
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-tokio = { version = "1", default-features = false, features = ["net"] }
+tokio = { version = "1", default-features = false, features = ["net", "time"] }
 zbus = { version = "=5.19.0", default-features = false, features = ["tokio"] }
 zbus_systemd = { version = "=0.26200.0", default-features = false, features = [
   "systemd1",
