@@ -324,7 +324,7 @@ fn read_body(
         .read_to_end(&mut bytes)
         .or(Err(ReleaseSourceErrorV1::Io))?;
     let length = bytes.len() as u64;
-    if length > size || (exact && length < size) {
+    if (exact && length != size) || length > size {
         Err(mismatch)
     } else {
         Ok(bytes)
