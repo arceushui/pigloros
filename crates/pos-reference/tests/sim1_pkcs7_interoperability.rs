@@ -54,8 +54,11 @@ fn openssl_detached_fixture_matches_the_accepted_algorithm_profile(
     let SignerIdentifier::IssuerAndSerialNumber(sid) = &signer.sid else {
         return Err("fixture must use issuer and serial".into());
     };
-    assert_eq!(sid.issuer, certificate.tbs_certificate.issuer);
-    assert_eq!(sid.serial_number, certificate.tbs_certificate.serial_number);
+    assert_eq!(&sid.issuer, certificate.tbs_certificate().issuer());
+    assert_eq!(
+        &sid.serial_number,
+        certificate.tbs_certificate().serial_number()
+    );
     assert_eq!(&signer.digest_alg, digest);
     assert!(signer.signed_attrs.is_none());
     assert!(signer.unsigned_attrs.is_none());
@@ -82,19 +85,19 @@ fn selected_webpki_and_ring_algorithms_verify_the_external_fixture(
     let cms_data: SignedData = outer.content.decode_as()?;
     let signer = cms_data.signer_infos.0.get(0).ok_or("missing signer")?;
     let certificate = x509_cert::Certificate::from_der(CERTIFICATE)?;
-    let spki = &certificate.tbs_certificate.subject_public_key_info;
+    let spki = certificate.tbs_certificate().subject_public_key_info();
     assert_eq!(spki.algorithm, signer.signature_algorithm);
     assert_eq!(
-        certificate.signature_algorithm.oid.to_string(),
+        certificate.signature_algorithm().oid.to_string(),
         "1.2.840.113549.1.1.11"
     );
     assert_eq!(
-        certificate.signature_algorithm,
-        certificate.tbs_certificate.signature
+        certificate.signature_algorithm(),
+        certificate.tbs_certificate().signature()
     );
     assert_eq!(
         certificate
-            .signature_algorithm
+            .signature_algorithm()
             .parameters
             .as_ref()
             .ok_or("missing certificate parameters")?
@@ -116,9 +119,9 @@ fn selected_webpki_and_ring_algorithms_verify_the_external_fixture(
     )?;
     verifier.verify_signature(
         webpki::ring::RSA_PKCS1_2048_8192_SHA256,
-        &certificate.tbs_certificate.to_der()?,
+        &certificate.tbs_certificate().to_der()?,
         certificate
-            .signature
+            .signature()
             .as_bytes()
             .ok_or("unaligned certificate signature")?,
     )?;

@@ -10,7 +10,7 @@ publish.workspace = true
 blake3 = { workspace = true }
 ciborium = { workspace = true }
 ciborium-ll = "0.2.2"
-cms = { version = "=0.2.3", features = ["std"] }
+cms = { version = "=0.3.0-rc.0", features = ["std"] }
 der = { version = "=0.8.2", features = ["std"] }
 ed25519-dalek = { workspace = true }
 flate2 = "1"
@@ -22,7 +22,7 @@ serde_json = { workspace = true }
 sha2 = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
-x509-cert = "=0.2.5"
+x509-cert = "=0.3.0"
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
