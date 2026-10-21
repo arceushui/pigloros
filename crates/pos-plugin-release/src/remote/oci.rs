@@ -100,7 +100,7 @@ impl OciReleaseSourceV1 {
     fn read_closure(
         &self,
         address: &BundleAddressV1,
-        bootstrap: Option<String>,
+        bootstrap: Option<&str>,
     ) -> Result<VerifiedReleaseBundleV1, ReleaseSourceErrorV1> {
         let token = RefCell::new(None::<String>);
         let read = self.engine.begin();
@@ -110,7 +110,10 @@ impl OciReleaseSourceV1 {
         };
         let fetch = |kind: &str, digest: &str, accept: Option<&str>, size: u64| {
             let url = object_url(&self.registry, &self.repository, kind, digest);
-            let current = token.borrow().clone().or_else(|| bootstrap.clone());
+            let current = token
+                .borrow()
+                .clone()
+                .or_else(|| bootstrap.map(str::to_owned));
             read.fetch_challenged(&url, current.as_deref(), accept, size, &reauthorize)
         };
         let manifest = fetch(
@@ -223,6 +226,6 @@ impl ReleaseSourceV1 for OciReleaseSourceV1 {
         self.engine
             .config()
             .authorization(&self.registry)
-            .and_then(|bootstrap| self.read_closure(address, bootstrap))
+            .and_then(|bootstrap| self.read_closure(address, bootstrap.as_deref()))
     }
 }
