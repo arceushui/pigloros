@@ -4,6 +4,7 @@ mod image_proof_cases {
     include!("image_proof_envelope_cases.rs");
     include!("image_proof_ddi_cases.rs");
 
+    use self::MutableCertificate as Certificate;
     use super::*;
     use cms::{
         cert::CertificateChoices,

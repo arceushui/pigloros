@@ -3,7 +3,7 @@
 // X.509 0.3 exposes immutable certificates. These test-only ASN.1 views retain
 // mutable fields so adversarial fixtures can still express invalid certificates.
 #[derive(Clone, Debug, Eq, PartialEq, der::Sequence)]
-struct Certificate {
+struct MutableCertificate {
     tbs_certificate: TestTbsCertificate,
     signature_algorithm: x509_cert::AlgorithmIdentifier,
     signature: der::asn1::BitString,
@@ -27,7 +27,7 @@ struct TestTbsCertificate {
     extensions: Option<x509_cert::ext::Extensions>,
 }
 
-impl Certificate {
+impl MutableCertificate {
     fn to_x509(&self) -> der::Result<x509_cert::Certificate> {
         self.to_der()
             .and_then(|encoded| x509_cert::Certificate::from_der(&encoded))
