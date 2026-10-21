@@ -557,6 +557,11 @@ fn invalid<T>(_: T) -> SelectorBoundaryError {
     SelectorBoundaryError::ArtifactInvalid
 }
 
+#[cfg(any(test, feature = "test-support"))]
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[doc(hidden)]
+pub mod test_support;
+
 // Public test-only module, like the installation fixtures: the privileged
 // root-selector composition test reuses its request fixture.
 #[cfg(test)]
@@ -584,6 +589,9 @@ pub mod tests {
     }
 
     /// A canonical SPX1 naming exactly this admitted provider's authority.
+    ///
+    /// Keep in step with `test_support::request_for`, which sets the same
+    /// authority fields for other crates' privileged tests.
     pub(crate) fn request_for(
         admitted: &AdmittedSelectorProvider,
     ) -> TestResult<SandboxExecuteRequest> {

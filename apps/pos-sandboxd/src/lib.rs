@@ -11,6 +11,8 @@ mod hardening;
 #[cfg(target_os = "linux")]
 mod image_activator;
 mod kernel_cgroup;
+#[cfg(target_os = "linux")]
+mod root_attachment;
 mod system_bus;
 mod transient_unit;
 
@@ -30,6 +32,8 @@ pub use image_activator::{
     ActivationImage, ImageActivationError, ImageActivator, MountfsdImageActivator,
     QuarantinedRootMount,
 };
+#[cfg(target_os = "linux")]
+pub use root_attachment::{activate_admitted_root, VerifiedRootMount};
 
 pub use hardening::{
     SystemdHardeningProperty, SystemdHardeningReadback, SystemdHardeningReadbackValue,
