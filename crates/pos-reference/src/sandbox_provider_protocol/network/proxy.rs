@@ -298,8 +298,12 @@ impl Read for DeadlineReader<'_> {
 /// cannot be peeked counts as pending, so the check fails closed.
 fn request_pending(channel: &impl AsFd) -> bool {
     let mut byte = [0_u8; 1];
-    recv(channel, &mut byte, RecvFlags::PEEK | RecvFlags::DONTWAIT)
-        .map_or_else(|errno| errno != Errno::AGAIN, |(read, _)| read != 0)
+    recv(
+        channel,
+        &mut byte,
+        RecvFlags::PEEK.union(RecvFlags::DONTWAIT),
+    )
+    .map_or_else(|errno| errno != Errno::AGAIN, |(read, _)| read != 0)
 }
 
 fn remaining(deadline: Instant) -> io::Result<Duration> {
