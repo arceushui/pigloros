@@ -23,7 +23,12 @@ const RLS1_DIGEST: &str = "533c96ca296f8ed9b29810932f3006584c4b8cfec660eaad85f82
 const RLS1_PUBLIC_KEY: &str = "197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d61";
 
 fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    bytes
+        .iter()
+        .flat_map(|byte| [byte >> 4, byte & 0x0f])
+        .map(|nibble| char::from(DIGITS[usize::from(nibble)]))
+        .collect()
 }
 
 fn unhex(text: &str) -> Result<Vec<u8>, Box<dyn Error>> {
