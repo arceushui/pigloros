@@ -89,7 +89,6 @@ pub(super) fn select_signer(
 fn validate_certificate_syntax(certificate: &Certificate) -> Result<&[u8], Error> {
     let tbs = certificate.tbs_certificate();
     if !algorithm(certificate.signature_algorithm(), RSA_SHA256)
-        || !algorithm(tbs.signature(), RSA_SHA256)
         || !algorithm(&tbs.subject_public_key_info().algorithm, RSA)
         || certificate.signature_algorithm() != tbs.signature()
     {

@@ -128,6 +128,7 @@ fn public_proof_verification_rejects_certificate_extension_violations() -> TestR
 enum CertificateDefect {
     SignatureAlgorithm,
     TbsAlgorithm,
+    MatchingUnsupportedAlgorithms,
     PublicKeyAlgorithm,
     AlgorithmParameterMismatch,
     MalformedPublicKey,
@@ -142,6 +143,10 @@ fn certificate_defect(certificate: &mut Certificate, defect: CertificateDefect) 
     match defect {
         CertificateDefect::SignatureAlgorithm => certificate.signature_algorithm.oid = other,
         CertificateDefect::TbsAlgorithm => certificate.tbs_certificate.signature.oid = other,
+        CertificateDefect::MatchingUnsupportedAlgorithms => {
+            certificate.signature_algorithm.oid = other;
+            certificate.tbs_certificate.signature.oid = other;
+        }
         CertificateDefect::PublicKeyAlgorithm => {
             certificate
                 .tbs_certificate
@@ -190,6 +195,10 @@ fn public_proof_verification_rejects_invalid_certificate_identity_and_crypto() -
         ),
         (
             CertificateDefect::TbsAlgorithm,
+            SandboxImageProofError::UnsupportedProfile,
+        ),
+        (
+            CertificateDefect::MatchingUnsupportedAlgorithms,
             SandboxImageProofError::UnsupportedProfile,
         ),
         (
