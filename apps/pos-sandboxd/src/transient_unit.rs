@@ -100,6 +100,15 @@ impl ActivatedRootDirectory {
         }
     }
 
+    /// The fixed attempt root `/run/pigloros/sandbox/attempts/<component>/root`.
+    ///
+    /// `component` is the validated 32-hex attempt component of a
+    /// [`crate::TransientServiceUnitName`], so the path is always valid.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn for_attempt(component: &str) -> Self {
+        Self(format!("/run/pigloros/sandbox/attempts/{component}/root"))
+    }
+
     /// Return the exact D-Bus `s` value for `RootDirectory`.
     #[must_use]
     pub fn as_str(&self) -> &str {
