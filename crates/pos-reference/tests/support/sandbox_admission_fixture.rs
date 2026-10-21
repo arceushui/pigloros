@@ -2975,4 +2975,11 @@ fn audit_record_rejects_every_malformed_wire_field() -> TestResult {
 public_admission_tests! {
 include!("network_admission_cases.rs");
 include!("image_proof_cases.rs");
+
+#[cfg(target_os = "linux")]
+mod network_proxy_cases {
+    use super::*;
+
+    include!("network_proxy_cases.rs");
+}
 }
