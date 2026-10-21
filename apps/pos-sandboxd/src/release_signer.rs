@@ -6,8 +6,8 @@
 //! signatures over the domain-separated `RLS1` message.
 //!
 //! Key file contract (recorded for owner review, not yet an ADR rule): a
-//! regular, non-symlink file directly beneath a held, provider-owned
-//! directory; owned by the provider uid; mode 0400 or 0600; exactly 32 raw
+//! regular, non-symlink file directly beneath a held directory that the
+//! caller has verified as provider-owned and private; owned by the provider uid; mode 0400 or 0600; exactly 32 raw
 //! bytes holding the Ed25519 seed. The runtime-attestation key ID comes from
 //! the admitted SPM1, never from the file.
 
@@ -86,7 +86,7 @@ impl KeyFileReleaseSigner {
             .and_then(|metadata| {
                 if !metadata.is_file()
                     || metadata.uid() != owner
-                    || metadata.mode() & 0o177 != 0
+                    || !matches!(metadata.mode() & 0o777, 0o400 | 0o600)
                     || metadata.len() != SEED_BYTES
                 {
                     Err(ReleaseSignerError::UnsafeKeyFile)
@@ -95,6 +95,7 @@ impl KeyFileReleaseSigner {
                 }
             })
             .and_then(|()| {
+                // The seed copy is not zeroized; `SigningKey` wipes its own copy on drop.
                 let mut seed = [0_u8; 32];
                 file.read_exact(&mut seed)
                     .map(|()| Self {
@@ -192,6 +193,8 @@ mod tests {
             (0o640, 32),
             (0o604, 32),
             (0o700, 32),
+            (0o200, 32),
+            (0o000, 32),
             (0o600, 31),
             (0o600, 33),
         ] {

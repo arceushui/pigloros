@@ -14,8 +14,8 @@
 //! and provider configuration. This module never defaults or guesses one.
 
 use std::fs::File;
-use std::io::{self, Write};
-use std::os::unix::fs::MetadataExt;
+use std::io;
+use std::os::unix::fs::{FileExt, MetadataExt};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use rustix::fs::{openat2, unlinkat, AtFlags, Mode, OFlags, ResolveFlags};
@@ -327,7 +327,8 @@ impl StagedInput {
             .ok_or(StagingError::ExceedsReservation)?;
         self.staged
             .file
-            .write_all(chunk)
+            // Positional, so a retry after a partial write overwrites the same range.
+            .write_all_at(chunk, self.written)
             .map(|()| self.written = end)
             .map_err(StagingError::from)
     }
