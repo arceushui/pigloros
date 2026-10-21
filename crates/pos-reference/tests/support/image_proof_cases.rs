@@ -2,6 +2,7 @@ mod image_proof_cases {
     include!("image_proof_certificate_cases.rs");
     include!("image_proof_chain_cases.rs");
     include!("image_proof_envelope_cases.rs");
+    include!("image_proof_ddi_cases.rs");
 
     use super::*;
     use cms::{
@@ -27,8 +28,21 @@ mod image_proof_cases {
     const OPTIONAL_SIGNER: &[u8] =
         include_bytes!("../vectors/sim1-pkcs7/optional-usage-signer.der");
     const NOW: u64 = 1_800_000_000;
+    // The bytes whose lowercase hexadecimal text is `sim1-pkcs7/root-hash.txt`.
+    const SYNTHETIC_ROOT_HASH: [u8; 32] = [
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
+        25, 26, 27, 28, 29, 30, 31,
+    ];
 
     fn fixture(proof: &[u8], certificate: &[u8]) -> TestResult<Fixture> {
+        fixture_for_root(proof, certificate, SYNTHETIC_ROOT_HASH)
+    }
+
+    fn fixture_for_root(
+        proof: &[u8],
+        certificate: &[u8],
+        root_hash: [u8; 32],
+    ) -> TestResult<Fixture> {
         let mut fixture = Fixture::new()?;
         let fingerprint = Sha256::digest(certificate).into();
         fixture.trust = fixture.authority.trust_with_certificate(fingerprint)?;
@@ -37,7 +51,7 @@ mod image_proof_cases {
             &fixture.sim1,
             "SIM1",
             &[
-                (7, Value::Bytes((0_u8..32).collect())),
+                (7, bytes(root_hash)),
                 (
                     12,
                     Value::Array(vec![

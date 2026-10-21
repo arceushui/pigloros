@@ -3,7 +3,12 @@
 use std::future::Future;
 
 use futures_util::{Stream, StreamExt};
-use zbus::{proxy::CacheProperties, zvariant::OwnedObjectPath, Connection};
+use zbus::{
+    address::{transport::Transport, Address},
+    proxy::CacheProperties,
+    zvariant::OwnedObjectPath,
+    Connection,
+};
 use zbus_systemd::systemd1::{JobRemovedArgs, JobRemovedStream, ManagerProxy, ServiceProxy};
 use zvariant::{Fd, OwnedFd, OwnedValue, Value};
 
@@ -318,11 +323,15 @@ pub struct SystemdTransientUnitTransport {
 impl SystemdTransientUnitTransport {
     /// Connect to the host system bus used by the privileged provider.
     ///
+    /// The resolved system-bus address must be a Unix socket. zbus's
+    /// `unixexec` and `ibus` transports start a local process, which the
+    /// provider never does (ADR-087 no-local-fork/exec invariant).
+    ///
     /// # Errors
     /// Returns [`SystemdTransientUnitTransportError::Connect`] when the system bus is
-    /// unavailable or rejects the connection.
+    /// unavailable, is not a Unix socket, or rejects the connection.
     pub async fn connect_system() -> Result<Self, SystemdTransientUnitTransportError> {
-        Self::connect_with(Connection::system()).await
+        Self::connect_with(local_system_bus()).await
     }
 
     async fn connect_with<F>(connection: F) -> Result<Self, SystemdTransientUnitTransportError>
@@ -906,6 +915,26 @@ fn extra_file_descriptors_value(descriptors: Vec<(OwnedFd, String)>) -> Value<'s
         .map(|(descriptor, name)| (Fd::from(descriptor), name))
         .collect::<Vec<_>>();
     Value::from(descriptors)
+}
+
+async fn local_system_bus() -> zbus::Result<Connection> {
+    match Address::system()
+        .and_then(unix_socket)
+        .and_then(zbus::connection::Builder::address)
+    {
+        Ok(builder) => builder.build().await,
+        Err(error) => Err(error),
+    }
+}
+
+fn unix_socket(address: Address) -> zbus::Result<Address> {
+    if matches!(address.transport(), Transport::Unix(_)) {
+        Ok(address)
+    } else {
+        Err(zbus::Error::Address(
+            "the system bus address must be a Unix socket".to_owned(),
+        ))
+    }
 }
 
 #[cfg(test)]

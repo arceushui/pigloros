@@ -54,8 +54,8 @@ impl From<LoadError> for CommunityPluginHostErrorV1 {
 /// The negotiated record's profile does not pin this engine's runtime.
 ///
 /// Execution requires the profile's pinned runtime to equal
-/// [`crate::runtime::pinned_runtime`]: the same version, features, Engine
-/// configuration and complete trap table.
+/// [`pos_runtime::community_plugin_host::pinned_runtime_v1`]: the same version,
+/// features, Engine configuration and complete trap table.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RuntimeNotPinnedV1;
 
@@ -74,7 +74,7 @@ impl std::error::Error for RuntimeNotPinnedV1 {}
 /// failing on guest-provided values, such as a guest return that does not
 /// lift: `InvalidGuestOutput`, never a trap.
 ///
-/// In Wasmtime 49.0.2 the host lifts a guest return in Rust and reports a
+/// In Wasmtime 49.0.4 the host lifts a guest return in Rust and reports a
 /// malformed value with a plain error, never a `Trap` code: for example
 /// `bail!("list pointer/length out of bounds of memory")` in
 /// `src/runtime/component/func/typed.rs` and the field and case checks in

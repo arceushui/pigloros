@@ -160,6 +160,54 @@ replace_json "${legacy_provider_root}/providers/artifact-integrity/provider.json
 expect_adapter_rejection "${legacy_provider_root}" "provider fixture adapter declaration is missing or invalid"
 expect_rejection "${legacy_provider_root}" "provider fixture adapter declaration is missing or invalid"
 
+missing_auxiliary_root="$(new_fixture_copy missing-auxiliary-key)"
+replace_json "${missing_auxiliary_root}/providers/artifact-integrity/provider.json" 'del(.auxiliary)'
+expect_adapter_rejection "${missing_auxiliary_root}" "invalid provider auxiliary declaration"
+expect_rejection "${missing_auxiliary_root}" "invalid provider auxiliary declaration"
+
+unsafe_auxiliary_root="$(new_fixture_copy unsafe-auxiliary-path)"
+replace_json "${unsafe_auxiliary_root}/providers/artifact-integrity/provider.json" \
+  '.auxiliary.positive = [{path: "inputs/../support/LICENSE", media_type: "application/octet-stream"}]'
+expect_adapter_rejection "${unsafe_auxiliary_root}" "invalid provider auxiliary declaration"
+expect_rejection "${unsafe_auxiliary_root}" "invalid provider auxiliary declaration"
+
+unknown_family_auxiliary_root="$(new_fixture_copy unknown-auxiliary-family)"
+replace_json "${unknown_family_auxiliary_root}/providers/artifact-integrity/provider.json" \
+  '.auxiliary.unknown = []'
+expect_adapter_rejection "${unknown_family_auxiliary_root}" "invalid provider auxiliary declaration"
+expect_rejection "${unknown_family_auxiliary_root}" "invalid provider auxiliary declaration"
+
+json_auxiliary_root="$(new_fixture_copy json-adapter-auxiliary)"
+replace_json "${json_auxiliary_root}/providers/artifact-integrity/provider.json" \
+  '.auxiliary.positive = [{path: "inputs/artifact-integrity/positive.pcw2", media_type: "application/octet-stream"}]'
+expect_adapter_rejection "${json_auxiliary_root}" "invalid pigloros-json-v1 fixture adapter declaration"
+expect_rejection "${json_auxiliary_root}" "invalid pigloros-json-v1 fixture adapter declaration"
+
+opaque_auxiliary_root="$(new_fixture_copy opaque-provider-auxiliary)"
+replace_json "${opaque_auxiliary_root}/providers/artifact-integrity/provider.json" '
+  .fixture_adapter.id = "opaque-provider-v1" |
+  .artifact_media_types = {
+    schema: "application/octet-stream",
+    payload: "application/octet-stream",
+    oracle: "application/octet-stream",
+    evidence_status: "application/octet-stream"
+  } |
+  .auxiliary.positive = [{path: "inputs/artifact-integrity/positive.pcw2", media_type: "application/octet-stream"}]'
+while IFS= read -r schema; do
+  printf 'opaque-schema-v1\n' >"${opaque_auxiliary_root}/${schema}"
+done < <(jq -r '.schemas[]' "${opaque_auxiliary_root}/providers/artifact-integrity/provider.json")
+printf 'auxiliary composite placeholder\n' \
+  >"${opaque_auxiliary_root}/inputs/artifact-integrity/positive.pcw2"
+expect_adapter_acceptance "${opaque_auxiliary_root}"
+rm -- "${opaque_auxiliary_root}/inputs/artifact-integrity/positive.pcw2"
+bash scripts/generate-conformance-fixture-records.sh "${opaque_auxiliary_root}" --write
+expect_rejection "${opaque_auxiliary_root}" "empty conformance fixture"
+
+watchdog_root="$(new_fixture_copy plugin-watchdog-drift)"
+replace_json "${watchdog_root}/providers/plugin-conformance/provider.json" \
+  '.fixture_contracts.denied.watchdog_ms = 1000'
+expect_rejection "${watchdog_root}" "invalid provider manifest for plugin-conformance"
+
 unknown_authority_root="$(new_fixture_copy unknown-authority-field)"
 replace_json "${unknown_authority_root}/support/draft-execution-authority.json" \
   '.undeclared_authority = true'
@@ -186,11 +234,63 @@ replace_json "${divergent_positive_root}/providers/empirical-evaluation/provider
 expect_adapter_rejection "${divergent_positive_root}" \
   "invalid pigloros-json-v1 fixture adapter declaration"
 
-short_plugin_id_root="$(new_fixture_copy short-plugin-invocation-id)"
-replace_json "${short_plugin_id_root}/providers/plugin-conformance/provider.json" \
-  '.fixture_adapter.config.payloads.denied.with_operation.stimulus.input["invocation-id"] |= .[:-1]'
-expect_adapter_rejection "${short_plugin_id_root}" \
-  "generated fixture does not satisfy its provider schema"
+# The Plugin provider's plugin-signed-v1 adapter (ADR-061 revision 8 decision 7, R8-F8).
+plugin_provider="providers/plugin-conformance/provider.json"
+
+# R8-F3: the checked-in Plugin provider declares the v2 contract, and nothing names the old one.
+jq -e '.contract_version == "2.0.0" and .abi_major == 0 and .abi_minor == 0 and
+  has("auxiliary") and .fixture_adapter.id == "plugin-signed-v1"' \
+  "${source_root}/${plugin_provider}" >/dev/null
+if git grep -nIF -e 'plugin-conformance@1.0.0' -- . \
+  ':(exclude)scripts/test-conformance-fixture-validation.sh'; then
+  echo "a checked-in file names the Plugin 1.0.0 provider contract" >&2
+  exit 1
+fi
+if grep -rlE '"contract_version": ?"1\.0\.0"' "${source_root}/oracles/plugin-conformance" \
+  "${source_root}/inputs/plugin-conformance" "${source_root}/providers/plugin-conformance"; then
+  echo "a Plugin fixture file carries the 1.0.0 contract version" >&2
+  exit 1
+fi
+
+missing_plugin_auxiliary_root="$(new_fixture_copy plugin-missing-auxiliary-key)"
+replace_json "${missing_plugin_auxiliary_root}/${plugin_provider}" 'del(.auxiliary)'
+expect_adapter_rejection "${missing_plugin_auxiliary_root}" "invalid provider auxiliary declaration"
+expect_rejection "${missing_plugin_auxiliary_root}" "invalid provider auxiliary declaration"
+
+old_contract_root="$(new_fixture_copy plugin-old-contract-version)"
+replace_json "${old_contract_root}/${plugin_provider}" '.contract_version = "1.0.0"'
+expect_adapter_rejection "${old_contract_root}" \
+  "invalid plugin-signed-v1 fixture adapter declaration"
+expect_rejection "${old_contract_root}" \
+  "invalid plugin-signed-v1 fixture adapter declaration"
+
+moved_composite_root="$(new_fixture_copy plugin-moved-composite)"
+replace_json "${moved_composite_root}/${plugin_provider}" \
+  '.auxiliary.positive[0].path = "inputs/plugin-conformance/elsewhere.pcw2"'
+expect_adapter_rejection "${moved_composite_root}" \
+  "invalid plugin-signed-v1 fixture adapter declaration"
+
+corrupt_composite_root="$(new_fixture_copy plugin-corrupt-composite)"
+printf '\x00' | dd of="${corrupt_composite_root}/inputs/plugin-conformance/positive.pcw2" \
+  bs=1 seek=100 count=1 conv=notrunc status=none
+expect_adapter_rejection "${corrupt_composite_root}" \
+  "auxiliary fixture member is not independently reproducible"
+
+# `render` writes the payload, oracle, evidence-status record and composite of one family, and
+# they are the checked-in bytes.
+rendered_root="${temporary_base}/rendered-plugin-family"
+mkdir -p "${rendered_root}/inputs/plugin-conformance"
+bash scripts/conformance-fixture-adapters/plugin-signed-v1.sh render \
+  "${source_root}/${plugin_provider}" "${source_root}/support/fixture-family-contract.json" \
+  plugin-conformance-positive plugin-conformance positive public-plugin-protocol \
+  "${rendered_root}/inputs/plugin-conformance/positive.json" "${rendered_root}/oracle.json" \
+  "${rendered_root}/evidence.json"
+cmp -- "${rendered_root}/inputs/plugin-conformance/positive.json" \
+  "${source_root}/inputs/plugin-conformance/positive.json"
+cmp -- "${rendered_root}/inputs/plugin-conformance/positive.pcw2" \
+  "${source_root}/inputs/plugin-conformance/positive.pcw2"
+cmp -- "${rendered_root}/oracle.json" "${source_root}/oracles/plugin-conformance/positive.json"
+cmp -- "${rendered_root}/evidence.json" "${source_root}/expected/plugin-conformance/positive.json"
 
 publication_wrapper_prefix="${temporary_base}/publication-wrapper-prefix.sh"
 sed -n '1,/^first_fingerprint=/p' scripts/materialize-conformance-bundles.sh \

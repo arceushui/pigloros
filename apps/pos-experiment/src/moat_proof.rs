@@ -277,7 +277,7 @@ impl MoatProofRun {
             ProofTopology::new(input.clone()).map_err(MoatProofError::from) => |topology|;
             plugin_versions_for_profile(&topology, profile_id, admission).map_err(MoatProofError::from) => |plugin_versions|;
             let factory_topology = topology.clone();
-            let registry_factory = move || build_registry_for_admission(&factory_topology, profile_id, admission);
+            let registry_factory = move |_: &pos_runtime::PluginComposition| build_registry_for_admission(&factory_topology, profile_id, admission);
             let mut experiment = Experiment::new(ExperimentConfig {
                 name: format!("wave8-{}", input.scenario_id),
                 stop: StopCondition::MaxTicks(input.ticks.saturating_add(1)),
@@ -2959,7 +2959,7 @@ mod tests {
             .step(TimelineId::new(), ObservationView::from_events(&[event]))
             .test_ok();
         let reaction: AgentReaction =
-            serde_json::from_slice(output.drafts[0].payload.as_slice()).test_ok();
+            serde_json::from_slice(output.outputs[0].draft.payload.as_slice()).test_ok();
         assert_eq!(reaction.action, "accelerate");
     }
 
@@ -3022,13 +3022,12 @@ mod tests {
     fn fork_rejects_malformed_agent_recovery_payload() {
         let topology = ProofTopology::new(input()).test_ok();
         let factory_topology = topology.clone();
-        let registry_factory = move || build_registry(&factory_topology);
         let mut experiment = Experiment::new(ExperimentConfig {
             name: "malformed-agent-recovery".to_owned(),
             stop: StopCondition::MaxTicks(1),
             store_config: pos_store::StoreConfig::Memory,
         })
-        .with_fork_registry_factory(registry_factory);
+        .with_fork_registry_factory(move |_| build_registry(&factory_topology));
         register_plugins(&mut experiment, &topology).test_ok();
         let mut session = experiment.start().test_ok();
         session

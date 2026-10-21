@@ -10,12 +10,12 @@ use pos_core::trusted_clock::{
     open_release_guard, principal_digest, reserve_trusted_clock, wall_time_from_epoch_duration,
     wall_time_from_system_time, AuthorizedArtifactUseV1, ExpiryPremisesV1, GuardMonotonicSourceV1,
     HostAdministrativeActionV1, HostAdministrativeAuthorizationV1, HostAuthorizationProvenanceV1,
-    OverrunAckReasonV1, ScriptedGuardMonotonicSourceV1, ScriptedTrustedWallSourceV1,
-    ScriptedWallSampleV1, StagedArtifactBytesV1, StagedProtectedOutputV1,
-    SystemGuardMonotonicSourceV1, SystemTrustedWallSourceV1, TrustedClockHighWaterRowV1,
-    TrustedClockOverrunAcknowledgementV1, TrustedClockOverrunKindV1, TrustedClockOverrunLatchRowV1,
-    TrustedClockPortErrorV1, TrustedClockReservationV1, TrustedClockRowsV1,
-    TrustedClockStorePortV1, TrustedWallSourceV1, WaitBudgetV1, WaitPhaseV1,
+    OverrunAckReasonV1, PluginTrustWallSourceV1, ScriptedGuardMonotonicSourceV1,
+    ScriptedTrustedWallSourceV1, ScriptedWallSampleV1, StagedArtifactBytesV1,
+    StagedProtectedOutputV1, SystemGuardMonotonicSourceV1, SystemTrustedWallSourceV1,
+    TrustedClockHighWaterRowV1, TrustedClockOverrunAcknowledgementV1, TrustedClockOverrunKindV1,
+    TrustedClockOverrunLatchRowV1, TrustedClockPortErrorV1, TrustedClockReservationV1,
+    TrustedClockRowsV1, TrustedClockStorePortV1, TrustedWallSourceV1, WaitBudgetV1, WaitPhaseV1,
     PROTECTED_RELEASE_LATCHED_SIGNAL, TRUSTED_CLOCK_FENCE_OVERRUN_SIGNAL,
     TRUSTED_CLOCK_FORMAT_VERSION_V1, TRUSTED_CLOCK_GUARD_BUDGET, TRUSTED_CLOCK_MARGIN,
     TRUSTED_CLOCK_RESERVATION_WINDOW, TRUSTED_CLOCK_WAIT_BUDGET,
@@ -317,12 +317,16 @@ fn scripted_sources_replay_through_the_conversions() -> TestResult {
     assert_eq!(wall.sample(), Err(Fence::SourceUnavailable));
     let mut mono = mono_at(&[Duration::from_secs(2)]);
     mono.push(Duration::from_secs(1));
+    assert_eq!(mono.samples_taken(), 0);
     let later = mono.mark();
+    assert_eq!(mono.samples_taken(), 1);
     let earlier = mono.mark();
+    assert_eq!(mono.samples_taken(), 2);
     let elapsed = later.checked_elapsed_since(earlier);
     assert_eq!(elapsed, Some(Duration::from_secs(1)));
     assert_eq!(earlier.checked_elapsed_since(later), None);
     assert_eq!(mono.mark(), earlier);
+    assert_eq!(mono.samples_taken(), 3);
     Ok(())
 }
 
@@ -1116,4 +1120,22 @@ fn fixture_ports_reject_writes_outside_a_transaction() {
     assert_eq!(store.write_high_water(&row), storage);
     assert_eq!(store.commit(), storage);
     assert_eq!(fixture.rows().high_water, vec![row]);
+}
+
+fn plugin_sample(source: &mut impl PluginTrustWallSourceV1) -> Result<WallTime, Fence> {
+    source.sample_plugin_trust()
+}
+
+#[test]
+fn every_trusted_wall_source_is_a_plugin_trust_wall_source() -> TestResult {
+    let mut scripted = ScriptedTrustedWallSourceV1::new([
+        ScriptedWallSampleV1::SinceEpoch(Duration::from_micros(7)),
+        ScriptedWallSampleV1::Unavailable,
+    ]);
+    assert_eq!(plugin_sample(&mut scripted)?.as_micros(), 7);
+    assert_eq!(plugin_sample(&mut scripted), Err(Fence::SourceUnavailable));
+    assert_eq!(plugin_sample(&mut scripted), Err(Fence::SourceUnavailable));
+    let system = plugin_sample(&mut SystemTrustedWallSourceV1)?;
+    assert!(system.as_micros() > 0);
+    Ok(())
 }

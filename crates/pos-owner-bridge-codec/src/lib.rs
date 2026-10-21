@@ -8,6 +8,10 @@
 //! lifecycle policy; those belong to the `pos-owner-bridge` Module in the
 //! next stack slice.
 
+/// The closed upper bound on authenticator-data bytes (ADR-110 §5.4 and §7), shared by the
+/// payload decoder, the authenticator-data parser and the signed-message buffer.
+const MAX_AUTHENTICATOR_DATA_BYTES: usize = 1_024;
+
 mod authenticator_data;
 // Public module reachability keeps these crate-only fixed-buffer helpers
 // compatible with both `unreachable_pub` and Clippy's `redundant_pub_crate`
@@ -41,7 +45,7 @@ pub use durable::{
     encode_subject_credential_binding, CleanupRecordV1, SubjectCredentialBindingInputV1,
     SubjectCredentialBindingV1, MAX_CLEANUP_RECORD_BYTES, MAX_SUBJECT_CREDENTIAL_BINDING_BYTES,
 };
-pub use error::OwnerBridgeCodecError;
+pub use error::{OwnerBridgeCodecError, VerificationReason};
 pub use http::{admit_loopback_http_request, LoopbackRequestDisposition};
 pub use payload::{
     decode_assertion_reply, decode_attestation_reply, decode_create_options, decode_get_options,

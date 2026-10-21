@@ -10,6 +10,9 @@
 use std::{error::Error, sync::Arc};
 
 use ed25519_dalek::{Signer, SigningKey};
+use pos_core::fork_authentication::{
+    ForkAuthenticationAdapterPolicyV1, ForkAuthenticationPolicyV1,
+};
 use pos_core::{
     store::{EventStore, SeqRange, TimelineExport},
     ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactStateV1,
@@ -36,18 +39,23 @@ use pos_core::{
     RegisteredArtifactV1, ReplayClaimEvaluationV1, ReplayClaimEvaluatorV1, Seq, Signature,
     SignedForkReproManifestV1, TimelineEventEnvelopeV1, TimelineId, TimelineMeta,
 };
+use pos_crypto::fork_authentication::{
+    ForkAuthenticationAdapterSigningKeyV1, ForkHostSigningKeyV1,
+};
 use pos_crypto::key_roles::{
     sign_for_registered_role, sign_timeline_event_for_registered_role, SigningKeyMaterial,
 };
 use pos_store::{
     export_timeline_own, import_timeline_verified_v1, memory::MemoryStore,
-    AuthenticatedOperatorPolicyPinV1, ForkAttributionAuthorityImportRequestV1,
-    ForkAttributionIssuerPolicyInstallationPortV1,
+    AuthenticatedOperatorPolicyPinV1, ForkAdmissionAuthorityBootstrapPortV1,
+    ForkAdmissionAuthoritySessionV1, ForkAttributionAuthorityImportPortV1,
+    ForkAttributionAuthorityImportRequestV1, ForkAttributionIssuerPolicyInstallationPortV1,
+    ForkEventPermitIssuerPortV1, ForkEventProvenanceAuthorityPortV1, ForkManifestPublicationPortV1,
 };
 
 pub type Fallible<T> = Result<T, Box<dyn Error>>;
 
-/// The parent cut of every fixture Fork.
+/// The default root-child cut; nested fixtures carry their actual cut.
 pub const PARENT_CUT: u64 = 4;
 /// The issuer-policy scope every fixture destination pins.
 pub const POLICY_SCOPE: &str = "destination-a";
@@ -179,6 +187,8 @@ impl Spec {
 /// One source Fork child with its exact own-segment export.
 pub struct Child {
     pub id: TimelineId,
+    pub parent: TimelineId,
+    pub parent_cut: u64,
     pub shape: Shape,
     pub export: TimelineExport,
     pub final_hash: Hash,
@@ -262,6 +272,80 @@ fn owner(value: &str) -> Fallible<OwnerIdV1> {
 #[must_use]
 pub fn attribution_identity(creator: &'static str, epoch: u64) -> KeyIdentityV1 {
     KeyIdentityV1::new(creator, KeyRoleV1::SubjectAttributionSigning, epoch)
+}
+
+/// The creator's attribution-signing key material, which signed every fixture
+/// `FSM1` unless a `Spec` overrides the signer.
+#[must_use]
+pub fn attribution_material() -> SigningKeyMaterial {
+    material(0x71)
+}
+
+/// The registrar identifier of the destination's own local classifier.
+pub const GATEWAY_REGISTRAR: &str = "piglor-gateway.local-fork-classifier/v1";
+
+/// One adapter that imports `FAE1`, reads imported Forks, and opens a local
+/// Fork admission authority session.
+pub trait Port:
+    ForkAttributionAuthorityImportPortV1
+    + EventStore
+    + ForkEventProvenanceAuthorityPortV1
+    + ForkEventPermitIssuerPortV1
+    + ForkManifestPublicationPortV1
+    + ForkAdmissionAuthorityBootstrapPortV1
+{
+}
+
+impl<T> Port for T where
+    T: ForkAttributionAuthorityImportPortV1
+        + EventStore
+        + ForkEventProvenanceAuthorityPortV1
+        + ForkEventPermitIssuerPortV1
+        + ForkManifestPublicationPortV1
+        + ForkAdmissionAuthorityBootstrapPortV1
+{
+}
+
+/// Open a live Fork admission authority session on one store.
+///
+/// # Errors
+/// Returns the store or signing error.
+pub fn open_session<S: ForkAdmissionAuthorityBootstrapPortV1>(
+    store: &mut S,
+) -> Fallible<ForkAdmissionAuthoritySessionV1> {
+    let host = ForkHostSigningKeyV1::from_seed([111; 32])?;
+    let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([112; 32])?;
+    let policy = ForkAuthenticationPolicyV1::new(vec![ForkAuthenticationAdapterPolicyV1 {
+        adapter_id: "test-adapter".to_owned(),
+        verifying_key: adapter.public_key(),
+        minimum_assurance: 1,
+        registry_bindings: vec![hash(3)],
+    }])?;
+    let key = PublicKey::from_bytes(host.public_key());
+    let initialize = store.begin_fork_admission_initialize(key, policy.digest()?)?;
+    store.finalize_fork_admission_initialize(
+        &initialize,
+        &host.sign_initialize(&initialize.to_canonical_cbor()?)?,
+    )?;
+    let open = store.begin_fork_admission_open(key, policy.digest()?)?;
+    let signature = host.sign_open(&open.to_canonical_cbor()?)?;
+    Ok(store.finalize_fork_admission_open(&open, &signature)?)
+}
+
+/// An `FCS1` of the destination's fixed local registrar, byte-equal to the
+/// one that a `Spec` naming [`GATEWAY_REGISTRAR`] imports.
+///
+/// # Errors
+/// Returns the record construction error.
+pub fn gateway_source() -> Fallible<ForkClassifierSourceV1> {
+    Ok(ForkClassifierSourceV1::new(ForkClassifierSourceInputV1 {
+        room_revision_descriptor_hash: hash(0x41),
+        registrar_identifier: GATEWAY_REGISTRAR.to_owned(),
+        routes: vec![
+            route("route-a", ROUTE_A_SCHEMA, true)?,
+            route("route-b", ROUTE_B_SCHEMA, false)?,
+        ],
+    })?)
 }
 
 /// The first item of a list.
@@ -387,6 +471,31 @@ fn provenance(
 }
 
 impl World {
+    /// The world's registry plus a live attribution-signing key of `creator`
+    /// made from `seed`.
+    ///
+    /// Seed `0x71` is the exact record that an imported `FPO1` retains, so a
+    /// destination holding it agrees with the retained evidence; any other
+    /// seed is a different record for the same key identity (ADR-105
+    /// erratum E12).
+    ///
+    /// # Errors
+    /// Returns the registry error.
+    pub fn registry_with_attribution_key(
+        &self,
+        creator: &'static str,
+        seed: u8,
+    ) -> Fallible<KeyRegistryStateV1> {
+        let attribution = material(seed);
+        let mut registry = self.registry.clone();
+        registry.register_key(KeyRegistrationV1::new(
+            attribution_identity(creator, 1),
+            attribution.material_digest(),
+            Some(attribution.public_verification_key()),
+        ))?;
+        Ok(registry)
+    }
+
     /// A world with one signed Fork child of `shape`.
     ///
     /// # Errors
@@ -444,11 +553,44 @@ impl World {
     /// # Errors
     /// Returns the construction error of any fixture record.
     pub fn add_child(&mut self, shape: Shape) -> Fallible<()> {
+        self.add_child_at(self.root, Seq::from_u64(PARENT_CUT), shape)
+    }
+
+    /// Build eight valid Mixed Forks in identifier ranges disjoint from the
+    /// default import and `Spec::distinct(1)` used by the selected arms.
+    ///
+    /// # Errors
+    /// Returns the source Fork, encoding, or signing error.
+    pub fn add_unrelated_mixed_forks(&mut self) -> Fallible<Vec<Built>> {
+        let mut unrelated = Vec::with_capacity(8);
+        // Each block reserves every operation and principal ID, including
+        // the four append operations at base+7 through base+10.
+        for base in [0x40_u8, 0x50, 0x70, 0x80, 0xc0, 0xd0, 0xe0, 0xf0] {
+            let child = self.children.len();
+            self.add_child(Shape::Mixed)?;
+            unrelated.push(self.build(&Spec {
+                child,
+                import_seed: base,
+                binding_seed: base + 1,
+                principal_seed: base + 2,
+                admission_seed: base + 3,
+                registration_seed: base + 4,
+                publication_seed: base + 5,
+                operations_seed: base + 6,
+                ..Spec::default()
+            })?);
+        }
+        Ok(unrelated)
+    }
+
+    /// Fork a signed child at its actual inherited publication coordinate.
+    /// Existing root-child fixtures retain their default parent and cut.
+    ///
+    /// # Errors
+    /// Returns the source Fork, signing or export error.
+    pub fn add_child_at(&mut self, parent: TimelineId, cut: Seq, shape: Shape) -> Fallible<()> {
         let name = format!("fae1-child-{}", self.children.len());
-        let child = self
-            .source
-            .fork(self.root, Seq::from_u64(PARENT_CUT), &name)?
-            .id();
+        let child = self.source.fork(parent, cut, &name)?.id();
         for index in 1..=shape.events() {
             let payload = format!("child-{index}").into_bytes();
             append_signed(
@@ -462,10 +604,12 @@ impl World {
         }
         let evaluation = export_evaluation()?;
         let export = export_timeline_own(&self.source, child, EXPORT_DIGEST, &evaluation)?;
-        let final_head = Seq::from_u64(PARENT_CUT + shape.events());
+        let final_head = Seq::from_u64(cut.as_u64() + shape.events());
         let final_hash = self.source.chain_hash_at(child, final_head)?;
         self.children.push(Child {
             id: child,
+            parent,
+            parent_cut: cut.as_u64(),
             shape,
             export,
             final_hash,
@@ -569,10 +713,10 @@ impl World {
             import_operation_id,
             &issuer,
             policy_digest,
-            self.root,
+            child.parent,
             child.id,
         );
-        let records = self.records(child, spec, origin)?;
+        let records = Self::records(child, spec, origin)?;
         let input = ForkAttributionAuthorityEnvelopeInputV1 {
             import_operation_id,
             issuer: issuer.clone(),
@@ -599,10 +743,10 @@ impl World {
         })
     }
 
-    fn records(&self, child: &Child, spec: &Spec, origin: Hash) -> Fallible<BuiltRecords> {
+    fn records(child: &Child, spec: &Spec, origin: Hash) -> Fallible<BuiltRecords> {
         let exported_hash = child.export.parent_fork_hash.ok_or("no parent hash")?;
         let parent_hash = spec.parent_hash.unwrap_or(exported_hash);
-        let authority = self.authority(child, spec, origin, parent_hash)?;
+        let authority = Self::authority(child, spec, origin, parent_hash)?;
         let graph = (child.shape != Shape::EmptyUnclassified)
             .then(|| classifier(child.id, authority.digest, spec))
             .transpose()?;
@@ -615,7 +759,7 @@ impl World {
                 .collect::<Fallible<Vec<_>>>()?,
             None => Vec::new(),
         };
-        let publication = self.publication(child, spec, origin, &authority, &derived)?;
+        let publication = Self::publication(child, spec, origin, &authority, &derived)?;
         let attribution = material(0x71);
         let (key_record, key_tombstone) =
             key_evidence(&attribution, spec.destroyed_key, spec.creator)?;
@@ -656,7 +800,6 @@ impl World {
 
     /// The code-2 `POB1` and `FAR1` of one import.
     fn authority(
-        &self,
         child: &Child,
         spec: &Spec,
         origin: Hash,
@@ -675,13 +818,13 @@ impl World {
             operation_id: hash(spec.admission_seed),
             principal_owner_binding_digest: binding.digest(),
             creator: owner(spec.creator)?,
-            parent_timeline_id: self.root,
+            parent_timeline_id: child.parent,
             child_timeline_id: child.id,
             room_revision_descriptor_hash: hash(0x41),
-            parent_logical_head: PARENT_CUT,
+            parent_logical_head: child.parent_cut,
             parent_chain_head_hash: parent_hash,
-            completed_fold_cursor: PARENT_CUT,
-            post_fold_tick_boundary: PARENT_CUT,
+            completed_fold_cursor: child.parent_cut,
+            post_fold_tick_boundary: child.parent_cut,
             plugin_composition_hash: hash(0x42),
             attribution_required: true,
             origin: ForkAttributionOriginV1::Local,
@@ -696,7 +839,6 @@ impl World {
 
     /// The signed `FSM1` with its `FPO1`, `FPB1`, and `FPA1`.
     fn publication(
-        &self,
         child: &Child,
         spec: &Spec,
         origin: Hash,
@@ -705,7 +847,7 @@ impl World {
     ) -> Fallible<Publication> {
         let exported_hash = child.export.parent_fork_hash.ok_or("no parent hash")?;
         let parent_hash = spec.parent_hash.unwrap_or(exported_hash);
-        let final_head = PARENT_CUT + child.shape.events();
+        let final_head = child.parent_cut + child.shape.events();
         let final_hash = spec.final_hash.unwrap_or(child.final_hash);
         let sequences = derived
             .iter()
@@ -714,13 +856,13 @@ impl World {
             .collect::<Vec<_>>();
         let manifest = Self::signed_manifest(
             ForkReproManifestInputV1 {
-                parent_timeline_id: self.root,
+                parent_timeline_id: child.parent,
                 fork_timeline_id: child.id,
                 admission_digest: authority.digest,
                 room_revision_descriptor_hash: hash(0x41),
-                parent_logical_head: PARENT_CUT,
+                parent_logical_head: child.parent_cut,
                 parent_chain_head_hash: parent_hash,
-                post_fold_tick_boundary: PARENT_CUT,
+                post_fold_tick_boundary: child.parent_cut,
                 plugin_composition_hash: hash(0x42),
                 intervention_sequences: sequences,
                 final_fork_logical_head: final_head,

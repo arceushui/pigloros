@@ -92,6 +92,8 @@ fn map_to_unit_error<T>(_: T) {}
 struct RootSelectorComposition {
     service: RootSelectorService<ProviderTransport>,
     updates: Mutex<()>,
+    /// Bound for one committed live update's provider control exchange.
+    live_update_timeout: Duration,
 }
 
 struct ReceivedInstallationUpdate {
@@ -667,6 +669,7 @@ impl RootSelectorComposition {
                             recovery_owner: ROOT_UID,
                         },
                         updates: Mutex::new(()),
+                        live_update_timeout: LIVE_UPDATE_TIMEOUT,
                     })
                 })
         })
@@ -719,7 +722,7 @@ impl RootSelectorComposition {
             .and_then(|closed| {
                 self.service
                     .transport
-                    .complete_committed_update(closed.committed, LIVE_UPDATE_TIMEOUT)
+                    .complete_committed_update(closed.committed, self.live_update_timeout)
                     .map(
                         |(successor, acknowledgement)| SynchronizedInstallationUpdate {
                             admission: closed.admission,
@@ -2657,6 +2660,11 @@ mod tests {
     const INSTALLATION_PARENT: &str = "/var/lib/pigloros";
     const RUNTIME_DIRECTORY: &str = "/run/pigloros";
     const SOCKET_MODE: u32 = 0o600;
+    const COMPOSITION_WATCHDOG_MS: u64 = INITIAL_IO_TIMEOUT.as_secs() * 1_000;
+    /// Test clients outwait the longest selector-side sequence (live update
+    /// then successor synchronization), so a selector error reply arrives
+    /// before the client's own read timeout fires.
+    const CLIENT_IO_TIMEOUT: Duration = INITIAL_IO_TIMEOUT.saturating_mul(3);
 
     fn test_recovery_directory() -> TestResult<Arc<File>> {
         let directory = tempfile::tempdir()?;
@@ -3183,14 +3191,111 @@ mod tests {
     }
 
     fn isolated_composition_role() -> TestResult<IsolatedCompositionRole> {
+        isolated_role("root_selector::tests::activated_public_composition_authenticates_sly1")
+    }
+
+    fn isolated_role(test_name: &str) -> TestResult<IsolatedCompositionRole> {
         if std::env::var_os(PRIVILEGED_COMPOSITION_TEST).is_some() {
             if rustix::process::geteuid().as_raw() != ROOT_UID {
                 return Err("isolated selector composition child is not root".into());
             }
             return Ok(IsolatedCompositionRole::ExecuteBody);
         }
-        run_isolated_test("root_selector::tests::activated_public_composition_authenticates_sly1")?;
+        run_isolated_test(test_name)?;
         Ok(IsolatedCompositionRole::Delegated)
+    }
+
+    /// Held-image admission through the real public entry point, with the
+    /// fixed root-owned installation staged in each rejecting state, after a
+    /// snapshot open rejected for a root-verity-sig partition other than SIM1.
+    #[test]
+    fn held_image_admission_rejects_each_staged_installation_state() -> TestResult {
+        use crate::provider_admission::tests::request_for;
+        use crate::provider_admission::ProviderImageSnapshot;
+        use crate::selector::installation::tests::updates::{complete_live_update, UpdateFixture};
+        use crate::selector::installation::tests::{
+            admitted_state_with_salt, ddi_fixture, ddi_salt, installed_object_path,
+            materialize_installation_state, materialize_root_selector_state, ImageSigning,
+            IMAGE_PROOF,
+        };
+        use crate::selector::installation::{InstallationObjectKind, SANDBOX_ARTIFACT_ROOT};
+
+        if matches!(
+            isolated_role(
+                "root_selector::tests::held_image_admission_rejects_each_staged_installation_state"
+            )?,
+            IsolatedCompositionRole::Delegated
+        ) {
+            return Ok(());
+        }
+        let root = Path::new(SANDBOX_ARTIFACT_ROOT);
+        // SIM1's own root hash and proof verify, but its image's
+        // root-verity-sig partition names systemd-repart's: open rejects.
+        // The control is the next stage: the same image under the SIM1 its
+        // partition names opens, as in the in-crate
+        // `provider_rejects_a_signature_partition_other_than_sim1`.
+        {
+            let _paths = FixedCompositionFixture::create()?;
+            let (image, partitions) = ddi_fixture("x86-64")?;
+            let state = admitted_state_with_salt(
+                &image,
+                b"adapter",
+                &partitions,
+                &ImageSigning::synthetic(IMAGE_PROOF),
+                ddi_salt("x86-64")?,
+            )?;
+            let installed = materialize_installation_state(
+                root,
+                &crate::selector_test_support::air_gapped_corpus()?,
+                state,
+            )?;
+            let request = request_for(&installed)?.to_canonical_cbor()?;
+            assert!(ProviderImageSnapshot::open(&request).is_err());
+        }
+        let _paths = FixedCompositionFixture::create()?;
+        let installed = materialize_root_selector_state(root)?;
+        let request = request_for(&installed)?.to_canonical_cbor()?;
+        let snapshot = ProviderImageSnapshot::open(&request)?;
+        snapshot.admit_held_image()?;
+
+        // Pending SIR1: the selector committed an update before sending RCU1.
+        let update = UpdateFixture::at(root)?;
+        let committed = update.commit_live_update()?;
+        assert!(snapshot.admit_held_image().is_err());
+
+        // Successor RVS1/APT1 installed: this snapshot's authority is stale.
+        complete_live_update(committed)?;
+        assert!(snapshot.admit_held_image().is_err());
+
+        // Mutated held descriptor under unchanged, current authority.
+        let current = update.admitted()?;
+        let request = request_for(&current)?.to_canonical_cbor()?;
+        let snapshot = ProviderImageSnapshot::open(&request)?;
+        snapshot.admit_held_image()?;
+        let path = installed_object_path(
+            root,
+            InstallationObjectKind::ROOT_IMAGE,
+            snapshot.image().manifest().root_image_blake3_digest,
+        )?;
+        // Keep the exact bytes at the installed path so the reopened
+        // installation still authenticates; only the held inode changes.
+        let held = Path::new(INSTALLATION_PARENT).join("held-root-image");
+        let replacement = path.with_extension("replacement");
+        fs::copy(&path, &replacement)?;
+        fs::set_permissions(&replacement, fs::Permissions::from_mode(0o400))?;
+        fs::rename(&path, &held)?;
+        fs::rename(&replacement, &path)?;
+        let current = update.admitted()?;
+        assert_eq!(request_for(&current)?.to_canonical_cbor()?, request);
+        // Swapping the installed path alone leaves the held image admissible.
+        snapshot.admit_held_image()?;
+        fs::set_permissions(&held, fs::Permissions::from_mode(0o600))?;
+        let writer = fs::OpenOptions::new().write(true).open(&held)?;
+        std::os::unix::fs::FileExt::write_all_at(&writer, &[0xff], 0)?;
+        assert!(snapshot.admit_held_image().is_err());
+        // The same installation still admits through a freshly held image.
+        ProviderImageSnapshot::open(&request)?.admit_held_image()?;
+        Ok(())
     }
 
     fn serve_describe_response(
@@ -3206,8 +3311,8 @@ mod tests {
         fixture: &crate::selector_transport_test_fixture::TransportAdmissionFixture,
         provider: &crate::sandbox_provider_protocol::AdmittedSandboxProvider,
     ) -> TestResult {
-        stream.set_read_timeout(Some(Duration::from_secs(5)))?;
-        stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+        stream.set_read_timeout(Some(INITIAL_IO_TIMEOUT))?;
+        stream.set_write_timeout(Some(INITIAL_IO_TIMEOUT))?;
         let mut prefix = [0; 4];
         stream.read_exact(&mut prefix)?;
         let length = usize::try_from(u32::from_be_bytes(prefix))?;
@@ -3240,8 +3345,8 @@ mod tests {
 
     fn serve_control_response(listener: &UnixListener) -> TestResult {
         let mut stream = accept_test_connection(listener)?;
-        stream.set_read_timeout(Some(Duration::from_secs(5)))?;
-        stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+        stream.set_read_timeout(Some(INITIAL_IO_TIMEOUT))?;
+        stream.set_write_timeout(Some(INITIAL_IO_TIMEOUT))?;
         let context = read_frame(&mut stream)?;
         let update = read_frame(&mut stream)?;
         let mut trailing = Vec::new();
@@ -3260,7 +3365,7 @@ mod tests {
 
     fn accept_test_connection(listener: &UnixListener) -> TestResult<UnixStream> {
         listener.set_nonblocking(true)?;
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let deadline = std::time::Instant::now() + INITIAL_IO_TIMEOUT;
         loop {
             match listener.accept() {
                 Ok((stream, _)) => return Ok(stream),
@@ -3310,11 +3415,11 @@ mod tests {
     ) -> TestResult {
         for &(epochs, identity_conflict) in responses {
             let mut stream = accept_test_connection(listener)?;
-            stream.set_read_timeout(Some(Duration::from_secs(5)))?;
-            stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+            stream.set_read_timeout(Some(INITIAL_IO_TIMEOUT))?;
+            stream.set_write_timeout(Some(INITIAL_IO_TIMEOUT))?;
             let spx1 = read_frame(&mut stream)?;
             // The provider independently opens SIC1; no selector proof or FD is
-            // transferred by SPX1. This is image evidence, not activation.
+            // transferred by SPX1. This is image admission, not activation.
             let image = crate::provider_admission::ProviderImageSnapshot::open(&spx1)?;
             assert_eq!(image.request().to_canonical_cbor()?, spx1);
             assert_eq!(
@@ -3325,7 +3430,22 @@ mod tests {
                 image.launch_policy().policy_digest,
                 image.request().authority.lps1_digest
             );
-            image.recheck_held_image()?;
+            // Joined to the fixed installation reopened at this instant.
+            let held = image.admit_held_image()?;
+            assert!(std::ptr::eq(held.snapshot(), &raw const image));
+            let carried = rustix::fs::fstat(std::os::fd::AsFd::as_fd(&held))?;
+            // The fixed installation's immutable object is the same inode.
+            let retained = crate::selector::installation::InstalledSelectorState::open()?
+                .artifact(
+                    crate::selector::installation::InstallationObjectKind::ROOT_IMAGE,
+                    image.image().manifest().root_image_blake3_digest,
+                )?
+                .file()
+                .metadata()?;
+            assert_eq!(
+                (carried.st_dev, carried.st_ino),
+                (retained.dev(), retained.ino())
+            );
             let mut input_frames = Vec::new();
             stream.read_to_end(&mut input_frames)?;
             if input_frames.is_empty() {
@@ -3351,13 +3471,13 @@ mod tests {
         let original_manifest = fs::read(manifest_path)?;
         let mut abandoned =
             UnixStream::connect(crate::selector::installation::SANDBOX_ADMIN_SOCKET)?;
-        abandoned.set_read_timeout(Some(Duration::from_secs(5)))?;
+        abandoned.set_read_timeout(Some(CLIENT_IO_TIMEOUT))?;
         let abandoned_challenge = read_frame(&mut abandoned)?;
         drop(abandoned);
 
         let mut cross_connection =
             UnixStream::connect(crate::selector::installation::SANDBOX_ADMIN_SOCKET)?;
-        cross_connection.set_read_timeout(Some(Duration::from_secs(5)))?;
+        cross_connection.set_read_timeout(Some(CLIENT_IO_TIMEOUT))?;
         let cross_challenge = read_frame(&mut cross_connection)?;
         assert_ne!(cross_challenge, abandoned_challenge);
         let cross_update = fixture.request_from_challenge(&abandoned_challenge, None)?;
@@ -3369,7 +3489,7 @@ mod tests {
 
         let mut extra_frame =
             UnixStream::connect(crate::selector::installation::SANDBOX_ADMIN_SOCKET)?;
-        extra_frame.set_read_timeout(Some(Duration::from_secs(5)))?;
+        extra_frame.set_read_timeout(Some(CLIENT_IO_TIMEOUT))?;
         let extra_frame_challenge = read_frame(&mut extra_frame)?;
         let extra_frame_update = fixture.request_from_challenge(&extra_frame_challenge, None)?;
         write_frame(&mut extra_frame, &extra_frame_update)?;
@@ -3387,7 +3507,7 @@ mod tests {
     ) -> TestResult {
         let mut administrator =
             UnixStream::connect(crate::selector::installation::SANDBOX_ADMIN_SOCKET)?;
-        administrator.set_read_timeout(Some(Duration::from_secs(5)))?;
+        administrator.set_read_timeout(Some(CLIENT_IO_TIMEOUT))?;
         let challenge = read_frame(&mut administrator)?;
         let siu1 = fixture.request_from_challenge(&challenge, None)?;
         write_frame(&mut administrator, &siu1)?;
@@ -3399,7 +3519,7 @@ mod tests {
         assert!(trailing.is_empty());
 
         let mut stale = UnixStream::connect(crate::selector::installation::SANDBOX_ADMIN_SOCKET)?;
-        stale.set_read_timeout(Some(Duration::from_secs(5)))?;
+        stale.set_read_timeout(Some(CLIENT_IO_TIMEOUT))?;
         let successor_challenge = read_frame(&mut stale)?;
         assert_ne!(successor_challenge, challenge);
         write_frame(&mut stale, &siu1)?;
@@ -3473,10 +3593,7 @@ mod tests {
         assert!(RootSelectorRuntime::activate().is_err());
         assert!(!Path::new(crate::selector::SANDBOX_SELECTOR_SOCKET).exists());
         assert!(!Path::new(crate::selector::installation::SANDBOX_ADMIN_SOCKET).exists());
-        let (request, _, resolved) = crate::selector::installation::tests::root_selector_fixture()?;
-        let admitted = crate::selector::installation::tests::materialize_root_selector_state(
-            Path::new(crate::selector::installation::SANDBOX_ARTIFACT_ROOT),
-        )?;
+        let (request, admitted, resolved) = installed_composition_fixture()?;
         let update_fixture = crate::selector::installation::tests::updates::UpdateFixture::at(
             Path::new(crate::selector::installation::SANDBOX_ARTIFACT_ROOT),
         )?;
@@ -3514,9 +3631,6 @@ mod tests {
             "/run/pigloros/provider-control.sock",
             fs::Permissions::from_mode(SOCKET_MODE),
         )?;
-        let control_provider = std::thread::spawn(move || {
-            serve_control_response(&control_listener).map_err(|error| error.to_string())
-        });
         let execute_provider = std::thread::spawn(move || {
             serve_describe_response(
                 &execute_listener,
@@ -3537,7 +3651,8 @@ mod tests {
         });
         assert!(!Path::new(crate::selector::SANDBOX_SELECTOR_SOCKET).exists());
         assert!(!Path::new(crate::selector::installation::SANDBOX_ADMIN_SOCKET).exists());
-        let runtime = RootSelectorRuntime::activate()?;
+        let mut runtime = RootSelectorRuntime::activate()?;
+        runtime.composition.live_update_timeout = INITIAL_IO_TIMEOUT;
         assert!(Path::new(crate::selector::SANDBOX_SELECTOR_SOCKET).exists());
         assert!(Path::new(crate::selector::installation::SANDBOX_ADMIN_SOCKET).exists());
         let runtime = std::thread::spawn(move || runtime.serve());
@@ -3547,17 +3662,19 @@ mod tests {
         reject_invalid_administrator_updates(&update_fixture, &manifest_path)?;
 
         let reply = evaluate_fixed_runtime_request(&request, resolved.attempt())?;
-        assert!(reply.observation.is_ok());
+        assert_eq!(reply.observation.as_ref().err(), None);
         assert_current_identity_conflict(&request, resolved.attempt())?;
 
-        apply_update_and_reject_replay(&update_fixture)?;
+        // Only the live update connects to the control provider, so its accept
+        // clock starts here rather than at activation.
+        let control_provider = std::thread::spawn(move || {
+            serve_control_response(&control_listener).map_err(|error| error.to_string())
+        });
+        let updated = apply_update_and_reject_replay(&update_fixture);
+        let control = join_provider("control", control_provider);
+        let execute = join_provider("execute", execute_provider);
+        all_succeeded([updated, control, execute])?;
         assert_successor_rejects_stale_request(&request, resolved.attempt())?;
-        control_provider
-            .join()
-            .map_err(|_| "provider control thread panicked")??;
-        execute_provider
-            .join()
-            .map_err(|_| "provider execute thread panicked")??;
         fs::remove_file(crate::selector::installation::SANDBOX_ADMIN_SOCKET)?;
         assert!(runtime
             .join()
@@ -3568,13 +3685,62 @@ mod tests {
         Ok(())
     }
 
+    /// Installs the fixed composition with sanitizer-proof provider headroom.
+    ///
+    /// The runtime bounds each provider round trip by the selected case watchdog.
+    /// Under `ASan` and a loaded CI runner the 1 s default corpus watchdog can
+    /// expire before the provider stub answers, so this fixture selects a case
+    /// whose watchdog matches the selector's initial I/O bound. Every authority,
+    /// commitment, and identity check still runs on the exact installed bytes.
+    fn installed_composition_fixture() -> TestResult<(
+        crate::evaluator_protocol::EvaluationRequest,
+        AdmittedSelectorProvider,
+        crate::selector::installation::ResolvedInstalledCase,
+    )> {
+        let corpus = crate::selector_test_support::air_gapped_corpus_with_watchdog_ms(
+            COMPOSITION_WATCHDOG_MS,
+        )?;
+        let (request, _, resolved) =
+            crate::selector::installation::tests::root_selector_fixture_from_corpus(
+                crate::selector::installation::tests::admitted_state()?,
+                &corpus,
+            )?;
+        let admitted = crate::selector::installation::tests::materialize_root_selector_state_from(
+            Path::new(crate::selector::installation::SANDBOX_ARTIFACT_ROOT),
+            &corpus,
+        )?;
+        Ok((request, admitted, resolved))
+    }
+
+    fn join_provider(
+        name: &str,
+        provider: std::thread::JoinHandle<Result<(), String>>,
+    ) -> TestResult {
+        provider
+            .join()
+            .map_err(|_| format!("provider {name} thread panicked"))?
+            .map_err(|error| format!("provider {name}: {error}").into())
+    }
+
+    /// Reports every failure, so an early update error is not hidden behind
+    /// the provider stub timeouts it causes.
+    fn all_succeeded(results: [TestResult; 3]) -> TestResult {
+        let errors: Vec<_> = results.into_iter().filter_map(Result::err).collect();
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            let messages: Vec<String> = errors.iter().map(ToString::to_string).collect();
+            Err(messages.join("; ").into())
+        }
+    }
+
     fn evaluate_fixed_runtime_request(
         request: &crate::evaluator_protocol::EvaluationRequest,
         attempt: &crate::evaluator::CaseAttempt,
     ) -> TestResult<crate::selector_protocol::DecodedSelectorReply> {
         let encoded = encoded_request(request, attempt)?;
         let mut client = UnixStream::connect(crate::selector::SANDBOX_SELECTOR_SOCKET)?;
-        client.set_read_timeout(Some(Duration::from_secs(5)))?;
+        client.set_read_timeout(Some(CLIENT_IO_TIMEOUT))?;
         write_frame(&mut client, &encoded.control)?;
         client.write_all(&encoded.attempt_stream)?;
         client.shutdown(std::net::Shutdown::Write)?;
@@ -4184,6 +4350,7 @@ mod tests {
                 recovery_owner: owner,
             },
             updates: Mutex::new(()),
+            live_update_timeout: LIVE_UPDATE_TIMEOUT,
         });
         let administrator_fixture = ListenerTestDirectory::create()?;
         let administrator = OwnedAdministratorListener {

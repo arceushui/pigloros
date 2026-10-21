@@ -154,8 +154,17 @@ impl ImportedForkClassifierGraphV1 {
         })
     }
 
-    /// Check ADR-105 r6 R6.5 rows G1–G7; the `FCR1` decoder already proved G8.
-    fn check(&self, admission: &ForkAdmissionRecordInputV1, admission_digest: Hash) -> bool {
+    /// Check ADR-105 r6 R6.5 rows G1–G7 against one `FAR1`, given as its
+    /// fields and ADR-099 digest; the `FCR1` decoder already proved G8.
+    ///
+    /// The import validation and the code-2 trusted read (R6.9 b) both call
+    /// this one check, so their per-Fork rules cannot drift apart.
+    #[must_use]
+    pub fn matches_admission(
+        &self,
+        admission: &ForkAdmissionRecordInputV1,
+        admission_digest: Hash,
+    ) -> bool {
         let source = self.source.input();
         let table = self.table.input();
         let registration = self.registration.input();
@@ -370,7 +379,7 @@ impl ForkAttributionImportClosureV1 {
         let digest = self.fork_admission_digest;
         self.classifier
             .as_ref()
-            .is_none_or(|graph| graph.check(admission, digest))
+            .is_none_or(|graph| graph.matches_admission(admission, digest))
     }
 
     /// Import step 6: P1–P8 for every Event, exactly the implied `FIA1` set,

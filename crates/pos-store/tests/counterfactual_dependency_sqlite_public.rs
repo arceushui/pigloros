@@ -11,10 +11,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use pos_core::counterfactual_store::test_fixtures::{
-    frontier_frame, hash_field, id_field, invalidation_frame, invalidation_middle, text_field, uint,
+    assert_ok, class_row as row, collect_rows, coord, coord_at, edge_row as edge, err, facts,
+    fork_scope, frontier_frame, hash, hash_field, id_field, invalidation_frame,
+    invalidation_middle, ok, prefix_scope, provisional_row as provisional, record_of, request,
+    uint, SeededFactualTickV1,
 };
 use pos_core::{
-    CanonicalBytes, CounterfactualAdapterSealV1, CounterfactualDependencyErrorV1,
+    CanonicalBytes, CoreError, CounterfactualAdapterSealV1, CounterfactualDependencyErrorV1,
     CounterfactualDependencyReadPortV1, CounterfactualDependencyRecordingPortV1,
     CounterfactualFactsV1, CounterfactualGenerationReceiptV1, CounterfactualInvalidationCommandV1,
     CounterfactualInvalidationInputV1, CounterfactualInvalidationOutcomeV1,
@@ -22,11 +25,14 @@ use pos_core::{
     DependencyEdgeRecordV1, DependencyNodeCoordinateV1, DependencyNodeRecordV1,
     DependencyPageCursorV1, DependencyPageRequestV1, DependencyPageV1, DependencyPagedRowV1,
     DependencyReadScopeV1, EntityId, ErasureContainmentGateV1, ErasureInventoryPersistencePortV1,
-    ErasureProtectedEffectDispositionV1, EventDraft, EventStore, ForkGenerationV1, Hash,
-    InvalidationConflictV1, Kind, PipelineDraftBatchV1, RecomputationFrontierBytesV1,
-    RecordedDependencyClassV1, RecordedNodeOriginV1, Seq, SuffixInvalidationBytesV1,
+    ErasureLifecycleV1, ErasureProtectedEffectDispositionV1, Event, EventDraft, EventStore,
+    FactualCutV1, FactualFoldCursorV1, FactualFoldEventV1, FactualFoldWindowV1, FactualHeadV1,
+    FactualOwnerIdV1, FactualPrefixReadPortV1, ForkGenerationV1, Hash, InvalidationConflictV1,
+    Kind, PipelineDraftBatchV1, RecomputationFrontierBytesV1, RecordedDependencyClassV1,
+    RecordedNodeOriginV1, RecordedSetCountsV1, Seq, SeqRange, SuffixInvalidationBytesV1,
     TickDependencyRecordV1, TimelineId, TimelineMeta, MAX_DEPENDENCY_PAGE_ROWS_V1,
-    MAX_RECORDED_DEPENDENCY_EDGES_V1, MAX_RECORDED_DEPENDENCY_NODES_V1,
+    MAX_FACTUAL_FOLD_SCAN_PER_TICK_V1, MAX_RECORDED_DEPENDENCY_EDGES_V1,
+    MAX_RECORDED_DEPENDENCY_NODES_V1,
 };
 use pos_store::sqlite::SqliteStore;
 use tempfile::{tempdir, TempDir};
@@ -53,7 +59,6 @@ const PROVISIONAL: RecordedNodeOriginV1 = RecordedNodeOriginV1::Provisional;
 const COMMITTED: RecordedNodeOriginV1 = RecordedNodeOriginV1::Committed;
 const ENDOGENOUS: RecordedDependencyClassV1 = RecordedDependencyClassV1::EndogenousRecomputed;
 const ROOT: RecordedDependencyClassV1 = RecordedDependencyClassV1::InterventionAssigned;
-const EDGE_HEAD: [u8; 7] = [0x89, 0x64, b'I', b'D', b'P', b'1', 0x01];
 /// The Tick of the invalidation every fixture commits.
 const FIRST_TICK: u64 = 17;
 /// Every column of a node row, in table order.
@@ -65,24 +70,6 @@ const RECORD_FAULTS: [&str; 3] = [
     "BEFORE INSERT ON counterfactual_dependency_nodes",
     "BEFORE INSERT ON counterfactual_dependency_edges",
 ];
-
-fn ok<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
-    result.unwrap_or_else(|error| {
-        std::panic::resume_unwind(Box::new(format!("unexpected test error: {error:?}")))
-    })
-}
-
-fn unexpected_success<T: std::fmt::Debug, E>(value: &T) -> E {
-    std::panic::resume_unwind(Box::new(format!("unexpected success: {value:?}")))
-}
-
-fn err<T: std::fmt::Debug, E>(result: Result<T, E>) -> E {
-    result.map_or_else(|error| error, |value| unexpected_success(&value))
-}
-
-const fn hash(value: u8) -> Hash {
-    Hash::from_bytes([value; 32])
-}
 
 fn hex(bytes: &[u8]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
@@ -101,16 +88,9 @@ fn hash_hex(value: u8) -> String {
     hex(hash(value).as_bytes())
 }
 
-const fn facts() -> CounterfactualFactsV1 {
-    CounterfactualFactsV1 {
-        plan_digest: hash(5),
-        dependency_graph_digest: hash(3),
-        trust_epoch: 6,
-        revocation_epoch: 7,
-        erasure_epoch: 8,
-    }
-}
-
+/// A draft of the fixed entity 9, so its bytes are identical on every run.
+///
+/// Unlike the shared `typed_draft`, which mints a fresh entity per call.
 fn draft(value: u8, kind: &str) -> EventDraft {
     EventDraft::new(
         EntityId::from_ulid(Ulid::from(9_u128)),
@@ -225,13 +205,13 @@ fn fixture_path_str(fixture: &Fixture) -> &str {
 
 fn open(path: &Path) -> SqliteStore {
     let mut store = ok(SqliteStore::open(path.to_str().unwrap_or_default()));
-    ok(store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open())));
+    assert_ok(store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open())));
     store
 }
 
 fn open_with_gate(path: &Path, gate: &Arc<ErasureContainmentGateV1>) -> SqliteStore {
     let mut store = ok(SqliteStore::open(path.to_str().unwrap_or_default()));
-    ok(store.bind_erasure_gate(Arc::clone(gate)));
+    assert_ok(store.bind_erasure_gate(Arc::clone(gate)));
     store
 }
 
@@ -240,9 +220,9 @@ fn fixture() -> Fixture {
     let path = directory.path().join("dependency.db");
     let mut store = open(&path);
     let root = ok(store.create_timeline("factual")).id();
-    ok(store.append(root, &[draft(1, "factual"), draft(2, "factual")]));
+    assert_ok(store.append(root, &[draft(1, "factual"), draft(2, "factual")]));
     let fork = ok(store.fork(root, Seq::from_u64(2), "counterfactual")).id();
-    ok(store.publish_counterfactual_facts(fork, facts()));
+    assert_ok(store.publish_counterfactual_facts(fork, facts()));
     Fixture {
         _directory: directory,
         path,
@@ -322,86 +302,9 @@ fn open_error(result: Result<SqliteStore, pos_core::CoreError>) -> String {
         .map_or_else(String::new, |error| format!("{error}"))
 }
 
-// Coordinates, nodes, edges, and records. Node `a` has digest 1 and `b` has
-// digest 2; the digest byte of the other nodes is named at each use.
-
-fn coord_at(tick: u64, owner: &str, ordinal: u32, digest: Hash) -> Coordinate {
-    ok(Coordinate::try_new(
-        tick,
-        0,
-        owner.to_owned(),
-        ordinal,
-        7,
-        digest,
-    ))
-}
-
-fn coord(tick: u64, owner: &str, digest: u8) -> Coordinate {
-    coord_at(tick, owner, 0, hash(digest))
-}
-
-fn row(
-    coordinate: Coordinate,
-    class: RecordedDependencyClassV1,
-    origin: RecordedNodeOriginV1,
-    inputs: Vec<Hash>,
-) -> NodeRow {
-    ok(NodeRow::try_new(
-        coordinate,
-        class,
-        origin,
-        inputs,
-        hash(99),
-    ))
-}
-
-fn provisional(coordinate: Coordinate, inputs: Vec<Hash>) -> NodeRow {
-    row(coordinate, ENDOGENOUS, PROVISIONAL, inputs)
-}
-
-/// The encoded six-field node array, written independently of the contract.
-fn node_bytes(node: &Coordinate) -> Vec<u8> {
-    [
-        vec![0x86],
-        uint(node.tick()),
-        uint(u64::from(node.scheduler_position())),
-        text_field(node.owner_id()),
-        uint(u64::from(node.output_ordinal())),
-        uint(u64::from(node.schema_id())),
-        hash_field(node.artifact_digest()),
-    ]
-    .concat()
-}
-
-fn edge_bytes(consumer: &Coordinate, source: &Coordinate) -> Vec<u8> {
-    [
-        EDGE_HEAD.to_vec(),
-        node_bytes(consumer),
-        node_bytes(source),
-        uint(2),
-        vec![0x82],
-        uint(3),
-        uint(5),
-        hash_field(hash(0x33)),
-        vec![0x82],
-        text_field("adr064.classification"),
-        uint(1),
-        hash_field(hash(0x44)),
-    ]
-    .concat()
-}
-
-fn edge(consumer: &Coordinate, source: &Coordinate) -> EdgeRow {
-    ok(EdgeRow::try_from_canonical(
-        edge_bytes(consumer, source),
-        consumer.clone(),
-        source.artifact_digest(),
-    ))
-}
-
-fn record_of(tick: u64, nodes: Vec<NodeRow>, edges: Vec<EdgeRow>) -> TickRecord {
-    ok(TickRecord::try_new(tick, PROVISIONAL, nodes, edges))
-}
+// Records, built from the shared `test_fixtures` coordinates, nodes, and edges.
+// Node `a` has digest 1 and `b` has digest 2; the digest byte of the other
+// nodes is named at each use.
 
 /// An empty provisional record at `tick`.
 fn empty_record(tick: u64) -> TickRecord {
@@ -436,43 +339,6 @@ fn tick_19_record() -> TickRecord {
 }
 
 // Scopes, requests, and paged reads.
-
-const fn fork_scope(fork: TimelineId, generation: u64) -> DependencyReadScopeV1 {
-    DependencyReadScopeV1::ForkGeneration(at(fork, generation))
-}
-
-const fn prefix_scope(timeline: TimelineId, through_tick: u64) -> DependencyReadScopeV1 {
-    DependencyReadScopeV1::ParentPrefix {
-        timeline,
-        through_tick,
-    }
-}
-
-fn request(
-    scope: DependencyReadScopeV1,
-    after: Option<DependencyPageCursorV1>,
-    limit: usize,
-) -> DependencyPageRequestV1 {
-    ok(DependencyPageRequestV1::try_new(scope, after, limit))
-}
-
-/// Read every page of `scope` through `read`.
-fn collect_rows<T: DependencyPagedRowV1 + Clone>(
-    scope: DependencyReadScopeV1,
-    limit: usize,
-    read: impl Fn(&DependencyPageRequestV1) -> Result<DependencyPageV1<T>, StoreError>,
-) -> Result<Vec<T>, StoreError> {
-    let mut collected = Vec::new();
-    let mut after = None;
-    loop {
-        let page = read(&request(scope, after, limit))?;
-        collected.extend_from_slice(page.items());
-        after = page.next().cloned();
-        if after.is_none() {
-            return Ok(collected);
-        }
-    }
-}
 
 fn nodes(
     store: &SqliteStore,
@@ -563,7 +429,7 @@ const RECORDED: [i64; 7] = [2, 1, 3, 2, 1, 2, 1];
 /// Make the Fork's own head fall back to `reset` once it reaches `reached`,
 /// so the staged Logical Head does not advance.
 fn stall_head(path: &Path, fork: TimelineId, reached: u64, reset: u64) {
-    ok(execute(
+    assert_ok(execute(
         path,
         &format!(
             "CREATE TRIGGER stalled_head AFTER UPDATE OF head_seq ON timelines
@@ -573,45 +439,37 @@ fn stall_head(path: &Path, fork: TimelineId, reached: u64, reset: u64) {
     ));
 }
 
-/// Insert one committed-prefix node of `timeline` through raw SQL: the prefix
-/// has no write path yet (#554).
-fn insert_prefix_node(path: &Path, timeline: TimelineId, node: &Coordinate) {
-    ok(execute(
-        path,
-        &format!(
-            "INSERT INTO counterfactual_dependency_nodes ({NODE_COLUMNS})
-             VALUES ('{timeline}', -1, {tick}, 0, '{owner}', 0, 7, X'{digest}', 2, 0, X'',
-                     X'{provenance}');",
-            tick = node.tick(),
-            owner = node.owner_id(),
-            digest = hex(node.artifact_digest().as_bytes()),
-            provenance = hash_hex(99),
-        ),
-    ));
+/// A committed node of the prefix, declaring `inputs`.
+fn committed_node(coordinate: Coordinate, inputs: Vec<Hash>) -> NodeRow {
+    row(coordinate, ENDOGENOUS, COMMITTED, inputs)
 }
 
-/// Insert one committed-prefix edge of `timeline` through raw SQL.
-fn insert_prefix_edge(
-    path: &Path,
-    timeline: TimelineId,
-    consumer: &Coordinate,
-    source: &Coordinate,
-) {
-    ok(execute(
-        path,
-        &format!(
-            "INSERT INTO counterfactual_dependency_edges
-             (timeline_id, generation, tick, scheduler_position, owner_id, output_ordinal,
-              source_digest, consumer_schema_id, consumer_digest, edge_bytes)
-             VALUES ('{timeline}', -1, {tick}, 0, '{owner}', 0, X'{source_digest}', 7,
-                     X'{consumer_digest}', X'{bytes}');",
-            tick = consumer.tick(),
-            owner = consumer.owner_id(),
-            source_digest = hex(source.artifact_digest().as_bytes()),
-            consumer_digest = hex(consumer.artifact_digest().as_bytes()),
-            bytes = hex(&edge_bytes(consumer, source)),
-        ),
-    ));
+/// A seeded Tick at `tick` that owns the one `seq` of the same number.
+fn seeded(tick: u64, nodes: Vec<NodeRow>, edges: Vec<EdgeRow>) -> SeededFactualTickV1 {
+    SeededFactualTickV1 {
+        record: ok(TickRecord::try_new(tick, COMMITTED, nodes, edges)),
+        first_seq: Seq::from_u64(tick),
+        last_seq: Seq::from_u64(tick),
+        event_nodes: Vec::new(),
+    }
+}
+
+/// A seeded Tick of the one node, which declares no input.
+fn lone(node: &Coordinate) -> SeededFactualTickV1 {
+    let held = committed_node(node.clone(), Vec::new());
+    seeded(node.tick(), vec![held], Vec::new())
+}
+
+/// A seeded Tick of the one node, which declares and consumes `source`.
+fn linked(node: &Coordinate, source: &Coordinate) -> SeededFactualTickV1 {
+    let held = committed_node(node.clone(), vec![source.artifact_digest()]);
+    seeded(node.tick(), vec![held], vec![edge(node, source)])
+}
+
+/// Seed committed Ticks of `timeline` through the public seam.
+fn seed_prefix(path: &Path, timeline: TimelineId, ticks: &[SeededFactualTickV1]) {
+    let mut store = open(path);
+    assert_ok(store.seed_factual_prefix(timeline, ticks));
 }
 
 /// Event types the generic append guard conceals as an absent Fork.
@@ -677,7 +535,7 @@ fn c2_injected_faults_record_nothing_and_the_commit_recovers() {
     let fork = fixture.fork;
     let command = Spec::new(fork).command();
     for fault in RECORD_FAULTS {
-        ok(execute(
+        assert_ok(execute(
             &fixture.path,
             &format!(
                 "CREATE TRIGGER injected_fault {fault}
@@ -694,7 +552,7 @@ fn c2_injected_faults_record_nothing_and_the_commit_recovers() {
         assert_eq!(ok(faulted.logical_head(fork)), Seq::from_u64(2), "{fault}");
         assert_eq!(snapshot(&fixture.path, fork), [0; 7], "{fault}");
         drop(faulted);
-        ok(execute(&fixture.path, "DROP TRIGGER injected_fault;"));
+        assert_ok(execute(&fixture.path, "DROP TRIGGER injected_fault;"));
     }
     let mut recovered = open(&fixture.path);
     commit_recorded(&mut recovered, fork, &sample_record());
@@ -703,7 +561,7 @@ fn c2_injected_faults_record_nothing_and_the_commit_recovers() {
 
     // The same faults fail a later Tick and leave the committed state alone.
     for fault in RECORD_FAULTS {
-        ok(execute(
+        assert_ok(execute(
             &fixture.path,
             &format!(
                 "CREATE TRIGGER injected_fault {fault}
@@ -720,7 +578,7 @@ fn c2_injected_faults_record_nothing_and_the_commit_recovers() {
         assert_eq!(faulted.current_counterfactual_basis(fork), Ok(before));
         assert_eq!(snapshot(&fixture.path, fork), RECORDED, "{fault}");
         drop(faulted);
-        ok(execute(&fixture.path, "DROP TRIGGER injected_fault;"));
+        assert_ok(execute(&fixture.path, "DROP TRIGGER injected_fault;"));
     }
     let mut reopened = open(&fixture.path);
     assert!(append_record(&mut reopened, fork, &tick_18_record()).is_ok());
@@ -877,7 +735,7 @@ fn c2_a_head_that_does_not_advance_records_nothing() {
     );
     assert_eq!(snapshot(&fixture.path, fork), [0; 7]);
     drop(store);
-    ok(execute(&fixture.path, "DROP TRIGGER stalled_head;"));
+    assert_ok(execute(&fixture.path, "DROP TRIGGER stalled_head;"));
 
     let mut store = open(&fixture.path);
     commit_recorded(&mut store, fork, &sample_record());
@@ -933,7 +791,7 @@ fn c3_a_record_must_fit_the_stored_set_counts() {
     for (over, fits) in CAPACITY_CASES {
         let fixture = recorded_fixture();
         let fork = fixture.fork;
-        ok(execute(
+        assert_ok(execute(
             &fixture.path,
             &format!(
                 "INSERT INTO counterfactual_dependency_records
@@ -967,7 +825,7 @@ fn c3_corrupt_stored_counts_and_ticks_are_corrupt_state() {
     for assignment in ["node_count = -1", "input_count = -1", "record_tick = -1"] {
         let fixture = recorded_fixture();
         let fork = fixture.fork;
-        ok(execute(
+        assert_ok(execute(
             &fixture.path,
             &format!(
                 "PRAGMA ignore_check_constraints = ON;
@@ -993,7 +851,7 @@ fn c3_corrupt_stored_counts_and_ticks_are_corrupt_state() {
 fn c3_capacity_trusts_drifted_stored_counts() {
     let fixture = recorded_fixture();
     let fork = fixture.fork;
-    ok(execute(
+    assert_ok(execute(
         &fixture.path,
         &format!(
             "DROP TRIGGER counterfactual_dependency_records_immutable;
@@ -1095,7 +953,7 @@ fn c4_the_database_refuses_repeated_keys_and_replacements() {
         ("records_monotonic", same_record),
     ] {
         let drop_guard = format!("DROP TRIGGER IF EXISTS counterfactual_dependency_{guard};");
-        ok(execute(&fixture.path, &drop_guard));
+        assert_ok(execute(&fixture.path, &drop_guard));
         let refused = err(execute(&fixture.path, sql)).to_string();
         assert!(refused.contains("UNIQUE constraint failed"), "{refused}");
     }
@@ -1204,10 +1062,10 @@ fn c5_a_generation_without_an_invalidation_has_no_first_tick() {
     );
     // A re-created Fork resumes at its generation floor without a receipt row.
     commit_recorded(&mut store, fork, &sample_record());
-    ok(store.delete_timeline(fork));
+    assert_ok(store.delete_timeline(fork));
     let mut meta = TimelineMeta::forked_from(root, Seq::from_u64(2), "recreated");
     meta.id = fork;
-    ok(store.create_timeline_with_meta(meta));
+    assert_ok(store.create_timeline_with_meta(meta));
     assert_eq!(
         store.publish_counterfactual_facts(fork, facts()),
         Ok(at(fork, 1))
@@ -1354,11 +1212,9 @@ fn c7_reads_are_qualified_by_the_current_generation() {
 /// Ticks 3, 5, and 9, and edges of the Tick 5 and Tick 9 nodes.
 fn insert_prefix(path: &Path, root: TimelineId) {
     let (first, second, third) = (coord(3, "p", 71), coord(5, "q", 72), coord(9, "s", 73));
-    for node in [&first, &second, &third] {
-        insert_prefix_node(path, root, node);
-    }
-    insert_prefix_edge(path, root, &second, &first);
-    insert_prefix_edge(path, root, &third, &second);
+    seed_prefix(path, root, &[lone(&first)]);
+    seed_prefix(path, root, &[linked(&second, &first)]);
+    seed_prefix(path, root, &[linked(&third, &second)]);
 }
 
 #[test]
@@ -1385,7 +1241,7 @@ fn c8_parent_prefix_reads_only_committed_rows_through_the_tick() {
 
     // The Fork's own rows are provisional and live in its generation; a
     // prefix recorded under the Fork's id is a different set.
-    insert_prefix_node(&fixture.path, fork, &coord(4, "k", 74));
+    seed_prefix(&fixture.path, fork, &[lone(&coord(4, "k", 74))]);
     let reopened = open(&fixture.path);
     let sample = sample_record();
     assert_eq!(ok(nodes(&reopened, fork_scope(fork, 1), 5)), sample.nodes());
@@ -1438,7 +1294,7 @@ const EDGE_CORRUPTIONS: [&str; 9] = [
 /// Corrupt `assignment` of `table` through raw SQL, with the table's update
 /// guard dropped and its checks ignored, as the schema-drift tests do.
 fn corrupt(path: &Path, table: &str, assignment: &str, filter: &str) {
-    ok(execute(
+    assert_ok(execute(
         path,
         &format!(
             "PRAGMA ignore_check_constraints = ON;
@@ -1500,7 +1356,7 @@ fn c8_stored_input_digests_must_be_one_ascending_run_of_digests() {
 fn c8_rows_outside_the_requested_scope_read_back_as_corrupt_state() {
     let fixture = fixture();
     let root = fixture.root;
-    insert_prefix_node(&fixture.path, root, &coord(3, "p", 71));
+    seed_prefix(&fixture.path, root, &[lone(&coord(3, "p", 71))]);
     // A provisional node stored in the committed prefix is out of scope.
     corrupt(&fixture.path, "nodes", "origin = 1", "");
     let store = open(&fixture.path);
@@ -1555,7 +1411,7 @@ fn c9_unknown_deleted_and_unpublished_timelines_are_not_found() {
     assert_eq!(counts(&store, fork_scope(fork, 1)), [Ok(2), Ok(1)]);
 
     // A deleted Fork is erased from both of its scopes.
-    ok(store.delete_timeline(fork));
+    assert_ok(store.delete_timeline(fork));
     for scope in [fork_scope(fork, 1), prefix_scope(fork, 9)] {
         assert_eq!(counts(&store, scope), NOT_FOUND, "{scope:?}");
     }
@@ -1565,7 +1421,7 @@ fn c9_unknown_deleted_and_unpublished_timelines_are_not_found() {
 fn c9_a_protected_lineage_is_not_found() {
     let fixture = recorded_fixture();
     let (fork, root) = (fixture.fork, fixture.root);
-    ok(execute(
+    assert_ok(execute(
         &fixture.path,
         &format!(
             "INSERT INTO geographic_presence (timeline_id, has_evidence) VALUES ('{root}', 1);"
@@ -1619,7 +1475,7 @@ fn c9_a_misplaced_record_reports_the_fork_error_first() {
     );
     drop(frozen);
     // A geographic-protected lineage is not found.
-    ok(execute(
+    assert_ok(execute(
         &fixture.path,
         &format!(
             "INSERT INTO geographic_presence (timeline_id, has_evidence) VALUES ('{root}', 1);"
@@ -1639,7 +1495,7 @@ fn c9_a_misplaced_record_reports_the_fork_error_first() {
     // and that refusal also comes before any record check.
     let admitted_fixture = self::fixture();
     let admitted_fork = admitted_fixture.fork;
-    ok(execute(
+    assert_ok(execute(
         &admitted_fixture.path,
         &format!(
             "INSERT INTO fork_admissions (child_id, far1_cbor) VALUES ('{admitted_fork}', X'00');"
@@ -1729,7 +1585,7 @@ fn c9_a_file_changed_by_another_connection_fails_closed() {
     let fixture = recorded_fixture();
     let fork = fixture.fork;
     let mut store = open(&fixture.path);
-    ok(execute(
+    assert_ok(execute(
         &fixture.path,
         "CREATE TABLE unrelated (id INTEGER);",
     ));
@@ -1764,8 +1620,12 @@ fn c9_reads_inside_a_protected_effect_interval_see_its_writes() {
     assert_eq!(ok(edges(&store, fork_scope(fork, 1), 1)), sample.edges());
     assert!(append_record(&mut store, fork, &tick_18_record()).is_ok());
     assert_eq!(ok(nodes(&store, fork_scope(fork, 1), 2)).len(), 3);
-    ok(store
-        .finish_protected_effect_interval(interval, ErasureProtectedEffectDispositionV1::Rollback));
+    assert_ok(
+        store.finish_protected_effect_interval(
+            interval,
+            ErasureProtectedEffectDispositionV1::Rollback,
+        ),
+    );
     assert_eq!(generation(&store, fork), 0);
     assert_eq!(snapshot(&fixture.path, fork), [0; 7]);
     assert_eq!(counts(&store, fork_scope(fork, 0)), EMPTY);
@@ -1773,7 +1633,7 @@ fn c9_reads_inside_a_protected_effect_interval_see_its_writes() {
 
 /// Insert `count` committed-prefix nodes of `root`, at Ticks `1..=count`.
 fn insert_prefix_run(path: &Path, root: TimelineId, count: u64) {
-    ok(execute(
+    assert_ok(execute(
         path,
         &format!(
             "WITH RECURSIVE sequence(value) AS (
@@ -1923,7 +1783,7 @@ fn c11_dependency_faults_map_to_the_storage_errors() {
 /// A second Fork of the root at Seq 1 that committed the sample record.
 fn recorded_other_fork(store: &mut SqliteStore, root: TimelineId) -> TimelineId {
     let other = ok(store.fork(root, Seq::from_u64(1), "other")).id();
-    ok(store.publish_counterfactual_facts(other, facts()));
+    assert_ok(store.publish_counterfactual_facts(other, facts()));
     let spec = Spec {
         head: 1,
         ..Spec::new(other)
@@ -1943,15 +1803,15 @@ fn c12_deleting_a_fork_purges_its_dependency_rows_and_reads_are_not_found() {
     let other = recorded_other_fork(&mut store, root);
     drop(store);
     // A prefix recorded under the Fork's own id, and one under the root.
-    insert_prefix_node(&fixture.path, fork, &coord(4, "k", 74));
-    insert_prefix_node(&fixture.path, root, &coord(3, "p", 71));
-    assert_eq!(recorded_rows(&fixture.path, fork), [1, 3, 1]);
+    seed_prefix(&fixture.path, fork, &[lone(&coord(4, "k", 74))]);
+    seed_prefix(&fixture.path, root, &[lone(&coord(3, "p", 71))]);
+    assert_eq!(recorded_rows(&fixture.path, fork), [2, 3, 1]);
 
     let mut store = open(&fixture.path);
-    ok(store.delete_timeline(fork));
+    assert_ok(store.delete_timeline(fork));
     assert_eq!(recorded_rows(&fixture.path, fork), [0; 3]);
     assert_eq!(recorded_rows(&fixture.path, other), [1, 2, 1]);
-    assert_eq!(recorded_rows(&fixture.path, root), [0, 1, 0]);
+    assert_eq!(recorded_rows(&fixture.path, root), [1, 1, 0]);
     for scope in [fork_scope(fork, 1), prefix_scope(fork, 9)] {
         assert_eq!(counts(&store, scope), NOT_FOUND, "{scope:?}");
     }
@@ -1961,7 +1821,7 @@ fn c12_deleting_a_fork_purges_its_dependency_rows_and_reads_are_not_found() {
     // A Fork re-created under the same ID starts with empty sets.
     let mut meta = TimelineMeta::forked_from(root, Seq::from_u64(2), "recreated");
     meta.id = fork;
-    ok(store.create_timeline_with_meta(meta));
+    assert_ok(store.create_timeline_with_meta(meta));
     assert_eq!(
         store.publish_counterfactual_facts(fork, facts()),
         Ok(at(fork, 1))
@@ -1976,14 +1836,14 @@ fn c12_deleting_a_parent_timeline_purges_its_prefix_rows() {
     let fixture = fixture();
     let mut store = open(&fixture.path);
     let lonely = ok(store.create_timeline("lonely")).id();
-    ok(store.append(lonely, &[draft(1, "factual")]));
+    assert_ok(store.append(lonely, &[draft(1, "factual")]));
     drop(store);
     insert_prefix(&fixture.path, lonely);
-    assert_eq!(recorded_rows(&fixture.path, lonely), [0, 3, 2]);
+    assert_eq!(recorded_rows(&fixture.path, lonely), [3, 3, 2]);
 
     let mut store = open(&fixture.path);
     assert_eq!(counts(&store, prefix_scope(lonely, 9)), [Ok(3), Ok(2)]);
-    ok(store.delete_timeline(lonely));
+    assert_ok(store.delete_timeline(lonely));
     assert_eq!(recorded_rows(&fixture.path, lonely), [0; 3]);
     assert_eq!(counts(&store, prefix_scope(lonely, 9)), NOT_FOUND);
 }
@@ -2041,7 +1901,7 @@ fn c12_only_a_marked_purge_passes_the_dependency_guards() {
          DELETE FROM counterfactual_purge_fence;
          COMMIT;"
     );
-    ok(execute(&fixture.path, &scoped));
+    assert_ok(execute(&fixture.path, &scoped));
     assert_eq!(recorded_rows(&fixture.path, fork), [0; 3]);
     assert_eq!(recorded_rows(&fixture.path, other), [1, 2, 1]);
     assert_eq!(opens_cleanly(&fixture), "");
@@ -2059,7 +1919,7 @@ fn c12_a_failed_purge_statement_leaves_every_row_and_no_marker() {
     let fixture = recorded_fixture();
     let fork = fixture.fork;
     for fault in DEPENDENCY_DELETE_FAULTS {
-        ok(execute(
+        assert_ok(execute(
             &fixture.path,
             &format!(
                 "CREATE TRIGGER injected_fault {fault}
@@ -2080,12 +1940,127 @@ fn c12_a_failed_purge_statement_leaves_every_row_and_no_marker() {
             "{fault}"
         );
         drop(faulted);
-        ok(execute(&fixture.path, "DROP TRIGGER injected_fault;"));
+        assert_ok(execute(&fixture.path, "DROP TRIGGER injected_fault;"));
         assert_eq!(opens_cleanly(&fixture), "");
     }
     let mut recovered = open(&fixture.path);
-    ok(recovered.delete_timeline(fork));
+    assert_ok(recovered.delete_timeline(fork));
     assert_eq!(recorded_rows(&fixture.path, fork), [0; 3]);
+}
+
+// ADR-060, 2026-10-18 amendment: dependency rows of Timelines that are never
+// deleted. Erasure fences the rows but never removes them, and only an
+// administrative delete purges them. Raw counts are read after the store is
+// dropped.
+
+/// The child-Fork refusal of the generic delete, as in the
+/// `admitted_fork_deletion_*_public` tests.
+const HAS_FORKS: &str = "cannot delete timeline that still has forks";
+
+/// Every dependency row of one Timeline: [`recorded_rows`], then
+/// [`factual_rows`], then its fold heads.
+fn dependency_rows(path: &Path, timeline: TimelineId) -> Vec<i64> {
+    let mut rows = recorded_rows(path, timeline).to_vec();
+    rows.extend(factual_rows(path, timeline));
+    rows.push(fold_heads(path, timeline));
+    rows
+}
+
+/// The dependency rows of the root, then of the Fork.
+fn held_rows(fixture: &Fixture) -> [Vec<i64>; 2] {
+    let rows = |timeline| dependency_rows(&fixture.path, timeline);
+    [rows(fixture.root), rows(fixture.fork)]
+}
+
+/// A recorded fixture whose root also holds one committed prefix Tick.
+fn retained_fixture() -> Fixture {
+    let fixture = recorded_fixture();
+    seed_prefix(&fixture.path, fixture.root, &[lone(&coord(3, "p", 71))]);
+    assert_eq!(recorded_rows(&fixture.path, fixture.root), [1, 1, 0]);
+    assert_eq!(recorded_rows(&fixture.path, fixture.fork), [1, 2, 1]);
+    fixture
+}
+
+#[test]
+fn c12_a_fail_closed_gate_refuses_the_delete_and_keeps_every_row() {
+    let fixture = retained_fixture();
+    let before = held_rows(&fixture);
+    let fail_closed = Arc::new(ErasureContainmentGateV1::new_fail_closed());
+    let mut store = open_with_gate(&fixture.path, &fail_closed);
+    for timeline in [fixture.fork, fixture.root] {
+        let refused = err(store.delete_timeline(timeline));
+        assert!(
+            matches!(refused, CoreError::ErasureContainmentUnavailable),
+            "{refused:?}"
+        );
+    }
+    // A fail-closed store with an unbound inventory refuses port reads too,
+    // so the rows are counted in the file.
+    drop(store);
+    assert_eq!(held_rows(&fixture), before);
+}
+
+#[test]
+fn c9_a_completed_fork_erasure_fences_the_fork_but_not_its_parent() {
+    let fixture = retained_fixture();
+    let (fork, root) = (fixture.fork, fixture.root);
+    let before = held_rows(&fixture);
+    let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
+    let store = open_with_gate(&fixture.path, &gate);
+    assert_eq!(counts(&store, fork_scope(fork, 1)), [Ok(2), Ok(1)]);
+    let parent = counts(&store, prefix_scope(root, 9));
+    assert_eq!(parent, [Ok(1), Ok(0)]);
+    let completed = gate.complete_timeline_erasure_for_test(fork);
+    assert_eq!(completed, Ok(ErasureLifecycleV1::Complete));
+    for scope in [fork_scope(fork, 1), prefix_scope(fork, 9)] {
+        assert_eq!(counts(&store, scope), FAILED, "{scope:?}");
+    }
+    // The Fork's request does not fence its parent's own prefix.
+    assert_eq!(counts(&store, prefix_scope(root, 9)), parent);
+    drop(store);
+    assert_eq!(held_rows(&fixture), before);
+}
+
+#[test]
+fn c9_a_completed_parent_erasure_fences_its_prefix_and_the_inherited_one() {
+    let fixture = retained_fixture();
+    let (fork, root) = (fixture.fork, fixture.root);
+    let before = held_rows(&fixture);
+    let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
+    let store = open_with_gate(&fixture.path, &gate);
+    let completed = gate.complete_timeline_erasure_for_test(root);
+    assert_eq!(completed, Ok(ErasureLifecycleV1::Complete));
+    for timeline in [root, fork] {
+        let scope = prefix_scope(timeline, 9);
+        assert_eq!(counts(&store, scope), FAILED, "{scope:?}");
+    }
+    drop(store);
+    assert_eq!(held_rows(&fixture), before);
+}
+
+#[test]
+fn c12_an_admitted_fork_and_its_parent_keep_every_row() {
+    let fixture = retained_fixture();
+    let (fork, root) = (fixture.fork, fixture.root);
+    // The delete guard checks only that a row exists, so an opaque `FAR1`
+    // blob admits the Fork.
+    let admission = "INSERT INTO fork_admissions (child_id, far1_cbor) VALUES";
+    let insert = format!("{admission} ('{fork}', X'00');");
+    assert_ok(execute(&fixture.path, &insert));
+    let before = held_rows(&fixture);
+    let mut store = open(&fixture.path);
+    let refused = err(store.delete_timeline(fork));
+    assert!(
+        matches!(refused, CoreError::AdmittedForkNotDeletable(id) if id == fork),
+        "{refused:?}"
+    );
+    let has_forks = err(store.delete_timeline(root));
+    assert!(
+        matches!(&has_forks, CoreError::Storage(message) if message == HAS_FORKS),
+        "{has_forks:?}"
+    );
+    drop(store);
+    assert_eq!(held_rows(&fixture), before);
 }
 
 #[test]
@@ -2137,6 +2112,9 @@ fn c14_drifted_dependency_tables_are_rejected_on_every_open() {
         ("nodes", "CHECK ((generation = -1) = (origin = 0)), "),
         ("edges", "CHECK (length(edge_bytes) <= 16384), "),
         ("records", "CHECK (node_count >= 0), "),
+        ("commit_ranges", "CHECK (last_seq >= first_seq), "),
+        ("event_nodes", "UNIQUE (timeline_id, artifact_digest), "),
+        ("fold_heads", "CHECK (length(head_artifact_digest) = 32), "),
     ] {
         let fixture = fixture();
         let name = format!("counterfactual_dependency_{table}");
@@ -2146,17 +2124,25 @@ fn c14_drifted_dependency_tables_are_rejected_on_every_open() {
         );
         let drifted = stored.replace(fragment, "");
         assert_ne!(drifted, stored, "{fragment}");
-        ok(execute(
+        assert_ok(execute(
             &fixture.path,
             &format!("DROP TABLE {name}; {drifted};"),
         ));
         let text = fixture_path_str(&fixture);
         assert!(refuses(text, &name), "{fragment}");
     }
-    for table in ["records", "nodes", "edges"] {
+    let tables = [
+        "records",
+        "nodes",
+        "edges",
+        "commit_ranges",
+        "event_nodes",
+        "fold_heads",
+    ];
+    for table in tables {
         let fixture = fixture();
         let name = format!("counterfactual_dependency_{table}");
-        ok(execute(
+        assert_ok(execute(
             &fixture.path,
             &format!("DROP TABLE {name}; CREATE TABLE {name} (timeline_id TEXT PRIMARY KEY);"),
         ));
@@ -2170,11 +2156,14 @@ fn c14_a_file_without_the_dependency_tables_fails_closed_read_only() {
     let fixture = recorded_fixture();
     let fork = fixture.fork;
     let text = fixture_path_str(&fixture);
-    ok(execute(
+    assert_ok(execute(
         &fixture.path,
         "DROP TABLE counterfactual_dependency_records;
          DROP TABLE counterfactual_dependency_nodes;
-         DROP TABLE counterfactual_dependency_edges;",
+         DROP TABLE counterfactual_dependency_edges;
+         DROP TABLE counterfactual_dependency_commit_ranges;
+         DROP TABLE counterfactual_dependency_event_nodes;
+         DROP TABLE counterfactual_dependency_fold_heads;",
     ));
     // A read-only open cannot create them, and the storage schema alone is
     // not enough: the file fails the exact validation.
@@ -2194,7 +2183,7 @@ fn c14_a_file_without_the_dependency_tables_fails_closed_read_only() {
 fn c14_a_pre_schema_file_reads_dependencies_as_not_found() {
     let fixture = recorded_fixture();
     let (fork, root) = (fixture.fork, fixture.root);
-    ok(execute(
+    assert_ok(execute(
         &fixture.path,
         "DROP TABLE counterfactual_forks;
          DROP TABLE counterfactual_generations;
@@ -2204,10 +2193,13 @@ fn c14_a_pre_schema_file_reads_dependencies_as_not_found() {
          DROP TABLE counterfactual_purge_fence;
          DROP TABLE counterfactual_dependency_records;
          DROP TABLE counterfactual_dependency_nodes;
-         DROP TABLE counterfactual_dependency_edges;",
+         DROP TABLE counterfactual_dependency_edges;
+         DROP TABLE counterfactual_dependency_commit_ranges;
+         DROP TABLE counterfactual_dependency_event_nodes;
+         DROP TABLE counterfactual_dependency_fold_heads;",
     ));
     let mut read_only = ok(SqliteStore::open_read_only(fixture_path_str(&fixture)));
-    ok(read_only.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open())));
+    assert_ok(read_only.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open())));
     for scope in [
         fork_scope(fork, 1),
         prefix_scope(root, 9),
@@ -2215,4 +2207,1128 @@ fn c14_a_pre_schema_file_reads_dependencies_as_not_found() {
     ] {
         assert_eq!(counts(&read_only, scope), NOT_FOUND, "{scope:?}");
     }
+    // The factual reads fail closed: the tables are absent and cannot be made.
+    for timeline in [root, fork] {
+        assert!(factual_reads_fail(&read_only, timeline));
+    }
+    // So do the reads with nothing to look up, which touch no table.
+    for timeline in [root, fork] {
+        let events = read_only.nodes_for_committed_events(timeline, &[]);
+        assert!(matches!(err(events), CoreError::Storage(_)));
+        let bound = read_only.nodes_by_digest(timeline, &[]);
+        assert!(matches!(err(bound), CoreError::Storage(_)));
+    }
+}
+
+// Factual prefix reads (ADR-064 Revision 3), over rows seeded through the
+// public `test-support` seeding function.
+
+const OWNER_A: &str = "plugin:a";
+const OWNER_B: &str = "plugin:b";
+const OWNER_C: &str = "plugin:c";
+/// Digest lane of the root Timeline's nodes, and of the Fork's.
+const ROOT_LANE: u8 = 0;
+const FORK_LANE: u8 = 100;
+
+/// The artifact digest of a seeded node, apart per Timeline by `lane`.
+const fn seeded_digest(lane: u8, tick: u8, ordinal: u8) -> Hash {
+    hash(lane + tick * 16 + ordinal)
+}
+
+/// A committed node of `owner` at `tick`: the step node at ordinal zero, then
+/// the Event-backed nodes.
+fn seeded_node(lane: u8, tick: u8, owner: &str, ordinal: u8) -> NodeRow {
+    let digest = seeded_digest(lane, tick, ordinal);
+    let coordinate = coord_at(u64::from(tick), owner, u32::from(ordinal), digest);
+    committed_node(coordinate, Vec::new())
+}
+
+/// A committed factual Tick owning the `seq` range `first..=last`: a step node
+/// of `owner` and one Event-backed node per `seq`.
+fn seeded_tick(lane: u8, tick: u8, owner: &str, first: u64, last: u64) -> SeededFactualTickV1 {
+    let mut nodes = vec![seeded_node(lane, tick, owner, 0)];
+    let mut event_nodes = Vec::new();
+    for (ordinal, seq) in (1_u8..).zip(first..=last) {
+        nodes.push(seeded_node(lane, tick, owner, ordinal));
+        event_nodes.push((Seq::from_u64(seq), seeded_digest(lane, tick, ordinal)));
+    }
+    let at = u64::from(tick);
+    let record = ok(TickRecord::try_new(at, COMMITTED, nodes, Vec::new()));
+    SeededFactualTickV1 {
+        record,
+        first_seq: Seq::from_u64(first),
+        last_seq: Seq::from_u64(last),
+        event_nodes,
+    }
+}
+
+/// The root Timeline's Ticks: 1 owns `seq` 2 to 4, 2 owns 5, 3 owns 6 to 8.
+fn root_ticks() -> [SeededFactualTickV1; 3] {
+    [
+        seeded_tick(ROOT_LANE, 1, OWNER_A, 2, 4),
+        seeded_tick(ROOT_LANE, 2, OWNER_B, 5, 5),
+        seeded_tick(ROOT_LANE, 3, OWNER_C, 6, 8),
+    ]
+}
+
+/// The Fork's own Tick: 3 owns `seq` 9.
+fn fork_tick() -> SeededFactualTickV1 {
+    seeded_tick(FORK_LANE, 3, OWNER_A, 9, 9)
+}
+
+/// A root Timeline with 14 Events and three seeded Ticks, a Fork of it at
+/// `seq` 6 that is mid-Tick at the first `seq` of Tick 3 (cut Tick 2) and owns
+/// Tick 3 at `seq` 9, and a Fork of that Fork at `seq` 7.
+struct Lineage {
+    _directory: TempDir,
+    path: PathBuf,
+    store: SqliteStore,
+    gate: Arc<ErasureContainmentGateV1>,
+    root: TimelineId,
+    mid: TimelineId,
+    deep: TimelineId,
+}
+
+fn lineage() -> Lineage {
+    let directory = ok(tempdir());
+    let path = directory.path().join("factual.db");
+    let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
+    let mut store = open_with_gate(&path, &gate);
+    let root = ok(store.create_timeline("factual-root")).id();
+    let events: Vec<EventDraft> = (0..14).map(|value| draft(value, "factual")).collect();
+    assert_ok(store.append(root, &events));
+    assert_ok(store.seed_factual_prefix(root, &root_ticks()));
+    let mid = fork_at(&mut store, root, 6);
+    let own: Vec<EventDraft> = (0..3).map(|value| draft(value, "factual")).collect();
+    assert_ok(store.append(mid, &own));
+    assert_ok(store.seed_factual_prefix(mid, &[fork_tick()]));
+    let deep = fork_at(&mut store, mid, 7);
+    Lineage {
+        _directory: directory,
+        path,
+        store,
+        gate,
+        root,
+        mid,
+        deep,
+    }
+}
+
+fn fork_at(store: &mut SqliteStore, parent: TimelineId, seq: u64) -> TimelineId {
+    let name = format!("factual-fork-{parent}-{seq}");
+    ok(store.fork(parent, Seq::from_u64(seq), &name)).id()
+}
+
+fn head_of(store: &SqliteStore, timeline: TimelineId) -> FactualHeadV1 {
+    ok(store.last_committed_factual_tick(timeline))
+}
+
+const fn head(tick: u64, last_seq: u64) -> FactualHeadV1 {
+    FactualHeadV1 {
+        tick,
+        last_seq: Seq::from_u64(last_seq),
+    }
+}
+
+const fn boundary(cut_tick: u64) -> FactualCutV1 {
+    FactualCutV1::Boundary { cut_tick }
+}
+
+const fn mid_tick(cut_tick: u64, split_tick: u64) -> FactualCutV1 {
+    FactualCutV1::MidTick {
+        cut_tick,
+        split_tick,
+    }
+}
+
+fn owner_id(name: &str) -> FactualOwnerIdV1 {
+    FactualOwnerIdV1::new(name.to_owned())
+}
+
+fn seq_list(values: &[u64]) -> Vec<Seq> {
+    values.iter().copied().map(Seq::from_u64).collect()
+}
+
+/// Whether every factual read of `id` fails.
+fn factual_reads_fail(store: &SqliteStore, id: TimelineId) -> bool {
+    let seqs = [Seq::from_u64(1)];
+    let step = owner_id(OWNER_A);
+    let failed = [
+        store.last_committed_factual_tick(id).is_err(),
+        store.cut_tick_at(id, seqs[0]).is_err(),
+        store.nodes_for_committed_events(id, &seqs).is_err(),
+        store.nodes_by_digest(id, &[hash(1)]).is_err(),
+        store.last_step_node(id, &step).is_err(),
+        store.factual_set_counts(id).is_err(),
+        store.fold_cursor(id).is_err(),
+        store.fold_window(id, Seq::ZERO, seqs[0]).is_err(),
+    ];
+    failed.iter().all(|one| *one)
+}
+
+/// Commit range and Event binding rows of one Timeline.
+fn factual_rows(path: &Path, timeline: TimelineId) -> [i64; 2] {
+    [
+        "SELECT count(*) FROM counterfactual_dependency_commit_ranges WHERE timeline_id = ?1",
+        "SELECT count(*) FROM counterfactual_dependency_event_nodes WHERE timeline_id = ?1",
+    ]
+    .map(|sql| scalar(path, sql, timeline))
+}
+
+#[test]
+fn f1_the_head_is_total_and_inherits_the_cut_tick() {
+    let mut lineage = lineage();
+    let (root, mid, deep) = (lineage.root, lineage.mid, lineage.deep);
+
+    assert_eq!(head_of(&lineage.store, root), head(3, 8));
+    assert_eq!(head_of(&lineage.store, mid), head(3, 9));
+    // The Fork at 7 sees Tick 2 of the root, which ends at 5, and nothing of
+    // the Fork's own Tick 3, which ends above the cut.
+    assert_eq!(head_of(&lineage.store, deep), head(2, 5));
+
+    let cases = [
+        (8, head(3, 8)),
+        (6, head(2, 5)),
+        (5, head(2, 5)),
+        (4, head(1, 4)),
+        // Inside Tick 1, and in the legacy range before the first Tick.
+        (3, head(0, 0)),
+        (1, head(0, 0)),
+    ];
+    for (seq, expected) in cases {
+        let child = fork_at(&mut lineage.store, root, seq);
+        assert_eq!(head_of(&lineage.store, child), expected);
+    }
+    let bare = ok(lineage.store.create_timeline("factual-bare")).id();
+    assert_eq!(head_of(&lineage.store, bare), head(0, 0));
+}
+
+#[test]
+fn f2_cut_tick_at_locates_legacy_boundary_tail_and_mid_tick_cuts() {
+    let lineage = lineage();
+    let cases = [
+        // The legacy range before the first Tick.
+        (1, boundary(0)),
+        // The first `seq` of a multi-Event Tick, and strictly inside it.
+        (2, mid_tick(0, 1)),
+        (3, mid_tick(0, 1)),
+        (4, boundary(1)),
+        // The single Event of a one-Event Tick is a boundary.
+        (5, boundary(2)),
+        (6, mid_tick(2, 3)),
+        (7, mid_tick(2, 3)),
+        (8, boundary(3)),
+        // The unrecorded tail after the last Tick.
+        (12, boundary(3)),
+    ];
+    for (seq, expected) in cases {
+        let cut = lineage.store.cut_tick_at(lineage.root, Seq::from_u64(seq));
+        assert_eq!(ok(cut), expected);
+    }
+}
+
+#[test]
+fn f3_a_straddling_grandparent_tick_is_invisible_to_the_nested_cut() {
+    let lineage = lineage();
+    // The Fork at 6 keeps the root's Ticks through 2. The root's Tick 3 spans
+    // 6 to 8, so a cut at 6 or 7 is mid-Tick for the root and a boundary here.
+    let cases = [
+        (3, mid_tick(0, 1)),
+        (4, boundary(1)),
+        (5, boundary(2)),
+        (6, boundary(2)),
+        (7, boundary(2)),
+        (9, boundary(3)),
+        (10, boundary(3)),
+    ];
+    for (seq, expected) in cases {
+        let cut = lineage.store.cut_tick_at(lineage.mid, Seq::from_u64(seq));
+        assert_eq!(ok(cut), expected);
+    }
+    let root_cut = lineage.store.cut_tick_at(lineage.root, Seq::from_u64(7));
+    assert_eq!(ok(root_cut), mid_tick(2, 3));
+}
+
+#[test]
+fn f4_event_nodes_resolve_through_ancestry_and_stop_at_each_cut() {
+    let lineage = lineage();
+    let store = &lineage.store;
+
+    let seqs = seq_list(&[1, 2, 5, 6, 8, 9, 10]);
+    let resolved = ok(store.nodes_for_committed_events(lineage.mid, &seqs));
+    // The root's Tick 3 binds 6 and 8 above the Fork's cut.
+    let expected = vec![
+        None,
+        Some(seeded_node(ROOT_LANE, 1, OWNER_A, 1)),
+        Some(seeded_node(ROOT_LANE, 2, OWNER_B, 1)),
+        None,
+        None,
+        Some(seeded_node(FORK_LANE, 3, OWNER_A, 1)),
+        None,
+    ];
+    assert_eq!(resolved, expected);
+
+    let own = seq_list(&[6, 8]);
+    let resolved = ok(store.nodes_for_committed_events(lineage.root, &own));
+    let expected = vec![
+        Some(seeded_node(ROOT_LANE, 3, OWNER_C, 1)),
+        Some(seeded_node(ROOT_LANE, 3, OWNER_C, 3)),
+    ];
+    assert_eq!(resolved, expected);
+
+    // The deepest Fork cuts the Fork's own Tick away too.
+    let both = seq_list(&[2, 9]);
+    let resolved = ok(store.nodes_for_committed_events(lineage.deep, &both));
+    let expected = vec![Some(seeded_node(ROOT_LANE, 1, OWNER_A, 1)), None];
+    assert_eq!(resolved, expected);
+}
+
+#[test]
+fn f4_a_binding_to_an_unrecorded_node_resolves_to_nothing() {
+    let fixture = fixture();
+    let root = fixture.root;
+    let mut store = open(&fixture.path);
+    let mut tick = seeded_tick(ROOT_LANE, 1, OWNER_A, 1, 1);
+    tick.event_nodes = vec![(Seq::from_u64(1), hash(250))];
+    assert_ok(store.seed_factual_prefix(root, &[tick]));
+
+    let resolved = ok(store.nodes_for_committed_events(root, &seq_list(&[1])));
+
+    assert_eq!(resolved, vec![None]);
+}
+
+#[test]
+fn f5_nodes_resolve_by_digest_with_their_bound_seq() {
+    let lineage = lineage();
+    let store = &lineage.store;
+    let digests = [
+        seeded_digest(ROOT_LANE, 1, 0),
+        seeded_digest(ROOT_LANE, 1, 1),
+        // The root's Tick 3 is above the Fork's cut.
+        seeded_digest(ROOT_LANE, 3, 0),
+        seeded_digest(FORK_LANE, 3, 0),
+        seeded_digest(FORK_LANE, 3, 1),
+        hash(250),
+    ];
+
+    let resolved = ok(store.nodes_by_digest(lineage.mid, &digests));
+
+    let expected = vec![
+        Some((seeded_node(ROOT_LANE, 1, OWNER_A, 0), None)),
+        Some((
+            seeded_node(ROOT_LANE, 1, OWNER_A, 1),
+            Some(Seq::from_u64(2)),
+        )),
+        None,
+        Some((seeded_node(FORK_LANE, 3, OWNER_A, 0), None)),
+        Some((
+            seeded_node(FORK_LANE, 3, OWNER_A, 1),
+            Some(Seq::from_u64(9)),
+        )),
+        None,
+    ];
+    assert_eq!(resolved, expected);
+    let own = ok(store.nodes_by_digest(lineage.root, &digests[2..3]));
+    let step = seeded_node(ROOT_LANE, 3, OWNER_C, 0);
+    assert_eq!(own, vec![Some((step, None))]);
+}
+
+#[test]
+fn f6_the_latest_step_node_of_an_owner_stops_at_each_cut() {
+    let lineage = lineage();
+    let store = &lineage.store;
+    let step = |lane, tick, name| Some(seeded_node(lane, tick, name, 0));
+    let latest = |timeline, name: &str| ok(store.last_step_node(timeline, &owner_id(name)));
+
+    assert_eq!(latest(lineage.root, OWNER_A), step(ROOT_LANE, 1, OWNER_A));
+    assert_eq!(latest(lineage.root, OWNER_B), step(ROOT_LANE, 2, OWNER_B));
+    assert_eq!(latest(lineage.root, OWNER_C), step(ROOT_LANE, 3, OWNER_C));
+    assert_eq!(latest(lineage.root, "plugin:none"), None);
+    // The Fork's own Tick wins over the inherited one; the root's Tick 3 is
+    // above its cut.
+    assert_eq!(latest(lineage.mid, OWNER_A), step(FORK_LANE, 3, OWNER_A));
+    assert_eq!(latest(lineage.mid, OWNER_B), step(ROOT_LANE, 2, OWNER_B));
+    assert_eq!(latest(lineage.mid, OWNER_C), None);
+    // The deepest Fork cuts the Fork's own Tick away too.
+    assert_eq!(latest(lineage.deep, OWNER_A), step(ROOT_LANE, 1, OWNER_A));
+    assert_eq!(latest(lineage.deep, OWNER_B), step(ROOT_LANE, 2, OWNER_B));
+}
+
+#[test]
+fn f7_set_counts_cover_only_the_timelines_own_set() {
+    let lineage = lineage();
+    let store = &lineage.store;
+    let counts = |nodes| RecordedSetCountsV1 {
+        nodes,
+        edges: 0,
+        inputs: 0,
+    };
+
+    assert_eq!(ok(store.factual_set_counts(lineage.root)), counts(10));
+    assert_eq!(ok(store.factual_set_counts(lineage.mid)), counts(2));
+    assert_eq!(ok(store.factual_set_counts(lineage.deep)), counts(0));
+}
+
+#[test]
+fn f8_parent_prefix_reads_stitch_ancestors_through_their_cuts() {
+    let lineage = lineage();
+    let store = &lineage.store;
+    let [first, second, third] = root_ticks();
+    let rows = |ticks: &[&SeededFactualTickV1]| -> Vec<NodeRow> {
+        let nodes = ticks.iter().flat_map(|held| held.record.nodes().to_vec());
+        nodes.collect()
+    };
+    let inherited = rows(&[&first, &second]);
+    let own = fork_tick();
+    let stitched = rows(&[&first, &second, &own]);
+
+    for limit in [2, 3, 50] {
+        let mid_scope = prefix_scope(lineage.mid, 9);
+        assert_eq!(ok(nodes(store, mid_scope, limit)), stitched);
+        let deep_scope = prefix_scope(lineage.deep, 9);
+        assert_eq!(ok(nodes(store, deep_scope, limit)), inherited);
+        let root_scope = prefix_scope(lineage.root, 9);
+        let all = rows(&[&first, &second, &third]);
+        assert_eq!(ok(nodes(store, root_scope, limit)), all);
+    }
+    // The request bound applies on top of each cut.
+    let bounded = nodes(store, prefix_scope(lineage.mid, 1), 3);
+    assert_eq!(ok(bounded), rows(&[&first]));
+    let listed = edges(store, prefix_scope(lineage.mid, 9), 3);
+    assert_eq!(ok(listed), Vec::<EdgeRow>::new());
+}
+
+#[test]
+fn f9_missing_and_deleted_timelines_are_not_found() {
+    let mut lineage = lineage();
+    let (root, mid, deep) = (lineage.root, lineage.mid, lineage.deep);
+    let unknown = TimelineId::from_ulid(Ulid::from(0x0123_4567_89ab_cdef_u128));
+    let store = &mut lineage.store;
+
+    assert!(matches!(
+        err(store.last_committed_factual_tick(unknown)),
+        CoreError::TimelineNotFound(_)
+    ));
+    assert!(matches!(
+        err(store.seed_factual_prefix(unknown, &[])),
+        CoreError::TimelineNotFound(_)
+    ));
+    assert_eq!(
+        err(nodes(store, prefix_scope(unknown, 5), 2)),
+        StoreError::ForkNotFound
+    );
+
+    // Deleting a Timeline purges its set; the others stay readable.
+    assert_ok(store.delete_timeline(deep));
+    assert_ok(store.delete_timeline(mid));
+    assert!(matches!(
+        err(store.factual_set_counts(mid)),
+        CoreError::TimelineNotFound(_)
+    ));
+    assert_eq!(head_of(store, root), head(3, 8));
+    assert_ok(store.delete_timeline(root));
+    assert!(matches!(
+        err(store.last_committed_factual_tick(root)),
+        CoreError::TimelineNotFound(_)
+    ));
+    assert_eq!(
+        err(nodes(store, prefix_scope(root, 5), 2)),
+        StoreError::ForkNotFound
+    );
+}
+
+#[test]
+fn f9_factual_reads_fail_closed_without_a_gate_or_past_a_blocked_ancestor() {
+    let blocked = lineage();
+    let (root, deep) = (blocked.root, blocked.deep);
+    blocked.gate.block_timeline(root);
+    for timeline in [root, deep] {
+        assert!(factual_reads_fail(&blocked.store, timeline));
+    }
+
+    let open_lineage = lineage();
+    let root = open_lineage.root;
+    let text = open_lineage.path.to_str().unwrap_or_default();
+    let ungated = ok(SqliteStore::open(text));
+    assert!(matches!(
+        err(ungated.last_committed_factual_tick(root)),
+        CoreError::ErasureContainmentUnavailable
+    ));
+    assert!(matches!(
+        err(ungated.factual_set_counts(root)),
+        CoreError::ErasureContainmentUnavailable
+    ));
+}
+
+#[test]
+fn f10_a_failed_seed_installs_nothing_and_a_reopen_serves_the_seeded_rows() {
+    let fixture = fixture();
+    let root = fixture.root;
+    let mut store = open(&fixture.path);
+    // The second Tick repeats the first one's number, which the record Tick
+    // guard refuses after the first Tick's rows went in.
+    let repeated = [
+        seeded_tick(ROOT_LANE, 1, OWNER_A, 2, 3),
+        seeded_tick(ROOT_LANE, 1, OWNER_B, 2, 3),
+    ];
+    assert!(store.seed_factual_prefix(root, &repeated).is_err());
+    assert_eq!(recorded_rows(&fixture.path, root), [0; 3]);
+    assert_eq!(factual_rows(&fixture.path, root), [0, 0]);
+
+    assert_ok(store.seed_factual_prefix(root, &repeated[..1]));
+    drop(store);
+    let reopened = open(&fixture.path);
+    assert_eq!(head_of(&reopened, root), head(1, 3));
+    assert_eq!(factual_rows(&fixture.path, root), [1, 2]);
+    assert_eq!(recorded_rows(&fixture.path, root), [1, 3, 0]);
+}
+
+#[test]
+fn f11_deleting_a_timeline_purges_its_commit_ranges_and_bindings() {
+    let mut lineage = lineage();
+    let (root, mid, deep) = (lineage.root, lineage.mid, lineage.deep);
+    assert_eq!(factual_rows(&lineage.path, root), [3, 7]);
+    assert_eq!(factual_rows(&lineage.path, mid), [1, 1]);
+
+    assert_ok(lineage.store.delete_timeline(deep));
+    assert_ok(lineage.store.delete_timeline(mid));
+
+    assert_eq!(factual_rows(&lineage.path, mid), [0, 0]);
+    assert_eq!(factual_rows(&lineage.path, root), [3, 7]);
+    assert_ok(lineage.store.delete_timeline(root));
+    assert_eq!(factual_rows(&lineage.path, root), [0, 0]);
+}
+
+/// A replacing insert of a new `seq` that binds a digest the Timeline already
+/// binds: only the digest guard refuses it.
+fn digest_replace_statement(root: TimelineId) -> String {
+    let bound = hex(seeded_digest(ROOT_LANE, 1, 1).as_bytes());
+    let bindings = "counterfactual_dependency_event_nodes";
+    format!("INSERT OR REPLACE INTO {bindings} VALUES ('{root}', 99, 1, X'{bound}')")
+}
+
+/// Statements the guards of the two factual tables refuse outside a purge.
+fn refused_statements(root: TimelineId) -> Vec<String> {
+    let other = hex(hash(250).as_bytes());
+    let ranges = "counterfactual_dependency_commit_ranges";
+    let bindings = "counterfactual_dependency_event_nodes";
+    vec![
+        format!("DELETE FROM {ranges}"),
+        format!("DELETE FROM {bindings}"),
+        format!("UPDATE {ranges} SET last_seq = 99"),
+        format!("UPDATE {bindings} SET tick = 2"),
+        // A replacing insert of a held key or digest.
+        format!("INSERT OR REPLACE INTO {ranges} VALUES ('{root}', 1, 2, 4)"),
+        format!("INSERT OR REPLACE INTO {bindings} VALUES ('{root}', 2, 1, X'{other}')"),
+        digest_replace_statement(root),
+        // Rows that break a check.
+        format!("INSERT INTO {ranges} VALUES ('{root}', 9, 5, 4)"),
+        format!("INSERT INTO {ranges} VALUES ('{root}', 0, 5, 6)"),
+        format!("INSERT INTO {bindings} VALUES ('{root}', 0, 1, X'{other}')"),
+        format!("INSERT INTO {bindings} VALUES ('{root}', 99, 1, X'00')"),
+    ]
+}
+
+#[test]
+fn f12_only_a_marked_purge_passes_the_factual_guards() {
+    let lineage = lineage();
+    let (path, root) = (&lineage.path, lineage.root);
+    for statement in refused_statements(root) {
+        assert!(execute(path, &statement).is_err(), "{statement}");
+        // A marker for another Timeline authorizes nothing here.
+        let marked = format!(
+            "BEGIN;
+             INSERT INTO counterfactual_purge_fence (fork_id) VALUES ('another');
+             {statement};
+             COMMIT;"
+        );
+        assert!(execute(path, &marked).is_err(), "{marked}");
+    }
+    assert_eq!(factual_rows(path, root), [3, 7]);
+    // The digest guard itself refuses the replacing insert, by its own text.
+    let statement = digest_replace_statement(root);
+    let refusal = err(execute(path, &statement)).to_string();
+    assert!(
+        refusal.contains("event node digest is already recorded"),
+        "{refusal}"
+    );
+
+    let purge = format!(
+        "BEGIN;
+         INSERT INTO counterfactual_purge_fence (fork_id) VALUES ('{root}');
+         DELETE FROM counterfactual_dependency_event_nodes WHERE timeline_id = '{root}';
+         DELETE FROM counterfactual_dependency_commit_ranges WHERE timeline_id = '{root}';
+         DELETE FROM counterfactual_purge_fence;
+         COMMIT;"
+    );
+    assert_ok(execute(path, &purge));
+    assert_eq!(factual_rows(path, root), [0, 0]);
+    let text = path.to_str().unwrap_or_default();
+    assert_eq!(open_error(SqliteStore::open(text)), "");
+}
+
+#[test]
+fn f13_corrupt_stored_rows_fail_the_factual_reads() {
+    let corrupted = |table: &str, assignment: &str, filter: &str| {
+        let lineage = lineage();
+        corrupt(&lineage.path, table, assignment, filter);
+        let store = open(&lineage.path);
+        (store, lineage)
+    };
+    let step = owner_id(OWNER_A);
+    let digests = [seeded_digest(ROOT_LANE, 1, 1)];
+
+    let (store, lineage) = corrupted("nodes", "class = 9", "WHERE owner_id = 'plugin:a'");
+    assert!(store.nodes_by_digest(lineage.root, &digests).is_err());
+    assert!(store.last_step_node(lineage.root, &step).is_err());
+    let seqs = seq_list(&[2]);
+    let found = store.nodes_for_committed_events(lineage.root, &seqs);
+    assert!(found.is_err());
+
+    let (store, lineage) = corrupted("records", "node_count = -1", "");
+    assert!(store.factual_set_counts(lineage.root).is_err());
+
+    let (store, lineage) = corrupted("commit_ranges", "tick = -1", "WHERE last_seq = 4");
+    assert!(store.cut_tick_at(lineage.root, Seq::from_u64(3)).is_err());
+    assert!(store.cut_tick_at(lineage.root, Seq::from_u64(4)).is_err());
+    assert!(store.cut_tick_at(lineage.deep, Seq::from_u64(3)).is_err());
+
+    let (store, lineage) = corrupted("event_nodes", "seq = -1", "WHERE seq = 2");
+    assert!(store.nodes_by_digest(lineage.root, &digests).is_err());
+}
+
+#[test]
+fn f14_the_exact_schema_lists_the_factual_indexes() {
+    for name in [
+        "counterfactual_dependency_commit_ranges_by_last_seq",
+        "counterfactual_dependency_nodes_by_owner",
+    ] {
+        let fixture = fixture();
+        let text = fixture_path_str(&fixture);
+        assert_ok(execute(&fixture.path, &format!("DROP INDEX {name};")));
+        // A read-only open cannot create the index; a writable open does.
+        let refused = open_error(SqliteStore::open_read_only(text));
+        assert!(refused.contains(name));
+        assert_eq!(open_error(SqliteStore::open(text)), "");
+        assert_eq!(open_error(SqliteStore::open_read_only(text)), "");
+    }
+}
+
+#[test]
+fn f4_a_batched_request_mixes_segments_misses_and_duplicates() {
+    let lineage = lineage();
+    let store = &lineage.store;
+    let fork = Some(seeded_node(FORK_LANE, 3, OWNER_A, 1));
+    let first = Some(seeded_node(ROOT_LANE, 1, OWNER_A, 1));
+    let second = Some(seeded_node(ROOT_LANE, 2, OWNER_B, 1));
+
+    // The Fork's own segment, the root's, misses, and repeated `seq`s, in one
+    // request that is answered in request order.
+    let seqs = seq_list(&[9, 2, 99, 9, 5, 2, 6, 1]);
+    let resolved = ok(store.nodes_for_committed_events(lineage.mid, &seqs));
+    let expected = vec![
+        fork.clone(),
+        first.clone(),
+        None,
+        fork,
+        second,
+        first,
+        None,
+        None,
+    ];
+    assert_eq!(resolved, expected);
+
+    // A request that the newest segment answers in full is complete.
+    let pair = seq_list(&[9, 9]);
+    let own = ok(store.nodes_for_committed_events(lineage.mid, &pair));
+    assert_eq!(own.len(), 2);
+    assert!(own.iter().all(Option::is_some));
+
+    // An empty request is answered, and a request at the contract's largest
+    // size is answered in full. That it costs one lookup per segment is
+    // structural, by construction of `resolve_batch`; no count is asserted.
+    let none = ok(store.nodes_for_committed_events(lineage.mid, &[]));
+    assert!(none.is_empty());
+    let all: Vec<u64> = (1..=16_384).collect();
+    let largest = seq_list(&all);
+    let wide = ok(store.nodes_for_committed_events(lineage.root, &largest));
+    assert_eq!(wide.len(), all.len());
+    assert_eq!(wide.iter().flatten().count(), 7);
+}
+
+#[test]
+fn f5_a_batched_digest_request_mixes_segments_misses_and_duplicates() {
+    let lineage = lineage();
+    let store = &lineage.store;
+    let fork_step = Some((seeded_node(FORK_LANE, 3, OWNER_A, 0), None));
+    let fork_event = Some((
+        seeded_node(FORK_LANE, 3, OWNER_A, 1),
+        Some(Seq::from_u64(9)),
+    ));
+    let root_event = Some((
+        seeded_node(ROOT_LANE, 1, OWNER_A, 1),
+        Some(Seq::from_u64(2)),
+    ));
+    let digests = [
+        seeded_digest(FORK_LANE, 3, 1),
+        seeded_digest(ROOT_LANE, 1, 1),
+        hash(250),
+        seeded_digest(FORK_LANE, 3, 0),
+        seeded_digest(FORK_LANE, 3, 1),
+        // The root's Tick 3 is above the Fork's cut.
+        seeded_digest(ROOT_LANE, 3, 1),
+        seeded_digest(ROOT_LANE, 1, 1),
+    ];
+
+    let resolved = ok(store.nodes_by_digest(lineage.mid, &digests));
+
+    let expected = vec![
+        fork_event.clone(),
+        root_event.clone(),
+        None,
+        fork_step,
+        fork_event,
+        None,
+        root_event,
+    ];
+    assert_eq!(resolved, expected);
+    let none = ok(store.nodes_by_digest(lineage.mid, &[]));
+    assert!(none.is_empty());
+
+    // A request at the contract's largest size: derived digests miss, and the
+    // two seeded ones at the ends hit.
+    let mut wide: Vec<Hash> = (0..16_384_u32)
+        .map(|index| {
+            let mut bytes = [0xEE; 32];
+            bytes[..4].copy_from_slice(&index.to_le_bytes());
+            Hash::from_bytes(bytes)
+        })
+        .collect();
+    wide[0] = seeded_digest(FORK_LANE, 3, 1);
+    wide[16_383] = seeded_digest(ROOT_LANE, 1, 1);
+    let largest = ok(store.nodes_by_digest(lineage.mid, &wide));
+    assert_eq!(largest.len(), wide.len());
+    assert_eq!(largest.iter().flatten().count(), 2);
+}
+
+#[test]
+fn f4_the_nearest_segment_wins_when_two_segments_hold_a_seq_or_a_digest() {
+    let mut lineage = lineage();
+    let child = fork_at(&mut lineage.store, lineage.root, 7);
+    // The child's own Tick binds `seq` 2 to a node of another owner that reuses
+    // the digest of the root's node for that `seq`.
+    let shadow = seeded_tick(ROOT_LANE, 1, OWNER_B, 2, 2);
+    assert_ok(lineage.store.seed_factual_prefix(child, &[shadow]));
+    let store = &lineage.store;
+
+    let seqs = seq_list(&[2, 3]);
+    let events = ok(store.nodes_for_committed_events(child, &seqs));
+    let own = Some(seeded_node(ROOT_LANE, 1, OWNER_B, 1));
+    let inherited = Some(seeded_node(ROOT_LANE, 1, OWNER_A, 2));
+    assert_eq!(events, vec![own, inherited]);
+    let root_events = ok(store.nodes_for_committed_events(lineage.root, &seqs));
+    let root_own = Some(seeded_node(ROOT_LANE, 1, OWNER_A, 1));
+    assert_eq!(root_events[0], root_own);
+
+    let digests = [
+        seeded_digest(ROOT_LANE, 1, 1),
+        seeded_digest(ROOT_LANE, 1, 2),
+    ];
+    let bound = ok(store.nodes_by_digest(child, &digests));
+    let near = Some((
+        seeded_node(ROOT_LANE, 1, OWNER_B, 1),
+        Some(Seq::from_u64(2)),
+    ));
+    let far = Some((
+        seeded_node(ROOT_LANE, 1, OWNER_A, 2),
+        Some(Seq::from_u64(3)),
+    ));
+    assert_eq!(bound, vec![near, far]);
+}
+
+#[test]
+fn f2_cut_tick_at_is_a_boundary_on_a_timeline_without_ticks_and_at_seq_zero() {
+    let mut lineage = lineage();
+    let bare = ok(lineage.store.create_timeline("factual-bare-cut")).id();
+    let events: Vec<EventDraft> = (0..3).map(|value| draft(value, "factual")).collect();
+    assert_ok(lineage.store.append(bare, &events));
+    let store = &lineage.store;
+
+    // No Tick is recorded, so every `seq`, beyond the head too, is a boundary.
+    for seq in [0, 1, 3, 50] {
+        let cut = store.cut_tick_at(bare, Seq::from_u64(seq));
+        assert_eq!(ok(cut), boundary(0));
+    }
+    let zero = store.cut_tick_at(bare, Seq::ZERO);
+    assert_eq!(ok(zero), boundary(0));
+    // `Seq::ZERO` precedes the first Tick of a recorded Timeline too.
+    let root_zero = store.cut_tick_at(lineage.root, Seq::ZERO);
+    assert_eq!(ok(root_zero), boundary(0));
+}
+
+#[test]
+fn f3_a_split_tick_clipped_at_two_levels_is_a_boundary_for_the_deepest_fork() {
+    let lineage = lineage();
+    // The Fork at 7 sees the root through 6 and the middle Fork through 7. The
+    // root's Tick 3 (6 to 8) and the middle Fork's Tick 3 (9) both end above
+    // those limits, so neither splits a cut here; only Tick 1 (2 to 4) does.
+    let cases = [
+        (3, mid_tick(0, 1)),
+        (4, boundary(1)),
+        (5, boundary(2)),
+        (6, boundary(2)),
+        (7, boundary(2)),
+        (8, boundary(2)),
+        (9, boundary(2)),
+        (12, boundary(2)),
+    ];
+    for (seq, expected) in cases {
+        let cut = lineage.store.cut_tick_at(lineage.deep, Seq::from_u64(seq));
+        assert_eq!(ok(cut), expected);
+    }
+}
+
+#[test]
+fn f8_paging_resumes_after_a_cursor_inside_an_ancestor_segment() {
+    let lineage = lineage();
+    let store = &lineage.store;
+    let scope = prefix_scope(lineage.mid, 9);
+    let all = ok(nodes(store, scope, 50));
+    assert_eq!(all.len(), 8);
+
+    // Rows 0 to 5 are the root's segment, rows 6 and 7 the Fork's own.
+    for (index, limit) in [(1_usize, 50_usize), (1, 3), (5, 50), (5, 1)] {
+        let after = Some(all[index].cursor());
+        let page = ok(store.read_dependency_nodes(&request(scope, after, limit)));
+        let rest = &all[index + 1..];
+        assert_eq!(page.items(), &rest[..rest.len().min(limit)]);
+        assert_eq!(page.next().is_some(), rest.len() > limit);
+    }
+}
+
+// Fold reads (ADR-064 Revision 4), over fold-head rows seeded by raw SQL: no
+// write path records one yet. A raw write runs while no store holds the file,
+// which is reopened under a fresh gate afterwards.
+
+const FOLD_HEADS: &str = "counterfactual_dependency_fold_heads";
+
+/// Fold-head rows of one Timeline.
+fn fold_heads(path: &Path, timeline: TimelineId) -> i64 {
+    let sql = format!("SELECT count(*) FROM {FOLD_HEADS} WHERE timeline_id = ?1");
+    scalar(path, &sql, timeline)
+}
+
+/// The `VALUES` tuple of one fold-head row.
+fn fold_head(timeline: TimelineId, tick: u64, scanned: u64, digest: Hash) -> String {
+    let head = hex(digest.as_bytes());
+    format!("('{timeline}', {tick}, {scanned}, X'{head}')")
+}
+
+/// Run `sql` on the lineage's file while no store holds it, then reopen it.
+fn rewritten(lineage: &mut Lineage, sql: &str) {
+    let placeholder = ok(SqliteStore::open_in_memory());
+    drop(std::mem::replace(&mut lineage.store, placeholder));
+    assert_ok(execute(&lineage.path, sql));
+    let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
+    lineage.store = open_with_gate(&lineage.path, &gate);
+    lineage.gate = gate;
+}
+
+/// Insert fold-head rows into the lineage's file.
+fn insert_fold_heads(lineage: &mut Lineage, rows: &[String]) {
+    let values = rows.join(", ");
+    rewritten(
+        lineage,
+        &format!("INSERT INTO {FOLD_HEADS} VALUES {values};"),
+    );
+}
+
+/// The lineage with fold heads: the root's Ticks 1 to 3 scanned through 3, 5
+/// (no head), and 7, and the middle Fork's own Tick 3 through 8, whose head
+/// is the root's Tick 2 step node.
+fn folded_lineage() -> Lineage {
+    let mut lineage = lineage();
+    let (root, mid) = (lineage.root, lineage.mid);
+    let rows = [
+        fold_head(root, 1, 3, seeded_digest(ROOT_LANE, 1, 0)),
+        fold_head(root, 2, 5, Hash::zero()),
+        fold_head(root, 3, 7, seeded_digest(ROOT_LANE, 3, 0)),
+        fold_head(mid, 3, 8, seeded_digest(ROOT_LANE, 2, 0)),
+    ];
+    insert_fold_heads(&mut lineage, &rows);
+    lineage
+}
+
+/// A fold cursor through `scanned` whose head is the step node of the root's
+/// Tick, if any.
+fn expected_cursor(scanned: u64, head: Option<(u8, &str)>) -> FactualFoldCursorV1 {
+    FactualFoldCursorV1 {
+        scanned_through: Seq::from_u64(scanned),
+        head: head.map(|(tick, owner)| seeded_node(ROOT_LANE, tick, owner, 0)),
+    }
+}
+
+#[test]
+fn f14_the_fold_cursor_is_the_latest_visible_fold_head_through_each_cut() {
+    let mut lineage = folded_lineage();
+    let (root, mid, deep) = (lineage.root, lineage.mid, lineage.deep);
+    let cursor = |store: &SqliteStore, timeline| ok(store.fold_cursor(timeline));
+    let cases = [
+        (root, expected_cursor(7, Some((3, OWNER_C)))),
+        // The middle Fork's own row wins; its head is an inherited node.
+        (mid, expected_cursor(8, Some((2, OWNER_B)))),
+        // The deep Fork has no row and sees none of the middle Fork's Ticks,
+        // so the root's row at its cut Tick 2 is the cursor, without a head.
+        (deep, expected_cursor(5, None)),
+    ];
+    for (timeline, expected) in cases {
+        assert_eq!(cursor(&lineage.store, timeline), Some(expected));
+    }
+    // A Fork of the root at 4 is cut at Tick 1; at 1 it is cut before any.
+    let at_four = fork_at(&mut lineage.store, root, 4);
+    let expected = expected_cursor(3, Some((1, OWNER_A)));
+    assert_eq!(cursor(&lineage.store, at_four), Some(expected));
+    let at_one = fork_at(&mut lineage.store, root, 1);
+    assert_eq!(cursor(&lineage.store, at_one), None);
+    let bare = ok(lineage.store.create_timeline("factual-fold-bare")).id();
+    assert_eq!(cursor(&lineage.store, bare), None);
+}
+
+#[test]
+fn f14_a_fold_head_that_names_no_visible_node_is_a_storage_fault() {
+    let mut lineage = folded_lineage();
+    let (root, deep) = (lineage.root, lineage.deep);
+    // The root's Tick 3 node is past the deep Fork's cut; the other digest is
+    // recorded nowhere.
+    let rows = [
+        fold_head(deep, 1, 6, seeded_digest(ROOT_LANE, 3, 0)),
+        fold_head(root, 4, 9, hash(250)),
+    ];
+    insert_fold_heads(&mut lineage, &rows);
+    for timeline in [deep, root] {
+        let refused = err(lineage.store.fold_cursor(timeline));
+        assert!(matches!(refused, CoreError::Storage(_)), "{refused:?}");
+    }
+}
+
+/// The fold window the public reads predict for `(after, through]`: the
+/// newest Events of the logical range, at most the scan cap, in ascending
+/// `seq`, each with its type, payload hash, and bound node.
+fn predicted_window(
+    store: &SqliteStore,
+    timeline: TimelineId,
+    after: u64,
+    through: u64,
+) -> FactualFoldWindowV1 {
+    let all = ok(store.read(timeline, SeqRange::all()));
+    let range = after + 1..=through;
+    let listed: Vec<&Event> = all
+        .iter()
+        .filter(|event| range.contains(&event.seq.as_u64()))
+        .collect();
+    let cap = MAX_FACTUAL_FOLD_SCAN_PER_TICK_V1;
+    let skipped = listed.len().saturating_sub(cap);
+    let kept = &listed[skipped..];
+    let seqs: Vec<Seq> = kept.iter().map(|event| event.seq).collect();
+    let nodes = ok(store.nodes_for_committed_events(timeline, &seqs));
+    let events = kept
+        .iter()
+        .zip(nodes)
+        .map(|(event, node)| FactualFoldEventV1 {
+            seq: event.seq,
+            event_type: event.event_type.clone(),
+            payload_hash: event.payload_hash,
+            node_class: node.as_ref().map(NodeRow::class),
+            node,
+        })
+        .collect();
+    FactualFoldWindowV1 {
+        events,
+        truncated: skipped > 0,
+    }
+}
+
+/// The `seq`s a fold window lists.
+fn window_seqs(listed: &FactualFoldWindowV1) -> Vec<u64> {
+    let seqs = listed.events.iter().map(|event| event.seq.as_u64());
+    seqs.collect()
+}
+
+#[test]
+fn f15_fold_windows_list_the_logical_range_with_hashes_and_bindings() {
+    let lineage = folded_lineage();
+    let store = &lineage.store;
+    let (root, mid, deep) = (lineage.root, lineage.mid, lineage.deep);
+    let window = |timeline, after, through| {
+        let read = store.fold_window(timeline, Seq::from_u64(after), Seq::from_u64(through));
+        ok(read)
+    };
+
+    let cases = [
+        (root, 1, 9),
+        (root, 0, 14),
+        (mid, 0, 9),
+        (mid, 5, 100),
+        (deep, 5, 100),
+        (deep, 7, 7),
+        (root, 9, 3),
+    ];
+    for (timeline, after, through) in cases {
+        let expected = predicted_window(store, timeline, after, through);
+        let listed = window(timeline, after, through);
+        assert_eq!(listed, expected, "{after} {through}");
+    }
+
+    // The middle Fork inherits `seq` 1 to 6, binds 2 to 5 through the root's
+    // visible Ticks 1 and 2, and its own 9; 6 is in the root's Tick 3, past
+    // the cut.
+    let listed = window(mid, 0, 9);
+    assert_eq!(window_seqs(&listed), (1..=9).collect::<Vec<_>>());
+    let bound = listed.events.iter().map(|event| event.node.is_some());
+    let expected = [false, true, true, true, true, false, false, false, true];
+    assert_eq!(bound.collect::<Vec<_>>(), expected);
+    let mut classes = listed.events.iter().filter_map(|event| event.node_class);
+    assert!(classes.all(|class| class == ENDOGENOUS));
+    assert!(!listed.truncated);
+    // The deep Fork ends at 7; an empty range lists nothing.
+    assert_eq!(window_seqs(&window(deep, 5, 100)), [6, 7]);
+    assert_eq!(window(deep, 7, 7), FactualFoldWindowV1::default());
+}
+
+#[test]
+fn f15_a_fold_window_never_reads_a_payload() {
+    let mut lineage = lineage();
+    let root = lineage.root;
+    let (after, through) = (Seq::ZERO, Seq::from_u64(14));
+    let before = ok(lineage.store.fold_window(root, after, through));
+    let corrupt = format!("UPDATE events SET payload = 'text' WHERE timeline_id = '{root}'");
+    rewritten(&mut lineage, &corrupt);
+
+    assert!(lineage.store.read(root, SeqRange::all()).is_err());
+    assert_eq!(ok(lineage.store.fold_window(root, after, through)), before);
+}
+
+/// A stored Event row that fails to read fails the fold window: its payload
+/// hash is a text here, not a blob, so the row query itself fails.
+#[test]
+fn f15_a_corrupt_event_row_fails_the_fold_window() {
+    let mut lineage = lineage();
+    let root = lineage.root;
+    let corrupt = format!("UPDATE events SET payload_hash = 'x' WHERE timeline_id = '{root}'");
+    rewritten(&mut lineage, &corrupt);
+
+    let read = lineage
+        .store
+        .fold_window(root, Seq::ZERO, Seq::from_u64(14));
+    assert!(read.is_err());
+}
+
+#[test]
+fn f15_a_fold_window_keeps_the_newest_events_up_to_the_scan_cap() {
+    let fixture = fixture();
+    let mut store = open(&fixture.path);
+    let root = ok(store.create_timeline("factual-fold-scan")).id();
+    assert_ok(store.append(root, &[draft(1, "factual")]));
+    // The Fork holds the cap and one more Event of its own above the root's.
+    let fork = fork_at(&mut store, root, 1);
+    let cap = MAX_FACTUAL_FOLD_SCAN_PER_TICK_V1;
+    let drafts: Vec<EventDraft> = (0..=cap).map(|_| draft(1, "factual")).collect();
+    assert_ok(store.append(fork, &drafts));
+    let last = ok(u64::try_from(cap + 2));
+    let seqs = |listed: &FactualFoldWindowV1| {
+        let first = listed.events.first().map(|event| event.seq.as_u64());
+        let newest = listed.events.last().map(|event| event.seq.as_u64());
+        (listed.events.len(), first, newest, listed.truncated)
+    };
+    let window = |after, through| {
+        let read = store.fold_window(fork, Seq::from_u64(after), Seq::from_u64(through));
+        ok(read)
+    };
+
+    // One Event past the cap, all the Fork's own: the oldest is left out and
+    // the root is not read.
+    let full = window(0, last);
+    assert_eq!(seqs(&full), (cap, Some(3), Some(last), true));
+    // Exactly the cap is not truncated, wherever the range ends.
+    let exact = window(2, last);
+    assert_eq!(seqs(&exact), (cap, Some(3), Some(last), false));
+    assert_eq!(exact.events, full.events);
+    let inside = window(1, last - 1);
+    assert_eq!(seqs(&inside), (cap, Some(2), Some(last - 1), false));
+    // One past the cap across the Fork point: the root's Event fills it.
+    let across = window(0, last - 1);
+    assert_eq!(seqs(&across), (cap, Some(2), Some(last - 1), true));
+}
+
+#[test]
+fn f16_deleting_a_timeline_purges_its_fold_heads() {
+    let mut lineage = folded_lineage();
+    let (root, mid, deep) = (lineage.root, lineage.mid, lineage.deep);
+    assert_eq!(fold_heads(&lineage.path, root), 3);
+    assert_eq!(fold_heads(&lineage.path, mid), 1);
+
+    assert_ok(lineage.store.delete_timeline(deep));
+    assert_ok(lineage.store.delete_timeline(mid));
+    assert_eq!(fold_heads(&lineage.path, mid), 0);
+    assert_eq!(fold_heads(&lineage.path, root), 3);
+    assert_ok(lineage.store.delete_timeline(root));
+    assert_eq!(fold_heads(&lineage.path, root), 0);
+}
+
+/// Statements the fold-head guards and checks refuse outside a purge.
+fn refused_fold_statements(root: TimelineId) -> Vec<String> {
+    let zero = hex(Hash::zero().as_bytes());
+    vec![
+        format!("DELETE FROM {FOLD_HEADS}"),
+        format!("UPDATE {FOLD_HEADS} SET scanned_through = 99"),
+        // A replacing insert of a held key.
+        format!("INSERT OR REPLACE INTO {FOLD_HEADS} VALUES ('{root}', 1, 4, X'{zero}')"),
+        // Rows that break a check.
+        format!("INSERT INTO {FOLD_HEADS} VALUES ('{root}', 0, 4, X'{zero}')"),
+        format!("INSERT INTO {FOLD_HEADS} VALUES ('{root}', 9, -1, X'{zero}')"),
+        format!("INSERT INTO {FOLD_HEADS} VALUES ('{root}', 9, 4, X'00')"),
+    ]
+}
+
+#[test]
+fn f16_only_a_marked_purge_passes_the_fold_head_guards() {
+    let mut lineage = folded_lineage();
+    let root = lineage.root;
+    let placeholder = ok(SqliteStore::open_in_memory());
+    drop(std::mem::replace(&mut lineage.store, placeholder));
+    let path = &lineage.path;
+    for statement in refused_fold_statements(root) {
+        assert!(execute(path, &statement).is_err(), "{statement}");
+        // A marker for another Timeline authorizes nothing here.
+        let marked = format!(
+            "BEGIN;
+             INSERT INTO counterfactual_purge_fence (fork_id) VALUES ('another');
+             {statement};
+             COMMIT;"
+        );
+        assert!(execute(path, &marked).is_err(), "{marked}");
+    }
+    assert_eq!(fold_heads(path, root), 3);
+    let texts = [
+        (0, "dependency fold head is retained"),
+        (1, "dependency fold head is immutable"),
+        (2, "dependency fold head is already recorded"),
+    ];
+    let statements = refused_fold_statements(root);
+    for (index, text) in texts {
+        let refusal = err(execute(path, &statements[index])).to_string();
+        assert!(refusal.contains(text), "{refusal}");
+    }
+
+    let purge = format!(
+        "BEGIN;
+         INSERT INTO counterfactual_purge_fence (fork_id) VALUES ('{root}');
+         DELETE FROM {FOLD_HEADS} WHERE timeline_id = '{root}';
+         DELETE FROM counterfactual_purge_fence;
+         COMMIT;"
+    );
+    assert_ok(execute(path, &purge));
+    assert_eq!(fold_heads(path, root), 0);
+    let text = path.to_str().unwrap_or_default();
+    assert_eq!(open_error(SqliteStore::open(text)), "");
 }

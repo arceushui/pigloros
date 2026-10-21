@@ -31,6 +31,30 @@ adapter may use another representation without changing the CPF1 verifier. No sc
 carries an adapter allowlist, provider version literal, generic payload template, or
 second family catalog.
 
+Each provider manifest also carries an `auxiliary` object that maps every family to
+a list of `{ "path", "media_type" }` entries (a provider lists none unless its adapter renders
+auxiliary members). A path
+is a source file under `inputs/` that `SHA256SUMS` and `BLAKE3SUMS` cover; the build
+embeds the verified bytes, and the materializer derives each bundle member path with
+`fixture_input_member_path`. The `pigloros-json-v1` adapter accepts only empty lists.
+
+The `plugin-signed-v1` adapter (`scripts/conformance-fixture-adapters/plugin-signed-v1.sh`) owns the
+`plugin-conformance` layer (ADR-061 revision 8, #194). `scripts/generate_plugin_conformance_fixtures.py`
+is the only writer of its payloads (`inputs/plugin-conformance/<family>.json`, JCS), its `PCW2`
+composites (`inputs/plugin-conformance/<family>.pcw2`, one auxiliary member per family: the signed
+release closures, trust epochs and anchor, addressed by BLAKE3 digest), its oracles and its
+evidence-status records, and of the adapter's `src/schema_digests.rs`. It runs offline, calls no
+Rust and uses fixed public fixture seeds ("repository-test-fixture-only"); `--check` reproduces the
+PMF1, PTR1, PRV1, TPS1 and execution-profile vectors of the repository and the official BLAKE3
+vectors (`scripts/data/blake3_test_vectors.json`) before it compares every output. The composites
+carry every sub-case of the catalogue: `pos.1` to `pos.3`, `den.01` to `den.22`, `mal.1a` to
+`mal.6`, `res.1` to `res.4`, `del.1`, `del.2`, `dgr.1` to `dgr.4` and `ind.1` to `ind.4`. Every
+`expected/plugin-conformance/*.json` stays `pending` with a null result and a null time
+(`scripts/check_plugin_conformance_expected.py` checks it).
+Payloads are RFC 8785 canonical JSON and, like the oracles, end with one LF byte (the adapter reads
+the payload with `serde_json`, which ignores it; the oracle LF is required by ADR-061 revision 8
+decision 2). The `--check` validates every payload against its checked-in schema.
+
 The immutable bundle boundary in `pos-conformance` accepts these bytes from a
 caller, recomputes each BLAKE3 content address, binds the CPF1 profile digest,
 and signs only the canonical manifest. Local and Air-Gapped manifests must be

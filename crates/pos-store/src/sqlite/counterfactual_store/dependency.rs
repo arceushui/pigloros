@@ -8,8 +8,8 @@
 //!
 //! # Schema
 //!
-//! Three additive tables and ten guard triggers, created and validated like
-//! the rest of the counterfactual schema:
+//! Six additive tables, two indexes, and twenty guard triggers, created and
+//! validated like the rest of the counterfactual schema:
 //!
 //! - `counterfactual_dependency_records` holds one row per recorded Tick
 //!   record: its set, its Tick (persisted apart from the node Ticks), and the
@@ -29,15 +29,38 @@
 //!   edge stores the exact `IDP1` bytes and the consumer's schema ID and
 //!   artifact digest, which are not part of the key; a read re-validates the
 //!   bytes against them with `DependencyEdgeRecordV1::try_from_canonical`.
+//! - `counterfactual_dependency_commit_ranges` holds, per Timeline, one row per
+//!   committed factual Tick of the Timeline's own set: the Tick and the
+//!   first and last `seq` it owns. Its primary key is `(timeline_id, tick)`,
+//!   and the index `counterfactual_dependency_commit_ranges_by_last_seq` on
+//!   `(timeline_id, last_seq)` serves the head and cut reads.
+//! - `counterfactual_dependency_event_nodes` holds, per Timeline, the node
+//!   each committed `seq` is bound to: the Tick that recorded it and the node's
+//!   artifact digest. Its primary key is `(timeline_id, seq)`, and a second
+//!   unique key on the Timeline and artifact digest serves the bound `seq` of
+//!   a digest lookup.
+//! - `counterfactual_dependency_fold_heads` holds, per Timeline, one row per
+//!   scheduled Tick of the Timeline's own set (ADR-064 R4.4): the Tick, the
+//!   scanned-through `seq`, and the head artifact digest (32 zero bytes when
+//!   there is no head). Its primary key is `(timeline_id, tick)` and serves
+//!   the cursor read. The pipeline commit inserts one row with every
+//!   scheduled Tick, in the Tick's transaction; a human Tick and a seeded
+//!   Tick insert none.
+//! - The index `counterfactual_dependency_nodes_by_owner` on the nodes table,
+//!   over `(timeline_id, generation, owner_id, tick)`, serves the latest step
+//!   node of an owner. Both index names carry no `idx_` prefix, on purpose:
+//!   they follow the module's trigger naming,
+//!   `counterfactual_dependency_<table>_<what>`.
 //!
 //! A set is addressed by a Timeline ID and a generation key. A Fork
 //! generation's provisional rows use the generation itself (at least `1`); the
-//! committed prefix of a parent Timeline uses the reserved key `-1`. No write
-//! path records a prefix yet (#554), so those rows exist only when a test
-//! inserts them, and the tables keep and serve them. The keys can never meet:
-//! a check ties the origin code to the key, and generation `0` holds no rows.
+//! committed prefix of a Timeline uses the reserved key `-1`. No write path
+//! records a prefix yet (#554), so those rows exist only when the
+//! `test-support` seeding function installs them, and the tables keep and
+//! serve them. The keys can never meet: a check ties the origin code to the
+//! key, and generation `0` holds no rows.
 //!
-//! The three tables refuse an update, refuse a delete outside the marked #530
+//! The six tables refuse an update, refuse a delete outside the marked #530
 //! purge (the same `counterfactual_purge_fence` condition as the four delete
 //! guards of the storage tables), and refuse an insert that repeats a key.
 //! The record Tick guard also refuses an insert that is not above every Tick
@@ -67,9 +90,10 @@
 //!   capacity check: a record is bounded far below the set bounds.
 //! - **Record Tick.** It must be above the highest Tick recorded in the set,
 //!   or, while the set has no record, not below the first Tick persisted in
-//!   the generation's receipt row. A generation with no receipt row (a Fork id
-//!   re-created after a purge resumes at its floor without an invalidation)
-//!   has no first Tick, so a later Tick with a record is `BindingMismatch`.
+//!   the generation's receipt row. A generation with no receipt row (a
+//!   generic Fork id re-created after a purge resumes at its floor without an
+//!   invalidation) has no first Tick, so a later Tick with a record is
+//!   `BindingMismatch`.
 //! - **Capacity.** The check sums the stored counts of the set's record rows
 //!   and trusts them; it does not recount the node and edge rows. That is the
 //!   accepted trust boundary: this adapter alone writes the counts, in the
@@ -87,6 +111,59 @@
 //!   host's savepoint and refuse an unsettled in-doubt write. A stored row
 //!   that fails re-validation, or lies outside the requested scope, is
 //!   `CorruptState`.
+//! - **Factual prefix reads.** [`FactualPrefixReadPortV1`] runs under the
+//!   Timeline's own erasure read fence and its inherited scopes, at one read
+//!   point. It stitches the Timeline's own committed prefix set with every
+//!   ancestor's set through that ancestor's cut, as the Memory adapter does:
+//!   an ancestor's Ticks are visible when they end at or before the fork
+//!   point `seq`, a lookup that finds nothing continues in the next older
+//!   set, and a `seq` inside a Tick is a mid-Tick cut. A parent-prefix page
+//!   read stitches the same way, each ancestor serving only its visible
+//!   Ticks. An unknown or concealed Timeline, or one whose ancestor was
+//!   deleted, is `TimelineNotFound`. A stored row that fails re-validation
+//!   is a storage fault, and so is any read of a pre-schema read-only file,
+//!   which holds none of the tables, even a read with nothing to look up.
+//!   The set counts are the sums of the Timeline's own record rows.
+//! - **Fold reads (ADR-064 R4).** They run under the same fence and read
+//!   point. The fold cursor is the latest fold-head row of the nearest
+//!   segment that holds one at or below its visible Tick (an ancestor's cut
+//!   Tick), with the node its head digest names resolved through the
+//!   segments like a digest lookup; a head of 32 zero bytes names none, and
+//!   one that names no visible node is a storage fault. The fold window reads
+//!   the newest at most 65,537 Events of the logical range through the
+//!   ancestry segments, one indexed statement per segment, newest first, until
+//!   the limit is reached, taking the `seq`, type, and payload hash but never
+//!   the payload, and keeps the newest 65,536 with their Event bindings,
+//!   resolved like `nodes_for_committed_events`.
+//! - **Install path.** One insert function records a committed Tick: its
+//!   record, nodes, and edges under the prefix key, its commit range, and its
+//!   Event bindings. The pipeline commit calls it inside its own transaction,
+//!   after it has checked the Tick declaration against the Timeline's prefix
+//!   and appended the Events; `seed_factual_prefix` (`test-support` only)
+//!   calls it, in one transaction, for seeded Ticks.
+//! - **Event binding digest key.** This is a decision beyond the ADR's list of
+//!   tables, keys, and guards: `counterfactual_dependency_event_nodes` has
+//!   `UNIQUE (timeline_id, artifact_digest)` and the `digest_not_replaced`
+//!   guard trigger. The lookup of the `seq` a digest is bound to needs that
+//!   index, and the key mirrors the in-memory adapter's single-valued
+//!   `bound_seqs`, which holds at most one `seq` per digest. One digest binds
+//!   at most one `seq` (R3.7.2(iv)). The adapters differ only at the seeding
+//!   seam: the in-memory seam overwrites a repeated digest silently, while this
+//!   one aborts the whole seeding call. Both are test seams; the pipeline
+//!   commit refuses a repeated digest before it writes any binding.
+//! - **Commit range order.** The head and split reads assume that the commit
+//!   ranges of a Timeline are disjoint and ascend with their Ticks. The schema
+//!   guards the Tick order of the records but not the `seq` order of the
+//!   ranges: the single writer is the trust boundary, and the #554 admission
+//!   enforces the order before it installs a Tick.
+//! - **Batched reads.** `nodes_for_committed_events` and `nodes_by_digest` walk
+//!   the ancestry once and run one statement per segment for the whole request
+//!   (R3.7.6), binding the requested `seq`s or digests as one JSON array that
+//!   `json_each` joins. A request resolves in the nearest segment that holds
+//!   it, so a segment only gets the requests the newer segments left open. An
+//!   empty request runs no lookup statement (the schema probe and the ancestry
+//!   walk still run); a request costs the ancestry-walk statements plus at most
+//!   one lookup statement per segment.
 //! - **`SQLite`-only differences.** `SQLite` stores signed 64-bit integers, so:
 //!   a record Tick above `i64::MAX` is `FieldOutOfBounds` before any fence,
 //!   Fork lookup, or transaction, and a first Tick above it is rejected the
@@ -100,8 +177,11 @@
 //!   the tables do not exist there and cannot be created, so the read fails
 //!   closed as not found.
 //! - **Deletion.** The marked purge of a deleted Timeline also deletes its
-//!   edges, nodes, and records, whether they are its Fork generations' or its
-//!   own committed prefix. A re-created Timeline ID starts with empty sets.
+//!   edges, nodes, records, commit ranges, Event bindings, and fold heads,
+//!   whether they are its Fork generations' or its own committed prefix. A
+//!   re-created generic Fork's Timeline ID starts with empty sets. An
+//!   admitted (ADR-099) Fork is never deleted (ADR-099 revision 13), so its
+//!   sets are never purged.
 //! - **Existing files.** The tables are additive and created with
 //!   `IF NOT EXISTS`; a writable open of a file with the storage tables but
 //!   without these creates them empty, and a read-only open of such a file
@@ -110,23 +190,32 @@
 //!   refuses a read-only open until one writable open adds the new tables;
 //!   that is acceptable under the no-migration, replacement-first rule.
 
+#[cfg(any(test, feature = "test-support"))]
+use pos_core::counterfactual_store::test_fixtures::SeededFactualTickV1;
+use pos_core::factual_dependency::BoundFactualNodeV1;
 use pos_core::{
     CoreError, CounterfactualBasisV1, CounterfactualDependencyErrorV1 as DepError,
     CounterfactualDependencyReadPortV1, CounterfactualDependencyRecordingPortV1,
     CounterfactualInvalidationCommandV1, CounterfactualInvalidationOutcomeV1,
     CounterfactualTickOutcomeV1, DependencyEdgeRecordV1, DependencyNodeCoordinateV1,
     DependencyNodeRecordV1, DependencyPageCursorV1, DependencyPageRequestV1, DependencyPageV1,
-    DependencyPagedRowV1, DependencyReadScopeV1, ErasureProtectedOperationV1, Hash,
-    PipelineDraftBatchV1, RecordedDependencyClassV1, RecordedNodeOriginV1, RecordedSetCountsV1,
+    DependencyPagedRowV1, DependencyReadScopeV1, ErasureProtectedOperationV1, Event, FactualCutV1,
+    FactualFoldCursorV1, FactualFoldWindowV1, FactualHeadV1, FactualOwnerIdV1,
+    FactualPrefixReadPortV1, Hash, Kind, PipelineAdmissionBasisV1, PipelineDraftBatchV1,
+    RecordedDependencyClassV1, RecordedNodeOriginV1, RecordedSetCountsV1, Seq, SeqRange,
     TickDependencyRecordV1, TimelineId,
 };
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension, Params, Row};
 
 use super::{
-    counterfactual_schema_present, read_fork_state, settle, sql_integer, stored_hash, stored_u64,
-    then_staged, CounterfactualSchemaObjectV1, Staged, StoreError,
+    counterfactual_schema_present, lift, read_fork_state, settle, sql_integer, stored_hash,
+    stored_u64, then_staged, CounterfactualSchemaObjectV1, Staged, StoreError,
 };
-use crate::sqlite::{SqliteSchemaColumn, SqliteSchemaTable, SqliteStore};
+use crate::factual_tick_plan::{
+    fold_cursor_of, fold_window_of, plan_tick, FactualInstallV1, FoldEntryV1, PlannedTickV1,
+    TickPrefixV1, FOLD_READ_LIMIT,
+};
+use crate::sqlite::{seq_as_i64, SqliteSchemaColumn, SqliteSchemaTable, SqliteStore};
 use crate::COUNTERFACTUAL_SEAL;
 
 /// The generation key of a parent Timeline's committed prefix.
@@ -250,10 +339,65 @@ pub(super) const EDGES_TABLE: SqliteSchemaTable = SqliteSchemaTable {
     ],
 };
 
+/// Commit ranges: the Tick and the `seq` range of each committed factual Tick
+/// of a Timeline's own set.
+pub(super) const COMMIT_RANGES_TABLE: SqliteSchemaTable = SqliteSchemaTable {
+    name: "counterfactual_dependency_commit_ranges",
+    columns_query: "PRAGMA table_info(counterfactual_dependency_commit_ranges)",
+    columns: &[
+        key_column!("timeline_id", "TEXT"),
+        key_column!("tick", "INTEGER"),
+        data_column!("first_seq", "INTEGER"),
+        data_column!("last_seq", "INTEGER"),
+    ],
+    constraints: &[
+        "CHECK (tick >= 1)",
+        "CHECK (first_seq >= 1)",
+        "CHECK (last_seq >= first_seq)",
+    ],
+};
+
+/// Event bindings: the Tick that recorded the node of a committed `seq` and
+/// the node's artifact digest, unique per Timeline.
+pub(super) const EVENT_NODES_TABLE: SqliteSchemaTable = SqliteSchemaTable {
+    name: "counterfactual_dependency_event_nodes",
+    columns_query: "PRAGMA table_info(counterfactual_dependency_event_nodes)",
+    columns: &[
+        key_column!("timeline_id", "TEXT"),
+        key_column!("seq", "INTEGER"),
+        data_column!("tick", "INTEGER"),
+        data_column!("artifact_digest", "BLOB"),
+    ],
+    constraints: &[
+        "CHECK (seq >= 1)",
+        "CHECK (tick >= 1)",
+        "CHECK (length(artifact_digest) = 32)",
+        "UNIQUE (timeline_id, artifact_digest)",
+    ],
+};
+
+/// Fold heads (ADR-064 R4.4): per Timeline, the fold cursor and the head
+/// artifact digest each scheduled Tick of its own set wrote.
+pub(super) const FOLD_HEADS_TABLE: SqliteSchemaTable = SqliteSchemaTable {
+    name: "counterfactual_dependency_fold_heads",
+    columns_query: "PRAGMA table_info(counterfactual_dependency_fold_heads)",
+    columns: &[
+        key_column!("timeline_id", "TEXT"),
+        key_column!("tick", "INTEGER"),
+        data_column!("scanned_through", "INTEGER"),
+        data_column!("head_artifact_digest", "BLOB"),
+    ],
+    constraints: &[
+        "CHECK (tick >= 1)",
+        "CHECK (scanned_through >= 0)",
+        "CHECK (length(head_artifact_digest) = 32)",
+    ],
+};
+
 // The `WHEN NOT EXISTS (... counterfactual_purge_fence ...)` clause is
-// repeated in three trigger bodies here and in four in the parent module, seven
+// repeated in six trigger bodies here and in four in the parent module, ten
 // copies in all, on purpose: the exact-body validation compares literal text,
-// so the seven copies must stay identical.
+// so the ten copies must stay identical.
 pub(super) const RECORDS_RETAINED: CounterfactualSchemaObjectV1 = CounterfactualSchemaObjectV1 {
     kind: "trigger",
     name: "counterfactual_dependency_records_retained",
@@ -365,6 +509,125 @@ pub(super) const EDGES_NOT_REPLACED: CounterfactualSchemaObjectV1 = Counterfactu
            BEGIN SELECT RAISE(ABORT, 'dependency edge is already recorded'); END",
 };
 
+pub(super) const RANGES_RETAINED: CounterfactualSchemaObjectV1 = CounterfactualSchemaObjectV1 {
+    kind: "trigger",
+    name: "counterfactual_dependency_commit_ranges_retained",
+    body: "BEFORE DELETE ON counterfactual_dependency_commit_ranges
+           WHEN NOT EXISTS (
+               SELECT 1 FROM counterfactual_purge_fence WHERE fork_id = OLD.timeline_id
+           )
+           BEGIN SELECT RAISE(ABORT, 'dependency commit range is retained'); END",
+};
+
+pub(super) const RANGES_IMMUTABLE: CounterfactualSchemaObjectV1 = CounterfactualSchemaObjectV1 {
+    kind: "trigger",
+    name: "counterfactual_dependency_commit_ranges_immutable",
+    body: "BEFORE UPDATE ON counterfactual_dependency_commit_ranges
+           BEGIN SELECT RAISE(ABORT, 'dependency commit range is immutable'); END",
+};
+
+pub(super) const RANGES_NOT_REPLACED: CounterfactualSchemaObjectV1 = CounterfactualSchemaObjectV1 {
+    kind: "trigger",
+    name: "counterfactual_dependency_commit_ranges_not_replaced",
+    body: "BEFORE INSERT ON counterfactual_dependency_commit_ranges
+           WHEN EXISTS (
+               SELECT 1 FROM counterfactual_dependency_commit_ranges
+               WHERE timeline_id = NEW.timeline_id AND tick = NEW.tick
+           )
+           BEGIN SELECT RAISE(ABORT, 'dependency commit range is already recorded'); END",
+};
+
+pub(super) const BINDINGS_RETAINED: CounterfactualSchemaObjectV1 = CounterfactualSchemaObjectV1 {
+    kind: "trigger",
+    name: "counterfactual_dependency_event_nodes_retained",
+    body: "BEFORE DELETE ON counterfactual_dependency_event_nodes
+           WHEN NOT EXISTS (
+               SELECT 1 FROM counterfactual_purge_fence WHERE fork_id = OLD.timeline_id
+           )
+           BEGIN SELECT RAISE(ABORT, 'dependency event node is retained'); END",
+};
+
+pub(super) const BINDINGS_IMMUTABLE: CounterfactualSchemaObjectV1 = CounterfactualSchemaObjectV1 {
+    kind: "trigger",
+    name: "counterfactual_dependency_event_nodes_immutable",
+    body: "BEFORE UPDATE ON counterfactual_dependency_event_nodes
+           BEGIN SELECT RAISE(ABORT, 'dependency event node is immutable'); END",
+};
+
+/// Guards the `seq` key of a binding, so a replacing insert deletes no binding
+/// that holds the `seq`.
+pub(super) const BINDINGS_SEQ_NOT_REPLACED: CounterfactualSchemaObjectV1 =
+    CounterfactualSchemaObjectV1 {
+        kind: "trigger",
+        name: "counterfactual_dependency_event_nodes_seq_not_replaced",
+        body: "BEFORE INSERT ON counterfactual_dependency_event_nodes
+           WHEN EXISTS (
+               SELECT 1 FROM counterfactual_dependency_event_nodes
+               WHERE timeline_id = NEW.timeline_id AND seq = NEW.seq
+           )
+           BEGIN SELECT RAISE(ABORT, 'dependency event node is already recorded'); END",
+    };
+
+/// Guards the artifact digest key of a binding, so a replacing insert deletes
+/// no binding that holds the digest.
+pub(super) const BINDINGS_DIGEST_NOT_REPLACED: CounterfactualSchemaObjectV1 =
+    CounterfactualSchemaObjectV1 {
+        kind: "trigger",
+        name: "counterfactual_dependency_event_nodes_digest_not_replaced",
+        body: "BEFORE INSERT ON counterfactual_dependency_event_nodes
+           WHEN EXISTS (
+               SELECT 1 FROM counterfactual_dependency_event_nodes
+               WHERE timeline_id = NEW.timeline_id AND artifact_digest = NEW.artifact_digest
+           )
+           BEGIN SELECT RAISE(ABORT, 'dependency event node digest is already recorded'); END",
+    };
+
+pub(super) const FOLD_HEADS_RETAINED: CounterfactualSchemaObjectV1 = CounterfactualSchemaObjectV1 {
+    kind: "trigger",
+    name: "counterfactual_dependency_fold_heads_retained",
+    body: "BEFORE DELETE ON counterfactual_dependency_fold_heads
+           WHEN NOT EXISTS (
+               SELECT 1 FROM counterfactual_purge_fence WHERE fork_id = OLD.timeline_id
+           )
+           BEGIN SELECT RAISE(ABORT, 'dependency fold head is retained'); END",
+};
+
+pub(super) const FOLD_HEADS_IMMUTABLE: CounterfactualSchemaObjectV1 =
+    CounterfactualSchemaObjectV1 {
+        kind: "trigger",
+        name: "counterfactual_dependency_fold_heads_immutable",
+        body: "BEFORE UPDATE ON counterfactual_dependency_fold_heads
+           BEGIN SELECT RAISE(ABORT, 'dependency fold head is immutable'); END",
+    };
+
+/// Guards the Tick key of a fold head, so a replacing insert deletes no fold
+/// head that holds the key.
+pub(super) const FOLD_HEADS_NOT_REPLACED: CounterfactualSchemaObjectV1 =
+    CounterfactualSchemaObjectV1 {
+        kind: "trigger",
+        name: "counterfactual_dependency_fold_heads_not_replaced",
+        body: "BEFORE INSERT ON counterfactual_dependency_fold_heads
+           WHEN EXISTS (
+               SELECT 1 FROM counterfactual_dependency_fold_heads
+               WHERE timeline_id = NEW.timeline_id AND tick = NEW.tick
+           )
+           BEGIN SELECT RAISE(ABORT, 'dependency fold head is already recorded'); END",
+    };
+
+/// Serves the head and cut reads: the commit ranges of a Timeline by last `seq`.
+pub(super) const RANGES_BY_LAST_SEQ: CounterfactualSchemaObjectV1 = CounterfactualSchemaObjectV1 {
+    kind: "index",
+    name: "counterfactual_dependency_commit_ranges_by_last_seq",
+    body: "ON counterfactual_dependency_commit_ranges(timeline_id, last_seq)",
+};
+
+/// Serves the latest step node of an owner.
+pub(super) const NODES_BY_OWNER: CounterfactualSchemaObjectV1 = CounterfactualSchemaObjectV1 {
+    kind: "index",
+    name: "counterfactual_dependency_nodes_by_owner",
+    body: "ON counterfactual_dependency_nodes(timeline_id, generation, owner_id, tick)",
+};
+
 /// One recorded set: the Timeline that owns it and its generation key.
 struct DependencySetV1 {
     timeline: String,
@@ -384,13 +647,10 @@ impl DependencySetV1 {
     }
 }
 
-/// One page read: its set, the last Tick it may return, the key it resumes
-/// after, and one more than the page limit.
+/// One page read: its set and its window.
 struct PageQueryV1<'a> {
-    set: DependencySetV1,
-    through: i64,
-    after: &'a CursorKeyV1,
-    limit: i64,
+    set: &'a DependencySetV1,
+    window: PageWindowV1<'a>,
 }
 
 /// Raw node columns after the set, in the node SELECT column order: position
@@ -418,6 +678,15 @@ type EdgeRowV1 = (i64, i64, String, i64, Vec<u8>, i64, Vec<u8>, Vec<u8>);
 /// edge, and declared-input totals, the highest record Tick, and the
 /// generation's first Tick.
 type SetStateRowV1 = (i64, i64, i64, Option<i64>, Option<i64>);
+
+/// One page window: the last Tick it may return, the key it resumes after,
+/// and the most rows it may return (one more than the page limit for a whole
+/// page).
+struct PageWindowV1<'a> {
+    tick_bound: i64,
+    after: &'a CursorKeyV1,
+    row_limit: i64,
+}
 
 /// Reads one kind of row for a page query.
 type PageRowsFnV1<T> = fn(&Connection, &PageQueryV1<'_>) -> Staged<Vec<T>>;
@@ -600,7 +869,7 @@ const EDGE_PAGE_SQL: &str = "SELECT tick, scheduler_position, owner_id, output_o
 
 /// Read and decode one page of node rows after the cursor.
 fn node_rows(conn: &Connection, query: &PageQueryV1<'_>) -> Staged<Vec<DependencyNodeRecordV1>> {
-    let (tick, position, owner, ordinal, _) = query.after;
+    let (tick, position, owner, ordinal, _) = query.window.after;
     conn.prepare_cached(NODE_PAGE_SQL)
         .and_then(|mut statement| {
             statement
@@ -608,12 +877,12 @@ fn node_rows(conn: &Connection, query: &PageQueryV1<'_>) -> Staged<Vec<Dependenc
                     params![
                         query.set.timeline,
                         query.set.generation,
-                        query.through,
+                        query.window.tick_bound,
                         tick,
                         position,
                         owner,
                         ordinal,
-                        query.limit
+                        query.window.row_limit
                     ],
                     |row| <NodeRowV1>::try_from(row),
                 )
@@ -625,7 +894,7 @@ fn node_rows(conn: &Connection, query: &PageQueryV1<'_>) -> Staged<Vec<Dependenc
 
 /// Read and decode one page of edge rows after the cursor.
 fn edge_rows(conn: &Connection, query: &PageQueryV1<'_>) -> Staged<Vec<DependencyEdgeRecordV1>> {
-    let (tick, position, owner, ordinal, source) = query.after;
+    let (tick, position, owner, ordinal, source) = query.window.after;
     conn.prepare_cached(EDGE_PAGE_SQL)
         .and_then(|mut statement| {
             statement
@@ -633,13 +902,13 @@ fn edge_rows(conn: &Connection, query: &PageQueryV1<'_>) -> Staged<Vec<Dependenc
                     params![
                         query.set.timeline,
                         query.set.generation,
-                        query.through,
+                        query.window.tick_bound,
                         tick,
                         position,
                         owner,
                         ordinal,
                         source,
-                        query.limit
+                        query.window.row_limit
                     ],
                     |row| <EdgeRowV1>::try_from(row),
                 )
@@ -647,6 +916,38 @@ fn edge_rows(conn: &Connection, query: &PageQueryV1<'_>) -> Staged<Vec<Dependenc
         })
         .map_err(SqliteStore::into_storage_error)
         .map(|raw| raw.into_iter().map(decode_edge).collect())
+}
+
+/// Read the rows of every segment, in ancestry order, up to the window's row
+/// limit in all; each segment serves only the Ticks it may show, and a window
+/// already full skips the remaining segments.
+fn window_rows<T>(
+    conn: &Connection,
+    rows: PageRowsFnV1<T>,
+    segments: &[SegmentV1],
+    window: &PageWindowV1<'_>,
+) -> Staged<Vec<T>> {
+    let start: Staged<Vec<T>> = Ok(Ok(Vec::new()));
+    segments.iter().fold(start, |held, segment| {
+        then_staged(held, |mut found| {
+            let row_limit = window.row_limit - sql_count(found.len());
+            if row_limit <= 0 {
+                return Ok(Ok(found));
+            }
+            let query = PageQueryV1 {
+                set: &segment.set,
+                window: PageWindowV1 {
+                    tick_bound: window.tick_bound.min(segment.tick_bound),
+                    after: window.after,
+                    row_limit,
+                },
+            };
+            then_staged(rows(conn, &query), |more| {
+                found.extend(more);
+                Ok(Ok(found))
+            })
+        })
+    })
 }
 
 /// Build the page of the fetched rows, which are after the request cursor and
@@ -900,38 +1201,22 @@ fn insert_dependency_record(
 }
 
 impl SqliteStore {
-    /// Require a visible parent Timeline, under its own erasure scopes and
-    /// the schema. A pre-schema read-only file holds no counterfactual state.
-    fn visible_dependency_parent(&self, timeline: TimelineId) -> Staged<()> {
-        self.ensure_generic_timeline_visibility(timeline)
-            .and_then(|()| {
-                self.authorize_inherited_scopes(timeline, ErasureProtectedOperationV1::Read)
-            })
-            .and_then(|()| {
-                counterfactual_schema_present(&self.conn).map(|present| {
-                    if present {
-                        Ok(())
-                    } else {
-                        Err(StoreError::ForkNotFound)
-                    }
-                })
-            })
-    }
-
-    /// Resolve a read scope to its set: a visible parent Timeline's prefix,
-    /// or a published Fork's committed generation.
-    fn dependency_set(&self, scope: DependencyReadScopeV1) -> Staged<DependencySetV1> {
+    /// Resolve a read scope to its segments, oldest first: a visible
+    /// Timeline's committed prefix stitched with every ancestor's through its
+    /// cut, or a published Fork's committed generation. A parent that exists
+    /// on a pre-schema read-only file is `ForkNotFound`.
+    fn dependency_segments(&self, scope: DependencyReadScopeV1) -> Staged<Vec<SegmentV1>> {
         match scope {
             DependencyReadScopeV1::ParentPrefix { timeline, .. } => {
-                then_staged(self.visible_dependency_parent(timeline), |()| {
-                    Ok(Ok(DependencySetV1::new(timeline, PREFIX_GENERATION)))
-                })
+                let path = self.factual_path(timeline);
+                path.map(|found| found.ok_or(StoreError::ForkNotFound))
             }
             DependencyReadScopeV1::ForkGeneration(at) => {
                 then_staged(self.visible_counterfactual_fork(at.fork), |()| {
                     then_staged(read_fork_state(&self.conn, at.fork), |state| {
                         let set = DependencySetV1::new(at.fork, sql_tick(at.generation));
-                        Ok(scope.ensure_current(state.generation).map(|()| set))
+                        let current = scope.ensure_current(state.generation);
+                        Ok(current.map(|()| vec![whole_segment(set)]))
                     })
                 })
             }
@@ -948,25 +1233,19 @@ impl SqliteStore {
         cursor_key(request.after())
             .and_then(|after| {
                 let scope = request.scope();
-                let limit = sql_count(request.limit().saturating_add(1));
-                let through = scope.through_tick().map_or(i64::MAX, sql_tick);
-                let fenced = self.with_erasure_read_fence(
-                    fence_timeline(scope),
-                    ErasureProtectedOperationV1::Read,
-                    |store| {
-                        store.in_counterfactual_read(|store| {
-                            then_staged(store.dependency_set(scope), |set| {
-                                let query = PageQueryV1 {
-                                    set,
-                                    through,
-                                    after: &after,
-                                    limit,
-                                };
-                                rows(&store.conn, &query)
-                            })
+                let window = PageWindowV1 {
+                    tick_bound: scope.through_tick().map_or(i64::MAX, sql_tick),
+                    after: &after,
+                    row_limit: sql_count(request.limit().saturating_add(1)),
+                };
+                let fence = fence_timeline(scope);
+                let fenced = self.with_erasure_read_fence(fence, READ_OPERATION, |store| {
+                    store.in_counterfactual_read(|store| {
+                        then_staged(store.dependency_segments(scope), |segments| {
+                            window_rows(&store.conn, rows, &segments, &window)
                         })
-                    },
-                );
+                    })
+                });
                 settle(fenced)
             })
             .and_then(|fetched| build_page(request, &fetched))
@@ -979,14 +1258,16 @@ impl SqliteStore {
     /// because `TickDependencyRecordV1::try_new` already enforces the
     /// per-record node, edge, input, and byte caps, which are far below the
     /// set bounds, and the generation's set starts empty.
-    fn write_recorded_generation(
+    fn write_recorded_generation<E: From<StoreError>>(
         &self,
         command: &CounterfactualInvalidationCommandV1,
         set: &DependencySetV1,
         first_tick: i64,
         record: Option<&TickDependencyRecordV1>,
-    ) -> Staged<CounterfactualInvalidationOutcomeV1> {
-        let written = self.write_counterfactual_generation(command, set.generation, first_tick);
+        step: impl Fn(&Self, TimelineId, &PipelineDraftBatchV1) -> Staged<Seq, E>,
+    ) -> Staged<CounterfactualInvalidationOutcomeV1, E> {
+        let written =
+            self.write_counterfactual_generation(command, set.generation, first_tick, step);
         then_staged(written, |outcome| {
             record
                 .map_or(Ok(()), |record| {
@@ -996,21 +1277,23 @@ impl SqliteStore {
         })
     }
 
-    /// Append one later Tick and insert its record, if any, in the open
-    /// transaction. The outcome is built from the staged head; a head that did
-    /// not advance rolls back.
-    fn append_recorded_tick(
+    /// Append one later Tick through the caller's Event-append `step` and
+    /// insert its record, if any, in the open transaction. The outcome is
+    /// built from the staged head; a head that did not advance rolls back.
+    fn append_recorded_tick<E: From<StoreError>>(
         &self,
         fork: TimelineId,
         persisted: &CounterfactualBasisV1,
         drafts: &PipelineDraftBatchV1,
         record: Option<&TickDependencyRecordV1>,
-    ) -> Staged<CounterfactualTickOutcomeV1> {
+        step: impl Fn(&Self, TimelineId, &PipelineDraftBatchV1) -> Staged<Seq, E>,
+    ) -> Staged<CounterfactualTickOutcomeV1, E> {
         let set = DependencySetV1::new(fork, sql_tick(persisted.generation));
-        then_staged(admit_later_record(&self.conn, &set, record), |()| {
-            let appended = self
-                .append_tick_in_transaction(fork, drafts)
-                .map(|head| persisted.committed_tick(&COUNTERFACTUAL_SEAL, head));
+        let admitted = lift(admit_later_record(&self.conn, &set, record));
+        then_staged(admitted, |()| {
+            let appended = then_staged(step(self, fork, drafts), |head| {
+                lift(Ok(persisted.committed_tick(&COUNTERFACTUAL_SEAL, head)))
+            });
             then_staged(appended, |outcome| {
                 record
                     .map_or(Ok(()), |record| {
@@ -1022,30 +1305,33 @@ impl SqliteStore {
     }
 
     /// The one write path of an invalidation, plain (`record` is `None`) or
-    /// recording. After the fence, the admitted-Fork guard, and the Fork
-    /// lookup, a record is checked before the basis, so a misplaced record
-    /// wins over a stale basis.
-    pub(super) fn commit_invalidation_recording(
+    /// recording. After the fence and the caller's `basis` read (the
+    /// admitted-Fork guard and the Fork lookup), a record is checked before the
+    /// basis comparison, so a misplaced record wins over a stale basis. The
+    /// first Tick's Events are appended by the caller's `step`.
+    pub(super) fn commit_invalidation_recording<E: From<StoreError>>(
         &mut self,
         command: &CounterfactualInvalidationCommandV1,
         record: Option<&TickDependencyRecordV1>,
-    ) -> Result<CounterfactualInvalidationOutcomeV1, StoreError> {
+        basis: impl Fn(&Self, TimelineId) -> Staged<CounterfactualBasisV1, E>,
+        step: impl Fn(&Self, TimelineId, &PipelineDraftBatchV1) -> Staged<Seq, E>,
+    ) -> Result<CounterfactualInvalidationOutcomeV1, E> {
         let fork = command.fork();
         let generation = sql_integer(command.new_generation().generation)?;
         let first_tick = sql_integer(command.first_tick())?;
         let set = DependencySetV1::new(fork, generation);
         let staged = self.with_erasure_fence(fork, ErasureProtectedOperationV1::Append, |store| {
             store.in_counterfactual_scope(|store| {
-                then_staged(store.writable_counterfactual_basis(fork), |persisted| {
-                    let admitted = admit_first_record(record, command.first_tick());
-                    then_staged(Ok(admitted), |()| {
+                then_staged(basis(store, fork), |persisted| {
+                    let admitted = lift(Ok(admit_first_record(record, command.first_tick())));
+                    then_staged(admitted, |()| {
                         command
                             .expected_basis()
                             .first_conflict(&persisted)
                             .map_or_else(
                                 || {
                                     store.write_recorded_generation(
-                                        command, &set, first_tick, record,
+                                        command, &set, first_tick, record, &step,
                                     )
                                 },
                                 |conflict| {
@@ -1064,23 +1350,32 @@ impl SqliteStore {
     }
 
     /// The one write path of a later Tick, plain (`record` is `None`) or
-    /// recording. A record's Tick must fit `SQLite` before any fence.
-    pub(super) fn append_tick_recording(
+    /// recording. A record's Tick must fit `SQLite` before any fence; the
+    /// basis is read by the caller's `basis` and the Events are appended by
+    /// its `step`.
+    pub(super) fn append_tick_recording<E: From<StoreError>>(
         &mut self,
         fork: TimelineId,
         expected: &CounterfactualBasisV1,
         drafts: &PipelineDraftBatchV1,
         record: Option<&TickDependencyRecordV1>,
-    ) -> Result<CounterfactualTickOutcomeV1, StoreError> {
+        basis: impl Fn(&Self, TimelineId) -> Staged<CounterfactualBasisV1, E>,
+        step: impl Fn(&Self, TimelineId, &PipelineDraftBatchV1) -> Staged<Seq, E>,
+    ) -> Result<CounterfactualTickOutcomeV1, E> {
         record
             .map_or(Ok(()), |record| sql_integer(record.tick()).map(|_| ()))
+            .map_err(E::from)
             .and_then(|()| {
                 let staged =
                     self.with_erasure_fence(fork, ErasureProtectedOperationV1::Append, |store| {
                         store.in_counterfactual_scope(|store| {
-                            then_staged(store.writable_counterfactual_basis(fork), |persisted| {
+                            then_staged(basis(store, fork), |persisted| {
                                 expected.first_conflict(&persisted).map_or_else(
-                                    || store.append_recorded_tick(fork, &persisted, drafts, record),
+                                    || {
+                                        store.append_recorded_tick(
+                                            fork, &persisted, drafts, record, &step,
+                                        )
+                                    },
                                     |conflict| Ok(Ok(CounterfactualTickOutcomeV1::Stale(conflict))),
                                 )
                             })
@@ -1113,7 +1408,12 @@ impl CounterfactualDependencyRecordingPortV1 for SqliteStore {
         command: &CounterfactualInvalidationCommandV1,
         record: &TickDependencyRecordV1,
     ) -> Result<CounterfactualInvalidationOutcomeV1, StoreError> {
-        self.commit_invalidation_recording(command, Some(record))
+        self.commit_invalidation_recording(
+            command,
+            Some(record),
+            Self::writable_counterfactual_basis,
+            Self::append_tick_in_transaction,
+        )
     }
 
     fn append_counterfactual_tick_with_dependencies(
@@ -1123,7 +1423,971 @@ impl CounterfactualDependencyRecordingPortV1 for SqliteStore {
         drafts: &PipelineDraftBatchV1,
         record: &TickDependencyRecordV1,
     ) -> Result<CounterfactualTickOutcomeV1, StoreError> {
-        self.append_tick_recording(fork, expected, drafts, Some(record))
+        self.append_tick_recording(
+            fork,
+            expected,
+            drafts,
+            Some(record),
+            Self::writable_counterfactual_basis,
+            Self::append_tick_in_transaction,
+        )
+    }
+}
+
+/// The erasure operation of every read of this module.
+const READ_OPERATION: ErasureProtectedOperationV1 = ErasureProtectedOperationV1::Read;
+
+/// The head of a Timeline without a recorded Tick.
+const NO_HEAD: FactualHeadV1 = FactualHeadV1 {
+    tick: 0,
+    last_seq: Seq::ZERO,
+};
+
+/// One segment of a Timeline's fork ancestry, as far as it is visible.
+struct SegmentV1 {
+    /// The segment's recorded set.
+    set: DependencySetV1,
+    /// Last `seq` a Tick of the segment may end on to be visible.
+    last_seq_limit: i64,
+    /// Highest Tick of the segment that is visible.
+    tick_bound: i64,
+}
+
+/// At most one node, or the store's fault.
+type NodeLookupV1 = Result<Option<DependencyNodeRecordV1>, CoreError>;
+
+/// One entry per requested `seq`, or the store's fault.
+type NodeListV1 = Result<Vec<Option<DependencyNodeRecordV1>>, CoreError>;
+
+/// One entry per requested digest, or the store's fault.
+type BoundListV1 = Result<Vec<Option<BoundFactualNodeV1>>, CoreError>;
+
+/// Reads one row of a statement.
+type RowReaderV1<T> = fn(&Row<'_>) -> rusqlite::Result<T>;
+
+/// The Tick and last `seq` of the highest commit range that ends at or before
+/// a limit. Commit ranges are disjoint and ascend (see the module docs), so the
+/// range with the highest last `seq` is the range of the highest Tick.
+const HEAD_SQL: &str = "SELECT tick, last_seq FROM counterfactual_dependency_commit_ranges
+     WHERE timeline_id = ?1 AND last_seq <= ?2
+     ORDER BY last_seq DESC LIMIT 1";
+
+/// The Tick that a `seq` splits (it relies on the order of `HEAD_SQL`): the
+/// first commit range that ends after the `seq` (`?2`), if it starts at or
+/// before it and ends within the limit (`?3`).
+const SPLIT_SQL: &str = "SELECT tick FROM (
+         SELECT tick, first_seq, last_seq FROM counterfactual_dependency_commit_ranges
+         WHERE timeline_id = ?1 AND last_seq > ?2
+         ORDER BY last_seq LIMIT 1
+     ) WHERE first_seq <= ?2 AND last_seq <= ?3";
+
+/// The nodes bound to the committed `seq`s of a JSON array (`?1`) in the
+/// prefix set of a Timeline (`?2`), if the Tick is at or below the bound
+/// (`?3`) and the node is in the set of generation `?4`. The last column is the
+/// array index of the request, so one statement serves a whole request;
+/// duplicates in the array each yield their own row. The first join is a
+/// `CROSS JOIN` only to force the join order: `SQLite` never reorders it, so
+/// `json_each` stays the outer loop and the tables are probed by index. With an
+/// `ON` clause it is still an inner join.
+const EVENT_NODES_SQL: &str = "SELECT n.tick, n.scheduler_position, n.owner_id,
+            n.output_ordinal, n.schema_id, n.artifact_digest, n.class, n.origin,
+            n.input_digests, n.provenance_digest, j.key
+     FROM json_each(?1) AS j
+     CROSS JOIN counterfactual_dependency_event_nodes AS e
+       ON e.timeline_id = ?2 AND e.seq = j.value AND e.tick <= ?3
+     JOIN counterfactual_dependency_nodes AS n
+       ON n.timeline_id = e.timeline_id AND n.generation = ?4
+      AND n.artifact_digest = e.artifact_digest";
+
+/// The nodes with the artifact digests of a JSON array of lowercase hex texts
+/// (`?1`) in the prefix set of generation `?4` of a Timeline (`?2`), if their
+/// Tick is at or below the bound (`?3`). The last columns are the array index
+/// of the request and the `seq` the digest is bound to, if any (the binding
+/// is not filtered by Tick, as in the in-memory adapter). The first join is a
+/// `CROSS JOIN` to force `json_each` as the outer loop, as in the event
+/// statement. It needs `SQLite` 3.41+ (`unhex`); the crate uses the bundled
+/// build.
+const DIGEST_NODES_SQL: &str = "SELECT n.tick, n.scheduler_position, n.owner_id,
+            n.output_ordinal, n.schema_id, n.artifact_digest, n.class, n.origin,
+            n.input_digests, n.provenance_digest, j.key, b.seq
+     FROM json_each(?1) AS j
+     CROSS JOIN counterfactual_dependency_nodes AS n
+       ON n.timeline_id = ?2 AND n.generation = ?4
+      AND n.artifact_digest = unhex(j.value) AND n.tick <= ?3
+     LEFT JOIN counterfactual_dependency_event_nodes AS b
+       ON b.timeline_id = n.timeline_id AND b.artifact_digest = n.artifact_digest";
+
+/// The latest step node (output ordinal zero) of an owner (`?3`) in the prefix
+/// set (`?2`) at or below the bound (`?4`).
+///
+/// `ORDER BY tick DESC, scheduler_position DESC` equals the in-memory
+/// adapter's last write wins over the canonical node order. If slice 8 adds a
+/// `scheduler_position >= 1` filter to the step lookup, it must be applied to
+/// both adapters.
+const STEP_NODE_SQL: &str = "SELECT tick, scheduler_position, owner_id, output_ordinal,
+            schema_id, artifact_digest, class, origin, input_digests, provenance_digest
+     FROM counterfactual_dependency_nodes
+     WHERE timeline_id = ?1 AND generation = ?2 AND owner_id = ?3
+       AND output_ordinal = 0 AND tick <= ?4
+     ORDER BY tick DESC, scheduler_position DESC LIMIT 1";
+
+/// The latest fold-head row of a Timeline's own set (`?1`) at or below the
+/// bound (`?2`): its scanned-through `seq` and head digest. The primary key
+/// serves it.
+const FOLD_HEAD_SQL: &str = "SELECT scanned_through, head_artifact_digest
+     FROM counterfactual_dependency_fold_heads
+     WHERE timeline_id = ?1 AND tick <= ?2
+     ORDER BY tick DESC LIMIT 1";
+
+/// The newest own Events of a Timeline (`?1`) in the local `seq` range
+/// (`?2`, `?3`], at most `?4` of them, newest first: the `seq`, the type,
+/// and the payload hash, never the payload. The primary key serves it.
+const FOLD_EVENTS_SQL: &str = "SELECT seq, event_type, payload_hash FROM events
+     WHERE timeline_id = ?1 AND seq > ?2 AND seq <= ?3
+     ORDER BY seq DESC LIMIT ?4";
+
+/// The message of a factual read on a file without the counterfactual schema.
+const SCHEMA_ABSENT: &str = "factual prefix read needs the counterfactual schema";
+
+/// The error of a closed rejection in a factual read: a stored row that fails
+/// the contract's checks is corrupt, and any other rejection is a failed read.
+///
+/// The text is diagnostic only: `CoreError::Storage` carries no code, so a
+/// caller must not match on it, and the wording may change.
+fn factual_fault(error: StoreError) -> CoreError {
+    CoreError::Storage(match error {
+        StoreError::CorruptState => "factual prefix row is corrupt".to_owned(),
+        other => format!("factual prefix read failed: {other:?}"),
+    })
+}
+
+/// Settle a staged read: a closed rejection becomes a storage fault.
+fn settle_factual<T>(staged: Staged<T>) -> Result<T, CoreError> {
+    staged.and_then(|inner| inner.map_err(factual_fault))
+}
+
+/// The fault of a factual read on a file without the counterfactual schema.
+fn schema_absent() -> CoreError {
+    CoreError::Storage(SCHEMA_ABSENT.to_owned())
+}
+
+/// The segments of a file that holds the schema, or its fault.
+fn schema_required(path: Option<Vec<SegmentV1>>) -> Result<Vec<SegmentV1>, CoreError> {
+    path.ok_or_else(schema_absent)
+}
+
+/// Whether the file holds the counterfactual schema, as a fault if not.
+fn require_schema(conn: &Connection) -> Result<(), CoreError> {
+    counterfactual_schema_present(conn)
+        .and_then(|present| present.then_some(()).ok_or_else(schema_absent))
+}
+
+/// Narrow a stored integer to `u64`; a negative is a corrupt row.
+fn stored_unsigned(value: i64) -> Result<u64, CoreError> {
+    stored_u64(value).map_err(factual_fault)
+}
+
+/// The first column of a row.
+fn first_column(row: &Row<'_>) -> rusqlite::Result<i64> {
+    row.get(0)
+}
+
+/// The Tick and last `seq` columns of a commit range row.
+fn head_row(row: &Row<'_>) -> rusqlite::Result<(i64, i64)> {
+    <(i64, i64)>::try_from(row)
+}
+
+/// The columns of a node row.
+fn node_row(row: &Row<'_>) -> rusqlite::Result<NodeRowV1> {
+    <NodeRowV1>::try_from(row)
+}
+
+/// Decode a stored node; a row that fails the contract's checks is corrupt.
+fn decode_factual_node(row: NodeRowV1) -> Result<DependencyNodeRecordV1, CoreError> {
+    decode_node(row).map_err(factual_fault)
+}
+
+/// Read at most one row of a statement.
+fn optional_row<T>(
+    conn: &Connection,
+    sql: &str,
+    query: impl Params,
+    read: impl FnOnce(&Row<'_>) -> rusqlite::Result<T>,
+) -> Result<Option<T>, CoreError> {
+    let mut statement = conn
+        .prepare_cached(sql)
+        .map_err(SqliteStore::into_storage_error)?;
+    statement
+        .query_row(query, read)
+        .optional()
+        .map_err(SqliteStore::into_storage_error)
+}
+
+/// Read every row of a statement.
+fn all_rows<T>(
+    conn: &Connection,
+    sql: &str,
+    query: impl Params,
+    read: RowReaderV1<T>,
+) -> Result<Vec<T>, CoreError> {
+    let mut statement = conn
+        .prepare_cached(sql)
+        .map_err(SqliteStore::into_storage_error)?;
+    let rows = statement
+        .query_map(query, read)
+        .and_then(|mapped| mapped.collect::<rusqlite::Result<Vec<T>>>());
+    rows.map_err(SqliteStore::into_storage_error)
+}
+
+/// Read and decode at most one node.
+fn node_lookup(conn: &Connection, sql: &str, query: impl Params) -> NodeLookupV1 {
+    optional_row(conn, sql, query, node_row)
+        .and_then(|row| row.map(decode_factual_node).transpose())
+}
+
+/// The first result `find` yields over the segments, in the order given.
+fn first_found<'a, T>(
+    mut path: impl Iterator<Item = &'a SegmentV1>,
+    find: impl Fn(&SegmentV1) -> Result<Option<T>, CoreError>,
+) -> Result<Option<T>, CoreError> {
+    path.try_fold(None, |found, segment| {
+        found.map_or_else(|| find(segment), |done| Ok(Some(done)))
+    })
+}
+
+/// The hits of one batched statement: the position in the pending requests
+/// and the hit. The slot is a position in the pending list, not a request
+/// index.
+type HitsV1<R> = Result<Vec<(usize, R)>, CoreError>;
+
+/// Resolve `count` requests over the segments, newest first, with one batched
+/// statement per segment that still has an unresolved request: `fetch` gets the
+/// segment and the indexes of the unresolved requests, in request order, and
+/// returns the hits keyed by position in that list. A request resolves in the
+/// nearest segment that holds it; a request nobody holds stays `None`.
+fn resolve_batch<R>(
+    path: &[SegmentV1],
+    count: usize,
+    fetch: impl Fn(&SegmentV1, &[usize]) -> HitsV1<R>,
+) -> Result<Vec<Option<R>>, CoreError> {
+    let mut found: Vec<Option<R>> = Vec::new();
+    found.resize_with(count, || None);
+    let mut pending: Vec<usize> = (0..count).collect();
+    for segment in path.iter().rev() {
+        if pending.is_empty() {
+            break;
+        }
+        for (slot, hit) in fetch(segment, &pending)? {
+            found[pending[slot]] = Some(hit);
+        }
+        pending.retain(|index| found[*index].is_none());
+    }
+    Ok(found)
+}
+
+/// A JSON array of the texts, which are already JSON values.
+fn json_array(items: impl Iterator<Item = String>) -> String {
+    format!("[{}]", items.collect::<Vec<_>>().join(","))
+}
+
+/// The digits of a hex text.
+const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
+
+/// The JSON text of a digest: its lowercase hex in quotes.
+fn digest_json(digest: &Hash) -> String {
+    let digits = digest.as_bytes().iter().flat_map(|byte| {
+        let value = usize::from(*byte);
+        [HEX_DIGITS[value >> 4], HEX_DIGITS[value & 15]]
+    });
+    format!("\"{}\"", digits.map(char::from).collect::<String>())
+}
+
+/// The highest commit range of the Timeline's own set that ends at or before
+/// `limit`, as its Tick and last `seq`.
+fn head_through(
+    conn: &Connection,
+    timeline: &str,
+    limit: i64,
+) -> Result<Option<(i64, i64)>, CoreError> {
+    optional_row(conn, HEAD_SQL, params![timeline, limit], head_row)
+}
+
+/// The visible head of a segment at or before `at`.
+fn segment_head(
+    conn: &Connection,
+    segment: &SegmentV1,
+    at: i64,
+) -> Result<Option<FactualHeadV1>, CoreError> {
+    let upto = at.min(segment.last_seq_limit);
+    let found = head_through(conn, &segment.set.timeline, upto);
+    found.and_then(|row| row.map(head_of).transpose())
+}
+
+/// The Tick the point `at` splits in a segment, if the Tick is visible.
+fn segment_split(
+    conn: &Connection,
+    segment: &SegmentV1,
+    at: i64,
+) -> Result<Option<u64>, CoreError> {
+    let found = optional_row(
+        conn,
+        SPLIT_SQL,
+        params![segment.set.timeline, at, segment.last_seq_limit],
+        first_column,
+    );
+    found.and_then(|row| row.map(stored_unsigned).transpose())
+}
+
+/// Decode the Tick and last `seq` of a commit range.
+fn head_of(row: (i64, i64)) -> Result<FactualHeadV1, CoreError> {
+    let (tick, last) = row;
+    let last_seq = stored_seq(last);
+    stored_unsigned(tick).and_then(|found| {
+        last_seq.map(|seq| FactualHeadV1 {
+            tick: found,
+            last_seq: seq,
+        })
+    })
+}
+
+/// A segment of an ancestor, visible through its cut.
+fn ancestor_segment(
+    conn: &Connection,
+    ancestor: TimelineId,
+    cut: Seq,
+) -> Result<SegmentV1, CoreError> {
+    let set = DependencySetV1::new(ancestor, PREFIX_GENERATION);
+    let last_seq_limit = seq_as_i64(cut);
+    let head = head_through(conn, &set.timeline, last_seq_limit);
+    head.map(|found| SegmentV1 {
+        tick_bound: found.map_or(0, |(tick, _)| tick),
+        set,
+        last_seq_limit,
+    })
+}
+
+/// A set that is fully visible.
+const fn whole_segment(set: DependencySetV1) -> SegmentV1 {
+    SegmentV1 {
+        set,
+        last_seq_limit: i64::MAX,
+        tick_bound: i64::MAX,
+    }
+}
+
+/// The ancestors' segments, then the Timeline's own, which is fully visible.
+fn with_leaf(mut path: Vec<SegmentV1>, timeline: TimelineId) -> Vec<SegmentV1> {
+    let own = DependencySetV1::new(timeline, PREFIX_GENERATION);
+    path.push(whole_segment(own));
+    path
+}
+
+/// The segments of a Timeline's ancestry, oldest first, from its fork chain.
+fn path_of(
+    conn: &Connection,
+    timeline: TimelineId,
+    chain: &[(TimelineId, Seq)],
+) -> Result<Vec<SegmentV1>, CoreError> {
+    chain
+        .iter()
+        .zip(chain.iter().skip(1))
+        .map(|(up, down)| ancestor_segment(conn, up.0, down.1))
+        .collect::<Result<Vec<_>, CoreError>>()
+        .map(|ancestors| with_leaf(ancestors, timeline))
+}
+
+/// The head of the Timeline's factual history.
+fn last_head(conn: &Connection, path: &[SegmentV1]) -> Result<FactualHeadV1, CoreError> {
+    let head = |segment: &SegmentV1| segment_head(conn, segment, i64::MAX);
+    first_found(path.iter().rev(), head).map(|found| found.unwrap_or(NO_HEAD))
+}
+
+/// Where a cut at `seq` falls in the visible Ticks.
+fn cut_at(conn: &Connection, path: &[SegmentV1], seq: Seq) -> Result<FactualCutV1, CoreError> {
+    let point = seq_as_i64(seq);
+    let head = |segment: &SegmentV1| segment_head(conn, segment, point);
+    let split = |segment: &SegmentV1| segment_split(conn, segment, point);
+    let ended = first_found(path.iter().rev(), head);
+    let inside = first_found(path.iter(), split);
+    ended.and_then(|top| inside.map(|mid| cut_of(top, mid)))
+}
+
+/// The cut after the highest Tick that ends before it and the Tick it splits.
+fn cut_of(ended: Option<FactualHeadV1>, split: Option<u64>) -> FactualCutV1 {
+    let cut_tick = ended.map_or(0, |found| found.tick);
+    let mid = |split_tick| FactualCutV1::MidTick {
+        cut_tick,
+        split_tick,
+    };
+    split.map_or(FactualCutV1::Boundary { cut_tick }, mid)
+}
+
+/// The latest step node of an owner in a segment.
+fn step_node(conn: &Connection, segment: &SegmentV1, owner: &str) -> NodeLookupV1 {
+    let timeline = &segment.set.timeline;
+    node_lookup(
+        conn,
+        STEP_NODE_SQL,
+        params![timeline, PREFIX_GENERATION, owner, segment.tick_bound],
+    )
+}
+
+/// Decode a stored `seq`.
+fn stored_seq(value: i64) -> Result<Seq, CoreError> {
+    stored_unsigned(value).map(Seq::from_u64)
+}
+
+/// A node row with its request index (the column after the node columns).
+fn indexed_node_row(row: &Row<'_>) -> rusqlite::Result<(usize, NodeRowV1)> {
+    // `usize` is not `FromSql`; the index is a position in a request, far
+    // below `u32::MAX`. `u32` widens to `usize` on every supported target
+    // (all have at least 32-bit pointers), so the cast never truncates and
+    // no truncation lint applies.
+    row.get::<_, u32>(10)
+        .and_then(|slot| node_row(row).map(|node| (slot as usize, node)))
+}
+
+/// A node row with its request index and the bound `seq`, if any.
+fn bound_node_row(row: &Row<'_>) -> rusqlite::Result<(usize, NodeRowV1, Option<i64>)> {
+    indexed_node_row(row).and_then(|(slot, node)| row.get(11).map(|seq| (slot, node, seq)))
+}
+
+/// The nodes bound to the requested `seq`s in a segment, by one statement.
+fn event_batch(
+    conn: &Connection,
+    segment: &SegmentV1,
+    seqs: &[Seq],
+    pending: &[usize],
+) -> HitsV1<DependencyNodeRecordV1> {
+    let texts = pending
+        .iter()
+        .map(|index| seq_as_i64(seqs[*index]).to_string());
+    let list = json_array(texts);
+    let (timeline, bound) = (&segment.set.timeline, segment.tick_bound);
+    let query = (list, timeline, bound, PREFIX_GENERATION);
+    all_rows(conn, EVENT_NODES_SQL, query, indexed_node_row).and_then(|stored| {
+        stored
+            .into_iter()
+            .map(|(slot, row)| decode_factual_node(row).map(|node| (slot, node)))
+            .collect()
+    })
+}
+
+/// The nodes with the requested digests in a segment, with their bound
+/// `seq`s, by one statement.
+fn digest_batch(
+    conn: &Connection,
+    segment: &SegmentV1,
+    digests: &[Hash],
+    pending: &[usize],
+) -> HitsV1<BoundFactualNodeV1> {
+    let texts = pending.iter().map(|index| digest_json(&digests[*index]));
+    let list = json_array(texts);
+    let (timeline, bound) = (&segment.set.timeline, segment.tick_bound);
+    let query = (list, timeline, bound, PREFIX_GENERATION);
+    all_rows(conn, DIGEST_NODES_SQL, query, bound_node_row).and_then(|stored| {
+        stored
+            .into_iter()
+            .map(|(slot, row, seq)| {
+                let node = decode_factual_node(row);
+                let bound_at = seq.map(stored_seq).transpose();
+                node.and_then(|held| bound_at.map(|at| (slot, (held, at))))
+            })
+            .collect()
+    })
+}
+
+/// The node of each committed `seq`: the nearest segment that binds it wins.
+fn event_nodes(conn: &Connection, path: &[SegmentV1], seqs: &[Seq]) -> NodeListV1 {
+    resolve_batch(path, seqs.len(), |segment, pending| {
+        event_batch(conn, segment, seqs, pending)
+    })
+}
+
+/// The node of each artifact digest, with its bound `seq`: the nearest segment
+/// that holds the digest wins.
+fn digest_nodes(conn: &Connection, path: &[SegmentV1], digests: &[Hash]) -> BoundListV1 {
+    resolve_batch(path, digests.len(), |segment, pending| {
+        digest_batch(conn, segment, digests, pending)
+    })
+}
+
+/// The latest step node of an owner, searching from the newest segment.
+fn last_step(conn: &Connection, path: &[SegmentV1], owner: &FactualOwnerIdV1) -> NodeLookupV1 {
+    let find = |segment: &SegmentV1| step_node(conn, segment, owner.as_str());
+    first_found(path.iter().rev(), find)
+}
+
+/// The scanned-through `seq` and head digest columns of a fold-head row.
+fn fold_head_row(row: &Row<'_>) -> rusqlite::Result<(i64, Vec<u8>)> {
+    <(i64, Vec<u8>)>::try_from(row)
+}
+
+/// Decode a fold-head row.
+fn fold_head_of(row: (i64, Vec<u8>)) -> Result<(Seq, Hash), CoreError> {
+    let (scanned, digest) = row;
+    let head = stored_hash(digest).map_err(factual_fault);
+    stored_seq(scanned).and_then(|through| head.map(|found| (through, found)))
+}
+
+/// The latest fold-head row of a segment at or below its visible Tick.
+fn segment_fold_head(
+    conn: &Connection,
+    segment: &SegmentV1,
+) -> Result<Option<(Seq, Hash)>, CoreError> {
+    let query = (&segment.set.timeline, segment.tick_bound);
+    let found = optional_row(conn, FOLD_HEAD_SQL, query, fold_head_row);
+    found.and_then(|row| row.map(fold_head_of).transpose())
+}
+
+/// The node of the first hit of a digest lookup.
+fn first_hit(hits: Vec<Option<BoundFactualNodeV1>>) -> Option<DependencyNodeRecordV1> {
+    hits.into_iter().flatten().next().map(|bound| bound.0)
+}
+
+/// The node with the artifact digest, the nearest segment first.
+fn node_with_digest(conn: &Connection, path: &[SegmentV1], digest: &Hash) -> NodeLookupV1 {
+    digest_nodes(conn, path, std::slice::from_ref(digest)).map(first_hit)
+}
+
+/// The fold cursor: the latest fold-head row of the nearest segment that
+/// holds one at or below its visible Tick, and the node its head names.
+fn fold_cursor_at(
+    conn: &Connection,
+    path: &[SegmentV1],
+) -> Result<Option<FactualFoldCursorV1>, CoreError> {
+    let fold_head = |segment: &SegmentV1| segment_fold_head(conn, segment);
+    let latest = first_found(path.iter().rev(), fold_head);
+    let lookup = |digest: &Hash| node_with_digest(conn, path, digest);
+    latest.and_then(|found| fold_cursor_of(found, lookup))
+}
+
+/// The local `seq`, type, and payload hash columns of an Event row.
+type FoldRowV1 = (i64, String, Vec<u8>);
+
+/// The columns of an Event row a fold read takes.
+fn fold_row(row: &Row<'_>) -> rusqlite::Result<FoldRowV1> {
+    <FoldRowV1>::try_from(row)
+}
+
+/// Decode an Event row of a Timeline that inherits `prefix` Events.
+fn fold_entry(prefix: i64, row: FoldRowV1) -> Result<FoldEntryV1, CoreError> {
+    let (local, event_type, digest) = row;
+    let payload_hash = stored_hash(digest).map_err(factual_fault);
+    let seq = stored_seq(prefix.saturating_add(local));
+    seq.and_then(|at| payload_hash.map(|hash| (at, Kind::new(event_type), hash)))
+}
+
+/// The newest own Events of the segment at `index` of a Timeline's ancestry
+/// in the logical range `(after, through]`, at most `room`, newest first. A
+/// segment's Timeline holds its own Events above the previous segment's
+/// limit, its fork point, and shows them through its own limit.
+fn segment_fold_events(
+    conn: &Connection,
+    path: &[SegmentV1],
+    index: usize,
+    range: (Seq, Seq),
+    room: usize,
+) -> Result<Vec<FoldEntryV1>, CoreError> {
+    let segment = &path[index];
+    let above = index.checked_sub(1);
+    let prefix = above.map_or(0, |parent| path[parent].last_seq_limit);
+    let low = seq_as_i64(range.0).saturating_sub(prefix);
+    let through = seq_as_i64(range.1).min(segment.last_seq_limit);
+    let high = through.saturating_sub(prefix);
+    let query = (&segment.set.timeline, low, high, sql_count(room));
+    let rows = all_rows(conn, FOLD_EVENTS_SQL, query, fold_row);
+    let decode = |row| fold_entry(prefix, row);
+    rows.and_then(|read| read.into_iter().map(decode).collect())
+}
+
+/// The newest Events of the logical range `(after, through]` of a Timeline's
+/// ancestry, at most [`FOLD_READ_LIMIT`], newest first: the segments are read
+/// from the Timeline itself up through its ancestors, and no older segment is
+/// read once the limit is reached.
+fn newest_fold_events(
+    conn: &Connection,
+    path: &[SegmentV1],
+    range: (Seq, Seq),
+) -> Result<Vec<FoldEntryV1>, CoreError> {
+    let mut newest = Vec::new();
+    for index in (0..path.len()).rev() {
+        let room = FOLD_READ_LIMIT.saturating_sub(newest.len());
+        if room == 0 {
+            break;
+        }
+        newest.extend(segment_fold_events(conn, path, index, range, room)?);
+    }
+    Ok(newest)
+}
+
+/// The fold window of `(after, through]`: the newest Events of the
+/// Timeline's logical history, read through its ancestry segments, with their
+/// nodes resolved through the same segments.
+fn fold_window_at(
+    conn: &Connection,
+    path: &[SegmentV1],
+    range: (Seq, Seq),
+) -> Result<FactualFoldWindowV1, CoreError> {
+    let newest = newest_fold_events(conn, path, range);
+    newest.and_then(|read| fold_window_of(read, |seqs| event_nodes(conn, path, seqs)))
+}
+
+/// The stored row counts of the Timeline's own committed prefix set.
+fn prefix_counts(
+    conn: &Connection,
+    timeline: TimelineId,
+) -> Result<RecordedSetCountsV1, CoreError> {
+    let set = DependencySetV1::new(timeline, PREFIX_GENERATION);
+    let state = settle_factual(read_set_state(conn, &set));
+    state.map(|read| read.counts)
+}
+
+impl SqliteStore {
+    /// The Timeline's fork chain, once it is visible and readable under its
+    /// own and its ancestors' erasure scopes. It reads no table.
+    fn factual_chain(&self, timeline: TimelineId) -> Result<Vec<(TimelineId, Seq)>, CoreError> {
+        self.ensure_generic_timeline_visibility(timeline)
+            .and_then(|()| self.authorized_fork_chain(timeline, READ_OPERATION))
+    }
+
+    /// The Timeline's ancestry as segments, once it is visible and readable
+    /// under its own and its ancestors' erasure scopes; `None` when the file
+    /// holds no counterfactual schema, so no table can be read.
+    fn factual_path(&self, timeline: TimelineId) -> Result<Option<Vec<SegmentV1>>, CoreError> {
+        self.factual_chain(timeline).and_then(|chain| {
+            counterfactual_schema_present(&self.conn).and_then(|present| {
+                present
+                    .then(|| path_of(&self.conn, timeline, &chain))
+                    .transpose()
+            })
+        })
+    }
+
+    /// Run a factual read under the Timeline's erasure read fence, at one
+    /// read point. The read itself checks visibility and the inherited scopes.
+    fn read_fenced<T>(
+        &self,
+        timeline: TimelineId,
+        read: impl Fn(&Self) -> Result<T, CoreError>,
+    ) -> Result<T, CoreError> {
+        let fenced = self.with_erasure_read_fence(timeline, READ_OPERATION, |store| {
+            store.in_counterfactual_read(|held| read(held).map(Ok))
+        });
+        settle_factual(fenced)
+    }
+
+    /// Run a factual read over the Timeline's ancestry segments. A file
+    /// without the counterfactual schema is a storage fault, even for a read
+    /// with nothing to look up.
+    fn read_factual<T>(
+        &self,
+        timeline: TimelineId,
+        read: impl Fn(&Connection, &[SegmentV1]) -> Result<T, CoreError>,
+    ) -> Result<T, CoreError> {
+        self.read_fenced(timeline, |held| {
+            let path = held.factual_path(timeline).and_then(schema_required);
+            path.and_then(|found| read(&held.conn, &found))
+        })
+    }
+
+    /// The fold window of `(after, through]`, under the Timeline's read
+    /// fence.
+    fn read_fold_window(
+        &self,
+        timeline: TimelineId,
+        range: (Seq, Seq),
+    ) -> Result<FactualFoldWindowV1, CoreError> {
+        self.read_factual(timeline, |conn, path| fold_window_at(conn, path, range))
+    }
+
+    /// The stored counts of the Timeline's own prefix set. It needs the
+    /// visibility and the authorization of the whole ancestry, but not the
+    /// segments, which the counts ignore.
+    fn read_prefix_counts(&self, timeline: TimelineId) -> Result<RecordedSetCountsV1, CoreError> {
+        self.read_fenced(timeline, |held| {
+            let chain = held.factual_chain(timeline);
+            chain
+                .and_then(|_| require_schema(&held.conn))
+                .and_then(|()| prefix_counts(&held.conn, timeline))
+        })
+    }
+}
+
+impl FactualPrefixReadPortV1 for SqliteStore {
+    fn last_committed_factual_tick(
+        &self,
+        timeline: TimelineId,
+    ) -> Result<FactualHeadV1, CoreError> {
+        self.read_factual(timeline, last_head)
+    }
+
+    fn cut_tick_at(&self, timeline: TimelineId, seq: Seq) -> Result<FactualCutV1, CoreError> {
+        self.read_factual(timeline, |conn, path| cut_at(conn, path, seq))
+    }
+
+    fn nodes_for_committed_events(
+        &self,
+        timeline: TimelineId,
+        seqs: &[Seq],
+    ) -> Result<Vec<Option<DependencyNodeRecordV1>>, CoreError> {
+        self.read_factual(timeline, |conn, path| event_nodes(conn, path, seqs))
+    }
+
+    fn nodes_by_digest(
+        &self,
+        timeline: TimelineId,
+        digests: &[Hash],
+    ) -> Result<Vec<Option<BoundFactualNodeV1>>, CoreError> {
+        self.read_factual(timeline, |conn, path| digest_nodes(conn, path, digests))
+    }
+
+    fn last_step_node(
+        &self,
+        timeline: TimelineId,
+        owner: &FactualOwnerIdV1,
+    ) -> Result<Option<DependencyNodeRecordV1>, CoreError> {
+        self.read_factual(timeline, |conn, path| last_step(conn, path, owner))
+    }
+
+    fn factual_set_counts(&self, timeline: TimelineId) -> Result<RecordedSetCountsV1, CoreError> {
+        self.read_prefix_counts(timeline)
+    }
+
+    fn fold_cursor(&self, timeline: TimelineId) -> Result<Option<FactualFoldCursorV1>, CoreError> {
+        self.read_factual(timeline, fold_cursor_at)
+    }
+
+    fn fold_window(
+        &self,
+        timeline: TimelineId,
+        after: Seq,
+        through: Seq,
+    ) -> Result<FactualFoldWindowV1, CoreError> {
+        self.read_fold_window(timeline, (after, through))
+    }
+}
+
+const INSERT_RANGE_SQL: &str = "INSERT INTO counterfactual_dependency_commit_ranges
+     (timeline_id, tick, first_seq, last_seq) VALUES (?1, ?2, ?3, ?4)";
+
+const INSERT_BINDING_SQL: &str = "INSERT INTO counterfactual_dependency_event_nodes
+     (timeline_id, seq, tick, artifact_digest) VALUES (?1, ?2, ?3, ?4)";
+
+const INSERT_FOLD_HEAD_SQL: &str = "INSERT INTO counterfactual_dependency_fold_heads
+     (timeline_id, tick, scanned_through, head_artifact_digest) VALUES (?1, ?2, ?3, ?4)";
+
+/// Insert the commit range of a Tick.
+fn insert_commit_range(
+    conn: &Connection,
+    timeline: &str,
+    tick: i64,
+    range: (Seq, Seq),
+) -> Result<(), CoreError> {
+    let first = seq_as_i64(range.0);
+    let last = seq_as_i64(range.1);
+    conn.execute(INSERT_RANGE_SQL, params![timeline, tick, first, last])
+        .map(|_| ())
+        .map_err(SqliteStore::into_storage_error)
+}
+
+/// Insert the Event bindings of a Tick.
+fn insert_event_nodes(
+    conn: &Connection,
+    timeline: &str,
+    tick: i64,
+    bindings: &[(Seq, Hash)],
+) -> Result<(), CoreError> {
+    conn.prepare_cached(INSERT_BINDING_SQL)
+        .and_then(|mut statement| {
+            bindings.iter().try_for_each(|(seq, digest)| {
+                let bytes = digest.as_bytes().as_slice();
+                statement
+                    .execute(params![timeline, seq_as_i64(*seq), tick, bytes])
+                    .map(|_| ())
+            })
+        })
+        .map_err(SqliteStore::into_storage_error)
+}
+
+/// Insert the fold-head row of a scheduled Tick: its scanned-through `seq`
+/// and head artifact digest.
+fn insert_fold_head(
+    conn: &Connection,
+    timeline: TimelineId,
+    tick: u64,
+    row: (Seq, Hash),
+) -> Result<(), CoreError> {
+    let (scanned, head) = row;
+    let values = params![
+        timeline.to_string(),
+        sql_tick(tick),
+        seq_as_i64(scanned),
+        head.as_bytes().as_slice()
+    ];
+    conn.execute(INSERT_FOLD_HEAD_SQL, values)
+        .map(|_| ())
+        .map_err(SqliteStore::into_storage_error)
+}
+
+/// Install a checked Tick through the one install path, then the fold-head
+/// row of a scheduled Tick (ADR-064 R4.3), in the caller's transaction.
+fn install_planned_rows(
+    conn: &Connection,
+    timeline: TimelineId,
+    record: &TickDependencyRecordV1,
+    planned: &FactualInstallV1,
+) -> Result<(), CoreError> {
+    let range = (planned.first_seq, planned.last_seq);
+    let tick = record.tick();
+    let insert = |row| insert_fold_head(conn, timeline, tick, row);
+    install_factual_tick(conn, timeline, record, range, &planned.event_nodes)
+        .and_then(|()| planned.fold_head.map_or(Ok(()), insert))
+}
+
+/// Install one committed Tick of the Timeline's prefix set: its record,
+/// nodes, and edges, its commit range, and its Event bindings.
+///
+/// The one insert path of a committed prefix: the pipeline commit calls it
+/// with the Events, and the `test-support` seeding function calls it for
+/// seeded Ticks.
+fn install_factual_tick(
+    conn: &Connection,
+    timeline: TimelineId,
+    record: &TickDependencyRecordV1,
+    range: (Seq, Seq),
+    bindings: &[(Seq, Hash)],
+) -> Result<(), CoreError> {
+    let set = DependencySetV1::new(timeline, PREFIX_GENERATION);
+    let tick = sql_tick(record.tick());
+    insert_dependency_record(conn, &set, tick, record)
+        .and_then(|()| insert_commit_range(conn, &set.timeline, tick, range))
+        .and_then(|()| insert_event_nodes(conn, &set.timeline, tick, bindings))
+}
+
+/// The Timeline's visible committed prefix, as the Tick checks read it inside
+/// the commit's transaction.
+struct SqlitePrefixV1<'a> {
+    conn: &'a Connection,
+    timeline: TimelineId,
+    /// The Timeline's ancestry, oldest first and its own set last.
+    path: Vec<SegmentV1>,
+}
+
+impl TickPrefixV1 for SqlitePrefixV1<'_> {
+    fn last_tick(&self) -> Result<u64, CoreError> {
+        last_head(self.conn, &self.path).map(|head| head.tick)
+    }
+
+    fn events_in(&self, range: SeqRange) -> Result<Vec<Event>, CoreError> {
+        SqliteStore::read_unchecked_on(self.conn, self.timeline, range)
+    }
+
+    fn any_bound(&self, seqs: &[Seq]) -> Result<bool, CoreError> {
+        event_nodes(self.conn, &self.path, seqs).map(|found| found.iter().any(Option::is_some))
+    }
+
+    fn records_any(&self, record: &TickDependencyRecordV1) -> Result<bool, CoreError> {
+        let set = DependencySetV1::new(self.timeline, PREFIX_GENERATION);
+        settle_factual(nodes_collide(self.conn, &set, record))
+    }
+
+    fn counts(&self) -> Result<RecordedSetCountsV1, CoreError> {
+        prefix_counts(self.conn, self.timeline)
+    }
+
+    fn sources_below(&self, digests: &[Hash], tick: u64) -> Result<bool, CoreError> {
+        digest_nodes(self.conn, &self.path, digests).map(|found| {
+            found.iter().all(|hit| {
+                hit.as_ref()
+                    .is_some_and(|(node, _)| node.coordinate().tick() < tick)
+            })
+        })
+    }
+
+    fn fold_cursor(&self) -> Result<Option<FactualFoldCursorV1>, CoreError> {
+        fold_cursor_at(self.conn, &self.path)
+    }
+
+    fn fold_window(&self, after: Seq, through: Seq) -> Result<FactualFoldWindowV1, CoreError> {
+        fold_window_at(self.conn, &self.path, (after, through))
+    }
+}
+
+impl SqliteStore {
+    /// Check the factual Tick declaration of `basis` against the Timeline's
+    /// visible committed prefix (R3.7.2), before any Event is appended, and
+    /// prepare the rows the commit installs. `chain` is the Timeline's fork
+    /// chain the caller has read. It reads inside the caller's transaction and
+    /// writes nothing.
+    pub(in crate::sqlite) fn plan_factual_tick(
+        &self,
+        timeline: TimelineId,
+        basis: &PipelineAdmissionBasisV1,
+        grant: Hash,
+        first_seq: Seq,
+        chain: &[(TimelineId, Seq)],
+    ) -> Result<PlannedTickV1, CoreError> {
+        path_of(&self.conn, timeline, chain).and_then(|path| {
+            let prefix = SqlitePrefixV1 {
+                conn: &self.conn,
+                timeline,
+                path,
+            };
+            plan_tick(&prefix, timeline, basis, grant, first_seq)
+        })
+    }
+
+    /// Install a checked Tick: its rows, commit range and Event bindings, and
+    /// the fold-head row of a scheduled Tick (ADR-064 R4.3), in the caller's
+    /// transaction.
+    pub(in crate::sqlite) fn install_planned_factual_tick(
+        &self,
+        timeline: TimelineId,
+        record: &TickDependencyRecordV1,
+        planned: &FactualInstallV1,
+    ) -> Result<(), CoreError> {
+        install_planned_rows(&self.conn, timeline, record, planned)
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl SqliteStore {
+    /// Seed committed factual Ticks into a Timeline's committed prefix set,
+    /// through the install path the pipeline commit uses, in one transaction.
+    ///
+    /// Test seam only. Unlike the in-memory seam, which checks nothing about
+    /// the Ticks it is given, this one is validated by the schema's `CHECK`
+    /// constraints and guard triggers: a prefix node needs the `Committed`
+    /// origin (generation `-1` requires origin code `0`), a record Tick must
+    /// be above every Tick already recorded, a commit range must satisfy its
+    /// `CHECK`s, and the duplicate-key triggers refuse a repeated key or
+    /// artifact digest. A refused Tick rolls back the whole seeding call.
+    ///
+    /// # Errors
+    /// Returns `TimelineNotFound` for an unknown Timeline, or the store's
+    /// error when a row cannot be inserted.
+    #[doc(hidden)]
+    pub fn seed_factual_prefix(
+        &mut self,
+        timeline: TimelineId,
+        ticks: &[SeededFactualTickV1],
+    ) -> Result<(), CoreError> {
+        self.ensure_timeline_exists(timeline).and_then(|()| {
+            self.conn
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .map_err(Self::into_storage_error)
+                .and_then(|tx| {
+                    ticks
+                        .iter()
+                        .try_for_each(|held| {
+                            let range = (held.first_seq, held.last_seq);
+                            let bindings = &held.event_nodes;
+                            install_factual_tick(&tx, timeline, &held.record, range, bindings)
+                        })
+                        .and_then(|()| tx.commit().map_err(Self::into_storage_error))
+                })
+        })
     }
 }
 
@@ -1164,7 +2428,8 @@ mod tests {
         ))
     }
 
-    /// Rows of the three dependency tables.
+    /// Rows of the record, node, and edge tables, which a recording write
+    /// fills; the commit range and Event binding tables are not counted.
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn recorded(store: &SqliteStore) -> i64 {
         ok(store.conn.query_row(
@@ -1304,6 +2569,44 @@ mod tests {
             })
         );
         assert_eq!(recorded(&again), 4);
+    }
+
+    /// The text of a storage fault, or a marker for any other outcome.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn fault_text<T>(result: Result<T, CoreError>) -> String {
+        match result {
+            Err(CoreError::Storage(text)) => text,
+            _ => "not a storage fault".to_owned(),
+        }
+    }
+
+    /// A corrupt row keeps its own message; any other rejection reads as a
+    /// failed read, never as a corrupt row.
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn a_factual_fault_names_corruption_only_for_corrupt_state() {
+        assert_eq!(
+            fault_text::<()>(Err(factual_fault(StoreError::CorruptState))),
+            "factual prefix row is corrupt"
+        );
+        assert_eq!(
+            fault_text::<()>(Err(factual_fault(StoreError::ForkNotFound))),
+            "factual prefix read failed: ForkNotFound"
+        );
+        let settled = settle_factual::<()>(Ok(Err(StoreError::BindingMismatch)));
+        assert_eq!(
+            fault_text(settled),
+            "factual prefix read failed: BindingMismatch"
+        );
+    }
+
+    /// A file without the counterfactual schema is a fault with its own text.
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn a_missing_schema_is_a_storage_fault() {
+        assert_eq!(fault_text::<()>(Err(schema_absent())), SCHEMA_ABSENT);
+        assert!(schema_required(Some(Vec::new())).is_ok());
+        assert_eq!(fault_text(schema_required(None)), SCHEMA_ABSENT);
     }
 
     /// The `CHECK` text repeats the contract's bounds as literals; each must

@@ -7,36 +7,23 @@
 //! prior state into the Event and appends `+` to it, and the other names are
 //! the probe's faults (see `tests/support/worker_probe.rs`).
 
-use std::num::NonZeroUsize;
-use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::Duration;
 
 use pos_core::{
-    AppendDedupKey, AppendDedupScope, AppendIdentity, CanonicalBytes, CoreError, EntityId,
-    ErasureContainmentGateV1, Event, EventDraft, EventStore, Hash, Kind, PipelineAdmissionBasisV1,
-    PipelineAdmissionPortV1, PipelineAttemptIdV1, PipelineCommitReceiptV1, PipelineEvidenceRefV1,
-    PipelineOutcomeV1, PipelineReceiptLookupV1, PipelineSecurityRevisionsV1, PluginId,
-    PurgeOutcome, Seq, SeqRange, TimelineId,
+    CanonicalBytes, CoreError, CorrelationId, CounterfactualDependencyErrorV1, EntityId, Event,
+    EventDraft, EventId, FactualDependencyErrorV1, Hash, Kind, PipelineAttemptIdV1,
+    PipelineOutcomeV1, SchemaVersion,
 };
-use pos_plugin_supervisor::test_support::{
-    self, community_pin, err, negotiated_with, ok, DriverPlugin, SMALL_BUDGET,
-};
-use pos_plugin_supervisor::{
-    classify_pass_failure, register_community_driver, CommunityDriverConfigV1, CommunityDriverV1,
-    CommunityPluginHandleV1, CommunityPluginSupervisorV1, CommunityStateV1,
-    InvocationContextSourceV1, InvocationContextV1, PassFailureV1, ReceiptDispositionV1,
-    WorkerProgramV1,
-};
+use pos_plugin_supervisor::pass_harness::{initial, LostPort, StoreKind, World};
+use pos_plugin_supervisor::test_support::{self, err, ok};
+use pos_plugin_supervisor::{CommunityPluginHandleV1, ReceiptDispositionV1};
 use pos_runtime::community_plugin_host::{
-    AtomicCommitFailureV1, CommunityPluginHostErrorV1, ComponentTrapClassV1, HostInputs,
-    TrapReproductionV1,
+    classify_pass_failure, AtomicCommitFailureV1, CommunityPluginHostErrorV1, ComponentTrapClassV1,
+    PassFailureV1, TrapReproductionV1,
 };
 use pos_runtime::{
-    LocalScheduledAdmissionHostV1, ObservationView, PluginAvailabilityV1, PluginCompositionErrorV1,
-    PluginRegistry, RuntimeError, ScheduledDriverBindingV1, ScheduledPassAdmissionV1,
+    PluginAvailabilityV1, PluginCompositionErrorV1, RuntimeError, ScheduledDriverBindingV1,
 };
-use pos_store::memory::MemoryStore;
 
 type Error = CommunityPluginHostErrorV1;
 
@@ -50,197 +37,9 @@ const NOT_ADMITTED: Error = Error::AtomicCommitFailed {
     failure: AtomicCommitFailureV1::DeterministicTypedResult,
 };
 
-/// The host's invocation inputs, one distinct invocation ID per member.
-struct Source {
-    invocation_id: [u8; 16],
-}
-
-impl InvocationContextSourceV1 for Source {
-    fn context(
-        &mut self,
-        timeline: TimelineId,
-        observation: &ObservationView<'_>,
-    ) -> Result<InvocationContextV1, Error> {
-        let mut invocation = test_support::invocation(b"observation");
-        invocation.invocation_id = self.invocation_id;
-        invocation.timeline_position.timeline_id = timeline.inner().to_bytes();
-        invocation.timeline_position.seq = observation
-            .anchor()
-            .map_or(0, |anchor| anchor.observed_through().as_u64());
-        Ok(InvocationContextV1 {
-            invocation,
-            host_inputs: HostInputs { simulation_time: 1 },
-        })
-    }
-}
-
-fn initial() -> CommunityStateV1 {
-    CommunityStateV1 {
-        schema: [9; 32],
-        bytes: b"initial".to_vec(),
-    }
-}
-
-/// Port that commits through the real store and then loses the outcome.
-struct LostPort<'a>(&'a mut MemoryStore);
-
-impl PipelineAdmissionPortV1 for LostPort<'_> {
-    fn admit_pipeline_batch(
-        &mut self,
-        basis: &PipelineAdmissionBasisV1,
-    ) -> Result<PipelineOutcomeV1, CoreError> {
-        self.0.admit_pipeline_batch(basis).and_then(|_| {
-            Err(CoreError::StorageOutcomeUnknown(
-                "injected lost commit acknowledgement".to_owned(),
-            ))
-        })
-    }
-
-    fn lookup_pipeline_receipt(
-        &mut self,
-        timeline: TimelineId,
-        key: AppendDedupKey,
-        attempt_id: PipelineAttemptIdV1,
-    ) -> Result<PipelineReceiptLookupV1, CoreError> {
-        self.0.lookup_pipeline_receipt(timeline, key, attempt_id)
-    }
-
-    fn purge_expired_pipeline_receipts_bounded(
-        &mut self,
-        limit: NonZeroUsize,
-    ) -> Result<PurgeOutcome, CoreError> {
-        self.0.purge_expired_pipeline_receipts_bounded(limit)
-    }
-}
-
-/// One staged scheduled pass and the host inputs of its commit.
-#[derive(Debug)]
-struct Staged {
-    head: Seq,
-    revisions: PipelineSecurityRevisionsV1,
-}
-
-struct World {
-    store: MemoryStore,
-    registry: PluginRegistry,
-    gate: Arc<ErasureContainmentGateV1>,
-    timeline: TimelineId,
-    members: u8,
-    attempts: u8,
-}
-
-impl World {
-    fn new() -> Self {
-        let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
-        let mut store = MemoryStore::new();
-        let () = ok(store.bind_erasure_gate(Arc::clone(&gate)));
-        let timeline = ok(store.create_timeline("community-pass")).id();
-        Self {
-            store,
-            registry: PluginRegistry::new().with_erasure_gate(gate.clone()),
-            gate,
-            timeline,
-            members: 0,
-            attempts: 0,
-        }
-    }
-
-    /// Register one community Plugin whose Component bytes name the probe's
-    /// behaviour.
-    fn add(
-        &mut self,
-        name: &'static str,
-        event_type: &'static str,
-        component: &[u8],
-        watchdog: Duration,
-    ) -> CommunityPluginHandleV1 {
-        self.members += 1;
-        let plugin = DriverPlugin {
-            id: PluginId::new(),
-            name,
-            event_type,
-            has_driver: true,
-        };
-        let supervisor = WorkerProgramV1::new(PathBuf::from(PROBE))
-            .and_then(|program| CommunityPluginSupervisorV1::new(program, watchdog));
-        let (driver, handle) = CommunityDriverV1::new(CommunityDriverConfigV1 {
-            plugin_id: plugin.id,
-            name,
-            tick_interval: Duration::from_millis(100),
-            subscriptions: Vec::new(),
-            supervisor: supervisor
-                .unwrap_or_else(|| std::panic::resume_unwind(Box::new("invalid supervisor"))),
-            negotiated: negotiated_with(name, SMALL_BUDGET, Vec::new()),
-            component: component.to_vec(),
-            source: Box::new(Source {
-                invocation_id: [self.members; 16],
-            }),
-            initial_state: initial(),
-        });
-        let pin = community_pin(self.members, &format!("community-{name}"));
-        let () = ok(register_community_driver(
-            &mut self.registry,
-            &plugin,
-            pin,
-            driver,
-        ));
-        handle
-    }
-
-    /// Observe, then stage one anchored pass over the committed prefix.
-    fn stage(&mut self) -> Result<Staged, RuntimeError> {
-        let revisions = LocalScheduledAdmissionHostV1::shared()?.observe(
-            &self.registry,
-            &mut self.store,
-            self.timeline,
-        )?;
-        let head = self.store.logical_head(self.timeline)?;
-        let prefix = self.store.read(self.timeline, SeqRange::all())?;
-        let chain = pos_core::fork_ancestry(&self.store, self.timeline)?;
-        self.registry
-            .step_all_anchored_with_events(self.timeline, &chain, head, &prefix)
-            .map(|_| Staged { head, revisions })
-    }
-
-    /// The host's admission inputs for the staged pass, fresh each time.
-    fn admission(&mut self, staged: &Staged) -> ScheduledPassAdmissionV1 {
-        self.attempts += 1;
-        let key = self.attempts;
-        ScheduledPassAdmissionV1 {
-            attempt_id: ok(PipelineAttemptIdV1::try_new([key; 16])),
-            idempotency: AppendIdentity::new(
-                AppendDedupKey::from_keyed_hash([key; 32]),
-                AppendDedupScope::from_keyed_hash([62; 32]),
-            ),
-            provider_validation: ok(PipelineEvidenceRefV1::try_new(Hash::from_bytes([60; 32]))),
-            security_revisions: staged.revisions,
-            commit_head: staged.head,
-            commit_now_secs: 1,
-        }
-    }
-
-    fn admit(&mut self, staged: &Staged) -> Result<Option<PipelineCommitReceiptV1>, RuntimeError> {
-        let admission = self.admission(staged);
-        self.registry
-            .admit_scheduled_pass(&mut self.store, &admission)
-    }
-
-    /// Stage and atomically admit one whole pass.
-    fn pass(&mut self) -> Result<Option<PipelineCommitReceiptV1>, RuntimeError> {
-        let staged = self.stage()?;
-        self.admit(&staged)
-    }
-
-    fn events(&self) -> Vec<Event> {
-        ok(self.store.read(self.timeline, SeqRange::all()))
-    }
-
-    /// Mirror each handle's availability into the registry.
-    fn sync(&mut self, handles: &[&CommunityPluginHandleV1]) {
-        for handle in handles {
-            let () = ok(handle.sync_registry(&mut self.registry));
-        }
-    }
+/// A pass world whose Drivers launch the probe worker.
+fn new_world() -> World {
+    World::new(PROBE)
 }
 
 fn payloads(events: &[Event]) -> Vec<Vec<u8>> {
@@ -260,7 +59,7 @@ fn dispositions(handle: &CommunityPluginHandleV1) -> Vec<ReceiptDispositionV1> {
 
 #[test]
 fn a_pass_commits_every_draft_atomically_and_only_then_the_state() {
-    let mut world = World::new();
+    let mut world = new_world();
     let alpha = world.add("alpha", "community.alpha", b"chain:community.alpha", PROMPT);
     let beta = world.add("beta", "community.beta", b"draft:community.beta", PROMPT);
     for handle in [&alpha, &beta] {
@@ -302,6 +101,78 @@ fn a_pass_commits_every_draft_atomically_and_only_then_the_state() {
     assert_eq!(alpha.committed_state().bytes, b"initial++");
 }
 
+/// The store-independent fields of one committed Event.
+///
+/// The Event ID and wall time are left out: every store mints its own.
+#[derive(Debug, PartialEq, Eq)]
+struct CommittedEvent {
+    seq: u64,
+    event_type: String,
+    entity: EntityId,
+    payload: Vec<u8>,
+    schema_version: SchemaVersion,
+    causation_id: Option<EventId>,
+    correlation_id: Option<CorrelationId>,
+}
+
+/// The store-independent part of one committed pass.
+///
+/// It holds the store-independent fields of each Event, each member's committed state, and the
+/// receipt's attempt, draft batch digest and Event positions. The Timeline ID is left out: every
+/// store mints its own.
+#[derive(Debug, PartialEq, Eq)]
+struct Committed {
+    events: Vec<CommittedEvent>,
+    states: Vec<Vec<u8>>,
+    attempt: PipelineAttemptIdV1,
+    digest: Hash,
+    receipt_seqs: Vec<u64>,
+}
+
+/// Run one two-member pass on a fresh world over `kind`, and keep what it committed.
+fn commit_one_pass(kind: StoreKind) -> Committed {
+    let mut world = World::on(kind, PROBE);
+    assert_eq!(world.kind(), kind);
+    let alpha = world.add("alpha", "community.alpha", b"chain:community.alpha", PROMPT);
+    let beta = world.add("beta", "community.beta", b"draft:community.beta", PROMPT);
+    let receipt = ok(ok(world.pass()).ok_or("the pass committed nothing"));
+    let events = world
+        .events()
+        .iter()
+        .map(|event| CommittedEvent {
+            seq: event.seq.as_u64(),
+            event_type: event.event_type.as_str().to_owned(),
+            entity: event.entity,
+            payload: event.payload.as_slice().to_vec(),
+            schema_version: event.schema_version,
+            causation_id: event.causation_id,
+            correlation_id: event.correlation_id,
+        })
+        .collect();
+    let receipt_seqs = receipt
+        .committed_events()
+        .iter()
+        .map(|event| event.seq().as_u64())
+        .collect();
+    // Both are store-independent: the attempt ID is the host's `[attempt_count; 16]`, and the
+    // draft batch digest covers only the draft fields, no Timeline, Event or store data.
+    Committed {
+        events,
+        states: vec![alpha.committed_state().bytes, beta.committed_state().bytes],
+        attempt: receipt.attempt_id(),
+        digest: receipt.draft_batch_digest(),
+        receipt_seqs,
+    }
+}
+
+#[test]
+fn a_pass_on_sqlite_commits_the_same_events_and_receipt_as_on_memory() {
+    let [memory, sqlite] = StoreKind::ALL.map(commit_one_pass);
+    assert_eq!(memory.events.len(), 2);
+    assert_eq!(memory.states, [b"initial+".to_vec(), b"next".to_vec()]);
+    assert_eq!(sqlite, memory, "sqlite differs from memory");
+}
+
 /// One failing member in a pass beside one that succeeds.
 struct Failure {
     component: &'static [u8],
@@ -325,8 +196,10 @@ const fn failure(
 
 /// Run one pass whose second member fails as `failure` says, and check that
 /// the whole pass is discarded and only that member is marked.
-fn check_failure(failure: &Failure) {
-    let mut world = World::new();
+///
+/// Returns the pass error, so a caller can inspect what the real pass raised.
+fn check_failure(failure: &Failure) -> RuntimeError {
+    let mut world = new_world();
     let alpha = world.add("alpha", "community.alpha", b"draft:community.alpha", PROMPT);
     let beta = world.add(
         "beta",
@@ -369,6 +242,7 @@ fn check_failure(failure: &Failure) {
         Some(PluginAvailabilityV1::Available)
     );
     assert_eq!(world.registry.availability(b), Some(quarantine));
+    error
 }
 
 #[test]
@@ -403,11 +277,57 @@ fn an_invalid_output_discards_the_pass_and_only_marks_that_plugin() {
         (&b"bad-digest"[..], Error::InvalidGuestOutput),
         (&b"guest-error"[..], Error::GuestDeclaredFailure),
         (&b"draft:Not.An.Id"[..], Error::InvalidGuestOutput),
-        // Dependency digests have no EventDraft field: a distinct refusal.
-        (&b"deps:community.beta"[..], Error::UnsupportedSchema),
     ] {
         check_failure(&failure(component, error, None));
     }
+}
+
+/// An unknown guest digest is refused at admission, not by the adapter: it
+/// is the host's typed, deterministic result and marks no Plugin (D22-A).
+#[test]
+fn an_unknown_dependency_digest_is_not_admitted_and_marks_no_plugin() {
+    let mut world = new_world();
+    let alpha = world.add("alpha", "community.alpha", b"draft:community.alpha", PROMPT);
+    let beta = world.add("beta", "community.beta", b"deps:community.beta", PROMPT);
+    let raised = err(world.pass());
+    assert!(matches!(
+        raised,
+        RuntimeError::DependencyDeclaration(FactualDependencyErrorV1::UnresolvedInput)
+    ));
+    assert_eq!(
+        classify_pass_failure(&raised),
+        PassFailureV1::Host(NOT_ADMITTED)
+    );
+    // The whole pass is discarded: no Event, no state, no quarantine.
+    assert!(world.events().is_empty());
+    for handle in [&alpha, &beta] {
+        assert_eq!(handle.committed_state(), initial());
+        assert_eq!(handle.last_failure(), None);
+        assert_eq!(handle.availability(), PluginAvailabilityV1::Available);
+    }
+}
+
+/// A Driver may declare `MAX_STEP_INPUTS_PER_DRIVER_V1` step inputs; one more
+/// consumed dependency is refused.
+#[test]
+fn too_many_consumed_dependencies_are_out_of_bounds_and_mark_no_plugin() {
+    let mut world = new_world();
+    let beta = world.add("beta", "community.beta", b"consumed:community.beta", PROMPT);
+    let raised = err(world.pass());
+    assert!(matches!(
+        raised,
+        RuntimeError::DependencyDeclaration(FactualDependencyErrorV1::Record(
+            CounterfactualDependencyErrorV1::FieldOutOfBounds
+        ))
+    ));
+    assert_eq!(
+        classify_pass_failure(&raised),
+        PassFailureV1::Host(NOT_ADMITTED)
+    );
+    assert!(world.events().is_empty());
+    assert_eq!(beta.committed_state(), initial());
+    assert_eq!(beta.last_failure(), None);
+    assert_eq!(beta.availability(), PluginAvailabilityV1::Available);
 }
 
 #[test]
@@ -420,7 +340,7 @@ fn a_watchdog_stop_discards_the_pass_without_quarantine() {
 
 #[test]
 fn a_quarantined_plugin_blocks_passes_in_memory_until_the_host_clears_it() {
-    let mut world = World::new();
+    let mut world = new_world();
     let alpha = world.add("alpha", "community.alpha", b"draft:community.alpha", PROMPT);
     let beta = world.add("beta", "community.beta", b"fuel", PROMPT);
     let error = err(world.pass());
@@ -459,7 +379,7 @@ fn a_quarantined_plugin_blocks_passes_in_memory_until_the_host_clears_it() {
 
 #[test]
 fn a_typed_non_commit_and_a_store_error_discard_the_pass_and_classify() {
-    let mut world = World::new();
+    let mut world = new_world();
     let alpha = world.add("alpha", "community.alpha", b"chain:community.alpha", PROMPT);
     let beta = world.add("beta", "community.beta", b"draft:community.beta", PROMPT);
 
@@ -518,17 +438,20 @@ fn a_typed_non_commit_and_a_store_error_discard_the_pass_and_classify() {
     }
 }
 
-#[test]
-fn a_lost_commit_outcome_keeps_the_staged_state_for_recovery() {
-    let mut world = World::new();
+/// Lose the commit acknowledgement of one pass on a fresh world over `kind`, then recover it.
+fn lose_and_recover(kind: StoreKind) {
+    let mut world = World::on(kind, PROBE);
+    let tag = world.kind().tag();
     let alpha = world.add("alpha", "community.alpha", b"chain:community.alpha", PROMPT);
     let beta = world.add("beta", "community.beta", b"draft:community.beta", PROMPT);
     let staged = ok(world.stage());
     let admission = world.admission(&staged);
     let lost = err(world
         .registry
-        .admit_scheduled_pass(&mut LostPort(&mut world.store), &admission));
+        .admit_scheduled_pass(&mut LostPort(world.store.as_mut()), &admission));
     assert_eq!(classify_pass_failure(&lost), PassFailureV1::InDoubt);
+    // The lost commit landed, so recovery must find it rather than commit the batch afresh.
+    assert_eq!(world.events().len(), 2, "{tag}");
 
     // Nothing was discarded and nothing adopted: the exact basis is retained.
     for handle in [&alpha, &beta] {
@@ -543,9 +466,28 @@ fn a_lost_commit_outcome_keeps_the_staged_state_for_recovery() {
 
     // Recovery resubmits the retained basis: the state commits, no Driver
     // runs again.
-    let recovered = ok(world.registry.recover_scheduled_pass(&mut world.store));
-    assert_eq!(recovered.map(|r| r.committed_events().len()), Some(2));
-    assert_eq!(world.events().len(), 2);
+    let recovered = ok(world.registry.recover_scheduled_pass(world.store.as_mut()));
+    let receipt = ok(recovered.ok_or("the recovery committed nothing"));
+    assert_eq!(receipt.attempt_id(), admission.attempt_id, "{tag}");
+
+    // The receipt names exactly the Events on the Timeline: the lost commit and its recovery
+    // committed the batch once, and nothing is left in doubt.
+    let events = world.events();
+    let committed: Vec<EventId> = receipt
+        .committed_events()
+        .iter()
+        .map(|event| event.event_id())
+        .collect();
+    let stored: Vec<EventId> = events.iter().map(|event| event.id).collect();
+    assert_eq!(stored.len(), 2, "{tag}");
+    assert_eq!(committed, stored, "{tag}");
+    // A second recovery finds nothing in doubt and commits nothing more.
+    let again = err(world.registry.recover_scheduled_pass(world.store.as_mut()));
+    assert!(
+        matches!(again, RuntimeError::NoScheduledAdmissionInDoubt),
+        "{tag}"
+    );
+    assert_eq!(world.events().len(), 2, "{tag}");
     assert_eq!(alpha.committed_state().bytes, b"initial+");
     assert_eq!(beta.committed_state().bytes, b"next");
     assert_eq!(dispositions(&alpha), [ReceiptDispositionV1::Committed]);
@@ -553,14 +495,21 @@ fn a_lost_commit_outcome_keeps_the_staged_state_for_recovery() {
 }
 
 #[test]
+fn a_lost_commit_outcome_keeps_the_staged_state_for_recovery() {
+    for kind in StoreKind::ALL {
+        lose_and_recover(kind);
+    }
+}
+
+#[test]
 fn abandoning_an_in_doubt_pass_discards_the_staged_state() {
-    let mut world = World::new();
+    let mut world = new_world();
     let alpha = world.add("alpha", "community.alpha", b"chain:community.alpha", PROMPT);
     let staged = ok(world.stage());
     let admission = world.admission(&staged);
     let lost = err(world
         .registry
-        .admit_scheduled_pass(&mut LostPort(&mut world.store), &admission));
+        .admit_scheduled_pass(&mut LostPort(world.store.as_mut()), &admission));
     assert_eq!(classify_pass_failure(&lost), PassFailureV1::InDoubt);
     world.registry.abort_step();
     assert_eq!(alpha.committed_state(), initial());

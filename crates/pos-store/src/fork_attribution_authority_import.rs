@@ -485,8 +485,11 @@ pub(crate) trait ImportBackendV1:
 ///
 /// It is the only way to install authority-origin code 2. It never routes
 /// through `import_timeline_with_id` and exposes no structural fallback.
-/// Imported code-2 rows stay unreadable through the trusted reads until
-/// #519.
+/// Imported code-2 rows are readable only through the code-2-aware reads of
+/// ADR-105 r6 R6.9 (`read_fork_event_suffix`, publication `read_committed`,
+/// and, once #561 lands, Replay). Every write path and every issuance or
+/// recovery read keeps the local-only validator, so an import grants no
+/// registrar, append, or publication authority.
 pub trait ForkAttributionAuthorityImportPortV1:
     ForkAttributionIssuerPolicyInstallationPortV1
 {

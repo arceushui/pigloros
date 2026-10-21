@@ -10,6 +10,8 @@
 //! closed in every decoder in this module. Only the import-only typed decoders
 //! of `authority_import` accept code 2, for the `FAE1` closure validator.
 
+use crate::crypto::{head, CanonicalEmit, CanonicalSink};
+
 use crate::{Hash, KeyIdentityV1, KeyRoleV1, OwnerIdV1, PublicKey, Signature, TimelineId};
 
 mod authority_admission;
@@ -186,32 +188,38 @@ impl ForkAdmissionRecordV1 {
     /// Encode the exact 15-field deterministic-CBOR `FAR1` array.
     #[must_use]
     pub fn to_canonical_cbor(&self) -> Vec<u8> {
-        let mut out = self.canonical_body();
-        authority_origin(&mut out, self.0.origin);
+        let mut out = Vec::with_capacity(320);
+        self.emit(&mut out);
         out
+    }
+
+    /// Measure these exact canonical bytes without allocating an encoding buffer.
+    ///
+    /// # Errors
+    /// Returns `LengthOverflow` if checked arithmetic cannot fit the target's `usize`.
+    pub fn canonical_cbor_len(&self) -> Result<usize, crate::CanonicalLengthErrorV1> {
+        crate::crypto::measure(self)
     }
 
     /// Encode every `FAR1` byte before the final `authority-origin-v1`
     /// field, which the ADR-105 code-2 encoder appends in its own form.
-    fn canonical_body(&self) -> Vec<u8> {
+    fn emit_body(&self, out: &mut impl CanonicalSink) {
         let value = &self.0;
-        let mut out = Vec::with_capacity(320);
-        array(&mut out, 15);
-        text(&mut out, "FAR1");
-        uint(&mut out, 1);
-        hash(&mut out, value.operation_id);
-        hash(&mut out, value.principal_owner_binding_digest);
-        text(&mut out, value.creator.as_str());
-        timeline(&mut out, value.parent_timeline_id);
-        timeline(&mut out, value.child_timeline_id);
-        hash(&mut out, value.room_revision_descriptor_hash);
-        uint(&mut out, value.parent_logical_head);
-        hash(&mut out, value.parent_chain_head_hash);
-        uint(&mut out, value.completed_fold_cursor);
-        uint(&mut out, value.post_fold_tick_boundary);
-        hash(&mut out, value.plugin_composition_hash);
-        uint(&mut out, u64::from(value.attribution_required));
-        out
+        array(out, 15);
+        text(out, "FAR1");
+        uint(out, 1);
+        hash(out, value.operation_id);
+        hash(out, value.principal_owner_binding_digest);
+        text(out, value.creator.as_str());
+        timeline(out, value.parent_timeline_id);
+        timeline(out, value.child_timeline_id);
+        hash(out, value.room_revision_descriptor_hash);
+        uint(out, value.parent_logical_head);
+        hash(out, value.parent_chain_head_hash);
+        uint(out, value.completed_fold_cursor);
+        uint(out, value.post_fold_tick_boundary);
+        hash(out, value.plugin_composition_hash);
+        uint(out, u64::from(value.attribution_required));
     }
 
     /// Return the domain-separated digest over complete canonical `FAR1` bytes.
@@ -313,6 +321,33 @@ impl ForkReproManifestV1 {
         final_fork_logical_head: u64,
         final_fork_chain_head_hash: Hash,
     ) -> Result<Self, ForkAttributionCodecErrorV1> {
+        Self::from_admission_fields(
+            admission.digest(),
+            admission.input(),
+            intervention_sequences,
+            final_fork_logical_head,
+            final_fork_chain_head_hash,
+        )
+    }
+
+    /// Construct `FRM1` from the fields and ADR-099 digest of one validated
+    /// `FAR1`, whatever its authority origin.
+    ///
+    /// ADR-105 r6 R6.9: a code-2 `FAR1` digest is over its exact code-2 bytes,
+    /// so the digest is supplied by the trusted caller rather than recomputed
+    /// from the local projection. Like [`Self::from_admission`], this
+    /// establishes byte agreement only, never authority.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid final Fork coordinates or intervention sequences.
+    pub fn from_admission_fields(
+        admission_digest: Hash,
+        admission: &ForkAdmissionRecordInputV1,
+        intervention_sequences: Vec<u64>,
+        final_fork_logical_head: u64,
+        final_fork_chain_head_hash: Hash,
+    ) -> Result<Self, ForkAttributionCodecErrorV1> {
         let CutCoordinatesV1 {
             parent_timeline_id,
             fork_timeline_id,
@@ -321,11 +356,11 @@ impl ForkReproManifestV1 {
             parent_chain_head_hash,
             post_fold_tick_boundary,
             plugin_composition_hash,
-        } = admission.input().cut_coordinates();
+        } = admission.cut_coordinates();
         Self::new(ForkReproManifestInputV1 {
             parent_timeline_id,
             fork_timeline_id,
-            admission_digest: admission.digest(),
+            admission_digest,
             room_revision_descriptor_hash,
             parent_logical_head,
             parent_chain_head_hash,
@@ -381,8 +416,21 @@ impl ForkReproManifestV1 {
         &self,
         admission: &ForkAdmissionRecordV1,
     ) -> Result<(), ForkAttributionCodecErrorV1> {
-        if self.0.admission_digest != admission.digest()
-            || self.0.cut_coordinates() != admission.input().cut_coordinates()
+        self.validate_against_admission_fields(admission.digest(), admission.input())
+    }
+
+    /// Require every duplicated provenance coordinate to equal one validated
+    /// `FAR1`, given as its ADR-099 digest and fields, whatever its origin.
+    ///
+    /// # Errors
+    /// Rejects any mismatch between the manifest and admission authority.
+    pub fn validate_against_admission_fields(
+        &self,
+        admission_digest: Hash,
+        admission: &ForkAdmissionRecordInputV1,
+    ) -> Result<(), ForkAttributionCodecErrorV1> {
+        if self.0.admission_digest != admission_digest
+            || self.0.cut_coordinates() != admission.cut_coordinates()
         {
             return Err(ForkAttributionCodecErrorV1::FieldMismatch);
         }
@@ -394,24 +442,16 @@ impl ForkReproManifestV1 {
     pub fn to_canonical_cbor(&self) -> Vec<u8> {
         let value = &self.0;
         let mut out = Vec::with_capacity(512 + value.intervention_sequences.len() * 9);
-        array(&mut out, 13);
-        text(&mut out, "FRM1");
-        uint(&mut out, 1);
-        timeline(&mut out, value.parent_timeline_id);
-        timeline(&mut out, value.fork_timeline_id);
-        hash(&mut out, value.admission_digest);
-        hash(&mut out, value.room_revision_descriptor_hash);
-        uint(&mut out, value.parent_logical_head);
-        hash(&mut out, value.parent_chain_head_hash);
-        uint(&mut out, value.post_fold_tick_boundary);
-        hash(&mut out, value.plugin_composition_hash);
-        array(&mut out, value.intervention_sequences.len() as u64);
-        for sequence in &value.intervention_sequences {
-            uint(&mut out, *sequence);
-        }
-        uint(&mut out, value.final_fork_logical_head);
-        hash(&mut out, value.final_fork_chain_head_hash);
+        self.emit(&mut out);
         out
+    }
+
+    /// Measure these exact canonical bytes without allocating an encoding buffer.
+    ///
+    /// # Errors
+    /// Returns `LengthOverflow` if checked arithmetic cannot fit the target's `usize`.
+    pub fn canonical_cbor_len(&self) -> Result<usize, crate::CanonicalLengthErrorV1> {
+        crate::crypto::measure(self)
     }
 
     /// Decode exact canonical `FRM1` bytes.
@@ -509,10 +549,25 @@ impl SignedForkReproManifestV1 {
         &self,
         admission: &ForkAdmissionRecordV1,
     ) -> Result<(), ForkAttributionCodecErrorV1> {
-        if self.identity.owner_id != admission.input().creator {
+        self.validate_against_admission_fields(admission.digest(), admission.input())
+    }
+
+    /// Require the wrapper creator and manifest fields to agree with one
+    /// validated `FAR1`, given as its ADR-099 digest and fields.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a different creator or any mismatched duplicated manifest field.
+    pub fn validate_against_admission_fields(
+        &self,
+        admission_digest: Hash,
+        admission: &ForkAdmissionRecordInputV1,
+    ) -> Result<(), ForkAttributionCodecErrorV1> {
+        if self.identity.owner_id != admission.creator {
             return Err(ForkAttributionCodecErrorV1::FieldMismatch);
         }
-        self.manifest.validate_against_admission(admission)
+        self.manifest
+            .validate_against_admission_fields(admission_digest, admission)
     }
 
     /// Construct a signature-only wrapper for the exact inner canonical bytes.
@@ -561,17 +616,17 @@ impl SignedForkReproManifestV1 {
     /// Encode exact deterministic-CBOR `FSM1` bytes.
     #[must_use]
     pub fn to_canonical_cbor(&self) -> Vec<u8> {
-        let inner = self.manifest_bytes();
-        let mut out = Vec::with_capacity(inner.len() + 192);
-        array(&mut out, 7);
-        text(&mut out, "FSM1");
-        uint(&mut out, 1);
-        text(&mut out, self.identity.owner_id.as_str());
-        uint(&mut out, u64::from(self.identity.role.code()));
-        uint(&mut out, self.identity.epoch);
-        bytes(&mut out, &inner);
-        bytes(&mut out, self.signature.as_bytes());
+        let mut out = Vec::with_capacity(192);
+        self.emit(&mut out);
         out
+    }
+
+    /// Measure these exact canonical bytes without allocating an encoding buffer.
+    ///
+    /// # Errors
+    /// Returns `LengthOverflow` if checked arithmetic cannot fit the target's `usize`.
+    pub fn canonical_cbor_len(&self) -> Result<usize, crate::CanonicalLengthErrorV1> {
+        crate::crypto::measure(self)
     }
     /// Return the ADR-099 record identifier over complete `FSM1` bytes.
     #[must_use]
@@ -657,31 +712,37 @@ impl ForkPublicationOperationV1 {
     /// Encode the exact 14-field deterministic-CBOR `FPO1` array.
     #[must_use]
     pub fn to_canonical_cbor(&self) -> Vec<u8> {
-        let mut out = self.canonical_body();
-        authority_origin(&mut out, self.0.origin);
+        let mut out = Vec::with_capacity(512);
+        self.emit(&mut out);
         out
+    }
+
+    /// Measure these exact canonical bytes without allocating an encoding buffer.
+    ///
+    /// # Errors
+    /// Returns `LengthOverflow` if checked arithmetic cannot fit the target's `usize`.
+    pub fn canonical_cbor_len(&self) -> Result<usize, crate::CanonicalLengthErrorV1> {
+        crate::crypto::measure(self)
     }
 
     /// Encode every `FPO1` byte before the final `authority-origin-v1`
     /// field, which the ADR-105 code-2 encoder appends in its own form.
-    fn canonical_body(&self) -> Vec<u8> {
+    fn emit_body(&self, out: &mut impl CanonicalSink) {
         let value = &self.0;
-        let mut out = Vec::with_capacity(512);
-        array(&mut out, 14);
-        text(&mut out, "FPO1");
-        uint(&mut out, 1);
-        hash(&mut out, value.operation_id);
-        timeline(&mut out, value.child_timeline_id);
-        uint(&mut out, value.final_logical_head);
-        hash(&mut out, value.final_chain_head_hash);
-        hash(&mut out, value.admission_digest);
-        text(&mut out, value.signing_identity.owner_id.as_str());
-        uint(&mut out, u64::from(value.signing_identity.role.code()));
-        uint(&mut out, value.signing_identity.epoch);
-        hash(&mut out, value.private_material_digest);
-        bytes(&mut out, value.public_verification_key.as_bytes());
-        hash(&mut out, value.signed_manifest_record_id);
-        out
+        array(out, 14);
+        text(out, "FPO1");
+        uint(out, 1);
+        hash(out, value.operation_id);
+        timeline(out, value.child_timeline_id);
+        uint(out, value.final_logical_head);
+        hash(out, value.final_chain_head_hash);
+        hash(out, value.admission_digest);
+        text(out, value.signing_identity.owner_id.as_str());
+        uint(out, u64::from(value.signing_identity.role.code()));
+        uint(out, value.signing_identity.epoch);
+        hash(out, value.private_material_digest);
+        bytes(out, value.public_verification_key.as_bytes());
+        hash(out, value.signed_manifest_record_id);
     }
 
     /// Decode only exact canonical local-origin `FPO1` bytes.
@@ -759,16 +820,17 @@ impl ForkPublicationBindingV1 {
     /// Encode the exact six-field deterministic-CBOR `FPB1` array.
     #[must_use]
     pub fn to_canonical_cbor(&self) -> Vec<u8> {
-        let value = &self.0;
         let mut out = Vec::with_capacity(128);
-        array(&mut out, 6);
-        text(&mut out, "FPB1");
-        uint(&mut out, 1);
-        timeline(&mut out, value.child_timeline_id);
-        uint(&mut out, value.final_logical_head);
-        hash(&mut out, value.operation_id);
-        hash(&mut out, value.signed_manifest_record_id);
+        self.emit(&mut out);
         out
+    }
+
+    /// Measure these exact canonical bytes without allocating an encoding buffer.
+    ///
+    /// # Errors
+    /// Returns `LengthOverflow` if checked arithmetic cannot fit the target's `usize`.
+    pub fn canonical_cbor_len(&self) -> Result<usize, crate::CanonicalLengthErrorV1> {
+        crate::crypto::measure(self)
     }
 
     /// Decode exact canonical `FPB1` bytes.
@@ -845,13 +907,16 @@ impl ForkPublicationArtifactV1 {
     pub fn to_canonical_cbor(&self) -> Vec<u8> {
         let value = &self.input;
         let mut out = Vec::with_capacity(value.signed_manifest_bytes.len() + 96);
-        array(&mut out, 5);
-        text(&mut out, "FPA1");
-        uint(&mut out, 1);
-        hash(&mut out, value.signed_manifest_record_id);
-        hash(&mut out, value.operation_id);
-        bytes(&mut out, &value.signed_manifest_bytes);
+        self.emit(&mut out);
         out
+    }
+
+    /// Measure these exact canonical bytes without allocating an encoding buffer.
+    ///
+    /// # Errors
+    /// Returns `LengthOverflow` if checked arithmetic cannot fit the target's `usize`.
+    pub fn canonical_cbor_len(&self) -> Result<usize, crate::CanonicalLengthErrorV1> {
+        crate::crypto::measure(self)
     }
 
     /// Decode exact canonical `FPA1` bytes and its nested `FSM1` bytes.
@@ -932,23 +997,23 @@ fn domain_digest(domain: &[u8], bytes_in: &[u8]) -> Hash {
     hasher.update(bytes_in);
     Hash::from_bytes(*hasher.finalize().as_bytes())
 }
-fn hash(out: &mut Vec<u8>, value: Hash) {
+fn hash(out: &mut impl CanonicalSink, value: Hash) {
     bytes(out, value.as_bytes());
 }
-fn timeline(out: &mut Vec<u8>, value: TimelineId) {
+fn timeline(out: &mut impl CanonicalSink, value: TimelineId) {
     bytes(out, &value.inner().to_bytes());
 }
-fn bytes(out: &mut Vec<u8>, value: &[u8]) {
+fn bytes(out: &mut impl CanonicalSink, value: &[u8]) {
     head(out, 2, value.len() as u64);
     out.extend_from_slice(value);
 }
-fn text(out: &mut Vec<u8>, value: &str) {
+fn text(out: &mut impl CanonicalSink, value: &str) {
     head(out, 3, value.len() as u64);
     out.extend_from_slice(value.as_bytes());
 }
 
 /// Encode ADR-099 `authority-origin-v1`; only the local `[1]` form exists in V1.
-fn authority_origin(out: &mut Vec<u8>, origin: ForkAttributionOriginV1) {
+fn authority_origin(out: &mut impl CanonicalSink, origin: ForkAttributionOriginV1) {
     match origin {
         ForkAttributionOriginV1::Local => {
             array(out, 1);
@@ -957,28 +1022,11 @@ fn authority_origin(out: &mut Vec<u8>, origin: ForkAttributionOriginV1) {
     }
 }
 
-fn array(out: &mut Vec<u8>, value: u64) {
+fn array(out: &mut impl CanonicalSink, value: u64) {
     head(out, 4, value);
 }
-fn uint(out: &mut Vec<u8>, value: u64) {
+fn uint(out: &mut impl CanonicalSink, value: u64) {
     head(out, 0, value);
-}
-fn head(out: &mut Vec<u8>, major: u8, value: u64) {
-    let tag = major << 5;
-    if value < 24 {
-        out.push(tag | value.to_be_bytes()[7]);
-    } else if let Ok(value) = u8::try_from(value) {
-        out.extend_from_slice(&[tag | 0x18, value]);
-    } else if let Ok(value) = u16::try_from(value) {
-        out.push(tag | 0x19);
-        out.extend_from_slice(&value.to_be_bytes());
-    } else if let Ok(value) = u32::try_from(value) {
-        out.push(tag | 0x1a);
-        out.extend_from_slice(&value.to_be_bytes());
-    } else {
-        out.push(tag | 0x1b);
-        out.extend_from_slice(&value.to_be_bytes());
-    }
 }
 fn canonical(actual: &[u8], expected: &[u8]) -> Result<(), ForkAttributionCodecErrorV1> {
     if actual == expected {
@@ -986,6 +1034,33 @@ fn canonical(actual: &[u8], expected: &[u8]) -> Result<(), ForkAttributionCodecE
     } else {
         Err(ForkAttributionCodecErrorV1::NonCanonical)
     }
+}
+
+/// POB1 uses the same capped borrowed primitives as FAR1, but its marker is
+/// a byte string, not the text marker of the attribution records. This seam
+/// stays crate-private; the POB1 owner validates nonzero hashes and equality.
+pub(crate) fn decode_local_principal_owner_binding_fields(
+    bytes: &[u8],
+) -> Result<crate::PrincipalOwnerBindingInputV1, ForkAttributionCodecErrorV1> {
+    let mut wire = Reader::new(bytes, crate::MAX_PRINCIPAL_OWNER_BINDING_BYTES_V1)?;
+    wire.array(6)?;
+    if wire.fixed::<4>()? != *b"POB1" {
+        return Err(ForkAttributionCodecErrorV1::InvalidEncoding);
+    }
+    wire.version()?;
+    let operation_id = wire.hash()?;
+    let principal_digest = wire.hash()?;
+    let owner = wire.owner()?;
+    let origin = match wire.authority_origin()? {
+        ForkAttributionOriginV1::Local => crate::ForkAuthorityOriginV1::Local,
+    };
+    wire.finish()?;
+    Ok(crate::PrincipalOwnerBindingInputV1 {
+        operation_id,
+        principal_digest,
+        owner,
+        origin,
+    })
 }
 
 struct Reader<'a> {
@@ -1125,5 +1200,80 @@ impl<'a> Reader<'a> {
         } else {
             Err(ForkAttributionCodecErrorV1::InvalidEncoding)
         }
+    }
+}
+
+impl CanonicalEmit for ForkAdmissionRecordV1 {
+    fn emit(&self, out: &mut impl CanonicalSink) {
+        self.emit_body(out);
+        authority_origin(out, self.0.origin);
+    }
+}
+
+impl CanonicalEmit for ForkPublicationOperationV1 {
+    fn emit(&self, out: &mut impl CanonicalSink) {
+        self.emit_body(out);
+        authority_origin(out, self.0.origin);
+    }
+}
+
+impl CanonicalEmit for ForkPublicationBindingV1 {
+    fn emit(&self, out: &mut impl CanonicalSink) {
+        let value = &self.0;
+        array(out, 6);
+        text(out, "FPB1");
+        uint(out, 1);
+        timeline(out, value.child_timeline_id);
+        uint(out, value.final_logical_head);
+        hash(out, value.operation_id);
+        hash(out, value.signed_manifest_record_id);
+    }
+}
+
+impl CanonicalEmit for ForkPublicationArtifactV1 {
+    fn emit(&self, out: &mut impl CanonicalSink) {
+        let value = &self.input;
+        array(out, 5);
+        text(out, "FPA1");
+        uint(out, 1);
+        hash(out, value.signed_manifest_record_id);
+        hash(out, value.operation_id);
+        bytes(out, &value.signed_manifest_bytes);
+    }
+}
+
+impl CanonicalEmit for ForkReproManifestV1 {
+    fn emit(&self, out: &mut impl CanonicalSink) {
+        let value = &self.0;
+        array(out, 13);
+        text(out, "FRM1");
+        uint(out, 1);
+        timeline(out, value.parent_timeline_id);
+        timeline(out, value.fork_timeline_id);
+        hash(out, value.admission_digest);
+        hash(out, value.room_revision_descriptor_hash);
+        uint(out, value.parent_logical_head);
+        hash(out, value.parent_chain_head_hash);
+        uint(out, value.post_fold_tick_boundary);
+        hash(out, value.plugin_composition_hash);
+        array(out, value.intervention_sequences.len() as u64);
+        for sequence in &value.intervention_sequences {
+            uint(out, *sequence);
+        }
+        uint(out, value.final_fork_logical_head);
+        hash(out, value.final_fork_chain_head_hash);
+    }
+}
+
+impl CanonicalEmit for SignedForkReproManifestV1 {
+    fn emit(&self, out: &mut impl CanonicalSink) {
+        array(out, 7);
+        text(out, "FSM1");
+        uint(out, 1);
+        text(out, self.identity.owner_id.as_str());
+        uint(out, u64::from(self.identity.role.code()));
+        uint(out, self.identity.epoch);
+        out.nested_byte_string(&self.manifest);
+        bytes(out, self.signature.as_bytes());
     }
 }

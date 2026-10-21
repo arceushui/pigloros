@@ -8,11 +8,12 @@ use std::sync::{
 
 use pos_core::{
     ActionApprover, ActionRejected, AppendDedupKey, AppendDedupScope, AppendIdentity,
-    CanonicalBytes, Capability, CoreError, EntityId, ErasureContainmentGateV1, EventDraft, Hash,
-    Kind, PipelineAdmissionBasisV1, PipelineAdmissionPortV1, PipelineAttemptIdV1,
-    PipelineContractErrorV1, PipelineEvidenceRefV1, PipelineObservationAnchorV1, PipelineOutcomeV1,
-    PipelineReceiptLookupV1, PipelineSecurityRevisionsV1, Plugin, PluginId, ProposedAction, Seq,
-    SeqRange, TimelineId,
+    CanonicalBytes, Capability, CoreError, EntityId, ErasureContainmentGateV1, EventDraft,
+    FactualDependencyErrorV1, Hash, Kind, PipelineAdmissionBasisV1, PipelineAdmissionPortV1,
+    PipelineAttemptIdV1, PipelineContractErrorV1, PipelineEvidenceRefV1,
+    PipelineObservationAnchorV1, PipelineOutcomeV1, PipelineReceiptLookupV1,
+    PipelineSecurityRevisionsV1, Plugin, PluginId, ProposedAction, RecordedDependencyClassV1,
+    RecordedSetCountsV1, Seq, SeqRange, TimelineId,
 };
 use pos_runtime::{
     ActionSubmissionError, HumanActionAdmissionErrorV1, HumanActionAdmissionV1,
@@ -138,6 +139,7 @@ fn proposal(actor: EntityId, payload: &'static [u8]) -> ProposedAction {
 
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn admission(harness: &Harness, key: u8, attempt: u8, observed: u64) -> HumanActionAdmissionV1 {
+    let host = ok(LocalScheduledAdmissionHostV1::shared());
     HumanActionAdmissionV1 {
         attempt_id: ok(PipelineAttemptIdV1::try_new([attempt; 16])),
         idempotency: AppendIdentity::new(
@@ -151,6 +153,7 @@ fn admission(harness: &Harness, key: u8, attempt: u8, observed: u64) -> HumanAct
         )),
         authorization: ok(PipelineEvidenceRefV1::try_new(Hash::from_bytes([5; 32]))),
         security_revisions: harness.revisions,
+        authority_grant: host.authority_grant(),
     }
 }
 
@@ -405,9 +408,88 @@ impl PipelineAdmissionPortV1 for LostOutcomePort<'_> {
     }
 }
 
+impl pos_core::FactualPrefixReadPortV1 for LostOutcomePort<'_> {
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn last_committed_factual_tick(
+        &self,
+        timeline: pos_core::TimelineId,
+    ) -> Result<pos_core::FactualHeadV1, pos_core::CoreError> {
+        self.0.last_committed_factual_tick(timeline)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn cut_tick_at(
+        &self,
+        timeline: pos_core::TimelineId,
+        seq: pos_core::Seq,
+    ) -> Result<pos_core::FactualCutV1, pos_core::CoreError> {
+        self.0.cut_tick_at(timeline, seq)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn nodes_for_committed_events(
+        &self,
+        timeline: pos_core::TimelineId,
+        seqs: &[pos_core::Seq],
+    ) -> Result<Vec<Option<pos_core::DependencyNodeRecordV1>>, pos_core::CoreError> {
+        self.0.nodes_for_committed_events(timeline, seqs)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn nodes_by_digest(
+        &self,
+        timeline: pos_core::TimelineId,
+        digests: &[pos_core::Hash],
+    ) -> Result<Vec<Option<pos_core::factual_dependency::BoundFactualNodeV1>>, pos_core::CoreError>
+    {
+        self.0.nodes_by_digest(timeline, digests)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn last_step_node(
+        &self,
+        timeline: pos_core::TimelineId,
+        owner: &pos_core::FactualOwnerIdV1,
+    ) -> Result<Option<pos_core::DependencyNodeRecordV1>, pos_core::CoreError> {
+        self.0.last_step_node(timeline, owner)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn factual_set_counts(
+        &self,
+        timeline: pos_core::TimelineId,
+    ) -> Result<pos_core::RecordedSetCountsV1, pos_core::CoreError> {
+        self.0.factual_set_counts(timeline)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn fold_cursor(
+        &self,
+        timeline: pos_core::TimelineId,
+    ) -> Result<Option<pos_core::FactualFoldCursorV1>, pos_core::CoreError> {
+        self.0.fold_cursor(timeline)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn fold_window(
+        &self,
+        timeline: pos_core::TimelineId,
+        after: pos_core::Seq,
+        through: pos_core::Seq,
+    ) -> Result<pos_core::FactualFoldWindowV1, pos_core::CoreError> {
+        self.0.fold_window(timeline, after, through)
+    }
+}
+
 /// A port whose basis-free lookup never finds a receipt, so only the
-/// store's own exact-retry comparison can recognize a duplicate.
-struct ForgetfulLookupPort<'a>(&'a mut dyn ScheduledAdmissionStoreV1);
+/// store's own exact-retry comparison can recognize a duplicate. It records
+/// every basis it submits, so a test can resubmit the retained one. When
+/// `replay` holds an outcome, the store is bypassed and that outcome returned.
+struct ForgetfulLookupPort<'a> {
+    store: &'a mut dyn ScheduledAdmissionStoreV1,
+    submitted: &'a mut Vec<PipelineAdmissionBasisV1>,
+    replay: Option<PipelineOutcomeV1>,
+}
 
 impl PipelineAdmissionPortV1 for ForgetfulLookupPort<'_> {
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -415,7 +497,10 @@ impl PipelineAdmissionPortV1 for ForgetfulLookupPort<'_> {
         &mut self,
         basis: &PipelineAdmissionBasisV1,
     ) -> Result<PipelineOutcomeV1, CoreError> {
-        self.0.admit_pipeline_batch(basis)
+        self.submitted.push(basis.clone());
+        self.replay
+            .clone()
+            .map_or_else(|| self.store.admit_pipeline_batch(basis), Ok)
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -433,7 +518,80 @@ impl PipelineAdmissionPortV1 for ForgetfulLookupPort<'_> {
         &mut self,
         limit: std::num::NonZeroUsize,
     ) -> Result<pos_core::PurgeOutcome, CoreError> {
-        self.0.purge_expired_pipeline_receipts_bounded(limit)
+        self.store.purge_expired_pipeline_receipts_bounded(limit)
+    }
+}
+
+impl pos_core::FactualPrefixReadPortV1 for ForgetfulLookupPort<'_> {
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn last_committed_factual_tick(
+        &self,
+        timeline: pos_core::TimelineId,
+    ) -> Result<pos_core::FactualHeadV1, pos_core::CoreError> {
+        self.store.last_committed_factual_tick(timeline)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn cut_tick_at(
+        &self,
+        timeline: pos_core::TimelineId,
+        seq: pos_core::Seq,
+    ) -> Result<pos_core::FactualCutV1, pos_core::CoreError> {
+        self.store.cut_tick_at(timeline, seq)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn nodes_for_committed_events(
+        &self,
+        timeline: pos_core::TimelineId,
+        seqs: &[pos_core::Seq],
+    ) -> Result<Vec<Option<pos_core::DependencyNodeRecordV1>>, pos_core::CoreError> {
+        self.store.nodes_for_committed_events(timeline, seqs)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn nodes_by_digest(
+        &self,
+        timeline: pos_core::TimelineId,
+        digests: &[pos_core::Hash],
+    ) -> Result<Vec<Option<pos_core::factual_dependency::BoundFactualNodeV1>>, pos_core::CoreError>
+    {
+        self.store.nodes_by_digest(timeline, digests)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn last_step_node(
+        &self,
+        timeline: pos_core::TimelineId,
+        owner: &pos_core::FactualOwnerIdV1,
+    ) -> Result<Option<pos_core::DependencyNodeRecordV1>, pos_core::CoreError> {
+        self.store.last_step_node(timeline, owner)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn factual_set_counts(
+        &self,
+        timeline: pos_core::TimelineId,
+    ) -> Result<pos_core::RecordedSetCountsV1, pos_core::CoreError> {
+        self.store.factual_set_counts(timeline)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn fold_cursor(
+        &self,
+        timeline: pos_core::TimelineId,
+    ) -> Result<Option<pos_core::FactualFoldCursorV1>, pos_core::CoreError> {
+        self.store.fold_cursor(timeline)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn fold_window(
+        &self,
+        timeline: pos_core::TimelineId,
+        after: pos_core::Seq,
+        through: pos_core::Seq,
+    ) -> Result<pos_core::FactualFoldWindowV1, pos_core::CoreError> {
+        self.store.fold_window(timeline, after, through)
     }
 }
 
@@ -465,6 +623,82 @@ impl PipelineAdmissionPortV1 for UnavailablePort {
         _limit: std::num::NonZeroUsize,
     ) -> Result<pos_core::PurgeOutcome, CoreError> {
         Err(CoreError::Storage("unreachable purge".to_owned()))
+    }
+}
+
+impl pos_core::FactualPrefixReadPortV1 for UnavailablePort {
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn last_committed_factual_tick(
+        &self,
+        _: pos_core::TimelineId,
+    ) -> Result<pos_core::FactualHeadV1, pos_core::CoreError> {
+        Ok(pos_core::FactualHeadV1 {
+            tick: 0,
+            last_seq: pos_core::Seq::ZERO,
+        })
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn cut_tick_at(
+        &self,
+        _: pos_core::TimelineId,
+        _: pos_core::Seq,
+    ) -> Result<pos_core::FactualCutV1, pos_core::CoreError> {
+        Ok(pos_core::FactualCutV1::Boundary { cut_tick: 0 })
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn nodes_for_committed_events(
+        &self,
+        _: pos_core::TimelineId,
+        seqs: &[pos_core::Seq],
+    ) -> Result<Vec<Option<pos_core::DependencyNodeRecordV1>>, pos_core::CoreError> {
+        Ok(seqs.iter().map(|_| None).collect())
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn nodes_by_digest(
+        &self,
+        _: pos_core::TimelineId,
+        digests: &[pos_core::Hash],
+    ) -> Result<Vec<Option<pos_core::factual_dependency::BoundFactualNodeV1>>, pos_core::CoreError>
+    {
+        Ok(digests.iter().map(|_| None).collect())
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn last_step_node(
+        &self,
+        _: pos_core::TimelineId,
+        _: &pos_core::FactualOwnerIdV1,
+    ) -> Result<Option<pos_core::DependencyNodeRecordV1>, pos_core::CoreError> {
+        Ok(None)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn factual_set_counts(
+        &self,
+        _: pos_core::TimelineId,
+    ) -> Result<pos_core::RecordedSetCountsV1, pos_core::CoreError> {
+        Ok(pos_core::RecordedSetCountsV1::default())
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn fold_cursor(
+        &self,
+        _: pos_core::TimelineId,
+    ) -> Result<Option<pos_core::FactualFoldCursorV1>, pos_core::CoreError> {
+        Ok(None)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn fold_window(
+        &self,
+        _: pos_core::TimelineId,
+        _: pos_core::Seq,
+        _: pos_core::Seq,
+    ) -> Result<pos_core::FactualFoldWindowV1, pos_core::CoreError> {
+        Ok(pos_core::FactualFoldWindowV1::default())
     }
 }
 
@@ -508,21 +742,58 @@ fn the_store_comparison_still_recognizes_an_exact_retry() {
         let actor = EntityId::new();
         let attempt = admission(&harness, 1, 1, 0);
         let action = proposal(actor, b"walk");
+        let mut submitted = Vec::new();
         let first = ok(harness.registry.admit_human_action(
-            &mut ForgetfulLookupPort(harness.store.as_mut()),
+            &mut ForgetfulLookupPort {
+                store: harness.store.as_mut(),
+                submitted: &mut submitted,
+                replay: None,
+            },
             &action,
             &attempt,
         ));
-
-        let retry = ok(harness.registry.admit_human_action(
-            &mut ForgetfulLookupPort(harness.store.as_mut()),
-            &action,
-            &attempt,
-        ));
-
         assert!(!first.recovered(), "{name}");
-        assert!(retry.recovered(), "{name}");
-        assert_eq!(retry.receipt(), first.receipt(), "{name}");
+        assert_eq!(submitted.len(), 1, "{name}");
+
+        // R3.8: the receipt lookup precedes every dependency check, so the
+        // retained basis is an exact retry. A rebuilt basis would declare the
+        // next Tick and conflict on an adapter that records Ticks.
+        let retained = ok(submitted.first().ok_or("no basis was submitted"));
+        let retry = ok(harness.store.admit_pipeline_batch(retained));
+
+        assert_eq!(
+            retry,
+            PipelineOutcomeV1::RecoveredDuplicate(first.receipt().clone()),
+            "{name}"
+        );
+        assert_eq!(events(&harness), 1, "{name}");
+    }
+}
+
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn a_store_reported_duplicate_is_a_recovered_receipt() {
+    for mut harness in harnesses() {
+        let name = harness.name;
+        let attempt = admission(&harness, 1, 1, 0);
+        let action = proposal(EntityId::new(), b"walk");
+        let committed = ok(admit(&mut harness, &action, &attempt));
+        let replay = PipelineOutcomeV1::RecoveredDuplicate(committed.receipt().clone());
+        let mut submitted = Vec::new();
+
+        let duplicate = ok(harness.registry.admit_human_action(
+            &mut ForgetfulLookupPort {
+                store: harness.store.as_mut(),
+                submitted: &mut submitted,
+                replay: Some(replay),
+            },
+            &action,
+            &attempt,
+        ));
+
+        assert!(duplicate.recovered(), "{name}");
+        assert_eq!(duplicate.receipt(), committed.receipt(), "{name}");
+        assert_eq!(submitted.len(), 1, "{name}");
         assert_eq!(events(&harness), 1, "{name}");
     }
 }
@@ -550,5 +821,229 @@ fn a_failed_lookup_stops_before_approval() {
             error.to_string().contains("injected lookup failure"),
             "{name}"
         );
+    }
+}
+
+// ── Set-capacity preflight (ADR-064 Revision 3, R3.10) ─────────────────────
+
+/// The recorded-set counts one node, edge or declared input past the preflight
+/// threshold: one worst-case Tick no longer fits.
+///
+/// The thresholds are the caps less one worst-case Tick: 934,464 nodes is
+/// 1,000,000 - 65,536, and 3,737,856 edges or inputs is 4,000,000 - 262,144.
+const fn exhausted_counts() -> [RecordedSetCountsV1; 3] {
+    [
+        RecordedSetCountsV1 {
+            nodes: 934_465,
+            edges: 0,
+            inputs: 0,
+        },
+        RecordedSetCountsV1 {
+            nodes: 0,
+            edges: 3_737_857,
+            inputs: 0,
+        },
+        RecordedSetCountsV1 {
+            nodes: 0,
+            edges: 0,
+            inputs: 3_737_857,
+        },
+    ]
+}
+
+/// The counts exactly at the threshold: one worst-case Tick still fits.
+///
+/// 934,464 is 1,000,000 - 65,536 and 3,737,856 is 4,000,000 - 262,144.
+const AT_THRESHOLD: RecordedSetCountsV1 = RecordedSetCountsV1 {
+    nodes: 934_464,
+    edges: 3_737_856,
+    inputs: 3_737_856,
+};
+
+/// A port over the real store that reports fixed recorded-set counts.
+struct SetCountsPort<'a> {
+    inner: &'a mut dyn ScheduledAdmissionStoreV1,
+    counts: RecordedSetCountsV1,
+    bases: Vec<PipelineAdmissionBasisV1>,
+}
+
+impl PipelineAdmissionPortV1 for SetCountsPort<'_> {
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn admit_pipeline_batch(
+        &mut self,
+        basis: &PipelineAdmissionBasisV1,
+    ) -> Result<PipelineOutcomeV1, CoreError> {
+        self.bases.push(basis.clone());
+        self.inner.admit_pipeline_batch(basis)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn purge_expired_pipeline_receipts_bounded(
+        &mut self,
+        limit: std::num::NonZeroUsize,
+    ) -> Result<pos_core::PurgeOutcome, CoreError> {
+        self.inner.purge_expired_pipeline_receipts_bounded(limit)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn lookup_pipeline_receipt(
+        &mut self,
+        timeline: TimelineId,
+        key: AppendDedupKey,
+        attempt_id: PipelineAttemptIdV1,
+    ) -> Result<PipelineReceiptLookupV1, CoreError> {
+        self.inner
+            .lookup_pipeline_receipt(timeline, key, attempt_id)
+    }
+}
+
+impl pos_core::FactualPrefixReadPortV1 for SetCountsPort<'_> {
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn last_committed_factual_tick(
+        &self,
+        timeline: TimelineId,
+    ) -> Result<pos_core::FactualHeadV1, CoreError> {
+        self.inner.last_committed_factual_tick(timeline)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn cut_tick_at(
+        &self,
+        timeline: TimelineId,
+        seq: Seq,
+    ) -> Result<pos_core::FactualCutV1, CoreError> {
+        self.inner.cut_tick_at(timeline, seq)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn nodes_for_committed_events(
+        &self,
+        timeline: TimelineId,
+        seqs: &[Seq],
+    ) -> Result<Vec<Option<pos_core::DependencyNodeRecordV1>>, CoreError> {
+        self.inner.nodes_for_committed_events(timeline, seqs)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn nodes_by_digest(
+        &self,
+        timeline: TimelineId,
+        digests: &[Hash],
+    ) -> Result<Vec<Option<pos_core::factual_dependency::BoundFactualNodeV1>>, CoreError> {
+        self.inner.nodes_by_digest(timeline, digests)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn last_step_node(
+        &self,
+        timeline: TimelineId,
+        owner: &pos_core::FactualOwnerIdV1,
+    ) -> Result<Option<pos_core::DependencyNodeRecordV1>, CoreError> {
+        self.inner.last_step_node(timeline, owner)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn factual_set_counts(&self, _: TimelineId) -> Result<RecordedSetCountsV1, CoreError> {
+        Ok(self.counts)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn fold_cursor(
+        &self,
+        timeline: TimelineId,
+    ) -> Result<Option<pos_core::FactualFoldCursorV1>, CoreError> {
+        self.inner.fold_cursor(timeline)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn fold_window(
+        &self,
+        timeline: TimelineId,
+        after: Seq,
+        through: Seq,
+    ) -> Result<pos_core::FactualFoldWindowV1, CoreError> {
+        self.inner.fold_window(timeline, after, through)
+    }
+}
+
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn an_exhausted_timeline_refuses_the_action_before_the_approver_runs() {
+    for mut harness in harnesses() {
+        let name = harness.name;
+        let actor = EntityId::new();
+        for counts in exhausted_counts() {
+            let attempt = admission(&harness, 1, 1, 0);
+            let mut port = SetCountsPort {
+                inner: harness.store.as_mut(),
+                counts,
+                bases: Vec::new(),
+            };
+            let walk = proposal(actor, b"walk");
+            let registry = &harness.registry;
+            let refused = err(registry.admit_human_action(&mut port, &walk, &attempt));
+            assert!(
+                matches!(
+                    refused,
+                    HumanActionAdmissionErrorV1::DependencyDeclaration(
+                        FactualDependencyErrorV1::SetExhausted
+                    )
+                ),
+                "{name}"
+            );
+        }
+        // The approver was never invoked.
+        assert_eq!(approvals(&harness), 0, "{name}");
+        assert_eq!(events(&harness), 0, "{name}");
+
+        // Exactly at the threshold one more worst-case Tick fits.
+        let attempt = admission(&harness, 2, 2, 0);
+        let mut port = SetCountsPort {
+            inner: harness.store.as_mut(),
+            counts: AT_THRESHOLD,
+            bases: Vec::new(),
+        };
+        let walk = proposal(actor, b"walk");
+        let registry = &harness.registry;
+        ok(registry.admit_human_action(&mut port, &walk, &attempt));
+        assert_eq!(approvals(&harness), 1, "{name}");
+        assert_eq!(events(&harness), 1, "{name}");
+    }
+}
+
+/// ADR-064 R3.4.5: the basis a human action submits declares one
+/// human-ingress node per approved draft and no edge.
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn the_submitted_basis_declares_one_human_ingress_node_per_draft() {
+    for mut harness in harnesses() {
+        let name = harness.name;
+        let attempt = admission(&harness, 1, 1, 0);
+        let mut port = SetCountsPort {
+            inner: harness.store.as_mut(),
+            counts: RecordedSetCountsV1::default(),
+            bases: Vec::new(),
+        };
+        let walk = proposal(EntityId::new(), b"walk");
+        let registry = &harness.registry;
+        ok(registry.admit_human_action(&mut port, &walk, &attempt));
+
+        let dependencies = port.bases[0].dependencies();
+        assert_eq!(dependencies.tick(), 1, "{name}");
+        let record = dependencies.record();
+        let nodes = record.nodes();
+        assert_eq!(nodes.len(), 1, "{name}");
+        assert_eq!(nodes[0].coordinate().owner_id(), "host.ingress", "{name}");
+        let class = RecordedDependencyClassV1::ExogenousFrozen;
+        assert_eq!(nodes[0].class(), class, "{name}");
+        assert!(nodes[0].input_digests().is_empty(), "{name}");
+        assert!(record.edges().is_empty(), "{name}");
+        let bound: Vec<(u32, u32)> = dependencies
+            .output_bindings()
+            .iter()
+            .map(|binding| (binding.draft_index, binding.node_index))
+            .collect();
+        assert_eq!(bound, [(0, 0)], "{name}");
+        assert!(dependencies.event_nodes().is_empty(), "{name}");
     }
 }

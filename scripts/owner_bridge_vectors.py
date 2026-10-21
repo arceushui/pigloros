@@ -13,8 +13,13 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import ast
+import base64
+import hashlib
+import re
 import struct
 from collections.abc import Sequence
+from pathlib import Path
 
 CEREMONY_ID = bytes(range(0x00, 0x10))
 SUBJECT_ID = bytes(range(0x10, 0x20))
@@ -53,6 +58,11 @@ EXPECTED = {
         "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f2021"
         "222324483031323334353637f65820a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2"
         "b3b4b5b6b7b8b9babbbcbdbebff6"
+    ),
+    "assertion_reply_without_prf": (
+        "8a44574153310150000102030405060708090a0b0c0d0e0f428081427b7d582500"
+        "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f2021"
+        "222324483031323334353637f6f6f6"
     ),
     "request_header": "50574231010040000000000001000000000102030405060708090a0b0c0d0e0f0010000094000000020000000000000000000000000000000000000000000000",
     "ready_reply_header": "50574231010040000101000001000000000102030405060708090a0b0c0d0e0f0020000072000000020000000000000000000000000000000000000000000000",
@@ -179,6 +189,22 @@ def vectors() -> dict[str, bytes]:
                 None,
             ]
         ),
+        # The packaged page reports an absent Get PRF as CBOR null where the closed decoder
+        # wants 32 bytes (ADR-110 section 1 and 7: this must fail closed as PrfUnsupported).
+        "assertion_reply_without_prf": cbor(
+            [
+                b"WAS1",
+                1,
+                CEREMONY_ID,
+                CREDENTIAL_ID,
+                b"{}",
+                authenticator_data,
+                bytes(range(0x30, 0x38)),
+                None,
+                None,
+                None,
+            ]
+        ),
         "request_header": control_header(0, 0, 4096, 148, 2),
         "ready_reply_header": control_header(1, 1, 8192, 114, 2),
         "subject_credential_binding": cbor(
@@ -215,8 +241,110 @@ def vectors() -> dict[str, bytes]:
     }
 
 
+BRIDGE_ROOT = Path(__file__).resolve().parent.parent / "crates" / "pos-owner-bridge"
+ASSET_SOURCE = BRIDGE_ROOT / "src" / "listener" / "assets.rs"
+PERMISSIONS = (
+    "publickey-credentials-create=(self), publickey-credentials-get=(self), "
+    "clipboard-read=(), clipboard-write=(), camera=(), microphone=(), geolocation=()"
+)
+
+
+def _inline_block(document: str, tag: str) -> bytes:
+    match = re.search(rf"<{tag}>(.*?)</{tag}>", document, re.DOTALL)
+    if match is None:
+        raise AssertionError(f"owner.html has no inline <{tag}> block")
+    return match.group(1).encode("utf-8")
+
+
+def _csp_hash(block: bytes) -> str:
+    return base64.b64encode(hashlib.sha256(block).digest()).decode("ascii")
+
+
+def owner_asset_values() -> dict[str, object]:
+    """Independently derive the ADR-110 section 4 listener constants from the packaged page."""
+    body = (BRIDGE_ROOT / "assets" / "owner.html").read_bytes()
+    document = body.decode("utf-8")
+    script, style = _csp_hash(_inline_block(document, "script")), _csp_hash(
+        _inline_block(document, "style")
+    )
+    policy = (
+        "default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; "
+        f"script-src 'sha256-{script}'; style-src 'sha256-{style}'; img-src 'none'; "
+        "connect-src 'none'"
+    )
+    fixed = "Cache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n"
+    head = (
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n"
+        f"Content-Length: {len(body)}\r\n{fixed}"
+        "Referrer-Policy: no-referrer\r\nCross-Origin-Opener-Policy: same-origin\r\n"
+        "Cross-Origin-Resource-Policy: same-origin\r\n"
+        f"Permissions-Policy: {PERMISSIONS}\r\nConnection: close\r\n"
+        f"Content-Security-Policy: {policy}\r\n\r\n"
+    )
+    empty = (
+        f"Content-Length: 0\r\n{fixed}Connection: close\r\n"
+        f"Content-Security-Policy: {policy}\r\n\r\n"
+    )
+    return {
+        "body": body,
+        "html_sha256": hashlib.sha256(body).digest(),
+        "response_sha256": hashlib.sha256(head.encode("ascii") + body).digest(),
+        "script": script,
+        "style": style,
+        "head": head,
+        "not_found": "HTTP/1.1 404 Not Found\r\n" + empty,
+        "bad_request": "HTTP/1.1 400 Bad Request\r\n" + empty,
+    }
+
+
+def _rust_bytes(source: str, name: str) -> bytes:
+    match = re.search(rf"pub(?:\(super\))? const {name}: \[u8; 32\] = \[(.*?)\];", source, re.DOTALL)
+    if match is None:
+        raise AssertionError(f"assets.rs has no {name}")
+    return bytes(int(item, 16) for item in re.findall(r"0x([0-9a-f]{2})", match.group(1)))
+
+
+def _rust_text(source: str, name: str) -> str:
+    match = re.search(rf'pub(?:\(super\))? const {name}: &str = "([^"]*)";', source)
+    if match is not None:
+        return match.group(1)
+    block = re.search(rf"pub(?:\(super\))? const {name}: &str = concat!\((.*?)\n\);", source, re.DOTALL)
+    if block is None:
+        raise AssertionError(f"assets.rs has no {name}")
+    return "".join(ast.literal_eval(piece) for piece in re.findall(r'"(?:[^"\\]|\\.)*"', block.group(1)))
+
+
+def check_assets() -> None:
+    """Fail closed if the packaged page, its manifest, or the Rust constants drift."""
+    expected = owner_asset_values()
+    source = ASSET_SOURCE.read_text(encoding="utf-8")
+    manifest = (BRIDGE_ROOT / "assets" / "manifest.v1").read_text(encoding="utf-8")
+    line = f"{expected['html_sha256'].hex()}  /owner.html  text/html; charset=utf-8\n"
+    if manifest != line:
+        raise AssertionError("assets/manifest.v1 does not describe owner.html")
+    checks = {
+        "OWNER_HTML_SHA256": (_rust_bytes(source, "OWNER_HTML_SHA256"), expected["html_sha256"]),
+        "OWNER_RESPONSE_SHA256": (
+            _rust_bytes(source, "OWNER_RESPONSE_SHA256"),
+            expected["response_sha256"],
+        ),
+        "CSP_SCRIPT_SHA256": (_rust_text(source, "CSP_SCRIPT_SHA256"), expected["script"]),
+        "CSP_STYLE_SHA256": (_rust_text(source, "CSP_STYLE_SHA256"), expected["style"]),
+        "OWNER_RESPONSE_HEAD": (_rust_text(source, "OWNER_RESPONSE_HEAD"), expected["head"]),
+        "NOT_FOUND_RESPONSE": (_rust_text(source, "NOT_FOUND_RESPONSE"), expected["not_found"]),
+        "BAD_REQUEST_RESPONSE": (
+            _rust_text(source, "BAD_REQUEST_RESPONSE"),
+            expected["bad_request"],
+        ),
+    }
+    for name, (actual, wanted) in checks.items():
+        if actual != wanted:
+            raise AssertionError(f"{name} drifted from the packaged owner page")
+
+
 def check() -> None:
     """Fail closed if an independently generated byte vector drifts."""
+    check_assets()
     actual = vectors()
     if set(actual) != set(EXPECTED):
         raise AssertionError("owner-bridge vector names drifted")
@@ -233,7 +361,7 @@ def main() -> int:
     parser.add_argument("--check", action="store_true", help="verify all committed vectors")
     parser.parse_args()
     check()
-    print("owner-bridge vectors: ALL MATCH")
+    print("owner-bridge vectors and listener assets: ALL MATCH")
     return 0
 
 

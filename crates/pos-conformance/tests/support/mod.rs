@@ -14,6 +14,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+pub mod plugin_composite;
+
 pub type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 pub const PROFILE_MEMBER_PATH: &str = "profile/CPF1.cbor";

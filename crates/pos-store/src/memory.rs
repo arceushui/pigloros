@@ -70,9 +70,9 @@ use pos_core::{
     ForkAppendOperationV1, ForkAppendSourceIdentityV1, ForkAttributionOriginV1,
     ForkAuthorityOriginV1, ForkClassifiedEventV1, ForkClassifiedProvenanceV1,
     ForkClassifierRegistrationInputV1, ForkClassifierRegistrationV1, ForkClassifierSourceV1,
-    ForkClassifierTableV1, ForkEventClassifierV1, ForkInterventionAdmissionV1,
-    ForkPublicationArtifactV1, ForkPublicationBindingV1, ForkPublicationOperationV1,
-    ForkPublicationReceiptV1, KeyIdentityV1, KeyRegistryErrorV1,
+    ForkClassifierTableV1, ForkEventAppendRequestV1, ForkEventClassifierV1,
+    ForkInterventionAdmissionV1, ForkPublicationArtifactV1, ForkPublicationBindingV1,
+    ForkPublicationOperationV1, ForkPublicationReceiptV1, KeyIdentityV1, KeyRegistryErrorV1,
     KeyRegistryHistoricalDecryptionPortV1, KeyRegistryStateV1, LocalCutOwnerCommitKindV1,
     LocalCutOwnerCommitV1, LocalCutOwnerErrorV1, LocalCutOwnerPersistencePortV1,
     LocalCutOwnerRequestV1, LocalCutOwnerStateV1, ManifestOwnerAdmissionCommitKindV1,
@@ -89,12 +89,14 @@ use pos_core::{
 
 use crate::fork_admission_authority::{
     admitted_fork_context_containment, admitted_fork_may_have_changed_topology, advance_wall_fence,
-    begin_initialize, begin_open, finalize_initialize, finalize_open, fork_commitment,
-    principal_owner_commitment, validate_live_session, verify_command, verify_recovery_proof,
-    with_unfenced_fork_containment, ForkAdmissionAuthorityBootstrapPortV1,
+    begin_initialize, begin_open, finalize_initialize, finalize_open, fork_commitment_with_context,
+    principal_owner_commitment_with_context, validate_live_session, verify_command,
+    verify_recovery_proof, with_unfenced_fork_containment, ForkAdmissionAuthorityBootstrapPortV1,
     ForkAdmissionAuthorityErrorV1, ForkAdmissionAuthorityPortV1, ForkAdmissionAuthoritySessionV1,
     ForkAdmissionAuthorityStateV1, ForkAdmissionOperationRowV1, VerifiedForkAdmissionCommandV1,
 };
+#[cfg(test)]
+use crate::fork_admission_authority::{fork_commitment, principal_owner_commitment};
 use crate::fork_delivery_journal::{
     fork_delivery_execution, fork_delivery_may_have_changed_topology,
     ForkAdmissionDeliveryJournalPortV1, ForkDeliveryClaimOutcomeV1, ForkDeliveryClaimV1,
@@ -103,15 +105,16 @@ use crate::fork_delivery_journal::{
 };
 use crate::fork_event_authority::{
     classified_event_matches_operation, fork_append_request, permitted_fork_admission,
-    preflight_classifier_sources, recover_classified_operation,
+    preflight_classifier_sources, recover_classified_operation, AuthorityValidatorV1,
+    ValidatedAdmissionV1, ValidatedOriginV1,
 };
 use crate::fork_manifest_publication::{
     authorize_publication, publication_parent_head, publication_sources,
     recovered_publication_receipt, require_absent_publication_graph, sign_publication,
-    trusted_committed_manifest, validate_publication_request, AbsentPublicationPreflightV1,
-    CommittedPublicationRowsV1, CommittedPublicationSourcesV1, PublicationGraphV1,
+    validate_publication_request, AbsentPublicationPreflightV1, PublicationGraphV1,
     PublicationSourceErrorV1, PublicationSourceResultV1, PublicationSourcesV1, PublicationSuffixV1,
 };
+use crate::fork_replay::NativeReadContextV1;
 use crate::{
     ForkAppendSourcePermitV1, ForkClassifiedAppendReceiptV1, ForkClassifierRegistrarPermitV1,
     ForkClassifierRegistrationReceiptV1, ForkEventAuthorityErrorV1,
@@ -119,10 +122,16 @@ use crate::{
     ForkManifestPublicationPortV1, ForkManifestPublicationRequestV1, HeldRegistryAuthorizationV1,
 };
 
+mod composition_fallback_registry;
 mod counterfactual_store;
 mod fork_attribution_authority_import;
 mod fork_attribution_issuer_policy;
+mod fork_code_two_read;
+mod fork_replay;
+mod fork_replay_lineage;
 mod pipeline_admission;
+#[cfg(target_os = "linux")]
+mod plugin_trust_registry;
 
 #[cfg(test)]
 thread_local! {
@@ -208,6 +217,11 @@ fn fail_next_visible_delete_for_test() {
 
 /// In-memory event store. Thread-unsafe — intended for single-threaded tests and benchmarks.
 pub struct MemoryStore {
+    /// ADR-119 composition fallback registry state, keyed by `(scope, timeline)`.
+    composition_fallback: composition_fallback_registry::MemoryCompositionFallbackStateV1,
+    /// ADR-103 Plugin trust policy registry state, one record set per policy scope.
+    #[cfg(target_os = "linux")]
+    plugin_trust: plugin_trust_registry::MemoryPluginTrustStateV1,
     /// Complete state per timeline. Keeping this together makes missing companion state
     /// unrepresentable.
     timelines: HashMap<TimelineId, TimelineState>,
@@ -260,7 +274,7 @@ pub struct MemoryStore {
     pipeline_admission_fences: HashMap<TimelineId, pos_core::PipelineAdmissionFenceV1>,
     /// ADR-064 per-Fork counterfactual facts, generation, and artifacts.
     counterfactual_forks: HashMap<TimelineId, counterfactual_store::CounterfactualForkStateV1>,
-    /// Last generation of each deleted Fork, so a re-created id never resumes lower.
+    /// Last generation of each deleted generic Fork, so a re-created id never resumes lower.
     counterfactual_generation_floors: HashMap<TimelineId, u64>,
     /// ADR-064 committed dependency prefix of each parent Timeline.
     dependency_prefixes: HashMap<TimelineId, counterfactual_store::DependencyRowsV1>,
@@ -522,6 +536,26 @@ fn delete_visible_timeline(store: &mut MemoryStore, id: TimelineId) -> Result<()
     delete_visible_timeline_impl(store, id)
 }
 
+/// Refuses deleting a Timeline that still has child Forks or is an admitted Fork.
+///
+/// Both checks run before `delete_visible_timeline_impl` removes anything, so a
+/// refusal mutates nothing and the counterfactual purge does not run. ADR-099
+/// revision 13 keeps an admitted Fork (a Timeline with a local or an imported
+/// `FAR1`) for the store's lifetime. The existence term makes an orphan `FAR1`
+/// of a missing Timeline fall through to the caller's `TimelineNotFound`, also
+/// for callers that skip the visibility check.
+fn ensure_timeline_deletable(store: &MemoryStore, id: TimelineId) -> Result<(), CoreError> {
+    if has_child_timeline(&store.timelines, id) {
+        return Err(CoreError::Storage(
+            "cannot delete timeline that still has forks".to_owned(),
+        ));
+    }
+    if store.timelines.contains_key(&id) && store.fork_is_admitted(id) {
+        return Err(CoreError::AdmittedForkNotDeletable(id));
+    }
+    Ok(())
+}
+
 fn delete_visible_timeline_impl(store: &mut MemoryStore, id: TimelineId) -> Result<(), CoreError> {
     #[cfg(test)]
     if FAIL_NEXT_VISIBLE_DELETE.with(|fail| fail.replace(false)) {
@@ -529,11 +563,7 @@ fn delete_visible_timeline_impl(store: &mut MemoryStore, id: TimelineId) -> Resu
             "injected visible Timeline deletion failure".to_owned(),
         ));
     }
-    if has_child_timeline(&store.timelines, id) {
-        return Err(CoreError::Storage(
-            "cannot delete timeline that still has forks".to_owned(),
-        ));
-    }
+    ensure_timeline_deletable(store, id)?;
     store
         .timelines
         .remove(&id)
@@ -707,12 +737,35 @@ impl MemoryStore {
         self
     }
 
+    /// Transfer a nonproduction fixture from its open test gate to a host.
+    ///
+    /// # Errors
+    /// Refuses to detach a real containment gate or a missing gate.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn detach_fixture_gate_for_host(mut self) -> Result<Self, CoreError> {
+        if self
+            .erasure_gate
+            .as_ref()
+            .is_none_or(|gate| !gate.permits_unverified_test_fixture())
+        {
+            return Err(CoreError::ErasureContainmentUnavailable);
+        }
+        self.erasure_gate_bound = false;
+        self.erasure_inventory_generation = None;
+        self.erasure_topology_requires_permit = false;
+        Ok(self.without_erasure_gate())
+    }
+
     #[must_use]
     fn with_default_components(hasher: Box<dyn Hasher>) -> Self {
         let erasure_gate = Some(Arc::new(ErasureContainmentGateV1::new_fail_closed()));
         let erasure_gate_bound = false;
 
         Self {
+            composition_fallback:
+                composition_fallback_registry::MemoryCompositionFallbackStateV1::default(),
+            #[cfg(target_os = "linux")]
+            plugin_trust: plugin_trust_registry::MemoryPluginTrustStateV1::default(),
             timelines: HashMap::new(),
             event_ids: HashSet::new(),
             append_identities: HashMap::new(),
@@ -1357,32 +1410,63 @@ impl MemoryStore {
 
     /// Walk the fork chain from `timeline_id` back to the root, returning [root, ..., `timeline_id`].
     fn fork_chain(&self, timeline_id: TimelineId) -> Result<ForkChain, CoreError> {
+        self.fork_chain_with_context(
+            timeline_id,
+            &mut crate::fork_replay::NativeReadContextV1::ordinary(),
+        )
+    }
+
+    fn fork_chain_with_context(
+        &self,
+        timeline_id: TimelineId,
+        context: &mut crate::fork_replay::NativeReadContextV1<'_, '_>,
+    ) -> Result<ForkChain, CoreError> {
         let mut chain = Vec::new();
         let mut fork_seqs = Vec::new();
         let mut visited = HashSet::new();
         let mut current = timeline_id;
         loop {
+            context
+                .node(chain.len())
+                .map_err(|_| CoreError::ArtifactUnavailable)?;
+            // Two real Timeline ID copies: cycle set and ordered chain.
+            context
+                .bytes(16)
+                .map_err(|_| CoreError::ArtifactUnavailable)?;
             if !visited.insert(current) {
                 return Err(CoreError::Storage(format!(
                     "fork ancestry contains a cycle at timeline {current}"
                 )));
             }
             let meta = self.timeline(current)?;
+            context
+                .bytes(16)
+                .map_err(|_| CoreError::ArtifactUnavailable)?;
             chain.push(current);
             match meta.meta.fork_point {
                 Some((parent, fork_seq)) => {
+                    context
+                        .bytes(8)
+                        .map_err(|_| CoreError::ArtifactUnavailable)?;
                     fork_seqs.push(fork_seq);
                     current = parent;
                 }
                 None => break,
             }
+            context
+                .check()
+                .map_err(|_| CoreError::ArtifactUnavailable)?;
         }
         chain.reverse();
         fork_seqs.reverse();
-        Ok(ForkChain {
+        let chain = ForkChain {
             timelines: chain,
             fork_seqs,
-        })
+        };
+        context
+            .check()
+            .map(|()| chain)
+            .map_err(|_| CoreError::ArtifactUnavailable)
     }
 
     /// Walk at most `max_depth` parent links before returning the chain.
@@ -2183,42 +2267,110 @@ impl MemoryStore {
         ),
         ForkEventAuthorityErrorV1,
     > {
-        let admission = self.validated_local_fork_admission(child_timeline_id)?;
+        self.classified_authority_graph_with_context(
+            child_timeline_id,
+            &mut NativeReadContextV1::ordinary(),
+        )
+    }
+
+    fn classified_authority_graph_with_context(
+        &self,
+        child_timeline_id: TimelineId,
+        context: &mut NativeReadContextV1<'_, '_>,
+    ) -> Result<
+        (
+            ForkAdmissionRecordV1,
+            ForkClassifierTableV1,
+            ForkClassifierRegistrationV1,
+        ),
+        ForkEventAuthorityErrorV1,
+    > {
+        use ForkEventAuthorityErrorV1::CorruptAuthority;
+        let admission =
+            self.validated_local_fork_admission_with_context(child_timeline_id, context)?;
         let table = self
             .fork_classifier_tables
             .get(&child_timeline_id)
-            .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority)?;
-        let mut registrations = self
-            .fork_classifier_registrations
-            .values()
-            .filter(|registration| registration.input().child_timeline_id == child_timeline_id);
-        let registration = registrations
-            .next()
-            .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority)?;
-        if registrations.next().is_some() {
-            return Err(ForkEventAuthorityErrorV1::CorruptAuthority);
-        }
+            .ok_or(CorruptAuthority)?;
+        context.suffix_row().map_err(|_| CorruptAuthority)?;
+        let registration = self.child_registration_with_context(child_timeline_id, context)?;
+        context
+            .bytes(table.input().registrar_identifier.len())
+            .map_err(|_| CorruptAuthority)?;
         let source = self
             .fork_classifier_sources
             .get(&(
                 table.input().room_revision_descriptor_hash,
                 table.input().registrar_identifier.clone(),
             ))
-            .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority)?;
-        (table.input().fork_admission_digest == admission.digest()
-            && table.input().room_revision_descriptor_hash
-                == admission.input().room_revision_descriptor_hash
-            && source.input().room_revision_descriptor_hash
-                == table.input().room_revision_descriptor_hash
-            && source.input().registrar_identifier == table.input().registrar_identifier
-            && table.input().source_configuration_revision_digest == source.digest()
-            && table.input().routes == source.input().routes
-            && registration.input().fork_admission_digest == admission.digest()
-            && registration.input().room_revision_descriptor_hash
-                == admission.input().room_revision_descriptor_hash
-            && registration.input().classifier_revision_digest == table.digest())
-        .then(|| (admission, table.clone(), registration.clone()))
-        .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority)
+            .ok_or(CorruptAuthority)?;
+        context.suffix_row().map_err(|_| CorruptAuthority)?;
+        Self::check_local_classifier_records(&admission, table, source, registration, context)?;
+        context
+            .canonical(table.canonical_cbor_len())
+            .map_err(|_| CorruptAuthority)?;
+        context
+            .canonical(registration.canonical_cbor_len())
+            .map_err(|_| CorruptAuthority)?;
+        let graph = (admission, table.clone(), registration.clone());
+        context
+            .check()
+            .map(|()| graph)
+            .map_err(|_| CorruptAuthority)
+    }
+
+    fn check_local_classifier_records(
+        admission: &ForkAdmissionRecordV1,
+        table: &ForkClassifierTableV1,
+        source: &ForkClassifierSourceV1,
+        registration: &ForkClassifierRegistrationV1,
+        context: &mut NativeReadContextV1<'_, '_>,
+    ) -> Result<(), ForkEventAuthorityErrorV1> {
+        use ForkEventAuthorityErrorV1::CorruptAuthority;
+        context
+            .canonical(admission.canonical_cbor_len())
+            .map_err(|_| CorruptAuthority)?;
+        let admission_digest = admission.digest();
+        context.check().map_err(|_| CorruptAuthority)?;
+        if table.input().fork_admission_digest != admission_digest
+            || table.input().room_revision_descriptor_hash
+                != admission.input().room_revision_descriptor_hash
+            || source.input().room_revision_descriptor_hash
+                != table.input().room_revision_descriptor_hash
+            || source.input().registrar_identifier != table.input().registrar_identifier
+        {
+            return Err(CorruptAuthority);
+        }
+        context
+            .canonical(source.canonical_cbor_len())
+            .map_err(|_| CorruptAuthority)?;
+        let source_digest = source.digest();
+        context.check().map_err(|_| CorruptAuthority)?;
+        if table.input().source_configuration_revision_digest != source_digest
+            || table.input().routes != source.input().routes
+        {
+            return Err(CorruptAuthority);
+        }
+        context
+            .canonical(admission.canonical_cbor_len())
+            .map_err(|_| CorruptAuthority)?;
+        let admission_digest = admission.digest();
+        context.check().map_err(|_| CorruptAuthority)?;
+        if registration.input().fork_admission_digest != admission_digest
+            || registration.input().room_revision_descriptor_hash
+                != admission.input().room_revision_descriptor_hash
+        {
+            return Err(CorruptAuthority);
+        }
+        context
+            .canonical(table.canonical_cbor_len())
+            .map_err(|_| CorruptAuthority)?;
+        let table_digest = table.digest();
+        context.check().map_err(|_| CorruptAuthority)?;
+        if registration.input().classifier_revision_digest != table_digest {
+            return Err(CorruptAuthority);
+        }
+        Ok(())
     }
 
     /// Validate the child's authority closure against digests retained by evidence.
@@ -2235,6 +2387,74 @@ impl MemoryStore {
                     .then_some((admission, table))
                     .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority)
             })
+    }
+
+    /// Insert one classified Event whose operation has no FOP1 entry yet.
+    ///
+    /// The fresh-only part of a classified append, mirroring `SQLite`: the
+    /// caller has built the FEQ1 request, validated the permit (yielding
+    /// `table`) and ruled out an existing operation, so this classifies the
+    /// source and installs the Event, its EOR1 and its FOP1 with no
+    /// idempotence branch.
+    fn insert_fresh_classified_append(
+        &mut self,
+        table: &ForkClassifierTableV1,
+        request: &ForkEventAppendRequestV1,
+        draft: &EventDraft,
+    ) -> Result<ForkClassifiedAppendReceiptV1, ForkEventAuthorityErrorV1> {
+        let classification = ForkEventClassifierV1::from_table(table)
+            .classify_identity(&request.source)
+            .map_err(|_| ForkEventAuthorityErrorV1::ClassifierRejected)?;
+        let hasher: &dyn Hasher = self.hasher.as_ref();
+        // Every fallible step precedes the first mutation, matching SQLite's
+        // all-or-nothing transaction.
+        let (event, provenance) = self
+            .timelines
+            .get_mut(&request.child_timeline_id)
+            .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority)
+            .and_then(|state| {
+                let prefix = state
+                    .timeline
+                    .meta
+                    .fork_point
+                    .map_or(0, |(_, fork)| fork.as_u64());
+                Self::prepare_one_for_state(state, draft, hasher)
+                    .and_then(|(local_event, chain_head)| {
+                        Self::logical_event(prefix, local_event.clone())
+                            .map(|event| (local_event, chain_head, event))
+                    })
+                    .map_err(|_| ForkEventAuthorityErrorV1::StorageIndeterminate)
+                    .and_then(|(local_event, chain_head, event)| {
+                        ForkClassifiedProvenanceV1::derive(
+                            request,
+                            table,
+                            classification,
+                            ForkClassifiedEventV1 {
+                                event_id: event.id,
+                                logical_seq: event.seq.as_u64(),
+                                wall_time: event.wall_time,
+                                payload_hash: event.payload_hash,
+                            },
+                        )
+                        .map_err(|_| ForkEventAuthorityErrorV1::InvalidRequest)
+                        .map(|provenance| {
+                            Self::commit_prepared_to_state(state, local_event, chain_head);
+                            (event, provenance)
+                        })
+                    })
+            })?;
+        self.event_ids.insert(event.id);
+        self.fork_event_origins.insert(event.id, provenance.origin);
+        if let Some(intervention) = provenance.intervention {
+            self.fork_intervention_admissions
+                .insert(event.id, intervention);
+        }
+        self.fork_append_operations
+            .insert(request.operation_id, provenance.operation.clone());
+        Ok(ForkClassifiedAppendReceiptV1 {
+            event,
+            operation: provenance.operation,
+        })
     }
 
     fn validate_classified_permit(
@@ -2303,7 +2523,7 @@ impl MemoryStore {
                 .map(|event| (table, event))
         })
         .and_then(|(table, event)| {
-            self.validate_classified_records(operation, &event, &table)
+            self.validate_classified_records(operation, &event, &table, ValidatedOriginV1::Local)
                 .map(|_| event)
         })
     }
@@ -2314,62 +2534,157 @@ impl MemoryStore {
         operation: &ForkAppendOperationV1,
         event: &Event,
         table: &ForkClassifierTableV1,
+        origin: ValidatedOriginV1,
     ) -> Result<(EventOriginRecordV1, Option<ForkInterventionAdmissionV1>), ForkEventAuthorityErrorV1>
     {
+        self.validate_classified_records_with_context(
+            operation,
+            event,
+            table,
+            origin,
+            &mut crate::fork_replay::NativeReadContextV1::ordinary(),
+        )
+    }
+
+    fn validate_classified_records_with_context(
+        &self,
+        operation: &ForkAppendOperationV1,
+        event: &Event,
+        table: &ForkClassifierTableV1,
+        origin: ValidatedOriginV1,
+        context: &mut crate::fork_replay::NativeReadContextV1<'_, '_>,
+    ) -> Result<(EventOriginRecordV1, Option<ForkInterventionAdmissionV1>), ForkEventAuthorityErrorV1>
+    {
+        use ForkEventAuthorityErrorV1::CorruptAuthority;
+
+        context.check().map_err(|_| CorruptAuthority)?;
         let input = operation.input();
         let intervention = self.fork_intervention_admissions.get(&event.id);
-        // A missing EOR1 and an unclassifiable FOP1 source are both corrupt
-        // authority, exactly like any field mismatch below.
-        self.fork_event_origins
+        let record = self
+            .fork_event_origins
             .get(&event.id)
-            .zip(
-                ForkEventClassifierV1::from_table(table)
-                    .classify_identity(&input.source)
-                    .ok(),
-            )
-            .filter(|(origin, classification)| {
-                let (expected_origin, expected_intervention) =
-                    operation.expected_provenance(table, *classification);
-                event.id == input.event_id
-                    && event.seq.as_u64() == input.logical_seq
-                    && classified_event_matches_operation(event, operation)
-                    && **origin == expected_origin
-                    && origin.digest() == input.event_origin_digest
-                    && intervention == expected_intervention.as_ref()
-                    && intervention.map(ForkInterventionAdmissionV1::digest)
-                        == input.intervention_admission_digest
-            })
-            .map(|(origin, _)| (origin.clone(), intervention.cloned()))
-            .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority)
+            .ok_or(CorruptAuthority)?;
+        // from_table emits FCT1 once for its digest and clones only its route
+        // metadata. Account for these distinct operations, not a second FCT1.
+        context
+            .canonical(table.canonical_cbor_len())
+            .map_err(|_| CorruptAuthority)?;
+        for route in &table.input().routes {
+            context
+                .bytes(route.source().route().len())
+                .map_err(|_| CorruptAuthority)?;
+            context.bytes(32 + 1).map_err(|_| CorruptAuthority)?;
+        }
+        let classifier = ForkEventClassifierV1::from_table(table);
+        context.check().map_err(|_| CorruptAuthority)?;
+        let classification = classifier
+            .classify_identity(&input.source)
+            .map_err(|_| CorruptAuthority)?;
+        let (expected_origin, expected_intervention) =
+            operation.expected_provenance(table, classification);
+        if event.id != input.event_id
+            || event.seq.as_u64() != input.logical_seq
+            || !classified_event_matches_operation(event, operation, origin)
+            || *record != expected_origin
+        {
+            return Err(CorruptAuthority);
+        }
+        context
+            .canonical(record.canonical_cbor_len())
+            .map_err(|_| CorruptAuthority)?;
+        let origin_digest = record.digest();
+        context.check().map_err(|_| CorruptAuthority)?;
+        if origin_digest != input.event_origin_digest
+            || intervention != expected_intervention.as_ref()
+        {
+            return Err(CorruptAuthority);
+        }
+        let intervention_digest = if let Some(intervention) = intervention {
+            context
+                .canonical(intervention.canonical_cbor_len())
+                .map_err(|_| CorruptAuthority)?;
+            let digest = intervention.digest();
+            context.check().map_err(|_| CorruptAuthority)?;
+            Some(digest)
+        } else {
+            None
+        };
+        if intervention_digest != input.intervention_admission_digest {
+            return Err(CorruptAuthority);
+        }
+        context
+            .canonical(record.canonical_cbor_len())
+            .map_err(|_| CorruptAuthority)?;
+        if let Some(intervention) = intervention {
+            context
+                .canonical(intervention.canonical_cbor_len())
+                .map_err(|_| CorruptAuthority)?;
+        }
+        let provenance = (record.clone(), intervention.cloned());
+        context
+            .check()
+            .map(|()| provenance)
+            .map_err(|_| CorruptAuthority)
     }
 
     fn validated_local_fork_admission(
         &self,
         child_timeline_id: TimelineId,
     ) -> Result<ForkAdmissionRecordV1, ForkEventAuthorityErrorV1> {
+        self.validated_local_fork_admission_with_context(
+            child_timeline_id,
+            &mut NativeReadContextV1::ordinary(),
+        )
+    }
+
+    fn validated_local_fork_admission_with_context(
+        &self,
+        child_timeline_id: TimelineId,
+        context: &mut NativeReadContextV1<'_, '_>,
+    ) -> Result<ForkAdmissionRecordV1, ForkEventAuthorityErrorV1> {
+        use ForkEventAuthorityErrorV1::CorruptAuthority;
+        context.check().map_err(|_| CorruptAuthority)?;
         // Every missing, foreign, or mismatched FAR1/FCC1 row is corrupt
         // authority; the committed Fork receipt must name exactly this FAR1.
-        self.fork_admissions
+        let admission = self
+            .fork_admissions
             .get(&child_timeline_id)
             .filter(|admission| {
                 admission.input().child_timeline_id == child_timeline_id
                     && admission.input().origin == ForkAttributionOriginV1::Local
             })
-            .and_then(|admission| {
-                let expected = ForkAdmissionOperationResultV1::Fork(ForkAdmissionReceiptV1 {
-                    child_id: child_timeline_id,
-                    admission_digest: admission.digest(),
-                });
-                self.fork_admission_operations
-                    .get(&(
-                        ForkAdmissionOperationKindV1::Fork,
-                        admission.input().operation_id,
-                    ))
-                    .and_then(|row| self.stored_fork_admission_result(row).ok())
-                    .filter(|result| *result == expected)
-                    .map(|_| admission.clone())
-            })
-            .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority)
+            .ok_or(CorruptAuthority)?;
+        context.suffix_row().map_err(|_| CorruptAuthority)?;
+        context
+            .canonical(admission.canonical_cbor_len())
+            .map_err(|_| CorruptAuthority)?;
+        let expected = ForkAdmissionOperationResultV1::Fork(ForkAdmissionReceiptV1 {
+            child_id: child_timeline_id,
+            admission_digest: admission.digest(),
+        });
+        context.check().map_err(|_| CorruptAuthority)?;
+        let row = self
+            .fork_admission_operations
+            .get(&(
+                ForkAdmissionOperationKindV1::Fork,
+                admission.input().operation_id,
+            ))
+            .ok_or(CorruptAuthority)?;
+        context.suffix_row().map_err(|_| CorruptAuthority)?;
+        let result = self
+            .stored_fork_admission_result_with_context(row, context)
+            .map_err(|_| CorruptAuthority)?;
+        if result != expected {
+            return Err(CorruptAuthority);
+        }
+        context
+            .canonical(admission.canonical_cbor_len())
+            .map_err(|_| CorruptAuthority)?;
+        let admitted = admission.clone();
+        context
+            .check()
+            .map(|()| admitted)
+            .map_err(|_| CorruptAuthority)
     }
 }
 
@@ -2476,59 +2791,7 @@ impl ForkEventProvenanceAuthorityPortV1 for MemoryStore {
                 }
             });
         }
-        let classification = ForkEventClassifierV1::from_table(&table)
-            .classify_identity(source)
-            .map_err(|_| ForkEventAuthorityErrorV1::ClassifierRejected)?;
-        let hasher: &dyn Hasher = self.hasher.as_ref();
-        // Every fallible step precedes the first mutation, matching SQLite's
-        // all-or-nothing transaction.
-        let (event, provenance) = self
-            .timelines
-            .get_mut(&child_timeline_id)
-            .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority)
-            .and_then(|state| {
-                let prefix = state
-                    .timeline
-                    .meta
-                    .fork_point
-                    .map_or(0, |(_, fork)| fork.as_u64());
-                Self::prepare_one_for_state(state, &draft, hasher)
-                    .and_then(|(local_event, chain_head)| {
-                        Self::logical_event(prefix, local_event.clone())
-                            .map(|event| (local_event, chain_head, event))
-                    })
-                    .map_err(|_| ForkEventAuthorityErrorV1::StorageIndeterminate)
-                    .and_then(|(local_event, chain_head, event)| {
-                        ForkClassifiedProvenanceV1::derive(
-                            &request,
-                            &table,
-                            classification,
-                            ForkClassifiedEventV1 {
-                                event_id: event.id,
-                                logical_seq: event.seq.as_u64(),
-                                wall_time: event.wall_time,
-                                payload_hash: event.payload_hash,
-                            },
-                        )
-                        .map_err(|_| ForkEventAuthorityErrorV1::InvalidRequest)
-                        .map(|provenance| {
-                            Self::commit_prepared_to_state(state, local_event, chain_head);
-                            (event, provenance)
-                        })
-                    })
-            })?;
-        self.event_ids.insert(event.id);
-        self.fork_event_origins.insert(event.id, provenance.origin);
-        if let Some(intervention) = provenance.intervention {
-            self.fork_intervention_admissions
-                .insert(event.id, intervention);
-        }
-        self.fork_append_operations
-            .insert(operation_id, provenance.operation.clone());
-        Ok(ForkClassifiedAppendReceiptV1 {
-            event,
-            operation: provenance.operation,
-        })
+        self.insert_fresh_classified_append(&table, &request, &draft)
     }
 
     fn recover_classified_append(
@@ -2569,76 +2832,11 @@ impl ForkEventProvenanceAuthorityPortV1 for MemoryStore {
         )>,
         ForkEventAuthorityErrorV1,
     > {
-        let prefix = self
-            .logical_prefix(child_timeline_id)
-            .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)?;
-        let events = &self.state(child_timeline_id).events;
-        let logical_seqs = events
-            .iter()
-            .filter_map(|event| {
-                prefix
-                    .checked_add(event.seq.as_u64())
-                    .map(|logical_seq| (event.id, logical_seq))
-            })
-            .collect::<HashMap<_, _>>();
-        let anchored =
-            |event_id: EventId, logical_seq: u64| logical_seqs.get(&event_id) == Some(&logical_seq);
-        let orphaned_operation = self.fork_append_operations.values().any(|operation| {
-            operation.input().child_timeline_id == child_timeline_id
-                && !anchored(operation.input().event_id, operation.input().logical_seq)
-        });
-        let orphaned_origin = self.fork_event_origins.values().any(|origin| {
-            origin.input().fork_timeline_id == child_timeline_id
-                && !anchored(origin.input().event_id, origin.input().logical_seq)
-        });
-        let orphaned_intervention = self.fork_intervention_admissions.values().any(|record| {
-            record.input().fork_timeline_id == child_timeline_id
-                && !anchored(record.input().event_id, record.input().logical_seq)
-        });
-        if orphaned_operation || orphaned_origin || orphaned_intervention {
-            return Err(ForkEventAuthorityErrorV1::CorruptAuthority);
-        }
-        if events.is_empty() {
-            return Ok(Vec::new());
-        }
-        let mut operations = HashMap::with_capacity(logical_seqs.len());
-        for operation in self.fork_append_operations.values() {
-            if logical_seqs.contains_key(&operation.input().event_id)
-                && operations
-                    .insert(operation.input().event_id, operation)
-                    .is_some()
-            {
-                return Err(ForkEventAuthorityErrorV1::CorruptAuthority);
-            }
-        }
-        let (admission, table, _) = self.classified_authority_graph(child_timeline_id)?;
-        events
-            .iter()
-            .filter_map(|event| {
-                prefix
-                    .checked_add(event.seq.as_u64())
-                    .filter(|logical_seq| *logical_seq >= from_logical_seq)
-                    .map(|logical_seq| (event, logical_seq))
-            })
-            .map(|(event, logical_seq)| {
-                let operation = operations
-                    .get(&event.id)
-                    .copied()
-                    .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority)?;
-                if operation.input().logical_seq != logical_seq
-                    || operation.input().fork_admission_digest != admission.digest()
-                    || operation.input().classifier_revision_digest != table.digest()
-                {
-                    return Err(ForkEventAuthorityErrorV1::CorruptAuthority);
-                }
-                let committed = Event {
-                    seq: Seq::from_u64(logical_seq),
-                    ..event.clone()
-                };
-                self.validate_classified_records(operation, &committed, &table)
-                    .map(|(origin, intervention)| (origin, intervention, operation.clone()))
-            })
-            .collect()
+        self.read_fork_event_suffix_as(
+            child_timeline_id,
+            from_logical_seq,
+            AuthorityValidatorV1::CodeTwoAware,
+        )
     }
 }
 
@@ -2701,26 +2899,33 @@ impl MemoryStore {
 }
 
 impl MemoryStore {
-    /// Read the admitted Fork's immutable `FAR1`.
+    /// Read the admitted Fork's immutable `FAR1` under one explicit R6.9
+    /// validator: issuance and recovery pass validator (a), which requires
+    /// the `Local` origin and its `FCC1` row, and only a read passes (b).
     fn fork_publication_admission(
         &self,
         child_timeline_id: TimelineId,
-    ) -> PublicationSourceResultV1<ForkAdmissionRecordV1> {
-        self.fork_admissions
-            .get(&child_timeline_id)
-            .cloned()
-            .ok_or(PublicationSourceErrorV1::Invalid)
+        validator: AuthorityValidatorV1,
+    ) -> PublicationSourceResultV1<ValidatedAdmissionV1> {
+        self.validated_admission(child_timeline_id, validator)
+            .map_err(PublicationSourceErrorV1::from)
     }
 
-    /// Read the admitted child's classified suffix after its parent cut.
+    /// Read the admitted child's classified suffix after its parent cut under
+    /// one explicit R6.9 validator.
     fn fork_publication_suffix(
         &self,
         child_timeline_id: TimelineId,
         parent_logical_head: PublicationSourceResultV1<u64>,
+        validator: AuthorityValidatorV1,
     ) -> PublicationSourceResultV1<PublicationSuffixV1> {
         parent_logical_head.and_then(|parent_logical_head| {
-            self.read_fork_event_suffix(child_timeline_id, parent_logical_head.saturating_add(1))
-                .map_err(PublicationSourceErrorV1::from)
+            self.read_fork_event_suffix_as(
+                child_timeline_id,
+                parent_logical_head.saturating_add(1),
+                validator,
+            )
+            .map_err(PublicationSourceErrorV1::from)
         })
     }
 
@@ -2773,8 +2978,10 @@ impl MemoryStore {
         request: &ForkManifestPublicationRequestV1,
     ) -> Result<PublicationSourcesV1, ForkManifestPublicationErrorV1> {
         let child = request.child_timeline_id;
-        let admission = self.fork_publication_admission(child);
-        let suffix = self.fork_publication_suffix(child, publication_parent_head(&admission));
+        let validator = AuthorityValidatorV1::LocalOnly;
+        let admission = self.fork_publication_admission(child, validator);
+        let suffix =
+            self.fork_publication_suffix(child, publication_parent_head(&admission), validator);
         let head_and_chain = self
             .logical_head_unchecked(child)
             .and_then(|head| {
@@ -2839,7 +3046,11 @@ impl ForkManifestPublicationPortV1 for MemoryStore {
         validate_publication_request(&request)?;
         if let Some(operation) = self.fork_publication_operations.get(&request.operation_id) {
             let input = operation.input();
-            let committed = self.read_committed(input.child_timeline_id, input.final_logical_head);
+            let committed = self.read_committed_as(
+                input.child_timeline_id,
+                input.final_logical_head,
+                AuthorityValidatorV1::LocalOnly,
+            );
             return recovered_publication_receipt(operation, &request, committed);
         }
         let key = (
@@ -2860,47 +3071,11 @@ impl ForkManifestPublicationPortV1 for MemoryStore {
         child_timeline_id: TimelineId,
         final_logical_head: u64,
     ) -> Result<crate::CommittedForkManifestV1, ForkManifestPublicationErrorV1> {
-        self.fork_publication_bindings
-            .get(&(child_timeline_id, final_logical_head))
-            .copied()
-            .ok_or(ForkManifestPublicationErrorV1::PublicationMissing)
-            .and_then(|binding| {
-                let input = binding.input();
-                let artifact = self
-                    .fork_publication_artifacts
-                    .get(&input.signed_manifest_record_id)
-                    .cloned();
-                self.fork_publication_operations
-                    .get(&input.operation_id)
-                    .cloned()
-                    .zip(artifact)
-                    .map(|(operation, artifact)| CommittedPublicationRowsV1 {
-                        child_timeline_id,
-                        final_logical_head,
-                        binding,
-                        operation,
-                        artifact,
-                    })
-                    .ok_or(ForkManifestPublicationErrorV1::PublicationConflict)
-            })
-            .and_then(|rows| {
-                let admission = self.fork_publication_admission(child_timeline_id);
-                let head = Seq::from_u64(final_logical_head);
-                let final_chain_head_hash = self
-                    .compute_chain_hash_at_unchecked(child_timeline_id, head)
-                    .map_err(PublicationSourceErrorV1::from);
-                let suffix = self.fork_publication_suffix(
-                    child_timeline_id,
-                    publication_parent_head(&admission),
-                );
-                let sources = CommittedPublicationSourcesV1 {
-                    admission,
-                    final_chain_head_hash,
-                    suffix,
-                    registry: Ok(self.key_registry.clone()),
-                };
-                trusted_committed_manifest(&rows, sources)
-            })
+        self.read_committed_as(
+            child_timeline_id,
+            final_logical_head,
+            AuthorityValidatorV1::CodeTwoAware,
+        )
     }
 }
 
@@ -3226,100 +3401,174 @@ impl MemoryStore {
         &self,
         row: &ForkAdmissionOperationRowV1,
     ) -> Result<ForkAdmissionOperationResultV1, pos_core::ForkAdmissionErrorV1> {
+        self.stored_fork_admission_result_with_context(row, &mut NativeReadContextV1::ordinary())
+    }
+
+    fn stored_fork_admission_result_with_context(
+        &self,
+        row: &ForkAdmissionOperationRowV1,
+        context: &mut NativeReadContextV1<'_, '_>,
+    ) -> Result<ForkAdmissionOperationResultV1, pos_core::ForkAdmissionErrorV1> {
+        use pos_core::ForkAdmissionErrorV1::CorruptAuthority;
+        context.check().map_err(|_| CorruptAuthority)?;
         let store_id = self
             .fork_admission_authority
             .host
-            .ok_or(pos_core::ForkAdmissionErrorV1::CorruptAuthority)?
+            .as_ref()
+            .ok_or(CorruptAuthority)?
             .store_id();
         match (row.kind, row.child_id) {
             (ForkAdmissionOperationKindV1::PrincipalOwner, None) => self
-                .stored_principal_owner_binding(store_id, row)
+                .stored_principal_owner_binding(store_id, row, context)
                 .map(ForkAdmissionOperationResultV1::PrincipalOwner),
             (ForkAdmissionOperationKindV1::Fork, Some(child_id)) => {
-                let admission = self
-                    .fork_admissions
-                    .get(&child_id)
-                    .filter(|admission| {
-                        admission.digest() == row.result_digest
-                            && admission.input().operation_id == row.operation_id
-                            && admission.input().child_timeline_id == child_id
-                    })
-                    .ok_or(pos_core::ForkAdmissionErrorV1::CorruptAuthority)?;
-                // The POB1 behind FAR1 must itself be a committed, exact
-                // operation root; an orphaned binding is corrupt authority.
-                let binding = self
-                    .principal_owner_binding_by_digest(
-                        admission.input().principal_owner_binding_digest,
-                    )
-                    .and_then(|binding| {
-                        self.fork_admission_operations.get(&(
-                            ForkAdmissionOperationKindV1::PrincipalOwner,
-                            binding.input().operation_id,
-                        ))
-                    })
-                    .filter(|binding_row| binding_row.child_id.is_none())
-                    .ok_or(pos_core::ForkAdmissionErrorV1::CorruptAuthority)
-                    .and_then(|binding_row| {
-                        self.stored_principal_owner_binding(store_id, binding_row)
-                    })?;
-                if binding.digest() != admission.input().principal_owner_binding_digest
-                    || binding.input().owner != admission.input().creator
-                {
-                    return Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority);
-                }
-                let parent_chain_head = self
-                    .compute_chain_hash_at_unchecked(
+                self.stored_fork_admission_child(store_id, row, child_id, context)
+            }
+            _ => Err(CorruptAuthority),
+        }
+    }
+
+    fn stored_fork_admission_child(
+        &self,
+        store_id: Hash,
+        row: &ForkAdmissionOperationRowV1,
+        child_id: TimelineId,
+        context: &mut NativeReadContextV1<'_, '_>,
+    ) -> Result<ForkAdmissionOperationResultV1, pos_core::ForkAdmissionErrorV1> {
+        use pos_core::ForkAdmissionErrorV1::CorruptAuthority;
+        let admission = self
+            .fork_admissions
+            .get(&child_id)
+            .ok_or(CorruptAuthority)?;
+        context.suffix_row().map_err(|_| CorruptAuthority)?;
+        context
+            .canonical(admission.canonical_cbor_len())
+            .map_err(|_| CorruptAuthority)?;
+        let digest = admission.digest();
+        context.check().map_err(|_| CorruptAuthority)?;
+        if digest != row.result_digest
+            || admission.input().operation_id != row.operation_id
+            || admission.input().child_timeline_id != child_id
+        {
+            return Err(CorruptAuthority);
+        }
+        let binding = self.committed_child_binding(store_id, admission, context)?;
+        let parent_chain_head = self
+            .compute_chain_hash_with_context(
+                admission.input().parent_timeline_id,
+                Seq::from_u64(admission.input().parent_logical_head),
+                context,
+            )
+            .map_err(|_| CorruptAuthority)?;
+        if parent_chain_head != admission.input().parent_chain_head_hash {
+            return Err(CorruptAuthority);
+        }
+        context.node(0).map_err(|_| CorruptAuthority)?;
+        let child = self
+            .timelines
+            .get(&child_id)
+            .filter(|child| {
+                child.timeline.meta.fork_point
+                    == Some((
                         admission.input().parent_timeline_id,
                         Seq::from_u64(admission.input().parent_logical_head),
-                    )
-                    .map_err(|_| pos_core::ForkAdmissionErrorV1::CorruptAuthority)?;
-                if parent_chain_head != admission.input().parent_chain_head_hash {
-                    return Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority);
-                }
-                let child = self
-                    .timelines
-                    .get(&child_id)
-                    .filter(|child| {
-                        child.timeline.meta.fork_point
-                            == Some((
-                                admission.input().parent_timeline_id,
-                                Seq::from_u64(admission.input().parent_logical_head),
-                            ))
-                    })
-                    .ok_or(pos_core::ForkAdmissionErrorV1::CorruptAuthority)?;
-                let child_name = child
-                    .timeline
-                    .meta
-                    .name
-                    .as_deref()
-                    .ok_or(pos_core::ForkAdmissionErrorV1::CorruptAuthority)?;
-                if fork_commitment(
-                    store_id,
-                    binding.input().principal_digest,
-                    row.evidence_digest,
-                    admission,
-                    child_name,
-                ) != row.commitment
-                {
-                    return Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority);
-                }
-                Ok(ForkAdmissionOperationResultV1::Fork(
-                    ForkAdmissionReceiptV1 {
-                        child_id,
-                        admission_digest: row.result_digest,
-                    },
-                ))
-            }
-            _ => Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority),
+                    ))
+            })
+            .ok_or(CorruptAuthority)?;
+        let child_name = child
+            .timeline
+            .meta
+            .name
+            .as_deref()
+            .ok_or(CorruptAuthority)?;
+        let commitment = fork_commitment_with_context(
+            store_id,
+            binding.input().principal_digest,
+            row.evidence_digest,
+            admission,
+            child_name,
+            context,
+        )?;
+        if commitment != row.commitment {
+            return Err(CorruptAuthority);
         }
+        Ok(ForkAdmissionOperationResultV1::Fork(
+            ForkAdmissionReceiptV1 {
+                child_id,
+                admission_digest: row.result_digest,
+            },
+        ))
+    }
+
+    fn committed_child_binding(
+        &self,
+        store_id: Hash,
+        admission: &ForkAdmissionRecordV1,
+        context: &mut NativeReadContextV1<'_, '_>,
+    ) -> Result<PrincipalOwnerBindingV1, pos_core::ForkAdmissionErrorV1> {
+        use pos_core::ForkAdmissionErrorV1::CorruptAuthority;
+        // Resolve just the selected POB1 through its durable digest index.
+        // The operation facts have no invented native wire representation.
+        let binding = self
+            .principal_owner_binding_by_digest_with_context(
+                admission.input().principal_owner_binding_digest,
+                context,
+            )?
+            .ok_or(CorruptAuthority)?;
+        let binding_row = self
+            .fork_admission_operations
+            .get(&(
+                ForkAdmissionOperationKindV1::PrincipalOwner,
+                binding.input().operation_id,
+            ))
+            .filter(|binding_row| binding_row.child_id.is_none())
+            .ok_or(CorruptAuthority)?;
+        context.suffix_row().map_err(|_| CorruptAuthority)?;
+        let binding = self.stored_principal_owner_binding(store_id, binding_row, context)?;
+        context
+            .canonical(binding.canonical_cbor_len())
+            .map_err(|_| CorruptAuthority)?;
+        let digest = binding.digest();
+        context.check().map_err(|_| CorruptAuthority)?;
+        if digest != admission.input().principal_owner_binding_digest
+            || binding.input().owner != admission.input().creator
+        {
+            return Err(CorruptAuthority);
+        }
+        Ok(binding)
     }
 
     /// Keyed POB1 lookup by binding digest through the digest index.
     fn principal_owner_binding_by_digest(&self, digest: Hash) -> Option<&PrincipalOwnerBindingV1> {
-        self.fork_principal_owner_binding_digests
+        self.principal_owner_binding_by_digest_with_context(
+            digest,
+            &mut NativeReadContextV1::ordinary(),
+        )
+        .ok()
+        .flatten()
+    }
+
+    fn principal_owner_binding_by_digest_with_context(
+        &self,
+        digest: Hash,
+        context: &mut NativeReadContextV1<'_, '_>,
+    ) -> Result<Option<&PrincipalOwnerBindingV1>, pos_core::ForkAdmissionErrorV1> {
+        use pos_core::ForkAdmissionErrorV1::CorruptAuthority;
+        context.check().map_err(|_| CorruptAuthority)?;
+        let binding = self
+            .fork_principal_owner_binding_digests
             .get(&digest)
-            .and_then(|principal_digest| self.fork_principal_owner_bindings.get(principal_digest))
-            .filter(|binding| binding.digest() == digest)
+            .and_then(|principal_digest| self.fork_principal_owner_bindings.get(principal_digest));
+        let Some(binding) = binding else {
+            return Ok(None);
+        };
+        context.suffix_row().map_err(|_| CorruptAuthority)?;
+        context
+            .canonical(binding.canonical_cbor_len())
+            .map_err(|_| CorruptAuthority)?;
+        let matches = binding.digest() == digest;
+        context.check().map_err(|_| CorruptAuthority)?;
+        Ok(matches.then_some(binding))
     }
 
     /// Validate one POB1 operation row against its keyed binding and
@@ -3328,15 +3577,41 @@ impl MemoryStore {
         &self,
         store_id: Hash,
         row: &ForkAdmissionOperationRowV1,
+        context: &mut NativeReadContextV1<'_, '_>,
     ) -> Result<PrincipalOwnerBindingV1, pos_core::ForkAdmissionErrorV1> {
-        self.principal_owner_binding_by_digest(row.result_digest)
-            .filter(|binding| {
-                binding.input().operation_id == row.operation_id
-                    && principal_owner_commitment(store_id, binding, row.evidence_digest)
-                        == row.commitment
+        use pos_core::ForkAdmissionErrorV1::CorruptAuthority;
+        self.principal_owner_binding_by_digest_with_context(row.result_digest, context)
+            .and_then(|binding| binding.ok_or(CorruptAuthority))
+            .and_then(|binding| {
+                (binding.input().operation_id == row.operation_id)
+                    .then_some(binding)
+                    .ok_or(CorruptAuthority)
             })
-            .cloned()
-            .ok_or(pos_core::ForkAdmissionErrorV1::CorruptAuthority)
+            .and_then(|binding| {
+                principal_owner_commitment_with_context(
+                    store_id,
+                    binding,
+                    row.evidence_digest,
+                    context,
+                )
+                .and_then(|commitment| {
+                    (commitment == row.commitment)
+                        .then_some(binding)
+                        .ok_or(CorruptAuthority)
+                })
+            })
+            .and_then(|binding| {
+                context
+                    .canonical(binding.canonical_cbor_len())
+                    .map(|()| binding.clone())
+                    .map_err(|_| CorruptAuthority)
+            })
+            .and_then(|binding| {
+                context
+                    .check()
+                    .map(|()| binding)
+                    .map_err(|_| CorruptAuthority)
+            })
     }
 }
 
@@ -4851,32 +5126,111 @@ impl MemoryStore {
         timeline: TimelineId,
         at_seq: Seq,
     ) -> Result<Hash, CoreError> {
+        self.compute_chain_hash_with_context(
+            timeline,
+            at_seq,
+            &mut crate::fork_replay::NativeReadContextV1::ordinary(),
+        )
+    }
+
+    fn compute_chain_hash_with_context(
+        &self,
+        timeline: TimelineId,
+        at_seq: Seq,
+        context: &mut crate::fork_replay::NativeReadContextV1<'_, '_>,
+    ) -> Result<Hash, CoreError> {
         #[cfg(test)]
         if FAIL_NEXT_CHAIN_HASH_AT.with(|fail| fail.replace(false)) {
             return Err(CoreError::Storage(
                 "injected chain-hash lookup failure".to_owned(),
             ));
         }
-        let logical_head = self.logical_head_unchecked(timeline)?;
+        let chain = self.fork_chain_with_context(timeline, context)?;
+        let mut logical_head = 0_u64;
+        for (index, timeline) in chain.timelines.iter().enumerate() {
+            context
+                .node(0)
+                .map_err(|_| CoreError::ArtifactUnavailable)?;
+            let length = chain.segment_length(self, index, *timeline)?;
+            logical_head = logical_head
+                .checked_add(length)
+                .ok_or_else(|| CoreError::Storage("logical Timeline head overflow".to_owned()))?;
+            context
+                .check()
+                .map_err(|_| CoreError::ArtifactUnavailable)?;
+        }
+        let logical_head = Seq::from_u64(logical_head);
         if at_seq > logical_head {
             return Err(CoreError::ForkBeyondHead {
                 fork_seq: at_seq.as_u64(),
                 head: logical_head.as_u64(),
             });
         }
+        context
+            .check()
+            .map_err(|_| CoreError::ArtifactUnavailable)?;
         let mut hash = self.hasher.genesis_hash();
+        context
+            .check()
+            .map_err(|_| CoreError::ArtifactUnavailable)?;
         if at_seq == Seq::ZERO {
             return Ok(hash);
         }
-        for event in
-            self.collect_events_in_range(timeline, SeqRange::bounded(Seq::from_u64(1), at_seq))?
-        {
-            let id_str = event.id.to_string();
-            hash = self
-                .hasher
-                .hash_event(&hash, id_str.as_bytes(), &event.payload);
+        // Reuse the same checked chain and borrow only Events at this cut.
+        // No stitched Vec<Event>, payload clone or event-type clone is created.
+        let mut logical_offset = 0_u64;
+        for (index, timeline) in chain.timelines.iter().enumerate() {
+            context
+                .node(0)
+                .map_err(|_| CoreError::ArtifactUnavailable)?;
+            // The first pass proved every boundary is ordered and within its
+            // native segment. Earlier iterations consumed complete segments;
+            // a partial segment ends the loop. Project the already-validated
+            // logical boundary onto this segment instead of validating again.
+            let logical_end = chain
+                .fork_seqs
+                .get(index)
+                .copied()
+                .unwrap_or(logical_head)
+                .as_u64();
+            let end = logical_end.min(at_seq.as_u64()) - logical_offset;
+            let events = &self.state(*timeline).events;
+            context
+                .check()
+                .map_err(|_| CoreError::ArtifactUnavailable)?;
+            // Indexed slice selection examines only fixed sequence metadata;
+            // its binary search is bounded by the platform's pointer width.
+            let selected = events.partition_point(|event| event.seq.as_u64() <= end);
+            context
+                .check()
+                .map_err(|_| CoreError::ArtifactUnavailable)?;
+            for event in &events[..selected] {
+                context
+                    .suffix_row()
+                    .map_err(|_| CoreError::ArtifactUnavailable)?;
+                context
+                    .bytes(event.payload.len())
+                    .map_err(|_| CoreError::ArtifactUnavailable)?;
+                context
+                    .bytes(ulid::ULID_LEN)
+                    .map_err(|_| CoreError::ArtifactUnavailable)?;
+                let id_str = event.id.to_string();
+                hash = self
+                    .hasher
+                    .hash_event(&hash, id_str.as_bytes(), &event.payload);
+                context
+                    .check()
+                    .map_err(|_| CoreError::ArtifactUnavailable)?;
+            }
+            logical_offset += end;
+            if logical_offset == at_seq.as_u64() {
+                break;
+            }
         }
-        Ok(hash)
+        context
+            .check()
+            .map(|()| hash)
+            .map_err(|_| CoreError::ArtifactUnavailable)
     }
 
     fn create_timeline_with_meta_unchecked(
@@ -5172,10 +5526,7 @@ impl EventStore for MemoryStore {
         drafts: &[EventDraft],
     ) -> Result<Vec<Event>, CoreError> {
         self.with_erasure_fence(timeline, ErasureProtectedOperationV1::Append, |store| {
-            crate::ensure_non_geographic_drafts(drafts, timeline)
-                .and_then(|()| store.ensure_generic_fork_append_is_rejected(timeline))
-                .and_then(|()| store.ensure_generic_timeline_visibility(timeline))
-                .and_then(|()| store.append_visible(timeline, drafts))
+            store.guarded_generic_append(timeline, drafts)
         })
     }
 
@@ -5780,6 +6131,22 @@ impl MemoryStore {
             || self.imported_fork_admissions.contains_key(&timeline)
     }
 
+    /// The generic append guards, in order, inside an already held erasure fence.
+    ///
+    /// `EventStore::append` and the Plugin trust registry's activation append
+    /// both run exactly this chain, so the registry can never place an Event on
+    /// a Timeline, or with a draft, that a generic append would refuse.
+    fn guarded_generic_append(
+        &mut self,
+        timeline: TimelineId,
+        drafts: &[EventDraft],
+    ) -> Result<Vec<Event>, CoreError> {
+        crate::ensure_non_geographic_drafts(drafts, timeline)
+            .and_then(|()| self.ensure_generic_fork_append_is_rejected(timeline))
+            .and_then(|()| self.ensure_generic_timeline_visibility(timeline))
+            .and_then(|()| self.append_visible(timeline, drafts))
+    }
+
     /// ADR-099 reserves every admitted Fork's append boundary for its
     /// classifier authority.  Generic callers never obtain a bypass.
     fn ensure_generic_fork_append_is_rejected(
@@ -5892,6 +6259,8 @@ impl MemoryStore {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    mod classifier_binding;
+
     use super::*;
     use crate::ErasureRejoinPersistencePortV1;
     use ciborium::value::Value;
@@ -6320,6 +6689,19 @@ mod tests {
     #[test]
     fn fork_admission_memory_rejects_corrupt_fork_rows_and_child_metadata(
     ) -> Result<(), Box<dyn std::error::Error>> {
+        let (store, mut row) = memory_fork_admission_graph("owner")?;
+        let expected = store.stored_fork_admission_result(&row)?;
+        let operation_id = row.operation_id;
+        // Keep the admission digest, child and commitment exact: only the
+        // operation ID disagrees, independently of the adjacent child guard.
+        row.operation_id = Hash::from_bytes([82; 32]);
+        assert_eq!(
+            store.stored_fork_admission_result(&row),
+            Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority)
+        );
+        row.operation_id = operation_id;
+        assert_eq!(store.stored_fork_admission_result(&row), Ok(expected));
+
         let (store, mut row) = memory_fork_admission_graph("owner")?;
         row.result_digest = Hash::zero();
         assert_eq!(
@@ -6992,6 +7374,167 @@ mod tests {
         Ok(())
     }
 
+    fn local_admission_materialization_bytes(
+        fixture: &ClassifiedAuthorityFixture,
+    ) -> Result<usize, Box<dyn std::error::Error>> {
+        use ciborium::value::Value;
+        let store = &fixture.store;
+        let fields = fixture.admission.input();
+        let binding = store
+            .principal_owner_binding_by_digest(fields.principal_owner_binding_digest)
+            .ok_or("missing POB1")?;
+        let store_id = store
+            .fork_admission_authority
+            .host
+            .as_ref()
+            .ok_or("missing FAH1")?
+            .store_id();
+        let principal = binding.input();
+        let owner_row = store
+            .fork_admission_operations
+            .get(&(
+                ForkAdmissionOperationKindV1::PrincipalOwner,
+                principal.operation_id,
+            ))
+            .ok_or("missing POC1 facts")?;
+        let fork_row = store
+            .fork_admission_operations
+            .get(&(ForkAdmissionOperationKindV1::Fork, fields.operation_id))
+            .ok_or("missing FCC1 facts")?;
+        let child_name = store
+            .timelines
+            .get(&fields.child_timeline_id)
+            .and_then(|state| state.timeline.meta.name.as_ref())
+            .ok_or("missing child name")?;
+        let hash = |value: Hash| Value::Bytes(value.as_bytes().to_vec());
+        // Independent native positional arrays, not the count methods or the
+        // adapter's commitment-input factoring, measure the real preimages.
+        let owner_array = Value::Array(vec![
+            hash(store_id),
+            hash(principal.operation_id),
+            hash(owner_row.evidence_digest),
+            hash(principal.principal_digest),
+            Value::Text(principal.owner.as_str().to_owned()),
+        ]);
+        let fork_array = Value::Array(vec![
+            hash(store_id),
+            hash(fields.operation_id),
+            hash(fork_row.evidence_digest),
+            hash(principal.principal_digest),
+            Value::Bytes(fields.parent_timeline_id.inner().to_bytes().to_vec()),
+            Value::Integer(fields.parent_logical_head.into()),
+            Value::Integer(fields.parent_logical_head.into()),
+            hash(fields.room_revision_descriptor_hash),
+            hash(fields.plugin_composition_hash),
+            Value::Integer(u8::from(fields.attribution_required).into()),
+            Value::Text(child_name.clone()),
+        ]);
+        let mut owner_bytes = Vec::new();
+        let mut fork_bytes = Vec::new();
+        ciborium::into_writer(&owner_array, &mut owner_bytes)?;
+        ciborium::into_writer(&fork_array, &mut fork_bytes)?;
+        // Two FAR1 digests and one copy; three POB1 digest checks and one copy.
+        // Parent-at-zero hashing creates only its two Timeline ID index copies.
+        Ok(fixture.admission.to_canonical_cbor().len() * 3
+            + binding.to_canonical_cbor().len() * 4
+            + owner_bytes.len()
+            + fork_bytes.len()
+            + 16
+            + 16)
+    }
+
+    #[test]
+    fn local_native_admission_and_graph_budget_actual_work_and_ignore_unrelated_bindings(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use crate::{ForkReplayReadBudgetV1, ForkReplayReadLimitsV1};
+        use pos_core::trusted_clock::{GuardMonotonicSourceV1, ScriptedGuardMonotonicSourceV1};
+        use std::time::Duration;
+        let mut fixture = classified_authority_fixture()?;
+        let admission_bytes = local_admission_materialization_bytes(&fixture)?;
+        let source = fixture
+            .store
+            .fork_classifier_sources
+            .values()
+            .next()
+            .ok_or("missing FCS1")?;
+        let graph_bytes = admission_bytes
+            + fixture.admission.to_canonical_cbor().len() * 2
+            + source.to_canonical_cbor().len()
+            + source.input().registrar_identifier.len()
+            + fixture.table.to_canonical_cbor().len() * 2
+            + fixture.registration.to_canonical_cbor().len();
+        insert_test_binding(
+            &mut fixture.store,
+            PrincipalOwnerBindingV1::new(PrincipalOwnerBindingInputV1 {
+                operation_id: Hash::from_bytes([231; 32]),
+                principal_digest: Hash::from_bytes([232; 32]),
+                owner: OwnerIdV1::new("unrelated".repeat(14))?,
+                origin: ForkAuthorityOriginV1::Local,
+            })?,
+        );
+        for graph in [false, true] {
+            let (bytes, rows) = if graph {
+                (graph_bytes, 9)
+            } else {
+                (admission_bytes, 6)
+            };
+            for (byte_limit, row_limit, visits, succeeds) in [
+                (bytes, rows, 3, true),
+                (bytes - 1, rows, 3, false),
+                (bytes, rows - 1, 3, false),
+                (bytes, rows, 2, false),
+            ] {
+                let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+                let start = clock.mark();
+                let limits =
+                    ForkReplayReadLimitsV1::new(1, visits, row_limit, byte_limit, 1_000_000)?;
+                let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+                let mut context = NativeReadContextV1::protected(&mut budget);
+                let result = if graph {
+                    fixture
+                        .store
+                        .classified_authority_graph_with_context(
+                            fixture.child_timeline_id,
+                            &mut context,
+                        )
+                        .map(|(admission, table, registration)| {
+                            assert_eq!(table, fixture.table);
+                            assert_eq!(registration, fixture.registration);
+                            admission
+                        })
+                } else {
+                    fixture.store.validated_local_fork_admission_with_context(
+                        fixture.child_timeline_id,
+                        &mut context,
+                    )
+                };
+                assert_eq!(result.is_ok(), succeeds);
+                if succeeds {
+                    assert_eq!(result?, fixture.admission);
+                    assert_eq!(budget.remaining_native_bytes(), 0);
+                } else {
+                    assert!(budget.check_time().is_err());
+                }
+            }
+        }
+        // Fail during indexed authority validation, not at ledger creation.
+        let mut clock = ScriptedGuardMonotonicSourceV1::new(
+            std::iter::repeat_n(Duration::ZERO, 10).chain([Duration::from_secs(2)]),
+        );
+        let start = clock.mark();
+        let limits = ForkReplayReadLimitsV1::new(1, 3, 9, graph_bytes, 1_000_000)?;
+        let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+        assert_eq!(
+            fixture.store.classified_authority_graph_with_context(
+                fixture.child_timeline_id,
+                &mut NativeReadContextV1::protected(&mut budget),
+            ),
+            Err(ForkEventAuthorityErrorV1::CorruptAuthority)
+        );
+        assert!(budget.check_time().is_err());
+        Ok(())
+    }
+
     #[test]
     fn classified_authority_graph_rejects_each_missing_classifier_record(
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -7019,6 +7562,78 @@ mod tests {
             Err(ForkEventAuthorityErrorV1::CorruptAuthority)
         );
         Ok(())
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum BindingFault {
+        TableAdmission,
+        TableRoom,
+        SourceRoom,
+        SourceRegistrar,
+        SourceRevision,
+        Routes,
+        RegistrationAdmission,
+        RegistrationRoom,
+        RegistrationClassifier,
+    }
+
+    impl BindingFault {
+        // Measure this fixture operation outside cargo-llvm-cov's tests/ file filter.
+        #[cfg_attr(coverage_nightly, coverage(on))]
+        fn changed_records(
+            self,
+            table: &ForkClassifierTableV1,
+            source: &ForkClassifierSourceV1,
+            registration: &ForkClassifierRegistrationV1,
+        ) -> (
+            ForkClassifierSourceV1,
+            ForkClassifierTableV1,
+            ForkClassifierRegistrationInputV1,
+        ) {
+            use pos_core::{
+                counterfactual_store::test_fixtures::ok, ForkEventSourceDescriptorV1,
+                ForkExternalInputRouteV1,
+            };
+
+            let mut table = table.input().clone();
+            let mut source = source.input().clone();
+            let mut registration = registration.input().clone();
+            let wrong = Hash::from_bytes([0xe1; 32]);
+            match self {
+                // The first binding block: table/admission, then source/table.
+                Self::TableAdmission => table.fork_admission_digest = wrong,
+                Self::TableRoom => {
+                    table.room_revision_descriptor_hash = wrong;
+                    source.room_revision_descriptor_hash = wrong;
+                }
+                Self::SourceRoom => source.room_revision_descriptor_hash = wrong,
+                Self::SourceRegistrar => source.registrar_identifier.push_str("-foreign"),
+                // The source revision remains exact in the route-only case.
+                Self::SourceRevision => table.source_configuration_revision_digest = wrong,
+                Self::Routes => {
+                    table.routes = vec![ForkExternalInputRouteV1::new(
+                        ok(ForkEventSourceDescriptorV1::new("foreign-route", wrong)),
+                        false,
+                    )];
+                }
+                // The selected registration keeps its child and operation identity.
+                Self::RegistrationAdmission => registration.fork_admission_digest = wrong,
+                Self::RegistrationRoom => registration.room_revision_descriptor_hash = wrong,
+                Self::RegistrationClassifier => registration.classifier_revision_digest = wrong,
+            }
+            let changed_source = ok(ForkClassifierSourceV1::new(source));
+            if matches!(
+                self,
+                Self::TableRoom | Self::SourceRoom | Self::SourceRegistrar | Self::Routes
+            ) {
+                table.source_configuration_revision_digest = changed_source.digest();
+            }
+            (
+                changed_source,
+                ok(ForkClassifierTableV1::new(table)),
+                registration,
+            )
+        }
     }
 
     /// A store with one valid classified host Event and its FOP1.
@@ -7075,6 +7690,189 @@ mod tests {
         );
         assert_eq!(store.read_fork_event_suffix(child_timeline_id, 1)?.len(), 1);
         Ok((store, child_timeline_id, suffix_operation, event))
+    }
+
+    #[test]
+    fn classified_suffix_refuses_overflowing_retained_fork_cut(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (mut store, child, _, _) = classified_suffix_store()?;
+        let original = store.read_fork_event_suffix(child, 1)?;
+        assert_eq!(original.len(), 1);
+        let original_cut = store
+            .timelines
+            .get(&child)
+            .ok_or("child state")?
+            .timeline
+            .meta
+            .fork_point
+            .ok_or("child fork point")?;
+        store
+            .timelines
+            .get_mut(&child)
+            .ok_or("child state")?
+            .timeline
+            .meta
+            .fork_point = Some((original_cut.0, Seq::from_u64(u64::MAX)));
+        assert_eq!(
+            store.read_fork_event_suffix(child, 1),
+            Err(ForkEventAuthorityErrorV1::CorruptAuthority)
+        );
+        store
+            .timelines
+            .get_mut(&child)
+            .ok_or("child state")?
+            .timeline
+            .meta
+            .fork_point = Some(original_cut);
+        assert_eq!(store.read_fork_event_suffix(child, 1)?, original);
+        Ok(())
+    }
+
+    /// Register the fixture creator's attribution key in the store and build
+    /// the publication request for the child at `head`, with its signer.
+    fn publication_setup(
+        store: &mut MemoryStore,
+        child: TimelineId,
+        head: u64,
+    ) -> Result<
+        (
+            ForkManifestPublicationRequestV1,
+            KeyRegistryStateV1,
+            pos_crypto::key_roles::SigningKeyMaterial,
+        ),
+        Box<dyn std::error::Error>,
+    > {
+        let (private_key, _) = pos_crypto::signing::generate_keypair();
+        let material = pos_crypto::key_roles::SigningKeyMaterial::new(private_key);
+        let identity = KeyIdentityV1::new("owner", KeyRoleV1::SubjectAttributionSigning, 1);
+        let mut registry = KeyRegistryStateV1::new();
+        registry.register_key(KeyRegistrationV1::new(
+            identity,
+            material.material_digest(),
+            Some(material.public_verification_key()),
+        ))?;
+        store.key_registry = Some(registry.clone());
+        let request = ForkManifestPublicationRequestV1 {
+            operation_id: Hash::from_bytes([0x71; 32]),
+            child_timeline_id: child,
+            expected_final_logical_head: head,
+            signing_identity: identity,
+            private_material_digest: material.material_digest(),
+            public_verification_key: material.public_verification_key(),
+            expected_registry: registry.clone(),
+        };
+        Ok((request, registry, material))
+    }
+
+    /// Commit with the fixture signer, and report whether the signer ran.
+    fn commit_with_signer(
+        store: &mut MemoryStore,
+        request: ForkManifestPublicationRequestV1,
+        registry: &KeyRegistryStateV1,
+        material: &pos_crypto::key_roles::SigningKeyMaterial,
+    ) -> (
+        Result<ForkPublicationReceiptV1, ForkManifestPublicationErrorV1>,
+        bool,
+    ) {
+        let invoked = std::cell::Cell::new(false);
+        let mut signing = registry.clone();
+        let identity = request.signing_identity;
+        let result = store.commit_authorized(request, |_, bytes| {
+            invoked.set(true);
+            pos_crypto::key_roles::sign_for_registered_role(
+                &mut signing,
+                material,
+                identity,
+                &CanonicalBytes::from_vec(bytes.to_vec()),
+            )
+        });
+        (result, invoked.get())
+    }
+
+    /// ADR-105 r6 R6.9 hardening: `MemoryStore` publication issuance and the
+    /// committed read now require the `Local` origin and its `FCC1` receipt,
+    /// as `SQLite` always did; only a read may also accept a code-2 `FAR1`.
+    #[test]
+    fn memory_publication_requires_the_local_admission_receipt(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (mut store, child, _, _) = classified_suffix_store()?;
+        for validator in [
+            AuthorityValidatorV1::LocalOnly,
+            AuthorityValidatorV1::CodeTwoAware,
+        ] {
+            assert_eq!(
+                store
+                    .fork_publication_admission(child, validator)
+                    .map(|admission| admission.origin()),
+                Ok(ValidatedOriginV1::Local)
+            );
+        }
+        let (request, registry, material) = publication_setup(&mut store, child, 1)?;
+        let (committed, invoked) = commit_with_signer(&mut store, request, &registry, &material);
+        assert!(invoked);
+        assert_eq!(committed?.final_logical_head, 1);
+        assert!(store.read_committed(child, 1).is_ok());
+        store.fork_admission_operations.clear();
+        assert_eq!(
+            store.read_committed(child, 1).err(),
+            Some(ForkManifestPublicationErrorV1::PublicationConflict)
+        );
+        for validator in [
+            AuthorityValidatorV1::LocalOnly,
+            AuthorityValidatorV1::CodeTwoAware,
+        ] {
+            assert_eq!(
+                store.fork_publication_admission(child, validator).err(),
+                Some(PublicationSourceErrorV1::Invalid)
+            );
+        }
+
+        // A new issuance without the receipt is refused before the signer runs.
+        let (mut store, child, _, _) = classified_suffix_store()?;
+        store.fork_admission_operations.clear();
+        let (request, registry, material) = publication_setup(&mut store, child, 1)?;
+        let (refused, invoked) = commit_with_signer(&mut store, request, &registry, &material);
+        assert_eq!(
+            refused,
+            Err(ForkManifestPublicationErrorV1::CorruptAuthority)
+        );
+        assert!(!invoked);
+        Ok(())
+    }
+
+    #[test]
+    fn local_admission_rejects_a_valid_result_under_the_wrong_operation_key(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use crate::ForkEventPermitIssuerPortV1;
+
+        let mut fixture = classified_authority_fixture()?;
+        assert_eq!(
+            fixture
+                .store
+                .read_validated_local_fork_admission(fixture.child_timeline_id)?,
+            fixture.admission
+        );
+        let principal = fixture
+            .store
+            .fork_admission_operations
+            .values()
+            .find(|row| row.kind == ForkAdmissionOperationKindV1::PrincipalOwner)
+            .cloned()
+            .ok_or("principal operation")?;
+        fixture.store.fork_admission_operations.insert(
+            (
+                ForkAdmissionOperationKindV1::Fork,
+                fixture.admission.input().operation_id,
+            ),
+            principal,
+        );
+        assert_eq!(
+            fixture
+                .store
+                .read_validated_local_fork_admission(fixture.child_timeline_id),
+            Err(ForkEventAuthorityErrorV1::CorruptAuthority)
+        );
+        Ok(())
     }
 
     #[test]
@@ -7167,6 +7965,58 @@ mod tests {
         assert_eq!(
             store.committed_classified_event(&operation),
             Err(ForkEventAuthorityErrorV1::CorruptAuthority)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn classified_record_validation_refuses_each_event_coordinate_independently(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (mut store, child, operation, event) = classified_suffix_store()?;
+        let (_, table) = store.validate_classified_authority_graph(
+            child,
+            operation.input().fork_admission_digest,
+            operation.input().classifier_revision_digest,
+        )?;
+        let expected = store.validate_classified_records(
+            &operation,
+            &event,
+            &table,
+            ValidatedOriginV1::Local,
+        )?;
+        let other_id = EventId::new();
+        // Keep lookup and provenance content valid so neither can mask the
+        // independent Event-ID guard at the record validator's own boundary.
+        store
+            .fork_event_origins
+            .insert(other_id, expected.0.clone());
+        for candidate in [
+            Event {
+                id: other_id,
+                ..event.clone()
+            },
+            Event {
+                seq: Seq::from_u64(event.seq.as_u64() + 1),
+                ..event.clone()
+            },
+        ] {
+            assert_eq!(
+                store.validate_classified_records(
+                    &operation,
+                    &candidate,
+                    &table,
+                    ValidatedOriginV1::Local,
+                ),
+                Err(ForkEventAuthorityErrorV1::CorruptAuthority)
+            );
+        }
+        assert_eq!(
+            store.fork_event_origins.remove(&other_id),
+            Some(expected.0.clone())
+        );
+        assert_eq!(
+            store.validate_classified_records(&operation, &event, &table, ValidatedOriginV1::Local),
+            Ok(expected)
         );
         Ok(())
     }
@@ -9565,6 +10415,10 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn logical_sequence_integrity_failures_are_fail_closed() {
+        use crate::{ForkReplayReadBudgetV1, ForkReplayReadLimitsV1};
+        use pos_core::trusted_clock::{GuardMonotonicSourceV1, ScriptedGuardMonotonicSourceV1};
+        use std::time::Duration;
+
         let mut store = new_store();
         let root = store.create_timeline("integrity-root").test_ok();
         let entity = EntityId::new();
@@ -9583,6 +10437,20 @@ mod tests {
         ));
 
         let child = store.fork(root.id(), Seq::from_u64(1), "child").test_ok();
+        let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+        let start = clock.mark();
+        let limits = ForkReplayReadLimitsV1::new(8, 128, 512, 16_384, 1_000_000).test_ok();
+        let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock).test_ok();
+        assert_eq!(
+            store
+                .compute_chain_hash_with_context(
+                    child.id(),
+                    Seq::ZERO,
+                    &mut NativeReadContextV1::protected(&mut budget),
+                )
+                .test_ok(),
+            store.hasher.genesis_hash()
+        );
         let missing_prefix = ForkChain {
             timelines: vec![root.id(), child.id()],
             fork_seqs: Vec::new(),
@@ -9618,6 +10486,17 @@ mod tests {
             store.logical_head(child.id()),
             Err(CoreError::Storage(_))
         ));
+        // Reuse the corrupt metadata to prove the protected hash accumulator
+        // refuses before hashing, independently of the ordinary head lookup.
+        assert!(matches!(
+            store.compute_chain_hash_with_context(
+                child.id(),
+                Seq::ZERO,
+                &mut NativeReadContextV1::protected(&mut budget),
+            ),
+            Err(CoreError::Storage(message)) if message == "logical Timeline head overflow"
+        ));
+        budget.check_time().test_ok();
     }
 
     #[test]
@@ -15991,6 +16870,197 @@ mod local_cut_owner_coverage {
             link_read(&store, link_identity(&second)?),
             Err(LocalCutOwnerErrorV1::CorruptState)
         );
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod admitted_fork_deletion {
+    //! ADR-099 revision 13 in-crate evidence: a refused delete of a ticked
+    //! classified Fork changes no map, an orphan `FAR1` of a missing Timeline
+    //! is not found through the generic delete and through the direct visible
+    //! delete that skips the visibility check, the direct delete still refuses
+    //! an existing admitted Fork, a permit-requiring store refuses before the
+    //! admission check, and a geographic admitted Fork stays concealed.
+
+    use std::sync::Arc;
+
+    use pos_core::{
+        CoreError, CounterfactualDependencyReadPortV1, CounterfactualInvalidationOutcomeV1,
+        CounterfactualStorePortV1, CounterfactualTickOutcomeV1, DependencyPageRequestV1,
+        DependencyReadScopeV1, ErasureContainmentGateV1, EventStore, TimelineId,
+        MAX_DEPENDENCY_PAGE_ROWS_V1,
+    };
+
+    use super::{delete_visible_timeline, MemoryStore};
+    use crate::classified_fork_fixture::{
+        batch, draft, hash, node_record, Authority, Fallible, Spec, FIRST_TICK, TICK_KIND,
+    };
+    use crate::ClassifiedCounterfactualStorePortV1;
+
+    /// The sizes of the main Timeline, Event, pipeline, counterfactual,
+    /// dependency, Fork authority, publication, and import maps.
+    fn sizes(store: &MemoryStore) -> [usize; 26] {
+        [
+            store.timelines.len(),
+            store.event_ids.len(),
+            store.append_identities.len(),
+            store.geographic_timelines.len(),
+            store.pipeline_admission_fences.len(),
+            store.pipeline_admission_receipts.len(),
+            store.counterfactual_forks.len(),
+            store.counterfactual_generation_floors.len(),
+            store.dependency_prefixes.len(),
+            store.fork_admissions.len(),
+            store.fork_admission_operations.len(),
+            store.fork_classifier_sources.len(),
+            store.fork_classifier_tables.len(),
+            store.fork_classifier_registrations.len(),
+            store.fork_append_operations.len(),
+            store.fork_event_origins.len(),
+            store.fork_intervention_admissions.len(),
+            store.fork_publication_operations.len(),
+            store.fork_publication_bindings.len(),
+            store.fork_publication_artifacts.len(),
+            store.imported_fork_admissions.len(),
+            store.imported_fork_principal_owner_bindings.len(),
+            store.imported_fork_classifier_sources.len(),
+            store.imported_fork_publication_operations.len(),
+            store.imported_fork_key_evidence.len(),
+            store.imported_fork_attributions.len(),
+        ]
+    }
+
+    /// A Memory store with an open erasure gate.
+    fn open() -> Fallible<MemoryStore> {
+        let mut store = MemoryStore::new();
+        store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
+        Ok(store)
+    }
+
+    /// The dependency nodes of the Fork's current generation.
+    fn nodes(store: &MemoryStore, fork: TimelineId) -> Fallible<usize> {
+        let at = store.current_fork_generation(fork)?;
+        let scope = DependencyReadScopeV1::ForkGeneration(at);
+        let request = DependencyPageRequestV1::try_new(scope, None, MAX_DEPENDENCY_PAGE_ROWS_V1)?;
+        Ok(store.read_dependency_nodes(&request)?.items().len())
+    }
+
+    /// A classified Fork with a committed invalidation and one later Tick,
+    /// each with its Events, provenance, and dependency record.
+    fn ticked() -> Fallible<(MemoryStore, TimelineId)> {
+        let mut store = open()?;
+        let authority = Authority::open(&mut store)?;
+        let fork = authority.admit(&mut store, 0xb1)?;
+        let permit = authority.host_permit(&store, fork)?;
+        let lent = authority.lend(&permit);
+        let command = Spec::new(fork).command()?;
+        let first = node_record(FIRST_TICK, "a", 1)?;
+        let base = hash(0x61);
+        let committed =
+            store.commit_classified_counterfactual_invalidation(&command, &first, &lent, base)?;
+        assert!(
+            matches!(committed, CounterfactualInvalidationOutcomeV1::Committed(_)),
+            "{committed:?}"
+        );
+        let basis = store.current_counterfactual_basis(fork)?;
+        let pair = batch(vec![draft(20, TICK_KIND), draft(21, TICK_KIND)])?;
+        let later = node_record(18, "b", 2)?;
+        let base = hash(0x62);
+        let ticked = store
+            .append_classified_counterfactual_tick(fork, &basis, &pair, &later, &lent, base)?;
+        assert!(
+            matches!(ticked, CounterfactualTickOutcomeV1::Committed { .. }),
+            "{ticked:?}"
+        );
+        Ok((store, fork))
+    }
+
+    #[test]
+    fn a_refused_delete_of_a_ticked_fork_changes_no_map() -> Fallible<()> {
+        let (mut store, fork) = ticked()?;
+        let events = store.state(fork).events.clone();
+        let state = store.counterfactual_forks.get(&fork).cloned();
+        let recorded = nodes(&store, fork)?;
+        assert_eq!(events.len(), 4, "two Ticks of two Events");
+        assert!(recorded > 0, "the Ticks recorded dependency nodes");
+        let before = sizes(&store);
+        let refused = store.delete_timeline(fork);
+        assert!(
+            matches!(refused, Err(CoreError::AdmittedForkNotDeletable(id)) if id == fork),
+            "{refused:?}"
+        );
+        assert_eq!(sizes(&store), before);
+        assert_eq!(store.state(fork).events, events);
+        assert_eq!(store.counterfactual_forks.get(&fork).cloned(), state);
+        assert_eq!(nodes(&store, fork)?, recorded);
+        Ok(())
+    }
+
+    #[test]
+    fn an_orphan_admission_of_a_missing_timeline_is_not_found() -> Fallible<()> {
+        let mut store = open()?;
+        let authority = Authority::open(&mut store)?;
+        let fork = authority.admit(&mut store, 0xb1)?;
+        let admission = store.fork_admissions.get(&fork).ok_or("no FAR1")?.clone();
+        let orphan = TimelineId::new();
+        store.fork_admissions.insert(orphan, admission);
+        let before = sizes(&store);
+        let generic = store.delete_timeline(orphan);
+        assert!(
+            matches!(generic, Err(CoreError::TimelineNotFound(id)) if id == orphan),
+            "{generic:?}"
+        );
+        let direct = delete_visible_timeline(&mut store, orphan);
+        assert!(
+            matches!(direct, Err(CoreError::TimelineNotFound(id)) if id == orphan),
+            "{direct:?}"
+        );
+        assert_eq!(sizes(&store), before);
+        let refused = delete_visible_timeline(&mut store, fork);
+        assert!(
+            matches!(refused, Err(CoreError::AdmittedForkNotDeletable(id)) if id == fork),
+            "{refused:?}"
+        );
+        assert_eq!(sizes(&store), before);
+        Ok(())
+    }
+
+    /// The direct-topology guard of a permit-requiring store refuses first.
+    #[test]
+    fn a_permit_requiring_store_refuses_before_the_admission_check() -> Fallible<()> {
+        let mut store = open()?;
+        let authority = Authority::open(&mut store)?;
+        let fork = authority.admit(&mut store, 0xb1)?;
+        // Binding a fail-closed gate sets this flag, but a bound store cannot
+        // be rebound and an unbound one cannot admit a Fork.
+        store.erasure_topology_requires_permit = true;
+        let before = sizes(&store);
+        let refused = store.delete_timeline(fork);
+        assert!(
+            matches!(refused, Err(CoreError::ErasureContainmentUnavailable)),
+            "{refused:?}"
+        );
+        assert_eq!(sizes(&store), before);
+        Ok(())
+    }
+
+    /// Geographic concealment still precedes the admission check.
+    #[test]
+    fn a_geographic_admitted_fork_stays_concealed() -> Fallible<()> {
+        let mut store = open()?;
+        let authority = Authority::open(&mut store)?;
+        let fork = authority.admit(&mut store, 0xb1)?;
+        store.geographic_timelines.insert(fork);
+        let before = sizes(&store);
+        let concealed = store.delete_timeline(fork);
+        assert!(
+            matches!(concealed, Err(CoreError::TimelineNotFound(id)) if id == fork),
+            "{concealed:?}"
+        );
+        assert_eq!(sizes(&store), before);
+        assert!(store.geographic_timelines.contains(&fork));
         Ok(())
     }
 }

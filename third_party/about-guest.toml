@@ -1,0 +1,33 @@
+# cargo-about — third-party notice bundle for the Rust guest fixtures (#545).
+# Docs: https://embarkstudios.github.io/cargo-about/
+#
+# The accepted list and any crate-scoped acceptance mirror deny.toml's
+# [licenses] allow list and exceptions exactly, in the same order;
+# scripts/third_party_notices.py fails when they drift. cargo-about satisfies
+# an `OR` expression with the first accepted licence in this order.
+#
+# Scope: the non-dev dependency graph of each Rust guest Cargo.lock under
+# plugins/community/examples, on the guests' wasm32-unknown-unknown target. The
+# unpublished guest crates themselves are PiglorOS's own code and are skipped.
+
+targets = ["wasm32-unknown-unknown"]
+ignore-dev-dependencies = true
+private = { ignore = true }
+accepted = [
+  "MIT",
+  "MIT-0",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Unicode-3.0",
+  "Zlib",
+  "CC0-1.0",
+  "MPL-2.0",
+]
+
+# Owner licence decision, 2026-10-19, Redmine #426: mirrors the crate-scoped
+# webpki-roots exception in deny.toml.
+[webpki-roots]
+accepted = ["CDLA-Permissive-2.0"]

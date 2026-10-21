@@ -7,19 +7,19 @@ use pos_crypto::plugin_execution::{
     DeterministicBudgetV1, PluginAbiRequirementV1, PluginExecutionProjectionFixtureV1,
     PluginExecutionProjectionV1,
 };
-use pos_plugin_host::{pinned_runtime, PinnedExecutionV1};
+use pos_plugin_host::PinnedExecutionV1;
 use pos_runtime::community_plugin_host::{
-    negotiate_community_plugin_v1, ArtifactRefV1, CommunityPluginCeilingsV1,
-    CommunityPluginExecutionProfileV1, CommunityPluginHostAbiV1, CommunityPluginModeV1, HostInputs,
-    InvocationOptionsV1, NegotiatedCommunityPluginV1, PinnedComponentRuntimeV1, PluginInvocationV1,
-    TimelinePositionV1,
+    negotiate_community_plugin_v1, pinned_runtime_v1, ArtifactRefV1, CommunityPluginCeilingsV1,
+    CommunityPluginExecutionProfileV1, CommunityPluginHostAbiV1, CommunityPluginModeV1,
+    GatedCommunityReleaseV1, HostInputs, InvocationOptionsV1, NegotiatedCommunityPluginV1,
+    PinnedComponentRuntimeV1, PluginInvocationV1, TimelinePositionV1,
 };
 
 /// The compatibility Rust guest.
 pub const RUST_GUEST: &[u8] = include_bytes!(
     "../../../../plugins/community/examples/compatibility-prototype/fixtures/rust-guest.wasm"
 );
-/// The Plugin ID both compatibility guests describe.
+/// The Plugin ID every compatibility guest describes.
 pub const PLUGIN_ID: &str = "pigloros.compatibility-prototype";
 /// The release's declared budget; the V1 profile clamps memory and fuel.
 pub const BUDGET: DeterministicBudgetV1 = DeterministicBudgetV1::MAXIMA;
@@ -87,8 +87,9 @@ pub fn negotiate(
         CommunityPluginCeilingsV1::V1,
         runtime,
     );
+    let gated = GatedCommunityReleaseV1::for_test(release.clone(), Vec::new());
     ok(
-        negotiate_community_plugin_v1(release, host, &profile),
+        negotiate_community_plugin_v1(&gated, host, &profile),
         "negotiation",
     )
 }
@@ -99,7 +100,7 @@ pub fn pinned(
     release: &PluginExecutionProjectionV1,
     host: &CommunityPluginHostAbiV1,
 ) -> PinnedExecutionV1 {
-    let runtime = ok(pinned_runtime(), "pinned runtime");
+    let runtime = pinned_runtime_v1();
     ok(
         PinnedExecutionV1::new(negotiate(release, host, Some(runtime))),
         "pinned execution",

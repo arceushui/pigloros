@@ -157,13 +157,14 @@ fn image_manifest() -> SignedImageManifestV1 {
             ),
         ],
         root_hash_sha256: digest(14),
+        verity_salt: digest(17),
         root_hash_signature: Pkcs7ProofV1 {
             der_length: der_bytes.len() as u64,
             der_sha256: Sha256::digest(&der_bytes).into(),
             der_bytes,
         },
         signing_certificate_sha256: digest(15),
-        kernel_keyring_serial: 7,
+        kernel_key_description: "Reference adapter image release: 0f0f0f0f".to_owned(),
         executable_path: "/usr/bin/reference-adapter".to_owned(),
         executable_blake3_digest: digest(16),
         arguments: vec!["--stdio".to_owned()],
@@ -651,6 +652,17 @@ fn authority_contracts_reject_order_digest_and_partition_changes() -> TestResult
         invalid_image.sign(&key),
         Err(SandboxContractErrorV1::FieldOutOfBounds)
     );
+    for description in [String::new(), "release\nkey".to_owned(), "k".repeat(4096)] {
+        let mut invalid_description = image_manifest();
+        invalid_description.kernel_key_description = description;
+        assert_eq!(
+            invalid_description.sign(&key),
+            Err(SandboxContractErrorV1::FieldOutOfBounds)
+        );
+    }
+    let mut longest_description = image_manifest();
+    longest_description.kernel_key_description = "k".repeat(4095);
+    longest_description.sign(&key)?;
 
     let mut unordered_network = launch_policy();
     unordered_network
@@ -2467,5 +2479,61 @@ fn public_encoders_propagate_nested_validation_failures() -> TestResult {
         local_error.to_canonical_cbor(),
         Err(SandboxContractErrorV1::FieldOutOfBounds)
     );
+    Ok(())
+}
+
+#[test]
+fn image_manifest_decoders_require_exact_salt_and_kernel_key_description() -> TestResult {
+    let encoded = image_manifest().sign(&signing_key())?.to_canonical_cbor()?;
+    let decoded: Value = ciborium::from_reader(encoded.as_slice())?;
+    for (field, replacement, expected) in [
+        (
+            11,
+            Value::Bytes(vec![17; 31]),
+            SandboxContractErrorV1::InvalidEncoding,
+        ),
+        (
+            11,
+            Value::Bytes(vec![17; 33]),
+            SandboxContractErrorV1::InvalidEncoding,
+        ),
+        (
+            11,
+            Value::Bytes(Vec::new()),
+            SandboxContractErrorV1::InvalidEncoding,
+        ),
+        (
+            14,
+            Value::Integer(7.into()),
+            SandboxContractErrorV1::InvalidEncoding,
+        ),
+        (
+            14,
+            Value::Text("k".repeat(4096)),
+            SandboxContractErrorV1::FieldOutOfBounds,
+        ),
+        (
+            14,
+            Value::Text("release\nkey".to_owned()),
+            SandboxContractErrorV1::FieldOutOfBounds,
+        ),
+    ] {
+        let mut changed = decoded.clone();
+        let Value::Array(wrapper) = &mut changed else {
+            return Err("SIM1 is not an array".into());
+        };
+        let Value::Array(unsigned) = &mut wrapper[0] else {
+            return Err("SIM1-U is not an array".into());
+        };
+        unsigned[field] = replacement;
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&changed, &mut bytes)?;
+        assert_eq!(
+            SignedImageManifestV1::from_canonical_cbor(&bytes),
+            Err(expected),
+            "field {field}"
+        );
+        assert!(independent::SignedImageManifest::from_canonical_cbor(&bytes).is_err());
+    }
     Ok(())
 }

@@ -272,6 +272,27 @@ pub(super) fn key_id(value: &Value) -> Result<String, SandboxProviderProtocolErr
     }
 }
 
+/// Longest kernel key description: one page less its terminating NUL.
+const MAX_KERNEL_KEY_DESCRIPTION_BYTES: usize = 4095;
+
+/// Exact certificate-derived kernel key description, as the kernel names it.
+pub(super) fn kernel_key_description(
+    value: &Value,
+) -> Result<String, SandboxProviderProtocolError> {
+    let value = text(value)?;
+    if valid_kernel_key_description(value) {
+        Ok(value.to_owned())
+    } else {
+        Err(SandboxProviderProtocolError::FieldOutOfBounds)
+    }
+}
+
+pub(super) fn valid_kernel_key_description(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_KERNEL_KEY_DESCRIPTION_BYTES
+        && !value.chars().any(char::is_control)
+}
+
 pub(super) const fn valid_key_id(value: &str) -> bool {
     !value.is_empty() && value.len() <= MAX_IDENTIFIER_BYTES
 }

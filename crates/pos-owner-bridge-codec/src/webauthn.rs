@@ -3,14 +3,18 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     parse_assertion_authenticator_data, parse_none_attestation_object, validate_client_data_json,
-    AssertionReplyV1, AttestationReplyV1, CeremonyId, CoseEs256PublicKey, OwnerBridgeCodecError,
-    OwnerUserHandle, PrfResult, TransportCodes, WebAuthnChallenge,
+    AssertionAuthenticatorData, AssertionReplyV1, AttestationReplyV1, CeremonyId,
+    CoseEs256PublicKey, OwnerBridgeCodecError, OwnerUserHandle, PrfResult, TransportCodes,
+    VerificationReason, WebAuthnChallenge, MAX_AUTHENTICATOR_DATA_BYTES,
 };
 
 const MIN_CREDENTIAL_ID_BYTES: usize = 1;
 const MAX_CREDENTIAL_ID_BYTES: usize = 1_024;
-const MAX_AUTHENTICATOR_DATA_BYTES: usize = 1_024;
+/// The authenticator-data bound plus the 32-byte client-data digest.
 const SIGNED_MESSAGE_BYTES: usize = MAX_AUTHENTICATOR_DATA_BYTES + 32;
+// The buffer is sized for the closed 1,024-byte bound; a change to either constant must be
+// made on purpose.
+const _: () = assert!(SIGNED_MESSAGE_BYTES == 1_056);
 
 /// Host-owned invariants for verifying a Create reply.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -184,15 +188,18 @@ impl VerifiedAssertion {
 ///
 /// # Errors
 ///
-/// Returns a closed [`OwnerBridgeCodecError`] when the ceremony ID, client
-/// data, attestation object, COSE point, flags, or PRF shape violates the
-/// closed `WebAuthn` Create contract.
+/// Returns the closed [`VerificationReason`] of the first failed check:
+/// ceremony ID, PRF support, client data, attestation object, authenticator
+/// data, COSE key, or public-key point.
 pub fn verify_attestation_reply<'a>(
     reply: &AttestationReplyV1<'a>,
     context: CreateVerificationContext,
-) -> Result<VerifiedRegistration<'a>, OwnerBridgeCodecError> {
-    if reply.ceremony_id() != context.ceremony_id || !reply.prf_enabled() {
-        return Err(OwnerBridgeCodecError::InvalidPayload);
+) -> Result<VerifiedRegistration<'a>, VerificationReason> {
+    if reply.ceremony_id() != context.ceremony_id {
+        return Err(VerificationReason::CeremonyIdMismatch);
+    }
+    if !reply.prf_enabled() {
+        return Err(VerificationReason::PrfUnsupported);
     }
     validate_client_data_json(
         reply.client_data_json(),
@@ -216,17 +223,30 @@ pub fn verify_attestation_reply<'a>(
 ///
 /// # Errors
 ///
-/// Returns a closed [`OwnerBridgeCodecError`] when any `WebAuthn` assertion
-/// invariant, strict DER signature, ES256 verification, credential/user-handle
-/// equality, backup flag, counter, or PRF requirement fails.
+/// Returns the closed [`VerificationReason`] of the first failed check, in this order:
+/// ceremony ID, credential ID, client data, authenticator data (RP ID hash, flags and
+/// extensions), the stored public key, the signature, and only then the checks that compare the
+/// reply with the stored binding: backup eligibility, user handle and counter.
+///
+/// The signature comes first on purpose (a decider ruling; ADR-110 §7 lists the signature
+/// bullet before the backup-eligibility and counter bullets). The stored-binding comparisons
+/// (backup-eligibility equality, user-handle equality and the counter) therefore run only after
+/// the signature, so `CounterRegression`, the security event, is reported for authenticated
+/// replies only; a forged reply fails with `Signature`.
+///
+/// Two earlier routes exist and are deliberate: a backup-state flag set without backup
+/// eligibility is `BackupFlags` while the authenticator data is parsed (the ADR §7 flag rule),
+/// and a wrongly shaped user handle is `UserHandleMismatch` while the reply is decoded. Neither
+/// is a security event.
 pub fn verify_assertion_reply(
     reply: &AssertionReplyV1<'_>,
     context: AssertionVerificationContext<'_>,
-) -> Result<VerifiedAssertion, OwnerBridgeCodecError> {
-    if reply.ceremony_id() != context.ceremony_id
-        || reply.raw_id() != context.credential.credential_id
-    {
-        return Err(OwnerBridgeCodecError::InvalidPayload);
+) -> Result<VerifiedAssertion, VerificationReason> {
+    if reply.ceremony_id() != context.ceremony_id {
+        return Err(VerificationReason::CeremonyIdMismatch);
+    }
+    if reply.raw_id() != context.credential.credential_id {
+        return Err(VerificationReason::CredentialMismatch);
     }
     validate_client_data_json(
         reply.client_data_json(),
@@ -234,14 +254,6 @@ pub fn verify_assertion_reply(
         &context.challenge,
     )?;
     let data = parse_assertion_authenticator_data(reply.authenticator_data())?;
-    if data.backup_eligible() != context.credential.backup_eligible
-        || (reply
-            .user_handle()
-            .is_some_and(|handle| handle != context.credential.user_handle))
-        || !counter_advanced(context.credential.sign_count, data.sign_count())
-    {
-        return Err(OwnerBridgeCodecError::InvalidPayload);
-    }
     let verifying_key = validating_key(context.credential.public_key)?;
     verify_signature(
         &verifying_key,
@@ -249,6 +261,7 @@ pub fn verify_assertion_reply(
         reply.client_data_json(),
         reply.signature(),
     )?;
+    check_stored_binding(reply, data, context.credential)?;
     Ok(VerifiedAssertion {
         backup_state: data.backup_state(),
         sign_count: data.sign_count(),
@@ -256,17 +269,38 @@ pub fn verify_assertion_reply(
     })
 }
 
+/// Compare an authenticated reply with the stored binding. It runs only after the signature
+/// verified.
+fn check_stored_binding(
+    reply: &AssertionReplyV1<'_>,
+    data: AssertionAuthenticatorData,
+    credential: StoredCredential<'_>,
+) -> Result<(), VerificationReason> {
+    let handle_mismatch = reply
+        .user_handle()
+        .is_some_and(|handle| handle != credential.user_handle);
+    if data.backup_eligible() != credential.backup_eligible {
+        Err(VerificationReason::BackupFlags)
+    } else if handle_mismatch {
+        Err(VerificationReason::UserHandleMismatch)
+    } else if !counter_advanced(credential.sign_count, data.sign_count()) {
+        Err(VerificationReason::CounterRegression)
+    } else {
+        Ok(())
+    }
+}
+
 const fn counter_advanced(stored: u32, current: u32) -> bool {
     (stored == 0 && current == 0) || current > stored
 }
 
-fn validate_public_key(key: CoseEs256PublicKey) -> Result<(), OwnerBridgeCodecError> {
+fn validate_public_key(key: CoseEs256PublicKey) -> Result<(), VerificationReason> {
     validating_key(key).map(|_| ())
 }
 
-fn validating_key(key: CoseEs256PublicKey) -> Result<VerifyingKey, OwnerBridgeCodecError> {
+fn validating_key(key: CoseEs256PublicKey) -> Result<VerifyingKey, VerificationReason> {
     VerifyingKey::from_sec1_bytes(&key.uncompressed_sec1_bytes())
-        .map_err(|_| OwnerBridgeCodecError::InvalidPayload)
+        .or(Err(VerificationReason::CoseKey))
 }
 
 fn verify_signature(
@@ -274,9 +308,8 @@ fn verify_signature(
     authenticator_data: &[u8],
     client_data_json: &[u8],
     signature_bytes: &[u8],
-) -> Result<(), OwnerBridgeCodecError> {
-    let signature =
-        Signature::from_der(signature_bytes).map_err(|_| OwnerBridgeCodecError::InvalidPayload)?;
+) -> Result<(), VerificationReason> {
+    let signature = Signature::from_der(signature_bytes).or(Err(VerificationReason::Signature))?;
 
     let client_data_digest: [u8; 32] = Sha256::digest(client_data_json).into();
     // `verify_signature` is private and reached only through
@@ -287,5 +320,5 @@ fn verify_signature(
     signed_message[authenticator_data.len()..message_length].copy_from_slice(&client_data_digest);
     verifying_key
         .verify(&signed_message[..message_length], &signature)
-        .map_err(|_| OwnerBridgeCodecError::InvalidPayload)
+        .or(Err(VerificationReason::Signature))
 }

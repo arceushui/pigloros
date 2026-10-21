@@ -189,11 +189,12 @@ impl Driver for MultiEntityAgentDriver {
         timeline: TimelineId,
         observations: ObservationView<'_>,
     ) -> Result<StepOutput, RuntimeError> {
-        let mut drafts = self.fast.step(timeline, observations)?.drafts;
+        let mut output = self.fast.step(timeline, observations)?;
         if self.committed_passes.is_multiple_of(2) {
-            drafts.extend(self.slow.step(timeline, ObservationView::empty())?.drafts);
+            let slow = self.slow.step(timeline, ObservationView::empty())?;
+            output.outputs.extend(slow.outputs);
         }
-        Ok(StepOutput::new(drafts))
+        Ok(output)
     }
 
     fn commit_step(&mut self) {

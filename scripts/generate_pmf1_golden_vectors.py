@@ -6,8 +6,11 @@ canonical 28-field PMF1 V1 manifest with its own deterministic CBOR encoder,
 computes every inner BLAKE3 domain digest with a pure-Python BLAKE3, the raw
 SHA-256 of every member with `hashlib`, the unsigned manifest and release
 digests, the complete-PMF1 digest, the ADR-103 descriptor digest set, and the
-ADR-102 JCS OCI manifest. It writes the Rust constants consumed by
-`crates/pos-crypto/tests/plugin_manifest_public.rs`.
+ADR-102 JCS OCI manifest. It signs the release digest with its own pure-Python
+Ed25519 under the ADR-065 role-signature message. It writes the Rust constants
+consumed by `crates/pos-crypto/tests/plugin_manifest_public.rs` and
+`plugin_release_query_public.rs` (closure facts) and the signing facts and
+artifact bytes used by the encoder and signature tests.
 
 Usage:
     python3 scripts/generate_pmf1_golden_vectors.py          # rewrite
@@ -26,6 +29,10 @@ from pathlib import Path
 OUTPUT = (
     Path(__file__).resolve().parent.parent
     / "crates/pos-crypto/tests/support/pmf1_golden_vectors.rs"
+)
+SIGNED_OUTPUT = (
+    Path(__file__).resolve().parent.parent
+    / "crates/pos-crypto/tests/support/pmf1_signed_release_vectors.rs"
 )
 
 # --- Pure-Python BLAKE3 (unkeyed hash mode, 32-byte output) -----------------
@@ -139,6 +146,78 @@ def blake3(data: bytes) -> bytes:
     return struct.pack("<8I", *state[:8])
 
 
+# --- Pure-Python Ed25519 (RFC 8032 section 6 reference algorithm) -------------
+
+_P = 2**255 - 19
+_Q = 2**252 + 27742317777372353535851937790883648493
+_D = -121665 * pow(121666, _P - 2, _P) % _P
+_I = pow(2, (_P - 1) // 4, _P)
+
+
+def _inv(x: int) -> int:
+    return pow(x, _P - 2, _P)
+
+
+def _recover_x(y: int, sign: int) -> int:
+    xx = (y * y - 1) * _inv(_D * y * y + 1)
+    x = pow(xx, (_P + 3) // 8, _P)
+    if (x * x - xx) % _P != 0:
+        x = x * _I % _P
+    if (x * x - xx) % _P != 0:
+        raise ValueError("not a curve point")
+    if x & 1 != sign:
+        x = _P - x
+    return x
+
+
+_BY = 4 * _inv(5) % _P
+_B = (_recover_x(_BY, 0), _BY, 1, _recover_x(_BY, 0) * _BY % _P)
+
+
+def _add(a, b):
+    a1 = (a[1] - a[0]) * (b[1] - b[0]) % _P
+    b1 = (a[1] + a[0]) * (b[1] + b[0]) % _P
+    c1 = 2 * a[3] * b[3] * _D % _P
+    d1 = 2 * a[2] * b[2] % _P
+    e, f, g, h = b1 - a1, d1 - c1, d1 + c1, b1 + a1
+    return (e * f % _P, g * h % _P, f * g % _P, e * h % _P)
+
+
+def _mul(scalar: int, point):
+    result = (0, 1, 1, 0)
+    while scalar:
+        if scalar & 1:
+            result = _add(result, point)
+        point = _add(point, point)
+        scalar >>= 1
+    return result
+
+
+def _encode_point(point) -> bytes:
+    zi = _inv(point[2])
+    x, y = point[0] * zi % _P, point[1] * zi % _P
+    return (y | ((x & 1) << 255)).to_bytes(32, "little")
+
+
+def _clamp(h: bytes) -> int:
+    a = int.from_bytes(h[:32], "little")
+    return (a & ((1 << 254) - 8)) | (1 << 254)
+
+
+def ed25519_public(seed: bytes) -> bytes:
+    return _encode_point(_mul(_clamp(hashlib.sha512(seed).digest()), _B))
+
+
+def ed25519_sign(seed: bytes, message: bytes) -> bytes:
+    h = hashlib.sha512(seed).digest()
+    a = _clamp(h)
+    public = _encode_point(_mul(a, _B))
+    r = int.from_bytes(hashlib.sha512(h[32:] + message).digest(), "little") % _Q
+    big_r = _encode_point(_mul(r, _B))
+    k = int.from_bytes(hashlib.sha512(big_r + public + message).digest(), "little") % _Q
+    return big_r + ((r + k * a) % _Q).to_bytes(32, "little")
+
+
 # --- Strict deterministic CBOR encoder ---------------------------------------
 
 
@@ -203,7 +282,24 @@ BLOBS = {
 }
 DEPENDENCY_RELEASE = bytes([0x42]) * 32
 PREVIOUS_RELEASE = bytes([0x24]) * 32
-SIGNATURE = bytes([0x5A]) * 64
+SIGNING_SEED = bytes([8]) * 32
+SIGNER_OWNER = "publisher"
+SIGNER_EPOCH = 9
+ROLE_SIGNATURE_DOMAIN = b"pigloros/role-signature/v1"
+PLUGIN_RELEASE_SIGNING_ROLE = 3
+
+
+def role_message(owner: str, epoch: int, release_digest: bytes) -> bytes:
+    """ADR-065 preimage: domain || u32be(len(owner)) || owner || role || u64be(epoch) || payload."""
+    owner_bytes = owner.encode("utf-8")
+    return (
+        ROLE_SIGNATURE_DOMAIN
+        + len(owner_bytes).to_bytes(4, "big")
+        + owner_bytes
+        + bytes([PLUGIN_RELEASE_SIGNING_ROLE])
+        + epoch.to_bytes(8, "big")
+        + release_digest
+    )
 
 
 def inner(role: str, data: bytes) -> bytes:
@@ -284,8 +380,12 @@ def golden_release():
         + fields[9][2]
         + fields[10][2]
     )
-    complete = cbor(fields + [manifest_digest, [1, 3, 9, SIGNATURE], release_digest])
-    return fields, complete, manifest_digest, release_digest
+    message = role_message(SIGNER_OWNER, SIGNER_EPOCH, release_digest)
+    signature = ed25519_sign(SIGNING_SEED, message)
+    complete = cbor(
+        fields + [manifest_digest, [1, 3, SIGNER_EPOCH, signature], release_digest]
+    )
+    return fields, complete, manifest_digest, release_digest, message, signature, unsigned
 
 
 def oci_layers(complete: bytes) -> tuple[list[dict], dict[str, bytes]]:
@@ -345,7 +445,7 @@ def rust_const(name: str, ty: str, literal: str) -> list[str]:
 
 
 def render() -> str:
-    fields, complete, manifest_digest, release_digest = golden_release()
+    fields, complete, manifest_digest, release_digest, _, _, _ = golden_release()
     layers, blobs = oci_layers(complete)
     manifest = jcs(
         {
@@ -408,6 +508,39 @@ def render() -> str:
     return "\n".join(lines)
 
 
+def render_signed() -> str:
+    """The signed-release facts and artifact bytes behind the golden PMF1."""
+    _, _, _, _, message, signature, unsigned = golden_release()
+    lines = [
+        "// @generated by scripts/generate_pmf1_golden_vectors.py; do not edit.",
+        "//",
+        "// Independent golden signing facts for the golden PMF1 V1 release (ADR-061",
+        "// revision 2 and 3, ADR-065). Every value was computed by the Python",
+        "// generator with its own Ed25519, not by `pos-crypto`.",
+        "",
+        "/// The canonical 25-element array of fields 0-24.",
+        *rust_const("GOLDEN_UNSIGNED_FIELDS_HEX", "&str", rust_bytes(unsigned)),
+        "/// The golden Ed25519 public key (the seed is `GOLDEN_SIGNING_SEED_BYTE` x 32).",
+        *rust_const("GOLDEN_SIGNER_PUBLIC_HEX", "&str", rust_bytes(ed25519_public(SIGNING_SEED))),
+        "/// The ADR-065 role-signature message for owner `publisher`, role 3, epoch 9.",
+        *rust_const("GOLDEN_ROLE_MESSAGE_HEX", "&str", rust_bytes(message)),
+        "/// Field 26's signature over that message.",
+        *rust_const("GOLDEN_SIGNATURE_HEX", "&str", rust_bytes(signature)),
+        "/// The byte repeated 32 times in the golden Ed25519 seed.",
+        f"const GOLDEN_SIGNING_SEED_BYTE: u8 = {SIGNING_SEED[0]};",
+        "/// The golden signing identity's owner.",
+        f'const GOLDEN_SIGNER_OWNER: &str = "{SIGNER_OWNER}";',
+        "/// The golden signing identity's epoch.",
+        f"const GOLDEN_SIGNER_EPOCH: u64 = {SIGNER_EPOCH};",
+        "/// The exact bytes of every golden artifact, as `(name, hex)`.",
+        f"const GOLDEN_ARTIFACT_BYTES_HEX: [(&str, &str); {len(BLOBS)}] = [",
+    ]
+    for name, data in BLOBS.items():
+        lines += ["    (", f'        "{name}",', f"        {rust_bytes(data)},", "    ),"]
+    lines += ["];", ""]
+    return "\n".join(lines)
+
+
 def self_test() -> None:
     """Check the BLAKE3 port against published BLAKE3 test-vector prefixes."""
     vectors = {
@@ -427,18 +560,36 @@ def self_test() -> None:
             raise SystemExit(f"BLAKE3 self-test failed for length {length}")
 
 
+def ed25519_self_test() -> None:
+    """Check the Ed25519 port against RFC 8032 section 7.1 test 1 (empty message)."""
+    seed = bytes.fromhex("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60")
+    public = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
+    signature = (
+        "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e06522490155"
+        "5fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b"
+    )
+    if ed25519_public(seed).hex() != public or ed25519_sign(seed, b"").hex() != signature:
+        raise SystemExit("Ed25519 self-test failed")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--check", action="store_true", help="verify the committed file")
     arguments = parser.parse_args()
     self_test()
-    rendered = render()
+    ed25519_self_test()
+    outputs = [(OUTPUT, render()), (SIGNED_OUTPUT, render_signed())]
     if arguments.check:
-        if OUTPUT.read_text(encoding="utf-8") != rendered:
-            print(f"{OUTPUT} is stale; rerun the generator", file=sys.stderr)
-            return 1
-        return 0
-    OUTPUT.write_text(rendered, encoding="utf-8")
+        stale = [
+            path
+            for path, rendered in outputs
+            if not path.exists() or path.read_text(encoding="utf-8") != rendered
+        ]
+        for path in stale:
+            print(f"{path} is stale; rerun the generator", file=sys.stderr)
+        return 1 if stale else 0
+    for path, rendered in outputs:
+        path.write_text(rendered, encoding="utf-8")
     return 0
 
 

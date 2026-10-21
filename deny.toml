@@ -11,7 +11,24 @@ all-features = true
 
 [advisories]
 yanked = "deny"
-ignore = []
+# RUSTSEC-2026-0344 (ruzstd < 0.9.1, decompression bomb): reached only through
+# bevy_image 0.19.1 (`ruzstd ^0.8`) for the zstd-compressed lookup tables Bevy
+# ships to apps/piglor-world-client. As of 2026-10-13 no released Bevy depends on
+# a fixed ruzstd (Redmine #629). Remove (here and in .cargo/audit.toml) once
+# Cargo.lock resolves ruzstd >= 0.9.1.
+# RUSTSEC-2026-0370 (zvariant), RUSTSEC-2026-0371 (zbus_names) and
+# RUSTSEC-2026-0372 (zvariant_derive), dated 2026-10-16, are informational
+# "unmaintained" advisories (no vulnerability): zvariant moved into zbus 6 as
+# `zbus::wire`.
+# Reached only through apps/pos-sandboxd (zbus 5.19, zbus_systemd 0.26200,
+# which still requires zbus ^5.3). Remove (here and in .cargo/audit.toml) once
+# pos-sandboxd is on zbus 6 (Redmine #686).
+ignore = [
+  "RUSTSEC-2026-0344",
+  "RUSTSEC-2026-0370",
+  "RUSTSEC-2026-0371",
+  "RUSTSEC-2026-0372",
+]
 
 [licenses]
 version = 2
@@ -31,7 +48,10 @@ allow = [
   "CC0-1.0",
   "MPL-2.0",
 ]
-exceptions = []
+# Owner licence decision, 2026-10-19, Redmine #426: the compiled WebPki root
+# set that ADR-061's pinned `ureq` `rustls` feature selects is CDLA-Permissive-2.0
+# data. The exception is scoped to this one crate only.
+exceptions = [{ crate = "webpki-roots", allow = ["CDLA-Permissive-2.0"] }]
 
 [licenses.private]
 ignore = true

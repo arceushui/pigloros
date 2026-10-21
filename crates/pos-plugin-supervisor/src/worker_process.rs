@@ -2,7 +2,8 @@
 //!
 //! A worker program calls [`prepare_worker_process`] before it reads anything.
 //! It refuses to run, and exits without a response, unless:
-//! 1. its only argument is a process ID, and binding the parent-death signal
+//! 1. its only arguments are a process ID and a mode token, exactly `local` or
+//!    `air-gapped` (lowercase ASCII), and binding the parent-death signal
 //!    leaves that process as its parent. `PR_SET_PDEATHSIG` with `SIGKILL`
 //!    kills the worker when the supervisor exits; the parent check closes the
 //!    race in which the supervisor exited before the signal was bound;
@@ -19,6 +20,7 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, OwnedFd};
 
+use pos_runtime::community_plugin_host::CommunityPluginModeV1;
 use rustix::fs::Dir;
 use rustix::process::{getppid, set_parent_process_death_signal, Pid, Signal};
 
@@ -26,7 +28,7 @@ use crate::frame::{read_frame, require_end, write_frame, WorkerFrameLimitsV1};
 use crate::ipc::{
     decode_worker_request_v1, encode_worker_response_v1, WorkerOutcomeV1, WorkerRequestV1,
 };
-use crate::launch::{FORWARDED_ENVIRONMENT, RUNTIME_ENVIRONMENT};
+use crate::launch::{mode_from_token, FORWARDED_ENVIRONMENT, RUNTIME_ENVIRONMENT};
 
 /// Why a worker process refused to serve its invocation.
 ///
@@ -34,7 +36,7 @@ use crate::launch::{FORWARDED_ENVIRONMENT, RUNTIME_ENVIRONMENT};
 /// unsuccessful exit, which the supervisor reports as `WorkerCrashed`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkerProcessErrorV1 {
-    /// The arguments are not exactly one supervisor process ID.
+    /// The arguments are not exactly a supervisor process ID and a mode token.
     Arguments,
     /// The parent-death signal could not be bound to the supervisor.
     Parent,
@@ -50,34 +52,53 @@ pub enum WorkerProcessErrorV1 {
 
 /// Check the worker process before it reads its request.
 ///
-/// `arguments` are the process arguments, program name first.
+/// `arguments` are the process arguments, program name first. On success the
+/// result is the mode the supervisor's token names: the only mode this worker
+/// serves.
 ///
 /// # Errors
 /// Returns the first failed check, in the order the module lists them.
 pub fn prepare_worker_process(
     arguments: impl IntoIterator<Item = OsString>,
-) -> Result<(), WorkerProcessErrorV1> {
-    let parent = supervisor_argument(arguments)?;
+) -> Result<CommunityPluginModeV1, WorkerProcessErrorV1> {
+    let (parent, mode) = worker_arguments(arguments)?;
     bind_to_parent(parent)?;
     verify_environment(std::env::vars_os().map(|(name, _)| name))?;
     open_descriptors()
         .filter(|open| open.as_slice() == [0, 1, 2])
-        .map(|_| ())
+        .map(|_| mode)
         .ok_or(WorkerProcessErrorV1::Descriptors)
 }
 
-/// The supervisor process ID: the single argument after the program name.
-fn supervisor_argument(
+/// The supervisor process ID and the mode: the two arguments after the
+/// program name, and nothing else.
+fn worker_arguments(
     arguments: impl IntoIterator<Item = OsString>,
-) -> Result<Pid, WorkerProcessErrorV1> {
+) -> Result<(Pid, CommunityPluginModeV1), WorkerProcessErrorV1> {
     let mut arguments = arguments.into_iter().skip(1);
-    let parent = arguments.next().filter(|_| arguments.next().is_none());
-    parent
-        .and_then(|parent| parent.into_string().ok())
+    let (parent, token) = (arguments.next(), arguments.next());
+    let exact = parent.zip(token).filter(|_| arguments.next().is_none());
+    exact
+        .and_then(|(parent, token)| parent_pid(parent).zip(mode_argument(token)))
+        .ok_or(WorkerProcessErrorV1::Arguments)
+}
+
+/// A positive process ID in decimal.
+fn parent_pid(argument: OsString) -> Option<Pid> {
+    argument
+        .into_string()
+        .ok()
         .and_then(|parent| parent.parse::<u32>().ok())
         .and_then(|parent| i32::try_from(parent).ok())
         .and_then(Pid::from_raw)
-        .ok_or(WorkerProcessErrorV1::Arguments)
+}
+
+/// The mode of a UTF-8 token that is exactly `local` or `air-gapped`.
+fn mode_argument(argument: OsString) -> Option<CommunityPluginModeV1> {
+    argument
+        .into_string()
+        .ok()
+        .and_then(|token| mode_from_token(&token))
 }
 
 /// Die with `SIGKILL` when the supervisor exits, which must not have happened.
@@ -187,40 +208,78 @@ mod tests {
         values.iter().map(OsString::from).collect()
     }
 
+    fn parsed(values: &[&str]) -> Result<(i32, CommunityPluginModeV1), WorkerProcessErrorV1> {
+        let (parent, mode) = worker_arguments(arguments(values))?;
+        Ok((i32::from(parent.as_raw_nonzero()), mode))
+    }
+
+    fn not_utf8() -> OsString {
+        std::os::unix::ffi::OsStringExt::from_vec(vec![0xff])
+    }
+
+    /// R7-P2: exactly `<pid> local` or `<pid> air-gapped` is accepted.
     #[test]
-    fn the_only_argument_is_a_positive_process_id() {
-        let parent = supervisor_argument(arguments(&["worker", "42"]));
-        assert_eq!(parent.map(Pid::as_raw_nonzero).map(i32::from), Ok(42));
+    fn the_arguments_are_a_positive_process_id_and_a_mode_token() {
+        assert_eq!(
+            parsed(&["worker", "42", "local"]),
+            Ok((42, CommunityPluginModeV1::Local))
+        );
+        assert_eq!(
+            parsed(&["worker", "42", "air-gapped"]),
+            Ok((42, CommunityPluginModeV1::AirGapped))
+        );
         for invalid in [
             &["worker"][..],
-            &["worker", "42", "43"],
-            &["worker", "0"],
-            &["worker", "-1"],
-            &["worker", "2147483648"],
-            &["worker", "4x"],
+            &["worker", "42"],
+            &["worker", "local"],
+            &["worker", "local", "42"],
+            &["worker", "42", "Local"],
+            &["worker", "42", "LOCAL"],
+            &["worker", "42", "airgapped"],
+            &["worker", "42", "air_gapped"],
+            &["worker", "42", "Air-Gapped"],
+            &["worker", "42", ""],
+            &["worker", "42", "local", "extra"],
+            &["worker", "42", "air-gapped", "43"],
+            &["worker", "0", "local"],
+            &["worker", "-1", "local"],
+            &["worker", "2147483648", "local"],
+            &["worker", "4x", "local"],
         ] {
             assert_eq!(
-                supervisor_argument(arguments(invalid)),
+                parsed(invalid),
                 Err(WorkerProcessErrorV1::Arguments),
                 "{invalid:?}"
             );
         }
-        let not_utf8 = vec![
+    }
+
+    #[test]
+    fn a_non_utf8_argument_is_refused() {
+        let token = vec![OsString::from("worker"), OsString::from("42"), not_utf8()];
+        assert_eq!(
+            worker_arguments(token).err(),
+            Some(WorkerProcessErrorV1::Arguments)
+        );
+        let parent = vec![
             OsString::from("worker"),
-            std::os::unix::ffi::OsStringExt::from_vec(vec![0xff]),
+            not_utf8(),
+            OsString::from("local"),
         ];
         assert_eq!(
-            supervisor_argument(not_utf8),
-            Err(WorkerProcessErrorV1::Arguments)
+            worker_arguments(parent).err(),
+            Some(WorkerProcessErrorV1::Arguments)
         );
     }
 
     #[test]
     fn preparation_rejects_bad_arguments_before_any_process_change() {
-        assert_eq!(
-            prepare_worker_process(arguments(&["worker"])),
-            Err(WorkerProcessErrorV1::Arguments)
-        );
+        for invalid in [&["worker"][..], &["worker", "1"], &["worker", "1", "Local"]] {
+            assert_eq!(
+                prepare_worker_process(arguments(invalid)),
+                Err(WorkerProcessErrorV1::Arguments)
+            );
+        }
     }
 
     #[test]
@@ -230,7 +289,7 @@ mod tests {
         // test runner that outlives this test.
         let other = std::process::id().to_string();
         assert_eq!(
-            prepare_worker_process(arguments(&["worker", &other])),
+            prepare_worker_process(arguments(&["worker", &other, "local"])),
             Err(WorkerProcessErrorV1::Parent)
         );
         // With the real parent the test process still fails: its environment
@@ -238,7 +297,7 @@ mod tests {
         let parent = getppid().map(|parent| parent.as_raw_nonzero().to_string());
         let parent = parent.unwrap_or_default();
         assert_eq!(
-            prepare_worker_process(arguments(&["worker", &parent])),
+            prepare_worker_process(arguments(&["worker", &parent, "air-gapped"])),
             Err(WorkerProcessErrorV1::Environment)
         );
     }

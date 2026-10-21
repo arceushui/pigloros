@@ -2,13 +2,16 @@
 //!
 //! `POB1`, `FAR1`, and `FPO1` end with `authority-origin-v1`. Inside `FAE1`
 //! that field is exactly `[2, authority_origin_digest]`, which every shared
-//! ADR-099 decoder still rejects until #519 activates code-2 trusted reads.
-//! These wrappers accept that code-2 form and nothing else, and only on the
-//! import path: each one validates the record's local projection (the same
-//! bytes with `[1]` in place of `[2, digest]`) with the unchanged strict local
-//! decoder, so every other field keeps exactly its accepted rules and
-//! canonical form. The projection never leaves this module, and every digest
-//! is computed over the exact code-2 bytes.
+//! ADR-099 decoder rejects, and keeps rejecting (ADR-105 r6 R6.9). These
+//! wrappers accept that code-2 form and nothing else, and only on the import
+//! path and on the code-2 trusted reads: each one validates the record's local
+//! projection (the same bytes with `[1]` in place of `[2, digest]`) with the
+//! unchanged strict local decoder, so every other field keeps exactly its
+//! accepted rules and canonical form. Every digest is computed over the exact
+//! code-2 bytes, and the projection accessors never make a record local
+//! authority.
+
+use crate::crypto::{CanonicalEmit, CanonicalSink};
 
 use super::{
     authority_envelope::MAX_IMPORTED_PRINCIPAL_OWNER_BINDING_BYTES_V1, domain_digest,
@@ -71,13 +74,6 @@ fn local_projection(bytes_in: &[u8]) -> Option<(Vec<u8>, Hash)> {
 /// The strict local `POB1` decoder, with every failure `InvalidEncoding`.
 fn decode_local_binding(bytes_in: &[u8]) -> Result<PrincipalOwnerBindingV1, Error> {
     PrincipalOwnerBindingV1::from_canonical_cbor(bytes_in).map_err(|_| Error::InvalidEncoding)
-}
-
-/// Append the code-2 `[2, digest]` origin to one local record body.
-fn with_imported_origin(mut body: Vec<u8>, authority_origin_digest: Hash) -> Vec<u8> {
-    body.extend_from_slice(&IMPORTED_ORIGIN_HEAD);
-    body.extend_from_slice(authority_origin_digest.as_bytes());
-    body
 }
 
 /// One strict code-2 `POB1` carried by `FAE1` field 7.
@@ -147,8 +143,6 @@ impl ImportedPrincipalOwnerBindingV1 {
     /// `Local`; the carried code-2 origin is
     /// [`Self::authority_origin_digest`]. It is never an authority: it only
     /// lets an import adapter key and compare the carried record.
-    ///
-    /// NOTE(#519): revisit this accessor when code 2 is activated.
     #[must_use]
     pub const fn input(&self) -> &PrincipalOwnerBindingInputV1 {
         self.binding.input()
@@ -203,7 +197,17 @@ impl ImportedForkAdmissionRecordV1 {
     /// Encode the exact canonical code-2 `FAR1` bytes.
     #[must_use]
     pub fn to_canonical_cbor(&self) -> Vec<u8> {
-        with_imported_origin(self.record.canonical_body(), self.authority_origin_digest)
+        let mut out = Vec::with_capacity(512);
+        self.emit(&mut out);
+        out
+    }
+
+    /// Measure these exact canonical bytes without allocating an encoding buffer.
+    ///
+    /// # Errors
+    /// Returns `LengthOverflow` if checked arithmetic cannot fit the target's `usize`.
+    pub fn canonical_cbor_len(&self) -> Result<usize, crate::CanonicalLengthErrorV1> {
+        crate::crypto::measure(self)
     }
 
     /// Return the ADR-099 `FAR1` digest over the exact code-2 bytes.
@@ -221,8 +225,6 @@ impl ImportedForkAdmissionRecordV1 {
     /// `FAR1` fields 2–13. The projected origin member is not field 14.
     ///
     /// This is the local projection only, never an authority.
-    ///
-    /// NOTE(#519): revisit this accessor when code 2 is activated.
     #[must_use]
     pub const fn fields(&self) -> &ForkAdmissionRecordInputV1 {
         self.record.input()
@@ -274,10 +276,17 @@ impl ImportedForkPublicationOperationV1 {
     /// Encode the exact canonical code-2 `FPO1` bytes.
     #[must_use]
     pub fn to_canonical_cbor(&self) -> Vec<u8> {
-        with_imported_origin(
-            self.operation.canonical_body(),
-            self.authority_origin_digest,
-        )
+        let mut out = Vec::with_capacity(512);
+        self.emit(&mut out);
+        out
+    }
+
+    /// Measure these exact canonical bytes without allocating an encoding buffer.
+    ///
+    /// # Errors
+    /// Returns `LengthOverflow` if checked arithmetic cannot fit the target's `usize`.
+    pub fn canonical_cbor_len(&self) -> Result<usize, crate::CanonicalLengthErrorV1> {
+        crate::crypto::measure(self)
     }
 
     /// The carried code-2 authority-origin digest.
@@ -289,10 +298,35 @@ impl ImportedForkPublicationOperationV1 {
     /// `FPO1` fields 2–12. The projected origin member is not field 13.
     ///
     /// This is the local projection only, never an authority.
-    ///
-    /// NOTE(#519): revisit this accessor when code 2 is activated.
     #[must_use]
     pub const fn fields(&self) -> &ForkPublicationOperationInputV1 {
         self.operation.input()
+    }
+
+    /// The whole local projection of this `FPO1`: the same fields with the
+    /// local `[1]` origin in place of the code-2 origin.
+    ///
+    /// ADR-105 r6 R6.9: the code-2 publication read returns it as the
+    /// authorization projection, next to [`Self::authority_origin_digest`]. It
+    /// is never publication authority by itself.
+    #[must_use]
+    pub const fn projection(&self) -> &ForkPublicationOperationV1 {
+        &self.operation
+    }
+}
+
+impl CanonicalEmit for ImportedForkAdmissionRecordV1 {
+    fn emit(&self, out: &mut impl CanonicalSink) {
+        self.record.emit_body(out);
+        out.extend_from_slice(&IMPORTED_ORIGIN_HEAD);
+        out.extend_from_slice(self.authority_origin_digest.as_bytes());
+    }
+}
+
+impl CanonicalEmit for ImportedForkPublicationOperationV1 {
+    fn emit(&self, out: &mut impl CanonicalSink) {
+        self.operation.emit_body(out);
+        out.extend_from_slice(&IMPORTED_ORIGIN_HEAD);
+        out.extend_from_slice(self.authority_origin_digest.as_bytes());
     }
 }

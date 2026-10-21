@@ -11,7 +11,7 @@
 //! 3. binds the attempt, its observation cursor, the host authorization and
 //!    domain approval evidence, and the full security revision set into one
 //!    [`PipelineAdmissionBasisV1`] on the `HumanProposedAction` path; and
-//! 4. commits it through the host-only [`PipelineAdmissionPortV1`], which
+//! 4. commits it through the host-only [`FactualAdmissionPortV1`], which
 //!    compares the whole basis and assigns Event identity and Timeline Order
 //!    at its serialization point.
 //!
@@ -19,16 +19,18 @@
 //! commits no Event and is never re-observed or retried here.
 
 use pos_core::{
-    pipeline_draft_vector_digest_v1, AppendIdentity, CoreError, EventDraft, Hash,
-    PipelineAdmissionBasisDraftV1, PipelineAdmissionBasisV1, PipelineAdmissionPortV1,
-    PipelineAttemptDraftV1, PipelineAttemptIdV1, PipelineAttemptV1, PipelineCommitReceiptV1,
-    PipelineContractErrorV1, PipelineDraftBatchV1, PipelineEvidenceRefV1, PipelineIngressV1,
-    PipelineObservationAnchorV1, PipelineOutcomeV1, PipelinePreconditionV1,
-    PipelineReceiptLookupV1, PipelineSecurityRevisionsV1, ProposedAction,
-    TentativePipelineResultV1, PIPELINE_CONTRACT_VERSION_V1,
+    assemble_factual_tick, pipeline_draft_vector_digest_v1, AppendIdentity, CoreError, EventDraft,
+    FactualAdmissionPortV1, FactualDependencyErrorV1, FactualPrefixReadPortV1,
+    FactualTickContextV1, FactualTickDependenciesV1, FactualTickShapeV1, Hash,
+    PipelineAdmissionBasisDraftV1, PipelineAdmissionBasisV1, PipelineAttemptDraftV1,
+    PipelineAttemptIdV1, PipelineAttemptV1, PipelineCommitReceiptV1, PipelineContractErrorV1,
+    PipelineDraftBatchV1, PipelineEvidenceRefV1, PipelineIngressV1, PipelineObservationAnchorV1,
+    PipelineOutcomeV1, PipelinePreconditionV1, PipelineReceiptLookupV1,
+    PipelineSecurityRevisionsV1, ProposedAction, TentativePipelineResultV1,
+    PIPELINE_CONTRACT_VERSION_V1,
 };
 
-use super::PluginRegistry;
+use super::{ensure_set_headroom_with, factual_dependencies::next_factual_tick, PluginRegistry};
 use crate::error::ActionSubmissionError;
 
 const APPROVAL_DOMAIN: &[u8] = b"PiglorOS.HumanDomainApproval.v1\0";
@@ -38,9 +40,10 @@ const APPROVAL_DOMAIN: &[u8] = b"PiglorOS.HumanDomainApproval.v1\0";
 /// The trusted host derives every field, never the caller or the
 /// `ActionApprover`: the attempt and idempotency identities, the observation
 /// cursor the request is valid against, a reference to the host's Principal
-/// authorization evidence, and the security revisions it published for the
-/// Timeline. The observation cursor is also the expected Logical Head, so a
-/// committed Event after the cursor makes the attempt stale.
+/// authorization evidence, the security revisions it published for the
+/// Timeline, and the authority grant of its admission fence. The observation
+/// cursor is also the expected Logical Head, so a committed Event after the
+/// cursor makes the attempt stale.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HumanActionAdmissionV1 {
     pub attempt_id: PipelineAttemptIdV1,
@@ -48,6 +51,9 @@ pub struct HumanActionAdmissionV1 {
     pub observation: PipelineObservationAnchorV1,
     pub authorization: PipelineEvidenceRefV1,
     pub security_revisions: PipelineSecurityRevisionsV1,
+    /// The fence grant the admission basis must carry; the store checks it
+    /// against the published fence from slice 8.
+    pub authority_grant: Hash,
 }
 
 /// Authoritative result of one admitted human action.
@@ -95,6 +101,10 @@ pub enum HumanActionAdmissionErrorV1 {
     /// host fault, never a rejection of the proposal.
     #[error("host admission inputs are invalid: {0}")]
     HostContract(PipelineContractErrorV1),
+    /// The dependency declaration of the action could not be built or
+    /// checked.
+    #[error(transparent)]
+    DependencyDeclaration(FactualDependencyErrorV1),
     /// The store failed; an unknown commit outcome is recovered by retrying
     /// the same request, which only looks up its receipt.
     #[error(transparent)]
@@ -114,7 +124,7 @@ impl PluginRegistry {
     /// no Event.
     pub fn admit_human_action(
         &self,
-        port: &mut dyn PipelineAdmissionPortV1,
+        port: &mut dyn FactualAdmissionPortV1,
         proposal: &ProposedAction,
         admission: &HumanActionAdmissionV1,
     ) -> Result<HumanActionReceiptV1, HumanActionAdmissionErrorV1> {
@@ -138,16 +148,25 @@ impl PluginRegistry {
 
     fn approve_and_admit(
         &self,
-        port: &mut dyn PipelineAdmissionPortV1,
+        port: &mut dyn FactualAdmissionPortV1,
         proposal: &ProposedAction,
         admission: &HumanActionAdmissionV1,
     ) -> Result<HumanActionReceiptV1, HumanActionAdmissionErrorV1> {
-        self.submit_action(admission.observation.timeline_id(), proposal)
-            .map_err(HumanActionAdmissionErrorV1::Submission)
-            .and_then(|draft| {
-                human_basis(admission, proposal, draft)
-                    .map_err(HumanActionAdmissionErrorV1::Contract)
+        let timeline = admission.observation.timeline_id();
+        // Refuse the action while the Timeline cannot take one more worst-case
+        // Tick (ADR-064 Revision 3, R3.10), before the `ActionApprover` runs.
+        let headroom = ensure_set_headroom_with(
+            &*port,
+            timeline,
+            HumanActionAdmissionErrorV1::Store,
+            HumanActionAdmissionErrorV1::DependencyDeclaration,
+        );
+        headroom
+            .and_then(|()| {
+                self.submit_action(timeline, proposal)
+                    .map_err(HumanActionAdmissionErrorV1::Submission)
             })
+            .and_then(|draft| bound_human_basis(port, admission, proposal, draft))
             .and_then(|basis| {
                 port.admit_pipeline_batch(&basis)
                     .map_err(HumanActionAdmissionErrorV1::Store)
@@ -173,14 +192,62 @@ fn settle_human_outcome(
     }
 }
 
-/// Build the `HumanProposedAction` basis for one approved draft.
-fn human_basis(
+/// Bind the approved draft and its factual Tick declaration into the basis.
+///
+/// The declaration is built after the approver ran, from the Tick the prefix
+/// is at (ADR-064 R3.8.3).
+fn bound_human_basis(
+    port: &dyn FactualAdmissionPortV1,
     admission: &HumanActionAdmissionV1,
     proposal: &ProposedAction,
     draft: EventDraft,
-) -> Result<PipelineAdmissionBasisV1, PipelineContractErrorV1> {
+) -> Result<PipelineAdmissionBasisV1, HumanActionAdmissionErrorV1> {
     let drafts = vec![draft];
-    PipelineEvidenceRefV1::try_new(approval_evidence(admission, proposal, &drafts))
+    let evidence = approval_evidence(admission, proposal, &drafts);
+    human_dependencies(port, admission, evidence, &drafts).and_then(|dependencies| {
+        human_basis(admission, evidence, drafts, dependencies)
+            .map_err(HumanActionAdmissionErrorV1::Contract)
+    })
+}
+
+/// Build the factual Tick declaration of the approved drafts: one
+/// human-ingress node per draft and no edge (R3.4.5).
+fn human_dependencies(
+    port: &dyn FactualPrefixReadPortV1,
+    admission: &HumanActionAdmissionV1,
+    evidence: Hash,
+    drafts: &[EventDraft],
+) -> Result<FactualTickDependenciesV1, HumanActionAdmissionErrorV1> {
+    let timeline = admission.observation.timeline_id();
+    port.last_committed_factual_tick(timeline)
+        .map_err(HumanActionAdmissionErrorV1::Store)
+        .and_then(|head| {
+            // A human Tick retains no prior node, so only the head sets it.
+            next_factual_tick(head.tick, 0)
+                .map_err(HumanActionAdmissionErrorV1::DependencyDeclaration)
+        })
+        .and_then(|tick| {
+            let context = FactualTickContextV1 {
+                timeline_id: timeline,
+                tick,
+                attempt_id: admission.attempt_id,
+                evidence_digest: evidence,
+                authority_grant: admission.authority_grant,
+            };
+            let shape = FactualTickShapeV1::Human(drafts.to_vec());
+            assemble_factual_tick(&context, &shape)
+                .map_err(HumanActionAdmissionErrorV1::DependencyDeclaration)
+        })
+}
+
+/// Build the `HumanProposedAction` basis for one approved draft.
+fn human_basis(
+    admission: &HumanActionAdmissionV1,
+    evidence: Hash,
+    drafts: Vec<EventDraft>,
+    dependencies: FactualTickDependenciesV1,
+) -> Result<PipelineAdmissionBasisV1, PipelineContractErrorV1> {
+    PipelineEvidenceRefV1::try_new(evidence)
         .and_then(|approval| {
             PipelineAttemptV1::try_from_draft(PipelineAttemptDraftV1 {
                 contract_version: PIPELINE_CONTRACT_VERSION_V1,
@@ -204,6 +271,7 @@ fn human_basis(
                 )),
                 security_revisions: Some(admission.security_revisions),
                 batch: Some(batch),
+                dependencies,
             })
         })
 }

@@ -27,6 +27,7 @@
 pub mod authorization_cache;
 pub mod community_plugin_host;
 pub mod composition;
+pub mod composition_fallback;
 #[cfg(target_os = "linux")]
 pub mod counterfactual;
 pub mod driver;
@@ -47,16 +48,23 @@ pub mod world_replay;
 
 pub use authorization_cache::AuthorizationCacheKeyV1;
 pub use composition::{
-    AdmittedCompositionV1, AdmittedManifestPolicySourceV1, DomainImplementationKindV1,
-    ManifestRegistrationErrorV1, ManifestSlotErrorV1, ManifestSlotV1, PluginAvailabilityV1,
-    PluginComposition, PluginCompositionErrorV1, PluginExecutionModeV1, PluginIsolationV1,
-    PluginPinFieldV1, PluginPinV1, PluginRegistrationV1, RegisteredEventSchema, RegisteredPlugin,
-    RequiredPluginCompositionV1, RequiredPluginV1, ResolvedPluginCompositionV1, ResolvedPluginV1,
-    MAX_MANIFEST_SLOT_BYTES_V1, MAX_REQUIRED_PLUGINS_V1,
+    community_pin_v1, AdmittedCompositionV1, AdmittedManifestPolicySourceV1,
+    DomainImplementationKindV1, ManifestRegistrationErrorV1, ManifestSlotErrorV1, ManifestSlotV1,
+    PluginAvailabilityV1, PluginComposition, PluginCompositionErrorV1, PluginExecutionModeV1,
+    PluginIsolationV1, PluginPinFieldV1, PluginPinV1, PluginRegistrationV1, RegisteredEventSchema,
+    RegisteredPlugin, RequiredPluginCompositionV1, RequiredPluginV1, ResolvedPluginCompositionV1,
+    ResolvedPluginV1, MAX_MANIFEST_SLOT_BYTES_V1, MAX_REQUIRED_PLUGINS_V1,
+};
+pub use composition_fallback::{
+    FallbackCandidateFactsV1, FallbackDeclarationV1, FallbackDeclareErrorV1,
+    FallbackDriverSettingsV1, FallbackDriverShellV1, FallbackEntryFactsV1,
+    FallbackExecutionFactsV1, FallbackHostFactsV1, FallbackHostGrantsV1, FallbackRegistryFactsV1,
+    FallbackTriggerCauseV1, FallbackValidationFieldV1, InvalidFallbackPolicyV1,
 };
 pub use driver::{
-    CommittedForkHandoff, Driver, DriverRecoveryEvidence, ObservationView, ProjectionKey,
-    RecoveryEvent, RecoveryEventHeader, SnapshotAnchor, StepOutput, TimelineHistorySegment,
+    CommittedForkHandoff, DeclaredOutputV1, DirectInputRefV1, Driver, DriverRecoveryEvidence,
+    ObservationView, ProjectionKey, RecoveryEvent, RecoveryEventHeader, SnapshotAnchor, StepOutput,
+    TimelineHistorySegment,
 };
 pub use erasure_host::{
     ClosedErasureCoordinatorAuthorityV1, ErasureCommandSenderV1, ErasureCoordinatorAuthorityV1,
@@ -81,14 +89,14 @@ pub use registry::is_reviewed_staged_factory;
 pub use registry::{
     fold_detached_candidate_v1, recover_local_cut_owner_retry_v1,
     recover_manifest_owner_admission_retry_v1, AuthorizedDriverViewV1, AuthorizedViewAuthorityV1,
-    ClosedAdapterTranscriptV1, HostCatalogueEntryV1, HostProjectionProviderV1,
-    HumanActionAdmissionErrorV1, HumanActionAdmissionV1, HumanActionReceiptV1,
-    InstalledPluginFactoryV1, InstalledPluginProductV1, LocalAdapterErrorV1,
+    ClosedAdapterTranscriptV1, FallbackSwapRefusalV1, HostCatalogueEntryV1,
+    HostProjectionProviderV1, HumanActionAdmissionErrorV1, HumanActionAdmissionV1,
+    HumanActionReceiptV1, InstalledPluginFactoryV1, InstalledPluginProductV1, LocalAdapterErrorV1,
     LocalAdapterIdempotencyKeyV1, LocalAdapterProviderResponseV1, LocalAdapterProviderV1,
     LocalAdapterSessionV1, ManifestRosterBuildErrorV1, NoActionApproverV1, OperationContext,
-    PluginRegistry, ScheduledDriverBindingV1, ScheduledPassAdmissionV1, ScheduledProfileErrorV1,
-    StagedGrowthBoundV1, StagedReducerAdmissionErrorV1, StagedReducerAdmissionV1,
-    EMPTY_CONFIGURATION_DETAILS_V1, MAX_STAGED_CALLBACK_BOUND_V1,
+    PluginRegistry, PreparedRegistrationV1, ScheduledDriverBindingV1, ScheduledPassAdmissionV1,
+    ScheduledProfileErrorV1, StagedGrowthBoundV1, StagedReducerAdmissionErrorV1,
+    StagedReducerAdmissionV1, EMPTY_CONFIGURATION_DETAILS_V1, MAX_STAGED_CALLBACK_BOUND_V1,
 };
 pub use reviewed_policy::{
     canonical_plugin_configuration_v1, execution_profile_artifact_hash_v1, host_artifact_hash_v1,
@@ -102,8 +110,10 @@ pub use scheduled_admission_host::LocalScheduledAdmissionHostV1;
 pub use scheduled_admission_host::{ScheduledAdmissionPortsV1, ScheduledAdmissionStoreV1};
 pub use scheduler::TickScheduler;
 pub use schema::SchemaRegistry;
+#[cfg(feature = "test-support")]
+pub use staged_executor::ScriptedGuardWaitV1;
 pub use staged_executor::{
-    check_handoff_reserve, require_staged_release, teardown_signal, ExecutorHealthV1,
+    check_handoff_reserve, require_staged_release, teardown_signal, ExecutorHealthV1, GuardWaitV1,
     GuardedFoldWindowV1, StagedFoldErrorV1, StagedFoldExecutorV1, StagedFoldPlanV1,
     GUARD_RELEASE_LATE_SIGNAL, MAX_STAGED_INPUT_BYTES_V1, MEASURED_PREPARE_BOUND_V1,
     MEASURED_TEARDOWN_BOUND_V1, STAGED_ACCOUNTING_PASS_BOUND_V1, STAGED_FOLD_DEADLINE_V1,
@@ -112,7 +122,9 @@ pub use staged_executor::{
 pub use trusted_clock::handoff;
 pub use world_profile::HostWorldProfileV1;
 pub use world_replay::{
-    VerifiedWorldReplayV1, WorldReplayUseV1, WorldReplayVerificationErrorV1, WorldReplayVerifierV1,
+    PreparedWorldReplayReadV1, VerifiedWorldReplayV1, WorldReplayForkSourceV1,
+    WorldReplayReadIntentV1, WorldReplayUseV1, WorldReplayVerificationErrorV1,
+    WorldReplayVerifierV1,
 };
 
 // Length-framed hashing shared by the output-admission and staged-catalogue identities: each field

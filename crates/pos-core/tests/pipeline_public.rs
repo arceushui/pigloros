@@ -1,9 +1,12 @@
+use pos_core::output_policy::OutputAuthorityV1;
 use pos_core::{
-    AppendDedupKey, AppendDedupScope, AppendIdentity, CanonicalBytes, CorrelationId, EntityId,
-    Event, EventDraft, EventId, Hash, Kind, PipelineAdmissionBasisDraftV1,
-    PipelineAdmissionBasisV1, PipelineAttemptDraftV1, PipelineAttemptIdV1, PipelineAttemptV1,
-    PipelineCommitReceiptV1, PipelineContractErrorV1, PipelineDraftBatchV1, PipelineEvidenceRefV1,
-    PipelineIngressV1, PipelineObservationAnchorV1, PipelineOutcomeV1, PipelinePreconditionV1,
+    assemble_factual_tick, AppendDedupKey, AppendDedupScope, AppendIdentity, CanonicalBytes,
+    CorrelationId, EntityId, Event, EventDraft, EventId, FactualDriverStepV1, FactualOutputV1,
+    FactualOwnerIdV1, FactualScheduledTickV1, FactualTickContextV1, FactualTickDependenciesV1,
+    FactualTickShapeV1, Hash, Kind, PipelineAdmissionBasisDraftV1, PipelineAdmissionBasisV1,
+    PipelineAttemptDraftV1, PipelineAttemptIdV1, PipelineAttemptV1, PipelineCommitReceiptV1,
+    PipelineContractErrorV1, PipelineDraftBatchV1, PipelineEvidenceRefV1, PipelineIngressV1,
+    PipelineObservationAnchorV1, PipelineOutcomeV1, PipelinePreconditionV1,
     PipelineSecurityRevisionsDraftV1, PipelineSecurityRevisionsV1, SchemaVersion, Seq,
     TentativePipelineResultV1, TimelineId, WallTime, MAX_PIPELINE_DRAFTS_PER_BATCH,
     MAX_PIPELINE_DRAFT_BATCH_BYTES, PIPELINE_CONTRACT_VERSION_V1,
@@ -74,11 +77,63 @@ fn draft(payload: &'static [u8]) -> EventDraft {
     draft
 }
 
+fn scheduled_tick(drafts: &[EventDraft]) -> FactualScheduledTickV1 {
+    let outputs = drafts
+        .iter()
+        .map(|draft| FactualOutputV1 {
+            draft: draft.clone(),
+            authority: OutputAuthorityV1::Authoritative,
+            direct_inputs: Vec::new(),
+        })
+        .collect();
+    let driver = FactualDriverStepV1 {
+        owner: FactualOwnerIdV1::new("plugin:test".to_owned()),
+        policy_identity: hash(8),
+        step_inputs: Vec::new(),
+        outputs,
+    };
+    FactualScheduledTickV1 {
+        snapshot_digest: hash(2),
+        prefix_contents: Vec::new(),
+        history_contents: Vec::new(),
+        ingress_events: Vec::new(),
+        drivers: vec![driver],
+        fold: None,
+    }
+}
+
+/// The factual Tick declaration of a hand-built basis: a real record that
+/// `assemble_factual_tick` builds for the Tick the caller names.
+fn tick_dependencies(
+    ingress: PipelineIngressV1,
+    tick: u64,
+    evidence: Hash,
+    drafts: &[EventDraft],
+) -> FactualTickDependenciesV1 {
+    let context = FactualTickContextV1 {
+        timeline_id: timeline(1),
+        tick,
+        attempt_id: ok(PipelineAttemptIdV1::try_new([1; 16])),
+        evidence_digest: evidence,
+        authority_grant: hash(5),
+    };
+    let shape = match ingress {
+        PipelineIngressV1::HumanProposedAction => FactualTickShapeV1::Human(drafts.to_vec()),
+        PipelineIngressV1::ScheduledAiDriver => {
+            FactualTickShapeV1::Scheduled(scheduled_tick(drafts))
+        }
+    };
+    ok(assemble_factual_tick(&context, &shape))
+}
+
 fn basis(
     ingress: PipelineIngressV1,
     tentative_result: TentativePipelineResultV1,
+    tick: u64,
     drafts: Vec<EventDraft>,
 ) -> PipelineAdmissionBasisV1 {
+    let evidence = tentative_result.evidence().digest();
+    let dependencies = tick_dependencies(ingress, tick, evidence, &drafts);
     ok(PipelineAdmissionBasisV1::try_from_draft(
         PipelineAdmissionBasisDraftV1 {
             contract_version: PIPELINE_CONTRACT_VERSION_V1,
@@ -89,6 +144,7 @@ fn basis(
             ))),
             security_revisions: Some(revisions()),
             batch: Some(ok(PipelineDraftBatchV1::try_new(drafts))),
+            dependencies,
         },
     ))
 }
@@ -117,12 +173,14 @@ fn human_and_ai_results_share_a_basis_without_erasing_ingress() {
     let human = basis(
         PipelineIngressV1::HumanProposedAction,
         TentativePipelineResultV1::HumanDomainApproval(human_evidence),
+        1,
         vec![draft(b"human")],
     );
     let ai_evidence = ok(PipelineEvidenceRefV1::try_new(hash(21)));
     let ai = basis(
         PipelineIngressV1::ScheduledAiDriver,
         TentativePipelineResultV1::AiProviderValidation(ai_evidence),
+        1,
         vec![draft(b"ai")],
     );
 
@@ -227,6 +285,12 @@ fn admission_basis_rejects_incomplete_unknown_and_cross_path_evidence() {
         )))),
         security_revisions: Some(revisions()),
         batch: Some(ok(PipelineDraftBatchV1::try_new(vec![draft(b"x")]))),
+        dependencies: tick_dependencies(
+            PipelineIngressV1::HumanProposedAction,
+            1,
+            hash(20),
+            &[draft(b"x")],
+        ),
     };
     assert_eq!(
         PipelineAdmissionBasisV1::try_from_draft(value.clone()),
@@ -295,6 +359,7 @@ fn receipt_requires_exact_committed_content_and_contiguous_store_order() {
         TentativePipelineResultV1::HumanDomainApproval(ok(PipelineEvidenceRefV1::try_new(hash(
             20,
         )))),
+        1,
         drafts.clone(),
     );
     let events = vec![committed(&drafts[0], 40, 9), committed(&drafts[1], 41, 10)];
@@ -345,6 +410,7 @@ fn retained_receipt_rebuilds_the_original_receipt_without_the_basis() {
         TentativePipelineResultV1::HumanDomainApproval(ok(PipelineEvidenceRefV1::try_new(hash(
             20,
         )))),
+        1,
         drafts.clone(),
     );
     let events = vec![committed(&drafts[0], 40, 9), committed(&drafts[1], 41, 10)];
@@ -460,6 +526,7 @@ fn receipt_rejects_timeline_count_identity_and_zero_order() {
         TentativePipelineResultV1::AiProviderValidation(ok(PipelineEvidenceRefV1::try_new(hash(
             20,
         )))),
+        1,
         vec![source.clone()],
     );
     let committed_event = committed(&source, 39, 8);
@@ -501,6 +568,7 @@ fn receipt_rejects_timeline_count_identity_and_zero_order() {
         TentativePipelineResultV1::AiProviderValidation(ok(PipelineEvidenceRefV1::try_new(hash(
             21,
         )))),
+        1,
         vec![source.clone(), second_source.clone()],
     );
     let leading_zero = [committed(&source, 41, 0), committed(&second_source, 42, 1)];
@@ -541,6 +609,7 @@ fn draft_digest_binds_optional_ids_schema_and_explicit_wall_time() {
         TentativePipelineResultV1::HumanDomainApproval(ok(PipelineEvidenceRefV1::try_new(hash(
             22,
         )))),
+        1,
         vec![with_wall_time.clone()],
     );
     let matching = Event {
@@ -569,8 +638,11 @@ fn basis_with(
     ingress: PipelineIngressV1,
     tentative_result: TentativePipelineResultV1,
     precondition: PipelinePreconditionV1,
+    tick: u64,
     drafts: Vec<EventDraft>,
 ) -> PipelineAdmissionBasisV1 {
+    let evidence = tentative_result.evidence().digest();
+    let dependencies = tick_dependencies(ingress, tick, evidence, &drafts);
     ok(PipelineAdmissionBasisV1::try_from_draft(
         PipelineAdmissionBasisDraftV1 {
             contract_version: PIPELINE_CONTRACT_VERSION_V1,
@@ -579,36 +651,41 @@ fn basis_with(
             precondition: Some(precondition),
             security_revisions: Some(revisions()),
             batch: Some(ok(PipelineDraftBatchV1::try_new(drafts))),
+            dependencies,
         },
     ))
 }
 
 #[test]
-fn basis_digest_binds_ingress_precondition_evidence_and_batch() {
+fn basis_digest_binds_ingress_precondition_evidence_batch_and_dependencies() {
     let evidence = ok(PipelineEvidenceRefV1::try_new(hash(20)));
     let head = PipelinePreconditionV1::ExpectedLogicalHead(Seq::from_u64(8));
     let human = basis_with(
         PipelineIngressV1::HumanProposedAction,
         TentativePipelineResultV1::HumanDomainApproval(evidence),
         head,
+        1,
         vec![draft(b"same")],
     );
     let ai = basis_with(
         PipelineIngressV1::ScheduledAiDriver,
         TentativePipelineResultV1::AiProviderValidation(evidence),
         head,
+        1,
         vec![draft(b"same")],
     );
     let domain = basis_with(
         PipelineIngressV1::HumanProposedAction,
         TentativePipelineResultV1::HumanDomainApproval(evidence),
         ok(PipelinePreconditionV1::try_domain_state_revision(hash(40))),
+        1,
         vec![draft(b"same")],
     );
     let other_batch = basis_with(
         PipelineIngressV1::HumanProposedAction,
         TentativePipelineResultV1::HumanDomainApproval(evidence),
         head,
+        1,
         vec![draft(b"other")],
     );
     let other_evidence = basis_with(
@@ -617,6 +694,15 @@ fn basis_digest_binds_ingress_precondition_evidence_and_batch() {
             21,
         )))),
         head,
+        1,
+        vec![draft(b"same")],
+    );
+
+    let other_tick = basis_with(
+        PipelineIngressV1::HumanProposedAction,
+        TentativePipelineResultV1::HumanDomainApproval(evidence),
+        head,
+        2,
         vec![draft(b"same")],
     );
 
@@ -624,10 +710,13 @@ fn basis_digest_binds_ingress_precondition_evidence_and_batch() {
         PipelineIngressV1::HumanProposedAction,
         TentativePipelineResultV1::HumanDomainApproval(evidence),
         head,
+        1,
         vec![draft(b"same")],
     );
     assert_eq!(human.digest(), same.digest());
-    for different in [&ai, &domain, &other_batch, &other_evidence] {
+    // Only the declared Tick differs: the record, and with it the basis, does.
+    assert_ne!(human.dependencies(), other_tick.dependencies());
+    for different in [&ai, &domain, &other_batch, &other_evidence, &other_tick] {
         assert_ne!(human.digest(), different.digest());
     }
     assert_ne!(human.digest(), Hash::zero());

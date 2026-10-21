@@ -144,11 +144,11 @@ no more than eight heavy runners at once.
 ```mermaid
 flowchart TD
     S["ci_change_scope"] --> P["Fast preflight"]
-    P --> C["Core: four parallel jobs"]
+    P --> C["Core: at most eight runners"]
     C --> R["cargo-crap"]
     R --> N["Normal checks: at most eight runners"]
-    N --> M["Mutation: at most eight shards"]
-    M --> A["ASan: five shards"]
+    N --> M["Mutation: sixteen shards, at most eight runners"]
+    M --> A["ASan: six shards"]
     A --> G["ci-gate"]
     P -. "failure" .-> X["Stop downstream work"]
     C -. "failure" .-> X
@@ -180,16 +180,21 @@ check.
 
 ### Stage 2: core quality gates
 
-After preflight, the four core jobs start together:
+After preflight, the core jobs start together:
 
 ```mermaid
 flowchart TD
     P["preflight-gate"] --> F["fmt"]
-    P --> T["full workspace test"]
+    P --> T["test: doctests"]
+    P --> M["feature-matrix"]
+    P --> S["test-shard x3: nextest partitions"]
     P --> C["clippy"]
     P --> V["one coverage execution"]
+    S --> A["test-shards: every test ran once"]
     F --> G["core-gate"]
     T --> G
+    M --> G
+    A --> G
     C --> G
     V --> G
 ```
@@ -197,22 +202,32 @@ flowchart TD
 The core checks and their immediate cargo-crap consumer mean:
 
 1. `fmt` runs `cargo fmt --all -- --check`.
-2. `test` checks the workspace with default features disabled and all
-   features enabled, then runs all tests with `--include-ignored`. The test
-   gate is workspace-wide; Cargo has no built-in changed-test selector.
-3. `clippy` runs all targets with warnings denied and the repository's
-   pedantic policy.
-4. `coverage` performs one complete `cargo llvm-cov` run. `covgate` checks
-   changed production Rust code first from that report, then the same report
-   is checked against the full workspace 99% line and 99% region floor. The
-   resulting LCOV is uploaded for the next gate.
-5. `cargo-crap` consumes that LCOV and a trusted baseline. Existing function
+2. `test` runs workspace doctests with all features, the locked dependency graph,
+   and `--include-ignored`. The `test-shard` matrix runs every other test with
+   cargo-nextest `--run-ignored all`, split
+   across three runners by `--partition slice:k/3`. `test-shards` then proves
+   from the shard summaries that every test ran exactly once and none was
+   skipped. The test gate is workspace-wide; Cargo has no built-in
+   changed-test selector. The crypto dependencies that dominate test CPU time
+   build at `opt-level = 3` in the dev and test profiles (see `Cargo.toml`);
+   workspace crates stay unoptimized.
+3. `feature-matrix` checks all workspace targets both without default features
+   and with all features, runs the no-default-feature Plugin trust registry
+   Memory vectors, and proves reference evaluator independence and the
+   conformance adapter dependency graph.
+4. `clippy` runs all targets with all features and warnings denied and the
+   repository's pedantic policy. It is the all-features type check.
+5. `coverage` performs one complete `cargo llvm-cov nextest` run. `covgate`
+   checks changed production Rust code first from that report, then the same
+   report is checked against the full workspace 99% line and 99% region
+   floor. The resulting LCOV is uploaded for the next gate.
+6. `cargo-crap` consumes that LCOV and a trusted baseline. Existing function
    scores may not regress, and new functions must score at most 30.
 
 There is no custom changed-test mapper. Cargo and nextest do not provide a
-reliable affected-test mapping for this workspace, so the complete test suite
-runs once. Coverage still checks changed production code first without a
-second instrumented execution:
+reliable affected-test mapping for this workspace, so the core nextest shards
+partition the complete suite. Coverage still checks changed production code
+first without a second instrumented execution:
 
 ```mermaid
 flowchart LR
@@ -228,6 +243,9 @@ flowchart LR
 normal checks. Audit, deny, and shear share one runner; browser parity replaces
 the completed WASM packaging job rather than adding another concurrent runner.
 CodeQL is called from this stage instead of starting independently on every PR.
+Documentation-only pull requests have no `cargo-crap` run, so CodeQL starts
+right after the scope job there; it is never skipped, because the `main`
+ruleset's code-scanning rule needs an analysis for every PR head.
 
 ```mermaid
 flowchart TD
@@ -235,19 +253,19 @@ flowchart TD
     CR --> E["reference evaluator"]
     CR --> B["conformance bundles"]
     CR --> P["audit → deny → shear"]
-    CR --> U["cargo-geiger"]
     CR --> X["Docker"]
     CR --> W["WASM package"]
-    CR --> Q["CodeQL"]
+    CR --> Q["CodeQL (docs-only PRs start it after the scope job)"]
+    CR --> AB["ASan archive build"]
     W --> BP["browser parity"]
     D --> G["standard-gate"]
     E --> G
     B --> G
     P --> G
-    U --> G
     X --> G
     Q --> G
     BP --> G
+    AB --> G
 ```
 
 `modules-structure` and `depgraph` are reporting-only jobs. They run after a
@@ -256,36 +274,67 @@ successful normal stage on `main`, not on pull requests.
 ### Stages 4 and 5: mutation, then ASan
 
 Mutation and ASan cannot begin until every cheaper blocking gate passes.
-Mutation is changed-line scoped and uses at most eight shards. It skips its own
-workspace baseline because the identical stable full-workspace test command has
-already passed in the core stage.
+Mutation is changed-line scoped and uses sixteen shards on at most eight
+concurrent runners. Each runner uses one mutation worker with one compiler job
+and four libtest harness threads. These four configured harness
+slots are not a hard CPU or process limit. The smaller shards retain the full
+selection and the existing 60-minute watchdog, 120-second Test limit and
+600-second Build limit; they do not omit slow tests or extend their deadlines.
+A separate `mutation-baseline` first runs the full unmutated workspace with all features,
+the locked dependency graph, and the same pinned nightly and libtest arguments
+as the shards. Stable core tests cannot prove the nightly-only harness. Only
+after that same-run baseline succeeds may shards use `--baseline skip`; the
+aggregate requires both the baseline and every shard.
 
 ```mermaid
 flowchart TD
     G["standard-gate"] --> R{"Mutation-relevant PR?"}
     R -->|"no"| S["Successful skip"]
-    R -->|"yes"| M["Eight changed-line shards"]
+    R -->|"yes"| B["Full same-nightly mutation baseline"]
+    B --> M["Sixteen changed-line shards, at most eight runners"]
+    B --> MG["diff mutation testing"]
     M --> MG["diff mutation testing"]
     S --> A["ASan"]
     MG --> A
 ```
 
-ASan remains final. The previously dominant `bundle_contract_public` target is
-split through nextest's native `slice:1/2` partitioning; the other test groups
-remain unchanged.
+ASan tests remain final. Their instrumented build runs on one of the eight
+normal-stage runners: `asan-build` compiles every workspace test target once
+with `cargo nextest archive` and uploads the archive, and `standard-gate` and
+`asan-gate` both require it. It compiles crates four at a time while
+`scripts/asan/serial-link.sh` admits one link at a time. Each shard downloads
+the archive and runs its tests without compiling. The archive is extracted
+into the workspace, so `target/` sits at the path compiled into
+`CARGO_BIN_EXE_*`.
+
+The previously dominant `bundle_contract_public` target is split through
+nextest's native `slice:1/2` partitioning. The non-conformance workspace
+remainder uses the same disjoint slices, while `remainder-1` retains the
+conformance library, binaries, and profile/provider targets. Shards select
+their tests with nextest filtersets. The selected packages, features, test
+targets, ignored-test handling, and sanitizer scope are unchanged.
+
+Execution isolation is stricter. `bundle-coverage`, `moat-proof`, and the
+conformance library, binary, profile, and provider tests previously ran under
+libtest, many tests per process. They now run one process per test under
+nextest, so LeakSanitizer checks each test on its own exit.
 
 ```mermaid
 flowchart LR
-    M["Mutation passed or skipped"] --> P1["bundle-public 1/2"]
-    M --> P2["bundle-public 2/2"]
-    M --> C["bundle coverage"]
-    M --> O["moat proof"]
-    M --> R["remainder"]
+    M["Mutation passed or skipped"] --> J{"Both succeeded"}
+    B["asan-build archive"] --> J
+    J --> P1["bundle-public 1/2"]
+    J --> P2["bundle-public 2/2"]
+    J --> C["bundle coverage"]
+    J --> O["moat proof"]
+    J --> R1["remainder-1"]
+    J --> R2["remainder-2"]
     P1 --> G["asan-gate"]
     P2 --> G
     C --> G
     O --> G
-    R --> G
+    R1 --> G
+    R2 --> G
 ```
 
 All features, ignored tests, sanitizer instrumentation, leak detection, and the

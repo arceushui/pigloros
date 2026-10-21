@@ -49,13 +49,48 @@ extern crate self as pos_store;
 #[path = "../tests/support/fae1_fixture.rs"]
 pub mod fae1_fixture;
 
+// Test-only. The ADR-099 revision 12 classified counterfactual fixture serves
+// the public Memory and `SQLite` tests and the adapter unit tests; its items
+// are `pub` for the same reason as the `FAE1` fixture above.
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[path = "../tests/support/classified_fork_fixture.rs"]
+pub mod classified_fork_fixture;
+
+// Test-only. The shared Plugin trust registry fixtures under `tests/support` serve the public
+// vectors and the Memory adapter's fault-injection tests; the items are `pub` for the same
+// reason as the `FAE1` fixture above.
+#[cfg(all(test, target_os = "linux"))]
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[path = "../tests/support/plugin_trust_registry_fixtures.rs"]
+pub mod plugin_trust_registry_fixtures;
+
+pub mod composition_fallback_registry;
+
+// Test-only. The shared composition fallback registry fixtures under `tests/support` serve the
+// public vectors and the `SQLite` adapter's fault-injection tests; the items are `pub` for the
+// same reason as the `FAE1` fixture above.
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[path = "../tests/support/composition_fallback_fixtures.rs"]
+pub mod composition_fallback_fixtures;
+
+// Public module reachability keeps the crate-only items of the two factual Tick modules
+// compatible with both `unreachable_pub` and Clippy's `redundant_pub_crate` lint.
+#[doc(hidden)]
+pub mod factual_declaration;
+#[doc(hidden)]
+pub mod factual_tick_plan;
 pub mod fork_admission_authority;
 pub mod fork_attribution_authority_import;
 pub mod fork_attribution_issuer_policy;
 pub mod fork_delivery_journal;
 pub mod fork_event_authority;
 pub mod fork_manifest_publication;
+pub mod fork_replay;
 pub mod memory;
+#[cfg(target_os = "linux")]
+pub mod plugin_trust_registry;
 pub mod stitch;
 mod timeline_range;
 pub mod trusted_clock;
@@ -81,13 +116,20 @@ pub use fork_delivery_journal::{
     ForkDeliveryStateV1, ForkDeliveryTupleV1,
 };
 pub use fork_event_authority::{
-    ForkAppendSourcePermitV1, ForkClassifiedAppendReceiptV1, ForkClassifierRegistrarPermitV1,
+    ClassifiedCounterfactualErrorV1, ClassifiedCounterfactualStorePortV1,
+    ClassifiedProvenanceErrorV1, ClassifiedTickAuthorityV1, ForkAppendSourcePermitV1,
+    ForkClassifiedAppendReceiptV1, ForkClassifierRegistrarPermitV1,
     ForkClassifierRegistrationReceiptV1, ForkEventAuthorityErrorV1, ForkEventPermitIssuerPortV1,
     ForkEventPermitIssuerV1, ForkEventProvenanceAuthorityPortV1,
 };
 pub use fork_manifest_publication::{
     CommittedForkManifestV1, ForkManifestPublicationErrorV1, ForkManifestPublicationPortV1,
     ForkManifestPublicationRequestV1, HeldRegistryAuthorizationV1,
+};
+pub use fork_replay::{
+    ForkReplayAuthorityEvidenceV1, ForkReplayAuthorityReadErrorV1, ForkReplayAuthorityReadPortV1,
+    ForkReplayLineageNodeV1, ForkReplayLineageReadErrorV1, ForkReplayReadBudgetV1,
+    ForkReplayReadLimitsV1, ForkReplayRequirementV1,
 };
 pub use timeline_range::{
     verify_signed_timeline_range_v1, TimelineSignedRangeClaimV1, TimelineSignedRangeReportV1,

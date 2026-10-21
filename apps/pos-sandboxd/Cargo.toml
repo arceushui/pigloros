@@ -11,21 +11,35 @@ futures-util = { version = "0.3", default-features = false }
 pos-reference = { path = "../../crates/pos-reference" }
 rustix = { version = "1.1.4", default-features = false, features = [
   "fs",
+  "mount",
+  "net",
   "std",
   "time",
 ] }
+serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
+tokio = { version = "1", default-features = false, features = ["net", "time"] }
 zbus = { version = "=5.19.0", default-features = false, features = ["tokio"] }
 zbus_systemd = { version = "=0.26200.0", default-features = false, features = [
   "systemd1",
   "zbus-async-tokio",
 ] }
+# ADR-087 MountImage transport. The facade needs its `tokio` runtime feature
+# for descriptor support; production code supplies its own atomic
+# close-on-exec socket instead of zlink's Tokio Unix stream.
+zlink = { version = "=0.7.1", default-features = false, features = [
+  "tokio",
+  "tracing",
+] }
 zvariant = "=5.15.0"
 
 [dev-dependencies]
 pos-conformance = { path = "../../crates/pos-conformance" }
-serde = { workspace = true }
-serde_json = { workspace = true }
+# Staging fixture for the privileged held-image activation test only.
+pos-reference = { path = "../../crates/pos-reference", features = [
+  "test-support",
+] }
 tempfile = { workspace = true }
 tokio = { workspace = true }
 zlink = { version = "=0.7.1", default-features = false, features = [

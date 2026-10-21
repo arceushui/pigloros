@@ -30,8 +30,29 @@ TEST_ONLY_EXCLUSIONS = (
     "src/selector/installation/tests/**",
     "src/erasure_tests.rs",
     "src/system_bus/tests.rs",
+    "src/image_activator/tests.rs",
+    "src/root_attachment/tests.rs",
+    "src/selector/installation/fixture.rs",
+    "src/provider_admission/test_support.rs",
     "src/e2e_determinism.rs",
     "src/action_admission_tests.rs",
+    "src/fork_event_authority/tests/local_replay.rs",
+    "src/sqlite/tests/protected_interval_cleanup.rs",
+    "src/sqlite/fork_replay/interval_tests.rs",
+    "src/imported_fork_replay_tests.rs",
+    "src/imported_fork_replay_tests/lifecycle.rs",
+    "src/imported_fork_replay_tests/lifecycle/begin.rs",
+    "src/imported_fork_replay_tests/cumulative_budget.rs",
+    "src/imported_fork_replay_tests/cumulative_budget/compare.rs",
+    "src/imported_fork_replay_tests/cumulative_budget/read_bounds.rs",
+    "src/imported_fork_replay_tests/cumulative_budget/sqlite.rs",
+    "src/imported_fork_replay_tests/cumulative_budget/sqlite/compare.rs",
+    "src/imported_fork_replay_tests/runtime_budget.rs",
+    "src/imported_fork_replay_tests/runtime_budget/deadline.rs",
+    "src/imported_fork_replay_tests/runtime_budget/repeat.rs",
+    "src/nested_imported_fork_replay_tests.rs",
+    "src/nested_imported_fork_replay_tests/intermediate_privacy.rs",
+    "src/ordinary_fork_lineage_tests.rs",
 )
 EXCLUSION_ARGS = "".join(f"--exclude '{path}' " for path in TEST_ONLY_EXCLUSIONS)
 GENERATE_BASELINE_COMMAND = (
@@ -62,11 +83,10 @@ STAGED_MAIN_JOBS = {
         "cargo-crap",
     ],
     "audit": ["ci_change_scope", "cargo-crap"],
-    "geiger": ["ci_change_scope", "cargo-crap"],
-    "codeql": ["ci_change_scope", "cargo-crap"],
     "docker-build": ["ci_change_scope", "cargo-crap"],
     "world-client-wasm": ["ci_change_scope", "cargo-crap"],
     "world-client-browser-parity": ["ci_change_scope", "world-client-wasm"],
+    "asan-build": ["ci_change_scope", "cargo-crap"],
 }
 
 
@@ -106,6 +126,37 @@ def check_staged_main_job(jobs: dict, name: str, needs: list[str]) -> None:
         "needs.ci_change_scope.outputs.rust == 'true' || "
         "github.event_name != 'pull_request'" in condition,
         f"{name} must retain Rust-scope filtering",
+    )
+
+
+# Deliberate tripwire: this mirrors the `codeql` job `if` in ci.yml, so an
+# edit to that condition must be made in both places.
+CODEQL_CONDITION = (
+    "${{ !cancelled() && needs.ci_change_scope.result == 'success' && "
+    "(needs.cargo-crap.result == 'success' || "
+    "(needs.ci_change_scope.outputs.rust == 'false' && "
+    "needs.cargo-crap.result == 'skipped')) }}"
+)
+
+
+def check_codeql_job(jobs: dict) -> None:
+    """CodeQL waits for cargo-crap but must still run for docs-only PRs.
+
+    The main ruleset's code_scanning rule needs an uploaded analysis for every
+    pull-request head, so a Rust-scope skip would make documentation-only pull
+    requests unmergeable.
+    """
+    job = jobs.get("codeql")
+    require(isinstance(job, dict), "missing codeql job")
+    require(
+        job.get("needs") == ["ci_change_scope", "cargo-crap"],
+        "codeql direct dependencies changed",
+    )
+    condition = job.get("if")
+    require(isinstance(condition, str), "codeql must have a job condition")
+    require(
+        " ".join(condition.split()) == CODEQL_CONDITION,
+        "codeql must run for every pull request once cargo-crap succeeds or is skipped by a non-Rust scope",
     )
 
 
@@ -390,6 +441,7 @@ def check_workflow(
 
     for name, needs in STAGED_MAIN_JOBS.items():
         check_staged_main_job(jobs, name, needs)
+    check_codeql_job(jobs)
 
 
 def main() -> int:

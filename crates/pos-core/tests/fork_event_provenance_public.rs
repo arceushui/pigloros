@@ -200,6 +200,35 @@ fn eor1_and_fia1_round_trip_at_public_seam() -> Result<(), Box<dyn std::error::E
 }
 
 #[test]
+fn provenance_lengths_equal_the_native_public_encodings() -> Result<(), Box<dyn std::error::Error>>
+{
+    let origin = origin_record()?;
+    let intervention = intervention_record(&origin)?;
+    let (source, table, registration, _, operation) = durable_append_records()?;
+    for (length, encoded) in [
+        (source.canonical_cbor_len(), source.to_canonical_cbor()),
+        (table.canonical_cbor_len(), table.to_canonical_cbor()),
+        (
+            registration.canonical_cbor_len(),
+            registration.to_canonical_cbor(),
+        ),
+        (
+            operation.canonical_cbor_len(),
+            operation.to_canonical_cbor(),
+        ),
+        (origin.canonical_cbor_len(), origin.to_canonical_cbor()),
+        (
+            intervention.canonical_cbor_len(),
+            intervention.to_canonical_cbor(),
+        ),
+    ] {
+        assert!(encoded.len() > 1);
+        assert_eq!(length, Ok(encoded.len()));
+    }
+    Ok(())
+}
+
+#[test]
 fn classifier_is_total_for_internal_and_admitted_external_sources(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let classifier = classifier()?;

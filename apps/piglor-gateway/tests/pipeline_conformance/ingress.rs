@@ -71,6 +71,9 @@ fn human_admission(
     observed: u64,
     revisions: PipelineSecurityRevisionsV1,
 ) -> HumanActionAdmissionV1 {
+    let grant = LocalScheduledAdmissionHostV1::shared()
+        .test_ok()
+        .authority_grant();
     HumanActionAdmissionV1 {
         attempt_id: PipelineAttemptIdV1::try_new([key; 16]).test_ok(),
         idempotency: AppendIdentity::new(
@@ -85,6 +88,7 @@ fn human_admission(
         .test_ok(),
         authorization: PipelineEvidenceRefV1::try_new(Hash::from_bytes([5; 32])).test_ok(),
         security_revisions: revisions,
+        authority_grant: grant,
     }
 }
 
@@ -506,6 +510,9 @@ pub fn lost_acknowledgement_recovery() -> Capture {
             .observe(&registry, backend.as_mut(), timeline)
             .test_ok();
         let (head, _) = stage(&mut registry, backend.as_ref(), timeline, None).test_ok();
+        let grant = LocalScheduledAdmissionHostV1::shared()
+            .test_ok()
+            .authority_grant();
         let admission = ScheduledPassAdmissionV1 {
             attempt_id: PipelineAttemptIdV1::try_new([9; 16]).test_ok(),
             idempotency: AppendIdentity::new(
@@ -515,6 +522,7 @@ pub fn lost_acknowledgement_recovery() -> Capture {
             provider_validation: PipelineEvidenceRefV1::try_new(Hash::from_bytes([11; 32]))
                 .test_ok(),
             security_revisions: revisions,
+            authority_grant: grant,
             commit_head: head,
             commit_now_secs: 0,
         };

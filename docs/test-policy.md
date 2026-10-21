@@ -16,11 +16,29 @@ Shared reference for humans and agents.
 |---|---|---|
 | Attrs / doctests | Trunk `rust-test-policy` | `coverage(off)` test-only; bans ` ```ignore ` |
 | Git hook | Versioned repository pre-commit runs Trunk `rust-test-policy`, then regenerates/stages `Cargo.lock` for manifest changes | Run once per clone: `git config core.hooksPath .githooks` |
-| Runtime | `cargo test -- --include-ignored` | Ignored tests still execute |
-| Summary check | `scripts/assert-no-ignored-in-test-summary.sh` | Matches `test result:` line only (no log prose FP) |
-| Coverage | `cargo llvm-cov` with `--include-ignored` + `covgate` | At least 99% lines + 99% regions for the whole workspace and new/changed Rust code |
+| Runtime | CI: `cargo nextest run --run-ignored all` in three `--partition slice:k/3` shards plus `cargo test --doc -- --include-ignored`; locally `cargo test -- --include-ignored` | Ignored tests still execute |
+| Summary check | `scripts/assert-no-ignored-in-test-summary.sh` | Matches libtest `test result:` and nextest `Summary` lines only (no log prose FP); outside `--partitioned=N` mode fails on any ignored or skipped test or a missing summary; `--partitioned=N` instead proves the N shards ran every test exactly once (partitioning itself causes skips) |
+| Coverage | `cargo llvm-cov nextest` with `--run-ignored all` + `covgate` | At least 99% lines + 99% regions for the whole workspace and new/changed Rust code |
 | Change risk | `cargo-crap` over the hosted LCOV report | Existing function scores must not regress; new functions must score at most 30 for Rust-affecting changes |
 | Dependencies | **cargo-deny** | Crates/licenses/advisories/sources only |
+
+## Mutation baseline policy
+
+Before any diff-mutation shard starts, `mutation-baseline` must pass the full
+unmutated workspace with all features, the locked dependency graph, and the
+same pinned nightly and libtest arguments as the shards. The workflow sets
+`RUSTUP_TOOLCHAIN` explicitly: installing nightly alone does not override
+`rust-toolchain.toml`. A successful stable core test run cannot prove that
+nightly-only harness arguments work.
+
+Shards may use `--baseline skip` only behind that successful same-run baseline;
+the aggregate gate requires both it and every shard. This also applies to
+manual workflow dispatch. The separate baseline has the normal test job's
+30-minute limit; mutant limits remain 120 seconds for tests, 600 seconds for
+builds, and a 60-minute shard watchdog. `scripts/test_mutation_workflow_policy.py`
+locks this dependency and exercises failed, cancelled, missing and skipped
+results against the actual fan-in shell. Harness startup failures are not
+evidence that a mutation was caught.
 
 ## Coverage attribution policy
 
@@ -33,9 +51,15 @@ production code or avoid writing a reachable behavior test.
 The same coverage job runs `covgate` 0.2.0 against the exact pull-request base
 (or the previous commit on a push). Its checked-in configuration applies the
 same 99% line and 99% region thresholds to changed production Rust files under
-`**/src/**/*.rs`. `covgate` reads the detailed LLVM JSON report produced by the
-completed `cargo llvm-cov` run, so the diff gate and repository-wide gate use the
-same test execution and native coverage data. Install the local tool with:
+`**/src/**/*.rs`, except `crates/pos-owner-bridge-windows`, which is excluded from
+the root gate. That crate has its own thresholds (99% lines and regions for `src`
+outside `src/ffi`, 95% lines and 80% regions for `src/ffi`) in its crate-local
+`covgate.toml`, read by the Windows-only owner-bridge CI job (not yet landed), so
+the Linux coverage job intentionally does not evaluate them.
+
+`covgate` reads the detailed LLVM JSON report produced by the completed
+`cargo llvm-cov` run, so the diff gate and repository-wide gate use the same test
+execution and native coverage data. Install the local tool with:
 
 ```bash
 cargo install covgate --version 0.2.0 --locked
@@ -66,6 +90,16 @@ allowed, so production Rust remains in scope regardless of module placement.
 Repository
 `.cargo-crap.toml` files are prohibited so a change cannot suppress or truncate
 the report.
+
+The internal-test allowlist includes the `#[cfg(test)]` imported Fork Replay,
+cumulative-budget, public-consumer lifecycle (including native begin refusal),
+native Local replay, and protected-interval acquisition/cleanup companions.
+Keep these fixtures in their private module trees; moving a private
+unit module beneath `tests/**` does not turn it into a Cargo integration target.
+Each companion has an exact literal path in both baseline and analysis commands,
+mirrored by `scripts/check_cargo_crap_ci_policy.py` and its independent adversarial
+tests. Family wildcards, production neighbours, and score-tolerance changes
+remain rejected; all fixture cases still execute in the workspace test run.
 
 Each successful `main` workflow publishes a 90-day baseline artifact named for
 its exact commit. A pull request downloads the artifact for its base SHA, so
@@ -104,22 +138,40 @@ device creation itself is not portable on GitHub's hosted GPU-less runners.
 
 ## Resource-intensive sanitizer jobs
 
-The complete workspace ASan gate retains all features and test targets, but
-partitions their execution across four hosted shards because Cargo runs separate
-test executables serially. The `bundle-coverage` and `bundle-public` shards run
-the two `pos-conformance` bundle integration targets independently. The
-`moat-proof` shard runs the slow moat integration target independently, while
-`remainder` runs `--workspace --exclude pos-conformance --tests`, then the
-`pos-conformance` library, binaries, and the profile/provider integration
-targets. Each shard serializes Cargo build/link jobs and bounds test threads at
-two. The required
-`asan (address sanitizer)` aggregate runs with `always()` and succeeds only when
-every shard succeeds. Partitioning reduces wall-clock time by repeating setup
-and build work on independent runners; it does not remove a package, feature,
-test target, sanitizer, or coverage requirement. ASan plus
+The complete workspace ASan gate retains all features and test targets. The
+standard-stage `asan-build` job compiles every workspace test target once with
+`cargo nextest archive` and uploads the archive; six hosted shards download it
+and run tests without compiling. The `bundle-coverage` and `bundle-public`
+shards run the two `pos-conformance` bundle integration targets independently.
+The `moat-proof` shard runs the slow moat integration target independently.
+`remainder-1` and `remainder-2` use cargo-nextest's disjoint `slice:1/2` and
+`slice:2/2` partitions over `not package(pos-conformance)`; `remainder-1` also
+runs every other `pos-conformance` target by excluding only the three targets
+assigned to the dedicated bundle and moat shards. Newly added conformance
+targets therefore join the remainder automatically rather than requiring an
+allowlist update. Each shard bounds test threads at two through the explicit
+cargo-nextest `--test-threads 2` cap. The two long remainder shards are
+scheduled first under the five-runner cap, so both begin together while the
+short moat shard waits. The required `asan (address sanitizer)` aggregate runs
+with `always()` and succeeds only when the archive build and every shard
+succeed. Partitioning reduces wall-clock time; it does not remove a package,
+feature, test target, sanitizer, or coverage requirement. ASan plus
 `build-std` produces unusually large test-binary links; concurrent lld workers
 can exhaust the runner's available resources and crash with `SIGBUS` before any
-test executes.
+test executes. The archive build therefore compiles crates four at a time
+(`CARGO_BUILD_JOBS=4`) while `scripts/asan/serial-link.sh` holds one lock
+around every link, so at most one link runs at once. A hosted probe on the
+4-core, 16 GB ubuntu-24.04 runner measured 1937 s fully serialized versus 861 s
+with serialized links, peaking at 5.5 GB memory with about 54 GB disk free.
+
+The ASan nextest commands pin cargo-nextest 0.9.146, disable user
+configuration, and ignore any profile default filter. Repository
+`.config/nextest.toml` is deliberately forbidden by the executable ASan policy:
+it could otherwise add a filter or experimental execution wrapper outside the
+reviewed shard command. Adding nextest configuration requires an explicit
+policy-contract change and adversarial coverage first. Nextest also emits
+successful test output at the end of each partition without indentation, so
+the existing LSan report validator receives every printed suppression table.
 
 The job uses the dated `nightly-2026-07-01` toolchain rather than a floating
 nightly. The 2026-08-07 nightly (`rustc 1.99.0-nightly`) crashed its bundled
@@ -138,15 +190,15 @@ backtraces without full type and variable metadata. This changes artifact size
 only; sanitizer instrumentation, debug assertions, packages, features, test
 targets, and execution scope remain.
 
-`scripts/check-asan-ci-policy.sh` enforces the exact shard matrix, target
-partition, per-shard resource settings, fail-closed aggregate, and complete
-ASan scope by parsing the workflow's executable YAML semantics. Adversarial
-fixtures prove that disabled/non-failing steps, environment-based test runners,
-detached sanitizer flags, `--no-run`, shell success overrides, skipped
-prerequisites, injected setup steps, and test-skip arguments are rejected. The
-ASan job graph and pinned setup-step sequence must match exactly, and each test
-step may contain only `name`, `env`, and `run` so it cannot select a nested
-Cargo configuration.
+`scripts/check_asan_ci_policy.py` enforces the exact archive-build job and
+serial linker wrapper, shard matrix and filtersets, test-thread cap,
+fail-closed aggregate, and complete ASan scope by parsing the workflow's
+executable YAML semantics. Adversarial fixtures prove that disabled/non-failing
+steps, environment-based test runners, detached sanitizer flags, `--no-run`,
+shell success overrides, skipped prerequisites, injected setup steps, and
+test-skip arguments are rejected. The ASan job graph and pinned setup-step
+sequence must match exactly, and each test step may contain only `name`, `env`,
+and `run` so it cannot select a nested Cargo configuration.
 
 ### Controlled Bevy reflection metadata roots
 
@@ -162,7 +214,7 @@ counts are not cross-run invariants because LSan evaluates reachability and
 records matched suppressions separately in each test process.
 
 The complete workspace/all-features/all-test-target ASan scope and
-`detect_leaks=1` remain unchanged across the four shards. A separate 1,234-byte
+`detect_leaks=1` remain unchanged across the six shards. A separate 1,234-byte
 intentional leak runs under the same sanitizer, symbolizer, suppression file,
 and options; it must exit nonzero, report exactly one allocation, and match
 neither approved rule.

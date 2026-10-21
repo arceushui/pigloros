@@ -7,14 +7,14 @@ use pos_crypto::plugin_execution::{
 use pos_runtime::community_plugin_host::{
     negotiate_community_plugin_v1, ArtifactRefV1, CommunityPluginCeilingsV1,
     CommunityPluginExecutionProfileV1, CommunityPluginHostAbiV1, CommunityPluginModeV1,
-    NegotiatedCommunityPluginV1, PinnedComponentRuntimeV1, PluginInvocationV1, TimelinePositionV1,
-    MAX_OBSERVATION_BYTES_V1, MAX_STATE_BYTES_V1,
+    GatedCommunityReleaseV1, NegotiatedCommunityPluginV1, PinnedComponentRuntimeV1,
+    PluginInvocationV1, TimelinePositionV1, MAX_OBSERVATION_BYTES_V1, MAX_STATE_BYTES_V1,
 };
 use wasmtime::component::Val;
 
 use crate::engine::PinnedExecutionV1;
 use crate::lift::widen;
-use crate::runtime::pinned_runtime;
+use crate::runtime::derived_runtime;
 
 pub(crate) use crate::lower::{byte_list, record};
 
@@ -52,13 +52,14 @@ pub(crate) fn negotiate(
         CommunityPluginCeilingsV1::V1,
         runtime,
     );
-    ok(negotiate_community_plugin_v1(release, host, &profile))
+    let gated = GatedCommunityReleaseV1::for_test(release.clone(), Vec::new());
+    ok(negotiate_community_plugin_v1(&gated, host, &profile))
 }
 
 /// The `plugin-a` release under the V1 host and a profile that pins this
 /// engine's runtime.
 pub(crate) fn execution() -> PinnedExecutionV1 {
-    let runtime = ok(pinned_runtime());
+    let runtime = ok(derived_runtime());
     let negotiated = negotiate(
         &release(0, &[]),
         &CommunityPluginHostAbiV1::v1(),

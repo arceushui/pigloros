@@ -1,0 +1,8 @@
+# cargo-mutants already skips `#[cfg(test)]` code. These test-only fixture
+# modules are compiled outside `#[cfg(test)]` only so that the `test-support`
+# feature can expose them to other crates' privileged public-seam tests; they
+# get the same treatment. Never list production code here.
+exclude_globs = [
+  "crates/pos-reference/src/selector/installation/fixture.rs",
+  "crates/pos-reference/src/provider_admission/test_support.rs",
+]

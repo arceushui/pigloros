@@ -1,14 +1,23 @@
 #!/usr/bin/env python3
-"""Generate the portable closed-ES256 WebAuthn fixture for ADR-110.
+"""Generate the portable closed-ES256 WebAuthn fixtures for ADR-110.
 
 The generator is deliberately stdlib-only and does not invoke Rust.  It
-implements the small P-256/RFC-6979 signing subset needed to produce a public
-test fixture for the owner-bridge verifier.  The fixture private scalar is
+implements the small P-256/RFC-6979 signing subset needed to produce public
+test fixtures for the owner-bridge verifier.  The fixture private scalar is
 ``d = 1`` and is test data only; it is never a deployment credential.
+
+Two fixtures are produced:
+
+* ``fixtures/owner-bridge/webauthn-es256-v1.fixture``: one valid Create and
+  Get ceremony (``--print``).
+* ``fixtures/owner-bridge/webauthn-reasons-v1.fixture``: one independently
+  signed case per verifier fault, each naming the exact ``VerificationReason``
+  the Rust verifier must report (``--print-reasons``).
 
 Usage:
     python3 scripts/owner_bridge_webauthn_fixtures.py --check
-    python3 scripts/owner_bridge_webauthn_fixtures.py --print
+    python3 scripts/owner_bridge_webauthn_fixtures.py --print > webauthn-es256-v1.fixture
+    python3 scripts/owner_bridge_webauthn_fixtures.py --print-reasons > webauthn-reasons-v1.fixture
 """
 
 from __future__ import annotations
@@ -19,8 +28,11 @@ import hashlib
 import hmac
 from pathlib import Path
 
+from owner_bridge_vectors import cbor
+
 ROOT = Path(__file__).resolve().parent.parent
 FIXTURE_PATH = ROOT / "fixtures/owner-bridge/webauthn-es256-v1.fixture"
+REASONS_PATH = ROOT / "fixtures/owner-bridge/webauthn-reasons-v1.fixture"
 
 P = 0xFFFFFFFF00000001000000000000000000000000FFFFFFFFFFFFFFFFFFFFFFFF
 A = P - 3
@@ -192,6 +204,480 @@ def fixture_fields() -> dict[str, str]:
     }
 
 
+def cbor_map(pairs: list[tuple[object, object]]) -> bytes:
+    """Encode a definite map of at most 23 entries from the vector encoder."""
+    if len(pairs) > 23:
+        raise ValueError("fixture maps are limited to 23 entries")
+    body = b"".join(cbor(key) + cbor(value) for key, value in pairs)
+    return bytes((0xA0 | len(pairs),)) + body
+
+
+CHALLENGE_B64 = base64.urlsafe_b64encode(CHALLENGE).rstrip(b"=").decode("ascii")
+ORIGIN = "http://localhost:49291"
+GENERATOR_X = GX.to_bytes(32, "big")
+GENERATOR_Y = GY.to_bytes(32, "big")
+OTHER_HANDLE = bytes(range(0x60, 0x80))
+OTHER_CREDENTIAL_ID = bytes((0x82, 0x83))
+OTHER_CEREMONY_ID = bytes(range(0x10, 0x20))
+
+
+def client_json(members: list[tuple[str, str]]) -> bytes:
+    """Render clientDataJSON from already-JSON-encoded member values."""
+    return ("{" + ",".join(f'"{key}":{value}' for key, value in members) + "}").encode()
+
+
+def client_members(kind: str) -> dict[str, str]:
+    """Return the baseline clientDataJSON members for one ceremony kind."""
+    return {
+        "type": f'"webauthn.{kind}"',
+        "challenge": f'"{CHALLENGE_B64}"',
+        "origin": f'"{ORIGIN}"',
+    }
+
+
+def client_variant(kind: str, change: dict[str, str | None], extra: str = "") -> bytes:
+    """Return baseline client data with members replaced, removed or appended."""
+    members = client_members(kind)
+    for key, value in change.items():
+        if value is None:
+            del members[key]
+        else:
+            members[key] = value
+    pairs = list(members.items())
+    return client_json(pairs) if not extra else client_json(pairs)[:-1] + extra.encode() + b"}"
+
+
+def cose_key(
+    kty: int = 2,
+    algorithm: int = -7,
+    curve: int = 1,
+    x_coordinate: bytes = GENERATOR_X,
+    y_coordinate: bytes = GENERATOR_Y,
+) -> bytes:
+    """Encode a COSE EC2 key map with selectable (possibly wrong) members."""
+    return cbor_map(
+        [(1, kty), (3, algorithm), (-1, curve), (-2, x_coordinate), (-3, y_coordinate)]
+    )
+
+
+def create_auth_data(
+    flags: int = 0x45,
+    credential_id: bytes = CREDENTIAL_ID,
+    key: bytes | None = None,
+    suffix: bytes = b"",
+    rp_id_hash: bytes = RP_ID_HASH,
+    length: int | None = None,
+) -> bytes:
+    """Build Create authenticator data with attested credential data."""
+    key = canonical_cose_es256_key() if key is None else key
+    credential_length = len(credential_id) if length is None else length
+    return (
+        rp_id_hash
+        + bytes((flags,))
+        + (0).to_bytes(4, "big")
+        + b"\0" * 16
+        + credential_length.to_bytes(2, "big")
+        + credential_id
+        + key
+        + suffix
+    )
+
+
+def attestation(
+    auth_data: bytes,
+    fmt: str = "none",
+    statement: bytes = b"\xa0",
+    field: str = "authData",
+) -> bytes:
+    """Build a three-member attestation object around authenticator data."""
+    return (
+        b"\xa3"
+        + cbor("fmt")
+        + cbor(fmt)
+        + cbor("attStmt")
+        + statement
+        + cbor(field)
+        + cbor(auth_data)
+    )
+
+
+def get_auth_data(
+    flags: int = 0x05,
+    counter: int = 1,
+    suffix: bytes = b"",
+    rp_id_hash: bytes = RP_ID_HASH,
+) -> bytes:
+    """Build Get authenticator data."""
+    return rp_id_hash + bytes((flags,)) + counter.to_bytes(4, "big") + suffix
+
+
+def sign(auth_data: bytes, client_data: bytes) -> bytes:
+    """Sign authenticator data and client data with the fixture scalar."""
+    message = auth_data + hashlib.sha256(client_data).digest()
+    return ecdsa_der_signature(*ecdsa_signature_values(message))
+
+
+def corrupted(signature: bytes) -> bytes:
+    """Flip one bit inside the DER r integer so the signature stays well formed."""
+    # DER: 0x30 len 0x02 len r...; index 10 is inside r for every signature this script makes.
+    if signature[0] != 0x30 or signature[2] != 0x02 or signature[3] < 8:
+        raise AssertionError("fixture signature is not the expected DER layout")
+    return signature[:10] + bytes((signature[10] ^ 1,)) + signature[11:]
+
+
+def create_case(reason: str, **fields: bytes | str) -> dict[str, str]:
+    """Return one Create case; omitted fields use the baseline fixture."""
+    return {"kind": "create", "reason": reason} | _hex_fields(fields)
+
+
+def get_case(reason: str, **fields: bytes | str) -> dict[str, str]:
+    """Return one Get case whose signature is valid unless the field overrides it."""
+    return {"kind": "get", "reason": reason} | _hex_fields(fields)
+
+
+def get_signed_case(
+    reason: str,
+    auth_data: bytes,
+    client_data: bytes | None = None,
+    **fields: bytes | str,
+) -> dict[str, str]:
+    """Return a Get case re-signed over its own authenticator and client data."""
+    signed_client = ASSERTION_CLIENT_DATA if client_data is None else client_data
+    return get_case(
+        reason,
+        authenticator_data=auth_data,
+        client_data_json=signed_client,
+        signature=sign(auth_data, signed_client),
+        **fields,
+    )
+
+
+def decode_case(reason: str, kind: str, payload: bytes) -> dict[str, str]:
+    """Return one payload-decoding case, reported as a decode-time reason."""
+    return {"kind": f"decode_{kind}", "reason": reason, "payload": payload.hex()}
+
+
+def _hex_fields(fields: dict[str, bytes | str]) -> dict[str, str]:
+    return {
+        name: value.hex() if isinstance(value, bytes) else value
+        for name, value in fields.items()
+    }
+
+
+def create_cases() -> dict[str, dict[str, str]]:
+    """Return one Create case per verifier fault that is not Get specific."""
+    base_flags = 0x45
+    ext_flag = 0xC5
+    return {
+        "create_ceremony_id": create_case(
+            "CeremonyIdMismatch", reply_ceremony_id=OTHER_CEREMONY_ID
+        ),
+        "create_prf_unsupported": create_case("PrfUnsupported", prf_enabled="false"),
+        "create_origin_wrong": create_case(
+            "Origin",
+            client_data_json=client_variant("create", {"origin": '"http://localhost:49292"'}),
+        ),
+        "create_origin_missing": create_case(
+            "Origin", client_data_json=client_variant("create", {"origin": None})
+        ),
+        "create_type_wrong": create_case(
+            "ClientDataType",
+            client_data_json=client_variant("create", {"type": '"webauthn.get"'}),
+        ),
+        "create_type_not_string": create_case(
+            "ClientDataType", client_data_json=client_variant("create", {"type": "true"})
+        ),
+        "create_type_missing": create_case(
+            "ClientDataType", client_data_json=client_variant("create", {"type": None})
+        ),
+        "create_challenge_wrong": create_case(
+            "Challenge",
+            client_data_json=client_variant(
+                "create", {"challenge": '"' + "A" * 43 + '"'}
+            ),
+        ),
+        "create_challenge_escaped": create_case(
+            "Challenge",
+            client_data_json=client_variant(
+                "create", {"challenge": '"\\u0049' + CHALLENGE_B64[1:] + '"'}
+            ),
+        ),
+        "create_challenge_missing": create_case(
+            "Challenge", client_data_json=client_variant("create", {"challenge": None})
+        ),
+        "create_cross_origin_true": create_case(
+            "CrossOrigin",
+            client_data_json=client_variant("create", {}, extra=',"crossOrigin":true'),
+        ),
+        "create_top_origin_present": create_case(
+            "CrossOrigin",
+            client_data_json=client_variant(
+                "create", {}, extra=',"topOrigin":"https://example.test"'
+            ),
+        ),
+        "create_token_binding_present": create_case(
+            "CrossOrigin",
+            client_data_json=client_variant("create", {}, extra=',"tokenBinding":"present"'),
+        ),
+        "create_nested_member": create_case(
+            "Malformed",
+            client_data_json=client_variant(
+                "create", {}, extra=',"tokenBinding":{"status":"present"}'
+            ),
+        ),
+        "create_client_data_duplicate_key": create_case(
+            "Malformed",
+            client_data_json=client_variant("create", {}, extra=f',"origin":"{ORIGIN}"'),
+        ),
+        "create_client_data_not_object": create_case("Malformed", client_data_json=b"[]"),
+        "create_rp_id_hash_wrong": create_case(
+            "RpIdHash",
+            attestation_object=attestation(
+                create_auth_data(rp_id_hash=hashlib.sha256(b"example.test").digest())
+            ),
+        ),
+        "create_user_presence_missing": create_case(
+            "UserPresence", attestation_object=attestation(create_auth_data(flags=0x44))
+        ),
+        "create_user_verification_missing": create_case(
+            "UserVerification", attestation_object=attestation(create_auth_data(flags=0x41))
+        ),
+        "create_reserved_flag": create_case(
+            "Malformed", attestation_object=attestation(create_auth_data(flags=0x47))
+        ),
+        "create_backup_state_without_eligibility": create_case(
+            "BackupFlags", attestation_object=attestation(create_auth_data(flags=0x55))
+        ),
+        "create_attested_data_flag_missing": create_case(
+            "Malformed",
+            attestation_object=attestation(get_auth_data(flags=0x05, counter=0)),
+        ),
+        "create_authenticator_data_too_short": create_case(
+            "Malformed", attestation_object=attestation(bytes(36))
+        ),
+        "create_authenticator_data_too_long": create_case(
+            "Malformed", attestation_object=attestation(create_auth_data(suffix=bytes(1_000)))
+        ),
+        "create_attestation_format_packed": create_case(
+            "AttestationFormat",
+            attestation_object=attestation(create_auth_data(), fmt="packed"),
+        ),
+        "create_attestation_statement_not_empty": create_case(
+            "AttestationFormat",
+            attestation_object=attestation(create_auth_data(), statement=b"\xa1\x61a\x01"),
+        ),
+        "create_attestation_unknown_member": create_case(
+            "AttestationFormat",
+            attestation_object=attestation(create_auth_data(), field="other"),
+        ),
+        "create_credential_id_mismatch": create_case(
+            "CredentialMismatch",
+            attestation_object=attestation(create_auth_data(credential_id=OTHER_CREDENTIAL_ID)),
+        ),
+        "create_credential_length_zero": create_case(
+            "Malformed", attestation_object=attestation(create_auth_data(length=0))
+        ),
+        "create_algorithm_eddsa": create_case(
+            "Algorithm",
+            attestation_object=attestation(
+                create_auth_data(
+                    key=cbor_map([(1, 1), (3, -8), (-1, 6), (-2, GENERATOR_X)]),
+                )
+            ),
+        ),
+        "create_algorithm_rs256": create_case(
+            "Algorithm",
+            attestation_object=attestation(create_auth_data(key=cose_key(algorithm=-257))),
+        ),
+        "create_cose_key_type_wrong": create_case(
+            "CoseKey", attestation_object=attestation(create_auth_data(key=cose_key(kty=1)))
+        ),
+        "create_cose_curve_wrong": create_case(
+            "CoseKey", attestation_object=attestation(create_auth_data(key=cose_key(curve=2)))
+        ),
+        "create_cose_coordinate_short": create_case(
+            "CoseKey",
+            attestation_object=attestation(
+                create_auth_data(key=cose_key(x_coordinate=GENERATOR_X[:31]))
+            ),
+        ),
+        "create_cose_point_invalid": create_case(
+            "CoseKey",
+            attestation_object=attestation(
+                create_auth_data(key=cose_key(x_coordinate=bytes(32), y_coordinate=bytes(32)))
+            ),
+        ),
+        "create_extensions_trailing_bytes": create_case(
+            "Extensions",
+            attestation_object=attestation(create_auth_data(flags=base_flags, suffix=b"\x00")),
+        ),
+        "create_extensions_missing_map": create_case(
+            "Extensions", attestation_object=attestation(create_auth_data(flags=ext_flag))
+        ),
+        "create_extensions_duplicate_key": create_case(
+            "Extensions",
+            attestation_object=attestation(
+                create_auth_data(flags=ext_flag, suffix=b"\xa2\x61a\x01\x61a\x02")
+            ),
+        ),
+        "create_extensions_integer_key": create_case(
+            "Extensions",
+            attestation_object=attestation(
+                create_auth_data(flags=ext_flag, suffix=b"\xa1\x01\x01")
+            ),
+        ),
+        "create_extensions_too_many_entries": create_case(
+            "Extensions",
+            attestation_object=attestation(
+                create_auth_data(
+                    flags=ext_flag,
+                    suffix=bytes((0xB1,))
+                    + b"".join(cbor(chr(0x61 + index)) + cbor(0) for index in range(17)),
+                )
+            ),
+        ),
+    }
+
+
+def get_cases() -> dict[str, dict[str, str]]:
+    """Return one Get case per verifier fault, each validly signed up to that fault."""
+    return {
+        "get_ceremony_id": get_case("CeremonyIdMismatch", reply_ceremony_id=OTHER_CEREMONY_ID),
+        "get_credential_mismatch": get_case("CredentialMismatch", raw_id=OTHER_CREDENTIAL_ID),
+        "get_origin_wrong": get_signed_case(
+            "Origin",
+            get_auth_data(),
+            client_variant("get", {"origin": '"http://localhost:49292"'}),
+        ),
+        "get_type_wrong": get_signed_case(
+            "ClientDataType",
+            get_auth_data(),
+            client_variant("get", {"type": '"webauthn.create"'}),
+        ),
+        "get_challenge_wrong": get_signed_case(
+            "Challenge",
+            get_auth_data(),
+            client_variant("get", {"challenge": '"' + "B" * 43 + '"'}),
+        ),
+        "get_cross_origin_true": get_signed_case(
+            "CrossOrigin",
+            get_auth_data(),
+            client_variant("get", {}, extra=',"crossOrigin":true'),
+        ),
+        "get_rp_id_hash_wrong": get_signed_case(
+            "RpIdHash",
+            get_auth_data(rp_id_hash=hashlib.sha256(b"example.test").digest()),
+        ),
+        "get_user_presence_missing": get_signed_case("UserPresence", get_auth_data(flags=0x04)),
+        "get_user_verification_missing": get_signed_case(
+            "UserVerification", get_auth_data(flags=0x01)
+        ),
+        "get_attested_data_flag_set": get_signed_case("Malformed", get_auth_data(flags=0x45)),
+        "get_backup_state_without_eligibility": get_signed_case(
+            "BackupFlags", get_auth_data(flags=0x15)
+        ),
+        "get_backup_eligibility_changed": get_signed_case(
+            "BackupFlags", get_auth_data(flags=0x0D)
+        ),
+        "get_extensions_not_a_map": get_signed_case(
+            "Extensions", get_auth_data(flags=0x85, suffix=b"\x01")
+        ),
+        "get_extensions_trailing_bytes": get_signed_case(
+            "Extensions", get_auth_data(suffix=b"\x00")
+        ),
+        "get_user_handle_mismatch": get_case("UserHandleMismatch", user_handle=OTHER_HANDLE),
+        "get_counter_equal": get_signed_case(
+            "CounterRegression", get_auth_data(counter=5), stored_sign_count="5"
+        ),
+        "get_counter_lower": get_signed_case(
+            "CounterRegression", get_auth_data(counter=4), stored_sign_count="5"
+        ),
+        "get_counter_zero_after_nonzero": get_signed_case(
+            "CounterRegression", get_auth_data(counter=0), stored_sign_count="1"
+        ),
+        "get_signature_invalid": get_case(
+            "Signature", signature=corrupted(sign(get_auth_data(), ASSERTION_CLIENT_DATA))
+        ),
+        "get_signature_not_der": get_case("Signature", signature=bytes(8)),
+        "get_unauthenticated_counter": get_case(
+            "Signature",
+            authenticator_data=get_auth_data(counter=4),
+            signature=corrupted(sign(get_auth_data(counter=4), ASSERTION_CLIENT_DATA)),
+            stored_sign_count="5",
+        ),
+        "get_unauthenticated_backup_flags": get_case(
+            "Signature",
+            authenticator_data=get_auth_data(flags=0x0D),
+            signature=corrupted(sign(get_auth_data(flags=0x0D), ASSERTION_CLIENT_DATA)),
+        ),
+        "get_unauthenticated_user_handle": get_case(
+            "Signature",
+            user_handle=OTHER_HANDLE,
+            signature=corrupted(sign(get_auth_data(), ASSERTION_CLIENT_DATA)),
+        ),
+        "get_signature_other_message": get_case(
+            "Signature", signature=sign(get_auth_data(counter=2), ASSERTION_CLIENT_DATA)
+        ),
+    }
+
+
+def decode_cases() -> dict[str, dict[str, str]]:
+    """Return reply payloads whose PRF or user-handle shape fails while decoding."""
+    attestation_fields = [
+        b"WAR1", 1, CEREMONY_ID, CREDENTIAL_ID, b"{}", b"\xa0", [0], True, PRF_FIRST, None
+    ]
+    assertion_fields = [
+        b"WAS1", 1, CEREMONY_ID, CREDENTIAL_ID, b"{}", bytes(37), bytes(8), None, PRF_FIRST, None
+    ]
+
+    def replace(fields: list[object], index: int, value: object) -> bytes:
+        return cbor(fields[:index] + [value] + fields[index + 1 :])
+
+    return {
+        "decode_create_prf_short": decode_case(
+            "PrfMalformed", "attestation", replace(attestation_fields, 8, PRF_FIRST[:31])
+        ),
+        "decode_create_prf_not_bytes": decode_case(
+            "PrfMalformed", "attestation", replace(attestation_fields, 8, 7)
+        ),
+        "decode_create_prf_second_present": decode_case(
+            "PrfMalformed", "attestation", replace(attestation_fields, 9, PRF_FIRST)
+        ),
+        "decode_get_prf_short": decode_case(
+            "PrfMalformed", "assertion", replace(assertion_fields, 8, PRF_FIRST[:31])
+        ),
+        "decode_get_prf_null": decode_case(
+            "PrfAbsent", "assertion", replace(assertion_fields, 8, None)
+        ),
+        "decode_get_prf_second_present": decode_case(
+            "PrfMalformed", "assertion", replace(assertion_fields, 9, PRF_FIRST)
+        ),
+        "decode_get_user_handle_short": decode_case(
+            "UserHandleMismatch", "assertion", replace(assertion_fields, 7, USER_HANDLE[:31])
+        ),
+        "decode_get_user_handle_empty": decode_case(
+            "UserHandleMismatch", "assertion", replace(assertion_fields, 7, b"")
+        ),
+        "decode_get_user_handle_not_bytes": decode_case(
+            "UserHandleMismatch", "assertion", replace(assertion_fields, 7, 7)
+        ),
+    }
+
+
+def reasons_text() -> str:
+    """Render the line-oriented per-reason fixture cases."""
+    cases = create_cases() | get_cases() | decode_cases()
+    lines = [
+        "# Generated by scripts/owner_bridge_webauthn_fixtures.py; do not edit.",
+        "# Each case differs from the baseline fixture in exactly one verifier fault.",
+        "version=1",
+    ]
+    for name, fields in cases.items():
+        lines.append(f"case={name}")
+        lines.extend(f"{name}.{field}={value}" for field, value in fields.items())
+    return "\n".join(lines) + "\n"
+
+
 def fixture_text() -> str:
     """Render the stable line-oriented fixture without a JSON dependency."""
     fields = fixture_fields()
@@ -205,26 +691,32 @@ def fixture_text() -> str:
 
 def check() -> None:
     """Fail closed when the committed portable fixture drifts."""
-    expected = fixture_text()
-    actual = FIXTURE_PATH.read_text(encoding="utf-8")
-    if actual != expected:
-        raise AssertionError(
-            "owner-bridge WebAuthn fixture drifted; regenerate from the independent script"
-        )
+    for path, expected in ((FIXTURE_PATH, fixture_text()), (REASONS_PATH, reasons_text())):
+        actual = path.read_text(encoding="utf-8")
+        if actual != expected:
+            flag = "--print" if path == FIXTURE_PATH else "--print-reasons"
+            raise AssertionError(
+                f"{path.relative_to(ROOT)} drifted; regenerate it with {flag}"
+            )
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true", help="verify the committed fixture")
-    parser.add_argument("--print", action="store_true", help="print the generated fixture")
+    parser.add_argument("--print", action="store_true", help="print the valid-ceremony fixture")
+    parser.add_argument(
+        "--print-reasons", action="store_true", help="print the per-reason fixture cases"
+    )
     arguments = parser.parse_args()
     if arguments.print:
         print(fixture_text(), end="")
+    if arguments.print_reasons:
+        print(reasons_text(), end="")
     if arguments.check:
         check()
-        print("owner-bridge WebAuthn fixture: ALL MATCH")
-    if not arguments.check and not arguments.print:
-        parser.error("choose --check or --print")
+        print("owner-bridge WebAuthn fixtures: ALL MATCH")
+    if not (arguments.check or arguments.print or arguments.print_reasons):
+        parser.error("choose --check, --print or --print-reasons")
     return 0
 
 

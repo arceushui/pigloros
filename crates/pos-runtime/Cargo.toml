@@ -10,7 +10,11 @@ publish.workspace = true
 # Enables downstream fixture registration and verifier-seam tests only.
 # Never enable in deployable builds; fixtures do not establish installed authority.
 # Enforced by scripts/check_test_support_features.py in CI.
-test-support = ["local-admission-host", "pos-core/test-support"]
+test-support = [
+  "local-admission-host",
+  "pos-core/test-support",
+  "pos-store/test-support",
+]
 # Exposes the process-wide local scheduled-admission host to the local
 # experiment composition root. Keeps the host out of deployable Plugin,
 # Driver, and provider graphs; it is not an in-process security boundary.
@@ -29,6 +33,12 @@ ulid = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 pos-conformance = { path = "../pos-conformance" }
+# The execution-time trust gate yields `ContentValidationV1` and reads release closures
+# through `ReleaseSourceV1`.
+pos-plugin-release = { path = "../pos-plugin-release" }
+# The install entry wraps the signed installer (ADR-061 revision 7 decision 9). The `test-support`
+# dev-dependency entry below stays alongside this normal one.
+pos-plugin-publisher = { path = "../pos-plugin-publisher" }
 
 [dev-dependencies]
 ciborium = { workspace = true }
@@ -39,6 +49,8 @@ pos-core = { path = "../pos-core", features = [
 ] }
 # Negotiation tests build execution projections without a release closure.
 pos-crypto = { path = "../pos-crypto", features = ["test-support"] }
+# The parent-cut cases seed a root's recorded factual prefix in the adapters.
+pos-store = { path = "../pos-store", features = ["test-support"] }
 rusqlite = { workspace = true }
 tempfile = { workspace = true }
 
@@ -47,6 +59,26 @@ tempfile = { workspace = true }
 # pos-time links pos-conformance, which builds only on Linux.
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 pos-time = { path = "../pos-time" }
+# The gate vectors run on the shared signed-release test world (ADR-061 revision 7, #579).
+pos-plugin-publisher = { path = "../pos-plugin-publisher", features = [
+  "test-support",
+] }
+
+[[test]]
+name = "community_gate_public"
+required-features = ["test-support"]
+
+[[test]]
+name = "community_plugin_host_public"
+required-features = ["test-support"]
+
+[[test]]
+name = "community_install_public"
+required-features = ["test-support"]
+
+[[test]]
+name = "community_trust_bytes_public"
+required-features = ["test-support"]
 
 [[test]]
 name = "counterfactual_suffix_public"

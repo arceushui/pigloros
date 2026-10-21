@@ -199,8 +199,10 @@
 //!   Timeline purges its prefix rows.
 //! - **Purge.** Not an obligation of this contract yet. Deleting a Fork purges
 //!   its generation rows with the rest of its counterfactual state (#530), and
-//!   its reads then return `ForkNotFound`. A re-created Fork id starts with an
-//!   empty set.
+//!   its reads then return `ForkNotFound`. A re-created generic Fork id starts
+//!   with an empty set. An admitted (ADR-099) Fork is never deleted (ADR-099
+//!   revision 13): the generic delete refuses it before any mutation, so its
+//!   rows are never purged and its id is never re-created.
 //! - **Error mapping.** Map [`CounterfactualDependencyErrorV1`] to the storage
 //!   error with `CounterfactualStoreErrorV1::from`: `InvalidEncoding` for
 //!   encoding and unknown-enum faults, `FieldOutOfBounds` for bounds,
@@ -276,6 +278,8 @@ const OWNER_TEXT_MAJOR: u8 = 3;
 const EDGE_TAIL_FIELDS: usize = 5;
 /// The range and rule arrays hold only scalars.
 const EDGE_TAIL_ARRAY_DEPTH: u8 = 1;
+/// Edge fields between the source and the authorization: class and range.
+const EDGE_CLASS_AND_RANGE_FIELDS: usize = 2;
 
 /// Closed failures of the dependency record contract.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
@@ -648,6 +652,8 @@ pub struct DependencyEdgeRecordV1 {
     bytes: Vec<u8>,
     consumer: DependencyNodeCoordinateV1,
     source_digest: Hash,
+    /// The authorization field when it is a 32-byte digest.
+    authorization: Option<Hash>,
     digest: Hash,
 }
 
@@ -685,19 +691,20 @@ impl DependencyEdgeRecordV1 {
                     .strip_prefix(expected_consumer.as_slice())
                     .ok_or(CounterfactualDependencyErrorV1::BindingMismatch)
             })
-            .and_then(source_artifact_digest)
-            .and_then(|extracted| {
+            .and_then(edge_fields)
+            .and_then(|(extracted, authorization)| {
                 if extracted == source_digest {
-                    Ok(())
+                    Ok(authorization)
                 } else {
                     Err(CounterfactualDependencyErrorV1::BindingMismatch)
                 }
             });
-        verified.map(|()| Self {
+        verified.map(|authorization| Self {
             digest: edge_digest(&bytes),
             bytes,
             consumer,
             source_digest,
+            authorization,
         })
     }
 
@@ -705,6 +712,16 @@ impl DependencyEdgeRecordV1 {
     #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
         &self.bytes
+    }
+
+    /// Return the authorization digest the edge carries, or `None` when its
+    /// authorization field is not a 32-byte digest.
+    ///
+    /// Construction checks the framing of the field, not its content, so the
+    /// store that records a factual Tick reads it here.
+    #[must_use]
+    pub const fn authorization_digest(&self) -> Option<Hash> {
+        self.authorization
     }
 
     /// Borrow the verified consumer coordinate.
@@ -763,8 +780,10 @@ fn owner_text_length(length: u64) -> DependencyResult<usize> {
         .ok_or(CounterfactualDependencyErrorV1::FieldOutOfBounds)
 }
 
-/// Read the source node's artifact digest and check the edge tail.
-fn source_artifact_digest(rest: &[u8]) -> DependencyResult<Hash> {
+/// Read the source node's artifact digest and the authorization digest, and
+/// check the edge tail. The authorization is `None` when its field is framed
+/// correctly but is not a 32-byte digest.
+fn edge_fields(rest: &[u8]) -> DependencyResult<(Hash, Option<Hash>)> {
     let mut cursor = CborCursor::new(rest);
     malformed(skip_source_head(&mut cursor))
         .and_then(|()| malformed(cursor.head(OWNER_TEXT_MAJOR)))
@@ -772,16 +791,27 @@ fn source_artifact_digest(rest: &[u8]) -> DependencyResult<Hash> {
         .and_then(|length| malformed(cursor.take(length)))
         .and_then(|_| malformed(read_source_digest(&mut cursor)))
         .and_then(|digest| {
-            let tail = (0..EDGE_TAIL_FIELDS)
-                .try_for_each(|_| skip_item(&mut cursor, EDGE_TAIL_ARRAY_DEPTH));
-            malformed(tail).map(|()| digest)
+            let tail = tail_authorization(&mut cursor);
+            malformed(tail).map(|auth| (digest, auth))
         })
-        .and_then(|digest| {
+        .and_then(|fields| {
             if cursor.is_finished() {
-                Ok(digest)
+                Ok(fields)
             } else {
                 Err(CounterfactualDependencyErrorV1::InvalidEncoding)
             }
+        })
+}
+
+/// Skip the edge tail, reading the authorization digest on the way.
+fn tail_authorization(cursor: &mut CborCursor<'_>) -> CursorResult<Option<Hash>> {
+    (0..EDGE_CLASS_AND_RANGE_FIELDS)
+        .try_for_each(|_| skip_item(cursor, EDGE_TAIL_ARRAY_DEPTH))
+        .map(|()| read_hash(&mut cursor.clone()).ok())
+        .and_then(|authorization| {
+            (EDGE_CLASS_AND_RANGE_FIELDS..EDGE_TAIL_FIELDS)
+                .try_for_each(|_| skip_item(cursor, EDGE_TAIL_ARRAY_DEPTH))
+                .map(|()| authorization)
         })
 }
 
@@ -806,6 +836,21 @@ pub struct RecordedSetCountsV1 {
     pub edges: usize,
     /// Declared-input digests, in total, of the nodes already recorded.
     pub inputs: usize,
+}
+
+/// Whether adding a Tick's counts to the recorded counts passes a set bound.
+///
+/// Shared by [`TickDependencyRecordV1::ensure_set_capacity`] and the factual
+/// preflight, so the bound and its saturating arithmetic live in one place.
+pub(crate) const fn set_bound_exceeded(
+    recorded: RecordedSetCountsV1,
+    nodes: usize,
+    edges: usize,
+    inputs: usize,
+) -> bool {
+    recorded.nodes.saturating_add(nodes) > MAX_RECORDED_DEPENDENCY_NODES_V1
+        || recorded.edges.saturating_add(edges) > MAX_RECORDED_DEPENDENCY_EDGES_V1
+        || recorded.inputs.saturating_add(inputs) > MAX_RECORDED_DEPENDENCY_EDGES_V1
 }
 
 /// The nodes and edges of one Tick, committed with that Tick's Events.
@@ -911,11 +956,8 @@ impl TickDependencyRecordV1 {
     /// [`MAX_RECORDED_DEPENDENCY_EDGES_V1`] edges, or
     /// [`MAX_RECORDED_DEPENDENCY_EDGES_V1`] declared inputs.
     pub fn ensure_set_capacity(&self, recorded: RecordedSetCountsV1) -> DependencyResult<()> {
-        if recorded.nodes.saturating_add(self.nodes.len()) > MAX_RECORDED_DEPENDENCY_NODES_V1
-            || recorded.edges.saturating_add(self.edges.len()) > MAX_RECORDED_DEPENDENCY_EDGES_V1
-            || recorded.inputs.saturating_add(self.declared_input_count())
-                > MAX_RECORDED_DEPENDENCY_EDGES_V1
-        {
+        let (nodes, edges) = (self.nodes.len(), self.edges.len());
+        if set_bound_exceeded(recorded, nodes, edges, self.declared_input_count()) {
             Err(CounterfactualDependencyErrorV1::FieldOutOfBounds)
         } else {
             Ok(())
@@ -1446,8 +1488,8 @@ pub trait CounterfactualDependencyRecordingPortV1: CounterfactualStorePortV1 {
     /// greater than the maximum record Tick already persisted in that
     /// generation (gaps are allowed), or, while the generation has no
     /// records, not below the generation's first Tick. A generation with no
-    /// persisted first Tick (generation 0, a Fork never invalidated, a Fork
-    /// re-created at its generation floor until its next invalidation) takes
+    /// persisted first Tick (generation 0, a Fork never invalidated, a generic
+    /// Fork re-created at its generation floor until its next invalidation) takes
     /// no record: its set is started by
     /// [`Self::commit_counterfactual_invalidation_with_dependencies`]. The Tick
     /// is stager-asserted: the store cannot check it against the drafts.

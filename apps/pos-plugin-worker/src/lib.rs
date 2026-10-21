@@ -5,10 +5,13 @@
 //!
 //! One worker process serves exactly one invocation:
 //! 1. it runs the worker process checks of
-//!    `pos_plugin_supervisor::prepare_worker_process` (parent-death signal,
-//!    scrubbed environment, no inherited descriptor);
+//!    `pos_plugin_supervisor::prepare_worker_process` (the arguments
+//!    `<pid> local` or `<pid> air-gapped`, parent-death signal, scrubbed
+//!    environment, no inherited descriptor); the token names the one mode this
+//!    worker serves;
 //! 2. it reads one request frame from standard input;
-//! 3. it runs the request through the in-worker engine seam ([`engine`]);
+//! 3. it runs the request through the in-worker engine seam ([`engine`]) under
+//!    that mode;
 //! 4. it writes one response frame to standard output and exits.
 //!
 //! On any failure before a response it exits unsuccessfully without writing
@@ -46,9 +49,9 @@ fn serve(
     output: &mut impl Write,
 ) -> bool {
     prepare_worker_process(arguments)
-        .and_then(|()| read_request(input))
+        .and_then(|mode| read_request(input).map(|request| (mode, request)))
         .ok()
-        .and_then(engine::invoke)
+        .and_then(|(mode, request)| engine::invoke(request, mode))
         .is_some_and(|outcome| write_response(output, &outcome).is_ok())
 }
 
@@ -66,5 +69,18 @@ mod tests {
         assert!(output.is_empty());
         let code = run_worker(arguments, &mut input, &mut output);
         assert_eq!(format!("{code:?}"), format!("{:?}", ExitCode::FAILURE));
+    }
+
+    #[test]
+    fn a_worker_refuses_a_bad_mode_token_before_it_reads_a_request() {
+        let request = [0_u8; 8];
+        for token in ["Local", "airgapped"] {
+            let mut input: &[u8] = &request;
+            let mut output = Vec::new();
+            let arguments = ["pos-plugin-worker", "1", token].map(OsString::from);
+            assert!(!serve(arguments, &mut input, &mut output));
+            assert_eq!(input.len(), request.len(), "{token}");
+            assert!(output.is_empty());
+        }
     }
 }

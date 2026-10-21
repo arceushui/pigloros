@@ -354,6 +354,87 @@ fn public_durable_records_preserve_every_field_and_cbor_width_boundary(
 }
 
 #[test]
+fn public_durable_records_admit_exactly_the_complete_record_limit(
+) -> Result<(), OwnerBridgeCodecError> {
+    // The 187-byte fixture spends six bytes on "owner"; an owner ID of 256 to
+    // 65,535 bytes takes a three-byte head, so the binding is 184 + n bytes.
+    let credential_id = [0x80, 0x81];
+    let owner_at_record_limit = "o".repeat(MAX_SUBJECT_CREDENTIAL_BINDING_BYTES - 184);
+    let binding = binding_with(&owner_at_record_limit, 1, &credential_id)?;
+    let mut binding_output = vec![0; MAX_SUBJECT_CREDENTIAL_BINDING_BYTES];
+    assert_eq!(
+        encode_subject_credential_binding(&binding, &mut binding_output),
+        Ok(MAX_SUBJECT_CREDENTIAL_BINDING_BYTES)
+    );
+    assert_eq!(
+        decode_subject_credential_binding(&binding_output),
+        Ok(binding)
+    );
+    let owner_over_record_limit = "o".repeat(MAX_SUBJECT_CREDENTIAL_BINDING_BYTES - 183);
+    assert_eq!(
+        binding_with(&owner_over_record_limit, 1, &credential_id),
+        Err(OwnerBridgeCodecError::BoundsExceeded)
+    );
+
+    // The 83-byte fixture spends fifteen bytes on "owner-bridge-1"; a folder
+    // name of 256 to 65,535 bytes takes a three-byte head, so 71 + n bytes.
+    let folder_at_record_limit = "f".repeat(MAX_CLEANUP_RECORD_BYTES - 71);
+    let cleanup = CleanupRecordV1::new(
+        CEREMONY_ID,
+        &folder_at_record_limit,
+        7,
+        0x0102_0304_0506_0708,
+        IMAGE_PATH_SHA256,
+    )?;
+    let mut cleanup_output = vec![0; MAX_CLEANUP_RECORD_BYTES];
+    assert_eq!(
+        encode_cleanup_record(&cleanup, &mut cleanup_output),
+        Ok(MAX_CLEANUP_RECORD_BYTES)
+    );
+    assert_eq!(decode_cleanup_record(&cleanup_output), Ok(cleanup));
+    let folder_over_record_limit = "f".repeat(MAX_CLEANUP_RECORD_BYTES - 70);
+    assert_eq!(
+        CleanupRecordV1::new(
+            CEREMONY_ID,
+            &folder_over_record_limit,
+            7,
+            0x0102_0304_0506_0708,
+            IMAGE_PATH_SHA256,
+        ),
+        Err(OwnerBridgeCodecError::BoundsExceeded)
+    );
+    Ok(())
+}
+
+#[test]
+fn public_binding_round_trips_each_valid_backup_flag_combination(
+) -> Result<(), OwnerBridgeCodecError> {
+    // The remaining combination, backup state without eligibility, is
+    // rejected in public_durable_codecs_reject_closed_schema_violations.
+    for (backup_eligible, backup_state, eligible_byte, state_byte) in [
+        (false, false, 0xf4, 0xf4),
+        (true, false, 0xf5, 0xf4),
+        (true, true, 0xf5, 0xf5),
+    ] {
+        let binding = binding_with_flags("owner", 1, &[0x80, 0x81], backup_eligible, backup_state)?;
+        assert_eq!(binding.backup_eligible(), backup_eligible);
+        assert_eq!(binding.backup_state(), backup_state);
+
+        let mut output = [0; 187];
+        assert_eq!(
+            encode_subject_credential_binding(&binding, &mut output),
+            Ok(187)
+        );
+        assert_eq!(output[182], eligible_byte);
+        assert_eq!(output[183], state_byte);
+        let decoded = decode_subject_credential_binding(&output)?;
+        assert_eq!(decoded.backup_eligible(), backup_eligible);
+        assert_eq!(decoded.backup_state(), backup_state);
+    }
+    Ok(())
+}
+
+#[test]
 fn public_durable_decoders_reject_every_closed_schema_variation(
 ) -> Result<(), OwnerBridgeCodecError> {
     let binding = fixture_binding()?;
@@ -486,6 +567,16 @@ fn binding_with<'a>(
     epoch: u64,
     credential_id: &'a [u8],
 ) -> Result<SubjectCredentialBindingV1<'a>, OwnerBridgeCodecError> {
+    binding_with_flags(owner_id, epoch, credential_id, false, false)
+}
+
+fn binding_with_flags<'a>(
+    owner_id: &'a str,
+    epoch: u64,
+    credential_id: &'a [u8],
+    backup_eligible: bool,
+    backup_state: bool,
+) -> Result<SubjectCredentialBindingV1<'a>, OwnerBridgeCodecError> {
     SubjectCredentialBindingV1::new(SubjectCredentialBindingInputV1 {
         owner_id,
         subject_id: SUBJECT_ID,
@@ -493,8 +584,8 @@ fn binding_with<'a>(
         credential_id,
         user_handle: USER_HANDLE,
         public_key: CoseEs256PublicKey::from_canonical_encoding(&cose_key())?,
-        backup_eligible: false,
-        backup_state: false,
+        backup_eligible,
+        backup_state,
         sign_count: 7,
         transports: TransportCodes::new(&[0])?,
     })

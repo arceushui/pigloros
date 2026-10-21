@@ -13,6 +13,10 @@
 //! rejects implementations outside `pos-store`, `pos-runtime` and `test-support`
 //! fixtures.
 //!
+//! [`PluginTrustWallSourceV1`] is the narrower sealed wall source of the Plugin trust paths
+//! (ADR-061 revision 8). Every [`TrustedWallSourceV1`] satisfies it, and so does the
+//! feature-gated fixture source; the fence functions here keep [`TrustedWallSourceV1`].
+//!
 //! The handoff token cannot be constructed outside this module:
 //!
 //! ```compile_fail,E0451
@@ -381,6 +385,126 @@ pub trait TrustedWallSourceV1: sealed::Sealed + Send {
     fn sample(&mut self) -> Result<WallTime, TrustedClockErrorV1>;
 }
 
+/// Sealed wall source accepted by the Plugin trust paths (ADR-061 revision 8 decision 4).
+///
+/// Every [`TrustedWallSourceV1`] satisfies it through one blanket implementation. The
+/// feature-gated fixture source implements it without implementing
+/// [`TrustedWallSourceV1`], so the ADR-112 fence functions never accept it.
+///
+/// The trait is sealed, so no other crate can implement it:
+///
+/// ```compile_fail,E0277
+/// use pos_core::trusted_clock::{PluginTrustWallSourceV1, TrustedClockErrorV1};
+/// struct Forged;
+/// impl PluginTrustWallSourceV1 for Forged {
+///     fn sample_plugin_trust(&mut self) -> Result<pos_core::WallTime, TrustedClockErrorV1> {
+///         Ok(pos_core::WallTime::from_micros(0))
+///     }
+/// }
+/// ```
+///
+/// A trusted wall source is accepted where the bound is required:
+///
+/// ```
+/// use pos_core::trusted_clock::{PluginTrustWallSourceV1, SystemTrustedWallSourceV1};
+/// fn accepts(_source: &mut impl PluginTrustWallSourceV1) {}
+/// accepts(&mut SystemTrustedWallSourceV1);
+/// ```
+pub trait PluginTrustWallSourceV1: sealed::Sealed + Send {
+    /// Take one wall sample for a Plugin trust decision.
+    ///
+    /// # Errors
+    /// Returns [`TrustedClockErrorV1::SourceUnavailable`] when no sample exists.
+    fn sample_plugin_trust(&mut self) -> Result<WallTime, TrustedClockErrorV1>;
+}
+
+impl<T: TrustedWallSourceV1> PluginTrustWallSourceV1 for T {
+    fn sample_plugin_trust(&mut self) -> Result<WallTime, TrustedClockErrorV1> {
+        self.sample()
+    }
+}
+
+/// One fixture evaluation instant, validated like every trusted wall sample.
+///
+/// The instant comes from a signed fixture payload, never from the environment, a flag or the
+/// system time.
+#[cfg(feature = "fixture-instant")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FixtureEvaluationInstantV1(WallTime);
+
+#[cfg(feature = "fixture-instant")]
+impl FixtureEvaluationInstantV1 {
+    /// Validate a microsecond count since the Unix epoch.
+    ///
+    /// # Errors
+    /// Returns [`TrustedClockErrorV1::SourceUnavailable`] above `i64::MAX` microseconds.
+    pub fn from_micros(micros: u64) -> Result<Self, TrustedClockErrorV1> {
+        wall_time_from_epoch_duration(Duration::from_micros(micros)).map(Self)
+    }
+}
+
+/// Wall source that returns one fixture instant at every sample.
+///
+/// It satisfies [`PluginTrustWallSourceV1`] only. It is not a [`TrustedWallSourceV1`], so the
+/// ADR-112 fence functions reject it:
+///
+/// ```compile_fail,E0277
+/// use pos_core::trusted_clock::{
+///     reserve_trusted_clock, FixtureEvaluationInstantV1, FixtureWallSourceV1,
+///     GuardMonotonicSourceV1, TrustedClockStorePortV1, WaitBudgetV1,
+/// };
+/// fn fence(
+///     store: &mut dyn TrustedClockStorePortV1,
+///     mono: &mut dyn GuardMonotonicSourceV1,
+///     wait: &mut WaitBudgetV1,
+///     instant: FixtureEvaluationInstantV1,
+/// ) {
+///     let mut wall = FixtureWallSourceV1::new(instant);
+///     let _ = reserve_trusted_clock(store, &mut wall, mono, wait, None);
+/// }
+/// ```
+///
+/// The same call with a trusted source compiles:
+///
+/// ```
+/// use pos_core::trusted_clock::{
+///     reserve_trusted_clock, GuardMonotonicSourceV1, SystemTrustedWallSourceV1,
+///     TrustedClockStorePortV1, WaitBudgetV1,
+/// };
+/// fn fence(
+///     store: &mut dyn TrustedClockStorePortV1,
+///     mono: &mut dyn GuardMonotonicSourceV1,
+///     wait: &mut WaitBudgetV1,
+/// ) {
+///     let mut wall = SystemTrustedWallSourceV1;
+///     let _ = reserve_trusted_clock(store, &mut wall, mono, wait, None);
+/// }
+/// ```
+#[cfg(feature = "fixture-instant")]
+#[derive(Clone, Debug)]
+pub struct FixtureWallSourceV1 {
+    instant: FixtureEvaluationInstantV1,
+}
+
+#[cfg(feature = "fixture-instant")]
+impl FixtureWallSourceV1 {
+    /// A source that returns `instant` at every sample.
+    #[must_use]
+    pub const fn new(instant: FixtureEvaluationInstantV1) -> Self {
+        Self { instant }
+    }
+}
+
+#[cfg(feature = "fixture-instant")]
+impl sealed::Sealed for FixtureWallSourceV1 {}
+
+#[cfg(feature = "fixture-instant")]
+impl PluginTrustWallSourceV1 for FixtureWallSourceV1 {
+    fn sample_plugin_trust(&mut self) -> Result<WallTime, TrustedClockErrorV1> {
+        Ok(self.instant.0)
+    }
+}
+
 /// Opaque monotonic mark.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord, Hash)]
 pub struct MonotonicMarkV1(Instant);
@@ -497,6 +621,7 @@ pub struct ScriptedGuardMonotonicSourceV1 {
     origin: Instant,
     script: std::collections::VecDeque<Duration>,
     last: Duration,
+    samples_taken: usize,
 }
 
 #[cfg(feature = "test-support")]
@@ -508,12 +633,19 @@ impl ScriptedGuardMonotonicSourceV1 {
             origin: Instant::now(),
             script: offsets.into_iter().collect(),
             last: Duration::ZERO,
+            samples_taken: 0,
         }
     }
 
     /// Append one offset.
     pub fn push(&mut self, offset: Duration) {
         self.script.push_back(offset);
+    }
+
+    /// Saturating count of marks, including repeats after script exhaustion.
+    #[must_use]
+    pub const fn samples_taken(&self) -> usize {
+        self.samples_taken
     }
 }
 
@@ -523,8 +655,23 @@ impl sealed::Sealed for ScriptedGuardMonotonicSourceV1 {}
 #[cfg(feature = "test-support")]
 impl GuardMonotonicSourceV1 for ScriptedGuardMonotonicSourceV1 {
     fn mark(&mut self) -> MonotonicMarkV1 {
+        self.samples_taken = self.samples_taken.saturating_add(1);
         self.last = self.script.pop_front().unwrap_or(self.last);
         MonotonicMarkV1(self.origin.checked_add(self.last).unwrap_or(self.origin))
+    }
+}
+
+// A test may advance its existing script at a lifecycle boundary while the
+// consumer owns the clock borrow. This implements no deployable time source.
+#[cfg(feature = "test-support")]
+impl sealed::Sealed for std::sync::Arc<std::sync::Mutex<ScriptedGuardMonotonicSourceV1>> {}
+
+#[cfg(feature = "test-support")]
+impl GuardMonotonicSourceV1 for std::sync::Arc<std::sync::Mutex<ScriptedGuardMonotonicSourceV1>> {
+    fn mark(&mut self) -> MonotonicMarkV1 {
+        self.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .mark()
     }
 }
 
@@ -1593,4 +1740,60 @@ pub fn principal_digest(principal: &PrincipalRefV1) -> [u8; 32] {
     hasher.update(principal.principal_id());
     hasher.update(principal.trust_domain().as_bytes());
     *hasher.finalize().as_bytes()
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod fixture_instant_tests {
+    #[cfg(feature = "fixture-instant")]
+    mod cases {
+        use super::super::*;
+
+        type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+        fn sample_of(
+            source: &mut impl PluginTrustWallSourceV1,
+        ) -> Result<u64, TrustedClockErrorV1> {
+            source.sample_plugin_trust().map(WallTime::as_micros)
+        }
+
+        #[test]
+        fn the_instant_accepts_zero_and_the_trusted_maximum() -> TestResult {
+            let largest = i64::MAX.unsigned_abs();
+            for micros in [0, 1, largest] {
+                let instant = FixtureEvaluationInstantV1::from_micros(micros)?;
+                let mut source = FixtureWallSourceV1::new(instant);
+                assert_eq!(sample_of(&mut source)?, micros, "accepted {micros}");
+            }
+            Ok(())
+        }
+
+        #[test]
+        fn the_instant_rejects_everything_above_the_trusted_maximum() {
+            let above = i64::MAX.unsigned_abs() + 1;
+            for micros in [above, above + 1, u64::MAX] {
+                let result = FixtureEvaluationInstantV1::from_micros(micros);
+                let expected = Err(TrustedClockErrorV1::SourceUnavailable);
+                assert_eq!(result, expected, "rejected {micros}");
+            }
+        }
+
+        #[test]
+        fn the_source_returns_the_same_instant_at_every_sample() -> TestResult {
+            let instant = FixtureEvaluationInstantV1::from_micros(40_000_000)?;
+            let mut source = FixtureWallSourceV1::new(instant);
+            let mut copy = source.clone();
+            for _ in 0..3 {
+                assert_eq!(sample_of(&mut source)?, 40_000_000, "first source");
+            }
+            assert_eq!(sample_of(&mut copy)?, 40_000_000, "clone");
+            let same = FixtureEvaluationInstantV1::from_micros(40_000_000)?;
+            let later = FixtureEvaluationInstantV1::from_micros(40_000_001)?;
+            assert_eq!(instant, same, "equality");
+            assert_ne!(instant, later, "inequality");
+            let debug = format!("{source:?}");
+            assert!(debug.contains("FixtureWallSourceV1"), "debug name");
+            Ok(())
+        }
+    }
 }

@@ -10,9 +10,12 @@ members = [
   "crates/pos-conformance",
   "crates/pos-reference",
   "crates/pos-plugin-release",
+  "crates/pos-plugin-publisher",
+  "crates/pos-owner-bridge",
   "crates/pos-owner-bridge-codec",
   "crates/pos-plugin-host",
   "crates/pos-plugin-supervisor",
+  "crates/pos-owner-bridge-windows",
   "plugins/entities/rule-agent",
   "plugins/observations/synthetic",
   "plugins/eval",
@@ -27,6 +30,7 @@ members = [
   "apps/pos-cli",
   "apps/pos-sandboxd",
   "apps/pos-plugin-worker",
+  "apps/pos-plugin-conformance-adapter",
   "apps/piglor-gateway",
   "apps/piglor-ledger",
   "apps/piglor-world-client",
@@ -72,8 +76,15 @@ sha2 = "0.11"
 rand = "0.10"
 zeroize = "1.9"
 httparse = { version = "=1.10.1", default-features = false }
-base64 = { version = "=0.22.1", default-features = false }
+base64 = { version = "=0.23.1", default-features = false }
 p256 = { version = "=0.14.0", default-features = false, features = ["ecdsa"] }
+getrandom = "=0.4.3"
+# ADR-091/097 subject key wrap and subject ciphertext (ADR-110 §3 pins).
+aes-gcm = { version = "=0.11.1", default-features = false, features = [
+  "aes",
+  "zeroize",
+] }
+hkdf = "=0.13.0"
 
 # Error handling
 thiserror = "2"
@@ -89,7 +100,7 @@ rusqlite = { version = "0.40", features = ["bundled", "hooks", "functions"] }
 # pin with default features off. `runtime` is the feature that lets the
 # Component Model instantiate and call a Component; `scripts/
 # check_wasmtime_feature_pin.py` fails if any further feature is resolved.
-wasmtime = { version = "=49.0.2", default-features = false, features = [
+wasmtime = { version = "=49.0.4", default-features = false, features = [
   "component-model",
   "cranelift",
   "runtime",
@@ -100,7 +111,7 @@ proptest = "1"
 tempfile = "3"
 # Component text fixtures for the community Plugin host tests; the same
 # wasm-tools release (wasmparser 0.258) that builds the guest fixtures.
-wat = "=1.258.3"
+wat = "=1.261.0"
 
 # Data files
 toml = "1.1"
@@ -121,6 +132,87 @@ tower = { version = "0.5", features = ["util"] }
 [profile.release]
 lto = true
 codegen-units = 1
+
+# Signature and digest verification dominates test CPU time: at opt-level 0
+# every curve25519-dalek SIMD intrinsic is an out-of-line call. Optimizing
+# only these dependencies cut workspace test time substantially for a small
+# cold-build cost (measurements in #649). Workspace crates stay unoptimized
+# for coverage and debugging; the test profile inherits these overrides.
+# Cargo only warns if a listed crate leaves the dependency graph.
+
+# Ed25519 signatures.
+[profile.dev.package.curve25519-dalek]
+opt-level = 3
+
+[profile.dev.package.ed25519-dalek]
+opt-level = 3
+
+# Digests. A name-only spec covers both locked sha2 versions (0.10 and 0.11).
+[profile.dev.package.sha2]
+opt-level = 3
+
+[profile.dev.package.blake3]
+opt-level = 3
+
+# P-256 (WebAuthn) and its arithmetic stack.
+[profile.dev.package.p256]
+opt-level = 3
+
+[profile.dev.package.ecdsa]
+opt-level = 3
+
+[profile.dev.package.elliptic-curve]
+opt-level = 3
+
+[profile.dev.package.primeorder]
+opt-level = 3
+
+[profile.dev.package.crypto-bigint]
+opt-level = 3
+
+# Community Plugin guests. Every real-worker launch validates the guest and
+# compiles it with Cranelift at OptLevel::Speed (pos-plugin-host engine.rs),
+# so the real-worker tests run an opt-level 0 compiler on every launch.
+# A name-only spec covers both locked wasmparser versions (0.258 and 0.261).
+[profile.dev.package.wasmtime]
+opt-level = 3
+
+[profile.dev.package.wasmtime-environ]
+opt-level = 3
+
+[profile.dev.package.wasmtime-internal-cranelift]
+opt-level = 3
+
+[profile.dev.package.wasmparser]
+opt-level = 3
+
+[profile.dev.package.cranelift-codegen]
+opt-level = 3
+
+[profile.dev.package.cranelift-frontend]
+opt-level = 3
+
+[profile.dev.package.cranelift-assembler-x64]
+opt-level = 3
+
+[profile.dev.package.cranelift-bforest]
+opt-level = 3
+
+[profile.dev.package.cranelift-entity]
+opt-level = 3
+
+[profile.dev.package.regalloc2]
+opt-level = 3
+
+[profile.dev.package.cranelift-bitset]
+opt-level = 3
+
+[profile.dev.package.cranelift-control]
+opt-level = 3
+
+# ELF emission for each compiled guest.
+[profile.dev.package.object]
+opt-level = 3
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

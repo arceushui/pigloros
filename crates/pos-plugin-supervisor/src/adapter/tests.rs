@@ -1,27 +1,24 @@
-//! Unit tests of the adapter's mapping, staging, receipts, quarantine table
-//! and registration. The pass-level tests are in `tests/community_pass.rs`.
+//! Unit tests of the adapter's mapping, staging, receipts and
+//! registration. The pass-level tests are in `tests/community_pass.rs`.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use pos_core::{CoreError, EntityId, Kind, PipelineOutcomeV1};
+use pos_core::{EntityId, Hash, Kind};
 use pos_runtime::community_plugin_host::{
     plugin_output_digest_v1, AtomicCommitFailureV1, ComponentTrapClassV1, EventDraftV1, FieldRefV1,
-    GuestPluginErrorV1, MeteringV1, PluginErrorCodeV1, TraceAnnotationV1, TrapReproductionV1,
+    GuestPluginErrorV1, MeteringV1, PluginErrorCodeV1, RevocationBasisV1, TraceAnnotationV1,
+    TrapReproductionV1, TrustDenialBasisV1,
 };
+use pos_runtime::DirectInputRefV1;
 use ulid::Ulid;
 
-use super::failure::commit_failed;
-use super::output::{map_draft, mapped_drafts};
+use super::output::{map_draft, mapped_drafts, mapped_output};
 use super::*;
 use crate::launch::WorkerProgramV1;
-use crate::test_support::{
-    self, community_pin, err, ok, pin_of, DriverPlugin, METERING, SMALL_BUDGET,
-};
-
-const DENIED: Error = commit_failed(AtomicCommitFailureV1::DeterministicTypedResult);
+use crate::test_support::{self, community_pin, err, ok, pin_of, DriverPlugin, METERING};
 
 fn plugin(id: PluginId, has_driver: bool) -> DriverPlugin {
     DriverPlugin {
@@ -43,12 +40,16 @@ impl InvocationContextSourceV1 for FixedSource {
         &mut self,
         _: TimelineId,
         _: &ObservationView<'_>,
+        binding: InvocationBindingV1,
     ) -> Result<InvocationContextV1, Error> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.refusal.map_or_else(
             || {
                 Ok(InvocationContextV1 {
-                    invocation: test_support::invocation(b"observation"),
+                    invocation: test_support::bound(
+                        test_support::invocation(b"observation"),
+                        binding,
+                    ),
                     host_inputs: HostInputs { simulation_time: 1 },
                 })
             },
@@ -107,81 +108,49 @@ fn fixture(
     let calls = Arc::new(AtomicUsize::new(0));
     let supervisor = WorkerProgramV1::new(PathBuf::from("/worker"))
         .and_then(|program| CommunityPluginSupervisorV1::new(program, Duration::from_secs(1)));
-    let (driver, handle) = CommunityDriverV1::new(CommunityDriverConfigV1 {
+    let settings = CommunityDriverSettingsV1 {
         plugin_id: PluginId::new(),
         name: "community-fixture",
         tick_interval: Duration::from_millis(250),
         subscriptions: vec![ProjectionKey::new(EntityId::new())],
         supervisor: supervisor
             .unwrap_or_else(|| std::panic::resume_unwind(Box::new("invalid supervisor"))),
-        negotiated: test_support::negotiated_with("plugin-a", SMALL_BUDGET, Vec::new()),
-        component: b"component".to_vec(),
         source: Box::new(FixedSource {
             calls: Arc::clone(&calls),
             refusal,
         }),
         initial_state: initial(),
-    });
+    };
+    let config = test_support::config_with("plugin-a", b"component", settings);
+    let (driver, handle) = CommunityDriverV1::new(config);
     (driver, handle, calls)
 }
 
-fn every_error() -> Vec<(Error, Option<PluginAvailabilityV1>)> {
-    use PluginAvailabilityV1 as Availability;
-    let trap = Error::ComponentTrap {
-        class: ComponentTrapClassV1::Other,
-        reproduction: TrapReproductionV1::Unverified,
-    };
-    let exhausted = Some(Availability::ResourceExhausted);
-    vec![
-        (Error::InvalidManifest, None),
-        (Error::ArtifactTrustDenied, None),
-        (Error::ArtifactRevoked, Some(Availability::Revoked)),
-        (Error::IncompatibleAbi, None),
-        (Error::MissingFeature { index: 0 }, None),
-        (Error::CapabilityDenied { index: 0 }, None),
-        (Error::InvalidInvocation, None),
-        (Error::InvalidGuestOutput, None),
-        (Error::UnsupportedSchema, None),
-        (Error::StateMigrationFailed, None),
-        (Error::GuestDeclaredFailure, None),
-        (trap, Some(Availability::Trapped)),
-        (Error::WorkerCrashed, Some(Availability::Unavailable)),
-        (Error::FuelExhausted, exhausted),
-        (Error::MemoryLimitExceeded, exhausted),
-        (Error::HostCallLimitExceeded, exhausted),
-        (Error::OutputLimitExceeded, exhausted),
-        (Error::DeterministicDeadlineExceeded, None),
-        (Error::OperationalWatchdogStop, None),
-        (DENIED, None),
-    ]
+/// Offer the authorization of the Driver's own release and bytes for a pass.
+fn offer(driver: &CommunityDriverV1, handle: &CommunityPluginHandleV1) {
+    let authorization = test_support::authorization_for(&driver.negotiated, &driver.component);
+    let () = ok(handle.offer_authorization(authorization));
 }
 
-#[test]
-fn only_traps_resource_limits_revocation_and_crashes_quarantine() {
-    for (error, expected) in every_error() {
-        assert_eq!(quarantine_for(error), expected, "{error:?}");
-    }
+/// The `NodeDigest` inputs a guest digest list declares.
+fn node_inputs<const N: usize>(digests: [[u8; 32]; N]) -> [DirectInputRefV1; N] {
+    digests.map(|digest| DirectInputRefV1::NodeDigest {
+        digest: Hash::from_bytes(digest),
+    })
 }
 
-#[test]
-fn a_failed_pass_is_classified_by_its_commit_contract() {
-    let host = PassFailureV1::Host;
-    let operational = commit_failed(AtomicCommitFailureV1::Operational);
-    let rejected = Box::new(PipelineOutcomeV1::Rejected);
-    let not_admitted = RuntimeError::ScheduledPassNotAdmitted(rejected);
-    let unknown = RuntimeError::Store(CoreError::StorageOutcomeUnknown("lost".to_owned()));
-    let frozen = RuntimeError::Store(CoreError::ErasureAccessFrozen);
-    let crashed = RuntimeError::from(Error::WorkerCrashed);
-    assert_eq!(classify_pass_failure(&not_admitted), host(DENIED));
-    assert_eq!(classify_pass_failure(&unknown), PassFailureV1::InDoubt);
-    assert_eq!(classify_pass_failure(&frozen), host(operational));
-    assert_eq!(classify_pass_failure(&crashed), host(Error::WorkerCrashed));
-    for unrelated in [
-        RuntimeError::PendingDriverStep,
-        RuntimeError::NoScheduledAdmissionInDoubt,
-    ] {
-        assert_eq!(classify_pass_failure(&unrelated), PassFailureV1::Unrelated);
-    }
+/// ADR-061 r9: an output whose annotation declares `[9; 32]`, beside one draft
+/// declaring `[7; 32]` and the consumed dependency `[3; 32]`, re-digested after
+/// the edit.
+fn annotated_output() -> PluginOutputV1 {
+    let mut annotated = output(vec![EventDraftV1 {
+        dependency_digests: vec![[7; 32]],
+        ..draft("community.event", b"payload")
+    }]);
+    annotated.trace_annotations[0].dependency_digests = vec![[9; 32]];
+    annotated.consumed_dependencies = vec![[3; 32]];
+    annotated.output_digest = plugin_output_digest_v1(&annotated);
+    annotated
 }
 
 #[test]
@@ -191,27 +160,71 @@ fn a_draft_maps_to_an_event_draft_or_is_rejected() {
         ..draft("community.event", b"payload")
     }));
     let entity = EntityId::from_ulid(Ulid::from(u128::from_be_bytes(*b"0123456789abcdef")));
-    assert_eq!(mapped.entity, entity);
-    assert_eq!(mapped.event_type, Kind::new("community.event"));
-    assert_eq!(mapped.payload.as_slice(), b"payload");
-    assert_eq!(mapped.causation_id, None);
+    assert_eq!(mapped.draft.entity, entity);
+    assert_eq!(mapped.draft.event_type, Kind::new("community.event"));
+    assert_eq!(mapped.draft.payload.as_slice(), b"payload");
+    assert_eq!(mapped.draft.causation_id, None);
+    assert!(mapped.direct_inputs.is_empty());
 
-    let with_dependency = EventDraftV1 {
-        dependency_digests: vec![[1; 32]],
-        ..draft("community.event", b"p")
-    };
     for malformed in [draft("Community.Event", b"p"), draft("", b"p")] {
         assert_eq!(map_draft(&malformed), Err(Error::InvalidGuestOutput));
     }
-    // Dependency digests have nowhere to go: a distinct, closed refusal.
-    assert_eq!(map_draft(&with_dependency), Err(Error::UnsupportedSchema));
+}
+
+#[test]
+fn a_drafts_dependency_digests_map_to_its_node_digest_inputs() {
+    let with_dependencies = EventDraftV1 {
+        dependency_digests: vec![[1; 32], [2; 32]],
+        ..draft("community.event", b"p")
+    };
+    let mapped = ok(map_draft(&with_dependencies));
+    let inputs = node_inputs([[1; 32], [2; 32]]);
+    assert_eq!(mapped.direct_inputs, inputs);
+}
+
+#[test]
+fn consumed_dependencies_map_to_step_inputs_and_annotations_stay_dropped() {
+    let mut consumed = output(vec![EventDraftV1 {
+        dependency_digests: vec![[7; 32]],
+        ..draft("a.b", b"one")
+    }]);
+    consumed.consumed_dependencies = vec![[3; 32], [4; 32]];
+    let step = ok(mapped_output(&consumed, 100));
+    let step_inputs = node_inputs([[3; 32], [4; 32]]);
+    assert_eq!(step.step_inputs(), step_inputs);
+    assert_eq!(step.outputs.len(), 1);
+    let draft_input = DirectInputRefV1::NodeDigest {
+        digest: Hash::from_bytes([7; 32]),
+    };
+    assert_eq!(step.outputs[0].direct_inputs, [draft_input]);
+    // The fixture carries one annotation; it declares nothing.
+    assert_eq!(consumed.trace_annotations.len(), 1);
+
+    let none = ok(mapped_output(&output(Vec::new()), 0));
+    assert!(none.step_inputs().is_empty());
+    assert_eq!(
+        mapped_output(&consumed, 2).map(|_| ()),
+        Err(Error::OutputLimitExceeded)
+    );
+}
+
+/// ADR-061 r9 test 1: an annotation's dependency digests are declared nowhere.
+#[test]
+fn annotation_dependency_digests_are_declared_nowhere() {
+    let step = ok(mapped_output(&annotated_output(), 100));
+    assert_eq!(step.step_inputs(), node_inputs([[3; 32]]));
+    assert_eq!(step.outputs.len(), 1);
+    assert_eq!(step.outputs[0].direct_inputs, node_inputs([[7; 32]]));
+    let [from_annotation] = node_inputs([[9; 32]]);
+    assert!(!step.step_inputs().contains(&from_annotation));
+    assert!(!step.outputs[0].direct_inputs.contains(&from_annotation));
 }
 
 #[test]
 fn drafts_are_mapped_in_the_guests_order_within_the_event_bytes_limit() {
     let two = output(vec![draft("a.b", b"one"), draft("c.d", b"two")]);
     let drafts = ok(mapped_drafts(&two, 6));
-    let payloads: Vec<&[u8]> = drafts.iter().map(|d| d.payload.as_slice()).collect();
+    let payloads: Vec<&[u8]> = drafts.iter().map(|d| d.draft.payload.as_slice()).collect();
     assert_eq!(payloads, [&b"one"[..], &b"two"[..]]);
     assert_eq!(mapped_drafts(&two, 5), Err(Error::OutputLimitExceeded));
     // Nothing above the limit is mapped partly; a bad draft stops the vector.
@@ -229,7 +242,7 @@ fn a_valid_output_is_staged_with_a_receipt_until_the_batch_commits() {
     let valid = output(vec![draft("community.event", b"payload")]);
     let digest = valid.output_digest;
     let staged = ok(driver.accept([3; 16], report(valid)));
-    assert_eq!(staged.drafts.len(), 1);
+    assert_eq!(staged.drafts().len(), 1);
     assert_eq!(
         driver.staged,
         Some(CommunityStateV1 {
@@ -263,6 +276,24 @@ fn a_valid_output_is_staged_with_a_receipt_until_the_batch_commits() {
     // A second commit has nothing staged and changes nothing.
     driver.commit_step();
     assert_eq!(handle.committed_state().bytes, b"next");
+}
+
+/// ADR-061 r9 test 2: the adapter's output carries nothing from the annotation.
+#[test]
+fn an_accepted_output_carries_nothing_from_its_annotation() {
+    let (mut driver, handle, _) = fixture(None);
+    let annotated = annotated_output();
+    let digest = annotated.output_digest;
+    let step = ok(driver.accept([3; 16], report(annotated)));
+    driver.commit_step();
+    assert_eq!(step.outputs.len(), 1);
+    assert_eq!(step.outputs[0].direct_inputs, node_inputs([[7; 32]]));
+    assert_eq!(step.step_inputs(), node_inputs([[3; 32]]));
+    let receipts = handle.receipts();
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(receipts[0].dropped_trace_annotations, 1);
+    assert_eq!(receipts[0].output_digest, Some(digest));
+    assert_eq!(receipts[0].disposition, ReceiptDispositionV1::Committed);
 }
 
 #[test]
@@ -365,13 +396,56 @@ fn driver_receipt(driver: &CommunityDriverV1) -> CommunityInvocationReceiptV1 {
         failure: None,
         guest_error: None,
         disposition: ReceiptDispositionV1::Discarded,
+        content_validation: ContentValidationV1::NotPerformed,
     }
+}
+
+/// Every closed error with the availability its failure puts a Plugin in.
+fn every_error() -> Vec<(Error, Option<PluginAvailabilityV1>)> {
+    use PluginAvailabilityV1 as Availability;
+    let trap = Error::ComponentTrap {
+        class: ComponentTrapClassV1::Other,
+        reproduction: TrapReproductionV1::Unverified,
+    };
+    let denied = Error::ArtifactTrustDenied {
+        basis: TrustDenialBasisV1::Untrusted,
+    };
+    let revoked = Error::ArtifactRevoked {
+        basis: RevocationBasisV1::Artifact,
+    };
+    let commit = Error::AtomicCommitFailed {
+        failure: AtomicCommitFailureV1::DeterministicTypedResult,
+    };
+    let exhausted = Some(Availability::ResourceExhausted);
+    vec![
+        (Error::InvalidManifest, None),
+        (denied, None),
+        (revoked, Some(Availability::Revoked)),
+        (Error::IncompatibleAbi, None),
+        (Error::MissingFeature { index: 0 }, None),
+        (Error::CapabilityDenied { index: 0 }, None),
+        (Error::InvalidInvocation, None),
+        (Error::InvalidGuestOutput, None),
+        (Error::UnsupportedSchema, None),
+        (Error::StateMigrationFailed, None),
+        (Error::GuestDeclaredFailure, None),
+        (trap, Some(Availability::Trapped)),
+        (Error::WorkerCrashed, Some(Availability::Unavailable)),
+        (Error::FuelExhausted, exhausted),
+        (Error::MemoryLimitExceeded, exhausted),
+        (Error::HostCallLimitExceeded, exhausted),
+        (Error::OutputLimitExceeded, exhausted),
+        (Error::DeterministicDeadlineExceeded, None),
+        (Error::OperationalWatchdogStop, None),
+        (commit, None),
+    ]
 }
 
 #[test]
 fn a_refused_invocation_marks_or_quarantines_only_by_its_class() {
     for (error, quarantine) in every_error() {
         let (mut driver, handle, calls) = fixture(Some(error));
+        offer(&driver, &handle);
         let failed = err(driver.step(TimelineId::new(), ObservationView::empty()));
         assert!(
             matches!(failed, RuntimeError::CommunityPlugin(refused) if refused == error),
@@ -390,6 +464,7 @@ fn a_refused_invocation_marks_or_quarantines_only_by_its_class() {
 #[test]
 fn a_quarantined_adapter_refuses_to_run_until_it_is_cleared() {
     let (mut driver, handle, calls) = fixture(Some(Error::FuelExhausted));
+    offer(&driver, &handle);
     assert!(driver
         .step(TimelineId::new(), ObservationView::empty())
         .is_err());
@@ -438,6 +513,7 @@ fn a_quarantined_adapter_refuses_to_run_until_it_is_cleared() {
 #[test]
 fn syncing_an_unregistered_plugin_leaves_the_handle_quarantined() {
     let (mut driver, handle, _) = fixture(Some(Error::WorkerCrashed));
+    offer(&driver, &handle);
     assert!(driver
         .step(TimelineId::new(), ObservationView::empty())
         .is_err());
@@ -458,6 +534,7 @@ fn syncing_an_unregistered_plugin_leaves_the_handle_quarantined() {
 #[test]
 fn a_step_drops_a_stale_staged_state_first() {
     let (mut driver, handle, _) = fixture(Some(Error::InvalidInvocation));
+    offer(&driver, &handle);
     let _staged = ok(driver.accept([1; 16], report(output(vec![draft("a.b", b"p")]))));
     assert!(driver.staged.is_some());
     assert!(driver
@@ -498,6 +575,34 @@ fn registration_is_pinned_community_and_non_participant() {
         registry.availability(plugin.id),
         Some(PluginAvailabilityV1::Available)
     );
+    assert_eq!(registry.driver_count(), 1);
+}
+
+/// R8-W4: the production pin is accepted, and is the governed community pin.
+#[test]
+fn registration_accepts_the_production_community_pin() {
+    let (driver, handle, _) = fixture(None);
+    let plugin = plugin(handle.plugin_id(), true);
+    let mut registry = PluginRegistry::new();
+    let pin = ok(pos_runtime::community_pin_v1(
+        pos_core::Hash::from_bytes([1; 32]),
+        vec!["community".to_owned()],
+    ));
+    assert_eq!(
+        pin,
+        pin_of(
+            DomainImplementationKindV1::Plugin,
+            PluginIsolationV1::GovernedCommunity,
+            1,
+            "community",
+        )
+    );
+    let () = ok(register_community_driver(
+        &mut registry,
+        &plugin,
+        pin,
+        driver,
+    ));
     assert_eq!(registry.driver_count(), 1);
 }
 

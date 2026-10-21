@@ -118,6 +118,12 @@ impl PreparedAttemptDirectory {
         &self.planned.intent
     }
 
+    /// The held attempt directory and its root directory, for attaching the
+    /// quarantined root mount by descriptor.
+    pub(crate) const fn held_directories(&self) -> (&File, &File) {
+        (&self.attempt, &self.root)
+    }
+
     /// Verify the durable identity extension and the same unmounted directory tree.
     ///
     /// # Errors

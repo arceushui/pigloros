@@ -5,7 +5,7 @@ use pos_owner_bridge_codec::{
     parse_none_attestation_object, validate_client_data_json, AssertionReplyV1, AttestationReplyV1,
     CeremonyId, CeremonyKind, ControlState, CreateOptionsV1, GetOptionsV1,
     LoopbackRequestDisposition, OwnerBridgeCodecError, OwnerBridgeControlV1, OwnerUserHandle,
-    PrfInput, PrfResult, TransportCodes, WebAuthnChallenge,
+    PrfInput, PrfResult, TransportCodes, VerificationReason as Reason, WebAuthnChallenge,
 };
 
 const CEREMONY_ID: CeremonyId = CeremonyId::from_bytes([
@@ -27,6 +27,10 @@ const PRF_RESULT: PrfResult = PrfResult::from_bytes([
     0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8, 0xa9, 0xaa, 0xab, 0xac, 0xad, 0xae, 0xaf,
     0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7, 0xb8, 0xb9, 0xba, 0xbb, 0xbc, 0xbd, 0xbe, 0xbf,
 ]);
+
+fn verified<T>(result: Result<T, Reason>) -> Result<T, OwnerBridgeCodecError> {
+    result.map_err(OwnerBridgeCodecError::Verification)
+}
 
 #[test]
 fn public_wire_codecs_match_adr_110_golden_vectors() -> Result<(), OwnerBridgeCodecError> {
@@ -175,25 +179,25 @@ fn public_client_data_validation_enforces_the_closed_web_authn_shape() {
     let duplicate_after_unescaping = b"{\"type\":\"webauthn.create\",\"\\u0074ype\":\"webauthn.create\",\"challenge\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8\",\"origin\":\"http://localhost:49291\"}";
     assert_eq!(
         validate_client_data_json(duplicate_after_unescaping, CeremonyKind::Create, &CHALLENGE),
-        Err(OwnerBridgeCodecError::InvalidPayload)
+        Err(Reason::Malformed)
     );
 
     let escaped_challenge = b"{\"type\":\"webauthn.create\",\"challenge\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj\\u0038\",\"origin\":\"http://localhost:49291\"}";
     assert_eq!(
         validate_client_data_json(escaped_challenge, CeremonyKind::Create, &CHALLENGE),
-        Err(OwnerBridgeCodecError::InvalidPayload)
+        Err(Reason::Challenge)
     );
 
     let cross_origin = b"{\"type\":\"webauthn.create\",\"challenge\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8\",\"origin\":\"http://localhost:49291\",\"crossOrigin\":true}";
     assert_eq!(
         validate_client_data_json(cross_origin, CeremonyKind::Create, &CHALLENGE),
-        Err(OwnerBridgeCodecError::InvalidPayload)
+        Err(Reason::CrossOrigin)
     );
 
     let top_origin = b"{\"type\":\"webauthn.create\",\"challenge\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8\",\"origin\":\"http://localhost:49291\",\"topOrigin\":false}";
     assert_eq!(
         validate_client_data_json(top_origin, CeremonyKind::Create, &CHALLENGE),
-        Err(OwnerBridgeCodecError::InvalidPayload)
+        Err(Reason::CrossOrigin)
     );
 }
 
@@ -210,7 +214,7 @@ fn public_authenticator_parsers_enforce_none_cose_and_extension_rules(
     authenticator_data[57..].copy_from_slice(&cose_key);
 
     let attestation = none_attestation_object(&authenticator_data);
-    let create = parse_none_attestation_object(&attestation, &[0x80, 0x81])?;
+    let create = verified(parse_none_attestation_object(&attestation, &[0x80, 0x81]))?;
     assert_eq!(create.credential_id(), &[0x80, 0x81]);
     assert_eq!(create.sign_count(), 7);
     assert_eq!(create.public_key().canonical_encoding(), cose_key);
@@ -220,7 +224,7 @@ fn public_authenticator_parsers_enforce_none_cose_and_extension_rules(
     assertion[32] = 0x85;
     assertion[33..37].copy_from_slice(&9_u32.to_be_bytes());
     assertion[37..].copy_from_slice(&[0xa1, 0x62, b't', b'x', 0xf5]);
-    let parsed_assertion = parse_assertion_authenticator_data(&assertion)?;
+    let parsed_assertion = verified(parse_assertion_authenticator_data(&assertion))?;
     assert_eq!(parsed_assertion.sign_count(), 9);
 
     let mut duplicate_extension = [0; 44];
@@ -228,14 +232,14 @@ fn public_authenticator_parsers_enforce_none_cose_and_extension_rules(
     duplicate_extension[37..].copy_from_slice(&[0xa2, 0x61, b'x', 0xf5, 0x61, b'x', 0xf4]);
     assert_eq!(
         parse_assertion_authenticator_data(&duplicate_extension),
-        Err(OwnerBridgeCodecError::InvalidPayload)
+        Err(Reason::Extensions)
     );
 
     let mut backup_state_without_eligibility = assertion;
     backup_state_without_eligibility[32] = 0x95;
     assert_eq!(
         parse_assertion_authenticator_data(&backup_state_without_eligibility),
-        Err(OwnerBridgeCodecError::InvalidPayload)
+        Err(Reason::BackupFlags)
     );
     Ok(())
 }

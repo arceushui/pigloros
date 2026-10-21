@@ -6,7 +6,9 @@
 
 use std::collections::HashSet;
 
-use crate::{AppendIdentity, Event, EventDraft, EventId, Hash, Seq, TimelineId};
+use crate::{
+    AppendIdentity, Event, EventDraft, EventId, FactualTickDependenciesV1, Hash, Seq, TimelineId,
+};
 use ulid::Ulid;
 
 /// The only pipeline contract version accepted by this implementation.
@@ -404,6 +406,10 @@ pub struct PipelineAdmissionBasisDraftV1 {
     pub precondition: Option<PipelinePreconditionV1>,
     pub security_revisions: Option<PipelineSecurityRevisionsV1>,
     pub batch: Option<PipelineDraftBatchV1>,
+    /// The factual Tick declaration the basis binds (ADR-064 Revision 3,
+    /// R3.7.1). It is required: a host that builds a basis by hand assembles
+    /// one with `assemble_factual_tick`.
+    pub dependencies: FactualTickDependenciesV1,
 }
 
 /// Complete evidence and state basis that must be revalidated atomically with commit.
@@ -414,6 +420,7 @@ pub struct PipelineAdmissionBasisV1 {
     precondition: PipelinePreconditionV1,
     security_revisions: PipelineSecurityRevisionsV1,
     batch: PipelineDraftBatchV1,
+    dependencies: FactualTickDependenciesV1,
 }
 
 impl PipelineAdmissionBasisV1 {
@@ -452,6 +459,7 @@ impl PipelineAdmissionBasisV1 {
             precondition,
             security_revisions,
             batch,
+            dependencies: draft.dependencies,
         })
     }
 
@@ -478,6 +486,12 @@ impl PipelineAdmissionBasisV1 {
     #[must_use]
     pub const fn batch(&self) -> &PipelineDraftBatchV1 {
         &self.batch
+    }
+
+    /// The factual Tick declaration this basis binds.
+    #[must_use]
+    pub const fn dependencies(&self) -> &FactualTickDependenciesV1 {
+        &self.dependencies
     }
 
     /// Bind every field of this admission basis into one exact retry fingerprint.
@@ -513,11 +527,12 @@ impl PipelineAdmissionBasisV1 {
             hasher.update(revision.as_bytes());
         }
         hasher.update(self.batch.digest.as_bytes());
+        hasher.update(self.dependencies.digest().as_bytes());
         Hash::from_bytes(*hasher.finalize().as_bytes())
     }
 }
 
-const fn ingress_tag(ingress: PipelineIngressV1) -> u8 {
+pub(crate) const fn ingress_tag(ingress: PipelineIngressV1) -> u8 {
     match ingress {
         PipelineIngressV1::HumanProposedAction => 1,
         PipelineIngressV1::ScheduledAiDriver => 2,
@@ -699,6 +714,10 @@ pub enum PipelineOutcomeV1 {
     AdmissionConflict,
     Committed(PipelineCommitReceiptV1),
     RecoveredDuplicate(PipelineCommitReceiptV1),
+    /// The basis declares a factual Tick dependency record the store refuses.
+    InvalidDependencyDeclaration,
+    /// The Timeline's recorded dependency set accepts no further Tick.
+    DependencySetExhausted,
 }
 
 fn invalid_draft(draft: &EventDraft) -> bool {

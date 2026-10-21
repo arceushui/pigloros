@@ -14,12 +14,19 @@ The evidence is executable:
   the negative variants and the committed Component fixtures.
 - The `plugin-component-fixtures` CI job rebuilds every fixture from source
   with the pinned toolchains and requires identical bytes.
+- A third guest fixture,
+  `plugins/community/examples/compatibility-prototype/fixtures/probe-guest.wasm`
+  (#652), came after this evidence. It mirrors the Rust guest, except on the
+  exact observations `reserved` and `bad-digest`, which the `PCH1` cases
+  `PCF-CPH-013` and `PCF-CPH-014` use. The same fixture job builds and verifies
+  it. "The Rust and C guests" and "both guests" below mean the two languages
+  of this evidence, not the probe guest.
 
 ## Runtime pin
 
 | Item | Value |
 |---|---|
-| Crate | `wasmtime` `=49.0.2` (newest stable release on 2026-10-06; MSRV 1.96) |
+| Crate | `wasmtime` `=49.0.2` as proven; the current pin is `=49.0.4` (security patch releases for RUSTSEC-2026-0353..0364, #630, and RUSTSEC-2026-0378..0379) (MSRV 1.96) |
 | Requested features | `default-features = false`, `component-model`, `cranelift`, `runtime` (ADR-061 revision 5, decision 2) |
 | Resolved Wasmtime features | `component-model`, `cranelift`, `once_cell`, `runtime`, `std`, `wasmtime-jit-icache-coherence` |
 | Rust toolchain | 1.97.1 (repository pin; the download is verified only by rustup's own checks) |

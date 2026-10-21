@@ -823,6 +823,16 @@ impl ProjectionRegistry {
             })
     }
 
+    /// Whether an installed reducer slot is keyed by `plugin_id`.
+    ///
+    /// Name-keyed slots, which only test support installs, are not covered.
+    #[must_use]
+    pub fn has_installed_reducer(&self, plugin_id: PluginId) -> bool {
+        self.slots
+            .iter()
+            .any(|(_, slot)| slot.plugin_id == Some(plugin_id))
+    }
+
     /// Return the names of all registered reducers in insertion order.
     #[must_use]
     pub fn reducer_names(&self) -> Vec<&str> {
@@ -1041,6 +1051,14 @@ impl ProjectionRegistry {
             snapshot.insert(name.clone(), slot.registry.clone());
         }
         snapshot
+    }
+
+    /// Inspect retained State after a fixture deliberately poisons its gate.
+    /// This diagnostic is absent from deployable builds and grants no release.
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn retained_state_for_test(&self) -> std::collections::HashMap<String, StateRegistry> {
+        self.snapshot_unfenced()
     }
 
     /// Compare this registry's accumulated state against a previously captured

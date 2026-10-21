@@ -47,6 +47,22 @@ cargo_home="${CARGO_HOME:-${HOME}/.cargo}"
   "${work}/rust-target/wasm32-unknown-unknown/release/pigloros_compatibility_prototype.wasm" \
   --output "${out_dir}/rust-guest.wasm"
 
+# Probe guest: the Rust guest's build, with its own crate, bindings and target
+# directory so that the Rust guest's bytes stay as they are.
+cp -R -- "${here}/probe-guest" "${work}/probe-guest"
+mkdir -p -- "${work}/probe-guest/generated"
+"${wit_bindgen}" rust --world community-plugin \
+  --out-dir "${work}/probe-guest/generated" "${wit_dir}"
+(
+  cd -- "${work}/probe-guest"
+  RUSTFLAGS="--remap-path-prefix=${work}=/build --remap-path-prefix=${cargo_home}=/cargo" \
+    cargo build --locked --release --target wasm32-unknown-unknown \
+    --target-dir "${work}/probe-target"
+)
+"${wasm_tools}" component new \
+  "${work}/probe-target/wasm32-unknown-unknown/release/pigloros_compatibility_probe.wasm" \
+  --output "${out_dir}/probe-guest.wasm"
+
 # C guest: wasi-sdk's libc supplies malloc and memcpy only. `component new` has
 # no WASI adapter, so any remaining WASI import fails the build.
 mkdir -p -- "${work}/c-guest"
@@ -84,11 +100,11 @@ for source in "${here}"/variants/*.wat; do
   "${wasm_tools}" parse "${source}" --output "${out_dir}/${name}.wasm"
 done
 
-# Both guests must import exactly the world's imports: host-v1 and the
+# Every guest must import exactly the world's imports: host-v1 and the
 # types-only contract-v1 interface that the world's `use` statements elaborate.
 expected_imports="import pigloros:plugin/contract-v1@0.1.0;
 import pigloros:plugin/host-v1@0.1.0;"
-for guest in rust-guest c-guest; do
+for guest in rust-guest probe-guest c-guest; do
   imports="$("${wasm_tools}" component wit "${out_dir}/${guest}.wasm" |
     grep -E '^\s*import ' | sed -E 's/^\s+//' | sort)"
   if [[ "${imports}" != "${expected_imports}" ]]; then

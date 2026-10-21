@@ -9,10 +9,15 @@
 use std::sync::{Arc, Weak};
 
 use pos_core::{
-    Event, EventDraft, EventOriginRecordV1, ForkAdmissionRecordV1, ForkAppendOperationV1,
+    CounterfactualBasisV1, CounterfactualDependencyRecordingPortV1,
+    CounterfactualInvalidationCommandV1, CounterfactualInvalidationOutcomeV1,
+    CounterfactualStoreErrorV1, CounterfactualTickOutcomeV1, Event, EventDraft,
+    EventOriginRecordV1, ForkAdmissionRecordInputV1, ForkAdmissionRecordV1, ForkAppendOperationV1,
     ForkAppendSourceIdentityV1, ForkClassifierRegistrationV1, ForkClassifierSourceV1,
     ForkClassifierTableV1, ForkEventAppendRequestV1, ForkEventClassifierV1,
-    ForkInterventionAdmissionV1, Hash, TimelineId, MAX_FORK_EVENT_REGISTRAR_BYTES_V1,
+    ForkInterventionAdmissionV1, Hash, ImportedForkAdmissionRecordV1,
+    ImportedForkAttributionAdmissionV1, ImportedForkClassifierGraphV1, PipelineDraftBatchV1,
+    TickDependencyRecordV1, TimelineId, MAX_FORK_EVENT_REGISTRAR_BYTES_V1,
 };
 
 use crate::ForkAdmissionAuthoritySessionV1;
@@ -38,6 +43,70 @@ pub enum ForkEventAuthorityErrorV1 {
     /// The adapter cannot determine whether its transaction committed.
     #[error("Fork Event authority storage outcome is indeterminate")]
     StorageIndeterminate,
+}
+
+/// Closed ADR-099 revision 12 provenance rejections of a classified
+/// counterfactual commit or append.
+///
+/// `InvalidRequest` is deliberately overloaded: an imported Fork, a classified
+/// call on an unclassified Fork, a permit for a source that is not
+/// host-internal, and a draft carrying a `WallTime` override are all host
+/// programming errors with one remedy, so they share one code.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum ClassifiedProvenanceErrorV1 {
+    /// The host request cannot be served by the classified counterfactual path.
+    #[error("invalid classified counterfactual request")]
+    InvalidRequest,
+    /// The live session or the host-internal permit is unavailable.
+    #[error("classified counterfactual authority is unauthenticated")]
+    Unauthenticated,
+    /// The immutable FAR1/classifier/provenance graph is incomplete or unequal.
+    #[error("classified counterfactual authority is corrupt")]
+    CorruptAuthority,
+}
+
+/// Closed outcomes of a classified counterfactual commit or append.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum ClassifiedCounterfactualErrorV1 {
+    /// A storage, record, or fence error of the counterfactual write path.
+    /// `OutcomeUnknown` leaves the commit in doubt.
+    #[error("classified counterfactual storage failed")]
+    Store(#[source] CounterfactualStoreErrorV1),
+    /// The ADR-099 provenance of the classified Events was rejected.
+    #[error("classified counterfactual provenance was rejected")]
+    Provenance(#[source] ClassifiedProvenanceErrorV1),
+}
+
+impl From<CounterfactualStoreErrorV1> for ClassifiedCounterfactualErrorV1 {
+    fn from(error: CounterfactualStoreErrorV1) -> Self {
+        Self::Store(error)
+    }
+}
+
+/// The total ADR-099 revision 12 mapping of a classified-append authority
+/// error. `ClassifierRejected` and `Conflict` cannot follow a host-internal
+/// source and a fresh operation, so they can only mean corrupt authority; an
+/// indeterminate step inside the counterfactual transaction is a known
+/// rollback.
+impl From<ForkEventAuthorityErrorV1> for ClassifiedCounterfactualErrorV1 {
+    fn from(error: ForkEventAuthorityErrorV1) -> Self {
+        match error {
+            ForkEventAuthorityErrorV1::InvalidRequest => {
+                Self::Provenance(ClassifiedProvenanceErrorV1::InvalidRequest)
+            }
+            ForkEventAuthorityErrorV1::Unauthenticated => {
+                Self::Provenance(ClassifiedProvenanceErrorV1::Unauthenticated)
+            }
+            ForkEventAuthorityErrorV1::ClassifierRejected
+            | ForkEventAuthorityErrorV1::Conflict
+            | ForkEventAuthorityErrorV1::CorruptAuthority => {
+                Self::Provenance(ClassifiedProvenanceErrorV1::CorruptAuthority)
+            }
+            ForkEventAuthorityErrorV1::StorageIndeterminate => {
+                Self::Store(CounterfactualStoreErrorV1::StorageFailure)
+            }
+        }
+    }
 }
 
 /// Committed classifier-registration receipt.
@@ -499,6 +568,11 @@ pub trait ForkEventProvenanceAuthorityPortV1 {
 
     /// Read the validated child suffix provenance in Timeline Order.
     ///
+    /// This is read validator (b) of ADR-105 r6 R6.9: it accepts a local Fork
+    /// and a code-2 imported Fork, each under its own origin rules. The result
+    /// is evidence, never write authority: no permit, registration, or append
+    /// follows from reading an imported Fork.
+    ///
     /// # Errors
     ///
     /// Returns an error when the stored suffix is incomplete or fails provenance validation.
@@ -514,6 +588,132 @@ pub trait ForkEventProvenanceAuthorityPortV1 {
         )>,
         ForkEventAuthorityErrorV1,
     >;
+}
+
+/// One transaction's classified append authority, lent by the host.
+///
+/// It borrows the live ADR-106 session and exactly one host-internal append
+/// permit for one classified counterfactual commit or append. It is neither
+/// cloneable nor serializable, and holding it proves nothing: the store
+/// decides at commit time whether the session and the permit are live.
+pub struct ClassifiedTickAuthorityV1<'a> {
+    session: &'a ForkAdmissionAuthoritySessionV1,
+    permit: &'a ForkAppendSourcePermitV1,
+}
+
+impl<'a> ClassifiedTickAuthorityV1<'a> {
+    /// Lend `session` and `permit` for one classified counterfactual call.
+    #[must_use]
+    pub const fn new(
+        session: &'a ForkAdmissionAuthoritySessionV1,
+        permit: &'a ForkAppendSourcePermitV1,
+    ) -> Self {
+        Self { session, permit }
+    }
+
+    /// The lent session.
+    #[must_use]
+    pub const fn session(&self) -> &'a ForkAdmissionAuthoritySessionV1 {
+        self.session
+    }
+
+    /// The lent permit.
+    #[must_use]
+    pub const fn permit(&self) -> &'a ForkAppendSourcePermitV1 {
+        self.permit
+    }
+}
+
+/// ADR-099 revision 12 counterfactual commit and append on classified Forks.
+///
+/// The classified analogues of the two recording write methods: each appends
+/// every draft as one host-internal `(0,0)` classified Event with exactly one
+/// `EOR1` and one `FOP1` and no `FIA1`, atomically with the generation or the
+/// later Tick and its dependency record, under the session and the one
+/// host-internal permit of a [`ClassifiedTickAuthorityV1`]. The `FOP1`
+/// operation ID of draft `i` is
+/// `BLAKE3("pigloros/counterfactual-tick-operation-index/v1" ||
+/// operation_base || u32be(i))`. Generic Forks keep the recording methods,
+/// and each Fork kind has exactly one write path.
+///
+/// # Adapter obligations
+///
+/// - **Check order.** Run the checks once per transaction, in this order, and
+///   write nothing before the last one passes:
+///   1. adapter integer bounds of the generation and Ticks (`SQLite` only),
+///      before any fence;
+///   2. the Fork's erasure write fence, then the transaction scope, then the
+///      live session (`Unauthenticated`), before the Fork is resolved, so a
+///      caller without a live session learns nothing about the Fork;
+///   3. the Fork: a visible counterfactual Fork (`ForkNotFound`) whose `FAR1`
+///      is present and local; an unclassified or imported Fork is
+///      `InvalidRequest`;
+///   4. the record and basis checks of the recording method, in its order
+///      (record before basis for the invalidation, basis before record for a
+///      later Tick);
+///   5. the draft guard: the non-geographic guard, concealed as
+///      `ForkNotFound`, then no draft may carry a `WallTime` override;
+///   6. one authority reread: the permit names this Fork, is live, is scoped
+///      to the Fork's `FAR1`, `FCT1` and registrar, and is host-internal;
+///   7. the derived operation IDs, none of which may already name a `FOP1`;
+///   8. the Events with their `EOR1` and `FOP1`, then the generation or Tick
+///      rows and the dependency record.
+/// - **Atomicity.** Every rejection, including one at a draft after the
+///   first, leaves no Event, `EOR1`, `FOP1`, generation, quarantine, artifact
+///   or dependency row. Only an in-doubt transaction finish is
+///   `OutcomeUnknown`; its recovery is the recording method's (the committed
+///   receipt, or the persisted basis), since the provenance commits in the
+///   same transaction. An adapter without transactions runs every fallible
+///   step before its first mutation.
+/// - **Not idempotent.** Replaying a committed call fails the basis recheck,
+///   and a prior `FOP1` under a derived operation ID is corrupt authority.
+/// - **Unsupported Forks.** A Fork whose `FAR1` was imported (origin code 2)
+///   is unsupported until #447.
+/// - **No deletion.** An admitted Fork is never deleted (ADR-099 revision
+///   13): the generic `delete_timeline` refuses it with
+///   `AdmittedForkNotDeletable` before any mutation. Its `FOP1` rows therefore
+///   never outlive it and its Timeline ID is never re-created, so a Seq or
+///   operation ID collision on this path is corrupt state.
+pub trait ClassifiedCounterfactualStorePortV1: CounterfactualDependencyRecordingPortV1 {
+    /// Commit a classified Fork's invalidation and its first Tick with its
+    /// dependency record.
+    ///
+    /// # Errors
+    ///
+    /// `Store(e)` carries every error of the recording invalidation commit;
+    /// `OutcomeUnknown` leaves the commit in doubt, to be resolved through the
+    /// committed receipt. `Provenance(Unauthenticated)` is a session or permit
+    /// that is not live, a permit for another Fork, or one that does not name
+    /// the Fork's durable authority. `Provenance(InvalidRequest)` is an
+    /// unclassified or imported Fork, a permit whose source is not
+    /// host-internal, or a draft carrying a `WallTime` override.
+    /// `Provenance(CorruptAuthority)` is a corrupt authority graph or an
+    /// existing `FOP1` under a derived operation ID.
+    fn commit_classified_counterfactual_invalidation(
+        &mut self,
+        command: &CounterfactualInvalidationCommandV1,
+        record: &TickDependencyRecordV1,
+        authority: &ClassifiedTickAuthorityV1<'_>,
+        operation_base: Hash,
+    ) -> Result<CounterfactualInvalidationOutcomeV1, ClassifiedCounterfactualErrorV1>;
+
+    /// Append one later Tick of a classified Fork with its dependency record.
+    ///
+    /// # Errors
+    ///
+    /// `Store(e)` carries every error of the recording Tick append;
+    /// `OutcomeUnknown` leaves the Tick in doubt, to be resolved through the
+    /// persisted basis. The `Provenance` errors are those of
+    /// [`Self::commit_classified_counterfactual_invalidation`].
+    fn append_classified_counterfactual_tick(
+        &mut self,
+        fork: TimelineId,
+        expected: &CounterfactualBasisV1,
+        drafts: &PipelineDraftBatchV1,
+        record: &TickDependencyRecordV1,
+        authority: &ClassifiedTickAuthorityV1<'_>,
+        operation_base: Hash,
+    ) -> Result<CounterfactualTickOutcomeV1, ClassifiedCounterfactualErrorV1>;
 }
 
 /// Build the canonical request digest input for a classified append.
@@ -541,26 +741,203 @@ pub(crate) fn fork_append_request(
     .map_err(|_| ForkEventAuthorityErrorV1::InvalidRequest)
 }
 
+/// ADR-099 revision 12 domain of one classified counterfactual operation ID.
+const COUNTERFACTUAL_TICK_OPERATION_INDEX_DOMAIN: &[u8] =
+    b"pigloros/counterfactual-tick-operation-index/v1";
+
+/// Derive the `FOP1` operation IDs of the first `count` drafts of one
+/// classified counterfactual batch: `BLAKE3(domain || operation_base ||
+/// u32be(i))` for draft `i`, so the store never needs the plan.
+pub(crate) fn derive_operation_ids(operation_base: Hash, count: usize) -> Vec<Hash> {
+    (0_u32..)
+        .take(count)
+        .map(|index| {
+            let mut hasher = blake3::Hasher::new();
+            hasher.update(COUNTERFACTUAL_TICK_OPERATION_INDEX_DOMAIN);
+            hasher.update(operation_base.as_bytes());
+            hasher.update(&index.to_be_bytes());
+            Hash::from_bytes(*hasher.finalize().as_bytes())
+        })
+        .collect()
+}
+
+/// A classified counterfactual Event is stamped by the store clock, so no
+/// draft of its batch may carry a `WallTime` override.
+pub(crate) fn without_wall_time_override(
+    drafts: &PipelineDraftBatchV1,
+) -> Result<(), ClassifiedCounterfactualErrorV1> {
+    if drafts
+        .drafts()
+        .iter()
+        .any(|draft| draft.wall_time.is_some())
+    {
+        Err(ClassifiedCounterfactualErrorV1::Provenance(
+            ClassifiedProvenanceErrorV1::InvalidRequest,
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+/// The two authority validators of ADR-105 r6 R6.9.
+///
+/// Every write path and every issuance or recovery read passes
+/// [`Self::LocalOnly`]. Only a read caller (`read_fork_event_suffix`,
+/// publication `read_committed`, and, once #561 lands, Replay) passes
+/// [`Self::CodeTwoAware`].
+/// Making the local check origin-aware instead is forbidden by R6.9.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AuthorityValidatorV1 {
+    /// Validator (a): `FAR1` origin exactly `Local`, an `FCC1` Fork-admission
+    /// row naming `D_FAR1`, and `FCS1` resolved only from the local custody
+    /// store. It rejects every code-2 `FAR1`.
+    LocalOnly,
+    /// Validator (b): validator (a) for a local `FAR1`, and for a code-2
+    /// `FAR1` the import admission row and the imported `FCS1` store.
+    CodeTwoAware,
+}
+
+/// The authority origin of a `FAR1` that a validator accepted.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ValidatedOriginV1 {
+    /// The local `[1]` origin.
+    Local,
+    /// The code-2 `[2, authority_origin_digest]` origin.
+    Imported(Hash),
+}
+
+impl ValidatedOriginV1 {
+    /// ADR-105 r6 P9: a local classified Event is unsigned, and an imported
+    /// one carries its verified `TimelineIntegritySigning` signature.
+    pub(crate) const fn requires_signature(self) -> bool {
+        matches!(self, Self::Imported(_))
+    }
+
+    /// The code-2 digest, for a public result that must disclose the origin.
+    pub(crate) const fn imported_digest(self) -> Option<Hash> {
+        match self {
+            Self::Local => None,
+            Self::Imported(digest) => Some(digest),
+        }
+    }
+}
+
+/// One `FAR1` that a validator accepted: its fields, its ADR-099 digest over
+/// its exact bytes, and its origin.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ValidatedAdmissionV1 {
+    digest: Hash,
+    fields: ForkAdmissionRecordInputV1,
+    origin: ValidatedOriginV1,
+    import: Option<ValidatedImportV1>,
+}
+
+/// The import admission that selects the retained key evidence of a code-2
+/// `FAR1` (ADR-105 erratum E12): the import operation ID keys the `IKR1` and
+/// `IKT1` rows, and the full-envelope digest must equal the stored one.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ValidatedImportV1 {
+    pub(crate) import_operation_id: Hash,
+    pub(crate) full_envelope_digest: Hash,
+}
+
+impl ValidatedAdmissionV1 {
+    /// A local `FAR1` that validator (a) accepted.
+    pub(crate) fn local(record: &ForkAdmissionRecordV1) -> Self {
+        Self {
+            digest: record.digest(),
+            fields: record.input().clone(),
+            origin: ValidatedOriginV1::Local,
+            import: None,
+        }
+    }
+
+    /// A code-2 `FAR1` that validator (b) accepted with its import admission.
+    pub(crate) fn imported(
+        record: &ImportedForkAdmissionRecordV1,
+        admission: &ImportedForkAttributionAdmissionV1,
+    ) -> Self {
+        Self {
+            digest: record.digest(),
+            fields: record.fields().clone(),
+            origin: ValidatedOriginV1::Imported(record.authority_origin_digest()),
+            import: Some(ValidatedImportV1 {
+                import_operation_id: admission.input().import_operation_id,
+                full_envelope_digest: admission.input().full_envelope_digest,
+            }),
+        }
+    }
+
+    pub(crate) const fn digest(&self) -> Hash {
+        self.digest
+    }
+
+    pub(crate) const fn fields(&self) -> &ForkAdmissionRecordInputV1 {
+        &self.fields
+    }
+
+    pub(crate) const fn origin(&self) -> ValidatedOriginV1 {
+        self.origin
+    }
+
+    /// The import admission of a code-2 `FAR1`, none for a local one.
+    pub(crate) const fn import(&self) -> Option<ValidatedImportV1> {
+        self.import
+    }
+}
+
+/// The accepted `FAR1` and `FCT1` of one child's classified authority graph.
+pub(crate) struct ValidatedGraphV1 {
+    pub(crate) admission: ValidatedAdmissionV1,
+    pub(crate) table: ForkClassifierTableV1,
+}
+
+/// ADR-105 r6 R6.9 (b), `FAR1` admission: the stored import admission `IFA1`
+/// names exactly this child, this code-2 origin, and this `FAR1` digest.
+pub(crate) fn imported_admission_matches(
+    admission: &ImportedForkAdmissionRecordV1,
+    record: &ImportedForkAttributionAdmissionV1,
+    child_timeline_id: TimelineId,
+) -> bool {
+    let fields = record.input();
+    admission.fields().child_timeline_id == child_timeline_id
+        && fields.child_timeline_id == child_timeline_id
+        && fields.authority_origin_digest == admission.authority_origin_digest()
+        && fields.fork_admission_digest == admission.digest()
+}
+
+/// ADR-105 r6 R6.9 (b), `FCS1` resolution: the imported triple satisfies
+/// rows G1-G8 against the accepted code-2 `FAR1`, with the same check that
+/// the import ran.
+pub(crate) fn imported_graph_matches(
+    graph: &ImportedForkClassifierGraphV1,
+    admission: &ValidatedAdmissionV1,
+) -> bool {
+    graph.matches_admission(admission.fields(), admission.digest())
+}
+
 /// Whether a stored classified Event carries exactly the content its `FOP1` binds.
 ///
 /// ADR-105 r6 R6.5 P8 and R6.9: every adapter requires the `FOP1` `WallTime`,
 /// payload hash, and origin (this child at the `FOP1` logical sequence).
 ///
-/// The signature arm is currently local-only: authority-origin code 1 is the
-/// only active origin, and ADR-099 local append inserts one unsigned Event,
-/// so every classified Event must be unsigned. #519 (ADR-105 r6 P9) adds the
-/// code-2 arm, which instead requires the stored verified signature.
+/// The signature arm follows P9 by the validated origin: a local child's
+/// Event is unsigned, as ADR-099 local append inserts it, and a code-2
+/// child's Event carries the signature that #202 verified at import. P9 checks
+/// the stored signature's presence only, deliberately: a trusted read does not
+/// revalidate the envelope, so it does not verify the Ed25519 signature again.
 pub(crate) fn classified_event_matches_operation(
     event: &Event,
     operation: &ForkAppendOperationV1,
+    origin: ValidatedOriginV1,
 ) -> bool {
     let input = operation.input();
     event.wall_time == input.wall_time
         && event.payload_hash == input.payload_hash
-        && event.signature.is_none()
-        && event.origin.is_some_and(|origin| {
-            origin.origin_timeline_id == input.child_timeline_id
-                && origin.origin_logical_seq.as_u64() == input.logical_seq
+        && event.signature.is_some() == origin.requires_signature()
+        && event.origin.is_some_and(|event_origin| {
+            event_origin.origin_timeline_id == input.child_timeline_id
+                && event_origin.origin_logical_seq.as_u64() == input.logical_seq
         })
 }
 
@@ -621,6 +998,8 @@ where
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    mod local_replay;
+
     use std::error::Error;
     #[cfg(feature = "sqlite")]
     use std::path::Path;
@@ -655,12 +1034,16 @@ mod tests {
 
     use super::*;
     #[cfg(feature = "sqlite")]
+    use crate::classified_fork_fixture::database_rows_at;
+    #[cfg(feature = "sqlite")]
     use crate::sqlite::SqliteStore;
     use crate::{
         memory::MemoryStore, ForkAdmissionAuthorityBootstrapPortV1, ForkAdmissionAuthorityPortV1,
         ForkManifestPublicationErrorV1, ForkManifestPublicationPortV1,
         ForkManifestPublicationRequestV1,
     };
+    #[cfg(feature = "sqlite")]
+    use pos_core::CoreError;
 
     fn encode(value: &Value) -> Result<Vec<u8>, Box<dyn Error>> {
         let mut bytes = Vec::new();
@@ -1821,6 +2204,123 @@ mod tests {
                 false
             )
         );
+        Ok(())
+    }
+
+    /// ADR-099 revision 13: the generic delete refuses a published admitted
+    /// Fork, changes no row, and leaves its sidecar readable and the Fork
+    /// appendable.
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn sqlite_published_admitted_fork_is_not_deletable() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("publication-delete.sqlite");
+        let mut store = sqlite_store_at(&path)?;
+        let lifecycle = create_lifecycle(&mut store)?;
+        let fixture = publication_fixture(&mut store, &lifecycle, 91, 0)?;
+        commit_fork_publication(&mut store, &fixture, fixture.request.clone())?;
+        let child = lifecycle.fork.child_id;
+        let before = database_rows_at(&path)?;
+        let refused = store.delete_timeline(child);
+        assert!(
+            matches!(refused, Err(CoreError::AdmittedForkNotDeletable(id)) if id == child),
+            "{refused:?}"
+        );
+        assert_eq!(database_rows_at(&path)?, before);
+        let committed = store.read_committed(child, 0)?;
+        assert_eq!(committed.receipt.final_logical_head, 0);
+        let permit = store.issue_append_source_permit(
+            &lifecycle.issuer,
+            &lifecycle.session,
+            child,
+            &lifecycle.source,
+            ForkAppendSourceIdentityV1::HostInternal,
+        )?;
+        let operation = Hash::from_bytes([97; 32]);
+        let event = draft(b"after-refusal");
+        let appended = store.append_classified(&lifecycle.session, &permit, operation, event)?;
+        assert_eq!(appended.operation.input().child_timeline_id, child);
+        assert_eq!(appended.event.seq.as_u64(), 1);
+        assert_eq!(store.read_fork_event_suffix(child, 1)?.len(), 1);
+        Ok(())
+    }
+
+    /// One refused generic call, with the admitted Fork's id masked.
+    #[cfg(feature = "sqlite")]
+    type MaskedErrorV1 = (std::mem::Discriminant<pos_core::CoreError>, String);
+
+    /// What both adapters must agree on after refusing to delete a published
+    /// admitted Fork (ADR-099 revision 13).
+    #[cfg(feature = "sqlite")]
+    #[derive(Debug, PartialEq, Eq)]
+    struct RefusedDeletionV1 {
+        /// The refused delete.
+        deleted: MaskedErrorV1,
+        /// The refused re-creation of the Fork's id from its own metadata.
+        recreated: MaskedErrorV1,
+        /// The committed sidecar's final logical head, read after both.
+        head: u64,
+        /// The Seq of a fresh host-internal classified append after both.
+        appended: u64,
+        /// The validated suffix length from logical Seq 1 after the append.
+        suffix: usize,
+    }
+
+    /// Publish an empty admitted Fork, refuse its delete and its re-creation,
+    /// read its sidecar back unchanged, and append to it once more.
+    #[cfg(feature = "sqlite")]
+    fn refused_published_deletion<S: PublicationTestStoreV1>(
+        store: &mut S,
+    ) -> Result<RefusedDeletionV1, Box<dyn Error>> {
+        let lifecycle = create_lifecycle(store)?;
+        let fixture = publication_fixture(store, &lifecycle, 91, 0)?;
+        let receipt = commit_fork_publication(store, &fixture, fixture.request.clone())?;
+        let child = lifecycle.fork.child_id;
+        let meta = store.get_timeline(child)?.ok_or("the Fork exists")?.meta;
+        let deleted = store.delete_timeline(child).err();
+        let deleted = deleted.ok_or("the delete must fail")?;
+        let recreated = store.create_timeline_with_meta(meta).err();
+        let recreated = recreated.ok_or("the re-creation must fail")?;
+        let committed = store.read_committed(child, 0)?;
+        assert_eq!(committed.receipt, receipt);
+        let permit = store.issue_append_source_permit(
+            &lifecycle.issuer,
+            &lifecycle.session,
+            child,
+            &lifecycle.source,
+            ForkAppendSourceIdentityV1::HostInternal,
+        )?;
+        let operation = Hash::from_bytes([97; 32]);
+        let event = draft(b"after-refusal");
+        let appended = store.append_classified(&lifecycle.session, &permit, operation, event)?;
+        assert_eq!(appended.operation.input().child_timeline_id, child);
+        let suffix = store.read_fork_event_suffix(child, 1)?.len();
+        let id = child.to_string();
+        let masked = |error: &pos_core::CoreError| {
+            let text = error.to_string().replace(&id, "<fork>");
+            (std::mem::discriminant(error), text)
+        };
+        Ok(RefusedDeletionV1 {
+            deleted: masked(&deleted),
+            recreated: masked(&recreated),
+            head: committed.receipt.final_logical_head,
+            appended: appended.event.seq.as_u64(),
+            suffix,
+        })
+    }
+
+    /// ADR-099 revision 13, test 2 publication case on both adapters: the
+    /// same refusal, re-creation failure, readable sidecar, and later append.
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn adapters_refuse_a_published_fork_delete_alike() -> Result<(), Box<dyn Error>> {
+        let memory = refused_published_deletion(&mut MemoryStore::new())?;
+        let sqlite = refused_published_deletion(&mut SqliteStore::open_in_memory()?)?;
+        assert_eq!(memory, sqlite);
+        assert_eq!(memory.deleted.1, "admitted Fork cannot be deleted: <fork>");
+        let duplicate = "storage error: timeline already exists: <fork>";
+        assert_eq!(memory.recreated.1, duplicate);
+        assert_eq!((memory.head, memory.appended, memory.suffix), (0, 1, 1));
         Ok(())
     }
 
@@ -3825,7 +4325,8 @@ mod tests {
         let receipt = assert_host_append(&mut store, &fixture)?;
         assert!(classified_event_matches_operation(
             &receipt.event,
-            &receipt.operation
+            &receipt.operation,
+            ValidatedOriginV1::Local
         ));
         let tampers: [EventTamperCaseV1; 6] = [
             ("wall-time", tamper_wall_time),
@@ -3839,10 +4340,41 @@ mod tests {
             let mut event = receipt.event.clone();
             tamper(&mut event);
             assert!(
-                !classified_event_matches_operation(&event, &receipt.operation),
+                !classified_event_matches_operation(
+                    &event,
+                    &receipt.operation,
+                    ValidatedOriginV1::Local
+                ),
                 "{name} must not match its FOP1"
             );
         }
+        Ok(())
+    }
+
+    /// ADR-105 r6 P9 by origin: a code-2 child's Event must carry its stored
+    /// signature, and a local child's Event must not.
+    #[test]
+    fn classified_event_rule_applies_the_signature_rule_of_its_origin() -> Result<(), Box<dyn Error>>
+    {
+        let mut store = MemoryStore::new();
+        let fixture = create_lifecycle(&mut store)?;
+        let receipt = assert_host_append(&mut store, &fixture)?;
+        let imported = ValidatedOriginV1::Imported(Hash::from_bytes([7; 32]));
+        let mut signed = receipt.event.clone();
+        tamper_signature(&mut signed);
+        for (event, origin, accepted) in [
+            (&receipt.event, ValidatedOriginV1::Local, true),
+            (&receipt.event, imported, false),
+            (&signed, ValidatedOriginV1::Local, false),
+            (&signed, imported, true),
+        ] {
+            assert_eq!(
+                classified_event_matches_operation(event, &receipt.operation, origin),
+                accepted
+            );
+        }
+        assert_eq!(imported.imported_digest(), Some(Hash::from_bytes([7; 32])));
+        assert_eq!(ValidatedOriginV1::Local.imported_digest(), None);
         Ok(())
     }
 
@@ -4466,5 +4998,262 @@ mod tests {
             assert_eq!(store.preflight_fork_classifier_profile(&[]), Err(expected));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod code_two_barrier_tests {
+    //! In-crate evidence for the ADR-105 r6 R6.9 and R6.10 escalation barrier that
+    //! the public port cannot reach.
+    //!
+    //! The public tests prove that both permit issuers and publication issuance
+    //! refuse a code-2 child. `register_classifier`, `append_classified`, and
+    //! `recover_classified_append` need a permit, and a permit is never issued for
+    //! an imported child, so this module forges one that names the imported `FAR1`
+    //! with every field that a valid permit would carry. Validator (a) must still
+    //! refuse each call, on both adapters, for an empty child with the classifier
+    //! triple null, an empty child with it present, and a nonempty child.
+
+    use std::sync::Arc;
+
+    use pos_core::{
+        store::SeqRange, CanonicalBytes, EntityId, EventDraft, ForkAppendSourceIdentityV1,
+        ForkAttributionImportClosureV1, Kind,
+    };
+
+    use super::{ForkAppendSourcePermitV1, ForkClassifierRegistrarPermitV1};
+    #[cfg(feature = "sqlite")]
+    use crate::sqlite::SqliteStore;
+    use crate::{
+        fae1_fixture::{
+            gateway_source, hash, open_session, pin_policy, request_for, Fallible, Port, Shape,
+            Spec, World, GATEWAY_REGISTRAR, PARENT_CUT,
+        },
+        memory::MemoryStore,
+        ForkEventAuthorityErrorV1,
+    };
+
+    fn forged_barrier<S: Port>(store: &mut S, shape: Shape) -> Fallible<()> {
+        let world = World::new(shape, false)?;
+        let built = world.build(&Spec {
+            registrar: GATEWAY_REGISTRAR,
+            ..Spec::default()
+        })?;
+        world.seed_destination(store)?;
+        pin_policy(store, &built.policy)?;
+        store.import_verified(&request_for(&world, &built))?;
+        let closure = ForkAttributionImportClosureV1::validate(&built.envelope)?;
+        let child = world.child_at(0)?.id;
+        let before = store.read_own(child, SeqRange::all())?;
+        let session = open_session(store)?;
+        let live = Arc::new(());
+        let store_id = store.fork_admission_host_record()?.store_id();
+        let graph = closure.classifier();
+        let registrar_permit = ForkClassifierRegistrarPermitV1 {
+            store_id,
+            session_identity: session.identity(),
+            child_timeline_id: child,
+            fork_admission_digest: closure.fork_admission_digest(),
+            source: gateway_source()?,
+            scope: Arc::downgrade(&live),
+        };
+        let append_permit = ForkAppendSourcePermitV1 {
+            store_id,
+            session_identity: session.identity(),
+            child_timeline_id: child,
+            fork_admission_digest: closure.fork_admission_digest(),
+            classifier_revision_digest: graph.map_or(hash(1), |graph| graph.table.digest()),
+            registration_digest: graph.map_or(hash(2), |graph| graph.registration.digest()),
+            registrar_identifier: GATEWAY_REGISTRAR.to_owned(),
+            source: ForkAppendSourceIdentityV1::HostInternal,
+            scope: Arc::downgrade(&live),
+        };
+        let corrupt = Some(ForkEventAuthorityErrorV1::CorruptAuthority);
+        let draft = EventDraft::new(
+            EntityId::new(),
+            Kind::new("fae1.import.test"),
+            CanonicalBytes::from_vec(vec![1]),
+        );
+        // The registration retry of the imported FCR1 is refused too.
+        let retried = graph.map_or(hash(0xd1), |graph| graph.registration.input().operation_id);
+        for operation in [hash(0xd1), retried] {
+            assert_eq!(
+                store
+                    .register_classifier(&session, &registrar_permit, operation, child)
+                    .err(),
+                corrupt
+            );
+        }
+        assert_eq!(
+            store
+                .append_classified(&session, &append_permit, hash(0xd2), draft.clone())
+                .err(),
+            corrupt
+        );
+        assert_eq!(
+            store
+                .recover_classified_append(&session, &append_permit, hash(0xd2), &draft)
+                .err(),
+            corrupt
+        );
+        // Nothing changed, and read (b) still accepts the complete import.
+        assert_eq!(store.read_own(child, SeqRange::all())?, before);
+        let suffix = store.read_fork_event_suffix(child, PARENT_CUT + 1)?;
+        assert_eq!(u64::try_from(suffix.len())?, shape.events());
+        Ok(())
+    }
+
+    const SHAPES: [Shape; 3] = [
+        Shape::Mixed,
+        Shape::EmptyClassified,
+        Shape::EmptyUnclassified,
+    ];
+
+    #[test]
+    fn memory_refuses_forged_registration_and_append_permits_for_a_code_two_child() -> Fallible<()>
+    {
+        for shape in SHAPES {
+            forged_barrier(&mut MemoryStore::new(), shape)?;
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn sqlite_refuses_forged_registration_and_append_permits_for_a_code_two_child() -> Fallible<()>
+    {
+        for shape in SHAPES {
+            forged_barrier(&mut SqliteStore::open_in_memory()?, shape)?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod classified_counterfactual_tests {
+    //! Unit vectors for the ADR-099 revision 12 classified counterfactual
+    //! error mapping and operation IDs.
+
+    use pos_core::CounterfactualStoreErrorV1;
+    #[cfg(feature = "sqlite")]
+    use pos_core::Hash;
+
+    use super::{
+        ClassifiedCounterfactualErrorV1 as Classified, ClassifiedProvenanceErrorV1 as Provenance,
+        ForkEventAuthorityErrorV1 as Authority,
+    };
+
+    #[test]
+    fn every_authority_error_maps_onto_one_closed_classified_error() {
+        let cases = [
+            (
+                Authority::InvalidRequest,
+                Classified::Provenance(Provenance::InvalidRequest),
+            ),
+            (
+                Authority::Unauthenticated,
+                Classified::Provenance(Provenance::Unauthenticated),
+            ),
+            (
+                Authority::ClassifierRejected,
+                Classified::Provenance(Provenance::CorruptAuthority),
+            ),
+            (
+                Authority::Conflict,
+                Classified::Provenance(Provenance::CorruptAuthority),
+            ),
+            (
+                Authority::CorruptAuthority,
+                Classified::Provenance(Provenance::CorruptAuthority),
+            ),
+            (
+                Authority::StorageIndeterminate,
+                Classified::Store(CounterfactualStoreErrorV1::StorageFailure),
+            ),
+        ];
+        for (error, expected) in cases {
+            assert_eq!(Classified::from(error), expected, "{error:?}");
+        }
+        for error in [
+            CounterfactualStoreErrorV1::OutcomeUnknown,
+            CounterfactualStoreErrorV1::ForkNotFound,
+        ] {
+            assert_eq!(Classified::from(error), Classified::Store(error));
+        }
+    }
+
+    #[test]
+    fn classified_errors_name_their_kind_and_keep_their_source() {
+        let store = Classified::Store(CounterfactualStoreErrorV1::StorageFailure);
+        assert_eq!(
+            store.to_string(),
+            "classified counterfactual storage failed"
+        );
+        let provenance = Classified::Provenance(Provenance::Unauthenticated);
+        assert_eq!(
+            provenance.to_string(),
+            "classified counterfactual provenance was rejected"
+        );
+        for (error, text) in [
+            (
+                Provenance::InvalidRequest,
+                "invalid classified counterfactual request",
+            ),
+            (
+                Provenance::Unauthenticated,
+                "classified counterfactual authority is unauthenticated",
+            ),
+            (
+                Provenance::CorruptAuthority,
+                "classified counterfactual authority is corrupt",
+            ),
+        ] {
+            assert_eq!(error.to_string(), text);
+        }
+        let sources = [store, provenance]
+            .map(|error| std::error::Error::source(&error).map(ToString::to_string));
+        assert_eq!(
+            sources,
+            [
+                Some(CounterfactualStoreErrorV1::StorageFailure.to_string()),
+                Some(Provenance::Unauthenticated.to_string()),
+            ]
+        );
+    }
+
+    fn hex(hash: Hash) -> String {
+        const DIGITS: &[u8; 16] = b"0123456789abcdef";
+        hash.as_bytes()
+            .iter()
+            .flat_map(|byte| {
+                [
+                    char::from(DIGITS[usize::from(byte >> 4)]),
+                    char::from(DIGITS[usize::from(byte & 15)]),
+                ]
+            })
+            .collect()
+    }
+
+    #[test]
+    fn operation_ids_hash_the_domain_the_base_and_the_big_endian_index() {
+        let base = Hash::from_bytes([0x42; 32]);
+        let derived = super::derive_operation_ids(base, 2);
+        // BLAKE3("pigloros/counterfactual-tick-operation-index/v1" || base ||
+        // u32be(i)), computed independently with `b3sum`.
+        let expected = [
+            "9a6b126ea7ded0da216bfca981e35a61827315591a0b0fae4b0b103c69249442",
+            "408e2f29760049c4086978ba27ea561773101f89ceeb5e6004c2bac61b85c618",
+        ];
+        assert_eq!(derived.into_iter().map(hex).collect::<Vec<_>>(), expected);
+        // A prefix of a longer batch is the shorter batch, and another base
+        // derives other IDs.
+        let longer = super::derive_operation_ids(base, 3);
+        let shorter = super::derive_operation_ids(base, 2);
+        assert_eq!(longer.get(..2), Some(shorter.as_slice()));
+        let other = super::derive_operation_ids(Hash::from_bytes([0x43; 32]), 1);
+        assert_ne!(other.first(), longer.first());
+        assert!(super::derive_operation_ids(base, 0).is_empty());
     }
 }

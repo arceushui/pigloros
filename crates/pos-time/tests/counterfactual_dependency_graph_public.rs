@@ -624,7 +624,7 @@ fn keeps_nodes_inside_their_origin_window() -> TestResult {
 }
 
 #[test]
-fn binds_root_nodes_exactly_to_the_plan() -> TestResult {
+fn rejects_provisional_roots_unbound_or_mismatched_by_the_plan() -> TestResult {
     let mut consuming_root = graph()?;
     consuming_root.nodes[EXOGENOUS].input_digests = vec![[0x11; 32]];
     assert_eq!(
@@ -632,11 +632,23 @@ fn binds_root_nodes_exactly_to_the_plan() -> TestResult {
         Err(GraphError::UnclosedEndogenousInput)
     );
 
+    // Every edit is rejected as `RootNotInPlan`. Bound roots with a wrong
+    // provenance digest: `EXOGENOUS` (committed), `FIXED` and
+    // `INTERVENTION_B` (provisional). The other edits leave a provisional
+    // root the plan does not bind (a changed class, schema, effective tick, or
+    // artifact digest), and above the cut `validate_root` has no committed
+    // exemption for it. A bound committed `FixedPolicy` or
+    // `InterventionAssigned` root cannot be built here: `FIXED` and the
+    // Interventions sit at or above `FIRST_TICK`, where a committed origin is
+    // out of range, and moving one below the cut breaks the node order.
     let edits: [fn(&mut [Node]); 9] = [
         |nodes| nodes[EXOGENOUS].provenance_digest = [0x63; 32],
-        |nodes| nodes[EXOGENOUS].node.schema_id = 2,
-        |nodes| nodes[EXOGENOUS].class = DependencyClassV1::FixedPolicy,
         |nodes| nodes[FIXED].class = DependencyClassV1::ExogenousFrozen,
+        |nodes| nodes[FIXED].node.schema_id = 4,
+        |nodes| {
+            nodes[FIXED].class = DependencyClassV1::ExogenousFrozen;
+            nodes[FIXED].node.schema_id = 4;
+        },
         |nodes| nodes[FIXED].provenance_digest = [0x63; 32],
         |nodes| {
             nodes[INTERVENTION_B].node.tick = 11;
@@ -651,6 +663,38 @@ fn binds_root_nodes_exactly_to_the_plan() -> TestResult {
     }
     assert_eq!(
         edited(|nodes| nodes[INTERVENTION_B].class = DependencyClassV1::EndogenousRecomputed)?,
+        Err(GraphError::InterventionNodeMissing)
+    );
+    Ok(())
+}
+
+#[test]
+fn accepts_committed_roots_the_plan_does_not_bind() -> TestResult {
+    let edits: [fn(&mut [Node]); 2] = [
+        |nodes| nodes[EXOGENOUS].node.schema_id = 2,
+        |nodes| nodes[EXOGENOUS].class = DependencyClassV1::FixedPolicy,
+    ];
+    for edit in edits {
+        assert_eq!(edited(edit)?, Ok(()));
+    }
+    // The edge out of an unbound committed root carries no plan authorization
+    // to check, so any authorization digest is accepted.
+    let mut unauthorized = graph_with(|nodes| nodes[EXOGENOUS].node.schema_id = 2)?;
+    let position = edge_position(&unauthorized, PARENT, EXOGENOUS)?;
+    unauthorized.edges[position].authorization_digest = [0x99; 32];
+    assert_eq!(validate(unauthorized).map(drop), Ok(()));
+    // An unbound committed root still declares no input.
+    let mut consuming = graph()?;
+    consuming.nodes[EXOGENOUS].node.schema_id = 2;
+    consuming.nodes[EXOGENOUS].input_digests = vec![[0x11; 32]];
+    assert_eq!(
+        validate(consuming).map(drop),
+        Err(GraphError::UnclosedEndogenousInput)
+    );
+    // An unbound committed Intervention is an extra Intervention node, since
+    // the plan has no Intervention for it.
+    assert_eq!(
+        edited(|nodes| nodes[EXOGENOUS].class = DependencyClassV1::InterventionAssigned)?,
         Err(GraphError::InterventionNodeMissing)
     );
     Ok(())

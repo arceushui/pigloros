@@ -22,6 +22,11 @@ use std::{
     time::Duration,
 };
 
+type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+/// The host-owned activation Event type (ADR-061 revision 7 decision 9).
+const RESERVED_ACTIVATION_TYPE: &str = "pigloros.plugin.release-activated";
+
 /// The one-member Fork ancestry of a fixture Timeline with no parent.
 fn root_ancestry(timeline: pos_core::TimelineId) -> Vec<pos_core::TimelineMeta> {
     vec![pos_core::TimelineMeta {
@@ -2121,6 +2126,79 @@ impl pos_core::PipelineAdmissionPortV1 for LostOutcomePorts<'_> {
     }
 }
 
+impl pos_core::FactualPrefixReadPortV1 for LostOutcomePorts<'_> {
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn last_committed_factual_tick(
+        &self,
+        timeline: pos_core::TimelineId,
+    ) -> Result<pos_core::FactualHeadV1, pos_core::CoreError> {
+        pos_core::FactualPrefixReadPortV1::last_committed_factual_tick(&*self.0, timeline)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn cut_tick_at(
+        &self,
+        timeline: pos_core::TimelineId,
+        seq: pos_core::Seq,
+    ) -> Result<pos_core::FactualCutV1, pos_core::CoreError> {
+        pos_core::FactualPrefixReadPortV1::cut_tick_at(&*self.0, timeline, seq)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn nodes_for_committed_events(
+        &self,
+        timeline: pos_core::TimelineId,
+        seqs: &[pos_core::Seq],
+    ) -> Result<Vec<Option<pos_core::DependencyNodeRecordV1>>, pos_core::CoreError> {
+        pos_core::FactualPrefixReadPortV1::nodes_for_committed_events(&*self.0, timeline, seqs)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn nodes_by_digest(
+        &self,
+        timeline: pos_core::TimelineId,
+        digests: &[pos_core::Hash],
+    ) -> Result<Vec<Option<pos_core::factual_dependency::BoundFactualNodeV1>>, pos_core::CoreError>
+    {
+        pos_core::FactualPrefixReadPortV1::nodes_by_digest(&*self.0, timeline, digests)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn last_step_node(
+        &self,
+        timeline: pos_core::TimelineId,
+        owner: &pos_core::FactualOwnerIdV1,
+    ) -> Result<Option<pos_core::DependencyNodeRecordV1>, pos_core::CoreError> {
+        pos_core::FactualPrefixReadPortV1::last_step_node(&*self.0, timeline, owner)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn factual_set_counts(
+        &self,
+        timeline: pos_core::TimelineId,
+    ) -> Result<pos_core::RecordedSetCountsV1, pos_core::CoreError> {
+        pos_core::FactualPrefixReadPortV1::factual_set_counts(&*self.0, timeline)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn fold_cursor(
+        &self,
+        timeline: pos_core::TimelineId,
+    ) -> Result<Option<pos_core::FactualFoldCursorV1>, pos_core::CoreError> {
+        pos_core::FactualPrefixReadPortV1::fold_cursor(&*self.0, timeline)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn fold_window(
+        &self,
+        timeline: pos_core::TimelineId,
+        after: pos_core::Seq,
+        through: pos_core::Seq,
+    ) -> Result<pos_core::FactualFoldWindowV1, pos_core::CoreError> {
+        pos_core::FactualPrefixReadPortV1::fold_window(&*self.0, timeline, after, through)
+    }
+}
+
 impl pos_core::PipelineAdmissionFencePublisherV1 for LostOutcomePorts<'_> {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn set_pipeline_admission_fence(
@@ -2230,4 +2308,47 @@ fn protected_recovery_fails_closed_after_the_consent_gate_is_unbound() {
         RuntimeError::ConsentOperationUnavailable
     ));
     assert_eq!(test_ok(store.logical_head(timeline)), Seq::ZERO);
+}
+
+struct ActivationDraftDriver;
+
+impl Driver for ActivationDraftDriver {
+    fn name(&self) -> &'static str {
+        "activation-draft"
+    }
+
+    fn step(&mut self, _: TimelineId, _: ObservationView<'_>) -> Result<StepOutput, RuntimeError> {
+        Ok(StepOutput::new(vec![EventDraft::new(
+            EntityId::new(),
+            Kind::new(RESERVED_ACTIVATION_TYPE),
+            CanonicalBytes::from_static(b"activation"),
+        )]))
+    }
+}
+
+/// R7-A3: the host-owned activation type is rejected from a Driver even when its Plugin owns it,
+/// and the rejected pass leaves nothing pending and nothing committed.
+#[test]
+fn a_driver_draft_of_the_reserved_activation_type_is_rejected_and_discarded() -> TestResult {
+    let mut store = admission_store();
+    let timeline = store.create_timeline("reserved-activation")?.id();
+    let mut registry = PluginRegistry::new();
+    register_output_driver(
+        &mut registry,
+        RESERVED_ACTIVATION_TYPE,
+        Box::new(ActivationDraftDriver),
+    );
+    let owned = registry.plugin_ownership_rows();
+    assert_eq!(owned.len(), 1);
+    assert_eq!(owned[0].0, [RESERVED_ACTIVATION_TYPE]);
+    for round in 0..2 {
+        let result = registry.step_all_anchored(timeline, &root_ancestry(timeline), Seq::ZERO);
+        let rejected = matches!(&result, Err(RuntimeError::ReservedHostDraft { .. }));
+        assert!(rejected, "round {round}: unexpected result {result:?}");
+        if let Err(error) = result {
+            assert!(error.to_string().contains(RESERVED_ACTIVATION_TYPE));
+        }
+    }
+    assert_eq!(store.logical_head(timeline)?, Seq::ZERO);
+    Ok(())
 }

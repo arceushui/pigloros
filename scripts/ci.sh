@@ -20,8 +20,8 @@ bash "$ROOT/scripts/check-world-client-wasm.sh"
 echo "==> pinned dependency policy"
 bash "$ROOT/scripts/check-pinned-dependencies.sh"
 bash "$ROOT/scripts/test-check-pinned-dependencies.sh"
-echo "==> Rust scope filter policy"
-python3 "$ROOT/scripts/test_rust_scope_policy.py"
+echo "==> CI workflow policy"
+python3 "$ROOT/scripts/test_ci_workflow_policy.py"
 
 echo "==> advisory benchmark comparator"
 python3 "$ROOT/scripts/test_compare_memory_store_benchmarks.py"
@@ -33,6 +33,11 @@ python3 "$ROOT/scripts/test_check_asan_ci_policy.py"
 echo "==> PMF1 golden vectors match their independent generator"
 python3 "$ROOT/scripts/generate_pmf1_golden_vectors.py" --check
 
+echo "==> Plugin conformance fixtures match their independent generator"
+python3 "$ROOT/scripts/generate_plugin_conformance_fixtures.py" --check
+python3 "$ROOT/scripts/check_plugin_conformance_expected.py"
+python3 "$ROOT/scripts/test_check_plugin_conformance_expected.py"
+
 echo "==> owner-bridge codec vectors match their independent generator"
 python3 "$ROOT/scripts/owner_bridge_vectors.py" --check
 
@@ -42,6 +47,16 @@ python3 "$ROOT/scripts/owner_bridge_webauthn_fixtures.py" --check
 echo "==> MemoryStore benchmark CI policy"
 python3 "$ROOT/scripts/check_memory_store_benchmark_ci_policy.py"
 python3 "$ROOT/scripts/test_check_memory_store_benchmark_ci_policy.py"
+
+echo "==> Plugin trust and composition fallback registries, fixture instant and handoff README policies"
+python3 "$ROOT/scripts/check_plugin_trust_registry_impls.py"
+python3 "$ROOT/scripts/test_check_plugin_trust_registry_impls.py"
+python3 "$ROOT/scripts/check_composition_fallback_registry_impls.py"
+python3 "$ROOT/scripts/test_check_composition_fallback_registry_impls.py"
+python3 "$ROOT/scripts/check_fixture_instant_confinement.py"
+python3 "$ROOT/scripts/test_check_fixture_instant_confinement.py"
+python3 "$ROOT/scripts/check_handoff_readme.py"
+python3 "$ROOT/scripts/test_check_handoff_readme.py"
 
 echo "==> cargo-crap CI policy"
 python3 "$ROOT/scripts/check_cargo_crap_ci_policy.py"
@@ -72,7 +87,8 @@ echo "==> rustdoc (warnings denied)"
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps --locked
 
 echo "==> test (--include-ignored)"
-# Run ignored tests too so #[ignore] cannot silently skip a path.
+# Run ignored tests too so #[ignore] cannot silently skip a path. Hosted CI runs
+# the same tests through cargo-nextest; libtest keeps this script nextest-free.
 test_log="$(mktemp)"
 coverage_json=""
 cleanup() {

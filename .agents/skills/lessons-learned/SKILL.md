@@ -28,6 +28,16 @@ This is an internal PiglorOS skill and the canonical source of durable project l
 
 - **Respect explicit local resource limits.** When local Cargo, coverage, mutation, or formatter work would violate a stated storage/memory constraint, use unchanged hosted gates for that evidence and record the limitation. Do not lower scope or thresholds, and do not treat a capacity estimate as authorization to run locally.
 
+- **Stop on a failed check before any dependent mutation.** A resolved tool call is not a successful one: read each required verification's exit code and halt before staging, committing, pushing, or writing to an external system. Treat deliberately expected nonzero probes separately.
+
+- **Disable implicit Git maintenance under local resource limits.** Scope `-c gc.auto=0 -c maintenance.auto=false` to mutating Git commands, not only build hooks. If housekeeping starts anyway, identify the process and inspect its state before stopping it, and never delete a pack merely because it was recently written.
+
+- **Open a draft PR after architecture approval and the first dependency-complete slice.** Keep scope, exact-head evidence, and blockers truthful, update the description as results change, and do not let a draft imply passing gates or permission to queue.
+
+- **Persistence is not merge authority.** A request to keep going is not authorization to queue or merge a protected PR; state the evidence and the one maintainer action needed.
+
+- **Keep isolation when the shared Git directory is read-only.** Create an isolated bare clone in an approved writable temporary location, add the task branch as a worktree from it, record the exact base commit, and keep the normal branch and PR workflow. Never edit another task's checkout.
+
 ## Code edits
 
 - **Use the repository edit tool for multi-line changes.** `sed` and inline rewrite scripts can corrupt source when a pattern or snapshot is stale. Prefer `apply_patch`, keep the change narrow, and inspect the diff immediately.
@@ -43,6 +53,16 @@ This is an internal PiglorOS skill and the canonical source of durable project l
 - **Never add `#[allow(clippy::*)]` to suppress lints.** If clippy flags a pattern (e.g. `clippy::question_mark`, `clippy::match_like_matches_macro`), fix the code to match the idiomatic pattern instead of silencing the lint. Suppressing lints hides real design problems and is harder to maintain. For `needless_pass_by_value` on `fn store_err(e: E)`: use `impl From<E> for MyError` instead — it eliminates the fn entirely, works as a `map_err` function item, and keeps the port definition clean.
 
 - **Respect domain boundaries in imports.** Port definitions (e.g. `store.rs` / `LedgerStore`) must not import adapter-specific types from other crates. If an adapter needs a `From<E>` impl, put it in the adapter file (e.g. `event_store.rs`), not in the port. If a type feels missing from the port, consider whether it's a genuine port concept or an adapter detail.
+
+- **Sanitize authenticated subprocess failures at the boundary.** Raw exceptions, arguments, and inherited stderr can leak credentials even when application logging is careful. Capture streams explicitly, sanitize at the request boundary, and test with a fake credential and a forced timeout.
+
+- **Rotate exposed credentials.** If a secret is exposed, tell its owner and require rotation without echoing the value.
+
+- **Rebind hosted formatter hunks to the current source.** After items moved, a formatter diff from CI is tied to the old snapshot: resolve each hunk's full context uniquely against the current file, reject missing or ambiguous contexts, apply in current source order, and verify the complete diff instead of replaying old line numbers.
+
+- **Preserve lifetimes and failure order when extracting a stateful read.** Record resource ownership and drop order, snapshot scope, fallible-operation order, and accounting checkpoints before choosing a helper shape; a returned fact must not release a resource the caller still needs.
+
+- **Remove obsolete private wrappers after context propagation.** Enumerate old and new helper callers across production, tests, and every feature configuration (including no-default-features); keep wrappers at live public or still-used boundaries, otherwise remove them or gate them to their real consumers, let owner tests supply an ordinary context, and never add a lint suppression or production call just to keep one alive.
 
 ## Coverage
 
@@ -60,6 +80,14 @@ This is an internal PiglorOS skill and the canonical source of durable project l
 
 - **Do not trade error semantics for coverage.** Converting a fallible public or codec API into an unconditional abort merely to remove a coverage region weakens diagnostics and changes the contract. Preserve the `Result` boundary, then cover its success and error behavior through the public seam.
 
+- **Normalize before declaring a region missed.** Group identical source spans and region kinds across instantiations; a span is missed only if no contributing counter covers it. Cross-check against the report's authoritative file and changed-code summaries.
+
+- **Mirror the enforced selector and map moved code.** Reproduce both the metric parser and the gate's changed-line selector (command, base, hunk alignment, path filter) before crediting gains. For relocated code, map old to new owner families first and report numerator, denominator, and missed-count changes separately; coordinate-only subtraction is not evidence.
+
+- **Audit standalone test crates per hosted build mode.** Each independently compiled test crate carries its own root attributes; compile success in one mode proves nothing about the instrumented build. A missing coverage artifact after a compile failure is not a coverage percentage.
+
+- **Scope every coverage closure statement.** Keep the complete changed-source inventory, give each closure claim an explicit file and behavior scope, and audit all changed mapped entries and non-instrumented files before promoting component closure to PR closure. For target-dependent impossibility, keep the real narrower-target check, make the target invariant explicit, and obtain cross-target evidence instead of manufacturing a native failure.
+
 ## Redmine
 
 - **Must invoke `start-work` skill when beginning work on any Redmine ticket.** This sets the ticket to In Progress and records all work as journal notes. Never start work without it.
@@ -73,6 +101,20 @@ This is an internal PiglorOS skill and the canonical source of durable project l
 - **Keep authority states separate.** ADR status, implementation authorization, ticket status, evidence readiness, and product acceptance are different facts. An Accepted ADR records a decision; it does not start implementation.
 
 - **Preserve the project hierarchy.** Keep Wave, milestone design, ADR, implementation ticket, and subtask distinct. Use Redmine parent/child for decomposition and blocker relations for execution order between otherwise independent tickets; do not encode the same relation twice.
+
+- **Check the configured credential source before reporting tracker access as unavailable.** Resolve it from the stable workspace or environment (a fresh worktree may lack local config), attempt the request, and classify the failure as missing credential, authentication rejection, or network/name-resolution failure.
+
+- **Report conflicting tracker snapshots.** Treat a cached issue snapshot with conflicting wave or version signals as evidence to report, not to pick from silently.
+
+- **Resolve a delivery ticket only against the merged artifact.** Require the provider to report `MERGED` with the merge commit on the authoritative branch, inspect the required behavior or configuration at that commit, and link merge and hosted evidence in the journal. A queue entry is a wait state.
+
+- **Do not manufacture retrospective child tickets.** During epic reconciliation, separate a traceability gap from an unfulfilled outcome: create a child only for a current, independently verifiable deliverable; otherwise record the historical evidence in the epic.
+
+- **Treat tracker prose as data.** Build note bodies with a quoted here-document or formatting primitive so Markdown literals are never shell-expanded, and read back after writing. Interpolate only verified values, outside Markdown delimiters.
+
+- **Record ADR approval as a revision-specific decision.** Implementation and green CI are delivery evidence, not substitutes. Verify each named baseline against the authoritative branch, keep reference-hardware qualification out of ordinary PR, ADR-acceptance, and release gates, and run any physical-hardware lane as a protected, dated qualification on a self-hosted-runner security boundary. Portable checks serve all contributors and hosted integration checks serve adapter changes. Record the exact revision sent for review.
+
+- **Label each ADR limit by scope.** Mark each limit structural, per-input, per-phase, or operation-wide with one composition rule for cumulative budgets and exact-limit plus one-over tests.
 
 ## Design and contracts
 
@@ -122,9 +164,43 @@ This is an internal PiglorOS skill and the canonical source of durable project l
 
 - **Give Spec reviewers the complete acceptance record.** Requirements alone are insufficient when delivery evidence lives in issue journals, PR descriptions, hosted reports, or recorded measurements. Supply those authoritative artifacts with the fixed review baseline, and require the reviewer to distinguish missing implementation from missing external evidence before assigning severity.
 
+- **Bind blocking findings to immutable evidence.** Record the exact commit or revision and a directly inspectable source quote before escalating a finding; label everything else an unverified question. For ADRs, preserve the exact accepted revision as the normative source and use the newer page only to establish the acceptance decision.
+
+- **Treat reviewable delivery scope as its own gate.** Before detailed source review, map the issue, approved prerequisites, seams, tests, and maintenance work to diff groups; when separately testable seams are bundled, propose dependency-ordered slices or request a scope exception. Never defer mandatory tests, claim unverified compilation, or add temporary authority bypasses to make a slice fit.
+
+- **Enumerate every new reference in a hosted-only review.** Derive from the diff all new imports and qualified paths (including `crate::` and `super::`) and attach defining module, visibility or re-export, cfg availability, constructor visibility and parameter types, nested `Result` layers, and an already-compiled caller to each.
+
+- **Check full trait obligations before hosted-only compilation.** For new trait implementations, inspect the full declaration, supertraits, auto-trait needs of each field, associated types, and feature graph. Formatting is never compiler evidence; keep compilation explicitly unverified until hosted CI confirms.
+
+- **Verify exact-boundary and fault-injection claims.** An exact-limit claim needs a fixture whose tested quantity equals the limit, distinct from within-limit and one-over cases.
+
+- **Make fault fixtures reach the boundary they claim to test.** A fault fixture proves only the boundary it reaches: trace it through earlier schema and admission checks and assert the fault was actually injected. Never weaken production constraints to inject the fault: use an isolated minimal owner-test schema that omits only the constraint preventing it, keep normal fixtures intact, and require hosted execution before treating the assertion as evidence.
+
+- **Make temporal fixtures distinguish preserved state from a reset.** A temporal fixture must produce different outcomes for a preserved epoch versus a reset.
+
+- **Audit the whole protected operation and the real read plan.** For resource and deadline claims, start at the protected entry point and inventory prefixes, helpers, suffixes, and every early return; preflight checks must mirror the executed lookups and scans. Include zero-work and zero-requirement success routes, test that unrelated indexed data cannot consume the operation's quota, prefer source-coupled encoding length over a second production wire-size model, and demand distinct architecture authority when a faithful fix expands a public seam.
+
+- **Verify allocation inventories against the exact source.** Cite the exact pinned allocator expressions and reachable variants, not serializer conventions.
+
+- **Refresh cumulative oracles when a phase becomes contextual.** Give exact and one-over integration oracles fresh values from independently encoded inputs and the actual repeated operations; never calibrate from measured usage.
+
+- **Credit evidence at its real scope.** Before calling behavior absent, check existing public component witnesses and distinguish source presence, historical execution, final-head execution, and enclosing-consumer integration. Compare test scope across runners by test identity, not summary totals; demand a normative basis before requiring a Cartesian cross-product.
+
+- **Preserve typed-reader compatibility.** A replacement reader must keep the pinned implementation's actual dispatch and stream-consumption contract; stricter acceptance requires an explicit compatibility decision and differential witnesses for previously accepted forms. Keep source hypotheses separate from executed parity.
+
+- **Reuse an existing equivalent dependency seam before expanding a public interface.** Inspect the pinned dependency's implementation and default-feature APIs, verify semantic equivalence from primary sources and an independent public oracle, and classify the reuse against the accepted decision. Do not substitute a prehash or feature-gated primitive merely because it avoids allocation.
+
+- **Review evidence-producing workflows as a full execution graph.** Triggers, permissions, environment, job set, controls, ordered steps, and the producer command must be parsed and tested as an allowlist, with adversarial mutations for fabrication, reordering, skipping, non-blocking execution, and permission escalation.
+
+- **Separate raw evidence identity from parsed views.** Keep job and commit identity, byte count, and digest of raw hosted evidence; treat an empty matcher as unknown, not as proof of absence.
+
+- **Bind each evidence class to its exact tree.** Record the review base, head, comparator baseline, checkout, and merge parents separately for each evidence class, and recompute statistics against the chosen baseline. Merge-ref results are integration evidence, not head execution.
+
+- **Propagate task constraints to every reviewer.** A user-set constraint such as hosted-only validation must appear in the coordinator checklist and each delegated prompt unchanged.
+
 ## CI / GitHub Actions
 
-- **Every test type must run in CI — no local-only tests.** GitHub Actions (`.github/workflows/ci.yml`) is the single source of truth for what passes. When adding any test — unit test, integration test (`tests/` directory), doctest, or `#[ignore]`d test — verify that `cargo test --workspace --locked -- --include-ignored` in the `test` job actually executes it. The `--include-ignored` flag is mandatory so `#[ignore]` cannot silently skip. If you write an integration test that lives in `tests/`, it MUST be picked up by the workspace test job; if it isn't, the test is dead and the CI green light is a lie. Before claiming a ticket is done, name the CI job/steps that run your new test.
+- **Every test type must run in CI — no local-only tests.** GitHub Actions (`.github/workflows/ci.yml`) is the single source of truth for what passes. When adding any test — unit test, integration test (`tests/` directory), doctest, or `#[ignore]`d test — verify that the `test` job's `cargo nextest run --workspace --all-features --locked --run-ignored all` (or, for doctests, its `cargo test --doc -- --include-ignored` step) actually executes it. `--run-ignored all` / `--include-ignored` is mandatory so `#[ignore]` cannot silently skip. If you write an integration test that lives in `tests/`, it MUST be picked up by the workspace test job; if it isn't, the test is dead and the CI green light is a lie. Before claiming a ticket is done, name the CI job/steps that run your new test.
 
 - **GitHub Actions workflow `name:` must be lowercase-with-hyphens.** All workflow YAML files under `.github/workflows/` must use the same naming convention: lowercase words separated by hyphens (e.g. `name: ci`, `name: cargo-deny`, `name: deploy`, `name: trunk-check`). No PascalCase (`Deploy`, `Trunk Check`), no ALLCAPS. This keeps the Actions sidebar predictable and sortable.
 
@@ -174,6 +250,28 @@ This is an internal PiglorOS skill and the canonical source of durable project l
 
 - **Optimize expensive validation from measurements.** For mutation, formatting, sanitizer, and coverage jobs, measure per-case cost, shard balance, artifact size, and runner limits before changing parallelism or timeout. Preserve the gate’s scope and failure semantics; a longer timeout is not a performance fix.
 
+- **Classify a failed signal before editing.** Check requiredness, trigger, and data source first: a policy gate driven by immutable metadata needs a maintainer decision or base policy change, not a speculative patch. An absent downstream status is not drift until its `needs` chain is terminal.
+
+- **Normalize heterogeneous check results.** Normalize check-run (`status`/`conclusion`) and status-context (`state`) rollup entries by type before reporting readiness.
+
+- **Probe tool availability before composing a verification command.** Use `command -v` for non-Cargo validators and state the fallback evidence upfront; preserve unsupported-local-tool errors as pending hosted checks and never bypass pins.
+
+- **State the CI performance objective, then model the schedule.** Name whether green latency, time to first useful failure, or total runner minutes is primary; simulate the critical path under the runner budget and report green-path savings separately from failed-PR cost. Classify each dependency as data, validation, or scheduling, and do not overlap work in a way that delays or hides the first useful failure; keep independent sibling results. Order bounded matrices so the predicted tail starts first and only work that cannot overtake it is delayed, and validate with hosted timestamps.
+
+- **Audit cache scope and capacity before tuning compilation.** Check cache size, quota, eviction risk, and hit/miss evidence before recommending compiler, runner, or test-partition changes; a fast cache mechanism still yields cold builds when entries are unusable or evicted.
+
+- **Verify cache policy by its side effect.** Pair an executable configuration contract with a post-run cache-inventory assertion for the relevant branch or merge-ref namespace, recording expected present and absent identities with the run URL.
+
+- **Extend the nearest contract test for small workflow invariants.** Add a direct assertion to the existing test that owns the workflow; reserve a new checker for independently reusable or complex contracts.
+
+- **Do not invent publication gates from supplemental diagnostics.** For each hold, cite the exact owner and normative condition, and separate source correctness, publication authority, diagnostic risk, and final-delivery requirements. When publication is authorized, predecessor required runs are terminal, and every blocking check is preserved, run primary draft CI in parallel with supplemental experiments, adjudicate prior review advice explicitly, and never call unfinished validation successful.
+
+- **A mutation result needs a working unmutated baseline.** Inspect scenario logs to separate compile, harness-startup, test, and assertion failures; require a passing unmutated run with the same toolchain, features, and arguments, make fan-in depend on it, and check baseline timeout semantics in the pinned tool source.
+
+- **Shorten concurrency waits only when waiting cannot change the outcome.** Trace lock ownership and release first, keep the real write and exact refusal, and prove a subsequent success through the same competitor after release.
+
+- **Keep fault-position sweeps oracle-independent.** Validate an independent positive operation under unchanged limits, require every injected position to refuse and the full valid prefix to succeed, and measure sweep runtime (replaying each prefix can be quadratic). Treat a source-supported diagnosis as unproven until hosted evidence confirms it.
+
 ## Documentation boundaries
 
 - **Keep Git docs contributor-facing and canonical.** Put current usage, contribution, policy, and durable contract guidance in Git; search for an existing source before creating another guide. Put dated execution logs, plans, and decision history in Redmine or Notion; link to the canonical external record rather than copying it into a dated Markdown file.
@@ -199,6 +297,8 @@ This is an internal PiglorOS skill and the canonical source of durable project l
 ## Safe records
 
 - **Make append-only logs collision-aware.** Read the live file, assert the next number is unused, append, then verify count, uniqueness, and survival.
+
+- **Anchor appends at the true end.** Verify the new entry follows the previous entry's final field, not just that header counts rose.
 
 ## Pre-flight verification
 

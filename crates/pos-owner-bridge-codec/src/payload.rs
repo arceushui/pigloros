@@ -4,7 +4,7 @@ use crate::{
         CborReader, CborWriter, PROTOCOL_VERSION,
     },
     CeremonyId, OwnerBridgeCodecError, OwnerUserHandle, PrfInput, PrfResult, TransportCodes,
-    WebAuthnChallenge,
+    VerificationReason, WebAuthnChallenge, MAX_AUTHENTICATOR_DATA_BYTES,
 };
 
 const CREATE_OPTIONS_MAGIC: [u8; 4] = *b"WCR1";
@@ -19,10 +19,11 @@ const REQUIRED_CODE: u64 = 0;
 const MAX_CREDENTIAL_ID_BYTES: usize = 1_024;
 const MAX_CLIENT_DATA_BYTES: usize = 4_096;
 const MAX_ATTESTATION_OBJECT_BYTES: usize = 65_536;
-const MAX_AUTHENTICATOR_DATA_BYTES: usize = 1_024;
 const MIN_AUTHENTICATOR_DATA_BYTES: usize = 37;
 const MAX_SIGNATURE_BYTES: usize = 80;
 const MIN_SIGNATURE_BYTES: usize = 8;
+const PRF_ABSENT: OwnerBridgeCodecError =
+    OwnerBridgeCodecError::Verification(VerificationReason::PrfAbsent);
 
 /// Host-supplied Create options encoded into a request buffer.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -458,9 +459,10 @@ pub fn decode_attestation_reply(
     let transports = read_transports(&mut reader)?;
     let prf_enabled = reader.boolean()?;
     let prf_first = reader
-        .optional_fixed_bytes::<32>()?
+        .optional_fixed_bytes::<32>()
+        .map_err(prf_fault)?
         .map(PrfResult::from_bytes);
-    reader.null()?;
+    reader.null().map_err(prf_fault)?;
     reader.finish()?;
     AttestationReplyV1::new(
         ceremony_id,
@@ -518,11 +520,8 @@ pub fn decode_assertion_reply(input: &[u8]) -> Result<AssertionReplyV1<'_>, Owne
     let authenticator_data =
         reader.bytes(MIN_AUTHENTICATOR_DATA_BYTES, MAX_AUTHENTICATOR_DATA_BYTES)?;
     let signature = reader.bytes(MIN_SIGNATURE_BYTES, MAX_SIGNATURE_BYTES)?;
-    let user_handle = reader
-        .optional_fixed_bytes::<32>()?
-        .map(OwnerUserHandle::from_bytes);
-    let prf_first = PrfResult::from_bytes(reader.fixed_bytes()?);
-    reader.null()?;
+    let user_handle = read_user_handle(&mut reader)?;
+    let prf_first = read_required_prf(&mut reader)?;
     reader.finish()?;
     AssertionReplyV1::new(
         ceremony_id,
@@ -533,6 +532,45 @@ pub fn decode_assertion_reply(input: &[u8]) -> Result<AssertionReplyV1<'_>, Owne
         user_handle,
         prf_first,
     )
+}
+
+/// Name the verification reason for a reply field of the wrong shape.
+///
+/// A wrong type, wrong length, or truncated field becomes `reason`: the reader reports all three
+/// as `InvalidCbor`, so a payload that ends inside the field is also reported as `reason`. Every
+/// other failure, such as a non-shortest encoding, keeps its own error.
+const fn field_fault(
+    error: OwnerBridgeCodecError,
+    reason: VerificationReason,
+) -> OwnerBridgeCodecError {
+    match error {
+        OwnerBridgeCodecError::InvalidCbor => OwnerBridgeCodecError::Verification(reason),
+        other => other,
+    }
+}
+
+fn read_user_handle(
+    reader: &mut CborReader<'_>,
+) -> Result<Option<OwnerUserHandle>, OwnerBridgeCodecError> {
+    let handle = reader
+        .optional_fixed_bytes::<32>()
+        .map_err(user_handle_fault)?;
+    Ok(handle.map(OwnerUserHandle::from_bytes))
+}
+
+/// Read the required Get PRF result and the reserved `second` field.
+fn read_required_prf(reader: &mut CborReader<'_>) -> Result<PrfResult, OwnerBridgeCodecError> {
+    let first = reader.optional_fixed_bytes::<32>().map_err(prf_fault)?;
+    reader.null().map_err(prf_fault)?;
+    first.map(PrfResult::from_bytes).ok_or(PRF_ABSENT)
+}
+
+const fn prf_fault(error: OwnerBridgeCodecError) -> OwnerBridgeCodecError {
+    field_fault(error, VerificationReason::PrfMalformed)
+}
+
+const fn user_handle_fault(error: OwnerBridgeCodecError) -> OwnerBridgeCodecError {
+    field_fault(error, VerificationReason::UserHandleMismatch)
 }
 
 fn write_optional_fixed<const N: usize>(writer: &mut CborWriter<'_>, value: Option<&[u8; N]>) {

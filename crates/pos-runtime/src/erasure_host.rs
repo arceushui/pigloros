@@ -1,5 +1,7 @@
 //! Single-owner execution boundary for erasure-protected store operations.
 
+mod world_replay_read;
+
 use std::{cell::RefCell, sync::Arc};
 
 use crate::authorization_cache::{AuthorizationCacheKeyV1, AuthorizationCacheV1};
@@ -36,18 +38,22 @@ use pos_core::{
     PreparedOwnTracksIngressV1, Seq, StoredErasureManifestV1, Timeline, TimelineId, TimelineMeta,
     TimelineMode, WallTime,
 };
+#[cfg(target_os = "linux")]
+use pos_store::plugin_trust_registry::PluginTrustPolicyRegistryV1;
 use pos_store::{
     ForkAdmissionAuthorityBootstrapPortV1, ForkAdmissionAuthorityPortV1,
     ForkAdmissionAuthoritySessionV1, ForkAdmissionDeliveryJournalPortV1,
     ForkClassifierRegistrationReceiptV1, ForkDeliveryClaimOutcomeV1, ForkDeliveryClaimV1,
     ForkDeliveryExecutionV1, ForkDeliveryJournalErrorV1, ForkDeliveryStartupOutcomeV1,
     ForkDeliveryTupleV1, ForkEventAuthorityErrorV1, ForkEventPermitIssuerPortV1,
-    ForkEventPermitIssuerV1, ForkEventProvenanceAuthorityPortV1, StoreConfig,
+    ForkEventPermitIssuerV1, ForkEventProvenanceAuthorityPortV1, ForkReplayAuthorityEvidenceV1,
+    ForkReplayAuthorityReadPortV1, ForkReplayReadBudgetV1, StoreConfig,
 };
 use std::num::NonZeroUsize;
 
 use crate::{
-    VerifiedWorldReplayV1, WorldReplayUseV1, WorldReplayVerificationErrorV1, WorldReplayVerifierV1,
+    PreparedWorldReplayReadV1, VerifiedWorldReplayV1, WorldReplayReadIntentV1, WorldReplayUseV1,
+    WorldReplayVerificationErrorV1, WorldReplayVerifierV1,
 };
 use pos_core::WorldReplayClosureV1;
 
@@ -174,6 +180,7 @@ trait ErasureHostStore:
     + ForkAdmissionDeliveryJournalPortV1
     + ForkEventPermitIssuerPortV1
     + ForkEventProvenanceAuthorityPortV1
+    + ForkReplayAuthorityReadPortV1
 {
     fn initialize_timeline_with_key_registry_for_host_transition_result_with_meta(
         &mut self,
@@ -193,7 +200,8 @@ where
         + ForkAdmissionAuthorityPortV1
         + ForkAdmissionDeliveryJournalPortV1
         + ForkEventPermitIssuerPortV1
-        + ForkEventProvenanceAuthorityPortV1,
+        + ForkEventProvenanceAuthorityPortV1
+        + ForkReplayAuthorityReadPortV1,
 {
     fn initialize_timeline_with_key_registry_for_host_transition_result_with_meta(
         &mut self,
@@ -217,6 +225,25 @@ where
         }
     }
 }
+
+/// A standard host store that also carries the Plugin trust policy registry (ADR-061 revision 8
+/// decision 5).
+///
+/// The registry port and its store implementations are Linux only while this module is not, so
+/// the registry cannot be a supertrait of [`ErasureHostStore`]: the standard variant of
+/// [`OwnedErasureStoreV1`] boxes this trait on Linux and the plain host store elsewhere.
+#[cfg(target_os = "linux")]
+trait ErasureHostRegistryStore: ErasureHostStore + PluginTrustPolicyRegistryV1 {}
+
+#[cfg(target_os = "linux")]
+impl<T> ErasureHostRegistryStore for T where T: ErasureHostStore + PluginTrustPolicyRegistryV1 {}
+
+/// The object type of the standard owned store.
+#[cfg(target_os = "linux")]
+type HostStoreObjectV1 = dyn ErasureHostRegistryStore;
+/// The object type of the standard owned store.
+#[cfg(not(target_os = "linux"))]
+type HostStoreObjectV1 = dyn ErasureHostStore;
 
 /// Replaceable host authority used by the erasure coordinator.
 ///
@@ -1113,7 +1140,7 @@ impl<T> ErasureGatewayHostStore for T where
 }
 
 enum OwnedErasureStoreV1 {
-    Standard(Box<dyn ErasureHostStore>),
+    Standard(Box<HostStoreObjectV1>),
     Gateway(Box<dyn ErasureGatewayHostStore>),
 }
 
@@ -1131,15 +1158,29 @@ impl OwnedErasureStoreV1 {
             Self::Standard(_) => Err(ErasureHostErrorV1::AuthorizationDenied),
         }
     }
+
+    /// The Plugin trust policy registry of a standard store; a Gateway store has none.
+    #[cfg(all(target_os = "linux", any(test, feature = "local-admission-host")))]
+    fn registry_store(
+        &mut self,
+    ) -> Result<&mut dyn PluginTrustPolicyRegistryV1, ErasureHostErrorV1> {
+        match self {
+            Self::Standard(store) => {
+                let registry: &mut dyn PluginTrustPolicyRegistryV1 = store.as_mut();
+                Ok(registry)
+            }
+            Self::Gateway(_) => Err(ErasureHostErrorV1::AuthorizationDenied),
+        }
+    }
 }
 
-fn open_host_store(config: StoreConfig) -> Result<Box<dyn ErasureHostStore>, CoreError> {
+fn open_host_store(config: StoreConfig) -> Result<Box<HostStoreObjectV1>, CoreError> {
     match config {
         StoreConfig::Memory => Ok(Box::new(pos_store::memory::MemoryStore::new())),
         StoreConfig::Sqlite { path } => pos_store::sqlite::SqliteStore::open(&path)
-            .map(|store| Box::new(store) as Box<dyn ErasureHostStore>),
+            .map(|store| Box::new(store) as Box<HostStoreObjectV1>),
         StoreConfig::SqliteInMemory => pos_store::sqlite::SqliteStore::open_in_memory()
-            .map(|store| Box::new(store) as Box<dyn ErasureHostStore>),
+            .map(|store| Box::new(store) as Box<HostStoreObjectV1>),
     }
 }
 
@@ -1222,7 +1263,7 @@ impl ErasureExecutionHostV1 {
     /// # Errors
     /// Returns [`ErasureHostErrorV1::AdapterFailure`] when the adapter refuses
     /// the unique host gate binding.
-    fn new_closed(store: Box<dyn ErasureHostStore>) -> Result<Self, ErasureHostErrorV1> {
+    fn new_closed(store: Box<HostStoreObjectV1>) -> Result<Self, ErasureHostErrorV1> {
         Self::new_closed_store(OwnedErasureStoreV1::Standard(store))
     }
 
@@ -1284,7 +1325,7 @@ impl ErasureExecutionHostV1 {
         limits: ErasureRecoveryLimitsV1,
     ) -> Result<Self, ErasureHostErrorV1> {
         pos_store::sqlite::SqliteStore::open_read_only(path)
-            .map(|store| Box::new(store) as Box<dyn ErasureHostStore>)
+            .map(|store| Box::new(store) as Box<HostStoreObjectV1>)
             .map_err(|_| ErasureHostErrorV1::AdapterFailure)
             .and_then(|store| Self::recover_verified_empty_with_limits(store, limits))
     }
@@ -1307,12 +1348,41 @@ impl ErasureExecutionHostV1 {
         Self::recover_with_composition(store, composition, limits)
     }
 
+    /// Recover an exclusively owned, prepopulated nonproduction Memory fixture.
+    ///
+    /// # Errors
+    /// Retains the normal composition's complete inventory and gate checks.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn recover_memory_fixture_with_authority(
+        store: pos_store::memory::MemoryStore,
+        composition: &ErasureCoordinatorCompositionV1,
+        limits: ErasureRecoveryLimitsV1,
+    ) -> Result<Self, ErasureHostErrorV1> {
+        store
+            .detach_fixture_gate_for_host()
+            .map_err(|_| ErasureHostErrorV1::AdapterFailure)
+            .and_then(|store| Self::recover_with_composition(Box::new(store), composition, limits))
+    }
+
+    /// Recover a nonproduction `SQLite` fixture with native fault observers.
+    ///
+    /// # Errors
+    /// Retains the normal composition's complete inventory and gate checks.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn recover_sqlite_fixture_with_authority(
+        store: pos_store::sqlite::SqliteStore,
+        composition: &ErasureCoordinatorCompositionV1,
+        limits: ErasureRecoveryLimitsV1,
+    ) -> Result<Self, ErasureHostErrorV1> {
+        Self::recover_with_composition(Box::new(store), composition, limits)
+    }
+
     /// Recover one store after installing its explicit authority composition.
     ///
     /// # Errors
     /// Returns a closed adapter or recovery error before host publication.
     fn recover_with_composition(
-        store: Box<dyn ErasureHostStore>,
+        store: Box<HostStoreObjectV1>,
         composition: &ErasureCoordinatorCompositionV1,
         limits: ErasureRecoveryLimitsV1,
     ) -> Result<Self, ErasureHostErrorV1> {
@@ -1335,7 +1405,7 @@ impl ErasureExecutionHostV1 {
         limits: ErasureRecoveryLimitsV1,
     ) -> Result<Self, ErasureHostErrorV1> {
         pos_store::sqlite::SqliteStore::open_read_only(path)
-            .map(|store| Box::new(store) as Box<dyn ErasureHostStore>)
+            .map(|store| Box::new(store) as Box<HostStoreObjectV1>)
             .map_err(|_| ErasureHostErrorV1::AdapterFailure)
             .and_then(|store| Self::recover_with_composition(store, composition, limits))
     }
@@ -2047,6 +2117,40 @@ impl ErasureExecutionHostV1 {
             host: self,
             generation,
         })
+    }
+
+    /// Run one closure on the Plugin trust policy registry of the owned store (ADR-061
+    /// revision 8 decision 5).
+    ///
+    /// The receiver is the host, not the public command sender: the sender is what every holder
+    /// of the host gets, and this method hands out the registry's `admit`, `rollback`,
+    /// `provision` and `advance_policy`, so it is crate private and `CommunityEvaluationWorldV1`
+    /// is its only caller. Like `with_scheduled_admission` it checks the generation before it
+    /// runs the closure; the host has no sender generation, so it checks the one it has
+    /// installed (a closed host is `RecoveryUnavailable`). The closure sees the registry only
+    /// as the port, and the borrow cannot outlive it.
+    ///
+    /// # Errors
+    /// Returns `RecoveryUnavailable` or `StaleGeneration` for a host that is not ready, and
+    /// `AuthorizationDenied` for a Gateway store, which has no registry; the closure runs only
+    /// on success.
+    ///
+    /// The in-crate use is the positive half (the `registry_facade` tests and the evaluation
+    /// world); this doctest is the negative half, compiled outside the crate and only where
+    /// the method exists.
+    #[cfg_attr(
+        all(target_os = "linux", feature = "local-admission-host"),
+        doc = "\n```compile_fail,E0624\nfn probe(host: &mut pos_runtime::ErasureExecutionHostV1) {\n    \
+               let _ = host.with_plugin_trust_registry(|_| ());\n}\n```"
+    )]
+    #[cfg(all(target_os = "linux", any(test, feature = "local-admission-host")))]
+    pub(crate) fn with_plugin_trust_registry<T>(
+        &mut self,
+        operation: impl FnOnce(&mut dyn PluginTrustPolicyRegistryV1) -> T,
+    ) -> Result<T, ErasureHostErrorV1> {
+        self.ready_generation()
+            .and_then(|generation| self.ensure_generation(generation))?;
+        self.store.registry_store().map(operation)
     }
 
     fn ready_generation(&self) -> Result<ErasureReferenceV1, ErasureHostErrorV1> {
@@ -2877,7 +2981,7 @@ impl ErasureExecutionHostV1 {
     /// through [`Self::open_with_authority`].
     #[cfg(test)]
     fn recover_verified_empty(
-        store: Box<dyn ErasureHostStore>,
+        store: Box<HostStoreObjectV1>,
         maximum_requests: usize,
     ) -> Result<Self, ErasureHostErrorV1> {
         Self::recover_verified_empty_with_limits(
@@ -2891,7 +2995,7 @@ impl ErasureExecutionHostV1 {
     /// # Errors
     /// Returns a closed adapter or recovery error before host publication.
     fn recover_verified_empty_with_limits(
-        mut store: Box<dyn ErasureHostStore>,
+        mut store: Box<HostStoreObjectV1>,
         limits: ErasureRecoveryLimitsV1,
     ) -> Result<Self, ErasureHostErrorV1> {
         let inventory = store
@@ -2917,7 +3021,7 @@ impl ErasureExecutionHostV1 {
     /// verification, current-store matching, or publication fails.
     #[cfg(test)]
     fn recover_from_verified_query<Q: ErasureVerifiedInventoryQueryV1 + ?Sized>(
-        store: Box<dyn ErasureHostStore>,
+        store: Box<HostStoreObjectV1>,
         query: &mut Q,
         maximum_requests: usize,
     ) -> Result<Self, ErasureHostErrorV1> {
@@ -2933,7 +3037,7 @@ impl ErasureExecutionHostV1 {
     /// # Errors
     /// Returns a closed adapter or recovery error before host publication.
     fn recover_from_verified_query_with_limits<Q: ErasureVerifiedInventoryQueryV1 + ?Sized>(
-        store: Box<dyn ErasureHostStore>,
+        store: Box<HostStoreObjectV1>,
         query: &mut Q,
         limits: ErasureRecoveryLimitsV1,
     ) -> Result<Self, ErasureHostErrorV1> {
@@ -3957,6 +4061,140 @@ pub struct ErasureReadSenderV1<'host> {
 }
 
 impl ErasureReadSenderV1<'_> {
+    /// Select immutable installed policy before native ancestry or head reads.
+    ///
+    /// The result binds this exact installed verifier allocation but grants no
+    /// verified claim or permission to release State (ADR-118).
+    ///
+    /// # Errors
+    /// Rejects stale generations, uncovered selections, absent owners and
+    /// invalid or unsupported finite profiles before Store access.
+    pub fn prepare_world_replay_read(
+        &mut self,
+        closure: &WorldReplayClosureV1,
+        intent: WorldReplayReadIntentV1,
+    ) -> Result<PreparedWorldReplayReadV1, ErasureHostErrorV1> {
+        self.host.ensure_generation(self.generation)?;
+        if closure.inventory_generation() != Hash::from_bytes(self.generation.digest()) {
+            return Err(ErasureHostErrorV1::StaleGeneration);
+        }
+        if !intent.is_covered_by(closure) {
+            return Err(ErasureHostErrorV1::Conflict);
+        }
+        let owner = self
+            .host
+            .world_replay_verifier
+            .clone()
+            .ok_or(ErasureHostErrorV1::AuthorizationDenied)?;
+        let (bounds, limits) = owner
+            .read_profile(closure, &intent, self.generation)
+            .map_err(map_world_replay_verification_error)?;
+        PreparedWorldReplayReadV1::new(closure, intent, self.generation, owner, bounds, limits)
+            .map_err(map_world_replay_verification_error)
+    }
+
+    fn require_prepared_world_replay(
+        &mut self,
+        prepared: &PreparedWorldReplayReadV1,
+        budget: &mut ForkReplayReadBudgetV1<'_>,
+    ) -> Result<(), ErasureHostErrorV1> {
+        budget
+            .check_time()
+            .map_err(|_| ErasureHostErrorV1::AdapterFailure)?;
+        self.host.ensure_generation(self.generation)?;
+        if prepared.generation() != self.generation {
+            return Err(ErasureHostErrorV1::StaleGeneration);
+        }
+        if prepared.fork_read_limits() != budget.limits()
+            || !self
+                .host
+                .world_replay_verifier
+                .as_ref()
+                .is_some_and(|owner| Arc::ptr_eq(owner, prepared.owner()))
+        {
+            return Err(ErasureHostErrorV1::Conflict);
+        }
+        Ok(())
+    }
+
+    /// Admit an observed use only through the retained prepared owner.
+    ///
+    /// # Errors
+    /// A refused budget wins over stale/foreign preparation. Rejects any
+    /// changed closure, selection, capability binding or prepared policy.
+    pub fn admit_prepared_world_replay(
+        &mut self,
+        prepared: &PreparedWorldReplayReadV1,
+        closure: &WorldReplayClosureV1,
+        requested_use: &WorldReplayUseV1,
+        budget: &mut ForkReplayReadBudgetV1<'_>,
+    ) -> Result<VerifiedWorldReplayV1, ErasureHostErrorV1> {
+        self.require_prepared_world_replay(prepared, budget)?;
+        if prepared.closure_digest() != closure.digest()
+            || !prepared.intent().matches_use(requested_use)
+        {
+            return Err(ErasureHostErrorV1::Conflict);
+        }
+        let result = verify_world_replay_with_owner(
+            prepared.owner().as_ref(),
+            closure,
+            requested_use,
+            self.generation,
+        );
+        budget
+            .check_time()
+            .map_err(|_| ErasureHostErrorV1::AdapterFailure)?;
+        result.and_then(|verified| {
+            if verified.read_bounds() == prepared.read_bounds()
+                && verified.fork_read_limits() == prepared.fork_read_limits()
+            {
+                Ok(verified)
+            } else {
+                Err(ErasureHostErrorV1::Conflict)
+            }
+        })
+    }
+
+    /// Observe the actual logical head on the prepared operation's ledger.
+    ///
+    /// # Errors
+    /// Rejects refused, stale or foreign preparation, native visibility/depth
+    /// failures and a requested range outside the observed logical head.
+    pub fn observe_world_replay_use(
+        &mut self,
+        prepared: &PreparedWorldReplayReadV1,
+        budget: &mut ForkReplayReadBudgetV1<'_>,
+    ) -> Result<WorldReplayUseV1, ErasureHostErrorV1> {
+        self.require_prepared_world_replay(prepared, budget)?;
+        let cap = prepared
+            .read_bounds()
+            .max_fork_depth()
+            .min(budget.limits().max_fork_depth_per_traversal());
+        let result = self.host.store.host_store().fork_replay_logical_head(
+            prepared.intent().timeline_id(),
+            cap,
+            budget,
+        );
+        budget
+            .check_time()
+            .map_err(|_| ErasureHostErrorV1::AdapterFailure)?;
+        let head = result.map_err(map_fork_replay_lineage_error)?;
+        let intent = prepared.intent();
+        let result = WorldReplayUseV1::new(
+            intent.timeline_id(),
+            intent.operation(),
+            intent.range(),
+            head,
+            intent.consumer_ids().to_vec(),
+            intent.requested_optional_view_roots().to_vec(),
+        )
+        .map_err(map_world_replay_verification_error);
+        budget
+            .check_time()
+            .map_err(|_| ErasureHostErrorV1::AdapterFailure)?;
+        result
+    }
+
     /// Read a page only while the host still owns the expected inventory generation.
     ///
     /// The expected digest is a cursor comparison, never authority to choose or
@@ -4011,20 +4249,120 @@ impl ErasureReadSenderV1<'_> {
             .world_replay_verifier
             .clone()
             .ok_or(ErasureHostErrorV1::AuthorizationDenied)?;
-        let capability = verification_owner
-            .verify(closure, requested_use, self.generation)
-            .map_err(map_world_replay_verification_error)?;
-        let closure_digest = closure.digest();
-        if capability.closure_digest() != closure_digest
-            || capability.timeline_id() != closure.timeline_id()
-            || capability.source_head() != closure.source_head()
-            || capability.inventory_generation() != self.generation
-            || capability.requested_use() != requested_use
-            || !capability.has_finite_read_bounds()
+        verify_world_replay_with_owner(
+            verification_owner.as_ref(),
+            closure,
+            requested_use,
+            self.generation,
+        )
+    }
+
+    /// Validate the complete owner-selected Fork classification and its exact
+    /// attribution requirements inside the caller's protected interval.
+    ///
+    /// # Errors
+    /// Fails closed on stale capabilities, incomplete classifications, native
+    /// evidence failure, or exhaustion of the shared operation budget.
+    pub fn validate_world_replay_forks(
+        &mut self,
+        capability: &VerifiedWorldReplayV1,
+        budget: &mut ForkReplayReadBudgetV1<'_>,
+    ) -> Result<Vec<ForkReplayAuthorityEvidenceV1>, ErasureHostErrorV1> {
+        budget
+            .check_time()
+            .map_err(|_| ErasureHostErrorV1::AdapterFailure)?;
+        self.host.ensure_generation(self.generation)?;
+        if capability.inventory_generation() != self.generation
+            || capability.fork_source_profile().is_none()
+            || capability.fork_read_limits() != budget.limits()
         {
             return Err(ErasureHostErrorV1::Conflict);
         }
-        Ok(capability)
+        let Some(sources) = capability.fork_sources() else {
+            // This variant is minted only by the installed owner, which
+            // attests an ordinary complete history without attribution.
+            return if capability.fork_requirements().is_empty() {
+                Ok(Vec::new())
+            } else {
+                Err(ErasureHostErrorV1::Conflict)
+            };
+        };
+        let mut next = Some(capability.timeline_id());
+        let mut head = capability.requested_use().source_logical_head();
+        let mut required_index = 0;
+        let effective_max_fork_depth = capability
+            .read_bounds()
+            .max_fork_depth()
+            .min(budget.limits().max_fork_depth_per_traversal());
+        for (depth, source) in sources.iter().enumerate() {
+            budget
+                .check_time()
+                .map_err(|_| ErasureHostErrorV1::AdapterFailure)?;
+            if next != Some(source.timeline_id()) {
+                return Err(ErasureHostErrorV1::Conflict);
+            }
+            for previous in &sources[..depth] {
+                budget
+                    .check_time()
+                    .map_err(|_| ErasureHostErrorV1::AdapterFailure)?;
+                let duplicate = previous.timeline_id() == source.timeline_id();
+                budget
+                    .check_time()
+                    .map_err(|_| ErasureHostErrorV1::AdapterFailure)?;
+                if duplicate {
+                    return Err(ErasureHostErrorV1::Conflict);
+                }
+            }
+            if let Some(required) = source.required_attribution() {
+                if required.publication_logical_head() != head
+                    || capability.fork_requirements().get(required_index) != Some(&required)
+                {
+                    return Err(ErasureHostErrorV1::Conflict);
+                }
+                required_index += 1;
+            }
+            let timeline = self.host.store.host_store().read_fork_replay_lineage_node(
+                source.timeline_id(),
+                depth,
+                effective_max_fork_depth,
+                budget,
+            );
+            budget
+                .check_time()
+                .map_err(|_| ErasureHostErrorV1::AdapterFailure)?;
+            let timeline = timeline
+                .map_err(map_fork_replay_lineage_error)?
+                .ok_or(ErasureHostErrorV1::Conflict)?;
+            if timeline.timeline_id() != &source.timeline_id() {
+                return Err(ErasureHostErrorV1::Conflict);
+            }
+            next = if let Some((parent, cut)) = timeline.fork_point() {
+                budget
+                    .charge_bytes(24)
+                    .map_err(|_| ErasureHostErrorV1::AdapterFailure)?;
+                head = *cut;
+                Some(*parent)
+            } else {
+                None
+            };
+        }
+        budget
+            .check_time()
+            .map_err(|_| ErasureHostErrorV1::AdapterFailure)?;
+        if next.is_some() || required_index != capability.fork_requirements().len() {
+            return Err(ErasureHostErrorV1::Conflict);
+        }
+        let mut evidence = Vec::new();
+        for requirement in capability.fork_requirements() {
+            let verified = self
+                .host
+                .store
+                .host_store()
+                .validate_fork_replay_authority(requirement, budget)
+                .map_err(|_| ErasureHostErrorV1::AdapterFailure)?;
+            evidence.push(verified);
+        }
+        Ok(evidence)
     }
 
     /// Recover one authoritative, payload-free ERS1 state through the
@@ -4298,6 +4636,41 @@ impl ErasureReadSenderV1<'_> {
     }
 }
 
+fn verify_world_replay_with_owner(
+    owner: &dyn WorldReplayVerifierV1,
+    closure: &WorldReplayClosureV1,
+    requested_use: &WorldReplayUseV1,
+    generation: ErasureReferenceV1,
+) -> Result<VerifiedWorldReplayV1, ErasureHostErrorV1> {
+    let capability = owner
+        .verify(closure, requested_use, generation)
+        .map_err(map_world_replay_verification_error)?;
+    let closure_digest = closure.digest();
+    if capability.closure_digest() != closure_digest
+        || capability.timeline_id() != closure.timeline_id()
+        || capability.source_head() != closure.source_head()
+        || capability.inventory_generation() != generation
+        || capability.requested_use() != requested_use
+        || !capability.has_finite_read_bounds()
+    {
+        Err(ErasureHostErrorV1::Conflict)
+    } else {
+        Ok(capability)
+    }
+}
+
+const fn map_fork_replay_lineage_error(
+    error: pos_store::ForkReplayLineageReadErrorV1,
+) -> ErasureHostErrorV1 {
+    match error {
+        pos_store::ForkReplayLineageReadErrorV1::Read(_) => ErasureHostErrorV1::AdapterFailure,
+        pos_store::ForkReplayLineageReadErrorV1::AccessFrozen => ErasureHostErrorV1::AccessFrozen,
+        pos_store::ForkReplayLineageReadErrorV1::ContainmentUnavailable => {
+            ErasureHostErrorV1::RecoveryUnavailable
+        }
+    }
+}
+
 const fn map_world_replay_verification_error(
     error: WorldReplayVerificationErrorV1,
 ) -> ErasureHostErrorV1 {
@@ -4489,6 +4862,9 @@ const fn is_non_poisoning_transition_error(error: ErasureErrorV1) -> bool {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+    mod world_replay_boundaries;
+
+    use pos_core::trusted_clock::ScriptedGuardMonotonicSourceV1;
     use pos_core::{
         geo_admission::GeoLocationAdmissionInputV1, AppendDedupKey, CanonicalBytes,
         ConsentAuthority, ConsentGrantedV1, ConsentRevokedV1, EntityId,
@@ -4506,6 +4882,7 @@ mod tests {
     };
 
     use pos_store::memory::MemoryStore;
+    use std::{cell::Cell, time::Duration};
     const fn reference(seed: u8) -> ErasureReferenceV1 {
         ErasureReferenceV1::from_digest([seed; 32])
     }
@@ -4533,18 +4910,59 @@ mod tests {
     }
 
     impl WorldReplayVerifierV1 for WorldReplayVerifierModeV1 {
+        #[cfg_attr(coverage_nightly, coverage(on))]
+        fn read_profile(
+            &self,
+            _closure: &WorldReplayClosureV1,
+            _intent: &WorldReplayReadIntentV1,
+            _generation: ErasureReferenceV1,
+        ) -> Result<
+            (EventReadBounds, pos_store::ForkReplayReadLimitsV1),
+            WorldReplayVerificationErrorV1,
+        > {
+            if let Self::Reject(error) = self {
+                return Err(*error);
+            }
+            let bounds = if matches!(self, Self::UnboundedRead) {
+                EventReadBounds::new(usize::MAX, usize::MAX, usize::MAX, usize::MAX)
+            } else {
+                EventReadBounds::new_with_total_bytes_and_elapsed(
+                    65_536, 128, 8, 65_536, 67_108_864, 30_000_000,
+                )
+            };
+            Ok((
+                bounds,
+                test_ok(pos_store::ForkReplayReadLimitsV1::new(
+                    8,
+                    1_024,
+                    262_144,
+                    256 * 1024 * 1024,
+                    30_000_000,
+                )),
+            ))
+        }
+
+        #[cfg_attr(coverage_nightly, coverage(on))]
         fn verify(
             &self,
             closure: &WorldReplayClosureV1,
             requested_use: &WorldReplayUseV1,
             inventory_generation: ErasureReferenceV1,
         ) -> Result<VerifiedWorldReplayV1, WorldReplayVerificationErrorV1> {
+            let limits = test_ok(pos_store::ForkReplayReadLimitsV1::new(
+                8,
+                1_024,
+                262_144,
+                256 * 1024 * 1024,
+                30_000_000,
+            ));
             match self {
                 Self::Exact => Ok(crate::world_replay::test_verified_world_replay(
                     closure,
                     requested_use,
                     inventory_generation,
                     pos_core::ErasureReplayClaimV1::Exact,
+                    limits,
                 )),
                 Self::Reject(error) => Err(*error),
                 Self::WrongDigest => {
@@ -4555,6 +4973,7 @@ mod tests {
                         requested_use.clone(),
                         inventory_generation,
                         pos_core::ErasureReplayClaimV1::Exact,
+                        limits,
                     ))
                 }
                 Self::WrongTimeline => {
@@ -4565,6 +4984,7 @@ mod tests {
                         requested_use.clone(),
                         inventory_generation,
                         pos_core::ErasureReplayClaimV1::Exact,
+                        limits,
                     ))
                 }
                 Self::WrongSourceHead => {
@@ -4575,6 +4995,7 @@ mod tests {
                         requested_use.clone(),
                         inventory_generation,
                         pos_core::ErasureReplayClaimV1::Exact,
+                        limits,
                     ))
                 }
                 Self::WrongGeneration => {
@@ -4585,6 +5006,7 @@ mod tests {
                         requested_use.clone(),
                         reference(1),
                         pos_core::ErasureReplayClaimV1::Exact,
+                        limits,
                     ))
                 }
                 Self::WrongUse => {
@@ -4601,6 +5023,7 @@ mod tests {
                         &wrong_use,
                         inventory_generation,
                         pos_core::ErasureReplayClaimV1::Exact,
+                        limits,
                     ))
                 }
                 Self::UnboundedRead => Ok(
@@ -4611,7 +5034,10 @@ mod tests {
                         requested_use.clone(),
                         inventory_generation,
                         pos_core::ErasureReplayClaimV1::Exact,
-                        EventReadBounds::new(usize::MAX, usize::MAX, usize::MAX, usize::MAX),
+                        (
+                            EventReadBounds::new(usize::MAX, usize::MAX, usize::MAX, usize::MAX),
+                            limits,
+                        ),
                     ),
                 ),
             }
@@ -4652,6 +5078,249 @@ mod tests {
             )),
         );
         (host, closure)
+    }
+
+    // Ordinary fixture helpers live here so the tests/ exporter filter cannot hide them.
+    #[cfg_attr(coverage_nightly, coverage(on))]
+    fn intent_for(requested: &WorldReplayUseV1) -> WorldReplayReadIntentV1 {
+        test_ok(WorldReplayReadIntentV1::new(
+            requested.timeline_id(),
+            requested.operation(),
+            requested.range(),
+            requested.consumer_ids().to_vec(),
+            requested.requested_optional_view_roots().to_vec(),
+        ))
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(on))]
+    fn replay_fault_host(fault: FaultModeV1) -> (ErasureExecutionHostV1, WorldReplayClosureV1) {
+        let composition = ErasureCoordinatorCompositionV1::closed()
+            .with_world_replay_verifier(Arc::new(WorldReplayVerifierModeV1::Exact));
+        let mut host = test_ok(ErasureExecutionHostV1::recover_with_composition(
+            Box::new(fault_store(fault)),
+            &composition,
+            ErasureRecoveryLimitsV1::compiled_maximum(),
+        ));
+        let root = {
+            let mut sender = test_ok(host.command_sender());
+            let root = test_ok(sender.create_timeline("replay boundary")).id();
+            test_ok(sender.append(
+                root,
+                &[EventDraft::new(
+                    EntityId::new(),
+                    Kind::new("host.fixture"),
+                    CanonicalBytes::from_vec(Vec::new()),
+                )],
+            ));
+            root
+        };
+        let generation = test_ok(host.gate.inventory_generation());
+        let closure = test_ok(
+            WorldReplayClosureV1::test_fixture_for_timeline_with_inventory_generation(
+                root,
+                Hash::from_bytes(generation.digest()),
+            ),
+        );
+        (host, closure)
+    }
+
+    const GOOD_MARK: Duration = Duration::from_millis(1);
+
+    struct LineageFixture {
+        host: ErasureExecutionHostV1,
+        prepared: PreparedWorldReplayReadV1,
+        classified: VerifiedWorldReplayV1,
+    }
+
+    impl LineageFixture {
+        #[cfg_attr(coverage_nightly, coverage(on))]
+        fn new() -> Self {
+            let (mut host, _) = world_replay_host(WorldReplayVerifierModeV1::Exact);
+            let (root, child) = {
+                let mut commands = test_ok(host.command_sender());
+                let root = test_ok(commands.create_timeline("budget root")).id();
+                let child = test_ok(commands.fork_timeline(root, Seq::ZERO, "budget child")).id();
+                (root, child)
+            };
+            let generation = test_ok(host.gate.inventory_generation());
+            let closure = test_ok(
+                WorldReplayClosureV1::test_fixture_for_timeline_with_inventory_generation(
+                    child,
+                    Hash::from_bytes(generation.digest()),
+                ),
+            );
+            let requested = replay_use(&closure);
+            let mut sender = test_ok(host.read_sender());
+            let prepared =
+                test_ok(sender.prepare_world_replay_read(&closure, intent_for(&requested)));
+            let verified = test_ok(sender.admit_world_replay(&closure, &requested));
+            let sources = [child, root]
+                .map(|timeline| test_ok(crate::WorldReplayForkSourceV1::new(timeline, None)));
+            // Classify the ordinary Fork explicitly to exercise complete native
+            // traversal, without inventing imported authority or adapter failures.
+            let classified = crate::world_replay::test_verified_world_replay_with_fork_attribution(
+                verified,
+                Some(Hash::from_bytes([0xda; 32])),
+                sources.to_vec(),
+                Vec::new(),
+                prepared.fork_read_limits(),
+            );
+            Self {
+                host,
+                prepared,
+                classified,
+            }
+        }
+
+        #[cfg_attr(coverage_nightly, coverage(on))]
+        fn validate(
+            &mut self,
+            budget: &mut ForkReplayReadBudgetV1<'_>,
+        ) -> Result<(), ErasureHostErrorV1> {
+            let mut result = Err(ErasureHostErrorV1::Conflict);
+            let mut sender = test_ok(self.host.read_sender());
+            let fenced = sender.with_protected_ancestry_fence(
+                self.classified.timeline_id(),
+                ErasureProtectedOperationV1::Read,
+                &mut |sender| {
+                    result = sender
+                        .validate_world_replay_forks(&self.classified, budget)
+                        .map(|evidence| assert!(evidence.is_empty()));
+                },
+            );
+            fenced.and(result)
+        }
+
+        #[cfg_attr(coverage_nightly, coverage(on))]
+        fn fence(
+            &mut self,
+            budget: &mut ForkReplayReadBudgetV1<'_>,
+            callbacks: &Cell<usize>,
+            installed: &Cell<bool>,
+        ) -> Result<(), ErasureHostErrorV1> {
+            test_ok(self.host.read_sender()).with_world_replay_read_fence(
+                &[&self.prepared],
+                budget,
+                |_, _| {
+                    callbacks.set(callbacks.get() + 1);
+                    Ok(())
+                },
+                |(), verdict| {
+                    callbacks.set(callbacks.get() + 1);
+                    verdict?;
+                    installed.set(true);
+                    Ok(())
+                },
+            )
+        }
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(on))]
+    fn clock_for(good_marks: Option<usize>, bad_mark: Duration) -> ScriptedGuardMonotonicSourceV1 {
+        let script = good_marks.map_or_else(
+            || vec![GOOD_MARK],
+            |marks| {
+                // g0 and ledger construction remain healthy. After refusal the
+                // good mark stays queued: repeated refusals and unchanged sample
+                // counts prove the latched ledger never reads the clock again.
+                std::iter::repeat_n(GOOD_MARK, marks + 2)
+                    .chain([bad_mark, GOOD_MARK])
+                    .collect()
+            },
+        );
+        ScriptedGuardMonotonicSourceV1::new(script)
+    }
+
+    #[test]
+    fn prepared_replay_admission_binds_owner_values_and_checks_refusal_first() {
+        use pos_core::trusted_clock::{GuardMonotonicSourceV1, ScriptedGuardMonotonicSourceV1};
+        use std::time::Duration;
+
+        let (mut host, closure) = world_replay_host(WorldReplayVerifierModeV1::Exact);
+        let requested = replay_use(&closure);
+        let intent = test_ok(WorldReplayReadIntentV1::new(
+            requested.timeline_id(),
+            requested.operation(),
+            requested.range(),
+            requested.consumer_ids().to_vec(),
+            requested.requested_optional_view_roots().to_vec(),
+        ));
+        let prepared = test_ok(
+            test_ok(host.read_sender()).prepare_world_replay_read(&closure, intent.clone()),
+        );
+        assert_eq!(prepared.intent(), &intent);
+        let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+        let start = clock.mark();
+        let mut budget = test_ok(ForkReplayReadBudgetV1::new(
+            prepared.fork_read_limits(),
+            start,
+            &mut clock,
+        ));
+        let verified = test_ok(test_ok(host.read_sender()).admit_prepared_world_replay(
+            &prepared,
+            &closure,
+            &requested,
+            &mut budget,
+        ));
+        assert_eq!(verified.read_bounds(), prepared.read_bounds());
+        assert_eq!(verified.fork_read_limits(), prepared.fork_read_limits());
+        let (mut foreign, _) = world_replay_host(WorldReplayVerifierModeV1::Exact);
+        assert_eq!(
+            test_ok(foreign.gate.inventory_generation()),
+            prepared.generation()
+        );
+        let mut reads = test_ok(foreign.read_sender());
+        assert_eq!(
+            reads.admit_prepared_world_replay(&prepared, &closure, &requested, &mut budget),
+            Err(ErasureHostErrorV1::Conflict)
+        );
+        assert!(budget
+            .charge_bytes(prepared.fork_read_limits().max_native_bytes() + 1)
+            .is_err());
+        reads.generation = reference(1);
+        assert_eq!(
+            reads.admit_prepared_world_replay(&prepared, &closure, &requested, &mut budget),
+            Err(ErasureHostErrorV1::AdapterFailure)
+        );
+    }
+
+    #[test]
+    fn replay_profile_preparation_rejects_unknown_selection_and_invalid_policy() {
+        for mode in [
+            WorldReplayVerifierModeV1::Reject(WorldReplayVerificationErrorV1::EvidenceUnavailable),
+            WorldReplayVerifierModeV1::UnboundedRead,
+        ] {
+            let (mut host, closure) = world_replay_host(mode);
+            let intent = test_ok(WorldReplayReadIntentV1::new(
+                closure.timeline_id(),
+                ErasureProtectedOperationV1::Read,
+                SeqRange::all(),
+                vec!["count".to_owned()],
+                Vec::new(),
+            ));
+            assert!(test_ok(host.read_sender())
+                .prepare_world_replay_read(&closure, intent)
+                .is_err());
+        }
+        let (mut host, closure) = world_replay_host(WorldReplayVerifierModeV1::Exact);
+        for (timeline, consumer) in [
+            (TimelineId::new(), "count"),
+            (closure.timeline_id(), "unknown"),
+        ] {
+            let intent = test_ok(WorldReplayReadIntentV1::new(
+                timeline,
+                ErasureProtectedOperationV1::Read,
+                SeqRange::all(),
+                vec![consumer.to_owned()],
+                Vec::new(),
+            ));
+            assert_eq!(
+                test_ok(host.read_sender())
+                    .prepare_world_replay_read(&closure, intent)
+                    .err(),
+                Some(ErasureHostErrorV1::Conflict)
+            );
+        }
     }
 
     #[test]
@@ -4783,6 +5452,112 @@ mod tests {
         );
     }
 
+    #[cfg_attr(coverage_nightly, coverage(on))]
+    fn root_lineage_capability(
+        host: &ErasureExecutionHostV1,
+        root: TimelineId,
+        limits: pos_store::ForkReplayReadLimitsV1,
+    ) -> VerifiedWorldReplayV1 {
+        let generation = test_ok(host.gate.inventory_generation());
+        let closure = test_ok(
+            WorldReplayClosureV1::test_fixture_for_timeline_with_inventory_generation(
+                root,
+                Hash::from_bytes(generation.digest()),
+            ),
+        );
+        let verified = crate::world_replay::test_verified_world_replay(
+            &closure,
+            &replay_use(&closure),
+            generation,
+            pos_core::ErasureReplayClaimV1::Exact,
+            limits,
+        );
+        crate::world_replay::test_verified_world_replay_with_fork_attribution(
+            verified,
+            Some(Hash::from_bytes([0xda; 32])),
+            vec![test_ok(crate::WorldReplayForkSourceV1::new(root, None))],
+            Vec::new(),
+            limits,
+        )
+    }
+
+    #[test]
+    fn fork_lineage_native_errors_and_post_read_clock_refusals_keep_their_precedence() {
+        use pos_core::trusted_clock::{GuardMonotonicSourceV1, ScriptedGuardMonotonicSourceV1};
+        use pos_store::{
+            ForkReplayAuthorityReadErrorV1 as ReadError,
+            ForkReplayLineageReadErrorV1 as LineageError, ForkReplayReadLimitsV1,
+        };
+        use std::{sync::atomic::Ordering, time::Duration};
+
+        let limits = test_ok(ForkReplayReadLimitsV1::new(8, 128, 512, 16_384, 1_000_000));
+        for (native_error, native_mapping) in [
+            (
+                LineageError::Read(ReadError::Unavailable),
+                ErasureHostErrorV1::AdapterFailure,
+            ),
+            (
+                LineageError::Read(ReadError::CorruptAuthority),
+                ErasureHostErrorV1::AdapterFailure,
+            ),
+            (
+                LineageError::Read(ReadError::StorageUnavailable),
+                ErasureHostErrorV1::AdapterFailure,
+            ),
+            (LineageError::AccessFrozen, ErasureHostErrorV1::AccessFrozen),
+            (
+                LineageError::ContainmentUnavailable,
+                ErasureHostErrorV1::RecoveryUnavailable,
+            ),
+        ] {
+            for post_read_mark in [
+                Duration::from_millis(1),
+                Duration::from_secs(2),
+                Duration::ZERO,
+            ] {
+                // Only the native fault is injected. Recovery, topology,
+                // inventory binding and the held ancestry interval are real.
+                let store = fault_store(FaultModeV1::ForkReplayLineageError(native_error));
+                let calls = Arc::clone(&store.lineage_read_calls);
+                let mut host = test_ok(ErasureExecutionHostV1::recover_with_composition(
+                    Box::new(store),
+                    &ErasureCoordinatorCompositionV1::closed(),
+                    ErasureRecoveryLimitsV1::compiled_maximum(),
+                ));
+                let root = test_ok(test_ok(host.command_sender()).create_timeline("lineage")).id();
+                let capability = root_lineage_capability(&host, root, limits);
+                // g0, ledger creation, validation entry and source entry are
+                // all at 1ms; only the mandatory post-read sample changes.
+                // The following good mark proves refusal stays latched.
+                let mut clock = ScriptedGuardMonotonicSourceV1::new(
+                    std::iter::repeat_n(Duration::from_millis(1), 4)
+                        .chain([post_read_mark, Duration::from_millis(1)]),
+                );
+                let start = clock.mark();
+                let mut budget = test_ok(ForkReplayReadBudgetV1::new(limits, start, &mut clock));
+                let mut reads = test_ok(host.read_sender());
+                let mut result = Ok(Vec::new());
+                test_ok(reads.with_protected_ancestry_fence(
+                    root,
+                    ErasureProtectedOperationV1::Read,
+                    &mut |sender| {
+                        result = sender.validate_world_replay_forks(&capability, &mut budget);
+                    },
+                ));
+                assert_eq!(calls.load(Ordering::SeqCst), 1);
+                let clock_valid = post_read_mark == Duration::from_millis(1);
+                let expected = if clock_valid {
+                    native_mapping
+                } else {
+                    ErasureHostErrorV1::AdapterFailure
+                };
+                assert_eq!(result.map(|_| ()), Err(expected));
+                assert_eq!(budget.remaining_native_bytes(), limits.max_native_bytes());
+                assert_eq!(budget.check_time().is_ok(), clock_valid);
+            }
+        }
+    }
+
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum FaultModeV1 {
         BeginProtectedEffect,
@@ -4808,6 +5583,16 @@ mod tests {
         DeliveryIndeterminate,
         DeliveryJournalIndeterminate,
         DeliveryMisreportedOwner,
+        ForkReplayLineageError(pos_store::ForkReplayLineageReadErrorV1),
+        ForkReplayLineageCycle,
+        ForkReplayLineageSubstitute,
+        ForkReplayLineageMissing,
+        ForkReplayHeadError(pos_store::ForkReplayLineageReadErrorV1),
+        ForkReplayOversizedHead,
+        ForkReplayEventsError(pos_store::ForkReplayLineageReadErrorV1),
+        ForkReplayEventCount,
+        ForkReplayEventSequence,
+        BeginForkReplayPanic,
         Passthrough,
     }
 
@@ -4819,6 +5604,7 @@ mod tests {
         resolve_control: Arc<ResolveStateControlV1>,
         timeline_created_hook: Option<TimelineCreatedHookV1>,
         transition_lookup_calls: Arc<std::sync::atomic::AtomicUsize>,
+        lineage_read_calls: Arc<std::sync::atomic::AtomicUsize>,
         inventory_snapshot_calls: usize,
         fork_recovery_override: Option<ErasureForkRecoveryV1>,
     }
@@ -5014,6 +5800,75 @@ mod tests {
                 key,
                 attempt_id,
             )
+        }
+    }
+
+    impl pos_core::FactualPrefixReadPortV1 for FaultStoreV1 {
+        fn last_committed_factual_tick(
+            &self,
+            timeline: TimelineId,
+        ) -> Result<pos_core::FactualHeadV1, CoreError> {
+            pos_core::FactualPrefixReadPortV1::last_committed_factual_tick(&self.inner, timeline)
+        }
+
+        fn cut_tick_at(
+            &self,
+            timeline: TimelineId,
+            seq: pos_core::Seq,
+        ) -> Result<pos_core::FactualCutV1, CoreError> {
+            pos_core::FactualPrefixReadPortV1::cut_tick_at(&self.inner, timeline, seq)
+        }
+
+        fn nodes_for_committed_events(
+            &self,
+            timeline: TimelineId,
+            seqs: &[pos_core::Seq],
+        ) -> Result<Vec<Option<pos_core::DependencyNodeRecordV1>>, CoreError> {
+            pos_core::FactualPrefixReadPortV1::nodes_for_committed_events(
+                &self.inner,
+                timeline,
+                seqs,
+            )
+        }
+
+        fn nodes_by_digest(
+            &self,
+            timeline: TimelineId,
+            digests: &[pos_core::Hash],
+        ) -> Result<Vec<Option<pos_core::factual_dependency::BoundFactualNodeV1>>, CoreError>
+        {
+            pos_core::FactualPrefixReadPortV1::nodes_by_digest(&self.inner, timeline, digests)
+        }
+
+        fn last_step_node(
+            &self,
+            timeline: TimelineId,
+            owner: &pos_core::FactualOwnerIdV1,
+        ) -> Result<Option<pos_core::DependencyNodeRecordV1>, CoreError> {
+            pos_core::FactualPrefixReadPortV1::last_step_node(&self.inner, timeline, owner)
+        }
+
+        fn factual_set_counts(
+            &self,
+            timeline: TimelineId,
+        ) -> Result<pos_core::RecordedSetCountsV1, CoreError> {
+            pos_core::FactualPrefixReadPortV1::factual_set_counts(&self.inner, timeline)
+        }
+
+        fn fold_cursor(
+            &self,
+            timeline: TimelineId,
+        ) -> Result<Option<pos_core::FactualFoldCursorV1>, CoreError> {
+            pos_core::FactualPrefixReadPortV1::fold_cursor(&self.inner, timeline)
+        }
+
+        fn fold_window(
+            &self,
+            timeline: TimelineId,
+            after: pos_core::Seq,
+            through: pos_core::Seq,
+        ) -> Result<pos_core::FactualFoldWindowV1, CoreError> {
+            pos_core::FactualPrefixReadPortV1::fold_window(&self.inner, timeline, after, through)
         }
     }
 
@@ -5555,6 +6410,121 @@ mod tests {
         ) -> Result<pos_store::ForkAppendSourcePermitV1, ForkEventAuthorityErrorV1> {
             self.inner
                 .issue_append_source_permit(issuer, session, child, selected, source)
+        }
+    }
+
+    impl ForkReplayAuthorityReadPortV1 for FaultStoreV1 {
+        #[cfg_attr(coverage_nightly, coverage(on))]
+        fn begin_fork_replay_read_interval(
+            &self,
+            budget: &mut ForkReplayReadBudgetV1<'_>,
+        ) -> Result<ErasureProtectedEffectIntervalV1, pos_store::ForkReplayLineageReadErrorV1>
+        {
+            if self.fault == FaultModeV1::BeginForkReplayPanic {
+                std::panic::resume_unwind(Box::new("fork replay setup panic"));
+            }
+            self.inner.begin_fork_replay_read_interval(budget)
+        }
+
+        #[cfg_attr(coverage_nightly, coverage(on))]
+        fn fork_replay_logical_head(
+            &self,
+            timeline: TimelineId,
+            depth: usize,
+            budget: &mut ForkReplayReadBudgetV1<'_>,
+        ) -> Result<Seq, pos_store::ForkReplayLineageReadErrorV1> {
+            if let FaultModeV1::ForkReplayHeadError(error) = self.fault {
+                return Err(error);
+            }
+            self.inner
+                .fork_replay_logical_head(timeline, depth, budget)
+                .map(|head| {
+                    if self.fault == FaultModeV1::ForkReplayOversizedHead {
+                        Seq::from_u64(u64::from(u32::MAX) + 1)
+                    } else {
+                        head
+                    }
+                })
+        }
+
+        #[cfg_attr(coverage_nightly, coverage(on))]
+        fn read_fork_replay_events(
+            &self,
+            timeline: TimelineId,
+            range: SeqRange,
+            bounds: EventReadBounds,
+            budget: &mut ForkReplayReadBudgetV1<'_>,
+        ) -> Result<Vec<Event>, pos_store::ForkReplayLineageReadErrorV1> {
+            if self.fault == FaultModeV1::ForkReplayOversizedHead {
+                // A distinct refusal makes reaching materialization observable
+                // without allocating the adapter's claimed oversized history.
+                return Err(pos_store::ForkReplayLineageReadErrorV1::AccessFrozen);
+            }
+            if let FaultModeV1::ForkReplayEventsError(error) = self.fault {
+                return Err(error);
+            }
+            self.inner
+                .read_fork_replay_events(timeline, range, bounds, budget)
+                .map(|mut events| {
+                    if self.fault == FaultModeV1::ForkReplayEventCount {
+                        events.clear();
+                    } else if self.fault == FaultModeV1::ForkReplayEventSequence {
+                        for event in &mut events {
+                            event.seq = Seq::ZERO;
+                        }
+                    }
+                    events
+                })
+        }
+
+        #[cfg_attr(coverage_nightly, coverage(on))]
+        fn read_fork_replay_lineage_node(
+            &self,
+            timeline_id: TimelineId,
+            depth: usize,
+            effective_max_fork_depth: usize,
+            budget: &mut ForkReplayReadBudgetV1<'_>,
+        ) -> Result<
+            Option<pos_store::ForkReplayLineageNodeV1>,
+            pos_store::ForkReplayLineageReadErrorV1,
+        > {
+            self.lineage_read_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if let FaultModeV1::ForkReplayLineageError(error) = self.fault {
+                return Err(error);
+            }
+            if self.fault == FaultModeV1::ForkReplayLineageMissing {
+                return Ok(None);
+            }
+            if self.fault == FaultModeV1::ForkReplayLineageCycle {
+                return Ok(Some(pos_store::fork_replay::test_fork_replay_lineage_node(
+                    timeline_id,
+                    Some((timeline_id, Seq::ZERO)),
+                )));
+            }
+            if self.fault == FaultModeV1::ForkReplayLineageSubstitute {
+                return Ok(Some(pos_store::fork_replay::test_fork_replay_lineage_node(
+                    TimelineId::new(),
+                    None,
+                )));
+            }
+            self.inner.read_fork_replay_lineage_node(
+                timeline_id,
+                depth,
+                effective_max_fork_depth,
+                budget,
+            )
+        }
+
+        #[cfg_attr(coverage_nightly, coverage(on))]
+        fn validate_fork_replay_authority(
+            &self,
+            requirement: &pos_store::ForkReplayRequirementV1,
+            budget: &mut ForkReplayReadBudgetV1<'_>,
+        ) -> Result<ForkReplayAuthorityEvidenceV1, pos_store::ForkReplayAuthorityReadErrorV1>
+        {
+            self.inner
+                .validate_fork_replay_authority(requirement, budget)
         }
     }
 
@@ -6596,6 +7566,69 @@ mod tests {
         }
     }
 
+    /// The inner Memory store is seeded with one committed Tick, so a forwarder
+    /// that returned a constant default would fail. The reads run under the
+    /// open test gate: Memory's factual reads go through its erasure read
+    /// fence, which refuses a store with no bound gate.
+    #[test]
+    fn fault_store_delegates_every_factual_prefix_read() -> Result<(), Box<dyn std::error::Error>> {
+        use pos_core::counterfactual_store::test_fixtures::SeededFactualTickV1;
+        use pos_core::{
+            DependencyNodeCoordinateV1, DependencyNodeRecordV1, FactualCutV1, FactualHeadV1,
+            FactualOwnerIdV1, FactualPrefixReadPortV1, RecordedDependencyClassV1,
+            RecordedNodeOriginV1, Seq, TickDependencyRecordV1,
+        };
+
+        let mut store = fault_store(FaultModeV1::Passthrough);
+        store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
+        let timeline = store.create_timeline("fault-factual-reads")?.id();
+        let digest = pos_core::Hash::from_bytes([5; 32]);
+        let owner_name = "driver.seeded".to_owned();
+        let coordinate =
+            DependencyNodeCoordinateV1::try_new(1, 0, owner_name.clone(), 0, 7, digest)?;
+        let step = DependencyNodeRecordV1::try_new(
+            coordinate,
+            RecordedDependencyClassV1::EndogenousRecomputed,
+            RecordedNodeOriginV1::Committed,
+            Vec::new(),
+            pos_core::Hash::from_bytes([6; 32]),
+        )?;
+        let nodes = vec![step.clone()];
+        let origin = RecordedNodeOriginV1::Committed;
+        let record = TickDependencyRecordV1::try_new(1, origin, nodes, Vec::new())?;
+        let seq = Seq::from_u64(2);
+        let seeded = SeededFactualTickV1 {
+            record,
+            first_seq: seq,
+            last_seq: seq,
+            event_nodes: vec![(seq, digest)],
+        };
+        store.inner.seed_factual_prefix(timeline, &[seeded])?;
+
+        let head = FactualHeadV1 {
+            tick: 1,
+            last_seq: seq,
+        };
+        assert_eq!(store.last_committed_factual_tick(timeline)?, head);
+        let tail = Seq::from_u64(3);
+        assert_eq!(
+            store.cut_tick_at(timeline, tail)?,
+            FactualCutV1::Boundary { cut_tick: 1 }
+        );
+        let absent = Seq::from_u64(9);
+        let events = store.nodes_for_committed_events(timeline, &[seq, absent])?;
+        assert_eq!(events, vec![Some(step.clone()), None]);
+        let absent_digest = pos_core::Hash::from_bytes([7; 32]);
+        let bound = store.nodes_by_digest(timeline, &[digest, absent_digest])?;
+        assert!(bound[0].is_some());
+        assert!(bound[1].is_none());
+        let owner = FactualOwnerIdV1::new(owner_name);
+        assert_eq!(store.last_step_node(timeline, &owner)?, Some(step));
+        let counts = store.factual_set_counts(timeline)?;
+        assert_eq!(counts.nodes, 1);
+        Ok(())
+    }
+
     #[test]
     fn hosted_coordinator_port_delegates_empty_persistence_reads() -> Result<(), ErasureErrorV1> {
         let mut store = fault_store(FaultModeV1::BindGate);
@@ -7193,6 +8226,12 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(target_os = "linux")]
+    mod registry_facade;
+
+    #[cfg(target_os = "linux")]
+    mod registry_delegation;
+
     fn fault_store_with_control(fault: FaultModeV1) -> (FaultStoreV1, Arc<ResolveStateControlV1>) {
         let resolve_control = ResolveStateControlV1::new();
         (
@@ -7202,6 +8241,7 @@ mod tests {
                 resolve_control: Arc::clone(&resolve_control),
                 timeline_created_hook: None,
                 transition_lookup_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                lineage_read_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                 inventory_snapshot_calls: 0,
                 fork_recovery_override: None,
             },

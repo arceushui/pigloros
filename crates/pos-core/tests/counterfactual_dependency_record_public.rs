@@ -5,8 +5,11 @@
 
 use std::collections::BTreeSet;
 
+use pos_core::counterfactual_store::test_fixtures;
 use pos_core::counterfactual_store::test_fixtures::{
-    frontier_frame, hash_field, id_field, invalidation_frame, invalidation_middle, text_field, uint,
+    class_row, collect_rows, coord, coord_at, edge_row, edge_tail, edge_tail_with_rule, err, facts,
+    frontier_frame, hash, hash_field, id_field, indexed_hash, invalidation_frame,
+    invalidation_middle, node_bytes, node_row, ok, request, text_field, uint, EDGE_HEAD,
 };
 use pos_core::{
     CanonicalBytes, CounterfactualAdapterSealV1, CounterfactualBasisV1,
@@ -39,31 +42,6 @@ type EdgePage = DependencyPageV1<EdgeRow>;
 /// The adapter seal; these tests stand in for an adapter.
 const SEAL: CounterfactualAdapterSealV1 = CounterfactualAdapterSealV1::for_adapter();
 const PROVISIONAL: RecordedNodeOriginV1 = RecordedNodeOriginV1::Provisional;
-const EDGE_HEAD: [u8; 7] = [0x89, 0x64, b'I', b'D', b'P', b'1', 0x01];
-
-fn ok<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
-    result.unwrap_or_else(|error| {
-        std::panic::resume_unwind(Box::new(format!("unexpected test error: {error:?}")))
-    })
-}
-
-fn unexpected_success<T: std::fmt::Debug, E>(value: &T) -> E {
-    std::panic::resume_unwind(Box::new(format!("unexpected success: {value:?}")))
-}
-
-fn err<T: std::fmt::Debug, E>(result: Result<T, E>) -> E {
-    result.map_or_else(|error| error, |value| unexpected_success(&value))
-}
-
-const fn hash(value: u8) -> Hash {
-    Hash::from_bytes([value; 32])
-}
-
-fn indexed_hash(index: usize) -> Hash {
-    let mut bytes = [0_u8; 32];
-    bytes[24..].copy_from_slice(&ok(u64::try_from(index)).to_be_bytes());
-    Hash::from_bytes(bytes)
-}
 
 /// The nonzero digests `1..=count` in ascending order.
 fn ascending_hashes(count: usize) -> Vec<Hash> {
@@ -76,75 +54,6 @@ fn fork() -> TimelineId {
 
 fn parent() -> TimelineId {
     TimelineId::from_ulid(Ulid::from(0x00ff_u128))
-}
-
-fn coord_at(tick: u64, owner: &str, ordinal: u32, digest: Hash) -> Coordinate {
-    ok(Coordinate::try_new(
-        tick,
-        0,
-        owner.to_owned(),
-        ordinal,
-        7,
-        digest,
-    ))
-}
-
-fn coord(tick: u64, owner: &str, digest: u8) -> Coordinate {
-    coord_at(tick, owner, 0, hash(digest))
-}
-
-fn class_row(
-    coordinate: Coordinate,
-    class: RecordedDependencyClassV1,
-    origin: RecordedNodeOriginV1,
-    inputs: Vec<Hash>,
-) -> NodeRow {
-    ok(NodeRow::try_new(
-        coordinate,
-        class,
-        origin,
-        inputs,
-        hash(99),
-    ))
-}
-
-fn node_row(coordinate: Coordinate, origin: RecordedNodeOriginV1, inputs: Vec<Hash>) -> NodeRow {
-    let class = RecordedDependencyClassV1::EndogenousRecomputed;
-    class_row(coordinate, class, origin, inputs)
-}
-
-/// The encoded six-field node array, written independently of the contract.
-fn node_bytes(node: &Coordinate) -> Vec<u8> {
-    [
-        vec![0x86],
-        uint(node.tick()),
-        uint(u64::from(node.scheduler_position())),
-        text_field(node.owner_id()),
-        uint(u64::from(node.output_ordinal())),
-        uint(u64::from(node.schema_id())),
-        hash_field(node.artifact_digest()),
-    ]
-    .concat()
-}
-
-/// The five `IDP1` fields after the source node, with `rule` as the rule ID.
-fn edge_tail_with_rule(rule: &str) -> Vec<u8> {
-    [
-        uint(2),
-        vec![0x82],
-        uint(3),
-        uint(5),
-        hash_field(hash(0x33)),
-        vec![0x82],
-        text_field(rule),
-        uint(1),
-        hash_field(hash(0x44)),
-    ]
-    .concat()
-}
-
-fn edge_tail() -> Vec<u8> {
-    edge_tail_with_rule("adr064.classification")
 }
 
 /// One `IDP1` edge split into the parts a test corrupts.
@@ -189,14 +98,6 @@ fn sized_parts(consumer: &Coordinate, source: &Coordinate, size: usize) -> EdgeP
         tail: edge_tail_with_rule(&rule),
         ..bare
     }
-}
-
-fn edge_row(consumer: &Coordinate, source: &Coordinate) -> EdgeRow {
-    ok(EdgeRow::try_from_canonical(
-        EdgeParts::new(consumer, source).bytes(),
-        consumer.clone(),
-        source.artifact_digest(),
-    ))
 }
 
 /// Verify `parts` against the consumer and the source of `edge_row(a, b)`.
@@ -373,6 +274,40 @@ fn edge_size_bound_is_checked_first() {
         EdgeRow::try_from_canonical(oversize, coord(17, "a", 1), hash(50)),
         Err(DepError::FieldOutOfBounds)
     );
+}
+
+#[test]
+fn an_edge_reports_the_authorization_digest_it_carries() {
+    let consumer = coord(17, "a", 1);
+    let source = coord(10, "w", 50);
+    assert_eq!(
+        edge_row(&consumer, &source).authorization_digest(),
+        Some(hash(0x33))
+    );
+
+    // Construction checks only the framing of the field, so an authorization
+    // that is not a 32-byte digest is accepted and reads back as absent.
+    let parts = EdgeParts {
+        tail: [
+            uint(2),
+            vec![0x82],
+            uint(3),
+            uint(5),
+            uint(7),
+            vec![0x82],
+            text_field("adr064.classification"),
+            uint(1),
+            hash_field(hash(0x44)),
+        ]
+        .concat(),
+        ..EdgeParts::new(&consumer, &source)
+    };
+    let edge = ok(EdgeRow::try_from_canonical(
+        parts.bytes(),
+        consumer,
+        source.artifact_digest(),
+    ));
+    assert_eq!(edge.authorization_digest(), None);
 }
 
 #[test]
@@ -876,26 +811,14 @@ fn dependency_errors_map_to_the_nearest_store_error() {
     assert_eq!(DepError::READ_BACK_FAULT, StoreError::CorruptState);
 }
 
+/// The shared [`test_fixtures::fork_scope`] of this suite's fixed `fork()`.
 fn fork_scope(generation: u64) -> DependencyReadScopeV1 {
-    DependencyReadScopeV1::ForkGeneration(ForkGenerationV1 {
-        fork: fork(),
-        generation,
-    })
+    test_fixtures::fork_scope(fork(), generation)
 }
 
+/// The shared [`test_fixtures::prefix_scope`] of this suite's fixed `parent()`.
 fn prefix_scope(through_tick: u64) -> DependencyReadScopeV1 {
-    DependencyReadScopeV1::ParentPrefix {
-        timeline: parent(),
-        through_tick,
-    }
-}
-
-fn request(
-    scope: DependencyReadScopeV1,
-    after: Option<DependencyPageCursorV1>,
-    limit: usize,
-) -> DependencyPageRequestV1 {
-    ok(DependencyPageRequestV1::try_new(scope, after, limit))
+    test_fixtures::prefix_scope(parent(), through_tick)
 }
 
 fn numbered_rows(count: u32) -> Vec<NodeRow> {
@@ -1164,16 +1087,6 @@ fn drafts() -> PipelineDraftBatchV1 {
         Kind::new("counterfactual.tick"),
         CanonicalBytes::from_vec(vec![7]),
     )]))
-}
-
-const fn facts() -> CounterfactualFactsV1 {
-    CounterfactualFactsV1 {
-        plan_digest: hash(5),
-        dependency_graph_digest: hash(3),
-        trust_epoch: 6,
-        revocation_epoch: 7,
-        erasure_epoch: 8,
-    }
 }
 
 fn command() -> CounterfactualInvalidationCommandV1 {
@@ -1499,24 +1412,6 @@ impl CounterfactualDependencyReadPortV1 for FakeStore {
         request: &DependencyPageRequestV1,
     ) -> Result<EdgePage, StoreError> {
         self.page(request, &self.fork_edges, &self.parent_edges)
-    }
-}
-
-/// Read every page of `scope` through `read`.
-fn collect_rows<T: DependencyPagedRowV1 + Clone>(
-    scope: DependencyReadScopeV1,
-    limit: usize,
-    read: impl Fn(&DependencyPageRequestV1) -> Result<DependencyPageV1<T>, StoreError>,
-) -> Result<Vec<T>, StoreError> {
-    let mut rows = Vec::new();
-    let mut after = None;
-    loop {
-        let page = read(&request(scope, after, limit))?;
-        rows.extend_from_slice(page.items());
-        after = page.next().cloned();
-        if after.is_none() {
-            return Ok(rows);
-        }
     }
 }
 

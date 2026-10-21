@@ -54,6 +54,26 @@ class LsanSuppressionReportTests(unittest.TestCase):
             {"TypePathComponent": (6, 144)},
         )
 
+    def test_accepts_unindented_passing_nextest_output(self) -> None:
+        report = "\n".join(
+            (
+                "PASS [   0.123s] pos-core::example",
+                table(f"      6        144 {TYPE_PATH_TEMPLATE}"),
+                "Summary [   0.123s] 1 test run: 1 passed, 0 skipped",
+            )
+        )
+        self.assertEqual(
+            CHECKER.check_report(report), {"TypePathComponent": (6, 144)}
+        )
+
+    def test_rejects_indented_passing_nextest_output(self) -> None:
+        report = "\n".join(
+            f"    {line}"
+            for line in table(f"      6        144 {TYPE_PATH_TEMPLATE}").splitlines()
+        )
+        with self.assertRaises(CHECKER.ReportError):
+            CHECKER.check_report(report)
+
     def test_accepts_both_approved_rows_without_locking_measurements(self) -> None:
         self.assertEqual(
             CHECKER.check_report(

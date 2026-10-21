@@ -3,7 +3,7 @@
 //! An anchored `step_all`/cadenced pass stages every due Driver against one
 //! shared base snapshot. This module turns that complete staged pass into one
 //! [`PipelineAdmissionBasisV1`] on the `ScheduledAiDriver` path and commits it
-//! through the host-only [`PipelineAdmissionPortV1`]: the store compares the
+//! through the host-only [`FactualAdmissionPortV1`]: the store compares the
 //! basis and assigns Event identity and Timeline Order inside one transaction,
 //! and staged Driver and cadence state commits only after that batch commits.
 //!
@@ -16,15 +16,17 @@
 //! view, and every view is revalidated against current authority first.
 
 use pos_core::{
-    AppendIdentity, CoreError, PipelineAdmissionBasisDraftV1, PipelineAdmissionBasisV1,
-    PipelineAdmissionPortV1, PipelineAttemptDraftV1, PipelineAttemptIdV1, PipelineAttemptV1,
-    PipelineCommitReceiptV1, PipelineContractErrorV1, PipelineDraftBatchV1, PipelineEvidenceRefV1,
-    PipelineIngressV1, PipelineObservationAnchorV1, PipelineOutcomeV1, PipelinePreconditionV1,
-    PipelineSecurityRevisionsV1, Seq, TentativePipelineResultV1, PIPELINE_CONTRACT_VERSION_V1,
+    AppendIdentity, CoreError, FactualAdmissionPortV1, FactualTickDependenciesV1, Hash,
+    PipelineAdmissionBasisDraftV1, PipelineAdmissionBasisV1, PipelineAttemptDraftV1,
+    PipelineAttemptIdV1, PipelineAttemptV1, PipelineCommitReceiptV1, PipelineContractErrorV1,
+    PipelineDraftBatchV1, PipelineEvidenceRefV1, PipelineIngressV1, PipelineObservationAnchorV1,
+    PipelineOutcomeV1, PipelinePreconditionV1, PipelineSecurityRevisionsV1, Seq,
+    TentativePipelineResultV1, PIPELINE_CONTRACT_VERSION_V1,
 };
 
 use super::{
-    unauthorized, AuthorizedViewAuthorityV1, OperationContext, PendingStep, PluginRegistry,
+    ensure_set_headroom, unauthorized, AuthorizedViewAuthorityV1, OperationContext, PendingStep,
+    PluginRegistry,
 };
 use crate::error::RuntimeError;
 
@@ -33,16 +35,20 @@ use crate::error::RuntimeError;
 /// Every field is issued by the trusted host, never by a Driver or provider:
 /// the attempt and idempotency identities, the reference to the host's ADR-046
 /// provider-validation evidence, the security revisions read from the
-/// host-published admission fence when the pass was observed, and the Logical
-/// Head and clock the host read after the pass finished. The observation
-/// anchor itself is never the expected head, so an Event committed while the
-/// pass ran does not by itself invalidate its shared base snapshot.
+/// host-published admission fence when the pass was observed, the authority
+/// grant that fence names, and the Logical Head and clock the host read after
+/// the pass finished. The observation anchor itself is never the expected
+/// head, so an Event committed while the pass ran does not by itself
+/// invalidate its shared base snapshot.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ScheduledPassAdmissionV1 {
     pub attempt_id: PipelineAttemptIdV1,
     pub idempotency: AppendIdentity,
     pub provider_validation: PipelineEvidenceRefV1,
     pub security_revisions: PipelineSecurityRevisionsV1,
+    /// The fence grant the admission basis must carry; the store checks it
+    /// against the published fence from slice 8.
+    pub authority_grant: Hash,
     pub commit_head: Seq,
     pub commit_now_secs: u64,
 }
@@ -73,21 +79,24 @@ impl PluginRegistry {
     /// pass, which commits only through
     /// [`Self::admit_authorized_scheduled_pass`]. Also returns a consent,
     /// schema, or [`RuntimeError::PipelineContract`] error, a
-    /// [`RuntimeError::ScheduledPassNotAdmitted`] outcome, or a store error.
+    /// [`RuntimeError::ScheduledPassNotAdmitted`] outcome, a
+    /// [`RuntimeError::DependencyDeclaration`] error when the factual Tick
+    /// declaration cannot be built or a timeline set is exhausted, or a store
+    /// error.
     /// Every error aborts all staged Driver state and commits no Event, except
     /// [`pos_core::CoreError::StorageOutcomeUnknown`], which retains the exact
     /// basis for [`Self::recover_scheduled_pass`].
     pub fn admit_scheduled_pass(
         &mut self,
-        port: &mut dyn PipelineAdmissionPortV1,
+        port: &mut dyn FactualAdmissionPortV1,
         admission: &ScheduledPassAdmissionV1,
     ) -> Result<Option<PipelineCommitReceiptV1>, RuntimeError> {
-        let Some(pending) = self.pending_step.take() else {
+        let Some(mut pending) = self.pending_step.take() else {
             return Err(RuntimeError::PendingDriverStep);
         };
         // Only an anchored scheduled pass carries a base cut and snapshot
         // digest; participant-authorized work keeps its own authority fence.
-        let Some((observed_through, snapshot_digest)) = pending.scheduled else {
+        let Some(anchor) = pending.scheduled else {
             let _ = self.abort_drivers(&pending.driver_ids);
             return Err(RuntimeError::AuthorityFenceRequired);
         };
@@ -107,7 +116,7 @@ impl PluginRegistry {
                 )
             })
             .and_then(|()| self.schemas.validate_batch(&pending.staged_drafts))
-            .and_then(|()| scheduled_basis(&pending, admission, observed_through, snapshot_digest));
+            .and_then(|()| self.scheduled_basis(port, &mut pending, admission, anchor));
         self.settle_prepared_pass(port, pending, admission, prepared)
     }
 
@@ -132,17 +141,20 @@ impl PluginRegistry {
     /// closed authority error covers a pass that is not participant-authorized
     /// and unpaired or stale authority. Also returns a
     /// [`RuntimeError::PipelineContract`] error, a
-    /// [`RuntimeError::ScheduledPassNotAdmitted`] outcome, or a store error.
+    /// [`RuntimeError::ScheduledPassNotAdmitted`] outcome, a
+    /// [`RuntimeError::DependencyDeclaration`] error when the factual Tick
+    /// declaration cannot be built or a timeline set is exhausted, or a store
+    /// error.
     /// Every error aborts all staged Driver state and commits no Event, except
     /// [`pos_core::CoreError::StorageOutcomeUnknown`], which retains the exact
     /// basis for [`Self::recover_scheduled_pass`].
     pub fn admit_authorized_scheduled_pass(
         &mut self,
-        port: &mut dyn PipelineAdmissionPortV1,
+        port: &mut dyn FactualAdmissionPortV1,
         admission: &ScheduledPassAdmissionV1,
         authorities: &[AuthorizedViewAuthorityV1<'_>],
     ) -> Result<Option<PipelineCommitReceiptV1>, RuntimeError> {
-        let Some(pending) = self.pending_step.take() else {
+        let Some(mut pending) = self.pending_step.take() else {
             return Err(RuntimeError::PendingDriverStep);
         };
         let prepared = pending
@@ -150,16 +162,14 @@ impl PluginRegistry {
             .as_ref()
             .ok_or_else(unauthorized)
             .and_then(|authorized| authorized.revalidate(authorities))
-            .and_then(|(observed_through, view_digest)| {
-                scheduled_basis(&pending, admission, observed_through, view_digest)
-            });
+            .and_then(|anchor| self.scheduled_basis(port, &mut pending, admission, anchor));
         self.settle_prepared_pass(port, pending, admission, prepared)
     }
 
     /// Submit a prepared basis, commit an empty pass, or abort on error.
     fn settle_prepared_pass(
         &mut self,
-        port: &mut dyn PipelineAdmissionPortV1,
+        port: &mut dyn FactualAdmissionPortV1,
         pending: PendingStep,
         admission: &ScheduledPassAdmissionV1,
         prepared: Result<Option<PipelineAdmissionBasisV1>, RuntimeError>,
@@ -185,6 +195,30 @@ impl PluginRegistry {
         }
     }
 
+    /// Build the basis of a prepared pass, or `None` for an empty pass.
+    ///
+    /// The capacity preflight is the builder's first port read and is skipped
+    /// for an empty pass, which builds no record and makes no store call
+    /// (ADR-064 R3.8.1).
+    fn scheduled_basis(
+        &self,
+        port: &dyn FactualAdmissionPortV1,
+        pending: &mut PendingStep,
+        admission: &ScheduledPassAdmissionV1,
+        anchor: (Seq, Hash),
+    ) -> Result<Option<PipelineAdmissionBasisV1>, RuntimeError> {
+        if pending.staged_drafts.is_empty() {
+            return Ok(None);
+        }
+        ensure_set_headroom(port, pending.timeline)
+            .and_then(|()| self.scheduled_dependencies(port, pending, admission, anchor))
+            .and_then(|dependencies| {
+                build_basis(pending, admission, anchor, dependencies)
+                    .map(Some)
+                    .map_err(RuntimeError::PipelineContract)
+            })
+    }
+
     /// Resolve an in-doubt scheduled pass by resubmitting its exact retained basis.
     ///
     /// Recovery never reruns a Driver or provider: the store either returns
@@ -202,7 +236,7 @@ impl PluginRegistry {
     /// in doubt, otherwise the same outcomes as [`Self::admit_scheduled_pass`].
     pub fn recover_scheduled_pass(
         &mut self,
-        port: &mut dyn PipelineAdmissionPortV1,
+        port: &mut dyn FactualAdmissionPortV1,
     ) -> Result<Option<PipelineCommitReceiptV1>, RuntimeError> {
         let Some(in_doubt) = self.in_doubt_admission.take() else {
             return Err(RuntimeError::NoScheduledAdmissionInDoubt);
@@ -212,7 +246,7 @@ impl PluginRegistry {
 
     fn finish_scheduled_admission(
         &mut self,
-        port: &mut dyn PipelineAdmissionPortV1,
+        port: &mut dyn FactualAdmissionPortV1,
         attempt: InDoubtAdmission,
     ) -> Result<Option<PipelineCommitReceiptV1>, RuntimeError> {
         match self.admit_within_consent_fence(port, &attempt) {
@@ -237,7 +271,7 @@ impl PluginRegistry {
     /// Submit the basis, holding the consent token fence for a protected pass.
     fn admit_within_consent_fence(
         &self,
-        port: &mut dyn PipelineAdmissionPortV1,
+        port: &mut dyn FactualAdmissionPortV1,
         attempt: &InDoubtAdmission,
     ) -> Result<PipelineOutcomeV1, RuntimeError> {
         let mut admit = || {
@@ -280,26 +314,13 @@ fn not_admitted(outcome: PipelineOutcomeV1) -> RuntimeError {
 }
 
 /// Build the `ScheduledAiDriver` basis for a nonempty anchored scheduled pass.
-fn scheduled_basis(
-    pending: &PendingStep,
-    admission: &ScheduledPassAdmissionV1,
-    observed_through: Seq,
-    snapshot_digest: pos_core::Hash,
-) -> Result<Option<PipelineAdmissionBasisV1>, RuntimeError> {
-    if pending.staged_drafts.is_empty() {
-        return Ok(None);
-    }
-    build_basis(pending, admission, observed_through, snapshot_digest)
-        .map(Some)
-        .map_err(RuntimeError::PipelineContract)
-}
-
 fn build_basis(
     pending: &PendingStep,
     admission: &ScheduledPassAdmissionV1,
-    observed_through: Seq,
-    snapshot_digest: pos_core::Hash,
+    anchor: (Seq, Hash),
+    dependencies: FactualTickDependenciesV1,
 ) -> Result<PipelineAdmissionBasisV1, PipelineContractErrorV1> {
+    let (observed_through, snapshot_digest) = anchor;
     PipelineObservationAnchorV1::try_new(pending.timeline, observed_through, snapshot_digest)
         .and_then(|observation| {
             PipelineAttemptV1::try_from_draft(PipelineAttemptDraftV1 {
@@ -326,6 +347,7 @@ fn build_basis(
                 )),
                 security_revisions: Some(admission.security_revisions),
                 batch: Some(batch),
+                dependencies,
             })
         })
 }

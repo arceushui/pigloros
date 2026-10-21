@@ -1,2 +1,3 @@
 crates/pos-conformance/vectors/sandbox-provider-v1/*.cbor binary
 crates/pos-conformance/vectors/systemd-provider-v260.2/*.cbor binary
+fixtures/conformance/inputs/*/*.pcw2 binary

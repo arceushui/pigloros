@@ -17,7 +17,9 @@ pub mod authority;
 #[cfg(test)]
 extern crate self as pos_core;
 
+pub(crate) mod canonical_length;
 pub mod clock;
+pub mod composition_fallback;
 pub mod consent;
 pub mod counterfactual_dependency;
 pub mod counterfactual_store;
@@ -27,6 +29,9 @@ pub mod erasure;
 pub mod error;
 pub mod event;
 pub mod executable_budget;
+pub mod factual_dependency;
+pub use canonical_length::CanonicalLengthErrorV1;
+
 pub mod fork_admission;
 pub mod fork_admission_authority;
 pub mod fork_admission_command;
@@ -126,6 +131,7 @@ pub(crate) enum CborReadError {
 ///
 /// Protocol modules retain their own field bounds, semantic validation, and
 /// public errors. This cursor owns only byte movement and basic CBOR heads.
+#[derive(Clone)]
 pub(crate) struct CborCursor<'a> {
     bytes: &'a [u8],
     offset: usize,
@@ -354,6 +360,21 @@ pub use authority::{
 pub use clock::{
     AdmissionClock, FixedAdmissionClock, Seq, SimDuration, SimTime, SystemAdmissionClock, WallTime,
 };
+pub use composition_fallback::{
+    CompositionPinV1, DomainFallbackPolicyV1, FallbackActivatedInputV1, FallbackActivatedPayloadV1,
+    FallbackActivationModeV1, FallbackActivationOriginV1, FallbackDeclaredPayloadV1,
+    FallbackEntryV1, FallbackFieldV1, FallbackRebasedEntryV1, FallbackRecordErrorV1,
+    FallbackSkipReasonV1, FallbackSkippedCandidateV1, FallbackTriggerBasisV1,
+    FallbackTriggerCodeV1, ImplementationKeyV1, COMPOSITION_FALLBACK_ACTIVATED_EVENT_TYPE_V1,
+    COMPOSITION_FALLBACK_DECLARED_EVENT_TYPE_V1, COMPOSITION_PIN_DIGEST_DOMAIN_V1,
+    FALLBACK_POLICY_DIGEST_DOMAIN_V1, IMPLEMENTATION_KEY_DIGEST_DOMAIN_V1,
+    MAX_COMPOSITION_PIN_BYTES_V1, MAX_FALLBACK_CANDIDATES_V1, MAX_FALLBACK_ENTRIES_V1,
+    MAX_FALLBACK_ENTRY_BYTES_V1, MAX_FALLBACK_ENTRY_KEY_BYTES_V1,
+    MAX_FALLBACK_EVENT_PAYLOAD_BYTES_V1, MAX_FALLBACK_PLUGIN_ID_BYTES_V1,
+    MAX_FALLBACK_POLICY_BYTES_V1, MAX_FALLBACK_ROLES_V1, MAX_FALLBACK_ROLE_BYTES_V1,
+    MAX_FALLBACK_SCOPE_BYTES_V1, MAX_FALLBACK_SKIPPED_V1, MAX_FALLBACK_VERSION_BYTES_V1,
+    MAX_IMPLEMENTATION_KEY_BYTES_V1,
+};
 pub use consent::{
     is_consent_event_type, is_consent_sensitive_event_type, is_subject_controlled_event_type,
     required_modality_for_event, ConsentAppendPermit, ConsentAuthority, ConsentCapabilityToken,
@@ -478,6 +499,29 @@ pub use executable_budget::{
     FidelityBudgetV1, PluginCpuReservationV1, WorkloadProfileV1,
     MAX_EXECUTABLE_BUDGET_POLICY_BYTES_V1, MAX_PLUGIN_CPU_RESERVATIONS_V1,
 };
+pub use factual_dependency::{
+    assemble_factual_tick, ensure_factual_set_headroom, factual_artifact_digest,
+    factual_classification_bundle_bytes, factual_classification_bundle_digest,
+    factual_event_schema_id, factual_fold_checkpoint_content_digest,
+    factual_fold_history_content_digest, factual_fold_layout, factual_history_content_digest,
+    factual_ingress_content_digest, factual_output_content_digest, factual_owner_id,
+    factual_provenance_digest, factual_step_content_digest, factual_verified_prefix_content_digest,
+    is_factual_fold_input, EventNodeBindingV1, FactualAdmissionPortV1, FactualCutV1,
+    FactualDependencyErrorV1, FactualDriverStepV1, FactualEventRefV1, FactualFoldBindingV1,
+    FactualFoldChunkV1, FactualFoldCursorV1, FactualFoldEventV1, FactualFoldLayoutV1,
+    FactualFoldRestV1, FactualFoldSourceV1, FactualFoldWindowV1, FactualHeadV1, FactualHostOwnerV1,
+    FactualIngressEventV1, FactualInputV1, FactualNodeKeyV1, FactualOutputV1, FactualOwnerIdV1,
+    FactualOwnerSourceV1, FactualPrefixReadPortV1, FactualPriorNodeV1, FactualRuleV1,
+    FactualScheduledTickV1, FactualTickContextV1, FactualTickDependenciesV1, FactualTickShapeV1,
+    OutputNodeBindingV1, FACTUAL_FOLD_HISTORY_SCHEMA_ID_V1, FACTUAL_FOLD_RESERVED_EDGES_V1,
+    FACTUAL_FOLD_RESERVED_NODES_V1, FACTUAL_FOLD_SCHEMA_ID_V1, FACTUAL_HISTORY_SCHEMA_ID_V1,
+    FACTUAL_PREFIX_SCHEMA_ID_V1, FACTUAL_SNAPSHOT_SCHEMA_ID_V1, FACTUAL_STEP_SCHEMA_ID_V1,
+    MAX_FACTUAL_FOLD_CHECKPOINTS_PER_TICK_V1, MAX_FACTUAL_FOLD_EVENTS_PER_CHECKPOINT_V1,
+    MAX_FACTUAL_FOLD_INPUT_EDGES_PER_TICK_V1, MAX_FACTUAL_FOLD_SCAN_PER_TICK_V1,
+    MAX_FACTUAL_FORWARDED_EDGES_PER_TICK_V1, MAX_FACTUAL_FORWARDED_EVENTS_PER_TICK_V1,
+    MAX_FORWARDED_EVENTS_PER_DRIVER_V1, MAX_HOST_DERIVED_STEP_INPUTS_V1,
+    MAX_OUTPUT_DIRECT_INPUTS_V1, MAX_STEP_INPUTS_PER_DRIVER_V1,
+};
 pub use fork_admission::{
     ForkAdmissionErrorV1, ForkAdmissionOperationKindV1, ForkAdmissionOperationResultV1,
     ForkAdmissionReceiptV1, ForkAuthorityOriginV1, PrincipalOwnerBindingInputV1,
@@ -567,8 +611,9 @@ pub use key_registry::{
     deletion_receipt, KeyDestructionBeginOutcomeV1, KeyDestructionOutcomeV1, KeyDestructionPortV1,
     KeyDestructionRequestV1, KeyIdentityV1, KeyRecordV1, KeyRegistrationOutcomeV1,
     KeyRegistrationV1, KeyRegistryEncryptionPortV1, KeyRegistryErrorV1,
-    KeyRegistryHistoricalDecryptionPortV1, KeyRegistryPortV1, KeyRegistrySigningPortV1,
-    KeyRegistryStateV1, KeyRoleV1, KeyTombstoneV1, OwnerIdV1,
+    KeyRegistryHistoricalDecryptionPortV1, KeyRegistryPortV1, KeyRegistryReadErrorV1,
+    KeyRegistryReadGuardV1, KeyRegistryReadRefusedV1, KeyRegistryReadWorkV1,
+    KeyRegistrySigningPortV1, KeyRegistryStateV1, KeyRoleV1, KeyTombstoneV1, OwnerIdV1,
 };
 pub use manifest::{
     checked_repro_manifest_input_len, AdapterRecord, ReproManifest, ReproManifestError,

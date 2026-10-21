@@ -765,6 +765,14 @@ fn every_not_admitted_outcome_maps_to_a_stable_gateway_error() {
             PipelineOutcomeV1::InvalidProviderResult,
             "action was not admitted",
         ),
+        (
+            PipelineOutcomeV1::InvalidDependencyDeclaration,
+            "human action admission is unavailable",
+        ),
+        (
+            PipelineOutcomeV1::DependencySetExhausted,
+            "timeline dependency set is exhausted",
+        ),
     ];
     for (outcome, expected) in cases {
         let error = crate::action_command_error(
@@ -814,6 +822,29 @@ fn every_not_admitted_outcome_maps_to_a_stable_gateway_error() {
             7
         ),
         GatewayError::Store(pos_core::CoreError::StorageOutcomeUnknown(_))
+    ));
+}
+
+#[test]
+fn an_exhausted_dependency_set_is_a_permanent_limit() {
+    let error = pos_runtime::HumanActionAdmissionErrorV1::DependencyDeclaration(
+        pos_core::FactualDependencyErrorV1::SetExhausted,
+    );
+    assert!(error.to_string().contains("exhausted"), "{error}");
+    assert!(matches!(
+        crate::action_command_error(executor::ActionCommandError::Admission(error), 7),
+        GatewayError::DependencySetExhausted
+    ));
+}
+
+#[test]
+fn any_other_dependency_declaration_fault_is_unavailable() {
+    let error = pos_runtime::HumanActionAdmissionErrorV1::DependencyDeclaration(
+        pos_core::FactualDependencyErrorV1::UnresolvedInput,
+    );
+    assert!(matches!(
+        crate::action_command_error(executor::ActionCommandError::Admission(error), 7),
+        GatewayError::ActionAdmissionUnavailable
     ));
 }
 

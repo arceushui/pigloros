@@ -273,6 +273,28 @@ fn a_refused_handoff_leaves_the_registry_unchanged() {
     assert_eq!(count_of(&registry, timeline, &entity), Some(1));
 }
 
+#[cfg(feature = "test-support")]
+#[test]
+fn retained_state_diagnostic_preserves_real_names_entities_and_values() {
+    let (timeline, entity) = (TimelineId::new(), EntityId::new());
+    let mut registry = live(consumer(), timeline, entity);
+    let retained = registry.retained_state_for_test();
+    assert_eq!(retained.len(), 1);
+    let states = test_some(retained.get(NAME));
+    assert_eq!(states.len(), 1);
+    assert_eq!(
+        test_some(states.get(&entity)).get("count"),
+        Some(&serde_json::json!(1))
+    );
+    // This is an owned diagnostic snapshot, not a live alias.
+    registry.apply_event(timeline, &counted(entity, 2));
+    assert_eq!(
+        test_some(states.get(&entity)).get("count"),
+        Some(&serde_json::json!(1))
+    );
+    assert_eq!(count_of(&registry, timeline, &entity), Some(2));
+}
+
 #[test]
 fn stale_sources_and_slots_fail_before_any_change() {
     let (timeline, entity) = (TimelineId::new(), EntityId::new());
@@ -379,4 +401,15 @@ fn compare_arms_commit_together_or_not_at_all() {
     assert_eq!(displaced_b.source().timeline(), Some(timeline_b));
     assert_eq!(count_of(&arm_a, timeline_a, &entity), Some(2));
     assert_eq!(count_of(&arm_b, timeline_b, &entity), Some(3));
+}
+
+#[test]
+fn an_installed_slot_is_found_by_its_plugin_id() {
+    let mut registry = ProjectionRegistry::new();
+    let plugin = PluginId::new();
+    registry.register(NAME, Box::new(CountingReducer));
+    assert!(!registry.has_installed_reducer(plugin));
+    test_ok(registry.register_installed_reducer(plugin, NAME, Box::new(CountingReducer)));
+    assert!(registry.has_installed_reducer(plugin));
+    assert!(!registry.has_installed_reducer(PluginId::new()));
 }

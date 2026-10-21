@@ -9,8 +9,9 @@
 //!   close-on-exec every descriptor from 3 upwards that its own process
 //!   inherited without that flag. The worker refuses to run if it still
 //!   inherited anything else (see [`crate::worker_process`]);
-//! - with the supervisor's process ID as its only argument, so the worker can
-//!   bind its parent-death signal to it;
+//! - with exactly two arguments: the supervisor's process ID, so the worker can
+//!   bind its parent-death signal to it, and the mode token of the negotiated
+//!   record's mode, `local` or `air-gapped` (`mode_token`);
 //! - with hard and soft rlimit ceilings on CPU time, data (memory), file size
 //!   and core size, set through `prlimit` before the request is sent, so no
 //!   Component byte reaches the worker before its ceilings hold.
@@ -23,6 +24,7 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::time::Duration;
 
 use pos_crypto::plugin_execution::DeterministicBudgetV1;
+use pos_runtime::community_plugin_host::CommunityPluginModeV1;
 use rustix::process::{prlimit, Pid, Resource, Rlimit};
 
 #[cfg(not(asan_build))]
@@ -64,6 +66,27 @@ const CPU_MARGIN_SECONDS: u64 = 2;
 /// File bytes reserved for the coverage profile an instrumented worker
 /// writes: none in production builds.
 const PROFILE_FILE_BYTES: u64 = if cfg!(coverage) { 1 << 30 } else { 0 };
+
+/// Both live modes, in worker IPC wire-code order (Local is 0).
+pub(crate) const MODES: [CommunityPluginModeV1; 2] = [
+    CommunityPluginModeV1::Local,
+    CommunityPluginModeV1::AirGapped,
+];
+
+/// The argument token that tells a worker to serve `mode`.
+///
+/// A worker accepts exactly these two lowercase ASCII tokens.
+pub(crate) const fn mode_token(mode: CommunityPluginModeV1) -> &'static str {
+    match mode {
+        CommunityPluginModeV1::Local => "local",
+        CommunityPluginModeV1::AirGapped => "air-gapped",
+    }
+}
+
+/// The mode a worker argument token names, or `None` for any other text.
+pub(crate) fn mode_from_token(token: &str) -> Option<CommunityPluginModeV1> {
+    MODES.into_iter().find(|mode| mode_token(*mode) == token)
+}
 
 /// The absolute path of the worker program the supervisor launches.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -188,7 +211,8 @@ pub(crate) struct LaunchedWorker {
     pub(crate) stdout: ChildStdout,
 }
 
-/// Start `program` and apply `ceilings` before it receives any request.
+/// Start `program` for `mode` and apply `ceilings` before it receives any
+/// request.
 ///
 /// Marks every descriptor from 3 upwards that this process inherited
 /// close-on-exec first. That is a process-wide change, not a per-child one.
@@ -198,10 +222,11 @@ pub(crate) struct LaunchedWorker {
 pub(crate) fn launch(
     program: &WorkerProgramV1,
     ceilings: &WorkerResourceCeilingsV1,
+    mode: CommunityPluginModeV1,
 ) -> Option<LaunchedWorker> {
     close_fds::set_fds_cloexec_threadsafe(3, &[]);
     let mut process = WorkerProcess {
-        child: command(program).spawn().ok()?,
+        child: command(program, mode).spawn().ok()?,
     };
     let pipes = process.child.stdin.take().zip(process.child.stdout.take());
     pipes
@@ -213,13 +238,14 @@ pub(crate) fn launch(
         })
 }
 
-fn command(program: &WorkerProgramV1) -> Command {
+fn command(program: &WorkerProgramV1, mode: CommunityPluginModeV1) -> Command {
     let forwarded = FORWARDED_ENVIRONMENT
         .iter()
         .filter_map(|name| std::env::var_os(name).map(|value| (OsString::from(name), value)));
     let mut command = Command::new(program.path());
     command
         .arg(std::process::id().to_string())
+        .arg(mode_token(mode))
         .env_clear()
         .envs(forwarded)
         .current_dir("/")
@@ -311,7 +337,28 @@ mod tests {
             &DeterministicBudgetV1::MINIMA,
             Duration::from_secs(1),
         );
-        let launched = program.and_then(|program| launch(&program, &ceilings));
+        let mode = CommunityPluginModeV1::Local;
+        let launched = program.and_then(|program| launch(&program, &ceilings, mode));
         assert!(launched.is_none());
+    }
+
+    #[test]
+    fn modes_and_tokens_round_trip_and_nothing_else_is_a_token() {
+        for mode in MODES {
+            assert_eq!(mode_from_token(mode_token(mode)), Some(mode));
+        }
+        assert_eq!(mode_token(CommunityPluginModeV1::Local), "local");
+        assert_eq!(mode_token(CommunityPluginModeV1::AirGapped), "air-gapped");
+        let others = [
+            "",
+            "Local",
+            "LOCAL",
+            "airgapped",
+            "air_gapped",
+            "Air-Gapped",
+        ];
+        for other in others {
+            assert_eq!(mode_from_token(other), None, "{other:?}");
+        }
     }
 }

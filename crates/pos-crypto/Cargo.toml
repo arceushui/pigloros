@@ -26,10 +26,12 @@ ulid = { workspace = true }
 serde_json = { workspace = true }
 zeroize = { workspace = true }
 thiserror = { workspace = true }
+aes-gcm = { workspace = true }
+hkdf = { workspace = true }
+sha2 = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
-sha2 = { workspace = true }
 
 # Release-query tests need the unchecked PMF1 projection fixture; tests that
 # need no fixture live in `plugin_trust_public` and `plugin_manifest_public`

@@ -53,7 +53,8 @@ use pos_core::{
     timeline::Timeline,
     ActionRejected, Capability, ConsentAuthority, ConsentCapabilityToken, ConsentCodecError,
     ConsentError, ConsentGrantedV1, ConsentRevokedV1, CoreError, ErasureGate, ErasureReferenceV1,
-    PipelineCommitReceiptV1, PipelineOutcomeV1, Plugin, PluginId, ProposedAction,
+    FactualDependencyErrorV1, PipelineCommitReceiptV1, PipelineOutcomeV1, Plugin, PluginId,
+    ProposedAction,
 };
 #[cfg(test)]
 use pos_core::{geo_admission::GeoLocationAdmissionStore, store::EventStore};
@@ -1608,6 +1609,10 @@ pub enum GatewayError {
     /// human action; a host fault, never a rejection of the proposal.
     #[error("human action admission is unavailable")]
     ActionAdmissionUnavailable,
+    /// The Timeline's recorded dependency set accepts no further Tick; the
+    /// limit is permanent, so retrying the same request cannot help.
+    #[error("timeline dependency set is exhausted")]
+    DependencySetExhausted,
     /// The provider-neutral host authorization decision denied the operation.
     #[error("authorization denied")]
     AuthorizationDenied,
@@ -1755,7 +1760,7 @@ fn action_command_error(error: executor::ActionCommandError, maximum: u64) -> Ga
     match error {
         executor::ActionCommandError::Executor(error) => error.into(),
         executor::ActionCommandError::Authorization(error) => map_authorization_error(error),
-        executor::ActionCommandError::Admission(error) => action_admission_error(error, maximum),
+        executor::ActionCommandError::Admission(error) => human_admission_failure(error, maximum),
         #[cfg(test)]
         executor::ActionCommandError::AdmissionUnavailable => {
             GatewayError::ActionAuthorizationUnavailable
@@ -1763,7 +1768,11 @@ fn action_command_error(error: executor::ActionCommandError, maximum: u64) -> Ga
     }
 }
 
-fn action_admission_error(error: HumanActionAdmissionErrorV1, maximum: u64) -> GatewayError {
+/// The Gateway error of a failed human-action admission.
+///
+/// Every `HumanActionAdmissionErrorV1` variant has its own arm and the match
+/// has no wildcard, so a new variant fails to compile until it is routed here.
+fn human_admission_failure(error: HumanActionAdmissionErrorV1, maximum: u64) -> GatewayError {
     match error {
         HumanActionAdmissionErrorV1::Submission(error) => error.into(),
         HumanActionAdmissionErrorV1::IdempotencyConflict => GatewayError::IngressConflict,
@@ -1774,27 +1783,78 @@ fn action_admission_error(error: HumanActionAdmissionErrorV1, maximum: u64) -> G
             ActionRejected::DomainValidationFailed("approved action is not admissible".to_owned()),
         ),
         HumanActionAdmissionErrorV1::HostContract(_) => GatewayError::ActionAdmissionUnavailable,
+        HumanActionAdmissionErrorV1::DependencyDeclaration(error) => {
+            dependency_declaration_error(error)
+        }
         HumanActionAdmissionErrorV1::Store(error) => GatewayError::Store(error),
     }
 }
 
-/// A store outcome names no protected record: authority failures reuse the
-/// authorization errors, and a stale cursor or domain state is one shape.
-fn action_not_admitted_error(outcome: &PipelineOutcomeV1, maximum: u64) -> GatewayError {
+/// A failed dependency declaration names no protected record: an exhausted set
+/// is a permanent per-Timeline limit and every other fault is a host fault.
+/// The match has no wildcard, so a new `FactualDependencyErrorV1` variant fails
+/// to compile until it is routed here.
+const fn dependency_declaration_error(error: FactualDependencyErrorV1) -> GatewayError {
+    match error {
+        FactualDependencyErrorV1::SetExhausted => GatewayError::DependencySetExhausted,
+        FactualDependencyErrorV1::UndeclarableInput
+        | FactualDependencyErrorV1::UnresolvedInput
+        | FactualDependencyErrorV1::ClassRuleViolation
+        | FactualDependencyErrorV1::Record(_) => GatewayError::ActionAdmissionUnavailable,
+    }
+}
+
+/// The Gateway error family of a not-admitted store outcome.
+#[derive(Clone, Copy)]
+enum NotAdmitted {
+    AuthorityDenied,
+    PolicyUnavailable,
+    LimitReached,
+    HostFault,
+    SetExhausted,
+    Stale,
+    Rejected,
+}
+
+/// Classify every outcome; the match has no wildcard, so a new
+/// `PipelineOutcomeV1` variant fails to compile until it is routed here.
+const fn not_admitted_family(outcome: &PipelineOutcomeV1) -> NotAdmitted {
     match outcome {
         PipelineOutcomeV1::AuthorityRevoked | PipelineOutcomeV1::AuthorityExpired => {
-            GatewayError::AuthorizationDenied
+            NotAdmitted::AuthorityDenied
         }
-        PipelineOutcomeV1::PolicyIndeterminate => GatewayError::AuthorizationUnavailable,
-        PipelineOutcomeV1::ResourceExhausted => GatewayError::EventLimitReached { maximum },
+        PipelineOutcomeV1::PolicyIndeterminate => NotAdmitted::PolicyUnavailable,
+        PipelineOutcomeV1::ResourceExhausted => NotAdmitted::LimitReached,
+        PipelineOutcomeV1::InvalidDependencyDeclaration => NotAdmitted::HostFault,
+        PipelineOutcomeV1::DependencySetExhausted => NotAdmitted::SetExhausted,
         PipelineOutcomeV1::InvalidObservation
         | PipelineOutcomeV1::AdmissionConflict
-        | PipelineOutcomeV1::DomainConflict => GatewayError::ActionObservationStale,
+        | PipelineOutcomeV1::DomainConflict => NotAdmitted::Stale,
         PipelineOutcomeV1::Rejected
         | PipelineOutcomeV1::InvalidPluginResult
         | PipelineOutcomeV1::InvalidProviderResult
         | PipelineOutcomeV1::Committed(_)
-        | PipelineOutcomeV1::RecoveredDuplicate(_) => GatewayError::ActionRejected(
+        | PipelineOutcomeV1::RecoveredDuplicate(_) => NotAdmitted::Rejected,
+    }
+}
+
+/// A store outcome names no protected record: authority failures reuse the
+/// authorization errors, the dependency faults are a host fault and a
+/// permanent per-Timeline limit, and a stale cursor or domain state is one shape.
+fn action_not_admitted_error(outcome: &PipelineOutcomeV1, maximum: u64) -> GatewayError {
+    not_admitted_error(not_admitted_family(outcome), maximum)
+}
+
+/// The stable Gateway error of one family; the match has no wildcard.
+fn not_admitted_error(family: NotAdmitted, maximum: u64) -> GatewayError {
+    match family {
+        NotAdmitted::AuthorityDenied => GatewayError::AuthorizationDenied,
+        NotAdmitted::PolicyUnavailable => GatewayError::AuthorizationUnavailable,
+        NotAdmitted::LimitReached => GatewayError::EventLimitReached { maximum },
+        NotAdmitted::HostFault => GatewayError::ActionAdmissionUnavailable,
+        NotAdmitted::SetExhausted => GatewayError::DependencySetExhausted,
+        NotAdmitted::Stale => GatewayError::ActionObservationStale,
+        NotAdmitted::Rejected => GatewayError::ActionRejected(
             ActionRejected::DomainValidationFailed("action was not admitted".to_owned()),
         ),
     }

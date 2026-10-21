@@ -1,0 +1,4 @@
+# One `[[block]]` record per explicit unsafe block in src/ffi, with `file`,
+# `line`, `function`, `operation`, `invariant` and `hosted_test`. The rules and
+# their enforcement live in scripts/check_owner_bridge_unsafe_policy.py.
+# No FFI unsafe block exists yet, so there are no records.

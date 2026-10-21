@@ -4,8 +4,9 @@
 //! file: the occupancy re-check, the staged child Timeline, the staged-range
 //! check, and every row insert become visible at commit or not at all.
 //! Imported code-2 `FAR1` and `FPO1` bytes sit in the same per-child tables as
-//! local rows, where the strict local decoders reject them, so every trusted
-//! read stays closed to code 2 until #519. An imported `POB1` lives in
+//! local rows, where the strict local decoders reject them, so every
+//! local-only validator stays closed to code 2 and only the code-2-aware reads
+//! of `fork_code_two_read` open it (ADR-105 r6 R6.9). An imported `POB1` lives in
 //! `imported_fork_principal_owner_bindings`, keyed by its import operation ID,
 //! so several imports can share one Principal and Owner (erratum E10) without
 //! a second row in the local Principal table. The additive
