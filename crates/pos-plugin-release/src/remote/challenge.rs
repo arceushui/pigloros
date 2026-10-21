@@ -45,17 +45,9 @@ fn parameters_of(mut rest: &str) -> Option<BTreeMap<String, String>> {
         if !is_token(name) {
             return None;
         }
-        let (value, after) = match after.strip_prefix('"') {
-            Some(quoted) => quoted_string(quoted)?,
-            None => {
-                let (value, after) =
-                    after.split_at(after.find([',', ' ', '\t']).unwrap_or(after.len()));
-                if !is_token(value) {
-                    return None;
-                }
-                (value.to_owned(), after)
-            }
-        };
+        let (value, after) = after
+            .strip_prefix('"')
+            .map_or_else(|| unquoted_value(after), quoted_string)?;
         if parameters
             .insert(name.to_ascii_lowercase(), value)
             .is_some()
@@ -68,6 +60,12 @@ fn parameters_of(mut rest: &str) -> Option<BTreeMap<String, String>> {
         }
         rest = after.strip_prefix(',')?.trim_start_matches([' ', '\t']);
     }
+}
+
+/// A token value up to the next comma or blank, and the text after it.
+fn unquoted_value(text: &str) -> Option<(String, &str)> {
+    let (value, after) = text.split_at(text.find([',', ' ', '\t']).unwrap_or(text.len()));
+    is_token(value).then(|| (value.to_owned(), after))
 }
 
 /// A non-empty RFC 9110 token.
