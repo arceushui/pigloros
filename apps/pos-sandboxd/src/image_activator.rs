@@ -18,9 +18,16 @@ mod policy;
 mod reply;
 mod socket;
 
-use std::{future::Future, io, os::fd::OwnedFd, path::Path};
+use std::{
+    future::Future,
+    io,
+    os::fd::{AsFd, OwnedFd},
+    path::Path,
+};
 
-use pos_reference::sandbox_provider_protocol::SandboxArchitecture;
+use pos_reference::{
+    provider_admission::HeldImageAdmission, sandbox_provider_protocol::SandboxArchitecture,
+};
 use serde::{de::IgnoredAny, Deserialize};
 use serde_json::{json, Value};
 use tokio::net::UnixStream;
@@ -52,15 +59,45 @@ pub trait ImageActivator {
 /// One admitted SIM1 image presented for activation.
 ///
 /// It holds a close-on-exec duplicate of the retained image descriptor and the
-/// admitted SIM1 root-data partition. It has no public constructor: only the
-/// #438 held-image admission composition may create it, so no caller can
-/// present an unadmitted descriptor to mountfsd.
+/// admitted SIM1 root-data partition. Its only constructor is
+/// [`Self::from_admission`], so no caller can present an unadmitted descriptor
+/// to mountfsd.
 #[derive(Debug)]
 pub struct ActivationImage {
     descriptor: OwnedFd,
     root_offset: u64,
     root_size: u64,
     architecture: SandboxArchitecture,
+}
+
+impl ActivationImage {
+    /// Present one held-image admission for activation.
+    ///
+    /// The descriptor is a close-on-exec duplicate of exactly the retained
+    /// root image that the admission checked. The root partition and
+    /// architecture come from the same admitted SIM1, and the reply must
+    /// describe that partition. The authority was current only when
+    /// `admit_held_image()` ran; the execute path (#441) must reserve the
+    /// attempt atomically with admission. This grants no mount, launch or
+    /// output authority; attachment and kernel readback still decide.
+    ///
+    /// # Errors
+    /// Returns the operating-system error when the held descriptor cannot be
+    /// duplicated.
+    pub fn from_admission(admission: &HeldImageAdmission<'_>) -> io::Result<Self> {
+        let manifest = admission.snapshot().image().manifest();
+        // SIM1 validation fixes partition ordinal 0 as the DPS root partition.
+        let root = &manifest.partitions[0];
+        admission
+            .as_fd()
+            .try_clone_to_owned()
+            .map(|descriptor| Self {
+                descriptor,
+                root_offset: root.start_bytes,
+                root_size: root.length_bytes,
+                architecture: manifest.architecture,
+            })
+    }
 }
 
 /// Exactly one sealed, detached root mount returned by `MountImage`.

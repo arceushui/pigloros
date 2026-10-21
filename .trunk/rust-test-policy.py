@@ -20,8 +20,13 @@ from pathlib import Path
 DOC_IGNORE = re.compile(r"```(?:rust,)?ignore\b")
 COV_OFF = re.compile(r"coverage\s*\(\s*off\s*\)")
 TEST_ATTR = re.compile(r"#\[\s*(?:tokio::)?test(?:\s*\([^)]*\))?\s*\]")
+# Test code is cfg(test), cfg(all(test, unix)), or a fixture module gated
+# exactly cfg(any(test, feature = "test-support")). The `test-support` feature
+# is never enabled in deployable graphs (scripts/check_test_support_features.py),
+# so such a module is test code compiled for other crates' tests.
 CFG_TEST = re.compile(
-    r"#\[\s*cfg\s*\(\s*(?:test|all\s*\(\s*test\s*,\s*unix\s*\))\s*\)\s*\]"
+    r"#\[\s*cfg\s*\(\s*(?:test|all\s*\(\s*test\s*,\s*unix\s*\)"
+    r"|any\s*\(\s*test\s*,\s*feature\s*=\s*\"test-support\"\s*\))\s*\)\s*\]"
 )
 MOD_START = re.compile(r"\bmod\s+[A-Za-z_][A-Za-z0-9_]*")
 
