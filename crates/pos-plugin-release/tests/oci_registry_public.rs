@@ -40,6 +40,8 @@ const SERVER_KEY: &[u8] = include_bytes!("vectors/https-tls/server.key.der");
 const REPOSITORY: &str = "acme/plugin";
 const SERVICE: &str = "registry.test";
 const MANIFEST_MEDIA_TYPE: &str = "application/vnd.oci.image.manifest.v1+json";
+/// The `Accept` the HTTP client sends when none is set.
+const DEFAULT_ACCEPT: &str = "*/*";
 const SCOPE: &str = "repository:acme/plugin:pull";
 /// The query of every token request: `service` first, then the exact scope.
 const TOKEN_QUERY: &str = "service=registry.test&scope=repository%3Aacme%2Fplugin%3Apull";
@@ -452,7 +454,10 @@ fn reads_the_same_verified_bundle_as_every_other_source() -> TestResult {
     );
     assert!(seen.iter().all(|seen| seen.authorization.is_none()));
     assert_eq!(seen[0].accept.as_deref(), Some(MANIFEST_MEDIA_TYPE));
-    assert!(seen[1..].iter().all(|seen| seen.accept.is_none()));
+    // The HTTP client's own default `Accept` is all a blob request carries.
+    assert!(seen[1..]
+        .iter()
+        .all(|seen| seen.accept.as_deref() == Some(DEFAULT_ACCEPT)));
     Ok(())
 }
 
@@ -606,7 +611,7 @@ fn a_blob_redirect_to_a_configured_origin_carries_no_credential() -> TestResult 
         vec![Seen {
             target: "/cdn/blob?X-Signature=signed".to_owned(),
             authorization: None,
-            accept: None,
+            accept: Some(DEFAULT_ACCEPT.to_owned()),
         }]
     );
     Ok(())
@@ -750,7 +755,7 @@ fn one_challenge_one_token_request_and_one_authenticated_retry() -> TestResult {
         vec![Seen {
             target: format!("/token?{TOKEN_QUERY}"),
             authorization: Some("Basic cmVhZGVyOnDDpHNzd29yZA==".to_owned()),
-            accept: None,
+            accept: Some(DEFAULT_ACCEPT.to_owned()),
         }]
     );
     // The registry origin once per read, the token service once per token.
