@@ -22,6 +22,10 @@ use pos_reference::sandbox_provider_protocol::{
 use rustix::fs::{openat2, Mode, OFlags, ResolveFlags};
 
 const SEED_BYTES: u64 = 32;
+// Read-only (`O_RDONLY` is zero) and close-on-exec. `RESOLVE_NO_SYMLINKS`
+// also rejects a symlink in the final component.
+const KEY_OPEN_FLAGS: OFlags = OFlags::CLOEXEC;
+const KEY_RESOLVE: ResolveFlags = ResolveFlags::BENEATH.union(ResolveFlags::NO_SYMLINKS);
 
 /// The signing port for the provider runtime-attestation key.
 pub trait ReleaseSigner {
@@ -71,9 +75,9 @@ impl KeyFileReleaseSigner {
         let mut file = openat2(
             directory,
             file_name,
-            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            KEY_OPEN_FLAGS,
             Mode::empty(),
-            ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS,
+            KEY_RESOLVE,
         )
         .map(File::from)
         .map_err(io::Error::from)?;
@@ -204,6 +208,12 @@ mod tests {
     #[test]
     fn missing_symlink_and_directory_key_entries_are_rejected() -> TestResult {
         let (temporary, directory, owner) = fixture(0o600, &[1; 32])?;
+        let nested = temporary.path().join("nested");
+        fs::create_dir(&nested)?;
+        let inner = File::open(&nested)?;
+        // A valid key above the held directory must stay unreachable.
+        let escaped = KeyFileReleaseSigner::open(&inner, "../key", owner, "k".to_owned());
+        assert!(escaped.is_err());
         symlink("key", temporary.path().join("link"))?;
         fs::create_dir(temporary.path().join("subdirectory"))?;
         for name in ["missing", "link", "subdirectory", "../key"] {

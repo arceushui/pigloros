@@ -9,7 +9,7 @@ use ciborium::value::Value;
 use ed25519_dalek::{Signer, SigningKey};
 use pos_reference::sandbox_provider_protocol::{
     ExecutionRelease, ExecutionReleaseFields, FdIdentity, LaunchParameters, LauncherReady,
-    LauncherReadyFields,
+    LauncherReadyFields, SandboxProviderProtocolError,
 };
 
 type TestResult = Result<(), Box<dyn Error>>;
@@ -391,7 +391,15 @@ fn every_decoder_field_rejects_a_value_of_the_wrong_type() -> TestResult {
 
 #[test]
 fn decoders_reject_oversized_and_zero_field_records() -> TestResult {
-    assert!(LaunchParameters::from_canonical_cbor(&vec![0; 64 * 1024 + 1]).is_err());
+    assert_eq!(
+        LaunchParameters::from_canonical_cbor(&vec![0; 64 * 1024 + 1]),
+        Err(SandboxProviderProtocolError::FieldOutOfBounds)
+    );
+    // Exactly 64 KiB passes the size gate and fails later, in decoding.
+    assert_eq!(
+        LaunchParameters::from_canonical_cbor(&vec![0; 64 * 1024]),
+        Err(SandboxProviderProtocolError::InvalidEncoding)
+    );
     let rdy = LauncherReady::new(ready_fields()?)?.to_canonical_cbor()?;
     assert!(LauncherReady::from_canonical_cbor(&mutated(
         &rdy,

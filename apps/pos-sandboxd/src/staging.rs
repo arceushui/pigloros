@@ -20,6 +20,15 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use rustix::fs::{openat2, unlinkat, AtFlags, Mode, OFlags, ResolveFlags};
 
+// Exclusive creation of a private, close-on-exec file. `RESOLVE_NO_SYMLINKS`
+// also rejects a symlink in the final component, so `O_NOFOLLOW` adds nothing.
+const INPUT_OPEN_FLAGS: OFlags = OFlags::WRONLY
+    .union(OFlags::CREATE)
+    .union(OFlags::EXCL)
+    .union(OFlags::CLOEXEC);
+const INPUT_MODE: Mode = Mode::RUSR.union(Mode::WUSR);
+const INPUT_RESOLVE: ResolveFlags = ResolveFlags::BENEATH.union(ResolveFlags::NO_SYMLINKS);
+
 /// The exact limits one ledger enforces. Zero is a literal zero-capacity ceiling.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct StagingLimits {
@@ -255,13 +264,9 @@ impl StagingDirectory {
                 openat2(
                     &self.directory,
                     &name,
-                    OFlags::WRONLY
-                        | OFlags::CREATE
-                        | OFlags::EXCL
-                        | OFlags::NOFOLLOW
-                        | OFlags::CLOEXEC,
-                    Mode::RUSR | Mode::WUSR,
-                    ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS,
+                    INPUT_OPEN_FLAGS,
+                    INPUT_MODE,
+                    INPUT_RESOLVE,
                 )
                 .map(|file| StagedInput {
                     staged: StagedFile {
