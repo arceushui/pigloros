@@ -218,11 +218,19 @@ impl StagingDirectory {
     /// `UnsafeDirectory` for a non-directory, another owner or any group/other
     /// permission; `Io` if it cannot be inspected.
     pub fn from_held_directory(directory: File, owner: u32) -> Result<Self, StagingError> {
-        let metadata = directory.metadata()?;
-        if !metadata.is_dir() || metadata.uid() != owner || metadata.mode() & 0o7777 != 0o700 {
-            return Err(StagingError::UnsafeDirectory);
-        }
-        Ok(Self { directory })
+        directory
+            .metadata()
+            .map_err(StagingError::from)
+            .and_then(|metadata| {
+                if !metadata.is_dir()
+                    || metadata.uid() != owner
+                    || metadata.mode() & 0o7777 != 0o700
+                {
+                    Err(StagingError::UnsafeDirectory)
+                } else {
+                    Ok(Self { directory })
+                }
+            })
     }
 
     /// Create the exclusive, non-executable file that stages one input.
@@ -239,24 +247,33 @@ impl StagingDirectory {
         reservation: StagingReservation,
     ) -> Result<StagedInput, StagingError> {
         let name = hex_name(name);
-        let file = openat2(
-            &self.directory,
-            &name,
-            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::RUSR | Mode::WUSR,
-            ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS,
-        )
-        .map(File::from)
-        .map_err(io::Error::from)?;
-        Ok(StagedInput {
-            staged: StagedFile {
-                file,
-                directory: self.directory.try_clone()?,
-                name,
-                reservation,
-            },
-            written: 0,
-        })
+        // Clone first, so a failure cannot leave a created file behind.
+        self.directory
+            .try_clone()
+            .map_err(StagingError::from)
+            .and_then(|directory| {
+                openat2(
+                    &self.directory,
+                    &name,
+                    OFlags::WRONLY
+                        | OFlags::CREATE
+                        | OFlags::EXCL
+                        | OFlags::NOFOLLOW
+                        | OFlags::CLOEXEC,
+                    Mode::RUSR | Mode::WUSR,
+                    ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS,
+                )
+                .map(|file| StagedInput {
+                    staged: StagedFile {
+                        file: File::from(file),
+                        directory,
+                        name,
+                        reservation,
+                    },
+                    written: 0,
+                })
+                .map_err(|errno| StagingError::Io(io::Error::from(errno)))
+            })
     }
 }
 
@@ -303,9 +320,11 @@ impl StagedInput {
             .and_then(|length| self.written.checked_add(length))
             .filter(|end| *end <= self.staged.reservation.bytes)
             .ok_or(StagingError::ExceedsReservation)?;
-        self.staged.file.write_all(chunk)?;
-        self.written = end;
-        Ok(())
+        self.staged
+            .file
+            .write_all(chunk)
+            .map(|()| self.written = end)
+            .map_err(StagingError::from)
     }
 
     /// Complete the transfer once exactly the declared length arrived.

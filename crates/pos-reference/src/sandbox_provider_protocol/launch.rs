@@ -55,8 +55,9 @@ fn finish_self_digested(
     unsigned: &[Value],
 ) -> Result<([u8; 32], Vec<u8>), SandboxProviderProtocolError> {
     let unsigned = Value::Array(unsigned.to_vec());
-    let digest = record_digest(magic, &unsigned)?;
-    encode(&Value::Array(vec![unsigned, bytes_value(&digest)])).map(|bytes| (digest, bytes))
+    record_digest(magic, &unsigned).and_then(|digest| {
+        encode(&Value::Array(vec![unsigned, bytes_value(&digest)])).map(|bytes| (digest, bytes))
+    })
 }
 
 /// Exact launch parameters the provider hands the launcher (LPV1).
@@ -102,12 +103,14 @@ impl LaunchParameters {
             digest: [0; 32],
         };
         record.validate_fields()?;
-        let (digest, bytes) = finish_self_digested("LPV1", &record.unsigned_value())?;
-        if bytes.len() > MAX_LAUNCH_PARAMETER_BYTES {
-            return Err(SandboxProviderProtocolError::FieldOutOfBounds);
-        }
-        record.digest = digest;
-        Ok(record)
+        finish_self_digested("LPV1", &record.unsigned_value()).and_then(|(digest, bytes)| {
+            if bytes.len() > MAX_LAUNCH_PARAMETER_BYTES {
+                Err(SandboxProviderProtocolError::FieldOutOfBounds)
+            } else {
+                record.digest = digest;
+                Ok(record)
+            }
+        })
     }
 
     /// Exact canonical LPV1 bytes.
@@ -216,8 +219,8 @@ impl LauncherReady {
     /// Rejects zero identities, digests or inodes.
     pub fn new(fields: LauncherReadyFields) -> Result<Self, SandboxProviderProtocolError> {
         validate_ready_fields(&fields)?;
-        let digest = finish_self_digested("RDY1", &ready_unsigned_value(&fields))?.0;
-        Ok(Self { fields, digest })
+        finish_self_digested("RDY1", &ready_unsigned_value(&fields))
+            .map(|(digest, _)| Self { fields, digest })
     }
 
     /// Exact canonical `RDY1` bytes.
@@ -347,15 +350,16 @@ impl ExecutionRelease {
         fields: ExecutionReleaseFields,
         sign: impl FnOnce(&[u8]) -> [u8; 64],
     ) -> Result<Self, SandboxProviderProtocolError> {
-        validate_release_fields(&fields)?;
-        let digest = finish_self_digested("RLS1", &release_unsigned_value(&fields))?.0;
-        let signature = sign(&signature_message("RLS1", &digest));
-        require_signature(&signature)?;
-        Ok(Self {
-            fields,
-            digest,
-            signature,
-        })
+        validate_release_fields(&fields)
+            .and_then(|()| finish_self_digested("RLS1", &release_unsigned_value(&fields)))
+            .and_then(|(digest, _)| {
+                let signature = sign(&signature_message("RLS1", &digest));
+                require_signature(&signature).map(|()| Self {
+                    fields,
+                    digest,
+                    signature,
+                })
+            })
     }
 
     /// Exact canonical `RLS1` bytes.

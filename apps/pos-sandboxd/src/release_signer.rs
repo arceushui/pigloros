@@ -77,20 +77,28 @@ impl KeyFileReleaseSigner {
         )
         .map(File::from)
         .map_err(io::Error::from)?;
-        let metadata = file.metadata()?;
-        if !metadata.is_file()
-            || metadata.uid() != owner
-            || metadata.mode() & 0o177 != 0
-            || metadata.len() != SEED_BYTES
-        {
-            return Err(ReleaseSignerError::UnsafeKeyFile);
-        }
-        let mut seed = [0_u8; 32];
-        file.read_exact(&mut seed)?;
-        Ok(Self {
-            key: SigningKey::from_bytes(&seed),
-            key_id,
-        })
+        file.metadata()
+            .map_err(ReleaseSignerError::from)
+            .and_then(|metadata| {
+                if !metadata.is_file()
+                    || metadata.uid() != owner
+                    || metadata.mode() & 0o177 != 0
+                    || metadata.len() != SEED_BYTES
+                {
+                    Err(ReleaseSignerError::UnsafeKeyFile)
+                } else {
+                    Ok(())
+                }
+            })
+            .and_then(|()| {
+                let mut seed = [0_u8; 32];
+                file.read_exact(&mut seed)
+                    .map(|()| Self {
+                        key: SigningKey::from_bytes(&seed),
+                        key_id,
+                    })
+                    .map_err(ReleaseSignerError::from)
+            })
     }
 }
 

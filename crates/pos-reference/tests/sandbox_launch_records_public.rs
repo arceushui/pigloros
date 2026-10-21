@@ -15,6 +15,7 @@ use pos_reference::sandbox_provider_protocol::{
 type TestResult = Result<(), Box<dyn Error>>;
 type Rejects = fn(&[u8]) -> bool;
 type Case<'a> = (&'a [u8], Rejects);
+type PathCase<'a> = (&'a [u8], Rejects, Vec<Vec<usize>>);
 
 const LPV1_FULL: &str = "8288644c5056310150010101010101010101010101010101015820020202020202020202020202020202020202020202020202020202020202020258200303030303030303030303030303030303030303030303030303030303030303702f7573722f62696e2f6164617074657282672d2d7365727665672d2d7175696574582004040404040404040404040404040404040404040404040404040404040404045820e139c1a90ed957711934f79d4706720242ef0f06c9cbb2e974ecbbe120582281";
 const LPV1_DIGEST: &str = "e139c1a90ed957711934f79d4706720242ef0f06c9cbb2e974ecbbe120582281";
@@ -343,5 +344,55 @@ fn decoders_reject_a_correctly_digested_record_with_a_zero_field() -> TestResult
     .is_err());
     let zero_signature = mutated(&rls, &[2], Value::Bytes(vec![0; 64]))?;
     assert!(ExecutionRelease::from_canonical_cbor(&zero_signature).is_err());
+    Ok(())
+}
+
+#[test]
+fn every_decoder_field_rejects_a_value_of_the_wrong_type() -> TestResult {
+    let lpv = launch()?.to_canonical_cbor()?;
+    let rdy = LauncherReady::new(ready_fields()?)?.to_canonical_cbor()?;
+    let rls = release()?.to_canonical_cbor()?;
+    let cases: [PathCase<'_>; 3] = [
+        (
+            lpv.as_slice(),
+            |b| LaunchParameters::from_canonical_cbor(b).is_err(),
+            (2..=7).map(|index| vec![0, index]).collect(),
+        ),
+        (
+            rdy.as_slice(),
+            |b| LauncherReady::from_canonical_cbor(b).is_err(),
+            (2..=12)
+                .map(|index| vec![0, index])
+                .chain([vec![0, 6, 0], vec![0, 6, 1], vec![0, 9, 0], vec![0, 9, 1]])
+                .collect(),
+        ),
+        (
+            rls.as_slice(),
+            |b| ExecutionRelease::from_canonical_cbor(b).is_err(),
+            (2..=14).map(|index| vec![0, index]).collect(),
+        ),
+    ];
+    for (bytes, rejects, paths) in cases {
+        for path in paths {
+            assert!(
+                rejects(&mutated(bytes, &path, Value::Null)?),
+                "{path:?} accepted a null"
+            );
+        }
+        assert!(rejects(&mutated(bytes, &[1], Value::Null)?));
+    }
+    Ok(())
+}
+
+#[test]
+fn decoders_reject_oversized_and_zero_field_records() -> TestResult {
+    assert!(LaunchParameters::from_canonical_cbor(&vec![0; 64 * 1024 + 1]).is_err());
+    let rdy = LauncherReady::new(ready_fields()?)?.to_canonical_cbor()?;
+    assert!(LauncherReady::from_canonical_cbor(&mutated(
+        &rdy,
+        &[0, 3],
+        Value::Bytes(vec![0; 32])
+    )?)
+    .is_err());
     Ok(())
 }
