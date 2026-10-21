@@ -139,6 +139,20 @@ fn node_inputs<const N: usize>(digests: [[u8; 32]; N]) -> [DirectInputRefV1; N] 
     })
 }
 
+/// ADR-061 r9: an output whose annotation declares `[9; 32]`, beside one draft
+/// declaring `[7; 32]` and the consumed dependency `[3; 32]`, re-digested after
+/// the edit.
+fn annotated_output() -> PluginOutputV1 {
+    let mut annotated = output(vec![EventDraftV1 {
+        dependency_digests: vec![[7; 32]],
+        ..draft("community.event", b"payload")
+    }]);
+    annotated.trace_annotations[0].dependency_digests = vec![[9; 32]];
+    annotated.consumed_dependencies = vec![[3; 32]];
+    annotated.output_digest = plugin_output_digest_v1(&annotated);
+    annotated
+}
+
 #[test]
 fn a_draft_maps_to_an_event_draft_or_is_rejected() {
     let mapped = ok(map_draft(&EventDraftV1 {
@@ -192,6 +206,18 @@ fn consumed_dependencies_map_to_step_inputs_and_annotations_stay_dropped() {
         mapped_output(&consumed, 2).map(|_| ()),
         Err(Error::OutputLimitExceeded)
     );
+}
+
+/// ADR-061 r9 test 1: an annotation's dependency digests are declared nowhere.
+#[test]
+fn annotation_dependency_digests_are_declared_nowhere() {
+    let step = ok(mapped_output(&annotated_output(), 100));
+    assert_eq!(step.step_inputs(), node_inputs([[3; 32]]));
+    assert_eq!(step.outputs.len(), 1);
+    assert_eq!(step.outputs[0].direct_inputs, node_inputs([[7; 32]]));
+    let [from_annotation] = node_inputs([[9; 32]]);
+    assert!(!step.step_inputs().contains(&from_annotation));
+    assert!(!step.outputs[0].direct_inputs.contains(&from_annotation));
 }
 
 #[test]
@@ -250,6 +276,24 @@ fn a_valid_output_is_staged_with_a_receipt_until_the_batch_commits() {
     // A second commit has nothing staged and changes nothing.
     driver.commit_step();
     assert_eq!(handle.committed_state().bytes, b"next");
+}
+
+/// ADR-061 r9 test 2: the adapter's output carries nothing from the annotation.
+#[test]
+fn an_accepted_output_carries_nothing_from_its_annotation() {
+    let (mut driver, handle, _) = fixture(None);
+    let annotated = annotated_output();
+    let digest = annotated.output_digest;
+    let step = ok(driver.accept([3; 16], report(annotated)));
+    driver.commit_step();
+    assert_eq!(step.outputs.len(), 1);
+    assert_eq!(step.outputs[0].direct_inputs, node_inputs([[7; 32]]));
+    assert_eq!(step.step_inputs(), node_inputs([[3; 32]]));
+    let receipts = handle.receipts();
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(receipts[0].dropped_trace_annotations, 1);
+    assert_eq!(receipts[0].output_digest, Some(digest));
+    assert_eq!(receipts[0].disposition, ReceiptDispositionV1::Committed);
 }
 
 #[test]
