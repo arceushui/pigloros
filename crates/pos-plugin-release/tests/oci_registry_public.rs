@@ -1179,6 +1179,74 @@ fn a_token_response_is_bounded_and_not_redirected() -> TestResult {
     Ok(())
 }
 
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn an_unreachable_token_service_fails_closed() -> TestResult {
+    let _network = network();
+    let bundle = bundle()?;
+    let registry = Server::start()?;
+    let port = TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
+    let origin = format!("https://127.0.0.1:{port}");
+    guard(
+        &registry,
+        &bundle,
+        &Reply::unauthorized(&[challenge(&format!("{origin}/token")).as_bytes()]),
+        &["T"],
+    );
+    let transport = RemoteTransportConfigV1::new(
+        &[registry.origin().as_str(), origin.as_str()],
+        &test_roots(),
+        quick(),
+    )?;
+    let source = OciReleaseSourceV1::new(&registry.origin(), REPOSITORY, Some(SERVICE), transport)?;
+    assert_eq!(source.read_verified(bundle.address()), Err(S::Io));
+    // Only the first request reached the registry: no retry without a token.
+    assert_eq!(registry.seen().len(), 1);
+    Ok(())
+}
+
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn an_invalid_credential_fails_closed_before_any_request() -> TestResult {
+    let _network = network();
+    let bundle = bundle()?;
+    let (registry, issuer) = protected(&bundle, &["T"])?;
+    let invalid = [
+        bearer(""),
+        bearer("two words"),
+        basic("user:name", "password"),
+    ];
+
+    // The registry credential is checked before the first request.
+    for credential in &invalid {
+        let provider = Provider::new(&[(registry.port, credential.clone())]);
+        assert_eq!(
+            read_authenticated(&registry, &issuer, &bundle, provider)?,
+            Err(S::Io),
+            "{credential:?}"
+        );
+    }
+    let bound = 8_192 - "Bearer ".len();
+    let provider = Provider::new(&[(registry.port, bearer(&"t".repeat(bound + 1)))]);
+    assert_eq!(
+        read_authenticated(&registry, &issuer, &bundle, provider)?,
+        Err(S::BoundsExceeded)
+    );
+    assert!(registry.seen().is_empty());
+
+    // The token service's credential is checked before the token request.
+    for credential in &invalid {
+        let provider = Provider::new(&[(issuer.port, credential.clone())]);
+        assert_eq!(
+            read_authenticated(&registry, &issuer, &bundle, provider)?,
+            Err(S::Io),
+            "{credential:?}"
+        );
+    }
+    assert!(issuer.seen().is_empty());
+    Ok(())
+}
+
 // ── Configuration ───────────────────────────────────────────────────────
 
 #[cfg_attr(coverage_nightly, coverage(off))]

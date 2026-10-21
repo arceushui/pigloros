@@ -94,6 +94,39 @@ impl OciReleaseSourceV1 {
         })
     }
 
+    /// Read the closure of `address`. The registry credential `bootstrap`
+    /// opens each request until a token replaces it; the token lives only
+    /// for this read.
+    fn read_closure(
+        &self,
+        address: &BundleAddressV1,
+        bootstrap: Option<String>,
+    ) -> Result<VerifiedReleaseBundleV1, ReleaseSourceErrorV1> {
+        let token = RefCell::new(None::<String>);
+        let read = self.engine.begin();
+        let reauthorize = |headers: &HeaderMap| {
+            self.token_authorization(&read, headers)
+                .inspect(|value| *token.borrow_mut() = Some(value.clone()))
+        };
+        let fetch = |kind: &str, digest: &str, accept: Option<&str>, size: u64| {
+            let url = object_url(&self.registry, &self.repository, kind, digest);
+            let current = token.borrow().clone().or_else(|| bootstrap.clone());
+            read.fetch_challenged(&url, current.as_deref(), accept, size, &reauthorize)
+        };
+        let manifest = fetch(
+            "manifests",
+            address.digest(),
+            Some(MANIFEST_MEDIA_TYPE),
+            address.size(),
+        )?;
+        let mut blobs = BTreeMap::new();
+        for (digest, size) in address.plan_closure(&manifest)? {
+            let bytes = fetch("blobs", &digest, None, size)?;
+            blobs.insert(digest, bytes);
+        }
+        verify_oci_closure_v1(address.clone(), manifest, blobs)
+    }
+
     /// Answer a 401 challenge: one token request for the exact pull scope,
     /// and the `Authorization` of the one authenticated retry.
     fn token_authorization(
@@ -122,10 +155,10 @@ impl OciReleaseSourceV1 {
             }
             query.append_pair("scope", &self.scope);
         }
-        let credential = config.authorization(&token_url)?;
-        let body = read.fetch_token(&token_url, credential.as_deref())?;
-        token_of(&body)
-            .ok_or(ReleaseSourceErrorV1::Io)
+        config
+            .authorization(&token_url)
+            .and_then(|credential| read.fetch_token(&token_url, credential.as_deref()))
+            .and_then(|body| token_of(&body).ok_or(ReleaseSourceErrorV1::Io))
             .and_then(|token| bearer_authorization(&token))
     }
 }
@@ -187,31 +220,9 @@ impl ReleaseSourceV1 for OciReleaseSourceV1 {
         &self,
         address: &BundleAddressV1,
     ) -> Result<VerifiedReleaseBundleV1, ReleaseSourceErrorV1> {
-        // The registry credential opens each request until a token replaces
-        // it. The token lives only for this closure read.
-        let bootstrap = self.engine.config().authorization(&self.registry)?;
-        let token = RefCell::new(None::<String>);
-        let read = self.engine.begin();
-        let reauthorize = |headers: &HeaderMap| {
-            self.token_authorization(&read, headers)
-                .inspect(|value| *token.borrow_mut() = Some(value.clone()))
-        };
-        let fetch = |kind: &str, digest: &str, accept: Option<&str>, size: u64| {
-            let url = object_url(&self.registry, &self.repository, kind, digest);
-            let current = token.borrow().clone().or_else(|| bootstrap.clone());
-            read.fetch_challenged(&url, current.as_deref(), accept, size, &reauthorize)
-        };
-        let manifest = fetch(
-            "manifests",
-            address.digest(),
-            Some(MANIFEST_MEDIA_TYPE),
-            address.size(),
-        )?;
-        let mut blobs = BTreeMap::new();
-        for (digest, size) in address.plan_closure(&manifest)? {
-            let bytes = fetch("blobs", &digest, None, size)?;
-            blobs.insert(digest, bytes);
-        }
-        verify_oci_closure_v1(address.clone(), manifest, blobs)
+        self.engine
+            .config()
+            .authorization(&self.registry)
+            .and_then(|bootstrap| self.read_closure(address, bootstrap))
     }
 }

@@ -181,12 +181,13 @@ impl ClosureRead<'_> {
         authorization: Option<&str>,
     ) -> Result<Vec<u8>, ReleaseSourceErrorV1> {
         let response = self.get(url, authorization, None)?;
-        self.budget.charge(Charge::Token)?;
-        if response.status().as_u16() == 200 {
-            read_body(response, MAX_TOKEN_BYTES, false)
-        } else {
-            Err(ReleaseSourceErrorV1::Io)
-        }
+        self.budget.charge(Charge::Token).and_then(|()| {
+            if response.status().as_u16() == 200 {
+                read_body(response, MAX_TOKEN_BYTES, false)
+            } else {
+                Err(ReleaseSourceErrorV1::Io)
+            }
+        })
     }
 
     fn fetch_object(
@@ -206,19 +207,26 @@ impl ClosureRead<'_> {
             let response = self.get(&current, authorization.as_deref(), accept)?;
             match (response.status().as_u16(), reauthorize) {
                 (200, _) => {
-                    self.budget.charge(Charge::Content)?;
-                    return read_body(response, size, true);
+                    return self
+                        .budget
+                        .charge(Charge::Content)
+                        .and_then(|()| read_body(response, size, true));
                 }
                 (301 | 302 | 303 | 307 | 308, _) if hops < MAX_REDIRECTS => {
-                    self.budget.charge(Charge::Redirect)?;
-                    current = self.redirect_target(&current, &response, &visited)?;
+                    current = self
+                        .budget
+                        .charge(Charge::Redirect)
+                        .and_then(|()| self.redirect_target(&current, &response, &visited))?;
                     visited.push(current.clone());
                     authorization = None;
                     hops += 1;
                 }
                 (401, Some(reauthorize)) if hops == 0 && !challenged => {
-                    self.budget.charge(Charge::Challenge)?;
-                    authorization = Some(reauthorize(response.headers())?);
+                    authorization = Some(
+                        self.budget
+                            .charge(Charge::Challenge)
+                            .and_then(|()| reauthorize(response.headers()))?,
+                    );
                     challenged = true;
                 }
                 (404 | 410, _) => return Err(ReleaseSourceErrorV1::NotFound),
@@ -233,7 +241,17 @@ impl ClosureRead<'_> {
         authorization: Option<&str>,
         accept: Option<&str>,
     ) -> Result<Response<Body>, ReleaseSourceErrorV1> {
-        self.budget.charge(Charge::Attempt)?;
+        self.budget
+            .charge(Charge::Attempt)
+            .and_then(|()| self.send(url, authorization, accept))
+    }
+
+    fn send(
+        &self,
+        url: &Url,
+        authorization: Option<&str>,
+        accept: Option<&str>,
+    ) -> Result<Response<Body>, ReleaseSourceErrorV1> {
         let remaining = self.deadline.saturating_duration_since(Instant::now());
         let deadlines = self.engine.config.deadlines();
         let request = self.engine.agent.get(url.as_str());
