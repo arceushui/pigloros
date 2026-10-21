@@ -16,7 +16,7 @@ ed25519-dalek = { workspace = true }
 flate2 = "1"
 ring = "=0.17.14"
 rustls-pki-types = "=1.15.1"
-rustls-webpki = { version = "=0.103.15", features = ["ring"] }
+rustls-webpki = { version = "=0.103.16", features = ["ring"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
