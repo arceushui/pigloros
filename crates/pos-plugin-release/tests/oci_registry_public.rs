@@ -409,10 +409,10 @@ fn bearer(token: &str) -> CredentialV1 {
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn basic(username: &str, password: &str) -> CredentialV1 {
+fn basic(user: &str, secret: &str) -> CredentialV1 {
     CredentialV1::Basic {
-        username: username.to_owned(),
-        password: password.to_owned(),
+        username: user.to_owned(),
+        password: secret.to_owned(),
     }
 }
 
