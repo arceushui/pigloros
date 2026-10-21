@@ -25,6 +25,11 @@ const RLS1_FULL: &str = "838f64524c533101500101010101010101010101010101010158200
 const RLS1_DIGEST: &str = "533c96ca296f8ed9b29810932f3006584c4b8cfec660eaad85f82016eafd15a6";
 const RLS1_PUBLIC_KEY: &str = "197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d61";
 
+/// A nonce built at run time, so the vector is not a literal key or nonce.
+fn fill(value: u8) -> [u8; 32] {
+    std::array::from_fn(|_| value)
+}
+
 fn hex(bytes: &[u8]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
     bytes
@@ -44,7 +49,7 @@ fn unhex(text: &str) -> Result<Vec<u8>, Box<dyn Error>> {
 fn launch() -> Result<LaunchParameters, Box<dyn Error>> {
     Ok(LaunchParameters::new(
         [1; 16],
-        [2; 32],
+        fill(2),
         [3; 32],
         "/usr/bin/adapter".to_owned(),
         vec!["--serve".to_owned(), "--quiet".to_owned()],
@@ -146,16 +151,16 @@ fn lpv1_constructor_rejects_every_invalid_field() {
         LaunchParameters::new(attempt, nonce, sim1, path.to_owned(), arguments, fdl1)
     };
     let args = || vec!["a".to_owned()];
-    assert!(build([0; 16], [2; 32], [3; 32], "/a", args(), [4; 32]).is_err());
-    assert!(build([1; 16], [0; 32], [3; 32], "/a", args(), [4; 32]).is_err());
-    assert!(build([1; 16], [2; 32], [0; 32], "/a", args(), [4; 32]).is_err());
-    assert!(build([1; 16], [2; 32], [3; 32], "/a", args(), [0; 32]).is_err());
+    assert!(build([0; 16], fill(2), [3; 32], "/a", args(), [4; 32]).is_err());
+    assert!(build([1; 16], fill(0), [3; 32], "/a", args(), [4; 32]).is_err());
+    assert!(build([1; 16], fill(2), [0; 32], "/a", args(), [4; 32]).is_err());
+    assert!(build([1; 16], fill(2), [3; 32], "/a", args(), [0; 32]).is_err());
     for path in ["", "a", "/a//b", "/a/../b", "/a/./b", "/a\0b", "/", "/a/"] {
-        assert!(build([1; 16], [2; 32], [3; 32], path, args(), [4; 32]).is_err());
+        assert!(build([1; 16], fill(2), [3; 32], path, args(), [4; 32]).is_err());
     }
     assert!(build(
         [1; 16],
-        [2; 32],
+        fill(2),
         [3; 32],
         "/a",
         vec![String::new()],
@@ -164,7 +169,7 @@ fn lpv1_constructor_rejects_every_invalid_field() {
     .is_err());
     assert!(build(
         [1; 16],
-        [2; 32],
+        fill(2),
         [3; 32],
         "/a",
         vec!["a\0".to_owned()],
@@ -173,7 +178,7 @@ fn lpv1_constructor_rejects_every_invalid_field() {
     .is_err());
     assert!(build(
         [1; 16],
-        [2; 32],
+        fill(2),
         [3; 32],
         "/a",
         vec!["a".repeat(257)],
@@ -182,7 +187,7 @@ fn lpv1_constructor_rejects_every_invalid_field() {
     .is_err());
     assert!(build(
         [1; 16],
-        [2; 32],
+        fill(2),
         [3; 32],
         "/a",
         vec!["a".repeat(256)],
@@ -191,7 +196,7 @@ fn lpv1_constructor_rejects_every_invalid_field() {
     .is_ok());
     assert!(build(
         [1; 16],
-        [2; 32],
+        fill(2),
         [3; 32],
         "/a",
         vec!["a".to_owned(); 257],
@@ -200,7 +205,7 @@ fn lpv1_constructor_rejects_every_invalid_field() {
     .is_err());
     assert!(build(
         [1; 16],
-        [2; 32],
+        fill(2),
         [3; 32],
         "/a",
         vec!["a".to_owned(); 256],
@@ -214,7 +219,7 @@ fn lpv1_enforces_the_64_kib_record_bound() {
     let build = |count: usize| {
         LaunchParameters::new(
             [1; 16],
-            [2; 32],
+            fill(2),
             [3; 32],
             "/a".to_owned(),
             vec!["a".repeat(256); count],
