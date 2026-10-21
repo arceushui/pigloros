@@ -23,6 +23,8 @@ impl LocalBindingFixture {
             limits[10 + offset] =
                 Value::Array(vec![integer(10 + u64::try_from(offset)?), integer(value)]);
         }
+        // Broker caps equal the selected limits, so ELM1 is exactly these values.
+        fixture.broker_hard_caps = broker_hard_caps_with_limits(limits.clone())?;
         let policy = launch_policy_with_limits(
             wrapped_digest(&fixture.sim1)?,
             u64::from(mode.code()),
