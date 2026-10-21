@@ -1,4 +1,4 @@
-//! ADR-069 launcher barrier records: LPV1, ReadyV1 (`RDY1`) and ReleaseV1 (`RLS1`).
+//! ADR-069 launcher barrier records: LPV1, `ReadyV1` (`RDY1`) and `ReleaseV1` (`RLS1`).
 //!
 //! LPV1 and `RDY1` are self-digested; `RLS1` is signed by the provider
 //! runtime-attestation key. Every constructor validates the same rules as the
@@ -74,7 +74,7 @@ pub struct LaunchParameters {
     pub arguments: Vec<String>,
     /// Expected FDL1 digest for the execution mode.
     pub expected_fdl1_digest: [u8; 32],
-    /// LPV1 self-digest, which ReadyV1 binds as the launch-parameter digest.
+    /// LPV1 self-digest, which `ReadyV1` binds as the launch-parameter digest.
     pub digest: [u8; 32],
 }
 
@@ -173,7 +173,7 @@ impl LaunchParameters {
     }
 }
 
-/// The body of a ReadyV1 before its self-digest exists.
+/// The body of a `ReadyV1` before its self-digest exists.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LauncherReadyFields {
     /// Attempt the launcher serves.
@@ -200,7 +200,7 @@ pub struct LauncherReadyFields {
     pub observed_fdl1_digest: [u8; 32],
 }
 
-/// Launcher readiness evidence (ReadyV1, `RDY1`).
+/// Launcher readiness evidence (`ReadyV1`, `RDY1`).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LauncherReady {
     /// Digested body.
@@ -292,12 +292,12 @@ fn ready_unsigned_value(fields: &LauncherReadyFields) -> [Value; 13] {
     ]
 }
 
-/// The signed body of a ReleaseV1 before its digest and signature exist.
+/// The signed body of a `ReleaseV1` before its digest and signature exist.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExecutionReleaseFields {
     /// Attempt being released.
     pub attempt_id: [u8; 16],
-    /// Nonce of the matching LPV1 and ReadyV1.
+    /// Nonce of the matching LPV1 and `ReadyV1`.
     pub nonce: [u8; 32],
     /// `RDY1` self-digest this release answers.
     pub ready1_digest: [u8; 32],
@@ -323,7 +323,7 @@ pub struct ExecutionReleaseFields {
     pub runtime_attestation_key_id: String,
 }
 
-/// Signed ReleaseV1 (`RLS1`).
+/// Signed `ReleaseV1` (`RLS1`).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExecutionRelease {
     /// Signed body.

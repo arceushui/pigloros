@@ -1,4 +1,4 @@
-//! Runtime-attestation signing of ReleaseV1 (ADR-069 section 6, #441).
+//! Runtime-attestation signing of `ReleaseV1` (ADR-069 section 6, #441).
 //!
 //! [`ReleaseSigner`] is the port the launch path signs through. The shipped
 //! adapter, [`KeyFileReleaseSigner`], loads the provider's Ed25519 seed from a
@@ -104,7 +104,7 @@ impl ReleaseSigner for KeyFileReleaseSigner {
     }
 }
 
-/// Build and sign one ReleaseV1 through `signer`.
+/// Build and sign one `ReleaseV1` through `signer`.
 ///
 /// # Errors
 /// `KeyIdMismatch` if the fields name another key, and `Protocol` for invalid
