@@ -4,16 +4,14 @@ use std::collections::BTreeMap;
 
 use url::Url;
 
-use super::config::{requestable, RemoteConfigErrorV1, RemoteTransportConfigV1};
+use super::config::{
+    requestable, RemoteConfigErrorV1, RemoteTransportConfigV1, LENGTH_PROBE_DIGEST,
+};
 use super::engine::Engine;
 use crate::oci::{
     verify_oci_closure_v1, BundleAddressV1, ReleaseSourceErrorV1, ReleaseSourceV1,
     VerifiedReleaseBundleV1,
 };
-
-/// A digest of the fixed V1 length, used only to bound blob URL length.
-const LENGTH_PROBE_DIGEST: &str =
-    "sha256:0000000000000000000000000000000000000000000000000000000000000000";
 
 /// A release source over HTTPS, bound to exactly one immutable bundle address.
 ///
