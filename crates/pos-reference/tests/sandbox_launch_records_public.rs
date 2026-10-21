@@ -1,4 +1,4 @@
-//! Golden-vector and mutation checks for the LPV1, ReadyV1 and ReleaseV1 launcher records.
+//! Golden-vector and mutation checks for the LPV1, `ReadyV1` and `ReleaseV1` launcher records.
 //!
 //! The vectors were produced by an independent Python CBOR/BLAKE3/Ed25519
 //! encoder, not by the codec under test.
@@ -13,6 +13,8 @@ use pos_reference::sandbox_provider_protocol::{
 };
 
 type TestResult = Result<(), Box<dyn Error>>;
+type Rejects = fn(&[u8]) -> bool;
+type Case<'a> = (&'a [u8], Rejects);
 
 const LPV1_FULL: &str = "8288644c5056310150010101010101010101010101010101015820020202020202020202020202020202020202020202020202020202020202020258200303030303030303030303030303030303030303030303030303030303030303702f7573722f62696e2f6164617074657282672d2d7365727665672d2d7175696574582004040404040404040404040404040404040404040404040404040404040404045820e139c1a90ed957711934f79d4706720242ef0f06c9cbb2e974ecbbe120582281";
 const LPV1_DIGEST: &str = "e139c1a90ed957711934f79d4706720242ef0f06c9cbb2e974ecbbe120582281";
@@ -138,7 +140,7 @@ fn rls1_matches_the_golden_vector_verifies_and_round_trips() -> TestResult {
 }
 
 #[test]
-fn lpv1_constructor_rejects_every_invalid_field() -> TestResult {
+fn lpv1_constructor_rejects_every_invalid_field() {
     let build = |attempt: [u8; 16], nonce, sim1, path: &str, arguments: Vec<String>, fdl1| {
         LaunchParameters::new(attempt, nonce, sim1, path.to_owned(), arguments, fdl1)
     };
@@ -204,7 +206,6 @@ fn lpv1_constructor_rejects_every_invalid_field() -> TestResult {
         [4; 32]
     )
     .is_ok());
-    Ok(())
 }
 
 #[test]
@@ -290,7 +291,7 @@ fn decoders_reject_wrong_magic_version_digest_and_truncation() -> TestResult {
     let lpv = launch()?.to_canonical_cbor()?;
     let rdy = LauncherReady::new(ready_fields()?)?.to_canonical_cbor()?;
     let rls = release()?.to_canonical_cbor()?;
-    let decoders: [(&[u8], fn(&[u8]) -> bool); 3] = [
+    let decoders: [Case<'_>; 3] = [
         (lpv.as_slice(), |b| {
             LaunchParameters::from_canonical_cbor(b).is_err()
         }),
