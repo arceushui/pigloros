@@ -811,6 +811,19 @@ fn a_ready_that_cannot_be_built_or_sent_ends_the_launch() -> TestResult {
     assert!(matches!(error, Some(LauncherError::Ready)));
     drop(provider);
 
+    // A provider that is already gone: ReadyV1 cannot be sent.
+    let (provider, release) = pair(SocketType::SEQPACKET)?;
+    let host = TestHost::new(&directory, &release, &elf())?;
+    drop(provider);
+    let error = run(
+        &host,
+        &environment(),
+        &parameters(Vec::new())?,
+        vec![named(RELEASE_NAME, release)],
+    )
+    .err();
+    assert!(matches!(error, Some(LauncherError::Ready)));
+
     let (provider, release) = pair(SocketType::SEQPACKET)?;
     drop(provider);
     assert!(matches!(
@@ -980,4 +993,38 @@ fn ready_for_digest() -> Result<LauncherReady, Box<dyn Error>> {
             observed_fdl1_digest: [9; 32],
         },
     )?)
+}
+
+#[test]
+fn proc_entries_name_descriptors_and_unparsable_names_fail_closed() {
+    assert_eq!(entry_number(b"."), None);
+    assert_eq!(entry_number(b".."), None);
+    assert_eq!(entry_number(b"7"), Some(7));
+    assert_eq!(entry_number(b"x"), Some(u32::MAX));
+    assert_eq!(entry_number(&[0xff]), Some(u32::MAX));
+}
+
+#[test]
+fn adopting_without_a_listen_environment_adopts_nothing() {
+    // The test process has no LISTEN_PID for itself, so the library adopts
+    // no descriptor and the expected count does not match.
+    let environment = environment();
+    assert!(matches!(
+        adopt(&environment),
+        Err(LauncherError::Environment)
+    ));
+}
+
+#[test]
+fn the_real_entry_point_refuses_bad_parameters_and_a_missing_environment() -> TestResult {
+    assert!(matches!(
+        super::run_launch_barrier("zz"),
+        LauncherError::Parameters
+    ));
+    let hex = hex(&parameters(Vec::new())?.to_canonical_cbor()?);
+    assert!(matches!(
+        super::run_launch_barrier(&hex),
+        LauncherError::Environment
+    ));
+    Ok(())
 }

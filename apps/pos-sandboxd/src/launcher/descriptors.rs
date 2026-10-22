@@ -42,17 +42,16 @@ pub(super) struct InheritedLayout {
 /// The environment is validated first, so the count is already bounded. This
 /// must be called at most once: every call re-adopts the same numbers.
 pub(super) fn adopt(environment: &LaunchEnvironment) -> Result<Inherited, LauncherError> {
-    let adopted = sd_listen_fds::get()
+    sd_listen_fds::get()
         .ok()
-        .ok_or(LauncherError::Environment)?;
-    if u32::try_from(adopted.len()) == Ok(environment.descriptor_count) {
-        Ok(adopted
-            .into_iter()
-            .map(|(name, descriptor)| (name, descriptor.into_std()))
-            .collect())
-    } else {
-        Err(LauncherError::Environment)
-    }
+        .filter(|adopted| u32::try_from(adopted.len()) == Ok(environment.descriptor_count))
+        .map(|adopted| {
+            adopted
+                .into_iter()
+                .map(|(name, descriptor)| (name, descriptor.into_std()))
+                .collect()
+        })
+        .ok_or(LauncherError::Environment)
 }
 
 /// Require exactly the expected names, order, socket families and types, and
@@ -76,14 +75,15 @@ pub(super) fn validate(
         socket_domain(descriptor).is_ok_and(|domain| domain == AddressFamily::UNIX)
             && socket_type(descriptor).is_ok_and(|kind| kind == expected_type(*role))
     });
-    if !numbers_match || !types_match {
+    // Sealing runs only for a layout that already matched.
+    let sealed = || {
+        inherited
+            .iter()
+            .all(|(_, descriptor)| fcntl_setfd(descriptor, FdFlags::CLOEXEC).is_ok())
+    };
+    if !(numbers_match && types_match && sealed()) {
         return Err(LauncherError::Layout);
     }
-    inherited
-        .iter()
-        .all(|(_, descriptor)| fcntl_setfd(descriptor, FdFlags::CLOEXEC).is_ok())
-        .then_some(())
-        .ok_or(LauncherError::Layout)?;
     let entries = (u64::from(FIRST_INHERITED)..)
         .zip(&roles)
         .map(|(fd_number, role)| FdLayoutEntry {
@@ -128,29 +128,41 @@ const fn expected_type(role: FdRole) -> SocketType {
 /// The open descriptors at or above 3, read from `/proc/self/fd`, without the
 /// descriptor used for the listing.
 pub(super) fn scan_proc_self_fd() -> io::Result<Vec<u32>> {
-    let directory = open(
+    open(
         "/proc/self/fd",
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
         Mode::empty(),
-    )?;
-    let own = directory.as_raw_fd();
-    let mut numbers = Vec::new();
-    for entry in Dir::new(directory)? {
-        let entry = entry?;
-        let name = entry.file_name().to_bytes();
-        if name == b"." || name == b".." {
-            continue;
-        }
-        let number = std::str::from_utf8(name)
+    )
+    .and_then(|directory| {
+        let own = directory.as_raw_fd();
+        Dir::new(directory)
+            .and_then(|entries| {
+                entries
+                    .map(|entry| entry.map(|entry| entry_number(entry.file_name().to_bytes())))
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .map(|numbers| (own, numbers))
+    })
+    .map(|(own, numbers)| {
+        let mut listed: Vec<u32> = numbers
+            .into_iter()
+            .flatten()
+            .filter(|number| *number >= FIRST_INHERITED && i32::try_from(*number) != Ok(own))
+            .collect();
+        listed.sort_unstable();
+        listed
+    })
+    .map_err(io::Error::from)
+}
+
+/// The descriptor number named by one `/proc/self/fd` entry, or nothing for
+/// `.` and `..`. No real entry is unparsable; a sentinel can never match the
+/// adopted set, so it still fails closed.
+pub(super) fn entry_number(name: &[u8]) -> Option<u32> {
+    (name != b"." && name != b"..").then(|| {
+        std::str::from_utf8(name)
             .ok()
             .and_then(|text| text.parse::<u32>().ok())
-            // No real entry is unparsable; a sentinel can never match the
-            // adopted set, so it still fails closed.
-            .unwrap_or(u32::MAX);
-        if number >= FIRST_INHERITED && i32::try_from(number) != Ok(own) {
-            numbers.push(number);
-        }
-    }
-    numbers.sort_unstable();
-    Ok(numbers)
+            .unwrap_or(u32::MAX)
+    })
 }
