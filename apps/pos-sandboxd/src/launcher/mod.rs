@@ -60,8 +60,9 @@ pub fn run_launch_barrier(lpv1_hex: &str) -> LauncherError {
 
 fn launch(lpv1_hex: &str) -> Result<Infallible, LauncherError> {
     let parameters = decode_parameters(lpv1_hex)?;
-    let environment = LaunchEnvironment::from_process()?;
-    let inherited = descriptors::adopt(&environment)?;
+    let (environment, inherited) = LaunchEnvironment::from_process().and_then(|environment| {
+        descriptors::adopt(&environment).map(|inherited| (environment, inherited))
+    })?;
     barrier::run(&ProcessHost, &environment, &parameters, inherited)
 }
 

@@ -176,20 +176,23 @@ pub fn release_after_ready(
             runtime_attestation_key_id: signer.runtime_attestation_key_id().to_owned(),
         },
     )?;
-    let bytes = release
-        .to_canonical_cbor()
-        .ok()
-        .ok_or(ReleaseBarrierError::ReleaseSend)?;
-    match send(&channel, &bytes, SendFlags::NOSIGNAL) {
-        Ok(sent) if sent == bytes.len() => Ok(release),
-        _ => Err(ReleaseBarrierError::ReleaseSend),
+    let sent = release.to_canonical_cbor().ok().is_some_and(|bytes| {
+        send(&channel, &bytes, SendFlags::NOSIGNAL).is_ok_and(|written| written == bytes.len())
+    });
+    if sent {
+        Ok(release)
+    } else {
+        Err(ReleaseBarrierError::ReleaseSend)
     }
 }
 
 fn receive_ready(channel: &impl AsFd, main_pid: u32) -> Result<LauncherReady, ReleaseBarrierError> {
     set_socket_passcred(channel, true).map_err(|_| ReleaseBarrierError::ReadyUnavailable)?;
     let mut buffer = [0_u8; MAX_READY_BYTES];
-    let mut space = [MaybeUninit::<u8>::uninit(); rustix::cmsg_space!(ScmCredentials(1))];
+    // Room for one descriptor too, so a launcher that sends one is seen and
+    // refused rather than only truncated.
+    let mut space =
+        [MaybeUninit::<u8>::uninit(); rustix::cmsg_space!(ScmCredentials(1), ScmRights(1))];
     let mut control = RecvAncillaryBuffer::new(&mut space);
     let received = recvmsg(
         channel,
@@ -198,10 +201,8 @@ fn receive_ready(channel: &impl AsFd, main_pid: u32) -> Result<LauncherReady, Re
         RecvFlags::CMSG_CLOEXEC,
     )
     .ok()
+    .filter(|received| received.bytes != 0)
     .ok_or(ReleaseBarrierError::ReadyUnavailable)?;
-    if received.bytes == 0 {
-        return Err(ReleaseBarrierError::ReadyUnavailable);
-    }
     let mut credentials = Vec::new();
     let mut other_control = false;
     for message in control.drain() {
