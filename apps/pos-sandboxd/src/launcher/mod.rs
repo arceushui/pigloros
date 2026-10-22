@@ -63,7 +63,7 @@ fn launch(lpv1_hex: &str) -> Result<Infallible, LauncherError> {
     let (environment, inherited) = LaunchEnvironment::from_process().and_then(|environment| {
         descriptors::adopt(&environment).map(|inherited| (environment, inherited))
     })?;
-    barrier::run(&ProcessHost, &environment, &parameters, inherited)
+    barrier::run(&ProcessHost::root(), &environment, &parameters, inherited)
 }
 
 /// Decode the lowercase-hexadecimal LPV1 argument.
@@ -80,7 +80,7 @@ fn decode_hex(text: &str) -> Option<Vec<u8>> {
     }
     digits
         .chunks_exact(2)
-        .map(|pair| Some((nibble(pair[0])? << 4) | nibble(pair[1])?))
+        .map(|pair| Some((nibble(pair[0])? << 4) + nibble(pair[1])?))
         .collect()
 }
 

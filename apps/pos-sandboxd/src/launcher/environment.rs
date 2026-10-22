@@ -60,7 +60,7 @@ fn invocation_id(text: &str) -> Option<[u8; 16]> {
     }
     let mut id = [0_u8; 16];
     for (byte, pair) in id.iter_mut().zip(digits.chunks_exact(2)) {
-        *byte = (super::nibble(pair[0])? << 4) | super::nibble(pair[1])?;
+        *byte = (super::nibble(pair[0])? << 4) + super::nibble(pair[1])?;
     }
     (id != [0; 16]).then_some(id)
 }

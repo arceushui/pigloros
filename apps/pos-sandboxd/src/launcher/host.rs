@@ -15,7 +15,7 @@ use rustix::{
 use super::{adapter::open_beneath, descriptors::scan_proc_self_fd, exec::replace_process_image};
 
 /// The uid that must own the release channel peer: the root provider.
-const PROVIDER_UID: u32 = 0;
+const ROOT_FLAGS: OFlags = OFlags::PATH.union(OFlags::DIRECTORY).union(OFlags::CLOEXEC);
 const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
 
 /// What the launch barrier needs from its surroundings.
@@ -34,13 +34,23 @@ pub(super) trait LaunchHost {
     fn replace_process(&self, adapter: &File, argv: &[CString]) -> io::Error;
 }
 
-/// The real process: root provider peer, `/proc/self`, `/`, the real clock.
+/// The real process: a provider peer of the given uid, `/proc/self`, `/` and
+/// the real clock.
 #[derive(Clone, Copy, Debug)]
-pub(super) struct ProcessHost;
+pub(super) struct ProcessHost {
+    pub(super) provider_uid: u32,
+}
+
+impl ProcessHost {
+    /// The production host: the provider is root.
+    pub(super) const fn root() -> Self {
+        Self { provider_uid: 0 }
+    }
+}
 
 impl LaunchHost for ProcessHost {
     fn provider_uid(&self) -> u32 {
-        PROVIDER_UID
+        self.provider_uid
     }
 
     fn open_descriptors(&self) -> io::Result<Vec<u32>> {
@@ -52,13 +62,9 @@ impl LaunchHost for ProcessHost {
     }
 
     fn open_adapter(&self, path: &str) -> io::Result<File> {
-        open(
-            "/",
-            OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
-            Mode::empty(),
-        )
-        .map_err(io::Error::from)
-        .and_then(|root| open_beneath(&root, path))
+        open("/", ROOT_FLAGS, Mode::empty())
+            .map_err(io::Error::from)
+            .and_then(|root| open_beneath(&root, path))
     }
 
     fn monotonic_ns(&self) -> io::Result<u64> {
