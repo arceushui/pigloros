@@ -88,6 +88,41 @@ composes the attempt:
 The live dm-verity table is #444 evidence, not a runtime check. Lifecycle
 cleanup (#442) and packaged-build conformance (#444) remain separate.
 
+`/work`, the sole writable mount, is requested as
+`TemporaryFileSystem=/work:size=<ELM1 WorkBytes>,nosuid,nodev,noexec` and read
+back as a typed `a(ss)` value. A zero ceiling requests no mount at all, because
+tmpfs reads `size=0` as unbounded. The image must provide the `/work`
+directory, and #444 records the effective mount.
+
+`execute` (#441) composes one reserved, admitted attempt from its rechecked
+root to its end. `AdmittedAttempt::from_entry` takes the facts of an
+`AdmittedEntry` only together with the directory prepared for that attempt and
+image. The attempt's planned mode must equal the admitted launch policy's. The
+verified root is rechecked last, immediately before `StartTransientUnit`, and
+must be the attempt's own root. After the typed unit is started and verified,
+its cgroup is bound and an `ActiveAttempt` is recorded; the launcher barrier
+(`LaunchBarrier`) then releases the adapter exactly once. Any failure after
+the unit was submitted kills it. The unit host, the barrier and the Local
+network are ports, so the composition is exercised without systemd.
+
+- Local: the FD 3 socket pair is created with the attempt, and
+  `piglor-host-service-v1` precedes `piglor-release-v1`. `ActiveAttempt` is the
+  only source of `BoundLocalProxy`, the `LocalProxyBinding` that `serve_proxy`
+  in `pos-reference` requires. It checks the grant's attempt, SIM1, authority
+  heads and epochs against the rechecked admission, the namespace's attempt and
+  the channel's attempt. The proxy serves on a blocking thread that the attempt
+  watchdog closes. The namespace, veth pair and nftables rules belong to a
+  separate ticket; `FailClosedLocalNetwork` establishes none and refuses every
+  connection.
+- Replay: every captured exchange is resolved from the durable capture store
+  before launch; a missing or mismatched capture is unavailable and nothing
+  starts.
+- Air-Gapped and Fork carry no network authority and no live descriptor.
+
+The result carries the ordered NXT1 transcript digests for SPR1 and the proxy
+termination for the SAU1 terminal classification; signing and classification
+are #443, and unmounting and removing the attempt are #442.
+
 The provider never creates a local process: `connect_system` accepts only a
 Unix-socket system-bus address (zbus's `unixexec` and `ibus` transports would
 start one), and

@@ -7,11 +7,17 @@
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
 #[cfg(target_os = "linux")]
+mod attempt;
+#[cfg(target_os = "linux")]
 mod attempt_registry;
+#[cfg(target_os = "linux")]
+mod execute;
 mod hardening;
 #[cfg(target_os = "linux")]
 mod image_activator;
 mod kernel_cgroup;
+#[cfg(target_os = "linux")]
+mod local_network;
 #[cfg(target_os = "linux")]
 pub mod launcher;
 #[cfg(target_os = "linux")]
@@ -23,10 +29,30 @@ mod root_attachment;
 #[cfg(target_os = "linux")]
 mod staging;
 mod system_bus;
+// Shared by the tests of several modules. Keeping it public, like the sibling
+// crates' test support modules, avoids suppressing visibility lints.
+#[cfg(all(test, unix))]
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[doc(hidden)]
+pub mod test_fixtures;
 mod transient_unit;
 
 #[derive(Debug)]
 struct CgroupRoot(std::fs::File);
+
+#[cfg(target_os = "linux")]
+pub use attempt::{ActiveAttempt, AdmittedAttempt};
+#[cfg(target_os = "linux")]
+pub use execute::{
+    execute, AttemptEnding, AttemptExecution, ExecuteError, ExecuteFailure, ExecuteJob,
+    LaunchBarrier, ModePlan, NetworkEvidence, ReplayRequest, UnitCgroup, UnitHost, UnitState,
+};
+#[cfg(target_os = "linux")]
+pub use local_network::{
+    BoundLocalProxy, EstablishedNetwork, FailClosedLocalNetwork, HostServiceChannel,
+    HostServiceStream, LocalNetworkPort, LocalProxyBindError, RefusingConnector, ServeError,
+    ServedProxy,
+};
 
 #[cfg(target_os = "linux")]
 pub use attempt_registry::{

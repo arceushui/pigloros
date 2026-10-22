@@ -531,6 +531,44 @@ impl SystemdTransientUnitTransport {
     }
 }
 
+#[cfg(target_os = "linux")]
+impl crate::UnitHost for SystemdTransientUnitTransport {
+    type Started = SystemdVerifiedStart;
+    type Cgroup = BoundAttemptCgroup;
+    type Error = SystemdTransientUnitTransportError;
+
+    fn start(
+        &self,
+        unit_name: TransientServiceUnitName,
+        request: TransientUnitRequest,
+    ) -> impl Future<Output = Result<SystemdVerifiedStart, SystemdTransientUnitTransportError>> + Send
+    {
+        Self::start(self, unit_name, request)
+    }
+
+    fn bind_cgroup(
+        &self,
+        started: &SystemdVerifiedStart,
+    ) -> impl Future<Output = Result<BoundAttemptCgroup, SystemdTransientUnitTransportError>> + Send
+    {
+        Self::bind_cgroup(self, started)
+    }
+
+    fn stop(
+        &self,
+        unit_name: TransientServiceUnitName,
+    ) -> impl Future<Output = Result<(), SystemdTransientUnitTransportError>> + Send {
+        async move { Self::stop_job(self, unit_name).await.map(|_completed| ()) }
+    }
+
+    fn kill(
+        &self,
+        unit_name: TransientServiceUnitName,
+    ) -> impl Future<Output = Result<(), SystemdTransientUnitTransportError>> + Send {
+        Self::force_kill(self, unit_name)
+    }
+}
+
 async fn stop_job_with_proxy(
     proxy: Result<ManagerProxy<'_>, zbus::Error>,
     unit_name: TransientServiceUnitName,
