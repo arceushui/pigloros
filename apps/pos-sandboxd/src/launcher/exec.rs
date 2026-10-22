@@ -16,7 +16,7 @@ use nix::{fcntl::AtFlags, unistd::execveat};
 /// Replace this process image with the adapter held open as `adapter`.
 ///
 /// The call returns only on failure, with the operating-system error.
-pub(crate) fn replace_process_image(adapter: &File, argv: &[CString]) -> io::Error {
+pub(super) fn replace_process_image(adapter: &File, argv: &[CString]) -> io::Error {
     let environment: [CString; 0] = [];
     let Err(errno) = execveat(adapter, c"", argv, &environment, AtFlags::AT_EMPTY_PATH);
     io::Error::from_raw_os_error(errno as i32)

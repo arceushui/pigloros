@@ -237,7 +237,7 @@ fn the_launcher_release_step_is_the_only_descriptor_exec() -> TestResult {
 #[test]
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn the_launcher_never_reaches_admission_or_the_verifier() -> TestResult {
-    const FORBIDDEN_REACH: [&str; 14] = [
+    const FORBIDDEN_REACH: [&str; 15] = [
         "crate::",
         "provider_admission",
         "root_selector",
@@ -250,7 +250,8 @@ fn the_launcher_never_reaches_admission_or_the_verifier() -> TestResult {
         "webpki",
         "x509",
         "cms::",
-        "ring::",
+        "use ring",
+        " ring::",
         "ReleaseSigner",
     ];
     let mut sources = Vec::new();

@@ -19,7 +19,7 @@ const PROVIDER_UID: u32 = 0;
 const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
 
 /// What the launch barrier needs from its surroundings.
-pub(crate) trait LaunchHost {
+pub(super) trait LaunchHost {
     /// The uid `SO_PEERCRED` must report for the release channel peer.
     fn provider_uid(&self) -> u32;
     /// Open descriptors at or above 3, without the one used to list them.
@@ -43,7 +43,7 @@ pub(crate) trait LaunchHost {
 
 /// The real process: root provider peer, `/proc/self`, `/`, the real clock.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct ProcessHost;
+pub(super) struct ProcessHost;
 
 impl LaunchHost for ProcessHost {
     fn provider_uid(&self) -> u32 {

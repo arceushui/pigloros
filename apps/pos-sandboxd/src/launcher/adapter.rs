@@ -27,17 +27,17 @@ pub(super) const NATIVE_MACHINE: u16 = if cfg!(target_arch = "x86_64") {
 };
 const MOUNT_ID_REQUEST: StatxFlags = StatxFlags::BASIC_STATS.union(StatxFlags::MNT_ID);
 
-/// An executable held open, with the digest and identity ReadyV1 binds.
+/// An executable held open, with the digest and identity `ReadyV1` binds.
 #[derive(Debug)]
-pub(crate) struct HeldExecutable {
-    pub(crate) file: File,
-    pub(crate) digest: [u8; 32],
-    pub(crate) identity: FdIdentity,
+pub(super) struct HeldExecutable {
+    pub(super) file: File,
+    pub(super) digest: [u8; 32],
+    pub(super) identity: FdIdentity,
 }
 
 /// Open `path` beneath `root` read-only without following any symlink or
 /// magic link and without leaving `root`.
-pub(crate) fn open_beneath(root: impl AsFd, path: &str) -> io::Result<File> {
+pub(super) fn open_beneath(root: impl AsFd, path: &str) -> io::Result<File> {
     openat2(
         root,
         path.trim_start_matches('/'),
@@ -54,8 +54,10 @@ pub(crate) fn open_beneath(root: impl AsFd, path: &str) -> io::Result<File> {
 /// Shebang scripts and every other format are rejected here, before
 /// `ReadyV1`. A `PT_INTERP` is allowed by the ADR and covered by the admitted
 /// image digest.
-pub(crate) fn hold_adapter(file: File) -> Result<HeldExecutable, LauncherError> {
-    let is_regular = file.metadata().is_ok_and(|metadata| metadata.is_file());
+pub(super) fn hold_adapter(file: File) -> Result<HeldExecutable, LauncherError> {
+    let is_regular = file
+        .metadata()
+        .is_ok_and(|metadata| std::fs::Metadata::is_file(&metadata));
     let mut header = [0_u8; ELF_HEADER_BYTES];
     if !is_regular || file.read_exact_at(&mut header, 0).is_err() || !native_elf(&header) {
         return Err(LauncherError::Adapter);
@@ -64,7 +66,7 @@ pub(crate) fn hold_adapter(file: File) -> Result<HeldExecutable, LauncherError> 
 }
 
 /// Hold the launcher's own executable image.
-pub(crate) fn hold(file: File) -> Result<HeldExecutable, LauncherError> {
+pub(super) fn hold(file: File) -> Result<HeldExecutable, LauncherError> {
     let digest = blake3_digest_of(&file).map_err(|_| LauncherError::Identity)?;
     let identity = statx(&file, "", AtFlags::EMPTY_PATH, MOUNT_ID_REQUEST)
         .ok()

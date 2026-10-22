@@ -16,32 +16,32 @@ use rustix::{
 use super::{environment::LaunchEnvironment, error::LauncherError};
 
 /// Name of the Local proxy descriptor (FD 3 in Local mode).
-pub(crate) const HOST_SERVICE_NAME: &str = "piglor-host-service-v1";
+pub(super) const HOST_SERVICE_NAME: &str = "piglor-host-service-v1";
 /// Name of the release descriptor.
-pub(crate) const RELEASE_NAME: &str = "piglor-release-v1";
+pub(super) const RELEASE_NAME: &str = "piglor-release-v1";
 /// Descriptors below this number are stdio.
 const FIRST_INHERITED: u32 = 3;
 
 /// Descriptors as adopted: optional systemd name and ownership.
-pub(crate) type Inherited = Vec<(Option<String>, OwnedFd)>;
+pub(super) type Inherited = Vec<(Option<String>, OwnedFd)>;
 
 /// The validated inherited descriptors.
 #[derive(Debug)]
-pub(crate) struct InheritedLayout {
+pub(super) struct InheritedLayout {
     /// The `SOCK_SEQPACKET` release channel.
-    pub(crate) release: OwnedFd,
+    pub(super) release: OwnedFd,
     /// The Local proxy channel, closed before adapter execution in every
     /// other mode by being absent.
-    pub(crate) host_service: Option<OwnedFd>,
+    pub(super) host_service: Option<OwnedFd>,
     /// The observed FDL1 entries in descriptor order.
-    pub(crate) entries: Vec<FdLayoutEntry>,
+    pub(super) entries: Vec<FdLayoutEntry>,
 }
 
 /// Take ownership of descriptors 3 onward named by systemd.
 ///
 /// The environment is validated first, so the count is already bounded. This
 /// must be called at most once: every call re-adopts the same numbers.
-pub(crate) fn adopt(environment: &LaunchEnvironment) -> Result<Inherited, LauncherError> {
+pub(super) fn adopt(environment: &LaunchEnvironment) -> Result<Inherited, LauncherError> {
     let adopted = sd_listen_fds::get()
         .ok()
         .ok_or(LauncherError::Environment)?;
@@ -61,7 +61,7 @@ pub(crate) fn adopt(environment: &LaunchEnvironment) -> Result<Inherited, Launch
 ///
 /// `open` is the complete open set above stdio, excluding the descriptor used
 /// to list it.
-pub(crate) fn validate(
+pub(super) fn validate(
     inherited: Inherited,
     open: &[u32],
 ) -> Result<InheritedLayout, LauncherError> {
@@ -127,7 +127,7 @@ const fn expected_type(role: FdRole) -> SocketType {
 
 /// The open descriptors at or above 3, read from `/proc/self/fd`, without the
 /// descriptor used for the listing.
-pub(crate) fn scan_proc_self_fd() -> io::Result<Vec<u32>> {
+pub(super) fn scan_proc_self_fd() -> io::Result<Vec<u32>> {
     let directory = open(
         "/proc/self/fd",
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,

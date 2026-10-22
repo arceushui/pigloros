@@ -10,16 +10,16 @@ const MAX_DESCRIPTORS: u32 = 2;
 
 /// Values taken from the process environment.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct LaunchEnvironment {
+pub(super) struct LaunchEnvironment {
     /// The 16 bytes decoded from systemd's `INVOCATION_ID`.
-    pub(crate) launch_instance_id: [u8; 16],
+    pub(super) launch_instance_id: [u8; 16],
     /// Validated `LISTEN_FDS`, so descriptor adoption is bounded.
-    pub(crate) descriptor_count: u32,
+    pub(super) descriptor_count: u32,
 }
 
 impl LaunchEnvironment {
     /// Read the real process environment.
-    pub(crate) fn from_process() -> Result<Self, LauncherError> {
+    pub(super) fn from_process() -> Result<Self, LauncherError> {
         Self::read(
             |name| std::env::var(name).ok(),
             u32::try_from(getpid().as_raw_nonzero().get()).unwrap_or(0),
@@ -30,7 +30,7 @@ impl LaunchEnvironment {
     ///
     /// `LISTEN_PID` must be this process; `LISTEN_FDS` must be 1 or 2, so the
     /// adoption below can never allocate for an attacker-sized count.
-    pub(crate) fn read(
+    pub(super) fn read(
         variable: impl Fn(&str) -> Option<String>,
         own_pid: u32,
     ) -> Result<Self, LauncherError> {
