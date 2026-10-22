@@ -18,6 +18,7 @@ use std::io;
 use std::os::unix::fs::{FileExt, MetadataExt};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
+use pos_reference::provider_admission::{AdmittedAuthority, HeldImageAdmission};
 use rustix::fs::{openat2, unlinkat, AtFlags, Mode, OFlags, ResolveFlags};
 
 // Exclusive creation of a private, close-on-exec file. `RESOLVE_NO_SYMLINKS`
@@ -51,6 +52,21 @@ pub struct StagingUsage {
     pub attempts: u64,
     /// Staged files that could not be unlinked when their owner was dropped.
     pub leaked_files: u64,
+    /// The live provider RVS1/APT1 control floor.
+    pub floor: ControlFloor,
+}
+
+/// The live provider control floor.
+///
+/// It is the lowest revocation and policy epochs the provider may still
+/// dispatch under (ADR-069: a committed update's next epochs are the floor).
+/// It only rises; restart recovery is #442.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ControlFloor {
+    /// Lowest dispatchable revocation epoch.
+    pub revocation_epoch: u64,
+    /// Lowest dispatchable policy epoch.
+    pub policy_epoch: u64,
 }
 
 /// Closed staging failures.
@@ -59,6 +75,12 @@ pub enum StagingError {
     /// `QueuedRequests` incomplete input transfers already exist.
     #[error("staging queue is full")]
     QueueFull,
+    /// The admission was joined at epochs below the live control floor.
+    #[error("admission is below the provider control floor")]
+    BelowControlFloor,
+    /// The installed authority can no longer be re-read as the admitted one.
+    #[error("installed authority differs from the admitted authority")]
+    AuthorityChanged,
     /// `ConcurrentAttempts` output reservations already exist.
     #[error("staging attempt slots are exhausted")]
     AttemptsExhausted,
@@ -151,6 +173,50 @@ impl StagingLedger {
         Ok(self.reservation(bytes, false, true))
     }
 
+    /// Raise the control floor; a component never moves down.
+    pub fn raise_floor(&self, floor: ControlFloor) {
+        let mut usage = self.shared.usage();
+        usage.floor = ControlFloor {
+            revocation_epoch: usage.floor.revocation_epoch.max(floor.revocation_epoch),
+            policy_epoch: usage.floor.policy_epoch.max(floor.policy_epoch),
+        };
+    }
+
+    /// Consume one held-image admission into a locked entry reservation.
+    ///
+    /// The floor comparison and the `ConcurrentAttempts` slot are taken under
+    /// one lock from the authority the admission was joined against, so a
+    /// raise of the floor cannot fall between the check and the reservation.
+    /// A refusal drops the admission.
+    ///
+    /// # Errors
+    /// `BelowControlFloor` when the admission's revocation or policy epoch is
+    /// below the floor, `AttemptsExhausted` at `ConcurrentAttempts`.
+    pub fn reserve_entry<'a>(
+        &self,
+        admission: HeldImageAdmission<'a>,
+    ) -> Result<AdmittedEntry<'a>, StagingError> {
+        self.reserve_for(admission.authority())
+            .map(|reservation| AdmittedEntry {
+                admission,
+                reservation,
+            })
+    }
+
+    fn reserve_for(
+        &self,
+        authority: AdmittedAuthority,
+    ) -> Result<StagingReservation, StagingError> {
+        let mut usage = self.shared.usage();
+        check_floor(&usage.floor, authority)?;
+        if usage.attempts >= self.shared.limits.concurrent_attempts {
+            return Err(StagingError::AttemptsExhausted);
+        }
+        usage.attempts += 1;
+        drop(usage);
+        Ok(self.reservation(0, false, true))
+    }
+
     fn checked_total(&self, usage: &StagingUsage, bytes: u64) -> Result<u64, StagingError> {
         usage
             .reserved_bytes
@@ -166,6 +232,48 @@ impl StagingLedger {
             queued,
             attempt,
         }
+    }
+}
+
+const fn check_floor(
+    floor: &ControlFloor,
+    authority: AdmittedAuthority,
+) -> Result<(), StagingError> {
+    if authority.revocation_epoch < floor.revocation_epoch
+        || authority.policy_epoch < floor.policy_epoch
+    {
+        Err(StagingError::BelowControlFloor)
+    } else {
+        Ok(())
+    }
+}
+
+/// One admission consumed together with its locked entry reservation.
+#[derive(Debug)]
+pub struct AdmittedEntry<'snapshot> {
+    admission: HeldImageAdmission<'snapshot>,
+    reservation: StagingReservation,
+}
+
+impl<'snapshot> AdmittedEntry<'snapshot> {
+    /// The admission, for activation. It stays reserved for as long as this
+    /// entry lives.
+    #[must_use]
+    pub const fn admission(&self) -> &HeldImageAdmission<'snapshot> {
+        &self.admission
+    }
+
+    /// Re-read the installed authority and compare the control floor again,
+    /// immediately before launch (ADR-087 §2 step 7).
+    ///
+    /// # Errors
+    /// `AuthorityChanged` when the installed authority is not the admitted
+    /// one, `BelowControlFloor` when the floor rose above the admission.
+    pub fn recheck(&self) -> Result<(), StagingError> {
+        self.admission
+            .recheck_authority()
+            .map_err(|_| StagingError::AuthorityChanged)
+            .and_then(|current| check_floor(&self.reservation.shared.usage().floor, current))
     }
 }
 
@@ -501,6 +609,59 @@ mod tests {
         drop(held);
         assert_eq!(ledger.usage(), StagingUsage::default());
         Ok(())
+    }
+
+    fn authority(revocation_epoch: u64, policy_epoch: u64) -> AdmittedAuthority {
+        AdmittedAuthority {
+            apt1_digest: [1; 32],
+            trs1_digest: [2; 32],
+            rvs1_digest: [3; 32],
+            trust_epoch: 1,
+            revocation_epoch,
+            policy_epoch,
+        }
+    }
+
+    #[test]
+    fn entry_reservation_refuses_epochs_below_the_floor_and_exhausted_slots() -> TestResult {
+        let ledger = StagingLedger::new(LIMITS);
+        ledger.raise_floor(ControlFloor {
+            revocation_epoch: 5,
+            policy_epoch: 7,
+        });
+        assert!(matches!(
+            ledger.reserve_for(authority(4, 7)),
+            Err(StagingError::BelowControlFloor)
+        ));
+        assert!(matches!(
+            ledger.reserve_for(authority(5, 6)),
+            Err(StagingError::BelowControlFloor)
+        ));
+        assert_eq!(ledger.usage().attempts, 0);
+        let first = ledger.reserve_for(authority(5, 7))?;
+        let second = ledger.reserve_for(authority(9, 9))?;
+        assert_eq!(ledger.usage().attempts, 2);
+        assert!(matches!(
+            ledger.reserve_for(authority(9, 9)),
+            Err(StagingError::AttemptsExhausted)
+        ));
+        drop((first, second));
+        assert_eq!(ledger.usage().attempts, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn the_floor_only_rises() {
+        let ledger = StagingLedger::new(LIMITS);
+        let floor = |revocation_epoch, policy_epoch| ControlFloor {
+            revocation_epoch,
+            policy_epoch,
+        };
+        ledger.raise_floor(floor(5, 7));
+        ledger.raise_floor(floor(3, 9));
+        assert_eq!(ledger.usage().floor, floor(5, 9));
+        ledger.raise_floor(floor(8, 1));
+        assert_eq!(ledger.usage().floor, floor(8, 9));
     }
 
     #[test]

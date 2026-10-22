@@ -20,8 +20,8 @@ use zbus::{
 
 use super::*;
 use crate::{
-    ActivatedRootDirectory, AttemptCgroupEmptyBasis, LaunchMode, LauncherSource, SystemCallFilter,
-    SystemdServiceLimits, TransientUnitLaunchInputs,
+    ActivatedRootDirectory, AttemptCgroupEmptyBasis, CheckedRoot, LaunchMode, LauncherSource,
+    SystemCallFilter, SystemdServiceLimits, TransientUnitLaunchInputs,
 };
 
 const X86_64: &[u8] = include_bytes!(
@@ -1556,7 +1556,9 @@ fn request(mode: LaunchMode) -> Result<TransientUnitRequest, Box<dyn Error>> {
         SandboxArchitecture::X86_64,
     )?;
     let inputs = TransientUnitLaunchInputs::new(
-        ActivatedRootDirectory::new("/run/pigloros/attempt-381/root")?,
+        &CheckedRoot::for_test(ActivatedRootDirectory::new(
+            "/run/pigloros/attempt-381/root",
+        )?),
         LauncherSource::new("/usr/lib/pigloros/release-launcher")?,
         mode,
         descriptor()?,

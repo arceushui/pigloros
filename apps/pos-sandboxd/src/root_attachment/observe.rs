@@ -33,6 +33,15 @@ pub(super) const ATTEMPT_ROOT_OPEN: OFlags = OFlags::PATH
     .union(OFlags::CLOEXEC);
 pub(super) const ATTEMPT_ROOT_RESOLVE: ResolveFlags =
     ResolveFlags::BENEATH.union(ResolveFlags::NO_SYMLINKS);
+/// The admitted executable is opened read-only (`O_RDONLY` is zero) and
+/// non-blocking, so a FIFO cannot stall the open before the regular-file check.
+pub(super) const EXECUTABLE_OPEN: OFlags = OFlags::CLOEXEC.union(OFlags::NONBLOCK);
+/// It is resolved beneath the attached root mount only: no symlink, magic
+/// link or mount crossing can lead elsewhere.
+pub(super) const EXECUTABLE_RESOLVE: ResolveFlags = ResolveFlags::BENEATH
+    .union(ResolveFlags::NO_SYMLINKS)
+    .union(ResolveFlags::NO_MAGICLINKS)
+    .union(ResolveFlags::NO_XDEV);
 /// `move_mount` from the sealed mount descriptor onto the held directory
 /// descriptor; neither side names a path.
 pub(super) const ATTACH_BY_DESCRIPTOR: MoveMountFlags =
@@ -92,6 +101,14 @@ pub(super) struct Mapper {
     pub(super) slaves: Option<Vec<Slave>>,
 }
 
+/// The admitted executable as found through the attached root mount: the
+/// identity of the held descriptor and the BLAKE3 digest of its content.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct ExecutableObservation {
+    pub(super) node: Node,
+    pub(super) blake3: [u8; 32],
+}
+
 /// Everything read back from the kernel about one attached mount.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct Observations {
@@ -105,6 +122,8 @@ pub(super) struct Observations {
     pub(super) read_only: Option<bool>,
     pub(super) entry: Option<MountEntry>,
     pub(super) mapper: Option<Mapper>,
+    /// The SIM1 executable, opened and hashed by descriptor beneath the mount.
+    pub(super) executable: Option<ExecutableObservation>,
 }
 
 /// The host kernel, read through fixed procfs and sysfs roots.
@@ -208,7 +227,13 @@ impl AttachmentKernel for HostKernel {
             .map_err(|_| ImageActivationError::AttachFailure)
     }
 
-    fn observe(&self, mount: BorrowedFd<'_>, attempt: &File, root: &File) -> Observations {
+    fn observe(
+        &self,
+        mount: BorrowedFd<'_>,
+        attempt: &File,
+        root: &File,
+        executable: &str,
+    ) -> Observations {
         let attached = node(mount);
         Observations {
             mount: attached,
@@ -233,6 +258,7 @@ impl AttachmentKernel for HostKernel {
                     .and_then(|mountinfo| mount_entry(&mountinfo, node.mount_id))
             }),
             mapper: attached.map(|node| self.mapper(node.device)),
+            executable: executable_of(mount, executable),
         }
     }
 
@@ -240,6 +266,32 @@ impl AttachmentKernel for HostKernel {
         unmount(self.descriptor_path(mount), UnmountFlags::DETACH)
             .map_err(|_| ImageActivationError::TeardownFailure)
     }
+}
+
+fn executable_of(mount: BorrowedFd<'_>, path: &str) -> Option<ExecutableObservation> {
+    openat2(
+        mount,
+        path.trim_start_matches('/'),
+        EXECUTABLE_OPEN,
+        Mode::empty(),
+        EXECUTABLE_RESOLVE,
+    )
+    .ok()
+    .map(File::from)
+    .filter(|file| file.metadata().is_ok_and(|metadata| metadata.is_file()))
+    .and_then(|file| {
+        node(file.as_fd())
+            .zip(blake3_of(&file))
+            .map(|(node, blake3)| ExecutableObservation { node, blake3 })
+    })
+}
+
+fn blake3_of(file: &File) -> Option<[u8; 32]> {
+    let mut hasher = blake3::Hasher::new();
+    hasher
+        .update_reader(file)
+        .ok()
+        .map(|hasher| *hasher.finalize().as_bytes())
 }
 
 fn node(descriptor: BorrowedFd<'_>) -> Option<Node> {

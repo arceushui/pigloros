@@ -27,7 +27,10 @@ use std::{
 };
 
 use pos_reference::provider_admission::{test_support::StagedInstallation, ProviderImageSnapshot};
-use pos_sandboxd::{ActivationImage, ImageActivationError, ImageActivator, MountfsdImageActivator};
+use pos_sandboxd::{
+    ActivationImage, ControlFloor, ImageActivationError, ImageActivator, MountfsdImageActivator,
+    StagingError, StagingLedger, StagingLimits,
+};
 use rustix::{
     fs::fstat,
     net::{
@@ -191,8 +194,33 @@ async fn activation_image_carries_exactly_the_held_admitted_image() -> TestResul
     }
     let staged = StagedInstallation::stage().map_err(|error| error.to_string())?;
     let snapshot = ProviderImageSnapshot::open(staged.request())?;
-    let admission = snapshot.admit_held_image()?;
-    let held = identity(&admission)?;
+    let limits = StagingLimits {
+        aggregate_bytes: 0,
+        queued_requests: 0,
+        concurrent_attempts: 1,
+    };
+    // The entry reservation consumes the admission, and a floor above the
+    // installed revocation epoch refuses dispatch.
+    let installed = snapshot.admit_held_image()?.authority();
+    let raised = StagingLedger::new(limits);
+    raised.raise_floor(ControlFloor {
+        revocation_epoch: installed.revocation_epoch + 1,
+        policy_epoch: 0,
+    });
+    assert!(matches!(
+        raised.reserve_entry(snapshot.admit_held_image()?),
+        Err(StagingError::BelowControlFloor)
+    ));
+    let ledger = StagingLedger::new(limits);
+    let entry = ledger.reserve_entry(snapshot.admit_held_image()?)?;
+    assert_eq!(ledger.usage().attempts, 1);
+    assert!(matches!(
+        ledger.reserve_entry(snapshot.admit_held_image()?),
+        Err(StagingError::AttemptsExhausted)
+    ));
+    entry.recheck()?;
+    let admission = entry.admission();
+    let held = identity(admission)?;
     let root = &snapshot.image().manifest().partitions[0];
     fs::create_dir(MOUNTFSD_DIRECTORY)?;
     let listener = UnixListener::bind(MOUNTFSD_SOCKET)?;
@@ -200,7 +228,7 @@ async fn activation_image_carries_exactly_the_held_admitted_image() -> TestResul
     // The admitted SIM1 root partition is what the reply must describe.
     let (outcome, observed) = activate(
         &listener,
-        ActivationImage::from_admission(&admission)?,
+        ActivationImage::from_admission(admission)?,
         reply(root.start_bytes, root.length_bytes)?,
     )
     .await?;
@@ -216,7 +244,7 @@ async fn activation_image_carries_exactly_the_held_admitted_image() -> TestResul
     let verity = &snapshot.image().manifest().partitions[1];
     let (outcome, observed) = activate(
         &listener,
-        ActivationImage::from_admission(&admission)?,
+        ActivationImage::from_admission(admission)?,
         reply(verity.start_bytes, verity.length_bytes)?,
     )
     .await?;
@@ -227,11 +255,27 @@ async fn activation_image_carries_exactly_the_held_admitted_image() -> TestResul
     // architecture is a mismatch too.
     let (outcome, observed) = activate(
         &listener,
-        ActivationImage::from_admission(&admission)?,
+        ActivationImage::from_admission(admission)?,
         reply_for(root.start_bytes, root.length_bytes, "arm64")?,
     )
     .await?;
     assert_eq!(outcome, Err(ImageActivationError::EvidenceMismatch));
     assert_eq!(observed.images, vec![held]);
+
+    // Immediately before launch, a floor above the admission refuses, and a
+    // pending recovery (here a pending SIR1) makes the authority unreadable.
+    ledger.raise_floor(ControlFloor {
+        revocation_epoch: installed.revocation_epoch + 1,
+        policy_epoch: 0,
+    });
+    assert!(matches!(
+        entry.recheck(),
+        Err(StagingError::BelowControlFloor)
+    ));
+    fs::write("/var/lib/pigloros/sandbox/installation-update.cbor", [1_u8])?;
+    assert!(matches!(
+        entry.recheck(),
+        Err(StagingError::AuthorityChanged)
+    ));
     Ok(())
 }

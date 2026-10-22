@@ -27,12 +27,13 @@ use super::*;
 use super::{
     cmdline::vetoes_userspace_verity,
     observe::{
-        has_mount_id, loop_of, mount_entry, LoopDevice, Mapper, MountEntry, Node, Slave,
-        ATTACH_BY_DESCRIPTOR, ATTEMPT_ROOT_OPEN, ATTEMPT_ROOT_RESOLVE, BACKING_OPEN, STATX_REQUEST,
+        has_mount_id, loop_of, mount_entry, ExecutableObservation, LoopDevice, Mapper, MountEntry,
+        Node, Slave, ATTACH_BY_DESCRIPTOR, ATTEMPT_ROOT_OPEN, ATTEMPT_ROOT_RESOLVE, BACKING_OPEN,
+        STATX_REQUEST,
     },
     verify::Extent,
 };
-use crate::{PlannedAttemptIntent, SystemdAttemptRegistry};
+use crate::{PlannedAttemptIntent, StagingLedger, StagingLimits, SystemdAttemptRegistry};
 
 type BoxError = Box<dyn Error + Send + Sync>;
 type TestResult = Result<(), BoxError>;
@@ -59,6 +60,8 @@ fn expected(component: &str) -> Expected {
             length: 16_384,
         },
         held: (5, 6),
+        executable_path: "/usr/bin/adapter".to_owned(),
+        executable_digest: [11; 32],
     }
 }
 
@@ -114,6 +117,14 @@ fn matching(expected: &Expected) -> Observations {
                 slave(expected, expected.root),
                 slave(expected, expected.verity),
             ]),
+        }),
+        executable: Some(ExecutableObservation {
+            node: Node {
+                mount_id: 41,
+                device: (253, 3),
+                inode: 77,
+            },
+            blake3: expected.executable_digest,
         }),
     }
 }
@@ -216,7 +227,7 @@ impl AttachmentKernel for FakeKernel {
         self.private
     }
 
-    fn observe(&self, _: BorrowedFd<'_>, _: &File, _: &File) -> Observations {
+    fn observe(&self, _: BorrowedFd<'_>, _: &File, _: &File, _: &str) -> Observations {
         self.observations.clone()
     }
 
@@ -369,6 +380,17 @@ fn mount_mutations() -> Vec<Mutation> {
                 device: (253, 3),
                 inode: 1,
             });
+        }),
+        ("no executable", |o| o.executable = None),
+        ("substituted executable", |o| {
+            if let Some(executable) = o.executable.as_mut() {
+                executable.blake3 = [12; 32];
+            }
+        }),
+        ("executable on another mount", |o| {
+            if let Some(executable) = o.executable.as_mut() {
+                executable.node.mount_id = 42;
+            }
         }),
         ("no parent", |o| o.parent_mount_id = None),
         ("foreign parent", |o| o.parent_mount_id = Some(31)),
@@ -523,7 +545,7 @@ fn the_host_kernel_reads_back_the_mount_loop_and_mapper_by_descriptor() -> TestR
     let kernel = HostKernel::at(&proc, &sys);
 
     // Unreadable procfs and sysfs: every dependent fact is absent.
-    let observed = kernel.observe(root.as_fd(), attempt, root);
+    let observed = kernel.observe(root.as_fd(), attempt, root, "/usr/bin/adapter");
     let mount = observed.mount.ok_or("statx through the root descriptor")?;
     assert_eq!(observed.path, Some(mount));
     assert_eq!(observed.parent_mount_id, Some(mount.mount_id));
@@ -571,7 +593,7 @@ fn the_host_kernel_reads_back_the_mount_loop_and_mapper_by_descriptor() -> TestR
     write(&device.join("loop/autoclear"), "1\n")?;
     write(&device.join("ro"), "1\n")?;
 
-    let observed = kernel.observe(root.as_fd(), attempt, root);
+    let observed = kernel.observe(root.as_fd(), attempt, root, "/usr/bin/adapter");
     let entry = observed.entry.ok_or("the synthetic mountinfo entry")?;
     assert_eq!(entry.mount_point, "/attempt");
     assert_eq!(entry.optional, vec!["shared:3".to_owned()]);
@@ -611,7 +633,7 @@ fn the_host_kernel_reads_back_the_mount_loop_and_mapper_by_descriptor() -> TestR
         ..loop_device
     };
     write(&device.join("loop/backing_file"), "/nonexistent/held\n")?;
-    let observed = kernel.observe(root.as_fd(), attempt, root);
+    let observed = kernel.observe(root.as_fd(), attempt, root, "/usr/bin/adapter");
     let slaves = observed
         .mapper
         .and_then(|mapper| mapper.slaves)
@@ -696,7 +718,7 @@ fn symlinks_never_lead_to_the_backing_image_or_the_attempt_root() -> TestResult 
         .join(component(&tree.prepared));
     fs::rename(attempt_path.join("root"), attempt_path.join("real"))?;
     std::os::unix::fs::symlink("real", attempt_path.join("root"))?;
-    let observed = kernel.observe(root.as_fd(), attempt, root);
+    let observed = kernel.observe(root.as_fd(), attempt, root, "/usr/bin/adapter");
     assert!(observed.mount.is_some());
     assert_eq!(observed.path, None);
     Ok(())
@@ -803,6 +825,115 @@ fn every_partial_attachment_failure_detaches_or_reports_teardown() -> TestResult
         assert_eq!(outcome.err(), Some(error), "{name}");
         assert_eq!(kernel.detached(), detached, "{name}");
     }
+    Ok(())
+}
+
+#[test]
+fn the_host_kernel_hashes_the_executable_through_the_mount_descriptor() -> TestResult {
+    let tree = prepared_tree()?;
+    let (attempt, root) = tree.prepared.held_directories();
+    let base = tree
+        .runtime
+        .path()
+        .join("attempts")
+        .join(component(&tree.prepared))
+        .join("root");
+    let host = tempfile::tempdir()?;
+    let kernel = HostKernel::at(&host.path().join("proc"), &host.path().join("sys"));
+    let observe = |path: &str| kernel.observe(root.as_fd(), attempt, root, path).executable;
+
+    fs::create_dir_all(base.join("usr/bin"))?;
+    fs::write(base.join("usr/bin/adapter"), b"adapter bytes")?;
+    let mount = kernel
+        .observe(root.as_fd(), attempt, root, "/usr/bin/adapter")
+        .mount
+        .ok_or("statx through the root descriptor")?;
+    let found = observe("/usr/bin/adapter").ok_or("regular executable")?;
+    assert_eq!(found.blake3, *blake3::hash(b"adapter bytes").as_bytes());
+    assert_eq!(found.node.mount_id, mount.mount_id);
+    assert_ne!(found.node.inode, 0);
+
+    // Only a regular file reached without symlinks, magic links or ".." counts.
+    std::os::unix::fs::symlink("adapter", base.join("usr/bin/link"))?;
+    fs::create_dir(base.join("usr/bin/directory"))?;
+    rustix::fs::mknodat(
+        root,
+        "usr/bin/fifo",
+        rustix::fs::FileType::Fifo,
+        rustix::fs::Mode::RUSR,
+        0,
+    )?;
+    fs::write(base.join("../escaped"), b"adapter bytes")?;
+    for path in [
+        "/usr/bin/missing",
+        "/usr/bin/link",
+        "/usr/bin/directory",
+        "/usr/bin/fifo",
+        "/usr/../../escaped",
+    ] {
+        assert_eq!(observe(path), None, "{path}");
+    }
+    Ok(())
+}
+
+#[test]
+fn recheck_mints_a_checked_root_only_for_the_same_authority_and_mount() -> TestResult {
+    let tree = prepared_tree()?;
+    let expected = expected(&component(&tree.prepared));
+    let kernel = FakeKernel::accepting(matching(&expected));
+    let verified = attach_and_verify(&kernel, &tree.prepared, &expected, file_mount()?, || Ok(()))?;
+    let checked = recheck(&kernel, &verified, &tree.prepared, || Ok(()))?;
+    assert_eq!(
+        checked,
+        CheckedRoot::for_test(expected.root_directory.clone())
+    );
+
+    // Authority drift or a floor above the admission refuses.
+    for error in [
+        StagingError::AuthorityChanged,
+        StagingError::BelowControlFloor,
+    ] {
+        assert_eq!(
+            recheck(&kernel, &verified, &tree.prepared, || Err(error)),
+            Err(ImageActivationError::EvidenceMismatch)
+        );
+    }
+
+    // Any readback difference refuses.
+    for (name, mutate) in readback_mutations() {
+        let mut observed = matching(&expected);
+        mutate(&mut observed);
+        let drifted = FakeKernel::accepting(observed);
+        assert_eq!(
+            recheck(&drifted, &verified, &tree.prepared, || Ok(())),
+            Err(ImageActivationError::EvidenceMismatch),
+            "{name}"
+        );
+    }
+
+    // A consistent readback of a different mount ID refuses.
+    let mut replaced = matching(&expected);
+    let other = Node {
+        mount_id: 42,
+        device: (253, 3),
+        inode: 1,
+    };
+    replaced.mount = Some(other);
+    replaced.path = Some(other);
+    edit_entry(&mut replaced, |entry| entry.mount_id = 42);
+    if let Some(executable) = replaced.executable.as_mut() {
+        executable.node.mount_id = 42;
+    }
+    assert_eq!(expected.verify(&replaced), Ok(42));
+    assert_eq!(
+        recheck(
+            &FakeKernel::accepting(replaced),
+            &verified,
+            &tree.prepared,
+            || Ok(())
+        ),
+        Err(ImageActivationError::EvidenceMismatch)
+    );
     Ok(())
 }
 
@@ -964,6 +1095,20 @@ async fn the_admitted_chain_reaches_attachment_only_through_every_gate() -> Test
     assert_eq!(verified.root_directory(), &root_directory);
     assert_eq!(verified.mount_id(), 41);
     assert_eq!(kernel.detached(), 0);
+
+    // The entry reservation consumes a fresh admission. The public recheck
+    // re-reads the real host kernel: the fake descriptor is no attached EROFS
+    // mount, so it refuses.
+    let ledger = StagingLedger::new(StagingLimits {
+        aggregate_bytes: 0,
+        queued_requests: 0,
+        concurrent_attempts: 1,
+    });
+    let entry = ledger.reserve_entry(snapshot.admit_held_image()?)?;
+    assert_eq!(
+        verified.recheck(&prepared, &entry).err(),
+        Some(ImageActivationError::EvidenceMismatch)
+    );
 
     // The held image changes after admission: re-admission rejects and the
     // attached root is detached again.

@@ -175,11 +175,15 @@ impl ProviderImageSnapshot {
             .and_then(InstalledSelectorState::authenticate_bootstrap)
             .and_then(AuthenticatedSelectorBootstrap::admit_provider)
             .and_then(|current| check_authority(&current, &self.request))
-            .and_then(|()| check_image(&self.admitted, &self.request, clock))
-            .map(|checked| HeldImageAdmission {
-                snapshot: self,
-                root_image: checked.root_image,
-                proof: checked.proof,
+            .and_then(|authority| {
+                check_image(&self.admitted, &self.request, clock).map(|checked| {
+                    HeldImageAdmission {
+                        snapshot: self,
+                        root_image: checked.root_image,
+                        proof: checked.proof,
+                        authority,
+                    }
+                })
             })
     }
 }
@@ -196,6 +200,28 @@ pub struct HeldImageAdmission<'snapshot> {
     snapshot: &'snapshot ProviderImageSnapshot,
     root_image: &'snapshot File,
     proof: VerifiedSandboxImageProof,
+    authority: AdmittedAuthority,
+}
+
+/// The installed authority one admission was joined against.
+///
+/// It is read in the same step that proved the request's authority equals the
+/// installed heads, so a provider that takes its entry reservation and
+/// control-floor comparison from this value cannot race a later re-read.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AdmittedAuthority {
+    /// The installed APT1 digest.
+    pub apt1_digest: [u8; 32],
+    /// The installed TRS1 digest.
+    pub trs1_digest: [u8; 32],
+    /// The installed RVS1 digest.
+    pub rvs1_digest: [u8; 32],
+    /// The installed trust epoch.
+    pub trust_epoch: u64,
+    /// The installed revocation epoch.
+    pub revocation_epoch: u64,
+    /// The installed policy epoch.
+    pub policy_epoch: u64,
 }
 
 impl<'snapshot> HeldImageAdmission<'snapshot> {
@@ -209,6 +235,37 @@ impl<'snapshot> HeldImageAdmission<'snapshot> {
     #[must_use]
     pub const fn proof(&self) -> &VerifiedSandboxImageProof {
         &self.proof
+    }
+
+    /// The installed authority this admission was joined against.
+    #[must_use]
+    pub const fn authority(&self) -> AdmittedAuthority {
+        self.authority
+    }
+
+    /// Re-read the installed authority and require it to still be the one
+    /// this admission's request names (ADR-087 §2 step 7, immediately before
+    /// `StartTransientUnit`).
+    ///
+    /// The fixed installation is reopened: a pending SIR1 update rejects, and
+    /// the installed APT1, TRS1, RVS1 and provider records must still be the
+    /// exact authority the request named. Because every digest binds its
+    /// epoch, success returns the same authority that was admitted.
+    ///
+    /// # Errors
+    /// Rejects pending recovery and any stale or substituted authority.
+    pub fn recheck_authority(&self) -> Result<AdmittedAuthority, SelectorBoundaryError> {
+        self.recheck_with(InstalledSelectorState::open())
+    }
+
+    fn recheck_with(
+        &self,
+        current: Result<InstalledSelectorState, SelectorBoundaryError>,
+    ) -> Result<AdmittedAuthority, SelectorBoundaryError> {
+        current
+            .and_then(InstalledSelectorState::authenticate_bootstrap)
+            .and_then(AuthenticatedSelectorBootstrap::admit_provider)
+            .and_then(|current| check_authority(&current, &self.snapshot.request))
     }
 }
 
@@ -227,7 +284,7 @@ impl std::fmt::Debug for HeldImageAdmission<'_> {
 fn check_authority(
     admitted: &AdmittedSelectorProvider,
     request: &SandboxExecuteRequest,
-) -> Result<(), SelectorBoundaryError> {
+) -> Result<AdmittedAuthority, SelectorBoundaryError> {
     let bootstrap = admitted.bootstrap();
     let provider = admitted.provider();
     let authority = &request.authority;
@@ -252,7 +309,14 @@ fn check_authority(
     if expected != supplied || request.request.policy_epoch != bootstrap.policy().policy_epoch() {
         return Err(SelectorBoundaryError::ArtifactInvalid);
     }
-    Ok(())
+    Ok(AdmittedAuthority {
+        apt1_digest: authority.apt1_digest,
+        trs1_digest: authority.trs1_digest,
+        rvs1_digest: authority.rvs1_digest,
+        trust_epoch: bootstrap.trust().trust_epoch(),
+        revocation_epoch: bootstrap.revocation().revocation_epoch(),
+        policy_epoch: bootstrap.policy().policy_epoch(),
+    })
 }
 
 /// Image evidence checked from one admitted provider's retained descriptors.
@@ -829,6 +893,18 @@ pub mod tests {
         assert!(std::ptr::eq(admission.snapshot(), &raw const snapshot));
         assert_eq!(admission.proof(), snapshot.proof());
         assert_eq!(format!("{admission:?}"), "HeldImageAdmission { .. }");
+        let bootstrap = snapshot.admitted.bootstrap();
+        assert_eq!(
+            admission.authority(),
+            AdmittedAuthority {
+                apt1_digest: bootstrap.policy().policy_digest(),
+                trs1_digest: bootstrap.trust().snapshot_digest(),
+                rvs1_digest: bootstrap.revocation().snapshot_digest(),
+                trust_epoch: bootstrap.trust().trust_epoch(),
+                revocation_epoch: bootstrap.revocation().revocation_epoch(),
+                policy_epoch: bootstrap.policy().policy_epoch(),
+            }
+        );
         let held = snapshot.admitted.bootstrap().installed().artifact(
             InstallationObjectKind::ROOT_IMAGE,
             snapshot.image().manifest().root_image_blake3_digest,
@@ -899,7 +975,31 @@ pub mod tests {
                 .manifest()
                 .authority_digests()
         );
-        assert!(snapshot.join_current(Ok(successor), fixture_time).is_err());
+        assert!(snapshot
+            .join_current(fixture.installed(), fixture_time)
+            .is_err());
+        let admission = ProviderImageSnapshot::from_installation(
+            admitted_state()?,
+            request_fixture()?,
+            fixture_time,
+        )?;
+        let admission = admission.join_current(current(), fixture_time)?;
+        assert!(admission.recheck_with(Ok(successor)).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn recheck_returns_the_admitted_authority_and_rejects_unreadable_state() -> TestResult {
+        let snapshot = ProviderImageSnapshot::from_installation(
+            admitted_state()?,
+            request_fixture()?,
+            fixture_time,
+        )?;
+        let admission = snapshot.join_current(current(), fixture_time)?;
+        assert_eq!(admission.recheck_with(current())?, admission.authority());
+        assert!(admission
+            .recheck_with(Err(SelectorBoundaryError::Io))
+            .is_err());
         Ok(())
     }
 
