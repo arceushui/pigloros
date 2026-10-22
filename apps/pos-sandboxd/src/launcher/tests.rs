@@ -412,7 +412,8 @@ fn open_beneath_refuses_symlinks_and_escapes() -> TestResult {
     fs::write(directory.path().join("real"), b"x")?;
     symlink("real", directory.path().join("link"))?;
     let root = File::open(directory.path())?;
-    assert!(open_beneath(&root, "/real").is_ok());
+    let opened = open_beneath(&root, "/real")?;
+    assert!(rustix::io::fcntl_getfd(&opened)?.contains(rustix::io::FdFlags::CLOEXEC));
     assert!(open_beneath(&root, "link").is_err());
     assert!(open_beneath(&root, "../escape").is_err());
     assert!(open_beneath(&root, "missing").is_err());
@@ -961,11 +962,16 @@ fn the_local_layout_keeps_the_proxy_open_for_the_adapter() -> TestResult {
 
 #[test]
 fn the_process_host_reads_the_real_process() -> TestResult {
-    let host = ProcessHost;
+    let host = ProcessHost::root();
     assert_eq!(host.provider_uid(), 0);
-    assert!(host.open_descriptors()?.iter().all(|number| *number >= 3));
+    assert_eq!(ProcessHost { provider_uid: 4242 }.provider_uid(), 4242);
+    let probe = File::open("/")?;
+    let listed = host.open_descriptors()?;
+    assert!(listed.contains(&u32::try_from(probe.as_raw_fd())?));
+    assert!(listed.iter().all(|number| *number >= 3));
     assert!(hold(host.open_launcher()?).is_ok());
     let first = host.monotonic_ns()?;
+    assert!(first > 1_000);
     assert!(host.monotonic_ns()? >= first);
     assert!(host.open_adapter("/proc/self/exe").is_err());
     assert!(host.open_adapter("/does/not/exist").is_err());

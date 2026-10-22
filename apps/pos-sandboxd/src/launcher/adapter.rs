@@ -25,6 +25,10 @@ pub(super) const NATIVE_MACHINE: u16 = if cfg!(target_arch = "x86_64") {
 } else {
     0
 };
+const OPEN_FLAGS: OFlags = OFlags::RDONLY.union(OFlags::CLOEXEC);
+const RESOLVE_FLAGS: ResolveFlags = ResolveFlags::BENEATH
+    .union(ResolveFlags::NO_SYMLINKS)
+    .union(ResolveFlags::NO_MAGICLINKS);
 const MOUNT_ID_REQUEST: StatxFlags = StatxFlags::BASIC_STATS.union(StatxFlags::MNT_ID);
 
 /// An executable held open, with the digest and identity `ReadyV1` binds.
@@ -41,9 +45,9 @@ pub(super) fn open_beneath(root: impl AsFd, path: &str) -> io::Result<File> {
     openat2(
         root,
         path.trim_start_matches('/'),
-        OFlags::RDONLY | OFlags::CLOEXEC,
+        OPEN_FLAGS,
         Mode::empty(),
-        ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
+        RESOLVE_FLAGS,
     )
     .map(File::from)
     .map_err(io::Error::from)
@@ -70,7 +74,7 @@ pub(super) fn hold(file: File) -> Result<HeldExecutable, LauncherError> {
     let digest = blake3_digest_of(&file).map_err(|_| LauncherError::Identity)?;
     statx(&file, "", AtFlags::EMPTY_PATH, MOUNT_ID_REQUEST)
         .ok()
-        .filter(|stat| stat.stx_mask & StatxFlags::MNT_ID.bits() != 0 && stat.stx_ino != 0)
+        .filter(|stat| StatxFlags::from_bits_retain(stat.stx_mask).contains(StatxFlags::MNT_ID))
         .map(|stat| HeldExecutable {
             file,
             digest,

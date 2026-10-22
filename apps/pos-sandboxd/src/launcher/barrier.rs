@@ -32,6 +32,7 @@ use super::{
     host::LaunchHost,
 };
 
+const TRUNCATED: ReturnFlags = ReturnFlags::TRUNC.union(ReturnFlags::CTRUNC);
 /// Largest `ReleaseV1` datagram the launcher accepts.
 const MAX_RELEASE_BYTES: usize = 4096;
 const MODES: [SandboxExecutionMode; 4] = [
@@ -146,10 +147,7 @@ pub(super) fn receive_release(release: &OwnedFd) -> Result<ExecutionRelease, Lau
     .ok()
     .filter(|received| received.bytes != 0)
     .ok_or(LauncherError::ReleaseUnavailable)?;
-    if received
-        .flags
-        .intersects(ReturnFlags::TRUNC | ReturnFlags::CTRUNC)
-    {
+    if received.flags.intersects(TRUNCATED) {
         return Err(LauncherError::Release(ReleaseDefect::Malformed));
     }
     let record = ExecutionRelease::from_canonical_cbor(&buffer[..received.bytes])

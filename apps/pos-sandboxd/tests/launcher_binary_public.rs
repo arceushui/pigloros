@@ -52,7 +52,12 @@ fn stderr(output: &Output) -> String {
 
 #[test]
 fn no_mode_and_unknown_modes_print_usage_and_exit_two() -> TestResult {
-    for arguments in [&[][..], &["serve"][..], &["launch-barrier"][..]] {
+    for arguments in [
+        &[][..],
+        &["serve"][..],
+        &["serve", "00"][..],
+        &["launch-barrier"][..],
+    ] {
         let output = Command::new(BINARY).args(arguments).output()?;
         assert_eq!(output.status.code(), Some(2), "{arguments:?}");
         assert!(stderr(&output).starts_with("usage: pos-sandboxd launch-barrier"));
