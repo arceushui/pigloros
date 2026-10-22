@@ -6,7 +6,7 @@
 //! Bounded, source-neutral Plugin release transport and local OCI publication.
 //!
 //! This crate verifies and builds OCI transport closures and reads them from
-//! local and immutable-descriptor HTTPS sources. It deliberately does not
+//! local, immutable-descriptor HTTPS and OCI registry sources. It deliberately does not
 //! parse PMF1 or make signing, trust-admission, installation, or activation
 //! decisions.
 
@@ -79,8 +79,9 @@ pub use oci::{
     ReleaseSourceV1, VerifiedReleaseBundleV1,
 };
 pub use remote::{
-    CredentialProviderV1, CredentialV1, HttpsReleaseSourceV1, OriginV1, RemoteConfigErrorV1,
-    RemoteTransportConfigV1, TransportDeadlinesV1, TrustRootsV1, TRANSPORT_LOG_TARGETS_V1,
+    CredentialProviderV1, CredentialV1, HttpsReleaseSourceV1, OciReleaseSourceV1, OriginV1,
+    RemoteConfigErrorV1, RemoteTransportConfigV1, TransportDeadlinesV1, TrustRootsV1,
+    TRANSPORT_LOG_TARGETS_V1,
 };
 
 /// What the installer did and did not check about the release content.

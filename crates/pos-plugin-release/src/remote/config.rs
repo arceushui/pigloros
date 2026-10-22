@@ -200,26 +200,37 @@ impl CredentialV1 {
                         .encode(format!("{username}:{password}"))
                 )
             }
-            Self::Bearer { token }
-                if !token.is_empty() && token.bytes().all(|byte| byte.is_ascii_graphic()) =>
-            {
-                format!("Bearer {token}")
-            }
-            Self::Basic { .. } | Self::Bearer { .. } => return Err(ReleaseSourceErrorV1::Io),
+            Self::Bearer { token } => return bearer_authorization(token).map(Some),
+            Self::Basic { .. } => return Err(ReleaseSourceErrorV1::Io),
         };
-        if value.len() > MAX_AUTHORIZATION_BYTES {
-            Err(ReleaseSourceErrorV1::BoundsExceeded)
-        } else {
-            Ok(Some(value))
-        }
+        bounded_authorization(value).map(Some)
+    }
+}
+
+/// The encoded `Authorization` value of a Bearer token of visible ASCII
+/// characters, at most 8 KiB.
+pub(super) fn bearer_authorization(token: &str) -> Result<String, ReleaseSourceErrorV1> {
+    if !token.is_empty() && token.bytes().all(|byte| byte.is_ascii_graphic()) {
+        bounded_authorization(format!("Bearer {token}"))
+    } else {
+        Err(ReleaseSourceErrorV1::Io)
+    }
+}
+
+fn bounded_authorization(value: String) -> Result<String, ReleaseSourceErrorV1> {
+    if value.len() > MAX_AUTHORIZATION_BYTES {
+        Err(ReleaseSourceErrorV1::BoundsExceeded)
+    } else {
+        Ok(value)
     }
 }
 
 /// Trusted application code that supplies in-memory credentials.
 ///
-/// A source asks once per configured locator on every closure read, retains
-/// the answer only for that read, and sends it only to that locator's exact
-/// origin. Redirected requests never carry it.
+/// A source asks for the configured locator's origin once per closure read,
+/// and an OCI source also asks for a token service's origin each time it
+/// needs a token. It retains an answer only for that read and sends it only
+/// to the exact origin it was asked for. Redirected requests never carry it.
 pub trait CredentialProviderV1: Send + Sync {
     /// The credential for one exact configured origin.
     fn credential(&self, origin: &OriginV1) -> CredentialV1;
@@ -240,7 +251,8 @@ pub enum RemoteConfigErrorV1 {
     /// A deadline is zero or above its V1 maximum.
     #[error("remote deadline is zero or above its V1 maximum")]
     InvalidDeadline,
-    /// A locator is not a valid HTTPS locator for its role.
+    /// A locator, registry origin, repository or token service is not valid
+    /// for its role.
     #[error("remote locator is invalid")]
     InvalidLocator,
     /// A locator's origin is not in the allowed origin set.
@@ -312,6 +324,10 @@ impl RemoteTransportConfigV1 {
     }
 }
 
+/// A digest of the fixed V1 length, used only to bound request URL length.
+pub(super) const LENGTH_PROBE_DIGEST: &str =
+    "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+
 /// Whether `url` is an HTTPS URL without userinfo or fragment, at most 8 KiB.
 pub(super) fn requestable(url: &Url) -> bool {
     url.scheme() == "https"
@@ -321,16 +337,20 @@ pub(super) fn requestable(url: &Url) -> bool {
         && url.as_str().len() <= MAX_URL_BYTES
 }
 
+/// `text` as an exact `https://host[:port]` origin URL.
+pub(super) fn exact_origin(text: &str) -> Option<Url> {
+    Url::parse(text)
+        .ok()
+        .filter(|url| requestable(url) && url.path() == "/" && url.query().is_none())
+}
+
 fn parse_origins(allowed: &[&str]) -> Result<BTreeSet<OriginV1>, RemoteConfigErrorV1> {
     if allowed.is_empty() || allowed.len() > MAX_ORIGINS {
         return Err(RemoteConfigErrorV1::InvalidOriginSet);
     }
     let mut origins = BTreeSet::new();
     for text in allowed {
-        let url = Url::parse(text)
-            .ok()
-            .filter(|url| requestable(url) && url.path() == "/" && url.query().is_none())
-            .ok_or(RemoteConfigErrorV1::InvalidOrigin)?;
+        let url = exact_origin(text).ok_or(RemoteConfigErrorV1::InvalidOrigin)?;
         if !origins.insert(OriginV1::of(&url)) {
             return Err(RemoteConfigErrorV1::InvalidOriginSet);
         }
