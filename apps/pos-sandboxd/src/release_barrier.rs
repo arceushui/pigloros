@@ -25,6 +25,7 @@ use rustix::net::{
 use crate::release_signer::{issue_release, ReleaseSigner, ReleaseSignerError};
 
 /// Largest `ReadyV1` datagram the provider accepts.
+const TRUNCATED: ReturnFlags = ReturnFlags::TRUNC.union(ReturnFlags::CTRUNC);
 const MAX_READY_BYTES: usize = 4096;
 
 /// Held or independently observed evidence for one launch (the `ReadyV1`
@@ -212,12 +213,7 @@ fn receive_ready(channel: &impl AsFd, main_pid: u32) -> Result<LauncherReady, Re
             other_control = true;
         }
     }
-    if received
-        .flags
-        .intersects(ReturnFlags::TRUNC | ReturnFlags::CTRUNC)
-        || other_control
-        || credentials.len() != 1
-    {
+    if received.flags.intersects(TRUNCATED) || other_control || credentials.len() != 1 {
         return Err(ReleaseBarrierError::ReadyFraming);
     }
     if credentials

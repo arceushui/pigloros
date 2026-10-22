@@ -19,6 +19,9 @@ use super::{environment::LaunchEnvironment, error::LauncherError};
 pub(super) const HOST_SERVICE_NAME: &str = "piglor-host-service-v1";
 /// Name of the release descriptor.
 pub(super) const RELEASE_NAME: &str = "piglor-release-v1";
+const LISTING_FLAGS: OFlags = OFlags::RDONLY
+    .union(OFlags::DIRECTORY)
+    .union(OFlags::CLOEXEC);
 /// Descriptors below this number are stdio.
 const FIRST_INHERITED: u32 = 3;
 
@@ -128,31 +131,27 @@ const fn expected_type(role: FdRole) -> SocketType {
 /// The open descriptors at or above 3, read from `/proc/self/fd`, without the
 /// descriptor used for the listing.
 pub(super) fn scan_proc_self_fd() -> io::Result<Vec<u32>> {
-    open(
-        "/proc/self/fd",
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .and_then(|directory| {
-        let own = directory.as_raw_fd();
-        Dir::new(directory)
-            .and_then(|entries| {
-                entries
-                    .map(|entry| entry.map(|entry| entry_number(entry.file_name().to_bytes())))
-                    .collect::<Result<Vec<_>, _>>()
-            })
-            .map(|numbers| (own, numbers))
-    })
-    .map(|(own, numbers)| {
-        let mut listed: Vec<u32> = numbers
-            .into_iter()
-            .flatten()
-            .filter(|number| *number >= FIRST_INHERITED && i32::try_from(*number) != Ok(own))
-            .collect();
-        listed.sort_unstable();
-        listed
-    })
-    .map_err(io::Error::from)
+    open("/proc/self/fd", LISTING_FLAGS, Mode::empty())
+        .and_then(|directory| {
+            let own = directory.as_raw_fd();
+            Dir::new(directory)
+                .and_then(|entries| {
+                    entries
+                        .map(|entry| entry.map(|entry| entry_number(entry.file_name().to_bytes())))
+                        .collect::<Result<Vec<_>, _>>()
+                })
+                .map(|numbers| (own, numbers))
+        })
+        .map(|(own, numbers)| {
+            let mut listed: Vec<u32> = numbers
+                .into_iter()
+                .flatten()
+                .filter(|number| *number >= FIRST_INHERITED && i32::try_from(*number) != Ok(own))
+                .collect();
+            listed.sort_unstable();
+            listed
+        })
+        .map_err(io::Error::from)
 }
 
 /// The descriptor number named by one `/proc/self/fd` entry, or nothing for
