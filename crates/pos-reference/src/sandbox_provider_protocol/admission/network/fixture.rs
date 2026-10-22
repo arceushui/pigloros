@@ -108,3 +108,90 @@ impl LocalNetworkAdmission {
         }
     }
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use std::error::Error;
+
+    use super::*;
+    use crate::sandbox_provider_protocol::{
+        NetworkExchangeRequest, NetworkExchangeTranscript, NetworkProxyLimits,
+    };
+
+    const REQUEST: &[u8] = b"fixture request";
+    const RESPONSE: &[u8] = b"fixture response";
+
+    fn plan() -> Result<NetworkExchangePlan, Box<dyn Error>> {
+        Ok(NetworkExchangePlan::fixture(
+            [9; 16], 0, "execute", REQUEST, RESPONSE,
+        )?)
+    }
+
+    #[test]
+    fn the_fixture_plan_binds_exactly_its_request_and_response() -> Result<(), Box<dyn Error>> {
+        let plan = plan()?;
+        assert!(NetworkExchangeRequest::new(&plan, REQUEST).is_ok());
+        assert!(NetworkExchangeRequest::new(&plan, b"another request").is_err());
+        assert!(NetworkExchangeTranscript::capture([1; 16], &plan, REQUEST, RESPONSE).is_ok());
+        assert!(NetworkExchangeTranscript::capture([1; 16], &plan, REQUEST, b"other").is_err());
+        assert_eq!(plan.request_length, REQUEST.len() as u64);
+        assert_eq!(plan.response_maximum, RESPONSE.len() as u64);
+        Ok(())
+    }
+
+    #[test]
+    fn the_fixture_admission_carries_the_grant_it_was_given() -> Result<(), Box<dyn Error>> {
+        let plan = plan()?;
+        let capability = NetworkCapability {
+            capability_id: "execute".to_owned(),
+            address: vec![127, 0, 0, 1],
+            destination_port: 9,
+            request_maximum: 1_024,
+            response_maximum: 1_024,
+        };
+        let limits = NetworkProxyLimits {
+            request_bytes: 10,
+            response_bytes: 20,
+            milliseconds: 30,
+        };
+        let authority = AdmissionAuthority {
+            evr1_digest: [1; 32],
+            fixture_contract_digest: [2; 32],
+            fixture_digest: [3; 32],
+            execution_profile_digest: [4; 32],
+            lps1_digest: [5; 32],
+            sim1_digest: [6; 32],
+            apt1_digest: [7; 32],
+            trs1_digest: [8; 32],
+            rvs1_digest: [9; 32],
+            spm1_digest: [10; 32],
+            pcf1_digest: [11; 32],
+            pcr1_digest: [12; 32],
+            hcp1_digest: [13; 32],
+        };
+        let admission = LocalNetworkAdmission::fixture(
+            [4; 16],
+            authority.clone(),
+            [1, 2, 3],
+            vec![(plan.clone(), capability.clone())],
+            limits,
+        );
+        let grant = admission.grant();
+        assert_eq!(grant.attempt_id, [4; 16]);
+        assert_eq!(grant.authority, authority);
+        assert_eq!(grant.expected_launch_policy_digest, [5; 32]);
+        assert_eq!(
+            [
+                grant.trust_epoch,
+                grant.revocation_epoch,
+                grant.policy_epoch
+            ],
+            [1, 2, 3]
+        );
+        assert_eq!(grant.exchange_plan_digests, [plan.plan_digest]);
+        assert_eq!(admission.limits(), limits);
+        assert_eq!(admission.exchanges().len(), 1);
+        Ok(())
+    }
+}

@@ -219,7 +219,9 @@ async fn a_stalled_adapter_is_closed_at_the_attempt_deadline() -> TestResult {
     // The adapter holds its end open and never sends a frame.
     let (_adapter, binding, connector) = bound_proxy(plan()?, UNUSED_ENDPOINT, LoopbackConnector)?;
     let started = Instant::now();
-    let outcome = serve_with(binding, connector, 200).await?.outcome?;
+    // A watchdog that does not close the channel would wait forever: bound it.
+    let served = tokio::time::timeout(Duration::from_secs(10), serve_with(binding, connector, 200));
+    let outcome = served.await??.outcome?;
     assert!(outcome.watchdog_expired);
     assert!(started.elapsed() >= Duration::from_millis(200));
     assert!(outcome.session.transcripts().is_empty());

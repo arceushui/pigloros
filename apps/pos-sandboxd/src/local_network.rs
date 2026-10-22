@@ -221,7 +221,8 @@ impl Write for HostServiceStream {
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        (&*self.0).flush()
+        // A socket buffers nothing in user space.
+        Ok(())
     }
 }
 

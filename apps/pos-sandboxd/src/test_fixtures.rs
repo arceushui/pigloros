@@ -84,8 +84,8 @@ pub fn admission(
         epochs,
         exchanges,
         NetworkProxyLimits {
-            request_bytes: 1 << 20,
-            response_bytes: 1 << 20,
+            request_bytes: 1_048_576,
+            response_bytes: 1_048_576,
             milliseconds: 30_000,
         },
     )
@@ -97,8 +97,8 @@ pub fn capability(address: SocketAddr) -> NetworkCapability {
         capability_id: "execute".to_owned(),
         address: vec![127, 0, 0, 1],
         destination_port: address.port(),
-        request_maximum: 1 << 20,
-        response_maximum: 1 << 20,
+        request_maximum: 1_048_576,
+        response_maximum: 1_048_576,
     }
 }
 
