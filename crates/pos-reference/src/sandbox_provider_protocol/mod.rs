@@ -8,6 +8,7 @@ mod audit;
 mod authority;
 mod codec;
 mod execution;
+mod launch;
 mod network;
 mod operations;
 mod policy;
@@ -91,6 +92,10 @@ pub use execution::{
     PayloadDirection, PayloadStreamValidator, ReceiptAuthority, SandboxExecuteRequest,
     SandboxPayloadChunk, SandboxProviderError, SandboxProviderErrorCode, SandboxProviderReceipt,
     SandboxProviderResult, SandboxTerminalOutcome,
+};
+pub use launch::{
+    ExecutionRelease, ExecutionReleaseFields, FdIdentity, LaunchParameters, LauncherReady,
+    LauncherReadyFields,
 };
 pub use operations::{
     RequestAuthority, SandboxCancelRequest, SandboxCancelResponse, SandboxCancellationResult,

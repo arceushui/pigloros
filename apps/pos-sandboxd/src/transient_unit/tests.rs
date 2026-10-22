@@ -1,18 +1,19 @@
 use std::{error::Error, fs::File, os::fd::OwnedFd as StdOwnedFd};
 
-use pos_conformance::SandboxSyscallSetV1;
-use pos_reference::sandbox_provider_protocol::{SandboxArchitecture, SandboxLimit};
-use pos_sandboxd::{
-    ActivatedRootDirectory, LaunchMode, LauncherSource, SystemCallFilter, SystemdManagerReadback,
-    SystemdManagerReadbackOnlyProperty, SystemdServiceLimits, SystemdServiceLimitsError,
-    SystemdTransientUnitNumericValue, SystemdTransientUnitReadback,
+use crate::{
+    ActivatedRootDirectory, CheckedRoot, LaunchMode, LauncherSource, SystemCallFilter,
+    SystemdDynamicPropertyKind, SystemdManagerReadback, SystemdManagerReadbackOnlyProperty,
+    SystemdServiceLimits, SystemdServiceLimitsError, SystemdTransientUnitNumericValue,
+    SystemdTransientUnitProperty, SystemdTransientUnitPropertyKind, SystemdTransientUnitReadback,
     SystemdTransientUnitReadbackValue, SystemdTransientUnitValue, TransientUnitLaunchInputs,
     TransientUnitRequest, TransientUnitRequestError,
 };
+use pos_conformance::SandboxSyscallSetV1;
+use pos_reference::sandbox_provider_protocol::{SandboxArchitecture, SandboxLimit};
 use zvariant::{serialized::Context, to_bytes, OwnedFd, Type, LE};
 
 const X86_64: &[u8] = include_bytes!(
-    "../../../crates/pos-conformance/vectors/systemd-provider-v260.2/systemd-v260.2-x86_64.scs1.cbor"
+    "../../../../crates/pos-conformance/vectors/systemd-provider-v260.2/systemd-v260.2-x86_64.scs1.cbor"
 );
 
 const EXPECTED_PROPERTY_NAMES: [&str; 42] = [
@@ -70,7 +71,7 @@ fn local_request_has_the_exact_ordered_dynamic_properties_and_dbus_signatures(
     assert_eq!(
         properties
             .iter()
-            .map(pos_sandboxd::SystemdTransientUnitProperty::name)
+            .map(SystemdTransientUnitProperty::name)
             .collect::<Vec<_>>(),
         EXPECTED_PROPERTY_NAMES
     );
@@ -503,21 +504,32 @@ fn verifier_rejects_any_substituted_or_mistyped_service_limit() -> Result<(), Bo
     Ok(())
 }
 
-fn request(mode: LaunchMode) -> Result<TransientUnitRequest, Box<dyn Error>> {
+fn filter() -> Result<SystemCallFilter, Box<dyn Error>> {
     let authority = SandboxSyscallSetV1::from_canonical_cbor(X86_64)?;
-    let filter = SystemCallFilter::from_selected_record(
+    Ok(SystemCallFilter::from_selected_record(
         X86_64,
         authority.syscall_set_digest,
         SandboxArchitecture::X86_64,
-    )?;
-    let inputs = TransientUnitLaunchInputs::new(
-        ActivatedRootDirectory::new("/run/pigloros/attempt-42/root")?,
+    )?)
+}
+
+fn inputs(mode: LaunchMode) -> Result<TransientUnitLaunchInputs, Box<dyn Error>> {
+    let root = ActivatedRootDirectory::new("/run/pigloros/attempt-42/root")?;
+    Ok(TransientUnitLaunchInputs::new(
+        &CheckedRoot::for_test(root),
         LauncherSource::new("/usr/lib/pigloros/release-launcher")?,
         mode,
         descriptor()?,
-    );
+    ))
+}
+
+fn request(mode: LaunchMode) -> Result<TransientUnitRequest, Box<dyn Error>> {
     let limits = SystemdServiceLimits::from_effective_limits(&complete_effective_limits())?;
-    Ok(TransientUnitRequest::compile(inputs, filter, &limits))
+    Ok(TransientUnitRequest::compile(
+        inputs(mode)?,
+        filter()?,
+        &limits,
+    ))
 }
 
 fn complete_effective_limits() -> Vec<SandboxLimit> {
@@ -584,4 +596,15 @@ fn exact_readback(
             SystemdTransientUnitReadback::new(property.name(), value)
         })
         .collect()
+}
+
+#[test]
+fn property_clone_propagates_value_failure() {
+    let result = SystemdTransientUnitProperty::from_cloned_value(
+        SystemdTransientUnitPropertyKind::Dynamic(
+            SystemdDynamicPropertyKind::FileDescriptorStoreMax,
+        ),
+        Err(zvariant::Error::IncorrectType),
+    );
+    assert!(matches!(result, Err(zvariant::Error::IncorrectType)));
 }

@@ -12,7 +12,11 @@ mod hardening;
 mod image_activator;
 mod kernel_cgroup;
 #[cfg(target_os = "linux")]
+mod release_signer;
+#[cfg(target_os = "linux")]
 mod root_attachment;
+#[cfg(target_os = "linux")]
+mod staging;
 mod system_bus;
 mod transient_unit;
 
@@ -35,6 +39,14 @@ pub use image_activator::{
 #[cfg(target_os = "linux")]
 pub use root_attachment::{activate_admitted_root, VerifiedRootMount};
 
+#[cfg(target_os = "linux")]
+pub use release_signer::{issue_release, KeyFileReleaseSigner, ReleaseSigner, ReleaseSignerError};
+#[cfg(target_os = "linux")]
+pub use staging::{
+    AdmittedEntry, ControlFloor, StagedInput, StagingDirectory, StagingError, StagingLedger,
+    StagingLimits, StagingReservation, StagingUsage, VerifiedStagedInput,
+};
+
 pub use hardening::{
     SystemdHardeningProperty, SystemdHardeningReadback, SystemdHardeningReadbackValue,
     SystemdHardeningValue, TransientUnitHardening, TransientUnitHardeningError,
@@ -50,7 +62,7 @@ pub use system_bus::{
     TransientServiceUnitName, TransientServiceUnitNameError,
 };
 pub use transient_unit::{
-    ActivatedRootDirectory, LaunchMode, LauncherSource, SystemdManagerReadback,
+    ActivatedRootDirectory, CheckedRoot, LaunchMode, LauncherSource, SystemdManagerReadback,
     SystemdManagerReadbackOnlyProperty, SystemdServiceLimits, SystemdServiceLimitsError,
     SystemdTransientUnitNumericValue, SystemdTransientUnitProperty, SystemdTransientUnitReadback,
     SystemdTransientUnitReadbackValue, SystemdTransientUnitValue, TransientUnitLaunchInputs,
