@@ -89,11 +89,12 @@ pub(super) fn run(
     } = layout;
     drop(channel);
     // Only the Local proxy survives into the adapter, as its FD 3.
-    host_service
-        .as_ref()
-        .is_none_or(|proxy| fcntl_setfd(proxy, FdFlags::empty()).is_ok())
-        .then_some(())
-        .ok_or(LauncherError::Layout)?;
+    if let Some(proxy) = &host_service {
+        // If this failed the proxy would stay close-on-exec and the adapter
+        // would start without it: the safe direction, so the result is not
+        // acted on.
+        fcntl_setfd(proxy, FdFlags::empty()).ok();
+    }
     let argv = argument_vector(parameters)?;
     Err(LauncherError::Exec(
         host.replace_process(&adapter.file, &argv),
@@ -143,10 +144,8 @@ pub(super) fn receive_release(release: &OwnedFd) -> Result<ExecutionRelease, Lau
         RecvFlags::empty(),
     )
     .ok()
+    .filter(|received| received.bytes != 0)
     .ok_or(LauncherError::ReleaseUnavailable)?;
-    if received.bytes == 0 {
-        return Err(LauncherError::ReleaseUnavailable);
-    }
     if received
         .flags
         .intersects(ReturnFlags::TRUNC | ReturnFlags::CTRUNC)

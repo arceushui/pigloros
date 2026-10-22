@@ -68,19 +68,18 @@ pub(super) fn hold_adapter(file: File) -> Result<HeldExecutable, LauncherError> 
 /// Hold the launcher's own executable image.
 pub(super) fn hold(file: File) -> Result<HeldExecutable, LauncherError> {
     let digest = blake3_digest_of(&file).map_err(|_| LauncherError::Identity)?;
-    let identity = statx(&file, "", AtFlags::EMPTY_PATH, MOUNT_ID_REQUEST)
+    statx(&file, "", AtFlags::EMPTY_PATH, MOUNT_ID_REQUEST)
         .ok()
         .filter(|stat| stat.stx_mask & StatxFlags::MNT_ID.bits() != 0 && stat.stx_ino != 0)
-        .map(|stat| FdIdentity {
-            mount_id: stat.stx_mnt_id,
-            inode: stat.stx_ino,
+        .map(|stat| HeldExecutable {
+            file,
+            digest,
+            identity: FdIdentity {
+                mount_id: stat.stx_mnt_id,
+                inode: stat.stx_ino,
+            },
         })
-        .ok_or(LauncherError::Identity)?;
-    Ok(HeldExecutable {
-        file,
-        digest,
-        identity,
-    })
+        .ok_or(LauncherError::Identity)
 }
 
 fn native_elf(header: &[u8; ELF_HEADER_BYTES]) -> bool {

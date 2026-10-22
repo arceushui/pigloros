@@ -29,15 +29,8 @@ pub(super) trait LaunchHost {
     /// The adapter beneath the activated root, without symlink traversal.
     fn open_adapter(&self, path: &str) -> io::Result<File>;
     /// `CLOCK_MONOTONIC` in nanoseconds.
-    fn monotonic_ns(&self) -> io::Result<u64> {
-        let now = clock_gettime(ClockId::Monotonic);
-        let seconds = u64::try_from(now.tv_sec).unwrap_or_default();
-        let nanoseconds = u64::try_from(now.tv_nsec).unwrap_or_default();
-        Ok(seconds
-            .saturating_mul(NANOSECONDS_PER_SECOND)
-            .saturating_add(nanoseconds))
-    }
-
+    fn monotonic_ns(&self) -> io::Result<u64>;
+    /// Replace the process image with the held adapter; returns only on failure.
     fn replace_process(&self, adapter: &File, argv: &[CString]) -> io::Error;
 }
 
@@ -59,21 +52,22 @@ impl LaunchHost for ProcessHost {
     }
 
     fn open_adapter(&self, path: &str) -> io::Result<File> {
-        let root = open(
+        open(
             "/",
             OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
             Mode::empty(),
-        )?;
-        open_beneath(&root, path)
+        )
+        .map_err(io::Error::from)
+        .and_then(|root| open_beneath(&root, path))
     }
 
     fn monotonic_ns(&self) -> io::Result<u64> {
         let now = clock_gettime(ClockId::Monotonic);
-        u64::try_from(now.tv_sec)
-            .ok()
-            .and_then(|seconds| seconds.checked_mul(NANOSECONDS_PER_SECOND))
-            .and_then(|nanoseconds| nanoseconds.checked_add(u64::try_from(now.tv_nsec).ok()?))
-            .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))
+        let seconds = u64::try_from(now.tv_sec).unwrap_or_default();
+        let nanoseconds = u64::try_from(now.tv_nsec).unwrap_or_default();
+        Ok(seconds
+            .saturating_mul(NANOSECONDS_PER_SECOND)
+            .saturating_add(nanoseconds))
     }
 
     fn replace_process(&self, adapter: &File, argv: &[CString]) -> io::Error {
