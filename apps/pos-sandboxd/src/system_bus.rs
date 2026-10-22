@@ -741,6 +741,10 @@ async fn read_dynamic_property(
             .extra_file_descriptor_names()
             .await
             .map(SystemdTransientUnitReadbackValue::StringArray),
+        SystemdDynamicPropertyKind::TemporaryFileSystem => service
+            .temporary_file_system()
+            .await
+            .map(SystemdTransientUnitReadbackValue::TemporaryFileSystem),
     }
 }
 
@@ -905,6 +909,7 @@ impl SystemdTransientUnitValue {
                 }
             },
             Self::ExtraFileDescriptors(value) => extra_file_descriptors_value(value),
+            Self::TemporaryFileSystem(value) => Value::from(value),
         }
     }
 }

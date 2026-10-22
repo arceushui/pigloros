@@ -142,6 +142,7 @@ enum SystemdDynamicPropertyKind {
     OperatingLimit(SystemdOperatingLimitProperty),
     FileDescriptorStoreMax,
     ExtraFileDescriptors,
+    TemporaryFileSystem,
 }
 
 impl SystemdTransientUnitPropertyKind {
@@ -163,6 +164,7 @@ impl SystemdDynamicPropertyKind {
             Self::OperatingLimit(property) => property.name(),
             Self::FileDescriptorStoreMax => "FileDescriptorStoreMax",
             Self::ExtraFileDescriptors => "ExtraFileDescriptors",
+            Self::TemporaryFileSystem => "TemporaryFileSystem",
         }
     }
 }
