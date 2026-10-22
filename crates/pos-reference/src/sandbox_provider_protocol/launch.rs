@@ -5,6 +5,8 @@
 //! decoder. Fields are public, like the sibling records, so a mutated value
 //! is validated again only when it is encoded and decoded.
 
+use std::io::{self, Read};
+
 use ciborium::value::Value;
 
 use super::codec::{
@@ -13,7 +15,7 @@ use super::codec::{
     signature_message, signed, text_value, uint, uint_value, valid_key_id, verify_digest,
     verify_signature,
 };
-use super::SandboxProviderProtocolError;
+use super::{SandboxExecutionMode, SandboxProviderProtocolError};
 
 /// LPV1 is limited to 64 KiB before the provider-private hexadecimal encoding.
 const MAX_LAUNCH_PARAMETER_BYTES: usize = 64 * 1024;
@@ -45,6 +47,85 @@ impl FdIdentity {
     const fn valid(self) -> bool {
         self.inode != 0
     }
+}
+
+/// Role of one inherited descriptor in an FDL1 layout.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FdRole {
+    /// The provider-neutral `AF_UNIX` stream host-service channel (role 0).
+    HostService,
+    /// The `AF_UNIX` `SOCK_SEQPACKET` release channel (role 1).
+    Release,
+}
+
+impl FdRole {
+    const fn code(self) -> u64 {
+        match self {
+            Self::HostService => 0,
+            Self::Release => 1,
+        }
+    }
+}
+
+/// One inherited non-stdio descriptor of an FDL1 layout.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FdLayoutEntry {
+    /// Descriptor number.
+    pub fd_number: u64,
+    /// Descriptor role.
+    pub role: FdRole,
+}
+
+/// FDL1 self-digest of one execution mode's descriptor layout.
+///
+/// Both the selector (expected layout) and the launcher (observed layout) use
+/// this one builder so the two digests cannot drift.
+///
+/// # Errors
+/// Rejects a layout whose entries are not unique and in ascending descriptor
+/// order.
+pub fn fdl1_digest(
+    mode: SandboxExecutionMode,
+    entries: &[FdLayoutEntry],
+) -> Result<[u8; 32], SandboxProviderProtocolError> {
+    if !entries
+        .windows(2)
+        .all(|pair| pair[0].fd_number < pair[1].fd_number)
+    {
+        return Err(SandboxProviderProtocolError::FieldOutOfBounds);
+    }
+    record_digest(
+        "FDL1",
+        &Value::Array(vec![
+            text_value("FDL1"),
+            uint_value(1),
+            uint_value(mode.code()),
+            Value::Array(
+                entries
+                    .iter()
+                    .map(|entry| {
+                        Value::Array(vec![
+                            uint_value(entry.fd_number),
+                            uint_value(entry.role.code()),
+                        ])
+                    })
+                    .collect(),
+            ),
+        ]),
+    )
+}
+
+/// BLAKE3-256 of everything `reader` yields.
+///
+/// The launcher hashes its own executable and the held adapter descriptor
+/// with this one function.
+///
+/// # Errors
+/// Returns the reader's I/O error.
+pub fn blake3_digest_of(reader: impl Read) -> io::Result<[u8; 32]> {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update_reader(reader)?;
+    Ok(*hasher.finalize().as_bytes())
 }
 
 fn nonzero(digests: &[[u8; 32]]) -> bool {

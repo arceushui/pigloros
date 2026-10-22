@@ -94,8 +94,8 @@ pub use execution::{
     SandboxProviderResult, SandboxTerminalOutcome,
 };
 pub use launch::{
-    ExecutionRelease, ExecutionReleaseFields, FdIdentity, LaunchParameters, LauncherReady,
-    LauncherReadyFields,
+    blake3_digest_of, fdl1_digest, ExecutionRelease, ExecutionReleaseFields, FdIdentity,
+    FdLayoutEntry, FdRole, LaunchParameters, LauncherReady, LauncherReadyFields,
 };
 pub use operations::{
     RequestAuthority, SandboxCancelRequest, SandboxCancelResponse, SandboxCancellationResult,

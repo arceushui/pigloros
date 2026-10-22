@@ -1,6 +1,7 @@
 //! Backend-specific components of the ADR-069 systemd Sandbox Provider Adapter.
 //!
-//! This library does not implement the provider daemon or grant admission.
+//! This library does not implement the provider daemon or grant admission. Its
+//! binary currently runs only the closed launcher mode ([`launcher`]).
 //! The existing signed admission boundary must supply the selected SCS1 digest
 //! and architecture before these requested-state components are used.
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
@@ -11,6 +12,10 @@ mod hardening;
 #[cfg(target_os = "linux")]
 mod image_activator;
 mod kernel_cgroup;
+#[cfg(target_os = "linux")]
+pub mod launcher;
+#[cfg(target_os = "linux")]
+mod release_barrier;
 #[cfg(target_os = "linux")]
 mod release_signer;
 #[cfg(target_os = "linux")]
@@ -39,6 +44,10 @@ pub use image_activator::{
 #[cfg(target_os = "linux")]
 pub use root_attachment::{activate_admitted_root, VerifiedRootMount};
 
+#[cfg(target_os = "linux")]
+pub use release_barrier::{
+    release_after_ready, ExpectedLauncherReady, ReleaseBarrierError, ReleaseBinding, ReleaseRecheck,
+};
 #[cfg(target_os = "linux")]
 pub use release_signer::{issue_release, KeyFileReleaseSigner, ReleaseSigner, ReleaseSignerError};
 #[cfg(target_os = "linux")]
@@ -245,6 +254,33 @@ impl SystemCallFilter {
             Ok(())
         } else {
             Err(SystemCallFilterError::ReadbackMismatch)
+        }
+    }
+}
+
+/// Run the binary for `arguments` (without the program name).
+///
+/// The only mode today is `launch-barrier <lpv1-hex>`, which never returns
+/// success: a released adapter replaces the process image. Any other argument
+/// vector, or any launcher failure, ends with a nonzero exit code and a fixed
+/// diagnostic on standard error.
+#[cfg(target_os = "linux")]
+#[must_use]
+pub fn run(arguments: impl IntoIterator<Item = std::ffi::OsString>) -> std::process::ExitCode {
+    let arguments: Vec<_> = arguments.into_iter().collect();
+    match arguments.as_slice() {
+        [mode, lpv1] if mode == launcher::LAUNCH_BARRIER_MODE => {
+            let error = lpv1
+                .to_str()
+                .map_or(launcher::LauncherError::Parameters, |hex| {
+                    launcher::run_launch_barrier(hex)
+                });
+            eprintln!("pos-sandboxd: {error}");
+            std::process::ExitCode::FAILURE
+        }
+        _ => {
+            eprintln!("usage: pos-sandboxd launch-barrier <lpv1-hex>");
+            std::process::ExitCode::from(2)
         }
     }
 }
