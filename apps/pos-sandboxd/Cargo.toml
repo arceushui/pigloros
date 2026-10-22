@@ -7,6 +7,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+ed25519-dalek = { workspace = true }
 futures-util = { version = "0.3", default-features = false }
 pos-reference = { path = "../../crates/pos-reference" }
 rustix = { version = "1.1.4", default-features = false, features = [

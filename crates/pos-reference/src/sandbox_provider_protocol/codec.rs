@@ -85,19 +85,26 @@ pub(super) fn digest_with_domain(
     Ok(*blake3::hash(&preimage).as_bytes())
 }
 
+pub(super) fn signature_message(magic: &str, digest: &[u8; 32]) -> Vec<u8> {
+    let mut message = Vec::with_capacity(magic.len() + 55);
+    message.extend_from_slice(b"PiglorOS.");
+    message.extend_from_slice(magic.as_bytes());
+    message.extend_from_slice(b".Signature.v1\0");
+    message.extend_from_slice(digest);
+    message
+}
+
 pub(super) fn verify_signature(
     magic: &str,
     digest: &[u8; 32],
     signature: &[u8; 64],
     key: &ed25519_dalek::VerifyingKey,
 ) -> Result<(), SandboxProviderProtocolError> {
-    let mut message = Vec::with_capacity(magic.len() + 55);
-    message.extend_from_slice(b"PiglorOS.");
-    message.extend_from_slice(magic.as_bytes());
-    message.extend_from_slice(b".Signature.v1\0");
-    message.extend_from_slice(digest);
-    key.verify(&message, &ed25519_dalek::Signature::from_bytes(signature))
-        .map_err(|_| SandboxProviderProtocolError::SignatureInvalid)
+    key.verify(
+        &signature_message(magic, digest),
+        &ed25519_dalek::Signature::from_bytes(signature),
+    )
+    .map_err(|_| SandboxProviderProtocolError::SignatureInvalid)
 }
 
 pub(super) fn require_signature(signature: &[u8; 64]) -> Result<(), SandboxProviderProtocolError> {
