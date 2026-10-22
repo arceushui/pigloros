@@ -7,9 +7,11 @@
 //! bundle view as every other source. The HTTP and TLS libraries never appear
 //! in this public interface.
 
+mod challenge;
 mod config;
 mod engine;
 mod https;
+mod oci;
 mod resolver;
 
 pub use config::{
@@ -17,6 +19,7 @@ pub use config::{
     TransportDeadlinesV1, TrustRootsV1,
 };
 pub use https::HttpsReleaseSourceV1;
+pub use oci::OciReleaseSourceV1;
 
 /// The log targets the remote transport and its HTTP and TLS libraries emit.
 ///
