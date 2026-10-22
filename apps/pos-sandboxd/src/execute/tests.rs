@@ -442,19 +442,21 @@ struct Scenario {
 impl Scenario {
     fn new() -> TestResult<Self> {
         let (root, store) = capture_store()?;
-        let mut scenario = Self::sharing(&store);
-        scenario._root = Some(root);
-        Ok(scenario)
+        Ok(Self::holding(&store, Some(root)))
     }
 
     fn sharing(store: &Arc<NetworkCaptureStore>) -> Self {
+        Self::holding(store, None)
+    }
+
+    fn holding(store: &Arc<NetworkCaptureStore>, root: Option<tempfile::TempDir>) -> Self {
         let log = Log::default();
         Self {
             host: FakeHost::new(&log),
             barrier: FakeBarrier::new(&log),
             log,
             store: Arc::clone(store),
-            _root: None,
+            _root: root,
         }
     }
 
