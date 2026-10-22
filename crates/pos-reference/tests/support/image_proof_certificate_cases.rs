@@ -1,5 +1,39 @@
 // Certificate attacks enter through the public provider operation. Rebinding
 // the test SIM1 pin ensures rejection is due to the certificate rule itself.
+// X.509 0.3 exposes immutable certificates. These test-only ASN.1 views retain
+// mutable fields so adversarial fixtures can still express invalid certificates.
+#[derive(Clone, Debug, Eq, PartialEq, der::Sequence)]
+struct MutableCertificate {
+    tbs_certificate: TestTbsCertificate,
+    signature_algorithm: x509_cert::AlgorithmIdentifier,
+    signature: der::asn1::BitString,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, der::Sequence)]
+struct TestTbsCertificate {
+    #[asn1(context_specific = "0", default = "Default::default")]
+    version: x509_cert::Version,
+    serial_number: x509_cert::serial_number::SerialNumber,
+    signature: x509_cert::AlgorithmIdentifier,
+    issuer: x509_cert::name::Name,
+    validity: x509_cert::time::Validity,
+    subject: x509_cert::name::Name,
+    subject_public_key_info: x509_cert::SubjectPublicKeyInfo,
+    #[asn1(context_specific = "1", tag_mode = "IMPLICIT", optional = "true")]
+    issuer_unique_id: Option<der::asn1::BitString>,
+    #[asn1(context_specific = "2", tag_mode = "IMPLICIT", optional = "true")]
+    subject_unique_id: Option<der::asn1::BitString>,
+    #[asn1(context_specific = "3", tag_mode = "EXPLICIT", optional = "true")]
+    extensions: Option<x509_cert::ext::Extensions>,
+}
+
+impl MutableCertificate {
+    fn to_x509(&self) -> der::Result<x509_cert::Certificate> {
+        self.to_der()
+            .and_then(|encoded| x509_cert::Certificate::from_der(&encoded))
+    }
+}
+
 fn edited_certificate(
     edit: impl FnOnce(&mut Certificate) -> TestResult,
 ) -> TestResult<(Vec<u8>, Vec<u8>)> {
@@ -8,7 +42,7 @@ fn edited_certificate(
     let encoded = certificate.to_der()?;
     let proof = edit_cms(PROOF, |cms_data| {
         cms_data.certificates =
-            Some(vec![CertificateChoices::Certificate(certificate)].try_into()?);
+            Some(vec![CertificateChoices::Certificate(certificate.to_x509()?)].try_into()?);
         Ok(())
     })?;
     Ok((proof, encoded))
@@ -94,6 +128,7 @@ fn public_proof_verification_rejects_certificate_extension_violations() -> TestR
 enum CertificateDefect {
     SignatureAlgorithm,
     TbsAlgorithm,
+    MatchingUnsupportedAlgorithms,
     PublicKeyAlgorithm,
     AlgorithmParameterMismatch,
     MalformedPublicKey,
@@ -108,6 +143,10 @@ fn certificate_defect(certificate: &mut Certificate, defect: CertificateDefect) 
     match defect {
         CertificateDefect::SignatureAlgorithm => certificate.signature_algorithm.oid = other,
         CertificateDefect::TbsAlgorithm => certificate.tbs_certificate.signature.oid = other,
+        CertificateDefect::MatchingUnsupportedAlgorithms => {
+            certificate.signature_algorithm.oid = other;
+            certificate.tbs_certificate.signature.oid = other;
+        }
         CertificateDefect::PublicKeyAlgorithm => {
             certificate
                 .tbs_certificate
@@ -156,6 +195,10 @@ fn public_proof_verification_rejects_invalid_certificate_identity_and_crypto() -
         ),
         (
             CertificateDefect::TbsAlgorithm,
+            SandboxImageProofError::UnsupportedProfile,
+        ),
+        (
+            CertificateDefect::MatchingUnsupportedAlgorithms,
             SandboxImageProofError::UnsupportedProfile,
         ),
         (
@@ -210,7 +253,7 @@ fn public_proof_verification_rejects_ambiguous_and_excessive_certificate_sets() 
                 let mut certificate = Certificate::from_der(CERTIFICATE)?;
                 // Retain the same SID while giving each certificate unique DER.
                 certificate.signature = der::asn1::BitString::from_bytes(&[marker; 256])?;
-                choices.push(CertificateChoices::Certificate(certificate));
+                choices.push(CertificateChoices::Certificate(certificate.to_x509()?));
             }
             cms_data.certificates = Some(choices.try_into()?);
             Ok(())
@@ -268,8 +311,9 @@ fn public_proof_verification_rejects_unused_key_and_signature_bits() -> TestResu
 fn public_proof_verification_rejects_malformed_subject_key_identifier() -> TestResult {
     let original = Certificate::from_der(CERTIFICATE)?;
     let (_, key_id) = original
-        .tbs_certificate
-        .get::<SubjectKeyIdentifier>()?
+        .to_x509()?
+        .tbs_certificate()
+        .get_extension::<SubjectKeyIdentifier>()?
         .ok_or("missing SKI")?;
     let (proof, certificate) = edited_certificate(|certificate| {
         let extension = certificate

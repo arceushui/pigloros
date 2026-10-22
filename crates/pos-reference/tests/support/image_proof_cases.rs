@@ -4,6 +4,7 @@ mod image_proof_cases {
     include!("image_proof_envelope_cases.rs");
     include!("image_proof_ddi_cases.rs");
 
+    use self::MutableCertificate as Certificate;
     use super::*;
     use cms::{
         cert::CertificateChoices,
@@ -18,10 +19,7 @@ mod image_proof_cases {
     use pos_reference::sandbox_provider_protocol::{
         SandboxImageProofError, VerifiedSandboxImageProof,
     };
-    use x509_cert::{
-        ext::{pkix::SubjectKeyIdentifier, Extension},
-        Certificate,
-    };
+    use x509_cert::ext::{pkix::SubjectKeyIdentifier, Extension};
 
     const PROOF: &[u8] = include_bytes!("../vectors/sim1-pkcs7/proof.der");
     const CERTIFICATE: &[u8] = include_bytes!("../vectors/sim1-pkcs7/signer.der");
@@ -113,8 +111,9 @@ mod image_proof_cases {
     fn public_proof_verification_accepts_ski_and_absent_cms_parameters() -> TestResult {
         let certificate = Certificate::from_der(CERTIFICATE)?;
         let (_, key_id) = certificate
-            .tbs_certificate
-            .get::<SubjectKeyIdentifier>()?
+            .to_x509()?
+            .tbs_certificate()
+            .get_extension::<SubjectKeyIdentifier>()?
             .ok_or("missing SKI")?;
         let proof = edit_cms(PROOF, |cms_data| {
             let mut signer = cms_data
@@ -407,8 +406,8 @@ mod image_proof_cases {
             let other = Certificate::from_der(OPTIONAL_SIGNER)?;
             cms_data.certificates = Some(
                 vec![
-                    CertificateChoices::Certificate(original),
-                    CertificateChoices::Certificate(other),
+                    CertificateChoices::Certificate(original.to_x509()?),
+                    CertificateChoices::Certificate(other.to_x509()?),
                 ]
                 .try_into()?,
             );
@@ -431,7 +430,7 @@ mod image_proof_cases {
                     extn_value: OctetString::new(vec![0; 65_536])?,
                 });
             cms_data.certificates =
-                Some(vec![CertificateChoices::Certificate(certificate)].try_into()?);
+                Some(vec![CertificateChoices::Certificate(certificate.to_x509()?)].try_into()?);
             Ok(())
         })?;
         assert_eq!(

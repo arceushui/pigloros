@@ -19,6 +19,12 @@ use x509_cert::{
 
 use super::{algorithm, SandboxImageProofError as Error, RSA, RSA_SHA256};
 
+#[derive(der::Sequence)]
+struct RsaPublicKey<'a> {
+    modulus: UintRef<'a>,
+    exponent: UintRef<'a>,
+}
+
 pub(super) struct ProofCertificate<'a> {
     parsed: &'a Certificate,
     public_key: &'a [u8],
@@ -59,13 +65,13 @@ pub(super) fn select_signer(
 ) -> Result<usize, Error> {
     let mut selected = None;
     for (index, certificate) in certificates.iter().enumerate() {
-        let tbs = &certificate.parsed.tbs_certificate;
+        let tbs = certificate.parsed.tbs_certificate();
         let matches = match sid {
             SignerIdentifier::IssuerAndSerialNumber(sid) => {
-                sid.issuer == tbs.issuer && sid.serial_number == tbs.serial_number
+                &sid.issuer == tbs.issuer() && &sid.serial_number == tbs.serial_number()
             }
             SignerIdentifier::SubjectKeyIdentifier(sid) => tbs
-                .get::<SubjectKeyIdentifier>()?
+                .get_extension::<SubjectKeyIdentifier>()?
                 .is_some_and(|(_, key)| key == *sid),
         };
         if matches && selected.replace(index).is_some() {
@@ -81,25 +87,24 @@ pub(super) fn select_signer(
 }
 
 fn validate_certificate_syntax(certificate: &Certificate) -> Result<&[u8], Error> {
-    let tbs = &certificate.tbs_certificate;
-    if !algorithm(&certificate.signature_algorithm, RSA_SHA256)
-        || !algorithm(&tbs.signature, RSA_SHA256)
-        || !algorithm(&tbs.subject_public_key_info.algorithm, RSA)
-        || certificate.signature_algorithm != tbs.signature
+    let tbs = certificate.tbs_certificate();
+    if !algorithm(certificate.signature_algorithm(), RSA_SHA256)
+        || !algorithm(&tbs.subject_public_key_info().algorithm, RSA)
+        || certificate.signature_algorithm() != tbs.signature()
     {
         return Err(Error::UnsupportedProfile);
     }
     let key_bytes = tbs
-        .subject_public_key_info
+        .subject_public_key_info()
         .subject_public_key
         .as_bytes()
         .ok_or(Error::Malformed)?;
-    let [modulus, _exponent] = <[UintRef<'_>; 2]>::from_der(key_bytes)?;
+    let modulus = RsaPublicKey::from_der(key_bytes)?.modulus;
     if modulus.as_bytes().len() != 256 || modulus.as_bytes()[0] < 128 {
         return Err(Error::UnsupportedProfile);
     }
     let mut extensions = BTreeSet::new();
-    for extension in tbs.extensions.iter().flatten() {
+    for extension in tbs.extensions().into_iter().flatten() {
         if !extensions.insert(extension.extn_id) {
             return Err(Error::Malformed);
         }
@@ -118,18 +123,18 @@ fn validate_certificate_syntax(certificate: &Certificate) -> Result<&[u8], Error
 }
 
 fn validate_usage(certificate: &Certificate, signer: bool) -> Result<(), Error> {
-    let tbs = &certificate.tbs_certificate;
-    let constraints = tbs.get::<BasicConstraints>()?;
+    let tbs = certificate.tbs_certificate();
+    let constraints = tbs.get_extension::<BasicConstraints>()?;
     if tbs
-        .get::<SubjectAltName>()?
+        .get_extension::<SubjectAltName>()?
         .is_some_and(|(_, names)| names.0.is_empty())
     {
         return Err(Error::Malformed);
     }
-    if tbs.get::<NameConstraints>()?.is_some() && signer {
+    if tbs.get_extension::<NameConstraints>()?.is_some() && signer {
         return Err(Error::InvalidPath);
     }
-    if let Some((_, usage)) = tbs.get::<KeyUsage>()? {
+    if let Some((_, usage)) = tbs.get_extension::<KeyUsage>()? {
         let allowed = if signer {
             usage.digital_signature()
         } else {
@@ -140,7 +145,7 @@ fn validate_usage(certificate: &Certificate, signer: bool) -> Result<(), Error> 
         }
     }
     if signer {
-        if let Some((_, usage)) = tbs.get::<ExtendedKeyUsage>()? {
+        if let Some((_, usage)) = tbs.get_extension::<ExtendedKeyUsage>()? {
             if !usage
                 .0
                 .iter()
@@ -156,7 +161,7 @@ fn validate_usage(certificate: &Certificate, signer: bool) -> Result<(), Error> 
 }
 
 fn validate_time(certificate: &Certificate, now: Option<u64>) -> Result<(), Error> {
-    let validity = &certificate.tbs_certificate.validity;
+    let validity = certificate.tbs_certificate().validity();
     let start = validity.not_before.to_unix_duration().as_secs();
     let end = validity.not_after.to_unix_duration().as_secs();
     if start > end || now.is_some_and(|time| time < start || time > end) {
@@ -166,14 +171,14 @@ fn validate_time(certificate: &Certificate, now: Option<u64>) -> Result<(), Erro
 }
 
 fn self_issued(certificate: &ProofCertificate<'_>) -> bool {
-    certificate.parsed.tbs_certificate.issuer == certificate.parsed.tbs_certificate.subject
+    certificate.parsed.tbs_certificate().issuer() == certificate.parsed.tbs_certificate().subject()
 }
 
 fn verify_self_signature(certificate: &ProofCertificate<'_>) -> Result<(), Error> {
     let parsed = certificate.parsed;
-    let signature = parsed.signature.as_bytes().ok_or(Error::Malformed)?;
+    let signature = parsed.signature().as_bytes().ok_or(Error::Malformed)?;
     parsed
-        .tbs_certificate
+        .tbs_certificate()
         .to_der()
         .map_err(Error::from)
         .and_then(|tbs| {
@@ -238,8 +243,8 @@ pub(super) fn verify_path(
     // therefore unsupported rather than silently treated as understood.
     if certificates[root]
         .parsed
-        .tbs_certificate
-        .get::<ExtendedKeyUsage>()?
+        .tbs_certificate()
+        .get_extension::<ExtendedKeyUsage>()?
         .is_some_and(|(critical, _)| critical)
     {
         return Err(Error::UnsupportedProfile);

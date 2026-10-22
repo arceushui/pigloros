@@ -13,9 +13,13 @@ mod chain_cases {
                 .ok_or("missing certificates")?
                 .0
                 .iter()
-                .map(|choice| match choice {
-                    CertificateChoices::Certificate(certificate) => Ok(certificate.clone()),
-                    CertificateChoices::Other(_) => Err("unexpected certificate choice"),
+                .map(|choice| -> TestResult<Certificate> {
+                    match choice {
+                        CertificateChoices::Certificate(certificate) => {
+                            Ok(Certificate::from_der(&certificate.to_der()?)?)
+                        }
+                        CertificateChoices::Other(_) => Err("unexpected certificate choice".into()),
+                    }
                 })
                 .collect::<Result<_, _>>()?;
             let leaf = certificates
@@ -38,8 +42,8 @@ mod chain_cases {
             cms_data.certificates = Some(
                 certificates
                     .into_iter()
-                    .map(CertificateChoices::Certificate)
-                    .collect::<Vec<_>>()
+                    .map(|certificate| certificate.to_x509().map(CertificateChoices::Certificate))
+                    .collect::<Result<Vec<_>, _>>()?
                     .try_into()?,
             );
             Ok(())
