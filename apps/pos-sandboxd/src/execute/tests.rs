@@ -284,6 +284,7 @@ impl UnitHost for FakeHost {
 
 struct FakeBarrier {
     log: Log,
+    released: Arc<Mutex<Vec<(String, Instant)>>>,
     fail_take: bool,
     fail_release: bool,
 }
@@ -292,6 +293,7 @@ impl FakeBarrier {
     fn new(log: &Log) -> Self {
         Self {
             log: Arc::clone(log),
+            released: Arc::default(),
             fail_take: false,
             fail_release: false,
         }
@@ -313,9 +315,12 @@ impl LaunchBarrier for FakeBarrier {
 
     fn release(
         &mut self,
-        _attempt: &ActiveAttempt,
+        attempt: &ActiveAttempt,
     ) -> impl Future<Output = Result<(), Injected>> + Send {
         record(&self.log, "release");
+        if let Ok(mut released) = self.released.lock() {
+            released.push((attempt.unit_name().as_str().to_owned(), attempt.deadline()));
+        }
         let outcome = if self.fail_release {
             Err(Injected)
         } else {
@@ -482,6 +487,18 @@ async fn a_local_attempt_serves_fd3_once_released_and_reports_its_transcripts() 
             work: vec![("/work".to_owned(), WORK.to_owned())],
         }
     );
+    // The barrier sees the active attempt: its unit and a live deadline.
+    let released = barrier
+        .released
+        .lock()
+        .map_err(|error| error.to_string())?
+        .clone();
+    assert_eq!(released.len(), 1);
+    assert_eq!(
+        released[0].0,
+        TransientServiceUnitName::from_attempt_id(ATTEMPT)?.as_str()
+    );
+    assert!(released[0].1 > Instant::now());
     assert_eq!(execution.attempt_id, ATTEMPT);
     assert_eq!(execution.ending, AttemptEnding::CgroupEmpty);
     assert_eq!(execution.network.termination(), None);
