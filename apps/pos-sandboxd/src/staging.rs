@@ -56,9 +56,11 @@ pub struct StagingUsage {
     pub floor: ControlFloor,
 }
 
-/// The live provider control floor: the lowest revocation and policy epochs
-/// the provider may still dispatch under (ADR-069: a committed update's next
-/// epochs are the floor). It only rises; restart recovery is #442.
+/// The live provider control floor.
+///
+/// It is the lowest revocation and policy epochs the provider may still
+/// dispatch under (ADR-069: a committed update's next epochs are the floor).
+/// It only rises; restart recovery is #442.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ControlFloor {
     /// Lowest dispatchable revocation epoch.
@@ -233,7 +235,10 @@ impl StagingLedger {
     }
 }
 
-fn check_floor(floor: &ControlFloor, authority: AdmittedAuthority) -> Result<(), StagingError> {
+const fn check_floor(
+    floor: &ControlFloor,
+    authority: AdmittedAuthority,
+) -> Result<(), StagingError> {
     if authority.revocation_epoch < floor.revocation_epoch
         || authority.policy_epoch < floor.policy_epoch
     {
