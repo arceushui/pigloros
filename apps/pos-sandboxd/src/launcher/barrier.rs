@@ -43,7 +43,7 @@ const MODES: [SandboxExecutionMode; 4] = [
 
 /// Run the complete barrier. It returns only the reason the adapter was not
 /// executed; a released adapter replaces the process image instead.
-pub(crate) fn run(
+pub(super) fn run(
     host: &impl LaunchHost,
     environment: &LaunchEnvironment,
     parameters: &LaunchParameters,

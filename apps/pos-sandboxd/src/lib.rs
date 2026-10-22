@@ -275,12 +275,19 @@ pub fn run(arguments: impl IntoIterator<Item = std::ffi::OsString>) -> std::proc
                 .map_or(launcher::LauncherError::Parameters, |hex| {
                     launcher::run_launch_barrier(hex)
                 });
-            eprintln!("pos-sandboxd: {error}");
+            report(&format!("pos-sandboxd: {error}"));
             std::process::ExitCode::FAILURE
         }
         _ => {
-            eprintln!("usage: pos-sandboxd launch-barrier <lpv1-hex>");
+            report("usage: pos-sandboxd launch-barrier <lpv1-hex>");
             std::process::ExitCode::from(2)
         }
     }
+}
+
+/// One diagnostic line on standard error; a failed write changes nothing.
+#[cfg(target_os = "linux")]
+fn report(message: &str) {
+    use std::io::Write;
+    writeln!(std::io::stderr(), "{message}").ok();
 }
