@@ -209,6 +209,9 @@ pub enum ExecuteError {
     /// The launcher barrier failed.
     #[error("the launcher barrier failed")]
     Barrier(#[source] Box<dyn Error + Send + Sync>),
+    /// The barrier did not release the adapter before the attempt deadline.
+    #[error("the launcher barrier did not release before the attempt deadline")]
+    ReleaseTimeout,
     /// The verified root could not be rechecked.
     #[error("the verified root could not be rechecked")]
     Recheck(#[source] ImageActivationError),
@@ -410,8 +413,19 @@ where
         Ok(bound) => bound,
         Err(error) => return Err(abort(host, &unit, Some(&mut cgroup), error).await),
     };
-    if let Err(error) = barrier.release(&active).await {
-        let error = ExecuteError::Barrier(Box::new(error));
+    // Release must arrive before the attempt deadline (ADR-069), whatever the
+    // port does.
+    let release = tokio::time::timeout_at(
+        tokio::time::Instant::from_std(deadline),
+        barrier.release(&active),
+    )
+    .await;
+    let refused = match release {
+        Ok(Ok(())) => None,
+        Ok(Err(error)) => Some(ExecuteError::Barrier(Box::new(error))),
+        Err(_elapsed) => Some(ExecuteError::ReleaseTimeout),
+    };
+    if let Some(error) = refused {
         return Err(abort(host, &unit, Some(&mut cgroup), error).await);
     }
     let (network, empty) = match supervise(&mut cgroup, bound, store, deadline).await {

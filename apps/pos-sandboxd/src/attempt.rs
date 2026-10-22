@@ -93,7 +93,7 @@ impl AdmittedAttempt {
 ///
 /// It exists once the transient unit was started and its requested state
 /// verified. The provider records the attempt, the authority heads it was
-/// admitted and rechecked against, and the broker watchdog deadline here, and
+/// admitted with (the last-moment recheck confirmed them), and the broker watchdog deadline here, and
 /// binds everything that must belong to this attempt to it. It has no public
 /// constructor.
 #[derive(Clone, Debug)]
