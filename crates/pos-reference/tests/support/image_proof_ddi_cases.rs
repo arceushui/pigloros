@@ -200,13 +200,11 @@ fn ddi_salt(vector: &DdiVector) -> TestResult<[u8; 32]> {
 // subject common name, ": ", then the lowercase subject key identifier.
 fn kernel_key_description(certificate: &[u8]) -> TestResult<String> {
     const COMMON_NAME: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.5.4.3");
-    let certificate = Certificate::from_der(certificate)?;
+    let certificate = x509_cert::Certificate::from_der(certificate)?;
     let common_name = certificate
-        .tbs_certificate
-        .subject
-        .0
+        .tbs_certificate()
+        .subject()
         .iter()
-        .flat_map(|name| name.0.iter())
         .find(|attribute| attribute.oid == COMMON_NAME)
         .ok_or("certificate has no common name")?
         .value
@@ -214,8 +212,8 @@ fn kernel_key_description(certificate: &[u8]) -> TestResult<String> {
         .as_str()
         .to_owned();
     let (_, key_id) = certificate
-        .tbs_certificate
-        .get::<SubjectKeyIdentifier>()?
+        .tbs_certificate()
+        .get_extension::<SubjectKeyIdentifier>()?
         .ok_or("certificate has no subject key identifier")?;
     Ok(format!(
         "{common_name}: {}",
