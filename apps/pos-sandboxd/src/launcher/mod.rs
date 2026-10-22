@@ -23,7 +23,7 @@
 //! bytes. This module is linked into the same binary as the provider but its
 //! code path never calls the admission or verifier modules (owner decision
 //! Q9.11, enforced by a hosted source test). Everything environmental sits
-//! behind the crate-private [`LaunchHost`] port; only [`host::ProcessHost`]
+//! behind a crate-private host port; only the process host
 //! reads the real process.
 
 mod adapter;
