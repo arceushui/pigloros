@@ -225,7 +225,7 @@ where
     C: NetworkEndpointConnector + Send + 'static,
 {
     let served = serve_with(binding, connector, deadline_ms);
-    Ok(tokio::time::timeout(Duration::from_secs(10), served).await??)
+    tokio::time::timeout(Duration::from_secs(10), served).await?
 }
 
 #[tokio::test]
