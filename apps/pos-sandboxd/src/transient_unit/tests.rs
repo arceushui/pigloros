@@ -71,7 +71,7 @@ fn local_request_has_the_exact_ordered_dynamic_properties_and_dbus_signatures(
     assert_eq!(
         properties
             .iter()
-            .map(pos_sandboxd::SystemdTransientUnitProperty::name)
+            .map(SystemdTransientUnitProperty::name)
             .collect::<Vec<_>>(),
         EXPECTED_PROPERTY_NAMES
     );
