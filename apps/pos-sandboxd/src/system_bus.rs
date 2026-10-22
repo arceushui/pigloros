@@ -554,11 +554,11 @@ impl crate::UnitHost for SystemdTransientUnitTransport {
         Self::bind_cgroup(self, started)
     }
 
-    fn stop(
+    async fn stop(
         &self,
         unit_name: TransientServiceUnitName,
-    ) -> impl Future<Output = Result<(), SystemdTransientUnitTransportError>> + Send {
-        async move { Self::stop_job(self, unit_name).await.map(|_completed| ()) }
+    ) -> Result<(), SystemdTransientUnitTransportError> {
+        Self::stop_job(self, unit_name).await.map(|_completed| ())
     }
 
     fn kill(
