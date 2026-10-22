@@ -10,6 +10,7 @@ use std::{
     },
     sync::Mutex,
     thread,
+    time::Duration,
 };
 
 use pos_reference::sandbox_provider_protocol::{
@@ -27,7 +28,7 @@ use rustix::{
 
 use super::{
     adapter::{hold, hold_adapter, open_beneath, ELF_HEADER_BYTES, NATIVE_MACHINE},
-    barrier::{receive_release, run, send_ready},
+    barrier::{receive_release, run, send_ready, RELEASE_WAIT},
     decode_hex, decode_parameters,
     descriptors::{
         adopt, entry_number, scan_proc_self_fd, validate, Inherited, HOST_SERVICE_NAME,
@@ -898,18 +899,21 @@ fn a_clock_failure_after_release_is_not_a_release() -> TestResult {
 }
 
 #[test]
-fn an_argument_with_a_nul_byte_is_rejected_before_exec() -> TestResult {
+fn an_argument_with_a_nul_byte_is_refused_before_ready() -> TestResult {
     let (provider, release) = pair(SocketType::SEQPACKET)?;
     let directory = tempfile::tempdir()?;
     let host = TestHost::new(&directory, &release, &elf())?;
     let mut bad = parameters(vec!["a".to_owned()])?;
     bad.arguments = vec!["a\0b".to_owned()];
-    let inherited = vec![named(RELEASE_NAME, release)];
-    let worker = thread::spawn(move || run(&host, &environment(), &bad, inherited).err());
-    let (ready, _) = read_ready(&provider).ok_or("no ReadyV1")?;
-    deliver(&provider, &release_with(|_| {}, &ready)?)?;
-    let error = worker.join().map_err(|_| "panicked")?;
+    let error = run(
+        &host,
+        &environment(),
+        &bad,
+        vec![named(RELEASE_NAME, release)],
+    )
+    .err();
     assert!(matches!(error, Some(LauncherError::Parameters)));
+    assert!(read_ready(&provider).is_none());
     Ok(())
 }
 
@@ -990,7 +994,7 @@ fn a_second_queued_release_is_a_duplicate_and_a_closed_peer_is_not() -> TestResu
     deliver(&provider, &bytes)?;
     deliver(&provider, &bytes)?;
     assert!(matches!(
-        receive_release(&release),
+        receive_release(&release, RELEASE_WAIT),
         Err(LauncherError::Release(ReleaseDefect::Duplicate))
     ));
 
@@ -998,13 +1002,21 @@ fn a_second_queued_release_is_a_duplicate_and_a_closed_peer_is_not() -> TestResu
     let (provider, release) = pair(SocketType::SEQPACKET)?;
     deliver(&provider, &bytes)?;
     drop(provider);
-    assert!(receive_release(&release).is_ok());
+    assert!(receive_release(&release, RELEASE_WAIT).is_ok());
 
     // A peer that is still connected and silent after the release is fine.
     let (provider, release) = pair(SocketType::SEQPACKET)?;
     deliver(&provider, &bytes)?;
-    assert!(receive_release(&release).is_ok());
+    assert!(receive_release(&release, RELEASE_WAIT).is_ok());
     drop(provider);
+
+    // A silent peer that stays connected: the wait ends at its bound.
+    let (_silent, release) = pair(SocketType::SEQPACKET)?;
+    assert!(matches!(
+        receive_release(&release, Duration::from_millis(50)),
+        Err(LauncherError::ReleaseUnavailable)
+    ));
+    assert_eq!(RELEASE_WAIT, Duration::from_secs(30));
     Ok(())
 }
 

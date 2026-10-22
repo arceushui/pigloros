@@ -25,7 +25,11 @@ pub(super) const NATIVE_MACHINE: u16 = if cfg!(target_arch = "x86_64") {
 } else {
     0
 };
-const OPEN_FLAGS: OFlags = OFlags::RDONLY.union(OFlags::CLOEXEC);
+// `NONBLOCK` keeps a FIFO or device node from stalling the open; it is inert
+// for the regular file that passes the check and the descriptor is closed on exec.
+const OPEN_FLAGS: OFlags = OFlags::RDONLY
+    .union(OFlags::CLOEXEC)
+    .union(OFlags::NONBLOCK);
 const RESOLVE_FLAGS: ResolveFlags = ResolveFlags::BENEATH
     .union(ResolveFlags::NO_SYMLINKS)
     .union(ResolveFlags::NO_MAGICLINKS);
