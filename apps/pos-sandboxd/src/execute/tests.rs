@@ -386,7 +386,7 @@ fn job(
 fn root_for(
     log: &Log,
     attempt_id: [u8; 16],
-) -> impl FnOnce() -> Result<CheckedRoot, ImageActivationError> + Send {
+) -> impl FnOnce() -> Result<CheckedRoot, ImageActivationError> + Send + use<> {
     let log = Arc::clone(log);
     let component = TransientServiceUnitName::from_attempt_id(attempt_id)
         .map(|name| name.attempt_component().to_owned())
