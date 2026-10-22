@@ -504,23 +504,32 @@ fn verifier_rejects_any_substituted_or_mistyped_service_limit() -> Result<(), Bo
     Ok(())
 }
 
-fn request(mode: LaunchMode) -> Result<TransientUnitRequest, Box<dyn Error>> {
+fn filter() -> Result<SystemCallFilter, Box<dyn Error>> {
     let authority = SandboxSyscallSetV1::from_canonical_cbor(X86_64)?;
-    let filter = SystemCallFilter::from_selected_record(
+    Ok(SystemCallFilter::from_selected_record(
         X86_64,
         authority.syscall_set_digest,
         SandboxArchitecture::X86_64,
-    )?;
-    let inputs = TransientUnitLaunchInputs::new(
-        &CheckedRoot::for_test(ActivatedRootDirectory::new(
-            "/run/pigloros/attempt-42/root",
-        )?),
+    )?)
+}
+
+fn inputs(mode: LaunchMode) -> Result<TransientUnitLaunchInputs, Box<dyn Error>> {
+    let root = ActivatedRootDirectory::new("/run/pigloros/attempt-42/root")?;
+    Ok(TransientUnitLaunchInputs::new(
+        &CheckedRoot::for_test(root),
         LauncherSource::new("/usr/lib/pigloros/release-launcher")?,
         mode,
         descriptor()?,
-    );
+    ))
+}
+
+fn request(mode: LaunchMode) -> Result<TransientUnitRequest, Box<dyn Error>> {
     let limits = SystemdServiceLimits::from_effective_limits(&complete_effective_limits())?;
-    Ok(TransientUnitRequest::compile(inputs, filter, &limits))
+    Ok(TransientUnitRequest::compile(
+        inputs(mode)?,
+        filter()?,
+        &limits,
+    ))
 }
 
 fn complete_effective_limits() -> Vec<SandboxLimit> {
