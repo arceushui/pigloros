@@ -486,12 +486,20 @@ struct Launch {
     executions: Vec<Vec<CString>>,
 }
 
-fn launch(
+type Worker = thread::JoinHandle<(Option<LauncherError>, TestHost)>;
+
+/// A launcher running on its own thread against a socket pair.
+struct Started {
+    provider: OwnedFd,
+    worker: Worker,
+    directory: tempfile::TempDir,
+}
+
+fn start(
     configure: impl FnOnce(&mut TestHost),
     adapter: &[u8],
     arguments: Vec<String>,
-    respond: impl FnOnce(&OwnedFd, &LauncherReady) -> TestResult,
-) -> Result<Launch, Box<dyn Error>> {
+) -> Result<Started, Box<dyn Error>> {
     let (provider, release) = pair(SocketType::SEQPACKET)?;
     let directory = tempfile::tempdir()?;
     let mut host = TestHost::new(&directory, &release, adapter)?;
@@ -502,23 +510,40 @@ fn launch(
         let result = run(&host, &environment(), &parameters, inherited).err();
         (result, host)
     });
-    let received = read_ready(&provider);
-    let (ready, credentials) = match received {
-        Some((ready, credentials)) => {
-            respond(&provider, &ready)?;
-            (Some(ready), Some(credentials))
-        }
-        None => (None, None),
-    };
-    drop(provider);
+    Ok(Started {
+        provider,
+        worker,
+        directory,
+    })
+}
+
+fn finish(worker: Worker, heard: Option<(LauncherReady, UCred)>) -> Result<Launch, Box<dyn Error>> {
     let (error, host) = worker.join().map_err(|_| "launcher thread panicked")?;
     let executions = host.executions.lock().map_err(|_| "poisoned")?.clone();
     Ok(Launch {
         error: error.ok_or("the launcher returned success")?,
-        ready,
-        credentials,
+        ready: heard.as_ref().map(|(ready, _)| ready.clone()),
+        credentials: heard.map(|(_, credentials)| credentials),
         executions,
     })
+}
+
+fn launch(
+    configure: impl FnOnce(&mut TestHost),
+    adapter: &[u8],
+    arguments: Vec<String>,
+    respond: impl FnOnce(&OwnedFd, &LauncherReady) -> TestResult,
+) -> Result<Launch, Box<dyn Error>> {
+    let started = start(configure, adapter, arguments)?;
+    let heard = read_ready(&started.provider);
+    heard
+        .as_ref()
+        .map(|(ready, _)| respond(&started.provider, ready))
+        .transpose()?;
+    drop(started.provider);
+    let outcome = finish(started.worker, heard);
+    drop(started.directory);
+    outcome
 }
 
 fn read_ready(provider: &OwnedFd) -> Option<(LauncherReady, UCred)> {
