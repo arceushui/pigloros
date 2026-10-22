@@ -556,10 +556,21 @@ struct LocalRun {
     remote: thread::JoinHandle<std::io::Result<Vec<u8>>>,
 }
 
+type LocalSetup = (
+    thread::JoinHandle<std::io::Result<Vec<u8>>>,
+    NetworkExchangePlan,
+    ModePlan,
+);
+
+fn local_setup() -> TestResult<LocalSetup> {
+    let (address, remote) = remote()?;
+    let (plan, mode) = local_plan(address)?;
+    Ok((remote, plan, mode))
+}
+
 impl LocalRun {
     async fn start() -> TestResult<Self> {
-        let (address, remote) = remote()?;
-        let (plan, mode) = local_plan(address)?;
+        let (remote, plan, mode) = local_setup()?;
         let mut scenario = Scenario::new()?;
         scenario.host.adapter = AdapterScript::Exchange(plan.clone());
         let outcome = scenario.run(SandboxExecutionMode::Local, mode).await?;

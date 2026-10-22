@@ -183,17 +183,14 @@ where
     })
 }
 
-#[tokio::test]
-async fn a_bound_proxy_serves_one_verified_exchange_and_retains_its_capture() -> TestResult {
-    let parties = Parties::start()?;
-    let (adapter, binding, connector) =
-        bound_proxy(parties.plan.clone(), parties.address, LoopbackConnector)?;
-    let plan = parties.plan.clone();
-    let adapter = thread::spawn(move || adapter_exchange(adapter, &plan));
-    let served = serve_with(binding, connector, 30_000).await?;
+/// Check what one served exchange left behind.
+fn check_exchange(
+    parties: Parties,
+    adapter: thread::JoinHandle<Result<Vec<u8>, String>>,
+    served: Served,
+) -> TestResult {
     assert!(served.root.path().is_dir());
     let outcome = served.outcome?;
-
     assert!(!outcome.watchdog_expired);
     assert_eq!(outcome.session.termination(), None);
     assert_eq!(outcome.session.transcripts().len(), 1);
@@ -204,6 +201,17 @@ async fn a_bound_proxy_serves_one_verified_exchange_and_retains_its_capture() ->
     let replayed = served.store.replay(ATTEMPT, &parties.plan, digest)?;
     assert_eq!(replayed.response_bytes(), RESPONSE);
     Ok(())
+}
+
+#[tokio::test]
+async fn a_bound_proxy_serves_one_verified_exchange_and_retains_its_capture() -> TestResult {
+    let parties = Parties::start()?;
+    let (adapter, binding, connector) =
+        bound_proxy(parties.plan.clone(), parties.address, LoopbackConnector)?;
+    let plan = parties.plan.clone();
+    let adapter = thread::spawn(move || adapter_exchange(adapter, &plan));
+    let served = serve_with(binding, connector, 30_000).await?;
+    check_exchange(parties, adapter, served)
 }
 
 #[tokio::test]
