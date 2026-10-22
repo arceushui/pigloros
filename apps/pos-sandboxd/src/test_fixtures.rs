@@ -136,3 +136,28 @@ pub fn plan() -> TestResult<NetworkExchangePlan> {
         [9; 16], 0, "execute", REQUEST, RESPONSE,
     )?)
 }
+
+/// A Local proxy bound to a fresh attempt over `connector`, with the adapter
+/// end of its channel. The admission plans one exchange with `address`.
+///
+/// # Errors
+/// Fails if the channel or the binding cannot be created.
+pub fn bound_proxy<C>(
+    plan: NetworkExchangePlan,
+    address: SocketAddr,
+    connector: C,
+) -> TestResult<(zvariant::OwnedFd, crate::BoundLocalProxy, C)> {
+    let (adapter, channel) = crate::HostServiceChannel::pair(ATTEMPT)?;
+    let admission = admission(
+        ATTEMPT,
+        grant_authority(),
+        [4, 5, 6],
+        vec![(plan, capability(address))],
+    );
+    let (binding, connector) = active()?.bind_local_proxy(
+        admission,
+        crate::EstablishedNetwork::new(ATTEMPT, connector),
+        channel,
+    )?;
+    Ok((adapter, binding, connector))
+}

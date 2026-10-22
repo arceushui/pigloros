@@ -45,6 +45,15 @@ pub enum SystemdServiceLimitsError {
     WatchdogOverflow,
 }
 
+/// Whether systemd cannot enforce `value` exactly for ELM1 limit `id`.
+///
+/// `u64::MAX` is infinity for the service limits and an unbounded mount for
+/// `WorkBytes`; zero is infinity for the limits that read it that way.
+const fn is_unenforceable(id: usize, value: u64) -> bool {
+    (value == u64::MAX && (id < 7 || id == WORK_BYTES_LIMIT_ID))
+        || (value == 0 && matches!(id, 0 | 2 | 3 | 4))
+}
+
 impl SystemdServiceLimits {
     /// Compile exact systemd values from one complete, already authorized ELM1.
     ///
@@ -67,19 +76,15 @@ impl SystemdServiceLimits {
         }
         let mut requested = [0; 7];
         let work_bytes = limits[WORK_BYTES_LIMIT_ID].value;
-        // tmpfs reads `size=18446744073709551615` as an unbounded mount.
-        if work_bytes == u64::MAX {
-            return Err(SystemdServiceLimitsError::UnenforceableLimit(
-                limits[WORK_BYTES_LIMIT_ID].limit_id,
-            ));
-        }
-        for (id, limit) in limits.iter().take(requested.len()).enumerate() {
-            if limit.value == u64::MAX || ([0, 2, 3, 4].contains(&id) && limit.value == 0) {
+        for (id, limit) in limits.iter().enumerate() {
+            if is_unenforceable(id, limit.value) {
                 return Err(SystemdServiceLimitsError::UnenforceableLimit(
                     limit.limit_id,
                 ));
             }
-            requested[id] = limit.value;
+            if let Some(slot) = requested.get_mut(id) {
+                *slot = limit.value;
+            }
         }
         requested[4] = requested[4]
             .checked_mul(1_000)
@@ -306,6 +311,34 @@ pub enum SystemdTransientUnitValue {
 }
 
 impl SystemdTransientUnitValue {
+    /// Readback equality of the array-valued kinds; anything else differs.
+    fn collection_matches(&self, observed: &SystemdTransientUnitReadbackValue) -> bool {
+        match (self, observed) {
+            (
+                Self::BindReadOnlyPaths(expected),
+                SystemdTransientUnitReadbackValue::BindReadOnlyPaths(actual),
+            ) => expected == actual,
+            (
+                Self::ExtraFileDescriptors(expected),
+                SystemdTransientUnitReadbackValue::StringArray(actual),
+            ) => expected.iter().map(|(_, name)| name).eq(actual.iter()),
+            (
+                Self::TemporaryFileSystem(expected),
+                SystemdTransientUnitReadbackValue::TemporaryFileSystem(actual),
+            ) => expected == actual,
+            _ => false,
+        }
+    }
+
+    /// The signature of the array-valued kinds; `a(ss)` is the last of them.
+    const fn collection_signature(&self) -> &'static str {
+        match self {
+            Self::BindReadOnlyPaths(_) => "a(ssbt)",
+            Self::ExtraFileDescriptors(_) => "a(hs)",
+            _ => "a(ss)",
+        }
+    }
+
     fn try_clone_for_submission(&self) -> Result<Self, zvariant::Error> {
         match self {
             Self::Static(value) => Ok(Self::Static(*value)),
@@ -316,17 +349,25 @@ impl SystemdTransientUnitValue {
                 Ok(Self::RestrictAddressFamilies(value.clone()))
             }
             Self::Numeric(value) => Ok(Self::Numeric(*value)),
-            Self::ExtraFileDescriptors(value) => value
-                .iter()
-                .map(|(descriptor, name)| {
-                    let descriptor = Fd::from(descriptor).try_to_owned().map(OwnedFd::from)?;
-                    Ok((descriptor, name.clone()))
-                })
-                .collect::<Result<Vec<_>, _>>()
-                .map(Self::ExtraFileDescriptors),
+            Self::ExtraFileDescriptors(value) => {
+                clone_descriptors(value).map(Self::ExtraFileDescriptors)
+            }
             Self::TemporaryFileSystem(value) => Ok(Self::TemporaryFileSystem(value.clone())),
         }
     }
+}
+
+fn clone_descriptors(
+    descriptors: &[(OwnedFd, String)],
+) -> Result<Vec<(OwnedFd, String)>, zvariant::Error> {
+    descriptors
+        .iter()
+        .map(|(descriptor, name)| {
+            Fd::from(descriptor)
+                .try_to_owned()
+                .map(|descriptor| (OwnedFd::from(descriptor), name.clone()))
+        })
+        .collect()
 }
 
 /// One named typed property ready for `StartTransientUnit` serialization.
@@ -359,12 +400,10 @@ impl SystemdTransientUnitProperty {
         match &self.value {
             SystemdTransientUnitValue::Static(value) => value.dbus_signature(),
             SystemdTransientUnitValue::RootDirectory(_) => "s",
-            SystemdTransientUnitValue::BindReadOnlyPaths(_) => "a(ssbt)",
             SystemdTransientUnitValue::SystemCallFilter(_)
             | SystemdTransientUnitValue::RestrictAddressFamilies(_) => "(bas)",
             SystemdTransientUnitValue::Numeric(value) => value.dbus_signature(),
-            SystemdTransientUnitValue::ExtraFileDescriptors(_) => "a(hs)",
-            SystemdTransientUnitValue::TemporaryFileSystem(_) => "a(ss)",
+            collection => collection.collection_signature(),
         }
     }
 
@@ -390,10 +429,6 @@ impl SystemdTransientUnitProperty {
                     SystemdTransientUnitReadbackValue::String(actual),
                 ) => expected == actual,
                 (
-                    SystemdTransientUnitValue::BindReadOnlyPaths(expected),
-                    SystemdTransientUnitReadbackValue::BindReadOnlyPaths(actual),
-                ) => expected == actual,
-                (
                     SystemdTransientUnitValue::SystemCallFilter(_),
                     SystemdTransientUnitReadbackValue::BoolStringArray(actual),
                 ) => system_call_filter.verify_readback(actual).is_ok(),
@@ -407,15 +442,7 @@ impl SystemdTransientUnitProperty {
                     ),
                     SystemdTransientUnitReadbackValue::U64(actual),
                 ) => expected == actual,
-                (
-                    SystemdTransientUnitValue::ExtraFileDescriptors(expected),
-                    SystemdTransientUnitReadbackValue::StringArray(actual),
-                ) => expected.iter().map(|(_, name)| name).eq(actual.iter()),
-                (
-                    SystemdTransientUnitValue::TemporaryFileSystem(expected),
-                    SystemdTransientUnitReadbackValue::TemporaryFileSystem(actual),
-                ) => expected == actual,
-                _ => false,
+                (expected, actual) => expected.collection_matches(actual),
             }
     }
 
