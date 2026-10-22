@@ -312,7 +312,7 @@ pub enum SystemdTransientUnitValue {
 
 impl SystemdTransientUnitValue {
     /// The same name-list kind carrying `value`.
-    fn with_names(&self, value: (bool, Vec<String>)) -> Self {
+    const fn with_names(&self, value: (bool, Vec<String>)) -> Self {
         if matches!(self, Self::SystemCallFilter(_)) {
             Self::SystemCallFilter(value)
         } else {
