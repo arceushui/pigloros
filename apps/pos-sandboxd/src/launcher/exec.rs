@@ -8,6 +8,9 @@
 //! process and the launcher holds no mountfsd or system-bus descriptor. A
 //! hosted source test (`provider_process_creation_public`) enforces all of
 //! this.
+//!
+//! The adapter is hashed and executed from the same held descriptor; that is
+//! sound because the activated root is a read-only, dm-verity-backed mount.
 
 use std::{ffi::CString, fs::File, io};
 
@@ -19,5 +22,5 @@ use nix::{fcntl::AtFlags, unistd::execveat};
 pub(super) fn replace_process_image(adapter: &File, argv: &[CString]) -> io::Error {
     let environment: [CString; 0] = [];
     let Err(errno) = execveat(adapter, c"", argv, &environment, AtFlags::AT_EMPTY_PATH);
-    io::Error::from_raw_os_error(errno as i32)
+    io::Error::from(errno)
 }

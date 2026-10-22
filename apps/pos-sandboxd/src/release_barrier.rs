@@ -24,8 +24,8 @@ use rustix::net::{
 
 use crate::release_signer::{issue_release, ReleaseSigner, ReleaseSignerError};
 
-/// Largest `ReadyV1` datagram the provider accepts.
 const TRUNCATED: ReturnFlags = ReturnFlags::TRUNC.union(ReturnFlags::CTRUNC);
+/// Largest `ReadyV1` datagram the provider accepts.
 const MAX_READY_BYTES: usize = 4096;
 
 /// Held or independently observed evidence for one launch (the `ReadyV1`

@@ -7,6 +7,7 @@ use std::{
     io::{IoSlice, IoSliceMut},
     mem::MaybeUninit,
     os::fd::OwnedFd,
+    time::Duration,
 };
 
 use pos_reference::sandbox_provider_protocol::{
@@ -16,8 +17,10 @@ use pos_reference::sandbox_provider_protocol::{
 use rustix::{
     io::{fcntl_setfd, Errno, FdFlags},
     net::{
-        recvmsg, sendmsg, sockopt::socket_peercred, RecvAncillaryBuffer, RecvFlags, ReturnFlags,
-        SendAncillaryBuffer, SendAncillaryMessage, SendFlags, UCred,
+        recvmsg, sendmsg,
+        sockopt::{set_socket_timeout, socket_peercred, Timeout},
+        RecvAncillaryBuffer, RecvFlags, ReturnFlags, SendAncillaryBuffer, SendAncillaryMessage,
+        SendFlags, UCred,
     },
     process::getgid,
     process::getpid,
@@ -33,6 +36,10 @@ use super::{
 };
 
 const TRUNCATED: ReturnFlags = ReturnFlags::TRUNC.union(ReturnFlags::CTRUNC);
+/// The launcher waits at most this long for `ReleaseV1` after `ReadyV1`
+/// (ADR-069: 30 seconds; the canonical constant belongs to #212 and a provider
+/// may only be stricter).
+pub(super) const RELEASE_WAIT: Duration = Duration::from_secs(30);
 /// Largest `ReleaseV1` datagram the launcher accepts.
 const MAX_RELEASE_BYTES: usize = 4096;
 const MODES: [SandboxExecutionMode; 4] = [
@@ -62,6 +69,8 @@ pub(super) fn run(
             .map_err(|_| LauncherError::Adapter)?,
     )?;
     let launcher = hold(host.open_launcher().map_err(|_| LauncherError::Identity)?)?;
+    // Built before ReadyV1, so a bad vector is refused before the provider can release.
+    let argv = argument_vector(parameters)?;
     let (ready, ready_bytes) = LauncherReady::new(LauncherReadyFields {
         attempt_id: parameters.attempt_id,
         nonce: parameters.nonce,
@@ -78,7 +87,7 @@ pub(super) fn run(
     .and_then(|ready| ready.to_canonical_cbor().map(|bytes| (ready, bytes)))
     .map_err(|_| LauncherError::Ready)?;
     send_ready(&layout.release, &ready_bytes)?;
-    let release = receive_release(&layout.release)?;
+    let release = receive_release(&layout.release, RELEASE_WAIT)?;
     let now = host
         .monotonic_ns()
         .map_err(|_| LauncherError::ReleaseUnavailable)?;
@@ -96,7 +105,6 @@ pub(super) fn run(
         // acted on.
         fcntl_setfd(proxy, FdFlags::empty()).ok();
     }
-    let argv = argument_vector(parameters)?;
     Err(LauncherError::Exec(
         host.replace_process(&adapter.file, &argv),
     ))
@@ -136,7 +144,14 @@ pub(super) fn send_ready(release: &OwnedFd, bytes: &[u8]) -> Result<(), Launcher
 
 /// Receive exactly one complete `ReleaseV1` datagram with no control data,
 /// then prove no second message is already queued.
-pub(super) fn receive_release(release: &OwnedFd) -> Result<ExecutionRelease, LauncherError> {
+pub(super) fn receive_release(
+    release: &OwnedFd,
+    wait: Duration,
+) -> Result<ExecutionRelease, LauncherError> {
+    // A failure to arm the timeout leaves the wait unbounded, so it refuses.
+    set_socket_timeout(release, Timeout::Recv, Some(wait))
+        .ok()
+        .ok_or(LauncherError::ReleaseUnavailable)?;
     let mut buffer = [0_u8; MAX_RELEASE_BYTES];
     let received = recvmsg(
         release,

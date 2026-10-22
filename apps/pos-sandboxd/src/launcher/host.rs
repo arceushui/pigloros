@@ -14,7 +14,6 @@ use rustix::{
 
 use super::{adapter::open_beneath, descriptors::scan_proc_self_fd, exec::replace_process_image};
 
-/// The uid that must own the release channel peer: the root provider.
 const ROOT_FLAGS: OFlags = OFlags::PATH.union(OFlags::DIRECTORY).union(OFlags::CLOEXEC);
 const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
 
