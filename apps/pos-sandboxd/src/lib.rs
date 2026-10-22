@@ -188,9 +188,16 @@ impl SystemdDynamicPropertyKind {
             Self::SystemCallFilter => "SystemCallFilter",
             Self::RestrictAddressFamilies => "RestrictAddressFamilies",
             Self::OperatingLimit(property) => property.name(),
+            tail => tail.tail_name(),
+        }
+    }
+
+    /// The last kinds; `TemporaryFileSystem` is the final one.
+    const fn tail_name(self) -> &'static str {
+        match self {
             Self::FileDescriptorStoreMax => "FileDescriptorStoreMax",
             Self::ExtraFileDescriptors => "ExtraFileDescriptors",
-            Self::TemporaryFileSystem => "TemporaryFileSystem",
+            _ => "TemporaryFileSystem",
         }
     }
 }

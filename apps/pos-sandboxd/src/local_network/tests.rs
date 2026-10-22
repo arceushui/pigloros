@@ -9,13 +9,14 @@ use std::{
 };
 
 use pos_reference::sandbox_provider_protocol::{
-    AdmissionAuthority, NetworkEndpointConnector, NetworkExchangeReply, NetworkExchangeRequest,
+    AdmissionAuthority, NetworkCaptureStore, NetworkEndpointConnector, NetworkExchangePlan,
+    NetworkExchangeReply, NetworkExchangeRequest,
 };
 
 use super::*;
 use crate::test_fixtures::{
-    active, admission, capability, capture_store, grant_authority, plan, remote, LoopbackConnector,
-    TestResult, ATTEMPT, OTHER, REQUEST, RESPONSE,
+    active, admission, bound_proxy, capture_store, grant_authority, plan, remote,
+    LoopbackConnector, TestResult, ATTEMPT, OTHER, REQUEST, RESPONSE,
 };
 
 fn bind(
@@ -106,84 +107,100 @@ fn the_stream_reads_writes_and_flushes_the_bound_channel() -> TestResult {
     Ok(())
 }
 
+const UNUSED_ENDPOINT: SocketAddr =
+    SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 9);
+
+/// The remote, the plan and the thread that answers the plan.
+struct Parties {
+    address: SocketAddr,
+    server: thread::JoinHandle<io::Result<Vec<u8>>>,
+    plan: NetworkExchangePlan,
+}
+
+impl Parties {
+    fn start() -> TestResult<Self> {
+        let (address, server) = remote()?;
+        Ok(Self {
+            address,
+            server,
+            plan: plan()?,
+        })
+    }
+}
+
+/// Send the planned request over the adapter end and return the response.
+fn adapter_exchange(
+    adapter: zvariant::OwnedFd,
+    plan: &NetworkExchangePlan,
+) -> Result<Vec<u8>, String> {
+    let mut stream = UnixStream::from(std::os::fd::OwnedFd::from(adapter));
+    NetworkExchangeRequest::new(plan, REQUEST)
+        .map_err(|error| error.to_string())?
+        .write_to(&mut stream)
+        .map_err(|error| error.to_string())?;
+    NetworkExchangeReply::read_from(&mut stream, ATTEMPT, plan)
+        .map_err(|error| error.to_string())?
+        .response_bytes()
+        .map(<[u8]>::to_vec)
+        .ok_or_else(|| "the reply was not captured".to_owned())
+}
+
+fn join_pair(
+    server: thread::JoinHandle<io::Result<Vec<u8>>>,
+    adapter: thread::JoinHandle<Result<Vec<u8>, String>>,
+) -> TestResult<(Vec<u8>, Vec<u8>)> {
+    Ok((
+        server.join().map_err(|_| "remote thread")??,
+        adapter.join().map_err(|_| "adapter thread")??,
+    ))
+}
+
+/// Serve `binding` against a fresh capture store until `deadline_ms`.
+async fn serve_with<C>(
+    binding: BoundLocalProxy,
+    connector: C,
+    deadline_ms: u64,
+) -> TestResult<(Arc<NetworkCaptureStore>, Result<ServedProxy, ServeError>)>
+where
+    C: NetworkEndpointConnector + Send + 'static,
+{
+    let (_root, store) = capture_store()?;
+    let deadline = Instant::now() + Duration::from_millis(deadline_ms);
+    let outcome = binding
+        .serve_until(connector, Arc::clone(&store), deadline)
+        .await;
+    Ok((store, outcome))
+}
+
 #[tokio::test]
 async fn a_bound_proxy_serves_one_verified_exchange_and_retains_its_capture() -> TestResult {
-    let (address, server) = remote()?;
-    let plan = plan()?;
-    let admission = admission(
-        ATTEMPT,
-        grant_authority(),
-        [4, 5, 6],
-        vec![(plan.clone(), capability(address))],
-    );
-    let (adapter, channel) = HostServiceChannel::pair(ATTEMPT)?;
-    let (binding, connector) = active()?.bind_local_proxy(
-        admission,
-        EstablishedNetwork::new(ATTEMPT, LoopbackConnector),
-        channel,
-    )?;
-    let adapter_plan = plan.clone();
-    let adapter = thread::spawn(move || -> Result<Vec<u8>, String> {
-        let mut adapter = UnixStream::from(std::os::fd::OwnedFd::from(adapter));
-        NetworkExchangeRequest::new(&adapter_plan, REQUEST)
-            .map_err(|error| error.to_string())?
-            .write_to(&mut adapter)
-            .map_err(|error| error.to_string())?;
-        NetworkExchangeReply::read_from(&mut adapter, ATTEMPT, &adapter_plan)
-            .map_err(|error| error.to_string())?
-            .response_bytes()
-            .map(<[u8]>::to_vec)
-            .ok_or_else(|| "the reply was not captured".to_owned())
-    });
-    let (_root, store) = capture_store()?;
-    let outcome = binding
-        .serve_until(
-            connector,
-            Arc::clone(&store),
-            Instant::now() + Duration::from_secs(30),
-        )
-        .await?;
+    let parties = Parties::start()?;
+    let (adapter, binding, connector) =
+        bound_proxy(parties.plan.clone(), parties.address, LoopbackConnector)?;
+    let plan = parties.plan.clone();
+    let adapter = thread::spawn(move || adapter_exchange(adapter, &plan));
+    let (store, outcome) = serve_with(binding, connector, 30_000).await?;
+    let outcome = outcome?;
 
     assert!(!outcome.watchdog_expired);
     assert_eq!(outcome.session.termination(), None);
     assert_eq!(outcome.session.transcripts().len(), 1);
-    assert_eq!(
-        server.join().map_err(|_| "remote thread")??,
-        REQUEST.to_vec()
-    );
-    assert_eq!(
-        adapter.join().map_err(|_| "adapter thread")??,
-        RESPONSE.to_vec()
-    );
-    let replayed = store.replay(ATTEMPT, &plan, outcome.session.transcripts()[0].digest())?;
+    let (request, response) = join_pair(parties.server, adapter)?;
+    assert_eq!(request, REQUEST.to_vec());
+    assert_eq!(response, RESPONSE.to_vec());
+    let digest = outcome.session.transcripts()[0].digest();
+    let replayed = store.replay(ATTEMPT, &parties.plan, digest)?;
     assert_eq!(replayed.response_bytes(), RESPONSE);
     Ok(())
 }
 
 #[tokio::test]
 async fn a_stalled_adapter_is_closed_at_the_attempt_deadline() -> TestResult {
-    let (_adapter, channel) = HostServiceChannel::pair(ATTEMPT)?;
-    let plan = plan()?;
-    let (binding, connector) = active()?.bind_local_proxy(
-        admission(
-            ATTEMPT,
-            grant_authority(),
-            [4, 5, 6],
-            vec![(plan, capability(SocketAddr::from(([127, 0, 0, 1], 9))))],
-        ),
-        EstablishedNetwork::new(ATTEMPT, LoopbackConnector),
-        channel,
-    )?;
-    let (_root, store) = capture_store()?;
-    let started = Instant::now();
     // The adapter holds its end open and never sends a frame.
-    let outcome = binding
-        .serve_until(
-            connector,
-            store,
-            Instant::now() + Duration::from_millis(200),
-        )
-        .await?;
+    let (_adapter, binding, connector) = bound_proxy(plan()?, UNUSED_ENDPOINT, LoopbackConnector)?;
+    let started = Instant::now();
+    let (_store, outcome) = serve_with(binding, connector, 200).await?;
+    let outcome = outcome?;
     assert!(outcome.watchdog_expired);
     assert!(started.elapsed() >= Duration::from_millis(200));
     assert!(outcome.session.transcripts().is_empty());
@@ -204,29 +221,17 @@ impl NetworkEndpointConnector for PanickingConnector {
 #[tokio::test]
 async fn a_failed_proxy_task_is_reported() -> TestResult {
     let plan = plan()?;
-    let (adapter, channel) = HostServiceChannel::pair(ATTEMPT)?;
-    let (binding, connector) = active()?.bind_local_proxy(
-        admission(
-            ATTEMPT,
-            grant_authority(),
-            [4, 5, 6],
-            vec![(
-                plan.clone(),
-                capability(SocketAddr::from(([127, 0, 0, 1], 9))),
-            )],
-        ),
-        EstablishedNetwork::new(ATTEMPT, PanickingConnector),
-        channel,
-    )?;
-    let mut adapter = UnixStream::from(std::os::fd::OwnedFd::from(adapter));
-    NetworkExchangeRequest::new(&plan, REQUEST)?.write_to(&mut adapter)?;
-    let (_root, store) = capture_store()?;
-    let error = binding
-        .serve_until(connector, store, Instant::now() + Duration::from_secs(30))
-        .await
-        .err()
-        .ok_or("a panicking connector was served")?;
-    assert_eq!(error.to_string(), "the proxy task did not finish");
-    assert!(error.source().is_some());
+    let (adapter, binding, connector) =
+        bound_proxy(plan.clone(), UNUSED_ENDPOINT, PanickingConnector)?;
+    let adapter = thread::spawn(move || adapter_exchange(adapter, &plan));
+    let (_store, outcome) = serve_with(binding, connector, 30_000).await?;
+    let error = outcome.err();
+    assert_eq!(
+        error.as_ref().map(ToString::to_string).as_deref(),
+        Some("the proxy task did not finish")
+    );
+    assert!(error.is_some_and(|error| error.source().is_some()));
+    // The task died with the channel, so the adapter saw no reply.
+    assert!(adapter.join().map_err(|_| "adapter thread")?.is_err());
     Ok(())
 }

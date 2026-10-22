@@ -767,6 +767,16 @@ async fn read_dynamic_property(
                 .await
                 .map(SystemdTransientUnitReadbackValue::U64)
         }
+        tail => read_tail_property(service, tail).await,
+    }
+}
+
+/// The last dynamic kinds; `TemporaryFileSystem` is the final one.
+async fn read_tail_property(
+    service: &ServiceProxy<'_>,
+    kind: SystemdDynamicPropertyKind,
+) -> Result<SystemdTransientUnitReadbackValue, zbus::Error> {
+    match kind {
         SystemdDynamicPropertyKind::FileDescriptorStoreMax => service
             .file_descriptor_store_max()
             .await
@@ -775,7 +785,7 @@ async fn read_dynamic_property(
             .extra_file_descriptor_names()
             .await
             .map(SystemdTransientUnitReadbackValue::StringArray),
-        SystemdDynamicPropertyKind::TemporaryFileSystem => service
+        _ => service
             .temporary_file_system()
             .await
             .map(SystemdTransientUnitReadbackValue::TemporaryFileSystem),
@@ -931,30 +941,36 @@ const fn classify_call_error(error: zbus::Error) -> SystemdTransientUnitTranspor
 impl SystemdTransientUnitValue {
     fn into_dbus_value(self) -> Variant<'static> {
         match self {
-            Self::Static(value) => match value {
-                SystemdHardeningValue::Bool(value) => Variant::from(value),
-                SystemdHardeningValue::String(value) => Variant::from(value.to_owned()),
-                SystemdHardeningValue::U64(value) => Variant::from(value),
-                SystemdHardeningValue::U32(value) => Variant::from(value),
-                SystemdHardeningValue::StringArray(value) => {
-                    Variant::from(value.iter().map(ToString::to_string).collect::<Vec<_>>())
-                }
-            },
+            Self::Static(value) => static_dbus_value(value),
             Self::RootDirectory(value) => Variant::from(value),
             Self::BindReadOnlyPaths(value) => Variant::from(value),
             Self::SystemCallFilter(value) | Self::RestrictAddressFamilies(value) => {
                 Variant::from(value)
             }
-            Self::Numeric(value) => match value {
-                crate::SystemdTransientUnitNumericValue::OperatingLimit(value) => {
-                    Variant::from(value)
-                }
-                crate::SystemdTransientUnitNumericValue::FileDescriptorStoreMax(value) => {
-                    Variant::from(value)
-                }
-            },
+            Self::Numeric(value) => numeric_dbus_value(value),
             Self::ExtraFileDescriptors(value) => extra_file_descriptors_value(value),
-            Self::TemporaryFileSystem(value) => Value::from(value),
+            Self::TemporaryFileSystem(value) => Variant::from(value),
+        }
+    }
+}
+
+fn static_dbus_value(value: SystemdHardeningValue) -> Variant<'static> {
+    match value {
+        SystemdHardeningValue::Bool(value) => Variant::from(value),
+        SystemdHardeningValue::String(value) => Variant::from(value.to_owned()),
+        SystemdHardeningValue::U64(value) => Variant::from(value),
+        SystemdHardeningValue::U32(value) => Variant::from(value),
+        SystemdHardeningValue::StringArray(value) => {
+            Variant::from(value.iter().map(ToString::to_string).collect::<Vec<_>>())
+        }
+    }
+}
+
+fn numeric_dbus_value(value: crate::SystemdTransientUnitNumericValue) -> Variant<'static> {
+    match value {
+        crate::SystemdTransientUnitNumericValue::OperatingLimit(value) => Variant::from(value),
+        crate::SystemdTransientUnitNumericValue::FileDescriptorStoreMax(value) => {
+            Variant::from(value)
         }
     }
 }

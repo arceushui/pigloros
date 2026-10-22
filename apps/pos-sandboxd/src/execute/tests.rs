@@ -1,6 +1,7 @@
 use std::{
     fs::File,
     future::Future,
+    net::SocketAddr,
     os::{
         fd::{AsFd, OwnedFd as StdOwnedFd},
         unix::net::UnixStream,
@@ -111,31 +112,20 @@ impl FakeHost {
 
     fn observe(&self, request: &TransientUnitRequest) -> Option<StdOwnedFd> {
         let mut observed = Observed::default();
-        let mut adapter_end = None;
         for property in request.requested_properties() {
-            match property.value() {
-                SystemdTransientUnitValue::RootDirectory(root) => observed.root.clone_from(root),
-                SystemdTransientUnitValue::RestrictAddressFamilies(families) => {
-                    observed.families.clone_from(families);
-                }
-                SystemdTransientUnitValue::TemporaryFileSystem(work) => {
-                    observed.work.clone_from(work);
-                }
-                SystemdTransientUnitValue::ExtraFileDescriptors(descriptors) => {
-                    observed.descriptors =
-                        descriptors.iter().map(|(_, name)| name.clone()).collect();
-                    adapter_end = descriptors
-                        .iter()
-                        .find(|(_, name)| name == HOST_SERVICE)
-                        .and_then(|(descriptor, _)| descriptor.as_fd().try_clone_to_owned().ok());
-                }
-                _other => {}
-            }
+            absorb(&mut observed, property.value());
         }
+        observed.descriptors = extra_descriptors(request)
+            .iter()
+            .map(|(_, name)| name.clone())
+            .collect();
         if let Ok(mut slot) = self.observed.lock() {
             *slot = observed;
         }
-        adapter_end
+        extra_descriptors(request)
+            .iter()
+            .find(|(_, name)| name == HOST_SERVICE)
+            .and_then(|(descriptor, _)| descriptor.as_fd().try_clone_to_owned().ok())
     }
 
     fn drive(&self, adapter_end: StdOwnedFd) {
@@ -186,6 +176,30 @@ impl FakeHost {
             .map(|observed| observed.clone())
             .unwrap_or_default()
     }
+}
+
+fn absorb(observed: &mut Observed, value: &SystemdTransientUnitValue) {
+    match value {
+        SystemdTransientUnitValue::RootDirectory(root) => observed.root.clone_from(root),
+        SystemdTransientUnitValue::RestrictAddressFamilies(families) => {
+            observed.families.clone_from(families);
+        }
+        SystemdTransientUnitValue::TemporaryFileSystem(work) => observed.work.clone_from(work),
+        _other => {}
+    }
+}
+
+fn extra_descriptors(request: &TransientUnitRequest) -> &[(OwnedFd, String)] {
+    request
+        .requested_properties()
+        .iter()
+        .find_map(|property| match property.value() {
+            SystemdTransientUnitValue::ExtraFileDescriptors(descriptors) => {
+                Some(descriptors.as_slice())
+            }
+            _other => None,
+        })
+        .unwrap_or_default()
 }
 
 struct FakeCgroup {
@@ -369,29 +383,15 @@ fn limits(watchdog_ms: u64) -> Vec<SandboxLimit> {
         .collect()
 }
 
-fn attempt(mode: SandboxExecutionMode) -> TestResult<AdmittedAttempt> {
-    Ok(AdmittedAttempt::for_test(ATTEMPT, authority(), mode)?)
-}
+type Outcome = Result<AttemptExecution<String, FakeCgroup>, ExecuteFailure>;
 
-fn job(
-    attempt: AdmittedAttempt,
-    mode: ModePlan,
-    store: &Arc<NetworkCaptureStore>,
-    watchdog_ms: u64,
-) -> TestResult<ExecuteJob> {
+fn filter() -> TestResult<SystemCallFilter> {
     let record = SandboxSyscallSetV1::from_canonical_cbor(X86_64)?;
-    Ok(ExecuteJob {
-        attempt,
-        launcher_source: LauncherSource::new("/usr/lib/pigloros/release-launcher")?,
-        system_call_filter: SystemCallFilter::from_selected_record(
-            X86_64,
-            record.syscall_set_digest,
-            SandboxArchitecture::X86_64,
-        )?,
-        service_limits: SystemdServiceLimits::from_effective_limits(&limits(watchdog_ms))?,
-        mode,
-        capture_store: Arc::clone(store),
-    })
+    Ok(SystemCallFilter::from_selected_record(
+        X86_64,
+        record.syscall_set_digest,
+        SandboxArchitecture::X86_64,
+    )?)
 }
 
 fn root_for(
@@ -424,30 +424,113 @@ fn names(entries: &[&str]) -> Vec<String> {
     entries.iter().map(|entry| (*entry).to_owned()).collect()
 }
 
-async fn run(
-    host: &FakeHost,
-    barrier: &mut FakeBarrier,
-    job: ExecuteJob,
-    log: &Log,
-) -> Result<AttemptExecution<String, FakeCgroup>, ExecuteFailure> {
-    execute(host, barrier, &LoopbackNetwork, job, root_for(log, ATTEMPT)).await
-}
-
 fn failure<T>(result: Result<T, ExecuteFailure>) -> TestResult<ExecuteFailure> {
     result
         .err()
         .ok_or_else(|| "the execution unexpectedly succeeded".into())
 }
 
-#[tokio::test]
-async fn a_local_attempt_serves_fd3_once_released_and_reports_its_transcripts() -> TestResult {
-    let (address, remote) = remote()?;
+/// The fake ports and the capture store of one execution.
+struct Scenario {
+    log: Log,
+    host: FakeHost,
+    barrier: FakeBarrier,
+    store: Arc<NetworkCaptureStore>,
+    _root: Option<tempfile::TempDir>,
+}
+
+impl Scenario {
+    fn new() -> TestResult<Self> {
+        let (root, store) = capture_store()?;
+        let mut scenario = Self::sharing(&store);
+        scenario._root = Some(root);
+        Ok(scenario)
+    }
+
+    fn sharing(store: &Arc<NetworkCaptureStore>) -> Self {
+        let log = Log::default();
+        Self {
+            host: FakeHost::new(&log),
+            barrier: FakeBarrier::new(&log),
+            log,
+            store: Arc::clone(store),
+            _root: None,
+        }
+    }
+
+    fn entries(&self) -> Vec<String> {
+        recorded(&self.log)
+    }
+
+    fn job(
+        &self,
+        attempt_id: [u8; 16],
+        mode: SandboxExecutionMode,
+        plan: ModePlan,
+        watchdog_ms: u64,
+    ) -> TestResult<ExecuteJob> {
+        Ok(ExecuteJob {
+            attempt: AdmittedAttempt::for_test(attempt_id, authority(), mode)?,
+            launcher_source: LauncherSource::new("/usr/lib/pigloros/release-launcher")?,
+            system_call_filter: filter()?,
+            service_limits: SystemdServiceLimits::from_effective_limits(&limits(watchdog_ms))?,
+            mode: plan,
+            capture_store: Arc::clone(&self.store),
+        })
+    }
+
+    async fn run_on<N: LocalNetworkPort + Sync>(
+        &mut self,
+        network: &N,
+        job: ExecuteJob,
+        recheck: impl FnOnce() -> Result<CheckedRoot, ImageActivationError> + Send,
+    ) -> Outcome {
+        execute(&self.host, &mut self.barrier, network, job, recheck).await
+    }
+
+    async fn run_as(
+        &mut self,
+        attempt_id: [u8; 16],
+        mode: SandboxExecutionMode,
+        plan: ModePlan,
+    ) -> TestResult<Outcome> {
+        let job = self.job(attempt_id, mode, plan, GENEROUS_WATCHDOG_MS)?;
+        let recheck = root_for(&self.log, attempt_id);
+        Ok(self.run_on(&LoopbackNetwork, job, recheck).await)
+    }
+
+    async fn run(&mut self, mode: SandboxExecutionMode, plan: ModePlan) -> TestResult<Outcome> {
+        self.run_as(ATTEMPT, mode, plan).await
+    }
+
+    async fn run_watched(
+        &mut self,
+        mode: SandboxExecutionMode,
+        plan: ModePlan,
+        watchdog_ms: u64,
+    ) -> TestResult<Outcome> {
+        let job = self.job(ATTEMPT, mode, plan, watchdog_ms)?;
+        let recheck = root_for(&self.log, ATTEMPT);
+        Ok(self.run_on(&LoopbackNetwork, job, recheck).await)
+    }
+
+    async fn air_gapped(&mut self) -> TestResult<Outcome> {
+        self.run(SandboxExecutionMode::AirGapped, ModePlan::AirGapped)
+            .await
+    }
+
+    async fn fails(&mut self) -> TestResult<ExecuteFailure> {
+        let outcome = self.air_gapped().await?;
+        failure(outcome)
+    }
+
+    fn cgroup_kills(&self) -> usize {
+        self.host.cgroup_kills.load(Ordering::SeqCst)
+    }
+}
+
+fn local_plan(address: SocketAddr) -> TestResult<(NetworkExchangePlan, ModePlan)> {
     let plan = plan()?;
-    let (_root, store) = capture_store()?;
-    let log = Log::default();
-    let mut host = FakeHost::new(&log);
-    host.adapter = AdapterScript::Exchange(plan.clone());
-    let mut barrier = FakeBarrier::new(&log);
     let admission = crate::test_fixtures::admission(
         ATTEMPT,
         grant_authority(),
@@ -457,19 +540,52 @@ async fn a_local_attempt_serves_fd3_once_released_and_reports_its_transcripts() 
     let mode = ModePlan::Local {
         admission: Box::new(admission),
     };
-    let job = job(
-        attempt(SandboxExecutionMode::Local)?,
-        mode,
-        &store,
-        GENEROUS_WATCHDOG_MS,
-    )?;
+    Ok((plan, mode))
+}
 
-    let execution = run(&host, &mut barrier, job, &log).await?;
+const UNUSED_ENDPOINT: SocketAddr =
+    SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 9);
 
+/// A finished Local attempt with its remote and adapter observations.
+struct LocalRun {
+    scenario: Scenario,
+    execution: AttemptExecution<String, FakeCgroup>,
+    plan: NetworkExchangePlan,
+    remote: thread::JoinHandle<std::io::Result<Vec<u8>>>,
+}
+
+impl LocalRun {
+    async fn start() -> TestResult<Self> {
+        let (address, remote) = remote()?;
+        let (plan, mode) = local_plan(address)?;
+        let mut scenario = Scenario::new()?;
+        scenario.host.adapter = AdapterScript::Exchange(plan.clone());
+        let outcome = scenario.run(SandboxExecutionMode::Local, mode).await?;
+        Ok(Self {
+            execution: outcome?,
+            scenario,
+            plan,
+            remote,
+        })
+    }
+
+    fn remote_request(self) -> TestResult<Vec<u8>> {
+        Ok(self.remote.join().map_err(|_| "remote thread")??)
+    }
+
+    fn adapter_reply(&self) -> TestResult<Option<Result<Vec<u8>, String>>> {
+        let reply = self.scenario.host.adapter_reply.lock();
+        Ok(reply.map_err(|error| error.to_string())?.clone())
+    }
+}
+
+#[tokio::test]
+async fn a_local_attempt_serves_fd3_once_released_and_reports_its_transcripts() -> TestResult {
+    let run = LocalRun::start().await?;
     // The recheck sits last before the start, and nothing is served before
     // the launcher releases the adapter.
     assert_eq!(
-        recorded(&log),
+        run.scenario.entries(),
         [
             "take_unit_end",
             "recheck",
@@ -479,7 +595,7 @@ async fn a_local_attempt_serves_fd3_once_released_and_reports_its_transcripts() 
         ]
     );
     assert_eq!(
-        host.observed(),
+        run.scenario.host.observed(),
         Observed {
             root: root_path(ATTEMPT),
             descriptors: names(&[HOST_SERVICE, RELEASE]),
@@ -487,59 +603,59 @@ async fn a_local_attempt_serves_fd3_once_released_and_reports_its_transcripts() 
             work: vec![("/work".to_owned(), WORK.to_owned())],
         }
     );
-    // The barrier sees the active attempt: its unit and a live deadline.
-    let released = barrier
+    assert_eq!(run.execution.attempt_id, ATTEMPT);
+    assert_eq!(run.execution.ending, AttemptEnding::CgroupEmpty);
+    assert_eq!(run.execution.network.termination(), None);
+    assert_eq!(run.execution.network.transcript_digests().len(), 1);
+    assert_eq!(run.adapter_reply()?, Some(Ok(RESPONSE.to_vec())));
+    assert_eq!(run.remote_request()?, REQUEST.to_vec());
+    Ok(())
+}
+
+#[test]
+fn the_barrier_sees_the_active_attempt() -> TestResult {
+    // The barrier is given the attempt's unit and a live deadline.
+    let log = Log::default();
+    let mut barrier = FakeBarrier::new(&log);
+    let active = crate::test_fixtures::active()?;
+    let _release = barrier.release(&active);
+    let seen = barrier
         .released
         .lock()
         .map_err(|error| error.to_string())?
         .clone();
-    assert_eq!(released.len(), 1);
+    assert_eq!(seen.len(), 1);
     assert_eq!(
-        released[0].0,
+        seen[0].0,
         TransientServiceUnitName::from_attempt_id(ATTEMPT)?.as_str()
     );
-    assert!(released[0].1 > Instant::now());
-    assert_eq!(execution.attempt_id, ATTEMPT);
-    assert_eq!(execution.ending, AttemptEnding::CgroupEmpty);
-    assert_eq!(execution.network.termination(), None);
-    let digests = execution.network.transcript_digests();
-    assert_eq!(digests.len(), 1);
-    assert_eq!(
-        remote.join().map_err(|_| "remote thread")??,
-        REQUEST.to_vec()
-    );
-    assert_eq!(
-        host.adapter_reply
-            .lock()
-            .map_err(|error| error.to_string())?
-            .clone(),
-        Some(Ok(RESPONSE.to_vec()))
-    );
+    assert!(seen[0].1 > Instant::now());
+    Ok(())
+}
 
-    // The retained capture replays offline into a later Replay attempt.
-    let replay_log = Log::default();
-    let replay_host = FakeHost::new(&replay_log);
-    let mut replay_barrier = FakeBarrier::new(&replay_log);
+#[tokio::test]
+async fn a_retained_capture_replays_offline_into_a_later_attempt() -> TestResult {
+    let run = LocalRun::start().await?;
+    let digests = run.execution.network.transcript_digests();
+    let mut replay = Scenario::sharing(&run.scenario.store);
     let replay_attempt = [0x43; 16];
-    let replay = ModePlan::Replay {
-        exchanges: vec![ReplayRequest {
-            attempt_id: ATTEMPT,
-            plan,
-            transcript_digest: digests[0],
-        }],
-    };
-    let replayed = execute(
-        &replay_host,
-        &mut replay_barrier,
-        &LoopbackNetwork,
-        job_for(replay_attempt, SandboxExecutionMode::Replay, replay, &store)?,
-        root_for(&replay_log, replay_attempt),
-    )
-    .await?;
+    let exchanges = vec![ReplayRequest {
+        attempt_id: ATTEMPT,
+        plan: run.plan.clone(),
+        transcript_digest: digests[0],
+    }];
+    let outcome = replay
+        .run_as(
+            replay_attempt,
+            SandboxExecutionMode::Replay,
+            ModePlan::Replay { exchanges },
+        )
+        .await?;
+    let replayed = outcome?;
     assert_eq!(replayed.network.transcript_digests(), digests);
     assert_eq!(replayed.network.termination(), None);
     assert_eq!(
-        replay_host.observed(),
+        replay.host.observed(),
         Observed {
             root: root_path(replay_attempt),
             descriptors: names(&[RELEASE]),
@@ -550,218 +666,148 @@ async fn a_local_attempt_serves_fd3_once_released_and_reports_its_transcripts() 
     Ok(())
 }
 
-fn job_for(
-    attempt_id: [u8; 16],
-    mode: SandboxExecutionMode,
-    plan: ModePlan,
-    store: &Arc<NetworkCaptureStore>,
-) -> TestResult<ExecuteJob> {
-    job(
-        AdmittedAttempt::for_test(attempt_id, authority(), mode)?,
-        plan,
-        store,
-        GENEROUS_WATCHDOG_MS,
-    )
-}
-
 #[tokio::test]
 async fn air_gapped_and_fork_attempts_get_only_the_release_descriptor() -> TestResult {
-    let (_root, store) = capture_store()?;
     for (mode, plan) in [
         (SandboxExecutionMode::AirGapped, ModePlan::AirGapped),
         (SandboxExecutionMode::Fork, ModePlan::Fork),
     ] {
-        let log = Log::default();
-        let host = FakeHost::new(&log);
-        let mut barrier = FakeBarrier::new(&log);
-        let job = job(attempt(mode)?, plan, &store, GENEROUS_WATCHDOG_MS)?;
-        let execution = run(&host, &mut barrier, job, &log).await?;
+        let mut scenario = Scenario::new()?;
+        let execution = scenario.run(mode, plan).await??;
         assert_eq!(execution.ending, AttemptEnding::CgroupEmpty);
         assert!(matches!(execution.network, NetworkEvidence::None));
         assert!(execution.network.transcript_digests().is_empty());
         assert_eq!(execution.network.termination(), None);
-        assert_eq!(
-            host.observed(),
-            Observed {
-                root: root_path(ATTEMPT),
-                descriptors: names(&[RELEASE]),
-                families: (true, Vec::new()),
-                work: vec![("/work".to_owned(), WORK.to_owned())],
-            }
-        );
+        assert_eq!(scenario.host.observed().descriptors, names(&[RELEASE]));
+        assert_eq!(scenario.host.observed().families, (true, Vec::new()));
     }
     Ok(())
 }
 
 #[tokio::test]
 async fn nothing_starts_when_the_plan_is_not_the_admitted_mode() -> TestResult {
-    let (_root, store) = capture_store()?;
-    let log = Log::default();
-    let host = FakeHost::new(&log);
-    let mut barrier = FakeBarrier::new(&log);
-    let job = job(
-        attempt(SandboxExecutionMode::Local)?,
-        ModePlan::AirGapped,
-        &store,
-        GENEROUS_WATCHDOG_MS,
-    )?;
-    let failed = failure(run(&host, &mut barrier, job, &log).await)?;
+    let mut scenario = Scenario::new()?;
+    let outcome = scenario
+        .run(SandboxExecutionMode::Local, ModePlan::AirGapped)
+        .await?;
+    let failed = failure(outcome)?;
     assert!(matches!(failed.error, ExecuteError::ModeMismatch));
     assert_eq!(failed.unit, UnitState::NotStarted);
-    assert!(recorded(&log).is_empty());
+    assert!(scenario.entries().is_empty());
     Ok(())
 }
 
 #[tokio::test]
 async fn an_unavailable_replay_capture_stops_before_the_launcher() -> TestResult {
-    let (_root, store) = capture_store()?;
-    let log = Log::default();
-    let host = FakeHost::new(&log);
-    let mut barrier = FakeBarrier::new(&log);
-    let replay = ModePlan::Replay {
-        exchanges: vec![ReplayRequest {
-            attempt_id: ATTEMPT,
-            plan: plan()?,
-            transcript_digest: [0x77; 32],
-        }],
-    };
-    let job = job(
-        attempt(SandboxExecutionMode::Replay)?,
-        replay,
-        &store,
-        GENEROUS_WATCHDOG_MS,
-    )?;
-    let failed = failure(run(&host, &mut barrier, job, &log).await)?;
+    let mut scenario = Scenario::new()?;
+    let exchanges = vec![ReplayRequest {
+        attempt_id: ATTEMPT,
+        plan: plan()?,
+        transcript_digest: [0x77; 32],
+    }];
+    let outcome = scenario
+        .run(SandboxExecutionMode::Replay, ModePlan::Replay { exchanges })
+        .await?;
+    let failed = failure(outcome)?;
     assert!(matches!(failed.error, ExecuteError::ReplayUnavailable));
     assert_eq!(failed.unit, UnitState::NotStarted);
-    assert!(recorded(&log).is_empty());
+    assert!(scenario.entries().is_empty());
     Ok(())
 }
 
 #[tokio::test]
 async fn the_barrier_must_hand_over_its_end_before_the_root_is_rechecked() -> TestResult {
-    let (_root, store) = capture_store()?;
-    let log = Log::default();
-    let host = FakeHost::new(&log);
-    let mut barrier = FakeBarrier::new(&log);
-    barrier.fail_take = true;
-    let job = job(
-        attempt(SandboxExecutionMode::AirGapped)?,
-        ModePlan::AirGapped,
-        &store,
-        GENEROUS_WATCHDOG_MS,
-    )?;
-    let failed = failure(run(&host, &mut barrier, job, &log).await)?;
+    let mut scenario = Scenario::new()?;
+    scenario.barrier.fail_take = true;
+    let failed = scenario.fails().await?;
     assert!(matches!(failed.error, ExecuteError::Barrier(_)));
     assert_eq!(failed.unit, UnitState::NotStarted);
-    assert_eq!(recorded(&log), ["take_unit_end"]);
+    assert_eq!(scenario.entries(), ["take_unit_end"]);
     Ok(())
 }
 
-#[tokio::test]
-async fn a_failed_or_foreign_root_recheck_never_starts_the_unit() -> TestResult {
-    let (_root, store) = capture_store()?;
-    let log = Log::default();
-    let host = FakeHost::new(&log);
-    let mut barrier = FakeBarrier::new(&log);
-    let job_failed = job(
-        attempt(SandboxExecutionMode::AirGapped)?,
+async fn recheck_failure(
+    recheck: impl FnOnce() -> Result<CheckedRoot, ImageActivationError> + Send,
+) -> TestResult<(Scenario, ExecuteFailure)> {
+    let mut scenario = Scenario::new()?;
+    let job = scenario.job(
+        ATTEMPT,
+        SandboxExecutionMode::AirGapped,
         ModePlan::AirGapped,
-        &store,
         GENEROUS_WATCHDOG_MS,
     )?;
-    let failed = failure(
-        execute(&host, &mut barrier, &LoopbackNetwork, job_failed, || {
-            Err(ImageActivationError::EvidenceMismatch)
-        })
-        .await,
-    )?;
+    let outcome = scenario.run_on(&LoopbackNetwork, job, recheck).await;
+    let failed = failure(outcome)?;
+    Ok((scenario, failed))
+}
+
+#[tokio::test]
+async fn a_failed_root_recheck_never_starts_the_unit() -> TestResult {
+    let (scenario, failed) =
+        recheck_failure(|| Err(ImageActivationError::EvidenceMismatch)).await?;
     assert!(matches!(
         failed.error,
         ExecuteError::Recheck(ImageActivationError::EvidenceMismatch)
     ));
     assert_eq!(failed.unit, UnitState::NotStarted);
-
-    let job_foreign = job(
-        attempt(SandboxExecutionMode::AirGapped)?,
-        ModePlan::AirGapped,
-        &store,
-        GENEROUS_WATCHDOG_MS,
-    )?;
-    let failed = failure(
-        execute(
-            &host,
-            &mut barrier,
-            &LoopbackNetwork,
-            job_foreign,
-            root_for(&log, OTHER),
-        )
-        .await,
-    )?;
-    assert!(matches!(failed.error, ExecuteError::RootIdentity));
-    assert_eq!(failed.unit, UnitState::NotStarted);
-    assert!(!recorded(&log).iter().any(|entry| entry == "start"));
+    assert!(!scenario.entries().iter().any(|entry| entry == "start"));
     Ok(())
 }
 
 #[tokio::test]
-async fn a_unit_that_fails_to_start_or_bind_is_killed() -> TestResult {
-    let (_root, store) = capture_store()?;
-    for (fail_start, fail_kill, expected_unit) in [
-        (true, false, UnitState::Killed),
-        (true, true, UnitState::KillFailed),
-        (false, false, UnitState::Killed),
-    ] {
-        let log = Log::default();
-        let mut host = FakeHost::new(&log);
-        host.faults.push(if fail_start {
-            Fault::Start
-        } else {
-            Fault::Bind
-        });
-        if fail_kill {
-            host.faults.push(Fault::Kill);
-        }
-        let mut barrier = FakeBarrier::new(&log);
-        let job = job(
-            attempt(SandboxExecutionMode::AirGapped)?,
-            ModePlan::AirGapped,
-            &store,
-            GENEROUS_WATCHDOG_MS,
-        )?;
-        let failed = failure(run(&host, &mut barrier, job, &log).await)?;
-        if fail_start {
-            assert!(matches!(failed.error, ExecuteError::Unit(_)));
-        } else {
-            assert!(matches!(failed.error, ExecuteError::Cgroup(_)));
-        }
-        assert_eq!(failed.unit, expected_unit);
-        // The barrier never released the adapter.
-        assert!(!recorded(&log).iter().any(|entry| entry == "release"));
-        assert!(recorded(&log).ends_with(&names(&["kill", "stop"])));
-        assert_eq!(host.cgroup_kills.load(Ordering::SeqCst), 0);
-    }
+async fn a_root_of_another_attempt_never_starts_the_unit() -> TestResult {
+    let (scenario, failed) = recheck_failure(root_for(&Log::default(), OTHER)).await?;
+    assert!(matches!(failed.error, ExecuteError::RootIdentity));
+    assert_eq!(failed.unit, UnitState::NotStarted);
+    assert!(!scenario.entries().iter().any(|entry| entry == "start"));
+    Ok(())
+}
+
+/// Run an Air-Gapped attempt whose host fails with `faults`.
+async fn faulted(faults: &[Fault]) -> TestResult<(Scenario, ExecuteFailure)> {
+    let mut scenario = Scenario::new()?;
+    scenario.host.faults.extend_from_slice(faults);
+    let failed = scenario.fails().await?;
+    Ok((scenario, failed))
+}
+
+#[tokio::test]
+async fn a_unit_that_fails_to_start_is_killed() -> TestResult {
+    let (scenario, failed) = faulted(&[Fault::Start]).await?;
+    assert!(matches!(failed.error, ExecuteError::Unit(_)));
+    assert_eq!(failed.unit, UnitState::Killed);
+    assert!(scenario.entries().ends_with(&names(&["kill", "stop"])));
+    assert_eq!(scenario.cgroup_kills(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_unacknowledged_kill_is_reported_after_a_failed_start() -> TestResult {
+    let (_scenario, failed) = faulted(&[Fault::Start, Fault::Kill]).await?;
+    assert!(matches!(failed.error, ExecuteError::Unit(_)));
+    assert_eq!(failed.unit, UnitState::KillFailed);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_unit_whose_cgroup_cannot_be_bound_is_killed_before_release() -> TestResult {
+    let (scenario, failed) = faulted(&[Fault::Bind]).await?;
+    assert!(matches!(failed.error, ExecuteError::Cgroup(_)));
+    assert_eq!(failed.unit, UnitState::Killed);
+    assert!(!scenario.entries().iter().any(|entry| entry == "release"));
+    assert_eq!(scenario.cgroup_kills(), 0);
     Ok(())
 }
 
 #[tokio::test]
 async fn a_refused_release_kills_the_unit_and_its_cgroup() -> TestResult {
-    let (_root, store) = capture_store()?;
-    let log = Log::default();
-    let host = FakeHost::new(&log);
-    let mut barrier = FakeBarrier::new(&log);
-    barrier.fail_release = true;
-    let job = job(
-        attempt(SandboxExecutionMode::AirGapped)?,
-        ModePlan::AirGapped,
-        &store,
-        GENEROUS_WATCHDOG_MS,
-    )?;
-    let failed = failure(run(&host, &mut barrier, job, &log).await)?;
+    let mut scenario = Scenario::new()?;
+    scenario.barrier.fail_release = true;
+    let failed = scenario.fails().await?;
     assert!(matches!(failed.error, ExecuteError::Barrier(_)));
     assert_eq!(failed.unit, UnitState::Killed);
     assert_eq!(
-        recorded(&log),
+        scenario.entries(),
         [
             "take_unit_end",
             "recheck",
@@ -772,154 +818,129 @@ async fn a_refused_release_kills_the_unit_and_its_cgroup() -> TestResult {
             "stop"
         ]
     );
-    assert_eq!(host.cgroup_kills.load(Ordering::SeqCst), 1);
+    assert_eq!(scenario.cgroup_kills(), 1);
+    Ok(())
+}
+
+/// Run a Local attempt whose admission names `admission_attempt`, on `network`.
+async fn local_failure<N: LocalNetworkPort + Sync>(
+    network: &N,
+    admission_attempt: [u8; 16],
+) -> TestResult<(Scenario, ExecuteFailure)> {
+    let plan = plan()?;
+    let admission = crate::test_fixtures::admission(
+        admission_attempt,
+        grant_authority(),
+        [4, 5, 6],
+        vec![(plan, capability(UNUSED_ENDPOINT))],
+    );
+    let mode = ModePlan::Local {
+        admission: Box::new(admission),
+    };
+    let mut scenario = Scenario::new()?;
+    let job = scenario.job(
+        ATTEMPT,
+        SandboxExecutionMode::Local,
+        mode,
+        GENEROUS_WATCHDOG_MS,
+    )?;
+    let recheck = root_for(&scenario.log, ATTEMPT);
+    let outcome = scenario.run_on(network, job, recheck).await;
+    Ok((scenario, failure(outcome)?))
+}
+
+#[tokio::test]
+async fn an_admission_of_another_attempt_is_killed_before_release() -> TestResult {
+    let (scenario, failed) = local_failure(&LoopbackNetwork, OTHER).await?;
+    assert!(matches!(
+        failed.error,
+        ExecuteError::Bind(LocalProxyBindError::Attempt)
+    ));
+    assert_eq!(failed.unit, UnitState::Killed);
+    assert!(!scenario.entries().iter().any(|entry| entry == "release"));
+    assert_eq!(scenario.cgroup_kills(), 1);
     Ok(())
 }
 
 #[tokio::test]
-async fn a_foreign_admission_or_namespace_is_killed_before_release() -> TestResult {
-    let (address, _remote) = remote()?;
-    let plan = plan()?;
-    let (_root, store) = capture_store()?;
-    for (admission_attempt, foreign_network, expected) in [
-        (OTHER, false, LocalProxyBindError::Attempt),
-        (ATTEMPT, true, LocalProxyBindError::Namespace),
-    ] {
-        let log = Log::default();
-        let host = FakeHost::new(&log);
-        let mut barrier = FakeBarrier::new(&log);
-        let admission = crate::test_fixtures::admission(
-            admission_attempt,
-            grant_authority(),
-            [4, 5, 6],
-            vec![(plan.clone(), capability(address))],
-        );
-        let job = job(
-            attempt(SandboxExecutionMode::Local)?,
-            ModePlan::Local {
-                admission: Box::new(admission),
-            },
-            &store,
-            GENEROUS_WATCHDOG_MS,
-        )?;
-        let failed = if foreign_network {
-            failure(
-                execute(
-                    &host,
-                    &mut barrier,
-                    &ForeignNetwork,
-                    job,
-                    root_for(&log, ATTEMPT),
-                )
-                .await,
-            )?
-        } else {
-            failure(run(&host, &mut barrier, job, &log).await)?
-        };
-        assert!(matches!(failed.error, ExecuteError::Bind(bound) if bound == expected));
-        assert_eq!(failed.unit, UnitState::Killed);
-        assert!(!recorded(&log).iter().any(|entry| entry == "release"));
-        assert_eq!(host.cgroup_kills.load(Ordering::SeqCst), 1);
-    }
+async fn a_namespace_of_another_attempt_is_killed_before_release() -> TestResult {
+    let (scenario, failed) = local_failure(&ForeignNetwork, ATTEMPT).await?;
+    assert!(matches!(
+        failed.error,
+        ExecuteError::Bind(LocalProxyBindError::Namespace)
+    ));
+    assert_eq!(failed.unit, UnitState::Killed);
+    assert_eq!(scenario.cgroup_kills(), 1);
     Ok(())
 }
 
 #[tokio::test]
 async fn an_unreadable_cgroup_terminates_the_unit() -> TestResult {
-    let (_root, store) = capture_store()?;
-    let log = Log::default();
-    let mut host = FakeHost::new(&log);
-    host.faults.push(Fault::ReadCgroup);
-    let mut barrier = FakeBarrier::new(&log);
-    let job = job(
-        attempt(SandboxExecutionMode::Fork)?,
-        ModePlan::Fork,
-        &store,
-        GENEROUS_WATCHDOG_MS,
-    )?;
-    let failed = failure(run(&host, &mut barrier, job, &log).await)?;
+    let (scenario, failed) = faulted(&[Fault::ReadCgroup]).await?;
     assert!(matches!(failed.error, ExecuteError::Cgroup(_)));
     assert_eq!(failed.unit, UnitState::Killed);
-    assert!(recorded(&log).ends_with(&names(&["release", "kill", "stop"])));
+    assert!(scenario
+        .entries()
+        .ends_with(&names(&["release", "kill", "stop"])));
     Ok(())
+}
+
+/// Run an Air-Gapped attempt whose cgroup never empties, under `faults`.
+async fn expired(faults: &[Fault]) -> TestResult<(Scenario, AttemptExecution<String, FakeCgroup>)> {
+    let mut scenario = Scenario::new()?;
+    scenario.host.empty_after = usize::MAX;
+    scenario.host.faults.extend_from_slice(faults);
+    let outcome = scenario
+        .run_watched(SandboxExecutionMode::AirGapped, ModePlan::AirGapped, 100)
+        .await?;
+    Ok((scenario, outcome?))
 }
 
 #[tokio::test]
 async fn the_watchdog_kills_an_attempt_that_never_empties() -> TestResult {
-    let (_root, store) = capture_store()?;
-    // A failed cgroup kill does not change the outcome: the unit kill covers it.
-    for fail_cgroup_kill in [false, true] {
-        let log = Log::default();
-        let mut host = FakeHost::new(&log);
-        host.empty_after = usize::MAX;
-        if fail_cgroup_kill {
-            host.faults.push(Fault::KillCgroup);
-        }
-        let mut barrier = FakeBarrier::new(&log);
-        let job = job(
-            attempt(SandboxExecutionMode::AirGapped)?,
-            ModePlan::AirGapped,
-            &store,
-            100,
-        )?;
-        let started = Instant::now();
-        let execution = run(&host, &mut barrier, job, &log).await?;
-        assert!(started.elapsed() >= Duration::from_millis(100));
-        assert_eq!(execution.ending, AttemptEnding::WatchdogKilled);
-        assert!(recorded(&log).ends_with(&names(&["release", "kill", "stop"])));
-        assert_eq!(host.cgroup_kills.load(Ordering::SeqCst), 1);
-    }
+    let started = Instant::now();
+    let (scenario, execution) = expired(&[]).await?;
+    assert!(started.elapsed() >= Duration::from_millis(100));
+    assert_eq!(execution.ending, AttemptEnding::WatchdogKilled);
+    assert!(scenario
+        .entries()
+        .ends_with(&names(&["release", "kill", "stop"])));
+    assert_eq!(scenario.cgroup_kills(), 1);
+    Ok(())
+}
 
-    // An unacknowledged SIGKILL is reported, not hidden.
-    let log = Log::default();
-    let mut host = FakeHost::new(&log);
-    host.empty_after = usize::MAX;
-    host.faults.push(Fault::Kill);
-    let mut barrier = FakeBarrier::new(&log);
-    let job = job(
-        attempt(SandboxExecutionMode::AirGapped)?,
-        ModePlan::AirGapped,
-        &store,
-        100,
-    )?;
-    let execution = run(&host, &mut barrier, job, &log).await?;
+#[tokio::test]
+async fn a_failed_cgroup_kill_does_not_change_the_watchdog_outcome() -> TestResult {
+    let (scenario, execution) = expired(&[Fault::KillCgroup]).await?;
+    assert_eq!(execution.ending, AttemptEnding::WatchdogKilled);
+    assert_eq!(scenario.cgroup_kills(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_unacknowledged_kill_is_reported_not_hidden() -> TestResult {
+    let (_scenario, execution) = expired(&[Fault::Kill]).await?;
     assert_eq!(execution.ending, AttemptEnding::WatchdogKillFailed);
     Ok(())
 }
 
 #[tokio::test]
 async fn the_watchdog_closes_a_silent_fd3_and_kills_the_unit() -> TestResult {
-    let plan = plan()?;
-    let (_root, store) = capture_store()?;
-    let log = Log::default();
-    let mut host = FakeHost::new(&log);
-    host.adapter = AdapterScript::Silent;
-    let mut barrier = FakeBarrier::new(&log);
-    let admission = crate::test_fixtures::admission(
-        ATTEMPT,
-        grant_authority(),
-        [4, 5, 6],
-        vec![(
-            plan,
-            capability(std::net::SocketAddr::from(([127, 0, 0, 1], 9))),
-        )],
-    );
-    let job = job(
-        attempt(SandboxExecutionMode::Local)?,
-        ModePlan::Local {
-            admission: Box::new(admission),
-        },
-        &store,
-        150,
-    )?;
-    let execution = run(&host, &mut barrier, job, &log).await?;
+    let (_, mode) = local_plan(UNUSED_ENDPOINT)?;
+    let mut scenario = Scenario::new()?;
+    scenario.host.adapter = AdapterScript::Silent;
+    let execution = scenario
+        .run_watched(SandboxExecutionMode::Local, mode, 150)
+        .await??;
     assert_eq!(execution.ending, AttemptEnding::WatchdogKilled);
     assert!(matches!(
         &execution.network,
         NetworkEvidence::Local(served) if served.watchdog_expired
     ));
     assert!(execution.network.transcript_digests().is_empty());
-    assert!(recorded(&log).ends_with(&names(&["release", "kill", "stop"])));
+    assert!(scenario
+        .entries()
+        .ends_with(&names(&["release", "kill", "stop"])));
     Ok(())
 }
 
@@ -947,42 +968,21 @@ impl LocalNetworkPort for PanickingNetwork {
 
 #[tokio::test]
 async fn a_failed_proxy_task_terminates_the_unit() -> TestResult {
-    let plan = plan()?;
-    let (_root, store) = capture_store()?;
-    let log = Log::default();
-    let mut host = FakeHost::new(&log);
-    host.adapter = AdapterScript::Exchange(plan.clone());
-    let mut barrier = FakeBarrier::new(&log);
-    let admission = crate::test_fixtures::admission(
+    let (plan, mode) = local_plan(UNUSED_ENDPOINT)?;
+    let mut scenario = Scenario::new()?;
+    scenario.host.adapter = AdapterScript::Exchange(plan);
+    let job = scenario.job(
         ATTEMPT,
-        grant_authority(),
-        [4, 5, 6],
-        vec![(
-            plan,
-            capability(std::net::SocketAddr::from(([127, 0, 0, 1], 9))),
-        )],
-    );
-    let job = job(
-        attempt(SandboxExecutionMode::Local)?,
-        ModePlan::Local {
-            admission: Box::new(admission),
-        },
-        &store,
+        SandboxExecutionMode::Local,
+        mode,
         GENEROUS_WATCHDOG_MS,
     )?;
-    let failed = failure(
-        execute(
-            &host,
-            &mut barrier,
-            &PanickingNetwork,
-            job,
-            root_for(&log, ATTEMPT),
-        )
-        .await,
-    )?;
+    let recheck = root_for(&scenario.log, ATTEMPT);
+    let outcome = scenario.run_on(&PanickingNetwork, job, recheck).await;
+    let failed = failure(outcome)?;
     assert!(matches!(failed.error, ExecuteError::Serve(_)));
     assert_eq!(failed.unit, UnitState::Killed);
-    assert_eq!(host.cgroup_kills.load(Ordering::SeqCst), 1);
+    assert_eq!(scenario.cgroup_kills(), 1);
     Ok(())
 }
 
