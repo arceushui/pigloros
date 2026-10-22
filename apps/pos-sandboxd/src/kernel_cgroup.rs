@@ -384,6 +384,23 @@ impl BoundAttemptCgroup {
     }
 }
 
+#[cfg(target_os = "linux")]
+impl crate::UnitCgroup for BoundAttemptCgroup {
+    type Error = AttemptCgroupError;
+
+    fn is_empty(&mut self) -> Result<bool, AttemptCgroupError> {
+        match self.observe_empty() {
+            Ok(_observation) => Ok(true),
+            Err(AttemptCgroupError::StillPopulated) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn kill_all(&mut self) -> Result<(), AttemptCgroupError> {
+        Self::kill_all(self)
+    }
+}
+
 fn relative_cgroup_path(path: &str) -> Result<&str, AttemptCgroupError> {
     if path.len() < 2
         || path.len() >= MAX_CONTROL_GROUP_BYTES

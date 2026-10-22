@@ -1,5 +1,7 @@
 //! Typed dynamic systemd transient-unit launch properties.
 
+use std::time::Duration;
+
 use pos_reference::sandbox_provider_protocol::SandboxLimit;
 use zvariant::{Fd, OwnedFd};
 
@@ -106,6 +108,12 @@ impl SystemdServiceLimits {
 
     pub(crate) const fn value(&self, property: SystemdOperatingLimitProperty) -> u64 {
         self.requested[property.index()]
+    }
+
+    /// The attempt watchdog: ELM1 `WatchdogMilliseconds`, the same ceiling
+    /// systemd enforces as `RuntimeMaxUSec`.
+    pub(crate) const fn watchdog(&self) -> Duration {
+        Duration::from_micros(self.requested[SystemdOperatingLimitProperty::RuntimeMaxUSec.index()])
     }
 }
 
@@ -223,6 +231,12 @@ impl CheckedRoot {
     #[cfg(target_os = "linux")]
     pub(crate) const fn rechecked(root_directory: ActivatedRootDirectory) -> Self {
         Self { root_directory }
+    }
+
+    /// The rechecked attempt root.
+    #[must_use]
+    pub const fn root_directory(&self) -> &ActivatedRootDirectory {
+        &self.root_directory
     }
 
     /// A rechecked root for requested-state unit tests, where no mount exists.

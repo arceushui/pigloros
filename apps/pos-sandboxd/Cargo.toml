@@ -27,7 +27,11 @@ sd-listen-fds = "=0.2.0"
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-tokio = { version = "1", default-features = false, features = ["net", "time"] }
+tokio = { version = "1", default-features = false, features = [
+  "net",
+  "rt",
+  "time",
+] }
 zbus = { version = "=5.19.0", default-features = false, features = ["tokio"] }
 zbus_systemd = { version = "=0.26200.0", default-features = false, features = [
   "systemd1",
