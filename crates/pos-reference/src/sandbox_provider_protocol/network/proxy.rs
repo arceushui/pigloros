@@ -84,62 +84,78 @@ impl LocalNetworkSession {
     }
 }
 
-impl LocalNetworkAdmission {
-    /// Serve this attempt's FD 3 host-service channel until it closes or ends.
-    ///
-    /// The ELM1 network deadline starts when this call starts. Cumulative ELM1
-    /// request and response byte ceilings apply across all exchanges. The
-    /// provider must already have bound this admission to its active attempt,
-    /// current authority heads, namespace and firewall, and FD 3; the channel
-    /// itself is bounded by the attempt watchdog, not by the network deadline.
-    ///
-    /// The channel must be a stream socket. Only one NXQ1 may be outstanding:
-    /// the proxy peeks without blocking before forwarding each request and
-    /// again before retaining or releasing its response. A byte already queued
-    /// at either point means a second NXQ1 was sent before the reply, and the
-    /// session fails closed as [`LocalNetworkTermination::ProtocolFailure`]
-    /// with no reply; so does a channel whose queue cannot be inspected. Bytes
-    /// that arrive after the second peek are read only after the reply.
-    pub fn serve_proxy(
-        &self,
-        channel: &mut (impl Read + Write + AsFd),
-        connector: &mut impl NetworkEndpointConnector,
-        store: &NetworkCaptureStore,
-    ) -> LocalNetworkSession {
-        let limits = self.limits();
-        let mut proxy = Proxy {
-            attempt_id: self.grant().attempt_id,
-            deadline: Instant::now() + Duration::from_millis(limits.milliseconds),
-            request_budget: limits.request_bytes,
-            response_budget: limits.response_bytes,
-            transcripts: Vec::new(),
-        };
-        let served =
-            self.exchanges().try_for_each(
-                |(plan, endpoint)| match NetworkExchangeRequest::read_next(channel, plan) {
-                    // Only one NXQ1 may be outstanding: any byte already waiting
-                    // behind this request ends the session before forwarding.
-                    Ok(Some(_)) if request_pending(&*channel) => {
-                        ControlFlow::Break(Some(LocalNetworkTermination::ProtocolFailure))
-                    }
-                    Ok(Some(request)) => {
-                        proxy.exchange(&request, plan, endpoint, channel, connector, store)
-                    }
-                    Ok(None) => ControlFlow::Break(None),
-                    Err(_) => ControlFlow::Break(Some(LocalNetworkTermination::ProtocolFailure)),
-                },
-            );
-        let termination = match served {
-            ControlFlow::Break(termination) => termination,
-            // Every plan was served: only a clean close may follow.
-            ControlFlow::Continue(()) => (control_framing::read_frame(channel, MAX_DOCUMENT_BYTES)
-                != Ok(None))
-            .then_some(LocalNetworkTermination::ProtocolFailure),
-        };
-        LocalNetworkSession {
-            transcripts: proxy.transcripts,
-            termination,
+/// One Local attempt's admission and FD 3 channel, bound by the provider.
+///
+/// The provider implements this for a type it alone can mint, from its active
+/// attempt record: that record proves the attempt, the current authority
+/// heads, the namespace and firewall, and ownership of FD 3. [`serve_proxy`]
+/// accepts nothing else, so a bare admission and an arbitrary channel cannot
+/// be served. This crate cannot verify those proofs itself, because they live
+/// in the provider crate; an implementation that does not check them is a
+/// provider defect.
+pub trait LocalProxyBinding {
+    /// The host-service stream, which must be a stream socket.
+    type Channel: Read + Write + AsFd;
+
+    /// The bound admission and the exact channel it may serve.
+    fn parts(&mut self) -> (&LocalNetworkAdmission, &mut Self::Channel);
+}
+
+/// Serve a bound attempt's FD 3 host-service channel until it closes or ends.
+///
+/// The ELM1 network deadline starts when this call starts. Cumulative ELM1
+/// request and response byte ceilings apply across all exchanges. The binding
+/// carries the provider's proof that the admission belongs to its active
+/// attempt, current authority heads, namespace and firewall, and FD 3; the
+/// channel itself is bounded by the attempt watchdog, not by the network
+/// deadline.
+///
+/// Only one NXQ1 may be outstanding: the proxy peeks without blocking before
+/// forwarding each request and again before retaining or releasing its
+/// response. A byte already queued at either point means a second NXQ1 was
+/// sent before the reply, and the session fails closed as
+/// [`LocalNetworkTermination::ProtocolFailure`] with no reply; so does a
+/// channel whose queue cannot be inspected. Bytes that arrive after the second
+/// peek are read only after the reply.
+pub fn serve_proxy(
+    binding: &mut impl LocalProxyBinding,
+    connector: &mut impl NetworkEndpointConnector,
+    store: &NetworkCaptureStore,
+) -> LocalNetworkSession {
+    let (admission, channel) = binding.parts();
+    let limits = admission.limits();
+    let mut proxy = Proxy {
+        attempt_id: admission.grant().attempt_id,
+        deadline: Instant::now() + Duration::from_millis(limits.milliseconds),
+        request_budget: limits.request_bytes,
+        response_budget: limits.response_bytes,
+        transcripts: Vec::new(),
+    };
+    let served = admission.exchanges().try_for_each(|(plan, endpoint)| {
+        match NetworkExchangeRequest::read_next(&mut *channel, plan) {
+            // Only one NXQ1 may be outstanding: any byte already waiting
+            // behind this request ends the session before forwarding.
+            Ok(Some(_)) if request_pending(&*channel) => {
+                ControlFlow::Break(Some(LocalNetworkTermination::ProtocolFailure))
+            }
+            Ok(Some(request)) => {
+                proxy.exchange(&request, plan, endpoint, &mut *channel, connector, store)
+            }
+            Ok(None) => ControlFlow::Break(None),
+            Err(_) => ControlFlow::Break(Some(LocalNetworkTermination::ProtocolFailure)),
         }
+    });
+    let termination = match served {
+        ControlFlow::Break(termination) => termination,
+        // Every plan was served: only a clean close may follow.
+        ControlFlow::Continue(()) => {
+            (control_framing::read_frame(&mut *channel, MAX_DOCUMENT_BYTES) != Ok(None))
+                .then_some(LocalNetworkTermination::ProtocolFailure)
+        }
+    };
+    LocalNetworkSession {
+        transcripts: proxy.transcripts,
+        termination,
     }
 }
 

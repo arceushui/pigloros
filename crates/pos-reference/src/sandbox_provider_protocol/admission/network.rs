@@ -8,6 +8,10 @@ use crate::sandbox_provider_protocol::{
     NetworkExchangeRequest, SandboxExecutionMode, SandboxProviderProtocolError,
 };
 
+#[cfg(any(test, feature = "test-support"))]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod fixture;
+
 /// Exact selector-derived ELM1 ceilings owned by the Local proxy.
 ///
 /// Byte ceilings are cumulative for the attempt, not renewed per exchange.
