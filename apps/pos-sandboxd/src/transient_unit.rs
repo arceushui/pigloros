@@ -311,6 +311,15 @@ pub enum SystemdTransientUnitValue {
 }
 
 impl SystemdTransientUnitValue {
+    /// The same name-list kind carrying `value`.
+    fn with_names(&self, value: (bool, Vec<String>)) -> Self {
+        if matches!(self, Self::SystemCallFilter(_)) {
+            Self::SystemCallFilter(value)
+        } else {
+            Self::RestrictAddressFamilies(value)
+        }
+    }
+
     /// Readback equality of the array-valued kinds; anything else differs.
     fn collection_matches(&self, observed: &SystemdTransientUnitReadbackValue) -> bool {
         match (self, observed) {
@@ -344,9 +353,8 @@ impl SystemdTransientUnitValue {
             Self::Static(value) => Ok(Self::Static(*value)),
             Self::RootDirectory(value) => Ok(Self::RootDirectory(value.clone())),
             Self::BindReadOnlyPaths(value) => Ok(Self::BindReadOnlyPaths(value.clone())),
-            Self::SystemCallFilter(value) => Ok(Self::SystemCallFilter(value.clone())),
-            Self::RestrictAddressFamilies(value) => {
-                Ok(Self::RestrictAddressFamilies(value.clone()))
+            Self::SystemCallFilter(value) | Self::RestrictAddressFamilies(value) => {
+                Ok(self.with_names(value.clone()))
             }
             Self::Numeric(value) => Ok(Self::Numeric(*value)),
             Self::ExtraFileDescriptors(value) => {
