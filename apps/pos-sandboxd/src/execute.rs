@@ -355,7 +355,12 @@ struct Prepared<C> {
 /// `recheck` rechecks, immediately before the unit starts, current authority
 /// and the attached root (ADR-087 section 2 step 7) and returns the only
 /// `RootDirectory` a unit may use. Production passes
-/// `|| root.recheck(&directory, &entry)`.
+/// `|| root.recheck(&directory, &entry)` with the same entry and directory
+/// that built the job's [`AdmittedAttempt`]; the rechecked root must name that
+/// attempt's own root, so a root of another attempt is refused. The recheck
+/// consumes nothing and does not detach the mount when it fails, and neither
+/// does this function: the caller owns the `VerifiedRootMount`, and the
+/// attempt lifecycle (#442) detaches or drops it on every terminal path.
 ///
 /// The runtime must have its time driver enabled.
 ///
@@ -484,7 +489,7 @@ where
     {
         return Err(ExecuteError::RootIdentity);
     }
-    let inputs = TransientUnitLaunchInputs::new(&checked, launcher_source, launch_mode, release);
+    let inputs = TransientUnitLaunchInputs::new(checked, launcher_source, launch_mode, release);
     Ok(Prepared {
         request: TransientUnitRequest::compile(inputs, system_call_filter, &service_limits),
         watchdog: service_limits.watchdog(),

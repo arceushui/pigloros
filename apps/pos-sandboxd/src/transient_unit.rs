@@ -222,7 +222,7 @@ pub struct TransientUnitLaunchInputs {
 /// mints one, after current RVS1, the control floor and the attached mount
 /// identity were checked again, and [`TransientUnitLaunchInputs`] accepts
 /// nothing else as `RootDirectory`.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct CheckedRoot {
     root_directory: ActivatedRootDirectory,
 }
@@ -248,15 +248,17 @@ impl CheckedRoot {
 
 impl TransientUnitLaunchInputs {
     /// Combine a rechecked root with the other per-attempt launch inputs.
+    ///
+    /// The root is consumed: one recheck authorizes one launch.
     #[must_use]
     pub fn new(
-        root: &CheckedRoot,
+        root: CheckedRoot,
         launcher_source: LauncherSource,
         mode: LaunchMode,
         release: OwnedFd,
     ) -> Self {
         Self {
-            root_directory: root.root_directory.clone(),
+            root_directory: root.root_directory,
             launcher_source,
             mode,
             release,
