@@ -263,12 +263,6 @@ impl<'snapshot> AdmittedEntry<'snapshot> {
         &self.admission
     }
 
-    /// The entry's reservation.
-    #[must_use]
-    pub const fn reservation(&self) -> &StagingReservation {
-        &self.reservation
-    }
-
     /// Re-read the installed authority and compare the control floor again,
     /// immediately before launch (ADR-087 §2 step 7).
     ///
