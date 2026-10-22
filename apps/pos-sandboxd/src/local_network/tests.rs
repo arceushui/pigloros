@@ -214,14 +214,26 @@ async fn a_bound_proxy_serves_one_verified_exchange_and_retains_its_capture() ->
     check_exchange(parties, adapter, served)
 }
 
+/// Like [`serve_with`], but a watchdog that never closes the channel fails the
+/// test instead of waiting forever.
+async fn serve_bounded<C>(
+    binding: BoundLocalProxy,
+    connector: C,
+    deadline_ms: u64,
+) -> TestResult<Served>
+where
+    C: NetworkEndpointConnector + Send + 'static,
+{
+    let served = serve_with(binding, connector, deadline_ms);
+    Ok(tokio::time::timeout(Duration::from_secs(10), served).await??)
+}
+
 #[tokio::test]
 async fn a_stalled_adapter_is_closed_at_the_attempt_deadline() -> TestResult {
     // The adapter holds its end open and never sends a frame.
     let (_adapter, binding, connector) = bound_proxy(plan()?, UNUSED_ENDPOINT, LoopbackConnector)?;
     let started = Instant::now();
-    // A watchdog that does not close the channel would wait forever: bound it.
-    let served = tokio::time::timeout(Duration::from_secs(10), serve_with(binding, connector, 200));
-    let outcome = served.await??.outcome?;
+    let outcome = serve_bounded(binding, connector, 200).await?.outcome?;
     assert!(outcome.watchdog_expired);
     assert!(started.elapsed() >= Duration::from_millis(200));
     assert!(outcome.session.transcripts().is_empty());
