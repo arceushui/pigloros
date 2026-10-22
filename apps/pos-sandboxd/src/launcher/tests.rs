@@ -182,6 +182,15 @@ impl LaunchHost for TestHost {
     }
 }
 
+fn hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    bytes
+        .iter()
+        .flat_map(|byte| [byte >> 4, byte & 0x0f])
+        .map(|nibble| char::from(DIGITS[usize::from(nibble)]))
+        .collect()
+}
+
 fn named(name: &str, descriptor: OwnedFd) -> (Option<String>, OwnedFd) {
     (Some(name.to_owned()), descriptor)
 }
@@ -210,11 +219,7 @@ fn hex_decoding_is_strict_lowercase() {
 #[test]
 fn parameters_decode_from_their_canonical_hex() -> TestResult {
     let expected = parameters(vec!["--serve".to_owned()])?;
-    let hex: String = expected
-        .to_canonical_cbor()?
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
+    let hex = hex(&expected.to_canonical_cbor()?);
     assert_eq!(decode_parameters(&hex)?, expected);
     Ok(())
 }
