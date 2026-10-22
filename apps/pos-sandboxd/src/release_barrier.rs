@@ -54,7 +54,7 @@ pub struct ExpectedLauncherReady {
 }
 
 impl ExpectedLauncherReady {
-    fn fields(&self) -> LauncherReadyFields {
+    const fn fields(&self) -> LauncherReadyFields {
         LauncherReadyFields {
             attempt_id: self.attempt_id,
             nonce: self.nonce,
@@ -94,9 +94,11 @@ pub struct ReleaseBinding {
     pub deadline_monotonic_ns: u64,
 }
 
-/// The provider's last-moment recheck: current RVS1, policy/trust/image
-/// epochs, cancellation, unit identity, requested configuration, kernel
-/// observations and descriptor bindings. `Err` means do not release.
+/// The provider's last-moment recheck before release.
+///
+/// It covers current RVS1, policy/trust/image epochs, cancellation, unit
+/// identity, requested configuration, kernel observations and descriptor
+/// bindings. `Err` means do not release.
 pub trait ReleaseRecheck {
     /// Recheck everything and return the current bindings, or why not.
     ///
