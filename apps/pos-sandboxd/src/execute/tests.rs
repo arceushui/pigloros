@@ -618,12 +618,9 @@ fn the_barrier_sees_the_active_attempt() -> TestResult {
     let log = Log::default();
     let mut barrier = FakeBarrier::new(&log);
     let active = crate::test_fixtures::active()?;
+    let released = Arc::clone(&barrier.released);
     let _release = barrier.release(&active);
-    let seen = barrier
-        .released
-        .lock()
-        .map_err(|error| error.to_string())?
-        .clone();
+    let seen = released.lock().map_err(|error| error.to_string())?.clone();
     assert_eq!(seen.len(), 1);
     assert_eq!(
         seen[0].0,
