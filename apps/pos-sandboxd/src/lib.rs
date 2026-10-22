@@ -17,9 +17,9 @@ mod hardening;
 mod image_activator;
 mod kernel_cgroup;
 #[cfg(target_os = "linux")]
-mod local_network;
-#[cfg(target_os = "linux")]
 pub mod launcher;
+#[cfg(target_os = "linux")]
+mod local_network;
 #[cfg(target_os = "linux")]
 mod release_barrier;
 #[cfg(target_os = "linux")]
