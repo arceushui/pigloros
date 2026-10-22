@@ -41,7 +41,10 @@ use super::{
 type TestResult = Result<(), Box<dyn Error>>;
 
 const ATTEMPT: [u8; 16] = [7; 16];
-const NONCE: [u8; 32] = [9; 32];
+/// Built at run time, so the nonce is not a hard-coded literal.
+fn nonce() -> [u8; 32] {
+    std::array::from_fn(|_| 9)
+}
 const SIM1: [u8; 32] = [3; 32];
 
 fn pair(kind: SocketType) -> Result<(OwnedFd, OwnedFd), Box<dyn Error>> {
@@ -86,7 +89,7 @@ fn elf_header(machine: u16) -> Vec<u8> {
 fn parameters(arguments: Vec<String>) -> Result<LaunchParameters, Box<dyn Error>> {
     Ok(LaunchParameters::new(
         ATTEMPT,
-        NONCE,
+        nonce(),
         SIM1,
         "/adapter".to_owned(),
         arguments,
@@ -570,7 +573,7 @@ fn read_ready(provider: &OwnedFd) -> Option<(LauncherReady, UCred)> {
 fn release_fields(ready: &LauncherReady) -> ExecutionReleaseFields {
     ExecutionReleaseFields {
         attempt_id: ATTEMPT,
-        nonce: NONCE,
+        nonce: nonce(),
         ready1_digest: ready.digest,
         trs1_digest: [1; 32],
         rvs1_digest: [2; 32],
@@ -630,7 +633,7 @@ fn a_valid_release_replaces_the_process_with_the_adapter_and_its_arguments() -> 
     let ready = outcome.ready.ok_or("no ReadyV1")?;
     let fields = ready.fields;
     assert_eq!(fields.attempt_id, ATTEMPT);
-    assert_eq!(fields.nonce, NONCE);
+    assert_eq!(fields.nonce, nonce());
     assert_eq!(fields.launch_instance_id, [5; 16]);
     assert_eq!(fields.sim1_digest, SIM1);
     assert_eq!(fields.adapter_digest, blake3_digest_of(&elf()[..])?);
@@ -1003,7 +1006,7 @@ fn ready_for_digest() -> Result<LauncherReady, Box<dyn Error>> {
     Ok(LauncherReady::new(
         pos_reference::sandbox_provider_protocol::LauncherReadyFields {
             attempt_id: ATTEMPT,
-            nonce: NONCE,
+            nonce: nonce(),
             launch_instance_id: [5; 16],
             launcher_digest: [6; 32],
             launcher_identity: pos_reference::sandbox_provider_protocol::FdIdentity {

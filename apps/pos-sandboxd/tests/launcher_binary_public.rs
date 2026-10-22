@@ -28,7 +28,7 @@ fn lpv1_hex() -> Result<String, Box<dyn Error>> {
     }];
     let parameters = LaunchParameters::new(
         [1; 16],
-        [2; 32],
+        std::array::from_fn(|_| 2),
         [3; 32],
         "/adapter".to_owned(),
         vec!["--serve".to_owned()],
