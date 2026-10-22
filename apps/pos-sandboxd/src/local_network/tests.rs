@@ -155,21 +155,32 @@ fn join_pair(
     ))
 }
 
+/// A capture store and what serving a binding against it ended with.
+struct Served {
+    root: tempfile::TempDir,
+    store: Arc<NetworkCaptureStore>,
+    outcome: Result<ServedProxy, ServeError>,
+}
+
 /// Serve `binding` against a fresh capture store until `deadline_ms`.
 async fn serve_with<C>(
     binding: BoundLocalProxy,
     connector: C,
     deadline_ms: u64,
-) -> TestResult<(Arc<NetworkCaptureStore>, Result<ServedProxy, ServeError>)>
+) -> TestResult<Served>
 where
     C: NetworkEndpointConnector + Send + 'static,
 {
-    let (_root, store) = capture_store()?;
+    let (root, store) = capture_store()?;
     let deadline = Instant::now() + Duration::from_millis(deadline_ms);
     let outcome = binding
         .serve_until(connector, Arc::clone(&store), deadline)
         .await;
-    Ok((store, outcome))
+    Ok(Served {
+        root,
+        store,
+        outcome,
+    })
 }
 
 #[tokio::test]
@@ -179,8 +190,9 @@ async fn a_bound_proxy_serves_one_verified_exchange_and_retains_its_capture() ->
         bound_proxy(parties.plan.clone(), parties.address, LoopbackConnector)?;
     let plan = parties.plan.clone();
     let adapter = thread::spawn(move || adapter_exchange(adapter, &plan));
-    let (store, outcome) = serve_with(binding, connector, 30_000).await?;
-    let outcome = outcome?;
+    let served = serve_with(binding, connector, 30_000).await?;
+    assert!(served.root.path().is_dir());
+    let outcome = served.outcome?;
 
     assert!(!outcome.watchdog_expired);
     assert_eq!(outcome.session.termination(), None);
@@ -189,7 +201,7 @@ async fn a_bound_proxy_serves_one_verified_exchange_and_retains_its_capture() ->
     assert_eq!(request, REQUEST.to_vec());
     assert_eq!(response, RESPONSE.to_vec());
     let digest = outcome.session.transcripts()[0].digest();
-    let replayed = store.replay(ATTEMPT, &parties.plan, digest)?;
+    let replayed = served.store.replay(ATTEMPT, &parties.plan, digest)?;
     assert_eq!(replayed.response_bytes(), RESPONSE);
     Ok(())
 }
@@ -199,8 +211,7 @@ async fn a_stalled_adapter_is_closed_at_the_attempt_deadline() -> TestResult {
     // The adapter holds its end open and never sends a frame.
     let (_adapter, binding, connector) = bound_proxy(plan()?, UNUSED_ENDPOINT, LoopbackConnector)?;
     let started = Instant::now();
-    let (_store, outcome) = serve_with(binding, connector, 200).await?;
-    let outcome = outcome?;
+    let outcome = serve_with(binding, connector, 200).await?.outcome?;
     assert!(outcome.watchdog_expired);
     assert!(started.elapsed() >= Duration::from_millis(200));
     assert!(outcome.session.transcripts().is_empty());
@@ -224,8 +235,7 @@ async fn a_failed_proxy_task_is_reported() -> TestResult {
     let (adapter, binding, connector) =
         bound_proxy(plan.clone(), UNUSED_ENDPOINT, PanickingConnector)?;
     let adapter = thread::spawn(move || adapter_exchange(adapter, &plan));
-    let (_store, outcome) = serve_with(binding, connector, 30_000).await?;
-    let error = outcome.err();
+    let error = serve_with(binding, connector, 30_000).await?.outcome.err();
     assert_eq!(
         error.as_ref().map(ToString::to_string).as_deref(),
         Some("the proxy task did not finish")
