@@ -1,6 +1,7 @@
 use std::{
     fs::File,
     future::Future,
+    io::Write,
     net::SocketAddr,
     os::{
         fd::{AsFd, OwnedFd as StdOwnedFd},
@@ -16,8 +17,8 @@ use std::{
 
 use pos_conformance::SandboxSyscallSetV1;
 use pos_reference::sandbox_provider_protocol::{
-    NetworkCaptureStore, NetworkExchangePlan, NetworkExchangeReply, NetworkExchangeRequest,
-    SandboxArchitecture, SandboxExecutionMode, SandboxLimit,
+    LocalNetworkTermination, NetworkCaptureStore, NetworkExchangePlan, NetworkExchangeReply,
+    NetworkExchangeRequest, SandboxArchitecture, SandboxExecutionMode, SandboxLimit,
 };
 use zvariant::OwnedFd;
 
@@ -70,6 +71,8 @@ enum AdapterScript {
     Exchange(NetworkExchangePlan),
     /// Hold FD 3 open and silent until the test ends.
     Silent,
+    /// Send a zero-length frame, then hold FD 3 open.
+    ProtocolViolation,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -128,14 +131,20 @@ impl FakeHost {
             .and_then(|(descriptor, _)| descriptor.as_fd().try_clone_to_owned().ok())
     }
 
+    fn hold(&self, stream: UnixStream) {
+        if let Ok(mut held) = self.held.lock() {
+            held.push(stream);
+        }
+    }
+
     fn drive(&self, adapter_end: StdOwnedFd) {
         let mut stream = UnixStream::from(adapter_end);
         match &self.adapter {
             AdapterScript::None => {}
-            AdapterScript::Silent => {
-                if let Ok(mut held) = self.held.lock() {
-                    held.push(stream);
-                }
+            AdapterScript::Silent => self.hold(stream),
+            AdapterScript::ProtocolViolation => {
+                stream.write_all(&[0, 0, 0, 0]).ok();
+                self.hold(stream);
             }
             AdapterScript::Exchange(plan) => {
                 let plan = plan.clone();
@@ -900,9 +909,9 @@ async fn expired(faults: &[Fault]) -> TestResult<(Scenario, AttemptExecution<Str
     let mut scenario = Scenario::new()?;
     scenario.host.empty_after = usize::MAX;
     scenario.host.faults.extend_from_slice(faults);
-    let outcome = scenario
-        .run_watched(SandboxExecutionMode::AirGapped, ModePlan::AirGapped, 100)
-        .await?;
+    // A watchdog that does not fire would wait forever: bound the wait.
+    let run = scenario.run_watched(SandboxExecutionMode::AirGapped, ModePlan::AirGapped, 100);
+    let outcome = tokio::time::timeout(Duration::from_secs(10), run).await??;
     Ok((scenario, outcome?))
 }
 
@@ -974,6 +983,21 @@ impl LocalNetworkPort for PanickingNetwork {
     fn establish(&self, attempt_id: [u8; 16]) -> EstablishedNetwork<PanickingConnector> {
         EstablishedNetwork::new(attempt_id, PanickingConnector)
     }
+}
+
+#[tokio::test]
+async fn a_protocol_violation_on_fd3_is_reported_for_classification() -> TestResult {
+    let (_, mode) = local_plan(UNUSED_ENDPOINT)?;
+    let mut scenario = Scenario::new()?;
+    scenario.host.adapter = AdapterScript::ProtocolViolation;
+    let execution = scenario.run(SandboxExecutionMode::Local, mode).await??;
+    assert_eq!(execution.ending, AttemptEnding::CgroupEmpty);
+    assert_eq!(
+        execution.network.termination(),
+        Some(LocalNetworkTermination::ProtocolFailure)
+    );
+    assert!(execution.network.transcript_digests().is_empty());
+    Ok(())
 }
 
 #[tokio::test]

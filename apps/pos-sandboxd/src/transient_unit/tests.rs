@@ -562,6 +562,13 @@ fn service_limits_require_the_complete_ordered_elm1_and_exact_systemd_values() {
         Err(SystemdServiceLimitsError::WatchdogOverflow)
     );
 
+    // Only the systemd-enforced ids and WorkBytes treat u64::MAX as infinity.
+    let mut unbounded_elsewhere = source.clone();
+    for limit_id in [7, 8, 10, 11, 12, 13, 14, 15, 16] {
+        unbounded_elsewhere[limit_id].value = u64::MAX;
+    }
+    assert!(SystemdServiceLimits::from_effective_limits(&unbounded_elsewhere).is_ok());
+
     let mut permitted_zero = source;
     for limit_id in [1, 5, 6, 9] {
         permitted_zero[limit_id].value = 0;
