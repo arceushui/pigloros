@@ -193,14 +193,18 @@ mod tests {
             (0o640, 32),
             (0o604, 32),
             (0o700, 32),
-            (0o200, 32),
-            (0o000, 32),
             (0o600, 31),
             (0o600, 33),
         ] {
             let (_temporary, directory, owner) = fixture(mode, &vec![1; length])?;
             let result = KeyFileReleaseSigner::open(&directory, "key", owner, "k".to_owned());
             assert!(matches!(result, Err(ReleaseSignerError::UnsafeKeyFile)));
+        }
+        // Unreadable modes fail at open (non-root) or at the mode check (root).
+        for mode in [0o200, 0o000] {
+            let (_temporary, directory, owner) = fixture(mode, &[1; 32])?;
+            let result = KeyFileReleaseSigner::open(&directory, "key", owner, "k".to_owned());
+            assert!(result.is_err());
         }
         let (_temporary, directory, owner) = fixture(0o600, &[1; 32])?;
         let result = KeyFileReleaseSigner::open(&directory, "key", owner + 1, "k".to_owned());
