@@ -86,7 +86,6 @@ fn local_request_has_the_exact_ordered_dynamic_properties_and_dbus_signatures(
     }
     assert_eq!(properties[40].dbus_signature(), "u");
     assert_eq!(properties[41].dbus_signature(), "a(hs)");
-    assert_eq!(properties[42].dbus_signature(), "a(ss)");
 
     match properties[1].value() {
         SystemdTransientUnitValue::RootDirectory(value) => {
@@ -166,6 +165,14 @@ fn local_request_has_the_exact_ordered_dynamic_properties_and_dbus_signatures(
         }
         _value => return Err("ExtraFileDescriptors must have an a(hs) value".into()),
     }
+    Ok(())
+}
+
+#[test]
+fn work_mount_property_has_the_exact_dbus_encoding() -> Result<(), Box<dyn Error>> {
+    let request = request(LaunchMode::AirGapped)?;
+    let properties = request.requested_properties();
+    assert_eq!(properties[42].dbus_signature(), "a(ss)");
     match properties[42].value() {
         SystemdTransientUnitValue::TemporaryFileSystem(value) => {
             assert_eq!(

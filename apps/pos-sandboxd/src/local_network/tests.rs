@@ -136,7 +136,7 @@ async fn a_bound_proxy_serves_one_verified_exchange_and_retains_its_capture() ->
             .ok_or_else(|| "the reply was not captured".to_owned())
     });
     let (_root, store) = capture_store()?;
-    let served = binding
+    let outcome = binding
         .serve_until(
             connector,
             Arc::clone(&store),
@@ -144,9 +144,9 @@ async fn a_bound_proxy_serves_one_verified_exchange_and_retains_its_capture() ->
         )
         .await?;
 
-    assert!(!served.watchdog_expired);
-    assert_eq!(served.session.termination(), None);
-    assert_eq!(served.session.transcripts().len(), 1);
+    assert!(!outcome.watchdog_expired);
+    assert_eq!(outcome.session.termination(), None);
+    assert_eq!(outcome.session.transcripts().len(), 1);
     assert_eq!(
         server.join().map_err(|_| "remote thread")??,
         REQUEST.to_vec()
@@ -155,7 +155,7 @@ async fn a_bound_proxy_serves_one_verified_exchange_and_retains_its_capture() ->
         adapter.join().map_err(|_| "adapter thread")??,
         RESPONSE.to_vec()
     );
-    let replayed = store.replay(ATTEMPT, &plan, served.session.transcripts()[0].digest())?;
+    let replayed = store.replay(ATTEMPT, &plan, outcome.session.transcripts()[0].digest())?;
     assert_eq!(replayed.response_bytes(), RESPONSE);
     Ok(())
 }
@@ -177,19 +177,19 @@ async fn a_stalled_adapter_is_closed_at_the_attempt_deadline() -> TestResult {
     let (_root, store) = capture_store()?;
     let started = Instant::now();
     // The adapter holds its end open and never sends a frame.
-    let served = binding
+    let outcome = binding
         .serve_until(
             connector,
             store,
             Instant::now() + Duration::from_millis(200),
         )
         .await?;
-    assert!(served.watchdog_expired);
+    assert!(outcome.watchdog_expired);
     assert!(started.elapsed() >= Duration::from_millis(200));
-    assert!(served.session.transcripts().is_empty());
+    assert!(outcome.session.transcripts().is_empty());
     // The closed channel reads as the adapter closing at a frame boundary;
     // the flag, not the termination, records the watchdog.
-    assert_eq!(served.session.termination(), None);
+    assert_eq!(outcome.session.termination(), None);
     Ok(())
 }
 

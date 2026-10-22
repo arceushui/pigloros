@@ -33,7 +33,8 @@ pub const RESPONSE: &[u8] = b"exact response";
 /// The result type of the tests.
 pub type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
-pub fn authority() -> AdmittedAuthority {
+#[must_use]
+pub const fn authority() -> AdmittedAuthority {
     AdmittedAuthority {
         apt1_digest: [1; 32],
         trs1_digest: [2; 32],
@@ -44,7 +45,8 @@ pub fn authority() -> AdmittedAuthority {
     }
 }
 
-pub fn grant_authority() -> AdmissionAuthority {
+#[must_use]
+pub const fn grant_authority() -> AdmissionAuthority {
     AdmissionAuthority {
         evr1_digest: [7; 32],
         fixture_contract_digest: [8; 32],
@@ -69,6 +71,7 @@ pub fn active() -> TestResult<ActiveAttempt> {
     ))
 }
 
+#[must_use]
 pub fn admission(
     attempt: [u8; 16],
     authority: AdmissionAuthority,
@@ -88,6 +91,7 @@ pub fn admission(
     )
 }
 
+#[must_use]
 pub fn capability(address: SocketAddr) -> NetworkCapability {
     NetworkCapability {
         capability_id: "execute".to_owned(),
