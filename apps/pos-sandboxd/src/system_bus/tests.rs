@@ -1224,6 +1224,52 @@ async fn force_kill_sends_whole_unit_sigkill_only() -> Result<(), Box<dyn Error>
 }
 
 #[tokio::test]
+async fn the_execute_path_port_delegates_to_the_typed_transport() -> Result<(), Box<dyn Error>> {
+    use crate::UnitHost;
+
+    let behavior = ManagerBehavior::default();
+    let calls = Arc::clone(&behavior.control_calls);
+    let service = RecordingService::exact(expected_system_call_filter()?);
+    let (transport, _server) = transport(Arc::new(Mutex::new(None)), behavior, service).await?;
+    let name = TransientServiceUnitName::from_attempt_id([0x20; 16])?;
+    let started = UnitHost::start(
+        &transport,
+        name.clone(),
+        request(LaunchMode::Local {
+            host_service: descriptor()?,
+        })?,
+    )
+    .await?;
+    assert_eq!(started.unit_name(), &name);
+    // The fixed cgroup mount has no such attempt cgroup.
+    let error = UnitHost::bind_cgroup(&transport, &started)
+        .await
+        .err()
+        .ok_or("absent attempt cgroup was accepted")?;
+    assert!(matches!(
+        error,
+        SystemdTransientUnitTransportError::CgroupKernel(_)
+    ));
+    UnitHost::stop(&transport, name.clone()).await?;
+    UnitHost::kill(&transport, name.clone()).await?;
+    assert_eq!(
+        calls.lock().map_err(|error| error.to_string())?.as_slice(),
+        &[
+            ObservedControl::Stop {
+                name: name.as_str().to_owned(),
+                mode: "replace".to_owned(),
+            },
+            ObservedControl::Kill {
+                name: name.as_str().to_owned(),
+                whom: "all".to_owned(),
+                signal: 9,
+            },
+        ]
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn exact_service_cgroup_is_reverse_mapped_and_kernel_observed() -> Result<(), Box<dyn Error>>
 {
     let behavior = ManagerBehavior::default();
