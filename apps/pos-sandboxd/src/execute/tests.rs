@@ -443,7 +443,9 @@ async fn a_local_attempt_serves_fd3_once_released_and_reports_its_transcripts() 
         [4, 5, 6],
         vec![(plan.clone(), capability(address))],
     );
-    let mode = ModePlan::Local { admission };
+    let mode = ModePlan::Local {
+        admission: Box::new(admission),
+    };
     let job = job(
         attempt(SandboxExecutionMode::Local)?,
         mode,
@@ -766,7 +768,9 @@ async fn a_foreign_admission_or_namespace_is_killed_before_release() -> TestResu
         );
         let job = job(
             attempt(SandboxExecutionMode::Local)?,
-            ModePlan::Local { admission },
+            ModePlan::Local {
+                admission: Box::new(admission),
+            },
             &store,
             GENEROUS_WATCHDOG_MS,
         )?;
@@ -872,7 +876,9 @@ async fn the_watchdog_closes_a_silent_fd3_and_kills_the_unit() -> TestResult {
     );
     let job = job(
         attempt(SandboxExecutionMode::Local)?,
-        ModePlan::Local { admission },
+        ModePlan::Local {
+            admission: Box::new(admission),
+        },
         &store,
         150,
     )?;
@@ -928,7 +934,9 @@ async fn a_failed_proxy_task_terminates_the_unit() -> TestResult {
     );
     let job = job(
         attempt(SandboxExecutionMode::Local)?,
-        ModePlan::Local { admission },
+        ModePlan::Local {
+            admission: Box::new(admission),
+        },
         &store,
         GENEROUS_WATCHDOG_MS,
     )?;

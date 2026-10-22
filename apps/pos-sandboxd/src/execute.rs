@@ -151,7 +151,7 @@ pub enum ModePlan {
     /// Bounded Local exchanges through the FD 3 proxy.
     Local {
         /// The admission of the exact endpoints and plans.
-        admission: LocalNetworkAdmission,
+        admission: Box<LocalNetworkAdmission>,
     },
     /// No network authority and no live descriptor.
     AirGapped,
@@ -331,14 +331,14 @@ struct LocalPreparation<C> {
 /// The network behaviour prepared before the unit starts.
 enum Planned<C> {
     None,
-    Local(LocalPreparation<C>),
+    Local(Box<LocalPreparation<C>>),
     Replay(Vec<ReplayedNetworkExchange>),
 }
 
 /// The network behaviour once the active attempt it belongs to is recorded.
 enum Bound<C> {
     None,
-    Local(BoundLocalProxy, C),
+    Local(Box<BoundLocalProxy>, C),
     Replay(Vec<ReplayedNetworkExchange>),
 }
 
@@ -454,11 +454,11 @@ where
         ModePlan::Local { admission } => {
             let (adapter_end, channel) = HostServiceChannel::pair(attempt.attempt_id())
                 .map_err(ExecuteError::HostService)?;
-            let preparation = LocalPreparation {
-                admission,
+            let preparation = Box::new(LocalPreparation {
+                admission: *admission,
                 network: network.establish(attempt.attempt_id()),
                 channel,
-            };
+            });
             (
                 LaunchMode::Local {
                     host_service: adapter_end,
@@ -511,7 +511,7 @@ fn bind_planned<C>(active: &ActiveAttempt, planned: Planned<C>) -> Result<Bound<
         Planned::Replay(replayed) => Ok(Bound::Replay(replayed)),
         Planned::Local(local) => active
             .bind_local_proxy(local.admission, local.network, local.channel)
-            .map(|(binding, connector)| Bound::Local(binding, connector))
+            .map(|(binding, connector)| Bound::Local(Box::new(binding), connector))
             .map_err(ExecuteError::from),
     }
 }
