@@ -278,6 +278,31 @@ fn a_valid_output_is_staged_with_a_receipt_until_the_batch_commits() {
     assert_eq!(handle.committed_state().bytes, b"next");
 }
 
+/// ADR-049 r9 test 1: the operational log and metering reach no step output.
+#[test]
+fn the_operational_log_and_metering_reach_no_step_output() {
+    let (mut driver, handle, _) = fixture(None);
+    let valid = output(vec![draft("community.event", b"payload")]);
+    let digest = valid.output_digest;
+    let mapped = ok(mapped_output(&valid, 100));
+    let logged = InvocationReportV1 {
+        operational_log: test_support::log(),
+        metering: MeteringV1 {
+            host_calls: METERING.host_calls + 1,
+            ..METERING
+        },
+        ..report(valid)
+    };
+    let usage = logged.metering;
+    let staged = ok(driver.accept([3; 16], logged));
+    assert_eq!(staged.step_inputs(), mapped.step_inputs());
+    assert_eq!(staged.outputs, mapped.outputs);
+    let receipts = handle.receipts();
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(receipts[0].metering, Some(usage));
+    assert_eq!(receipts[0].output_digest, Some(digest));
+}
+
 /// ADR-061 r9 test 2: the adapter's output carries nothing from the annotation.
 #[test]
 fn an_accepted_output_carries_nothing_from_its_annotation() {
