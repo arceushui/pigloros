@@ -638,6 +638,77 @@ jobs:
       - name: Staged reducer purity guard (ADR-113 §7)
         run: bash scripts/check-reducer-purity-guard.sh
 
+  # The provider binary doubles as the ADR-069 release launcher, which must be a
+  # self-contained static ELF: no PT_INTERP, no dynamic section (owner decision
+  # Q9.10). Build it for both supported architectures and inspect the result.
+  static-launcher:
+    name: static-launcher
+    needs: [ci_change_scope, preflight-gate]
+    if: ${{ !cancelled() && needs.preflight-gate.result == 'success' && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      RUSTFLAGS: -D warnings -C target-feature=+crt-static -C relocation-model=static
+      CC_x86_64_unknown_linux_musl: musl-gcc
+      CC_aarch64_unknown_linux_musl: aarch64-linux-gnu-gcc
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: aarch64-linux-gnu-gcc
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: 1.97.1
+          targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        with:
+          shared-key: static-launcher
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install the musl and aarch64 cross toolchains
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends musl-tools gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
+      - name: Build the provider binary as a static ELF for each architecture
+        run: |
+          set -euo pipefail
+          for target in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
+            cargo build --locked --release --package pos-sandboxd --bin pos-sandboxd --target "${target}"
+          done
+      - name: Require no interpreter, no dynamic section and no shared dependency
+        run: |
+          set -euo pipefail
+          for target in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
+            binary="target/${target}/release/pos-sandboxd"
+            file "${binary}"
+            file "${binary}" | grep -q 'statically linked'
+            if file "${binary}" | grep -qi 'interpreter\|dynamically linked'; then
+              echo "${binary} names an interpreter or is dynamically linked" >&2
+              exit 1
+            fi
+            if readelf --program-headers --wide "${binary}" | grep -q 'INTERP'; then
+              echo "${binary} has a PT_INTERP program header" >&2
+              exit 1
+            fi
+            readelf --dynamic "${binary}" 2>&1 | grep -q 'There is no dynamic section in this file'
+            if readelf --section-headers --wide "${binary}" | grep -Eq '\.interp|\.dynamic|\.dynsym'; then
+              echo "${binary} has dynamic-linking sections" >&2
+              exit 1
+            fi
+          done
+      - name: Run the x86_64 binary in launcher mode without a systemd environment
+        run: |
+          set -euo pipefail
+          binary=target/x86_64-unknown-linux-musl/release/pos-sandboxd
+          set +e
+          "${binary}" launch-barrier zz 2> launcher.err
+          status=$?
+          set -e
+          test "${status}" = 1
+          grep -q 'launch parameters are not a valid LPV1' launcher.err
+
   coverage:
     name: coverage
     needs: [ci_change_scope, preflight-gate]
@@ -1325,6 +1396,7 @@ jobs:
       - world-client-wasm
       - world-client-browser-parity
       - asan-build
+      - static-launcher
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -1343,6 +1415,7 @@ jobs:
           WASM_RESULT: ${{ needs.world-client-wasm.result }}
           BROWSER_RESULT: ${{ needs.world-client-browser-parity.result }}
           ASAN_BUILD_RESULT: ${{ needs.asan-build.result }}
+          STATIC_LAUNCHER_RESULT: ${{ needs.static-launcher.result }}
         run: |
           set -euo pipefail
           test "${CORE_RESULT}" = success
@@ -1355,7 +1428,8 @@ jobs:
             "${CARGO_CRAP_RESULT}" "${RUSTDOC_RESULT}" "${REFERENCE_RESULT}" \
             "${MATERIALIZE_RESULT}" "${DEPENDENCY_RESULT}" \
             "${LEDGER_WINDOWS_RESULT}" "${DOCKER_RESULT}" \
-            "${WASM_RESULT}" "${BROWSER_RESULT}" "${ASAN_BUILD_RESULT}"; do
+            "${WASM_RESULT}" "${BROWSER_RESULT}" "${ASAN_BUILD_RESULT}" \
+            "${STATIC_LAUNCHER_RESULT}"; do
             test "${result}" = "${expected}"
           done
 

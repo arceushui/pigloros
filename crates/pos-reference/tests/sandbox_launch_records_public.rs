@@ -8,8 +8,9 @@ use std::error::Error;
 use ciborium::value::Value;
 use ed25519_dalek::{Signer, SigningKey};
 use pos_reference::sandbox_provider_protocol::{
-    ExecutionRelease, ExecutionReleaseFields, FdIdentity, LaunchParameters, LauncherReady,
-    LauncherReadyFields, SandboxProviderProtocolError,
+    blake3_digest_of, fdl1_digest, ExecutionRelease, ExecutionReleaseFields, FdIdentity,
+    FdLayoutEntry, FdRole, LaunchParameters, LauncherReady, LauncherReadyFields,
+    SandboxExecutionMode, SandboxProviderProtocolError,
 };
 
 type TestResult = Result<(), Box<dyn Error>>;
@@ -407,5 +408,78 @@ fn decoders_reject_oversized_and_zero_field_records() -> TestResult {
         Value::Bytes(vec![0; 32])
     )?)
     .is_err());
+    Ok(())
+}
+
+#[test]
+fn the_largest_accepted_lpv1_hex_encoding_fits_one_argv_string() -> TestResult {
+    // Linux MAX_ARG_STRLEN: one argv string, including its NUL, is 128 KiB at most.
+    const MAX_ARG_STRLEN: usize = 131_072;
+    let largest = (0..=256)
+        .rev()
+        .find_map(|count| {
+            LaunchParameters::new(
+                [1; 16],
+                fill(2),
+                [3; 32],
+                "/a".to_owned(),
+                vec!["a".repeat(256); count],
+                [4; 32],
+            )
+            .ok()
+        })
+        .ok_or("no LPV1 record is accepted")?;
+    let hex_length = hex(&largest.to_canonical_cbor()?).len();
+    assert!(hex_length > MAX_ARG_STRLEN / 2);
+    assert!(hex_length < MAX_ARG_STRLEN);
+    Ok(())
+}
+
+#[test]
+fn fdl1_digest_distinguishes_mode_role_and_number_and_rejects_bad_order() -> TestResult {
+    let release = FdLayoutEntry {
+        fd_number: 3,
+        role: FdRole::Release,
+    };
+    let host = FdLayoutEntry {
+        fd_number: 3,
+        role: FdRole::HostService,
+    };
+    let local = [
+        host,
+        FdLayoutEntry {
+            fd_number: 4,
+            role: FdRole::Release,
+        },
+    ];
+    let base = fdl1_digest(SandboxExecutionMode::AirGapped, &[release])?;
+    assert_ne!(base, fdl1_digest(SandboxExecutionMode::Replay, &[release])?);
+    assert_ne!(base, fdl1_digest(SandboxExecutionMode::AirGapped, &[host])?);
+    assert_ne!(
+        base,
+        fdl1_digest(
+            SandboxExecutionMode::AirGapped,
+            &[FdLayoutEntry {
+                fd_number: 4,
+                role: FdRole::Release
+            }]
+        )?
+    );
+    assert_ne!(base, fdl1_digest(SandboxExecutionMode::Local, &local)?);
+    assert!(fdl1_digest(SandboxExecutionMode::Local, &[local[1], local[0]]).is_err());
+    assert!(fdl1_digest(SandboxExecutionMode::Local, &[host, host]).is_err());
+    Ok(())
+}
+
+#[test]
+fn blake3_digest_of_matches_the_official_empty_and_one_byte_vectors() -> TestResult {
+    assert_eq!(
+        hex(&blake3_digest_of(&b""[..])?),
+        "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262"
+    );
+    assert_eq!(
+        hex(&blake3_digest_of(&[0_u8][..])?),
+        "2d3adedff11b61f14c886e35afa036736dcd87a74d27b5c1510225d0f592e213"
+    );
     Ok(())
 }
