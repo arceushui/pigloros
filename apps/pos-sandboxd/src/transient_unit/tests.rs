@@ -639,20 +639,6 @@ fn request_with_limits(
     mode: LaunchMode,
     effective_limits: &[SandboxLimit],
 ) -> Result<TransientUnitRequest, Box<dyn Error>> {
-    let authority = SandboxSyscallSetV1::from_canonical_cbor(X86_64)?;
-    let filter = SystemCallFilter::from_selected_record(
-        X86_64,
-        authority.syscall_set_digest,
-        SandboxArchitecture::X86_64,
-    )?;
-    let inputs = TransientUnitLaunchInputs::new(
-        CheckedRoot::for_test(ActivatedRootDirectory::new(
-            "/run/pigloros/attempt-42/root",
-        )?),
-        LauncherSource::new("/usr/lib/pigloros/release-launcher")?,
-        mode,
-        descriptor()?,
-    );
     let limits = SystemdServiceLimits::from_effective_limits(effective_limits)?;
     Ok(TransientUnitRequest::compile(
         inputs(mode)?,
