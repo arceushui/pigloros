@@ -29,7 +29,10 @@ use super::{
     adapter::{hold, hold_adapter, open_beneath, ELF_HEADER_BYTES, NATIVE_MACHINE},
     barrier::{receive_release, run, send_ready},
     decode_hex, decode_parameters,
-    descriptors::{scan_proc_self_fd, validate, Inherited, HOST_SERVICE_NAME, RELEASE_NAME},
+    descriptors::{
+        adopt, entry_number, scan_proc_self_fd, validate, Inherited, HOST_SERVICE_NAME,
+        RELEASE_NAME,
+    },
     environment::LaunchEnvironment,
     error::{LauncherError, ReleaseDefect},
     host::{LaunchHost, ProcessHost},
