@@ -622,6 +622,12 @@ fn a_valid_release_replaces_the_process_with_the_adapter_and_its_arguments() -> 
     Ok(())
 }
 
+type DefectCase = (
+    &'static str,
+    ReleaseDefect,
+    Box<dyn Fn(&mut ExecutionReleaseFields)>,
+);
+
 fn release_error(
     respond: impl FnOnce(&OwnedFd, &LauncherReady) -> TestResult,
 ) -> Result<LauncherError, Box<dyn Error>> {
@@ -632,11 +638,7 @@ fn release_error(
 
 #[test]
 fn every_release_defect_executes_nothing() -> TestResult {
-    let cases: Vec<(
-        &str,
-        ReleaseDefect,
-        Box<dyn Fn(&mut ExecutionReleaseFields)>,
-    )> = vec![
+    let cases: Vec<DefectCase> = vec![
         (
             "attempt",
             ReleaseDefect::Attempt,
@@ -692,10 +694,10 @@ fn malformed_oversized_truncated_and_duplicate_releases_execute_nothing() -> Tes
 fn a_release_carrying_a_descriptor_is_rejected() -> TestResult {
     let error = release_error(|provider, ready| {
         let bytes = release_with(|_| {}, ready)?;
-        let spare = File::open("/")?;
-        let borrowed = [std::os::fd::AsFd::as_fd(&spare)];
-        let mut space = [MaybeUninit::<u8>::uninit(); rustix::cmsg_space!(ScmRights(1))];
-        let mut control = SendAncillaryBuffer::new(&mut space);
+        let directory = File::open("/")?;
+        let borrowed = [std::os::fd::AsFd::as_fd(&directory)];
+        let mut buffer = [MaybeUninit::<u8>::uninit(); rustix::cmsg_space!(ScmRights(1))];
+        let mut control = SendAncillaryBuffer::new(&mut buffer);
         assert!(control.push(SendAncillaryMessage::ScmRights(&borrowed)));
         sendmsg(
             provider,

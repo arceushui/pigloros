@@ -26,6 +26,8 @@ type TestResult = Result<(), Box<dyn Error>>;
 
 const KEY_ID: &str = "runtime-key";
 
+type Mutation = Box<dyn Fn(&mut ExpectedLauncherReady)>;
+
 fn expected() -> ExpectedLauncherReady {
     ExpectedLauncherReady {
         attempt_id: [1; 16],
@@ -232,7 +234,7 @@ fn a_ready_from_another_pid_is_refused_without_a_recheck() -> TestResult {
 #[test]
 fn every_ready_binding_must_equal_the_expected_evidence() -> TestResult {
     let expected = expected();
-    let mutations: Vec<Box<dyn Fn(&mut ExpectedLauncherReady)>> = vec![
+    let mutations: Vec<Mutation> = vec![
         Box::new(|e| e.attempt_id = [9; 16]),
         Box::new(|e| e.nonce = [9; 32]),
         Box::new(|e| e.launch_instance_id = [9; 16]),
@@ -283,17 +285,17 @@ fn malformed_oversized_and_control_carrying_ready_datagrams_are_refused() -> Tes
 
     // A descriptor next to the credentials is control data the provider refuses.
     let (provider, launcher) = pair()?;
-    let spare = File::open("/")?;
-    let borrowed = [spare.as_fd()];
+    let directory = File::open("/")?;
+    let borrowed = [directory.as_fd()];
     let credentials = UCred {
         pid: getpid(),
         uid: getuid(),
         gid: getgid(),
     };
     let bytes = ready_bytes(&expected)?;
-    let mut space =
+    let mut buffer =
         [MaybeUninit::<u8>::uninit(); rustix::cmsg_space!(ScmCredentials(1), ScmRights(1))];
-    let mut control = SendAncillaryBuffer::new(&mut space);
+    let mut control = SendAncillaryBuffer::new(&mut buffer);
     assert!(control.push(SendAncillaryMessage::ScmCredentials(credentials)));
     assert!(control.push(SendAncillaryMessage::ScmRights(&borrowed)));
     sendmsg(
