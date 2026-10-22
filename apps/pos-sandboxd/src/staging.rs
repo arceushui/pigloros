@@ -22,7 +22,7 @@ use rustix::fs::{openat2, unlinkat, AtFlags, Mode, OFlags, ResolveFlags};
 
 // Exclusive creation of a private, close-on-exec file. `RESOLVE_NO_SYMLINKS`
 // also rejects a symlink in the final component, so `O_NOFOLLOW` adds nothing.
-const INPUT_OPEN_FLAGS: OFlags = OFlags::WRONLY
+const INPUT_OPEN_FLAGS: OFlags = OFlags::RDWR
     .union(OFlags::CREATE)
     .union(OFlags::EXCL)
     .union(OFlags::CLOEXEC);
@@ -370,7 +370,8 @@ impl VerifiedStagedInput {
         self.len() == 0
     }
 
-    /// The staged file, positioned after the last written byte.
+    /// The staged file, opened read-write. Chunks are written positionally, so
+    /// its cursor is at 0; read it with positional reads or after seeking.
     #[must_use]
     pub const fn file(&self) -> &File {
         &self.staged.file
@@ -521,6 +522,9 @@ mod tests {
         assert!(!verified.is_empty());
         assert_eq!(fs::read(&path)?, b"abcde");
         assert_eq!(verified.file().metadata()?.len(), 5);
+        let mut readback = [0_u8; 5];
+        verified.file().read_exact_at(&mut readback, 0)?;
+        assert_eq!(&readback, b"abcde");
         assert_eq!(ledger.usage().queued_inputs, 0);
         assert_eq!(ledger.usage().reserved_bytes, 5);
         drop(verified);

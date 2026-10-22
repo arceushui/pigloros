@@ -2,7 +2,8 @@
 //!
 //! LPV1 and `RDY1` are self-digested; `RLS1` is signed by the provider
 //! runtime-attestation key. Every constructor validates the same rules as the
-//! decoder, so a value that exists is a value that decodes.
+//! decoder. Fields are public, like the sibling records, so a mutated value
+//! carries a stale digest and is rejected when encoded and decoded again.
 
 use ciborium::value::Value;
 

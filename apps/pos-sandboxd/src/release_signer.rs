@@ -7,8 +7,8 @@
 //!
 //! Key file contract (recorded for owner review, not yet an ADR rule): a
 //! regular, non-symlink file directly beneath a held directory that the
-//! caller has verified as provider-owned and private; owned by the provider uid; mode 0400 or 0600; exactly 32 raw
-//! bytes holding the Ed25519 seed. The runtime-attestation key ID comes from
+//! caller has verified as provider-owned and private; owned by the provider
+//! uid; mode 0400 or 0600; exactly 32 raw bytes holding the Ed25519 seed. The runtime-attestation key ID comes from
 //! the admitted SPM1, never from the file.
 
 use std::fs::File;
@@ -22,9 +22,10 @@ use pos_reference::sandbox_provider_protocol::{
 use rustix::fs::{openat2, Mode, OFlags, ResolveFlags};
 
 const SEED_BYTES: u64 = 32;
-// Read-only (`O_RDONLY` is zero) and close-on-exec. `RESOLVE_NO_SYMLINKS`
+// Read-only (`O_RDONLY` is zero), close-on-exec and non-blocking, so a FIFO
+// cannot stall the open before the regular-file check. `RESOLVE_NO_SYMLINKS`
 // also rejects a symlink in the final component.
-const KEY_OPEN_FLAGS: OFlags = OFlags::CLOEXEC;
+const KEY_OPEN_FLAGS: OFlags = OFlags::CLOEXEC.union(OFlags::NONBLOCK);
 const KEY_RESOLVE: ResolveFlags = ResolveFlags::BENEATH.union(ResolveFlags::NO_SYMLINKS);
 
 /// The signing port for the provider runtime-attestation key.
@@ -86,7 +87,7 @@ impl KeyFileReleaseSigner {
             .and_then(|metadata| {
                 if !metadata.is_file()
                     || metadata.uid() != owner
-                    || !matches!(metadata.mode() & 0o777, 0o400 | 0o600)
+                    || !matches!(metadata.mode() & 0o7777, 0o400 | 0o600)
                     || metadata.len() != SEED_BYTES
                 {
                     Err(ReleaseSignerError::UnsafeKeyFile)
