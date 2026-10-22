@@ -273,7 +273,7 @@ impl UnitHost for FakeHost {
         _unit_name: TransientServiceUnitName,
     ) -> impl Future<Output = Result<(), Injected>> + Send {
         record(&self.log, "kill");
-        let outcome = if self.fail_kill {
+        let outcome = if self.faulty(Fault::Kill) {
             Err(Injected)
         } else {
             Ok(())
