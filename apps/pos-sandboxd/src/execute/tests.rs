@@ -71,18 +71,25 @@ enum AdapterScript {
     Silent,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Fault {
+    Start,
+    Bind,
+    Kill,
+    ReadCgroup,
+    KillCgroup,
+}
+
+type Reply = Arc<Mutex<Option<Result<Vec<u8>, String>>>>;
+
 struct FakeHost {
     log: Log,
-    fail_start: bool,
-    fail_bind: bool,
-    fail_kill: bool,
+    faults: Vec<Fault>,
     observed: Arc<Mutex<Observed>>,
     adapter: AdapterScript,
-    adapter_reply: Arc<Mutex<Option<Result<Vec<u8>, String>>>>,
+    adapter_reply: Reply,
     held: Arc<Mutex<Vec<UnixStream>>>,
     empty_after: usize,
-    fail_read: bool,
-    fail_cgroup_kill: bool,
     polls: Arc<AtomicUsize>,
     cgroup_kills: Arc<AtomicUsize>,
 }
@@ -91,16 +98,12 @@ impl FakeHost {
     fn new(log: &Log) -> Self {
         Self {
             log: Arc::clone(log),
-            fail_start: false,
-            fail_bind: false,
-            fail_kill: false,
+            faults: Vec::new(),
             observed: Arc::default(),
             adapter: AdapterScript::None,
             adapter_reply: Arc::default(),
             held: Arc::default(),
             empty_after: 0,
-            fail_read: false,
-            fail_cgroup_kill: false,
             polls: Arc::default(),
             cgroup_kills: Arc::default(),
         }
@@ -173,6 +176,10 @@ impl FakeHost {
         }
     }
 
+    fn faulty(&self, fault: Fault) -> bool {
+        self.faults.contains(&fault)
+    }
+
     fn observed(&self) -> Observed {
         self.observed
             .lock()
@@ -223,7 +230,7 @@ impl UnitHost for FakeHost {
     ) -> impl Future<Output = Result<String, Injected>> + Send {
         record(&self.log, "start");
         let adapter_end = self.observe(&request);
-        let outcome = if self.fail_start {
+        let outcome = if self.faulty(Fault::Start) {
             Err(Injected)
         } else {
             if let Some(adapter_end) = adapter_end {
@@ -239,15 +246,15 @@ impl UnitHost for FakeHost {
         _started: &String,
     ) -> impl Future<Output = Result<FakeCgroup, Injected>> + Send {
         record(&self.log, "bind_cgroup");
-        let outcome = if self.fail_bind {
+        let outcome = if self.faulty(Fault::Bind) {
             Err(Injected)
         } else {
             Ok(FakeCgroup {
                 polls: Arc::clone(&self.polls),
                 kills: Arc::clone(&self.cgroup_kills),
                 empty_after: self.empty_after,
-                fail_read: self.fail_read,
-                fail_kill: self.fail_cgroup_kill,
+                fail_read: self.faulty(Fault::ReadCgroup),
+                fail_kill: self.faulty(Fault::KillCgroup),
             })
         };
         async move { outcome }
@@ -350,8 +357,7 @@ fn limits(watchdog_ms: u64) -> Vec<SandboxLimit> {
                 3 => 500_000,
                 4 => watchdog_ms,
                 5 => 64,
-                6 => 4_096,
-                9 => 4_096,
+                6 | 9 => 4_096,
                 _ => 1_000,
             },
         })
@@ -691,9 +697,14 @@ async fn a_unit_that_fails_to_start_or_bind_is_killed() -> TestResult {
     ] {
         let log = Log::default();
         let mut host = FakeHost::new(&log);
-        host.fail_start = fail_start;
-        host.fail_bind = !fail_start;
-        host.fail_kill = fail_kill;
+        host.faults.push(if fail_start {
+            Fault::Start
+        } else {
+            Fault::Bind
+        });
+        if fail_kill {
+            host.faults.push(Fault::Kill);
+        }
         let mut barrier = FakeBarrier::new(&log);
         let job = job(
             attempt(SandboxExecutionMode::AirGapped)?,
@@ -801,7 +812,7 @@ async fn an_unreadable_cgroup_terminates_the_unit() -> TestResult {
     let (_root, store) = capture_store()?;
     let log = Log::default();
     let mut host = FakeHost::new(&log);
-    host.fail_read = true;
+    host.faults.push(Fault::ReadCgroup);
     let mut barrier = FakeBarrier::new(&log);
     let job = job(
         attempt(SandboxExecutionMode::Fork)?,
@@ -824,7 +835,9 @@ async fn the_watchdog_kills_an_attempt_that_never_empties() -> TestResult {
         let log = Log::default();
         let mut host = FakeHost::new(&log);
         host.empty_after = usize::MAX;
-        host.fail_cgroup_kill = fail_cgroup_kill;
+        if fail_cgroup_kill {
+            host.faults.push(Fault::KillCgroup);
+        }
         let mut barrier = FakeBarrier::new(&log);
         let job = job(
             attempt(SandboxExecutionMode::AirGapped)?,
@@ -844,7 +857,7 @@ async fn the_watchdog_kills_an_attempt_that_never_empties() -> TestResult {
     let log = Log::default();
     let mut host = FakeHost::new(&log);
     host.empty_after = usize::MAX;
-    host.fail_kill = true;
+    host.faults.push(Fault::Kill);
     let mut barrier = FakeBarrier::new(&log);
     let job = job(
         attempt(SandboxExecutionMode::AirGapped)?,
