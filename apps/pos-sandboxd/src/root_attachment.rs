@@ -43,8 +43,9 @@ use self::{
     verify::Expected,
 };
 use crate::{
-    ActivatedRootDirectory, ActivationImage, ImageActivationError, ImageActivator,
-    MountfsdImageActivator, PreparedAttemptDirectory, QuarantinedRootMount,
+    ActivatedRootDirectory, ActivationImage, AdmittedEntry, CheckedRoot, ImageActivationError,
+    ImageActivator, MountfsdImageActivator, PreparedAttemptDirectory, QuarantinedRootMount,
+    StagingError,
 };
 
 /// The kernel operations of one attachment.
@@ -57,7 +58,13 @@ trait AttachmentKernel {
     /// Make the attached mount private.
     fn make_private(&self, mount: BorrowedFd<'_>) -> Result<(), ImageActivationError>;
     /// Read the attached mount's kernel identity back.
-    fn observe(&self, mount: BorrowedFd<'_>, attempt: &File, root: &File) -> Observations;
+    fn observe(
+        &self,
+        mount: BorrowedFd<'_>,
+        attempt: &File,
+        root: &File,
+        executable: &str,
+    ) -> Observations;
     /// Detach a rejected, attached mount.
     fn detach(&self, mount: BorrowedFd<'_>) -> Result<(), ImageActivationError>;
 }
@@ -71,14 +78,14 @@ trait AttachmentKernel {
 pub struct VerifiedRootMount {
     mount: OwnedFd,
     mount_id: u64,
-    root_directory: ActivatedRootDirectory,
+    expected: Expected,
 }
 
 impl VerifiedRootMount {
     /// The verified attempt root, the only `RootDirectory` a unit may use.
     #[must_use]
     pub const fn root_directory(&self) -> &ActivatedRootDirectory {
-        &self.root_directory
+        &self.expected.root_directory
     }
 
     /// The kernel mount ID read back for the attached root.
@@ -92,6 +99,51 @@ impl VerifiedRootMount {
     pub fn mount(&self) -> BorrowedFd<'_> {
         self.mount.as_fd()
     }
+
+    /// Recheck, immediately before `StartTransientUnit`, that current
+    /// authority and the attached mount are still the verified ones
+    /// (ADR-087 §2 step 7).
+    ///
+    /// The installed authority is re-read and compared with the provider
+    /// control floor through `entry`. The mount, loop, dm-verity and
+    /// executable readback is then repeated and must name the same mount ID.
+    /// The returned [`CheckedRoot`] is the only `RootDirectory` a launch input
+    /// accepts.
+    ///
+    /// # Errors
+    /// [`ImageActivationError::EvidenceMismatch`] for changed authority, a
+    /// floor above the admission, or any readback difference.
+    pub fn recheck(
+        &self,
+        directory: &PreparedAttemptDirectory,
+        entry: &AdmittedEntry<'_>,
+    ) -> Result<CheckedRoot, ImageActivationError> {
+        recheck(&HostKernel::system(), self, directory, || entry.recheck())
+    }
+}
+
+fn recheck<K: AttachmentKernel>(
+    kernel: &K,
+    root: &VerifiedRootMount,
+    directory: &PreparedAttemptDirectory,
+    authority: impl FnOnce() -> Result<(), StagingError>,
+) -> Result<CheckedRoot, ImageActivationError> {
+    let (attempt, held_root) = directory.held_directories();
+    authority()
+        .map_err(|_| ImageActivationError::EvidenceMismatch)
+        .and_then(|()| {
+            root.expected.verify(&kernel.observe(
+                root.mount.as_fd(),
+                attempt,
+                held_root,
+                &root.expected.executable_path,
+            ))
+        })
+        .and_then(|mount_id| {
+            (mount_id == root.mount_id)
+                .then(|| CheckedRoot::rechecked(root.expected.root_directory.clone()))
+                .ok_or(ImageActivationError::EvidenceMismatch)
+        })
 }
 
 /// Activate, attach and verify the admitted SIM1 root of one attempt.
@@ -187,14 +239,21 @@ fn attach_and_verify<K: AttachmentKernel>(
     let verified = kernel.attach(mount.as_fd(), root).and_then(|()| {
         kernel
             .make_private(mount.as_fd())
-            .and_then(|()| expected.verify(&kernel.observe(mount.as_fd(), attempt, root)))
+            .and_then(|()| {
+                expected.verify(&kernel.observe(
+                    mount.as_fd(),
+                    attempt,
+                    root,
+                    &expected.executable_path,
+                ))
+            })
             .and_then(|mount_id| recheck().map(|()| mount_id))
             .or_else(|error| kernel.detach(mount.as_fd()).and(Err(error)))
     });
     verified.map(|mount_id| VerifiedRootMount {
         mount,
         mount_id,
-        root_directory: expected.root_directory.clone(),
+        expected: expected.clone(),
     })
 }
 

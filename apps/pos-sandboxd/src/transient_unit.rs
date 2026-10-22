@@ -80,18 +80,22 @@ impl SystemdServiceLimits {
 
 /// A bounded provider-owned path to the activated admitted SIM1 root beneath `/run`.
 ///
-/// Construction validates only the path representation. The provider activation
-/// boundary remains responsible for ownership, freshness, and the read-only mount.
+/// It has no public constructor: a [`crate::VerifiedRootMount`] supplies the
+/// only one, after kernel readback and re-admission.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ActivatedRootDirectory(String);
 
 impl ActivatedRootDirectory {
-    /// Validate one provider-owned activated-root path.
+    /// Validate one activated-root path representation, for tests only.
+    ///
+    /// Production roots come solely from [`crate::VerifiedRootMount`] (owner
+    /// decision Q9.4), so this constructor does not exist in a build.
     ///
     /// # Errors
     /// Rejects paths outside `/run`, paths with traversal or empty components,
     /// embedded NUL bytes, and paths larger than the Linux path bound.
-    pub fn new(path: impl Into<String>) -> Result<Self, TransientUnitRequestError> {
+    #[cfg(test)]
+    pub(crate) fn new(path: impl Into<String>) -> Result<Self, TransientUnitRequestError> {
         let path = path.into();
         if is_normalized_absolute_path(&path) && path.starts_with("/run/") {
             Ok(Self(path))
@@ -172,17 +176,42 @@ pub struct TransientUnitLaunchInputs {
     release: OwnedFd,
 }
 
+/// The verified attempt root, rechecked immediately before launch (ADR-087
+/// §2 step 7).
+///
+/// It has no public constructor. Only [`crate::VerifiedRootMount::recheck`]
+/// mints one, after current RVS1, the control floor and the attached mount
+/// identity were checked again, and [`TransientUnitLaunchInputs`] accepts
+/// nothing else as `RootDirectory`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CheckedRoot {
+    root_directory: ActivatedRootDirectory,
+}
+
+impl CheckedRoot {
+    #[cfg(target_os = "linux")]
+    pub(crate) const fn rechecked(root_directory: ActivatedRootDirectory) -> Self {
+        Self { root_directory }
+    }
+
+    /// A rechecked root for requested-state unit tests, where no mount exists.
+    #[cfg(test)]
+    pub(crate) const fn for_test(root_directory: ActivatedRootDirectory) -> Self {
+        Self { root_directory }
+    }
+}
+
 impl TransientUnitLaunchInputs {
-    /// Combine already-validated per-attempt launch inputs.
+    /// Combine a rechecked root with the other per-attempt launch inputs.
     #[must_use]
-    pub const fn new(
-        root_directory: ActivatedRootDirectory,
+    pub fn new(
+        root: &CheckedRoot,
         launcher_source: LauncherSource,
         mode: LaunchMode,
         release: OwnedFd,
     ) -> Self {
         Self {
-            root_directory,
+            root_directory: root.root_directory.clone(),
             launcher_source,
             mode,
             release,
@@ -643,17 +672,5 @@ fn is_normalized_absolute_path(path: &str) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn property_clone_propagates_value_failure() {
-        let result = SystemdTransientUnitProperty::from_cloned_value(
-            SystemdTransientUnitPropertyKind::Dynamic(
-                SystemdDynamicPropertyKind::FileDescriptorStoreMax,
-            ),
-            Err(zvariant::Error::IncorrectType),
-        );
-        assert!(matches!(result, Err(zvariant::Error::IncorrectType)));
-    }
-}
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests;

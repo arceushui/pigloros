@@ -43,8 +43,8 @@ pub use root_attachment::{activate_admitted_root, VerifiedRootMount};
 pub use release_signer::{issue_release, KeyFileReleaseSigner, ReleaseSigner, ReleaseSignerError};
 #[cfg(target_os = "linux")]
 pub use staging::{
-    StagedInput, StagingDirectory, StagingError, StagingLedger, StagingLimits, StagingReservation,
-    StagingUsage, VerifiedStagedInput,
+    AdmittedEntry, ControlFloor, StagedInput, StagingDirectory, StagingError, StagingLedger,
+    StagingLimits, StagingReservation, StagingUsage, VerifiedStagedInput,
 };
 
 pub use hardening::{
@@ -62,7 +62,7 @@ pub use system_bus::{
     TransientServiceUnitName, TransientServiceUnitNameError,
 };
 pub use transient_unit::{
-    ActivatedRootDirectory, LaunchMode, LauncherSource, SystemdManagerReadback,
+    ActivatedRootDirectory, CheckedRoot, LaunchMode, LauncherSource, SystemdManagerReadback,
     SystemdManagerReadbackOnlyProperty, SystemdServiceLimits, SystemdServiceLimitsError,
     SystemdTransientUnitNumericValue, SystemdTransientUnitProperty, SystemdTransientUnitReadback,
     SystemdTransientUnitReadbackValue, SystemdTransientUnitValue, TransientUnitLaunchInputs,

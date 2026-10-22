@@ -42,6 +42,9 @@ pub(super) struct Expected {
     pub(super) signature: Extent,
     /// Device and inode of the held, admitted image descriptor.
     pub(super) held: (u64, u64),
+    /// The SIM1 executable path and its admitted BLAKE3 digest.
+    pub(super) executable_path: String,
+    pub(super) executable_digest: [u8; 32],
 }
 
 impl Expected {
@@ -59,6 +62,8 @@ impl Expected {
             verity: Extent::of(&manifest.partitions[1]),
             signature: Extent::of(&manifest.partitions[2]),
             held: (held.st_dev, held.st_ino),
+            executable_path: manifest.executable_path.clone(),
+            executable_digest: manifest.executable_blake3_digest,
         })
     }
 
@@ -75,6 +80,10 @@ impl Expected {
                         .entry
                         .as_ref()
                         .is_some_and(|entry| self.entry_matches(entry, mount, observed))
+                    && observed.executable.is_some_and(|executable| {
+                        executable.node.mount_id == mount.mount_id
+                            && executable.blake3 == self.executable_digest
+                    })
                     && observed.mapper.as_ref().is_some_and(|mapper| {
                         mapper
                             .uuid
