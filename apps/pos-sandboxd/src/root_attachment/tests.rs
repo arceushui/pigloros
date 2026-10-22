@@ -33,7 +33,7 @@ use super::{
     },
     verify::Extent,
 };
-use crate::{PlannedAttemptIntent, SystemdAttemptRegistry};
+use crate::{PlannedAttemptIntent, StagingLedger, StagingLimits, SystemdAttemptRegistry};
 
 type BoxError = Box<dyn Error + Send + Sync>;
 type TestResult = Result<(), BoxError>;
@@ -1095,6 +1095,20 @@ async fn the_admitted_chain_reaches_attachment_only_through_every_gate() -> Test
     assert_eq!(verified.root_directory(), &root_directory);
     assert_eq!(verified.mount_id(), 41);
     assert_eq!(kernel.detached(), 0);
+
+    // The entry reservation consumes a fresh admission. The public recheck
+    // re-reads the real host kernel: the fake descriptor is no attached EROFS
+    // mount, so it refuses.
+    let ledger = StagingLedger::new(StagingLimits {
+        aggregate_bytes: 0,
+        queued_requests: 0,
+        concurrent_attempts: 1,
+    });
+    let entry = ledger.reserve_entry(snapshot.admit_held_image()?)?;
+    assert_eq!(
+        verified.recheck(&prepared, &entry).err(),
+        Some(ImageActivationError::EvidenceMismatch)
+    );
 
     // The held image changes after admission: re-admission rejects and the
     // attached root is detached again.
