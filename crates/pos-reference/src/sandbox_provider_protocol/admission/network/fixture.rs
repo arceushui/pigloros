@@ -174,7 +174,7 @@ mod tests {
             [4; 16],
             authority.clone(),
             [1, 2, 3],
-            vec![(plan.clone(), capability.clone())],
+            vec![(plan.clone(), capability)],
             limits,
         );
         let grant = admission.grant();
