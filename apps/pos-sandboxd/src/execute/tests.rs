@@ -310,6 +310,7 @@ struct FakeBarrier {
     released: Arc<Mutex<Vec<(String, Instant)>>>,
     fail_take: bool,
     fail_release: bool,
+    hang_release: bool,
 }
 
 impl FakeBarrier {
@@ -319,6 +320,7 @@ impl FakeBarrier {
             released: Arc::default(),
             fail_take: false,
             fail_release: false,
+            hang_release: false,
         }
     }
 }
@@ -349,7 +351,13 @@ impl LaunchBarrier for FakeBarrier {
         } else {
             Ok(())
         };
-        async move { outcome }
+        let hang = self.hang_release;
+        async move {
+            if hang {
+                std::future::pending::<()>().await;
+            }
+            outcome
+        }
     }
 }
 
@@ -815,6 +823,21 @@ async fn a_unit_whose_cgroup_cannot_be_bound_is_killed_before_release() -> TestR
     assert_eq!(failed.unit, UnitState::Killed);
     assert!(!scenario.entries().iter().any(|entry| entry == "release"));
     assert_eq!(scenario.cgroup_kills(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_barrier_that_never_answers_is_cut_off_at_the_deadline() -> TestResult {
+    let mut scenario = Scenario::new()?;
+    scenario.barrier.hang_release = true;
+    let started = Instant::now();
+    let run = scenario.run_watched(SandboxExecutionMode::AirGapped, ModePlan::AirGapped, 100);
+    let outcome = tokio::time::timeout(Duration::from_secs(10), run).await??;
+    let failed = failure(outcome)?;
+    assert!(started.elapsed() >= Duration::from_millis(100));
+    assert!(matches!(failed.error, ExecuteError::ReleaseTimeout));
+    assert_eq!(failed.unit, UnitState::Killed);
+    assert_eq!(scenario.cgroup_kills(), 1);
     Ok(())
 }
 

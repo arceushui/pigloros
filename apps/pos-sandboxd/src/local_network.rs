@@ -5,7 +5,7 @@
 //! [`LocalProxyBinding`]. This module supplies the only binding the provider
 //! ever serves, [`BoundLocalProxy`]. It has no public constructor and is
 //! minted solely from an [`ActiveAttempt`], which proves the attempt, the
-//! authority heads the attempt was rechecked against, the namespace and
+//! authority heads the attempt was admitted with, the namespace and
 //! firewall ([`EstablishedNetwork`]) and ownership of FD 3
 //! ([`HostServiceChannel`]). A bare admission and an arbitrary channel cannot
 //! be bound.
@@ -126,7 +126,7 @@ pub enum LocalProxyBindError {
     #[error("admission belongs to another attempt")]
     Attempt,
     /// The grant names another SIM1, or other authority heads or epochs than
-    /// the attempt was admitted and rechecked against.
+    /// the attempt was admitted with.
     #[error("admission authority differs from the active attempt")]
     Authority,
     /// The namespace belongs to another attempt.

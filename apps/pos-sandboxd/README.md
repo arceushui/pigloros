@@ -121,7 +121,18 @@ network are ports, so the composition is exercised without systemd.
 
 The result carries the ordered NXT1 transcript digests for SPR1 and the proxy
 termination for the SAU1 terminal classification; signing and classification
-are #443, and unmounting and removing the attempt are #442.
+are #443, and unmounting and removing the attempt are #442. A watchdog that
+closed the channel is reported by `ServedProxy::watchdog_expired`, not by the
+termination, which reads a closed channel as a clean close.
+
+Not composed here, and stated so that nothing is assumed: the `ExecStart`
+launcher-mode property and its LPV1 argument, the production `LaunchBarrier`
+and `ReleaseRecheck` adapters over `release_after_ready`, adapter stdin and
+stdout transport, and the real Local namespace. `ActiveAttempt` binds an
+admission against the authority heads the attempt was admitted with, which the
+successful last-moment recheck confirmed. Authorization of a Replay exchange
+set is the caller's: the report that supplies it is not verified here. `tokio`
+gains its `rt` feature for the blocking proxy thread.
 
 The provider never creates a local process: `connect_system` accepts only a
 Unix-socket system-bus address (zbus's `unixexec` and `ibus` transports would
