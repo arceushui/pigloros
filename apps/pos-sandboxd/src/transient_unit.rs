@@ -14,6 +14,10 @@ const LAUNCHER_DESTINATION: &str = "/.pigloros/release-launcher";
 const RELEASE_DESCRIPTOR_NAME: &str = "piglor-release-v1";
 const HOST_SERVICE_DESCRIPTOR_NAME: &str = "piglor-host-service-v1";
 const ELM1_LIMIT_COUNT: usize = 17;
+/// ELM1 limit 9 (`WorkBytes`) sizes the one optional writable mount.
+const WORK_BYTES_LIMIT_ID: usize = 9;
+/// The sole writable mount point (ADR-069 section 6).
+const WORK_MOUNT_PATH: &str = "/work";
 
 /// The systemd-owned portion of one complete, already authorized ELM1 limit set.
 ///
@@ -22,6 +26,7 @@ const ELM1_LIMIT_COUNT: usize = 17;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SystemdServiceLimits {
     requested: [u64; 7],
+    work_bytes: u64,
 }
 
 /// Failure to represent the exact ELM1 service limits on pinned systemd.
@@ -59,6 +64,13 @@ impl SystemdServiceLimits {
             return Err(SystemdServiceLimitsError::InvalidEffectiveLimits);
         }
         let mut requested = [0; 7];
+        let work_bytes = limits[WORK_BYTES_LIMIT_ID].value;
+        // tmpfs reads `size=18446744073709551615` as an unbounded mount.
+        if work_bytes == u64::MAX {
+            return Err(SystemdServiceLimitsError::UnenforceableLimit(
+                limits[WORK_BYTES_LIMIT_ID].limit_id,
+            ));
+        }
         for (id, limit) in limits.iter().take(requested.len()).enumerate() {
             if limit.value == u64::MAX || ([0, 2, 3, 4].contains(&id) && limit.value == 0) {
                 return Err(SystemdServiceLimitsError::UnenforceableLimit(
@@ -70,7 +82,26 @@ impl SystemdServiceLimits {
         requested[4] = requested[4]
             .checked_mul(1_000)
             .ok_or(SystemdServiceLimitsError::WatchdogOverflow)?;
-        Ok(Self { requested })
+        Ok(Self {
+            requested,
+            work_bytes,
+        })
+    }
+
+    /// The requested `TemporaryFileSystem` entries: the `/work` tmpfs sized by
+    /// ELM1 `WorkBytes`, or none when that ceiling is zero.
+    ///
+    /// A zero ceiling is a literal zero-capacity limit, and tmpfs reads
+    /// `size=0` as unbounded, so no writable mount is requested at all.
+    fn temporary_file_systems(&self) -> Vec<(String, String)> {
+        if self.work_bytes == 0 {
+            Vec::new()
+        } else {
+            vec![(
+                WORK_MOUNT_PATH.to_owned(),
+                format!("size={},nosuid,nodev,noexec", self.work_bytes),
+            )]
+        }
     }
 
     pub(crate) const fn value(&self, property: SystemdOperatingLimitProperty) -> u64 {
@@ -254,6 +285,8 @@ pub enum SystemdTransientUnitValue {
     Numeric(SystemdTransientUnitNumericValue),
     /// A D-Bus `a(hs)` descriptor array: Unix FD before descriptor name.
     ExtraFileDescriptors(Vec<(OwnedFd, String)>),
+    /// A D-Bus `a(ss)` array of tmpfs mount path and mount options.
+    TemporaryFileSystem(Vec<(String, String)>),
 }
 
 impl SystemdTransientUnitValue {
@@ -275,6 +308,7 @@ impl SystemdTransientUnitValue {
                 })
                 .collect::<Result<Vec<_>, _>>()
                 .map(Self::ExtraFileDescriptors),
+            Self::TemporaryFileSystem(value) => Ok(Self::TemporaryFileSystem(value.clone())),
         }
     }
 }
@@ -314,6 +348,7 @@ impl SystemdTransientUnitProperty {
             | SystemdTransientUnitValue::RestrictAddressFamilies(_) => "(bas)",
             SystemdTransientUnitValue::Numeric(value) => value.dbus_signature(),
             SystemdTransientUnitValue::ExtraFileDescriptors(_) => "a(hs)",
+            SystemdTransientUnitValue::TemporaryFileSystem(_) => "a(ss)",
         }
     }
 
@@ -360,6 +395,10 @@ impl SystemdTransientUnitProperty {
                     SystemdTransientUnitValue::ExtraFileDescriptors(expected),
                     SystemdTransientUnitReadbackValue::StringArray(actual),
                 ) => expected.iter().map(|(_, name)| name).eq(actual.iter()),
+                (
+                    SystemdTransientUnitValue::TemporaryFileSystem(expected),
+                    SystemdTransientUnitReadbackValue::TemporaryFileSystem(actual),
+                ) => expected == actual,
                 _ => false,
             }
     }
@@ -462,6 +501,8 @@ pub enum SystemdTransientUnitReadbackValue {
     BoolStringArray((bool, Vec<String>)),
     /// A D-Bus `as` value.
     StringArray(Vec<String>),
+    /// A D-Bus `a(ss)` value.
+    TemporaryFileSystem(Vec<(String, String)>),
     /// A D-Bus `u` value.
     U32(u32),
     /// A D-Bus `t` value.
@@ -545,7 +586,7 @@ impl TransientUnitRequest {
             ),
         };
         let mut properties =
-            Vec::with_capacity(TransientUnitHardening::requested_properties().len() + 13);
+            Vec::with_capacity(TransientUnitHardening::requested_properties().len() + 14);
         for property in TransientUnitHardening::requested_properties() {
             properties.push(SystemdTransientUnitProperty::new(
                 SystemdTransientUnitPropertyKind::Hardening(*property),
@@ -610,6 +651,12 @@ impl TransientUnitRequest {
                 SystemdDynamicPropertyKind::ExtraFileDescriptors,
             ),
             SystemdTransientUnitValue::ExtraFileDescriptors(descriptors),
+        ));
+        properties.push(SystemdTransientUnitProperty::new(
+            SystemdTransientUnitPropertyKind::Dynamic(
+                SystemdDynamicPropertyKind::TemporaryFileSystem,
+            ),
+            SystemdTransientUnitValue::TemporaryFileSystem(service_limits.temporary_file_systems()),
         ));
         Self {
             properties,

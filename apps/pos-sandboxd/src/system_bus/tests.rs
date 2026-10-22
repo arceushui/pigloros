@@ -35,7 +35,7 @@ const UNRELATED_UNIT_PATH: &str = "/org/freedesktop/systemd1/unit/unrelated_2ese
 const CONTROL_GROUP_PATH: &str = "/system.slice/pigloros-attempt-test.service";
 const ROOT_DIRECTORY: &str = "/run/pigloros/attempt-381/root";
 const ROOT_IMAGE_POLICY: &str = "root=verity+signed";
-const EXPECTED_PROPERTY_SHAPE: [(&str, &str); 42] = [
+const EXPECTED_PROPERTY_SHAPE: [(&str, &str); 43] = [
     ("Type", "s"),
     ("RootDirectory", "s"),
     ("BindReadOnlyPaths", "a(ssbt)"),
@@ -78,6 +78,7 @@ const EXPECTED_PROPERTY_SHAPE: [(&str, &str); 42] = [
     ("LimitFSIZE", "t"),
     ("FileDescriptorStoreMax", "u"),
     ("ExtraFileDescriptors", "a(hs)"),
+    ("TemporaryFileSystem", "a(ss)"),
 ];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -427,6 +428,7 @@ struct RecordingService {
     system_call_filter: Vec<String>,
     root_directory: String,
     service_limits: [u64; 7],
+    temporary_file_system: Vec<(String, String)>,
     property_reads: Arc<AtomicUsize>,
     control_group_reads: Arc<AtomicUsize>,
     control_group: String,
@@ -451,6 +453,10 @@ impl RecordingService {
             system_call_filter,
             root_directory: ROOT_DIRECTORY.to_owned(),
             service_limits: [134_217_728, 0, 16, 500_000, 5_000_000, 64, 4_096],
+            temporary_file_system: vec![(
+                "/work".to_owned(),
+                "size=1000,nosuid,nodev,noexec".to_owned(),
+            )],
             property_reads: Arc::new(AtomicUsize::new(0)),
             control_group_reads: Arc::new(AtomicUsize::new(0)),
             control_group: CONTROL_GROUP_PATH.to_owned(),
@@ -730,6 +736,11 @@ impl RecordingService {
         ])
     }
 
+    #[zbus(property, name = "TemporaryFileSystem")]
+    fn temporary_file_system(&self) -> Vec<(String, String)> {
+        self.fixed(self.temporary_file_system.clone())
+    }
+
     #[zbus(property, name = "RootImagePolicy")]
     fn root_image_policy(&self) -> fdo::Result<&'static str> {
         self.record_read();
@@ -784,7 +795,7 @@ async fn generated_proxy_submits_the_exact_closed_request() -> Result<(), Box<dy
     assert_eq!(verified.unit_name(), &name);
     assert_eq!(verified.job().as_str(), JOB_PATH);
     assert_eq!(verified.unit_path(), UNIT_PATH);
-    assert_eq!(verified.requested_readback().len(), 42);
+    assert_eq!(verified.requested_readback().len(), 43);
     assert_eq!(verified.requested_readback()[0].name(), "Type");
     assert_eq!(
         verified.requested_readback()[41].name(),
