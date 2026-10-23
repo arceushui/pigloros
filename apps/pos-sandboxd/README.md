@@ -145,7 +145,7 @@ itself, and bounds the `ReadyV1` receive with a socket timeout equal to the
 time left before the attempt deadline. The blocking receive, the recheck and
 the signed `ReleaseV1` send run under `tokio::task::block_in_place`, so the
 barrier needs a multi-thread Tokio runtime; a current-thread runtime or none
-is refused with `BarrierError::RuntimeFlavor` (a test fixes this requirement).
+is refused with `BarrierError::RuntimeFlavor` (a test fixes this requirement). The receive is bounded by a socket read timeout, because an outer deadline cannot preempt a blocking call.
 `AuthorityCheck` is the last-moment recheck: the caller's
 `|| root.recheck(&directory, &entry)`, the cancellation flag the attempt
 lifecycle sets, and the observed readback-set digest behind `ObservedReadback`.
