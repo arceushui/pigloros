@@ -367,6 +367,10 @@ struct Prepared<C> {
 ///
 /// The runtime must have its time driver enabled.
 ///
+/// `execute` is not cancel-safe: if the returned future is dropped after the
+/// unit was submitted, nothing kills the unit, so the caller must drive it to
+/// completion.
+///
 /// # Errors
 /// An [`ExecuteFailure`] names the error and what is known of the unit. Any
 /// failure after the unit was submitted kills it.
