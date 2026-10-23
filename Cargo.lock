@@ -5946,6 +5946,7 @@ dependencies = [
  "tokio",
  "zbus",
  "zbus_systemd",
+ "zeroize",
  "zlink",
 ]
 

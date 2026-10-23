@@ -43,6 +43,7 @@ zlink = { version = "=0.7.1", default-features = false, features = [
   "tokio",
   "tracing",
 ] }
+zeroize = { workspace = true }
 
 [dev-dependencies]
 pos-conformance = { path = "../../crates/pos-conformance" }
