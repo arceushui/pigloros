@@ -34,6 +34,7 @@ zlink = { version = "=0.7.1", default-features = false, features = [
   "tracing",
 ] }
 zvariant = "=5.15.0"
+zeroize = { workspace = true }
 
 [dev-dependencies]
 pos-conformance = { path = "../../crates/pos-conformance" }

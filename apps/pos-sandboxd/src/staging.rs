@@ -370,11 +370,15 @@ impl VerifiedStagedInput {
         self.len() == 0
     }
 
-    /// The staged file, opened read-write. Chunks are written positionally, so
-    /// its cursor is at 0; read it with positional reads or after seeking.
-    #[must_use]
-    pub const fn file(&self) -> &File {
-        &self.staged.file
+    /// Read exactly `buffer.len()` bytes at `offset`, positionally.
+    ///
+    /// The staged file stays private: the verified input offers reads only, so
+    /// no holder can write the bytes after verification.
+    ///
+    /// # Errors
+    /// Any read error, including a read past the end of the input.
+    pub fn read_exact_at(&self, buffer: &mut [u8], offset: u64) -> io::Result<()> {
+        self.staged.file.read_exact_at(buffer, offset)
     }
 }
 
@@ -521,10 +525,10 @@ mod tests {
         assert_eq!(verified.len(), 5);
         assert!(!verified.is_empty());
         assert_eq!(fs::read(&path)?, b"abcde");
-        assert_eq!(verified.file().metadata()?.len(), 5);
         let mut readback = [0_u8; 5];
-        verified.file().read_exact_at(&mut readback, 0)?;
+        verified.read_exact_at(&mut readback, 0)?;
         assert_eq!(&readback, b"abcde");
+        assert!(verified.read_exact_at(&mut [0_u8; 1], 5).is_err());
         assert_eq!(ledger.usage().queued_inputs, 0);
         assert_eq!(ledger.usage().reserved_bytes, 5);
         drop(verified);

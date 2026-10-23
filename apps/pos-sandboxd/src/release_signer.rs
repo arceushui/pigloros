@@ -20,6 +20,7 @@ use pos_reference::sandbox_provider_protocol::{
     ExecutionRelease, ExecutionReleaseFields, SandboxProviderProtocolError,
 };
 use rustix::fs::{openat2, Mode, OFlags, ResolveFlags};
+use zeroize::Zeroizing;
 
 const SEED_BYTES: u64 = 32;
 // Read-only (`O_RDONLY` is zero), close-on-exec and non-blocking, so a FIFO
@@ -96,9 +97,10 @@ impl KeyFileReleaseSigner {
                 }
             })
             .and_then(|()| {
-                // The seed copy is not zeroized; `SigningKey` wipes its own copy on drop.
-                let mut seed = [0_u8; 32];
-                file.read_exact(&mut seed)
+                // The stack copy of the seed is wiped on drop, on every path;
+                // `SigningKey` wipes its own copy.
+                let mut seed = Zeroizing::new([0_u8; 32]);
+                file.read_exact(&mut *seed)
                     .map(|()| Self {
                         key: SigningKey::from_bytes(&seed),
                         key_id,
