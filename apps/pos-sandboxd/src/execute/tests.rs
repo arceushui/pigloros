@@ -88,13 +88,15 @@ enum Fault {
     HangStop,
 }
 
+type ExecCommands = Vec<(String, Vec<String>, bool)>;
+
 type Reply = Arc<Mutex<Option<Result<Vec<u8>, String>>>>;
 
 struct FakeHost {
     log: Log,
     faults: Vec<Fault>,
     observed: Arc<Mutex<Observed>>,
-    exec_start: Arc<Mutex<Vec<(String, Vec<String>, bool)>>>,
+    exec_start: Arc<Mutex<ExecCommands>>,
     adapter: AdapterScript,
     adapter_reply: Reply,
     held: Arc<Mutex<Vec<UnixStream>>>,
@@ -207,7 +209,7 @@ fn absorb(observed: &mut Observed, value: &SystemdTransientUnitValue) {
     }
 }
 
-fn exec_start_of(request: &TransientUnitRequest) -> Vec<(String, Vec<String>, bool)> {
+fn exec_start_of(request: &TransientUnitRequest) -> ExecCommands {
     request
         .requested_properties()
         .iter()

@@ -431,6 +431,32 @@ impl SystemdTransientUnitValue {
     }
 }
 
+/// The last dynamic properties: descriptors, the `/work` mount and the command.
+fn tail_properties(
+    descriptors: Vec<(OwnedFd, String)>,
+    service_limits: &SystemdServiceLimits,
+    invocation: &LauncherInvocation,
+) -> [SystemdTransientUnitProperty; 3] {
+    [
+        SystemdTransientUnitProperty::new(
+            SystemdTransientUnitPropertyKind::Dynamic(
+                SystemdDynamicPropertyKind::ExtraFileDescriptors,
+            ),
+            SystemdTransientUnitValue::ExtraFileDescriptors(descriptors),
+        ),
+        SystemdTransientUnitProperty::new(
+            SystemdTransientUnitPropertyKind::Dynamic(
+                SystemdDynamicPropertyKind::TemporaryFileSystem,
+            ),
+            SystemdTransientUnitValue::TemporaryFileSystem(service_limits.temporary_file_systems()),
+        ),
+        SystemdTransientUnitProperty::new(
+            SystemdTransientUnitPropertyKind::Dynamic(SystemdDynamicPropertyKind::ExecStart),
+            SystemdTransientUnitValue::ExecStart(invocation.exec_start()),
+        ),
+    ]
+}
+
 fn clone_descriptors(
     descriptors: &[(OwnedFd, String)],
 ) -> Result<Vec<(OwnedFd, String)>, zbus::Error> {
@@ -767,22 +793,7 @@ impl TransientUnitRequest {
                 SystemdTransientUnitNumericValue::FileDescriptorStoreMax(0),
             ),
         ));
-        properties.push(SystemdTransientUnitProperty::new(
-            SystemdTransientUnitPropertyKind::Dynamic(
-                SystemdDynamicPropertyKind::ExtraFileDescriptors,
-            ),
-            SystemdTransientUnitValue::ExtraFileDescriptors(descriptors),
-        ));
-        properties.push(SystemdTransientUnitProperty::new(
-            SystemdTransientUnitPropertyKind::Dynamic(
-                SystemdDynamicPropertyKind::TemporaryFileSystem,
-            ),
-            SystemdTransientUnitValue::TemporaryFileSystem(service_limits.temporary_file_systems()),
-        ));
-        properties.push(SystemdTransientUnitProperty::new(
-            SystemdTransientUnitPropertyKind::Dynamic(SystemdDynamicPropertyKind::ExecStart),
-            SystemdTransientUnitValue::ExecStart(invocation.exec_start()),
-        ));
+        properties.extend(tail_properties(descriptors, service_limits, &invocation));
         Self {
             properties,
             system_call_filter,
