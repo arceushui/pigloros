@@ -686,6 +686,30 @@ class CiWorkflowPolicyTests(unittest.TestCase):
     def test_parallel_validation_preserves_every_required_command(self) -> None:
         assert_parallel_validation_contract(load_workflow(CI_WORKFLOW_PATH))
 
+    def test_owner_bridge_coverage_scope_runs_with_fixtures_and_real_metadata(self) -> None:
+        jobs = load_workflow(CI_WORKFLOW_PATH)["jobs"]
+        expected = (
+            ("pinned-dependencies", {
+                "name": "Test Windows shim coverage exclusions",
+                "run": "python scripts/test_owner_bridge_windows_cov_ignore.py",
+            }),
+            ("clippy", {
+                "name": "Exercise Windows shim coverage exclusions with real metadata",
+                "run": "set -euo pipefail\n"
+                "cargo metadata --locked --no-deps --format-version 1 |\n"
+                "  python scripts/owner_bridge_windows_cov_ignore.py > "
+                '"${RUNNER_TEMP}/owner-bridge-windows-cov-ignore.txt"\n'
+                'test -s "${RUNNER_TEMP}/owner-bridge-windows-cov-ignore.txt"\n',
+            }),
+        )
+        for owner, step in expected:
+            with self.subTest(job=owner):
+                self.assertEqual(
+                    [candidate for candidate in jobs[owner]["steps"]
+                     if candidate.get("name") == step["name"]],
+                    [step],
+                )
+
     def test_native_width_counter_runs_on_the_actual_narrower_target(self) -> None:
         expected = {
             "name": "Exercise native-width canonical length arithmetic",

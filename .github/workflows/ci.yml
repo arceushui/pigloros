@@ -637,6 +637,12 @@ jobs:
           -D warnings -W clippy::pedantic
       - name: Staged reducer purity guard (ADR-113 §7)
         run: bash scripts/check-reducer-purity-guard.sh
+      - name: Exercise Windows shim coverage exclusions with real metadata
+        run: |
+          set -euo pipefail
+          cargo metadata --locked --no-deps --format-version 1 |
+            python scripts/owner_bridge_windows_cov_ignore.py > "${RUNNER_TEMP}/owner-bridge-windows-cov-ignore.txt"
+          test -s "${RUNNER_TEMP}/owner-bridge-windows-cov-ignore.txt"
 
   coverage:
     name: coverage
@@ -1487,6 +1493,8 @@ jobs:
         run: |
           python scripts/check_owner_bridge_unsafe_policy.py
           python scripts/test_check_owner_bridge_unsafe_policy.py
+      - name: Test Windows shim coverage exclusions
+        run: python scripts/test_owner_bridge_windows_cov_ignore.py
 
   modules-structure:
     name: modules-structure (reports only)
