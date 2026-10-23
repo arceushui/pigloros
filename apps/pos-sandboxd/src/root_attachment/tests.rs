@@ -1159,3 +1159,23 @@ async fn the_admitted_chain_reaches_attachment_only_through_every_gate() -> Test
     );
     Ok(())
 }
+
+#[test]
+fn an_entry_binds_only_the_root_its_admission_activated() -> TestResult {
+    let tree = prepared_tree()?;
+    let expected = expected(&component(&tree.prepared));
+    assert!(binds(&expected, Some(&expected.clone())));
+    assert!(!binds(&expected, None));
+    let mut other_image = expected.clone();
+    other_image.held.1 += 1;
+    let mut other_executable = expected.clone();
+    other_executable.executable_digest[0] ^= 1;
+    let mut other_path = expected.clone();
+    other_path.executable_path.push('x');
+    let mut other_root = expected.clone();
+    other_root.root_directory = ActivatedRootDirectory::for_attempt("another");
+    for other in [other_image, other_executable, other_path, other_root] {
+        assert!(!binds(&expected, Some(&other)));
+    }
+    Ok(())
+}
