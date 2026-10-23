@@ -7,6 +7,7 @@
 
 pub mod canonical;
 pub mod chain;
+pub mod consent_v2;
 pub mod fork_attribution;
 pub mod fork_attribution_authority;
 pub mod fork_authentication;
