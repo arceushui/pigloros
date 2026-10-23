@@ -253,9 +253,33 @@ fn rejects_wrong_types_truncation_trailing_and_noncanonical_encodings() -> TestR
 #[test]
 fn bounds_purpose_and_complete_payload_before_consumer_access() -> TestResult {
     let mut values = inner()?;
+    // Even empty CBOR text (0x60) needs one plaintext byte before the tag.
+    values[15] = Value::Bytes(vec![0; 16]);
+    assert_eq!(
+        ConsentGrantedV2::new(
+            policy(),
+            SubjectCiphertextV1::from_bytes(&encode(&values)?)?
+        ),
+        Err(ConsentV2Error::InvalidPolicy)
+    );
+    let mut tag_only_grant = outer()?;
+    tag_only_grant[4] = Value::Bytes(encode(&values)?);
+    assert_eq!(
+        ConsentGrantedV2::from_bytes(&encode(&tag_only_grant)?),
+        Err(ConsentV2Error::InvalidPolicy)
+    );
+    values[15] = Value::Bytes(vec![0; 1 + 16]);
+    let minimum = ConsentGrantedV2::new(
+        policy(),
+        SubjectCiphertextV1::from_bytes(&encode(&values)?)?,
+    )?;
+    assert_eq!(ConsentGrantedV2::from_bytes(minimum.as_bytes())?, minimum);
     values[15] = Value::Bytes(vec![0; 128 + 2 + 16]);
-    let accepted = SubjectCiphertextV1::from_bytes(&encode(&values)?)?;
-    assert!(ConsentGrantedV2::new(policy(), accepted).is_ok());
+    let maximum = ConsentGrantedV2::new(
+        policy(),
+        SubjectCiphertextV1::from_bytes(&encode(&values)?)?,
+    )?;
+    assert_eq!(ConsentGrantedV2::from_bytes(maximum.as_bytes())?, maximum);
     values[15] = Value::Bytes(vec![0; 128 + 2 + 16 + 1]);
     assert_eq!(
         ConsentGrantedV2::new(

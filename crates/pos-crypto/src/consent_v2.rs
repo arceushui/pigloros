@@ -115,8 +115,9 @@ impl ConsentGrantedV2 {
     /// at most 128 UTF-8 bytes; this checks the possible ciphertext length.
     ///
     /// # Errors
-    /// Rejects invalid policy, oversized purpose, and a mismatch with the
-    /// SDC1 subject, origin sequence, use, Event type, schema or field tag.
+    /// Rejects invalid policy, a purpose too short to contain even an empty
+    /// CBOR text value, oversized purpose, and a mismatch with the SDC1
+    /// subject, origin sequence, use, Event type, schema or field tag.
     pub fn new(
         policy: ConsentPolicyV2,
         purpose: SubjectCiphertextV1,
@@ -128,6 +129,7 @@ impl ConsentGrantedV2 {
             || purpose.event_type() != CONSENT_GRANTED_V2_EVENT_TYPE
             || purpose.schema_version() != 1
             || purpose.field_tag() != "purpose"
+            || purpose.ciphertext_and_tag().len() < 1 + 16
         {
             return Err(ConsentV2Error::InvalidPolicy);
         }
