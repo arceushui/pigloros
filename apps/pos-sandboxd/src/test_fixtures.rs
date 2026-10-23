@@ -170,3 +170,19 @@ pub fn bound_proxy<C>(
     let (binding, connector) = checked.bind();
     Ok((adapter, binding, connector))
 }
+
+/// The launcher-mode command of the fixture attempt.
+///
+/// # Errors
+/// Fails if the fixture launch parameters cannot be encoded.
+pub fn invocation() -> TestResult<crate::LauncherInvocation> {
+    let parameters = pos_reference::sandbox_provider_protocol::LaunchParameters::new(
+        ATTEMPT,
+        [7; 32],
+        [0x51; 32],
+        "/usr/bin/adapter".to_owned(),
+        vec!["--check".to_owned()],
+        [8; 32],
+    )?;
+    Ok(crate::LauncherInvocation::from_parameters(&parameters)?)
+}

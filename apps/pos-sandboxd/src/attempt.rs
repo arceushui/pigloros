@@ -25,6 +25,9 @@ pub struct AdmittedAttempt {
     sim1_digest: [u8; 32],
     authority: AdmittedAuthority,
     mode: SandboxExecutionMode,
+    executable_path: String,
+    arguments: Vec<String>,
+    executable_digest: [u8; 32],
 }
 
 impl AdmittedAttempt {
@@ -45,12 +48,16 @@ impl AdmittedAttempt {
         {
             return Err(ExecuteError::DirectoryIdentity);
         }
+        let manifest = admission.snapshot().image().manifest();
         Ok(Self {
             attempt_id: request.attempt_id,
             unit_name: intent.unit_name().clone(),
             sim1_digest: request.authority.sim1_digest,
             authority: admission.authority(),
             mode: admission.snapshot().launch_policy().execution_mode,
+            executable_path: manifest.executable_path.clone(),
+            arguments: manifest.arguments.clone(),
+            executable_digest: manifest.executable_blake3_digest,
         })
     }
 
@@ -84,6 +91,24 @@ impl AdmittedAttempt {
         self.authority
     }
 
+    /// The SIM1 adapter executable path.
+    #[must_use]
+    pub fn executable_path(&self) -> &str {
+        &self.executable_path
+    }
+
+    /// The SIM1 fixed adapter argument vector.
+    #[must_use]
+    pub fn arguments(&self) -> &[String] {
+        &self.arguments
+    }
+
+    /// The admitted BLAKE3 digest of the adapter executable.
+    #[must_use]
+    pub const fn executable_digest(&self) -> [u8; 32] {
+        self.executable_digest
+    }
+
     /// Facts for tests that have no privileged installation to admit from.
     #[cfg(test)]
     pub(crate) fn for_test(
@@ -97,6 +122,9 @@ impl AdmittedAttempt {
             sim1_digest: [0x51; 32],
             authority,
             mode,
+            executable_path: "/usr/bin/adapter".to_owned(),
+            arguments: vec!["--check".to_owned()],
+            executable_digest: [0x61; 32],
         })
     }
 }

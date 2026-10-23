@@ -94,6 +94,7 @@ struct FakeHost {
     log: Log,
     faults: Vec<Fault>,
     observed: Arc<Mutex<Observed>>,
+    exec_start: Arc<Mutex<Vec<(String, Vec<String>, bool)>>>,
     adapter: AdapterScript,
     adapter_reply: Reply,
     held: Arc<Mutex<Vec<UnixStream>>>,
@@ -108,6 +109,7 @@ impl FakeHost {
             log: Arc::clone(log),
             faults: Vec::new(),
             observed: Arc::default(),
+            exec_start: Arc::default(),
             adapter: AdapterScript::None,
             adapter_reply: Arc::default(),
             held: Arc::default(),
@@ -128,6 +130,9 @@ impl FakeHost {
             .collect();
         if let Ok(mut slot) = self.observed.lock() {
             *slot = observed;
+        }
+        if let Ok(mut slot) = self.exec_start.lock() {
+            *slot = exec_start_of(request);
         }
         extra_descriptors(request)
             .iter()
@@ -200,6 +205,17 @@ fn absorb(observed: &mut Observed, value: &SystemdTransientUnitValue) {
         SystemdTransientUnitValue::TemporaryFileSystem(work) => observed.work.clone_from(work),
         _other => {}
     }
+}
+
+fn exec_start_of(request: &TransientUnitRequest) -> Vec<(String, Vec<String>, bool)> {
+    request
+        .requested_properties()
+        .iter()
+        .find_map(|property| match property.value() {
+            SystemdTransientUnitValue::ExecStart(commands) => Some(commands.clone()),
+            _other => None,
+        })
+        .unwrap_or_default()
 }
 
 fn extra_descriptors(request: &TransientUnitRequest) -> &[(OwnedFd, String)] {
@@ -372,6 +388,10 @@ impl FakeBarrier {
 
 impl LaunchBarrier for FakeBarrier {
     type Error = Injected;
+
+    fn launcher_invocation(&self) -> Result<LauncherInvocation, Injected> {
+        crate::test_fixtures::invocation().map_err(|_| Injected)
+    }
 
     fn take_unit_end(&mut self) -> Result<OwnedFd, Injected> {
         record(&self.log, "take_unit_end");
@@ -819,6 +839,21 @@ async fn air_gapped_and_fork_attempts_get_only_the_release_descriptor() -> TestR
         assert_eq!(scenario.host.observed().descriptors, names(&[RELEASE]));
         assert_eq!(scenario.host.observed().families, (true, Vec::new()));
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_unit_runs_the_launcher_in_launch_barrier_mode() -> TestResult {
+    let mut scenario = Scenario::new()?;
+    scenario.air_gapped().await??;
+    let commands = scenario
+        .host
+        .exec_start
+        .lock()
+        .map_err(|error| error.to_string())?
+        .clone();
+    assert_eq!(commands.len(), 1);
+    assert_eq!(commands[0].1[1], "launch-barrier");
     Ok(())
 }
 
