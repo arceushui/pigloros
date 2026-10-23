@@ -734,70 +734,90 @@ fn property_clone_propagates_value_failure() {
     assert!(matches!(result, Err(zbus::Error::IncorrectType)));
 }
 
-/// Every dynamic kind with the name systemd gives it. The match has no
-/// wildcard, so a new kind does not compile until it is pinned here.
-fn pinned_name(kind: SystemdDynamicPropertyKind) -> &'static str {
-    match kind {
-        SystemdDynamicPropertyKind::RootDirectory => "RootDirectory",
-        SystemdDynamicPropertyKind::BindReadOnlyPaths => "BindReadOnlyPaths",
-        SystemdDynamicPropertyKind::SystemCallFilter => "SystemCallFilter",
-        SystemdDynamicPropertyKind::RestrictAddressFamilies => "RestrictAddressFamilies",
-        SystemdDynamicPropertyKind::OperatingLimit(_) => "MemoryMax",
-        SystemdDynamicPropertyKind::FileDescriptorStoreMax => "FileDescriptorStoreMax",
-        SystemdDynamicPropertyKind::ExtraFileDescriptors => "ExtraFileDescriptors",
-        SystemdDynamicPropertyKind::TemporaryFileSystem => "TemporaryFileSystem",
-    }
+/// Every dynamic kind with the name systemd gives it.
+fn pinned_names() -> [(SystemdDynamicPropertyKind, &'static str); 8] {
+    [
+        (SystemdDynamicPropertyKind::RootDirectory, "RootDirectory"),
+        (
+            SystemdDynamicPropertyKind::BindReadOnlyPaths,
+            "BindReadOnlyPaths",
+        ),
+        (
+            SystemdDynamicPropertyKind::SystemCallFilter,
+            "SystemCallFilter",
+        ),
+        (
+            SystemdDynamicPropertyKind::RestrictAddressFamilies,
+            "RestrictAddressFamilies",
+        ),
+        (
+            SystemdDynamicPropertyKind::OperatingLimit(
+                crate::SystemdOperatingLimitProperty::MemoryMax,
+            ),
+            "MemoryMax",
+        ),
+        (
+            SystemdDynamicPropertyKind::FileDescriptorStoreMax,
+            "FileDescriptorStoreMax",
+        ),
+        (
+            SystemdDynamicPropertyKind::ExtraFileDescriptors,
+            "ExtraFileDescriptors",
+        ),
+        (
+            SystemdDynamicPropertyKind::TemporaryFileSystem,
+            "TemporaryFileSystem",
+        ),
+    ]
 }
 
 #[test]
 fn every_dynamic_kind_keeps_its_systemd_property_name() {
-    for kind in [
-        SystemdDynamicPropertyKind::RootDirectory,
-        SystemdDynamicPropertyKind::BindReadOnlyPaths,
-        SystemdDynamicPropertyKind::SystemCallFilter,
-        SystemdDynamicPropertyKind::RestrictAddressFamilies,
-        SystemdDynamicPropertyKind::OperatingLimit(crate::SystemdOperatingLimitProperty::MemoryMax),
-        SystemdDynamicPropertyKind::FileDescriptorStoreMax,
-        SystemdDynamicPropertyKind::ExtraFileDescriptors,
-        SystemdDynamicPropertyKind::TemporaryFileSystem,
-    ] {
-        assert_eq!(kind.name(), pinned_name(kind));
+    for (kind, name) in pinned_names() {
+        assert_eq!(kind.name(), name);
     }
 }
 
-/// Every value kind with its D-Bus signature, again without a wildcard.
-fn pinned_signature(value: &SystemdTransientUnitValue) -> &'static str {
-    match value {
-        SystemdTransientUnitValue::Static(_) => "b",
-        SystemdTransientUnitValue::RootDirectory(_) => "s",
-        SystemdTransientUnitValue::BindReadOnlyPaths(_) => "a(ssbt)",
-        SystemdTransientUnitValue::SystemCallFilter(_)
-        | SystemdTransientUnitValue::RestrictAddressFamilies(_) => "(bas)",
-        SystemdTransientUnitValue::Numeric(_) => "u",
-        SystemdTransientUnitValue::ExtraFileDescriptors(_) => "a(hs)",
-        SystemdTransientUnitValue::TemporaryFileSystem(_) => "a(ss)",
-    }
-}
-
-fn sample_values() -> Vec<SystemdTransientUnitValue> {
+/// Every value kind with its D-Bus signature.
+fn pinned_signatures() -> Vec<(SystemdTransientUnitValue, &'static str)> {
     vec![
-        SystemdTransientUnitValue::Static(crate::SystemdHardeningValue::Bool(true)),
-        SystemdTransientUnitValue::RootDirectory(String::new()),
-        SystemdTransientUnitValue::BindReadOnlyPaths(Vec::new()),
-        SystemdTransientUnitValue::SystemCallFilter((true, Vec::new())),
-        SystemdTransientUnitValue::RestrictAddressFamilies((true, Vec::new())),
-        SystemdTransientUnitValue::Numeric(
-            SystemdTransientUnitNumericValue::FileDescriptorStoreMax(0),
+        (
+            SystemdTransientUnitValue::Static(crate::SystemdHardeningValue::Bool(true)),
+            "b",
         ),
-        SystemdTransientUnitValue::ExtraFileDescriptors(Vec::new()),
-        SystemdTransientUnitValue::TemporaryFileSystem(Vec::new()),
+        (SystemdTransientUnitValue::RootDirectory(String::new()), "s"),
+        (
+            SystemdTransientUnitValue::BindReadOnlyPaths(Vec::new()),
+            "a(ssbt)",
+        ),
+        (
+            SystemdTransientUnitValue::SystemCallFilter((true, Vec::new())),
+            "(bas)",
+        ),
+        (
+            SystemdTransientUnitValue::RestrictAddressFamilies((true, Vec::new())),
+            "(bas)",
+        ),
+        (
+            SystemdTransientUnitValue::Numeric(
+                SystemdTransientUnitNumericValue::FileDescriptorStoreMax(0),
+            ),
+            "u",
+        ),
+        (
+            SystemdTransientUnitValue::ExtraFileDescriptors(Vec::new()),
+            "a(hs)",
+        ),
+        (
+            SystemdTransientUnitValue::TemporaryFileSystem(Vec::new()),
+            "a(ss)",
+        ),
     ]
 }
 
 #[test]
 fn every_value_kind_keeps_its_dbus_signature() {
-    for value in sample_values() {
-        let expected = pinned_signature(&value);
+    for (value, expected) in pinned_signatures() {
         let property = SystemdTransientUnitProperty::new(
             SystemdTransientUnitPropertyKind::Dynamic(
                 SystemdDynamicPropertyKind::FileDescriptorStoreMax,
