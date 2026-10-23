@@ -109,6 +109,21 @@ class CoverageIsolationTests(unittest.TestCase):
         value["workspace_members"].reverse()
         self.assertEqual(TOOL.coverage_ignore_regex(value), expected)
 
+    def test_a_member_nested_inside_the_shim_fails_closed(self) -> None:
+        for root in ["/work/repo", r"C:\work\repo", r"\\server\share\repo"]:
+            with self.subTest(root=root):
+                value = metadata(root)
+                value["packages"].append({
+                    "id": "nested member ID",
+                    "name": "nested-member",
+                    "manifest_path": root + "/crates/pos-owner-bridge-windows/src/nested/Cargo.toml",
+                })
+                value["workspace_members"].append("nested member ID")
+                result = run_cli(json.dumps(value))
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertEqual(result.stdout, "")
+                self.assertNotIn("Traceback", result.stderr)
+
     def test_non_workspace_dependencies_and_future_fields_are_ignored(self) -> None:
         value = metadata()
         value["packages"].append({"id": "dependency ID", "name": "pos-owner-bridge-windows",
