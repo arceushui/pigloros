@@ -176,9 +176,13 @@ pub fn bound_proxy<C>(
 /// # Errors
 /// Fails if the fixture launch parameters cannot be encoded.
 pub fn invocation() -> TestResult<crate::LauncherInvocation> {
+    // One random nonce per test process, so every caller of the fixture builds
+    // the same command without a hard-coded cryptographic value.
+    static NONCE: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
+    let nonce = *NONCE.get_or_init(|| crate::fresh_nonce().unwrap_or_default());
     let parameters = pos_reference::sandbox_provider_protocol::LaunchParameters::new(
         ATTEMPT,
-        crate::fresh_nonce()?,
+        nonce,
         [0x51; 32],
         "/usr/bin/adapter".to_owned(),
         vec!["--check".to_owned()],
