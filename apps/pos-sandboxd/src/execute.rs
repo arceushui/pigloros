@@ -33,8 +33,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use pos_reference::sandbox_provider_protocol::{
-    LocalNetworkAdmission, LocalNetworkTermination, NetworkCaptureStore, NetworkEndpointConnector,
-    NetworkExchangePlan, NetworkExchangeTranscript, ReplayedNetworkExchange, SandboxExecutionMode,
+    LocalNetworkAdmission, LocalNetworkTermination, NetworkCaptureStore, NetworkCaptureStoreError,
+    NetworkEndpointConnector, NetworkExchangePlan, NetworkExchangeTranscript,
+    ReplayedNetworkExchange, SandboxExecutionMode,
 };
 use zvariant::OwnedFd;
 
@@ -59,6 +60,12 @@ pub trait UnitHost {
     type Cgroup: UnitCgroup + Send;
     /// The host's failure type.
     type Error: Error + Send + Sync + 'static;
+    /// An owned, `'static` handle that can kill a unit after the execute
+    /// future was dropped.
+    type Killer: UnitKiller;
+
+    /// A handle for [`SubmissionGuard`]'s best-effort kill.
+    fn killer(&self) -> Self::Killer;
 
     /// Submit the compiled request and verify its requested state.
     fn start(
@@ -84,6 +91,13 @@ pub trait UnitHost {
         &self,
         unit_name: TransientServiceUnitName,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send;
+}
+
+/// A `'static` handle that kills one unit, used when an execution is dropped.
+pub trait UnitKiller: Send + 'static {
+    /// Best-effort SIGKILL and stop of `unit_name`; failures are not reported
+    /// because nothing is left to report them to.
+    fn kill(self, unit_name: TransientServiceUnitName) -> impl Future<Output = ()> + Send;
 }
 
 /// The attempt cgroup operations the execute path needs.
@@ -202,7 +216,13 @@ pub enum ExecuteError {
     ModeMismatch,
     /// A Replay exchange is missing or does not match its authority.
     #[error("a replayed exchange is unavailable")]
-    ReplayUnavailable,
+    ReplayUnavailable(#[source] NetworkCaptureStoreError),
+    /// The Local network could not be established.
+    #[error("the Local network could not be established")]
+    Network(#[source] Box<dyn Error + Send + Sync>),
+    /// A systemd operation did not finish within its bound.
+    #[error("a systemd operation did not finish within its bound")]
+    HostTimeout,
     /// The FD 3 socket pair could not be created.
     #[error("the host-service channel could not be created")]
     HostService(#[source] io::Error),
@@ -241,9 +261,13 @@ pub enum UnitState {
     ///
     /// This is a command acknowledgement, not proof that the cgroup is empty.
     Killed,
-    /// The unit was started or submitted and could not be killed; it may
-    /// still run and the lifecycle must reconcile it.
+    /// The unit was started and could not be killed; it may still run and the
+    /// lifecycle must reconcile it.
     KillFailed,
+    /// The start did not complete and the kill was not acknowledged. The unit
+    /// may or may not exist, so it is neither known to run nor known absent;
+    /// the lifecycle (#442) must inventory it.
+    Unknown,
 }
 
 /// A failed execution and the state of its unit.
@@ -301,6 +325,10 @@ impl NetworkEvidence {
     /// How the Local proxy session ended, for attempt classification.
     ///
     /// `None` means no Local session, or a clean close at a frame boundary.
+    /// A watchdog that closed the channel also reads as a clean close here:
+    /// the classifier (#443) must consult [`ServedProxy::watchdog_expired`] as
+    /// well. A protocol failure leaves the unit running until it empties or the
+    /// watchdog fires; classifying it is #443's, not an early kill.
     #[must_use]
     pub const fn termination(&self) -> Option<LocalNetworkTermination> {
         match self {
@@ -367,9 +395,11 @@ struct Prepared<C> {
 ///
 /// The runtime must have its time driver enabled.
 ///
-/// `execute` is not cancel-safe: if the returned future is dropped after the
-/// unit was submitted, nothing kills the unit, so the caller must drive it to
-/// completion.
+/// Dropping the returned future after the unit was submitted spawns a
+/// best-effort kill and stop of that unit on the current runtime, bounded by
+/// the attempt's watchdog, so cancellation does not leave a released-looking
+/// unit running. A drop outside a runtime cannot spawn it; the lifecycle
+/// (#442) reconciles any unit left behind.
 ///
 /// # Errors
 /// An [`ExecuteFailure`] names the error and what is known of the unit. Any
@@ -380,6 +410,43 @@ pub async fn execute<H, B, N>(
     network: &N,
     job: ExecuteJob,
     recheck: impl FnOnce() -> Result<CheckedRoot, ImageActivationError> + Send,
+) -> Result<AttemptExecution<H::Started, H::Cgroup>, ExecuteFailure>
+where
+    H: UnitHost + Sync,
+    B: LaunchBarrier + Send,
+    N: LocalNetworkPort + Sync,
+{
+    let mut guard = SubmissionGuard::new();
+    let result = drive(host, barrier, network, job, recheck, &mut guard).await;
+    guard.disarm();
+    result
+}
+
+/// The wall-clock bounds of one attempt: the unit's watchdog deadline for the
+/// steps before and during the run, and the watchdog length for each
+/// termination call, which must still run after the deadline passed.
+#[derive(Clone, Copy)]
+struct Bounds {
+    deadline: Instant,
+    call: Duration,
+}
+
+/// Whether the unit is known to exist when an execution is aborted.
+#[derive(Clone, Copy)]
+enum Submission {
+    /// The start completed.
+    Confirmed,
+    /// The start failed or timed out; the unit may or may not exist.
+    Unconfirmed,
+}
+
+async fn drive<H, B, N>(
+    host: &H,
+    barrier: &mut B,
+    network: &N,
+    job: ExecuteJob,
+    recheck: impl FnOnce() -> Result<CheckedRoot, ImageActivationError> + Send,
+    guard: &mut SubmissionGuard<H::Killer>,
 ) -> Result<AttemptExecution<H::Started, H::Cgroup>, ExecuteFailure>
 where
     H: UnitHost + Sync,
@@ -398,47 +465,85 @@ where
         store,
     } = prepared;
     let unit = attempt.unit_name().clone();
-    let deadline = Instant::now() + watchdog;
-    let started = match host.start(unit.clone(), request).await {
-        Ok(started) => started,
-        Err(error) => {
-            return Err(abort(host, &unit, None, ExecuteError::Unit(Box::new(error))).await)
+    let bounds = Bounds {
+        deadline: Instant::now() + watchdog,
+        call: watchdog,
+    };
+    let deadline = bounds.deadline;
+    guard.arm(host.killer(), unit.clone(), bounds.call);
+    let started = match until(deadline, host.start(unit.clone(), request)).await {
+        Some(Ok(started)) => started,
+        Some(Err(error)) => {
+            let error = ExecuteError::Unit(Box::new(error));
+            return Err(abort(host, &unit, None, error, Submission::Unconfirmed, bounds).await);
+        }
+        None => {
+            let error = ExecuteError::HostTimeout;
+            return Err(abort(host, &unit, None, error, Submission::Unconfirmed, bounds).await);
         }
     };
-    let mut cgroup = match host.bind_cgroup(&started).await {
-        Ok(cgroup) => cgroup,
-        Err(error) => {
-            return Err(abort(host, &unit, None, ExecuteError::Cgroup(Box::new(error))).await)
+    let mut cgroup = match until(deadline, host.bind_cgroup(&started)).await {
+        Some(Ok(cgroup)) => cgroup,
+        Some(Err(error)) => {
+            let error = ExecuteError::Cgroup(Box::new(error));
+            return Err(abort(host, &unit, None, error, Submission::Confirmed, bounds).await);
+        }
+        None => {
+            let error = ExecuteError::HostTimeout;
+            return Err(abort(host, &unit, None, error, Submission::Confirmed, bounds).await);
         }
     };
     let attempt_id = attempt.attempt_id();
     let active = ActiveAttempt::record(attempt, deadline);
     let bound = match bind_planned(&active, planned) {
         Ok(bound) => bound,
-        Err(error) => return Err(abort(host, &unit, Some(&mut cgroup), error).await),
+        Err(error) => {
+            let aborted = abort(
+                host,
+                &unit,
+                Some(&mut cgroup),
+                error,
+                Submission::Confirmed,
+                bounds,
+            );
+            return Err(aborted.await);
+        }
     };
     // Release must arrive before the attempt deadline (ADR-069), whatever the
     // port does.
-    let release = tokio::time::timeout_at(
-        tokio::time::Instant::from_std(deadline),
-        barrier.release(&active),
-    )
-    .await;
-    let refused = match release {
-        Ok(Ok(())) => None,
-        Ok(Err(error)) => Some(ExecuteError::Barrier(Box::new(error))),
-        Err(_elapsed) => Some(ExecuteError::ReleaseTimeout),
+    let refused = match until(deadline, barrier.release(&active)).await {
+        Some(Ok(())) => None,
+        Some(Err(error)) => Some(ExecuteError::Barrier(Box::new(error))),
+        None => Some(ExecuteError::ReleaseTimeout),
     };
     if let Some(error) = refused {
-        return Err(abort(host, &unit, Some(&mut cgroup), error).await);
+        let aborted = abort(
+            host,
+            &unit,
+            Some(&mut cgroup),
+            error,
+            Submission::Confirmed,
+            bounds,
+        );
+        return Err(aborted.await);
     }
     let (network, empty) = match supervise(&mut cgroup, bound, store, deadline).await {
         Ok(supervised) => supervised,
-        Err(error) => return Err(abort(host, &unit, Some(&mut cgroup), error).await),
+        Err(error) => {
+            let aborted = abort(
+                host,
+                &unit,
+                Some(&mut cgroup),
+                error,
+                Submission::Confirmed,
+                bounds,
+            );
+            return Err(aborted.await);
+        }
     };
     let ending = if empty {
         AttemptEnding::CgroupEmpty
-    } else if kill_everything(host, &unit, Some(&mut cgroup)).await {
+    } else if kill_everything(host, &unit, Some(&mut cgroup), bounds.call).await {
         AttemptEnding::WatchdogKilled
     } else {
         AttemptEnding::WatchdogKillFailed
@@ -450,6 +555,52 @@ where
         ending,
         network,
     })
+}
+
+/// Await `future` until `deadline`; `None` if it did not finish by then.
+async fn until<T>(deadline: Instant, future: impl Future<Output = T>) -> Option<T> {
+    tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), future)
+        .await
+        .ok()
+}
+
+/// Await `future` for at most `limit`; `None` if it did not finish in time.
+async fn within<T>(limit: Duration, future: impl Future<Output = T>) -> Option<T> {
+    tokio::time::timeout(limit, future).await.ok()
+}
+
+/// Kills a submitted unit when an execution is dropped before it finished.
+///
+/// It is armed just before the unit is submitted and disarmed when the
+/// execution returns, so only a dropped (cancelled) execution fires it.
+struct SubmissionGuard<K: UnitKiller> {
+    pending: Option<(K, TransientServiceUnitName, Duration)>,
+}
+
+impl<K: UnitKiller> SubmissionGuard<K> {
+    const fn new() -> Self {
+        Self { pending: None }
+    }
+
+    fn arm(&mut self, killer: K, unit: TransientServiceUnitName, bound: Duration) {
+        self.pending = Some((killer, unit, bound));
+    }
+
+    fn disarm(&mut self) {
+        self.pending = None;
+    }
+}
+
+impl<K: UnitKiller> Drop for SubmissionGuard<K> {
+    fn drop(&mut self) {
+        if let (Some((killer, unit, bound)), Ok(runtime)) =
+            (self.pending.take(), tokio::runtime::Handle::try_current())
+        {
+            runtime.spawn(async move {
+                within(bound, killer.kill(unit)).await;
+            });
+        }
+    }
 }
 
 fn prepare<B, N>(
@@ -477,9 +628,14 @@ where
         ModePlan::Local { admission } => {
             let (adapter_end, channel) = HostServiceChannel::pair(attempt.attempt_id())
                 .map_err(ExecuteError::HostService)?;
+            let established = network
+                .establish(attempt.attempt_id())
+                .map_err(|error| ExecuteError::Network(Box::new(error)))?;
+            // A bad admission, namespace or channel never reaches the start.
+            attempt.check_local(&admission, &established, &channel)?;
             let preparation = Box::new(LocalPreparation {
                 admission: *admission,
-                network: network.establish(attempt.attempt_id()),
+                network: established,
                 channel,
             });
             (
@@ -525,7 +681,7 @@ fn resolve_replay(
         .iter()
         .map(|request| store.replay(request.attempt_id, &request.plan, request.transcript_digest))
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| ExecuteError::ReplayUnavailable)
+        .map_err(ExecuteError::ReplayUnavailable)
 }
 
 fn bind_planned<C>(active: &ActiveAttempt, planned: Planned<C>) -> Result<Bound<C>, ExecuteError> {
@@ -589,38 +745,43 @@ async fn abort<H>(
     unit: &TransientServiceUnitName,
     cgroup: Option<&mut H::Cgroup>,
     error: ExecuteError,
+    submission: Submission,
+    bounds: Bounds,
 ) -> ExecuteFailure
 where
     H: UnitHost + Sync,
 {
-    let killed = kill_everything(host, unit, cgroup).await;
+    let killed = kill_everything(host, unit, cgroup, bounds.call).await;
     ExecuteFailure {
         error,
-        unit: if killed {
-            UnitState::Killed
-        } else {
-            UnitState::KillFailed
+        unit: match (killed, submission) {
+            (true, _) => UnitState::Killed,
+            (false, Submission::Confirmed) => UnitState::KillFailed,
+            (false, Submission::Unconfirmed) => UnitState::Unknown,
         },
     }
 }
 
-/// SIGKILL the unit, kill its cgroup when bound, and stop its job; `true`
-/// when SIGKILL was acknowledged.
+/// SIGKILL the unit, kill its cgroup when bound, and stop its job, each
+/// bounded by `call`; `true` when SIGKILL was acknowledged.
 async fn kill_everything<H>(
     host: &H,
     unit: &TransientServiceUnitName,
     cgroup: Option<&mut H::Cgroup>,
+    call: Duration,
 ) -> bool
 where
     H: UnitHost + Sync,
 {
-    let killed = host.kill(unit.clone()).await.is_ok();
+    let killed = within(call, async { host.kill(unit.clone()).await.is_ok() })
+        .await
+        .unwrap_or(false);
     if let Some(cgroup) = cgroup {
         // The cgroup kill is belt and braces: the unit kill already covers it.
         cgroup.kill_all().ok();
     }
     // Replacing a queued start job is best effort for the same reason.
-    host.stop(unit.clone()).await.ok();
+    within(call, async { host.stop(unit.clone()).await.ok() }).await;
     killed
 }
 

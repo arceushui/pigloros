@@ -316,6 +316,7 @@ pub enum SystemdTransientUnitTransportError {
 }
 
 /// A generated, typed systemd Manager transport over one D-Bus connection.
+#[derive(Clone)]
 pub struct SystemdTransientUnitTransport {
     connection: Connection,
 }
@@ -532,10 +533,23 @@ impl SystemdTransientUnitTransport {
 }
 
 #[cfg(target_os = "linux")]
+impl crate::UnitKiller for SystemdTransientUnitTransport {
+    async fn kill(self, unit_name: TransientServiceUnitName) {
+        self.force_kill(unit_name.clone()).await.ok();
+        self.stop_job(unit_name).await.ok();
+    }
+}
+
+#[cfg(target_os = "linux")]
 impl crate::UnitHost for SystemdTransientUnitTransport {
     type Started = SystemdVerifiedStart;
     type Cgroup = BoundAttemptCgroup;
     type Error = SystemdTransientUnitTransportError;
+    type Killer = Self;
+
+    fn killer(&self) -> Self {
+        self.clone()
+    }
 
     fn start(
         &self,

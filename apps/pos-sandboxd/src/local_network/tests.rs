@@ -29,7 +29,7 @@ fn bind(
     let (_adapter, channel) = HostServiceChannel::pair(channel)?;
     Ok(active()?.bind_local_proxy(
         admission(attempt, authority, epochs, Vec::new()),
-        FailClosedLocalNetwork.establish(namespace),
+        FailClosedLocalNetwork.establish(namespace)?,
         channel,
     ))
 }
