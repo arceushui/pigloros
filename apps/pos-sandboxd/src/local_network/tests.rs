@@ -15,7 +15,7 @@ use pos_reference::sandbox_provider_protocol::{
 
 use super::*;
 use crate::test_fixtures::{
-    active, admission, bound_proxy, capture_store, grant_authority, plan, remote,
+    active, admission, admitted, bound_proxy, capture_store, grant_authority, plan, remote,
     LoopbackConnector, TestResult, ATTEMPT, OTHER, REQUEST, RESPONSE,
 };
 
@@ -27,18 +27,21 @@ fn bind(
     channel: [u8; 16],
 ) -> TestResult<Result<(BoundLocalProxy, RefusingConnector), LocalProxyBindError>> {
     let (_adapter, channel) = HostServiceChannel::pair(channel)?;
-    Ok(active()?.bind_local_proxy(
-        admission(attempt, authority, epochs, Vec::new()),
-        FailClosedLocalNetwork.establish(namespace)?,
-        channel,
-    ))
+    let active = active()?;
+    Ok(admitted()?
+        .check_local(
+            admission(attempt, authority, epochs, Vec::new()),
+            FailClosedLocalNetwork.establish(namespace)?,
+            channel,
+        )
+        .map(|checked| checked.bind(&active)))
 }
 
 #[test]
 fn only_the_matching_attempt_authority_namespace_and_channel_bind() -> TestResult {
     let epochs = [4, 5, 6];
     let bound = bind(ATTEMPT, grant_authority(), epochs, ATTEMPT, ATTEMPT)?;
-    assert!(bound.is_ok());
+    assert_eq!(bound.map(|(binding, _)| binding.attempt_id()), Ok(ATTEMPT));
 
     assert_eq!(
         bind(OTHER, grant_authority(), epochs, ATTEMPT, ATTEMPT)?.err(),

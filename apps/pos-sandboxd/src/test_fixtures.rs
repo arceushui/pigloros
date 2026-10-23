@@ -64,9 +64,17 @@ pub const fn grant_authority() -> AdmissionAuthority {
     }
 }
 
+pub fn admitted() -> TestResult<AdmittedAttempt> {
+    Ok(AdmittedAttempt::for_test(
+        ATTEMPT,
+        authority(),
+        SandboxExecutionMode::Local,
+    )?)
+}
+
 pub fn active() -> TestResult<ActiveAttempt> {
     Ok(ActiveAttempt::record(
-        AdmittedAttempt::for_test(ATTEMPT, authority(), SandboxExecutionMode::Local)?,
+        admitted()?,
         Instant::now() + Duration::from_secs(30),
     ))
 }
@@ -154,10 +162,11 @@ pub fn bound_proxy<C>(
         [4, 5, 6],
         vec![(plan, capability(address))],
     );
-    let (binding, connector) = active()?.bind_local_proxy(
+    let checked = admitted()?.check_local(
         admission,
         crate::EstablishedNetwork::new(ATTEMPT, connector),
         channel,
     )?;
+    let (binding, connector) = checked.bind(&active()?);
     Ok((adapter, binding, connector))
 }

@@ -1226,7 +1226,7 @@ async fn force_kill_sends_whole_unit_sigkill_only() -> Result<(), Box<dyn Error>
 
 #[tokio::test]
 async fn the_execute_path_port_delegates_to_the_typed_transport() -> Result<(), Box<dyn Error>> {
-    use crate::UnitHost;
+    use crate::{UnitHost, UnitKiller};
 
     let behavior = ManagerBehavior::default();
     let calls = Arc::clone(&behavior.control_calls);
@@ -1253,19 +1253,20 @@ async fn the_execute_path_port_delegates_to_the_typed_transport() -> Result<(), 
     ));
     UnitHost::stop(&transport, name.clone()).await?;
     UnitHost::kill(&transport, name.clone()).await?;
+    // The handle an execution falls back on when it is dropped kills, then stops.
+    UnitKiller::kill(UnitHost::killer(&transport), name.clone()).await;
+    let stop = ObservedControl::Stop {
+        name: name.as_str().to_owned(),
+        mode: "replace".to_owned(),
+    };
+    let kill = ObservedControl::Kill {
+        name: name.as_str().to_owned(),
+        whom: "all".to_owned(),
+        signal: 9,
+    };
     assert_eq!(
         calls.lock().map_err(|error| error.to_string())?.as_slice(),
-        &[
-            ObservedControl::Stop {
-                name: name.as_str().to_owned(),
-                mode: "replace".to_owned(),
-            },
-            ObservedControl::Kill {
-                name: name.as_str().to_owned(),
-                whom: "all".to_owned(),
-                signal: 9,
-            },
-        ]
+        &[stop.clone(), kill.clone(), kill, stop]
     );
     Ok(())
 }
