@@ -163,7 +163,7 @@ pub enum LocalProxyBindError {
 /// A Local admission, namespace and channel that were checked against the
 /// admitted attempt they belong to.
 ///
-/// Only [`AdmittedAttempt::check_local`] makes one, so holding it proves the
+/// Only `AdmittedAttempt::check_local` makes one, so holding it proves the
 /// check ran. The execute path makes it before the unit is submitted, so a bad
 /// admission never starts a unit, and binds it once the unit is active. It has
 /// no public constructor.

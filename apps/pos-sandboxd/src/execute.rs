@@ -64,7 +64,7 @@ pub trait UnitHost {
     /// future was dropped.
     type Killer: UnitKiller;
 
-    /// A handle for [`SubmissionGuard`]'s best-effort kill.
+    /// A handle for `SubmissionGuard`'s best-effort kill.
     fn killer(&self) -> Self::Killer;
 
     /// Submit the compiled request and verify its requested state.
