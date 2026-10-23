@@ -95,7 +95,8 @@ def coverage_ignore_regex(metadata: Any) -> str:
         directory = member_directory(root, package.get("manifest_path"))
         if package["id"] == shims[0]["id"]:
             continue
-        require(not shim.is_relative_to(directory), "a member directory would exclude the Windows shim")
+        require(not (shim.is_relative_to(directory) or directory.is_relative_to(shim)),
+                "a member directory would exclude the Windows shim")
         patterns.append(path_pattern(directory.as_posix()) + SEPARATOR)
     if not patterns:
         # Coverage filenames are nonempty; an empty alternation would hide all.
