@@ -400,7 +400,8 @@ fn the_expected_layout_depends_on_the_mode() -> TestResult {
     let local = layout_digest(SandboxExecutionMode::Local)?;
     let air_gapped = layout_digest(SandboxExecutionMode::AirGapped)?;
     assert_ne!(local, air_gapped);
-    assert_eq!(air_gapped, layout_digest(SandboxExecutionMode::Fork)?);
+    // The mode is part of the FDL1 record, so even equal layouts differ by mode.
+    assert_ne!(air_gapped, layout_digest(SandboxExecutionMode::Fork)?);
     Ok(())
 }
 
