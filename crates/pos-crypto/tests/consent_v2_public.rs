@@ -264,8 +264,19 @@ fn bounds_purpose_and_complete_payload_before_consumer_access() -> TestResult {
         ),
         Err(ConsentV2Error::BoundsExceeded)
     );
+    // Trailing data is malformed within the transport budget. Only a
+    // buffer above that budget is oversized, before its contents are read.
+    let mut padded_grant = encode(&outer()?)?;
+    padded_grant.resize(MAX_CONSENT_V2_BYTES, 0);
+    assert_eq!(padded_grant.len(), MAX_CONSENT_V2_BYTES);
     assert_eq!(
-        ConsentGrantedV2::from_bytes(&vec![0; MAX_CONSENT_V2_BYTES + 1]),
+        ConsentGrantedV2::from_bytes(&padded_grant),
+        Err(ConsentV2Error::InvalidEncoding)
+    );
+    padded_grant.push(0);
+    assert_eq!(padded_grant.len(), MAX_CONSENT_V2_BYTES + 1);
+    assert_eq!(
+        ConsentGrantedV2::from_bytes(&padded_grant),
         Err(ConsentV2Error::BoundsExceeded)
     );
     // An oversized declared byte-string length is refused before allocation.
