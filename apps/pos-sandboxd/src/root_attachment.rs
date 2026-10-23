@@ -121,14 +121,15 @@ impl VerifiedRootMount {
         directory: &PreparedAttemptDirectory,
         entry: &AdmittedEntry<'_>,
     ) -> Result<CheckedRoot, ImageActivationError> {
-        if !binds(
-            &self.expected,
-            Expected::for_admission(entry.admission(), self.expected.root_directory.clone())
-                .as_ref(),
-        ) {
-            return Err(ImageActivationError::EvidenceMismatch);
-        }
-        recheck(&HostKernel::system(), self, directory, || entry.recheck())
+        let activated =
+            Expected::for_admission(entry.admission(), self.expected.root_directory.clone());
+        recheck(
+            &HostKernel::system(),
+            self,
+            directory,
+            activated.as_ref(),
+            || entry.recheck(),
+        )
     }
 }
 
@@ -142,11 +143,14 @@ fn recheck<K: AttachmentKernel>(
     kernel: &K,
     root: &VerifiedRootMount,
     directory: &PreparedAttemptDirectory,
+    activated: Option<&Expected>,
     authority: impl FnOnce() -> Result<(), StagingError>,
 ) -> Result<CheckedRoot, ImageActivationError> {
     let (attempt, held_root) = directory.held_directories();
-    authority()
-        .map_err(|_| ImageActivationError::EvidenceMismatch)
+    binds(&root.expected, activated)
+        .then_some(())
+        .ok_or(ImageActivationError::EvidenceMismatch)
+        .and_then(|()| authority().map_err(|_| ImageActivationError::EvidenceMismatch))
         .and_then(|()| {
             root.expected.verify(&kernel.observe(
                 root.mount.as_fd(),

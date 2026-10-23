@@ -39,12 +39,12 @@ use pos_reference::sandbox_provider_protocol::{
 };
 use zvariant::OwnedFd;
 
+use crate::local_network::CheckedLocal;
 use crate::{
     ActivatedRootDirectory, ActiveAttempt, AdmittedAttempt, BoundLocalProxy, CheckedRoot,
-    EstablishedNetwork, HostServiceChannel, ImageActivationError, LaunchMode, LauncherSource,
-    LocalNetworkPort, LocalProxyBindError, ServeError, ServedProxy, SystemCallFilter,
-    SystemdServiceLimits, TransientServiceUnitName, TransientUnitLaunchInputs,
-    TransientUnitRequest,
+    HostServiceChannel, ImageActivationError, LaunchMode, LauncherSource, LocalNetworkPort,
+    LocalProxyBindError, ServeError, ServedProxy, SystemCallFilter, SystemdServiceLimits,
+    TransientServiceUnitName, TransientUnitLaunchInputs, TransientUnitRequest,
 };
 
 /// How often the attempt cgroup is polled for emptiness.
@@ -353,16 +353,10 @@ pub struct AttemptExecution<S, C> {
     pub network: NetworkEvidence,
 }
 
-struct LocalPreparation<C> {
-    admission: LocalNetworkAdmission,
-    network: EstablishedNetwork<C>,
-    channel: HostServiceChannel,
-}
-
 /// The network behaviour prepared before the unit starts.
 enum Planned<C> {
     None,
-    Local(Box<LocalPreparation<C>>),
+    Local(Box<CheckedLocal<C>>),
     Replay(Vec<ReplayedNetworkExchange>),
 }
 
@@ -474,20 +468,7 @@ where
     let (started, mut cgroup) = submit(host, &unit, request, bounds).await?;
     let attempt_id = attempt.attempt_id();
     let active = ActiveAttempt::record(attempt, deadline);
-    let bound = match bind_planned(&active, planned) {
-        Ok(bound) => bound,
-        Err(error) => {
-            let aborted = abort(
-                host,
-                &unit,
-                Some(&mut cgroup),
-                error,
-                Submission::Confirmed,
-                bounds,
-            );
-            return Err(aborted.await);
-        }
-    };
+    let bound = bind_planned(&active, planned);
     // Release must arrive before the attempt deadline (ADR-069), whatever the
     // port does.
     let refused = match until(deadline, barrier.release(&active)).await {
@@ -647,17 +628,12 @@ where
                 .establish(attempt.attempt_id())
                 .map_err(|error| ExecuteError::Network(Box::new(error)))?;
             // A bad admission, namespace or channel never reaches the start.
-            attempt.check_local(&admission, &established, &channel)?;
-            let preparation = Box::new(LocalPreparation {
-                admission: *admission,
-                network: established,
-                channel,
-            });
+            let checked = attempt.check_local(*admission, established, channel)?;
             (
                 LaunchMode::Local {
                     host_service: adapter_end,
                 },
-                Planned::Local(preparation),
+                Planned::Local(Box::new(checked)),
             )
         }
         ModePlan::AirGapped => (LaunchMode::AirGapped, Planned::None),
@@ -699,14 +675,14 @@ fn resolve_replay(
         .map_err(ExecuteError::ReplayUnavailable)
 }
 
-fn bind_planned<C>(active: &ActiveAttempt, planned: Planned<C>) -> Result<Bound<C>, ExecuteError> {
+fn bind_planned<C>(active: &ActiveAttempt, planned: Planned<C>) -> Bound<C> {
     match planned {
-        Planned::None => Ok(Bound::None),
-        Planned::Replay(replayed) => Ok(Bound::Replay(replayed)),
-        Planned::Local(local) => active
-            .bind_local_proxy(local.admission, local.network, local.channel)
-            .map(|(binding, connector)| Bound::Local(Box::new(binding), connector))
-            .map_err(ExecuteError::from),
+        Planned::None => Bound::None,
+        Planned::Replay(replayed) => Bound::Replay(replayed),
+        Planned::Local(checked) => {
+            let (binding, connector) = checked.bind(active);
+            Bound::Local(Box::new(binding), connector)
+        }
     }
 }
 

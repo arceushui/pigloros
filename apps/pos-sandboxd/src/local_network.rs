@@ -160,23 +160,32 @@ pub enum LocalProxyBindError {
     Channel,
 }
 
+/// A Local admission, namespace and channel that were checked against the
+/// admitted attempt they belong to.
+///
+/// Only [`AdmittedAttempt::check_local`] makes one, so holding it proves the
+/// check ran. The execute path makes it before the unit is submitted, so a bad
+/// admission never starts a unit, and binds it once the unit is active.
+#[derive(Debug)]
+pub(crate) struct CheckedLocal<C> {
+    admission: LocalNetworkAdmission,
+    network: EstablishedNetwork<C>,
+    channel: HostServiceChannel,
+}
+
 impl AdmittedAttempt {
     /// Check that `admission`, `network` and `channel` belong to this attempt.
-    ///
-    /// The execute path runs this before the unit is submitted, so an
-    /// admission of another attempt, SIM1, authority head or epoch never
-    /// starts a unit; [`ActiveAttempt`] runs it again when it mints the
-    /// binding.
     ///
     /// # Errors
     /// Rejects an admission whose grant names another attempt, SIM1, authority
     /// head or epoch, and a namespace or channel created for another attempt.
+    /// The rejected inputs are dropped, which tears the namespace down.
     pub(crate) fn check_local<C>(
         &self,
-        admission: &LocalNetworkAdmission,
-        network: &EstablishedNetwork<C>,
-        channel: &HostServiceChannel,
-    ) -> Result<(), LocalProxyBindError> {
+        admission: LocalNetworkAdmission,
+        network: EstablishedNetwork<C>,
+        channel: HostServiceChannel,
+    ) -> Result<CheckedLocal<C>, LocalProxyBindError> {
         let grant = admission.grant();
         let authority = self.authority();
         if grant.attempt_id != self.attempt_id() {
@@ -198,35 +207,30 @@ impl AdmittedAttempt {
         if channel.attempt_id != self.attempt_id() {
             return Err(LocalProxyBindError::Channel);
         }
-        Ok(())
+        Ok(CheckedLocal {
+            admission,
+            network,
+            channel,
+        })
     }
 }
 
-impl ActiveAttempt {
-    /// Bind `admission`, `network` and `channel` to this active attempt.
+impl<C> CheckedLocal<C> {
+    /// Bind the checked inputs to the attempt that is now active.
     ///
     /// The binding is the only value the provider serves with `serve_proxy`.
-    /// The connector of the bound namespace is returned beside it.
-    ///
-    /// # Errors
-    /// Rejects what [`AdmittedAttempt::check_local`] rejects.
-    pub(crate) fn bind_local_proxy<C>(
-        &self,
-        admission: LocalNetworkAdmission,
-        network: EstablishedNetwork<C>,
-        channel: HostServiceChannel,
-    ) -> Result<(BoundLocalProxy, C), LocalProxyBindError> {
-        self.admitted()
-            .check_local(&admission, &network, &channel)
-            .map(|()| {
-                (
-                    BoundLocalProxy {
-                        admission,
-                        channel: HostServiceStream(Arc::new(channel.provider)),
-                    },
-                    network.connector,
-                )
-            })
+    /// The connector of the bound namespace is returned beside it. `active`
+    /// must be the record of the attempt the inputs were checked against; the
+    /// execute path makes both from the same [`AdmittedAttempt`].
+    pub(crate) fn bind(self, active: &ActiveAttempt) -> (BoundLocalProxy, C) {
+        (
+            BoundLocalProxy {
+                attempt_id: active.attempt_id(),
+                admission: self.admission,
+                channel: HostServiceStream(Arc::new(self.channel.provider)),
+            },
+            self.network.connector,
+        )
     }
 }
 
@@ -236,6 +240,7 @@ impl ActiveAttempt {
 /// channel; [`ActiveAttempt`] mints it.
 #[derive(Debug)]
 pub struct BoundLocalProxy {
+    attempt_id: [u8; 16],
     admission: LocalNetworkAdmission,
     channel: HostServiceStream,
 }
@@ -280,6 +285,12 @@ impl AsFd for HostServiceStream {
 }
 
 impl BoundLocalProxy {
+    /// The active attempt this binding was minted for.
+    #[must_use]
+    pub const fn attempt_id(&self) -> [u8; 16] {
+        self.attempt_id
+    }
+
     /// Serve this binding on a blocking thread until its channel ends or
     /// `deadline`.
     ///
