@@ -145,8 +145,14 @@ INVOCATION_ID=0123456789abcdef0123456789abcdef exec "$0" launch-barrier "$1""#;
         .stdin(Stdio::from(launcher))
         .output()?;
     assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
-    let message = stderr(&output);
-    assert!(message.starts_with("pos-sandboxd: "), "{message}");
-    assert!(!message.contains("environment is invalid"), "{message}");
+    // The release channel is a valid adopted descriptor, so the refusal is the
+    // peer check for a non-root user; as root the launch proceeds to the
+    // adapter, which does not exist in the unit's root here.
+    let expected = if rustix::process::getuid().is_root() {
+        "pos-sandboxd: adapter is not a regular native ELF beneath the root\n"
+    } else {
+        "pos-sandboxd: release channel peer is not the root provider\n"
+    };
+    assert_eq!(stderr(&output), expected);
     Ok(())
 }

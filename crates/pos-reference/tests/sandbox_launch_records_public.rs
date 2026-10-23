@@ -411,27 +411,67 @@ fn decoders_reject_oversized_and_zero_field_records() -> TestResult {
     Ok(())
 }
 
+/// A record with `full` maximal arguments and one more of `last` bytes.
+fn sized_record(
+    full: usize,
+    last: usize,
+) -> Result<LaunchParameters, SandboxProviderProtocolError> {
+    let mut arguments = vec!["a".repeat(256); full];
+    if last > 0 {
+        arguments.push("a".repeat(last));
+    }
+    LaunchParameters::new(
+        [1; 16],
+        fill(2),
+        [3; 32],
+        "/a".to_owned(),
+        arguments,
+        [4; 32],
+    )
+}
+
+/// The canonical length of the accepted record, or nothing if the 64 KiB
+/// bound rejects it.
+fn record_len(full: usize, last: usize) -> Result<Option<usize>, Box<dyn Error>> {
+    sized_record(full, last)
+        .ok()
+        .map(|record| record.to_canonical_cbor().map(|bytes| bytes.len()))
+        .transpose()
+        .map_err(Into::into)
+}
+
 #[test]
-fn the_largest_accepted_lpv1_hex_encoding_fits_one_argv_string() -> TestResult {
-    // Linux MAX_ARG_STRLEN: one argv string, including its NUL, is 128 KiB at most.
+fn lpv1_hex_fits_one_argv_string_up_to_65535_bytes_and_longer_records_fail_closed() -> TestResult {
+    // Linux MAX_ARG_STRLEN: one argv string, including its NUL, is 128 KiB at
+    // most. The launcher receives LPV1 as lowercase hex in one such string.
     const MAX_ARG_STRLEN: usize = 131_072;
-    let largest = (0..=256)
-        .rev()
-        .find_map(|count| {
-            LaunchParameters::new(
-                [1; 16],
-                fill(2),
-                [3; 32],
-                "/a".to_owned(),
-                vec!["a".repeat(256); count],
-                [4; 32],
-            )
-            .ok()
-        })
-        .ok_or("no LPV1 record is accepted")?;
-    let hex_length = hex(&largest.to_canonical_cbor()?).len();
-    assert!(hex_length > MAX_ARG_STRLEN / 2);
-    assert!(hex_length < MAX_ARG_STRLEN);
+    const BOUND: usize = 64 * 1024;
+    let mut by_len = std::collections::BTreeMap::new();
+    for full in (240..=255).rev() {
+        for last in 0..=256 {
+            if let Some(length) = record_len(full, last)? {
+                by_len.entry(length).or_insert((full, last));
+            }
+        }
+    }
+    // The bound is exactly 65 536 bytes: that record is accepted, one byte more is not.
+    assert_eq!(by_len.keys().next_back(), Some(&BOUND));
+    let (full, last) = by_len[&BOUND];
+    assert!(sized_record(full, last + 1).is_err());
+    assert!(by_len.contains_key(&(BOUND - 1)));
+    // Every record up to 65 535 bytes hex-encodes into one argv string.
+    for length in by_len.keys().copied().filter(|length| *length < BOUND) {
+        assert!(2 * length < MAX_ARG_STRLEN, "{length}");
+    }
+    // A record of exactly 65 536 bytes is valid but its hex plus NUL is 131 073
+    // bytes, so the provider's exec of the launcher fails with E2BIG: the
+    // launch fails closed and nothing is released.
+    let (full, last) = by_len[&BOUND];
+    let record = sized_record(full, last)?;
+    assert_eq!(
+        hex(&record.to_canonical_cbor()?).len() + 1,
+        MAX_ARG_STRLEN + 1
+    );
     Ok(())
 }
 

@@ -138,12 +138,16 @@ fn provider_production_code_never_creates_a_local_process() -> TestResult {
     );
     for path in &sources {
         for (number, line) in production_lines(path)?.iter().enumerate() {
+            // Only the exact descriptor-exec name is allowed, and only in the
+            // launcher's exec file: removing it must leave no forbidden token.
+            let checked = if path.ends_with(LAUNCHER_EXEC) {
+                line.replace("execveat", "")
+            } else {
+                line.clone()
+            };
             for token in FORBIDDEN {
-                if token == "execv" && path.ends_with(LAUNCHER_EXEC) {
-                    continue;
-                }
                 assert!(
-                    !line.contains(token),
+                    !checked.contains(token),
                     "{}:{}: `{token}` in provider production code",
                     path.display(),
                     number + 1
@@ -224,34 +228,79 @@ fn the_launcher_release_step_is_the_only_descriptor_exec() -> TestResult {
     let text = non_comment_text(&exec_files[0])?;
     // Exactly one call, on the held descriptor, with an empty path,
     // AT_EMPTY_PATH, the explicit argument vector and an empty environment.
-    assert_eq!(text.matches("execveat(").count(), 1);
-    assert!(text.contains("execveat(adapter, c\"\", argv, &environment, AtFlags::AT_EMPTY_PATH)"));
-    assert!(text.contains("let environment: [CString; 0] = [];"));
-    assert_eq!(text.matches("AT_EMPTY_PATH").count(), 1);
+    // Whitespace is removed first, so the check survives rustfmt layout.
+    let compact: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+    assert_eq!(compact.matches("execveat(").count(), 1);
+    assert!(compact.contains("execveat(adapter,c\"\",argv,&environment,AtFlags::AT_EMPTY_PATH)"));
+    assert!(compact.contains("letenvironment:[CString;0]=[];"));
+    assert_eq!(compact.matches("AT_EMPTY_PATH").count(), 1);
     Ok(())
 }
 
+/// Imports the launcher may use from `pos_reference`: the launch records and
+/// the two digest helpers, nothing from admission or the verifier.
+const LAUNCHER_PROTOCOL_NAMES: [&str; 13] = [
+    "blake3_digest_of",
+    "fdl1_digest",
+    "ExecutionRelease",
+    "FdIdentity",
+    "FdLayoutEntry",
+    "FdRole",
+    "LaunchParameters",
+    "LauncherReady",
+    "LauncherReadyFields",
+    "SandboxExecutionMode",
+    "sandbox_provider_protocol",
+    "self",
+    "pos_reference",
+];
+/// Crates and path roots the launcher may import from.
+const LAUNCHER_IMPORT_ROOTS: [&str; 7] = [
+    "std",
+    "super",
+    "self",
+    "rustix",
+    "nix",
+    "sd_listen_fds",
+    "pos_reference",
+];
+
+/// Each `use` statement of the text, flattened to one line.
+fn use_statements(text: &str) -> Vec<String> {
+    let mut statements = Vec::new();
+    let mut current: Option<String> = None;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if current.is_none()
+            && (trimmed.starts_with("use ")
+                || trimmed.starts_with("pub use ")
+                || trimmed.starts_with("pub(super) use "))
+        {
+            current = Some(String::new());
+        }
+        if let Some(statement) = current.as_mut() {
+            statement.push_str(trimmed);
+            statement.push(' ');
+            if trimmed.ends_with(';') {
+                statements.extend(current.take());
+            }
+        }
+    }
+    statements
+}
+
 /// ADR-087 reading (owner decision Q9.11): the launcher code path never calls
-/// the verifier. Its sources import nothing from the provider's admission or
-/// verifier modules.
+/// the verifier. Its sources import only from an allowlist of crates, and from
+/// `pos_reference` only the launch records and digest helpers.
 #[test]
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn the_launcher_never_reaches_admission_or_the_verifier() -> TestResult {
-    const FORBIDDEN_REACH: [&str; 15] = [
+    const FORBIDDEN_REACH: [&str; 6] = [
         "crate::",
         "provider_admission",
-        "root_selector",
-        "selector",
-        "Admitted",
         "image_proof",
-        "verify_image",
-        "HeldImage",
-        "TrustSnapshot",
         "webpki",
         "x509",
-        "cms::",
-        "use ring",
-        " ring::",
         "ReleaseSigner",
     ];
     let mut sources = Vec::new();
@@ -266,6 +315,44 @@ fn the_launcher_never_reaches_admission_or_the_verifier() -> TestResult {
                 path.display()
             );
         }
+        for statement in use_statements(&text) {
+            let body = statement
+                .trim_start_matches("pub(super) ")
+                .trim_start_matches("pub ")
+                .trim_start_matches("use ")
+                .trim_start_matches("::");
+            let root = body
+                .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .next()
+                .unwrap_or_default();
+            assert!(
+                LAUNCHER_IMPORT_ROOTS.contains(&root),
+                "{}: launcher imports from `{root}`",
+                path.display()
+            );
+            if root == "pos_reference" {
+                for name in body
+                    .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                    .filter(|name| !name.is_empty())
+                {
+                    assert!(
+                        LAUNCHER_PROTOCOL_NAMES.contains(&name),
+                        "{}: launcher imports `{name}` from pos_reference",
+                        path.display()
+                    );
+                }
+            }
+        }
+        // Any other path into the protocol crate is also refused.
+        assert_eq!(
+            text.matches("pos_reference::").count(),
+            use_statements(&text)
+                .iter()
+                .map(|statement| statement.matches("pos_reference::").count())
+                .sum::<usize>(),
+            "{}: inline pos_reference path outside a use statement",
+            path.display()
+        );
     }
     Ok(())
 }
