@@ -129,7 +129,7 @@ fn barrier_for(
     let barrier = ProviderReleaseBarrier::new(
         &attempt,
         mode,
-        [0x33; 32],
+        fresh_nonce()?,
         BarrierEvidence {
             launcher_digest: LAUNCHER_DIGEST,
             adapter_identity: ADAPTER_IDENTITY,
@@ -370,7 +370,7 @@ fn launch_parameters_that_do_not_fit_are_refused() -> TestResult {
     let barrier = ProviderReleaseBarrier::new(
         &attempt,
         SandboxExecutionMode::AirGapped,
-        [0x33; 32],
+        fresh_nonce()?,
         BarrierEvidence {
             launcher_digest: LAUNCHER_DIGEST,
             adapter_identity: ADAPTER_IDENTITY,

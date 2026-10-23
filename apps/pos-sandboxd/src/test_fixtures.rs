@@ -178,7 +178,7 @@ pub fn bound_proxy<C>(
 pub fn invocation() -> TestResult<crate::LauncherInvocation> {
     let parameters = pos_reference::sandbox_provider_protocol::LaunchParameters::new(
         ATTEMPT,
-        [7; 32],
+        crate::fresh_nonce()?,
         [0x51; 32],
         "/usr/bin/adapter".to_owned(),
         vec!["--check".to_owned()],
