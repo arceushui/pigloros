@@ -104,9 +104,12 @@ impl VerifiedRootMount {
     /// authority and the attached mount are still the verified ones
     /// (ADR-087 §2 step 7).
     ///
-    /// The installed authority is re-read and compared with the provider
-    /// control floor through `entry`. The mount, loop, dm-verity and
-    /// executable readback is then repeated and must name the same mount ID.
+    /// `entry` must hold the admission this root was activated from: the held
+    /// image, partitions and executable it names must equal the ones this root
+    /// was verified against. The installed authority is then re-read and
+    /// compared with the provider control floor through `entry`. The mount,
+    /// loop, dm-verity and executable readback is repeated and must name the
+    /// same mount ID.
     /// The returned [`CheckedRoot`] is the only `RootDirectory` a launch input
     /// accepts.
     ///
@@ -118,8 +121,21 @@ impl VerifiedRootMount {
         directory: &PreparedAttemptDirectory,
         entry: &AdmittedEntry<'_>,
     ) -> Result<CheckedRoot, ImageActivationError> {
+        if !binds(
+            &self.expected,
+            Expected::for_admission(entry.admission(), self.expected.root_directory.clone())
+                .as_ref(),
+        ) {
+            return Err(ImageActivationError::EvidenceMismatch);
+        }
         recheck(&HostKernel::system(), self, directory, || entry.recheck())
     }
+}
+
+/// Whether `candidate`, derived from an entry's admission, is exactly what a
+/// root was verified against.
+fn binds(expected: &Expected, candidate: Option<&Expected>) -> bool {
+    candidate == Some(expected)
 }
 
 fn recheck<K: AttachmentKernel>(
