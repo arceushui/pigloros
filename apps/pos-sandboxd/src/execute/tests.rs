@@ -1015,6 +1015,14 @@ async fn a_barrier_that_never_answers_is_cut_off_at_the_deadline() -> TestResult
     Ok(())
 }
 
+fn release_fault(refuse_release: bool) -> BarrierFault {
+    if refuse_release {
+        BarrierFault::Release
+    } else {
+        BarrierFault::None
+    }
+}
+
 /// Run an Air-Gapped attempt under a 100 ms watchdog with `faults`, optionally
 /// refusing the release so that the termination calls run.
 async fn timed_out(
@@ -1023,11 +1031,7 @@ async fn timed_out(
 ) -> TestResult<(Scenario, ExecuteFailure)> {
     let mut scenario = Scenario::new()?;
     scenario.host.faults.extend_from_slice(faults);
-    scenario.barrier.fault = if refuse_release {
-        BarrierFault::Release
-    } else {
-        BarrierFault::None
-    };
+    scenario.barrier.fault = release_fault(refuse_release);
     let run = scenario.run_watched(SandboxExecutionMode::AirGapped, ModePlan::AirGapped, 100);
     let outcome = tokio::time::timeout(Duration::from_secs(10), run).await??;
     Ok((scenario, failure(outcome)?))

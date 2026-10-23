@@ -733,11 +733,19 @@ fn filter() -> Result<SystemCallFilter, Box<dyn Error>> {
     )?)
 }
 
-fn inputs(mode: LaunchMode) -> Result<TransientUnitLaunchInputs, Box<dyn Error>> {
+fn root_and_launcher() -> Result<(CheckedRoot, LauncherSource), Box<dyn Error>> {
     let root = ActivatedRootDirectory::new("/run/pigloros/attempt-42/root")?;
-    Ok(TransientUnitLaunchInputs::new(
+    Ok((
         CheckedRoot::for_test(root),
         LauncherSource::new("/usr/lib/pigloros/release-launcher")?,
+    ))
+}
+
+fn inputs(mode: LaunchMode) -> Result<TransientUnitLaunchInputs, Box<dyn Error>> {
+    let (root, launcher) = root_and_launcher()?;
+    Ok(TransientUnitLaunchInputs::new(
+        root,
+        launcher,
         mode,
         descriptor()?,
         crate::test_fixtures::invocation()?,
