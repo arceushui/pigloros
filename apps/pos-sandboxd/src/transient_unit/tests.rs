@@ -847,7 +847,7 @@ fn property_clone_propagates_value_failure() {
 }
 
 /// Every dynamic kind with the name systemd gives it.
-fn pinned_names() -> [(SystemdDynamicPropertyKind, &'static str); 8] {
+fn pinned_names() -> [(SystemdDynamicPropertyKind, &'static str); 9] {
     [
         (SystemdDynamicPropertyKind::RootDirectory, "RootDirectory"),
         (
@@ -880,6 +880,7 @@ fn pinned_names() -> [(SystemdDynamicPropertyKind, &'static str); 8] {
             SystemdDynamicPropertyKind::TemporaryFileSystem,
             "TemporaryFileSystem",
         ),
+        (SystemdDynamicPropertyKind::ExecStart, "ExecStart"),
     ]
 }
 
@@ -939,6 +940,10 @@ fn pinned_signatures() -> Vec<(SystemdTransientUnitValue, &'static str)> {
         (
             SystemdTransientUnitValue::TemporaryFileSystem(Vec::new()),
             "a(ss)",
+        ),
+        (
+            SystemdTransientUnitValue::ExecStart(Vec::new()),
+            "a(sasb)",
         ),
     ]
 }
