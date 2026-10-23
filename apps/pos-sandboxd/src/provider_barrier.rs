@@ -261,7 +261,8 @@ impl<S, I, R, O> ProviderReleaseBarrier<S, I, R, O> {
             SocketFlags::CLOEXEC,
             None,
         )
-        .map_err(|errno| BarrierError::Channel(io::Error::from(errno)))?;
+        .map_err(io::Error::from)
+        .map_err(BarrierError::Channel)?;
         let parameters = layout_digest(mode)
             .and_then(|layout| {
                 LaunchParameters::new(

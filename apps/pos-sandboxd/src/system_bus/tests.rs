@@ -1417,6 +1417,10 @@ async fn an_unknown_unit_has_no_identity() -> Result<(), Box<dyn Error>> {
         UnitIdentitySource::main_pid(&transport, &name).await,
         Err(SystemdTransientUnitTransportError::UnitLookup(_))
     ));
+    assert!(matches!(
+        UnitIdentitySource::invocation_id(&transport, &name).await,
+        Err(SystemdTransientUnitTransportError::UnitLookup(_))
+    ));
     Ok(())
 }
 
