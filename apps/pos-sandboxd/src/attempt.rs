@@ -72,6 +72,18 @@ impl AdmittedAttempt {
         self.mode
     }
 
+    /// The SIM1 identity the attempt was admitted for.
+    #[must_use]
+    pub const fn sim1_digest(&self) -> [u8; 32] {
+        self.sim1_digest
+    }
+
+    /// The authority heads and epochs the attempt was admitted with.
+    #[must_use]
+    pub const fn authority(&self) -> AdmittedAuthority {
+        self.authority
+    }
+
     /// Facts for tests that have no privileged installation to admit from.
     #[cfg(test)]
     pub(crate) fn for_test(
@@ -92,10 +104,10 @@ impl AdmittedAttempt {
 /// The record of a started, not yet released attempt.
 ///
 /// It exists once the transient unit was started and its requested state
-/// verified. The provider records the attempt, the authority heads it was
-/// admitted with (the last-moment recheck confirmed them), and the broker watchdog deadline here, and
-/// binds everything that must belong to this attempt to it. It has no public
-/// constructor.
+/// verified. It records the admitted attempt, whose authority heads the
+/// successful last-moment recheck confirmed, and the broker watchdog deadline;
+/// everything that must belong to this attempt is bound to it. It has no
+/// public constructor.
 #[derive(Clone, Debug)]
 pub struct ActiveAttempt {
     admitted: AdmittedAttempt,
@@ -105,6 +117,10 @@ pub struct ActiveAttempt {
 impl ActiveAttempt {
     pub(crate) const fn record(admitted: AdmittedAttempt, deadline: Instant) -> Self {
         Self { admitted, deadline }
+    }
+
+    pub(crate) const fn admitted(&self) -> &AdmittedAttempt {
+        &self.admitted
     }
 
     /// The attempt identity.
@@ -117,19 +133,6 @@ impl ActiveAttempt {
     #[must_use]
     pub const fn unit_name(&self) -> &TransientServiceUnitName {
         &self.admitted.unit_name
-    }
-
-    /// The SIM1 identity the attempt was admitted for.
-    #[must_use]
-    pub const fn sim1_digest(&self) -> [u8; 32] {
-        self.admitted.sim1_digest
-    }
-
-    /// The authority heads and epochs the attempt was admitted and rechecked
-    /// against.
-    #[must_use]
-    pub const fn authority(&self) -> AdmittedAuthority {
-        self.admitted.authority
     }
 
     /// The broker's monotonic watchdog deadline for the whole attempt.

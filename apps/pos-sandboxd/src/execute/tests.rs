@@ -82,6 +82,10 @@ enum Fault {
     Kill,
     ReadCgroup,
     KillCgroup,
+    HangStart,
+    HangBind,
+    HangKill,
+    HangStop,
 }
 
 type Reply = Arc<Mutex<Option<Result<Vec<u8>, String>>>>;
@@ -245,6 +249,13 @@ impl UnitHost for FakeHost {
     type Started = String;
     type Cgroup = FakeCgroup;
     type Error = Injected;
+    type Killer = FakeKiller;
+
+    fn killer(&self) -> FakeKiller {
+        FakeKiller {
+            log: Arc::clone(&self.log),
+        }
+    }
 
     fn start(
         &self,
@@ -261,7 +272,11 @@ impl UnitHost for FakeHost {
             }
             Ok(unit_name.as_str().to_owned())
         };
-        async move { outcome }
+        let hang = self.faulty(Fault::HangStart);
+        async move {
+            hang_if(hang).await;
+            outcome
+        }
     }
 
     fn bind_cgroup(
@@ -280,7 +295,11 @@ impl UnitHost for FakeHost {
                 fail_kill: self.faulty(Fault::KillCgroup),
             })
         };
-        async move { outcome }
+        let hang = self.faulty(Fault::HangBind);
+        async move {
+            hang_if(hang).await;
+            outcome
+        }
     }
 
     fn stop(
@@ -288,7 +307,11 @@ impl UnitHost for FakeHost {
         _unit_name: TransientServiceUnitName,
     ) -> impl Future<Output = Result<(), Injected>> + Send {
         record(&self.log, "stop");
-        async move { Ok(()) }
+        let hang = self.faulty(Fault::HangStop);
+        async move {
+            hang_if(hang).await;
+            Ok(())
+        }
     }
 
     fn kill(
@@ -301,7 +324,29 @@ impl UnitHost for FakeHost {
         } else {
             Ok(())
         };
-        async move { outcome }
+        let hang = self.faulty(Fault::HangKill);
+        async move {
+            hang_if(hang).await;
+            outcome
+        }
+    }
+}
+
+/// Never finishes when `hang` is set.
+async fn hang_if(hang: bool) {
+    if hang {
+        std::future::pending::<()>().await;
+    }
+}
+
+/// The kill handle an execution that was dropped falls back on.
+struct FakeKiller {
+    log: Log,
+}
+
+impl UnitKiller for FakeKiller {
+    async fn kill(self, _unit_name: TransientServiceUnitName) {
+        record(&self.log, "guard_kill");
     }
 }
 
@@ -365,9 +410,13 @@ struct LoopbackNetwork;
 
 impl LocalNetworkPort for LoopbackNetwork {
     type Connector = LoopbackConnector;
+    type Error = Injected;
 
-    fn establish(&self, attempt_id: [u8; 16]) -> EstablishedNetwork<LoopbackConnector> {
-        EstablishedNetwork::new(attempt_id, LoopbackConnector)
+    fn establish(
+        &self,
+        attempt_id: [u8; 16],
+    ) -> Result<EstablishedNetwork<LoopbackConnector>, Injected> {
+        Ok(EstablishedNetwork::new(attempt_id, LoopbackConnector))
     }
 }
 
@@ -376,9 +425,70 @@ struct ForeignNetwork;
 
 impl LocalNetworkPort for ForeignNetwork {
     type Connector = LoopbackConnector;
+    type Error = Injected;
 
-    fn establish(&self, _attempt_id: [u8; 16]) -> EstablishedNetwork<LoopbackConnector> {
-        EstablishedNetwork::new(OTHER, LoopbackConnector)
+    fn establish(
+        &self,
+        _attempt_id: [u8; 16],
+    ) -> Result<EstablishedNetwork<LoopbackConnector>, Injected> {
+        Ok(EstablishedNetwork::new(OTHER, LoopbackConnector))
+    }
+}
+
+/// A port that cannot establish a namespace.
+struct BrokenNetwork;
+
+impl LocalNetworkPort for BrokenNetwork {
+    type Connector = LoopbackConnector;
+    type Error = Injected;
+
+    fn establish(
+        &self,
+        _attempt_id: [u8; 16],
+    ) -> Result<EstablishedNetwork<LoopbackConnector>, Injected> {
+        Err(Injected)
+    }
+}
+
+/// A connector whose drop is the namespace teardown the port contract asks for.
+struct TornDownConnector {
+    torn_down: Arc<AtomicUsize>,
+}
+
+impl Drop for TornDownConnector {
+    fn drop(&mut self) {
+        self.torn_down.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+impl pos_reference::sandbox_provider_protocol::NetworkEndpointConnector for TornDownConnector {
+    fn connect(
+        &mut self,
+        _endpoint: SocketAddr,
+        _timeout: Duration,
+    ) -> std::io::Result<std::net::TcpStream> {
+        Err(std::io::ErrorKind::PermissionDenied.into())
+    }
+}
+
+struct TornDownNetwork {
+    torn_down: Arc<AtomicUsize>,
+}
+
+impl LocalNetworkPort for TornDownNetwork {
+    type Connector = TornDownConnector;
+    type Error = Injected;
+
+    fn establish(
+        &self,
+        attempt_id: [u8; 16],
+    ) -> Result<EstablishedNetwork<TornDownConnector>, Injected> {
+        Ok(EstablishedNetwork::new(
+            attempt_id,
+            TornDownConnector {
+                torn_down: Arc::clone(&self.torn_down),
+            },
+        ))
     }
 }
 
@@ -649,6 +759,7 @@ fn the_barrier_sees_the_active_attempt() -> TestResult {
     let mut barrier = FakeBarrier::new(&log);
     let active = crate::test_fixtures::active()?;
     let released = Arc::clone(&barrier.released);
+    assert_eq!(active.attempt_id(), ATTEMPT);
     let _release = barrier.release(&active);
     let seen = released.lock().map_err(|error| error.to_string())?.clone();
     assert_eq!(seen.len(), 1);
@@ -809,9 +920,17 @@ async fn a_unit_that_fails_to_start_is_killed() -> TestResult {
 }
 
 #[tokio::test]
-async fn an_unacknowledged_kill_is_reported_after_a_failed_start() -> TestResult {
+async fn an_unacknowledged_kill_after_a_failed_start_leaves_the_unit_unknown() -> TestResult {
     let (_scenario, failed) = faulted(&[Fault::Start, Fault::Kill]).await?;
     assert!(matches!(failed.error, ExecuteError::Unit(_)));
+    assert_eq!(failed.unit, UnitState::Unknown);
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_unacknowledged_kill_after_a_started_unit_is_reported_as_running() -> TestResult {
+    let (_scenario, failed) = faulted(&[Fault::Bind, Fault::Kill]).await?;
+    assert!(matches!(failed.error, ExecuteError::Cgroup(_)));
     assert_eq!(failed.unit, UnitState::KillFailed);
     Ok(())
 }
@@ -838,6 +957,110 @@ async fn a_barrier_that_never_answers_is_cut_off_at_the_deadline() -> TestResult
     assert!(matches!(failed.error, ExecuteError::ReleaseTimeout));
     assert_eq!(failed.unit, UnitState::Killed);
     assert_eq!(scenario.cgroup_kills(), 1);
+    Ok(())
+}
+
+/// Run an Air-Gapped attempt under a 100 ms watchdog with `faults`, optionally
+/// refusing the release so that the termination calls run.
+async fn timed_out(
+    faults: &[Fault],
+    refuse_release: bool,
+) -> TestResult<(Scenario, ExecuteFailure)> {
+    let mut scenario = Scenario::new()?;
+    scenario.host.faults.extend_from_slice(faults);
+    scenario.barrier.fail_release = refuse_release;
+    let run = scenario.run_watched(SandboxExecutionMode::AirGapped, ModePlan::AirGapped, 100);
+    let outcome = tokio::time::timeout(Duration::from_secs(10), run).await??;
+    Ok((scenario, failure(outcome)?))
+}
+
+#[tokio::test]
+async fn a_start_that_never_answers_is_cut_off_and_the_unit_killed() -> TestResult {
+    let (scenario, failed) = timed_out(&[Fault::HangStart], false).await?;
+    assert!(matches!(failed.error, ExecuteError::HostTimeout));
+    assert_eq!(failed.unit, UnitState::Killed);
+    assert!(scenario
+        .entries()
+        .ends_with(&names(&["start", "kill", "stop"])));
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_cgroup_bind_that_never_answers_is_cut_off_and_the_unit_killed() -> TestResult {
+    let (_scenario, failed) = timed_out(&[Fault::HangBind], false).await?;
+    assert!(matches!(failed.error, ExecuteError::HostTimeout));
+    assert_eq!(failed.unit, UnitState::Killed);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_kill_that_never_answers_is_reported_as_unacknowledged() -> TestResult {
+    let started = Instant::now();
+    let (_scenario, failed) = timed_out(&[Fault::HangKill], true).await?;
+    assert_eq!(failed.unit, UnitState::KillFailed);
+    assert!(started.elapsed() >= Duration::from_millis(100));
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_stop_that_never_answers_does_not_hold_the_failure() -> TestResult {
+    let (scenario, failed) = timed_out(&[Fault::HangStop], true).await?;
+    assert_eq!(failed.unit, UnitState::Killed);
+    assert!(scenario.entries().ends_with(&names(&["kill", "stop"])));
+    Ok(())
+}
+
+/// Wait until `entry` is logged, for at most five seconds.
+async fn logged(log: &Log, entry: &str) -> bool {
+    for _ in 0..500 {
+        if recorded(log).iter().any(|logged| logged == entry) {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    false
+}
+
+#[tokio::test]
+async fn a_dropped_execution_kills_the_submitted_unit() -> TestResult {
+    let mut scenario = Scenario::new()?;
+    scenario.barrier.hang_release = true;
+    let log = Arc::clone(&scenario.log);
+    let run = scenario.run(SandboxExecutionMode::AirGapped, ModePlan::AirGapped);
+    // The caller gives up while the barrier is still waiting.
+    assert!(tokio::time::timeout(Duration::from_millis(200), run)
+        .await
+        .is_err());
+    assert!(logged(&log, "guard_kill").await);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_finished_execution_leaves_nothing_for_the_guard() -> TestResult {
+    let mut scenario = Scenario::new()?;
+    scenario.air_gapped().await??;
+    let mut refused = Scenario::new()?;
+    refused.barrier.fail_release = true;
+    refused.fails().await?;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!scenario.entries().iter().any(|entry| entry == "guard_kill"));
+    assert!(!refused.entries().iter().any(|entry| entry == "guard_kill"));
+    Ok(())
+}
+
+#[test]
+fn a_guard_dropped_outside_a_runtime_spawns_nothing() -> TestResult {
+    let log = Log::default();
+    let mut guard = SubmissionGuard::new();
+    guard.arm(
+        FakeKiller {
+            log: Arc::clone(&log),
+        },
+        TransientServiceUnitName::from_attempt_id(ATTEMPT)?,
+        Duration::from_secs(1),
+    );
+    drop(guard);
+    assert!(recorded(&log).is_empty());
     Ok(())
 }
 
@@ -892,27 +1115,106 @@ async fn local_failure<N: LocalNetworkPort + Sync>(
 }
 
 #[tokio::test]
-async fn an_admission_of_another_attempt_is_killed_before_release() -> TestResult {
+async fn an_admission_of_another_attempt_never_submits_a_unit() -> TestResult {
     let (scenario, failed) = local_failure(&LoopbackNetwork, OTHER).await?;
     assert!(matches!(
         failed.error,
         ExecuteError::Bind(LocalProxyBindError::Attempt)
     ));
-    assert_eq!(failed.unit, UnitState::Killed);
-    assert!(!scenario.entries().iter().any(|entry| entry == "release"));
-    assert_eq!(scenario.cgroup_kills(), 1);
+    assert_eq!(failed.unit, UnitState::NotStarted);
+    assert!(scenario.entries().is_empty());
     Ok(())
 }
 
 #[tokio::test]
-async fn a_namespace_of_another_attempt_is_killed_before_release() -> TestResult {
+async fn a_namespace_of_another_attempt_never_submits_a_unit() -> TestResult {
     let (scenario, failed) = local_failure(&ForeignNetwork, ATTEMPT).await?;
     assert!(matches!(
         failed.error,
         ExecuteError::Bind(LocalProxyBindError::Namespace)
     ));
+    assert_eq!(failed.unit, UnitState::NotStarted);
+    assert!(scenario.entries().is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_network_that_cannot_be_established_never_submits_a_unit() -> TestResult {
+    let (scenario, failed) = local_failure(&BrokenNetwork, ATTEMPT).await?;
+    assert!(matches!(failed.error, ExecuteError::Network(_)));
+    assert_eq!(failed.unit, UnitState::NotStarted);
+    assert!(scenario.entries().is_empty());
+    Ok(())
+}
+
+/// Run a Local attempt on a network that counts its teardowns, with `fault`
+/// injected into the barrier, and return how many namespaces were torn down.
+async fn teardowns(
+    configure: impl FnOnce(&mut Scenario),
+    network_attempt: [u8; 16],
+) -> TestResult<(usize, ExecuteFailure)> {
+    let torn_down = Arc::new(AtomicUsize::new(0));
+    let network = TornDownNetwork {
+        torn_down: Arc::clone(&torn_down),
+    };
+    let (_, mode) = local_plan(UNUSED_ENDPOINT)?;
+    let mut scenario = Scenario::new()?;
+    configure(&mut scenario);
+    let job = scenario.job(
+        network_attempt,
+        SandboxExecutionMode::Local,
+        mode,
+        GENEROUS_WATCHDOG_MS,
+    )?;
+    let recheck = root_for(&scenario.log, ATTEMPT);
+    let outcome = scenario.run_on(&network, job, recheck).await;
+    Ok((torn_down.load(Ordering::SeqCst), failure(outcome)?))
+}
+
+#[tokio::test]
+async fn the_namespace_is_torn_down_when_the_unit_end_cannot_be_taken() -> TestResult {
+    let (torn_down, failed) =
+        teardowns(|scenario| scenario.barrier.fail_take = true, ATTEMPT).await?;
+    assert!(matches!(failed.error, ExecuteError::Barrier(_)));
+    assert_eq!(failed.unit, UnitState::NotStarted);
+    assert_eq!(torn_down, 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_namespace_is_torn_down_when_the_recheck_fails() -> TestResult {
+    let torn_down = Arc::new(AtomicUsize::new(0));
+    let network = TornDownNetwork {
+        torn_down: Arc::clone(&torn_down),
+    };
+    let (_, mode) = local_plan(UNUSED_ENDPOINT)?;
+    let mut scenario = Scenario::new()?;
+    let job = scenario.job(
+        ATTEMPT,
+        SandboxExecutionMode::Local,
+        mode,
+        GENEROUS_WATCHDOG_MS,
+    )?;
+    let outcome = scenario
+        .run_on(&network, job, || {
+            Err(ImageActivationError::EvidenceMismatch)
+        })
+        .await;
+    assert!(matches!(
+        failure(outcome)?.error,
+        ExecuteError::Recheck(ImageActivationError::EvidenceMismatch)
+    ));
+    assert_eq!(torn_down.load(Ordering::SeqCst), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_namespace_is_torn_down_when_the_release_is_refused() -> TestResult {
+    let (torn_down, failed) =
+        teardowns(|scenario| scenario.barrier.fail_release = true, ATTEMPT).await?;
+    assert!(matches!(failed.error, ExecuteError::Barrier(_)));
     assert_eq!(failed.unit, UnitState::Killed);
-    assert_eq!(scenario.cgroup_kills(), 1);
+    assert_eq!(torn_down, 1);
     Ok(())
 }
 
@@ -1002,9 +1304,13 @@ impl pos_reference::sandbox_provider_protocol::NetworkEndpointConnector for Pani
 
 impl LocalNetworkPort for PanickingNetwork {
     type Connector = PanickingConnector;
+    type Error = Injected;
 
-    fn establish(&self, attempt_id: [u8; 16]) -> EstablishedNetwork<PanickingConnector> {
-        EstablishedNetwork::new(attempt_id, PanickingConnector)
+    fn establish(
+        &self,
+        attempt_id: [u8; 16],
+    ) -> Result<EstablishedNetwork<PanickingConnector>, Injected> {
+        Ok(EstablishedNetwork::new(attempt_id, PanickingConnector))
     }
 }
 

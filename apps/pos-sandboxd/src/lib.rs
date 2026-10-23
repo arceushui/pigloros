@@ -45,7 +45,8 @@ pub use attempt::{ActiveAttempt, AdmittedAttempt};
 #[cfg(target_os = "linux")]
 pub use execute::{
     execute, AttemptEnding, AttemptExecution, ExecuteError, ExecuteFailure, ExecuteJob,
-    LaunchBarrier, ModePlan, NetworkEvidence, ReplayRequest, UnitCgroup, UnitHost, UnitState,
+    LaunchBarrier, ModePlan, NetworkEvidence, ReplayRequest, UnitCgroup, UnitHost, UnitKiller,
+    UnitState,
 };
 #[cfg(target_os = "linux")]
 pub use local_network::{

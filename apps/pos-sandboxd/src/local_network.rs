@@ -16,6 +16,7 @@
 //! outbound connection, so a Local attempt that plans an exchange ends as
 //! unavailable rather than reaching the host network.
 
+use std::error::Error;
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpStream};
 use std::os::fd::{AsFd, BorrowedFd};
@@ -29,7 +30,7 @@ use pos_reference::sandbox_provider_protocol::{
 };
 use zvariant::OwnedFd;
 
-use crate::ActiveAttempt;
+use crate::{ActiveAttempt, AdmittedAttempt};
 
 /// The provider end of one attempt's FD 3 socket pair.
 ///
@@ -86,12 +87,30 @@ impl<C> EstablishedNetwork<C> {
 /// An implementation creates the namespace, veth pair and default-drop
 /// nftables rules for the attempt and reads them back before it returns. The
 /// connector it hands out must honour the timeout it is given.
+///
+/// Teardown is RAII: the returned [`EstablishedNetwork`], and the connector
+/// inside it, own the namespace, and dropping them removes it. The execute
+/// path establishes the network before the recheck and before the unit
+/// starts, so it drops the handle on every path that does not serve it: a
+/// refused admission, a failed `take_unit_end`, a failed recheck, a failed
+/// start, a refused release and a finished attempt. An implementation must
+/// therefore make its `Drop` (or its connector's) tear the namespace down, and
+/// must not rely on the caller to do it.
 pub trait LocalNetworkPort {
     /// The connector that operates inside the established namespace.
     type Connector: NetworkEndpointConnector + Send + 'static;
+    /// Why a namespace could not be established or read back.
+    type Error: Error + Send + Sync + 'static;
 
     /// Establish and read back the namespace of `attempt_id`.
-    fn establish(&self, attempt_id: [u8; 16]) -> EstablishedNetwork<Self::Connector>;
+    ///
+    /// # Errors
+    /// Fails, leaving nothing behind, if the namespace, veth pair or firewall
+    /// cannot be created or read back.
+    fn establish(
+        &self,
+        attempt_id: [u8; 16],
+    ) -> Result<EstablishedNetwork<Self::Connector>, Self::Error>;
 }
 
 /// The Local network adapter until a real namespace exists.
@@ -103,9 +122,13 @@ pub struct FailClosedLocalNetwork;
 
 impl LocalNetworkPort for FailClosedLocalNetwork {
     type Connector = RefusingConnector;
+    type Error = std::convert::Infallible;
 
-    fn establish(&self, attempt_id: [u8; 16]) -> EstablishedNetwork<RefusingConnector> {
-        EstablishedNetwork::new(attempt_id, RefusingConnector)
+    fn establish(
+        &self,
+        attempt_id: [u8; 16],
+    ) -> Result<EstablishedNetwork<RefusingConnector>, std::convert::Infallible> {
+        Ok(EstablishedNetwork::new(attempt_id, RefusingConnector))
     }
 }
 
@@ -137,21 +160,23 @@ pub enum LocalProxyBindError {
     Channel,
 }
 
-impl ActiveAttempt {
-    /// Bind `admission`, `network` and `channel` to this active attempt.
+impl AdmittedAttempt {
+    /// Check that `admission`, `network` and `channel` belong to this attempt.
     ///
-    /// The binding is the only value the provider serves with `serve_proxy`.
-    /// The connector of the bound namespace is returned beside it.
+    /// The execute path runs this before the unit is submitted, so an
+    /// admission of another attempt, SIM1, authority head or epoch never
+    /// starts a unit; [`ActiveAttempt`] runs it again when it mints the
+    /// binding.
     ///
     /// # Errors
     /// Rejects an admission whose grant names another attempt, SIM1, authority
     /// head or epoch, and a namespace or channel created for another attempt.
-    pub(crate) fn bind_local_proxy<C>(
+    pub(crate) fn check_local<C>(
         &self,
-        admission: LocalNetworkAdmission,
-        network: EstablishedNetwork<C>,
-        channel: HostServiceChannel,
-    ) -> Result<(BoundLocalProxy, C), LocalProxyBindError> {
+        admission: &LocalNetworkAdmission,
+        network: &EstablishedNetwork<C>,
+        channel: &HostServiceChannel,
+    ) -> Result<(), LocalProxyBindError> {
         let grant = admission.grant();
         let authority = self.authority();
         if grant.attempt_id != self.attempt_id() {
@@ -173,13 +198,35 @@ impl ActiveAttempt {
         if channel.attempt_id != self.attempt_id() {
             return Err(LocalProxyBindError::Channel);
         }
-        Ok((
-            BoundLocalProxy {
-                admission,
-                channel: HostServiceStream(Arc::new(channel.provider)),
-            },
-            network.connector,
-        ))
+        Ok(())
+    }
+}
+
+impl ActiveAttempt {
+    /// Bind `admission`, `network` and `channel` to this active attempt.
+    ///
+    /// The binding is the only value the provider serves with `serve_proxy`.
+    /// The connector of the bound namespace is returned beside it.
+    ///
+    /// # Errors
+    /// Rejects what [`AdmittedAttempt::check_local`] rejects.
+    pub(crate) fn bind_local_proxy<C>(
+        &self,
+        admission: LocalNetworkAdmission,
+        network: EstablishedNetwork<C>,
+        channel: HostServiceChannel,
+    ) -> Result<(BoundLocalProxy, C), LocalProxyBindError> {
+        self.admitted()
+            .check_local(&admission, &network, &channel)
+            .map(|()| {
+                (
+                    BoundLocalProxy {
+                        admission,
+                        channel: HostServiceStream(Arc::new(channel.provider)),
+                    },
+                    network.connector,
+                )
+            })
     }
 }
 

@@ -102,8 +102,13 @@ verified root is rechecked last, immediately before `StartTransientUnit`, and
 must be the attempt's own root. After the typed unit is started and verified,
 its cgroup is bound and an `ActiveAttempt` is recorded; the launcher barrier
 (`LaunchBarrier`) then releases the adapter exactly once. Any failure after
-the unit was submitted kills it. The unit host, the barrier and the Local
-network are ports, so the composition is exercised without systemd.
+the unit was submitted kills it, every host call is bounded by the attempt
+watchdog, and dropping the execution future after the submission spawns a
+best-effort kill of the unit. A Local admission, namespace or channel of another
+attempt, SIM1, head or epoch is refused before anything is submitted. The Local
+network port owns its namespace by RAII: the execute path drops it on every
+path that does not serve it. The unit host, the barrier and the Local network
+are ports, so the composition is exercised without systemd.
 
 - Local: the FD 3 socket pair is created with the attempt, and
   `piglor-host-service-v1` precedes `piglor-release-v1`. `ActiveAttempt` is the
