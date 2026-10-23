@@ -134,10 +134,10 @@ fn an_adopted_release_channel_from_a_non_root_peer_is_refused() -> TestResult {
         None,
     )?;
     drop(provider);
-    // Every inherited descriptor above 3 (for example the test runner's) is
-    // closed first, so the layout check sees exactly the release channel.
+    // Inherited descriptors 4 to 9 (for example the test runner's) are
+    // closed first, so the layout check sees only the release channel.
     let script = r#"exec 3<&0 0</dev/null
-fd=4; while [ "$fd" -lt 64 ]; do eval "exec $fd>&-" 2>/dev/null; fd=$((fd + 1)); done
+exec 4>&- 5>&- 6>&- 7>&- 8>&- 9>&-
 LISTEN_PID=$$ LISTEN_FDS=1 LISTEN_FDNAMES=piglor-release-v1 \
 INVOCATION_ID=0123456789abcdef0123456789abcdef exec "$0" launch-barrier "$1""#;
     let output = Command::new("sh")
