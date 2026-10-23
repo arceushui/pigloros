@@ -39,12 +39,12 @@ use pos_reference::sandbox_provider_protocol::{
 };
 use zvariant::OwnedFd;
 
-use crate::local_network::CheckedLocal;
 use crate::{
-    ActivatedRootDirectory, ActiveAttempt, AdmittedAttempt, BoundLocalProxy, CheckedRoot,
-    HostServiceChannel, ImageActivationError, LaunchMode, LauncherSource, LocalNetworkPort,
-    LocalProxyBindError, ServeError, ServedProxy, SystemCallFilter, SystemdServiceLimits,
-    TransientServiceUnitName, TransientUnitLaunchInputs, TransientUnitRequest,
+    ActivatedRootDirectory, ActiveAttempt, AdmittedAttempt, BoundLocalProxy, CheckedLocal,
+    CheckedRoot, HostServiceChannel, ImageActivationError, LaunchMode, LauncherSource,
+    LocalNetworkPort, LocalProxyBindError, ServeError, ServedProxy, SystemCallFilter,
+    SystemdServiceLimits, TransientServiceUnitName, TransientUnitLaunchInputs,
+    TransientUnitRequest,
 };
 
 /// How often the attempt cgroup is polled for emptiness.

@@ -165,9 +165,10 @@ pub enum LocalProxyBindError {
 ///
 /// Only [`AdmittedAttempt::check_local`] makes one, so holding it proves the
 /// check ran. The execute path makes it before the unit is submitted, so a bad
-/// admission never starts a unit, and binds it once the unit is active.
+/// admission never starts a unit, and binds it once the unit is active. It has
+/// no public constructor.
 #[derive(Debug)]
-pub(crate) struct CheckedLocal<C> {
+pub struct CheckedLocal<C> {
     admission: LocalNetworkAdmission,
     network: EstablishedNetwork<C>,
     channel: HostServiceChannel,

@@ -119,10 +119,6 @@ impl ActiveAttempt {
         Self { admitted, deadline }
     }
 
-    pub(crate) const fn admitted(&self) -> &AdmittedAttempt {
-        &self.admitted
-    }
-
     /// The attempt identity.
     #[must_use]
     pub const fn attempt_id(&self) -> [u8; 16] {

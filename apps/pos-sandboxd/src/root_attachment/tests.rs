@@ -1193,7 +1193,7 @@ fn a_recheck_consults_nothing_for_an_admission_it_was_not_activated_from() -> Te
     let expected = expected(&component(&tree.prepared));
     let kernel = FakeKernel::accepting(matching(&expected));
     let verified = attach_and_verify(&kernel, &tree.prepared, &expected, file_mount()?, || Ok(()))?;
-    let mut other = expected.clone();
+    let mut other = expected;
     other.executable_digest[0] ^= 1;
     let consulted = std::cell::Cell::new(false);
     for candidate in [Some(&other), None] {
