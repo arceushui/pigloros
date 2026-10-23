@@ -21,7 +21,7 @@ permissions: read-all
 jobs:
   trunk_check:
     name: Trunk Code Quality
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Full scheduled/main checks may inspect the whole repository; allow the
     # hosted job enough time to finish without changing the PR diff gate.
     timeout-minutes: 60
