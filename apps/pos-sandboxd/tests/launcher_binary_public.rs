@@ -138,6 +138,7 @@ fn an_adopted_release_channel_from_a_non_root_peer_is_refused() -> TestResult {
     // closed first, so the layout check sees only the release channel.
     let script = r#"exec 3<&0 0</dev/null
 exec 4>&- 5>&- 6>&- 7>&- 8>&- 9>&-
+ls -l /proc/$$/fd >&2
 LISTEN_PID=$$ LISTEN_FDS=1 LISTEN_FDNAMES=piglor-release-v1 \
 INVOCATION_ID=0123456789abcdef0123456789abcdef exec "$0" launch-barrier "$1""#;
     let output = Command::new("sh")
