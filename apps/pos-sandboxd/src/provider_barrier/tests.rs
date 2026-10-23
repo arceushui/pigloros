@@ -67,11 +67,11 @@ impl UnitIdentitySource for TestIdentity {
         async move { outcome }
     }
 
-    fn invocation_id(
+    async fn invocation_id(
         &self,
         _unit_name: &TransientServiceUnitName,
-    ) -> impl Future<Output = Result<[u8; 16], IdentityDown>> + Send {
-        async move { Ok(INVOCATION) }
+    ) -> Result<[u8; 16], IdentityDown> {
+        Ok(INVOCATION)
     }
 }
 
@@ -215,8 +215,8 @@ fn monotonic_ns() -> u64 {
         + u64::try_from(now.tv_nsec).unwrap_or_default()
 }
 
-fn check_release(barrier: &TestBarrier, received: Option<ExecutionRelease>) -> TestResult {
-    let sent = barrier.sent_release().cloned();
+fn check_release(barrier: &TestBarrier, received: Option<&ExecutionRelease>) -> TestResult {
+    let sent = barrier.sent_release();
     assert_eq!(received, sent);
     let release = sent.ok_or("no release was sent")?;
     let fields = &release.fields;
@@ -254,7 +254,7 @@ async fn released() -> TestResult<(TestBarrier, Option<ExecutionRelease>)> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_valid_ready_is_released_once_with_the_admitted_bindings() -> TestResult {
     let (barrier, received) = released().await?;
-    check_release(&barrier, received.clone())?;
+    check_release(&barrier, received.as_ref())?;
     check_authority(&received.ok_or("no release received")?);
     Ok(())
 }

@@ -27,6 +27,9 @@ use crate::{
 const X86_64: &[u8] = include_bytes!(
     "../../../../crates/pos-conformance/vectors/systemd-provider-v260.2/systemd-v260.2-x86_64.scs1.cbor"
 );
+type ExecCommands = Vec<(String, Vec<String>, bool)>;
+type ExecStartRecord = (String, Vec<String>, bool, u64, u64, u64, u64, u32, i32, i32);
+
 const MANAGER_PATH: &str = "/org/freedesktop/systemd1";
 const JOB_PATH: &str = "/org/freedesktop/systemd1/job/381";
 const STOP_JOB_PATH: &str = "/org/freedesktop/systemd1/job/382";
@@ -431,7 +434,7 @@ struct RecordingService {
     root_directory: String,
     service_limits: [u64; 7],
     temporary_file_system: Vec<(String, String)>,
-    exec_start: Vec<(String, Vec<String>, bool)>,
+    exec_start: ExecCommands,
     main_pid: u32,
     invocation_id: Vec<u8>,
     failing_identity: Vec<&'static str>,
@@ -752,7 +755,7 @@ impl RecordingService {
     }
 
     #[zbus(property, name = "ExecStart")]
-    fn exec_start(&self) -> Vec<(String, Vec<String>, bool, u64, u64, u64, u64, u32, i32, i32)> {
+    fn exec_start(&self) -> Vec<ExecStartRecord> {
         self.record_read();
         self.exec_start
             .iter()
@@ -1755,7 +1758,7 @@ async fn transport(
 }
 
 /// The `ExecStart=` command the fixture request asks for.
-fn expected_exec_start() -> Result<Vec<(String, Vec<String>, bool)>, Box<dyn Error>> {
+fn expected_exec_start() -> Result<ExecCommands, Box<dyn Error>> {
     let request = request(LaunchMode::AirGapped)?;
     Ok(request
         .requested_properties()

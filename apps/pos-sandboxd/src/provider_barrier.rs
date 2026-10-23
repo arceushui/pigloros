@@ -407,7 +407,7 @@ where
         Ok(())
     }
 
-    fn expected(&self, invocation: [u8; 16], launcher: FdIdentity) -> ExpectedLauncherReady {
+    const fn expected(&self, invocation: [u8; 16], launcher: FdIdentity) -> ExpectedLauncherReady {
         ExpectedLauncherReady {
             attempt_id: self.parameters.attempt_id,
             nonce: self.parameters.nonce,

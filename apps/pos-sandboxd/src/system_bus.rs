@@ -545,10 +545,8 @@ impl SystemdTransientUnitTransport {
         let manager = ManagerProxy::new(&self.connection)
             .await
             .map_err(SystemdTransientUnitTransportError::Proxy)?;
-        manager
-            .get_unit(unit_name.as_str().to_owned())
-            .await
-            .map_err(SystemdTransientUnitTransportError::UnitLookup)
+        let looked_up = manager.get_unit(unit_name.as_str().to_owned()).await;
+        looked_up.map_err(SystemdTransientUnitTransportError::UnitLookup)
     }
 
     /// The unit's current `MainPID`, read fresh from the manager.
@@ -564,12 +562,13 @@ impl SystemdTransientUnitTransport {
             .build()
             .await
             .map_err(SystemdTransientUnitTransportError::ServiceProxy)?;
-        service.main_pid().await.map_err(|source| {
-            SystemdTransientUnitTransportError::PropertyReadback {
+        let main_pid = service.main_pid().await;
+        main_pid.map_err(
+            |source| SystemdTransientUnitTransportError::PropertyReadback {
                 property: "MainPID",
                 source: Box::new(source),
-            }
-        })
+            },
+        )
     }
 
     /// The unit's current `InvocationID`, read fresh from the manager.
@@ -585,7 +584,8 @@ impl SystemdTransientUnitTransport {
             .build()
             .await
             .map_err(SystemdTransientUnitTransportError::ServiceProxy)?;
-        let raw = unit.invocation_id().await.map_err(|source| {
+        let invocation_id = unit.invocation_id().await;
+        let raw = invocation_id.map_err(|source| {
             SystemdTransientUnitTransportError::PropertyReadback {
                 property: "InvocationID",
                 source: Box::new(source),
