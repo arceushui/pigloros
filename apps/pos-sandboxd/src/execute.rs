@@ -471,28 +471,7 @@ where
     };
     let deadline = bounds.deadline;
     guard.arm(host.killer(), unit.clone(), bounds.call);
-    let started = match until(deadline, host.start(unit.clone(), request)).await {
-        Some(Ok(started)) => started,
-        Some(Err(error)) => {
-            let error = ExecuteError::Unit(Box::new(error));
-            return Err(abort(host, &unit, None, error, Submission::Unconfirmed, bounds).await);
-        }
-        None => {
-            let error = ExecuteError::HostTimeout;
-            return Err(abort(host, &unit, None, error, Submission::Unconfirmed, bounds).await);
-        }
-    };
-    let mut cgroup = match until(deadline, host.bind_cgroup(&started)).await {
-        Some(Ok(cgroup)) => cgroup,
-        Some(Err(error)) => {
-            let error = ExecuteError::Cgroup(Box::new(error));
-            return Err(abort(host, &unit, None, error, Submission::Confirmed, bounds).await);
-        }
-        None => {
-            let error = ExecuteError::HostTimeout;
-            return Err(abort(host, &unit, None, error, Submission::Confirmed, bounds).await);
-        }
-    };
+    let (started, mut cgroup) = submit(host, &unit, request, bounds).await?;
     let attempt_id = attempt.attempt_id();
     let active = ActiveAttempt::record(attempt, deadline);
     let bound = match bind_planned(&active, planned) {
@@ -555,6 +534,42 @@ where
         ending,
         network,
     })
+}
+
+/// Submit the unit and bind its cgroup, both before the attempt deadline. A
+/// failure of either kills the unit.
+async fn submit<H>(
+    host: &H,
+    unit: &TransientServiceUnitName,
+    request: TransientUnitRequest,
+    bounds: Bounds,
+) -> Result<(H::Started, H::Cgroup), ExecuteFailure>
+where
+    H: UnitHost + Sync,
+{
+    let started = match until(bounds.deadline, host.start(unit.clone(), request)).await {
+        Some(Ok(started)) => started,
+        Some(Err(error)) => {
+            let error = ExecuteError::Unit(Box::new(error));
+            return Err(abort(host, unit, None, error, Submission::Unconfirmed, bounds).await);
+        }
+        None => {
+            let error = ExecuteError::HostTimeout;
+            return Err(abort(host, unit, None, error, Submission::Unconfirmed, bounds).await);
+        }
+    };
+    let bound = until(bounds.deadline, host.bind_cgroup(&started)).await;
+    match bound {
+        Some(Ok(cgroup)) => Ok((started, cgroup)),
+        Some(Err(error)) => {
+            let error = ExecuteError::Cgroup(Box::new(error));
+            Err(abort(host, unit, None, error, Submission::Confirmed, bounds).await)
+        }
+        None => {
+            let error = ExecuteError::HostTimeout;
+            Err(abort(host, unit, None, error, Submission::Confirmed, bounds).await)
+        }
+    }
 }
 
 /// Await `future` until `deadline`; `None` if it did not finish by then.

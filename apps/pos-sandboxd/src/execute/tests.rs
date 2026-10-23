@@ -847,7 +847,7 @@ async fn an_unavailable_replay_capture_stops_before_the_launcher() -> TestResult
         .run(SandboxExecutionMode::Replay, ModePlan::Replay { exchanges })
         .await?;
     let failed = failure(outcome)?;
-    assert!(matches!(failed.error, ExecuteError::ReplayUnavailable));
+    assert!(matches!(failed.error, ExecuteError::ReplayUnavailable(_)));
     assert_eq!(failed.unit, UnitState::NotStarted);
     assert!(scenario.entries().is_empty());
     Ok(())
