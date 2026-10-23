@@ -121,8 +121,8 @@ fn a_launch_for_another_pid_is_refused() -> TestResult {
     Ok(())
 }
 
-/// Start the launcher through `sh` so `LISTEN_PID` can name the launcher's own
-/// pid (`sh` execs the binary and keeps its pid) and the release socket is
+/// Start the launcher through `bash` so `LISTEN_PID` can name the launcher's own
+/// pid (`bash` execs the binary and keeps its pid) and the release socket is
 /// descriptor 3. The provider end is closed first, so the launch can never
 /// block, and it is not root, so the peer check or an earlier check refuses.
 #[test]
@@ -134,14 +134,17 @@ fn an_adopted_release_channel_from_a_non_root_peer_is_refused() -> TestResult {
         None,
     )?;
     drop(provider);
-    // Inherited descriptors 4 to 9 (for example the test runner's) are
-    // closed first, so the layout check sees only the release channel.
+    // Every inherited descriptor above 3 (the test runner's pipes, for
+    // example) is closed first, so the layout check sees only the release
+    // channel. Bash is used because dash cannot close descriptors above 9.
     let script = r#"exec 3<&0 0</dev/null
-exec 4>&- 5>&- 6>&- 7>&- 8>&- 9>&-
-ls -l /proc/$$/fd >&2
+for entry in /proc/$$/fd/*; do
+  number=${entry##*/}
+  if [ "$number" -gt 3 ]; then eval "exec $number>&-" 2>/dev/null; fi
+done
 LISTEN_PID=$$ LISTEN_FDS=1 LISTEN_FDNAMES=piglor-release-v1 \
 INVOCATION_ID=0123456789abcdef0123456789abcdef exec "$0" launch-barrier "$1""#;
-    let output = Command::new("sh")
+    let output = Command::new("bash")
         .arg("-c")
         .arg(script)
         .arg(BINARY)
