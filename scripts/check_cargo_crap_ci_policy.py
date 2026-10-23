@@ -300,7 +300,7 @@ def check_workflow(
         job.get("if") == SCOPED_CARGO_CRAP_JOB_IF,
         "cargo-crap must skip documentation-only pull requests",
     )
-    require(job.get("runs-on") == "ubuntu-latest", "cargo-crap runner changed")
+    require(job.get("runs-on") == "ubuntu-24.04", "cargo-crap runner changed")
     require(job.get("timeout-minutes") == 10, "cargo-crap timeout changed")
     steps = job.get("steps")
     require(isinstance(steps, list), "cargo-crap steps must be an array")

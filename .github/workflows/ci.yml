@@ -66,7 +66,7 @@ jobs:
 
   ci_change_scope:
     name: ci change scope
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: read
@@ -105,7 +105,7 @@ jobs:
     name: Trunk Code Quality
     needs: ci_change_scope
     if: ${{ github.event_name == 'pull_request' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       checks: write
@@ -128,7 +128,7 @@ jobs:
       - conformance-non-linux
       - plugin-component-fixtures
       - third-party-notices
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Require fast preflight checks
@@ -169,7 +169,7 @@ jobs:
     # !cancelled() prevents that optional ancestor from propagating a skip here;
     # the explicit result check still stops the stage after a failed preflight.
     if: ${{ !cancelled() && needs.preflight-gate.result == 'success' && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -191,7 +191,7 @@ jobs:
       ${{ !cancelled() && needs.ci_change_scope.result == 'success' &&
       needs.cargo-crap.result == 'success' &&
       (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -210,7 +210,7 @@ jobs:
     name: feature-matrix
     needs: [ci_change_scope, preflight-gate]
     if: ${{ !cancelled() && needs.preflight-gate.result == 'success' && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -240,7 +240,7 @@ jobs:
     name: test
     needs: [ci_change_scope, preflight-gate]
     if: ${{ !cancelled() && needs.preflight-gate.result == 'success' && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
       # Coverage and ASan already build tests with line tables. They keep
@@ -276,7 +276,7 @@ jobs:
     name: test shard (${{ matrix.shard }}/3)
     needs: [ci_change_scope, preflight-gate]
     if: ${{ !cancelled() && needs.preflight-gate.result == 'success' && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
@@ -325,7 +325,7 @@ jobs:
     name: test-shards
     needs: [test-shard]
     if: ${{ !cancelled() && needs.test-shard.result == 'success' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -354,7 +354,7 @@ jobs:
       ${{ !cancelled() && needs.ci_change_scope.result == 'success' &&
       needs.cargo-crap.result == 'success' &&
       (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -615,7 +615,7 @@ jobs:
     name: clippy
     needs: [ci_change_scope, preflight-gate]
     if: ${{ !cancelled() && needs.preflight-gate.result == 'success' && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -642,7 +642,7 @@ jobs:
     name: coverage
     needs: [ci_change_scope, preflight-gate]
     if: ${{ !cancelled() && needs.preflight-gate.result == 'success' && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
       RUSTC_BOOTSTRAP: "1"
@@ -741,7 +741,7 @@ jobs:
       - test-shards
       - clippy
       - coverage
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Require fmt, feature matrix, doctests, test shards, clippy, and coverage
@@ -779,7 +779,7 @@ jobs:
     # The push-only Trunk skip is an accepted preflight ancestor. Evaluate the
     # explicit direct dependencies instead of inheriting that skipped state.
     if: ${{ !cancelled() && needs.core-gate.result == 'success' && needs.coverage.result == 'success' && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -922,7 +922,7 @@ jobs:
       ${{ !cancelled() && needs.ci_change_scope.result == 'success' &&
       needs.cargo-crap.result == 'success' &&
       (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -981,7 +981,7 @@ jobs:
     if: ${{ always() }}
     needs:
       - codeql
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Report the required CodeQL status
@@ -1212,7 +1212,7 @@ jobs:
       ${{ !cancelled() && needs.ci_change_scope.result == 'success' &&
       needs.cargo-crap.result == 'success' &&
       (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1253,7 +1253,7 @@ jobs:
       ${{ !cancelled() && needs.ci_change_scope.result == 'success' &&
       needs.cargo-crap.result == 'success' &&
       (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1279,7 +1279,7 @@ jobs:
       ${{ !cancelled() && needs.ci_change_scope.result == 'success' &&
       needs.world-client-wasm.result == 'success' &&
       (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1325,7 +1325,7 @@ jobs:
       - world-client-wasm
       - world-client-browser-parity
       - asan-build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Require normal blocking checks
@@ -1377,7 +1377,7 @@ jobs:
     needs:
       - ci_change_scope
       - mutation-checks
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Report the required mutation status
@@ -1398,7 +1398,7 @@ jobs:
     name: pinned-dependencies
     needs: ci_change_scope
     if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1492,7 +1492,7 @@ jobs:
     name: modules-structure (reports only)
     needs: standard-gate
     if: ${{ github.event_name != 'pull_request' && needs.standard-gate.result == 'success' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1530,7 +1530,7 @@ jobs:
     name: depgraph
     needs: standard-gate
     if: ${{ github.event_name != 'pull_request' && needs.standard-gate.result == 'success' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1567,7 +1567,7 @@ jobs:
       - standard-gate
       - mutation-checks
       - asan-gate
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Require every blocking CI job to pass
