@@ -1035,16 +1035,26 @@ async fn a_dropped_execution_kills_the_submitted_unit() -> TestResult {
     Ok(())
 }
 
+fn guard_kills(scenario: &Scenario) -> bool {
+    scenario.entries().iter().any(|entry| entry == "guard_kill")
+}
+
 #[tokio::test]
 async fn a_finished_execution_leaves_nothing_for_the_guard() -> TestResult {
     let mut scenario = Scenario::new()?;
     scenario.air_gapped().await??;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!guard_kills(&scenario));
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_refused_execution_leaves_nothing_for_the_guard() -> TestResult {
     let mut refused = Scenario::new()?;
     refused.barrier.fail_release = true;
     refused.fails().await?;
     tokio::time::sleep(Duration::from_millis(100)).await;
-    assert!(!scenario.entries().iter().any(|entry| entry == "guard_kill"));
-    assert!(!refused.entries().iter().any(|entry| entry == "guard_kill"));
+    assert!(!guard_kills(&refused));
     Ok(())
 }
 
