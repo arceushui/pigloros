@@ -26,7 +26,7 @@ env:
 jobs:
   mutation-changes:
     name: detect mutation-relevant changes
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       relevant: ${{ steps.changes.outputs.relevant }}
     steps:
@@ -60,7 +60,7 @@ jobs:
     name: mutation test baseline
     needs: mutation-changes
     if: needs.mutation-changes.outputs.relevant == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # The baseline builds one workspace with three compiler jobs;
     # mutant workers retain the single-job workflow default above.
     env:
@@ -98,7 +98,7 @@ jobs:
     name: diff mutation testing (shard ${{ matrix.shard }})
     needs: [mutation-changes, mutation-baseline]
     if: needs.mutation-changes.outputs.relevant == 'true' && needs.mutation-baseline.result == 'success'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # The shell watchdog below exits with diagnostics before this outer limit.
     timeout-minutes: 70
     strategy:
@@ -190,7 +190,7 @@ jobs:
     name: diff mutation testing
     if: always()
     needs: [mutation-changes, mutation-baseline, mutation]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Require every relevant mutation shard to pass
         run: |
