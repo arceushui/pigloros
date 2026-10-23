@@ -50,7 +50,7 @@ pub use execute::{
 };
 #[cfg(target_os = "linux")]
 pub use local_network::{
-    BoundLocalProxy, EstablishedNetwork, FailClosedLocalNetwork, HostServiceChannel,
+    BoundLocalProxy, CheckedLocal, EstablishedNetwork, FailClosedLocalNetwork, HostServiceChannel,
     HostServiceStream, LocalNetworkPort, LocalProxyBindError, RefusingConnector, ServeError,
     ServedProxy,
 };
