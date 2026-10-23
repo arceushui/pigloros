@@ -2,7 +2,9 @@
 
 use std::time::Duration;
 
-use pos_reference::sandbox_provider_protocol::SandboxLimit;
+use pos_reference::sandbox_provider_protocol::{
+    LaunchParameters, SandboxLimit, SandboxProviderProtocolError,
+};
 use zvariant::{Fd, OwnedFd};
 
 use crate::{
@@ -16,6 +18,8 @@ const LAUNCHER_DESTINATION: &str = "/.pigloros/release-launcher";
 const RELEASE_DESCRIPTOR_NAME: &str = "piglor-release-v1";
 const HOST_SERVICE_DESCRIPTOR_NAME: &str = "piglor-host-service-v1";
 const ELM1_LIMIT_COUNT: usize = 17;
+/// The one launcher-mode argument (`crate::launcher::LAUNCH_BARRIER_MODE`).
+const LAUNCH_BARRIER_ARGUMENT: &str = "launch-barrier";
 /// ELM1 limit 9 (`WorkBytes`) sizes the one optional writable mount.
 const WORK_BYTES_LIMIT_ID: usize = 9;
 /// The sole writable mount point (ADR-069 section 6).
@@ -218,6 +222,51 @@ pub struct TransientUnitLaunchInputs {
     launcher_source: LauncherSource,
     mode: LaunchMode,
     release: OwnedFd,
+    invocation: LauncherInvocation,
+}
+
+/// The launcher-mode command the unit runs: `<launcher> launch-barrier
+/// <lpv1-hex>` with the exact LPV1 launch parameters (ADR-069 "Trusted
+/// launcher and trust binding").
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LauncherInvocation {
+    lpv1_hex: String,
+}
+
+impl LauncherInvocation {
+    /// Encode `parameters` as the single hexadecimal launcher argument.
+    ///
+    /// # Errors
+    /// Returns a protocol error if the record cannot be serialized.
+    pub fn from_parameters(
+        parameters: &LaunchParameters,
+    ) -> Result<Self, SandboxProviderProtocolError> {
+        parameters.to_canonical_cbor().map(|bytes| Self {
+            lpv1_hex: lower_hex(&bytes),
+        })
+    }
+
+    /// The `ExecStart=` value: the bind-mounted launcher, its argument vector
+    /// and no failure tolerance.
+    fn exec_start(&self) -> Vec<(String, Vec<String>, bool)> {
+        vec![(
+            LAUNCHER_DESTINATION.to_owned(),
+            vec![
+                LAUNCHER_DESTINATION.to_owned(),
+                LAUNCH_BARRIER_ARGUMENT.to_owned(),
+                self.lpv1_hex.clone(),
+            ],
+            false,
+        )]
+    }
+}
+
+fn lower_hex(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .flat_map(|byte| [byte >> 4, byte & 0x0f])
+        .map(|nibble| char::from_digit(u32::from(nibble), 16).unwrap_or('0'))
+        .collect()
 }
 
 /// The verified attempt root, rechecked immediately before launch (ADR-087
@@ -261,12 +310,14 @@ impl TransientUnitLaunchInputs {
         launcher_source: LauncherSource,
         mode: LaunchMode,
         release: OwnedFd,
+        invocation: LauncherInvocation,
     ) -> Self {
         Self {
             root_directory: root.root_directory,
             launcher_source,
             mode,
             release,
+            invocation,
         }
     }
 }
@@ -308,6 +359,8 @@ pub enum SystemdTransientUnitValue {
     ExtraFileDescriptors(Vec<(OwnedFd, String)>),
     /// A D-Bus `a(ss)` array of tmpfs mount path and mount options.
     TemporaryFileSystem(Vec<(String, String)>),
+    /// A D-Bus `a(sasb)` command list: path, argument vector, ignore-failure.
+    ExecStart(Vec<(String, Vec<String>, bool)>),
 }
 
 impl SystemdTransientUnitValue {
@@ -335,6 +388,9 @@ impl SystemdTransientUnitValue {
                 Self::TemporaryFileSystem(expected),
                 SystemdTransientUnitReadbackValue::TemporaryFileSystem(actual),
             ) => expected == actual,
+            (Self::ExecStart(expected), SystemdTransientUnitReadbackValue::ExecStart(actual)) => {
+                expected == actual
+            }
             _ => false,
         }
     }
@@ -344,6 +400,7 @@ impl SystemdTransientUnitValue {
         match self {
             Self::BindReadOnlyPaths(_) => "a(ssbt)",
             Self::ExtraFileDescriptors(_) => "a(hs)",
+            Self::ExecStart(_) => "a(sasb)",
             _ => "a(ss)",
         }
     }
@@ -360,7 +417,16 @@ impl SystemdTransientUnitValue {
             Self::ExtraFileDescriptors(value) => {
                 clone_descriptors(value).map(Self::ExtraFileDescriptors)
             }
-            Self::TemporaryFileSystem(value) => Ok(Self::TemporaryFileSystem(value.clone())),
+            lists => lists.clone_lists().ok_or(zvariant::Error::IncorrectType),
+        }
+    }
+
+    /// Clone the list-valued kinds that carry no descriptor.
+    fn clone_lists(&self) -> Option<Self> {
+        match self {
+            Self::TemporaryFileSystem(value) => Some(Self::TemporaryFileSystem(value.clone())),
+            Self::ExecStart(value) => Some(Self::ExecStart(value.clone())),
+            _ => None,
         }
     }
 }
@@ -554,6 +620,9 @@ pub enum SystemdTransientUnitReadbackValue {
     StringArray(Vec<String>),
     /// A D-Bus `a(ss)` value.
     TemporaryFileSystem(Vec<(String, String)>),
+    /// The path, argument vector and ignore-failure flag of each `ExecStart=`
+    /// command; systemd's timestamps, PID and status fields are not compared.
+    ExecStart(Vec<(String, Vec<String>, bool)>),
     /// A D-Bus `u` value.
     U32(u32),
     /// A D-Bus `t` value.
@@ -622,6 +691,7 @@ impl TransientUnitRequest {
             launcher_source,
             mode,
             release,
+            invocation,
         } = inputs;
         let (address_families, descriptors) = match mode {
             LaunchMode::Local { host_service } => (
@@ -637,7 +707,7 @@ impl TransientUnitRequest {
             ),
         };
         let mut properties =
-            Vec::with_capacity(TransientUnitHardening::requested_properties().len() + 14);
+            Vec::with_capacity(TransientUnitHardening::requested_properties().len() + 15);
         for property in TransientUnitHardening::requested_properties() {
             properties.push(SystemdTransientUnitProperty::new(
                 SystemdTransientUnitPropertyKind::Hardening(*property),
@@ -708,6 +778,10 @@ impl TransientUnitRequest {
                 SystemdDynamicPropertyKind::TemporaryFileSystem,
             ),
             SystemdTransientUnitValue::TemporaryFileSystem(service_limits.temporary_file_systems()),
+        ));
+        properties.push(SystemdTransientUnitProperty::new(
+            SystemdTransientUnitPropertyKind::Dynamic(SystemdDynamicPropertyKind::ExecStart),
+            SystemdTransientUnitValue::ExecStart(invocation.exec_start()),
         ));
         Self {
             properties,

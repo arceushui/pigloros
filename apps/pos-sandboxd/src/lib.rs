@@ -21,6 +21,8 @@ pub mod launcher;
 #[cfg(target_os = "linux")]
 mod local_network;
 #[cfg(target_os = "linux")]
+mod provider_barrier;
+#[cfg(target_os = "linux")]
 mod release_barrier;
 #[cfg(target_os = "linux")]
 mod release_signer;
@@ -72,6 +74,11 @@ pub use image_activator::{
 pub use root_attachment::{activate_admitted_root, VerifiedRootMount};
 
 #[cfg(target_os = "linux")]
+pub use provider_barrier::{
+    fresh_nonce, AuthorityCheck, BarrierError, BarrierEvidence, ObservedReadback,
+    ObservedReadbackUnavailable, ProviderReleaseBarrier, UnitIdentitySource,
+};
+#[cfg(target_os = "linux")]
 pub use release_barrier::{
     release_after_ready, ExpectedLauncherReady, ReleaseBarrierError, ReleaseBinding, ReleaseRecheck,
 };
@@ -98,11 +105,11 @@ pub use system_bus::{
     TransientServiceUnitName, TransientServiceUnitNameError,
 };
 pub use transient_unit::{
-    ActivatedRootDirectory, CheckedRoot, LaunchMode, LauncherSource, SystemdManagerReadback,
-    SystemdManagerReadbackOnlyProperty, SystemdServiceLimits, SystemdServiceLimitsError,
-    SystemdTransientUnitNumericValue, SystemdTransientUnitProperty, SystemdTransientUnitReadback,
-    SystemdTransientUnitReadbackValue, SystemdTransientUnitValue, TransientUnitLaunchInputs,
-    TransientUnitRequest, TransientUnitRequestError,
+    ActivatedRootDirectory, CheckedRoot, LaunchMode, LauncherInvocation, LauncherSource,
+    SystemdManagerReadback, SystemdManagerReadbackOnlyProperty, SystemdServiceLimits,
+    SystemdServiceLimitsError, SystemdTransientUnitNumericValue, SystemdTransientUnitProperty,
+    SystemdTransientUnitReadback, SystemdTransientUnitReadbackValue, SystemdTransientUnitValue,
+    TransientUnitLaunchInputs, TransientUnitRequest, TransientUnitRequestError,
 };
 
 /// The seven ELM1 limit IDs enforced by systemd service properties.
@@ -170,6 +177,7 @@ enum SystemdDynamicPropertyKind {
     FileDescriptorStoreMax,
     ExtraFileDescriptors,
     TemporaryFileSystem,
+    ExecStart,
 }
 
 impl SystemdTransientUnitPropertyKind {
@@ -198,6 +206,7 @@ impl SystemdDynamicPropertyKind {
         match self {
             Self::FileDescriptorStoreMax => "FileDescriptorStoreMax",
             Self::ExtraFileDescriptors => "ExtraFileDescriptors",
+            Self::ExecStart => "ExecStart",
             _ => "TemporaryFileSystem",
         }
     }

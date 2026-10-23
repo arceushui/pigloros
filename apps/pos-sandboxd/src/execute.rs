@@ -41,7 +41,8 @@ use zvariant::OwnedFd;
 
 use crate::{
     ActivatedRootDirectory, ActiveAttempt, AdmittedAttempt, BoundLocalProxy, CheckedLocal,
-    CheckedRoot, HostServiceChannel, ImageActivationError, LaunchMode, LauncherSource,
+    CheckedRoot, HostServiceChannel, ImageActivationError, LaunchMode, LauncherInvocation,
+    LauncherSource,
     LocalNetworkPort, LocalProxyBindError, ServeError, ServedProxy, SystemCallFilter,
     SystemdServiceLimits, TransientServiceUnitName, TransientUnitLaunchInputs,
     TransientUnitRequest,
@@ -133,6 +134,13 @@ pub trait UnitCgroup {
 pub trait LaunchBarrier {
     /// The barrier's failure type.
     type Error: Error + Send + Sync + 'static;
+
+    /// The launcher-mode command for this launch: the exact LPV1 parameters the
+    /// unit's `ExecStart=` passes to the launcher.
+    ///
+    /// # Errors
+    /// Fails if the parameters cannot be encoded.
+    fn launcher_invocation(&self) -> Result<LauncherInvocation, Self::Error>;
 
     /// Hand over, once, the unit's end of the release channel, which becomes
     /// `piglor-release-v1`.
@@ -665,6 +673,9 @@ where
     let release = barrier
         .take_unit_end()
         .map_err(|error| ExecuteError::Barrier(Box::new(error)))?;
+    let invocation = barrier
+        .launcher_invocation()
+        .map_err(|error| ExecuteError::Barrier(Box::new(error)))?;
     // The recheck comes last, so nothing but compilation separates it from
     // the start of the unit.
     let checked = recheck().map_err(ExecuteError::Recheck)?;
@@ -673,7 +684,8 @@ where
     {
         return Err(ExecuteError::RootIdentity);
     }
-    let inputs = TransientUnitLaunchInputs::new(checked, launcher_source, launch_mode, release);
+    let inputs =
+        TransientUnitLaunchInputs::new(checked, launcher_source, launch_mode, release, invocation);
     Ok(Prepared {
         request: TransientUnitRequest::compile(inputs, system_call_filter, &service_limits),
         watchdog: service_limits.watchdog(),
