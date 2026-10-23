@@ -127,6 +127,13 @@ impl AdmittedAttempt {
             executable_digest: [0x61; 32],
         })
     }
+
+    /// The same attempt running another adapter path.
+    #[cfg(test)]
+    pub(crate) fn running(mut self, executable_path: String) -> Self {
+        self.executable_path = executable_path;
+        self
+    }
 }
 
 /// The record of a started, not yet released attempt.

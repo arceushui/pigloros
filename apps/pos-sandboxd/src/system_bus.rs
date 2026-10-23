@@ -549,19 +549,31 @@ impl SystemdTransientUnitTransport {
         looked_up.map_err(SystemdTransientUnitTransportError::UnitLookup)
     }
 
-    /// The unit's current `MainPID`, read fresh from the manager.
-    async fn read_main_pid(
+    /// A proxy for the unit that never serves a cached property, so every read
+    /// reaches systemd.
+    async fn uncached<P>(
         &self,
         unit_name: &TransientServiceUnitName,
-    ) -> Result<u32, SystemdTransientUnitTransportError> {
+    ) -> Result<P, SystemdTransientUnitTransportError>
+    where
+        P: zbus::proxy::ProxyImpl<'static> + From<zbus::Proxy<'static>>,
+    {
         let path = self.unit_path_of(unit_name).await?;
-        let service = ServiceProxy::builder(&self.connection)
+        P::builder(&self.connection)
             .path(path)
             .map_err(SystemdTransientUnitTransportError::ServiceProxy)?
             .cache_properties(CacheProperties::No)
             .build()
             .await
-            .map_err(SystemdTransientUnitTransportError::ServiceProxy)?;
+            .map_err(SystemdTransientUnitTransportError::ServiceProxy)
+    }
+
+    /// The unit's current `MainPID`, read fresh from the manager.
+    async fn read_main_pid(
+        &self,
+        unit_name: &TransientServiceUnitName,
+    ) -> Result<u32, SystemdTransientUnitTransportError> {
+        let service: ServiceProxy<'_> = self.uncached(unit_name).await?;
         let main_pid = service.main_pid().await;
         main_pid.map_err(
             |source| SystemdTransientUnitTransportError::PropertyReadback {
@@ -576,14 +588,7 @@ impl SystemdTransientUnitTransport {
         &self,
         unit_name: &TransientServiceUnitName,
     ) -> Result<[u8; 16], SystemdTransientUnitTransportError> {
-        let path = self.unit_path_of(unit_name).await?;
-        let unit = UnitProxy::builder(&self.connection)
-            .path(path)
-            .map_err(SystemdTransientUnitTransportError::ServiceProxy)?
-            .cache_properties(CacheProperties::No)
-            .build()
-            .await
-            .map_err(SystemdTransientUnitTransportError::ServiceProxy)?;
+        let unit: UnitProxy<'_> = self.uncached(unit_name).await?;
         let invocation_id = unit.invocation_id().await;
         let raw = invocation_id.map_err(|source| {
             SystemdTransientUnitTransportError::PropertyReadback {
