@@ -50,6 +50,7 @@ struct IdentityDown;
 struct TestIdentity {
     pid: u32,
     broken: bool,
+    invocation_broken: bool,
 }
 
 impl UnitIdentitySource for TestIdentity {
@@ -71,6 +72,9 @@ impl UnitIdentitySource for TestIdentity {
         &self,
         _unit_name: &TransientServiceUnitName,
     ) -> Result<[u8; 16], IdentityDown> {
+        if self.invocation_broken {
+            return Err(IdentityDown);
+        }
         Ok(INVOCATION)
     }
 }
@@ -136,6 +140,7 @@ fn barrier_for(
         TestIdentity {
             pid: claimed_pid,
             broken: false,
+            invocation_broken: false,
         },
         check,
     )?;
@@ -336,6 +341,64 @@ async fn an_unreadable_unit_identity_is_refused() -> TestResult {
     let error = barrier.release(&active(attempt, GENEROUS_MS)).await.err();
     assert!(matches!(error, Some(BarrierError::Identity(_))));
     Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unreadable_invocation_id_is_refused() -> TestResult {
+    let (mut barrier, attempt) =
+        barrier_for(SandboxExecutionMode::AirGapped, Refusal::None, own_pid())?;
+    barrier.identity.invocation_broken = true;
+    let error = barrier.release(&active(attempt, GENEROUS_MS)).await.err();
+    assert!(matches!(error, Some(BarrierError::Identity(_))));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_release_channel_that_takes_no_timeout_is_refused() -> TestResult {
+    let (mut barrier, attempt) =
+        barrier_for(SandboxExecutionMode::AirGapped, Refusal::None, own_pid())?;
+    barrier.provider_end = StdOwnedFd::from(std::fs::File::open("/dev/null")?);
+    let error = barrier.release(&active(attempt, GENEROUS_MS)).await.err();
+    assert!(matches!(error, Some(BarrierError::Timeout(_))));
+    Ok(())
+}
+
+#[test]
+fn launch_parameters_that_do_not_fit_are_refused() -> TestResult {
+    let attempt = AdmittedAttempt::for_test(ATTEMPT, authority(), SandboxExecutionMode::AirGapped)?
+        .running("a".repeat(1 << 20));
+    let barrier = ProviderReleaseBarrier::new(
+        &attempt,
+        SandboxExecutionMode::AirGapped,
+        [0x33; 32],
+        BarrierEvidence {
+            launcher_digest: LAUNCHER_DIGEST,
+            adapter_identity: ADAPTER_IDENTITY,
+        },
+        TestSigner {
+            key: SigningKey::from_bytes(&[9; 32]),
+        },
+        TestIdentity {
+            pid: own_pid(),
+            broken: false,
+            invocation_broken: false,
+        },
+        AuthorityCheck::new(
+            authority(),
+            root_check(Refusal::None),
+            EXPECTED_READBACK,
+            TestObserved(Some(OBSERVED_READBACK)),
+            Arc::new(AtomicBool::new(false)),
+        ),
+    );
+    assert!(matches!(barrier, Err(BarrierError::Parameters(_))));
+    Ok(())
+}
+
+#[test]
+fn a_nonce_source_that_cannot_supply_32_bytes_is_refused() {
+    assert!(nonce_from(Path::new("/dev/null")).is_err());
+    assert!(nonce_from(Path::new("/nonexistent/urandom")).is_err());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

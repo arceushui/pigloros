@@ -368,12 +368,19 @@ impl UnitKiller for FakeKiller {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BarrierFault {
+    None,
+    Take,
+    Invocation,
+    Release,
+    Hang,
+}
+
 struct FakeBarrier {
     log: Log,
     released: Arc<Mutex<Vec<(String, Instant)>>>,
-    fail_take: bool,
-    fail_release: bool,
-    hang_release: bool,
+    fault: BarrierFault,
 }
 
 impl FakeBarrier {
@@ -381,9 +388,7 @@ impl FakeBarrier {
         Self {
             log: Arc::clone(log),
             released: Arc::default(),
-            fail_take: false,
-            fail_release: false,
-            hang_release: false,
+            fault: BarrierFault::None,
         }
     }
 }
@@ -392,12 +397,15 @@ impl LaunchBarrier for FakeBarrier {
     type Error = Injected;
 
     fn launcher_invocation(&self) -> Result<LauncherInvocation, Injected> {
+        if self.fault == BarrierFault::Invocation {
+            return Err(Injected);
+        }
         crate::test_fixtures::invocation().map_err(|_| Injected)
     }
 
     fn take_unit_end(&mut self) -> Result<OwnedFd, Injected> {
         record(&self.log, "take_unit_end");
-        if self.fail_take {
+        if self.fault == BarrierFault::Take {
             return Err(Injected);
         }
         File::open("/dev/null")
@@ -413,12 +421,12 @@ impl LaunchBarrier for FakeBarrier {
         if let Ok(mut released) = self.released.lock() {
             released.push((attempt.unit_name().as_str().to_owned(), attempt.deadline()));
         }
-        let outcome = if self.fail_release {
+        let outcome = if self.fault == BarrierFault::Release {
             Err(Injected)
         } else {
             Ok(())
         };
-        let hang = self.hang_release;
+        let hang = self.fault == BarrierFault::Hang;
         async move {
             if hang {
                 std::future::pending::<()>().await;
@@ -893,11 +901,21 @@ async fn an_unavailable_replay_capture_stops_before_the_launcher() -> TestResult
 #[tokio::test]
 async fn the_barrier_must_hand_over_its_end_before_the_root_is_rechecked() -> TestResult {
     let mut scenario = Scenario::new()?;
-    scenario.barrier.fail_take = true;
+    scenario.barrier.fault = BarrierFault::Take;
     let failed = scenario.fails().await?;
     assert!(matches!(failed.error, ExecuteError::Barrier(_)));
     assert_eq!(failed.unit, UnitState::NotStarted);
     assert_eq!(scenario.entries(), ["take_unit_end"]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_unencodable_launch_never_reaches_the_recheck() -> TestResult {
+    let mut scenario = Scenario::new()?;
+    scenario.barrier.fault = BarrierFault::Invocation;
+    let failed = scenario.fails().await?;
+    assert!(matches!(failed.error, ExecuteError::Barrier(_)));
+    assert_eq!(failed.unit, UnitState::NotStarted);
     Ok(())
 }
 
@@ -985,7 +1003,7 @@ async fn a_unit_whose_cgroup_cannot_be_bound_is_killed_before_release() -> TestR
 #[tokio::test]
 async fn a_barrier_that_never_answers_is_cut_off_at_the_deadline() -> TestResult {
     let mut scenario = Scenario::new()?;
-    scenario.barrier.hang_release = true;
+    scenario.barrier.fault = BarrierFault::Hang;
     let started = Instant::now();
     let run = scenario.run_watched(SandboxExecutionMode::AirGapped, ModePlan::AirGapped, 100);
     let outcome = tokio::time::timeout(Duration::from_secs(10), run).await??;
@@ -1005,7 +1023,11 @@ async fn timed_out(
 ) -> TestResult<(Scenario, ExecuteFailure)> {
     let mut scenario = Scenario::new()?;
     scenario.host.faults.extend_from_slice(faults);
-    scenario.barrier.fail_release = refuse_release;
+    scenario.barrier.fault = if refuse_release {
+        BarrierFault::Release
+    } else {
+        BarrierFault::None
+    };
     let run = scenario.run_watched(SandboxExecutionMode::AirGapped, ModePlan::AirGapped, 100);
     let outcome = tokio::time::timeout(Duration::from_secs(10), run).await??;
     Ok((scenario, failure(outcome)?))
@@ -1061,7 +1083,7 @@ async fn logged(log: &Log, entry: &str) -> bool {
 #[tokio::test]
 async fn a_dropped_execution_kills_the_submitted_unit() -> TestResult {
     let mut scenario = Scenario::new()?;
-    scenario.barrier.hang_release = true;
+    scenario.barrier.fault = BarrierFault::Hang;
     let log = Arc::clone(&scenario.log);
     let run = scenario.run(SandboxExecutionMode::AirGapped, ModePlan::AirGapped);
     // The caller gives up while the barrier is still waiting.
@@ -1088,7 +1110,7 @@ async fn a_finished_execution_leaves_nothing_for_the_guard() -> TestResult {
 #[tokio::test]
 async fn a_refused_execution_leaves_nothing_for_the_guard() -> TestResult {
     let mut refused = Scenario::new()?;
-    refused.barrier.fail_release = true;
+    refused.barrier.fault = BarrierFault::Release;
     refused.fails().await?;
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(!guard_kills(&refused));
@@ -1114,7 +1136,7 @@ fn a_guard_dropped_outside_a_runtime_spawns_nothing() -> TestResult {
 #[tokio::test]
 async fn a_refused_release_kills_the_unit_and_its_cgroup() -> TestResult {
     let mut scenario = Scenario::new()?;
-    scenario.barrier.fail_release = true;
+    scenario.barrier.fault = BarrierFault::Release;
     let failed = scenario.fails().await?;
     assert!(matches!(failed.error, ExecuteError::Barrier(_)));
     assert_eq!(failed.unit, UnitState::Killed);
@@ -1220,8 +1242,11 @@ async fn teardowns(
 
 #[tokio::test]
 async fn the_namespace_is_torn_down_when_the_unit_end_cannot_be_taken() -> TestResult {
-    let (torn_down, failed) =
-        teardowns(|scenario| scenario.barrier.fail_take = true, ATTEMPT).await?;
+    let (torn_down, failed) = teardowns(
+        |scenario| scenario.barrier.fault = BarrierFault::Take,
+        ATTEMPT,
+    )
+    .await?;
     assert!(matches!(failed.error, ExecuteError::Barrier(_)));
     assert_eq!(failed.unit, UnitState::NotStarted);
     assert_eq!(torn_down, 1);
@@ -1257,8 +1282,11 @@ async fn the_namespace_is_torn_down_when_the_recheck_fails() -> TestResult {
 
 #[tokio::test]
 async fn the_namespace_is_torn_down_when_the_release_is_refused() -> TestResult {
-    let (torn_down, failed) =
-        teardowns(|scenario| scenario.barrier.fail_release = true, ATTEMPT).await?;
+    let (torn_down, failed) = teardowns(
+        |scenario| scenario.barrier.fault = BarrierFault::Release,
+        ATTEMPT,
+    )
+    .await?;
     assert!(matches!(failed.error, ExecuteError::Barrier(_)));
     assert_eq!(failed.unit, UnitState::Killed);
     assert_eq!(torn_down, 1);

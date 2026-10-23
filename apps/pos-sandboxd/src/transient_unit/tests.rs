@@ -941,10 +941,7 @@ fn pinned_signatures() -> Vec<(SystemdTransientUnitValue, &'static str)> {
             SystemdTransientUnitValue::TemporaryFileSystem(Vec::new()),
             "a(ss)",
         ),
-        (
-            SystemdTransientUnitValue::ExecStart(Vec::new()),
-            "a(sasb)",
-        ),
+        (SystemdTransientUnitValue::ExecStart(Vec::new()), "a(sasb)"),
     ]
 }
 

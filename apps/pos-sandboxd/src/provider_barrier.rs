@@ -30,6 +30,7 @@ use std::{
     fs::File,
     future::Future,
     io::{self, Read},
+    path::Path,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -322,8 +323,12 @@ fn layout_digest(mode: SandboxExecutionMode) -> Result<[u8; 32], SandboxProvider
 /// # Errors
 /// Returns the operating system's error if it cannot supply them.
 pub fn fresh_nonce() -> io::Result<[u8; 32]> {
+    nonce_from(Path::new("/dev/urandom"))
+}
+
+fn nonce_from(source: &Path) -> io::Result<[u8; 32]> {
     let mut nonce = [0_u8; 32];
-    File::open("/dev/urandom").and_then(|mut source| source.read_exact(&mut nonce))?;
+    File::open(source)?.read_exact(&mut nonce)?;
     Ok(nonce)
 }
 
@@ -352,11 +357,13 @@ fn release_window(deadline: Instant) -> Result<(Duration, u64), BarrierError> {
         .filter(|remaining| !remaining.is_zero())
         .ok_or(BarrierError::Expired)?;
     let now = clock_gettime(ClockId::Monotonic);
-    u64::try_from(now.tv_sec)
+    let nanoseconds_per_second = i128::from(NANOSECONDS_PER_SECOND);
+    let absolute = i128::from(now.tv_sec) * nanoseconds_per_second
+        + i128::from(now.tv_nsec)
+        + i128::from(remaining.as_secs()) * nanoseconds_per_second
+        + i128::from(remaining.subsec_nanos());
+    u64::try_from(absolute)
         .ok()
-        .and_then(|seconds| seconds.checked_mul(NANOSECONDS_PER_SECOND))
-        .and_then(|nanoseconds| nanoseconds.checked_add(u64::try_from(now.tv_nsec).ok()?))
-        .and_then(|now| now.checked_add(u64::try_from(remaining.as_nanos()).ok()?))
         .map(|absolute| (remaining, absolute))
         .ok_or(BarrierError::Expired)
 }
