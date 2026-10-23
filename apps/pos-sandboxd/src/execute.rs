@@ -42,9 +42,8 @@ use zvariant::OwnedFd;
 use crate::{
     ActivatedRootDirectory, ActiveAttempt, AdmittedAttempt, BoundLocalProxy, CheckedLocal,
     CheckedRoot, HostServiceChannel, ImageActivationError, LaunchMode, LauncherInvocation,
-    LauncherSource,
-    LocalNetworkPort, LocalProxyBindError, ServeError, ServedProxy, SystemCallFilter,
-    SystemdServiceLimits, TransientServiceUnitName, TransientUnitLaunchInputs,
+    LauncherSource, LocalNetworkPort, LocalProxyBindError, ServeError, ServedProxy,
+    SystemCallFilter, SystemdServiceLimits, TransientServiceUnitName, TransientUnitLaunchInputs,
     TransientUnitRequest,
 };
 
