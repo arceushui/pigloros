@@ -8,10 +8,11 @@ use pos_core::{
     AppendDedupKey, AppendDedupScope, AppendIdentity, AuthorityGranteeV1,
     AuthorityPersistenceHostV1, AuthorityPersistencePortV1, AuthorityRegistrySnapshotV1,
     AuthorityRoleV1, Capability, CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityScopeDraftV1,
-    CapabilityScopeV1, DelegateClassV1, EntityId, ErasureContainmentGateV1, EventStore, Hash, Kind,
-    PipelineAdmissionFencePublisherV1, PipelineAdmissionFenceV1, PipelineAttemptIdV1,
-    PipelineEvidenceRefV1, PipelineSecurityRevisionsDraftV1, PipelineSecurityRevisionsV1, Plugin,
-    PluginId, PrincipalRefV1, Seq, SeqRange, TimelineId, DELEGATE_ACTION_V1,
+    CapabilityScopeV1, DelegateClassV1, EntityId, ErasureContainmentGateV1, EventStore,
+    FactualAdmissionPortV1, FactualPrefixReadPortV1, Hash, Kind, PipelineAdmissionFencePublisherV1,
+    PipelineAdmissionFenceV1, PipelineAttemptIdV1, PipelineEvidenceRefV1,
+    PipelineSecurityRevisionsDraftV1, PipelineSecurityRevisionsV1, Plugin, PluginId,
+    PrincipalRefV1, Seq, SeqRange, TimelineId, DELEGATE_ACTION_V1,
 };
 use pos_plugin_agent::{
     protocol::{
@@ -25,7 +26,7 @@ use pos_runtime::{
     OutputPolicySourceV1, PluginRegistry, RuntimeError, ScheduledPassAdmissionV1,
     TimelineHistorySegment,
 };
-use pos_store::memory::MemoryStore;
+use pos_store::{memory::MemoryStore, sqlite::SqliteStore};
 use ulid::Ulid;
 
 /// The one-member Fork ancestry of a fixture Timeline with no parent.
@@ -41,6 +42,11 @@ fn ok<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
     result.unwrap_or_else(|error| {
         std::panic::resume_unwind(Box::new(format!("unexpected test error: {error:?}")))
     })
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn expect_some<T>(value: Option<T>, what: &'static str) -> T {
+    value.unwrap_or_else(|| std::panic::resume_unwind(Box::new(format!("expected {what}"))))
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -119,17 +125,24 @@ fn revisions(
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn publish(store: &mut MemoryStore, timeline: TimelineId, revisions: PipelineSecurityRevisionsV1) {
+fn publish<S: PipelineAdmissionFencePublisherV1>(
+    store: &mut S,
+    timeline: TimelineId,
+    revisions: PipelineSecurityRevisionsV1,
+) {
     let fence = PipelineAdmissionFenceV1::try_new(GRANT, revisions, None, 10);
     ok(store.set_pipeline_admission_fence(timeline, ok(fence)));
 }
 
 /// Bind the erasure gate and persisted authority, then publish the fence.
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn admission_store(
+fn admission_store<S>(
+    mut store: S,
     gate: &Arc<ErasureContainmentGateV1>,
-) -> (MemoryStore, TimelineId, PipelineSecurityRevisionsV1) {
-    let mut store = MemoryStore::new();
+) -> (S, TimelineId, PipelineSecurityRevisionsV1)
+where
+    S: EventStore + AuthorityPersistencePortV1 + PipelineAdmissionFencePublisherV1,
+{
     let timeline = ok(store.create_timeline("provider-admission")).id();
     ok(store.bind_erasure_gate(Arc::clone(gate)));
     let host = AuthorityPersistenceHostV1::new(&ok(AuthorityRegistrySnapshotV1::try_new(
@@ -153,8 +166,8 @@ fn admission_store(
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn admission(
-    store: &MemoryStore,
+fn admission<S: EventStore>(
+    store: &S,
     timeline: TimelineId,
     revisions: PipelineSecurityRevisionsV1,
     key: u8,
@@ -213,11 +226,82 @@ fn accepted_proposal() -> ProviderAttempt {
     ProviderAttempt::Response(ok(BoundedProviderBytes::try_from(bytes)))
 }
 
+/// Register the provider-backed Driver under a verified output policy.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn provider_registry(
+    gate: Arc<ErasureContainmentGateV1>,
+    plugin: &AgentBindingPlugin,
+    driver: ProviderBackedAgentDriver,
+) -> PluginRegistry {
+    let mut registry = PluginRegistry::new().with_erasure_gate(gate);
+    let binding = ok(OutputPolicyBindingV1::from_source(
+        plugin,
+        OutputPolicySourceV1::Generated,
+        &[],
+        "deterministic-local-v1",
+    ));
+    ok(registry.register_test_driver_with_verified_output_policy(
+        plugin.id,
+        binding,
+        Box::new(driver),
+    ));
+    ok(registry.compose_non_participant_drivers());
+    ok(registry.schemas.register(EventTypeSchema {
+        event_type: Kind::new(EVENT_TYPE_ACTION),
+        description: "host-constructed Agent action".to_owned(),
+        json_schema: None,
+    }));
+    registry
+}
+
+/// Assert each committed Event is an output node of the Driver's last step.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn assert_step_outputs<S: FactualPrefixReadPortV1>(
+    store: &S,
+    registry: &PluginRegistry,
+    plugin: PluginId,
+    timeline: TimelineId,
+    seqs: &[Seq],
+) {
+    let owner = expect_some(
+        registry
+            .factual_owner_ids()
+            .into_iter()
+            .find_map(|(id, owner)| (id == plugin).then_some(owner)),
+        "the Driver's factual owner",
+    );
+    let step = expect_some(ok(store.last_step_node(timeline, &owner)), "a step node");
+    let expected = [step.coordinate().artifact_digest()];
+    let entries = ok(store.nodes_for_committed_events(timeline, seqs));
+    assert_eq!(entries.len(), seqs.len());
+    for entry in entries {
+        let node = expect_some(entry, "an output node");
+        assert_eq!(node.input_digests(), expected.as_slice());
+    }
+}
+
 #[test]
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn provider_proposal_commits_only_through_host_admission() {
+fn memory_provider_proposal_commits_only_through_host_admission() {
+    provider_proposal_commits_only_through_host_admission(MemoryStore::new());
+}
+
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn sqlite_provider_proposal_commits_only_through_host_admission() {
+    provider_proposal_commits_only_through_host_admission(ok(SqliteStore::open(":memory:")));
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn provider_proposal_commits_only_through_host_admission<S>(store: S)
+where
+    S: EventStore
+        + AuthorityPersistencePortV1
+        + PipelineAdmissionFencePublisherV1
+        + FactualAdmissionPortV1,
+{
     let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
-    let (mut store, timeline, current) = admission_store(&gate);
+    let (mut store, timeline, current) = admission_store(store, &gate);
     let agent = entity(10);
     let plugin = AgentBindingPlugin {
         id: PluginId::from_ulid(Ulid::from(40_u128)),
@@ -237,29 +321,13 @@ fn provider_proposal_commits_only_through_host_admission() {
     let provider =
         FixtureAgentDecisionProvider::new(vec![accepted_proposal(), accepted_proposal()]);
     let calls = provider.call_count_handle();
-    let mut registry = PluginRegistry::new().with_erasure_gate(gate);
-    let binding = ok(OutputPolicyBindingV1::from_source(
-        &plugin,
-        OutputPolicySourceV1::Generated,
-        &[],
-        "deterministic-local-v1",
-    ));
-    ok(registry.register_test_driver_with_verified_output_policy(
-        plugin.id,
-        binding,
-        Box::new(ProviderBackedAgentDriver::new(
-            agent,
-            catalogue.clone(),
-            provenance.clone(),
-            Box::new(provider),
-        )),
-    ));
-    ok(registry.compose_non_participant_drivers());
-    ok(registry.schemas.register(EventTypeSchema {
-        event_type: Kind::new(EVENT_TYPE_ACTION),
-        description: "host-constructed Agent action".to_owned(),
-        json_schema: None,
-    }));
+    let driver = ProviderBackedAgentDriver::new(
+        agent,
+        catalogue.clone(),
+        provenance.clone(),
+        Box::new(provider),
+    );
+    let mut registry = provider_registry(gate, &plugin, driver);
 
     // A validated provider proposal is still tentative: a stale basis
     // discards it and commits nothing.
@@ -286,8 +354,10 @@ fn provider_proposal_commits_only_through_host_admission() {
     let drafts = ok(registry.step_all_anchored(timeline, &root_ancestry(timeline), Seq::ZERO));
     assert_eq!(calls.get(), 2);
     let admitted = admission(&store, timeline, current, 2);
-    let receipt = ok(registry.admit_scheduled_pass(&mut store, &admitted))
-        .unwrap_or_else(|| std::panic::resume_unwind(Box::new("expected a committed batch")));
+    let receipt = expect_some(
+        ok(registry.admit_scheduled_pass(&mut store, &admitted)),
+        "a committed batch",
+    );
 
     // Event identity and Timeline Order come only from the store transaction.
     let events = ok(store.read(timeline, SeqRange::all()));
@@ -304,6 +374,10 @@ fn provider_proposal_commits_only_through_host_admission() {
         .collect();
     let stored: Vec<_> = events.iter().map(|event| (event.id, event.seq)).collect();
     assert_eq!(identities, stored);
+
+    // The PDR1 record and the action are output nodes of the provider-backed step.
+    let seqs: Vec<Seq> = events.iter().map(|event| event.seq).collect();
+    assert_step_outputs(&store, &registry, plugin.id, timeline, &seqs);
 
     // Replay reads committed evidence and never calls the provider again.
     let verifier = ok(AgentDecisionReplayVerifier::try_new_with_timeline_ancestry(
