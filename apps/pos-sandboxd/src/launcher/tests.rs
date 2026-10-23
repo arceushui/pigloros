@@ -980,6 +980,8 @@ fn the_process_host_reads_the_real_process() -> TestResult {
     assert!(host.open_adapter("/proc/self/exe").is_err());
     assert!(host.open_adapter("/does/not/exist").is_err());
     let argv = [CString::new("/adapter")?];
+    // An empty, mode-0600 file is refused by the kernel (EACCES), so this real
+    // descriptor-exec never replaces the test process.
     let empty = tempfile::tempfile()?;
     let refused = host.replace_process(&empty, &argv);
     assert!(refused.raw_os_error().is_some());
