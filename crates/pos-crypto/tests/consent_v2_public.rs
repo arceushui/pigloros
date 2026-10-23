@@ -52,7 +52,7 @@ fn inner() -> TestResult<Vec<Value>> {
     Ok(ciborium::de::from_reader(hex(CIPHERTEXT)?.as_slice())?)
 }
 
-fn policy() -> ConsentPolicyV2 {
+const fn policy() -> ConsentPolicyV2 {
     ConsentPolicyV2 {
         subject_id: EntityId::from_ulid(Ulid::from_bytes([
             0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
