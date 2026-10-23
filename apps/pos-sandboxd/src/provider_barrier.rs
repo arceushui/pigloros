@@ -328,7 +328,7 @@ pub fn fresh_nonce() -> io::Result<[u8; 32]> {
 }
 
 fn nonce_from(source: &Path) -> io::Result<[u8; 32]> {
-    let mut nonce = [0_u8; 32];
+    let mut nonce = <[u8; 32]>::default();
     File::open(source)?.read_exact(&mut nonce)?;
     Ok(nonce)
 }
