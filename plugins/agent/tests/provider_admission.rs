@@ -45,7 +45,7 @@ fn ok<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn some<T>(value: Option<T>, what: &'static str) -> T {
+fn expect_some<T>(value: Option<T>, what: &'static str) -> T {
     value.unwrap_or_else(|| std::panic::resume_unwind(Box::new(format!("expected {what}"))))
 }
 
@@ -228,7 +228,7 @@ fn accepted_proposal() -> ProviderAttempt {
 
 /// Register the provider-backed Driver under a verified output policy.
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn registry(
+fn provider_registry(
     gate: Arc<ErasureContainmentGateV1>,
     plugin: &AgentBindingPlugin,
     driver: ProviderBackedAgentDriver,
@@ -263,19 +263,19 @@ fn assert_step_outputs<S: FactualPrefixReadPortV1>(
     timeline: TimelineId,
     seqs: &[Seq],
 ) {
-    let owner = some(
+    let owner = expect_some(
         registry
             .factual_owner_ids()
             .into_iter()
             .find_map(|(id, owner)| (id == plugin).then_some(owner)),
         "the Driver's factual owner",
     );
-    let step = some(ok(store.last_step_node(timeline, &owner)), "a step node");
+    let step = expect_some(ok(store.last_step_node(timeline, &owner)), "a step node");
     let expected = [step.coordinate().artifact_digest()];
     let entries = ok(store.nodes_for_committed_events(timeline, seqs));
     assert_eq!(entries.len(), seqs.len());
     for entry in entries {
-        let node = some(entry, "an output node");
+        let node = expect_some(entry, "an output node");
         assert_eq!(node.input_digests(), expected.as_slice());
     }
 }
@@ -327,7 +327,7 @@ where
         provenance.clone(),
         Box::new(provider),
     );
-    let mut registry = registry(gate, &plugin, driver);
+    let mut registry = provider_registry(gate, &plugin, driver);
 
     // A validated provider proposal is still tentative: a stale basis
     // discards it and commits nothing.
@@ -354,7 +354,7 @@ where
     let drafts = ok(registry.step_all_anchored(timeline, &root_ancestry(timeline), Seq::ZERO));
     assert_eq!(calls.get(), 2);
     let admitted = admission(&store, timeline, current, 2);
-    let receipt = some(
+    let receipt = expect_some(
         ok(registry.admit_scheduled_pass(&mut store, &admitted)),
         "a committed batch",
     );
