@@ -47,6 +47,14 @@ use crate::{
     TransientUnitRequest,
 };
 
+/// The least time a terminating host call is given, however short the
+/// attempt's watchdog.
+const MIN_TERMINATION_CALL: Duration = Duration::from_secs(1);
+
+/// The most time a terminating host call is given, however long the attempt's
+/// watchdog. An abort is two such calls at worst.
+const MAX_TERMINATION_CALL: Duration = Duration::from_secs(10);
+
 /// How often the attempt cgroup is polled for emptiness.
 const EMPTY_POLL: Duration = Duration::from_millis(10);
 
@@ -387,11 +395,15 @@ struct Prepared<C> {
 /// does this function: the caller owns the `VerifiedRootMount`, and the
 /// attempt lifecycle (#442) detaches or drops it on every terminal path.
 ///
+/// `recheck` blocks: it mounts, reads and verifies. The production barrier
+/// wraps its own recheck for the multi-thread runtime (Q9.16); a caller that
+/// passes a slow closure here stalls one worker until it returns.
+///
 /// The runtime must have its time driver enabled.
 ///
 /// Dropping the returned future after the unit was submitted spawns a
-/// best-effort kill and stop of that unit on the current runtime, bounded by
-/// the attempt's watchdog, so cancellation does not leave a released-looking
+/// best-effort kill and stop of that unit on the current runtime, bounded like
+/// any other termination, so cancellation does not leave a released-looking
 /// unit running. A drop outside a runtime cannot spawn it; the lifecycle
 /// (#442) reconciles any unit left behind.
 ///
@@ -417,7 +429,8 @@ where
 }
 
 /// The wall-clock bounds of one attempt: the unit's watchdog deadline for the
-/// steps before and during the run, and the watchdog length for each
+/// steps before and during the run, and a fixed bound (the watchdog clamped to
+/// [`MIN_TERMINATION_CALL`] and [`MAX_TERMINATION_CALL`]) for each
 /// termination call, which must still run after the deadline passed.
 #[derive(Clone, Copy)]
 struct Bounds {
@@ -461,7 +474,7 @@ where
     let unit = attempt.unit_name().clone();
     let bounds = Bounds {
         deadline: Instant::now() + watchdog,
-        call: watchdog,
+        call: watchdog.clamp(MIN_TERMINATION_CALL, MAX_TERMINATION_CALL),
     };
     let deadline = bounds.deadline;
     guard.arm(host.killer(), unit.clone(), bounds.call);
@@ -753,8 +766,8 @@ where
     }
 }
 
-/// SIGKILL the unit, kill its cgroup when bound, and stop its job, each
-/// bounded by `call`; `true` when SIGKILL was acknowledged.
+/// SIGKILL the unit, kill its cgroup when bound (a synchronous write that
+/// returns promptly), and stop its job, each host call bounded by `call`; `true` when SIGKILL was acknowledged.
 async fn kill_everything<H>(
     host: &H,
     unit: &TransientServiceUnitName,

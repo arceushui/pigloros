@@ -102,8 +102,8 @@ verified root is rechecked last, immediately before `StartTransientUnit`, and
 must be the attempt's own root. After the typed unit is started and verified,
 its cgroup is bound and an `ActiveAttempt` is recorded; the launcher barrier
 (`LaunchBarrier`) then releases the adapter exactly once. Any failure after
-the unit was submitted kills it, every host call is bounded by the attempt
-watchdog, and dropping the execution future after the submission spawns a
+the unit was submitted kills it, every start and bind is bounded by the attempt
+watchdog, every termination call by a fixed 1 to 10 s bound, and dropping the execution future after the submission spawns a
 best-effort kill of the unit. A Local admission, namespace or channel of another
 attempt, SIM1, head or epoch is refused before anything is submitted. The Local
 network port owns its namespace by RAII: the execute path drops it on every
@@ -111,11 +111,13 @@ path that does not serve it. The unit host, the barrier and the Local network
 are ports, so the composition is exercised without systemd.
 
 - Local: the FD 3 socket pair is created with the attempt, and
-  `piglor-host-service-v1` precedes `piglor-release-v1`. `ActiveAttempt` is the
+  `piglor-host-service-v1` precedes `piglor-release-v1`. `CheckedLocal` is the
   only source of `BoundLocalProxy`, the `LocalProxyBinding` that `serve_proxy`
-  in `pos-reference` requires. It checks the grant's attempt, SIM1, authority
-  heads and epochs against the rechecked admission, the namespace's attempt and
-  the channel's attempt. The proxy serves on a blocking thread that the attempt
+  in `pos-reference` requires; `ActiveAttempt` witnesses that the unit was
+  started. `AdmittedAttempt::check_local` checks the grant's attempt, SIM1,
+  authority heads and epochs against the admitted attempt, the namespace's
+  attempt and the channel's attempt, and the token carries the attempt it
+  checked. The proxy serves on a blocking thread that the attempt
   watchdog closes. The namespace, veth pair and nftables rules belong to a
   separate ticket; `FailClosedLocalNetwork` establishes none and refuses every
   connection.
@@ -133,9 +135,10 @@ termination, which reads a closed channel as a clean close.
 Not composed here, and stated so that nothing is assumed: the `ExecStart`
 launcher-mode property and its LPV1 argument, the production `LaunchBarrier`
 and `ReleaseRecheck` adapters over `release_after_ready`, adapter stdin and
-stdout transport, and the real Local namespace. `ActiveAttempt` binds an
-admission against the authority heads the attempt was admitted with, which the
-successful last-moment recheck confirmed. Authorization of a Replay exchange
+stdout transport, and the real Local namespace. `AdmittedAttempt::check_local`
+binds an admission against the authority heads the attempt was admitted with;
+that the recheck closure belongs to the same admitted entry is the caller's
+contract (`VerifiedRootMount::recheck` enforces it for its own entry). Authorization of a Replay exchange
 set is the caller's: the report that supplies it is not verified here. `tokio`
 gains its `rt` feature for the blocking proxy thread.
 
