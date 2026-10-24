@@ -14,7 +14,8 @@
 //! 5. the launcher barrier releases the adapter, exactly once;
 //! 6. a Local proxy serves FD 3 until the channel ends or the attempt
 //!    watchdog closes it, and the cgroup is observed until it is empty or the
-//!    watchdog expires, which kills the unit.
+//!    watchdog expires, which kills the unit; a proxy protocol failure kills
+//!    the unit at once and keeps the evidence.
 //!
 //! Any failure after the unit was started terminates it. The result carries
 //! the evidence the later signed records need: the ordered NXT1 transcript
@@ -349,8 +350,8 @@ impl NetworkEvidence {
     /// `None` means no Local session, or a clean close at a frame boundary.
     /// A watchdog that closed the channel also reads as a clean close here:
     /// the classifier (#443) must consult [`ServedProxy::watchdog_expired`] as
-    /// well. A protocol failure leaves the unit running until it empties or the
-    /// watchdog fires; classifying it is #443's, not an early kill.
+    /// well. A protocol failure kills the unit
+    /// ([`AttemptEnding::ProtocolFailureKilled`]); classifying it is #443's.
     #[must_use]
     pub const fn termination(&self) -> Option<LocalNetworkTermination> {
         match self {
@@ -410,12 +411,14 @@ struct Prepared<C> {
 /// attempt lifecycle (#442) detaches or drops it on every terminal path.
 ///
 /// `recheck` blocks: it mounts, reads and verifies. The production barrier
-/// wraps its own recheck for the multi-thread runtime (owner decision on `block_in_place`, #441); a caller that
-/// passes a slow closure here stalls one worker until it returns.
+/// wraps its own recheck for the multi-thread runtime (owner decision on
+/// `block_in_place`, #441); a caller that passes a slow closure here stalls
+/// one worker until it returns.
 ///
-/// After a watchdog expiry the unit is killed once the Local proxy thread has
-/// joined, which a slow connector can delay up to the proxy's own network
-/// deadline; `RuntimeMaxUSec` is the backstop. If observing the cgroup fails
+/// After a watchdog expiry the unit is killed while the Local proxy thread is
+/// still being joined, so a slow connector cannot delay the kill. A proxy
+/// protocol failure kills the unit at once and keeps the session's evidence
+/// ([`AttemptEnding::ProtocolFailureKilled`]). If observing the cgroup fails
 /// after a Local session, the failure is returned without the session's
 /// transcripts.
 ///

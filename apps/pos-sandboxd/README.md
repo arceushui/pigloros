@@ -106,7 +106,11 @@ the unit was submitted kills it, every start and bind is bounded by the
 attempt watchdog, every termination call by a fixed 1 to 10 s bound, and
 dropping the execution future after the submission spawns a best-effort kill
 of the unit. A Local admission, namespace or channel of another
-attempt, SIM1, head or epoch is refused before anything is submitted. The Local
+attempt, request, authority block, head, epoch or launch policy, or one that
+plans an endpoint the launch policy does not allow, is refused before anything
+is submitted. A proxy protocol failure kills the unit at once and the evidence
+is kept; after a watchdog expiry the unit is killed while the proxy thread is
+still being joined. The Local
 network port owns its namespace by RAII: the execute path drops it on every
 path that does not serve it. The unit host, the barrier and the Local network
 are ports, so the composition is exercised without systemd.
@@ -162,8 +166,8 @@ digest, and the provider must supply an `ObservedReadback` before it can
 release), the adapter's mount and inode identity (the composition root
 supplies it in `BarrierEvidence`), the setting of the cancellation flag
 (#442), adapter stdin and stdout transport, and the real Local namespace.
-`AdmittedAttempt::check_local` binds an admission against the authority heads
-the attempt was admitted with; that the recheck closure belongs to the same
+`AdmittedAttempt::check_local` binds an admission against the launch-policy
+view and the authority heads the attempt was admitted with; that the recheck closure belongs to the same
 admitted entry is the caller's contract (`VerifiedRootMount::recheck` enforces
 it for its own entry). Authorization of a Replay exchange set is the caller's:
 the report that supplies it is not verified here. `tokio` gains its `rt` and
