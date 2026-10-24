@@ -76,7 +76,7 @@ pub use root_attachment::{activate_admitted_root, VerifiedRootMount};
 #[cfg(target_os = "linux")]
 pub use provider_barrier::{
     fresh_nonce, AuthorityCheck, BarrierError, BarrierEvidence, ObservedReadback,
-    ObservedReadbackUnavailable, ProviderReleaseBarrier, UnitIdentitySource,
+    ObservedReadbackUnavailable, ProviderReleaseBarrier, RecheckRefusal, UnitIdentitySource,
 };
 #[cfg(target_os = "linux")]
 pub use release_barrier::{

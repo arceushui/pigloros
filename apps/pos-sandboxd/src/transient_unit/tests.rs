@@ -900,7 +900,8 @@ const fn is_dynamic_kind(kind: SystemdDynamicPropertyKind) -> bool {
         | SystemdDynamicPropertyKind::OperatingLimit(_)
         | SystemdDynamicPropertyKind::FileDescriptorStoreMax
         | SystemdDynamicPropertyKind::ExtraFileDescriptors
-        | SystemdDynamicPropertyKind::TemporaryFileSystem => true,
+        | SystemdDynamicPropertyKind::TemporaryFileSystem
+        | SystemdDynamicPropertyKind::ExecStart => true,
     }
 }
 
@@ -960,7 +961,8 @@ const fn is_value_kind(value: &SystemdTransientUnitValue) -> bool {
         | SystemdTransientUnitValue::RestrictAddressFamilies(_)
         | SystemdTransientUnitValue::Numeric(_)
         | SystemdTransientUnitValue::ExtraFileDescriptors(_)
-        | SystemdTransientUnitValue::TemporaryFileSystem(_) => true,
+        | SystemdTransientUnitValue::TemporaryFileSystem(_)
+        | SystemdTransientUnitValue::ExecStart(_) => true,
     }
 }
 

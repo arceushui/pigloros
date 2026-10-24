@@ -121,6 +121,9 @@ pub enum RecheckRefusal {
     /// The manager's identity of the unit could not be read again.
     #[error("the unit identity could not be read again")]
     Identity(#[source] Box<dyn Error + Send + Sync>),
+    /// The attempt deadline passed while the unit identity was read again.
+    #[error("the attempt deadline passed during the identity recheck")]
+    Expired,
     /// The unit's `MainPID`, `InvocationID` or launcher executable changed
     /// after `ReadyV1` was verified against them.
     #[error("the unit identity changed after ReadyV1")]
@@ -203,6 +206,7 @@ struct UnitSnapshot {
 struct Bounded<'a, R, O, I> {
     check: &'a AuthorityCheck<R, O>,
     deadline_monotonic_ns: u64,
+    deadline: Instant,
     identity: &'a I,
     unit_name: &'a TransientServiceUnitName,
     snapshot: UnitSnapshot,
@@ -219,13 +223,8 @@ where
     /// under `block_in_place` on a multi-thread runtime.
     fn unit_unchanged(&self) -> Result<(), RecheckRefusal> {
         let handle = tokio::runtime::Handle::current();
-        let boxed = |error: I::Error| RecheckRefusal::Identity(Box::new(error));
-        let main_pid = handle
-            .block_on(self.identity.main_pid(self.unit_name))
-            .map_err(boxed)?;
-        let invocation = handle
-            .block_on(self.identity.invocation_id(self.unit_name))
-            .map_err(boxed)?;
+        let main_pid = self.read_again(&handle, self.identity.main_pid(self.unit_name))?;
+        let invocation = self.read_again(&handle, self.identity.invocation_id(self.unit_name))?;
         let launcher = observe_executable(main_pid).map_err(|_| RecheckRefusal::UnitChanged)?;
         let current = UnitSnapshot {
             main_pid,
@@ -237,6 +236,19 @@ where
         } else {
             Err(RecheckRefusal::UnitChanged)
         }
+    }
+
+    /// One identity read, cut off at the attempt deadline.
+    fn read_again<T>(
+        &self,
+        handle: &tokio::runtime::Handle,
+        read: impl Future<Output = Result<T, I::Error>>,
+    ) -> Result<T, RecheckRefusal> {
+        let limit = tokio::time::Instant::from_std(self.deadline);
+        handle
+            .block_on(tokio::time::timeout_at(limit, read))
+            .map_err(|_| RecheckRefusal::Expired)?
+            .map_err(|error| RecheckRefusal::Identity(Box::new(error)))
     }
 
     fn rechecked(&self) -> Result<ReleaseBinding, RecheckRefusal> {
@@ -333,7 +345,6 @@ impl<S, I, R, O> ProviderReleaseBarrier<S, I, R, O> {
     /// that cannot be created.
     pub fn new(
         attempt: &AdmittedAttempt,
-        mode: SandboxExecutionMode,
         nonce: [u8; 32],
         evidence: BarrierEvidence,
         signer: S,
@@ -348,7 +359,7 @@ impl<S, I, R, O> ProviderReleaseBarrier<S, I, R, O> {
         )
         .map_err(io::Error::from)
         .map_err(BarrierError::Channel)?;
-        let parameters = layout_digest(mode)
+        let parameters = layout_digest(attempt.mode())
             .and_then(|layout| {
                 LaunchParameters::new(
                     attempt.attempt_id(),
@@ -474,6 +485,9 @@ where
 {
     async fn release_inner(&mut self, attempt: &ActiveAttempt) -> Result<(), BarrierError> {
         require_multi_thread()?;
+        if self.attempted {
+            return Err(BarrierError::AlreadyAttempted);
+        }
         let main_pid = self
             .identity
             .main_pid(attempt.unit_name())
@@ -491,13 +505,11 @@ where
             .map_err(|errno| BarrierError::Timeout(io::Error::from(errno)))?;
         // Nothing above consumes `ReadyV1`, so dropping the future before this
         // point leaves the barrier unused; from here the release is one-shot.
-        if self.attempted {
-            return Err(BarrierError::AlreadyAttempted);
-        }
         self.attempted = true;
         let bounded = Bounded {
             check: &self.check,
             deadline_monotonic_ns,
+            deadline: attempt.deadline(),
             identity: &self.identity,
             unit_name: attempt.unit_name(),
             snapshot: UnitSnapshot {
