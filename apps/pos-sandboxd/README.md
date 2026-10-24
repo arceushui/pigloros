@@ -133,16 +133,41 @@ are #443, and unmounting and removing the attempt are #442. A watchdog that
 closed the channel is reported by `ServedProxy::watchdog_expired`, not by the
 termination, which reads a closed channel as a clean close.
 
-Not composed here, and stated so that nothing is assumed: the `ExecStart`
-launcher-mode property and its LPV1 argument, the production `LaunchBarrier`
-and `ReleaseRecheck` adapters over `release_after_ready`, adapter stdin and
-stdout transport, and the real Local namespace. `AdmittedAttempt::check_local`
-binds an admission against the authority heads the attempt was admitted with;
-that the recheck closure belongs to the same admitted entry is the caller's
-contract (`VerifiedRootMount::recheck` enforces it for its own entry).
-Authorization of a Replay exchange set is the caller's: the report that
-supplies it is not verified here. `tokio` gains its `rt` feature for the
-blocking proxy thread.
+`ExecStart=` is requested as `a(sasb)`: the bind-mounted launcher at
+`/.pigloros/release-launcher`, `launch-barrier` and one lowercase-hexadecimal
+LPV1 argument, and read back as path, argument vector and ignore-failure flag.
+`ProviderReleaseBarrier` is the production `LaunchBarrier`. Before the start it
+builds the LPV1 parameters (attempt, a nonce from `fresh_nonce`, SIM1, adapter
+path and arguments, the expected FDL1 digest of the mode) and the
+`SOCK_SEQPACKET` release channel. After the start it reads the unit's current
+`MainPID` and `InvocationID` from the manager, observes `/proc/<MainPID>/exe`
+itself, and bounds the `ReadyV1` receive with a socket timeout equal to the
+time left before the attempt deadline. The blocking receive, the recheck and
+the signed `ReleaseV1` send run under `tokio::task::block_in_place`, so the
+barrier needs a multi-thread Tokio runtime; a current-thread runtime or none
+is refused with `BarrierError::RuntimeFlavor`, already when the launcher
+command is requested, before any unit starts (a test fixes this requirement).
+The receive is bounded by a socket read timeout, because an outer deadline
+cannot preempt a blocking call. After `ReadyV1` verifies, the last-moment
+recheck reads `MainPID`, `InvocationID` and the launcher executable again and
+refuses the release if any changed (`BarrierError::Refused` carries the typed
+`RecheckRefusal`); a barrier releases at most once.
+`AuthorityCheck` is the last-moment recheck: the caller's
+`|| root.recheck(&directory, &entry)`, the cancellation flag the attempt
+lifecycle sets, and the observed readback-set digest behind `ObservedReadback`.
+
+Not composed here, and stated so that nothing is assumed: the observed
+readback-set digest itself (#443 owns the kernel observations and their
+digest, and the provider must supply an `ObservedReadback` before it can
+release), the adapter's mount and inode identity (the composition root
+supplies it in `BarrierEvidence`), the setting of the cancellation flag
+(#442), adapter stdin and stdout transport, and the real Local namespace.
+`AdmittedAttempt::check_local` binds an admission against the authority heads
+the attempt was admitted with; that the recheck closure belongs to the same
+admitted entry is the caller's contract (`VerifiedRootMount::recheck` enforces
+it for its own entry). Authorization of a Replay exchange set is the caller's:
+the report that supplies it is not verified here. `tokio` gains its `rt` and
+`rt-multi-thread` features.
 
 The provider never creates a local process: `connect_system` accepts only a
 Unix-socket system-bus address (zbus's `unixexec` and `ibus` transports would

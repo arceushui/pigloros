@@ -27,6 +27,9 @@ use crate::{
 const X86_64: &[u8] = include_bytes!(
     "../../../../crates/pos-conformance/vectors/systemd-provider-v260.2/systemd-v260.2-x86_64.scs1.cbor"
 );
+type ExecCommands = Vec<(String, Vec<String>, bool)>;
+type ExecStartRecord = (String, Vec<String>, bool, u64, u64, u64, u64, u32, i32, i32);
+
 const MANAGER_PATH: &str = "/org/freedesktop/systemd1";
 const JOB_PATH: &str = "/org/freedesktop/systemd1/job/381";
 const STOP_JOB_PATH: &str = "/org/freedesktop/systemd1/job/382";
@@ -36,7 +39,7 @@ const UNRELATED_UNIT_PATH: &str = "/org/freedesktop/systemd1/unit/unrelated_2ese
 const CONTROL_GROUP_PATH: &str = "/system.slice/pigloros-attempt-test.service";
 const ROOT_DIRECTORY: &str = "/run/pigloros/attempt-381/root";
 const ROOT_IMAGE_POLICY: &str = "root=verity+signed";
-const EXPECTED_PROPERTY_SHAPE: [(&str, &str); 43] = [
+const EXPECTED_PROPERTY_SHAPE: [(&str, &str); 44] = [
     ("Type", "s"),
     ("RootDirectory", "s"),
     ("BindReadOnlyPaths", "a(ssbt)"),
@@ -80,6 +83,7 @@ const EXPECTED_PROPERTY_SHAPE: [(&str, &str); 43] = [
     ("FileDescriptorStoreMax", "u"),
     ("ExtraFileDescriptors", "a(hs)"),
     ("TemporaryFileSystem", "a(ss)"),
+    ("ExecStart", "a(sasb)"),
 ];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -430,6 +434,10 @@ struct RecordingService {
     root_directory: String,
     service_limits: [u64; 7],
     temporary_file_system: Vec<(String, String)>,
+    exec_start: ExecCommands,
+    main_pid: u32,
+    invocation_id: Vec<u8>,
+    failing_identity: Vec<&'static str>,
     property_reads: Arc<AtomicUsize>,
     control_group_reads: Arc<AtomicUsize>,
     control_group: String,
@@ -458,6 +466,10 @@ impl RecordingService {
                 "/work".to_owned(),
                 "size=1000,nosuid,nodev,noexec".to_owned(),
             )],
+            exec_start: expected_exec_start().unwrap_or_default(),
+            main_pid: 4242,
+            invocation_id: vec![0x11; 16],
+            failing_identity: Vec::new(),
             property_reads: Arc::new(AtomicUsize::new(0)),
             control_group_reads: Arc::new(AtomicUsize::new(0)),
             control_group: CONTROL_GROUP_PATH.to_owned(),
@@ -742,6 +754,37 @@ impl RecordingService {
         self.fixed(self.temporary_file_system.clone())
     }
 
+    #[zbus(property, name = "ExecStart")]
+    fn exec_start(&self) -> Vec<ExecStartRecord> {
+        self.record_read();
+        self.exec_start
+            .iter()
+            .map(|(path, arguments, ignore)| {
+                (
+                    path.clone(),
+                    arguments.clone(),
+                    *ignore,
+                    1,
+                    2,
+                    3,
+                    4,
+                    5,
+                    6,
+                    7,
+                )
+            })
+            .collect()
+    }
+
+    #[zbus(property, name = "MainPID")]
+    fn main_pid(&self) -> fdo::Result<u32> {
+        if self.failing_identity.contains(&"MainPID") {
+            Err(fdo::Error::Failed("test MainPID failure".to_owned()))
+        } else {
+            Ok(self.main_pid)
+        }
+    }
+
     #[zbus(property, name = "RootImagePolicy")]
     fn root_image_policy(&self) -> fdo::Result<&'static str> {
         self.record_read();
@@ -749,6 +792,24 @@ impl RecordingService {
             Err(fdo::Error::Failed("test readback failure".to_owned()))
         } else {
             Ok(ROOT_IMAGE_POLICY)
+        }
+    }
+}
+
+/// The unit-level properties of the same object path.
+struct RecordingUnit {
+    invocation_id: Vec<u8>,
+    failing: bool,
+}
+
+#[zbus::interface(name = "org.freedesktop.systemd1.Unit")]
+impl RecordingUnit {
+    #[zbus(property, name = "InvocationID")]
+    fn invocation_id(&self) -> fdo::Result<Vec<u8>> {
+        if self.failing {
+            Err(fdo::Error::Failed("test InvocationID failure".to_owned()))
+        } else {
+            Ok(self.invocation_id.clone())
         }
     }
 }
@@ -796,7 +857,7 @@ async fn generated_proxy_submits_the_exact_closed_request() -> Result<(), Box<dy
     assert_eq!(verified.unit_name(), &name);
     assert_eq!(verified.job().as_str(), JOB_PATH);
     assert_eq!(verified.unit_path(), UNIT_PATH);
-    assert_eq!(verified.requested_readback().len(), 43);
+    assert_eq!(verified.requested_readback().len(), 44);
     assert_eq!(verified.requested_readback()[0].name(), "Type");
     assert_eq!(
         verified.requested_readback()[41].name(),
@@ -1271,6 +1332,99 @@ async fn the_execute_path_port_delegates_to_the_typed_transport() -> Result<(), 
     Ok(())
 }
 
+async fn identity_transport(
+    mutate: impl FnOnce(&mut RecordingService),
+    behavior: ManagerBehavior,
+) -> Result<(SystemdTransientUnitTransport, zbus::Connection), Box<dyn Error>> {
+    let mut service = RecordingService::exact(expected_system_call_filter()?);
+    mutate(&mut service);
+    transport(Arc::new(Mutex::new(None)), behavior, service).await
+}
+
+#[tokio::test]
+async fn the_identity_source_reads_the_units_current_main_pid_and_invocation_id(
+) -> Result<(), Box<dyn Error>> {
+    use crate::UnitIdentitySource;
+
+    let (transport, _server) = identity_transport(|_| (), ManagerBehavior::default()).await?;
+    let name = TransientServiceUnitName::from_attempt_id([0x30; 16])?;
+    assert_eq!(UnitIdentitySource::main_pid(&transport, &name).await?, 4242);
+    assert_eq!(
+        UnitIdentitySource::invocation_id(&transport, &name).await?,
+        [0x11; 16]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_malformed_invocation_id_is_refused() -> Result<(), Box<dyn Error>> {
+    use crate::UnitIdentitySource;
+
+    let name = TransientServiceUnitName::from_attempt_id([0x31; 16])?;
+    let short = |service: &mut RecordingService| service.invocation_id = vec![1, 2, 3];
+    let (transport, _server) = identity_transport(short, ManagerBehavior::default()).await?;
+    assert!(matches!(
+        UnitIdentitySource::invocation_id(&transport, &name).await,
+        Err(SystemdTransientUnitTransportError::InvocationIdMalformed)
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_unreadable_main_pid_is_refused() -> Result<(), Box<dyn Error>> {
+    use crate::UnitIdentitySource;
+
+    let name = TransientServiceUnitName::from_attempt_id([0x33; 16])?;
+    let failing = |service: &mut RecordingService| service.failing_identity = vec!["MainPID"];
+    let (transport, _server) = identity_transport(failing, ManagerBehavior::default()).await?;
+    assert!(matches!(
+        UnitIdentitySource::main_pid(&transport, &name).await,
+        Err(SystemdTransientUnitTransportError::PropertyReadback {
+            property: "MainPID",
+            ..
+        })
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_unreadable_invocation_id_is_refused() -> Result<(), Box<dyn Error>> {
+    use crate::UnitIdentitySource;
+
+    let name = TransientServiceUnitName::from_attempt_id([0x34; 16])?;
+    let failing = |service: &mut RecordingService| service.failing_identity = vec!["InvocationID"];
+    let (transport, _server) = identity_transport(failing, ManagerBehavior::default()).await?;
+    assert!(matches!(
+        UnitIdentitySource::invocation_id(&transport, &name).await,
+        Err(SystemdTransientUnitTransportError::PropertyReadback {
+            property: "InvocationID",
+            ..
+        })
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_unknown_unit_has_no_identity() -> Result<(), Box<dyn Error>> {
+    use crate::UnitIdentitySource;
+
+    let behavior = ManagerBehavior {
+        unit_lookup: UnitLookupBehavior::Reject,
+        ..ManagerBehavior::default()
+    };
+    let (transport, _server) = identity_transport(|_| (), behavior).await?;
+    let name = TransientServiceUnitName::from_attempt_id([0x32; 16])?;
+    assert!(matches!(
+        UnitIdentitySource::main_pid(&transport, &name).await,
+        Err(SystemdTransientUnitTransportError::UnitLookup(_))
+    ));
+    assert!(matches!(
+        UnitIdentitySource::invocation_id(&transport, &name).await,
+        Err(SystemdTransientUnitTransportError::UnitLookup(_))
+    ));
+    Ok(())
+}
+
 #[tokio::test]
 async fn exact_service_cgroup_is_reverse_mapped_and_kernel_observed() -> Result<(), Box<dyn Error>>
 {
@@ -1587,6 +1741,13 @@ async fn transport(
                 behavior,
             },
         )?
+        .serve_at(
+            UNIT_PATH,
+            RecordingUnit {
+                invocation_id: service.invocation_id.clone(),
+                failing: service.failing_identity.contains(&"InvocationID"),
+            },
+        )?
         .serve_at(UNIT_PATH, service)?
         .build();
     let client = Builder::authenticated_socket(client_socket, guid)?
@@ -1598,6 +1759,19 @@ async fn transport(
     let transport =
         SystemdTransientUnitTransport::connect_with(std::future::ready(Ok(client))).await?;
     Ok((transport, server))
+}
+
+/// The `ExecStart=` command the fixture request asks for.
+fn expected_exec_start() -> Result<ExecCommands, Box<dyn Error>> {
+    let request = request(LaunchMode::AirGapped)?;
+    Ok(request
+        .requested_properties()
+        .iter()
+        .find_map(|property| match property.value() {
+            SystemdTransientUnitValue::ExecStart(commands) => Some(commands.clone()),
+            _other => None,
+        })
+        .unwrap_or_default())
 }
 
 fn expected_system_call_filter() -> Result<Vec<String>, Box<dyn Error>> {
@@ -1620,6 +1794,7 @@ fn request(mode: LaunchMode) -> Result<TransientUnitRequest, Box<dyn Error>> {
         LauncherSource::new("/usr/lib/pigloros/release-launcher")?,
         mode,
         descriptor()?,
+        crate::test_fixtures::invocation()?,
     );
     let limits = SystemdServiceLimits::from_effective_limits(&complete_effective_limits())?;
     Ok(TransientUnitRequest::compile(inputs, filter, &limits))

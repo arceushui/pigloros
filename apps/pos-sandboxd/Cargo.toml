@@ -30,6 +30,7 @@ thiserror = { workspace = true }
 tokio = { version = "1", default-features = false, features = [
   "net",
   "rt",
+  "rt-multi-thread",
   "time",
 ] }
 zbus = { version = "=5.19.0", default-features = false, features = ["tokio"] }
