@@ -455,15 +455,22 @@ fn release_window(deadline: Instant) -> Result<(Duration, u64), BarrierError> {
         .filter(|remaining| !remaining.is_zero())
         .ok_or(BarrierError::Expired)?;
     let now = clock_gettime(ClockId::Monotonic);
-    let nanoseconds_per_second = i128::from(NANOSECONDS_PER_SECOND);
-    let absolute = i128::from(now.tv_sec) * nanoseconds_per_second
-        + i128::from(now.tv_nsec)
-        + i128::from(remaining.as_secs()) * nanoseconds_per_second
-        + i128::from(remaining.subsec_nanos());
-    u64::try_from(absolute)
-        .ok()
+    absolute_deadline_ns(i128::from(now.tv_sec), i128::from(now.tv_nsec), remaining)
         .map(|absolute| (remaining, absolute))
         .ok_or(BarrierError::Expired)
+}
+
+/// `CLOCK_MONOTONIC` nanoseconds at `now` plus `remaining`, if it fits.
+fn absolute_deadline_ns(
+    now_seconds: i128,
+    now_nanoseconds: i128,
+    remaining: Duration,
+) -> Option<u64> {
+    let nanoseconds_per_second = i128::from(NANOSECONDS_PER_SECOND);
+    let absolute = (now_seconds + i128::from(remaining.as_secs())) * nanoseconds_per_second
+        + now_nanoseconds
+        + i128::from(remaining.subsec_nanos());
+    u64::try_from(absolute).ok()
 }
 
 fn require_multi_thread() -> Result<(), BarrierError> {

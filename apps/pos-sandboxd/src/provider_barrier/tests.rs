@@ -686,6 +686,13 @@ fn the_launcher_executable_is_observed_by_mount_and_inode() -> TestResult {
 }
 
 #[test]
+fn the_absolute_deadline_adds_every_component() {
+    let remaining = Duration::new(2, 300);
+    assert_eq!(absolute_deadline_ns(5, 250, remaining), Some(7_000_000_550));
+    assert_eq!(absolute_deadline_ns(-1, 0, Duration::ZERO), None);
+}
+
+#[test]
 fn the_release_window_is_the_time_left_on_the_monotonic_clock() -> TestResult {
     let before = monotonic_ns();
     let (remaining, absolute) = release_window(Instant::now() + Duration::from_secs(20))?;
