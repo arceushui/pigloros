@@ -974,7 +974,7 @@ class CiWorkflowPolicyTests(unittest.TestCase):
                 {
                     "ninth-heavy-job": {
                         "needs": ["ci_change_scope", "cargo-crap"],
-                        "runs-on": "ubuntu-latest",
+                        "runs-on": "ubuntu-24.04",
                         "steps": [{"run": "true"}],
                     }
                 }
