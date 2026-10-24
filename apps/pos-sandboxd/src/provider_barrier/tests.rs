@@ -77,6 +77,22 @@ impl TestIdentity {
         Self::behaving(pid, Behaviour::Normal)
     }
 
+    fn main_pid_after(&self, reads: usize) -> Result<u32, IdentityDown> {
+        match self.behaviour {
+            Behaviour::MainPidDown => Err(IdentityDown),
+            Behaviour::MainPidDrifts if reads > 0 => Ok(u32::MAX),
+            _ => Ok(self.pid),
+        }
+    }
+
+    fn main_pid_hangs(&self, reads: usize) -> bool {
+        match self.behaviour {
+            Behaviour::Hangs => true,
+            Behaviour::HangsAfterFirstRead => reads > 0,
+            _ => false,
+        }
+    }
+
     const fn behaving(pid: u32, behaviour: Behaviour) -> Self {
         Self {
             pid,
@@ -95,16 +111,8 @@ impl UnitIdentitySource for TestIdentity {
         _unit_name: &TransientServiceUnitName,
     ) -> impl Future<Output = Result<u32, IdentityDown>> + Send {
         let reads = self.main_pid_reads.fetch_add(1, Ordering::SeqCst);
-        let outcome = match self.behaviour {
-            Behaviour::MainPidDown => Err(IdentityDown),
-            Behaviour::MainPidDrifts if reads > 0 => Ok(u32::MAX),
-            _ => Ok(self.pid),
-        };
-        let hangs = match self.behaviour {
-            Behaviour::Hangs => true,
-            Behaviour::HangsAfterFirstRead => reads > 0,
-            _ => false,
-        };
+        let outcome = self.main_pid_after(reads);
+        let hangs = self.main_pid_hangs(reads);
         async move {
             if hangs {
                 std::future::pending::<()>().await;
