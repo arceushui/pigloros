@@ -518,6 +518,7 @@ async fn the_unit_end_is_handed_over_once_and_the_invocation_carries_the_paramet
         LauncherInvocation::from_parameters(&barrier.parameters)?
     );
     assert_eq!(barrier.parameters.adapter_path, "/usr/bin/adapter");
+    assert_eq!(barrier.adapter_digest, [0x61; 32]);
     assert_eq!(barrier.parameters.arguments, ["--check"]);
     assert_eq!(barrier.parameters.sim1_digest, [0x51; 32]);
     assert!(barrier.take_unit_end().is_ok());

@@ -436,7 +436,7 @@ fn observe_executable(pid: u32) -> Result<FdIdentity, BarrierError> {
         CWD,
         format!("/proc/{pid}/exe").as_str(),
         AtFlags::empty(),
-        StatxFlags::INO | StatxFlags::MNT_ID,
+        StatxFlags::INO.union(StatxFlags::MNT_ID),
     )
     .ok()
     .filter(|stat| StatxFlags::from_bits_retain(stat.stx_mask).contains(StatxFlags::MNT_ID))
