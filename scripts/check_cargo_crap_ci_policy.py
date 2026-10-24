@@ -83,7 +83,7 @@ STAGED_MAIN_JOBS = {
         "cargo-crap",
     ],
     "audit": ["ci_change_scope", "cargo-crap"],
-    "docker-build": ["ci_change_scope", "cargo-crap"],
+    "docker-build": ["ci_change_scope", "cargo-crap", "third-party-notices"],
     "world-client-wasm": ["ci_change_scope", "cargo-crap"],
     "world-client-browser-parity": ["ci_change_scope", "world-client-wasm"],
     "asan-build": ["ci_change_scope", "cargo-crap"],
