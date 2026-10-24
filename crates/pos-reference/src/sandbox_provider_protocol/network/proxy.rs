@@ -86,13 +86,13 @@ impl LocalNetworkSession {
 
 /// One Local attempt's admission and FD 3 channel, bound by the provider.
 ///
-/// The provider implements this for a type it alone can mint, from its active
-/// attempt record: that record proves the attempt, the current authority
+/// The provider implements this for a type it alone can mint, from the checks
+/// of its admitted attempt: they prove the attempt, the admitted authority
 /// heads, the namespace and firewall, and ownership of FD 3. [`serve_proxy`]
 /// accepts only a provider-supplied binding, so a bare admission and an
-/// arbitrary channel are not served by the provider. This crate cannot verify those proofs itself, because they live
-/// in the provider crate; an implementation that does not check them is a
-/// provider defect.
+/// arbitrary channel are not served by the provider. This crate cannot verify
+/// those proofs itself, because they live in the provider crate; an
+/// implementation that does not check them is a provider defect.
 pub trait LocalProxyBinding {
     /// The host-service stream, which must be a stream socket.
     type Channel: Read + Write + AsFd;

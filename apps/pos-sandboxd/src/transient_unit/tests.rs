@@ -771,9 +771,25 @@ fn pinned_names() -> [(SystemdDynamicPropertyKind, &'static str); 8] {
     ]
 }
 
+/// Names every dynamic kind in one arm and no wildcard, so a new kind does not
+/// compile until it is added here and to the pinned tables.
+const fn is_dynamic_kind(kind: SystemdDynamicPropertyKind) -> bool {
+    match kind {
+        SystemdDynamicPropertyKind::RootDirectory
+        | SystemdDynamicPropertyKind::BindReadOnlyPaths
+        | SystemdDynamicPropertyKind::SystemCallFilter
+        | SystemdDynamicPropertyKind::RestrictAddressFamilies
+        | SystemdDynamicPropertyKind::OperatingLimit(_)
+        | SystemdDynamicPropertyKind::FileDescriptorStoreMax
+        | SystemdDynamicPropertyKind::ExtraFileDescriptors
+        | SystemdDynamicPropertyKind::TemporaryFileSystem => true,
+    }
+}
+
 #[test]
 fn every_dynamic_kind_keeps_its_systemd_property_name() {
     for (kind, name) in pinned_names() {
+        assert!(is_dynamic_kind(kind));
         assert_eq!(kind.name(), name);
     }
 }
@@ -815,9 +831,24 @@ fn pinned_signatures() -> Vec<(SystemdTransientUnitValue, &'static str)> {
     ]
 }
 
+/// Names every value kind in one arm and no wildcard; see `is_dynamic_kind`.
+const fn is_value_kind(value: &SystemdTransientUnitValue) -> bool {
+    match value {
+        SystemdTransientUnitValue::Static(_)
+        | SystemdTransientUnitValue::RootDirectory(_)
+        | SystemdTransientUnitValue::BindReadOnlyPaths(_)
+        | SystemdTransientUnitValue::SystemCallFilter(_)
+        | SystemdTransientUnitValue::RestrictAddressFamilies(_)
+        | SystemdTransientUnitValue::Numeric(_)
+        | SystemdTransientUnitValue::ExtraFileDescriptors(_)
+        | SystemdTransientUnitValue::TemporaryFileSystem(_) => true,
+    }
+}
+
 #[test]
 fn every_value_kind_keeps_its_dbus_signature() {
     for (value, expected) in pinned_signatures() {
+        assert!(is_value_kind(&value));
         let property = SystemdTransientUnitProperty::new(
             SystemdTransientUnitPropertyKind::Dynamic(
                 SystemdDynamicPropertyKind::FileDescriptorStoreMax,

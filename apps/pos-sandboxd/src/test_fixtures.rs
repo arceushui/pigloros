@@ -167,6 +167,6 @@ pub fn bound_proxy<C>(
         crate::EstablishedNetwork::new(ATTEMPT, connector),
         channel,
     )?;
-    let (binding, connector) = checked.bind(&active()?);
+    let (binding, connector) = checked.bind();
     Ok((adapter, binding, connector))
 }
