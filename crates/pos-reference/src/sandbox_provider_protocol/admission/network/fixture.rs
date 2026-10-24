@@ -109,6 +109,23 @@ impl LocalNetworkAdmission {
     }
 }
 
+impl LocalNetworkAdmission {
+    /// The same fixture admission for another request, for tests only.
+    #[must_use]
+    pub const fn with_request_id(mut self, request_id: [u8; 16]) -> Self {
+        self.grant.0.request_id = request_id;
+        self
+    }
+
+    /// The same fixture admission expecting another launch policy digest, for
+    /// tests only.
+    #[must_use]
+    pub const fn with_expected_launch_policy_digest(mut self, digest: [u8; 32]) -> Self {
+        self.grant.0.expected_launch_policy_digest = digest;
+        self
+    }
+}
+
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {

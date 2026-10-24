@@ -17,15 +17,18 @@
 //! unavailable rather than reaching the host network.
 
 use std::error::Error;
+use std::future::{poll_fn, Future};
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpStream};
 use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::net::UnixStream;
+use std::pin::pin;
 use std::sync::Arc;
+use std::task::Poll;
 use std::time::{Duration, Instant};
 
 use pos_reference::sandbox_provider_protocol::{
-    serve_proxy, LocalNetworkAdmission, LocalNetworkSession, LocalProxyBinding,
+    serve_proxy, AdmissionGrant, LocalNetworkAdmission, LocalNetworkSession, LocalProxyBinding,
     NetworkCaptureStore, NetworkEndpointConnector,
 };
 use zbus::OwnedFd;
@@ -148,10 +151,19 @@ pub enum LocalProxyBindError {
     /// The admission's grant names another attempt.
     #[error("admission belongs to another attempt")]
     Attempt,
-    /// The grant names another SIM1, or other authority heads or epochs than
-    /// the attempt was admitted with.
+    /// The grant names another request than the attempt was admitted for.
+    #[error("admission belongs to another request")]
+    Request,
+    /// The grant carries another authority block, or other authority heads or
+    /// epochs, than the attempt was admitted with.
     #[error("admission authority differs from the active attempt")]
     Authority,
+    /// The grant expects another launch policy than the admitted one.
+    #[error("admission expects another launch policy")]
+    LaunchPolicy,
+    /// The grant plans an endpoint the admitted launch policy does not allow.
+    #[error("admission plans an endpoint the launch policy does not allow")]
+    Capability,
     /// The namespace belongs to another attempt.
     #[error("network namespace belongs to another attempt")]
     Namespace,
@@ -188,21 +200,7 @@ impl AdmittedAttempt {
         network: EstablishedNetwork<C>,
         channel: HostServiceChannel,
     ) -> Result<CheckedLocal<C>, LocalProxyBindError> {
-        let grant = admission.grant();
-        let authority = self.authority();
-        if grant.attempt_id != self.attempt_id() {
-            return Err(LocalProxyBindError::Attempt);
-        }
-        if grant.authority.sim1_digest != self.sim1_digest()
-            || grant.authority.apt1_digest != authority.apt1_digest
-            || grant.authority.trs1_digest != authority.trs1_digest
-            || grant.authority.rvs1_digest != authority.rvs1_digest
-            || grant.trust_epoch != authority.trust_epoch
-            || grant.revocation_epoch != authority.revocation_epoch
-            || grant.policy_epoch != authority.policy_epoch
-        {
-            return Err(LocalProxyBindError::Authority);
-        }
+        self.check_grant(&admission)?;
         if network.attempt_id != self.attempt_id() {
             return Err(LocalProxyBindError::Namespace);
         }
@@ -215,6 +213,44 @@ impl AdmittedAttempt {
             network,
             channel,
         })
+    }
+}
+
+impl AdmittedAttempt {
+    /// Check the grant against everything the admitted launch policy defines.
+    fn check_grant(&self, admission: &LocalNetworkAdmission) -> Result<(), LocalProxyBindError> {
+        let grant = admission.grant();
+        if grant.attempt_id != self.attempt_id() {
+            return Err(LocalProxyBindError::Attempt);
+        }
+        if grant.request_id != self.request_id() {
+            return Err(LocalProxyBindError::Request);
+        }
+        if grant.authority != *self.admission_authority() || !self.heads_match(grant) {
+            return Err(LocalProxyBindError::Authority);
+        }
+        if grant.expected_launch_policy_digest != self.launch_policy_digest() {
+            return Err(LocalProxyBindError::LaunchPolicy);
+        }
+        let allowed = self.network_capabilities();
+        if !admission
+            .exchanges()
+            .all(|(_, capability)| allowed.contains(capability))
+        {
+            return Err(LocalProxyBindError::Capability);
+        }
+        Ok(())
+    }
+
+    /// Whether the grant names the authority heads and epochs of the admission.
+    fn heads_match(&self, grant: &AdmissionGrant) -> bool {
+        let authority = self.authority();
+        grant.authority.apt1_digest == authority.apt1_digest
+            && grant.authority.trs1_digest == authority.trs1_digest
+            && grant.authority.rvs1_digest == authority.rvs1_digest
+            && grant.trust_epoch == authority.trust_epoch
+            && grant.revocation_epoch == authority.revocation_epoch
+            && grant.policy_epoch == authority.policy_epoch
     }
 }
 
@@ -255,6 +291,33 @@ pub struct BoundLocalProxy {
 /// a session that is blocked on the adapter. It has no public constructor.
 #[derive(Clone, Debug)]
 pub struct HostServiceStream(Arc<UnixStream>);
+
+/// Drive `first` and `second` together and return both outputs.
+async fn both<A: Future, B: Future>(first: A, second: B) -> (A::Output, B::Output) {
+    let (mut first, mut second) = (pin!(first), pin!(second));
+    let (mut first_out, mut second_out) = (None, None);
+    poll_fn(|context| {
+        if first_out.is_none() {
+            if let Poll::Ready(output) = first.as_mut().poll(context) {
+                first_out = Some(output);
+            }
+        }
+        if second_out.is_none() {
+            if let Poll::Ready(output) = second.as_mut().poll(context) {
+                second_out = Some(output);
+            }
+        }
+        match (first_out.take(), second_out.take()) {
+            (Some(first), Some(second)) => Poll::Ready((first, second)),
+            (first, second) => {
+                first_out = first;
+                second_out = second;
+                Poll::Pending
+            }
+        }
+    })
+    .await
+}
 
 /// Closes the channel when dropped.
 struct CloseOnDrop(HostServiceStream);
@@ -327,6 +390,28 @@ impl BoundLocalProxy {
     where
         C: NetworkEndpointConnector + Send + 'static,
     {
+        self.serve_until_or(connector, store, deadline, async {})
+            .await
+            .0
+    }
+
+    /// [`Self::serve_until`], running `on_expiry` concurrently with the join
+    /// of the proxy thread once `deadline` has passed.
+    ///
+    /// The second value is `on_expiry`'s output when the deadline passed
+    /// before the session ended, and `None` otherwise. `on_expiry` is not
+    /// polled before the deadline, and is dropped unfinished if this future is.
+    pub async fn serve_until_or<C, F>(
+        self,
+        connector: C,
+        store: Arc<NetworkCaptureStore>,
+        deadline: Instant,
+        on_expiry: F,
+    ) -> (Result<ServedProxy, ServeError>, Option<F::Output>)
+    where
+        C: NetworkEndpointConnector + Send + 'static,
+        F: Future,
+    {
         let closer = self.channel.clone();
         // Dropping this future mid-await must not leave the proxy thread
         // serving a channel nobody supervises any more.
@@ -338,20 +423,21 @@ impl BoundLocalProxy {
         });
         let timed =
             tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), &mut task).await;
-        let watchdog_expired = timed.is_err();
-        if watchdog_expired {
-            closer.close();
-        }
-        let session = match timed {
-            Ok(joined) => joined,
-            Err(_elapsed) => task.await,
+        let (session, expired) = match timed {
+            Ok(joined) => (joined, None),
+            Err(_elapsed) => {
+                closer.close();
+                let (joined, expired) = both(task, on_expiry).await;
+                (joined, Some(expired))
+            }
         };
-        session
+        let served = session
             .map(|session| ServedProxy {
                 session,
-                watchdog_expired,
+                watchdog_expired: expired.is_some(),
             })
-            .map_err(ServeError)
+            .map_err(ServeError);
+        (served, expired)
     }
 }
 

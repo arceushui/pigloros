@@ -17,8 +17,9 @@ use std::{
 
 use pos_conformance::SandboxSyscallSetV1;
 use pos_reference::sandbox_provider_protocol::{
-    LocalNetworkTermination, NetworkCaptureStore, NetworkExchangePlan, NetworkExchangeReply,
-    NetworkExchangeRequest, SandboxArchitecture, SandboxExecutionMode, SandboxLimit,
+    LocalNetworkTermination, NetworkCapability, NetworkCaptureStore, NetworkExchangePlan,
+    NetworkExchangeReply, NetworkExchangeRequest, SandboxArchitecture, SandboxExecutionMode,
+    SandboxLimit,
 };
 use zbus::OwnedFd;
 
@@ -629,7 +630,8 @@ impl Scenario {
         watchdog_ms: u64,
     ) -> TestResult<ExecuteJob> {
         Ok(ExecuteJob {
-            attempt: AdmittedAttempt::for_test(attempt_id, authority(), mode)?,
+            attempt: AdmittedAttempt::for_test(attempt_id, authority(), mode)?
+                .allowing(planned_capabilities(&plan)),
             launcher_source: LauncherSource::new("/usr/lib/pigloros/release-launcher")?,
             system_call_filter: filter()?,
             service_limits: SystemdServiceLimits::from_effective_limits(&limits(watchdog_ms))?,
@@ -685,6 +687,17 @@ impl Scenario {
 
     fn cgroup_kills(&self) -> usize {
         self.host.cgroup_kills.load(Ordering::SeqCst)
+    }
+}
+
+/// The endpoints a Local plan exchanges with, which the launch policy allows.
+fn planned_capabilities(plan: &ModePlan) -> Vec<NetworkCapability> {
+    match plan {
+        ModePlan::Local { admission } => admission
+            .exchanges()
+            .map(|(_, capability)| capability.clone())
+            .collect(),
+        _ => Vec::new(),
     }
 }
 
