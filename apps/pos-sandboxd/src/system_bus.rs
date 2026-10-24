@@ -877,6 +877,9 @@ async fn read_dynamic_property(
     }
 }
 
+/// The manager's `a(sasbttttuii)` command record.
+type ExecStartCommand = (String, Vec<String>, bool, u64, u64, u64, u64, u32, i32, i32);
+
 /// The path, argument vector and ignore-failure flag of each command; the
 /// manager's timestamps, PID and status fields are not part of the request.
 fn exec_start_commands(commands: Vec<ExecStartCommand>) -> Vec<(String, Vec<String>, bool)> {
@@ -885,9 +888,6 @@ fn exec_start_commands(commands: Vec<ExecStartCommand>) -> Vec<(String, Vec<Stri
         .map(|(path, arguments, ignore_failure, ..)| (path, arguments, ignore_failure))
         .collect()
 }
-
-/// The manager's `a(sasbttttuii)` command record.
-type ExecStartCommand = (String, Vec<String>, bool, u64, u64, u64, u64, u32, i32, i32);
 
 /// The last dynamic kinds; `TemporaryFileSystem` is the final one.
 async fn read_tail_property(

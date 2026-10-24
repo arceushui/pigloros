@@ -262,11 +262,13 @@ impl LauncherInvocation {
 }
 
 fn lower_hex(bytes: &[u8]) -> String {
-    bytes
-        .iter()
-        .flat_map(|byte| [byte >> 4, byte & 0x0f])
-        .map(|nibble| char::from_digit(u32::from(nibble), 16).unwrap_or('0'))
-        .collect()
+    use std::fmt::Write;
+
+    bytes.iter().fold(String::new(), |mut hex, byte| {
+        // Writing to a `String` cannot fail.
+        write!(hex, "{byte:02x}").ok();
+        hex
+    })
 }
 
 /// The verified attempt root, rechecked immediately before launch (ADR-087
@@ -417,16 +419,23 @@ impl SystemdTransientUnitValue {
             Self::ExtraFileDescriptors(value) => {
                 clone_descriptors(value).map(Self::ExtraFileDescriptors)
             }
-            lists => lists.clone_lists().ok_or(zvariant::Error::IncorrectType),
+            lists => lists.clone_lists(),
         }
     }
 
-    /// Clone the list-valued kinds that carry no descriptor.
-    fn clone_lists(&self) -> Option<Self> {
+    /// Clone the list-valued kinds that carry no descriptor. Every other kind
+    /// is named, so a new kind does not compile until it is placed.
+    fn clone_lists(&self) -> Result<Self, zvariant::Error> {
         match self {
-            Self::TemporaryFileSystem(value) => Some(Self::TemporaryFileSystem(value.clone())),
-            Self::ExecStart(value) => Some(Self::ExecStart(value.clone())),
-            _ => None,
+            Self::TemporaryFileSystem(value) => Ok(Self::TemporaryFileSystem(value.clone())),
+            Self::ExecStart(value) => Ok(Self::ExecStart(value.clone())),
+            Self::Static(_)
+            | Self::RootDirectory(_)
+            | Self::BindReadOnlyPaths(_)
+            | Self::SystemCallFilter(_)
+            | Self::RestrictAddressFamilies(_)
+            | Self::Numeric(_)
+            | Self::ExtraFileDescriptors(_) => Err(zvariant::Error::IncorrectType),
         }
     }
 }

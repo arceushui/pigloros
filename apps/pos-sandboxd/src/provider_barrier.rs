@@ -26,6 +26,7 @@
 //! behind [`ObservedReadback`].
 
 use std::{
+    cell::RefCell,
     error::Error,
     fs::File,
     future::Future,
@@ -102,6 +103,30 @@ pub trait ObservedReadback {
 #[error("the observed readback set is unavailable")]
 pub struct ObservedReadbackUnavailable;
 
+/// Why the last-moment recheck refused the release. The release barrier only
+/// reports that it refused; this keeps the cause for the attempt lifecycle
+/// (#442) and the classifier (#443).
+#[derive(Debug, thiserror::Error)]
+pub enum RecheckRefusal {
+    /// The verified root, current authority or the control floor no longer
+    /// holds.
+    #[error("the verified root could not be rechecked")]
+    Root(#[source] ImageActivationError),
+    /// The attempt was cancelled.
+    #[error("the attempt was cancelled")]
+    Cancelled,
+    /// No observed readback set exists.
+    #[error("no observed readback set exists")]
+    Observation(#[source] ObservedReadbackUnavailable),
+    /// The manager's identity of the unit could not be read again.
+    #[error("the unit identity could not be read again")]
+    Identity(#[source] Box<dyn Error + Send + Sync>),
+    /// The unit's `MainPID`, `InvocationID` or launcher executable changed
+    /// after `ReadyV1` was verified against them.
+    #[error("the unit identity changed after ReadyV1")]
+    UnitChanged,
+}
+
 /// The last-moment recheck before `ReleaseV1` (ADR-069: current RVS1, epochs,
 /// cancellation, mount identity and observations).
 ///
@@ -142,45 +167,95 @@ where
         }
     }
 
-    fn binding(&self, deadline_monotonic_ns: u64) -> Result<ReleaseBinding, ReleaseBarrierError> {
-        (self.root)()
-            .map_err(|_| ReleaseBarrierError::Recheck)
-            .and_then(|_checked| {
-                if self.cancelled.load(Ordering::SeqCst) {
-                    Err(ReleaseBarrierError::Recheck)
-                } else {
-                    self.observed
-                        .observed_digest()
-                        .map_err(|_| ReleaseBarrierError::Recheck)
-                }
-            })
-            .map(|observed_readback_digest| ReleaseBinding {
-                trs1_digest: self.authority.trs1_digest,
-                rvs1_digest: self.authority.rvs1_digest,
-                apt1_digest: self.authority.apt1_digest,
-                trust_epoch: self.authority.trust_epoch,
-                revocation_epoch: self.authority.revocation_epoch,
-                policy_epoch: self.authority.policy_epoch,
-                expected_readback_digest: self.expected_readback_digest,
-                observed_readback_digest,
-                deadline_monotonic_ns,
-            })
+    fn binding(&self, deadline_monotonic_ns: u64) -> Result<ReleaseBinding, RecheckRefusal> {
+        (self.root)().map_err(RecheckRefusal::Root)?;
+        if self.cancelled.load(Ordering::SeqCst) {
+            return Err(RecheckRefusal::Cancelled);
+        }
+        let observed_readback_digest = self
+            .observed
+            .observed_digest()
+            .map_err(RecheckRefusal::Observation)?;
+        Ok(ReleaseBinding {
+            trs1_digest: self.authority.trs1_digest,
+            rvs1_digest: self.authority.rvs1_digest,
+            apt1_digest: self.authority.apt1_digest,
+            trust_epoch: self.authority.trust_epoch,
+            revocation_epoch: self.authority.revocation_epoch,
+            policy_epoch: self.authority.policy_epoch,
+            expected_readback_digest: self.expected_readback_digest,
+            observed_readback_digest,
+            deadline_monotonic_ns,
+        })
     }
 }
 
-/// An [`AuthorityCheck`] with the release deadline of this attempt.
-struct Bounded<'a, R, O> {
-    check: &'a AuthorityCheck<R, O>,
-    deadline_monotonic_ns: u64,
+/// What the unit looked like when `ReadyV1` was verified against it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct UnitSnapshot {
+    main_pid: u32,
+    invocation: [u8; 16],
+    launcher: FdIdentity,
 }
 
-impl<R, O> ReleaseRecheck for Bounded<'_, R, O>
+/// An [`AuthorityCheck`] with the release deadline of this attempt, and the
+/// unit identity it must still match when the recheck runs.
+struct Bounded<'a, R, O, I> {
+    check: &'a AuthorityCheck<R, O>,
+    deadline_monotonic_ns: u64,
+    identity: &'a I,
+    unit_name: &'a TransientServiceUnitName,
+    snapshot: UnitSnapshot,
+    refusal: RefCell<Option<RecheckRefusal>>,
+}
+
+impl<R, O, I> Bounded<'_, R, O, I>
 where
     R: Fn() -> Result<CheckedRoot, ImageActivationError>,
     O: ObservedReadback,
+    I: UnitIdentitySource,
+{
+    /// Read the unit identity again, as the last step before signing. Runs
+    /// under `block_in_place` on a multi-thread runtime.
+    fn unit_unchanged(&self) -> Result<(), RecheckRefusal> {
+        let handle = tokio::runtime::Handle::current();
+        let boxed = |error: I::Error| RecheckRefusal::Identity(Box::new(error));
+        let main_pid = handle
+            .block_on(self.identity.main_pid(self.unit_name))
+            .map_err(boxed)?;
+        let invocation = handle
+            .block_on(self.identity.invocation_id(self.unit_name))
+            .map_err(boxed)?;
+        let launcher = observe_executable(main_pid).map_err(|_| RecheckRefusal::UnitChanged)?;
+        let current = UnitSnapshot {
+            main_pid,
+            invocation,
+            launcher,
+        };
+        if current == self.snapshot {
+            Ok(())
+        } else {
+            Err(RecheckRefusal::UnitChanged)
+        }
+    }
+
+    fn rechecked(&self) -> Result<ReleaseBinding, RecheckRefusal> {
+        self.unit_unchanged()?;
+        self.check.binding(self.deadline_monotonic_ns)
+    }
+}
+
+impl<R, O, I> ReleaseRecheck for Bounded<'_, R, O, I>
+where
+    R: Fn() -> Result<CheckedRoot, ImageActivationError>,
+    O: ObservedReadback,
+    I: UnitIdentitySource,
 {
     fn recheck(&self) -> Result<ReleaseBinding, ReleaseBarrierError> {
-        self.check.binding(self.deadline_monotonic_ns)
+        self.rechecked().map_err(|refusal| {
+            *self.refusal.borrow_mut() = Some(refusal);
+            ReleaseBarrierError::Recheck
+        })
     }
 }
 
@@ -223,10 +298,19 @@ pub enum BarrierError {
     /// `ReadyV1` was refused or `ReleaseV1` could not be sent.
     #[error(transparent)]
     Release(#[from] ReleaseBarrierError),
+    /// The last-moment recheck refused the release, for this reason.
+    #[error("the release was refused")]
+    Refused(#[source] RecheckRefusal),
+    /// A release was already attempted; `ReadyV1` and `ReleaseV1` are single
+    /// use and never retried.
+    #[error("a release was already attempted")]
+    AlreadyAttempted,
 }
 
 /// The production [`LaunchBarrier`].
 pub struct ProviderReleaseBarrier<S, I, R, O> {
+    /// The provider's end of the channel (`std` type; the unit's end below is
+    /// the `zvariant` type that D-Bus passes).
     provider_end: std::os::fd::OwnedFd,
     unit_end: Option<OwnedFd>,
     parameters: LaunchParameters,
@@ -236,6 +320,7 @@ pub struct ProviderReleaseBarrier<S, I, R, O> {
     identity: I,
     check: AuthorityCheck<R, O>,
     sent: Option<ExecutionRelease>,
+    attempted: bool,
 }
 
 impl<S, I, R, O> ProviderReleaseBarrier<S, I, R, O> {
@@ -285,6 +370,7 @@ impl<S, I, R, O> ProviderReleaseBarrier<S, I, R, O> {
             identity,
             check,
             sent: None,
+            attempted: false,
         })
     }
 
@@ -398,18 +484,39 @@ where
             .invocation_id(attempt.unit_name())
             .await
             .map_err(|error| BarrierError::Identity(Box::new(error)))?;
-        let expected = self.expected(invocation, observe_executable(main_pid)?);
+        let launcher = observe_executable(main_pid)?;
+        let expected = self.expected(invocation, launcher);
         let (remaining, deadline_monotonic_ns) = release_window(attempt.deadline())?;
         set_socket_timeout(&self.provider_end, Timeout::Recv, Some(remaining))
             .map_err(|errno| BarrierError::Timeout(io::Error::from(errno)))?;
+        // Nothing above consumes `ReadyV1`, so dropping the future before this
+        // point leaves the barrier unused; from here the release is one-shot.
+        if self.attempted {
+            return Err(BarrierError::AlreadyAttempted);
+        }
+        self.attempted = true;
         let bounded = Bounded {
             check: &self.check,
             deadline_monotonic_ns,
+            identity: &self.identity,
+            unit_name: attempt.unit_name(),
+            snapshot: UnitSnapshot {
+                main_pid,
+                invocation,
+                launcher,
+            },
+            refusal: RefCell::new(None),
         };
         let provider_end = &self.provider_end;
         let signer = &self.signer;
-        let release = tokio::task::block_in_place(|| {
+        let released = tokio::task::block_in_place(|| {
             release_after_ready(provider_end, main_pid, &expected, &bounded, signer)
+        });
+        let release = released.map_err(|error| {
+            bounded
+                .refusal
+                .take()
+                .map_or(BarrierError::Release(error), BarrierError::Refused)
         })?;
         self.sent = Some(release);
         Ok(())
@@ -441,6 +548,8 @@ where
     type Error = BarrierError;
 
     fn launcher_invocation(&self) -> Result<LauncherInvocation, BarrierError> {
+        // Called before the start, so a wrong runtime never starts a unit.
+        require_multi_thread()?;
         LauncherInvocation::from_parameters(&self.parameters).map_err(BarrierError::Parameters)
     }
 

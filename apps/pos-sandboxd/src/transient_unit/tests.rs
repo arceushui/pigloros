@@ -298,10 +298,10 @@ fn verifier_rejects_a_substituted_exec_start() -> Result<(), Box<dyn Error>> {
 fn only_list_kinds_clone_without_descriptors() {
     assert!(SystemdTransientUnitValue::RootDirectory(String::new())
         .clone_lists()
-        .is_none());
+        .is_err());
     assert!(SystemdTransientUnitValue::ExecStart(Vec::new())
         .clone_lists()
-        .is_some());
+        .is_ok());
 }
 
 #[test]
