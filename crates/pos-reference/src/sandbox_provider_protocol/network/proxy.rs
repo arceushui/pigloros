@@ -89,8 +89,8 @@ impl LocalNetworkSession {
 /// The provider implements this for a type it alone can mint, from its active
 /// attempt record: that record proves the attempt, the current authority
 /// heads, the namespace and firewall, and ownership of FD 3. [`serve_proxy`]
-/// accepts nothing else, so a bare admission and an arbitrary channel cannot
-/// be served. This crate cannot verify those proofs itself, because they live
+/// accepts only a provider-supplied binding, so a bare admission and an
+/// arbitrary channel are not served by the provider. This crate cannot verify those proofs itself, because they live
 /// in the provider crate; an implementation that does not check them is a
 /// provider defect.
 pub trait LocalProxyBinding {

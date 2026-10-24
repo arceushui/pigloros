@@ -4,11 +4,11 @@
 //! `serve_proxy` in `pos-reference` is provider-neutral: it serves any
 //! [`LocalProxyBinding`]. This module supplies the only binding the provider
 //! ever serves, [`BoundLocalProxy`]. It has no public constructor and is
-//! minted solely from an [`ActiveAttempt`], which proves the attempt, the
+//! minted solely from a [`CheckedLocal`], which proves the attempt, the
 //! authority heads the attempt was admitted with, the namespace and
 //! firewall ([`EstablishedNetwork`]) and ownership of FD 3
-//! ([`HostServiceChannel`]). A bare admission and an arbitrary channel cannot
-//! be bound.
+//! ([`HostServiceChannel`]) were checked together. A bare admission and an
+//! arbitrary channel cannot be bound.
 //!
 //! The namespace, veth and nftables state behind a real Local network belong
 //! to a separate ticket (owner decision Q9.5). Until that adapter exists,
@@ -164,11 +164,12 @@ pub enum LocalProxyBindError {
 /// admitted attempt they belong to.
 ///
 /// Only `AdmittedAttempt::check_local` makes one, so holding it proves the
-/// check ran. The execute path makes it before the unit is submitted, so a bad
+/// check ran for the attempt it records. The execute path makes it before the unit is submitted, so a bad
 /// admission never starts a unit, and binds it once the unit is active. It has
 /// no public constructor.
 #[derive(Debug)]
 pub struct CheckedLocal<C> {
+    attempt_id: [u8; 16],
     admission: LocalNetworkAdmission,
     network: EstablishedNetwork<C>,
     channel: HostServiceChannel,
@@ -209,6 +210,7 @@ impl AdmittedAttempt {
             return Err(LocalProxyBindError::Channel);
         }
         Ok(CheckedLocal {
+            attempt_id: self.attempt_id(),
             admission,
             network,
             channel,
@@ -217,16 +219,16 @@ impl AdmittedAttempt {
 }
 
 impl<C> CheckedLocal<C> {
-    /// Bind the checked inputs to the attempt that is now active.
+    /// Bind the checked inputs once the unit is active.
     ///
     /// The binding is the only value the provider serves with `serve_proxy`.
-    /// The connector of the bound namespace is returned beside it. `active`
-    /// must be the record of the attempt the inputs were checked against; the
-    /// execute path makes both from the same [`AdmittedAttempt`].
-    pub(crate) fn bind(self, active: &ActiveAttempt) -> (BoundLocalProxy, C) {
+    /// The connector of the bound namespace is returned beside it. The bound
+    /// attempt is the one the inputs were checked against, so it cannot differ
+    /// from the checks; `_active` is the witness that the unit was started.
+    pub(crate) fn bind(self, _active: &ActiveAttempt) -> (BoundLocalProxy, C) {
         (
             BoundLocalProxy {
-                attempt_id: active.attempt_id(),
+                attempt_id: self.attempt_id,
                 admission: self.admission,
                 channel: HostServiceStream(Arc::new(self.channel.provider)),
             },
@@ -238,7 +240,7 @@ impl<C> CheckedLocal<C> {
 /// One Local admission bound to its active attempt and its FD 3 channel.
 ///
 /// It has no public constructor and no way to replace its admission or its
-/// channel; [`ActiveAttempt`] mints it.
+/// channel; it is minted from a `CheckedLocal` once the attempt is active.
 #[derive(Debug)]
 pub struct BoundLocalProxy {
     attempt_id: [u8; 16],
@@ -252,6 +254,15 @@ pub struct BoundLocalProxy {
 /// a session that is blocked on the adapter. It has no public constructor.
 #[derive(Clone, Debug)]
 pub struct HostServiceStream(Arc<UnixStream>);
+
+/// Closes the channel when dropped.
+struct CloseOnDrop(HostServiceStream);
+
+impl Drop for CloseOnDrop {
+    fn drop(&mut self) {
+        self.0.close();
+    }
+}
 
 impl HostServiceStream {
     /// Shut both directions down. A blocked read or write of the proxy then
@@ -301,6 +312,9 @@ impl BoundLocalProxy {
     ///
     /// The runtime must have its time driver enabled.
     ///
+    /// Dropping the future closes the channel. After a watchdog expiry the
+    /// join is bounded only by the proxy's own network deadline.
+    ///
     /// # Errors
     /// Fails if the blocking task does not finish.
     pub async fn serve_until<C>(
@@ -313,6 +327,9 @@ impl BoundLocalProxy {
         C: NetworkEndpointConnector + Send + 'static,
     {
         let closer = self.channel.clone();
+        // Dropping this future mid-await must not leave the proxy thread
+        // serving a channel nobody supervises any more.
+        let _closing = CloseOnDrop(closer.clone());
         let mut task = tokio::task::spawn_blocking(move || {
             let mut binding = self;
             let mut connector = connector;

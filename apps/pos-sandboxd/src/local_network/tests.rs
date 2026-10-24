@@ -37,16 +37,36 @@ fn bind(
         .map(|checked| checked.bind(&active)))
 }
 
-#[test]
-fn only_the_matching_attempt_authority_namespace_and_channel_bind() -> TestResult {
-    let epochs = [4, 5, 6];
-    let bound = bind(ATTEMPT, grant_authority(), epochs, ATTEMPT, ATTEMPT)?;
-    assert_eq!(bound.map(|(binding, _)| binding.attempt_id()), Ok(ATTEMPT));
+const EPOCHS: [u64; 3] = [4, 5, 6];
 
+fn refusal(
+    attempt: [u8; 16],
+    authority: AdmissionAuthority,
+    epochs: [u64; 3],
+    namespace: [u8; 16],
+    channel: [u8; 16],
+) -> TestResult<Option<LocalProxyBindError>> {
+    Ok(bind(attempt, authority, epochs, namespace, channel)?.err())
+}
+
+#[test]
+fn the_matching_inputs_bind_the_attempt_they_were_checked_against() -> TestResult {
+    let bound = bind(ATTEMPT, grant_authority(), EPOCHS, ATTEMPT, ATTEMPT)?;
+    assert_eq!(bound.map(|(binding, _)| binding.attempt_id()), Ok(ATTEMPT));
+    Ok(())
+}
+
+#[test]
+fn a_grant_for_another_attempt_is_refused() -> TestResult {
     assert_eq!(
-        bind(OTHER, grant_authority(), epochs, ATTEMPT, ATTEMPT)?.err(),
+        refusal(OTHER, grant_authority(), EPOCHS, ATTEMPT, ATTEMPT)?,
         Some(LocalProxyBindError::Attempt)
     );
+    Ok(())
+}
+
+#[test]
+fn a_grant_with_other_digests_is_refused() -> TestResult {
     let mutations: [fn(&mut AdmissionAuthority); 4] = [
         |authority| authority.sim1_digest = [0xee; 32],
         |authority| authority.apt1_digest = [0xee; 32],
@@ -57,22 +77,37 @@ fn only_the_matching_attempt_authority_namespace_and_channel_bind() -> TestResul
         let mut authority = grant_authority();
         mutate(&mut authority);
         assert_eq!(
-            bind(ATTEMPT, authority, epochs, ATTEMPT, ATTEMPT)?.err(),
+            refusal(ATTEMPT, authority, EPOCHS, ATTEMPT, ATTEMPT)?,
             Some(LocalProxyBindError::Authority)
         );
     }
+    Ok(())
+}
+
+#[test]
+fn a_grant_with_stale_epochs_is_refused() -> TestResult {
     for stale in [[3, 5, 6], [4, 4, 6], [4, 5, 5]] {
         assert_eq!(
-            bind(ATTEMPT, grant_authority(), stale, ATTEMPT, ATTEMPT)?.err(),
+            refusal(ATTEMPT, grant_authority(), stale, ATTEMPT, ATTEMPT)?,
             Some(LocalProxyBindError::Authority)
         );
     }
+    Ok(())
+}
+
+#[test]
+fn a_namespace_of_another_attempt_is_refused() -> TestResult {
     assert_eq!(
-        bind(ATTEMPT, grant_authority(), epochs, OTHER, ATTEMPT)?.err(),
+        refusal(ATTEMPT, grant_authority(), EPOCHS, OTHER, ATTEMPT)?,
         Some(LocalProxyBindError::Namespace)
     );
+    Ok(())
+}
+
+#[test]
+fn a_channel_of_another_attempt_is_refused() -> TestResult {
     assert_eq!(
-        bind(ATTEMPT, grant_authority(), epochs, ATTEMPT, OTHER)?.err(),
+        refusal(ATTEMPT, grant_authority(), EPOCHS, ATTEMPT, OTHER)?,
         Some(LocalProxyBindError::Channel)
     );
     Ok(())
@@ -243,6 +278,23 @@ async fn a_stalled_adapter_is_closed_at_the_attempt_deadline() -> TestResult {
     // The closed channel reads as the adapter closing at a frame boundary;
     // the flag, not the termination, records the watchdog.
     assert_eq!(outcome.session.termination(), None);
+    Ok(())
+}
+
+#[tokio::test]
+async fn dropping_the_serving_future_closes_the_channel() -> TestResult {
+    let (adapter, binding, connector) = bound_proxy(plan()?, UNUSED_ENDPOINT, LoopbackConnector)?;
+    let mut adapter = UnixStream::from(std::os::fd::OwnedFd::from(adapter));
+    adapter.set_read_timeout(Some(Duration::from_secs(5)))?;
+    let (_root, store) = capture_store()?;
+    let deadline = Instant::now() + Duration::from_mins(1);
+    let serving = binding.serve_until(connector, store, deadline);
+    // The caller gives up while the proxy waits for the adapter.
+    assert!(tokio::time::timeout(Duration::from_millis(100), serving)
+        .await
+        .is_err());
+    let mut byte = [0_u8; 1];
+    assert_eq!(adapter.read(&mut byte)?, 0);
     Ok(())
 }
 
