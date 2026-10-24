@@ -645,7 +645,7 @@ jobs:
     name: static-launcher
     needs: [ci_change_scope, preflight-gate]
     if: ${{ !cancelled() && needs.preflight-gate.result == 'success' && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
       RUSTFLAGS: -D warnings -C target-feature=+crt-static -C relocation-model=static
