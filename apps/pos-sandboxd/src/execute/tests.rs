@@ -8,7 +8,7 @@ use std::{
         unix::net::UnixStream,
     },
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,
     },
     thread,
@@ -104,6 +104,7 @@ struct FakeHost {
     empty_after: usize,
     polls: Arc<AtomicUsize>,
     cgroup_kills: Arc<AtomicUsize>,
+    killed: Arc<AtomicBool>,
 }
 
 impl FakeHost {
@@ -119,6 +120,7 @@ impl FakeHost {
             empty_after: 0,
             polls: Arc::default(),
             cgroup_kills: Arc::default(),
+            killed: Arc::default(),
         }
     }
 
@@ -338,6 +340,7 @@ impl UnitHost for FakeHost {
         _unit_name: TransientServiceUnitName,
     ) -> impl Future<Output = Result<(), Injected>> + Send {
         record(&self.log, "kill");
+        self.killed.store(true, Ordering::SeqCst);
         let outcome = if self.faulty(Fault::Kill) {
             Err(Injected)
         } else {
@@ -1102,13 +1105,29 @@ async fn a_dropped_execution_kills_the_submitted_unit() -> TestResult {
     let mut scenario = Scenario::new()?;
     scenario.barrier.fault = BarrierFault::Hang;
     let log = Arc::clone(&scenario.log);
-    let run = scenario.run(SandboxExecutionMode::AirGapped, ModePlan::AirGapped);
-    // The caller gives up while the barrier is still waiting.
-    assert!(tokio::time::timeout(Duration::from_millis(200), run)
-        .await
-        .is_err());
+    {
+        let run = scenario.run(SandboxExecutionMode::AirGapped, ModePlan::AirGapped);
+        let mut run = std::pin::pin!(run);
+        // The caller gives up while the barrier is still waiting: poll the
+        // execution until it reached the barrier, then drop it unfinished.
+        for _ in 0..50 {
+            let done = std::future::poll_fn(|context| {
+                std::task::Poll::Ready(run.as_mut().poll(context).is_ready())
+            })
+            .await;
+            assert!(!done);
+            tokio::task::yield_now().await;
+        }
+    }
     assert!(logged(&log, "guard_kill").await);
     Ok(())
+}
+
+/// Let every task the current-thread runtime has queued run.
+async fn settle() {
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
 }
 
 fn guard_kills(scenario: &Scenario) -> bool {
@@ -1119,7 +1138,7 @@ fn guard_kills(scenario: &Scenario) -> bool {
 async fn a_finished_execution_leaves_nothing_for_the_guard() -> TestResult {
     let mut scenario = Scenario::new()?;
     scenario.air_gapped().await??;
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    settle().await;
     assert!(!guard_kills(&scenario));
     Ok(())
 }
@@ -1129,7 +1148,7 @@ async fn a_refused_execution_leaves_nothing_for_the_guard() -> TestResult {
     let mut refused = Scenario::new()?;
     refused.barrier.fault = BarrierFault::Release;
     refused.fails().await?;
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    settle().await;
     assert!(!guard_kills(&refused));
     Ok(())
 }
@@ -1406,18 +1425,112 @@ impl LocalNetworkPort for PanickingNetwork {
     }
 }
 
-#[tokio::test]
-async fn a_protocol_violation_on_fd3_is_reported_for_classification() -> TestResult {
+async fn protocol_violation(
+    faults: &[Fault],
+) -> TestResult<(Scenario, AttemptExecution<String, FakeCgroup>)> {
     let (_, mode) = local_plan(UNUSED_ENDPOINT)?;
     let mut scenario = Scenario::new()?;
     scenario.host.adapter = AdapterScript::ProtocolViolation;
+    scenario.host.faults.extend_from_slice(faults);
     let execution = scenario.run(SandboxExecutionMode::Local, mode).await??;
-    assert_eq!(execution.ending, AttemptEnding::CgroupEmpty);
+    Ok((scenario, execution))
+}
+
+#[tokio::test]
+async fn a_protocol_violation_on_fd3_kills_the_unit_and_keeps_the_evidence() -> TestResult {
+    let (scenario, execution) = protocol_violation(&[]).await?;
+    assert_eq!(execution.ending, AttemptEnding::ProtocolFailureKilled);
     assert_eq!(
         execution.network.termination(),
         Some(LocalNetworkTermination::ProtocolFailure)
     );
     assert!(execution.network.transcript_digests().is_empty());
+    assert!(scenario
+        .entries()
+        .ends_with(&names(&["release", "kill", "stop"])));
+    assert_eq!(scenario.cgroup_kills(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_unacknowledged_kill_after_a_protocol_violation_is_reported() -> TestResult {
+    let (_scenario, execution) = protocol_violation(&[Fault::Kill]).await?;
+    assert_eq!(execution.ending, AttemptEnding::ProtocolFailureKillFailed);
+    assert_eq!(
+        execution.network.termination(),
+        Some(LocalNetworkTermination::ProtocolFailure)
+    );
+    Ok(())
+}
+
+/// Connects only once the unit kill was issued, like a connector that hangs.
+struct KillAwareConnector {
+    killed: Arc<AtomicBool>,
+    saw_kill: Arc<AtomicBool>,
+}
+
+impl pos_reference::sandbox_provider_protocol::NetworkEndpointConnector for KillAwareConnector {
+    fn connect(
+        &mut self,
+        _endpoint: std::net::SocketAddr,
+        _timeout: Duration,
+    ) -> std::io::Result<std::net::TcpStream> {
+        for _ in 0..1_000 {
+            if self.killed.load(Ordering::SeqCst) {
+                self.saw_kill.store(true, Ordering::SeqCst);
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        Err(std::io::ErrorKind::ConnectionRefused.into())
+    }
+}
+
+struct KillAwareNetwork {
+    killed: Arc<AtomicBool>,
+    saw_kill: Arc<AtomicBool>,
+}
+
+impl LocalNetworkPort for KillAwareNetwork {
+    type Connector = KillAwareConnector;
+    type Error = Injected;
+
+    fn establish(
+        &self,
+        attempt_id: [u8; 16],
+    ) -> Result<EstablishedNetwork<KillAwareConnector>, Injected> {
+        Ok(EstablishedNetwork::new(
+            attempt_id,
+            KillAwareConnector {
+                killed: Arc::clone(&self.killed),
+                saw_kill: Arc::clone(&self.saw_kill),
+            },
+        ))
+    }
+}
+
+#[tokio::test]
+async fn the_unit_is_killed_while_a_slow_connector_is_still_being_joined() -> TestResult {
+    let (plan, mode) = local_plan(UNUSED_ENDPOINT)?;
+    let mut scenario = Scenario::new()?;
+    scenario.host.adapter = AdapterScript::Exchange(plan);
+    let network = KillAwareNetwork {
+        killed: Arc::clone(&scenario.host.killed),
+        saw_kill: Arc::default(),
+    };
+    let job = scenario.job(ATTEMPT, SandboxExecutionMode::Local, mode, 200)?;
+    let recheck = root_for(&scenario.log, ATTEMPT);
+    let started = Instant::now();
+    let execution = scenario
+        .run_on(&network, job, recheck)
+        .await
+        .map_err(|failed| failed.error)?;
+    // A kill that waited for the join would never have been seen by the
+    // connector, which gives up after five seconds.
+    assert!(network.saw_kill.load(Ordering::SeqCst));
+    assert!(started.elapsed() < Duration::from_secs(4));
+    assert_eq!(execution.ending, AttemptEnding::WatchdogKilled);
+    assert_eq!(scenario.cgroup_kills(), 1);
     Ok(())
 }
 

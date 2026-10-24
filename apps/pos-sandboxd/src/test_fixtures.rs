@@ -45,9 +45,26 @@ pub const fn authority() -> AdmittedAuthority {
     }
 }
 
+/// The request id of the fixture admission.
+pub const REQUEST_ID: [u8; 16] = [1; 16];
+
 #[must_use]
 pub const fn grant_authority() -> AdmissionAuthority {
-    crate::attempt::test_admission_authority()
+    AdmissionAuthority {
+        evr1_digest: [7; 32],
+        fixture_contract_digest: [8; 32],
+        fixture_digest: [9; 32],
+        execution_profile_digest: [10; 32],
+        lps1_digest: [11; 32],
+        sim1_digest: [0x51; 32],
+        apt1_digest: [1; 32],
+        trs1_digest: [2; 32],
+        rvs1_digest: [3; 32],
+        spm1_digest: [12; 32],
+        pcf1_digest: [13; 32],
+        pcr1_digest: [14; 32],
+        hcp1_digest: [15; 32],
+    }
 }
 
 pub fn admitted() -> TestResult<AdmittedAttempt> {

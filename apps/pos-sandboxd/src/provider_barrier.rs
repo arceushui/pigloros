@@ -138,7 +138,6 @@ pub enum RecheckRefusal {
 /// heads bound into the release are the admitted ones, which that recheck
 /// just confirmed.
 pub struct AuthorityCheck<R, O> {
-    authority: AdmittedAuthority,
     root: R,
     expected_readback_digest: [u8; 32],
     observed: O,
@@ -150,19 +149,18 @@ where
     R: Fn() -> Result<CheckedRoot, ImageActivationError>,
     O: ObservedReadback,
 {
-    /// Bind the admitted `authority`, the root recheck, the selector-derived
-    /// expected readback digest, the observed readback source and the
-    /// cancellation flag the attempt lifecycle sets.
+    /// Bind the root recheck, the selector-derived expected readback digest,
+    /// the observed readback source and the cancellation flag the attempt
+    /// lifecycle sets. The authority heads bound into the release are the
+    /// admitted attempt's, taken by the barrier.
     #[must_use]
     pub const fn new(
-        authority: AdmittedAuthority,
         root: R,
         expected_readback_digest: [u8; 32],
         observed: O,
         cancelled: Arc<AtomicBool>,
     ) -> Self {
         Self {
-            authority,
             root,
             expected_readback_digest,
             observed,
@@ -170,7 +168,11 @@ where
         }
     }
 
-    fn binding(&self, deadline_monotonic_ns: u64) -> Result<ReleaseBinding, RecheckRefusal> {
+    fn binding(
+        &self,
+        authority: AdmittedAuthority,
+        deadline_monotonic_ns: u64,
+    ) -> Result<ReleaseBinding, RecheckRefusal> {
         (self.root)().map_err(RecheckRefusal::Root)?;
         if self.cancelled.load(Ordering::SeqCst) {
             return Err(RecheckRefusal::Cancelled);
@@ -180,12 +182,12 @@ where
             .observed_digest()
             .map_err(RecheckRefusal::Observation)?;
         Ok(ReleaseBinding {
-            trs1_digest: self.authority.trs1_digest,
-            rvs1_digest: self.authority.rvs1_digest,
-            apt1_digest: self.authority.apt1_digest,
-            trust_epoch: self.authority.trust_epoch,
-            revocation_epoch: self.authority.revocation_epoch,
-            policy_epoch: self.authority.policy_epoch,
+            trs1_digest: authority.trs1_digest,
+            rvs1_digest: authority.rvs1_digest,
+            apt1_digest: authority.apt1_digest,
+            trust_epoch: authority.trust_epoch,
+            revocation_epoch: authority.revocation_epoch,
+            policy_epoch: authority.policy_epoch,
             expected_readback_digest: self.expected_readback_digest,
             observed_readback_digest,
             deadline_monotonic_ns,
@@ -205,6 +207,7 @@ struct UnitSnapshot {
 /// unit identity it must still match when the recheck runs.
 struct Bounded<'a, R, O, I> {
     check: &'a AuthorityCheck<R, O>,
+    authority: AdmittedAuthority,
     deadline_monotonic_ns: u64,
     deadline: Instant,
     identity: &'a I,
@@ -253,7 +256,8 @@ where
 
     fn rechecked(&self) -> Result<ReleaseBinding, RecheckRefusal> {
         self.unit_unchanged()?;
-        self.check.binding(self.deadline_monotonic_ns)
+        self.check
+            .binding(self.authority, self.deadline_monotonic_ns)
     }
 }
 
@@ -331,6 +335,7 @@ pub struct ProviderReleaseBarrier<S, I, R, O> {
     signer: S,
     identity: I,
     check: AuthorityCheck<R, O>,
+    authority: AdmittedAuthority,
     sent: Option<ExecutionRelease>,
     attempted: bool,
 }
@@ -380,6 +385,7 @@ impl<S, I, R, O> ProviderReleaseBarrier<S, I, R, O> {
             signer,
             identity,
             check,
+            authority: attempt.authority(),
             sent: None,
             attempted: false,
         })
@@ -473,6 +479,14 @@ fn absolute_deadline_ns(
     u64::try_from(absolute).ok()
 }
 
+/// Bound both the `ReadyV1` receive and the `ReleaseV1` send by the time left.
+fn bound_channel(channel: &std::os::fd::OwnedFd, remaining: Duration) -> Result<(), BarrierError> {
+    [Timeout::Recv, Timeout::Send]
+        .into_iter()
+        .try_for_each(|direction| set_socket_timeout(channel, direction, Some(remaining)))
+        .map_err(|errno| BarrierError::Timeout(io::Error::from(errno)))
+}
+
 fn require_multi_thread() -> Result<(), BarrierError> {
     let multi_thread = tokio::runtime::Handle::try_current()
         .is_ok_and(|handle| handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread);
@@ -508,13 +522,13 @@ where
         let launcher = observe_executable(main_pid)?;
         let expected = self.expected(invocation, launcher);
         let (remaining, deadline_monotonic_ns) = release_window(attempt.deadline())?;
-        set_socket_timeout(&self.provider_end, Timeout::Recv, Some(remaining))
-            .map_err(|errno| BarrierError::Timeout(io::Error::from(errno)))?;
+        bound_channel(&self.provider_end, remaining)?;
         // Nothing above consumes `ReadyV1`, so dropping the future before this
         // point leaves the barrier unused; from here the release is one-shot.
         self.attempted = true;
         let bounded = Bounded {
             check: &self.check,
+            authority: self.authority,
             deadline_monotonic_ns,
             deadline: attempt.deadline(),
             identity: &self.identity,

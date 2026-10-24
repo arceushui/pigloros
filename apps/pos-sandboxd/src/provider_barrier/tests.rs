@@ -181,7 +181,6 @@ fn barrier_with(
     let observed = (!matches!(refusal, Refusal::NoObservation)).then_some(OBSERVED_READBACK);
     let cancelled = Arc::new(AtomicBool::new(matches!(refusal, Refusal::Cancelled)));
     let check = AuthorityCheck::new(
-        authority(),
         root_check(refusal),
         EXPECTED_READBACK,
         TestObserved(observed),
@@ -343,6 +342,11 @@ async fn a_valid_ready_is_released_once_with_the_admitted_bindings() -> TestResu
     let (barrier, received) = released().await?;
     check_release(&barrier, received.as_ref())?;
     check_authority(&received.ok_or("no release received")?);
+    // Both directions of the channel were bounded by the time left.
+    for direction in [Timeout::Recv, Timeout::Send] {
+        let bound = rustix::net::sockopt::socket_timeout(&barrier.provider_end, direction)?;
+        assert!(bound.is_some_and(|limit| limit <= Duration::from_millis(GENEROUS_MS)));
+    }
     Ok(())
 }
 

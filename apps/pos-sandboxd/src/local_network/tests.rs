@@ -389,6 +389,20 @@ async fn dropping_the_serving_future_closes_the_channel() -> TestResult {
     Ok(())
 }
 
+#[tokio::test]
+async fn both_futures_finish_whichever_is_slower() {
+    let slow = async {
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        1
+    };
+    assert_eq!(both(slow, async { 2 }).await, (1, 2));
+    let slow = async {
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        2
+    };
+    assert_eq!(both(async { 1 }, slow).await, (1, 2));
+}
+
 struct PanickingConnector;
 
 impl NetworkEndpointConnector for PanickingConnector {

@@ -44,7 +44,7 @@ impl LaunchPolicyView {
 }
 
 /// The thirteen digests a grant carries, out of the fifteen of the request.
-fn admission_authority(authority: &ExecuteAuthority) -> AdmissionAuthority {
+const fn admission_authority(authority: &ExecuteAuthority) -> AdmissionAuthority {
     AdmissionAuthority {
         evr1_digest: authority.evr1_digest,
         fixture_contract_digest: authority.fixture_contract_digest,
@@ -185,7 +185,7 @@ impl AdmittedAttempt {
     }
 
     /// Facts for tests that have no privileged installation to admit from.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn for_test(
         attempt_id: [u8; 16],
         authority: AdmittedAuthority,
@@ -201,50 +201,26 @@ impl AdmittedAttempt {
             arguments: vec!["--check".to_owned()],
             executable_digest: [0x61; 32],
             launch: LaunchPolicyView {
-                request_id: TEST_REQUEST_ID,
-                authority: test_admission_authority(),
-                policy_digest: test_admission_authority().lps1_digest,
+                request_id: crate::test_fixtures::REQUEST_ID,
+                authority: crate::test_fixtures::grant_authority(),
+                policy_digest: crate::test_fixtures::grant_authority().lps1_digest,
                 network_capabilities: Vec::new(),
             },
         })
     }
 
     /// The same attempt, with a launch policy that allows `capabilities`.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn allowing(mut self, capabilities: Vec<NetworkCapability>) -> Self {
         self.launch.network_capabilities = capabilities;
         self
     }
 
     /// The same attempt running another adapter path.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn running(mut self, executable_path: String) -> Self {
         self.executable_path = executable_path;
         self
-    }
-}
-
-/// The request id of the test admission.
-#[cfg(test)]
-pub(crate) const TEST_REQUEST_ID: [u8; 16] = [1; 16];
-
-/// The grant authority block of the test admission.
-#[cfg(test)]
-pub(crate) const fn test_admission_authority() -> AdmissionAuthority {
-    AdmissionAuthority {
-        evr1_digest: [7; 32],
-        fixture_contract_digest: [8; 32],
-        fixture_digest: [9; 32],
-        execution_profile_digest: [10; 32],
-        lps1_digest: [11; 32],
-        sim1_digest: [0x51; 32],
-        apt1_digest: [1; 32],
-        trs1_digest: [2; 32],
-        rvs1_digest: [3; 32],
-        spm1_digest: [12; 32],
-        pcf1_digest: [13; 32],
-        pcr1_digest: [14; 32],
-        hcp1_digest: [15; 32],
     }
 }
 

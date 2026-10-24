@@ -8,9 +8,9 @@ use zbus::{
     proxy::CacheProperties,
     Connection, Fd, OwnedFd, OwnedObjectPath, OwnedVariant, Variant,
 };
-use zbus_systemd::systemd1::{
-    JobRemovedArgs, JobRemovedStream, ManagerProxy, ServiceProxy, UnitProxy,
-};
+#[cfg(target_os = "linux")]
+use zbus_systemd::systemd1::UnitProxy;
+use zbus_systemd::systemd1::{JobRemovedArgs, JobRemovedStream, ManagerProxy, ServiceProxy};
 
 use crate::{
     AttemptCgroupError, BoundAttemptCgroup, CgroupRoot, SystemdHardeningProperty,
@@ -534,6 +534,7 @@ impl SystemdTransientUnitTransport {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl SystemdTransientUnitTransport {
     async fn unit_path_of(
         &self,
