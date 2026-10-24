@@ -140,16 +140,17 @@ def check_ci(workflow: dict) -> None:
 
 def check_dockerfile(text: str) -> None:
     copy_pattern = re.compile(
-        r"^COPY --chmod=0644 \\\n"
-        r"\s+third-party-notices/THIRD-PARTY-NOTICES\.txt \\\n"
+        r"^COPY third-party-notices/THIRD-PARTY-NOTICES\.txt \\\n"
         r"\s+third-party-notices/third-party-notices\.json \\\n"
-        r"\s+" + re.escape(IMAGE_DIR) + r"$",
+        r"\s+" + re.escape(IMAGE_DIR) + r"\n"
+        r"RUN chmod 0755 /usr/share/doc/piglor-gateway " + re.escape(IMAGE_DIR.rstrip("/")) + r" \\\n"
+        r"\s+&& chmod 0644 " + re.escape(IMAGE_DIR) + r"\*$",
         re.MULTILINE,
     )
     runtime = text.split("AS runtime", 1)[-1]
     if not copy_pattern.search(runtime):
         raise AssertionError("the runtime stage must copy both notice files")
-    if runtime.index("COPY --chmod=0644") > runtime.index("USER appuser"):
+    if runtime.index("COPY third-party-notices/") > runtime.index("USER appuser"):
         raise AssertionError("copy the notices before dropping to appuser")
 
 
@@ -306,13 +307,13 @@ class DeployNoticePolicy(unittest.TestCase):
     def test_dockerfile_rejects_missing_or_misplaced_copy(self) -> None:
         text = DOCKERFILE.read_text(encoding="utf-8")
         with self.assertRaisesRegex(AssertionError, "copy both notice files"):
-            check_dockerfile(text.replace("--chmod=0644", "--chmod=0600"))
+            check_dockerfile(text.replace("chmod 0644", "chmod 0600"))
         with self.assertRaisesRegex(AssertionError, "copy both notice files"):
             check_dockerfile(text.replace("third-party/\n", "elsewhere/\n"))
         moved = text.replace("USER appuser", "")
         moved = moved.replace("EXPOSE 8080", "USER appuser\nEXPOSE 8080")
         moved = moved.replace(
-            "COPY --chmod=0644", "RUN true\nUSER appuser\nCOPY --chmod=0644", 1
+            "COPY third-party-notices/", "RUN true\nUSER appuser\nCOPY third-party-notices/", 1
         )
         with self.assertRaisesRegex(AssertionError, "before dropping"):
             check_dockerfile(moved)

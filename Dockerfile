@@ -28,11 +28,13 @@ COPY --from=builder /src/target/release/piglor-gateway /usr/local/bin/piglor-gat
 # The third-party notice bundle (#798): the `third-party-notices` artifact of
 # the reusable workflow, downloaded into the build context by deploy.yml and the
 # ci docker-build job. A build without it fails at this COPY, so no image ships
-# without its notices.
-COPY --chmod=0644 \
-    third-party-notices/THIRD-PARTY-NOTICES.txt \
+# without its notices. COPY --chmod would also apply to the directories it
+# creates and make them untraversable for appuser, so the modes are set after.
+COPY third-party-notices/THIRD-PARTY-NOTICES.txt \
     third-party-notices/third-party-notices.json \
     /usr/share/doc/piglor-gateway/third-party/
+RUN chmod 0755 /usr/share/doc/piglor-gateway /usr/share/doc/piglor-gateway/third-party \
+    && chmod 0644 /usr/share/doc/piglor-gateway/third-party/*
 
 # The image intentionally ships without curated ledger content. Supply a
 # read-only source at runtime when a deployment needs one.
