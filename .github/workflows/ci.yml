@@ -1208,14 +1208,25 @@ jobs:
     needs:
       - ci_change_scope
       - cargo-crap
+      - third-party-notices
     if: >-
       ${{ !cancelled() && needs.ci_change_scope.result == 'success' &&
       needs.cargo-crap.result == 'success' &&
+      needs.third-party-notices.result == 'success' &&
       (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The image ships the third-party notice bundle (#798), exactly as
+      # deploy.yml builds it; this job never pushes. The bundle lands in the
+      # build context, where the Dockerfile COPYs it.
+      - name: Download the third-party notice bundle
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: third-party-notices
+          path: third-party-notices
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
@@ -1231,6 +1242,8 @@ jobs:
           # PR runs restore only; main writes the shared layer cache so pull
           # requests cannot evict it from the repository cache budget.
           cache-to: ${{ github.ref == 'refs/heads/main' && 'type=gha,mode=max' || '' }}
+      - name: Check the image carries its third-party notices
+        run: bash scripts/check-gateway-image-notices.sh pigloros-gateway:ci
       - name: Smoke test container
         run: |
           docker run --rm -d -p 8080:8080 --name pigloros-smoke pigloros-gateway:ci
@@ -1417,6 +1430,8 @@ jobs:
         run: python scripts/test_ci_workflow_policy.py
       - name: Test mutation workflow policy
         run: python scripts/test_mutation_workflow_policy.py
+      - name: Test deploy workflow policy
+        run: python scripts/test_deploy_workflow_policy.py
       - name: Test ignored-test summary checker
         run: python scripts/test_assert_no_ignored_in_test_summary.py
       - name: Check ASan CI policy
