@@ -396,8 +396,14 @@ struct Prepared<C> {
 /// attempt lifecycle (#442) detaches or drops it on every terminal path.
 ///
 /// `recheck` blocks: it mounts, reads and verifies. The production barrier
-/// wraps its own recheck for the multi-thread runtime (Q9.16); a caller that
+/// wraps its own recheck for the multi-thread runtime (owner decision on `block_in_place`, #441); a caller that
 /// passes a slow closure here stalls one worker until it returns.
+///
+/// After a watchdog expiry the unit is killed once the Local proxy thread has
+/// joined, which a slow connector can delay up to the proxy's own network
+/// deadline; `RuntimeMaxUSec` is the backstop. If observing the cgroup fails
+/// after a Local session, the failure is returned without the session's
+/// transcripts.
 ///
 /// The runtime must have its time driver enabled.
 ///
@@ -481,7 +487,7 @@ where
     let (started, mut cgroup) = submit(host, &unit, request, bounds).await?;
     let attempt_id = attempt.attempt_id();
     let active = ActiveAttempt::record(attempt, deadline);
-    let bound = bind_planned(&active, planned);
+    let bound = bind_planned(planned);
     // Release must arrive before the attempt deadline (ADR-069), whatever the
     // port does.
     let refused = match until(deadline, barrier.release(&active)).await {
@@ -688,12 +694,12 @@ fn resolve_replay(
         .map_err(ExecuteError::ReplayUnavailable)
 }
 
-fn bind_planned<C>(active: &ActiveAttempt, planned: Planned<C>) -> Bound<C> {
+fn bind_planned<C>(planned: Planned<C>) -> Bound<C> {
     match planned {
         Planned::None => Bound::None,
         Planned::Replay(replayed) => Bound::Replay(replayed),
         Planned::Local(checked) => {
-            let (binding, connector) = checked.bind(active);
+            let (binding, connector) = checked.bind();
             Bound::Local(Box::new(binding), connector)
         }
     }
@@ -767,7 +773,8 @@ where
 }
 
 /// SIGKILL the unit, kill its cgroup when bound (a synchronous write that
-/// returns promptly), and stop its job, each host call bounded by `call`; `true` when SIGKILL was acknowledged.
+/// returns promptly), and stop its job, each host call bounded by `call`;
+/// `true` when SIGKILL was acknowledged.
 async fn kill_everything<H>(
     host: &H,
     unit: &TransientServiceUnitName,

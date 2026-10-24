@@ -30,7 +30,7 @@ use pos_reference::sandbox_provider_protocol::{
 };
 use zvariant::OwnedFd;
 
-use crate::{ActiveAttempt, AdmittedAttempt};
+use crate::AdmittedAttempt;
 
 /// The provider end of one attempt's FD 3 socket pair.
 ///
@@ -164,9 +164,9 @@ pub enum LocalProxyBindError {
 /// admitted attempt they belong to.
 ///
 /// Only `AdmittedAttempt::check_local` makes one, so holding it proves the
-/// check ran for the attempt it records. The execute path makes it before the unit is submitted, so a bad
-/// admission never starts a unit, and binds it once the unit is active. It has
-/// no public constructor.
+/// check ran for the attempt it records. The execute path makes it before the
+/// unit is submitted, so a bad admission never starts a unit, and binds it
+/// once the unit is active. It has no public constructor.
 #[derive(Debug)]
 pub struct CheckedLocal<C> {
     attempt_id: [u8; 16],
@@ -224,8 +224,9 @@ impl<C> CheckedLocal<C> {
     /// The binding is the only value the provider serves with `serve_proxy`.
     /// The connector of the bound namespace is returned beside it. The bound
     /// attempt is the one the inputs were checked against, so it cannot differ
-    /// from the checks; `_active` is the witness that the unit was started.
-    pub(crate) fn bind(self, _active: &ActiveAttempt) -> (BoundLocalProxy, C) {
+    /// from the checks; the execute path calls this only once the unit is
+    /// active.
+    pub(crate) fn bind(self) -> (BoundLocalProxy, C) {
         (
             BoundLocalProxy {
                 attempt_id: self.attempt_id,

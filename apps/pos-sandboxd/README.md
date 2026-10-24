@@ -102,9 +102,10 @@ verified root is rechecked last, immediately before `StartTransientUnit`, and
 must be the attempt's own root. After the typed unit is started and verified,
 its cgroup is bound and an `ActiveAttempt` is recorded; the launcher barrier
 (`LaunchBarrier`) then releases the adapter exactly once. Any failure after
-the unit was submitted kills it, every start and bind is bounded by the attempt
-watchdog, every termination call by a fixed 1 to 10 s bound, and dropping the execution future after the submission spawns a
-best-effort kill of the unit. A Local admission, namespace or channel of another
+the unit was submitted kills it, every start and bind is bounded by the
+attempt watchdog, every termination call by a fixed 1 to 10 s bound, and
+dropping the execution future after the submission spawns a best-effort kill
+of the unit. A Local admission, namespace or channel of another
 attempt, SIM1, head or epoch is refused before anything is submitted. The Local
 network port owns its namespace by RAII: the execute path drops it on every
 path that does not serve it. The unit host, the barrier and the Local network
@@ -138,9 +139,10 @@ and `ReleaseRecheck` adapters over `release_after_ready`, adapter stdin and
 stdout transport, and the real Local namespace. `AdmittedAttempt::check_local`
 binds an admission against the authority heads the attempt was admitted with;
 that the recheck closure belongs to the same admitted entry is the caller's
-contract (`VerifiedRootMount::recheck` enforces it for its own entry). Authorization of a Replay exchange
-set is the caller's: the report that supplies it is not verified here. `tokio`
-gains its `rt` feature for the blocking proxy thread.
+contract (`VerifiedRootMount::recheck` enforces it for its own entry).
+Authorization of a Replay exchange set is the caller's: the report that
+supplies it is not verified here. `tokio` gains its `rt` feature for the
+blocking proxy thread.
 
 The provider never creates a local process: `connect_system` accepts only a
 Unix-socket system-bus address (zbus's `unixexec` and `ibus` transports would
