@@ -7,6 +7,7 @@
 
 pub mod canonical;
 pub mod chain;
+pub mod consent_v2;
 pub mod fork_attribution;
 pub mod fork_attribution_authority;
 pub mod fork_authentication;
@@ -29,5 +30,6 @@ pub mod strict_cbor;
 #[doc(hidden)]
 pub mod subject_cbor;
 pub mod subject_ciphertext;
+pub mod subject_data;
 pub mod subject_key;
 pub mod timeline_erasure;
