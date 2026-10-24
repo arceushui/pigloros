@@ -2,6 +2,7 @@ use std::{
     io::IoSlice,
     mem::MaybeUninit,
     os::fd::OwnedFd as StdOwnedFd,
+    sync::atomic::AtomicUsize,
     thread::{self, JoinHandle},
 };
 
@@ -47,10 +48,37 @@ impl ReleaseSigner for TestSigner {
 #[error("the unit identity is unavailable")]
 struct IdentityDown;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Behaviour {
+    Normal,
+    MainPidDown,
+    InvocationDown,
+    /// The second `InvocationID` read differs from the first.
+    InvocationDrifts,
+    /// The second `InvocationID` read fails.
+    InvocationBreaksAfterFirstRead,
+    /// `MainPID` never answers.
+    Hangs,
+}
+
 struct TestIdentity {
     pid: u32,
-    broken: bool,
-    invocation_broken: bool,
+    behaviour: Behaviour,
+    invocation_reads: AtomicUsize,
+}
+
+impl TestIdentity {
+    const fn new(pid: u32) -> Self {
+        Self::behaving(pid, Behaviour::Normal)
+    }
+
+    const fn behaving(pid: u32, behaviour: Behaviour) -> Self {
+        Self {
+            pid,
+            behaviour,
+            invocation_reads: AtomicUsize::new(0),
+        }
+    }
 }
 
 impl UnitIdentitySource for TestIdentity {
@@ -60,22 +88,31 @@ impl UnitIdentitySource for TestIdentity {
         &self,
         _unit_name: &TransientServiceUnitName,
     ) -> impl Future<Output = Result<u32, IdentityDown>> + Send {
-        let outcome = if self.broken {
+        let outcome = if self.behaviour == Behaviour::MainPidDown {
             Err(IdentityDown)
         } else {
             Ok(self.pid)
         };
-        async move { outcome }
+        let hangs = self.behaviour == Behaviour::Hangs;
+        async move {
+            if hangs {
+                std::future::pending::<()>().await;
+            }
+            outcome
+        }
     }
 
     async fn invocation_id(
         &self,
         _unit_name: &TransientServiceUnitName,
     ) -> Result<[u8; 16], IdentityDown> {
-        if self.invocation_broken {
-            return Err(IdentityDown);
+        let reads = self.invocation_reads.fetch_add(1, Ordering::SeqCst);
+        match self.behaviour {
+            Behaviour::InvocationDown => Err(IdentityDown),
+            Behaviour::InvocationBreaksAfterFirstRead if reads > 0 => Err(IdentityDown),
+            Behaviour::InvocationDrifts if reads > 0 => Ok([0x13; 16]),
+            _ => Ok(INVOCATION),
         }
-        Ok(INVOCATION)
     }
 }
 
@@ -110,13 +147,19 @@ fn root_check(refusal: Refusal) -> RootCheck {
     }
 }
 
-/// A barrier whose manager reports `claimed_pid`, plus its admitted attempt.
-fn barrier_for(
+fn test_signer() -> TestResult<TestSigner> {
+    Ok(TestSigner {
+        key: SigningKey::from_bytes(&fresh_nonce()?),
+    })
+}
+
+/// A barrier for `attempt` whose manager reports `claimed_pid`.
+fn barrier_with(
+    attempt: &AdmittedAttempt,
     mode: SandboxExecutionMode,
     refusal: Refusal,
-    claimed_pid: u32,
-) -> TestResult<(TestBarrier, AdmittedAttempt)> {
-    let attempt = AdmittedAttempt::for_test(ATTEMPT, authority(), mode)?;
+    identity: TestIdentity,
+) -> TestResult<TestBarrier> {
     let observed = (!matches!(refusal, Refusal::NoObservation)).then_some(OBSERVED_READBACK);
     let cancelled = Arc::new(AtomicBool::new(matches!(refusal, Refusal::Cancelled)));
     let check = AuthorityCheck::new(
@@ -126,24 +169,28 @@ fn barrier_for(
         TestObserved(observed),
         cancelled,
     );
-    let barrier = ProviderReleaseBarrier::new(
-        &attempt,
+    Ok(ProviderReleaseBarrier::new(
+        attempt,
         mode,
         fresh_nonce()?,
         BarrierEvidence {
             launcher_digest: LAUNCHER_DIGEST,
             adapter_identity: ADAPTER_IDENTITY,
         },
-        TestSigner {
-            key: SigningKey::from_bytes(&[9; 32]),
-        },
-        TestIdentity {
-            pid: claimed_pid,
-            broken: false,
-            invocation_broken: false,
-        },
+        test_signer()?,
+        identity,
         check,
-    )?;
+    )?)
+}
+
+/// A barrier whose manager reports `claimed_pid`, plus its admitted attempt.
+fn barrier_for(
+    mode: SandboxExecutionMode,
+    refusal: Refusal,
+    claimed_pid: u32,
+) -> TestResult<(TestBarrier, AdmittedAttempt)> {
+    let attempt = AdmittedAttempt::for_test(ATTEMPT, authority(), mode)?;
+    let barrier = barrier_with(&attempt, mode, refusal, TestIdentity::new(claimed_pid))?;
     Ok((barrier, attempt))
 }
 
@@ -231,7 +278,7 @@ fn check_release(barrier: &TestBarrier, received: Option<&ExecutionRelease>) -> 
     assert_eq!(fields.observed_readback_digest, OBSERVED_READBACK);
     assert_eq!(fields.runtime_attestation_key_id, KEY_ID);
     assert!(fields.deadline_monotonic_ns > monotonic_ns());
-    release.verify_signature(&SigningKey::from_bytes(&[9; 32]).verifying_key())?;
+    release.verify_signature(&barrier.signer.key.verifying_key())?;
     Ok(())
 }
 
@@ -281,7 +328,7 @@ async fn a_cancelled_attempt_is_not_released() -> TestResult {
     let error = refused(Refusal::Cancelled, own_pid()).await?;
     assert!(matches!(
         error,
-        BarrierError::Release(ReleaseBarrierError::Recheck)
+        BarrierError::Refused(RecheckRefusal::Cancelled)
     ));
     Ok(())
 }
@@ -291,7 +338,7 @@ async fn a_failed_root_recheck_is_not_released() -> TestResult {
     let error = refused(Refusal::RootFails, own_pid()).await?;
     assert!(matches!(
         error,
-        BarrierError::Release(ReleaseBarrierError::Recheck)
+        BarrierError::Refused(RecheckRefusal::Root(_))
     ));
     Ok(())
 }
@@ -301,7 +348,7 @@ async fn a_missing_observed_readback_is_not_released() -> TestResult {
     let error = refused(Refusal::NoObservation, own_pid()).await?;
     assert!(matches!(
         error,
-        BarrierError::Release(ReleaseBarrierError::Recheck)
+        BarrierError::Refused(RecheckRefusal::Observation(_))
     ));
     Ok(())
 }
@@ -337,7 +384,7 @@ async fn a_silent_launcher_is_cut_off_at_the_attempt_deadline() -> TestResult {
 async fn an_unreadable_unit_identity_is_refused() -> TestResult {
     let (mut barrier, attempt) =
         barrier_for(SandboxExecutionMode::AirGapped, Refusal::None, own_pid())?;
-    barrier.identity.broken = true;
+    barrier.identity.behaviour = Behaviour::MainPidDown;
     let error = barrier.release(&active(attempt, GENEROUS_MS)).await.err();
     assert!(matches!(error, Some(BarrierError::Identity(_))));
     Ok(())
@@ -347,7 +394,7 @@ async fn an_unreadable_unit_identity_is_refused() -> TestResult {
 async fn an_unreadable_invocation_id_is_refused() -> TestResult {
     let (mut barrier, attempt) =
         barrier_for(SandboxExecutionMode::AirGapped, Refusal::None, own_pid())?;
-    barrier.identity.invocation_broken = true;
+    barrier.identity.behaviour = Behaviour::InvocationDown;
     let error = barrier.release(&active(attempt, GENEROUS_MS)).await.err();
     assert!(matches!(error, Some(BarrierError::Identity(_))));
     Ok(())
@@ -367,31 +414,19 @@ async fn a_release_channel_that_takes_no_timeout_is_refused() -> TestResult {
 fn launch_parameters_that_do_not_fit_are_refused() -> TestResult {
     let attempt = AdmittedAttempt::for_test(ATTEMPT, authority(), SandboxExecutionMode::AirGapped)?
         .running("a".repeat(1 << 20));
-    let barrier = ProviderReleaseBarrier::new(
+    let barrier = barrier_with(
         &attempt,
         SandboxExecutionMode::AirGapped,
-        fresh_nonce()?,
-        BarrierEvidence {
-            launcher_digest: LAUNCHER_DIGEST,
-            adapter_identity: ADAPTER_IDENTITY,
-        },
-        TestSigner {
-            key: SigningKey::from_bytes(&[9; 32]),
-        },
-        TestIdentity {
-            pid: own_pid(),
-            broken: false,
-            invocation_broken: false,
-        },
-        AuthorityCheck::new(
-            authority(),
-            root_check(Refusal::None),
-            EXPECTED_READBACK,
-            TestObserved(Some(OBSERVED_READBACK)),
-            Arc::new(AtomicBool::new(false)),
-        ),
+        Refusal::None,
+        TestIdentity::new(own_pid()),
     );
-    assert!(matches!(barrier, Err(BarrierError::Parameters(_))));
+    assert!(matches!(
+        barrier
+            .err()
+            .and_then(|error| error.downcast::<BarrierError>().ok())
+            .as_deref(),
+        Some(BarrierError::Parameters(_))
+    ));
     Ok(())
 }
 
@@ -439,8 +474,9 @@ fn no_runtime_at_all_is_refused() {
     ));
 }
 
-#[test]
-fn the_unit_end_is_handed_over_once_and_the_invocation_carries_the_parameters() -> TestResult {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_unit_end_is_handed_over_once_and_the_invocation_carries_the_parameters() -> TestResult
+{
     let (mut barrier, _attempt) =
         barrier_for(SandboxExecutionMode::AirGapped, Refusal::None, own_pid())?;
     assert_eq!(
@@ -456,6 +492,98 @@ fn the_unit_end_is_handed_over_once_and_the_invocation_carries_the_parameters() 
         Err(BarrierError::UnitEndTaken)
     ));
     Ok(())
+}
+
+#[tokio::test]
+async fn a_current_thread_runtime_is_refused_before_the_unit_would_start() -> TestResult {
+    let (barrier, _attempt) =
+        barrier_for(SandboxExecutionMode::AirGapped, Refusal::None, own_pid())?;
+    assert!(matches!(
+        barrier.launcher_invocation(),
+        Err(BarrierError::RuntimeFlavor)
+    ));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_unit_whose_invocation_changes_after_ready_is_not_released() -> TestResult {
+    let attempt = AdmittedAttempt::for_test(ATTEMPT, authority(), SandboxExecutionMode::AirGapped)?;
+    let identity = TestIdentity::behaving(own_pid(), Behaviour::InvocationDrifts);
+    let mut barrier = barrier_with(
+        &attempt,
+        SandboxExecutionMode::AirGapped,
+        Refusal::None,
+        identity,
+    )?;
+    let launcher = launcher(&mut barrier)?;
+    let error = barrier.release(&active(attempt, GENEROUS_MS)).await.err();
+    assert!(matches!(
+        error,
+        Some(BarrierError::Refused(RecheckRefusal::UnitChanged))
+    ));
+    drop(barrier);
+    assert_eq!(launcher.join().map_err(|_| "launcher thread")?, None);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unreadable_identity_after_ready_is_not_released() -> TestResult {
+    let attempt = AdmittedAttempt::for_test(ATTEMPT, authority(), SandboxExecutionMode::AirGapped)?;
+    let identity = TestIdentity::behaving(own_pid(), Behaviour::InvocationBreaksAfterFirstRead);
+    let mut barrier = barrier_with(
+        &attempt,
+        SandboxExecutionMode::AirGapped,
+        Refusal::None,
+        identity,
+    )?;
+    let launcher = launcher(&mut barrier)?;
+    let error = barrier.release(&active(attempt, GENEROUS_MS)).await.err();
+    assert!(matches!(
+        error,
+        Some(BarrierError::Refused(RecheckRefusal::Identity(_)))
+    ));
+    drop(barrier);
+    assert_eq!(launcher.join().map_err(|_| "launcher thread")?, None);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_second_release_is_refused_after_the_first() -> TestResult {
+    let (mut barrier, attempt) = barrier_for(
+        SandboxExecutionMode::AirGapped,
+        Refusal::Cancelled,
+        own_pid(),
+    )?;
+    let launcher = launcher(&mut barrier)?;
+    let attempt = active(attempt, GENEROUS_MS);
+    assert!(barrier.release(&attempt).await.is_err());
+    assert!(matches!(
+        barrier.release(&attempt).await.err(),
+        Some(BarrierError::AlreadyAttempted)
+    ));
+    drop(barrier);
+    assert_eq!(launcher.join().map_err(|_| "launcher thread")?, None);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dropped_release_leaves_the_barrier_usable() -> TestResult {
+    let (mut barrier, attempt) =
+        barrier_for(SandboxExecutionMode::AirGapped, Refusal::None, own_pid())?;
+    let attempt = active(attempt, GENEROUS_MS);
+    barrier.identity.behaviour = Behaviour::Hangs;
+    // The caller gives up while the manager does not answer.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), barrier.release(&attempt))
+            .await
+            .is_err()
+    );
+    assert!(barrier.sent_release().is_none());
+    barrier.identity.behaviour = Behaviour::Normal;
+    let launcher = launcher(&mut barrier)?;
+    barrier.release(&attempt).await?;
+    let received = launcher.join().map_err(|_| "launcher thread")?;
+    check_release(&barrier, received.as_ref())
 }
 
 #[test]
