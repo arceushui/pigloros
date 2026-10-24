@@ -3,7 +3,7 @@
 
 deploy.yml is manual, so its steps cannot run in CI. This policy test pins the
 contract instead: the reusable #545 workflow generates the bundle, the image
-build needs it, both Docker builds receive it as the `notices` build context,
+build needs it, the artifact is downloaded into the build context for both Docker builds,
 the image is checked before it is pushed, and the Dockerfile copies the bundle
 to the documented path. The ci docker-build job builds the same image without
 pushing and runs the same image check.
