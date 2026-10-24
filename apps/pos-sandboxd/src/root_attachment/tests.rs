@@ -882,7 +882,9 @@ fn recheck_mints_a_checked_root_only_for_the_same_authority_and_mount() -> TestR
     let expected = expected(&component(&tree.prepared));
     let kernel = FakeKernel::accepting(matching(&expected));
     let verified = attach_and_verify(&kernel, &tree.prepared, &expected, file_mount()?, || Ok(()))?;
-    let checked = recheck(&kernel, &verified, &tree.prepared, || Ok(()))?;
+    let checked = recheck(&kernel, &verified, &tree.prepared, Some(&expected), || {
+        Ok(())
+    })?;
     assert_eq!(
         checked,
         CheckedRoot::for_test(expected.root_directory.clone())
@@ -894,7 +896,9 @@ fn recheck_mints_a_checked_root_only_for_the_same_authority_and_mount() -> TestR
         StagingError::BelowControlFloor,
     ] {
         assert_eq!(
-            recheck(&kernel, &verified, &tree.prepared, || Err(error)),
+            recheck(&kernel, &verified, &tree.prepared, Some(&expected), || Err(
+                error
+            )),
             Err(ImageActivationError::EvidenceMismatch)
         );
     }
@@ -905,7 +909,9 @@ fn recheck_mints_a_checked_root_only_for_the_same_authority_and_mount() -> TestR
         mutate(&mut observed);
         let drifted = FakeKernel::accepting(observed);
         assert_eq!(
-            recheck(&drifted, &verified, &tree.prepared, || Ok(())),
+            recheck(&drifted, &verified, &tree.prepared, Some(&expected), || Ok(
+                ()
+            )),
             Err(ImageActivationError::EvidenceMismatch),
             "{name}"
         );
@@ -930,6 +936,7 @@ fn recheck_mints_a_checked_root_only_for_the_same_authority_and_mount() -> TestR
             &FakeKernel::accepting(replaced),
             &verified,
             &tree.prepared,
+            Some(&expected),
             || Ok(())
         ),
         Err(ImageActivationError::EvidenceMismatch)
@@ -1157,5 +1164,48 @@ async fn the_admitted_chain_reaches_attachment_only_through_every_gate() -> Test
         .err(),
         Some(ImageActivationError::AttachFailure)
     );
+    Ok(())
+}
+
+#[test]
+fn an_entry_binds_only_the_root_its_admission_activated() -> TestResult {
+    let tree = prepared_tree()?;
+    let expected = expected(&component(&tree.prepared));
+    assert!(binds(&expected, Some(&expected.clone())));
+    assert!(!binds(&expected, None));
+    let mut other_image = expected.clone();
+    other_image.held.1 += 1;
+    let mut other_executable = expected.clone();
+    other_executable.executable_digest[0] ^= 1;
+    let mut other_path = expected.clone();
+    other_path.executable_path.push('x');
+    let mut other_root = expected.clone();
+    other_root.root_directory = ActivatedRootDirectory::for_attempt("another");
+    for other in [other_image, other_executable, other_path, other_root] {
+        assert!(!binds(&expected, Some(&other)));
+    }
+    Ok(())
+}
+
+#[test]
+fn a_recheck_consults_nothing_for_an_admission_it_was_not_activated_from() -> TestResult {
+    let tree = prepared_tree()?;
+    let expected = expected(&component(&tree.prepared));
+    let kernel = FakeKernel::accepting(matching(&expected));
+    let verified = attach_and_verify(&kernel, &tree.prepared, &expected, file_mount()?, || Ok(()))?;
+    let mut other = expected;
+    other.executable_digest[0] ^= 1;
+    let consulted = std::cell::Cell::new(false);
+    for candidate in [Some(&other), None] {
+        assert_eq!(
+            recheck(&kernel, &verified, &tree.prepared, candidate, || {
+                consulted.set(true);
+                Ok(())
+            })
+            .err(),
+            Some(ImageActivationError::EvidenceMismatch)
+        );
+    }
+    assert!(!consulted.get());
     Ok(())
 }

@@ -106,6 +106,26 @@ mod tests {
     }
 
     #[test]
+    fn the_execute_path_port_distinguishes_populated_from_empty_and_kills_the_cgroup(
+    ) -> Result<(), Box<dyn Error>> {
+        use crate::UnitCgroup;
+
+        let mut fixture = Fixture::new()?;
+        assert!(!UnitCgroup::is_empty(&mut fixture.bound)?);
+        UnitCgroup::kill_all(&mut fixture.bound)?;
+        assert_eq!(fs::read(fixture.directory.join("cgroup.kill"))?, b"1");
+        fs::write(fixture.directory.join("cgroup.events"), b"populated 0\n")?;
+        assert!(UnitCgroup::is_empty(&mut fixture.bound)?);
+        // Anything but populated or empty is a failure, never emptiness.
+        fs::write(fixture.directory.join("cgroup.events"), b"populated 2\n")?;
+        assert!(matches!(
+            UnitCgroup::is_empty(&mut fixture.bound),
+            Err(AttemptCgroupError::MalformedEvents)
+        ));
+        Ok(())
+    }
+
+    #[test]
     fn replaced_path_cannot_kill_original_or_replacement() -> Result<(), Box<dyn Error>> {
         let fixture = Fixture::new()?;
         let moved = fixture.directory.with_file_name("original");

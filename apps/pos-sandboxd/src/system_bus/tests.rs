@@ -36,7 +36,7 @@ const UNRELATED_UNIT_PATH: &str = "/org/freedesktop/systemd1/unit/unrelated_2ese
 const CONTROL_GROUP_PATH: &str = "/system.slice/pigloros-attempt-test.service";
 const ROOT_DIRECTORY: &str = "/run/pigloros/attempt-381/root";
 const ROOT_IMAGE_POLICY: &str = "root=verity+signed";
-const EXPECTED_PROPERTY_SHAPE: [(&str, &str); 42] = [
+const EXPECTED_PROPERTY_SHAPE: [(&str, &str); 43] = [
     ("Type", "s"),
     ("RootDirectory", "s"),
     ("BindReadOnlyPaths", "a(ssbt)"),
@@ -79,6 +79,7 @@ const EXPECTED_PROPERTY_SHAPE: [(&str, &str); 42] = [
     ("LimitFSIZE", "t"),
     ("FileDescriptorStoreMax", "u"),
     ("ExtraFileDescriptors", "a(hs)"),
+    ("TemporaryFileSystem", "a(ss)"),
 ];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -428,6 +429,7 @@ struct RecordingService {
     system_call_filter: Vec<String>,
     root_directory: String,
     service_limits: [u64; 7],
+    temporary_file_system: Vec<(String, String)>,
     property_reads: Arc<AtomicUsize>,
     control_group_reads: Arc<AtomicUsize>,
     control_group: String,
@@ -452,6 +454,10 @@ impl RecordingService {
             system_call_filter,
             root_directory: ROOT_DIRECTORY.to_owned(),
             service_limits: [134_217_728, 0, 16, 500_000, 5_000_000, 64, 4_096],
+            temporary_file_system: vec![(
+                "/work".to_owned(),
+                "size=1000,nosuid,nodev,noexec".to_owned(),
+            )],
             property_reads: Arc::new(AtomicUsize::new(0)),
             control_group_reads: Arc::new(AtomicUsize::new(0)),
             control_group: CONTROL_GROUP_PATH.to_owned(),
@@ -731,6 +737,11 @@ impl RecordingService {
         ])
     }
 
+    #[zbus(property, name = "TemporaryFileSystem")]
+    fn temporary_file_system(&self) -> Vec<(String, String)> {
+        self.fixed(self.temporary_file_system.clone())
+    }
+
     #[zbus(property, name = "RootImagePolicy")]
     fn root_image_policy(&self) -> fdo::Result<&'static str> {
         self.record_read();
@@ -785,7 +796,7 @@ async fn generated_proxy_submits_the_exact_closed_request() -> Result<(), Box<dy
     assert_eq!(verified.unit_name(), &name);
     assert_eq!(verified.job().as_str(), JOB_PATH);
     assert_eq!(verified.unit_path(), UNIT_PATH);
-    assert_eq!(verified.requested_readback().len(), 42);
+    assert_eq!(verified.requested_readback().len(), 43);
     assert_eq!(verified.requested_readback()[0].name(), "Type");
     assert_eq!(
         verified.requested_readback()[41].name(),
@@ -1214,6 +1225,53 @@ async fn force_kill_sends_whole_unit_sigkill_only() -> Result<(), Box<dyn Error>
 }
 
 #[tokio::test]
+async fn the_execute_path_port_delegates_to_the_typed_transport() -> Result<(), Box<dyn Error>> {
+    use crate::{UnitHost, UnitKiller};
+
+    let behavior = ManagerBehavior::default();
+    let calls = Arc::clone(&behavior.control_calls);
+    let service = RecordingService::exact(expected_system_call_filter()?);
+    let (transport, _server) = transport(Arc::new(Mutex::new(None)), behavior, service).await?;
+    let name = TransientServiceUnitName::from_attempt_id([0x20; 16])?;
+    let started = UnitHost::start(
+        &transport,
+        name.clone(),
+        request(LaunchMode::Local {
+            host_service: descriptor()?,
+        })?,
+    )
+    .await?;
+    assert_eq!(started.unit_name(), &name);
+    // The fixed cgroup mount has no such attempt cgroup.
+    let error = UnitHost::bind_cgroup(&transport, &started)
+        .await
+        .err()
+        .ok_or("absent attempt cgroup was accepted")?;
+    assert!(matches!(
+        error,
+        SystemdTransientUnitTransportError::CgroupKernel(_)
+    ));
+    UnitHost::stop(&transport, name.clone()).await?;
+    UnitHost::kill(&transport, name.clone()).await?;
+    // The handle an execution falls back on when it is dropped kills, then stops.
+    UnitKiller::kill(UnitHost::killer(&transport), name.clone()).await;
+    let stop = ObservedControl::Stop {
+        name: name.as_str().to_owned(),
+        mode: "replace".to_owned(),
+    };
+    let kill = ObservedControl::Kill {
+        name: name.as_str().to_owned(),
+        whom: "all".to_owned(),
+        signal: 9,
+    };
+    assert_eq!(
+        calls.lock().map_err(|error| error.to_string())?.as_slice(),
+        &[stop.clone(), kill.clone(), kill, stop]
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn exact_service_cgroup_is_reverse_mapped_and_kernel_observed() -> Result<(), Box<dyn Error>>
 {
     let behavior = ManagerBehavior::default();
@@ -1556,7 +1614,7 @@ fn request(mode: LaunchMode) -> Result<TransientUnitRequest, Box<dyn Error>> {
         SandboxArchitecture::X86_64,
     )?;
     let inputs = TransientUnitLaunchInputs::new(
-        &CheckedRoot::for_test(ActivatedRootDirectory::new(
+        CheckedRoot::for_test(ActivatedRootDirectory::new(
             "/run/pigloros/attempt-381/root",
         )?),
         LauncherSource::new("/usr/lib/pigloros/release-launcher")?,
