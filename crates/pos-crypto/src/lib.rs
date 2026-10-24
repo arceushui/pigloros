@@ -29,5 +29,6 @@ pub mod strict_cbor;
 #[doc(hidden)]
 pub mod subject_cbor;
 pub mod subject_ciphertext;
+pub mod subject_data;
 pub mod subject_key;
 pub mod timeline_erasure;
