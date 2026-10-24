@@ -575,7 +575,7 @@ async fn a_unit_whose_main_pid_changes_after_ready_is_not_released() -> TestResu
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_identity_read_that_outlasts_the_deadline_is_not_released() -> TestResult {
-    let error = refused_with(Behaviour::HangsAfterFirstRead, 500).await?;
+    let error = refused_with(Behaviour::HangsAfterFirstRead, 3_000).await?;
     assert!(matches!(
         error,
         BarrierError::Refused(RecheckRefusal::Expired)

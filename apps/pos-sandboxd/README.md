@@ -166,7 +166,8 @@ supplies it in `BarrierEvidence`), the setting of the cancellation flag
 the attempt was admitted with; that the recheck closure belongs to the same
 admitted entry is the caller's contract (`VerifiedRootMount::recheck` enforces
 it for its own entry). Authorization of a Replay exchange set is the caller's:
-the report that supplies it is not verified here. `tokio` gains its `rt` and `rt-multi-thread` features.
+the report that supplies it is not verified here. `tokio` gains its `rt` and
+`rt-multi-thread` features.
 
 The provider never creates a local process: `connect_system` accepts only a
 Unix-socket system-bus address (zbus's `unixexec` and `ibus` transports would
