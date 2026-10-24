@@ -59,12 +59,17 @@ enum Behaviour {
     InvocationBreaksAfterFirstRead,
     /// `MainPID` never answers.
     Hangs,
+    /// The second `MainPID` read never answers.
+    HangsAfterFirstRead,
+    /// The second `MainPID` read names another process.
+    MainPidDrifts,
 }
 
 struct TestIdentity {
     pid: u32,
     behaviour: Behaviour,
     invocation_reads: AtomicUsize,
+    main_pid_reads: AtomicUsize,
 }
 
 impl TestIdentity {
@@ -77,6 +82,7 @@ impl TestIdentity {
             pid,
             behaviour,
             invocation_reads: AtomicUsize::new(0),
+            main_pid_reads: AtomicUsize::new(0),
         }
     }
 }
@@ -88,12 +94,17 @@ impl UnitIdentitySource for TestIdentity {
         &self,
         _unit_name: &TransientServiceUnitName,
     ) -> impl Future<Output = Result<u32, IdentityDown>> + Send {
-        let outcome = if self.behaviour == Behaviour::MainPidDown {
-            Err(IdentityDown)
-        } else {
-            Ok(self.pid)
+        let reads = self.main_pid_reads.fetch_add(1, Ordering::SeqCst);
+        let outcome = match self.behaviour {
+            Behaviour::MainPidDown => Err(IdentityDown),
+            Behaviour::MainPidDrifts if reads > 0 => Ok(u32::MAX),
+            _ => Ok(self.pid),
         };
-        let hangs = self.behaviour == Behaviour::Hangs;
+        let hangs = match self.behaviour {
+            Behaviour::Hangs => true,
+            Behaviour::HangsAfterFirstRead => reads > 0,
+            _ => false,
+        };
         async move {
             if hangs {
                 std::future::pending::<()>().await;
@@ -156,7 +167,6 @@ fn test_signer() -> TestResult<TestSigner> {
 /// A barrier for `attempt` whose manager reports `claimed_pid`.
 fn barrier_with(
     attempt: &AdmittedAttempt,
-    mode: SandboxExecutionMode,
     refusal: Refusal,
     identity: TestIdentity,
 ) -> TestResult<TestBarrier> {
@@ -171,7 +181,6 @@ fn barrier_with(
     );
     Ok(ProviderReleaseBarrier::new(
         attempt,
-        mode,
         fresh_nonce()?,
         BarrierEvidence {
             launcher_digest: LAUNCHER_DIGEST,
@@ -190,7 +199,7 @@ fn barrier_for(
     claimed_pid: u32,
 ) -> TestResult<(TestBarrier, AdmittedAttempt)> {
     let attempt = AdmittedAttempt::for_test(ATTEMPT, authority(), mode)?;
-    let barrier = barrier_with(&attempt, mode, refusal, TestIdentity::new(claimed_pid))?;
+    let barrier = barrier_with(&attempt, refusal, TestIdentity::new(claimed_pid))?;
     Ok((barrier, attempt))
 }
 
@@ -292,6 +301,24 @@ fn check_authority(release: &ExecutionRelease) {
     assert_eq!(release.fields.policy_epoch, admitted.policy_epoch);
 }
 
+/// The kernel thread id of a thread that stays alive until the sender drops.
+fn parked_thread_id() -> TestResult<(u32, std::sync::mpsc::Sender<()>)> {
+    let (alive, parked) = std::sync::mpsc::channel::<()>();
+    let (reported, tid) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        let link = std::fs::read_link("/proc/thread-self").ok();
+        reported.send(link).ok();
+        parked.recv().ok();
+    });
+    let link = tid.recv()?.ok_or("no /proc/thread-self")?;
+    let tid = link
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or("no thread id")?
+        .parse()?;
+    Ok((tid, alive))
+}
+
 /// Release a correct `ReadyV1` and return what the launcher received.
 async fn released() -> TestResult<(TestBarrier, Option<ExecutionRelease>)> {
     let (mut barrier, attempt) =
@@ -355,7 +382,11 @@ async fn a_missing_observed_readback_is_not_released() -> TestResult {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_ready_from_another_process_than_the_main_pid_is_not_released() -> TestResult {
-    let error = refused(Refusal::None, own_pid() + 1).await?;
+    // A live thread id: `/proc/<tid>/exe` is observable, but the launcher
+    // (this process) is not that id, so the kernel-supplied pid differs.
+    let (tid, release_thread) = parked_thread_id()?;
+    let error = refused(Refusal::None, tid).await?;
+    drop(release_thread);
     assert!(matches!(
         error,
         BarrierError::Release(ReleaseBarrierError::PidMismatch)
@@ -414,12 +445,7 @@ async fn a_release_channel_that_takes_no_timeout_is_refused() -> TestResult {
 fn launch_parameters_that_do_not_fit_are_refused() -> TestResult {
     let attempt = AdmittedAttempt::for_test(ATTEMPT, authority(), SandboxExecutionMode::AirGapped)?
         .running("a".repeat(1 << 20));
-    let barrier = barrier_with(
-        &attempt,
-        SandboxExecutionMode::AirGapped,
-        Refusal::None,
-        TestIdentity::new(own_pid()),
-    );
+    let barrier = barrier_with(&attempt, Refusal::None, TestIdentity::new(own_pid()));
     assert!(matches!(
         barrier
             .err()
@@ -505,45 +531,56 @@ async fn a_current_thread_runtime_is_refused_before_the_unit_would_start() -> Te
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_unit_whose_invocation_changes_after_ready_is_not_released() -> TestResult {
+/// Release against a unit whose identity misbehaves after `ReadyV1`; the
+/// launcher is never answered.
+async fn refused_with(behaviour: Behaviour, milliseconds: u64) -> TestResult<BarrierError> {
     let attempt = AdmittedAttempt::for_test(ATTEMPT, authority(), SandboxExecutionMode::AirGapped)?;
-    let identity = TestIdentity::behaving(own_pid(), Behaviour::InvocationDrifts);
-    let mut barrier = barrier_with(
-        &attempt,
-        SandboxExecutionMode::AirGapped,
-        Refusal::None,
-        identity,
-    )?;
+    let identity = TestIdentity::behaving(own_pid(), behaviour);
+    let mut barrier = barrier_with(&attempt, Refusal::None, identity)?;
     let launcher = launcher(&mut barrier)?;
-    let error = barrier.release(&active(attempt, GENEROUS_MS)).await.err();
-    assert!(matches!(
-        error,
-        Some(BarrierError::Refused(RecheckRefusal::UnitChanged))
-    ));
+    let error = barrier.release(&active(attempt, milliseconds)).await.err();
     drop(barrier);
     assert_eq!(launcher.join().map_err(|_| "launcher thread")?, None);
+    error.ok_or_else(|| "the release was not refused".into())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_unit_whose_invocation_changes_after_ready_is_not_released() -> TestResult {
+    let error = refused_with(Behaviour::InvocationDrifts, GENEROUS_MS).await?;
+    assert!(matches!(
+        error,
+        BarrierError::Refused(RecheckRefusal::UnitChanged)
+    ));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_unit_whose_main_pid_changes_after_ready_is_not_released() -> TestResult {
+    let error = refused_with(Behaviour::MainPidDrifts, GENEROUS_MS).await?;
+    assert!(matches!(
+        error,
+        BarrierError::Refused(RecheckRefusal::UnitChanged)
+    ));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_identity_read_that_outlasts_the_deadline_is_not_released() -> TestResult {
+    let error = refused_with(Behaviour::HangsAfterFirstRead, 500).await?;
+    assert!(matches!(
+        error,
+        BarrierError::Refused(RecheckRefusal::Expired)
+    ));
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_unreadable_identity_after_ready_is_not_released() -> TestResult {
-    let attempt = AdmittedAttempt::for_test(ATTEMPT, authority(), SandboxExecutionMode::AirGapped)?;
-    let identity = TestIdentity::behaving(own_pid(), Behaviour::InvocationBreaksAfterFirstRead);
-    let mut barrier = barrier_with(
-        &attempt,
-        SandboxExecutionMode::AirGapped,
-        Refusal::None,
-        identity,
-    )?;
-    let launcher = launcher(&mut barrier)?;
-    let error = barrier.release(&active(attempt, GENEROUS_MS)).await.err();
+    let error = refused_with(Behaviour::InvocationBreaksAfterFirstRead, GENEROUS_MS).await?;
     assert!(matches!(
         error,
-        Some(BarrierError::Refused(RecheckRefusal::Identity(_)))
+        BarrierError::Refused(RecheckRefusal::Identity(_))
     ));
-    drop(barrier);
-    assert_eq!(launcher.join().map_err(|_| "launcher thread")?, None);
     Ok(())
 }
 
