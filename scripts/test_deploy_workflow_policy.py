@@ -123,6 +123,8 @@ def check_ci(workflow: dict) -> None:
     job = workflow["jobs"]["docker-build"]
     if "third-party-notices" not in job["needs"]:
         raise AssertionError("docker-build must need the notice job")
+    if "(needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request')" not in job["if"]:
+        raise AssertionError("docker-build must keep the Rust-scope clause")
     if "needs.third-party-notices.result == 'success'" not in job["if"]:
         raise AssertionError("docker-build must require the notice job to succeed")
     steps = job["steps"]
@@ -279,6 +281,13 @@ class DeployNoticePolicy(unittest.TestCase):
             (lambda j: j["docker-build"]["needs"].remove("third-party-notices"), "must need"),
             (
                 lambda j: j["docker-build"].update({"if": "${{ true }}"}),
+                "Rust-scope clause",
+            ),
+            (
+                lambda j: j["docker-build"].update(
+                    {"if": j["docker-build"]["if"].replace(
+                        "needs.third-party-notices.result == 'success' &&", "")}
+                ),
                 "require the notice job",
             ),
             (

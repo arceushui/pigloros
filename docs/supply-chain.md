@@ -170,7 +170,7 @@ The `piglor-gateway` image ships the same bundle (#798) at
   needs, so an unknown or unaccepted licence, a missing licence text or a
   failed generation stops the deployment before any image is built or pushed.
 - The job downloads the artifact with `actions/download-artifact` (pinned to
-  the v7.0.0 commit, the release matching `upload-artifact` v7.0.1) into
+  the v7.0.0 commit, the same major version as `upload-artifact` v7.0.1) into
   `third-party-notices/` in the build context, where `.dockerignore` allows it.
   The `Dockerfile` copies it from there, so a build without the bundle fails.
 - `scripts/check-gateway-image-notices.sh` checks the built image before the
