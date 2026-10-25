@@ -266,6 +266,7 @@ struct ForkEntriesV1<'s> {
     fork_append_operations: &'s mut HashMap<Hash, ForkAppendOperationV1>,
     fork_event_origins: &'s mut HashMap<EventId, EventOriginRecordV1>,
     hasher: &'s dyn Hasher,
+    key_registry: Option<&'s pos_core::KeyRegistryStateV1>,
 }
 
 impl ForkEntriesV1<'_> {
@@ -291,7 +292,13 @@ impl ForkEntriesV1<'_> {
             .drafts()
             .iter()
             .try_for_each(|draft| {
-                MemoryStore::append_one_to_state(&mut timeline, draft, self.hasher).map(drop)
+                MemoryStore::append_one_to_state(
+                    &mut timeline,
+                    draft,
+                    self.hasher,
+                    self.key_registry,
+                )
+                .map(drop)
             })
             .and_then(|()| staged_tick_head(&timeline))
             .map(|head| StagedTickV1 {
@@ -472,6 +479,7 @@ impl MemoryStore {
             ref mut fork_append_operations,
             ref mut fork_event_origins,
             ref hasher,
+            ref key_registry,
             ..
         } = *self;
         let hasher: &dyn Hasher = hasher.as_ref();
@@ -486,6 +494,7 @@ impl MemoryStore {
                 fork_append_operations,
                 fork_event_origins,
                 hasher,
+                key_registry: key_registry.as_ref(),
             })
             .ok_or(CounterfactualStoreErrorV1::ForkNotFound)
     }
