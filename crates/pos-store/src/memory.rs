@@ -1034,41 +1034,43 @@ impl MemoryStore {
             registry,
             draft.entity,
             draft.event_type.as_str(),
-        )?;
-        let seq = state.timeline.head.next();
-        crate::checked_logical_head(
-            state
-                .timeline
-                .meta
-                .fork_point
-                .map_or(0, |(_, fork)| fork.as_u64()),
-            seq.as_u64(),
         )
-        .map(|origin_logical_seq| {
-            let event_id = EventId::new();
-            let id_bytes = event_id.to_string();
-            let payload_hash = hasher.hash_payload(&draft.payload);
-            let chain_head =
-                hasher.hash_event(&state.chain_head, id_bytes.as_bytes(), &draft.payload);
-            let event = Event {
-                id: event_id,
-                entity: draft.entity,
-                event_type: draft.event_type.clone(),
-                payload: draft.payload.clone(),
-                wall_time: draft.wall_time.unwrap_or_else(WallTime::now),
-                seq,
-                causation_id: draft.causation_id,
-                correlation_id: draft.correlation_id,
-                schema_version: draft.schema_version,
-                signature: None,
-                signature_identity: None,
-                origin: Some(EventOriginV1 {
-                    origin_timeline_id: state.timeline.id(),
-                    origin_logical_seq: Seq::from_u64(origin_logical_seq),
-                }),
-                payload_hash,
-            };
-            (event, chain_head)
+        .and_then(|()| {
+            let seq = state.timeline.head.next();
+            crate::checked_logical_head(
+                state
+                    .timeline
+                    .meta
+                    .fork_point
+                    .map_or(0, |(_, fork)| fork.as_u64()),
+                seq.as_u64(),
+            )
+            .map(|origin_logical_seq| {
+                let event_id = EventId::new();
+                let id_bytes = event_id.to_string();
+                let payload_hash = hasher.hash_payload(&draft.payload);
+                let chain_head =
+                    hasher.hash_event(&state.chain_head, id_bytes.as_bytes(), &draft.payload);
+                let event = Event {
+                    id: event_id,
+                    entity: draft.entity,
+                    event_type: draft.event_type.clone(),
+                    payload: draft.payload.clone(),
+                    wall_time: draft.wall_time.unwrap_or_else(WallTime::now),
+                    seq,
+                    causation_id: draft.causation_id,
+                    correlation_id: draft.correlation_id,
+                    schema_version: draft.schema_version,
+                    signature: None,
+                    signature_identity: None,
+                    origin: Some(EventOriginV1 {
+                        origin_timeline_id: state.timeline.id(),
+                        origin_logical_seq: Seq::from_u64(origin_logical_seq),
+                    }),
+                    payload_hash,
+                };
+                (event, chain_head)
+            })
         })
     }
 
@@ -1706,26 +1708,30 @@ impl MemoryStore {
         logical_prefix: u64,
     ) -> Result<Vec<Event>, CoreError> {
         // Check the complete batch before the first in-memory mutation.
-        for draft in drafts {
-            crate::ensure_plaintext_preference_allowed(
-                self.key_registry.as_ref(),
-                draft.entity,
-                draft.event_type.as_str(),
-            )?;
-        }
-        let committed = {
-            let (timelines, hasher, registry) = (
-                &mut self.timelines,
-                &self.hasher,
-                self.key_registry.as_ref(),
-            );
-            mutable_state(timelines, timeline).and_then(|state| {
-                drafts
-                    .iter()
-                    .map(|draft| Self::append_one_to_state(state, draft, hasher.as_ref(), registry))
-                    .collect::<Result<Vec<_>, _>>()
+        let committed = drafts
+            .iter()
+            .try_for_each(|draft| {
+                crate::ensure_plaintext_preference_allowed(
+                    self.key_registry.as_ref(),
+                    draft.entity,
+                    draft.event_type.as_str(),
+                )
             })
-        };
+            .and_then(|()| {
+                let (timelines, hasher, registry) = (
+                    &mut self.timelines,
+                    &self.hasher,
+                    self.key_registry.as_ref(),
+                );
+                mutable_state(timelines, timeline).and_then(|state| {
+                    drafts
+                        .iter()
+                        .map(|draft| {
+                            Self::append_one_to_state(state, draft, hasher.as_ref(), registry)
+                        })
+                        .collect::<Result<Vec<_>, _>>()
+                })
+            });
         committed
             .inspect(|events| {
                 self.event_ids.extend(events.iter().map(|event| event.id));
@@ -5607,12 +5613,14 @@ impl EventStore for MemoryStore {
         let head = self
             .get_timeline(timeline)?
             .ok_or(CoreError::TimelineNotFound(timeline))?;
-        let event = create_event(&persisted, head.head.next())?;
-        crate::ensure_plaintext_preference_allowed(
-            Some(&persisted),
-            event.entity,
-            event.event_type.as_str(),
-        )?;
+        let event = create_event(&persisted, head.head.next()).and_then(|event| {
+            crate::ensure_plaintext_preference_allowed(
+                Some(&persisted),
+                event.entity,
+                event.event_type.as_str(),
+            )
+            .map(|()| event)
+        })?;
         if event
             .signature_identity
             .is_some_and(|identity| identity.role == pos_core::KeyRoleV1::TimelineIntegritySigning)
@@ -5638,12 +5646,16 @@ impl EventStore for MemoryStore {
             &pos_core::CanonicalBytes,
         ) -> Result<pos_core::Signature, CoreError>,
     ) -> Result<Event, CoreError> {
-        let mut persisted = self.checked_signing_registry(expected_registry)?;
-        crate::ensure_plaintext_preference_allowed(
-            Some(&persisted),
-            draft.entity,
-            draft.event_type.as_str(),
-        )?;
+        let mut persisted =
+            self.checked_signing_registry(expected_registry)
+                .and_then(|persisted| {
+                    crate::ensure_plaintext_preference_allowed(
+                        Some(&persisted),
+                        draft.entity,
+                        draft.event_type.as_str(),
+                    )
+                    .map(|()| persisted)
+                })?;
         let owning_timeline = self
             .get_timeline(timeline)
             .and_then(|head| head.ok_or(CoreError::TimelineNotFound(timeline)))?;

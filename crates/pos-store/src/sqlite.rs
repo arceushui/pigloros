@@ -1910,12 +1910,12 @@ impl SqliteStore {
         timeline: TimelineId,
         draft: EventDraft,
     ) -> Result<Event, CoreError> {
-        Self::ensure_plaintext_preference_in_transaction(
+        let context = Self::ensure_plaintext_preference_in_transaction(
             tx,
             draft.entity,
             draft.event_type.as_str(),
-        )?;
-        let context = read_append_context(tx, timeline, CoreError::TimelineNotFound(timeline))?;
+        )
+        .and_then(|()| read_append_context(tx, timeline, CoreError::TimelineNotFound(timeline)))?;
         let seq = context.seq;
         let event_id = EventId::new();
         let event_id_text = event_id.to_string();
@@ -3700,7 +3700,7 @@ impl SqliteStore {
     }
 
     #[cfg(test)]
-    fn check_key_destruction_inventory_version(&mut self) -> Result<(), CoreError> {
+    fn check_key_destruction_inventory_version_with_hook(&mut self) -> Result<(), CoreError> {
         let version_check = self.validate_erasure_inventory_data_version();
         if version_check.is_ok() {
             if let Some((started, release)) = self.destruction_transaction_hook.take() {
@@ -6055,6 +6055,9 @@ impl EventStore for SqliteStore {
         request: KeyDestructionRequestV1,
     ) -> Result<(pos_core::KeyDestructionBeginOutcomeV1, KeyRegistryStateV1), CoreError> {
         let scope = begin_immediate_scope(&self.conn)?;
+        #[cfg(test)]
+        let version_check = self.check_key_destruction_inventory_version_with_hook();
+        #[cfg(not(test))]
         let version_check = self.check_key_destruction_inventory_version();
         let result = version_check.and_then(|()| {
             (|| {
