@@ -162,6 +162,25 @@ fn sqlite_refuses_new_subject_preferences_through_public_append_seams() -> TestR
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
+fn assert_signed_event_refused(
+    destination: &mut impl EventStore,
+    timeline: pos_core::TimelineId,
+    registry: &KeyRegistryStateV1,
+    historical: &pos_core::Event,
+) {
+    // The callback-returned Event is the input to the legacy signed authoring
+    // seam; checking only its signer or a pre-callback placeholder is unsafe.
+    let mut returned = historical.clone();
+    returned.id = EventId::new();
+    returned.seq = historical.seq.next();
+    returned.origin = None;
+    returned.signature = None;
+    returned.signature_identity = None;
+    let mut create = |_: &KeyRegistryStateV1, _: pos_core::Seq| Ok(returned.clone());
+    assert_refused(destination.append_signed_authorized(timeline, registry, &mut create));
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn signed_history_contract(destination: &mut impl EventStore) -> TestResult {
     let subject = EntityId::new();
     let (private_key, _) = generate_keypair();
@@ -217,16 +236,7 @@ fn signed_history_contract(destination: &mut impl EventStore) -> TestResult {
     );
     assert_refused(destination.append(timeline, std::slice::from_ref(&plaintext)));
 
-    // The callback-returned Event is the input to the legacy signed authoring
-    // seam; checking only its signer or a pre-callback placeholder is unsafe.
-    let mut returned = historical.clone();
-    returned.id = EventId::new();
-    returned.seq = historical.seq.next();
-    returned.origin = None;
-    returned.signature = None;
-    returned.signature_identity = None;
-    let mut create = |_: &KeyRegistryStateV1, _: pos_core::Seq| Ok(returned.clone());
-    assert_refused(destination.append_signed_authorized(timeline, &registry, &mut create));
+    assert_signed_event_refused(destination, timeline, &registry, &historical);
 
     let sign_calls = std::cell::Cell::new(0);
     let mut forbidden_sign =
