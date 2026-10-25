@@ -11,7 +11,8 @@
 //!    manager ([`UnitIdentitySource`]) and observes `/proc/<MainPID>/exe`
 //!    itself, so the launcher's claims are compared with the provider's own
 //!    observations, not with the launcher's word;
-//! 2. bounds the `ReadyV1` receive with a socket timeout set to the time left
+//! 2. bounds the `ReadyV1` receive and the `ReleaseV1` send with socket
+//!    timeouts set to the time left
 //!    before the attempt deadline, so a silent launcher cannot hold the
 //!    provider; and
 //! 3. runs the blocking receive, the recheck and the signed `ReleaseV1`
@@ -255,9 +256,13 @@ where
     }
 
     fn rechecked(&self) -> Result<ReleaseBinding, RecheckRefusal> {
+        let binding = self
+            .check
+            .binding(self.authority, self.deadline_monotonic_ns)?;
+        // The identity is read last, so nothing slower than the read itself
+        // separates it from the signing.
         self.unit_unchanged()?;
-        self.check
-            .binding(self.authority, self.deadline_monotonic_ns)
+        Ok(binding)
     }
 }
 

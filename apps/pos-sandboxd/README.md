@@ -119,11 +119,12 @@ are ports, so the composition is exercised without systemd.
   `piglor-host-service-v1` precedes `piglor-release-v1`. `CheckedLocal` is the
   only source of `BoundLocalProxy`, the `LocalProxyBinding` that `serve_proxy`
   in `pos-reference` requires; `ActiveAttempt` witnesses that the unit was
-  started. `AdmittedAttempt::check_local` checks the grant's attempt, SIM1,
-  authority heads and epochs against the admitted attempt, the namespace's
-  attempt and the channel's attempt, and the token carries the attempt it
-  checked. The proxy serves on a blocking thread that the attempt
-  watchdog closes. The namespace, veth pair and nftables rules belong to a
+  started. `AdmittedAttempt::check_local` checks the grant's attempt, request,
+  full authority block, heads and epochs, expected launch policy digest and
+  planned endpoints against the admitted attempt and its launch policy, and
+  the namespace's and the channel's attempt; the token carries the attempt it
+  checked. The proxy serves on a blocking thread that the attempt watchdog
+  closes. The namespace, veth pair and nftables rules belong to a
   separate ticket; `FailClosedLocalNetwork` establishes none and refuses every
   connection.
 - Replay: every captured exchange is resolved from the durable capture store
@@ -145,13 +146,14 @@ builds the LPV1 parameters (attempt, a nonce from `fresh_nonce`, SIM1, adapter
 path and arguments, the expected FDL1 digest of the mode) and the
 `SOCK_SEQPACKET` release channel. After the start it reads the unit's current
 `MainPID` and `InvocationID` from the manager, observes `/proc/<MainPID>/exe`
-itself, and bounds the `ReadyV1` receive with a socket timeout equal to the
-time left before the attempt deadline. The blocking receive, the recheck and
-the signed `ReleaseV1` send run under `tokio::task::block_in_place`, so the
-barrier needs a multi-thread Tokio runtime; a current-thread runtime or none
-is refused with `BarrierError::RuntimeFlavor`, already when the launcher
-command is requested, before any unit starts (a test fixes this requirement).
-The receive is bounded by a socket read timeout, because an outer deadline
+itself, and bounds the `ReadyV1` receive and the `ReleaseV1` send with socket
+timeouts equal to the time left before the attempt deadline. The blocking
+receive, the recheck and the signed `ReleaseV1` send run under
+`tokio::task::block_in_place`, so the barrier needs a multi-thread Tokio
+runtime; a current-thread runtime or none is refused with
+`BarrierError::RuntimeFlavor`, already when the launcher command is requested,
+before any unit starts (a test fixes this requirement). The receive and the
+`ReleaseV1` send are bounded by socket timeouts, because an outer deadline
 cannot preempt a blocking call. After `ReadyV1` verifies, the last-moment
 recheck reads `MainPID`, `InvocationID` and the launcher executable again and
 refuses the release if any changed (`BarrierError::Refused` carries the typed
@@ -167,11 +169,11 @@ release), the adapter's mount and inode identity (the composition root
 supplies it in `BarrierEvidence`), the setting of the cancellation flag
 (#442), adapter stdin and stdout transport, and the real Local namespace.
 `AdmittedAttempt::check_local` binds an admission against the launch-policy
-view and the authority heads the attempt was admitted with; that the recheck closure belongs to the same
-admitted entry is the caller's contract (`VerifiedRootMount::recheck` enforces
-it for its own entry). Authorization of a Replay exchange set is the caller's:
-the report that supplies it is not verified here. `tokio` gains its `rt` and
-`rt-multi-thread` features.
+view and the authority heads the attempt was admitted with; that the recheck
+closure belongs to the same admitted entry is the caller's contract
+(`VerifiedRootMount::recheck` enforces it for its own entry). Authorization of
+a Replay exchange set is the caller's: the report that supplies it is not
+verified here. `tokio` gains its `rt` and `rt-multi-thread` features.
 
 The provider never creates a local process: `connect_system` accepts only a
 Unix-socket system-bus address (zbus's `unixexec` and `ibus` transports would

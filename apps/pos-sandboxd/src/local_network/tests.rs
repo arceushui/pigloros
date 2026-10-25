@@ -389,18 +389,18 @@ async fn dropping_the_serving_future_closes_the_channel() -> TestResult {
     Ok(())
 }
 
+/// Ready only after it was polled `polls` times.
+async fn after_polls(polls: usize, output: u8) -> u8 {
+    for _ in 0..polls {
+        tokio::task::yield_now().await;
+    }
+    output
+}
+
 #[tokio::test]
 async fn both_futures_finish_whichever_is_slower() {
-    let slow = async {
-        tokio::time::sleep(Duration::from_millis(30)).await;
-        1
-    };
-    assert_eq!(both(slow, async { 2 }).await, (1, 2));
-    let slow = async {
-        tokio::time::sleep(Duration::from_millis(30)).await;
-        2
-    };
-    assert_eq!(both(async { 1 }, slow).await, (1, 2));
+    assert_eq!(both(after_polls(3, 1), after_polls(0, 2)).await, (1, 2));
+    assert_eq!(both(after_polls(0, 1), after_polls(3, 2)).await, (1, 2));
 }
 
 struct PanickingConnector;

@@ -88,7 +88,7 @@ impl LocalNetworkAdmission {
     ) -> Self {
         Self {
             grant: AuthenticatedAdmissionGrant(AdmissionGrant {
-                request_id: [1; 16],
+                request_id: [0x1f; 16],
                 attempt_id,
                 expected_launch_policy_digest: authority.lps1_digest,
                 authority,

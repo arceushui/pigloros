@@ -46,7 +46,7 @@ pub const fn authority() -> AdmittedAuthority {
 }
 
 /// The request id of the fixture admission.
-pub const REQUEST_ID: [u8; 16] = [1; 16];
+pub const REQUEST_ID: [u8; 16] = [0x1f; 16];
 
 #[must_use]
 pub const fn grant_authority() -> AdmissionAuthority {
