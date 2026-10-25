@@ -48,7 +48,7 @@ impl CanonicalBytes {
     /// Returns the unchanged value if its non-empty backing is shared, static,
     /// or otherwise not uniquely mutable. Release other clones before retrying.
     /// A static-backed non-empty value cannot become uniquely mutable.
-    #[must_use]
+    #[must_use = "handle the unchanged value returned when its backing cannot be wiped"]
     pub fn try_zeroize_owned(mut self) -> Result<(), Self> {
         if self.zeroize_if_uniquely_owned() {
             Ok(())
