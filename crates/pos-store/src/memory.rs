@@ -1030,7 +1030,7 @@ impl MemoryStore {
         hasher: &dyn Hasher,
         registry: Option<&KeyRegistryStateV1>,
     ) -> Result<(Event, Hash), CoreError> {
-        crate::subject_preferences::ensure_plaintext_preference_allowed(
+        crate::ensure_plaintext_preference_allowed(
             registry,
             draft.entity,
             draft.event_type.as_str(),
@@ -1707,7 +1707,7 @@ impl MemoryStore {
     ) -> Result<Vec<Event>, CoreError> {
         // Check the complete batch before the first in-memory mutation.
         for draft in drafts {
-            crate::subject_preferences::ensure_plaintext_preference_allowed(
+            crate::ensure_plaintext_preference_allowed(
                 self.key_registry.as_ref(),
                 draft.entity,
                 draft.event_type.as_str(),
@@ -5608,7 +5608,7 @@ impl EventStore for MemoryStore {
             .get_timeline(timeline)?
             .ok_or(CoreError::TimelineNotFound(timeline))?;
         let event = create_event(&persisted, head.head.next())?;
-        crate::subject_preferences::ensure_plaintext_preference_allowed(
+        crate::ensure_plaintext_preference_allowed(
             Some(&persisted),
             event.entity,
             event.event_type.as_str(),
@@ -5639,7 +5639,7 @@ impl EventStore for MemoryStore {
         ) -> Result<pos_core::Signature, CoreError>,
     ) -> Result<Event, CoreError> {
         let mut persisted = self.checked_signing_registry(expected_registry)?;
-        crate::subject_preferences::ensure_plaintext_preference_allowed(
+        crate::ensure_plaintext_preference_allowed(
             Some(&persisted),
             draft.entity,
             draft.event_type.as_str(),

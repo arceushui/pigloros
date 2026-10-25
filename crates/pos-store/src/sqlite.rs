@@ -5886,7 +5886,7 @@ impl EventStore for SqliteStore {
                         .get_timeline(timeline)?
                         .ok_or(CoreError::TimelineNotFound(timeline))?;
                     let event = create_event(&persisted, head.head.next())?;
-                    crate::subject_preferences::ensure_plaintext_preference_allowed(
+                    crate::ensure_plaintext_preference_allowed(
                         Some(&persisted),
                         event.entity,
                         event.event_type.as_str(),
@@ -5933,7 +5933,7 @@ impl EventStore for SqliteStore {
                     "durable key registry changed during signing".to_owned(),
                 ));
             }
-            crate::subject_preferences::ensure_plaintext_preference_allowed(
+            crate::ensure_plaintext_preference_allowed(
                 Some(&persisted),
                 draft.entity,
                 draft.event_type.as_str(),
@@ -6997,11 +6997,7 @@ impl SqliteStore {
         } else {
             None
         };
-        crate::subject_preferences::ensure_plaintext_preference_allowed(
-            registry.as_ref(),
-            entity,
-            event_type,
-        )
+        crate::ensure_plaintext_preference_allowed(registry.as_ref(), entity, event_type)
     }
 
     fn write_committed_rows(
