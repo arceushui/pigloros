@@ -44,8 +44,8 @@ fn assert_refused<T>(result: Result<T, CoreError>) {
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn identity(subject: EntityId, epoch: u64) -> Result<KeyIdentityV1, Box<dyn std::error::Error>> {
     let owner = pos_crypto::subject_key::subject_owner_id(subject)?;
-    Ok(KeyIdentityV1::new(
-        owner.as_str(),
+    Ok(KeyIdentityV1::from_parts(
+        pos_core::OwnerIdV1::new(owner)?,
         KeyRoleV1::SubjectDataEncryption,
         epoch,
     ))
