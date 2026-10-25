@@ -1,6 +1,8 @@
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 #![cfg(feature = "sqlite")]
 
+//! Public append-policy regressions, including verified historical imports.
+
 use pos_core::{
     AppendDedupKey, AppendDedupScope, AppendIdentity, AppendOrDuplicateOutcome, CanonicalBytes,
     CoreError, EntityId, ErasureContainmentGateV1, ErasureInventoryPersistencePortV1, EventDraft,
