@@ -1122,7 +1122,7 @@ fn host_owned_draft_error(draft: &EventDraft) -> Option<RuntimeError> {
 const RESTRICTED_HOST_EVENT_TYPES_V1: [&str; 3] = [
     pos_core::COMPOSITION_FALLBACK_DECLARED_EVENT_TYPE_V1,
     pos_core::COMPOSITION_FALLBACK_ACTIVATED_EVENT_TYPE_V1,
-    "subject.data.v1",
+    pos_crypto::subject_data::SUBJECT_DATA_EVENT_TYPE,
 ];
 
 /// Whether no Plugin may draft `kind`: the ADR-061 release activation type
