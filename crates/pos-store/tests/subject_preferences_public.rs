@@ -5,7 +5,11 @@ use pos_core::{
     AppendDedupKey, AppendDedupScope, AppendIdentity, AppendOrDuplicateOutcome, CanonicalBytes,
     CoreError, EntityId, ErasureContainmentGateV1, ErasureInventoryPersistencePortV1, EventDraft,
     EventId, EventStore, Hash, KeyDestructionRequestV1, KeyIdentityV1, KeyRegistrationV1,
-    KeyRegistryStateV1, KeyRoleV1, Kind, SeqRange, WallTime,
+    KeyRegistryStateV1, KeyRoleV1, Kind, PreparedSubjectAppendAuthorizationV1, SeqRange, WallTime,
+};
+use pos_crypto::{
+    key_roles::{sign_timeline_event_for_registered_role, SigningKeyMaterial},
+    signing::generate_keypair,
 };
 use pos_store::{memory::MemoryStore, sqlite::SqliteStore};
 use std::sync::Arc;
@@ -109,11 +113,6 @@ fn contract(store: &mut impl EventStore) -> TestResult {
         AppendOrDuplicateOutcome::Duplicate { .. }
     ));
 
-    let mut committed = historical.clone();
-    committed.id = EventId::new();
-    committed.seq = head.next();
-    committed.origin = None;
-    assert_refused(store.append_committed(timeline, &[committed]));
     assert_eq!(
         store
             .get_timeline(timeline)?
@@ -160,6 +159,128 @@ fn memory_refuses_new_subject_preferences_through_public_append_seams() -> TestR
 #[test]
 fn sqlite_refuses_new_subject_preferences_through_public_append_seams() -> TestResult {
     contract(&mut SqliteStore::open_in_memory()?)
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn signed_history_contract(destination: &mut impl EventStore) -> TestResult {
+    let subject = EntityId::new();
+    let (private_key, _) = generate_keypair();
+    let material = SigningKeyMaterial::new(private_key);
+    let signer = KeyIdentityV1::new("gateway", KeyRoleV1::TimelineIntegritySigning, 1);
+    let mut registry = KeyRegistryStateV1::new();
+    registry.register_key(KeyRegistrationV1::new(
+        signer,
+        material.material_digest(),
+        Some(material.public_verification_key()),
+    ))?;
+    let mut source = MemoryStore::new();
+    bind(&mut source)?;
+    source.save_key_registry(&registry)?;
+    let timeline = source.create_timeline("signed-plaintext-history")?.id();
+    let plaintext = draft(subject, "persona.preference");
+    let mut sign = |state: &mut KeyRegistryStateV1,
+                    envelope: &pos_core::TimelineEventEnvelopeV1,
+                    payload: &CanonicalBytes| {
+        sign_timeline_event_for_registered_role(state, &material, envelope, payload)
+            .map_err(|error| CoreError::Storage(error.to_string()))
+    };
+    let historical = source.append_timeline_signed_authorized(
+        timeline,
+        &registry,
+        plaintext.clone(),
+        signer,
+        material.material_digest(),
+        material.public_verification_key(),
+        &mut sign,
+    )?;
+
+    let subject_identity = identity(subject, 1)?;
+    register(&mut registry, subject_identity, 71)?;
+    bind(destination)?;
+    destination.save_key_registry(&registry)?;
+    let export = pos_core::store::TimelineExport {
+        timeline: source
+            .get_timeline(timeline)?
+            .ok_or("missing source Timeline")?,
+        events: vec![historical.clone()],
+        parent_fork_hash: None,
+    };
+    let imported = pos_store::import_timeline_verified_v1(
+        destination,
+        export,
+        &[(signer, material.public_verification_key())],
+    )?;
+    assert_eq!(imported.id(), timeline);
+    assert_eq!(
+        destination.read(timeline, SeqRange::all())?,
+        vec![historical.clone()]
+    );
+    assert_refused(destination.append(timeline, std::slice::from_ref(&plaintext)));
+
+    // The callback-returned Event is the input to the legacy signed authoring
+    // seam; checking only its signer or a pre-callback placeholder is unsafe.
+    let mut returned = historical.clone();
+    returned.id = EventId::new();
+    returned.seq = historical.seq.next();
+    returned.origin = None;
+    returned.signature = None;
+    returned.signature_identity = None;
+    let mut create = |_: &KeyRegistryStateV1, _: pos_core::Seq| Ok(returned.clone());
+    assert_refused(destination.append_signed_authorized(timeline, &registry, &mut create));
+
+    let sign_calls = std::cell::Cell::new(0);
+    let mut forbidden_sign =
+        |_: &mut KeyRegistryStateV1, _: &pos_core::TimelineEventEnvelopeV1, _: &CanonicalBytes| {
+            sign_calls.set(sign_calls.get() + 1);
+            Err(CoreError::SignatureVerificationFailed)
+        };
+    assert_refused(destination.append_timeline_signed_authorized(
+        timeline,
+        &registry,
+        plaintext.clone(),
+        signer,
+        material.material_digest(),
+        material.public_verification_key(),
+        &mut forbidden_sign,
+    ));
+    let payload_calls = std::cell::Cell::new(0);
+    let mut forbidden_payload = |_: &pos_core::TimelineEventEnvelopeInputV1| {
+        payload_calls.set(payload_calls.get() + 1);
+        Err(CoreError::SignatureVerificationFailed)
+    };
+    assert_refused(
+        destination.append_prepared_subject_encrypted_timeline_signed(
+            timeline,
+            &registry,
+            plaintext,
+            PreparedSubjectAppendAuthorizationV1 {
+                encryption_identity: subject_identity,
+                encryption_material_digest: Hash::from_bytes([71; 32]),
+                signing_identity: signer,
+                signing_material_digest: material.material_digest(),
+                signing_public_key: material.public_verification_key(),
+            },
+            &mut forbidden_payload,
+            &mut forbidden_sign,
+        ),
+    );
+    assert_eq!(payload_calls.get(), 0);
+    assert_eq!(sign_calls.get(), 0);
+    assert_eq!(
+        destination.read(timeline, SeqRange::all())?,
+        vec![historical]
+    );
+    Ok(())
+}
+
+#[test]
+fn memory_preserves_verified_history_and_refuses_signed_plaintext_authoring() -> TestResult {
+    signed_history_contract(&mut MemoryStore::new())
+}
+
+#[test]
+fn sqlite_preserves_verified_history_and_refuses_signed_plaintext_authoring() -> TestResult {
+    signed_history_contract(&mut SqliteStore::open_in_memory()?)
 }
 
 #[test]

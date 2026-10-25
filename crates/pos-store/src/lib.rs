@@ -461,6 +461,13 @@ fn prepare_subject_encrypted_timeline_event(
     } = callbacks;
     let signing_identity = authorization.signing_identity;
     authorize_prepared_subject_append(registry, authorization)
+        .and_then(|()| {
+            subject_preferences::ensure_plaintext_preference_allowed(
+                Some(registry),
+                draft.entity,
+                draft.event_type.as_str(),
+            )
+        })
         .and_then(|()| store.get_timeline(timeline))
         .and_then(|owning| owning.ok_or(CoreError::TimelineNotFound(timeline)))
         .and_then(|owning| {

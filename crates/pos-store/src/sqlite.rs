@@ -5886,6 +5886,11 @@ impl EventStore for SqliteStore {
                         .get_timeline(timeline)?
                         .ok_or(CoreError::TimelineNotFound(timeline))?;
                     let event = create_event(&persisted, head.head.next())?;
+                    crate::subject_preferences::ensure_plaintext_preference_allowed(
+                        Some(&persisted),
+                        event.entity,
+                        event.event_type.as_str(),
+                    )?;
                     if event.signature_identity.is_some_and(|identity| {
                         identity.role == KeyRoleV1::TimelineIntegritySigning
                     }) {
@@ -5928,6 +5933,11 @@ impl EventStore for SqliteStore {
                     "durable key registry changed during signing".to_owned(),
                 ));
             }
+            crate::subject_preferences::ensure_plaintext_preference_allowed(
+                Some(&persisted),
+                draft.entity,
+                draft.event_type.as_str(),
+            )?;
             let owning_timeline = self
                 .get_timeline(timeline)
                 .and_then(|head| head.ok_or(CoreError::TimelineNotFound(timeline)))?;
@@ -7001,13 +7011,6 @@ impl SqliteStore {
         mut prev_hash: pos_core::Hash,
         ordered: &[Event],
     ) -> Result<(), CoreError> {
-        for event in ordered {
-            Self::ensure_plaintext_preference_in_transaction(
-                &self.conn,
-                event.entity,
-                event.event_type.as_str(),
-            )?;
-        }
         let mut new_head = head_seq;
         for event in ordered {
             let id_str = event.id.to_string();

@@ -5608,6 +5608,11 @@ impl EventStore for MemoryStore {
             .get_timeline(timeline)?
             .ok_or(CoreError::TimelineNotFound(timeline))?;
         let event = create_event(&persisted, head.head.next())?;
+        crate::subject_preferences::ensure_plaintext_preference_allowed(
+            Some(&persisted),
+            event.entity,
+            event.event_type.as_str(),
+        )?;
         if event
             .signature_identity
             .is_some_and(|identity| identity.role == pos_core::KeyRoleV1::TimelineIntegritySigning)
@@ -5634,6 +5639,11 @@ impl EventStore for MemoryStore {
         ) -> Result<pos_core::Signature, CoreError>,
     ) -> Result<Event, CoreError> {
         let mut persisted = self.checked_signing_registry(expected_registry)?;
+        crate::subject_preferences::ensure_plaintext_preference_allowed(
+            Some(&persisted),
+            draft.entity,
+            draft.event_type.as_str(),
+        )?;
         let owning_timeline = self
             .get_timeline(timeline)
             .and_then(|head| head.ok_or(CoreError::TimelineNotFound(timeline)))?;
@@ -6084,14 +6094,6 @@ impl EventStore for MemoryStore {
                 .and_then(|()| {
                     if events.is_empty() {
                         return Ok(());
-                    }
-
-                    for event in events {
-                        crate::subject_preferences::ensure_plaintext_preference_allowed(
-                            store.key_registry.as_ref(),
-                            event.entity,
-                            event.event_type.as_str(),
-                        )?;
                     }
 
                     let mut timeline_state = store.state(timeline).timeline.clone();
