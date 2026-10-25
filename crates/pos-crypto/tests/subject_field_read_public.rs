@@ -42,7 +42,7 @@ impl SubjectFieldOwnerReadPortV1 for RefusalWitness {
 
 // Exhaustive client handling proves the public closed names/classifications are
 // expressible. It does not prove a real adapter's delivery or quarantine behavior.
-fn delivery_occurred(error: OuterError) -> bool {
+const fn delivery_occurred(error: OuterError) -> bool {
     match error {
         OuterError::ContextQuarantined
         | OuterError::OperationActive
