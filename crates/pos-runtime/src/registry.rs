@@ -1117,24 +1117,25 @@ fn host_owned_draft_error(draft: &EventDraft) -> Option<RuntimeError> {
     }
 }
 
-/// The host-owned Event types of ADR-119 (section 4.7): no Plugin may draft
-/// or own them.
-const COMPOSITION_FALLBACK_EVENT_TYPES_V1: [&str; 2] = [
+/// Host-owned types refused in both Plugin ownership and drafts (ADR-119
+/// section 4.7 and ADR-024 revision 3 C1).
+const RESTRICTED_HOST_EVENT_TYPES_V1: [&str; 3] = [
     pos_core::COMPOSITION_FALLBACK_DECLARED_EVENT_TYPE_V1,
     pos_core::COMPOSITION_FALLBACK_ACTIVATED_EVENT_TYPE_V1,
+    pos_crypto::subject_data::SUBJECT_DATA_EVENT_TYPE,
 ];
 
 /// Whether no Plugin may draft `kind`: the ADR-061 release activation type
-/// and the ADR-119 fallback types.
+/// and the shared host-owned types.
 fn is_reserved_host_draft_type(kind: &str) -> bool {
     kind == crate::community_plugin_host::PLUGIN_RELEASE_ACTIVATED_EVENT_TYPE_V1
-        || COMPOSITION_FALLBACK_EVENT_TYPES_V1.contains(&kind)
+        || RESTRICTED_HOST_EVENT_TYPES_V1.contains(&kind)
 }
 
-/// Whether `kind` is an ADR-119 fallback type, which no Plugin may own.
-fn is_composition_fallback_kind(kind: &Kind) -> bool {
+/// Whether `kind` is one of the shared types no Plugin may own.
+fn is_restricted_host_kind(kind: &Kind) -> bool {
     let kind = kind.as_str();
-    COMPOSITION_FALLBACK_EVENT_TYPES_V1.contains(&kind)
+    RESTRICTED_HOST_EVENT_TYPES_V1.contains(&kind)
 }
 
 /// One reserved-ownership rule: which types are reserved, and the closed
@@ -1145,7 +1146,7 @@ type ReservedOwnershipV1 = (fn(&Kind) -> bool, fn(String, String) -> RuntimeErro
 const RESERVED_OWNERSHIP_V1: [ReservedOwnershipV1; 3] = [
     (pos_core::is_geographic_event_type, reserved_geographic),
     (pos_core::is_consent_event_type, reserved_consent),
-    (is_composition_fallback_kind, reserved_host),
+    (is_restricted_host_kind, reserved_host),
 ];
 
 const fn reserved_geographic(name: String, event_type: String) -> RuntimeError {
@@ -7486,10 +7487,11 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn plugins_cannot_claim_composition_fallback_event_types() {
+    fn plugins_cannot_claim_restricted_host_event_types() {
         for reserved in [
             pos_core::COMPOSITION_FALLBACK_DECLARED_EVENT_TYPE_V1,
             pos_core::COMPOSITION_FALLBACK_ACTIVATED_EVENT_TYPE_V1,
+            "subject.data.v1",
         ] {
             let plugin = simple_plugin("malicious-fallback", &["plugin.allowed.v1", reserved]);
             let mut registry = PluginRegistry::new();
@@ -7500,6 +7502,8 @@ mod tests {
                 "{result:?}"
             );
             assert!(registry.is_empty());
+            assert!(!registry.schemas.contains("plugin.allowed.v1"));
+            assert!(!registry.schemas.contains(reserved));
         }
     }
 
@@ -7517,6 +7521,7 @@ mod tests {
             crate::community_plugin_host::PLUGIN_RELEASE_ACTIVATED_EVENT_TYPE_V1,
             pos_core::COMPOSITION_FALLBACK_DECLARED_EVENT_TYPE_V1,
             pos_core::COMPOSITION_FALLBACK_ACTIVATED_EVENT_TYPE_V1,
+            "subject.data.v1",
         ] {
             let error = host_owned_draft_error(&draft(reserved));
             let refused = matches!(&error, Some(RuntimeError::ReservedHostDraft { .. }));
