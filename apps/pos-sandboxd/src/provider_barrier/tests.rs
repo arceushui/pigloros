@@ -438,6 +438,37 @@ async fn an_unreadable_unit_identity_is_refused() -> TestResult {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_unit_identity_is_read_after_the_other_rechecks() -> TestResult {
+    // Both the attempt is cancelled and the invocation drifts: the cancellation
+    // is reported because the identity is read last.
+    let attempt = AdmittedAttempt::for_test(ATTEMPT, authority(), SandboxExecutionMode::AirGapped)?;
+    let identity = TestIdentity::behaving(own_pid(), Behaviour::InvocationDrifts);
+    let mut barrier = barrier_with(&attempt, Refusal::Cancelled, identity)?;
+    let launcher = launcher(&mut barrier)?;
+    let error = barrier.release(&active(attempt, GENEROUS_MS)).await.err();
+    assert!(matches!(
+        error,
+        Some(BarrierError::Refused(RecheckRefusal::Cancelled))
+    ));
+    drop(barrier);
+    assert_eq!(launcher.join().map_err(|_| "launcher thread")?, None);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_manager_that_never_answers_is_cut_off_at_the_attempt_deadline() -> TestResult {
+    let (mut barrier, attempt) =
+        barrier_for(SandboxExecutionMode::AirGapped, Refusal::None, own_pid())?;
+    barrier.identity.behaviour = Behaviour::Hangs;
+    let started = Instant::now();
+    let error = barrier.release(&active(attempt, 300)).await.err();
+    assert!(matches!(error, Some(BarrierError::Expired)));
+    assert!(started.elapsed() >= Duration::from_millis(300));
+    assert!(barrier.sent_release().is_none());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_unreadable_invocation_id_is_refused() -> TestResult {
     let (mut barrier, attempt) =
         barrier_for(SandboxExecutionMode::AirGapped, Refusal::None, own_pid())?;

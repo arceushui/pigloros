@@ -184,7 +184,12 @@ pub fn invocation() -> TestResult<crate::LauncherInvocation> {
     // One random nonce per test process, so every caller of the fixture builds
     // the same command without a hard-coded cryptographic value.
     static NONCE: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
-    let nonce = *NONCE.get_or_init(|| crate::fresh_nonce().unwrap_or_default());
+    let nonce = if let Some(nonce) = NONCE.get() {
+        *nonce
+    } else {
+        let fresh = crate::fresh_nonce()?;
+        *NONCE.get_or_init(|| fresh)
+    };
     let parameters = pos_reference::sandbox_provider_protocol::LaunchParameters::new(
         ATTEMPT,
         nonce,

@@ -12,9 +12,8 @@
 //!    itself, so the launcher's claims are compared with the provider's own
 //!    observations, not with the launcher's word;
 //! 2. bounds the `ReadyV1` receive and the `ReleaseV1` send with socket
-//!    timeouts set to the time left
-//!    before the attempt deadline, so a silent launcher cannot hold the
-//!    provider; and
+//!    timeouts set to the time left before the attempt deadline, so a silent
+//!    launcher cannot hold the provider; and
 //! 3. runs the blocking receive, the recheck and the signed `ReleaseV1`
 //!    send with [`tokio::task::block_in_place`], which exists only on a
 //!    multi-thread runtime. A current-thread runtime is refused up front
@@ -484,6 +483,20 @@ fn absolute_deadline_ns(
     u64::try_from(absolute).ok()
 }
 
+/// One manager read, cut off at the attempt `deadline`.
+async fn read_by<T, E>(
+    deadline: Instant,
+    read: impl Future<Output = Result<T, E>>,
+) -> Result<T, BarrierError>
+where
+    E: Error + Send + Sync + 'static,
+{
+    tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), read)
+        .await
+        .map_err(|_| BarrierError::Expired)?
+        .map_err(|error| BarrierError::Identity(Box::new(error)))
+}
+
 /// Bound both the `ReadyV1` receive and the `ReleaseV1` send by the time left.
 fn bound_channel(channel: &std::os::fd::OwnedFd, remaining: Duration) -> Result<(), BarrierError> {
     [Timeout::Recv, Timeout::Send]
@@ -514,16 +527,16 @@ where
         if self.attempted {
             return Err(BarrierError::AlreadyAttempted);
         }
-        let main_pid = self
-            .identity
-            .main_pid(attempt.unit_name())
-            .await
-            .map_err(|error| BarrierError::Identity(Box::new(error)))?;
-        let invocation = self
-            .identity
-            .invocation_id(attempt.unit_name())
-            .await
-            .map_err(|error| BarrierError::Identity(Box::new(error)))?;
+        let main_pid = read_by(
+            attempt.deadline(),
+            self.identity.main_pid(attempt.unit_name()),
+        )
+        .await?;
+        let invocation = read_by(
+            attempt.deadline(),
+            self.identity.invocation_id(attempt.unit_name()),
+        )
+        .await?;
         let launcher = observe_executable(main_pid)?;
         let expected = self.expected(invocation, launcher);
         let (remaining, deadline_monotonic_ns) = release_window(attempt.deadline())?;

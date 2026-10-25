@@ -237,6 +237,7 @@ fn extra_descriptors(request: &TransientUnitRequest) -> &[(OwnedFd, String)] {
 }
 
 struct FakeCgroup {
+    log: Log,
     polls: Arc<AtomicUsize>,
     kills: Arc<AtomicUsize>,
     empty_after: usize,
@@ -257,6 +258,7 @@ impl UnitCgroup for FakeCgroup {
     }
 
     fn kill_all(&mut self) -> Result<(), Injected> {
+        record(&self.log, "cgroup_kill");
         self.kills.fetch_add(1, Ordering::SeqCst);
         if self.fail_kill {
             Err(Injected)
@@ -309,6 +311,7 @@ impl UnitHost for FakeHost {
             Err(Injected)
         } else {
             Ok(FakeCgroup {
+                log: Arc::clone(&self.log),
                 polls: Arc::clone(&self.polls),
                 kills: Arc::clone(&self.cgroup_kills),
                 empty_after: self.empty_after,
@@ -700,7 +703,7 @@ fn planned_capabilities(plan: &ModePlan) -> Vec<NetworkCapability> {
             .exchanges()
             .map(|(_, capability)| capability.clone())
             .collect(),
-        _ => Vec::new(),
+        ModePlan::AirGapped | ModePlan::Fork | ModePlan::Replay { .. } => Vec::new(),
     }
 }
 
@@ -1085,7 +1088,11 @@ async fn a_kill_that_never_answers_is_reported_as_unacknowledged() -> TestResult
 async fn a_stop_that_never_answers_does_not_hold_the_failure() -> TestResult {
     let (scenario, failed) = timed_out(&[Fault::HangStop], true).await?;
     assert_eq!(failed.unit, UnitState::Killed);
-    assert!(scenario.entries().ends_with(&names(&["kill", "stop"])));
+    // The cgroup kill came before the stalled stop, so the stop cannot delay it.
+    assert!(scenario
+        .entries()
+        .ends_with(&names(&["kill", "cgroup_kill", "stop"])));
+    assert_eq!(scenario.cgroup_kills(), 1);
     Ok(())
 }
 
@@ -1185,6 +1192,7 @@ async fn a_refused_release_kills_the_unit_and_its_cgroup() -> TestResult {
             "bind_cgroup",
             "release",
             "kill",
+            "cgroup_kill",
             "stop"
         ]
     );
@@ -1336,7 +1344,7 @@ async fn an_unreadable_cgroup_terminates_the_unit() -> TestResult {
     assert_eq!(failed.unit, UnitState::Killed);
     assert!(scenario
         .entries()
-        .ends_with(&names(&["release", "kill", "stop"])));
+        .ends_with(&names(&["release", "kill", "cgroup_kill", "stop"])));
     Ok(())
 }
 
@@ -1359,7 +1367,7 @@ async fn the_watchdog_kills_an_attempt_that_never_empties() -> TestResult {
     assert_eq!(execution.ending, AttemptEnding::WatchdogKilled);
     assert!(scenario
         .entries()
-        .ends_with(&names(&["release", "kill", "stop"])));
+        .ends_with(&names(&["release", "kill", "cgroup_kill", "stop"])));
     assert_eq!(scenario.cgroup_kills(), 1);
     Ok(())
 }
@@ -1395,7 +1403,7 @@ async fn the_watchdog_closes_a_silent_fd3_and_kills_the_unit() -> TestResult {
     assert!(execution.network.transcript_digests().is_empty());
     assert!(scenario
         .entries()
-        .ends_with(&names(&["release", "kill", "stop"])));
+        .ends_with(&names(&["release", "kill", "cgroup_kill", "stop"])));
     Ok(())
 }
 
@@ -1447,7 +1455,7 @@ async fn a_protocol_violation_on_fd3_kills_the_unit_and_keeps_the_evidence() -> 
     assert!(execution.network.transcript_digests().is_empty());
     assert!(scenario
         .entries()
-        .ends_with(&names(&["release", "kill", "stop"])));
+        .ends_with(&names(&["release", "kill", "cgroup_kill", "stop"])));
     assert_eq!(scenario.cgroup_kills(), 1);
     Ok(())
 }

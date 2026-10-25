@@ -789,7 +789,7 @@ where
             connector,
             store,
             bounds.deadline,
-            kill_unit(host, unit, bounds.call),
+            sigkill(host, unit, bounds.call),
         )
         .await;
     let served = served.map_err(ExecuteError::from)?;
@@ -797,8 +797,8 @@ where
         served.session.termination() == Some(LocalNetworkTermination::ProtocolFailure);
     let finish = match expired {
         Some(killed) => {
-            // The unit kill ran during the join; this is the belt and braces.
-            cgroup.kill_all().ok();
+            // SIGKILL ran during the join; the rest follows in the usual order.
+            finish_kill(host, unit, Some(cgroup), bounds.call).await;
             Finish::Watchdog { killed }
         }
         None if protocol_failure => Finish::ProtocolFailure {
@@ -867,22 +867,35 @@ where
     }
 }
 
-/// SIGKILL the unit and stop its job, each host call bounded by `call`;
-/// `true` when SIGKILL was acknowledged.
-async fn kill_unit<H>(host: &H, unit: &TransientServiceUnitName, call: Duration) -> bool
+/// SIGKILL the unit, bounded by `call`; `true` when it was acknowledged.
+async fn sigkill<H>(host: &H, unit: &TransientServiceUnitName, call: Duration) -> bool
 where
     H: UnitHost + Sync,
 {
-    let killed = within(call, async { host.kill(unit.clone()).await.is_ok() })
+    within(call, async { host.kill(unit.clone()).await.is_ok() })
         .await
-        .unwrap_or(false);
-    // Replacing a queued start job is best effort: the unit kill covers it.
-    within(call, async { host.stop(unit.clone()).await.ok() }).await;
-    killed
+        .unwrap_or(false)
 }
 
-/// [`kill_unit`], then kill the cgroup when bound (a synchronous write that
-/// returns promptly; belt and braces for the unit kill).
+/// After SIGKILL: kill the cgroup when bound (a synchronous write that returns
+/// promptly, so a stalled manager cannot delay it), then stop the job, which
+/// replaces a queued start and is best effort because the kill covers it.
+async fn finish_kill<H>(
+    host: &H,
+    unit: &TransientServiceUnitName,
+    cgroup: Option<&mut H::Cgroup>,
+    call: Duration,
+) where
+    H: UnitHost + Sync,
+{
+    if let Some(cgroup) = cgroup {
+        cgroup.kill_all().ok();
+    }
+    within(call, async { host.stop(unit.clone()).await.ok() }).await;
+}
+
+/// SIGKILL the unit, kill its cgroup when bound, then stop its job, each host
+/// call bounded by `call`; `true` when SIGKILL was acknowledged.
 async fn kill_everything<H>(
     host: &H,
     unit: &TransientServiceUnitName,
@@ -892,10 +905,8 @@ async fn kill_everything<H>(
 where
     H: UnitHost + Sync,
 {
-    let killed = kill_unit(host, unit, call).await;
-    if let Some(cgroup) = cgroup {
-        cgroup.kill_all().ok();
-    }
+    let killed = sigkill(host, unit, call).await;
+    finish_kill(host, unit, cgroup, call).await;
     killed
 }
 
