@@ -192,6 +192,35 @@ pub use pos_core::{
 const COUNTERFACTUAL_SEAL: pos_core::CounterfactualAdapterSealV1 =
     pos_core::CounterfactualAdapterSealV1::for_adapter();
 
+/// Check fresh Persona appends against the adapter's current validated registry,
+/// never a cached subject classification. Records include every lifecycle state
+/// and are retained permanently; validation also requires a record for each
+/// epoch high-water entry.
+fn ensure_plaintext_preference_allowed(
+    registry: Option<&pos_core::KeyRegistryStateV1>,
+    entity: EntityId,
+    event_type: &str,
+) -> Result<(), CoreError> {
+    if event_type != "persona.preference" {
+        return Ok(());
+    }
+    let owner = format!(
+        "subject:{:032x}",
+        u128::from_be_bytes(entity.inner().to_bytes())
+    );
+    let subject = registry.is_some_and(|registry| {
+        registry.key_records().any(|record| {
+            record.identity.role == pos_core::KeyRoleV1::SubjectDataEncryption
+                && record.identity.owner_id.as_str() == owner
+        })
+    });
+    if subject {
+        Err(CoreError::SubjectPlaintextPreferenceRefused)
+    } else {
+        Ok(())
+    }
+}
+
 /// Map a backend failure onto the closed counterfactual port errors.
 ///
 /// A missing Timeline is `ForkNotFound`, a write whose commit may or may not
@@ -460,6 +489,13 @@ fn prepare_subject_encrypted_timeline_event(
     } = callbacks;
     let signing_identity = authorization.signing_identity;
     authorize_prepared_subject_append(registry, authorization)
+        .and_then(|()| {
+            ensure_plaintext_preference_allowed(
+                Some(registry),
+                draft.entity,
+                draft.event_type.as_str(),
+            )
+        })
         .and_then(|()| store.get_timeline(timeline))
         .and_then(|owning| owning.ok_or(CoreError::TimelineNotFound(timeline)))
         .and_then(|owning| {

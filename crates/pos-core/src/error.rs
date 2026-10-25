@@ -75,6 +75,9 @@ pub enum CoreError {
 
     #[error("erasure containment boundary is unavailable")]
     ErasureContainmentUnavailable,
+
+    #[error("plaintext Persona Preferences are unavailable for this subject")]
+    SubjectPlaintextPreferenceRefused,
 }
 
 #[cfg(test)]
