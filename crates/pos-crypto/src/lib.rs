@@ -31,5 +31,6 @@ pub mod strict_cbor;
 pub mod subject_cbor;
 pub mod subject_ciphertext;
 pub mod subject_data;
+pub mod subject_field_read;
 pub mod subject_key;
 pub mod timeline_erasure;
