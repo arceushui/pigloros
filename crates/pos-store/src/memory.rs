@@ -922,10 +922,14 @@ impl MemoryStore {
         }
         let expires_at = checked_append_identity_expires_at(admitted_at)?;
         let event = {
-            let (timelines, event_ids, hasher) =
-                (&mut self.timelines, &mut self.event_ids, &self.hasher);
+            let (timelines, event_ids, hasher, registry) = (
+                &mut self.timelines,
+                &mut self.event_ids,
+                &self.hasher,
+                self.key_registry.as_ref(),
+            );
             mutable_state(timelines, timeline).and_then(|state| {
-                let event = Self::append_one_to_state(state, draft, hasher.as_ref())?;
+                let event = Self::append_one_to_state(state, draft, hasher.as_ref(), registry)?;
                 event_ids.insert(event.id);
                 Ok(event)
             })
@@ -1004,8 +1008,9 @@ impl MemoryStore {
         state: &mut TimelineState,
         draft: &EventDraft,
         hasher: &dyn Hasher,
+        registry: Option<&KeyRegistryStateV1>,
     ) -> Result<Event, CoreError> {
-        Self::prepare_one_for_state(state, draft, hasher).map(|(event, chain_head)| {
+        Self::prepare_one_for_state(state, draft, hasher, registry).map(|(event, chain_head)| {
             Self::commit_prepared_to_state(state, event.clone(), chain_head);
             event
         })
@@ -1023,7 +1028,13 @@ impl MemoryStore {
         state: &TimelineState,
         draft: &EventDraft,
         hasher: &dyn Hasher,
+        registry: Option<&KeyRegistryStateV1>,
     ) -> Result<(Event, Hash), CoreError> {
+        crate::subject_preferences::ensure_plaintext_preference_allowed(
+            registry,
+            draft.entity,
+            draft.event_type.as_str(),
+        )?;
         let seq = state.timeline.head.next();
         crate::checked_logical_head(
             state
@@ -1694,12 +1705,24 @@ impl MemoryStore {
         drafts: &[EventDraft],
         logical_prefix: u64,
     ) -> Result<Vec<Event>, CoreError> {
+        // Check the complete batch before the first in-memory mutation.
+        for draft in drafts {
+            crate::subject_preferences::ensure_plaintext_preference_allowed(
+                self.key_registry.as_ref(),
+                draft.entity,
+                draft.event_type.as_str(),
+            )?;
+        }
         let committed = {
-            let (timelines, hasher) = (&mut self.timelines, &self.hasher);
+            let (timelines, hasher, registry) = (
+                &mut self.timelines,
+                &self.hasher,
+                self.key_registry.as_ref(),
+            );
             mutable_state(timelines, timeline).and_then(|state| {
                 drafts
                     .iter()
-                    .map(|draft| Self::append_one_to_state(state, draft, hasher.as_ref()))
+                    .map(|draft| Self::append_one_to_state(state, draft, hasher.as_ref(), registry))
                     .collect::<Result<Vec<_>, _>>()
             })
         };
@@ -2418,7 +2441,7 @@ impl MemoryStore {
                     .meta
                     .fork_point
                     .map_or(0, |(_, fork)| fork.as_u64());
-                Self::prepare_one_for_state(state, draft, hasher)
+                Self::prepare_one_for_state(state, draft, hasher, self.key_registry.as_ref())
                     .and_then(|(local_event, chain_head)| {
                         Self::logical_event(prefix, local_event.clone())
                             .map(|event| (local_event, chain_head, event))
@@ -4639,10 +4662,14 @@ impl GeoLocationAdmissionStore for MemoryStore {
         )
         .with_wall_time(admitted_at);
         let event = {
-            let (timelines, event_ids, hasher) =
-                (&mut self.timelines, &mut self.event_ids, &self.hasher);
+            let (timelines, event_ids, hasher, registry) = (
+                &mut self.timelines,
+                &mut self.event_ids,
+                &self.hasher,
+                self.key_registry.as_ref(),
+            );
             mutable_state(timelines, timeline).and_then(|state| {
-                let event = Self::append_one_to_state(state, &draft, hasher.as_ref())?;
+                let event = Self::append_one_to_state(state, &draft, hasher.as_ref(), registry)?;
                 event_ids.insert(event.id);
                 Ok(event)
             })?
@@ -6057,6 +6084,14 @@ impl EventStore for MemoryStore {
                 .and_then(|()| {
                     if events.is_empty() {
                         return Ok(());
+                    }
+
+                    for event in events {
+                        crate::subject_preferences::ensure_plaintext_preference_allowed(
+                            store.key_registry.as_ref(),
+                            event.entity,
+                            event.event_type.as_str(),
+                        )?;
                     }
 
                     let mut timeline_state = store.state(timeline).timeline.clone();
@@ -7656,6 +7691,7 @@ mod tests {
                 state,
                 &make_draft(EntityId::new(), b"classified-suffix"),
                 hasher.as_ref(),
+                None,
             )?
         };
         let origin = EventOriginRecordV1::new(EventOriginRecordInputV1 {
@@ -8433,7 +8469,7 @@ mod tests {
 
         let (timelines, hasher) = (&mut store.timelines, &store.hasher);
         let state = timelines.get_mut(&timeline.id()).test_ok();
-        assert!(MemoryStore::append_one_to_state(state, &draft, hasher.as_ref()).is_err());
+        assert!(MemoryStore::append_one_to_state(state, &draft, hasher.as_ref(), None).is_err());
         assert!(store
             .append_or_duplicate_with_limit_visible(
                 timeline.id(),

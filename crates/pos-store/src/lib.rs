@@ -92,6 +92,7 @@ pub mod memory;
 #[cfg(target_os = "linux")]
 pub mod plugin_trust_registry;
 pub mod stitch;
+mod subject_preferences;
 mod timeline_range;
 pub mod trusted_clock;
 

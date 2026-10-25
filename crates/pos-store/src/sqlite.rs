@@ -1910,6 +1910,11 @@ impl SqliteStore {
         timeline: TimelineId,
         draft: EventDraft,
     ) -> Result<Event, CoreError> {
+        Self::ensure_plaintext_preference_in_transaction(
+            tx,
+            draft.entity,
+            draft.event_type.as_str(),
+        )?;
         let context = read_append_context(tx, timeline, CoreError::TimelineNotFound(timeline))?;
         let seq = context.seq;
         let event_id = EventId::new();
@@ -6969,6 +6974,26 @@ impl SqliteStore {
 }
 
 impl SqliteStore {
+    /// Registry reads share the append's immediate transaction with enrollment.
+    /// Other Event types do not depend on a readable subject registry.
+    fn ensure_plaintext_preference_in_transaction(
+        connection: &Connection,
+        entity: EntityId,
+        event_type: &str,
+    ) -> Result<(), CoreError> {
+        let registry = if event_type == "persona.preference" {
+            sqlite_load_key_registry(connection)
+                .map_err(|_| CoreError::SubjectPlaintextPreferenceRefused)?
+        } else {
+            None
+        };
+        crate::subject_preferences::ensure_plaintext_preference_allowed(
+            registry.as_ref(),
+            entity,
+            event_type,
+        )
+    }
+
     fn write_committed_rows(
         &self,
         timeline: TimelineId,
@@ -6976,6 +7001,13 @@ impl SqliteStore {
         mut prev_hash: pos_core::Hash,
         ordered: &[Event],
     ) -> Result<(), CoreError> {
+        for event in ordered {
+            Self::ensure_plaintext_preference_in_transaction(
+                &self.conn,
+                event.entity,
+                event.event_type.as_str(),
+            )?;
+        }
         let mut new_head = head_seq;
         for event in ordered {
             let id_str = event.id.to_string();
