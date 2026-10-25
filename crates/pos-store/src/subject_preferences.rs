@@ -6,7 +6,7 @@ use pos_core::{CoreError, EntityId, KeyRegistryStateV1, KeyRoleV1};
 /// subject classification. Records include every lifecycle state and are
 /// retained permanently; validation also requires a record for each epoch
 /// high-water entry.
-pub(crate) fn ensure_plaintext_preference_allowed(
+pub(super) fn ensure_plaintext_preference_allowed(
     registry: Option<&KeyRegistryStateV1>,
     entity: EntityId,
     event_type: &str,
