@@ -233,28 +233,35 @@ impl AdmittedAttempt {
         authority: AdmittedAuthority,
         mode: SandboxExecutionMode,
     ) -> crate::test_fixtures::TestResult<Self> {
-        let unit_name = TransientServiceUnitName::from_attempt_id(attempt_id)?;
-        Ok(Self {
-            attempt_id,
-            unit_name,
-            sim1_digest: [0x51; 32],
-            authority,
-            mode,
-            executable_path: "/usr/bin/adapter".to_owned(),
-            arguments: vec!["--check".to_owned()],
-            executable_digest: [0x61; 32],
-            launch: LaunchPolicyView {
-                request_id: crate::test_fixtures::REQUEST_ID,
-                authority: crate::test_fixtures::grant_authority(),
-                policy_digest: crate::test_fixtures::grant_authority().lps1_digest,
-                network_capabilities: Vec::new(),
-            },
-            launcher: crate::test_fixtures::launcher_facts()?,
-            runtime_key_id: crate::test_fixtures::RUNTIME_KEY_ID.to_owned(),
-            runtime_key: ed25519_dalek::SigningKey::from_bytes(&crate::test_fixtures::RUNTIME_SEED)
-                .verifying_key(),
-            syscall_set: Arc::new(crate::test_fixtures::syscall_set()?),
-        })
+        TransientServiceUnitName::from_attempt_id(attempt_id)
+            .map_err(Into::into)
+            .and_then(|unit_name| {
+                crate::test_fixtures::launcher_facts().and_then(|launcher| {
+                    crate::test_fixtures::syscall_set().map(|syscall_set| Self {
+                        attempt_id,
+                        unit_name,
+                        sim1_digest: [0x51; 32],
+                        authority,
+                        mode,
+                        executable_path: "/usr/bin/adapter".to_owned(),
+                        arguments: vec!["--check".to_owned()],
+                        executable_digest: [0x61; 32],
+                        launch: LaunchPolicyView {
+                            request_id: crate::test_fixtures::REQUEST_ID,
+                            authority: crate::test_fixtures::grant_authority(),
+                            policy_digest: crate::test_fixtures::grant_authority().lps1_digest,
+                            network_capabilities: Vec::new(),
+                        },
+                        launcher,
+                        runtime_key_id: crate::test_fixtures::RUNTIME_KEY_ID.to_owned(),
+                        runtime_key: ed25519_dalek::SigningKey::from_bytes(
+                            &crate::test_fixtures::RUNTIME_SEED,
+                        )
+                        .verifying_key(),
+                        syscall_set: Arc::new(syscall_set),
+                    })
+                })
+            })
     }
 
     /// The same attempt, with a launch policy that allows `capabilities`.

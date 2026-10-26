@@ -1220,6 +1220,7 @@ fn check_admitted_recheck(
         Some(ImageActivationError::EvidenceMismatch)
     );
     let checked = verified.recheck_with(kernel, prepared, &entry)?;
+    assert_eq!(checked.root_directory(), verified.root_directory());
     assert!(checked.matches_attempt(&AdmittedAttempt::from_entry(&entry, prepared)?));
     let foreign = registry
         .commit_planned(&PlannedAttemptIntent::new(

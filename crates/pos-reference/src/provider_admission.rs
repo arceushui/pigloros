@@ -108,18 +108,23 @@ fn provider_binary(
     admitted: &AdmittedSelectorProvider,
 ) -> Result<AdmittedProviderBinary, SelectorBoundaryError> {
     let digest = admitted.provider().manifest().binary_digest;
-    let artifact = admitted
+    admitted
         .bootstrap()
         .installed()
-        .artifact(InstallationObjectKind::PROVIDER_EXECUTABLE, digest)?;
-    let metadata = artifact.file().metadata().map_err(invalid)?;
-    Ok(AdmittedProviderBinary {
-        path: format!("{SANDBOX_ARTIFACT_ROOT}/providers/{}", lower_hex(&digest)),
-        digest,
-        length: artifact.object().byte_length(),
-        device: metadata.dev(),
-        inode: metadata.ino(),
-    })
+        .artifact(InstallationObjectKind::PROVIDER_EXECUTABLE, digest)
+        .and_then(|artifact| {
+            artifact
+                .file()
+                .metadata()
+                .map_err(invalid)
+                .map(|metadata| AdmittedProviderBinary {
+                    path: format!("{SANDBOX_ARTIFACT_ROOT}/providers/{}", lower_hex(&digest)),
+                    digest,
+                    length: artifact.object().byte_length(),
+                    device: metadata.dev(),
+                    inode: metadata.ino(),
+                })
+        })
 }
 
 impl ProviderImageSnapshot {
@@ -152,33 +157,35 @@ impl ProviderImageSnapshot {
             .and_then(AuthenticatedSelectorBootstrap::admit_provider)
             .and_then(|admitted| {
                 check_authority(&admitted, &request)?;
-                let binary = provider_binary(&admitted)?;
-                let CheckedImage { image, proof, .. } = check_image(&admitted, &request, clock)?;
-                let launch_bytes = admitted
-                    .bootstrap()
-                    .installed()
-                    .artifact(
-                        InstallationObjectKind::LAUNCH_POLICY,
-                        request.authority.lps1_digest,
-                    )?
-                    .read_control(CONTROL_LIMIT)?;
-                admitted
-                    .provider()
-                    .admit_launch_policy(&launch_bytes, &image)
-                    .map_err(invalid)
-                    .and_then(|launch| {
-                        if launch.policy_digest != request.authority.lps1_digest {
-                            return Err(SelectorBoundaryError::ArtifactInvalid);
-                        }
-                        Ok(Self {
-                            admitted,
-                            request,
-                            image,
-                            proof,
-                            launch,
-                            binary,
+                provider_binary(&admitted).and_then(|binary| {
+                    let CheckedImage { image, proof, .. } =
+                        check_image(&admitted, &request, clock)?;
+                    let launch_bytes = admitted
+                        .bootstrap()
+                        .installed()
+                        .artifact(
+                            InstallationObjectKind::LAUNCH_POLICY,
+                            request.authority.lps1_digest,
+                        )?
+                        .read_control(CONTROL_LIMIT)?;
+                    admitted
+                        .provider()
+                        .admit_launch_policy(&launch_bytes, &image)
+                        .map_err(invalid)
+                        .and_then(|launch| {
+                            if launch.policy_digest != request.authority.lps1_digest {
+                                return Err(SelectorBoundaryError::ArtifactInvalid);
+                            }
+                            Ok(Self {
+                                admitted,
+                                request,
+                                image,
+                                proof,
+                                launch,
+                                binary,
+                            })
                         })
-                    })
+                })
             })
     }
 

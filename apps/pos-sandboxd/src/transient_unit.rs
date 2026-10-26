@@ -321,15 +321,22 @@ impl CheckedRoot {
     pub(crate) fn for_test(
         root_directory: ActivatedRootDirectory,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        Ok(Self {
-            root_directory,
-            #[cfg(target_os = "linux")]
-            admitted: crate::AdmittedAttempt::for_test(
+        #[cfg(target_os = "linux")]
+        {
+            crate::AdmittedAttempt::for_test(
                 crate::test_fixtures::ATTEMPT,
                 crate::test_fixtures::authority(),
                 pos_reference::sandbox_provider_protocol::SandboxExecutionMode::AirGapped,
-            )?,
-        })
+            )
+            .map(|admitted| Self {
+                root_directory,
+                admitted,
+            })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Ok(Self { root_directory })
+        }
     }
 }
 

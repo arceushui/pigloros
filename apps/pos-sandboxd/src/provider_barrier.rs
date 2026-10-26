@@ -367,38 +367,40 @@ impl<S, I, R, O> ProviderReleaseBarrier<S, I, R, O> {
         identity: I,
         check: AuthorityCheck<R, O>,
     ) -> Result<Self, BarrierError> {
-        let (provider_end, unit_end) = socketpair(
+        socketpair(
             AddressFamily::UNIX,
             SocketType::SEQPACKET,
             SocketFlags::CLOEXEC,
             None,
         )
         .map_err(io::Error::from)
-        .map_err(BarrierError::Channel)?;
-        let parameters = layout_digest(attempt.mode())
-            .and_then(|layout| {
-                LaunchParameters::new(
-                    attempt.attempt_id(),
-                    nonce,
-                    attempt.sim1_digest(),
-                    attempt.executable_path().to_owned(),
-                    attempt.arguments().to_vec(),
-                    layout,
-                )
-            })
-            .map_err(BarrierError::Parameters)?;
-        Ok(Self {
-            admitted: attempt.clone(),
-            provider_end,
-            unit_end: Some(OwnedFd::from(unit_end)),
-            parameters,
-            evidence,
-            adapter_digest: attempt.executable_digest(),
-            signer,
-            identity,
-            check,
-            sent: None,
-            attempted: false,
+        .map_err(BarrierError::Channel)
+        .and_then(|(provider_end, unit_end)| {
+            layout_digest(attempt.mode())
+                .and_then(|layout| {
+                    LaunchParameters::new(
+                        attempt.attempt_id(),
+                        nonce,
+                        attempt.sim1_digest(),
+                        attempt.executable_path().to_owned(),
+                        attempt.arguments().to_vec(),
+                        layout,
+                    )
+                })
+                .map_err(BarrierError::Parameters)
+                .map(|parameters| Self {
+                    admitted: attempt.clone(),
+                    provider_end,
+                    unit_end: Some(OwnedFd::from(unit_end)),
+                    parameters,
+                    evidence,
+                    adapter_digest: attempt.executable_digest(),
+                    signer,
+                    identity,
+                    check,
+                    sent: None,
+                    attempted: false,
+                })
         })
     }
 
@@ -475,24 +477,24 @@ struct HeldLauncher {
 fn hold_launcher(pid: u32, facts: &crate::LauncherFacts) -> Result<HeldLauncher, BarrierError> {
     let file =
         File::open(format!("/proc/{pid}/exe")).map_err(|_| BarrierError::LauncherIdentity)?;
-    verify_launcher_identity(&file, facts)?;
-    let identity = statx(
-        &file,
-        "",
-        AtFlags::EMPTY_PATH,
-        StatxFlags::INO.union(StatxFlags::MNT_ID),
-    )
-    .ok()
-    .filter(|stat| StatxFlags::from_bits_retain(stat.stx_mask).contains(StatxFlags::MNT_ID))
-    .map(|stat| FdIdentity {
-        mount_id: stat.stx_mnt_id,
-        inode: stat.stx_ino,
-    })
-    .ok_or(BarrierError::LauncherIdentity)?;
-    Ok(HeldLauncher {
-        file,
-        identity,
-        facts: facts.clone(),
+    verify_launcher_identity(&file, facts).and_then(|()| {
+        statx(
+            &file,
+            "",
+            AtFlags::EMPTY_PATH,
+            StatxFlags::INO.union(StatxFlags::MNT_ID),
+        )
+        .ok()
+        .filter(|stat| StatxFlags::from_bits_retain(stat.stx_mask).contains(StatxFlags::MNT_ID))
+        .map(|stat| HeldLauncher {
+            file,
+            identity: FdIdentity {
+                mount_id: stat.stx_mnt_id,
+                inode: stat.stx_ino,
+            },
+            facts: facts.clone(),
+        })
+        .ok_or(BarrierError::LauncherIdentity)
     })
 }
 
@@ -506,13 +508,13 @@ fn verify_launcher(file: &File, facts: &crate::LauncherFacts) -> Result<(), Barr
 }
 
 fn verify_launcher_identity(file: &File, facts: &crate::LauncherFacts) -> Result<(), BarrierError> {
-    let metadata = file
-        .metadata()
-        .map_err(|_| BarrierError::LauncherIdentity)?;
-    if (metadata.dev(), metadata.ino()) != facts.identity || metadata.len() != facts.length {
-        return Err(BarrierError::LauncherIdentity);
-    }
-    Ok(())
+    file.metadata()
+        .ok()
+        .filter(|metadata| {
+            (metadata.dev(), metadata.ino()) == facts.identity && metadata.len() == facts.length
+        })
+        .map(|_| ())
+        .ok_or(BarrierError::LauncherIdentity)
 }
 
 /// The time left before `deadline` and the absolute `CLOCK_MONOTONIC`
@@ -700,8 +702,7 @@ where
         let release = released
             .map_err(|error| bounded.refusal.take().map_or(error, BarrierError::Refused))?;
         self.sent = Some(release);
-        remaining_until(attempt.deadline())?;
-        Ok(())
+        remaining_until(attempt.deadline()).map(|_| ())
     }
 
     const fn expected(&self, invocation: [u8; 16], launcher: FdIdentity) -> ExpectedLauncherReady {
@@ -744,12 +745,14 @@ where
         // Called before the start, so a wrong runtime never starts a unit.
         require_multi_thread()?;
         self.require_attempt(attempt)?;
-        let invocation = LauncherInvocation::from_parameters(&self.parameters)
-            .map_err(BarrierError::Parameters)?;
-        self.unit_end
-            .take()
-            .ok_or(BarrierError::UnitEndTaken)
-            .map(|end| (invocation, end))
+        LauncherInvocation::from_parameters(&self.parameters)
+            .map_err(BarrierError::Parameters)
+            .and_then(|invocation| {
+                self.unit_end
+                    .take()
+                    .ok_or(BarrierError::UnitEndTaken)
+                    .map(|end| (invocation, end))
+            })
     }
 
     fn release(
