@@ -103,8 +103,8 @@ impl StagingDirectory {
         name: [u8; 16],
         prepared: PreparedProviderExecution,
     ) -> Result<StagedInput, StagingError> {
-        let staged = self.create_file(name, prepared.staging_charge())?;
-        Ok(StagedInput { staged, prepared })
+        self.create_file(name, prepared.staging_charge())
+            .map(|staged| StagedInput { staged, prepared })
     }
 
     fn create_file(
@@ -113,21 +113,25 @@ impl StagingDirectory {
         reservation: StagingCharge,
     ) -> Result<StagedFile, StagingError> {
         let name = hex_name(name);
-        let directory = self.directory.try_clone()?;
-        let file = openat2(
-            &self.directory,
-            &name,
-            INPUT_OPEN_FLAGS,
-            INPUT_MODE,
-            INPUT_RESOLVE,
-        )
-        .map_err(|errno| StagingError::Io(io::Error::from(errno)))?;
-        Ok(StagedFile {
-            file: File::from(file),
-            directory,
-            name,
-            reservation,
-        })
+        self.directory
+            .try_clone()
+            .map_err(StagingError::from)
+            .and_then(|directory| {
+                openat2(
+                    &self.directory,
+                    &name,
+                    INPUT_OPEN_FLAGS,
+                    INPUT_MODE,
+                    INPUT_RESOLVE,
+                )
+                .map_err(|errno| StagingError::Io(io::Error::from(errno)))
+                .map(|file| StagedFile {
+                    file: File::from(file),
+                    directory,
+                    name,
+                    reservation,
+                })
+            })
     }
 }
 

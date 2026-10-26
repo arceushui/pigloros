@@ -2782,32 +2782,32 @@ mod tests {
         Ok(())
     }
 
+    struct DenyRetryAdmission {
+        begin_calls: usize,
+        entry_active: bool,
+        completed_entries: usize,
+    }
+
+    impl ProviderRequestAdmission for DenyRetryAdmission {
+        fn begin(&mut self) -> Result<(), ProviderTransportError> {
+            self.begin_calls += 1;
+            if self.begin_calls == 2 {
+                return Err(ProviderTransportError::BeforeAdmission);
+            }
+            self.entry_active = true;
+            Ok(())
+        }
+
+        fn entered(&mut self) {
+            if self.entry_active {
+                self.entry_active = false;
+                self.completed_entries += 1;
+            }
+        }
+    }
+
     #[test]
     fn retry_rechecks_provider_request_admission_before_reconnecting() -> TestResult {
-        struct DenyRetryAdmission {
-            begin_calls: usize,
-            entry_active: bool,
-            completed_entries: usize,
-        }
-
-        impl ProviderRequestAdmission for DenyRetryAdmission {
-            fn begin(&mut self) -> Result<(), ProviderTransportError> {
-                self.begin_calls += 1;
-                if self.begin_calls == 2 {
-                    return Err(ProviderTransportError::BeforeAdmission);
-                }
-                self.entry_active = true;
-                Ok(())
-            }
-
-            fn entered(&mut self) {
-                if self.entry_active {
-                    self.entry_active = false;
-                    self.completed_entries += 1;
-                }
-            }
-        }
-
         let fixture = crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("provider.sock");
@@ -2851,43 +2851,58 @@ mod tests {
 
     #[test]
     fn selected_endpoint_classifies_invalid_pre_admission_evidence() -> TestResult {
-        let fixture = crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
-        let directory = tempfile::tempdir()?;
-        let path = directory.path().join("provider.sock");
-        let listener = std::os::unix::net::UnixListener::bind(&path)?;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
-        let transport = ProviderTransport::from_path_for_test(&path)?;
-        let expected_spx1 = fixture.spx1.clone();
-        let provider = std::thread::spawn(move || -> Result<(), String> {
-            let (mut stream, _) = listener
-                .accept()
-                .map_err(|error| format!("provider accept failed: {error}"))?;
-            let deadline = Deadline::new(Duration::from_secs(5))
-                .map_err(|error| format!("provider deadline failed: {error}"))?;
-            read_expected_attempt(&mut stream, &expected_spx1, &deadline)?;
-            write_frame(
-                &mut stream,
-                &selector_record("AGR1").map_err(|error| error.to_string())?,
-                &deadline,
-            )
-            .map_err(|error| format!("invalid AGR1 write failed: {error:?}"))?;
-            stream
-                .shutdown(std::net::Shutdown::Write)
-                .map_err(|error| format!("provider shutdown failed: {error}"))
-        });
+        for magic in ["AGR1", "SPY1", "UNEXPECTED"] {
+            let fixture =
+                crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
+            // A signed Completed terminal still cannot stand in for the grant
+            // and its complete admitted response/evidence sequence.
+            let response = if magic == "SPY1" {
+                fixture.spy1
+            } else {
+                selector_record(magic)?
+            };
+            let directory = tempfile::tempdir()?;
+            let path = directory.path().join("provider.sock");
+            let listener = std::os::unix::net::UnixListener::bind(&path)?;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+            let transport = ProviderTransport::from_path_for_test(&path)?;
+            let expected_spx1 = fixture.spx1.clone();
+            let provider = std::thread::spawn(move || -> Result<(), String> {
+                let (mut stream, _) = listener
+                    .accept()
+                    .map_err(|error| format!("provider accept failed: {error}"))?;
+                let deadline = Deadline::new(Duration::from_secs(5))
+                    .map_err(|error| format!("provider deadline failed: {error}"))?;
+                read_expected_attempt(&mut stream, &expected_spx1, &deadline)?;
+                write_frame(&mut stream, &response, &deadline)
+                    .map_err(|error| format!("invalid initial response write failed: {error:?}"))?;
+                stream
+                    .shutdown(std::net::Shutdown::Write)
+                    .map_err(|error| format!("provider shutdown failed: {error}"))
+            });
 
-        assert!(matches!(
-            transport.execute(
-                &fixture.provider,
-                &fixture.commitment,
-                &fixture.evaluation,
-                &fixture.spx1,
-                b"input",
-                Duration::from_secs(5),
-            ),
-            Err(ProviderTransportError::BeforeAdmission)
-        ));
-        provider.join().map_err(|_| "provider thread panicked")??;
+            let mut admission = DenyRetryAdmission {
+                begin_calls: 0,
+                entry_active: false,
+                completed_entries: 0,
+            };
+            assert!(matches!(
+                transport.execute_staged(
+                    &fixture.provider,
+                    &fixture.commitment,
+                    &fixture.evaluation,
+                    &fixture.spx1,
+                    &mut std::io::Cursor::new(b"input"),
+                    Duration::from_secs(5),
+                    &mut admission,
+                ),
+                Err(ProviderTransportError::BeforeAdmission)
+            ));
+            assert_eq!(admission.begin_calls, 1);
+            assert_eq!(admission.completed_entries, 1);
+            assert!(!admission.entry_active);
+            provider.join().map_err(|_| "provider thread panicked")??;
+        }
         Ok(())
     }
 

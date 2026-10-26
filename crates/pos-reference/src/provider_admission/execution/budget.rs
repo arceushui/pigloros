@@ -303,12 +303,6 @@ struct Charge {
 pub struct StagingCharge(Arc<Charge>);
 
 impl StagingCharge {
-    /// Bytes owned by this charge, counted once across every clone.
-    #[must_use]
-    pub fn bytes(&self) -> u64 {
-        self.0.bytes
-    }
-
     /// Record a failed unlink from the private file-staging adapter.
     pub fn record_leak(&self) {
         self.0.shared.state().usage.leaked_files += 1;

@@ -18,7 +18,10 @@ use crate::{
         AdmissionAuthority, AdmissionGrant, PayloadDescriptor, PayloadDirection,
         PayloadStreamValidator, SandboxExecuteRequest, SandboxPayloadChunk,
     },
-    selector::installation::{InstalledSelectorState, PositionalReader},
+    selector::installation::{
+        authority::{AdmittedSelectorProvider, AuthenticatedSelectorBootstrap},
+        InstalledSelectorState, PositionalReader,
+    },
     selector_protocol::execute_request_for_case,
 };
 
@@ -184,6 +187,13 @@ fn frame(reader: &mut impl Read, ledger: &StagingLedger) -> Result<RetainedContr
         })
 }
 
+fn installed_provider() -> Result<AdmittedSelectorProvider, StagingError> {
+    InstalledSelectorState::open()
+        .and_then(InstalledSelectorState::authenticate_bootstrap)
+        .and_then(AuthenticatedSelectorBootstrap::admit_provider)
+        .map_err(StagingError::from)
+}
+
 pub(super) fn receive(
     stream: &mut UnixStream,
     ledger: &StagingLedger,
@@ -197,9 +207,7 @@ pub(super) fn receive(
         return Err(StagingError::UnauthenticatedPeer);
     }
     let identity = connection(stream)?;
-    let admitted = InstalledSelectorState::open()?
-        .authenticate_bootstrap()?
-        .admit_provider()?;
+    let admitted = installed_provider()?;
     let bhc = admitted.provider().broker_hard_caps();
     let deadlines = TransferDeadlines::new(stream, bhc[16].value)?;
     let initial_deadline = deadlines.initial;
@@ -225,21 +233,26 @@ pub(super) fn receive(
         .resolve_installed_case(&evaluation, ordinal)?;
     let input = input_descriptor(resolved.attempt())?;
     let case_bytes = case_buffer_bytes(resolved.attempt());
-    let expected_request = execute_request_for_case(
+    let expected = execute_request_for_case(
         &admitted,
         &evaluation,
         &resolved,
         input,
         ordinal,
         request.request.nonce,
-    )?;
-    if expected_request != request {
-        return Err(StagingError::InvalidSource);
-    }
-    let expected = RetainedCase {
-        attempt: resolved.into_attempt(),
-        _charge: ledger.reserve_storage(case_bytes)?,
-    };
+    )
+    .map_err(StagingError::from)
+    .and_then(|expected_request| {
+        if expected_request != request {
+            return Err(StagingError::InvalidSource);
+        }
+        ledger
+            .reserve_storage(case_bytes)
+            .map(|charge| RetainedCase {
+                attempt: resolved.into_attempt(),
+                _charge: charge,
+            })
+    })?;
     let snapshot = ProviderImageSnapshot::from_admitted(admitted, request, SystemTime::now)?;
     let commitment = snapshot
         .admitted
@@ -357,10 +370,10 @@ impl PreparedProviderExecution {
 
     fn check_connection(&self, stream: &UnixStream) -> Result<(), StagingError> {
         connection(stream).and_then(|identity| {
-            if identity != self.connection {
-                Err(StagingError::ConnectionChanged)
-            } else {
+            if identity == self.connection {
                 Ok(())
+            } else {
+                Err(StagingError::ConnectionChanged)
             }
         })
     }
