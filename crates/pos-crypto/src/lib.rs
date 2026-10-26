@@ -33,4 +33,5 @@ pub mod subject_ciphertext;
 pub mod subject_data;
 pub mod subject_field_read;
 pub mod subject_key;
+pub mod subject_nonce_ledger;
 pub mod timeline_erasure;
