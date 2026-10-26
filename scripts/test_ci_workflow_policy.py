@@ -1227,10 +1227,20 @@ STATIC_LAUNCHER_JOB_SET = ['asan',
 
 
 def assert_static_launcher_contract(workflow: dict) -> None:
+    trigger_key = "on" if "on" in workflow else True
+    if set(workflow) != {"name", trigger_key, "concurrency", "permissions", "env", "jobs"}:
+        raise AssertionError("static-launcher requires the reviewed workflow root envelope")
+    if workflow["name"] != "ci" or workflow["concurrency"] != {
+        "group": "ci-${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || github.ref }}",
+        "cancel-in-progress": True,
+    }:
+        raise AssertionError("static-launcher requires the reviewed workflow controls")
     if set(workflow_triggers(workflow)) != {"push", "pull_request", "workflow_dispatch"}:
         raise AssertionError("static-launcher requires the reviewed workflow triggers")
     if workflow_triggers(workflow).get("push") != MAIN_PUSH_TRIGGER:
         raise AssertionError("static-launcher must execute on main pushes")
+    if any(workflow_triggers(workflow)[trigger] is not None for trigger in ("pull_request", "workflow_dispatch")):
+        raise AssertionError("static-launcher requires unfiltered pull-request and manual triggers")
     if workflow.get("permissions") != {"actions": "read", "contents": "read"}:
         raise AssertionError("static-launcher requires read-only workflow permissions")
     if workflow.get("env") != {"CARGO_TERM_COLOR": "always", "RUSTFLAGS": "-D warnings"}:
@@ -1262,6 +1272,13 @@ class StaticLauncherPolicyTests(unittest.TestCase):
         changed("nonblocking producer", lambda w: w["jobs"]["static-launcher"].update({"continue-on-error": True}))
         changed("producer permission escalation", lambda w: w["jobs"]["static-launcher"].update(permissions={"contents": "write"}))
         changed("workflow permission escalation", lambda w: w.update(permissions="write-all"))
+        changed("inherited no-op shell", lambda w: w.update(defaults={"run": {"shell": "true {0}"}}))
+        changed("inherited working directory", lambda w: w.update(defaults={"run": {"working-directory": "/tmp"}}))
+        changed("altered workflow name", lambda w: w.update(name="fabricated-ci"))
+        changed("altered concurrency", lambda w: w["concurrency"].update(group="all-branches"))
+        changed("disabled cancellation", lambda w: w["concurrency"].update({"cancel-in-progress": False}))
+        changed("filtered pull request", lambda w: w["on" if "on" in w else True].update(pull_request={"types": ["opened"]}))
+        changed("manual input injection", lambda w: w["on" if "on" in w else True].update(workflow_dispatch={"inputs": {"skip": {"default": True}}}))
         changed("detached trigger", lambda w: w["on" if "on" in w else True].pop("pull_request"))
         changed("injected environment", lambda w: w["env"].update(CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUNNER="true"))
         changed("injected job", lambda w: w["jobs"].update({"fabricate": {"runs-on": "ubuntu-24.04", "steps": [{"run": "true"}]}}))
