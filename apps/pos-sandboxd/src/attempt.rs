@@ -5,7 +5,7 @@
 //! that was started for it and not yet released; the Local binding token is
 //! minted only from it.
 
-use std::time::Instant;
+use std::{sync::Arc, time::Instant};
 
 use pos_reference::{
     provider_admission::AdmittedAuthority,
@@ -83,7 +83,7 @@ pub struct AdmittedAttempt {
     launcher: LauncherFacts,
     runtime_key_id: String,
     runtime_key: ed25519_dalek::VerifyingKey,
-    syscall_set: SandboxSyscallSet,
+    syscall_set: Arc<SandboxSyscallSet>,
 }
 
 impl AdmittedAttempt {
@@ -128,7 +128,7 @@ impl AdmittedAttempt {
             },
             runtime_key_id: admission.snapshot().runtime_attestation_key_id().to_owned(),
             runtime_key: *admission.snapshot().runtime_attestation_key(),
-            syscall_set: admission.snapshot().syscall_set().clone(),
+            syscall_set: Arc::new(admission.snapshot().syscall_set().clone()),
         })
     }
 
@@ -202,7 +202,7 @@ impl AdmittedAttempt {
     #[must_use]
     pub fn system_call_filter(&self) -> crate::SystemCallFilter {
         crate::SystemCallFilter {
-            record: self.syscall_set.clone(),
+            record: self.syscall_set.as_ref().clone(),
         }
     }
 
@@ -253,7 +253,7 @@ impl AdmittedAttempt {
             runtime_key_id: crate::test_fixtures::RUNTIME_KEY_ID.to_owned(),
             runtime_key: ed25519_dalek::SigningKey::from_bytes(&crate::test_fixtures::RUNTIME_SEED)
                 .verifying_key(),
-            syscall_set: crate::test_fixtures::syscall_set()?,
+            syscall_set: Arc::new(crate::test_fixtures::syscall_set()?),
         })
     }
 
