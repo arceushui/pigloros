@@ -187,12 +187,14 @@ pub struct PreparedProviderExecution {
 #[derive(Debug)]
 pub struct AdmittedProviderExecution {
     source: Arc<ExecutionSource>,
-    slot: Arc<budget::AttemptSlot>,
-    _input: StagingCharge,
     verified_input: File,
     root_image: File,
     proof: Arc<crate::sandbox_provider_protocol::VerifiedSandboxImageProof>,
     authority: AdmittedAuthority,
+    // The descriptor pins staged storage even after its private name is unlinked.
+    // Close owned resources before releasing bytes, then the counted attempt.
+    _input: StagingCharge,
+    slot: Arc<budget::AttemptSlot>,
 }
 
 impl PreparedProviderExecution {

@@ -203,6 +203,8 @@ impl StagingLedger {
             bytes,
             queued: Mutex::new(queued),
             _attempt: attempt,
+            #[cfg(test)]
+            before_release: Mutex::new(None),
         }))
     }
 }
@@ -313,13 +315,32 @@ struct Charge {
     bytes: u64,
     queued: Mutex<Option<u64>>,
     _attempt: Option<Arc<AttemptSlot>>,
+    #[cfg(test)]
+    before_release: Mutex<Option<ReleaseProbe>>,
 }
+
+#[cfg(test)]
+type ReleaseProbe = (std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>);
 
 /// Shared byte ownership. Cloning keeps the same charge alive; it grants no authority.
 #[derive(Clone, Debug)]
 pub struct StagingCharge(Arc<Charge>);
 
 impl StagingCharge {
+    #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    pub(super) fn before_release_for_test(
+        &self,
+        reached: std::sync::mpsc::Sender<()>,
+        proceed: std::sync::mpsc::Receiver<()>,
+    ) {
+        *self
+            .0
+            .before_release
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some((reached, proceed));
+    }
+
     /// Close all live-ledger admission before a possibly residual file's charge drops.
     ///
     /// This live ledger cannot be reopened by dropping reservations or raising floors.
@@ -345,6 +366,9 @@ impl StagingCharge {
 
 impl Drop for Charge {
     fn drop(&mut self) {
+        #[cfg(test)]
+        self.wait_before_release_for_test();
+
         let mut state = self.shared.state();
         state.usage.reserved_bytes -= self.bytes;
         if let Some(ceiling) = self
@@ -355,6 +379,24 @@ impl Drop for Charge {
         {
             state.usage.queued_inputs -= 1;
             remove_ceiling(&mut state.queue_ceilings, ceiling);
+        }
+    }
+}
+
+impl Charge {
+    #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn wait_before_release_for_test(&mut self) {
+        let Some((reached, proceed)) = self
+            .before_release
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+        else {
+            return;
+        };
+        if reached.send(()).is_ok() {
+            let _ = proceed.recv_timeout(std::time::Duration::from_secs(30));
         }
     }
 }

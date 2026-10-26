@@ -44,6 +44,8 @@ Attempt and queued-input counts preserve the minimum of the candidate's ceiling
 and every live counted reservation's ceiling under one lock. Retained output
 keeps the original attempt counted once. Failed admission releases its partial
 reservations; successful inputs retain their bytes and execution context.
+The retained input descriptor closes before its byte charge and attempt slot
+are released, including after the staging name has been unlinked.
 If private-file unlink fails, the ledger permanently closes admission before
 releasing its charge. All source, storage, attempt and output reservations,
 grant rechecks and launch rechecks then refuse, including already prepared

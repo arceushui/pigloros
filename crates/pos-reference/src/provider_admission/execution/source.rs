@@ -529,12 +529,12 @@ impl PreparedProviderExecution {
         self.input.finish_input();
         Ok(AdmittedProviderExecution {
             source: self.source,
-            slot: self.slot,
-            _input: self.input,
             verified_input,
             root_image,
             proof,
             authority,
+            _input: self.input,
+            slot: self.slot,
         })
     }
 }
@@ -1170,6 +1170,79 @@ mod tests {
                 Err(StagingError::CleanupFailed)
             ));
         }
+        Ok(())
+    }
+
+    #[test]
+    fn retained_input_closes_before_its_bytes_and_attempt_are_released() -> TestResult {
+        use super::super::staging::StagingDirectory;
+        use std::os::{
+            fd::AsRawFd as _,
+            unix::fs::{MetadataExt as _, PermissionsExt as _},
+        };
+
+        if !isolated("retained_input_closes_before_its_bytes_and_attempt_are_released")? {
+            return Ok(());
+        }
+        let staged = StagedInstallation::stage_execution()?;
+        let ledger = StagingLedger::new(super::super::StagingLimits {
+            aggregate_bytes: 512 * 1024 * 1024,
+        });
+        let (mut prepared, mut provider, mut selector) = prepared_pair(&staged, &ledger)?;
+        send_grant(&mut prepared, &mut provider)?;
+        drop(frame(&mut selector, &ledger)?);
+        let temporary = tempfile::tempdir()?;
+        std::fs::set_permissions(temporary.path(), std::fs::Permissions::from_mode(0o700))?;
+        let held = File::open(temporary.path())?;
+        let owner = held.metadata()?.uid();
+        let staging = StagingDirectory::from_held_directory(held, owner)?;
+        let input = staging.create_input([7; 16], prepared)?;
+        staged.write_input(&mut selector)?;
+        selector.shutdown(std::net::Shutdown::Write)?;
+        let verified = input.receive(&mut provider)?;
+        let execution = verified.entry().retain();
+        let metadata = execution.verified_input.metadata()?;
+        let descriptor_path = format!("/proc/self/fd/{}", execution.verified_input.as_raw_fd());
+        // Keep unrelated source-buffer charges out of this input-charge checkpoint.
+        let retained_source = Arc::clone(&execution.source);
+        drop(verified);
+        assert!(!temporary.path().join("07".repeat(16)).exists());
+        let retained = std::fs::metadata(&descriptor_path)?;
+        assert_eq!(
+            (retained.dev(), retained.ino()),
+            (metadata.dev(), metadata.ino())
+        );
+        let mut byte = [0];
+        execution.read_exact_at(&mut byte, 0)?;
+        assert_eq!(byte[0], staged.input()[0]);
+        let before = ledger.usage();
+        let (reached_tx, reached_rx) = std::sync::mpsc::channel();
+        let (proceed_tx, proceed_rx) = std::sync::mpsc::channel();
+        execution
+            ._input
+            .before_release_for_test(reached_tx, proceed_rx);
+        let (closed, at_release) = std::thread::scope(|scope| -> TestResult<_> {
+            let worker = scope.spawn(move || drop(execution));
+            let reached = reached_rx.recv_timeout(Duration::from_secs(5));
+            let closed = std::fs::symlink_metadata(descriptor_path)
+                .is_err_and(|error| error.kind() == io::ErrorKind::NotFound);
+            let at_release = ledger.usage();
+            // Always unblock the destructor before inspecting fallible observations.
+            let resumed = proceed_tx.send(());
+            let joined = worker.join();
+            reached?;
+            resumed?;
+            joined.map_err(|_| "input destructor panicked")?;
+            Ok((closed, at_release))
+        })?;
+        drop(retained_source);
+        assert!(
+            closed,
+            "the input descriptor must close before its charge releases"
+        );
+        assert_eq!(at_release, before);
+        assert_eq!(before.attempts, 1);
+        assert_eq!(ledger.usage(), super::super::StagingUsage::default());
         Ok(())
     }
 }
