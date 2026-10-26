@@ -37,6 +37,26 @@ impl CanonicalBytes {
         self.0.is_empty()
     }
 
+    /// Consumes this value, overwriting its uniquely held logical byte range.
+    ///
+    /// Empty values succeed vacuously. Success covers only the current logical
+    /// range, without a guarantee for spare capacity, earlier copies, retained
+    /// aliases, allocator remnants, hardware leakage, abort, or process termination.
+    ///
+    /// # Errors
+    ///
+    /// Returns the unchanged value if its non-empty backing is shared, static,
+    /// or otherwise not uniquely mutable. Release other clones before retrying.
+    /// A static-backed non-empty value cannot become uniquely mutable.
+    #[must_use = "handle the unchanged value returned when its backing cannot be wiped"]
+    pub fn try_zeroize_owned(mut self) -> Result<(), Self> {
+        if self.zeroize_if_uniquely_owned() {
+            Ok(())
+        } else {
+            Err(self)
+        }
+    }
+
     pub(crate) fn is_uniquely_owned(&self) -> bool {
         self.0.is_empty() || self.0.is_unique()
     }

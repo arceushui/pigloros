@@ -72,7 +72,10 @@ Use a reviewed dependency update rather than editing a tag in place.
    Replace the `sha256:` digest while retaining the human-readable tag before
    `@`.
 
-3. Run both policy commands above, then build and smoke-test the image:
+3. Run both policy commands above, then build and smoke-test the image. The
+   image build needs the third-party notice bundle in `third-party-notices/`
+   (see below); download the `third-party-notices` artifact of a ci run into
+   that directory:
 
    ```bash
    docker build --tag pigloros-gateway:pin-check .
@@ -157,4 +160,23 @@ compatibility fixtures must:
 2. ship the `third-party-notices` artifact from the same commit with the
    release.
 
-Shipping notices in the gateway image is tracked separately in Redmine #798.
+### Gateway image
+
+The `piglor-gateway` image ships the same bundle (#798) at
+`/usr/share/doc/piglor-gateway/third-party/`: `THIRD-PARTY-NOTICES.txt` and
+`third-party-notices.json`, readable by the image's `appuser`.
+
+- `deploy.yml` calls `third-party-notices.yml` as a job that `build-and-push`
+  needs, so an unknown or unaccepted licence, a missing licence text or a
+  failed generation stops the deployment before any image is built or pushed.
+- The job downloads the artifact with `actions/download-artifact` (pinned to
+  the v7.0.0 commit, the same major version as `upload-artifact` v7.0.1) into
+  `third-party-notices/` in the build context, where `.dockerignore` allows it.
+  The `Dockerfile` copies it from there, so a build without the bundle fails.
+- `scripts/check-gateway-image-notices.sh` checks the built image before the
+  smoke test and the push.
+- The ci `docker-build` job builds the same image without pushing and runs the
+  same check. `scripts/test_deploy_workflow_policy.py` pins the `deploy.yml`
+  contract, which cannot run outside a manual dispatch.
+- The bundle is the workspace-wide superset described above, not only the
+  gateway's own graph. A gateway-only mode is tracked in Redmine #1093.

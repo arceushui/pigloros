@@ -202,7 +202,9 @@ impl MemoryStore {
             .batch()
             .drafts()
             .iter()
-            .map(|draft| Self::append_one_to_state(&mut staged, draft, hasher))
+            .map(|draft| {
+                Self::append_one_to_state(&mut staged, draft, hasher, self.key_registry.as_ref())
+            })
             .collect::<Result<Vec<_>, _>>()
             .and_then(|committed| {
                 committed

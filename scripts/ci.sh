@@ -22,6 +22,7 @@ bash "$ROOT/scripts/check-pinned-dependencies.sh"
 bash "$ROOT/scripts/test-check-pinned-dependencies.sh"
 echo "==> CI workflow policy"
 python3 "$ROOT/scripts/test_ci_workflow_policy.py"
+python3 "$ROOT/scripts/test_deploy_workflow_policy.py"
 
 echo "==> advisory benchmark comparator"
 python3 "$ROOT/scripts/test_compare_memory_store_benchmarks.py"
