@@ -788,6 +788,13 @@ async fn a_barrier_rejects_a_different_valid_attempt_before_handoff_or_identity_
         Err(BarrierError::AttemptMismatch)
     ));
     // Rejection consumed neither the release descriptor nor its single use.
+    assert_valid_attempt_still_releases(barrier, attempt).await
+}
+
+async fn assert_valid_attempt_still_releases(
+    mut barrier: TestBarrier,
+    attempt: AdmittedAttempt,
+) -> TestResult {
     let launcher = launcher(&mut barrier)?;
     barrier.release(&active(attempt, GENEROUS_MS)).await?;
     assert!(launcher.join().map_err(|_| "launcher thread")?.is_some());
@@ -857,22 +864,31 @@ async fn a_recheck_for_another_admitted_context_cannot_authorize_release() -> Te
         AdmittedAttempt::for_test(ATTEMPT, changed, SandboxExecutionMode::AirGapped)?,
     ];
     for other in alternatives {
-        let (mut barrier, attempt) =
-            barrier_for(SandboxExecutionMode::AirGapped, Refusal::None, own_pid())?;
-        // The barrier, job and Ready all agree on A. Only the otherwise valid
-        // recheck belongs to B, including the same-ID/different-authority case.
-        barrier.check.root = root_check(Refusal::None, &other);
-        let launcher = launcher(&mut barrier)?;
-        assert!(matches!(
-            barrier.release(&active(attempt, GENEROUS_MS)).await,
-            Err(BarrierError::Refused(RecheckRefusal::Root(
-                ImageActivationError::EvidenceMismatch
-            )))
-        ));
-        assert!(barrier.sent_release().is_none());
-        drop(barrier);
-        assert!(launcher.join().map_err(|_| "launcher thread")?.is_none());
+        assert_foreign_root_refuses_release(&other).await?;
     }
+    Ok(())
+}
+
+async fn assert_foreign_root_refuses_release(other: &AdmittedAttempt) -> TestResult {
+    let (mut barrier, attempt) =
+        barrier_for(SandboxExecutionMode::AirGapped, Refusal::None, own_pid())?;
+    // The barrier, job and Ready all agree on A. Only the otherwise valid
+    // recheck belongs to B, including the same-ID/different-authority case.
+    barrier.check.root = root_check(Refusal::None, other);
+    let launcher = launcher(&mut barrier)?;
+    assert!(matches!(
+        barrier.release(&active(attempt, GENEROUS_MS)).await,
+        Err(BarrierError::Refused(RecheckRefusal::Root(
+            ImageActivationError::EvidenceMismatch
+        )))
+    ));
+    assert!(barrier.sent_release().is_none());
+    drop(barrier);
+    assert_no_release_received(launcher)
+}
+
+fn assert_no_release_received(launcher: JoinHandle<Option<ExecutionRelease>>) -> TestResult {
+    assert!(launcher.join().map_err(|_| "launcher thread")?.is_none());
     Ok(())
 }
 
@@ -882,37 +898,39 @@ async fn a_safe_key_file_cannot_substitute_another_runtime_signing_identity() ->
         ("foreign-runtime-key", crate::test_fixtures::RUNTIME_SEED),
         (KEY_ID, [0x53; 32]),
     ] {
-        let directory = tempfile::tempdir()?;
-        let path = directory.path().join("key");
-        std::fs::write(&path, seed)?;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400))?;
-        let held = File::open(directory.path())?;
-        let signer = crate::KeyFileReleaseSigner::open(
-            &held,
-            "key",
-            held.metadata()?.uid(),
-            key_id.to_owned(),
-        )?;
-        let (parts, attempt) =
-            barrier_for(SandboxExecutionMode::AirGapped, Refusal::None, own_pid())?;
-        let mut barrier = ProviderReleaseBarrier::new(
-            &attempt,
-            fresh_nonce()?,
-            parts.evidence,
-            signer,
-            parts.identity,
-            parts.check,
-        )?;
-        let launcher = launcher(&mut barrier)?;
-        assert!(matches!(
-            barrier.release(&active(attempt, GENEROUS_MS)).await,
-            Err(BarrierError::Release(ReleaseBarrierError::Sign(_)))
-        ));
-        assert!(barrier.sent_release().is_none());
-        drop(barrier);
-        assert!(launcher.join().map_err(|_| "launcher thread")?.is_none());
+        assert_foreign_signer_refuses_release(safe_key_file_signer(key_id, &seed)?).await?;
     }
     Ok(())
+}
+
+fn safe_key_file_signer(key_id: &str, seed: &[u8; 32]) -> TestResult<crate::KeyFileReleaseSigner> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("key");
+    std::fs::write(&path, seed)?;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400))?;
+    let (held, owner) = File::open(directory.path())
+        .and_then(|held| held.metadata().map(|metadata| (held, metadata.uid())))?;
+    crate::KeyFileReleaseSigner::open(&held, "key", owner, key_id.to_owned()).map_err(Into::into)
+}
+
+async fn assert_foreign_signer_refuses_release(signer: crate::KeyFileReleaseSigner) -> TestResult {
+    let (parts, attempt) = barrier_for(SandboxExecutionMode::AirGapped, Refusal::None, own_pid())?;
+    let mut barrier = ProviderReleaseBarrier::new(
+        &attempt,
+        parts.parameters.nonce,
+        parts.evidence,
+        signer,
+        parts.identity,
+        parts.check,
+    )?;
+    let launcher = launcher(&mut barrier)?;
+    assert!(matches!(
+        barrier.release(&active(attempt, GENEROUS_MS)).await,
+        Err(BarrierError::Release(ReleaseBarrierError::Sign(_)))
+    ));
+    assert!(barrier.sent_release().is_none());
+    drop(barrier);
+    assert_no_release_received(launcher)
 }
 
 #[test]

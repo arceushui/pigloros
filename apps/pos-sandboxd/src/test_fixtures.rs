@@ -37,16 +37,19 @@ pub(crate) fn launcher_facts() -> TestResult<crate::LauncherFacts> {
     if let Some(facts) = FACTS.get() {
         return Ok(facts.clone());
     }
-    let path = std::env::current_exe()?;
-    let file = File::open(&path)?;
+    let facts = measure_launcher_facts(&std::env::current_exe()?)?;
+    Ok(FACTS.get_or_init(|| facts).clone())
+}
+
+fn measure_launcher_facts(path: &std::path::Path) -> TestResult<crate::LauncherFacts> {
+    let file = File::open(path)?;
     let metadata = file.metadata()?;
-    let facts = crate::LauncherFacts {
+    Ok(crate::LauncherFacts {
         path: path.to_string_lossy().into_owned(),
         digest: pos_reference::sandbox_provider_protocol::blake3_digest_of(&file)?,
         length: metadata.len(),
         identity: (metadata.dev(), metadata.ino()),
-    };
-    Ok(FACTS.get_or_init(|| facts).clone())
+    })
 }
 
 /// The attempt every fixture belongs to.
