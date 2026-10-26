@@ -228,6 +228,12 @@ impl ProviderImageSnapshot {
         self.admitted.provider().runtime_attestation_key()
     }
 
+    /// Exact SCS1 selected by the admitted APT1/provider authority.
+    #[must_use]
+    pub const fn syscall_set(&self) -> &crate::sandbox_provider_protocol::SandboxSyscallSet {
+        self.admitted.provider().syscall_set()
+    }
+
     /// Join this snapshot's retained image to the currently installed authority.
     ///
     /// The fixed installation is reopened: a pending SIR1 update rejects, and
@@ -811,6 +817,10 @@ pub mod tests {
         );
         let checked = check_image(&snapshot.admitted, &request, fixture_time)?;
         assert_eq!(snapshot.proof(), &checked.proof);
+        assert_eq!(
+            snapshot.syscall_set(),
+            snapshot.admitted.provider().syscall_set()
+        );
         let runtime = snapshot.admitted.runtime_attestation_key()?;
         assert_eq!(snapshot.runtime_attestation_key_id(), runtime.key_id);
         assert_eq!(

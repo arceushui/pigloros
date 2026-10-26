@@ -66,6 +66,13 @@ pub const RUNTIME_KEY_ID: &str = "runtime-key";
 /// Seed belonging to that test-only admitted public key.
 pub const RUNTIME_SEED: [u8; 32] = [0x52; 32];
 
+/// The selected, pinned syscall record used by admitted attempt port tests.
+pub fn syscall_set() -> TestResult<pos_reference::sandbox_provider_protocol::SandboxSyscallSet> {
+    pos_reference::sandbox_provider_protocol::SandboxSyscallSet::from_canonical_cbor(include_bytes!(
+        "../../../crates/pos-conformance/vectors/systemd-provider-v260.2/systemd-v260.2-x86_64.scs1.cbor"
+    )).map_err(Into::into)
+}
+
 #[must_use]
 pub const fn authority() -> AdmittedAuthority {
     AdmittedAuthority {
@@ -101,11 +108,7 @@ pub const fn grant_authority() -> AdmissionAuthority {
 }
 
 pub fn admitted() -> TestResult<AdmittedAttempt> {
-    Ok(AdmittedAttempt::for_test(
-        ATTEMPT,
-        authority(),
-        SandboxExecutionMode::Local,
-    )?)
+    AdmittedAttempt::for_test(ATTEMPT, authority(), SandboxExecutionMode::Local)
 }
 
 pub fn active() -> TestResult<ActiveAttempt> {

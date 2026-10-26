@@ -1056,7 +1056,8 @@ async fn the_admitted_chain_reaches_attachment_only_through_every_gate() -> Test
     let snapshot = ProviderImageSnapshot::open(staged.request())?;
     let admission = snapshot.admit_held_image()?;
     fixed_registry()?;
-    let prepared = SystemdAttemptRegistry::open()?
+    let registry = SystemdAttemptRegistry::open()?;
+    let prepared = registry
         .commit_planned(&PlannedAttemptIntent::new(
             snapshot.request().attempt_id,
             snapshot.request().authority.sim1_digest,
@@ -1106,28 +1107,7 @@ async fn the_admitted_chain_reaches_attachment_only_through_every_gate() -> Test
     // The entry reservation consumes a fresh admission. The public recheck
     // re-reads the real host kernel: the fake descriptor is no attached EROFS
     // mount, so it refuses.
-    let ledger = StagingLedger::new(StagingLimits {
-        aggregate_bytes: 0,
-        queued_requests: 0,
-        concurrent_attempts: 1,
-    });
-    let entry = ledger.reserve_entry(snapshot.admit_held_image()?)?;
-    assert_eq!(
-        verified.recheck(&prepared, &entry).err(),
-        Some(ImageActivationError::EvidenceMismatch)
-    );
-    let checked = verified.recheck_with(&kernel, &prepared, &entry)?;
-    assert!(checked.matches_attempt(&AdmittedAttempt::from_entry(&entry, &prepared)?));
-    let foreign = SystemdAttemptRegistry::open()?
-        .commit_planned(&PlannedAttemptIntent::new(
-            [0x44; 16],
-            snapshot.request().authority.sim1_digest,
-        )?)?
-        .prepare_directory()?;
-    assert_eq!(
-        verified.recheck_with(&kernel, &foreign, &entry).err(),
-        Some(ImageActivationError::EvidenceMismatch)
-    );
+    check_admitted_recheck(&verified, &kernel, &registry, &snapshot, &prepared)?;
 
     // The held image changes after admission: re-admission rejects and the
     // attached root is detached again.
@@ -1219,5 +1199,37 @@ fn a_recheck_consults_nothing_for_an_admission_it_was_not_activated_from() -> Te
         );
     }
     assert!(!consulted.get());
+    Ok(())
+}
+
+fn check_admitted_recheck(
+    verified: &VerifiedRootMount,
+    kernel: &FakeKernel,
+    registry: &SystemdAttemptRegistry,
+    snapshot: &ProviderImageSnapshot,
+    prepared: &PreparedAttemptDirectory,
+) -> TestResult {
+    let ledger = StagingLedger::new(StagingLimits {
+        aggregate_bytes: 0,
+        queued_requests: 0,
+        concurrent_attempts: 1,
+    });
+    let entry = ledger.reserve_entry(snapshot.admit_held_image()?)?;
+    assert_eq!(
+        verified.recheck(prepared, &entry).err(),
+        Some(ImageActivationError::EvidenceMismatch)
+    );
+    let checked = verified.recheck_with(kernel, prepared, &entry)?;
+    assert!(checked.matches_attempt(&AdmittedAttempt::from_entry(&entry, prepared)?));
+    let foreign = registry
+        .commit_planned(&PlannedAttemptIntent::new(
+            [0x44; 16],
+            snapshot.request().authority.sim1_digest,
+        )?)?
+        .prepare_directory()?;
+    assert_eq!(
+        verified.recheck_with(kernel, &foreign, &entry).err(),
+        Some(ImageActivationError::EvidenceMismatch)
+    );
     Ok(())
 }

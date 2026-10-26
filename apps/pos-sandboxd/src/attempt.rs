@@ -11,7 +11,7 @@ use pos_reference::{
     provider_admission::AdmittedAuthority,
     sandbox_provider_protocol::{
         AdmissionAuthority, ExecuteAuthority, NetworkCapability, SandboxExecuteRequest,
-        SandboxExecutionMode,
+        SandboxExecutionMode, SandboxSyscallSet,
     },
 };
 
@@ -83,6 +83,7 @@ pub struct AdmittedAttempt {
     launcher: LauncherFacts,
     runtime_key_id: String,
     runtime_key: ed25519_dalek::VerifyingKey,
+    syscall_set: SandboxSyscallSet,
 }
 
 impl AdmittedAttempt {
@@ -127,6 +128,7 @@ impl AdmittedAttempt {
             },
             runtime_key_id: admission.snapshot().runtime_attestation_key_id().to_owned(),
             runtime_key: *admission.snapshot().runtime_attestation_key(),
+            syscall_set: admission.snapshot().syscall_set().clone(),
         })
     }
 
@@ -196,6 +198,14 @@ impl AdmittedAttempt {
         &self.runtime_key
     }
 
+    /// The syscall filter derived exclusively from this admitted SCS1.
+    #[must_use]
+    pub fn system_call_filter(&self) -> crate::SystemCallFilter {
+        crate::SystemCallFilter {
+            record: self.syscall_set.clone(),
+        }
+    }
+
     /// The request the admission was granted for.
     pub(crate) const fn request_id(&self) -> [u8; 16] {
         self.launch.request_id
@@ -243,6 +253,7 @@ impl AdmittedAttempt {
             runtime_key_id: crate::test_fixtures::RUNTIME_KEY_ID.to_owned(),
             runtime_key: ed25519_dalek::SigningKey::from_bytes(&crate::test_fixtures::RUNTIME_SEED)
                 .verifying_key(),
+            syscall_set: crate::test_fixtures::syscall_set()?,
         })
     }
 
@@ -262,7 +273,7 @@ impl AdmittedAttempt {
 
     /// A deliberately inconsistent admitted digest for substitution tests.
     #[cfg(all(test, unix))]
-    pub(crate) fn with_launcher_digest(mut self, digest: [u8; 32]) -> Self {
+    pub(crate) const fn with_launcher_digest(mut self, digest: [u8; 32]) -> Self {
         self.launcher.digest = digest;
         self
     }

@@ -15,11 +15,9 @@ use std::{
     time::Duration,
 };
 
-use pos_conformance::SandboxSyscallSetV1;
 use pos_reference::sandbox_provider_protocol::{
     LocalNetworkTermination, NetworkCapability, NetworkCaptureStore, NetworkExchangePlan,
-    NetworkExchangeReply, NetworkExchangeRequest, SandboxArchitecture, SandboxExecutionMode,
-    SandboxLimit,
+    NetworkExchangeReply, NetworkExchangeRequest, SandboxExecutionMode, SandboxLimit,
 };
 use zbus::OwnedFd;
 
@@ -33,9 +31,6 @@ use crate::{
     EstablishedNetwork, LocalProxyBindError, SystemdTransientUnitValue, TransientServiceUnitName,
 };
 
-const X86_64: &[u8] = include_bytes!(
-    "../../../../crates/pos-conformance/vectors/systemd-provider-v260.2/systemd-v260.2-x86_64.scs1.cbor"
-);
 const HOST_SERVICE: &str = "piglor-host-service-v1";
 const RELEASE: &str = "piglor-release-v1";
 const WORK: &str = "size=4096,nosuid,nodev,noexec";
@@ -550,15 +545,6 @@ fn limits(watchdog_ms: u64) -> Vec<SandboxLimit> {
 
 type Outcome = Result<AttemptExecution<String, FakeCgroup>, ExecuteFailure>;
 
-fn filter() -> TestResult<SystemCallFilter> {
-    let record = SandboxSyscallSetV1::from_canonical_cbor(X86_64)?;
-    Ok(SystemCallFilter::from_selected_record(
-        X86_64,
-        record.syscall_set_digest,
-        SandboxArchitecture::X86_64,
-    )?)
-}
-
 fn root_for(
     log: &Log,
     attempt: &AdmittedAttempt,
@@ -635,7 +621,6 @@ impl Scenario {
         Ok(ExecuteJob {
             attempt: AdmittedAttempt::for_test(attempt_id, authority(), mode)?
                 .allowing(planned_capabilities(&plan)),
-            system_call_filter: filter()?,
             service_limits: SystemdServiceLimits::from_effective_limits(&limits(watchdog_ms))?,
             mode: plan,
             capture_store: Arc::clone(&self.store),

@@ -107,6 +107,15 @@ fn the_entry_facts_need_the_directory_prepared_for_the_same_attempt() -> TestRes
         attempt.launcher_source().as_str(),
         snapshot.provider_binary().path()
     );
+    let filter = attempt.system_call_filter();
+    assert_eq!(
+        filter.requested_property(),
+        (true, snapshot.syscall_set().requested_names.clone())
+    );
+    filter.verify_readback(&(
+        true,
+        snapshot.syscall_set().expected_effective_names.clone(),
+    ))?;
     assert!(matches!(
         AdmittedAttempt::from_entry(&entry, &foreign),
         Err(ExecuteError::DirectoryIdentity)

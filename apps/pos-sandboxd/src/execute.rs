@@ -43,7 +43,7 @@ use zbus::OwnedFd;
 use crate::{
     ActiveAttempt, AdmittedAttempt, BoundLocalProxy, CheckedLocal, CheckedRoot, HostServiceChannel,
     ImageActivationError, LaunchMode, LauncherInvocation, LocalNetworkPort, LocalProxyBindError,
-    ServeError, ServedProxy, SystemCallFilter, SystemdServiceLimits, TransientServiceUnitName,
+    ServeError, ServedProxy, SystemdServiceLimits, TransientServiceUnitName,
     TransientUnitLaunchInputs, TransientUnitRequest,
 };
 
@@ -204,8 +204,6 @@ impl ModePlan {
 pub struct ExecuteJob {
     /// The facts of the reserved, admitted attempt.
     pub attempt: AdmittedAttempt,
-    /// The selected, digest-bound syscall filter.
-    pub system_call_filter: SystemCallFilter,
     /// The effective ELM1 limits systemd enforces.
     pub service_limits: SystemdServiceLimits,
     /// The planned network behaviour; it must match the admitted mode.
@@ -635,7 +633,6 @@ where
 {
     let ExecuteJob {
         attempt,
-        system_call_filter,
         service_limits,
         mode,
         capture_store,
@@ -683,7 +680,11 @@ where
         invocation,
     );
     Ok(Prepared {
-        request: TransientUnitRequest::compile(inputs, system_call_filter, &service_limits),
+        request: TransientUnitRequest::compile(
+            inputs,
+            attempt.system_call_filter(),
+            &service_limits,
+        ),
         watchdog: service_limits.watchdog(),
         attempt,
         planned,
