@@ -258,11 +258,11 @@ where
     }
 
     fn rechecked(&self) -> Result<ReleaseBinding, RecheckRefusal> {
+        verify_launcher(&self.launcher.file, &self.launcher.facts)
+            .map_err(|_| RecheckRefusal::UnitChanged)?;
         let binding = self
             .check
             .binding(self.admitted, self.deadline_monotonic_ns)?;
-        verify_launcher(&self.launcher.file, &self.launcher.facts)
-            .map_err(|_| RecheckRefusal::UnitChanged)?;
         // The identity is read last, so nothing slower than the read itself
         // separates it from the signing.
         self.unit_unchanged()?;
