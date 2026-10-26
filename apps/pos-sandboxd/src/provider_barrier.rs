@@ -40,12 +40,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use pos_reference::{
-    provider_admission::AdmittedAuthority,
-    sandbox_provider_protocol::{
-        blake3_digest_of, fdl1_digest, ExecutionRelease, FdIdentity, FdLayoutEntry, FdRole,
-        LaunchParameters, SandboxExecutionMode, SandboxProviderProtocolError,
-    },
+use pos_reference::sandbox_provider_protocol::{
+    blake3_digest_of, fdl1_digest, ExecutionRelease, FdIdentity, FdLayoutEntry, FdRole,
+    LaunchParameters, SandboxExecutionMode, SandboxProviderProtocolError,
 };
 use rustix::{
     fs::{statx, AtFlags, StatxFlags, CWD},
@@ -135,9 +132,9 @@ pub enum RecheckRefusal {
 /// cancellation, mount identity and observations).
 ///
 /// `root` is the caller's `|| root.recheck(&directory, &entry)`: it rechecks
-/// current authority, the control floor and the attached mount. The authority
-/// heads bound into the release are the admitted ones, which that recheck
-/// just confirmed.
+/// current authority, the control floor and the attached mount. Its returned
+/// proof must retain the barrier's complete admitted attempt before any
+/// authority heads can be bound into the release.
 pub struct AuthorityCheck<R, O> {
     root: R,
     expected_readback_digest: [u8; 32],
@@ -171,10 +168,13 @@ where
 
     fn binding(
         &self,
-        authority: AdmittedAuthority,
+        admitted: &AdmittedAttempt,
         deadline_monotonic_ns: u64,
     ) -> Result<ReleaseBinding, RecheckRefusal> {
-        (self.root)().map_err(RecheckRefusal::Root)?;
+        let checked = (self.root)().map_err(RecheckRefusal::Root)?;
+        if !checked.matches_attempt(admitted) {
+            return Err(RecheckRefusal::Root(ImageActivationError::EvidenceMismatch));
+        }
         if self.cancelled.load(Ordering::SeqCst) {
             return Err(RecheckRefusal::Cancelled);
         }
@@ -182,6 +182,7 @@ where
             .observed
             .observed_digest()
             .map_err(RecheckRefusal::Observation)?;
+        let authority = admitted.authority();
         Ok(ReleaseBinding {
             trs1_digest: authority.trs1_digest,
             rvs1_digest: authority.rvs1_digest,
@@ -208,7 +209,7 @@ struct UnitSnapshot {
 /// unit identity it must still match when the recheck runs.
 struct Bounded<'a, R, O, I> {
     check: &'a AuthorityCheck<R, O>,
-    authority: AdmittedAuthority,
+    admitted: &'a AdmittedAttempt,
     deadline_monotonic_ns: u64,
     deadline: Instant,
     identity: &'a I,
@@ -259,7 +260,7 @@ where
     fn rechecked(&self) -> Result<ReleaseBinding, RecheckRefusal> {
         let binding = self
             .check
-            .binding(self.authority, self.deadline_monotonic_ns)?;
+            .binding(self.admitted, self.deadline_monotonic_ns)?;
         verify_launcher(&self.launcher.file, &self.launcher.facts)
             .map_err(|_| RecheckRefusal::UnitChanged)?;
         // The identity is read last, so nothing slower than the read itself
@@ -346,7 +347,6 @@ pub struct ProviderReleaseBarrier<S, I, R, O> {
     signer: S,
     identity: I,
     check: AuthorityCheck<R, O>,
-    authority: AdmittedAuthority,
     sent: Option<ExecutionRelease>,
     attempted: bool,
 }
@@ -397,7 +397,6 @@ impl<S, I, R, O> ProviderReleaseBarrier<S, I, R, O> {
             signer,
             identity,
             check,
-            authority: attempt.authority(),
             sent: None,
             attempted: false,
         })
@@ -650,7 +649,7 @@ where
         self.attempted = true;
         let bounded = Bounded {
             check: &self.check,
-            authority: self.authority,
+            admitted: &self.admitted,
             deadline_monotonic_ns,
             deadline: attempt.deadline(),
             identity: &self.identity,

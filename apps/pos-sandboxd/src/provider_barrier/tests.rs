@@ -14,10 +14,7 @@ use rustix::{
 };
 
 use super::*;
-use crate::{
-    test_fixtures::{authority, TestResult, ATTEMPT},
-    ActivatedRootDirectory,
-};
+use crate::test_fixtures::{authority, TestResult, ATTEMPT};
 
 const KEY_ID: &str = "runtime-key";
 const EXPECTED_READBACK: [u8; 32] = [5; 32];
@@ -153,15 +150,12 @@ enum Refusal {
 type RootCheck = Box<dyn Fn() -> Result<CheckedRoot, ImageActivationError> + Send + Sync>;
 type TestBarrier = ProviderReleaseBarrier<TestSigner, TestIdentity, RootCheck, TestObserved>;
 
-fn root_check(refusal: Refusal) -> RootCheck {
+fn root_check(refusal: Refusal, attempt: &AdmittedAttempt) -> RootCheck {
     if matches!(refusal, Refusal::RootFails) {
         Box::new(|| Err(ImageActivationError::EvidenceMismatch))
     } else {
-        Box::new(|| {
-            Ok(CheckedRoot::for_test(ActivatedRootDirectory::for_attempt(
-                "00000000000000000000000000000041",
-            )))
-        })
+        let attempt = attempt.clone();
+        Box::new(move || Ok(crate::test_fixtures::checked_root(&attempt)))
     }
 }
 
@@ -180,7 +174,7 @@ fn barrier_with(
     let observed = (!matches!(refusal, Refusal::NoObservation)).then_some(OBSERVED_READBACK);
     let cancelled = Arc::new(AtomicBool::new(matches!(refusal, Refusal::Cancelled)));
     let check = AuthorityCheck::new(
-        root_check(refusal),
+        root_check(refusal, attempt),
         EXPECTED_READBACK,
         TestObserved(observed),
         cancelled,
@@ -835,6 +829,7 @@ async fn a_substituted_running_launcher_cannot_self_assert_the_admitted_digest()
     // digest. A matching ReadyV1 claim must never replace a provider hash.
     barrier.admitted = barrier.admitted.clone().with_launcher_digest([0x71; 32]);
     let attempt = attempt.with_launcher_digest([0x71; 32]);
+    barrier.check.root = root_check(Refusal::None, &attempt);
     let launcher = launcher(&mut barrier)?;
     assert!(matches!(
         barrier.release(&active(attempt, GENEROUS_MS)).await,
@@ -842,6 +837,38 @@ async fn a_substituted_running_launcher_cannot_self_assert_the_admitted_digest()
     ));
     drop(barrier);
     assert!(launcher.join().map_err(|_| "launcher thread")?.is_none());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_recheck_for_another_admitted_context_cannot_authorize_release() -> TestResult {
+    let mut changed = authority();
+    changed.policy_epoch += 1;
+    let alternatives = [
+        AdmittedAttempt::for_test(
+            crate::test_fixtures::OTHER,
+            authority(),
+            SandboxExecutionMode::AirGapped,
+        )?,
+        AdmittedAttempt::for_test(ATTEMPT, changed, SandboxExecutionMode::AirGapped)?,
+    ];
+    for other in alternatives {
+        let (mut barrier, attempt) =
+            barrier_for(SandboxExecutionMode::AirGapped, Refusal::None, own_pid())?;
+        // The barrier, job and Ready all agree on A. Only the otherwise valid
+        // recheck belongs to B, including the same-ID/different-authority case.
+        barrier.check.root = root_check(Refusal::None, &other);
+        let launcher = launcher(&mut barrier)?;
+        assert!(matches!(
+            barrier.release(&active(attempt, GENEROUS_MS)).await,
+            Err(BarrierError::Refused(RecheckRefusal::Root(
+                ImageActivationError::EvidenceMismatch
+            )))
+        ));
+        assert!(barrier.sent_release().is_none());
+        drop(barrier);
+        assert!(launcher.join().map_err(|_| "launcher thread")?.is_none());
+    }
     Ok(())
 }
 
@@ -867,7 +894,7 @@ async fn a_recheck_resumed_after_the_original_deadline_cannot_release() -> TestR
     let held = hold_launcher(own_pid(), attempt.launcher())?;
     let bounded = Bounded {
         check: &barrier.check,
-        authority: attempt.authority(),
+        admitted: &attempt,
         deadline_monotonic_ns: monotonic_ns(),
         deadline: Instant::now(),
         identity: &barrier.identity,

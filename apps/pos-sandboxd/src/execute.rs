@@ -41,11 +41,10 @@ use pos_reference::sandbox_provider_protocol::{
 use zbus::OwnedFd;
 
 use crate::{
-    ActivatedRootDirectory, ActiveAttempt, AdmittedAttempt, BoundLocalProxy, CheckedLocal,
-    CheckedRoot, HostServiceChannel, ImageActivationError, LaunchMode, LauncherInvocation,
-    LocalNetworkPort, LocalProxyBindError, ServeError, ServedProxy, SystemCallFilter,
-    SystemdServiceLimits, TransientServiceUnitName, TransientUnitLaunchInputs,
-    TransientUnitRequest,
+    ActiveAttempt, AdmittedAttempt, BoundLocalProxy, CheckedLocal, CheckedRoot, HostServiceChannel,
+    ImageActivationError, LaunchMode, LauncherInvocation, LocalNetworkPort, LocalProxyBindError,
+    ServeError, ServedProxy, SystemCallFilter, SystemdServiceLimits, TransientServiceUnitName,
+    TransientUnitLaunchInputs, TransientUnitRequest,
 };
 
 /// The least time a terminating host call is given, however short the
@@ -398,8 +397,8 @@ struct Prepared<C> {
 /// and the attached root (ADR-087 section 2 step 7) and returns the only
 /// `RootDirectory` a unit may use. Production passes
 /// `|| root.recheck(&directory, &entry)` with the same entry and directory
-/// that built the job's [`AdmittedAttempt`]; the rechecked root must name that
-/// attempt's own root, so a root of another attempt is refused. The recheck
+/// that built the job's [`AdmittedAttempt`]; the rechecked proof must retain
+/// that exact admitted context, so another root or authority is refused. The recheck
 /// consumes nothing and does not detach the mount when it fails, and neither
 /// does this function: the caller owns the `VerifiedRootMount`, and the
 /// attempt lifecycle (#442) detaches or drops it on every terminal path.
@@ -673,9 +672,7 @@ where
     // The recheck comes last, so nothing but compilation separates it from
     // the start of the unit.
     let checked = recheck().map_err(ExecuteError::Recheck)?;
-    if checked.root_directory()
-        != &ActivatedRootDirectory::for_attempt(attempt.unit_name().attempt_component())
-    {
+    if !checked.matches_attempt(&attempt) {
         return Err(ExecuteError::RootIdentity);
     }
     let inputs = TransientUnitLaunchInputs::new(

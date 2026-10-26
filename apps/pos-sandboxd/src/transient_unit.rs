@@ -13,6 +13,7 @@ use crate::{
     SystemdTransientUnitPropertyAccess, SystemdTransientUnitPropertyKind, TransientUnitHardening,
 };
 
+#[cfg(test)]
 const MAX_PROVIDER_PATH_BYTES: usize = 4096;
 const LAUNCHER_DESTINATION: &str = "/.pigloros/release-launcher";
 const RELEASE_DESCRIPTOR_NAME: &str = "piglor-release-v1";
@@ -282,17 +283,31 @@ fn lower_hex(bytes: &[u8]) -> String {
 ///
 /// It has no public constructor. Only [`crate::VerifiedRootMount::recheck`]
 /// mints one, after current RVS1, the control floor and the attached mount
-/// identity were checked again, and [`TransientUnitLaunchInputs`] accepts
-/// nothing else as `RootDirectory`.
+/// identity were checked again. It retains the complete admitted attempt
+/// whose entry was rechecked; execution and release require that same context.
+/// [`TransientUnitLaunchInputs`] accepts nothing else as `RootDirectory`.
 #[derive(Debug, Eq, PartialEq)]
 pub struct CheckedRoot {
     root_directory: ActivatedRootDirectory,
+    #[cfg(target_os = "linux")]
+    admitted: crate::AdmittedAttempt,
 }
 
 impl CheckedRoot {
     #[cfg(target_os = "linux")]
-    pub(crate) const fn rechecked(root_directory: ActivatedRootDirectory) -> Self {
-        Self { root_directory }
+    pub(crate) const fn rechecked(
+        root_directory: ActivatedRootDirectory,
+        admitted: crate::AdmittedAttempt,
+    ) -> Self {
+        Self {
+            root_directory,
+            admitted,
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn matches_attempt(&self, attempt: &crate::AdmittedAttempt) -> bool {
+        self.admitted == *attempt
     }
 
     /// The rechecked attempt root.
@@ -303,8 +318,17 @@ impl CheckedRoot {
 
     /// A rechecked root for requested-state unit tests, where no mount exists.
     #[cfg(test)]
-    pub(crate) const fn for_test(root_directory: ActivatedRootDirectory) -> Self {
-        Self { root_directory }
+    pub(crate) fn for_test(root_directory: ActivatedRootDirectory) -> std::io::Result<Self> {
+        Ok(Self {
+            root_directory,
+            #[cfg(target_os = "linux")]
+            admitted: crate::AdmittedAttempt::for_test(
+                crate::test_fixtures::ATTEMPT,
+                crate::test_fixtures::authority(),
+                pos_reference::sandbox_provider_protocol::SandboxExecutionMode::AirGapped,
+            )
+            .map_err(std::io::Error::other)?,
+        })
     }
 }
 
@@ -857,6 +881,7 @@ impl TransientUnitRequest {
     }
 }
 
+#[cfg(test)]
 fn is_normalized_absolute_path(path: &str) -> bool {
     path.len() < MAX_PROVIDER_PATH_BYTES
         && path.starts_with('/')

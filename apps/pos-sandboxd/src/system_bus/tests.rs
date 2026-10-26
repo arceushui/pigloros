@@ -1789,7 +1789,7 @@ fn request(mode: LaunchMode) -> Result<TransientUnitRequest, Box<dyn Error>> {
     let inputs = TransientUnitLaunchInputs::new(
         CheckedRoot::for_test(ActivatedRootDirectory::new(
             "/run/pigloros/attempt-381/root",
-        )?),
+        )?)?,
         LauncherSource::new("/usr/lib/pigloros/release-launcher")?,
         mode,
         descriptor()?,

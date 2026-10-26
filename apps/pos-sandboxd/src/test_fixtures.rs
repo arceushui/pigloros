@@ -6,6 +6,7 @@ use std::{
     fs::File,
     io::{self, Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
+    os::unix::fs::MetadataExt,
     sync::Arc,
     thread,
     time::{Duration, Instant},
@@ -21,6 +22,14 @@ use pos_reference::{
 
 use crate::{ActiveAttempt, AdmittedAttempt};
 
+/// A complete recheck token for in-process port tests without a kernel mount.
+pub(crate) fn checked_root(attempt: &AdmittedAttempt) -> crate::CheckedRoot {
+    crate::CheckedRoot::rechecked(
+        crate::ActivatedRootDirectory::for_attempt(attempt.unit_name().attempt_component()),
+        attempt.clone(),
+    )
+}
+
 /// One independently measured executable fixture per test process. Reusing
 /// immutable facts avoids hashing the large instrumented test binary per case.
 pub(crate) fn launcher_facts() -> TestResult<crate::attempt::LauncherFacts> {
@@ -28,7 +37,6 @@ pub(crate) fn launcher_facts() -> TestResult<crate::attempt::LauncherFacts> {
     if let Some(facts) = FACTS.get() {
         return Ok(facts.clone());
     }
-    use std::os::unix::fs::MetadataExt;
     let path = std::env::current_exe()?;
     let file = File::open(&path)?;
     let metadata = file.metadata()?;

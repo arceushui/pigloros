@@ -739,7 +739,7 @@ fn filter() -> Result<SystemCallFilter, Box<dyn Error>> {
 fn root_and_launcher() -> Result<(CheckedRoot, LauncherSource), Box<dyn Error>> {
     let root = ActivatedRootDirectory::new("/run/pigloros/attempt-42/root")?;
     Ok((
-        CheckedRoot::for_test(root),
+        CheckedRoot::for_test(root)?,
         LauncherSource::new("/usr/lib/pigloros/release-launcher")?,
     ))
 }

@@ -144,6 +144,10 @@ LPV1 argument, and read back as path, argument vector and ignore-failure flag.
 `ProviderReleaseBarrier` is the production `LaunchBarrier`. Its `prepare`
 operation checks the complete admitted attempt before handing over a descriptor,
 and release checks the active attempt against that same record again.
+The root recheck also returns the complete admitted context in its opaque
+`CheckedRoot` proof. Both prelaunch execution and the final release check
+reject a proof from another context, including a changed authority for the
+same attempt ID.
 `AdmittedAttempt` derives the launcher source, byte length, BLAKE3 digest and
 device/inode from the authenticated SIC1 role-11 provider executable. Neither
 the execute job nor barrier evidence can supply a separate path or digest.

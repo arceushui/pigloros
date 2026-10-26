@@ -885,10 +885,7 @@ fn recheck_mints_a_checked_root_only_for_the_same_authority_and_mount() -> TestR
     let checked = recheck(&kernel, &verified, &tree.prepared, Some(&expected), || {
         Ok(())
     })?;
-    assert_eq!(
-        checked,
-        CheckedRoot::for_test(expected.root_directory.clone())
-    );
+    assert_eq!(checked, expected.root_directory);
 
     // Authority drift or a floor above the admission refuses.
     for error in [
@@ -1060,7 +1057,10 @@ async fn the_admitted_chain_reaches_attachment_only_through_every_gate() -> Test
     let admission = snapshot.admit_held_image()?;
     fixed_registry()?;
     let prepared = SystemdAttemptRegistry::open()?
-        .commit_planned(&PlannedAttemptIntent::new([0x44; 16], [0x45; 32])?)?
+        .commit_planned(&PlannedAttemptIntent::new(
+            staged.request().attempt_id,
+            staged.request().authority.sim1_digest,
+        )?)?
         .prepare_directory()?;
     let root_directory = ActivatedRootDirectory::for_attempt(&component(&prepared));
     let expected = Expected::for_admission(&admission, root_directory.clone())
@@ -1114,6 +1114,18 @@ async fn the_admitted_chain_reaches_attachment_only_through_every_gate() -> Test
     let entry = ledger.reserve_entry(snapshot.admit_held_image()?)?;
     assert_eq!(
         verified.recheck(&prepared, &entry).err(),
+        Some(ImageActivationError::EvidenceMismatch)
+    );
+    let checked = verified.recheck_with(&kernel, &prepared, &entry)?;
+    assert!(checked.matches_attempt(&AdmittedAttempt::from_entry(&entry, &prepared)?));
+    let foreign = SystemdAttemptRegistry::open()?
+        .commit_planned(&PlannedAttemptIntent::new(
+            [0x44; 16],
+            staged.request().authority.sim1_digest,
+        )?)?
+        .prepare_directory()?;
+    assert_eq!(
+        verified.recheck_with(&kernel, &foreign, &entry).err(),
         Some(ImageActivationError::EvidenceMismatch)
     );
 

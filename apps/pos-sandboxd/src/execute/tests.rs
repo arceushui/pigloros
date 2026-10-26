@@ -28,6 +28,7 @@ use crate::test_fixtures::{
     authority, capability, capture_store, grant_authority, plan, remote, LoopbackConnector,
     TestResult, ATTEMPT, OTHER, REQUEST, RESPONSE,
 };
+use crate::ActivatedRootDirectory;
 use crate::{
     EstablishedNetwork, LocalProxyBindError, SystemdTransientUnitValue, TransientServiceUnitName,
 };
@@ -560,17 +561,13 @@ fn filter() -> TestResult<SystemCallFilter> {
 
 fn root_for(
     log: &Log,
-    attempt_id: [u8; 16],
+    attempt: &AdmittedAttempt,
 ) -> impl FnOnce() -> Result<CheckedRoot, ImageActivationError> + Send + use<> {
     let log = Arc::clone(log);
-    let component = TransientServiceUnitName::from_attempt_id(attempt_id)
-        .map(|name| name.attempt_component().to_owned())
-        .unwrap_or_default();
+    let attempt = attempt.clone();
     move || {
         record(&log, "recheck");
-        Ok(CheckedRoot::for_test(ActivatedRootDirectory::for_attempt(
-            &component,
-        )))
+        Ok(crate::test_fixtures::checked_root(&attempt))
     }
 }
 
@@ -661,7 +658,7 @@ impl Scenario {
         plan: ModePlan,
     ) -> TestResult<Outcome> {
         let job = self.job(attempt_id, mode, plan, GENEROUS_WATCHDOG_MS)?;
-        let recheck = root_for(&self.log, attempt_id);
+        let recheck = root_for(&self.log, &job.attempt);
         Ok(self.run_on(&LoopbackNetwork, job, recheck).await)
     }
 
@@ -676,7 +673,7 @@ impl Scenario {
         watchdog_ms: u64,
     ) -> TestResult<Outcome> {
         let job = self.job(ATTEMPT, mode, plan, watchdog_ms)?;
-        let recheck = root_for(&self.log, ATTEMPT);
+        let recheck = root_for(&self.log, &job.attempt);
         Ok(self.run_on(&LoopbackNetwork, job, recheck).await)
     }
 
@@ -967,7 +964,20 @@ async fn a_failed_root_recheck_never_starts_the_unit() -> TestResult {
 
 #[tokio::test]
 async fn a_root_of_another_attempt_never_starts_the_unit() -> TestResult {
-    let (scenario, failed) = recheck_failure(root_for(&Log::default(), OTHER)).await?;
+    let other = AdmittedAttempt::for_test(OTHER, authority(), SandboxExecutionMode::AirGapped)?;
+    let (scenario, failed) = recheck_failure(root_for(&Log::default(), &other)).await?;
+    assert!(matches!(failed.error, ExecuteError::RootIdentity));
+    assert_eq!(failed.unit, UnitState::NotStarted);
+    assert!(!scenario.entries().iter().any(|entry| entry == "start"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_recheck_with_the_same_attempt_id_but_different_authority_never_starts() -> TestResult {
+    let mut changed = authority();
+    changed.policy_epoch += 1;
+    let other = AdmittedAttempt::for_test(ATTEMPT, changed, SandboxExecutionMode::AirGapped)?;
+    let (scenario, failed) = recheck_failure(root_for(&Log::default(), &other)).await?;
     assert!(matches!(failed.error, ExecuteError::RootIdentity));
     assert_eq!(failed.unit, UnitState::NotStarted);
     assert!(!scenario.entries().iter().any(|entry| entry == "start"));
@@ -1221,7 +1231,7 @@ async fn local_failure<N: LocalNetworkPort + Sync>(
         mode,
         GENEROUS_WATCHDOG_MS,
     )?;
-    let recheck = root_for(&scenario.log, ATTEMPT);
+    let recheck = root_for(&scenario.log, &job.attempt);
     let outcome = scenario.run_on(network, job, recheck).await;
     Ok((scenario, failure(outcome)?))
 }
@@ -1278,7 +1288,7 @@ async fn teardowns(
         mode,
         GENEROUS_WATCHDOG_MS,
     )?;
-    let recheck = root_for(&scenario.log, ATTEMPT);
+    let recheck = root_for(&scenario.log, &job.attempt);
     let outcome = scenario.run_on(&network, job, recheck).await;
     Ok((torn_down.load(Ordering::SeqCst), failure(outcome)?))
 }
@@ -1526,7 +1536,7 @@ async fn the_unit_is_killed_while_a_slow_connector_is_still_being_joined() -> Te
         saw_kill: Arc::default(),
     };
     let job = scenario.job(ATTEMPT, SandboxExecutionMode::Local, mode, 200)?;
-    let recheck = root_for(&scenario.log, ATTEMPT);
+    let recheck = root_for(&scenario.log, &job.attempt);
     let started = Instant::now();
     let execution = scenario
         .run_on(&network, job, recheck)
@@ -1552,7 +1562,7 @@ async fn a_failed_proxy_task_terminates_the_unit() -> TestResult {
         mode,
         GENEROUS_WATCHDOG_MS,
     )?;
-    let recheck = root_for(&scenario.log, ATTEMPT);
+    let recheck = root_for(&scenario.log, &job.attempt);
     let outcome = scenario.run_on(&PanickingNetwork, job, recheck).await;
     let failed = failure(outcome)?;
     assert!(matches!(failed.error, ExecuteError::Serve(_)));
