@@ -599,7 +599,7 @@ mod tests {
     use crate::provider_admission::test_support::StagedInstallation;
     use ciborium::value::Value;
     use std::io::Cursor;
-    type TestResult = Result<(), Box<dyn std::error::Error>>;
+    type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
     #[test]
     fn frames_validate_lengths_and_charge_before_allocating() -> TestResult {
