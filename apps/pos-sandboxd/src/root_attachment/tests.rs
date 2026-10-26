@@ -1058,8 +1058,8 @@ async fn the_admitted_chain_reaches_attachment_only_through_every_gate() -> Test
     fixed_registry()?;
     let prepared = SystemdAttemptRegistry::open()?
         .commit_planned(&PlannedAttemptIntent::new(
-            staged.request().attempt_id,
-            staged.request().authority.sim1_digest,
+            snapshot.request().attempt_id,
+            snapshot.request().authority.sim1_digest,
         )?)?
         .prepare_directory()?;
     let root_directory = ActivatedRootDirectory::for_attempt(&component(&prepared));
@@ -1121,7 +1121,7 @@ async fn the_admitted_chain_reaches_attachment_only_through_every_gate() -> Test
     let foreign = SystemdAttemptRegistry::open()?
         .commit_planned(&PlannedAttemptIntent::new(
             [0x44; 16],
-            staged.request().authority.sim1_digest,
+            snapshot.request().authority.sim1_digest,
         )?)?
         .prepare_directory()?;
     assert_eq!(
