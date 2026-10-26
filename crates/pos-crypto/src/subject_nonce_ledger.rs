@@ -159,6 +159,7 @@ impl SubjectNonceLedgerV1 {
     }
 
     /// Structurally validated rows in canonical identity order.
+    #[must_use]
     pub fn rows(&self) -> impl ExactSizeIterator<Item = &SubjectNonceLedgerRowV1> {
         self.rows.iter()
     }
