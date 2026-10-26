@@ -801,12 +801,21 @@ impl ProviderTransport {
             commitment,
             bytes: spx1,
         };
-        if let Some(execution) =
-            self.execute_initial_attempt(admitted, &source, input, &deadline, &mut progress)?
-        {
-            return Ok(execution);
-        }
-        self.execute_retry_attempt(admitted, &source, input, &deadline, &mut progress)
+        self.execute_initial_attempt(admitted, &source, input, &deadline, &mut progress)
+            .and_then(|first| {
+                first.map_or_else(
+                    || {
+                        self.execute_retry_attempt(
+                            admitted,
+                            &source,
+                            input,
+                            &deadline,
+                            &mut progress,
+                        )
+                    },
+                    Ok,
+                )
+            })
     }
 
     fn execute_initial_attempt(
