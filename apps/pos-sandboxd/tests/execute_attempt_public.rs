@@ -103,6 +103,10 @@ fn the_entry_facts_need_the_directory_prepared_for_the_same_attempt() -> TestRes
     assert_eq!(attempt.attempt_id(), request.attempt_id);
     assert_eq!(attempt.unit_name(), own.intent().unit_name());
     assert_eq!(attempt.mode(), snapshot.launch_policy().execution_mode);
+    assert_eq!(
+        attempt.launcher_source().as_str(),
+        snapshot.provider_binary().path()
+    );
     assert!(matches!(
         AdmittedAttempt::from_entry(&entry, &foreign),
         Err(ExecuteError::DirectoryIdentity)

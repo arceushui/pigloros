@@ -31,6 +31,7 @@ use std::{
     fs::File,
     future::Future,
     io::{self, Read},
+    os::unix::fs::MetadataExt,
     path::Path,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -42,8 +43,8 @@ use std::{
 use pos_reference::{
     provider_admission::AdmittedAuthority,
     sandbox_provider_protocol::{
-        fdl1_digest, ExecutionRelease, FdIdentity, FdLayoutEntry, FdRole, LaunchParameters,
-        SandboxExecutionMode, SandboxProviderProtocolError,
+        blake3_digest_of, fdl1_digest, ExecutionRelease, FdIdentity, FdLayoutEntry, FdRole,
+        LaunchParameters, SandboxExecutionMode, SandboxProviderProtocolError,
     },
 };
 use rustix::{
@@ -213,6 +214,7 @@ struct Bounded<'a, R, O, I> {
     identity: &'a I,
     unit_name: &'a TransientServiceUnitName,
     snapshot: UnitSnapshot,
+    launcher: &'a HeldLauncher,
     refusal: RefCell<Option<RecheckRefusal>>,
 }
 
@@ -258,9 +260,12 @@ where
         let binding = self
             .check
             .binding(self.authority, self.deadline_monotonic_ns)?;
+        verify_launcher(&self.launcher.file, &self.launcher.facts)
+            .map_err(|_| RecheckRefusal::UnitChanged)?;
         // The identity is read last, so nothing slower than the read itself
         // separates it from the signing.
         self.unit_unchanged()?;
+        remaining_until(self.deadline).map_err(|_| RecheckRefusal::Expired)?;
         Ok(binding)
     }
 }
@@ -282,8 +287,6 @@ where
 /// Evidence the composition root already holds about the launch.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BarrierEvidence {
-    /// The admitted BLAKE3 digest of the launcher binary (SPM1/APT1-bound).
-    pub launcher_digest: [u8; 32],
     /// The adapter's mount ID and inode, observed beneath the verified root.
     pub adapter_identity: FdIdentity,
 }
@@ -291,6 +294,9 @@ pub struct BarrierEvidence {
 /// Why the barrier could not be built or could not release.
 #[derive(Debug, thiserror::Error)]
 pub enum BarrierError {
+    /// The barrier and active job do not share the exact admitted context.
+    #[error("the release barrier belongs to another admitted attempt")]
+    AttemptMismatch,
     /// The descriptor layout or launch parameters are not valid records.
     #[error("the launch parameters are invalid")]
     Parameters(#[source] SandboxProviderProtocolError),
@@ -329,6 +335,7 @@ pub enum BarrierError {
 
 /// The production [`LaunchBarrier`].
 pub struct ProviderReleaseBarrier<S, I, R, O> {
+    admitted: AdmittedAttempt,
     /// The provider's end of the channel (`std` type; the unit's end below is
     /// the `zvariant` type that D-Bus passes).
     provider_end: std::os::fd::OwnedFd,
@@ -381,6 +388,7 @@ impl<S, I, R, O> ProviderReleaseBarrier<S, I, R, O> {
             })
             .map_err(BarrierError::Parameters)?;
         Ok(Self {
+            admitted: attempt.clone(),
             provider_end,
             unit_end: Some(OwnedFd::from(unit_end)),
             parameters,
@@ -457,16 +465,106 @@ fn observe_executable(pid: u32) -> Result<FdIdentity, BarrierError> {
     .ok_or(BarrierError::LauncherIdentity)
 }
 
+struct HeldLauncher {
+    file: File,
+    identity: FdIdentity,
+    facts: crate::attempt::LauncherFacts,
+}
+
+/// Identify the very descriptor opened from the running process.
+/// Holding it through the handshake prevents a path/stat/hash substitution.
+fn hold_launcher(
+    pid: u32,
+    facts: &crate::attempt::LauncherFacts,
+) -> Result<HeldLauncher, BarrierError> {
+    let file =
+        File::open(format!("/proc/{pid}/exe")).map_err(|_| BarrierError::LauncherIdentity)?;
+    verify_launcher_identity(&file, facts)?;
+    let identity = statx(
+        &file,
+        "",
+        AtFlags::EMPTY_PATH,
+        StatxFlags::INO.union(StatxFlags::MNT_ID),
+    )
+    .ok()
+    .filter(|stat| StatxFlags::from_bits_retain(stat.stx_mask).contains(StatxFlags::MNT_ID))
+    .map(|stat| FdIdentity {
+        mount_id: stat.stx_mnt_id,
+        inode: stat.stx_ino,
+    })
+    .ok_or(BarrierError::LauncherIdentity)?;
+    Ok(HeldLauncher {
+        file,
+        identity,
+        facts: facts.clone(),
+    })
+}
+
+fn verify_launcher(file: &File, facts: &crate::attempt::LauncherFacts) -> Result<(), BarrierError> {
+    verify_launcher_identity(file, facts)?;
+    let digest = blake3_digest_of(file).map_err(|_| BarrierError::LauncherIdentity)?;
+    if digest != facts.digest {
+        return Err(BarrierError::LauncherIdentity);
+    }
+    Ok(())
+}
+
+fn verify_launcher_identity(
+    file: &File,
+    facts: &crate::attempt::LauncherFacts,
+) -> Result<(), BarrierError> {
+    let metadata = file
+        .metadata()
+        .map_err(|_| BarrierError::LauncherIdentity)?;
+    if (metadata.dev(), metadata.ino()) != facts.identity || metadata.len() != facts.length {
+        return Err(BarrierError::LauncherIdentity);
+    }
+    Ok(())
+}
+
 /// The time left before `deadline` and the absolute `CLOCK_MONOTONIC`
 /// nanosecond value it corresponds to.
 fn release_window(deadline: Instant) -> Result<(Duration, u64), BarrierError> {
+    release_window_with(
+        deadline,
+        || {
+            let now = clock_gettime(ClockId::Monotonic);
+            (i128::from(now.tv_sec), i128::from(now.tv_nsec))
+        },
+        Instant::now,
+    )
+}
+
+fn release_window_with(
+    deadline: Instant,
+    monotonic: impl FnOnce() -> (i128, i128),
+    instant: impl FnOnce() -> Instant,
+) -> Result<(Duration, u64), BarrierError> {
+    // Sample the absolute clock FIRST. A later remaining-time sample can only
+    // shorten the signed window; preemption can never extend it beyond D.
+    let (seconds, nanoseconds) = monotonic();
+    release_window_at(deadline, instant(), seconds, nanoseconds)
+}
+
+fn release_window_at(
+    deadline: Instant,
+    sampled: Instant,
+    seconds: i128,
+    nanoseconds: i128,
+) -> Result<(Duration, u64), BarrierError> {
     let remaining = deadline
-        .checked_duration_since(Instant::now())
+        .checked_duration_since(sampled)
         .filter(|remaining| !remaining.is_zero())
         .ok_or(BarrierError::Expired)?;
-    let now = clock_gettime(ClockId::Monotonic);
-    absolute_deadline_ns(i128::from(now.tv_sec), i128::from(now.tv_nsec), remaining)
+    absolute_deadline_ns(seconds, nanoseconds, remaining)
         .map(|absolute| (remaining, absolute))
+        .ok_or(BarrierError::Expired)
+}
+
+fn remaining_until(deadline: Instant) -> Result<Duration, BarrierError> {
+    deadline
+        .checked_duration_since(Instant::now())
+        .filter(|remaining| !remaining.is_zero())
         .ok_or(BarrierError::Expired)
 }
 
@@ -498,11 +596,15 @@ where
 }
 
 /// Bound both the `ReadyV1` receive and the `ReleaseV1` send by the time left.
-fn bound_channel(channel: &std::os::fd::OwnedFd, remaining: Duration) -> Result<(), BarrierError> {
+fn bound_channel(channel: &std::os::fd::OwnedFd, deadline: Instant) -> Result<(), BarrierError> {
     [Timeout::Recv, Timeout::Send]
         .into_iter()
-        .try_for_each(|direction| set_socket_timeout(channel, direction, Some(remaining)))
-        .map_err(|errno| BarrierError::Timeout(io::Error::from(errno)))
+        .try_for_each(|direction| {
+            remaining_until(deadline).and_then(|remaining| {
+                set_socket_timeout(channel, direction, Some(remaining))
+                    .map_err(|errno| BarrierError::Timeout(io::Error::from(errno)))
+            })
+        })
 }
 
 fn require_multi_thread() -> Result<(), BarrierError> {
@@ -524,6 +626,7 @@ where
 {
     async fn release_inner(&mut self, attempt: &ActiveAttempt) -> Result<(), BarrierError> {
         require_multi_thread()?;
+        self.require_attempt(attempt.admitted())?;
         if self.attempted {
             return Err(BarrierError::AlreadyAttempted);
         }
@@ -537,10 +640,11 @@ where
             self.identity.invocation_id(attempt.unit_name()),
         )
         .await?;
-        let launcher = observe_executable(main_pid)?;
+        let held_launcher =
+            tokio::task::block_in_place(|| hold_launcher(main_pid, self.admitted.launcher()))?;
+        let launcher = held_launcher.identity;
         let expected = self.expected(invocation, launcher);
-        let (remaining, deadline_monotonic_ns) = release_window(attempt.deadline())?;
-        bound_channel(&self.provider_end, remaining)?;
+        let (_, deadline_monotonic_ns) = release_window(attempt.deadline())?;
         // Nothing above consumes `ReadyV1`, so dropping the future before this
         // point leaves the barrier unused; from here the release is one-shot.
         self.attempted = true;
@@ -556,20 +660,20 @@ where
                 invocation,
                 launcher,
             },
+            launcher: &held_launcher,
             refusal: RefCell::new(None),
         };
         let provider_end = &self.provider_end;
         let signer = &self.signer;
         let released = tokio::task::block_in_place(|| {
+            bound_channel(provider_end, attempt.deadline())?;
             release_after_ready(provider_end, main_pid, &expected, &bounded, signer)
+                .map_err(BarrierError::Release)
         });
-        let release = released.map_err(|error| {
-            bounded
-                .refusal
-                .take()
-                .map_or(BarrierError::Release(error), BarrierError::Refused)
-        })?;
+        let release = released
+            .map_err(|error| bounded.refusal.take().map_or(error, BarrierError::Refused))?;
         self.sent = Some(release);
+        remaining_until(attempt.deadline())?;
         Ok(())
     }
 
@@ -578,13 +682,21 @@ where
             attempt_id: self.parameters.attempt_id,
             nonce: self.parameters.nonce,
             launch_instance_id: invocation,
-            launcher_digest: self.evidence.launcher_digest,
+            launcher_digest: self.admitted.launcher().digest,
             launcher_identity: launcher,
             sim1_digest: self.parameters.sim1_digest,
             adapter_digest: self.adapter_digest,
             adapter_identity: self.evidence.adapter_identity,
             launch_parameter_digest: self.parameters.digest,
             expected_fdl1_digest: self.parameters.expected_fdl1_digest,
+        }
+    }
+
+    fn require_attempt(&self, attempt: &AdmittedAttempt) -> Result<(), BarrierError> {
+        if &self.admitted == attempt {
+            Ok(())
+        } else {
+            Err(BarrierError::AttemptMismatch)
         }
     }
 }
@@ -598,14 +710,19 @@ where
 {
     type Error = BarrierError;
 
-    fn launcher_invocation(&self) -> Result<LauncherInvocation, BarrierError> {
+    fn prepare(
+        &mut self,
+        attempt: &AdmittedAttempt,
+    ) -> Result<(LauncherInvocation, OwnedFd), BarrierError> {
         // Called before the start, so a wrong runtime never starts a unit.
         require_multi_thread()?;
-        LauncherInvocation::from_parameters(&self.parameters).map_err(BarrierError::Parameters)
-    }
-
-    fn take_unit_end(&mut self) -> Result<OwnedFd, BarrierError> {
-        self.unit_end.take().ok_or(BarrierError::UnitEndTaken)
+        self.require_attempt(attempt)?;
+        let invocation = LauncherInvocation::from_parameters(&self.parameters)
+            .map_err(BarrierError::Parameters)?;
+        self.unit_end
+            .take()
+            .ok_or(BarrierError::UnitEndTaken)
+            .map(|end| (invocation, end))
     }
 
     fn release(

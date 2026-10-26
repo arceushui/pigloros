@@ -95,7 +95,7 @@ impl<C> EstablishedNetwork<C> {
 /// inside it, own the namespace, and dropping them removes it. The execute
 /// path establishes the network before the recheck and before the unit
 /// starts, so it drops the handle on every path that does not serve it: a
-/// refused admission, a failed `take_unit_end`, a failed recheck, a failed
+/// refused admission, a failed barrier preparation, a failed recheck, a failed
 /// start, a refused release and a finished attempt. An implementation must
 /// therefore make its `Drop` (or its connector's) tear the namespace down, and
 /// must not rely on the caller to do it.

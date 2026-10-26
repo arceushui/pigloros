@@ -22,7 +22,6 @@ use crate::{
 const KEY_ID: &str = "runtime-key";
 const EXPECTED_READBACK: [u8; 32] = [5; 32];
 const OBSERVED_READBACK: [u8; 32] = [6; 32];
-const LAUNCHER_DIGEST: [u8; 32] = [0x71; 32];
 const INVOCATION: [u8; 16] = [0x12; 16];
 const ADAPTER_IDENTITY: FdIdentity = FdIdentity {
     mount_id: 9,
@@ -190,7 +189,6 @@ fn barrier_with(
         attempt,
         fresh_nonce()?,
         BarrierEvidence {
-            launcher_digest: LAUNCHER_DIGEST,
             adapter_identity: ADAPTER_IDENTITY,
         },
         test_signer()?,
@@ -220,7 +218,7 @@ fn ready_for(barrier: &TestBarrier) -> TestResult<LauncherReady> {
         attempt_id: parameters.attempt_id,
         nonce: parameters.nonce,
         launch_instance_id: INVOCATION,
-        launcher_digest: LAUNCHER_DIGEST,
+        launcher_digest: barrier.admitted.launcher().digest,
         launcher_identity: observe_executable(own_pid())?,
         sim1_digest: parameters.sim1_digest,
         adapter_digest: barrier.adapter_digest,
@@ -262,7 +260,8 @@ fn receive_release(unit_end: &StdOwnedFd) -> Option<ExecutionRelease> {
 /// A launcher that answers with a correct `ReadyV1` and reports the release it
 /// receives.
 fn launcher(barrier: &mut TestBarrier) -> TestResult<JoinHandle<Option<ExecutionRelease>>> {
-    let unit_end = StdOwnedFd::from(barrier.take_unit_end()?);
+    let attempt = barrier.admitted.clone();
+    let unit_end = StdOwnedFd::from(barrier.prepare(&attempt)?.1);
     let ready = ready_for(barrier)?.to_canonical_cbor()?;
     Ok(thread::spawn(move || {
         send_ready(&unit_end, &ready)?;
@@ -415,7 +414,7 @@ async fn a_silent_launcher_is_cut_off_at_the_attempt_deadline() -> TestResult {
     let (mut barrier, attempt) =
         barrier_for(SandboxExecutionMode::AirGapped, Refusal::None, own_pid())?;
     // Hold the unit's end open and send nothing.
-    let _unit_end = barrier.take_unit_end()?;
+    let _unit_end = barrier.prepare(&attempt)?.1;
     let started = Instant::now();
     let error = barrier.release(&active(attempt, 300)).await.err();
     assert!(started.elapsed() >= Duration::from_millis(250));
@@ -550,19 +549,18 @@ fn no_runtime_at_all_is_refused() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_unit_end_is_handed_over_once_and_the_invocation_carries_the_parameters() -> TestResult
 {
-    let (mut barrier, _attempt) =
+    let (mut barrier, attempt) =
         barrier_for(SandboxExecutionMode::AirGapped, Refusal::None, own_pid())?;
     assert_eq!(
-        barrier.launcher_invocation()?,
+        barrier.prepare(&attempt)?.0,
         LauncherInvocation::from_parameters(&barrier.parameters)?
     );
     assert_eq!(barrier.parameters.adapter_path, "/usr/bin/adapter");
     assert_eq!(barrier.adapter_digest, [0x61; 32]);
     assert_eq!(barrier.parameters.arguments, ["--check"]);
     assert_eq!(barrier.parameters.sim1_digest, [0x51; 32]);
-    assert!(barrier.take_unit_end().is_ok());
     assert!(matches!(
-        barrier.take_unit_end(),
+        barrier.prepare(&attempt),
         Err(BarrierError::UnitEndTaken)
     ));
     Ok(())
@@ -570,10 +568,10 @@ async fn the_unit_end_is_handed_over_once_and_the_invocation_carries_the_paramet
 
 #[tokio::test]
 async fn a_current_thread_runtime_is_refused_before_the_unit_would_start() -> TestResult {
-    let (barrier, _attempt) =
+    let (mut barrier, attempt) =
         barrier_for(SandboxExecutionMode::AirGapped, Refusal::None, own_pid())?;
     assert!(matches!(
-        barrier.launcher_invocation(),
+        barrier.prepare(&attempt),
         Err(BarrierError::RuntimeFlavor)
     ));
     Ok(())
@@ -732,6 +730,122 @@ fn the_absolute_deadline_adds_every_component() {
 }
 
 #[test]
+fn clock_translation_never_extends_the_original_attempt_deadline() -> TestResult {
+    let first = Instant::now();
+    let deadline = first + Duration::from_secs(10);
+    // The monotonic sample is 5s at `first`; sampling Instant 3s later must
+    // shorten the signed absolute deadline, never move it from 15s to 18s.
+    let order = RefCell::new(Vec::new());
+    let (remaining, absolute) = release_window_with(
+        deadline,
+        || {
+            order.borrow_mut().push("monotonic");
+            (5, 0)
+        },
+        || {
+            order.borrow_mut().push("instant");
+            first + Duration::from_secs(3)
+        },
+    )?;
+    assert_eq!(*order.borrow(), ["monotonic", "instant"]);
+    assert_eq!(remaining, Duration::from_secs(7));
+    assert_eq!(absolute, 12_000_000_000);
+    assert!(matches!(
+        release_window_at(deadline, deadline, 15, 0),
+        Err(BarrierError::Expired)
+    ));
+    assert!(matches!(
+        release_window_at(deadline, first, -100, 0),
+        Err(BarrierError::Expired)
+    ));
+    assert!(matches!(remaining_until(first), Err(BarrierError::Expired)));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_barrier_rejects_a_different_valid_attempt_before_handoff_or_identity_read() -> TestResult
+{
+    let (mut barrier, attempt) =
+        barrier_for(SandboxExecutionMode::AirGapped, Refusal::None, own_pid())?;
+    let mut other = AdmittedAttempt::for_test(
+        crate::test_fixtures::OTHER,
+        authority(),
+        SandboxExecutionMode::AirGapped,
+    )?;
+    assert!(matches!(
+        barrier.prepare(&other),
+        Err(BarrierError::AttemptMismatch)
+    ));
+    assert!(matches!(
+        barrier.release(&active(other.clone(), GENEROUS_MS)).await,
+        Err(BarrierError::AttemptMismatch)
+    ));
+    assert_eq!(barrier.identity.main_pid_reads.load(Ordering::SeqCst), 0);
+    // Even a reused attempt ID cannot substitute another admitted authority.
+    let mut changed = authority();
+    changed.policy_epoch += 1;
+    other = AdmittedAttempt::for_test(ATTEMPT, changed, SandboxExecutionMode::AirGapped)?;
+    assert!(matches!(
+        barrier.prepare(&other),
+        Err(BarrierError::AttemptMismatch)
+    ));
+    // Rejection consumed neither the release descriptor nor its single use.
+    let launcher = launcher(&mut barrier)?;
+    barrier.release(&active(attempt, GENEROUS_MS)).await?;
+    assert!(launcher.join().map_err(|_| "launcher thread")?.is_some());
+    Ok(())
+}
+
+#[test]
+fn an_executable_must_match_the_admitted_inode_length_and_actual_digest() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("launcher");
+    std::fs::write(&path, b"admitted executable")?;
+    let metadata = std::fs::metadata(&path)?;
+    let facts = crate::attempt::LauncherFacts {
+        path: path.to_string_lossy().into_owned(),
+        digest: *blake3::hash(b"admitted executable").as_bytes(),
+        length: metadata.len(),
+        identity: (metadata.dev(), metadata.ino()),
+    };
+    verify_launcher(&File::open(&path)?, &facts)?;
+    let mut wrong = facts.clone();
+    wrong.identity.1 += 1;
+    assert!(verify_launcher(&File::open(&path)?, &wrong).is_err());
+    wrong = facts.clone();
+    wrong.length += 1;
+    assert!(verify_launcher(&File::open(&path)?, &wrong).is_err());
+    wrong = facts;
+    wrong.digest = [0x71; 32];
+    assert!(verify_launcher(&File::open(&path)?, &wrong).is_err());
+    // A descriptor whose bytes cannot be read must also fail closed.
+    let unreadable = File::open(directory.path())?;
+    let metadata = unreadable.metadata()?;
+    wrong.identity = (metadata.dev(), metadata.ino());
+    wrong.length = metadata.len();
+    assert!(verify_launcher(&unreadable, &wrong).is_err());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_substituted_running_launcher_cannot_self_assert_the_admitted_digest() -> TestResult {
+    let (mut barrier, attempt) =
+        barrier_for(SandboxExecutionMode::AirGapped, Refusal::None, own_pid())?;
+    // Keep the real MainPID/mount/inode but change the independently admitted
+    // digest. A matching ReadyV1 claim must never replace a provider hash.
+    barrier.admitted = barrier.admitted.clone().with_launcher_digest([0x71; 32]);
+    let attempt = attempt.with_launcher_digest([0x71; 32]);
+    let launcher = launcher(&mut barrier)?;
+    assert!(matches!(
+        barrier.release(&active(attempt, GENEROUS_MS)).await,
+        Err(BarrierError::Refused(RecheckRefusal::UnitChanged))
+    ));
+    drop(barrier);
+    assert!(launcher.join().map_err(|_| "launcher thread")?.is_none());
+    Ok(())
+}
+
+#[test]
 fn the_release_window_is_the_time_left_on_the_monotonic_clock() -> TestResult {
     let before = monotonic_ns();
     let (remaining, absolute) = release_window(Instant::now() + Duration::from_secs(20))?;
@@ -743,5 +857,33 @@ fn the_release_window_is_the_time_left_on_the_monotonic_clock() -> TestResult {
         release_window(Instant::now()),
         Err(BarrierError::Expired)
     ));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_recheck_resumed_after_the_original_deadline_cannot_release() -> TestResult {
+    let (barrier, attempt) =
+        barrier_for(SandboxExecutionMode::AirGapped, Refusal::None, own_pid())?;
+    let held = hold_launcher(own_pid(), attempt.launcher())?;
+    let bounded = Bounded {
+        check: &barrier.check,
+        authority: attempt.authority(),
+        deadline_monotonic_ns: monotonic_ns(),
+        deadline: Instant::now(),
+        identity: &barrier.identity,
+        unit_name: attempt.unit_name(),
+        snapshot: UnitSnapshot {
+            main_pid: own_pid(),
+            invocation: INVOCATION,
+            launcher: held.identity,
+        },
+        launcher: &held,
+        refusal: RefCell::new(None),
+    };
+    // Model a valid Ready followed by provider preemption. Immediate manager
+    // reads can complete even when Tokio's timeout is already due; the
+    // original deadline must still forbid a release after the final recheck.
+    let result = tokio::task::block_in_place(|| bounded.rechecked());
+    assert!(matches!(result, Err(RecheckRefusal::Expired)));
     Ok(())
 }

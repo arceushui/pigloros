@@ -403,20 +403,20 @@ impl FakeBarrier {
 impl LaunchBarrier for FakeBarrier {
     type Error = Injected;
 
-    fn launcher_invocation(&self) -> Result<LauncherInvocation, Injected> {
+    fn prepare(
+        &mut self,
+        _attempt: &AdmittedAttempt,
+    ) -> Result<(LauncherInvocation, OwnedFd), Injected> {
         if self.fault == BarrierFault::Invocation {
             return Err(Injected);
         }
-        crate::test_fixtures::invocation().map_err(|_| Injected)
-    }
-
-    fn take_unit_end(&mut self) -> Result<OwnedFd, Injected> {
+        let invocation = crate::test_fixtures::invocation().map_err(|_| Injected)?;
         record(&self.log, "take_unit_end");
         if self.fault == BarrierFault::Take {
             return Err(Injected);
         }
         File::open("/dev/null")
-            .map(|file| OwnedFd::from(StdOwnedFd::from(file)))
+            .map(|file| (invocation, OwnedFd::from(StdOwnedFd::from(file))))
             .map_err(|_| Injected)
     }
 
@@ -638,7 +638,6 @@ impl Scenario {
         Ok(ExecuteJob {
             attempt: AdmittedAttempt::for_test(attempt_id, authority(), mode)?
                 .allowing(planned_capabilities(&plan)),
-            launcher_source: LauncherSource::new("/usr/lib/pigloros/release-launcher")?,
             system_call_filter: filter()?,
             service_limits: SystemdServiceLimits::from_effective_limits(&limits(watchdog_ms))?,
             mode: plan,

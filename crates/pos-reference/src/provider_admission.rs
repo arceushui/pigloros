@@ -10,6 +10,7 @@ use std::collections::BTreeSet;
 use std::fs::File;
 use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::fs::FileExt as _;
+use std::os::unix::fs::MetadataExt as _;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::de::{Error as _, IgnoredAny, MapAccess, Visitor};
@@ -22,7 +23,9 @@ use crate::sandbox_provider_protocol::{
 use crate::selector::installation::authority::{
     AdmittedSelectorProvider, AuthenticatedSelectorBootstrap,
 };
-use crate::selector::installation::{InstallationObjectKind, InstalledSelectorState};
+use crate::selector::installation::{
+    InstallationObjectKind, InstalledSelectorState, SANDBOX_ARTIFACT_ROOT,
+};
 use crate::selector::SelectorBoundaryError;
 
 const CONTROL_LIMIT: u64 = 16 * 1024 * 1024;
@@ -57,6 +60,66 @@ pub struct ProviderImageSnapshot {
     image: AdmittedSandboxImage,
     proof: VerifiedSandboxImageProof,
     launch: LaunchPolicy,
+    binary: AdmittedProviderBinary,
+}
+
+/// The selected SIC1 provider executable, also the ADR-069 release launcher.
+///
+/// Only snapshot admission constructs this view. SIC1 has already opened the
+/// root-owned mode-0500 content-addressed file without symlink traversal,
+/// verified its bytes, and bound that digest to SPM1/APT1. The retained
+/// descriptor supplies its device and inode; callers cannot supply these facts.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdmittedProviderBinary {
+    path: String,
+    digest: [u8; 32],
+    length: u64,
+    device: u64,
+    inode: u64,
+}
+
+impl AdmittedProviderBinary {
+    /// The fixed, digest-addressed SIC1 source path.
+    #[must_use]
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// The SPM1/APT1-bound BLAKE3 digest.
+    #[must_use]
+    pub const fn digest(&self) -> [u8; 32] {
+        self.digest
+    }
+
+    /// Exact admitted byte length.
+    #[must_use]
+    pub const fn length(&self) -> u64 {
+        self.length
+    }
+
+    /// Device and inode of the retained installation descriptor.
+    #[must_use]
+    pub const fn identity(&self) -> (u64, u64) {
+        (self.device, self.inode)
+    }
+}
+
+fn provider_binary(
+    admitted: &AdmittedSelectorProvider,
+) -> Result<AdmittedProviderBinary, SelectorBoundaryError> {
+    let digest = admitted.provider().manifest().binary_digest;
+    let artifact = admitted
+        .bootstrap()
+        .installed()
+        .artifact(InstallationObjectKind::PROVIDER_EXECUTABLE, digest)?;
+    let metadata = artifact.file().metadata().map_err(invalid)?;
+    Ok(AdmittedProviderBinary {
+        path: format!("{SANDBOX_ARTIFACT_ROOT}/providers/{}", lower_hex(&digest)),
+        digest,
+        length: artifact.object().byte_length(),
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    })
 }
 
 impl ProviderImageSnapshot {
@@ -89,6 +152,7 @@ impl ProviderImageSnapshot {
             .and_then(AuthenticatedSelectorBootstrap::admit_provider)
             .and_then(|admitted| {
                 check_authority(&admitted, &request)?;
+                let binary = provider_binary(&admitted)?;
                 let CheckedImage { image, proof, .. } = check_image(&admitted, &request, clock)?;
                 let launch_bytes = admitted
                     .bootstrap()
@@ -112,6 +176,7 @@ impl ProviderImageSnapshot {
                             image,
                             proof,
                             launch,
+                            binary,
                         })
                     })
             })
@@ -139,6 +204,12 @@ impl ProviderImageSnapshot {
     #[must_use]
     pub const fn launch_policy(&self) -> &LaunchPolicy {
         &self.launch
+    }
+
+    /// The retained, authenticated provider executable used as the launcher.
+    #[must_use]
+    pub const fn provider_binary(&self) -> &AdmittedProviderBinary {
+        &self.binary
     }
 
     /// Join this snapshot's retained image to the currently installed authority.
@@ -724,6 +795,26 @@ pub mod tests {
         );
         let checked = check_image(&snapshot.admitted, &request, fixture_time)?;
         assert_eq!(snapshot.proof(), &checked.proof);
+        let binary = snapshot.provider_binary();
+        let retained = snapshot
+            .admitted
+            .bootstrap()
+            .installed()
+            .artifact(InstallationObjectKind::PROVIDER_EXECUTABLE, binary.digest())?;
+        let metadata = retained.file().metadata()?;
+        assert_eq!(
+            binary.digest(),
+            snapshot.admitted.provider().manifest().binary_digest
+        );
+        assert_eq!(binary.length(), metadata.len());
+        assert_eq!(binary.identity(), (metadata.dev(), metadata.ino()));
+        assert_eq!(
+            binary.path(),
+            format!(
+                "{SANDBOX_ARTIFACT_ROOT}/providers/{}",
+                lower_hex(&binary.digest())
+            )
+        );
         Ok(())
     }
 

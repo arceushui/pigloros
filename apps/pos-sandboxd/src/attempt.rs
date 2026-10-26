@@ -20,7 +20,7 @@ use crate::{AdmittedEntry, ExecuteError, PreparedAttemptDirectory, TransientServ
 /// The launch-policy view of an admitted attempt: everything a Local grant
 /// must agree with (request, authority block, launch policy digest and the
 /// network capabilities the policy allows).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct LaunchPolicyView {
     request_id: [u8; 16],
     authority: AdmissionAuthority,
@@ -67,7 +67,7 @@ const fn admission_authority(authority: &ExecuteAuthority) -> AdmissionAuthority
 /// Only [`Self::from_entry`] creates one, from an entry whose reservation is
 /// held and a directory prepared for that same attempt, so no caller can
 /// present facts the admission did not produce.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AdmittedAttempt {
     attempt_id: [u8; 16],
     unit_name: TransientServiceUnitName,
@@ -78,6 +78,16 @@ pub struct AdmittedAttempt {
     arguments: Vec<String>,
     executable_digest: [u8; 32],
     launch: LaunchPolicyView,
+    launcher: LauncherFacts,
+}
+
+/// Facts copied only from the authenticated, retained SIC1 provider binary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct LauncherFacts {
+    pub(crate) path: String,
+    pub(crate) digest: [u8; 32],
+    pub(crate) length: u64,
+    pub(crate) identity: (u64, u64),
 }
 
 impl AdmittedAttempt {
@@ -99,6 +109,7 @@ impl AdmittedAttempt {
             return Err(ExecuteError::DirectoryIdentity);
         }
         let manifest = admission.snapshot().image().manifest();
+        let binary = admission.snapshot().provider_binary();
         Ok(Self {
             attempt_id: request.attempt_id,
             unit_name: intent.unit_name().clone(),
@@ -113,6 +124,12 @@ impl AdmittedAttempt {
                 admission.snapshot().launch_policy().policy_digest,
                 &admission.snapshot().launch_policy().network_capabilities,
             ),
+            launcher: LauncherFacts {
+                path: binary.path().to_owned(),
+                digest: binary.digest(),
+                length: binary.length(),
+                identity: binary.identity(),
+            },
         })
     }
 
@@ -164,6 +181,16 @@ impl AdmittedAttempt {
         self.executable_digest
     }
 
+    /// The launcher source derived solely from this admitted SIC1 context.
+    #[must_use]
+    pub fn launcher_source(&self) -> crate::LauncherSource {
+        crate::LauncherSource::admitted(self.launcher.path.clone())
+    }
+
+    pub(crate) const fn launcher(&self) -> &LauncherFacts {
+        &self.launcher
+    }
+
     /// The request the admission was granted for.
     pub(crate) const fn request_id(&self) -> [u8; 16] {
         self.launch.request_id
@@ -190,8 +217,9 @@ impl AdmittedAttempt {
         attempt_id: [u8; 16],
         authority: AdmittedAuthority,
         mode: SandboxExecutionMode,
-    ) -> Result<Self, crate::TransientServiceUnitNameError> {
-        TransientServiceUnitName::from_attempt_id(attempt_id).map(|unit_name| Self {
+    ) -> crate::test_fixtures::TestResult<Self> {
+        let unit_name = TransientServiceUnitName::from_attempt_id(attempt_id)?;
+        Ok(Self {
             attempt_id,
             unit_name,
             sim1_digest: [0x51; 32],
@@ -206,6 +234,7 @@ impl AdmittedAttempt {
                 policy_digest: crate::test_fixtures::grant_authority().lps1_digest,
                 network_capabilities: Vec::new(),
             },
+            launcher: crate::test_fixtures::launcher_facts()?,
         })
     }
 
@@ -220,6 +249,13 @@ impl AdmittedAttempt {
     #[cfg(all(test, unix))]
     pub(crate) fn running(mut self, executable_path: String) -> Self {
         self.executable_path = executable_path;
+        self
+    }
+
+    /// A deliberately inconsistent admitted digest for substitution tests.
+    #[cfg(all(test, unix))]
+    pub(crate) fn with_launcher_digest(mut self, digest: [u8; 32]) -> Self {
+        self.launcher.digest = digest;
         self
     }
 }
@@ -238,6 +274,9 @@ pub struct ActiveAttempt {
 }
 
 impl ActiveAttempt {
+    pub(crate) const fn admitted(&self) -> &AdmittedAttempt {
+        &self.admitted
+    }
     pub(crate) const fn record(admitted: AdmittedAttempt, deadline: Instant) -> Self {
         Self { admitted, deadline }
     }

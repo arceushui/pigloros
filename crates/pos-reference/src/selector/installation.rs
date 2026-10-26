@@ -92,6 +92,8 @@ impl InstallationObjectKind {
     pub(crate) const IMAGE_MANIFEST: Self = Self(9);
     /// Installed root-image role.
     pub(crate) const ROOT_IMAGE: Self = Self(12);
+    /// Installed provider executable, also used as the trusted launcher.
+    pub(crate) const PROVIDER_EXECUTABLE: Self = Self(11);
     /// Installed subject-executable role.
     pub(crate) const SUBJECT_EXECUTABLE: Self = Self(13);
 

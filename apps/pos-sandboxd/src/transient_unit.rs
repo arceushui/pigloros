@@ -170,8 +170,8 @@ impl ActivatedRootDirectory {
 
 /// A bounded provider-owned source path for the admitted launcher bind mount.
 ///
-/// The provider's launcher-admission boundary owns source identity, ownership,
-/// immutability, and digest validation; this type keeps only its normalized path.
+/// Production construction is restricted to the authenticated SIC1 source
+/// captured by `AdmittedAttempt`; no caller-selected path can construct it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LauncherSource(String);
 
@@ -180,13 +180,19 @@ impl LauncherSource {
     ///
     /// # Errors
     /// Rejects non-absolute, non-normalized, embedded-NUL, or oversized paths.
-    pub fn new(path: impl Into<String>) -> Result<Self, TransientUnitRequestError> {
+    #[cfg(test)]
+    pub(crate) fn new(path: impl Into<String>) -> Result<Self, TransientUnitRequestError> {
         let path = path.into();
         if is_normalized_absolute_path(&path) {
             Ok(Self(path))
         } else {
             Err(TransientUnitRequestError::InvalidLauncherSource)
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) const fn admitted(path: String) -> Self {
+        Self(path)
     }
 
     /// Return the exact source for `BindReadOnlyPaths`.

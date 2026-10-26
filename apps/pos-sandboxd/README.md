@@ -31,9 +31,9 @@ result proves requested-state verification only. The separate `stop_job` and
 typed systemd D-Bus. Stop uses `replace` mode so a queued start job cannot
 block cleanup; start retains `fail` mode. A completed stop job or acknowledged
 SIGKILL is not proof that the unit or cgroup is absent. The separate cgroup
-observer can verify process emptiness, but not complete cleanup. Later slices
-own bounded orchestration, launcher readiness/release, and full lifecycle
-cleanup.
+observer can verify process emptiness, but not complete cleanup. The bounded
+`execute` orchestration and launcher readiness/release barrier are implemented
+below; full lifecycle cleanup remains #442.
 
 `SystemdServiceLimits` accepts the complete ordered, already authorized ELM1
 limit set and compiles IDs 0–6 into the seven exact systemd service properties:
@@ -141,13 +141,24 @@ termination, which reads a closed channel as a clean close.
 `ExecStart=` is requested as `a(sasb)`: the bind-mounted launcher at
 `/.pigloros/release-launcher`, `launch-barrier` and one lowercase-hexadecimal
 LPV1 argument, and read back as path, argument vector and ignore-failure flag.
-`ProviderReleaseBarrier` is the production `LaunchBarrier`. Before the start it
+`ProviderReleaseBarrier` is the production `LaunchBarrier`. Its `prepare`
+operation checks the complete admitted attempt before handing over a descriptor,
+and release checks the active attempt against that same record again.
+`AdmittedAttempt` derives the launcher source, byte length, BLAKE3 digest and
+device/inode from the authenticated SIC1 role-11 provider executable. Neither
+the execute job nor barrier evidence can supply a separate path or digest.
+Before the start the barrier
 builds the LPV1 parameters (attempt, a nonce from `fresh_nonce`, SIM1, adapter
 path and arguments, the expected FDL1 digest of the mode) and the
 `SOCK_SEQPACKET` release channel. After the start it reads the unit's current
 `MainPID` and `InvocationID` from the manager, observes `/proc/<MainPID>/exe`
-itself, and bounds the `ReadyV1` receive and the `ReleaseV1` send with socket
-timeouts equal to the time left before the attempt deadline. The blocking
+itself through a held descriptor, checks its device/inode and length against
+admitted evidence, and independently hashes those exact bytes. It bounds the
+`ReadyV1` receive and the `ReleaseV1` send with socket timeouts recomputed from
+the original attempt deadline. The signed absolute deadline is conservatively
+translated by sampling `CLOCK_MONOTONIC` before the remaining `Instant` duration.
+The original deadline is checked after the final identity recheck and after
+sending the release. The blocking
 receive, the recheck and the signed `ReleaseV1` send run under
 `tokio::task::block_in_place`, so the barrier needs a multi-thread Tokio
 runtime; a current-thread runtime or none is refused with

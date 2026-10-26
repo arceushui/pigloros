@@ -21,6 +21,26 @@ use pos_reference::{
 
 use crate::{ActiveAttempt, AdmittedAttempt};
 
+/// One independently measured executable fixture per test process. Reusing
+/// immutable facts avoids hashing the large instrumented test binary per case.
+pub(crate) fn launcher_facts() -> TestResult<crate::attempt::LauncherFacts> {
+    static FACTS: std::sync::OnceLock<crate::attempt::LauncherFacts> = std::sync::OnceLock::new();
+    if let Some(facts) = FACTS.get() {
+        return Ok(facts.clone());
+    }
+    use std::os::unix::fs::MetadataExt;
+    let path = std::env::current_exe()?;
+    let file = File::open(&path)?;
+    let metadata = file.metadata()?;
+    let facts = crate::attempt::LauncherFacts {
+        path: path.to_string_lossy().into_owned(),
+        digest: pos_reference::sandbox_provider_protocol::blake3_digest_of(&file)?,
+        length: metadata.len(),
+        identity: (metadata.dev(), metadata.ino()),
+    };
+    Ok(FACTS.get_or_init(|| facts).clone())
+}
+
 /// The attempt every fixture belongs to.
 pub const ATTEMPT: [u8; 16] = [0x41; 16];
 /// Another attempt, for substitution cases.

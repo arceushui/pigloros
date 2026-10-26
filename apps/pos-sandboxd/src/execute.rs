@@ -43,8 +43,8 @@ use zbus::OwnedFd;
 use crate::{
     ActivatedRootDirectory, ActiveAttempt, AdmittedAttempt, BoundLocalProxy, CheckedLocal,
     CheckedRoot, HostServiceChannel, ImageActivationError, LaunchMode, LauncherInvocation,
-    LauncherSource, LocalNetworkPort, LocalProxyBindError, ServeError, ServedProxy,
-    SystemCallFilter, SystemdServiceLimits, TransientServiceUnitName, TransientUnitLaunchInputs,
+    LocalNetworkPort, LocalProxyBindError, ServeError, ServedProxy, SystemCallFilter,
+    SystemdServiceLimits, TransientServiceUnitName, TransientUnitLaunchInputs,
     TransientUnitRequest,
 };
 
@@ -135,19 +135,15 @@ pub trait LaunchBarrier {
     /// The barrier's failure type.
     type Error: Error + Send + Sync + 'static;
 
-    /// The launcher-mode command for this launch: the exact LPV1 parameters the
-    /// unit's `ExecStart=` passes to the launcher.
+    /// Validate the complete admitted context, then provide its exact LPV1
+    /// invocation and hand over the unit's release descriptor once.
     ///
     /// # Errors
     /// Fails if the parameters cannot be encoded.
-    fn launcher_invocation(&self) -> Result<LauncherInvocation, Self::Error>;
-
-    /// Hand over, once, the unit's end of the release channel, which becomes
-    /// `piglor-release-v1`.
-    ///
-    /// # Errors
-    /// Fails if the channel is unavailable or was already handed over.
-    fn take_unit_end(&mut self) -> Result<OwnedFd, Self::Error>;
+    fn prepare(
+        &mut self,
+        attempt: &AdmittedAttempt,
+    ) -> Result<(LauncherInvocation, OwnedFd), Self::Error>;
 
     /// Await `ReadyV1`, recheck every binding, and send exactly one
     /// `ReleaseV1`, all before the attempt's deadline.
@@ -209,8 +205,6 @@ impl ModePlan {
 pub struct ExecuteJob {
     /// The facts of the reserved, admitted attempt.
     pub attempt: AdmittedAttempt,
-    /// The admitted launcher binary to bind into the root.
-    pub launcher_source: LauncherSource,
     /// The selected, digest-bound syscall filter.
     pub system_call_filter: SystemCallFilter,
     /// The effective ELM1 limits systemd enforces.
@@ -642,7 +636,6 @@ where
 {
     let ExecuteJob {
         attempt,
-        launcher_source,
         system_call_filter,
         service_limits,
         mode,
@@ -674,11 +667,8 @@ where
             Planned::Replay(resolve_replay(&capture_store, &exchanges)?),
         ),
     };
-    let release = barrier
-        .take_unit_end()
-        .map_err(|error| ExecuteError::Barrier(Box::new(error)))?;
-    let invocation = barrier
-        .launcher_invocation()
+    let (invocation, release) = barrier
+        .prepare(&attempt)
         .map_err(|error| ExecuteError::Barrier(Box::new(error)))?;
     // The recheck comes last, so nothing but compilation separates it from
     // the start of the unit.
@@ -688,8 +678,13 @@ where
     {
         return Err(ExecuteError::RootIdentity);
     }
-    let inputs =
-        TransientUnitLaunchInputs::new(checked, launcher_source, launch_mode, release, invocation);
+    let inputs = TransientUnitLaunchInputs::new(
+        checked,
+        attempt.launcher_source(),
+        launch_mode,
+        release,
+        invocation,
+    );
     Ok(Prepared {
         request: TransientUnitRequest::compile(inputs, system_call_filter, &service_limits),
         watchdog: service_limits.watchdog(),
