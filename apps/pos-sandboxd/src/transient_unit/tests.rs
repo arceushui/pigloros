@@ -10,7 +10,10 @@ use crate::{
 };
 use pos_conformance::SandboxSyscallSetV1;
 use pos_reference::sandbox_provider_protocol::{SandboxArchitecture, SandboxLimit};
-use zvariant::{serialized::Context, to_bytes, OwnedFd, Type, LE};
+use zbus::{
+    wire::{serialized::Context, to_bytes, LE},
+    OwnedFd, Type,
+};
 
 const X86_64: &[u8] = include_bytes!(
     "../../../../crates/pos-conformance/vectors/systemd-provider-v260.2/systemd-v260.2-x86_64.scs1.cbor"
@@ -88,7 +91,7 @@ fn local_request_has_the_exact_ordered_dynamic_properties_and_dbus_signatures(
 
     match properties[1].value() {
         SystemdTransientUnitValue::RootDirectory(value) => {
-            let encoded = to_bytes(Context::new_dbus(LE, 0), value)?;
+            let encoded = to_bytes(Context::new(LE, 0), value)?;
             let (decoded, consumed): (String, usize) = encoded.deserialize()?;
             assert_eq!(decoded, *value);
             assert_eq!(consumed, encoded.len());
@@ -98,7 +101,7 @@ fn local_request_has_the_exact_ordered_dynamic_properties_and_dbus_signatures(
     }
     match properties[2].value() {
         SystemdTransientUnitValue::BindReadOnlyPaths(value) => {
-            let encoded = to_bytes(Context::new_dbus(LE, 0), value)?;
+            let encoded = to_bytes(Context::new(LE, 0), value)?;
             let (decoded, consumed): (Vec<(String, String, bool, u64)>, usize) =
                 encoded.deserialize()?;
             assert_eq!(decoded, *value);
@@ -117,7 +120,7 @@ fn local_request_has_the_exact_ordered_dynamic_properties_and_dbus_signatures(
     }
     match properties[29].value() {
         SystemdTransientUnitValue::RestrictAddressFamilies(value) => {
-            let encoded = to_bytes(Context::new_dbus(LE, 0), value)?;
+            let encoded = to_bytes(Context::new(LE, 0), value)?;
             let (decoded, consumed): ((bool, Vec<String>), usize) = encoded.deserialize()?;
             assert_eq!(decoded, *value);
             assert_eq!(consumed, encoded.len());
@@ -127,7 +130,7 @@ fn local_request_has_the_exact_ordered_dynamic_properties_and_dbus_signatures(
     }
     match properties[28].value() {
         SystemdTransientUnitValue::SystemCallFilter(value) => {
-            let encoded = to_bytes(Context::new_dbus(LE, 0), value)?;
+            let encoded = to_bytes(Context::new(LE, 0), value)?;
             let (decoded, consumed): ((bool, Vec<String>), usize) = encoded.deserialize()?;
             assert_eq!(decoded, *value);
             assert_eq!(consumed, encoded.len());
@@ -138,7 +141,7 @@ fn local_request_has_the_exact_ordered_dynamic_properties_and_dbus_signatures(
         SystemdTransientUnitValue::Numeric(
             SystemdTransientUnitNumericValue::FileDescriptorStoreMax(value),
         ) => {
-            let encoded = to_bytes(Context::new_dbus(LE, 0), value)?;
+            let encoded = to_bytes(Context::new(LE, 0), value)?;
             let (decoded, consumed): (u32, usize) = encoded.deserialize()?;
             assert_eq!(decoded, *value);
             assert_eq!(*value, 0);
@@ -155,7 +158,7 @@ fn local_request_has_the_exact_ordered_dynamic_properties_and_dbus_signatures(
             assert_eq!(value.len(), 2);
             assert_eq!(value[0].1, "piglor-host-service-v1");
             assert_eq!(value[1].1, "piglor-release-v1");
-            let encoded = to_bytes(Context::new_dbus(LE, 0), value)?;
+            let encoded = to_bytes(Context::new(LE, 0), value)?;
             let (decoded, consumed): (Vec<(OwnedFd, String)>, usize) = encoded.deserialize()?;
             assert_eq!(decoded.len(), 2);
             assert_eq!(decoded[0].1, "piglor-host-service-v1");
@@ -180,7 +183,7 @@ fn elm1_service_limit_values_have_exact_dbus_encoding() -> Result<(), Box<dyn Er
             SystemdTransientUnitValue::Numeric(
                 SystemdTransientUnitNumericValue::OperatingLimit(value),
             ) => {
-                let encoded = to_bytes(Context::new_dbus(LE, 0), value)?;
+                let encoded = to_bytes(Context::new(LE, 0), value)?;
                 let (decoded, consumed): (u64, usize) = encoded.deserialize()?;
                 assert_eq!(decoded, expected);
                 assert_eq!(decoded, *value);
@@ -201,7 +204,7 @@ fn non_local_modes_have_only_the_release_descriptor_and_no_network_families(
         match properties[29].value() {
             SystemdTransientUnitValue::RestrictAddressFamilies(value) => {
                 assert_eq!(value, &(true, Vec::new()));
-                let encoded = to_bytes(Context::new_dbus(LE, 0), value)?;
+                let encoded = to_bytes(Context::new(LE, 0), value)?;
                 let (decoded, consumed): ((bool, Vec<String>), usize) = encoded.deserialize()?;
                 assert_eq!(decoded, *value);
                 assert_eq!(consumed, encoded.len());
@@ -212,7 +215,7 @@ fn non_local_modes_have_only_the_release_descriptor_and_no_network_families(
             SystemdTransientUnitValue::ExtraFileDescriptors(value) => {
                 assert_eq!(value.len(), 1);
                 assert_eq!(value[0].1, "piglor-release-v1");
-                let encoded = to_bytes(Context::new_dbus(LE, 0), value)?;
+                let encoded = to_bytes(Context::new(LE, 0), value)?;
                 let (decoded, consumed): (Vec<(OwnedFd, String)>, usize) = encoded.deserialize()?;
                 assert_eq!(decoded.len(), 1);
                 assert_eq!(decoded[0].1, "piglor-release-v1");
@@ -236,8 +239,8 @@ fn swapped_descriptor_name_and_fd_shape_is_rejected_before_transport() -> Result
         <Vec<(String, OwnedFd)> as Type>::SIGNATURE,
         <Vec<(OwnedFd, String)> as Type>::SIGNATURE
     );
-    let encoded = to_bytes(Context::new_dbus(LE, 0), &swapped)?;
-    let rejected: zvariant::Result<(Vec<(OwnedFd, String)>, usize)> = encoded.deserialize();
+    let encoded = to_bytes(Context::new(LE, 0), &swapped)?;
+    let rejected: zbus::Result<(Vec<(OwnedFd, String)>, usize)> = encoded.deserialize();
     assert!(rejected.is_err());
     Ok(())
 }
@@ -407,7 +410,7 @@ fn manager_only_root_image_policy_is_not_a_request_property() -> Result<(), Box<
     );
     assert_eq!(readback.value(), "root=verity+signed");
     let root_image_policy = readback.value().to_owned();
-    let encoded = to_bytes(Context::new_dbus(LE, 0), &root_image_policy)?;
+    let encoded = to_bytes(Context::new(LE, 0), &root_image_policy)?;
     let (decoded, consumed): (String, usize) = encoded.deserialize()?;
     assert_eq!(decoded, readback.value());
     assert_eq!(consumed, encoded.len());
@@ -604,7 +607,7 @@ fn property_clone_propagates_value_failure() {
         SystemdTransientUnitPropertyKind::Dynamic(
             SystemdDynamicPropertyKind::FileDescriptorStoreMax,
         ),
-        Err(zvariant::Error::IncorrectType),
+        Err(zbus::Error::IncorrectType),
     );
-    assert!(matches!(result, Err(zvariant::Error::IncorrectType)));
+    assert!(matches!(result, Err(zbus::Error::IncorrectType)));
 }

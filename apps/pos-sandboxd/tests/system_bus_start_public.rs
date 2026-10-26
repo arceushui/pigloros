@@ -26,11 +26,15 @@ async fn system_bus_connection_failure_is_classified() -> Result<(), Box<dyn Err
         let SystemdTransientUnitTransportError::Connect(cause) = error else {
             return Err("connection failure had the wrong error class".into());
         };
-        // Only the transport guard produces this cause: without it zbus would
-        // spawn the unixexec command or dial TCP and fail differently.
+        // zbus 6 rejects the disabled unixexec transport during address parsing;
+        // the local guard rejects supported transports such as TCP. Both must
+        // fail before spawning a process or attempting a connection.
         let guarded = std::env::var_os(CONNECT_FAILURE_GUARDED).is_some();
         assert_eq!(
-            cause.to_string().contains(NOT_A_UNIX_SOCKET),
+            cause.to_string().contains(NOT_A_UNIX_SOCKET)
+                || cause
+                    .to_string()
+                    .contains("unsupported transport 'unixexec'"),
             guarded,
             "{cause}"
         );

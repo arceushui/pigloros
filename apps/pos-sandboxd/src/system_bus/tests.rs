@@ -14,8 +14,7 @@ use zbus::{
     connection::{socket::channel::Channel, Builder},
     fdo,
     object_server::SignalEmitter,
-    zvariant::{OwnedFd, OwnedObjectPath, OwnedValue, Structure},
-    Guid,
+    Guid, OwnedFd, OwnedObjectPath, OwnedVariant, Structure,
 };
 
 use super::*;
@@ -197,8 +196,8 @@ impl RecordingManager {
         &self,
         name: String,
         mode: String,
-        properties: Vec<(String, OwnedValue)>,
-        auxiliary: Vec<(String, Vec<(String, OwnedValue)>)>,
+        properties: Vec<(String, OwnedVariant)>,
+        auxiliary: Vec<(String, Vec<(String, OwnedVariant)>)>,
         #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
     ) -> fdo::Result<OwnedObjectPath> {
         if !self.subscribed.load(Ordering::SeqCst) {
@@ -742,7 +741,7 @@ impl RecordingService {
     }
 }
 
-fn descriptor_names(value: OwnedValue) -> fdo::Result<Vec<String>> {
+fn descriptor_names(value: OwnedVariant) -> fdo::Result<Vec<String>> {
     Vec::<Structure<'static>>::try_from(value)
         .map_err(|error| fdo::Error::Failed(error.to_string()))?
         .into_iter()
@@ -1519,7 +1518,7 @@ async fn transport(
     let guid = Guid::generate();
     let (server_socket, client_socket) = Channel::pair();
     let subscribed = Arc::new(AtomicBool::new(false));
-    let server = Builder::authenticated_socket(server_socket, guid.clone())?
+    let server = Builder::authenticated_socket(server_socket, guid.clone())
         .p2p()
         .serve_at(
             MANAGER_PATH,
@@ -1528,10 +1527,10 @@ async fn transport(
                 subscribed,
                 behavior,
             },
-        )?
-        .serve_at(UNIT_PATH, service)?
+        )
+        .serve_at(UNIT_PATH, service)
         .build();
-    let client = Builder::authenticated_socket(client_socket, guid)?
+    let client = Builder::authenticated_socket(client_socket, guid)
         .p2p()
         .build();
     let (server, client) = tokio::join!(server, client);
@@ -1596,10 +1595,8 @@ fn value() -> SystemdTransientUnitValue {
 }
 
 #[test]
-fn owned_value_failure_is_classified() {
-    let error = encode_property_with("TestProperty", value(), |_| {
-        Err(zvariant::Error::IncorrectType)
-    });
+fn owned_variant_failure_is_classified() {
+    let error = encode_property_with("TestProperty", value(), |_| Err(zbus::Error::IncorrectType));
     assert_eq!(
         error.as_ref().err().map(ToString::to_string),
         Some("failed to serialize the typed transient-unit request".to_owned())
@@ -1607,12 +1604,36 @@ fn owned_value_failure_is_classified() {
 }
 
 #[test]
-fn call_serialization_failure_is_classified() {
-    let error = classify_call_error(zbus::Error::Variant(zvariant::Error::IncorrectType));
-    assert_eq!(
-        error.to_string(),
-        "failed to serialize the typed transient-unit request"
-    );
+fn call_serialization_failures_retain_their_sources() -> Result<(), Box<dyn Error>> {
+    let invalid_utf8 = vec![0xff];
+    let errors = [
+        zbus::Error::IncorrectType,
+        zbus::Error::Utf8(
+            std::str::from_utf8(&invalid_utf8)
+                .err()
+                .ok_or("valid UTF-8")?,
+        ),
+        zbus::Error::PaddingNot0(1),
+        zbus::Error::UnknownFd,
+        zbus::Error::SignatureMismatch(zbus::Signature::U32, "s".to_owned()),
+        zbus::Error::OutOfBounds,
+        zbus::Error::MaxDepthExceeded(zbus::MaxDepthExceeded::Structure),
+        zbus::Error::SignatureParse(zbus::wire::signature::Error::InvalidSignature),
+        zbus::Error::EmptyStructure,
+        zbus::Error::InvalidObjectPath,
+    ];
+    for source in errors {
+        let error = classify_call_error(source.clone());
+        assert_eq!(
+            error.to_string(),
+            "failed to serialize the typed transient-unit request"
+        );
+        assert_eq!(
+            error.source().map(ToString::to_string),
+            Some(source.to_string())
+        );
+    }
+    Ok(())
 }
 
 #[tokio::test]
@@ -1677,7 +1698,7 @@ async fn preparation_and_encoding_failures_are_classified() -> Result<(), Box<dy
         .start_with_prepared(
             TransientServiceUnitName("prepared.service".to_owned()),
             request(LaunchMode::AirGapped)?,
-            Err(zvariant::Error::IncorrectType),
+            Err(zbus::Error::IncorrectType),
         )
         .await;
     assert!(matches!(
@@ -1690,7 +1711,7 @@ async fn preparation_and_encoding_failures_are_classified() -> Result<(), Box<dy
             TransientServiceUnitName("encoded.service".to_owned()),
             request(LaunchMode::AirGapped)?,
             Err(SystemdTransientUnitTransportError::Serialization(
-                zvariant::Error::IncorrectType,
+                zbus::Error::IncorrectType,
             )),
         )
         .await;

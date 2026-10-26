@@ -7,7 +7,7 @@ use std::os::unix::fs::MetadataExt;
 use rustix::fs::{fstatfs, openat2, Mode, OFlags, ResolveFlags, CWD};
 use rustix::io::Errno;
 use rustix::time::{clock_gettime, ClockId};
-use zbus::zvariant::OwnedObjectPath;
+use zbus::OwnedObjectPath;
 
 use crate::{CgroupRoot, TransientServiceUnitName};
 

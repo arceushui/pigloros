@@ -6,11 +6,9 @@ use futures_util::{Stream, StreamExt};
 use zbus::{
     address::{transport::Transport, Address},
     proxy::CacheProperties,
-    zvariant::OwnedObjectPath,
-    Connection,
+    Connection, Fd, OwnedFd, OwnedObjectPath, OwnedVariant, Variant,
 };
 use zbus_systemd::systemd1::{JobRemovedArgs, JobRemovedStream, ManagerProxy, ServiceProxy};
-use zvariant::{Fd, OwnedFd, OwnedValue, Value};
 
 use crate::{
     AttemptCgroupError, BoundAttemptCgroup, CgroupRoot, SystemdHardeningProperty,
@@ -254,7 +252,7 @@ pub enum SystemdTransientUnitTransportError {
     ManagerSubscribe(#[source] zbus::Error),
     /// One closed request value could not be serialized for D-Bus.
     #[error("failed to serialize the typed transient-unit request")]
-    Serialization(#[source] zvariant::Error),
+    Serialization(#[source] zbus::Error),
     /// systemd rejected or failed the typed `StartTransientUnit` call.
     #[error("systemd rejected the transient-unit request")]
     ManagerCall(#[source] zbus::Error),
@@ -457,7 +455,6 @@ impl SystemdTransientUnitTransport {
         }
         let service = ServiceProxy::builder(&self.connection)
             .path(verified.unit_path.clone())
-            .map_err(SystemdTransientUnitTransportError::ServiceProxy)?
             // The second ControlGroup read must reach systemd, not a proxy cache.
             .cache_properties(CacheProperties::No)
             .build()
@@ -508,7 +505,7 @@ impl SystemdTransientUnitTransport {
         &self,
         unit_name: TransientServiceUnitName,
         request: TransientUnitRequest,
-        properties: Result<Vec<SystemdTransientUnitProperty>, zvariant::Error>,
+        properties: Result<Vec<SystemdTransientUnitProperty>, zbus::Error>,
     ) -> Result<SystemdVerifiedStart, SystemdTransientUnitTransportError> {
         let properties = properties
             .map_err(SystemdTransientUnitTransportError::Serialization)?
@@ -523,7 +520,7 @@ impl SystemdTransientUnitTransport {
         &self,
         unit_name: TransientServiceUnitName,
         request: TransientUnitRequest,
-        properties: Result<Vec<(String, OwnedValue)>, SystemdTransientUnitTransportError>,
+        properties: Result<Vec<(String, OwnedVariant)>, SystemdTransientUnitTransportError>,
     ) -> Result<SystemdVerifiedStart, SystemdTransientUnitTransportError> {
         let properties = properties?;
         let proxy = ManagerProxy::new(&self.connection).await;
@@ -584,7 +581,7 @@ async fn force_kill_with_proxy(
 
 async fn submit_and_verify(
     proxy: Result<ManagerProxy<'_>, zbus::Error>,
-    properties: Vec<(String, OwnedValue)>,
+    properties: Vec<(String, OwnedVariant)>,
     unit_name: TransientServiceUnitName,
     request: &TransientUnitRequest,
     connection: &Connection,
@@ -609,7 +606,7 @@ async fn submit_and_verify(
 async fn submit_with_completions(
     proxy: &ManagerProxy<'_>,
     completions: Result<JobRemovedStream, zbus::Error>,
-    properties: Vec<(String, OwnedValue)>,
+    properties: Vec<(String, OwnedVariant)>,
     unit_name: TransientServiceUnitName,
     request: &TransientUnitRequest,
     connection: &Connection,
@@ -638,7 +635,6 @@ async fn submit_with_completions(
         .map_err(SystemdTransientUnitTransportError::UnitLookup)?;
     let service = ServiceProxy::builder(connection)
         .path(unit_path.clone())
-        .map_err(SystemdTransientUnitTransportError::ServiceProxy)?
         .build()
         .await;
     let result = verify_service(service, unit_name, job, unit_path, request).await;
@@ -854,54 +850,65 @@ const fn u32_readback(value: u32) -> SystemdHardeningReadbackValue {
 
 fn encode_property(
     property: SystemdTransientUnitProperty,
-) -> Result<(String, OwnedValue), SystemdTransientUnitTransportError> {
+) -> Result<(String, OwnedVariant), SystemdTransientUnitTransportError> {
     let (name, value) = property.into_parts();
-    encode_property_with(name, value, OwnedValue::try_from)
+    encode_property_with(name, value, OwnedVariant::try_from)
 }
 
 fn encode_property_with<O>(
     name: &'static str,
     value: SystemdTransientUnitValue,
     owned_value: O,
-) -> Result<(String, OwnedValue), SystemdTransientUnitTransportError>
+) -> Result<(String, OwnedVariant), SystemdTransientUnitTransportError>
 where
-    O: FnOnce(Value<'static>) -> Result<OwnedValue, zvariant::Error>,
+    O: FnOnce(Variant<'static>) -> Result<OwnedVariant, zbus::Error>,
 {
     owned_value(value.into_dbus_value())
         .map(|value| (name.to_owned(), value))
         .map_err(SystemdTransientUnitTransportError::Serialization)
 }
 
-fn classify_call_error(error: zbus::Error) -> SystemdTransientUnitTransportError {
+const fn classify_call_error(error: zbus::Error) -> SystemdTransientUnitTransportError {
     match error {
-        zbus::Error::Variant(error) => SystemdTransientUnitTransportError::Serialization(error),
+        zbus::Error::IncorrectType
+        | zbus::Error::Utf8(_)
+        | zbus::Error::PaddingNot0(_)
+        | zbus::Error::UnknownFd
+        | zbus::Error::SignatureMismatch(_, _)
+        | zbus::Error::OutOfBounds
+        | zbus::Error::MaxDepthExceeded(_)
+        | zbus::Error::SignatureParse(_)
+        | zbus::Error::EmptyStructure
+        | zbus::Error::InvalidObjectPath => {
+            SystemdTransientUnitTransportError::Serialization(error)
+        }
         error => SystemdTransientUnitTransportError::ManagerCall(error),
     }
 }
 
 impl SystemdTransientUnitValue {
-    fn into_dbus_value(self) -> Value<'static> {
+    fn into_dbus_value(self) -> Variant<'static> {
         match self {
             Self::Static(value) => match value {
-                SystemdHardeningValue::Bool(value) => Value::from(value),
-                SystemdHardeningValue::String(value) => Value::from(value.to_owned()),
-                SystemdHardeningValue::U64(value) => Value::from(value),
-                SystemdHardeningValue::U32(value) => Value::from(value),
+                SystemdHardeningValue::Bool(value) => Variant::from(value),
+                SystemdHardeningValue::String(value) => Variant::from(value.to_owned()),
+                SystemdHardeningValue::U64(value) => Variant::from(value),
+                SystemdHardeningValue::U32(value) => Variant::from(value),
                 SystemdHardeningValue::StringArray(value) => {
-                    Value::from(value.iter().map(ToString::to_string).collect::<Vec<_>>())
+                    Variant::from(value.iter().map(ToString::to_string).collect::<Vec<_>>())
                 }
             },
-            Self::RootDirectory(value) => Value::from(value),
-            Self::BindReadOnlyPaths(value) => Value::from(value),
+            Self::RootDirectory(value) => Variant::from(value),
+            Self::BindReadOnlyPaths(value) => Variant::from(value),
             Self::SystemCallFilter(value) | Self::RestrictAddressFamilies(value) => {
-                Value::from(value)
+                Variant::from(value)
             }
             Self::Numeric(value) => match value {
                 crate::SystemdTransientUnitNumericValue::OperatingLimit(value) => {
-                    Value::from(value)
+                    Variant::from(value)
                 }
                 crate::SystemdTransientUnitNumericValue::FileDescriptorStoreMax(value) => {
-                    Value::from(value)
+                    Variant::from(value)
                 }
             },
             Self::ExtraFileDescriptors(value) => extra_file_descriptors_value(value),
@@ -909,18 +916,18 @@ impl SystemdTransientUnitValue {
     }
 }
 
-fn extra_file_descriptors_value(descriptors: Vec<(OwnedFd, String)>) -> Value<'static> {
+fn extra_file_descriptors_value(descriptors: Vec<(OwnedFd, String)>) -> Variant<'static> {
     let descriptors = descriptors
         .into_iter()
         .map(|(descriptor, name)| (Fd::from(descriptor), name))
         .collect::<Vec<_>>();
-    Value::from(descriptors)
+    Variant::from(descriptors)
 }
 
 async fn local_system_bus() -> zbus::Result<Connection> {
     match Address::system()
         .and_then(unix_socket)
-        .and_then(zbus::connection::Builder::address)
+        .map(zbus::connection::Builder::address)
     {
         Ok(builder) => builder.build().await,
         Err(error) => Err(error),
