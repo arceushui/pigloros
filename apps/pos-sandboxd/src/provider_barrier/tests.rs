@@ -177,7 +177,6 @@ fn barrier_with(
     let cancelled = Arc::new(AtomicBool::new(matches!(refusal, Refusal::Cancelled)));
     let check = AuthorityCheck::new(
         root_check(refusal, attempt),
-        EXPECTED_READBACK,
         TestObserved(observed),
         cancelled,
     );
@@ -885,6 +884,20 @@ async fn assert_foreign_root_refuses_release(other: &AdmittedAttempt) -> TestRes
     assert!(barrier.sent_release().is_none());
     drop(barrier);
     assert_no_release_received(launcher)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn same_identity_roots_with_crossed_execution_policy_cannot_release() -> TestResult {
+    let same = AdmittedAttempt::for_test(ATTEMPT, authority(), SandboxExecutionMode::AirGapped)?;
+    let mut limits = crate::test_fixtures::execution_limits(5_000);
+    limits[9].value += 1;
+    for other in [
+        same.clone().with_limits(limits),
+        same.with_readback([0x79; 32]),
+    ] {
+        assert_foreign_root_refuses_release(&other).await?;
+    }
+    Ok(())
 }
 
 fn assert_no_release_received(launcher: JoinHandle<Option<ExecutionRelease>>) -> TestResult {

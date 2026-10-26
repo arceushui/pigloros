@@ -3348,3 +3348,53 @@ mod tests {
         Ok(())
     }
 }
+
+/// Build SPX1 only from an independently resolved installed case.
+pub(crate) fn execute_request_for_case(
+    admitted: &crate::selector::installation::authority::AdmittedSelectorProvider,
+    evaluation: &EvaluationRequest,
+    resolved: &crate::selector::installation::ResolvedInstalledCase,
+    input: PayloadDescriptor,
+    ordinal: u16,
+    nonce: [u8; 16],
+) -> Result<SandboxExecuteRequest, crate::selector::SelectorBoundaryError> {
+    use crate::sandbox_provider_protocol::{ExecuteAuthority, RequestAuthority};
+    let invalid = |_| crate::selector::SelectorBoundaryError::ArtifactInvalid;
+    let requirement = evaluation
+        .sandbox_requirement
+        .as_ref()
+        .ok_or(crate::selector::SelectorBoundaryError::ArtifactInvalid)?;
+    let bootstrap = admitted.bootstrap();
+    let provider = admitted.provider();
+    let authority = ExecuteAuthority {
+        evr1_digest: evaluation.request_digest,
+        cpf1_digest: resolved.profile_digest(),
+        cfb1_digest: resolved.bundle_digest(),
+        fixture_contract_digest: resolved.fixture_contract_digest(),
+        fixture_digest: resolved.attempt().fixture_digest,
+        execution_profile_digest: decoded.request.execution_profile_digest,
+        lps1_digest: requirement.lps1_digest,
+        sim1_digest: requirement.sim1_digest,
+        apt1_digest: requirement.apt1_digest,
+        trs1_digest: bootstrap.trust().snapshot_digest(),
+        rvs1_digest: bootstrap.revocation().snapshot_digest(),
+        spm1_digest: provider.manifest().manifest_digest,
+        pcf1_digest: provider.manifest().pcf1_digest,
+        pcr1_digest: provider.conformance_report().report_digest,
+        hcp1_digest: provider.host_profile().profile_digest,
+    };
+    SandboxExecuteRequest::for_selector(
+        RequestAuthority {
+            request_id: derived_id(evaluation.request_id, ordinal),
+            apt1_digest: requirement.apt1_digest,
+            policy_epoch: requirement.policy_epoch,
+            nonce,
+        },
+        derived_id(evaluation.request_id, ordinal ^ 0x8000),
+        authority,
+        resolved.attempt().capability_ids.clone(),
+        input,
+        Vec::new(),
+    )
+    .map_err(invalid)
+}

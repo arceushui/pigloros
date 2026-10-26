@@ -137,7 +137,6 @@ pub enum RecheckRefusal {
 /// authority heads can be bound into the release.
 pub struct AuthorityCheck<R, O> {
     root: R,
-    expected_readback_digest: [u8; 32],
     observed: O,
     cancelled: Arc<AtomicBool>,
 }
@@ -147,20 +146,14 @@ where
     R: Fn() -> Result<CheckedRoot, ImageActivationError>,
     O: ObservedReadback,
 {
-    /// Bind the root recheck, the selector-derived expected readback digest,
+    /// Bind the root recheck to the independently admitted policy,
     /// the observed readback source and the cancellation flag the attempt
     /// lifecycle sets. The authority heads bound into the release are the
     /// admitted attempt's, taken by the barrier.
     #[must_use]
-    pub const fn new(
-        root: R,
-        expected_readback_digest: [u8; 32],
-        observed: O,
-        cancelled: Arc<AtomicBool>,
-    ) -> Self {
+    pub const fn new(root: R, observed: O, cancelled: Arc<AtomicBool>) -> Self {
         Self {
             root,
-            expected_readback_digest,
             observed,
             cancelled,
         }
@@ -190,7 +183,7 @@ where
             trust_epoch: authority.trust_epoch,
             revocation_epoch: authority.revocation_epoch,
             policy_epoch: authority.policy_epoch,
-            expected_readback_digest: self.expected_readback_digest,
+            expected_readback_digest: admitted.expected_readback_digest(),
             observed_readback_digest,
             deadline_monotonic_ns,
         })

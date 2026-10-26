@@ -1052,7 +1052,7 @@ async fn the_admitted_chain_reaches_attachment_only_through_every_gate() -> Test
             "root_attachment::tests::the_admitted_chain_reaches_attachment_only_through_every_gate",
         );
     }
-    let staged = StagedInstallation::stage().map_err(|error| error.to_string())?;
+    let staged = StagedInstallation::stage_execution().map_err(|error| error.to_string())?;
     let snapshot = ProviderImageSnapshot::open(staged.request())?;
     let admission = snapshot.admit_held_image()?;
     fixed_registry()?;
@@ -1107,7 +1107,7 @@ async fn the_admitted_chain_reaches_attachment_only_through_every_gate() -> Test
     // The entry reservation consumes a fresh admission. The public recheck
     // re-reads the real host kernel: the fake descriptor is no attached EROFS
     // mount, so it refuses.
-    check_admitted_recheck(&verified, &kernel, &registry, &snapshot, &prepared)?;
+    check_admitted_recheck(&verified, &kernel, &registry, &snapshot, &staged, &prepared)?;
 
     // The held image changes after admission: re-admission rejects and the
     // attached root is detached again.
@@ -1207,14 +1207,15 @@ fn check_admitted_recheck(
     kernel: &FakeKernel,
     registry: &SystemdAttemptRegistry,
     snapshot: &ProviderImageSnapshot,
+    staged: &StagedInstallation,
     prepared: &PreparedAttemptDirectory,
 ) -> TestResult {
     let ledger = StagingLedger::new(StagingLimits {
-        aggregate_bytes: 0,
-        queued_requests: 0,
-        concurrent_attempts: 1,
+        aggregate_bytes: 512 * 1024 * 1024,
     });
-    let entry = ledger.reserve_entry(snapshot.admit_held_image()?)?;
+    let (_staging, input) = crate::test_fixtures::staged_execution::verified_input(staged, &ledger)
+        .map_err(|error| error.to_string())?;
+    let entry = input.entry();
     assert_eq!(
         verified.recheck(prepared, &entry).err(),
         Some(ImageActivationError::EvidenceMismatch)

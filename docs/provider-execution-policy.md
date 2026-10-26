@@ -1,0 +1,44 @@
+# Provider execution policy admission
+
+The #441 execution composition implements the source exchange proposed in
+[ADR-122 revision 2](https://redmine.piglor.com/projects/pigloros/wiki/ADR-122_Provider_execution_policy_provenance).
+The ADR remains Proposed. This document describes the implementation, not a
+change to its formal decision status or permission to activate a daemon.
+
+The selector sends canonical EVR1 and then SPX1, each with its own four-byte
+big-endian length prefix and 16 MiB payload ceiling. The provider authenticates
+the root peer and its fixed SIC1 installation before reading either record. It
+reconstructs the selected case from retained CFB1/TPS1, rederives both complete
+request IDs, and compares the exact SPX1 before reserving an attempt or issuing
+AGR1. The current authenticated network-plan source is the empty sequence;
+nonempty plans fail admission.
+
+The provider derives all seventeen ELM1 limits and the expected RBS1 commitment
+using the existing commitment algorithm. One opaque prepared context retains
+that policy and the source/input reservations. AGR1 is signed from those facts
+and checked under the installed runtime key. Only after authenticating AGR1
+does the selector send SBC1 input. Complete descriptor, EAI1 case and framing
+verification inside a private staging file produces the admitted entry.
+
+Execution derives systemd limits, `/work` and the watchdog from that entry.
+The release barrier takes its expected RBS1 digest from the same context. A
+different context, including otherwise equal IDs with different policy, cannot
+replace the rechecked root. Observed readback remains the #443 evidence port.
+
+The owner configures only the aggregate staging byte cap. Source buffers and
+payload storage share that accounting. Pending controls use a separate pool
+bounded by the smaller of BHC1 ConcurrentAttempts and 256. One original BHC1
+deadline spans both source frames and reconstruction; input uses the derived
+whole-transfer deadline. Zero is a denial, never an implicit default.
+
+Attempt and queued-input counts preserve the minimum of the candidate's ceiling
+and every live counted reservation's ceiling under one lock. Retained output
+keeps the original attempt counted once. Failed admission releases its partial
+reservations; successful inputs retain their bytes and execution context.
+
+Selector and provider must be upgraded together while admission is closed.
+There is no SPX1-only fallback. The record schemas and digest preimages are
+unchanged, but the live connection sequence is incompatible. #442 must restore
+retained reservations and ceilings before reopening after restart; #443 owns
+durable evidence and observed readback, #444 owns packaged conformance, and #911
+owns actual Local networking. No listener or daemon is activated by this code.

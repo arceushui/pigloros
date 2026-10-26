@@ -6,6 +6,9 @@
 //! currently installed authority and yields the descriptor-bearing admission
 //! for later image activation. Neither value is a mount or launch permit.
 
+#[cfg(target_os = "linux")]
+pub mod execution;
+
 use std::collections::BTreeSet;
 use std::fs::File;
 use std::os::fd::{AsFd, BorrowedFd};
@@ -155,38 +158,43 @@ impl ProviderImageSnapshot {
         installed
             .authenticate_bootstrap()
             .and_then(AuthenticatedSelectorBootstrap::admit_provider)
-            .and_then(|admitted| {
-                check_authority(&admitted, &request)?;
-                provider_binary(&admitted).and_then(|binary| {
-                    let CheckedImage { image, proof, .. } =
-                        check_image(&admitted, &request, clock)?;
-                    let launch_bytes = admitted
-                        .bootstrap()
-                        .installed()
-                        .artifact(
-                            InstallationObjectKind::LAUNCH_POLICY,
-                            request.authority.lps1_digest,
-                        )?
-                        .read_control(CONTROL_LIMIT)?;
-                    admitted
-                        .provider()
-                        .admit_launch_policy(&launch_bytes, &image)
-                        .map_err(invalid)
-                        .and_then(|launch| {
-                            if launch.policy_digest != request.authority.lps1_digest {
-                                return Err(SelectorBoundaryError::ArtifactInvalid);
-                            }
-                            Ok(Self {
-                                admitted,
-                                request,
-                                image,
-                                proof,
-                                launch,
-                                binary,
-                            })
-                        })
+            .and_then(|admitted| Self::from_admitted(admitted, request, clock))
+    }
+
+    fn from_admitted(
+        admitted: AdmittedSelectorProvider,
+        request: SandboxExecuteRequest,
+        clock: fn() -> SystemTime,
+    ) -> Result<Self, SelectorBoundaryError> {
+        check_authority(&admitted, &request)?;
+        provider_binary(&admitted).and_then(|binary| {
+            let CheckedImage { image, proof, .. } = check_image(&admitted, &request, clock)?;
+            let launch_bytes = admitted
+                .bootstrap()
+                .installed()
+                .artifact(
+                    InstallationObjectKind::LAUNCH_POLICY,
+                    request.authority.lps1_digest,
+                )?
+                .read_control(CONTROL_LIMIT)?;
+            admitted
+                .provider()
+                .admit_launch_policy(&launch_bytes, &image)
+                .map_err(invalid)
+                .and_then(|launch| {
+                    if launch.policy_digest != request.authority.lps1_digest {
+                        return Err(SelectorBoundaryError::ArtifactInvalid);
+                    }
+                    Ok(Self {
+                        admitted,
+                        request,
+                        image,
+                        proof,
+                        launch,
+                        binary,
+                    })
                 })
-            })
+        })
     }
 
     /// The canonical request whose immutable authority was checked.
@@ -280,7 +288,7 @@ impl ProviderImageSnapshot {
                     HeldImageAdmission {
                         snapshot: self,
                         root_image: checked.root_image,
-                        proof: checked.proof,
+                        proof: std::sync::Arc::new(checked.proof),
                         authority,
                     }
                 })
@@ -290,7 +298,7 @@ impl ProviderImageSnapshot {
 
 /// One snapshot's retained image, admitted against current installed authority.
 ///
-/// Only [`ProviderImageSnapshot::admit_held_image`] constructs this value. It
+/// Constructed from a snapshot admission or its retained execution context. It
 /// borrows the snapshot, and [`AsFd`] yields exactly the retained root-image
 /// descriptor that every image, GPT, EROFS, verity superblock,
 /// root-verity-sig and CMS check read; no caller can supply or substitute a
@@ -299,7 +307,7 @@ impl ProviderImageSnapshot {
 pub struct HeldImageAdmission<'snapshot> {
     snapshot: &'snapshot ProviderImageSnapshot,
     root_image: &'snapshot File,
-    proof: VerifiedSandboxImageProof,
+    proof: std::sync::Arc<VerifiedSandboxImageProof>,
     authority: AdmittedAuthority,
 }
 
@@ -333,7 +341,7 @@ impl<'snapshot> HeldImageAdmission<'snapshot> {
 
     /// Independent CMS evidence at this admission's host time.
     #[must_use]
-    pub const fn proof(&self) -> &VerifiedSandboxImageProof {
+    pub fn proof(&self) -> &VerifiedSandboxImageProof {
         &self.proof
     }
 

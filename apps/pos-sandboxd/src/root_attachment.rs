@@ -131,7 +131,7 @@ impl VerifiedRootMount {
         entry: &AdmittedEntry<'_>,
     ) -> Result<CheckedRoot, ImageActivationError> {
         let activated =
-            Expected::for_admission(entry.admission(), self.expected.root_directory.clone());
+            Expected::for_admission(&entry.admission(), self.expected.root_directory.clone());
         AdmittedAttempt::from_entry(entry, directory)
             .map_err(|_| ImageActivationError::EvidenceMismatch)
             .and_then(|admitted| {

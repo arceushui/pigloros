@@ -239,3 +239,33 @@ pub fn invocation() -> TestResult<crate::LauncherInvocation> {
     )?;
     Ok(crate::LauncherInvocation::from_parameters(&parameters)?)
 }
+
+pub(crate) fn execution_limits(
+    watchdog_ms: u64,
+) -> Vec<pos_reference::sandbox_provider_protocol::SandboxLimit> {
+    (0..=16)
+        .map(
+            |limit_id| pos_reference::sandbox_provider_protocol::SandboxLimit {
+                limit_id,
+                value: match limit_id {
+                    0 => 134_217_728,
+                    1 => 0,
+                    2 => 16,
+                    3 => 500_000,
+                    4 => watchdog_ms,
+                    5 => 64,
+                    6 | 9 => 4_096,
+                    _ => 1_000,
+                },
+            },
+        )
+        .collect()
+}
+
+pub(crate) mod staged_execution {
+    use crate as pos_sandboxd;
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/support/staged_execution.rs"
+    ));
+}

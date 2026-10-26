@@ -1231,6 +1231,11 @@ impl AdmittedSandboxProvider {
         &self.syscall_set
     }
 
+    #[cfg(target_os = "linux")]
+    pub(crate) fn broker_hard_caps(&self) -> &[SandboxLimit] {
+        &self.broker_hard_caps
+    }
+
     /// Current runtime-signed HCP1 used by admission.
     #[must_use]
     pub const fn host_profile(&self) -> &HostCapabilityProfile {

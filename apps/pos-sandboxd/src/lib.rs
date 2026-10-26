@@ -96,8 +96,8 @@ pub use release_barrier::{
 pub use release_signer::{issue_release, KeyFileReleaseSigner, ReleaseSigner, ReleaseSignerError};
 #[cfg(target_os = "linux")]
 pub use staging::{
-    AdmittedEntry, ControlFloor, StagedInput, StagingDirectory, StagingError, StagingLedger,
-    StagingLimits, StagingReservation, StagingUsage, VerifiedStagedInput,
+    AdmittedEntry, ControlFloor, StagedInput, StagingCharge, StagingDirectory, StagingError,
+    StagingLedger, StagingLimits, StagingUsage, VerifiedStagedInput,
 };
 
 pub use hardening::{

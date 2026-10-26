@@ -43,8 +43,8 @@ use zbus::OwnedFd;
 use crate::{
     ActiveAttempt, AdmittedAttempt, BoundLocalProxy, CheckedLocal, CheckedRoot, HostServiceChannel,
     ImageActivationError, LaunchMode, LauncherInvocation, LocalNetworkPort, LocalProxyBindError,
-    ServeError, ServedProxy, SystemdServiceLimits, TransientServiceUnitName,
-    TransientUnitLaunchInputs, TransientUnitRequest,
+    ServeError, ServedProxy, TransientServiceUnitName, TransientUnitLaunchInputs,
+    TransientUnitRequest,
 };
 
 /// The least time a terminating host call is given, however short the
@@ -204,8 +204,6 @@ impl ModePlan {
 pub struct ExecuteJob {
     /// The facts of the reserved, admitted attempt.
     pub attempt: AdmittedAttempt,
-    /// The effective ELM1 limits systemd enforces.
-    pub service_limits: SystemdServiceLimits,
     /// The planned network behaviour; it must match the admitted mode.
     pub mode: ModePlan,
     /// The durable capture store, opened over a root-owned directory.
@@ -215,6 +213,9 @@ pub struct ExecuteJob {
 /// Why an execution could not start or continue.
 #[derive(Debug, thiserror::Error)]
 pub enum ExecuteError {
+    /// The authenticated limits cannot be enforced exactly on systemd.
+    #[error(transparent)]
+    Limits(#[from] crate::SystemdServiceLimitsError),
     /// The directory was prepared for another attempt or SIM1.
     #[error("the attempt directory belongs to another attempt")]
     DirectoryIdentity,
@@ -633,10 +634,10 @@ where
 {
     let ExecuteJob {
         attempt,
-        service_limits,
         mode,
         capture_store,
     } = job;
+    let service_limits = attempt.service_limits().map_err(ExecuteError::Limits)?;
     if mode.execution_mode() != attempt.mode() {
         return Err(ExecuteError::ModeMismatch);
     }

@@ -8,10 +8,10 @@
 use std::{sync::Arc, time::Instant};
 
 use pos_reference::{
-    provider_admission::AdmittedAuthority,
+    provider_admission::{execution::AdmittedProviderExecution, AdmittedAuthority},
     sandbox_provider_protocol::{
-        AdmissionAuthority, ExecuteAuthority, NetworkCapability, SandboxExecuteRequest,
-        SandboxExecutionMode, SandboxSyscallSet,
+        AdmissionAuthority, ExecuteAuthority, NetworkCapability, PayloadDescriptor,
+        SandboxExecuteRequest, SandboxExecutionMode, SandboxLimit, SandboxSyscallSet,
     },
 };
 
@@ -64,6 +64,26 @@ const fn admission_authority(authority: &ExecuteAuthority) -> AdmissionAuthority
     }
 }
 
+// A clone retains the exact live admission; a separately admitted exchange is
+// never interchangeable merely because its public IDs happen to match.
+#[derive(Clone, Debug)]
+struct ExecutionLease(Arc<AdmittedProviderExecution>);
+impl PartialEq for ExecutionLease {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+impl Eq for ExecutionLease {}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ExecutionPolicyFacts {
+    limits: Vec<SandboxLimit>,
+    elm_digest: [u8; 32],
+    readback_digest: [u8; 32],
+    request_digest: [u8; 32],
+    input: PayloadDescriptor,
+}
+
 /// The facts of one reserved, admitted attempt that the execute path binds.
 ///
 /// Only [`Self::from_entry`] creates one, from an entry whose reservation is
@@ -84,6 +104,8 @@ pub struct AdmittedAttempt {
     runtime_key_id: String,
     runtime_key: ed25519_dalek::VerifyingKey,
     syscall_set: Arc<SandboxSyscallSet>,
+    policy: ExecutionPolicyFacts,
+    lease: Option<ExecutionLease>,
 }
 
 impl AdmittedAttempt {
@@ -129,7 +151,29 @@ impl AdmittedAttempt {
             runtime_key_id: admission.snapshot().runtime_attestation_key_id().to_owned(),
             runtime_key: *admission.snapshot().runtime_attestation_key(),
             syscall_set: Arc::new(admission.snapshot().syscall_set().clone()),
+            policy: ExecutionPolicyFacts {
+                limits: entry.policy().effective_limits().to_vec(),
+                elm_digest: entry.policy().effective_limits_digest(),
+                readback_digest: entry.policy().expected_readback_digest(),
+                request_digest: entry.policy().request_digest(),
+                input: entry.policy().input_descriptor().clone(),
+            },
+            lease: Some(ExecutionLease(entry.retain())),
         })
+    }
+
+    /// Exact ELM1 projection from this attempt's independently derived policy.
+    ///
+    /// # Errors
+    /// Refuses values that systemd cannot enforce exactly.
+    pub fn service_limits(
+        &self,
+    ) -> Result<crate::SystemdServiceLimits, crate::SystemdServiceLimitsError> {
+        crate::SystemdServiceLimits::from_effective_limits(&self.policy.limits)
+    }
+
+    pub(crate) const fn expected_readback_digest(&self) -> [u8; 32] {
+        self.policy.readback_digest
     }
 
     /// The attempt identity.
@@ -259,9 +303,32 @@ impl AdmittedAttempt {
                         )
                         .verifying_key(),
                         syscall_set: Arc::new(syscall_set),
+                        policy: ExecutionPolicyFacts {
+                            limits: crate::test_fixtures::execution_limits(5_000),
+                            elm_digest: [6; 32],
+                            readback_digest: [5; 32],
+                            request_digest: [7; 32],
+                            input: PayloadDescriptor {
+                                byte_length: 1,
+                                digest: [8; 32],
+                            },
+                        },
+                        lease: None,
                     })
                 })
             })
+    }
+
+    #[cfg(all(test, unix))]
+    pub(crate) fn with_limits(mut self, limits: Vec<SandboxLimit>) -> Self {
+        self.policy.limits = limits;
+        self
+    }
+
+    #[cfg(all(test, unix))]
+    pub(crate) const fn with_readback(mut self, digest: [u8; 32]) -> Self {
+        self.policy.readback_digest = digest;
+        self
     }
 
     /// The same attempt, with a launch policy that allows `capabilities`.

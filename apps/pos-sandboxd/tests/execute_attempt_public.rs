@@ -9,6 +9,9 @@
 //! (ADR-087 section 5, #444).
 #![cfg(target_os = "linux")]
 
+#[path = "support/staged_execution.rs"]
+mod staged_execution;
+
 use std::{
     error::Error,
     fs,
@@ -22,6 +25,11 @@ use pos_sandboxd::{
     AdmittedAttempt, ExecuteError, PlannedAttemptIntent, StagingLedger, StagingLimits,
     SystemdAttemptRegistry,
 };
+
+use pos_reference::provider_admission::execution::{
+    PreparedProviderExecution, StagingError, StagingUsage,
+};
+use std::{io::Write as _, os::unix::net::UnixStream};
 
 type BoxError = Box<dyn Error + Send + Sync>;
 type TestResult = Result<(), BoxError>;
@@ -75,15 +83,14 @@ fn the_entry_facts_need_the_directory_prepared_for_the_same_attempt() -> TestRes
     if !require_isolated_root("the_entry_facts_need_the_directory_prepared_for_the_same_attempt")? {
         return Ok(());
     }
-    let staged = StagedInstallation::stage().map_err(|error| error.to_string())?;
+    let staged = StagedInstallation::stage_execution().map_err(|error| error.to_string())?;
     let snapshot = ProviderImageSnapshot::open(staged.request())?;
     let request = snapshot.request();
     let ledger = StagingLedger::new(StagingLimits {
-        aggregate_bytes: 0,
-        queued_requests: 0,
-        concurrent_attempts: 1,
+        aggregate_bytes: 512 * 1024 * 1024,
     });
-    let entry = ledger.reserve_entry(snapshot.admit_held_image()?)?;
+    let (_staging, verified) = staged_execution::verified_input(&staged, &ledger)?;
+    let entry = verified.entry();
     fixed_registry()?;
     let registry = SystemdAttemptRegistry::open()?;
     let own = registry
@@ -128,15 +135,14 @@ fn a_directory_for_another_image_is_rejected() -> TestResult {
     if !require_isolated_root("a_directory_for_another_image_is_rejected")? {
         return Ok(());
     }
-    let staged = StagedInstallation::stage().map_err(|error| error.to_string())?;
+    let staged = StagedInstallation::stage_execution().map_err(|error| error.to_string())?;
     let snapshot = ProviderImageSnapshot::open(staged.request())?;
     let request = snapshot.request();
     let ledger = StagingLedger::new(StagingLimits {
-        aggregate_bytes: 0,
-        queued_requests: 0,
-        concurrent_attempts: 1,
+        aggregate_bytes: 512 * 1024 * 1024,
     });
-    let entry = ledger.reserve_entry(snapshot.admit_held_image()?)?;
+    let (_staging, verified) = staged_execution::verified_input(&staged, &ledger)?;
+    let entry = verified.entry();
     fixed_registry()?;
     let other_image = SystemdAttemptRegistry::open()?
         .commit_planned(&PlannedAttemptIntent::new(request.attempt_id, [0x78; 32])?)?
@@ -145,5 +151,216 @@ fn a_directory_for_another_image_is_rejected() -> TestResult {
         AdmittedAttempt::from_entry(&entry, &other_image),
         Err(ExecuteError::DirectoryIdentity)
     ));
+    Ok(())
+}
+
+fn source_pair(
+    staged: &StagedInstallation,
+    ledger: &StagingLedger,
+) -> Result<(PreparedProviderExecution, UnixStream, UnixStream), BoxError> {
+    let (mut provider, mut selector) = UnixStream::pair()?;
+    staged.write_source(&mut selector)?;
+    let prepared = PreparedProviderExecution::receive(&mut provider, ledger)?;
+    Ok((prepared, provider, selector))
+}
+
+fn frame(writer: &mut impl std::io::Write, bytes: &[u8]) -> TestResult {
+    writer.write_all(&u32::try_from(bytes.len())?.to_be_bytes())?;
+    writer.write_all(bytes)?;
+    Ok(())
+}
+
+#[test]
+fn altered_source_and_same_fixture_budget_fail_before_grant_or_attempt_reservation() -> TestResult {
+    if !require_isolated_root(
+        "altered_source_and_same_fixture_budget_fail_before_grant_or_attempt_reservation",
+    )? {
+        return Ok(());
+    }
+    let staged = StagedInstallation::stage_execution().map_err(|error| error.to_string())?;
+    let ledger = StagingLedger::new(StagingLimits {
+        aggregate_bytes: 512 * 1024 * 1024,
+    });
+    let changed = [
+        staged.changed_request(|request| request.request.request_id[0] ^= 1),
+        staged.changed_request(|request| request.attempt_id[15] ^= 1),
+        staged.changed_request(|request| request.authority.cpf1_digest[0] ^= 1),
+        staged.changed_request(|request| request.authority.cfb1_digest[0] ^= 1),
+        staged.changed_request(|request| request.authority.fixture_contract_digest[0] ^= 1),
+        staged.changed_request(|request| request.authority.execution_profile_digest[0] ^= 1),
+        staged.changed_request(|request| request.capability_ids.clear()),
+        staged.changed_case_request(|attempt| attempt.watchdog_ms += 1),
+        staged.changed_case_request(|attempt| attempt.budget.memory_bytes += 1),
+    ];
+    for request in changed {
+        let request = request.map_err(|error| error.to_string())?;
+        let (mut provider, mut selector) = UnixStream::pair()?;
+        frame(&mut selector, staged.evaluation())?;
+        frame(&mut selector, &request)?;
+        selector.shutdown(std::net::Shutdown::Write)?;
+        assert!(matches!(
+            PreparedProviderExecution::receive(&mut provider, &ledger),
+            Err(StagingError::InvalidSource)
+        ));
+        assert_eq!(ledger.usage(), StagingUsage::default());
+    }
+    for records in [
+        vec![staged.request()],
+        vec![staged.evaluation(), staged.evaluation()],
+        vec![],
+    ] {
+        let (mut provider, mut selector) = UnixStream::pair()?;
+        for record in records {
+            frame(&mut selector, record)?;
+        }
+        selector.shutdown(std::net::Shutdown::Write)?;
+        assert!(PreparedProviderExecution::receive(&mut provider, &ledger).is_err());
+        assert_eq!(ledger.usage(), StagingUsage::default());
+    }
+    let tiny = StagingLedger::new(StagingLimits { aggregate_bytes: 1 });
+    assert!(source_pair(&staged, &tiny).is_err());
+    assert_eq!(tiny.usage(), StagingUsage::default());
+    Ok(())
+}
+
+#[test]
+fn grant_and_input_are_single_use_and_bound_to_the_original_connection() -> TestResult {
+    if !require_isolated_root(
+        "grant_and_input_are_single_use_and_bound_to_the_original_connection",
+    )? {
+        return Ok(());
+    }
+    let staged = StagedInstallation::stage_execution().map_err(|error| error.to_string())?;
+    let ledger = StagingLedger::new(StagingLimits {
+        aggregate_bytes: 512 * 1024 * 1024,
+    });
+    let (mut prepared, mut provider, _selector) = source_pair(&staged, &ledger)?;
+    let (mut foreign, _peer) = UnixStream::pair()?;
+    assert!(matches!(
+        prepared.send_grant(&mut foreign, |message| Ok(StagedInstallation::sign_grant(
+            message
+        ))),
+        Err(StagingError::ConnectionChanged)
+    ));
+    assert!(matches!(
+        prepared.send_grant(&mut provider, |_| Ok([1; 64])),
+        Err(StagingError::InvalidSignature)
+    ));
+    prepared.send_grant(&mut provider, |message| {
+        Ok(StagedInstallation::sign_grant(message))
+    })?;
+    assert!(matches!(
+        prepared.send_grant(&mut provider, |message| Ok(StagedInstallation::sign_grant(
+            message
+        ))),
+        Err(StagingError::GrantAlreadyIssued)
+    ));
+    let directory = tempfile::tempdir()?;
+    fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))?;
+    let held = fs::File::open(directory.path())?;
+    let staging = pos_sandboxd::StagingDirectory::from_held_directory(
+        held.try_clone()?,
+        held.metadata()?.uid(),
+    )?;
+    assert!(matches!(
+        staging
+            .create_input([1; 16], prepared)?
+            .receive(&mut foreign),
+        Err(StagingError::ConnectionChanged)
+    ));
+    assert_eq!(ledger.usage(), StagingUsage::default());
+    let (prepared, mut provider, _selector) = source_pair(&staged, &ledger)?;
+    assert!(matches!(
+        staging
+            .create_input([2; 16], prepared)?
+            .receive(&mut provider),
+        Err(StagingError::GrantRequired)
+    ));
+    assert_eq!(ledger.usage(), StagingUsage::default());
+    Ok(())
+}
+
+#[test]
+fn incomplete_foreign_corrupt_or_duplicate_input_never_mints_an_entry() -> TestResult {
+    if !require_isolated_root("incomplete_foreign_corrupt_or_duplicate_input_never_mints_an_entry")?
+    {
+        return Ok(());
+    }
+    let staged = StagedInstallation::stage_execution().map_err(|error| error.to_string())?;
+    let ledger = StagingLedger::new(StagingLimits {
+        aggregate_bytes: 512 * 1024 * 1024,
+    });
+    let mut complete = Vec::new();
+    staged
+        .write_input(&mut complete)
+        .map_err(|error| error.to_string())?;
+    let mut corrupt = complete.clone();
+    if let Some(last) = corrupt.last_mut() {
+        *last ^= 1;
+    }
+    let mut duplicate = complete.clone();
+    duplicate.extend_from_slice(&complete);
+    let mut foreign = Vec::new();
+    frame(&mut foreign, staged.request())?;
+    for bytes in [Vec::new(), foreign, corrupt, duplicate] {
+        let (mut prepared, mut provider, mut selector) = source_pair(&staged, &ledger)?;
+        prepared.send_grant(&mut provider, |message| {
+            Ok(StagedInstallation::sign_grant(message))
+        })?;
+        selector.write_all(&bytes)?;
+        selector.shutdown(std::net::Shutdown::Write)?;
+        let directory = tempfile::tempdir()?;
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))?;
+        let held = fs::File::open(directory.path())?;
+        let staging = pos_sandboxd::StagingDirectory::from_held_directory(
+            held.try_clone()?,
+            held.metadata()?.uid(),
+        )?;
+        assert!(staging
+            .create_input([1; 16], prepared)?
+            .receive(&mut provider)
+            .is_err());
+        assert_eq!(ledger.usage(), StagingUsage::default());
+    }
+    Ok(())
+}
+
+#[test]
+fn verified_input_retains_policy_and_one_attempt_until_output_is_dropped() -> TestResult {
+    if !require_isolated_root(
+        "verified_input_retains_policy_and_one_attempt_until_output_is_dropped",
+    )? {
+        return Ok(());
+    }
+    let staged = StagedInstallation::stage_execution().map_err(|error| error.to_string())?;
+    let ledger = StagingLedger::new(StagingLimits {
+        aggregate_bytes: 512 * 1024 * 1024,
+    });
+    let (_directory, input) = staged_execution::verified_input(&staged, &ledger)?;
+    let policy = input.entry().policy().clone();
+    assert_eq!(input.len(), staged.input().len() as u64);
+    assert!(!input.is_empty());
+    let mut readback = vec![0; staged.input().len()];
+    input.read_exact_at(&mut readback, 0)?;
+    assert_eq!(readback, staged.input());
+    assert!(input.read_exact_at(&mut [0], input.len()).is_err());
+    assert_eq!(policy.effective_limits().len(), 17);
+    assert_ne!(policy.effective_limits_digest(), [0; 32]);
+    assert_ne!(policy.expected_readback_digest(), [0; 32]);
+    assert!(matches!(
+        input.reserve_output(u64::MAX),
+        Err(StagingError::OutputTooLarge)
+    ));
+    let output = input.reserve_output(1)?;
+    assert!(matches!(
+        input.reserve_output(0),
+        Err(StagingError::OutputAlreadyReserved)
+    ));
+    assert_eq!(ledger.usage().queued_inputs, 0);
+    assert_eq!(ledger.usage().attempts, 1);
+    drop(input);
+    assert_eq!(ledger.usage().attempts, 1);
+    drop(output);
+    assert_eq!(ledger.usage(), StagingUsage::default());
     Ok(())
 }

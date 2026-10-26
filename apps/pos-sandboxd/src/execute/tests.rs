@@ -17,7 +17,7 @@ use std::{
 
 use pos_reference::sandbox_provider_protocol::{
     LocalNetworkTermination, NetworkCapability, NetworkCaptureStore, NetworkExchangePlan,
-    NetworkExchangeReply, NetworkExchangeRequest, SandboxExecutionMode, SandboxLimit,
+    NetworkExchangeReply, NetworkExchangeRequest, SandboxExecutionMode,
 };
 use zbus::OwnedFd;
 
@@ -525,24 +525,6 @@ impl LocalNetworkPort for TornDownNetwork {
     }
 }
 
-fn limits(watchdog_ms: u64) -> Vec<SandboxLimit> {
-    (0..=16)
-        .map(|limit_id| SandboxLimit {
-            limit_id,
-            value: match limit_id {
-                0 => 134_217_728,
-                1 => 0,
-                2 => 16,
-                3 => 500_000,
-                4 => watchdog_ms,
-                5 => 64,
-                6 | 9 => 4_096,
-                _ => 1_000,
-            },
-        })
-        .collect()
-}
-
 type Outcome = Result<AttemptExecution<String, FakeCgroup>, ExecuteFailure>;
 
 fn root_for(
@@ -620,8 +602,8 @@ impl Scenario {
     ) -> TestResult<ExecuteJob> {
         Ok(ExecuteJob {
             attempt: AdmittedAttempt::for_test(attempt_id, authority(), mode)?
-                .allowing(planned_capabilities(&plan)),
-            service_limits: SystemdServiceLimits::from_effective_limits(&limits(watchdog_ms))?,
+                .allowing(planned_capabilities(&plan))
+                .with_limits(crate::test_fixtures::execution_limits(watchdog_ms)),
             mode: plan,
             capture_store: Arc::clone(&self.store),
         })
@@ -966,6 +948,24 @@ async fn a_recheck_with_the_same_attempt_id_but_different_authority_never_starts
     assert!(matches!(failed.error, ExecuteError::RootIdentity));
     assert_eq!(failed.unit, UnitState::NotStarted);
     assert!(!scenario.entries().iter().any(|entry| entry == "start"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_same_ids_and_authority_cannot_substitute_limits_or_readback_policy() -> TestResult {
+    let same = AdmittedAttempt::for_test(ATTEMPT, authority(), SandboxExecutionMode::AirGapped)?
+        .with_limits(crate::test_fixtures::execution_limits(GENEROUS_WATCHDOG_MS));
+    let mut limits = crate::test_fixtures::execution_limits(GENEROUS_WATCHDOG_MS);
+    limits[9].value += 1;
+    for other in [
+        same.clone().with_limits(limits),
+        same.with_readback([0x79; 32]),
+    ] {
+        let (scenario, failed) = recheck_failure(root_for(&Log::default(), &other)).await?;
+        assert!(matches!(failed.error, ExecuteError::RootIdentity));
+        assert_eq!(failed.unit, UnitState::NotStarted);
+        assert!(!scenario.entries().iter().any(|entry| entry == "start"));
+    }
     Ok(())
 }
 
