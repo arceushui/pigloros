@@ -316,13 +316,8 @@ impl StagingCharge {
 
     pub(super) fn finish_input(&self) {
         let mut state = self.0.shared.state();
-        if let Some(ceiling) = self
-            .0
-            .queued
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take()
-        {
+        let mut queued = self.0.queued.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(ceiling) = queued.take() {
             state.usage.queued_inputs -= 1;
             remove_ceiling(&mut state.queue_ceilings, ceiling);
         }

@@ -197,7 +197,6 @@ fn altered_source_and_same_fixture_budget_fail_before_grant_or_attempt_reservati
         let (mut provider, mut selector) = UnixStream::pair()?;
         frame(&mut selector, staged.evaluation())?;
         frame(&mut selector, &request)?;
-        selector.shutdown(std::net::Shutdown::Write)?;
         assert!(matches!(
             PreparedProviderExecution::receive(&mut provider, &ledger),
             Err(StagingError::InvalidSource)
@@ -207,6 +206,7 @@ fn altered_source_and_same_fixture_budget_fail_before_grant_or_attempt_reservati
     for records in [
         vec![staged.request()],
         vec![staged.evaluation(), staged.evaluation()],
+        vec![staged.evaluation(), staged.request(), staged.request()],
         vec![],
     ] {
         let (mut provider, mut selector) = UnixStream::pair()?;
@@ -362,5 +362,99 @@ fn verified_input_retains_policy_and_one_attempt_until_output_is_dropped() -> Te
     assert_eq!(ledger.usage().attempts, 1);
     drop(output);
     assert_eq!(ledger.usage(), StagingUsage::default());
+    Ok(())
+}
+
+#[test]
+fn a_floor_raised_by_a_slow_signer_is_rechecked_before_any_grant_bytes() -> TestResult {
+    if !require_isolated_root(
+        "a_floor_raised_by_a_slow_signer_is_rechecked_before_any_grant_bytes",
+    )? {
+        return Ok(());
+    }
+    let staged = StagedInstallation::stage_execution().map_err(|error| error.to_string())?;
+    let ledger = StagingLedger::new(StagingLimits {
+        aggregate_bytes: 512 * 1024 * 1024,
+    });
+    let (mut prepared, mut provider, mut selector) = source_pair(&staged, &ledger)?;
+    let error = prepared.send_grant(&mut provider, |message| {
+        ledger.raise_floor(pos_sandboxd::ControlFloor {
+            revocation_epoch: u64::MAX,
+            policy_epoch: u64::MAX,
+        });
+        Ok(StagedInstallation::sign_grant(message))
+    });
+    assert!(matches!(error, Err(StagingError::BelowControlFloor)));
+    drop((prepared, provider));
+    use std::io::Read as _;
+    assert_eq!(selector.read(&mut [0])?, 0);
+    assert_eq!(ledger.usage().attempts, 0);
+    assert_eq!(ledger.usage().reserved_bytes, 0);
+    Ok(())
+}
+
+#[test]
+fn extra_source_after_preparation_is_refused_before_any_grant_bytes() -> TestResult {
+    if !require_isolated_root("extra_source_after_preparation_is_refused_before_any_grant_bytes")? {
+        return Ok(());
+    }
+    let staged = StagedInstallation::stage_execution().map_err(|error| error.to_string())?;
+    let ledger = StagingLedger::new(StagingLimits {
+        aggregate_bytes: 512 * 1024 * 1024,
+    });
+    let (mut prepared, mut provider, mut selector) = source_pair(&staged, &ledger)?;
+    frame(&mut selector, staged.request())?;
+    assert!(matches!(
+        prepared.send_grant(&mut provider, |message| Ok(StagedInstallation::sign_grant(
+            message
+        ))),
+        Err(StagingError::InvalidSource)
+    ));
+    drop((prepared, provider));
+    use std::io::Read as _;
+    assert_eq!(selector.read(&mut [0])?, 0);
+    assert_eq!(ledger.usage(), StagingUsage::default());
+    Ok(())
+}
+
+#[test]
+fn admission_charges_actual_retained_bytes_and_no_hard_cap_maximum() -> TestResult {
+    if !require_isolated_root("admission_charges_actual_retained_bytes_and_no_hard_cap_maximum")? {
+        return Ok(());
+    }
+    use pos_reference::{
+        evaluator_protocol::EvaluationRequest,
+        selector::installation::{InstallationObjectKind, InstalledSelectorState},
+    };
+    let staged = StagedInstallation::stage_execution().map_err(|error| error.to_string())?;
+    let evaluation = EvaluationRequest::from_canonical_cbor(staged.evaluation())?;
+    let installed = InstalledSelectorState::open()?;
+    let mut expected = staged.evaluation().len() as u64
+        + staged.request().len() as u64
+        + 2 * staged.input().len() as u64;
+    for (code, digest) in [
+        (14, evaluation.fixture_bundle_digest),
+        (15, evaluation.trust_policy_snapshot_digest),
+    ] {
+        expected += installed
+            .artifact(InstallationObjectKind::from_code(code)?, digest)?
+            .object()
+            .byte_length();
+    }
+    let ledger = StagingLedger::new(StagingLimits {
+        aggregate_bytes: expected,
+    });
+    let exchange = source_pair(&staged, &ledger)?;
+    assert_eq!(ledger.usage().reserved_bytes, expected);
+    assert_eq!(ledger.usage().attempts, 1);
+    drop(exchange);
+    assert_eq!(ledger.usage(), StagingUsage::default());
+    let short = StagingLedger::new(StagingLimits {
+        aggregate_bytes: expected.checked_sub(1).ok_or("empty fixture")?,
+    });
+    assert!(
+        matches!(source_pair(&staged, &short), Err(error) if error.downcast_ref::<StagingError>().is_some_and(|error| matches!(error, StagingError::AggregateExceeded)))
+    );
+    assert_eq!(short.usage(), StagingUsage::default());
     Ok(())
 }

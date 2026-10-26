@@ -39,10 +39,14 @@ fn invalid_input<T>(_: T) -> StagingError {
 }
 
 fn deadline(milliseconds: u64) -> Result<Instant, StagingError> {
+    deadline_after(Instant::now(), milliseconds)
+}
+
+fn deadline_after(start: Instant, milliseconds: u64) -> Result<Instant, StagingError> {
     if milliseconds == 0 {
         return Err(StagingError::Expired);
     }
-    Instant::now()
+    start
         .checked_add(Duration::from_millis(milliseconds))
         .ok_or(StagingError::Expired)
 }
@@ -54,12 +58,57 @@ fn remaining(until: Instant) -> Result<Duration, StagingError> {
         .ok_or(StagingError::Expired)
 }
 
+struct TransferDeadlines {
+    initial: Instant,
+    transport: Option<Instant>,
+}
+
+impl TransferDeadlines {
+    fn new(stream: &UnixStream, control_milliseconds: u64) -> Result<Self, StagingError> {
+        let initial = deadline(control_milliseconds)?;
+        let timeout = stream
+            .read_timeout()?
+            .into_iter()
+            .chain(stream.write_timeout()?)
+            .min();
+        let transport = timeout
+            .map(|timeout| {
+                Instant::now()
+                    .checked_add(timeout)
+                    .ok_or(StagingError::Expired)
+            })
+            .transpose()?;
+        Ok(Self {
+            initial: transport.map_or(initial, |until| initial.min(until)),
+            transport,
+        })
+    }
+
+    fn input(&self, spx_completed: Instant, milliseconds: u64) -> Result<Instant, StagingError> {
+        let input = deadline_after(spx_completed, milliseconds)?;
+        Ok(self.transport.map_or(input, |until| input.min(until)))
+    }
+}
+
 fn connection(stream: &UnixStream) -> Result<ConnectionIdentity, StagingError> {
     let metadata = rustix::fs::fstat(stream).map_err(io::Error::from)?;
     Ok(ConnectionIdentity {
         device: metadata.st_dev,
         inode: metadata.st_ino,
     })
+}
+
+fn require_grant_turn(stream: &UnixStream) -> Result<(), StagingError> {
+    use rustix::net::{recv, RecvFlags};
+    match recv(
+        stream,
+        &mut [0_u8; 1],
+        RecvFlags::PEEK | RecvFlags::DONTWAIT,
+    ) {
+        Err(rustix::io::Errno::AGAIN) => Ok(()),
+        Ok(_) => Err(StagingError::InvalidSource),
+        Err(error) => Err(StagingError::Io(io::Error::from(error))),
+    }
 }
 
 struct TimedStream<'a> {
@@ -119,7 +168,8 @@ pub(super) fn receive(
         .authenticate_bootstrap()?
         .admit_provider()?;
     let bhc = admitted.provider().broker_hard_caps();
-    let initial_deadline = deadline(bhc[16].value)?;
+    let deadlines = TransferDeadlines::new(stream, bhc[16].value)?;
+    let initial_deadline = deadlines.initial;
     let control = ledger.control(bhc[13].value)?;
     let mut reader = TimedStream {
         stream,
@@ -128,18 +178,16 @@ pub(super) fn receive(
     let (evaluation_bytes, evaluation_charge) = frame(&mut reader, ledger)?;
     let evaluation = EvaluationRequest::from_canonical_cbor(&evaluation_bytes).map_err(invalid)?;
     let (request_bytes, request_charge) = frame(&mut reader, ledger)?;
+    let spx_completed = Instant::now();
     let request = SandboxExecuteRequest::from_canonical_cbor(&request_bytes).map_err(invalid)?;
+    require_grant_turn(reader.stream)?;
     let ordinal = u16::from_be_bytes([
         request.request.request_id[14],
         request.request.request_id[15],
     ]);
     // Reserve retained source closure before reconstruction materializes it.
     let installed = admitted.bootstrap().installed();
-    let mut source_charges = vec![
-        evaluation_charge,
-        request_charge,
-        ledger.reserve_storage(bhc[7].value)?,
-    ];
+    let mut source_charges = vec![evaluation_charge, request_charge];
     for (code, digest) in [
         (14, evaluation.fixture_bundle_digest),
         (15, evaluation.trust_policy_snapshot_digest),
@@ -153,6 +201,7 @@ pub(super) fn receive(
         .bootstrap()
         .resolve_installed_case(&evaluation, ordinal)?;
     let input = input_descriptor(resolved.attempt())?;
+    source_charges.push(ledger.reserve_storage(input.byte_length)?);
     let expected_request = execute_request_for_case(
         &admitted,
         &evaluation,
@@ -184,8 +233,10 @@ pub(super) fn receive(
     };
     let authority = snapshot.admit_held_image()?.authority();
     remaining(initial_deadline)?;
+    let input_deadline = deadlines.input(spx_completed, policy.limit(16))?;
+    remaining(input_deadline)?;
+    require_grant_turn(reader.stream)?;
     let (slot, input) = ledger.prepare(authority, &policy)?;
-    let input_deadline = deadline(policy.limit(16))?;
     drop(control);
     Ok(PreparedProviderExecution {
         source: Arc::new(ExecutionSource {
@@ -330,14 +381,20 @@ impl PreparedProviderExecution {
             )
             .map_err(|_| StagingError::InvalidSignature)?;
         let length = u32::try_from(grant.len()).map_err(invalid)?;
+        // A supplied signer may block while installation or the floor changes.
+        self.slot
+            .recheck(snapshot.admit_held_image()?.authority())?;
+        remaining(self.initial_deadline)?;
+        remaining(self.input_deadline)?;
+        require_grant_turn(stream)?;
         self.grant = GrantState::Writing;
         let mut writer = TimedStream {
             stream,
-            until: self.initial_deadline,
+            until: self.initial_deadline.min(self.input_deadline),
         };
         writer.write_all(&length.to_be_bytes())?;
         writer.write_all(&grant)?;
-        remaining(self.initial_deadline)?;
+        remaining(self.initial_deadline.min(self.input_deadline))?;
         self.grant = GrantState::Granted;
         Ok(())
     }
@@ -537,6 +594,51 @@ mod tests {
         assert!(timed.write(b"e").is_err());
         assert_eq!(connection(&first)?, connection(&first.try_clone()?)?);
         assert_ne!(connection(&first)?, connection(&second)?);
+        Ok(())
+    }
+
+    #[test]
+    fn source_and_input_preserve_stricter_original_transport_bounds() -> TestResult {
+        let (stream, _peer) = UnixStream::pair()?;
+        let unrestricted = TransferDeadlines::new(&stream, 10_000)?;
+        assert!(unrestricted.transport.is_none());
+        assert!(unrestricted.input(Instant::now(), 1_000)? < unrestricted.initial);
+        stream.set_read_timeout(Some(Duration::from_millis(100)))?;
+        stream.set_write_timeout(Some(Duration::from_millis(50)))?;
+        let strict = TransferDeadlines::new(&stream, 10_000)?;
+        let original = strict.transport.ok_or("missing original transport bound")?;
+        assert_eq!(strict.initial, original);
+        assert_eq!(strict.input(Instant::now(), 10_000)?, original);
+        assert!(strict.input(Instant::now(), 1)? < original);
+        assert!(TransferDeadlines::new(&stream, 0).is_err());
+        assert!(strict.input(Instant::now(), 0).is_err());
+        let spx_completed = Instant::now()
+            .checked_sub(Duration::from_secs(5))
+            .ok_or("clock range")?;
+        assert!(matches!(
+            remaining(unrestricted.input(spx_completed, 1_000)?),
+            Err(StagingError::Expired)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn source_turn_rejects_queued_extra_bytes_and_early_eof_without_consuming() -> TestResult {
+        let (mut provider, mut selector) = UnixStream::pair()?;
+        require_grant_turn(&provider)?;
+        selector.write_all(b"x")?;
+        assert!(matches!(
+            require_grant_turn(&provider),
+            Err(StagingError::InvalidSource)
+        ));
+        let mut byte = [0];
+        provider.read_exact(&mut byte)?;
+        assert_eq!(byte, *b"x");
+        selector.shutdown(std::net::Shutdown::Write)?;
+        assert!(matches!(
+            require_grant_turn(&provider),
+            Err(StagingError::InvalidSource)
+        ));
         Ok(())
     }
 

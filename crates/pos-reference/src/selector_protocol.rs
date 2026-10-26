@@ -3372,7 +3372,7 @@ pub(crate) fn execute_request_for_case(
         cfb1_digest: resolved.bundle_digest(),
         fixture_contract_digest: resolved.fixture_contract_digest(),
         fixture_digest: resolved.attempt().fixture_digest,
-        execution_profile_digest: decoded.request.execution_profile_digest,
+        execution_profile_digest: evaluation.execution_profile_digest,
         lps1_digest: requirement.lps1_digest,
         sim1_digest: requirement.sim1_digest,
         apt1_digest: requirement.apt1_digest,

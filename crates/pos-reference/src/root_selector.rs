@@ -29,9 +29,11 @@ use crate::provider_transport::{
     AuthenticatedProviderExecution, AuthenticatedProviderTerminal, PostAdmissionProviderFailure,
     ProviderRequestAdmission, ProviderTransport, ProviderTransportError, ReadSeek,
 };
+#[cfg(test)]
+use crate::sandbox_provider_protocol::SandboxExecuteRequest;
 use crate::sandbox_provider_protocol::{
-    AdmittedSandboxImage, LaunchPolicy, SandboxExecuteRequest, SandboxLocalError,
-    SandboxLocalErrorCode, SandboxLocalErrorPhase, SandboxProviderError, SandboxProviderErrorCode,
+    AdmittedSandboxImage, LaunchPolicy, SandboxLocalError, SandboxLocalErrorCode,
+    SandboxLocalErrorPhase, SandboxProviderError, SandboxProviderErrorCode,
     SandboxProviderOperation, SignedImageManifest, VerifiedSandboxImageProof,
 };
 #[cfg(test)]

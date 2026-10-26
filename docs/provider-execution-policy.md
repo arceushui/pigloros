@@ -28,8 +28,11 @@ replace the rechecked root. Observed readback remains the #443 evidence port.
 The owner configures only the aggregate staging byte cap. Source buffers and
 payload storage share that accounting. Pending controls use a separate pool
 bounded by the smaller of BHC1 ConcurrentAttempts and 256. One original BHC1
-deadline spans both source frames and reconstruction; input uses the derived
-whole-transfer deadline. Zero is a denial, never an implicit default.
+deadline spans both source frames and reconstruction, preserving any stricter
+original transport bound. The derived input deadline starts at completion of
+SPX1 and is never reset after reconstruction or signing. Extra queued source
+bytes are refused before reservation and again before AGR1. Zero is a denial,
+never an implicit default.
 
 Attempt and queued-input counts preserve the minimum of the candidate's ceiling
 and every live counted reservation's ceiling under one lock. Retained output
