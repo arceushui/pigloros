@@ -952,6 +952,27 @@ async fn a_recheck_with_the_same_attempt_id_but_different_authority_never_starts
 }
 
 #[tokio::test]
+async fn unenforceable_admitted_limits_fail_before_any_launch_side_effect() -> TestResult {
+    let mut scenario = Scenario::new()?;
+    let mut job = scenario.job(
+        ATTEMPT,
+        SandboxExecutionMode::AirGapped,
+        ModePlan::AirGapped,
+        GENEROUS_WATCHDOG_MS,
+    )?;
+    let mut limits = crate::test_fixtures::execution_limits(GENEROUS_WATCHDOG_MS);
+    limits[0].value = 0;
+    job.attempt = job.attempt.with_limits(limits);
+    let recheck = root_for(&scenario.log, &job.attempt);
+    let failed = failure(scenario.run_on(&LoopbackNetwork, job, recheck).await)?;
+    assert!(matches!(failed.error, ExecuteError::Limits(_)));
+    assert_eq!(failed.unit, UnitState::NotStarted);
+    assert!(scenario.entries().is_empty());
+    assert_eq!(scenario.cgroup_kills(), 0);
+    Ok(())
+}
+
+#[tokio::test]
 async fn the_same_ids_and_authority_cannot_substitute_limits_or_readback_policy() -> TestResult {
     let same = AdmittedAttempt::for_test(ATTEMPT, authority(), SandboxExecutionMode::AirGapped)?
         .with_limits(crate::test_fixtures::execution_limits(GENEROUS_WATCHDOG_MS));

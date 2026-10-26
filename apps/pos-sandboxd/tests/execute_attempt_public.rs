@@ -208,6 +208,7 @@ fn altered_source_and_same_fixture_budget_fail_before_grant_or_attempt_reservati
     }
     for records in [
         vec![staged.request()],
+        vec![staged.evaluation()],
         vec![staged.evaluation(), staged.evaluation()],
         vec![staged.evaluation(), staged.request(), staged.request()],
         vec![],
@@ -247,6 +248,16 @@ fn grant_and_input_are_single_use_and_bound_to_the_original_connection() -> Test
     ));
     assert!(matches!(
         prepared.send_grant(&mut provider, |_| Ok([1; 64])),
+        Err(StagingError::InvalidSignature)
+    ));
+    assert!(matches!(
+        prepared.send_grant(&mut provider, |_| Err(std::io::Error::other(
+            "signer unavailable"
+        ))),
+        Err(StagingError::InvalidSignature)
+    ));
+    assert!(matches!(
+        prepared.send_grant(&mut provider, |_| Ok([0; 64])),
         Err(StagingError::InvalidSignature)
     ));
     prepared.send_grant(&mut provider, |message| {
@@ -417,6 +428,31 @@ fn extra_source_after_preparation_is_refused_before_any_grant_bytes() -> TestRes
         Ok(length) => length == 0,
         Err(error) => error.kind() == std::io::ErrorKind::ConnectionReset,
     });
+    assert_eq!(ledger.usage(), StagingUsage::default());
+    Ok(())
+}
+
+#[test]
+fn a_pending_installation_update_is_rechecked_after_signing_before_grant_output() -> TestResult {
+    if !require_isolated_root(
+        "a_pending_installation_update_is_rechecked_after_signing_before_grant_output",
+    )? {
+        return Ok(());
+    }
+    let staged = StagedInstallation::stage_execution().map_err(|error| error.to_string())?;
+    let ledger = StagingLedger::new(StagingLimits {
+        aggregate_bytes: 512 * 1024 * 1024,
+    });
+    let (mut prepared, mut provider, mut selector) = source_pair(&staged, &ledger)?;
+    let recovery = Path::new(pos_reference::selector::installation::SANDBOX_ARTIFACT_ROOT)
+        .join("installation-update.cbor");
+    let result = prepared.send_grant(&mut provider, |message| {
+        fs::write(&recovery, b"pending installation transaction")?;
+        Ok(StagedInstallation::sign_grant(message))
+    });
+    assert!(matches!(result, Err(StagingError::Source(_))));
+    drop((prepared, provider));
+    assert_eq!(selector.read(&mut [0])?, 0);
     assert_eq!(ledger.usage(), StagingUsage::default());
     Ok(())
 }

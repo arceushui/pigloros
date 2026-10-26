@@ -1203,6 +1203,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn execute_construction_requires_sandbox_authority_and_a_valid_nonce(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (mut evaluation, admitted, resolved) =
+            crate::selector::installation::tests::root_selector_fixture()?;
+        let input = PayloadDescriptor {
+            byte_length: 1,
+            digest: [1; 32],
+        };
+        assert!(execute_request_for_case(
+            &admitted,
+            &evaluation,
+            &resolved,
+            input.clone(),
+            0,
+            [0; 16]
+        )
+        .is_err());
+        evaluation.sandbox_requirement = None;
+        assert!(
+            execute_request_for_case(&admitted, &evaluation, &resolved, input, 0, [1; 16]).is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
     fn reply_error_closure_preserves_only_pre_admission_failures() {
         assert_eq!(
             close_reply_error(false, AdapterError::ProtocolFailure),

@@ -104,7 +104,7 @@ pub struct AdmittedAttempt {
     runtime_key_id: String,
     runtime_key: ed25519_dalek::VerifyingKey,
     syscall_set: Arc<SandboxSyscallSet>,
-    policy: ExecutionPolicyFacts,
+    policy: Arc<ExecutionPolicyFacts>,
     lease: Option<ExecutionLease>,
 }
 
@@ -151,13 +151,13 @@ impl AdmittedAttempt {
             runtime_key_id: admission.snapshot().runtime_attestation_key_id().to_owned(),
             runtime_key: *admission.snapshot().runtime_attestation_key(),
             syscall_set: Arc::new(admission.snapshot().syscall_set().clone()),
-            policy: ExecutionPolicyFacts {
+            policy: Arc::new(ExecutionPolicyFacts {
                 limits: entry.policy().effective_limits().to_vec(),
                 elm_digest: entry.policy().effective_limits_digest(),
                 readback_digest: entry.policy().expected_readback_digest(),
                 request_digest: entry.policy().request_digest(),
                 input: entry.policy().input_descriptor().clone(),
-            },
+            }),
             lease: Some(ExecutionLease(entry.retain())),
         })
     }
@@ -172,7 +172,7 @@ impl AdmittedAttempt {
         crate::SystemdServiceLimits::from_effective_limits(&self.policy.limits)
     }
 
-    pub(crate) const fn expected_readback_digest(&self) -> [u8; 32] {
+    pub(crate) fn expected_readback_digest(&self) -> [u8; 32] {
         self.policy.readback_digest
     }
 
@@ -303,7 +303,7 @@ impl AdmittedAttempt {
                         )
                         .verifying_key(),
                         syscall_set: Arc::new(syscall_set),
-                        policy: ExecutionPolicyFacts {
+                        policy: Arc::new(ExecutionPolicyFacts {
                             limits: crate::test_fixtures::execution_limits(5_000),
                             elm_digest: [6; 32],
                             readback_digest: [5; 32],
@@ -312,7 +312,7 @@ impl AdmittedAttempt {
                                 byte_length: 1,
                                 digest: [8; 32],
                             },
-                        },
+                        }),
                         lease: None,
                     })
                 })
@@ -321,13 +321,13 @@ impl AdmittedAttempt {
 
     #[cfg(all(test, unix))]
     pub(crate) fn with_limits(mut self, limits: Vec<SandboxLimit>) -> Self {
-        self.policy.limits = limits;
+        Arc::make_mut(&mut self.policy).limits = limits;
         self
     }
 
     #[cfg(all(test, unix))]
-    pub(crate) const fn with_readback(mut self, digest: [u8; 32]) -> Self {
-        self.policy.readback_digest = digest;
+    pub(crate) fn with_readback(mut self, digest: [u8; 32]) -> Self {
+        Arc::make_mut(&mut self.policy).readback_digest = digest;
         self
     }
 

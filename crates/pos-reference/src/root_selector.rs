@@ -4440,6 +4440,89 @@ mod tests {
         Ok(())
     }
 
+    struct RefuseRecovery {
+        begun: usize,
+    }
+
+    impl ProviderRequestAdmission for RefuseRecovery {
+        fn begin(&mut self) -> Result<(), ProviderTransportError> {
+            self.begun += 1;
+            if self.begun == 1 {
+                Ok(())
+            } else {
+                Err(ProviderTransportError::BeforeAdmission)
+            }
+        }
+
+        fn entered(&mut self) {}
+    }
+
+    #[test]
+    fn authenticated_grant_retains_namespace_when_recovery_generation_refuses() -> TestResult {
+        let fixture = crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
+        let directory = tempfile::tempdir()?;
+        let socket = directory.path().join("provider.sock");
+        let listener = UnixListener::bind(&socket)?;
+        fs::set_permissions(&socket, fs::Permissions::from_mode(SOCKET_MODE))?;
+        let transport = ProviderTransport::from_path_for_test(&socket)?;
+        let evaluation_bytes = fixture.evaluation.to_canonical_cbor()?;
+        let request_bytes = fixture.spx1.clone();
+        let grant_bytes = fixture.agr1.clone();
+        let grant = fixture.provider.authenticate_selector_grant(
+            &grant_bytes,
+            &fixture.request,
+            &fixture.commitment,
+        )?;
+        let provider = thread::spawn(move || {
+            (|| -> TestResult {
+                let (mut stream, _) = listener.accept()?;
+                stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+                stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+                assert_eq!(read_frame(&mut stream)?, evaluation_bytes);
+                assert_eq!(read_frame(&mut stream)?, request_bytes);
+                write_frame(&mut stream, &grant_bytes)?;
+                let mut input = Vec::new();
+                stream.read_to_end(&mut input)?;
+                assert!(!input.is_empty());
+                // Lose the terminal only after the client authenticated AGR1.
+                Ok(())
+            })()
+            .map_err(|error| error.to_string())
+        });
+        let bindings = EvaluationNamespaceBindings::default();
+        let mut admission = RefuseRecovery { begun: 0 };
+        let execution = bindings.execute_ordered(&fixture.evaluation, || {
+            transport.execute_staged(
+                &fixture.provider,
+                &fixture.commitment,
+                &fixture.evaluation,
+                &fixture.spx1,
+                &mut std::io::Cursor::new(b"input"),
+                Duration::from_secs(5),
+                &mut admission,
+            )
+        })?;
+        assert!(!execution.conflict);
+        assert!(matches!(
+            &execution.result,
+            Err(ProviderTransportError::AfterAdmission { agr1_digest, failure })
+                if *agr1_digest == grant.grant_digest
+                    && *failure == PostAdmissionProviderFailure::TerminalUnavailable
+        ));
+        assert_eq!(admission.begun, 2);
+        assert!(provider_retains_namespace(&execution.result));
+        let mut foreign = fixture.evaluation.clone();
+        foreign.implementation.organization_id = Some("foreign-owner".to_owned());
+        refresh_request_digest(&mut foreign)?;
+        assert!(
+            bindings
+                .execute_ordered(&foreign, || Err(ProviderTransportError::BeforeAdmission))?
+                .conflict
+        );
+        provider.join().map_err(|_| "provider thread panicked")??;
+        Ok(())
+    }
+
     #[test]
     fn evaluation_namespace_binding_tracks_only_live_or_retained_requests() -> TestResult {
         let (request, _, _) = crate::selector::installation::tests::root_selector_fixture()?;

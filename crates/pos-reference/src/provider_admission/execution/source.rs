@@ -550,6 +550,9 @@ impl AdmittedProviderExecution {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+    use crate::evaluator_protocol::encode;
+    use crate::provider_admission::test_support::StagedInstallation;
+    use ciborium::value::Value;
     use std::io::Cursor;
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -695,6 +698,11 @@ mod tests {
         assert!(bounded.write(b"x").is_err());
         assert!(matches!(invalid(()), StagingError::InvalidSource));
         assert!(matches!(invalid_input(()), StagingError::InvalidInput));
+        changed.watchdog_ms = 0;
+        assert!(matches!(
+            input_descriptor(&changed),
+            Err(StagingError::InvalidSource)
+        ));
         Ok(())
     }
 
@@ -710,6 +718,239 @@ mod tests {
             Err(StagingError::UnauthenticatedPeer)
         ));
         assert_eq!(ledger.usage(), super::super::StagingUsage::default());
+        Ok(())
+    }
+
+    fn isolated(test: &str) -> Result<bool, Box<dyn std::error::Error>> {
+        if std::env::var_os("PIGLOROS_PRIVILEGED_COMPOSITION_TEST").is_some() {
+            assert_eq!(rustix::process::geteuid().as_raw(), 0);
+            return Ok(true);
+        }
+        let runner = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../scripts/run-isolated-test.sh");
+        let output = std::process::Command::new(runner)
+            .arg(std::env::current_exe()?)
+            .arg(format!(
+                "provider_admission::execution::source::tests::{test}"
+            ))
+            .output()?;
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(false)
+    }
+
+    fn prepared_pair(
+        staged: &StagedInstallation,
+        ledger: &StagingLedger,
+    ) -> Result<(PreparedProviderExecution, UnixStream, UnixStream), Box<dyn std::error::Error>>
+    {
+        let (mut provider, mut selector) = UnixStream::pair()?;
+        staged.write_source(&mut selector)?;
+        let prepared = PreparedProviderExecution::receive(&mut provider, ledger)?;
+        Ok((prepared, provider, selector))
+    }
+
+    fn send_grant(prepared: &mut PreparedProviderExecution, stream: &mut UnixStream) -> TestResult {
+        prepared.send_grant(stream, |message| {
+            Ok(StagedInstallation::sign_grant(message))
+        })?;
+        Ok(())
+    }
+
+    // A separate wire oracle deliberately does not call the validator under test.
+    fn write_chunk(
+        staged: &StagedInstallation,
+        selector: &mut UnixStream,
+        payload: &[u8],
+        parent: [u8; 32],
+    ) -> TestResult {
+        let request = SandboxExecuteRequest::from_canonical_cbor(staged.request())?;
+        let unsigned = Value::Array(vec![
+            Value::Text("SBC1".to_owned()),
+            Value::Integer(1.into()),
+            Value::Bytes(parent.to_vec()),
+            Value::Bytes(request.request.request_id.to_vec()),
+            Value::Bytes(request.attempt_id.to_vec()),
+            Value::Integer(0.into()),
+            Value::Integer(0.into()),
+            Value::Integer(0.into()),
+            Value::Bytes(payload.to_vec()),
+        ]);
+        let mut hash = blake3::Hasher::new();
+        hash.update(b"PiglorOS.SBC1.v1\0");
+        hash.update(&encode(&unsigned)?);
+        let bytes = encode(&Value::Array(vec![
+            unsigned,
+            Value::Bytes(hash.finalize().as_bytes().to_vec()),
+        ]))?;
+        selector.write_all(&u32::try_from(bytes.len())?.to_be_bytes())?;
+        selector.write_all(&bytes)?;
+        selector.shutdown(std::net::Shutdown::Write)?;
+        Ok(())
+    }
+
+    #[test]
+    fn peer_reset_is_reported_before_grant_output_and_failed_writes_consume_the_grant() -> TestResult
+    {
+        if !isolated(
+            "peer_reset_is_reported_before_grant_output_and_failed_writes_consume_the_grant",
+        )? {
+            return Ok(());
+        }
+        let staged = StagedInstallation::stage_execution()?;
+        let ledger = StagingLedger::new(super::super::StagingLimits {
+            aggregate_bytes: 512 * 1024 * 1024,
+        });
+        let (mut prepared, mut provider, selector) = prepared_pair(&staged, &ledger)?;
+        let mut outgoing = provider.try_clone()?;
+        let result = prepared.send_grant(&mut provider, |message| {
+            outgoing.write_all(b"unread")?;
+            drop(selector);
+            Ok(StagedInstallation::sign_grant(message))
+        });
+        assert!(
+            matches!(result, Err(StagingError::Io(error)) if error.kind() == io::ErrorKind::ConnectionReset)
+        );
+        drop((prepared, provider, outgoing));
+        assert_eq!(ledger.usage(), super::super::StagingUsage::default());
+
+        let (mut prepared, mut provider, selector) = prepared_pair(&staged, &ledger)?;
+        selector.shutdown(std::net::Shutdown::Read)?;
+        assert!(
+            matches!(send_grant(&mut prepared, &mut provider), Err(error) if error.downcast_ref::<StagingError>().is_some_and(|error| matches!(error, StagingError::Io(_))))
+        );
+        assert!(matches!(
+            prepared.send_grant(&mut provider, |message| Ok(StagedInstallation::sign_grant(
+                message
+            ))),
+            Err(StagingError::GrantAlreadyIssued)
+        ));
+        drop((prepared, provider, selector));
+        assert_eq!(ledger.usage(), super::super::StagingUsage::default());
+        Ok(())
+    }
+
+    #[test]
+    fn verified_chunk_identity_digest_and_private_storage_fail_closed() -> TestResult {
+        if !isolated("verified_chunk_identity_digest_and_private_storage_fail_closed")? {
+            return Ok(());
+        }
+        let staged = StagedInstallation::stage_execution()?;
+        for fault in [
+            "parent",
+            "digest",
+            "read-only",
+            "overlong",
+            "floor",
+            "installation",
+        ] {
+            let ledger = StagingLedger::new(super::super::StagingLimits {
+                aggregate_bytes: 512 * 1024 * 1024,
+            });
+            let (mut prepared, mut provider, mut selector) = prepared_pair(&staged, &ledger)?;
+            send_grant(&mut prepared, &mut provider)?;
+            let temporary = tempfile::NamedTempFile::new()?;
+            let file = if fault == "read-only" {
+                File::open(temporary.path())?
+            } else {
+                temporary.reopen()?
+            };
+            if fault == "overlong" {
+                file.set_len(staged.input().len() as u64 + 1)?;
+            }
+            let mut payload = staged.input().to_vec();
+            if fault == "digest" {
+                payload[0] ^= 1;
+            }
+            let parent = if fault == "parent" {
+                [0x71; 32]
+            } else {
+                prepared.request().request_digest
+            };
+            write_chunk(&staged, &mut selector, &payload, parent)?;
+            if fault == "floor" {
+                ledger.raise_floor(super::super::ControlFloor {
+                    revocation_epoch: u64::MAX,
+                    policy_epoch: u64::MAX,
+                });
+            }
+            let manifest =
+                std::path::Path::new(crate::selector::installation::SANDBOX_ARTIFACT_ROOT)
+                    .join(crate::selector::installation::MANIFEST_NAME);
+            let saved = if fault == "installation" {
+                let bytes = std::fs::read(&manifest)?;
+                std::fs::remove_file(&manifest)?;
+                Some(bytes)
+            } else {
+                None
+            };
+            let result = prepared.receive_input(&mut provider, &file);
+            if let Some(bytes) = saved {
+                use std::os::unix::fs::PermissionsExt as _;
+                std::fs::write(&manifest, bytes)?;
+                std::fs::set_permissions(&manifest, std::fs::Permissions::from_mode(0o400))?;
+            }
+            assert!(
+                match fault {
+                    "read-only" => matches!(result, Err(StagingError::Io(_))),
+                    "floor" => matches!(result, Err(StagingError::BelowControlFloor)),
+                    "installation" => matches!(result, Err(StagingError::Source(_))),
+                    _ => matches!(result, Err(StagingError::InvalidInput)),
+                },
+                "{fault}: {result:?}"
+            );
+            assert_eq!(ledger.usage().attempts, 0);
+            assert_eq!(ledger.usage().reserved_bytes, 0);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn independent_eai_decode_and_case_comparison_survive_crossed_private_facts() -> TestResult {
+        if !isolated("independent_eai_decode_and_case_comparison_survive_crossed_private_facts")? {
+            return Ok(());
+        }
+        let staged = StagedInstallation::stage_execution()?;
+        for fault in ["decode", "case", "decoded-budget"] {
+            let ledger = StagingLedger::new(super::super::StagingLimits {
+                aggregate_bytes: 1024 * 1024,
+            });
+            let (mut prepared, mut provider, mut selector) = prepared_pair(&staged, &ledger)?;
+            send_grant(&mut prepared, &mut provider)?;
+            let parent = prepared.request().request_digest;
+            let mut payload = staged.input().to_vec();
+            // These are impossible-state faults after the real authenticated
+            // factory, scoped to private test access. They prove the final
+            // decoder/comparison/reservation guards independently of the
+            // already verified source descriptor, with no production bypass.
+            let source = Arc::get_mut(&mut prepared.source).ok_or("shared fixture source")?;
+            match fault {
+                "decode" => {
+                    payload.fill(0);
+                    let mut hash = blake3::Hasher::new();
+                    hash.update(b"PiglorOS.SandboxInputBytes.v1\0");
+                    hash.update(&payload);
+                    source.policy.input.digest = *hash.finalize().as_bytes();
+                }
+                "case" => source.expected.attempt.watchdog_ms += 1,
+                _ => source.expected.attempt.schema.bytes.resize(1024 * 1024, 0),
+            }
+            write_chunk(&staged, &mut selector, &payload, parent)?;
+            let file = tempfile::tempfile()?;
+            let result = prepared.receive_input(&mut provider, &file);
+            assert!(
+                match fault {
+                    "decoded-budget" => matches!(result, Err(StagingError::AggregateExceeded)),
+                    _ => matches!(result, Err(StagingError::InvalidInput)),
+                },
+                "{fault}: {result:?}"
+            );
+            assert_eq!(ledger.usage(), super::super::StagingUsage::default());
+        }
         Ok(())
     }
 }

@@ -858,7 +858,20 @@ impl ProviderTransport {
         deadline: &Deadline,
         progress: &mut ProviderRequestProgress<'_>,
     ) -> Result<Result<AuthenticatedProviderTerminal, ReceiveFailure>, ProviderTransportError> {
-        progress.admission.begin()?;
+        progress
+            .admission
+            .begin()
+            .map_err(|refusal| match refusal {
+                ProviderTransportError::BeforeAdmission if progress.retained_grant.is_some() => {
+                    // A closed generation can forbid recovery, but cannot undo
+                    // the AGR1 already authenticated on the original connection.
+                    classify_receive_failure(
+                        progress.retained_grant.as_ref(),
+                        PostAdmissionProviderFailure::TerminalUnavailable,
+                    )
+                }
+                _ => refusal,
+            })?;
         let result = self.execute_once(admitted, source, input, deadline, progress);
         progress.admission.entered();
         Ok(result)
