@@ -262,7 +262,7 @@ pub(crate) fn execution_limits(
         .collect()
 }
 
-pub(crate) mod staged_execution {
+pub mod staged_execution {
     use crate as pos_sandboxd;
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),

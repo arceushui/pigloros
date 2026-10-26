@@ -1,7 +1,7 @@
 # Provider execution policy admission
 
 The #441 execution composition implements the source exchange proposed in
-[ADR-122 revision 2](https://redmine.piglor.com/projects/pigloros/wiki/ADR-122_Provider_execution_policy_provenance).
+[ADR-122 revision 3](https://redmine.piglor.com/projects/pigloros/wiki/ADR-122_Provider_execution_policy_provenance).
 The ADR remains Proposed. This document describes the implementation, not a
 change to its formal decision status or permission to activate a daemon.
 
@@ -25,14 +25,20 @@ The release barrier takes its expected RBS1 digest from the same context. A
 different context, including otherwise equal IDs with different policy, cannot
 replace the rechecked root. Observed readback remains the #443 evidence port.
 
-The owner configures only the aggregate staging byte cap. Source buffers and
-payload storage share that accounting. Pending controls use a separate pool
+The owner configures only the aggregate staging byte cap. Retained canonical
+EVR1/SPX1 buffers, reconstructed case buffers and payload storage share that
+accounting. Installed artifact bytes held only by descriptors are not staging
+copies. Buffer ownership drops each charge after its actual bytes. Pending controls use a separate pool
 bounded by the smaller of BHC1 ConcurrentAttempts and 256. One original BHC1
 deadline spans both source frames and reconstruction, preserving any stricter
 original transport bound. The derived input deadline starts at completion of
-SPX1 and is never reset after reconstruction or signing. Extra queued source
-bytes are refused before reservation and again before AGR1. Zero is a denial,
-never an implicit default.
+SPX1 and is never reset after reconstruction or signing. Checks refuse extra
+bytes already visible before reservation and grant writing. Source decoding
+accepts exactly its two records; the transition to grant writing starts the
+AGR1 output phase. Later peer bytes can only be input, including while AGR1 is
+being written. An injected SPX1 is invalid input and cannot mint an admitted
+entry or start a unit. A queue peek supplies no authority or prediction about
+future peer bytes. Zero is a denial, never an implicit default.
 
 Attempt and queued-input counts preserve the minimum of the candidate's ceiling
 and every live counted reservation's ceiling under one lock. Retained output

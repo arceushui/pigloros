@@ -213,7 +213,7 @@ fn remove_ceiling(ceilings: &mut BTreeMap<u64, u64>, ceiling: u64) {
     ceilings.retain(|_, count| *count != 0);
 }
 
-pub(super) fn check_floor(
+pub(super) const fn check_floor(
     floor: ControlFloor,
     authority: AdmittedAuthority,
 ) -> Result<(), StagingError> {

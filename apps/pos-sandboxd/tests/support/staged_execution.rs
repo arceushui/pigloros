@@ -13,7 +13,7 @@ use std::{
     },
 };
 
-pub fn verified_input(
+pub(crate) fn verified_input(
     staged: &StagedInstallation,
     ledger: &StagingLedger,
 ) -> Result<(tempfile::TempDir, VerifiedStagedInput), Box<dyn std::error::Error + Send + Sync>> {

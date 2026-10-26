@@ -141,10 +141,17 @@ impl ProviderExecutionPolicy {
 #[derive(Debug)]
 struct ExecutionSource {
     snapshot: ProviderImageSnapshot,
-    expected: CaseAttempt,
+    expected: RetainedCase,
     policy: ProviderExecutionPolicy,
-    // Retained decoded source material stays charged until its context dies.
-    _source_charges: Vec<StagingCharge>,
+    // Canonical source bytes remain available for the attempt's evidence closure.
+    _records: [source::RetainedControl; 2],
+}
+
+#[derive(Debug)]
+struct RetainedCase {
+    attempt: CaseAttempt,
+    // Field order keeps the charge until the actual case buffers are dropped.
+    _charge: StagingCharge,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

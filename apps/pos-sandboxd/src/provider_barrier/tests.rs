@@ -787,7 +787,9 @@ async fn a_barrier_rejects_a_different_valid_attempt_before_handoff_or_identity_
         Err(BarrierError::AttemptMismatch)
     ));
     // Rejection consumed neither the release descriptor nor its single use.
-    assert_valid_attempt_still_releases(barrier, attempt).await
+    let result = assert_valid_attempt_still_releases(barrier, attempt).await;
+    drop(other);
+    result
 }
 
 async fn assert_valid_attempt_still_releases(

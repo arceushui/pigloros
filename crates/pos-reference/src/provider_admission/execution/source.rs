@@ -18,14 +18,15 @@ use crate::{
         AdmissionAuthority, AdmissionGrant, PayloadDescriptor, PayloadDirection,
         PayloadStreamValidator, SandboxExecuteRequest, SandboxPayloadChunk,
     },
-    selector::installation::{InstallationObjectKind, InstalledSelectorState, PositionalReader},
+    selector::installation::{InstalledSelectorState, PositionalReader},
     selector_protocol::execute_request_for_case,
 };
 
 use super::super::{HeldImageAdmission, ProviderImageSnapshot};
 use super::{
     AdmittedProviderExecution, ConnectionIdentity, ExecutionSource, GrantState,
-    PreparedProviderExecution, ProviderExecutionPolicy, StagingCharge, StagingError, StagingLedger,
+    PreparedProviderExecution, ProviderExecutionPolicy, RetainedCase, StagingCharge, StagingError,
+    StagingLedger,
 };
 
 const FRAME_LIMIT: usize = 16 * 1024 * 1024;
@@ -135,10 +136,14 @@ impl Write for TimedStream<'_> {
     }
 }
 
-fn frame(
-    reader: &mut impl Read,
-    ledger: &StagingLedger,
-) -> Result<(Vec<u8>, StagingCharge), StagingError> {
+#[derive(Debug)]
+pub(super) struct RetainedControl {
+    bytes: Vec<u8>,
+    // Drop the buffer before releasing its shared byte reservation.
+    _charge: StagingCharge,
+}
+
+fn frame(reader: &mut impl Read, ledger: &StagingLedger) -> Result<RetainedControl, StagingError> {
     let mut prefix = [0; 4];
     reader.read_exact(&mut prefix)?;
     let length = usize::try_from(u32::from_be_bytes(prefix)).map_err(invalid)?;
@@ -148,7 +153,10 @@ fn frame(
     let charge = ledger.reserve_storage(length as u64)?;
     let mut bytes = vec![0; length];
     reader.read_exact(&mut bytes)?;
-    Ok((bytes, charge))
+    Ok(RetainedControl {
+        bytes,
+        _charge: charge,
+    })
 }
 
 pub(super) fn receive(
@@ -175,33 +183,23 @@ pub(super) fn receive(
         stream,
         until: initial_deadline,
     };
-    let (evaluation_bytes, evaluation_charge) = frame(&mut reader, ledger)?;
-    let evaluation = EvaluationRequest::from_canonical_cbor(&evaluation_bytes).map_err(invalid)?;
-    let (request_bytes, request_charge) = frame(&mut reader, ledger)?;
+    let evaluation_record = frame(&mut reader, ledger)?;
+    let evaluation =
+        EvaluationRequest::from_canonical_cbor(&evaluation_record.bytes).map_err(invalid)?;
+    let request_record = frame(&mut reader, ledger)?;
     let spx_completed = Instant::now();
-    let request = SandboxExecuteRequest::from_canonical_cbor(&request_bytes).map_err(invalid)?;
+    let request =
+        SandboxExecuteRequest::from_canonical_cbor(&request_record.bytes).map_err(invalid)?;
     require_grant_turn(reader.stream)?;
     let ordinal = u16::from_be_bytes([
         request.request.request_id[14],
         request.request.request_id[15],
     ]);
-    // Reserve retained source closure before reconstruction materializes it.
-    let installed = admitted.bootstrap().installed();
-    let mut source_charges = vec![evaluation_charge, request_charge];
-    for (code, digest) in [
-        (14, evaluation.fixture_bundle_digest),
-        (15, evaluation.trust_policy_snapshot_digest),
-    ] {
-        let kind = InstallationObjectKind::from_code(code).map_err(invalid)?;
-        source_charges.push(
-            ledger.reserve_storage(installed.artifact(kind, digest)?.object().byte_length())?,
-        );
-    }
     let resolved = admitted
         .bootstrap()
         .resolve_installed_case(&evaluation, ordinal)?;
     let input = input_descriptor(resolved.attempt())?;
-    source_charges.push(ledger.reserve_storage(input.byte_length)?);
+    let case_bytes = case_buffer_bytes(resolved.attempt());
     let expected_request = execute_request_for_case(
         &admitted,
         &evaluation,
@@ -213,7 +211,10 @@ pub(super) fn receive(
     if expected_request != request {
         return Err(StagingError::InvalidSource);
     }
-    let expected = resolved.into_attempt();
+    let expected = RetainedCase {
+        attempt: resolved.into_attempt(),
+        _charge: ledger.reserve_storage(case_bytes)?,
+    };
     let snapshot = ProviderImageSnapshot::from_admitted(admitted, request, SystemTime::now)?;
     let commitment = snapshot
         .admitted
@@ -222,7 +223,7 @@ pub(super) fn receive(
             snapshot.image(),
             snapshot.launch_policy(),
             &evaluation,
-            &expected,
+            &expected.attempt,
             &[],
         )
         .map_err(invalid)?;
@@ -243,7 +244,7 @@ pub(super) fn receive(
             snapshot,
             expected,
             policy,
-            _source_charges: source_charges,
+            _records: [evaluation_record, request_record],
         }),
         slot,
         input,
@@ -258,6 +259,24 @@ pub(super) fn receive(
 struct DigestWriter {
     hasher: blake3::Hasher,
     length: u64,
+}
+
+// Called only after the bounded canonical writer validated the complete case;
+// its buffers are strictly smaller than that at-most-128-MiB representation.
+fn case_buffer_bytes(attempt: &crate::evaluator::CaseAttempt) -> u64 {
+    attempt.case_id.len() as u64
+        + attempt.schema.bytes.len() as u64
+        + attempt.payload.bytes.len() as u64
+        + attempt
+            .auxiliary
+            .iter()
+            .map(|artifact| artifact.bytes.len() as u64)
+            .sum::<u64>()
+        + attempt
+            .capability_ids
+            .iter()
+            .map(|id| id.len() as u64)
+            .sum::<u64>()
 }
 
 impl Write for DigestWriter {
@@ -387,6 +406,8 @@ impl PreparedProviderExecution {
         remaining(self.initial_deadline)?;
         remaining(self.input_deadline)?;
         require_grant_turn(stream)?;
+        // Grant output starts here. Later peer bytes can only be input; they
+        // cannot reopen or replace the independently validated source records.
         self.grant = GrantState::Writing;
         let mut writer = TimedStream {
             stream,
@@ -428,12 +449,13 @@ impl PreparedProviderExecution {
         };
         let mut offset = 0;
         while offset < self.policy().input.byte_length {
-            let (bytes, charge) = frame(&mut reader, &self.ledger)?;
-            let chunk = SandboxPayloadChunk::from_canonical_cbor(&bytes).map_err(invalid_input)?;
+            let record = frame(&mut reader, &self.ledger)?;
+            let chunk =
+                SandboxPayloadChunk::from_canonical_cbor(&record.bytes).map_err(invalid_input)?;
             validator.accept(&chunk).map_err(invalid_input)?;
             file.write_all_at(&chunk.bytes, offset)?;
             offset += chunk.bytes.len() as u64;
-            drop(charge);
+            drop(record);
         }
         validator.finish().map_err(invalid_input)?;
         if reader.read(&mut [0; 1])? != 0 || file.metadata()?.len() != offset {
@@ -441,9 +463,9 @@ impl PreparedProviderExecution {
         }
         let _decoded_input = self
             .ledger
-            .reserve_storage(self.policy().input.byte_length)?;
+            .reserve_storage(case_buffer_bytes(&self.source.expected.attempt))?;
         let actual = read_attempt(PositionalReader::new(file)).map_err(invalid_input)?;
-        if actual != self.source.expected {
+        if actual != self.source.expected.attempt {
             return Err(StagingError::InvalidInput);
         }
         remaining(self.input_deadline)?;
@@ -546,11 +568,11 @@ mod tests {
         ));
         assert!(frame(&mut Cursor::new([0, 0, 0, 3, 1]), &ledger).is_err());
         assert_eq!(ledger.usage().reserved_bytes, 0);
-        let (bytes, charge) = frame(&mut Cursor::new([0, 0, 0, 3, 1, 2, 3]), &ledger)?;
-        assert_eq!(bytes, [1, 2, 3]);
-        assert_eq!(charge.bytes(), 3);
+        let record = frame(&mut Cursor::new([0, 0, 0, 3, 1, 2, 3]), &ledger)?;
+        assert_eq!(record.bytes, [1, 2, 3]);
+        assert_eq!(record._charge.bytes(), 3);
         assert_eq!(ledger.usage().reserved_bytes, 3);
-        drop(charge);
+        drop(record);
         assert_eq!(ledger.usage().reserved_bytes, 0);
         Ok(())
     }
@@ -562,9 +584,9 @@ mod tests {
         });
         let mut bytes = u32::try_from(FRAME_LIMIT)?.to_be_bytes().to_vec();
         bytes.resize(FRAME_LIMIT + 4, 1);
-        let (received, charge) = frame(&mut Cursor::new(bytes), &ledger)?;
-        assert_eq!(received.len(), FRAME_LIMIT);
-        drop(charge);
+        let record = frame(&mut Cursor::new(bytes), &ledger)?;
+        assert_eq!(record.bytes.len(), FRAME_LIMIT);
+        drop(record);
         assert_eq!(ledger.usage().reserved_bytes, 0);
         Ok(())
     }
@@ -656,6 +678,14 @@ mod tests {
         let mut changed = resolved.into_attempt();
         changed.watchdog_ms += 1;
         assert_ne!(descriptor, input_descriptor(&changed)?);
+        let retained = case_buffer_bytes(&changed);
+        let extra = b"aux";
+        changed.auxiliary.push(crate::evaluator::AttemptArtifact {
+            digest: *blake3::hash(extra).as_bytes(),
+            bytes: extra.to_vec(),
+        });
+        assert_eq!(case_buffer_bytes(&changed), retained + 3);
+        assert!(case_buffer_bytes(&changed) < input_descriptor(&changed)?.byte_length);
         let mut bounded = DigestWriter {
             hasher: blake3::Hasher::new(),
             length: INPUT_LIMIT,

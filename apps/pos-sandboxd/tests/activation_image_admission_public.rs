@@ -9,7 +9,7 @@
 #![cfg(target_os = "linux")]
 
 #[path = "support/staged_execution.rs"]
-mod staged_execution;
+pub mod staged_execution;
 
 use std::{
     error::Error,

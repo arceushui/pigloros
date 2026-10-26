@@ -10,7 +10,7 @@
 #![cfg(target_os = "linux")]
 
 #[path = "support/staged_execution.rs"]
-mod staged_execution;
+pub mod staged_execution;
 
 use std::{
     error::Error,
@@ -422,24 +422,19 @@ fn admission_charges_actual_retained_bytes_and_no_hard_cap_maximum() -> TestResu
     if !require_isolated_root("admission_charges_actual_retained_bytes_and_no_hard_cap_maximum")? {
         return Ok(());
     }
-    use pos_reference::{
-        evaluator_protocol::EvaluationRequest,
-        selector::installation::{InstallationObjectKind, InstalledSelectorState},
-    };
     let staged = StagedInstallation::stage_execution().map_err(|error| error.to_string())?;
-    let evaluation = EvaluationRequest::from_canonical_cbor(staged.evaluation())?;
-    let installed = InstalledSelectorState::open()?;
+    let case = pos_reference::adapter_transport::read_attempt(staged.input())?;
     let mut expected = staged.evaluation().len() as u64
         + staged.request().len() as u64
-        + 2 * staged.input().len() as u64;
-    for (code, digest) in [
-        (14, evaluation.fixture_bundle_digest),
-        (15, evaluation.trust_policy_snapshot_digest),
-    ] {
-        expected += installed
-            .artifact(InstallationObjectKind::from_code(code)?, digest)?
-            .object()
-            .byte_length();
+        + staged.input().len() as u64
+        + case.case_id.len() as u64
+        + case.schema.bytes.len() as u64
+        + case.payload.bytes.len() as u64;
+    for artifact in &case.auxiliary {
+        expected += artifact.bytes.len() as u64;
+    }
+    for capability in &case.capability_ids {
+        expected += capability.len() as u64;
     }
     let ledger = StagingLedger::new(StagingLimits {
         aggregate_bytes: expected,

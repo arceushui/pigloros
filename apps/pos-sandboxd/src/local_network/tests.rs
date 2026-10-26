@@ -27,7 +27,8 @@ fn bind(
     channel: [u8; 16],
 ) -> TestResult<Result<(BoundLocalProxy, RefusingConnector), LocalProxyBindError>> {
     let (_adapter, channel) = HostServiceChannel::pair(channel)?;
-    Ok(admitted()?
+    let admitted = admitted()?;
+    Ok(admitted
         .check_local(
             admission(attempt, authority, epochs, Vec::new()),
             FailClosedLocalNetwork.establish(namespace)?,
@@ -89,8 +90,8 @@ fn refusal_with(
     allowed: Vec<NetworkCapability>,
 ) -> TestResult<Option<LocalProxyBindError>> {
     let (_adapter, channel) = HostServiceChannel::pair(ATTEMPT)?;
-    Ok(admitted()?
-        .allowing(allowed)
+    let admitted = admitted()?.allowing(allowed);
+    Ok(admitted
         .check_local(
             admission,
             FailClosedLocalNetwork.establish(ATTEMPT)?,
