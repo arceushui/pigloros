@@ -22,7 +22,10 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { version = "1", default-features = false, features = ["net", "time"] }
-zbus = { version = "=6.0.0", default-features = false, features = ["proxy", "tokio"] }
+zbus = { version = "=6.0.0", default-features = false, features = [
+  "proxy",
+  "tokio",
+] }
 zbus_systemd = { version = "=0.26201.0", default-features = false, features = [
   "systemd1",
   "zbus-async-tokio",
