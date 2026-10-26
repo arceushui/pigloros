@@ -66,37 +66,45 @@ struct TransferDeadlines {
 
 impl TransferDeadlines {
     fn new(stream: &UnixStream, control_milliseconds: u64) -> Result<Self, StagingError> {
-        let initial = deadline(control_milliseconds)?;
-        let timeout = stream
-            .read_timeout()?
-            .into_iter()
-            .chain(stream.write_timeout()?)
-            .min();
-        let transport = timeout
-            .map(|timeout| {
-                Instant::now()
-                    .checked_add(timeout)
-                    .ok_or(StagingError::Expired)
-            })
-            .transpose()?;
-        Ok(Self {
-            initial: transport.map_or(initial, |until| initial.min(until)),
-            transport,
+        deadline(control_milliseconds).and_then(|initial| {
+            stream
+                .read_timeout()
+                .and_then(|read| {
+                    stream
+                        .write_timeout()
+                        .map(|write| read.into_iter().chain(write).min())
+                })
+                .map_err(StagingError::from)
+                .and_then(|timeout| {
+                    timeout
+                        .map(|timeout| {
+                            Instant::now()
+                                .checked_add(timeout)
+                                .ok_or(StagingError::Expired)
+                        })
+                        .transpose()
+                })
+                .map(|transport| Self {
+                    initial: transport.map_or(initial, |until| initial.min(until)),
+                    transport,
+                })
         })
     }
 
     fn input(&self, spx_completed: Instant, milliseconds: u64) -> Result<Instant, StagingError> {
-        let input = deadline_after(spx_completed, milliseconds)?;
-        Ok(self.transport.map_or(input, |until| input.min(until)))
+        deadline_after(spx_completed, milliseconds)
+            .map(|input| self.transport.map_or(input, |until| input.min(until)))
     }
 }
 
 fn connection(stream: &UnixStream) -> Result<ConnectionIdentity, StagingError> {
-    let metadata = rustix::fs::fstat(stream).map_err(io::Error::from)?;
-    Ok(ConnectionIdentity {
-        device: metadata.st_dev,
-        inode: metadata.st_ino,
-    })
+    rustix::fs::fstat(stream)
+        .map_err(io::Error::from)
+        .map_err(StagingError::from)
+        .map(|metadata| ConnectionIdentity {
+            device: metadata.st_dev,
+            inode: metadata.st_ino,
+        })
 }
 
 fn require_grant_turn(stream: &UnixStream) -> Result<(), StagingError> {
@@ -119,17 +127,25 @@ struct TimedStream<'a> {
 
 impl Read for TimedStream<'_> {
     fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
-        let left = remaining(self.until).map_err(io::Error::other)?;
-        self.stream.set_read_timeout(Some(left))?;
-        self.stream.read(bytes)
+        remaining(self.until)
+            .map_err(io::Error::other)
+            .and_then(|left| {
+                self.stream
+                    .set_read_timeout(Some(left))
+                    .and_then(|()| self.stream.read(bytes))
+            })
     }
 }
 
 impl Write for TimedStream<'_> {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        let left = remaining(self.until).map_err(io::Error::other)?;
-        self.stream.set_write_timeout(Some(left))?;
-        self.stream.write(bytes)
+        remaining(self.until)
+            .map_err(io::Error::other)
+            .and_then(|left| {
+                self.stream
+                    .set_write_timeout(Some(left))
+                    .and_then(|()| self.stream.write(bytes))
+            })
     }
     fn flush(&mut self) -> io::Result<()> {
         self.stream.flush()
@@ -145,18 +161,27 @@ pub(super) struct RetainedControl {
 
 fn frame(reader: &mut impl Read, ledger: &StagingLedger) -> Result<RetainedControl, StagingError> {
     let mut prefix = [0; 4];
-    reader.read_exact(&mut prefix)?;
-    let length = usize::try_from(u32::from_be_bytes(prefix)).map_err(invalid)?;
-    if length == 0 || length > FRAME_LIMIT {
-        return Err(StagingError::InvalidSource);
-    }
-    let charge = ledger.reserve_storage(length as u64)?;
-    let mut bytes = vec![0; length];
-    reader.read_exact(&mut bytes)?;
-    Ok(RetainedControl {
-        bytes,
-        _charge: charge,
-    })
+    reader
+        .read_exact(&mut prefix)
+        .map_err(StagingError::from)
+        .and_then(|()| usize::try_from(u32::from_be_bytes(prefix)).map_err(invalid))
+        .and_then(|length| {
+            if length == 0 || length > FRAME_LIMIT {
+                return Err(StagingError::InvalidSource);
+            }
+            ledger
+                .reserve_storage(length as u64)
+                .map(|charge| RetainedControl {
+                    bytes: vec![0; length],
+                    _charge: charge,
+                })
+        })
+        .and_then(|mut record| {
+            reader
+                .read_exact(&mut record.bytes)
+                .map_err(StagingError::from)
+                .map(|()| record)
+        })
 }
 
 pub(super) fn receive(
@@ -303,11 +328,12 @@ fn input_descriptor(
         length: 0,
     };
     writer.hasher.update(b"PiglorOS.SandboxInputBytes.v1\0");
-    write_attempt(&mut writer, expected).map_err(invalid)?;
-    Ok(PayloadDescriptor {
-        byte_length: writer.length,
-        digest: *writer.hasher.finalize().as_bytes(),
-    })
+    write_attempt(&mut writer, expected)
+        .map_err(invalid)
+        .map(|()| PayloadDescriptor {
+            byte_length: writer.length,
+            digest: *writer.hasher.finalize().as_bytes(),
+        })
 }
 
 impl PreparedProviderExecution {
@@ -330,10 +356,13 @@ impl PreparedProviderExecution {
     }
 
     fn check_connection(&self, stream: &UnixStream) -> Result<(), StagingError> {
-        if connection(stream)? != self.connection {
-            return Err(StagingError::ConnectionChanged);
-        }
-        Ok(())
+        connection(stream).and_then(|identity| {
+            if identity != self.connection {
+                Err(StagingError::ConnectionChanged)
+            } else {
+                Ok(())
+            }
+        })
     }
 
     /// Sign and send AGR1 solely from this policy on its original connection.
@@ -401,23 +430,28 @@ impl PreparedProviderExecution {
             .map_err(|_| StagingError::InvalidSignature)?;
         let length = u32::try_from(grant.len()).map_err(invalid)?;
         // A supplied signer may block while installation or the floor changes.
-        self.slot
-            .recheck(snapshot.admit_held_image()?.authority())?;
-        remaining(self.initial_deadline)?;
-        remaining(self.input_deadline)?;
-        require_grant_turn(stream)?;
-        // Grant output starts here. Later peer bytes can only be input; they
-        // cannot reopen or replace the independently validated source records.
-        self.grant = GrantState::Writing;
-        let mut writer = TimedStream {
-            stream,
-            until: self.initial_deadline.min(self.input_deadline),
-        };
-        writer.write_all(&length.to_be_bytes())?;
-        writer.write_all(&grant)?;
-        remaining(self.initial_deadline.min(self.input_deadline))?;
-        self.grant = GrantState::Granted;
-        Ok(())
+        snapshot
+            .admit_held_image()
+            .map_err(StagingError::from)
+            .and_then(|image| self.slot.recheck(image.authority()))
+            .and_then(|()| remaining(self.initial_deadline))
+            .and_then(|_| remaining(self.input_deadline))
+            .and_then(|_| require_grant_turn(stream))
+            .and_then(|()| {
+                // Grant output starts here. Later peer bytes can only be input;
+                // they cannot reopen the independently validated source records.
+                self.grant = GrantState::Writing;
+                let mut writer = TimedStream {
+                    stream,
+                    until: self.initial_deadline.min(self.input_deadline),
+                };
+                writer
+                    .write_all(&length.to_be_bytes())
+                    .and_then(|()| writer.write_all(&grant))
+                    .map_err(StagingError::from)
+                    .and_then(|()| remaining(self.initial_deadline.min(self.input_deadline)))
+                    .map(|_| self.grant = GrantState::Granted)
+            })
     }
 
     /// Receive and verify complete SBC1/EAI1 into the retained private file.
@@ -515,12 +549,10 @@ impl AdmittedProviderExecution {
     /// # Errors
     /// Refuses stale or substituted authority and raised control floors.
     pub fn recheck(&self) -> Result<super::super::AdmittedAuthority, StagingError> {
-        let authority = self
-            .image_admission()
+        self.image_admission()
             .recheck_authority()
-            .map_err(|_| StagingError::AuthorityChanged)?;
-        self.slot.recheck(authority)?;
-        Ok(authority)
+            .map_err(|_| StagingError::AuthorityChanged)
+            .and_then(|authority| self.slot.recheck(authority).map(|()| authority))
     }
 
     /// Read exactly from the descriptor whose complete case was verified.
@@ -573,7 +605,6 @@ mod tests {
         assert_eq!(ledger.usage().reserved_bytes, 0);
         let record = frame(&mut Cursor::new([0, 0, 0, 3, 1, 2, 3]), &ledger)?;
         assert_eq!(record.bytes, [1, 2, 3]);
-        assert_eq!(record._charge.bytes(), 3);
         assert_eq!(ledger.usage().reserved_bytes, 3);
         drop(record);
         assert_eq!(ledger.usage().reserved_bytes, 0);
@@ -951,6 +982,118 @@ mod tests {
             );
             assert_eq!(ledger.usage(), super::super::StagingUsage::default());
         }
+        Ok(())
+    }
+
+    #[test]
+    fn prepared_deadlines_are_not_restarted_by_signing_and_authority_is_rechecked() -> TestResult {
+        if !isolated("prepared_deadlines_are_not_restarted_by_signing_and_authority_is_rechecked")?
+        {
+            return Ok(());
+        }
+        let staged = StagedInstallation::stage_execution()?;
+        for fault in ["initial", "input", "floor", "installation"] {
+            let ledger = StagingLedger::new(super::super::StagingLimits {
+                aggregate_bytes: 512 * 1024 * 1024,
+            });
+            let (mut prepared, mut provider, mut selector) = prepared_pair(&staged, &ledger)?;
+            let expired = Instant::now()
+                .checked_sub(Duration::from_secs(1))
+                .ok_or("clock range")?;
+            // Set only private clocks; no sleeps, clock reset, or alternate
+            // admission constructor is introduced into the production path.
+            if fault == "initial" {
+                prepared.initial_deadline = expired;
+            }
+            if fault == "floor" {
+                ledger.raise_floor(super::super::ControlFloor {
+                    revocation_epoch: u64::MAX,
+                    policy_epoch: u64::MAX,
+                });
+            }
+            let manifest =
+                std::path::Path::new(crate::selector::installation::SANDBOX_ARTIFACT_ROOT)
+                    .join(crate::selector::installation::MANIFEST_NAME);
+            let saved = if fault == "installation" {
+                let bytes = std::fs::read(&manifest)?;
+                std::fs::remove_file(&manifest)?;
+                Some(bytes)
+            } else {
+                None
+            };
+            if fault == "input" {
+                prepared.input_deadline = expired;
+            }
+            let result = prepared.send_grant(&mut provider, |message| {
+                Ok(StagedInstallation::sign_grant(message))
+            });
+            if let Some(bytes) = saved {
+                use std::os::unix::fs::PermissionsExt as _;
+                std::fs::write(&manifest, bytes)?;
+                std::fs::set_permissions(&manifest, std::fs::Permissions::from_mode(0o400))?;
+            }
+            assert!(
+                match fault {
+                    "floor" => matches!(result, Err(StagingError::BelowControlFloor)),
+                    "installation" => matches!(result, Err(StagingError::Source(_))),
+                    _ => matches!(result, Err(StagingError::Expired)),
+                },
+                "{fault}: {result:?}"
+            );
+            drop((prepared, provider));
+            assert_eq!(selector.read(&mut [0])?, 0);
+            assert_eq!(ledger.usage().attempts, 0);
+            assert_eq!(ledger.usage().reserved_bytes, 0);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn source_failure_releases_control_and_reconstructed_case_reservations() -> TestResult {
+        if !isolated("source_failure_releases_control_and_reconstructed_case_reservations")? {
+            return Ok(());
+        }
+        let ledger = StagingLedger::new(super::super::StagingLimits {
+            aggregate_bytes: 512 * 1024 * 1024,
+        });
+        let (mut provider, _selector) = UnixStream::pair()?;
+        assert!(matches!(
+            PreparedProviderExecution::receive(&mut provider, &ledger),
+            Err(StagingError::Source(_))
+        ));
+        assert_eq!(ledger.usage(), super::super::StagingUsage::default());
+        let staged = StagedInstallation::stage_execution()?;
+        let controls = (0..256)
+            .map(|_| ledger.control(256))
+            .collect::<Result<Vec<_>, _>>()?;
+        assert!(
+            matches!(prepared_pair(&staged, &ledger), Err(error) if error.downcast_ref::<StagingError>().is_some_and(|error| matches!(error, StagingError::ControlSlotsExhausted)))
+        );
+        drop(controls);
+        assert_eq!(ledger.usage(), super::super::StagingUsage::default());
+        let case = read_attempt(staged.input())?;
+        let source_bytes = staged.evaluation().len() as u64 + staged.request().len() as u64;
+        let short = StagingLedger::new(super::super::StagingLimits {
+            aggregate_bytes: source_bytes + case_buffer_bytes(&case) - 1,
+        });
+        assert!(
+            matches!(prepared_pair(&staged, &short), Err(error) if error.downcast_ref::<StagingError>().is_some_and(|error| matches!(error, StagingError::AggregateExceeded)))
+        );
+        assert_eq!(short.usage(), super::super::StagingUsage::default());
+        let request = staged.changed_request(|request| {
+            request.request.request_id[14..].copy_from_slice(&u16::MAX.to_be_bytes());
+            request.attempt_id[14..].copy_from_slice(&0x7fff_u16.to_be_bytes());
+        })?;
+        let (mut provider, mut selector) = UnixStream::pair()?;
+        for record in [staged.evaluation(), request.as_slice()] {
+            selector.write_all(&u32::try_from(record.len())?.to_be_bytes())?;
+            selector.write_all(record)?;
+        }
+        assert!(matches!(
+            PreparedProviderExecution::receive(&mut provider, &ledger),
+            Err(StagingError::Source(_))
+        ));
+        assert_eq!(ledger.usage(), super::super::StagingUsage::default());
         Ok(())
     }
 }

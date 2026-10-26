@@ -493,3 +493,38 @@ fn admission_charges_actual_retained_bytes_and_no_hard_cap_maximum() -> TestResu
     assert_eq!(short.usage(), StagingUsage::default());
     Ok(())
 }
+
+#[test]
+fn private_staging_descriptor_exhaustion_releases_the_prepared_exchange() -> TestResult {
+    if !require_isolated_root(
+        "private_staging_descriptor_exhaustion_releases_the_prepared_exchange",
+    )? {
+        return Ok(());
+    }
+    let staged = StagedInstallation::stage_execution().map_err(|error| error.to_string())?;
+    let ledger = StagingLedger::new(StagingLimits {
+        aggregate_bytes: 512 * 1024 * 1024,
+    });
+    let (prepared, _provider, _selector) = source_pair(&staged, &ledger)?;
+    let temporary = tempfile::tempdir()?;
+    fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700))?;
+    let held = fs::File::open(temporary.path())?;
+    let staging = pos_sandboxd::StagingDirectory::from_held_directory(
+        held.try_clone()?,
+        held.metadata()?.uid(),
+    )?;
+    let original = rustix::process::getrlimit(rustix::process::Resource::Nofile);
+    rustix::process::setrlimit(
+        rustix::process::Resource::Nofile,
+        rustix::process::Rlimit {
+            current: Some(0),
+            maximum: original.maximum,
+        },
+    )?;
+    let result = staging.create_input([0x41; 16], prepared);
+    rustix::process::setrlimit(rustix::process::Resource::Nofile, original)?;
+    assert!(matches!(result, Err(StagingError::Io(_))));
+    assert_eq!(ledger.usage(), StagingUsage::default());
+    assert_eq!(fs::read_dir(temporary.path())?.count(), 0);
+    Ok(())
+}

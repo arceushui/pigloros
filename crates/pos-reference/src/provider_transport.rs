@@ -785,7 +785,7 @@ impl ProviderTransport {
         if evaluation.request_digest != request.authority.evr1_digest {
             return Err(ProviderTransportError::BeforeAdmission);
         }
-        evaluation
+        let evaluation = evaluation
             .to_canonical_cbor()
             .map_err(transport_before_admission)?;
         validate_staged_input(&request.adapter_input, input).map_err(transport_before_admission)?;
@@ -797,7 +797,7 @@ impl ProviderTransport {
         };
         let source = ExecuteSource {
             request,
-            evaluation,
+            evaluation: &evaluation,
             commitment,
             bytes: spx1,
         };
@@ -909,9 +909,8 @@ impl ProviderTransport {
     ) -> Result<AuthenticatedProviderTerminal, ReceiveFailure> {
         let ExecuteSource {
             request,
-            evaluation,
             commitment,
-            bytes: spx1,
+            ..
         } = source;
         deadline
             .remaining()
@@ -925,50 +924,63 @@ impl ProviderTransport {
                     .map_err(receive_incomplete)
             })
             .and_then(|mut stream| {
-                let evaluation = evaluation.to_canonical_cbor().map_err(receive_invalid)?;
-                write_frame(&mut stream, &evaluation, deadline)?;
-                write_frame(&mut stream, spx1, deadline)?;
-                let first = read_frame(&mut stream, deadline)?.ok_or(ReceiveFailure::Incomplete)?;
-                match record_magic(&first)?.as_str() {
-                    "AGR1" => {
-                        let grant = authenticate_initial_grant(
+                read_initial_response(&mut stream, source, deadline).and_then(|first| {
+                    record_magic(&first).and_then(|magic| match magic.as_str() {
+                        "AGR1" => authenticate_initial_grant(
                             admitted,
                             commitment,
                             request,
                             progress.retained_grant,
                             &first,
-                        )?;
-                        write_input(&mut stream, request, input, deadline)?;
-                        stream
-                            .shutdown(std::net::Shutdown::Write)
-                            .map_err(receive_incomplete)?;
-                        progress.admission.entered();
-                        read_admitted_response(
-                            &mut stream,
-                            admitted,
-                            request,
-                            deadline,
-                            first,
-                            grant,
                         )
-                    }
-                    "SPE1" if progress.retained_grant.is_none() => {
-                        stream
+                        .and_then(|grant| {
+                            write_input(&mut stream, request, input, deadline)
+                                .and_then(|()| {
+                                    stream
+                                        .shutdown(std::net::Shutdown::Write)
+                                        .map_err(receive_incomplete)
+                                })
+                                .and_then(|()| {
+                                    progress.admission.entered();
+                                    read_admitted_response(
+                                        &mut stream,
+                                        admitted,
+                                        request,
+                                        deadline,
+                                        first,
+                                        grant,
+                                    )
+                                })
+                        }),
+                        "SPE1" if progress.retained_grant.is_none() => stream
                             .shutdown(std::net::Shutdown::Write)
-                            .map_err(receive_incomplete)?;
-                        read_error_response(&mut stream, admitted, request, deadline, first)
-                    }
-                    _ => Err(ReceiveFailure::Invalid),
-                }
+                            .map_err(receive_incomplete)
+                            .and_then(|()| {
+                                read_error_response(&mut stream, admitted, request, deadline, first)
+                            }),
+                        _ => Err(ReceiveFailure::Invalid),
+                    })
+                })
             })
     }
 }
 
 struct ExecuteSource<'a> {
     request: SandboxExecuteRequest,
-    evaluation: &'a crate::evaluator_protocol::EvaluationRequest,
+    evaluation: &'a [u8],
     commitment: &'a SelectorGrantCommitment,
     bytes: &'a [u8],
+}
+
+fn read_initial_response(
+    stream: &mut UnixStream,
+    source: &ExecuteSource<'_>,
+    deadline: &Deadline,
+) -> Result<Vec<u8>, ReceiveFailure> {
+    write_frame(stream, source.evaluation, deadline)
+        .and_then(|()| write_frame(stream, source.bytes, deadline))
+        .and_then(|()| read_frame(stream, deadline))
+        .and_then(|first| first.ok_or(ReceiveFailure::Incomplete))
 }
 
 fn validate_connected_endpoint(
@@ -2986,7 +2998,27 @@ mod tests {
         let _listener = std::os::unix::net::UnixListener::bind(&path)?;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
         let transport = ProviderTransport::from_path_for_test(&path)?;
+        let mut foreign_evaluation = fixture.evaluation.clone();
+        foreign_evaluation.request_digest[0] ^= 1;
+        let mut invalid_evaluation = fixture.evaluation.clone();
+        invalid_evaluation.implementation.implementation_id.clear();
         for result in [
+            transport.execute(
+                &fixture.provider,
+                &fixture.commitment,
+                &foreign_evaluation,
+                &fixture.spx1,
+                b"input",
+                Duration::from_secs(1),
+            ),
+            transport.execute(
+                &fixture.provider,
+                &fixture.commitment,
+                &invalid_evaluation,
+                &fixture.spx1,
+                b"input",
+                Duration::from_secs(1),
+            ),
             transport.execute(
                 &fixture.provider,
                 &fixture.commitment,

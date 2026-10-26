@@ -4119,6 +4119,23 @@ mod tests {
         Ok(())
     }
 
+    fn generation_fence_provider(
+        listener: &UnixListener,
+        entered: std::sync::mpsc::Sender<()>,
+        release: std::sync::mpsc::Receiver<()>,
+    ) -> Result<(), String> {
+        (|| -> TestResult {
+            let (mut stream, _) = listener.accept()?;
+            stream.set_read_timeout(Some(Duration::from_secs(1)))?;
+            let _evaluation = read_frame(&mut stream)?;
+            let _spx1 = read_frame(&mut stream)?;
+            entered.send(())?;
+            release.recv_timeout(Duration::from_secs(1))?;
+            Ok(())
+        })()
+        .map_err(|error| error.to_string())
+    }
+
     fn assert_transport_generation_fence(reopen_with_successor: bool) -> TestResult {
         let transport_fixture =
             crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
@@ -4144,16 +4161,7 @@ mod tests {
             // unauthorized retry cannot hide behind a connection failure.
             let listener = &listener;
             let provider = scope.spawn(move || {
-                (|| -> TestResult {
-                    let (mut stream, _) = listener.accept()?;
-                    stream.set_read_timeout(Some(Duration::from_secs(1)))?;
-                    let _evaluation = read_frame(&mut stream)?;
-                    let _spx1 = read_frame(&mut stream)?;
-                    request_entered_tx.send(())?;
-                    release_provider_rx.recv_timeout(Duration::from_secs(1))?;
-                    Ok(())
-                })()
-                .map_err(|error| error.to_string())
+                generation_fence_provider(listener, request_entered_tx, release_provider_rx)
             });
             scope.spawn(|| {
                 let result = transport
@@ -4511,7 +4519,7 @@ mod tests {
         ));
         assert_eq!(admission.begun, 2);
         assert!(provider_retains_namespace(&execution.result));
-        let mut foreign = fixture.evaluation.clone();
+        let mut foreign = fixture.evaluation;
         foreign.implementation.organization_id = Some("foreign-owner".to_owned());
         refresh_request_digest(&mut foreign)?;
         assert!(
