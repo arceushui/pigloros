@@ -560,9 +560,14 @@ pub trait EventStore: Send {
     /// Append one or more draft events to a timeline, returning the committed events.
     ///
     /// Batching is required for performance: single-row commit is too slow for `SQLite` WAL.
+    /// Adapters refuse fresh `persona.preference` Events for an entity with a
+    /// durable `SubjectDataEncryption` registry record, including tombstones,
+    /// using registry state inside the append's write boundary (ADR-097 r4 B4).
     ///
     /// # Errors
     /// Returns [`CoreError::TimelineNotFound`] if the timeline does not exist.
+    /// Returns [`CoreError::SubjectPlaintextPreferenceRefused`] for the subject
+    /// plaintext refusal.
     fn append(
         &mut self,
         timeline: TimelineId,
@@ -967,6 +972,10 @@ pub trait EventStore: Send {
     }
 
     /// Append already-committed events, preserving event ids, seqs, and payload hashes.
+    ///
+    /// This persistence/import seam preserves historical Events. Fresh
+    /// authoring uses the draft or authorized signing seams, whose privacy
+    /// checks run before dispatching their committed Event here.
     ///
     /// Used by [`import_timeline_with_id`]. Implementations must be all-or-nothing for the
     /// batch (no partial apply on validation failure). Seqs must be contiguous from
