@@ -2,12 +2,4 @@
 [advisories]
 # RUSTSEC-2026-0344 (ruzstd < 0.9.1): see the full reason and the removal
 # condition in deny.toml (Redmine #629).
-# RUSTSEC-2026-0370/0371/0372 (zvariant, zbus_names, zvariant_derive
-# unmaintained): see the full reason and the removal condition in deny.toml
-# (Redmine #686).
-ignore = [
-  "RUSTSEC-2026-0344",
-  "RUSTSEC-2026-0370",
-  "RUSTSEC-2026-0371",
-  "RUSTSEC-2026-0372",
-]
+ignore = ["RUSTSEC-2026-0344"]
