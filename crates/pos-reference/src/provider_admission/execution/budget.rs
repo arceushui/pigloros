@@ -516,7 +516,9 @@ mod tests {
             ledger.prepare_with(authority(1, 1), policy(101, 1, 1)),
             Err(StagingError::InputTooLarge)
         ));
-        let (slot, input) = ledger.prepare_with(authority(1, 1), policy(1, 1, 1))?;
+        // ID 7 is inclusive: an input at its exact authenticated ceiling fits.
+        let (slot, input) = ledger.prepare_with(authority(1, 1), policy(100, 1, 1))?;
+        assert_eq!(ledger.usage().reserved_bytes, 100);
         let before = ledger.usage();
         assert!(matches!(
             slot.output_with_limit(2, 3),

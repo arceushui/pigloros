@@ -244,19 +244,29 @@ pub(crate) fn execution_limits(
     watchdog_ms: u64,
 ) -> Vec<pos_reference::sandbox_provider_protocol::SandboxLimit> {
     (0..=16)
+        .zip([
+            134_217_728,
+            0,
+            16,
+            500_000,
+            watchdog_ms,
+            64,
+            4_096,
+            1_000,
+            1_000,
+            4_096,
+            1_000,
+            1_000,
+            1_000,
+            1_000,
+            1_000,
+            1_000,
+            1_000,
+        ])
         .map(
-            |limit_id| pos_reference::sandbox_provider_protocol::SandboxLimit {
+            |(limit_id, value)| pos_reference::sandbox_provider_protocol::SandboxLimit {
                 limit_id,
-                value: match limit_id {
-                    0 => 134_217_728,
-                    1 => 0,
-                    2 => 16,
-                    3 => 500_000,
-                    4 => watchdog_ms,
-                    5 => 64,
-                    6 | 9 => 4_096,
-                    _ => 1_000,
-                },
+                value,
             },
         )
         .collect()

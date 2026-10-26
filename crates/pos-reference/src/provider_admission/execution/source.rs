@@ -115,7 +115,7 @@ fn require_grant_turn(stream: &UnixStream) -> Result<(), StagingError> {
     match recv(
         stream,
         &mut [0_u8; 1],
-        RecvFlags::PEEK | RecvFlags::DONTWAIT,
+        RecvFlags::PEEK.union(RecvFlags::DONTWAIT),
     ) {
         Err(rustix::io::Errno::AGAIN) => Ok(()),
         Ok(_) => Err(StagingError::InvalidSource),
@@ -151,7 +151,8 @@ impl Write for TimedStream<'_> {
             })
     }
     fn flush(&mut self) -> io::Result<()> {
-        self.stream.flush()
+        // UnixStream writes directly to the socket and has no buffered output.
+        Ok(())
     }
 }
 
@@ -626,13 +627,16 @@ mod tests {
 
     #[test]
     fn maximum_control_frame_is_admissible_without_enclosing_overhead() -> TestResult {
+        // Independent wire-size oracle: the protocol permits 16 MiB, excluding
+        // the four-byte prefix. Do not derive test input from the production cap.
+        let maximum = 16_777_216;
         let ledger = StagingLedger::new(super::super::StagingLimits {
-            aggregate_bytes: FRAME_LIMIT as u64,
+            aggregate_bytes: maximum as u64,
         });
-        let mut bytes = u32::try_from(FRAME_LIMIT)?.to_be_bytes().to_vec();
-        bytes.resize(FRAME_LIMIT + 4, 1);
+        let mut bytes = u32::try_from(maximum)?.to_be_bytes().to_vec();
+        bytes.resize(maximum + 4, 1);
         let record = frame(&mut Cursor::new(bytes), &ledger)?;
-        assert_eq!(record.bytes.len(), FRAME_LIMIT);
+        assert_eq!(record.bytes.len(), maximum);
         drop(record);
         assert_eq!(ledger.usage().reserved_bytes, 0);
         Ok(())
@@ -726,6 +730,15 @@ mod tests {
         changed.watchdog_ms += 1;
         assert_ne!(descriptor, input_descriptor(&changed)?);
         let retained = case_buffer_bytes(&changed);
+        let mut larger = changed.clone();
+        larger.case_id.push_str("-retained");
+        larger.schema.bytes.extend_from_slice(b"schema");
+        larger.payload.bytes.extend_from_slice(b"payload");
+        larger.capability_ids.push("capability-a".to_owned());
+        larger.capability_ids.push("capability-bb".to_owned());
+        // Measure the independently chosen retained byte additions, including
+        // nonempty capability strings rather than only the default fixture.
+        assert_eq!(case_buffer_bytes(&larger), retained + 9 + 6 + 7 + 12 + 13);
         let extra = b"aux";
         changed.auxiliary.push(crate::evaluator::AttemptArtifact {
             digest: *blake3::hash(extra).as_bytes(),
@@ -735,8 +748,11 @@ mod tests {
         assert!(case_buffer_bytes(&changed) < input_descriptor(&changed)?.byte_length);
         let mut bounded = DigestWriter {
             hasher: blake3::Hasher::new(),
-            length: INPUT_LIMIT,
+            // Independent 128-MiB canonical-input boundary, before the last byte.
+            length: 134_217_727,
         };
+        assert_eq!(bounded.write(b"x")?, 1);
+        assert_eq!(bounded.length, 134_217_728);
         assert!(bounded.write(b"x").is_err());
         bounded.length = u64::MAX;
         assert!(bounded.write(b"x").is_err());
@@ -811,6 +827,7 @@ mod tests {
         selector: &mut UnixStream,
         payload: &[u8],
         parent: [u8; 32],
+        trailing: &[u8],
     ) -> TestResult {
         let request = SandboxExecuteRequest::from_canonical_cbor(staged.request())?;
         let unsigned = Value::Array(vec![
@@ -833,6 +850,7 @@ mod tests {
         ]))?;
         selector.write_all(&u32::try_from(bytes.len())?.to_be_bytes())?;
         selector.write_all(&bytes)?;
+        selector.write_all(trailing)?;
         selector.shutdown(std::net::Shutdown::Write)?;
         Ok(())
     }
@@ -850,6 +868,14 @@ mod tests {
             aggregate_bytes: 512 * 1024 * 1024,
         });
         let (mut prepared, mut provider, selector) = prepared_pair(&staged, &ledger)?;
+        let (mut foreign, foreign_peer) = UnixStream::pair()?;
+        assert!(matches!(
+            prepared.send_grant(&mut foreign, |message| Ok(StagedInstallation::sign_grant(
+                message
+            ))),
+            Err(StagingError::ConnectionChanged)
+        ));
+        drop((foreign, foreign_peer));
         let mut outgoing = provider.try_clone()?;
         let result = prepared.send_grant(&mut provider, |message| {
             outgoing.write_all(b"unread")?;
@@ -889,6 +915,7 @@ mod tests {
             "digest",
             "read-only",
             "overlong",
+            "trailing",
             "floor",
             "installation",
         ] {
@@ -915,7 +942,8 @@ mod tests {
             } else {
                 prepared.request().request_digest
             };
-            write_chunk(&staged, &mut selector, &payload, parent)?;
+            let trailing: &[u8] = if fault == "trailing" { b"x" } else { b"" };
+            write_chunk(&staged, &mut selector, &payload, parent, trailing)?;
             if fault == "floor" {
                 ledger.raise_floor(super::super::ControlFloor {
                     revocation_epoch: u64::MAX,
@@ -983,7 +1011,7 @@ mod tests {
                 "case" => source.expected.attempt.watchdog_ms += 1,
                 _ => source.expected.attempt.schema.bytes.resize(1024 * 1024, 0),
             }
-            write_chunk(&staged, &mut selector, &payload, parent)?;
+            write_chunk(&staged, &mut selector, &payload, parent, b"")?;
             let file = tempfile::tempfile()?;
             let result = prepared.receive_input(&mut provider, &file);
             assert!(
@@ -1170,6 +1198,73 @@ mod tests {
                 Err(StagingError::CleanupFailed)
             ));
         }
+        Ok(())
+    }
+
+    #[test]
+    fn admitted_input_preserves_bytes_policy_and_the_live_floor() -> TestResult {
+        use super::super::staging::StagingDirectory;
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+        if !isolated("admitted_input_preserves_bytes_policy_and_the_live_floor")? {
+            return Ok(());
+        }
+        let staged = StagedInstallation::stage_execution()?;
+        let ledger = StagingLedger::new(super::super::StagingLimits {
+            aggregate_bytes: 512 * 1024 * 1024,
+        });
+        let (mut prepared, mut provider, mut selector) = prepared_pair(&staged, &ledger)?;
+        send_grant(&mut prepared, &mut provider)?;
+        drop(frame(&mut selector, &ledger)?);
+        let temporary = tempfile::tempdir()?;
+        std::fs::set_permissions(temporary.path(), std::fs::Permissions::from_mode(0o700))?;
+        let held = File::open(temporary.path())?;
+        let owner = held.metadata()?.uid();
+        let staging = StagingDirectory::from_held_directory(held, owner)?;
+        let input = staging.create_input([8; 16], prepared)?;
+        staged.write_input(&mut selector)?;
+        selector.shutdown(std::net::Shutdown::Write)?;
+        let verified = input.receive(&mut provider)?;
+        let expected_request = SandboxExecuteRequest::from_canonical_cbor(staged.request())?;
+        assert_eq!(verified.len(), staged.input().len() as u64);
+        assert!(!verified.is_empty());
+        assert_eq!(
+            verified.entry().policy().request_digest(),
+            expected_request.request_digest
+        );
+        verified.entry().recheck()?;
+        let mut readback = vec![0xff; staged.input().len()];
+        verified.read_exact_at(&mut readback, 0)?;
+        assert_eq!(readback, staged.input());
+        let execution = verified.entry().retain();
+        let length = verified.len();
+        execution.read_exact_at(&mut [], length)?;
+        let mut last = [0xff];
+        execution.read_exact_at(&mut last, length - 1)?;
+        assert_eq!(
+            last[0],
+            *staged.input().last().ok_or("empty admitted input")?
+        );
+        for offset in [length, length + 1, u64::MAX] {
+            assert_eq!(
+                execution
+                    .read_exact_at(&mut [0], offset)
+                    .err()
+                    .map(|error| error.kind()),
+                Some(io::ErrorKind::UnexpectedEof)
+            );
+        }
+        ledger.raise_floor(super::super::ControlFloor {
+            revocation_epoch: u64::MAX,
+            policy_epoch: u64::MAX,
+        });
+        assert!(matches!(
+            verified.entry().recheck(),
+            Err(StagingError::BelowControlFloor)
+        ));
+        drop((verified, execution));
+        assert_eq!(ledger.usage().reserved_bytes, 0);
+        assert_eq!(ledger.usage().attempts, 0);
         Ok(())
     }
 

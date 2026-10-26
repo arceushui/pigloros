@@ -871,7 +871,7 @@ impl ProviderTransport {
             .admission
             .begin()
             .map_err(|refusal| match refusal {
-                ProviderTransportError::BeforeAdmission if progress.retained_grant.is_some() => {
+                ProviderTransportError::BeforeAdmission => {
                     // A closed generation can forbid recovery, but cannot undo
                     // the AGR1 already authenticated on the original connection.
                     classify_receive_failure(

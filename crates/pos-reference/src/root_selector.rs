@@ -4532,6 +4532,78 @@ mod tests {
     }
 
     #[test]
+    fn authenticated_grant_retains_namespace_when_recovery_returns_a_pre_admission_error(
+    ) -> TestResult {
+        let fixture = crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
+        let directory = tempfile::tempdir()?;
+        let socket = directory.path().join("provider.sock");
+        let listener = UnixListener::bind(&socket)?;
+        fs::set_permissions(&socket, fs::Permissions::from_mode(SOCKET_MODE))?;
+        let transport = ProviderTransport::from_path_for_test(&socket)?;
+        let evaluation_bytes = fixture.evaluation.to_canonical_cbor()?;
+        let request_bytes = fixture.spx1.clone();
+        let grant_bytes = fixture.agr1.clone();
+        let error_bytes = fixture.spe1.clone();
+        let grant = fixture.provider.authenticate_selector_grant(
+            &grant_bytes,
+            &fixture.request,
+            &fixture.commitment,
+        )?;
+        let provider = thread::spawn(move || {
+            (|| -> TestResult {
+                let mut first = accept_test_connection(&listener)?;
+                first.set_read_timeout(Some(Duration::from_secs(5)))?;
+                first.set_write_timeout(Some(Duration::from_secs(5)))?;
+                assert_eq!(read_frame(&mut first)?, evaluation_bytes);
+                assert_eq!(read_frame(&mut first)?, request_bytes);
+                write_frame(&mut first, &grant_bytes)?;
+                let mut input = Vec::new();
+                first.read_to_end(&mut input)?;
+                assert!(!input.is_empty());
+                drop(first);
+                let mut recovery = accept_test_connection(&listener)?;
+                recovery.set_read_timeout(Some(Duration::from_secs(5)))?;
+                recovery.set_write_timeout(Some(Duration::from_secs(5)))?;
+                assert_eq!(read_frame(&mut recovery)?, evaluation_bytes);
+                assert_eq!(read_frame(&mut recovery)?, request_bytes);
+                // Correctly signed SPE1 is still invalid after the retained AGR1.
+                write_frame(&mut recovery, &error_bytes)?;
+                Ok(())
+            })()
+            .map_err(|error| error.to_string())
+        });
+        let bindings = EvaluationNamespaceBindings::default();
+        let execution = bindings.execute_ordered(&fixture.evaluation, || {
+            transport.execute(
+                &fixture.provider,
+                &fixture.commitment,
+                &fixture.evaluation,
+                &fixture.spx1,
+                b"input",
+                Duration::from_secs(5),
+            )
+        })?;
+        provider.join().map_err(|_| "provider thread panicked")??;
+        assert!(!execution.conflict);
+        assert!(matches!(
+            &execution.result,
+            Err(ProviderTransportError::AfterAdmission { agr1_digest, failure })
+                if *agr1_digest == grant.grant_digest
+                    && *failure == PostAdmissionProviderFailure::EvidenceInvalid
+        ));
+        assert!(provider_retains_namespace(&execution.result));
+        let mut foreign = fixture.evaluation;
+        foreign.implementation.organization_id = Some("foreign-owner".to_owned());
+        refresh_request_digest(&mut foreign)?;
+        assert!(
+            bindings
+                .execute_ordered(&foreign, || Err(ProviderTransportError::BeforeAdmission))?
+                .conflict
+        );
+        Ok(())
+    }
+
+    #[test]
     fn evaluation_namespace_binding_tracks_only_live_or_retained_requests() -> TestResult {
         let (request, _, _) = crate::selector::installation::tests::root_selector_fixture()?;
         let bindings = EvaluationNamespaceBindings::default();

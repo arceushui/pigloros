@@ -1203,6 +1203,38 @@ mod tests {
     use super::*;
 
     #[test]
+    fn execute_record_construction_preserves_the_full_ordinal_mapping(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (evaluation, admitted, resolved) =
+            crate::selector::installation::tests::root_selector_fixture()?;
+        let nonce = crate::selector::installation::authority::fresh_selector_id()?;
+        // This tests record construction, not high-ordinal admission of the
+        // small fixture corpus. The wire mapping covers the complete u16 range.
+        for (ordinal, attempt_suffix) in [(0, 0x8000), (7, 0x8007), (0x8000, 0), (u16::MAX, 0x7fff)]
+        {
+            let request = execute_request_for_case(
+                &admitted,
+                &evaluation,
+                &resolved,
+                PayloadDescriptor {
+                    byte_length: 1,
+                    digest: [1; 32],
+                },
+                ordinal,
+                nonce,
+            )?;
+            assert_eq!(
+                &request.request.request_id[..14],
+                &evaluation.request_id[..14]
+            );
+            assert_eq!(&request.request.request_id[14..], &ordinal.to_be_bytes());
+            assert_eq!(&request.attempt_id[..14], &evaluation.request_id[..14]);
+            assert_eq!(&request.attempt_id[14..], &u16::to_be_bytes(attempt_suffix));
+        }
+        Ok(())
+    }
+
+    #[test]
     fn execute_construction_requires_sandbox_authority_and_a_valid_nonce(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let (mut evaluation, admitted, resolved) =

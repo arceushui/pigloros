@@ -110,6 +110,15 @@ fn the_entry_facts_need_the_directory_prepared_for_the_same_attempt() -> TestRes
         .prepare_directory()?;
 
     let attempt = AdmittedAttempt::from_entry(&entry, &own)?;
+    assert_eq!(attempt, attempt.clone());
+    let separate_ledger = StagingLedger::new(StagingLimits {
+        aggregate_bytes: 512 * 1024 * 1024,
+    });
+    let (_separate_staging, separate_input) =
+        staged_execution::verified_input(&staged, &separate_ledger)?;
+    let separately_admitted = AdmittedAttempt::from_entry(&separate_input.entry(), &own)?;
+    // Equal public request facts do not make independently admitted leases equal.
+    assert_ne!(attempt, separately_admitted);
     assert_eq!(attempt.attempt_id(), request.attempt_id);
     assert_eq!(attempt.unit_name(), own.intent().unit_name());
     assert_eq!(attempt.mode(), snapshot.launch_policy().execution_mode);

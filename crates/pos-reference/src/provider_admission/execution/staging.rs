@@ -205,10 +205,10 @@ impl VerifiedStagedInput {
         self.execution.policy().input_descriptor().byte_length
     }
 
-    /// Whether the verified input is empty.
+    /// Always false: admission requires a complete, nonempty EAI1..EIE1 stream.
     #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
+    pub const fn is_empty(&self) -> bool {
+        false
     }
 
     /// Read only the descriptor checked by complete EAI1 verification.
