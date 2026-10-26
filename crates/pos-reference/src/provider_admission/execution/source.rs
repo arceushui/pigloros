@@ -1189,6 +1189,7 @@ mod tests {
             aggregate_bytes: 512 * 1024 * 1024,
         });
         let (mut prepared, mut provider, mut selector) = prepared_pair(&staged, &ledger)?;
+        let input_reservation = prepared.staging_charge();
         send_grant(&mut prepared, &mut provider)?;
         drop(frame(&mut selector, &ledger)?);
         let temporary = tempfile::tempdir()?;
@@ -1218,9 +1219,8 @@ mod tests {
         let before = ledger.usage();
         let (reached_tx, reached_rx) = std::sync::mpsc::channel();
         let (proceed_tx, proceed_rx) = std::sync::mpsc::channel();
-        execution
-            ._input
-            .before_release_for_test(reached_tx, proceed_rx);
+        input_reservation.before_release_for_test(reached_tx, proceed_rx);
+        drop(input_reservation);
         let (closed, at_release) = std::thread::scope(|scope| -> TestResult<_> {
             let worker = scope.spawn(move || drop(execution));
             let reached = reached_rx.recv_timeout(Duration::from_secs(5));

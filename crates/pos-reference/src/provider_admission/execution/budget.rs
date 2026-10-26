@@ -396,7 +396,7 @@ impl Charge {
             return;
         };
         if reached.send(()).is_ok() {
-            let _ = proceed.recv_timeout(std::time::Duration::from_secs(30));
+            let _resume_result = proceed.recv_timeout(std::time::Duration::from_secs(30));
         }
     }
 }
