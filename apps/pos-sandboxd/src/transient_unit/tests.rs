@@ -231,7 +231,7 @@ fn exec_start_is_the_last_property_with_its_dbus_signature() -> Result<(), Box<d
         <Vec<(String, Vec<String>, bool)> as Type>::SIGNATURE.to_string(),
         "a(sasb)"
     );
-    let encoded = to_bytes(Context::new_dbus(LE, 0), &commands)?;
+    let encoded = to_bytes(Context::new(LE, 0), &commands)?;
     let (decoded, consumed): (Vec<(String, Vec<String>, bool)>, usize) = encoded.deserialize()?;
     assert_eq!(decoded, commands);
     assert_eq!(consumed, encoded.len());
