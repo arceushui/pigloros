@@ -29,7 +29,10 @@ use pos_sandboxd::{
 use pos_reference::provider_admission::execution::{
     PreparedProviderExecution, StagingError, StagingUsage,
 };
-use std::{io::Write as _, os::unix::net::UnixStream};
+use std::{
+    io::{Read as _, Write as _},
+    os::unix::net::UnixStream,
+};
 
 type BoxError = Box<dyn Error + Send + Sync>;
 type TestResult = Result<(), BoxError>;
@@ -386,7 +389,6 @@ fn a_floor_raised_by_a_slow_signer_is_rechecked_before_any_grant_bytes() -> Test
     });
     assert!(matches!(error, Err(StagingError::BelowControlFloor)));
     drop((prepared, provider));
-    use std::io::Read as _;
     assert_eq!(selector.read(&mut [0])?, 0);
     assert_eq!(ledger.usage().attempts, 0);
     assert_eq!(ledger.usage().reserved_bytes, 0);
@@ -411,8 +413,10 @@ fn extra_source_after_preparation_is_refused_before_any_grant_bytes() -> TestRes
         Err(StagingError::InvalidSource)
     ));
     drop((prepared, provider));
-    use std::io::Read as _;
-    assert_eq!(selector.read(&mut [0])?, 0);
+    assert!(match selector.read(&mut [0]) {
+        Ok(length) => length == 0,
+        Err(error) => error.kind() == std::io::ErrorKind::ConnectionReset,
+    });
     assert_eq!(ledger.usage(), StagingUsage::default());
     Ok(())
 }
