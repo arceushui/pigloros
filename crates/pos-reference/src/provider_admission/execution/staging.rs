@@ -112,6 +112,7 @@ impl StagingDirectory {
         name: [u8; 16],
         reservation: StagingCharge,
     ) -> Result<StagedFile, StagingError> {
+        reservation.recheck()?;
         let name = hex_name(name);
         self.directory
             .try_clone()
@@ -280,6 +281,40 @@ mod tests {
         fs::remove_file(temporary.path().join("03".repeat(16)))?;
         drop(input);
         assert_eq!(ledger.usage().leaked_files, 1);
+        assert!(matches!(
+            ledger.reserve_storage(0),
+            Err(StagingError::CleanupFailed)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn residual_file_after_failed_unlink_closes_storage_and_already_prepared_creation() -> TestResult
+    {
+        use std::os::unix::fs::FileExt as _;
+
+        let (temporary, staging) = directory()?;
+        let ledger = StagingLedger::new(LIMITS);
+        let input = staging.create_file([4; 16], ledger.reserve_storage(8)?)?;
+        input.file.write_all_at(b"residual", 0)?;
+        let held = ledger.reserve_storage(1)?;
+        let leaf = temporary.path().join("04".repeat(16));
+        let residual = temporary.path().join("residual");
+        fs::rename(&leaf, &residual)?;
+        fs::create_dir(&leaf)?; // unlinkat without REMOVEDIR must fail, even as root.
+        drop(input);
+        assert_eq!(fs::read(&residual)?, b"residual");
+        assert_eq!(ledger.usage().leaked_files, 1);
+        assert!(matches!(
+            ledger.reserve_storage(0),
+            Err(StagingError::CleanupFailed)
+        ));
+        assert!(matches!(
+            staging.create_file([5; 16], held),
+            Err(StagingError::CleanupFailed)
+        ));
+        assert!(!temporary.path().join("05".repeat(16)).exists());
+        assert_eq!(ledger.usage().reserved_bytes, 0);
         Ok(())
     }
 

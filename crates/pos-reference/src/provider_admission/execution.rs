@@ -68,6 +68,9 @@ pub enum StagingError {
     /// A checked byte sum would exceed the provider's aggregate cap.
     #[error("staging aggregate cap would be exceeded")]
     AggregateExceeded,
+    /// A failed private-file cleanup permanently closed this live ledger.
+    #[error("staging admission is closed after a cleanup failure")]
+    CleanupFailed,
     /// The independently derived input ceiling forbids the declared input.
     #[error("input exceeds ELM1 InputBytes")]
     InputTooLarge,

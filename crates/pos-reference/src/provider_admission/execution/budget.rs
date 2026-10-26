@@ -35,7 +35,7 @@ pub struct StagingUsage {
     pub queued_inputs: u64,
     /// Live attempts, including retained output reservations.
     pub attempts: u64,
-    /// Failed unlink operations reported by the private staging adapter.
+    /// Failed unlink operations; any nonzero value permanently closes admission.
     pub leaked_files: u64,
     /// Current control floor.
     pub floor: ControlFloor,
@@ -46,6 +46,16 @@ struct State {
     usage: StagingUsage,
     queue_ceilings: BTreeMap<u64, u64>,
     attempt_ceilings: BTreeMap<u64, u64>,
+}
+
+impl State {
+    fn ensure_open(&self) -> Result<(), StagingError> {
+        if self.usage.leaked_files == 0 {
+            Ok(())
+        } else {
+            Err(StagingError::CleanupFailed)
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -60,12 +70,14 @@ impl Shared {
     }
 
     fn total(&self, state: &State, bytes: u64) -> Result<u64, StagingError> {
-        state
-            .usage
-            .reserved_bytes
-            .checked_add(bytes)
-            .filter(|total| *total <= self.maximum)
-            .ok_or(StagingError::AggregateExceeded)
+        state.ensure_open().and_then(|()| {
+            state
+                .usage
+                .reserved_bytes
+                .checked_add(bytes)
+                .filter(|total| *total <= self.maximum)
+                .ok_or(StagingError::AggregateExceeded)
+        })
     }
 }
 
@@ -107,7 +119,7 @@ impl StagingLedger {
     /// Charge private storage only; this value grants no admission or input proof.
     ///
     /// # Errors
-    /// Refuses a checked aggregate sum above the owner's cap.
+    /// Refuses a closed ledger or a checked aggregate sum above the owner's cap.
     pub fn reserve_storage(&self, bytes: u64) -> Result<StagingCharge, StagingError> {
         let mut state = self.shared.state();
         state.usage.reserved_bytes = self.shared.total(&state, bytes)?;
@@ -117,6 +129,7 @@ impl StagingLedger {
 
     pub(super) fn control(&self, bhc_slots: u64) -> Result<ControlSlot, StagingError> {
         let mut state = self.shared.state();
+        state.ensure_open()?;
         if state.usage.pending_controls >= bhc_slots.min(256) {
             return Err(StagingError::ControlSlotsExhausted);
         }
@@ -156,6 +169,7 @@ impl StagingLedger {
             return Err(StagingError::InputTooLarge);
         }
         let mut state = self.shared.state();
+        state.ensure_open()?;
         check_floor(state.usage.floor, authority)?;
         if state.usage.attempts >= intersection(&state.attempt_ceilings, attempt_ceiling) {
             return Err(StagingError::AttemptsExhausted);
@@ -244,7 +258,10 @@ pub(super) struct AttemptSlot {
 
 impl AttemptSlot {
     pub(super) fn recheck(&self, authority: AdmittedAuthority) -> Result<(), StagingError> {
-        check_floor(self.shared.state().usage.floor, authority)
+        let state = self.shared.state();
+        state
+            .ensure_open()
+            .and_then(|()| check_floor(state.usage.floor, authority))
     }
 
     pub(super) fn output(
@@ -303,9 +320,17 @@ struct Charge {
 pub struct StagingCharge(Arc<Charge>);
 
 impl StagingCharge {
-    /// Record a failed unlink from the private file-staging adapter.
+    /// Close all live-ledger admission before a possibly residual file's charge drops.
+    ///
+    /// This live ledger cannot be reopened by dropping reservations or raising floors.
+    /// Lifecycle reconciliation must prove cleanup before installing a fresh ledger.
     pub fn record_leak(&self) {
-        self.0.shared.state().usage.leaked_files += 1;
+        let mut state = self.0.shared.state();
+        state.usage.leaked_files = state.usage.leaked_files.saturating_add(1);
+    }
+
+    pub(super) fn recheck(&self) -> Result<(), StagingError> {
+        self.0.shared.state().ensure_open()
     }
 
     pub(super) fn finish_input(&self) {
@@ -548,6 +573,53 @@ mod tests {
     }
 
     #[test]
+    fn cleanup_failure_closes_every_admission_path_after_reservations_drop() -> TestResult {
+        let ledger = new_ledger(100);
+        let (slot, input) = ledger.prepare_with(authority(1, 1), policy(5, 2, 2))?;
+        let storage = ledger.reserve_storage(1)?;
+        storage.record_leak();
+        assert!(matches!(
+            ledger.control(2),
+            Err(StagingError::CleanupFailed)
+        ));
+        assert!(matches!(
+            ledger.reserve_storage(0),
+            Err(StagingError::CleanupFailed)
+        ));
+        assert!(matches!(
+            ledger.prepare_with(authority(1, 1), policy(0, 2, 2)),
+            Err(StagingError::CleanupFailed)
+        ));
+        assert!(matches!(
+            slot.recheck(authority(1, 1)),
+            Err(StagingError::CleanupFailed)
+        ));
+        assert!(matches!(
+            slot.output_with_limit(1, 1),
+            Err(StagingError::CleanupFailed)
+        ));
+        assert!(matches!(input.recheck(), Err(StagingError::CleanupFailed)));
+        drop((slot, input, storage));
+        ledger.raise_floor(ControlFloor {
+            revocation_epoch: 2,
+            policy_epoch: 2,
+        });
+        assert_eq!(ledger.usage().reserved_bytes, 0);
+        assert_eq!(ledger.usage().attempts, 0);
+        assert_eq!(ledger.usage().queued_inputs, 0);
+        assert_eq!(ledger.usage().leaked_files, 1);
+        assert!(matches!(
+            ledger.reserve_storage(0),
+            Err(StagingError::CleanupFailed)
+        ));
+        assert!(matches!(
+            ledger.control(2),
+            Err(StagingError::CleanupFailed)
+        ));
+        Ok(())
+    }
+
+    #[test]
     fn poisoned_accounting_and_transfer_locks_preserve_owned_release() -> TestResult {
         let ledger = new_ledger(100);
         let (slot, input) = ledger.prepare_with(authority(1, 1), policy(5, 2, 2))?;
@@ -565,9 +637,9 @@ mod tests {
         })
         .join()
         .is_err());
-        input.record_leak();
         input.finish_input();
         let output = slot.output_with_limit(0, 0)?;
+        input.record_leak();
         drop((slot, input, output));
         assert_eq!(ledger.usage().reserved_bytes, 0);
         assert_eq!(ledger.usage().attempts, 0);

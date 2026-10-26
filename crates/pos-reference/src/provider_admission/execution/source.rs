@@ -1109,4 +1109,67 @@ mod tests {
         assert_eq!(ledger.usage(), super::super::StagingUsage::default());
         Ok(())
     }
+
+    #[test]
+    fn residual_cleanup_closes_new_sources_and_grants_even_during_signing() -> TestResult {
+        use super::super::staging::StagingDirectory;
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+        if !isolated("residual_cleanup_closes_new_sources_and_grants_even_during_signing")? {
+            return Ok(());
+        }
+
+        let staged = StagedInstallation::stage_execution()?;
+        for during_signing in [false, true] {
+            let ledger = StagingLedger::new(super::super::StagingLimits {
+                aggregate_bytes: 512 * 1024 * 1024,
+            });
+            let (mut prepared, mut provider, mut selector) = prepared_pair(&staged, &ledger)?;
+            let (failed, failed_provider, failed_selector) = prepared_pair(&staged, &ledger)?;
+            let temporary = tempfile::tempdir()?;
+            std::fs::set_permissions(temporary.path(), std::fs::Permissions::from_mode(0o700))?;
+            let held = File::open(temporary.path())?;
+            let owner = held.metadata()?.uid();
+            let staging = StagingDirectory::from_held_directory(held, owner)?;
+            let input = staging.create_input([6; 16], failed)?;
+            let leaf = temporary.path().join("06".repeat(16));
+            let residual = temporary.path().join("residual");
+            std::fs::write(&leaf, b"retained owned bytes")?;
+            let fail_cleanup = || -> io::Result<()> {
+                std::fs::rename(&leaf, &residual)?;
+                std::fs::create_dir(&leaf)?;
+                drop(input);
+                Ok(())
+            };
+            let result = if during_signing {
+                prepared.send_grant(&mut provider, |message| {
+                    fail_cleanup()?;
+                    Ok(StagedInstallation::sign_grant(message))
+                })
+            } else {
+                fail_cleanup()?;
+                prepared.send_grant(&mut provider, |_| {
+                    Err(io::Error::other(
+                        "closed admission must not invoke the signer",
+                    ))
+                })
+            };
+            assert!(matches!(result, Err(StagingError::CleanupFailed)));
+            assert_eq!(std::fs::read(residual)?, b"retained owned bytes");
+            let (mut next_provider, _next_selector) = UnixStream::pair()?;
+            assert!(matches!(
+                PreparedProviderExecution::receive(&mut next_provider, &ledger),
+                Err(StagingError::CleanupFailed)
+            ));
+            drop((prepared, provider, failed_provider, failed_selector));
+            assert_eq!(selector.read(&mut [0])?, 0);
+            assert_eq!(ledger.usage().reserved_bytes, 0);
+            assert_eq!(ledger.usage().leaked_files, 1);
+            assert!(matches!(
+                ledger.reserve_storage(0),
+                Err(StagingError::CleanupFailed)
+            ));
+        }
+        Ok(())
+    }
 }

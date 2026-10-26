@@ -44,6 +44,13 @@ Attempt and queued-input counts preserve the minimum of the candidate's ceiling
 and every live counted reservation's ceiling under one lock. Retained output
 keeps the original attempt counted once. Failed admission releases its partial
 reservations; successful inputs retain their bytes and execution context.
+If private-file unlink fails, the ledger permanently closes admission before
+releasing its charge. All source, storage, attempt and output reservations,
+grant rechecks and launch rechecks then refuse, including already prepared
+contexts. An unexpectedly absent private leaf also closes admission. Dropping
+reservations or raising control floors cannot reopen this ledger. Lifecycle
+reconciliation must prove removal of residual resources before installing a
+fresh ledger; this slice exposes no reopen operation.
 
 Selector and provider must be upgraded together while admission is closed.
 There is no SPX1-only fallback. The record schemas and digest preimages are
