@@ -212,6 +212,22 @@ impl ProviderImageSnapshot {
         &self.binary
     }
 
+    /// Runtime signing identity selected by the authenticated SPM1.
+    #[must_use]
+    pub fn runtime_attestation_key_id(&self) -> &str {
+        &self
+            .admitted
+            .provider()
+            .manifest()
+            .runtime_attestation_key_id
+    }
+
+    /// Runtime verifying key authenticated during provider admission.
+    #[must_use]
+    pub const fn runtime_attestation_key(&self) -> &ed25519_dalek::VerifyingKey {
+        self.admitted.provider().runtime_attestation_key()
+    }
+
     /// Join this snapshot's retained image to the currently installed authority.
     ///
     /// The fixed installation is reopened: a pending SIR1 update rejects, and
@@ -795,6 +811,12 @@ pub mod tests {
         );
         let checked = check_image(&snapshot.admitted, &request, fixture_time)?;
         assert_eq!(snapshot.proof(), &checked.proof);
+        let runtime = snapshot.admitted.runtime_attestation_key()?;
+        assert_eq!(snapshot.runtime_attestation_key_id(), runtime.key_id);
+        assert_eq!(
+            snapshot.runtime_attestation_key().to_bytes(),
+            runtime.public_key
+        );
         let binary = snapshot.provider_binary();
         let retained = snapshot
             .admitted

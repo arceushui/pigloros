@@ -318,7 +318,9 @@ impl CheckedRoot {
 
     /// A rechecked root for requested-state unit tests, where no mount exists.
     #[cfg(test)]
-    pub(crate) fn for_test(root_directory: ActivatedRootDirectory) -> std::io::Result<Self> {
+    pub(crate) fn for_test(
+        root_directory: ActivatedRootDirectory,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         Ok(Self {
             root_directory,
             #[cfg(target_os = "linux")]
@@ -326,8 +328,7 @@ impl CheckedRoot {
                 crate::test_fixtures::ATTEMPT,
                 crate::test_fixtures::authority(),
                 pos_reference::sandbox_provider_protocol::SandboxExecutionMode::AirGapped,
-            )
-            .map_err(std::io::Error::other)?,
+            )?,
         })
     }
 }

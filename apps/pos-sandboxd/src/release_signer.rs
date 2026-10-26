@@ -10,6 +10,9 @@
 //! caller has verified as provider-owned and private; owned by the provider
 //! uid; mode 0400 or 0600; exactly 32 raw bytes holding the Ed25519 seed. The runtime-attestation key ID comes from
 //! the admitted SPM1, never from the file.
+//! The production `ProviderReleaseBarrier` enforces that selected ID and
+//! verifies each signature under the independently admitted public key before
+//! permitting a release packet to be sent.
 
 use std::fs::File;
 use std::io::{self, Read};

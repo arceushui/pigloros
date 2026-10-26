@@ -32,15 +32,15 @@ pub(crate) fn checked_root(attempt: &AdmittedAttempt) -> crate::CheckedRoot {
 
 /// One independently measured executable fixture per test process. Reusing
 /// immutable facts avoids hashing the large instrumented test binary per case.
-pub(crate) fn launcher_facts() -> TestResult<crate::attempt::LauncherFacts> {
-    static FACTS: std::sync::OnceLock<crate::attempt::LauncherFacts> = std::sync::OnceLock::new();
+pub(crate) fn launcher_facts() -> TestResult<crate::LauncherFacts> {
+    static FACTS: std::sync::OnceLock<crate::LauncherFacts> = std::sync::OnceLock::new();
     if let Some(facts) = FACTS.get() {
         return Ok(facts.clone());
     }
     let path = std::env::current_exe()?;
     let file = File::open(&path)?;
     let metadata = file.metadata()?;
-    let facts = crate::attempt::LauncherFacts {
+    let facts = crate::LauncherFacts {
         path: path.to_string_lossy().into_owned(),
         digest: pos_reference::sandbox_provider_protocol::blake3_digest_of(&file)?,
         length: metadata.len(),
@@ -60,6 +60,11 @@ pub const RESPONSE: &[u8] = b"exact response";
 
 /// The result type of the tests.
 pub type TestResult<T = ()> = Result<T, Box<dyn Error>>;
+
+/// Fixed, explicitly admitted runtime signing identity for in-process tests.
+pub const RUNTIME_KEY_ID: &str = "runtime-key";
+/// Seed belonging to that test-only admitted public key.
+pub const RUNTIME_SEED: [u8; 32] = [0x52; 32];
 
 #[must_use]
 pub const fn authority() -> AdmittedAuthority {

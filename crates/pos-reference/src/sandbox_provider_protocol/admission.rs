@@ -504,6 +504,10 @@ impl AdmittedSandboxImage {
 }
 
 impl AdmittedSandboxProvider {
+    pub(crate) const fn runtime_attestation_key(&self) -> &ed25519_dalek::VerifyingKey {
+        &self.runtime_key
+    }
+
     pub(crate) fn authenticate_describe_response(
         &self,
         bytes: &[u8],

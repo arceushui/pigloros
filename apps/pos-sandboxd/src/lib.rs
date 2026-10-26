@@ -42,6 +42,16 @@ mod transient_unit;
 #[derive(Debug)]
 struct CgroupRoot(std::fs::File);
 
+/// Facts copied only from the authenticated, retained SIC1 provider binary.
+#[cfg(target_os = "linux")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct LauncherFacts {
+    path: String,
+    digest: [u8; 32],
+    length: u64,
+    identity: (u64, u64),
+}
+
 #[cfg(target_os = "linux")]
 pub use attempt::{ActiveAttempt, AdmittedAttempt};
 #[cfg(target_os = "linux")]

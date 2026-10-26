@@ -467,15 +467,12 @@ fn observe_executable(pid: u32) -> Result<FdIdentity, BarrierError> {
 struct HeldLauncher {
     file: File,
     identity: FdIdentity,
-    facts: crate::attempt::LauncherFacts,
+    facts: crate::LauncherFacts,
 }
 
 /// Identify the very descriptor opened from the running process.
 /// Holding it through the handshake prevents a path/stat/hash substitution.
-fn hold_launcher(
-    pid: u32,
-    facts: &crate::attempt::LauncherFacts,
-) -> Result<HeldLauncher, BarrierError> {
+fn hold_launcher(pid: u32, facts: &crate::LauncherFacts) -> Result<HeldLauncher, BarrierError> {
     let file =
         File::open(format!("/proc/{pid}/exe")).map_err(|_| BarrierError::LauncherIdentity)?;
     verify_launcher_identity(&file, facts)?;
@@ -499,7 +496,7 @@ fn hold_launcher(
     })
 }
 
-fn verify_launcher(file: &File, facts: &crate::attempt::LauncherFacts) -> Result<(), BarrierError> {
+fn verify_launcher(file: &File, facts: &crate::LauncherFacts) -> Result<(), BarrierError> {
     verify_launcher_identity(file, facts)?;
     let digest = blake3_digest_of(file).map_err(|_| BarrierError::LauncherIdentity)?;
     if digest != facts.digest {
@@ -508,10 +505,7 @@ fn verify_launcher(file: &File, facts: &crate::attempt::LauncherFacts) -> Result
     Ok(())
 }
 
-fn verify_launcher_identity(
-    file: &File,
-    facts: &crate::attempt::LauncherFacts,
-) -> Result<(), BarrierError> {
+fn verify_launcher_identity(file: &File, facts: &crate::LauncherFacts) -> Result<(), BarrierError> {
     let metadata = file
         .metadata()
         .map_err(|_| BarrierError::LauncherIdentity)?;
@@ -616,6 +610,37 @@ fn require_multi_thread() -> Result<(), BarrierError> {
     }
 }
 
+/// The low-level signing port cannot supply its own admission authority.
+/// RLS1 rejects a zero signature, so a mismatched ID or unverifiable signature
+/// fails before the release packet can be serialized or sent.
+struct AdmittedReleaseSigner<'a> {
+    signer: &'a dyn ReleaseSigner,
+    attempt: &'a AdmittedAttempt,
+}
+
+impl ReleaseSigner for AdmittedReleaseSigner<'_> {
+    fn runtime_attestation_key_id(&self) -> &str {
+        self.attempt.runtime_key_id()
+    }
+
+    fn sign(&self, message: &[u8]) -> [u8; 64] {
+        if self.signer.runtime_attestation_key_id() != self.attempt.runtime_key_id() {
+            return [0; 64];
+        }
+        let signature = self.signer.sign(message);
+        if self
+            .attempt
+            .runtime_key()
+            .verify_strict(message, &ed25519_dalek::Signature::from_bytes(&signature))
+            .is_ok()
+        {
+            signature
+        } else {
+            [0; 64]
+        }
+    }
+}
+
 impl<S, I, R, O> ProviderReleaseBarrier<S, I, R, O>
 where
     S: ReleaseSigner + Send + Sync,
@@ -663,10 +688,13 @@ where
             refusal: RefCell::new(None),
         };
         let provider_end = &self.provider_end;
-        let signer = &self.signer;
+        let signer = AdmittedReleaseSigner {
+            signer: &self.signer,
+            attempt: &self.admitted,
+        };
         let released = tokio::task::block_in_place(|| {
             bound_channel(provider_end, attempt.deadline())?;
-            release_after_ready(provider_end, main_pid, &expected, &bounded, signer)
+            release_after_ready(provider_end, main_pid, &expected, &bounded, &signer)
                 .map_err(BarrierError::Release)
         });
         let release = released

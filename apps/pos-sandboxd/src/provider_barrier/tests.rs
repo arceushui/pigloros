@@ -1,7 +1,7 @@
 use std::{
     io::IoSlice,
     mem::MaybeUninit,
-    os::fd::OwnedFd as StdOwnedFd,
+    os::{fd::OwnedFd as StdOwnedFd, unix::fs::PermissionsExt},
     sync::atomic::AtomicUsize,
     thread::{self, JoinHandle},
 };
@@ -16,7 +16,7 @@ use rustix::{
 use super::*;
 use crate::test_fixtures::{authority, TestResult, ATTEMPT};
 
-const KEY_ID: &str = "runtime-key";
+const KEY_ID: &str = crate::test_fixtures::RUNTIME_KEY_ID;
 const EXPECTED_READBACK: [u8; 32] = [5; 32];
 const OBSERVED_READBACK: [u8; 32] = [6; 32];
 const INVOCATION: [u8; 16] = [0x12; 16];
@@ -28,11 +28,12 @@ const GENEROUS_MS: u64 = 30_000;
 
 struct TestSigner {
     key: SigningKey,
+    key_id: &'static str,
 }
 
 impl ReleaseSigner for TestSigner {
     fn runtime_attestation_key_id(&self) -> &str {
-        KEY_ID
+        self.key_id
     }
 
     fn sign(&self, message: &[u8]) -> [u8; 64] {
@@ -148,7 +149,7 @@ enum Refusal {
 }
 
 type RootCheck = Box<dyn Fn() -> Result<CheckedRoot, ImageActivationError> + Send + Sync>;
-type TestBarrier = ProviderReleaseBarrier<TestSigner, TestIdentity, RootCheck, TestObserved>;
+type TestBarrier<S = TestSigner> = ProviderReleaseBarrier<S, TestIdentity, RootCheck, TestObserved>;
 
 fn root_check(refusal: Refusal, attempt: &AdmittedAttempt) -> RootCheck {
     if matches!(refusal, Refusal::RootFails) {
@@ -159,10 +160,11 @@ fn root_check(refusal: Refusal, attempt: &AdmittedAttempt) -> RootCheck {
     }
 }
 
-fn test_signer() -> TestResult<TestSigner> {
-    Ok(TestSigner {
-        key: SigningKey::from_bytes(&fresh_nonce()?),
-    })
+fn test_signer() -> TestSigner {
+    TestSigner {
+        key: SigningKey::from_bytes(&crate::test_fixtures::RUNTIME_SEED),
+        key_id: KEY_ID,
+    }
 }
 
 /// A barrier for `attempt` whose manager reports `claimed_pid`.
@@ -185,7 +187,7 @@ fn barrier_with(
         BarrierEvidence {
             adapter_identity: ADAPTER_IDENTITY,
         },
-        test_signer()?,
+        test_signer(),
         identity,
         check,
     )?)
@@ -206,7 +208,7 @@ fn own_pid() -> u32 {
     std::process::id()
 }
 
-fn ready_for(barrier: &TestBarrier) -> TestResult<LauncherReady> {
+fn ready_for<S>(barrier: &TestBarrier<S>) -> TestResult<LauncherReady> {
     let parameters = &barrier.parameters;
     Ok(LauncherReady::new(LauncherReadyFields {
         attempt_id: parameters.attempt_id,
@@ -253,7 +255,9 @@ fn receive_release(unit_end: &StdOwnedFd) -> Option<ExecutionRelease> {
 
 /// A launcher that answers with a correct `ReadyV1` and reports the release it
 /// receives.
-fn launcher(barrier: &mut TestBarrier) -> TestResult<JoinHandle<Option<ExecutionRelease>>> {
+fn launcher<S: ReleaseSigner + Send + Sync>(
+    barrier: &mut TestBarrier<S>,
+) -> TestResult<JoinHandle<Option<ExecutionRelease>>> {
     let attempt = barrier.admitted.clone();
     let unit_end = StdOwnedFd::from(barrier.prepare(&attempt)?.1);
     let ready = ready_for(barrier)?.to_canonical_cbor()?;
@@ -287,7 +291,7 @@ fn check_release(barrier: &TestBarrier, received: Option<&ExecutionRelease>) -> 
     assert_eq!(fields.observed_readback_digest, OBSERVED_READBACK);
     assert_eq!(fields.runtime_attestation_key_id, KEY_ID);
     assert!(fields.deadline_monotonic_ns > monotonic_ns());
-    release.verify_signature(&barrier.signer.key.verifying_key())?;
+    release.verify_signature(barrier.admitted.runtime_key())?;
     Ok(())
 }
 
@@ -796,7 +800,7 @@ fn an_executable_must_match_the_admitted_inode_length_and_actual_digest() -> Tes
     let path = directory.path().join("launcher");
     std::fs::write(&path, b"admitted executable")?;
     let metadata = std::fs::metadata(&path)?;
-    let facts = crate::attempt::LauncherFacts {
+    let facts = crate::LauncherFacts {
         path: path.to_string_lossy().into_owned(),
         digest: *blake3::hash(b"admitted executable").as_bytes(),
         length: metadata.len(),
@@ -864,6 +868,45 @@ async fn a_recheck_for_another_admitted_context_cannot_authorize_release() -> Te
             Err(BarrierError::Refused(RecheckRefusal::Root(
                 ImageActivationError::EvidenceMismatch
             )))
+        ));
+        assert!(barrier.sent_release().is_none());
+        drop(barrier);
+        assert!(launcher.join().map_err(|_| "launcher thread")?.is_none());
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_safe_key_file_cannot_substitute_another_runtime_signing_identity() -> TestResult {
+    for (key_id, seed) in [
+        ("foreign-runtime-key", crate::test_fixtures::RUNTIME_SEED),
+        (KEY_ID, [0x53; 32]),
+    ] {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("key");
+        std::fs::write(&path, seed)?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400))?;
+        let held = File::open(directory.path())?;
+        let signer = crate::KeyFileReleaseSigner::open(
+            &held,
+            "key",
+            held.metadata()?.uid(),
+            key_id.to_owned(),
+        )?;
+        let (parts, attempt) =
+            barrier_for(SandboxExecutionMode::AirGapped, Refusal::None, own_pid())?;
+        let mut barrier = ProviderReleaseBarrier::new(
+            &attempt,
+            fresh_nonce()?,
+            parts.evidence,
+            signer,
+            parts.identity,
+            parts.check,
+        )?;
+        let launcher = launcher(&mut barrier)?;
+        assert!(matches!(
+            barrier.release(&active(attempt, GENEROUS_MS)).await,
+            Err(BarrierError::Release(ReleaseBarrierError::Sign(_)))
         ));
         assert!(barrier.sent_release().is_none());
         drop(barrier);

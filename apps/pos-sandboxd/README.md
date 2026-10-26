@@ -148,6 +148,10 @@ The root recheck also returns the complete admitted context in its opaque
 `CheckedRoot` proof. Both prelaunch execution and the final release check
 reject a proof from another context, including a changed authority for the
 same attempt ID.
+The attempt also retains the SPM1-selected runtime key ID and authenticated
+verifying key. The production barrier requires that ID from its signer and
+verifies the produced signature under the admitted key before sending any
+release; a safe but incorrect key file cannot authorize execution.
 `AdmittedAttempt` derives the launcher source, byte length, BLAKE3 digest and
 device/inode from the authenticated SIC1 role-11 provider executable. Neither
 the execute job nor barrier evidence can supply a separate path or digest.

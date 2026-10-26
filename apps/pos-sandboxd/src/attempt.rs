@@ -15,7 +15,9 @@ use pos_reference::{
     },
 };
 
-use crate::{AdmittedEntry, ExecuteError, PreparedAttemptDirectory, TransientServiceUnitName};
+use crate::{
+    AdmittedEntry, ExecuteError, LauncherFacts, PreparedAttemptDirectory, TransientServiceUnitName,
+};
 
 /// The launch-policy view of an admitted attempt: everything a Local grant
 /// must agree with (request, authority block, launch policy digest and the
@@ -79,15 +81,8 @@ pub struct AdmittedAttempt {
     executable_digest: [u8; 32],
     launch: LaunchPolicyView,
     launcher: LauncherFacts,
-}
-
-/// Facts copied only from the authenticated, retained SIC1 provider binary.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct LauncherFacts {
-    pub(super) path: String,
-    pub(super) digest: [u8; 32],
-    pub(super) length: u64,
-    pub(super) identity: (u64, u64),
+    runtime_key_id: String,
+    runtime_key: ed25519_dalek::VerifyingKey,
 }
 
 impl AdmittedAttempt {
@@ -130,6 +125,8 @@ impl AdmittedAttempt {
                 length: binary.length(),
                 identity: binary.identity(),
             },
+            runtime_key_id: admission.snapshot().runtime_attestation_key_id().to_owned(),
+            runtime_key: *admission.snapshot().runtime_attestation_key(),
         })
     }
 
@@ -191,6 +188,14 @@ impl AdmittedAttempt {
         &self.launcher
     }
 
+    pub(crate) fn runtime_key_id(&self) -> &str {
+        &self.runtime_key_id
+    }
+
+    pub(crate) const fn runtime_key(&self) -> &ed25519_dalek::VerifyingKey {
+        &self.runtime_key
+    }
+
     /// The request the admission was granted for.
     pub(crate) const fn request_id(&self) -> [u8; 16] {
         self.launch.request_id
@@ -235,6 +240,9 @@ impl AdmittedAttempt {
                 network_capabilities: Vec::new(),
             },
             launcher: crate::test_fixtures::launcher_facts()?,
+            runtime_key_id: crate::test_fixtures::RUNTIME_KEY_ID.to_owned(),
+            runtime_key: ed25519_dalek::SigningKey::from_bytes(&crate::test_fixtures::RUNTIME_SEED)
+                .verifying_key(),
         })
     }
 
