@@ -11,8 +11,6 @@ import shutil
 import sys
 import tempfile
 import unittest
-from datetime import datetime, timezone
-from email.utils import format_datetime
 from pathlib import Path
 from unittest import mock
 
@@ -407,22 +405,22 @@ class UpstreamTests(WorkspaceTest):
         super().setUp()
         self.manifest = notices.load_toml(self.workspace.root, notices.MANIFEST)
         self.notices_dir = self.workspace.root / notices.NOTICES_DIR
-        self.upstream: dict[str, bytes] = {}
+        self.upstream: dict[tuple[str, str, str], bytes] = {}
         for component in self.manifest["component"]:
             for entry in component["file"]:
-                url = notices.raw_url(component["repository"], component["commit"], entry["path"])
+                key = (component["repository"], component["commit"], entry["path"])
                 data = (self.notices_dir / entry["local"]).read_bytes()
                 if "lines" in entry:
                     # Stand in for the full upstream file around the excerpt.
                     data += b"the rest of the upstream file\n"
                     entry["sha256"] = notices.sha256(data)
-                self.upstream[url] = data
+                self.upstream[key] = data
         rust = next(c for c in self.manifest["component"] if c["id"] == "rust")
         for path, data in (
             ("library/Cargo.lock", STD_LOCK),
             ("library/std/Cargo.toml", STD_MANIFEST),
         ):
-            self.upstream[notices.raw_url(rust["repository"], rust["commit"], path)] = data.encode()
+            self.upstream[(rust["repository"], rust["commit"], path)] = data.encode()
         self.tags = {
             (component["repository"], component["tag"]): component["commit"]
             for component in self.manifest["component"]
@@ -438,7 +436,7 @@ class UpstreamTests(WorkspaceTest):
         return notices.upstream_errors(
             self.manifest,
             self.notices_dir,
-            fetch=self.upstream.__getitem__,
+            fetch=lambda repository, commit, path: self.upstream[(repository, commit, path)],
             tag_commit=lambda repository, tag: self.tags[(repository, tag)],
             submodule_commit=lambda repository, tag, path: self.submodules[(repository, tag, path)],
         )
@@ -469,7 +467,7 @@ class UpstreamTests(WorkspaceTest):
 
     def test_changed_rust_std_inputs_fail(self) -> None:
         rust = next(c for c in self.manifest["component"] if c["id"] == "rust")
-        url = notices.raw_url(rust["repository"], rust["commit"], "library/Cargo.lock")
+        url = (rust["repository"], rust["commit"], "library/Cargo.lock")
         self.upstream[url] += b"# changed\n"
         self.assertIn(
             "rust_std upstream library/Cargo.lock does not match its sha256", self.run_check()
@@ -477,7 +475,7 @@ class UpstreamTests(WorkspaceTest):
 
     def test_excerpt_must_equal_upstream_lines(self) -> None:
         component, entry = self.excerpt_entry()
-        url = notices.raw_url(component["repository"], component["commit"], entry["path"])
+        url = (component["repository"], component["commit"], entry["path"])
         full = b"line one\nline two\nline three\nline four\nline five\nline six\n"
         self.upstream[url] = full
         entry["sha256"] = notices.sha256(full)
@@ -490,100 +488,79 @@ class UpstreamTests(WorkspaceTest):
         with self.assertRaisesRegex(notices.NoticeError, "fewer than"):
             self.run_check()
 
-    def test_raw_url_and_excerpt(self) -> None:
-        self.assertEqual(
-            notices.raw_url("https://github.com/a/b", "c" * 40, "x/LICENSE"),
-            f"https://raw.githubusercontent.com/a/b/{'c' * 40}/x/LICENSE",
-        )
+    def test_excerpt_preserves_bytes(self) -> None:
         self.assertEqual(notices.excerpt_bytes(b"1\n2\n3\n", [2, 3]), b"2\n3\n")
 
 
-class FetchTests(unittest.TestCase):
-    URL = "https://raw.githubusercontent.com/example/project/commit/LICENSE"
-
-    def test_success_returns_exact_bytes_without_waiting(self) -> None:
-        response = mock.MagicMock()
-        response.__enter__.return_value.read.return_value = b"exact upstream bytes\n"
-        with (
-            mock.patch.object(notices.urllib.request, "urlopen", return_value=response) as fetch,
-            mock.patch.object(notices.time, "sleep") as sleep,
-        ):
-            self.assertEqual(notices.fetch_url(self.URL), b"exact upstream bytes\n")
-        fetch.assert_called_once_with(self.URL, timeout=60)
-        sleep.assert_not_called()
-
-    def test_transient_failure_waits_before_fetching_again(self) -> None:
-        response = mock.MagicMock()
-        response.__enter__.return_value.read.return_value = b"verified next\n"
-        calls = mock.Mock()
-        with (
-            mock.patch.object(
-                notices.urllib.request, "urlopen", side_effect=[OSError("reset"), response]
-            ) as fetch,
-            mock.patch.object(notices.time, "sleep") as sleep,
-        ):
-            calls.attach_mock(fetch, "fetch")
-            calls.attach_mock(sleep, "sleep")
-            self.assertEqual(notices.fetch_url(self.URL), b"verified next\n")
-        self.assertEqual(fetch.call_count, 2)
-        sleep.assert_called_once_with(60)
-        self.assertEqual(
-            calls.mock_calls,
-            [mock.call.fetch(self.URL, timeout=60), mock.call.sleep(60), mock.call.fetch(self.URL, timeout=60)],
-        )
-
-    def test_exhaustion_is_bounded_and_preserves_the_failure(self) -> None:
-        error = notices.urllib.error.HTTPError(self.URL, 429, "Too Many Requests", {}, None)
-        with (
-            mock.patch.object(notices.urllib.request, "urlopen", side_effect=error) as fetch,
-            mock.patch.object(notices.time, "sleep") as sleep,
-        ):
-            with self.assertRaisesRegex(notices.NoticeError, "429: Too Many Requests"):
-                notices.fetch_url(self.URL)
-        self.assertEqual(fetch.call_count, 3)
-        self.assertEqual(sleep.call_args_list, [mock.call(60), mock.call(120)])
-
-    def test_retry_after_seconds_and_http_date_are_respected(self) -> None:
-        now = datetime(2026, 10, 27, tzinfo=timezone.utc)
-        for value in [
-            "90",
-            format_datetime(datetime(2026, 10, 27, 0, 1, 30, tzinfo=timezone.utc), usegmt=True),
-        ]:
-            error = notices.urllib.error.HTTPError(
-                self.URL, 429, "rate limited", {"Retry-After": value}, None
+class PinnedGitFilesTests(unittest.TestCase):
+    def test_real_git_reads_the_pinned_revision_without_newline_conversion(self) -> None:
+        with tempfile.TemporaryDirectory() as work:
+            root = Path(work)
+            source = root / "source"
+            source.mkdir()
+            notices.git("init", "--quiet", cwd=source)
+            payload = b"license\r\n\x00\xff\n"
+            (source / "LICENSE").write_bytes(payload)
+            notices.git("add", "LICENSE", cwd=source)
+            notices.git(
+                "-c", "user.name=notice-test", "-c", "user.email=notice-test@example.invalid",
+                "-c", "core.hooksPath=/dev/null", "commit", "--quiet", "-m", "pinned", cwd=source,
             )
-            response = mock.MagicMock()
-            response.__enter__.return_value.read.return_value = b"after cooldown\n"
-            with (
-                mock.patch.object(notices, "datetime") as clock,
-                mock.patch.object(
-                    notices.urllib.request, "urlopen", side_effect=[error, response]
-                ),
-                mock.patch.object(notices.time, "sleep") as sleep,
-            ):
-                clock.now.return_value = now
-                self.assertEqual(notices.fetch_url(self.URL), b"after cooldown\n")
-                sleep.assert_called_once_with(90)
-
-    def test_malformed_or_past_retry_after_uses_the_backoff(self) -> None:
-        for value in ["bad", "-1", "0", "Mon, 01 Jan 2001 00:00:00 GMT"]:
-            error = notices.urllib.error.HTTPError(
-                self.URL, 503, "unavailable", {"Retry-After": value}, None
+            commit = notices.git("rev-parse", "HEAD", cwd=source).strip()
+            (source / "LICENSE").write_bytes(b"changed\n")
+            notices.git("add", "LICENSE", cwd=source)
+            notices.git(
+                "-c", "user.name=notice-test", "-c", "user.email=notice-test@example.invalid",
+                "-c", "core.hooksPath=/dev/null", "commit", "--quiet", "-m", "later", cwd=source,
             )
-            self.assertEqual(notices.fetch_retry_delay(error, 0), 60)
+            cache = root / "cache"
+            cache.mkdir()
+            reader = notices._PinnedGitFiles(cache)
+            self.assertEqual(reader.read(str(source), commit, "LICENSE"), payload)
+            with self.assertRaisesRegex(notices.NoticeError, "missing"):
+                reader.read(str(source), commit, "missing")
 
-    def test_long_server_delay_fails_without_retrying_early(self) -> None:
-        error = notices.urllib.error.HTTPError(
-            self.URL, 429, "rate limited", {"Retry-After": "3600"}, None
-        )
+    def test_pinned_files_share_only_the_same_repository_and_revision(self) -> None:
+        repository = "https://github.com/example/project"
+        commit = "c" * 40
+        payload = b"license\r\n\x00\xff\n"
         with (
-            mock.patch.object(notices.urllib.request, "urlopen", side_effect=error) as fetch,
-            mock.patch.object(notices.time, "sleep") as sleep,
+            tempfile.TemporaryDirectory() as work,
+            mock.patch.object(notices, "git") as git,
+            mock.patch.object(notices, "_git_bytes", return_value=payload) as blob,
         ):
-            with self.assertRaisesRegex(notices.NoticeError, "429"):
-                notices.fetch_url(self.URL)
-        fetch.assert_called_once()
-        sleep.assert_not_called()
+            reader = notices._PinnedGitFiles(Path(work))
+            for repo, revision, path in [
+                (repository, commit, "LICENSE"),
+                (repository, commit, "nested/NOTICE"),
+                (repository, "d" * 40, "LICENSE"),
+                (repository + "-other", commit, "LICENSE"),
+            ]:
+                self.assertEqual(reader.read(repo, revision, path), payload)
+            self.assertEqual(len(reader.repositories), 3)
+            first = Path(work) / "0"
+            self.assertIn(mock.call(
+                "fetch", "--quiet", "--depth=1", "--filter=blob:none", "--no-tags",
+                "origin", commit, cwd=first,
+            ), git.call_args_list)
+            self.assertEqual(sum(call.args[0] == "fetch" for call in git.call_args_list), 3)
+            self.assertEqual(blob.call_args_list[:2], [
+                mock.call("cat-file", "blob", f"{commit}:LICENSE", cwd=first),
+                mock.call("cat-file", "blob", f"{commit}:nested/NOTICE", cwd=first),
+            ])
+        self.assertFalse(first.exists())
+
+    def test_failed_fetch_is_not_cached_or_replaced_by_local_bytes(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as work,
+            mock.patch.object(notices, "git", side_effect=notices.NoticeError("unavailable")),
+            mock.patch.object(notices, "_git_bytes") as blob,
+        ):
+            reader = notices._PinnedGitFiles(Path(work))
+            with self.assertRaisesRegex(notices.NoticeError, "unavailable"):
+                reader.read("https://github.com/example/project", "c" * 40, "LICENSE")
+            self.assertEqual(reader.repositories, {})
+            blob.assert_not_called()
 
 
 class GitTests(unittest.TestCase):
@@ -610,7 +587,7 @@ class GitTests(unittest.TestCase):
                 notices.git("fetch")
 
     def test_git_succeeds_after_a_transient_failure(self) -> None:
-        results = [notices.subprocess.CalledProcessError(1, "git", stderr="reset"), "ok"]
+        results = [notices.subprocess.CalledProcessError(1, "git", stderr=b"reset"), b"ok"]
 
         def flaky(command, **kwargs):
             result = results.pop(0)
@@ -620,6 +597,17 @@ class GitTests(unittest.TestCase):
 
         with mock.patch.object(notices.subprocess, "run", flaky):
             self.assertEqual(notices.git("ls-remote"), "ok")
+
+    def test_git_preserves_binary_blobs_and_reports_binary_stderr(self) -> None:
+        payload = b"notice\r\n\xff\x00"
+        with mock.patch.object(notices.subprocess, "run") as run:
+            run.return_value.stdout = payload
+            self.assertEqual(notices._git_bytes("cat-file", "blob", "commit:LICENSE"), payload)
+            self.assertFalse(run.call_args.kwargs["text"])
+            self.assertIn("maintenance.auto=false", run.call_args.args[0])
+            run.side_effect = notices.subprocess.CalledProcessError(128, "git", stderr=b"missing \xff")
+            with self.assertRaisesRegex(notices.NoticeError, "missing"):
+                notices._git_bytes("cat-file", "blob", "commit:LICENSE")
 
 
 class RustStdReportTests(WorkspaceTest):
