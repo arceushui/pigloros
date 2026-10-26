@@ -11,6 +11,8 @@ import shutil
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timezone
+from email.utils import format_datetime
 from pathlib import Path
 from unittest import mock
 
@@ -492,75 +494,70 @@ class UpstreamTests(WorkspaceTest):
         self.assertEqual(notices.excerpt_bytes(b"1\n2\n3\n", [2, 3]), b"2\n3\n")
 
 
-class PinnedGitFilesTests(unittest.TestCase):
-    def test_real_git_reads_the_pinned_revision_without_newline_conversion(self) -> None:
-        with tempfile.TemporaryDirectory() as work:
-            root = Path(work)
-            source = root / "source"
-            source.mkdir()
-            notices.git("init", "--quiet", cwd=source)
-            payload = b"license\r\n\x00\xff\n"
-            (source / "LICENSE").write_bytes(payload)
-            notices.git("add", "LICENSE", cwd=source)
-            notices.git(
-                "-c", "user.name=notice-test", "-c", "user.email=notice-test@example.invalid",
-                "-c", "core.hooksPath=/dev/null", "commit", "--quiet", "-m", "pinned", cwd=source,
-            )
-            commit = notices.git("rev-parse", "HEAD", cwd=source).strip()
-            (source / "LICENSE").write_bytes(b"changed\n")
-            notices.git("add", "LICENSE", cwd=source)
-            notices.git(
-                "-c", "user.name=notice-test", "-c", "user.email=notice-test@example.invalid",
-                "-c", "core.hooksPath=/dev/null", "commit", "--quiet", "-m", "later", cwd=source,
-            )
-            cache = root / "cache"
-            cache.mkdir()
-            reader = notices._PinnedGitFiles(cache)
-            self.assertEqual(reader.read(str(source), commit, "LICENSE"), payload)
-            with self.assertRaisesRegex(notices.NoticeError, "missing"):
-                reader.read(str(source), commit, "missing")
+class FetchTests(unittest.TestCase):
+    REPOSITORY = "https://github.com/example/project"
+    COMMIT = "c" * 40
 
-    def test_pinned_files_share_only_the_same_repository_and_revision(self) -> None:
-        repository = "https://github.com/example/project"
-        commit = "c" * 40
+    def test_pinned_api_request_preserves_bytes_and_scopes_authentication(self) -> None:
         payload = b"license\r\n\x00\xff\n"
-        with (
-            tempfile.TemporaryDirectory() as work,
-            mock.patch.object(notices, "git") as git,
-            mock.patch.object(notices, "_git_bytes", return_value=payload) as blob,
-        ):
-            reader = notices._PinnedGitFiles(Path(work))
-            for repo, revision, path in [
-                (repository, commit, "LICENSE"),
-                (repository, commit, "nested/NOTICE"),
-                (repository, "d" * 40, "LICENSE"),
-                (repository + "-other", commit, "LICENSE"),
-            ]:
-                self.assertEqual(reader.read(repo, revision, path), payload)
-            self.assertEqual(len(reader.repositories), 3)
-            first = Path(work) / "0"
-            self.assertIn(mock.call(
-                "fetch", "--quiet", "--depth=1", "--filter=blob:none", "--no-tags",
-                "origin", commit, cwd=first,
-            ), git.call_args_list)
-            self.assertEqual(sum(call.args[0] == "fetch" for call in git.call_args_list), 3)
-            self.assertEqual(blob.call_args_list[:2], [
-                mock.call("cat-file", "blob", f"{commit}:LICENSE", cwd=first),
-                mock.call("cat-file", "blob", f"{commit}:nested/NOTICE", cwd=first),
-            ])
-        self.assertFalse(first.exists())
+        for token in ["", "test-only-placeholder"]:
+            with (
+                mock.patch.dict(notices.os.environ, {"GITHUB_TOKEN": token}),
+                mock.patch.object(notices.urllib.request, "build_opener") as build,
+            ):
+                build.return_value.open.return_value.__enter__.return_value.read.return_value = payload
+                self.assertEqual(notices.fetch_file(self.REPOSITORY, self.COMMIT, "nested/LICENSE #1"), payload)
+                request = build.return_value.open.call_args.args[0]
+                self.assertEqual(request.full_url,
+                    f"https://api.github.com/repos/example/project/contents/nested/LICENSE%20%231?ref={self.COMMIT}")
+                self.assertEqual(request.get_header("Accept"), "application/vnd.github.raw+json")
+                self.assertEqual(request.get_header("Authorization"), f"Bearer {token}" if token else None)
+                self.assertIsInstance(build.call_args.args[0], notices._NoRedirect)
+        self.assertIsNone(notices._NoRedirect().redirect_request(None, None, 302, "", {}, "https://other.invalid"))
 
-    def test_failed_fetch_is_not_cached_or_replaced_by_local_bytes(self) -> None:
+    def test_rate_limits_wait_then_fail_closed_without_local_fallback(self) -> None:
+        error = notices.urllib.error.HTTPError("https://api.github.com", 429, "rate limited", {}, None)
         with (
-            tempfile.TemporaryDirectory() as work,
-            mock.patch.object(notices, "git", side_effect=notices.NoticeError("unavailable")),
-            mock.patch.object(notices, "_git_bytes") as blob,
+            mock.patch.object(notices.urllib.request, "build_opener") as build,
+            mock.patch.object(notices.time, "sleep") as sleep,
         ):
-            reader = notices._PinnedGitFiles(Path(work))
-            with self.assertRaisesRegex(notices.NoticeError, "unavailable"):
-                reader.read("https://github.com/example/project", "c" * 40, "LICENSE")
-            self.assertEqual(reader.repositories, {})
-            blob.assert_not_called()
+            build.return_value.open.side_effect = error
+            with self.assertRaisesRegex(notices.NoticeError, "429"):
+                notices.fetch_file(self.REPOSITORY, self.COMMIT, "LICENSE")
+            self.assertEqual(build.return_value.open.call_count, 3)
+            self.assertEqual(sleep.call_args_list, [mock.call(60), mock.call(120)])
+
+    def test_transient_failure_then_success_and_permanent_failure(self) -> None:
+        with (
+            mock.patch.object(notices.urllib.request, "build_opener") as build,
+            mock.patch.object(notices.time, "sleep") as sleep,
+        ):
+            response = mock.MagicMock()
+            response.__enter__.return_value.read.return_value = b"notice\r\n"
+            build.return_value.open.side_effect = [OSError("reset"), response]
+            self.assertEqual(notices.fetch_file(self.REPOSITORY, self.COMMIT, "LICENSE"), b"notice\r\n")
+            sleep.assert_called_once_with(60)
+            sleep.reset_mock()
+            build.return_value.open.side_effect = notices.urllib.error.HTTPError("https://api.github.com", 404, "missing", {}, None)
+            with self.assertRaisesRegex(notices.NoticeError, "404"):
+                notices.fetch_file(self.REPOSITORY, self.COMMIT, "missing")
+            sleep.assert_not_called()
+
+    def test_server_retry_after_dates_reset_and_bounded_wait(self) -> None:
+        now = datetime(2026, 10, 27, tzinfo=timezone.utc)
+        cases = [
+            ({"Retry-After": "90"}, 90),
+            ({"Retry-After": format_datetime(datetime(2026, 10, 27, 0, 1, 30, tzinfo=timezone.utc), usegmt=True)}, 90),
+            ({"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": str(now.timestamp() + 89)}, 90),
+            ({"Retry-After": "bad"}, 60),
+            ({"Retry-After": "3600"}, None),
+            ({"X-RateLimit-Remaining": "0"}, 60),
+        ]
+        with mock.patch.object(notices, "datetime") as clock, mock.patch.object(notices.time, "time", return_value=now.timestamp()):
+            clock.now.return_value = now
+            for headers, expected in cases:
+                error = notices.urllib.error.HTTPError("https://api.github.com", 429, "rate limited", headers, None)
+                self.assertEqual(notices._retry_delay(error, 0), expected)
 
 
 class GitTests(unittest.TestCase):
@@ -587,7 +584,7 @@ class GitTests(unittest.TestCase):
                 notices.git("fetch")
 
     def test_git_succeeds_after_a_transient_failure(self) -> None:
-        results = [notices.subprocess.CalledProcessError(1, "git", stderr=b"reset"), b"ok"]
+        results = [notices.subprocess.CalledProcessError(1, "git", stderr=b"reset"), "ok"]
 
         def flaky(command, **kwargs):
             result = results.pop(0)
@@ -597,18 +594,6 @@ class GitTests(unittest.TestCase):
 
         with mock.patch.object(notices.subprocess, "run", flaky):
             self.assertEqual(notices.git("ls-remote"), "ok")
-
-    def test_git_preserves_binary_blobs_and_reports_binary_stderr(self) -> None:
-        payload = b"notice\r\n\xff\x00"
-        with mock.patch.object(notices.subprocess, "run") as run:
-            run.return_value.stdout = payload
-            self.assertEqual(notices._git_bytes("cat-file", "blob", "commit:LICENSE"), payload)
-            self.assertFalse(run.call_args.kwargs["text"])
-            self.assertIn("maintenance.auto=false", run.call_args.args[0])
-            run.side_effect = notices.subprocess.CalledProcessError(128, "git", stderr=b"missing \xff")
-            with self.assertRaisesRegex(notices.NoticeError, "missing"):
-                notices._git_bytes("cat-file", "blob", "commit:LICENSE")
-
 
 class RustStdReportTests(WorkspaceTest):
     def test_runs_cargo_about_on_std_with_the_release_features(self) -> None:
@@ -931,6 +916,9 @@ class WorkflowContractTests(unittest.TestCase):
 
     def test_generator_pins_cargo_about_and_runs_every_stage(self) -> None:
         steps = self.reusable["jobs"]["notices"]["steps"]
+        verification = [step for step in steps if "verify-upstream" in step.get("run", "")]
+        self.assertEqual(len(verification), 1)
+        self.assertEqual(verification[0].get("env"), {"GITHUB_TOKEN": "${{ github.token }}"})
         installs = [step for step in steps if step.get("uses", "").startswith("taiki-e/")]
         self.assertEqual(
             installs,

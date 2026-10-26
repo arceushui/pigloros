@@ -36,8 +36,14 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import tomllib
+import urllib.error
+import urllib.parse
+import urllib.request
 from collections.abc import Callable
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -77,6 +83,7 @@ TEXT_NAME = "THIRD-PARTY-NOTICES.txt"
 INDEX_NAME = "third-party-notices.json"
 RULE = "=" * 78
 FETCH_ATTEMPTS = 3
+FETCH_MAX_RETRY_WAIT_SECONDS = 300
 
 
 class NoticeError(Exception):
@@ -365,8 +372,8 @@ def offline_errors(root: Path) -> list[str]:
 GIT_TIMEOUT_SECONDS = 300
 
 
-def _git_bytes(*args: str, cwd: Path | None = None) -> bytes:
-    """Run Git without newline conversion, including for binary notice blobs."""
+def git(*args: str, cwd: Path | None = None) -> str:
+    """Run Git, retrying transient failures and reporting stderr on failure."""
     failure = ""
     for _ in range(FETCH_ATTEMPTS):
         try:
@@ -375,7 +382,7 @@ def _git_bytes(*args: str, cwd: Path | None = None) -> bytes:
                 cwd=cwd,
                 check=True,
                 capture_output=True,
-                text=False,
+                text=True,
                 timeout=GIT_TIMEOUT_SECONDS,
             ).stdout
         except subprocess.CalledProcessError as error:
@@ -386,33 +393,54 @@ def _git_bytes(*args: str, cwd: Path | None = None) -> bytes:
     raise NoticeError(f"git {' '.join(args)} failed: {failure}")
 
 
-def git(*args: str, cwd: Path | None = None) -> str:
-    """Run Git and decode its textual metadata."""
-    return _git_bytes(*args, cwd=cwd).decode()
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        # Never forward the workflow token outside the fixed API origin.
+        return None
 
 
-class _PinnedGitFiles:
-    """Read exact pinned blobs without checkout or a separate raw-file service."""
+def _retry_delay(error: OSError, attempt: int) -> float | None:
+    delay = float(60 * 2**attempt)
+    if isinstance(error, urllib.error.HTTPError):
+        if error.code not in (403, 429) and error.code < 500:
+            return None
+        headers = error.headers or {}
+        try:
+            if value := headers.get("Retry-After"):
+                requested = (
+                    float(value) if value.isascii() and value.isdecimal()
+                    else (parsedate_to_datetime(value) - datetime.now(timezone.utc)).total_seconds()
+                )
+                delay = max(delay, requested)
+            elif headers.get("X-RateLimit-Remaining") == "0":
+                delay = max(delay, float(headers["X-RateLimit-Reset"]) - time.time() + 1)
+        except (KeyError, ValueError, TypeError, OverflowError):
+            pass
+    # Fail closed rather than retry before the server permits or exceed the job budget.
+    return delay if delay <= FETCH_MAX_RETRY_WAIT_SECONDS else None
 
-    def __init__(self, work: Path):
-        self.work = work
-        self.repositories: dict[tuple[str, str], Path] = {}
 
-    def read(self, repository: str, commit: str, path: str) -> bytes:
-        key = (repository, commit)
-        if key not in self.repositories:
-            directory = self.work / str(len(self.repositories))
-            directory.mkdir()
-            git("init", "--bare", "--quiet", cwd=directory)
-            git("remote", "add", "origin", repository, cwd=directory)
-            git("config", "remote.origin.promisor", "true", cwd=directory)
-            git("config", "remote.origin.partialclonefilter", "blob:none", cwd=directory)
-            git(
-                "fetch", "--quiet", "--depth=1", "--filter=blob:none", "--no-tags",
-                "origin", commit, cwd=directory,
-            )
-            self.repositories[key] = directory
-        return _git_bytes("cat-file", "blob", f"{commit}:{path}", cwd=self.repositories[key])
+def fetch_file(repository: str, commit: str, path: str) -> bytes:
+    """Fetch exact pinned file bytes from the API, optionally authenticated in CI."""
+    slug = urllib.parse.quote(repository.removeprefix("https://github.com/"), safe="/")
+    name = urllib.parse.quote(path, safe="/")
+    url = f"https://api.github.com/repos/{slug}/contents/{name}?{urllib.parse.urlencode({'ref': commit})}"
+    headers = {"Accept": "application/vnd.github.raw+json", "User-Agent": "pigloros-notice-verifier"}
+    if token := os.environ.get("GITHUB_TOKEN"):
+        headers["Authorization"] = f"Bearer {token}"
+    opener = urllib.request.build_opener(_NoRedirect())
+    failure = ""
+    for attempt in range(FETCH_ATTEMPTS):
+        try:
+            with opener.open(urllib.request.Request(url, headers=headers), timeout=60) as response:
+                return response.read()
+        except OSError as error:
+            failure = str(error)
+            delay = _retry_delay(error, attempt)
+            if attempt + 1 == FETCH_ATTEMPTS or delay is None:
+                break
+            time.sleep(delay)
+    raise NoticeError(f"could not fetch {url}: {failure}")
 
 
 def resolve_tag(repository: str, tag: str) -> str:
@@ -447,23 +475,9 @@ def excerpt_bytes(data: bytes, lines: list[int]) -> bytes:
 def upstream_errors(
     manifest: dict,
     notices_dir: Path,
-    fetch: Callable[[str, str, str], bytes] | None = None,
+    fetch: Callable[[str, str, str], bytes] = fetch_file,
     tag_commit: Callable[[str, str], str] = resolve_tag,
     submodule_commit: Callable[[str, str, str], str] = resolve_submodule,
-) -> list[str]:
-    with tempfile.TemporaryDirectory() as work:
-        return _upstream_errors(
-            manifest, notices_dir, fetch or _PinnedGitFiles(Path(work)).read,
-            tag_commit, submodule_commit,
-        )
-
-
-def _upstream_errors(
-    manifest: dict,
-    notices_dir: Path,
-    fetch: Callable[[str, str, str], bytes],
-    tag_commit: Callable[[str, str], str],
-    submodule_commit: Callable[[str, str, str], str],
 ) -> list[str]:
     errors: list[str] = []
     for component in manifest.get("component", []):
