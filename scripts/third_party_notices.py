@@ -36,9 +36,13 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import tomllib
+import urllib.error
 import urllib.request
 from collections.abc import Callable
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -78,6 +82,8 @@ TEXT_NAME = "THIRD-PARTY-NOTICES.txt"
 INDEX_NAME = "third-party-notices.json"
 RULE = "=" * 78
 FETCH_ATTEMPTS = 3
+FETCH_RETRY_BASE_SECONDS = 60
+FETCH_RETRY_MAX_SECONDS = 120
 
 
 class NoticeError(Exception):
@@ -363,14 +369,42 @@ def offline_errors(root: Path) -> list[str]:
 # ── Upstream verification ────────────────────────────────────────────────────
 
 
+def fetch_retry_delay(error: OSError, attempt: int) -> float | None:
+    # GitHub asks clients without a Retry-After to wait at least one minute,
+    # then back off: https://docs.github.com/en/rest/using-the-rest-api/best-practices-for-using-the-rest-api#handle-rate-limit-errors-appropriately
+    delay = float(FETCH_RETRY_BASE_SECONDS * 2**attempt)
+    if isinstance(error, urllib.error.HTTPError) and error.headers:
+        retry_after = error.headers.get("Retry-After", "").strip()
+        if retry_after:
+            try:
+                requested = (
+                    float(retry_after)
+                    if retry_after.isascii() and retry_after.isdecimal()
+                    else (
+                        parsedate_to_datetime(retry_after) - datetime.now(timezone.utc)
+                    ).total_seconds()
+                )
+                delay = max(delay, requested)
+            except (ValueError, TypeError, OverflowError):
+                pass
+    # Never retry earlier than the server permits to fit our bounded wait.
+    return delay if delay <= FETCH_RETRY_MAX_SECONDS else None
+
+
 def fetch_url(url: str) -> bytes:
     last: Exception | None = None
-    for _ in range(FETCH_ATTEMPTS):
+    for attempt in range(FETCH_ATTEMPTS):
         try:
             with urllib.request.urlopen(url, timeout=60) as response:  # noqa: S310
                 return response.read()
         except OSError as error:
             last = error
+            if attempt + 1 == FETCH_ATTEMPTS:
+                break
+            delay = fetch_retry_delay(error, attempt)
+            if delay is None:
+                break
+            time.sleep(delay)
     raise NoticeError(f"could not fetch {url}: {last}")
 
 

@@ -11,6 +11,8 @@ import shutil
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timezone
+from email.utils import format_datetime
 from pathlib import Path
 from unittest import mock
 
@@ -494,6 +496,94 @@ class UpstreamTests(WorkspaceTest):
             f"https://raw.githubusercontent.com/a/b/{'c' * 40}/x/LICENSE",
         )
         self.assertEqual(notices.excerpt_bytes(b"1\n2\n3\n", [2, 3]), b"2\n3\n")
+
+
+class FetchTests(unittest.TestCase):
+    URL = "https://raw.githubusercontent.com/example/project/commit/LICENSE"
+
+    def test_success_returns_exact_bytes_without_waiting(self) -> None:
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = b"exact upstream bytes\n"
+        with (
+            mock.patch.object(notices.urllib.request, "urlopen", return_value=response) as fetch,
+            mock.patch.object(notices.time, "sleep") as sleep,
+        ):
+            self.assertEqual(notices.fetch_url(self.URL), b"exact upstream bytes\n")
+        fetch.assert_called_once_with(self.URL, timeout=60)
+        sleep.assert_not_called()
+
+    def test_transient_failure_waits_before_fetching_again(self) -> None:
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = b"verified next\n"
+        calls = mock.Mock()
+        with (
+            mock.patch.object(
+                notices.urllib.request, "urlopen", side_effect=[OSError("reset"), response]
+            ) as fetch,
+            mock.patch.object(notices.time, "sleep") as sleep,
+        ):
+            calls.attach_mock(fetch, "fetch")
+            calls.attach_mock(sleep, "sleep")
+            self.assertEqual(notices.fetch_url(self.URL), b"verified next\n")
+        self.assertEqual(fetch.call_count, 2)
+        sleep.assert_called_once_with(60)
+        self.assertEqual(
+            calls.mock_calls,
+            [mock.call.fetch(self.URL, timeout=60), mock.call.sleep(60), mock.call.fetch(self.URL, timeout=60)],
+        )
+
+    def test_exhaustion_is_bounded_and_preserves_the_failure(self) -> None:
+        error = notices.urllib.error.HTTPError(self.URL, 429, "Too Many Requests", {}, None)
+        with (
+            mock.patch.object(notices.urllib.request, "urlopen", side_effect=error) as fetch,
+            mock.patch.object(notices.time, "sleep") as sleep,
+        ):
+            with self.assertRaisesRegex(notices.NoticeError, "429: Too Many Requests"):
+                notices.fetch_url(self.URL)
+        self.assertEqual(fetch.call_count, 3)
+        self.assertEqual(sleep.call_args_list, [mock.call(60), mock.call(120)])
+
+    def test_retry_after_seconds_and_http_date_are_respected(self) -> None:
+        now = datetime(2026, 10, 27, tzinfo=timezone.utc)
+        for value in [
+            "90",
+            format_datetime(datetime(2026, 10, 27, 0, 1, 30, tzinfo=timezone.utc), usegmt=True),
+        ]:
+            error = notices.urllib.error.HTTPError(
+                self.URL, 429, "rate limited", {"Retry-After": value}, None
+            )
+            response = mock.MagicMock()
+            response.__enter__.return_value.read.return_value = b"after cooldown\n"
+            with (
+                mock.patch.object(notices, "datetime") as clock,
+                mock.patch.object(
+                    notices.urllib.request, "urlopen", side_effect=[error, response]
+                ),
+                mock.patch.object(notices.time, "sleep") as sleep,
+            ):
+                clock.now.return_value = now
+                self.assertEqual(notices.fetch_url(self.URL), b"after cooldown\n")
+                sleep.assert_called_once_with(90)
+
+    def test_malformed_or_past_retry_after_uses_the_backoff(self) -> None:
+        for value in ["bad", "-1", "0", "Mon, 01 Jan 2001 00:00:00 GMT"]:
+            error = notices.urllib.error.HTTPError(
+                self.URL, 503, "unavailable", {"Retry-After": value}, None
+            )
+            self.assertEqual(notices.fetch_retry_delay(error, 0), 60)
+
+    def test_long_server_delay_fails_without_retrying_early(self) -> None:
+        error = notices.urllib.error.HTTPError(
+            self.URL, 429, "rate limited", {"Retry-After": "3600"}, None
+        )
+        with (
+            mock.patch.object(notices.urllib.request, "urlopen", side_effect=error) as fetch,
+            mock.patch.object(notices.time, "sleep") as sleep,
+        ):
+            with self.assertRaisesRegex(notices.NoticeError, "429"):
+                notices.fetch_url(self.URL)
+        fetch.assert_called_once()
+        sleep.assert_not_called()
 
 
 class GitTests(unittest.TestCase):
