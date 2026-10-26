@@ -28,7 +28,7 @@ use pos_reference::sandbox_provider_protocol::{
     serve_proxy, LocalNetworkAdmission, LocalNetworkSession, LocalProxyBinding,
     NetworkCaptureStore, NetworkEndpointConnector,
 };
-use zvariant::OwnedFd;
+use zbus::OwnedFd;
 
 use crate::AdmittedAttempt;
 

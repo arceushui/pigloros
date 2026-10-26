@@ -182,7 +182,7 @@ fn work_mount_property_has_the_exact_dbus_encoding() -> Result<(), Box<dyn Error
                 <Vec<(String, String)> as Type>::SIGNATURE.to_string(),
                 "a(ss)"
             );
-            let encoded = to_bytes(Context::new_dbus(LE, 0), value)?;
+            let encoded = to_bytes(Context::new(LE, 0), value)?;
             let (decoded, consumed): (Vec<(String, String)>, usize) = encoded.deserialize()?;
             assert_eq!(decoded, *value);
             assert_eq!(consumed, encoded.len());
@@ -860,7 +860,7 @@ fn every_value_kind_keeps_its_dbus_signature() {
 }
 
 #[test]
-fn the_two_name_list_kinds_clone_as_themselves() -> Result<(), zvariant::Error> {
+fn the_two_name_list_kinds_clone_as_themselves() -> Result<(), zbus::Error> {
     let filter = SystemdTransientUnitValue::SystemCallFilter((true, vec!["read".to_owned()]));
     let families = SystemdTransientUnitValue::RestrictAddressFamilies((true, Vec::new()));
     assert!(matches!(

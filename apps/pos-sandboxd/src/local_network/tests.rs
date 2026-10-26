@@ -166,10 +166,7 @@ impl Parties {
 }
 
 /// Send the planned request over the adapter end and return the response.
-fn adapter_exchange(
-    adapter: zvariant::OwnedFd,
-    plan: &NetworkExchangePlan,
-) -> Result<Vec<u8>, String> {
+fn adapter_exchange(adapter: zbus::OwnedFd, plan: &NetworkExchangePlan) -> Result<Vec<u8>, String> {
     let mut stream = UnixStream::from(std::os::fd::OwnedFd::from(adapter));
     NetworkExchangeRequest::new(plan, REQUEST)
         .map_err(|error| error.to_string())?

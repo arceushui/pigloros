@@ -37,7 +37,7 @@ use pos_reference::sandbox_provider_protocol::{
     NetworkEndpointConnector, NetworkExchangePlan, NetworkExchangeTranscript,
     ReplayedNetworkExchange, SandboxExecutionMode,
 };
-use zvariant::OwnedFd;
+use zbus::OwnedFd;
 
 use crate::{
     ActivatedRootDirectory, ActiveAttempt, AdmittedAttempt, BoundLocalProxy, CheckedLocal,

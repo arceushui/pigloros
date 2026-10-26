@@ -154,7 +154,7 @@ pub fn bound_proxy<C>(
     plan: NetworkExchangePlan,
     address: SocketAddr,
     connector: C,
-) -> TestResult<(zvariant::OwnedFd, crate::BoundLocalProxy, C)> {
+) -> TestResult<(zbus::OwnedFd, crate::BoundLocalProxy, C)> {
     let (adapter, channel) = crate::HostServiceChannel::pair(ATTEMPT)?;
     let admission = admission(
         ATTEMPT,

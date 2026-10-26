@@ -20,7 +20,7 @@ use pos_reference::sandbox_provider_protocol::{
     LocalNetworkTermination, NetworkCaptureStore, NetworkExchangePlan, NetworkExchangeReply,
     NetworkExchangeRequest, SandboxArchitecture, SandboxExecutionMode, SandboxLimit,
 };
-use zvariant::OwnedFd;
+use zbus::OwnedFd;
 
 use super::*;
 use crate::test_fixtures::{
