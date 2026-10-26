@@ -83,11 +83,11 @@ pub struct AdmittedAttempt {
 
 /// Facts copied only from the authenticated, retained SIC1 provider binary.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct LauncherFacts {
-    pub(crate) path: String,
-    pub(crate) digest: [u8; 32],
-    pub(crate) length: u64,
-    pub(crate) identity: (u64, u64),
+pub(super) struct LauncherFacts {
+    pub(super) path: String,
+    pub(super) digest: [u8; 32],
+    pub(super) length: u64,
+    pub(super) identity: (u64, u64),
 }
 
 impl AdmittedAttempt {
