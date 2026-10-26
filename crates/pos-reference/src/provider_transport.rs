@@ -879,7 +879,7 @@ impl ProviderTransport {
                         PostAdmissionProviderFailure::TerminalUnavailable,
                     )
                 }
-                _ => refusal,
+                ProviderTransportError::AfterAdmission { .. } => refusal,
             })?;
         let result = self.execute_once(admitted, source, input, deadline, progress);
         progress.admission.entered();
