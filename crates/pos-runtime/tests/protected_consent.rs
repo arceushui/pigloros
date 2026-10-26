@@ -2310,17 +2310,19 @@ fn protected_recovery_fails_closed_after_the_consent_gate_is_unbound() {
     assert_eq!(test_ok(store.logical_head(timeline)), Seq::ZERO);
 }
 
-struct ActivationDraftDriver;
+struct ReservedDraftDriver {
+    event_type: &'static str,
+}
 
-impl Driver for ActivationDraftDriver {
+impl Driver for ReservedDraftDriver {
     fn name(&self) -> &'static str {
-        "activation-draft"
+        "reserved-draft"
     }
 
     fn step(&mut self, _: TimelineId, _: ObservationView<'_>) -> Result<StepOutput, RuntimeError> {
         Ok(StepOutput::new(vec![EventDraft::new(
             EntityId::new(),
-            Kind::new(RESERVED_ACTIVATION_TYPE),
+            Kind::new(self.event_type),
             CanonicalBytes::from_static(b"activation"),
         )]))
     }
@@ -2336,7 +2338,9 @@ fn a_driver_draft_of_the_reserved_activation_type_is_rejected_and_discarded() ->
     register_output_driver(
         &mut registry,
         RESERVED_ACTIVATION_TYPE,
-        Box::new(ActivationDraftDriver),
+        Box::new(ReservedDraftDriver {
+            event_type: RESERVED_ACTIVATION_TYPE,
+        }),
     );
     let owned = registry.plugin_ownership_rows();
     assert_eq!(owned.len(), 1);
@@ -2350,5 +2354,42 @@ fn a_driver_draft_of_the_reserved_activation_type_is_rejected_and_discarded() ->
         }
     }
     assert_eq!(store.logical_head(timeline)?, Seq::ZERO);
+    Ok(())
+}
+
+#[test]
+fn subject_data_driver_drafts_are_refused_without_pending_or_committed_output() -> TestResult {
+    let mut store = admission_store();
+    let timeline = store.create_timeline("subject-data-driver")?.id();
+    let ancestry = root_ancestry(timeline);
+    let mut registry = PluginRegistry::new();
+    register_output_driver(
+        &mut registry,
+        "plugin.allowed.v1",
+        Box::new(ReservedDraftDriver {
+            event_type: "subject.data.v1",
+        }),
+    );
+    for _ in 0..2 {
+        let error = test_err(registry.step_all_anchored(timeline, &ancestry, Seq::ZERO));
+        assert!(matches!(&error, RuntimeError::ReservedHostDraft { .. }));
+        assert!(error.to_string().contains("subject.data.v1"));
+        let error = test_err(registry.tick_cadenced_anchored(timeline, &ancestry, 0, Seq::ZERO));
+        assert!(matches!(&error, RuntimeError::ReservedHostDraft { .. }));
+        assert!(error.to_string().contains("subject.data.v1"));
+    }
+    assert_eq!(store.logical_head(timeline)?, Seq::ZERO);
+
+    let mut allowed = PluginRegistry::new();
+    register_output_driver(
+        &mut allowed,
+        "plugin.allowed.v1",
+        Box::new(ReservedDraftDriver {
+            event_type: "plugin.allowed.v1",
+        }),
+    );
+    let output = allowed.step_all_anchored(timeline, &ancestry, Seq::ZERO)?;
+    assert_eq!(output.len(), 1);
+    assert_eq!(output[0].event_type.as_str(), "plugin.allowed.v1");
     Ok(())
 }
