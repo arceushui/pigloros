@@ -4,7 +4,10 @@ use pos_sandboxd::{
     SystemdHardeningReadback, SystemdHardeningReadbackValue, SystemdHardeningValue,
     TransientUnitHardening, TransientUnitHardeningError,
 };
-use zvariant::{serialized::Context, to_bytes, Value, LE};
+use zbus::{
+    wire::{serialized::Context, to_bytes, LE},
+    Variant,
+};
 
 #[test]
 fn static_hardening_bundle_has_exact_names_values_signatures_and_dbus_roundtrips(
@@ -92,29 +95,29 @@ const fn expected_static_hardening_properties(
 fn assert_dbus_roundtrip(value: SystemdHardeningValue) -> Result<(), Box<dyn Error>> {
     match value {
         SystemdHardeningValue::Bool(value) => {
-            assert_eq!(Value::from(value).value_signature().to_string(), "b");
-            let encoded = to_bytes(Context::new_dbus(LE, 0), &value)?;
+            assert_eq!(Variant::from(value).value_signature().to_string(), "b");
+            let encoded = to_bytes(Context::new(LE, 0), &value)?;
             let (decoded, consumed): (bool, usize) = encoded.deserialize()?;
             assert_eq!(decoded, value);
             assert_eq!(consumed, encoded.len());
         }
         SystemdHardeningValue::String(value) => {
-            assert_eq!(Value::from(value).value_signature().to_string(), "s");
-            let encoded = to_bytes(Context::new_dbus(LE, 0), &value)?;
+            assert_eq!(Variant::from(value).value_signature().to_string(), "s");
+            let encoded = to_bytes(Context::new(LE, 0), &value)?;
             let (decoded, consumed): (String, usize) = encoded.deserialize()?;
             assert_eq!(decoded, value);
             assert_eq!(consumed, encoded.len());
         }
         SystemdHardeningValue::U64(value) => {
-            assert_eq!(Value::from(value).value_signature().to_string(), "t");
-            let encoded = to_bytes(Context::new_dbus(LE, 0), &value)?;
+            assert_eq!(Variant::from(value).value_signature().to_string(), "t");
+            let encoded = to_bytes(Context::new(LE, 0), &value)?;
             let (decoded, consumed): (u64, usize) = encoded.deserialize()?;
             assert_eq!(decoded, value);
             assert_eq!(consumed, encoded.len());
         }
         SystemdHardeningValue::U32(value) => {
-            assert_eq!(Value::from(value).value_signature().to_string(), "u");
-            let encoded = to_bytes(Context::new_dbus(LE, 0), &value)?;
+            assert_eq!(Variant::from(value).value_signature().to_string(), "u");
+            let encoded = to_bytes(Context::new(LE, 0), &value)?;
             let (decoded, consumed): (u32, usize) = encoded.deserialize()?;
             assert_eq!(decoded, value);
             assert_eq!(consumed, encoded.len());
@@ -122,10 +125,10 @@ fn assert_dbus_roundtrip(value: SystemdHardeningValue) -> Result<(), Box<dyn Err
         SystemdHardeningValue::StringArray(value) => {
             let value = value.iter().map(ToString::to_string).collect::<Vec<_>>();
             assert_eq!(
-                Value::from(value.clone()).value_signature().to_string(),
+                Variant::from(value.clone()).value_signature().to_string(),
                 "as"
             );
-            let encoded = to_bytes(Context::new_dbus(LE, 0), &value)?;
+            let encoded = to_bytes(Context::new(LE, 0), &value)?;
             let (decoded, consumed): (Vec<String>, usize) = encoded.deserialize()?;
             assert_eq!(decoded, value);
             assert_eq!(consumed, encoded.len());

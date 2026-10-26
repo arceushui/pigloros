@@ -251,7 +251,7 @@ mod tests {
         let subscribed = Arc::new(AtomicBool::new(false));
         let guid = Guid::generate();
         let (server_socket, client_socket) = Channel::pair();
-        let server = Builder::authenticated_socket(server_socket, guid.clone())?
+        let server = Builder::authenticated_socket(server_socket, guid.clone())
             .p2p()
             .serve_at(
                 "/org/freedesktop/systemd1",
@@ -261,9 +261,9 @@ mod tests {
                     subscribed: Arc::clone(&subscribed),
                     fault,
                 },
-            )?
+            )
             .build();
-        let client = Builder::authenticated_socket(client_socket, guid)?
+        let client = Builder::authenticated_socket(client_socket, guid)
             .p2p()
             .build();
         let (server, client) = tokio::join!(server, client);

@@ -3,7 +3,10 @@ use std::error::Error;
 use pos_conformance::SandboxSyscallSetV1;
 use pos_reference::sandbox_provider_protocol::{SandboxArchitecture, SandboxProviderProtocolError};
 use pos_sandboxd::{SystemCallFilter, SystemCallFilterError};
-use zvariant::{serialized::Context, to_bytes, Value, LE};
+use zbus::{
+    wire::{serialized::Context, to_bytes, LE},
+    Variant,
+};
 
 const X86_64: &[u8] = include_bytes!(
     "../../../crates/pos-conformance/vectors/systemd-provider-v260.2/systemd-v260.2-x86_64.scs1.cbor"
@@ -31,10 +34,10 @@ fn production_requests_have_exact_dbus_type_and_roundtrip() -> Result<(), Box<dy
         let request = filter.requested_property();
         assert_eq!(request, (true, authority.requested_names));
         assert_eq!(
-            Value::from(request.clone()).value_signature().to_string(),
+            Variant::from(request.clone()).value_signature().to_string(),
             "(bas)"
         );
-        let encoded = to_bytes(Context::new_dbus(LE, 0), &request)?;
+        let encoded = to_bytes(Context::new(LE, 0), &request)?;
         let (decoded, consumed): ((bool, Vec<String>), usize) = encoded.deserialize()?;
         assert_eq!(decoded, request);
         assert_eq!(consumed, encoded.len());

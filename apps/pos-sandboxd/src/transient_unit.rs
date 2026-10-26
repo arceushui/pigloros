@@ -1,7 +1,7 @@
 //! Typed dynamic systemd transient-unit launch properties.
 
 use pos_reference::sandbox_provider_protocol::SandboxLimit;
-use zvariant::{Fd, OwnedFd};
+use zbus::{Fd, OwnedFd};
 
 use crate::{
     SystemCallFilter, SystemdDynamicPropertyKind, SystemdHardeningProperty,
@@ -257,7 +257,7 @@ pub enum SystemdTransientUnitValue {
 }
 
 impl SystemdTransientUnitValue {
-    fn try_clone_for_submission(&self) -> Result<Self, zvariant::Error> {
+    fn try_clone_for_submission(&self) -> Result<Self, zbus::Error> {
         match self {
             Self::Static(value) => Ok(Self::Static(*value)),
             Self::RootDirectory(value) => Ok(Self::RootDirectory(value.clone())),
@@ -364,14 +364,14 @@ impl SystemdTransientUnitProperty {
             }
     }
 
-    fn try_clone_for_submission(&self) -> Result<Self, zvariant::Error> {
+    fn try_clone_for_submission(&self) -> Result<Self, zbus::Error> {
         Self::from_cloned_value(self.kind, self.value.try_clone_for_submission())
     }
 
     fn from_cloned_value(
         kind: SystemdTransientUnitPropertyKind,
-        value: Result<SystemdTransientUnitValue, zvariant::Error>,
-    ) -> Result<Self, zvariant::Error> {
+        value: Result<SystemdTransientUnitValue, zbus::Error>,
+    ) -> Result<Self, zbus::Error> {
         Ok(Self {
             kind,
             value: value?,
@@ -625,7 +625,7 @@ impl TransientUnitRequest {
 
     pub(crate) fn requested_properties_for_submission(
         &self,
-    ) -> Result<Vec<SystemdTransientUnitProperty>, zvariant::Error> {
+    ) -> Result<Vec<SystemdTransientUnitProperty>, zbus::Error> {
         self.properties
             .iter()
             .map(SystemdTransientUnitProperty::try_clone_for_submission)

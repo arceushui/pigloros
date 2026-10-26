@@ -54,7 +54,7 @@ mod tests {
 
     use super::*;
     use crate::{CgroupRoot, TransientServiceUnitName};
-    use zbus::zvariant::OwnedObjectPath;
+    use zbus::OwnedObjectPath;
 
     struct Fixture {
         _root: tempfile::TempDir,
