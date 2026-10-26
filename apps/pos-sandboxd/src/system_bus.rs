@@ -554,7 +554,7 @@ impl SystemdTransientUnitTransport {
         unit_name: &TransientServiceUnitName,
     ) -> Result<P, SystemdTransientUnitTransportError>
     where
-        P: zbus::proxy::ProxyImpl<'static> + From<zbus::Proxy<'static>>,
+        P: zbus::proxy::ProxyImpl<'static> + zbus::proxy::Defaults + From<zbus::Proxy<'static>>,
     {
         let path = self.unit_path_of(unit_name).await?;
         P::builder(&self.connection)

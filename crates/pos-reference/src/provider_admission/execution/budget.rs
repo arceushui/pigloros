@@ -49,7 +49,7 @@ struct State {
 }
 
 impl State {
-    fn ensure_open(&self) -> Result<(), StagingError> {
+    const fn ensure_open(&self) -> Result<(), StagingError> {
         if self.usage.leaked_files == 0 {
             Ok(())
         } else {
