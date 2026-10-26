@@ -4121,8 +4121,8 @@ mod tests {
 
     fn generation_fence_provider(
         listener: &UnixListener,
-        entered: std::sync::mpsc::Sender<()>,
-        release: std::sync::mpsc::Receiver<()>,
+        entered: &std::sync::mpsc::Sender<()>,
+        release: &std::sync::mpsc::Receiver<()>,
     ) -> Result<(), String> {
         (|| -> TestResult {
             let (mut stream, _) = listener.accept()?;
@@ -4161,7 +4161,7 @@ mod tests {
             // unauthorized retry cannot hide behind a connection failure.
             let listener = &listener;
             let provider = scope.spawn(move || {
-                generation_fence_provider(listener, request_entered_tx, release_provider_rx)
+                generation_fence_provider(listener, &request_entered_tx, &release_provider_rx)
             });
             scope.spawn(|| {
                 let result = transport
