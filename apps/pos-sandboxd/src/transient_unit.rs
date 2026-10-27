@@ -463,7 +463,7 @@ impl SystemdTransientUnitValue {
 
     /// Clone the list-valued kinds that carry no descriptor. Every other kind
     /// is named, so a new kind does not compile until it is placed.
-    fn clone_lists(&self) -> Result<Self, zvariant::Error> {
+    fn clone_lists(&self) -> Result<Self, zbus::Error> {
         match self {
             Self::TemporaryFileSystem(value) => Ok(Self::TemporaryFileSystem(value.clone())),
             Self::ExecStart(value) => Ok(Self::ExecStart(value.clone())),
@@ -473,7 +473,7 @@ impl SystemdTransientUnitValue {
             | Self::SystemCallFilter(_)
             | Self::RestrictAddressFamilies(_)
             | Self::Numeric(_)
-            | Self::ExtraFileDescriptors(_) => Err(zvariant::Error::IncorrectType),
+            | Self::ExtraFileDescriptors(_) => Err(zbus::Error::IncorrectType),
         }
     }
 }

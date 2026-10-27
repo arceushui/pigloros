@@ -559,7 +559,6 @@ impl SystemdTransientUnitTransport {
         let path = self.unit_path_of(unit_name).await?;
         P::builder(&self.connection)
             .path(path)
-            .map_err(SystemdTransientUnitTransportError::ServiceProxy)?
             .cache_properties(CacheProperties::No)
             .build()
             .await

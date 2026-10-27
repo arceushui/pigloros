@@ -53,7 +53,7 @@ use rustix::{
     },
     time::{clock_gettime, ClockId},
 };
-use zvariant::OwnedFd;
+use zbus::OwnedFd;
 
 use crate::{
     release_after_ready, ActiveAttempt, AdmittedAttempt, CheckedRoot, ExpectedLauncherReady,
