@@ -76,7 +76,7 @@ mod cases {
     struct Call {
         operation: &'static str,
         unit: TransientServiceUnitName,
-        kernel_command: Vec<u8>,
+        kernel_command: Option<Vec<u8>>,
     }
 
     struct Host {
@@ -106,7 +106,8 @@ mod cases {
                 .push(Call {
                     operation,
                     unit,
-                    kernel_command: fs::read(self.directory.join("cgroup.kill"))?,
+                    // A missing kernel file must not hide a manager attempt.
+                    kernel_command: fs::read(self.directory.join("cgroup.kill")).ok(),
                 });
             match action {
                 Action::Ack => Ok(()),
@@ -197,7 +198,7 @@ mod cases {
             vec![Call {
                 operation: "stop",
                 unit: fixture.unit,
-                kernel_command: b"0".to_vec(),
+                kernel_command: Some(b"0".to_vec()),
             }]
         );
         assert_eq!(fs::read(fixture.directory.join("cgroup.kill"))?, b"0");
@@ -246,15 +247,34 @@ mod cases {
                 Call {
                     operation: "stop",
                     unit: fixture.unit.clone(),
-                    kernel_command: b"0".to_vec(),
+                    kernel_command: Some(b"0".to_vec()),
                 },
                 Call {
                     operation: "kill",
                     unit: fixture.unit,
-                    kernel_command: b"0".to_vec(),
+                    kernel_command: Some(b"0".to_vec()),
                 },
             ]
         );
+        assert_eq!(fs::read(fixture.directory.join("cgroup.kill"))?, b"1");
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn grace_deadline_caps_a_poll_that_would_finish_after_it() -> TestResult {
+        let mut fixture = Fixture::new(18)?;
+        let host = fixture.host(Action::Ack, Action::Empty);
+        let now = Instant::now();
+        let limits = AttemptShutdownDeadlines::new(
+            now + Duration::from_millis(95),
+            now + Duration::from_millis(195),
+            now + Duration::from_millis(495),
+        )?;
+        fixture.bound.stop_processes(&host, limits).await?;
+        assert!(Instant::now() >= limits.grace);
+        // Tokio rounds timer deadlines to milliseconds; no extra poll is allowed.
+        assert!(Instant::now() <= limits.grace + Duration::from_millis(1));
+        assert_eq!(host.calls()?.len(), 2);
         assert_eq!(fs::read(fixture.directory.join("cgroup.kill"))?, b"1");
         Ok(())
     }

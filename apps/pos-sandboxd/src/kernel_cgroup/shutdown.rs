@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use rustix::io::Errno;
-use tokio::time::{sleep_until, timeout_at, Instant};
+use tokio::time::{sleep, timeout_at, Instant};
 
 use super::{
     AttemptCgroupEmptyBasis, AttemptCgroupEmptyObservation, AttemptCgroupError, BoundAttemptCgroup,
@@ -160,7 +160,9 @@ impl BoundAttemptCgroup {
                 Err(AttemptShutdownError::Cgroup(AttemptCgroupError::StillPopulated)) => {}
                 result => return result,
             }
-            sleep_until((Instant::now() + EMPTY_POLL).min(deadline)).await;
+            // Either timer wakes the probe; its original deadline still gates
+            // the next observation, including when the poll ends late.
+            let _wake = timeout_at(deadline, sleep(EMPTY_POLL)).await;
         }
     }
 }
