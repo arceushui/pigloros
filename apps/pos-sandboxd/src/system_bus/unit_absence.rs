@@ -77,13 +77,15 @@ async fn wait_with_proxy(
 ) -> AbsenceResult {
     let proxy = proxy.map_err(SystemdTransientUnitTransportError::Proxy)?;
     loop {
-        match proxy.get_unit(unit_name.as_str().to_owned()).await {
-            Ok(_) => sleep(UNIT_POLL).await,
+        let looked_up = proxy.get_unit(unit_name.as_str().to_owned()).await;
+        match looked_up {
+            Ok(path) => drop(path),
             Err(zbus::Error::MethodError(name, _, _)) if name.as_str() == NO_SUCH_UNIT => {
                 return Ok(SystemdAttemptUnitAbsenceObservation { unit_name });
             }
             Err(error) => return Err(SystemdTransientUnitTransportError::UnitLookup(error)),
         }
+        sleep(UNIT_POLL).await;
     }
 }
 
