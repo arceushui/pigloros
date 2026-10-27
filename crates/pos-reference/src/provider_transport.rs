@@ -774,6 +774,7 @@ impl ProviderTransport {
         &self,
         admitted: &AdmittedSandboxProvider,
         commitment: &SelectorGrantCommitment,
+        evaluation: &crate::evaluator_protocol::EvaluationRequest,
         spx1: &[u8],
         input: &mut dyn ReadSeek,
         watchdog: Duration,
@@ -781,6 +782,12 @@ impl ProviderTransport {
     ) -> Result<AuthenticatedProviderTerminal, ProviderTransportError> {
         let request =
             SandboxExecuteRequest::from_canonical_cbor(spx1).map_err(transport_before_admission)?;
+        if evaluation.request_digest != request.authority.evr1_digest {
+            return Err(ProviderTransportError::BeforeAdmission);
+        }
+        let evaluation = evaluation
+            .to_canonical_cbor()
+            .map_err(transport_before_admission)?;
         validate_staged_input(&request.adapter_input, input).map_err(transport_before_admission)?;
         let deadline = Deadline::new(watchdog).map_err(transport_before_admission)?;
         let mut retained_grant = None;
@@ -788,41 +795,38 @@ impl ProviderTransport {
             retained_grant: &mut retained_grant,
             admission,
         };
-        if let Some(execution) = self.execute_initial_attempt(
-            admitted,
+        let source = ExecuteSource {
+            request,
+            evaluation: &evaluation,
             commitment,
-            &request,
-            spx1,
-            input,
-            &deadline,
-            &mut progress,
-        )? {
-            return Ok(execution);
-        }
-        self.execute_retry_attempt(
-            admitted,
-            commitment,
-            &request,
-            spx1,
-            input,
-            &deadline,
-            &mut progress,
-        )
+            bytes: spx1,
+        };
+        self.execute_initial_attempt(admitted, &source, input, &deadline, &mut progress)
+            .and_then(|first| {
+                first.map_or_else(
+                    || {
+                        self.execute_retry_attempt(
+                            admitted,
+                            &source,
+                            input,
+                            &deadline,
+                            &mut progress,
+                        )
+                    },
+                    Ok,
+                )
+            })
     }
 
     fn execute_initial_attempt(
         &self,
         admitted: &AdmittedSandboxProvider,
-        commitment: &SelectorGrantCommitment,
-        request: &SandboxExecuteRequest,
-        spx1: &[u8],
+        source: &ExecuteSource<'_>,
         input: &mut dyn ReadSeek,
         deadline: &Deadline,
         progress: &mut ProviderRequestProgress<'_>,
     ) -> Result<Option<AuthenticatedProviderTerminal>, ProviderTransportError> {
-        let first = self.execute_admitted_attempt(
-            admitted, commitment, request, spx1, input, deadline, progress,
-        )?;
+        let first = self.execute_admitted_attempt(admitted, source, input, deadline, progress)?;
         match first {
             Ok(execution) => Ok(Some(execution)),
             Err(ReceiveFailure::Invalid) => Err(classify_receive_failure(
@@ -836,16 +840,12 @@ impl ProviderTransport {
     fn execute_retry_attempt(
         &self,
         admitted: &AdmittedSandboxProvider,
-        commitment: &SelectorGrantCommitment,
-        request: &SandboxExecuteRequest,
-        spx1: &[u8],
+        source: &ExecuteSource<'_>,
         input: &mut dyn ReadSeek,
         deadline: &Deadline,
         progress: &mut ProviderRequestProgress<'_>,
     ) -> Result<AuthenticatedProviderTerminal, ProviderTransportError> {
-        let retry = self.execute_admitted_attempt(
-            admitted, commitment, request, spx1, input, deadline, progress,
-        )?;
+        let retry = self.execute_admitted_attempt(admitted, source, input, deadline, progress)?;
         match retry {
             Ok(execution) => Ok(execution),
             Err(ReceiveFailure::Invalid) => Err(classify_receive_failure(
@@ -862,17 +862,26 @@ impl ProviderTransport {
     fn execute_admitted_attempt(
         &self,
         admitted: &AdmittedSandboxProvider,
-        commitment: &SelectorGrantCommitment,
-        request: &SandboxExecuteRequest,
-        spx1: &[u8],
+        source: &ExecuteSource<'_>,
         input: &mut dyn ReadSeek,
         deadline: &Deadline,
         progress: &mut ProviderRequestProgress<'_>,
     ) -> Result<Result<AuthenticatedProviderTerminal, ReceiveFailure>, ProviderTransportError> {
-        progress.admission.begin()?;
-        let result = self.execute_once(
-            admitted, commitment, request, spx1, input, deadline, progress,
-        );
+        progress
+            .admission
+            .begin()
+            .map_err(|refusal| match refusal {
+                ProviderTransportError::BeforeAdmission => {
+                    // A closed generation can forbid recovery, but cannot undo
+                    // the AGR1 already authenticated on the original connection.
+                    classify_receive_failure(
+                        progress.retained_grant.as_ref(),
+                        PostAdmissionProviderFailure::TerminalUnavailable,
+                    )
+                }
+                ProviderTransportError::AfterAdmission { .. } => refusal,
+            })?;
+        let result = self.execute_once(admitted, source, input, deadline, progress);
         progress.admission.entered();
         Ok(result)
     }
@@ -883,6 +892,7 @@ impl ProviderTransport {
         &self,
         admitted: &AdmittedSandboxProvider,
         commitment: &SelectorGrantCommitment,
+        evaluation: &crate::evaluator_protocol::EvaluationRequest,
         spx1: &[u8],
         input: &[u8],
         watchdog: Duration,
@@ -890,6 +900,7 @@ impl ProviderTransport {
         self.execute_staged(
             admitted,
             commitment,
+            evaluation,
             spx1,
             &mut std::io::Cursor::new(input),
             watchdog,
@@ -900,13 +911,16 @@ impl ProviderTransport {
     fn execute_once(
         &self,
         admitted: &AdmittedSandboxProvider,
-        commitment: &SelectorGrantCommitment,
-        request: &SandboxExecuteRequest,
-        spx1: &[u8],
+        source: &ExecuteSource<'_>,
         input: &mut dyn ReadSeek,
         deadline: &Deadline,
         progress: &mut ProviderRequestProgress<'_>,
     ) -> Result<AuthenticatedProviderTerminal, ReceiveFailure> {
+        let ExecuteSource {
+            request,
+            commitment,
+            ..
+        } = source;
         deadline
             .remaining()
             .and_then(|remaining| {
@@ -919,26 +933,63 @@ impl ProviderTransport {
                     .map_err(receive_incomplete)
             })
             .and_then(|mut stream| {
-                write_frame(&mut stream, spx1, deadline)
-                    .and_then(|()| write_input(&mut stream, request, input, deadline))
-                    .and_then(|()| {
-                        stream
-                            .shutdown(std::net::Shutdown::Write)
-                            .map_err(receive_incomplete)
-                    })
-                    .and_then(|()| {
-                        progress.admission.entered();
-                        read_response(
-                            &mut stream,
+                read_initial_response(&mut stream, source, deadline).and_then(|first| {
+                    record_magic(&first).and_then(|magic| match magic.as_str() {
+                        "AGR1" => authenticate_initial_grant(
                             admitted,
                             commitment,
                             request,
-                            deadline,
-                            &mut *progress.retained_grant,
+                            progress.retained_grant,
+                            &first,
                         )
+                        .and_then(|grant| {
+                            write_input(&mut stream, request, input, deadline)
+                                .and_then(|()| {
+                                    stream
+                                        .shutdown(std::net::Shutdown::Write)
+                                        .map_err(receive_incomplete)
+                                })
+                                .and_then(|()| {
+                                    progress.admission.entered();
+                                    read_admitted_response(
+                                        &mut stream,
+                                        admitted,
+                                        request,
+                                        deadline,
+                                        first,
+                                        grant,
+                                    )
+                                })
+                        }),
+                        "SPE1" if progress.retained_grant.is_none() => stream
+                            .shutdown(std::net::Shutdown::Write)
+                            .map_err(receive_incomplete)
+                            .and_then(|()| {
+                                read_error_response(&mut stream, admitted, request, deadline, first)
+                            }),
+                        _ => Err(ReceiveFailure::Invalid),
                     })
+                })
             })
     }
+}
+
+struct ExecuteSource<'a> {
+    request: SandboxExecuteRequest,
+    evaluation: &'a [u8],
+    commitment: &'a SelectorGrantCommitment,
+    bytes: &'a [u8],
+}
+
+fn read_initial_response(
+    stream: &mut UnixStream,
+    source: &ExecuteSource<'_>,
+    deadline: &Deadline,
+) -> Result<Vec<u8>, ReceiveFailure> {
+    write_frame(stream, source.evaluation, deadline)
+        .and_then(|()| write_frame(stream, source.bytes, deadline))
+        .and_then(|()| read_frame(stream, deadline))
+        .and_then(|first| first.ok_or(ReceiveFailure::Incomplete))
 }
 
 fn validate_connected_endpoint(
@@ -1101,6 +1152,7 @@ fn encode_input_chunk(
         })
 }
 
+#[cfg(test)]
 fn read_response(
     stream: &mut UnixStream,
     admitted: &AdmittedSandboxProvider,
@@ -1113,15 +1165,16 @@ fn read_response(
         .and_then(|first| first.ok_or(ReceiveFailure::Incomplete))
         .and_then(|first| record_magic(&first).map(|magic| (first, magic)))
         .and_then(|(first, magic)| match magic.as_str() {
-            "AGR1" => read_admitted_response(
-                stream,
-                admitted,
-                commitment,
-                request,
-                deadline,
-                retained_grant,
-                first,
-            ),
+            "AGR1" => {
+                let grant = authenticate_initial_grant(
+                    admitted,
+                    commitment,
+                    request,
+                    retained_grant,
+                    &first,
+                )?;
+                read_admitted_response(stream, admitted, request, deadline, first, grant)
+            }
             "SPE1" if retained_grant.is_none() => {
                 read_error_response(stream, admitted, request, deadline, first)
             }
@@ -1130,25 +1183,31 @@ fn read_response(
         })
 }
 
-fn read_admitted_response(
-    stream: &mut UnixStream,
+fn authenticate_initial_grant(
     admitted: &AdmittedSandboxProvider,
     commitment: &SelectorGrantCommitment,
     request: &SandboxExecuteRequest,
+    retained: &mut Option<RetainedGrant>,
+    bytes: &[u8],
+) -> Result<crate::sandbox_provider_protocol::AuthenticatedAdmissionGrant, ReceiveFailure> {
+    verify_retained_grant(retained.as_ref(), bytes)?;
+    let grant = admitted
+        .authenticate_selector_grant(bytes, request, commitment)
+        .map_err(receive_invalid)?;
+    retain_authenticated_grant(retained, bytes.to_vec(), grant.grant_digest);
+    Ok(grant)
+}
+
+fn read_admitted_response(
+    stream: &mut UnixStream,
+    admitted: &AdmittedSandboxProvider,
+    request: &SandboxExecuteRequest,
     deadline: &Deadline,
-    retained_grant: &mut Option<RetainedGrant>,
     grant_bytes: Vec<u8>,
+    grant: crate::sandbox_provider_protocol::AuthenticatedAdmissionGrant,
 ) -> Result<AuthenticatedProviderTerminal, ReceiveFailure> {
-    verify_retained_grant(retained_grant.as_ref(), &grant_bytes)
-        .and_then(|()| {
-            admitted
-                .authenticate_selector_grant(&grant_bytes, request, commitment)
-                .map_err(receive_invalid)
-        })
-        .and_then(|grant| {
-            retain_authenticated_grant(retained_grant, grant_bytes.clone(), grant.grant_digest);
-            read_audit_and_receipt(stream, deadline).map(|(audit, receipt)| (grant, audit, receipt))
-        })
+    read_audit_and_receipt(stream, deadline)
+        .map(|(audit, receipt)| (grant, audit, receipt))
         .and_then(|(grant, audit_bytes, receipt_bytes)| {
             admitted
                 .authenticate_receipt(&receipt_bytes, &grant)
@@ -2590,6 +2649,7 @@ mod tests {
             .execute(
                 &fixture.provider,
                 &fixture.commitment,
+                &fixture.evaluation,
                 &fixture.spx1,
                 b"input",
                 Duration::from_secs(5),
@@ -2626,27 +2686,13 @@ mod tests {
                 .map_err(|error| format!("provider accept failed: {error}"))?;
             let deadline = Deadline::new(Duration::from_secs(5))
                 .map_err(|error| format!("provider deadline failed: {error}"))?;
-            let spx1 = read_frame(&mut stream, &deadline)
-                .map_err(|error| format!("SPX1 read failed: {error:?}"))?
-                .ok_or("SPX1 frame missing")?;
-            if spx1 != expected_spx1 {
-                return Err("SPX1 bytes changed in transport".to_owned());
-            }
-            let input = read_frame(&mut stream, &deadline)
-                .map_err(|error| format!("input read failed: {error:?}"))?
-                .ok_or("input frame missing")?;
-            let input = SandboxPayloadChunk::from_canonical_cbor(&input)
-                .map_err(|error| format!("input chunk invalid: {error}"))?;
-            if input.bytes != b"input" {
-                return Err("input bytes changed in transport".to_owned());
-            }
-            if read_frame(&mut stream, &deadline)
-                .map_err(|error| format!("input EOF read failed: {error:?}"))?
-                .is_some()
-            {
-                return Err("unexpected extra input frame".to_owned());
-            }
-            for frame in response_frames {
+            read_expected_attempt(&mut stream, &expected_spx1, &deadline)?;
+            let mut responses = response_frames.into_iter();
+            let grant = responses.next().ok_or("missing grant")?;
+            write_frame(&mut stream, &grant, &deadline)
+                .map_err(|error| format!("grant write failed: {error:?}"))?;
+            read_expected_input(&mut stream, &deadline)?;
+            for frame in responses {
                 write_frame(&mut stream, &frame, &deadline)
                     .map_err(|error| format!("response write failed: {error:?}"))?;
             }
@@ -2659,6 +2705,7 @@ mod tests {
             .execute(
                 &fixture.provider,
                 &fixture.commitment,
+                &fixture.evaluation,
                 &fixture.spx1,
                 b"input",
                 Duration::from_secs(5),
@@ -2710,6 +2757,7 @@ mod tests {
             read_expected_attempt(&mut first, &expected_spx1, &deadline)?;
             write_frame(&mut first, &agr1, &deadline)
                 .map_err(|error| format!("first AGR1 write failed: {error:?}"))?;
+            read_expected_input(&mut first, &deadline)?;
             drop(first);
 
             let (mut replay, _) = listener
@@ -2718,6 +2766,7 @@ mod tests {
             read_expected_attempt(&mut replay, &expected_spx1, &deadline)?;
             write_frame(&mut replay, &agr1, &deadline)
                 .map_err(|error| format!("replay AGR1 write failed: {error:?}"))?;
+            read_expected_input(&mut replay, &deadline)?;
             for frame in response_frames {
                 write_frame(&mut replay, &frame, &deadline)
                     .map_err(|error| format!("replay response write failed: {error:?}"))?;
@@ -2731,6 +2780,7 @@ mod tests {
             transport.execute(
                 &fixture.provider,
                 &fixture.commitment,
+                &fixture.evaluation,
                 &fixture.spx1,
                 b"input",
                 Duration::from_secs(5),
@@ -2741,32 +2791,32 @@ mod tests {
         Ok(())
     }
 
+    struct DenyRetryAdmission {
+        begin_calls: usize,
+        entry_active: bool,
+        completed_entries: usize,
+    }
+
+    impl ProviderRequestAdmission for DenyRetryAdmission {
+        fn begin(&mut self) -> Result<(), ProviderTransportError> {
+            self.begin_calls += 1;
+            if self.begin_calls == 2 {
+                return Err(ProviderTransportError::BeforeAdmission);
+            }
+            self.entry_active = true;
+            Ok(())
+        }
+
+        fn entered(&mut self) {
+            if self.entry_active {
+                self.entry_active = false;
+                self.completed_entries += 1;
+            }
+        }
+    }
+
     #[test]
     fn retry_rechecks_provider_request_admission_before_reconnecting() -> TestResult {
-        struct DenyRetryAdmission {
-            begin_calls: usize,
-            entry_active: bool,
-            completed_entries: usize,
-        }
-
-        impl ProviderRequestAdmission for DenyRetryAdmission {
-            fn begin(&mut self) -> Result<(), ProviderTransportError> {
-                self.begin_calls += 1;
-                if self.begin_calls == 2 {
-                    return Err(ProviderTransportError::BeforeAdmission);
-                }
-                self.entry_active = true;
-                Ok(())
-            }
-
-            fn entered(&mut self) {
-                if self.entry_active {
-                    self.entry_active = false;
-                    self.completed_entries += 1;
-                }
-            }
-        }
-
         let fixture = crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("provider.sock");
@@ -2791,6 +2841,7 @@ mod tests {
         let result = transport.execute_staged(
             &fixture.provider,
             &fixture.commitment,
+            &fixture.evaluation,
             &fixture.spx1,
             &mut std::io::Cursor::new(b"input"),
             Duration::from_secs(5),
@@ -2809,42 +2860,58 @@ mod tests {
 
     #[test]
     fn selected_endpoint_classifies_invalid_pre_admission_evidence() -> TestResult {
-        let fixture = crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
-        let directory = tempfile::tempdir()?;
-        let path = directory.path().join("provider.sock");
-        let listener = std::os::unix::net::UnixListener::bind(&path)?;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
-        let transport = ProviderTransport::from_path_for_test(&path)?;
-        let expected_spx1 = fixture.spx1.clone();
-        let provider = std::thread::spawn(move || -> Result<(), String> {
-            let (mut stream, _) = listener
-                .accept()
-                .map_err(|error| format!("provider accept failed: {error}"))?;
-            let deadline = Deadline::new(Duration::from_secs(5))
-                .map_err(|error| format!("provider deadline failed: {error}"))?;
-            read_expected_attempt(&mut stream, &expected_spx1, &deadline)?;
-            write_frame(
-                &mut stream,
-                &selector_record("AGR1").map_err(|error| error.to_string())?,
-                &deadline,
-            )
-            .map_err(|error| format!("invalid AGR1 write failed: {error:?}"))?;
-            stream
-                .shutdown(std::net::Shutdown::Write)
-                .map_err(|error| format!("provider shutdown failed: {error}"))
-        });
+        for magic in ["AGR1", "SPY1", "UNEXPECTED"] {
+            let fixture =
+                crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
+            // A signed Completed terminal still cannot stand in for the grant
+            // and its complete admitted response/evidence sequence.
+            let response = if magic == "SPY1" {
+                fixture.spy1
+            } else {
+                selector_record(magic)?
+            };
+            let directory = tempfile::tempdir()?;
+            let path = directory.path().join("provider.sock");
+            let listener = std::os::unix::net::UnixListener::bind(&path)?;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+            let transport = ProviderTransport::from_path_for_test(&path)?;
+            let expected_spx1 = fixture.spx1.clone();
+            let provider = std::thread::spawn(move || -> Result<(), String> {
+                let (mut stream, _) = listener
+                    .accept()
+                    .map_err(|error| format!("provider accept failed: {error}"))?;
+                let deadline = Deadline::new(Duration::from_secs(5))
+                    .map_err(|error| format!("provider deadline failed: {error}"))?;
+                read_expected_attempt(&mut stream, &expected_spx1, &deadline)?;
+                write_frame(&mut stream, &response, &deadline)
+                    .map_err(|error| format!("invalid initial response write failed: {error:?}"))?;
+                stream
+                    .shutdown(std::net::Shutdown::Write)
+                    .map_err(|error| format!("provider shutdown failed: {error}"))
+            });
 
-        assert!(matches!(
-            transport.execute(
-                &fixture.provider,
-                &fixture.commitment,
-                &fixture.spx1,
-                b"input",
-                Duration::from_secs(5),
-            ),
-            Err(ProviderTransportError::BeforeAdmission)
-        ));
-        provider.join().map_err(|_| "provider thread panicked")??;
+            let mut admission = DenyRetryAdmission {
+                begin_calls: 0,
+                entry_active: false,
+                completed_entries: 0,
+            };
+            assert!(matches!(
+                transport.execute_staged(
+                    &fixture.provider,
+                    &fixture.commitment,
+                    &fixture.evaluation,
+                    &fixture.spx1,
+                    &mut std::io::Cursor::new(b"input"),
+                    Duration::from_secs(5),
+                    &mut admission,
+                ),
+                Err(ProviderTransportError::BeforeAdmission)
+            ));
+            assert_eq!(admission.begin_calls, 1);
+            assert_eq!(admission.completed_entries, 1);
+            assert!(!admission.entry_active);
+            provider.join().map_err(|_| "provider thread panicked")??;
+        }
         Ok(())
     }
 
@@ -2868,6 +2935,7 @@ mod tests {
                 read_expected_attempt(&mut stream, &expected_spx1, &deadline)?;
                 write_frame(&mut stream, &grant_frame, &deadline)
                     .map_err(|error| format!("AGR1 write failed: {error:?}"))?;
+                read_expected_input(&mut stream, &deadline)?;
                 stream
                     .shutdown(std::net::Shutdown::Write)
                     .map_err(|error| format!("provider shutdown failed: {error}"))?;
@@ -2884,6 +2952,7 @@ mod tests {
             transport.execute(
                 &fixture.provider,
                 &fixture.commitment,
+                &fixture.evaluation,
                 &fixture.spx1,
                 b"input",
                 Duration::from_secs(5),
@@ -2934,6 +3003,7 @@ mod tests {
             transport.execute(
                 &fixture.provider,
                 &fixture.commitment,
+                &fixture.evaluation,
                 &fixture.spx1,
                 b"input",
                 Duration::from_secs(5),
@@ -2952,10 +3022,31 @@ mod tests {
         let _listener = std::os::unix::net::UnixListener::bind(&path)?;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
         let transport = ProviderTransport::from_path_for_test(&path)?;
+        let mut foreign_evaluation = fixture.evaluation.clone();
+        foreign_evaluation.request_digest[0] ^= 1;
+        let mut invalid_evaluation = fixture.evaluation.clone();
+        invalid_evaluation.implementation.implementation_id.clear();
         for result in [
             transport.execute(
                 &fixture.provider,
                 &fixture.commitment,
+                &foreign_evaluation,
+                &fixture.spx1,
+                b"input",
+                Duration::from_secs(1),
+            ),
+            transport.execute(
+                &fixture.provider,
+                &fixture.commitment,
+                &invalid_evaluation,
+                &fixture.spx1,
+                b"input",
+                Duration::from_secs(1),
+            ),
+            transport.execute(
+                &fixture.provider,
+                &fixture.commitment,
+                &fixture.evaluation,
                 b"not SPX1",
                 b"input",
                 Duration::from_secs(1),
@@ -2963,6 +3054,7 @@ mod tests {
             transport.execute(
                 &fixture.provider,
                 &fixture.commitment,
+                &fixture.evaluation,
                 &fixture.spx1,
                 b"substituted input",
                 Duration::from_secs(1),
@@ -2970,6 +3062,7 @@ mod tests {
             transport.execute(
                 &fixture.provider,
                 &fixture.commitment,
+                &fixture.evaluation,
                 &fixture.spx1,
                 b"input",
                 Duration::MAX,
@@ -3019,25 +3112,40 @@ mod tests {
         expected_spx1: &[u8],
         deadline: &Deadline,
     ) -> Result<(), String> {
+        let evaluation = read_frame(stream, deadline)
+            .map_err(|error| format!("EVR1 read failed: {error:?}"))?
+            .ok_or("EVR1 frame missing")?;
+        let evaluation =
+            crate::evaluator_protocol::EvaluationRequest::from_canonical_cbor(&evaluation)
+                .map_err(|error| error.to_string())?;
         let spx1 = read_frame(stream, deadline)
             .map_err(|error| format!("SPX1 read failed: {error:?}"))?
             .ok_or("SPX1 frame missing")?;
         if spx1 != expected_spx1 {
             return Err("SPX1 bytes changed in transport".to_owned());
         }
+        let request =
+            SandboxExecuteRequest::from_canonical_cbor(&spx1).map_err(|error| error.to_string())?;
+        if request.authority.evr1_digest != evaluation.request_digest {
+            return Err("EVR1 source changed".to_owned());
+        }
+        Ok(())
+    }
+
+    fn read_expected_input(stream: &mut UnixStream, deadline: &Deadline) -> Result<(), String> {
         let input = read_frame(stream, deadline)
             .map_err(|error| format!("input read failed: {error:?}"))?
             .ok_or("input frame missing")?;
-        let input = SandboxPayloadChunk::from_canonical_cbor(&input)
-            .map_err(|error| format!("input chunk invalid: {error}"))?;
+        let input =
+            SandboxPayloadChunk::from_canonical_cbor(&input).map_err(|error| error.to_string())?;
         if input.bytes != b"input" {
-            return Err("input bytes changed in transport".to_owned());
+            return Err("input bytes changed".to_owned());
         }
         if read_frame(stream, deadline)
-            .map_err(|error| format!("input EOF read failed: {error:?}"))?
+            .map_err(|error| format!("input EOF failed: {error:?}"))?
             .is_some()
         {
-            return Err("unexpected extra input frame".to_owned());
+            return Err("extra input frame".to_owned());
         }
         Ok(())
     }
@@ -3162,6 +3270,7 @@ mod tests {
             transport.execute_staged(
                 &fixture.provider,
                 &fixture.commitment,
+                &fixture.evaluation,
                 &fixture.spx1,
                 &mut std::io::Cursor::new(b"input"),
                 Duration::from_secs(1),

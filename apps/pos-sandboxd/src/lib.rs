@@ -1,16 +1,29 @@
 //! Backend-specific components of the ADR-069 systemd Sandbox Provider Adapter.
 //!
-//! This library does not implement the provider daemon or grant admission.
+//! This library does not implement the provider daemon or grant admission. Its
+//! binary currently runs only the closed launcher mode ([`launcher`]).
 //! The existing signed admission boundary must supply the selected SCS1 digest
 //! and architecture before these requested-state components are used.
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
 #[cfg(target_os = "linux")]
+mod attempt;
+#[cfg(target_os = "linux")]
 mod attempt_registry;
+#[cfg(target_os = "linux")]
+mod execute;
 mod hardening;
 #[cfg(target_os = "linux")]
 mod image_activator;
 mod kernel_cgroup;
+#[cfg(target_os = "linux")]
+pub mod launcher;
+#[cfg(target_os = "linux")]
+mod local_network;
+#[cfg(target_os = "linux")]
+mod provider_barrier;
+#[cfg(target_os = "linux")]
+mod release_barrier;
 #[cfg(target_os = "linux")]
 mod release_signer;
 #[cfg(target_os = "linux")]
@@ -18,10 +31,41 @@ mod root_attachment;
 #[cfg(target_os = "linux")]
 mod staging;
 mod system_bus;
+// Shared by the tests of several modules. Keeping it public, like the sibling
+// crates' test support modules, avoids suppressing visibility lints.
+#[cfg(all(test, unix))]
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[doc(hidden)]
+pub mod test_fixtures;
 mod transient_unit;
 
 #[derive(Debug)]
 struct CgroupRoot(std::fs::File);
+
+/// Facts copied only from the authenticated, retained SIC1 provider binary.
+#[cfg(target_os = "linux")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct LauncherFacts {
+    path: String,
+    digest: [u8; 32],
+    length: u64,
+    identity: (u64, u64),
+}
+
+#[cfg(target_os = "linux")]
+pub use attempt::{ActiveAttempt, AdmittedAttempt};
+#[cfg(target_os = "linux")]
+pub use execute::{
+    execute, AttemptEnding, AttemptExecution, ExecuteError, ExecuteFailure, ExecuteJob,
+    LaunchBarrier, ModePlan, NetworkEvidence, ReplayRequest, UnitCgroup, UnitHost, UnitKiller,
+    UnitState,
+};
+#[cfg(target_os = "linux")]
+pub use local_network::{
+    BoundLocalProxy, CheckedLocal, EstablishedNetwork, FailClosedLocalNetwork, HostServiceChannel,
+    HostServiceStream, LocalNetworkPort, LocalProxyBindError, RefusingConnector, ServeError,
+    ServedProxy,
+};
 
 #[cfg(target_os = "linux")]
 pub use attempt_registry::{
@@ -40,11 +84,20 @@ pub use image_activator::{
 pub use root_attachment::{activate_admitted_root, VerifiedRootMount};
 
 #[cfg(target_os = "linux")]
+pub use provider_barrier::{
+    fresh_nonce, AuthorityCheck, BarrierError, BarrierEvidence, ObservedReadback,
+    ObservedReadbackUnavailable, ProviderReleaseBarrier, RecheckRefusal, UnitIdentitySource,
+};
+#[cfg(target_os = "linux")]
+pub use release_barrier::{
+    release_after_ready, ExpectedLauncherReady, ReleaseBarrierError, ReleaseBinding, ReleaseRecheck,
+};
+#[cfg(target_os = "linux")]
 pub use release_signer::{issue_release, KeyFileReleaseSigner, ReleaseSigner, ReleaseSignerError};
 #[cfg(target_os = "linux")]
 pub use staging::{
-    AdmittedEntry, ControlFloor, StagedInput, StagingDirectory, StagingError, StagingLedger,
-    StagingLimits, StagingReservation, StagingUsage, VerifiedStagedInput,
+    AdmittedEntry, ControlFloor, StagedInput, StagingCharge, StagingDirectory, StagingError,
+    StagingLedger, StagingLimits, StagingUsage, VerifiedStagedInput,
 };
 
 pub use hardening::{
@@ -62,11 +115,11 @@ pub use system_bus::{
     TransientServiceUnitName, TransientServiceUnitNameError,
 };
 pub use transient_unit::{
-    ActivatedRootDirectory, CheckedRoot, LaunchMode, LauncherSource, SystemdManagerReadback,
-    SystemdManagerReadbackOnlyProperty, SystemdServiceLimits, SystemdServiceLimitsError,
-    SystemdTransientUnitNumericValue, SystemdTransientUnitProperty, SystemdTransientUnitReadback,
-    SystemdTransientUnitReadbackValue, SystemdTransientUnitValue, TransientUnitLaunchInputs,
-    TransientUnitRequest, TransientUnitRequestError,
+    ActivatedRootDirectory, CheckedRoot, LaunchMode, LauncherInvocation, LauncherSource,
+    SystemdManagerReadback, SystemdManagerReadbackOnlyProperty, SystemdServiceLimits,
+    SystemdServiceLimitsError, SystemdTransientUnitNumericValue, SystemdTransientUnitProperty,
+    SystemdTransientUnitReadback, SystemdTransientUnitReadbackValue, SystemdTransientUnitValue,
+    TransientUnitLaunchInputs, TransientUnitRequest, TransientUnitRequestError,
 };
 
 /// The seven ELM1 limit IDs enforced by systemd service properties.
@@ -133,6 +186,8 @@ enum SystemdDynamicPropertyKind {
     OperatingLimit(SystemdOperatingLimitProperty),
     FileDescriptorStoreMax,
     ExtraFileDescriptors,
+    TemporaryFileSystem,
+    ExecStart,
 }
 
 impl SystemdTransientUnitPropertyKind {
@@ -152,8 +207,17 @@ impl SystemdDynamicPropertyKind {
             Self::SystemCallFilter => "SystemCallFilter",
             Self::RestrictAddressFamilies => "RestrictAddressFamilies",
             Self::OperatingLimit(property) => property.name(),
+            tail => tail.tail_name(),
+        }
+    }
+
+    /// The last kinds; `TemporaryFileSystem` is the final one.
+    const fn tail_name(self) -> &'static str {
+        match self {
             Self::FileDescriptorStoreMax => "FileDescriptorStoreMax",
             Self::ExtraFileDescriptors => "ExtraFileDescriptors",
+            Self::ExecStart => "ExecStart",
+            _ => "TemporaryFileSystem",
         }
     }
 }
@@ -247,4 +311,38 @@ impl SystemCallFilter {
             Err(SystemCallFilterError::ReadbackMismatch)
         }
     }
+}
+
+/// Run the binary for `arguments` (without the program name).
+///
+/// The only mode today is `launch-barrier <lpv1-hex>`, which never returns
+/// success: a released adapter replaces the process image. Any other argument
+/// vector, or any launcher failure, ends with a nonzero exit code and a fixed
+/// diagnostic on standard error.
+#[cfg(target_os = "linux")]
+#[must_use]
+pub fn run(arguments: impl IntoIterator<Item = std::ffi::OsString>) -> std::process::ExitCode {
+    let arguments: Vec<_> = arguments.into_iter().collect();
+    match arguments.as_slice() {
+        [mode, lpv1] if mode == launcher::LAUNCH_BARRIER_MODE => {
+            let error = lpv1
+                .to_str()
+                .map_or(launcher::LauncherError::Parameters, |hex| {
+                    launcher::run_launch_barrier(hex)
+                });
+            report(&format!("pos-sandboxd: {error}"));
+            std::process::ExitCode::FAILURE
+        }
+        _ => {
+            report("usage: pos-sandboxd launch-barrier <lpv1-hex>");
+            std::process::ExitCode::from(2)
+        }
+    }
+}
+
+/// One diagnostic line on standard error; a failed write changes nothing.
+#[cfg(target_os = "linux")]
+fn report(message: &str) {
+    use std::io::Write;
+    writeln!(std::io::stderr(), "{message}").ok();
 }

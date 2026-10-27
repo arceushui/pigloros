@@ -153,6 +153,22 @@ def main() -> None:
     )
     with tempfile.TemporaryDirectory() as directory:
         temporary = Path(directory)
+        # A changed caller must still be rejected when another caller retains
+        # the valid runner reference, so owner discovery cannot hide the fault.
+        multiple_owners = temporary / "multiple-owners"
+        copy_fixture(multiple_owners)
+        caller = multiple_owners / PRIMARY_OWNER
+        (multiple_owners / "crates/extra-runner-owner.rs").write_text(
+            caller.read_text(encoding="utf-8"), encoding="utf-8"
+        )
+        caller.write_text(
+            caller.read_text(encoding="utf-8").replace(
+                PRIMARY_RUNNER.name, "unrecognized-runner.sh"
+            ),
+            encoding="utf-8",
+        )
+        if invoke(multiple_owners).returncode == 0:
+            raise SystemExit("another valid caller concealed an unrecognized runner")
         for index, (relative, old, new) in enumerate(mutations):
             fixture_root = temporary / str(index)
             copy_fixture(fixture_root)

@@ -16,11 +16,15 @@ use ed25519_dalek::{Signer, SigningKey};
 use sha2::{Digest, Sha256};
 
 use super::authority::AdmittedSelectorProvider;
+#[cfg(test)]
+use super::ResolvedInstalledCase;
 use super::{
     hex_name, manifest_digest, HeldInstallationArtifact, InstallationManifest, InstallationObject,
     InstallationObjectKind, InstalledSelectorState, MANIFEST_NAME,
 };
-use crate::evaluator_protocol::{encode, ProtocolError};
+use crate::evaluator_protocol::{
+    encode, EvaluationRequest, ProtocolError, RequiredProviderCapability, SandboxRequirement,
+};
 use crate::sandbox_provider_protocol::{PartitionDescriptor, PartitionRole};
 
 pub(crate) type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
@@ -738,4 +742,79 @@ pub(crate) fn materialize_state(
     fs::write(&manifest_path, manifest_bytes)?;
     fs::set_permissions(manifest_path, fs::Permissions::from_mode(0o400))?;
     Ok(admitted)
+}
+
+fn retain_case_artifact(
+    state: &mut InstalledSelectorState,
+    kind: u8,
+    identity: [u8; 32],
+    bytes: &[u8],
+) -> TestResult {
+    let artifact = held_artifact(kind, identity, bytes)?;
+    let key = (artifact.object.kind, artifact.object.identity);
+    state.manifest.objects.push(artifact.object.clone());
+    state
+        .manifest
+        .objects
+        .sort_by_key(|object| (object.kind, object.identity));
+    state.artifacts.insert(key, artifact);
+    Ok(())
+}
+
+#[cfg(test)]
+pub(crate) fn root_selector_fixture_from_corpus(
+    state: InstalledSelectorState,
+    corpus: &crate::selector_test_support::Corpus,
+) -> TestResult<(
+    EvaluationRequest,
+    AdmittedSelectorProvider,
+    ResolvedInstalledCase,
+)> {
+    let (request, state) = execution_state(state, corpus)?;
+    let admitted = state.authenticate_bootstrap()?.admit_provider()?;
+    let resolved = admitted.bootstrap().resolve_installed_case(&request, 0)?;
+    Ok((request, admitted, resolved))
+}
+
+pub(crate) fn execution_state(
+    mut state: InstalledSelectorState,
+    corpus: &crate::selector_test_support::Corpus,
+) -> TestResult<(EvaluationRequest, InstalledSelectorState)> {
+    let mut request = EvaluationRequest::from_canonical_cbor(&corpus.request)?;
+    let object_identity = |kind| {
+        state
+            .manifest
+            .objects()
+            .iter()
+            .find(|object| object.kind().code() == kind)
+            .map(InstallationObject::identity)
+            .ok_or("root selector fixture object missing")
+    };
+    request.sandbox_requirement = Some(SandboxRequirement {
+        lps1_digest: object_identity(8)?,
+        sim1_digest: object_identity(9)?,
+        required_provider_capability: RequiredProviderCapability {
+            capability_id: ROOT_SELECTOR_CAPABILITY.to_owned(),
+            capability_version: 1,
+            minimum_strength: 1,
+        },
+        apt1_digest: state.manifest.policy_digest,
+        policy_epoch: 4,
+    });
+    request.request_id[14..].copy_from_slice(&0_u16.to_be_bytes());
+    request.output_capability.capability_digest = request.expected_output_capability_digest()?;
+    request.request_digest = request.digest()?;
+    retain_case_artifact(
+        &mut state,
+        14,
+        request.fixture_bundle_digest,
+        &corpus.archive,
+    )?;
+    retain_case_artifact(
+        &mut state,
+        15,
+        request.trust_policy_snapshot_digest,
+        &corpus.trust_policy,
+    )?;
+    Ok((request, state))
 }

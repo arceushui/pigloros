@@ -1058,5 +1058,252 @@ class CiWorkflowPolicyTests(unittest.TestCase):
         )
 
 
+
+
+# Accepted ADR-069's two-architecture static launcher evidence is a blocking
+# contract. Keep the executable recipe, its graph and its fan-in explicit so
+# changing the producer cannot silently turn acceptance evidence into a no-op.
+STATIC_LAUNCHER_JOB = {'name': 'static-launcher',
+ 'needs': ['ci_change_scope', 'preflight-gate'],
+ 'if': "${{ !cancelled() && needs.preflight-gate.result == 'success' && "
+       "(needs.ci_change_scope.outputs.rust == 'true' || github.event_name != "
+       "'pull_request') }}",
+ 'runs-on': 'ubuntu-24.04',
+ 'timeout-minutes': 45,
+ 'env': {'RUSTFLAGS': '-D warnings -C target-feature=+crt-static -C '
+                      'relocation-model=static',
+         'CC_x86_64_unknown_linux_musl': 'musl-gcc',
+         'CC_aarch64_unknown_linux_musl': 'aarch64-linux-gnu-gcc',
+         'CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER': 'musl-gcc',
+         'CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER': 'aarch64-linux-gnu-gcc'},
+ 'steps': [{'uses': 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1',
+            'with': {'fetch-depth': 0, 'persist-credentials': False}},
+           {'uses': 'dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de',
+            'with': {'toolchain': '1.97.1',
+                     'targets': 'x86_64-unknown-linux-musl,aarch64-unknown-linux-musl'}},
+           {'uses': 'Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16',
+            'with': {'shared-key': 'static-launcher',
+                     'save-if': "${{ github.ref == 'refs/heads/main' }}"}},
+           {'name': 'Install the musl and aarch64 cross toolchains',
+            'run': 'set -euo pipefail\n'
+                   'sudo apt-get update\n'
+                   'sudo apt-get install --yes --no-install-recommends musl-tools '
+                   'gcc-aarch64-linux-gnu libc6-dev-arm64-cross\n'},
+           {'name': 'Build the provider binary as a static ELF for each architecture',
+            'run': 'set -euo pipefail\n'
+                   'for target in x86_64-unknown-linux-musl '
+                   'aarch64-unknown-linux-musl; do\n'
+                   '  cargo build --locked --release --package pos-sandboxd --bin '
+                   'pos-sandboxd --target "${target}"\n'
+                   'done\n'},
+           {'name': 'Require no interpreter, no dynamic section and no shared '
+                    'dependency',
+            'run': 'set -euo pipefail\n'
+                   'for target in x86_64-unknown-linux-musl '
+                   'aarch64-unknown-linux-musl; do\n'
+                   '  binary="target/${target}/release/pos-sandboxd"\n'
+                   '  file "${binary}"\n'
+                   '  file "${binary}" | grep -q \'statically linked\'\n'
+                   '  if file "${binary}" | grep -qi \'interpreter\\|dynamically '
+                   "linked'; then\n"
+                   '    echo "${binary} names an interpreter or is dynamically linked" '
+                   '>&2\n'
+                   '    exit 1\n'
+                   '  fi\n'
+                   '  if readelf --program-headers --wide "${binary}" | grep -q '
+                   "'INTERP'; then\n"
+                   '    echo "${binary} has a PT_INTERP program header" >&2\n'
+                   '    exit 1\n'
+                   '  fi\n'
+                   '  readelf --dynamic "${binary}" 2>&1 | grep -q \'There is no '
+                   "dynamic section in this file'\n"
+                   '  if readelf --section-headers --wide "${binary}" | grep -Eq '
+                   "'\\.interp|\\.dynamic|\\.dynsym'; then\n"
+                   '    echo "${binary} has dynamic-linking sections" >&2\n'
+                   '    exit 1\n'
+                   '  fi\n'
+                   'done\n'},
+           {'name': 'Run the x86_64 binary and require its launcher mode to refuse '
+                    'invalid LPV1 input',
+            'run': 'set -euo pipefail\n'
+                   'binary=target/x86_64-unknown-linux-musl/release/pos-sandboxd\n'
+                   'set +e\n'
+                   '"${binary}" launch-barrier zz 2> launcher.err\n'
+                   'status=$?\n'
+                   'set -e\n'
+                   'test "${status}" = 1\n'
+                   "grep -q 'launch parameters are not a valid LPV1' launcher.err\n"}]}
+
+STATIC_LAUNCHER_FAN_IN = {'name': 'standard-gate',
+ 'if': '${{ always() }}',
+ 'needs': ['ci_change_scope',
+           'core-gate',
+           'cargo-crap',
+           'rustdoc',
+           'reference-evaluator-release',
+           'materialize-conformance-bundles',
+           'audit',
+           'codeql',
+           'ledger-windows',
+           'docker-build',
+           'world-client-wasm',
+           'world-client-browser-parity',
+           'asan-build',
+           'static-launcher'],
+ 'runs-on': 'ubuntu-24.04',
+ 'timeout-minutes': 5,
+ 'steps': [{'name': 'Require normal blocking checks',
+            'env': {'RUST_SCOPE': '${{ needs.ci_change_scope.outputs.rust }}',
+                    'CORE_RESULT': '${{ needs.core-gate.result }}',
+                    'CARGO_CRAP_RESULT': '${{ needs.cargo-crap.result }}',
+                    'RUSTDOC_RESULT': '${{ needs.rustdoc.result }}',
+                    'REFERENCE_RESULT': '${{ needs.reference-evaluator-release.result '
+                                        '}}',
+                    'MATERIALIZE_RESULT': '${{ '
+                                          'needs.materialize-conformance-bundles.result '
+                                          '}}',
+                    'DEPENDENCY_RESULT': '${{ needs.audit.result }}',
+                    'CODEQL_RESULT': '${{ needs.codeql.result }}',
+                    'LEDGER_WINDOWS_RESULT': '${{ needs.ledger-windows.result }}',
+                    'DOCKER_RESULT': '${{ needs.docker-build.result }}',
+                    'WASM_RESULT': '${{ needs.world-client-wasm.result }}',
+                    'BROWSER_RESULT': '${{ needs.world-client-browser-parity.result }}',
+                    'ASAN_BUILD_RESULT': '${{ needs.asan-build.result }}',
+                    'STATIC_LAUNCHER_RESULT': '${{ needs.static-launcher.result }}'},
+            'run': 'set -euo pipefail\n'
+                   'test "${CORE_RESULT}" = success\n'
+                   'test "${CODEQL_RESULT}" = success\n'
+                   'expected=success\n'
+                   'if [[ "${RUST_SCOPE}" = false ]]; then\n'
+                   '  expected=skipped\n'
+                   'fi\n'
+                   'for result in \\\n'
+                   '  "${CARGO_CRAP_RESULT}" "${RUSTDOC_RESULT}" "${REFERENCE_RESULT}" '
+                   '\\\n'
+                   '  "${MATERIALIZE_RESULT}" "${DEPENDENCY_RESULT}" \\\n'
+                   '  "${LEDGER_WINDOWS_RESULT}" "${DOCKER_RESULT}" \\\n'
+                   '  "${WASM_RESULT}" "${BROWSER_RESULT}" "${ASAN_BUILD_RESULT}" \\\n'
+                   '  "${STATIC_LAUNCHER_RESULT}"; do\n'
+                   '  test "${result}" = "${expected}"\n'
+                   'done\n'}]}
+
+STATIC_LAUNCHER_JOB_SET = ['asan',
+ 'asan-build',
+ 'asan-gate',
+ 'audit',
+ 'cargo-crap',
+ 'ci-gate',
+ 'ci_change_scope',
+ 'clippy',
+ 'codeql',
+ 'codeql-required',
+ 'conformance-fixtures',
+ 'conformance-non-linux',
+ 'core-gate',
+ 'coverage',
+ 'depgraph',
+ 'docker-build',
+ 'feature-matrix',
+ 'fmt',
+ 'ledger-windows',
+ 'materialize-conformance-bundles',
+ 'modules-structure',
+ 'mutation-checks',
+ 'mutation-required',
+ 'pinned-dependencies',
+ 'plugin-component-fixtures',
+ 'preflight-gate',
+ 'reference-evaluator-release',
+ 'rustdoc',
+ 'standard-gate',
+ 'static-launcher',
+ 'test',
+ 'test-shard',
+ 'test-shards',
+ 'third-party-notices',
+ 'trunk-pr',
+ 'world-client-browser-parity',
+ 'world-client-wasm']
+
+
+def assert_static_launcher_contract(workflow: dict) -> None:
+    trigger_key = "on" if "on" in workflow else True
+    if set(workflow) != {"name", trigger_key, "concurrency", "permissions", "env", "jobs"}:
+        raise AssertionError("static-launcher requires the reviewed workflow root envelope")
+    if workflow["name"] != "ci" or workflow["concurrency"] != {
+        "group": "ci-${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || github.ref }}",
+        "cancel-in-progress": True,
+    }:
+        raise AssertionError("static-launcher requires the reviewed workflow controls")
+    if set(workflow_triggers(workflow)) != {"push", "pull_request", "workflow_dispatch"}:
+        raise AssertionError("static-launcher requires the reviewed workflow triggers")
+    if workflow_triggers(workflow).get("push") != MAIN_PUSH_TRIGGER:
+        raise AssertionError("static-launcher must execute on main pushes")
+    if any(workflow_triggers(workflow)[trigger] is not None for trigger in ("pull_request", "workflow_dispatch")):
+        raise AssertionError("static-launcher requires unfiltered pull-request and manual triggers")
+    if workflow.get("permissions") != {"actions": "read", "contents": "read"}:
+        raise AssertionError("static-launcher requires read-only workflow permissions")
+    if workflow.get("env") != {"CARGO_TERM_COLOR": "always", "RUSTFLAGS": "-D warnings"}:
+        raise AssertionError("static-launcher requires the reviewed workflow environment")
+    jobs = workflow.get("jobs", {})
+    if sorted(jobs) != STATIC_LAUNCHER_JOB_SET:
+        raise AssertionError("static-launcher requires the reviewed complete job set")
+    if jobs.get("static-launcher") != STATIC_LAUNCHER_JOB:
+        raise AssertionError("static-launcher evidence producer differs from its reviewed contract")
+    if jobs.get("standard-gate") != STATIC_LAUNCHER_FAN_IN:
+        raise AssertionError("static-launcher evidence must block the reviewed fan-in")
+
+
+class StaticLauncherPolicyTests(unittest.TestCase):
+    def test_checked_in_static_launcher_contract(self) -> None:
+        assert_static_launcher_contract(load_workflow(CI_WORKFLOW_PATH))
+
+    def test_static_launcher_rejects_weakening(self) -> None:
+        original = load_workflow(CI_WORKFLOW_PATH)
+        cases = []
+
+        def changed(label, mutate):
+            workflow = copy.deepcopy(original)
+            mutate(workflow)
+            cases.append((label, workflow))
+
+        changed("fabricated success", lambda w: w["jobs"]["static-launcher"].update(steps=[{"run": "true"}]))
+        changed("skipped producer", lambda w: w["jobs"]["static-launcher"].update({"if": False}))
+        changed("nonblocking producer", lambda w: w["jobs"]["static-launcher"].update({"continue-on-error": True}))
+        changed("producer permission escalation", lambda w: w["jobs"]["static-launcher"].update(permissions={"contents": "write"}))
+        changed("workflow permission escalation", lambda w: w.update(permissions="write-all"))
+        changed("inherited no-op shell", lambda w: w.update(defaults={"run": {"shell": "true {0}"}}))
+        changed("inherited working directory", lambda w: w.update(defaults={"run": {"working-directory": "/tmp"}}))
+        changed("altered workflow name", lambda w: w.update(name="fabricated-ci"))
+        changed("altered concurrency", lambda w: w["concurrency"].update(group="all-branches"))
+        changed("disabled cancellation", lambda w: w["concurrency"].update({"cancel-in-progress": False}))
+        changed("filtered pull request", lambda w: w["on" if "on" in w else True].update(pull_request={"types": ["opened"]}))
+        changed("manual input injection", lambda w: w["on" if "on" in w else True].update(workflow_dispatch={"inputs": {"skip": {"default": True}}}))
+        changed("detached trigger", lambda w: w["on" if "on" in w else True].pop("pull_request"))
+        changed("injected environment", lambda w: w["env"].update(CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUNNER="true"))
+        changed("injected job", lambda w: w["jobs"].update({"fabricate": {"runs-on": "ubuntu-24.04", "steps": [{"run": "true"}]}}))
+        changed("reordered checks", lambda w: w["jobs"]["static-launcher"]["steps"].reverse())
+        changed("missing architecture", lambda w: w["jobs"]["static-launcher"]["steps"][1]["with"].update(targets="x86_64-unknown-linux-musl"))
+        changed("missing ELF inspection", lambda w: w["jobs"]["static-launcher"]["steps"].pop(5))
+        changed("missing smoke check", lambda w: w["jobs"]["static-launcher"]["steps"].pop())
+        changed("removed producer", lambda w: w["jobs"].pop("static-launcher"))
+        changed("removed fan-in dependency", lambda w: w["jobs"]["standard-gate"]["needs"].remove("static-launcher"))
+        changed("removed fan-in result", lambda w: w["jobs"]["standard-gate"]["steps"][0]["env"].pop("STATIC_LAUNCHER_RESULT"))
+        changed("fabricated fan-in", lambda w: w["jobs"]["standard-gate"]["steps"][0].update(run="true"))
+        for label, workflow in cases:
+            with self.subTest(label=label), self.assertRaises(AssertionError):
+                assert_static_launcher_contract(workflow)
+
+    def test_failed_or_missing_launcher_result_cannot_pass_fan_in(self) -> None:
+        gate = STATIC_LAUNCHER_FAN_IN["steps"][0]
+        for result in ("failure", "cancelled", "skipped", "", "success"):
+            with self.subTest(result=result):
+                environment = {name: "success" for name in gate["env"]}
+                environment["RUST_SCOPE"] = "true"
+                environment["STATIC_LAUNCHER_RESULT"] = result
+                completed = subprocess.run(["bash", "-c", gate["run"]], env=environment, capture_output=True, check=False)
+                self.assertEqual(completed.returncode == 0, result == "success")
+
+
 if __name__ == "__main__":
     unittest.main()

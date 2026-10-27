@@ -8,6 +8,9 @@
 //! SIM1 root reach the wire, not a real mount (ADR-087 §5, #444).
 #![cfg(target_os = "linux")]
 
+#[path = "support/staged_execution.rs"]
+pub mod staged_execution;
+
 use std::{
     error::Error,
     fs,
@@ -192,35 +195,19 @@ async fn activation_image_carries_exactly_the_held_admitted_image() -> TestResul
     if fs::metadata("/proc/self")?.uid() != 0 {
         return Err("the isolated activation child is not root".into());
     }
-    let staged = StagedInstallation::stage().map_err(|error| error.to_string())?;
+    let staged = StagedInstallation::stage_execution().map_err(|error| error.to_string())?;
     let snapshot = ProviderImageSnapshot::open(staged.request())?;
     let limits = StagingLimits {
-        aggregate_bytes: 0,
-        queued_requests: 0,
-        concurrent_attempts: 1,
+        aggregate_bytes: 512 * 1024 * 1024,
     };
-    // The entry reservation consumes the admission, and a floor above the
-    // installed revocation epoch refuses dispatch.
-    let installed = snapshot.admit_held_image()?.authority();
-    let raised = StagingLedger::new(limits);
-    raised.raise_floor(ControlFloor {
-        revocation_epoch: installed.revocation_epoch + 1,
-        policy_epoch: 0,
-    });
-    assert!(matches!(
-        raised.reserve_entry(snapshot.admit_held_image()?),
-        Err(StagingError::BelowControlFloor)
-    ));
     let ledger = StagingLedger::new(limits);
-    let entry = ledger.reserve_entry(snapshot.admit_held_image()?)?;
+    let (_staging, verified) = staged_execution::verified_input(&staged, &ledger)?;
+    let entry = verified.entry();
     assert_eq!(ledger.usage().attempts, 1);
-    assert!(matches!(
-        ledger.reserve_entry(snapshot.admit_held_image()?),
-        Err(StagingError::AttemptsExhausted)
-    ));
     entry.recheck()?;
     let admission = entry.admission();
-    let held = identity(admission)?;
+    let installed = admission.authority();
+    let held = identity(&admission)?;
     let root = &snapshot.image().manifest().partitions[0];
     fs::create_dir(MOUNTFSD_DIRECTORY)?;
     let listener = UnixListener::bind(MOUNTFSD_SOCKET)?;
@@ -228,7 +215,7 @@ async fn activation_image_carries_exactly_the_held_admitted_image() -> TestResul
     // The admitted SIM1 root partition is what the reply must describe.
     let (outcome, observed) = activate(
         &listener,
-        ActivationImage::from_admission(admission)?,
+        ActivationImage::from_admission(&admission)?,
         reply(root.start_bytes, root.length_bytes)?,
     )
     .await?;
@@ -244,7 +231,7 @@ async fn activation_image_carries_exactly_the_held_admitted_image() -> TestResul
     let verity = &snapshot.image().manifest().partitions[1];
     let (outcome, observed) = activate(
         &listener,
-        ActivationImage::from_admission(admission)?,
+        ActivationImage::from_admission(&admission)?,
         reply(verity.start_bytes, verity.length_bytes)?,
     )
     .await?;
@@ -255,7 +242,7 @@ async fn activation_image_carries_exactly_the_held_admitted_image() -> TestResul
     // architecture is a mismatch too.
     let (outcome, observed) = activate(
         &listener,
-        ActivationImage::from_admission(admission)?,
+        ActivationImage::from_admission(&admission)?,
         reply_for(root.start_bytes, root.length_bytes, "arm64")?,
     )
     .await?;

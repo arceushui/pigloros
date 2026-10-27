@@ -52,6 +52,10 @@ pub(crate) struct ResolvedInstalledCase {
 }
 
 impl ResolvedInstalledCase {
+    pub(crate) fn into_attempt(self) -> crate::evaluator::CaseAttempt {
+        self.attempt
+    }
+
     /// Returns the exact ordinal attempt rebuilt from the verified CFB1 closure.
     #[must_use]
     pub(crate) const fn attempt(&self) -> &crate::evaluator::CaseAttempt {
@@ -92,6 +96,8 @@ impl InstallationObjectKind {
     pub(crate) const IMAGE_MANIFEST: Self = Self(9);
     /// Installed root-image role.
     pub(crate) const ROOT_IMAGE: Self = Self(12);
+    /// Installed provider executable, also used as the trusted launcher.
+    pub(crate) const PROVIDER_EXECUTABLE: Self = Self(11);
     /// Installed subject-executable role.
     pub(crate) const SUBJECT_EXECUTABLE: Self = Self(13);
 
@@ -727,13 +733,13 @@ fn read_complete_file(file: &File, maximum: u64) -> Result<Vec<u8>, SelectorBoun
 
 // Cloning a File shares its kernel cursor. Keep each bounded read/hash cursor
 // here instead, without reopening the verified inode or serializing callers.
-struct PositionalReader<'a> {
+pub(crate) struct PositionalReader<'a> {
     file: &'a File,
     offset: u64,
 }
 
 impl<'a> PositionalReader<'a> {
-    const fn new(file: &'a File) -> Self {
+    pub(crate) const fn new(file: &'a File) -> Self {
         Self { file, offset: 0 }
     }
 }
@@ -843,15 +849,13 @@ pub mod tests {
 
     use crate::sandbox_provider_protocol::PartitionDescriptor;
 
-    use crate::evaluator_protocol::{
-        EvaluationRequest, RequiredProviderCapability, SandboxRequirement, SubjectAdapterKind,
-    };
+    use crate::evaluator_protocol::{EvaluationRequest, SubjectAdapterKind};
 
     use super::authority::{AdmittedSelectorProvider, AuthenticatedSelectorBootstrap};
     pub(crate) use super::fixture::{
         admitted_state, admitted_state_with_salt, ddi_fixture, ddi_salt, digest, encode_manifest,
         held_artifact, integer, materialize_state, sidecar_partitions, sign_record,
-        signed_record_digest, ImageSigning, TestResult, ROOT_SELECTOR_CAPABILITY,
+        signed_record_digest, ImageSigning, TestResult,
     };
     use super::*;
 
@@ -1998,55 +2002,7 @@ pub mod tests {
         )
     }
 
-    pub(crate) fn root_selector_fixture_from_corpus(
-        mut state: InstalledSelectorState,
-        corpus: &crate::selector_test_support::Corpus,
-    ) -> TestResult<(
-        EvaluationRequest,
-        AdmittedSelectorProvider,
-        ResolvedInstalledCase,
-    )> {
-        let mut request = EvaluationRequest::from_canonical_cbor(&corpus.request)?;
-        let object_identity = |kind| {
-            state
-                .manifest
-                .objects()
-                .iter()
-                .find(|object| object.kind().code() == kind)
-                .map(InstallationObject::identity)
-                .ok_or("root selector fixture object missing")
-        };
-        request.sandbox_requirement = Some(SandboxRequirement {
-            lps1_digest: object_identity(8)?,
-            sim1_digest: object_identity(9)?,
-            required_provider_capability: RequiredProviderCapability {
-                capability_id: ROOT_SELECTOR_CAPABILITY.to_owned(),
-                capability_version: 1,
-                minimum_strength: 1,
-            },
-            apt1_digest: state.manifest.policy_digest,
-            policy_epoch: 4,
-        });
-        request.request_id[14..].copy_from_slice(&0_u16.to_be_bytes());
-        request.output_capability.capability_digest =
-            request.expected_output_capability_digest()?;
-        request.request_digest = request.digest()?;
-        retain_case_artifact(
-            &mut state,
-            14,
-            request.fixture_bundle_digest,
-            &corpus.archive,
-        )?;
-        retain_case_artifact(
-            &mut state,
-            15,
-            request.trust_policy_snapshot_digest,
-            &corpus.trust_policy,
-        )?;
-        let admitted = state.authenticate_bootstrap()?.admit_provider()?;
-        let resolved = admitted.bootstrap().resolve_installed_case(&request, 0)?;
-        Ok((request, admitted, resolved))
-    }
+    pub(crate) use super::fixture::root_selector_fixture_from_corpus;
 
     fn rebound(mut request: EvaluationRequest) -> TestResult<EvaluationRequest> {
         request.output_capability.capability_digest =

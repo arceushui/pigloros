@@ -61,6 +61,13 @@ def main() -> None:
         source: source.read_text(encoding="utf-8")
         for source in (root / "crates").glob("**/*.rs")
     }
+    runner_names = {runner.name for runner in runners}
+    for source, text in rust_sources.items():
+        for reference in re.findall(r'\.join\("\.\./\.\./scripts/([^"\n]+)"\)', text):
+            if reference not in runner_names:
+                raise SystemExit(
+                    f"{source}: delegated test runner is not a discovered isolated runner: {reference}"
+                )
 
     for runner_path in runners:
         runner = runner_path.read_text(encoding="utf-8")

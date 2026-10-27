@@ -59,7 +59,7 @@ pub mod signed_bundle;
 // Unit tests reuse the public integration corpus. Keeping this test-only module
 // reachable at the crate boundary preserves the integration helper's ordinary
 // public visibility without suppressing unused-item or reachability lints.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 #[doc(hidden)]
 pub mod selector_test_support {
@@ -89,6 +89,7 @@ pub mod selector_transport_test_fixture {
         pub(crate) provider: crate::sandbox_provider_protocol::AdmittedSandboxProvider,
         pub(crate) request: crate::sandbox_provider_protocol::SandboxExecuteRequest,
         pub(crate) commitment: crate::sandbox_provider_protocol::SelectorGrantCommitment,
+        pub(crate) evaluation: crate::evaluator_protocol::EvaluationRequest,
         pub(crate) spx1: Vec<u8>,
         pub(crate) agr1: Vec<u8>,
         pub(crate) sau1: Vec<Vec<u8>>,
@@ -341,6 +342,7 @@ pub mod selector_transport_test_fixture {
             provider,
             request,
             commitment,
+            evaluation: fixture.evaluation_request(&launch)?,
             spx1: execute_request_bytes,
             agr1,
             sau1,

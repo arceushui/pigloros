@@ -443,6 +443,23 @@ pub struct AdmissionGrant {
 }
 
 impl AdmissionGrant {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn sign_and_encode(
+        mut self,
+        sign: impl FnOnce(&[u8]) -> Result<[u8; 64], std::io::Error>,
+    ) -> Result<Vec<u8>, SandboxProviderProtocolError> {
+        let unsigned = self.unsigned_value();
+        self.grant_digest = record_digest("AGR1", &Value::Array(unsigned.to_vec()))?;
+        self.signature = sign(&super::codec::signature_message("AGR1", &self.grant_digest))
+            .map_err(|_| SandboxProviderProtocolError::SignatureInvalid)?;
+        self.validate(&unsigned)?;
+        encode(&Value::Array(vec![
+            Value::Array(unsigned.to_vec()),
+            bytes_value(&self.grant_digest),
+            bytes_value(&self.signature),
+        ]))
+    }
+
     /// Decode and fully validate exact canonical AGR1 bytes.
     ///
     /// # Errors

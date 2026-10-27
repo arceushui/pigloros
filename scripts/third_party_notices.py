@@ -36,9 +36,14 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import tomllib
+import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Callable
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -78,6 +83,7 @@ TEXT_NAME = "THIRD-PARTY-NOTICES.txt"
 INDEX_NAME = "third-party-notices.json"
 RULE = "=" * 78
 FETCH_ATTEMPTS = 3
+FETCH_MAX_RETRY_WAIT_SECONDS = 300
 
 
 class NoticeError(Exception):
@@ -363,27 +369,16 @@ def offline_errors(root: Path) -> list[str]:
 # ── Upstream verification ────────────────────────────────────────────────────
 
 
-def fetch_url(url: str) -> bytes:
-    last: Exception | None = None
-    for _ in range(FETCH_ATTEMPTS):
-        try:
-            with urllib.request.urlopen(url, timeout=60) as response:  # noqa: S310
-                return response.read()
-        except OSError as error:
-            last = error
-    raise NoticeError(f"could not fetch {url}: {last}")
-
-
 GIT_TIMEOUT_SECONDS = 300
 
 
 def git(*args: str, cwd: Path | None = None) -> str:
-    """Run git, retrying transient failures; report its stderr on failure."""
+    """Run Git, retrying transient failures and reporting stderr on failure."""
     failure = ""
     for _ in range(FETCH_ATTEMPTS):
         try:
             return subprocess.run(
-                ["git", *args],
+                ["git", "-c", "gc.auto=0", "-c", "maintenance.auto=false", *args],
                 cwd=cwd,
                 check=True,
                 capture_output=True,
@@ -391,10 +386,61 @@ def git(*args: str, cwd: Path | None = None) -> str:
                 timeout=GIT_TIMEOUT_SECONDS,
             ).stdout
         except subprocess.CalledProcessError as error:
-            failure = error.stderr.strip()
+            stderr = error.stderr or b""
+            failure = (stderr.decode(errors="replace") if isinstance(stderr, bytes) else stderr).strip()
         except subprocess.TimeoutExpired:
             failure = f"timed out after {GIT_TIMEOUT_SECONDS} s"
     raise NoticeError(f"git {' '.join(args)} failed: {failure}")
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        # Never forward the workflow token outside the fixed API origin.
+        return None
+
+
+def _retry_delay(error: OSError, attempt: int) -> float | None:
+    delay = float(60 * 2**attempt)
+    if isinstance(error, urllib.error.HTTPError):
+        if error.code not in (403, 429) and error.code < 500:
+            return None
+        headers = error.headers or {}
+        try:
+            if value := headers.get("Retry-After"):
+                requested = (
+                    float(value) if value.isascii() and value.isdecimal()
+                    else (parsedate_to_datetime(value) - datetime.now(timezone.utc)).total_seconds()
+                )
+                delay = max(delay, requested)
+            elif headers.get("X-RateLimit-Remaining") == "0":
+                delay = max(delay, float(headers["X-RateLimit-Reset"]) - time.time() + 1)
+        except (KeyError, ValueError, TypeError, OverflowError):
+            pass
+    # Fail closed rather than retry before the server permits or exceed the job budget.
+    return delay if delay <= FETCH_MAX_RETRY_WAIT_SECONDS else None
+
+
+def fetch_file(repository: str, commit: str, path: str) -> bytes:
+    """Fetch exact pinned file bytes from the API, optionally authenticated in CI."""
+    slug = urllib.parse.quote(repository.removeprefix("https://github.com/"), safe="/")
+    name = urllib.parse.quote(path, safe="/")
+    url = f"https://api.github.com/repos/{slug}/contents/{name}?{urllib.parse.urlencode({'ref': commit})}"
+    headers = {"Accept": "application/vnd.github.raw+json", "User-Agent": "pigloros-notice-verifier"}
+    if token := os.environ.get("GITHUB_TOKEN"):
+        headers["Authorization"] = f"Bearer {token}"
+    opener = urllib.request.build_opener(_NoRedirect())
+    failure = ""
+    for attempt in range(FETCH_ATTEMPTS):
+        try:
+            with opener.open(urllib.request.Request(url, headers=headers), timeout=60) as response:
+                return response.read()
+        except OSError as error:
+            failure = str(error)
+            delay = _retry_delay(error, attempt)
+            if attempt + 1 == FETCH_ATTEMPTS or delay is None:
+                break
+            time.sleep(delay)
+    raise NoticeError(f"could not fetch {url}: {failure}")
 
 
 def resolve_tag(repository: str, tag: str) -> str:
@@ -419,11 +465,6 @@ def resolve_submodule(repository: str, tag: str, path: str) -> str:
     return entry[2]
 
 
-def raw_url(repository: str, commit: str, path: str) -> str:
-    slug = repository.removeprefix("https://github.com/")
-    return f"https://raw.githubusercontent.com/{slug}/{commit}/{path}"
-
-
 def excerpt_bytes(data: bytes, lines: list[int]) -> bytes:
     selected = data.splitlines(keepends=True)[lines[0] - 1 : lines[1]]
     if len(selected) != lines[1] - lines[0] + 1:
@@ -434,7 +475,7 @@ def excerpt_bytes(data: bytes, lines: list[int]) -> bytes:
 def upstream_errors(
     manifest: dict,
     notices_dir: Path,
-    fetch: Callable[[str], bytes] = fetch_url,
+    fetch: Callable[[str, str, str], bytes] = fetch_file,
     tag_commit: Callable[[str, str], str] = resolve_tag,
     submodule_commit: Callable[[str, str, str], str] = resolve_submodule,
 ) -> list[str]:
@@ -455,7 +496,7 @@ def upstream_errors(
                     f"{found}, not {commit}"
                 )
         for entry in component["file"]:
-            data = fetch(raw_url(component["repository"], commit, entry["path"]))
+            data = fetch(component["repository"], commit, entry["path"])
             if sha256(data) != entry["sha256"]:
                 errors.append(f"{label} upstream {entry['path']} does not match its sha256")
                 continue
@@ -466,7 +507,7 @@ def upstream_errors(
     rust_std = manifest["rust_std"]
     (component,) = (c for c in manifest["component"] if c["id"] == rust_std["component"])
     for key in ("lockfile", "std_manifest"):
-        data = fetch(raw_url(component["repository"], component["commit"], rust_std[key]))
+        data = fetch(component["repository"], component["commit"], rust_std[key])
         if sha256(data) != rust_std[f"{key}_sha256"]:
             errors.append(f"rust_std upstream {rust_std[key]} does not match its sha256")
     return errors

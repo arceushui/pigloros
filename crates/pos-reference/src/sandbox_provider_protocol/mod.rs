@@ -38,8 +38,9 @@ pub(crate) const REQUIRED_HOST_FEATURES: [&str; 16] = [
 
 #[cfg(target_os = "linux")]
 pub use network::{
-    LocalNetworkSession, LocalNetworkTermination, NetworkCaptureStore, NetworkCaptureStoreError,
-    NetworkEndpointConnector, ReplayedNetworkExchange,
+    serve_proxy, LocalNetworkSession, LocalNetworkTermination, LocalProxyBinding,
+    NetworkCaptureStore, NetworkCaptureStoreError, NetworkEndpointConnector,
+    ReplayedNetworkExchange,
 };
 pub use network::{
     NetworkExchangeFailure, NetworkExchangeReply, NetworkExchangeRequest,
@@ -94,8 +95,8 @@ pub use execution::{
     SandboxProviderResult, SandboxTerminalOutcome,
 };
 pub use launch::{
-    ExecutionRelease, ExecutionReleaseFields, FdIdentity, LaunchParameters, LauncherReady,
-    LauncherReadyFields,
+    blake3_digest_of, fdl1_digest, ExecutionRelease, ExecutionReleaseFields, FdIdentity,
+    FdLayoutEntry, FdRole, LaunchParameters, LauncherReady, LauncherReadyFields,
 };
 pub use operations::{
     RequestAuthority, SandboxCancelRequest, SandboxCancelResponse, SandboxCancellationResult,

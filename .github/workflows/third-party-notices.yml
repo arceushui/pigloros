@@ -38,6 +38,8 @@ jobs:
         with:
           tool: cargo-about@0.9.2
       - name: Check the committed notice texts against their upstream commits
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: python3 scripts/third_party_notices.py verify-upstream
       - name: Generate the cargo-about reports from the locked graphs
         env:

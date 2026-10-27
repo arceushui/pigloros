@@ -1,6 +1,10 @@
 //! Typed dynamic systemd transient-unit launch properties.
 
-use pos_reference::sandbox_provider_protocol::SandboxLimit;
+use std::time::Duration;
+
+use pos_reference::sandbox_provider_protocol::{
+    LaunchParameters, SandboxLimit, SandboxProviderProtocolError,
+};
 use zbus::{Fd, OwnedFd};
 
 use crate::{
@@ -9,11 +13,18 @@ use crate::{
     SystemdTransientUnitPropertyAccess, SystemdTransientUnitPropertyKind, TransientUnitHardening,
 };
 
+#[cfg(test)]
 const MAX_PROVIDER_PATH_BYTES: usize = 4096;
 const LAUNCHER_DESTINATION: &str = "/.pigloros/release-launcher";
 const RELEASE_DESCRIPTOR_NAME: &str = "piglor-release-v1";
 const HOST_SERVICE_DESCRIPTOR_NAME: &str = "piglor-host-service-v1";
 const ELM1_LIMIT_COUNT: usize = 17;
+/// The one launcher-mode argument (`crate::launcher::LAUNCH_BARRIER_MODE`).
+const LAUNCH_BARRIER_ARGUMENT: &str = "launch-barrier";
+/// ELM1 limit 9 (`WorkBytes`) sizes the one optional writable mount.
+const WORK_BYTES_LIMIT_ID: usize = 9;
+/// The sole writable mount point (ADR-069 section 6).
+const WORK_MOUNT_PATH: &str = "/work";
 
 /// The systemd-owned portion of one complete, already authorized ELM1 limit set.
 ///
@@ -22,6 +33,7 @@ const ELM1_LIMIT_COUNT: usize = 17;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SystemdServiceLimits {
     requested: [u64; 7],
+    work_bytes: u64,
 }
 
 /// Failure to represent the exact ELM1 service limits on pinned systemd.
@@ -36,6 +48,15 @@ pub enum SystemdServiceLimitsError {
     /// The watchdog milliseconds cannot be represented as systemd microseconds.
     #[error("ELM1 watchdog milliseconds overflow systemd microseconds")]
     WatchdogOverflow,
+}
+
+/// Whether systemd cannot enforce `value` exactly for ELM1 limit `id`.
+///
+/// `u64::MAX` is infinity for the service limits and an unbounded mount for
+/// `WorkBytes`; zero is infinity for the limits that read it that way.
+const fn is_unenforceable(id: usize, value: u64) -> bool {
+    (value == u64::MAX && (id < 7 || id == WORK_BYTES_LIMIT_ID))
+        || (value == 0 && matches!(id, 0 | 2 | 3 | 4))
 }
 
 impl SystemdServiceLimits {
@@ -59,22 +80,50 @@ impl SystemdServiceLimits {
             return Err(SystemdServiceLimitsError::InvalidEffectiveLimits);
         }
         let mut requested = [0; 7];
-        for (id, limit) in limits.iter().take(requested.len()).enumerate() {
-            if limit.value == u64::MAX || ([0, 2, 3, 4].contains(&id) && limit.value == 0) {
+        let work_bytes = limits[WORK_BYTES_LIMIT_ID].value;
+        for (id, limit) in limits.iter().enumerate() {
+            if is_unenforceable(id, limit.value) {
                 return Err(SystemdServiceLimitsError::UnenforceableLimit(
                     limit.limit_id,
                 ));
             }
-            requested[id] = limit.value;
+            if let Some(slot) = requested.get_mut(id) {
+                *slot = limit.value;
+            }
         }
         requested[4] = requested[4]
             .checked_mul(1_000)
             .ok_or(SystemdServiceLimitsError::WatchdogOverflow)?;
-        Ok(Self { requested })
+        Ok(Self {
+            requested,
+            work_bytes,
+        })
+    }
+
+    /// The requested `TemporaryFileSystem` entries: the `/work` tmpfs sized by
+    /// ELM1 `WorkBytes`, or none when that ceiling is zero.
+    ///
+    /// A zero ceiling is a literal zero-capacity limit, and tmpfs reads
+    /// `size=0` as unbounded, so no writable mount is requested at all.
+    fn temporary_file_systems(&self) -> Vec<(String, String)> {
+        if self.work_bytes == 0 {
+            Vec::new()
+        } else {
+            vec![(
+                WORK_MOUNT_PATH.to_owned(),
+                format!("size={},nosuid,nodev,noexec", self.work_bytes),
+            )]
+        }
     }
 
     pub(crate) const fn value(&self, property: SystemdOperatingLimitProperty) -> u64 {
         self.requested[property.index()]
+    }
+
+    /// The attempt watchdog: ELM1 `WatchdogMilliseconds`, the same ceiling
+    /// systemd enforces as `RuntimeMaxUSec`.
+    pub(crate) const fn watchdog(&self) -> Duration {
+        Duration::from_micros(self.requested[SystemdOperatingLimitProperty::RuntimeMaxUSec.index()])
     }
 }
 
@@ -122,8 +171,8 @@ impl ActivatedRootDirectory {
 
 /// A bounded provider-owned source path for the admitted launcher bind mount.
 ///
-/// The provider's launcher-admission boundary owns source identity, ownership,
-/// immutability, and digest validation; this type keeps only its normalized path.
+/// Production construction is restricted to the authenticated SIC1 source
+/// captured by `AdmittedAttempt`; no caller-selected path can construct it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LauncherSource(String);
 
@@ -132,13 +181,19 @@ impl LauncherSource {
     ///
     /// # Errors
     /// Rejects non-absolute, non-normalized, embedded-NUL, or oversized paths.
-    pub fn new(path: impl Into<String>) -> Result<Self, TransientUnitRequestError> {
+    #[cfg(test)]
+    pub(crate) fn new(path: impl Into<String>) -> Result<Self, TransientUnitRequestError> {
         let path = path.into();
         if is_normalized_absolute_path(&path) {
             Ok(Self(path))
         } else {
             Err(TransientUnitRequestError::InvalidLauncherSource)
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) const fn admitted(path: String) -> Self {
+        Self(path)
     }
 
     /// Return the exact source for `BindReadOnlyPaths`.
@@ -174,6 +229,53 @@ pub struct TransientUnitLaunchInputs {
     launcher_source: LauncherSource,
     mode: LaunchMode,
     release: OwnedFd,
+    invocation: LauncherInvocation,
+}
+
+/// The launcher-mode command the unit runs: `<launcher> launch-barrier
+/// <lpv1-hex>` with the exact LPV1 launch parameters (ADR-069 "Trusted
+/// launcher and trust binding").
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LauncherInvocation {
+    lpv1_hex: String,
+}
+
+impl LauncherInvocation {
+    /// Encode `parameters` as the single hexadecimal launcher argument.
+    ///
+    /// # Errors
+    /// Returns a protocol error if the record cannot be serialized.
+    pub fn from_parameters(
+        parameters: &LaunchParameters,
+    ) -> Result<Self, SandboxProviderProtocolError> {
+        parameters.to_canonical_cbor().map(|bytes| Self {
+            lpv1_hex: lower_hex(&bytes),
+        })
+    }
+
+    /// The `ExecStart=` value: the bind-mounted launcher, its argument vector
+    /// and no failure tolerance.
+    fn exec_start(&self) -> Vec<(String, Vec<String>, bool)> {
+        vec![(
+            LAUNCHER_DESTINATION.to_owned(),
+            vec![
+                LAUNCHER_DESTINATION.to_owned(),
+                LAUNCH_BARRIER_ARGUMENT.to_owned(),
+                self.lpv1_hex.clone(),
+            ],
+            false,
+        )]
+    }
+}
+
+fn lower_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+
+    bytes.iter().fold(String::new(), |mut hex, byte| {
+        // Writing to a `String` cannot fail.
+        write!(hex, "{byte:02x}").ok();
+        hex
+    })
 }
 
 /// The verified attempt root, rechecked immediately before launch (ADR-087
@@ -181,40 +283,81 @@ pub struct TransientUnitLaunchInputs {
 ///
 /// It has no public constructor. Only [`crate::VerifiedRootMount::recheck`]
 /// mints one, after current RVS1, the control floor and the attached mount
-/// identity were checked again, and [`TransientUnitLaunchInputs`] accepts
-/// nothing else as `RootDirectory`.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// identity were checked again. It retains the complete admitted attempt
+/// whose entry was rechecked; execution and release require that same context.
+/// [`TransientUnitLaunchInputs`] accepts nothing else as `RootDirectory`.
+#[derive(Debug, Eq, PartialEq)]
 pub struct CheckedRoot {
     root_directory: ActivatedRootDirectory,
+    #[cfg(target_os = "linux")]
+    admitted: crate::AdmittedAttempt,
 }
 
 impl CheckedRoot {
     #[cfg(target_os = "linux")]
-    pub(crate) const fn rechecked(root_directory: ActivatedRootDirectory) -> Self {
-        Self { root_directory }
+    pub(crate) const fn rechecked(
+        root_directory: ActivatedRootDirectory,
+        admitted: crate::AdmittedAttempt,
+    ) -> Self {
+        Self {
+            root_directory,
+            admitted,
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn matches_attempt(&self, attempt: &crate::AdmittedAttempt) -> bool {
+        self.admitted == *attempt
+    }
+
+    /// The rechecked attempt root.
+    #[must_use]
+    pub const fn root_directory(&self) -> &ActivatedRootDirectory {
+        &self.root_directory
     }
 
     /// A rechecked root for requested-state unit tests, where no mount exists.
     #[cfg(test)]
-    pub(crate) const fn for_test(root_directory: ActivatedRootDirectory) -> Self {
-        Self { root_directory }
+    pub(crate) fn for_test(
+        root_directory: ActivatedRootDirectory,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        #[cfg(target_os = "linux")]
+        {
+            crate::AdmittedAttempt::for_test(
+                crate::test_fixtures::ATTEMPT,
+                crate::test_fixtures::authority(),
+                pos_reference::sandbox_provider_protocol::SandboxExecutionMode::AirGapped,
+            )
+            .map(|admitted| Self {
+                root_directory,
+                admitted,
+            })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Ok(Self { root_directory })
+        }
     }
 }
 
 impl TransientUnitLaunchInputs {
     /// Combine a rechecked root with the other per-attempt launch inputs.
+    ///
+    /// The root is consumed: one recheck authorizes one launch.
     #[must_use]
     pub fn new(
-        root: &CheckedRoot,
+        root: CheckedRoot,
         launcher_source: LauncherSource,
         mode: LaunchMode,
         release: OwnedFd,
+        invocation: LauncherInvocation,
     ) -> Self {
         Self {
-            root_directory: root.root_directory.clone(),
+            root_directory: root.root_directory,
             launcher_source,
             mode,
             release,
+            invocation,
         }
     }
 }
@@ -254,29 +397,124 @@ pub enum SystemdTransientUnitValue {
     Numeric(SystemdTransientUnitNumericValue),
     /// A D-Bus `a(hs)` descriptor array: Unix FD before descriptor name.
     ExtraFileDescriptors(Vec<(OwnedFd, String)>),
+    /// A D-Bus `a(ss)` array of tmpfs mount path and mount options.
+    TemporaryFileSystem(Vec<(String, String)>),
+    /// A D-Bus `a(sasb)` command list: path, argument vector, ignore-failure.
+    ExecStart(Vec<(String, Vec<String>, bool)>),
 }
 
 impl SystemdTransientUnitValue {
+    /// The same name-list kind carrying `value`.
+    const fn with_names(&self, value: (bool, Vec<String>)) -> Self {
+        if matches!(self, Self::SystemCallFilter(_)) {
+            Self::SystemCallFilter(value)
+        } else {
+            Self::RestrictAddressFamilies(value)
+        }
+    }
+
+    /// Readback equality of the array-valued kinds; anything else differs.
+    fn collection_matches(&self, observed: &SystemdTransientUnitReadbackValue) -> bool {
+        match (self, observed) {
+            (
+                Self::BindReadOnlyPaths(expected),
+                SystemdTransientUnitReadbackValue::BindReadOnlyPaths(actual),
+            ) => expected == actual,
+            (
+                Self::ExtraFileDescriptors(expected),
+                SystemdTransientUnitReadbackValue::StringArray(actual),
+            ) => expected.iter().map(|(_, name)| name).eq(actual.iter()),
+            (
+                Self::TemporaryFileSystem(expected),
+                SystemdTransientUnitReadbackValue::TemporaryFileSystem(actual),
+            ) => expected == actual,
+            (Self::ExecStart(expected), SystemdTransientUnitReadbackValue::ExecStart(actual)) => {
+                expected == actual
+            }
+            _ => false,
+        }
+    }
+
+    /// The signature of the array-valued kinds; `a(ss)` is the last of them.
+    const fn collection_signature(&self) -> &'static str {
+        match self {
+            Self::BindReadOnlyPaths(_) => "a(ssbt)",
+            Self::ExtraFileDescriptors(_) => "a(hs)",
+            Self::ExecStart(_) => "a(sasb)",
+            _ => "a(ss)",
+        }
+    }
+
     fn try_clone_for_submission(&self) -> Result<Self, zbus::Error> {
         match self {
             Self::Static(value) => Ok(Self::Static(*value)),
             Self::RootDirectory(value) => Ok(Self::RootDirectory(value.clone())),
             Self::BindReadOnlyPaths(value) => Ok(Self::BindReadOnlyPaths(value.clone())),
-            Self::SystemCallFilter(value) => Ok(Self::SystemCallFilter(value.clone())),
-            Self::RestrictAddressFamilies(value) => {
-                Ok(Self::RestrictAddressFamilies(value.clone()))
+            Self::SystemCallFilter(value) | Self::RestrictAddressFamilies(value) => {
+                Ok(self.with_names(value.clone()))
             }
             Self::Numeric(value) => Ok(Self::Numeric(*value)),
-            Self::ExtraFileDescriptors(value) => value
-                .iter()
-                .map(|(descriptor, name)| {
-                    let descriptor = Fd::from(descriptor).try_to_owned().map(OwnedFd::from)?;
-                    Ok((descriptor, name.clone()))
-                })
-                .collect::<Result<Vec<_>, _>>()
-                .map(Self::ExtraFileDescriptors),
+            Self::ExtraFileDescriptors(value) => {
+                clone_descriptors(value).map(Self::ExtraFileDescriptors)
+            }
+            lists => lists.clone_lists(),
         }
     }
+
+    /// Clone the list-valued kinds that carry no descriptor. Every other kind
+    /// is named, so a new kind does not compile until it is placed.
+    fn clone_lists(&self) -> Result<Self, zbus::Error> {
+        match self {
+            Self::TemporaryFileSystem(value) => Ok(Self::TemporaryFileSystem(value.clone())),
+            Self::ExecStart(value) => Ok(Self::ExecStart(value.clone())),
+            Self::Static(_)
+            | Self::RootDirectory(_)
+            | Self::BindReadOnlyPaths(_)
+            | Self::SystemCallFilter(_)
+            | Self::RestrictAddressFamilies(_)
+            | Self::Numeric(_)
+            | Self::ExtraFileDescriptors(_) => Err(zbus::Error::IncorrectType),
+        }
+    }
+}
+
+/// The last dynamic properties: descriptors, the `/work` mount and the command.
+fn tail_properties(
+    descriptors: Vec<(OwnedFd, String)>,
+    service_limits: &SystemdServiceLimits,
+    invocation: &LauncherInvocation,
+) -> [SystemdTransientUnitProperty; 3] {
+    [
+        SystemdTransientUnitProperty::new(
+            SystemdTransientUnitPropertyKind::Dynamic(
+                SystemdDynamicPropertyKind::ExtraFileDescriptors,
+            ),
+            SystemdTransientUnitValue::ExtraFileDescriptors(descriptors),
+        ),
+        SystemdTransientUnitProperty::new(
+            SystemdTransientUnitPropertyKind::Dynamic(
+                SystemdDynamicPropertyKind::TemporaryFileSystem,
+            ),
+            SystemdTransientUnitValue::TemporaryFileSystem(service_limits.temporary_file_systems()),
+        ),
+        SystemdTransientUnitProperty::new(
+            SystemdTransientUnitPropertyKind::Dynamic(SystemdDynamicPropertyKind::ExecStart),
+            SystemdTransientUnitValue::ExecStart(invocation.exec_start()),
+        ),
+    ]
+}
+
+fn clone_descriptors(
+    descriptors: &[(OwnedFd, String)],
+) -> Result<Vec<(OwnedFd, String)>, zbus::Error> {
+    descriptors
+        .iter()
+        .map(|(descriptor, name)| {
+            Fd::from(descriptor)
+                .try_to_owned()
+                .map(|descriptor| (OwnedFd::from(descriptor), name.clone()))
+        })
+        .collect()
 }
 
 /// One named typed property ready for `StartTransientUnit` serialization.
@@ -309,11 +547,10 @@ impl SystemdTransientUnitProperty {
         match &self.value {
             SystemdTransientUnitValue::Static(value) => value.dbus_signature(),
             SystemdTransientUnitValue::RootDirectory(_) => "s",
-            SystemdTransientUnitValue::BindReadOnlyPaths(_) => "a(ssbt)",
             SystemdTransientUnitValue::SystemCallFilter(_)
             | SystemdTransientUnitValue::RestrictAddressFamilies(_) => "(bas)",
             SystemdTransientUnitValue::Numeric(value) => value.dbus_signature(),
-            SystemdTransientUnitValue::ExtraFileDescriptors(_) => "a(hs)",
+            collection => collection.collection_signature(),
         }
     }
 
@@ -339,10 +576,6 @@ impl SystemdTransientUnitProperty {
                     SystemdTransientUnitReadbackValue::String(actual),
                 ) => expected == actual,
                 (
-                    SystemdTransientUnitValue::BindReadOnlyPaths(expected),
-                    SystemdTransientUnitReadbackValue::BindReadOnlyPaths(actual),
-                ) => expected == actual,
-                (
                     SystemdTransientUnitValue::SystemCallFilter(_),
                     SystemdTransientUnitReadbackValue::BoolStringArray(actual),
                 ) => system_call_filter.verify_readback(actual).is_ok(),
@@ -356,11 +589,7 @@ impl SystemdTransientUnitProperty {
                     ),
                     SystemdTransientUnitReadbackValue::U64(actual),
                 ) => expected == actual,
-                (
-                    SystemdTransientUnitValue::ExtraFileDescriptors(expected),
-                    SystemdTransientUnitReadbackValue::StringArray(actual),
-                ) => expected.iter().map(|(_, name)| name).eq(actual.iter()),
-                _ => false,
+                (expected, actual) => expected.collection_matches(actual),
             }
     }
 
@@ -462,6 +691,11 @@ pub enum SystemdTransientUnitReadbackValue {
     BoolStringArray((bool, Vec<String>)),
     /// A D-Bus `as` value.
     StringArray(Vec<String>),
+    /// A D-Bus `a(ss)` value.
+    TemporaryFileSystem(Vec<(String, String)>),
+    /// The path, argument vector and ignore-failure flag of each `ExecStart=`
+    /// command; systemd's timestamps, PID and status fields are not compared.
+    ExecStart(Vec<(String, Vec<String>, bool)>),
     /// A D-Bus `u` value.
     U32(u32),
     /// A D-Bus `t` value.
@@ -530,6 +764,7 @@ impl TransientUnitRequest {
             launcher_source,
             mode,
             release,
+            invocation,
         } = inputs;
         let (address_families, descriptors) = match mode {
             LaunchMode::Local { host_service } => (
@@ -545,7 +780,7 @@ impl TransientUnitRequest {
             ),
         };
         let mut properties =
-            Vec::with_capacity(TransientUnitHardening::requested_properties().len() + 13);
+            Vec::with_capacity(TransientUnitHardening::requested_properties().len() + 15);
         for property in TransientUnitHardening::requested_properties() {
             properties.push(SystemdTransientUnitProperty::new(
                 SystemdTransientUnitPropertyKind::Hardening(*property),
@@ -605,12 +840,7 @@ impl TransientUnitRequest {
                 SystemdTransientUnitNumericValue::FileDescriptorStoreMax(0),
             ),
         ));
-        properties.push(SystemdTransientUnitProperty::new(
-            SystemdTransientUnitPropertyKind::Dynamic(
-                SystemdDynamicPropertyKind::ExtraFileDescriptors,
-            ),
-            SystemdTransientUnitValue::ExtraFileDescriptors(descriptors),
-        ));
+        properties.extend(tail_properties(descriptors, service_limits, &invocation));
         Self {
             properties,
             system_call_filter,
@@ -659,6 +889,7 @@ impl TransientUnitRequest {
     }
 }
 
+#[cfg(test)]
 fn is_normalized_absolute_path(path: &str) -> bool {
     path.len() < MAX_PROVIDER_PATH_BYTES
         && path.starts_with('/')

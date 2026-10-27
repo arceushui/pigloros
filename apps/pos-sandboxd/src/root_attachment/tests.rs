@@ -882,11 +882,10 @@ fn recheck_mints_a_checked_root_only_for_the_same_authority_and_mount() -> TestR
     let expected = expected(&component(&tree.prepared));
     let kernel = FakeKernel::accepting(matching(&expected));
     let verified = attach_and_verify(&kernel, &tree.prepared, &expected, file_mount()?, || Ok(()))?;
-    let checked = recheck(&kernel, &verified, &tree.prepared, || Ok(()))?;
-    assert_eq!(
-        checked,
-        CheckedRoot::for_test(expected.root_directory.clone())
-    );
+    let checked = recheck(&kernel, &verified, &tree.prepared, Some(&expected), || {
+        Ok(())
+    })?;
+    assert_eq!(checked, expected.root_directory);
 
     // Authority drift or a floor above the admission refuses.
     for error in [
@@ -894,7 +893,9 @@ fn recheck_mints_a_checked_root_only_for_the_same_authority_and_mount() -> TestR
         StagingError::BelowControlFloor,
     ] {
         assert_eq!(
-            recheck(&kernel, &verified, &tree.prepared, || Err(error)),
+            recheck(&kernel, &verified, &tree.prepared, Some(&expected), || Err(
+                error
+            )),
             Err(ImageActivationError::EvidenceMismatch)
         );
     }
@@ -905,7 +906,9 @@ fn recheck_mints_a_checked_root_only_for_the_same_authority_and_mount() -> TestR
         mutate(&mut observed);
         let drifted = FakeKernel::accepting(observed);
         assert_eq!(
-            recheck(&drifted, &verified, &tree.prepared, || Ok(())),
+            recheck(&drifted, &verified, &tree.prepared, Some(&expected), || Ok(
+                ()
+            )),
             Err(ImageActivationError::EvidenceMismatch),
             "{name}"
         );
@@ -930,6 +933,7 @@ fn recheck_mints_a_checked_root_only_for_the_same_authority_and_mount() -> TestR
             &FakeKernel::accepting(replaced),
             &verified,
             &tree.prepared,
+            Some(&expected),
             || Ok(())
         ),
         Err(ImageActivationError::EvidenceMismatch)
@@ -1048,12 +1052,16 @@ async fn the_admitted_chain_reaches_attachment_only_through_every_gate() -> Test
             "root_attachment::tests::the_admitted_chain_reaches_attachment_only_through_every_gate",
         );
     }
-    let staged = StagedInstallation::stage().map_err(|error| error.to_string())?;
+    let staged = StagedInstallation::stage_execution().map_err(|error| error.to_string())?;
     let snapshot = ProviderImageSnapshot::open(staged.request())?;
     let admission = snapshot.admit_held_image()?;
     fixed_registry()?;
-    let prepared = SystemdAttemptRegistry::open()?
-        .commit_planned(&PlannedAttemptIntent::new([0x44; 16], [0x45; 32])?)?
+    let registry = SystemdAttemptRegistry::open()?;
+    let prepared = registry
+        .commit_planned(&PlannedAttemptIntent::new(
+            snapshot.request().attempt_id,
+            snapshot.request().authority.sim1_digest,
+        )?)?
         .prepare_directory()?;
     let root_directory = ActivatedRootDirectory::for_attempt(&component(&prepared));
     let expected = Expected::for_admission(&admission, root_directory.clone())
@@ -1099,16 +1107,7 @@ async fn the_admitted_chain_reaches_attachment_only_through_every_gate() -> Test
     // The entry reservation consumes a fresh admission. The public recheck
     // re-reads the real host kernel: the fake descriptor is no attached EROFS
     // mount, so it refuses.
-    let ledger = StagingLedger::new(StagingLimits {
-        aggregate_bytes: 0,
-        queued_requests: 0,
-        concurrent_attempts: 1,
-    });
-    let entry = ledger.reserve_entry(snapshot.admit_held_image()?)?;
-    assert_eq!(
-        verified.recheck(&prepared, &entry).err(),
-        Some(ImageActivationError::EvidenceMismatch)
-    );
+    check_admitted_recheck(&verified, &kernel, &registry, &snapshot, &staged, &prepared)?;
 
     // The held image changes after admission: re-admission rejects and the
     // attached root is detached again.
@@ -1156,6 +1155,83 @@ async fn the_admitted_chain_reaches_attachment_only_through_every_gate() -> Test
         .await
         .err(),
         Some(ImageActivationError::AttachFailure)
+    );
+    Ok(())
+}
+
+#[test]
+fn an_entry_binds_only_the_root_its_admission_activated() -> TestResult {
+    let tree = prepared_tree()?;
+    let expected = expected(&component(&tree.prepared));
+    assert!(binds(&expected, Some(&expected.clone())));
+    assert!(!binds(&expected, None));
+    let mut other_image = expected.clone();
+    other_image.held.1 += 1;
+    let mut other_executable = expected.clone();
+    other_executable.executable_digest[0] ^= 1;
+    let mut other_path = expected.clone();
+    other_path.executable_path.push('x');
+    let mut other_root = expected.clone();
+    other_root.root_directory = ActivatedRootDirectory::for_attempt("another");
+    for other in [other_image, other_executable, other_path, other_root] {
+        assert!(!binds(&expected, Some(&other)));
+    }
+    Ok(())
+}
+
+#[test]
+fn a_recheck_consults_nothing_for_an_admission_it_was_not_activated_from() -> TestResult {
+    let tree = prepared_tree()?;
+    let expected = expected(&component(&tree.prepared));
+    let kernel = FakeKernel::accepting(matching(&expected));
+    let verified = attach_and_verify(&kernel, &tree.prepared, &expected, file_mount()?, || Ok(()))?;
+    let mut other = expected;
+    other.executable_digest[0] ^= 1;
+    let consulted = std::cell::Cell::new(false);
+    for candidate in [Some(&other), None] {
+        assert_eq!(
+            recheck(&kernel, &verified, &tree.prepared, candidate, || {
+                consulted.set(true);
+                Ok(())
+            })
+            .err(),
+            Some(ImageActivationError::EvidenceMismatch)
+        );
+    }
+    assert!(!consulted.get());
+    Ok(())
+}
+
+fn check_admitted_recheck(
+    verified: &VerifiedRootMount,
+    kernel: &FakeKernel,
+    registry: &SystemdAttemptRegistry,
+    snapshot: &ProviderImageSnapshot,
+    staged: &StagedInstallation,
+    prepared: &PreparedAttemptDirectory,
+) -> TestResult {
+    let ledger = StagingLedger::new(StagingLimits {
+        aggregate_bytes: 512 * 1024 * 1024,
+    });
+    let (_staging, input) = crate::test_fixtures::staged_execution::verified_input(staged, &ledger)
+        .map_err(|error| error.to_string())?;
+    let entry = input.entry();
+    assert_eq!(
+        verified.recheck(prepared, &entry).err(),
+        Some(ImageActivationError::EvidenceMismatch)
+    );
+    let checked = verified.recheck_with(kernel, prepared, &entry)?;
+    assert_eq!(checked.root_directory(), verified.root_directory());
+    assert!(checked.matches_attempt(&AdmittedAttempt::from_entry(&entry, prepared)?));
+    let foreign = registry
+        .commit_planned(&PlannedAttemptIntent::new(
+            [0x44; 16],
+            snapshot.request().authority.sim1_digest,
+        )?)?
+        .prepare_directory()?;
+    assert_eq!(
+        verified.recheck_with(kernel, &foreign, &entry).err(),
+        Some(ImageActivationError::EvidenceMismatch)
     );
     Ok(())
 }
