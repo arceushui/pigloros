@@ -372,7 +372,7 @@ fn proxy_ends_cleanly_when_the_adapter_closes_before_later_plans() -> TestResult
 #[test]
 fn proxy_rejects_frames_that_do_not_match_the_next_plan_before_connecting() -> TestResult {
     let exchanges = [PROXY_FIRST, PROXY_SECOND];
-    let address = proxy_unused_address()?;
+    let address = proxy_unused_address();
     let case = ProxyCase::new(address, &exchanges, [100, 100, PROXY_DEADLINE_MS])?;
     let mut out_of_order = Vec::new();
     NetworkExchangeRequest::new(&case.plans[1], PROXY_SECOND.0)?.write_to(&mut out_of_order)?;
@@ -412,7 +412,7 @@ fn proxy_rejects_frames_that_do_not_match_the_next_plan_before_connecting() -> T
 fn proxy_fails_closed_when_a_second_request_is_already_outstanding() -> TestResult {
     let exchanges = [PROXY_FIRST, PROXY_SECOND];
     let case = ProxyCase::new(
-        proxy_unused_address()?,
+        proxy_unused_address(),
         &exchanges,
         [100, 100, PROXY_DEADLINE_MS],
     )?;
@@ -510,7 +510,7 @@ fn proxy_treats_a_closed_adapter_write_side_as_no_outstanding_request() -> TestR
 fn proxy_fails_closed_on_a_channel_whose_queue_cannot_be_inspected() -> TestResult {
     let exchanges = [PROXY_FIRST];
     let case = ProxyCase::new(
-        proxy_unused_address()?,
+        proxy_unused_address(),
         &exchanges,
         [100, 100, PROXY_DEADLINE_MS],
     )?;
@@ -563,7 +563,7 @@ fn proxy_rejects_any_frame_after_every_plan_was_served() -> TestResult {
 #[test]
 fn proxy_reports_remote_unavailable_for_refused_or_substituted_peers() -> TestResult {
     let exchanges = [PROXY_FIRST];
-    let address = proxy_unused_address()?;
+    let address = proxy_unused_address();
     let decoy = TcpListener::bind("127.0.0.1:0")?;
     let decoy_address = decoy.local_addr()?;
     let decoy = thread::spawn(move || -> io::Result<Vec<u8>> {
@@ -598,7 +598,7 @@ fn proxy_reports_remote_unavailable_for_refused_or_substituted_peers() -> TestRe
 fn proxy_enforces_the_monotonic_network_deadline() -> TestResult {
     let exchanges = [PROXY_FIRST];
     // A zero deadline denies every exchange before any connection is attempted.
-    let case = ProxyCase::new(proxy_unused_address()?, &exchanges, [100, 100, 0])?;
+    let case = ProxyCase::new(proxy_unused_address(), &exchanges, [100, 100, 0])?;
     let mut channel = ProxyChannel::new(case.requests(&exchanges)?)?;
     let mut connector = ProxyConnector::default();
     let session = case.serve(&mut channel, &mut connector)?;
@@ -776,7 +776,7 @@ fn proxy_reports_channel_failure_when_a_reply_cannot_be_written() -> TestResult 
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let address = listener.local_addr()?;
     let server = proxy_server(listener, &exchanges);
-    for endpoint in [address, proxy_unused_address()?] {
+    for endpoint in [address, proxy_unused_address()] {
         let case = ProxyCase::new(endpoint, &exchanges, [100, 100, PROXY_DEADLINE_MS])?;
         let mut channel = ProxyChannel::scripted(vec![
             AdapterStep::CloseRead,
@@ -862,8 +862,8 @@ fn proxy_accept(listener: &TcpListener) -> io::Result<TcpStream> {
 /// `127.0.0.1:0`, so a port freed by dropping a listener there could be handed
 /// to a concurrent test's listener and turn a refused peer into a live one;
 /// `127.0.0.2` is never bound by them, so its discard port stays closed.
-fn proxy_unused_address() -> TestResult<SocketAddr> {
-    Ok(SocketAddr::from(([127, 0, 0, 2], 9)))
+fn proxy_unused_address() -> SocketAddr {
+    SocketAddr::from(([127, 0, 0, 2], 9))
 }
 
 fn proxy_total(exchanges: &[(&[u8], &[u8])], side: usize) -> u64 {
