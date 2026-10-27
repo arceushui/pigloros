@@ -174,7 +174,7 @@ impl FactualHostOwnerV1 {
     const OWNER_IDS: [&'static str; 6] = [
         "host.observation",
         "host.prefix",
-        "host.history",
+        "host.visible-history",
         "host.ingress",
         "host.lineage",
         "host.fold-history",
@@ -978,6 +978,7 @@ pub enum FactualTickShapeV1 {
 }
 
 /// Where one input of a node comes from.
+#[derive(Clone)]
 enum FactualSource {
     /// A node of this Tick, by index into the specs.
     Node(usize),
@@ -1464,9 +1465,20 @@ impl<'a> FactualAssembly<'a> {
     ) -> Result<(), FactualDependencyErrorV1> {
         if let Some(source) = source {
             self.fold(host, source)?;
+            self.feed_coarse_nodes(host);
         }
         self.renumber_ingress();
         Ok(())
+    }
+
+    /// Give every verified-prefix and history node the one input the snapshot
+    /// node declares (ADR-064 R6, 4.1): the last fold checkpoint node, else the
+    /// head, else none.
+    fn feed_coarse_nodes(&mut self, host: &HostNodes) {
+        let fold_input = self.specs[host.snapshot].sources.clone();
+        for index in host.prefix.iter().chain(&host.history) {
+            self.specs[*index].sources.extend(fold_input.clone());
+        }
     }
 
     /// Give the ingress nodes their ordinals in ascending `seq`, once the
@@ -1492,7 +1504,9 @@ impl<'a> FactualAssembly<'a> {
                 .specs
                 .iter()
                 .map(|spec| distinct_sources(&spec.sources))
-                .sum(),
+                .sum::<usize>()
+                + host.prefix.len()
+                + host.history.len(),
         };
         let tick = self.context.tick;
         let layout = factual_fold_layout((self.context.timeline_id, tick), source, &rest)?;

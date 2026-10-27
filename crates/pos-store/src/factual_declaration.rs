@@ -221,7 +221,8 @@ pub(crate) fn digest_index(record: &TickDependencyRecordV1) -> DigestIndex<'_> {
 /// Every output node inputs exactly one step node of its Tick, position and
 /// owner; every step node inputs the snapshot node; every host node has the
 /// class of its host owner's rule and declares no input, except the snapshot
-/// node and the fold checkpoint nodes; the fold binding names the fold nodes
+/// node, the fold checkpoint nodes and, by check (xi), the verified-prefix and
+/// history nodes; the fold binding names the fold nodes
 /// (see [`fold_shape_holds`]); a human record holds nothing but its draft
 /// nodes. The store cannot check Driver-output classes, which need the output
 /// policy, nor the step-chain, carried-set, history or verified-prefix
@@ -237,7 +238,26 @@ pub(crate) fn shape_holds(basis: &PipelineAdmissionBasisV1, by_digest: &DigestIn
 fn nodes_and_fold_hold(basis: &PipelineAdmissionBasisV1, by_digest: &DigestIndex<'_>) -> bool {
     let nodes = basis.dependencies().record().nodes();
     let each = nodes.iter().all(|node| node_shape_holds(node, by_digest));
-    each && fold_shape_holds(basis, by_digest)
+    each && fold_shape_holds(basis, by_digest) && coarse_inputs_hold(nodes)
+}
+
+/// Check (xi) (ADR-064 R6, 4.3): every verified-prefix and history node
+/// inputs exactly what the snapshot node inputs: the Tick's last fold
+/// checkpoint node, else the head, else nothing. The shape check pins the
+/// snapshot node's input, so this compares with it and needs no registry state.
+fn coarse_inputs_hold(nodes: &[DependencyNodeRecordV1]) -> bool {
+    let snapshot = nodes
+        .iter()
+        .find(|node| is_host_node(node.coordinate(), FactualHostOwnerV1::Observation));
+    let expected = snapshot.map_or(&[][..], DependencyNodeRecordV1::input_digests);
+    [FactualHostOwnerV1::Prefix, FactualHostOwnerV1::History]
+        .into_iter()
+        .flat_map(|owner| {
+            nodes
+                .iter()
+                .filter(move |node| is_host_node(node.coordinate(), owner))
+        })
+        .all(|node| node.input_digests() == expected)
 }
 
 /// Whether one node has the shape its kind requires.
@@ -265,11 +285,18 @@ fn host_node_shape_holds(node: &DependencyNodeRecordV1) -> bool {
 }
 
 /// Whether the host node's inputs are allowed by its rule: only the snapshot
-/// node and the fold checkpoint nodes may declare any (ADR-064 R4.3, (viii)).
+/// node, the fold checkpoint nodes (ADR-064 R4.3, (viii)) and the verified-prefix
+/// and history nodes (ADR-064 R6, 4.3, checked by [`coarse_inputs_hold`]) may
+/// declare any.
 fn inputs_allowed(node: &DependencyNodeRecordV1, rule: Option<FactualRuleV1>) -> bool {
     let may_input = matches!(
         rule,
-        Some(FactualRuleV1::ObservationSnapshot | FactualRuleV1::FoldCheckpoint)
+        Some(
+            FactualRuleV1::ObservationSnapshot
+                | FactualRuleV1::FoldCheckpoint
+                | FactualRuleV1::VerifiedPrefix
+                | FactualRuleV1::ConsumedHistory
+        )
     );
     may_input || node.input_digests().is_empty()
 }

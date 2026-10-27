@@ -282,7 +282,7 @@ fn host_owners_are_the_documented_literals() {
     let literals = [
         (FactualHostOwnerV1::Observation, "host.observation"),
         (FactualHostOwnerV1::Prefix, "host.prefix"),
-        (FactualHostOwnerV1::History, "host.history"),
+        (FactualHostOwnerV1::History, "host.visible-history"),
         (FactualHostOwnerV1::Ingress, "host.ingress"),
         (FactualHostOwnerV1::Fold, "host.lineage"),
         (FactualHostOwnerV1::FoldHistory, "host.fold-history"),
@@ -632,11 +632,11 @@ fn a_scheduled_tick_orders_its_nodes_canonically_and_binds_drafts_and_events() {
     assert_eq!(
         layout,
         vec![
-            (0, "host.history", 0),
             (0, "host.ingress", 0),
             (0, "host.ingress", 1),
             (0, "host.observation", 0),
             (0, "host.prefix", 0),
+            (0, "host.visible-history", 0),
             (1, OWNER_A, 0),
             (1, OWNER_A, 1),
             (1, OWNER_A, 2),
@@ -700,7 +700,10 @@ fn a_scheduled_tick_classifies_every_node_by_its_rule() {
         FACTUAL_SNAPSHOT_SCHEMA_ID_V1
     );
     assert_eq!(schema_of("host.prefix", 0), FACTUAL_PREFIX_SCHEMA_ID_V1);
-    assert_eq!(schema_of("host.history", 0), FACTUAL_HISTORY_SCHEMA_ID_V1);
+    assert_eq!(
+        schema_of("host.visible-history", 0),
+        FACTUAL_HISTORY_SCHEMA_ID_V1
+    );
     assert_eq!(schema_of(OWNER_A, 0), FACTUAL_STEP_SCHEMA_ID_V1);
     assert_eq!(schema_of(OWNER_A, 1), factual_event_schema_id("world.out"));
     assert_eq!(
@@ -784,7 +787,7 @@ fn a_scheduled_tick_declares_every_required_and_resolved_input_once() {
     let mut expected = vec![
         digest_of(record, "host.observation", 0),
         digest_of(record, "host.prefix", 0),
-        digest_of(record, "host.history", 0),
+        digest_of(record, "host.visible-history", 0),
         digest_of(record, "host.ingress", 0),
         digest_of(record, "host.ingress", 1),
         indexed_hash(1),
@@ -809,7 +812,7 @@ fn a_scheduled_tick_declares_every_required_and_resolved_input_once() {
     for host in [
         "host.observation",
         "host.prefix",
-        "host.history",
+        "host.visible-history",
         "host.ingress",
     ] {
         assert!(find(record, host, 0).input_digests().is_empty());
@@ -2073,4 +2076,63 @@ fn a_fold_window_out_of_order_or_outside_its_range_is_refused() {
     let own = Some(cursor(0, Some(fold_head(TICK))));
     let own_head = fold_source(own, 9, Vec::new(), false);
     assert_eq!(refused(own_head), unresolved);
+}
+
+/// ADR-064 R6 4.1: the verified-prefix and history nodes input what the
+/// snapshot node inputs, and nothing when the Timeline has no fold input.
+#[test]
+fn prefix_and_history_nodes_input_the_fold_input_of_the_snapshot_node() {
+    let lone = driver(OWNER_A, Vec::new(), Vec::new());
+    let build = |source| {
+        let mut tick = scheduled(vec![lone.clone()]);
+        tick.prefix_contents = vec![hash(0x61)];
+        tick.history_contents = vec![hash(0x62)];
+        ok(assemble_folded(tick, source))
+    };
+    let coarse = ["host.prefix", "host.visible-history"];
+
+    let checkpointed = build(first_window(12, 12));
+    let record = checkpointed.record();
+    let last = artifact(fold_nodes(&checkpointed)[0]);
+    assert_eq!(find(record, "host.observation", 0).input_digests(), [last]);
+    for owner in coarse {
+        assert_eq!(find(record, owner, 0).input_digests(), [last], "{owner}");
+    }
+    let checkpoint = fold_nodes(&checkpointed)[0].coordinate();
+    let prefix = find(record, "host.prefix", 0);
+    assert_eq!(
+        edge_bytes_between(record, prefix, last),
+        expected_edge(
+            prefix,
+            checkpoint,
+            ENDOGENOUS,
+            FactualRuleV1::VerifiedPrefix
+        )
+        .as_slice()
+    );
+    let history = find(record, "host.visible-history", 0);
+    assert_eq!(
+        edge_bytes_between(record, history, last),
+        expected_edge(
+            history,
+            checkpoint,
+            ENDOGENOUS,
+            FactualRuleV1::ConsumedHistory
+        )
+        .as_slice()
+    );
+
+    let head = fold_head(TICK - 2);
+    let excluded = vec![typed_fold_event(11, EVENT_TYPE_CONSENT_GRANTED_V1)];
+    let at = Some(cursor(10, Some(head.clone())));
+    let headed = build(fold_source(at, 11, excluded.clone(), false));
+    for owner in coarse {
+        let inputs = find(headed.record(), owner, 0).input_digests();
+        assert_eq!(inputs, [artifact(&head)], "{owner}");
+    }
+
+    let headless = build(fold_source(Some(cursor(10, None)), 11, excluded, false));
+    for owner in coarse {
+        assert!(find(headless.record(), owner, 0).input_digests().is_empty());
+    }
 }
