@@ -3594,12 +3594,15 @@ fn verified_prefix_drivers_declare_one_prefix_node_per_digest_on_both_adapters()
         assert!(declares(&basis, &owners[3], apart), "{name}");
         assert!(!declares(&basis, &owners[3], shared), "{name}");
 
-        // The prefix nodes are recomputed, input-free and of the prefix schema.
+        // The prefix nodes are recomputed, of the prefix schema, and input what
+        // the snapshot node inputs: the fold chain (ADR-064 R6, 4.1).
+        let fold_input = node_of(&basis, OBSERVATION, 0).input_digests();
+        assert_eq!(fold_input.len(), 1, "{name}");
         for ordinal in 0..2 {
             let node = node_of(&basis, PREFIX, ordinal);
             assert_eq!(node.class(), ENDOGENOUS, "{name}");
             assert_eq!(node.coordinate().schema_id(), PREFIX_SCHEMA, "{name}");
-            assert!(node.input_digests().is_empty(), "{name}");
+            assert_eq!(node.input_digests(), fold_input, "{name}");
         }
         // The fourth Driver subscribed to the Event type, so its step node
         // declares exactly the snapshot, its prefix node and the two ingress nodes.
