@@ -14,6 +14,17 @@ use ulid::Ulid;
 
 use super::Error;
 
+/// A guest digest list must be empty: under the V1 profile no guest is shown a
+/// node digest, so any entry is the guest's `UnsupportedSchema` (ADR-061
+/// revision 10, 4.1).
+fn refuse_digests(digests: &[[u8; 32]]) -> Result<(), Error> {
+    if digests.is_empty() {
+        Ok(())
+    } else {
+        Err(Error::UnsupportedSchema)
+    }
+}
+
 /// Map one guest draft to the pipeline's `DeclaredOutputV1`, which declares no
 /// inputs.
 ///
@@ -29,10 +40,7 @@ pub(super) fn map_draft(draft: &EventDraftV1) -> Result<DeclaredOutputV1, Error>
     if !is_valid_id_v1(&draft.event_type) {
         return Err(Error::InvalidGuestOutput);
     }
-    if !draft.dependency_digests.is_empty() {
-        return Err(Error::UnsupportedSchema);
-    }
-    Ok(DeclaredOutputV1 {
+    refuse_digests(&draft.dependency_digests).map(|()| DeclaredOutputV1 {
         draft: EventDraft::new(
             EntityId::from_ulid(Ulid::from(u128::from_be_bytes(draft.entity_id))),
             Kind::new(draft.event_type.clone()),
@@ -72,9 +80,8 @@ pub(super) fn mapped_output(
     output: &PluginOutputV1,
     event_bytes: u64,
 ) -> Result<StepOutput, Error> {
-    let drafts = mapped_drafts(output, event_bytes)?;
-    if !output.consumed_dependencies.is_empty() {
-        return Err(Error::UnsupportedSchema);
-    }
-    Ok(StepOutput::declared(Vec::new(), drafts))
+    mapped_drafts(output, event_bytes).and_then(|drafts| {
+        refuse_digests(&output.consumed_dependencies)
+            .map(|()| StepOutput::declared(Vec::new(), drafts))
+    })
 }
