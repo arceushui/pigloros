@@ -33,6 +33,8 @@ const LOWER_HEX: &[u8; 16] = b"0123456789abcdef";
 
 mod inventory;
 pub use inventory::SystemdAttemptUnitObservation;
+mod unit_absence;
+pub use unit_absence::SystemdAttemptUnitAbsenceObservation;
 
 /// The deterministic transient service-unit name for one sandbox attempt.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -288,6 +290,9 @@ pub enum SystemdTransientUnitTransportError {
     /// The named transient unit could not be resolved to an object path.
     #[error("failed to resolve the systemd transient unit")]
     UnitLookup(#[source] zbus::Error),
+    /// No timely exact-name unit-absence observation was obtained.
+    #[error("systemd attempt-unit absence deadline elapsed")]
+    UnitAbsenceDeadlineElapsed,
     /// The generated typed service proxy could not be constructed.
     #[error("failed to construct the typed systemd service proxy")]
     ServiceProxy(#[source] zbus::Error),

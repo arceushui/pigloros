@@ -35,6 +35,14 @@ observer can verify process emptiness, but not complete cleanup. The bounded
 `execute` orchestration and launcher readiness/release barrier are implemented
 below; full lifecycle cleanup remains #442.
 
+`wait_for_attempt_unit_absence` queries the exact attempt name with typed
+`GetUnit` until systemd reports `org.freedesktop.systemd1.NoSuchUnit`, under
+one caller-supplied absolute deadline. A loaded object, including an inactive
+or failed unit, keeps waiting; all other errors reject. The sealed result is
+only a point-in-time manager observation. It does not fence later starts or
+prove process/resource absence, authorize unmount or intent deletion, or reopen
+admission. Complete lifecycle ownership and cleanup remain #442.
+
 `SystemdServiceLimits` accepts the complete ordered, already authorized ELM1
 limit set and compiles IDs 0–6 into the seven exact systemd service properties:
 `MemoryMax`, `MemorySwapMax`, `TasksMax`, `CPUQuotaPerSecUSec`,

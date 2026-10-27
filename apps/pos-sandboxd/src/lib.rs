@@ -112,9 +112,10 @@ pub use kernel_cgroup::{
 #[cfg(target_os = "linux")]
 pub use kernel_cgroup::{AttemptShutdownDeadlines, AttemptShutdownError};
 pub use system_bus::{
-    SystemdAttemptUnitObservation, SystemdJobFailure, SystemdStartJob, SystemdStopJobCompleted,
-    SystemdTransientUnitTransport, SystemdTransientUnitTransportError, SystemdVerifiedStart,
-    TransientServiceUnitName, TransientServiceUnitNameError,
+    SystemdAttemptUnitAbsenceObservation, SystemdAttemptUnitObservation, SystemdJobFailure,
+    SystemdStartJob, SystemdStopJobCompleted, SystemdTransientUnitTransport,
+    SystemdTransientUnitTransportError, SystemdVerifiedStart, TransientServiceUnitName,
+    TransientServiceUnitNameError,
 };
 pub use transient_unit::{
     ActivatedRootDirectory, CheckedRoot, LaunchMode, LauncherInvocation, LauncherSource,
