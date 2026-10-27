@@ -858,8 +858,12 @@ fn proxy_accept(listener: &TcpListener) -> io::Result<TcpStream> {
     }
 }
 
+/// A loopback endpoint nothing listens on. Every other test binds
+/// `127.0.0.1:0`, so a port freed by dropping a listener there could be handed
+/// to a concurrent test's listener and turn a refused peer into a live one;
+/// `127.0.0.2` is never bound by them, so its discard port stays closed.
 fn proxy_unused_address() -> TestResult<SocketAddr> {
-    Ok(TcpListener::bind("127.0.0.1:0")?.local_addr()?)
+    Ok(SocketAddr::from(([127, 0, 0, 2], 9)))
 }
 
 fn proxy_total(exchanges: &[(&[u8], &[u8])], side: usize) -> u64 {
