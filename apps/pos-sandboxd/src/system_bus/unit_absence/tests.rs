@@ -126,7 +126,7 @@ mod cases {
         let (server_socket, client_socket) = Channel::pair();
         let server = Builder::authenticated_socket(server_socket, guid.clone())
             .p2p()
-            .serve_at("/org/freedesktop/systemd1", Manager(Arc::clone(&state)))?
+            .serve_at("/org/freedesktop/systemd1", Manager(Arc::clone(&state)))
             .build();
         let client = Builder::authenticated_socket(client_socket, guid)
             .p2p()
