@@ -9,7 +9,10 @@ mod proxy;
 pub use capture_store::{NetworkCaptureStore, NetworkCaptureStoreError, ReplayedNetworkExchange};
 pub use frames::{NetworkExchangeFailure, NetworkExchangeReply, NetworkExchangeRequest};
 #[cfg(target_os = "linux")]
-pub use proxy::{LocalNetworkSession, LocalNetworkTermination, NetworkEndpointConnector};
+pub use proxy::{
+    serve_proxy, LocalNetworkSession, LocalNetworkTermination, LocalProxyBinding,
+    NetworkEndpointConnector,
+};
 
 use ciborium::value::Value;
 

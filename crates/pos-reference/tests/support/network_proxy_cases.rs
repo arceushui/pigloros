@@ -7,9 +7,12 @@ use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use std::os::fd::AsFd;
+
 use pos_reference::sandbox_provider_protocol::{
-    LocalNetworkSession, LocalNetworkTermination, NetworkCaptureStore, NetworkEndpointConnector,
-    NetworkExchangeFailure, NetworkExchangeReply, NetworkExchangeRequest,
+    serve_proxy, LocalNetworkSession, LocalNetworkTermination, LocalProxyBinding,
+    NetworkCaptureStore, NetworkEndpointConnector, NetworkExchangeFailure, NetworkExchangeReply,
+    NetworkExchangeRequest,
 };
 
 const PROXY_DEADLINE_MS: u64 = 30_000;
@@ -30,6 +33,31 @@ impl NetworkEndpointConnector for ProxyConnector {
         self.timeouts.push(timeout);
         TcpStream::connect_timeout(&self.redirect.unwrap_or(endpoint), timeout)
     }
+}
+
+/// The provider's binding of an admission to its FD 3 channel, as the tests
+/// of the proxy itself need it. A real provider mints this from its active
+/// attempt record.
+struct ProxyBinding<'a, C> {
+    admission: &'a LocalNetworkAdmission,
+    channel: &'a mut C,
+}
+
+impl<C: Read + Write + AsFd> LocalProxyBinding for ProxyBinding<'_, C> {
+    type Channel = C;
+
+    fn parts(&mut self) -> (&LocalNetworkAdmission, &mut C) {
+        (self.admission, &mut *self.channel)
+    }
+}
+
+fn serve_bound<C: Read + Write + AsFd>(
+    admission: &LocalNetworkAdmission,
+    channel: &mut C,
+    connector: &mut impl NetworkEndpointConnector,
+    store: &NetworkCaptureStore,
+) -> LocalNetworkSession {
+    serve_proxy(&mut ProxyBinding { admission, channel }, connector, store)
 }
 
 enum AdapterStep {
@@ -194,9 +222,12 @@ impl ProxyCase {
         channel: &mut ProxyChannel,
         connector: &mut ProxyConnector,
     ) -> TestResult<LocalNetworkSession> {
-        let session = self
-            .admission
-            .serve_proxy(&mut channel.provider, connector, &self.store);
+        let session = serve_bound(
+            &self.admission,
+            &mut channel.provider,
+            connector,
+            &self.store,
+        );
         channel.finish()?;
         Ok(session)
     }
@@ -272,9 +303,7 @@ fn proxy_forwards_verified_requests_and_retains_captures_before_replying() -> Te
             .collect()
     });
     let mut connector = ProxyConnector::default();
-    let session = case
-        .admission
-        .serve_proxy(&mut provider, &mut connector, &case.store);
+    let session = serve_bound(&case.admission, &mut provider, &mut connector, &case.store);
     assert_eq!(session.termination(), None);
     let responses = adapter.join().map_err(|_| "adapter thread")??;
     assert_eq!(
@@ -490,9 +519,12 @@ fn proxy_treats_a_closed_adapter_write_side_as_no_outstanding_request() -> TestR
     let (mut provider, mut adapter) = UnixStream::pair()?;
     adapter.write_all(&case.requests(&exchanges)?)?;
     adapter.shutdown(Shutdown::Write)?;
-    let session =
-        case.admission
-            .serve_proxy(&mut provider, &mut ProxyConnector::default(), &case.store);
+    let session = serve_bound(
+        &case.admission,
+        &mut provider,
+        &mut ProxyConnector::default(),
+        &case.store,
+    );
     assert_eq!(session.termination(), None);
     assert_eq!(session.transcripts().len(), 1);
     drop(provider);
@@ -522,9 +554,7 @@ fn proxy_fails_closed_on_a_channel_whose_queue_cannot_be_inspected() -> TestResu
         .write(true)
         .open(&path)?;
     let mut connector = ProxyConnector::default();
-    let session = case
-        .admission
-        .serve_proxy(&mut channel, &mut connector, &case.store);
+    let session = serve_bound(&case.admission, &mut channel, &mut connector, &case.store);
     assert_eq!(
         session.termination(),
         Some(LocalNetworkTermination::ProtocolFailure)

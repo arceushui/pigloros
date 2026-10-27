@@ -1,5 +1,7 @@
 //! Typed dynamic systemd transient-unit launch properties.
 
+use std::time::Duration;
+
 use pos_reference::sandbox_provider_protocol::SandboxLimit;
 use zbus::{Fd, OwnedFd};
 
@@ -14,6 +16,10 @@ const LAUNCHER_DESTINATION: &str = "/.pigloros/release-launcher";
 const RELEASE_DESCRIPTOR_NAME: &str = "piglor-release-v1";
 const HOST_SERVICE_DESCRIPTOR_NAME: &str = "piglor-host-service-v1";
 const ELM1_LIMIT_COUNT: usize = 17;
+/// ELM1 limit 9 (`WorkBytes`) sizes the one optional writable mount.
+const WORK_BYTES_LIMIT_ID: usize = 9;
+/// The sole writable mount point (ADR-069 section 6).
+const WORK_MOUNT_PATH: &str = "/work";
 
 /// The systemd-owned portion of one complete, already authorized ELM1 limit set.
 ///
@@ -22,6 +28,7 @@ const ELM1_LIMIT_COUNT: usize = 17;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SystemdServiceLimits {
     requested: [u64; 7],
+    work_bytes: u64,
 }
 
 /// Failure to represent the exact ELM1 service limits on pinned systemd.
@@ -36,6 +43,15 @@ pub enum SystemdServiceLimitsError {
     /// The watchdog milliseconds cannot be represented as systemd microseconds.
     #[error("ELM1 watchdog milliseconds overflow systemd microseconds")]
     WatchdogOverflow,
+}
+
+/// Whether systemd cannot enforce `value` exactly for ELM1 limit `id`.
+///
+/// `u64::MAX` is infinity for the service limits and an unbounded mount for
+/// `WorkBytes`; zero is infinity for the limits that read it that way.
+const fn is_unenforceable(id: usize, value: u64) -> bool {
+    (value == u64::MAX && (id < 7 || id == WORK_BYTES_LIMIT_ID))
+        || (value == 0 && matches!(id, 0 | 2 | 3 | 4))
 }
 
 impl SystemdServiceLimits {
@@ -59,22 +75,50 @@ impl SystemdServiceLimits {
             return Err(SystemdServiceLimitsError::InvalidEffectiveLimits);
         }
         let mut requested = [0; 7];
-        for (id, limit) in limits.iter().take(requested.len()).enumerate() {
-            if limit.value == u64::MAX || ([0, 2, 3, 4].contains(&id) && limit.value == 0) {
+        let work_bytes = limits[WORK_BYTES_LIMIT_ID].value;
+        for (id, limit) in limits.iter().enumerate() {
+            if is_unenforceable(id, limit.value) {
                 return Err(SystemdServiceLimitsError::UnenforceableLimit(
                     limit.limit_id,
                 ));
             }
-            requested[id] = limit.value;
+            if let Some(slot) = requested.get_mut(id) {
+                *slot = limit.value;
+            }
         }
         requested[4] = requested[4]
             .checked_mul(1_000)
             .ok_or(SystemdServiceLimitsError::WatchdogOverflow)?;
-        Ok(Self { requested })
+        Ok(Self {
+            requested,
+            work_bytes,
+        })
+    }
+
+    /// The requested `TemporaryFileSystem` entries: the `/work` tmpfs sized by
+    /// ELM1 `WorkBytes`, or none when that ceiling is zero.
+    ///
+    /// A zero ceiling is a literal zero-capacity limit, and tmpfs reads
+    /// `size=0` as unbounded, so no writable mount is requested at all.
+    fn temporary_file_systems(&self) -> Vec<(String, String)> {
+        if self.work_bytes == 0 {
+            Vec::new()
+        } else {
+            vec![(
+                WORK_MOUNT_PATH.to_owned(),
+                format!("size={},nosuid,nodev,noexec", self.work_bytes),
+            )]
+        }
     }
 
     pub(crate) const fn value(&self, property: SystemdOperatingLimitProperty) -> u64 {
         self.requested[property.index()]
+    }
+
+    /// The attempt watchdog: ELM1 `WatchdogMilliseconds`, the same ceiling
+    /// systemd enforces as `RuntimeMaxUSec`.
+    pub(crate) const fn watchdog(&self) -> Duration {
+        Duration::from_micros(self.requested[SystemdOperatingLimitProperty::RuntimeMaxUSec.index()])
     }
 }
 
@@ -183,7 +227,7 @@ pub struct TransientUnitLaunchInputs {
 /// mints one, after current RVS1, the control floor and the attached mount
 /// identity were checked again, and [`TransientUnitLaunchInputs`] accepts
 /// nothing else as `RootDirectory`.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct CheckedRoot {
     root_directory: ActivatedRootDirectory,
 }
@@ -192,6 +236,12 @@ impl CheckedRoot {
     #[cfg(target_os = "linux")]
     pub(crate) const fn rechecked(root_directory: ActivatedRootDirectory) -> Self {
         Self { root_directory }
+    }
+
+    /// The rechecked attempt root.
+    #[must_use]
+    pub const fn root_directory(&self) -> &ActivatedRootDirectory {
+        &self.root_directory
     }
 
     /// A rechecked root for requested-state unit tests, where no mount exists.
@@ -203,15 +253,17 @@ impl CheckedRoot {
 
 impl TransientUnitLaunchInputs {
     /// Combine a rechecked root with the other per-attempt launch inputs.
+    ///
+    /// The root is consumed: one recheck authorizes one launch.
     #[must_use]
     pub fn new(
-        root: &CheckedRoot,
+        root: CheckedRoot,
         launcher_source: LauncherSource,
         mode: LaunchMode,
         release: OwnedFd,
     ) -> Self {
         Self {
-            root_directory: root.root_directory.clone(),
+            root_directory: root.root_directory,
             launcher_source,
             mode,
             release,
@@ -254,29 +306,76 @@ pub enum SystemdTransientUnitValue {
     Numeric(SystemdTransientUnitNumericValue),
     /// A D-Bus `a(hs)` descriptor array: Unix FD before descriptor name.
     ExtraFileDescriptors(Vec<(OwnedFd, String)>),
+    /// A D-Bus `a(ss)` array of tmpfs mount path and mount options.
+    TemporaryFileSystem(Vec<(String, String)>),
 }
 
 impl SystemdTransientUnitValue {
+    /// The same name-list kind carrying `value`.
+    const fn with_names(&self, value: (bool, Vec<String>)) -> Self {
+        if matches!(self, Self::SystemCallFilter(_)) {
+            Self::SystemCallFilter(value)
+        } else {
+            Self::RestrictAddressFamilies(value)
+        }
+    }
+
+    /// Readback equality of the array-valued kinds; anything else differs.
+    fn collection_matches(&self, observed: &SystemdTransientUnitReadbackValue) -> bool {
+        match (self, observed) {
+            (
+                Self::BindReadOnlyPaths(expected),
+                SystemdTransientUnitReadbackValue::BindReadOnlyPaths(actual),
+            ) => expected == actual,
+            (
+                Self::ExtraFileDescriptors(expected),
+                SystemdTransientUnitReadbackValue::StringArray(actual),
+            ) => expected.iter().map(|(_, name)| name).eq(actual.iter()),
+            (
+                Self::TemporaryFileSystem(expected),
+                SystemdTransientUnitReadbackValue::TemporaryFileSystem(actual),
+            ) => expected == actual,
+            _ => false,
+        }
+    }
+
+    /// The signature of the array-valued kinds; `a(ss)` is the last of them.
+    const fn collection_signature(&self) -> &'static str {
+        match self {
+            Self::BindReadOnlyPaths(_) => "a(ssbt)",
+            Self::ExtraFileDescriptors(_) => "a(hs)",
+            _ => "a(ss)",
+        }
+    }
+
     fn try_clone_for_submission(&self) -> Result<Self, zbus::Error> {
         match self {
             Self::Static(value) => Ok(Self::Static(*value)),
             Self::RootDirectory(value) => Ok(Self::RootDirectory(value.clone())),
             Self::BindReadOnlyPaths(value) => Ok(Self::BindReadOnlyPaths(value.clone())),
-            Self::SystemCallFilter(value) => Ok(Self::SystemCallFilter(value.clone())),
-            Self::RestrictAddressFamilies(value) => {
-                Ok(Self::RestrictAddressFamilies(value.clone()))
+            Self::SystemCallFilter(value) | Self::RestrictAddressFamilies(value) => {
+                Ok(self.with_names(value.clone()))
             }
             Self::Numeric(value) => Ok(Self::Numeric(*value)),
-            Self::ExtraFileDescriptors(value) => value
-                .iter()
-                .map(|(descriptor, name)| {
-                    let descriptor = Fd::from(descriptor).try_to_owned().map(OwnedFd::from)?;
-                    Ok((descriptor, name.clone()))
-                })
-                .collect::<Result<Vec<_>, _>>()
-                .map(Self::ExtraFileDescriptors),
+            Self::ExtraFileDescriptors(value) => {
+                clone_descriptors(value).map(Self::ExtraFileDescriptors)
+            }
+            Self::TemporaryFileSystem(value) => Ok(Self::TemporaryFileSystem(value.clone())),
         }
     }
+}
+
+fn clone_descriptors(
+    descriptors: &[(OwnedFd, String)],
+) -> Result<Vec<(OwnedFd, String)>, zbus::Error> {
+    descriptors
+        .iter()
+        .map(|(descriptor, name)| {
+            Fd::from(descriptor)
+                .try_to_owned()
+                .map(|descriptor| (OwnedFd::from(descriptor), name.clone()))
+        })
+        .collect()
 }
 
 /// One named typed property ready for `StartTransientUnit` serialization.
@@ -309,11 +408,10 @@ impl SystemdTransientUnitProperty {
         match &self.value {
             SystemdTransientUnitValue::Static(value) => value.dbus_signature(),
             SystemdTransientUnitValue::RootDirectory(_) => "s",
-            SystemdTransientUnitValue::BindReadOnlyPaths(_) => "a(ssbt)",
             SystemdTransientUnitValue::SystemCallFilter(_)
             | SystemdTransientUnitValue::RestrictAddressFamilies(_) => "(bas)",
             SystemdTransientUnitValue::Numeric(value) => value.dbus_signature(),
-            SystemdTransientUnitValue::ExtraFileDescriptors(_) => "a(hs)",
+            collection => collection.collection_signature(),
         }
     }
 
@@ -339,10 +437,6 @@ impl SystemdTransientUnitProperty {
                     SystemdTransientUnitReadbackValue::String(actual),
                 ) => expected == actual,
                 (
-                    SystemdTransientUnitValue::BindReadOnlyPaths(expected),
-                    SystemdTransientUnitReadbackValue::BindReadOnlyPaths(actual),
-                ) => expected == actual,
-                (
                     SystemdTransientUnitValue::SystemCallFilter(_),
                     SystemdTransientUnitReadbackValue::BoolStringArray(actual),
                 ) => system_call_filter.verify_readback(actual).is_ok(),
@@ -356,11 +450,7 @@ impl SystemdTransientUnitProperty {
                     ),
                     SystemdTransientUnitReadbackValue::U64(actual),
                 ) => expected == actual,
-                (
-                    SystemdTransientUnitValue::ExtraFileDescriptors(expected),
-                    SystemdTransientUnitReadbackValue::StringArray(actual),
-                ) => expected.iter().map(|(_, name)| name).eq(actual.iter()),
-                _ => false,
+                (expected, actual) => expected.collection_matches(actual),
             }
     }
 
@@ -462,6 +552,8 @@ pub enum SystemdTransientUnitReadbackValue {
     BoolStringArray((bool, Vec<String>)),
     /// A D-Bus `as` value.
     StringArray(Vec<String>),
+    /// A D-Bus `a(ss)` value.
+    TemporaryFileSystem(Vec<(String, String)>),
     /// A D-Bus `u` value.
     U32(u32),
     /// A D-Bus `t` value.
@@ -545,7 +637,7 @@ impl TransientUnitRequest {
             ),
         };
         let mut properties =
-            Vec::with_capacity(TransientUnitHardening::requested_properties().len() + 13);
+            Vec::with_capacity(TransientUnitHardening::requested_properties().len() + 14);
         for property in TransientUnitHardening::requested_properties() {
             properties.push(SystemdTransientUnitProperty::new(
                 SystemdTransientUnitPropertyKind::Hardening(*property),
@@ -610,6 +702,12 @@ impl TransientUnitRequest {
                 SystemdDynamicPropertyKind::ExtraFileDescriptors,
             ),
             SystemdTransientUnitValue::ExtraFileDescriptors(descriptors),
+        ));
+        properties.push(SystemdTransientUnitProperty::new(
+            SystemdTransientUnitPropertyKind::Dynamic(
+                SystemdDynamicPropertyKind::TemporaryFileSystem,
+            ),
+            SystemdTransientUnitValue::TemporaryFileSystem(service_limits.temporary_file_systems()),
         ));
         Self {
             properties,

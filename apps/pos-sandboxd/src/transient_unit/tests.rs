@@ -19,7 +19,7 @@ const X86_64: &[u8] = include_bytes!(
     "../../../../crates/pos-conformance/vectors/systemd-provider-v260.2/systemd-v260.2-x86_64.scs1.cbor"
 );
 
-const EXPECTED_PROPERTY_NAMES: [&str; 42] = [
+const EXPECTED_PROPERTY_NAMES: [&str; 43] = [
     "Type",
     "RootDirectory",
     "BindReadOnlyPaths",
@@ -62,6 +62,7 @@ const EXPECTED_PROPERTY_NAMES: [&str; 42] = [
     "LimitFSIZE",
     "FileDescriptorStoreMax",
     "ExtraFileDescriptors",
+    "TemporaryFileSystem",
 ];
 
 #[test]
@@ -167,6 +168,104 @@ fn local_request_has_the_exact_ordered_dynamic_properties_and_dbus_signatures(
         }
         _value => return Err("ExtraFileDescriptors must have an a(hs) value".into()),
     }
+    Ok(())
+}
+
+#[test]
+fn work_mount_property_has_the_exact_dbus_encoding() -> Result<(), Box<dyn Error>> {
+    let request = request(LaunchMode::AirGapped)?;
+    let properties = request.requested_properties();
+    assert_eq!(properties[42].dbus_signature(), "a(ss)");
+    match properties[42].value() {
+        SystemdTransientUnitValue::TemporaryFileSystem(value) => {
+            assert_eq!(
+                <Vec<(String, String)> as Type>::SIGNATURE.to_string(),
+                "a(ss)"
+            );
+            let encoded = to_bytes(Context::new(LE, 0), value)?;
+            let (decoded, consumed): (Vec<(String, String)>, usize) = encoded.deserialize()?;
+            assert_eq!(decoded, *value);
+            assert_eq!(consumed, encoded.len());
+            assert_eq!(
+                value,
+                &[(
+                    "/work".to_owned(),
+                    "size=1000,nosuid,nodev,noexec".to_owned()
+                )]
+            );
+        }
+        _value => return Err("TemporaryFileSystem must have an a(ss) value".into()),
+    }
+    Ok(())
+}
+
+#[test]
+fn work_mount_is_sized_by_elm1_work_bytes_and_absent_at_zero() -> Result<(), Box<dyn Error>> {
+    for (work_bytes, expected) in [
+        (
+            4_096,
+            vec![(
+                "/work".to_owned(),
+                "size=4096,nosuid,nodev,noexec".to_owned(),
+            )],
+        ),
+        (0, Vec::new()),
+    ] {
+        let mut limits = complete_effective_limits();
+        limits[9].value = work_bytes;
+        let request = request_with_limits(LaunchMode::AirGapped, &limits)?;
+        match request.requested_properties()[42].value() {
+            SystemdTransientUnitValue::TemporaryFileSystem(value) => assert_eq!(value, &expected),
+            _value => return Err("TemporaryFileSystem must have an a(ss) value".into()),
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn verifier_rejects_a_substituted_work_mount() -> Result<(), Box<dyn Error>> {
+    let authority = SandboxSyscallSetV1::from_canonical_cbor(X86_64)?;
+    let request = request(LaunchMode::AirGapped)?;
+    let exact = exact_readback(&request, &authority.expected_effective_names);
+    assert_eq!(request.verify_readback(&exact), Ok(()));
+    for substituted in [
+        Vec::new(),
+        vec![(
+            "/work".to_owned(),
+            "size=1001,nosuid,nodev,noexec".to_owned(),
+        )],
+        vec![("/work".to_owned(), "size=1000,nosuid,nodev".to_owned())],
+        vec![(
+            "/tmp".to_owned(),
+            "size=1000,nosuid,nodev,noexec".to_owned(),
+        )],
+        vec![
+            (
+                "/work".to_owned(),
+                "size=1000,nosuid,nodev,noexec".to_owned(),
+            ),
+            ("/tmp".to_owned(), "size=1".to_owned()),
+        ],
+    ] {
+        let mut readback = exact.clone();
+        readback[42] = SystemdTransientUnitReadback::new(
+            "TemporaryFileSystem",
+            SystemdTransientUnitReadbackValue::TemporaryFileSystem(substituted),
+        );
+        assert_eq!(
+            request.verify_readback(&readback),
+            Err(TransientUnitRequestError::ReadbackMismatch)
+        );
+    }
+    let mut mistyped = exact;
+    mistyped[42] = SystemdTransientUnitReadback::new(
+        "TemporaryFileSystem",
+        SystemdTransientUnitReadbackValue::StringArray(vec!["/work".to_owned()]),
+    );
+    assert_eq!(
+        request.verify_readback(&mistyped),
+        Err(TransientUnitRequestError::ReadbackMismatch)
+    );
     Ok(())
 }
 
@@ -453,6 +552,12 @@ fn service_limits_require_the_complete_ordered_elm1_and_exact_systemd_values() {
             Err(SystemdServiceLimitsError::UnenforceableLimit(limit_id))
         );
     }
+    let mut unbounded_work = source.clone();
+    unbounded_work[9].value = u64::MAX;
+    assert_eq!(
+        SystemdServiceLimits::from_effective_limits(&unbounded_work),
+        Err(SystemdServiceLimitsError::UnenforceableLimit(9))
+    );
     let mut overflow = source.clone();
     overflow[4].value = u64::MAX / 1_000 + 1;
     assert_eq!(
@@ -460,8 +565,15 @@ fn service_limits_require_the_complete_ordered_elm1_and_exact_systemd_values() {
         Err(SystemdServiceLimitsError::WatchdogOverflow)
     );
 
+    // Only the systemd-enforced ids and WorkBytes treat u64::MAX as infinity.
+    let mut unbounded_elsewhere = source.clone();
+    for limit_id in [7, 8, 10, 11, 12, 13, 14, 15, 16] {
+        unbounded_elsewhere[limit_id].value = u64::MAX;
+    }
+    assert!(SystemdServiceLimits::from_effective_limits(&unbounded_elsewhere).is_ok());
+
     let mut permitted_zero = source;
-    for limit_id in [1, 5, 6] {
+    for limit_id in [1, 5, 6, 9] {
         permitted_zero[limit_id].value = 0;
     }
     assert!(SystemdServiceLimits::from_effective_limits(&permitted_zero).is_ok());
@@ -519,7 +631,7 @@ fn filter() -> Result<SystemCallFilter, Box<dyn Error>> {
 fn inputs(mode: LaunchMode) -> Result<TransientUnitLaunchInputs, Box<dyn Error>> {
     let root = ActivatedRootDirectory::new("/run/pigloros/attempt-42/root")?;
     Ok(TransientUnitLaunchInputs::new(
-        &CheckedRoot::for_test(root),
+        CheckedRoot::for_test(root),
         LauncherSource::new("/usr/lib/pigloros/release-launcher")?,
         mode,
         descriptor()?,
@@ -527,7 +639,14 @@ fn inputs(mode: LaunchMode) -> Result<TransientUnitLaunchInputs, Box<dyn Error>>
 }
 
 fn request(mode: LaunchMode) -> Result<TransientUnitRequest, Box<dyn Error>> {
-    let limits = SystemdServiceLimits::from_effective_limits(&complete_effective_limits())?;
+    request_with_limits(mode, &complete_effective_limits())
+}
+
+fn request_with_limits(
+    mode: LaunchMode,
+    effective_limits: &[SandboxLimit],
+) -> Result<TransientUnitRequest, Box<dyn Error>> {
+    let limits = SystemdServiceLimits::from_effective_limits(effective_limits)?;
     Ok(TransientUnitRequest::compile(
         inputs(mode)?,
         filter()?,
@@ -595,6 +714,9 @@ fn exact_readback(
                 SystemdTransientUnitValue::Numeric(
                     SystemdTransientUnitNumericValue::FileDescriptorStoreMax(value),
                 ) => SystemdTransientUnitReadbackValue::U32(*value),
+                SystemdTransientUnitValue::TemporaryFileSystem(value) => {
+                    SystemdTransientUnitReadbackValue::TemporaryFileSystem(value.clone())
+                }
             };
             SystemdTransientUnitReadback::new(property.name(), value)
         })
@@ -610,4 +732,144 @@ fn property_clone_propagates_value_failure() {
         Err(zbus::Error::IncorrectType),
     );
     assert!(matches!(result, Err(zbus::Error::IncorrectType)));
+}
+
+/// Every dynamic kind with the name systemd gives it.
+fn pinned_names() -> [(SystemdDynamicPropertyKind, &'static str); 8] {
+    [
+        (SystemdDynamicPropertyKind::RootDirectory, "RootDirectory"),
+        (
+            SystemdDynamicPropertyKind::BindReadOnlyPaths,
+            "BindReadOnlyPaths",
+        ),
+        (
+            SystemdDynamicPropertyKind::SystemCallFilter,
+            "SystemCallFilter",
+        ),
+        (
+            SystemdDynamicPropertyKind::RestrictAddressFamilies,
+            "RestrictAddressFamilies",
+        ),
+        (
+            SystemdDynamicPropertyKind::OperatingLimit(
+                crate::SystemdOperatingLimitProperty::MemoryMax,
+            ),
+            "MemoryMax",
+        ),
+        (
+            SystemdDynamicPropertyKind::FileDescriptorStoreMax,
+            "FileDescriptorStoreMax",
+        ),
+        (
+            SystemdDynamicPropertyKind::ExtraFileDescriptors,
+            "ExtraFileDescriptors",
+        ),
+        (
+            SystemdDynamicPropertyKind::TemporaryFileSystem,
+            "TemporaryFileSystem",
+        ),
+    ]
+}
+
+/// Names every dynamic kind in one arm and no wildcard, so a new kind does not
+/// compile until it is added here and to the pinned tables.
+const fn is_dynamic_kind(kind: SystemdDynamicPropertyKind) -> bool {
+    match kind {
+        SystemdDynamicPropertyKind::RootDirectory
+        | SystemdDynamicPropertyKind::BindReadOnlyPaths
+        | SystemdDynamicPropertyKind::SystemCallFilter
+        | SystemdDynamicPropertyKind::RestrictAddressFamilies
+        | SystemdDynamicPropertyKind::OperatingLimit(_)
+        | SystemdDynamicPropertyKind::FileDescriptorStoreMax
+        | SystemdDynamicPropertyKind::ExtraFileDescriptors
+        | SystemdDynamicPropertyKind::TemporaryFileSystem => true,
+    }
+}
+
+#[test]
+fn every_dynamic_kind_keeps_its_systemd_property_name() {
+    for (kind, name) in pinned_names() {
+        assert!(is_dynamic_kind(kind));
+        assert_eq!(kind.name(), name);
+    }
+}
+
+/// Every value kind with its D-Bus signature.
+fn pinned_signatures() -> Vec<(SystemdTransientUnitValue, &'static str)> {
+    vec![
+        (
+            SystemdTransientUnitValue::Static(crate::SystemdHardeningValue::Bool(true)),
+            "b",
+        ),
+        (SystemdTransientUnitValue::RootDirectory(String::new()), "s"),
+        (
+            SystemdTransientUnitValue::BindReadOnlyPaths(Vec::new()),
+            "a(ssbt)",
+        ),
+        (
+            SystemdTransientUnitValue::SystemCallFilter((true, Vec::new())),
+            "(bas)",
+        ),
+        (
+            SystemdTransientUnitValue::RestrictAddressFamilies((true, Vec::new())),
+            "(bas)",
+        ),
+        (
+            SystemdTransientUnitValue::Numeric(
+                SystemdTransientUnitNumericValue::FileDescriptorStoreMax(0),
+            ),
+            "u",
+        ),
+        (
+            SystemdTransientUnitValue::ExtraFileDescriptors(Vec::new()),
+            "a(hs)",
+        ),
+        (
+            SystemdTransientUnitValue::TemporaryFileSystem(Vec::new()),
+            "a(ss)",
+        ),
+    ]
+}
+
+/// Names every value kind in one arm and no wildcard; see `is_dynamic_kind`.
+const fn is_value_kind(value: &SystemdTransientUnitValue) -> bool {
+    match value {
+        SystemdTransientUnitValue::Static(_)
+        | SystemdTransientUnitValue::RootDirectory(_)
+        | SystemdTransientUnitValue::BindReadOnlyPaths(_)
+        | SystemdTransientUnitValue::SystemCallFilter(_)
+        | SystemdTransientUnitValue::RestrictAddressFamilies(_)
+        | SystemdTransientUnitValue::Numeric(_)
+        | SystemdTransientUnitValue::ExtraFileDescriptors(_)
+        | SystemdTransientUnitValue::TemporaryFileSystem(_) => true,
+    }
+}
+
+#[test]
+fn every_value_kind_keeps_its_dbus_signature() {
+    for (value, expected) in pinned_signatures() {
+        assert!(is_value_kind(&value));
+        let property = SystemdTransientUnitProperty::new(
+            SystemdTransientUnitPropertyKind::Dynamic(
+                SystemdDynamicPropertyKind::FileDescriptorStoreMax,
+            ),
+            value,
+        );
+        assert_eq!(property.dbus_signature(), expected);
+    }
+}
+
+#[test]
+fn the_two_name_list_kinds_clone_as_themselves() -> Result<(), zbus::Error> {
+    let filter = SystemdTransientUnitValue::SystemCallFilter((true, vec!["read".to_owned()]));
+    let families = SystemdTransientUnitValue::RestrictAddressFamilies((true, Vec::new()));
+    assert!(matches!(
+        filter.try_clone_for_submission()?,
+        SystemdTransientUnitValue::SystemCallFilter(names) if names.1 == ["read"]
+    ));
+    assert!(matches!(
+        families.try_clone_for_submission()?,
+        SystemdTransientUnitValue::RestrictAddressFamilies(_)
+    ));
+    Ok(())
 }

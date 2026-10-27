@@ -38,8 +38,9 @@ pub(crate) const REQUIRED_HOST_FEATURES: [&str; 16] = [
 
 #[cfg(target_os = "linux")]
 pub use network::{
-    LocalNetworkSession, LocalNetworkTermination, NetworkCaptureStore, NetworkCaptureStoreError,
-    NetworkEndpointConnector, ReplayedNetworkExchange,
+    serve_proxy, LocalNetworkSession, LocalNetworkTermination, LocalProxyBinding,
+    NetworkCaptureStore, NetworkCaptureStoreError, NetworkEndpointConnector,
+    ReplayedNetworkExchange,
 };
 pub use network::{
     NetworkExchangeFailure, NetworkExchangeReply, NetworkExchangeRequest,
