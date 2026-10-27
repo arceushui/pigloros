@@ -699,3 +699,42 @@ fn output_inputs_one_step(node: &DependencyNodeRecordV1, by_digest: &DigestIndex
         .count();
     steps == 1
 }
+
+#[cfg(test)]
+mod tests {
+    use pos_core::RecordedDependencyClassV1;
+
+    use super::*;
+
+    fn host_node(inputs: Vec<Hash>) -> DependencyNodeRecordV1 {
+        let owner = FactualHostOwnerV1::Observation.as_str().to_owned();
+        let coordinate = DependencyNodeCoordinateV1::try_new(1, 0, owner, 0, 1, Hash::zero())
+            .unwrap_or_else(|_| std::panic::resume_unwind(Box::new("coordinate")));
+        let class = RecordedDependencyClassV1::EndogenousRecomputed;
+        let origin = RecordedNodeOriginV1::Committed;
+        DependencyNodeRecordV1::try_new(coordinate, class, origin, inputs, Hash::zero())
+            .unwrap_or_else(|_| std::panic::resume_unwind(Box::new("node")))
+    }
+
+    /// ADR-064 R4.3 and R6 (viii): only the snapshot node, the fold checkpoint
+    /// nodes and the verified-prefix and history nodes may declare an input.
+    #[test]
+    fn only_four_host_rules_may_declare_an_input() {
+        let with_input = host_node(vec![Hash::from_bytes([7; 32])]);
+        let bare = host_node(Vec::new());
+        let rules = [
+            (FactualRuleV1::ObservationSnapshot, true),
+            (FactualRuleV1::FoldCheckpoint, true),
+            (FactualRuleV1::VerifiedPrefix, true),
+            (FactualRuleV1::ConsumedHistory, true),
+            (FactualRuleV1::ExternalIngress, false),
+            (FactualRuleV1::FoldHistory, false),
+        ];
+        for (index, (rule, allowed)) in rules.into_iter().enumerate() {
+            assert_eq!(inputs_allowed(&with_input, Some(rule)), allowed, "{index}");
+            assert!(inputs_allowed(&bare, Some(rule)), "{index}");
+        }
+        assert!(!inputs_allowed(&with_input, None));
+        assert!(inputs_allowed(&bare, None));
+    }
+}
