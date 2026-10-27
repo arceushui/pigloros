@@ -109,6 +109,8 @@ pub use kernel_cgroup::{
     AttemptLimitEventCounter, AttemptLimitEventDelta, AttemptLimitEventSnapshot,
     AttemptLimitEventSource, BoundAttemptCgroup,
 };
+#[cfg(target_os = "linux")]
+pub use kernel_cgroup::{AttemptShutdownDeadlines, AttemptShutdownError};
 pub use system_bus::{
     SystemdAttemptUnitObservation, SystemdJobFailure, SystemdStartJob, SystemdStopJobCompleted,
     SystemdTransientUnitTransport, SystemdTransientUnitTransportError, SystemdVerifiedStart,
