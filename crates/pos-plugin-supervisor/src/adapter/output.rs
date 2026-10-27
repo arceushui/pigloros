@@ -17,7 +17,7 @@ use super::Error;
 /// A guest digest list must be empty: under the V1 profile no guest is shown a
 /// node digest, so any entry is the guest's `UnsupportedSchema` (ADR-061
 /// revision 10, 4.1).
-fn refuse_digests(digests: &[[u8; 32]]) -> Result<(), Error> {
+const fn refuse_digests(digests: &[[u8; 32]]) -> Result<(), Error> {
     if digests.is_empty() {
         Ok(())
     } else {
