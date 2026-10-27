@@ -708,12 +708,15 @@ mod tests {
 
     fn host_node(inputs: Vec<Hash>) -> DependencyNodeRecordV1 {
         let owner = FactualHostOwnerV1::Observation.as_str().to_owned();
-        let coordinate = DependencyNodeCoordinateV1::try_new(1, 0, owner, 0, 1, Hash::zero())
-            .unwrap_or_else(|_| std::panic::resume_unwind(Box::new("coordinate")));
+        let schema = FACTUAL_SNAPSHOT_SCHEMA_ID_V1;
+        let content = Hash::from_bytes([2; 32]);
+        let coordinate = DependencyNodeCoordinateV1::try_new(1, 0, owner, 0, schema, content)
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(error.to_string())));
         let class = RecordedDependencyClassV1::EndogenousRecomputed;
         let origin = RecordedNodeOriginV1::Committed;
-        DependencyNodeRecordV1::try_new(coordinate, class, origin, inputs, Hash::zero())
-            .unwrap_or_else(|_| std::panic::resume_unwind(Box::new("node")))
+        let provenance = Hash::from_bytes([3; 32]);
+        DependencyNodeRecordV1::try_new(coordinate, class, origin, inputs, provenance)
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(error.to_string())))
     }
 
     /// ADR-064 R4.3 and R6 (viii): only the snapshot node, the fold checkpoint
