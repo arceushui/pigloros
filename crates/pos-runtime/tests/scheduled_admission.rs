@@ -3638,7 +3638,7 @@ fn verified_prefix_drivers_declare_one_prefix_node_per_digest_on_both_adapters()
             assert_eq!(node.coordinate().schema_id(), PREFIX_SCHEMA, "{name}");
             assert_eq!(node.input_digests(), fold_input, "{name}");
         }
-        // One edge per prefix node, whatever the length of the prefix it covers.
+        // One edge per prefix node: the empty prefix and the two-Event prefix add one each.
         assert_eq!(edges_into(&basis, PREFIX), 2, "{name}");
         // The fourth Driver subscribed to the Event type, so its step node
         // declares exactly the snapshot, its prefix node and the two ingress nodes.
