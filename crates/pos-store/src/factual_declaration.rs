@@ -709,25 +709,27 @@ mod tests {
 
     use super::*;
 
-    fn host_node(inputs: Vec<Hash>) -> DependencyNodeRecordV1 {
+    type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
+
+    fn host_node(inputs: Vec<Hash>) -> TestResult<DependencyNodeRecordV1> {
         let owner = FactualHostOwnerV1::Observation.as_str().to_owned();
         let schema = FACTUAL_SNAPSHOT_SCHEMA_ID_V1;
         let content = Hash::from_bytes([2; 32]);
-        let coordinate = DependencyNodeCoordinateV1::try_new(1, 0, owner, 0, schema, content)
-            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(error.to_string())));
+        let coordinate = DependencyNodeCoordinateV1::try_new(1, 0, owner, 0, schema, content)?;
         let class = RecordedDependencyClassV1::EndogenousRecomputed;
         let origin = RecordedNodeOriginV1::Committed;
         let provenance = Hash::from_bytes([3; 32]);
-        DependencyNodeRecordV1::try_new(coordinate, class, origin, inputs, provenance)
-            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(error.to_string())))
+        Ok(DependencyNodeRecordV1::try_new(
+            coordinate, class, origin, inputs, provenance,
+        )?)
     }
 
     /// ADR-064 R4.3 and R6 (viii): only the snapshot node, the fold checkpoint
     /// nodes and the verified-prefix and history nodes may declare an input.
     #[test]
-    fn only_four_host_rules_may_declare_an_input() {
-        let with_input = host_node(vec![Hash::from_bytes([7; 32])]);
-        let bare = host_node(Vec::new());
+    fn only_four_host_rules_may_declare_an_input() -> TestResult<()> {
+        let with_input = host_node(vec![Hash::from_bytes([7; 32])])?;
+        let bare = host_node(Vec::new())?;
         let rules = [
             (FactualRuleV1::ObservationSnapshot, true),
             (FactualRuleV1::FoldCheckpoint, true),
@@ -742,5 +744,6 @@ mod tests {
         }
         assert!(!inputs_allowed(&with_input, None));
         assert!(inputs_allowed(&bare, None));
+        Ok(())
     }
 }
