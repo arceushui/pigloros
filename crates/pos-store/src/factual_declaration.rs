@@ -238,7 +238,12 @@ pub(crate) fn shape_holds(basis: &PipelineAdmissionBasisV1, by_digest: &DigestIn
 fn nodes_and_fold_hold(basis: &PipelineAdmissionBasisV1, by_digest: &DigestIndex<'_>) -> bool {
     let nodes = basis.dependencies().record().nodes();
     let each = nodes.iter().all(|node| node_shape_holds(node, by_digest));
-    each && fold_shape_holds(basis, by_digest) && coarse_inputs_hold(nodes)
+    let held = [
+        each,
+        fold_shape_holds(basis, by_digest),
+        coarse_inputs_hold(nodes),
+    ];
+    held.iter().all(|check| *check)
 }
 
 /// Check (xi) (ADR-064 R6, 4.3): every verified-prefix and history node

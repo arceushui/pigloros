@@ -977,6 +977,20 @@ pub enum FactualTickShapeV1 {
     Human(Vec<EventDraft>),
 }
 
+/// The edges the verified-prefix and history nodes will add to the rest of the
+/// record: one each, exactly when the snapshot node gets a fold input (a head
+/// or a fold input exists), as the store counts them.
+fn coarse_edge_reserve(host: &HostNodes, source: &FactualFoldSourceV1) -> usize {
+    let fold_input =
+        |event: &FactualFoldEventV1| is_factual_fold_input(&event.event_type, event.node_class);
+    let fed = source.head().is_some() || source.window.events.iter().any(fold_input);
+    if fed {
+        host.prefix.len() + host.history.len()
+    } else {
+        0
+    }
+}
+
 /// Where one input of a node comes from.
 #[derive(Clone)]
 enum FactualSource {
@@ -1497,20 +1511,6 @@ impl<'a> FactualAssembly<'a> {
         host: &mut HostNodes,
         source: &FactualFoldSourceV1,
     ) -> Result<(), FactualDependencyErrorV1> {
-        // The prefix and history nodes will input the snapshot node's fold
-        // input, which exists exactly when there is a head or a fold input; the
-        // store counts those edges in the rest of the record.
-        let fed = source.head().is_some()
-            || source
-                .window
-                .events
-                .iter()
-                .any(|event| is_factual_fold_input(&event.event_type, event.node_class));
-        let coarse = if fed {
-            host.prefix.len() + host.history.len()
-        } else {
-            0
-        };
         let rest = FactualFoldRestV1 {
             forwarded: host.ingress.keys().copied().collect(),
             nodes: self.specs.len(),
@@ -1519,7 +1519,7 @@ impl<'a> FactualAssembly<'a> {
                 .iter()
                 .map(|spec| distinct_sources(&spec.sources))
                 .sum::<usize>()
-                + coarse,
+                + coarse_edge_reserve(host, source),
         };
         let tick = self.context.tick;
         let layout = factual_fold_layout((self.context.timeline_id, tick), source, &rest)?;
