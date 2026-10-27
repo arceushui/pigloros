@@ -22,13 +22,13 @@ use super::codec::{
     valid_identifier, valid_key_id, verify_digest, verify_signature,
 };
 use super::{
-    AdmissionAuthority, AdmissionGrant, ExecuteAuthority, LaunchPolicy, ProviderCapability,
-    ReceiptAuthority, SandboxAdministratorPolicy, SandboxArchitecture, SandboxDescribeRequest,
-    SandboxDescribeResponse, SandboxExecuteRequest, SandboxExecutionMode, SandboxLimit,
-    SandboxProviderError, SandboxProviderManifest, SandboxProviderProtocolError,
-    SandboxProviderReceipt, SandboxProviderResult, SandboxRevocationSnapshot, SandboxSyscallSet,
-    SandboxTerminalOutcome, SandboxTrustError, SandboxTrustRole, SandboxTrustSnapshot,
-    SignedImageManifest,
+    fdl1_digest, AdmissionAuthority, AdmissionGrant, ExecuteAuthority, FdLayoutEntry, FdRole,
+    LaunchPolicy, ProviderCapability, ReceiptAuthority, SandboxAdministratorPolicy,
+    SandboxArchitecture, SandboxDescribeRequest, SandboxDescribeResponse, SandboxExecuteRequest,
+    SandboxExecutionMode, SandboxLimit, SandboxProviderError, SandboxProviderManifest,
+    SandboxProviderProtocolError, SandboxProviderReceipt, SandboxProviderResult,
+    SandboxRevocationSnapshot, SandboxSyscallSet, SandboxTerminalOutcome, SandboxTrustError,
+    SandboxTrustRole, SandboxTrustSnapshot, SignedImageManifest,
 };
 
 const CAPABILITY_SET_DOMAIN: &[u8] = b"PiglorOS.ProviderCapabilitySet.v1\0";
@@ -1540,21 +1540,25 @@ fn effective_limits_digest(
 fn expected_fdl1_digest(
     mode: SandboxExecutionMode,
 ) -> Result<[u8; 32], SandboxProviderProtocolError> {
-    let entries = match mode {
-        SandboxExecutionMode::Local => vec![fd_layout_entry(3, 0), fd_layout_entry(4, 1)],
+    let entries: &[FdLayoutEntry] = match mode {
+        SandboxExecutionMode::Local => &[
+            FdLayoutEntry {
+                fd_number: 3,
+                role: FdRole::HostService,
+            },
+            FdLayoutEntry {
+                fd_number: 4,
+                role: FdRole::Release,
+            },
+        ],
         SandboxExecutionMode::AirGapped
         | SandboxExecutionMode::Replay
-        | SandboxExecutionMode::Fork => vec![fd_layout_entry(3, 1)],
+        | SandboxExecutionMode::Fork => &[FdLayoutEntry {
+            fd_number: 3,
+            role: FdRole::Release,
+        }],
     };
-    record_digest(
-        "FDL1",
-        &Value::Array(vec![
-            text_value("FDL1"),
-            uint_value(1),
-            uint_value(mode.code()),
-            Value::Array(entries),
-        ]),
-    )
+    fdl1_digest(mode, entries)
 }
 
 fn readback_set(
@@ -1619,10 +1623,6 @@ fn limit_values(limits: &[SandboxLimit]) -> Value {
             })
             .collect(),
     )
-}
-
-fn fd_layout_entry(fd: u64, role: u64) -> Value {
-    Value::Array(vec![uint_value(fd), uint_value(role)])
 }
 
 fn capability_set_digest(

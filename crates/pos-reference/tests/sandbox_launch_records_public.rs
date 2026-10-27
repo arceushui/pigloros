@@ -8,8 +8,9 @@ use std::error::Error;
 use ciborium::value::Value;
 use ed25519_dalek::{Signer, SigningKey};
 use pos_reference::sandbox_provider_protocol::{
-    ExecutionRelease, ExecutionReleaseFields, FdIdentity, LaunchParameters, LauncherReady,
-    LauncherReadyFields, SandboxProviderProtocolError,
+    blake3_digest_of, fdl1_digest, ExecutionRelease, ExecutionReleaseFields, FdIdentity,
+    FdLayoutEntry, FdRole, LaunchParameters, LauncherReady, LauncherReadyFields,
+    SandboxExecutionMode, SandboxProviderProtocolError,
 };
 
 type TestResult = Result<(), Box<dyn Error>>;
@@ -407,5 +408,118 @@ fn decoders_reject_oversized_and_zero_field_records() -> TestResult {
         Value::Bytes(vec![0; 32])
     )?)
     .is_err());
+    Ok(())
+}
+
+/// A record with `full` maximal arguments and one more of `last` bytes.
+fn sized_record(
+    full: usize,
+    last: usize,
+) -> Result<LaunchParameters, SandboxProviderProtocolError> {
+    let mut arguments = vec!["a".repeat(256); full];
+    if last > 0 {
+        arguments.push("a".repeat(last));
+    }
+    LaunchParameters::new(
+        [1; 16],
+        fill(2),
+        [3; 32],
+        "/a".to_owned(),
+        arguments,
+        [4; 32],
+    )
+}
+
+/// The canonical length of the accepted record, or nothing if the 64 KiB
+/// bound rejects it.
+fn record_len(full: usize, last: usize) -> Result<Option<usize>, Box<dyn Error>> {
+    sized_record(full, last)
+        .ok()
+        .map(|record| record.to_canonical_cbor().map(|bytes| bytes.len()))
+        .transpose()
+        .map_err(Into::into)
+}
+
+#[test]
+fn lpv1_hex_fits_one_argv_string_up_to_65535_bytes_and_longer_records_fail_closed() -> TestResult {
+    // Linux MAX_ARG_STRLEN: one argv string, including its NUL, is 128 KiB at
+    // most. The launcher receives LPV1 as lowercase hex in one such string.
+    const MAX_ARG_STRLEN: usize = 131_072;
+    const BOUND: usize = 64 * 1024;
+    let mut by_len = std::collections::BTreeMap::new();
+    for full in (240..=255).rev() {
+        for last in 0..=256 {
+            if let Some(length) = record_len(full, last)? {
+                by_len.entry(length).or_insert((full, last));
+            }
+        }
+    }
+    // The bound is exactly 65 536 bytes: that record is accepted, one byte more is not.
+    assert_eq!(by_len.keys().next_back(), Some(&BOUND));
+    let (full, last) = by_len[&BOUND];
+    assert!(sized_record(full, last + 1).is_err());
+    assert!(by_len.contains_key(&(BOUND - 1)));
+    // Every record up to 65 535 bytes hex-encodes into one argv string.
+    for length in by_len.keys().copied().filter(|length| *length < BOUND) {
+        assert!(2 * length < MAX_ARG_STRLEN, "{length}");
+    }
+    // A record of exactly 65 536 bytes is valid but its hex plus NUL is 131 073
+    // bytes, so the provider's exec of the launcher fails with E2BIG: the
+    // launch fails closed and nothing is released.
+    let (full, last) = by_len[&BOUND];
+    let record = sized_record(full, last)?;
+    assert_eq!(
+        hex(&record.to_canonical_cbor()?).len() + 1,
+        MAX_ARG_STRLEN + 1
+    );
+    Ok(())
+}
+
+#[test]
+fn fdl1_digest_distinguishes_mode_role_and_number_and_rejects_bad_order() -> TestResult {
+    let release = FdLayoutEntry {
+        fd_number: 3,
+        role: FdRole::Release,
+    };
+    let host = FdLayoutEntry {
+        fd_number: 3,
+        role: FdRole::HostService,
+    };
+    let local = [
+        host,
+        FdLayoutEntry {
+            fd_number: 4,
+            role: FdRole::Release,
+        },
+    ];
+    let base = fdl1_digest(SandboxExecutionMode::AirGapped, &[release])?;
+    assert_ne!(base, fdl1_digest(SandboxExecutionMode::Replay, &[release])?);
+    assert_ne!(base, fdl1_digest(SandboxExecutionMode::AirGapped, &[host])?);
+    assert_ne!(
+        base,
+        fdl1_digest(
+            SandboxExecutionMode::AirGapped,
+            &[FdLayoutEntry {
+                fd_number: 4,
+                role: FdRole::Release
+            }]
+        )?
+    );
+    assert_ne!(base, fdl1_digest(SandboxExecutionMode::Local, &local)?);
+    assert!(fdl1_digest(SandboxExecutionMode::Local, &[local[1], local[0]]).is_err());
+    assert!(fdl1_digest(SandboxExecutionMode::Local, &[host, host]).is_err());
+    Ok(())
+}
+
+#[test]
+fn blake3_digest_of_matches_the_official_empty_and_one_byte_vectors() -> TestResult {
+    assert_eq!(
+        hex(&blake3_digest_of(&b""[..])?),
+        "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262"
+    );
+    assert_eq!(
+        hex(&blake3_digest_of(&[0_u8][..])?),
+        "2d3adedff11b61f14c886e35afa036736dcd87a74d27b5c1510225d0f592e213"
+    );
     Ok(())
 }

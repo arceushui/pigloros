@@ -94,3 +94,29 @@ start one), and
 `provider_process_creation_public` checks the provider's production sources
 and manifests, because zbus receives system-bus descriptors without
 `MSG_CMSG_CLOEXEC`.
+
+## Launcher mode and release barrier (#441)
+
+The package now builds one binary, `pos-sandboxd`, whose mode is chosen by
+argv. The only mode is `launch-barrier <lpv1-hex>`: the ADR-069 Sandbox Release
+Launcher, started by the provider as the transient unit's main process. It
+adopts the descriptors systemd passes (`sd-listen-fds`), validates their names,
+types, count, order and the absence of any other open descriptor, accepts the
+release channel only from a root `SO_PEERCRED` peer, opens and hashes the
+adapter beneath the activated root, sends one `ReadyV1` with
+`SCM_CREDENTIALS`, waits for one `ReleaseV1` (attempt, nonce, `ReadyV1` digest
+and monotonic deadline), closes the release channel and replaces its process
+image with the held adapter descriptor through `nix`'s safe `execveat`
+wrapper (`src/launcher/exec.rs`, the only file allowed to name it). Any other
+outcome, including EOF, ends the process without running adapter bytes.
+
+The launcher code path never calls admission or the verifier (a hosted source
+test enforces it). CI builds the binary for `x86_64` and `aarch64`
+`unknown-linux-musl` and requires no `PT_INTERP` and no dynamic section.
+ADR-087 A.3 governs the daemon mode; the launcher's final exec creates no
+process.
+
+`release_after_ready` is the provider half: it accepts one `ReadyV1` only from
+the unit's `MainPID` (kernel `SCM_CREDENTIALS`) with every binding equal to
+held or observed evidence, rechecks current authority through the
+`ReleaseRecheck` port, and sends one `ReleaseV1` signed through `ReleaseSigner`.

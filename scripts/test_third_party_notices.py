@@ -11,6 +11,8 @@ import shutil
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timezone
+from email.utils import format_datetime
 from pathlib import Path
 from unittest import mock
 
@@ -405,22 +407,22 @@ class UpstreamTests(WorkspaceTest):
         super().setUp()
         self.manifest = notices.load_toml(self.workspace.root, notices.MANIFEST)
         self.notices_dir = self.workspace.root / notices.NOTICES_DIR
-        self.upstream: dict[str, bytes] = {}
+        self.upstream: dict[tuple[str, str, str], bytes] = {}
         for component in self.manifest["component"]:
             for entry in component["file"]:
-                url = notices.raw_url(component["repository"], component["commit"], entry["path"])
+                key = (component["repository"], component["commit"], entry["path"])
                 data = (self.notices_dir / entry["local"]).read_bytes()
                 if "lines" in entry:
                     # Stand in for the full upstream file around the excerpt.
                     data += b"the rest of the upstream file\n"
                     entry["sha256"] = notices.sha256(data)
-                self.upstream[url] = data
+                self.upstream[key] = data
         rust = next(c for c in self.manifest["component"] if c["id"] == "rust")
         for path, data in (
             ("library/Cargo.lock", STD_LOCK),
             ("library/std/Cargo.toml", STD_MANIFEST),
         ):
-            self.upstream[notices.raw_url(rust["repository"], rust["commit"], path)] = data.encode()
+            self.upstream[(rust["repository"], rust["commit"], path)] = data.encode()
         self.tags = {
             (component["repository"], component["tag"]): component["commit"]
             for component in self.manifest["component"]
@@ -436,7 +438,7 @@ class UpstreamTests(WorkspaceTest):
         return notices.upstream_errors(
             self.manifest,
             self.notices_dir,
-            fetch=self.upstream.__getitem__,
+            fetch=lambda repository, commit, path: self.upstream[(repository, commit, path)],
             tag_commit=lambda repository, tag: self.tags[(repository, tag)],
             submodule_commit=lambda repository, tag, path: self.submodules[(repository, tag, path)],
         )
@@ -467,7 +469,7 @@ class UpstreamTests(WorkspaceTest):
 
     def test_changed_rust_std_inputs_fail(self) -> None:
         rust = next(c for c in self.manifest["component"] if c["id"] == "rust")
-        url = notices.raw_url(rust["repository"], rust["commit"], "library/Cargo.lock")
+        url = (rust["repository"], rust["commit"], "library/Cargo.lock")
         self.upstream[url] += b"# changed\n"
         self.assertIn(
             "rust_std upstream library/Cargo.lock does not match its sha256", self.run_check()
@@ -475,7 +477,7 @@ class UpstreamTests(WorkspaceTest):
 
     def test_excerpt_must_equal_upstream_lines(self) -> None:
         component, entry = self.excerpt_entry()
-        url = notices.raw_url(component["repository"], component["commit"], entry["path"])
+        url = (component["repository"], component["commit"], entry["path"])
         full = b"line one\nline two\nline three\nline four\nline five\nline six\n"
         self.upstream[url] = full
         entry["sha256"] = notices.sha256(full)
@@ -488,12 +490,74 @@ class UpstreamTests(WorkspaceTest):
         with self.assertRaisesRegex(notices.NoticeError, "fewer than"):
             self.run_check()
 
-    def test_raw_url_and_excerpt(self) -> None:
-        self.assertEqual(
-            notices.raw_url("https://github.com/a/b", "c" * 40, "x/LICENSE"),
-            f"https://raw.githubusercontent.com/a/b/{'c' * 40}/x/LICENSE",
-        )
+    def test_excerpt_preserves_bytes(self) -> None:
         self.assertEqual(notices.excerpt_bytes(b"1\n2\n3\n", [2, 3]), b"2\n3\n")
+
+
+class FetchTests(unittest.TestCase):
+    REPOSITORY = "https://github.com/example/project"
+    COMMIT = "c" * 40
+
+    def test_pinned_api_request_preserves_bytes_and_scopes_authentication(self) -> None:
+        payload = b"license\r\n\x00\xff\n"
+        for token in ["", "test-only-placeholder"]:
+            with (
+                mock.patch.dict(notices.os.environ, {"GITHUB_TOKEN": token}),
+                mock.patch.object(notices.urllib.request, "build_opener") as build,
+            ):
+                build.return_value.open.return_value.__enter__.return_value.read.return_value = payload
+                self.assertEqual(notices.fetch_file(self.REPOSITORY, self.COMMIT, "nested/LICENSE #1"), payload)
+                request = build.return_value.open.call_args.args[0]
+                self.assertEqual(request.full_url,
+                    f"https://api.github.com/repos/example/project/contents/nested/LICENSE%20%231?ref={self.COMMIT}")
+                self.assertEqual(request.get_header("Accept"), "application/vnd.github.raw+json")
+                self.assertEqual(request.get_header("Authorization"), f"Bearer {token}" if token else None)
+                self.assertIsInstance(build.call_args.args[0], notices._NoRedirect)
+        self.assertIsNone(notices._NoRedirect().redirect_request(None, None, 302, "", {}, "https://other.invalid"))
+
+    def test_rate_limits_wait_then_fail_closed_without_local_fallback(self) -> None:
+        error = notices.urllib.error.HTTPError("https://api.github.com", 429, "rate limited", {}, None)
+        with (
+            mock.patch.object(notices.urllib.request, "build_opener") as build,
+            mock.patch.object(notices.time, "sleep") as sleep,
+        ):
+            build.return_value.open.side_effect = error
+            with self.assertRaisesRegex(notices.NoticeError, "429"):
+                notices.fetch_file(self.REPOSITORY, self.COMMIT, "LICENSE")
+            self.assertEqual(build.return_value.open.call_count, 3)
+            self.assertEqual(sleep.call_args_list, [mock.call(60), mock.call(120)])
+
+    def test_transient_failure_then_success_and_permanent_failure(self) -> None:
+        with (
+            mock.patch.object(notices.urllib.request, "build_opener") as build,
+            mock.patch.object(notices.time, "sleep") as sleep,
+        ):
+            response = mock.MagicMock()
+            response.__enter__.return_value.read.return_value = b"notice\r\n"
+            build.return_value.open.side_effect = [OSError("reset"), response]
+            self.assertEqual(notices.fetch_file(self.REPOSITORY, self.COMMIT, "LICENSE"), b"notice\r\n")
+            sleep.assert_called_once_with(60)
+            sleep.reset_mock()
+            build.return_value.open.side_effect = notices.urllib.error.HTTPError("https://api.github.com", 404, "missing", {}, None)
+            with self.assertRaisesRegex(notices.NoticeError, "404"):
+                notices.fetch_file(self.REPOSITORY, self.COMMIT, "missing")
+            sleep.assert_not_called()
+
+    def test_server_retry_after_dates_reset_and_bounded_wait(self) -> None:
+        now = datetime(2026, 10, 27, tzinfo=timezone.utc)
+        cases = [
+            ({"Retry-After": "90"}, 90),
+            ({"Retry-After": format_datetime(datetime(2026, 10, 27, 0, 1, 30, tzinfo=timezone.utc), usegmt=True)}, 90),
+            ({"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": str(now.timestamp() + 89)}, 90),
+            ({"Retry-After": "bad"}, 60),
+            ({"Retry-After": "3600"}, None),
+            ({"X-RateLimit-Remaining": "0"}, 60),
+        ]
+        with mock.patch.object(notices, "datetime") as clock, mock.patch.object(notices.time, "time", return_value=now.timestamp()):
+            clock.now.return_value = now
+            for headers, expected in cases:
+                error = notices.urllib.error.HTTPError("https://api.github.com", 429, "rate limited", headers, None)
+                self.assertEqual(notices._retry_delay(error, 0), expected)
 
 
 class GitTests(unittest.TestCase):
@@ -520,7 +584,7 @@ class GitTests(unittest.TestCase):
                 notices.git("fetch")
 
     def test_git_succeeds_after_a_transient_failure(self) -> None:
-        results = [notices.subprocess.CalledProcessError(1, "git", stderr="reset"), "ok"]
+        results = [notices.subprocess.CalledProcessError(1, "git", stderr=b"reset"), "ok"]
 
         def flaky(command, **kwargs):
             result = results.pop(0)
@@ -530,7 +594,6 @@ class GitTests(unittest.TestCase):
 
         with mock.patch.object(notices.subprocess, "run", flaky):
             self.assertEqual(notices.git("ls-remote"), "ok")
-
 
 class RustStdReportTests(WorkspaceTest):
     def test_runs_cargo_about_on_std_with_the_release_features(self) -> None:
@@ -853,6 +916,9 @@ class WorkflowContractTests(unittest.TestCase):
 
     def test_generator_pins_cargo_about_and_runs_every_stage(self) -> None:
         steps = self.reusable["jobs"]["notices"]["steps"]
+        verification = [step for step in steps if "verify-upstream" in step.get("run", "")]
+        self.assertEqual(len(verification), 1)
+        self.assertEqual(verification[0].get("env"), {"GITHUB_TOKEN": "${{ github.token }}"})
         installs = [step for step in steps if step.get("uses", "").startswith("taiki-e/")]
         self.assertEqual(
             installs,
