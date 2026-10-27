@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+use rustix::io::Errno;
 use tokio::time::{sleep_until, timeout_at, Instant};
 
 use super::{
@@ -66,8 +67,11 @@ impl BoundAttemptCgroup {
     /// operation. Stop/kill acknowledgements (including errors and timeouts)
     /// never establish emptiness: only the retained kernel observation can.
     /// A stalled manager kill cannot consume the reserved kernel-observation
-    /// budget. Escalation sends unit-wide SIGKILL before descriptor-bound
-    /// `cgroup.kill`, without addressing individual PIDs.
+    /// budget. Within that budget, escalation requests unit-wide SIGKILL before
+    /// descriptor-bound `cgroup.kill`, without addressing individual PIDs.
+    /// If scheduling misses the unit-kill cutoff, kernel killing is still
+    /// requested as a fail-safe, but the operation returns a deadline failure.
+    /// Later emptiness cannot repair a missed phase or overall deadline.
     ///
     /// A genuinely deleted original cgroup needs no further process signalling.
     /// Success proves only process emptiness at the observation time. It does
@@ -98,15 +102,40 @@ impl BoundAttemptCgroup {
             result => return result,
         }
 
-        if Instant::now() < deadlines.unit_kill {
+        let unit_kill_started = Instant::now() < deadlines.unit_kill;
+        if unit_kill_started {
             drop(timeout_at(deadlines.unit_kill, host.kill(unit_name)).await);
         }
-        match self.kill_all() {
+        let killed = self.kill_all();
+        if !unit_kill_started {
+            return Err(AttemptShutdownError::DeadlineElapsed);
+        }
+        match killed {
             Ok(()) => self.wait_empty_before(deadlines.overall).await,
             // A manager kill may have removed the original cgroup. A missing
             // pathname alone is insufficient; retain the exact deletion check.
             Err(AttemptCgroupError::KillTargetMissing) => self.observe_before(deadlines.overall),
+            Err(AttemptCgroupError::KillOpen(Errno::NOENT)) => {
+                self.observe_deleted_after_missing_control(deadlines.overall)
+            }
             Err(error) => Err(AttemptShutdownError::Cgroup(error)),
+        }
+    }
+
+    fn observe_deleted_after_missing_control(
+        &mut self,
+        deadline: Instant,
+    ) -> Result<AttemptCgroupEmptyObservation, AttemptShutdownError> {
+        // Deletion may race the identity check and control-file open. Preserve
+        // the command failure unless timely original-inode deletion is proven.
+        match self.observe_before(deadline) {
+            Ok(empty) if empty.basis() == AttemptCgroupEmptyBasis::Deleted => Ok(empty),
+            Err(AttemptShutdownError::DeadlineElapsed) => {
+                Err(AttemptShutdownError::DeadlineElapsed)
+            }
+            _ => Err(AttemptShutdownError::Cgroup(AttemptCgroupError::KillOpen(
+                Errno::NOENT,
+            ))),
         }
     }
 
