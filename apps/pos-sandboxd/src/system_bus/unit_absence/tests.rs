@@ -4,15 +4,18 @@ mod cases {
         collections::{BTreeMap, VecDeque},
         error::Error,
         future::pending,
+        num::NonZeroU32,
         sync::{Arc, Mutex},
         time::Duration,
     };
 
-    use futures_util::future::join_all;
+    use futures_util::{future::join_all, StreamExt};
     use tokio::time::{advance, sleep, Instant};
     use zbus::{
         connection::{socket::channel::Channel, Builder},
-        fdo, BoxDBusError, Guid, OwnedObjectPath,
+        fdo,
+        message::{Header, Type},
+        BoxDBusError, Guid, MessageStream, OwnedObjectPath,
     };
 
     use super::super::wait_with_proxy;
@@ -45,6 +48,7 @@ mod cases {
 
     struct State {
         calls: Vec<String>,
+        query_serials: Vec<NonZeroU32>,
         scripts: BTreeMap<String, VecDeque<Reply>>,
     }
 
@@ -54,7 +58,11 @@ mod cases {
     impl Manager {
         fn subscribe(&self) {}
 
-        async fn get_unit(&self, name: String) -> Result<OwnedObjectPath, BoxDBusError> {
+        async fn get_unit(
+            &self,
+            name: String,
+            #[zbus(header)] header: Header<'_>,
+        ) -> Result<OwnedObjectPath, BoxDBusError> {
             let reply = {
                 let mut state = self
                     .0
@@ -62,6 +70,7 @@ mod cases {
                     .map_err(|_| fdo::Error::Failed("poisoned fixture".to_owned()))?;
                 // Record the attempt before any fallible script lookup.
                 state.calls.push(name.clone());
+                state.query_serials.push(header.primary().serial_num());
                 let script = state
                     .scripts
                     .get_mut(&name)
@@ -105,6 +114,7 @@ mod cases {
     )> {
         let state = Arc::new(Mutex::new(State {
             calls: Vec::new(),
+            query_serials: Vec::new(),
             scripts: plans
                 .into_iter()
                 .map(|(unit, replies)| (unit.as_str().to_owned(), replies.into()))
@@ -274,6 +284,54 @@ mod cases {
             } else {
                 deadline_error(result);
             }
+        }
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_ready_reply_cannot_be_accepted_at_or_after_the_deadline() -> TestResult {
+        for late_by in [0, 1] {
+            let name = unit(10)?;
+            let (transport, _server, state) =
+                fixture(vec![(name.clone(), vec![Reply::Absent("unloaded")])]).await?;
+            let mut messages = MessageStream::from(&transport.connection);
+            let deadline = Instant::now() + Duration::from_millis(100);
+            let mut operation =
+                std::pin::pin!(transport.wait_for_attempt_unit_absence(name.clone(), deadline));
+            // zbus dispatches the serial-keyed pending reply before publishing
+            // the same frame to MessageStream. Inspect the frame first and
+            // deliberately leave the public operation unpolled after that.
+            let reply = tokio::time::timeout_at(deadline, async {
+                tokio::select! {
+                    biased;
+                    message = messages.next() => {
+                        Ok::<_, Box<dyn Error>>(message.ok_or("reply stream ended")??)
+                    }
+                    result = operation.as_mut() => {
+                        Err(format!("operation completed before reply inspection: {result:?}").into())
+                    }
+                }
+            })
+            .await??;
+            assert!(Instant::now() < deadline);
+            assert_eq!(reply.message_type(), Type::Error);
+            assert_eq!(
+                reply.header().error_name().map(|name| name.as_str()),
+                Some("org.freedesktop.systemd1.NoSuchUnit")
+            );
+            {
+                let state = state.lock().map_err(|_| "poisoned fixture")?;
+                assert_eq!(state.calls, vec![name.as_str()]);
+                assert_eq!(state.query_serials.len(), 1);
+                assert_eq!(reply.header().reply_serial(), Some(state.query_serials[0]));
+            }
+            advance(
+                deadline.saturating_duration_since(Instant::now()) + Duration::from_millis(late_by),
+            )
+            .await;
+            // Tokio polls the ready inner result before its expired timer.
+            // The operation's final strict check must refuse that result.
+            deadline_error(operation.await);
         }
         Ok(())
     }
