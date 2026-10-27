@@ -92,17 +92,22 @@ impl BoundAttemptCgroup {
         }
 
         let unit_name = self.identity.unit_name.clone();
-        let _stop = timeout_at(deadlines.grace, host.stop(unit_name.clone())).await;
+        drop(timeout_at(deadlines.grace, host.stop(unit_name.clone())).await);
         match self.wait_empty_before(deadlines.grace).await {
             Err(AttemptShutdownError::DeadlineElapsed) => {}
             result => return result,
         }
 
         if Instant::now() < deadlines.unit_kill {
-            let _kill = timeout_at(deadlines.unit_kill, host.kill(unit_name)).await;
+            drop(timeout_at(deadlines.unit_kill, host.kill(unit_name)).await);
         }
-        self.kill_all().map_err(AttemptShutdownError::Cgroup)?;
-        self.wait_empty_before(deadlines.overall).await
+        match self.kill_all() {
+            Ok(()) => self.wait_empty_before(deadlines.overall).await,
+            // A manager kill may have removed the original cgroup. A missing
+            // pathname alone is insufficient; retain the exact deletion check.
+            Err(AttemptCgroupError::KillTargetMissing) => self.observe_before(deadlines.overall),
+            Err(error) => Err(AttemptShutdownError::Cgroup(error)),
+        }
     }
 
     fn observe_before(

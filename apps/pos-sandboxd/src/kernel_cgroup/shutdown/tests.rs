@@ -64,6 +64,8 @@ enum Action {
     Malformed,
     RemoveKill,
     LateEmpty,
+    Delete,
+    Move,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -114,6 +116,8 @@ impl Host {
             }
             Action::Malformed => fs::write(self.directory.join("cgroup.events"), b"populated 2\n"),
             Action::RemoveKill => fs::remove_file(self.directory.join("cgroup.kill")),
+            Action::Delete => fs::remove_dir_all(&self.directory),
+            Action::Move => fs::rename(&self.directory, self.directory.with_file_name("original")),
             Action::LateEmpty => {
                 // Model the controller being descheduled across its deadlines.
                 fs::write(self.directory.join("cgroup.events"), b"populated 0\n")?;
@@ -444,6 +448,46 @@ async fn missing_kernel_control_cannot_be_replaced_by_manager_acknowledgement() 
     assert!(error.to_string().contains("cgroup.kill"));
     assert!(std::error::Error::source(&error).is_some());
     assert_eq!(host.calls()?.len(), 2);
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn deletion_during_manager_kill_requires_the_original_retained_inode_to_be_unlinked(
+) -> TestResult {
+    let mut fixture = Fixture::new(15)?;
+    let host = fixture.host(Action::Ack, Action::Delete);
+    let empty = fixture.bound.stop_processes(&host, deadlines()?).await?;
+    assert_eq!(empty.basis(), AttemptCgroupEmptyBasis::Deleted);
+    assert_eq!(empty.unit_name(), &fixture.unit);
+    assert_eq!(host.calls()?.len(), 2);
+    assert!(!fixture.directory.exists());
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_moved_original_is_not_proven_deleted_when_the_kill_target_is_missing() -> TestResult {
+    let mut fixture = Fixture::new(16)?;
+    let host = fixture.host(Action::Ack, Action::Move);
+    let error = fixture
+        .bound
+        .stop_processes(&host, deadlines()?)
+        .await
+        .err()
+        .ok_or("a moved live cgroup was accepted as deleted")?;
+    assert_eq!(
+        error.to_string(),
+        "the attempt cgroup path disappeared without proven deletion"
+    );
+    assert_eq!(host.calls()?.len(), 2);
+    assert_eq!(
+        fs::read(
+            fixture
+                .directory
+                .with_file_name("original")
+                .join("cgroup.kill")
+        )?,
+        b"0"
+    );
     Ok(())
 }
 
