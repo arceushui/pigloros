@@ -2634,13 +2634,13 @@ fn coarse_declared(attempt: &Attempt, source: FactualFoldSourceV1) -> FactualTic
 fn with_inputs_of(
     valid: &FactualTickDependenciesV1,
     owner: &'static str,
-    inputs: Vec<Hash>,
+    inputs: &[Hash],
 ) -> FactualTickDependenciesV1 {
     let record = valid.record();
     let origin = RecordedNodeOriginV1::Committed;
     let replaced = |node: &DependencyNodeRecordV1| {
         if node.coordinate().owner_id() == owner {
-            inputs.clone()
+            inputs.to_vec()
         } else {
             inputs_unchanged(node)
         }
@@ -2676,17 +2676,18 @@ fn the_store_refuses_prefix_and_history_nodes_that_differ_from_the_snapshot_inpu
             [last]
         );
 
-        let cases = [
-            ("prefix node without its input", "host.prefix", Vec::new()),
+        let others = [prefix];
+        let cases: [(&str, &'static str, &[Hash]); 3] = [
+            ("prefix node without its input", "host.prefix", &[]),
             (
                 "history node without its input",
                 "host.visible-history",
-                Vec::new(),
+                &[],
             ),
             (
                 "history node inputting another node",
                 "host.visible-history",
-                vec![prefix],
+                &others,
             ),
         ];
         let invalid = PipelineOutcomeV1::InvalidDependencyDeclaration;
