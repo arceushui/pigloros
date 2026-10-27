@@ -6,10 +6,14 @@
 //! currently installed authority and yields the descriptor-bearing admission
 //! for later image activation. Neither value is a mount or launch permit.
 
+#[cfg(target_os = "linux")]
+pub mod execution;
+
 use std::collections::BTreeSet;
 use std::fs::File;
 use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::fs::FileExt as _;
+use std::os::unix::fs::MetadataExt as _;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::de::{Error as _, IgnoredAny, MapAccess, Visitor};
@@ -22,7 +26,9 @@ use crate::sandbox_provider_protocol::{
 use crate::selector::installation::authority::{
     AdmittedSelectorProvider, AuthenticatedSelectorBootstrap,
 };
-use crate::selector::installation::{InstallationObjectKind, InstalledSelectorState};
+use crate::selector::installation::{
+    InstallationObjectKind, InstalledSelectorState, SANDBOX_ARTIFACT_ROOT,
+};
 use crate::selector::SelectorBoundaryError;
 
 const CONTROL_LIMIT: u64 = 16 * 1024 * 1024;
@@ -57,6 +63,71 @@ pub struct ProviderImageSnapshot {
     image: AdmittedSandboxImage,
     proof: VerifiedSandboxImageProof,
     launch: LaunchPolicy,
+    binary: AdmittedProviderBinary,
+}
+
+/// The selected SIC1 provider executable, also the ADR-069 release launcher.
+///
+/// Only snapshot admission constructs this view. SIC1 has already opened the
+/// root-owned mode-0500 content-addressed file without symlink traversal,
+/// verified its bytes, and bound that digest to SPM1/APT1. The retained
+/// descriptor supplies its device and inode; callers cannot supply these facts.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdmittedProviderBinary {
+    path: String,
+    digest: [u8; 32],
+    length: u64,
+    device: u64,
+    inode: u64,
+}
+
+impl AdmittedProviderBinary {
+    /// The fixed, digest-addressed SIC1 source path.
+    #[must_use]
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// The SPM1/APT1-bound BLAKE3 digest.
+    #[must_use]
+    pub const fn digest(&self) -> [u8; 32] {
+        self.digest
+    }
+
+    /// Exact admitted byte length.
+    #[must_use]
+    pub const fn length(&self) -> u64 {
+        self.length
+    }
+
+    /// Device and inode of the retained installation descriptor.
+    #[must_use]
+    pub const fn identity(&self) -> (u64, u64) {
+        (self.device, self.inode)
+    }
+}
+
+fn provider_binary(
+    admitted: &AdmittedSelectorProvider,
+) -> Result<AdmittedProviderBinary, SelectorBoundaryError> {
+    let digest = admitted.provider().manifest().binary_digest;
+    admitted
+        .bootstrap()
+        .installed()
+        .artifact(InstallationObjectKind::PROVIDER_EXECUTABLE, digest)
+        .and_then(|artifact| {
+            artifact
+                .file()
+                .metadata()
+                .map_err(invalid)
+                .map(|metadata| AdmittedProviderBinary {
+                    path: format!("{SANDBOX_ARTIFACT_ROOT}/providers/{}", lower_hex(&digest)),
+                    digest,
+                    length: artifact.object().byte_length(),
+                    device: metadata.dev(),
+                    inode: metadata.ino(),
+                })
+        })
 }
 
 impl ProviderImageSnapshot {
@@ -87,34 +158,43 @@ impl ProviderImageSnapshot {
         installed
             .authenticate_bootstrap()
             .and_then(AuthenticatedSelectorBootstrap::admit_provider)
-            .and_then(|admitted| {
-                check_authority(&admitted, &request)?;
-                let CheckedImage { image, proof, .. } = check_image(&admitted, &request, clock)?;
-                let launch_bytes = admitted
-                    .bootstrap()
-                    .installed()
-                    .artifact(
-                        InstallationObjectKind::LAUNCH_POLICY,
-                        request.authority.lps1_digest,
-                    )?
-                    .read_control(CONTROL_LIMIT)?;
-                admitted
-                    .provider()
-                    .admit_launch_policy(&launch_bytes, &image)
-                    .map_err(invalid)
-                    .and_then(|launch| {
-                        if launch.policy_digest != request.authority.lps1_digest {
-                            return Err(SelectorBoundaryError::ArtifactInvalid);
-                        }
-                        Ok(Self {
-                            admitted,
-                            request,
-                            image,
-                            proof,
-                            launch,
-                        })
+            .and_then(|admitted| Self::from_admitted(admitted, request, clock))
+    }
+
+    fn from_admitted(
+        admitted: AdmittedSelectorProvider,
+        request: SandboxExecuteRequest,
+        clock: fn() -> SystemTime,
+    ) -> Result<Self, SelectorBoundaryError> {
+        check_authority(&admitted, &request)?;
+        provider_binary(&admitted).and_then(|binary| {
+            let CheckedImage { image, proof, .. } = check_image(&admitted, &request, clock)?;
+            let launch_bytes = admitted
+                .bootstrap()
+                .installed()
+                .artifact(
+                    InstallationObjectKind::LAUNCH_POLICY,
+                    request.authority.lps1_digest,
+                )?
+                .read_control(CONTROL_LIMIT)?;
+            admitted
+                .provider()
+                .admit_launch_policy(&launch_bytes, &image)
+                .map_err(invalid)
+                .and_then(|launch| {
+                    if launch.policy_digest != request.authority.lps1_digest {
+                        return Err(SelectorBoundaryError::ArtifactInvalid);
+                    }
+                    Ok(Self {
+                        admitted,
+                        request,
+                        image,
+                        proof,
+                        launch,
+                        binary,
                     })
-            })
+                })
+        })
     }
 
     /// The canonical request whose immutable authority was checked.
@@ -139,6 +219,34 @@ impl ProviderImageSnapshot {
     #[must_use]
     pub const fn launch_policy(&self) -> &LaunchPolicy {
         &self.launch
+    }
+
+    /// The retained, authenticated provider executable used as the launcher.
+    #[must_use]
+    pub const fn provider_binary(&self) -> &AdmittedProviderBinary {
+        &self.binary
+    }
+
+    /// Runtime signing identity selected by the authenticated SPM1.
+    #[must_use]
+    pub fn runtime_attestation_key_id(&self) -> &str {
+        &self
+            .admitted
+            .provider()
+            .manifest()
+            .runtime_attestation_key_id
+    }
+
+    /// Runtime verifying key authenticated during provider admission.
+    #[must_use]
+    pub const fn runtime_attestation_key(&self) -> &ed25519_dalek::VerifyingKey {
+        self.admitted.provider().runtime_attestation_key()
+    }
+
+    /// Exact SCS1 selected by the admitted APT1/provider authority.
+    #[must_use]
+    pub const fn syscall_set(&self) -> &crate::sandbox_provider_protocol::SandboxSyscallSet {
+        self.admitted.provider().syscall_set()
     }
 
     /// Join this snapshot's retained image to the currently installed authority.
@@ -180,7 +288,7 @@ impl ProviderImageSnapshot {
                     HeldImageAdmission {
                         snapshot: self,
                         root_image: checked.root_image,
-                        proof: checked.proof,
+                        proof: std::sync::Arc::new(checked.proof),
                         authority,
                     }
                 })
@@ -190,7 +298,7 @@ impl ProviderImageSnapshot {
 
 /// One snapshot's retained image, admitted against current installed authority.
 ///
-/// Only [`ProviderImageSnapshot::admit_held_image`] constructs this value. It
+/// Constructed from a snapshot admission or its retained execution context. It
 /// borrows the snapshot, and [`AsFd`] yields exactly the retained root-image
 /// descriptor that every image, GPT, EROFS, verity superblock,
 /// root-verity-sig and CMS check read; no caller can supply or substitute a
@@ -199,7 +307,7 @@ impl ProviderImageSnapshot {
 pub struct HeldImageAdmission<'snapshot> {
     snapshot: &'snapshot ProviderImageSnapshot,
     root_image: &'snapshot File,
-    proof: VerifiedSandboxImageProof,
+    proof: std::sync::Arc<VerifiedSandboxImageProof>,
     authority: AdmittedAuthority,
 }
 
@@ -233,7 +341,7 @@ impl<'snapshot> HeldImageAdmission<'snapshot> {
 
     /// Independent CMS evidence at this admission's host time.
     #[must_use]
-    pub const fn proof(&self) -> &VerifiedSandboxImageProof {
+    pub fn proof(&self) -> &VerifiedSandboxImageProof {
         &self.proof
     }
 
@@ -724,6 +832,36 @@ pub mod tests {
         );
         let checked = check_image(&snapshot.admitted, &request, fixture_time)?;
         assert_eq!(snapshot.proof(), &checked.proof);
+        assert_eq!(
+            snapshot.syscall_set(),
+            snapshot.admitted.provider().syscall_set()
+        );
+        let runtime = snapshot.admitted.runtime_attestation_key()?;
+        assert_eq!(snapshot.runtime_attestation_key_id(), runtime.key_id);
+        assert_eq!(
+            snapshot.runtime_attestation_key().to_bytes(),
+            runtime.public_key
+        );
+        let binary = snapshot.provider_binary();
+        let retained = snapshot
+            .admitted
+            .bootstrap()
+            .installed()
+            .artifact(InstallationObjectKind::PROVIDER_EXECUTABLE, binary.digest())?;
+        let metadata = retained.file().metadata()?;
+        assert_eq!(
+            binary.digest(),
+            snapshot.admitted.provider().manifest().binary_digest
+        );
+        assert_eq!(binary.length(), metadata.len());
+        assert_eq!(binary.identity(), (metadata.dev(), metadata.ino()));
+        assert_eq!(
+            binary.path(),
+            format!(
+                "{SANDBOX_ARTIFACT_ROOT}/providers/{}",
+                lower_hex(&binary.digest())
+            )
+        );
         Ok(())
     }
 

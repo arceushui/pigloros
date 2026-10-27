@@ -88,7 +88,7 @@ impl LocalNetworkAdmission {
     ) -> Self {
         Self {
             grant: AuthenticatedAdmissionGrant(AdmissionGrant {
-                request_id: [1; 16],
+                request_id: [0x1f; 16],
                 attempt_id,
                 expected_launch_policy_digest: authority.lps1_digest,
                 authority,
@@ -106,6 +106,23 @@ impl LocalNetworkAdmission {
             exchanges,
             limits,
         }
+    }
+}
+
+impl LocalNetworkAdmission {
+    /// The same fixture admission for another request, for tests only.
+    #[must_use]
+    pub const fn with_request_id(mut self, request_id: [u8; 16]) -> Self {
+        self.grant.0.request_id = request_id;
+        self
+    }
+
+    /// The same fixture admission expecting another launch policy digest, for
+    /// tests only.
+    #[must_use]
+    pub const fn with_expected_launch_policy_digest(mut self, digest: [u8; 32]) -> Self {
+        self.grant.0.expected_launch_policy_digest = digest;
+        self
     }
 }
 

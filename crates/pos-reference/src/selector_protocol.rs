@@ -1136,6 +1136,56 @@ fn is_magic(value: &Value, magic: &str) -> bool {
         == Some(magic)
 }
 
+/// Build SPX1 only from an independently resolved installed case.
+pub(crate) fn execute_request_for_case(
+    admitted: &crate::selector::installation::authority::AdmittedSelectorProvider,
+    evaluation: &EvaluationRequest,
+    resolved: &crate::selector::installation::ResolvedInstalledCase,
+    input: PayloadDescriptor,
+    ordinal: u16,
+    nonce: [u8; 16],
+) -> Result<SandboxExecuteRequest, crate::selector::SelectorBoundaryError> {
+    use crate::sandbox_provider_protocol::{ExecuteAuthority, RequestAuthority};
+    let invalid = |_| crate::selector::SelectorBoundaryError::ArtifactInvalid;
+    let requirement = evaluation
+        .sandbox_requirement
+        .as_ref()
+        .ok_or(crate::selector::SelectorBoundaryError::ArtifactInvalid)?;
+    let bootstrap = admitted.bootstrap();
+    let provider = admitted.provider();
+    let authority = ExecuteAuthority {
+        evr1_digest: evaluation.request_digest,
+        cpf1_digest: resolved.profile_digest(),
+        cfb1_digest: resolved.bundle_digest(),
+        fixture_contract_digest: resolved.fixture_contract_digest(),
+        fixture_digest: resolved.attempt().fixture_digest,
+        execution_profile_digest: evaluation.execution_profile_digest,
+        lps1_digest: requirement.lps1_digest,
+        sim1_digest: requirement.sim1_digest,
+        apt1_digest: requirement.apt1_digest,
+        trs1_digest: bootstrap.trust().snapshot_digest(),
+        rvs1_digest: bootstrap.revocation().snapshot_digest(),
+        spm1_digest: provider.manifest().manifest_digest,
+        pcf1_digest: provider.manifest().pcf1_digest,
+        pcr1_digest: provider.conformance_report().report_digest,
+        hcp1_digest: provider.host_profile().profile_digest,
+    };
+    SandboxExecuteRequest::for_selector(
+        RequestAuthority {
+            request_id: derived_id(evaluation.request_id, ordinal),
+            apt1_digest: requirement.apt1_digest,
+            policy_epoch: requirement.policy_epoch,
+            nonce,
+        },
+        derived_id(evaluation.request_id, ordinal ^ 0x8000),
+        authority,
+        resolved.attempt().capability_ids.clone(),
+        input,
+        Vec::new(),
+    )
+    .map_err(invalid)
+}
+
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
@@ -1151,6 +1201,63 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn execute_record_construction_preserves_the_full_ordinal_mapping(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (evaluation, admitted, resolved) =
+            crate::selector::installation::tests::root_selector_fixture()?;
+        let nonce = crate::selector::installation::authority::fresh_selector_id()?;
+        // This tests record construction, not high-ordinal admission of the
+        // small fixture corpus. The wire mapping covers the complete u16 range.
+        for (ordinal, attempt_suffix) in [(0, 0x8000), (7, 0x8007), (0x8000, 0), (u16::MAX, 0x7fff)]
+        {
+            let request = execute_request_for_case(
+                &admitted,
+                &evaluation,
+                &resolved,
+                PayloadDescriptor {
+                    byte_length: 1,
+                    digest: [1; 32],
+                },
+                ordinal,
+                nonce,
+            )?;
+            assert_eq!(
+                &request.request.request_id[..14],
+                &evaluation.request_id[..14]
+            );
+            assert_eq!(&request.request.request_id[14..], &ordinal.to_be_bytes());
+            assert_eq!(&request.attempt_id[..14], &evaluation.request_id[..14]);
+            assert_eq!(&request.attempt_id[14..], &u16::to_be_bytes(attempt_suffix));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn execute_construction_requires_sandbox_authority_and_a_valid_nonce(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (mut evaluation, admitted, resolved) =
+            crate::selector::installation::tests::root_selector_fixture()?;
+        let input = PayloadDescriptor {
+            byte_length: 1,
+            digest: [1; 32],
+        };
+        assert!(execute_request_for_case(
+            &admitted,
+            &evaluation,
+            &resolved,
+            input.clone(),
+            0,
+            [0; 16]
+        )
+        .is_err());
+        evaluation.sandbox_requirement = None;
+        assert!(
+            execute_request_for_case(&admitted, &evaluation, &resolved, input, 0, [1; 16]).is_err()
+        );
+        Ok(())
+    }
 
     #[test]
     fn reply_error_closure_preserves_only_pre_admission_failures() {

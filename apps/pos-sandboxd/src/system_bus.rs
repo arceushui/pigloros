@@ -8,6 +8,8 @@ use zbus::{
     proxy::CacheProperties,
     Connection, Fd, OwnedFd, OwnedObjectPath, OwnedVariant, Variant,
 };
+#[cfg(target_os = "linux")]
+use zbus_systemd::systemd1::UnitProxy;
 use zbus_systemd::systemd1::{JobRemovedArgs, JobRemovedStream, ManagerProxy, ServiceProxy};
 
 use crate::{
@@ -301,6 +303,9 @@ pub enum SystemdTransientUnitTransportError {
     /// The manager-bound cgroup could not be safely opened or observed.
     #[error(transparent)]
     CgroupKernel(#[from] AttemptCgroupError),
+    /// The manager's `InvocationID` is not exactly 16 bytes.
+    #[error("systemd returned a malformed InvocationID")]
+    InvocationIdMalformed,
     /// One typed systemd service property could not be read.
     #[error("failed to read systemd transient-unit property {property}")]
     PropertyReadback {
@@ -526,6 +531,89 @@ impl SystemdTransientUnitTransport {
         let properties = properties?;
         let proxy = ManagerProxy::new(&self.connection).await;
         submit_and_verify(proxy, properties, unit_name, &request, &self.connection).await
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl SystemdTransientUnitTransport {
+    async fn unit_path_of(
+        &self,
+        unit_name: &TransientServiceUnitName,
+    ) -> Result<OwnedObjectPath, SystemdTransientUnitTransportError> {
+        let manager = ManagerProxy::new(&self.connection)
+            .await
+            .map_err(SystemdTransientUnitTransportError::Proxy)?;
+        let looked_up = manager.get_unit(unit_name.as_str().to_owned()).await;
+        looked_up.map_err(SystemdTransientUnitTransportError::UnitLookup)
+    }
+
+    /// A proxy for the unit that never serves a cached property, so every read
+    /// reaches systemd.
+    async fn uncached<P>(
+        &self,
+        unit_name: &TransientServiceUnitName,
+    ) -> Result<P, SystemdTransientUnitTransportError>
+    where
+        P: zbus::proxy::ProxyImpl<'static> + zbus::proxy::Defaults + From<zbus::Proxy<'static>>,
+    {
+        let path = self.unit_path_of(unit_name).await?;
+        P::builder(&self.connection)
+            .path(path)
+            .cache_properties(CacheProperties::No)
+            .build()
+            .await
+            .map_err(SystemdTransientUnitTransportError::ServiceProxy)
+    }
+
+    /// The unit's current `MainPID`, read fresh from the manager.
+    async fn read_main_pid(
+        &self,
+        unit_name: &TransientServiceUnitName,
+    ) -> Result<u32, SystemdTransientUnitTransportError> {
+        let service: ServiceProxy<'_> = self.uncached(unit_name).await?;
+        let main_pid = service.main_pid().await;
+        main_pid.map_err(
+            |source| SystemdTransientUnitTransportError::PropertyReadback {
+                property: "MainPID",
+                source: Box::new(source),
+            },
+        )
+    }
+
+    /// The unit's current `InvocationID`, read fresh from the manager.
+    async fn read_invocation_id(
+        &self,
+        unit_name: &TransientServiceUnitName,
+    ) -> Result<[u8; 16], SystemdTransientUnitTransportError> {
+        let unit: UnitProxy<'_> = self.uncached(unit_name).await?;
+        let invocation_id = unit.invocation_id().await;
+        let raw = invocation_id.map_err(|source| {
+            SystemdTransientUnitTransportError::PropertyReadback {
+                property: "InvocationID",
+                source: Box::new(source),
+            }
+        })?;
+        <[u8; 16]>::try_from(raw.as_slice())
+            .map_err(|_| SystemdTransientUnitTransportError::InvocationIdMalformed)
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl crate::UnitIdentitySource for SystemdTransientUnitTransport {
+    type Error = SystemdTransientUnitTransportError;
+
+    fn main_pid(
+        &self,
+        unit_name: &TransientServiceUnitName,
+    ) -> impl Future<Output = Result<u32, SystemdTransientUnitTransportError>> + Send {
+        self.read_main_pid(unit_name)
+    }
+
+    fn invocation_id(
+        &self,
+        unit_name: &TransientServiceUnitName,
+    ) -> impl Future<Output = Result<[u8; 16], SystemdTransientUnitTransportError>> + Send {
+        self.read_invocation_id(unit_name)
     }
 }
 
@@ -785,6 +873,18 @@ async fn read_dynamic_property(
     }
 }
 
+/// The manager's `a(sasbttttuii)` command record.
+type ExecStartCommand = (String, Vec<String>, bool, u64, u64, u64, u64, u32, i32, i32);
+
+/// The path, argument vector and ignore-failure flag of each command; the
+/// manager's timestamps, PID and status fields are not part of the request.
+fn exec_start_commands(commands: Vec<ExecStartCommand>) -> Vec<(String, Vec<String>, bool)> {
+    commands
+        .into_iter()
+        .map(|(path, arguments, ignore_failure, ..)| (path, arguments, ignore_failure))
+        .collect()
+}
+
 /// The last dynamic kinds; `TemporaryFileSystem` is the final one.
 async fn read_tail_property(
     service: &ServiceProxy<'_>,
@@ -799,6 +899,9 @@ async fn read_tail_property(
             .extra_file_descriptor_names()
             .await
             .map(SystemdTransientUnitReadbackValue::StringArray),
+        SystemdDynamicPropertyKind::ExecStart => service.exec_start().await.map(|commands| {
+            SystemdTransientUnitReadbackValue::ExecStart(exec_start_commands(commands))
+        }),
         _ => service
             .temporary_file_system()
             .await
@@ -964,6 +1067,7 @@ impl SystemdTransientUnitValue {
             Self::Numeric(value) => numeric_dbus_value(value),
             Self::ExtraFileDescriptors(value) => extra_file_descriptors_value(value),
             Self::TemporaryFileSystem(value) => Variant::from(value),
+            Self::ExecStart(value) => Variant::from(value),
         }
     }
 }

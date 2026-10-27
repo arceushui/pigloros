@@ -9,7 +9,9 @@ use crate::{
     TransientUnitRequest, TransientUnitRequestError,
 };
 use pos_conformance::SandboxSyscallSetV1;
-use pos_reference::sandbox_provider_protocol::{SandboxArchitecture, SandboxLimit};
+use pos_reference::sandbox_provider_protocol::{
+    LaunchParameters, SandboxArchitecture, SandboxLimit,
+};
 use zbus::{
     wire::{serialized::Context, to_bytes, LE},
     OwnedFd, Type,
@@ -19,7 +21,7 @@ const X86_64: &[u8] = include_bytes!(
     "../../../../crates/pos-conformance/vectors/systemd-provider-v260.2/systemd-v260.2-x86_64.scs1.cbor"
 );
 
-const EXPECTED_PROPERTY_NAMES: [&str; 43] = [
+const EXPECTED_PROPERTY_NAMES: [&str; 44] = [
     "Type",
     "RootDirectory",
     "BindReadOnlyPaths",
@@ -63,6 +65,7 @@ const EXPECTED_PROPERTY_NAMES: [&str; 43] = [
     "FileDescriptorStoreMax",
     "ExtraFileDescriptors",
     "TemporaryFileSystem",
+    "ExecStart",
 ];
 
 #[test]
@@ -197,6 +200,111 @@ fn work_mount_property_has_the_exact_dbus_encoding() -> Result<(), Box<dyn Error
         _value => return Err("TemporaryFileSystem must have an a(ss) value".into()),
     }
     Ok(())
+}
+
+fn exec_start(request: &TransientUnitRequest) -> Vec<(String, Vec<String>, bool)> {
+    request
+        .requested_properties()
+        .iter()
+        .find_map(|property| match property.value() {
+            SystemdTransientUnitValue::ExecStart(commands) => Some(commands.clone()),
+            _other => None,
+        })
+        .unwrap_or_default()
+}
+
+fn decode_hex(text: &str) -> Result<Vec<u8>, std::num::ParseIntError> {
+    (0..text.len())
+        .step_by(2)
+        .map(|index| u8::from_str_radix(&text[index..index + 2], 16))
+        .collect()
+}
+
+#[test]
+fn exec_start_is_the_last_property_with_its_dbus_signature() -> Result<(), Box<dyn Error>> {
+    let request = request(LaunchMode::AirGapped)?;
+    let property = &request.requested_properties()[43];
+    assert_eq!(property.name(), "ExecStart");
+    assert_eq!(property.dbus_signature(), "a(sasb)");
+    let commands = exec_start(&request);
+    assert_eq!(
+        <Vec<(String, Vec<String>, bool)> as Type>::SIGNATURE.to_string(),
+        "a(sasb)"
+    );
+    let encoded = to_bytes(Context::new(LE, 0), &commands)?;
+    let (decoded, consumed): (Vec<(String, Vec<String>, bool)>, usize) = encoded.deserialize()?;
+    assert_eq!(decoded, commands);
+    assert_eq!(consumed, encoded.len());
+    Ok(())
+}
+
+#[test]
+fn exec_start_runs_the_bound_launcher_in_launch_barrier_mode() -> Result<(), Box<dyn Error>> {
+    let commands = exec_start(&request(LaunchMode::AirGapped)?);
+    assert_eq!(commands.len(), 1);
+    let (path, arguments, ignore_failure) = &commands[0];
+    assert_eq!(path, "/.pigloros/release-launcher");
+    assert!(!ignore_failure);
+    assert_eq!(arguments[..2], [path.clone(), "launch-barrier".to_owned()]);
+    assert_eq!(arguments.len(), 3);
+    assert_eq!(arguments[2], arguments[2].to_ascii_lowercase());
+    Ok(())
+}
+
+#[test]
+fn the_launcher_argument_is_exactly_the_lpv1_record() -> Result<(), Box<dyn Error>> {
+    let commands = exec_start(&request(LaunchMode::AirGapped)?);
+    let bytes = decode_hex(&commands[0].1[2])?;
+    let parameters = LaunchParameters::from_canonical_cbor(&bytes)?;
+    assert_eq!(parameters.attempt_id, crate::test_fixtures::ATTEMPT);
+    assert_eq!(parameters.to_canonical_cbor()?, bytes);
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn the_launcher_mode_argument_is_the_launchers_own() {
+    assert_eq!(
+        super::LAUNCH_BARRIER_ARGUMENT,
+        crate::launcher::LAUNCH_BARRIER_MODE
+    );
+}
+
+#[test]
+fn verifier_rejects_a_substituted_exec_start() -> Result<(), Box<dyn Error>> {
+    let authority = SandboxSyscallSetV1::from_canonical_cbor(X86_64)?;
+    let request = request(LaunchMode::AirGapped)?;
+    let exact = exact_readback(&request, &authority.expected_effective_names);
+    assert_eq!(request.verify_readback(&exact), Ok(()));
+    let commands = exec_start(&request);
+    let mut other_argument = commands.clone();
+    other_argument[0].1[2].push('0');
+    let mut other_path = commands.clone();
+    other_path[0].0 = "/usr/bin/elsewhere".to_owned();
+    let mut tolerant = commands;
+    tolerant[0].2 = true;
+    for substituted in [other_argument, other_path, tolerant, Vec::new()] {
+        let mut readback = exact.clone();
+        readback[43] = SystemdTransientUnitReadback::new(
+            "ExecStart",
+            SystemdTransientUnitReadbackValue::ExecStart(substituted),
+        );
+        assert_eq!(
+            request.verify_readback(&readback),
+            Err(TransientUnitRequestError::ReadbackMismatch)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn only_list_kinds_clone_without_descriptors() {
+    assert!(SystemdTransientUnitValue::RootDirectory(String::new())
+        .clone_lists()
+        .is_err());
+    assert!(SystemdTransientUnitValue::ExecStart(Vec::new())
+        .clone_lists()
+        .is_ok());
 }
 
 #[test]
@@ -628,13 +736,22 @@ fn filter() -> Result<SystemCallFilter, Box<dyn Error>> {
     )?)
 }
 
-fn inputs(mode: LaunchMode) -> Result<TransientUnitLaunchInputs, Box<dyn Error>> {
+fn root_and_launcher() -> Result<(CheckedRoot, LauncherSource), Box<dyn Error>> {
     let root = ActivatedRootDirectory::new("/run/pigloros/attempt-42/root")?;
-    Ok(TransientUnitLaunchInputs::new(
-        CheckedRoot::for_test(root),
+    Ok((
+        CheckedRoot::for_test(root)?,
         LauncherSource::new("/usr/lib/pigloros/release-launcher")?,
+    ))
+}
+
+fn inputs(mode: LaunchMode) -> Result<TransientUnitLaunchInputs, Box<dyn Error>> {
+    let (root, launcher) = root_and_launcher()?;
+    Ok(TransientUnitLaunchInputs::new(
+        root,
+        launcher,
         mode,
         descriptor()?,
+        crate::test_fixtures::invocation()?,
     ))
 }
 
@@ -717,6 +834,9 @@ fn exact_readback(
                 SystemdTransientUnitValue::TemporaryFileSystem(value) => {
                     SystemdTransientUnitReadbackValue::TemporaryFileSystem(value.clone())
                 }
+                SystemdTransientUnitValue::ExecStart(value) => {
+                    SystemdTransientUnitReadbackValue::ExecStart(value.clone())
+                }
             };
             SystemdTransientUnitReadback::new(property.name(), value)
         })
@@ -735,7 +855,7 @@ fn property_clone_propagates_value_failure() {
 }
 
 /// Every dynamic kind with the name systemd gives it.
-fn pinned_names() -> [(SystemdDynamicPropertyKind, &'static str); 8] {
+fn pinned_names() -> [(SystemdDynamicPropertyKind, &'static str); 9] {
     [
         (SystemdDynamicPropertyKind::RootDirectory, "RootDirectory"),
         (
@@ -768,6 +888,7 @@ fn pinned_names() -> [(SystemdDynamicPropertyKind, &'static str); 8] {
             SystemdDynamicPropertyKind::TemporaryFileSystem,
             "TemporaryFileSystem",
         ),
+        (SystemdDynamicPropertyKind::ExecStart, "ExecStart"),
     ]
 }
 
@@ -782,7 +903,8 @@ const fn is_dynamic_kind(kind: SystemdDynamicPropertyKind) -> bool {
         | SystemdDynamicPropertyKind::OperatingLimit(_)
         | SystemdDynamicPropertyKind::FileDescriptorStoreMax
         | SystemdDynamicPropertyKind::ExtraFileDescriptors
-        | SystemdDynamicPropertyKind::TemporaryFileSystem => true,
+        | SystemdDynamicPropertyKind::TemporaryFileSystem
+        | SystemdDynamicPropertyKind::ExecStart => true,
     }
 }
 
@@ -828,6 +950,7 @@ fn pinned_signatures() -> Vec<(SystemdTransientUnitValue, &'static str)> {
             SystemdTransientUnitValue::TemporaryFileSystem(Vec::new()),
             "a(ss)",
         ),
+        (SystemdTransientUnitValue::ExecStart(Vec::new()), "a(sasb)"),
     ]
 }
 
@@ -841,7 +964,8 @@ const fn is_value_kind(value: &SystemdTransientUnitValue) -> bool {
         | SystemdTransientUnitValue::RestrictAddressFamilies(_)
         | SystemdTransientUnitValue::Numeric(_)
         | SystemdTransientUnitValue::ExtraFileDescriptors(_)
-        | SystemdTransientUnitValue::TemporaryFileSystem(_) => true,
+        | SystemdTransientUnitValue::TemporaryFileSystem(_)
+        | SystemdTransientUnitValue::ExecStart(_) => true,
     }
 }
 

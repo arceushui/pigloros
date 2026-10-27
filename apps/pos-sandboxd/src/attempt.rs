@@ -5,26 +5,107 @@
 //! that was started for it and not yet released; the Local binding token is
 //! minted only from it.
 
-use std::time::Instant;
+use std::{sync::Arc, time::Instant};
 
 use pos_reference::{
-    provider_admission::AdmittedAuthority, sandbox_provider_protocol::SandboxExecutionMode,
+    provider_admission::{execution::AdmittedProviderExecution, AdmittedAuthority},
+    sandbox_provider_protocol::{
+        AdmissionAuthority, ExecuteAuthority, NetworkCapability, PayloadDescriptor,
+        SandboxExecuteRequest, SandboxExecutionMode, SandboxLimit, SandboxSyscallSet,
+    },
 };
 
-use crate::{AdmittedEntry, ExecuteError, PreparedAttemptDirectory, TransientServiceUnitName};
+use crate::{
+    AdmittedEntry, ExecuteError, LauncherFacts, PreparedAttemptDirectory, TransientServiceUnitName,
+};
+
+/// The launch-policy view of an admitted attempt: everything a Local grant
+/// must agree with (request, authority block, launch policy digest and the
+/// network capabilities the policy allows).
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct LaunchPolicyView {
+    request_id: [u8; 16],
+    authority: AdmissionAuthority,
+    policy_digest: [u8; 32],
+    network_capabilities: Vec<NetworkCapability>,
+}
+
+impl LaunchPolicyView {
+    fn of(
+        request: &SandboxExecuteRequest,
+        policy_digest: [u8; 32],
+        capabilities: &[NetworkCapability],
+    ) -> Self {
+        Self {
+            request_id: request.request.request_id,
+            authority: admission_authority(&request.authority),
+            policy_digest,
+            network_capabilities: capabilities.to_vec(),
+        }
+    }
+}
+
+/// The thirteen digests a grant carries, out of the fifteen of the request.
+const fn admission_authority(authority: &ExecuteAuthority) -> AdmissionAuthority {
+    AdmissionAuthority {
+        evr1_digest: authority.evr1_digest,
+        fixture_contract_digest: authority.fixture_contract_digest,
+        fixture_digest: authority.fixture_digest,
+        execution_profile_digest: authority.execution_profile_digest,
+        lps1_digest: authority.lps1_digest,
+        sim1_digest: authority.sim1_digest,
+        apt1_digest: authority.apt1_digest,
+        trs1_digest: authority.trs1_digest,
+        rvs1_digest: authority.rvs1_digest,
+        spm1_digest: authority.spm1_digest,
+        pcf1_digest: authority.pcf1_digest,
+        pcr1_digest: authority.pcr1_digest,
+        hcp1_digest: authority.hcp1_digest,
+    }
+}
+
+// A clone retains the exact live admission; a separately admitted exchange is
+// never interchangeable merely because its public IDs happen to match.
+#[derive(Clone, Debug)]
+struct ExecutionLease(Arc<AdmittedProviderExecution>);
+impl PartialEq for ExecutionLease {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+impl Eq for ExecutionLease {}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ExecutionPolicyFacts {
+    limits: Vec<SandboxLimit>,
+    elm_digest: [u8; 32],
+    readback_digest: [u8; 32],
+    request_digest: [u8; 32],
+    input: PayloadDescriptor,
+}
 
 /// The facts of one reserved, admitted attempt that the execute path binds.
 ///
 /// Only [`Self::from_entry`] creates one, from an entry whose reservation is
 /// held and a directory prepared for that same attempt, so no caller can
 /// present facts the admission did not produce.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AdmittedAttempt {
     attempt_id: [u8; 16],
     unit_name: TransientServiceUnitName,
     sim1_digest: [u8; 32],
     authority: AdmittedAuthority,
     mode: SandboxExecutionMode,
+    executable_path: String,
+    arguments: Vec<String>,
+    executable_digest: [u8; 32],
+    launch: LaunchPolicyView,
+    launcher: LauncherFacts,
+    runtime_key_id: String,
+    runtime_key: ed25519_dalek::VerifyingKey,
+    syscall_set: Arc<SandboxSyscallSet>,
+    policy: Arc<ExecutionPolicyFacts>,
+    lease: Option<ExecutionLease>,
 }
 
 impl AdmittedAttempt {
@@ -45,13 +126,54 @@ impl AdmittedAttempt {
         {
             return Err(ExecuteError::DirectoryIdentity);
         }
+        let manifest = admission.snapshot().image().manifest();
+        let binary = admission.snapshot().provider_binary();
         Ok(Self {
             attempt_id: request.attempt_id,
             unit_name: intent.unit_name().clone(),
             sim1_digest: request.authority.sim1_digest,
             authority: admission.authority(),
             mode: admission.snapshot().launch_policy().execution_mode,
+            executable_path: manifest.executable_path.clone(),
+            arguments: manifest.arguments.clone(),
+            executable_digest: manifest.executable_blake3_digest,
+            launch: LaunchPolicyView::of(
+                request,
+                admission.snapshot().launch_policy().policy_digest,
+                &admission.snapshot().launch_policy().network_capabilities,
+            ),
+            launcher: LauncherFacts {
+                path: binary.path().to_owned(),
+                digest: binary.digest(),
+                length: binary.length(),
+                identity: binary.identity(),
+            },
+            runtime_key_id: admission.snapshot().runtime_attestation_key_id().to_owned(),
+            runtime_key: *admission.snapshot().runtime_attestation_key(),
+            syscall_set: Arc::new(admission.snapshot().syscall_set().clone()),
+            policy: Arc::new(ExecutionPolicyFacts {
+                limits: entry.policy().effective_limits().to_vec(),
+                elm_digest: entry.policy().effective_limits_digest(),
+                readback_digest: entry.policy().expected_readback_digest(),
+                request_digest: entry.policy().request_digest(),
+                input: entry.policy().input_descriptor().clone(),
+            }),
+            lease: Some(ExecutionLease(entry.retain())),
         })
+    }
+
+    /// Exact ELM1 projection from this attempt's independently derived policy.
+    ///
+    /// # Errors
+    /// Refuses values that systemd cannot enforce exactly.
+    pub fn service_limits(
+        &self,
+    ) -> Result<crate::SystemdServiceLimits, crate::SystemdServiceLimitsError> {
+        crate::SystemdServiceLimits::from_effective_limits(&self.policy.limits)
+    }
+
+    pub(crate) fn expected_readback_digest(&self) -> [u8; 32] {
+        self.policy.readback_digest
     }
 
     /// The attempt identity.
@@ -84,20 +206,150 @@ impl AdmittedAttempt {
         self.authority
     }
 
+    /// The SIM1 adapter executable path.
+    #[must_use]
+    pub fn executable_path(&self) -> &str {
+        &self.executable_path
+    }
+
+    /// The SIM1 fixed adapter argument vector.
+    #[must_use]
+    pub fn arguments(&self) -> &[String] {
+        &self.arguments
+    }
+
+    /// The admitted BLAKE3 digest of the adapter executable.
+    #[must_use]
+    pub const fn executable_digest(&self) -> [u8; 32] {
+        self.executable_digest
+    }
+
+    /// The launcher source derived solely from this admitted SIC1 context.
+    #[must_use]
+    pub fn launcher_source(&self) -> crate::LauncherSource {
+        crate::LauncherSource::admitted(self.launcher.path.clone())
+    }
+
+    pub(crate) const fn launcher(&self) -> &LauncherFacts {
+        &self.launcher
+    }
+
+    pub(crate) fn runtime_key_id(&self) -> &str {
+        &self.runtime_key_id
+    }
+
+    pub(crate) const fn runtime_key(&self) -> &ed25519_dalek::VerifyingKey {
+        &self.runtime_key
+    }
+
+    /// The syscall filter derived exclusively from this admitted SCS1.
+    #[must_use]
+    pub fn system_call_filter(&self) -> crate::SystemCallFilter {
+        crate::SystemCallFilter {
+            record: self.syscall_set.as_ref().clone(),
+        }
+    }
+
+    /// The request the admission was granted for.
+    pub(crate) const fn request_id(&self) -> [u8; 16] {
+        self.launch.request_id
+    }
+
+    /// The authority block a grant for this attempt must carry.
+    pub(crate) const fn admission_authority(&self) -> &AdmissionAuthority {
+        &self.launch.authority
+    }
+
+    /// The digest of the admitted launch policy (LPS1).
+    pub(crate) const fn launch_policy_digest(&self) -> [u8; 32] {
+        self.launch.policy_digest
+    }
+
+    /// The network capabilities the admitted launch policy allows.
+    pub(crate) fn network_capabilities(&self) -> &[NetworkCapability] {
+        &self.launch.network_capabilities
+    }
+
     /// Facts for tests that have no privileged installation to admit from.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn for_test(
         attempt_id: [u8; 16],
         authority: AdmittedAuthority,
         mode: SandboxExecutionMode,
-    ) -> Result<Self, crate::TransientServiceUnitNameError> {
-        TransientServiceUnitName::from_attempt_id(attempt_id).map(|unit_name| Self {
-            attempt_id,
-            unit_name,
-            sim1_digest: [0x51; 32],
-            authority,
-            mode,
-        })
+    ) -> crate::test_fixtures::TestResult<Self> {
+        TransientServiceUnitName::from_attempt_id(attempt_id)
+            .map_err(Into::into)
+            .and_then(|unit_name| {
+                crate::test_fixtures::launcher_facts().and_then(|launcher| {
+                    crate::test_fixtures::syscall_set().map(|syscall_set| Self {
+                        attempt_id,
+                        unit_name,
+                        sim1_digest: [0x51; 32],
+                        authority,
+                        mode,
+                        executable_path: "/usr/bin/adapter".to_owned(),
+                        arguments: vec!["--check".to_owned()],
+                        executable_digest: [0x61; 32],
+                        launch: LaunchPolicyView {
+                            request_id: crate::test_fixtures::REQUEST_ID,
+                            authority: crate::test_fixtures::grant_authority(),
+                            policy_digest: crate::test_fixtures::grant_authority().lps1_digest,
+                            network_capabilities: Vec::new(),
+                        },
+                        launcher,
+                        runtime_key_id: crate::test_fixtures::RUNTIME_KEY_ID.to_owned(),
+                        runtime_key: ed25519_dalek::SigningKey::from_bytes(
+                            &crate::test_fixtures::RUNTIME_SEED,
+                        )
+                        .verifying_key(),
+                        syscall_set: Arc::new(syscall_set),
+                        policy: Arc::new(ExecutionPolicyFacts {
+                            limits: crate::test_fixtures::execution_limits(5_000),
+                            elm_digest: [6; 32],
+                            readback_digest: [5; 32],
+                            request_digest: [7; 32],
+                            input: PayloadDescriptor {
+                                byte_length: 1,
+                                digest: [8; 32],
+                            },
+                        }),
+                        lease: None,
+                    })
+                })
+            })
+    }
+
+    #[cfg(all(test, unix))]
+    pub(crate) fn with_limits(mut self, limits: Vec<SandboxLimit>) -> Self {
+        Arc::make_mut(&mut self.policy).limits = limits;
+        self
+    }
+
+    #[cfg(all(test, unix))]
+    pub(crate) fn with_readback(mut self, digest: [u8; 32]) -> Self {
+        Arc::make_mut(&mut self.policy).readback_digest = digest;
+        self
+    }
+
+    /// The same attempt, with a launch policy that allows `capabilities`.
+    #[cfg(all(test, unix))]
+    pub(crate) fn allowing(mut self, capabilities: Vec<NetworkCapability>) -> Self {
+        self.launch.network_capabilities = capabilities;
+        self
+    }
+
+    /// The same attempt running another adapter path.
+    #[cfg(all(test, unix))]
+    pub(crate) fn running(mut self, executable_path: String) -> Self {
+        self.executable_path = executable_path;
+        self
+    }
+
+    /// A deliberately inconsistent admitted digest for substitution tests.
+    #[cfg(all(test, unix))]
+    pub(crate) const fn with_launcher_digest(mut self, digest: [u8; 32]) -> Self {
+        self.launcher.digest = digest;
+        self
     }
 }
 
@@ -115,6 +367,9 @@ pub struct ActiveAttempt {
 }
 
 impl ActiveAttempt {
+    pub(crate) const fn admitted(&self) -> &AdmittedAttempt {
+        &self.admitted
+    }
     pub(crate) const fn record(admitted: AdmittedAttempt, deadline: Instant) -> Self {
         Self { admitted, deadline }
     }

@@ -31,9 +31,9 @@ result proves requested-state verification only. The separate `stop_job` and
 typed systemd D-Bus. Stop uses `replace` mode so a queued start job cannot
 block cleanup; start retains `fail` mode. A completed stop job or acknowledged
 SIGKILL is not proof that the unit or cgroup is absent. The separate cgroup
-observer can verify process emptiness, but not complete cleanup. Later slices
-own bounded orchestration, launcher readiness/release, and full lifecycle
-cleanup.
+observer can verify process emptiness, but not complete cleanup. The bounded
+`execute` orchestration and launcher readiness/release barrier are implemented
+below; full lifecycle cleanup remains #442.
 
 `SystemdServiceLimits` accepts the complete ordered, already authorized ELM1
 limit set and compiles IDs 0–6 into the seven exact systemd service properties:
@@ -106,7 +106,11 @@ the unit was submitted kills it, every start and bind is bounded by the
 attempt watchdog, every termination call by a fixed 1 to 10 s bound, and
 dropping the execution future after the submission spawns a best-effort kill
 of the unit. A Local admission, namespace or channel of another
-attempt, SIM1, head or epoch is refused before anything is submitted. The Local
+attempt, request, authority block, head, epoch or launch policy, or one that
+plans an endpoint the launch policy does not allow, is refused before anything
+is submitted. A proxy protocol failure kills the unit at once and the evidence
+is kept; after a watchdog expiry the unit is killed while the proxy thread is
+still being joined. The Local
 network port owns its namespace by RAII: the execute path drops it on every
 path that does not serve it. The unit host, the barrier and the Local network
 are ports, so the composition is exercised without systemd.
@@ -115,11 +119,12 @@ are ports, so the composition is exercised without systemd.
   `piglor-host-service-v1` precedes `piglor-release-v1`. `CheckedLocal` is the
   only source of `BoundLocalProxy`, the `LocalProxyBinding` that `serve_proxy`
   in `pos-reference` requires; `ActiveAttempt` witnesses that the unit was
-  started. `AdmittedAttempt::check_local` checks the grant's attempt, SIM1,
-  authority heads and epochs against the admitted attempt, the namespace's
-  attempt and the channel's attempt, and the token carries the attempt it
-  checked. The proxy serves on a blocking thread that the attempt
-  watchdog closes. The namespace, veth pair and nftables rules belong to a
+  started. `AdmittedAttempt::check_local` checks the grant's attempt, request,
+  full authority block, heads and epochs, expected launch policy digest and
+  planned endpoints against the admitted attempt and its launch policy, and
+  the namespace's and the channel's attempt; the token carries the attempt it
+  checked. The proxy serves on a blocking thread that the attempt watchdog
+  closes. The namespace, veth pair and nftables rules belong to a
   separate ticket; `FailClosedLocalNetwork` establishes none and refuses every
   connection.
 - Replay: every captured exchange is resolved from the durable capture store
@@ -133,16 +138,63 @@ are #443, and unmounting and removing the attempt are #442. A watchdog that
 closed the channel is reported by `ServedProxy::watchdog_expired`, not by the
 termination, which reads a closed channel as a clean close.
 
-Not composed here, and stated so that nothing is assumed: the `ExecStart`
-launcher-mode property and its LPV1 argument, the production `LaunchBarrier`
-and `ReleaseRecheck` adapters over `release_after_ready`, adapter stdin and
-stdout transport, and the real Local namespace. `AdmittedAttempt::check_local`
-binds an admission against the authority heads the attempt was admitted with;
-that the recheck closure belongs to the same admitted entry is the caller's
-contract (`VerifiedRootMount::recheck` enforces it for its own entry).
-Authorization of a Replay exchange set is the caller's: the report that
-supplies it is not verified here. `tokio` gains its `rt` feature for the
-blocking proxy thread.
+`ExecStart=` is requested as `a(sasb)`: the bind-mounted launcher at
+`/.pigloros/release-launcher`, `launch-barrier` and one lowercase-hexadecimal
+LPV1 argument, and read back as path, argument vector and ignore-failure flag.
+`ProviderReleaseBarrier` is the production `LaunchBarrier`. Its `prepare`
+operation checks the complete admitted attempt before handing over a descriptor,
+and release checks the active attempt against that same record again.
+The root recheck also returns the complete admitted context in its opaque
+`CheckedRoot` proof. Both prelaunch execution and the final release check
+reject a proof from another context, including a changed authority for the
+same attempt ID.
+Execution derives its syscall filter from the exact admitted SCS1; an execute
+job cannot supply another independently validated allow-list.
+The attempt also retains the SPM1-selected runtime key ID and authenticated
+verifying key. The production barrier requires that ID from its signer and
+verifies the produced signature under the admitted key before sending any
+release; a safe but incorrect key file cannot authorize execution.
+`AdmittedAttempt` derives the launcher source, byte length, BLAKE3 digest and
+device/inode from the authenticated SIC1 role-11 provider executable. Neither
+the execute job nor barrier evidence can supply a separate path or digest.
+Before the start the barrier
+builds the LPV1 parameters (attempt, a nonce from `fresh_nonce`, SIM1, adapter
+path and arguments, the expected FDL1 digest of the mode) and the
+`SOCK_SEQPACKET` release channel. After the start it reads the unit's current
+`MainPID` and `InvocationID` from the manager, observes `/proc/<MainPID>/exe`
+itself through a held descriptor, checks its device/inode and length against
+admitted evidence, and independently hashes those exact bytes. It bounds the
+`ReadyV1` receive and the `ReleaseV1` send with socket timeouts recomputed from
+the original attempt deadline. The signed absolute deadline is conservatively
+translated by sampling `CLOCK_MONOTONIC` before the remaining `Instant` duration.
+The original deadline is checked after the final identity recheck and after
+sending the release. The blocking
+receive, the recheck and the signed `ReleaseV1` send run under
+`tokio::task::block_in_place`, so the barrier needs a multi-thread Tokio
+runtime; a current-thread runtime or none is refused with
+`BarrierError::RuntimeFlavor`, already when the launcher command is requested,
+before any unit starts (a test fixes this requirement). The receive and the
+`ReleaseV1` send are bounded by socket timeouts, because an outer deadline
+cannot preempt a blocking call. After `ReadyV1` verifies, the last-moment
+recheck reads `MainPID`, `InvocationID` and the launcher executable again and
+refuses the release if any changed (`BarrierError::Refused` carries the typed
+`RecheckRefusal`); a barrier releases at most once.
+`AuthorityCheck` is the last-moment recheck: the caller's
+`|| root.recheck(&directory, &entry)`, the cancellation flag the attempt
+lifecycle sets, and the observed readback-set digest behind `ObservedReadback`.
+
+Not composed here, and stated so that nothing is assumed: the observed
+readback-set digest itself (#443 owns the kernel observations and their
+digest, and the provider must supply an `ObservedReadback` before it can
+release), the adapter's mount and inode identity (the composition root
+supplies it in `BarrierEvidence`), the setting of the cancellation flag
+(#442), adapter stdin and stdout transport, and the real Local namespace.
+`AdmittedAttempt::check_local` binds an admission against the launch-policy
+view and the authority heads the attempt was admitted with; that the recheck
+closure belongs to the same admitted entry is the caller's contract
+(`VerifiedRootMount::recheck` enforces it for its own entry). Authorization of
+a Replay exchange set is the caller's: the report that supplies it is not
+verified here. `tokio` gains its `rt` and `rt-multi-thread` features.
 
 The provider never creates a local process: `connect_system` accepts only a
 Unix-socket system-bus address (zbus's `unixexec` and `ibus` transports would

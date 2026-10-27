@@ -29,11 +29,12 @@ use crate::provider_transport::{
     AuthenticatedProviderExecution, AuthenticatedProviderTerminal, PostAdmissionProviderFailure,
     ProviderRequestAdmission, ProviderTransport, ProviderTransportError, ReadSeek,
 };
+#[cfg(test)]
+use crate::sandbox_provider_protocol::SandboxExecuteRequest;
 use crate::sandbox_provider_protocol::{
-    AdmittedSandboxImage, ExecuteAuthority, LaunchPolicy, RequestAuthority, SandboxExecuteRequest,
-    SandboxLocalError, SandboxLocalErrorCode, SandboxLocalErrorPhase, SandboxProviderError,
-    SandboxProviderErrorCode, SandboxProviderOperation, SignedImageManifest,
-    VerifiedSandboxImageProof,
+    AdmittedSandboxImage, LaunchPolicy, SandboxLocalError, SandboxLocalErrorCode,
+    SandboxLocalErrorPhase, SandboxProviderError, SandboxProviderErrorCode,
+    SandboxProviderOperation, SignedImageManifest, VerifiedSandboxImageProof,
 };
 #[cfg(test)]
 use crate::selector::installation::authority::ProviderRuntimeSlot;
@@ -976,6 +977,7 @@ trait ProviderExecutor {
         &self,
         admitted: &crate::sandbox_provider_protocol::AdmittedSandboxProvider,
         commitment: &crate::sandbox_provider_protocol::SelectorGrantCommitment,
+        evaluation: &crate::evaluator_protocol::EvaluationRequest,
         spx1: &[u8],
         input: &mut dyn ReadSeek,
         watchdog: Duration,
@@ -988,12 +990,15 @@ impl ProviderExecutor for ProviderTransport {
         &self,
         admitted: &crate::sandbox_provider_protocol::AdmittedSandboxProvider,
         commitment: &crate::sandbox_provider_protocol::SelectorGrantCommitment,
+        evaluation: &crate::evaluator_protocol::EvaluationRequest,
         spx1: &[u8],
         input: &mut dyn ReadSeek,
         watchdog: Duration,
         admission: &mut dyn ProviderRequestAdmission,
     ) -> Result<AuthenticatedProviderTerminal, ProviderTransportError> {
-        Self::execute_staged(self, admitted, commitment, spx1, input, watchdog, admission)
+        Self::execute_staged(
+            self, admitted, commitment, evaluation, spx1, input, watchdog, admission,
+        )
     }
 }
 
@@ -1631,7 +1636,7 @@ impl<T: ProviderExecutor> RootSelectorService<T> {
         ) else {
             return write_authority_mismatch(stream, decoded);
         };
-        let Ok(spx1) = selector_execute_bytes(admitted, decoded, &resolved, requirement) else {
+        let Ok(spx1) = selector_execute_bytes(admitted, decoded, &resolved) else {
             return write_authority_mismatch(stream, decoded);
         };
         // The same EVR1 legitimately derives one ID per selected case and exact
@@ -1645,6 +1650,7 @@ impl<T: ProviderExecutor> RootSelectorService<T> {
                 let result = self.transport.execute(
                     admitted.provider(),
                     &commitment,
+                    &decoded.request,
                     &spx1,
                     input,
                     Duration::from_millis(resolved.attempt().watchdog_ms),
@@ -1840,43 +1846,20 @@ fn selector_execute_bytes(
     admitted: &AdmittedSelectorProvider,
     decoded: &DecodedSelectorRequest,
     resolved: &crate::selector::installation::ResolvedInstalledCase,
-    requirement: &crate::evaluator_protocol::SandboxRequirement,
 ) -> Result<Vec<u8>, SelectorBoundaryError> {
-    let bootstrap = admitted.bootstrap();
-    let provider = admitted.provider();
-    let authority = ExecuteAuthority {
-        evr1_digest: decoded.request.request_digest,
-        cpf1_digest: resolved.profile_digest(),
-        cfb1_digest: resolved.bundle_digest(),
-        fixture_contract_digest: resolved.fixture_contract_digest(),
-        fixture_digest: resolved.attempt().fixture_digest,
-        execution_profile_digest: decoded.request.execution_profile_digest,
-        lps1_digest: requirement.lps1_digest,
-        sim1_digest: requirement.sim1_digest,
-        apt1_digest: requirement.apt1_digest,
-        trs1_digest: bootstrap.trust().snapshot_digest(),
-        rvs1_digest: bootstrap.revocation().snapshot_digest(),
-        spm1_digest: provider.manifest().manifest_digest,
-        pcf1_digest: provider.manifest().pcf1_digest,
-        pcr1_digest: provider.conformance_report().report_digest,
-        hcp1_digest: provider.host_profile().profile_digest,
-    };
     fresh_selector_id()
         .and_then(|nonce| {
-            SandboxExecuteRequest::for_selector(
-                RequestAuthority {
-                    request_id: decoded.provider_request_id,
-                    apt1_digest: requirement.apt1_digest,
-                    policy_epoch: requirement.policy_epoch,
-                    nonce,
-                },
-                decoded.attempt_id,
-                authority,
-                resolved.attempt().capability_ids.clone(),
+            crate::selector_protocol::execute_request_for_case(
+                admitted,
+                &decoded.request,
+                resolved,
                 decoded.input_descriptor(),
-                Vec::new(),
+                u16::from_be_bytes([
+                    decoded.provider_request_id[14],
+                    decoded.provider_request_id[15],
+                ]),
+                nonce,
             )
-            .map_err(artifact_invalid)
         })
         .and_then(|request| request.to_canonical_cbor().map_err(artifact_invalid))
 }
@@ -3417,11 +3400,18 @@ mod tests {
             let mut stream = accept_test_connection(listener)?;
             stream.set_read_timeout(Some(INITIAL_IO_TIMEOUT))?;
             stream.set_write_timeout(Some(INITIAL_IO_TIMEOUT))?;
+            let evaluation = crate::evaluator_protocol::EvaluationRequest::from_canonical_cbor(
+                &read_frame(&mut stream)?,
+            )?;
             let spx1 = read_frame(&mut stream)?;
             // The provider independently opens SIC1; no selector proof or FD is
             // transferred by SPX1. This is image admission, not activation.
             let image = crate::provider_admission::ProviderImageSnapshot::open(&spx1)?;
             assert_eq!(image.request().to_canonical_cbor()?, spx1);
+            assert_eq!(
+                image.request().authority.evr1_digest,
+                evaluation.request_digest
+            );
             assert_eq!(
                 image.image().manifest().manifest_digest,
                 image.request().authority.sim1_digest
@@ -3446,16 +3436,23 @@ mod tests {
                 (carried.st_dev, carried.st_ino),
                 (retained.dev(), retained.ino())
             );
-            let mut input_frames = Vec::new();
-            stream.read_to_end(&mut input_frames)?;
-            if input_frames.is_empty() {
-                return Err("provider input frames missing".into());
-            }
             let responses = if identity_conflict {
                 vec![fixture.request_identity_conflict_for(&spx1)?]
             } else {
                 fixture.execution_response_for(provider, &spx1, commitment, epochs)?
             };
+            let mut responses = responses.into_iter();
+            write_frame(
+                &mut stream,
+                &responses.next().ok_or("missing initial response")?,
+            )?;
+            if !identity_conflict {
+                let mut input_frames = Vec::new();
+                stream.read_to_end(&mut input_frames)?;
+                if input_frames.is_empty() {
+                    return Err("provider input frames missing".into());
+                }
+            }
             for response in responses {
                 write_frame(&mut stream, &response)?;
             }
@@ -4016,6 +4013,7 @@ mod tests {
             transport.execute_staged(
                 &fixture.provider,
                 &fixture.commitment,
+                &fixture.evaluation,
                 &fixture.spx1,
                 &mut std::io::Cursor::new(b"input"),
                 Duration::from_secs(1),
@@ -4032,9 +4030,8 @@ mod tests {
                     (|| -> TestResult {
                         let (mut stream, _) = listener.accept()?;
                         stream.set_read_timeout(Some(Duration::from_secs(1)))?;
+                        let _evaluation = read_frame(&mut stream)?;
                         let _spx1 = read_frame(&mut stream)?;
-                        let mut input = Vec::new();
-                        stream.read_to_end(&mut input)?;
                         entered_tx.send(())?;
                         release_rx.recv_timeout(Duration::from_secs(1))?;
                         Ok(())
@@ -4104,6 +4101,7 @@ mod tests {
                 transport.execute_staged(
                     &fixture.provider,
                     &fixture.commitment,
+                    &fixture.evaluation,
                     &fixture.spx1,
                     &mut std::io::Cursor::new(b"input"),
                     Duration::from_secs(1),
@@ -4119,6 +4117,23 @@ mod tests {
             assert!(request_admission.entry_proof.is_none());
         }
         Ok(())
+    }
+
+    fn generation_fence_provider(
+        listener: &UnixListener,
+        entered: &std::sync::mpsc::Sender<()>,
+        release: &std::sync::mpsc::Receiver<()>,
+    ) -> Result<(), String> {
+        (|| -> TestResult {
+            let (mut stream, _) = listener.accept()?;
+            stream.set_read_timeout(Some(Duration::from_secs(1)))?;
+            let _evaluation = read_frame(&mut stream)?;
+            let _spx1 = read_frame(&mut stream)?;
+            entered.send(())?;
+            release.recv_timeout(Duration::from_secs(1))?;
+            Ok(())
+        })()
+        .map_err(|error| error.to_string())
     }
 
     fn assert_transport_generation_fence(reopen_with_successor: bool) -> TestResult {
@@ -4146,23 +4161,14 @@ mod tests {
             // unauthorized retry cannot hide behind a connection failure.
             let listener = &listener;
             let provider = scope.spawn(move || {
-                (|| -> TestResult {
-                    let (mut stream, _) = listener.accept()?;
-                    stream.set_read_timeout(Some(Duration::from_secs(1)))?;
-                    let _spx1 = read_frame(&mut stream)?;
-                    let mut input = Vec::new();
-                    stream.read_to_end(&mut input)?;
-                    request_entered_tx.send(())?;
-                    release_provider_rx.recv_timeout(Duration::from_secs(1))?;
-                    Ok(())
-                })()
-                .map_err(|error| error.to_string())
+                generation_fence_provider(listener, &request_entered_tx, &release_provider_rx)
             });
             scope.spawn(|| {
                 let result = transport
                     .execute_staged(
                         &transport_fixture.provider,
                         &transport_fixture.commitment,
+                        &transport_fixture.evaluation,
                         &transport_fixture.spx1,
                         &mut std::io::Cursor::new(b"input"),
                         Duration::from_secs(1),
@@ -4172,7 +4178,22 @@ mod tests {
                 assert!(execution_tx.send(result).is_ok());
             });
             request_entered_rx.recv_timeout(Duration::from_secs(1))?;
-            let closed = admission.close_and_snapshot()?;
+            let (closed_tx, closed_rx) = std::sync::mpsc::channel();
+            let closing = Arc::clone(&admission);
+            scope.spawn(move || {
+                drop(closed_tx.send(closing.close_and_snapshot()));
+            });
+            loop {
+                let state = admission.state.lock().map_err(selector_unavailable)?;
+                if !state.open {
+                    break;
+                }
+                drop(state);
+                thread::yield_now();
+            }
+            assert!(closed_rx.try_recv().is_err());
+            release_provider_tx.send(())?;
+            let closed = closed_rx.recv_timeout(Duration::from_secs(1))??;
             assert_eq!(closed.live_attempt_ids, vec![[1; 16]]);
             let successor_lease = if reopen_with_successor {
                 let (_, successor, _) =
@@ -4182,7 +4203,6 @@ mod tests {
             } else {
                 None
             };
-            release_provider_tx.send(())?;
             assert!(matches!(
                 execution_rx.recv_timeout(Duration::from_secs(1))?,
                 Err(ProviderTransportError::BeforeAdmission)
@@ -4201,6 +4221,7 @@ mod tests {
                 transport.execute_staged(
                     &transport_fixture.provider,
                     &transport_fixture.commitment,
+                    &transport_fixture.evaluation,
                     &transport_fixture.spx1,
                     &mut std::io::Cursor::new(b"input"),
                     Duration::from_secs(1),
@@ -4424,6 +4445,180 @@ mod tests {
             assert!(composition.update_installation(server).is_err());
             drop(client);
         }
+        Ok(())
+    }
+
+    struct RefuseRecovery {
+        begun: usize,
+        refusal: ProviderTransportError,
+    }
+
+    impl ProviderRequestAdmission for RefuseRecovery {
+        fn begin(&mut self) -> Result<(), ProviderTransportError> {
+            self.begun += 1;
+            if self.begun == 1 {
+                Ok(())
+            } else {
+                Err(self.refusal)
+            }
+        }
+
+        fn entered(&mut self) {}
+    }
+
+    #[test]
+    fn authenticated_grant_retains_namespace_when_recovery_generation_refuses() -> TestResult {
+        for already_classified in [false, true] {
+            let fixture =
+                crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
+            let directory = tempfile::tempdir()?;
+            let socket = directory.path().join("provider.sock");
+            let listener = UnixListener::bind(&socket)?;
+            fs::set_permissions(&socket, fs::Permissions::from_mode(SOCKET_MODE))?;
+            let transport = ProviderTransport::from_path_for_test(&socket)?;
+            let evaluation_bytes = fixture.evaluation.to_canonical_cbor()?;
+            let request_bytes = fixture.spx1.clone();
+            let grant_bytes = fixture.agr1.clone();
+            let grant = fixture.provider.authenticate_selector_grant(
+                &grant_bytes,
+                &fixture.request,
+                &fixture.commitment,
+            )?;
+            let provider = thread::spawn(move || {
+                (|| -> TestResult {
+                    let mut stream = accept_test_connection(&listener)?;
+                    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+                    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+                    assert_eq!(read_frame(&mut stream)?, evaluation_bytes);
+                    assert_eq!(read_frame(&mut stream)?, request_bytes);
+                    write_frame(&mut stream, &grant_bytes)?;
+                    let mut input = Vec::new();
+                    stream.read_to_end(&mut input)?;
+                    assert!(!input.is_empty());
+                    // Lose the terminal only after the client authenticated AGR1.
+                    Ok(())
+                })()
+                .map_err(|error| error.to_string())
+            });
+            let bindings = EvaluationNamespaceBindings::default();
+            let expected_failure = if already_classified {
+                PostAdmissionProviderFailure::EvidenceInvalid
+            } else {
+                PostAdmissionProviderFailure::TerminalUnavailable
+            };
+            let mut admission = RefuseRecovery {
+                begun: 0,
+                refusal: if already_classified {
+                    ProviderTransportError::AfterAdmission {
+                        agr1_digest: grant.grant_digest,
+                        failure: expected_failure,
+                    }
+                } else {
+                    ProviderTransportError::BeforeAdmission
+                },
+            };
+            let execution = bindings.execute_ordered(&fixture.evaluation, || {
+                transport.execute_staged(
+                    &fixture.provider,
+                    &fixture.commitment,
+                    &fixture.evaluation,
+                    &fixture.spx1,
+                    &mut std::io::Cursor::new(b"input"),
+                    Duration::from_secs(5),
+                    &mut admission,
+                )
+            })?;
+            provider.join().map_err(|_| "provider thread panicked")??;
+            assert!(!execution.conflict);
+            assert!(matches!(
+                &execution.result,
+                Err(ProviderTransportError::AfterAdmission { agr1_digest, failure })
+                    if *agr1_digest == grant.grant_digest
+                        && *failure == expected_failure
+            ));
+            assert_eq!(admission.begun, 2);
+            assert!(provider_retains_namespace(&execution.result));
+            let mut foreign = fixture.evaluation;
+            foreign.implementation.organization_id = Some("foreign-owner".to_owned());
+            refresh_request_digest(&mut foreign)?;
+            assert!(
+                bindings
+                    .execute_ordered(&foreign, || Err(ProviderTransportError::BeforeAdmission))?
+                    .conflict
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn authenticated_grant_retains_namespace_when_recovery_returns_a_pre_admission_error(
+    ) -> TestResult {
+        let fixture = crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
+        let directory = tempfile::tempdir()?;
+        let socket = directory.path().join("provider.sock");
+        let listener = UnixListener::bind(&socket)?;
+        fs::set_permissions(&socket, fs::Permissions::from_mode(SOCKET_MODE))?;
+        let transport = ProviderTransport::from_path_for_test(&socket)?;
+        let evaluation_bytes = fixture.evaluation.to_canonical_cbor()?;
+        let request_bytes = fixture.spx1.clone();
+        let grant_bytes = fixture.agr1.clone();
+        let error_bytes = fixture.spe1.clone();
+        let grant = fixture.provider.authenticate_selector_grant(
+            &grant_bytes,
+            &fixture.request,
+            &fixture.commitment,
+        )?;
+        let provider = thread::spawn(move || {
+            (|| -> TestResult {
+                let mut first = accept_test_connection(&listener)?;
+                first.set_read_timeout(Some(Duration::from_secs(5)))?;
+                first.set_write_timeout(Some(Duration::from_secs(5)))?;
+                assert_eq!(read_frame(&mut first)?, evaluation_bytes);
+                assert_eq!(read_frame(&mut first)?, request_bytes);
+                write_frame(&mut first, &grant_bytes)?;
+                let mut input = Vec::new();
+                first.read_to_end(&mut input)?;
+                assert!(!input.is_empty());
+                drop(first);
+                let mut recovery = accept_test_connection(&listener)?;
+                recovery.set_read_timeout(Some(Duration::from_secs(5)))?;
+                recovery.set_write_timeout(Some(Duration::from_secs(5)))?;
+                assert_eq!(read_frame(&mut recovery)?, evaluation_bytes);
+                assert_eq!(read_frame(&mut recovery)?, request_bytes);
+                // Correctly signed SPE1 is still invalid after the retained AGR1.
+                write_frame(&mut recovery, &error_bytes)?;
+                Ok(())
+            })()
+            .map_err(|error| error.to_string())
+        });
+        let bindings = EvaluationNamespaceBindings::default();
+        let execution = bindings.execute_ordered(&fixture.evaluation, || {
+            transport.execute(
+                &fixture.provider,
+                &fixture.commitment,
+                &fixture.evaluation,
+                &fixture.spx1,
+                b"input",
+                Duration::from_secs(5),
+            )
+        })?;
+        provider.join().map_err(|_| "provider thread panicked")??;
+        assert!(!execution.conflict);
+        assert!(matches!(
+            &execution.result,
+            Err(ProviderTransportError::AfterAdmission { agr1_digest, failure })
+                if *agr1_digest == grant.grant_digest
+                    && *failure == PostAdmissionProviderFailure::EvidenceInvalid
+        ));
+        assert!(provider_retains_namespace(&execution.result));
+        let mut foreign = fixture.evaluation;
+        foreign.implementation.organization_id = Some("foreign-owner".to_owned());
+        refresh_request_digest(&mut foreign)?;
+        assert!(
+            bindings
+                .execute_ordered(&foreign, || Err(ProviderTransportError::BeforeAdmission))?
+                .conflict
+        );
         Ok(())
     }
 
@@ -4698,6 +4893,7 @@ mod tests {
             &self,
             _admitted: &crate::sandbox_provider_protocol::AdmittedSandboxProvider,
             _commitment: &crate::sandbox_provider_protocol::SelectorGrantCommitment,
+            _evaluation: &crate::evaluator_protocol::EvaluationRequest,
             _spx1: &[u8],
             _input: &mut dyn ReadSeek,
             _watchdog: Duration,
@@ -4721,6 +4917,7 @@ mod tests {
             &self,
             _admitted: &crate::sandbox_provider_protocol::AdmittedSandboxProvider,
             _commitment: &crate::sandbox_provider_protocol::SelectorGrantCommitment,
+            _evaluation: &crate::evaluator_protocol::EvaluationRequest,
             _spx1: &[u8],
             _input: &mut dyn ReadSeek,
             _watchdog: Duration,
@@ -4747,6 +4944,7 @@ mod tests {
             &self,
             _admitted: &crate::sandbox_provider_protocol::AdmittedSandboxProvider,
             _commitment: &crate::sandbox_provider_protocol::SelectorGrantCommitment,
+            _evaluation: &crate::evaluator_protocol::EvaluationRequest,
             spx1: &[u8],
             _input: &mut dyn ReadSeek,
             _watchdog: Duration,
@@ -4864,7 +5062,7 @@ mod tests {
         let encoded = encoded_request(&request, resolved.attempt())?;
         let decoded = decode_request(&encoded.control, &encoded.attempt_stream)
             .map_err(|error| format!("selector request decode failed: {error:?}"))?;
-        let bytes = selector_execute_bytes(&admitted, &decoded, &resolved, requirement)?;
+        let bytes = selector_execute_bytes(&admitted, &decoded, &resolved)?;
         let execute = SandboxExecuteRequest::from_canonical_cbor(&bytes)?;
 
         assert_eq!(execute.request.request_id, decoded.provider_request_id);

@@ -14,7 +14,8 @@
 //! 5. the launcher barrier releases the adapter, exactly once;
 //! 6. a Local proxy serves FD 3 until the channel ends or the attempt
 //!    watchdog closes it, and the cgroup is observed until it is empty or the
-//!    watchdog expires, which kills the unit.
+//!    watchdog expires, which kills the unit; a proxy protocol failure kills
+//!    the unit at once and keeps the evidence.
 //!
 //! Any failure after the unit was started terminates it. The result carries
 //! the evidence the later signed records need: the ordered NXT1 transcript
@@ -40,10 +41,9 @@ use pos_reference::sandbox_provider_protocol::{
 use zbus::OwnedFd;
 
 use crate::{
-    ActivatedRootDirectory, ActiveAttempt, AdmittedAttempt, BoundLocalProxy, CheckedLocal,
-    CheckedRoot, HostServiceChannel, ImageActivationError, LaunchMode, LauncherSource,
-    LocalNetworkPort, LocalProxyBindError, ServeError, ServedProxy, SystemCallFilter,
-    SystemdServiceLimits, TransientServiceUnitName, TransientUnitLaunchInputs,
+    ActiveAttempt, AdmittedAttempt, BoundLocalProxy, CheckedLocal, CheckedRoot, HostServiceChannel,
+    ImageActivationError, LaunchMode, LauncherInvocation, LocalNetworkPort, LocalProxyBindError,
+    ServeError, ServedProxy, TransientServiceUnitName, TransientUnitLaunchInputs,
     TransientUnitRequest,
 };
 
@@ -134,12 +134,15 @@ pub trait LaunchBarrier {
     /// The barrier's failure type.
     type Error: Error + Send + Sync + 'static;
 
-    /// Hand over, once, the unit's end of the release channel, which becomes
-    /// `piglor-release-v1`.
+    /// Validate the complete admitted context, then provide its exact LPV1
+    /// invocation and hand over the unit's release descriptor once.
     ///
     /// # Errors
-    /// Fails if the channel is unavailable or was already handed over.
-    fn take_unit_end(&mut self) -> Result<OwnedFd, Self::Error>;
+    /// Fails if the parameters cannot be encoded.
+    fn prepare(
+        &mut self,
+        attempt: &AdmittedAttempt,
+    ) -> Result<(LauncherInvocation, OwnedFd), Self::Error>;
 
     /// Await `ReadyV1`, recheck every binding, and send exactly one
     /// `ReleaseV1`, all before the attempt's deadline.
@@ -201,12 +204,6 @@ impl ModePlan {
 pub struct ExecuteJob {
     /// The facts of the reserved, admitted attempt.
     pub attempt: AdmittedAttempt,
-    /// The admitted launcher binary to bind into the root.
-    pub launcher_source: LauncherSource,
-    /// The selected, digest-bound syscall filter.
-    pub system_call_filter: SystemCallFilter,
-    /// The effective ELM1 limits systemd enforces.
-    pub service_limits: SystemdServiceLimits,
     /// The planned network behaviour; it must match the admitted mode.
     pub mode: ModePlan,
     /// The durable capture store, opened over a root-owned directory.
@@ -216,6 +213,9 @@ pub struct ExecuteJob {
 /// Why an execution could not start or continue.
 #[derive(Debug, thiserror::Error)]
 pub enum ExecuteError {
+    /// The authenticated limits cannot be enforced exactly on systemd.
+    #[error(transparent)]
+    Limits(#[from] crate::SystemdServiceLimitsError),
     /// The directory was prepared for another attempt or SIM1.
     #[error("the attempt directory belongs to another attempt")]
     DirectoryIdentity,
@@ -298,6 +298,13 @@ pub enum AttemptEnding {
     WatchdogKilled,
     /// The watchdog expired and the kill could not be issued.
     WatchdogKillFailed,
+    /// The Local proxy session ended in a protocol failure; the unit was
+    /// killed (acknowledged, not proven) and the evidence kept for the
+    /// classifier (#443).
+    ProtocolFailureKilled,
+    /// The proxy session ended in a protocol failure and the kill could not be
+    /// issued.
+    ProtocolFailureKillFailed,
 }
 
 /// The network evidence of one attempt, for SPR1 and SAU1.
@@ -335,8 +342,8 @@ impl NetworkEvidence {
     /// `None` means no Local session, or a clean close at a frame boundary.
     /// A watchdog that closed the channel also reads as a clean close here:
     /// the classifier (#443) must consult [`ServedProxy::watchdog_expired`] as
-    /// well. A protocol failure leaves the unit running until it empties or the
-    /// watchdog fires; classifying it is #443's, not an early kill.
+    /// well. A protocol failure kills the unit
+    /// ([`AttemptEnding::ProtocolFailureKilled`]); classifying it is #443's.
     #[must_use]
     pub const fn termination(&self) -> Option<LocalNetworkTermination> {
         match self {
@@ -389,19 +396,21 @@ struct Prepared<C> {
 /// and the attached root (ADR-087 section 2 step 7) and returns the only
 /// `RootDirectory` a unit may use. Production passes
 /// `|| root.recheck(&directory, &entry)` with the same entry and directory
-/// that built the job's [`AdmittedAttempt`]; the rechecked root must name that
-/// attempt's own root, so a root of another attempt is refused. The recheck
+/// that built the job's [`AdmittedAttempt`]; the rechecked proof must retain
+/// that exact admitted context, so another root or authority is refused. The recheck
 /// consumes nothing and does not detach the mount when it fails, and neither
 /// does this function: the caller owns the `VerifiedRootMount`, and the
 /// attempt lifecycle (#442) detaches or drops it on every terminal path.
 ///
 /// `recheck` blocks: it mounts, reads and verifies. The production barrier
-/// wraps its own recheck for the multi-thread runtime (owner decision on `block_in_place`, #441); a caller that
-/// passes a slow closure here stalls one worker until it returns.
+/// wraps its own recheck for the multi-thread runtime (owner decision on
+/// `block_in_place`, #441); a caller that passes a slow closure here stalls
+/// one worker until it returns.
 ///
-/// After a watchdog expiry the unit is killed once the Local proxy thread has
-/// joined, which a slow connector can delay up to the proxy's own network
-/// deadline; `RuntimeMaxUSec` is the backstop. If observing the cgroup fails
+/// After a watchdog expiry the unit is killed while the Local proxy thread is
+/// still being joined, so a slow connector cannot delay the kill. A proxy
+/// protocol failure kills the unit at once and keeps the session's evidence
+/// ([`AttemptEnding::ProtocolFailureKilled`]). If observing the cgroup fails
 /// after a Local session, the failure is returned without the session's
 /// transcripts.
 ///
@@ -506,7 +515,8 @@ where
         );
         return Err(aborted.await);
     }
-    let (network, empty) = match supervise(&mut cgroup, bound, store, deadline).await {
+    let supervised = supervise(host, &unit, &mut cgroup, bound, store, bounds).await;
+    let (network, finish) = match supervised {
         Ok(supervised) => supervised,
         Err(error) => {
             let aborted = abort(
@@ -520,13 +530,7 @@ where
             return Err(aborted.await);
         }
     };
-    let ending = if empty {
-        AttemptEnding::CgroupEmpty
-    } else if kill_everything(host, &unit, Some(&mut cgroup), bounds.call).await {
-        AttemptEnding::WatchdogKilled
-    } else {
-        AttemptEnding::WatchdogKillFailed
-    };
+    let ending = finish.ending();
     Ok(AttemptExecution {
         attempt_id,
         started,
@@ -630,12 +634,10 @@ where
 {
     let ExecuteJob {
         attempt,
-        launcher_source,
-        system_call_filter,
-        service_limits,
         mode,
         capture_store,
     } = job;
+    let service_limits = attempt.service_limits().map_err(ExecuteError::Limits)?;
     if mode.execution_mode() != attempt.mode() {
         return Err(ExecuteError::ModeMismatch);
     }
@@ -662,20 +664,28 @@ where
             Planned::Replay(resolve_replay(&capture_store, &exchanges)?),
         ),
     };
-    let release = barrier
-        .take_unit_end()
+    let (invocation, release) = barrier
+        .prepare(&attempt)
         .map_err(|error| ExecuteError::Barrier(Box::new(error)))?;
     // The recheck comes last, so nothing but compilation separates it from
     // the start of the unit.
     let checked = recheck().map_err(ExecuteError::Recheck)?;
-    if checked.root_directory()
-        != &ActivatedRootDirectory::for_attempt(attempt.unit_name().attempt_component())
-    {
+    if !checked.matches_attempt(&attempt) {
         return Err(ExecuteError::RootIdentity);
     }
-    let inputs = TransientUnitLaunchInputs::new(checked, launcher_source, launch_mode, release);
+    let inputs = TransientUnitLaunchInputs::new(
+        checked,
+        attempt.launcher_source(),
+        launch_mode,
+        release,
+        invocation,
+    );
     Ok(Prepared {
-        request: TransientUnitRequest::compile(inputs, system_call_filter, &service_limits),
+        request: TransientUnitRequest::compile(
+            inputs,
+            attempt.system_call_filter(),
+            &service_limits,
+        ),
         watchdog: service_limits.watchdog(),
         attempt,
         planned,
@@ -705,31 +715,110 @@ fn bind_planned<C>(planned: Planned<C>) -> Bound<C> {
     }
 }
 
+/// How the supervision of a released attempt ended.
+#[derive(Clone, Copy)]
+enum Finish {
+    /// The cgroup was observed empty before the watchdog expired.
+    Empty,
+    /// The watchdog expired; `killed` is whether SIGKILL was acknowledged.
+    Watchdog { killed: bool },
+    /// The proxy session ended in a protocol failure and the unit was killed.
+    ProtocolFailure { killed: bool },
+}
+
+impl Finish {
+    const fn ending(self) -> AttemptEnding {
+        match self {
+            Self::Empty => AttemptEnding::CgroupEmpty,
+            Self::Watchdog { killed: true } => AttemptEnding::WatchdogKilled,
+            Self::Watchdog { killed: false } => AttemptEnding::WatchdogKillFailed,
+            Self::ProtocolFailure { killed: true } => AttemptEnding::ProtocolFailureKilled,
+            Self::ProtocolFailure { killed: false } => AttemptEnding::ProtocolFailureKillFailed,
+        }
+    }
+}
+
 /// Serve the Local proxy, if any, then observe the cgroup until it is empty or
-/// the watchdog expires. The flag is `true` when the cgroup was observed empty.
-async fn supervise<C, K>(
-    cgroup: &mut K,
+/// the watchdog expires. A watchdog expiry or a proxy protocol failure kills
+/// the unit; the network evidence is kept either way.
+async fn supervise<H, C>(
+    host: &H,
+    unit: &TransientServiceUnitName,
+    cgroup: &mut H::Cgroup,
     bound: Bound<C>,
     store: Arc<NetworkCaptureStore>,
-    deadline: Instant,
-) -> Result<(NetworkEvidence, bool), ExecuteError>
+    bounds: Bounds,
+) -> Result<(NetworkEvidence, Finish), ExecuteError>
 where
+    H: UnitHost + Sync,
     C: NetworkEndpointConnector + Send + 'static,
-    K: UnitCgroup + Send,
 {
     let evidence = match bound {
         Bound::None => NetworkEvidence::None,
         Bound::Replay(replayed) => NetworkEvidence::Replay(replayed),
-        Bound::Local(binding, connector) => NetworkEvidence::Local(
-            binding
-                .serve_until(connector, store, deadline)
-                .await
-                .map_err(ExecuteError::from)?,
-        ),
+        Bound::Local(binding, connector) => {
+            return serve_local(host, unit, cgroup, (*binding, connector), store, bounds).await;
+        }
     };
-    let expired = matches!(&evidence, NetworkEvidence::Local(served) if served.watchdog_expired);
-    let empty = !expired && wait_empty(cgroup, deadline).await?;
-    Ok((evidence, empty))
+    let finish = observe(host, unit, cgroup, bounds).await?;
+    Ok((evidence, finish))
+}
+
+/// Serve the Local proxy. At the watchdog the unit is killed while the proxy
+/// thread is still being joined, so a slow connector cannot delay the kill.
+async fn serve_local<H, C>(
+    host: &H,
+    unit: &TransientServiceUnitName,
+    cgroup: &mut H::Cgroup,
+    (binding, connector): (BoundLocalProxy, C),
+    store: Arc<NetworkCaptureStore>,
+    bounds: Bounds,
+) -> Result<(NetworkEvidence, Finish), ExecuteError>
+where
+    H: UnitHost + Sync,
+    C: NetworkEndpointConnector + Send + 'static,
+{
+    let (served, expired) = binding
+        .serve_until_or(
+            connector,
+            store,
+            bounds.deadline,
+            sigkill(host, unit, bounds.call),
+        )
+        .await;
+    let served = served.map_err(ExecuteError::from)?;
+    let protocol_failure =
+        served.session.termination() == Some(LocalNetworkTermination::ProtocolFailure);
+    let finish = match expired {
+        Some(killed) => {
+            // SIGKILL ran during the join; the rest follows in the usual order.
+            finish_kill(host, unit, Some(cgroup), bounds.call).await;
+            Finish::Watchdog { killed }
+        }
+        None if protocol_failure => Finish::ProtocolFailure {
+            killed: kill_everything(host, unit, Some(cgroup), bounds.call).await,
+        },
+        None => observe(host, unit, cgroup, bounds).await?,
+    };
+    Ok((NetworkEvidence::Local(served), finish))
+}
+
+/// Observe the cgroup until it is empty; kill the unit at the watchdog.
+async fn observe<H>(
+    host: &H,
+    unit: &TransientServiceUnitName,
+    cgroup: &mut H::Cgroup,
+    bounds: Bounds,
+) -> Result<Finish, ExecuteError>
+where
+    H: UnitHost + Sync,
+{
+    if wait_empty(cgroup, bounds.deadline).await? {
+        return Ok(Finish::Empty);
+    }
+    Ok(Finish::Watchdog {
+        killed: kill_everything(host, unit, Some(cgroup), bounds.call).await,
+    })
 }
 
 /// Poll until the cgroup is empty (`true`) or `deadline` passes (`false`).
@@ -772,9 +861,35 @@ where
     }
 }
 
-/// SIGKILL the unit, kill its cgroup when bound (a synchronous write that
-/// returns promptly), and stop its job, each host call bounded by `call`;
-/// `true` when SIGKILL was acknowledged.
+/// SIGKILL the unit, bounded by `call`; `true` when it was acknowledged.
+async fn sigkill<H>(host: &H, unit: &TransientServiceUnitName, call: Duration) -> bool
+where
+    H: UnitHost + Sync,
+{
+    within(call, async { host.kill(unit.clone()).await.is_ok() })
+        .await
+        .unwrap_or(false)
+}
+
+/// After SIGKILL: kill the cgroup when bound (a synchronous write that returns
+/// promptly, so a stalled manager cannot delay it), then stop the job, which
+/// replaces a queued start and is best effort because the kill covers it.
+async fn finish_kill<H>(
+    host: &H,
+    unit: &TransientServiceUnitName,
+    cgroup: Option<&mut H::Cgroup>,
+    call: Duration,
+) where
+    H: UnitHost + Sync,
+{
+    if let Some(cgroup) = cgroup {
+        cgroup.kill_all().ok();
+    }
+    within(call, async { host.stop(unit.clone()).await.ok() }).await;
+}
+
+/// SIGKILL the unit, kill its cgroup when bound, then stop its job, each host
+/// call bounded by `call`; `true` when SIGKILL was acknowledged.
 async fn kill_everything<H>(
     host: &H,
     unit: &TransientServiceUnitName,
@@ -784,15 +899,8 @@ async fn kill_everything<H>(
 where
     H: UnitHost + Sync,
 {
-    let killed = within(call, async { host.kill(unit.clone()).await.is_ok() })
-        .await
-        .unwrap_or(false);
-    if let Some(cgroup) = cgroup {
-        // The cgroup kill is belt and braces: the unit kill already covers it.
-        cgroup.kill_all().ok();
-    }
-    // Replacing a queued start job is best effort for the same reason.
-    within(call, async { host.stop(unit.clone()).await.ok() }).await;
+    let killed = sigkill(host, unit, call).await;
+    finish_kill(host, unit, cgroup, call).await;
     killed
 }
 

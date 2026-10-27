@@ -8,17 +8,16 @@ use std::{
         unix::net::UnixStream,
     },
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,
     },
     thread,
     time::Duration,
 };
 
-use pos_conformance::SandboxSyscallSetV1;
 use pos_reference::sandbox_provider_protocol::{
-    LocalNetworkTermination, NetworkCaptureStore, NetworkExchangePlan, NetworkExchangeReply,
-    NetworkExchangeRequest, SandboxArchitecture, SandboxExecutionMode, SandboxLimit,
+    LocalNetworkTermination, NetworkCapability, NetworkCaptureStore, NetworkExchangePlan,
+    NetworkExchangeReply, NetworkExchangeRequest, SandboxExecutionMode,
 };
 use zbus::OwnedFd;
 
@@ -27,13 +26,11 @@ use crate::test_fixtures::{
     authority, capability, capture_store, grant_authority, plan, remote, LoopbackConnector,
     TestResult, ATTEMPT, OTHER, REQUEST, RESPONSE,
 };
+use crate::ActivatedRootDirectory;
 use crate::{
     EstablishedNetwork, LocalProxyBindError, SystemdTransientUnitValue, TransientServiceUnitName,
 };
 
-const X86_64: &[u8] = include_bytes!(
-    "../../../../crates/pos-conformance/vectors/systemd-provider-v260.2/systemd-v260.2-x86_64.scs1.cbor"
-);
 const HOST_SERVICE: &str = "piglor-host-service-v1";
 const RELEASE: &str = "piglor-release-v1";
 const WORK: &str = "size=4096,nosuid,nodev,noexec";
@@ -88,18 +85,22 @@ enum Fault {
     HangStop,
 }
 
+type ExecCommands = Vec<(String, Vec<String>, bool)>;
+
 type Reply = Arc<Mutex<Option<Result<Vec<u8>, String>>>>;
 
 struct FakeHost {
     log: Log,
     faults: Vec<Fault>,
     observed: Arc<Mutex<Observed>>,
+    exec_start: Arc<Mutex<ExecCommands>>,
     adapter: AdapterScript,
     adapter_reply: Reply,
     held: Arc<Mutex<Vec<UnixStream>>>,
     empty_after: usize,
     polls: Arc<AtomicUsize>,
     cgroup_kills: Arc<AtomicUsize>,
+    killed: Arc<AtomicBool>,
 }
 
 impl FakeHost {
@@ -108,12 +109,14 @@ impl FakeHost {
             log: Arc::clone(log),
             faults: Vec::new(),
             observed: Arc::default(),
+            exec_start: Arc::default(),
             adapter: AdapterScript::None,
             adapter_reply: Arc::default(),
             held: Arc::default(),
             empty_after: 0,
             polls: Arc::default(),
             cgroup_kills: Arc::default(),
+            killed: Arc::default(),
         }
     }
 
@@ -128,6 +131,9 @@ impl FakeHost {
             .collect();
         if let Ok(mut slot) = self.observed.lock() {
             *slot = observed;
+        }
+        if let Ok(mut slot) = self.exec_start.lock() {
+            *slot = exec_start_of(request);
         }
         extra_descriptors(request)
             .iter()
@@ -202,6 +208,17 @@ fn absorb(observed: &mut Observed, value: &SystemdTransientUnitValue) {
     }
 }
 
+fn exec_start_of(request: &TransientUnitRequest) -> ExecCommands {
+    request
+        .requested_properties()
+        .iter()
+        .find_map(|property| match property.value() {
+            SystemdTransientUnitValue::ExecStart(commands) => Some(commands.clone()),
+            _other => None,
+        })
+        .unwrap_or_default()
+}
+
 fn extra_descriptors(request: &TransientUnitRequest) -> &[(OwnedFd, String)] {
     request
         .requested_properties()
@@ -216,6 +233,7 @@ fn extra_descriptors(request: &TransientUnitRequest) -> &[(OwnedFd, String)] {
 }
 
 struct FakeCgroup {
+    log: Log,
     polls: Arc<AtomicUsize>,
     kills: Arc<AtomicUsize>,
     empty_after: usize,
@@ -236,6 +254,7 @@ impl UnitCgroup for FakeCgroup {
     }
 
     fn kill_all(&mut self) -> Result<(), Injected> {
+        record(&self.log, "cgroup_kill");
         self.kills.fetch_add(1, Ordering::SeqCst);
         if self.fail_kill {
             Err(Injected)
@@ -288,6 +307,7 @@ impl UnitHost for FakeHost {
             Err(Injected)
         } else {
             Ok(FakeCgroup {
+                log: Arc::clone(&self.log),
                 polls: Arc::clone(&self.polls),
                 kills: Arc::clone(&self.cgroup_kills),
                 empty_after: self.empty_after,
@@ -319,6 +339,7 @@ impl UnitHost for FakeHost {
         _unit_name: TransientServiceUnitName,
     ) -> impl Future<Output = Result<(), Injected>> + Send {
         record(&self.log, "kill");
+        self.killed.store(true, Ordering::SeqCst);
         let outcome = if self.faulty(Fault::Kill) {
             Err(Injected)
         } else {
@@ -350,12 +371,19 @@ impl UnitKiller for FakeKiller {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BarrierFault {
+    None,
+    Take,
+    Invocation,
+    Release,
+    Hang,
+}
+
 struct FakeBarrier {
     log: Log,
     released: Arc<Mutex<Vec<(String, Instant)>>>,
-    fail_take: bool,
-    fail_release: bool,
-    hang_release: bool,
+    fault: BarrierFault,
 }
 
 impl FakeBarrier {
@@ -363,9 +391,7 @@ impl FakeBarrier {
         Self {
             log: Arc::clone(log),
             released: Arc::default(),
-            fail_take: false,
-            fail_release: false,
-            hang_release: false,
+            fault: BarrierFault::None,
         }
     }
 }
@@ -373,13 +399,20 @@ impl FakeBarrier {
 impl LaunchBarrier for FakeBarrier {
     type Error = Injected;
 
-    fn take_unit_end(&mut self) -> Result<OwnedFd, Injected> {
+    fn prepare(
+        &mut self,
+        _attempt: &AdmittedAttempt,
+    ) -> Result<(LauncherInvocation, OwnedFd), Injected> {
+        if self.fault == BarrierFault::Invocation {
+            return Err(Injected);
+        }
+        let invocation = crate::test_fixtures::invocation().map_err(|_| Injected)?;
         record(&self.log, "take_unit_end");
-        if self.fail_take {
+        if self.fault == BarrierFault::Take {
             return Err(Injected);
         }
         File::open("/dev/null")
-            .map(|file| OwnedFd::from(StdOwnedFd::from(file)))
+            .map(|file| (invocation, OwnedFd::from(StdOwnedFd::from(file))))
             .map_err(|_| Injected)
     }
 
@@ -391,12 +424,12 @@ impl LaunchBarrier for FakeBarrier {
         if let Ok(mut released) = self.released.lock() {
             released.push((attempt.unit_name().as_str().to_owned(), attempt.deadline()));
         }
-        let outcome = if self.fail_release {
+        let outcome = if self.fault == BarrierFault::Release {
             Err(Injected)
         } else {
             Ok(())
         };
-        let hang = self.hang_release;
+        let hang = self.fault == BarrierFault::Hang;
         async move {
             if hang {
                 std::future::pending::<()>().await;
@@ -492,48 +525,17 @@ impl LocalNetworkPort for TornDownNetwork {
     }
 }
 
-fn limits(watchdog_ms: u64) -> Vec<SandboxLimit> {
-    (0..=16)
-        .map(|limit_id| SandboxLimit {
-            limit_id,
-            value: match limit_id {
-                0 => 134_217_728,
-                1 => 0,
-                2 => 16,
-                3 => 500_000,
-                4 => watchdog_ms,
-                5 => 64,
-                6 | 9 => 4_096,
-                _ => 1_000,
-            },
-        })
-        .collect()
-}
-
 type Outcome = Result<AttemptExecution<String, FakeCgroup>, ExecuteFailure>;
-
-fn filter() -> TestResult<SystemCallFilter> {
-    let record = SandboxSyscallSetV1::from_canonical_cbor(X86_64)?;
-    Ok(SystemCallFilter::from_selected_record(
-        X86_64,
-        record.syscall_set_digest,
-        SandboxArchitecture::X86_64,
-    )?)
-}
 
 fn root_for(
     log: &Log,
-    attempt_id: [u8; 16],
+    attempt: &AdmittedAttempt,
 ) -> impl FnOnce() -> Result<CheckedRoot, ImageActivationError> + Send + use<> {
     let log = Arc::clone(log);
-    let component = TransientServiceUnitName::from_attempt_id(attempt_id)
-        .map(|name| name.attempt_component().to_owned())
-        .unwrap_or_default();
+    let attempt = attempt.clone();
     move || {
         record(&log, "recheck");
-        Ok(CheckedRoot::for_test(ActivatedRootDirectory::for_attempt(
-            &component,
-        )))
+        Ok(crate::test_fixtures::checked_root(&attempt))
     }
 }
 
@@ -599,10 +601,9 @@ impl Scenario {
         watchdog_ms: u64,
     ) -> TestResult<ExecuteJob> {
         Ok(ExecuteJob {
-            attempt: AdmittedAttempt::for_test(attempt_id, authority(), mode)?,
-            launcher_source: LauncherSource::new("/usr/lib/pigloros/release-launcher")?,
-            system_call_filter: filter()?,
-            service_limits: SystemdServiceLimits::from_effective_limits(&limits(watchdog_ms))?,
+            attempt: AdmittedAttempt::for_test(attempt_id, authority(), mode)?
+                .allowing(planned_capabilities(&plan))
+                .with_limits(crate::test_fixtures::execution_limits(watchdog_ms)),
             mode: plan,
             capture_store: Arc::clone(&self.store),
         })
@@ -624,7 +625,7 @@ impl Scenario {
         plan: ModePlan,
     ) -> TestResult<Outcome> {
         let job = self.job(attempt_id, mode, plan, GENEROUS_WATCHDOG_MS)?;
-        let recheck = root_for(&self.log, attempt_id);
+        let recheck = root_for(&self.log, &job.attempt);
         Ok(self.run_on(&LoopbackNetwork, job, recheck).await)
     }
 
@@ -639,7 +640,7 @@ impl Scenario {
         watchdog_ms: u64,
     ) -> TestResult<Outcome> {
         let job = self.job(ATTEMPT, mode, plan, watchdog_ms)?;
-        let recheck = root_for(&self.log, ATTEMPT);
+        let recheck = root_for(&self.log, &job.attempt);
         Ok(self.run_on(&LoopbackNetwork, job, recheck).await)
     }
 
@@ -655,6 +656,17 @@ impl Scenario {
 
     fn cgroup_kills(&self) -> usize {
         self.host.cgroup_kills.load(Ordering::SeqCst)
+    }
+}
+
+/// The endpoints a Local plan exchanges with, which the launch policy allows.
+fn planned_capabilities(plan: &ModePlan) -> Vec<NetworkCapability> {
+    match plan {
+        ModePlan::Local { admission } => admission
+            .exchanges()
+            .map(|(_, capability)| capability.clone())
+            .collect(),
+        ModePlan::AirGapped | ModePlan::Fork | ModePlan::Replay { .. } => Vec::new(),
     }
 }
 
@@ -823,6 +835,21 @@ async fn air_gapped_and_fork_attempts_get_only_the_release_descriptor() -> TestR
 }
 
 #[tokio::test]
+async fn the_unit_runs_the_launcher_in_launch_barrier_mode() -> TestResult {
+    let mut scenario = Scenario::new()?;
+    scenario.air_gapped().await??;
+    let commands = scenario
+        .host
+        .exec_start
+        .lock()
+        .map_err(|error| error.to_string())?
+        .clone();
+    assert_eq!(commands.len(), 1);
+    assert_eq!(commands[0].1[1], "launch-barrier");
+    Ok(())
+}
+
+#[tokio::test]
 async fn nothing_starts_when_the_plan_is_not_the_admitted_mode() -> TestResult {
     let mut scenario = Scenario::new()?;
     let outcome = scenario
@@ -856,11 +883,21 @@ async fn an_unavailable_replay_capture_stops_before_the_launcher() -> TestResult
 #[tokio::test]
 async fn the_barrier_must_hand_over_its_end_before_the_root_is_rechecked() -> TestResult {
     let mut scenario = Scenario::new()?;
-    scenario.barrier.fail_take = true;
+    scenario.barrier.fault = BarrierFault::Take;
     let failed = scenario.fails().await?;
     assert!(matches!(failed.error, ExecuteError::Barrier(_)));
     assert_eq!(failed.unit, UnitState::NotStarted);
     assert_eq!(scenario.entries(), ["take_unit_end"]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_unencodable_launch_never_reaches_the_recheck() -> TestResult {
+    let mut scenario = Scenario::new()?;
+    scenario.barrier.fault = BarrierFault::Invocation;
+    let failed = scenario.fails().await?;
+    assert!(matches!(failed.error, ExecuteError::Barrier(_)));
+    assert_eq!(failed.unit, UnitState::NotStarted);
     Ok(())
 }
 
@@ -894,10 +931,62 @@ async fn a_failed_root_recheck_never_starts_the_unit() -> TestResult {
 
 #[tokio::test]
 async fn a_root_of_another_attempt_never_starts_the_unit() -> TestResult {
-    let (scenario, failed) = recheck_failure(root_for(&Log::default(), OTHER)).await?;
+    let other = AdmittedAttempt::for_test(OTHER, authority(), SandboxExecutionMode::AirGapped)?;
+    let (scenario, failed) = recheck_failure(root_for(&Log::default(), &other)).await?;
     assert!(matches!(failed.error, ExecuteError::RootIdentity));
     assert_eq!(failed.unit, UnitState::NotStarted);
     assert!(!scenario.entries().iter().any(|entry| entry == "start"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_recheck_with_the_same_attempt_id_but_different_authority_never_starts() -> TestResult {
+    let mut changed = authority();
+    changed.policy_epoch += 1;
+    let other = AdmittedAttempt::for_test(ATTEMPT, changed, SandboxExecutionMode::AirGapped)?;
+    let (scenario, failed) = recheck_failure(root_for(&Log::default(), &other)).await?;
+    assert!(matches!(failed.error, ExecuteError::RootIdentity));
+    assert_eq!(failed.unit, UnitState::NotStarted);
+    assert!(!scenario.entries().iter().any(|entry| entry == "start"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn unenforceable_admitted_limits_fail_before_any_launch_side_effect() -> TestResult {
+    let mut scenario = Scenario::new()?;
+    let mut job = scenario.job(
+        ATTEMPT,
+        SandboxExecutionMode::AirGapped,
+        ModePlan::AirGapped,
+        GENEROUS_WATCHDOG_MS,
+    )?;
+    let mut limits = crate::test_fixtures::execution_limits(GENEROUS_WATCHDOG_MS);
+    limits[0].value = 0;
+    job.attempt = job.attempt.with_limits(limits);
+    let recheck = root_for(&scenario.log, &job.attempt);
+    let failed = failure(scenario.run_on(&LoopbackNetwork, job, recheck).await)?;
+    assert!(matches!(failed.error, ExecuteError::Limits(_)));
+    assert_eq!(failed.unit, UnitState::NotStarted);
+    assert!(scenario.entries().is_empty());
+    assert_eq!(scenario.cgroup_kills(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_same_ids_and_authority_cannot_substitute_limits_or_readback_policy() -> TestResult {
+    let same = AdmittedAttempt::for_test(ATTEMPT, authority(), SandboxExecutionMode::AirGapped)?
+        .with_limits(crate::test_fixtures::execution_limits(GENEROUS_WATCHDOG_MS));
+    let mut limits = crate::test_fixtures::execution_limits(GENEROUS_WATCHDOG_MS);
+    limits[9].value += 1;
+    for other in [
+        same.clone().with_limits(limits),
+        same.with_readback([0x79; 32]),
+    ] {
+        let (scenario, failed) = recheck_failure(root_for(&Log::default(), &other)).await?;
+        assert!(matches!(failed.error, ExecuteError::RootIdentity));
+        assert_eq!(failed.unit, UnitState::NotStarted);
+        assert!(!scenario.entries().iter().any(|entry| entry == "start"));
+    }
     Ok(())
 }
 
@@ -948,7 +1037,7 @@ async fn a_unit_whose_cgroup_cannot_be_bound_is_killed_before_release() -> TestR
 #[tokio::test]
 async fn a_barrier_that_never_answers_is_cut_off_at_the_deadline() -> TestResult {
     let mut scenario = Scenario::new()?;
-    scenario.barrier.hang_release = true;
+    scenario.barrier.fault = BarrierFault::Hang;
     let started = Instant::now();
     let run = scenario.run_watched(SandboxExecutionMode::AirGapped, ModePlan::AirGapped, 100);
     let outcome = tokio::time::timeout(Duration::from_secs(10), run).await??;
@@ -960,6 +1049,14 @@ async fn a_barrier_that_never_answers_is_cut_off_at_the_deadline() -> TestResult
     Ok(())
 }
 
+fn release_fault(refuse_release: bool) -> BarrierFault {
+    if refuse_release {
+        BarrierFault::Release
+    } else {
+        BarrierFault::None
+    }
+}
+
 /// Run an Air-Gapped attempt under a 100 ms watchdog with `faults`, optionally
 /// refusing the release so that the termination calls run.
 async fn timed_out(
@@ -968,7 +1065,7 @@ async fn timed_out(
 ) -> TestResult<(Scenario, ExecuteFailure)> {
     let mut scenario = Scenario::new()?;
     scenario.host.faults.extend_from_slice(faults);
-    scenario.barrier.fail_release = refuse_release;
+    scenario.barrier.fault = release_fault(refuse_release);
     let run = scenario.run_watched(SandboxExecutionMode::AirGapped, ModePlan::AirGapped, 100);
     let outcome = tokio::time::timeout(Duration::from_secs(10), run).await??;
     Ok((scenario, failure(outcome)?))
@@ -1006,7 +1103,11 @@ async fn a_kill_that_never_answers_is_reported_as_unacknowledged() -> TestResult
 async fn a_stop_that_never_answers_does_not_hold_the_failure() -> TestResult {
     let (scenario, failed) = timed_out(&[Fault::HangStop], true).await?;
     assert_eq!(failed.unit, UnitState::Killed);
-    assert!(scenario.entries().ends_with(&names(&["kill", "stop"])));
+    // The cgroup kill came before the stalled stop, so the stop cannot delay it.
+    assert!(scenario
+        .entries()
+        .ends_with(&names(&["kill", "cgroup_kill", "stop"])));
+    assert_eq!(scenario.cgroup_kills(), 1);
     Ok(())
 }
 
@@ -1024,15 +1125,31 @@ async fn logged(log: &Log, entry: &str) -> bool {
 #[tokio::test]
 async fn a_dropped_execution_kills_the_submitted_unit() -> TestResult {
     let mut scenario = Scenario::new()?;
-    scenario.barrier.hang_release = true;
+    scenario.barrier.fault = BarrierFault::Hang;
     let log = Arc::clone(&scenario.log);
-    let run = scenario.run(SandboxExecutionMode::AirGapped, ModePlan::AirGapped);
-    // The caller gives up while the barrier is still waiting.
-    assert!(tokio::time::timeout(Duration::from_millis(200), run)
-        .await
-        .is_err());
+    {
+        let run = scenario.run(SandboxExecutionMode::AirGapped, ModePlan::AirGapped);
+        let mut run = std::pin::pin!(run);
+        // The caller gives up while the barrier is still waiting: poll the
+        // execution until it reached the barrier, then drop it unfinished.
+        for _ in 0..50 {
+            let done = std::future::poll_fn(|context| {
+                std::task::Poll::Ready(run.as_mut().poll(context).is_ready())
+            })
+            .await;
+            assert!(!done);
+            tokio::task::yield_now().await;
+        }
+    }
     assert!(logged(&log, "guard_kill").await);
     Ok(())
+}
+
+/// Let every task the current-thread runtime has queued run.
+async fn settle() {
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
 }
 
 fn guard_kills(scenario: &Scenario) -> bool {
@@ -1043,7 +1160,7 @@ fn guard_kills(scenario: &Scenario) -> bool {
 async fn a_finished_execution_leaves_nothing_for_the_guard() -> TestResult {
     let mut scenario = Scenario::new()?;
     scenario.air_gapped().await??;
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    settle().await;
     assert!(!guard_kills(&scenario));
     Ok(())
 }
@@ -1051,9 +1168,9 @@ async fn a_finished_execution_leaves_nothing_for_the_guard() -> TestResult {
 #[tokio::test]
 async fn a_refused_execution_leaves_nothing_for_the_guard() -> TestResult {
     let mut refused = Scenario::new()?;
-    refused.barrier.fail_release = true;
+    refused.barrier.fault = BarrierFault::Release;
     refused.fails().await?;
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    settle().await;
     assert!(!guard_kills(&refused));
     Ok(())
 }
@@ -1077,7 +1194,7 @@ fn a_guard_dropped_outside_a_runtime_spawns_nothing() -> TestResult {
 #[tokio::test]
 async fn a_refused_release_kills_the_unit_and_its_cgroup() -> TestResult {
     let mut scenario = Scenario::new()?;
-    scenario.barrier.fail_release = true;
+    scenario.barrier.fault = BarrierFault::Release;
     let failed = scenario.fails().await?;
     assert!(matches!(failed.error, ExecuteError::Barrier(_)));
     assert_eq!(failed.unit, UnitState::Killed);
@@ -1090,6 +1207,7 @@ async fn a_refused_release_kills_the_unit_and_its_cgroup() -> TestResult {
             "bind_cgroup",
             "release",
             "kill",
+            "cgroup_kill",
             "stop"
         ]
     );
@@ -1119,7 +1237,7 @@ async fn local_failure<N: LocalNetworkPort + Sync>(
         mode,
         GENEROUS_WATCHDOG_MS,
     )?;
-    let recheck = root_for(&scenario.log, ATTEMPT);
+    let recheck = root_for(&scenario.log, &job.attempt);
     let outcome = scenario.run_on(network, job, recheck).await;
     Ok((scenario, failure(outcome)?))
 }
@@ -1176,15 +1294,18 @@ async fn teardowns(
         mode,
         GENEROUS_WATCHDOG_MS,
     )?;
-    let recheck = root_for(&scenario.log, ATTEMPT);
+    let recheck = root_for(&scenario.log, &job.attempt);
     let outcome = scenario.run_on(&network, job, recheck).await;
     Ok((torn_down.load(Ordering::SeqCst), failure(outcome)?))
 }
 
 #[tokio::test]
 async fn the_namespace_is_torn_down_when_the_unit_end_cannot_be_taken() -> TestResult {
-    let (torn_down, failed) =
-        teardowns(|scenario| scenario.barrier.fail_take = true, ATTEMPT).await?;
+    let (torn_down, failed) = teardowns(
+        |scenario| scenario.barrier.fault = BarrierFault::Take,
+        ATTEMPT,
+    )
+    .await?;
     assert!(matches!(failed.error, ExecuteError::Barrier(_)));
     assert_eq!(failed.unit, UnitState::NotStarted);
     assert_eq!(torn_down, 1);
@@ -1220,8 +1341,11 @@ async fn the_namespace_is_torn_down_when_the_recheck_fails() -> TestResult {
 
 #[tokio::test]
 async fn the_namespace_is_torn_down_when_the_release_is_refused() -> TestResult {
-    let (torn_down, failed) =
-        teardowns(|scenario| scenario.barrier.fail_release = true, ATTEMPT).await?;
+    let (torn_down, failed) = teardowns(
+        |scenario| scenario.barrier.fault = BarrierFault::Release,
+        ATTEMPT,
+    )
+    .await?;
     assert!(matches!(failed.error, ExecuteError::Barrier(_)));
     assert_eq!(failed.unit, UnitState::Killed);
     assert_eq!(torn_down, 1);
@@ -1235,7 +1359,7 @@ async fn an_unreadable_cgroup_terminates_the_unit() -> TestResult {
     assert_eq!(failed.unit, UnitState::Killed);
     assert!(scenario
         .entries()
-        .ends_with(&names(&["release", "kill", "stop"])));
+        .ends_with(&names(&["release", "kill", "cgroup_kill", "stop"])));
     Ok(())
 }
 
@@ -1258,7 +1382,7 @@ async fn the_watchdog_kills_an_attempt_that_never_empties() -> TestResult {
     assert_eq!(execution.ending, AttemptEnding::WatchdogKilled);
     assert!(scenario
         .entries()
-        .ends_with(&names(&["release", "kill", "stop"])));
+        .ends_with(&names(&["release", "kill", "cgroup_kill", "stop"])));
     assert_eq!(scenario.cgroup_kills(), 1);
     Ok(())
 }
@@ -1294,7 +1418,7 @@ async fn the_watchdog_closes_a_silent_fd3_and_kills_the_unit() -> TestResult {
     assert!(execution.network.transcript_digests().is_empty());
     assert!(scenario
         .entries()
-        .ends_with(&names(&["release", "kill", "stop"])));
+        .ends_with(&names(&["release", "kill", "cgroup_kill", "stop"])));
     Ok(())
 }
 
@@ -1324,18 +1448,112 @@ impl LocalNetworkPort for PanickingNetwork {
     }
 }
 
-#[tokio::test]
-async fn a_protocol_violation_on_fd3_is_reported_for_classification() -> TestResult {
+async fn protocol_violation(
+    faults: &[Fault],
+) -> TestResult<(Scenario, AttemptExecution<String, FakeCgroup>)> {
     let (_, mode) = local_plan(UNUSED_ENDPOINT)?;
     let mut scenario = Scenario::new()?;
     scenario.host.adapter = AdapterScript::ProtocolViolation;
+    scenario.host.faults.extend_from_slice(faults);
     let execution = scenario.run(SandboxExecutionMode::Local, mode).await??;
-    assert_eq!(execution.ending, AttemptEnding::CgroupEmpty);
+    Ok((scenario, execution))
+}
+
+#[tokio::test]
+async fn a_protocol_violation_on_fd3_kills_the_unit_and_keeps_the_evidence() -> TestResult {
+    let (scenario, execution) = protocol_violation(&[]).await?;
+    assert_eq!(execution.ending, AttemptEnding::ProtocolFailureKilled);
     assert_eq!(
         execution.network.termination(),
         Some(LocalNetworkTermination::ProtocolFailure)
     );
     assert!(execution.network.transcript_digests().is_empty());
+    assert!(scenario
+        .entries()
+        .ends_with(&names(&["release", "kill", "cgroup_kill", "stop"])));
+    assert_eq!(scenario.cgroup_kills(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_unacknowledged_kill_after_a_protocol_violation_is_reported() -> TestResult {
+    let (_scenario, execution) = protocol_violation(&[Fault::Kill]).await?;
+    assert_eq!(execution.ending, AttemptEnding::ProtocolFailureKillFailed);
+    assert_eq!(
+        execution.network.termination(),
+        Some(LocalNetworkTermination::ProtocolFailure)
+    );
+    Ok(())
+}
+
+/// Connects only once the unit kill was issued, like a connector that hangs.
+struct KillAwareConnector {
+    killed: Arc<AtomicBool>,
+    saw_kill: Arc<AtomicBool>,
+}
+
+impl pos_reference::sandbox_provider_protocol::NetworkEndpointConnector for KillAwareConnector {
+    fn connect(
+        &mut self,
+        _endpoint: std::net::SocketAddr,
+        _timeout: Duration,
+    ) -> std::io::Result<std::net::TcpStream> {
+        for _ in 0..1_000 {
+            if self.killed.load(Ordering::SeqCst) {
+                self.saw_kill.store(true, Ordering::SeqCst);
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        Err(std::io::ErrorKind::ConnectionRefused.into())
+    }
+}
+
+struct KillAwareNetwork {
+    killed: Arc<AtomicBool>,
+    saw_kill: Arc<AtomicBool>,
+}
+
+impl LocalNetworkPort for KillAwareNetwork {
+    type Connector = KillAwareConnector;
+    type Error = Injected;
+
+    fn establish(
+        &self,
+        attempt_id: [u8; 16],
+    ) -> Result<EstablishedNetwork<KillAwareConnector>, Injected> {
+        Ok(EstablishedNetwork::new(
+            attempt_id,
+            KillAwareConnector {
+                killed: Arc::clone(&self.killed),
+                saw_kill: Arc::clone(&self.saw_kill),
+            },
+        ))
+    }
+}
+
+#[tokio::test]
+async fn the_unit_is_killed_while_a_slow_connector_is_still_being_joined() -> TestResult {
+    let (plan, mode) = local_plan(UNUSED_ENDPOINT)?;
+    let mut scenario = Scenario::new()?;
+    scenario.host.adapter = AdapterScript::Exchange(plan);
+    let network = KillAwareNetwork {
+        killed: Arc::clone(&scenario.host.killed),
+        saw_kill: Arc::default(),
+    };
+    let job = scenario.job(ATTEMPT, SandboxExecutionMode::Local, mode, 200)?;
+    let recheck = root_for(&scenario.log, &job.attempt);
+    let started = Instant::now();
+    let execution = scenario
+        .run_on(&network, job, recheck)
+        .await
+        .map_err(|failed| failed.error)?;
+    // A kill that waited for the join would never have been seen by the
+    // connector, which gives up after five seconds.
+    assert!(network.saw_kill.load(Ordering::SeqCst));
+    assert!(started.elapsed() < Duration::from_secs(4));
+    assert_eq!(execution.ending, AttemptEnding::WatchdogKilled);
+    assert_eq!(scenario.cgroup_kills(), 1);
     Ok(())
 }
 
@@ -1350,7 +1568,7 @@ async fn a_failed_proxy_task_terminates_the_unit() -> TestResult {
         mode,
         GENEROUS_WATCHDOG_MS,
     )?;
-    let recheck = root_for(&scenario.log, ATTEMPT);
+    let recheck = root_for(&scenario.log, &job.attempt);
     let outcome = scenario.run_on(&PanickingNetwork, job, recheck).await;
     let failed = failure(outcome)?;
     assert!(matches!(failed.error, ExecuteError::Serve(_)));

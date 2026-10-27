@@ -9,13 +9,13 @@ use std::{
 };
 
 use pos_reference::sandbox_provider_protocol::{
-    AdmissionAuthority, NetworkCaptureStore, NetworkEndpointConnector, NetworkExchangePlan,
-    NetworkExchangeReply, NetworkExchangeRequest,
+    AdmissionAuthority, NetworkCapability, NetworkCaptureStore, NetworkEndpointConnector,
+    NetworkExchangePlan, NetworkExchangeReply, NetworkExchangeRequest,
 };
 
 use super::*;
 use crate::test_fixtures::{
-    admission, admitted, bound_proxy, capture_store, grant_authority, plan, remote,
+    admission, admitted, bound_proxy, capability, capture_store, grant_authority, plan, remote,
     LoopbackConnector, TestResult, ATTEMPT, OTHER, REQUEST, RESPONSE,
 };
 
@@ -27,7 +27,8 @@ fn bind(
     channel: [u8; 16],
 ) -> TestResult<Result<(BoundLocalProxy, RefusingConnector), LocalProxyBindError>> {
     let (_adapter, channel) = HostServiceChannel::pair(channel)?;
-    Ok(admitted()?
+    let admitted = admitted()?;
+    Ok(admitted
         .check_local(
             admission(attempt, authority, epochs, Vec::new()),
             FailClosedLocalNetwork.establish(namespace)?,
@@ -80,6 +81,101 @@ fn a_grant_with_other_digests_is_refused() -> TestResult {
             Some(LocalProxyBindError::Authority)
         );
     }
+    Ok(())
+}
+
+/// Check `admission` against the fixture attempt, which allows `allowed`.
+fn refusal_with(
+    admission: LocalNetworkAdmission,
+    allowed: Vec<NetworkCapability>,
+) -> TestResult<Option<LocalProxyBindError>> {
+    let (_adapter, channel) = HostServiceChannel::pair(ATTEMPT)?;
+    let admitted = admitted()?.allowing(allowed);
+    Ok(admitted
+        .check_local(
+            admission,
+            FailClosedLocalNetwork.establish(ATTEMPT)?,
+            channel,
+        )
+        .err())
+}
+
+fn matching_admission() -> LocalNetworkAdmission {
+    admission(ATTEMPT, grant_authority(), EPOCHS, Vec::new())
+}
+
+#[test]
+fn a_grant_for_another_request_is_refused() -> TestResult {
+    let other = matching_admission().with_request_id([0xee; 16]);
+    assert_eq!(
+        refusal_with(other, Vec::new())?,
+        Some(LocalProxyBindError::Request)
+    );
+    Ok(())
+}
+
+#[test]
+fn a_grant_expecting_another_launch_policy_is_refused() -> TestResult {
+    let other = matching_admission().with_expected_launch_policy_digest([0xee; 32]);
+    assert_eq!(
+        refusal_with(other, Vec::new())?,
+        Some(LocalProxyBindError::LaunchPolicy)
+    );
+    Ok(())
+}
+
+#[test]
+fn every_authority_digest_of_the_grant_must_match_the_request() -> TestResult {
+    let mutations: [fn(&mut AdmissionAuthority); 9] = [
+        |authority| authority.evr1_digest = [0xee; 32],
+        |authority| authority.fixture_contract_digest = [0xee; 32],
+        |authority| authority.fixture_digest = [0xee; 32],
+        |authority| authority.execution_profile_digest = [0xee; 32],
+        |authority| authority.lps1_digest = [0xee; 32],
+        |authority| authority.spm1_digest = [0xee; 32],
+        |authority| authority.pcf1_digest = [0xee; 32],
+        |authority| authority.pcr1_digest = [0xee; 32],
+        |authority| authority.hcp1_digest = [0xee; 32],
+    ];
+    for mutate in mutations {
+        let mut authority = grant_authority();
+        mutate(&mut authority);
+        let other = admission(ATTEMPT, authority, EPOCHS, Vec::new());
+        assert_eq!(
+            refusal_with(other, Vec::new())?,
+            Some(LocalProxyBindError::Authority)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn an_endpoint_the_launch_policy_does_not_allow_is_refused() -> TestResult {
+    let planned = admission(
+        ATTEMPT,
+        grant_authority(),
+        EPOCHS,
+        vec![(plan()?, capability(UNUSED_ENDPOINT))],
+    );
+    assert_eq!(
+        refusal_with(planned, Vec::new())?,
+        Some(LocalProxyBindError::Capability)
+    );
+    Ok(())
+}
+
+#[test]
+fn an_endpoint_the_launch_policy_allows_is_accepted() -> TestResult {
+    let planned = admission(
+        ATTEMPT,
+        grant_authority(),
+        EPOCHS,
+        vec![(plan()?, capability(UNUSED_ENDPOINT))],
+    );
+    assert_eq!(
+        refusal_with(planned, vec![capability(UNUSED_ENDPOINT)])?,
+        None
+    );
     Ok(())
 }
 
@@ -292,6 +388,20 @@ async fn dropping_the_serving_future_closes_the_channel() -> TestResult {
     let mut byte = [0_u8; 1];
     assert_eq!(adapter.read(&mut byte)?, 0);
     Ok(())
+}
+
+/// Ready only after it was polled `polls` times.
+async fn after_polls(polls: usize, output: u8) -> u8 {
+    for _ in 0..polls {
+        tokio::task::yield_now().await;
+    }
+    output
+}
+
+#[tokio::test]
+async fn both_futures_finish_whichever_is_slower() {
+    assert_eq!(both(after_polls(3, 1), after_polls(0, 2)).await, (1, 2));
+    assert_eq!(both(after_polls(0, 1), after_polls(3, 2)).await, (1, 2));
 }
 
 struct PanickingConnector;

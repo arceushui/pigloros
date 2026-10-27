@@ -43,9 +43,9 @@ use self::{
     verify::Expected,
 };
 use crate::{
-    ActivatedRootDirectory, ActivationImage, AdmittedEntry, CheckedRoot, ImageActivationError,
-    ImageActivator, MountfsdImageActivator, PreparedAttemptDirectory, QuarantinedRootMount,
-    StagingError,
+    ActivatedRootDirectory, ActivationImage, AdmittedAttempt, AdmittedEntry, CheckedRoot,
+    ImageActivationError, ImageActivator, MountfsdImageActivator, PreparedAttemptDirectory,
+    QuarantinedRootMount, StagingError,
 };
 
 /// The kernel operations of one attachment.
@@ -121,15 +121,25 @@ impl VerifiedRootMount {
         directory: &PreparedAttemptDirectory,
         entry: &AdmittedEntry<'_>,
     ) -> Result<CheckedRoot, ImageActivationError> {
+        self.recheck_with(&HostKernel::system(), directory, entry)
+    }
+
+    fn recheck_with(
+        &self,
+        kernel: &impl AttachmentKernel,
+        directory: &PreparedAttemptDirectory,
+        entry: &AdmittedEntry<'_>,
+    ) -> Result<CheckedRoot, ImageActivationError> {
         let activated =
-            Expected::for_admission(entry.admission(), self.expected.root_directory.clone());
-        recheck(
-            &HostKernel::system(),
-            self,
-            directory,
-            activated.as_ref(),
-            || entry.recheck(),
-        )
+            Expected::for_admission(&entry.admission(), self.expected.root_directory.clone());
+        AdmittedAttempt::from_entry(entry, directory)
+            .map_err(|_| ImageActivationError::EvidenceMismatch)
+            .and_then(|admitted| {
+                recheck(kernel, self, directory, activated.as_ref(), || {
+                    entry.recheck()
+                })
+                .map(|root| CheckedRoot::rechecked(root, admitted))
+            })
     }
 }
 
@@ -145,7 +155,7 @@ fn recheck<K: AttachmentKernel>(
     directory: &PreparedAttemptDirectory,
     activated: Option<&Expected>,
     authority: impl FnOnce() -> Result<(), StagingError>,
-) -> Result<CheckedRoot, ImageActivationError> {
+) -> Result<ActivatedRootDirectory, ImageActivationError> {
     let (attempt, held_root) = directory.held_directories();
     binds(&root.expected, activated)
         .then_some(())
@@ -161,7 +171,7 @@ fn recheck<K: AttachmentKernel>(
         })
         .and_then(|mount_id| {
             (mount_id == root.mount_id)
-                .then(|| CheckedRoot::rechecked(root.expected.root_directory.clone()))
+                .then(|| root.expected.root_directory.clone())
                 .ok_or(ImageActivationError::EvidenceMismatch)
         })
 }

@@ -25,6 +25,8 @@ const INSTALLATION_PARENT: &str = "/var/lib/pigloros";
 #[derive(Debug)]
 pub struct StagedInstallation {
     request: Vec<u8>,
+    evaluation: Vec<u8>,
+    input: Vec<u8>,
     parent: (u64, u64),
 }
 
@@ -35,6 +37,18 @@ impl StagedInstallation {
     /// Fails when the fixed installation parent already exists, so a host
     /// installation is never adopted or replaced, and on any write failure.
     pub fn stage() -> Result<Self, Box<dyn Error>> {
+        Self::stage_with_source(false)
+    }
+
+    /// Stage a complete authenticated EVR1/CFB1/TPS1 source and canonical input.
+    ///
+    /// # Errors
+    /// Refuses an existing fixed installation and invalid fixture material.
+    pub fn stage_execution() -> Result<Self, Box<dyn Error>> {
+        Self::stage_with_source(true)
+    }
+
+    fn stage_with_source(execution: bool) -> Result<Self, Box<dyn Error>> {
         let parent = Path::new(INSTALLATION_PARENT);
         if parent.exists() {
             return Err("the fixed installation parent already exists".into());
@@ -43,13 +57,45 @@ impl StagedInstallation {
         let metadata = fs::symlink_metadata(parent)?;
         let mut staged = Self {
             request: Vec::new(),
+            evaluation: Vec::new(),
+            input: Vec::new(),
             parent: (metadata.dev(), metadata.ino()),
         };
         fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
         fs::create_dir(SANDBOX_ARTIFACT_ROOT)?;
         fs::set_permissions(SANDBOX_ARTIFACT_ROOT, fs::Permissions::from_mode(0o700))?;
-        let admitted = materialize_state(Path::new(SANDBOX_ARTIFACT_ROOT), admitted_state()?)?;
-        staged.request = request_for(&admitted)?;
+        if execution {
+            let corpus = crate::selector_test_support::air_gapped_corpus()?;
+            let (evaluation, state) = crate::selector::installation::fixture::execution_state(
+                admitted_state()?,
+                &corpus,
+            )?;
+            let admitted = materialize_state(Path::new(SANDBOX_ARTIFACT_ROOT), state)?;
+            let resolved = admitted
+                .bootstrap()
+                .resolve_installed_case(&evaluation, 0)?;
+            crate::adapter_transport::write_attempt(&mut staged.input, resolved.attempt())?;
+            let mut hasher = blake3::Hasher::new();
+            hasher.update(b"PiglorOS.SandboxInputBytes.v1\0");
+            hasher.update(&staged.input);
+            let input = PayloadDescriptor {
+                byte_length: staged.input.len() as u64,
+                digest: *hasher.finalize().as_bytes(),
+            };
+            let request = crate::selector_protocol::execute_request_for_case(
+                &admitted,
+                &evaluation,
+                &resolved,
+                input,
+                0,
+                [2; 16],
+            )?;
+            staged.request = request.to_canonical_cbor()?;
+            staged.evaluation = evaluation.to_canonical_cbor()?;
+        } else {
+            let admitted = materialize_state(Path::new(SANDBOX_ARTIFACT_ROOT), admitted_state()?)?;
+            staged.request = request_for(&admitted)?;
+        }
         Ok(staged)
     }
 
@@ -57,6 +103,117 @@ impl StagedInstallation {
     #[must_use]
     pub const fn request(&self) -> &[u8] {
         self.request.as_slice()
+    }
+    /// Canonical EVR1 for the complete execution fixture.
+    #[must_use]
+    pub fn evaluation(&self) -> &[u8] {
+        &self.evaluation
+    }
+
+    /// Exact canonical EAI1..EIE1 input for this selected case.
+    #[must_use]
+    pub fn input(&self) -> &[u8] {
+        &self.input
+    }
+
+    /// Encode a self-consistent but deliberately substituted SPX1 for refusal tests.
+    ///
+    /// # Errors
+    /// Rejects a mutation that violates the record codec itself.
+    pub fn changed_request(
+        &self,
+        change: impl FnOnce(&mut SandboxExecuteRequest),
+    ) -> Result<Vec<u8>, Box<dyn Error>> {
+        let mut request = SandboxExecuteRequest::from_canonical_cbor(&self.request)?;
+        change(&mut request);
+        Ok(SandboxExecuteRequest::for_selector(
+            request.request,
+            request.attempt_id,
+            request.authority,
+            request.capability_ids,
+            request.adapter_input,
+            request.network_plans,
+        )?
+        .to_canonical_cbor()?)
+    }
+
+    /// Bind a changed, internally valid EAI1 case under the original fixture identity.
+    ///
+    /// This produces adversarial source bytes, never an admitted policy.
+    ///
+    /// # Errors
+    /// Rejects a malformed changed case or record.
+    pub fn changed_case_request(
+        &self,
+        change: impl FnOnce(&mut crate::evaluator::CaseAttempt),
+    ) -> Result<Vec<u8>, Box<dyn Error>> {
+        let mut attempt = crate::adapter_transport::read_attempt(self.input.as_slice())?;
+        change(&mut attempt);
+        let mut input = Vec::new();
+        crate::adapter_transport::write_attempt(&mut input, &attempt)?;
+        let mut hash = blake3::Hasher::new();
+        hash.update(b"PiglorOS.SandboxInputBytes.v1\0");
+        hash.update(&input);
+        self.changed_request(|request| {
+            request.adapter_input = PayloadDescriptor {
+                byte_length: input.len() as u64,
+                digest: *hash.finalize().as_bytes(),
+            }
+        })
+    }
+
+    /// Write the two initial length-prefixed source records.
+    ///
+    /// # Errors
+    /// Returns framing or stream I/O errors.
+    pub fn write_source(&self, writer: &mut impl std::io::Write) -> std::io::Result<()> {
+        for record in [&self.evaluation, &self.request] {
+            fixture_frame(writer, record)?;
+        }
+        Ok(())
+    }
+
+    /// Write exact SPX1-bound input chunks after the provider issued AGR1.
+    ///
+    /// # Errors
+    /// Returns a malformed fixture or stream I/O failure.
+    pub fn write_input(&self, writer: &mut impl std::io::Write) -> Result<(), Box<dyn Error>> {
+        use crate::evaluator_protocol::encode;
+        use ciborium::value::Value;
+        let request = SandboxExecuteRequest::from_canonical_cbor(&self.request)?;
+        for (index, bytes) in self.input.chunks(1024 * 1024).enumerate() {
+            let unsigned = Value::Array(vec![
+                Value::Text("SBC1".to_owned()),
+                Value::Integer(1.into()),
+                Value::Bytes(request.request_digest.to_vec()),
+                Value::Bytes(request.request.request_id.to_vec()),
+                Value::Bytes(request.attempt_id.to_vec()),
+                Value::Integer(0.into()),
+                Value::Integer((index as u64).into()),
+                Value::Integer(((index * 1024 * 1024) as u64).into()),
+                Value::Bytes(bytes.to_vec()),
+            ]);
+            let mut hash = blake3::Hasher::new();
+            hash.update(b"PiglorOS.SBC1.v1\0");
+            hash.update(&encode(&unsigned)?);
+            fixture_frame(
+                writer,
+                &encode(&Value::Array(vec![
+                    unsigned,
+                    Value::Bytes(hash.finalize().as_bytes().to_vec()),
+                ]))?,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// The installed test runtime signer, used only inside disposable fixtures.
+    #[must_use]
+    pub fn sign_grant(message: &[u8]) -> [u8; 64] {
+        use ed25519_dalek::Signer as _;
+        ed25519_dalek::SigningKey::from_bytes(&[4; 32])
+            .sign(message)
+            .to_bytes()
     }
 }
 
@@ -127,4 +284,10 @@ fn request_for(admitted: &AdmittedSelectorProvider) -> Result<Vec<u8>, Box<dyn E
         Vec::new(),
     )?;
     Ok(request.to_canonical_cbor()?)
+}
+
+fn fixture_frame(writer: &mut impl std::io::Write, bytes: &[u8]) -> std::io::Result<()> {
+    let length = u32::try_from(bytes.len()).map_err(std::io::Error::other)?;
+    writer.write_all(&length.to_be_bytes())?;
+    writer.write_all(bytes)
 }
