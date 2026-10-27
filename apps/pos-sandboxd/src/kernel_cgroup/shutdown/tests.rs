@@ -116,8 +116,9 @@ impl Host {
             Action::RemoveKill => fs::remove_file(self.directory.join("cgroup.kill")),
             Action::LateEmpty => {
                 // Model the controller being descheduled across its deadlines.
+                fs::write(self.directory.join("cgroup.events"), b"populated 0\n")?;
                 tokio::time::advance(Duration::from_millis(500)).await;
-                fs::write(self.directory.join("cgroup.events"), b"populated 0\n")
+                Ok(())
             }
         }
     }
@@ -355,7 +356,8 @@ async fn invalid_or_expired_phase_budgets_issue_no_commands() -> TestResult {
     let mut fixture = Fixture::new(8)?;
     let host = fixture.host(Action::Empty, Action::Empty);
     let limits = deadlines()?;
-    sleep(Duration::from_millis(100)).await;
+    tokio::time::advance(Duration::from_millis(100)).await;
+    assert_eq!(Instant::now(), limits.grace);
     assert!(fixture.bound.stop_processes(&host, limits).await.is_err());
     assert!(host.calls()?.is_empty());
     assert_eq!(fs::read(fixture.directory.join("cgroup.kill"))?, b"0");

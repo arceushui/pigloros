@@ -109,9 +109,6 @@ impl BoundAttemptCgroup {
         &mut self,
         deadline: Instant,
     ) -> Result<AttemptCgroupEmptyObservation, AttemptShutdownError> {
-        if Instant::now() >= deadline {
-            return Err(AttemptShutdownError::DeadlineElapsed);
-        }
         let observed = self.observe_empty().map_err(AttemptShutdownError::Cgroup);
         // Synchronous kernel reads must also finish within the original budget.
         if Instant::now() >= deadline {
