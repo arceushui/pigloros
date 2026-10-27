@@ -10,9 +10,8 @@
 use std::time::Duration;
 
 use pos_core::{
-    CanonicalBytes, CoreError, CorrelationId, CounterfactualDependencyErrorV1, EntityId, Event,
-    EventDraft, EventId, FactualDependencyErrorV1, Hash, Kind, PipelineAttemptIdV1,
-    PipelineOutcomeV1, SchemaVersion,
+    CanonicalBytes, CoreError, CorrelationId, EntityId, Event, EventDraft, EventId, Hash, Kind,
+    PipelineAttemptIdV1, PipelineOutcomeV1, SchemaVersion,
 };
 use pos_plugin_supervisor::pass_harness::{initial, LostPort, StoreKind, World};
 use pos_plugin_supervisor::test_support::{self, err, ok};
@@ -199,7 +198,12 @@ const fn failure(
 ///
 /// Returns the pass error, so a caller can inspect what the real pass raised.
 fn check_failure(failure: &Failure) -> RuntimeError {
-    let mut world = new_world();
+    check_failure_on(StoreKind::Memory, failure)
+}
+
+/// [`check_failure()`] over a world on `kind`.
+fn check_failure_on(kind: StoreKind, failure: &Failure) -> RuntimeError {
+    let mut world = World::on(kind, PROBE);
     let alpha = world.add("alpha", "community.alpha", b"draft:community.alpha", PROMPT);
     let beta = world.add(
         "beta",
@@ -282,52 +286,24 @@ fn an_invalid_output_discards_the_pass_and_only_marks_that_plugin() {
     }
 }
 
-/// An unknown guest digest is refused at admission, not by the adapter: it
-/// is the host's typed, deterministic result and marks no Plugin (D22-A).
+/// ADR-061 r10 4.1 (revision 7 vector R7-F4): under the V1 profile a draft's
+/// dependency digests are the guest's `UnsupportedSchema`, raised before
+/// admission. The pass is discarded and only that Plugin is marked.
 #[test]
-fn an_unknown_dependency_digest_is_not_admitted_and_marks_no_plugin() {
-    let mut world = new_world();
-    let alpha = world.add("alpha", "community.alpha", b"draft:community.alpha", PROMPT);
-    let beta = world.add("beta", "community.beta", b"deps:community.beta", PROMPT);
-    let raised = err(world.pass());
-    assert!(matches!(
-        raised,
-        RuntimeError::DependencyDeclaration(FactualDependencyErrorV1::UnresolvedInput)
-    ));
-    assert_eq!(
-        classify_pass_failure(&raised),
-        PassFailureV1::Host(NOT_ADMITTED)
-    );
-    // The whole pass is discarded: no Event, no state, no quarantine.
-    assert!(world.events().is_empty());
-    for handle in [&alpha, &beta] {
-        assert_eq!(handle.committed_state(), initial());
-        assert_eq!(handle.last_failure(), None);
-        assert_eq!(handle.availability(), PluginAvailabilityV1::Available);
+fn a_drafts_dependency_digests_are_the_guests_unsupported_schema() {
+    for kind in StoreKind::ALL {
+        let digests = failure(b"deps:community.beta", Error::UnsupportedSchema, None);
+        check_failure_on(kind, &digests);
     }
 }
 
-/// A Driver may declare `MAX_STEP_INPUTS_PER_DRIVER_V1` step inputs; one more
-/// consumed dependency is refused.
+/// Consumed dependencies are refused the same way, not by the registry cap.
 #[test]
-fn too_many_consumed_dependencies_are_out_of_bounds_and_mark_no_plugin() {
-    let mut world = new_world();
-    let beta = world.add("beta", "community.beta", b"consumed:community.beta", PROMPT);
-    let raised = err(world.pass());
-    assert!(matches!(
-        raised,
-        RuntimeError::DependencyDeclaration(FactualDependencyErrorV1::Record(
-            CounterfactualDependencyErrorV1::FieldOutOfBounds
-        ))
-    ));
-    assert_eq!(
-        classify_pass_failure(&raised),
-        PassFailureV1::Host(NOT_ADMITTED)
-    );
-    assert!(world.events().is_empty());
-    assert_eq!(beta.committed_state(), initial());
-    assert_eq!(beta.last_failure(), None);
-    assert_eq!(beta.availability(), PluginAvailabilityV1::Available);
+fn consumed_dependencies_are_the_guests_unsupported_schema() {
+    for kind in StoreKind::ALL {
+        let consumed = failure(b"consumed:community.beta", Error::UnsupportedSchema, None);
+        check_failure_on(kind, &consumed);
+    }
 }
 
 #[test]

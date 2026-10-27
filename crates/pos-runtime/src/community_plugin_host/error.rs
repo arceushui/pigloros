@@ -314,7 +314,9 @@ impl CommunityPluginHostErrorV1 {
     ///   `DeterministicDeadlineExceeded`, which a V1 host never produces.
     ///   `GuestDeclaredFailure` and `InvalidGuestOutput` are constructed only
     ///   after a valid deterministic invocation, and so is `UnsupportedSchema`
-    ///   (a returned draft the host cannot commit).
+    ///   (a returned draft or output the host cannot commit under the V1
+    ///   profile: a non-empty draft `dependency-digests` or a non-empty
+    ///   `consumed-dependencies`).
     /// - `ComponentTrap` is authoritative only when conformance reproduces
     ///   it, and `AtomicCommitFailed` only with a deterministic typed result.
     ///   Otherwise both are operational, like worker crashes and watchdog

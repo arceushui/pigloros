@@ -13,8 +13,9 @@ use crate::{PluginAvailabilityV1, RuntimeError};
 /// - a worker crash is `Unavailable`: ADR-061 quarantines and reports it, and
 ///   it fabricates no Event, state or guest failure.
 ///
-/// A trust denial, whatever its basis, and `UnsupportedSchema` quarantine
-/// nothing: the Plugin is gated again at the next pass.
+/// A trust denial, whatever its basis, and `UnsupportedSchema` (a guest that
+/// declares dependency digests under the V1 profile, ADR-061 revision 10)
+/// quarantine nothing: the Plugin is gated again at the next pass.
 ///
 /// Every other failure discards the pass and marks only the failing Plugin;
 /// it quarantines nothing. The operational wall-time watchdog stop is such a
