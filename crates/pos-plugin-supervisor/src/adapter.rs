@@ -24,11 +24,11 @@
 //!   [`Driver::commit_step()`] only after the whole batch commits. An abort
 //!   discards it, and a store outcome that is unknown keeps it staged for
 //!   `recover_scheduled_pass`.
-//! - A draft's `dependency_digests` become `NodeDigest` inputs declared for
-//!   that draft, and the output's `consumed_dependencies` become step-level
-//!   `NodeDigest` inputs. The registry resolves them at admission; a digest
-//!   that names nothing fails there as `UnresolvedInput`, and a count above
-//!   the cap as `FieldOutOfBounds`.
+//! - Under the V1 profile no guest is shown a node digest, so a non-empty
+//!   draft `dependency_digests` or output `consumed_dependencies` is the
+//!   guest's `UnsupportedSchema` (ADR-061 revision 10): the pass is discarded,
+//!   only that Plugin is marked and nothing is quarantined. A community
+//!   Driver's `StepOutput` declares no inputs.
 //! - Trace annotations are validated by the engine and the supervisor and
 //!   then dropped; only their count survives, in the receipt.
 //!

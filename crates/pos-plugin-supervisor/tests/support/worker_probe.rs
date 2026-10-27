@@ -111,8 +111,8 @@ fn serve(request: &WorkerRequestV1) -> ExitCode {
 /// payload and `next` as the next state. `chain` carries the prior state as
 /// its payload and the prior state plus `+` as the next state, so the state
 /// the host feeds back is visible in the committed Event. `deps` adds a
-/// dependency digest that names no recorded node, and `consumed` consumes 256
-/// distinct dependencies, one more than a Driver may declare.
+/// dependency digest, and `consumed` consumes 256 distinct dependencies; the
+/// host refuses both as `UnsupportedSchema` under the V1 profile.
 fn serve_draft(request: &WorkerRequestV1) -> Option<ExitCode> {
     let mut parts = request.component.splitn(2, |byte| *byte == b':');
     let mode = parts.next()?;

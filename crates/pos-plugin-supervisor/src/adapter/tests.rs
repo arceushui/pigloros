@@ -6,13 +6,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use pos_core::{EntityId, Hash, Kind};
+use pos_core::{EntityId, Kind};
 use pos_runtime::community_plugin_host::{
     plugin_output_digest_v1, AtomicCommitFailureV1, ComponentTrapClassV1, EventDraftV1, FieldRefV1,
     GuestPluginErrorV1, MeteringV1, PluginErrorCodeV1, RevocationBasisV1, TraceAnnotationV1,
     TrapReproductionV1, TrustDenialBasisV1,
 };
-use pos_runtime::DirectInputRefV1;
 use ulid::Ulid;
 
 use super::output::{map_draft, mapped_drafts, mapped_output};
@@ -132,23 +131,11 @@ fn offer(driver: &CommunityDriverV1, handle: &CommunityPluginHandleV1) {
     let () = ok(handle.offer_authorization(authorization));
 }
 
-/// The `NodeDigest` inputs a guest digest list declares.
-fn node_inputs<const N: usize>(digests: [[u8; 32]; N]) -> [DirectInputRefV1; N] {
-    digests.map(|digest| DirectInputRefV1::NodeDigest {
-        digest: Hash::from_bytes(digest),
-    })
-}
-
-/// ADR-061 r9: an output whose annotation declares `[9; 32]`, beside one draft
-/// declaring `[7; 32]` and the consumed dependency `[3; 32]`, re-digested after
-/// the edit.
+/// ADR-061 r9: an output whose annotation declares `[9; 32]` and whose draft
+/// and consumed lists are empty (revision 10), re-digested after the edit.
 fn annotated_output() -> PluginOutputV1 {
-    let mut annotated = output(vec![EventDraftV1 {
-        dependency_digests: vec![[7; 32]],
-        ..draft("community.event", b"payload")
-    }]);
+    let mut annotated = output(vec![draft("community.event", b"payload")]);
     annotated.trace_annotations[0].dependency_digests = vec![[9; 32]];
-    annotated.consumed_dependencies = vec![[3; 32]];
     annotated.output_digest = plugin_output_digest_v1(&annotated);
     annotated
 }
@@ -171,53 +158,72 @@ fn a_draft_maps_to_an_event_draft_or_is_rejected() {
     }
 }
 
+/// ADR-061 r10 4.1: under the V1 profile a draft's dependency digests are the
+/// guest's `UnsupportedSchema`, after the event type check.
 #[test]
-fn a_drafts_dependency_digests_map_to_its_node_digest_inputs() {
+fn a_drafts_dependency_digests_are_unsupported_after_the_event_type_check() {
     let with_dependencies = EventDraftV1 {
         dependency_digests: vec![[1; 32], [2; 32]],
         ..draft("community.event", b"p")
     };
-    let mapped = ok(map_draft(&with_dependencies));
-    let inputs = node_inputs([[1; 32], [2; 32]]);
-    assert_eq!(mapped.direct_inputs, inputs);
+    assert_eq!(map_draft(&with_dependencies), Err(Error::UnsupportedSchema));
+    let malformed = EventDraftV1 {
+        event_type: "Not.An.Id".to_owned(),
+        ..with_dependencies
+    };
+    assert_eq!(map_draft(&malformed), Err(Error::InvalidGuestOutput));
+}
+
+/// The refusal is draft by draft in the guest's order.
+#[test]
+fn the_first_draft_with_digests_decides_before_a_later_bad_draft_is_reached() {
+    let ordered = output(vec![
+        EventDraftV1 {
+            dependency_digests: vec![[1; 32]],
+            ..draft("a.b", b"one")
+        },
+        draft("Not.An.Id", b"two"),
+    ]);
+    assert_eq!(
+        mapped_output(&ordered, 100).map(|_| ()),
+        Err(Error::UnsupportedSchema)
+    );
 }
 
 #[test]
-fn consumed_dependencies_map_to_step_inputs_and_annotations_stay_dropped() {
-    let mut consumed = output(vec![EventDraftV1 {
-        dependency_digests: vec![[7; 32]],
-        ..draft("a.b", b"one")
-    }]);
-    consumed.consumed_dependencies = vec![[3; 32], [4; 32]];
-    let step = ok(mapped_output(&consumed, 100));
-    let step_inputs = node_inputs([[3; 32], [4; 32]]);
-    assert_eq!(step.step_inputs(), step_inputs);
-    assert_eq!(step.outputs.len(), 1);
-    let draft_input = DirectInputRefV1::NodeDigest {
-        digest: Hash::from_bytes([7; 32]),
-    };
-    assert_eq!(step.outputs[0].direct_inputs, [draft_input]);
-    // The fixture carries one annotation; it declares nothing.
-    assert_eq!(consumed.trace_annotations.len(), 1);
-
-    let none = ok(mapped_output(&output(Vec::new()), 0));
-    assert!(none.step_inputs().is_empty());
+fn consumed_dependencies_are_unsupported_after_the_drafts_and_the_limit() {
+    let mut consumed = output(vec![draft("a.b", b"one")]);
+    consumed.consumed_dependencies = vec![[3; 32]];
+    assert_eq!(
+        mapped_output(&consumed, 100).map(|_| ()),
+        Err(Error::UnsupportedSchema)
+    );
     assert_eq!(
         mapped_output(&consumed, 2).map(|_| ()),
         Err(Error::OutputLimitExceeded)
     );
+    consumed.event_drafts = vec![draft("Not.An.Id", b"one")];
+    assert_eq!(
+        mapped_output(&consumed, 100).map(|_| ()),
+        Err(Error::InvalidGuestOutput)
+    );
+
+    let none = ok(mapped_output(&output(Vec::new()), 0));
+    assert!(none.step_inputs().is_empty());
+    let plain = ok(mapped_output(&output(vec![draft("a.b", b"one")]), 100));
+    assert!(plain.step_inputs().is_empty());
+    assert!(plain.outputs[0].direct_inputs.is_empty());
 }
 
 /// ADR-061 r9 test 1: an annotation's dependency digests are declared nowhere.
 #[test]
 fn annotation_dependency_digests_are_declared_nowhere() {
-    let step = ok(mapped_output(&annotated_output(), 100));
-    assert_eq!(step.step_inputs(), node_inputs([[3; 32]]));
+    let annotated = annotated_output();
+    assert_eq!(annotated.trace_annotations[0].dependency_digests, [[9; 32]]);
+    let step = ok(mapped_output(&annotated, 100));
+    assert!(step.step_inputs().is_empty());
     assert_eq!(step.outputs.len(), 1);
-    assert_eq!(step.outputs[0].direct_inputs, node_inputs([[7; 32]]));
-    let [from_annotation] = node_inputs([[9; 32]]);
-    assert!(!step.step_inputs().contains(&from_annotation));
-    assert!(!step.outputs[0].direct_inputs.contains(&from_annotation));
+    assert!(step.outputs[0].direct_inputs.is_empty());
 }
 
 #[test]
@@ -312,8 +318,8 @@ fn an_accepted_output_carries_nothing_from_its_annotation() {
     let step = ok(driver.accept([3; 16], report(annotated)));
     driver.commit_step();
     assert_eq!(step.outputs.len(), 1);
-    assert_eq!(step.outputs[0].direct_inputs, node_inputs([[7; 32]]));
-    assert_eq!(step.step_inputs(), node_inputs([[3; 32]]));
+    assert!(step.outputs[0].direct_inputs.is_empty());
+    assert!(step.step_inputs().is_empty());
     let receipts = handle.receipts();
     assert_eq!(receipts.len(), 1);
     assert_eq!(receipts[0].dropped_trace_annotations, 1);
