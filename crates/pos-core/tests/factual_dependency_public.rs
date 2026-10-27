@@ -282,7 +282,7 @@ fn host_owners_are_the_documented_literals() {
     let literals = [
         (FactualHostOwnerV1::Observation, "host.observation"),
         (FactualHostOwnerV1::Prefix, "host.prefix"),
-        (FactualHostOwnerV1::History, "host.history"),
+        (FactualHostOwnerV1::History, "host.visible-history"),
         (FactualHostOwnerV1::Ingress, "host.ingress"),
         (FactualHostOwnerV1::Fold, "host.lineage"),
         (FactualHostOwnerV1::FoldHistory, "host.fold-history"),
@@ -632,11 +632,11 @@ fn a_scheduled_tick_orders_its_nodes_canonically_and_binds_drafts_and_events() {
     assert_eq!(
         layout,
         vec![
-            (0, "host.history", 0),
             (0, "host.ingress", 0),
             (0, "host.ingress", 1),
             (0, "host.observation", 0),
             (0, "host.prefix", 0),
+            (0, "host.visible-history", 0),
             (1, OWNER_A, 0),
             (1, OWNER_A, 1),
             (1, OWNER_A, 2),
@@ -661,11 +661,11 @@ fn a_scheduled_tick_orders_its_nodes_canonically_and_binds_drafts_and_events() {
         [
             EventNodeBindingV1 {
                 seq: Seq::from_u64(2),
-                node_index: 1
+                node_index: 0
             },
             EventNodeBindingV1 {
                 seq: Seq::from_u64(5),
-                node_index: 2
+                node_index: 1
             },
         ]
     );
@@ -683,9 +683,9 @@ fn a_scheduled_tick_classifies_every_node_by_its_rule() {
     assert_eq!(
         classes,
         vec![
+            EXOGENOUS,
+            EXOGENOUS,
             ENDOGENOUS,
-            EXOGENOUS,
-            EXOGENOUS,
             ENDOGENOUS,
             ENDOGENOUS,
             ENDOGENOUS,
@@ -700,7 +700,10 @@ fn a_scheduled_tick_classifies_every_node_by_its_rule() {
         FACTUAL_SNAPSHOT_SCHEMA_ID_V1
     );
     assert_eq!(schema_of("host.prefix", 0), FACTUAL_PREFIX_SCHEMA_ID_V1);
-    assert_eq!(schema_of("host.history", 0), FACTUAL_HISTORY_SCHEMA_ID_V1);
+    assert_eq!(
+        schema_of("host.visible-history", 0),
+        FACTUAL_HISTORY_SCHEMA_ID_V1
+    );
     assert_eq!(schema_of(OWNER_A, 0), FACTUAL_STEP_SCHEMA_ID_V1);
     assert_eq!(schema_of(OWNER_A, 1), factual_event_schema_id("world.out"));
     assert_eq!(
@@ -784,7 +787,7 @@ fn a_scheduled_tick_declares_every_required_and_resolved_input_once() {
     let mut expected = vec![
         digest_of(record, "host.observation", 0),
         digest_of(record, "host.prefix", 0),
-        digest_of(record, "host.history", 0),
+        digest_of(record, "host.visible-history", 0),
         digest_of(record, "host.ingress", 0),
         digest_of(record, "host.ingress", 1),
         indexed_hash(1),
@@ -809,7 +812,7 @@ fn a_scheduled_tick_declares_every_required_and_resolved_input_once() {
     for host in [
         "host.observation",
         "host.prefix",
-        "host.history",
+        "host.visible-history",
         "host.ingress",
     ] {
         assert!(find(record, host, 0).input_digests().is_empty());
@@ -2073,4 +2076,144 @@ fn a_fold_window_out_of_order_or_outside_its_range_is_refused() {
     let own = Some(cursor(0, Some(fold_head(TICK))));
     let own_head = fold_source(own, 9, Vec::new(), false);
     assert_eq!(refused(own_head), unresolved);
+}
+
+/// ADR-064 R6 4.1: the verified-prefix and history nodes input what the
+/// snapshot node inputs, and nothing when the Timeline has no fold input.
+#[test]
+fn prefix_and_history_nodes_input_the_fold_input_of_the_snapshot_node() {
+    let lone = driver(OWNER_A, Vec::new(), Vec::new());
+    let build = |source| {
+        let mut tick = scheduled(vec![lone.clone()]);
+        tick.prefix_contents = vec![hash(0x61)];
+        tick.history_contents = vec![hash(0x62)];
+        ok(assemble_folded(tick, source))
+    };
+    let coarse = ["host.prefix", "host.visible-history"];
+
+    let checkpointed = build(first_window(12, 12));
+    let record = checkpointed.record();
+    let last = artifact(fold_nodes(&checkpointed)[0]);
+    assert_eq!(find(record, "host.observation", 0).input_digests(), [last]);
+    for owner in coarse {
+        assert_eq!(find(record, owner, 0).input_digests(), [last], "{owner}");
+    }
+    let checkpoint = fold_nodes(&checkpointed)[0].coordinate();
+    let prefix = find(record, "host.prefix", 0);
+    assert_eq!(
+        edge_bytes_between(record, prefix, last),
+        expected_edge(
+            prefix,
+            checkpoint,
+            ENDOGENOUS,
+            FactualRuleV1::VerifiedPrefix
+        )
+        .as_slice()
+    );
+    let history = find(record, "host.visible-history", 0);
+    assert_eq!(
+        edge_bytes_between(record, history, last),
+        expected_edge(
+            history,
+            checkpoint,
+            ENDOGENOUS,
+            FactualRuleV1::ConsumedHistory
+        )
+        .as_slice()
+    );
+
+    let head = fold_head(TICK - 2);
+    let excluded = vec![typed_fold_event(11, EVENT_TYPE_CONSENT_GRANTED_V1)];
+    let at = Some(cursor(10, Some(head.clone())));
+    let headed = build(fold_source(at, 11, excluded.clone(), false));
+    for owner in coarse {
+        let inputs = find(headed.record(), owner, 0).input_digests();
+        assert_eq!(inputs, [artifact(&head)], "{owner}");
+    }
+
+    let headless = build(fold_source(Some(cursor(10, None)), 11, excluded, false));
+    for owner in coarse {
+        assert!(find(headless.record(), owner, 0).input_digests().is_empty());
+    }
+}
+
+/// A scheduled Tick of `prefix` verified-prefix nodes and one history node,
+/// whose step nodes add `step_edges` edges in all (each also inputs the
+/// snapshot node), with `fold` as its fold source.
+fn coarse_heavy_tick(
+    prefix: usize,
+    step_edges: usize,
+    fold: FactualFoldSourceV1,
+) -> FactualScheduledTickV1 {
+    let per_step = MAX_DEPENDENCY_NODE_INPUTS_V1;
+    let drivers = (0..step_edges.div_ceil(per_step))
+        .map(|index| {
+            let inputs = (step_edges - index * per_step).min(per_step) - 1;
+            let at = |node: usize| FactualInputV1::PrefixNode(ok(u32::try_from(node)));
+            let owner = format!("plugin:heavy-{index}");
+            driver(&owner, (0..inputs).map(at).collect(), Vec::new())
+        })
+        .collect();
+    let mut tick = scheduled(drivers);
+    tick.prefix_contents = (0..prefix).map(|at| indexed_hash(at + 1)).collect();
+    tick.history_contents = vec![hash(0x62)];
+    tick.fold = Some(Box::new(fold));
+    tick
+}
+
+/// ADR-064 R6, 4.4: the edges of the prefix and history nodes count in the
+/// rest of the record the fold part is fitted to. At the boundary the fold
+/// part keeps the newest 100 of 500 fold inputs behind a fold-history node,
+/// and the record holds exactly the edge maximum; a rest one prefix or history
+/// edge short of what the builder reserves would overflow it.
+#[test]
+fn the_fold_fit_counts_the_edges_of_the_prefix_and_history_nodes() {
+    let prefix = MAX_DEPENDENCY_NODE_INPUTS_V1 - 1;
+    let coarse = prefix + 1;
+    // The rest holds `coarse` edges besides the step nodes'; the fold part adds
+    // 103 (100 inputs, the fold-history node, the head and the snapshot edge).
+    let step_edges = MAX_TICK_DEPENDENCY_EDGES_V1 - 103 - coarse;
+
+    let head = fold_head(TICK - 2);
+    let at = Some(cursor(3, Some(head)));
+    let headed = fold_source(at, 503, fold_events(4..=503), false);
+    let tick = coarse_heavy_tick(prefix, step_edges, headed);
+    let fitted = ok(assemble(TICK, &FactualTickShapeV1::Scheduled(tick)));
+    assert_eq!(fitted.record().edges().len(), MAX_TICK_DEPENDENCY_EDGES_V1);
+    assert_eq!(fitted.fold().history.len(), 1);
+
+    // Without a head the snapshot node still gets the fold chain's input, so
+    // the same rest must also fit; a builder that reserved nothing would keep
+    // every fold input and overflow the record.
+    let headless = fold_source(None, 503, fold_events(1..=500), false);
+    let tick = coarse_heavy_tick(prefix, step_edges, headless);
+    let fitted = ok(assemble(TICK, &FactualTickShapeV1::Scheduled(tick)));
+    assert!(fitted.record().edges().len() <= MAX_TICK_DEPENDENCY_EDGES_V1);
+}
+
+/// A truncated window with no head and no fold input still gets a fold-history
+/// node behind an empty checkpoint, so the snapshot node, and with it every
+/// prefix and history node, gets a fold input. The rest then counts those
+/// edges: one edge over what the reserve leaves is refused, as the store
+/// refuses it, and one edge fewer is fitted.
+#[test]
+fn a_truncated_headless_window_counts_the_coarse_edges_in_the_rest() {
+    let prefix = MAX_DEPENDENCY_NODE_INPUTS_V1 - 1;
+    let coarse = prefix + 1;
+    let excluded = vec![typed_fold_event(11, EVENT_TYPE_CONSENT_GRANTED_V1)];
+    let source = || fold_source(None, 11, excluded.clone(), true);
+    let at_limit = MAX_TICK_DEPENDENCY_EDGES_V1 - FACTUAL_FOLD_RESERVED_EDGES_V1 - coarse;
+
+    let over = coarse_heavy_tick(prefix, at_limit + 1, source());
+    let refused = err(assemble(TICK, &FactualTickShapeV1::Scheduled(over)));
+    assert_eq!(
+        refused,
+        FactualError::Record(DepError::FieldOutOfBounds),
+        "one edge over the reserve"
+    );
+
+    let within = coarse_heavy_tick(prefix, at_limit, source());
+    let fitted = ok(assemble(TICK, &FactualTickShapeV1::Scheduled(within)));
+    assert_eq!(fitted.fold().history.len(), 1);
+    assert!(fitted.record().edges().len() <= MAX_TICK_DEPENDENCY_EDGES_V1);
 }

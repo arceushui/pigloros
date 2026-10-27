@@ -90,6 +90,7 @@ const GAMMA_EVENT: &str = "agent.e2e.gamma";
 const INPUT_EVENT: &str = "agent.e2e.input";
 const INTERVENTION_OWNER: &str = "intervention";
 const HISTORY_OWNER: &str = FactualHostOwnerV1::History.as_str();
+const OBSERVATION_OWNER: &str = FactualHostOwnerV1::Observation.as_str();
 const PREFIX_OWNER: &str = FactualHostOwnerV1::Prefix.as_str();
 const INGRESS_OWNER: &str = FactualHostOwnerV1::Ingress.as_str();
 
@@ -1396,9 +1397,10 @@ fn check_step_chains<B>(prepared: &Prepared<B>, graph: &ValidatedDependencyGraph
     Ok(())
 }
 
-/// The first step after the resume declares the one history node, which has
-/// no input, and the Driver that reads the verified prefix declares its
-/// prefix node; the ingress nodes are recorded with no input.
+/// The first step after the resume declares the one history node, which
+/// inputs what its Tick's snapshot node inputs (ADR-064 R6), and the Driver
+/// that reads the verified prefix declares its prefix node; the ingress nodes
+/// are recorded with no input.
 fn check_recorded_nodes<B>(
     prepared: &Prepared<B>,
     graph: &ValidatedDependencyGraphV1,
@@ -1407,7 +1409,12 @@ fn check_recorded_nodes<B>(
     let recorded = owned_by(graph, HISTORY_OWNER);
     assert_eq!(recorded.len(), 1);
     let history = recorded[0];
-    assert!(history.input_digests.is_empty());
+    let snapshots = owned_by(graph, OBSERVATION_OWNER);
+    let snapshot = snapshots
+        .iter()
+        .find(|node| node.node.tick == resumed_tick)
+        .ok_or("no snapshot at the resume")?;
+    assert_eq!(history.input_digests, snapshot.input_digests);
     assert_eq!(history.node.schema_id, FACTUAL_HISTORY_SCHEMA_ID_V1);
     assert_eq!(history.node.tick, resumed_tick);
     let lead_nodes = owned_by(graph, &prepared.lanes[0].owner);
