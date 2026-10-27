@@ -3317,10 +3317,12 @@ fn assert_fit_and_reserve(name: &str, store: &mut dyn Harness) {
     let crowded = heavy_declared(&third, over, None);
     let case = invalid_for("rest over the reserve", third.clone(), crowded);
     assert_all_refused(name, store, vec![case]);
-    // A rest of 262,144 - 103 edges keeps the newest 100 fold inputs.
+    // A rest of 262,144 - 103 edges keeps the newest 100 fold inputs. Each of
+    // the 4,095 prefix nodes inputs the fold head (ADR-064 R6), so the step
+    // nodes carry that many edges fewer.
     let source = fold_source(store, timeline, 503);
     let head = source.head().cloned();
-    let rest = edge_heavy(MAX_TICK_DEPENDENCY_EDGES_V1 - 104);
+    let rest = edge_heavy(MAX_TICK_DEPENDENCY_EDGES_V1 - 104 - (MAX_DEPENDENCY_NODE_INPUTS_V1 - 1));
     let fitted = heavy_declared(&third, rest, Some(source));
     let total = fitted.record().edges().len();
     assert_eq!(total, MAX_TICK_DEPENDENCY_EDGES_V1, "{name}");

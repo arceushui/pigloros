@@ -1497,6 +1497,20 @@ impl<'a> FactualAssembly<'a> {
         host: &mut HostNodes,
         source: &FactualFoldSourceV1,
     ) -> Result<(), FactualDependencyErrorV1> {
+        // The prefix and history nodes will input the snapshot node's fold
+        // input, which exists exactly when there is a head or a fold input; the
+        // store counts those edges in the rest of the record.
+        let fed = source.head().is_some()
+            || source
+                .window
+                .events
+                .iter()
+                .any(|event| is_factual_fold_input(&event.event_type, event.node_class));
+        let coarse = if fed {
+            host.prefix.len() + host.history.len()
+        } else {
+            0
+        };
         let rest = FactualFoldRestV1 {
             forwarded: host.ingress.keys().copied().collect(),
             nodes: self.specs.len(),
@@ -1505,8 +1519,7 @@ impl<'a> FactualAssembly<'a> {
                 .iter()
                 .map(|spec| distinct_sources(&spec.sources))
                 .sum::<usize>()
-                + host.prefix.len()
-                + host.history.len(),
+                + coarse,
         };
         let tick = self.context.tick;
         let layout = factual_fold_layout((self.context.timeline_id, tick), source, &rest)?;
