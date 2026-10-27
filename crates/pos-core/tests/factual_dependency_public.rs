@@ -2190,3 +2190,30 @@ fn the_fold_fit_counts_the_edges_of_the_prefix_and_history_nodes() {
     let fitted = ok(assemble(TICK, &FactualTickShapeV1::Scheduled(tick)));
     assert!(fitted.record().edges().len() <= MAX_TICK_DEPENDENCY_EDGES_V1);
 }
+
+/// A truncated window with no head and no fold input still gets a fold-history
+/// node behind an empty checkpoint, so the snapshot node, and with it every
+/// prefix and history node, gets a fold input. The rest then counts those
+/// edges: one edge over what the reserve leaves is refused, as the store
+/// refuses it, and one edge fewer is fitted.
+#[test]
+fn a_truncated_headless_window_counts_the_coarse_edges_in_the_rest() {
+    let prefix = MAX_DEPENDENCY_NODE_INPUTS_V1 - 1;
+    let coarse = prefix + 1;
+    let excluded = vec![typed_fold_event(11, EVENT_TYPE_CONSENT_GRANTED_V1)];
+    let source = || fold_source(None, 11, excluded.clone(), true);
+    let at_limit = MAX_TICK_DEPENDENCY_EDGES_V1 - FACTUAL_FOLD_RESERVED_EDGES_V1 - coarse;
+
+    let over = coarse_heavy_tick(prefix, at_limit + 1, source());
+    let refused = err(assemble(TICK, &FactualTickShapeV1::Scheduled(over)));
+    assert_eq!(
+        refused,
+        FactualError::Record(DepError::FieldOutOfBounds),
+        "one edge over the reserve"
+    );
+
+    let within = coarse_heavy_tick(prefix, at_limit, source());
+    let fitted = ok(assemble(TICK, &FactualTickShapeV1::Scheduled(within)));
+    assert_eq!(fitted.fold().history.len(), 1);
+    assert!(fitted.record().edges().len() <= MAX_TICK_DEPENDENCY_EDGES_V1);
+}

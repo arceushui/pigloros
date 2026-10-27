@@ -2677,7 +2677,9 @@ fn the_store_refuses_prefix_and_history_nodes_that_differ_from_the_snapshot_inpu
         );
 
         let others = [prefix];
-        let cases: [(&str, &'static str, &[Hash]); 3] = [
+        let mut twice = [last, prefix];
+        twice.sort();
+        let cases: [(&str, &'static str, &[Hash]); 5] = [
             ("prefix node without its input", "host.prefix", &[]),
             (
                 "history node without its input",
@@ -2688,6 +2690,12 @@ fn the_store_refuses_prefix_and_history_nodes_that_differ_from_the_snapshot_inpu
                 "history node inputting another node",
                 "host.visible-history",
                 &others,
+            ),
+            ("prefix node inputting two nodes", "host.prefix", &twice),
+            (
+                "history node inputting two nodes",
+                "host.visible-history",
+                &twice,
             ),
         ];
         let invalid = PipelineOutcomeV1::InvalidDependencyDeclaration;

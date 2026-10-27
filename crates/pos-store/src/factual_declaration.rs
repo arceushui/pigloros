@@ -238,6 +238,7 @@ pub(crate) fn shape_holds(basis: &PipelineAdmissionBasisV1, by_digest: &DigestIn
 fn nodes_and_fold_hold(basis: &PipelineAdmissionBasisV1, by_digest: &DigestIndex<'_>) -> bool {
     let nodes = basis.dependencies().record().nodes();
     let each = nodes.iter().all(|node| node_shape_holds(node, by_digest));
+    // Every check runs, so the function stays one straight line.
     let held = [
         each,
         fold_shape_holds(basis, by_digest),
@@ -503,7 +504,9 @@ fn driver_inputs(nodes: &[DependencyNodeRecordV1]) -> BTreeSet<Hash> {
 /// The rest of a scheduled record beside its fold part (ADR-064 R4.2), as
 /// the builder sized it: every node but the fold checkpoint, fold-history and
 /// fold-only ingress nodes, and every edge but those into the fold checkpoint
-/// nodes and the snapshot node. An ingress node is forwarded-needed iff a
+/// nodes and the snapshot node (the edges of the verified-prefix and history
+/// nodes to the fold input are therefore part of the rest, as the builder
+/// reserves them; ADR-064 R6, 4.4). An ingress node is forwarded-needed iff a
 /// step or output node inputs it; one that only a fold checkpoint node inputs
 /// is counted in the fold part. The builder counts such an orphan ingress
 /// node in the rest instead (`assemble_factual_tick` counts every ingress

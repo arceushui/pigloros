@@ -978,12 +978,16 @@ pub enum FactualTickShapeV1 {
 }
 
 /// The edges the verified-prefix and history nodes will add to the rest of the
-/// record: one each, exactly when the snapshot node gets a fold input (a head
-/// or a fold input exists), as the store counts them.
+/// record: one each, exactly when the snapshot node gets a fold input, as the
+/// store counts them. That is when a head exists, or a fold input exists, or
+/// the window is truncated (a fold-history node then stands behind an empty
+/// checkpoint even without a fold input).
 fn coarse_edge_reserve(host: &HostNodes, source: &FactualFoldSourceV1) -> usize {
     let fold_input =
         |event: &FactualFoldEventV1| is_factual_fold_input(&event.event_type, event.node_class);
-    let fed = source.head().is_some() || source.window.events.iter().any(fold_input);
+    let fed = source.head().is_some()
+        || source.window.truncated
+        || source.window.events.iter().any(fold_input);
     if fed {
         host.prefix.len() + host.history.len()
     } else {
