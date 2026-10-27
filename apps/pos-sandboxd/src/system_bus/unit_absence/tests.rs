@@ -47,6 +47,7 @@ mod cases {
     }
 
     struct State {
+        subscribed: bool,
         calls: Vec<String>,
         query_serials: Vec<NonZeroU32>,
         scripts: BTreeMap<String, VecDeque<Reply>>,
@@ -58,7 +59,15 @@ mod cases {
     // every earlier request, including a wrongly issued expired-budget query.
     #[zbus::interface(name = "org.freedesktop.systemd1.Manager", spawn = false)]
     impl Manager {
-        fn subscribe(&self) {}
+        fn subscribe(&self) -> fdo::Result<()> {
+            let mut state = self
+                .0
+                .lock()
+                .map_err(|_| fdo::Error::Failed("poisoned fixture".to_owned()))?;
+            state.subscribed = true;
+            drop(state);
+            Ok(())
+        }
 
         async fn get_unit(
             &self,
@@ -84,6 +93,7 @@ mod cases {
                 if script.len() > 1 {
                     let _previous = script.pop_front();
                 }
+                drop(state);
                 reply
             };
             let misleading = "org.freedesktop.systemd1.NoSuchUnit: not loaded".to_owned();
@@ -115,6 +125,7 @@ mod cases {
         Arc<Mutex<State>>,
     )> {
         let state = Arc::new(Mutex::new(State {
+            subscribed: false,
             calls: Vec::new(),
             query_serials: Vec::new(),
             scripts: plans
@@ -134,6 +145,7 @@ mod cases {
         let (server, client) = tokio::join!(server, client);
         let server = server?;
         let transport = SystemdTransientUnitTransport::from_connection(client?).await?;
+        assert!(state.lock().map_err(|_| "poisoned fixture")?.subscribed);
         Ok((transport, server, state))
     }
 
@@ -145,8 +157,8 @@ mod cases {
         result: Result<SystemdAttemptUnitAbsenceObservation, SystemdTransientUnitTransportError>,
     ) {
         assert!(matches!(
-            result,
-            Err(SystemdTransientUnitTransportError::UnitAbsenceDeadlineElapsed)
+            result.err(),
+            Some(SystemdTransientUnitTransportError::UnitAbsenceDeadlineElapsed)
         ));
     }
 
@@ -187,6 +199,7 @@ mod cases {
         let state = state.lock().map_err(|_| "poisoned fixture")?;
         assert!(state.calls.len() > 1);
         assert!(state.calls.iter().all(|called| called == name.as_str()));
+        drop(state);
         Ok(())
     }
 
@@ -330,7 +343,10 @@ mod cases {
             assert!(Instant::now() < deadline);
             assert_eq!(reply.message_type(), Type::Error);
             assert_eq!(
-                reply.header().error_name().map(|name| name.as_str()),
+                reply
+                    .header()
+                    .error_name()
+                    .map(zbus::names::ErrorName::as_str),
                 Some("org.freedesktop.systemd1.NoSuchUnit")
             );
             {
@@ -338,6 +354,7 @@ mod cases {
                 assert_eq!(state.calls, vec![name.as_str()]);
                 assert_eq!(state.query_serials.len(), 1);
                 assert_eq!(reply.header().reply_serial(), Some(state.query_serials[0]));
+                drop(state);
             }
             advance(
                 deadline.saturating_duration_since(Instant::now()) + Duration::from_millis(late_by),
@@ -450,6 +467,7 @@ mod cases {
                 2
             );
         }
+        drop(state);
         Ok(())
     }
 
