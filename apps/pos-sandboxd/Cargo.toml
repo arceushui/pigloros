@@ -57,7 +57,7 @@ pos-reference = { path = "../../crates/pos-reference", features = [
   "test-support",
 ] }
 tempfile = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
 zlink = { version = "=0.7.1", default-features = false, features = [
   "proxy",
   "tokio",
