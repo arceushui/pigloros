@@ -54,7 +54,9 @@ mod cases {
 
     struct Manager(Arc<Mutex<State>>);
 
-    #[zbus::interface(name = "org.freedesktop.systemd1.Manager")]
+    // Ordered dispatch makes a later successful query a protocol barrier for
+    // every earlier request, including a wrongly issued expired-budget query.
+    #[zbus::interface(name = "org.freedesktop.systemd1.Manager", spawn = false)]
     impl Manager {
         fn subscribe(&self) {}
 
@@ -242,8 +244,12 @@ mod cases {
     #[tokio::test(start_paused = true)]
     async fn expired_and_exact_start_budgets_issue_no_queries() -> TestResult {
         let name = unit(5)?;
-        let (transport, _server, state) =
-            fixture(vec![(name.clone(), vec![Reply::Absent("unloaded")])]).await?;
+        let barrier = unit(11)?;
+        let (transport, _server, state) = fixture(vec![
+            (name.clone(), vec![Reply::Absent("unloaded")]),
+            (barrier.clone(), vec![Reply::Absent("unloaded")]),
+        ])
+        .await?;
         let deadline = Instant::now();
         deadline_error(
             transport
@@ -256,11 +262,19 @@ mod cases {
                 .wait_for_attempt_unit_absence(name, deadline)
                 .await,
         );
-        assert!(state
-            .lock()
-            .map_err(|_| "poisoned fixture")?
-            .calls
-            .is_empty());
+        // Await a real later reply before asserting no earlier query escaped.
+        // An immediate call-log read could miss a request still in transit.
+        let observed = transport
+            .wait_for_attempt_unit_absence(
+                barrier.clone(),
+                Instant::now() + Duration::from_millis(100),
+            )
+            .await?;
+        assert_eq!(observed.unit_name(), &barrier);
+        assert_eq!(
+            state.lock().map_err(|_| "poisoned fixture")?.calls,
+            vec![barrier.as_str()]
+        );
         Ok(())
     }
 
