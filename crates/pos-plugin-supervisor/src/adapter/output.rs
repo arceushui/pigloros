@@ -14,7 +14,8 @@ use ulid::Ulid;
 
 use super::Error;
 
-/// Map one guest draft to the pipeline's `EventDraft` and its declared inputs.
+/// Map one guest draft to the pipeline's `DeclaredOutputV1`, which declares no
+/// inputs.
 ///
 /// An `EventDraft` carries an entity, a type and a payload. An event type
 /// outside the ADR-061 ID grammar is `InvalidGuestOutput`. Under the V1
