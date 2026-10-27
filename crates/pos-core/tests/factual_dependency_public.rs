@@ -661,11 +661,11 @@ fn a_scheduled_tick_orders_its_nodes_canonically_and_binds_drafts_and_events() {
         [
             EventNodeBindingV1 {
                 seq: Seq::from_u64(2),
-                node_index: 1
+                node_index: 0
             },
             EventNodeBindingV1 {
                 seq: Seq::from_u64(5),
-                node_index: 2
+                node_index: 1
             },
         ]
     );
@@ -683,9 +683,9 @@ fn a_scheduled_tick_classifies_every_node_by_its_rule() {
     assert_eq!(
         classes,
         vec![
+            EXOGENOUS,
+            EXOGENOUS,
             ENDOGENOUS,
-            EXOGENOUS,
-            EXOGENOUS,
             ENDOGENOUS,
             ENDOGENOUS,
             ENDOGENOUS,
