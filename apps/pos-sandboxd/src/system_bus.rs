@@ -1129,3 +1129,30 @@ fn unix_socket(address: Address) -> zbus::Result<Address> {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests;
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod test_support {
+    use zbus::{
+        connection::{socket::channel::Channel, Builder},
+        Connection, Guid,
+    };
+
+    /// Connect authenticated peers after registering the fixture's interfaces.
+    pub(super) async fn peer_connections(
+        configure_server: impl FnOnce(Builder<'static>) -> Builder<'static>,
+    ) -> zbus::Result<(Connection, Connection)> {
+        let guid = Guid::generate();
+        let (server_socket, client_socket) = Channel::pair();
+        let server =
+            configure_server(Builder::authenticated_socket(server_socket, guid.clone()).p2p())
+                .build();
+        let client = Builder::authenticated_socket(client_socket, guid)
+            .p2p()
+            .build();
+        let (server, client) = tokio::join!(server, client);
+        let server = server?;
+        let client = client?;
+        Ok((server, client))
+    }
+}

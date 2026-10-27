@@ -12,13 +12,13 @@ mod cases {
     use futures_util::{future::join_all, StreamExt};
     use tokio::time::{advance, sleep, Instant};
     use zbus::{
-        connection::{socket::channel::Channel, Builder},
         fdo,
         message::{Header, Type},
-        BoxDBusError, Guid, MessageStream, OwnedObjectPath,
+        BoxDBusError, MessageStream, OwnedObjectPath,
     };
 
     use super::super::wait_with_proxy;
+    use crate::system_bus::test_support::peer_connections;
     use crate::{
         SystemdAttemptUnitAbsenceObservation, SystemdTransientUnitTransport,
         SystemdTransientUnitTransportError, TransientServiceUnitName,
@@ -133,18 +133,11 @@ mod cases {
                 .map(|(unit, replies)| (unit.as_str().to_owned(), replies.into()))
                 .collect(),
         }));
-        let guid = Guid::generate();
-        let (server_socket, client_socket) = Channel::pair();
-        let server = Builder::authenticated_socket(server_socket, guid.clone())
-            .p2p()
-            .serve_at("/org/freedesktop/systemd1", Manager(Arc::clone(&state)))
-            .build();
-        let client = Builder::authenticated_socket(client_socket, guid)
-            .p2p()
-            .build();
-        let (server, client) = tokio::join!(server, client);
-        let server = server?;
-        let transport = SystemdTransientUnitTransport::from_connection(client?).await?;
+        let (server, client) = peer_connections(|server| {
+            server.serve_at("/org/freedesktop/systemd1", Manager(Arc::clone(&state)))
+        })
+        .await?;
+        let transport = SystemdTransientUnitTransport::from_connection(client).await?;
         assert!(state.lock().map_err(|_| "poisoned fixture")?.subscribed);
         Ok((transport, server, state))
     }

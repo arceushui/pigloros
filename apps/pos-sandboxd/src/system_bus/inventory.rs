@@ -183,10 +183,9 @@ mod tests {
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     };
-    use zbus::{
-        connection::{socket::channel::Channel, Builder},
-        fdo, Guid,
-    };
+    use zbus::fdo;
+
+    use crate::system_bus::test_support::peer_connections;
 
     type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
     type Calls = Arc<Mutex<Vec<(Vec<String>, Vec<String>)>>>;
@@ -249,11 +248,8 @@ mod tests {
     ) -> TestResult<(SystemdTransientUnitTransport, zbus::Connection, Calls)> {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let subscribed = Arc::new(AtomicBool::new(false));
-        let guid = Guid::generate();
-        let (server_socket, client_socket) = Channel::pair();
-        let server = Builder::authenticated_socket(server_socket, guid.clone())
-            .p2p()
-            .serve_at(
+        let (server, client) = peer_connections(|server| {
+            server.serve_at(
                 "/org/freedesktop/systemd1",
                 RecordingManager {
                     rows,
@@ -262,13 +258,9 @@ mod tests {
                     fault,
                 },
             )
-            .build();
-        let client = Builder::authenticated_socket(client_socket, guid)
-            .p2p()
-            .build();
-        let (server, client) = tokio::join!(server, client);
-        let server = server?;
-        let transport = SystemdTransientUnitTransport::from_connection(client?).await?;
+        })
+        .await?;
+        let transport = SystemdTransientUnitTransport::from_connection(client).await?;
         assert!(subscribed.load(Ordering::SeqCst));
         Ok((transport, server, calls))
     }
