@@ -2601,6 +2601,119 @@ fn the_store_refuses_a_fold_part_of_the_wrong_shape() {
     }
 }
 
+/// [`fold_declared`], with one verified-prefix node and one history node.
+fn coarse_declared(attempt: &Attempt, source: FactualFoldSourceV1) -> FactualTickDependenciesV1 {
+    let outputs = attempt
+        .drafts
+        .iter()
+        .map(|draft| FactualOutputV1 {
+            draft: draft.clone(),
+            authority: OutputAuthorityV1::Authoritative,
+            direct_inputs: Vec::new(),
+        })
+        .collect();
+    let driver = FactualDriverStepV1 {
+        owner: FactualOwnerIdV1::new("plugin:test".to_owned()),
+        policy_identity: hash(8),
+        step_inputs: Vec::new(),
+        outputs,
+    };
+    let shape = FactualTickShapeV1::Scheduled(FactualScheduledTickV1 {
+        snapshot_digest: hash(61),
+        prefix_contents: vec![hash(62)],
+        history_contents: vec![hash(63)],
+        ingress_events: Vec::new(),
+        drivers: vec![driver],
+        fold: Some(Box::new(source)),
+    });
+    declared(attempt, hash(1), &shape)
+}
+
+/// `valid` with the inputs and edges of the nodes of `owner` replaced by
+/// `inputs`: the node declares exactly them, and an edge for each.
+fn with_inputs_of(
+    valid: &FactualTickDependenciesV1,
+    owner: &'static str,
+    inputs: &[Hash],
+) -> FactualTickDependenciesV1 {
+    let record = valid.record();
+    let origin = RecordedNodeOriginV1::Committed;
+    let replaced = |node: &DependencyNodeRecordV1| {
+        if node.coordinate().owner_id() == owner {
+            inputs.to_vec()
+        } else {
+            inputs_unchanged(node)
+        }
+    };
+    let kept = |edge: &DependencyEdgeRecordV1| edge.consumer().owner_id() != owner;
+    let stripped = rebuilt(record, origin, replaced, kept);
+    with_record(valid, stripped)
+}
+
+/// ADR-064 R6, 4.3, check (xi): the verified-prefix and history nodes of a
+/// scheduled Tick input exactly what its snapshot node inputs. A node with no
+/// input, or with another one, is refused and nothing is recorded.
+#[test]
+fn the_store_refuses_prefix_and_history_nodes_that_differ_from_the_snapshot_input() {
+    let clock = TestClock::at(1_000);
+    for (name, mut store) in stores(&clock) {
+        let fixture = prepare(store.as_mut());
+        let timeline = fixture.timeline;
+        let first = attempt(&fixture, 1, 0);
+        committed(ok(admit(store.as_mut(), &first)));
+        let second = Attempt {
+            drafts: drafts(&[b"x"]),
+            ..scheduled_after(&first, 2, 3)
+        };
+        let source = fold_source(store.as_ref(), timeline, 3);
+        let valid = coarse_declared(&second, source);
+        let record = valid.record();
+        let last = last_fold_digest(&valid);
+        let prefix = digest_of_host(record, "host.prefix");
+        assert_eq!(node_of(record, "host.prefix").input_digests(), [last]);
+        assert_eq!(
+            node_of(record, "host.visible-history").input_digests(),
+            [last]
+        );
+
+        let others = [prefix];
+        let mut twice = [last, prefix];
+        twice.sort();
+        let cases: [(&str, &'static str, &[Hash]); 5] = [
+            ("prefix node without its input", "host.prefix", &[]),
+            (
+                "history node without its input",
+                "host.visible-history",
+                &[],
+            ),
+            (
+                "history node inputting another node",
+                "host.visible-history",
+                &others,
+            ),
+            ("prefix node inputting two nodes", "host.prefix", &twice),
+            (
+                "history node inputting two nodes",
+                "host.visible-history",
+                &twice,
+            ),
+        ];
+        let invalid = PipelineOutcomeV1::InvalidDependencyDeclaration;
+        for (case, owner, inputs) in cases {
+            let forged = with_inputs_of(&valid, owner, inputs);
+            assert_refused(name, case, store.as_mut(), &second, forged, &invalid);
+        }
+        assert_eq!(cursor_of(store.as_ref(), timeline), None, "{name}");
+
+        commit_declared(store.as_mut(), &second, valid);
+        assert_eq!(
+            cursor_of(store.as_ref(), timeline),
+            Some((3, last)),
+            "{name}"
+        );
+    }
+}
+
 /// ADR-064 R4.3: the fold-head row commits atomically with the Tick. A failing
 /// insert of the row rolls the whole scheduled Tick back; the retry commits
 /// it with exactly one row.
@@ -3212,10 +3325,12 @@ fn assert_fit_and_reserve(name: &str, store: &mut dyn Harness) {
     let crowded = heavy_declared(&third, over, None);
     let case = invalid_for("rest over the reserve", third.clone(), crowded);
     assert_all_refused(name, store, vec![case]);
-    // A rest of 262,144 - 103 edges keeps the newest 100 fold inputs.
+    // A rest of 262,144 - 103 edges keeps the newest 100 fold inputs. Each of
+    // the 4,095 prefix nodes inputs the fold head (ADR-064 R6), so the step
+    // nodes carry that many edges fewer.
     let source = fold_source(store, timeline, 503);
     let head = source.head().cloned();
-    let rest = edge_heavy(MAX_TICK_DEPENDENCY_EDGES_V1 - 104);
+    let rest = edge_heavy(MAX_TICK_DEPENDENCY_EDGES_V1 - 104 - (MAX_DEPENDENCY_NODE_INPUTS_V1 - 1));
     let fitted = heavy_declared(&third, rest, Some(source));
     let total = fitted.record().edges().len();
     assert_eq!(total, MAX_TICK_DEPENDENCY_EDGES_V1, "{name}");
