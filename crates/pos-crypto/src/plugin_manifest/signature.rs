@@ -36,8 +36,10 @@ pub enum PluginReleaseSignatureErrorV1 {
 
 /// Proof that field 26 of one PMF1 is a valid signature by the authorized key.
 ///
-/// It is constructed only by [`verify_plugin_release_signature_v1()`]. It is a
-/// mathematical fact about exact bytes, not an admission decision.
+/// Production code constructs it only by
+/// [`verify_plugin_release_signature_v1()`]; the `test-support` feature adds a
+/// fixture conversion. It is a mathematical fact about exact bytes, not an
+/// admission decision.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct VerifiedPluginReleaseSignatureV1 {
     pmf1_digest: Digest,
@@ -77,6 +79,41 @@ impl VerifiedPluginReleaseSignatureV1 {
     #[must_use]
     pub const fn public_key(&self) -> [u8; 32] {
         self.public_key
+    }
+}
+
+/// Raw, unchecked release-signature token fields for test fixtures only.
+///
+/// This type exists only with the `test-support` feature, which
+/// `scripts/check_test_support_features.py` keeps out of deployable dependency
+/// graphs. It lets a test hold a token without a signed OCI release closure;
+/// fixtures do not establish release authority, and a token built from one
+/// proves no signature.
+#[cfg(feature = "test-support")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PluginReleaseSignatureFixtureV1 {
+    /// BLAKE3-256 of the complete PMF1 bytes.
+    pub pmf1_digest: Digest,
+    /// The field 27 release digest.
+    pub release_digest: Digest,
+    /// The signing identity's owner (field 21).
+    pub owner: OwnerIdV1,
+    /// The signing identity's key epoch (field 26).
+    pub epoch: u64,
+    /// The raw Ed25519 public key.
+    pub public_key: [u8; 32],
+}
+
+#[cfg(feature = "test-support")]
+impl From<PluginReleaseSignatureFixtureV1> for VerifiedPluginReleaseSignatureV1 {
+    fn from(fixture: PluginReleaseSignatureFixtureV1) -> Self {
+        Self {
+            pmf1_digest: fixture.pmf1_digest,
+            release_digest: fixture.release_digest,
+            owner: fixture.owner,
+            epoch: fixture.epoch,
+            public_key: fixture.public_key,
+        }
     }
 }
 
