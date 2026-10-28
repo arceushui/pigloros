@@ -921,9 +921,10 @@ fn approval_refused(
     Ok((outcome, untouched && port.calls() == 1))
 }
 
-/// FU-6 (#626; ADR-061 revision 8 decision 13 and owner decision O-10, which narrowed D8 until
-/// this test existed): an approval failure injected at the Tick-Boundary commit. For every typed
-/// approval refusal the pass fails with `AtomicCommitFailed` and a deterministic typed result,
+/// FU-6: an approval failure injected at the Tick-Boundary commit.
+///
+/// ADR-061 revision 8 decision 13 and owner decision O-10 narrowed D8 until this test existed
+/// (#626). For every typed approval refusal the pass fails with `AtomicCommitFailed` and a deterministic typed result,
 /// whose class is `Authoritative` (a store error is the other class, `Operational`); each
 /// member's staged output is discarded and its outcome record is `Discarded`; nothing commits,
 /// nobody is quarantined and every slot is empty. The next pass commits from the initial state,

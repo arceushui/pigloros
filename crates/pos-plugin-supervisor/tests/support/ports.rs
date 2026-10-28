@@ -323,8 +323,9 @@ impl FactualPrefixReadPortV1 for StampedPort<'_> {
     }
 }
 
-/// A port whose approval of the staged batch at the Tick-Boundary commit refuses it with a typed
-/// outcome, as the store's own approval (the authority and policy check of
+/// A port that refuses the staged batch at the Tick-Boundary commit with a typed outcome.
+///
+/// It refuses as the store's own approval (the authority and policy check of
 /// `admit_pipeline_batch`) does when the authority is revoked or expired or the policy cannot be
 /// determined: the store commits nothing and the outcome is returned.
 ///
