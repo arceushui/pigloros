@@ -2,6 +2,8 @@
 
 use rustix::fs::mkdirat;
 
+mod removal;
+
 use super::{
     open_directory, publish_record, read_record_bytes, registry_io, require_empty,
     validate_directory, verify_intent, Arc, CommittedPlannedAttempt, File, MetadataExt, Mode,
@@ -215,7 +217,7 @@ mod tests {
 
     type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
-    fn fixture() -> TestResult<(tempfile::TempDir, SystemdAttemptRegistry)> {
+    pub(super) fn fixture() -> TestResult<(tempfile::TempDir, SystemdAttemptRegistry)> {
         let (directory, runtime, owner) = super::super::tests::fixture()?;
         fs::create_dir(directory.path().join("attempts"))?;
         fs::set_permissions(
@@ -226,7 +228,7 @@ mod tests {
         Ok((directory, registry))
     }
 
-    fn intent(id: u8) -> TestResult<PlannedAttemptIntent> {
+    pub(super) fn intent(id: u8) -> TestResult<PlannedAttemptIntent> {
         Ok(PlannedAttemptIntent::new([id; 16], [2; 32])?)
     }
 

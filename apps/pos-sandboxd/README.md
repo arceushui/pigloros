@@ -55,6 +55,18 @@ joint observation proves neither a later-start fence nor complete resource
 cleanup; mount/device/directory/intent cleanup and restart reconciliation remain
 #442.
 
+`PreparedAttemptDirectory::remove_unmounted` consumes the held directory
+ownership, rechecks its durable identity record and empty unmounted tree, then
+removes only its exact root and attempt directories through held parent
+descriptors. Each parent is synchronized after removal. Unexpected attempt
+children reject before either directory is removed. The lifecycle controller
+retains exclusive ownership and stops the unit and unmounts the root first.
+The durable intent remains unchanged for later full reconciliation. Read-only
+recovery inventory recognizes the root-removed/attempt-present crash frontier,
+while every surviving directory must match its recorded identity. This stage
+does not prove other resource absence or reopen admission; full cleanup remains
+#442.
+
 `SystemdServiceLimits` accepts the complete ordered, already authorized ELM1
 limit set and compiles IDs 0–6 into the seven exact systemd service properties:
 `MemoryMax`, `MemorySwapMax`, `TasksMax`, `CPUQuotaPerSecUSec`,

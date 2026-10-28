@@ -135,7 +135,7 @@ impl SystemdAttemptRecovery {
         Self::from_directory(RegistryDirectory::open()?)
     }
 
-    fn from_directory(directory: RegistryDirectory) -> RegistryResult<Self> {
+    pub(super) fn from_directory(directory: RegistryDirectory) -> RegistryResult<Self> {
         inventory(&directory).map(|entries| Self { directory, entries })
     }
 

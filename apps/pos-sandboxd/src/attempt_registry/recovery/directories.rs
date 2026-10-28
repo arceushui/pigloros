@@ -39,7 +39,7 @@ impl RecoveredUnmountedDirectory {
         self.observation.attempt
     }
 
-    /// Observed root identity, absent after a crash before root creation.
+    /// Observed root identity, absent before creation or after root removal.
     #[must_use]
     pub const fn root_identity(&self) -> Option<(u64, u64)> {
         self.observation.root
@@ -171,7 +171,9 @@ fn read_directory(
         root: root.as_ref().map(identity).transpose()?,
     };
     if intent.directory_identities.is_some_and(|expected| {
-        expected[0] != observed.attempt || Some(expected[1]) != observed.root
+        // A missing root also occurs between the two directory removals.
+        // Every root that is still present must retain its committed identity.
+        expected[0] != observed.attempt || observed.root.unwrap_or(expected[1]) != expected[1]
     }) {
         return Err(SystemdAttemptRegistryError::UnsafeRegistry);
     }
@@ -329,7 +331,10 @@ mod tests {
                 1 => fs::write(attempt.join("unexpected"), b"not root")?,
                 2 => fs::write(root.join("unexpected"), b"not empty")?,
                 3 => fs::set_permissions(&root, fs::Permissions::from_mode(0o755))?,
-                4 => fs::remove_dir(&root)?,
+                4 => {
+                    fs::remove_dir(&root)?;
+                    fs::write(&root, b"not a directory")?;
+                }
                 5 => {
                     fs::rename(&root, directory.path().join("held-root"))?;
                     private_directory(&root)?;
@@ -350,6 +355,37 @@ mod tests {
             assert!(recovery.inventory_unmounted_directories().is_err());
             assert_eq!(fs::read_dir(directory.path().join("registry"))?.count(), 8);
         }
+        Ok(())
+    }
+
+    #[test]
+    fn partial_removal_inventory_keeps_the_attempt_binding_and_detects_later_changes() -> TestResult
+    {
+        if !in_lock_test_process("attempt_registry::recovery::directories::tests::partial_removal_inventory_keeps_the_attempt_binding_and_detects_later_changes")? {
+            return Ok(());
+        }
+        let (directory, recovery) = fixture()?;
+        let root = directory.path().join("attempts").join(key(4)?).join("root");
+        // Keep the removed inode pinned so a new root cannot reuse its number.
+        let held_root = File::open(&root)?;
+        let original = recovery.inventory_unmounted_directories()?;
+        fs::remove_dir(&root)?;
+        assert!(original.verify_unchanged().is_err());
+        drop(original);
+        let partial = recovery.inventory_unmounted_directories()?;
+        let entry = partial
+            .directories()
+            .iter()
+            .find(|entry| entry.intent().attempt_id() == [4; 16])
+            .ok_or("missing surviving attempt")?;
+        assert!(entry.identity_was_committed());
+        assert_eq!(entry.root_identity(), None);
+        partial.verify_unchanged()?;
+        private_directory(&root)?;
+        assert_ne!(identity(&File::open(&root)?)?, identity(&held_root)?);
+        assert!(partial.verify_unchanged().is_err());
+        assert!(recovery.inventory_unmounted_directories().is_err());
+        assert_eq!(fs::read_dir(directory.path().join("registry"))?.count(), 8);
         Ok(())
     }
 
