@@ -38,6 +38,8 @@ use crate::{PlannedAttemptIntent, StagingLedger, StagingLimits, SystemdAttemptRe
 type BoxError = Box<dyn Error + Send + Sync>;
 type TestResult = Result<(), BoxError>;
 
+mod release;
+
 const PRIVILEGED_COMPOSITION_TEST: &str = "PIGLOROS_PRIVILEGED_COMPOSITION_TEST";
 const VETO: &str = "systemd.allow_userspace_verity=0";
 
@@ -164,6 +166,7 @@ fn edit_loop(observed: &mut Observations, edit: impl FnOnce(&mut LoopDevice)) {
 struct PreparedTree {
     runtime: tempfile::TempDir,
     prepared: PreparedAttemptDirectory,
+    registry: SystemdAttemptRegistry,
 }
 
 fn prepared_tree() -> Result<PreparedTree, BoxError> {
@@ -180,7 +183,11 @@ fn prepared_tree() -> Result<PreparedTree, BoxError> {
     let prepared = registry
         .commit_planned(&PlannedAttemptIntent::new([7; 16], [9; 32])?)?
         .prepare_directory()?;
-    Ok(PreparedTree { runtime, prepared })
+    Ok(PreparedTree {
+        runtime,
+        prepared,
+        registry,
+    })
 }
 
 fn component(prepared: &PreparedAttemptDirectory) -> String {
