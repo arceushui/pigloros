@@ -144,7 +144,7 @@ impl PreparedAttemptDirectory {
 
     /// Hold registry ownership while verifying the recorded attempt's ancestors
     /// and performing an attached-root operation. The operation must verify the
-    /// mount separately: opening `root` with NO_XDEV would reject an attachment.
+    /// mount separately: opening `root` with `NO_XDEV` would reject an attachment.
     /// Cleanup may run after quarantine, but cannot clear it.
     pub(crate) fn with_verified_parent<E>(
         &self,
