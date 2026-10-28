@@ -207,6 +207,41 @@ fn every_invocation_gets_a_fresh_worker_process() {
     assert_eq!(field(&first, "ppid"), field(&second, "ppid"));
 }
 
+/// #660: the launch count adds one for every worker that was launched, however its invocation
+/// ended, is shared by clones, and adds nothing for a call refused before the launch or for a
+/// worker that cannot start.
+#[test]
+fn the_launch_count_is_one_per_launched_worker_and_shared_by_clones() {
+    let worker = supervisor(PROBE, PROMPT);
+    let clone = worker.clone();
+    assert_eq!(worker.worker_launches(), 0);
+    let refused = worker.reduce(None, &negotiated(), b"output", &invocation(), INPUTS);
+    assert_eq!(refused, Err(UNAVAILABLE));
+    let component = vec![0; 33_554_433];
+    let oversized = describe_on(&worker, &component);
+    assert_eq!(oversized, Err(Error::InvalidInvocation));
+    assert_eq!(worker.worker_launches(), 0, "refused before the launch");
+    assert!(reduce_on(&worker, b"output", &invocation()).is_ok());
+    assert_eq!(worker.worker_launches(), 1);
+    assert_eq!(describe_on(&clone, b"exit"), Err(Error::WorkerCrashed));
+    assert_eq!(worker.worker_launches(), 2, "a crashed worker was launched");
+    assert!(drive_on(&clone, b"output", &invocation()).is_ok());
+    assert_eq!(worker.worker_launches(), 3);
+    assert_eq!(clone.worker_launches(), 3);
+    let other = supervisor(PROBE, PROMPT);
+    assert_eq!(
+        other.worker_launches(),
+        0,
+        "another supervisor counts apart"
+    );
+    let missing = unlaunchable();
+    assert_eq!(
+        describe_on(&missing, b"describe"),
+        Err(Error::WorkerCrashed)
+    );
+    assert_eq!(missing.worker_launches(), 0, "no worker started");
+}
+
 #[test]
 fn returned_values_are_checked_by_the_supervisor() {
     let report = ok(reduce(b"output"));
