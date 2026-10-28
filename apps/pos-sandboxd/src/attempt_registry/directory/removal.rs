@@ -29,9 +29,8 @@ impl PreparedAttemptDirectory {
     /// directory already removed. New commits remain closed and recovery must
     /// inspect the retained intent and surviving directory identities.
     pub fn remove_unmounted(self) -> RemovalResult {
-        let mut state = match self.planned.state.lock() {
-            Ok(state) => state,
-            Err(_) => return Err(SystemdAttemptRegistryError::ReconciliationRequired),
+        let Ok(mut state) = self.planned.state.lock() else {
+            return Err(SystemdAttemptRegistryError::ReconciliationRequired);
         };
         let result = self
             .verify_record_and_tree()
@@ -231,10 +230,20 @@ mod tests {
 
     #[test]
     fn quarantine_is_preserved_and_poisoned_ownership_never_removes() -> TestResult {
-        for poisoned in [false, true] {
+        for (poisoned, nonempty) in [(false, false), (false, true), (true, false)] {
             let (runtime, registry) = fixture()?;
             let planned = intent(1)?;
             let directory = registry.commit_planned(&planned)?.prepare_directory()?;
+            if nonempty {
+                fs::write(
+                    runtime
+                        .path()
+                        .join("attempts")
+                        .join(planned.unit_name().attempt_component())
+                        .join("root/unexpected"),
+                    b"retained",
+                )?;
+            }
             if poisoned {
                 assert!(std::panic::catch_unwind(|| {
                     let _guard = registry.state.lock();
@@ -249,14 +258,14 @@ mod tests {
                     .failed = true;
             }
             let result = directory.remove_unmounted();
-            assert_eq!(result.is_err(), poisoned);
+            assert_eq!(result.is_err(), poisoned || nonempty);
             assert_eq!(
                 runtime
                     .path()
                     .join("attempts")
                     .join(planned.unit_name().attempt_component())
                     .exists(),
-                poisoned
+                poisoned || nonempty
             );
             assert!(registry.commit_planned(&intent(2)?).is_err());
         }
