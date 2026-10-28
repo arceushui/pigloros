@@ -5242,6 +5242,11 @@ fn typical_plan() -> Plan {
 /// of one verified-prefix Driver costs 17 nodes and 61 edges, the R4
 /// baseline of 17 and 60 plus the one edge from the prefix node to `F(T)`.
 ///
+/// The scenario is constructed (13 outputs, 29 declared nodes) to land on the
+/// R4 baseline of 60 edges without the prefix node's input; it is not the
+/// R3/R4 "typical" model. Dropping that one input costs exactly one edge, so
+/// the pinned 61 and `edges_into(PREFIX) == 1` fail together.
+///
 /// The nodes are the snapshot, the prefix, the step, 13 outputs and one fold
 /// node. The edges are the snapshot's (1), the prefix's (1), the fold node's
 /// head and 13 outputs of the previous Tick (14), the step's snapshot, chain,
@@ -5274,8 +5279,6 @@ fn a_typical_tick_costs_17_nodes_and_61_edges_one_edge_more_than_the_r4_baseline
         // The first Tick has no chain, no head and one raw Event to record;
         // from the second one on, every Tick costs the same.
         assert_eq!(costs[1..], [(17, 61); 3], "{name}");
-        // Without the prefix node's input the edges are the R4 baseline.
-        assert_eq!(costs[1].1 - 1, 60, "{name}");
     }
 }
 
