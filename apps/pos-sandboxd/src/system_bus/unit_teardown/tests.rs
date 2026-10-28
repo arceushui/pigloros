@@ -494,13 +494,18 @@ mod cases {
     async fn invalid_and_expired_budgets_issue_no_commands() -> TestResult {
         let mut fixture = Fixture::new(9, Stop::Empty, Reset::Unload).await?;
         let (shutdown, _) = budgets()?;
-        assert!(matches!(
-            fixture
-                .transport
-                .stop_attempt_unit(&mut fixture.bound, shutdown, shutdown.overall())
-                .await,
-            Err(SystemdAttemptUnitTeardownError::InvalidDeadlines)
-        ));
+        for deadline in [
+            shutdown.overall(),
+            shutdown.overall() - Duration::from_millis(1),
+        ] {
+            assert!(matches!(
+                fixture
+                    .transport
+                    .stop_attempt_unit(&mut fixture.bound, shutdown, deadline)
+                    .await,
+                Err(SystemdAttemptUnitTeardownError::InvalidDeadlines)
+            ));
+        }
         let now = Instant::now();
         let expired = AttemptShutdownDeadlines::new(
             now - Duration::from_millis(3),
