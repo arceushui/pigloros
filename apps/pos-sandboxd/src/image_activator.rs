@@ -152,8 +152,8 @@ pub enum ImageActivationError {
     /// could not be attached to it.
     #[error("the quarantined root mount could not be attached")]
     AttachFailure,
-    /// A rejected, attached root mount could not be detached again.
-    #[error("the rejected root mount could not be detached")]
+    /// An owned, attached root mount could not be detached.
+    #[error("the owned root mount could not be detached")]
     TeardownFailure,
 }
 

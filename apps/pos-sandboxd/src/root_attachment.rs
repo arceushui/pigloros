@@ -28,6 +28,7 @@
 
 mod cmdline;
 mod observe;
+mod release;
 mod verify;
 
 use std::{
@@ -65,15 +66,15 @@ trait AttachmentKernel {
         root: &File,
         executable: &str,
     ) -> Observations;
-    /// Detach a rejected, attached mount.
+    /// Detach an owned, attached mount.
     fn detach(&self, mount: BorrowedFd<'_>) -> Result<(), ImageActivationError>;
 }
 
 /// The admitted SIM1 root, attached at its attempt path and read back.
 ///
 /// It holds the attached mount's descriptor. Dropping it leaves the mount
-/// attached; stopping the unit, detaching and proving loop and dm-verity
-/// removal belong to the attempt lifecycle.
+/// attached. The attempt lifecycle must stop the unit before explicitly calling
+/// [`Self::detach`], and prove loop and dm-verity removal afterwards.
 #[derive(Debug)]
 pub struct VerifiedRootMount {
     mount: OwnedFd,
@@ -141,6 +142,33 @@ impl VerifiedRootMount {
                 .map(|root| CheckedRoot::rechecked(root, admitted))
             })
     }
+
+    fn verify_mount(
+        &self,
+        kernel: &impl AttachmentKernel,
+        directory: &PreparedAttemptDirectory,
+    ) -> Result<(), ImageActivationError> {
+        let (attempt, held_root) = directory.held_directories();
+        (self.expected.root_directory
+            == ActivatedRootDirectory::for_attempt(
+                directory.intent().unit_name().attempt_component(),
+            ))
+        .then_some(())
+        .ok_or(ImageActivationError::EvidenceMismatch)
+        .and_then(|()| {
+            self.expected.verify(&kernel.observe(
+                self.mount(),
+                attempt,
+                held_root,
+                &self.expected.executable_path,
+            ))
+        })
+        .and_then(|mount_id| {
+            (mount_id == self.mount_id)
+                .then_some(())
+                .ok_or(ImageActivationError::EvidenceMismatch)
+        })
+    }
 }
 
 /// Whether `candidate`, derived from an entry's admission, is exactly what a
@@ -156,24 +184,12 @@ fn recheck<K: AttachmentKernel>(
     activated: Option<&Expected>,
     authority: impl FnOnce() -> Result<(), StagingError>,
 ) -> Result<ActivatedRootDirectory, ImageActivationError> {
-    let (attempt, held_root) = directory.held_directories();
     binds(&root.expected, activated)
         .then_some(())
         .ok_or(ImageActivationError::EvidenceMismatch)
         .and_then(|()| authority().map_err(|_| ImageActivationError::EvidenceMismatch))
-        .and_then(|()| {
-            root.expected.verify(&kernel.observe(
-                root.mount.as_fd(),
-                attempt,
-                held_root,
-                &root.expected.executable_path,
-            ))
-        })
-        .and_then(|mount_id| {
-            (mount_id == root.mount_id)
-                .then(|| root.expected.root_directory.clone())
-                .ok_or(ImageActivationError::EvidenceMismatch)
-        })
+        .and_then(|()| root.verify_mount(kernel, directory))
+        .map(|()| root.expected.root_directory.clone())
 }
 
 /// Activate, attach and verify the admitted SIM1 root of one attempt.
