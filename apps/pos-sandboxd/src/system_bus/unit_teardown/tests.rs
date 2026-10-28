@@ -33,7 +33,7 @@ mod cases {
     #[derive(Clone, Copy)]
     enum Stop {
         Empty,
-        Ack,
+        LeavesPopulated,
     }
 
     #[derive(Clone, Copy)]
@@ -45,9 +45,14 @@ mod cases {
         NearMatch,
         Hang,
         Delayed(Duration),
+    }
+
+    #[derive(Clone, Copy)]
+    enum Lookup {
+        Unchanged,
         Repopulate,
         Replace,
-        LookupDenied,
+        Denied,
     }
 
     #[derive(Debug, PartialEq)]
@@ -61,6 +66,7 @@ mod cases {
     struct State {
         subscribed: bool,
         loaded: bool,
+        lookup: Lookup,
         calls: Vec<Call>,
         reset_serial: Option<NonZeroU32>,
         get_serial: Option<NonZeroU32>,
@@ -143,7 +149,7 @@ mod cases {
                 Reset::KeepLoaded => return Ok(()),
                 Reset::Hang => return std::future::pending().await,
                 Reset::Delayed(delay) => sleep(delay).await,
-                Reset::Unload | Reset::Repopulate | Reset::Replace | Reset::LookupDenied => {}
+                Reset::Unload => {}
             }
             self.state.lock().map_err(failed)?.loaded = false;
             Ok(())
@@ -154,30 +160,30 @@ mod cases {
             name: String,
             #[zbus(header)] header: Header<'_>,
         ) -> Result<OwnedObjectPath, BoxDBusError> {
-            let loaded = {
+            let (loaded, lookup) = {
                 let mut state = self.state.lock().map_err(failed)?;
                 state.calls.push(Call::Get(name));
                 state.get_serial = Some(header.primary().serial_num());
-                let loaded = state.loaded;
+                let observed = (state.loaded, state.lookup);
                 drop(state);
-                loaded
+                observed
             };
-            match self.reset {
-                Reset::Repopulate => {
+            match lookup {
+                Lookup::Repopulate => {
                     fs::write(self.directory.join("cgroup.events"), b"populated 1\n")
                         .map_err(failed)?;
                 }
-                Reset::Replace => {
+                Lookup::Replace => {
                     fs::rename(&self.directory, self.directory.with_file_name("original"))
                         .map_err(failed)?;
                     fs::create_dir(&self.directory).map_err(failed)?;
                     fs::write(self.directory.join("cgroup.events"), b"populated 0\n")
                         .map_err(failed)?;
                 }
-                Reset::LookupDenied => {
+                Lookup::Denied => {
                     return Err(fdo::Error::AccessDenied("query denied".to_owned()).into());
                 }
-                _ => {}
+                Lookup::Unchanged => {}
             }
             if loaded {
                 OwnedObjectPath::try_from("/org/freedesktop/systemd1/unit/attempt")
@@ -228,6 +234,7 @@ mod cases {
             let state = Arc::new(Mutex::new(State {
                 subscribed: false,
                 loaded: true,
+                lookup: Lookup::Unchanged,
                 calls: Vec::new(),
                 reset_serial: None,
                 get_serial: None,
@@ -301,7 +308,7 @@ mod cases {
 
     #[tokio::test(start_paused = true)]
     async fn escalation_finishes_before_reset_and_unit_removal() -> TestResult {
-        let mut fixture = Fixture::new(2, Stop::Ack, Reset::Unload).await?;
+        let mut fixture = Fixture::new(2, Stop::LeavesPopulated, Reset::Unload).await?;
         let (shutdown, deadline) = budgets()?;
         let observed = fixture
             .transport
@@ -353,8 +360,13 @@ mod cases {
 
     #[tokio::test(start_paused = true)]
     async fn reset_and_lookup_errors_never_establish_joint_absence() -> TestResult {
-        for reset in [Reset::Denied, Reset::NearMatch, Reset::LookupDenied] {
+        for (reset, lookup) in [
+            (Reset::Denied, Lookup::Unchanged),
+            (Reset::NearMatch, Lookup::Unchanged),
+            (Reset::Unload, Lookup::Denied),
+        ] {
             let mut fixture = Fixture::new(4, Stop::Empty, reset).await?;
+            fixture.state.lock().map_err(|_| "poisoned fixture")?.lookup = lookup;
             let (shutdown, deadline) = budgets()?;
             let error = fixture
                 .transport
@@ -363,7 +375,7 @@ mod cases {
                 .err()
                 .ok_or("manager rejection was accepted")?;
             assert!(error.source().is_some());
-            if matches!(reset, Reset::LookupDenied) {
+            if matches!(lookup, Lookup::Denied) {
                 assert!(matches!(
                     error,
                     SystemdAttemptUnitTeardownError::Transport(
@@ -428,8 +440,9 @@ mod cases {
     #[tokio::test(start_paused = true)]
     async fn manager_absence_cannot_replace_the_final_kernel_identity_and_empty_check() -> TestResult
     {
-        for reset in [Reset::Repopulate, Reset::Replace] {
-            let mut fixture = Fixture::new(7, Stop::Empty, reset).await?;
+        for lookup in [Lookup::Repopulate, Lookup::Replace] {
+            let mut fixture = Fixture::new(7, Stop::Empty, Reset::Unload).await?;
+            fixture.state.lock().map_err(|_| "poisoned fixture")?.lookup = lookup;
             let (shutdown, deadline) = budgets()?;
             let result = fixture
                 .transport

@@ -92,18 +92,24 @@ impl SystemdTransientUnitTransport {
             return Err(SystemdAttemptUnitTeardownError::DeadlineElapsed);
         }
         let observed = timeout_at(deadline, async {
-            let stopped = cgroup.stop_processes(self, shutdown).await?;
-            let name = stopped.unit_name().clone();
-            let unit_absence =
-                remove_with_proxy(ManagerProxy::new(&self.connection).await, name, deadline)
-                    .await?;
-            let cgroup_empty = cgroup
-                .observe_empty()
-                .map_err(AttemptShutdownError::Cgroup)?;
-            Ok(SystemdAttemptUnitTeardownObservation {
-                unit_absence,
-                cgroup_empty,
-            })
+            match cgroup.stop_processes(self, shutdown).await {
+                Err(error) => Err(SystemdAttemptUnitTeardownError::Shutdown(error)),
+                Ok(stopped) => {
+                    let name = stopped.unit_name().clone();
+                    remove_with_proxy(ManagerProxy::new(&self.connection).await, name, deadline)
+                        .await
+                        .and_then(|unit_absence| {
+                            cgroup
+                                .observe_empty()
+                                .map(|cgroup_empty| SystemdAttemptUnitTeardownObservation {
+                                    unit_absence,
+                                    cgroup_empty,
+                                })
+                                .map_err(AttemptShutdownError::Cgroup)
+                                .map_err(SystemdAttemptUnitTeardownError::Shutdown)
+                        })
+                }
+            }
         })
         .await
         .unwrap_or(Err(SystemdAttemptUnitTeardownError::DeadlineElapsed));
@@ -119,10 +125,20 @@ async fn remove_with_proxy(
     name: TransientServiceUnitName,
     deadline: Instant,
 ) -> Result<SystemdAttemptUnitAbsenceObservation, SystemdAttemptUnitTeardownError> {
-    let proxy = proxy.map_err(SystemdTransientUnitTransportError::Proxy)?;
-    match proxy.reset_failed_unit(name.as_str().to_owned()).await {
-        Err(zbus::Error::MethodError(name, _, _)) if name.as_str() == NO_SUCH_UNIT => {}
-        result => result.map_err(SystemdAttemptUnitTeardownError::ResetFailed)?,
+    let proxy = match proxy {
+        Ok(proxy) => proxy,
+        Err(error) => {
+            return Err(SystemdAttemptUnitTeardownError::Transport(
+                SystemdTransientUnitTransportError::Proxy(error),
+            ));
+        }
+    };
+    let reset = match proxy.reset_failed_unit(name.as_str().to_owned()).await {
+        Err(zbus::Error::MethodError(name, _, _)) if name.as_str() == NO_SUCH_UNIT => Ok(()),
+        result => result,
+    };
+    if let Err(error) = reset {
+        return Err(SystemdAttemptUnitTeardownError::ResetFailed(error));
     }
     if Instant::now() >= deadline {
         return Err(SystemdAttemptUnitTeardownError::DeadlineElapsed);
