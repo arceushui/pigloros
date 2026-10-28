@@ -4,7 +4,8 @@
 
 use ciborium::value::Value;
 use pos_conformance::counterfactual::dependency::{
-    DependencyClassificationRuleV1, DependencyTickRangeV1, InputDependencyV1,
+    DependencyClassificationRuleV1, DependencyTickRangeV1, InputDependencyContractErrorV1,
+    InputDependencyV1,
 };
 use pos_conformance::{DependencyClassV1, DependencyNodeV1};
 use pos_core::output_policy::OutputAuthorityV1;
@@ -301,5 +302,70 @@ fn assembled_fold_part_edges_decode_in_the_conformance_codec() -> TestResult {
     let observation = FactualHostOwnerV1::Observation.as_str();
     let into_snapshot = (fold.to_owned(), observation.to_owned());
     assert!(pairs.contains(&into_snapshot));
+    Ok(())
+}
+
+/// ADR-064 R6, 4.1 (conformance test 6): the history and verified-prefix nodes
+/// of a Tick that has a fold part input its last `host.lineage` node, and
+/// every such edge decodes in the conformance codec in `IDP1` order: the
+/// history owner ID sorts after `host.lineage`.
+#[test]
+fn the_history_and_prefix_edges_to_the_fold_chain_decode_in_the_conformance_codec() -> TestResult {
+    let mut tick = scheduled_tick()?;
+    tick.fold = Some(Box::new(fold_source(4_095)?));
+    let shape = FactualTickShapeV1::Scheduled(tick);
+    let assembled = assemble_factual_tick(&fold_context()?, &shape)?;
+    let pairs = decoded_owner_pairs(assembled.record())?;
+    let lineage = FactualHostOwnerV1::Fold.as_str();
+    for consumer in [FactualHostOwnerV1::History, FactualHostOwnerV1::Prefix] {
+        let into = |pair: &&(String, String)| pair.0 == lineage && pair.1 == consumer.as_str();
+        assert_eq!(
+            pairs.iter().filter(into).count(),
+            1,
+            "{}",
+            consumer.as_str()
+        );
+    }
+    Ok(())
+}
+
+/// The edge from a `host.lineage` node of Tick 4 to a history node of the
+/// same Tick under the owner ID `consumer`, at the same scheduler position.
+fn lineage_to_history_edge(consumer: &str) -> TestResult<InputDependencyV1> {
+    let rule = FactualRuleV1::ConsumedHistory;
+    Ok(InputDependencyV1 {
+        consumer: node(4, 0, consumer, 0x22),
+        source: node(4, 0, FactualHostOwnerV1::Fold.as_str(), 0x11),
+        dependency_class: class_of(rule.class().code())?,
+        tick_range: DependencyTickRangeV1 {
+            first_tick: 4,
+            last_tick: 4,
+        },
+        authorization_digest: GRANT,
+        classification_rule: DependencyClassificationRuleV1 {
+            rule_id: rule.rule_id().to_owned(),
+            rule_version: FactualRuleV1::VERSION,
+        },
+        provenance_digest: [0x44; 32],
+    })
+}
+
+/// ADR-064 R6, 4.1 (conformance test 6, negative): the history owner ID the
+/// amendment renames, `host.history`, sorts before `host.lineage`, so an edge
+/// from the fold chain into such a node fails the `IDP1` order in encoding and
+/// in validation, while the same edge into `host.visible-history` decodes.
+/// This is what motivates the rename.
+#[test]
+fn the_pre_rename_history_owner_fails_the_idp1_order_that_the_new_one_meets() -> TestResult {
+    let renamed = FactualHostOwnerV1::History.as_str();
+    assert_eq!(renamed, "host.visible-history");
+    let edge = lineage_to_history_edge(renamed)?;
+    let decoded = InputDependencyV1::from_canonical_cbor(&edge.to_canonical_cbor()?)?;
+    assert_eq!(decoded, edge);
+
+    let old = lineage_to_history_edge("host.history")?;
+    let order = Err(InputDependencyContractErrorV1::NonCanonicalOrder);
+    assert_eq!(old.validate(), order);
+    assert_eq!(old.to_canonical_cbor(), order.map(|()| Vec::new()));
     Ok(())
 }
