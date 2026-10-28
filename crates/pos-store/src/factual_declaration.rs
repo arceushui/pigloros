@@ -221,7 +221,8 @@ pub(crate) fn digest_index(record: &TickDependencyRecordV1) -> DigestIndex<'_> {
 /// Every output node inputs exactly one step node of its Tick, position and
 /// owner; every step node inputs the snapshot node; every host node has the
 /// class of its host owner's rule and declares no input, except the snapshot
-/// node and the fold checkpoint nodes; the fold binding names the fold nodes
+/// node, the fold checkpoint nodes and, by check (xi), the verified-prefix and
+/// history nodes; the fold binding names the fold nodes
 /// (see [`fold_shape_holds`]); a human record holds nothing but its draft
 /// nodes. The store cannot check Driver-output classes, which need the output
 /// policy, nor the step-chain, carried-set, history or verified-prefix
@@ -237,7 +238,32 @@ pub(crate) fn shape_holds(basis: &PipelineAdmissionBasisV1, by_digest: &DigestIn
 fn nodes_and_fold_hold(basis: &PipelineAdmissionBasisV1, by_digest: &DigestIndex<'_>) -> bool {
     let nodes = basis.dependencies().record().nodes();
     let each = nodes.iter().all(|node| node_shape_holds(node, by_digest));
-    each && fold_shape_holds(basis, by_digest)
+    // Every check runs, so the function stays one straight line.
+    let held = [
+        each,
+        fold_shape_holds(basis, by_digest),
+        coarse_inputs_hold(nodes),
+    ];
+    held.iter().all(|check| *check)
+}
+
+/// Check (xi) (ADR-064 R6, 4.3): every verified-prefix and history node
+/// inputs exactly what the snapshot node inputs: the Tick's last fold
+/// checkpoint node, else the head, else nothing. The shape check pins the
+/// snapshot node's input, so this compares with it and needs no registry state.
+fn coarse_inputs_hold(nodes: &[DependencyNodeRecordV1]) -> bool {
+    let snapshot = nodes
+        .iter()
+        .find(|node| is_host_node(node.coordinate(), FactualHostOwnerV1::Observation));
+    let expected = snapshot.map_or(&[][..], DependencyNodeRecordV1::input_digests);
+    [FactualHostOwnerV1::Prefix, FactualHostOwnerV1::History]
+        .into_iter()
+        .flat_map(|owner| {
+            nodes
+                .iter()
+                .filter(move |node| is_host_node(node.coordinate(), owner))
+        })
+        .all(|node| node.input_digests() == expected)
 }
 
 /// Whether one node has the shape its kind requires.
@@ -265,11 +291,18 @@ fn host_node_shape_holds(node: &DependencyNodeRecordV1) -> bool {
 }
 
 /// Whether the host node's inputs are allowed by its rule: only the snapshot
-/// node and the fold checkpoint nodes may declare any (ADR-064 R4.3, (viii)).
+/// node, the fold checkpoint nodes (ADR-064 R4.3, (viii)) and the verified-prefix
+/// and history nodes (ADR-064 R6, 4.3, checked by [`coarse_inputs_hold`]) may
+/// declare any.
 fn inputs_allowed(node: &DependencyNodeRecordV1, rule: Option<FactualRuleV1>) -> bool {
     let may_input = matches!(
         rule,
-        Some(FactualRuleV1::ObservationSnapshot | FactualRuleV1::FoldCheckpoint)
+        Some(
+            FactualRuleV1::ObservationSnapshot
+                | FactualRuleV1::FoldCheckpoint
+                | FactualRuleV1::VerifiedPrefix
+                | FactualRuleV1::ConsumedHistory
+        )
     );
     may_input || node.input_digests().is_empty()
 }
@@ -471,7 +504,9 @@ fn driver_inputs(nodes: &[DependencyNodeRecordV1]) -> BTreeSet<Hash> {
 /// The rest of a scheduled record beside its fold part (ADR-064 R4.2), as
 /// the builder sized it: every node but the fold checkpoint, fold-history and
 /// fold-only ingress nodes, and every edge but those into the fold checkpoint
-/// nodes and the snapshot node. An ingress node is forwarded-needed iff a
+/// nodes and the snapshot node (the edges of the verified-prefix and history
+/// nodes to the fold input are therefore part of the rest, as the builder
+/// reserves them; ADR-064 R6, 4.4). An ingress node is forwarded-needed iff a
 /// step or output node inputs it; one that only a fold checkpoint node inputs
 /// is counted in the fold part. The builder counts such an orphan ingress
 /// node in the rest instead (`assemble_factual_tick` counts every ingress
@@ -666,4 +701,51 @@ fn output_inputs_one_step(node: &DependencyNodeRecordV1, by_digest: &DigestIndex
         })
         .count();
     steps == 1
+}
+
+#[cfg(test)]
+mod tests {
+    use pos_core::RecordedDependencyClassV1;
+
+    use super::*;
+
+    type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn host_node(inputs: Vec<Hash>) -> TestResult<DependencyNodeRecordV1> {
+        let owner = FactualHostOwnerV1::Observation.as_str().to_owned();
+        let schema = FACTUAL_SNAPSHOT_SCHEMA_ID_V1;
+        let content = Hash::from_bytes([2; 32]);
+        let coordinate = DependencyNodeCoordinateV1::try_new(1, 0, owner, 0, schema, content)?;
+        let class = RecordedDependencyClassV1::EndogenousRecomputed;
+        let origin = RecordedNodeOriginV1::Committed;
+        let provenance = Hash::from_bytes([3; 32]);
+        Ok(DependencyNodeRecordV1::try_new(
+            coordinate, class, origin, inputs, provenance,
+        )?)
+    }
+
+    /// ADR-064 R4.3 and R6 (viii): only the snapshot node, the fold checkpoint
+    /// nodes and the verified-prefix and history nodes may declare an input.
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn only_four_host_rules_may_declare_an_input() -> TestResult<()> {
+        let with_input = host_node(vec![Hash::from_bytes([7; 32])])?;
+        let bare = host_node(Vec::new())?;
+        let rules = [
+            (FactualRuleV1::ObservationSnapshot, true),
+            (FactualRuleV1::FoldCheckpoint, true),
+            (FactualRuleV1::VerifiedPrefix, true),
+            (FactualRuleV1::ConsumedHistory, true),
+            (FactualRuleV1::ExternalIngress, false),
+            (FactualRuleV1::FoldHistory, false),
+        ];
+        for (index, (rule, allowed)) in rules.into_iter().enumerate() {
+            assert_eq!(inputs_allowed(&with_input, Some(rule)), allowed, "{index}");
+            assert!(inputs_allowed(&bare, Some(rule)), "{index}");
+        }
+        assert!(!inputs_allowed(&with_input, None));
+        assert!(inputs_allowed(&bare, None));
+        Ok(())
+    }
 }

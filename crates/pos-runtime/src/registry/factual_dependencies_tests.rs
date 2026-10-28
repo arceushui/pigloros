@@ -400,7 +400,7 @@ fn build(
     if let Ok(dependencies) = &built {
         let staged = &pending.factual;
         assert_eq!(staged.step_nodes.len(), pending.driver_ids.len());
-        let history = count_owned_by(dependencies, "host.history");
+        let history = count_owned_by(dependencies, "host.visible-history");
         assert_eq!(staged.history_recorded.len(), history);
     }
     built
@@ -947,8 +947,8 @@ fn a_restored_history_node_is_recorded_once_and_declared_by_the_driver_stepped_l
     let mut pending = registry.pending_step.take().test_ok();
     let deps = build(&registry, &FakePrefix::at(0), &mut pending, 3).test_ok();
 
-    assert_eq!(count_owned_by(&deps, "host.history"), 1);
-    let recorded = digest_of(&deps, "host.history", 0);
+    assert_eq!(count_owned_by(&deps, "host.visible-history"), 1);
+    let recorded = digest_of(&deps, "host.visible-history", 0);
     let first_owner = owner_of(&registry, 0);
     assert!(find(&deps, &first_owner, 0)
         .input_digests()
@@ -981,7 +981,7 @@ fn a_restored_history_node_is_recorded_once_and_declared_by_the_driver_stepped_l
         .test_ok();
     let mut pending = registry.pending_step.take().test_ok();
     let deps = build(&registry, &later, &mut pending, 3).test_ok();
-    assert_eq!(count_owned_by(&deps, "host.history"), 0);
+    assert_eq!(count_owned_by(&deps, "host.visible-history"), 0);
     assert!(find(&deps, &second_owner, 0)
         .input_digests()
         .contains(&recorded));
@@ -1039,7 +1039,7 @@ fn a_pending_history_node_is_recorded_by_the_next_recorded_step() {
     registry.plugins[&id].pass_state.history = HistoryInputV1::Pending { content: hash(46) };
     let mut pending = staged(&mut registry, TimelineId::new(), 0, &[]);
     let deps = build(&registry, &FakePrefix::at(0), &mut pending, 0).test_ok();
-    assert_eq!(count_owned_by(&deps, "host.history"), 1);
+    assert_eq!(count_owned_by(&deps, "host.visible-history"), 1);
     assert_eq!(pending.factual.history_recorded[0].0, hash(46));
 }
 
