@@ -25,6 +25,10 @@ pub struct AttemptShutdownDeadlines {
 }
 
 impl AttemptShutdownDeadlines {
+    pub(crate) const fn overall(self) -> Instant {
+        self.overall
+    }
+
     /// Bound stop plus grace, the unit SIGKILL call, and final observation.
     ///
     /// # Errors

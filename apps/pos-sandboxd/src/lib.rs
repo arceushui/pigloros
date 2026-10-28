@@ -117,6 +117,8 @@ pub use system_bus::{
     SystemdTransientUnitTransportError, SystemdVerifiedStart, TransientServiceUnitName,
     TransientServiceUnitNameError,
 };
+#[cfg(target_os = "linux")]
+pub use system_bus::{SystemdAttemptUnitTeardownError, SystemdAttemptUnitTeardownObservation};
 pub use transient_unit::{
     ActivatedRootDirectory, CheckedRoot, LaunchMode, LauncherInvocation, LauncherSource,
     SystemdManagerReadback, SystemdManagerReadbackOnlyProperty, SystemdServiceLimits,

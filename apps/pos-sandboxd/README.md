@@ -43,6 +43,18 @@ only a point-in-time manager observation. It does not fence later starts or
 prove process/resource absence, authorize unmount or intent deletion, or reopen
 admission. Complete lifecycle ownership and cleanup remain #442.
 
+`stop_attempt_unit` joins the retained cgroup's bounded stop/grace/escalation
+with exact-name unit removal. After kernel process emptiness, it resets only
+that unit's failed state so systemd can collect it, waits for fresh `GetUnit`
+absence, and rechecks the retained cgroup identity and emptiness. The process
+shutdown budget must leave time before one absolute final deadline. Reset
+acknowledgement, including `NoSuchUnit`, cannot substitute for the fresh query.
+The lifecycle controller retains exclusive ownership and captures terminal
+systemd state before teardown, since unloading discards that state. The sealed
+joint observation proves neither a later-start fence nor complete resource
+cleanup; mount/device/directory/intent cleanup and restart reconciliation remain
+#442.
+
 `SystemdServiceLimits` accepts the complete ordered, already authorized ELM1
 limit set and compiles IDs 0–6 into the seven exact systemd service properties:
 `MemoryMax`, `MemorySwapMax`, `TasksMax`, `CPUQuotaPerSecUSec`,
