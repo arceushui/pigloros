@@ -15,7 +15,7 @@ use thiserror::Error;
 use crate::strict_cbor::{Reader, StrictCborError};
 use crate::subject_cbor::{self, ROLE, VERSION};
 use crate::subject_ciphertext::MAX_SUBJECT_NONCE_COUNTER;
-use crate::subject_key::{parse_subject_owner_id, SUBJECT_OWNER_BYTES};
+use crate::subject_key::{parse_subject_owner_id, SubjectKeyUseV1, SUBJECT_OWNER_BYTES};
 
 /// Maximum complete SNL1 file size: 1 MiB, including every CBOR header.
 pub const MAX_SUBJECT_NONCE_LEDGER_BYTES: usize = 1_048_576;
@@ -25,7 +25,7 @@ pub const EXHAUSTED_SUBJECT_NONCE_COUNTER: u64 = MAX_SUBJECT_NONCE_COUNTER + 1;
 const MAGIC: [u8; 4] = *b"SNL1";
 const LINUX_STORE_FILE_TAG: u64 = 1;
 
-/// A closed, payload-free SNL1 structural failure.
+/// A closed, payload-free SNL1 structural or counter-transition failure.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum SubjectNonceLedgerErrorV1 {
     /// Wrong magic, type, cardinality, noncanonical CBOR, truncation or suffix.
@@ -46,6 +46,12 @@ pub enum SubjectNonceLedgerErrorV1 {
     /// A store-file identity uses a tag other than the selected Linux tag 1.
     #[error("unsupported SNL1 store-file tag")]
     UnsupportedPlatform,
+    /// No row exactly matches the expected identity, binding and counters.
+    #[error("SNL1 row differs from its expected state")]
+    RowMismatch,
+    /// The selected counter has reached the exhaustion sentinel.
+    #[error("SNL1 counter exhausted")]
+    CounterExhausted,
 }
 
 impl StrictCborError for SubjectNonceLedgerErrorV1 {
@@ -162,6 +168,46 @@ impl SubjectNonceLedgerV1 {
     #[must_use]
     pub fn rows(&self) -> impl ExactSizeIterator<Item = &SubjectNonceLedgerRowV1> {
         self.rows.iter()
+    }
+
+    /// Build a candidate with exactly one counter advanced by one.
+    ///
+    /// The expected row must match every field, including both counters.
+    /// The other counter and every other row are preserved. The last usable
+    /// counter advances to the exhaustion sentinel, which cannot advance again.
+    ///
+    /// This pure operation leaves `self` unchanged and does not reserve an IV.
+    /// Repeating it on the same artifact produces the same candidate. Before
+    /// using the expected counter, the owner adapter must independently check
+    /// registry/root/store authority under its locks and durably commit the
+    /// candidate. A later append failure must never restore the old artifact.
+    ///
+    /// # Errors
+    /// Returns [`SubjectNonceLedgerErrorV1::RowMismatch`] when no exact row
+    /// matches, [`SubjectNonceLedgerErrorV1::CounterExhausted`] for an exhausted
+    /// selected domain, or [`SubjectNonceLedgerErrorV1::BoundsExceeded`] if
+    /// counter encoding growth would exceed the complete 1 MiB file bound.
+    pub fn advance_counter(
+        &self,
+        expected: &SubjectNonceLedgerRowV1,
+        key_use: SubjectKeyUseV1,
+    ) -> Result<Self, SubjectNonceLedgerErrorV1> {
+        self.rows
+            .iter()
+            .position(|row| row == expected)
+            .ok_or(SubjectNonceLedgerErrorV1::RowMismatch)
+            .and_then(|index| {
+                let mut rows = self.rows.clone();
+                let selected = match key_use {
+                    SubjectKeyUseV1::Data => &mut rows[index].data_next,
+                    SubjectKeyUseV1::Bootstrap => &mut rows[index].bootstrap_next,
+                };
+                if *selected == EXHAUSTED_SUBJECT_NONCE_COUNTER {
+                    return Err(SubjectNonceLedgerErrorV1::CounterExhausted);
+                }
+                *selected += 1;
+                Self::new(rows)
+            })
     }
 }
 
