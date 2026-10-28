@@ -168,6 +168,7 @@ mod cases {
                 drop(state);
                 observed
             };
+            drop(header);
             match lookup {
                 Lookup::Repopulate => {
                     fs::write(self.directory.join("cgroup.events"), b"populated 1\n")
