@@ -41,7 +41,7 @@ use pos_reference::provider_admission::HeldImageAdmission;
 
 use self::{
     observe::{HostKernel, Observations},
-    verify::Expected,
+    verify::{Expected, VerifiedMountIdentity},
 };
 use crate::{
     ActivatedRootDirectory, ActivationImage, AdmittedAttempt, AdmittedEntry, CheckedRoot,
@@ -78,7 +78,7 @@ trait AttachmentKernel {
 #[derive(Debug)]
 pub struct VerifiedRootMount {
     mount: OwnedFd,
-    mount_id: u64,
+    identity: VerifiedMountIdentity,
     expected: Expected,
 }
 
@@ -92,7 +92,7 @@ impl VerifiedRootMount {
     /// The kernel mount ID read back for the attached root.
     #[must_use]
     pub const fn mount_id(&self) -> u64 {
-        self.mount_id
+        self.identity.mount.mount_id
     }
 
     /// The attached root mount, for rechecking its identity before launch.
@@ -110,7 +110,7 @@ impl VerifiedRootMount {
     /// was verified against. The installed authority is then re-read and
     /// compared with the provider control floor through `entry`. The mount,
     /// loop, dm-verity and executable readback is repeated and must name the
-    /// same mount ID.
+    /// same mount node, device-mapper UUID and loop name retained at activation.
     /// The returned [`CheckedRoot`] is the only `RootDirectory` a launch input
     /// accepts.
     ///
@@ -163,8 +163,8 @@ impl VerifiedRootMount {
                 &self.expected.executable_path,
             ))
         })
-        .and_then(|mount_id| {
-            (mount_id == self.mount_id)
+        .and_then(|identity| {
+            (identity == self.identity)
                 .then_some(())
                 .ok_or(ImageActivationError::EvidenceMismatch)
         })
@@ -293,12 +293,12 @@ fn attach_and_verify<K: AttachmentKernel>(
                     &expected.executable_path,
                 ))
             })
-            .and_then(|mount_id| recheck().map(|()| mount_id))
+            .and_then(|identity| recheck().map(|()| identity))
             .or_else(|error| kernel.detach(mount.as_fd()).and(Err(error)))
     });
-    verified.map(|mount_id| VerifiedRootMount {
+    verified.map(|identity| VerifiedRootMount {
         mount,
-        mount_id,
+        identity,
         expected: expected.clone(),
     })
 }

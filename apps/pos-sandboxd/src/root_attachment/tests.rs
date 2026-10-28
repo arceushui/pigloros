@@ -368,9 +368,13 @@ fn only_loop_partition_names_name_a_loop_device() {
 fn exactly_the_admitted_private_read_only_erofs_root_is_accepted() {
     let expected = expected("0123456789abcdef0123456789abcdef");
     let mut observed = matching(&expected);
-    assert_eq!(expected.verify(&observed), Ok(41));
+    let identity = expected.verify(&observed);
+    assert_eq!(
+        identity.as_ref().map(|identity| identity.mount.mount_id),
+        Ok(41)
+    );
     edit_slaves(&mut observed, |slaves| slaves.swap(0, 1));
-    assert_eq!(expected.verify(&observed), Ok(41));
+    assert_eq!(expected.verify(&observed), identity);
 }
 
 /// A named edit of the matching readback.
@@ -934,7 +938,12 @@ fn recheck_mints_a_checked_root_only_for_the_same_authority_and_mount() -> TestR
     if let Some(executable) = replaced.executable.as_mut() {
         executable.node.mount_id = 42;
     }
-    assert_eq!(expected.verify(&replaced), Ok(42));
+    assert_eq!(
+        expected
+            .verify(&replaced)
+            .map(|identity| identity.mount.mount_id),
+        Ok(42)
+    );
     assert_eq!(
         recheck(
             &FakeKernel::accepting(replaced),
