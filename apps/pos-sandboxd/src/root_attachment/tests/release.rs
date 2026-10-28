@@ -170,7 +170,7 @@ mod cases {
 
     #[test]
     fn same_image_device_substitutions_refuse_launch_and_detach() -> TestResult {
-        for fault in 0..3 {
+        for fault in 0..4 {
             let tree = prepared_tree()?;
             let record = tree
                 .runtime
@@ -193,11 +193,16 @@ mod cases {
                 1 => edit_mapper(&mut kernel.observations, |mapper| {
                     mapper.uuid = Some("CRYPT-VERITY-another-root".to_owned());
                 }),
-                _ => edit_slaves(&mut kernel.observations, |slaves| {
+                2 => edit_slaves(&mut kernel.observations, |slaves| {
                     for slave in slaves {
                         slave.loop_name = Some("loop8".to_owned());
                     }
                 }),
+                _ => {
+                    let node = kernel.observations.mount.as_mut().ok_or("attached node")?;
+                    node.inode += 1;
+                    kernel.observations.path = Some(*node);
+                }
             }
             // Every replacement still satisfies the admitted image. Refusal
             // must come from retaining the original device identities.
