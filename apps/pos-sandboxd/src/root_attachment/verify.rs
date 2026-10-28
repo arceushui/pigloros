@@ -47,6 +47,16 @@ pub(super) struct Expected {
     pub(super) executable_digest: [u8; 32],
 }
 
+/// The mount and devices accepted together in one complete kernel readback.
+/// Rechecks must retain these identities even when another device could also
+/// satisfy the admitted image's content and partition requirements.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct VerifiedMountIdentity {
+    pub(super) mount: Node,
+    mapper_uuid: String,
+    loop_name: String,
+}
+
 impl Expected {
     /// The admitted SIM1 root and root-verity extents and the held image.
     pub(super) fn for_admission(
@@ -68,7 +78,10 @@ impl Expected {
     }
 
     /// Accept exactly the admitted, private, read-only EROFS root.
-    pub(super) fn verify(&self, observed: &Observations) -> Result<u64, ImageActivationError> {
+    pub(super) fn verify(
+        &self,
+        observed: &Observations,
+    ) -> Result<VerifiedMountIdentity, ImageActivationError> {
         observed
             .mount
             .filter(|mount| {
@@ -84,19 +97,25 @@ impl Expected {
                         executable.node.mount_id == mount.mount_id
                             && executable.blake3 == self.executable_digest
                     })
-                    && observed.mapper.as_ref().is_some_and(|mapper| {
-                        mapper
-                            .uuid
-                            .as_deref()
-                            .is_some_and(|uuid| uuid.starts_with(VERITY_UUID_PREFIX))
-                            && mapper.read_only == Some(1)
-                            && mapper
-                                .slaves
-                                .as_deref()
-                                .is_some_and(|slaves| self.slaves_match(slaves))
+            })
+            .zip(observed.mapper.as_ref())
+            .and_then(|(mount, mapper)| {
+                mapper
+                    .uuid
+                    .as_ref()
+                    .filter(|uuid| {
+                        uuid.starts_with(VERITY_UUID_PREFIX) && mapper.read_only == Some(1)
+                    })
+                    .zip(mapper.slaves.as_deref())
+                    .and_then(|(uuid, slaves)| {
+                        self.verified_loop(slaves)
+                            .map(|loop_name| VerifiedMountIdentity {
+                                mount,
+                                mapper_uuid: uuid.clone(),
+                                loop_name: loop_name.to_owned(),
+                            })
                     })
             })
-            .map(|mount| mount.mount_id)
             .ok_or(ImageActivationError::EvidenceMismatch)
     }
 
@@ -115,22 +134,28 @@ impl Expected {
 
     /// Exactly the root and root-verity partitions of one loop device that
     /// is backed read-only by the held image.
-    fn slaves_match(&self, slaves: &[Slave]) -> bool {
+    fn verified_loop<'a>(&self, slaves: &'a [Slave]) -> Option<&'a str> {
         match slaves {
             [first, second] => {
                 let extents = [first, second].map(extent_of);
-                (extents == [Some(self.root), Some(self.verity)]
-                    || extents == [Some(self.verity), Some(self.root)])
-                    && first.loop_name.is_some()
-                    && first.loop_name == second.loop_name
-                    && [first, second].iter().all(|slave| {
-                        slave
-                            .loop_device
-                            .as_ref()
-                            .is_some_and(|device| self.loop_matches(device))
+                first
+                    .loop_name
+                    .as_deref()
+                    .zip(second.loop_name.as_deref())
+                    .filter(|(first_name, second_name)| {
+                        first_name == second_name
+                            && (extents == [Some(self.root), Some(self.verity)]
+                                || extents == [Some(self.verity), Some(self.root)])
+                            && [first, second].iter().all(|slave| {
+                                slave
+                                    .loop_device
+                                    .as_ref()
+                                    .is_some_and(|device| self.loop_matches(device))
+                            })
                     })
+                    .map(|(name, _)| name)
             }
-            _ => false,
+            _ => None,
         }
     }
 
