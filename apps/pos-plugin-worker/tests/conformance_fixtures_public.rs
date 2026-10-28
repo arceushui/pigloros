@@ -12,6 +12,10 @@
 //! R8-F7b: `res.2` to `res.4` (memory, host-call and `event_bytes` limits of the signed release)
 //! and the `del.2` inputs run on the real worker.
 //!
+//! #625 (ADR-061 revision 8 follow-up FU-5): `res.5` to `res.7`, the `state_bytes`, `log_calls`
+//! and `log_bytes` limits of the signed release, reached by the committed probe guest, run on the
+//! real worker the same way.
+//!
 //! R8-F2c: the load-time link failures `den.03` to `den.12` of the `denied` family give
 //! `IncompatibleAbi` from the real worker. The `denied` case, which also holds the sub-cases
 //! that refuse before a launch, is the failure of its oracle only when every sub-case matched;
@@ -55,7 +59,9 @@ fn the_independent_evaluation_literals_are_the_hosts() -> TestResult {
 }
 
 /// The IDs of the sub-cases of `resource-exhaustion`, one per limit of the signed release.
-const RESOURCE_LIMITS: [&str; 4] = ["res.1", "res.2", "res.3", "res.4"];
+const RESOURCE_LIMITS: [&str; 7] = [
+    "res.1", "res.2", "res.3", "res.4", "res.5", "res.6", "res.7",
+];
 
 #[test]
 fn starved_budgets_are_the_resource_limit_failure() -> TestResult {
@@ -67,9 +73,10 @@ fn starved_budgets_are_the_resource_limit_failure() -> TestResult {
     Ok(())
 }
 
-/// R8-F7b: each limit of the signed release gives its own error at pass level. The case code
-/// `resource-limit` is the failure of the family oracle only when every sub-case matched, so
-/// each sub-case is run alone, with a control whose expected error is another well-formed one.
+/// R8-F7b and #625: each limit of the signed release gives its own error at pass level. The
+/// case code `resource-limit` is the failure of the family oracle only when every sub-case
+/// matched, so each sub-case is run alone, with a control whose expected error is another
+/// well-formed one.
 #[test]
 fn each_resource_limit_gives_its_error_from_the_real_worker() -> TestResult {
     let family = FixtureFamily::ResourceExhaustion;
