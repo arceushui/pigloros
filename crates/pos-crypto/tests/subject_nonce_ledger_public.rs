@@ -2,6 +2,7 @@
 //! Ciborium and a literal vector supply independent encoding oracles.
 
 use ciborium::Value;
+use pos_crypto::subject_key::SubjectKeyUseV1;
 use pos_crypto::subject_nonce_ledger::{
     SubjectNonceLedgerErrorV1 as Error, SubjectNonceLedgerRowV1 as Row,
     SubjectNonceLedgerV1 as Ledger, EXHAUSTED_SUBJECT_NONCE_COUNTER,
@@ -420,16 +421,7 @@ fn rejects_every_truncated_prefix_trailing_data_and_noncanonical_items() -> Test
 #[test]
 fn whole_file_bound_includes_every_header_and_accepts_exactly_one_mib() -> TestResult {
     assert_eq!(MAX_SUBJECT_NONCE_LEDGER_BYTES, 1_048_576);
-    // A minimal row is 85 bytes. The complete header for 12,336 rows is 10.
-    let mut rows = (1..=12_336)
-        .map(|id| Row {
-            owner_id: format!("subject:{id:032x}"),
-            store_file_id: [1, 1],
-            data_next: 1,
-            bootstrap_next: 1,
-            ..row()
-        })
-        .collect::<Vec<_>>();
+    let mut rows = minimal_full_ledger_rows();
     let last = &mut rows[12_335];
     // Integer widths add exactly 2 + 4 bytes to reach the accepted byte bound.
     last.store_file_id = [256, 65_536];
@@ -455,10 +447,203 @@ fn errors_are_closed_and_payload_free() {
         Error::InvalidOrder,
         Error::UnsupportedVersion,
         Error::UnsupportedPlatform,
+        Error::RowMismatch,
+        Error::CounterExhausted,
     ] {
         let copy = error;
         assert_eq!(copy, error);
         assert!(!format!("{error:?}").is_empty());
         assert!(!error.to_string().contains(OWNER));
     }
+}
+
+fn minimal_full_ledger_rows() -> Vec<Row> {
+    // A minimal row is 85 bytes. The complete header for 12,336 rows is 10.
+    (1..=12_336)
+        .map(|id| Row {
+            owner_id: format!("subject:{id:032x}"),
+            store_file_id: [1, 1],
+            data_next: 1,
+            bootstrap_next: 1,
+            ..row()
+        })
+        .collect()
+}
+
+#[test]
+fn counter_candidates_preserve_other_domains_subjects_and_epochs() -> TestResult {
+    let mut rows = vec![
+        row(),
+        Row { epoch: 2, ..row() },
+        Row {
+            owner_id: "subject:ffffffffffffffffffffffffffffffff".to_owned(),
+            ..row()
+        },
+    ];
+    for (index, key_use) in [
+        (0, SubjectKeyUseV1::Data),
+        (1, SubjectKeyUseV1::Bootstrap),
+        (2, SubjectKeyUseV1::Data),
+    ] {
+        let ledger = Ledger::new(rows.clone())?;
+        let original = ledger.clone();
+        let expected = rows[index].clone();
+        let candidate = ledger.advance_counter(&expected, key_use)?;
+        assert_eq!(ledger, original);
+        assert_eq!(ledger.advance_counter(&expected, key_use)?, candidate);
+        match key_use {
+            SubjectKeyUseV1::Data => rows[index].data_next += 1,
+            SubjectKeyUseV1::Bootstrap => rows[index].bootstrap_next += 1,
+        }
+        assert_eq!(candidate.as_bytes(), independent(&rows)?);
+        assert_eq!(candidate.rows().cloned().collect::<Vec<_>>(), rows);
+        assert_eq!(Ledger::from_bytes(candidate.as_bytes())?, candidate);
+        assert_eq!(
+            candidate.advance_counter(&expected, key_use),
+            Err(Error::RowMismatch)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn each_counter_crosses_encoding_boundaries_then_stops_at_exhaustion() -> TestResult {
+    for key_use in [SubjectKeyUseV1::Data, SubjectKeyUseV1::Bootstrap] {
+        for counter in [
+            1,
+            22,
+            23,
+            24,
+            254,
+            255,
+            256,
+            65_534,
+            65_535,
+            65_536,
+            0xffff_fffe,
+            0xffff_ffff,
+        ] {
+            let mut expected = Row {
+                data_next: EXHAUSTED_SUBJECT_NONCE_COUNTER,
+                bootstrap_next: EXHAUSTED_SUBJECT_NONCE_COUNTER,
+                ..row()
+            };
+            match key_use {
+                SubjectKeyUseV1::Data => expected.data_next = counter,
+                SubjectKeyUseV1::Bootstrap => expected.bootstrap_next = counter,
+            }
+            let ledger = Ledger::new([expected.clone()])?;
+            let candidate = ledger.advance_counter(&expected, key_use)?;
+            match key_use {
+                SubjectKeyUseV1::Data => expected.data_next = counter + 1,
+                SubjectKeyUseV1::Bootstrap => expected.bootstrap_next = counter + 1,
+            }
+            assert_eq!(candidate.as_bytes(), independent(&[expected.clone()])?);
+            assert_eq!(Ledger::from_bytes(candidate.as_bytes())?, candidate);
+            if counter == 0xffff_ffff {
+                assert_eq!(
+                    candidate.advance_counter(&expected, key_use),
+                    Err(Error::CounterExhausted)
+                );
+                assert_eq!(candidate.as_bytes(), independent(&[expected])?);
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn counter_candidates_require_the_entire_exact_existing_row() -> TestResult {
+    let expected = row();
+    let ledger = Ledger::new([expected.clone()])?;
+    let original = ledger.clone();
+    let mut mismatches = Vec::new();
+    for replacement in ["subject:ffffffffffffffffffffffffffffffff", "invalid-owner"] {
+        mismatches.push(Row {
+            owner_id: replacement.to_owned(),
+            ..expected.clone()
+        });
+    }
+    mismatches.extend([
+        Row {
+            epoch: 2,
+            ..expected.clone()
+        },
+        Row {
+            epoch: 0,
+            ..expected.clone()
+        },
+        Row {
+            root_material_digest: [0x22; 32],
+            ..expected.clone()
+        },
+        Row {
+            store_file_id: [9, 3],
+            ..expected.clone()
+        },
+        Row {
+            store_file_id: [2, 9],
+            ..expected.clone()
+        },
+        Row {
+            data_next: 2,
+            ..expected.clone()
+        },
+        Row {
+            bootstrap_next: 3,
+            ..expected.clone()
+        },
+    ]);
+    for key_use in [SubjectKeyUseV1::Data, SubjectKeyUseV1::Bootstrap] {
+        assert_eq!(
+            Ledger::new([])?.advance_counter(&expected, key_use),
+            Err(Error::RowMismatch)
+        );
+        for mismatch in &mismatches {
+            assert_eq!(
+                ledger.advance_counter(mismatch, key_use),
+                Err(Error::RowMismatch)
+            );
+        }
+    }
+    assert_eq!(ledger, original);
+    Ok(())
+}
+
+#[test]
+fn counter_encoding_growth_cannot_exceed_the_complete_file_bound() -> TestResult {
+    for key_use in [SubjectKeyUseV1::Data, SubjectKeyUseV1::Bootstrap] {
+        for (counter, store_file_id, growth) in [
+            (23, [256, 65_536], 1),
+            (255, [24, 65_536], 1),
+            (65_535, [1, 65_536], 2),
+            (0xffff_ffff, [1, 256], 4),
+        ] {
+            let mut rows = minimal_full_ledger_rows();
+            let last = &mut rows[12_335];
+            last.store_file_id = store_file_id;
+            match key_use {
+                SubjectKeyUseV1::Data => last.data_next = counter,
+                SubjectKeyUseV1::Bootstrap => last.bootstrap_next = counter,
+            }
+            let expected = last.clone();
+            let ledger = Ledger::new(rows.clone())?;
+            let original = independent(&rows)?;
+            assert_eq!(original.len(), MAX_SUBJECT_NONCE_LEDGER_BYTES);
+            assert_eq!(
+                ledger.advance_counter(&expected, key_use),
+                Err(Error::BoundsExceeded)
+            );
+            assert_eq!(ledger.as_bytes(), original);
+            match key_use {
+                SubjectKeyUseV1::Data => rows[12_335].data_next += 1,
+                SubjectKeyUseV1::Bootstrap => rows[12_335].bootstrap_next += 1,
+            }
+            assert_eq!(
+                independent(&rows)?.len(),
+                MAX_SUBJECT_NONCE_LEDGER_BYTES + growth
+            );
+        }
+    }
+    Ok(())
 }
