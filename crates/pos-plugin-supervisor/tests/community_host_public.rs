@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use pos_core::PluginId;
+use pos_core::{PipelineOutcomeV1, PluginId};
 use pos_plugin_publisher::test_support::{
     encoding::{Material, Spec as Coordinates, TICK, UTC},
     release::Shape,
@@ -25,20 +25,21 @@ use pos_plugin_publisher::test_support::{
 };
 use pos_plugin_release::{BundleAddressV1, ReleaseSourceV1};
 use pos_plugin_supervisor::pass_harness::{
-    initial, FailingPort, GatedSpec, LostPort, PanickingSource, Source, StampedPort,
+    initial, FailingPort, GatedSpec, LostPort, PanickingSource, RefusingPort, Source, StampedPort,
     World as PassWorld,
 };
 use pos_plugin_supervisor::test_support::{self, err};
 use pos_plugin_supervisor::{
-    CommunityMemberV1, CommunityPluginHandleV1, InvocationContextSourceV1, ReceiptDispositionV1,
+    CommunityMemberV1, CommunityPluginHandleV1, CommunityPluginSubjectOutcomeV1,
+    CommunityPluginSubjectResultV1, InvocationContextSourceV1, ReceiptDispositionV1,
 };
 use pos_runtime::community_plugin_host::{
     gate_community_release_v1, AtomicCommitFailureV1, CommunityPassAuthorizationV1,
     CommunityPassOutcomeV1, CommunityPassV1, CommunityPluginExpectationV1,
     CommunityPluginHostErrorV1, CommunityPluginHostV1, CommunityPluginMemberV1,
-    CommunityPluginTrustMaterialV1, CommunityStageV1, MemberPassV1, PassResultV1,
-    PluginTrustMaterialSourceV1, PluginTrustMaterialUnavailableV1, RevocationBasisV1,
-    TrustDenialBasisV1,
+    CommunityPluginModeV1, CommunityPluginTrustMaterialV1, CommunityStageV1, HostFailureClassV1,
+    MemberPassV1, PassResultV1, PluginTrustMaterialSourceV1, PluginTrustMaterialUnavailableV1,
+    RevocationBasisV1, TrustDenialBasisV1,
 };
 use pos_runtime::{PluginAvailabilityV1 as Availability, PluginRegistry, RuntimeError};
 use pos_store::plugin_trust_registry::PluginTrustPolicyRegistryErrorV1 as Reg;
@@ -82,6 +83,19 @@ const INVALID: Error = Error::InvalidInvocation;
 const COMMIT_FAILED: Error = Error::AtomicCommitFailed {
     failure: AtomicCommitFailureV1::Operational,
 };
+/// The classification of an approval failure at the commit: a typed refusal of the batch.
+const NOT_APPROVED: Error = Error::AtomicCommitFailed {
+    failure: AtomicCommitFailureV1::DeterministicTypedResult,
+};
+/// The typed approval refusals of a staged batch at the Tick-Boundary commit: the approval
+/// rejects it, or the store's authority and policy check finds the authority revoked or expired
+/// or the policy indeterminate.
+const APPROVAL_REFUSALS: [PipelineOutcomeV1; 4] = [
+    PipelineOutcomeV1::Rejected,
+    PipelineOutcomeV1::AuthorityRevoked,
+    PipelineOutcomeV1::AuthorityExpired,
+    PipelineOutcomeV1::PolicyIndeterminate,
+];
 
 /// One member of a rig: the Plugin ID, the Event type it owns, the probe behaviour, and whether
 /// its Driver misbehaves or stays out of the registry.
@@ -887,6 +901,81 @@ fn a_failed_admission_discards_the_pass_and_empties_every_slot() -> TestResult {
         assert_eq!(dispositions(handle), [ReceiptDispositionV1::Discarded]);
     }
     assert!(rig.all_slots_empty());
+    Ok(())
+}
+
+/// One pass whose approval at the commit refuses the staged batch with `refusal`, and whether
+/// the refusal was injected exactly once.
+fn approval_refused(
+    rig: &mut Rig,
+    refusal: PipelineOutcomeV1,
+) -> BoxResult<(CommunityPassOutcomeV1, bool)> {
+    let mut clock = wall(UTC)?;
+    let prepared = rig.pass.prepare()?;
+    let mut port = RefusingPort::new(rig.pass.store.as_mut(), refusal);
+    let untouched = port.calls() == 0;
+    let request = prepared.request(TICK, &mut port);
+    let registry = &rig.signed.registry;
+    let host = &mut rig.host;
+    let outcome = host.run_pass(&mut rig.pass.registry, registry, &mut clock, request);
+    Ok((outcome, untouched && port.calls() == 1))
+}
+
+/// FU-6: an approval failure injected at the Tick-Boundary commit.
+///
+/// ADR-061 revision 8 decision 13 and owner decision O-10 narrowed D8 until this test existed
+/// (#626). For every typed approval refusal the pass fails with `AtomicCommitFailed` and a deterministic typed result,
+/// whose class is `Authoritative` (a store error is the other class, `Operational`); each
+/// member's staged output is discarded and its outcome record is `Discarded`; nothing commits,
+/// nobody is quarantined and every slot is empty. The next pass commits from the initial state,
+/// so the refused pass left nothing staged.
+#[test]
+fn an_approval_failure_at_the_commit_discards_the_pass_and_empties_every_slot() -> TestResult {
+    assert_eq!(NOT_APPROVED.name(), "AtomicCommitFailed");
+    assert_eq!(NOT_APPROVED.class(), HostFailureClassV1::Authoritative);
+    assert_eq!(COMMIT_FAILED.class(), HostFailureClassV1::Operational);
+    for refusal in APPROVAL_REFUSALS {
+        let mut rig = Rig::new(&[CHAIN_ALPHA, BETA])?;
+        let (outcome, injected) = approval_refused(&mut rig, refusal.clone())?;
+        assert!(injected, "{refusal:?}");
+        let PassResultV1::Failed { host, error } = &outcome.result else {
+            return Err(format!("{refusal:?} did not fail the pass: {outcome:?}").into());
+        };
+        assert_eq!(*host, Some(NOT_APPROVED), "{refusal:?}");
+        let typed = matches!(
+            &**error,
+            RuntimeError::ScheduledPassNotAdmitted(typed) if **typed == refusal
+        );
+        assert!(typed, "{error:?}");
+        for (entry, part) in outcome.gates.iter().zip(&rig.parts) {
+            let handle = &part.handle;
+            let receipt = entry.invocation_id.and_then(|id| handle.receipt_for(id));
+            assert!(receipt.is_some(), "{refusal:?}: the member launched");
+            let mode = CommunityPluginModeV1::Local;
+            let record =
+                CommunityPluginSubjectOutcomeV1::assemble(entry, TICK, mode, receipt.as_ref());
+            assert_eq!(
+                record.result,
+                CommunityPluginSubjectResultV1::Discarded,
+                "{refusal:?}"
+            );
+            assert_eq!(handle.committed_state(), initial(), "{refusal:?}");
+            assert_eq!(dispositions(handle), [ReceiptDispositionV1::Discarded]);
+            assert_eq!(handle.availability(), Availability::Available);
+            assert_eq!(handle.last_failure(), None, "{refusal:?}");
+        }
+        assert_eq!(outcome.gates.len(), 2);
+        assert!(
+            rig.pass.events().is_empty(),
+            "{refusal:?}: nothing committed"
+        );
+        assert!(rig.all_slots_empty(), "{refusal:?}");
+
+        let next = rig.run()?;
+        assert_eq!(committed_events(&next), Some(2), "{next:?}");
+        assert_eq!(rig.handle(0).committed_state().bytes, b"initial+");
+        assert_eq!(rig.pass.events().len(), 2);
+    }
     Ok(())
 }
 

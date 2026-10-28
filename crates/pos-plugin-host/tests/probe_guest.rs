@@ -12,12 +12,19 @@
 //! `ReservedHostDraft` refusal is proven by PCF-CPH-013 and, for the ADR-119
 //! types, by PCF-CPH-017 of PCH1 version 2, and the pass that `bad-digest`
 //! fails with `InvalidGuestOutput` by PCF-CPH-014, in the PCH1 runner.
+//!
+//! The probe guest also reaches each host-call and output limit of a release
+//! budget exactly (#625): the `res.5` to `res.7` sub-cases of the Plugin
+//! conformance fixtures lower its `state_bytes`, `log_calls` and `log_bytes`
+//! budgets one below what its `drive` uses, and the real worker proves them at
+//! pass level (`apps/pos-plugin-worker/tests/conformance_fixtures_public.rs`).
 
 pub mod common;
 
 use std::sync::LazyLock;
 
 use common::{execution, invocation, ok, options, BUDGET, RUST_GUEST};
+use pos_crypto::plugin_execution::DeterministicBudgetV1;
 use pos_plugin_host::{ComponentHost, GuestExport, LoadedComponent};
 use pos_runtime::community_plugin_host::{
     plugin_output_digest_v1, CommunityPluginHostErrorV1, InvocationOptionsV1, InvocationReportV1,
@@ -135,5 +142,100 @@ fn the_bad_digest_selector_is_invalid_guest_output() {
         let failure = run(&GUESTS.probe, export, b"bad-digest").err();
         let invalid = CommunityPluginHostErrorV1::InvalidGuestOutput;
         assert_eq!(failure, Some(invalid), "{export:?}");
+    }
+}
+
+/// The failure of the probe guest's `drive` of `b"observation"` under `budget`,
+/// or `None` when it returns.
+fn drive_under(budget: DeterministicBudgetV1) -> Option<CommunityPluginHostErrorV1> {
+    let execution = execution(budget);
+    let invocation = invocation(b"observation");
+    GUESTS
+        .host
+        .drive(&GUESTS.probe, &execution, &invocation, OPTIONS)
+        .err()
+}
+
+/// One budget member at exactly what the probe guest's `drive` uses, the same
+/// member one below it, and the error that the lower budget gives.
+struct Bound {
+    name: &'static str,
+    exact: DeterministicBudgetV1,
+    below: DeterministicBudgetV1,
+    error: CommunityPluginHostErrorV1,
+}
+
+/// The `drive` uses three host calls (time, random and log), one Event whose
+/// payload is the 8-byte state, the 8-byte state itself, and one log call
+/// whose message is `drive` (5 bytes).
+const BOUNDS: [Bound; 5] = [
+    Bound {
+        name: "host_calls",
+        exact: DeterministicBudgetV1 {
+            host_calls: 3,
+            ..BUDGET
+        },
+        below: DeterministicBudgetV1 {
+            host_calls: 2,
+            ..BUDGET
+        },
+        error: CommunityPluginHostErrorV1::HostCallLimitExceeded,
+    },
+    Bound {
+        name: "event_bytes",
+        exact: DeterministicBudgetV1 {
+            event_bytes: 8,
+            ..BUDGET
+        },
+        below: DeterministicBudgetV1 {
+            event_bytes: 7,
+            ..BUDGET
+        },
+        error: CommunityPluginHostErrorV1::OutputLimitExceeded,
+    },
+    Bound {
+        name: "state_bytes",
+        exact: DeterministicBudgetV1 {
+            state_bytes: 8,
+            ..BUDGET
+        },
+        below: DeterministicBudgetV1 {
+            state_bytes: 7,
+            ..BUDGET
+        },
+        error: CommunityPluginHostErrorV1::OutputLimitExceeded,
+    },
+    Bound {
+        name: "log_calls",
+        exact: DeterministicBudgetV1 {
+            log_calls: 1,
+            ..BUDGET
+        },
+        below: DeterministicBudgetV1 {
+            log_calls: 0,
+            ..BUDGET
+        },
+        error: CommunityPluginHostErrorV1::OutputLimitExceeded,
+    },
+    Bound {
+        name: "log_bytes",
+        exact: DeterministicBudgetV1 {
+            log_bytes: 5,
+            ..BUDGET
+        },
+        below: DeterministicBudgetV1 {
+            log_bytes: 4,
+            ..BUDGET
+        },
+        error: CommunityPluginHostErrorV1::OutputLimitExceeded,
+    },
+];
+
+#[test]
+fn the_probe_guest_reaches_each_call_and_output_limit_exactly() {
+    for bound in BOUNDS {
+        assert_eq!(drive_under(bound.exact), None, "{}", bound.name);
+        let failure = drive_under(bound.below);
+        assert_eq!(failure, Some(bound.error), "{}", bound.name);
     }
 }

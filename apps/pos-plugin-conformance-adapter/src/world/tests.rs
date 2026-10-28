@@ -89,6 +89,10 @@ struct Fake {
     bind_args: Vec<BindArgsV1>,
     refresh_args: Vec<RefreshArgsV1>,
     pass_args: Vec<PassArgsV1>,
+    /// The scripted launch count, which each `pass` raises by its entry of `pass_launches`
+    /// (none when the script is exhausted).
+    launches: u64,
+    pass_launches: VecDeque<u64>,
 }
 
 impl StepPortV1 for Fake {
@@ -122,6 +126,7 @@ impl StepPortV1 for Fake {
         self.seen_states.push(self.state.clone());
         self.pass_args.push(args.clone());
         self.state = format!("state-{}", self.pass_args.len()).into_bytes();
+        self.launches += self.pass_launches.pop_front().unwrap_or(0);
         let default = Ok(vec![committed([7; 32])]);
         self.passes.pop_front().unwrap_or(default)
     }
@@ -139,6 +144,10 @@ impl StepPortV1 for Fake {
 
     fn outcome_bytes(&self) -> Vec<u8> {
         self.outcome.clone()
+    }
+
+    fn worker_launches(&self) -> u64 {
+        self.launches
     }
 }
 
@@ -215,6 +224,7 @@ fn the_result_of_a_two_pass_subcase_is_the_last_pass_and_the_state_is_carried() 
     let mut fake = Fake::default();
     fake.passes.push_back(Ok(vec![committed([1; 32])]));
     fake.passes.push_back(Ok(vec![committed([2; 32])]));
+    fake.pass_launches.extend([1, 1]);
     let mut steps = prefix();
     steps.push(pass_step(vec![member("p")]));
     let record = run(
@@ -407,7 +417,7 @@ fn an_outcome_that_is_refused_or_failed_stops_the_subcase_and_is_compared() -> T
     let record = run(&mut fake, &subcase("den.20", steps.clone(), expect))?;
     assert!(record.matched);
     assert_eq!(record.steps_run, 3, "the second pass does not run");
-    assert_eq!(record.worker_launches, 0, "no receipt, no launch");
+    assert_eq!(record.worker_launches, 0, "no launch");
 
     let mut fake = Fake::default();
     let failed = outcome(
@@ -418,11 +428,53 @@ fn an_outcome_that_is_refused_or_failed_stops_the_subcase_and_is_compared() -> T
         true,
     );
     fake.passes.push_back(Ok(vec![failed]));
+    fake.pass_launches.push_back(1);
     let expect = json!({"kind": "failed", "error": "FuelExhausted", "class": "Authoritative"});
     let record = run(&mut fake, &subcase("res.1", steps, expect))?;
     assert!(record.matched);
     assert_eq!(record.worker_launches, 1);
     assert_eq!(record.usage, ResourceUsage::default());
+    Ok(())
+}
+
+/// #660: `worker_launches` is the port's launch count across each pass, not the outcomes: a
+/// pass whose outcome carries a profile digest but launched nothing (a reused worker) adds
+/// nothing, a pass adds every worker it launched, and the count the port already had before the
+/// first pass is not the sub-case's.
+#[test]
+fn the_worker_launches_are_the_ports_count_across_each_pass() -> TestResult {
+    let mut fake = Fake {
+        launches: 5,
+        ..Fake::default()
+    };
+    fake.pass_launches.extend([0, 2]);
+    let mut steps = prefix();
+    steps.push(pass_step(vec![member("p")]));
+    let record = run(
+        &mut fake,
+        &subcase("pos.3", steps, committed_expect([7; 32])),
+    )?;
+    assert!(record.matched);
+    assert_eq!(record.outcomes.len(), 2);
+    let launched =
+        |outcome: &CommunityPluginSubjectOutcomeV1| outcome.execution_profile_digest.is_some();
+    assert!(
+        record.outcomes.iter().all(launched),
+        "every outcome carries a digest"
+    );
+    assert_eq!(record.worker_launches, 2);
+    assert_eq!(fake.launches, 7);
+
+    // A pass that could not run still counts the workers it launched.
+    let mut fake = Fake::default();
+    fake.passes.push_back(Err(TRUST));
+    fake.pass_launches.push_back(1);
+    let record = run(
+        &mut fake,
+        &subcase("x", prefix(), committed_expect([7; 32])),
+    )?;
+    assert_eq!(record.setup_refusal, Some(TRUST));
+    assert_eq!(record.worker_launches, 1);
     Ok(())
 }
 

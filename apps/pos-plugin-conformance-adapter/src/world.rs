@@ -58,10 +58,10 @@ pub struct SubCaseRecordV1 {
     pub committed: Option<[u8; 32]>,
     /// The usage of the sub-case: zero unless it committed.
     pub usage: ResourceUsage,
-    /// The worker launches of the passes: the count of outcomes that carry an execution profile
-    /// digest. A proxy (decision 2 lists the field only): a Driver records the digest only
-    /// after it reached the launch. Verified by `r8_s9_*` in
-    /// `apps/pos-plugin-worker/tests/conformance_adapter_public.rs`.
+    /// The worker launches of the passes: the port's [`StepPortV1::worker_launches()`] after
+    /// each `pass` step less the count before it, summed, whether the pass ran or not. It is
+    /// the supervisors' own count of launched workers (#660), so a reused worker adds nothing.
+    /// Verified by `r8_s9_*` in `apps/pos-plugin-worker/tests/conformance_adapter_public.rs`.
     pub worker_launches: u32,
     /// Whether the sub-result equals `expect`.
     pub matched: bool,
@@ -181,7 +181,8 @@ pub enum ResolvedStepV1 {
     Scan(ScanArgsV1),
 }
 
-/// The world a sub-case runs on: one method per step, and the three read-backs of a `scan`.
+/// The world a sub-case runs on: one method per step, the three read-backs of a `scan`, and the
+/// launch count the interpreter reads around each `pass`.
 ///
 /// A refusal is the closed host error of the step. The port keeps the Driver's committed state
 /// across passes and reports the identity of the release that `bind` gated.
@@ -230,6 +231,11 @@ pub trait StepPortV1 {
 
     /// The canonical bytes ([`outcome_bytes_of()`]) of the outcome records of the last pass.
     fn outcome_bytes(&self) -> Vec<u8>;
+
+    /// The workers the Drivers of the open world have launched so far: the sum of their
+    /// supervisors' `CommunityPluginSupervisorV1::worker_launches()`, zero before any `bind`.
+    /// It never decreases while one world is open.
+    fn worker_launches(&self) -> u64;
 }
 
 /// The canonical bytes of the outcome record.
@@ -687,12 +693,24 @@ impl Run<'_> {
                 let result = self.port.refresh(args);
                 self.settle(result)
             }
-            ResolvedStepV1::Pass(args) => match self.port.pass(args) {
-                Ok(outcomes) => self.record_pass(args, &outcomes),
-                Err(error) => self.refuse(error),
-            },
+            ResolvedStepV1::Pass(args) => {
+                let before = self.port.worker_launches();
+                let result = self.port.pass(args);
+                self.count_launches(before);
+                match result {
+                    Ok(outcomes) => self.record_pass(args, &outcomes),
+                    Err(error) => self.refuse(error),
+                }
+            }
             ResolvedStepV1::Scan(scan) => self.scan(scan),
         }
+    }
+
+    /// Add the workers launched since the port's count was `before`.
+    fn count_launches(&mut self, before: u64) {
+        let launched = self.port.worker_launches().saturating_sub(before);
+        let launched = u32::try_from(launched).unwrap_or(u32::MAX);
+        self.record.worker_launches = self.record.worker_launches.saturating_add(launched);
     }
 
     /// Record the outcome of a pass: the first outcome that did not commit, else the last.
@@ -703,11 +721,6 @@ impl Run<'_> {
         outcomes: &[CommunityPluginSubjectOutcomeV1],
     ) -> bool {
         self.invocation = Some(args.invocation_id);
-        let launched = outcomes
-            .iter()
-            .filter(|outcome| outcome.execution_profile_digest.is_some())
-            .count();
-        self.record.worker_launches += u32::try_from(launched).unwrap_or(u32::MAX);
         let decisive = outcomes
             .iter()
             .find(|outcome| !is_committed(outcome))

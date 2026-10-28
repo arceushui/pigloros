@@ -11,11 +11,11 @@
 //! The tests assert nothing about wall time; the per-launch watchdog of the supervisor is the
 //! adapter's constant. Every result here is Local-relaxation engineering evidence.
 //!
-//! `worker_launches` of a sub-case record is a proxy: it counts the outcomes that carry an
-//! execution profile digest, which a Driver records only after it reached the launch. R8-S9
-//! checks it against the number of pass steps, and the "baseline plus three launches" control
-//! of R8-S2 uses the same proxy. The evaluator-path half of R8-S8 lives in
-//! `crates/pos-reference/tests/plugin_subject_public.rs`.
+//! `worker_launches` of a sub-case record, and the launches the recording port captures around
+//! each pass, are the supervisors' own count of launched workers (#660). R8-S9 checks that every
+//! pass of a launching sub-case launched exactly one worker, so a reused worker fails it, and
+//! the "baseline plus three launches" control of R8-S2 uses the same count. The evaluator-path
+//! half of R8-S8 lives in `crates/pos-reference/tests/plugin_subject_public.rs`.
 //!
 //! The sharing of a family run between tests (`OnceLock`) assumes the single-process `cargo
 //! test` runner; under nextest every test is its own process and recomputes the runs it uses.
@@ -92,6 +92,8 @@ struct PassCapture {
     after: Snapshot,
     /// The pass could not run, or a member was refused or failed.
     unsuccessful: bool,
+    /// The workers the pass launched: the port's launch count after it less the count before.
+    launches: u64,
 }
 
 /// One sub-case: its record and the passes it ran.
@@ -135,7 +137,9 @@ impl StepPortV1 for SpyPort {
 
     fn pass(&mut self, args: &PassArgsV1) -> Result<Vec<Outcome>, CommunityPluginHostErrorV1> {
         let before = self.snapshot();
+        let launched_before = self.inner.worker_launches();
         let result = self.inner.pass(args);
+        let launches = self.inner.worker_launches().saturating_sub(launched_before);
         let after = self.snapshot();
         let ended_well = result
             .as_ref()
@@ -144,6 +148,7 @@ impl StepPortV1 for SpyPort {
             before,
             after,
             unsuccessful: !ended_well,
+            launches,
         });
         result
     }
@@ -158,6 +163,10 @@ impl StepPortV1 for SpyPort {
 
     fn outcome_bytes(&self) -> Vec<u8> {
         self.inner.outcome_bytes()
+    }
+
+    fn worker_launches(&self) -> u64 {
+        self.inner.worker_launches()
     }
 }
 
@@ -459,7 +468,9 @@ fn r8_s3_malformed_is_malformed_payload_after_mal_1a_to_mal_6_matched() -> TestR
 
 #[test]
 fn r8_s4_resource_exhaustion_is_resource_limit_within_the_budget() -> TestResult {
-    let ids = ["res.1", "res.2", "res.3", "res.4"];
+    let ids = [
+        "res.1", "res.2", "res.3", "res.4", "res.5", "res.6", "res.7",
+    ];
     assert_family_failure(FixtureFamily::ResourceExhaustion, "resource-limit", &ids)
 }
 
@@ -684,19 +695,25 @@ const LAUNCHING_FAMILIES: [FixtureFamily; 5] = [
     FixtureFamily::IndependentEvaluation,
 ];
 
+/// R8-S9: every pass step of a launching sub-case launched exactly one worker, by the
+/// supervisors' own count (#660). A worker reused by a later pass would leave that pass at zero
+/// launches and fail the test.
 #[test]
 fn r8_s9_every_pass_is_one_fresh_worker_launch() -> TestResult {
     for family in LAUNCHING_FAMILIES {
         for mode in MODES {
             let run = family_run(family, mode)?;
             for id in launching_ids(family, &run) {
-                let launches = capture_of(&run.captures, &id)?.record.worker_launches;
+                let capture = capture_of(&run.captures, &id)?;
+                let passes = pass_count(family, &id)?;
+                let per_pass: Vec<u64> = capture.passes.iter().map(|pass| pass.launches).collect();
+                let one_each = vec![1; usize::try_from(passes)?];
+                assert_eq!(per_pass, one_each, "{family:?} {mode:?} {id}");
                 assert_eq!(
-                    launches,
-                    pass_count(family, &id)?,
+                    capture.record.worker_launches, passes,
                     "{family:?} {mode:?} {id}"
                 );
-                assert!(launches > 0, "{id}");
+                assert!(passes > 0, "{id}");
             }
         }
     }

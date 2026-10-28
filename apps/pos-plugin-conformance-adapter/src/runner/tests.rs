@@ -250,7 +250,10 @@ fn a_worker_that_exits_without_a_reply_is_a_crash_and_the_case_is_unavailable() 
             };
             assert_eq!(record.outcomes[0].result, failed, "{program}");
             assert_eq!(record.outcomes[0].mode, mode);
-            assert_eq!(record.worker_launches, 1);
+            // `/bin/false` starts and is confined, then exits: one launch. A path that holds no
+            // program never starts, so nothing launched although the member crashed (#660).
+            let launched = u32::from(program == "/bin/false");
+            assert_eq!(record.worker_launches, launched, "{program}");
             assert!(!record.matched, "an operational result matches nothing");
             assert_eq!(of_record(&record), Some(SubResultV1::Operational));
             let decided = case_result("c", FixtureFamily::ResourceExhaustion, &[record]);
@@ -546,6 +549,7 @@ fn a_port_is_a_world_port_over_the_program_it_was_given() {
         }),
     );
     assert_eq!(port.outcome_bytes(), Vec::<u8>::new());
+    assert_eq!(port.worker_launches(), 0, "no world, no Driver, no launch");
 }
 
 #[test]

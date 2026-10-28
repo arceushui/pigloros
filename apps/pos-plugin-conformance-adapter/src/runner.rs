@@ -5,7 +5,9 @@
 //! [`SupervisorRunnerV1`] builds the real port, [`EvaluationStepPortV1`], and interprets the
 //! sub-case on it. The port has no logic of its own: it builds the S1c2 world, calls `install`,
 //! `gate_for_driver`, `refresh_policy` and `run_pass` with a fixture wall source at the instant
-//! of the step, builds and registers the Driver of a `bind` step, and reads the world back.
+//! of the step, builds and registers the Driver of a `bind` step, and reads the world back. Its
+//! launch count is the sum of the counts of the supervisors it built, each read through a clone
+//! the port keeps beside the Driver that owns the supervisor.
 
 use std::path::PathBuf;
 use std::sync::{Arc, MutexGuard, PoisonError};
@@ -119,6 +121,8 @@ struct Bound {
     inputs: SharedInputsV1,
     /// The identity of the release this Plugin's `bind` gated.
     identity: ReleaseIdentityV1,
+    /// A clone of the Driver's supervisor, which shares its launch count.
+    supervisor: CommunityPluginSupervisorV1,
 }
 
 /// The world of one sub-case and what the port keeps beside it.
@@ -257,6 +261,7 @@ impl OpenWorld {
         supervisor
             .ok_or(WIRING)
             .and_then(|supervisor| {
+                let counter = supervisor.clone();
                 CommunityDriverConfigV1::from_gated(
                     gated,
                     &CommunityPluginHostAbiV1::v1(),
@@ -264,8 +269,9 @@ impl OpenWorld {
                     &args.plugin_id,
                     settings(supervisor),
                 )
+                .map(|config| (config, counter))
             })
-            .and_then(|config| {
+            .and_then(|(config, counter)| {
                 let (driver, handle) = CommunityDriverV1::new(config);
                 let registered = pin.or(Err(WIRING)).and_then(|pin| {
                     register_community_driver(self.world.plugins_mut(), &plugin, pin, driver)
@@ -276,6 +282,7 @@ impl OpenWorld {
                     handle,
                     inputs,
                     identity,
+                    supervisor: counter,
                 })
             })
     }
@@ -423,6 +430,15 @@ impl StepPortV1 for EvaluationStepPortV1 {
             .as_ref()
             .map(|open| open.outcome.clone())
             .unwrap_or_default()
+    }
+
+    fn worker_launches(&self) -> u64 {
+        self.open.as_ref().map_or(0, |open| {
+            open.bound
+                .iter()
+                .map(|bound| bound.supervisor.worker_launches())
+                .sum()
+        })
     }
 }
 
