@@ -48,7 +48,7 @@ Rust and uses fixed public fixture seeds ("repository-test-fixture-only"); `--ch
 PMF1, PTR1, PRV1, TPS1 and execution-profile vectors of the repository and the official BLAKE3
 vectors (`scripts/data/blake3_test_vectors.json`) before it compares every output. The composites
 carry every sub-case of the catalogue: `pos.1` to `pos.3`, `den.01` to `den.22`, `mal.1a` to
-`mal.6`, `res.1` to `res.4`, `del.1`, `del.2`, `dgr.1` to `dgr.4` and `ind.1` to `ind.4`. Every
+`mal.6`, `res.1` to `res.7`, `del.1`, `del.2`, `dgr.1` to `dgr.4` and `ind.1` to `ind.4`. Every
 `expected/plugin-conformance/*.json` stays `pending` with a null result and a null time
 (`scripts/check_plugin_conformance_expected.py` checks it).
 Payloads are RFC 8785 canonical JSON and, like the oracles, end with one LF byte (the adapter reads
