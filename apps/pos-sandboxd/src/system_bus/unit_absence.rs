@@ -9,7 +9,7 @@ use super::{
     TransientServiceUnitName,
 };
 
-const NO_SUCH_UNIT: &str = "org.freedesktop.systemd1.NoSuchUnit";
+pub(super) const NO_SUCH_UNIT: &str = "org.freedesktop.systemd1.NoSuchUnit";
 const UNIT_POLL: Duration = Duration::from_millis(10);
 
 type AbsenceResult =
@@ -71,7 +71,7 @@ impl SystemdTransientUnitTransport {
     }
 }
 
-async fn wait_with_proxy(
+pub(super) async fn wait_with_proxy(
     proxy: Result<ManagerProxy<'_>, zbus::Error>,
     unit_name: TransientServiceUnitName,
 ) -> AbsenceResult {

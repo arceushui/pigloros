@@ -35,6 +35,10 @@ mod inventory;
 pub use inventory::SystemdAttemptUnitObservation;
 mod unit_absence;
 pub use unit_absence::SystemdAttemptUnitAbsenceObservation;
+#[cfg(target_os = "linux")]
+mod unit_teardown;
+#[cfg(target_os = "linux")]
+pub use unit_teardown::{SystemdAttemptUnitTeardownError, SystemdAttemptUnitTeardownObservation};
 
 /// The deterministic transient service-unit name for one sandbox attempt.
 #[derive(Clone, Debug, Eq, PartialEq)]
