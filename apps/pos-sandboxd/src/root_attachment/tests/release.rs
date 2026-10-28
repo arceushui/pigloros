@@ -6,6 +6,15 @@
 mod cases {
     use super::super::*;
 
+    fn attached_root(
+        directory: &PreparedAttemptDirectory,
+    ) -> Result<(FakeKernel, VerifiedRootMount), BoxError> {
+        let expected = expected(&component(directory));
+        let kernel = FakeKernel::accepting(matching(&expected));
+        let root = attach_and_verify(&kernel, directory, &expected, file_mount()?, || Ok(()))?;
+        Ok((kernel, root))
+    }
+
     #[test]
     fn eight_owned_roots_detach_without_deleting_intent_or_other_directories() -> TestResult {
         let tree = prepared_tree()?;
@@ -21,9 +30,7 @@ mod cases {
             let key = component(&directory);
             let record = tree.runtime.path().join("registry").join(&key);
             let bytes = fs::read(&record)?;
-            let expected = expected(&key);
-            let kernel = FakeKernel::accepting(matching(&expected));
-            let root = attach_and_verify(&kernel, &directory, &expected, file_mount()?, || Ok(()))?;
+            let (kernel, root) = attached_root(&directory)?;
             root.detach_with(&kernel, &directory)?;
             assert_eq!(kernel.detached(), 1);
             assert!(tree
@@ -58,10 +65,7 @@ mod cases {
             let record = tree.runtime.path().join("registry").join(&key);
             let attempts = tree.runtime.path().join("attempts");
             let attempt = attempts.join(&key);
-            let expected = expected(&key);
-            let kernel = FakeKernel::accepting(matching(&expected));
-            let root =
-                attach_and_verify(&kernel, &tree.prepared, &expected, file_mount()?, || Ok(()))?;
+            let (kernel, root) = attached_root(&tree.prepared)?;
             match fault {
                 0 => fs::write(&record, b"changed")?,
                 1 => {
@@ -114,10 +118,7 @@ mod cases {
             let key = component(&tree.prepared);
             let record = tree.runtime.path().join("registry").join(&key);
             let bytes = fs::read(&record)?;
-            let expected = expected(&key);
-            let mut kernel = FakeKernel::accepting(matching(&expected));
-            let root =
-                attach_and_verify(&kernel, &tree.prepared, &expected, file_mount()?, || Ok(()))?;
+            let (mut kernel, root) = attached_root(&tree.prepared)?;
             match fault {
                 0 => kernel.observations.mount = None,
                 1 => kernel.observations.path = None,
@@ -170,9 +171,7 @@ mod cases {
     #[test]
     fn a_quarantined_owner_can_detach_but_never_reopens_admission() -> TestResult {
         let tree = prepared_tree()?;
-        let expected = expected(&component(&tree.prepared));
-        let kernel = FakeKernel::accepting(matching(&expected));
-        let root = attach_and_verify(&kernel, &tree.prepared, &expected, file_mount()?, || Ok(()))?;
+        let (kernel, root) = attached_root(&tree.prepared)?;
         assert!(tree
             .registry
             .commit_planned(tree.prepared.intent())
@@ -189,20 +188,19 @@ mod cases {
     #[test]
     fn foreign_directory_and_real_host_dispatch_reject_without_mutating_resources() -> TestResult {
         let tree = prepared_tree()?;
-        let expected = expected(&component(&tree.prepared));
-        let kernel = FakeKernel::accepting(matching(&expected));
         let foreign = tree
             .registry
             .commit_planned(&PlannedAttemptIntent::new([10; 16], [9; 32])?)?
             .prepare_directory()?;
-        let root = attach_and_verify(&kernel, &tree.prepared, &expected, file_mount()?, || Ok(()))?;
+        let (kernel, root) = attached_root(&tree.prepared)?;
         assert_eq!(
             root.detach_with(&kernel, &foreign),
             Err(ImageActivationError::EvidenceMismatch)
         );
         assert_eq!(kernel.detached(), 0);
         foreign.verify_directory()?;
-        let root = attach_and_verify(&kernel, &tree.prepared, &expected, file_mount()?, || Ok(()))?;
+        let tree = prepared_tree()?;
+        let (_kernel, root) = attached_root(&tree.prepared)?;
         // The public facade observes a regular file on the real kernel; it must
         // refuse before issuing an unmount. Positive mounted-host proof is #444.
         assert_eq!(

@@ -29,7 +29,7 @@ impl VerifiedRootMount {
         self.detach_with(&HostKernel::system(), directory)
     }
 
-    fn detach_with(
+    pub(super) fn detach_with(
         self,
         kernel: &impl AttachmentKernel,
         directory: &PreparedAttemptDirectory,
