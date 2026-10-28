@@ -10,12 +10,7 @@ use std::{
 
 use pos_conformance::SandboxSyscallSetV1;
 use pos_reference::sandbox_provider_protocol::{SandboxArchitecture, SandboxLimit};
-use zbus::{
-    connection::{socket::channel::Channel, Builder},
-    fdo,
-    object_server::SignalEmitter,
-    Guid, OwnedFd, OwnedObjectPath, OwnedVariant, Structure,
-};
+use zbus::{fdo, object_server::SignalEmitter, OwnedFd, OwnedObjectPath, OwnedVariant, Structure};
 
 use super::*;
 use crate::{
@@ -1727,34 +1722,27 @@ async fn transport(
     behavior: ManagerBehavior,
     service: RecordingService,
 ) -> Result<(SystemdTransientUnitTransport, zbus::Connection), Box<dyn Error>> {
-    let guid = Guid::generate();
-    let (server_socket, client_socket) = Channel::pair();
     let subscribed = Arc::new(AtomicBool::new(false));
-    let server = Builder::authenticated_socket(server_socket, guid.clone())
-        .p2p()
-        .serve_at(
-            MANAGER_PATH,
-            RecordingManager {
-                observed,
-                subscribed,
-                behavior,
-            },
-        )
-        .serve_at(
-            UNIT_PATH,
-            RecordingUnit {
-                invocation_id: service.invocation_id.clone(),
-                failing: service.failing_identity.contains(&"InvocationID"),
-            },
-        )
-        .serve_at(UNIT_PATH, service)
-        .build();
-    let client = Builder::authenticated_socket(client_socket, guid)
-        .p2p()
-        .build();
-    let (server, client) = tokio::join!(server, client);
-    let server = server?;
-    let client = client?;
+    let (server, client) = test_support::peer_connections(|server| {
+        server
+            .serve_at(
+                MANAGER_PATH,
+                RecordingManager {
+                    observed,
+                    subscribed,
+                    behavior,
+                },
+            )
+            .serve_at(
+                UNIT_PATH,
+                RecordingUnit {
+                    invocation_id: service.invocation_id.clone(),
+                    failing: service.failing_identity.contains(&"InvocationID"),
+                },
+            )
+            .serve_at(UNIT_PATH, service)
+    })
+    .await?;
     let transport =
         SystemdTransientUnitTransport::connect_with(std::future::ready(Ok(client))).await?;
     Ok((transport, server))

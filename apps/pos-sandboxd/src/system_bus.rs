@@ -33,6 +33,8 @@ const LOWER_HEX: &[u8; 16] = b"0123456789abcdef";
 
 mod inventory;
 pub use inventory::SystemdAttemptUnitObservation;
+mod unit_absence;
+pub use unit_absence::SystemdAttemptUnitAbsenceObservation;
 
 /// The deterministic transient service-unit name for one sandbox attempt.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -288,6 +290,9 @@ pub enum SystemdTransientUnitTransportError {
     /// The named transient unit could not be resolved to an object path.
     #[error("failed to resolve the systemd transient unit")]
     UnitLookup(#[source] zbus::Error),
+    /// No timely exact-name unit-absence observation was obtained.
+    #[error("systemd attempt-unit absence deadline elapsed")]
+    UnitAbsenceDeadlineElapsed,
     /// The generated typed service proxy could not be constructed.
     #[error("failed to construct the typed systemd service proxy")]
     ServiceProxy(#[source] zbus::Error),
@@ -1124,3 +1129,30 @@ fn unix_socket(address: Address) -> zbus::Result<Address> {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests;
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod test_support {
+    use zbus::{
+        connection::{socket::channel::Channel, Builder},
+        Connection, Guid,
+    };
+
+    /// Connect authenticated peers after registering the fixture's interfaces.
+    pub(super) async fn peer_connections(
+        configure_server: impl FnOnce(Builder<'static>) -> Builder<'static>,
+    ) -> zbus::Result<(Connection, Connection)> {
+        let guid = Guid::generate();
+        let (server_socket, client_socket) = Channel::pair();
+        let server =
+            configure_server(Builder::authenticated_socket(server_socket, guid.clone()).p2p())
+                .build();
+        let client = Builder::authenticated_socket(client_socket, guid)
+            .p2p()
+            .build();
+        let (server, client) = tokio::join!(server, client);
+        let server = server?;
+        let client = client?;
+        Ok((server, client))
+    }
+}
