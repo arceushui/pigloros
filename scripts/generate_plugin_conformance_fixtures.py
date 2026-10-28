@@ -26,8 +26,10 @@ the signatures prove consistency, not publisher identity.
 
 The catalogue holds `positive` and `independent-evaluation` in full, every `denied`
 (`den.01` to `den.22`), `malformed` (`mal.1a` to `mal.6`) and `downgrade` (`dgr.1` to `dgr.4`)
-sub-case, `res.1` to `res.4` (the rust guest under a release whose memory, host-call or
-`event_bytes` budget it exceeds, and the c guest under a fuel budget of 1) and `del.1`, `del.2`.
+sub-case, `res.1` to `res.7` (the rust guest under a release whose memory, host-call or
+`event_bytes` budget it exceeds, the c guest under a fuel budget of 1, and the probe guest
+under a release whose `state_bytes`, `log_calls` or `log_bytes` budget it exceeds) and `del.1`,
+`del.2`.
 """
 
 from __future__ import annotations
@@ -533,6 +535,9 @@ ROOMY_FUEL = 1 << 40
 WASM_PAGE_BYTES = 65_536
 ROOMY_HOST_CALLS = 256
 ROOMY_EVENT_BYTES = 4096
+ROOMY_STATE_BYTES = 4096
+ROOMY_LOG_CALLS = 24
+ROOMY_LOG_BYTES = 256
 
 
 def tar_archive(name: str, data: bytes) -> bytes:
@@ -579,9 +584,16 @@ def default_budget(
     memory: int = MEMORY_BYTES,
     host_calls: int = ROOMY_HOST_CALLS,
     event_bytes: int = ROOMY_EVENT_BYTES,
+    state_bytes: int = ROOMY_STATE_BYTES,
+    log_calls: int = ROOMY_LOG_CALLS,
+    log_bytes: int = ROOMY_LOG_BYTES,
 ) -> tuple:
-    """The PMF1 budget (field 15): memory, fuel, host calls, then the five output bounds."""
-    return (memory, fuel, host_calls, 24, event_bytes, 4096, 24, 256)
+    """The PMF1 budget (field 15): memory, fuel, host calls, then the five output bounds.
+
+    The output bounds are, in order, `event_count`, `event_bytes`, `state_bytes`, `log_calls`
+    and `log_bytes`.
+    """
+    return (memory, fuel, host_calls, 24, event_bytes, state_bytes, log_calls, log_bytes)
 
 
 def default_spec(**overrides) -> Pmf1Spec:
@@ -1362,8 +1374,23 @@ def starved_subcase(sub_id: str, component_name: str, error: str, **limits: int)
     )
 
 
+def probe_state_bytes() -> int:
+    """The length of the state that the guests' `drive` stages in the first pass (8 bytes)."""
+    _digest, state = drive(FIRST_PASS, INITIAL_STATE)
+    return len(state)
+
+
 def resource_subcases() -> list[SubCase]:
-    """`res.1` to `res.4`: each limit of the signed release gives its own error (R8-F7b)."""
+    """`res.1` to `res.7`: each limit of the signed release gives its own error.
+
+    `res.1` to `res.4` are proved at pass level by R8-F7b. `res.5` to `res.7` (#625, ADR-061
+    revision 8 follow-up FU-5) are the state and log bounds, reached by the committed probe
+    guest, which behaves like the rust guest for an observation that selects no fault. Each
+    budget is one below what the guest uses; `crates/pos-plugin-host/tests/probe_guest.rs`
+    proves on the engine that the guest succeeds at exactly that limit and fails one below it.
+    """
+    state_bytes = probe_state_bytes()
+    log_bytes = len(LOG_MESSAGE.encode("ascii"))
     return [
         starved_subcase("res.1", "c-guest.wasm", "FuelExhausted", fuel=1),
         # Restates docs/evidence/adr-061-r4-prototype.md: the guest reserves 17 pages at start.
@@ -1375,6 +1402,16 @@ def resource_subcases() -> list[SubCase]:
         starved_subcase("res.3", "rust-guest.wasm", "HostCallLimitExceeded", host_calls=2),
         # Restates the same document: one Event with an 8-byte payload (the 8-byte state).
         starved_subcase("res.4", "rust-guest.wasm", "OutputLimitExceeded", event_bytes=1),
+        # The staged state is one byte over `state_bytes`; the 7-byte initial state fits.
+        starved_subcase(
+            "res.5", "probe-guest.wasm", "OutputLimitExceeded", state_bytes=state_bytes - 1
+        ),
+        # The guest's one `record-operational-log` call is over `log_calls`.
+        starved_subcase("res.6", "probe-guest.wasm", "OutputLimitExceeded", log_calls=0),
+        # Its message `drive` is one byte over `log_bytes`.
+        starved_subcase(
+            "res.7", "probe-guest.wasm", "OutputLimitExceeded", log_bytes=log_bytes - 1
+        ),
     ]
 
 

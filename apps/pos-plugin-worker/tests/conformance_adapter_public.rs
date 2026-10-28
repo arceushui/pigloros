@@ -468,7 +468,9 @@ fn r8_s3_malformed_is_malformed_payload_after_mal_1a_to_mal_6_matched() -> TestR
 
 #[test]
 fn r8_s4_resource_exhaustion_is_resource_limit_within_the_budget() -> TestResult {
-    let ids = ["res.1", "res.2", "res.3", "res.4"];
+    let ids = [
+        "res.1", "res.2", "res.3", "res.4", "res.5", "res.6", "res.7",
+    ];
     assert_family_failure(FixtureFamily::ResourceExhaustion, "resource-limit", &ids)
 }
 
