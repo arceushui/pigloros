@@ -143,7 +143,8 @@ async fn remove_with_proxy(
     if Instant::now() >= deadline {
         return Err(SystemdAttemptUnitTeardownError::DeadlineElapsed);
     }
-    wait_with_proxy(Ok(proxy), name).await.map_err(Into::into)
+    let observed = wait_with_proxy(Ok(proxy), name).await.map_err(Into::into);
+    observed
 }
 
 #[cfg(test)]
