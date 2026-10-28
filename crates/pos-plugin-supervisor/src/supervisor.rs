@@ -6,6 +6,10 @@
 //! it exactly one request frame, reads at most one response frame, and reaps
 //! the worker. Nothing is retried: a later operator retry is a new invocation.
 //!
+//! The supervisor counts the workers it launches
+//! ([`CommunityPluginSupervisorV1::worker_launches`]), so a host can show that
+//! every invocation had a fresh worker (#660).
+//!
 //! Each call takes the one-shot [`CommunityPassAuthorizationV1`] of its pass by
 //! value (`None` when the host has none) and consumes it whether or not the
 //! launch happens (ADR-061 revision 7 decisions 3 and 8).
@@ -37,7 +41,8 @@
 //!    supervisor's own checks (`verify`) is the authoritative
 //!    `InvalidGuestOutput`.
 
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -97,10 +102,17 @@ pub const NOT_ACTIVE: Error = Error::ArtifactTrustDenied {
 /// changes the host process, not only the child: an application that relies
 /// on a descriptor surviving an `exec` of its own must set the flag again
 /// after the call.
-#[derive(Clone, Debug, Eq, PartialEq)]
+///
+/// # Launch count
+/// Clones share one count of launched workers
+/// ([`Self::worker_launches()`]): a host that moves the supervisor into a
+/// Driver keeps a clone to read it.
+#[derive(Clone, Debug)]
 pub struct CommunityPluginSupervisorV1 {
     program: WorkerProgramV1,
     watchdog: Duration,
+    /// The workers launched so far by this supervisor and its clones.
+    launches: Arc<AtomicU64>,
 }
 
 impl CommunityPluginSupervisorV1 {
@@ -110,14 +122,31 @@ impl CommunityPluginSupervisorV1 {
     /// [`MAX_WORKER_WATCHDOG`].
     #[must_use]
     pub fn new(program: WorkerProgramV1, watchdog: Duration) -> Option<Self> {
-        (!watchdog.is_zero() && watchdog <= MAX_WORKER_WATCHDOG)
-            .then_some(Self { program, watchdog })
+        (!watchdog.is_zero() && watchdog <= MAX_WORKER_WATCHDOG).then_some(Self {
+            program,
+            watchdog,
+            launches: Arc::default(),
+        })
     }
 
     /// The wall-time watchdog, measured from the worker's launch.
     #[must_use]
     pub const fn watchdog(&self) -> Duration {
         self.watchdog
+    }
+
+    /// The workers this supervisor and its clones have launched so far.
+    ///
+    /// A worker counts once it started and holds its rlimit ceilings, before
+    /// it receives the one request of its invocation; how the invocation then
+    /// ends does not matter. A call refused before any worker starts, and a
+    /// worker that cannot start or be confined, add nothing. The count never
+    /// decreases, so the launches of a pass are the difference between the
+    /// count after the pass and before it: one per invocation that reached a
+    /// worker, since no worker is reused.
+    #[must_use]
+    pub fn worker_launches(&self) -> u64 {
+        self.launches.load(Ordering::Relaxed)
     }
 
     /// Call `describe` in a fresh worker.
@@ -220,6 +249,7 @@ impl CommunityPluginSupervisorV1 {
         let deadline = Instant::now() + self.watchdog;
         let worker =
             launch(&self.program, &ceilings, negotiated.mode()).ok_or(Error::WorkerCrashed)?;
+        self.launches.fetch_add(1, Ordering::Relaxed);
         let frames = WorkerFrameLimitsV1::for_limits(&limits);
         let response = supervise(worker, &request, frames, deadline)?;
         decode_worker_response_v1(&response).map_err(|_| Error::WorkerCrashed)?

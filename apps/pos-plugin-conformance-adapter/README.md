@@ -20,7 +20,10 @@ other platforms the library is empty and `main` does nothing.
   sub-cases (the test entry).
 - Each sub-case runs on a fresh in-memory evaluation world (`CommunityEvaluationWorldV1`) with a
   fresh supervised worker per member launch, at the fixture evaluation instant of the step (the
-  sealed `FixtureWallSourceV1` of `pos-core`, which only this crate enables).
+  sealed `FixtureWallSourceV1` of `pos-core`, which only this crate enables). The record's
+  `worker_launches` is the supervisors' own count of launched workers
+  (`CommunityPluginSupervisorV1::worker_launches()`) across each pass, not an inference from the
+  outcome records.
 - The outcome record of a pass is mapped to an EAO1 result as ADR-061 revision 8 decision 3
   states: an operational fault is `Unavailable`, never a typed failure and never an output.
 - The payload grammar, the `PCW2` composite, the `PCA1` anchor and the oracle record are those of
