@@ -711,6 +711,7 @@ mod tests {
 
     type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn host_node(inputs: Vec<Hash>) -> TestResult<DependencyNodeRecordV1> {
         let owner = FactualHostOwnerV1::Observation.as_str().to_owned();
         let schema = FACTUAL_SNAPSHOT_SCHEMA_ID_V1;
@@ -727,6 +728,7 @@ mod tests {
     /// ADR-064 R4.3 and R6 (viii): only the snapshot node, the fold checkpoint
     /// nodes and the verified-prefix and history nodes may declare an input.
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn only_four_host_rules_may_declare_an_input() -> TestResult<()> {
         let with_input = host_node(vec![Hash::from_bytes([7; 32])])?;
         let bare = host_node(Vec::new())?;
