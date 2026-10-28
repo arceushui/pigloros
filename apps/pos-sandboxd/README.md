@@ -33,7 +33,7 @@ block cleanup; start retains `fail` mode. A completed stop job or acknowledged
 SIGKILL is not proof that the unit or cgroup is absent. The separate cgroup
 observer can verify process emptiness, but not complete cleanup. The bounded
 `execute` orchestration and launcher readiness/release barrier are implemented
-below; full lifecycle cleanup remains #442.
+below; complete resource cleanup and lifecycle recovery remain #1199 and #1200.
 
 `wait_for_attempt_unit_absence` queries the exact attempt name with typed
 `GetUnit` until systemd reports `org.freedesktop.systemd1.NoSuchUnit`, under
@@ -41,7 +41,7 @@ one caller-supplied absolute deadline. A loaded object, including an inactive
 or failed unit, keeps waiting; all other errors reject. The sealed result is
 only a point-in-time manager observation. It does not fence later starts or
 prove process/resource absence, authorize unmount or intent deletion, or reopen
-admission. Complete lifecycle ownership and cleanup remain #442.
+admission. Complete lifecycle ownership and cleanup remain #1199 and #1200.
 
 `stop_attempt_unit` joins the retained cgroup's bounded stop/grace/escalation
 with exact-name unit removal. After kernel process emptiness, it resets only
@@ -53,7 +53,20 @@ The lifecycle controller retains exclusive ownership and captures terminal
 systemd state before teardown, since unloading discards that state. The sealed
 joint observation proves neither a later-start fence nor complete resource
 cleanup; mount/device/directory/intent cleanup and restart reconciliation remain
-#442.
+#1199 and #1200.
+
+`VerifiedRootMount::detach` consumes the retained mount, rechecks the exact
+durable directory record and private parent identities, then repeats the
+mount/image readback and requires the original mount ID before detaching by
+descriptor. The lifecycle controller must exclusively own the attempt and
+finish unit/process shutdown first. Cleanup needs no renewed execution
+admission. A failure preserves intent and quarantines new registry commits;
+successful cleanup never clears an existing quarantine. The mount descriptor
+closes on return, while intent and directories remain. Success acknowledges
+lazy detachment only: other references can delay actual unmount and loop/dm
+removal, whose exact absence must still be proved before intent deletion or
+admission reopening. Unit tests reuse the attachment kernel port and fixtures;
+positive mounted-host conformance remains #444.
 
 `PreparedAttemptDirectory::remove_unmounted` consumes the held directory
 ownership, rechecks its durable identity record and empty unmounted tree, then
@@ -65,7 +78,7 @@ The durable intent remains unchanged for later full reconciliation. Read-only
 recovery inventory recognizes the root-removed/attempt-present crash frontier,
 while every surviving directory must match its recorded identity. This stage
 does not prove other resource absence or reopen admission; full cleanup remains
-#442.
+#1199 and #1200.
 
 `SystemdServiceLimits` accepts the complete ordered, already authorized ELM1
 limit set and compiles IDs 0–6 into the seven exact systemd service properties:
@@ -118,7 +131,7 @@ composes the attempt:
 - Any failure after attachment detaches the mount.
 
 The live dm-verity table is #444 evidence, not a runtime check. Lifecycle
-cleanup (#442) and packaged-build conformance (#444) remain separate.
+cleanup (#1199/#1200) and packaged-build conformance (#444) remain separate.
 
 `/work`, the sole writable mount, is requested as
 `TemporaryFileSystem=/work:size=<ELM1 WorkBytes>,nosuid,nodev,noexec` and read
@@ -166,7 +179,7 @@ are ports, so the composition is exercised without systemd.
 
 The result carries the ordered NXT1 transcript digests for SPR1 and the proxy
 termination for the SAU1 terminal classification; signing and classification
-are #443, and unmounting and removing the attempt are #442. A watchdog that
+are #443, and complete resource/lifecycle cleanup is #1199/#1200. A watchdog that
 closed the channel is reported by `ServedProxy::watchdog_expired`, not by the
 termination, which reads a closed channel as a clean close.
 
@@ -220,7 +233,7 @@ readback-set digest itself (#443 owns the kernel observations and their
 digest, and the provider must supply an `ObservedReadback` before it can
 release), the adapter's mount and inode identity (the composition root
 supplies it in `BarrierEvidence`), the setting of the cancellation flag
-(#442), adapter stdin and stdout transport, and the real Local namespace.
+(#1199/#1200), adapter stdin and stdout transport, and the real Local namespace.
 `AdmittedAttempt::check_local` binds an admission against the launch-policy
 view and the authority heads the attempt was admitted with; that the recheck
 closure belongs to the same admitted entry is the caller's contract

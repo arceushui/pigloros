@@ -142,6 +142,27 @@ impl PreparedAttemptDirectory {
         result
     }
 
+    /// Hold registry ownership while verifying the recorded attempt's ancestors
+    /// and performing an attached-root operation. The operation must verify the
+    /// mount separately: opening `root` with `NO_XDEV` would reject an attachment.
+    /// Cleanup may run after quarantine, but cannot clear it.
+    pub(crate) fn with_verified_parent<E>(
+        &self,
+        rejected: E,
+        operation: impl FnOnce() -> Result<(), E>,
+    ) -> Result<(), E> {
+        let Ok(mut state) = self.planned.state.lock() else {
+            return Err(rejected);
+        };
+        let result = self
+            .verify_record()
+            .and_then(|()| self.verify_attempt().map(|_| ()))
+            .map_err(|_| rejected)
+            .and_then(|()| operation());
+        state.failed |= result.is_err();
+        result
+    }
+
     fn record_bytes(&self) -> [u8; DIRECTORY_RECORD_SIZE] {
         let mut bytes = [0; DIRECTORY_RECORD_SIZE];
         bytes[..52].copy_from_slice(&self.planned.intent.encode());
@@ -159,6 +180,10 @@ impl PreparedAttemptDirectory {
     }
 
     fn verify_record_and_tree(&self) -> Result<(), SystemdAttemptRegistryError> {
+        self.verify_record().and_then(|()| self.verify_tree())
+    }
+
+    fn verify_record(&self) -> Result<(), SystemdAttemptRegistryError> {
         let observed = read_record_bytes::<DIRECTORY_RECORD_SIZE>(
             &self.planned.directory,
             &self.planned.intent.unit_name,
@@ -166,10 +191,20 @@ impl PreparedAttemptDirectory {
         if observed != self.record_bytes() {
             return Err(SystemdAttemptRegistryError::InvalidIntent);
         }
-        self.verify_tree()
+        Ok(())
     }
 
     fn verify_tree(&self) -> Result<(), SystemdAttemptRegistryError> {
+        let attempt = self.verify_attempt()?;
+        let root = open_directory(&attempt, "root", ResolveFlags::NO_XDEV)?;
+        validate_directory(&root, self.planned.directory.owner, true)?;
+        if DirectoryIdentity::read(&root)? != DirectoryIdentity::read(&self.root)? {
+            return Err(SystemdAttemptRegistryError::UnsafeRegistry);
+        }
+        require_empty(&root)
+    }
+
+    fn verify_attempt(&self) -> Result<File, SystemdAttemptRegistryError> {
         let directory = &self.planned.directory;
         validate_directory(&directory.runtime, directory.owner, true)?;
         let attempts = open_directory(&directory.runtime, "attempts", ResolveFlags::NO_XDEV)?;
@@ -182,14 +217,11 @@ impl PreparedAttemptDirectory {
             self.planned.intent.unit_name.attempt_component(),
             ResolveFlags::NO_XDEV,
         )?;
-        let root = open_directory(&attempt, "root", ResolveFlags::NO_XDEV)?;
-        for (observed, held) in [(&attempt, &self.attempt), (&root, &self.root)] {
-            validate_directory(observed, directory.owner, true)?;
-            if DirectoryIdentity::read(observed)? != DirectoryIdentity::read(held)? {
-                return Err(SystemdAttemptRegistryError::UnsafeRegistry);
-            }
+        validate_directory(&attempt, directory.owner, true)?;
+        if DirectoryIdentity::read(&attempt)? != DirectoryIdentity::read(&self.attempt)? {
+            return Err(SystemdAttemptRegistryError::UnsafeRegistry);
         }
-        require_empty(&root)
+        Ok(attempt)
     }
 }
 
@@ -538,6 +570,53 @@ mod tests {
         })
         .is_err());
         assert!(prepared.verify_directory().is_err());
+        let invoked = std::cell::Cell::new(false);
+        assert!(prepared
+            .with_verified_parent(SystemdAttemptRegistryError::ReconciliationRequired, || {
+                invoked.set(true);
+                Ok(())
+            })
+            .is_err());
+        assert!(!invoked.get());
+        Ok(())
+    }
+
+    #[test]
+    fn every_attached_parent_io_failure_prevents_the_operation_and_closes_commits() -> TestResult {
+        if !in_lock_test_process("attempt_registry::directory::tests::every_attached_parent_io_failure_prevents_the_operation_and_closes_commits")? {
+            return Ok(());
+        }
+        let operation_count = {
+            let (_directory, registry) = fixture()?;
+            let prepared = registry.commit_planned(&intent(1)?)?.prepare_directory()?;
+            let (result, count) = with_io_fault(None, || {
+                prepared
+                    .with_verified_parent(SystemdAttemptRegistryError::UnsafeRegistry, || Ok(()))
+            });
+            result?;
+            count
+        };
+        for fail_at in 0..operation_count {
+            let (directory, registry) = fixture()?;
+            let prepared = registry.commit_planned(&intent(1)?)?.prepare_directory()?;
+            let record = directory
+                .path()
+                .join("registry")
+                .join(prepared.intent().unit_name().attempt_component());
+            let bytes = fs::read(&record)?;
+            let invoked = std::cell::Cell::new(false);
+            let (result, count) = with_io_fault(Some(fail_at), || {
+                prepared.with_verified_parent(SystemdAttemptRegistryError::UnsafeRegistry, || {
+                    invoked.set(true);
+                    Ok(())
+                })
+            });
+            assert!(result.is_err(), "boundary {fail_at}");
+            assert_eq!(count, fail_at + 1);
+            assert!(!invoked.get());
+            assert_eq!(fs::read(record)?, bytes);
+            assert!(registry.commit_planned(&intent(2)?).is_err());
+        }
         Ok(())
     }
 }
