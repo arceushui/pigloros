@@ -322,3 +322,127 @@ impl FactualPrefixReadPortV1 for StampedPort<'_> {
         self.db.fold_window(timeline, after, through)
     }
 }
+
+/// A port whose approval of the staged batch at the Tick-Boundary commit refuses it with a typed
+/// outcome, as the store's own approval (the authority and policy check of
+/// `admit_pipeline_batch`) does when the authority is revoked or expired or the policy cannot be
+/// determined: the store commits nothing and the outcome is returned.
+///
+/// Every other call, the prefix reads that build the basis included, goes to the real store.
+pub struct RefusingPort<'a> {
+    db: &'a mut dyn ScheduledAdmissionStoreV1,
+    outcome: PipelineOutcomeV1,
+    calls: usize,
+}
+
+impl<'a> RefusingPort<'a> {
+    /// A port over `db` whose approval refuses every batch with `outcome`.
+    #[must_use]
+    pub const fn new(
+        db: &'a mut dyn ScheduledAdmissionStoreV1,
+        outcome: PipelineOutcomeV1,
+    ) -> Self {
+        Self {
+            db,
+            outcome,
+            calls: 0,
+        }
+    }
+
+    /// How many batches reached the approval, which shows that the refusal was injected.
+    #[must_use]
+    pub const fn calls(&self) -> usize {
+        self.calls
+    }
+}
+
+impl PipelineAdmissionPortV1 for RefusingPort<'_> {
+    fn admit_pipeline_batch(
+        &mut self,
+        _basis: &PipelineAdmissionBasisV1,
+    ) -> Result<PipelineOutcomeV1, CoreError> {
+        self.calls += 1;
+        Ok(self.outcome.clone())
+    }
+
+    fn lookup_pipeline_receipt(
+        &mut self,
+        timeline: TimelineId,
+        key: AppendDedupKey,
+        attempt_id: PipelineAttemptIdV1,
+    ) -> Result<PipelineReceiptLookupV1, CoreError> {
+        self.db.lookup_pipeline_receipt(timeline, key, attempt_id)
+    }
+
+    fn purge_expired_pipeline_receipts_bounded(
+        &mut self,
+        limit: NonZeroUsize,
+    ) -> Result<PurgeOutcome, CoreError> {
+        self.db.purge_expired_pipeline_receipts_bounded(limit)
+    }
+}
+
+impl FactualPrefixReadPortV1 for RefusingPort<'_> {
+    fn last_committed_factual_tick(
+        &self,
+        timeline: pos_core::TimelineId,
+    ) -> Result<pos_core::FactualHeadV1, pos_core::CoreError> {
+        self.db.last_committed_factual_tick(timeline)
+    }
+
+    fn cut_tick_at(
+        &self,
+        timeline: pos_core::TimelineId,
+        seq: pos_core::Seq,
+    ) -> Result<pos_core::FactualCutV1, pos_core::CoreError> {
+        self.db.cut_tick_at(timeline, seq)
+    }
+
+    fn nodes_for_committed_events(
+        &self,
+        timeline: pos_core::TimelineId,
+        seqs: &[pos_core::Seq],
+    ) -> Result<Vec<Option<pos_core::DependencyNodeRecordV1>>, pos_core::CoreError> {
+        self.db.nodes_for_committed_events(timeline, seqs)
+    }
+
+    fn nodes_by_digest(
+        &self,
+        timeline: pos_core::TimelineId,
+        digests: &[pos_core::Hash],
+    ) -> Result<Vec<Option<pos_core::factual_dependency::BoundFactualNodeV1>>, pos_core::CoreError>
+    {
+        self.db.nodes_by_digest(timeline, digests)
+    }
+
+    fn last_step_node(
+        &self,
+        timeline: pos_core::TimelineId,
+        owner: &pos_core::FactualOwnerIdV1,
+    ) -> Result<Option<pos_core::DependencyNodeRecordV1>, pos_core::CoreError> {
+        self.db.last_step_node(timeline, owner)
+    }
+
+    fn factual_set_counts(
+        &self,
+        timeline: pos_core::TimelineId,
+    ) -> Result<pos_core::RecordedSetCountsV1, pos_core::CoreError> {
+        self.db.factual_set_counts(timeline)
+    }
+
+    fn fold_cursor(
+        &self,
+        timeline: pos_core::TimelineId,
+    ) -> Result<Option<pos_core::FactualFoldCursorV1>, pos_core::CoreError> {
+        self.db.fold_cursor(timeline)
+    }
+
+    fn fold_window(
+        &self,
+        timeline: pos_core::TimelineId,
+        after: pos_core::Seq,
+        through: pos_core::Seq,
+    ) -> Result<pos_core::FactualFoldWindowV1, pos_core::CoreError> {
+        self.db.fold_window(timeline, after, through)
+    }
+}
