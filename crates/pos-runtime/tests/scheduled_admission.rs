@@ -4890,3 +4890,442 @@ fn the_first_fold_tick_after_the_rollout_starts_at_zero_on_both_adapters() {
         assert_eq!(bound.first(), Some(&(collapsed + 1)), "{name}");
     }
 }
+
+// ── ADR-064 Revision 6: the restored history and the prefix node inputs ────
+//
+// The remaining conformance tests of the amendment (Redmine #594): a restore
+// after a reopen, a second collapse, the exclusions, the restart arithmetic,
+// the typical Tick cost and the Fork.
+
+/// The artifact digest of the head the fold-head row of `timeline` names.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn persisted_head(store: &dyn Harness, timeline: TimelineId) -> Option<Hash> {
+    let cursor = ok(store.fold_cursor(timeline));
+    let head = cursor.and_then(|found| found.head);
+    head.map(|node| node.coordinate().artifact_digest())
+}
+
+/// Tick 2 of the restore case: a fresh registry restored over the three Events
+/// Tick 1 left, whose one Driver emits one draft. The registry is dropped on
+/// return.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn restored_recovery_tick(host: &Host, store: &mut dyn Harness) -> PipelineAdmissionBasisV1 {
+    let log = Log::default();
+    let (driver, plan) = BasisDriver::new(FIRST, &log);
+    let mut registry = host.registry();
+    register_basis(&mut registry, driver);
+    let events = committed_events(store, host.timeline);
+    let segment = TimelineHistorySegment::new(host.timeline, Seq::from_u64(3));
+    ok(registry.restore_driver_state(&[segment], &events));
+    emit(&plan, &[b"b"]);
+    pass_basis(host, &mut registry, store, &all_at(3, &events), 2)
+}
+
+/// The restored history node of the second Tick is recorded once, inputs the
+/// fold node of its own Tick, and that fold node chains to the head Tick 1
+/// persisted.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn assert_restored_history_follows_the_head(
+    name: &str,
+    head: Hash,
+    ticks: [&PipelineAdmissionBasisV1; 2],
+) {
+    let [first, restored] = ticks;
+    assert_eq!(first.dependencies().tick(), 1, "{name}");
+    assert_eq!(restored.dependencies().tick(), 2, "{name}");
+    assert_eq!(fold_nodes(first)[0].coordinate().artifact_digest(), head);
+    let folded = fold_nodes(restored);
+    assert!(folded[0].input_digests().contains(&head), "{name}");
+    let last = folded[0].coordinate().artifact_digest();
+    assert_eq!(count_owned_by(restored, HISTORY), 1, "{name}");
+    let history = node_of(restored, HISTORY, 0);
+    assert_eq!(history.input_digests(), [last], "{name}");
+    assert_eq!(edges_into(restored, HISTORY), 1, "{name}");
+    let snapshot = node_of(restored, OBSERVATION, 0);
+    assert_eq!(snapshot.input_digests(), [last], "{name}");
+}
+
+/// ADR-064 R6 (conformance test 2): after the store and the registry are
+/// dropped and reopened, a restore records its history node against the fold
+/// head the store persisted: the node inputs the fold node of its Tick, which
+/// chains to that head. The memory adapter cannot be reopened, so there only
+/// the registry is dropped.
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn a_restore_after_a_reopen_chains_its_history_node_to_the_persisted_fold_head() {
+    let directory = ok(tempfile::tempdir());
+    let path = directory.path().join("restore-recovery.db");
+    let file = path.to_string_lossy().into_owned();
+    let mut sqlite = ok(SqliteStore::open(&file));
+    let host = Host::prepare(&mut sqlite, 1_000);
+    let first = first_recovery_tick(&host, &mut sqlite);
+    drop(sqlite);
+    // A gate binds one store only, so the reopened store gets a fresh one.
+    let mut reopened = ok(SqliteStore::open(&file));
+    let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
+    ok(reopened.bind_erasure_gate(Arc::clone(&gate)));
+    ok(reopened.bind_authority_persistence(host.authority.persistence_binding()));
+    let restarted = Host { gate, ..host };
+    let head = fold_nodes(&first)[0].coordinate().artifact_digest();
+    assert_eq!(
+        persisted_head(&reopened, restarted.timeline),
+        Some(head),
+        "sqlite"
+    );
+    let restored = restored_recovery_tick(&restarted, &mut reopened);
+    assert_restored_history_follows_the_head("sqlite", head, [&first, &restored]);
+
+    let mut memory = MemoryStore::new();
+    let host = Host::prepare(&mut memory, 1_000);
+    let first = first_recovery_tick(&host, &mut memory);
+    let head = fold_nodes(&first)[0].coordinate().artifact_digest();
+    assert_eq!(persisted_head(&memory, host.timeline), Some(head), "memory");
+    let restored = restored_recovery_tick(&host, &mut memory);
+    assert_restored_history_follows_the_head("memory", head, [&first, &restored]);
+}
+
+/// ADR-064 R6 (conformance test 3) and R3.4.10: a second collapse of a Driver
+/// whose first collapse has not been recorded chains its content onto the
+/// first node's content digest, and the node still has exactly one input, the
+/// one the snapshot node has.
+///
+/// The first collapse happens in a pass that admits nothing, so its history
+/// stays pending and the Driver's carried set refills from the Event that
+/// found it full.
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn a_second_collapse_chains_on_the_first_nodes_content_digest_on_both_adapters() {
+    let full = MAX_FORWARDED_EVENTS_PER_DRIVER_V1;
+    let carried = ok(u64::try_from(full));
+    for (name, mut store) in stores() {
+        let host = Host::prepare(store.as_mut(), 1_000);
+        let log = Log::default();
+        let (driver, plan) = BasisDriver::new(FIRST, &log);
+        let mut registry = host.registry();
+        register_basis(&mut registry, driver.subscribed(INPUT));
+        append_events(store.as_mut(), &host, INPUT, 2 * full + 1);
+        let events = committed_events(store.as_ref(), host.timeline);
+
+        // The first `full` Events fill the carried set.
+        ok(stage(&host, &mut registry, &all_at(carried, &events)));
+        settle_empty(&host, &mut registry, store.as_mut(), 1);
+        // Event `full + 1` finds it full: the first collapse. Nothing is admitted.
+        ok(stage(&host, &mut registry, &all_at(carried + 1, &events)));
+        settle_empty(&host, &mut registry, store.as_mut(), 2);
+        // The next `full - 1` Events fill the set again.
+        ok(stage(&host, &mut registry, &all_at(2 * carried, &events)));
+        settle_empty(&host, &mut registry, store.as_mut(), 3);
+
+        // Event `2 * full + 1` finds it full again: the second collapse.
+        emit(&plan, &[b"a"]);
+        let cut = all_at(2 * carried + 1, &events);
+        let basis = pass_basis(&host, &mut registry, store.as_mut(), &cut, 4);
+        assert_eq!(basis.dependencies().tick(), 1, "{name}");
+        assert_eq!(count_owned_by(&basis, HISTORY), 1, "{name}");
+        let first = factual_history_content_digest(
+            Hash::zero(),
+            Seq::from_u64(1),
+            Seq::from_u64(carried),
+            &event_refs(&events[..full]),
+        );
+        let covered = event_refs(&events[full..2 * full]);
+        let (from, through) = (Seq::from_u64(carried + 1), Seq::from_u64(2 * carried));
+        let chained = factual_history_content_digest(first, from, through, &covered);
+        let unchained = factual_history_content_digest(Hash::zero(), from, through, &covered);
+        let key = host_key(1, HISTORY, 0, HISTORY_SCHEMA);
+        let expected = factual_artifact_digest(host.timeline, key, chained);
+        let alone = factual_artifact_digest(host.timeline, key, unchained);
+        let history = digest_of(&basis, HISTORY, 0);
+        assert_eq!(history, expected, "{name}");
+        assert_ne!(history, alone, "{name}");
+        // The node inputs what the snapshot node inputs, and nothing else.
+        let snapshot = node_of(&basis, OBSERVATION, 0);
+        let fold_input = snapshot.input_digests();
+        assert_eq!(fold_input.len(), 1, "{name}");
+        assert_eq!(node_of(&basis, HISTORY, 0).input_digests(), fold_input);
+        assert_eq!(edges_into(&basis, HISTORY), 1, "{name}");
+    }
+}
+
+/// Seed Tick 1 with the presentation-only node of Event 1, the node of an
+/// Ephemeral Event, over two Events of the subscribed type.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn seed_ephemeral_event(store: &mut dyn Harness, host: &Host, shown: Hash) {
+    append_events(store, host, INPUT, 2);
+    let step_node = step_spec(OLD_OWNER, hash(0x51));
+    let ephemeral = event_spec(OLD_OWNER, 1, shown, PRESENTATION);
+    let nodes = vec![seeded_node(1, &step_node), seeded_node(1, &ephemeral)];
+    let bound = vec![(Seq::from_u64(1), shown)];
+    store.seed(host.timeline, &[seeded_tick(1, nodes, (1, 2), bound)]);
+}
+
+/// ADR-064 R6 (conformance test 5, residual): the Ephemeral Event of a
+/// verified-prefix Driver is in the prefix and in the restored history, yet
+/// has no path through the fold chain. The pass commits: that is a declared
+/// residual (R3 D9, R6 4.5), not an error.
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn an_ephemeral_event_of_a_prefix_driver_has_no_path_through_the_fold_chain_on_both_adapters() {
+    let shown = hash(0x52);
+    for (name, mut store) in stores() {
+        let host = Host::prepare(store.as_mut(), 1_000);
+        let log = Log::default();
+        let (driver, plan) = BasisDriver::new(FIRST, &log);
+        let mut registry = host.registry();
+        register_basis(&mut registry, driver.verified().subscribed(INPUT));
+        emit(&plan, &[b"a"]);
+        seed_ephemeral_event(store.as_mut(), &host, shown);
+        // A restored Driver is forwarded no Event, so the presentation-only
+        // node is no step input and the pass commits.
+        let events = committed_events(store.as_ref(), host.timeline);
+        let segment = TimelineHistorySegment::new(host.timeline, Seq::from_u64(2));
+        ok(registry.restore_driver_state(&[segment], &events));
+        let basis = pass_basis(&host, &mut registry, store.as_mut(), &all_at(2, &events), 1);
+        let tick = basis.dependencies().tick();
+        assert_eq!(tick, 2, "{name}");
+
+        // Both Events are in the prefix and in the history.
+        let through = Seq::from_u64(2);
+        let handed = event_refs(&events);
+        let prefix = factual_verified_prefix_content_digest(through, &handed);
+        let prefix_key = host_key(tick, PREFIX, 0, PREFIX_SCHEMA);
+        let expected = factual_artifact_digest(host.timeline, prefix_key, prefix);
+        assert_eq!(digest_of(&basis, PREFIX, 0), expected, "{name}");
+        let history =
+            factual_history_content_digest(Hash::zero(), Seq::from_u64(1), through, &handed);
+        let history_key = host_key(tick, HISTORY, 0, HISTORY_SCHEMA);
+        let expected = factual_artifact_digest(host.timeline, history_key, history);
+        assert_eq!(digest_of(&basis, HISTORY, 0), expected, "{name}");
+
+        // Only Event 2 is a fold input; no node of the record inputs Event 1's node.
+        assert_eq!(bound_seqs(&basis), [2], "{name}");
+        let nodes = declared_nodes(&basis);
+        assert!(nodes
+            .iter()
+            .all(|node| !node.input_digests().contains(&shown)));
+        // The prefix and history nodes still input the fold chain, once each.
+        let snapshot = node_of(&basis, OBSERVATION, 0);
+        let fold_input = snapshot.input_digests();
+        assert_eq!(fold_input.len(), 1, "{name}");
+        for owner in [PREFIX, HISTORY] {
+            assert_eq!(node_of(&basis, owner, 0).input_digests(), fold_input);
+            assert_eq!(edges_into(&basis, owner), 1, "{name}");
+        }
+    }
+}
+
+/// The Event type of a subject-controlled Event: a public pass may not show it.
+const HIDDEN: &str = "persona.prediction";
+
+/// ADR-064 R6 (conformance test 5): an Event a public pass may not show a
+/// Driver is not in that Driver's verified prefix, yet it is a fold input, so
+/// the fold node behind `F(T)` inputs its ingress node and the prefix node
+/// inputs `F(T)`.
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn a_consent_hidden_event_is_covered_by_the_fold_input_without_being_in_the_prefix() {
+    for (name, mut store) in stores() {
+        let host = Host::prepare(store.as_mut(), 1_000);
+        let log = Log::default();
+        let (driver, plan) = BasisDriver::new(FIRST, &log);
+        let mut registry = host.registry();
+        let subscribed = driver.verified().subscribed(INPUT).subscribed(HIDDEN);
+        register_basis(&mut registry, subscribed);
+        emit(&plan, &[b"a"]);
+        append_events(store.as_mut(), &host, INPUT, 1);
+        append_events(store.as_mut(), &host, HIDDEN, 1);
+        append_events(store.as_mut(), &host, INPUT, 1);
+        let events = committed_events(store.as_ref(), host.timeline);
+        let basis = pass_basis(&host, &mut registry, store.as_mut(), &all_at(3, &events), 1);
+
+        // The prefix hands the two public Events and not the hidden one.
+        let shown: Vec<Event> = events
+            .iter()
+            .filter(|event| event.event_type.as_str() != HIDDEN)
+            .cloned()
+            .collect();
+        assert_eq!(shown.len(), 2, "{name}");
+        let through = Seq::from_u64(3);
+        let public = factual_verified_prefix_content_digest(through, &event_refs(&shown));
+        let all = factual_verified_prefix_content_digest(through, &event_refs(&events));
+        let key = host_key(basis.dependencies().tick(), PREFIX, 0, PREFIX_SCHEMA);
+        let expected = factual_artifact_digest(host.timeline, key, public);
+        let hidden = factual_artifact_digest(host.timeline, key, all);
+        let prefix = digest_of(&basis, PREFIX, 0);
+        assert_eq!(prefix, expected, "{name}");
+        assert_ne!(prefix, hidden, "{name}");
+
+        // The fold chain covers all three, the hidden Event through an ingress node.
+        assert_eq!(bound_seqs(&basis), [1, 2, 3], "{name}");
+        let folded = fold_nodes(&basis);
+        assert_eq!(folded.len(), 1, "{name}");
+        let ingress_of_hidden = bound_digests(&basis)[1];
+        assert!(
+            folded[0].input_digests().contains(&ingress_of_hidden),
+            "{name}"
+        );
+        let last = folded[0].coordinate().artifact_digest();
+        assert_eq!(node_of(&basis, PREFIX, 0).input_digests(), [last], "{name}");
+        assert_eq!(edges_into(&basis, PREFIX), 1, "{name}");
+    }
+}
+
+/// The restarts of the restart-arithmetic case.
+const RESTARTS: u8 = 4;
+
+/// One restart: five more Events, a fresh registry restored over the whole
+/// visible history, and one step.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn restart_and_step(host: &Host, store: &mut dyn Harness, restart: u8) -> PipelineAdmissionBasisV1 {
+    append_events(store, host, INPUT, 5);
+    let log = Log::default();
+    let (driver, plan) = BasisDriver::new(FIRST, &log);
+    let mut registry = host.registry();
+    register_basis(&mut registry, driver);
+    let events = committed_events(store, host.timeline);
+    let through = events.last().map_or(Seq::ZERO, |event| event.seq);
+    let segment = TimelineHistorySegment::new(host.timeline, through);
+    ok(registry.restore_driver_state(&[segment], &events));
+    emit(&plan, &[b"a"]);
+    let cut = all_at(through.as_u64(), &events);
+    pass_basis(host, &mut registry, store, &cut, restart)
+}
+
+/// ADR-064 R6 (conformance test 7): every restore-and-step cycle adds one
+/// history node, shared by the Drivers it restores, and one edge for it,
+/// whatever the length of the history: the rows the store counts grow by
+/// exactly the rows of the submitted basis.
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn each_restart_adds_one_history_node_and_one_edge_to_the_store_on_both_adapters() {
+    for (name, mut store) in stores() {
+        let host = Host::prepare(store.as_mut(), 1_000);
+        let (mut nodes, mut edges) = (0, 0);
+        for restart in 1..=RESTARTS {
+            let before = ok(store.factual_set_counts(host.timeline));
+            let basis = restart_and_step(&host, store.as_mut(), restart);
+            let after = ok(store.factual_set_counts(host.timeline));
+            assert_eq!(basis.dependencies().tick(), u64::from(restart), "{name}");
+            let declared = basis.dependencies().record();
+            assert_eq!(after.nodes, before.nodes + declared.nodes().len(), "{name}");
+            assert_eq!(after.edges, before.edges + declared.edges().len(), "{name}");
+            nodes += count_owned_by(&basis, HISTORY);
+            edges += edges_into(&basis, HISTORY);
+            assert_eq!(count_owned_by(&basis, HISTORY), 1, "{name}");
+            assert_eq!(edges_into(&basis, HISTORY), 1, "{name}");
+        }
+        assert_eq!(nodes, usize::from(RESTARTS), "{name}");
+        assert_eq!(edges, usize::from(RESTARTS), "{name}");
+    }
+}
+
+/// The outputs of a Tick of the typical-cost case.
+const TYPICAL_OUTPUTS: usize = 13;
+/// The seeded nodes its step declares.
+const TYPICAL_DECLARED: usize = 29;
+
+/// The plan of a Driver that emits thirteen drafts and declares twenty-nine
+/// seeded nodes on its step.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn typical_plan() -> Plan {
+    let payloads: [&'static [u8]; TYPICAL_OUTPUTS] = [
+        b"a", b"b", b"c", b"d", b"e", b"f", b"g", b"h", b"i", b"j", b"k", b"l", b"m",
+    ];
+    Plan {
+        payloads: payloads.to_vec(),
+        step_inputs: named_inputs(&bulk_digests(), TYPICAL_DECLARED),
+        direct_inputs: Vec::new(),
+    }
+}
+
+/// ADR-064 R6 (conformance test 8, 4.4 lifetime table): a steady-state Tick
+/// of one verified-prefix Driver costs 17 nodes and 61 edges, the R4
+/// baseline of 17 and 60 plus the one edge from the prefix node to `F(T)`.
+///
+/// The nodes are the snapshot, the prefix, the step, 13 outputs and one fold
+/// node. The edges are the snapshot's (1), the prefix's (1), the fold node's
+/// head and 13 outputs of the previous Tick (14), the step's snapshot, chain,
+/// prefix and 29 declared nodes (32), and the step of each output (13).
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn a_typical_tick_costs_17_nodes_and_61_edges_one_edge_more_than_the_r4_baseline() {
+    for (name, mut store) in stores() {
+        let host = Host::prepare(store.as_mut(), 1_000);
+        let log = Log::default();
+        let (driver, plan) = BasisDriver::new(FIRST, &log);
+        let mut registry = host.registry();
+        register_basis(&mut registry, driver.verified());
+        append_events(store.as_mut(), &host, OTHER_INPUT, 1);
+        store.seed(host.timeline, &[bulk_tick()]);
+        declare(&plan, typical_plan());
+
+        let mut costs = Vec::new();
+        for key in 1..=4_u8 {
+            let events = committed_events(store.as_ref(), host.timeline);
+            let through = ok(u64::try_from(events.len()));
+            let before = ok(store.factual_set_counts(host.timeline));
+            let cut = all_at(through, &events);
+            let basis = pass_basis(&host, &mut registry, store.as_mut(), &cut, key);
+            let after = ok(store.factual_set_counts(host.timeline));
+            costs.push((after.nodes - before.nodes, after.edges - before.edges));
+            assert_eq!(count_owned_by(&basis, PREFIX), 1, "{name}");
+            assert_eq!(edges_into(&basis, PREFIX), 1, "{name}");
+        }
+        // The first Tick has no chain, no head and one raw Event to record;
+        // from the second one on, every Tick costs the same.
+        assert_eq!(costs[1..], [(17, 61); 3], "{name}");
+        // Without the prefix node's input the edges are the R4 baseline.
+        assert_eq!(costs[1].1 - 1, 60, "{name}");
+    }
+}
+
+/// ADR-064 R6 (conformance test 9) and R4 test 8: the first Tick of a Fork
+/// after the cut records its prefix and history nodes against the head the
+/// Fork inherits from its cut Tick: both input the fold node of the Tick, which
+/// chains to that head.
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn a_forks_first_tick_inputs_the_inherited_fold_chain_from_its_prefix_and_history_nodes() {
+    for (name, mut store) in stores() {
+        let host = Host::prepare(store.as_mut(), 1_000);
+        let log = Log::default();
+        let (driver, plan) = BasisDriver::new(FIRST, &log);
+        let mut registry = host.registry();
+        register_basis(&mut registry, driver);
+        emit(&plan, &[b"a", b"b"]);
+        append_events(store.as_mut(), &host, INPUT, 1);
+        // Tick 1 scans Event 1; its outputs are Events 2 and 3.
+        let parent = pass_basis(&host, &mut registry, store.as_mut(), &all_at(1, &[]), 1);
+        append_events(store.as_mut(), &host, INPUT, 3);
+        let fork = ok(store.fork(host.timeline, Seq::from_u64(6), "fold-child")).id();
+        let child = host.on(fork);
+        publish(store.as_mut(), fork, host.revisions, 1_000);
+        // The Fork inherits the head of the parent's cut Tick.
+        let inherited = digest_of(&parent, FOLD, 0);
+        assert_eq!(
+            persisted_head(store.as_ref(), fork),
+            Some(inherited),
+            "{name}"
+        );
+
+        let (driver, plan) = BasisDriver::new(FIRST, &log);
+        let mut forked = child.registry();
+        register_basis(&mut forked, driver.verified());
+        let events = committed_events(store.as_ref(), fork);
+        let segment = TimelineHistorySegment::new(fork, Seq::from_u64(6));
+        ok(forked.restore_driver_state(&[segment], &events));
+        emit(&plan, &[b"c"]);
+        let cut = all_at(6, &events);
+        let first = pass_basis(&child, &mut forked, store.as_mut(), &cut, 2);
+        assert_eq!(first.dependencies().tick(), 2, "{name}");
+        let folded = fold_nodes(&first);
+        assert_eq!(folded.len(), 1, "{name}");
+        assert!(folded[0].input_digests().contains(&inherited), "{name}");
+        let last = folded[0].coordinate().artifact_digest();
+        for owner in [PREFIX, HISTORY] {
+            assert_eq!(count_owned_by(&first, owner), 1, "{name}");
+            assert_eq!(node_of(&first, owner, 0).input_digests(), [last], "{name}");
+            assert_eq!(edges_into(&first, owner), 1, "{name}");
+        }
+    }
+}

@@ -2714,6 +2714,187 @@ fn the_store_refuses_prefix_and_history_nodes_that_differ_from_the_snapshot_inpu
     }
 }
 
+/// The owner ID history nodes carried before ADR-064 R6, 4.1 renamed it.
+const PRE_RENAME_HISTORY: &str = "host.history";
+/// The owner ID of history nodes since.
+const HISTORY_OWNER: &str = "host.visible-history";
+
+/// The `IDP1` text field of an owner ID of fewer than 24 bytes, as an edge
+/// embeds it: a definite-length CBOR text string.
+fn owner_field(owner: &str) -> Vec<u8> {
+    let length = ok(u8::try_from(owner.len()));
+    let mut field = vec![0x60 | length];
+    field.extend_from_slice(owner.as_bytes());
+    field
+}
+
+/// `bytes` with every occurrence of `from` replaced by `to`.
+fn replaced(bytes: &[u8], from: &[u8], to: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut rest = bytes;
+    while let Some((&first, tail)) = rest.split_first() {
+        if rest.starts_with(from) {
+            out.extend_from_slice(to);
+            rest = &rest[from.len()..];
+        } else {
+            out.push(first);
+            rest = tail;
+        }
+    }
+    out
+}
+
+/// The coordinate with another owner ID and the same artifact digest.
+fn owned_by(coordinate: &DependencyNodeCoordinateV1, owner: &str) -> DependencyNodeCoordinateV1 {
+    ok(DependencyNodeCoordinateV1::try_new(
+        coordinate.tick(),
+        coordinate.scheduler_position(),
+        owner.to_owned(),
+        coordinate.output_ordinal(),
+        coordinate.schema_id(),
+        coordinate.artifact_digest(),
+    ))
+}
+
+/// The edge with the owner ID `from` replaced by `to` wherever it names a
+/// node: in the consumer and in the source field of the `IDP1` bytes.
+fn edge_renamed(edge: &DependencyEdgeRecordV1, from: &str, to: &str) -> DependencyEdgeRecordV1 {
+    let bytes = replaced(edge.as_bytes(), &owner_field(from), &owner_field(to));
+    let consumer = edge.consumer();
+    let consumer = if consumer.owner_id() == from {
+        owned_by(consumer, to)
+    } else {
+        consumer.clone()
+    };
+    ok(DependencyEdgeRecordV1::try_from_canonical(
+        bytes,
+        consumer,
+        edge.source_digest(),
+    ))
+}
+
+/// The declaration with the owner ID `from` of its nodes replaced by `to`,
+/// the artifact digests, the inputs and the bindings otherwise as they were.
+fn with_owner_renamed(
+    valid: &FactualTickDependenciesV1,
+    from: &str,
+    to: &str,
+) -> FactualTickDependenciesV1 {
+    let old = valid.record();
+    let origin = RecordedNodeOriginV1::Committed;
+    let mut nodes: Vec<DependencyNodeRecordV1> = old
+        .nodes()
+        .iter()
+        .map(|node| {
+            if node.coordinate().owner_id() == from {
+                let coordinate = owned_by(node.coordinate(), to);
+                let inputs = node.input_digests().to_vec();
+                let provenance = node.provenance_digest();
+                ok(DependencyNodeRecordV1::try_new(
+                    coordinate,
+                    node.class(),
+                    origin,
+                    inputs,
+                    provenance,
+                ))
+            } else {
+                node.clone()
+            }
+        })
+        .collect();
+    nodes.sort_by(|left, right| left.coordinate().cmp(right.coordinate()));
+    let mut edges: Vec<DependencyEdgeRecordV1> = old
+        .edges()
+        .iter()
+        .map(|edge| edge_renamed(edge, from, to))
+        .collect();
+    edges.sort_by(DependencyEdgeRecordV1::order_cmp);
+    let record = ok(TickDependencyRecordV1::try_new(
+        old.tick(),
+        origin,
+        nodes,
+        edges,
+    ));
+    // The renamed node sorts elsewhere, so the fold binding is re-pointed by digest.
+    let remap = |at: &u32| index_of(&record, digest_at(old, *at));
+    let checkpoints = valid.fold().checkpoints.iter().map(remap).collect();
+    let history = valid.fold().history.iter().map(remap).collect();
+    let renamed = rebound(valid, record.clone(), None);
+    with_fold(&renamed, checkpoints, history)
+}
+
+/// ADR-064 R6, 4.1 and 4.3 (conformance test 4): a history node that still
+/// carries the owner ID `host.history` is refused, though it inputs exactly
+/// what check (xi) expects. Only the owner ID differs from the valid
+/// declaration, which then commits. Nothing is appended by the refusal.
+#[test]
+fn the_store_refuses_a_history_node_under_the_pre_rename_owner_id() {
+    let clock = TestClock::at(1_000);
+    for (name, mut store) in stores(&clock) {
+        let fixture = prepare(store.as_mut());
+        let timeline = fixture.timeline;
+        let first = attempt(&fixture, 1, 0);
+        committed(ok(admit(store.as_mut(), &first)));
+        let second = Attempt {
+            drafts: drafts(&[b"x"]),
+            ..scheduled_after(&first, 2, 3)
+        };
+        let source = fold_source(store.as_ref(), timeline, 3);
+        let valid = coarse_declared(&second, source);
+        let last = last_fold_digest(&valid);
+        let forged = with_owner_renamed(&valid, HISTORY_OWNER, PRE_RENAME_HISTORY);
+        let old = node_of(forged.record(), PRE_RENAME_HISTORY);
+        assert_eq!(old.input_digests(), [last], "{name}");
+        let invalid = PipelineOutcomeV1::InvalidDependencyDeclaration;
+        let case = "history node under the pre-rename owner";
+        assert_refused(name, case, store.as_mut(), &second, forged, &invalid);
+        assert_eq!(cursor_of(store.as_ref(), timeline), None, "{name}");
+
+        commit_declared(store.as_mut(), &second, valid);
+        let row = Some((3, last));
+        assert_eq!(cursor_of(store.as_ref(), timeline), row, "{name}");
+    }
+}
+
+/// ADR-064 R6, 4.1 (conformance test 6): a record whose history and
+/// verified-prefix nodes input a `host.lineage` node of the same Tick commits
+/// and reads back from either adapter, and every edge it stored decodes in the
+/// `IDP1` codec, which requires the source to sort before the consumer. The
+/// owner ID `host.history` would sort before `host.lineage`: the conformance
+/// codec test of the same amendment shows that order failure.
+#[cfg(target_os = "linux")]
+#[test]
+fn history_and_prefix_edges_to_the_fold_chain_read_back_in_idp1_order_on_both_adapters() {
+    use pos_conformance::counterfactual::dependency::InputDependencyV1;
+
+    let clock = TestClock::at(1_000);
+    for (name, mut store) in stores(&clock) {
+        let fixture = prepare(store.as_mut());
+        let timeline = fixture.timeline;
+        let first = attempt(&fixture, 1, 0);
+        committed(ok(admit(store.as_mut(), &first)));
+        let second = Attempt {
+            drafts: drafts(&[b"x"]),
+            ..scheduled_after(&first, 2, 3)
+        };
+        let source = fold_source(store.as_ref(), timeline, 3);
+        let valid = coarse_declared(&second, source);
+        commit_declared(store.as_mut(), &second, valid);
+
+        let nodes = recorded_nodes(store.as_ref(), timeline);
+        assert!(!nodes.is_empty(), "{name}");
+        let mut pairs = Vec::new();
+        for edge in recorded_edges(store.as_ref(), timeline) {
+            let decoded = ok(InputDependencyV1::from_canonical_cbor(edge.as_bytes()));
+            pairs.push((decoded.source.owner_id, decoded.consumer.owner_id));
+        }
+        for consumer in ["host.prefix", HISTORY_OWNER] {
+            let pair = ("host.lineage".to_owned(), consumer.to_owned());
+            assert!(pairs.contains(&pair), "{name}: {consumer}");
+        }
+    }
+}
+
 /// ADR-064 R4.3: the fold-head row commits atomically with the Tick. A failing
 /// insert of the row rolls the whole scheduled Tick back; the retry commits
 /// it with exactly one row.
