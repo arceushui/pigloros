@@ -3223,6 +3223,16 @@ fn count_owned_by(basis: &PipelineAdmissionBasisV1, owner: &str) -> usize {
         .count()
 }
 
+/// How many edges of a basis end at a node of `owner`.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn edges_into(basis: &PipelineAdmissionBasisV1, owner: &str) -> usize {
+    let edges = basis.dependencies().record().edges();
+    edges
+        .iter()
+        .filter(|edge| edge.consumer().owner_id() == owner)
+        .count()
+}
+
 /// The node of `owner` at output ordinal `ordinal`.
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn node_of(basis: &PipelineAdmissionBasisV1, owner: &str, ordinal: u32) -> DependencyNodeRecordV1 {
@@ -3436,6 +3446,8 @@ fn a_full_carried_set_collapses_into_one_history_node_on_both_adapters() {
         let fold_input = snapshot.input_digests();
         assert_eq!(fold_input.len(), 1, "{name}");
         assert_eq!(node.input_digests(), fold_input, "{name}");
+        // The collapse of a full carried set adds one edge, not one per Event.
+        assert_eq!(edges_into(&basis, HISTORY), 1, "{name}");
         let owner = owner_at(&registry, 0);
         // The snapshot, the history node and the new Event's ingress node.
         let inputs = step_inputs_of(&basis, &owner);
@@ -3514,6 +3526,8 @@ fn a_restored_history_node_is_declared_by_the_driver_stepped_later_on_both_adapt
         assert_eq!(fold_input.len(), 1, "{name}");
         let restored = node_of(&basis, HISTORY, 0);
         assert_eq!(restored.input_digests(), fold_input, "{name}");
+        // The restore of the whole visible history adds one edge.
+        assert_eq!(edges_into(&basis, HISTORY), 1, "{name}");
 
         // The second Driver steps later and declares the node without recording another.
         emit(&plans[0], &[]);
@@ -3624,6 +3638,8 @@ fn verified_prefix_drivers_declare_one_prefix_node_per_digest_on_both_adapters()
             assert_eq!(node.coordinate().schema_id(), PREFIX_SCHEMA, "{name}");
             assert_eq!(node.input_digests(), fold_input, "{name}");
         }
+        // One edge per prefix node: the empty prefix and the two-Event prefix add one each.
+        assert_eq!(edges_into(&basis, PREFIX), 2, "{name}");
         // The fourth Driver subscribed to the Event type, so its step node
         // declares exactly the snapshot, its prefix node and the two ingress nodes.
         let snapshot = digest_of(&basis, OBSERVATION, 0);
