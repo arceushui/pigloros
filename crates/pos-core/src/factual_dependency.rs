@@ -174,7 +174,7 @@ impl FactualHostOwnerV1 {
     const OWNER_IDS: [&'static str; 6] = [
         "host.observation",
         "host.prefix",
-        "host.history",
+        "host.visible-history",
         "host.ingress",
         "host.lineage",
         "host.fold-history",
@@ -977,7 +977,26 @@ pub enum FactualTickShapeV1 {
     Human(Vec<EventDraft>),
 }
 
+/// The edges the verified-prefix and history nodes will add to the rest of the
+/// record: one each, exactly when the snapshot node gets a fold input, as the
+/// store counts them. That is when a head exists, or a fold input exists, or
+/// the window is truncated (a fold-history node then stands behind an empty
+/// checkpoint even without a fold input).
+fn coarse_edge_reserve(host: &HostNodes, source: &FactualFoldSourceV1) -> usize {
+    let fold_input =
+        |event: &FactualFoldEventV1| is_factual_fold_input(&event.event_type, event.node_class);
+    let fed = source.head().is_some()
+        || source.window.truncated
+        || source.window.events.iter().any(fold_input);
+    if fed {
+        host.prefix.len() + host.history.len()
+    } else {
+        0
+    }
+}
+
 /// Where one input of a node comes from.
+#[derive(Clone)]
 enum FactualSource {
     /// A node of this Tick, by index into the specs.
     Node(usize),
@@ -1464,9 +1483,20 @@ impl<'a> FactualAssembly<'a> {
     ) -> Result<(), FactualDependencyErrorV1> {
         if let Some(source) = source {
             self.fold(host, source)?;
+            self.feed_coarse_nodes(host);
         }
         self.renumber_ingress();
         Ok(())
+    }
+
+    /// Give every verified-prefix and history node the one input the snapshot
+    /// node declares (ADR-064 R6, 4.1): the last fold checkpoint node, else the
+    /// head, else none.
+    fn feed_coarse_nodes(&mut self, host: &HostNodes) {
+        let fold_input = self.specs[host.snapshot].sources.clone();
+        for index in host.prefix.iter().chain(&host.history) {
+            self.specs[*index].sources.extend(fold_input.clone());
+        }
     }
 
     /// Give the ingress nodes their ordinals in ascending `seq`, once the
@@ -1492,7 +1522,8 @@ impl<'a> FactualAssembly<'a> {
                 .specs
                 .iter()
                 .map(|spec| distinct_sources(&spec.sources))
-                .sum(),
+                .sum::<usize>()
+                + coarse_edge_reserve(host, source),
         };
         let tick = self.context.tick;
         let layout = factual_fold_layout((self.context.timeline_id, tick), source, &rest)?;
