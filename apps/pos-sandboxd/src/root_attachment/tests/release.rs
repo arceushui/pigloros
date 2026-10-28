@@ -138,12 +138,12 @@ mod cases {
                 }
                 3 => edit_mapper(&mut kernel.observations, |mapper| mapper.uuid = None),
                 4 => edit_loop(&mut kernel.observations, |device| {
-                    device.backing = Some((7, 8))
+                    device.backing = Some((7, 8));
                 }),
                 5 => kernel.observations.parent_mount_id = None,
                 6 => kernel.observations.executable = None,
                 7 => edit_entry(&mut kernel.observations, |entry| {
-                    entry.optional.push("shared:5".to_owned())
+                    entry.optional.push("shared:5".to_owned());
                 }),
                 _ => kernel.detach = Err(ImageActivationError::TeardownFailure),
             }
