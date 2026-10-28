@@ -169,6 +169,92 @@ mod cases {
     }
 
     #[test]
+    fn same_image_device_substitutions_refuse_launch_and_detach() -> TestResult {
+        for fault in 0..4 {
+            let tree = prepared_tree()?;
+            let record = tree
+                .runtime
+                .path()
+                .join("registry")
+                .join(component(&tree.prepared));
+            let bytes = fs::read(&record)?;
+            let (mut kernel, root) = attached_root(&tree.prepared)?;
+            match fault {
+                0 => {
+                    let mut node = kernel.observations.mount.ok_or("attached node")?;
+                    node.device.1 += 1;
+                    kernel.observations.mount = Some(node);
+                    kernel.observations.path = Some(node);
+                    edit_entry(&mut kernel.observations, |entry| entry.device = node.device);
+                    if let Some(executable) = kernel.observations.executable.as_mut() {
+                        executable.node.device = node.device;
+                    }
+                }
+                1 => edit_mapper(&mut kernel.observations, |mapper| {
+                    mapper.uuid = Some("CRYPT-VERITY-another-root".to_owned());
+                }),
+                2 => edit_slaves(&mut kernel.observations, |slaves| {
+                    for slave in slaves {
+                        slave.loop_name = Some("loop8".to_owned());
+                    }
+                }),
+                _ => {
+                    let node = kernel.observations.mount.as_mut().ok_or("attached node")?;
+                    node.inode += 1;
+                    kernel.observations.path = Some(*node);
+                }
+            }
+            // Every replacement still satisfies the admitted image. Refusal
+            // must come from retaining the original device identities.
+            assert!(root.expected.verify(&kernel.observations).is_ok());
+            assert_eq!(
+                recheck(&kernel, &root, &tree.prepared, Some(&root.expected), || Ok(
+                    ()
+                )),
+                Err(ImageActivationError::EvidenceMismatch),
+                "launch with substitution {fault}"
+            );
+            assert_eq!(
+                root.detach_with(&kernel, &tree.prepared),
+                Err(ImageActivationError::EvidenceMismatch),
+                "detach with substitution {fault}"
+            );
+            assert_eq!(kernel.detached(), 0);
+            assert_eq!(fs::read(&record)?, bytes);
+            tree.prepared.verify_directory()?;
+            assert!(tree
+                .registry
+                .commit_planned(&PlannedAttemptIntent::new([10; 16], [9; 32])?)
+                .is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn reordered_identical_device_evidence_rechecks_and_detaches() -> TestResult {
+        let tree = prepared_tree()?;
+        let (mut kernel, root) = attached_root(&tree.prepared)?;
+        edit_slaves(&mut kernel.observations, |slaves| slaves.reverse());
+        edit_loop(&mut kernel.observations, |device| {
+            if let Some(partitions) = device.partitions.as_mut() {
+                partitions.reverse();
+            }
+        });
+        assert_eq!(
+            recheck(&kernel, &root, &tree.prepared, Some(&root.expected), || Ok(
+                ()
+            )),
+            Ok(root.root_directory().clone())
+        );
+        root.detach_with(&kernel, &tree.prepared)?;
+        assert_eq!(kernel.detached(), 1);
+        tree.prepared.verify_directory()?;
+        tree.registry
+            .commit_planned(&PlannedAttemptIntent::new([10; 16], [9; 32])?)?;
+        Ok(())
+    }
+
+    #[test]
     fn a_quarantined_owner_can_detach_but_never_reopens_admission() -> TestResult {
         let tree = prepared_tree()?;
         let (kernel, root) = attached_root(&tree.prepared)?;

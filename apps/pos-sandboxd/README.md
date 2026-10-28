@@ -57,8 +57,10 @@ cleanup; mount/device/directory/intent cleanup and restart reconciliation remain
 
 `VerifiedRootMount::detach` consumes the retained mount, rechecks the exact
 durable directory record and private parent identities, then repeats the
-mount/image readback and requires the original mount ID before detaching by
-descriptor. The lifecycle controller must exclusively own the attempt and
+mount/image readback and requires the original mount node, device-mapper UUID
+and loop name before detaching by descriptor. Pre-launch rechecks retain the
+same identities, even if substituted devices could satisfy the admitted image.
+The lifecycle controller must exclusively own the attempt and
 finish unit/process shutdown first. Cleanup needs no renewed execution
 admission. A failure preserves intent and quarantines new registry commits;
 successful cleanup never clears an existing quarantine. The mount descriptor
