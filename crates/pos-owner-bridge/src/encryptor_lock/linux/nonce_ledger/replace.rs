@@ -116,4 +116,5 @@ impl Drop for StagedLedger<'_> {
 }
 
 #[cfg(test)]
+#[path = "../../../../tests/support/nonce_ledger_replace.rs"]
 mod tests;
