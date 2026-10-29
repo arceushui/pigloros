@@ -225,6 +225,28 @@ fn digest(domain: &[u8], parts: &[&[u8]]) -> [u8; 32] {
     *hasher.finalize().as_bytes()
 }
 
+/// The documented authoritative result digest of a rebuilt stream.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn result_digest(stream: &AuthoritativeStreamV1) -> [u8; 32] {
+    let mut parts: Vec<Vec<u8>> = Vec::new();
+    for (position, event) in &stream.events {
+        parts.push(position.timeline_id.to_vec());
+        parts.push(position.seq.to_be_bytes().to_vec());
+        parts.push(event.identity.to_vec());
+        parts.push(event.schema.to_vec());
+        parts.push(blake3::hash(&event.payload).as_bytes().to_vec());
+    }
+    for (coordinate, checkpoint) in &stream.checkpoints {
+        parts.push(coordinate.timeline_id.to_vec());
+        parts.push(coordinate.fold_cursor.to_be_bytes().to_vec());
+        parts.push(coordinate.tick.to_be_bytes().to_vec());
+        parts.push(checkpoint.digest.to_vec());
+        parts.push(checkpoint.size.to_be_bytes().to_vec());
+    }
+    let parts: Vec<&[u8]> = parts.iter().map(Vec::as_slice).collect();
+    digest(b"PiglorOS.RecordedReplayResult.v1", &parts)
+}
+
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn evaluation(
     enclosing: ErasureReplayClaimV1,
@@ -458,7 +480,10 @@ fn rpl_001_recorded_replay_is_verified_exact() -> TestResult {
         VerificationOutcomeV1::VerifiedExact
     );
     assert_eq!(outcome.result.replay_claim, ReplayClaimV1::Exact);
-    assert!(outcome.result.authoritative_result_digest.is_some());
+    assert_eq!(
+        outcome.result.authoritative_result_digest,
+        Some(result_digest(&recording.expected(2)?))
+    );
     assert_eq!(outcome.result.divergence_report_digest, None);
     assert_eq!(outcome.result.first_error, None);
     assert_eq!(outcome.result.checked_artifact_count, 2);
@@ -545,7 +570,15 @@ fn a_rebuilt_state_that_differs_is_diverged_with_one_dvr1() -> TestResult {
         outcome.result.divergence_report_digest,
         Some(report.report_digest)
     );
-    assert!(outcome.result.authoritative_result_digest.is_some());
+    // The rebuilt stream, not the expected one, is the authoritative result.
+    assert_eq!(
+        outcome.result.authoritative_result_digest,
+        Some(result_digest(&recording.expected(2)?))
+    );
+    assert_ne!(
+        outcome.result.authoritative_result_digest,
+        Some(result_digest(&expected))
+    );
     assert_eq!(outcome.result.first_error, None);
     Ok(())
 }

@@ -48,6 +48,7 @@
 //! | Event identity | `PiglorOS.RecordedReplayEventIdentity.v1` | Event id bytes, entity id bytes, Event type |
 //! | Event schema | `PiglorOS.RecordedReplayEventSchema.v1` | Event type, zero byte, schema version (`u32`, big endian) |
 //! | Checkpoint | `PiglorOS.RecordedReplayCheckpoint.v1` | canonical CBOR of the Projection Snapshot |
+//! | Authoritative result | `PiglorOS.RecordedReplayResult.v1` | per Event in Timeline Order: Timeline id, sequence (`u64`, big endian), identity digest, schema digest, BLAKE3 of the payload; then per checkpoint: Timeline id, Fold Cursor, tick (`u64`, big endian), digest, size (`u64`, big endian) |
 //!
 //! The checkpoint is keyed by the export's Timeline id and the Fold Cursor of
 //! the last exported Event (0 when the export is empty); its size is the
