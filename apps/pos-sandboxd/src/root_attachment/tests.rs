@@ -283,7 +283,14 @@ fn component(prepared: &PreparedAttemptDirectory) -> String {
     prepared.intent().unit_name().attempt_component().to_owned()
 }
 
-/// A descriptor-aware fake kernel that records every detach.
+/// The fake clock stays at the original deadline after its timely checks.
+#[derive(Clone, Copy)]
+struct ClockExpiry {
+    timely_checks: usize,
+    deadline: tokio::time::Instant,
+}
+
+/// A descriptor-aware fake kernel that records every detach and readback.
 struct FakeKernel {
     vetoes: bool,
     attach: Result<(), ImageActivationError>,
@@ -291,6 +298,9 @@ struct FakeKernel {
     observations: Observations,
     detach: Result<(), ImageActivationError>,
     detached: AtomicUsize,
+    readbacks: AtomicUsize,
+    clock_checks: AtomicUsize,
+    clock_expiry: Option<ClockExpiry>,
     absence: Mutex<VecDeque<AbsenceProbe>>,
     probes: Mutex<Vec<[BlockIdentity; 2]>>,
     detached_mount: Mutex<Option<(std::path::PathBuf, std::path::PathBuf)>>,
@@ -305,6 +315,9 @@ impl FakeKernel {
             observations,
             detach: Ok(()),
             detached: AtomicUsize::new(0),
+            readbacks: AtomicUsize::new(0),
+            clock_checks: AtomicUsize::new(0),
+            clock_expiry: None,
             absence: Mutex::new(VecDeque::new()),
             probes: Mutex::new(Vec::new()),
             detached_mount: Mutex::new(None),
@@ -317,6 +330,17 @@ impl FakeKernel {
 }
 
 impl AttachmentKernel for FakeKernel {
+    fn now(&self) -> tokio::time::Instant {
+        match self.clock_expiry {
+            Some(expiry)
+                if self.clock_checks.fetch_add(1, Ordering::SeqCst) >= expiry.timely_checks =>
+            {
+                expiry.deadline
+            }
+            _ => tokio::time::Instant::now(),
+        }
+    }
+
     fn vetoes_userspace_verity(&self) -> bool {
         self.vetoes
     }
@@ -330,6 +354,7 @@ impl AttachmentKernel for FakeKernel {
     }
 
     fn observe(&self, _: BorrowedFd<'_>, _: &File, _: &File, _: &str) -> Observations {
+        self.readbacks.fetch_add(1, Ordering::SeqCst);
         self.observations.clone()
     }
 

@@ -66,12 +66,57 @@ mod cases {
         let tree = prepared_tree()?;
         let (kernel, root) = attached_root(&tree.prepared)?;
         let deadline = Instant::now() + Duration::from_millis(50);
-        let release = Release::new(root, &tree.prepared, deadline);
+        let release = root.detach(&tree.prepared, deadline);
         advance(Duration::from_millis(50)).await;
-        assert_eq!(release.finish(&kernel).await, Err(UNVERIFIED));
+        assert_eq!(release.await, Err(UNVERIFIED));
         assert_eq!(kernel.detached(), 0);
         assert!(kernel.probes.lock().map_err(|_| "probes")?.is_empty());
         quarantined(&tree)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn synchronous_work_cannot_outlive_the_original_deadline() -> TestResult {
+        for (phase, timely_checks, readbacks, detaches, probes) in [
+            ("after initial ownership", 1, 0, 0, 0),
+            ("after mount readback", 2, 1, 0, 0),
+            ("after final ownership", 6, 1, 1, 1),
+        ] {
+            let tree = prepared_tree()?;
+            let (mut kernel, root) = attached_root(&tree.prepared)?;
+            let initial_reads = kernel.readbacks.load(Ordering::SeqCst);
+            let record = tree
+                .runtime
+                .path()
+                .join("registry")
+                .join(component(&tree.prepared));
+            let bytes = fs::read(&record)?;
+            let deadline = cleanup_deadline();
+            kernel.clock_expiry = Some(ClockExpiry {
+                timely_checks,
+                deadline,
+            });
+            assert_eq!(
+                Release::new(root, &tree.prepared, deadline)
+                    .finish(&kernel)
+                    .await,
+                Err(UNVERIFIED),
+                "{phase}"
+            );
+            assert_eq!(
+                kernel.readbacks.load(Ordering::SeqCst) - initial_reads,
+                readbacks,
+                "{phase}"
+            );
+            assert_eq!(kernel.detached(), detaches, "{phase}");
+            assert_eq!(
+                kernel.probes.lock().map_err(|_| "probes")?.len(),
+                probes,
+                "{phase}"
+            );
+            assert_eq!(fs::read(record)?, bytes);
+            quarantined(&tree)?;
+        }
+        Ok(())
     }
 
     #[tokio::test(start_paused = true)]
@@ -199,6 +244,8 @@ mod cases {
 
     #[tokio::test]
     async fn changing_generations_are_pending_and_backwards_evidence_rejects() -> TestResult {
+        use rustix::fs::{mkfifoat, Mode, CWD};
+
         const CHILD: &str = "PIGLOROS_ABSENCE_SAMPLE_CHILD";
         const TEST: &str = concat!(
             module_path!(),
@@ -207,8 +254,6 @@ mod cases {
         if bounded_fixture_child(CHILD, TEST)? {
             return Ok(());
         }
-        use rustix::fs::{mkfifoat, Mode, CWD};
-
         for (first, second, first_dev, expected) in [
             (101_u64, Some(103_u64), "7:7", Ok(false)),
             (103, Some(99), "7:7", Err(UNVERIFIED)),

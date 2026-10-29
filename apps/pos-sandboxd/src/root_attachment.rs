@@ -38,6 +38,7 @@ use std::{
 };
 
 use pos_reference::provider_admission::HeldImageAdmission;
+use tokio::time::Instant;
 
 use self::{
     observe::{BlockIdentity, HostKernel, Observations},
@@ -51,6 +52,12 @@ use crate::{
 
 /// The kernel operations of one attachment.
 trait AttachmentKernel: Sync {
+    /// Monotonic time for checks around synchronous kernel/ownership work.
+    /// Production shares the Tokio clock used by the original timeout budget.
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+
     /// Whether the kernel command line vetoes systemd's userspace Verity
     /// fallback.
     fn vetoes_userspace_verity(&self) -> bool;

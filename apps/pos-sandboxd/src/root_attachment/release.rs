@@ -90,30 +90,30 @@ impl<'a> Release<'a> {
             deadline,
         } = self;
         let devices = root.identity.devices();
-        before(deadline)?;
+        before(kernel, deadline)?;
         guard
             .directory
             .with_verified_parent(ImageActivationError::EvidenceMismatch, || {
-                before(deadline)?;
+                before(kernel, deadline)?;
                 root.verify_mount(kernel, guard.directory)?;
-                before(deadline)?;
+                before(kernel, deadline)?;
                 kernel.detach(root.mount())?;
-                before(deadline)
+                before(kernel, deadline)
             })?;
         drop(root);
         loop {
-            before(deadline)?;
+            before(kernel, deadline)?;
             let observed = timeout_at(deadline, kernel.devices_absent(devices))
                 .await
                 .map_err(|_| ImageActivationError::ResourceAbsenceUnverified)?;
             // Synchronous sysfs work must finish strictly before the deadline,
             // even when it did not yield to the async timeout.
-            before(deadline)?;
+            before(kernel, deadline)?;
             if observed? {
                 guard
                     .directory
                     .with_verified_parent(ImageActivationError::EvidenceMismatch, || Ok(()))?;
-                before(deadline)?;
+                before(kernel, deadline)?;
                 guard.complete = true;
                 return Ok(());
             }
@@ -135,8 +135,8 @@ impl Drop for CleanupGuard<'_> {
     }
 }
 
-fn before(deadline: Instant) -> Result<(), ImageActivationError> {
-    (Instant::now() < deadline)
+fn before(kernel: &impl AttachmentKernel, deadline: Instant) -> Result<(), ImageActivationError> {
+    (kernel.now() < deadline)
         .then_some(())
         .ok_or(ImageActivationError::ResourceAbsenceUnverified)
 }
