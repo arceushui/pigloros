@@ -1,0 +1,49 @@
+name: owner-profile-diagnostic
+on:
+  pull_request:
+    paths:
+      - .github/workflows/owner-profile-diagnostic.yml
+      - scripts/diagnose_owner_profiles.py
+      - crates/pos-owner-bridge/**
+permissions:
+  contents: read
+jobs:
+  profile:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      RUSTC_BOOTSTRAP: "1"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: 1.97.1
+          components: llvm-tools-preview
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
+        with:
+          tool: cargo-llvm-cov
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
+        with:
+          tool: cargo-nextest@0.9.146
+          fallback: none
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        with:
+          shared-key: coverage
+          save-if: false
+      - name: Minimize the profile merger reproduction to the public lock target
+        run: |
+          ulimit -c 0
+          cargo llvm-cov nextest -p pos-owner-bridge --all-features --locked \
+            --test encryptor_lock_public --json --output-path /tmp/owner-coverage.json \
+            --user-config-file none --ignore-default-filter --run-ignored all --no-fail-fast
+      - name: Preserve input metadata after success or failure
+        if: ${{ always() }}
+        run: python3 scripts/diagnose_owner_profiles.py
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ always() }}
+        with:
+          name: owner-profile-diagnostic
+          path: /tmp/owner-profile-metadata.json
+          if-no-files-found: error
