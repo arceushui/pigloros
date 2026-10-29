@@ -5,12 +5,14 @@
 //! [`World`] publishes releases through the real publisher into a real local
 //! OCI store, builds trust evidence from independently encoded PTR1, PRV1, and
 //! TPS1 records, provisions the Memory adapter of the Plugin trust policy
-//! registry from the matching genesis TPS1, and installs through the real
-//! installer. It also steps the policy forward (key and release revocation)
-//! and performs an operator rollback; both are test fixtures only, because
-//! production has no entry point for either. Every direct `admit` and
-//! `rollback` passes a release proof (ADR-103 revision 7): the real verified
-//! signature, except where a test deliberately plants an invalid signature.
+//! registry from the matching genesis TPS1, and installs and rolls back through
+//! the real installer and rollback entry (ADR-103 revision 7). It also steps the
+//! policy forward (key and release revocation) and performs a direct registry
+//! rollback; both are test fixtures only: production has no policy-advance
+//! entry point, and its only rollback entry is `rollback_plugin_release_v1`.
+//! Every direct `admit` and `rollback` passes a release proof (ADR-103
+//! revision 7): the real verified signature, except where a test deliberately
+//! plants an invalid signature.
 
 use std::sync::{atomic::AtomicU64, Arc};
 
@@ -42,13 +44,16 @@ use super::release::{address_of, closure, make_draft, PrivateRoot, Shape};
 use super::spy_registry::SpyRegistry;
 use super::BoxResult;
 use crate::{
-    install_plugin_release_v1, publish_plugin_release_v1, sign_plugin_release_v1,
-    InstalledPluginReleaseV1, PluginInstallRequestV1, PluginReleaseInstallErrorV1,
-    PublishedPluginReleaseV1,
+    install_plugin_release_v1, publish_plugin_release_v1, rollback_plugin_release_v1,
+    sign_plugin_release_v1, InstalledPluginReleaseV1, PluginInstallRequestV1,
+    PluginReleaseInstallErrorV1, PluginReleaseRollbackErrorV1, PluginRollbackRequestV1,
+    PublishedPluginReleaseV1, RolledBackPluginReleaseV1,
 };
 
 /// The result of one install call.
 pub type Installed = Result<InstalledPluginReleaseV1, PluginReleaseInstallErrorV1>;
+/// The result of one call of the production rollback entry.
+pub type RolledBack = Result<RolledBackPluginReleaseV1, PluginReleaseRollbackErrorV1>;
 /// The scripted trusted wall source the installer samples.
 pub type WallSource = ScriptedTrustedWallSourceV1;
 /// A typed registry result.
@@ -510,6 +515,43 @@ impl World {
         Ok(self.install_with(address, &material, &mut source, tag))
     }
 
+    /// Roll back to the release at `address` through the production rollback entry, with
+    /// explicit evidence and wall source.
+    ///
+    /// # Errors
+    /// Returns the rollback entry's typed refusal.
+    pub fn roll_back_with(
+        &mut self,
+        address: &BundleAddressV1,
+        material: &Material,
+        wall: &mut WallSource,
+        tag: u8,
+    ) -> RolledBack {
+        rollback_plugin_release_v1(
+            &self.store,
+            address,
+            &mut self.registry,
+            wall,
+            PluginRollbackRequestV1 {
+                anchor: &self.anchor,
+                tps1_bytes: &material.tps1,
+                evidence: &material.evidence,
+                activation: activation(self.timeline, tag),
+            },
+        )
+    }
+
+    /// Roll back to the release at `address` through the production rollback entry, with the
+    /// current evidence and a wall source at the evidence UTC.
+    ///
+    /// # Errors
+    /// Returns the fixture construction error; the rollback result is the value.
+    pub fn roll_back(&mut self, address: &BundleAddressV1, tag: u8) -> BoxResult<RolledBack> {
+        let material = self.material()?;
+        let mut source = wall(material.utc)?;
+        Ok(self.roll_back_with(address, &material, &mut source, tag))
+    }
+
     /// Advance the registry policy by one PRV1 epoch that revokes the
     /// publisher key `epochs`, keeping every earlier revocation.
     ///
@@ -683,9 +725,10 @@ impl World {
     }
 
     /// Operator rollback of the active release to the already admitted release
-    /// at `target`, with the current evidence.
+    /// at `target`, with the current evidence, straight through the registry.
     ///
-    /// Test fixture only: production has no rollback entry point.
+    /// Test fixture only: production rolls back only through
+    /// `rollback_plugin_release_v1` ([`World::roll_back`]).
     ///
     /// # Errors
     /// Returns the fixture construction error; the registry result is the value.

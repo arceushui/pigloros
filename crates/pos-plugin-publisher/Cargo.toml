@@ -53,6 +53,10 @@ name = "installer_public"
 required-features = ["test-support"]
 
 [[test]]
+name = "rollback_public"
+required-features = ["test-support"]
+
+[[test]]
 name = "signed_release_world_public"
 required-features = ["test-support"]
 
