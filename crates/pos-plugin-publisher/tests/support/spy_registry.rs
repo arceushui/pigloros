@@ -37,7 +37,8 @@ use pos_store::plugin_trust_registry::{
 /// What one `admit` call received.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AdmitCall {
-    pub release_proof: VerifiedPluginReleaseSignatureV1,
+    /// Boxed so that the admit entry of [`Call`] stays as small as the evaluation entry.
+    pub release_proof: Box<VerifiedPluginReleaseSignatureV1>,
     pub utc: i64,
     pub tick: u64,
     pub tps1: Vec<u8>,
@@ -129,7 +130,7 @@ impl PluginTrustPolicyRegistryV1 for SpyRegistry {
         activation: ActivationEventInputV1,
     ) -> Registry<AdmittedPluginReleaseReceiptV1> {
         let call = AdmitCall {
-            release_proof: *release_proof,
+            release_proof: Box::new(*release_proof),
             utc: trusted_utc.as_i64(),
             tick,
             tps1: tps1_bytes.to_vec(),

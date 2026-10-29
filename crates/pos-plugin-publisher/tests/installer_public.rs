@@ -124,7 +124,7 @@ fn installs_a_signed_release_and_returns_the_admission_and_execution_projection(
     assert_eq!(world.registry.admits[0].tps1, material.tps1);
     assert_eq!(world.registry.admits[0].timeline, world.timeline);
     // R7-T7: the registry received the installer's own verified signature as the release proof.
-    assert_eq!(world.registry.admits[0].release_proof, signature);
+    assert_eq!(*world.registry.admits[0].release_proof, signature);
     // The release is active and exactly one activation Event was appended.
     let active = world.registry.active_release(SCOPE, "plugin-a")?;
     assert_eq!(
