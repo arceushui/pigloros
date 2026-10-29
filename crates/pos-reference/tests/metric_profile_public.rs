@@ -41,17 +41,11 @@ fn json(path: &str) -> TestResult<Json> {
 }
 
 fn text<'a>(value: &'a Json, key: &str) -> TestResult<&'a str> {
-    Ok(value
-        .get(key)
-        .and_then(Json::as_str)
-        .ok_or("missing text field")?)
+    Ok(value.get(key).and_then(Json::as_str).ok_or(key)?)
 }
 
 fn list<'a>(value: &'a Json, key: &str) -> TestResult<&'a Vec<Json>> {
-    Ok(value
-        .get(key)
-        .and_then(Json::as_array)
-        .ok_or("missing list field")?)
+    Ok(value.get(key).and_then(Json::as_array).ok_or(key)?)
 }
 
 /// The members of one family's `MCS1` composite, by BLAKE3 hex digest.
@@ -606,18 +600,17 @@ fn record_semantics_follow_index_order() -> TestResult {
         Cbor::Null,
         Cbor::Bool(true),
     ]);
-    let mut fields = input_fields(1, vec![record("a", "e", 1, 0, Some(0)), pending]);
-    expect_failure(
-        &encode(&Cbor::Array(fields.clone())),
-        outcome,
-        "records/1/5",
-    )?;
+    let fields = input_fields(1, vec![record("a", "e", 1, 0, Some(0)), pending]);
+    expect_failure(&encode(&Cbor::Array(fields)), outcome, "records/1/5")?;
     // A later failure in the same record or in a later record never displaces an earlier one.
-    fields[7] = Cbor::Array(vec![
-        record("b", "e", 1, 0, Some(0)),
-        record("", "e", 1_000_001, 0, Some(0)),
-        record("a", "e", 1, 0, Some(0)),
-    ]);
+    let fields = input_fields(
+        1,
+        vec![
+            record("b", "e", 1, 0, Some(0)),
+            record("", "e", 1_000_001, 0, Some(0)),
+            record("a", "e", 1, 0, Some(0)),
+        ],
+    );
     expect_failure(
         &encode(&Cbor::Array(fields)),
         MetricErrorV1::InvalidIdentifier,
