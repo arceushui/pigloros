@@ -3,7 +3,7 @@
 #![cfg(target_os = "linux")]
 
 use std::fs::{self, DirBuilder, Permissions};
-use std::io;
+use std::io::{self, Write as _};
 use std::os::unix::fs::{symlink, DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -36,7 +36,7 @@ impl Sandbox {
 
 impl Drop for Sandbox {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
+        drop(fs::remove_dir_all(&self.0));
     }
 }
 
@@ -141,7 +141,7 @@ fn lock_probe() -> TestResult {
         }
         _ => return Err("unknown lock probe".into()),
     }
-    println!("{MARKER}");
+    writeln!(io::stdout(), "{MARKER}")?;
     Ok(())
 }
 
