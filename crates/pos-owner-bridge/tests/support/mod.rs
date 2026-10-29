@@ -10,9 +10,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
+/// A private fixture directory with best-effort cleanup when dropped.
 pub struct Sandbox(pub PathBuf);
 
 impl Sandbox {
+    /// Create a unique private directory for this test process.
+    ///
+    /// # Errors
+    /// Fails if the clock precedes its epoch or creating or securing the
+    /// directory fails.
     pub fn new() -> TestResult<Self> {
         let nanos = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
         let path = std::env::temp_dir().join(format!(
@@ -31,6 +37,10 @@ impl Drop for Sandbox {
     }
 }
 
+/// Create a new directory with owner-only permissions.
+///
+/// # Errors
+/// Returns the filesystem error if creation or setting mode `0o700` fails.
 pub fn private_directory(path: &Path) -> io::Result<()> {
     DirBuilder::new().mode(0o700).create(path)?;
     fs::set_permissions(path, Permissions::from_mode(0o700))
