@@ -369,7 +369,7 @@ impl<'a> Decoder<'a> {
             let valid = (1..=MAX_IDENTIFIER_BYTES).contains(&text.len())
                 && std::str::from_utf8(text).is_ok();
             self.require(valid, MetricErrorV1::InvalidIdentifier, path);
-            Ok(Some(text).filter(|_| valid))
+            Ok(valid.then_some(text))
         } else {
             self.flag(MetricErrorV1::InvalidEncoding, path);
             Ok(None)
