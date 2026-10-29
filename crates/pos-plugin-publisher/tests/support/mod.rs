@@ -6,9 +6,10 @@
 //! Nothing here grants authority: the world signs and publishes releases with
 //! fixture keys, builds trust evidence from independently encoded PTR1, PRV1,
 //! and TPS1 records, provisions the Memory adapter of the Plugin trust policy
-//! registry, and installs through the real installer. Policy advance and
-//! operator rollback are fixtures here because production has no entry point
-//! for either.
+//! registry, and installs and rolls back through the real installer and
+//! rollback entry. Policy advance and the direct registry rollback are fixtures
+//! here: production has no policy-advance entry point, and its only rollback
+//! entry is `rollback_plugin_release_v1` (ADR-103 revision 7).
 //!
 //! A test of another crate enables the feature from its `[dev-dependencies]`,
 //! builds a [`world::World`], publishes a [`release::Shape`], and installs it.

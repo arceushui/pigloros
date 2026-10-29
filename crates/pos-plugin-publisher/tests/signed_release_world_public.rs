@@ -418,7 +418,8 @@ fn a_clocked_spy_stamps_every_evaluation_and_leaves_admits_unstamped() -> TestRe
     assert_eq!(evaluation.tick(), TICK);
     assert_eq!(clock.load(Ordering::SeqCst), 1);
 
-    // The forced error is an `admit` injection only, and the inner result is returned as is.
+    // The forced error is an `admit` and `rollback` injection only, and the inner result is
+    // returned as is.
     world.registry.forced = Some(PluginTrustPolicyRegistryErrorV1::StorageFailed);
     let wrong_utc = world.evaluate_at(&address, utc + 1, TICK)?;
     assert_eq!(
