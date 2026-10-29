@@ -186,6 +186,24 @@ try:
     body = body.replace("use super::{CommitStage, SubjectEncryptorLock, LEDGER_NAME, TEMPORARY_NAME};", "use super::super::{CommitStage, SubjectEncryptorLock, LEDGER_NAME, TEMPORARY_NAME};")
     assert body.count("nonce_ledger::replace::tests::crash_probe") == 1
     body = body.replace("nonce_ledger::replace::tests::crash_probe", "nonce_ledger::replace::tests::cases::crash_probe")
+    body += '''
+
+#[test]
+fn a_duplicate_descriptor_defers_ledger_unlock_after_commit() -> TestResult {
+    let (_root, guard) = prepare()?;
+    let staged = super::super::StagedLedger::open(&guard.directory)?;
+    let duplicate = rustix::io::fcntl_dupfd_cloexec(&staged.file, 0)?;
+    staged.commit(&image(13)?, |_| Ok(()))?;
+    assert_eq!(
+        guard.replace_nonce_ledger_bytes(&image(14)?),
+        Err(BridgeError::Unavailable(UnavailableCode::InterfaceUnavailable))
+    );
+    drop(duplicate);
+    guard.replace_nonce_ledger_bytes(&image(14)?)?;
+    assert_eq!(guard.read_nonce_ledger_bytes()?, image(14)?);
+    Ok(())
+}
+'''
     adjacent.write_text(header + "\n#[cfg(test)]\nmod cases {\n" + textwrap.indent(body, "    ") + "}\n")
     previous.unlink()
     text = original_declaration.decode()
@@ -198,12 +216,56 @@ try:
     assert code == 0
     code, output = execute("combo-shear", ["cargo", "shear", "--deny-warnings"], repo)
     assert code == 0
+    linux = repo / "crates/pos-owner-bridge/src/encryptor_lock/linux.rs"
+    original_linux = linux.read_bytes()
+    old_call = ".and_then(|()| fs::flock(file, FlockOperation::NonBlockingLockExclusive))"
+    assert linux.read_text().count(old_call) == 1
+    instrumented = linux.read_text().replace(old_call, '''.and_then(|()| fs::flock(file, FlockOperation::NonBlockingLockExclusive).inspect_err(|error| {
+        if name == "subject-nonce-ledger.v1" {
+            eprintln!("[DEBUG-399-FORK] ledger flock refused: {error:?}");
+        }
+    }))''')
+    try:
+        linux.write_text(instrumented)
+        build = subprocess.run(["cargo", "test", "-p", "pos-owner-bridge", "--lib", "--all-features", "--locked", "--no-run", "--message-format=json"], cwd=repo, text=True, capture_output=True, check=False)
+        (EVIDENCE / "parallel-build.log").write_text(build.stderr)
+        assert build.returncode == 0
+        artifacts = [json.loads(line) for line in build.stdout.splitlines() if line.startswith("{")]
+        binaries = [a["executable"] for a in artifacts if a.get("reason") == "compiler-artifact" and a.get("profile", {}).get("test") and a.get("executable") and a.get("target", {}).get("name") == "pos_owner_bridge"]
+        assert len(binaries) == 1, binaries
+        binary = binaries[0]
+        prefix = "encryptor_lock::linux::nonce_ledger::replace::tests::cases::"
+        stress = {"parallel": [], "serial": []}
+        for mode, count, flags in [("parallel", 100, []), ("serial", 10, ["--test-threads=1"])]:
+            for index in range(count):
+                trial = subprocess.run([binary, prefix, *flags], cwd=repo, capture_output=True, text=True, check=False)
+                text = trial.stdout + trial.stderr
+                (EVIDENCE / f"{mode}-{index}.log").write_text(text)
+                stress[mode].append({"exit": trial.returncode, "ledger_flock_refusal": "[DEBUG-399-FORK] ledger flock refused" in text})
+        (EVIDENCE / "parallel-stress.json").write_text(json.dumps(stress, indent=2))
+        assert all(row["exit"] == 0 for row in stress["serial"])
+        print("[DEBUG-399-FORK] baseline parallel failures", sum(row["exit"] != 0 for row in stress["parallel"]))
+    finally:
+        linux.write_bytes(original_linux)
+    # A single test-process mutex prevents sibling forks from extending the
+    # lifetime of short-lived flock descriptors. There are no other process
+    # spawns in this library's unit tests; child probes exec a fresh test binary.
+    body = body.replace("use std::time::{Duration, Instant};", "use std::time::{Duration, Instant};\nuse std::sync::Mutex;")
+    body = body.replace("type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;", "type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;\n\n// fork duplicates descriptors until exec applies CLOEXEC. Serialize these\n// descriptor-lifetime witnesses with their sibling child-process creation.\nstatic PROCESS_TEST_LOCK: Mutex<()> = Mutex::new(());")
+    pattern = r"(#\[test\]\s*fn (\w+)\(\) -> TestResult \{\n)"
+    body, count = re.subn(pattern, lambda match: match[1] + ("    let _serial = PROCESS_TEST_LOCK.lock()?;\n" if match[2] != "crash_probe" else ""), body)
+    assert count == 8, count
+    assert body.count("let guard = SubjectEncryptorLock::acquire(&root)?;") == 1
+    body = body.replace("let guard = SubjectEncryptorLock::acquire(&root)?;", "let _serial = PROCESS_TEST_LOCK.lock()?;\n    let guard = SubjectEncryptorLock::acquire(&root)?;")
+    adjacent.write_text(header + "\n#[cfg(test)]\nmod cases {\n" + textwrap.indent(body, "    ") + "}\n")
+    code, output = execute("combo-serialized-format", ["rustfmt", "--edition", "2021", str(adjacent)], repo)
+    assert code == 0
     code, output = execute("combo-owner-coverage", ["cargo", "llvm-cov", "--manifest-path", "crates/pos-owner-bridge/Cargo.toml", "--all-features", "--locked", "--json", "--output-path", str(EVIDENCE / "combo-coverage.json"), "--", "--include-ignored"], repo)
     assert code == 0
     clean = re.sub(r"\x1b\[[0-9;]*m", "", output)
     private_names = re.findall(r"#\[test\]\s*fn (\w+)", adjacent.read_text())
     public_names = re.findall(r"#\[test\]\s*fn (\w+)", (repo / "crates/pos-owner-bridge/tests/nonce_ledger_replace_public.rs").read_text())
-    assert len(private_names) == 7 and len(public_names) == 7
+    assert len(private_names) == 8 and len(public_names) == 7
     for name in private_names:
         assert f"test encryptor_lock::linux::nonce_ledger::replace::tests::cases::{name} ... ok" in clean
     for name in public_names:
@@ -227,7 +289,7 @@ try:
     assert selected and all(e["coverage"] == 100 and e["crap"] <= 4 for e in selected)
     (EVIDENCE / "combo-adjacent-tests.rs").write_bytes(adjacent.read_bytes())
     (EVIDENCE / "combo-replace.rs").write_bytes(declaration.read_bytes())
-    (EVIDENCE / "combo-verdict.json").write_text(json.dumps({"shear_passes": True, "all14_new_tests_run": True, "owned_mapped_coverage_full": True, "private_raw_mappings": private_mappings, "private_excluded_from_production_metrics": True, "owned_crap_max": max(e["crap"] for e in selected), "owned": owned}, indent=2))
+    (EVIDENCE / "combo-verdict.json").write_text(json.dumps({"shear_passes": True, "all15_new_tests_run": True, "owned_mapped_coverage_full": True, "private_raw_mappings": private_mappings, "private_excluded_from_production_metrics": True, "owned_crap_max": max(e["crap"] for e in selected), "owned": owned}, indent=2))
 finally:
     declaration.write_bytes(original_declaration)
     previous.write_bytes(original_witness)
