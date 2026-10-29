@@ -1047,5 +1047,78 @@ fn a_coordinate_the_dvr1_shape_rejects_is_an_error() -> TestResult {
     let mut actual = baseline();
     actual.events.insert(position(u64::MAX), event(1, 9));
     assert!(first_divergence_v1(&context(), &expected, &actual).is_err());
+
+    let mut actual = baseline();
+    actual.scheduler.insert(slot(2), String::new());
+    assert!(first_divergence_v1(&context(), &expected, &actual).is_err());
+
+    let over_ordinal = u32::from(u16::MAX) + 1;
+    let mut actual = baseline();
+    actual
+        .world_cut_artifacts
+        .insert(artifact(over_ordinal), b"late-artifact".to_vec());
+    assert!(first_divergence_v1(&context(), &expected, &actual).is_err());
+
+    let mut actual = baseline();
+    actual.driver_outputs.insert(
+        output(0, WORLD_DRIVER, over_ordinal),
+        driver_output(DriverOutcomeV1::Output(b"late-output".to_vec())),
+    );
+    assert!(first_divergence_v1(&context(), &expected, &actual).is_err());
+    Ok(())
+}
+
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn a_tick_boundary_outranks_the_scheduler_and_the_scheduler_a_driver_output() -> TestResult {
+    let expected = baseline();
+    let mut actual = baseline();
+    world_output(&mut actual).ok_or("world output")?.outcome =
+        DriverOutcomeV1::Output(b"world-changed".to_vec());
+    actual.scheduler.insert(slot(1), WORLD_DRIVER.to_owned());
+    let report = compare(&expected, &actual)?.ok_or("report")?;
+    assert_eq!(report.location_kind, Location::Scheduler);
+    assert_eq!(
+        report.follow_on_counts,
+        follow_on(&[(Kind::CanonicalBytes, 1)])
+    );
+
+    actual
+        .checkpoints
+        .get_mut(&boundary(3, 2))
+        .ok_or("checkpoint")?
+        .digest = [0xee; 32];
+    let report = compare(&expected, &actual)?.ok_or("report")?;
+    assert_eq!(report.location_kind, Location::TickBoundary);
+    assert_eq!(
+        report.follow_on_counts,
+        follow_on(&[(Kind::EventOrder, 1), (Kind::CanonicalBytes, 1)])
+    );
+    Ok(())
+}
+
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn the_prior_checkpoint_is_the_latest_matching_one_before_the_tick() -> TestResult {
+    // A second Timeline whose checkpoint sorts last by key but has the
+    // earliest tick.
+    let other = TickBoundaryCoordinateV1 {
+        timeline_id: [0xff; 16],
+        fold_cursor: 0,
+        tick: 0,
+    };
+    let mut expected = baseline();
+    expected.checkpoints.insert(
+        other,
+        CheckpointDigestV1 {
+            digest: [0xc0; 32],
+            size: 80,
+        },
+    );
+    let mut actual = expected.clone();
+    actual.scheduler.insert(slot(1), WORLD_DRIVER.to_owned());
+    let report = compare(&expected, &actual)?.ok_or("report")?;
+    assert_eq!(report.tick, 2);
+    assert_eq!(report.prior_matching_checkpoint_digest, Some(CHECKPOINT_1));
     Ok(())
 }

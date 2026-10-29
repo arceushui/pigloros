@@ -205,8 +205,9 @@ pub struct ComparedDriverOutputV1 {
 ///
 /// # Errors
 /// Returns the `DVR1` codec error when the first mismatch has a coordinate
-/// the closed `DVR1` shape rejects, such as a Driver id longer than 128 bytes
-/// or a scheduler position above `u16::MAX`.
+/// the closed `DVR1` shape rejects: a sequence, cut ordinal or tick above
+/// `i64::MAX`, a scheduler position or output ordinal above `u16::MAX`, or an
+/// empty Driver id or one longer than 128 bytes.
 pub fn first_divergence_v1(
     context: &DivergenceContextV1,
     expected: &AuthoritativeStreamV1,
@@ -617,7 +618,7 @@ fn prior_matching_checkpoint(
         .zip(actual)
         .take_while(|(left, right)| left == right)
         .filter(|((key, _), _)| key.tick < tick)
-        .last()
+        .max_by_key(|((key, _), _)| key.tick)
         .map(|((_, checkpoint), _)| checkpoint.digest)
 }
 
