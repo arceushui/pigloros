@@ -24,6 +24,23 @@ class ActivationPolicyTests(unittest.TestCase):
             for source in [f"use owner::{name} as Hidden;", f"use owner::{{{name} as Hidden}};", f"use owner::r#{name};", f"type Hidden = owner::{name};"]:
                 self.assertTrue(check_source("crates/x/src/lib.rs", GATE + source))
 
+    def test_indirect_construction_and_arbitrary_nonfake_self_types(self):
+        sources = [
+            "fn build(path: &Path) -> impl Debug { let f = SubjectEncryptorLock::acquire; f(path) }",
+            "fn build(fd: OwnedFd) -> impl Debug { SubjectEncryptorLock { _file: fd } }",
+            "fn build() { let f = <SubjectEncryptorLock as Factory>::build; }",
+        ]
+        for owner in ["&RealOwner", "(RealOwner,)", "Box<RealOwner>", "RealOwner"]:
+            for port in ["EnrollmentPort", "UnlockPort"]:
+                sources.append(f"impl {port} for {owner} {{}}")
+        sources.append("impl<T> EnrollmentPort for T where T: RealMarker {}")
+        sources.append("impl owner::UnlockPort for owner::RealOwner {}")
+        sources.append("macro_rules! install { ($port:path) => { impl $port for RealOwner {} } } install!(EnrollmentPort);")
+        sources.append("install!((owner::UnlockPort, RealOwner));")
+        for source in sources:
+            self.assertTrue(check_source("crates/x/src/lib.rs", source), source)
+            self.assertEqual(check_source("crates/x/src/fixture.rs", GATE + source), [], source)
+
     def test_apps_allow_only_explicit_test_items(self):
         call = "fn exercise() { SubjectEncryptorLock::acquire(); }"
         for source in [call, GATE + call, "#[cfg(test)] mod tests {}\n" + call]:
@@ -31,7 +48,7 @@ class ActivationPolicyTests(unittest.TestCase):
         for source in ["#[cfg(test)] " + call, "#[cfg(test)] mod tests { " + call + " }", "#![cfg(test)]\n" + GATE + call]:
             # The constructor call itself also belongs in a gated fixture file.
             self.assertEqual(check_source("apps/x/src/test.rs", GATE + source), [])
-        self.assertEqual(check_source("apps/x/src/main.rs", "#[cfg(test)] use owner::SubjectEncryptorLock;"), [])
+        self.assertEqual(check_source("apps/x/src/test.rs", GATE + "#[cfg(test)] use owner::SubjectEncryptorLock;"), [])
 
     def test_comments_literals_and_real_protocol_fakes(self):
         for text in ["// " + LOCK, "/* outer /* nested */ " + OWNER + " */", 'const TEXT: &str = r#"' + LOCK + '"#;', "fn validation(_: TargetOs) {}"]:

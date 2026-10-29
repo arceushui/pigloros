@@ -7,9 +7,7 @@
 use crate::{BridgeError, UnavailableCode};
 
 #[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
-mod linux;
-#[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
-pub use linux::SubjectEncryptorLock;
+pub mod linux;
 
 /// The platform distinction selected by ADR-110 E16.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

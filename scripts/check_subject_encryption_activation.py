@@ -3,7 +3,9 @@
 
 The inventory contains the activation type currently implemented. Extend it
 when another activation constructor lands; pure codecs and role enums are not
-activation types. Existing protocol-test fakes are exempt from the non-fake
+activation types. References to these types stay in file-gated fixtures, so a
+function pointer, inferred return type or struct literal cannot hide a builder.
+Existing protocol-test fakes are exempt from the non-fake
 port rule. The feature-graph checker separately excludes test-support from
 deployable graphs. This source check does not establish activation approval.
 """
@@ -14,7 +16,7 @@ import argparse
 import re
 from pathlib import Path
 
-from check_owner_bridge_unsafe_policy import scan
+from check_owner_bridge_unsafe_policy import _group_end, scan
 from check_trusted_clock_port_impls import FIXTURE_GATE, SKIPPED_PARTS, strip_comments
 
 TYPES = ("SubjectEncryptorLock",)
@@ -23,17 +25,14 @@ NAMES = "|".join((*TYPES, *PORTS))
 TYPE_NAMES = "|".join(TYPES)
 ALIAS = re.compile(r"\buse\b[^;]*\b(?:" + NAMES + r")\s+as\b", re.DOTALL)
 TYPE_ALIAS = re.compile(r"\btype\s+\w+[^;=]*=[^;]*\b(?:" + NAMES + r")\b", re.DOTALL)
-SURFACE = re.compile(
-    r"\b(?:struct|enum|impl)\b[^;{]*\b(?:" + TYPE_NAMES + r")\b"
-    r"|\bfn\b[^;{]*->[^;{]*\b(?:" + TYPE_NAMES + r")\b"
-    r"|\b(?:" + TYPE_NAMES + r")\s*::\s*\w+\s*\(",
-    re.DOTALL,
-)
+ACTIVATION_REFERENCE = re.compile(r"\b(?:" + TYPE_NAMES + r")\b")
 PORT_IMPL = re.compile(
-    r"\bimpl\b[^;{]*\b(?:" + "|".join(PORTS) + r")\s+for\s+([\w:]+)",
+    r"\bimpl\b[^;{]*\b(?:" + "|".join(PORTS) + r")\s+for\s+([^;{]+)",
     re.DOTALL,
 )
 REFERENCE = re.compile(r"\b(?:" + NAMES + r")\b")
+PORT_REFERENCE = re.compile(r"\b(?:" + "|".join(PORTS) + r")\b")
+MACRO = re.compile(r"\b\w+\s*!\s*([({\[])")
 TEST_ITEM = re.compile(r"#\[\s*cfg\s*\(\s*test\s*\)\s*\]\s*(?:#\[[^\]]*\]\s*)*")
 FAKES = {
     "crates/pos-owner-bridge/tests/protocol/main.rs": {"FakeEnrollment", "FakeUnlock"},
@@ -74,9 +73,13 @@ def check_source(relative: str, text: str) -> list[str]:
             errors.append("raw identifier hides an activation type or owner port")
     gated = FIXTURE_GATE.match(strip_comments(text)) is not None
     nonfake = any(
-        match[1] not in FAKES.get(relative, set()) for match in PORT_IMPL.finditer(code)
+        match[1].strip() not in FAKES.get(relative, set()) for match in PORT_IMPL.finditer(code)
     )
-    if not gated and (SURFACE.search(code) or nonfake):
+    hidden_port = any(
+        PORT_REFERENCE.search(code[match.end():_group_end(code, match.start(1))])
+        for match in MACRO.finditer(code)
+    )
+    if not gated and (ACTIVATION_REFERENCE.search(code) or nonfake or hidden_port):
         errors.append("activation constructor or non-fake owner port lacks the E15 file gate")
     if relative.startswith("apps/") and REFERENCE.search(without_test_items(code)):
         errors.append("deployable app names the activation surface outside cfg(test)")

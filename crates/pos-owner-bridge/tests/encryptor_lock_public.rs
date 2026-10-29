@@ -11,7 +11,7 @@ use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use pos_owner_bridge::encryptor_lock::SubjectEncryptorLock;
+use pos_owner_bridge::encryptor_lock::linux::SubjectEncryptorLock;
 use pos_owner_bridge::{BridgeError, UnavailableCode};
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
