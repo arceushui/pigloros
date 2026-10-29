@@ -292,6 +292,64 @@ cmp -- "${rendered_root}/inputs/plugin-conformance/positive.pcw2" \
 cmp -- "${rendered_root}/oracle.json" "${source_root}/oracles/plugin-conformance/positive.json"
 cmp -- "${rendered_root}/evidence.json" "${source_root}/expected/plugin-conformance/positive.json"
 
+# The metric provider's metric-cbor-v1 adapter (ADR-062 Revision 7 section 6 slice 1, #1211).
+metric_provider="providers/metric-conformance/provider.json"
+jq -e '.contract_version == "2.0.0" and .fixture_adapter == {id: "metric-cbor-v1", config: {}}' \
+  "${source_root}/${metric_provider}" >/dev/null
+if grep -rlF 'fixture-ratio' "${source_root}/providers/metric-conformance" \
+  "${source_root}/oracles/metric-conformance" "${source_root}/expected/metric-conformance"; then
+  echo "a metric provider, oracle or evidence file still carries the fixture-ratio placeholder" >&2
+  exit 1
+fi
+
+metric_old_contract_root="$(new_fixture_copy metric-old-contract-version)"
+replace_json "${metric_old_contract_root}/${metric_provider}" '.contract_version = "1.0.0"'
+expect_adapter_rejection "${metric_old_contract_root}" \
+  "invalid metric-cbor-v1 fixture adapter declaration"
+expect_rejection "${metric_old_contract_root}" \
+  "invalid metric-cbor-v1 fixture adapter declaration"
+
+metric_config_root="$(new_fixture_copy metric-adapter-config)"
+replace_json "${metric_config_root}/${metric_provider}" '.fixture_adapter.config.operations = {}'
+expect_adapter_rejection "${metric_config_root}" \
+  "invalid metric-cbor-v1 fixture adapter declaration"
+
+metric_moved_composite_root="$(new_fixture_copy metric-moved-composite)"
+replace_json "${metric_moved_composite_root}/${metric_provider}" \
+  '.auxiliary.malformed[0].path = "inputs/metric-conformance/elsewhere.mcs1"'
+expect_adapter_rejection "${metric_moved_composite_root}" \
+  "invalid metric-cbor-v1 fixture adapter declaration"
+
+metric_corrupt_composite_root="$(new_fixture_copy metric-corrupt-composite)"
+printf '\x00' | dd of="${metric_corrupt_composite_root}/inputs/metric-conformance/positive.mcs1" \
+  bs=1 seek=100 count=1 conv=notrunc status=none
+expect_adapter_rejection "${metric_corrupt_composite_root}" \
+  "auxiliary fixture member is not independently reproducible"
+
+metric_oracle_root="$(new_fixture_copy metric-edited-oracle)"
+sed -i 's/"brier_micros":97500/"brier_micros":97501/' \
+  "${metric_oracle_root}/oracles/metric-conformance/positive.json"
+expect_adapter_rejection "${metric_oracle_root}" \
+  "oracle fixture is not independently reproducible: metric-conformance-positive"
+
+# `render` writes the payload, oracle, evidence-status record and composite of one family, and
+# they are the checked-in bytes.
+rendered_metric_root="${temporary_base}/rendered-metric-family"
+mkdir -p "${rendered_metric_root}/inputs/metric-conformance"
+bash scripts/conformance-fixture-adapters/metric-cbor-v1.sh render \
+  "${source_root}/${metric_provider}" "${source_root}/support/fixture-family-contract.json" \
+  metric-conformance-malformed metric-conformance malformed exported-artifact \
+  "${rendered_metric_root}/inputs/metric-conformance/malformed.json" \
+  "${rendered_metric_root}/oracle.json" "${rendered_metric_root}/evidence.json"
+cmp -- "${rendered_metric_root}/inputs/metric-conformance/malformed.json" \
+  "${source_root}/inputs/metric-conformance/malformed.json"
+cmp -- "${rendered_metric_root}/inputs/metric-conformance/malformed.mcs1" \
+  "${source_root}/inputs/metric-conformance/malformed.mcs1"
+cmp -- "${rendered_metric_root}/oracle.json" \
+  "${source_root}/oracles/metric-conformance/malformed.json"
+cmp -- "${rendered_metric_root}/evidence.json" \
+  "${source_root}/expected/metric-conformance/malformed.json"
+
 publication_wrapper_prefix="${temporary_base}/publication-wrapper-prefix.sh"
 sed -n '1,/^first_fingerprint=/p' scripts/materialize-conformance-bundles.sh \
   >"${publication_wrapper_prefix}"
