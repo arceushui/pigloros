@@ -84,8 +84,9 @@ const IMPLICIT_BIT: u64 = 1 << 52;
 const SUBNORMAL_SHIFT: u64 = 1_074;
 /// The binary64 exponent bias plus the 52 fraction bits.
 const NORMAL_SHIFT_BASE: u64 = 1_075;
-/// The widest shift whose power of two fits in an `i128` denominator.
-const MAX_EXACT_SHIFT: u64 = 126;
+/// The widest shift that can still round to a non-zero micro value: with a significand below
+/// `2^53`, a shift of 74 or more leaves a value below `2^-21`, under half a micro.
+const MAX_ROUNDING_SHIFT: u64 = 73;
 
 /// The closed `MetricErrorV1` failure set of section 4.2, with its wire codes.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -725,7 +726,7 @@ impl Encoder {
         } else {
             (27, 8)
         };
-        self.0.push((major << 5) | info);
+        self.0.push((major << 5) + info);
         self.0.extend_from_slice(&bytes[bytes.len() - width..]);
     }
 
@@ -877,9 +878,9 @@ pub fn quantize_probability_v1(bits: u64) -> Result<u32, MetricErrorV1> {
             let (significand, shift) = if exponent == 0 {
                 (fraction, SUBNORMAL_SHIFT)
             } else {
-                (fraction | IMPLICIT_BIT, NORMAL_SHIFT_BASE - exponent)
+                (fraction + IMPLICIT_BIT, NORMAL_SHIFT_BASE - exponent)
             };
-            if shift > MAX_EXACT_SHIFT {
+            if shift > MAX_ROUNDING_SHIFT {
                 0
             } else {
                 round_half_even(i128::from(significand) * MICROS, 1_i128 << shift)

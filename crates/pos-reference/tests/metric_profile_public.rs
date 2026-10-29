@@ -253,6 +253,10 @@ fn quantizer_matches_the_normative_vectors_without_clamping() {
         (0.023_437_5_f64.to_bits(), Ok(23_438)),
         (1, Ok(0)),
         (0x3EA0_C6F7_A0B5_ED8D, Ok(0)),
+        // The largest shift that still rounds up: just below 2^-20 is 0.95 micros.
+        (0x3EAF_FFFF_FFFF_FFFF, Ok(1)),
+        // One exponent lower, just below 2^-21, is under half a micro.
+        (0x3E9F_FFFF_FFFF_FFFF, Ok(0)),
         (1.000_001_f64.to_bits(), invalid),
         (f64::NAN.to_bits(), invalid),
         (f64::INFINITY.to_bits(), invalid),
@@ -745,6 +749,21 @@ fn exactly_two_to_the_eighteen_records_compute_at_extreme_values() -> TestResult
         metrics,
         [500_000, 500_000, 500_000, 500_000, 0, 250_000, -250_000, 500_000, 0]
     );
+    Ok(())
+}
+
+#[test]
+fn a_count_of_twenty_four_uses_the_one_byte_head() -> TestResult {
+    let input = encode(&Cbor::Array(input_fields(
+        1,
+        bound_records(24, own_entity, never),
+    )));
+    let (counts, _, last_bin) = computed_values(&input)?;
+    assert_eq!(counts, [24, 24, 0, 0, 0, 0, 24]);
+    assert_eq!(last_bin, [24, 24_000_000, 0]);
+    let result = accepted(recompute_result_v1(&input))?;
+    let head = [0x87, 0x18, 24, 0x18, 24];
+    assert!(result.windows(head.len()).any(|window| window == head));
     Ok(())
 }
 
