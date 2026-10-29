@@ -866,12 +866,12 @@ fn only_the_first_mismatch_is_reported_and_the_rest_are_counted() -> TestResult 
 
     // At one coordinate the mismatch kind order decides.
     let mut same_coordinate = baseline();
-    let event = same_coordinate
+    let changed = same_coordinate
         .events
         .get_mut(&position(1))
         .ok_or("event 1")?;
-    event.payload = b"payload-y".to_vec();
-    event.schema = [0x53; 32];
+    changed.payload = b"payload-y".to_vec();
+    changed.schema = [0x53; 32];
     let report = compare(&expected, &same_coordinate)?.ok_or("report")?;
     assert_case(
         "same coordinate",
