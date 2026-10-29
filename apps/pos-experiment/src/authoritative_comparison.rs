@@ -433,13 +433,14 @@ impl Findings {
             expected,
             actual,
         };
-        if self
+        // Actual-only entries are visited after the shared ones, so a later
+        // finding can rank first.
+        self.first = self
             .first
-            .as_ref()
-            .is_none_or(|first| finding.rank() < first.rank())
-        {
-            self.first = Some(finding);
-        }
+            .take()
+            .into_iter()
+            .chain([finding])
+            .min_by(|left, right| left.rank().cmp(&right.rank()));
     }
 
     fn compare_events(

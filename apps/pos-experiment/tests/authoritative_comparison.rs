@@ -887,6 +887,30 @@ fn only_the_first_mismatch_is_reported_and_the_rest_are_counted() -> TestResult 
         },
     );
 
+    // An entry only the actual stream has ranks by its coordinate, although
+    // it is found after the shared entries.
+    let mut extra_first = baseline();
+    extra_first.events.insert(position(0), event(1, 9));
+    extra_first
+        .events
+        .get_mut(&position(2))
+        .ok_or("event 2")?
+        .schema = [0x54; 32];
+    let report = compare(&expected, &extra_first)?.ok_or("report")?;
+    assert_case(
+        "actual-only entry first",
+        &report,
+        &ExpectedReport {
+            follow_on: vec![(Kind::SchemaOrUpcaster, 1)],
+            ..timeline(
+                Kind::EventIdentity,
+                0,
+                1,
+                (absent(), digest_only(identity(9))),
+            )
+        },
+    );
+
     // A WorldCut mismatch outranks every later location kind.
     let mut later_locations = baseline();
     later_locations.events = expected.events.clone();
