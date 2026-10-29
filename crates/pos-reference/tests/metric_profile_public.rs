@@ -83,7 +83,7 @@ fn subcases(family: &str) -> TestResult<Vec<SubCase>> {
     let members = members(family)?;
     let mut found = Vec::new();
     for subcase in list(&payload, "subcases")? {
-        let Some(member) = subcase.get("member") else {
+        let Some(member) = subcase.get("member").filter(|member| member.is_object()) else {
             continue;
         };
         let bytes = members
