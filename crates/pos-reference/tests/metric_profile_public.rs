@@ -341,7 +341,7 @@ enum Cbor {
     Negative(u64),
     Text(Vec<u8>),
     Bytes(Vec<u8>),
-    Array(Vec<Cbor>),
+    Array(Vec<Self>),
     Bool(bool),
     Null,
     /// Bytes written verbatim, for non-canonical forms.
