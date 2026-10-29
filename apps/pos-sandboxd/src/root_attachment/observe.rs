@@ -24,6 +24,8 @@ use rustix::{
 use super::{cmdline, AttachmentKernel};
 use crate::ImageActivationError;
 
+mod absence;
+
 /// The loop backing path is opened only as a path, never through a symlink.
 pub(super) const BACKING_OPEN: OFlags = OFlags::PATH.union(OFlags::NOFOLLOW).union(OFlags::CLOEXEC);
 /// The attempt root is reopened only as a directory path, beneath the held
@@ -282,6 +284,18 @@ impl AttachmentKernel for HostKernel {
     fn detach(&self, mount: BorrowedFd<'_>) -> Result<(), ImageActivationError> {
         unmount(self.descriptor_path(mount), UnmountFlags::DETACH)
             .map_err(|_| ImageActivationError::TeardownFailure)
+    }
+
+    async fn devices_absent(
+        &self,
+        devices: [BlockIdentity; 2],
+    ) -> Result<bool, ImageActivationError> {
+        for device in devices {
+            if !self.device_absent(device)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 }
 

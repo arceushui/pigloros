@@ -1,10 +1,11 @@
 use std::{
+    collections::VecDeque,
     error::Error,
     fs,
     io::{IoSlice, IoSliceMut, Write},
     mem::MaybeUninit,
     os::{
-        fd::{AsFd, OwnedFd},
+        fd::{AsFd, AsRawFd, OwnedFd},
         unix::{
             fs::{MetadataExt, PermissionsExt},
             net::{UnixListener, UnixStream as StdUnixStream},
@@ -12,7 +13,10 @@ use std::{
     },
     path::Path,
     process::Command,
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Mutex,
+    },
     thread,
 };
 
@@ -37,12 +41,95 @@ use crate::{PlannedAttemptIntent, StagingLedger, StagingLimits, SystemdAttemptRe
 
 type BoxError = Box<dyn Error + Send + Sync>;
 type TestResult = Result<(), BoxError>;
+type AbsenceProbe = (std::time::Duration, Result<bool, ImageActivationError>);
 
+mod absence;
 mod generations;
 mod release;
 
+fn cleanup_deadline() -> tokio::time::Instant {
+    tokio::time::Instant::now() + std::time::Duration::from_secs(1)
+}
+
+fn attached_root(
+    directory: &PreparedAttemptDirectory,
+) -> Result<(FakeKernel, VerifiedRootMount), BoxError> {
+    let expected = expected(&component(directory));
+    let (mount, mount_path) = tempfile::NamedTempFile::new()?.into_parts();
+    let kernel = FakeKernel {
+        mount_path: Some(mount_path),
+        ..FakeKernel::accepting(matching(&expected))
+    };
+    let mount = QuarantinedRootMount::from_descriptor(mount.into());
+    let root = attach_and_verify(&kernel, directory, &expected, mount, || Ok(()))?;
+    Ok((kernel, root))
+}
+
+async fn detach_owned(
+    root: VerifiedRootMount,
+    kernel: &impl AttachmentKernel,
+    directory: &PreparedAttemptDirectory,
+) -> Result<(), ImageActivationError> {
+    super::release::Release::new(root, directory, cleanup_deadline())
+        .finish(kernel)
+        .await
+}
+
 fn block_generation(device: (u32, u32), diskseq: u64) -> Option<BlockIdentity> {
     std::num::NonZeroU64::new(diskseq).map(|diskseq| BlockIdentity { device, diskseq })
+}
+
+/// Bound every participant in blocking filesystem fixtures, including readers.
+/// `true` means the parent completed its child; `false` runs the child body.
+fn bounded_fixture_child(variable: &str, full_test: &str) -> Result<bool, BoxError> {
+    use std::time::{Duration, Instant};
+
+    if std::env::var_os(variable).is_some() {
+        return Ok(false);
+    }
+    let (_, test) = full_test.split_once("::").ok_or("test module path")?;
+    let mut child = Command::new(std::env::current_exe()?)
+        .args(["--exact", test, "--nocapture"])
+        .env(variable, "1")
+        .spawn()?;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let error: BoxError = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                return status
+                    .success()
+                    .then_some(true)
+                    .ok_or_else(|| format!("filesystem fixture child failed: {status}").into());
+            }
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(1)),
+            Ok(None) => break "filesystem fixture child exceeded its deadline".into(),
+            Err(error) => break error.into(),
+        }
+    };
+    child.kill()?;
+    child.wait()?;
+    Err(error)
+}
+
+/// Rendezvous with an already-blocked fixture reader without hanging a writer.
+fn open_fifo_writer(barrier: &Path) -> Result<File, BoxError> {
+    use rustix::fs::{open, Mode, OFlags};
+    use std::time::{Duration, Instant};
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        match open(
+            barrier,
+            OFlags::WRONLY | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) {
+            Ok(descriptor) => return Ok(File::from(descriptor)),
+            Err(error) if error == rustix::io::Errno::NXIO && Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(1));
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
 }
 
 const PRIVILEGED_COMPOSITION_TEST: &str = "PIGLOROS_PRIVILEGED_COMPOSITION_TEST";
@@ -201,7 +288,14 @@ fn component(prepared: &PreparedAttemptDirectory) -> String {
     prepared.intent().unit_name().attempt_component().to_owned()
 }
 
-/// A descriptor-aware fake kernel that records every detach.
+/// The fake clock stays at the original deadline after its timely checks.
+#[derive(Clone, Copy)]
+struct ClockExpiry {
+    timely_checks: usize,
+    deadline: tokio::time::Instant,
+}
+
+/// A descriptor-aware fake kernel that records every detach and readback.
 struct FakeKernel {
     vetoes: bool,
     attach: Result<(), ImageActivationError>,
@@ -209,6 +303,15 @@ struct FakeKernel {
     observations: Observations,
     detach: Result<(), ImageActivationError>,
     detached: AtomicUsize,
+    readbacks: AtomicUsize,
+    clock_checks: AtomicUsize,
+    clock_expiry: Option<ClockExpiry>,
+    absence: Mutex<VecDeque<AbsenceProbe>>,
+    probes: Mutex<Vec<[BlockIdentity; 2]>>,
+    // Keep the file linked without retaining another descriptor. Its pathname
+    // and inode cannot be recycled while the closure witness is in use.
+    mount_path: Option<tempfile::TempPath>,
+    detached_mount: Mutex<Option<(std::path::PathBuf, std::path::PathBuf)>>,
 }
 
 impl FakeKernel {
@@ -220,6 +323,13 @@ impl FakeKernel {
             observations,
             detach: Ok(()),
             detached: AtomicUsize::new(0),
+            readbacks: AtomicUsize::new(0),
+            clock_checks: AtomicUsize::new(0),
+            clock_expiry: None,
+            absence: Mutex::new(VecDeque::new()),
+            probes: Mutex::new(Vec::new()),
+            mount_path: None,
+            detached_mount: Mutex::new(None),
         }
     }
 
@@ -229,6 +339,17 @@ impl FakeKernel {
 }
 
 impl AttachmentKernel for FakeKernel {
+    fn now(&self) -> tokio::time::Instant {
+        match self.clock_expiry {
+            Some(expiry)
+                if self.clock_checks.fetch_add(1, Ordering::SeqCst) >= expiry.timely_checks =>
+            {
+                expiry.deadline
+            }
+            _ => tokio::time::Instant::now(),
+        }
+    }
+
     fn vetoes_userspace_verity(&self) -> bool {
         self.vetoes
     }
@@ -242,12 +363,61 @@ impl AttachmentKernel for FakeKernel {
     }
 
     fn observe(&self, _: BorrowedFd<'_>, _: &File, _: &File, _: &str) -> Observations {
+        self.readbacks.fetch_add(1, Ordering::SeqCst);
         self.observations.clone()
     }
 
-    fn detach(&self, _: BorrowedFd<'_>) -> Result<(), ImageActivationError> {
+    fn detach(&self, mount: BorrowedFd<'_>) -> Result<(), ImageActivationError> {
+        let path = std::path::PathBuf::from(format!("/proc/self/fd/{}", mount.as_raw_fd()));
+        let target = fs::read_link(&path).map_err(|_| ImageActivationError::EvidenceMismatch)?;
+        *self
+            .detached_mount
+            .lock()
+            .map_err(|_| ImageActivationError::EvidenceMismatch)? = Some((path, target));
         self.detached.fetch_add(1, Ordering::SeqCst);
         self.detach
+    }
+
+    async fn devices_absent(
+        &self,
+        devices: [BlockIdentity; 2],
+    ) -> Result<bool, ImageActivationError> {
+        let rejected = ImageActivationError::ResourceAbsenceUnverified;
+        assert!(
+            self.mount_path.is_some(),
+            "retain the owned fixture pathname"
+        );
+        {
+            let detached = self.detached_mount.lock().map_err(|_| rejected)?;
+            assert!(detached.is_some(), "detach must precede absence probes");
+            if let Some((path, target)) = &*detached {
+                let current = match fs::read_link(path) {
+                    Ok(current) => Some(current),
+                    Err(error) => {
+                        assert_eq!(
+                            error.kind(),
+                            std::io::ErrorKind::NotFound,
+                            "unverified mount descriptor lookup"
+                        );
+                        None
+                    }
+                };
+                assert_ne!(
+                    current.as_ref(),
+                    Some(target),
+                    "mount FD must close before probing"
+                );
+            }
+        }
+        self.probes.lock().map_err(|_| rejected)?.push(devices);
+        let (delay, result) = self
+            .absence
+            .lock()
+            .map_err(|_| rejected)?
+            .pop_front()
+            .unwrap_or((std::time::Duration::ZERO, Ok(true)));
+        tokio::time::sleep(delay).await;
+        result
     }
 }
 
