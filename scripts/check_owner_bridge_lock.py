@@ -40,9 +40,14 @@ def check(lock: dict, owner: dict, workspace: dict) -> list[str]:
     actual = targets.get(TARGET, {}).get("dependencies", {}).get("rustix")
     if actual != expected:
         errors.append("owner rustix must inherit the workspace with only process on Linux")
-    for table in [owner, *(value for key, value in targets.items() if key != TARGET)]:
-        if "rustix" in table.get("dependencies", {}):
-            errors.append("owner rustix must not be enabled outside the Linux target")
+    for target, table in [(None, owner), *targets.items()]:
+        for kind in ["dependencies", "dev-dependencies", "build-dependencies"]:
+            for name, dependency in table.get(kind, {}).items():
+                is_rustix = name == "rustix" or (
+                    isinstance(dependency, dict) and dependency.get("package") == "rustix"
+                )
+                if is_rustix and (target, kind, name) != (TARGET, "dependencies", "rustix"):
+                    errors.append("owner rustix is allowed only as the named Linux normal dependency")
     expected_workspace = {
         "version": "1.1.4",
         "default-features": False,

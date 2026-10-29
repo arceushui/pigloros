@@ -7,28 +7,6 @@ use super::*;
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 #[test]
-fn environment_selection_is_absolute_and_empty_xdg_uses_home() -> TestResult {
-    for xdg in [None, Some(OsString::new())] {
-        assert_eq!(
-            selected_base(xdg.clone(), Some("/home/example".into()))?,
-            (PathBuf::from("/home/example"), true)
-        );
-        for home in [None, Some(OsString::new()), Some("relative".into())] {
-            assert_eq!(selected_base(xdg.clone(), home), Err(Errno::INVAL));
-        }
-    }
-    assert_eq!(
-        selected_base(Some("/state".into()), None)?,
-        (PathBuf::from("/state"), false)
-    );
-    assert_eq!(
-        selected_base(Some("relative".into()), Some("/home/example".into())),
-        Err(Errno::INVAL)
-    );
-    Ok(())
-}
-
-#[test]
 fn metadata_requires_exact_kind_effective_owner_and_permission_bits() -> TestResult {
     let descriptor = fs::openat(CWD, "/", DIRECTORY_FLAGS, Mode::empty())?;
     let mut stat = fs::fstat(&descriptor)?;
@@ -76,13 +54,9 @@ fn component_creation_propagates_kernel_failure() -> TestResult {
         OFlags::RDONLY | OFlags::CLOEXEC,
         Mode::empty(),
     )?;
-    assert_eq!(component(&file, "pigloros").err(), Some(Errno::NOTDIR));
-    Ok(())
-}
-
-#[test]
-fn opened_base_descriptors_are_close_on_exec() -> TestResult {
-    let descriptor = fs::openat(CWD, "/", DIRECTORY_FLAGS, Mode::empty())?;
-    assert!(rustix::io::fcntl_getfd(&descriptor)?.contains(rustix::io::FdFlags::CLOEXEC));
+    assert_eq!(
+        open_or_create_directory_component(&file, "pigloros").err(),
+        Some(Errno::NOTDIR)
+    );
     Ok(())
 }

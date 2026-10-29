@@ -1,6 +1,7 @@
 //! E16 admission through the real public constructor, isolated per subprocess.
 //! No test changes the test runner's environment or umask.
 #![cfg(target_os = "linux")]
+#![cfg(any(test, feature = "test-support"))]
 
 use std::fs::{self, DirBuilder, Permissions};
 use std::io::{self, Write as _};
@@ -16,6 +17,7 @@ use pos_owner_bridge::{BridgeError, UnavailableCode};
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 const LOCK: &str = "pigloros.subject-encryptor.v1.lock";
 const CASE: &str = "PIGLOROS_ENCRYPTOR_LOCK_PROBE";
+const DIRECTORY: &str = "PIGLOROS_ENCRYPTOR_LOCK_TEST_DIRECTORY";
 const MARKER: &str = "ENCRYPTOR_LOCK_PROBE_EXECUTED";
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
@@ -50,6 +52,7 @@ fn probe(case: &str) -> TestResult<Command> {
     command
         .args(["--exact", "lock_probe", "--nocapture", "--test-threads=1"])
         .env(CASE, case)
+        .env_remove(DIRECTORY)
         .env_remove("XDG_STATE_HOME")
         .env_remove("HOME");
     Ok(command)
@@ -129,16 +132,19 @@ fn lock_probe() -> TestResult {
     let Ok(case) = std::env::var(CASE) else {
         return Ok(());
     };
+    let directory = std::env::var_os(DIRECTORY)
+        .map(PathBuf::from)
+        .unwrap_or_default();
     match case.as_str() {
         "acquire" => {
-            let guard = SubjectEncryptorLock::acquire()?;
+            let guard = SubjectEncryptorLock::acquire(&directory)?;
             assert_lock_is_close_on_exec()?;
             assert!(!format!("{guard:?}").is_empty());
         }
         "denied" | "restrictive-umask" => {
             let previous = (case == "restrictive-umask")
                 .then(|| rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o777)));
-            let acquired = SubjectEncryptorLock::acquire();
+            let acquired = SubjectEncryptorLock::acquire(&directory);
             if let Some(previous) = previous {
                 // Preserve the lock file permission assertion and restore the
                 // mask before the instrumented runtime writes its exit profile.
@@ -152,20 +158,19 @@ fn lock_probe() -> TestResult {
             );
         }
         "contention" => {
-            let guard = SubjectEncryptorLock::acquire()?;
+            let guard = SubjectEncryptorLock::acquire(&directory)?;
             assert_eq!(
-                SubjectEncryptorLock::acquire().err(),
+                SubjectEncryptorLock::acquire(&directory).err(),
                 Some(BridgeError::Unavailable(
                     UnavailableCode::InterfaceUnavailable
                 ))
             );
-            let state = std::env::var_os("XDG_STATE_HOME").ok_or("missing probe state")?;
             let mut contender = probe("denied")?;
-            contender.env("XDG_STATE_HOME", &state);
+            contender.env(DIRECTORY, &directory);
             run(contender)?;
             drop(guard);
             let mut successor = probe("acquire")?;
-            successor.env("XDG_STATE_HOME", state);
+            successor.env(DIRECTORY, &directory);
             run(successor)?;
         }
         _ => return Err("unknown lock probe".into()),
@@ -178,12 +183,12 @@ fn lock_probe() -> TestResult {
 fn contention_is_nonblocking_across_descriptors_and_processes_and_drop_releases() -> TestResult {
     let root = Sandbox::new()?;
     let mut command = probe("contention")?;
-    command.env("XDG_STATE_HOME", &root.0);
+    command.env(DIRECTORY, &root.0);
     run(command)?;
     let lock = root.0.join("pigloros").join(LOCK);
     let original = fs::metadata(&lock)?;
     let mut command = probe("acquire")?;
-    command.env("XDG_STATE_HOME", &root.0);
+    command.env(DIRECTORY, &root.0);
     run(command)?;
     let retained = fs::metadata(&lock)?;
     assert_eq!(
@@ -196,75 +201,64 @@ fn contention_is_nonblocking_across_descriptors_and_processes_and_drop_releases(
 }
 
 #[test]
-fn home_fallback_creates_private_components_for_absent_and_empty_xdg() -> TestResult {
+fn explicit_test_directory_does_not_resolve_environment_paths() -> TestResult {
     let root = Sandbox::new()?;
-    for empty_xdg in [false, true] {
-        let mut command = probe("acquire")?;
-        command.env("HOME", &root.0);
-        if empty_xdg {
-            command.env("XDG_STATE_HOME", "");
-        }
-        run(command)?;
-    }
-    for path in [".local", ".local/state", ".local/state/pigloros"] {
-        assert_eq!(
-            fs::metadata(root.0.join(path))?.permissions().mode() & 0o7777,
-            0o700
-        );
-    }
-    assert!(root.0.join(".local/state/pigloros").join(LOCK).is_file());
+    let ambient = Sandbox::new()?;
+    let mut command = probe("acquire")?;
+    command
+        .env(DIRECTORY, &root.0)
+        .env("HOME", &ambient.0)
+        .env("XDG_STATE_HOME", &ambient.0);
+    run(command)?;
+    assert!(root.0.join("pigloros").join(LOCK).is_file());
+    assert_eq!(
+        fs::metadata(root.0.join("pigloros"))?.mode() & 0o7777,
+        0o700
+    );
+    assert_eq!(fs::read_dir(&ambient.0)?.count(), 0);
     Ok(())
 }
 
 #[test]
-fn invalid_environment_paths_fail_before_creating_state() -> TestResult {
+fn invalid_explicit_directories_fail_before_creating_state() -> TestResult {
     let root = Sandbox::new()?;
     let file = root.0.join("file");
     fs::write(&file, b"untouched")?;
-    for xdg in [PathBuf::from("relative"), root.0.join("missing"), file] {
+    for directory in [
+        PathBuf::new(),
+        PathBuf::from("relative"),
+        root.0.join("missing"),
+        file,
+    ] {
         let mut command = probe("denied")?;
-        command.env("XDG_STATE_HOME", xdg).env("HOME", &root.0);
+        command.env(DIRECTORY, directory);
         run(command)?;
     }
     run(probe("denied")?)?;
-    for home in ["", "relative"] {
-        let mut command = probe("denied")?;
-        command.env("XDG_STATE_HOME", "").env("HOME", home);
-        run(command)?;
-    }
     assert!(!root.0.join(".local").exists());
     assert!(!root.0.join("pigloros").exists());
     Ok(())
 }
 
 #[test]
-fn trusted_base_symlinks_are_followed_but_appended_components_are_not() -> TestResult {
+fn trusted_test_directory_symlink_is_followed_but_leaf_symlink_is_not() -> TestResult {
     let root = Sandbox::new()?;
     let trusted = root.0.join("trusted");
     private_directory(&trusted)?;
     let alias = root.0.join("alias");
     symlink(&trusted, &alias)?;
     let mut command = probe("acquire")?;
-    command.env("XDG_STATE_HOME", alias);
+    command.env(DIRECTORY, alias);
     run(command)?;
     assert!(trusted.join("pigloros").join(LOCK).is_file());
-    for component in ["pigloros", ".local", ".local/state"] {
-        let home = root.0.join(component.replace(['.', '/'], "x"));
-        private_directory(&home)?;
-        let link = home.join(component);
-        if component == ".local/state" {
-            private_directory(&home.join(".local"))?;
-        }
-        symlink(&trusted, &link)?;
-        let mut command = probe("denied")?;
-        if component == "pigloros" {
-            command.env("XDG_STATE_HOME", &home);
-        } else {
-            command.env("HOME", &home);
-        }
-        run(command)?;
-        assert!(fs::symlink_metadata(link)?.file_type().is_symlink());
-    }
+    let other = root.0.join("other");
+    private_directory(&other)?;
+    let link = other.join("pigloros");
+    symlink(&trusted, &link)?;
+    let mut command = probe("denied")?;
+    command.env(DIRECTORY, &other);
+    run(command)?;
+    assert!(fs::symlink_metadata(link)?.file_type().is_symlink());
     Ok(())
 }
 
@@ -290,7 +284,7 @@ fn unsafe_lock_nodes_and_modes_are_rejected_without_replacement() -> TestResult 
         }
         let before = fs::symlink_metadata(&lock)?;
         let mut command = probe("denied")?;
-        command.env("XDG_STATE_HOME", &root.0);
+        command.env(DIRECTORY, &root.0);
         run(command)?;
         let after = fs::symlink_metadata(&lock)?;
         assert_eq!((before.dev(), before.ino()), (after.dev(), after.ino()));
@@ -308,18 +302,18 @@ fn unsafe_leaf_permissions_and_creation_umask_fail_closed() -> TestResult {
     for mode in [0o755, 0o1700] {
         fs::set_permissions(&leaf, Permissions::from_mode(mode))?;
         let mut command = probe("denied")?;
-        command.env("XDG_STATE_HOME", &root.0);
+        command.env(DIRECTORY, &root.0);
         run(command)?;
         assert!(!leaf.join(LOCK).exists());
     }
     fs::set_permissions(&leaf, Permissions::from_mode(0o700))?;
     let mut command = probe("restrictive-umask")?;
-    command.env("XDG_STATE_HOME", &root.0);
+    command.env(DIRECTORY, &root.0);
     run(command)?;
     assert_eq!(fs::metadata(leaf.join(LOCK))?.mode() & 0o7777, 0);
     fs::set_permissions(leaf.join(LOCK), Permissions::from_mode(0o600))?;
     let mut command = probe("acquire")?;
-    command.env("XDG_STATE_HOME", &root.0);
+    command.env(DIRECTORY, &root.0);
     run(command)?;
     Ok(())
 }

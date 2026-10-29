@@ -56,6 +56,15 @@ class OwnerBridgeLockTests(unittest.TestCase):
                 owner["target"][destination] = {"dependencies": {"rustix": {"workspace": True}}}
             self.assertTrue(check(self.lock, owner, self.workspace))
         self.assertTrue(check(self.lock, {}, self.workspace))
+        for target in [None, TARGET, 'cfg(windows)']:
+            for kind in ["dependencies", "dev-dependencies", "build-dependencies"]:
+                for name in ["rustix", "renamed"]:
+                    if (target, kind, name) == (TARGET, "dependencies", "rustix"):
+                        continue
+                    owner = copy.deepcopy(self.owner)
+                    table = owner if target is None else owner["target"].setdefault(target, {})
+                    table.setdefault(kind, {})[name] = {"package": "rustix", "version": "1.1.5"}
+                    self.assertTrue(check(self.lock, owner, self.workspace), (target, kind, name))
 
     def test_workspace_features_stay_unchanged(self):
         for field, value in [("version", "1.1.6"), ("default-features", True), ("features", ["fs", "std", "process"])]:

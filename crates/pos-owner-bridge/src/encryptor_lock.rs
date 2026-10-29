@@ -1,15 +1,14 @@
 //! Accepted ADR-110 E16 admission for the OS-user-global subject encryptor lock.
 //!
-//! The future owner adapter must acquire this lock before starting a ceremony
-//! and retain it for its process lifetime. The lock alone grants no registry,
-//! store, nonce or encryption authority; those checks remain owner obligations.
-//! Only Linux has filesystem primitives. Other targets remain unavailable.
+//! The pure platform policy is available in normal builds. Linux filesystem
+//! primitives require test-support and an explicit test directory (E15).
+//! Fixed per-user paths and owner activation remain unavailable.
 
 use crate::{BridgeError, UnavailableCode};
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
 mod linux;
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
 pub use linux::SubjectEncryptorLock;
 
 /// The platform distinction selected by ADR-110 E16.

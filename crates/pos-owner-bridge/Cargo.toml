@@ -28,6 +28,11 @@ rustix = { workspace = true, features = ["process"] }
 workspace = true
 
 [[test]]
+name = "encryptor_lock_public"
+path = "tests/encryptor_lock_public.rs"
+required-features = ["test-support"]
+
+[[test]]
 name = "protocol"
 path = "tests/protocol/main.rs"
 required-features = ["test-support"]
