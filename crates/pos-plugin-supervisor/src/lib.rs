@@ -81,8 +81,8 @@ pub mod pass_harness;
 pub use adapter::{
     register_community_driver, CommunityDriverConfigV1, CommunityDriverSettingsV1,
     CommunityDriverV1, CommunityInvocationReceiptV1, CommunityPluginHandleV1, CommunityStateV1,
-    InvocationBindingV1, InvocationContextSourceV1, InvocationContextV1, ReceiptDispositionV1,
-    MAX_RETAINED_RECEIPTS_V1,
+    InvocationBindingV1, InvocationContextSourceV1, InvocationContextV1, OutputUsageV1,
+    ReceiptDispositionV1, MAX_RETAINED_RECEIPTS_V1,
 };
 pub use fallback::{
     compose_restart_v1, effective_composition_v1, fallback_tenures_v1, fallback_trigger_cause_v1,

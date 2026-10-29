@@ -323,10 +323,12 @@ fn result_bytes(out: &mut Vec<u8>, result: CommunityPluginSubjectResultV1) {
         CommunityPluginSubjectResultV1::Staged {
             output_digest,
             metering,
+            ..
         } => settled_bytes(out, "Staged", output_digest, metering),
         CommunityPluginSubjectResultV1::Committed {
             output_digest,
             metering,
+            ..
         } => settled_bytes(out, "Committed", output_digest, metering),
         CommunityPluginSubjectResultV1::Refused {
             error,

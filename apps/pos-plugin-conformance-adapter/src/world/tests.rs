@@ -53,6 +53,7 @@ fn committed(digest: [u8; 32]) -> CommunityPluginSubjectOutcomeV1 {
         Result1::Committed {
             output_digest: Some(digest),
             metering: Some(metering),
+            output_usage: None,
         },
         true,
     )
@@ -1150,6 +1151,7 @@ fn every_result_of_the_outcome_record_has_its_encoding() {
     let committed = Result1::Committed {
         output_digest: Some([9; 32]),
         metering: Some(metering),
+        output_usage: None,
     };
     let golden = concat!(
         "8b64504f42310161705820010101010101010101010101010101010101010101",
@@ -1166,6 +1168,7 @@ fn every_result_of_the_outcome_record_has_its_encoding() {
     let staged = Result1::Staged {
         output_digest: None,
         metering: None,
+        output_usage: None,
     };
     let record = CommunityPluginSubjectOutcomeV1 {
         pmf1_digest: None,

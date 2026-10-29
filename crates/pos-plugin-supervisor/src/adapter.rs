@@ -31,6 +31,9 @@
 //!   Driver's `StepOutput` declares no inputs.
 //! - Trace annotations are validated by the engine and the supervisor and
 //!   then dropped; only their count survives, in the receipt.
+//! - The output usage of a staged output (Event count, payload bytes and
+//!   state bytes, ADR-068 R4) is measured here, not by the worker, and kept
+//!   only in the receipt.
 //!
 //! # Quarantine
 //! A failure quarantines the failing Plugin and nobody else; see
@@ -83,11 +86,11 @@ use pos_runtime::{
     StepOutput,
 };
 
-use self::output::mapped_output;
+use self::output::{mapped_output, output_usage};
 use self::state::Shared;
 pub use self::state::{
-    CommunityInvocationReceiptV1, CommunityPluginHandleV1, CommunityStateV1, ReceiptDispositionV1,
-    MAX_RETAINED_RECEIPTS_V1,
+    CommunityInvocationReceiptV1, CommunityPluginHandleV1, CommunityStateV1, OutputUsageV1,
+    ReceiptDispositionV1, MAX_RETAINED_RECEIPTS_V1,
 };
 use crate::supervisor::{CommunityPluginSupervisorV1, NOT_ACTIVE, UNAVAILABLE};
 
@@ -341,6 +344,8 @@ impl CommunityDriverV1 {
     }
 
     /// Record the receipt of a returned report and stage a valid output.
+    ///
+    /// The output usage is measured only when the output is staged.
     fn accept(
         &mut self,
         invocation_id: [u8; 16],
@@ -362,6 +367,7 @@ impl CommunityDriverV1 {
                 let parts = ReceiptParts {
                     output_digest: Some(output.output_digest),
                     metering,
+                    output_usage: staged.is_ok().then(|| output_usage(&output)),
                     dropped_trace_annotations: output.trace_annotations.len(),
                     failure: staged.as_ref().err().copied(),
                     disposition: if staged.is_ok() {
@@ -394,6 +400,7 @@ impl CommunityDriverV1 {
             negotiated: self.negotiated.clone(),
             output_digest: parts.output_digest,
             metering: parts.metering,
+            output_usage: parts.output_usage,
             dropped_trace_annotations: parts.dropped_trace_annotations,
             failure: parts.failure,
             guest_error: parts.guest_error,
@@ -407,6 +414,7 @@ impl CommunityDriverV1 {
 struct ReceiptParts {
     output_digest: Option<[u8; 32]>,
     metering: Option<MeteringV1>,
+    output_usage: Option<OutputUsageV1>,
     dropped_trace_annotations: usize,
     failure: Option<Error>,
     guest_error: Option<GuestPluginErrorV1>,
@@ -419,6 +427,7 @@ impl ReceiptParts {
         Self {
             output_digest: None,
             metering: None,
+            output_usage: None,
             dropped_trace_annotations: 0,
             failure: Some(failure),
             guest_error: None,

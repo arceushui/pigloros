@@ -19,6 +19,14 @@ use super::*;
 use crate::launch::WorkerProgramV1;
 use crate::test_support::{self, community_pin, err, ok, pin_of, DriverPlugin, METERING};
 
+/// The usage of a staged `output(vec![draft(_, b"payload")])`: one draft, 7 payload bytes and
+/// the 4-byte next state `next`.
+const ONE_DRAFT_USAGE: OutputUsageV1 = OutputUsageV1 {
+    event_count: 1,
+    event_payload_bytes: 7,
+    state_bytes: 4,
+};
+
 fn plugin(id: PluginId, has_driver: bool) -> DriverPlugin {
     DriverPlugin {
         id,
@@ -270,6 +278,7 @@ fn a_valid_output_is_staged_with_a_receipt_until_the_batch_commits() {
     assert_eq!(receipt.guest_error, None);
     assert_eq!(receipt.dropped_trace_annotations, 1);
     assert_eq!(receipt.disposition, ReceiptDispositionV1::Staged);
+    assert_eq!(receipt.output_usage, Some(ONE_DRAFT_USAGE));
 
     driver.commit_step();
     assert_eq!(driver.staged, None);
@@ -279,14 +288,17 @@ fn a_valid_output_is_staged_with_a_receipt_until_the_batch_commits() {
         handle.receipts()[0].disposition,
         ReceiptDispositionV1::Committed
     );
+    // A committed receipt keeps its output usage.
+    assert_eq!(handle.receipts()[0].output_usage, Some(ONE_DRAFT_USAGE));
     // A second commit has nothing staged and changes nothing.
     driver.commit_step();
     assert_eq!(handle.committed_state().bytes, b"next");
 }
 
-/// ADR-049 r9 test 1: the operational log and metering reach no step output.
+/// ADR-049 r9 test 1, extended by ADR-068 R4 test 1: the operational log, the metering and the
+/// output usage reach no step output.
 #[test]
-fn the_operational_log_and_metering_reach_no_step_output() {
+fn the_operational_log_metering_and_output_usage_reach_no_step_output() {
     let (mut driver, handle, _) = fixture(None);
     let valid = output(vec![draft("community.event", b"payload")]);
     let digest = valid.output_digest;
@@ -306,7 +318,70 @@ fn the_operational_log_and_metering_reach_no_step_output() {
     let receipts = handle.receipts();
     assert_eq!(receipts.len(), 1);
     assert_eq!(receipts[0].metering, Some(usage));
+    assert_eq!(receipts[0].output_usage, Some(ONE_DRAFT_USAGE));
     assert_eq!(receipts[0].output_digest, Some(digest));
+}
+
+/// ADR-068 R4 test 1: a staged output's receipt carries the host-measured output usage; a
+/// guest-declared failure, an output over the limit and a worker failure carry none.
+#[test]
+fn only_a_staged_receipt_carries_the_output_usage() {
+    let (mut driver, handle, _) = fixture(None);
+    let mut measured = output(vec![draft("a.b", b"one"), draft("c.d", b"three")]);
+    measured.next_state_bytes = b"state-7".to_vec();
+    measured.output_digest = plugin_output_digest_v1(&measured);
+    let _staged = ok(driver.accept([1; 16], report(measured)));
+    let expected = OutputUsageV1 {
+        event_count: 2,
+        event_payload_bytes: 8,
+        state_bytes: 7,
+    };
+    assert_eq!(handle.receipts()[0].output_usage, Some(expected));
+    assert_eq!(
+        handle.receipts()[0].disposition,
+        ReceiptDispositionV1::Staged
+    );
+
+    let declared = InvocationReportV1 {
+        result: Err(GuestPluginErrorV1 {
+            code: PluginErrorCodeV1::InvalidState(FieldRefV1 {
+                schema_id: 4,
+                field_ordinal: 7,
+            }),
+            canonical_coordinate: None,
+            related_digest: None,
+        }),
+        metering: METERING,
+        operational_log: Vec::new(),
+    };
+    assert_eq!(
+        driver.accept([2; 16], declared).err(),
+        Some(Error::GuestDeclaredFailure)
+    );
+    let limit = driver.negotiated.limits().values().event_bytes;
+    let oversized = vec![b'x'; ok(usize::try_from(limit)) + 1];
+    let over = output(vec![draft("a.b", &oversized)]);
+    assert_eq!(
+        driver.accept([3; 16], report(over)).err(),
+        Some(Error::OutputLimitExceeded)
+    );
+    // The fixture's worker program does not exist: the launch fails.
+    let (mut crashing, crashed, _) = fixture(None);
+    offer(&crashing, &crashed);
+    assert!(crashing
+        .step(TimelineId::new(), ObservationView::empty())
+        .is_err());
+
+    let receipts = handle.receipts();
+    assert_eq!(receipts[1].failure, Some(Error::GuestDeclaredFailure));
+    assert_eq!(receipts[2].failure, Some(Error::OutputLimitExceeded));
+    let launched = crashed.receipts();
+    assert_eq!(launched.len(), 1);
+    assert_eq!(launched[0].failure, Some(Error::WorkerCrashed));
+    for failed in [&receipts[1], &receipts[2], &launched[0]] {
+        assert_eq!(failed.output_usage, None);
+        assert_eq!(failed.disposition, ReceiptDispositionV1::Discarded);
+    }
 }
 
 /// ADR-061 r9 test 2: the adapter's output carries nothing from the annotation.
@@ -331,6 +406,7 @@ fn an_accepted_output_carries_nothing_from_its_annotation() {
 fn an_abort_discards_the_staged_state_and_receipt() {
     let (mut driver, handle, _) = fixture(None);
     let _staged = ok(driver.accept([3; 16], report(output(vec![draft("a.b", b"p")]))));
+    assert!(handle.receipts()[0].output_usage.is_some());
     driver.abort_step();
     assert_eq!(driver.staged, None);
     assert_eq!(handle.committed_state(), initial());
@@ -338,6 +414,8 @@ fn an_abort_discards_the_staged_state_and_receipt() {
         handle.receipts()[0].disposition,
         ReceiptDispositionV1::Discarded
     );
+    // A discarded receipt carries no output usage.
+    assert_eq!(handle.receipts()[0].output_usage, None);
     // A discarded receipt is never committed afterwards.
     driver.commit_step();
     assert_eq!(
@@ -423,6 +501,7 @@ fn driver_receipt(driver: &CommunityDriverV1) -> CommunityInvocationReceiptV1 {
         negotiated: driver.negotiated.clone(),
         output_digest: None,
         metering: Some(METERING),
+        output_usage: None,
         dropped_trace_annotations: 0,
         failure: None,
         guest_error: None,

@@ -180,6 +180,7 @@ fn every_result_variant_maps_and_an_incomplete_record_is_operational() {
     let committed = R::Committed {
         output_digest: digest,
         metering: Some(METERING),
+        output_usage: None,
     };
     assert_eq!(
         of_outcome(&outcome(committed)),
@@ -192,22 +193,27 @@ fn every_result_variant_maps_and_an_incomplete_record_is_operational() {
         R::Committed {
             output_digest: None,
             metering: Some(METERING),
+            output_usage: None,
         },
         R::Committed {
             output_digest: digest,
             metering: None,
+            output_usage: None,
         },
         R::Committed {
             output_digest: None,
             metering: None,
+            output_usage: None,
         },
         R::Staged {
             output_digest: digest,
             metering: Some(METERING),
+            output_usage: None,
         },
         R::Staged {
             output_digest: None,
             metering: None,
+            output_usage: None,
         },
         R::NotRun,
         R::Discarded,
@@ -269,6 +275,7 @@ fn the_record_result_is_the_setup_refusal_else_the_last_outcome_else_none() {
     let committed = R::Committed {
         output_digest: Some([1; 32]),
         metering: Some(METERING),
+        output_usage: None,
     };
     let refused = R::Refused {
         error: "IncompatibleAbi",
@@ -317,10 +324,12 @@ fn an_operational_result_is_never_a_failure_or_an_output() {
         R::Staged {
             output_digest: Some([1; 32]),
             metering: Some(METERING),
+            output_usage: None,
         },
         R::Committed {
             output_digest: None,
             metering: None,
+            output_usage: None,
         },
     ];
     for family in FixtureFamily::ALL {
@@ -345,6 +354,7 @@ fn an_operational_result_is_never_a_failure_or_an_output() {
             call_fuel: 1,
             ..METERING
         }),
+        output_usage: None,
     };
     let record = SubCaseRecordV1 {
         outcomes: vec![outcome(overflow)],
