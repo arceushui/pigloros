@@ -21,6 +21,12 @@ pub mod status;
 pub mod surface;
 pub mod unlock;
 
+// Shared with public Linux filesystem tests; public reachability keeps fixture
+// helpers compatible with `unreachable_pub` without exposing deployable APIs.
+#[cfg(all(test, target_os = "linux"))]
+#[path = "../tests/support/mod.rs"]
+pub mod encryptor_lock_test_support;
+
 pub use bridge::{BridgeConfig, OwnerBridge, RestartProgress};
 pub use enroll::{ConfirmedBinding, EnrollmentContext, EnrollmentPort, RootFingerprint};
 pub use error::{

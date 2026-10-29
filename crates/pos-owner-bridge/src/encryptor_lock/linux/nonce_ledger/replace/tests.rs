@@ -2,16 +2,14 @@
 //! Real stage boundaries and process-crash witnesses for the private commit core.
 
 use std::fs;
-use std::io::{Read as _, Write as _};
+use std::io::{self, Read as _, Write as _};
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
-use super::*;
-
-#[path = "../../../../../tests/support/mod.rs"]
-pub mod support;
-use support::{write_private, Sandbox};
+use super::{CommitStage, SubjectEncryptorLock, LEDGER_NAME, TEMPORARY_NAME};
+use crate::encryptor_lock_test_support::{write_private, Sandbox};
+use crate::{BridgeError, UnavailableCode};
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 const ROOT_ENV: &str = "PIGLOROS_LEDGER_REPLACE_PROBE_DIRECTORY";
@@ -126,7 +124,7 @@ fn substituted_ledger_or_temporary_names_are_not_committed_or_cleaned_as_owned()
     Ok(())
 }
 
-fn label(stage: CommitStage) -> &'static str {
+const fn label(stage: CommitStage) -> &'static str {
     match stage {
         CommitStage::Created => "created",
         CommitStage::Written => "written",
