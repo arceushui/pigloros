@@ -606,6 +606,8 @@ jobs:
         run: cargo test -p piglor-ledger --all-features --test non_unix_store_owner --locked -- --include-ignored
       - name: Exercise the unsupported non-Linux EPF1 boundary
         run: cargo test -p pos-runtime --features test-support --test non_linux_profile --locked -- --include-ignored
+      - name: Exercise the unsupported Windows subject encryptor profile
+        run: cargo test -p pos-owner-bridge --lib --locked only_linux_supports_the_nonce_ledger_and_encryptor_lock -- --include-ignored
       - name: Check narrower-target Replay representation boundaries
         run: cargo check -p pos-runtime --target i686-pc-windows-msvc --locked
       - name: Exercise narrower-target registry cardinality refusals
@@ -1584,6 +1586,14 @@ jobs:
         run: |
           python scripts/check_owner_bridge_unsafe_policy.py
           python scripts/test_check_owner_bridge_unsafe_policy.py
+      - name: Check owner-bridge encryptor-lock dependency pin
+        run: |
+          python scripts/check_owner_bridge_lock.py
+          python scripts/test_check_owner_bridge_lock.py
+      - name: Check subject-encryption activation boundary
+        run: |
+          python scripts/check_subject_encryption_activation.py
+          python scripts/test_check_subject_encryption_activation.py
       - name: Test Windows shim coverage exclusions
         run: python scripts/test_owner_bridge_windows_cov_ignore.py
 

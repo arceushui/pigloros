@@ -66,12 +66,18 @@ same identities, even if substituted devices could satisfy the admitted image.
 The lifecycle controller must exclusively own the attempt and
 finish unit/process shutdown first. Cleanup needs no renewed execution
 admission. A failure preserves intent and quarantines new registry commits;
-successful cleanup never clears an existing quarantine. The mount descriptor
-closes on return, while intent and directories remain. Success acknowledges
-lazy detachment only: other references can delay actual unmount and loop/dm
-removal, whose exact absence must still be proved before intent deletion or
-admission reopening. Unit tests reuse the attachment kernel port and fixtures;
-positive mounted-host conformance remains #444.
+successful cleanup never clears an existing quarantine. The controller closes
+its other image/mount references before calling asynchronous `detach`, and
+supplies the original absolute cleanup deadline, including preceding shutdown.
+After lazy detachment, the owned mount descriptor closes before fresh sysfs
+checks prove both original block generations ended. A missing whole-device
+index or coherent later diskseq can prove disappearance; missing attributes,
+unavailable sysfs, malformed evidence and backwards generations cannot. Other
+held references delay removal and exhaust the same deadline. Errors, timeout
+and cancellation (even before the first poll) quarantine the owner. Intent and
+directories remain; success grants no lifecycle, intent-deletion or admission
+authority. Unit tests reuse the attachment kernel port and fixtures; positive
+mounted-host conformance remains #444.
 
 `PreparedAttemptDirectory::remove_unmounted` consumes the held directory
 ownership, rechecks its durable identity record and empty unmounted tree, then

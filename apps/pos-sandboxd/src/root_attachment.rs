@@ -38,9 +38,10 @@ use std::{
 };
 
 use pos_reference::provider_admission::HeldImageAdmission;
+use tokio::time::Instant;
 
 use self::{
-    observe::{HostKernel, Observations},
+    observe::{BlockIdentity, HostKernel, Observations},
     verify::{Expected, VerifiedMountIdentity},
 };
 use crate::{
@@ -50,7 +51,13 @@ use crate::{
 };
 
 /// The kernel operations of one attachment.
-trait AttachmentKernel {
+trait AttachmentKernel: Sync {
+    /// Monotonic time for checks around synchronous kernel/ownership work.
+    /// Production shares the Tokio clock used by the original timeout budget.
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+
     /// Whether the kernel command line vetoes systemd's userspace Verity
     /// fallback.
     fn vetoes_userspace_verity(&self) -> bool;
@@ -68,13 +75,19 @@ trait AttachmentKernel {
     ) -> Observations;
     /// Detach an owned, attached mount.
     fn detach(&self, mount: BorrowedFd<'_>) -> Result<(), ImageActivationError>;
+    /// Independently observe whether both original block generations ended.
+    fn devices_absent(
+        &self,
+        devices: [BlockIdentity; 2],
+    ) -> impl Future<Output = Result<bool, ImageActivationError>> + Send;
 }
 
 /// The admitted SIM1 root, attached at its attempt path and read back.
 ///
 /// It holds the attached mount's descriptor. Dropping it leaves the mount
 /// attached. The attempt lifecycle must stop the unit before explicitly calling
-/// [`Self::detach`], and prove loop and dm-verity removal afterwards.
+/// [`Self::detach`], which also waits for original loop/dm generation absence
+/// within the caller's original cleanup deadline.
 #[derive(Debug)]
 pub struct VerifiedRootMount {
     mount: OwnedFd,
