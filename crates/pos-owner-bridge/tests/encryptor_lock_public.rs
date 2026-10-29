@@ -1,7 +1,7 @@
+#![cfg(any(test, feature = "test-support"))]
 //! E16 admission through the real public constructor, isolated per subprocess.
 //! No test changes the test runner's environment or umask.
 #![cfg(target_os = "linux")]
-#![cfg(any(test, feature = "test-support"))]
 
 use std::fs::{self, DirBuilder, Permissions};
 use std::io::{self, Write as _};

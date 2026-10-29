@@ -17,17 +17,22 @@ import re
 from pathlib import Path
 
 from check_owner_bridge_unsafe_policy import _group_end, scan
-from check_trusted_clock_port_impls import FIXTURE_GATE, SKIPPED_PARTS, strip_comments
+from check_trusted_clock_port_impls import SKIPPED_PARTS, strip_comments
 
 TYPES = ("SubjectEncryptorLock",)
 PORTS = ("EnrollmentPort", "UnlockPort")
 NAMES = "|".join((*TYPES, *PORTS))
 TYPE_NAMES = "|".join(TYPES)
+FILE_GATE = re.compile(
+    r'\A\s*#!\[\s*cfg\s*\(\s*any\s*\(\s*test\s*,\s*feature\s*=\s*"test-support"\s*\)\s*\)\s*\]'
+)
 ALIAS = re.compile(r"\buse\b[^;]*\b(?:" + NAMES + r")\s+as\b", re.DOTALL)
 TYPE_ALIAS = re.compile(r"\btype\s+\w+[^;=]*=[^;]*\b(?:" + NAMES + r")\b", re.DOTALL)
 ACTIVATION_REFERENCE = re.compile(r"\b(?:" + TYPE_NAMES + r")\b")
 PORT_IMPL = re.compile(
-    r"\b(?:" + "|".join(PORTS) + r")\s+for\s+([^;{]+)",
+    # These traits have no generic parameters, but Rust permits empty arguments.
+    # Punctuation can separate tokens without intervening whitespace.
+    r"\b(?:" + "|".join(PORTS) + r")\b\s*(?:(?:::\s*)?<\s*>\s*)?for\b\s*([^;{]+)",
     re.DOTALL,
 )
 REFERENCE = re.compile(r"\b(?:" + NAMES + r")\b")
@@ -71,7 +76,7 @@ def check_source(relative: str, text: str) -> list[str]:
         identifier = re.match(r"r#(\w+)", text[offset:])
         if identifier and identifier[1] in (*TYPES, *PORTS):
             errors.append("raw identifier hides an activation type or owner port")
-    gated = FIXTURE_GATE.match(strip_comments(text)) is not None
+    gated = FILE_GATE.match(strip_comments(text)) is not None
     nonfake = any(
         match[1].strip() not in FAKES.get(relative, set()) for match in PORT_IMPL.finditer(code)
     )

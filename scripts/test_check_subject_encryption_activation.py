@@ -16,7 +16,7 @@ class ActivationPolicyTests(unittest.TestCase):
     def test_activation_definitions_require_a_real_leading_gate(self):
         for surface in [LOCK, OWNER, "fn build() -> Result<SubjectEncryptorLock, Error> {}"]:
             self.assertEqual(check_source("crates/x/src/fixture.rs", GATE + surface), [])
-            for prefix in ["", "// " + GATE, 'const DOC: &str = r#"' + GATE + '"#;\n', "fn prior() {}\n" + GATE, '#[cfg(any(test, feature = "test-support"))]\n']:
+            for prefix in ["", "// " + GATE, 'const DOC: &str = r#"' + GATE + '"#;\n', "fn prior() {}\n" + GATE, '#[cfg(any(test, feature = "test-support"))]\n', '#![allow(dead_code)]\n' + GATE, '#![cfg(target_os = "linux")]\n' + GATE]:
                 self.assertTrue(check_source("crates/x/src/fixture.rs", prefix + surface))
 
     def test_aliases_and_raw_names_do_not_hide_the_surface(self):
@@ -38,6 +38,15 @@ class ActivationPolicyTests(unittest.TestCase):
         sources.append("impl<T: Trait<{ 1 }>> owner::UnlockPort for Owner<T> {}")
         sources.append("impl EnrollmentPort for [RealOwner; { 1 }] {}")
         sources.append("impl UnlockPort for for<'a> fn(&'a RealOwner) {}")
+        sources.extend([
+            "impl EnrollmentPort<> for RealOwner {}",
+            "impl UnlockPort::<> for RealOwner {}",
+            "impl EnrollmentPort<>for&RealOwner {}",
+            "impl UnlockPort::<>for(RealOwner,) {}",
+            "impl EnrollmentPort for[RealOwner; 1] {}",
+            "impl UnlockPort for&RealOwner {}",
+            "impl EnrollmentPort for::owner::RealOwner {}",
+        ])
         sources.append("impl owner::UnlockPort for owner::RealOwner {}")
         sources.append("macro_rules! install { ($port:path) => { impl $port for RealOwner {} } } install!(EnrollmentPort);")
         sources.append("install!((owner::UnlockPort, RealOwner));")
