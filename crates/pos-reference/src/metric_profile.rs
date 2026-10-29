@@ -72,6 +72,7 @@ const TERM_SCALE: i128 = 1_000_000_000_000_000_000;
 const MAX_PROBABILITY_MICROS: u64 = 1_000_000;
 const BIN_WIDTH_MICROS: i128 = 100_000;
 const BIN_COUNT: usize = 10;
+const LAST_BIN: i128 = 9;
 
 /// The binary64 bit pattern of `1.0`; every non-negative pattern up to it is in `[0, 1]`.
 const ONE_BITS: u64 = 0x3FF0_0000_0000_0000;
@@ -635,9 +636,9 @@ impl<'a> Tally<'a> {
         self.probability_sum += probability;
         self.positives += outcome;
         self.supplied += i128::from(record.supplied);
-        let index = usize::try_from(probability / BIN_WIDTH_MICROS)
-            .unwrap_or(BIN_COUNT - 1)
-            .min(BIN_COUNT - 1);
+        // `k = min(p div 100000, 9)`, already in 0..=9 before the index conversion.
+        let index =
+            usize::try_from((probability / BIN_WIDTH_MICROS).min(LAST_BIN)).unwrap_or_default();
         let bin = &mut self.bins[index];
         bin.count += 1;
         bin.probability_sum += probability;
