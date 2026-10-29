@@ -41,11 +41,8 @@ type TestResult = Result<(), BoxError>;
 mod generations;
 mod release;
 
-fn block_generation(device: (u32, u32), diskseq: u64) -> BlockIdentity {
-    BlockIdentity {
-        device,
-        diskseq: diskseq.try_into().expect("nonzero fixture generation"),
-    }
+fn block_generation(device: (u32, u32), diskseq: u64) -> Option<BlockIdentity> {
+    std::num::NonZeroU64::new(diskseq).map(|diskseq| BlockIdentity { device, diskseq })
 }
 
 const PRIVILEGED_COMPOSITION_TEST: &str = "PIGLOROS_PRIVILEGED_COMPOSITION_TEST";
@@ -81,7 +78,7 @@ fn slave(expected: &Expected, extent: Extent) -> Slave {
         start: Some(extent.start / 512),
         size: Some(extent.length / 512),
         loop_device: Some(LoopDevice {
-            identity: Some(block_generation((7, 7), 101)),
+            identity: block_generation((7, 7), 101),
             backing: Some(expected.held),
             offset: Some(0),
             size_limit: Some(0),
@@ -122,7 +119,7 @@ fn matching(expected: &Expected) -> Observations {
             super_options: "ro,user_xattr,acl".to_owned(),
         }),
         mapper: Some(Mapper {
-            identity: Some(block_generation((253, 3), 102)),
+            identity: block_generation((253, 3), 102),
             uuid: Some("CRYPT-VERITY-5f0e5a1c-root".to_owned()),
             read_only: Some(1),
             slaves: Some(vec![
@@ -447,6 +444,33 @@ fn mount_mutations() -> Vec<Mutation> {
 }
 
 /// One named difference per accepted device-mapper and loop fact.
+fn generation_mutations() -> Vec<Mutation> {
+    vec![
+        ("no mapper generation", |o| {
+            edit_mapper(o, |m| m.identity = None);
+        }),
+        ("mapper is not the mounted device", |o| {
+            edit_mapper(o, |m| m.identity = block_generation((253, 4), 102));
+        }),
+        ("no first loop generation", |o| {
+            edit_loop(o, |d| d.identity = None);
+        }),
+        ("no second loop generation", |o| {
+            edit_slaves(o, |s| {
+                if let Some(device) = s[1].loop_device.as_mut() {
+                    device.identity = None;
+                }
+            });
+        }),
+        ("contradictory loop device numbers", |o| {
+            edit_loop(o, |d| d.identity = block_generation((7, 8), 101));
+        }),
+        ("contradictory loop generations", |o| {
+            edit_loop(o, |d| d.identity = block_generation((7, 7), 103));
+        }),
+    ]
+}
+
 fn device_mutations() -> Vec<Mutation> {
     vec![
         ("no mapper", |o| o.mapper = None),
@@ -530,7 +554,7 @@ fn device_mutations() -> Vec<Mutation> {
 fn readback_mutations() -> Vec<Mutation> {
     let mut mutations = mount_mutations();
     mutations.extend(device_mutations());
-    mutations.extend(generations::mutations());
+    mutations.extend(generation_mutations());
     mutations
 }
 
@@ -555,6 +579,18 @@ fn every_readback_difference_is_an_evidence_mismatch() {
 fn write(path: &Path, text: &str) -> TestResult {
     fs::create_dir_all(path.parent().ok_or("no parent")?)?;
     fs::write(path, text)?;
+    Ok(())
+}
+
+fn write_mapper_fixture(sys: &Path, device: (u32, u32)) -> TestResult {
+    let block = sys.join(format!("dev/block/{}:{}", device.0, device.1));
+    write(&block.join("dev"), &format!("{}:{}\n", device.0, device.1))?;
+    write(&block.join("diskseq"), "102\n")?;
+    write(&block.join("dm/uuid"), "CRYPT-VERITY-abc-root\n")?;
+    write(&block.join("ro"), "1\n")?;
+    for name in ["loop7p1", "loop7p2", "sdz1"] {
+        fs::create_dir_all(block.join("slaves").join(name))?;
+    }
     Ok(())
 }
 
@@ -592,14 +628,7 @@ fn the_host_kernel_reads_back_the_mount_loop_and_mapper_by_descriptor() -> TestR
             mount.mount_id
         ),
     )?;
-    let block = sys.join(format!("dev/block/{major}:{minor}"));
-    write(&block.join("dev"), &format!("{major}:{minor}\n"))?;
-    write(&block.join("diskseq"), "102\n")?;
-    write(&block.join("dm/uuid"), "CRYPT-VERITY-abc-root\n")?;
-    write(&block.join("ro"), "1\n")?;
-    for name in ["loop7p1", "loop7p2", "sdz1"] {
-        fs::create_dir_all(block.join("slaves").join(name))?;
-    }
+    write_mapper_fixture(&sys, mount.device)?;
     // As in sysfs, a loop partition is a directory of its disk.
     let partitions = sys.join("class/block");
     let device = partitions.join("loop7");
@@ -627,11 +656,11 @@ fn the_host_kernel_reads_back_the_mount_loop_and_mapper_by_descriptor() -> TestR
     let mapper = observed.mapper.ok_or("the synthetic mapper")?;
     assert_eq!(mapper.uuid.as_deref(), Some("CRYPT-VERITY-abc-root"));
     assert_eq!(mapper.read_only, Some(1));
-    assert_eq!(mapper.identity, Some(block_generation(mount.device, 102)));
+    assert_eq!(mapper.identity, block_generation(mount.device, 102));
     let mut slaves = mapper.slaves.ok_or("the synthetic slaves")?;
     slaves.sort_by_key(|slave| slave.loop_name.clone());
     let loop_device = LoopDevice {
-        identity: Some(block_generation((7, 7), 101)),
+        identity: block_generation((7, 7), 101),
         backing: Some((held.dev(), held.ino())),
         offset: Some(0),
         size_limit: Some(0),

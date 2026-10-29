@@ -187,7 +187,7 @@ mod cases {
                     kernel.observations.path = Some(node);
                     edit_entry(&mut kernel.observations, |entry| entry.device = node.device);
                     edit_mapper(&mut kernel.observations, |mapper| {
-                        mapper.identity = Some(block_generation(node.device, 102));
+                        mapper.identity = block_generation(node.device, 102);
                     });
                     if let Some(executable) = kernel.observations.executable.as_mut() {
                         executable.node.device = node.device;
@@ -207,16 +207,17 @@ mod cases {
                     kernel.observations.path = Some(*node);
                 }
                 4 => edit_mapper(&mut kernel.observations, |mapper| {
-                    mapper.identity = Some(block_generation((253, 3), 103));
+                    mapper.identity = block_generation((253, 3), 103);
                 }),
                 _ => edit_slaves(&mut kernel.observations, |slaves| {
                     for slave in slaves {
-                        let device = slave.loop_device.as_mut().expect("loop fixture");
-                        device.identity = Some(if fault == 5 {
-                            block_generation((7, 8), 101)
-                        } else {
-                            block_generation((7, 7), 103)
-                        });
+                        if let Some(device) = slave.loop_device.as_mut() {
+                            device.identity = if fault == 5 {
+                                block_generation((7, 8), 101)
+                            } else {
+                                block_generation((7, 7), 103)
+                            };
+                        }
                     }
                 }),
             }
