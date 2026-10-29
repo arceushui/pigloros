@@ -7,7 +7,7 @@ use super::{
 };
 #[cfg(test)]
 use super::{StagingLedger, StagingLimits, StagingUsage};
-use rustix::fs::{openat2, unlinkat, AtFlags, Mode, OFlags, ResolveFlags};
+use rustix::fs::{openat2, statat, unlinkat, AtFlags, Mode, OFlags, ResolveFlags};
 use std::{
     fs::File,
     io,
@@ -155,7 +155,24 @@ struct StagedFile {
 
 impl Drop for StagedFile {
     fn drop(&mut self) {
-        if unlinkat(&self.directory, &self.name, AtFlags::empty()).is_err() {
+        self.cleanup(|directory, name| unlinkat(directory, name, AtFlags::empty()).is_ok());
+    }
+}
+
+impl StagedFile {
+    // The caller keeps the staging directory private and serializes name
+    // mutations. Readback and unlink are not atomic against a hostile root.
+    // The private unlink seam also permits failure after valid ownership checks.
+    fn cleanup(&self, unlink: impl FnOnce(&File, &str) -> bool) {
+        let owned = self
+            .file
+            .metadata()
+            .ok()
+            .zip(statat(&self.directory, &self.name, AtFlags::SYMLINK_NOFOLLOW).ok())
+            .is_some_and(|(held, named)| {
+                (held.dev(), held.ino()) == (named.st_dev, named.st_ino) && named.st_nlink == 1
+            });
+        if !owned || !unlink(&self.directory, &self.name) {
             self.reservation.record_leak();
         }
     }
@@ -289,8 +306,7 @@ mod tests {
     }
 
     #[test]
-    fn residual_file_after_failed_unlink_closes_storage_and_already_prepared_creation() -> TestResult
-    {
+    fn replaced_entry_closes_storage_and_already_prepared_creation() -> TestResult {
         use std::os::unix::fs::FileExt as _;
 
         let (temporary, staging) = directory()?;
@@ -301,7 +317,7 @@ mod tests {
         let leaf = temporary.path().join("04".repeat(16));
         let residual = temporary.path().join("residual");
         fs::rename(&leaf, &residual)?;
-        fs::create_dir(&leaf)?; // unlinkat without REMOVEDIR must fail, even as root.
+        fs::create_dir(&leaf)?; // Refuse the replacement before attempting unlink.
         drop(input);
         assert_eq!(fs::read(&residual)?, b"residual");
         assert_eq!(ledger.usage().leaked_files, 1);
@@ -315,6 +331,32 @@ mod tests {
         ));
         assert!(!temporary.path().join("05".repeat(16)).exists());
         assert_eq!(ledger.usage().reserved_bytes, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn unlink_refusal_after_identity_readback_keeps_quarantine_after_cleanup() -> TestResult {
+        let (temporary, staging) = directory()?;
+        let ledger = StagingLedger::new(LIMITS);
+        let input = staging.create_file([5; 16], ledger.reserve_storage(1)?)?;
+        let leaf = temporary.path().join("05".repeat(16));
+        let mut reached = false;
+        input.cleanup(|_, _| {
+            reached = true;
+            false
+        });
+        assert!(
+            reached,
+            "the fault must follow successful ownership readback"
+        );
+        assert!(leaf.exists());
+        assert_eq!(ledger.usage().leaked_files, 1);
+        assert!(ledger.reserve_storage(0).is_err());
+        drop(input);
+        assert!(!leaf.exists());
+        assert_eq!(ledger.usage().leaked_files, 1);
+        assert_eq!(ledger.usage().reserved_bytes, 0);
+        assert!(ledger.reserve_storage(0).is_err());
         Ok(())
     }
 
