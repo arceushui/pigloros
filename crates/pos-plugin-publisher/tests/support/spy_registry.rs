@@ -1,10 +1,10 @@
 #![cfg(any(test, feature = "test-support"))]
 //! A Plugin trust policy registry spy for the installer's ordering vectors.
 //!
-//! [`SpyRegistry`] wraps the Memory adapter, records every `admit` call (with the release proof
-//! it received, ADR-103 revision 7) and every `evaluate_current_release` call, and can force a
-//! typed registry error instead of delegating an `admit`. Every other method delegates
-//! unchanged, so a test reads the real retained state through it.
+//! [`SpyRegistry`] wraps the Memory adapter, records every `admit` and `rollback` call (with the
+//! release proof it received, ADR-103 revision 7) and every `evaluate_current_release` call, and
+//! can force a typed registry error instead of delegating an `admit` or a `rollback`. Every other
+//! method delegates unchanged, so a test reads the real retained state through it.
 //!
 //! The ordered [`SpyRegistry::calls`] log holds both kinds of call in call order. An evaluation
 //! entry carries a stamp: a spy built with [`SpyRegistry::with_clock`] records
@@ -35,7 +35,7 @@ use pos_store::plugin_trust_registry::{
     TrustedUtcSecondV1,
 };
 
-/// What one `admit` call received.
+/// What one `admit` or `rollback` call received.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AdmitCall {
     /// Boxed so that the admit entry of [`Call`] stays as small as the evaluation entry.
@@ -62,10 +62,13 @@ pub enum Call {
     },
 }
 
-/// The Memory adapter plus a call log and an optional forced `admit` error.
+/// The Memory adapter plus a call log and an optional forced `admit` and `rollback` error.
 pub struct SpyRegistry {
     pub store: MemoryStore,
     pub admits: Vec<AdmitCall>,
+    /// Every `rollback` call, in call order (not in [`SpyRegistry::calls`]).
+    pub rollbacks: Vec<AdmitCall>,
+    /// Returned instead of delegating an `admit` or a `rollback`; evaluations ignore it.
     pub forced: Option<PluginTrustPolicyRegistryErrorV1>,
     /// Every `admit` and `evaluate_current_release` call in call order.
     ///
@@ -83,6 +86,7 @@ impl SpyRegistry {
         Self {
             store,
             admits: Vec::new(),
+            rollbacks: Vec::new(),
             forced: None,
             calls: RefCell::new(Vec::new()),
             clock: None,
@@ -95,6 +99,7 @@ impl SpyRegistry {
         Self {
             store,
             admits: Vec::new(),
+            rollbacks: Vec::new(),
             forced: None,
             calls: RefCell::new(Vec::new()),
             clock: Some(clock),
@@ -175,6 +180,16 @@ impl PluginTrustPolicyRegistryV1 for SpyRegistry {
         point: TrustEvaluationPointV1,
         activation: ActivationEventInputV1,
     ) -> Registry<PluginRollbackReceiptV1> {
+        self.rollbacks.push(AdmitCall {
+            release_proof: Box::new(*release_proof),
+            utc: point.trusted_utc.as_i64(),
+            tick: point.tick,
+            tps1: tps1_bytes.to_vec(),
+            timeline: activation.timeline,
+        });
+        if let Some(error) = self.forced {
+            return Err(error);
+        }
         self.store.rollback(
             anchor,
             tps1_bytes,

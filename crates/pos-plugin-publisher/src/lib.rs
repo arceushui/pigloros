@@ -19,10 +19,16 @@
 //! trust policy registry to admit it. It does not validate artifact content
 //! (follow-up #574) and builds no activation Event (the caller supplies it).
 //!
+//! The production rollback entry (ADR-103 revision 7) re-activates an already
+//! admitted release in the installer's own order: it reads, projects,
+//! authorizes, and signature-verifies the target through the installer's
+//! private prefix before it asks the registry to roll back to it.
+//!
 //! The `test-support` feature compiles the shared signed-release test world used by the
-//! installer vectors and by other crates' tests. The `installer_public` and
-//! `signed_release_world_public` test targets declare `required-features`, so a plain
-//! `cargo test -p pos-plugin-publisher` skips them; run with `--all-features`.
+//! installer and rollback vectors and by other crates' tests. The `installer_public`,
+//! `rollback_public` and `signed_release_world_public` test targets declare
+//! `required-features`, so a plain `cargo test -p pos-plugin-publisher` skips them; run with
+//! `--all-features`.
 //!
 //! Layout rule: the world lives under `tests/support` and is included by `#[path]`, so it stays
 //! outside the `**/src/**/*.rs` production-coverage glob; `cargo-shear` is told about its
@@ -60,8 +66,9 @@ pub use historical::{
 
 #[cfg(target_os = "linux")]
 pub use install::{
-    install_plugin_release_v1, InstalledPluginReleaseV1, PluginInstallRequestV1,
-    PluginReleaseInstallErrorV1,
+    install_plugin_release_v1, rollback_plugin_release_v1, InstalledPluginReleaseV1,
+    PluginInstallRequestV1, PluginReleaseInstallErrorV1, PluginReleaseRollbackErrorV1,
+    PluginRollbackRequestV1, RolledBackPluginReleaseV1,
 };
 
 #[cfg(target_os = "linux")]

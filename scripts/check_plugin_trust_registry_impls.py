@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Restrict the ADR-103 revisions 4 and 5 Plugin trust policy registry to the trusted composition
-(and, since ADR-061 revision 8, the from-bytes trust APIs of rule 6).
+"""Restrict the ADR-103 revisions 4, 5 and 7 Plugin trust policy registry to the trusted
+composition (and, since ADR-061 revision 8, the from-bytes trust APIs of rule 6).
 
 `PluginTrustPolicyRegistryV1` is a trusted-host port: a registry that retains
 untruthful state, a forged trusted UTC second, or a caller-made receipt can
@@ -17,23 +17,28 @@ source of every `.rs` file outside the top-level build and tooling directories:
    `advance_policy` follow the same allow-list. Files under a `tests`
    directory, gated fixture files, and `#[cfg(test)]` items are tests.
 3. `admit` and `rollback` may be called only from tests and `test-support`
-   fixtures (revision 4 decisions 1 and 10), with one exception. Revision 4
-   names no installer exemption; decision 1 only says the supported order is
-   verify-then-admit. ADR-103 revision 5 (decision 3) ratifies the exemption
-   that #573 shipped: the signed installer module
-   `crates/pos-plugin-publisher/src/install.rs` is the sole non-test
-   verify-then-admit caller, so it is the only non-test call site of `admit`
-   and the only non-test file that may construct `TrustedUtcSecondV1` outside
-   the trusted host. Since ADR-103 revision 7 both operations also require the
-   verified PMF1 signature token as their release proof, which the registry
-   checks against its own authorization; the call-site rule stays as defence in
-   depth, because the token proves a signature, not that the caller is the
-   trusted composition. The installer verifies the signature before it calls
-   `admit`. It may not call `rollback`, `provision`, or `advance_policy`, nor
-   implement the port. `rollback` has no production entry point: no non-test file may call
-   it. Any other call site, including one inside `pos-store`, is rejected. A
-   file can call a method of the port only after naming the trait or glob
-   importing its module, so method names are checked only in such files.
+   fixtures (revision 4 decisions 1 and 10), with one sanctioned production
+   file per operation. Revision 4 names no installer exemption; decision 1
+   only says the supported order is verify-then-admit. ADR-103 revision 5
+   (decision 3) ratifies the exemption that #573 shipped: the signed installer
+   module `crates/pos-plugin-publisher/src/install.rs` is the sole non-test
+   verify-then-admit caller of `admit`. ADR-103 revision 7 (decisions 4.3 and
+   4.5, Q4) adds the production rollback entry
+   `crates/pos-plugin-publisher/src/rollback.rs` as the sole non-test caller of
+   `rollback`, and makes the verified PMF1 signature token a required release
+   proof of both operations, which the registry checks against its own
+   authorization; the per-file call-site rule stays as defence in depth,
+   because the token proves a signature, not that the caller is the trusted
+   composition. The behavioural tests (`rollback_public.rs`,
+   `installer_public.rs`), not this checker, pin that each of the two files
+   verifies the signature before its one operation; neither may call the
+   other operation, `provision`, or
+   `advance_policy`, nor implement the port, and they are the only non-test
+   files that may construct `TrustedUtcSecondV1` outside the trusted host. Any
+   other call site, including one inside `pos-store` or `pos-runtime`, is
+   rejected. A file can call a method of the port only after naming the trait
+   or glob importing its module, so method names are checked only in such
+   files.
    `evaluate_current_release` is read-only and returns no authority token, so
    it has no call-site rule; `CurrentReleaseEvaluationV1` is one of the
    receipt types of rule 1, so only the trusted host constructs one.
@@ -80,9 +85,13 @@ CONFINED_NAME = re.compile(
     r"\b(?:from_bytes_v1|FixedTrustMaterialSourceV1|CommunityTrustAnchorBytesV1"
     r"|CommunityEvaluationWorldV1)\b"
 )
-# Named by ADR-103 revision 5 (not by revision 4): the sanctioned verify-then-admit caller (#573);
-# revision 7 adds the required release proof and keeps this allow-list; see rule 3.
-ALLOWED_CALL_BY_FILE = "crates/pos-plugin-publisher/src/install.rs"
+# Each sanctioned production file and the one operation it may call: the verify-then-admit
+# installer named by ADR-103 revision 5 (#573), and the rollback entry of ADR-103 revision 7
+# (Q4, the per-file allow-list); see rule 3.
+ALLOWED_CALL_BY_FILE = {
+    "crates/pos-plugin-publisher/src/install.rs": "admit",
+    "crates/pos-plugin-publisher/src/rollback.rs": "rollback",
+}
 GUARDED_NAMES = (PORT, "TrustedUtcSecondV1", "PluginTrustPolicyAnchorV1")
 RECEIPT_TYPES = (
     "AdmittedPluginReleaseReceiptV1",
@@ -125,7 +134,11 @@ ANCHOR_CALL = re.compile(r"\bPluginTrustPolicyAnchorV1\s*::\s*new\s*\(")
 # (`<S as PluginTrustPolicyRegistryV1>::admit(..)`).
 SETUP_CALL = re.compile(r"(?:\.|::)\s*(?:provision|advance_policy)\s*\(")
 ADMISSION_CALL = re.compile(r"(?:\.|::)\s*(?:admit|rollback)\s*\(")
-ROLLBACK_CALL = re.compile(r"(?:\.|::)\s*rollback\s*\(")
+# The operation a sanctioned file may not call: the other one of `admit` and `rollback`.
+OTHER_OPERATION_CALL = {
+    "admit": re.compile(r"(?:\.|::)\s*rollback\s*\("),
+    "rollback": re.compile(r"(?:\.|::)\s*admit\s*\("),
+}
 REGISTRY_AWARE = re.compile(r"\b" + PORT + r"\b|\bplugin_trust_registry\s*::\s*\*")
 PUBLIC_ITEM = re.compile(
     r"\bpub\s+(?:const\s+)?(?:unsafe\s+)?(?:async\s+)?"
@@ -263,9 +276,9 @@ def linux_gate_findings(relative: str, code: str) -> list[str]:
     ]
 
 
-def construction_findings(relative: str, code: str, installer: bool) -> list[str]:
+def construction_findings(relative: str, code: str, sanctioned: bool) -> list[str]:
     found: list[str] = []
-    if not installer and UTC_CONSTRUCTION.search(code):
+    if not sanctioned and UTC_CONSTRUCTION.search(code):
         found.append(f"{relative}: TrustedUtcSecondV1 constructed outside the trusted host")
     for match in RECEIPT_LITERAL.finditer(code):
         if LITERAL_PREFIX.search(code[: match.start()]) is None:
@@ -291,7 +304,7 @@ def file_findings(relative: str, code: str) -> list[str]:
     is_test = gated or "tests" in Path(relative).parts
     live = strip_test_items(code)
     aware = REGISTRY_AWARE.search(live) is not None
-    installer = relative == ALLOWED_CALL_BY_FILE
+    operation = ALLOWED_CALL_BY_FILE.get(relative)
     found: list[str] = confined_name_findings(relative, code)
     if REGISTRY_MODULE.match(relative):
         found.extend(forbidden_name_findings(relative, live))
@@ -302,14 +315,14 @@ def file_findings(relative: str, code: str) -> list[str]:
             found.append(f"{relative}: Plugin trust registry implemented outside the trusted host")
         if ALIAS.search(code):
             found.append(f"{relative}: Plugin trust registry name aliased outside the trusted host")
-        found.extend(construction_findings(relative, code, installer))
+        found.extend(construction_findings(relative, code, operation is not None))
         if not is_test and (ANCHOR_CALL.search(live) or (aware and SETUP_CALL.search(live))):
             found.append(f"{relative}: registry anchor or setup call outside the trusted host")
-    call = ROLLBACK_CALL if installer else ADMISSION_CALL
+    call = ADMISSION_CALL if operation is None else OTHER_OPERATION_CALL[operation]
     if not is_test and aware and call.search(live):
         found.append(
             f"{relative}: admit or rollback called outside tests, test-support, "
-            "and the sanctioned installer module"
+            "and the sanctioned installer and rollback modules"
         )
     return found
 

@@ -27,6 +27,12 @@ TEST_WORLD_FILE = "crates/pos-plugin-publisher/tests/support/world.rs"
 INSTALLER_BODY = (
     IMPORT + "fn f(s: &mut S, w: &mut W) { TrustedUtcSecondV1::from_source(w); s.admit(a); }\n"
 )
+# ADR-103 revision 7 (R7-G1): the production rollback entry and its one permitted operation.
+ROLLBACK_FILE = "crates/pos-plugin-publisher/src/rollback.rs"
+ROLLBACK_BODY = (
+    IMPORT
+    + "fn f(s: &mut S, w: &mut W) { TrustedUtcSecondV1::from_source(w); s.rollback(a); }\n"
+)
 REGISTRY_FILE = "crates/pos-store/src/plugin_trust_registry/types.rs"
 PORT_FILE = "crates/pos-store/src/plugin_trust_registry/port.rs"
 ADAPTER_FILE = "crates/pos-store/src/memory/plugin_trust_registry.rs"
@@ -141,7 +147,9 @@ ALLOWED = {
     ),
     "target/debug/build/generated.rs": IMPL + IMPORT + CALLS,
     INSTALLER_FILE: INSTALLER_BODY,
+    ROLLBACK_FILE: ROLLBACK_BODY,
     "crates/pos-plugin-publisher/tests/installer_public.rs": IMPORT + CALLS,
+    "crates/pos-plugin-publisher/tests/rollback_public.rs": IMPORT + CALLS,
     # The shared signed-release test world (#579): gated fixture files under `tests/support`,
     # included into the library by `#[path]` under the `test-support` feature.
     TEST_WORLD_FILE: GATE + IMPL + IMPORT + CALLS + ANCHOR + UTC,
@@ -204,6 +212,14 @@ REJECTED = {
         LINUX + IMPORT + LINUX + "fn f(s: &mut S) { s.admit(a); }\n"
     ),
     "crates/pos-runtime/src/composition.rs": IMPORT + "fn f(s: &mut S) { s.rollback(a); }\n",
+    # ADR-103 revision 7 (R7-G1): neither operation from any other non-test file.
+    "crates/pos-runtime/src/admission.rs": IMPORT + "fn f(s: &mut S) { s.admit(a); }\n",
+    "crates/pos-store/src/rollback.rs": (
+        LINUX + IMPORT + LINUX + "fn f(s: &mut S) { s.rollback(a); }\n"
+    ),
+    "crates/pos-plugin-supervisor/src/rollback.rs": ROLLBACK_BODY,
+    "crates/pos-plugin-publisher/src/rollback_copy.rs": ROLLBACK_BODY,
+    "crates/pos-plugin-publisher/src/install/rollback.rs": ROLLBACK_BODY,
     "crates/pos-state/src/feature_gated.rs": (
         IMPORT + '#[cfg(feature = "test-support")]\nfn f(s: &mut S) { s.admit(a); }\n'
     ),
@@ -295,7 +311,7 @@ FORBIDDEN_NAMES = {
 }
 
 
-# The installer file is rejected, not exempted, for everything except `admit` and
+# Each sanctioned file is rejected, not exempted, for everything except its one operation and
 # the one trusted-time construction.
 INSTALLER_REJECTED = {
     "rollback": IMPORT + "fn f(s: &mut S) { s.rollback(a); }\n",
@@ -305,6 +321,19 @@ INSTALLER_REJECTED = {
     "impl": IMPL,
     "receipt": "fn f() { let _ = AdmittedPluginReleaseReceiptV1 { a: 1 }; }\n",
     "path_rollback": IMPORT + "fn f(s: &mut S) { MemoryStore::rollback(s, a); }\n",
+}
+# ADR-103 revision 7 (R7-G1): the rollback entry may not call `admit`.
+ROLLBACK_REJECTED = {
+    "admit": IMPORT + "fn f(s: &mut S) { s.admit(a); }\n",
+    "path_admit": IMPORT + "fn f(s: &mut S) { MemoryStore::admit(s, a); }\n",
+    "qualified_admit": (
+        IMPORT + "fn f(s: &mut S) { <S as PluginTrustPolicyRegistryV1>::admit(s, a); }\n"
+    ),
+    "provision": IMPORT + "fn f(s: &mut S) { s.provision(a, b); }\n",
+    "advance": IMPORT + "fn f(s: &mut S) { s.advance_policy(a); }\n",
+    "anchor": ANCHOR,
+    "impl": IMPL,
+    "receipt": "fn f() { let _ = PluginRollbackReceiptV1 { a: 1 }; }\n",
 }
 
 
@@ -323,27 +352,32 @@ def run(files: dict[str, str]) -> subprocess.CompletedProcess[str]:
         )
 
 
-def revision_five_citations() -> list[str]:
-    """Return the places of the checker that must cite ADR-103 revision 5 but do not (EU2)."""
+def missing_citations(revision: str, spellings: tuple[str, ...]) -> list[str]:
+    """Return the places of the checker that must cite ADR-103 `revision` but do not.
+
+    Revision 5 is EU2; revision 7 is R7-G1.
+    """
     text = CHECKER.read_text(encoding="utf-8")
     lines = text.splitlines()
     docstring = text.split('"""')[1]
     index = next(i for i, line in enumerate(lines) if line.startswith("ALLOWED_CALL_BY_FILE ="))
     comment = "\n".join(lines[max(index - 3, 0) : index])
     return [
-        place
+        f"{place} (revision {revision})"
         for place, text in (
             ("the script docstring", docstring),
             ("the ALLOWED_CALL_BY_FILE comment", comment),
         )
-        if "revision 5" not in text and "revisions 4 and 5" not in text
+        if not any(spelling in " ".join(text.split()) for spelling in spellings)
     ]
 
 
 def main() -> None:
-    missing = revision_five_citations()
+    missing = missing_citations("5", ("revision 5", "revisions 4 and 5", "revisions 4, 5")) + (
+        missing_citations("7", ("revision 7", "revisions 4, 5 and 7"))
+    )
     if missing:
-        raise SystemExit("ADR-103 revision 5 is not cited by " + ", ".join(missing))
+        raise SystemExit("ADR-103 is not cited by " + ", ".join(missing))
     accepted = run(ALLOWED)
     if accepted.returncode != 0:
         raise SystemExit(f"allowed layout was rejected:\n{accepted.stderr}")
@@ -359,6 +393,10 @@ def main() -> None:
         result = run({**ALLOWED, INSTALLER_FILE: INSTALLER_BODY + text})
         if result.returncode == 0 or INSTALLER_FILE not in result.stderr:
             raise SystemExit(f"installer {label} was not rejected")
+    for label, text in ROLLBACK_REJECTED.items():
+        result = run({**ALLOWED, ROLLBACK_FILE: ROLLBACK_BODY + text})
+        if result.returncode == 0 or ROLLBACK_FILE not in result.stderr:
+            raise SystemExit(f"rollback entry {label} was not rejected")
     for label, text in FORBIDDEN_NAMES.items():
         for relative in (
             REGISTRY_FILE,

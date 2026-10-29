@@ -20,6 +20,10 @@
 //! order is enforced by type as well. It may not call `rollback`, `provision`, or
 //! `advance_policy`.
 //!
+//! Steps 1 to 5 are one private function, `verify_release_v1`, that the production rollback
+//! entry (`rollback_plugin_release_v1`, ADR-103 revision 7) shares, so the two orders cannot
+//! drift.
+//!
 //! The installer accepts no projection, public key, clock value, or Tick from
 //! its caller, and it builds no activation Event: the trusted composition
 //! supplies the already validated [`ActivationEventInputV1`].
@@ -49,6 +53,17 @@ use pos_store::plugin_trust_registry::{
     PluginTrustPolicyRegistryV1, TrustEvaluationPointV1, TrustedUtcSecondV1,
 };
 use thiserror::Error;
+
+// The production rollback entry (ADR-103 revision 7) keeps its own file, `src/rollback.rs`, so
+// that the guard's per-file allow-list can name it, but it is a child of this module, so that it
+// shares the private prefix `verify_release_v1` without any wider visibility.
+#[path = "rollback.rs"]
+mod rollback;
+
+pub use rollback::{
+    rollback_plugin_release_v1, PluginReleaseRollbackErrorV1, PluginRollbackRequestV1,
+    RolledBackPluginReleaseV1,
+};
 
 /// A closed failure of Plugin release installation.
 ///
@@ -164,25 +179,67 @@ pub fn install_plugin_release_v1(
     wall: &mut impl PluginTrustWallSourceV1,
     request: PluginInstallRequestV1<'_>,
 ) -> Result<InstalledPluginReleaseV1, PluginReleaseInstallErrorV1> {
-    let bundle = source.read_verified(address)?;
-    let (projection, execution) = project(&bundle)?;
-    let authorization = request.evidence.authorize_release(&projection)?;
-    let signature = verify_plugin_release_signature_v1(&bundle, &authorization)?;
-    let trusted_utc = TrustedUtcSecondV1::from_source(wall)?;
-    let (_, tick) = request.evidence.evaluation_coordinates();
+    let verified =
+        verify_release_v1::<PluginReleaseInstallErrorV1>(source, address, request.evidence, wall)?;
     let admission = registry.admit(
         request.anchor,
         request.tps1_bytes,
         request.evidence,
-        &projection,
-        &signature,
-        TrustEvaluationPointV1::new(trusted_utc, tick),
+        &verified.projection,
+        &verified.signature,
+        verified.point,
         request.activation,
     )?;
     Ok(InstalledPluginReleaseV1 {
         admission,
+        execution: verified.execution,
+        signature: verified.signature,
+    })
+}
+
+/// One release that passed the shared fail-closed prefix: both projections of its closure, its
+/// verified signature, and the transaction's trusted UTC second and Tick.
+struct VerifiedReleaseV1 {
+    /// The trust projection of the closure's PMF1.
+    projection: ValidatedPluginManifestProjectionV1,
+    /// The execution projection of the same PMF1.
+    execution: PluginExecutionProjectionV1,
+    /// The PMF1 signature verified under the key the evidence resolved.
+    signature: VerifiedPluginReleaseSignatureV1,
+    /// The sampled trusted UTC second and the evidence's own Tick.
+    point: TrustEvaluationPointV1,
+}
+
+/// The read-project-authorize-verify-sample prefix shared by installation and rollback (ADR-103
+/// revision 7): read the verified closure at `address`, project it, authorize the projection
+/// with `evidence`, verify the PMF1 signature under the resolved key, then sample `wall` once.
+///
+/// Nothing here touches a registry, and `wall` is sampled only after the signature verified.
+/// `E` is the caller's closed error type, so each entry keeps its own typed variants.
+fn verify_release_v1<E>(
+    source: &impl ReleaseSourceV1,
+    address: &BundleAddressV1,
+    evidence: &VerifiedPluginTrustEvidenceV1,
+    wall: &mut impl PluginTrustWallSourceV1,
+) -> Result<VerifiedReleaseV1, E>
+where
+    E: From<ReleaseSourceErrorV1>
+        + From<PluginManifestErrorV1>
+        + From<PluginTrustErrorV1>
+        + From<PluginReleaseSignatureErrorV1>
+        + From<PluginTrustPolicyRegistryErrorV1>,
+{
+    let bundle = source.read_verified(address)?;
+    let (projection, execution) = project(&bundle)?;
+    let authorization = evidence.authorize_release(&projection)?;
+    let signature = verify_plugin_release_signature_v1(&bundle, &authorization)?;
+    let trusted_utc = TrustedUtcSecondV1::from_source(wall)?;
+    let (_, tick) = evidence.evaluation_coordinates();
+    Ok(VerifiedReleaseV1 {
+        projection,
         execution,
         signature,
+        point: TrustEvaluationPointV1::new(trusted_utc, tick),
     })
 }
 
