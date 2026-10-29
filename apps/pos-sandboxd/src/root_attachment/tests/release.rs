@@ -297,7 +297,7 @@ mod cases {
         foreign.verify_directory()?;
         let tree = prepared_tree()?;
         let (_kernel, root) = attached_root(&tree.prepared)?;
-        // The public facade observes a socket on the real kernel; it must
+        // The public facade observes a regular file on the real kernel; it must
         // refuse before issuing an unmount. Positive mounted-host proof is #444.
         assert_eq!(
             root.detach(&tree.prepared, cleanup_deadline()).await,

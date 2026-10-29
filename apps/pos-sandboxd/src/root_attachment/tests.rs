@@ -22,8 +22,8 @@ use std::{
 
 use pos_reference::provider_admission::{test_support::StagedInstallation, ProviderImageSnapshot};
 use rustix::net::{
-    recv, recvmsg, sendmsg, RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags,
-    SendAncillaryBuffer, SendAncillaryMessage, SendFlags,
+    recvmsg, sendmsg, RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, SendAncillaryBuffer,
+    SendAncillaryMessage, SendFlags,
 };
 use serde_json::json;
 
@@ -55,9 +55,9 @@ fn attached_root(
     directory: &PreparedAttemptDirectory,
 ) -> Result<(FakeKernel, VerifiedRootMount), BoxError> {
     let expected = expected(&component(directory));
-    let (mount, peer) = StdUnixStream::pair()?;
+    let (mount, mount_path) = tempfile::NamedTempFile::new()?.into_parts();
     let kernel = FakeKernel {
-        mount_peer: Some((mount.as_raw_fd(), peer)),
+        mount_path: Some(mount_path),
         ..FakeKernel::accepting(matching(&expected))
     };
     let mount = QuarantinedRootMount::from_descriptor(mount.into());
@@ -308,9 +308,10 @@ struct FakeKernel {
     clock_expiry: Option<ClockExpiry>,
     absence: Mutex<VecDeque<AbsenceProbe>>,
     probes: Mutex<Vec<[BlockIdentity; 2]>>,
-    // The peer observes endpoint lifetime even when its old FD number is reused.
-    // The number is compared only at detach, while the owned endpoint is live.
-    mount_peer: Option<(std::os::fd::RawFd, StdUnixStream)>,
+    // Keep the file linked without retaining another descriptor. Its pathname
+    // and inode cannot be recycled while the closure witness is in use.
+    mount_path: Option<tempfile::TempPath>,
+    detached_mount: Mutex<Option<(std::path::PathBuf, std::path::PathBuf)>>,
 }
 
 impl FakeKernel {
@@ -327,7 +328,8 @@ impl FakeKernel {
             clock_expiry: None,
             absence: Mutex::new(VecDeque::new()),
             probes: Mutex::new(Vec::new()),
-            mount_peer: None,
+            mount_path: None,
+            detached_mount: Mutex::new(None),
         }
     }
 
@@ -366,14 +368,12 @@ impl AttachmentKernel for FakeKernel {
     }
 
     fn detach(&self, mount: BorrowedFd<'_>) -> Result<(), ImageActivationError> {
-        if let Some((expected, peer)) = &self.mount_peer {
-            assert_eq!(mount.as_raw_fd(), *expected, "detach the owned endpoint");
-            assert_eq!(
-                recv(peer, &mut [0_u8; 1][..], RecvFlags::DONTWAIT).map(|(_, received)| received),
-                Err(rustix::io::Errno::AGAIN),
-                "owned endpoint must remain open until detach"
-            );
-        }
+        let path = std::path::PathBuf::from(format!("/proc/self/fd/{}", mount.as_raw_fd()));
+        let target = fs::read_link(&path).map_err(|_| ImageActivationError::EvidenceMismatch)?;
+        *self
+            .detached_mount
+            .lock()
+            .map_err(|_| ImageActivationError::EvidenceMismatch)? = Some((path, target));
         self.detached.fetch_add(1, Ordering::SeqCst);
         self.detach
     }
@@ -383,12 +383,31 @@ impl AttachmentKernel for FakeKernel {
         devices: [BlockIdentity; 2],
     ) -> Result<bool, ImageActivationError> {
         let rejected = ImageActivationError::ResourceAbsenceUnverified;
-        if let Some((_, peer)) = &self.mount_peer {
-            assert_eq!(
-                recv(peer, &mut [0_u8; 1][..], RecvFlags::DONTWAIT).map(|(_, received)| received),
-                Ok(0),
-                "mount FD must close before probing"
-            );
+        assert!(
+            self.mount_path.is_some(),
+            "retain the owned fixture pathname"
+        );
+        {
+            let detached = self.detached_mount.lock().map_err(|_| rejected)?;
+            assert!(detached.is_some(), "detach must precede absence probes");
+            if let Some((path, target)) = &*detached {
+                let current = match fs::read_link(path) {
+                    Ok(current) => Some(current),
+                    Err(error) => {
+                        assert_eq!(
+                            error.kind(),
+                            std::io::ErrorKind::NotFound,
+                            "unverified mount descriptor lookup"
+                        );
+                        None
+                    }
+                };
+                assert_ne!(
+                    current.as_ref(),
+                    Some(target),
+                    "mount FD must close before probing"
+                );
+            }
         }
         self.probes.lock().map_err(|_| rejected)?.push(devices);
         let (delay, result) = self
