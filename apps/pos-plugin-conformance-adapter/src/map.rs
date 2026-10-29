@@ -74,13 +74,15 @@ pub enum SubResultV1 {
     Operational,
 }
 
-/// The usage of one committed invocation from its `metering` and its `output` usage
+/// The usage of one committed outcome from its `metering` and its `output` usage
 /// (ADR-068 R4 4.1).
 ///
 /// `cpu_fuel` is the checked sum of the two fuel counters (overflow is `None`, which is
 /// operational); `memory_bytes`, `host_calls`, the Event count, the output bytes (the Event
-/// payload bytes) and the storage bytes (the next state bytes) are direct; the invocation is one
-/// execution step; Simulation Time belongs to the sub-case ([`of_record()`]), so it is 0 here.
+/// payload bytes) and the storage bytes (the next state bytes) are direct; the outcome is one
+/// execution step, because a sub-case keeps one decisive outcome per `pass` step and counts one
+/// step per committed one (ADR-068 R4 4.1(4)); Simulation Time belongs to the sub-case
+/// ([`of_record()`]), so it is 0 here.
 #[must_use]
 pub fn usage_of(metering: MeteringV1, output: OutputUsageV1) -> Option<ResourceUsage> {
     metering
@@ -98,9 +100,9 @@ pub fn usage_of(metering: MeteringV1, output: OutputUsageV1) -> Option<ResourceU
         })
 }
 
-/// The usage of two invocations of one attempt (ADR-068 R4 4.2(1)): `memory_bytes` is the
-/// maximum, every other counter but Simulation Time is the checked sum, and an overflow is
-/// `None`. Simulation Time is left 0: it is the sub-case's advance.
+/// The usage of two decisive committed outcomes of one attempt (ADR-068 R4 4.2(1)):
+/// `memory_bytes` is the maximum, every other counter but Simulation Time is the checked sum,
+/// and an overflow is `None`. Simulation Time is left 0: it is the sub-case's advance.
 const fn plus(left: ResourceUsage, right: ResourceUsage) -> Option<ResourceUsage> {
     let sums = (
         left.cpu_fuel.checked_add(right.cpu_fuel),
@@ -141,24 +143,42 @@ fn advance(times: &[u64]) -> u64 {
         .map_or(0, |(last, first)| last.saturating_sub(*first))
 }
 
-/// The usage of the attempt of `record` (ADR-068 R4 4.2(1)): the [`plus()`] of the usage of
-/// its committed outcomes, with Simulation Time the [`advance()`] of its passes; `None` on an
-/// overflow.
-fn attempt_usage(record: &SubCaseRecordV1) -> Option<ResourceUsage> {
-    record
-        .outcomes
-        .iter()
-        .filter_map(|outcome| match of_outcome(outcome) {
-            SubResultV1::Committed { usage, .. } => Some(usage),
-            SubResultV1::Refused { .. } | SubResultV1::Failed { .. } | SubResultV1::Operational => {
-                None
-            }
-        })
-        .try_fold(ResourceUsage::default(), plus)
-        .map(|usage| ResourceUsage {
-            simulation_time_ns: advance(&record.simulation_times),
-            ..usage
-        })
+/// The sub-result of the passes so far, `seen`, followed by the decisive outcome `next` of the
+/// next pass (ADR-068 R4 4.2(1)): a committed outcome after a committed sub-result adds its
+/// usage with [`plus()`] (an overflow is operational, and stays so over later passes); the
+/// first outcome is itself.
+fn after_pass(seen: Option<SubResultV1>, next: SubResultV1) -> SubResultV1 {
+    match (seen, next) {
+        (
+            Some(SubResultV1::Committed { usage: before, .. }),
+            SubResultV1::Committed {
+                output_digest,
+                usage,
+            },
+        ) => plus(before, usage).map_or(SubResultV1::Operational, |usage| SubResultV1::Committed {
+            output_digest,
+            usage,
+        }),
+        (Some(SubResultV1::Operational), _) => SubResultV1::Operational,
+        (_, next) => next,
+    }
+}
+
+/// `result` with the Simulation Time [`advance()`] of `times` when it is committed.
+fn timed(result: SubResultV1, times: &[u64]) -> SubResultV1 {
+    match result {
+        SubResultV1::Committed {
+            output_digest,
+            usage,
+        } => SubResultV1::Committed {
+            output_digest,
+            usage: ResourceUsage {
+                simulation_time_ns: advance(times),
+                ..usage
+            },
+        },
+        other => other,
+    }
 }
 
 /// Whether `error` is one of the 20 closed names.
@@ -235,25 +255,21 @@ pub fn of_error(error: CommunityPluginHostErrorV1) -> SubResultV1 {
 /// The sub-result of a record: its setup refusal, else the outcome of its last pass, else none
 /// (a sub-case with no pass has no result, which `digest`, `absent` and `malformed` need not).
 ///
-/// A committed sub-result carries the usage of the attempt, not of its last outcome: the
-/// checked sum over the committed outcomes, the maximum `memory_bytes`, one execution step per
-/// committed outcome and the Simulation Time advance (ADR-068 R4 4.1, 4.2(1)). An overflow of a
-/// sum is operational.
+/// The record keeps one decisive outcome per `pass` step, and a sub-case stops at the first
+/// that did not commit, so every outcome before the last is committed. A committed sub-result
+/// carries the usage of the attempt: the checked sum over these decisive committed outcomes,
+/// the maximum `memory_bytes`, one execution step per committed `pass` step and the Simulation
+/// Time advance (ADR-068 R4 4.1(4), 4.1(5), 4.2(1)). An overflow of a sum is operational.
 #[must_use]
 pub fn of_record(record: &SubCaseRecordV1) -> Option<SubResultV1> {
     let refusal = record.setup_refusal.map(of_error);
     refusal.or_else(|| {
-        record.outcomes.last().map(|last| match of_outcome(last) {
-            SubResultV1::Committed { output_digest, .. } => {
-                attempt_usage(record).map_or(SubResultV1::Operational, |usage| {
-                    SubResultV1::Committed {
-                        output_digest,
-                        usage,
-                    }
-                })
-            }
-            other => other,
-        })
+        record
+            .outcomes
+            .iter()
+            .map(of_outcome)
+            .fold(None, |seen, next| Some(after_pass(seen, next)))
+            .map(|result| timed(result, &record.simulation_times))
     })
 }
 

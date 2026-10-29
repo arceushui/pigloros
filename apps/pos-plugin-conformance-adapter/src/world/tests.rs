@@ -349,8 +349,13 @@ fn a_subcase_usage_sums_its_passes_takes_the_maximum_memory_and_the_time_advance
         simulation_time_ns: 30,
     };
     assert_eq!(record.usage, usage);
+    Ok(())
+}
 
-    // A one-pass sub-case is one step and consumes no Simulation Time.
+/// ADR-068 R4 test 5: a one-pass sub-case is one execution step and consumes no Simulation
+/// Time, whatever its pass value.
+#[test]
+fn a_one_pass_subcase_is_one_step_and_consumes_no_simulation_time() -> TestResult {
     let mut fake = Fake::default();
     let mut steps = prefix();
     steps.pop();
@@ -359,6 +364,8 @@ fn a_subcase_usage_sums_its_passes_takes_the_maximum_memory_and_the_time_advance
         &mut fake,
         &subcase("pos.1", steps, committed_expect([7; 32])),
     )?;
+    assert!(record.matched);
+    assert_eq!(record.simulation_times, [40]);
     let usage = ResourceUsage {
         memory_bytes: 3,
         cpu_fuel: 3,
@@ -406,6 +413,26 @@ fn a_sum_that_overflows_over_the_passes_is_operational() -> TestResult {
         pos_reference::evaluator::SubjectResult::Unavailable
     );
     assert_eq!(decided.usage, ResourceUsage::default());
+
+    // A later committed pass does not hide an overflow of the passes before it.
+    let mut fake = Fake::default();
+    fake.passes
+        .push_back(Ok(vec![committed_with([1; 32], heavy, OUTPUT)]));
+    fake.passes.push_back(Ok(vec![committed([2; 32])]));
+    fake.passes.push_back(Ok(vec![committed([3; 32])]));
+    let mut steps = prefix();
+    steps.extend([pass_step(vec![member("p")]), pass_step(vec![member("p")])]);
+    let record = run(
+        &mut fake,
+        &subcase("pos.3", steps, committed_expect([3; 32])),
+    )?;
+    assert_eq!(record.outcomes.len(), 3);
+    assert_eq!(
+        crate::map::of_record(&record),
+        Some(SubResultV1::Operational)
+    );
+    assert_eq!(record.committed, None);
+    assert_eq!(record.usage, ResourceUsage::default());
     Ok(())
 }
 

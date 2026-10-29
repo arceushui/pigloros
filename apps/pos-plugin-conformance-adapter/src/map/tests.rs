@@ -307,7 +307,8 @@ fn the_record_result_is_the_setup_refusal_else_the_last_outcome_else_none() {
         outcomes: vec![outcome(refused), outcome(committed)],
         ..empty
     };
-    // The usage of the attempt counts its committed outcomes only.
+    // A committed outcome after one that did not commit is its own usage (the interpreter
+    // stops at the first outcome that does not commit, so this record is hand-built).
     assert_eq!(
         of_record(&both),
         Some(SubResultV1::Committed {

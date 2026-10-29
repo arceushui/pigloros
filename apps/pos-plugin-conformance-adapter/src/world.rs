@@ -48,7 +48,7 @@ pub struct SubCaseRecordV1 {
     pub id: String,
     /// The steps that ran, the refusing step included.
     pub steps_run: u32,
-    /// The outcome of each `pass` step that ran, in step order.
+    /// The decisive outcome of each `pass` step that ran, in step order.
     pub outcomes: Vec<CommunityPluginSubjectOutcomeV1>,
     /// The `simulation_time` of each `pass` step that ran, in step order: the source of the
     /// sub-case's Simulation Time usage (ADR-068 R4 4.1(5)).
@@ -741,8 +741,10 @@ impl Run<'_> {
         self.record.worker_launches = self.record.worker_launches.saturating_add(launched);
     }
 
-    /// Record the outcome of a pass: the first outcome that did not commit, else the last.
-    /// Only a committed outcome lets the sub-case continue.
+    /// Record the decisive outcome of a pass: the first outcome that did not commit, else the
+    /// last. Only a committed outcome lets the sub-case continue. The sub-case's usage sums
+    /// these decisive committed outcomes, one per `pass` step (ADR-068 R4 4.1(4)); the other
+    /// members of a pass are not recorded.
     fn record_pass(
         &mut self,
         args: &PassArgsV1,
