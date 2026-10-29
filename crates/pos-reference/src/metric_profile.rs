@@ -12,8 +12,9 @@
 //! Decoding runs in one pass that checks structure everywhere and latches the first semantic
 //! failure. A structural defect anywhere in the input (section 4.6 item 1) therefore outranks
 //! every header or record failure, and the first semantic failure in index order (section 4.6
-//! items 2 and 3, gap-fill G2) wins among the rest. No record is kept once a failure is latched,
-//! so a declared `record_count` above 262,144 is `ResourceLimit` before any record is allocated.
+//! items 2 and 3, gap-fill G2) wins among the rest. The validating pass keeps nothing; only an
+//! input it accepts is decoded a second time into the exact sums, so a declared `record_count`
+//! above 262,144 is `ResourceLimit` before any record is allocated.
 //!
 //! Gap-fills this module adds, recorded for the profile owner:
 //!
@@ -208,9 +209,9 @@ impl<'a> Reader<'a> {
                 let minimum = if width == 1 { 24 } else { 1_u64 << (4 * width) };
                 self.take(width)
                     .map(|bytes| {
-                        bytes
-                            .iter()
-                            .fold(0_u64, |value, byte| (value << 8) | u64::from(*byte))
+                        let mut word = [0_u8; 8];
+                        word[8 - bytes.len()..].copy_from_slice(bytes);
+                        u64::from_be_bytes(word)
                     })
                     .filter(|value| *value >= minimum)
             }
@@ -260,10 +261,6 @@ impl<'a> Decoder<'a> {
             reader: Reader::new(bytes),
             latched: None,
         }
-    }
-
-    const fn clean(&self) -> bool {
-        self.latched.is_none()
     }
 
     fn flag(&mut self, error: MetricErrorV1, path: &[Segment]) {
@@ -403,12 +400,6 @@ struct Record<'a> {
     supplied: bool,
 }
 
-/// One decoded `MTI1`.
-struct MetricInput<'a> {
-    minimum: u64,
-    records: Vec<Record<'a>>,
-}
-
 const fn is_version(value: u64) -> bool {
     value == RECORD_VERSION
 }
@@ -445,7 +436,13 @@ const fn name(name: &'static str) -> [Segment; 1] {
     [Segment::Name(name)]
 }
 
-fn decode_input(bytes: &[u8]) -> Result<MetricInput<'_>, MetricFailure> {
+/// Decodes one `MTI1` and returns its `minimum_scored_records`. The validating pass has no
+/// `tally` and keeps nothing; only an input already validated is decoded again into a tally, so
+/// no record of a rejected input is ever kept.
+fn decode_input<'a>(
+    bytes: &'a [u8],
+    mut tally: Option<&mut Tally<'a>>,
+) -> Result<u64, MetricFailure> {
     let mut decoder = Decoder::new(bytes);
     decoder.array_of(&name("input"), INPUT_FIELDS)?;
     decoder.expect_text(
@@ -494,16 +491,15 @@ fn decode_input(bytes: &[u8]) -> Result<MetricInput<'_>, MetricFailure> {
         MetricErrorV1::InconsistentLength,
         &name("records"),
     );
-    let mut records = Vec::new();
     let mut previous = None;
     for index in 0..length {
         let record = decode_record(&mut decoder, index, &mut previous)?;
-        if decoder.clean() {
-            records.extend(record);
+        if let (Some(tally), Some(record)) = (tally.as_deref_mut(), record) {
+            tally.add(&record);
         }
     }
     decoder.finish()?;
-    Ok(MetricInput { minimum, records })
+    Ok(minimum)
 }
 
 /// The coordinate `records/<index>/<field>`.
@@ -622,17 +618,13 @@ struct Tally<'a> {
 }
 
 impl<'a> Tally<'a> {
-    fn of(records: &[Record<'a>]) -> Self {
-        let mut tally = Self::default();
-        for record in records {
-            match record.outcome {
-                Outcome::Observed { positive } => tally.score(record, i128::from(positive)),
-                Outcome::Pending => tally.pending += 1,
-                Outcome::Redacted => tally.redacted += 1,
-                Outcome::Unavailable => tally.unavailable += 1,
-            }
+    fn add(&mut self, record: &Record<'a>) {
+        match record.outcome {
+            Outcome::Observed { positive } => self.score(record, i128::from(positive)),
+            Outcome::Pending => self.pending += 1,
+            Outcome::Redacted => self.redacted += 1,
+            Outcome::Unavailable => self.unavailable += 1,
         }
-        tally
     }
 
     fn score(&mut self, record: &Record<'a>, outcome: i128) {
@@ -777,9 +769,8 @@ fn digest(domain: &[u8], prefix: &[u8], content: &[u8]) -> [u8; 32] {
     *hasher.finalize().as_bytes()
 }
 
-fn encode_result(input: &[u8], decoded: &MetricInput<'_>) -> Vec<u8> {
-    let tally = Tally::of(&decoded.records);
-    let computed = tally.scored >= i128::from(decoded.minimum);
+fn encode_result(input: &[u8], tally: &Tally<'_>, minimum: u64) -> Vec<u8> {
+    let computed = tally.scored >= i128::from(minimum);
     let mut fields = Encoder(Vec::new());
     fields.text("MTR1");
     fields.integer(i128::from(RECORD_VERSION));
@@ -797,7 +788,7 @@ fn encode_result(input: &[u8], decoded: &MetricInput<'_>) -> Vec<u8> {
         tally.supplied,
         i128::try_from(tally.entities.len()).unwrap_or(i128::MAX),
     ]);
-    fields.integer(i128::from(decoded.minimum));
+    fields.integer(i128::from(minimum));
     fields.integer(tally.redaction_state());
     if computed {
         fields.integers(&tally.metrics());
@@ -826,7 +817,10 @@ fn encode_result(input: &[u8], decoded: &MetricInput<'_>) -> Vec<u8> {
 ///
 /// Returns the first [`MetricFailure`] in decode order when `input` is not a valid `MTI1`.
 pub fn recompute_result_v1(input: &[u8]) -> Result<Vec<u8>, MetricFailure> {
-    decode_input(input).map(|decoded| encode_result(input, &decoded))
+    decode_input(input, None).and_then(|_| {
+        let mut tally = Tally::default();
+        decode_input(input, Some(&mut tally)).map(|minimum| encode_result(input, &tally, minimum))
+    })
 }
 
 /// Accepts an `MTR1` only as a result of this profile's record version and algorithm major
@@ -902,6 +896,17 @@ pub fn quantize_probability_v1(bits: u64) -> Result<u32, MetricErrorV1> {
 ///
 /// Returns the first [`MetricFailure`] in decode order when `input` is not a valid `MTQ1`.
 pub fn recompute_quantization_v1(input: &[u8]) -> Result<Vec<u8>, MetricFailure> {
+    decode_quantization(input, None).and_then(|()| {
+        let mut patterns = Vec::new();
+        decode_quantization(input, Some(&mut patterns)).map(|()| encode_quantization(&patterns))
+    })
+}
+
+/// Decodes one `MTQ1`; like [`decode_input`], only a validated input fills `patterns`.
+fn decode_quantization(
+    input: &[u8],
+    mut patterns: Option<&mut Vec<u64>>,
+) -> Result<(), MetricFailure> {
     let mut decoder = Decoder::new(input);
     decoder.array_of(&name("input"), QUANTIZATION_FIELDS)?;
     decoder.expect_text(
@@ -926,7 +931,6 @@ pub fn recompute_quantization_v1(input: &[u8]) -> Result<Vec<u8>, MetricFailure>
         MetricErrorV1::ResourceLimit,
         &name("patterns"),
     );
-    let mut patterns = Vec::new();
     for index in 0..length {
         let pattern = decoder.expect_unsigned(
             &[Segment::Name("patterns"), Segment::Index(index)],
@@ -934,21 +938,24 @@ pub fn recompute_quantization_v1(input: &[u8]) -> Result<Vec<u8>, MetricFailure>
             any_pattern,
             MetricErrorV1::InvalidEncoding,
         )?;
-        if decoder.clean() {
+        if let Some(patterns) = patterns.as_deref_mut() {
             patterns.push(pattern);
         }
     }
-    decoder.finish()?;
+    decoder.finish()
+}
+
+fn encode_quantization(patterns: &[u64]) -> Vec<u8> {
     let mut result = Encoder(Vec::new());
     result.array(3);
     result.text(QUANTIZATION_RESULT_MAGIC);
     result.integer(i128::from(RECORD_VERSION));
     result.array(patterns.len());
     for pattern in patterns {
-        match quantize_probability_v1(pattern) {
+        match quantize_probability_v1(*pattern) {
             Ok(micros) => result.integer(i128::from(micros)),
             Err(error) => result.integers(&[i128::from(error.code())]),
         }
     }
-    Ok(result.0)
+    result.0
 }
