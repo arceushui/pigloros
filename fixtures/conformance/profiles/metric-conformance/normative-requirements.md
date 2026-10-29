@@ -2,9 +2,9 @@
 
 Profile `pigloros.w8.metric-computation`, claim layer `MetricConformance = 5`, subject adapter
 `exported-artifact`. Source: ADR-062 Revision 7 "Metric Computation Profile" (accepted
-2026-10-28), sections 4.1 to 4.5, which are reproduced below. Section 4.6 records the decode
-order, coordinates and encodings the fixtures of this profile pin where sections 4.2 and 4.4
-leave a detail open; section 4.7 is the CDDL of the four public records; section 5 lists the
+2026-10-28), sections 4.1 to 4.5, which are reproduced below. Section 4.6 restates the 4.2
+decode order and lists the gaps that sections 4.2 and 4.4 leave open, which the fixtures pin;
+section 4.7 is the CDDL of the four public records; section 5 lists the
 fixture sub-cases.
 
 ## 4.1 Profile identity, claim and versioning
@@ -254,45 +254,66 @@ Events build the same input:
    pos-reference is the evaluator side, and an evaluator does not count as a second
    implementation under test.
 
-## 4.6 Decode order, coordinates and encodings pinned by the fixtures
+## 4.6 Decode order and the details the fixtures fill in
 
-Sections 4.2 and 4.4 leave the following details open. The fixtures of provider 2.0.0 pin
-them as stated here; they are recorded for the profile owner's confirmation and add no failure,
-field or bound.
+The decode order is the one section 4.2 states: structure, then header fields in index order,
+then records in order, with fields in index order inside each record. The first failure wins.
 
-1. **Decode order.** An `MTI1` is decoded in one pass in encoding order. Each data item is
-   checked structurally (major type, preferred head, definite length, no tag, no map, no float
-   or other simple value) when its head is read, and each field is checked semantically right
-   after it is decoded, before the next field is read. "Structure" in the precedence rule is
-   therefore the root array head; trailing bytes are found after the root item, so any earlier
-   failure wins over them. Under this order `record_count` is checked before the records array
-   head is read, which is what lets `ResourceLimit` precede any record allocation.
-2. **Header checks**, in index order: the root must be an array of exactly 8 items
-   (`InvalidEncoding` at `input`); a magic other than the text `"MTI1"` and a version other than
-   1 are `UnsupportedVersion`; an algorithm id other than the exact text and an algorithm major
-   other than 1 are `UnsupportedAlgorithm`; binning other than 0 is `InvalidBinning`; a minimum
-   outside 1..=262144 is `InvalidMinimum`; a `record_count` above 262,144 is `ResourceLimit`; a
-   records array whose length differs from `record_count` is `InconsistentLength` at `records`.
-3. **Record checks**, in field order: a record that is not an array of exactly 6 items is
-   `InvalidEncoding` at `records/i`; `prediction_id` (invalid UTF-8 or outside 1..=64 bytes:
-   `InvalidIdentifier`), then its order against the previous record (equal:
-   `DuplicatePrediction`, smaller: `NonCanonicalOrder`, both at `records/i/0`); `entity_id`
-   (`InvalidIdentifier`); `probability_micros` above 1,000,000 (`InvalidProbability`);
-   `outcome_state` above 3, an Observed record whose outcome is null or not 0 or 1, a
-   non-Observed record with an outcome, and `predictor_supplied = true` on a non-Observed record
-   are `InvalidOutcome` at the offending field.
-4. **Types.** A field of the wrong CBOR type (for example a float, a negative integer, a tag or
-   a map where an unsigned integer is required) is `InvalidEncoding` at that field.
-5. **Coordinates.** Header fields are named `magic`, `version`, `algorithm_id`,
-   `algorithm_major`, `binning`, `minimum_scored_records`, `record_count` and `records`; a record
-   is `records/<i>` and its fields `records/<i>/<j>` (zero-based); the root item is `input` and
-   bytes after it are `trailing`.
-6. **`MTR1` digest.** `fields 0..11` is the deterministic CBOR encoding of the 12-item array of
-   fields 0 to 11; `result_digest32` is the BLAKE3 hash of the domain followed by that encoding.
-7. **`MQR1` error.** A pattern that is `InvalidProbability` is the one-item array `[5]`
-   (`[MetricErrorV1]`), so it cannot be confused with an unsigned result.
-8. **`MTR1` acceptance.** A result whose magic or version differs is `UnsupportedVersion`, and
-   one whose algorithm id or algorithm major differs is `UnsupportedAlgorithm`, at the field.
+1. **Structure.** A single structural pass covers the whole input before any field is
+   interpreted. It keeps nothing, so it allocates no record. It rejects the structural defects
+   that 4.2 lists, all as `InvalidEncoding`:
+   - maps, tags, floats and simple values other than `false`, `true` and `null`;
+   - indefinite lengths and non-preferred integer or length heads;
+   - truncated items;
+   - missing or trailing fields: a root that is not an array of exactly 8 fields, a `records`
+     field that is not an array, or a record that is not an array of exactly 6 fields;
+   - trailing bytes after the root item.
+
+   The structural pass reads the records array head but keeps no record. It does not compare
+   that length with `record_count`.
+2. **Header fields**, in index order:
+   - a magic other than the text `"MTI1"`, or a version other than 1, is `UnsupportedVersion`;
+   - an algorithm id other than the exact text, or an algorithm major other than 1, is
+     `UnsupportedAlgorithm`;
+   - binning other than 0 is `InvalidBinning`;
+   - a minimum outside 1..=262144 is `InvalidMinimum`;
+   - a declared `record_count` above 262,144 is `ResourceLimit`. This check reads only the
+     declared count, before any record is allocated or decoded;
+   - a records array whose length differs from `record_count` is `InconsistentLength`.
+3. **Records** in order, and fields in index order inside each record:
+   - `prediction_id`: `InvalidIdentifier`, then its order against the previous record (equal is
+     `DuplicatePrediction`, smaller is `NonCanonicalOrder`);
+   - `entity_id`: `InvalidIdentifier`;
+   - `probability_micros`: `InvalidProbability`;
+   - `outcome_state`, `outcome` and `predictor_supplied`: `InvalidOutcome`.
+
+The following points fill gaps that sections 4.2 and 4.4 leave open. The fixtures pin them,
+and they are recorded for the profile owner's confirmation:
+
+- **G1. Identifier UTF-8.** Invalid UTF-8 in an identifier is `InvalidIdentifier` (section 5,
+  `mal.11`), not a structural `InvalidEncoding`. It is checked when that field is read.
+- **G2. Wrong CBOR type.** A well-formed item of the wrong CBOR type for its field is
+  `InvalidEncoding` at that field. It is found when that field is read in step 2 or 3. Examples
+  are a text string or negative integer where an unsigned integer is required, and a non-boolean
+  `predictor_supplied`.
+- **G3. Out-of-range `outcome_state`.** An `outcome_state` above 3 is `InvalidOutcome` at
+  `records/<i>/3`.
+- **G4. `predictor_supplied` on a non-Observed record.** `true` there is `InvalidOutcome` at
+  `records/<i>/5`. The rule is in 4.2; the error is not.
+- **G5. Order check position.** The order check runs right after `prediction_id`, so its
+  coordinate is `records/<i>/0`.
+- **G6. Coordinates.**
+  - Header fields are named `magic`, `version`, `algorithm_id`, `algorithm_major`, `binning`,
+    `minimum_scored_records`, `record_count` and `records`.
+  - A record is `records/<i>` and its fields are `records/<i>/<j>`, zero-based.
+  - A nested item inside a field appends its index.
+  - The root item is `input`, and bytes after it are `trailing`.
+- **G7. `MTR1` digest.** `fields 0..11` is the deterministic CBOR encoding of the 12-item array
+  of fields 0 to 11. `result_digest32` is the BLAKE3 hash of the domain followed by that encoding.
+- **G8. `MQR1` error.** A pattern that is `InvalidProbability` is the one-item array `[5]`
+  (`[MetricErrorV1]`), so it cannot be confused with an unsigned result.
+- **G9. `MTR1` acceptance.** A result whose magic or version differs is `UnsupportedVersion`.
+  One whose algorithm id or algorithm major differs is `UnsupportedAlgorithm`, at that field.
 
 ## 4.7 CDDL
 
@@ -406,8 +427,9 @@ budget or contract failure). Every family is materialized for both `deterministi
   with a 64-byte identifier; `pos.6a` perfect and `pos.6b` worst predictor; `pos.7` the `MTQ1`
   vectors of 4.4; `pos.8a` to `pos.8c` `InsufficientSamples`.
 - **denied**: `den.1` a capability other than `read-public-bundle`; `den.2` network use.
-- **malformed**: `mal.1a` to `mal.12b`, and `mal.13a` to `mal.13i` with several defects that pin
-  the precedence and first coordinate.
+- **malformed**: `mal.1a` to `mal.12b`, and `mal.13a` to `mal.13i`, which have several defects
+  each and pin the precedence and first coordinate. Structural defects come before header
+  failures, record failures and trailing bytes.
 - **resource-exhaustion**: `res.1` declared `record_count` 262,145; `res.2` an `MTI1` member of
   64 MiB + 1 byte, described by its length and rejected by the #222 transport
   (`FieldOutOfBounds`) without being stored in the repository; `res.3` the execution-step

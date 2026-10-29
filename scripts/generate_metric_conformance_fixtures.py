@@ -369,8 +369,44 @@ def identifier(reader: Reader, where: str) -> bytes:
     return raw
 
 
+def skip_item(reader: Reader, where: str) -> None:
+    """Consume one data item and everything inside it without keeping it."""
+    major, argument = reader.head(where)
+    if major in (2, 3):
+        reader._take(argument, where)
+    elif major == 4:
+        for index in range(argument):
+            skip_item(reader, f"{where}/{index}")
+
+
+def check_structure(data: bytes) -> None:
+    """The structural pass over the whole input (section 4.2 failure precedence: structure
+    first). It keeps nothing: deterministic-CBOR well-formedness (no map, tag, float or other
+    simple value, indefinite length, non-preferred head, truncation or trailing bytes) and the
+    record shape (a root array of 8 fields, a records array, records of 6 fields)."""
+    reader = Reader(data)
+    major, length = reader.head("input")
+    if major != 4 or length != len(HEADER_FIELDS):
+        raise Failure("InvalidEncoding", "input")
+    for name in HEADER_FIELDS[:-1]:
+        skip_item(reader, name)
+    major, count = reader.head("records")
+    if major != 4:
+        raise Failure("InvalidEncoding", "records")
+    for index in range(count):
+        at = f"records/{index}"
+        major, length = reader.head(at)
+        if major != 4 or length != 6:
+            raise Failure("InvalidEncoding", at)
+        for field_index in range(6):
+            skip_item(reader, f"{at}/{field_index}")
+    reader.finish()
+
+
 def decode_mti1(data: bytes) -> MetricInput:
-    """Decode `MTI1` in decode order; the first failure wins (profile failure precedence)."""
+    """Decode `MTI1`: the structural pass, then header fields in index order, then records in
+    order with fields in index order; the first failure wins (section 4.2)."""
+    check_structure(data)
     reader = Reader(data)
     if reader.array("input") != len(HEADER_FIELDS):
         raise Failure("InvalidEncoding", "input")
@@ -1089,19 +1125,19 @@ def malformed_subcases() -> list[SubCase]:
             mti1(BASE, binning=1, minimum=0), "InvalidBinning", "binning",
         ),
         error_case(
-            "mal.13d", "precedence: a header field before any record",
+            "mal.13d", "precedence: a structural defect in a record before a header failure",
             mti1(record_with((0, 2), Raw(b"\xf9\x38\x00")), minimum=0),
-            "InvalidMinimum", "minimum_scored_records",
+            "InvalidEncoding", "records/0/2",
         ),
         error_case(
-            "mal.13e", "precedence: field 0 before field 2 inside one record",
+            "mal.13e", "precedence: a float in field 2 before an empty identifier in field 0",
             mti1(_replace(record_with((0, 0), ""), (0, 2), Raw(b"\xf9\x38\x00"))),
-            "InvalidIdentifier", "records/0/0",
+            "InvalidEncoding", "records/0/2",
         ),
         error_case(
-            "mal.13f", "precedence: record 0 before record 1",
+            "mal.13f", "precedence: a float in record 1 before outcome 2 in record 0",
             mti1(_replace(record_with((0, 4), 2), (1, 2), Raw(b"\xfb" + struct.pack(">d", 0.6)))),
-            "InvalidOutcome", "records/0/4",
+            "InvalidEncoding", "records/1/2",
         ),
         error_case(
             "mal.13g", "precedence: order is checked at field 0, before field 2",
@@ -1109,9 +1145,9 @@ def malformed_subcases() -> list[SubCase]:
             "NonCanonicalOrder", "records/1/0",
         ),
         error_case(
-            "mal.13h", "precedence: a record failure before trailing bytes",
+            "mal.13h", "precedence: trailing bytes before a semantic record failure",
             mti1(record_with((1, 2), 1_000_001), trailing=b"\x00"),
-            "InvalidProbability", "records/1/2",
+            "InvalidEncoding", "trailing",
         ),
         error_case(
             "mal.13i", "precedence: a duplicate before a later invalid probability",

@@ -2,7 +2,7 @@
   "claim_layer": "metric-conformance",
   "case_id": "metric-conformance-malformed",
   "family": "malformed",
-  "input_blake3_digest": "eb74a0ed0d3ae1f1caebfccaf644cad8a608681fa0d4528a61bf6c92998fb772",
+  "input_blake3_digest": "e707bd90d35e6b9cf3778381e3b4a5add3e8ff4f9b6cd8135c31d9f3b3a1a4d3",
   "status": "pending",
   "execution_result": null,
   "executed_at": null
