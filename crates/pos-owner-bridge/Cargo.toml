@@ -24,12 +24,20 @@ zeroize = { workspace = true }
 # Accepted ADR-110 E16: safe descriptor-relative filesystem operations and euid.
 rustix = { workspace = true, features = ["process"] }
 
+[dev-dependencies]
+pos-crypto = { path = "../pos-crypto" }
+
 [lints]
 workspace = true
 
 [[test]]
 name = "encryptor_lock_public"
 path = "tests/encryptor_lock_public.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "nonce_ledger_read_public"
+path = "tests/nonce_ledger_read_public.rs"
 required-features = ["test-support"]
 
 [[test]]

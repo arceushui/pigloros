@@ -11,6 +11,7 @@ use super::{nonce_ledger_support, HOST_TARGET_OS};
 use crate::{BridgeError, UnavailableCode};
 
 const LOCK_NAME: &str = "pigloros.subject-encryptor.v1.lock";
+const FILE_FLAGS: OFlags = OFlags::RDWR.union(OFlags::NOFOLLOW).union(OFlags::CLOEXEC);
 const DIRECTORY_FLAGS: OFlags = OFlags::RDONLY
     .union(OFlags::DIRECTORY)
     .union(OFlags::CLOEXEC);
@@ -25,6 +26,7 @@ const DIRECTORY_FLAGS: OFlags = OFlags::RDONLY
 #[must_use = "retain the encryptor lock for the owner-process lifetime"]
 pub struct SubjectEncryptorLock {
     _file: OwnedFd,
+    directory: OwnedFd,
 }
 
 impl SubjectEncryptorLock {
@@ -46,9 +48,19 @@ impl SubjectEncryptorLock {
         nonce_ledger_support(HOST_TARGET_OS).and_then(|()| {
             open_directory(test_directory)
                 .and_then(|directory| {
-                    validate_directory(&directory).and_then(|()| acquire_file(&directory))
+                    validate_directory(&directory)
+                        .and_then(|()| {
+                            open_locked_file(
+                                &directory,
+                                LOCK_NAME,
+                                FILE_FLAGS.union(OFlags::CREATE),
+                            )
+                        })
+                        .map(|file| Self {
+                            _file: file,
+                            directory,
+                        })
                 })
-                .map(|file| Self { _file: file })
                 .map_err(|_| BridgeError::Unavailable(UnavailableCode::InterfaceUnavailable))
         })
     }
@@ -104,12 +116,8 @@ fn validate_directory(directory: &OwnedFd) -> io::Result<()> {
         .and_then(|stat| enforce(not_nfs(&stat)))
 }
 
-fn acquire_file(directory: &OwnedFd) -> io::Result<OwnedFd> {
-    let flags = OFlags::RDWR
-        .union(OFlags::CREATE)
-        .union(OFlags::NOFOLLOW)
-        .union(OFlags::CLOEXEC);
-    fs::openat(directory, LOCK_NAME, flags, Mode::RUSR.union(Mode::WUSR)).and_then(|file| {
+fn open_locked_file(directory: &OwnedFd, name: &str, flags: OFlags) -> io::Result<OwnedFd> {
+    fs::openat(directory, name, flags, Mode::RUSR.union(Mode::WUSR)).and_then(|file| {
         fs::fstat(&file)
             .and_then(|stat| {
                 enforce(private_metadata(&stat, FileType::RegularFile, 0o600) && stat.st_nlink == 1)
@@ -117,13 +125,15 @@ fn acquire_file(directory: &OwnedFd) -> io::Result<OwnedFd> {
             .and_then(|()| fs::flock(&file, FlockOperation::NonBlockingLockExclusive))
             .and_then(|()| {
                 fs::fstat(&file).and_then(|locked| {
-                    fs::statat(directory, LOCK_NAME, AtFlags::SYMLINK_NOFOLLOW)
+                    fs::statat(directory, name, AtFlags::SYMLINK_NOFOLLOW)
                         .and_then(|path| enforce(same_file(&locked, &path)))
                 })
             })
             .map(|()| file)
     })
 }
+
+mod nonce_ledger;
 
 #[cfg(test)]
 mod tests;
