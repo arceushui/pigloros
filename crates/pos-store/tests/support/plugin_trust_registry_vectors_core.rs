@@ -1,6 +1,6 @@
 // This file is `include!`d by the adapter test crates, so rustfmt does not format it; keep it in
 // rustfmt style by hand.
-// Shared public acceptance vectors of the ADR-103 revisions 4 and 5 Plugin registry port:
+// Shared public acceptance vectors of the ADR-103 revisions 4, 5 and 7 Plugin registry port:
 // C1, D1-D3, E1-E3, and F1-F2. The including module declares `type Store: Backend` and sees
 // the crate's `fixtures` module, so one body runs the vectors on every adapter and a vector is
 // written once. The file is `include!`d, never a module of its own.
@@ -26,7 +26,8 @@ use pos_core::{
 use pos_crypto::plugin_trust::PluginTrustErrorV1;
 use pos_store::plugin_trust_registry::{
     ActivationEventInputV1, PluginTrustCommitOutcomeV1, PluginTrustLedgerKindV1,
-    PluginTrustPolicyRegistryV1, PolicyAdvanceKindV1, ProvisionOutcomeV1, TrustedUtcSecondV1,
+    PluginTrustPolicyRegistryV1, PolicyAdvanceKindV1, ProvisionOutcomeV1, TrustEvaluationPointV1,
+    TrustedUtcSecondV1,
 };
 
 // ---------------------------------------------------------------------------
@@ -238,8 +239,8 @@ fn a_changed_anchor_field_is_an_anchor_mismatch_in_every_operation() -> TestResu
                 &genesis.tps1,
                 &genesis.evidence,
                 &one.projection()?,
-                genesis.trusted()?,
-                genesis.tick,
+                &one.release_proof()?,
+                TrustEvaluationPointV1::new(genesis.trusted()?, genesis.tick),
                 activation(h.timeline, 1)
             ),
             Err(RegistryError::AnchorMismatch)
@@ -250,8 +251,8 @@ fn a_changed_anchor_field_is_an_anchor_mismatch_in_every_operation() -> TestResu
                 &genesis.tps1,
                 &genesis.evidence,
                 &one.projection()?,
-                genesis.trusted()?,
-                genesis.tick,
+                &one.release_proof()?,
+                TrustEvaluationPointV1::new(genesis.trusted()?, genesis.tick),
                 activation(h.timeline, 1)
             ),
             Err(RegistryError::AnchorMismatch)
@@ -396,8 +397,8 @@ fn evidence_coordinates_must_equal_the_trusted_utc_and_tick() -> TestResult {
                 &genesis.tps1,
                 &genesis.evidence,
                 &one.projection()?,
-                utc,
-                tick,
+                &one.release_proof()?,
+                TrustEvaluationPointV1::new(utc, tick),
                 activation(h.timeline, 1)
             ),
             Err(expected)
@@ -408,8 +409,8 @@ fn evidence_coordinates_must_equal_the_trusted_utc_and_tick() -> TestResult {
                 &genesis.tps1,
                 &genesis.evidence,
                 &one.projection()?,
-                utc,
-                tick,
+                &one.release_proof()?,
+                TrustEvaluationPointV1::new(utc, tick),
                 activation(h.timeline, 1)
             ),
             Err(expected)
@@ -498,8 +499,8 @@ fn release_chain_is_independent_per_plugin_id_and_per_scope() -> TestResult {
         &other_genesis.tps1,
         &other_genesis.evidence,
         &release_one().projection()?,
-        other_genesis.trusted()?,
-        other_genesis.tick,
+        &release_one().release_proof()?,
+        TrustEvaluationPointV1::new(other_genesis.trusted()?, other_genesis.tick),
         activation(h.timeline, 9),
     )?;
     assert_eq!(receipt.decision().scope(), "scope-two");
@@ -690,8 +691,8 @@ fn a_store_without_an_erasure_gate_cannot_admit_or_roll_back() -> TestResult {
             &genesis.tps1,
             &genesis.evidence,
             &one.projection()?,
-            genesis.trusted()?,
-            genesis.tick,
+            &one.release_proof()?,
+            TrustEvaluationPointV1::new(genesis.trusted()?, genesis.tick),
             activation(timeline, 1)
         ),
         Err(RegistryError::ActivationEventRejected)
@@ -702,8 +703,8 @@ fn a_store_without_an_erasure_gate_cannot_admit_or_roll_back() -> TestResult {
             &genesis.tps1,
             &genesis.evidence,
             &one.projection()?,
-            genesis.trusted()?,
-            genesis.tick,
+            &one.release_proof()?,
+            TrustEvaluationPointV1::new(genesis.trusted()?, genesis.tick),
             activation(timeline, 1)
         ),
         Err(RegistryError::ActivationEventRejected)
@@ -734,8 +735,8 @@ fn an_unbound_fail_closed_erasure_gate_refuses_the_activation_fence() -> TestRes
             &genesis.tps1,
             &genesis.evidence,
             &release_one().projection()?,
-            genesis.trusted()?,
-            genesis.tick,
+            &release_one().release_proof()?,
+            TrustEvaluationPointV1::new(genesis.trusted()?, genesis.tick),
             activation(timeline, 1)
         ),
         Err(RegistryError::ActivationEventRejected)
@@ -780,8 +781,8 @@ fn a_store_with_another_payload_hasher_can_never_activate() -> TestResult {
             &genesis.tps1,
             &genesis.evidence,
             &release_one().projection()?,
-            genesis.trusted()?,
-            genesis.tick,
+            &release_one().release_proof()?,
+            TrustEvaluationPointV1::new(genesis.trusted()?, genesis.tick),
             activation(timeline, 1)
         ),
         Err(RegistryError::ActivationEventRejected)

@@ -8,7 +8,9 @@
 //! registry from the matching genesis TPS1, and installs through the real
 //! installer. It also steps the policy forward (key and release revocation)
 //! and performs an operator rollback; both are test fixtures only, because
-//! production has no entry point for either.
+//! production has no entry point for either. Every direct `admit` and
+//! `rollback` passes a release proof (ADR-103 revision 7): the real verified
+//! signature, except where a test deliberately plants an invalid signature.
 
 use std::sync::{atomic::AtomicU64, Arc};
 
@@ -20,6 +22,10 @@ use pos_core::{
     KeyRegistrationV1, KeyRegistryStateV1, KeyRoleV1, Kind, OwnerIdV1, TimelineId,
 };
 use pos_crypto::key_roles::SigningKeyMaterial;
+use pos_crypto::plugin_manifest::{
+    decode_plugin_release_signature_claim_v1, verify_plugin_release_signature_v1,
+    PluginReleaseSignatureFixtureV1, VerifiedPluginReleaseSignatureV1,
+};
 use pos_crypto::plugin_trust::ValidatedPluginManifestProjectionV1;
 use pos_crypto::signing::generate_keypair;
 use pos_plugin_release::{BundleAddressV1, LocalOciPublisherV1, ReleaseSourceV1};
@@ -28,7 +34,7 @@ use pos_store::plugin_trust_registry::{
     ActivationEventInputV1, ActiveReleaseV1, AdmittedPluginReleaseReceiptV1,
     CurrentReleaseEvaluationV1, PluginRollbackReceiptV1, PluginTrustLedgerRowV1,
     PluginTrustPolicyRegistryErrorV1, PluginTrustPolicyRegistryV1, PolicyAdvanceOutcomeV1,
-    RetainedPolicyStateV1, RetainedReleaseDecisionV1, TrustedUtcSecondV1,
+    RetainedPolicyStateV1, RetainedReleaseDecisionV1, TrustEvaluationPointV1, TrustedUtcSecondV1,
 };
 
 use super::encoding::{Material, Policy, Revocations, Spec, FAR_FUTURE, OTHER_OWNER, OWNER, SCOPE};
@@ -691,6 +697,8 @@ impl World {
         let bundle = self.store.read_verified(target)?;
         let projection = ValidatedPluginManifestProjectionV1::from_verified_bundle(&bundle)?;
         let material = self.material()?;
+        let authorization = material.evidence.authorize_release(&projection)?;
+        let proof = verify_plugin_release_signature_v1(&bundle, &authorization)?;
         let mut source = wall(material.utc)?;
         let utc = TrustedUtcSecondV1::from_source(&mut source)?;
         Ok(self.registry.rollback(
@@ -698,8 +706,8 @@ impl World {
             &material.tps1,
             &material.evidence,
             &projection,
-            utc,
-            self.spec.tick,
+            &proof,
+            TrustEvaluationPointV1::new(utc, self.spec.tick),
             activation(self.timeline, tag),
         ))
     }
@@ -707,6 +715,9 @@ impl World {
     /// Admit the release at `address` straight through the registry with the current evidence,
     /// bypassing the installer: no PMF1 signature is checked, because the registry does not
     /// check it (`registry` is a public field).
+    ///
+    /// The release proof is a `test-support` token fixture bound to the authorized release and
+    /// key, which proves no signature.
     ///
     /// Together with `publish_with_signature` it plants a release whose field 26 is invalid
     /// as the active release, which only the execution gate's own signature check refuses.
@@ -721,14 +732,23 @@ impl World {
         let bundle = self.store.read_verified(address)?;
         let projection = ValidatedPluginManifestProjectionV1::from_verified_bundle(&bundle)?;
         let material = self.material()?;
+        let authorization = material.evidence.authorize_release(&projection)?;
+        let claim = decode_plugin_release_signature_claim_v1(&bundle)?;
+        let proof = VerifiedPluginReleaseSignatureV1::from(PluginReleaseSignatureFixtureV1 {
+            pmf1_digest: claim.pmf1_digest(),
+            release_digest: claim.release_digest(),
+            owner: claim.owner(),
+            epoch: claim.epoch(),
+            public_key: authorization.resolved_public_key(),
+        });
         let utc = TrustedUtcSecondV1::from_source(&mut wall(material.utc)?)?;
         Ok(self.registry.admit(
             &self.anchor,
             &material.tps1,
             &material.evidence,
             &projection,
-            utc,
-            self.spec.tick,
+            &proof,
+            TrustEvaluationPointV1::new(utc, self.spec.tick),
             activation(self.timeline, tag),
         ))
     }

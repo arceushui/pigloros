@@ -1,10 +1,10 @@
 #![cfg(any(test, feature = "test-support"))]
 //! A Plugin trust policy registry spy for the installer's ordering vectors.
 //!
-//! [`SpyRegistry`] wraps the Memory adapter, records every `admit` call and every
-//! `evaluate_current_release` call, and can force a typed registry error instead of delegating an
-//! `admit`. Every other method delegates unchanged, so a test reads the real retained state
-//! through it.
+//! [`SpyRegistry`] wraps the Memory adapter, records every `admit` call (with the release proof
+//! it received, ADR-103 revision 7) and every `evaluate_current_release` call, and can force a
+//! typed registry error instead of delegating an `admit`. Every other method delegates
+//! unchanged, so a test reads the real retained state through it.
 //!
 //! The ordered [`SpyRegistry::calls`] log holds both kinds of call in call order. An evaluation
 //! entry carries a stamp: a spy built with [`SpyRegistry::with_clock`] records
@@ -22,6 +22,7 @@ use std::{
 
 use pos_conformance::PluginTrustPolicyAnchorV1;
 use pos_core::TimelineId;
+use pos_crypto::plugin_manifest::VerifiedPluginReleaseSignatureV1;
 use pos_crypto::plugin_trust::{
     ValidatedPluginManifestProjectionV1, VerifiedPluginTrustEvidenceV1,
 };
@@ -30,12 +31,15 @@ use pos_store::plugin_trust_registry::{
     ActivationEventInputV1, ActiveReleaseV1, AdmittedPluginReleaseReceiptV1,
     CurrentReleaseEvaluationV1, PluginRollbackReceiptV1, PluginTrustLedgerRowV1,
     PluginTrustPolicyRegistryErrorV1, PluginTrustPolicyRegistryV1, PolicyAdvanceOutcomeV1,
-    ProvisionOutcomeV1, RetainedPolicyStateV1, RetainedReleaseDecisionV1, TrustedUtcSecondV1,
+    ProvisionOutcomeV1, RetainedPolicyStateV1, RetainedReleaseDecisionV1, TrustEvaluationPointV1,
+    TrustedUtcSecondV1,
 };
 
 /// What one `admit` call received.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AdmitCall {
+    /// Boxed so that the admit entry of [`Call`] stays as small as the evaluation entry.
+    pub release_proof: Box<VerifiedPluginReleaseSignatureV1>,
     pub utc: i64,
     pub tick: u64,
     pub tps1: Vec<u8>,
@@ -122,13 +126,14 @@ impl PluginTrustPolicyRegistryV1 for SpyRegistry {
         tps1_bytes: &[u8],
         evidence: &VerifiedPluginTrustEvidenceV1,
         projection: &ValidatedPluginManifestProjectionV1,
-        trusted_utc: TrustedUtcSecondV1,
-        tick: u64,
+        release_proof: &VerifiedPluginReleaseSignatureV1,
+        point: TrustEvaluationPointV1,
         activation: ActivationEventInputV1,
     ) -> Registry<AdmittedPluginReleaseReceiptV1> {
         let call = AdmitCall {
-            utc: trusted_utc.as_i64(),
-            tick,
+            release_proof: Box::new(*release_proof),
+            utc: point.trusted_utc.as_i64(),
+            tick: point.tick,
             tps1: tps1_bytes.to_vec(),
             timeline: activation.timeline,
         };
@@ -142,8 +147,8 @@ impl PluginTrustPolicyRegistryV1 for SpyRegistry {
             tps1_bytes,
             evidence,
             projection,
-            trusted_utc,
-            tick,
+            release_proof,
+            point,
             activation,
         )
     }
@@ -166,8 +171,8 @@ impl PluginTrustPolicyRegistryV1 for SpyRegistry {
         tps1_bytes: &[u8],
         evidence: &VerifiedPluginTrustEvidenceV1,
         target: &ValidatedPluginManifestProjectionV1,
-        trusted_utc: TrustedUtcSecondV1,
-        tick: u64,
+        release_proof: &VerifiedPluginReleaseSignatureV1,
+        point: TrustEvaluationPointV1,
         activation: ActivationEventInputV1,
     ) -> Registry<PluginRollbackReceiptV1> {
         self.store.rollback(
@@ -175,8 +180,8 @@ impl PluginTrustPolicyRegistryV1 for SpyRegistry {
             tps1_bytes,
             evidence,
             target,
-            trusted_utc,
-            tick,
+            release_proof,
+            point,
             activation,
         )
     }

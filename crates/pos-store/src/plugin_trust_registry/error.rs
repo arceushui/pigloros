@@ -6,9 +6,10 @@ use thiserror::Error;
 
 /// Closed, secret-free failures of the Plugin trust policy registry.
 ///
-/// The variants are exactly the ADR-103 revision 4 error table plus the two
-/// variants that revision 5 adds for the read-only evaluation. Every other
-/// name in the contract is a variant of a wrapped enum.
+/// The variants are exactly the ADR-103 revision 4 error table, plus the two
+/// variants that revision 5 adds for the read-only evaluation, plus the release
+/// proof binding of revision 7. Every other name in the contract is a variant
+/// of a wrapped enum.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum PluginTrustPolicyRegistryErrorV1 {
     /// The scope row is absent, or all Plugin trust tables are absent.
@@ -72,6 +73,12 @@ pub enum PluginTrustPolicyRegistryErrorV1 {
     /// only `rollback` returns, this covers a missing pointer and a pointer naming another release.
     #[error("release is not the active release of its Plugin ID")]
     ReleaseNotActive,
+    /// The release proof does not bind the authorized release and key (revision 7).
+    ///
+    /// The proof passed to `admit` or `rollback` names another complete-PMF1 digest, release
+    /// digest, or public key than the registry's own authorization of the projection.
+    #[error("release proof does not bind the authorized release and key")]
+    ReleaseProofMismatch,
     /// A pure TPS1 bridge check failed.
     #[error("TPS1 bridge: {0}")]
     Bridge(#[from] PluginTrustBridgeErrorV1),

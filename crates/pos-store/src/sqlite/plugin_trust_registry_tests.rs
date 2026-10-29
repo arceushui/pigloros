@@ -24,6 +24,7 @@ use super::seam::{Step, FAULT, LEVEL_AT_COMMIT, RESTORE_PROBE, SNAPSHOT_PROBE};
 use crate::plugin_trust_registry::{
     CurrentReleaseEvaluationV1, PluginTrustCommitOutcomeV1,
     PluginTrustPolicyRegistryErrorV1 as Error, PluginTrustPolicyRegistryV1, ProvisionOutcomeV1,
+    TrustEvaluationPointV1,
 };
 use crate::plugin_trust_registry_fixtures::{
     activation, release_one, release_three, release_two, Backend, Env, Gate, Guard, Harness,
@@ -211,9 +212,9 @@ fn a_read_only_handle_cannot_write_and_restores_the_level() -> TestResult {
             &genesis.tps1,
             &genesis.evidence,
             &three.projection()?,
-            trusted,
-            genesis.tick,
-            activation(h.timeline, 3),
+            &three.release_proof()?,
+            TrustEvaluationPointV1::new(trusted, genesis.tick),
+            activation(h.timeline, 3)
         ),
         Err(Error::ActivationEventRejected)
     );
@@ -224,9 +225,9 @@ fn a_read_only_handle_cannot_write_and_restores_the_level() -> TestResult {
             &genesis.tps1,
             &genesis.evidence,
             &one.projection()?,
-            trusted,
-            genesis.tick,
-            activation(h.timeline, 3),
+            &one.release_proof()?,
+            TrustEvaluationPointV1::new(trusted, genesis.tick),
+            activation(h.timeline, 3)
         ),
         Err(Error::ActivationEventRejected)
     );
@@ -261,8 +262,8 @@ fn a_store_that_is_not_in_wal_mode_is_refused() -> TestResult {
             &genesis.tps1,
             &genesis.evidence,
             &release_one().projection()?,
-            genesis.trusted()?,
-            genesis.tick,
+            &release_one().release_proof()?,
+            TrustEvaluationPointV1::new(genesis.trusted()?, genesis.tick),
             activation(TimelineId::new(), 1)
         ),
         Err(Error::WalRequired)
@@ -421,8 +422,8 @@ fn a_failed_restore_poisons_the_handle_until_it_is_reopened() -> TestResult {
             &genesis.tps1,
             &genesis.evidence,
             &one.projection()?,
-            genesis.trusted()?,
-            genesis.tick,
+            &one.release_proof()?,
+            TrustEvaluationPointV1::new(genesis.trusted()?, genesis.tick),
             activation(timeline, 1),
         )?;
         assert_eq!(
@@ -1340,6 +1341,7 @@ fn an_evaluation_reads_one_snapshot_while_a_second_handle_commits() -> TestResul
     let env = Env::new("scope")?;
     let material = env.genesis()?;
     let projection = two.projection()?;
+    let proof = two.release_proof()?;
     let timeline = h.timeline;
     let committed = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&committed);
@@ -1350,8 +1352,8 @@ fn an_evaluation_reads_one_snapshot_while_a_second_handle_commits() -> TestResul
                 &material.tps1,
                 &material.evidence,
                 &projection,
-                utc,
-                material.tick,
+                &proof,
+                TrustEvaluationPointV1::new(utc, material.tick),
                 activation(timeline, 2),
             );
             receipt.is_ok()

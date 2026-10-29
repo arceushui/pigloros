@@ -20,6 +20,8 @@ pub use encode::{
     PluginArtifactInputV1, PluginDependencyInputV1, PluginReleaseDraftV1, PluginSchemaInputV1,
     UnsignedPluginReleaseV1,
 };
+#[cfg(feature = "test-support")]
+pub use signature::PluginReleaseSignatureFixtureV1;
 pub use signature::{
     decode_plugin_release_signature_claim_v1, verify_plugin_release_signature_v1,
     PluginReleaseSignatureClaimV1, PluginReleaseSignatureErrorV1, VerifiedPluginReleaseSignatureV1,

@@ -8,6 +8,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use pos_conformance::PluginTrustPolicyAnchorV1;
+use pos_crypto::plugin_manifest::VerifiedPluginReleaseSignatureV1;
 use pos_crypto::plugin_trust::{
     ValidatedPluginManifestProjectionV1, VerifiedPluginTrustEvidenceV1,
 };
@@ -16,7 +17,8 @@ use pos_store::plugin_trust_registry::{
     ActivationEventInputV1, ActiveReleaseV1, AdmittedPluginReleaseReceiptV1,
     CurrentReleaseEvaluationV1, PluginRollbackReceiptV1, PluginTrustLedgerRowV1,
     PluginTrustPolicyRegistryErrorV1 as Reg, PluginTrustPolicyRegistryV1, PolicyAdvanceOutcomeV1,
-    ProvisionOutcomeV1, RetainedPolicyStateV1, RetainedReleaseDecisionV1, TrustedUtcSecondV1,
+    ProvisionOutcomeV1, RetainedPolicyStateV1, RetainedReleaseDecisionV1, TrustEvaluationPointV1,
+    TrustedUtcSecondV1,
 };
 
 type Registry<T> = Result<T, Reg>;
@@ -75,8 +77,8 @@ impl PluginTrustPolicyRegistryV1 for Scripted<'_> {
         _tps1_bytes: &[u8],
         _evidence: &VerifiedPluginTrustEvidenceV1,
         _projection: &ValidatedPluginManifestProjectionV1,
-        _trusted_utc: TrustedUtcSecondV1,
-        _tick: u64,
+        _release_proof: &VerifiedPluginReleaseSignatureV1,
+        _point: TrustEvaluationPointV1,
         _activation: ActivationEventInputV1,
     ) -> Registry<AdmittedPluginReleaseReceiptV1> {
         Err(Reg::NestedTransaction)
@@ -99,8 +101,8 @@ impl PluginTrustPolicyRegistryV1 for Scripted<'_> {
         _tps1_bytes: &[u8],
         _evidence: &VerifiedPluginTrustEvidenceV1,
         _target: &ValidatedPluginManifestProjectionV1,
-        _trusted_utc: TrustedUtcSecondV1,
-        _tick: u64,
+        _release_proof: &VerifiedPluginReleaseSignatureV1,
+        _point: TrustEvaluationPointV1,
         _activation: ActivationEventInputV1,
     ) -> Registry<PluginRollbackReceiptV1> {
         Err(Reg::NestedTransaction)

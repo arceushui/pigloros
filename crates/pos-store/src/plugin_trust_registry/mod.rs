@@ -1,4 +1,4 @@
-//! The Plugin trust policy registry port (ADR-103 revisions 4 and 5, slices #568 and #580).
+//! The Plugin trust policy registry port (ADR-103 revisions 4, 5 and 7, slices #568, #580, #1212).
 //!
 //! The registry persists the operator-pinned anchor, the authenticated TPS1
 //! continuity, the PTR1/PRV1 floors, the highest trusted UTC second, the
@@ -10,7 +10,9 @@
 //!
 //! A decision, receipt, retained record, or ledger row claims trust-policy
 //! admission only. The PMF1 publisher signature is verified nowhere in this
-//! module, and no type here has a signature-validity field.
+//! module, and no type here has a signature-validity field. Since revision 7,
+//! `admit` and `rollback` require the caller's release proof and check only
+//! that it binds the authorized release and key; nothing from it is retained.
 //!
 //! The registry exists only on Linux, because `pos-conformance` builds only
 //! there: a non-Linux build exposes no Plugin admission surface, which fails
@@ -27,7 +29,7 @@ pub mod types;
 mod utc;
 
 pub use error::PluginTrustPolicyRegistryErrorV1;
-pub use port::PluginTrustPolicyRegistryV1;
+pub use port::{PluginTrustPolicyRegistryV1, TrustEvaluationPointV1};
 pub use types::{
     ActivationEventIdentityV1, ActivationEventInputV1, ActiveReleaseV1,
     AdmittedPluginReleaseReceiptV1, CurrentReleaseEvaluationV1, PluginRollbackReceiptV1,
