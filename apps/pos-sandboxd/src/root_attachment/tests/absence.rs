@@ -349,6 +349,16 @@ mod cases {
                 assert_eq!(kernel.devices_absent(devices).await, Err(UNVERIFIED));
             }
             fs::remove_dir_all(&path)?;
+            // A malformed device-index link fails lookup while its index
+            // remains readable. A non-ENOENT error cannot prove absence.
+            std::os::unix::fs::symlink(&path, &path)?;
+            let lookup_error = fs::metadata(&path)
+                .err()
+                .ok_or("device-index loop accepted")?;
+            assert_ne!(lookup_error.kind(), std::io::ErrorKind::NotFound);
+            assert!(fs::read_dir(host.path().join("dev/block")).is_ok());
+            assert_eq!(kernel.devices_absent(devices).await, Err(UNVERIFIED));
+            fs::remove_file(&path)?;
         }
         fs::remove_dir(host.path().join("dev/block"))?;
         assert_eq!(kernel.devices_absent(devices).await, Err(UNVERIFIED));
