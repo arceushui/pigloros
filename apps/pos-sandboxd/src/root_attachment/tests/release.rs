@@ -6,17 +6,8 @@
 mod cases {
     use super::super::*;
 
-    fn attached_root(
-        directory: &PreparedAttemptDirectory,
-    ) -> Result<(FakeKernel, VerifiedRootMount), BoxError> {
-        let expected = expected(&component(directory));
-        let kernel = FakeKernel::accepting(matching(&expected));
-        let root = attach_and_verify(&kernel, directory, &expected, file_mount()?, || Ok(()))?;
-        Ok((kernel, root))
-    }
-
-    #[test]
-    fn eight_owned_roots_detach_without_deleting_intent_or_other_directories() -> TestResult {
+    #[tokio::test]
+    async fn eight_owned_roots_detach_without_deleting_intent_or_other_directories() -> TestResult {
         let tree = prepared_tree()?;
         let mut directories = vec![tree.prepared];
         for id in [1, 2, 3, 4, 5, 6, 8] {
@@ -31,7 +22,7 @@ mod cases {
             let record = tree.runtime.path().join("registry").join(&key);
             let bytes = fs::read(&record)?;
             let (kernel, root) = attached_root(&directory)?;
-            root.detach_with(&kernel, &directory)?;
+            detach_owned(root, &kernel, &directory).await?;
             assert_eq!(kernel.detached(), 1);
             assert!(tree
                 .runtime
@@ -57,8 +48,8 @@ mod cases {
         Ok(())
     }
 
-    #[test]
-    fn changed_ownership_rejects_before_detach_and_quarantines_the_owner() -> TestResult {
+    #[tokio::test]
+    async fn changed_ownership_rejects_before_detach_and_quarantines_the_owner() -> TestResult {
         for fault in 0..9 {
             let tree = prepared_tree()?;
             let key = component(&tree.prepared);
@@ -97,7 +88,7 @@ mod cases {
             }
             let held_root = tree.prepared.held_directories().1.try_clone()?;
             assert_eq!(
-                root.detach_with(&kernel, &tree.prepared),
+                detach_owned(root, &kernel, &tree.prepared).await,
                 Err(ImageActivationError::EvidenceMismatch)
             );
             assert_eq!(kernel.detached(), 0, "fault {fault}");
@@ -111,8 +102,9 @@ mod cases {
         Ok(())
     }
 
-    #[test]
-    fn fresh_kernel_evidence_and_original_mount_id_are_required_before_detach() -> TestResult {
+    #[tokio::test]
+    async fn fresh_kernel_evidence_and_original_mount_id_are_required_before_detach() -> TestResult
+    {
         for fault in 0..9 {
             let tree = prepared_tree()?;
             let key = component(&tree.prepared);
@@ -153,7 +145,7 @@ mod cases {
                 ImageActivationError::EvidenceMismatch
             };
             assert_eq!(
-                root.detach_with(&kernel, &tree.prepared),
+                detach_owned(root, &kernel, &tree.prepared).await,
                 Err(error),
                 "fault {fault}"
             );
@@ -168,8 +160,8 @@ mod cases {
         Ok(())
     }
 
-    #[test]
-    fn same_image_device_substitutions_refuse_launch_and_detach() -> TestResult {
+    #[tokio::test]
+    async fn same_image_device_substitutions_refuse_launch_and_detach() -> TestResult {
         for fault in 0..7 {
             let tree = prepared_tree()?;
             let record = tree
@@ -232,7 +224,7 @@ mod cases {
                 "launch with substitution {fault}"
             );
             assert_eq!(
-                root.detach_with(&kernel, &tree.prepared),
+                detach_owned(root, &kernel, &tree.prepared).await,
                 Err(ImageActivationError::EvidenceMismatch),
                 "detach with substitution {fault}"
             );
@@ -247,8 +239,8 @@ mod cases {
         Ok(())
     }
 
-    #[test]
-    fn reordered_identical_device_evidence_rechecks_and_detaches() -> TestResult {
+    #[tokio::test]
+    async fn reordered_identical_device_evidence_rechecks_and_detaches() -> TestResult {
         let tree = prepared_tree()?;
         let (mut kernel, root) = attached_root(&tree.prepared)?;
         edit_slaves(&mut kernel.observations, |slaves| slaves.reverse());
@@ -263,7 +255,7 @@ mod cases {
             )),
             Ok(root.root_directory().clone())
         );
-        root.detach_with(&kernel, &tree.prepared)?;
+        detach_owned(root, &kernel, &tree.prepared).await?;
         assert_eq!(kernel.detached(), 1);
         tree.prepared.verify_directory()?;
         tree.registry
@@ -271,15 +263,15 @@ mod cases {
         Ok(())
     }
 
-    #[test]
-    fn a_quarantined_owner_can_detach_but_never_reopens_admission() -> TestResult {
+    #[tokio::test]
+    async fn a_quarantined_owner_can_detach_but_never_reopens_admission() -> TestResult {
         let tree = prepared_tree()?;
         let (kernel, root) = attached_root(&tree.prepared)?;
         assert!(tree
             .registry
             .commit_planned(tree.prepared.intent())
             .is_err());
-        root.detach_with(&kernel, &tree.prepared)?;
+        detach_owned(root, &kernel, &tree.prepared).await?;
         assert_eq!(kernel.detached(), 1);
         assert!(tree
             .registry
@@ -288,8 +280,9 @@ mod cases {
         Ok(())
     }
 
-    #[test]
-    fn foreign_directory_and_real_host_dispatch_reject_without_mutating_resources() -> TestResult {
+    #[tokio::test]
+    async fn foreign_directory_and_real_host_dispatch_reject_without_mutating_resources(
+    ) -> TestResult {
         let tree = prepared_tree()?;
         let foreign = tree
             .registry
@@ -297,7 +290,7 @@ mod cases {
             .prepare_directory()?;
         let (kernel, root) = attached_root(&tree.prepared)?;
         assert_eq!(
-            root.detach_with(&kernel, &foreign),
+            detach_owned(root, &kernel, &foreign).await,
             Err(ImageActivationError::EvidenceMismatch)
         );
         assert_eq!(kernel.detached(), 0);
@@ -307,7 +300,7 @@ mod cases {
         // The public facade observes a regular file on the real kernel; it must
         // refuse before issuing an unmount. Positive mounted-host proof is #444.
         assert_eq!(
-            root.detach(&tree.prepared),
+            root.detach(&tree.prepared, cleanup_deadline()).await,
             Err(ImageActivationError::EvidenceMismatch)
         );
         tree.prepared.verify_directory()?;
