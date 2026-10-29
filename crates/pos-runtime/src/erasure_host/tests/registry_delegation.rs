@@ -10,7 +10,8 @@ use pos_store::plugin_trust_registry::{
     ActivationEventInputV1, ActiveReleaseV1, AdmittedPluginReleaseReceiptV1,
     CurrentReleaseEvaluationV1, PluginRollbackReceiptV1, PluginTrustLedgerRowV1,
     PluginTrustPolicyRegistryErrorV1, PluginTrustPolicyRegistryV1, PolicyAdvanceOutcomeV1,
-    ProvisionOutcomeV1, RetainedPolicyStateV1, RetainedReleaseDecisionV1, TrustedUtcSecondV1,
+    ProvisionOutcomeV1, RetainedPolicyStateV1, RetainedReleaseDecisionV1, TrustEvaluationPointV1,
+    TrustedUtcSecondV1,
 };
 
 use super::FaultStoreV1;
@@ -33,7 +34,7 @@ impl PluginTrustPolicyRegistryV1 for FaultStoreV1 {
         evidence: &VerifiedPluginTrustEvidenceV1,
         projection: &ValidatedPluginManifestProjectionV1,
         release_proof: &VerifiedPluginReleaseSignatureV1,
-        coordinates: (TrustedUtcSecondV1, u64),
+        point: TrustEvaluationPointV1,
         activation: ActivationEventInputV1,
     ) -> Registry<AdmittedPluginReleaseReceiptV1> {
         self.inner.admit(
@@ -42,7 +43,7 @@ impl PluginTrustPolicyRegistryV1 for FaultStoreV1 {
             evidence,
             projection,
             release_proof,
-            coordinates,
+            point,
             activation,
         )
     }
@@ -66,7 +67,7 @@ impl PluginTrustPolicyRegistryV1 for FaultStoreV1 {
         evidence: &VerifiedPluginTrustEvidenceV1,
         target: &ValidatedPluginManifestProjectionV1,
         release_proof: &VerifiedPluginReleaseSignatureV1,
-        coordinates: (TrustedUtcSecondV1, u64),
+        point: TrustEvaluationPointV1,
         activation: ActivationEventInputV1,
     ) -> Registry<PluginRollbackReceiptV1> {
         self.inner.rollback(
@@ -75,7 +76,7 @@ impl PluginTrustPolicyRegistryV1 for FaultStoreV1 {
             evidence,
             target,
             release_proof,
-            coordinates,
+            point,
             activation,
         )
     }

@@ -26,7 +26,8 @@ use pos_core::{
 use pos_crypto::plugin_trust::PluginTrustErrorV1;
 use pos_store::plugin_trust_registry::{
     ActivationEventInputV1, PluginTrustCommitOutcomeV1, PluginTrustLedgerKindV1,
-    PluginTrustPolicyRegistryV1, PolicyAdvanceKindV1, ProvisionOutcomeV1, TrustedUtcSecondV1,
+    PluginTrustPolicyRegistryV1, PolicyAdvanceKindV1, ProvisionOutcomeV1, TrustEvaluationPointV1,
+    TrustedUtcSecondV1,
 };
 
 // ---------------------------------------------------------------------------
@@ -239,7 +240,7 @@ fn a_changed_anchor_field_is_an_anchor_mismatch_in_every_operation() -> TestResu
                 &genesis.evidence,
                 &one.projection()?,
                 &one.release_proof()?,
-                (genesis.trusted()?, genesis.tick),
+                TrustEvaluationPointV1::new(genesis.trusted()?, genesis.tick),
                 activation(h.timeline, 1)
             ),
             Err(RegistryError::AnchorMismatch)
@@ -251,7 +252,7 @@ fn a_changed_anchor_field_is_an_anchor_mismatch_in_every_operation() -> TestResu
                 &genesis.evidence,
                 &one.projection()?,
                 &one.release_proof()?,
-                (genesis.trusted()?, genesis.tick),
+                TrustEvaluationPointV1::new(genesis.trusted()?, genesis.tick),
                 activation(h.timeline, 1)
             ),
             Err(RegistryError::AnchorMismatch)
@@ -397,7 +398,7 @@ fn evidence_coordinates_must_equal_the_trusted_utc_and_tick() -> TestResult {
                 &genesis.evidence,
                 &one.projection()?,
                 &one.release_proof()?,
-                (utc, tick),
+                TrustEvaluationPointV1::new(utc, tick),
                 activation(h.timeline, 1)
             ),
             Err(expected)
@@ -409,7 +410,7 @@ fn evidence_coordinates_must_equal_the_trusted_utc_and_tick() -> TestResult {
                 &genesis.evidence,
                 &one.projection()?,
                 &one.release_proof()?,
-                (utc, tick),
+                TrustEvaluationPointV1::new(utc, tick),
                 activation(h.timeline, 1)
             ),
             Err(expected)
@@ -499,7 +500,7 @@ fn release_chain_is_independent_per_plugin_id_and_per_scope() -> TestResult {
         &other_genesis.evidence,
         &release_one().projection()?,
         &release_one().release_proof()?,
-        (other_genesis.trusted()?, other_genesis.tick),
+        TrustEvaluationPointV1::new(other_genesis.trusted()?, other_genesis.tick),
         activation(h.timeline, 9),
     )?;
     assert_eq!(receipt.decision().scope(), "scope-two");
@@ -691,7 +692,7 @@ fn a_store_without_an_erasure_gate_cannot_admit_or_roll_back() -> TestResult {
             &genesis.evidence,
             &one.projection()?,
             &one.release_proof()?,
-            (genesis.trusted()?, genesis.tick),
+            TrustEvaluationPointV1::new(genesis.trusted()?, genesis.tick),
             activation(timeline, 1)
         ),
         Err(RegistryError::ActivationEventRejected)
@@ -703,7 +704,7 @@ fn a_store_without_an_erasure_gate_cannot_admit_or_roll_back() -> TestResult {
             &genesis.evidence,
             &one.projection()?,
             &one.release_proof()?,
-            (genesis.trusted()?, genesis.tick),
+            TrustEvaluationPointV1::new(genesis.trusted()?, genesis.tick),
             activation(timeline, 1)
         ),
         Err(RegistryError::ActivationEventRejected)
@@ -735,7 +736,7 @@ fn an_unbound_fail_closed_erasure_gate_refuses_the_activation_fence() -> TestRes
             &genesis.evidence,
             &release_one().projection()?,
             &release_one().release_proof()?,
-            (genesis.trusted()?, genesis.tick),
+            TrustEvaluationPointV1::new(genesis.trusted()?, genesis.tick),
             activation(timeline, 1)
         ),
         Err(RegistryError::ActivationEventRejected)
@@ -781,7 +782,7 @@ fn a_store_with_another_payload_hasher_can_never_activate() -> TestResult {
             &genesis.evidence,
             &release_one().projection()?,
             &release_one().release_proof()?,
-            (genesis.trusted()?, genesis.tick),
+            TrustEvaluationPointV1::new(genesis.trusted()?, genesis.tick),
             activation(timeline, 1)
         ),
         Err(RegistryError::ActivationEventRejected)

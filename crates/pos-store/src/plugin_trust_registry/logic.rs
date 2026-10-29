@@ -355,9 +355,11 @@ fn check_release_proof(
         authorization.release_digest(),
         authorization.resolved_public_key(),
     );
-    (proven == authorized)
-        .then_some(())
-        .ok_or(PluginTrustPolicyRegistryErrorV1::ReleaseProofMismatch)
+    if proven == authorized {
+        Ok(())
+    } else {
+        Err(PluginTrustPolicyRegistryErrorV1::ReleaseProofMismatch)
+    }
 }
 
 /// The release-dependent tail of `admit` and `rollback`, which takes the release proof.

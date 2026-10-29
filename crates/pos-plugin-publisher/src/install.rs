@@ -46,7 +46,7 @@ use pos_plugin_release::{
 };
 use pos_store::plugin_trust_registry::{
     ActivationEventInputV1, AdmittedPluginReleaseReceiptV1, PluginTrustPolicyRegistryErrorV1,
-    PluginTrustPolicyRegistryV1, TrustedUtcSecondV1,
+    PluginTrustPolicyRegistryV1, TrustEvaluationPointV1, TrustedUtcSecondV1,
 };
 use thiserror::Error;
 
@@ -176,7 +176,7 @@ pub fn install_plugin_release_v1(
         request.evidence,
         &projection,
         &signature,
-        (trusted_utc, tick),
+        TrustEvaluationPointV1::new(trusted_utc, tick),
         request.activation,
     )?;
     Ok(InstalledPluginReleaseV1 {

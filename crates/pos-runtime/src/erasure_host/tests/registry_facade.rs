@@ -12,7 +12,7 @@ use pos_plugin_publisher::test_support::{
     BoxResult,
 };
 use pos_plugin_release::{BundleAddressV1, ReleaseSourceV1, VerifiedReleaseBundleV1};
-use pos_store::plugin_trust_registry::TrustedUtcSecondV1;
+use pos_store::plugin_trust_registry::{TrustEvaluationPointV1, TrustedUtcSecondV1};
 
 use super::*;
 use crate::community_plugin_host::{
@@ -181,7 +181,7 @@ fn advance_and_read(
             evidence,
             &projection,
             &proof,
-            (utc, TICK),
+            TrustEvaluationPointV1::new(utc, TICK),
             activation(timeline, 9),
         );
         let decision = registry.retained_release_decision(SCOPE, digest);

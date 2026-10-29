@@ -21,7 +21,7 @@ use pos_crypto::plugin_manifest::VerifiedPluginReleaseSignatureV1;
 use pos_crypto::plugin_trust::PluginTrustErrorV1;
 use pos_store::plugin_trust_registry::{
     PluginTrustCommitOutcomeV1, PluginTrustLedgerKindV1, PluginTrustPolicyRegistryV1,
-    PolicyAdvanceKindV1,
+    PolicyAdvanceKindV1, TrustEvaluationPointV1,
 };
 
 const fn rollback_error(kind: PluginFloorKindV1) -> RegistryError {
@@ -429,7 +429,7 @@ fn an_unknown_rollback_target_is_one_never_admitted_in_this_scope() -> TestResul
         &other_genesis.evidence,
         &ManifestSpec::new("plugin-a", 0x50, 0x60, None).projection()?,
         &ManifestSpec::new("plugin-a", 0x50, 0x60, None).release_proof()?,
-        (other_genesis.trusted()?, other_genesis.tick),
+        TrustEvaluationPointV1::new(other_genesis.trusted()?, other_genesis.tick),
         activation(h.timeline, 3),
     )?;
     let foreign_digest_in_other_scope = release_one();
@@ -444,7 +444,7 @@ fn an_unknown_rollback_target_is_one_never_admitted_in_this_scope() -> TestResul
             &other_genesis.evidence,
             &foreign_digest_in_other_scope.projection()?,
             &foreign_digest_in_other_scope.release_proof()?,
-            (other_genesis.trusted()?, other_genesis.tick),
+            TrustEvaluationPointV1::new(other_genesis.trusted()?, other_genesis.tick),
             activation(h.timeline, 4)
         ),
         Err(RegistryError::UnknownRollbackTarget)
@@ -630,7 +630,7 @@ fn an_unprovisioned_scope_is_missing_state_and_never_affects_a_provisioned_one()
             &material.evidence,
             &one.projection()?,
             &one.release_proof()?,
-            (material.trusted()?, material.tick),
+            TrustEvaluationPointV1::new(material.trusted()?, material.tick),
             activation(h.timeline, 1)
         ),
         Err(RegistryError::MissingState)
@@ -642,7 +642,7 @@ fn an_unprovisioned_scope_is_missing_state_and_never_affects_a_provisioned_one()
             &material.evidence,
             &one.projection()?,
             &one.release_proof()?,
-            (material.trusted()?, material.tick),
+            TrustEvaluationPointV1::new(material.trusted()?, material.tick),
             activation(h.timeline, 1)
         ),
         Err(RegistryError::MissingState)
@@ -690,7 +690,7 @@ fn two_scopes_keep_independent_floors_pointers_and_ledgers() -> TestResult {
         &other_genesis.evidence,
         &one.projection()?,
         &one.release_proof()?,
-        (other_genesis.trusted()?, other_genesis.tick),
+        TrustEvaluationPointV1::new(other_genesis.trusted()?, other_genesis.tick),
         activation(h.timeline, 2),
     )?;
     let first = h.store.retained_policy_state("scope")?;

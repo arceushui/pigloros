@@ -34,7 +34,7 @@ use pos_store::plugin_trust_registry::{
     ActivationEventInputV1, ActiveReleaseV1, AdmittedPluginReleaseReceiptV1,
     CurrentReleaseEvaluationV1, PluginRollbackReceiptV1, PluginTrustLedgerRowV1,
     PluginTrustPolicyRegistryErrorV1, PluginTrustPolicyRegistryV1, PolicyAdvanceOutcomeV1,
-    RetainedPolicyStateV1, RetainedReleaseDecisionV1, TrustedUtcSecondV1,
+    RetainedPolicyStateV1, RetainedReleaseDecisionV1, TrustEvaluationPointV1, TrustedUtcSecondV1,
 };
 
 use super::encoding::{Material, Policy, Revocations, Spec, FAR_FUTURE, OTHER_OWNER, OWNER, SCOPE};
@@ -707,7 +707,7 @@ impl World {
             &material.evidence,
             &projection,
             &proof,
-            (utc, self.spec.tick),
+            TrustEvaluationPointV1::new(utc, self.spec.tick),
             activation(self.timeline, tag),
         ))
     }
@@ -748,7 +748,7 @@ impl World {
             &material.evidence,
             &projection,
             &proof,
-            (utc, self.spec.tick),
+            TrustEvaluationPointV1::new(utc, self.spec.tick),
             activation(self.timeline, tag),
         ))
     }

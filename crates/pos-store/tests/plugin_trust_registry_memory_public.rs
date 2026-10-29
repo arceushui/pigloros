@@ -18,7 +18,10 @@ mod core_vectors {
 mod erased_activation {
     use super::fixtures::{activation, release_one, Env, RegistryError, TestResult};
     use pos_core::store::EventStore;
-    use pos_store::{memory::MemoryStore, plugin_trust_registry::PluginTrustPolicyRegistryV1};
+    use pos_store::{
+        memory::MemoryStore,
+        plugin_trust_registry::{PluginTrustPolicyRegistryV1, TrustEvaluationPointV1},
+    };
 
     #[test]
     fn an_erased_activation_timeline_refuses_the_activation_event() -> TestResult {
@@ -42,7 +45,7 @@ mod erased_activation {
                 &genesis.evidence,
                 &release_one().projection()?,
                 &release_one().release_proof()?,
-                (genesis.trusted()?, genesis.tick),
+                TrustEvaluationPointV1::new(genesis.trusted()?, genesis.tick),
                 activation(timeline, 1)
             ),
             Err(RegistryError::ActivationEventRejected)

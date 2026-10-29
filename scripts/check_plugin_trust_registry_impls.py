@@ -19,15 +19,18 @@ source of every `.rs` file outside the top-level build and tooling directories:
 3. `admit` and `rollback` may be called only from tests and `test-support`
    fixtures (revision 4 decisions 1 and 10), with one exception. Revision 4
    names no installer exemption; decision 1 only says the supported order is
-   verify-then-admit (the port has no signature input). ADR-103 revision 5
-   (decision 3) ratifies the exemption that #573 shipped: the signed installer
-   module `crates/pos-plugin-publisher/src/install.rs` is the sole non-test
+   verify-then-admit. ADR-103 revision 5 (decision 3) ratifies the exemption
+   that #573 shipped: the signed installer module
+   `crates/pos-plugin-publisher/src/install.rs` is the sole non-test
    verify-then-admit caller, so it is the only non-test call site of `admit`
    and the only non-test file that may construct `TrustedUtcSecondV1` outside
-   the trusted host, until the later amendment that adds the PMF1 signature
-   token. It verifies the PMF1 release signature before it calls `admit`. It
-   may not call `rollback`, `provision`, or `advance_policy`, nor implement the
-   port. `rollback` has no production entry point: no non-test file may call
+   the trusted host. Since ADR-103 revision 7 both operations also require the
+   verified PMF1 signature token as their release proof, which the registry
+   checks against its own authorization; the call-site rule stays as defence in
+   depth, because the token proves a signature, not that the caller is the
+   trusted composition. The installer verifies the signature before it calls
+   `admit`. It may not call `rollback`, `provision`, or `advance_policy`, nor
+   implement the port. `rollback` has no production entry point: no non-test file may call
    it. Any other call site, including one inside `pos-store`, is rejected. A
    file can call a method of the port only after naming the trait or glob
    importing its module, so method names are checked only in such files.
@@ -38,7 +41,9 @@ source of every `.rs` file outside the top-level build and tooling directories:
    fields, enum variants, and re-exports) is linted against the forbidden-name
    list: no name may contain `signature`, `verified_signature`, `is_admitted`,
    `is_live`, `live_authority`, or `authorize_from_receipt`, because no
-   registry type claims signature validity or live authority.
+   registry type claims signature validity or live authority. Since revision 7
+   the port names `VerifiedPluginReleaseSignatureV1` (the release proof) through
+   a private `use` only; a `pub use` of it is rejected by this lint.
 5. Every reference to the registry modules from another `pos-store` file sits
    under a `cfg` attribute that names `target_os = "linux"`: non-Linux builds
    expose no admission surface.
@@ -75,8 +80,8 @@ CONFINED_NAME = re.compile(
     r"\b(?:from_bytes_v1|FixedTrustMaterialSourceV1|CommunityTrustAnchorBytesV1"
     r"|CommunityEvaluationWorldV1)\b"
 )
-# Named by ADR-103 revision 5 (not by revision 4): the sanctioned verify-then-admit caller (#573),
-# until the signature-token amendment; see rule 3.
+# Named by ADR-103 revision 5 (not by revision 4): the sanctioned verify-then-admit caller (#573);
+# revision 7 adds the required release proof and keeps this allow-list; see rule 3.
 ALLOWED_CALL_BY_FILE = "crates/pos-plugin-publisher/src/install.rs"
 GUARDED_NAMES = (PORT, "TrustedUtcSecondV1", "PluginTrustPolicyAnchorV1")
 RECEIPT_TYPES = (

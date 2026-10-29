@@ -24,6 +24,7 @@ use super::seam::{Step, FAULT, LEVEL_AT_COMMIT, RESTORE_PROBE, SNAPSHOT_PROBE};
 use crate::plugin_trust_registry::{
     CurrentReleaseEvaluationV1, PluginTrustCommitOutcomeV1,
     PluginTrustPolicyRegistryErrorV1 as Error, PluginTrustPolicyRegistryV1, ProvisionOutcomeV1,
+    TrustEvaluationPointV1,
 };
 use crate::plugin_trust_registry_fixtures::{
     activation, release_one, release_three, release_two, Backend, Env, Gate, Guard, Harness,
@@ -212,7 +213,7 @@ fn a_read_only_handle_cannot_write_and_restores_the_level() -> TestResult {
             &genesis.evidence,
             &three.projection()?,
             &three.release_proof()?,
-            (trusted, genesis.tick),
+            TrustEvaluationPointV1::new(trusted, genesis.tick),
             activation(h.timeline, 3)
         ),
         Err(Error::ActivationEventRejected)
@@ -225,7 +226,7 @@ fn a_read_only_handle_cannot_write_and_restores_the_level() -> TestResult {
             &genesis.evidence,
             &one.projection()?,
             &one.release_proof()?,
-            (trusted, genesis.tick),
+            TrustEvaluationPointV1::new(trusted, genesis.tick),
             activation(h.timeline, 3)
         ),
         Err(Error::ActivationEventRejected)
@@ -262,7 +263,7 @@ fn a_store_that_is_not_in_wal_mode_is_refused() -> TestResult {
             &genesis.evidence,
             &release_one().projection()?,
             &release_one().release_proof()?,
-            (genesis.trusted()?, genesis.tick),
+            TrustEvaluationPointV1::new(genesis.trusted()?, genesis.tick),
             activation(TimelineId::new(), 1)
         ),
         Err(Error::WalRequired)
@@ -422,7 +423,7 @@ fn a_failed_restore_poisons_the_handle_until_it_is_reopened() -> TestResult {
             &genesis.evidence,
             &one.projection()?,
             &one.release_proof()?,
-            (genesis.trusted()?, genesis.tick),
+            TrustEvaluationPointV1::new(genesis.trusted()?, genesis.tick),
             activation(timeline, 1),
         )?;
         assert_eq!(
@@ -1352,7 +1353,7 @@ fn an_evaluation_reads_one_snapshot_while_a_second_handle_commits() -> TestResul
                 &material.evidence,
                 &projection,
                 &proof,
-                (utc, material.tick),
+                TrustEvaluationPointV1::new(utc, material.tick),
                 activation(timeline, 2),
             );
             receipt.is_ok()

@@ -15,7 +15,9 @@ use crate::fixtures::{
 };
 use pos_conformance::{PluginFloorErrorV1, PluginFloorKindV1, PluginTrustBridgeErrorV1};
 use pos_crypto::plugin_trust::PluginTrustErrorV1;
-use pos_store::plugin_trust_registry::{CurrentReleaseEvaluationV1, PluginTrustPolicyRegistryV1};
+use pos_store::plugin_trust_registry::{
+    CurrentReleaseEvaluationV1, PluginTrustPolicyRegistryV1, TrustEvaluationPointV1,
+};
 
 const fn bridge(error: PluginTrustBridgeErrorV1) -> RegistryError {
     RegistryError::Bridge(error)
@@ -706,7 +708,7 @@ fn scopes_evaluate_independently() -> TestResult {
         &other_genesis.evidence,
         &one.projection()?,
         &one.release_proof()?,
-        (other_genesis.trusted()?, other_genesis.tick),
+        TrustEvaluationPointV1::new(other_genesis.trusted()?, other_genesis.tick),
         activation(h.timeline, 2),
     )?;
     let in_other = evaluate_in(&h, &other, &other_genesis, &one)??;

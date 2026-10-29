@@ -18,6 +18,7 @@ use pos_core::{store::EventStore, store::SeqRange, ErasureContainmentGateV1};
 use pos_store::{
     plugin_trust_registry::{
         PluginTrustCommitOutcomeV1, PluginTrustPolicyRegistryV1, ProvisionOutcomeV1,
+        TrustEvaluationPointV1,
     },
     sqlite::SqliteStore,
 };
@@ -71,7 +72,7 @@ fn a_preexisting_store_file_is_missing_state_until_provisioned() -> TestResult {
             &genesis.evidence,
             &release_one().projection()?,
             &release_one().release_proof()?,
-            (genesis.trusted()?, genesis.tick),
+            TrustEvaluationPointV1::new(genesis.trusted()?, genesis.tick),
             activation(timeline, 1)
         ),
         Err(RegistryError::MissingState)
@@ -127,7 +128,7 @@ fn committed_state_survives_a_restart_and_a_retry_replays() -> TestResult {
         &genesis.evidence,
         &one.projection()?,
         &one.release_proof()?,
-        (genesis.trusted()?, genesis.tick),
+        TrustEvaluationPointV1::new(genesis.trusted()?, genesis.tick),
         activation(timeline, 1),
     )?;
     assert_eq!(

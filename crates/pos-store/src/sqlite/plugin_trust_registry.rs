@@ -61,7 +61,7 @@ use crate::plugin_trust_registry::{
     AdmittedPluginReleaseReceiptV1, CurrentReleaseEvaluationV1, PluginRollbackReceiptV1,
     PluginTrustCommitOutcomeV1, PluginTrustLedgerRowV1, PluginTrustPolicyRegistryErrorV1,
     PluginTrustPolicyRegistryV1, PolicyAdvanceOutcomeV1, ProvisionOutcomeV1, RetainedPolicyStateV1,
-    RetainedReleaseDecisionV1, TrustedUtcSecondV1,
+    RetainedReleaseDecisionV1, TrustEvaluationPointV1, TrustedUtcSecondV1,
 };
 
 impl DurabilityErrorV1 for PluginTrustPolicyRegistryErrorV1 {
@@ -407,7 +407,7 @@ impl PluginTrustPolicyRegistryV1 for SqliteStore {
         evidence: &VerifiedPluginTrustEvidenceV1,
         projection: &ValidatedPluginManifestProjectionV1,
         release_proof: &VerifiedPluginReleaseSignatureV1,
-        (trusted_utc, tick): (TrustedUtcSecondV1, u64),
+        TrustEvaluationPointV1 { trusted_utc, tick }: TrustEvaluationPointV1,
         activation: ActivationEventInputV1,
     ) -> RegistryResult<AdmittedPluginReleaseReceiptV1> {
         let input = PolicyInputV1 {
@@ -447,7 +447,7 @@ impl PluginTrustPolicyRegistryV1 for SqliteStore {
         evidence: &VerifiedPluginTrustEvidenceV1,
         target: &ValidatedPluginManifestProjectionV1,
         release_proof: &VerifiedPluginReleaseSignatureV1,
-        (trusted_utc, tick): (TrustedUtcSecondV1, u64),
+        TrustEvaluationPointV1 { trusted_utc, tick }: TrustEvaluationPointV1,
         activation: ActivationEventInputV1,
     ) -> RegistryResult<PluginRollbackReceiptV1> {
         let input = PolicyInputV1 {

@@ -14,6 +14,25 @@ use super::types::{
 };
 use super::utc::TrustedUtcSecondV1;
 
+/// The trusted UTC second and the Tick of one `admit` or `rollback` transaction.
+///
+/// A call argument only: no decision, receipt, or ledger row retains it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TrustEvaluationPointV1 {
+    /// The UTC second sampled from the sealed wall source.
+    pub trusted_utc: TrustedUtcSecondV1,
+    /// The host Tick of the transaction.
+    pub tick: u64,
+}
+
+impl TrustEvaluationPointV1 {
+    /// The point at `trusted_utc` and `tick`.
+    #[must_use]
+    pub const fn new(trusted_utc: TrustedUtcSecondV1, tick: u64) -> Self {
+        Self { trusted_utc, tick }
+    }
+}
+
 /// The durable Plugin trust policy registry (ADR-103 revisions 4, 5 and 7).
 ///
 /// Only the private trusted composition boundary constructs the anchor,
@@ -29,7 +48,7 @@ use super::utc::TrustedUtcSecondV1;
 /// the release digest and the public key of the registry's own authorization
 /// of the projection, else `ReleaseProofMismatch`. The registry checks that
 /// binding only; it does not re-verify the signature and retains nothing from
-/// the proof. Their UTC second and Tick are one `(trusted_utc, tick)` pair.
+/// the proof. Their UTC second and Tick are one [`TrustEvaluationPointV1`].
 ///
 /// Writes take `&mut self` and commit all of their state or none; reads take
 /// `&self`, and so does the read-only `evaluate_current_release`. A write validates the
@@ -50,8 +69,8 @@ pub trait PluginTrustPolicyRegistryV1 {
 
     /// Admit and activate one release, or return the identical earlier decision.
     ///
-    /// `release_proof` must bind the authorized release and key; `coordinates`
-    /// is the trusted UTC second and the Tick of the transaction.
+    /// `release_proof` must bind the authorized release and key; `point` is the
+    /// trusted UTC second and the Tick of the transaction.
     ///
     /// # Errors
     /// Returns the closed registry error of the first failing step.
@@ -62,7 +81,7 @@ pub trait PluginTrustPolicyRegistryV1 {
         evidence: &VerifiedPluginTrustEvidenceV1,
         projection: &ValidatedPluginManifestProjectionV1,
         release_proof: &VerifiedPluginReleaseSignatureV1,
-        coordinates: (TrustedUtcSecondV1, u64),
+        point: TrustEvaluationPointV1,
         activation: ActivationEventInputV1,
     ) -> Result<AdmittedPluginReleaseReceiptV1, PluginTrustPolicyRegistryErrorV1>;
 
@@ -81,8 +100,8 @@ pub trait PluginTrustPolicyRegistryV1 {
 
     /// Re-activate a previously admitted release of the active Plugin ID.
     ///
-    /// `release_proof` must bind the authorized target and key; `coordinates`
-    /// is the trusted UTC second and the Tick of the transaction.
+    /// `release_proof` must bind the authorized target and key; `point` is the
+    /// trusted UTC second and the Tick of the transaction.
     ///
     /// # Errors
     /// Returns the closed registry error of the first failing step.
@@ -93,7 +112,7 @@ pub trait PluginTrustPolicyRegistryV1 {
         evidence: &VerifiedPluginTrustEvidenceV1,
         target: &ValidatedPluginManifestProjectionV1,
         release_proof: &VerifiedPluginReleaseSignatureV1,
-        coordinates: (TrustedUtcSecondV1, u64),
+        point: TrustEvaluationPointV1,
         activation: ActivationEventInputV1,
     ) -> Result<PluginRollbackReceiptV1, PluginTrustPolicyRegistryErrorV1>;
 

@@ -43,7 +43,7 @@ use pos_store::{
         ActivationEventInputV1, ActiveReleaseV1, AdmittedPluginReleaseReceiptV1,
         CurrentReleaseEvaluationV1, PluginRollbackReceiptV1, PluginTrustLedgerRowV1,
         PluginTrustPolicyRegistryV1, PolicyAdvanceOutcomeV1, RetainedPolicyStateV1,
-        RetainedReleaseDecisionV1, TrustedUtcSecondV1,
+        RetainedReleaseDecisionV1, TrustEvaluationPointV1, TrustedUtcSecondV1,
     },
 };
 
@@ -948,7 +948,7 @@ impl<S: Backend> Harness<S> {
             &material.evidence,
             &manifest.projection()?,
             proof,
-            (material.trusted()?, material.tick),
+            TrustEvaluationPointV1::new(material.trusted()?, material.tick),
             activation,
         ))
     }
@@ -1012,7 +1012,7 @@ impl<S: Backend> Harness<S> {
             &material.evidence,
             &target.projection()?,
             proof,
-            (material.trusted()?, material.tick),
+            TrustEvaluationPointV1::new(material.trusted()?, material.tick),
             activation,
         ))
     }

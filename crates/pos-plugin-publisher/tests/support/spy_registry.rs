@@ -31,7 +31,8 @@ use pos_store::plugin_trust_registry::{
     ActivationEventInputV1, ActiveReleaseV1, AdmittedPluginReleaseReceiptV1,
     CurrentReleaseEvaluationV1, PluginRollbackReceiptV1, PluginTrustLedgerRowV1,
     PluginTrustPolicyRegistryErrorV1, PluginTrustPolicyRegistryV1, PolicyAdvanceOutcomeV1,
-    ProvisionOutcomeV1, RetainedPolicyStateV1, RetainedReleaseDecisionV1, TrustedUtcSecondV1,
+    ProvisionOutcomeV1, RetainedPolicyStateV1, RetainedReleaseDecisionV1, TrustEvaluationPointV1,
+    TrustedUtcSecondV1,
 };
 
 /// What one `admit` call received.
@@ -126,13 +127,13 @@ impl PluginTrustPolicyRegistryV1 for SpyRegistry {
         evidence: &VerifiedPluginTrustEvidenceV1,
         projection: &ValidatedPluginManifestProjectionV1,
         release_proof: &VerifiedPluginReleaseSignatureV1,
-        (trusted_utc, tick): (TrustedUtcSecondV1, u64),
+        point: TrustEvaluationPointV1,
         activation: ActivationEventInputV1,
     ) -> Registry<AdmittedPluginReleaseReceiptV1> {
         let call = AdmitCall {
             release_proof: Box::new(*release_proof),
-            utc: trusted_utc.as_i64(),
-            tick,
+            utc: point.trusted_utc.as_i64(),
+            tick: point.tick,
             tps1: tps1_bytes.to_vec(),
             timeline: activation.timeline,
         };
@@ -147,7 +148,7 @@ impl PluginTrustPolicyRegistryV1 for SpyRegistry {
             evidence,
             projection,
             release_proof,
-            (trusted_utc, tick),
+            point,
             activation,
         )
     }
@@ -171,7 +172,7 @@ impl PluginTrustPolicyRegistryV1 for SpyRegistry {
         evidence: &VerifiedPluginTrustEvidenceV1,
         target: &ValidatedPluginManifestProjectionV1,
         release_proof: &VerifiedPluginReleaseSignatureV1,
-        coordinates: (TrustedUtcSecondV1, u64),
+        point: TrustEvaluationPointV1,
         activation: ActivationEventInputV1,
     ) -> Registry<PluginRollbackReceiptV1> {
         self.store.rollback(
@@ -180,7 +181,7 @@ impl PluginTrustPolicyRegistryV1 for SpyRegistry {
             evidence,
             target,
             release_proof,
-            coordinates,
+            point,
             activation,
         )
     }

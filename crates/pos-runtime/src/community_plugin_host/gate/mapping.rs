@@ -186,8 +186,8 @@ const fn floor_error(error: PluginFloorErrorV1) -> CommunityPluginHostErrorV1 {
 ///
 /// Variants that no read-only evaluation raises are mapped defensively to
 /// `TrustStateUnavailable`. So is `ReleaseProofMismatch` (ADR-103 revision 7),
-/// which the installer path can raise: it is a composition defect, not a
-/// verdict on the release.
+/// which a direct `admit` or `rollback` caller can raise: it is a composition
+/// defect, not a verdict on the release.
 #[must_use]
 pub const fn host_error_for_registry_v1(
     error: PluginTrustPolicyRegistryErrorV1,

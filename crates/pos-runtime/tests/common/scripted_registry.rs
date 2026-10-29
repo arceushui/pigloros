@@ -17,7 +17,8 @@ use pos_store::plugin_trust_registry::{
     ActivationEventInputV1, ActiveReleaseV1, AdmittedPluginReleaseReceiptV1,
     CurrentReleaseEvaluationV1, PluginRollbackReceiptV1, PluginTrustLedgerRowV1,
     PluginTrustPolicyRegistryErrorV1 as Reg, PluginTrustPolicyRegistryV1, PolicyAdvanceOutcomeV1,
-    ProvisionOutcomeV1, RetainedPolicyStateV1, RetainedReleaseDecisionV1, TrustedUtcSecondV1,
+    ProvisionOutcomeV1, RetainedPolicyStateV1, RetainedReleaseDecisionV1, TrustEvaluationPointV1,
+    TrustedUtcSecondV1,
 };
 
 type Registry<T> = Result<T, Reg>;
@@ -77,7 +78,7 @@ impl PluginTrustPolicyRegistryV1 for Scripted<'_> {
         _evidence: &VerifiedPluginTrustEvidenceV1,
         _projection: &ValidatedPluginManifestProjectionV1,
         _release_proof: &VerifiedPluginReleaseSignatureV1,
-        _coordinates: (TrustedUtcSecondV1, u64),
+        _point: TrustEvaluationPointV1,
         _activation: ActivationEventInputV1,
     ) -> Registry<AdmittedPluginReleaseReceiptV1> {
         Err(Reg::NestedTransaction)
@@ -101,7 +102,7 @@ impl PluginTrustPolicyRegistryV1 for Scripted<'_> {
         _evidence: &VerifiedPluginTrustEvidenceV1,
         _target: &ValidatedPluginManifestProjectionV1,
         _release_proof: &VerifiedPluginReleaseSignatureV1,
-        _coordinates: (TrustedUtcSecondV1, u64),
+        _point: TrustEvaluationPointV1,
         _activation: ActivationEventInputV1,
     ) -> Registry<PluginRollbackReceiptV1> {
         Err(Reg::NestedTransaction)

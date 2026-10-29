@@ -29,7 +29,7 @@ pub mod types;
 mod utc;
 
 pub use error::PluginTrustPolicyRegistryErrorV1;
-pub use port::PluginTrustPolicyRegistryV1;
+pub use port::{PluginTrustPolicyRegistryV1, TrustEvaluationPointV1};
 pub use types::{
     ActivationEventIdentityV1, ActivationEventInputV1, ActiveReleaseV1,
     AdmittedPluginReleaseReceiptV1, CurrentReleaseEvaluationV1, PluginRollbackReceiptV1,
