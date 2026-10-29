@@ -10,37 +10,48 @@
 //!
 //! # Order
 //!
-//! 1. The `ArtifactClosure` check (ADR-062 Revision 8, Q5): the closure is
-//!    complete only when the deployment boundary reports it complete **and**
-//!    the exported Timeline member and the licence member are both supplied.
-//!    The result is the `artifact_closure` evidence of the unchanged
-//!    [`preflight_verification_v1`]; there is no separate licence coordinate.
+//! 1. The `ArtifactClosure` members (ADR-062 Revision 8, Q5): the exported
+//!    Timeline and a non-empty licence member must both be supplied. When
+//!    either is missing, the `artifact_closure` evidence passed to the
+//!    unchanged [`preflight_verification_v1`] is `Incomplete`; otherwise it is
+//!    the deployment boundary's own report. There is no licence coordinate.
 //! 2. [`preflight_verification_v1`]. Its first error becomes the result's
-//!    first error: a closure or provenance error is
-//!    `UnverifiableArtifactsMissing`, a profile error is
-//!    `IncompatibleProfile`, and every other error is `InvalidManifest`.
+//!    first error, so a missing closure member is the preflight's own
+//!    `ClosureIncomplete` at `artifact_closure`. A closure or provenance
+//!    error is `UnverifiableArtifactsMissing`, a profile error is
+//!    `IncompatibleProfile`, and every other code (encoding, digest, trust,
+//!    signature, revocation) is `InvalidManifest`.
 //! 3. The reproducibility class must be `RecordedReplay`.
 //! 4. ADR-060 `ReplayClaim` degradation: the admitted claim is weakened by the
 //!    host-owned [`ReplayClaimEvaluationV1`], never strengthened. A weakened
-//!    `IncompatibleProfile` claim is `IncompatibleProfile`; a structural or
-//!    missing claim, or an exported Timeline the evaluation does not admit for
-//!    authoritative use, is `UnverifiableArtifactsMissing`. A claim with
-//!    redacted views stays exact (Q4: `VerifiedExact` with a degraded
-//!    `replay_claim`).
-//! 5. The Event count of the export must not exceed the manifest
-//!    `resource_limit`, checked before any fold.
-//! 6. The exported Events are folded into the caller's
+//!    `IncompatibleProfile` claim is `IncompatibleProfile`; a `StructuralOnly`
+//!    or `UnverifiableArtifactsMissing` claim, or an exported Timeline the
+//!    evaluation does not admit for authoritative use, is
+//!    `UnverifiableArtifactsMissing`. The result keeps a `StructuralOnly`
+//!    claim distinct (ADR-058: the result is the class, outcome and claim
+//!    tuple); every other missing case reports
+//!    `UnverifiableArtifactsMissing`. A claim with redacted views stays exact
+//!    (Q4: `VerifiedExact` with a degraded `replay_claim`).
+//! 5. The number of Events in the export must not exceed the manifest
+//!    `resource_limit`, read as an Event budget (as the Tick draft budget
+//!    the proof kernel derives from it), checked before any Event is read.
+//! 6. The export's sequences must be strictly increasing (Timeline Order);
+//!    otherwise the export is an invalid closure member: `InvalidManifest`
+//!    with `NonCanonicalOrder` at `artifact_closure`.
+//! 7. The exported Events are folded into the caller's
 //!    [`ProjectionRegistry`] from empty State, and its Snapshot is read under
 //!    the registry's erasure fence; a denied fence is
 //!    `UnverifiableArtifactsMissing`.
-//! 7. The rebuilt stream is compared with the expected stream: no divergence
+//! 8. The rebuilt stream is compared with the expected stream: no divergence
 //!    is `VerifiedExact`; otherwise the result is `Diverged` and carries the
 //!    `DVR1` digest.
 //!
 //! # Rebuilt stream
 //!
 //! A recorded export carries no Tick numbering, so every Event and the one
-//! Projection checkpoint have tick 0. Each digest is BLAKE3 over a domain
+//! Projection checkpoint have tick 0; an expected stream for `RecordedReplay`
+//! must use tick 0 too. The Event schema digest covers only the Event type and
+//! schema version, not a payload schema or upcaster chain. Each digest is BLAKE3 over a domain
 //! string, a zero byte and the listed fields:
 //!
 //! | Field | Domain | Fields |
@@ -48,7 +59,7 @@
 //! | Event identity | `PiglorOS.RecordedReplayEventIdentity.v1` | Event id bytes, entity id bytes, Event type |
 //! | Event schema | `PiglorOS.RecordedReplayEventSchema.v1` | Event type, zero byte, schema version (`u32`, big endian) |
 //! | Checkpoint | `PiglorOS.RecordedReplayCheckpoint.v1` | canonical CBOR of the Projection Snapshot |
-//! | Authoritative result | `PiglorOS.RecordedReplayResult.v1` | per Event in Timeline Order: Timeline id, sequence (`u64`, big endian), identity digest, schema digest, BLAKE3 of the payload; then per checkpoint: Timeline id, Fold Cursor, tick (`u64`, big endian), digest, size (`u64`, big endian) |
+//! | Authoritative result | `PiglorOS.RecordedReplayResult.v1` | the Event count (`u64`, big endian), then per Event in Timeline Order: Timeline id, sequence (`u64`, big endian), identity digest, schema digest, BLAKE3 of the payload; then the checkpoint count (`u64`, big endian) and per checkpoint: Timeline id, Fold Cursor, tick (`u64`, big endian), digest, size (`u64`, big endian) |
 //!
 //! The checkpoint is keyed by the export's Timeline id and the Fold Cursor of
 //! the last exported Event (0 when the export is empty); its size is the
@@ -80,6 +91,11 @@ const AUTHORITATIVE_RESULT_DOMAIN_V1: &[u8] = b"PiglorOS.RecordedReplayResult.v1
 const PROVENANCE_DOMAIN_V1: &[u8] = b"PiglorOS.RecordedReplayProvenance.v1";
 
 /// The exported Timeline member of a `RecordedReplay` closure.
+///
+/// The host binds `artifact_digest` to the export's content and to the
+/// request's `artifact_closure_digest`; this step only checks that the
+/// ADR-060 evaluation admits that identity. The closure-digest binding is
+/// deferred to ADR-062 Revision 8 slice R4.
 #[derive(Clone, Copy, Debug)]
 pub struct ExportedTimelineMemberV1<'a> {
     /// The exported Timeline artifact.
@@ -93,14 +109,16 @@ pub struct ExportedTimelineMemberV1<'a> {
 pub struct RecordedReplayClosureV1<'a> {
     /// The exported Timeline, when it is materialized.
     pub timeline_export: Option<ExportedTimelineMemberV1<'a>>,
-    /// The licence member bytes, when they are materialized.
+    /// The licence member bytes, when they are materialized; empty bytes
+    /// count as missing.
     pub licence: Option<&'a [u8]>,
 }
 
 /// Inputs to one `RecordedReplay` execution.
 pub struct RecordedReplayInputV1<'a> {
-    /// The preflight input. Its `artifact_closure` evidence is combined with
-    /// the closure member check; it is never overridden to complete.
+    /// The preflight input. Its `artifact_closure` evidence is replaced by
+    /// `Incomplete` when a closure member is missing, and is otherwise used
+    /// as given; it is never overridden to complete.
     pub preflight: VerificationPreflightInputV1<'a>,
     /// The materialized closure members.
     pub closure: RecordedReplayClosureV1<'a>,
@@ -145,41 +163,38 @@ pub fn execute_recorded_replay_v1(
     let header = ResultHeader::new(&preflight, closure, fixture_digest);
     let declared_claim = preflight.manifest.replay_claim;
     let resource_limit = preflight.manifest.resource_limit;
-    let complete = closure.licence.and(closure.timeline_export);
-    let closure_status = if matches!(
-        preflight.evidence.artifact_closure,
-        ArtifactClosureStatusV1::Complete
-    ) && complete.is_some()
-    {
-        ArtifactClosureStatusV1::Complete
-    } else {
-        ArtifactClosureStatusV1::Incomplete
-    };
-    let preflight = VerificationPreflightInputV1 {
-        evidence: VerificationPreflightEvidenceV1 {
-            artifact_closure: closure_status,
-            ..preflight.evidence
-        },
-        ..preflight
-    };
-    let rebuilt = preflight_verification_v1(&preflight)
-        .map_err(|error| preflight_refusal(error, declared_claim))
-        // A complete closure always has both members; preflight admits only
-        // a complete closure.
-        .and_then(|admitted| {
-            complete
-                .map(|export| (admitted, export))
-                .ok_or_else(missing)
-        })
-        .and_then(|(admitted, export)| {
-            admit_class(admitted.reproducibility_class, admitted.replay_claim)
+    let rebuilt = match (closure.timeline_export, closure.licence) {
+        (Some(export), Some(licence)) if !licence.is_empty() => {
+            preflight_verification_v1(&preflight)
+                .map_err(|error| preflight_refusal(error, declared_claim))
+                .and_then(|admitted| {
+                    admit_class(admitted.reproducibility_class, admitted.replay_claim)
+                })
                 .and_then(|claim| degrade_claim(claim, replay_claim_evaluation, export))
                 .and_then(|claim| admit_budget(claim, export.export, resource_limit))
+                .and_then(|claim| admit_order(claim, export.export))
                 .and_then(|claim| {
-                    rebuild_projections(projections, export.export)
+                    rebuild_projections(projections, claim, export.export)
                         .map(|snapshot| (claim, export.export, snapshot))
                 })
-        });
+        }
+        _ => {
+            let preflight = VerificationPreflightInputV1 {
+                evidence: VerificationPreflightEvidenceV1 {
+                    artifact_closure: ArtifactClosureStatusV1::Incomplete,
+                    ..preflight.evidence
+                },
+                ..preflight
+            };
+            // An incomplete closure always fails the preflight, at the latest
+            // with `ClosureIncomplete` at `artifact_closure`.
+            Err(preflight_verification_v1(&preflight)
+                .err()
+                .map_or(CLOSURE_INCOMPLETE, |error| {
+                    preflight_refusal(error, declared_claim)
+                }))
+        }
+    };
     match rebuilt {
         Ok((claim, export, snapshot)) => rebuilt_stream(export, &snapshot)
             .and_then(|actual| header.compare(claim, expected, &actual)),
@@ -196,10 +211,30 @@ struct Refusal {
     coordinate: Option<VerificationPreflightCoordinateV1>,
 }
 
-const fn missing() -> Refusal {
+/// The preflight's closure refusal, reported when a closure member is missing.
+const CLOSURE_INCOMPLETE: Refusal = Refusal {
+    outcome: VerificationOutcomeV1::UnverifiableArtifactsMissing,
+    replay_claim: ReplayClaimV1::UnverifiableArtifactsMissing,
+    code: SafeErrorCodeV1::ClosureIncomplete,
+    coordinate: Some(VerificationPreflightCoordinateV1::ArtifactClosure),
+};
+
+/// The claim an `UnverifiableArtifactsMissing` result reports: a
+/// `StructuralOnly` claim stays distinct, every other claim is missing.
+const fn missing_claim(claim: ReplayClaimV1) -> ReplayClaimV1 {
+    match claim {
+        ReplayClaimV1::StructuralOnly => ReplayClaimV1::StructuralOnly,
+        ReplayClaimV1::Exact
+        | ReplayClaimV1::ExactAuthoritativeWithRedactedViews
+        | ReplayClaimV1::UnverifiableArtifactsMissing
+        | ReplayClaimV1::IncompatibleProfile => ReplayClaimV1::UnverifiableArtifactsMissing,
+    }
+}
+
+const fn missing(claim: ReplayClaimV1) -> Refusal {
     Refusal {
         outcome: VerificationOutcomeV1::UnverifiableArtifactsMissing,
-        replay_claim: ReplayClaimV1::UnverifiableArtifactsMissing,
+        replay_claim: missing_claim(claim),
         code: SafeErrorCodeV1::ProvenanceMissing,
         coordinate: Some(VerificationPreflightCoordinateV1::ReplayClaim),
     }
@@ -224,13 +259,26 @@ const fn preflight_refusal(
     let (outcome, replay_claim) = match error.code() {
         SafeErrorCodeV1::ClosureIncomplete | SafeErrorCodeV1::ProvenanceMissing => (
             VerificationOutcomeV1::UnverifiableArtifactsMissing,
-            ReplayClaimV1::UnverifiableArtifactsMissing,
+            missing_claim(declared_claim),
         ),
         SafeErrorCodeV1::ProfileUnsupported | SafeErrorCodeV1::ProfileClassMismatch => (
             VerificationOutcomeV1::IncompatibleProfile,
             ReplayClaimV1::IncompatibleProfile,
         ),
-        _ => (VerificationOutcomeV1::InvalidManifest, declared_claim),
+        SafeErrorCodeV1::InvalidEncoding
+        | SafeErrorCodeV1::UnsupportedVersion
+        | SafeErrorCodeV1::FieldOutOfBounds
+        | SafeErrorCodeV1::NonCanonicalOrder
+        | SafeErrorCodeV1::DigestMismatch
+        | SafeErrorCodeV1::SignatureInvalid
+        | SafeErrorCodeV1::TrustRootUnknown
+        | SafeErrorCodeV1::TrustSnapshotRollback
+        | SafeErrorCodeV1::ArtifactRevoked
+        // The preflight never reports a resource limit; it is listed so that
+        // a new safe error code fails to compile here.
+        | SafeErrorCodeV1::ResourceLimitExceeded => {
+            (VerificationOutcomeV1::InvalidManifest, declared_claim)
+        }
     };
     Refusal {
         outcome,
@@ -264,9 +312,9 @@ fn degrade_claim(
         ReplayClaimV1::Exact | ReplayClaimV1::ExactAuthoritativeWithRedactedViews => evaluation
             .require_authoritative_use(ErasureArtifactClassV1::Export, export.artifact_digest)
             .map(|()| claim)
-            .map_err(|_| missing()),
+            .map_err(|_| missing(claim)),
         ReplayClaimV1::StructuralOnly | ReplayClaimV1::UnverifiableArtifactsMissing => {
-            Err(missing())
+            Err(missing(claim))
         }
         ReplayClaimV1::IncompatibleProfile => Err(incompatible(
             SafeErrorCodeV1::ProfileUnsupported,
@@ -292,14 +340,34 @@ fn admit_budget(
     }
 }
 
+fn admit_order(claim: ReplayClaimV1, export: &TimelineExport) -> Result<ReplayClaimV1, Refusal> {
+    if export
+        .events
+        .windows(2)
+        .all(|pair| pair[0].seq < pair[1].seq)
+    {
+        Ok(claim)
+    } else {
+        Err(Refusal {
+            outcome: VerificationOutcomeV1::InvalidManifest,
+            replay_claim: claim,
+            code: SafeErrorCodeV1::NonCanonicalOrder,
+            coordinate: Some(VerificationPreflightCoordinateV1::ArtifactClosure),
+        })
+    }
+}
+
 fn rebuild_projections(
     projections: &mut ProjectionRegistry,
+    claim: ReplayClaimV1,
     export: &TimelineExport,
 ) -> Result<HashMap<String, StateRegistry>, Refusal> {
     let timeline = export.timeline.id();
     projections.clear_state();
     projections.fold_events(timeline, &export.events);
-    projections.state_snapshot(timeline).map_err(|_| missing())
+    projections
+        .state_snapshot(timeline)
+        .map_err(|_| missing(claim))
 }
 
 fn rebuilt_stream(
@@ -357,6 +425,7 @@ fn recorded_event(timeline_id: [u8; 16], event: &Event) -> (TimelinePositionV1, 
 
 fn authoritative_result_digest(actual: &AuthoritativeStreamV1) -> [u8; 32] {
     let mut digest = domain_hasher(AUTHORITATIVE_RESULT_DOMAIN_V1);
+    digest.update(&count(actual.events.len()));
     for (position, event) in &actual.events {
         digest.update(&position.timeline_id);
         digest.update(&position.seq.to_be_bytes());
@@ -364,6 +433,7 @@ fn authoritative_result_digest(actual: &AuthoritativeStreamV1) -> [u8; 32] {
         digest.update(&event.schema);
         digest.update(blake3::hash(&event.payload).as_bytes());
     }
+    digest.update(&count(actual.checkpoints.len()));
     for (coordinate, checkpoint) in &actual.checkpoints {
         digest.update(&coordinate.timeline_id);
         digest.update(&coordinate.fold_cursor.to_be_bytes());
@@ -372,6 +442,10 @@ fn authoritative_result_digest(actual: &AuthoritativeStreamV1) -> [u8; 32] {
         digest.update(&checkpoint.size.to_be_bytes());
     }
     *digest.finalize().as_bytes()
+}
+
+fn count(length: usize) -> [u8; 8] {
+    u64::try_from(length).unwrap_or(u64::MAX).to_be_bytes()
 }
 
 fn domain_hasher(domain: &[u8]) -> blake3::Hasher {
@@ -416,6 +490,7 @@ impl ResultHeader {
             .map_or([0; 32], |member| member.artifact_digest.digest());
         let licence_digest = closure
             .licence
+            .filter(|bytes| !bytes.is_empty())
             .map_or([0; 32], |bytes| *blake3::hash(bytes).as_bytes());
         let mut provenance = domain_hasher(PROVENANCE_DOMAIN_V1);
         provenance.update(&preflight.canonical_request_digest);
@@ -431,7 +506,7 @@ impl ResultHeader {
             evaluator_digest: request.evaluator_digest,
             reproducibility_class: request.reproducibility_class,
             checked_artifact_count: u64::from(closure.timeline_export.is_some())
-                + u64::from(closure.licence.is_some()),
+                + u64::from(licence_digest != [0; 32]),
             provenance_digest: *provenance.finalize().as_bytes(),
         }
     }

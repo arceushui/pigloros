@@ -96,6 +96,7 @@ struct Recording {
     timeline: TimelineId,
     entity: EntityId,
     export: TimelineExport,
+    payloads: Vec<u8>,
     driver_calls: Arc<AtomicU64>,
     _driver: Box<dyn Driver>,
 }
@@ -103,11 +104,17 @@ struct Recording {
 impl Recording {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn new() -> TestResult<Self> {
+        Self::with_payloads(&PAYLOADS)
+    }
+
+    /// Record one Event per payload, all for one entity.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn with_payloads(payloads: &[u8]) -> TestResult<Self> {
         let mut store = MemoryStore::new();
         store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
         let timeline = store.create_timeline("recorded-replay")?.id();
         let entity = EntityId::new();
-        for payload in PAYLOADS {
+        for &payload in payloads {
             let draft = EventDraft::new(
                 entity,
                 Kind::new(EVENT_TYPE),
@@ -123,6 +130,7 @@ impl Recording {
             timeline,
             entity,
             export,
+            payloads: payloads.to_vec(),
             driver_calls,
             _driver: driver,
         })
@@ -132,13 +140,13 @@ impl Recording {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn assert_side_effect_free(&self) -> TestResult {
         assert_eq!(self.driver_calls.load(Ordering::SeqCst), 0);
-        let appended = self.store.read(self.timeline, SeqRange::all())?.len() - PAYLOADS.len();
-        assert_eq!(appended, 0);
+        let recorded = self.store.read(self.timeline, SeqRange::all())?.len();
+        assert_eq!(recorded, self.payloads.len());
         let head = self
             .store
             .get_timeline(self.timeline)?
             .map(|timeline| timeline.head.as_u64());
-        assert_eq!(head, Some(2));
+        assert_eq!(head, Some(u64::try_from(self.payloads.len())?));
         Ok(())
     }
 
@@ -163,7 +171,7 @@ impl Recording {
     fn expected(&self, count: u64) -> TestResult<AuthoritativeStreamV1> {
         let timeline_id = self.timeline.inner().to_bytes();
         let mut events = BTreeMap::new();
-        for (event, payload) in self.export.events.iter().zip(PAYLOADS) {
+        for (event, &payload) in self.export.events.iter().zip(&self.payloads) {
             let identity = digest(
                 b"PiglorOS.RecordedReplayEventIdentity.v1",
                 &[
@@ -190,10 +198,12 @@ impl Recording {
             );
         }
         let mut states = serde_json::Map::new();
-        states.insert(
-            self.entity.inner().to_string(),
-            serde_json::json!({"fields": {"count": count}}),
-        );
+        if count > 0 {
+            states.insert(
+                self.entity.inner().to_string(),
+                serde_json::json!({"fields": {"count": count}}),
+            );
+        }
         let mut snapshot = serde_json::Map::new();
         snapshot.insert(REDUCER.to_owned(), serde_json::json!({"states": states}));
         let bytes = pos_crypto::canonical::encode(&snapshot)?;
@@ -203,7 +213,7 @@ impl Recording {
         };
         let coordinate = TickBoundaryCoordinateV1 {
             timeline_id,
-            fold_cursor: 2,
+            fold_cursor: u64::try_from(self.payloads.len())?,
             tick: 0,
         };
         Ok(AuthoritativeStreamV1 {
@@ -228,7 +238,10 @@ fn digest(domain: &[u8], parts: &[&[u8]]) -> [u8; 32] {
 /// The documented authoritative result digest of a rebuilt stream.
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn result_digest(stream: &AuthoritativeStreamV1) -> [u8; 32] {
-    let mut parts: Vec<Vec<u8>> = Vec::new();
+    let mut parts: Vec<Vec<u8>> = vec![u64::try_from(stream.events.len())
+        .unwrap_or(u64::MAX)
+        .to_be_bytes()
+        .to_vec()];
     for (position, event) in &stream.events {
         parts.push(position.timeline_id.to_vec());
         parts.push(position.seq.to_be_bytes().to_vec());
@@ -236,6 +249,12 @@ fn result_digest(stream: &AuthoritativeStreamV1) -> [u8; 32] {
         parts.push(event.schema.to_vec());
         parts.push(blake3::hash(&event.payload).as_bytes().to_vec());
     }
+    parts.push(
+        u64::try_from(stream.checkpoints.len())
+            .unwrap_or(u64::MAX)
+            .to_be_bytes()
+            .to_vec(),
+    );
     for (coordinate, checkpoint) in &stream.checkpoints {
         parts.push(coordinate.timeline_id.to_vec());
         parts.push(coordinate.fold_cursor.to_be_bytes().to_vec());
@@ -412,7 +431,7 @@ fn run(
     evaluation: &ReplayClaimEvaluationV1,
     projections: &mut ProjectionRegistry,
 ) -> TestResult<RecordedReplayOutcomeV1> {
-    let expected = recording.expected(2)?;
+    let expected = recording.expected(u64::try_from(recording.payloads.len())?)?;
     let outcome = execute_recorded_replay_v1(
         RecordedReplayInputV1 {
             preflight: fixture.preflight(),
@@ -659,6 +678,20 @@ fn inv_002_an_incomplete_closure_is_unverifiable_artifacts_missing() -> TestResu
     )?;
     assert_refused(&outcome, missing, Some("artifact_closure"));
 
+    let empty_licence = RecordedReplayClosureV1 {
+        licence: Some(b"".as_slice()),
+        ..recording.closure()
+    };
+    let outcome = run(
+        &recording,
+        &fixture,
+        empty_licence,
+        &evaluation_exact()?,
+        &mut projections(),
+    )?;
+    assert_refused(&outcome, missing, Some("artifact_closure"));
+    assert_eq!(outcome.result.checked_artifact_count, 1);
+
     let mut reported_incomplete = Fixture::recorded()?;
     reported_incomplete.evidence.artifact_closure = ArtifactClosureStatusV1::Incomplete;
     let outcome = run(
@@ -766,7 +799,16 @@ fn adr_060_degradation_never_strengthens_the_claim() -> TestResult {
         ArtifactTransitionRuleV1::PreserveExact,
         ArtifactStateV1::Retained,
     )?;
-    for evaluation in [structural, erased, foreign] {
+    let structural_claim = (
+        VerificationOutcomeV1::UnverifiableArtifactsMissing,
+        ReplayClaimV1::StructuralOnly,
+        SafeErrorCodeV1::ProvenanceMissing,
+    );
+    for (evaluation, expected) in [
+        (structural, structural_claim),
+        (erased, missing),
+        (foreign, missing),
+    ] {
         let outcome = run(
             &recording,
             &fixture,
@@ -774,7 +816,7 @@ fn adr_060_degradation_never_strengthens_the_claim() -> TestResult {
             &evaluation,
             &mut projections(),
         )?;
-        assert_refused(&outcome, missing, Some("replay_claim"));
+        assert_refused(&outcome, expected, Some("replay_claim"));
     }
 
     let mut structural_manifest = Fixture::recorded()?;
@@ -787,7 +829,28 @@ fn adr_060_degradation_never_strengthens_the_claim() -> TestResult {
         &evaluation_exact()?,
         &mut projections(),
     )?;
-    assert_refused(&outcome, missing, Some("replay_claim"));
+    assert_refused(&outcome, structural_claim, Some("replay_claim"));
+
+    // A missing closure member keeps a structural claim distinct too.
+    let outcome = run(
+        &recording,
+        &structural_manifest,
+        RecordedReplayClosureV1 {
+            licence: None,
+            ..recording.closure()
+        },
+        &evaluation_exact()?,
+        &mut projections(),
+    )?;
+    assert_refused(
+        &outcome,
+        (
+            VerificationOutcomeV1::UnverifiableArtifactsMissing,
+            ReplayClaimV1::StructuralOnly,
+            SafeErrorCodeV1::ClosureIncomplete,
+        ),
+        Some("artifact_closure"),
+    );
 
     let incompatible = evaluation(
         ErasureReplayClaimV1::IncompatibleProfile,
@@ -865,6 +928,92 @@ fn a_denied_snapshot_fence_is_unverifiable_artifacts_missing() -> TestResult {
             SafeErrorCodeV1::ProvenanceMissing,
         ),
         Some("replay_claim"),
+    );
+    Ok(())
+}
+
+#[test]
+fn a_revoked_artifact_is_invalid_manifest_at_revocation() -> TestResult {
+    let recording = Recording::new()?;
+    let mut fixture = Fixture::recorded()?;
+    fixture.evidence.artifact_revocation = ArtifactRevocationStatusV1::Revoked;
+    let outcome = run(
+        &recording,
+        &fixture,
+        recording.closure(),
+        &evaluation_exact()?,
+        &mut projections(),
+    )?;
+    assert_refused(
+        &outcome,
+        (
+            VerificationOutcomeV1::InvalidManifest,
+            ReplayClaimV1::Exact,
+            SafeErrorCodeV1::ArtifactRevoked,
+        ),
+        Some("revocation"),
+    );
+    Ok(())
+}
+
+#[test]
+fn an_export_out_of_timeline_order_is_refused_before_any_fold() -> TestResult {
+    let recording = Recording::with_payloads(&[7, 9, 11])?;
+    let fixture = Fixture::recorded()?;
+    let mut duplicate = recording.export.clone();
+    duplicate.events[2].seq = duplicate.events[1].seq;
+    let mut decreasing = recording.export.clone();
+    decreasing.events.swap(0, 2);
+    for export in [&duplicate, &decreasing] {
+        let mut projections = projections();
+        let outcome = run(
+            &recording,
+            &fixture,
+            RecordedReplayClosureV1 {
+                timeline_export: Some(ExportedTimelineMemberV1 {
+                    export,
+                    artifact_digest: EXPORT_DIGEST,
+                }),
+                licence: Some(LICENCE),
+            },
+            &evaluation_exact()?,
+            &mut projections,
+        )?;
+        assert_refused(
+            &outcome,
+            (
+                VerificationOutcomeV1::InvalidManifest,
+                ReplayClaimV1::Exact,
+                SafeErrorCodeV1::NonCanonicalOrder,
+            ),
+            Some("artifact_closure"),
+        );
+        assert_eq!(
+            projections.state_for(recording.timeline, &recording.entity)?,
+            None
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn an_empty_export_is_verified_exact_at_fold_cursor_zero() -> TestResult {
+    let recording = Recording::with_payloads(&[])?;
+    let fixture = Fixture::recorded()?;
+    let outcome = run(
+        &recording,
+        &fixture,
+        recording.closure(),
+        &evaluation_exact()?,
+        &mut projections(),
+    )?;
+    assert_eq!(
+        outcome.result.verification_outcome,
+        VerificationOutcomeV1::VerifiedExact
+    );
+    assert_eq!(
+        outcome.result.authoritative_result_digest,
+        Some(result_digest(&recording.expected(0)?))
     );
     Ok(())
 }
