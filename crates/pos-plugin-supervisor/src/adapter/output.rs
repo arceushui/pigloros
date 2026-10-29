@@ -51,8 +51,8 @@ pub(super) fn map_draft(draft: &EventDraftV1) -> Result<DeclaredOutputV1, Error>
 }
 
 /// A length as a `u64`, saturating.
-fn length(bytes: &[u8]) -> u64 {
-    u64::try_from(bytes.len()).unwrap_or(u64::MAX)
+fn length(len: usize) -> u64 {
+    u64::try_from(len).unwrap_or(u64::MAX)
 }
 
 /// The summed `canonical_payload` lengths of `output`'s drafts, saturating.
@@ -60,7 +60,7 @@ fn payload_bytes(output: &PluginOutputV1) -> u64 {
     output
         .event_drafts
         .iter()
-        .map(|draft| length(&draft.canonical_payload))
+        .map(|draft| length(draft.canonical_payload.len()))
         .fold(0, u64::saturating_add)
 }
 
@@ -70,9 +70,9 @@ fn payload_bytes(output: &PluginOutputV1) -> u64 {
 /// effective `event_bytes` limit.
 pub(super) fn output_usage(output: &PluginOutputV1) -> OutputUsageV1 {
     OutputUsageV1 {
-        event_count: u64::try_from(output.event_drafts.len()).unwrap_or(u64::MAX),
+        event_count: length(output.event_drafts.len()),
         event_payload_bytes: payload_bytes(output),
-        state_bytes: length(&output.next_state_bytes),
+        state_bytes: length(output.next_state_bytes.len()),
     }
 }
 
