@@ -101,6 +101,7 @@ pub fn of_outcome(outcome: &CommunityPluginSubjectOutcomeV1) -> SubResultV1 {
         CommunityPluginSubjectResultV1::Committed {
             output_digest: Some(output_digest),
             metering: Some(metering),
+            ..
         } => usage_of(metering).map_or(SubResultV1::Operational, |usage| SubResultV1::Committed {
             output_digest,
             usage,

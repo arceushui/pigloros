@@ -23,7 +23,9 @@ use pos_runtime::community_plugin_host::{
 };
 use pos_runtime::{DomainImplementationKindV1, PluginIsolationV1, PluginPinV1};
 
-use crate::adapter::{CommunityDriverConfigV1, CommunityDriverSettingsV1, InvocationBindingV1};
+use crate::adapter::{
+    CommunityDriverConfigV1, CommunityDriverSettingsV1, InvocationBindingV1, OutputUsageV1,
+};
 
 pub use crate::supervisor::{NOT_ACTIVE, UNAVAILABLE};
 
@@ -46,6 +48,14 @@ pub const METERING: MeteringV1 = MeteringV1 {
     call_fuel: 300,
     memory_bytes: 65_536,
     host_calls: 4_294_967_296,
+};
+
+/// The output usage the host measures for a staged [`output()`]: one draft of
+/// 7 payload bytes and a 4-byte next state.
+pub const OUTPUT_USAGE: OutputUsageV1 = OutputUsageV1 {
+    event_count: 1,
+    event_payload_bytes: 7,
+    state_bytes: 4,
 };
 
 /// The value of `result`, or a test failure that names the error.

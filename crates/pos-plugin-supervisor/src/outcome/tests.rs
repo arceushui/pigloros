@@ -11,7 +11,7 @@ use pos_runtime::community_plugin_host::{
 use super::*;
 use crate::test_support::{
     fixture_runtime, negotiated_under, negotiated_with, profile_without_digest, METERING,
-    SMALL_BUDGET,
+    OUTPUT_USAGE, SMALL_BUDGET,
 };
 
 type Error = CommunityPluginHostErrorV1;
@@ -55,6 +55,7 @@ fn receipt(
         negotiated,
         output_digest: Some([7; 32]),
         metering: Some(METERING),
+        output_usage: Some(OUTPUT_USAGE),
         dropped_trace_annotations: 0,
         failure,
         guest_error: None,
@@ -77,6 +78,7 @@ fn staged() -> Verdict {
     Verdict::Staged {
         output_digest: Some([7; 32]),
         metering: Some(METERING),
+        output_usage: Some(OUTPUT_USAGE),
     }
 }
 
@@ -113,11 +115,60 @@ fn a_receipt_without_failure_gives_its_disposition() {
     let expected = Verdict::Committed {
         output_digest: digest,
         metering,
+        output_usage: Some(OUTPUT_USAGE),
     };
     assert_eq!(committed.result, expected);
     let dropped = local_receipt(None, ReceiptDispositionV1::Discarded);
     assert_eq!(dropped.result, Verdict::Discarded);
     assert_eq!(dropped.pmf1_digest, Some([1; 32]));
+}
+
+/// ADR-068 R4 test 2: `assemble` copies the receipt's output usage into `Staged` and
+/// `Committed`, as it is (`None` stays `None`); every other result carries none.
+#[test]
+fn the_output_usage_is_copied_into_staged_and_committed_only() {
+    let usage_of = |result: Verdict| match result {
+        Verdict::Staged { output_usage, .. } | Verdict::Committed { output_usage, .. } => {
+            output_usage
+        }
+        Verdict::Refused { .. } | Verdict::Failed { .. } | Verdict::NotRun | Verdict::Discarded => {
+            None
+        }
+    };
+    for disposition in [
+        ReceiptDispositionV1::Staged,
+        ReceiptDispositionV1::Committed,
+    ] {
+        let copied = local_receipt(None, disposition);
+        assert_eq!(usage_of(copied.result), Some(OUTPUT_USAGE));
+        let negotiated = negotiated_with("plugin-a", SMALL_BUDGET, Vec::new());
+        let unmeasured = CommunityInvocationReceiptV1 {
+            output_usage: None,
+            ..receipt(negotiated, None, disposition)
+        };
+        let outcome = Outcome::assemble(&member(Ok(summary()), None), 9, LOCAL, Some(&unmeasured));
+        assert_eq!(usage_of(outcome.result), None);
+    }
+    let others = [
+        local_receipt(None, ReceiptDispositionV1::Discarded),
+        local_receipt(
+            Some(Error::OutputLimitExceeded),
+            ReceiptDispositionV1::Staged,
+        ),
+        local_receipt(
+            Some(Error::InvalidInvocation),
+            ReceiptDispositionV1::Committed,
+        ),
+        without_receipt(Ok(summary()), None),
+        without_receipt(Ok(summary()), Some(Error::WorkerCrashed)),
+    ];
+    for outcome in others {
+        assert!(!matches!(
+            outcome.result,
+            Verdict::Staged { .. } | Verdict::Committed { .. }
+        ));
+        assert_eq!(usage_of(outcome.result), None);
+    }
 }
 
 #[test]
@@ -227,6 +278,7 @@ fn every_result() -> [Verdict; 6] {
     let committed = Verdict::Committed {
         output_digest: None,
         metering: None,
+        output_usage: None,
     };
     [
         staged(),
