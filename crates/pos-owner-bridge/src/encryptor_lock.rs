@@ -55,11 +55,9 @@ mod tests {
                 UnavailableCode::PlatformUnsupported
             ))
         );
-        let expected = if cfg!(target_os = "linux") {
-            TargetOs::Linux
-        } else {
-            TargetOs::Other
-        };
-        assert_eq!(HOST_TARGET_OS, expected);
+        #[cfg(target_os = "linux")]
+        assert_eq!(HOST_TARGET_OS, TargetOs::Linux);
+        #[cfg(not(target_os = "linux"))]
+        assert_eq!(HOST_TARGET_OS, TargetOs::Other);
     }
 }
