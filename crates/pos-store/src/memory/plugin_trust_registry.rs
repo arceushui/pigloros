@@ -1,4 +1,4 @@
-//! `MemoryStore` adapter for the ADR-103 revisions 4 and 5 Plugin trust policy registry port.
+//! `MemoryStore` adapter for the ADR-103 revisions 4, 5 and 7 Plugin trust policy registry port.
 //!
 //! The registry state is one more `MemoryStore` field, so an activation Event
 //! shares the store's single mutable owner with the decision that authorized
@@ -19,6 +19,7 @@ use std::collections::BTreeMap;
 
 use pos_conformance::{PluginFloorStateV1, PluginTrustPolicyAnchorV1};
 use pos_core::{ErasureProtectedOperationV1, TimelineId};
+use pos_crypto::plugin_manifest::VerifiedPluginReleaseSignatureV1;
 use pos_crypto::plugin_trust::{
     ValidatedPluginManifestProjectionV1, VerifiedPluginTrustEvidenceV1,
 };
@@ -238,11 +239,12 @@ impl MemoryStore {
         &mut self,
         input: &PolicyInputV1<'_>,
         projection: &ValidatedPluginManifestProjectionV1,
+        release_proof: &VerifiedPluginReleaseSignatureV1,
         activation: &ActivationEventInputV1,
         faults: MemoryFaultsV1,
     ) -> RegistryResult<AdmittedPluginReleaseReceiptV1> {
         self.in_activation_fence(activation.timeline, |store| {
-            store.admit_fenced(input, projection, activation, faults)
+            store.admit_fenced(input, projection, release_proof, activation, faults)
         })
     }
 
@@ -250,12 +252,20 @@ impl MemoryStore {
         &mut self,
         input: &PolicyInputV1<'_>,
         projection: &ValidatedPluginManifestProjectionV1,
+        release_proof: &VerifiedPluginReleaseSignatureV1,
         activation: &ActivationEventInputV1,
         faults: MemoryFaultsV1,
     ) -> RegistryResult<AdmittedPluginReleaseReceiptV1> {
         let scope = input.anchor.scope();
         let utc = input.utc.as_i64();
-        match plan_admit(&self.plugin_trust, input, projection, activation)? {
+        let plan = plan_admit(
+            &self.plugin_trust,
+            input,
+            projection,
+            release_proof,
+            activation,
+        )?;
+        match plan {
             AdmitPlanV1::Replay(decision) => self
                 .plugin_trust
                 .with_scope(scope, |state| state.raise_utc(utc))
@@ -282,11 +292,12 @@ impl MemoryStore {
         &mut self,
         input: &PolicyInputV1<'_>,
         target: &ValidatedPluginManifestProjectionV1,
+        release_proof: &VerifiedPluginReleaseSignatureV1,
         activation: &ActivationEventInputV1,
         faults: MemoryFaultsV1,
     ) -> RegistryResult<PluginRollbackReceiptV1> {
         self.in_activation_fence(activation.timeline, |store| {
-            store.rollback_fenced(input, target, activation, faults)
+            store.rollback_fenced(input, target, release_proof, activation, faults)
         })
     }
 
@@ -294,12 +305,14 @@ impl MemoryStore {
         &mut self,
         input: &PolicyInputV1<'_>,
         target: &ValidatedPluginManifestProjectionV1,
+        release_proof: &VerifiedPluginReleaseSignatureV1,
         activation: &ActivationEventInputV1,
         faults: MemoryFaultsV1,
     ) -> RegistryResult<PluginRollbackReceiptV1> {
         let scope = input.anchor.scope();
         let utc = input.utc.as_i64();
-        match plan_rollback(&self.plugin_trust, input, target, activation)? {
+        let plan = plan_rollback(&self.plugin_trust, input, target, release_proof, activation)?;
+        match plan {
             RollbackPlanV1::Replay(facts) => self
                 .plugin_trust
                 .with_scope(scope, |state| state.raise_utc(utc))
@@ -342,8 +355,8 @@ impl PluginTrustPolicyRegistryV1 for MemoryStore {
         tps1_bytes: &[u8],
         evidence: &VerifiedPluginTrustEvidenceV1,
         projection: &ValidatedPluginManifestProjectionV1,
-        trusted_utc: TrustedUtcSecondV1,
-        tick: u64,
+        release_proof: &VerifiedPluginReleaseSignatureV1,
+        (trusted_utc, tick): (TrustedUtcSecondV1, u64),
         activation: ActivationEventInputV1,
     ) -> RegistryResult<AdmittedPluginReleaseReceiptV1> {
         let input = PolicyInputV1 {
@@ -353,7 +366,8 @@ impl PluginTrustPolicyRegistryV1 for MemoryStore {
             utc: trusted_utc,
             tick,
         };
-        self.admit_with_faults(&input, projection, &activation, MemoryFaultsV1::NONE)
+        let faults = MemoryFaultsV1::NONE;
+        self.admit_with_faults(&input, projection, release_proof, &activation, faults)
     }
 
     fn advance_policy(
@@ -384,8 +398,8 @@ impl PluginTrustPolicyRegistryV1 for MemoryStore {
         tps1_bytes: &[u8],
         evidence: &VerifiedPluginTrustEvidenceV1,
         target: &ValidatedPluginManifestProjectionV1,
-        trusted_utc: TrustedUtcSecondV1,
-        tick: u64,
+        release_proof: &VerifiedPluginReleaseSignatureV1,
+        (trusted_utc, tick): (TrustedUtcSecondV1, u64),
         activation: ActivationEventInputV1,
     ) -> RegistryResult<PluginRollbackReceiptV1> {
         let input = PolicyInputV1 {
@@ -395,7 +409,8 @@ impl PluginTrustPolicyRegistryV1 for MemoryStore {
             utc: trusted_utc,
             tick,
         };
-        self.rollback_with_faults(&input, target, &activation, MemoryFaultsV1::NONE)
+        let faults = MemoryFaultsV1::NONE;
+        self.rollback_with_faults(&input, target, release_proof, &activation, faults)
     }
 
     fn retained_release_decision(
@@ -506,6 +521,7 @@ mod tests {
             store.admit_with_faults(
                 &input,
                 &release_one().projection()?,
+                &release_one().release_proof()?,
                 &activation(timeline, 1),
                 failing
             ),
@@ -523,8 +539,8 @@ mod tests {
                 &genesis.tps1,
                 &genesis.evidence,
                 &manifest.projection()?,
-                utc,
-                genesis.tick,
+                &manifest.release_proof()?,
+                (utc, genesis.tick),
                 activation(timeline, tag),
             )?;
         }
@@ -534,6 +550,7 @@ mod tests {
             store.rollback_with_faults(
                 &input,
                 &release_one().projection()?,
+                &release_one().release_proof()?,
                 &activation(timeline, 3),
                 failing
             ),
@@ -564,8 +581,9 @@ mod tests {
             Some(PluginTrustPolicyRegistryErrorV1::StorageIndeterminate),
         );
         let one = release_one().projection()?;
+        let proof = release_one().release_proof()?;
         assert_eq!(
-            store.admit_with_faults(&input, &one, &activation(timeline, 1), lost),
+            store.admit_with_faults(&input, &one, &proof, &activation(timeline, 1), lost),
             Err(PluginTrustPolicyRegistryErrorV1::StorageIndeterminate)
         );
         let committed = store
@@ -577,8 +595,8 @@ mod tests {
             &genesis.tps1,
             &genesis.evidence,
             &one,
-            utc,
-            genesis.tick,
+            &proof,
+            (utc, genesis.tick),
             activation(timeline, 1),
         )?;
         assert_eq!(
@@ -594,12 +612,12 @@ mod tests {
             &genesis.tps1,
             &genesis.evidence,
             &release_two().projection()?,
-            utc,
-            genesis.tick,
+            &release_two().release_proof()?,
+            (utc, genesis.tick),
             activation(timeline, 2),
         )?;
         assert_eq!(
-            store.rollback_with_faults(&input, &one, &activation(timeline, 3), lost),
+            store.rollback_with_faults(&input, &one, &proof, &activation(timeline, 3), lost),
             Err(PluginTrustPolicyRegistryErrorV1::StorageIndeterminate)
         );
         let active = store
@@ -612,8 +630,8 @@ mod tests {
             &genesis.tps1,
             &genesis.evidence,
             &one,
-            utc,
-            genesis.tick,
+            &proof,
+            (utc, genesis.tick),
             activation(timeline, 3),
         )?;
         assert_eq!(
@@ -674,8 +692,8 @@ mod tests {
                     &genesis.tps1,
                     &genesis.evidence,
                     &one,
-                    utc,
-                    genesis.tick,
+                    &release_one().release_proof()?,
+                    (utc, genesis.tick),
                     activation(timeline, 1)
                 ),
                 Err(PluginTrustPolicyRegistryErrorV1::CorruptState)
@@ -686,8 +704,8 @@ mod tests {
                     &genesis.tps1,
                     &genesis.evidence,
                     &one,
-                    utc,
-                    genesis.tick,
+                    &release_one().release_proof()?,
+                    (utc, genesis.tick),
                     activation(timeline, 1)
                 ),
                 Err(PluginTrustPolicyRegistryErrorV1::CorruptState)
@@ -713,8 +731,8 @@ mod tests {
                 &genesis.tps1,
                 &genesis.evidence,
                 &release_one().projection()?,
-                genesis.trusted()?,
-                genesis.tick,
+                &release_one().release_proof()?,
+                (genesis.trusted()?, genesis.tick),
                 activation(timeline, 1)
             ),
             Err(PluginTrustPolicyRegistryErrorV1::ActivationEventRejected)

@@ -185,7 +185,9 @@ const fn floor_error(error: PluginFloorErrorV1) -> CommunityPluginHostErrorV1 {
 /// Public for the R7-F5 public vector; the gate is the only production caller.
 ///
 /// Variants that no read-only evaluation raises are mapped defensively to
-/// `TrustStateUnavailable`.
+/// `TrustStateUnavailable`. So is `ReleaseProofMismatch` (ADR-103 revision 7),
+/// which the installer path can raise: it is a composition defect, not a
+/// verdict on the release.
 #[must_use]
 pub const fn host_error_for_registry_v1(
     error: PluginTrustPolicyRegistryErrorV1,
@@ -213,6 +215,7 @@ pub const fn host_error_for_registry_v1(
         | PluginTrustPolicyRegistryErrorV1::UnknownRollbackTarget
         | PluginTrustPolicyRegistryErrorV1::NoActiveRelease
         | PluginTrustPolicyRegistryErrorV1::RollbackTargetActive
+        | PluginTrustPolicyRegistryErrorV1::ReleaseProofMismatch
         | PluginTrustPolicyRegistryErrorV1::ActivationEventRejected
         | PluginTrustPolicyRegistryErrorV1::NestedTransaction
         | PluginTrustPolicyRegistryErrorV1::WalRequired

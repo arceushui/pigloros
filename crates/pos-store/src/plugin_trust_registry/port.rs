@@ -1,6 +1,7 @@
-//! The Plugin trust policy registry port (ADR-103 revisions 4 and 5).
+//! The Plugin trust policy registry port (ADR-103 revisions 4, 5 and 7).
 
 use pos_conformance::PluginTrustPolicyAnchorV1;
+use pos_crypto::plugin_manifest::VerifiedPluginReleaseSignatureV1;
 use pos_crypto::plugin_trust::{
     ValidatedPluginManifestProjectionV1, VerifiedPluginTrustEvidenceV1,
 };
@@ -13,7 +14,7 @@ use super::types::{
 };
 use super::utc::TrustedUtcSecondV1;
 
-/// The durable Plugin trust policy registry (ADR-103 revisions 4 and 5).
+/// The durable Plugin trust policy registry (ADR-103 revisions 4, 5 and 7).
 ///
 /// Only the private trusted composition boundary constructs the anchor,
 /// trusted-time, Tick, and manifest-projection inputs;
@@ -22,6 +23,13 @@ use super::utc::TrustedUtcSecondV1;
 /// retained record, or ledger row claims trust-policy admission only: it never
 /// claims the PMF1 publisher signature is valid, and no method accepts one of
 /// them as live authority.
+///
+/// `admit` and `rollback` require a release proof (revision 7): a
+/// `VerifiedPluginReleaseSignatureV1` that must name the complete-PMF1 digest,
+/// the release digest and the public key of the registry's own authorization
+/// of the projection, else `ReleaseProofMismatch`. The registry checks that
+/// binding only; it does not re-verify the signature and retains nothing from
+/// the proof. Their UTC second and Tick are one `(trusted_utc, tick)` pair.
 ///
 /// Writes take `&mut self` and commit all of their state or none; reads take
 /// `&self`, and so does the read-only `evaluate_current_release`. A write validates the
@@ -42,6 +50,9 @@ pub trait PluginTrustPolicyRegistryV1 {
 
     /// Admit and activate one release, or return the identical earlier decision.
     ///
+    /// `release_proof` must bind the authorized release and key; `coordinates`
+    /// is the trusted UTC second and the Tick of the transaction.
+    ///
     /// # Errors
     /// Returns the closed registry error of the first failing step.
     fn admit(
@@ -50,8 +61,8 @@ pub trait PluginTrustPolicyRegistryV1 {
         tps1_bytes: &[u8],
         evidence: &VerifiedPluginTrustEvidenceV1,
         projection: &ValidatedPluginManifestProjectionV1,
-        trusted_utc: TrustedUtcSecondV1,
-        tick: u64,
+        release_proof: &VerifiedPluginReleaseSignatureV1,
+        coordinates: (TrustedUtcSecondV1, u64),
         activation: ActivationEventInputV1,
     ) -> Result<AdmittedPluginReleaseReceiptV1, PluginTrustPolicyRegistryErrorV1>;
 
@@ -70,6 +81,9 @@ pub trait PluginTrustPolicyRegistryV1 {
 
     /// Re-activate a previously admitted release of the active Plugin ID.
     ///
+    /// `release_proof` must bind the authorized target and key; `coordinates`
+    /// is the trusted UTC second and the Tick of the transaction.
+    ///
     /// # Errors
     /// Returns the closed registry error of the first failing step.
     fn rollback(
@@ -78,8 +92,8 @@ pub trait PluginTrustPolicyRegistryV1 {
         tps1_bytes: &[u8],
         evidence: &VerifiedPluginTrustEvidenceV1,
         target: &ValidatedPluginManifestProjectionV1,
-        trusted_utc: TrustedUtcSecondV1,
-        tick: u64,
+        release_proof: &VerifiedPluginReleaseSignatureV1,
+        coordinates: (TrustedUtcSecondV1, u64),
         activation: ActivationEventInputV1,
     ) -> Result<PluginRollbackReceiptV1, PluginTrustPolicyRegistryErrorV1>;
 

@@ -1,9 +1,11 @@
-//! Shared Plugin trust policy registry fixtures (ADR-103 revisions 4 and 5).
+//! Shared Plugin trust policy registry fixtures (ADR-103 revisions 4, 5 and 7).
 //!
 //! One [`Env`] is one policy scope with an operator key, a PTR1 root key, and
 //! publisher keys. [`Spec`] picks the PTR1/PRV1 chain shape and the evaluation
 //! coordinates, [`TpsSpec`] picks the TPS1 content, and [`Material`] bundles
-//! the verified evidence with the matching operator-signed TPS1. Every digest
+//! the verified evidence with the matching operator-signed TPS1. A
+//! [`ManifestSpec`] yields both the projection and the release proof bound to it
+//! (revision 7), built from the `test-support` token fixture. Every digest
 //! here is recomputed from the public encodings, independently of the registry.
 //! The public tests and the adapter unit tests include this one file; the
 //! items are public so that no test crate sees them as unused.
@@ -25,6 +27,9 @@ use pos_core::{
     trusted_clock::ScriptedTrustedWallSourceV1,
     CanonicalBytes, EntityId, ErasureContainmentGateV1, Event, EventDraft, Hasher, Kind, OwnerIdV1,
     TimelineId,
+};
+use pos_crypto::plugin_manifest::{
+    PluginReleaseSignatureFixtureV1, VerifiedPluginReleaseSignatureV1,
 };
 use pos_crypto::plugin_trust::{
     verify_plugin_trust_v1, PluginManifestProjectionFixtureV1, TrustedPluginRootAnchorV1,
@@ -657,6 +662,56 @@ impl ManifestSpec {
         ))
     }
 
+    /// The raw token fields bound to this projection.
+    ///
+    /// They name its digests and the publisher key of its epoch, which the fixture PTR1 grants.
+    ///
+    /// # Errors
+    /// Returns the fixture construction error.
+    pub fn proof_fields(&self) -> TestResult<PluginReleaseSignatureFixtureV1> {
+        Ok(PluginReleaseSignatureFixtureV1 {
+            pmf1_digest: [self.pmf1; 32],
+            release_digest: [self.release; 32],
+            owner: OwnerIdV1::new(OWNER)?,
+            epoch: self.epoch,
+            public_key: publisher_public(self.epoch),
+        })
+    }
+
+    /// The release proof bound to this projection (revision 7).
+    ///
+    /// # Errors
+    /// Returns the fixture construction error.
+    pub fn release_proof(&self) -> TestResult<VerifiedPluginReleaseSignatureV1> {
+        Ok(self.proof_fields()?.into())
+    }
+
+    /// Three release proofs that each differ from the bound one in exactly one field.
+    ///
+    /// The fields are the complete-PMF1 digest, the release digest, and the public key.
+    ///
+    /// # Errors
+    /// Returns the fixture construction error.
+    pub fn mismatched_proofs(&self) -> TestResult<[VerifiedPluginReleaseSignatureV1; 3]> {
+        let bound = self.proof_fields()?;
+        let other = !self.pmf1;
+        Ok([
+            PluginReleaseSignatureFixtureV1 {
+                pmf1_digest: [other; 32],
+                ..bound
+            },
+            PluginReleaseSignatureFixtureV1 {
+                release_digest: [!self.release; 32],
+                ..bound
+            },
+            PluginReleaseSignatureFixtureV1 {
+                public_key: other_publisher_public(),
+                ..bound
+            },
+        ]
+        .map(VerifiedPluginReleaseSignatureV1::from))
+    }
+
     /// A fixture value.
     #[must_use]
     pub const fn pmf1_digest(&self) -> [u8; 32] {
@@ -872,13 +927,28 @@ impl<S: Backend> Harness<S> {
         manifest: &ManifestSpec,
         activation: ActivationEventInputV1,
     ) -> TestResult<Registry<AdmittedPluginReleaseReceiptV1>> {
+        let proof = manifest.release_proof()?;
+        self.admit_proven(material, manifest, &proof, activation)
+    }
+
+    /// Admit `manifest` with `proof` as the release proof, bound or not.
+    ///
+    /// # Errors
+    /// Returns the fixture construction error; the registry result is the value.
+    pub fn admit_proven(
+        &mut self,
+        material: &Material,
+        manifest: &ManifestSpec,
+        proof: &VerifiedPluginReleaseSignatureV1,
+        activation: ActivationEventInputV1,
+    ) -> TestResult<Registry<AdmittedPluginReleaseReceiptV1>> {
         Ok(self.store.admit(
             &self.env.anchor,
             &material.tps1,
             &material.evidence,
             &manifest.projection()?,
-            material.trusted()?,
-            material.tick,
+            proof,
+            (material.trusted()?, material.tick),
             activation,
         ))
     }
@@ -921,13 +991,28 @@ impl<S: Backend> Harness<S> {
         target: &ManifestSpec,
         activation: ActivationEventInputV1,
     ) -> TestResult<Registry<PluginRollbackReceiptV1>> {
+        let proof = target.release_proof()?;
+        self.rollback_proven(material, target, &proof, activation)
+    }
+
+    /// Roll back to `target` with `proof` as the release proof, bound or not.
+    ///
+    /// # Errors
+    /// Returns the fixture construction error; the registry result is the value.
+    pub fn rollback_proven(
+        &mut self,
+        material: &Material,
+        target: &ManifestSpec,
+        proof: &VerifiedPluginReleaseSignatureV1,
+        activation: ActivationEventInputV1,
+    ) -> TestResult<Registry<PluginRollbackReceiptV1>> {
         Ok(self.store.rollback(
             &self.env.anchor,
             &material.tps1,
             &material.evidence,
             &target.projection()?,
-            material.trusted()?,
-            material.tick,
+            proof,
+            (material.trusted()?, material.tick),
             activation,
         ))
     }

@@ -157,6 +157,7 @@ const fn registry_index(error: Reg) -> usize {
         Reg::Bridge(_) => 19,
         Reg::Floor(_) => 20,
         Reg::Trust(_) => 21,
+        Reg::ReleaseProofMismatch => 22,
     }
 }
 
@@ -264,6 +265,8 @@ fn registry_errors_map_row_by_row() {
         (Reg::UnknownRollbackTarget, TSU),
         (Reg::NoActiveRelease, TSU),
         (Reg::RollbackTargetActive, TSU),
+        // ADR-103 revision 7 (R7-T6): a composition defect, not a verdict on the release.
+        (Reg::ReleaseProofMismatch, TSU),
         (Reg::ActivationEventRejected, TSU),
         (Reg::NestedTransaction, TSU),
         (Reg::WalRequired, TSU),
@@ -276,7 +279,7 @@ fn registry_errors_map_row_by_row() {
         (Reg::Floor(PluginFloorErrorV1::PartialFloorState), TSU),
         (Reg::Trust(PluginTrustErrorV1::ManifestExpired), EXPIRED),
     ];
-    check(&rows, host_error_for_registry_v1, registry_index, 22);
+    check(&rows, host_error_for_registry_v1, registry_index, 23);
 }
 
 #[test]

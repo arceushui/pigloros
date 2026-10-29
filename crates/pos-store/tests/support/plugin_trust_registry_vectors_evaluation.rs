@@ -705,8 +705,8 @@ fn scopes_evaluate_independently() -> TestResult {
         &other_genesis.tps1,
         &other_genesis.evidence,
         &one.projection()?,
-        other_genesis.trusted()?,
-        other_genesis.tick,
+        &one.release_proof()?,
+        (other_genesis.trusted()?, other_genesis.tick),
         activation(h.timeline, 2),
     )?;
     let in_other = evaluate_in(&h, &other, &other_genesis, &one)??;

@@ -8,6 +8,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use pos_conformance::PluginTrustPolicyAnchorV1;
+use pos_crypto::plugin_manifest::VerifiedPluginReleaseSignatureV1;
 use pos_crypto::plugin_trust::{
     ValidatedPluginManifestProjectionV1, VerifiedPluginTrustEvidenceV1,
 };
@@ -75,8 +76,8 @@ impl PluginTrustPolicyRegistryV1 for Scripted<'_> {
         _tps1_bytes: &[u8],
         _evidence: &VerifiedPluginTrustEvidenceV1,
         _projection: &ValidatedPluginManifestProjectionV1,
-        _trusted_utc: TrustedUtcSecondV1,
-        _tick: u64,
+        _release_proof: &VerifiedPluginReleaseSignatureV1,
+        _coordinates: (TrustedUtcSecondV1, u64),
         _activation: ActivationEventInputV1,
     ) -> Registry<AdmittedPluginReleaseReceiptV1> {
         Err(Reg::NestedTransaction)
@@ -99,8 +100,8 @@ impl PluginTrustPolicyRegistryV1 for Scripted<'_> {
         _tps1_bytes: &[u8],
         _evidence: &VerifiedPluginTrustEvidenceV1,
         _target: &ValidatedPluginManifestProjectionV1,
-        _trusted_utc: TrustedUtcSecondV1,
-        _tick: u64,
+        _release_proof: &VerifiedPluginReleaseSignatureV1,
+        _coordinates: (TrustedUtcSecondV1, u64),
         _activation: ActivationEventInputV1,
     ) -> Registry<PluginRollbackReceiptV1> {
         Err(Reg::NestedTransaction)

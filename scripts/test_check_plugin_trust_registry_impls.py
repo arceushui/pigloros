@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Adversarial tests for the Plugin trust policy registry checker (ADR-103 revisions 4 and 5,
+"""Adversarial tests for the Plugin trust policy registry checker (ADR-103 revisions 4, 5 and 7,
 ADR-061 revision 8 rule 6)."""
 
 from __future__ import annotations
@@ -28,6 +28,7 @@ INSTALLER_BODY = (
     IMPORT + "fn f(s: &mut S, w: &mut W) { TrustedUtcSecondV1::from_source(w); s.admit(a); }\n"
 )
 REGISTRY_FILE = "crates/pos-store/src/plugin_trust_registry/types.rs"
+PORT_FILE = "crates/pos-store/src/plugin_trust_registry/port.rs"
 ADAPTER_FILE = "crates/pos-store/src/memory/plugin_trust_registry.rs"
 SQLITE_ADAPTER_FILE = "crates/pos-store/src/sqlite/plugin_trust_registry.rs"
 SQLITE_SIBLING_FILE = "crates/pos-store/src/sqlite/plugin_trust_registry_rows.rs"
@@ -94,6 +95,20 @@ ALLOWED = {
         "#[cfg(test)]\n#[path = \"plugin_trust_registry_tests.rs\"]\nmod tests;\n"
     ),
     SQLITE_SIBLING_FILE: "pub(super) fn insert_ledger() {}\n",
+    # ADR-103 revision 7 (R7-G2): the release proof type named by a private `use`, the
+    # `release_proof` parameter, and the `ReleaseProofMismatch` variant all pass the name lint.
+    PORT_FILE: (
+        "use pos_crypto::plugin_manifest::VerifiedPluginReleaseSignatureV1;\n"
+        "use pos_crypto::plugin_manifest::{VerifiedPluginReleaseSignatureV1 as Proof};\n"
+        "pub trait PluginTrustPolicyRegistryV1 {\n"
+        "    fn admit(&mut self, projection: &P, release_proof: &VerifiedPluginReleaseSignatureV1);\n"
+        "    fn rollback(&mut self, target: &P, release_proof: &VerifiedPluginReleaseSignatureV1);\n"
+        "}\n"
+        "pub(crate) fn plan_admit(release_proof: &VerifiedPluginReleaseSignatureV1) {}\n"
+        "pub enum PluginTrustPolicyRegistryErrorV1 {\n"
+        '    #[error("release proof does not bind the authorized release and key")]\n'
+        "    ReleaseProofMismatch,\n}\n"
+    ),
     SQLITE_SCHEMA_FILE: "pub(super) fn validate() {}\n",
     "crates/pos-store/src/sqlite/plugin_trust_registry_tests.rs": (
         GATE + IMPORT + "fn t(s: &mut S) { s.admit(a); s.rollback(a); s.provision(a); }\n"
@@ -270,6 +285,13 @@ FORBIDDEN_NAMES = {
     "module": "pub mod signature;\n",
     "reexport": "pub use other::authorize_from_receipt;\n",
     "reexport_list": "pub use other::{A, SignatureToken};\n",
+    # ADR-103 revision 7 (R7-G2): the registry names the release proof type only privately.
+    "reexport_release_proof": (
+        "pub use pos_crypto::plugin_manifest::VerifiedPluginReleaseSignatureV1;\n"
+    ),
+    "reexport_release_proof_in_list": (
+        "pub use pos_crypto::plugin_manifest::{VerifiedPluginReleaseSignatureV1 as Proof};\n"
+    ),
 }
 
 
@@ -340,6 +362,7 @@ def main() -> None:
     for label, text in FORBIDDEN_NAMES.items():
         for relative in (
             REGISTRY_FILE,
+            PORT_FILE,
             ADAPTER_FILE,
             SQLITE_ADAPTER_FILE,
             SQLITE_SIBLING_FILE,
