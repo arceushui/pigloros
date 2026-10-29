@@ -38,8 +38,8 @@ pub enum PluginReleaseSignatureErrorV1 {
 ///
 /// Production code constructs it only by
 /// [`verify_plugin_release_signature_v1()`]; the `test-support` feature adds a
-/// fixture conversion. It is a mathematical fact about exact bytes, not an
-/// admission decision.
+/// conversion from `PluginReleaseSignatureFixtureV1`. It is a mathematical fact
+/// about exact bytes, not an admission decision.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct VerifiedPluginReleaseSignatureV1 {
     pmf1_digest: Digest,
