@@ -11,7 +11,7 @@ use pos_plugin_publisher::test_support::{
     world::{activation, wall, World},
     BoxResult,
 };
-use pos_plugin_release::{BundleAddressV1, ReleaseSourceV1};
+use pos_plugin_release::{BundleAddressV1, ReleaseSourceV1, VerifiedReleaseBundleV1};
 use pos_store::plugin_trust_registry::TrustedUtcSecondV1;
 
 use super::*;
@@ -132,6 +132,20 @@ fn gated_through_facade(
     Ok(gated.is_ok())
 }
 
+/// The projection of `bundle` and its release proof, verified under `material`'s evidence.
+fn proven_projection(
+    material: &Material,
+    bundle: &VerifiedReleaseBundleV1,
+) -> BoxResult<(
+    ValidatedPluginManifestProjectionV1,
+    VerifiedPluginReleaseSignatureV1,
+)> {
+    let projection = ValidatedPluginManifestProjectionV1::from_verified_bundle(bundle)?;
+    let authorization = material.evidence.authorize_release(&projection)?;
+    let proof = verify_plugin_release_signature_v1(bundle, &authorization)?;
+    Ok((projection, proof))
+}
+
 /// The PMF1 digest, projection, verified release proof and trusted second of the release.
 fn release_inputs(
     world: &World,
@@ -144,9 +158,7 @@ fn release_inputs(
     TrustedUtcSecondV1,
 )> {
     let bundle = world.store.read_verified(address)?;
-    let projection = ValidatedPluginManifestProjectionV1::from_verified_bundle(&bundle)?;
-    let authorization = material.evidence.authorize_release(&projection)?;
-    let proof = verify_plugin_release_signature_v1(&bundle, &authorization)?;
+    let (projection, proof) = proven_projection(material, &bundle)?;
     let utc = TrustedUtcSecondV1::from_source(&mut wall(material.utc)?)?;
     Ok((pmf1_digest(&bundle), projection, proof, utc))
 }

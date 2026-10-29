@@ -360,11 +360,25 @@ fn check_release_proof(
         .ok_or(PluginTrustPolicyRegistryErrorV1::ReleaseProofMismatch)
 }
 
+/// The release-dependent tail of `admit` and `rollback`, which takes the release proof.
+///
+/// Order: `authorize_release` (`Trust`); the release proof binding (`ReleaseProofMismatch`);
+/// the TPS1 artifact-denial check; the floor plan, which only has to succeed.
+fn check_proven_release(
+    checked: &CheckedPolicyV1,
+    input: &PolicyInputV1<'_>,
+    projection: &ValidatedPluginManifestProjectionV1,
+    release_proof: &VerifiedPluginReleaseSignatureV1,
+) -> RegistryResult<ResolvedPluginTrustAuthorizationV1> {
+    let authorization = input.evidence.authorize_release(projection)?;
+    check_release_proof(release_proof, &authorization)?;
+    check_authorized_release(checked, input, &authorization)?;
+    Ok(authorization)
+}
+
 /// The release-dependent prefix of `admit` and `rollback`.
 ///
-/// Order: the shared prefix; `authorize_release` (`Trust`); the release proof binding
-/// (`ReleaseProofMismatch`); the TPS1 artifact-denial check; the floor plan, which only has to
-/// succeed.
+/// Order: the shared prefix; the proven release tail.
 fn check_release(
     tx: &impl PluginTrustTransactionV1,
     input: &PolicyInputV1<'_>,
@@ -372,9 +386,7 @@ fn check_release(
     release_proof: &VerifiedPluginReleaseSignatureV1,
 ) -> RegistryResult<(CheckedPolicyV1, ResolvedPluginTrustAuthorizationV1)> {
     let checked = check_policy(tx, input)?;
-    let authorization = input.evidence.authorize_release(projection)?;
-    check_release_proof(release_proof, &authorization)?;
-    check_authorized_release(&checked, input, &authorization)?;
+    let authorization = check_proven_release(&checked, input, projection, release_proof)?;
     Ok((checked, authorization))
 }
 
