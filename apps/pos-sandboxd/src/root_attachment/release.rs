@@ -10,7 +10,8 @@ impl VerifiedRootMount {
     /// and have stopped/removed its unit and proved process emptiness first.
     /// The durable intent, private parent identities and fresh mount/image
     /// readback must still match the mount node, device-mapper UUID and loop
-    /// name retained at activation. Cleanup uses that identity, without
+    /// name and boot-local block device generations retained at activation.
+    /// Cleanup uses that identity, without
     /// requiring renewed execution admission.
     ///
     /// Success acknowledges descriptor-bound lazy detachment only. Other held

@@ -7,7 +7,7 @@ use pos_reference::{
     provider_admission::HeldImageAdmission, sandbox_provider_protocol::PartitionDescriptor,
 };
 
-use super::observe::{LoopDevice, MountEntry, Node, Observations, Slave};
+use super::observe::{BlockIdentity, LoopDevice, MountEntry, Node, Observations, Slave};
 use crate::{ActivatedRootDirectory, ImageActivationError};
 
 /// `EROFS_SUPER_MAGIC_V1` (Linux `include/uapi/linux/magic.h`).
@@ -54,7 +54,9 @@ pub(super) struct Expected {
 pub(super) struct VerifiedMountIdentity {
     pub(super) mount: Node,
     mapper_uuid: String,
+    mapper: BlockIdentity,
     loop_name: String,
+    loop_device: BlockIdentity,
 }
 
 impl Expected {
@@ -98,8 +100,15 @@ impl Expected {
                             && executable.blake3 == self.executable_digest
                     })
             })
-            .zip(observed.mapper.as_ref())
-            .and_then(|(mount, mapper)| {
+            .and_then(|mount| {
+                observed.mapper.as_ref().and_then(|mapper| {
+                    mapper
+                        .identity
+                        .filter(|identity| identity.device == mount.device)
+                        .map(|identity| (mount, mapper, identity))
+                })
+            })
+            .and_then(|(mount, mapper, identity)| {
                 mapper
                     .uuid
                     .as_ref()
@@ -108,12 +117,15 @@ impl Expected {
                     })
                     .zip(mapper.slaves.as_deref())
                     .and_then(|(uuid, slaves)| {
-                        self.verified_loop(slaves)
-                            .map(|loop_name| VerifiedMountIdentity {
+                        self.verified_loop(slaves).map(|(loop_name, loop_device)| {
+                            VerifiedMountIdentity {
                                 mount,
                                 mapper_uuid: uuid.clone(),
+                                mapper: identity,
                                 loop_name: loop_name.to_owned(),
-                            })
+                                loop_device,
+                            }
+                        })
                     })
             })
             .ok_or(ImageActivationError::EvidenceMismatch)
@@ -134,16 +146,26 @@ impl Expected {
 
     /// Exactly the root and root-verity partitions of one loop device that
     /// is backed read-only by the held image.
-    fn verified_loop<'a>(&self, slaves: &'a [Slave]) -> Option<&'a str> {
+    fn verified_loop<'a>(&self, slaves: &'a [Slave]) -> Option<(&'a str, BlockIdentity)> {
         match slaves {
             [first, second] => {
                 let extents = [first, second].map(extent_of);
+                let identity = first
+                    .loop_device
+                    .as_ref()
+                    .and_then(|device| device.identity);
                 first
                     .loop_name
                     .as_deref()
                     .zip(second.loop_name.as_deref())
-                    .filter(|(first_name, second_name)| {
+                    .zip(identity)
+                    .filter(|((first_name, second_name), identity)| {
                         first_name == second_name
+                            && second
+                                .loop_device
+                                .as_ref()
+                                .and_then(|device| device.identity)
+                                == Some(*identity)
                             && (extents == [Some(self.root), Some(self.verity)]
                                 || extents == [Some(self.verity), Some(self.root)])
                             && [first, second].iter().all(|slave| {
@@ -153,7 +175,7 @@ impl Expected {
                                     .is_some_and(|device| self.loop_matches(device))
                             })
                     })
-                    .map(|(name, _)| name)
+                    .map(|((name, _), identity)| (name, identity))
             }
             _ => None,
         }
