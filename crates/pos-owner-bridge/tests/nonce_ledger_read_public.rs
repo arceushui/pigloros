@@ -13,7 +13,7 @@ use pos_owner_bridge::encryptor_lock::linux::SubjectEncryptorLock;
 use pos_owner_bridge::{BridgeError, UnavailableCode};
 use rustix::fs::{flock, FlockOperation};
 
-mod support;
+pub mod support;
 use support::{private_directory, Sandbox};
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
