@@ -155,6 +155,10 @@ pub enum ImageActivationError {
     /// An owned, attached root mount could not be detached.
     #[error("the owned root mount could not be detached")]
     TeardownFailure,
+    /// Exact owned block-device absence could not be proved within the
+    /// original cleanup deadline, including unavailable or contradictory evidence.
+    #[error("owned loop and device-mapper absence could not be verified")]
+    ResourceAbsenceUnverified,
 }
 
 /// A connected, root-peer `MountFileSystem` client for one transaction.

@@ -163,6 +163,16 @@ impl PreparedAttemptDirectory {
         result
     }
 
+    /// Abandoned cleanup retains durable intent and closes further commits.
+    /// Marking a poisoned owner cannot make its lock usable again.
+    pub(crate) fn quarantine(&self) {
+        self.planned
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .failed = true;
+    }
+
     fn record_bytes(&self) -> [u8; DIRECTORY_RECORD_SIZE] {
         let mut bytes = [0; DIRECTORY_RECORD_SIZE];
         bytes[..52].copy_from_slice(&self.planned.intent.encode());

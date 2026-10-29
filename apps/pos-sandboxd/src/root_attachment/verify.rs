@@ -59,6 +59,12 @@ pub(super) struct VerifiedMountIdentity {
     loop_device: BlockIdentity,
 }
 
+impl VerifiedMountIdentity {
+    pub(super) const fn devices(&self) -> [BlockIdentity; 2] {
+        [self.mapper, self.loop_device]
+    }
+}
+
 impl Expected {
     /// The admitted SIM1 root and root-verity extents and the held image.
     pub(super) fn for_admission(

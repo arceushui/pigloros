@@ -1,44 +1,136 @@
-//! Explicit owned-root detachment, separate from complete resource absence.
+//! Bounded owned-root detachment and independent original-device absence.
+
+use std::{future::Future, time::Duration};
+
+use tokio::time::{sleep, timeout_at, Instant};
 
 use super::{AttachmentKernel, HostKernel, ImageActivationError, VerifiedRootMount};
 use crate::PreparedAttemptDirectory;
 
+const DEVICE_POLL: Duration = Duration::from_millis(10);
+
 impl VerifiedRootMount {
-    /// Recheck and detach this attempt's owned root, closing its mount descriptor.
+    /// Detach this owned root and prove its original loop/dm generations ended.
     ///
-    /// The lifecycle controller must exclusively own the private attempt tree
-    /// and have stopped/removed its unit and proved process emptiness first.
-    /// The durable intent, private parent identities and fresh mount/image
-    /// readback must still match the mount node, device-mapper UUID and loop
-    /// name and boot-local block device generations retained at activation.
-    /// Cleanup uses that identity, without
-    /// requiring renewed execution admission.
+    /// The lifecycle controller must exclusively own the private attempt tree,
+    /// stop/remove its unit, prove process emptiness, and close its other
+    /// image/mount references first. The supplied absolute deadline must be
+    /// the original cleanup deadline, including all preceding shutdown work.
+    /// This method never renews it or requires renewed execution admission.
     ///
-    /// Success acknowledges descriptor-bound lazy detachment only. Other held
-    /// references can delay actual unmount and loop/dm removal. The controller
-    /// must close remaining image/directory references and prove exact resource
-    /// absence before deleting intent or reopening admission. This operation
-    /// leaves the durable intent and directories unchanged.
+    /// Durable intent, private parents and fresh mount/image readback must
+    /// match the mount node, mapper UUID, loop name and boot-local device
+    /// generations retained at activation. After descriptor-bound lazy detach,
+    /// the owned mount descriptor closes before fresh sysfs absence checks.
+    /// Other references can delay removal; acknowledgement alone cannot pass.
+    /// No block-device descriptors are opened while waiting.
+    ///
+    /// Success proves only point-in-time original device absence in this boot.
+    /// It leaves intent and directories unchanged and grants no lifecycle,
+    /// fencing, intent-deletion, terminal-evidence or admission authority.
+    /// Subsequent directory removal remains with its existing owner.
     ///
     /// # Errors
-    /// Returns [`ImageActivationError::EvidenceMismatch`] before detachment for
-    /// unsafe/changed ownership, poisoned ownership, or different kernel evidence;
-    /// [`ImageActivationError::TeardownFailure`] if the detach command fails.
-    /// Either failure closes new registry commits; prior quarantine is retained.
-    /// The mount descriptor is closed on either result, so a surviving attachment
-    /// must be recovered through the retained intent.
-    pub fn detach(self, directory: &PreparedAttemptDirectory) -> Result<(), ImageActivationError> {
-        self.detach_with(&HostKernel::system(), directory)
+    /// Changed ownership or mount evidence returns
+    /// [`ImageActivationError::EvidenceMismatch`]; a failed detach command
+    /// returns [`ImageActivationError::TeardownFailure`]. Unverified device
+    /// absence or an exhausted deadline returns
+    /// [`ImageActivationError::ResourceAbsenceUnverified`]. Every failure or
+    /// cancellation closes new registry commits, even if the future was never
+    /// polled. Success never clears existing quarantine. The mount FD closes
+    /// on every result or cancellation; retained intent governs recovery.
+    pub fn detach(
+        self,
+        directory: &PreparedAttemptDirectory,
+        deadline: Instant,
+    ) -> impl Future<Output = Result<(), ImageActivationError>> + '_ {
+        let release = Release::new(self, directory, deadline);
+        async move { release.finish(&HostKernel::system()).await }
+    }
+}
+
+/// Created before constructing the future, so even unpolled cancellation
+/// preserves quarantine. The underlying directory descriptors do not pin the
+/// activated mount; the owned mount descriptor is dropped before polling.
+pub(super) struct Release<'a> {
+    root: VerifiedRootMount,
+    guard: CleanupGuard<'a>,
+    deadline: Instant,
+}
+
+impl<'a> Release<'a> {
+    pub(super) const fn new(
+        root: VerifiedRootMount,
+        directory: &'a PreparedAttemptDirectory,
+        deadline: Instant,
+    ) -> Self {
+        Self {
+            root,
+            guard: CleanupGuard {
+                directory,
+                complete: false,
+            },
+            deadline,
+        }
     }
 
-    pub(super) fn detach_with(
+    pub(super) async fn finish(
         self,
         kernel: &impl AttachmentKernel,
-        directory: &PreparedAttemptDirectory,
     ) -> Result<(), ImageActivationError> {
-        directory.with_verified_parent(ImageActivationError::EvidenceMismatch, || {
-            self.verify_mount(kernel, directory)
-                .and_then(|()| kernel.detach(self.mount()))
-        })
+        let Self {
+            root,
+            mut guard,
+            deadline,
+        } = self;
+        let devices = root.identity.devices();
+        before(deadline)?;
+        guard
+            .directory
+            .with_verified_parent(ImageActivationError::EvidenceMismatch, || {
+                before(deadline)?;
+                root.verify_mount(kernel, guard.directory)?;
+                before(deadline)?;
+                kernel.detach(root.mount())?;
+                before(deadline)
+            })?;
+        drop(root);
+        loop {
+            before(deadline)?;
+            let observed = timeout_at(deadline, kernel.devices_absent(devices))
+                .await
+                .map_err(|_| ImageActivationError::ResourceAbsenceUnverified)?;
+            // Synchronous sysfs work must finish strictly before the deadline,
+            // even when it did not yield to the async timeout.
+            before(deadline)?;
+            if observed? {
+                guard
+                    .directory
+                    .with_verified_parent(ImageActivationError::EvidenceMismatch, || Ok(()))?;
+                before(deadline)?;
+                guard.complete = true;
+                return Ok(());
+            }
+            let _wake = timeout_at(deadline, sleep(DEVICE_POLL)).await;
+        }
     }
+}
+
+struct CleanupGuard<'a> {
+    directory: &'a PreparedAttemptDirectory,
+    complete: bool,
+}
+
+impl Drop for CleanupGuard<'_> {
+    fn drop(&mut self) {
+        if !self.complete {
+            self.directory.quarantine();
+        }
+    }
+}
+
+fn before(deadline: Instant) -> Result<(), ImageActivationError> {
+    (Instant::now() < deadline)
+        .then_some(())
+        .ok_or(ImageActivationError::ResourceAbsenceUnverified)
 }

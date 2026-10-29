@@ -6,8 +6,8 @@ mod cases {
     use super::super::*;
     use std::time::{Duration, Instant};
 
-    #[test]
-    fn unverified_generations_refuse_attachment_and_detach() -> TestResult {
+    #[tokio::test]
+    async fn unverified_generations_refuse_attachment_and_detach() -> TestResult {
         for (name, mutate) in generation_mutations() {
             let tree = prepared_tree()?;
             let expected = expected(&component(&tree.prepared));
@@ -34,7 +34,7 @@ mod cases {
                 .join(component(&tree.prepared));
             let bytes = fs::read(&record)?;
             assert_eq!(
-                root.detach_with(&kernel, &tree.prepared),
+                detach_owned(root, &kernel, &tree.prepared).await,
                 Err(ImageActivationError::EvidenceMismatch),
                 "detach: {name}"
             );
@@ -130,35 +130,10 @@ mod cases {
             module_path!(),
             "::changes_during_each_host_device_sample_invalidate_its_generation"
         );
-        if std::env::var_os(CHILD).is_some() {
-            return observe_device_changes();
+        if bounded_fixture_child(CHILD, TEST)? {
+            return Ok(());
         }
-        // libtest omits the crate prefix included by module_path!().
-        let (_, test) = TEST.split_once("::").ok_or("test module path")?;
-        // The child owns both sides of the blocking FIFO fixture. Bound the
-        // whole process so a missing or delayed reader cannot hang this test.
-        // Inherited output cannot fill an undrained parent pipe.
-        let mut child = Command::new(std::env::current_exe()?)
-            .args(["--exact", test, "--nocapture"])
-            .env(CHILD, "1")
-            .spawn()?;
-        let deadline = Instant::now() + Duration::from_secs(30);
-        let error: BoxError = loop {
-            match child.try_wait() {
-                Ok(Some(status)) => {
-                    return status
-                        .success()
-                        .then_some(())
-                        .ok_or_else(|| format!("generation sample child failed: {status}").into());
-                }
-                Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(1)),
-                Ok(None) => break "generation sample child exceeded its deadline".into(),
-                Err(error) => break error.into(),
-            }
-        };
-        child.kill()?;
-        child.wait()?;
-        Err(error)
+        observe_device_changes()
     }
 
     fn observe_device_changes() -> TestResult {

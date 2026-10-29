@@ -1,4 +1,5 @@
 use std::{
+    collections::VecDeque,
     error::Error,
     fs,
     io::{IoSlice, IoSliceMut, Write},
@@ -12,7 +13,10 @@ use std::{
     },
     path::Path,
     process::Command,
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Mutex,
+    },
     thread,
 };
 
@@ -37,12 +41,69 @@ use crate::{PlannedAttemptIntent, StagingLedger, StagingLimits, SystemdAttemptRe
 
 type BoxError = Box<dyn Error + Send + Sync>;
 type TestResult = Result<(), BoxError>;
+type AbsenceProbe = (std::time::Duration, Result<bool, ImageActivationError>);
 
+mod absence;
 mod generations;
 mod release;
 
+fn cleanup_deadline() -> tokio::time::Instant {
+    tokio::time::Instant::now() + std::time::Duration::from_secs(1)
+}
+
+fn attached_root(
+    directory: &PreparedAttemptDirectory,
+) -> Result<(FakeKernel, VerifiedRootMount), BoxError> {
+    let expected = expected(&component(directory));
+    let kernel = FakeKernel::accepting(matching(&expected));
+    let root = attach_and_verify(&kernel, directory, &expected, file_mount()?, || Ok(()))?;
+    Ok((kernel, root))
+}
+
+async fn detach_owned(
+    root: VerifiedRootMount,
+    kernel: &impl AttachmentKernel,
+    directory: &PreparedAttemptDirectory,
+) -> Result<(), ImageActivationError> {
+    super::release::Release::new(root, directory, cleanup_deadline())
+        .finish(kernel)
+        .await
+}
+
 fn block_generation(device: (u32, u32), diskseq: u64) -> Option<BlockIdentity> {
     std::num::NonZeroU64::new(diskseq).map(|diskseq| BlockIdentity { device, diskseq })
+}
+
+/// Bound every participant in blocking filesystem fixtures, including readers.
+/// `true` means the parent completed its child; `false` runs the child body.
+fn bounded_fixture_child(variable: &str, full_test: &str) -> Result<bool, BoxError> {
+    use std::time::{Duration, Instant};
+
+    if std::env::var_os(variable).is_some() {
+        return Ok(false);
+    }
+    let (_, test) = full_test.split_once("::").ok_or("test module path")?;
+    let mut child = Command::new(std::env::current_exe()?)
+        .args(["--exact", test, "--nocapture"])
+        .env(variable, "1")
+        .spawn()?;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let error: BoxError = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                return status
+                    .success()
+                    .then_some(true)
+                    .ok_or_else(|| format!("filesystem fixture child failed: {status}").into());
+            }
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(1)),
+            Ok(None) => break "filesystem fixture child exceeded its deadline".into(),
+            Err(error) => break error.into(),
+        }
+    };
+    child.kill()?;
+    child.wait()?;
+    Err(error)
 }
 
 const PRIVILEGED_COMPOSITION_TEST: &str = "PIGLOROS_PRIVILEGED_COMPOSITION_TEST";
@@ -209,6 +270,9 @@ struct FakeKernel {
     observations: Observations,
     detach: Result<(), ImageActivationError>,
     detached: AtomicUsize,
+    absence: Mutex<VecDeque<AbsenceProbe>>,
+    probes: Mutex<Vec<[BlockIdentity; 2]>>,
+    detached_mount: Mutex<Option<(std::path::PathBuf, std::path::PathBuf)>>,
 }
 
 impl FakeKernel {
@@ -220,6 +284,9 @@ impl FakeKernel {
             observations,
             detach: Ok(()),
             detached: AtomicUsize::new(0),
+            absence: Mutex::new(VecDeque::new()),
+            probes: Mutex::new(Vec::new()),
+            detached_mount: Mutex::new(None),
         }
     }
 
@@ -245,9 +312,39 @@ impl AttachmentKernel for FakeKernel {
         self.observations.clone()
     }
 
-    fn detach(&self, _: BorrowedFd<'_>) -> Result<(), ImageActivationError> {
+    fn detach(&self, mount: BorrowedFd<'_>) -> Result<(), ImageActivationError> {
+        use std::os::fd::AsRawFd;
+        let path = std::path::PathBuf::from(format!("/proc/self/fd/{}", mount.as_raw_fd()));
+        let target = fs::read_link(&path).map_err(|_| ImageActivationError::EvidenceMismatch)?;
+        *self
+            .detached_mount
+            .lock()
+            .map_err(|_| ImageActivationError::EvidenceMismatch)? = Some((path, target));
         self.detached.fetch_add(1, Ordering::SeqCst);
         self.detach
+    }
+
+    async fn devices_absent(
+        &self,
+        devices: [BlockIdentity; 2],
+    ) -> Result<bool, ImageActivationError> {
+        let rejected = ImageActivationError::ResourceAbsenceUnverified;
+        if let Some((path, target)) = &*self.detached_mount.lock().map_err(|_| rejected)? {
+            assert_ne!(
+                fs::read_link(path).ok().as_ref(),
+                Some(target),
+                "mount FD must close before probing"
+            );
+        }
+        self.probes.lock().map_err(|_| rejected)?.push(devices);
+        let (delay, result) = self
+            .absence
+            .lock()
+            .map_err(|_| rejected)?
+            .pop_front()
+            .unwrap_or((std::time::Duration::ZERO, Ok(true)));
+        tokio::time::sleep(delay).await;
+        result
     }
 }
 
