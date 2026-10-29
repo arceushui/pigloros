@@ -3,49 +3,24 @@
 //! No test changes the test runner's environment or umask.
 #![cfg(target_os = "linux")]
 
-use std::fs::{self, DirBuilder, Permissions};
+use std::fs::{self, Permissions};
 use std::io::{self, Write as _};
-use std::os::unix::fs::{symlink, DirBuilderExt, MetadataExt, PermissionsExt};
+use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use pos_owner_bridge::encryptor_lock::linux::SubjectEncryptorLock;
 use pos_owner_bridge::{BridgeError, UnavailableCode};
+
+pub mod support;
+use support::{private_directory, Sandbox};
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 const LOCK: &str = "pigloros.subject-encryptor.v1.lock";
 const CASE: &str = "PIGLOROS_ENCRYPTOR_LOCK_PROBE";
 const DIRECTORY: &str = "PIGLOROS_ENCRYPTOR_LOCK_TEST_DIRECTORY";
 const MARKER: &str = "ENCRYPTOR_LOCK_PROBE_EXECUTED";
-static NEXT: AtomicU64 = AtomicU64::new(0);
-
-struct Sandbox(PathBuf);
-
-impl Sandbox {
-    fn new() -> TestResult<Self> {
-        let nanos = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "pigloros-encryptor-lock-{}-{nanos}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        private_directory(&path)?;
-        Ok(Self(path))
-    }
-}
-
-impl Drop for Sandbox {
-    fn drop(&mut self) {
-        drop(fs::remove_dir_all(&self.0));
-    }
-}
-
-fn private_directory(path: &Path) -> io::Result<()> {
-    DirBuilder::new().mode(0o700).create(path)?;
-    fs::set_permissions(path, Permissions::from_mode(0o700))
-}
 
 fn probe(case: &str) -> TestResult<Command> {
     let mut command = Command::new(std::env::current_exe()?);
