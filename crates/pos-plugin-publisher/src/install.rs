@@ -54,6 +54,17 @@ use pos_store::plugin_trust_registry::{
 };
 use thiserror::Error;
 
+// The production rollback entry (ADR-103 revision 7) keeps its own file, `src/rollback.rs`, so
+// that the guard's per-file allow-list can name it, but it is a child of this module, so that it
+// shares the private prefix `verify_release_v1` without any wider visibility.
+#[path = "rollback.rs"]
+mod rollback;
+
+pub use rollback::{
+    rollback_plugin_release_v1, PluginReleaseRollbackErrorV1, PluginRollbackRequestV1,
+    RolledBackPluginReleaseV1,
+};
+
 /// A closed failure of Plugin release installation.
 ///
 /// Every variant means the registry committed nothing for this call, except
@@ -188,15 +199,15 @@ pub fn install_plugin_release_v1(
 
 /// One release that passed the shared fail-closed prefix: both projections of its closure, its
 /// verified signature, and the transaction's trusted UTC second and Tick.
-pub(super) struct VerifiedReleaseV1 {
+struct VerifiedReleaseV1 {
     /// The trust projection of the closure's PMF1.
-    pub(super) projection: ValidatedPluginManifestProjectionV1,
+    projection: ValidatedPluginManifestProjectionV1,
     /// The execution projection of the same PMF1.
-    pub(super) execution: PluginExecutionProjectionV1,
+    execution: PluginExecutionProjectionV1,
     /// The PMF1 signature verified under the key the evidence resolved.
-    pub(super) signature: VerifiedPluginReleaseSignatureV1,
+    signature: VerifiedPluginReleaseSignatureV1,
     /// The sampled trusted UTC second and the evidence's own Tick.
-    pub(super) point: TrustEvaluationPointV1,
+    point: TrustEvaluationPointV1,
 }
 
 /// The read-project-authorize-verify-sample prefix shared by installation and rollback (ADR-103
@@ -205,7 +216,7 @@ pub(super) struct VerifiedReleaseV1 {
 ///
 /// Nothing here touches a registry, and `wall` is sampled only after the signature verified.
 /// `E` is the caller's closed error type, so each entry keeps its own typed variants.
-pub(super) fn verify_release_v1<E>(
+fn verify_release_v1<E>(
     source: &impl ReleaseSourceV1,
     address: &BundleAddressV1,
     evidence: &VerifiedPluginTrustEvidenceV1,

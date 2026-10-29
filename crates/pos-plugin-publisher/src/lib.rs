@@ -47,8 +47,6 @@ mod historical;
 mod install;
 #[cfg(target_os = "linux")]
 mod publish;
-#[cfg(target_os = "linux")]
-mod rollback;
 
 // Test-only. The shared signed-release test world lives under `tests/support`, outside the
 // production-coverage globs, like the Plugin trust registry fixtures of `pos-store`. It serves
@@ -68,14 +66,9 @@ pub use historical::{
 
 #[cfg(target_os = "linux")]
 pub use install::{
-    install_plugin_release_v1, InstalledPluginReleaseV1, PluginInstallRequestV1,
-    PluginReleaseInstallErrorV1,
-};
-
-#[cfg(target_os = "linux")]
-pub use rollback::{
-    rollback_plugin_release_v1, PluginReleaseRollbackErrorV1, PluginRollbackRequestV1,
-    RolledBackPluginReleaseV1,
+    install_plugin_release_v1, rollback_plugin_release_v1, InstalledPluginReleaseV1,
+    PluginInstallRequestV1, PluginReleaseInstallErrorV1, PluginReleaseRollbackErrorV1,
+    PluginRollbackRequestV1, RolledBackPluginReleaseV1,
 };
 
 #[cfg(target_os = "linux")]

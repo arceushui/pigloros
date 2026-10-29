@@ -17,7 +17,8 @@
 //!    to bind its own authorization of the target.
 //!
 //! Steps 1 to 5 are the installer's own private prefix, so the two orders
-//! cannot drift. ADR-103 revision 7 names this module the sole non-test caller
+//! cannot drift; this file is therefore a child module of `install`, included
+//! by `#[path]`, while keeping its own file for the guard's allow-list. ADR-103 revision 7 names this module the sole non-test caller
 //! of the registry's `rollback`; it may not call `admit`, `provision`, or
 //! `advance_policy`. No operator command, HTTP route, or remote trigger reaches
 //! it (revision 7, Q9).
@@ -42,7 +43,7 @@ use pos_store::plugin_trust_registry::{
 };
 use thiserror::Error;
 
-use crate::install::verify_release_v1;
+use super::verify_release_v1;
 
 /// A closed failure of Plugin release rollback.
 ///
