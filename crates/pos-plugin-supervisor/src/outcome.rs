@@ -12,7 +12,7 @@ use pos_runtime::community_plugin_host::{
     CommunityPluginHostErrorV1, CommunityPluginModeV1, HostFailureClassV1, MemberPassV1, MeteringV1,
 };
 
-use crate::adapter::{CommunityInvocationReceiptV1, ReceiptDispositionV1};
+use crate::adapter::{CommunityInvocationReceiptV1, OutputUsageV1, ReceiptDispositionV1};
 
 /// How one Plugin's pass ended, as a closed set with the exact closed strings of ADR-061
 /// revision 7 decisions 3 and 5.
@@ -24,6 +24,8 @@ pub enum CommunityPluginSubjectResultV1 {
         output_digest: Option<[u8; 32]>,
         /// The deterministic metering the worker reported.
         metering: Option<MeteringV1>,
+        /// The output usage the host measured when it staged the output.
+        output_usage: Option<OutputUsageV1>,
     },
     /// The whole batch committed (receipt disposition `Committed`).
     Committed {
@@ -31,6 +33,8 @@ pub enum CommunityPluginSubjectResultV1 {
         output_digest: Option<[u8; 32]>,
         /// The deterministic metering the worker reported.
         metering: Option<MeteringV1>,
+        /// The output usage the host measured when it staged the output.
+        output_usage: Option<OutputUsageV1>,
     },
     /// A host refusal before any guest code ran: a gate error, or a failure of the class
     /// `PreExecutionRejection`.
@@ -147,10 +151,12 @@ const fn settled(receipt: &CommunityInvocationReceiptV1) -> CommunityPluginSubje
         ReceiptDispositionV1::Staged => CommunityPluginSubjectResultV1::Staged {
             output_digest: receipt.output_digest,
             metering: receipt.metering,
+            output_usage: receipt.output_usage,
         },
         ReceiptDispositionV1::Committed => CommunityPluginSubjectResultV1::Committed {
             output_digest: receipt.output_digest,
             metering: receipt.metering,
+            output_usage: receipt.output_usage,
         },
         ReceiptDispositionV1::Discarded => CommunityPluginSubjectResultV1::Discarded,
     }

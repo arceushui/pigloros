@@ -12,7 +12,7 @@ use pos_runtime::community_plugin_host::{EventDraftV1, PluginOutputV1};
 use pos_runtime::{DeclaredOutputV1, StepOutput};
 use ulid::Ulid;
 
-use super::Error;
+use super::{Error, OutputUsageV1};
 
 /// A guest digest list must be empty: under the V1 profile no guest is shown a
 /// node digest, so any entry is the guest's `UnsupportedSchema` (ADR-061
@@ -50,6 +50,32 @@ pub(super) fn map_draft(draft: &EventDraftV1) -> Result<DeclaredOutputV1, Error>
     })
 }
 
+/// A length as a `u64`, saturating.
+fn length(len: usize) -> u64 {
+    u64::try_from(len).unwrap_or(u64::MAX)
+}
+
+/// The summed `canonical_payload` lengths of `output`'s drafts, saturating.
+fn payload_bytes(output: &PluginOutputV1) -> u64 {
+    output
+        .event_drafts
+        .iter()
+        .map(|draft| length(draft.canonical_payload.len()))
+        .fold(0, u64::saturating_add)
+}
+
+/// The output usage of a staged `output` (ADR-068 R4 4.1 items 1-3).
+///
+/// The payload bytes are the same sum [`mapped_drafts`] compares with the
+/// effective `event_bytes` limit.
+pub(super) fn output_usage(output: &PluginOutputV1) -> OutputUsageV1 {
+    OutputUsageV1 {
+        event_count: length(output.event_drafts.len()),
+        event_payload_bytes: payload_bytes(output),
+        state_bytes: length(output.next_state_bytes.len()),
+    }
+}
+
 /// Every draft of `output`, mapped in the guest's order.
 ///
 /// All drafts together may carry at most `event_bytes` payload bytes (the
@@ -59,12 +85,7 @@ pub(super) fn mapped_drafts(
     output: &PluginOutputV1,
     event_bytes: u64,
 ) -> Result<Vec<DeclaredOutputV1>, Error> {
-    let payload_bytes: u64 = output
-        .event_drafts
-        .iter()
-        .map(|draft| u64::try_from(draft.canonical_payload.len()).unwrap_or(u64::MAX))
-        .fold(0, u64::saturating_add);
-    if payload_bytes > event_bytes {
+    if payload_bytes(output) > event_bytes {
         return Err(Error::OutputLimitExceeded);
     }
     output.event_drafts.iter().map(map_draft).collect()

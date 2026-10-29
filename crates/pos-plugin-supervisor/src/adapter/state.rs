@@ -31,6 +31,24 @@ pub struct CommunityStateV1 {
     pub bytes: Vec<u8>,
 }
 
+/// The host-measured output usage of one staged invocation (ADR-068 R4 4.1).
+///
+/// The supervisor measures it from the validated output it stages, never from
+/// the worker. It lives in process memory only and is never an input of a
+/// dependency node, committed State, recovery or authoritative Replay
+/// (ADR-049 R9 4.1).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OutputUsageV1 {
+    /// The number of Event drafts: all are admitted together or not at all.
+    pub event_count: u64,
+    /// The summed `canonical_payload` lengths of the drafts, the quantity
+    /// compared with the effective `event_bytes` limit. Trace annotations and
+    /// operational log records are not counted.
+    pub event_payload_bytes: u64,
+    /// The length of `next_state_bytes`, the state held until commit.
+    pub state_bytes: u64,
+}
+
 /// What became of one invocation's staged result.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReceiptDispositionV1 {
@@ -46,10 +64,11 @@ pub enum ReceiptDispositionV1 {
 /// In-memory record of one invocation that reached a worker (non-durable).
 ///
 /// It holds what the follow-up `ReproManifest` record needs: the negotiated
-/// tuple, the output digest, the effective limits and the metering. A failed
-/// invocation keeps its receipt too, with the closed `failure` and, for a
-/// guest-declared failure, the guest's exact `plugin-error` (code, field
-/// ordinal and related digest). Nothing here is persisted or authoritative.
+/// tuple, the output digest, the effective limits, the metering and the output
+/// usage. A failed invocation keeps its receipt too, with the closed `failure`
+/// and, for a guest-declared failure, the guest's exact `plugin-error` (code,
+/// field ordinal and related digest). Nothing here is persisted or
+/// authoritative.
 /// The effective limits fixed at negotiation are
 /// [`CommunityInvocationReceiptV1::limits()`]; the profile digest the
 /// invocation was bound to is `negotiated.execution_profile_digest()`.
@@ -67,6 +86,9 @@ pub struct CommunityInvocationReceiptV1 {
     /// invocation ended without a report (a crash, a watchdog stop, an engine
     /// failure or a supervisor check).
     pub metering: Option<MeteringV1>,
+    /// The host-measured output usage: `Some` exactly when the disposition is
+    /// `Staged` or `Committed`.
+    pub output_usage: Option<OutputUsageV1>,
     /// The number of trace annotations validated and then dropped.
     pub dropped_trace_annotations: usize,
     /// The closed host error that ended the invocation, if it failed.
@@ -230,7 +252,7 @@ impl Shared {
         settle(&mut inner.receipts, ReceiptDispositionV1::Committed);
     }
 
-    /// Settle every staged receipt as discarded.
+    /// Settle every staged receipt as discarded, dropping its output usage.
     pub(super) fn discard(&self) {
         settle(&mut self.lock().receipts, ReceiptDispositionV1::Discarded);
     }
@@ -242,14 +264,21 @@ impl Shared {
     }
 }
 
+/// Settle every staged receipt; only a committed one keeps its output usage.
 fn settle(
     receipts: &mut VecDeque<CommunityInvocationReceiptV1>,
     disposition: ReceiptDispositionV1,
 ) {
+    let keeps_usage = disposition == ReceiptDispositionV1::Committed;
     receipts
         .iter_mut()
         .filter(|receipt| receipt.disposition == ReceiptDispositionV1::Staged)
-        .for_each(|receipt| receipt.disposition = disposition);
+        .for_each(|receipt| {
+            receipt.disposition = disposition;
+            if !keeps_usage {
+                receipt.output_usage = None;
+            }
+        });
 }
 
 /// The host's view of one community Plugin's in-memory adapter state.
