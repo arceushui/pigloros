@@ -26,7 +26,7 @@ const WORLD_DRIVER: &str = "world.driver";
 const AGENT_DRIVER: &str = "agent.driver";
 
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn context() -> DivergenceContextV1 {
+const fn context() -> DivergenceContextV1 {
     DivergenceContextV1 {
         request_digest: [1; 32],
         manifest_digest: [2; 32],
@@ -103,7 +103,7 @@ fn output(position: u32, driver: &str, output_ordinal: u32) -> DriverOutputCoord
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn driver_output(outcome: DriverOutcomeV1) -> ComparedDriverOutputV1 {
+const fn driver_output(outcome: DriverOutcomeV1) -> ComparedDriverOutputV1 {
     ComparedDriverOutputV1 {
         outcome,
         numeric_profile_digest: NUMERIC_PROFILE,
@@ -222,6 +222,8 @@ struct ExpectedReport {
 
 type Mutation = fn(&mut AuthoritativeStreamV1) -> Option<()>;
 
+type PayloadMutation = fn(&mut AuthoritativeStreamV1, Vec<u8>) -> Option<()>;
+
 struct Case {
     name: &'static str,
     mutate_actual: Mutation,
@@ -229,7 +231,7 @@ struct Case {
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn timeline(
+const fn timeline(
     kind: Kind,
     seq: u64,
     tick: u64,
@@ -535,7 +537,7 @@ fn scheduler_cases() -> Vec<Case> {
         Case {
             name: "scheduler runs another Driver",
             mutate_actual: |s| {
-                *s.scheduler.get_mut(&slot(1))? = "other.driver".to_owned();
+                "other.driver".clone_into(s.scheduler.get_mut(&slot(1))?);
                 Some(())
             },
             expected: scheduler(
@@ -952,7 +954,7 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 fn reports_carry_digest_and_size_and_never_payload_bytes() -> TestResult {
     let secret_expected = b"SECRET-EXPECTED-PAYLOAD-0123456789".to_vec();
     let secret_actual = b"SECRET-ACTUAL-PAYLOAD-9876543210".to_vec();
-    let mutations: [fn(&mut AuthoritativeStreamV1, Vec<u8>) -> Option<()>; 5] = [
+    let mutations: [PayloadMutation; 5] = [
         |s, payload| {
             s.events.get_mut(&position(1))?.payload = payload;
             Some(())

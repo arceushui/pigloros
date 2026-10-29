@@ -529,11 +529,14 @@ impl Findings {
             match side {
                 Side::Both(left, right) => {
                     if left.outcome != right.outcome {
-                        let kind = match (&left.outcome, &right.outcome) {
-                            (DriverOutcomeV1::Output(_), DriverOutcomeV1::Output(_)) => {
-                                DivergenceMismatchKindV1::CanonicalBytes
-                            }
-                            _ => DivergenceMismatchKindV1::TypedFailure,
+                        let both_outputs = matches!(
+                            (&left.outcome, &right.outcome),
+                            (DriverOutcomeV1::Output(_), DriverOutcomeV1::Output(_))
+                        );
+                        let kind = if both_outputs {
+                            DivergenceMismatchKindV1::CanonicalBytes
+                        } else {
+                            DivergenceMismatchKindV1::TypedFailure
                         };
                         let digests = (left.outcome.digest_size(), right.outcome.digest_size());
                         self.record(location, &coordinate, kind, digests);
