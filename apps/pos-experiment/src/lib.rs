@@ -317,6 +317,7 @@ fn reject_protected_history(
         .and_then(|events| reject_protected_events(&events))
 }
 
+pub mod authoritative_comparison;
 pub mod moat_proof;
 
 // ---------------------------------------------------------------------------
