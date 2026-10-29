@@ -80,3 +80,32 @@ for depth in [4, 3, 2, 1, 0]:
         observed = code == 1 and "unlinked" in shear and "tests/support/nonce_ledger_replace.rs" in shear
         minimized.append({"depth": depth, "rust_links": True, "false_unlinked": observed})
 (EVIDENCE / "minimized.json").write_text(json.dumps(minimized, indent=2))
+
+# Keep the original module names, visibility and path fixed while removing
+# one additional source-root link at a time.
+root_cases = {}
+without_alias = dict(FILES)
+without_alias["src/lib.rs"] = "pub mod encryptor_lock;\n"
+root_cases["without-root-alias"] = without_alias
+without_driver = dict(FILES)
+del without_driver["tests/driver.rs"]
+root_cases["without-driver"] = without_driver
+without_either = dict(without_alias)
+del without_either["tests/driver.rs"]
+del without_either["tests/support/mod.rs"]
+root_cases["without-either"] = without_either
+roots = []
+for label, files in root_cases.items():
+    with tempfile.TemporaryDirectory(prefix="399-shear-roots-") as temporary:
+        root = Path(temporary)
+        for name, content in files.items():
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content)
+        (EVIDENCE / f"{label}-source.json").write_text(json.dumps(files, indent=2))
+        code, rust = execute(label + "-rust", ["cargo", "test", "--quiet", "--features", "test-support", "--", "--list"], root)
+        assert code == 0 and "encryptor_lock::linux::nonce_ledger::replace::tests::linked_probe: test" in rust
+        code, shear = execute(label + "-shear", ["cargo", "shear", "--deny-warnings"], root)
+        observed = code == 1 and "unlinked" in shear and "tests/support/nonce_ledger_replace.rs" in shear
+        roots.append({"case": label, "rust_links": True, "false_unlinked": observed})
+(EVIDENCE / "root-cases.json").write_text(json.dumps(roots, indent=2))
