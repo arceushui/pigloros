@@ -41,6 +41,11 @@ path = "tests/nonce_ledger_read_public.rs"
 required-features = ["test-support"]
 
 [[test]]
+name = "nonce_ledger_replace_public"
+path = "tests/nonce_ledger_replace_public.rs"
+required-features = ["test-support"]
+
+[[test]]
 name = "protocol"
 path = "tests/protocol/main.rs"
 required-features = ["test-support"]
