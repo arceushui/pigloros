@@ -32,11 +32,12 @@ jobs:
         with:
           shared-key: coverage
           save-if: false
-      - name: Minimize the profile merger reproduction to the public lock target
+      - name: Minimize the profile merger reproduction to the restrictive-umask case
         run: |
           ulimit -c 0
           cargo llvm-cov nextest -p pos-owner-bridge --all-features --locked \
-            --test encryptor_lock_public --json --output-path /tmp/owner-coverage.json \
+            --test encryptor_lock_public -E 'test(unsafe_leaf_permissions_and_creation_umask_fail_closed)' \
+            --json --output-path /tmp/owner-coverage.json \
             --user-config-file none --ignore-default-filter --run-ignored all --no-fail-fast
       - name: Preserve input metadata after success or failure
         if: ${{ always() }}
