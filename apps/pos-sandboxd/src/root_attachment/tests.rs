@@ -5,7 +5,7 @@ use std::{
     io::{IoSlice, IoSliceMut, Write},
     mem::MaybeUninit,
     os::{
-        fd::{AsFd, OwnedFd},
+        fd::{AsFd, AsRawFd, OwnedFd},
         unix::{
             fs::{MetadataExt, PermissionsExt},
             net::{UnixListener, UnixStream as StdUnixStream},
@@ -22,8 +22,8 @@ use std::{
 
 use pos_reference::provider_admission::{test_support::StagedInstallation, ProviderImageSnapshot};
 use rustix::net::{
-    recvmsg, sendmsg, RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, SendAncillaryBuffer,
-    SendAncillaryMessage, SendFlags,
+    recv, recvmsg, sendmsg, RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags,
+    SendAncillaryBuffer, SendAncillaryMessage, SendFlags,
 };
 use serde_json::json;
 
@@ -55,8 +55,13 @@ fn attached_root(
     directory: &PreparedAttemptDirectory,
 ) -> Result<(FakeKernel, VerifiedRootMount), BoxError> {
     let expected = expected(&component(directory));
-    let kernel = FakeKernel::accepting(matching(&expected));
-    let root = attach_and_verify(&kernel, directory, &expected, file_mount()?, || Ok(()))?;
+    let (mount, peer) = StdUnixStream::pair()?;
+    let kernel = FakeKernel {
+        mount_peer: Some((mount.as_raw_fd(), peer)),
+        ..FakeKernel::accepting(matching(&expected))
+    };
+    let mount = QuarantinedRootMount::from_descriptor(mount.into());
+    let root = attach_and_verify(&kernel, directory, &expected, mount, || Ok(()))?;
     Ok((kernel, root))
 }
 
@@ -303,7 +308,9 @@ struct FakeKernel {
     clock_expiry: Option<ClockExpiry>,
     absence: Mutex<VecDeque<AbsenceProbe>>,
     probes: Mutex<Vec<[BlockIdentity; 2]>>,
-    detached_mount: Mutex<Option<(std::path::PathBuf, std::path::PathBuf)>>,
+    // The peer observes endpoint lifetime even when its old FD number is reused.
+    // The number is compared only at detach, while the owned endpoint is live.
+    mount_peer: Option<(std::os::fd::RawFd, StdUnixStream)>,
 }
 
 impl FakeKernel {
@@ -320,7 +327,7 @@ impl FakeKernel {
             clock_expiry: None,
             absence: Mutex::new(VecDeque::new()),
             probes: Mutex::new(Vec::new()),
-            detached_mount: Mutex::new(None),
+            mount_peer: None,
         }
     }
 
@@ -359,13 +366,14 @@ impl AttachmentKernel for FakeKernel {
     }
 
     fn detach(&self, mount: BorrowedFd<'_>) -> Result<(), ImageActivationError> {
-        use std::os::fd::AsRawFd;
-        let path = std::path::PathBuf::from(format!("/proc/self/fd/{}", mount.as_raw_fd()));
-        let target = fs::read_link(&path).map_err(|_| ImageActivationError::EvidenceMismatch)?;
-        *self
-            .detached_mount
-            .lock()
-            .map_err(|_| ImageActivationError::EvidenceMismatch)? = Some((path, target));
+        if let Some((expected, peer)) = &self.mount_peer {
+            assert_eq!(mount.as_raw_fd(), *expected, "detach the owned endpoint");
+            assert_eq!(
+                recv(peer, &mut [0_u8; 1][..], RecvFlags::DONTWAIT).map(|(_, received)| received),
+                Err(rustix::io::Errno::AGAIN),
+                "owned endpoint must remain open until detach"
+            );
+        }
         self.detached.fetch_add(1, Ordering::SeqCst);
         self.detach
     }
@@ -375,10 +383,10 @@ impl AttachmentKernel for FakeKernel {
         devices: [BlockIdentity; 2],
     ) -> Result<bool, ImageActivationError> {
         let rejected = ImageActivationError::ResourceAbsenceUnverified;
-        if let Some((path, target)) = &*self.detached_mount.lock().map_err(|_| rejected)? {
-            assert_ne!(
-                fs::read_link(path).ok().as_ref(),
-                Some(target),
+        if let Some((_, peer)) = &self.mount_peer {
+            assert_eq!(
+                recv(peer, &mut [0_u8; 1][..], RecvFlags::DONTWAIT).map(|(_, received)| received),
+                Ok(0),
                 "mount FD must close before probing"
             );
         }
