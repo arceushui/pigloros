@@ -345,10 +345,17 @@ fn check_release_proof(
     release_proof: &VerifiedPluginReleaseSignatureV1,
     authorization: &ResolvedPluginTrustAuthorizationV1,
 ) -> RegistryResult<()> {
-    let bound = release_proof.pmf1_digest() == authorization.pmf1_digest()
-        && release_proof.release_digest() == authorization.release_digest()
-        && release_proof.public_key() == authorization.resolved_public_key();
-    bound
+    let proven = (
+        release_proof.pmf1_digest(),
+        release_proof.release_digest(),
+        release_proof.public_key(),
+    );
+    let authorized = (
+        authorization.pmf1_digest(),
+        authorization.release_digest(),
+        authorization.resolved_public_key(),
+    );
+    (proven == authorized)
         .then_some(())
         .ok_or(PluginTrustPolicyRegistryErrorV1::ReleaseProofMismatch)
 }
