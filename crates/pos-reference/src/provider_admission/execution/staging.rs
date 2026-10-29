@@ -306,8 +306,7 @@ mod tests {
     }
 
     #[test]
-    fn residual_file_after_failed_unlink_closes_storage_and_already_prepared_creation() -> TestResult
-    {
+    fn replaced_entry_closes_storage_and_already_prepared_creation() -> TestResult {
         use std::os::unix::fs::FileExt as _;
 
         let (temporary, staging) = directory()?;
@@ -318,7 +317,7 @@ mod tests {
         let leaf = temporary.path().join("04".repeat(16));
         let residual = temporary.path().join("residual");
         fs::rename(&leaf, &residual)?;
-        fs::create_dir(&leaf)?; // unlinkat without REMOVEDIR must fail, even as root.
+        fs::create_dir(&leaf)?; // Refuse the replacement before attempting unlink.
         drop(input);
         assert_eq!(fs::read(&residual)?, b"residual");
         assert_eq!(ledger.usage().leaked_files, 1);
