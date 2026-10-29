@@ -55,6 +55,21 @@ Payloads are RFC 8785 canonical JSON and, like the oracles, end with one LF byte
 the payload with `serde_json`, which ignores it; the oracle LF is required by ADR-061 revision 8
 decision 2). The `--check` validates every payload against its checked-in schema.
 
+The `metric-cbor-v1` adapter (`scripts/conformance-fixture-adapters/metric-cbor-v1.sh`) owns the
+`metric-conformance` layer (ADR-062 Revision 7, slice 1, #1211); provider
+`pigloros.fixture.metric-conformance@2.0.0` replaces the Draft `fixture-ratio` placeholder with no
+reader or alias. `scripts/generate_metric_conformance_fixtures.py` is the only writer of its seven
+schemas, payloads (`inputs/metric-conformance/<family>.json`, JCS), `MCS1` composites
+(`inputs/metric-conformance/<family>.mcs1`, one auxiliary member per family carrying the `MTI1`,
+`MTQ1` and `MTR1` members of the sub-cases, addressed by BLAKE3 digest), oracles (`MTR1`/`MQR1`
+bytes, or the closed `MetricErrorV1` and first coordinate) and evidence-status records. It runs
+offline, calls no Rust and computes every oracle with exact integer and `fractions.Fraction`
+arithmetic; `--check` reproduces the worked example and the quantization table of the profile,
+recomputes every result by a second, definitional route, checks the strict decoder against every
+failure expectation, and then compares every output. The profile text, including the record CDDL,
+is `profiles/metric-conformance/normative-requirements.md`. Every
+`expected/metric-conformance/*.json` stays `pending`.
+
 The immutable bundle boundary in `pos-conformance` accepts these bytes from a
 caller, recomputes each BLAKE3 content address, binds the CPF1 profile digest,
 and signs only the canonical manifest. Local and Air-Gapped manifests must be

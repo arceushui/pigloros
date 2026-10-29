@@ -2,7 +2,7 @@
   "claim_layer": "metric-conformance",
   "case_id": "metric-conformance-positive",
   "family": "positive",
-  "input_blake3_digest": "5cf62265decd9ed52c8686ee700b9a7f25c94477343947e0e52ecb753a7440de",
+  "input_blake3_digest": "d97e40412ee7c12b67753d8709b4af73bcd66a48b5173d41eeb074659448d16b",
   "status": "pending",
   "execution_result": null,
   "executed_at": null
