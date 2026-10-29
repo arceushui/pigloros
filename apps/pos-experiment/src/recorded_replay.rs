@@ -4,7 +4,7 @@
 //! execution step after [`preflight_verification_v1`]: it rebuilds Projection
 //! State from the exported Timeline artifact, compares the result with the
 //! expected authoritative stream through
-//! [`first_divergence_v1`](crate::authoritative_comparison::first_divergence_v1),
+//! [`first_divergence_v1`],
 //! and emits one sealed [`VerificationResultV1`]. It takes no Driver, provider
 //! or store: it invokes no Driver, contacts no provider and appends no Event.
 //!
