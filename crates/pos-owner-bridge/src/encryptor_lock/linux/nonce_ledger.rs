@@ -17,6 +17,8 @@ impl SubjectEncryptorLock {
     /// ownership, exact 0600 mode, single-link, no-symlink, nonblocking exclusive
     /// lock and post-lock path-identity checks. Its descriptor closes after the
     /// read; the process-lifetime encryptor lock remains held, even on failure.
+    /// Retaining the directory anchors this read; it does not detect directory
+    /// replacement or prevent a second lock inode in a recreated leaf.
     ///
     /// These are untrusted bytes. The caller must separately validate SNL1 and
     /// establish registry, root and store identity. This operation never writes,

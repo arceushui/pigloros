@@ -195,6 +195,8 @@ fn held_directory_is_close_on_exec_and_cannot_be_redirected_by_leaf_replacement(
     }
     assert_eq!(found, 1);
     write_private(&leaf.join(LEDGER), b"held directory")?;
+    // This probes read anchoring only. A recreated leaf can admit another lock
+    // inode; this fixture does not establish production binding or exclusivity.
     let retained = root.0.join("retained");
     fs::rename(&leaf, &retained)?;
     private_directory(&leaf)?;
