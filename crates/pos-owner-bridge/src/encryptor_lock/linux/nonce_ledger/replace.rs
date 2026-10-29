@@ -110,10 +110,8 @@ impl<'directory> StagedLedger<'directory> {
 impl Drop for StagedLedger<'_> {
     fn drop(&mut self) {
         // A renamed or substituted slot must not be unlinked by this owner.
-        drop(
-            validate_file_identity(self.directory, TEMPORARY_NAME, &self.file)
-                .and_then(|()| fs::unlinkat(self.directory, TEMPORARY_NAME, AtFlags::empty())),
-        );
+        let _cleanup = validate_file_identity(self.directory, TEMPORARY_NAME, &self.file)
+            .and_then(|()| fs::unlinkat(self.directory, TEMPORARY_NAME, AtFlags::empty()));
     }
 }
 
