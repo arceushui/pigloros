@@ -959,7 +959,11 @@ fn a_revoked_artifact_is_invalid_manifest_at_revocation() -> TestResult {
 #[test]
 fn an_export_out_of_timeline_order_is_refused_before_any_fold() -> TestResult {
     let recording = Recording::with_payloads(&[7, 9, 11])?;
-    let fixture = Fixture::recorded()?;
+    // The budget check (step 5) runs before the order check (step 6), so
+    // the budget must admit all three Events.
+    let mut fixture = Fixture::recorded()?;
+    fixture.manifest.resource_limit = 3;
+    fixture.refresh_manifest_binding()?;
     let mut duplicate = recording.export.clone();
     duplicate.events[2].seq = duplicate.events[1].seq;
     let mut decreasing = recording.export.clone();
