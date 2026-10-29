@@ -27,9 +27,12 @@
 //! Production uses only the fixed `/proc` and `/sys` host kernel.
 
 mod cmdline;
+mod identity;
 mod observe;
 mod release;
 mod verify;
+
+pub use identity::RootResourceIdentity;
 
 use std::{
     fs::File,

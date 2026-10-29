@@ -81,7 +81,7 @@ pub use image_activator::{
     QuarantinedRootMount,
 };
 #[cfg(target_os = "linux")]
-pub use root_attachment::{activate_admitted_root, VerifiedRootMount};
+pub use root_attachment::{activate_admitted_root, RootResourceIdentity, VerifiedRootMount};
 
 #[cfg(target_os = "linux")]
 pub use provider_barrier::{
