@@ -112,11 +112,16 @@ fn lock_probe() -> TestResult {
             assert!(!format!("{guard:?}").is_empty());
         }
         "denied" | "restrictive-umask" => {
-            if case == "restrictive-umask" {
-                rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o777));
+            let previous = (case == "restrictive-umask")
+                .then(|| rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o777)));
+            let acquired = SubjectEncryptorLock::acquire();
+            if let Some(previous) = previous {
+                // Leave the locked-file assertion intact, while allowing the
+                // instrumented test runtime to write its profile at process exit.
+                rustix::process::umask(previous);
             }
             assert_eq!(
-                SubjectEncryptorLock::acquire().err(),
+                acquired.err(),
                 Some(BridgeError::Unavailable(
                     UnavailableCode::InterfaceUnavailable
                 ))
