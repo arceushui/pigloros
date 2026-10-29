@@ -530,6 +530,51 @@ fn an_absent_expectation_needs_exactly_one_matching_scan() {
     assert!(other_steps.is_ok(), "other steps do not count as scans");
 }
 
+/// `pos.1` of `base()` with a second `pass` step at Simulation Time `time` (the first is at 7).
+fn second_pass_at(time: u64) -> Result<CaseV1, InvalidCaseV1> {
+    changed(|value| {
+        let mut later = pass();
+        later["simulation_time"] = time.into();
+        if let Some(steps) = at(value, "/subcases/0/steps").as_array_mut() {
+            steps.push(later);
+        }
+    })
+}
+
+/// ADR-068 R4 test 6: the Simulation Time of the passes of a sub-case never decreases.
+#[test]
+fn simulation_time_that_decreases_within_a_subcase_is_payload_invalid() -> TestResult {
+    assert_eq!(second_pass_at(6).err(), Some(InvalidCaseV1), "a decrease");
+    assert_eq!(
+        second_pass_at(0).err(),
+        Some(InvalidCaseV1),
+        "a decrease to 0"
+    );
+    let equal = second_pass_at(7)?;
+    assert_eq!(
+        equal.subcases[0].steps.len(),
+        6,
+        "equal values are accepted"
+    );
+    assert!(second_pass_at(8).is_ok(), "an increase is accepted");
+    // The rule is per sub-case: a later sub-case may start below an earlier one's passes.
+    let other = changed(|value| {
+        let mut early = pass();
+        early["simulation_time"] = 1.into();
+        if let Some(steps) = at(value, "/subcases/5/steps").as_array_mut() {
+            steps.insert(0, early);
+        }
+    });
+    assert!(other.is_ok());
+    // A nested document is read by the same grammar.
+    let mut later = pass();
+    later["simulation_time"] = 6.into();
+    let document = subcase("n.1", json!([pass(), later]), json!({"kind": "malformed"}));
+    let nested = SubCaseV1::parse_document(document.to_string().as_bytes());
+    assert_eq!(nested.err(), Some(InvalidCaseV1));
+    Ok(())
+}
+
 #[test]
 fn a_step_or_expectation_kind_outside_the_grammar_is_payload_invalid() {
     let step = changed(|value| *at(value, "/subcases/0/steps/0/step") = json!("migrate"));
