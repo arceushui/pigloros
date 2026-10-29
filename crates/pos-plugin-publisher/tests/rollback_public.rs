@@ -338,11 +338,17 @@ fn an_address_holding_nothing_is_refused_before_the_registry() -> TestResult {
     let (mut world, _, _) = two_installed()?;
     let scratch = PrivateRoot::new()?;
     let other_store = scratch.store()?;
+    // Releases are content-addressed and signing is deterministic, so R1 published elsewhere
+    // would have R1's address; a release that only the other store holds does not.
+    let only_elsewhere = Shape {
+        version: "9.0.0",
+        ..Shape::first()
+    };
     let elsewhere = publish_plugin_release_v1(
         &mut world.keys,
         &world.publisher,
         1,
-        &make_draft(Shape::first())?,
+        &make_draft(only_elsewhere)?,
         &other_store,
     )?;
     let material = world.material()?;
