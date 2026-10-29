@@ -109,3 +109,63 @@ for label, files in root_cases.items():
         observed = code == 1 and "unlinked" in shear and "tests/support/nonce_ledger_replace.rs" in shear
         roots.append({"case": label, "rust_links": True, "false_unlinked": observed})
 (EVIDENCE / "root-cases.json").write_text(json.dumps(roots, indent=2))
+
+# Phase 4: one variable per prediction, keeping the Rust-discovered witness.
+predictions = {}
+separate = dict(FILES)
+separate["tests/private/nonce_ledger_replace.rs"] = separate.pop("tests/support/nonce_ledger_replace.rs")
+key = "src/encryptor_lock/linux/nonce_ledger/replace.rs"
+separate[key] = separate[key].replace("tests/support/nonce_ledger_replace.rs", "tests/private/nonce_ledger_replace.rs")
+predictions["separate-private-folder"] = (separate, "encryptor_lock::linux::nonce_ledger::replace::tests::linked_probe: test", "tests/private/nonce_ledger_replace.rs")
+shallow = dict(FILES)
+for name in list(shallow):
+    if name.startswith("src/encryptor_lock"):
+        del shallow[name]
+shallow["src/lib.rs"] = '#[cfg(test)]\n#[path="../tests/support/nonce_ledger_replace.rs"]\nmod tests;\n'
+predictions["root-level-include"] = (shallow, "tests::linked_probe: test", "tests/support/nonce_ledger_replace.rs")
+feature = dict(FILES)
+feature[key] = feature[key].replace("#[cfg(test)]", '#[cfg(feature="test-support")]')
+predictions["feature-gate"] = (feature, "encryptor_lock::linux::nonce_ledger::replace::tests::linked_probe: test", "tests/support/nonce_ledger_replace.rs")
+results = []
+for label, (files, expected, target) in predictions.items():
+    with tempfile.TemporaryDirectory(prefix="399-shear-prediction-") as temporary:
+        root = Path(temporary)
+        for name, content in files.items():
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content)
+        (EVIDENCE / f"{label}-source.json").write_text(json.dumps(files, indent=2))
+        code, rust = execute(label + "-rust", ["cargo", "test", "--quiet", "--features", "test-support", "--", "--list"], root)
+        assert code == 0 and expected in rust
+        code, shear = execute(label + "-shear", ["cargo", "shear", "--deny-warnings"], root)
+        results.append({"case": label, "rust_links": True, "exit": code, "false_unlinked": code == 1 and "unlinked" in shear and target in shear})
+(EVIDENCE / "predictions.json").write_text(json.dumps(results, indent=2))
+
+# Verify the proposed ownership layout at the real repository boundary, then
+# restore its exact bytes and reproduce the original finding once more.
+repo = Path.cwd()
+declaration = repo / "crates/pos-owner-bridge/src/encryptor_lock/linux/nonce_ledger/replace.rs"
+previous = repo / "crates/pos-owner-bridge/tests/support/nonce_ledger_replace.rs"
+candidate = repo / "crates/pos-owner-bridge/tests/private/nonce_ledger_replace.rs"
+original_declaration = declaration.read_bytes()
+original_witness = previous.read_bytes()
+assert not candidate.exists()
+candidate.parent.mkdir()
+try:
+    previous.rename(candidate)
+    text = original_declaration.decode()
+    assert text.count("tests/support/nonce_ledger_replace.rs") == 1
+    declaration.write_text(text.replace("tests/support/nonce_ledger_replace.rs", "tests/private/nonce_ledger_replace.rs"))
+    code, result = execute("actual-candidate-shear", ["cargo", "shear", "--deny-warnings"], repo)
+    assert code == 0
+    code, tests = execute("actual-candidate-test-list", ["cargo", "test", "-p", "pos-owner-bridge", "--all-features", "--locked", "--", "--list"], repo)
+    assert code == 0 and "encryptor_lock::linux::nonce_ledger::replace::tests::orphan_cleanup_propagates_a_name_lost_after_open: test" in tests
+finally:
+    if candidate.exists():
+        candidate.rename(previous)
+    declaration.write_bytes(original_declaration)
+    candidate.parent.rmdir()
+assert declaration.read_bytes() == original_declaration and previous.read_bytes() == original_witness
+code, result = execute("actual-restored-shear", ["cargo", "shear", "--deny-warnings"], repo)
+assert code == 1 and "unlinked" in result and "tests/support/nonce_ledger_replace.rs" in result
+(EVIDENCE / "real-boundary.json").write_text(json.dumps({"candidate_shear_passes": True, "candidate_real_rust_test_list_passes": True, "restored_baseline_fails_again": True}, indent=2))
