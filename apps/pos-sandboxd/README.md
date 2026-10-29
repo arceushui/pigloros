@@ -57,8 +57,11 @@ cleanup; mount/device/directory/intent cleanup and restart reconciliation remain
 
 `VerifiedRootMount::detach` consumes the retained mount, rechecks the exact
 durable directory record and private parent identities, then repeats the
-mount/image readback and requires the original mount node, device-mapper UUID
-and loop name before detaching by descriptor. Pre-launch rechecks retain the
+mount/image readback and requires the original mount node, device-mapper UUID,
+loop name and each device's `(major:minor, diskseq)` before detaching by
+descriptor. Sysfs identity reads bracket each device sample, and both loop
+slave observations must name the same generation. These generations apply only
+within one kernel boot. Pre-launch rechecks retain the
 same identities, even if substituted devices could satisfy the admitted image.
 The lifecycle controller must exclusively own the attempt and
 finish unit/process shutdown first. Cleanup needs no renewed execution

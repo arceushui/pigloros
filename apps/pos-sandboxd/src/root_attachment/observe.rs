@@ -6,6 +6,7 @@
 
 use std::{
     fs::{self, File},
+    num::NonZeroU64,
     os::fd::{AsFd, AsRawFd, BorrowedFd},
     path::{Path, PathBuf},
 };
@@ -71,9 +72,18 @@ pub(super) struct MountEntry {
     pub(super) super_options: String,
 }
 
+/// A block device generation within this kernel boot. Device numbers alone
+/// can be reused; loop diskseq also changes when its backing file changes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct BlockIdentity {
+    pub(super) device: (u32, u32),
+    pub(super) diskseq: NonZeroU64,
+}
+
 /// The loop device backing one device-mapper slave partition.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct LoopDevice {
+    pub(super) identity: Option<BlockIdentity>,
     pub(super) backing: Option<(u64, u64)>,
     pub(super) offset: Option<u64>,
     pub(super) size_limit: Option<u64>,
@@ -96,6 +106,7 @@ pub(super) struct Slave {
 /// The device-mapper device under the mount.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct Mapper {
+    pub(super) identity: Option<BlockIdentity>,
     pub(super) uuid: Option<String>,
     pub(super) read_only: Option<u64>,
     pub(super) slaves: Option<Vec<Slave>>,
@@ -158,6 +169,7 @@ impl HostKernel {
             .sys
             .join("dev/block")
             .join(format!("{}:{}", device.0, device.1));
+        let identity = block_identity(&block);
         Mapper {
             uuid: read_text(&block.join("dm/uuid")),
             read_only: read_number(&block.join("ro")),
@@ -167,6 +179,9 @@ impl HostKernel {
                     .map(|entry| self.slave(&entry.file_name().to_string_lossy()))
                     .collect()
             }),
+            // Bracket the facts with fresh generation reads. A missing or
+            // changed stamp makes the whole identity unverified.
+            identity: identity.filter(|before| Some(*before) == block_identity(&block)),
         }
     }
 
@@ -184,6 +199,7 @@ impl HostKernel {
 
     pub(super) fn loop_device(&self, name: &str) -> LoopDevice {
         let device = self.sys.join("class/block").join(name);
+        let identity = block_identity(&device);
         LoopDevice {
             backing: read_text(&device.join("loop/backing_file")).and_then(|path| {
                 open(path.as_str(), BACKING_OPEN, Mode::empty())
@@ -207,6 +223,7 @@ impl HostKernel {
                     })
                     .collect()
             }),
+            identity: identity.filter(|before| Some(*before) == block_identity(&device)),
         }
     }
 }
@@ -319,6 +336,15 @@ fn read_text(path: &Path) -> Option<String> {
 
 fn read_number(path: &Path) -> Option<u64> {
     read_text(path).and_then(|text| text.parse().ok())
+}
+
+/// Read sysfs identity without opening a block-device FD that could prevent
+/// loop autoclear or deferred mapper removal.
+fn block_identity(path: &Path) -> Option<BlockIdentity> {
+    read_number(&path.join("diskseq"))
+        .and_then(NonZeroU64::new)
+        .zip(read_text(&path.join("dev")).and_then(|text| device_numbers(&text)))
+        .map(|(diskseq, device)| BlockIdentity { device, diskseq })
 }
 
 /// The loop device of a loop partition name, `loop<N>p<K>`.

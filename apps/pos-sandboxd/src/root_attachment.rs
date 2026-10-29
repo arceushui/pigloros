@@ -110,7 +110,8 @@ impl VerifiedRootMount {
     /// was verified against. The installed authority is then re-read and
     /// compared with the provider control floor through `entry`. The mount,
     /// loop, dm-verity and executable readback is repeated and must name the
-    /// same mount node, device-mapper UUID and loop name retained at activation.
+    /// same mount node, device-mapper UUID, loop name and boot-local block
+    /// device generations retained at activation.
     /// The returned [`CheckedRoot`] is the only `RootDirectory` a launch input
     /// accepts.
     ///

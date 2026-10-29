@@ -170,7 +170,7 @@ mod cases {
 
     #[test]
     fn same_image_device_substitutions_refuse_launch_and_detach() -> TestResult {
-        for fault in 0..4 {
+        for fault in 0..7 {
             let tree = prepared_tree()?;
             let record = tree
                 .runtime
@@ -186,6 +186,9 @@ mod cases {
                     kernel.observations.mount = Some(node);
                     kernel.observations.path = Some(node);
                     edit_entry(&mut kernel.observations, |entry| entry.device = node.device);
+                    edit_mapper(&mut kernel.observations, |mapper| {
+                        mapper.identity = block_generation(node.device, 102);
+                    });
                     if let Some(executable) = kernel.observations.executable.as_mut() {
                         executable.node.device = node.device;
                     }
@@ -198,11 +201,25 @@ mod cases {
                         slave.loop_name = Some("loop8".to_owned());
                     }
                 }),
-                _ => {
+                3 => {
                     let node = kernel.observations.mount.as_mut().ok_or("attached node")?;
                     node.inode += 1;
                     kernel.observations.path = Some(*node);
                 }
+                4 => edit_mapper(&mut kernel.observations, |mapper| {
+                    mapper.identity = block_generation((253, 3), 103);
+                }),
+                _ => edit_slaves(&mut kernel.observations, |slaves| {
+                    for slave in slaves {
+                        if let Some(device) = slave.loop_device.as_mut() {
+                            device.identity = if fault == 5 {
+                                block_generation((7, 8), 101)
+                            } else {
+                                block_generation((7, 7), 103)
+                            };
+                        }
+                    }
+                }),
             }
             // Every replacement still satisfies the admitted image. Refusal
             // must come from retaining the original device identities.
