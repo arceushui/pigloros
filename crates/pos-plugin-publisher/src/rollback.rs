@@ -18,10 +18,11 @@
 //!
 //! Steps 1 to 5 are the installer's own private prefix, so the two orders
 //! cannot drift; this file is therefore a child module of `install`, included
-//! by `#[path]`, while keeping its own file for the guard's allow-list. ADR-103 revision 7 names this module the sole non-test caller
-//! of the registry's `rollback`; it may not call `admit`, `provision`, or
-//! `advance_policy`. No operator command, HTTP route, or remote trigger reaches
-//! it (revision 7, Q9).
+//! by `#[path]`, while keeping its own file for the guard's allow-list.
+//! ADR-103 revision 7 names this module the sole non-test caller of the
+//! registry's `rollback`; it may not call `admit`, `provision`, or
+//! `advance_policy`. No operator command, HTTP route, or remote trigger
+//! reaches it (revision 7, Q9).
 //!
 //! The entry accepts no projection, public key, clock value, or Tick from its
 //! caller, and it builds no activation Event: the trusted composition supplies

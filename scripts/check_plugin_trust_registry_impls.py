@@ -29,8 +29,10 @@ source of every `.rs` file outside the top-level build and tooling directories:
    proof of both operations, which the registry checks against its own
    authorization; the per-file call-site rule stays as defence in depth,
    because the token proves a signature, not that the caller is the trusted
-   composition. Each of the two files verifies the signature before it calls
-   its one operation; neither may call the other operation, `provision`, or
+   composition. The behavioural tests (`rollback_public.rs`,
+   `installer_public.rs`), not this checker, pin that each of the two files
+   verifies the signature before its one operation; neither may call the
+   other operation, `provision`, or
    `advance_policy`, nor implement the port, and they are the only non-test
    files that may construct `TrustedUtcSecondV1` outside the trusted host. Any
    other call site, including one inside `pos-store` or `pos-runtime`, is
