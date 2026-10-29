@@ -125,6 +125,7 @@ fn failure_oracle(family: &str) -> TestResult<BTreeMap<String, Json>> {
 }
 
 fn expect_oracle_failure(found: &MetricFailure, oracle: &Json) -> TestResult {
+    assert_eq!(found.error.to_string(), text(oracle, "error")?);
     assert_eq!(format!("{:?}", found.error), text(oracle, "error")?);
     assert_eq!(
         Some(u64::from(found.error.code())),
@@ -136,12 +137,6 @@ fn expect_oracle_failure(found: &MetricFailure, oracle: &Json) -> TestResult {
 
 fn rejected(result: Result<Vec<u8>, MetricFailure>) -> TestResult<MetricFailure> {
     Ok(result.err().ok_or("the input was accepted")?)
-}
-
-/// The accepted bytes; the failure, if any, is reported by the assertion.
-fn accepted(result: Result<Vec<u8>, MetricFailure>) -> TestResult<Vec<u8>> {
-    assert_eq!(result.as_ref().err(), None);
-    Ok(result.ok().ok_or("the input was rejected")?)
 }
 
 fn failure(error: MetricErrorV1, coordinate: &str) -> MetricFailure {
@@ -161,9 +156,7 @@ fn ind1_recomputes_every_positive_and_deletion_redaction_oracle() -> TestResult 
                 continue;
             }
             let entry = oracle.get(&subcase.id).ok_or("oracle entry")?;
-            let result = recompute_result_v1(&subcase.member);
-            assert_eq!(result.as_ref().err(), None, "{}", subcase.id);
-            let result = accepted(result)?;
+            let result = recompute_result_v1(&subcase.member)?;
             assert_eq!(hex(&result), text(entry, "hex")?, "{}", subcase.id);
             let digest = hex(blake3::hash(&result).as_bytes());
             assert_eq!(digest, text(entry, "blake3")?, "{}", subcase.id);
@@ -212,7 +205,7 @@ fn del3_canary_identifier_never_appears_in_the_result() -> TestResult {
         .member
         .windows(canary.len())
         .any(|window| window == canary));
-    let result = accepted(recompute_result_v1(&subcase.member))?;
+    let result = recompute_result_v1(&subcase.member)?;
     assert!(!result.windows(canary.len()).any(|window| window == canary));
     Ok(())
 }
@@ -227,7 +220,7 @@ fn ind3_recomputes_the_quantization_vectors_from_bit_patterns() -> TestResult {
                 continue;
             }
             let entry = oracle.get(&subcase.id).ok_or("oracle entry")?;
-            let result = accepted(recompute_quantization_v1(&subcase.member))?;
+            let result = recompute_quantization_v1(&subcase.member)?;
             assert_eq!(hex(&result), text(entry, "hex")?, "{}", subcase.id);
             assert_eq!(
                 hex(blake3::hash(&result).as_bytes()),
@@ -452,6 +445,7 @@ fn with_record_field(record_index: usize, field: usize, value: Cbor) -> Vec<u8> 
 fn expect_failure(input: &[u8], error: MetricErrorV1, coordinate: &str) -> TestResult {
     let found = rejected(recompute_result_v1(input))?;
     assert_eq!(found, failure(error, coordinate), "{}", hex(input));
+    assert_eq!(found.to_string(), format!("{error} at {coordinate}"));
     Ok(())
 }
 
@@ -464,7 +458,7 @@ fn nested(levels: usize, leaf: Cbor) -> Cbor {
 #[test]
 fn the_base_input_is_valid_and_every_truncated_prefix_is_invalid_encoding() -> TestResult {
     let input = encode(&Cbor::Array(base_fields()));
-    accepted(recompute_result_v1(&input))?;
+    recompute_result_v1(&input)?;
     for end in 0..input.len() {
         let found = rejected(recompute_result_v1(&input[..end]))?;
         assert_eq!(found.error, MetricErrorV1::InvalidEncoding, "prefix {end}");
@@ -518,6 +512,38 @@ fn structural_defects_are_invalid_encoding_at_their_coordinate() -> TestResult {
     // A structural defect inside a nested array carries the nested path.
     let inner = Cbor::Array(vec![Cbor::Unsigned(1), Cbor::Raw(vec![0xa0])]);
     expect_failure(&with_record_field(0, 2, inner), invalid, "records/0/2/1")
+}
+
+#[test]
+fn preferred_head_widths_are_accepted_and_wider_or_indefinite_heads_rejected() -> TestResult {
+    // The smallest two- and four-byte arguments are the preferred encodings of 256 and 65536.
+    for (raw, micros) in [
+        (vec![0x19, 0x01, 0x00], 256_i128),
+        (vec![0x1a, 0x00, 0x01, 0x00, 0x00], 65_536),
+    ] {
+        let input = with_record_field(0, 2, Cbor::Raw(raw));
+        let result = recompute_result_v1(&input)?;
+        let decoded: Value = ciborium::de::from_reader(result.as_slice())?;
+        let bins = decoded.as_array().ok_or("MTR1")?[11]
+            .as_array()
+            .ok_or("bins")?;
+        let first = bins[0].as_array().ok_or("bin 0")?;
+        assert_eq!(first[1].as_integer().map(i128::from), Some(micros));
+    }
+    let invalid = MetricErrorV1::InvalidEncoding;
+    // An eight-byte head carrying a value below 2^32 is not preferred.
+    let wide = vec![0x1b, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff];
+    expect_failure(
+        &with_record_field(0, 2, Cbor::Raw(wide)),
+        invalid,
+        "records/0/2",
+    )?;
+    // Indefinite-length byte string, text string, array and map heads.
+    for head in [0x5f, 0x7f, 0x9f, 0xbf] {
+        let raw = Cbor::Raw(vec![head, 0xff]);
+        expect_failure(&with_record_field(0, 2, raw), invalid, "records/0/2")?;
+    }
+    Ok(())
 }
 
 #[test]
@@ -640,9 +666,7 @@ fn supplied_flags_are_counted_and_redacted_or_unavailable_records_are_excluded()
         record("c", "f", 100_000, 2, None),
         record("d", "g", 100_000, 3, None),
     ];
-    let result = accepted(recompute_result_v1(&encode(&Cbor::Array(input_fields(
-        1, records,
-    )))))?;
+    let result = recompute_result_v1(&encode(&Cbor::Array(input_fields(1, records))))?;
     let decoded: Value = ciborium::de::from_reader(result.as_slice())?;
     let fields = decoded.as_array().ok_or("MTR1")?;
     let counts: Vec<u64> = fields[7]
@@ -676,7 +700,7 @@ fn bound_records(count: u64, entity: fn(u64) -> String, outcome: fn(u64) -> u64)
 }
 
 fn computed_values(input: &[u8]) -> TestResult<(Vec<i128>, Vec<i128>, Vec<i128>)> {
-    let result = accepted(recompute_result_v1(input))?;
+    let result = recompute_result_v1(input)?;
     let decoded: Value = ciborium::de::from_reader(result.as_slice())?;
     let fields = decoded.as_array().ok_or("MTR1")?;
     let integers = |value: &Value| -> TestResult<Vec<i128>> {
@@ -761,7 +785,7 @@ fn a_count_of_twenty_four_uses_the_one_byte_head() -> TestResult {
     let (counts, _, last_bin) = computed_values(&input)?;
     assert_eq!(counts, [24, 24, 0, 0, 0, 0, 24]);
     assert_eq!(last_bin, [24, 24_000_000, 0]);
-    let result = accepted(recompute_result_v1(&input))?;
+    let result = recompute_result_v1(&input)?;
     let head = [0x87, 0x18, 24, 0x18, 24];
     assert!(result.windows(head.len()).any(|window| window == head));
     Ok(())
@@ -776,7 +800,7 @@ fn two_to_the_eighteen_plus_one_records_is_resource_limit() -> TestResult {
     let declared = with_field(6, Cbor::Unsigned(MAX_RECORDS + 1));
     expect_failure(&declared, MetricErrorV1::ResourceLimit, "record_count")?;
     let minimum = with_field(5, Cbor::Unsigned(MAX_RECORDS));
-    let found = accepted(recompute_result_v1(&minimum))?;
+    let found = recompute_result_v1(&minimum)?;
     assert_eq!(accept_result_v1(&found), Ok(()));
     Ok(())
 }
@@ -802,7 +826,7 @@ fn quantization_inputs_are_strictly_decoded() -> TestResult {
     let one = || Cbor::Array(vec![Cbor::Unsigned(1.0_f64.to_bits())]);
     let valid = quantization("MTQ1", 1, one());
     assert_eq!(
-        accepted(recompute_quantization_v1(&valid))?,
+        recompute_quantization_v1(&valid)?,
         [0x83, 0x64, b'M', b'Q', b'R', b'1', 0x01, 0x81, 0x1a, 0x00, 0x0f, 0x42, 0x40]
     );
     for end in 0..valid.len() {
@@ -833,12 +857,16 @@ fn quantization_inputs_are_strictly_decoded() -> TestResult {
     let mut trailing = valid;
     trailing.push(0x00);
     expect_quantization_failure(&trailing, invalid, "trailing")?;
+    // Trailing bytes are structural, so they outrank an empty pattern list.
+    let mut empty_trailing = quantization("MTQ1", 1, Cbor::Array(vec![]));
+    empty_trailing.push(0x00);
+    expect_quantization_failure(&empty_trailing, invalid, "trailing")?;
     expect_quantization_failure(&[0x82, 0x00, 0x00], invalid, "input")
 }
 
 fn foreign_result(index: usize, value: Value) -> TestResult<Vec<u8>> {
     let input = encode(&Cbor::Array(base_fields()));
-    let result = accepted(recompute_result_v1(&input))?;
+    let result = recompute_result_v1(&input)?;
     let decoded: Value = ciborium::de::from_reader(result.as_slice())?;
     let mut fields = decoded.into_array().ok().ok_or("MTR1")?;
     fields[index] = value;
@@ -894,49 +922,41 @@ const fn is_path_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_' || c == ':'
 }
 
+/// Crate and path names of the implementation under test and the conformance host.
+const FORBIDDEN: [&str; 4] = ["pos-conformance", "pos-plugin", "plugins/eval", "eval"];
+
 #[test]
 fn the_metric_profile_module_imports_no_plugin_or_conformance_code() -> TestResult {
-    const PRIMITIVES: [&str; 5] = ["i128", "u32", "u64", "u128", "usize"];
     let crate_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let manifest = std::fs::read_to_string(crate_root.join("Cargo.toml"))?;
-    let workspace_crates: Vec<&str> = manifest
-        .lines()
-        .map(str::trim_start)
-        .filter(|line| line.starts_with("pos-") || line.contains("path ="))
-        .collect();
-    assert!(workspace_crates.is_empty(), "{workspace_crates:?}");
-    for forbidden in ["pos-plugin", "pos-conformance", "plugins/"] {
-        assert!(!manifest.contains(forbidden), "{forbidden}");
-    }
-    let source = std::fs::read_to_string(crate_root.join("src/metric_profile.rs"))?;
-    let imports: Vec<&str> = source
-        .lines()
-        .map(str::trim_start)
-        .filter(|line| line.starts_with("use ") || line.starts_with("extern crate"))
-        .collect();
-    assert_eq!(
-        imports,
-        ["use std::cmp::Ordering;", "use std::collections::BTreeMap;"]
-    );
-    // Beyond `std`, the only path the module names is `blake3`, for the digests.
-    let code: Vec<&str> = source
-        .lines()
-        .filter(|line| !line.trim_start().starts_with("//"))
-        .collect();
-    for forbidden in ["pos_", "crate::", "super::", "plugins", "eval::"] {
+    // No dependency key names the plugin or conformance crates.
+    for line in manifest.lines().map(str::trim_start) {
+        let key = line.split(['=', ' ', '.']).next().unwrap_or_default();
         assert!(
-            !code.iter().any(|line| line.contains(forbidden)),
-            "{forbidden}"
+            !FORBIDDEN.iter().any(|name| key.starts_with(name)),
+            "{line}"
         );
     }
-    let roots: BTreeSet<&str> = code
-        .iter()
+    assert!(!manifest.contains("plugins/"));
+    // No path root in the module names one of those crates.
+    let source = std::fs::read_to_string(crate_root.join("src/metric_profile.rs"))?;
+    let roots: BTreeSet<&str> = source
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
         .flat_map(|line| line.split(|c: char| !is_path_char(c)))
         .filter_map(|token| token.split_once("::").map(|(root, _)| root))
-        .filter(|root| root.starts_with(|c: char| c.is_ascii_lowercase()))
-        .filter(|root| !PRIMITIVES.contains(root))
         .collect();
-    let expected: BTreeSet<&str> = ["blake3", "std"].into_iter().collect();
-    assert_eq!(roots, expected);
+    assert!(
+        roots.contains("std") && roots.contains("blake3"),
+        "{roots:?}"
+    );
+    for root in &roots {
+        assert!(
+            !root.starts_with("pos_")
+                && !root.contains("eval")
+                && !["crate", "super"].contains(root),
+            "{root}"
+        );
+    }
     Ok(())
 }

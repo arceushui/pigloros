@@ -1,6 +1,8 @@
 //! Independent recomputation of the `pigloros.w8.metric-computation` profile.
 //!
-//! This module reimplements ADR-062 Revision 7 sections 4.2 to 4.4 from the profile text
+//! This module reimplements ADR-062 Revision 7 sections 4.2 to 4.4, with the section 4.6 decode
+//! order and gap-fills G1 to G9 (including the `MTR1` digest framing G7, the `MQR1` error entry
+//! G8 and `MTR1` acceptance G9), from the profile text
 //! (`fixtures/conformance/profiles/metric-conformance/normative-requirements.md`): the strict
 //! core-deterministic CBOR decoder for `MTI1` and `MTQ1`, the closed [`MetricErrorV1`] with its
 //! decode-order precedence and zero-based first coordinate, the section 4.3 algorithms in exact
@@ -88,32 +90,45 @@ const NORMAL_SHIFT_BASE: u64 = 1_075;
 /// `2^53`, a shift of 74 or more leaves a value below `2^-21`, under half a micro.
 const MAX_ROUNDING_SHIFT: u64 = 73;
 
-/// The closed `MetricErrorV1` failure set of section 4.2, with its wire codes.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+/// The closed `MetricErrorV1` failure set of section 4.2, with its wire codes. It displays as
+/// its profile name.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, thiserror::Error)]
 pub enum MetricErrorV1 {
     /// A structural, encoding or CBOR type defect.
+    #[error("InvalidEncoding")]
     InvalidEncoding = 0,
     /// An unknown record magic or version.
+    #[error("UnsupportedVersion")]
     UnsupportedVersion = 1,
     /// An unknown algorithm identifier or algorithm major.
+    #[error("UnsupportedAlgorithm")]
     UnsupportedAlgorithm = 2,
     /// A binning other than `EqualWidth10`.
+    #[error("InvalidBinning")]
     InvalidBinning = 3,
     /// A records array whose length differs from `record_count`.
+    #[error("InconsistentLength")]
     InconsistentLength = 4,
     /// A probability outside `0..=1000000` micros, or a pattern outside `[0, 1]`.
+    #[error("InvalidProbability")]
     InvalidProbability = 5,
     /// An outcome state, outcome or predictor-supplied flag that does not agree.
+    #[error("InvalidOutcome")]
     InvalidOutcome = 6,
     /// An identifier outside 1..=64 bytes or not valid UTF-8.
+    #[error("InvalidIdentifier")]
     InvalidIdentifier = 7,
     /// A `prediction_id` equal to the previous record's.
+    #[error("DuplicatePrediction")]
     DuplicatePrediction = 8,
     /// A `prediction_id` below the previous record's in UTF-8 byte order.
+    #[error("NonCanonicalOrder")]
     NonCanonicalOrder = 9,
     /// A `minimum_scored_records` outside 1..=262144.
+    #[error("InvalidMinimum")]
     InvalidMinimum = 10,
     /// A declared count above its bound, raised before any record is allocated.
+    #[error("ResourceLimit")]
     ResourceLimit = 11,
 }
 
@@ -126,7 +141,8 @@ impl MetricErrorV1 {
 }
 
 /// A rejected input: the closed failure and the CNR1 zero-based `first_coordinate`.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("{error} at {first_coordinate}")]
 pub struct MetricFailure {
     /// The closed failure.
     pub error: MetricErrorV1,
@@ -709,14 +725,20 @@ const fn entity_term(count: i128, positives: i128) -> i128 {
     }
 }
 
+/// The CBOR argument of a non-negative value. Every value the encoders write is bounded by
+/// section 4.2 far below `2^64`, so the saturating fallback is never taken.
+fn magnitude(value: i128) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
+}
+
 /// A core-deterministic CBOR writer for the result records.
 struct Encoder(Vec<u8>);
 
 impl Encoder {
-    fn head(&mut self, major: u8, argument: u128) {
+    fn head(&mut self, major: u8, argument: u64) {
         let bytes = argument.to_be_bytes();
         let (info, width) = if argument < 24 {
-            (bytes[15], 0)
+            (bytes[7], 0)
         } else if argument <= 0xff {
             (24, 1)
         } else if argument <= 0xffff {
@@ -732,14 +754,14 @@ impl Encoder {
 
     fn integer(&mut self, value: i128) {
         if value < 0 {
-            self.head(1, (-1 - value).unsigned_abs());
+            self.head(1, magnitude(-1 - value));
         } else {
-            self.head(0, value.unsigned_abs());
+            self.head(0, magnitude(value));
         }
     }
 
     fn bytes(&mut self, major: u8, content: &[u8]) {
-        self.head(major, u128::try_from(content.len()).unwrap_or(u128::MAX));
+        self.head(major, u64::try_from(content.len()).unwrap_or(u64::MAX));
         self.0.extend_from_slice(content);
     }
 
@@ -748,7 +770,7 @@ impl Encoder {
     }
 
     fn array(&mut self, length: usize) {
-        self.head(4, u128::try_from(length).unwrap_or(u128::MAX));
+        self.head(4, u64::try_from(length).unwrap_or(u64::MAX));
     }
 
     fn integers(&mut self, values: &[i128]) {
@@ -827,6 +849,11 @@ pub fn recompute_result_v1(input: &[u8]) -> Result<Vec<u8>, MetricFailure> {
 
 /// Accepts an `MTR1` only as a result of this profile's record version and algorithm major
 /// (gap-fill G9); a result of another version or algorithm has no fallback.
+///
+/// This is the G9 identity and structure gate only: it checks the core-deterministic structure,
+/// the 13-field root and the magic, version, algorithm identifier and algorithm major. It does
+/// not verify `input_digest` or `result_digest` and does not recompute the result, so it is not
+/// integrity verification.
 ///
 /// # Errors
 ///
