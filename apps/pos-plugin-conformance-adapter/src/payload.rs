@@ -491,9 +491,14 @@ impl SubCaseV1 {
             .all(|(earlier, later)| earlier <= later)
     }
 
+    /// The rules on the steps: the scan of an `absent` expectation, and Simulation Time.
+    fn steps_are_valid(&self) -> bool {
+        self.scans_agree() && self.time_is_monotone()
+    }
+
     /// The grammar rules that need no context.
     fn is_wellformed(&self) -> bool {
-        self.expect.is_valid() && self.scans_agree() && self.time_is_monotone()
+        self.expect.is_valid() && self.steps_are_valid()
     }
 
     /// The rules of a sub-case of a payload: `nested` and the `malformed` expectation belong
