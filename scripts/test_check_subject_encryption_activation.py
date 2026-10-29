@@ -34,6 +34,10 @@ class ActivationPolicyTests(unittest.TestCase):
             for port in ["EnrollmentPort", "UnlockPort"]:
                 sources.append(f"impl {port} for {owner} {{}}")
         sources.append("impl<T> EnrollmentPort for T where T: RealMarker {}")
+        sources.append("impl<T: Trait<{ 1 }>> EnrollmentPort for Owner<T> {}")
+        sources.append("impl<T: Trait<{ 1 }>> owner::UnlockPort for Owner<T> {}")
+        sources.append("impl EnrollmentPort for [RealOwner; { 1 }] {}")
+        sources.append("impl UnlockPort for for<'a> fn(&'a RealOwner) {}")
         sources.append("impl owner::UnlockPort for owner::RealOwner {}")
         sources.append("macro_rules! install { ($port:path) => { impl $port for RealOwner {} } } install!(EnrollmentPort);")
         sources.append("install!((owner::UnlockPort, RealOwner));")

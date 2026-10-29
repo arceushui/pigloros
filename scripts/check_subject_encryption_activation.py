@@ -27,7 +27,7 @@ ALIAS = re.compile(r"\buse\b[^;]*\b(?:" + NAMES + r")\s+as\b", re.DOTALL)
 TYPE_ALIAS = re.compile(r"\btype\s+\w+[^;=]*=[^;]*\b(?:" + NAMES + r")\b", re.DOTALL)
 ACTIVATION_REFERENCE = re.compile(r"\b(?:" + TYPE_NAMES + r")\b")
 PORT_IMPL = re.compile(
-    r"\bimpl\b[^;{]*\b(?:" + "|".join(PORTS) + r")\s+for\s+([^;{]+)",
+    r"\b(?:" + "|".join(PORTS) + r")\s+for\s+([^;{]+)",
     re.DOTALL,
 )
 REFERENCE = re.compile(r"\b(?:" + NAMES + r")\b")
