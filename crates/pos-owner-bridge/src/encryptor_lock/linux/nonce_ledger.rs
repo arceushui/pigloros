@@ -73,7 +73,6 @@ mod replace;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::encryptor_lock_test_support::{write_private, Sandbox};
 
     struct FaultyReader;
 
@@ -91,27 +90,5 @@ mod tests {
                 .map(|error| error.kind()),
             Some(io::ErrorKind::Other)
         );
-    }
-
-    // Opening succeeded, then a rename removed only the path, retaining nlink=1.
-    // This isolates the later statat ENOENT from the allowed initial absence.
-    #[test]
-    fn orphan_cleanup_propagates_a_name_lost_after_open() -> Result<(), Box<dyn std::error::Error>>
-    {
-        let root = Sandbox::new()?;
-        let guard = SubjectEncryptorLock::acquire(&root.0)?;
-        let leaf = root.0.join("pigloros");
-        let path = leaf.join(TEMPORARY_NAME);
-        write_private(&path, b"retained orphan")?;
-        let file = fs::openat(&guard.directory, TEMPORARY_NAME, FILE_FLAGS, Mode::empty())?;
-        let retained = leaf.join("retained");
-        std::fs::rename(path, &retained)?;
-        assert_eq!(
-            remove_opened_temporary(&guard.directory, &file),
-            Err(rustix::io::Errno::NOENT)
-        );
-        assert_eq!(std::fs::read(retained)?, b"retained orphan");
-        assert!(SubjectEncryptorLock::acquire(&root.0).is_err());
-        Ok(())
     }
 }

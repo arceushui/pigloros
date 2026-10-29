@@ -1,5 +1,5 @@
 #![cfg(any(test, feature = "test-support"))]
-//! Real stage boundaries and process-crash witnesses for the private commit core.
+//! Private commit/recovery stage boundaries and process-crash witnesses.
 
 use std::fs;
 use std::io::{self, Read as _, Write as _};
@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
+use super::super::{remove_opened_temporary, FILE_FLAGS};
 use super::{CommitStage, SubjectEncryptorLock, LEDGER_NAME, TEMPORARY_NAME};
 use crate::encryptor_lock_test_support::{write_private, Sandbox};
 use crate::{BridgeError, UnavailableCode};
@@ -121,6 +122,32 @@ fn substituted_ledger_or_temporary_names_are_not_committed_or_cleaned_as_owned()
             assert_eq!(guard.read_nonce_ledger_bytes()?, image(12)?);
         }
     }
+    Ok(())
+}
+
+// Opening succeeded, then a rename removed only the path, retaining nlink=1.
+// This isolates the later statat ENOENT from the allowed initial absence.
+#[test]
+fn orphan_cleanup_propagates_a_name_lost_after_open() -> TestResult {
+    let root = Sandbox::new()?;
+    let guard = SubjectEncryptorLock::acquire(&root.0)?;
+    let leaf = root.0.join("pigloros");
+    let path = leaf.join(TEMPORARY_NAME);
+    write_private(&path, b"retained orphan")?;
+    let file = rustix::fs::openat(
+        &guard.directory,
+        TEMPORARY_NAME,
+        FILE_FLAGS,
+        rustix::fs::Mode::empty(),
+    )?;
+    let retained = leaf.join("retained");
+    fs::rename(path, &retained)?;
+    assert_eq!(
+        remove_opened_temporary(&guard.directory, &file),
+        Err(rustix::io::Errno::NOENT)
+    );
+    assert_eq!(fs::read(retained)?, b"retained orphan");
+    assert!(SubjectEncryptorLock::acquire(&root.0).is_err());
     Ok(())
 }
 
