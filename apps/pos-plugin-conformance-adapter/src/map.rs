@@ -5,7 +5,9 @@
 //! the evaluator never turns into `Pass` or `Fail`. [`case_result`] is the only place a case
 //! result is decided.
 
-use pos_plugin_supervisor::{CommunityPluginSubjectOutcomeV1, CommunityPluginSubjectResultV1};
+use pos_plugin_supervisor::{
+    CommunityPluginSubjectOutcomeV1, CommunityPluginSubjectResultV1, OutputUsageV1,
+};
 use pos_reference::evaluator::{ResourceUsage, SubjectResult};
 use pos_reference::evaluator_domain::FixtureFamily;
 use pos_reference::profile::NamespacedFailure;
@@ -49,7 +51,8 @@ const AUTHORITATIVE: &str = HostFailureClassV1::Authoritative.name();
 /// One sub-result.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SubResultV1 {
-    /// The pass committed output with this digest and metering.
+    /// The pass committed output with this digest; the usage of one outcome, or of the
+    /// attempt for the sub-result of a record ([`of_record()`]).
     Committed {
         output_digest: [u8; 32],
         usage: ResourceUsage,
@@ -71,13 +74,17 @@ pub enum SubResultV1 {
     Operational,
 }
 
-/// The usage of `metering`.
+/// The usage of one committed outcome from its `metering` and its `output` usage
+/// (ADR-068 R4 4.1).
 ///
 /// `cpu_fuel` is the checked sum of the two fuel counters (overflow is `None`, which is
-/// operational), `memory_bytes` and `host_calls` are direct and the other five counters are
-/// not measured.
+/// operational); `memory_bytes`, `host_calls`, the Event count, the output bytes (the Event
+/// payload bytes) and the storage bytes (the next state bytes) are direct; the outcome is one
+/// execution step, because a sub-case keeps one decisive outcome per `pass` step and counts one
+/// step per committed one (ADR-068 R4 4.1(4)); Simulation Time belongs to the sub-case
+/// ([`of_record()`]), so it is 0 here.
 #[must_use]
-pub fn usage_of(metering: MeteringV1) -> Option<ResourceUsage> {
+pub fn usage_of(metering: MeteringV1, output: OutputUsageV1) -> Option<ResourceUsage> {
     metering
         .startup_fuel
         .checked_add(metering.call_fuel)
@@ -85,8 +92,93 @@ pub fn usage_of(metering: MeteringV1) -> Option<ResourceUsage> {
             memory_bytes: metering.memory_bytes,
             cpu_fuel,
             host_calls: metering.host_calls,
-            ..ResourceUsage::default()
+            event_count: output.event_count,
+            output_bytes: output.event_payload_bytes,
+            storage_bytes: output.state_bytes,
+            execution_steps: 1,
+            simulation_time_ns: 0,
         })
+}
+
+/// The usage of two decisive committed outcomes of one attempt (ADR-068 R4 4.2(1)):
+/// `memory_bytes` is the maximum, every other counter but Simulation Time is the checked sum,
+/// and an overflow is `None`. Simulation Time is left 0: it is the sub-case's advance.
+const fn plus(left: ResourceUsage, right: ResourceUsage) -> Option<ResourceUsage> {
+    let sums = (
+        left.cpu_fuel.checked_add(right.cpu_fuel),
+        left.host_calls.checked_add(right.host_calls),
+        left.event_count.checked_add(right.event_count),
+        left.output_bytes.checked_add(right.output_bytes),
+        left.storage_bytes.checked_add(right.storage_bytes),
+        left.execution_steps.checked_add(right.execution_steps),
+    );
+    match sums {
+        (
+            Some(cpu_fuel),
+            Some(host_calls),
+            Some(event_count),
+            Some(output_bytes),
+            Some(storage_bytes),
+            Some(execution_steps),
+        ) => Some(ResourceUsage {
+            memory_bytes: greater(left.memory_bytes, right.memory_bytes),
+            cpu_fuel,
+            host_calls,
+            event_count,
+            output_bytes,
+            storage_bytes,
+            execution_steps,
+            simulation_time_ns: 0,
+        }),
+        _ => None,
+    }
+}
+
+/// The Simulation Time a sub-case consumed (ADR-068 R4 4.1(5)): the last pass value less the
+/// first, 0 for one pass or none. The grammar makes the values non-decreasing.
+fn advance(times: &[u64]) -> u64 {
+    times
+        .last()
+        .zip(times.first())
+        .map_or(0, |(last, first)| last.saturating_sub(*first))
+}
+
+/// The sub-result of the passes so far, `seen`, followed by the decisive outcome `next` of the
+/// next pass (ADR-068 R4 4.2(1)): a committed outcome after a committed sub-result adds its
+/// usage with [`plus()`] (an overflow is operational, and stays so over later passes); the
+/// first outcome is itself.
+fn after_pass(seen: Option<SubResultV1>, next: SubResultV1) -> SubResultV1 {
+    match (seen, next) {
+        (
+            Some(SubResultV1::Committed { usage: before, .. }),
+            SubResultV1::Committed {
+                output_digest,
+                usage,
+            },
+        ) => plus(before, usage).map_or(SubResultV1::Operational, |usage| SubResultV1::Committed {
+            output_digest,
+            usage,
+        }),
+        (Some(SubResultV1::Operational), _) => SubResultV1::Operational,
+        (_, next) => next,
+    }
+}
+
+/// `result` with the Simulation Time [`advance()`] of `times` when it is committed.
+fn timed(result: SubResultV1, times: &[u64]) -> SubResultV1 {
+    match result {
+        SubResultV1::Committed {
+            output_digest,
+            usage,
+        } => SubResultV1::Committed {
+            output_digest,
+            usage: ResourceUsage {
+                simulation_time_ns: advance(times),
+                ..usage
+            },
+        },
+        other => other,
+    }
 }
 
 /// Whether `error` is one of the 20 closed names.
@@ -101,10 +193,12 @@ pub fn of_outcome(outcome: &CommunityPluginSubjectOutcomeV1) -> SubResultV1 {
         CommunityPluginSubjectResultV1::Committed {
             output_digest: Some(output_digest),
             metering: Some(metering),
-            ..
-        } => usage_of(metering).map_or(SubResultV1::Operational, |usage| SubResultV1::Committed {
-            output_digest,
-            usage,
+            output_usage: Some(output),
+        } => usage_of(metering, output).map_or(SubResultV1::Operational, |usage| {
+            SubResultV1::Committed {
+                output_digest,
+                usage,
+            }
         }),
         CommunityPluginSubjectResultV1::Refused {
             error,
@@ -160,10 +254,23 @@ pub fn of_error(error: CommunityPluginHostErrorV1) -> SubResultV1 {
 
 /// The sub-result of a record: its setup refusal, else the outcome of its last pass, else none
 /// (a sub-case with no pass has no result, which `digest`, `absent` and `malformed` need not).
+///
+/// The record keeps one decisive outcome per `pass` step, and a sub-case stops at the first
+/// that did not commit, so every outcome before the last is committed. A committed sub-result
+/// carries the usage of the attempt: the checked sum over these decisive committed outcomes,
+/// the maximum `memory_bytes`, one execution step per committed `pass` step and the Simulation
+/// Time advance (ADR-068 R4 4.1(4), 4.1(5), 4.2(1)). An overflow of a sum is operational.
 #[must_use]
 pub fn of_record(record: &SubCaseRecordV1) -> Option<SubResultV1> {
     let refusal = record.setup_refusal.map(of_error);
-    refusal.or_else(|| record.outcomes.last().map(of_outcome))
+    refusal.or_else(|| {
+        record
+            .outcomes
+            .iter()
+            .map(of_outcome)
+            .fold(None, |seen, next| Some(after_pass(seen, next)))
+            .map(|result| timed(result, &record.simulation_times))
+    })
 }
 
 /// The case result and the usage that goes with it.
@@ -239,7 +346,8 @@ const fn greater(left: u64, right: u64) -> u64 {
 /// 3. Else it is the family's fixed failure when every sub-case matched, and
 ///    `subcase-mismatch` otherwise.
 ///
-/// The usage is the per-counter maximum over the records.
+/// The usage is the per-counter maximum over the records (ADR-068 R4 4.2(2)); a record that did
+/// not commit reports 0 for all eight counters.
 #[must_use]
 pub fn case_result(
     case_id: &str,
