@@ -8,6 +8,7 @@
 pub mod bridge;
 pub mod ceremony;
 pub mod channel;
+pub mod encryptor_lock;
 pub mod enroll;
 pub mod error;
 #[cfg(feature = "test-support")]
