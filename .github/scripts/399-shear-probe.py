@@ -5,6 +5,9 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+import posixpath
+import re
+import textwrap
 
 assert os.environ.get("GITHUB_ACTIONS") == "true", "hosted diagnostic only"
 EVIDENCE = Path("/tmp/399-shear-evidence")
@@ -157,9 +160,7 @@ try:
     assert text.count("tests/support/nonce_ledger_replace.rs") == 1
     declaration.write_text(text.replace("tests/support/nonce_ledger_replace.rs", "tests/private/nonce_ledger_replace.rs"))
     code, result = execute("actual-candidate-shear", ["cargo", "shear", "--deny-warnings"], repo)
-    assert code == 0
-    code, tests = execute("actual-candidate-test-list", ["cargo", "test", "-p", "pos-owner-bridge", "--all-features", "--locked", "--", "--list"], repo)
-    assert code == 0 and "encryptor_lock::linux::nonce_ledger::replace::tests::orphan_cleanup_propagates_a_name_lost_after_open: test" in tests
+    candidate_passes = code == 0
 finally:
     if candidate.exists():
         candidate.rename(previous)
@@ -168,4 +169,68 @@ finally:
 assert declaration.read_bytes() == original_declaration and previous.read_bytes() == original_witness
 code, result = execute("actual-restored-shear", ["cargo", "shear", "--deny-warnings"], repo)
 assert code == 1 and "unlinked" in result and "tests/support/nonce_ledger_replace.rs" in result
-(EVIDENCE / "real-boundary.json").write_text(json.dumps({"candidate_shear_passes": True, "candidate_real_rust_test_list_passes": True, "restored_baseline_fails_again": True}, indent=2))
+(EVIDENCE / "real-boundary.json").write_text(json.dumps({"candidate_shear_passes": candidate_passes, "restored_baseline_fails_again": True}, indent=2))
+
+# Fourth, source-backed prediction: use ordinary adjacent module discovery and
+# preserve an explicit inline cfg(test) boundary for the complexity visitor.
+adjacent = repo / "crates/pos-owner-bridge/src/encryptor_lock/linux/nonce_ledger/replace/tests.rs"
+assert not adjacent.exists()
+adjacent.parent.mkdir()
+try:
+    lines = original_witness.decode().splitlines(keepends=True)
+    header = "".join(lines[:2])
+    body = "".join(lines[2:]).lstrip("\n")
+    assert body.count("use super::super::{remove_opened_temporary, FILE_FLAGS};") == 1
+    body = body.replace("use super::super::{remove_opened_temporary, FILE_FLAGS};", "use super::super::super::{remove_opened_temporary, FILE_FLAGS};")
+    assert body.count("use super::{CommitStage, SubjectEncryptorLock, LEDGER_NAME, TEMPORARY_NAME};") == 1
+    body = body.replace("use super::{CommitStage, SubjectEncryptorLock, LEDGER_NAME, TEMPORARY_NAME};", "use super::super::{CommitStage, SubjectEncryptorLock, LEDGER_NAME, TEMPORARY_NAME};")
+    assert body.count("nonce_ledger::replace::tests::crash_probe") == 1
+    body = body.replace("nonce_ledger::replace::tests::crash_probe", "nonce_ledger::replace::tests::cases::crash_probe")
+    adjacent.write_text(header + "\n#[cfg(test)]\nmod cases {\n" + textwrap.indent(body, "    ") + "}\n")
+    previous.unlink()
+    text = original_declaration.decode()
+    attribute = '#[path = "../../../../tests/support/nonce_ledger_replace.rs"]\n'
+    assert text.count(attribute) == 1
+    declaration.write_text(text.replace(attribute, ""))
+    code, output = execute("combo-format", ["rustfmt", "--edition", "2021", str(declaration), str(adjacent)], repo)
+    assert code == 0
+    code, output = execute("combo-source-gate", ["python3", "scripts/check_subject_encryption_activation.py"], repo)
+    assert code == 0
+    code, output = execute("combo-shear", ["cargo", "shear", "--deny-warnings"], repo)
+    assert code == 0
+    code, output = execute("combo-owner-coverage", ["cargo", "llvm-cov", "--manifest-path", "crates/pos-owner-bridge/Cargo.toml", "--all-features", "--locked", "--json", "--output-path", str(EVIDENCE / "combo-coverage.json"), "--", "--include-ignored"], repo)
+    assert code == 0
+    clean = re.sub(r"\x1b\[[0-9;]*m", "", output)
+    private_names = re.findall(r"#\[test\]\s*fn (\w+)", adjacent.read_text())
+    public_names = re.findall(r"#\[test\]\s*fn (\w+)", (repo / "crates/pos-owner-bridge/tests/nonce_ledger_replace_public.rs").read_text())
+    assert len(private_names) == 7 and len(public_names) == 7
+    for name in private_names:
+        assert f"test encryptor_lock::linux::nonce_ledger::replace::tests::cases::{name} ... ok" in clean
+    for name in public_names:
+        assert f"test {name} ... ok" in clean
+    data = json.loads((EVIDENCE / "combo-coverage.json").read_text())["data"][0]
+    assert not any(posixpath.normpath(f["filename"]).endswith("/src/encryptor_lock/linux/nonce_ledger/replace/tests.rs") for f in data["files"])
+    private_mappings = sum(1 for f in data["functions"] for region in f["regions"] if posixpath.normpath(f["filenames"][region[5]]).endswith("/src/encryptor_lock/linux/nonce_ledger/replace/tests.rs"))
+    assert private_mappings > 0
+    owned = []
+    for path in ["src/encryptor_lock/linux.rs", "src/encryptor_lock/linux/nonce_ledger.rs", "src/encryptor_lock/linux/nonce_ledger/replace.rs"]:
+        summary = next(f["summary"] for f in data["files"] if posixpath.normpath(f["filename"]).endswith("/pos-owner-bridge/" + path))
+        assert all(summary[k]["covered"] == summary[k]["count"] for k in ["lines", "regions"])
+        owned.append({"file": path, "summary": summary})
+    code, output = execute("combo-lcov", ["cargo", "llvm-cov", "report", "--manifest-path", "crates/pos-owner-bridge/Cargo.toml", "--lcov", "--output-path", str(EVIDENCE / "combo.lcov")], repo)
+    assert code == 0
+    code, output = execute("combo-crap", ["cargo", "crap", "--workspace", "--lcov", str(EVIDENCE / "combo.lcov"), "--missing", "pessimistic", "--jobs", "2", "--exclude", "tests/**", "--format", "json", "--output", str(EVIDENCE / "combo-crap.json")], repo)
+    assert code == 0
+    entries = json.loads((EVIDENCE / "combo-crap.json").read_text())["entries"]
+    assert not any(e["file"].endswith("/src/encryptor_lock/linux/nonce_ledger/replace/tests.rs") for e in entries)
+    selected = [e for e in entries if "/crates/pos-owner-bridge/src/encryptor_lock/" in e["file"]]
+    assert selected and all(e["coverage"] == 100 and e["crap"] <= 4 for e in selected)
+    (EVIDENCE / "combo-adjacent-tests.rs").write_bytes(adjacent.read_bytes())
+    (EVIDENCE / "combo-replace.rs").write_bytes(declaration.read_bytes())
+    (EVIDENCE / "combo-verdict.json").write_text(json.dumps({"shear_passes": True, "all14_new_tests_run": True, "owned_mapped_coverage_full": True, "private_raw_mappings": private_mappings, "private_excluded_from_production_metrics": True, "owned_crap_max": max(e["crap"] for e in selected), "owned": owned}, indent=2))
+finally:
+    declaration.write_bytes(original_declaration)
+    previous.write_bytes(original_witness)
+    adjacent.unlink()
+    adjacent.parent.rmdir()
+assert declaration.read_bytes() == original_declaration and previous.read_bytes() == original_witness
