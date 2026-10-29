@@ -6,7 +6,7 @@ use std::fs::{self, DirBuilder, Permissions};
 use std::io::{self, Write as _};
 use std::os::unix::fs::{symlink, DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -56,11 +56,17 @@ fn probe(case: &str) -> TestResult<Command> {
 }
 
 fn run(mut command: Command) -> TestResult<Output> {
-    let mut child = command
+    let child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let output = finish(child, Instant::now() + Duration::from_secs(30))?;
+    assert!(output.status.success(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stdout).contains(MARKER));
+    Ok(output)
+}
+
+fn finish(mut child: Child, deadline: Instant) -> TestResult<Output> {
     while child.try_wait()?.is_none() {
         if Instant::now() >= deadline {
             child.kill()?;
@@ -69,10 +75,28 @@ fn run(mut command: Command) -> TestResult<Output> {
         }
         std::thread::sleep(Duration::from_millis(5));
     }
-    let output = child.wait_with_output()?;
-    assert!(output.status.success(), "{output:?}");
-    assert!(String::from_utf8_lossy(&output.stdout).contains(MARKER));
-    Ok(output)
+    child.wait_with_output().map_err(Into::into)
+}
+
+#[test]
+fn probe_harness_rejects_unknown_cases_and_reaps_timed_out_children() -> TestResult {
+    let child = probe("unknown")?
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let rejected = finish(child, Instant::now() + Duration::from_secs(30))?;
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("unknown lock probe"));
+    let child = Command::new("/bin/sleep").arg("60").spawn()?;
+    let pid = child.id();
+    assert_eq!(
+        finish(child, Instant::now())
+            .err()
+            .map(|error| error.to_string()),
+        Some("lock probe exceeded its subprocess deadline".to_owned())
+    );
+    assert!(!Path::new("/proc").join(pid.to_string()).exists());
+    Ok(())
 }
 
 fn assert_lock_is_close_on_exec() -> TestResult {
