@@ -53,10 +53,10 @@ pub(super) struct Expected {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct VerifiedMountIdentity {
     pub(super) mount: Node,
-    mapper_uuid: String,
-    mapper: BlockIdentity,
-    loop_name: String,
-    loop_device: BlockIdentity,
+    pub(super) mapper_uuid: String,
+    pub(super) mapper: BlockIdentity,
+    pub(super) loop_name: String,
+    pub(super) loop_device: BlockIdentity,
 }
 
 impl VerifiedMountIdentity {

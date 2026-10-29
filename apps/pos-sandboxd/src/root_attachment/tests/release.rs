@@ -22,7 +22,20 @@ mod cases {
             let record = tree.runtime.path().join("registry").join(&key);
             let bytes = fs::read(&record)?;
             let (kernel, root) = attached_root(&directory)?;
+            let identity: crate::RootResourceIdentity = root.resource_identity();
+            let retained = identity.clone();
+            assert_eq!(identity.mount_id(), 41);
+            assert_eq!(identity.root_identity(), ((253, 3), 1));
+            assert_eq!(identity.image_identity(), (5, 6));
+            assert_eq!(identity.mapper_uuid(), "CRYPT-VERITY-5f0e5a1c-root");
+            assert_eq!(identity.mapper_generation(), ((253, 3), 102));
+            assert_eq!(identity.loop_name(), "loop7");
+            assert_eq!(identity.loop_generation(), ((7, 7), 101));
+            let root_path = format!("/run/pigloros/sandbox/attempts/{key}/root");
+            assert_eq!(identity.root_directory().as_str(), root_path);
+            assert_eq!(kernel.readbacks.load(Ordering::SeqCst), 1);
             detach_owned(root, &kernel, &directory).await?;
+            assert_eq!(retained, identity);
             assert_eq!(kernel.detached(), 1);
             assert!(tree
                 .runtime
@@ -37,6 +50,7 @@ mod cases {
                 8 - index
             );
             directory.remove_unmounted()?;
+            assert_eq!(retained.root_directory().as_str(), root_path);
             assert_eq!(fs::read(&record)?, bytes);
         }
         assert_eq!(
@@ -111,6 +125,7 @@ mod cases {
             let record = tree.runtime.path().join("registry").join(&key);
             let bytes = fs::read(&record)?;
             let (mut kernel, root) = attached_root(&tree.prepared)?;
+            let retained = root.resource_identity();
             match fault {
                 0 => kernel.observations.mount = None,
                 1 => kernel.observations.path = None,
@@ -144,12 +159,15 @@ mod cases {
             } else {
                 ImageActivationError::EvidenceMismatch
             };
+            assert_eq!(root.resource_identity(), retained);
             assert_eq!(
                 detach_owned(root, &kernel, &tree.prepared).await,
                 Err(error),
                 "fault {fault}"
             );
             assert_eq!(kernel.detached(), usize::from(fault == 8));
+            assert_eq!(retained.mount_id(), 41);
+            assert_eq!(retained.image_identity(), (5, 6));
             assert_eq!(fs::read(record)?, bytes);
             tree.prepared.verify_directory()?;
             assert!(tree
