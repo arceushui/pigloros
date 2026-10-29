@@ -121,15 +121,17 @@ fn validate_directory(directory: &OwnedFd) -> io::Result<()> {
 }
 
 fn open_locked_file(directory: &OwnedFd, name: &str, flags: OFlags) -> io::Result<OwnedFd> {
-    fs::openat(directory, name, flags, Mode::RUSR.union(Mode::WUSR)).and_then(|file| {
-        fs::fstat(&file)
-            .and_then(|stat| {
-                enforce(private_metadata(&stat, FileType::RegularFile, 0o600) && stat.st_nlink == 1)
-            })
-            .and_then(|()| fs::flock(&file, FlockOperation::NonBlockingLockExclusive))
-            .and_then(|()| validate_file_identity(directory, name, &file))
-            .map(|()| file)
-    })
+    fs::openat(directory, name, flags, Mode::RUSR.union(Mode::WUSR))
+        .and_then(|file| lock_file(directory, name, &file).map(|()| file))
+}
+
+fn lock_file(directory: &OwnedFd, name: &str, file: &OwnedFd) -> io::Result<()> {
+    fs::fstat(file)
+        .and_then(|stat| {
+            enforce(private_metadata(&stat, FileType::RegularFile, 0o600) && stat.st_nlink == 1)
+        })
+        .and_then(|()| fs::flock(file, FlockOperation::NonBlockingLockExclusive))
+        .and_then(|()| validate_file_identity(directory, name, file))
 }
 
 fn validate_file_identity(directory: &OwnedFd, name: &str, file: &impl AsFd) -> io::Result<()> {

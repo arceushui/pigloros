@@ -3,7 +3,10 @@
 
 use std::io::{self, Read as _};
 
-use super::{open_locked_file, SubjectEncryptorLock, FILE_FLAGS};
+use rustix::fd::OwnedFd;
+use rustix::fs::{self, AtFlags, Mode};
+
+use super::{lock_file, open_locked_file, SubjectEncryptorLock, FILE_FLAGS};
 use crate::{BridgeError, UnavailableCode};
 
 const LEDGER_NAME: &str = "subject-nonce-ledger.v1";
@@ -51,13 +54,18 @@ fn read_bounded(reader: impl io::Read) -> io::Result<Vec<u8>> {
         })
 }
 
-pub(super) fn remove_stale_temporary(directory: &rustix::fd::OwnedFd) -> rustix::io::Result<()> {
-    match open_locked_file(directory, TEMPORARY_NAME, FILE_FLAGS) {
-        Ok(_file) => rustix::fs::unlinkat(directory, TEMPORARY_NAME, rustix::fs::AtFlags::empty())
-            .and_then(|()| rustix::fs::fsync(directory)),
+pub(super) fn remove_stale_temporary(directory: &OwnedFd) -> rustix::io::Result<()> {
+    match fs::openat(directory, TEMPORARY_NAME, FILE_FLAGS, Mode::empty()) {
+        Ok(file) => remove_opened_temporary(directory, &file),
         Err(error) if error == rustix::io::Errno::NOENT => Ok(()),
         Err(error) => Err(error),
     }
+}
+
+fn remove_opened_temporary(directory: &OwnedFd, file: &OwnedFd) -> rustix::io::Result<()> {
+    lock_file(directory, TEMPORARY_NAME, file)
+        .and_then(|()| fs::unlinkat(directory, TEMPORARY_NAME, AtFlags::empty()))
+        .and_then(|()| fs::fsync(directory))
 }
 
 mod replace;
@@ -65,6 +73,7 @@ mod replace;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::encryptor_lock_test_support::{write_private, Sandbox};
 
     struct FaultyReader;
 
@@ -82,5 +91,27 @@ mod tests {
                 .map(|error| error.kind()),
             Some(io::ErrorKind::Other)
         );
+    }
+
+    // Opening succeeded, then a rename removed only the path, retaining nlink=1.
+    // This isolates the later statat ENOENT from the allowed initial absence.
+    #[test]
+    fn orphan_cleanup_propagates_a_name_lost_after_open() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let root = Sandbox::new()?;
+        let guard = SubjectEncryptorLock::acquire(&root.0)?;
+        let leaf = root.0.join("pigloros");
+        let path = leaf.join(TEMPORARY_NAME);
+        write_private(&path, b"retained orphan")?;
+        let file = fs::openat(&guard.directory, TEMPORARY_NAME, FILE_FLAGS, Mode::empty())?;
+        let retained = leaf.join("retained");
+        std::fs::rename(path, &retained)?;
+        assert_eq!(
+            remove_opened_temporary(&guard.directory, &file),
+            Err(rustix::io::Errno::NOENT)
+        );
+        assert_eq!(std::fs::read(retained)?, b"retained orphan");
+        assert!(SubjectEncryptorLock::acquire(&root.0).is_err());
+        Ok(())
     }
 }
