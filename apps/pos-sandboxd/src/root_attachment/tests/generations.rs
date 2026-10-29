@@ -4,7 +4,6 @@
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod cases {
     use super::super::*;
-    use std::time::{Duration, Instant};
 
     #[tokio::test]
     async fn unverified_generations_refuse_attachment_and_detach() -> TestResult {
@@ -137,7 +136,7 @@ mod cases {
     }
 
     fn observe_device_changes() -> TestResult {
-        use rustix::fs::{mkfifoat, open, Mode, OFlags, CWD};
+        use rustix::fs::{mkfifoat, Mode, CWD};
 
         let tree = prepared_tree()?;
         let (attempt, root) = tree.prepared.held_directories();
@@ -166,27 +165,11 @@ mod cases {
                 mkfifoat(CWD, &barrier, Mode::RUSR | Mode::WUSR)?;
                 let changed = path.join(attribute);
                 let writer = thread::spawn(move || -> TestResult {
-                    let deadline = Instant::now() + Duration::from_secs(30);
-                    let descriptor = loop {
-                        match open(
-                            &barrier,
-                            OFlags::WRONLY | OFlags::NONBLOCK | OFlags::CLOEXEC,
-                            Mode::empty(),
-                        ) {
-                            Ok(descriptor) => break descriptor,
-                            Err(error)
-                                if error == rustix::io::Errno::NXIO
-                                    && Instant::now() < deadline =>
-                            {
-                                thread::sleep(Duration::from_millis(1));
-                            }
-                            Err(error) => return Err(error.into()),
-                        }
-                    };
+                    let mut writer = open_fifo_writer(&barrier)?;
                     // Opening the FIFO for writing proves the observer already
                     // passed its first identity read and is reading the facts.
                     fs::write(changed, replacement)?;
-                    writeln!(File::from(descriptor), "/absent")?;
+                    writeln!(writer, "/absent")?;
                     Ok(())
                 });
                 let identity = if is_loop {

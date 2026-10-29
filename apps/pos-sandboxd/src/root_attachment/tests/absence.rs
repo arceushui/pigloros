@@ -34,7 +34,12 @@ mod cases {
     async fn delayed_reference_release_requires_both_original_generations() -> TestResult {
         let tree = prepared_tree()?;
         let (kernel, root) = attached_root(&tree.prepared)?;
-        let devices = root.identity.devices();
+        // Independent oracle for the matching fixture's retained mapper and
+        // loop, so duplicating either identity in production fails this test.
+        let devices = [
+            block_generation((253, 3), 102).ok_or("mapper")?,
+            block_generation((7, 7), 101).ok_or("loop")?,
+        ];
         kernel.absence.lock().map_err(|_| "probe script")?.extend([
             (Duration::ZERO, Ok(false)),
             (Duration::from_millis(20), Ok(false)),
@@ -202,10 +207,15 @@ mod cases {
         if bounded_fixture_child(CHILD, TEST)? {
             return Ok(());
         }
-        use rustix::fs::{mkfifoat, open, Mode, OFlags, CWD};
-        use std::time::Instant;
+        use rustix::fs::{mkfifoat, Mode, CWD};
 
-        for (first, second, expected) in [(101, 103, Ok(false)), (103, 99, Err(UNVERIFIED))] {
+        for (first, second, first_dev, expected) in [
+            (101_u64, Some(103_u64), "7:7", Ok(false)),
+            (103, Some(99), "7:7", Err(UNVERIFIED)),
+            (101, None, "7:7", Ok(true)),
+            (101, None, "7:8", Err(UNVERIFIED)),
+            (99, None, "7:7", Err(UNVERIFIED)),
+        ] {
             let host = tempfile::tempdir()?;
             let kernel = HostKernel::at(host.path(), host.path());
             let path = host.path().join("dev/block/7:7");
@@ -213,29 +223,21 @@ mod cases {
             let barrier = path.join("dev");
             mkfifoat(CWD, &barrier, Mode::RUSR | Mode::WUSR)?;
             let writer = thread::spawn(move || -> TestResult {
-                let deadline = Instant::now() + Duration::from_secs(30);
-                let descriptor = loop {
-                    match open(
-                        &barrier,
-                        OFlags::WRONLY | OFlags::NONBLOCK | OFlags::CLOEXEC,
-                        Mode::empty(),
-                    ) {
-                        Ok(descriptor) => break descriptor,
-                        Err(error)
-                            if error == rustix::io::Errno::NXIO && Instant::now() < deadline =>
-                        {
-                            thread::sleep(Duration::from_millis(1))
-                        }
-                        Err(error) => return Err(error.into()),
-                    }
-                };
+                let mut writer = open_fifo_writer(&barrier)?;
                 // The first diskseq was read before this FIFO opened. Publish
                 // the next generation and replace the path for the next sample.
-                fs::write(path.join("diskseq"), second.to_string())?;
-                let replacement = path.join("next-dev");
-                fs::write(&replacement, "7:7\n")?;
-                fs::rename(replacement, &barrier)?;
-                writeln!(File::from(descriptor), "7:7")?;
+                if let Some(second) = second {
+                    fs::write(path.join("diskseq"), second.to_string())?;
+                    let replacement = path.join("next-dev");
+                    fs::write(&replacement, "7:7\n")?;
+                    fs::rename(replacement, &barrier)?;
+                } else {
+                    // Remove the complete device while its first dev read is
+                    // blocked. The following stamp and whole-path lookup miss,
+                    // but a contradictory first stamp must still reject.
+                    fs::remove_dir_all(path)?;
+                }
+                writeln!(writer, "{first_dev}")?;
                 Ok(())
             });
             let device = block_generation((7, 7), 101).ok_or("loop")?;

@@ -50,7 +50,7 @@ use crate::{
 };
 
 /// The kernel operations of one attachment.
-trait AttachmentKernel {
+trait AttachmentKernel: Sync {
     /// Whether the kernel command line vetoes systemd's userspace Verity
     /// fallback.
     fn vetoes_userspace_verity(&self) -> bool;
@@ -72,7 +72,7 @@ trait AttachmentKernel {
     fn devices_absent(
         &self,
         devices: [BlockIdentity; 2],
-    ) -> impl Future<Output = Result<bool, ImageActivationError>>;
+    ) -> impl Future<Output = Result<bool, ImageActivationError>> + Send;
 }
 
 /// The admitted SIM1 root, attached at its attempt path and read back.

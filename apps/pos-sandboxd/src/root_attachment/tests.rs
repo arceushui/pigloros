@@ -106,6 +106,27 @@ fn bounded_fixture_child(variable: &str, full_test: &str) -> Result<bool, BoxErr
     Err(error)
 }
 
+/// Rendezvous with an already-blocked fixture reader without hanging a writer.
+fn open_fifo_writer(barrier: &Path) -> Result<File, BoxError> {
+    use rustix::fs::{open, Mode, OFlags};
+    use std::time::{Duration, Instant};
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        match open(
+            barrier,
+            OFlags::WRONLY | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) {
+            Ok(descriptor) => return Ok(File::from(descriptor)),
+            Err(error) if error == rustix::io::Errno::NXIO && Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(1));
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+}
+
 const PRIVILEGED_COMPOSITION_TEST: &str = "PIGLOROS_PRIVILEGED_COMPOSITION_TEST";
 const VETO: &str = "systemd.allow_userspace_verity=0";
 

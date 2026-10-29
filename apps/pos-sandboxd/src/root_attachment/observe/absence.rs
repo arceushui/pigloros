@@ -16,16 +16,17 @@ impl HostKernel {
         let path = index.join(format!("{}:{}", expected.device.0, expected.device.1));
         let first = block_identity(&path);
         let second = block_identity(&path);
+        // Later disappearance cannot repair a known contradictory stamp,
+        // including when only one sample completed before removal.
+        for observed in [first, second].into_iter().flatten() {
+            if observed.device != expected.device || observed.diskseq < expected.diskseq {
+                return Err(rejected);
+            }
+        }
         match (first, second) {
-            (Some(first), Some(second))
-                if first.device == expected.device && second.device == expected.device =>
-            {
+            (Some(first), Some(second)) => {
                 // Incoherent valid samples may be a removal/reuse in progress.
-                // Retry within the caller's original deadline. A generation
-                // going backwards is contradictory, never absence.
-                if first.diskseq < expected.diskseq || second.diskseq < expected.diskseq {
-                    return Err(rejected);
-                }
+                // Retry within the caller's original deadline.
                 Ok(first == second && second.diskseq > expected.diskseq)
             }
             _ => {

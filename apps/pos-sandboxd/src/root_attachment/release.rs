@@ -30,6 +30,12 @@ impl VerifiedRootMount {
     /// fencing, intent-deletion, terminal-evidence or admission authority.
     /// Subsequent directory removal remains with its existing owner.
     ///
+    /// The caller's Tokio runtime must have its time driver enabled. The
+    /// deadline gates acceptance of evidence, not a hard wall-clock return:
+    /// synchronous kernel/filesystem work and ownership-lock acquisition cannot
+    /// be preempted by the timer. Their results are checked on completion, and
+    /// work completing at or after the deadline cannot report success.
+    ///
     /// # Errors
     /// Changed ownership or mount evidence returns
     /// [`ImageActivationError::EvidenceMismatch`]; a failed detach command
@@ -43,7 +49,7 @@ impl VerifiedRootMount {
         self,
         directory: &PreparedAttemptDirectory,
         deadline: Instant,
-    ) -> impl Future<Output = Result<(), ImageActivationError>> + '_ {
+    ) -> impl Future<Output = Result<(), ImageActivationError>> + Send + '_ {
         let release = Release::new(self, directory, deadline);
         async move { release.finish(&HostKernel::system()).await }
     }
