@@ -109,11 +109,11 @@ fn private_metadata(stat: &Stat, kind: FileType, mode: u32) -> bool {
         && stat.st_mode & 0o7777 == mode
 }
 
-fn not_nfs(stat: &StatFs) -> bool {
+const fn not_nfs(stat: &StatFs) -> bool {
     stat.f_type != fs::NFS_SUPER_MAGIC
 }
 
-fn same_file(descriptor: &Stat, path: &Stat) -> bool {
+const fn same_file(descriptor: &Stat, path: &Stat) -> bool {
     descriptor.st_dev == path.st_dev && descriptor.st_ino == path.st_ino
 }
 
