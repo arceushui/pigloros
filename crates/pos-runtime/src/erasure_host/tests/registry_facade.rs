@@ -1,6 +1,9 @@
 //! R8-W3: the crate-private registry facade of the erasure execution host (ADR-061 revision 8
 //! decision 5), on the shared signed-release test world.
 
+use pos_crypto::plugin_manifest::{
+    verify_plugin_release_signature_v1, VerifiedPluginReleaseSignatureV1,
+};
 use pos_crypto::plugin_trust::ValidatedPluginManifestProjectionV1;
 use pos_plugin_publisher::test_support::{
     encoding::{Material, SCOPE, TICK},
@@ -8,8 +11,8 @@ use pos_plugin_publisher::test_support::{
     world::{activation, wall, World},
     BoxResult,
 };
-use pos_plugin_release::{BundleAddressV1, ReleaseSourceV1};
-use pos_store::plugin_trust_registry::TrustedUtcSecondV1;
+use pos_plugin_release::{BundleAddressV1, ReleaseSourceV1, VerifiedReleaseBundleV1};
+use pos_store::plugin_trust_registry::{TrustEvaluationPointV1, TrustedUtcSecondV1};
 
 use super::*;
 use crate::community_plugin_host::{
@@ -129,7 +132,21 @@ fn gated_through_facade(
     Ok(gated.is_ok())
 }
 
-/// The PMF1 digest, the projection and the trusted second of the installed release.
+/// The projection of `bundle` and its release proof, verified under `material`'s evidence.
+fn proven_projection(
+    material: &Material,
+    bundle: &VerifiedReleaseBundleV1,
+) -> BoxResult<(
+    ValidatedPluginManifestProjectionV1,
+    VerifiedPluginReleaseSignatureV1,
+)> {
+    let projection = ValidatedPluginManifestProjectionV1::from_verified_bundle(bundle)?;
+    let authorization = material.evidence.authorize_release(&projection)?;
+    let proof = verify_plugin_release_signature_v1(bundle, &authorization)?;
+    Ok((projection, proof))
+}
+
+/// The PMF1 digest, projection, verified release proof and trusted second of the release.
 fn release_inputs(
     world: &World,
     material: &Material,
@@ -137,12 +154,13 @@ fn release_inputs(
 ) -> BoxResult<(
     [u8; 32],
     ValidatedPluginManifestProjectionV1,
+    VerifiedPluginReleaseSignatureV1,
     TrustedUtcSecondV1,
 )> {
     let bundle = world.store.read_verified(address)?;
-    let projection = ValidatedPluginManifestProjectionV1::from_verified_bundle(&bundle)?;
+    let (projection, proof) = proven_projection(material, &bundle)?;
     let utc = TrustedUtcSecondV1::from_source(&mut wall(material.utc)?)?;
-    Ok((pmf1_digest(&bundle), projection, utc))
+    Ok((pmf1_digest(&bundle), projection, proof, utc))
 }
 
 /// Advance, roll back and read the registry through the facade.
@@ -153,7 +171,7 @@ fn advance_and_read(
     address: &BundleAddressV1,
     timeline: TimelineId,
 ) -> BoxResult<Observed> {
-    let (digest, projection, utc) = release_inputs(world, material, address)?;
+    let (digest, projection, proof, utc) = release_inputs(world, material, address)?;
     let (anchor, tps1, evidence) = (&world.anchor, &material.tps1, &material.evidence);
     host(host_under_test.with_plugin_trust_registry(|registry| {
         let advanced = registry.advance_policy(anchor, tps1, evidence, utc, TICK);
@@ -162,8 +180,8 @@ fn advance_and_read(
             tps1,
             evidence,
             &projection,
-            utc,
-            TICK,
+            &proof,
+            TrustEvaluationPointV1::new(utc, TICK),
             activation(timeline, 9),
         );
         let decision = registry.retained_release_decision(SCOPE, digest);

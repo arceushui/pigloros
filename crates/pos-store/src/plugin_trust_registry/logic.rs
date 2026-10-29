@@ -1,8 +1,8 @@
 //! The adapter-independent decision logic of the Plugin trust policy registry.
 //!
 //! Each `plan_*` function reads the retained state through the abstract
-//! `PluginTrustTransactionV1`, runs the ADR-103 revisions 4 and 5 steps in their
-//! contract order, and returns a plan of writes. An adapter applies the plan
+//! `PluginTrustTransactionV1`, runs the ADR-103 revisions 4, 5 and 7 steps in
+//! their contract order, and returns a plan of writes. An adapter applies the plan
 //! inside its own transaction. `plan_evaluate` (revision 5) runs the same
 //! checks, with the differences that decision 2 lists, and returns the
 //! read-only evaluation instead of a plan: it writes nothing. The Memory and
@@ -15,6 +15,7 @@ use pos_conformance::{
     verify_plugin_tps1_policy_v1, AuthenticatedPluginTps1V1, PluginFloorPlanV1, PluginFloorStateV1,
     PluginFloorTransitionV1, PluginTrustPolicyAnchorV1,
 };
+use pos_crypto::plugin_manifest::VerifiedPluginReleaseSignatureV1;
 use pos_crypto::plugin_trust::{
     ResolvedPluginTrustAuthorizationV1, ValidatedPluginManifestProjectionV1,
     VerifiedPluginTrustEvidenceV1,
@@ -312,7 +313,18 @@ pub(crate) fn plan_advance(
     })
 }
 
-/// The release-dependent tail shared by `admit`, `rollback` and the evaluation.
+/// The checks that follow `authorize_release`: the TPS1 artifact denial, then the floor plan.
+fn check_authorized_release(
+    checked: &CheckedPolicyV1,
+    input: &PolicyInputV1<'_>,
+    authorization: &ResolvedPluginTrustAuthorizationV1,
+) -> RegistryResult<PluginFloorPlanV1> {
+    check_plugin_tps1_artifact_denial_v1(&checked.tps1, authorization)?;
+    plan_plugin_floor_transition_v1(&checked.floors, input.evidence)
+        .map_err(PluginTrustPolicyRegistryErrorV1::from)
+}
+
+/// The release-dependent tail of the evaluation, which takes no release proof.
 ///
 /// Order: `authorize_release` (`Trust`); the TPS1 artifact-denial check; the floor plan.
 fn check_release_tail(
@@ -321,21 +333,62 @@ fn check_release_tail(
     projection: &ValidatedPluginManifestProjectionV1,
 ) -> RegistryResult<(ResolvedPluginTrustAuthorizationV1, PluginFloorPlanV1)> {
     let authorization = input.evidence.authorize_release(projection)?;
-    check_plugin_tps1_artifact_denial_v1(&checked.tps1, &authorization)?;
-    let plan = plan_plugin_floor_transition_v1(&checked.floors, input.evidence)?;
+    let plan = check_authorized_release(checked, input, &authorization)?;
     Ok((authorization, plan))
+}
+
+/// The release proof binding of revision 7 decision 2.
+///
+/// `ReleaseProofMismatch` unless the proof names the complete-PMF1 digest, the release digest,
+/// and the public key of the registry's own authorization.
+fn check_release_proof(
+    release_proof: &VerifiedPluginReleaseSignatureV1,
+    authorization: &ResolvedPluginTrustAuthorizationV1,
+) -> RegistryResult<()> {
+    let proven = (
+        release_proof.pmf1_digest(),
+        release_proof.release_digest(),
+        release_proof.public_key(),
+    );
+    let authorized = (
+        authorization.pmf1_digest(),
+        authorization.release_digest(),
+        authorization.resolved_public_key(),
+    );
+    if proven == authorized {
+        Ok(())
+    } else {
+        Err(PluginTrustPolicyRegistryErrorV1::ReleaseProofMismatch)
+    }
+}
+
+/// The release-dependent tail of `admit` and `rollback`, which takes the release proof.
+///
+/// Order: `authorize_release` (`Trust`); the release proof binding (`ReleaseProofMismatch`);
+/// the TPS1 artifact-denial check; the floor plan, which only has to succeed.
+fn check_proven_release(
+    checked: &CheckedPolicyV1,
+    input: &PolicyInputV1<'_>,
+    projection: &ValidatedPluginManifestProjectionV1,
+    release_proof: &VerifiedPluginReleaseSignatureV1,
+) -> RegistryResult<ResolvedPluginTrustAuthorizationV1> {
+    let authorization = input.evidence.authorize_release(projection)?;
+    check_release_proof(release_proof, &authorization)?;
+    check_authorized_release(checked, input, &authorization)?;
+    Ok(authorization)
 }
 
 /// The release-dependent prefix of `admit` and `rollback`.
 ///
-/// Order: the shared prefix; the release tail. The floor plan only has to succeed.
+/// Order: the shared prefix; the proven release tail.
 fn check_release(
     tx: &impl PluginTrustTransactionV1,
     input: &PolicyInputV1<'_>,
     projection: &ValidatedPluginManifestProjectionV1,
+    release_proof: &VerifiedPluginReleaseSignatureV1,
 ) -> RegistryResult<(CheckedPolicyV1, ResolvedPluginTrustAuthorizationV1)> {
     let checked = check_policy(tx, input)?;
-    let (authorization, _plan) = check_release_tail(&checked, input, projection)?;
+    let authorization = check_proven_release(&checked, input, projection, release_proof)?;
     Ok((checked, authorization))
 }
 
@@ -524,9 +577,10 @@ pub(crate) fn plan_admit(
     tx: &impl PluginTrustTransactionV1,
     input: &PolicyInputV1<'_>,
     projection: &ValidatedPluginManifestProjectionV1,
+    release_proof: &VerifiedPluginReleaseSignatureV1,
     activation: &ActivationEventInputV1,
 ) -> RegistryResult<AdmitPlanV1> {
-    let (checked, authorization) = check_release(tx, input, projection)?;
+    let (checked, authorization) = check_release(tx, input, projection, release_proof)?;
     let scope = input.anchor.scope();
     if let Some(existing) = tx.decision(scope, authorization.pmf1_digest())? {
         return if same_decision_identity(&existing, &checked.tps1, input, activation) {
@@ -652,9 +706,10 @@ pub(crate) fn plan_rollback(
     tx: &impl PluginTrustTransactionV1,
     input: &PolicyInputV1<'_>,
     target: &ValidatedPluginManifestProjectionV1,
+    release_proof: &VerifiedPluginReleaseSignatureV1,
     activation: &ActivationEventInputV1,
 ) -> RegistryResult<RollbackPlanV1> {
-    let (checked, authorization) = check_release(tx, input, target)?;
+    let (checked, authorization) = check_release(tx, input, target, release_proof)?;
     let scope = input.anchor.scope();
     let target_pmf1_digest = authorization.pmf1_digest();
     if tx.decision(scope, target_pmf1_digest)?.is_none() {
@@ -1166,6 +1221,7 @@ mod tests {
         };
         let failed = Some(PluginTrustPolicyRegistryErrorV1::StorageFailed);
         let projection = release_one().projection()?;
+        let proof = release_one().release_proof()?;
 
         let empty = FailingTx {
             fail: Read::Scope,
@@ -1181,7 +1237,7 @@ mod tests {
             assert_eq!(plan_advance(&tx(read, false, None), &policy).err(), failed);
         }
         for read in [Read::Scope, Read::Decision, Read::Active, Read::NextRowSeq] {
-            let plan = plan_admit(&tx(read, false, None), &policy, &projection, &input);
+            let plan = plan_admit(&tx(read, false, None), &policy, &projection, &proof, &input);
             assert_eq!(plan.err(), failed);
         }
         // Rollback reaches each read in turn: the target is retained, then the pointer names
@@ -1193,7 +1249,8 @@ mod tests {
             (Read::LatestRow, Some(0x01)),
             (Read::NextRowSeq, Some(0x03)),
         ] {
-            let plan = plan_rollback(&tx(read, true, pointer), &policy, &projection, &input);
+            let failing = tx(read, true, pointer);
+            let plan = plan_rollback(&failing, &policy, &projection, &proof, &input);
             assert_eq!(plan.err(), failed);
         }
         Ok(())

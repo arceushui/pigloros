@@ -1,5 +1,5 @@
 //! The signed Plugin release installer at the public seam (ADR-061 revision 2,
-//! ADR-103 revisions 4 and 5).
+//! ADR-103 revisions 4, 5 and 7).
 //!
 //! Releases are signed and published by the #571 publisher into a real local
 //! OCI store, trust evidence is built from independently encoded PTR1, PRV1,
@@ -123,6 +123,8 @@ fn installs_a_signed_release_and_returns_the_admission_and_execution_projection(
     assert_eq!(world.registry.admits[0].tick, TICK);
     assert_eq!(world.registry.admits[0].tps1, material.tps1);
     assert_eq!(world.registry.admits[0].timeline, world.timeline);
+    // R7-T7: the registry received the installer's own verified signature as the release proof.
+    assert_eq!(*world.registry.admits[0].release_proof, signature);
     // The release is active and exactly one activation Event was appended.
     let active = world.registry.active_release(SCOPE, "plugin-a")?;
     assert_eq!(
@@ -271,6 +273,7 @@ fn every_registry_error_variant_passes_through_typed() -> TestResult {
         PluginTrustPolicyRegistryErrorV1::StorePoisoned,
         PluginTrustPolicyRegistryErrorV1::PolicyNotAdvanced,
         PluginTrustPolicyRegistryErrorV1::ReleaseNotActive,
+        PluginTrustPolicyRegistryErrorV1::ReleaseProofMismatch,
         PluginTrustPolicyRegistryErrorV1::Bridge(PluginTrustBridgeErrorV1::EvaluationUtcMismatch),
         PluginTrustPolicyRegistryErrorV1::Floor(pos_conformance::PluginFloorErrorV1::Rollback(
             PluginFloorKindV1::Root,

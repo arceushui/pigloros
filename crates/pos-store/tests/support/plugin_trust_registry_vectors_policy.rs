@@ -1,7 +1,8 @@
 // This file is `include!`d by the adapter test crates, so rustfmt does not format it; keep it in
 // rustfmt style by hand.
-// Shared public acceptance vectors of the ADR-103 revisions 4 and 5 Plugin registry port:
-// G1, H1, R1-R6, S1, S2, X1, and the retained-record accessors. The including module declares
+// Shared public acceptance vectors of the ADR-103 revisions 4, 5 and 7 Plugin registry port:
+// G1, H1, R1-R6, S1, S2, X1, the retained-record accessors, and the revision 7 release proof
+// vectors R7-T3 to R7-T5. The including module declares
 // `type Store: Backend` and sees the crate's `fixtures` module, so one body runs the vectors on
 // every adapter and a vector is written once. The file is `include!`d, never a module of its own.
 //
@@ -11,15 +12,16 @@
 
 use crate::fixtures::{
     activation, digest, release_one, release_three, release_two, spec, tps_after, Env, Harness,
-    ManifestSpec, RegistryError, Spec, TestResult, TpsSpec,
+    ManifestSpec, Material, RegistryError, Spec, TestResult, TpsSpec,
 };
 use pos_conformance::{
     PluginFloorErrorV1, PluginFloorKindV1, PluginTrustBridgeErrorV1, TrustPolicySnapshotV1,
 };
+use pos_crypto::plugin_manifest::VerifiedPluginReleaseSignatureV1;
 use pos_crypto::plugin_trust::PluginTrustErrorV1;
 use pos_store::plugin_trust_registry::{
     PluginTrustCommitOutcomeV1, PluginTrustLedgerKindV1, PluginTrustPolicyRegistryV1,
-    PolicyAdvanceKindV1,
+    PolicyAdvanceKindV1, TrustEvaluationPointV1,
 };
 
 const fn rollback_error(kind: PluginFloorKindV1) -> RegistryError {
@@ -426,8 +428,8 @@ fn an_unknown_rollback_target_is_one_never_admitted_in_this_scope() -> TestResul
         &other_genesis.tps1,
         &other_genesis.evidence,
         &ManifestSpec::new("plugin-a", 0x50, 0x60, None).projection()?,
-        other_genesis.trusted()?,
-        other_genesis.tick,
+        &ManifestSpec::new("plugin-a", 0x50, 0x60, None).release_proof()?,
+        TrustEvaluationPointV1::new(other_genesis.trusted()?, other_genesis.tick),
         activation(h.timeline, 3),
     )?;
     let foreign_digest_in_other_scope = release_one();
@@ -441,8 +443,8 @@ fn an_unknown_rollback_target_is_one_never_admitted_in_this_scope() -> TestResul
             &other_genesis.tps1,
             &other_genesis.evidence,
             &foreign_digest_in_other_scope.projection()?,
-            other_genesis.trusted()?,
-            other_genesis.tick,
+            &foreign_digest_in_other_scope.release_proof()?,
+            TrustEvaluationPointV1::new(other_genesis.trusted()?, other_genesis.tick),
             activation(h.timeline, 4)
         ),
         Err(RegistryError::UnknownRollbackTarget)
@@ -627,8 +629,8 @@ fn an_unprovisioned_scope_is_missing_state_and_never_affects_a_provisioned_one()
             &material.tps1,
             &material.evidence,
             &one.projection()?,
-            material.trusted()?,
-            material.tick,
+            &one.release_proof()?,
+            TrustEvaluationPointV1::new(material.trusted()?, material.tick),
             activation(h.timeline, 1)
         ),
         Err(RegistryError::MissingState)
@@ -639,8 +641,8 @@ fn an_unprovisioned_scope_is_missing_state_and_never_affects_a_provisioned_one()
             &material.tps1,
             &material.evidence,
             &one.projection()?,
-            material.trusted()?,
-            material.tick,
+            &one.release_proof()?,
+            TrustEvaluationPointV1::new(material.trusted()?, material.tick),
             activation(h.timeline, 1)
         ),
         Err(RegistryError::MissingState)
@@ -687,8 +689,8 @@ fn two_scopes_keep_independent_floors_pointers_and_ledgers() -> TestResult {
         &other_genesis.tps1,
         &other_genesis.evidence,
         &one.projection()?,
-        other_genesis.trusted()?,
-        other_genesis.tick,
+        &one.release_proof()?,
+        TrustEvaluationPointV1::new(other_genesis.trusted()?, other_genesis.tick),
         activation(h.timeline, 2),
     )?;
     let first = h.store.retained_policy_state("scope")?;
@@ -1012,6 +1014,10 @@ fn registry_error_messages_are_stable_and_secret_free() {
             RegistryError::ReleaseNotActive,
             "release is not the active release of its Plugin ID",
         ),
+        (
+            RegistryError::ReleaseProofMismatch,
+            "release proof does not bind the authorized release and key",
+        ),
     ];
     for (error, message) in direct {
         assert_eq!(error.to_string(), message);
@@ -1035,4 +1041,194 @@ fn registry_error_messages_are_stable_and_secret_free() {
         assert_eq!(error.to_string(), message);
         assert!(error.source().is_some());
     }
+}
+
+// ---------------------------------------------------------------------------
+// Revision 7: the release proof of admit and rollback (R7-T3, R7-T4, R7-T5)
+// ---------------------------------------------------------------------------
+
+/// Admit `manifest` with `proof` and assert exactly `expected` with nothing changed.
+///
+/// Nothing changed means no decision, pointer, ledger row, policy change, or Event.
+fn assert_admit_proof_denied(
+    h: &mut Harness<Store>,
+    material: &Material,
+    manifest: &ManifestSpec,
+    proof: &VerifiedPluginReleaseSignatureV1,
+    expected: RegistryError,
+) -> TestResult {
+    let before = h.snapshot(&[manifest])?;
+    let input = activation(h.timeline, 1);
+    assert_eq!(
+        h.admit_proven(material, manifest, proof, input)?,
+        Err(expected)
+    );
+    assert_eq!(h.snapshot(&[manifest])?, before);
+    Ok(())
+}
+
+/// Roll back to `target` with `proof` and assert exactly `expected` with nothing changed.
+fn assert_rollback_proof_denied(
+    h: &mut Harness<Store>,
+    material: &Material,
+    target: &ManifestSpec,
+    proof: &VerifiedPluginReleaseSignatureV1,
+    expected: RegistryError,
+) -> TestResult {
+    let before = h.snapshot(&[target])?;
+    let input = activation(h.timeline, 3);
+    assert_eq!(
+        h.rollback_proven(material, target, proof, input)?,
+        Err(expected)
+    );
+    assert_eq!(h.snapshot(&[target])?, before);
+    Ok(())
+}
+
+#[test]
+fn an_admission_whose_release_proof_differs_in_one_field_is_a_mismatch() -> TestResult {
+    let mut h = Harness::<Store>::open()?;
+    let genesis = h.env.genesis()?;
+    let one = release_one();
+    for proof in one.mismatched_proofs()? {
+        assert_admit_proof_denied(
+            &mut h,
+            &genesis,
+            &one,
+            &proof,
+            RegistryError::ReleaseProofMismatch,
+        )?;
+    }
+    assert_eq!(h.ledger()?.len(), 1);
+    assert!(h.events()?.is_empty());
+    // The bound proof admits the same release afterwards.
+    let receipt = h.admit(&genesis, &one, 1)??;
+    assert_eq!(receipt.outcome(), PluginTrustCommitOutcomeV1::Committed);
+    Ok(())
+}
+
+#[test]
+fn a_rollback_whose_release_proof_differs_in_one_field_is_a_mismatch() -> TestResult {
+    let mut h = two_releases()?;
+    let genesis = h.env.genesis()?;
+    let one = release_one();
+    for proof in one.mismatched_proofs()? {
+        assert_rollback_proof_denied(
+            &mut h,
+            &genesis,
+            &one,
+            &proof,
+            RegistryError::ReleaseProofMismatch,
+        )?;
+    }
+    assert_eq!(h.active("plugin-a")?.pmf1_digest(), [0x03; 32]);
+    // The bound proof rolls back to the same target afterwards.
+    let receipt = h.rollback(&genesis, &one, 3)??;
+    assert_eq!(receipt.outcome(), PluginTrustCommitOutcomeV1::Committed);
+    assert_eq!(h.active("plugin-a")?.pmf1_digest(), [0x01; 32]);
+    Ok(())
+}
+
+#[test]
+fn a_release_proof_is_checked_after_authorization_and_before_the_tps1_denial() -> TestResult {
+    let mut h = two_releases()?;
+    let genesis = h.env.genesis()?;
+    let one = release_one();
+    let three = release_three();
+    let [mismatched, ..] = three.mismatched_proofs()?;
+    let [target_mismatched, ..] = one.mismatched_proofs()?;
+
+    // A now-revoked key wins over a mismatched proof.
+    let revoked_key = h.env.material(
+        &Spec {
+            epochs: 2,
+            revoked_publisher_epochs: vec![1],
+            ..Spec::default()
+        },
+        &tps_after(&genesis),
+    )?;
+    let key_revoked = RegistryError::Trust(PluginTrustErrorV1::PublisherKeyRevoked);
+    assert_admit_proof_denied(&mut h, &revoked_key, &three, &mismatched, key_revoked)?;
+    assert_rollback_proof_denied(&mut h, &revoked_key, &one, &target_mismatched, key_revoked)?;
+
+    // A mismatched proof wins over a TPS1 artifact denial; the bound proof reaches the denial.
+    let denied = RegistryError::Bridge(PluginTrustBridgeErrorV1::TpsArtifactDenied);
+    let three_denied = h.env.material(
+        &spec(1, 2),
+        &TpsSpec {
+            extra_artifacts: vec![three.pmf1_digest()],
+            ..tps_after(&genesis)
+        },
+    )?;
+    let mismatch = RegistryError::ReleaseProofMismatch;
+    assert_admit_proof_denied(&mut h, &three_denied, &three, &mismatched, mismatch)?;
+    assert_admit_proof_denied(
+        &mut h,
+        &three_denied,
+        &three,
+        &three.release_proof()?,
+        denied,
+    )?;
+    let one_denied = h.env.material(
+        &spec(1, 2),
+        &TpsSpec {
+            extra_artifacts: vec![one.pmf1_digest()],
+            ..tps_after(&genesis)
+        },
+    )?;
+    assert_rollback_proof_denied(&mut h, &one_denied, &one, &target_mismatched, mismatch)?;
+    assert_rollback_proof_denied(&mut h, &one_denied, &one, &one.release_proof()?, denied)?;
+
+    // A mismatched proof wins over a never-admitted rollback target.
+    let never_admitted = ManifestSpec::new("plugin-a", 0x99, 0x19, None);
+    let [unknown_mismatched, ..] = never_admitted.mismatched_proofs()?;
+    assert_rollback_proof_denied(
+        &mut h,
+        &genesis,
+        &never_admitted,
+        &unknown_mismatched,
+        mismatch,
+    )?;
+    assert_rollback_proof_denied(
+        &mut h,
+        &genesis,
+        &never_admitted,
+        &never_admitted.release_proof()?,
+        RegistryError::UnknownRollbackTarget,
+    )?;
+    Ok(())
+}
+
+#[test]
+fn a_fresh_but_equal_release_proof_replays_admit_and_rollback() -> TestResult {
+    let mut h = Harness::<Store>::open()?;
+    let genesis = h.env.genesis()?;
+    let one = release_one();
+    let two = release_two();
+    let admitted = h.admit(&genesis, &one, 1)??;
+    let fresh = one.release_proof()?;
+    assert_eq!(fresh, one.release_proof()?);
+    let replay = h.admit_proven(&genesis, &one, &fresh, activation(h.timeline, 1))??;
+    assert_eq!(
+        replay.outcome(),
+        PluginTrustCommitOutcomeV1::IdempotentReplay
+    );
+    assert_eq!(replay.decision(), admitted.decision());
+
+    h.admit(&genesis, &two, 2)??;
+    let rolled = h.rollback(&h.same_policy(51, 6)?, &one, 7)??;
+    let before = h.snapshot(&[&one, &two])?;
+    let material = h.same_policy(52, 7)?;
+    let fresh = one.release_proof()?;
+    let replay = h.rollback_proven(&material, &one, &fresh, activation(h.timeline, 7))??;
+    assert_eq!(
+        replay.outcome(),
+        PluginTrustCommitOutcomeV1::IdempotentReplay
+    );
+    assert_eq!(replay.activation_event(), rolled.activation_event());
+    let after = h.snapshot(&[&one, &two])?;
+    assert_eq!(after.events, before.events);
+    assert_eq!(after.ledger, before.ledger);
+    assert_eq!(after.decisions, before.decisions);
+    Ok(())
 }

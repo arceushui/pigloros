@@ -2,6 +2,7 @@
 //! opened over a fault store is a valid standard host on Linux (R8-W3).
 
 use pos_conformance::PluginTrustPolicyAnchorV1;
+use pos_crypto::plugin_manifest::VerifiedPluginReleaseSignatureV1;
 use pos_crypto::plugin_trust::{
     ValidatedPluginManifestProjectionV1, VerifiedPluginTrustEvidenceV1,
 };
@@ -9,7 +10,8 @@ use pos_store::plugin_trust_registry::{
     ActivationEventInputV1, ActiveReleaseV1, AdmittedPluginReleaseReceiptV1,
     CurrentReleaseEvaluationV1, PluginRollbackReceiptV1, PluginTrustLedgerRowV1,
     PluginTrustPolicyRegistryErrorV1, PluginTrustPolicyRegistryV1, PolicyAdvanceOutcomeV1,
-    ProvisionOutcomeV1, RetainedPolicyStateV1, RetainedReleaseDecisionV1, TrustedUtcSecondV1,
+    ProvisionOutcomeV1, RetainedPolicyStateV1, RetainedReleaseDecisionV1, TrustEvaluationPointV1,
+    TrustedUtcSecondV1,
 };
 
 use super::FaultStoreV1;
@@ -31,8 +33,8 @@ impl PluginTrustPolicyRegistryV1 for FaultStoreV1 {
         tps1_bytes: &[u8],
         evidence: &VerifiedPluginTrustEvidenceV1,
         projection: &ValidatedPluginManifestProjectionV1,
-        trusted_utc: TrustedUtcSecondV1,
-        tick: u64,
+        release_proof: &VerifiedPluginReleaseSignatureV1,
+        point: TrustEvaluationPointV1,
         activation: ActivationEventInputV1,
     ) -> Registry<AdmittedPluginReleaseReceiptV1> {
         self.inner.admit(
@@ -40,8 +42,8 @@ impl PluginTrustPolicyRegistryV1 for FaultStoreV1 {
             tps1_bytes,
             evidence,
             projection,
-            trusted_utc,
-            tick,
+            release_proof,
+            point,
             activation,
         )
     }
@@ -64,8 +66,8 @@ impl PluginTrustPolicyRegistryV1 for FaultStoreV1 {
         tps1_bytes: &[u8],
         evidence: &VerifiedPluginTrustEvidenceV1,
         target: &ValidatedPluginManifestProjectionV1,
-        trusted_utc: TrustedUtcSecondV1,
-        tick: u64,
+        release_proof: &VerifiedPluginReleaseSignatureV1,
+        point: TrustEvaluationPointV1,
         activation: ActivationEventInputV1,
     ) -> Registry<PluginRollbackReceiptV1> {
         self.inner.rollback(
@@ -73,8 +75,8 @@ impl PluginTrustPolicyRegistryV1 for FaultStoreV1 {
             tps1_bytes,
             evidence,
             target,
-            trusted_utc,
-            tick,
+            release_proof,
+            point,
             activation,
         )
     }

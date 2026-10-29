@@ -1,5 +1,5 @@
-//! Public acceptance vectors for the ADR-103 revisions 4 and 5 Plugin trust policy registry port on
-//! the Memory adapter (slice #568): C1, D1-D3, E1-E3, and F1-F2.
+//! Public acceptance vectors for the ADR-103 revisions 4, 5 and 7 Plugin trust policy registry
+//! port on the Memory adapter (slice #568): C1, D1-D3, E1-E3, and F1-F2.
 //!
 //! The vectors are written once, in `support/plugin_trust_registry_vectors_core.rs`, and run
 //! unchanged on the `SQLite` adapter in `plugin_trust_registry_sqlite_public.rs`.
@@ -18,7 +18,10 @@ mod core_vectors {
 mod erased_activation {
     use super::fixtures::{activation, release_one, Env, RegistryError, TestResult};
     use pos_core::store::EventStore;
-    use pos_store::{memory::MemoryStore, plugin_trust_registry::PluginTrustPolicyRegistryV1};
+    use pos_store::{
+        memory::MemoryStore,
+        plugin_trust_registry::{PluginTrustPolicyRegistryV1, TrustEvaluationPointV1},
+    };
 
     #[test]
     fn an_erased_activation_timeline_refuses_the_activation_event() -> TestResult {
@@ -41,8 +44,8 @@ mod erased_activation {
                 &genesis.tps1,
                 &genesis.evidence,
                 &release_one().projection()?,
-                genesis.trusted()?,
-                genesis.tick,
+                &release_one().release_proof()?,
+                TrustEvaluationPointV1::new(genesis.trusted()?, genesis.tick),
                 activation(timeline, 1)
             ),
             Err(RegistryError::ActivationEventRejected)

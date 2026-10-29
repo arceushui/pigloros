@@ -1,6 +1,6 @@
-//! Public acceptance vectors for the ADR-103 revisions 4 and 5 Plugin trust policy registry port on
-//! the `SQLite` adapter (slice #569): the shared vectors C1, D1-D3, E1-E3, and F1-F2, plus the
-//! `SQLite`-only clauses of S1 and restart retention.
+//! Public acceptance vectors for the ADR-103 revisions 4, 5 and 7 Plugin trust policy registry
+//! port on the `SQLite` adapter (slice #569): the shared vectors C1, D1-D3, E1-E3, and F1-F2, plus
+//! the `SQLite`-only clauses of S1 and restart retention.
 #![cfg(all(target_os = "linux", feature = "sqlite"))]
 
 #[path = "support/plugin_trust_registry_fixtures.rs"]
@@ -18,6 +18,7 @@ use pos_core::{store::EventStore, store::SeqRange, ErasureContainmentGateV1};
 use pos_store::{
     plugin_trust_registry::{
         PluginTrustCommitOutcomeV1, PluginTrustPolicyRegistryV1, ProvisionOutcomeV1,
+        TrustEvaluationPointV1,
     },
     sqlite::SqliteStore,
 };
@@ -70,8 +71,8 @@ fn a_preexisting_store_file_is_missing_state_until_provisioned() -> TestResult {
             &genesis.tps1,
             &genesis.evidence,
             &release_one().projection()?,
-            genesis.trusted()?,
-            genesis.tick,
+            &release_one().release_proof()?,
+            TrustEvaluationPointV1::new(genesis.trusted()?, genesis.tick),
             activation(timeline, 1)
         ),
         Err(RegistryError::MissingState)
@@ -126,8 +127,8 @@ fn committed_state_survives_a_restart_and_a_retry_replays() -> TestResult {
         &genesis.tps1,
         &genesis.evidence,
         &one.projection()?,
-        genesis.trusted()?,
-        genesis.tick,
+        &one.release_proof()?,
+        TrustEvaluationPointV1::new(genesis.trusted()?, genesis.tick),
         activation(timeline, 1),
     )?;
     assert_eq!(

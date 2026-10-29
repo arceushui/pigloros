@@ -16,6 +16,9 @@ test-support = [
   "dep:ed25519-dalek",
   "dep:sha2",
   "pos-core/test-support",
+  # The world's direct admission of a deliberately mis-signed release needs the release proof
+  # token fixture (ADR-103 revision 7 decision 4.4).
+  "pos-crypto/test-support",
 ]
 
 [dependencies]
