@@ -10,10 +10,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
-pub struct Sandbox(pub PathBuf);
+pub(super) struct Sandbox(pub(super) PathBuf);
 
 impl Sandbox {
-    pub fn new() -> TestResult<Self> {
+    pub(super) fn new() -> TestResult<Self> {
         let nanos = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
         let path = std::env::temp_dir().join(format!(
             "pigloros-encryptor-lock-{}-{nanos}-{}",
@@ -31,7 +31,7 @@ impl Drop for Sandbox {
     }
 }
 
-pub fn private_directory(path: &Path) -> io::Result<()> {
+pub(super) fn private_directory(path: &Path) -> io::Result<()> {
     DirBuilder::new().mode(0o700).create(path)?;
     fs::set_permissions(path, Permissions::from_mode(0o700))
 }
