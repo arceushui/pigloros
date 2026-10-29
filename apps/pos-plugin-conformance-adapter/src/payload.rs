@@ -3,8 +3,9 @@
 //! Unknown keys, missing keys, a value of the wrong type, a hex value of the wrong length or
 //! case, a number that is not an integer from 0 to 9,007,199,254,740,991 and a text with a
 //! control or non-ASCII character are all `payload-invalid`. A conditional key is required
-//! exactly when its condition holds. Digest references are resolved against the composite by
-//! [`crate::world`], not here.
+//! exactly when its condition holds, and the `simulation_time` of the `pass` steps of a
+//! sub-case never decreases (ADR-068 R4 4.1(5)). Digest references are resolved against the
+//! composite by [`crate::world`], not here.
 
 use std::collections::BTreeSet;
 
@@ -474,9 +475,25 @@ impl SubCaseV1 {
         }
     }
 
+    /// The `simulation_time` of each `pass` step, in step order.
+    fn simulation_times(&self) -> impl Iterator<Item = u64> + '_ {
+        self.steps.iter().filter_map(|step| match step {
+            StepV1::Pass(pass) => Some(pass.simulation_time.0),
+            StepV1::Install(_) | StepV1::Bind(_) | StepV1::Refresh(_) | StepV1::Scan(_) => None,
+        })
+    }
+
+    /// Whether the Simulation Time of the `pass` steps never decreases (ADR-068 R4 4.1(5)):
+    /// equal values are accepted, a decrease is `payload-invalid`.
+    fn time_is_monotone(&self) -> bool {
+        self.simulation_times()
+            .zip(self.simulation_times().skip(1))
+            .all(|(earlier, later)| earlier <= later)
+    }
+
     /// The grammar rules that need no context.
     fn is_wellformed(&self) -> bool {
-        self.expect.is_valid() && self.scans_agree()
+        self.expect.is_valid() && self.scans_agree() && self.time_is_monotone()
     }
 
     /// The rules of a sub-case of a payload: `nested` and the `malformed` expectation belong

@@ -92,6 +92,32 @@ const METERING: MeteringV1 = MeteringV1 {
     host_calls: 3,
 };
 
+const OUTPUT: OutputUsageV1 = OutputUsageV1 {
+    event_count: 2,
+    event_payload_bytes: 16,
+    state_bytes: 9,
+};
+
+/// The usage of one committed outcome of [`METERING`] and [`OUTPUT`].
+const ONE: ResourceUsage = ResourceUsage {
+    memory_bytes: 1_114_112,
+    cpu_fuel: 12,
+    host_calls: 3,
+    event_count: 2,
+    output_bytes: 16,
+    storage_bytes: 9,
+    execution_steps: 1,
+    simulation_time_ns: 0,
+};
+
+const fn committed_of(metering: MeteringV1, output: OutputUsageV1) -> R {
+    R::Committed {
+        output_digest: Some([1; 32]),
+        metering: Some(metering),
+        output_usage: Some(output),
+    }
+}
+
 /// The outcome result the host assembles for a failure `error`: `Refused` for a pre-execution
 /// rejection and `Failed` otherwise, as `CommunityPluginSubjectOutcomeV1::assemble` does.
 const fn result_of_error(error: E) -> R {
@@ -171,25 +197,24 @@ fn every_closed_error_with_every_basis_maps_by_its_class() {
 #[test]
 fn every_result_variant_maps_and_an_incomplete_record_is_operational() {
     let digest = Some([4; 32]);
-    let usage = ResourceUsage {
-        memory_bytes: 1_114_112,
-        cpu_fuel: 12,
-        host_calls: 3,
-        ..ResourceUsage::default()
-    };
     let committed = R::Committed {
         output_digest: digest,
         metering: Some(METERING),
-        output_usage: None,
+        output_usage: Some(OUTPUT),
     };
     assert_eq!(
         of_outcome(&outcome(committed)),
         SubResultV1::Committed {
             output_digest: [4; 32],
-            usage,
+            usage: ONE,
         }
     );
     let operational = [
+        R::Committed {
+            output_digest: digest,
+            metering: Some(METERING),
+            output_usage: None,
+        },
         R::Committed {
             output_digest: None,
             metering: Some(METERING),
@@ -272,11 +297,7 @@ fn operational_record(id: &str) -> SubCaseRecordV1 {
 fn the_record_result_is_the_setup_refusal_else_the_last_outcome_else_none() {
     let empty = SubCaseRecordV1::empty("x");
     assert_eq!(of_record(&empty), None);
-    let committed = R::Committed {
-        output_digest: Some([1; 32]),
-        metering: Some(METERING),
-        output_usage: None,
-    };
+    let committed = committed_of(METERING, OUTPUT);
     let refused = R::Refused {
         error: "IncompatibleAbi",
         basis: None,
@@ -286,10 +307,14 @@ fn the_record_result_is_the_setup_refusal_else_the_last_outcome_else_none() {
         outcomes: vec![outcome(refused), outcome(committed)],
         ..empty
     };
-    assert!(matches!(
+    // The usage of the attempt counts its committed outcomes only.
+    assert_eq!(
         of_record(&both),
-        Some(SubResultV1::Committed { .. })
-    ));
+        Some(SubResultV1::Committed {
+            output_digest: [1; 32],
+            usage: ONE,
+        })
+    );
     let refusal = SubCaseRecordV1 {
         setup_refusal: Some(E::IncompatibleAbi),
         ..both
@@ -347,15 +372,14 @@ fn an_operational_result_is_never_a_failure_or_an_output() {
             assert_eq!(decided.usage, ResourceUsage::default());
         }
     }
-    let overflow = R::Committed {
-        output_digest: Some([1; 32]),
-        metering: Some(MeteringV1 {
+    let overflow = committed_of(
+        MeteringV1 {
             startup_fuel: u64::MAX,
             call_fuel: 1,
             ..METERING
-        }),
-        output_usage: None,
-    };
+        },
+        OUTPUT,
+    );
     let record = SubCaseRecordV1 {
         outcomes: vec![outcome(overflow)],
         ..matched("x")
@@ -582,28 +606,17 @@ fn a_failure_family_has_no_entries() {
     }
 }
 
+/// ADR-068 R4 test 4: one committed invocation gives all eight counters.
 #[test]
-fn usage_is_the_checked_sum_of_the_two_fuel_counters_and_the_rest_is_direct() -> TestResult {
-    let usage = usage_of(METERING).ok_or("no usage")?;
-    assert_eq!(
-        usage,
-        ResourceUsage {
-            memory_bytes: 1_114_112,
-            cpu_fuel: 12,
-            host_calls: 3,
-            event_count: 0,
-            output_bytes: 0,
-            storage_bytes: 0,
-            execution_steps: 0,
-            simulation_time_ns: 0,
-        }
-    );
+fn usage_is_the_checked_fuel_sum_the_direct_counters_and_one_step() -> TestResult {
+    assert_eq!(usage_of(METERING, OUTPUT).ok_or("no usage")?, ONE);
     let edge = |startup_fuel, call_fuel| {
-        usage_of(MeteringV1 {
+        let metering = MeteringV1 {
             startup_fuel,
             call_fuel,
             ..METERING
-        })
+        };
+        usage_of(metering, OUTPUT)
     };
     assert_eq!(edge(u64::MAX, 0).map(|u| u.cpu_fuel), Some(u64::MAX));
     assert_eq!(edge(0, u64::MAX).map(|u| u.cpu_fuel), Some(u64::MAX));
@@ -613,6 +626,114 @@ fn usage_is_the_checked_sum_of_the_two_fuel_counters_and_the_rest_is_direct() ->
     Ok(())
 }
 
+/// A record of two passes: the committed outcomes `first` and `second`, at the Simulation
+/// Times `times`.
+fn two_passes(first: R, second: R, times: Vec<u64>) -> SubCaseRecordV1 {
+    SubCaseRecordV1 {
+        outcomes: vec![outcome(first), outcome(second)],
+        simulation_times: times,
+        ..matched("pos.3")
+    }
+}
+
+/// ADR-068 R4 test 4: the attempt's usage sums the committed outcomes (memory is the maximum,
+/// Simulation Time the advance), and an overflow of any checked sum is operational.
+#[test]
+fn the_attempt_usage_sums_its_outcomes_and_any_overflow_is_operational() {
+    let small = committed_of(METERING, OUTPUT);
+    let larger_memory = MeteringV1 {
+        memory_bytes: 2_000_000,
+        ..METERING
+    };
+    let record = two_passes(small, committed_of(larger_memory, OUTPUT), vec![42, 43]);
+    let usage = ResourceUsage {
+        memory_bytes: 2_000_000,
+        cpu_fuel: 24,
+        host_calls: 6,
+        event_count: 4,
+        output_bytes: 32,
+        storage_bytes: 18,
+        execution_steps: 2,
+        simulation_time_ns: 1,
+    };
+    let expected = Some(SubResultV1::Committed {
+        output_digest: [1; 32],
+        usage,
+    });
+    assert_eq!(of_record(&record), expected);
+    // No recorded pass time, or one, consumes no Simulation Time.
+    for times in [Vec::new(), vec![9]] {
+        let record = two_passes(small, small, times);
+        let time = match of_record(&record) {
+            Some(SubResultV1::Committed { usage, .. }) => Some(usage.simulation_time_ns),
+            _ => None,
+        };
+        assert_eq!(time, Some(0));
+    }
+
+    let near = u64::MAX - 1;
+    let fuel = MeteringV1 {
+        startup_fuel: near,
+        call_fuel: 0,
+        ..METERING
+    };
+    let host = MeteringV1 {
+        host_calls: near,
+        ..METERING
+    };
+    let events = OutputUsageV1 {
+        event_count: near,
+        ..OUTPUT
+    };
+    let bytes = OutputUsageV1 {
+        event_payload_bytes: near,
+        ..OUTPUT
+    };
+    let state = OutputUsageV1 {
+        state_bytes: near,
+        ..OUTPUT
+    };
+    let heavy = [
+        committed_of(fuel, OUTPUT),
+        committed_of(host, OUTPUT),
+        committed_of(METERING, events),
+        committed_of(METERING, bytes),
+        committed_of(METERING, state),
+    ];
+    for result in heavy {
+        // Alone it is within range; with a second outcome its sum overflows.
+        let alone = SubCaseRecordV1 {
+            outcomes: vec![outcome(result)],
+            ..matched("pos.1")
+        };
+        assert!(matches!(
+            of_record(&alone),
+            Some(SubResultV1::Committed { .. })
+        ));
+        let record = two_passes(result, small, vec![1, 2]);
+        assert_eq!(
+            of_record(&record),
+            Some(SubResultV1::Operational),
+            "{result:?}"
+        );
+        let decided = case_result("c", FixtureFamily::Positive, &[record]);
+        assert_eq!(decided.result, SubjectResult::Unavailable);
+        assert_eq!(decided.usage, ResourceUsage::default());
+    }
+    // The execution steps overflow only after u64::MAX outcomes, so the sum is checked at the
+    // boundary through the counter itself.
+    assert_eq!(
+        plus(
+            ResourceUsage {
+                execution_steps: u64::MAX,
+                ..ONE
+            },
+            ONE
+        ),
+        None
+    );
+}
+
 fn usage_record(id: &str, usage: ResourceUsage) -> SubCaseRecordV1 {
     SubCaseRecordV1 {
         usage,
@@ -620,6 +741,8 @@ fn usage_record(id: &str, usage: ResourceUsage) -> SubCaseRecordV1 {
     }
 }
 
+/// R8-A4 and ADR-068 R4 test 7: the case usage is the per-counter maximum over the sub-cases,
+/// for all eight counters, with the maximum in the first, a middle or the last sub-case.
 #[test]
 fn the_case_usage_is_the_per_counter_maximum_wherever_the_maximum_is() {
     let counters: [fn(&mut ResourceUsage, u64); 8] = [

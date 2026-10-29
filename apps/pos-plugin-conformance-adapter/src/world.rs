@@ -19,7 +19,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use pos_plugin_release::{
     BundleAddressV1, ContentValidationV1, InMemoryReleaseEntryV1, InMemoryReleaseSourceV1,
 };
-use pos_plugin_supervisor::{CommunityPluginSubjectOutcomeV1, CommunityPluginSubjectResultV1};
+use pos_plugin_supervisor::{
+    CommunityPluginSubjectOutcomeV1, CommunityPluginSubjectResultV1, OutputUsageV1,
+};
 use pos_reference::evaluator::ResourceUsage;
 use pos_runtime::community_plugin_host::{
     cbor, profile_digest_of, CeilingValuesV1, CommunityPluginHostErrorV1, CommunityPluginModeV1,
@@ -48,6 +50,9 @@ pub struct SubCaseRecordV1 {
     pub steps_run: u32,
     /// The outcome of each `pass` step that ran, in step order.
     pub outcomes: Vec<CommunityPluginSubjectOutcomeV1>,
+    /// The `simulation_time` of each `pass` step that ran, in step order: the source of the
+    /// sub-case's Simulation Time usage (ADR-068 R4 4.1(5)).
+    pub simulation_times: Vec<u64>,
     /// The refusal of the step that failed in setup (install, gate, Driver build), if any.
     pub setup_refusal: Option<CommunityPluginHostErrorV1>,
     /// The result of the `scan` step, if it ran.
@@ -56,7 +61,8 @@ pub struct SubCaseRecordV1 {
     pub computed: Option<[u8; 32]>,
     /// The output digest when the sub-result is `committed`.
     pub committed: Option<[u8; 32]>,
-    /// The usage of the sub-case: zero unless it committed.
+    /// The usage of the sub-case, the attempt's usage of [`crate::map::of_record()`]: zero
+    /// for all eight counters unless it committed.
     pub usage: ResourceUsage,
     /// The worker launches of the passes: the port's [`StepPortV1::worker_launches()`] after
     /// each `pass` step less the count before it, summed, whether the pass ran or not. It is
@@ -75,6 +81,7 @@ impl SubCaseRecordV1 {
             id: id.to_owned(),
             steps_run: 0,
             outcomes: Vec::new(),
+            simulation_times: Vec::new(),
             setup_refusal: None,
             scan: None,
             computed: None,
@@ -291,30 +298,49 @@ fn optional_digest(out: &mut Vec<u8>, digest: Option<[u8; 32]>) {
     }
 }
 
-/// `[name, output_digest, metering]` of a `Staged` or `Committed` result.
-fn settled_bytes(
-    out: &mut Vec<u8>,
-    name: &str,
-    output_digest: Option<[u8; 32]>,
-    metering: Option<MeteringV1>,
-) {
-    cbor::array(out, 3);
-    cbor::text(out, name);
-    optional_digest(out, output_digest);
-    match metering {
-        Some(metering) => {
-            cbor::array(out, 4);
-            for counter in [
-                metering.startup_fuel,
-                metering.call_fuel,
-                metering.memory_bytes,
-                metering.host_calls,
-            ] {
+/// The counters of a measurement as an array of unsigned integers, or null.
+fn optional_counters<const N: usize>(out: &mut Vec<u8>, counters: Option<[u64; N]>) {
+    match counters {
+        Some(counters) => {
+            cbor::array(out, N);
+            for counter in counters {
                 cbor::unsigned(out, counter);
             }
         }
         None => out.push(NULL),
     }
+}
+
+/// `[name, output_digest, metering, output_usage]` of a `Staged` or `Committed` result:
+/// `metering` is `[startup_fuel, call_fuel, memory_bytes, host_calls]` and `output_usage` is
+/// `[event_count, event_payload_bytes, state_bytes]` (ADR-068 R4), each or null.
+fn settled_bytes(
+    out: &mut Vec<u8>,
+    name: &str,
+    output_digest: Option<[u8; 32]>,
+    metering: Option<MeteringV1>,
+    output_usage: Option<OutputUsageV1>,
+) {
+    cbor::array(out, 4);
+    cbor::text(out, name);
+    optional_digest(out, output_digest);
+    let metering = metering.map(|metering| {
+        [
+            metering.startup_fuel,
+            metering.call_fuel,
+            metering.memory_bytes,
+            metering.host_calls,
+        ]
+    });
+    optional_counters(out, metering);
+    let output_usage = output_usage.map(|usage| {
+        [
+            usage.event_count,
+            usage.event_payload_bytes,
+            usage.state_bytes,
+        ]
+    });
+    optional_counters(out, output_usage);
 }
 
 /// The `result` member of the outcome record.
@@ -323,13 +349,13 @@ fn result_bytes(out: &mut Vec<u8>, result: CommunityPluginSubjectResultV1) {
         CommunityPluginSubjectResultV1::Staged {
             output_digest,
             metering,
-            ..
-        } => settled_bytes(out, "Staged", output_digest, metering),
+            output_usage,
+        } => settled_bytes(out, "Staged", output_digest, metering, output_usage),
         CommunityPluginSubjectResultV1::Committed {
             output_digest,
             metering,
-            ..
-        } => settled_bytes(out, "Committed", output_digest, metering),
+            output_usage,
+        } => settled_bytes(out, "Committed", output_digest, metering, output_usage),
         CommunityPluginSubjectResultV1::Refused {
             error,
             basis,
@@ -723,6 +749,7 @@ impl Run<'_> {
         outcomes: &[CommunityPluginSubjectOutcomeV1],
     ) -> bool {
         self.invocation = Some(args.invocation_id);
+        self.record.simulation_times.push(args.simulation_time);
         let decisive = outcomes
             .iter()
             .find(|outcome| !is_committed(outcome))

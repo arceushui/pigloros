@@ -42,21 +42,38 @@ fn outcome(result: Result1, launched: bool) -> CommunityPluginSubjectOutcomeV1 {
     }
 }
 
-fn committed(digest: [u8; 32]) -> CommunityPluginSubjectOutcomeV1 {
-    let metering = MeteringV1 {
-        startup_fuel: 1,
-        call_fuel: 2,
-        memory_bytes: 3,
-        host_calls: 4,
-    };
+/// The metering of the outcomes of [`committed()`].
+const METERING: MeteringV1 = MeteringV1 {
+    startup_fuel: 1,
+    call_fuel: 2,
+    memory_bytes: 3,
+    host_calls: 4,
+};
+
+/// The output usage of the outcomes of [`committed()`]: one Event of 8 bytes, 8 state bytes.
+const OUTPUT: OutputUsageV1 = OutputUsageV1 {
+    event_count: 1,
+    event_payload_bytes: 8,
+    state_bytes: 8,
+};
+
+fn committed_with(
+    digest: [u8; 32],
+    metering: MeteringV1,
+    output_usage: OutputUsageV1,
+) -> CommunityPluginSubjectOutcomeV1 {
     outcome(
         Result1::Committed {
             output_digest: Some(digest),
             metering: Some(metering),
-            output_usage: None,
+            output_usage: Some(output_usage),
         },
         true,
     )
+}
+
+fn committed(digest: [u8; 32]) -> CommunityPluginSubjectOutcomeV1 {
+    committed_with(digest, METERING, OUTPUT)
 }
 
 fn refused(error: &'static str, basis: Option<&'static str>) -> CommunityPluginSubjectOutcomeV1 {
@@ -176,6 +193,13 @@ fn refresh_step(with_material: Value) -> Value {
     step
 }
 
+/// A `pass` step of the member `p` at Simulation Time `time`.
+fn pass_at(time: u64) -> Value {
+    let mut step = pass_step(vec![member("p")]);
+    step["simulation_time"] = time.into();
+    step
+}
+
 fn pass_step(members: Vec<Value>) -> Value {
     let mut step = json!({
         "step": "pass", "instant_micros": 50_000_000, "tick": 5,
@@ -238,13 +262,19 @@ fn the_result_of_a_two_pass_subcase_is_the_last_pass_and_the_state_is_carried() 
     assert_eq!(record.committed, Some([2; 32]));
     assert_eq!(record.worker_launches, 2);
     assert_eq!(record.setup_refusal, None);
+    // ADR-068 R4 4.2(1): the attempt's usage sums both passes; both are at Simulation Time 11.
     let usage = ResourceUsage {
         memory_bytes: 3,
-        cpu_fuel: 3,
-        host_calls: 4,
-        ..ResourceUsage::default()
+        cpu_fuel: 6,
+        host_calls: 8,
+        event_count: 2,
+        output_bytes: 16,
+        storage_bytes: 16,
+        execution_steps: 2,
+        simulation_time_ns: 0,
     };
     assert_eq!(record.usage, usage);
+    assert_eq!(record.simulation_times, [11, 11]);
     assert_eq!(
         fake.seen_states,
         vec![b"init".to_vec(), b"state-1".to_vec()]
@@ -261,6 +291,181 @@ fn the_result_of_a_two_pass_subcase_is_the_last_pass_and_the_state_is_carried() 
         &subcase("pos.3", steps, committed_expect([1; 32])),
     )?;
     assert!(!first.matched);
+    Ok(())
+}
+
+/// The three passes of the ADR-068 R4 test 5 sub-case: each with its own metering and output
+/// usage, the maximum memory in the middle one.
+fn three_passes() -> Vec<CommunityPluginSubjectOutcomeV1> {
+    let pass = |digit: u8, fuel: u64, memory_bytes, host_calls, output: [u64; 3]| {
+        let metering = MeteringV1 {
+            startup_fuel: fuel,
+            call_fuel: 10 * fuel,
+            memory_bytes,
+            host_calls,
+        };
+        let [event_count, event_payload_bytes, state_bytes] = output;
+        let usage = OutputUsageV1 {
+            event_count,
+            event_payload_bytes,
+            state_bytes,
+        };
+        committed_with([digit; 32], metering, usage)
+    };
+    vec![
+        pass(1, 1, 100, 2, [1, 5, 4]),
+        pass(2, 2, 300, 3, [2, 6, 4]),
+        pass(3, 3, 200, 4, [0, 0, 4]),
+    ]
+}
+
+/// The sub-case of three passes at Simulation Time 10, 15 and 40.
+fn three_pass_subcase() -> Value {
+    let mut steps = prefix();
+    steps.pop();
+    steps.extend([pass_at(10), pass_at(15), pass_at(40)]);
+    subcase("pos.3", steps, committed_expect([3; 32]))
+}
+
+/// ADR-068 R4 test 5: within a sub-case the cumulative counters are the sum over its committed
+/// passes, memory is the maximum, every committed pass is one execution step, and Simulation
+/// Time is the last pass value less the first.
+#[test]
+fn a_subcase_usage_sums_its_passes_takes_the_maximum_memory_and_the_time_advance() -> TestResult {
+    let mut fake = Fake::default();
+    fake.passes
+        .extend(three_passes().into_iter().map(|outcome| Ok(vec![outcome])));
+    let record = run(&mut fake, &three_pass_subcase())?;
+    assert!(record.matched);
+    assert_eq!(record.simulation_times, [10, 15, 40]);
+    let usage = ResourceUsage {
+        memory_bytes: 300,
+        cpu_fuel: 66,
+        host_calls: 9,
+        event_count: 3,
+        output_bytes: 11,
+        storage_bytes: 12,
+        execution_steps: 3,
+        simulation_time_ns: 30,
+    };
+    assert_eq!(record.usage, usage);
+
+    // A one-pass sub-case is one step and consumes no Simulation Time.
+    let mut fake = Fake::default();
+    let mut steps = prefix();
+    steps.pop();
+    steps.push(pass_at(40));
+    let record = run(
+        &mut fake,
+        &subcase("pos.1", steps, committed_expect([7; 32])),
+    )?;
+    let usage = ResourceUsage {
+        memory_bytes: 3,
+        cpu_fuel: 3,
+        host_calls: 4,
+        event_count: 1,
+        output_bytes: 8,
+        storage_bytes: 8,
+        execution_steps: 1,
+        simulation_time_ns: 0,
+    };
+    assert_eq!(record.usage, usage);
+    Ok(())
+}
+
+/// ADR-068 R4 4.2(1) and (3): a sum that overflows over the passes is operational, so the
+/// sub-case has no committed result and no usage, and the case is `Unavailable`.
+#[test]
+fn a_sum_that_overflows_over_the_passes_is_operational() -> TestResult {
+    let mut fake = Fake::default();
+    let heavy = MeteringV1 {
+        startup_fuel: u64::MAX,
+        call_fuel: 0,
+        ..METERING
+    };
+    fake.passes
+        .push_back(Ok(vec![committed_with([1; 32], heavy, OUTPUT)]));
+    fake.passes
+        .push_back(Ok(vec![committed_with([2; 32], METERING, OUTPUT)]));
+    let mut steps = prefix();
+    steps.push(pass_step(vec![member("p")]));
+    let record = run(
+        &mut fake,
+        &subcase("pos.3", steps, committed_expect([2; 32])),
+    )?;
+    assert_eq!(
+        crate::map::of_record(&record),
+        Some(SubResultV1::Operational)
+    );
+    assert_eq!(record.committed, None);
+    assert!(!record.matched);
+    assert_eq!(record.usage, ResourceUsage::default());
+    let decided = crate::map::case_result("c", FixtureFamily::Positive, &[record]);
+    assert_eq!(
+        decided.result,
+        pos_reference::evaluator::SubjectResult::Unavailable
+    );
+    assert_eq!(decided.usage, ResourceUsage::default());
+    Ok(())
+}
+
+/// ADR-068 R4 4.2(3): a sub-case that commits a pass and is then refused or fails reports 0
+/// for all eight counters, whatever its earlier passes measured.
+#[test]
+fn a_subcase_that_does_not_commit_reports_no_usage_after_a_committed_pass() -> TestResult {
+    let failed = outcome(
+        Result1::Failed {
+            error: "FuelExhausted",
+            class: "Authoritative",
+        },
+        true,
+    );
+    let refusals = [
+        (
+            refused("IncompatibleAbi", None),
+            json!({"kind": "refused", "error": "IncompatibleAbi",
+                "class": "PreExecutionRejection"}),
+        ),
+        (
+            failed,
+            json!({"kind": "failed", "error": "FuelExhausted", "class": "Authoritative"}),
+        ),
+    ];
+    for (second, expect) in refusals {
+        let mut fake = Fake::default();
+        fake.passes.push_back(Ok(vec![committed([1; 32])]));
+        fake.passes.push_back(Ok(vec![second]));
+        let mut steps = prefix();
+        steps.push(pass_step(vec![member("p")]));
+        let record = run(&mut fake, &subcase("x", steps, expect))?;
+        assert!(record.matched);
+        assert_eq!(record.outcomes.len(), 2);
+        assert_eq!(record.committed, None);
+        assert_eq!(record.usage, ResourceUsage::default());
+    }
+    Ok(())
+}
+
+/// ADR-068 R4 test 9: two runs of the same case give byte-identical EAO1 usage.
+#[test]
+fn two_runs_of_the_same_case_give_byte_identical_eao1_usage() -> TestResult {
+    let observe = || -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let mut fake = Fake::default();
+        fake.passes
+            .extend(three_passes().into_iter().map(|outcome| Ok(vec![outcome])));
+        let record = run(&mut fake, &three_pass_subcase())?;
+        let decided = crate::map::case_result("c", FixtureFamily::Positive, &[record]);
+        let observation = pos_reference::evaluator::SubjectObservation {
+            result: decided.result,
+            usage: decided.usage,
+        };
+        let mut out = Vec::new();
+        pos_reference::adapter_transport::write_observation(&mut out, &observation)?;
+        Ok(out)
+    };
+    let (first, second) = (observe()?, observe()?);
+    assert_eq!(first, second);
+    assert!(!first.is_empty());
     Ok(())
 }
 
@@ -1148,19 +1353,24 @@ fn every_result_of_the_outcome_record_has_its_encoding() {
         memory_bytes: 3,
         host_calls: 4,
     };
+    let output_usage = OutputUsageV1 {
+        event_count: 2,
+        event_payload_bytes: 24,
+        state_bytes: 300,
+    };
     let committed = Result1::Committed {
         output_digest: Some([9; 32]),
         metering: Some(metering),
-        output_usage: None,
+        output_usage: Some(output_usage),
     };
     let golden = concat!(
         "8b64504f42310161705820010101010101010101010101010101010101010101",
         "0101010101010101010101582002020202020202020202020202020202020202",
         "0202020202020202020202020258200303030303030303030303030303030303",
         "0303030303030303030303030303035820040404040404040404040404040404",
-        "04040404040404040404040404040404040501008369436f6d6d697474656458",
+        "04040404040404040404040404040404040501008469436f6d6d697474656458",
         "2009090909090909090909090909090909090909090909090909090909090909",
-        "098401020304",
+        "0984010203048302181819012c",
     );
     let record = full_digests(committed, 5, CommunityPluginModeV1::AirGapped);
     assert_eq!(hex::encode(&outcome_bytes_of(&record)), golden);
@@ -1182,7 +1392,7 @@ fn every_result_of_the_outcome_record_has_its_encoding() {
         hex::encode(&outcome_bytes_of(&record)),
         concat!(
             "8b64504f4231016170f658200202020202020202020202020202020202020202",
-            "020202020202020202020202f6f619012c00008366537461676564f6f6",
+            "020202020202020202020202f6f619012c00008466537461676564f6f6f6",
         )
     );
 
