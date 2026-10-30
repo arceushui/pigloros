@@ -337,8 +337,9 @@ pub(super) struct SubCaseV1 {
 pub(super) type MembersV1 = BTreeMap<[u8; 32], Vec<u8>>;
 
 /// Find the `RCS1` composite among the auxiliary members: the first member
-/// that decodes as one with the right magic and version and whose every
-/// entry is addressed by the BLAKE3 of its bytes.
+/// that decodes as one with the right magic and version, whose entries are in
+/// strictly increasing digest order and whose every entry is addressed by the
+/// BLAKE3 of its bytes.
 pub(super) fn find_composite(auxiliary: &[AttemptArtifact]) -> Option<MembersV1> {
     auxiliary.iter().find_map(|member| {
         ciborium::from_reader::<CompositeV1, _>(member.bytes.as_slice())
@@ -346,6 +347,7 @@ pub(super) fn find_composite(auxiliary: &[AttemptArtifact]) -> Option<MembersV1>
             .filter(|CompositeV1(magic, version, entries)| {
                 magic == COMPOSITE_MAGIC
                     && *version == 1
+                    && entries.windows(2).all(|pair| pair[0].0 < pair[1].0)
                     && entries
                         .iter()
                         .all(|(digest, bytes)| digest.as_slice() == blake3::hash(bytes).as_bytes())
@@ -621,12 +623,14 @@ pub(super) fn hex_bytes(text: &str) -> Option<Vec<u8>> {
                 .and_then(|value| u8::try_from(value).ok())
         })
         .collect();
-    digits.filter(|digits| digits.len() % 2 == 0).map(|digits| {
-        digits
-            .chunks_exact(2)
-            .map(|pair| (pair[0] << 4) | pair[1])
-            .collect()
-    })
+    digits
+        .filter(|digits| digits.len().is_multiple_of(2))
+        .map(|digits| {
+            digits
+                .chunks_exact(2)
+                .map(|pair| (pair[0] << 4) | pair[1])
+                .collect()
+        })
 }
 
 fn digest32(text: &str) -> Option<[u8; 32]> {

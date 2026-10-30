@@ -466,12 +466,16 @@ fn another_claim_layer_or_mode_is_unavailable() -> TestResult {
 fn an_attempt_without_its_composite_is_not_executed() -> TestResult {
     let base = attempt(FixtureFamily::Positive, ExecutionMode::Local)?;
     let members = [b"SPDX-License-Identifier: MIT\n".as_slice()];
+    // Two members out of digest order (and so not unique-sorted).
+    let mut unsorted = [b"first".as_slice(), b"second".as_slice()];
+    unsorted.sort_by_key(|member| std::cmp::Reverse(blake3_of(member)));
     let candidates = [
         Vec::new(),
         vec![artifact(b"{}".to_vec())],
         vec![artifact(composite("MCS1", &members, blake3_of)?)],
         vec![artifact(composite("RCS1", &members, |_| vec![0; 32])?)],
         vec![artifact(composite("RCS1", &members, |_| vec![0; 31])?)],
+        vec![artifact(composite("RCS1", &unsorted, blake3_of)?)],
     ];
     for auxiliary in candidates {
         let mut attempt = base.clone();
