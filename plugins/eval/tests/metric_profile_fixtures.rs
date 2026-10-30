@@ -66,13 +66,18 @@ fn hex(text: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         .map(|index| {
             text.get(index..index + 2)
                 .ok_or_else(|| missing("a whole hex byte"))
-                .and_then(|pair| Ok(u8::from_str_radix(pair, 16)?))
+                .and_then(|pair| u8::from_str_radix(pair, 16).map_err(Into::into))
         })
         .collect()
 }
 
 fn to_hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    bytes
+        .iter()
+        .flat_map(|byte| [HEX[usize::from(byte >> 4)], HEX[usize::from(byte & 0x0f)]])
+        .map(char::from)
+        .collect()
 }
 
 /// The members of an `MCS1 = ["MCS1", 1, [* [digest32, member]]]` composite, by digest.
@@ -116,7 +121,8 @@ fn oracle_outputs(oracle: &Json) -> Result<BTreeMap<String, Vec<u8>>, Box<dyn st
     oracle
         .pointer("/output/subcases")
         .and_then(Json::as_array)
-        .map_or_else(Vec::new, Clone::clone)
+        .cloned()
+        .unwrap_or_default()
         .iter()
         .map(|entry| Ok((text(entry, "id")?.to_owned(), hex(text(entry, "hex")?)?)))
         .collect()

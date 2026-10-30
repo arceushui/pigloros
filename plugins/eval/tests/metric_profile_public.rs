@@ -437,6 +437,7 @@ fn computed_none() -> Result<pos_plugin_eval::MetricResultV1, MetricFailureV1> {
 
 #[test]
 fn two_to_the_eighteen_records_compute_without_overflow() -> TestResult {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
     let records: Vec<MetricRecordV1> = (0..MAX_METRIC_RECORDS)
         .map(|index| MetricRecordV1 {
             prediction_id: format!("p{index:06}"),
@@ -462,7 +463,8 @@ fn two_to_the_eighteen_records_compute_without_overflow() -> TestResult {
     let hex: String = result
         .encode()
         .iter()
-        .map(|byte| format!("{byte:02x}"))
+        .flat_map(|byte| [HEX[usize::from(byte >> 4)], HEX[usize::from(byte & 0x0f)]])
+        .map(char::from)
         .collect();
     assert_eq!(hex, expected);
     Ok(())

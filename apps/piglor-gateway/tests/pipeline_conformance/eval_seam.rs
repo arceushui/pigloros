@@ -715,6 +715,7 @@ pub fn parse_legacy_history(bytes: &[u8]) -> Result<LegacyHistory, ConformanceEr
 /// every metric in integer micro-units (ADR-062 Revision 7), ending with the
 /// hex of its `MTR1` bytes.
 fn canonical_report(report: &CalibrationReport) -> Vec<String> {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
     let counts = report.result.counts;
     let mut lines = vec![
         format!("replay_claim={:?}", report.replay_claim),
@@ -766,7 +767,8 @@ fn canonical_report(report: &CalibrationReport) -> Vec<String> {
         .result
         .encode()
         .iter()
-        .map(|byte| format!("{byte:02x}"))
+        .flat_map(|byte| [HEX[usize::from(byte >> 4)], HEX[usize::from(byte & 0x0f)]])
+        .map(char::from)
         .collect();
     lines.push(format!("mtr1={mtr1}"));
     lines
