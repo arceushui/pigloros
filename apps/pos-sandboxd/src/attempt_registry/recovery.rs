@@ -64,14 +64,7 @@ impl RecoveredAttemptIntent {
         } else {
             None
         };
-        let root = if bytes.len() == ROOT_RECORD_SIZE {
-            let mut record = [0; ROOT_RECORD_SIZE];
-            record.copy_from_slice(bytes);
-            RootRecord::decode(&record, &planned).map(Some)
-        } else {
-            Ok(None)
-        };
-        root.map(|root| Self {
+        RootRecord::decode_extension(bytes, &planned).map(|root| Self {
             planned,
             directory_identities,
             root,
@@ -293,15 +286,10 @@ fn parse_content(
     temporary: bool,
 ) -> RegistryResult<Option<RecoveredAttemptIntent>> {
     let header = &bytes[..bytes.len().min(4)];
-    let size = if b"PAI1".starts_with(header) {
-        52
-    } else if b"PAI2".starts_with(header) {
-        84
-    } else if b"PAI3".starts_with(header) {
-        ROOT_RECORD_SIZE
-    } else {
-        return Err(SystemdAttemptRegistryError::InvalidIntent);
-    };
+    let size = [(b"PAI1", 52), (b"PAI2", 84), (b"PAI3", ROOT_RECORD_SIZE)]
+        .into_iter()
+        .find_map(|(tag, size)| tag.starts_with(header).then_some(size))
+        .ok_or(SystemdAttemptRegistryError::InvalidIntent)?;
     if bytes.len() > size || !temporary && bytes.len() != size {
         return Err(SystemdAttemptRegistryError::InvalidIntent);
     }

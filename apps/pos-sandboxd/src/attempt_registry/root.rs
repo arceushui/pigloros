@@ -57,6 +57,20 @@ impl RootRecord {
             .and_then(|()| Self::decode(&bytes, directory.intent()))
     }
 
+    /// Decode the root extension of a validated complete registry stage.
+    /// The caller has checked that stage's length and planned prefix.
+    pub(super) fn decode_extension(
+        bytes: &[u8],
+        intent: &PlannedAttemptIntent,
+    ) -> Result<Option<Self>, SystemdAttemptRegistryError> {
+        if bytes.len() != ROOT_RECORD_SIZE {
+            return Ok(None);
+        }
+        let mut record = [0; ROOT_RECORD_SIZE];
+        record.copy_from_slice(bytes);
+        Self::decode(&record, intent).map(Some)
+    }
+
     /// The caller has already checked the PAI3 stage, length and planned prefix.
     pub(super) fn decode(
         bytes: &[u8; ROOT_RECORD_SIZE],
