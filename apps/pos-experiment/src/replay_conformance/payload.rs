@@ -394,7 +394,7 @@ fn resolve(text: SubCaseTextV1, members: &MembersV1) -> Option<SubCaseV1> {
     } else {
         1
     };
-    let licence = member(text.closure.licence.as_deref(), members);
+    let licence = member(text.closure.licence.as_deref(), members).ok();
     let closure = closure(&text, members);
     let manifest = manifest(&text.manifest);
     let expected = stream(&text.expected_stream);
@@ -417,18 +417,24 @@ fn resolve(text: SubCaseTextV1, members: &MembersV1) -> Option<SubCaseV1> {
         })
 }
 
-/// The member `reference` names: `Some(None)` when there is no reference,
-/// `None` when the reference is not a digest of the composite.
-fn member<'a>(reference: Option<&str>, members: &'a MembersV1) -> Option<Option<&'a [u8]>> {
-    reference.map_or(Some(None), |reference| {
+/// A member reference that is not a digest of the composite.
+struct UnknownMemberV1;
+
+/// The member `reference` names: `Ok(None)` when there is no reference.
+fn member<'a>(
+    reference: Option<&str>,
+    members: &'a MembersV1,
+) -> Result<Option<&'a [u8]>, UnknownMemberV1> {
+    reference.map_or(Ok(None), |reference| {
         digest32(reference)
             .and_then(|digest| members.get(&digest))
             .map(|bytes| Some(bytes.as_slice()))
+            .ok_or(UnknownMemberV1)
     })
 }
 
 fn closure(text: &SubCaseTextV1, members: &MembersV1) -> Option<ClosureV1> {
-    let primary = member(text.closure.primary.as_deref(), members);
+    let primary = member(text.closure.primary.as_deref(), members).ok();
     match (text.class, &text.export_evaluation, text.ticks) {
         (ClassV1::RecordedReplay, Some(evaluation), None) => primary.and_then(|primary| {
             let digest = primary.map_or([0; 32], |bytes| *blake3::hash(bytes).as_bytes());
