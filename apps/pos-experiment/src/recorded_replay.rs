@@ -22,7 +22,12 @@
 //!    `ClosureIncomplete` at `artifact_closure`. A closure or provenance
 //!    error is `UnverifiableArtifactsMissing`, a profile error is
 //!    `IncompatibleProfile`, and every other code (encoding, digest, trust,
-//!    signature, revocation) is `InvalidManifest`.
+//!    signature, revocation) is `InvalidManifest`. The closure members bind
+//!    the request's `artifact_closure_digest` (slice R4, #1222): when the
+//!    composition of the export's artifact digest and the licence
+//!    ([`recorded_replay_closure_digest_v1`]) is not that digest, the closure
+//!    is refused at `artifact_closure` with `DigestMismatch`
+//!    (`InvalidManifest`), after any earlier preflight coordinate.
 //! 3. The reproducibility class must be `RecordedReplay`.
 //! 4. ADR-060 `ReplayClaim` degradation: the admitted claim is weakened by the
 //!    host-owned [`ReplayClaimEvaluationV1`], never strengthened. A weakened
@@ -58,10 +63,12 @@
 //! or upcaster chain. The digests follow the accepted `RecordedReplay`
 //! scheme documented in [`crate::verification_execution`]; Event payloads are
 //! compared as canonical bytes.
+//!
+//! [`preflight_verification_v1`]: pos_conformance::preflight_verification_v1
 
 use pos_conformance::{
-    preflight_verification_v1, ReplayClaimV1, ReproducibilityClassV1, SafeErrorCodeV1,
-    VerificationOutcomeV1, VerificationPreflightCoordinateV1, VerificationPreflightInputV1,
+    ReplayClaimV1, ReproducibilityClassV1, SafeErrorCodeV1, VerificationOutcomeV1,
+    VerificationPreflightCoordinateV1, VerificationPreflightInputV1,
 };
 use pos_core::{
     CoreError, ErasureArtifactClassV1, ErasureReferenceV1, ReplayClaimEvaluationV1, TimelineExport,
@@ -70,17 +77,16 @@ use pos_state::ProjectionRegistry;
 
 use crate::authoritative_comparison::AuthoritativeStreamV1;
 use crate::verification_execution::{
-    admit_class, authoritative_stream, event_count, incompatible, missing, preflight_refusal,
-    rebuild_projections, refuse_incomplete_closure, resource_limit_exceeded, Refusal, ResultHeader,
-    VerificationExecutionOutcomeV1,
+    admit_class, authoritative_stream, event_count, incompatible, missing, preflight_bound_closure,
+    rebuild_projections, recorded_replay_closure_digest_v1, refuse_incomplete_closure,
+    resource_limit_exceeded, Refusal, ResultHeader, VerificationExecutionOutcomeV1,
 };
 
 /// The exported Timeline member of a `RecordedReplay` closure.
 ///
-/// The host binds `artifact_digest` to the export's content and to the
-/// request's `artifact_closure_digest`; this step only checks that the
-/// ADR-060 evaluation admits that identity. The closure-digest binding is
-/// deferred to ADR-062 Revision 8 slice R4.
+/// The host binds `artifact_digest` to the export's content; this step checks
+/// that the ADR-060 evaluation admits that identity and that the digest,
+/// composed with the licence, is the request's `artifact_closure_digest`.
 #[derive(Clone, Copy, Debug)]
 pub struct ExportedTimelineMemberV1<'a> {
     /// The exported Timeline artifact.
@@ -144,12 +150,12 @@ pub fn execute_recorded_replay_v1(
         closure.licence,
         fixture_digest,
     );
-    let declared_claim = preflight.manifest.replay_claim;
     let resource_limit = preflight.manifest.resource_limit;
     let rebuilt = match (closure.timeline_export, closure.licence) {
         (Some(export), Some(licence)) if !licence.is_empty() => {
-            preflight_verification_v1(&preflight)
-                .map_err(|error| preflight_refusal(error, declared_claim))
+            let closure_digest =
+                recorded_replay_closure_digest_v1(export.artifact_digest.digest(), licence);
+            preflight_bound_closure(&preflight, closure_digest)
                 .and_then(|admitted| {
                     admit_class(admitted, &[ReproducibilityClassV1::RecordedReplay])
                 })

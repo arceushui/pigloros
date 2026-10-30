@@ -24,3 +24,14 @@ For the plugin-conformance layer: Publisher signature proves attribution only.
 
 For the plugin-conformance layer: results are Local-relaxation engineering
 evidence, not hosted conformance.
+
+For the replay-conformance layer: results are Local-relaxation engineering
+evidence, not hosted conformance; the subject adapter runs on the open fixture
+erasure gate.
+
+For the replay-conformance layer: the `replay-v1` and `live-local-v1`
+execution profiles are `deterministic-local-v1` restricted to one
+reproducibility class; the Draft authority declares neither.
+
+For the replay-conformance layer: only execution steps are metered; the other
+usage counters are reported as 0.

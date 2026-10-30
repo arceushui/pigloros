@@ -350,6 +350,71 @@ cmp -- "${rendered_metric_root}/oracle.json" \
 cmp -- "${rendered_metric_root}/evidence.json" \
   "${source_root}/expected/metric-conformance/malformed.json"
 
+# The replay provider's replay-cbor-v1 adapter (ADR-062 Revision 8 slice R4, #1222). Provider
+# contract 1.0.0 has no reader: a 1.0.0 declaration is rejected.
+replay_provider="providers/replay-conformance/provider.json"
+jq -e '.contract_version == "2.0.0" and .fixture_adapter == {id: "replay-cbor-v1", config: {}}' \
+  "${source_root}/${replay_provider}" >/dev/null
+if grep -rlF 'pigloros.fixture.replay-conformance@1.0.0' "${source_root}/inputs/replay-conformance" \
+  "${source_root}/providers/replay-conformance" "${source_root}/oracles/replay-conformance"; then
+  echo "a replay provider, input or oracle file still names provider contract 1.0.0" >&2
+  exit 1
+fi
+
+replay_old_contract_root="$(new_fixture_copy replay-old-contract-version)"
+replace_json "${replay_old_contract_root}/${replay_provider}" '.contract_version = "1.0.0"'
+expect_adapter_rejection "${replay_old_contract_root}" \
+  "invalid replay-cbor-v1 fixture adapter declaration"
+expect_rejection "${replay_old_contract_root}" \
+  "invalid replay-cbor-v1 fixture adapter declaration"
+
+replay_moved_composite_root="$(new_fixture_copy replay-moved-composite)"
+replace_json "${replay_moved_composite_root}/${replay_provider}" \
+  '.auxiliary.positive[0].path = "inputs/replay-conformance/elsewhere.rcs1"'
+expect_adapter_rejection "${replay_moved_composite_root}" \
+  "invalid replay-cbor-v1 fixture adapter declaration"
+
+replay_corrupt_composite_root="$(new_fixture_copy replay-corrupt-composite)"
+printf '\x00' | dd of="${replay_corrupt_composite_root}/inputs/replay-conformance/positive.rcs1" \
+  bs=1 seek=100 count=1 conv=notrunc status=none
+expect_adapter_rejection "${replay_corrupt_composite_root}" \
+  "auxiliary fixture member is not independently reproducible"
+
+replay_oracle_root="$(new_fixture_copy replay-edited-oracle)"
+sed -i 's/"outcome":"VerifiedExact"/"outcome":"Diverged"/' \
+  "${replay_oracle_root}/oracles/replay-conformance/positive.json"
+expect_adapter_rejection "${replay_oracle_root}" \
+  "oracle fixture is not independently reproducible: replay-conformance-positive"
+
+# A W8H1 entry put back to pending, or bound to another file's digest, is rejected.
+replay_pending_root="$(new_fixture_copy replay-pending-w8h1)"
+replace_json "${replay_pending_root}/expected-authority/inventory.json" \
+  '.entries[0].materialization_status = "pending"'
+expect_rejection "${replay_pending_root}" \
+  "invalid #172 expected-authority inventory lifecycle or entries"
+replay_rebound_root="$(new_fixture_copy replay-rebound-w8h1)"
+replace_json "${replay_rebound_root}/expected-authority/inventory.json" \
+  '.entries[0].fixture_bytes_digest = .entries[3].fixture_bytes_digest'
+expect_rejection "${replay_rebound_root}" "W8H1 entry RPL-001 does not bind"
+
+# `render` writes the payload, oracle, evidence-status record and composite of one family, and
+# they are the checked-in bytes.
+rendered_replay_root="${temporary_base}/rendered-replay-family"
+mkdir -p "${rendered_replay_root}/inputs/replay-conformance"
+bash scripts/conformance-fixture-adapters/replay-cbor-v1.sh render \
+  "${source_root}/${replay_provider}" "${source_root}/support/fixture-family-contract.json" \
+  replay-conformance-denied replay-conformance denied exported-artifact \
+  "${rendered_replay_root}/inputs/replay-conformance/denied.json" \
+  "${rendered_replay_root}/oracle.json" "${rendered_replay_root}/evidence.json"
+cmp -- "${rendered_replay_root}/inputs/replay-conformance/denied.json" \
+  "${source_root}/inputs/replay-conformance/denied.json"
+cmp -- "${rendered_replay_root}/inputs/replay-conformance/denied.rcs1" \
+  "${source_root}/inputs/replay-conformance/denied.rcs1"
+cmp -- "${rendered_replay_root}/oracle.json" \
+  "${source_root}/oracles/replay-conformance/denied.json"
+cmp -- "${rendered_replay_root}/evidence.json" \
+  "${source_root}/expected/replay-conformance/denied.json"
+
 publication_wrapper_prefix="${temporary_base}/publication-wrapper-prefix.sh"
 sed -n '1,/^first_fingerprint=/p' scripts/materialize-conformance-bundles.sh \
   >"${publication_wrapper_prefix}"

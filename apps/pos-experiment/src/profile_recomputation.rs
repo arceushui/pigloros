@@ -19,7 +19,12 @@
 //!    missing, the unchanged preflight runs with `Incomplete` closure
 //!    evidence, so the refusal is its own `ClosureIncomplete` at
 //!    `artifact_closure` (as for `RecordedReplay`).
-//! 2. The preflight; its first error becomes the result's first error.
+//! 2. The preflight; its first error becomes the result's first error. The
+//!    closure members bind the request's `artifact_closure_digest` (slice R4,
+//!    #1222): when the composition of the subject's artifact digest and the
+//!    licence ([`recomputation_closure_digest_v1`]) is not that digest, the
+//!    closure is refused at `artifact_closure` with `DigestMismatch`
+//!    (`InvalidManifest`), after any earlier preflight coordinate.
 //! 3. The reproducibility class: `ProfileRecomputation` or `LiveUnverified`
 //!    for a single run, `CrossProfileConformance` for each leg of a
 //!    cross-profile run. Any other class is `IncompatibleProfile` at
@@ -85,12 +90,14 @@
 //!
 //! The store configuration, wall clock and logging are operational: they are
 //! not inputs to the stream, so they cannot change the `VRR1`.
+//!
+//! [`preflight_verification_v1`]: pos_conformance::preflight_verification_v1
 
 use std::collections::HashMap;
 
 use pos_conformance::{
-    preflight_verification_v1, ExecutionProfileV1, ReproducibilityClassV1, SafeErrorCodeV1,
-    VerificationPreflightCoordinateV1, VerificationPreflightInputV1, VerificationPreflightResultV1,
+    ExecutionProfileV1, ReproducibilityClassV1, SafeErrorCodeV1, VerificationPreflightCoordinateV1,
+    VerificationPreflightInputV1, VerificationPreflightResultV1,
 };
 use pos_core::{CoreError, Event, StateRegistry, TimelineId};
 use pos_runtime::RuntimeError;
@@ -100,8 +107,9 @@ use pos_store::StoreConfig;
 use crate::authoritative_comparison::{
     AuthoritativeStreamV1, ComparedDriverOutputV1, DriverOutcomeV1, DriverOutputCoordinateV1,
 };
+pub use crate::verification_execution::recomputation_closure_digest_v1;
 use crate::verification_execution::{
-    admit_class, authoritative_stream, event_count, incompatible, preflight_refusal,
+    admit_class, authoritative_stream, event_count, incompatible, preflight_bound_closure,
     rebuild_projections, refuse_incomplete_closure, resource_limit_exceeded, Refusal, ResultHeader,
     VerificationExecutionOutcomeV1,
 };
@@ -323,8 +331,9 @@ pub trait RecomputationSubjectV1 {
 
 /// The subject member of a recomputation closure.
 ///
-/// The closure-digest binding of `artifact_digest` to the request's
-/// `artifact_closure_digest` is deferred to ADR-062 Revision 8 slice R4.
+/// `artifact_digest`, composed with the licence
+/// ([`recomputation_closure_digest_v1`]), must be the request's
+/// `artifact_closure_digest` (ADR-062 Revision 8 slice R4).
 #[derive(Clone, Copy)]
 pub struct RecomputationSubjectMemberV1<'a> {
     /// The frozen subject.
@@ -491,21 +500,25 @@ fn execute(
         fixture_digest,
     );
     let recomputed = match (closure.subject, closure.licence) {
-        (Some(member), Some(licence)) if !licence.is_empty() => admit(&preflight, leg)
+        (Some(member), Some(licence)) if !licence.is_empty() => admit(
+            &preflight,
+            recomputation_closure_digest_v1(member.artifact_digest, licence),
+            leg,
+        )
+        .map_err(Halt::Refused)
+        .and_then(|admitted| {
+            recompute(member, &preflight, admitted, store_config).map(|run| (admitted, run))
+        })
+        .and_then(|(admitted, run)| {
+            rebuild_projections(
+                projections,
+                admitted.replay_claim,
+                run.timeline,
+                &run.events,
+            )
             .map_err(Halt::Refused)
-            .and_then(|admitted| {
-                recompute(member, &preflight, admitted, store_config).map(|run| (admitted, run))
-            })
-            .and_then(|(admitted, run)| {
-                rebuild_projections(
-                    projections,
-                    admitted.replay_claim,
-                    run.timeline,
-                    &run.events,
-                )
-                .map_err(Halt::Refused)
-                .map(|snapshot| (admitted, run, snapshot))
-            }),
+            .map(|snapshot| (admitted, run, snapshot))
+        }),
         _ => Err(Halt::Refused(refuse_incomplete_closure(preflight))),
     };
     match recomputed {
@@ -526,11 +539,10 @@ fn execute(
 
 fn admit(
     preflight: &VerificationPreflightInputV1<'_>,
+    closure_digest: [u8; 32],
     leg: &Leg,
 ) -> Result<VerificationPreflightResultV1, Refusal> {
-    let declared_claim = preflight.manifest.replay_claim;
-    preflight_verification_v1(preflight)
-        .map_err(|error| preflight_refusal(error, declared_claim))
+    preflight_bound_closure(preflight, closure_digest)
         .and_then(|admitted| admit_class(admitted, leg.classes))
         .and_then(|admitted| {
             if leg

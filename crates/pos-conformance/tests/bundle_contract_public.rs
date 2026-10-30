@@ -5317,9 +5317,11 @@ fn independent_verifier_rejects_archive_authority_structure_mutations() -> TestR
     })?;
     assert_archive_rejected_by_both(&invalid_matrix, "noncanonical execution matrix");
 
+    // ADR-062 Revision 8 slice R4 materialized every W8H1 entry; an entry put back to
+    // `pending` is not the canonical inventory.
     let mut inventory: serde_json::Value = serde_json::from_slice(AUTHORITY_INVENTORY_BYTES)?;
     inventory["entries"][0]["materialization_status"] =
-        serde_json::Value::String("materialized".to_owned());
+        serde_json::Value::String("pending".to_owned());
     let inventory_bytes = serde_json::to_vec_pretty(&inventory)?;
     let invalid_inventory = mutate_archive(|archive| {
         replace_archive_member_bytes(

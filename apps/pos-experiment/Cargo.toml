@@ -7,7 +7,10 @@ license.workspace = true
 publish.workspace = true
 
 [features]
-test-support = ["pos-runtime/test-support"]
+# Also compiles the replay-conformance subject adapter (`replay_conformance`, the
+# binary's EAI1/EAO1 entry): it runs on the open fixture erasure gate and the
+# generated Plugin registration of the Experiment host.
+test-support = ["pos-core/test-support", "pos-runtime/test-support"]
 
 [dependencies]
 pos-core = { path = "../../crates/pos-core" }
@@ -23,7 +26,9 @@ pos-plugin-eval = { path = "../../plugins/eval" }
 pos-plugin-society = { path = "../../plugins/society" }
 pos-plugin-world = { path = "../../plugins/world" }
 blake3 = { workspace = true }
+ciborium = { workspace = true }
 serde = { workspace = true }
+serde_bytes = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 ulid = { workspace = true }
@@ -57,6 +62,10 @@ required-features = ["test-support"]
 
 [[test]]
 name = "profile_recomputation"
+required-features = ["test-support"]
+
+[[test]]
+name = "replay_conformance_adapter"
 required-features = ["test-support"]
 
 [[test]]

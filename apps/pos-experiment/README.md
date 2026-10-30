@@ -7,6 +7,24 @@ SQLite file; live concurrent commands must share one erasure host.
 Human action submission additionally requires a host-bound Gateway authority adapter
 and World body catalogue.
 
+## Replay-conformance subject adapter
+
+The `pos-experiment` binary is the replay-conformance subject adapter of ADR-062
+Revision 8 slice R4 (#1222). It reads one EAI1 attempt from standard input and
+writes one EAO1 observation to standard output (the `pos-reference` codec), or
+writes nothing and exits with code 2 (wire fault), 3 (not executed: a schema
+member other than provider contract 2.0.0, or no `RCS1` composite) or 4 (the
+output could not be written). The logic is `pos_experiment::replay_conformance`.
+It runs each sub-case of the payload through the `RecordedReplay` and
+`ProfileRecomputation` / `CrossProfileConformance` execution steps and compares
+the `VRR1` of every leg with the sub-case's expected legs.
+
+The adapter is compiled only with the `test-support` feature (it runs on the
+open fixture erasure gate and the generated Plugin registration); without it the
+binary exits with a failure. Results are Local-relaxation engineering evidence,
+not hosted conformance. The fixtures are `fixtures/conformance` layer
+`replay-conformance`, written by `scripts/generate_replay_conformance_fixtures.py`.
+
 ## Sequential SQLite multi-rate demo
 
 Start the local-only Gateway with an explicit SQLite file:
