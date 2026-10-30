@@ -4,7 +4,7 @@
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod cases {
     use super::super::*;
-    use crate::attempt_registry::{root_record_fixture, with_io_fault};
+    use crate::test_fixtures::{root_record_fixture, with_io_fault};
     use crate::SystemdAttemptRecovery;
 
     #[tokio::test]

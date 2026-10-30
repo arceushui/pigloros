@@ -9,7 +9,7 @@ use super::{
     directory::{PreparedAttemptDirectory, DIRECTORY_RECORD_SIZE},
     PlannedAttemptIntent, SystemdAttemptRegistryError,
 };
-use crate::{transient_unit::attempt_root_path, RootResourceIdentity};
+use crate::{ActivatedRootDirectory, RootResourceIdentity};
 
 const VALUES_END: usize = DIRECTORY_RECORD_SIZE + 12 * 8;
 const PATH_END: usize = VALUES_END + 68;
@@ -73,7 +73,7 @@ impl RootRecord {
         }
         let [mount_id, root_major, root_minor, root_inode, _, image_inode, mapper_major, mapper_minor, mapper_sequence, loop_major, loop_minor, loop_sequence] =
             values;
-        let root = attempt_root_path(intent.unit_name().attempt_component());
+        let root = ActivatedRootDirectory::path_for_attempt(intent.unit_name().attempt_component());
         if [
             mount_id,
             root_inode,

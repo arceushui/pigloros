@@ -335,4 +335,6 @@ fn attach_and_verify<K: AttachmentKernel>(
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
-pub(super) mod tests;
+mod tests;
+#[cfg(test)]
+pub use tests::recorded_identity;

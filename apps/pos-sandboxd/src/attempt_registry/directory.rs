@@ -657,7 +657,7 @@ mod tests {
         for fault in 0..4 {
             let (_runtime, registry) = fixture()?;
             let prepared = registry.commit_planned(&intent(1)?)?.prepare_directory()?;
-            let identity = crate::root_attachment::tests::recorded_identity(&prepared)?;
+            let identity = crate::test_fixtures::recorded_identity(&prepared)?;
             match fault {
                 0 => registry.state.lock().map_err(|_| "owner")?.failed = true,
                 1 => registry.state.lock().map_err(|_| "owner")?.next_sequence = u64::MAX,
