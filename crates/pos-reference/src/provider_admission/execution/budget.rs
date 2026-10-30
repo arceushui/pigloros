@@ -35,7 +35,7 @@ pub struct StagingUsage {
     pub queued_inputs: u64,
     /// Live attempts, including retained output reservations.
     pub attempts: u64,
-    /// Failed unlink operations; any nonzero value permanently closes admission.
+    /// Unverified file cleanup; any nonzero value permanently closes admission.
     pub leaked_files: u64,
     /// Current control floor.
     pub floor: ControlFloor,

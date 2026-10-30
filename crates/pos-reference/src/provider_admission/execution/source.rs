@@ -1143,12 +1143,29 @@ mod tests {
         use super::super::staging::StagingDirectory;
         use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 
+        #[derive(Clone, Copy, Debug)]
+        enum Replacement {
+            Directory,
+            RegularFile,
+            SymbolicLink,
+            HardLink,
+        }
+
         if !isolated("residual_cleanup_closes_new_sources_and_grants_even_during_signing")? {
             return Ok(());
         }
 
         let staged = StagedInstallation::stage_execution()?;
-        for during_signing in [false, true] {
+        for (during_signing, replacement) in [
+            (false, Replacement::Directory),
+            (true, Replacement::Directory),
+            (false, Replacement::RegularFile),
+            (true, Replacement::RegularFile),
+            (false, Replacement::SymbolicLink),
+            (true, Replacement::SymbolicLink),
+            (false, Replacement::HardLink),
+            (true, Replacement::HardLink),
+        ] {
             let ledger = StagingLedger::new(super::super::StagingLimits {
                 aggregate_bytes: 512 * 1024 * 1024,
             });
@@ -1165,8 +1182,20 @@ mod tests {
             std::fs::write(&leaf, b"retained owned bytes")?;
             let fail_cleanup = || -> io::Result<()> {
                 std::fs::rename(&leaf, &residual)?;
-                std::fs::create_dir(&leaf)?;
+                match replacement {
+                    Replacement::Directory => std::fs::create_dir(&leaf)?,
+                    Replacement::RegularFile => std::fs::write(&leaf, b"foreign bytes")?,
+                    Replacement::SymbolicLink => std::os::unix::fs::symlink(&residual, &leaf)?,
+                    Replacement::HardLink => std::fs::hard_link(&residual, &leaf)?,
+                }
+                let before = std::fs::symlink_metadata(&leaf)?;
                 drop(input);
+                let after = std::fs::symlink_metadata(&leaf)?;
+                assert_eq!(
+                    (after.dev(), after.ino()),
+                    (before.dev(), before.ino()),
+                    "cleanup must preserve {replacement:?}, during_signing={during_signing}"
+                );
                 Ok(())
             };
             let result = if during_signing {
