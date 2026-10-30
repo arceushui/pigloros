@@ -29,6 +29,11 @@ fixture sub-cases.
    Additive fixture cases that do not change the expected result of any existing case create a
    **minor** version. Changes to wording only, with no byte changes, create a **patch**.
 
+   The first normative content that replaces a Draft placeholder (item 4) keeps
+   `semantic_version` 1.0.0, because there is no earlier expected behaviour for it to change.
+   After that, any change to the expected behaviour of a case, including a change to a rule of
+   section 4.6, creates a new major version as listed above.
+
    Records carry a numeric schema version (`1`). An unknown magic, version, algorithm ID or
    algorithm major is `UnsupportedVersion` or `UnsupportedAlgorithm`. There are no upcasters,
    aliases or fallbacks. Results stay bound to the `MTI1` digest, the `MTR1` digest and the CPF1
@@ -272,6 +277,7 @@ then records in order, with fields in index order inside each record. The first 
    - truncated items;
    - missing or trailing fields: a root that is not an array of exactly 8 fields, a `records`
      field that is not an array, or a record that is not an array of exactly 6 fields;
+   - an array nested deeper than 16 levels (G10);
    - trailing bytes after the root item.
 
    The structural pass reads the records array head but keeps no record. It does not compare
@@ -292,8 +298,8 @@ then records in order, with fields in index order inside each record. The first 
    - `probability_micros`: `InvalidProbability`;
    - `outcome_state`, `outcome` and `predictor_supplied`: `InvalidOutcome`.
 
-The following points fill gaps that sections 4.2 and 4.4 leave open. The fixtures pin them,
-and they are recorded for the profile owner's confirmation:
+The following points fill gaps that sections 4.2 and 4.4 leave open. The profile owner
+confirmed them as normative on 2026-10-30, and the fixtures pin them:
 
 - **G1. Identifier UTF-8.** Invalid UTF-8 in an identifier is `InvalidIdentifier` (section 5,
   `mal.11`), not a structural `InvalidEncoding`. It is checked when that field is read.
@@ -319,6 +325,26 @@ and they are recorded for the profile owner's confirmation:
   (`[MetricErrorV1]`), so it cannot be confused with an unsigned result.
 - **G9. `MTR1` acceptance.** A result whose magic or version differs is `UnsupportedVersion`.
   One whose algorithm id or algorithm major differs is `UnsupportedAlgorithm`, at that field.
+- **G10. Nesting depth.** The root array is level 1, a header field level 2, a record level 3
+  and a record field level 4. An array nested deeper than 16 levels is `InvalidEncoding` at
+  the coordinate of the over-deep array (the first array at level 17), found by the structural
+  pass. An array at level 16 passes the structural pass; it is then a field of the wrong type
+  (G2). Every well-formed public record nests at most 3 levels, so the cap bounds only the walk
+  of malformed input (`mal.14a`, `mal.14b`).
+- **G11. `MTQ1` shape.** The `MTQ1` fields are named `magic`, `version` and `patterns`, and a
+  pattern is `patterns/<i>`. The decode order is the one above: structure (a root that is not
+  an array of exactly 3 fields, or a `patterns` field that is not an array, is
+  `InvalidEncoding`), then `magic` and `version` (`UnsupportedVersion`), then `patterns`, then
+  each pattern in index order:
+  - a `patterns` field that is not an array, or an empty `patterns` array, is
+    `InvalidEncoding` at `patterns`;
+  - more than 4,096 patterns is `ResourceLimit` at `patterns`;
+  - an entry that is not an unsigned integer is `InvalidEncoding` at `patterns/<i>`.
+
+  (`mal.16a` to `mal.16d`.)
+- **G12. Header text UTF-8.** Invalid UTF-8 in a header text field is that field's failure,
+  not a structural `InvalidEncoding`: in `magic` it is `UnsupportedVersion` and in
+  `algorithm_id` it is `UnsupportedAlgorithm`, at that field (`mal.15a`, `mal.15b`).
 
 ## 4.7 CDDL
 
@@ -434,7 +460,10 @@ budget or contract failure). Every family is materialized for both `deterministi
 - **denied**: `den.1` a capability other than `read-public-bundle`; `den.2` network use.
 - **malformed**: `mal.1a` to `mal.12b`, and `mal.13a` to `mal.13i`, which have several defects
   each and pin the precedence and first coordinate. Structural defects come before header
-  failures, record failures and trailing bytes.
+  failures, record failures and trailing bytes. `mal.14a` and `mal.14b` nest arrays 16 and 17
+  levels deep (G10); `mal.15a` and `mal.15b` carry invalid UTF-8 in `magic` and `algorithm_id`
+  (G12); `mal.16a` to `mal.16d` are `MTQ1` inputs whose `patterns` is not an array, is empty,
+  holds a text entry or holds 4,097 entries (G11).
 - **resource-exhaustion**: `res.1` declared `record_count` 262,145; `res.2` an `MTI1` member of
   64 MiB + 1 byte, described by its length and rejected by the #222 transport
   (`FieldOutOfBounds`) without being stored in the repository; `res.3` the execution-step
