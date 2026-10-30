@@ -463,3 +463,31 @@ fn digest_size(value: &DigestSizeV1) -> DigestSizeRecordV1 {
         size: value.size,
     }
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+
+    /// The subject's Plugin and Driver are named `replay-subject`; nothing
+    /// in a `VRR1` carries the name, so it is pinned here.
+    #[test]
+    fn the_subject_plugin_and_driver_carry_the_subject_name() {
+        let plugin = SubjectPlugin {
+            id: PluginId::new(),
+            event_type: Kind::new("replay.count"),
+        };
+        assert_eq!(plugin.name(), SUBJECT_PLUGIN);
+        let driver = ScriptDriver {
+            script: ScriptV1 {
+                entity: pos_core::ids::EntityId::new(),
+                event_type: "replay.count".to_owned(),
+                drafts: Vec::new(),
+                failure: None,
+            },
+            tick: 0,
+        };
+        assert_eq!(driver.name(), SUBJECT_PLUGIN);
+        assert_eq!(SUBJECT_PLUGIN, "replay-subject");
+    }
+}

@@ -12,6 +12,12 @@ publish.workspace = true
 # generated Plugin registration of the Experiment host.
 test-support = ["pos-core/test-support", "pos-runtime/test-support"]
 
+# The replay-conformance subject adapter; it is compiled only with `test-support`.
+[[bin]]
+name = "pos-experiment"
+path = "src/main.rs"
+required-features = ["test-support"]
+
 [dependencies]
 pos-core = { path = "../../crates/pos-core" }
 pos-crypto = { path = "../../crates/pos-crypto" }

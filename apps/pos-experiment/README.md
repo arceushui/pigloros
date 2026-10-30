@@ -19,9 +19,9 @@ It runs each sub-case of the payload through the `RecordedReplay` and
 `ProfileRecomputation` / `CrossProfileConformance` execution steps and compares
 the `VRR1` of every leg with the sub-case's expected legs.
 
-The adapter is compiled only with the `test-support` feature (it runs on the
-open fixture erasure gate and the generated Plugin registration); without it the
-binary exits with a failure. Results are Local-relaxation engineering evidence,
+The adapter and the binary are compiled only with the `test-support` feature
+(it runs on the open fixture erasure gate and the generated Plugin
+registration): `cargo build -p pos-experiment --features test-support`. Results are Local-relaxation engineering evidence,
 not hosted conformance. The fixtures are `fixtures/conformance` layer
 `replay-conformance`, written by `scripts/generate_replay_conformance_fixtures.py`.
 
