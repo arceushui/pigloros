@@ -217,9 +217,10 @@ impl Driver for ScriptDriver {
             }
         }
         match self.script {
-            Script::Count => Ok(StepOutput::new(vec![self.draft(self.tick)])),
             Script::DeniedSecret if self.tick > 1 => Err(secret_denied()),
-            Script::DeniedSecret => Ok(StepOutput::new(vec![self.draft(self.tick)])),
+            Script::Count | Script::DeniedSecret => {
+                Ok(StepOutput::new(vec![self.draft(self.tick)]))
+            }
             Script::Burst => Ok(StepOutput::new(vec![
                 self.draft(1),
                 self.draft(2),
