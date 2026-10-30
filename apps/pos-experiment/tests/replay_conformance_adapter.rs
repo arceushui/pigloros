@@ -721,9 +721,9 @@ fn a_host_that_cannot_start_makes_the_attempt_unavailable() -> TestResult {
 fn a_present_but_empty_licence_is_refused_at_closure_presence() -> TestResult {
     use ciborium::value::Value as Cbor;
     let base = attempt(FixtureFamily::Positive, ExecutionMode::Local)?;
-    let composite: Cbor =
+    let checked_in: Cbor =
         ciborium::from_reader(read("inputs/replay-conformance/positive.rcs1")?.as_slice())?;
-    let Cbor::Array(fields) = composite else {
+    let Cbor::Array(fields) = checked_in else {
         return Err("the composite is an array".into());
     };
     let Some(Cbor::Array(entries)) = fields.get(2) else {
