@@ -299,8 +299,8 @@ fn persona_sources_are_derived_by_eval_in_a_later_pass_exactly_once() {
             &report_claim(),
         )
         .test_ok();
-        assert_eq!(report.n_resolved, 5, "{name}");
-        assert_eq!(report.n_predictor_supplied, 5, "{name}");
+        assert_eq!(report.result.counts.scored, 5, "{name}");
+        assert_eq!(report.result.counts.predictor_supplied, 5, "{name}");
         for outcome in of_type(&committed, EVENT_TYPE_OUTCOME) {
             let payload: OutcomePayload =
                 ciborium::from_reader(outcome.payload.as_slice()).test_ok();
@@ -336,9 +336,9 @@ fn a_legacy_persona_emitted_eval_timeline_folds_and_reports_unchanged() {
         let legacy = events(store.as_ref(), timeline);
         let digest = ErasureReferenceV1::from_digest([221; 32]);
         let before = compute_report_from_events(&legacy, digest, &report_claim()).test_ok();
-        assert_eq!(before.n_predictions, 3, "{name}");
-        assert_eq!(before.n_resolved, 2, "{name}");
-        assert_eq!(before.n_predictor_supplied, 0, "{name}");
+        assert_eq!(before.result.counts.record_count, 3, "{name}");
+        assert_eq!(before.result.counts.scored, 2, "{name}");
+        assert_eq!(before.result.counts.predictor_supplied, 0, "{name}");
 
         // The new composition folds the legacy records into Eval's reducer.
         let token = persona_token(&authority, timeline, entity);

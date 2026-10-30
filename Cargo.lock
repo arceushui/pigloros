@@ -5692,6 +5692,7 @@ dependencies = [
 name = "pos-plugin-eval"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "ciborium",
  "pos-core",
  "pos-plugin-persona",

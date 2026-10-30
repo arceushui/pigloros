@@ -340,7 +340,7 @@ impl PipelineEvaluatorV1 for CalibrationReportEvaluatorV1 {
             self.artifact_digest,
             input.claim(),
         ) {
-            Ok(report) if report.n_resolved > 0 => {
+            Ok(report) if report.result.counts.scored > 0 => {
                 PipelineEvaluatorOutputV1::CalibrationReport(Box::new(report))
             }
             Err(pos_plugin_eval::EvalError::ArtifactUnavailable) => {

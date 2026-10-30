@@ -254,8 +254,11 @@ port refusals and pre-commit refusals) runs on the probe worker in
 Legacy `eval.prediction` and `eval.outcome` Events in the form the
 pre-ADR-024-Revision-1 Persona composition emitted them: no causation,
 `pred-<n>` ids and no outcome label. `expected_report` is the canonical text of
-their Calibration Report: one field per line, floats in shortest round-trip
-form. The values are exact binary fractions computed by hand from the Events.
+their Calibration Report: one field per line, every metric in integer
+micro-units (ADR-062 Revision 7), ending with the hex of its `MTR1` bytes. The
+values and bytes were computed with exact fractions by
+`scripts/generate_metric_conformance_fixtures.py` from the `MTI1` of these
+Events.
 
 These files are not part of the CPF1 bundle inventories (`SHA256SUMS`,
 `BLAKE3SUMS`) and are not materialized into Draft bundles.
