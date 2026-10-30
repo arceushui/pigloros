@@ -36,7 +36,7 @@ fn the_key_id_is_the_blake3_digest_of_the_verifying_key() {
 fn a_signed_envelope_round_trips_canonically_and_verifies() -> TestResult {
     let signer = key(7);
     let envelope = DsseEnvelopeV1::sign(IN_TOTO_PAYLOAD_TYPE_V1, b"{\"a\":1}".to_vec(), &signer);
-    let bytes = envelope.to_json();
+    let bytes = envelope.to_canonical_json();
     let expected_signature =
         ed25519_dalek::Signer::sign(&signer, &pae_v1(IN_TOTO_PAYLOAD_TYPE_V1, b"{\"a\":1}"))
             .to_bytes();
@@ -55,9 +55,9 @@ fn a_signed_envelope_round_trips_canonically_and_verifies() -> TestResult {
     );
     assert_eq!(String::from_utf8(bytes.clone())?, expected);
 
-    let parsed = DsseEnvelopeV1::from_json(&bytes, BOUND)?;
+    let parsed = DsseEnvelopeV1::from_canonical_json(&bytes, BOUND)?;
     assert_eq!(parsed, envelope);
-    assert_eq!(parsed.to_json(), bytes);
+    assert_eq!(parsed.to_canonical_json(), bytes);
     assert!(parsed.has_payload_type(IN_TOTO_PAYLOAD_TYPE_V1));
     assert!(!parsed.has_payload_type("application/json"));
     assert_eq!(parsed.payload(), b"{\"a\":1}");
@@ -68,22 +68,24 @@ fn a_signed_envelope_round_trips_canonically_and_verifies() -> TestResult {
 
 #[test]
 fn the_bound_is_checked_before_parsing_and_is_inclusive() {
-    let bytes = DsseEnvelopeV1::sign(IN_TOTO_PAYLOAD_TYPE_V1, b"x".to_vec(), &key(7)).to_json();
-    assert!(DsseEnvelopeV1::from_json(&bytes, bytes.len()).is_ok());
+    let bytes =
+        DsseEnvelopeV1::sign(IN_TOTO_PAYLOAD_TYPE_V1, b"x".to_vec(), &key(7)).to_canonical_json();
+    assert!(DsseEnvelopeV1::from_canonical_json(&bytes, bytes.len()).is_ok());
     assert_eq!(
-        DsseEnvelopeV1::from_json(&bytes, bytes.len() - 1),
+        DsseEnvelopeV1::from_canonical_json(&bytes, bytes.len() - 1),
         Err(DsseParseErrorV1::Oversized)
     );
     // Not even JSON: refused by length alone.
     assert_eq!(
-        DsseEnvelopeV1::from_json(&[0xff; 9], 8),
+        DsseEnvelopeV1::from_canonical_json(&[0xff; 9], 8),
         Err(DsseParseErrorV1::Oversized)
     );
 }
 
 #[test]
 fn non_canonical_or_non_single_signature_envelopes_are_malformed() -> TestResult {
-    let bytes = DsseEnvelopeV1::sign(IN_TOTO_PAYLOAD_TYPE_V1, b"x".to_vec(), &key(7)).to_json();
+    let bytes =
+        DsseEnvelopeV1::sign(IN_TOTO_PAYLOAD_TYPE_V1, b"x".to_vec(), &key(7)).to_canonical_json();
     let text = String::from_utf8(bytes)?;
     let value: serde_json::Value = serde_json::from_str(&text)?;
     let signature = value["signatures"][0].clone();
@@ -114,7 +116,7 @@ fn non_canonical_or_non_single_signature_envelopes_are_malformed() -> TestResult
     ];
     for envelope in refused {
         assert_eq!(
-            DsseEnvelopeV1::from_json(envelope.as_bytes(), BOUND),
+            DsseEnvelopeV1::from_canonical_json(envelope.as_bytes(), BOUND),
             Err(DsseParseErrorV1::Malformed),
             "{envelope}"
         );
@@ -130,15 +132,16 @@ fn verification_refuses_a_foreign_key_and_a_bad_signature() -> TestResult {
         envelope.verify(&key(8).verifying_key()),
         Err(DsseSignatureErrorV1::KeyIdMismatch)
     );
-    let other = DsseEnvelopeV1::sign(IN_TOTO_PAYLOAD_TYPE_V1, b"y".to_vec(), &signer).to_json();
-    let text = String::from_utf8(envelope.to_json())?;
+    let other =
+        DsseEnvelopeV1::sign(IN_TOTO_PAYLOAD_TYPE_V1, b"y".to_vec(), &signer).to_canonical_json();
+    let text = String::from_utf8(envelope.to_canonical_json())?;
     let other: serde_json::Value = serde_json::from_slice(&other)?;
     let value: serde_json::Value = serde_json::from_str(&text)?;
     let swapped = text.replace(
         value["signatures"][0]["sig"].as_str().ok_or("sig")?,
         other["signatures"][0]["sig"].as_str().ok_or("sig")?,
     );
-    let forged = DsseEnvelopeV1::from_json(swapped.as_bytes(), BOUND)?;
+    let forged = DsseEnvelopeV1::from_canonical_json(swapped.as_bytes(), BOUND)?;
     assert_eq!(
         forged.verify(&signer.verifying_key()),
         Err(DsseSignatureErrorV1::InvalidSignature)

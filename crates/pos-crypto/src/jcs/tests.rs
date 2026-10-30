@@ -1,9 +1,13 @@
 use super::*;
 
+fn number(value: u64) -> JsonV1 {
+    JsonIntegerV1::new(value).map_or(JsonV1::Null, JsonV1::Number)
+}
+
 #[test]
 fn objects_sort_their_keys_and_nest() {
-    let inner = JsonV1::object([("z", JsonV1::text("x")), ("y", JsonV1::Number(18))]);
-    let list = JsonV1::Array(vec![JsonV1::Number(0), JsonV1::Bool(false)]);
+    let inner = JsonV1::object([("z", JsonV1::text("x")), ("y", number(18))]);
+    let list = JsonV1::Array(vec![number(0), JsonV1::Bool(false)]);
     let value = JsonV1::object([("b", JsonV1::Bool(true)), ("a", list), ("B", inner)]);
     assert_eq!(
         value.canonical(),
@@ -15,10 +19,7 @@ fn objects_sort_their_keys_and_nest() {
 fn the_line_ends_with_one_lf_and_empty_containers_are_compact() {
     assert_eq!(JsonV1::Array(Vec::new()).line(), b"[]\n");
     assert_eq!(JsonV1::Object(Vec::new()).line(), b"{}\n");
-    assert_eq!(
-        JsonV1::Number(u64::MAX).canonical(),
-        b"18446744073709551615"
-    );
+    assert_eq!(number(JsonIntegerV1::MAX).canonical(), b"9007199254740992");
 }
 
 #[test]
@@ -57,7 +58,7 @@ fn the_reader_accepts_exactly_the_canonical_encoding() {
                     JsonV1::Null,
                     JsonV1::Bool(true),
                     JsonV1::Bool(false),
-                    JsonV1::Number(7),
+                    number(7),
                     JsonV1::text("x"),
                 ]),
             ),
@@ -100,4 +101,27 @@ fn members_arrays_text_and_booleans_are_read_closed() {
     assert_eq!(JsonV1::Null.into_text(), None);
     assert_eq!(JsonV1::Bool(true).as_bool(), Some(true));
     assert_eq!(JsonV1::Null.as_bool(), None);
+}
+
+#[test]
+fn integers_above_two_to_the_53_are_refused_by_the_writer_and_the_reader() {
+    assert_eq!(JsonIntegerV1::MAX, 1 << 53);
+    assert_eq!(
+        JsonIntegerV1::new(JsonIntegerV1::MAX).map(JsonIntegerV1::get),
+        Ok(JsonIntegerV1::MAX)
+    );
+    for above in [JsonIntegerV1::MAX + 1, u64::MAX] {
+        assert_eq!(JsonIntegerV1::new(above), Err(JsonIntegerRangeErrorV1));
+    }
+    assert_eq!(
+        JsonIntegerRangeErrorV1.to_string(),
+        "JSON integer is above 2^53"
+    );
+    assert_eq!(
+        JsonV1::parse_canonical(b"[9007199254740992]"),
+        Some(JsonV1::Array(vec![number(JsonIntegerV1::MAX)]))
+    );
+    for refused in [&b"[9007199254740993]"[..], b"[18446744073709551615]"] {
+        assert_eq!(JsonV1::parse_canonical(refused), None);
+    }
 }

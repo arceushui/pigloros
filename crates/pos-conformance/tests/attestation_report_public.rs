@@ -4,9 +4,10 @@
 //! owner decisions of `ADR-062_R8_Report_Attestation_Binding` (split trust steps, subjects bound
 //! to their CNR1 fields).
 //!
-//! The file name sorts before the slow `bundle_contract_*` suites, so `cargo test` (and the
-//! diff-mutation job, whose test phase is bounded) reaches these tests within seconds; they are
-//! the only tests that kill mutants of `report_attestation.rs`.
+//! The file name only places this suite before the slow `bundle_contract_*` suites in
+//! `cargo test`'s alphabetical order. That is incidental: it keeps the bounded test phase of the
+//! diff-mutation job from being spent in those pre-existing suites before it reaches the only
+//! tests that kill mutants of `report_attestation.rs`, but it does not make them faster.
 
 pub mod support;
 
@@ -285,7 +286,7 @@ fn signed(cnr1: &[u8]) -> TestResult<Vec<u8>> {
 }
 
 fn statement_of(envelope: &[u8]) -> TestResult<Value> {
-    let envelope = DsseEnvelopeV1::from_json(envelope, MAX_REPORT_ATTESTATION_BYTES_V1)?;
+    let envelope = DsseEnvelopeV1::from_canonical_json(envelope, MAX_REPORT_ATTESTATION_BYTES_V1)?;
     Ok(serde_json::from_slice(envelope.payload())?)
 }
 
@@ -294,7 +295,7 @@ fn resigned(statement: &Value) -> TestResult<Vec<u8>> {
     let payload = JsonV1::from_json_value(statement.clone())
         .ok_or("the edited Statement is JSON")?
         .canonical();
-    Ok(DsseEnvelopeV1::sign(IN_TOTO_PAYLOAD_TYPE_V1, payload, &signer()).to_json())
+    Ok(DsseEnvelopeV1::sign(IN_TOTO_PAYLOAD_TYPE_V1, payload, &signer()).to_canonical_json())
 }
 
 fn verify(envelope: &[u8]) -> TestResult<Result<SignatureMeaningV1, Error>> {
@@ -345,11 +346,11 @@ fn golden_statement_predicate_and_envelope_round_trip_canonically() -> TestResul
 
     let trust = TrustDouble::admitting(&signer());
     let envelope = sign_report_attestation_v1(&cnr1, artifacts, Some([42; 32]), &signer())?;
-    let parsed = DsseEnvelopeV1::from_json(&envelope, MAX_REPORT_ATTESTATION_BYTES_V1)?;
+    let parsed = DsseEnvelopeV1::from_canonical_json(&envelope, MAX_REPORT_ATTESTATION_BYTES_V1)?;
     assert_eq!(std::str::from_utf8(parsed.payload())?, golden_statement);
     assert!(parsed.has_payload_type(IN_TOTO_PAYLOAD_TYPE_V1));
     assert_eq!(parsed.verify(&signer().verifying_key()), Ok(()));
-    assert_eq!(parsed.to_json(), envelope);
+    assert_eq!(parsed.to_canonical_json(), envelope);
     assert_eq!(
         JsonV1::parse_canonical(parsed.payload()).map(|value| value.canonical()),
         Some(parsed.payload().to_vec())
@@ -469,14 +470,16 @@ fn oversized_or_malformed_input_is_refused_at_bounded_parse() -> TestResult {
 fn a_foreign_payload_type_is_refused_before_key_admission() -> TestResult {
     let artifacts = artifacts()?;
     let envelope = signed(&passing_cnr1()?)?;
-    let statement = DsseEnvelopeV1::from_json(&envelope, MAX_REPORT_ATTESTATION_BYTES_V1)?
-        .payload()
-        .to_vec();
+    let statement =
+        DsseEnvelopeV1::from_canonical_json(&envelope, MAX_REPORT_ATTESTATION_BYTES_V1)?
+            .payload()
+            .to_vec();
     let edited = String::from_utf8(envelope)?.replace(
         "\"payloadType\":\"application/vnd.in-toto+json\"",
         "\"payloadType\":\"application/vnd.in-toto+jsom\"",
     );
-    let resigned_type = DsseEnvelopeV1::sign("application/json", statement, &signer()).to_json();
+    let resigned_type =
+        DsseEnvelopeV1::sign("application/json", statement, &signer()).to_canonical_json();
     let trust = TrustDouble::admitting(&signer());
     for envelope in [edited.into_bytes(), resigned_type] {
         assert_eq!(
@@ -669,7 +672,10 @@ fn every_statement_and_predicate_shape_violation_is_refused() -> TestResult {
 fn a_payload_that_is_not_canonical_json_fails_the_shape_step() -> TestResult {
     for payload in [&b"not JSON"[..], b"{\"_type\": 1}"] {
         let envelope = DsseEnvelopeV1::sign(IN_TOTO_PAYLOAD_TYPE_V1, payload.to_vec(), &signer());
-        assert_eq!(verify(&envelope.to_json())?, Err(Error::StatementShape));
+        assert_eq!(
+            verify(&envelope.to_canonical_json())?,
+            Err(Error::StatementShape)
+        );
     }
     Ok(())
 }

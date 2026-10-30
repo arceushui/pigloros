@@ -87,7 +87,7 @@ impl DsseEnvelopeV1 {
 
     /// The canonical JSON bytes of the envelope.
     #[must_use]
-    pub fn to_json(&self) -> Vec<u8> {
+    pub fn to_canonical_json(&self) -> Vec<u8> {
         JsonV1::object([
             ("payload", JsonV1::Text(STANDARD.encode(&self.payload))),
             ("payloadType", JsonV1::text(&self.payload_type)),
@@ -111,13 +111,13 @@ impl DsseEnvelopeV1 {
     /// Returns [`DsseParseErrorV1::Oversized`] before parsing when `bytes` is longer than
     /// `max_bytes`, and [`DsseParseErrorV1::Malformed`] for any other envelope that is not the
     /// exact canonical encoding of one single-signature envelope.
-    pub fn from_json(bytes: &[u8], max_bytes: usize) -> Result<Self, DsseParseErrorV1> {
+    pub fn from_canonical_json(bytes: &[u8], max_bytes: usize) -> Result<Self, DsseParseErrorV1> {
         if bytes.len() > max_bytes {
             return Err(DsseParseErrorV1::Oversized);
         }
         JsonV1::parse_canonical(bytes)
             .and_then(Self::from_value)
-            .filter(|envelope| envelope.to_json() == bytes)
+            .filter(|envelope| envelope.to_canonical_json() == bytes)
             .ok_or(DsseParseErrorV1::Malformed)
     }
 

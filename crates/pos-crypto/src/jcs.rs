@@ -5,13 +5,47 @@
 //!
 //! Object members are sorted by the UTF-16 code units of their keys, strings escape `"`, `\`
 //! and control characters (`\b`, `\t`, `\n`, `\f`, `\r`, otherwise lowercase `\u00xx`), numbers
-//! are non-negative integers, the literals are `true`, `false` and `null`, and there is no
-//! whitespace. The oracle record ends with one LF byte, as `jq -c` writes it.
+//! are non-negative integers no greater than 2^53 (RFC 8785 writes numbers as IEEE-754
+//! doubles, which represent every such integer exactly and in plain decimal form), the literals
+//! are `true`, `false` and `null`, and there is no whitespace. The oracle record ends with one
+//! LF byte, as `jq -c` writes it.
 //!
 //! [`JsonV1::parse_canonical`] accepts a document only when writing the parsed value again
 //! yields exactly the input bytes; whitespace, escaped aliases, duplicate or unsorted keys,
-//! fractions, exponents and negative numbers are therefore refused. `serde_json` reads the
+//! fractions, exponents, negative numbers and integers above 2^53 are therefore refused. `serde_json` reads the
 //! input and bounds its nesting; callers bound the byte length before calling it.
+
+/// A JSON integer in the exactly representable range `0..=2^53`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct JsonIntegerV1(u64);
+
+/// The refusal of an integer above 2^53, which an IEEE-754 double cannot hold exactly.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("JSON integer is above 2^53")]
+pub struct JsonIntegerRangeErrorV1;
+
+impl JsonIntegerV1 {
+    /// The largest integer RFC 8785 writes exactly: 2^53.
+    pub const MAX: u64 = 9_007_199_254_740_992;
+
+    /// The integer `value`.
+    ///
+    /// # Errors
+    /// Returns [`JsonIntegerRangeErrorV1`] when `value` is above [`Self::MAX`].
+    pub const fn new(value: u64) -> Result<Self, JsonIntegerRangeErrorV1> {
+        if value <= Self::MAX {
+            Ok(Self(value))
+        } else {
+            Err(JsonIntegerRangeErrorV1)
+        }
+    }
+
+    /// The integer value.
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
 
 /// One JSON value.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -20,8 +54,8 @@ pub enum JsonV1 {
     Null,
     /// `true` or `false`.
     Bool(bool),
-    /// A non-negative integer.
-    Number(u64),
+    /// A non-negative integer no greater than 2^53.
+    Number(JsonIntegerV1),
     /// A string.
     Text(String),
     /// An array.
@@ -76,13 +110,17 @@ impl JsonV1 {
             .filter(|value| value.canonical() == bytes)
     }
 
-    /// Convert a parsed `serde_json` value; `None` for a number that is not a `u64`.
+    /// Convert a parsed `serde_json` value; `None` for a number that is not an integer in
+    /// `0..=2^53`.
     #[must_use]
     pub fn from_json_value(value: serde_json::Value) -> Option<Self> {
         match value {
             serde_json::Value::Null => Some(Self::Null),
             serde_json::Value::Bool(value) => Some(Self::Bool(value)),
-            serde_json::Value::Number(value) => value.as_u64().map(Self::Number),
+            serde_json::Value::Number(value) => value
+                .as_u64()
+                .and_then(|integer| JsonIntegerV1::new(integer).ok())
+                .map(Self::Number),
             serde_json::Value::String(value) => Some(Self::Text(value)),
             serde_json::Value::Array(items) => items
                 .into_iter()
@@ -114,7 +152,12 @@ impl JsonV1 {
                 })
                 .collect::<Option<Vec<_>>>()
                 .and_then(|values| values.try_into().ok()),
-            _ => None,
+            Self::Null
+            | Self::Bool(_)
+            | Self::Number(_)
+            | Self::Text(_)
+            | Self::Array(_)
+            | Self::Object(_) => None,
         }
     }
 
@@ -123,7 +166,7 @@ impl JsonV1 {
     pub fn into_array(self) -> Option<Vec<Self>> {
         match self {
             Self::Array(items) => Some(items),
-            _ => None,
+            Self::Null | Self::Bool(_) | Self::Number(_) | Self::Text(_) | Self::Object(_) => None,
         }
     }
 
@@ -132,7 +175,7 @@ impl JsonV1 {
     pub fn into_text(self) -> Option<String> {
         match self {
             Self::Text(text) => Some(text),
-            _ => None,
+            Self::Null | Self::Bool(_) | Self::Number(_) | Self::Array(_) | Self::Object(_) => None,
         }
     }
 
@@ -141,29 +184,35 @@ impl JsonV1 {
     pub const fn as_bool(&self) -> Option<bool> {
         match self {
             Self::Bool(value) => Some(*value),
-            _ => None,
-        }
-    }
-
-    /// The JSON literal of `true`, `false` or `null`; [`Self::write`] calls it for no other
-    /// value.
-    const fn literal(&self) -> &'static [u8] {
-        match self {
-            Self::Bool(true) => b"true",
-            Self::Bool(false) => b"false",
-            _ => b"null",
+            Self::Null | Self::Number(_) | Self::Text(_) | Self::Array(_) | Self::Object(_) => None,
         }
     }
 
     fn write(&self, out: &mut Vec<u8>) {
         match self {
-            Self::Number(value) => out.extend_from_slice(value.to_string().as_bytes()),
+            literal @ (Self::Null | Self::Bool(_)) => {
+                out.extend_from_slice(literal_bytes(literal.as_bool()));
+            }
+            Self::Number(value) => write_number(*value, out),
             Self::Text(value) => write_text(value, out),
             Self::Array(items) => write_list(items.iter(), out),
             Self::Object(entries) => write_object(entries, out),
-            literal => out.extend_from_slice(literal.literal()),
         }
     }
+}
+
+/// The literal of a boolean, or `null` for `None`.
+const fn literal_bytes(value: Option<bool>) -> &'static [u8] {
+    match value {
+        Some(true) => b"true",
+        Some(false) => b"false",
+        None => b"null",
+    }
+}
+
+/// An integer in plain decimal form, as RFC 8785 writes an integral double up to 2^53.
+fn write_number(value: JsonIntegerV1, out: &mut Vec<u8>) {
+    out.extend_from_slice(value.get().to_string().as_bytes());
 }
 
 /// The items of an array, separated by commas.

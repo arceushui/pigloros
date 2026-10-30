@@ -9,11 +9,10 @@
 
 use ed25519_dalek::VerifyingKey;
 
-/// The purpose a conformance key is admitted for. CTP1 keeps a separate root list per role.
+/// The purpose a conformance key is admitted for. CTP1 keeps a separate root list per role;
+/// slice G1 needs only report signing, and G2 (#1237) adds the evaluator-release role.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum ConformanceTrustRoleV1 {
-    /// Signs evaluator releases.
-    EvaluatorRelease,
     /// Signs conformance-report attestations.
     ReportSigning,
 }

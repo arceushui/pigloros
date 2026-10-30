@@ -41,16 +41,15 @@
 //!
 //! The subject binding recomputes each CNR1 field as `ADR-062_R8_Report_Attestation_Binding`
 //! defines it: the BLAKE3-256 digest of the exact subject artifact bytes, the CPF1
-//! `profile_digest` of the validated profile, the BLAKE3 digest of the canonical CFB1 archive,
-//! and the BLAKE3 digest of the evaluator binary.
+//! `profile_digest` of the validated profile, the BLAKE3 digest of the exact CFB1 archive
+//! bytes, and the BLAKE3 digest of the evaluator binary. Only the profile is decoded; the other
+//! three reuse their recomputed Statement subject digests.
 
 use crate::conformance_trust_admission::{
     ConformanceArtifactRefusalV1, ConformanceKeyRefusalV1, ConformanceTrustAdmissionPortV1,
     ConformanceTrustRoleV1,
 };
-use crate::{
-    decode_hex_digest, hex_digest, ConformanceBundleV1, ConformanceProfileV1, ConformanceReportV1,
-};
+use crate::{decode_hex_digest, hex_digest, ConformanceProfileV1, ConformanceReportV1};
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
 use ed25519_dalek::SigningKey;
@@ -226,7 +225,8 @@ pub fn sign_report_attestation_v1(
         .map_err(|_| ReportAttestationErrorV1::EmbeddedReport)
         .map(|report| {
             let statement = statement_value(cnr1, &report, &artifacts, diagnostics_digest);
-            DsseEnvelopeV1::sign(IN_TOTO_PAYLOAD_TYPE_V1, statement.canonical(), key).to_json()
+            DsseEnvelopeV1::sign(IN_TOTO_PAYLOAD_TYPE_V1, statement.canonical(), key)
+                .to_canonical_json()
         })
 }
 
@@ -322,7 +322,7 @@ pub fn verify_report_attestation_v1(
     trust: &dyn ConformanceTrustAdmissionPortV1,
     artifacts: ReportAttestationArtifactsV1<'_>,
 ) -> Result<VerifiedReportAttestationV1, ReportAttestationErrorV1> {
-    let envelope = DsseEnvelopeV1::from_json(envelope, MAX_REPORT_ATTESTATION_BYTES_V1)
+    let envelope = DsseEnvelopeV1::from_canonical_json(envelope, MAX_REPORT_ATTESTATION_BYTES_V1)
         .map_err(ReportAttestationErrorV1::BoundedParse)?;
     if !envelope.has_payload_type(IN_TOTO_PAYLOAD_TYPE_V1) {
         return Err(ReportAttestationErrorV1::PayloadType);
@@ -364,8 +364,8 @@ pub fn verify_report_attestation_v1(
 }
 
 /// Require each bound subject to reproduce its CNR1 field. `subjects` are the Statement
-/// subject digests, already recomputed from the artifact bytes; the subject artifact and the
-/// evaluator binary reuse their BLAKE3 digests.
+/// subject digests, already recomputed from the artifact bytes; the subject artifact, the
+/// fixture bundle and the evaluator binary reuse their BLAKE3 digests.
 fn bind_subjects(
     report: &ConformanceReportV1,
     artifacts: &ReportAttestationArtifactsV1<'_>,
@@ -380,10 +380,7 @@ fn bind_subjects(
     if profile_digest != Some(report.profile_digest) {
         return Err(BoundSubjectV1::Profile);
     }
-    let bundle_digest = ConformanceBundleV1::from_canonical_cbor(artifacts.fixture_bundle)
-        .and_then(|bundle| bundle.archive_digest())
-        .ok();
-    if bundle_digest != Some(report.fixture_bundle_digest) {
+    if subjects[3][0] != report.fixture_bundle_digest {
         return Err(BoundSubjectV1::FixtureBundle);
     }
     if subjects[4][0] == report.evaluator_binary_digest {
