@@ -14,7 +14,7 @@ use super::{
 };
 
 /// Exact Wasmtime release of the worker.
-const PINNED_WASMTIME_VERSION: &str = "49.0.4";
+const PINNED_WASMTIME_VERSION: &str = "49.0.5";
 
 /// The resolved Wasmtime feature set, sorted.
 const PINNED_RESOLVED_FEATURES: [&str; 6] = [
@@ -44,7 +44,7 @@ const OTHER: TrapOutcomeV1 = TrapOutcomeV1::Trap(ComponentTrapClassV1::Other);
 const FUEL: TrapOutcomeV1 = TrapOutcomeV1::FuelExhausted;
 const WATCHDOG: TrapOutcomeV1 = TrapOutcomeV1::WatchdogStop;
 
-/// Every trap code of Wasmtime 49.0.4, in code order, with its outcome.
+/// Every trap code of Wasmtime 49.0.5, in code order, with its outcome.
 const PINNED_TRAP_TABLE: [(&str, TrapOutcomeV1); 50] = [
     ("StackOverflow", STACK),
     ("MemoryOutOfBounds", MEMORY),
