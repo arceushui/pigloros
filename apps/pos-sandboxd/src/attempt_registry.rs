@@ -458,7 +458,7 @@ mod tests {
     type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
     /// One independent byte oracle for the private root stage, not its encoder.
-    pub fn root_record_fixture(mut directory: Vec<u8>, component: &str) -> Vec<u8> {
+    pub(crate) fn root_record_fixture(mut directory: Vec<u8>, component: &str) -> Vec<u8> {
         assert_eq!(directory.len(), 84);
         directory[..4].copy_from_slice(b"PAI3");
         for value in [41_u64, 253, 3, 1, 5, 6, 253, 3, 102, 7, 7, 101] {
@@ -503,7 +503,10 @@ mod tests {
         }
     }
 
-    pub fn with_io_fault<T>(fail_at: Option<usize>, operation: impl FnOnce() -> T) -> (T, usize) {
+    pub(crate) fn with_io_fault<T>(
+        fail_at: Option<usize>,
+        operation: impl FnOnce() -> T,
+    ) -> (T, usize) {
         let _restore = RestoreIoFault(IO_FAULT.with(|state| state.replace((0, fail_at))));
         let result = operation();
         (result, IO_FAULT.with(|state| state.get().0))
