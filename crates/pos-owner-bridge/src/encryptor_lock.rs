@@ -1,7 +1,7 @@
 //! Accepted ADR-110 E16 admission for the OS-user-global subject encryptor lock.
 //!
 //! The pure platform policy is available in normal builds. Linux filesystem
-//! primitives require test-support and an explicit test directory (E15).
+//! primitives require test-support; lock admission takes an explicit test directory (E15).
 //! Fixed per-user paths and owner activation remain unavailable.
 
 use crate::{BridgeError, UnavailableCode};

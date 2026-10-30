@@ -1,5 +1,5 @@
 #![cfg(any(test, feature = "test-support"))]
-//! Linux E16 primitives confined to explicit test directories until E15 activation.
+//! Linux E16 primitives under the test/test-support boundary until E15 activation.
 
 use std::path::Path;
 
@@ -9,6 +9,8 @@ use rustix::io::{self, Errno};
 
 use super::{nonce_ledger_support, HOST_TARGET_OS};
 use crate::{BridgeError, UnavailableCode};
+
+pub use store_file::store_file_id;
 
 const LOCK_NAME: &str = "pigloros.subject-encryptor.v1.lock";
 const FILE_FLAGS: OFlags = OFlags::RDWR.union(OFlags::NOFOLLOW).union(OFlags::CLOEXEC);
@@ -142,6 +144,7 @@ fn validate_file_identity(directory: &OwnedFd, name: &str, file: &impl AsFd) -> 
 }
 
 mod nonce_ledger;
+mod store_file;
 
 #[cfg(test)]
 mod tests;
