@@ -1,12 +1,16 @@
 #![cfg(any(test, feature = "test-support"))]
-//! Bounded transport of existing ledger bytes; no parsing or identity authority.
+//! Bounded ledger byte storage; no parsing, identity or reservation authority.
 
 use std::io::{self, Read as _};
 
-use super::{open_locked_file, SubjectEncryptorLock, FILE_FLAGS};
+use rustix::fd::OwnedFd;
+use rustix::fs::{self, AtFlags, Mode};
+
+use super::{lock_file, open_locked_file, SubjectEncryptorLock, FILE_FLAGS};
 use crate::{BridgeError, UnavailableCode};
 
 const LEDGER_NAME: &str = "subject-nonce-ledger.v1";
+const TEMPORARY_NAME: &str = "subject-nonce-ledger.v1.tmp";
 const MAX_LEDGER_BYTES: usize = 1_048_576;
 
 impl SubjectEncryptorLock {
@@ -49,6 +53,22 @@ fn read_bounded(reader: impl io::Read) -> io::Result<Vec<u8>> {
                 .ok_or_else(|| io::ErrorKind::InvalidData.into())
         })
 }
+
+pub(super) fn remove_stale_temporary(directory: &OwnedFd) -> rustix::io::Result<()> {
+    match fs::openat(directory, TEMPORARY_NAME, FILE_FLAGS, Mode::empty()) {
+        Ok(file) => remove_opened_temporary(directory, &file),
+        Err(error) if error == rustix::io::Errno::NOENT => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn remove_opened_temporary(directory: &OwnedFd, file: &OwnedFd) -> rustix::io::Result<()> {
+    lock_file(directory, TEMPORARY_NAME, file)
+        .and_then(|()| fs::unlinkat(directory, TEMPORARY_NAME, AtFlags::empty()))
+        .and_then(|()| fs::fsync(directory))
+}
+
+mod replace;
 
 #[cfg(test)]
 mod tests {
