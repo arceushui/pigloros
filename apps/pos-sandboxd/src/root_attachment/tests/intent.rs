@@ -71,8 +71,8 @@ mod cases {
         Ok(())
     }
 
-    #[test]
-    fn root_intent_io_failures_refuse_launch_and_preserve_recovery_state() -> TestResult {
+    #[tokio::test]
+    async fn root_intent_io_failures_refuse_launch_and_preserve_recovery_state() -> TestResult {
         if bounded_fixture_child(
             "PIGLOROS_ROOT_INTENT_IO_CHILD",
             concat!(
@@ -102,6 +102,7 @@ mod cases {
             count
         };
         assert!(count > 0);
+        let mut replaced_before_failure = false;
         for fail_at in 0..count {
             let tree = prepared_tree()?;
             let (kernel, root) = attached_root(&tree.prepared)?;
@@ -119,6 +120,7 @@ mod cases {
             );
             assert_eq!(observed, fail_at + 1, "fault {fail_at} must be reached");
             let retained = fs::read(&path)?;
+            replaced_before_failure |= retained.starts_with(b"PAI3");
             assert!(
                 recheck(&kernel, &root, &tree.prepared, Some(&root.expected), || Ok(
                     ()
@@ -131,8 +133,20 @@ mod cases {
                 .commit_planned(&PlannedAttemptIntent::new([8; 16], [9; 32])?)
                 .is_err());
             assert_eq!(kernel.detached(), 0);
-            drop(root);
-            drop(tree.prepared);
+            assert_eq!(
+                detach_owned(root, &kernel, &tree.prepared).await,
+                Ok(()),
+                "cleanup after publication fault {fail_at}, record size {}",
+                retained.len()
+            );
+            assert_eq!(kernel.detached(), 1);
+            tree.prepared.remove_unmounted()?;
+            assert!(!tree.runtime.path().join("attempts").join(&key).exists());
+            assert_eq!(fs::read(&path)?, retained);
+            assert!(tree
+                .registry
+                .commit_planned(&PlannedAttemptIntent::new([8; 16], [9; 32])?)
+                .is_err());
             drop(tree.registry);
             let parent = fs::File::open(tree.runtime.path())?;
             let recovery =
@@ -149,6 +163,7 @@ mod cases {
             )
             .is_err());
         }
+        assert!(replaced_before_failure, "the post-rename frontier must run");
         Ok(())
     }
 
