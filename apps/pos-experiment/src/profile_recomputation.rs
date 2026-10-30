@@ -372,18 +372,24 @@ fn recompute(
                 .map_err(Halt::Host)
                 .map(|events| (session.timeline().id(), events, failure))
         })
-        .and_then(|(timeline, events, failure)| match failure {
-            Some(ExperimentError::Runtime(RuntimeError::ResourceExhausted { .. })) => Err(
-                Halt::Refused(resource_limit_exceeded(admitted.replay_claim)),
-            ),
-            _ if event_count(&events) > resource_limit => Err(Halt::Refused(
-                resource_limit_exceeded(admitted.replay_claim),
-            )),
-            failure => Ok(Recomputed {
-                timeline,
-                events,
-                failure: failure.map(|error| error.to_string()),
-            }),
+        .and_then(|(timeline, events, failure)| {
+            let exhausted = matches!(
+                failure,
+                Some(ExperimentError::Runtime(
+                    RuntimeError::ResourceExhausted { .. }
+                ))
+            );
+            if exhausted || event_count(&events) > resource_limit {
+                Err(Halt::Refused(resource_limit_exceeded(
+                    admitted.replay_claim,
+                )))
+            } else {
+                Ok(Recomputed {
+                    timeline,
+                    events,
+                    failure: failure.map(|error| error.to_string()),
+                })
+            }
         })
 }
 
