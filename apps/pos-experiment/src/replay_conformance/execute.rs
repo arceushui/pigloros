@@ -117,22 +117,20 @@ impl HostV1 {
     }
 
     /// The request of one leg: the manifest the fixture owns, bound by the
-    /// host to the leg's EPF1, the bundled TPS1 and the sub-case's class.
+    /// host to the leg's EPF1, the bundled TPS1, the sub-case's class and the
+    /// attempt's Execution Mode.
     fn request(
         &self,
         fields: &ManifestFieldsV1,
         class: ReproducibilityClassV1,
         profile: ProfileV1,
+        mode: ExecutionModeV1,
     ) -> LegRequestV1 {
         let execution_profile = self.profile(profile).clone();
         let manifest = ReproManifestV1 {
             format_version: fields.format_version,
             input_digest: fields.input_digest,
-            execution_mode: if profile == ProfileV1::AirGapped {
-                ExecutionModeV1::AirGapped
-            } else {
-                ExecutionModeV1::Local
-            },
+            execution_mode: mode,
             fork_cut_seq: None,
             seed: fields.seed,
             resource_limit: fields.resource_limit,
@@ -215,21 +213,26 @@ impl LegRequestV1 {
     }
 }
 
-/// Counts every Event per entity; the one Projection of every run.
+/// Counts every Event per entity from a zero the initial State seeds; the one
+/// Projection of every run.
 struct CountReducer;
 
 impl Reducer for CountReducer {
     fn initial(&self) -> State {
-        State::new()
+        let mut state = State::new();
+        state.set("count", serde_json::json!(0_u64));
+        state
     }
 
+    /// Increment the counter the initial State seeds.
     fn apply(&self, state: &mut State, _event: &Event) {
-        let count = state
-            .fields
+        let next = state
             .get("count")
             .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0);
-        state.set("count", serde_json::json!(count + 1));
+            .map(|count| count + 1);
+        if let Some(next) = next {
+            state.set("count", serde_json::json!(next));
+        }
     }
 }
 
@@ -342,12 +345,13 @@ pub(super) fn run_subcase(
     host: &HostV1,
     subcase: &SubCaseV1,
     fixture_digest: [u8; 32],
+    mode: ExecutionModeV1,
     store_config: &StoreConfig,
 ) -> Option<RecordV1> {
     let requests: Vec<LegRequestV1> = subcase
         .profiles
         .iter()
-        .map(|profile| host.request(&subcase.manifest, subcase.class, *profile))
+        .map(|profile| host.request(&subcase.manifest, subcase.class, *profile, mode))
         .collect();
     let licence = subcase.licence.as_deref();
     let outcomes: Option<Vec<VerificationExecutionOutcomeV1>> = match &subcase.closure {

@@ -13,7 +13,8 @@
 //! 1. The EAI1 stream decodes, else there is no EAO1 stream and the exit code
 //!    is non-zero.
 //! 2. The claim layer is `replay-conformance` and the mode is Local or
-//!    Air-Gapped, else the result is `Unavailable` with zero usage.
+//!    Air-Gapped, else the result is `Unavailable` with zero usage. Every
+//!    manifest of the attempt carries that Execution Mode.
 //! 3. The BLAKE3 of the schema member is the digest pinned for the family
 //!    (provider contract 2.0.0), and
 //! 4. an auxiliary member is the family's `RCS1` composite: otherwise the
@@ -39,6 +40,7 @@
 use std::io::{Read, Write};
 use std::process::ExitCode;
 
+use pos_conformance::ExecutionModeV1;
 use pos_reference::adapter_transport::{read_attempt, write_observation};
 use pos_reference::evaluator::{CaseAttempt, ResourceUsage, SubjectObservation, SubjectResult};
 use pos_reference::evaluator_domain::{ClaimLayer, ExecutionMode, FixtureFamily};
@@ -176,18 +178,18 @@ fn observe(
     store_config: &StoreConfig,
     attempt: &CaseAttempt,
 ) -> Result<SubjectObservation, AdapterRunErrorV1> {
-    let runs = attempt.claim_layer == ClaimLayer::ReplayConformance
-        && matches!(
-            attempt.mode,
-            ExecutionMode::Local | ExecutionMode::AirGapped
-        );
-    if !runs {
+    let mode = match attempt.mode {
+        ExecutionMode::Local => Some(ExecutionModeV1::Local),
+        ExecutionMode::AirGapped => Some(ExecutionModeV1::AirGapped),
+        ExecutionMode::Replay | ExecutionMode::Fork => None,
+    };
+    let Some(mode) = mode.filter(|_| attempt.claim_layer == ClaimLayer::ReplayConformance) else {
         return Ok(unmeasured(SubjectResult::Unavailable));
-    }
+    };
     let pinned = schema_digests::pinned_digest(attempt.family);
     payload::find_composite(&attempt.auxiliary)
         .filter(|_| blake3::hash(&attempt.schema.bytes).as_bytes() == &pinned)
-        .map(|members| decide(store_config, attempt, &members))
+        .map(|members| decide(store_config, attempt, mode, &members))
         .ok_or(AdapterRunErrorV1::NotExecuted)
 }
 
@@ -195,6 +197,7 @@ fn observe(
 fn decide(
     store_config: &StoreConfig,
     attempt: &CaseAttempt,
+    mode: ExecutionModeV1,
     members: &payload::MembersV1,
 ) -> SubjectObservation {
     let family = family_text(attempt.family);
@@ -210,6 +213,7 @@ fn decide(
                                 &host,
                                 subcase,
                                 attempt.fixture_digest,
+                                mode,
                                 store_config,
                             )
                             .map(|record| {
