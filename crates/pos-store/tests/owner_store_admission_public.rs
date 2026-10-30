@@ -1,4 +1,4 @@
-//! Public controller conformance; no owner-read adapter or SQLite qualification.
+//! Public controller conformance; no owner-read adapter or `SQLite` qualification.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc};
