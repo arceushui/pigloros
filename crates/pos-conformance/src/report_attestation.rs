@@ -23,9 +23,9 @@
 //!
 //! # The `blake3` digest
 //!
-//! `blake3` is not in the in-toto DigestSet registry (`spec/v1/digest_set.md`), so generic
+//! `blake3` is not in the in-toto `DigestSet` registry (`spec/v1/digest_set.md`), so generic
 //! in-toto consumers ignore it and match subjects on `sha256`; that is why every subject carries
-//! both (ADR-062 Revision 8 Q12). PiglorOS encodes a `blake3` value as 64 lowercase hexadecimal
+//! both (ADR-062 Revision 8 Q12). `PiglorOS` encodes a `blake3` value as 64 lowercase hexadecimal
 //! characters, the 32-byte BLAKE3-256 digest of the subject bytes, the same encoding as
 //! `sha256`.
 //!

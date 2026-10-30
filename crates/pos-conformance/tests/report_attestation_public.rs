@@ -662,11 +662,12 @@ fn every_statement_and_predicate_shape_violation_is_refused() -> TestResult {
 }
 
 #[test]
-fn a_payload_that_is_not_canonical_json_fails_the_shape_step() {
+fn a_payload_that_is_not_canonical_json_fails_the_shape_step() -> TestResult {
     for payload in [&b"not JSON"[..], b"{\"_type\": 1}"] {
         let envelope = DsseEnvelopeV1::sign(IN_TOTO_PAYLOAD_TYPE_V1, payload.to_vec(), &signer());
         assert_eq!(verify(&envelope.to_json())?, Err(Error::StatementShape));
     }
+    Ok(())
 }
 
 #[test]
