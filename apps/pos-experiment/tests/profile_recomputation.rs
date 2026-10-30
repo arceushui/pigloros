@@ -31,14 +31,17 @@ use pos_experiment::authoritative_comparison::{
 };
 use pos_experiment::profile_recomputation::{
     execute_cross_profile_conformance_v1, execute_profile_recomputation_v1,
-    CrossProfileConformanceInputV1, CrossProfileConformanceOutcomeV1, ProfileRecomputationInputV1,
-    RecomputationClosureV1, RecomputationSubjectMemberV1, RecomputationSubjectV1,
-    AIR_GAPPED_PROFILE_ID_V1, HOST_FAILURE_DRIVER_ID_V1, LOCAL_PROFILE_ID_V1,
-    RECOMPUTED_TIMELINE_ID_V1,
+    CrossProfileConformanceInputV1, CrossProfileConformanceOutcomeV1, HostFailureCodeV1,
+    ProfileRecomputationInputV1, RecomputationClosureV1, RecomputationSubjectMemberV1,
+    RecomputationSubjectV1, AIR_GAPPED_PROFILE_ID_V1, HOST_FAILURE_DRIVER_ID_V1,
+    LOCAL_PROFILE_ID_V1, RECOMPUTED_TIMELINE_ID_V1,
 };
 use pos_experiment::verification_execution::VerificationExecutionOutcomeV1;
 use pos_experiment::{Experiment, ExperimentError};
-use pos_runtime::{Driver, ObservationView, RuntimeError, StepOutput};
+use pos_runtime::{
+    Driver, HumanActionAdmissionErrorV1, ManifestRegistrationErrorV1, ManifestRosterBuildErrorV1,
+    ObservationView, RuntimeError, StepOutput,
+};
 use pos_state::ProjectionRegistry;
 use pos_store::StoreConfig;
 use std::collections::BTreeMap;
@@ -54,6 +57,8 @@ const SUBJECT_DIGEST: [u8; 32] = [0xd1; 32];
 const FIXTURE_DIGEST: [u8; 32] = [0xf1; 32];
 const RESOURCE_LIMIT: u64 = 16;
 const SECRET_DENIED: &str = "secret read denied";
+/// The closed host-failure code of a runtime failure (wiki section 6).
+const RUNTIME_FAILURE_CODE: u16 = 1;
 
 /// What the subject's Driver emits at each Tick.
 #[derive(Clone, Copy)]
@@ -286,7 +291,7 @@ fn digest(domain: &[u8], parts: &[&[u8]]) -> [u8; 32] {
 /// per payload at tick 0 addressed by the recomputed Timeline id with a
 /// zero Event id, the count checkpoint and an optional typed failure.
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn expected(payloads: &[u8], failure: Option<&str>) -> TestResult<AuthoritativeStreamV1> {
+fn expected(payloads: &[u8], failure: Option<u16>) -> TestResult<AuthoritativeStreamV1> {
     let timeline_id = RECOMPUTED_TIMELINE_ID_V1;
     let entity = entity();
     let mut events = BTreeMap::new();
@@ -341,7 +346,7 @@ fn expected(payloads: &[u8], failure: Option<&str>) -> TestResult<AuthoritativeS
                     output_ordinal: 0,
                 },
                 ComparedDriverOutputV1 {
-                    outcome: DriverOutcomeV1::TypedFailure(failure.as_bytes().to_vec()),
+                    outcome: DriverOutcomeV1::TypedFailure(failure.to_be_bytes().to_vec()),
                     numeric_profile_digest: [0; 32],
                     prohibited_operational_input: None,
                 },
@@ -379,6 +384,27 @@ fn result_digest(stream: &AuthoritativeStreamV1) -> TestResult<[u8; 32]> {
         parts.push(coordinate.tick.to_be_bytes().to_vec());
         parts.push(checkpoint.digest.to_vec());
         parts.push(checkpoint.size.to_be_bytes().to_vec());
+    }
+    parts.push(
+        u64::try_from(stream.driver_outputs.len())?
+            .to_be_bytes()
+            .to_vec(),
+    );
+    for (coordinate, output) in &stream.driver_outputs {
+        parts.push(coordinate.timeline_id.to_vec());
+        parts.push(coordinate.fold_cursor.to_be_bytes().to_vec());
+        parts.push(coordinate.tick.to_be_bytes().to_vec());
+        parts.push(coordinate.scheduler_position.to_be_bytes().to_vec());
+        parts.push(
+            u64::try_from(coordinate.driver_id.len())?
+                .to_be_bytes()
+                .to_vec(),
+        );
+        parts.push(coordinate.driver_id.as_bytes().to_vec());
+        parts.push(coordinate.output_ordinal.to_be_bytes().to_vec());
+        let (DriverOutcomeV1::Output(bytes) | DriverOutcomeV1::TypedFailure(bytes)) =
+            &output.outcome;
+        parts.push(bytes.clone());
     }
     let parts: Vec<&[u8]> = parts.iter().map(Vec::as_slice).collect();
     Ok(digest(b"PiglorOS.RecordedReplayResult.v1", &parts))
@@ -781,8 +807,7 @@ fn live_001_live_unverified_is_never_verified_exact() -> TestResult {
 #[test]
 fn sec_001_an_expected_typed_failure_is_verified_exact_in_both_profiles() -> TestResult {
     let subject = Subject::new(Script::DeniedSecret);
-    let failure = ExperimentError::Runtime(secret_denied()).to_string();
-    let expected = expected(&[1], Some(&failure))?;
+    let expected = expected(&[1], Some(RUNTIME_FAILURE_CODE))?;
 
     let fixture = Fixture::recomputation()?;
     let outcome = run(&fixture, subject.closure(3), &expected, StoreConfig::Memory)?;
@@ -1013,5 +1038,163 @@ fn a_host_that_cannot_start_is_an_error_not_a_result() -> TestResult {
         &mut projections(),
     );
     assert!(outcome.is_err());
+    Ok(())
+}
+
+#[test]
+fn host_failure_codes_are_closed_and_stable() {
+    let errors = [
+        (ExperimentError::Runtime(secret_denied()), 1),
+        (
+            ExperimentError::ActionRejected(pos_core::ActionRejected::UnknownEventType),
+            2,
+        ),
+        (
+            ExperimentError::Store(pos_core::CoreError::ErasureContainmentUnavailable),
+            3,
+        ),
+        (
+            ExperimentError::ManifestRoster(ManifestRosterBuildErrorV1::Admission(
+                ManifestRegistrationErrorV1::EmptyBatch,
+            )),
+            4,
+        ),
+        (ExperimentError::MissingForkRegistryFactory, 5),
+        (ExperimentError::MissingStoreRecoveryRecipe, 6),
+        (ExperimentError::SharedStoreLockPoisoned, 7),
+        (ExperimentError::IncompatibleForkRegistry, 8),
+        (ExperimentError::SessionFaulted, 9),
+        (ExperimentError::ConsentRevokedV1, 10),
+        (
+            ExperimentError::ActionNotAdmitted(Box::new(
+                HumanActionAdmissionErrorV1::IdempotencyConflict,
+            )),
+            11,
+        ),
+        (ExperimentError::DuplicatePipelineEvaluator, 12),
+        (
+            ExperimentError::CadenceTimeRegressed {
+                previous_ns: 2,
+                requested_ns: 1,
+            },
+            13,
+        ),
+        (
+            ExperimentError::StepModeMismatch {
+                active: "cadenced",
+                requested: "all-drivers",
+            },
+            14,
+        ),
+    ];
+    for (error, code) in &errors {
+        let closed = HostFailureCodeV1::from(error);
+        assert_eq!(closed.to_be_bytes(), u16::to_be_bytes(*code));
+    }
+    // The code ignores free text: two runtime failures share one code.
+    assert_eq!(
+        HostFailureCodeV1::from(&ExperimentError::Runtime(RuntimeError::NoDriver {
+            name: "/tmp/elsewhere".to_owned(),
+        })),
+        HostFailureCodeV1::Runtime
+    );
+}
+
+#[test]
+fn operational_variation_does_not_change_a_typed_failure_vrr1() -> TestResult {
+    let fixture = Fixture::recomputation()?;
+    let expected = expected(&[1], Some(RUNTIME_FAILURE_CODE))?;
+    let first = tempfile::tempdir()?;
+    let second = tempfile::tempdir()?;
+    let sqlite = |directory: &tempfile::TempDir, file: &str| StoreConfig::Sqlite {
+        path: directory.path().join(file).to_string_lossy().into_owned(),
+    };
+    let runs = [
+        (Operational::new(1_000, 0), StoreConfig::Memory),
+        (
+            Operational::new(7_000_000, 2),
+            sqlite(&first, "failure-a.db"),
+        ),
+        (Operational::new(3, 1), sqlite(&second, "failure-b.db")),
+    ];
+    let mut results = Vec::new();
+    for (operational, store_config) in runs {
+        let subject = Subject {
+            operational,
+            ..Subject::new(Script::DeniedSecret)
+        };
+        let outcome = run(&fixture, subject.closure(3), &expected, store_config)?;
+        assert_exact(&outcome, &expected)?;
+        results.push(outcome);
+    }
+    assert_eq!(results[1], results[0]);
+    assert_eq!(results[2], results[0]);
+    Ok(())
+}
+
+#[test]
+fn a_typed_failure_changes_the_authoritative_result_digest() -> TestResult {
+    // The same committed Event, once followed by a typed failure and once not.
+    let failing = Subject::new(Script::DeniedSecret);
+    let succeeding = Subject::new(Script::Count);
+    let with_failure = expected(&[1], Some(RUNTIME_FAILURE_CODE))?;
+    let without_failure = expected(&[1], None)?;
+    assert_ne!(
+        result_digest(&with_failure)?,
+        result_digest(&without_failure)?
+    );
+
+    let fixture = Fixture::recomputation()?;
+    let failed = run(
+        &fixture,
+        failing.closure(3),
+        &with_failure,
+        StoreConfig::Memory,
+    )?;
+    let succeeded = run(
+        &fixture,
+        succeeding.closure(1),
+        &without_failure,
+        StoreConfig::Memory,
+    )?;
+    assert_exact(&failed, &with_failure)?;
+    assert_exact(&succeeded, &without_failure)?;
+    assert_ne!(
+        failed.result.authoritative_result_digest,
+        succeeded.result.authoritative_result_digest
+    );
+
+    // LiveUnverified results are never compared, but their digests differ too.
+    let mut live = Fixture::new(
+        ReproducibilityClassV1::LiveUnverified,
+        LOCAL_PROFILE_ID_V1,
+        "live-local-v1",
+    )?;
+    live.manifest.replay_claim = ReplayClaimV1::StructuralOnly;
+    live.refresh_manifest_binding()?;
+    let failed = run(
+        &live,
+        failing.closure(3),
+        &without_failure,
+        StoreConfig::Memory,
+    )?;
+    let succeeded = run(
+        &live,
+        succeeding.closure(1),
+        &without_failure,
+        StoreConfig::Memory,
+    )?;
+    assert_eq!(
+        failed.result.authoritative_result_digest,
+        Some(result_digest(&with_failure)?)
+    );
+    assert_eq!(
+        succeeded.result.authoritative_result_digest,
+        Some(result_digest(&without_failure)?)
+    );
+    assert_ne!(
+        failed.result.verification_outcome,
+        VerificationOutcomeV1::VerifiedExact
+    );
     Ok(())
 }

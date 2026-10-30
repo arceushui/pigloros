@@ -31,6 +31,8 @@
 //!    under the named EPF1, with the manifest `resource_limit` as the host's
 //!    per-Tick Event budget. A subject that cannot run under the EPF1 is
 //!    `IncompatibleProfile` with `ProfileUnsupported` at `execution_profile`.
+//!    Every `compose` error currently maps to `ProfileUnsupported`, including
+//!    a Plugin registration error that is not about the profile.
 //! 6. The host steps the frozen number of Ticks, or until the run is
 //!    quiescent. A step error is the run's typed failure and ends the run;
 //!    an exhausted host budget is `ResourceLimitExceeded` instead. A
@@ -47,10 +49,23 @@
 //!    recomputed result digest and is `UnverifiableArtifactsMissing` with
 //!    `ProvenanceMissing` at `replay_claim` (ADR-062 Revision 8, Q4).
 //!
+//! # ExecutionProfile enforcement
+//!
+//! The named EPF1 is enforced by the subject's
+//! [`RecomputationSubjectV1::compose`], not by the host: the host passes the
+//! EPF1 to the subject and applies only the manifest `resource_limit`.
+//! Host-side enforcement of the EPF1, and a finer mapping of `compose`
+//! errors than `ProfileUnsupported`, are follow-up #1266. Until then, and
+//! until the Sandbox Provider runs Air-Gapped (Q6), results are
+//! Local-relaxation engineering evidence.
+//!
 //! # Recomputed stream
 //!
-//! The stream uses the accepted `RecordedReplay` digest scheme documented in
-//! [`crate::verification_execution`], with tick 0. A recomputed run mints a
+//! The owner decisions for this slice are recorded on the wiki page
+//! `ADR-062_R8_Recorded_Replay_Digests`, section 6 (2026-10-30), and its
+//! section 2 digest table. The stream uses that accepted `RecordedReplay`
+//! digest scheme, documented in [`crate::verification_execution`], with
+//! tick 0. A recomputed run mints a
 //! fresh Timeline id and fresh Event ids (ULIDs that carry the wall clock), so
 //! those identifiers are operational: the stream is addressed by
 //! [`RECOMPUTED_TIMELINE_ID_V1`] and every Event identity digest covers 16
@@ -61,22 +76,25 @@
 //! A typed failure is one Driver output at the host coordinate: Timeline
 //! [`RECOMPUTED_TIMELINE_ID_V1`], the Fold Cursor of the last committed Event,
 //! tick 0, scheduler position 0, Driver id [`HOST_FAILURE_DRIVER_ID_V1`] and
-//! output ordinal 0. Its canonical bytes are the UTF-8 text of the host's
-//! typed error; its numeric profile digest is 32 zero bytes. A typed failure
-//! the expected stream also holds verifies as exact (Q4).
+//! output ordinal 0. Its canonical bytes are its closed
+//! [`HostFailureCodeV1`] as a big-endian `u16` (two bytes), never error
+//! text; its numeric profile digest is 32 zero bytes. The typed failure is
+//! part of the `authoritative_result_digest`. A typed failure the expected
+//! stream also holds verifies as exact (Q4).
 //!
 //! The store configuration, wall clock and logging are operational: they are
 //! not inputs to the stream, so they cannot change the `VRR1`.
+
+use std::collections::HashMap;
 
 use pos_conformance::{
     preflight_verification_v1, ExecutionProfileV1, ReproducibilityClassV1, SafeErrorCodeV1,
     VerificationPreflightCoordinateV1, VerificationPreflightInputV1, VerificationPreflightResultV1,
 };
-use pos_core::{Event, StateRegistry, TimelineId};
+use pos_core::{CoreError, Event, StateRegistry, TimelineId};
 use pos_runtime::RuntimeError;
 use pos_state::ProjectionRegistry;
 use pos_store::StoreConfig;
-use std::collections::HashMap;
 
 use crate::authoritative_comparison::{
     AuthoritativeStreamV1, ComparedDriverOutputV1, DriverOutcomeV1, DriverOutputCoordinateV1,
@@ -98,6 +116,70 @@ pub const RECOMPUTED_TIMELINE_ID_V1: [u8; 16] = [0; 16];
 pub const HOST_FAILURE_DRIVER_ID_V1: &str = "experiment-host";
 
 const EXPERIMENT_NAME: &str = "profile-recomputation";
+
+/// The closed code of a host typed failure, one per [`ExperimentError`]
+/// variant. Its canonical bytes are the code as a big-endian `u16`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u16)]
+pub enum HostFailureCodeV1 {
+    /// [`ExperimentError::Runtime`]: a Driver, Plugin or runtime failure.
+    Runtime = 1,
+    /// [`ExperimentError::ActionRejected`].
+    ActionRejected = 2,
+    /// [`ExperimentError::Store`].
+    Store = 3,
+    /// [`ExperimentError::ManifestRoster`].
+    ManifestRoster = 4,
+    /// [`ExperimentError::MissingForkRegistryFactory`].
+    MissingForkRegistryFactory = 5,
+    /// [`ExperimentError::MissingStoreRecoveryRecipe`].
+    MissingStoreRecoveryRecipe = 6,
+    /// [`ExperimentError::SharedStoreLockPoisoned`].
+    SharedStoreLockPoisoned = 7,
+    /// [`ExperimentError::IncompatibleForkRegistry`].
+    IncompatibleForkRegistry = 8,
+    /// [`ExperimentError::SessionFaulted`].
+    SessionFaulted = 9,
+    /// [`ExperimentError::ConsentRevokedV1`].
+    ConsentRevoked = 10,
+    /// [`ExperimentError::ActionNotAdmitted`].
+    ActionNotAdmitted = 11,
+    /// [`ExperimentError::DuplicatePipelineEvaluator`].
+    DuplicatePipelineEvaluator = 12,
+    /// [`ExperimentError::CadenceTimeRegressed`].
+    CadenceTimeRegressed = 13,
+    /// [`ExperimentError::StepModeMismatch`].
+    StepModeMismatch = 14,
+}
+
+impl HostFailureCodeV1 {
+    /// The canonical bytes of the code: a big-endian `u16`.
+    #[must_use]
+    pub const fn to_be_bytes(self) -> [u8; 2] {
+        (self as u16).to_be_bytes()
+    }
+}
+
+impl From<&ExperimentError> for HostFailureCodeV1 {
+    fn from(error: &ExperimentError) -> Self {
+        match error {
+            ExperimentError::Runtime(_) => Self::Runtime,
+            ExperimentError::ActionRejected(_) => Self::ActionRejected,
+            ExperimentError::Store(_) => Self::Store,
+            ExperimentError::ManifestRoster(_) => Self::ManifestRoster,
+            ExperimentError::MissingForkRegistryFactory => Self::MissingForkRegistryFactory,
+            ExperimentError::MissingStoreRecoveryRecipe => Self::MissingStoreRecoveryRecipe,
+            ExperimentError::SharedStoreLockPoisoned => Self::SharedStoreLockPoisoned,
+            ExperimentError::IncompatibleForkRegistry => Self::IncompatibleForkRegistry,
+            ExperimentError::SessionFaulted => Self::SessionFaulted,
+            ExperimentError::ConsentRevokedV1 => Self::ConsentRevoked,
+            ExperimentError::ActionNotAdmitted(_) => Self::ActionNotAdmitted,
+            ExperimentError::DuplicatePipelineEvaluator => Self::DuplicatePipelineEvaluator,
+            ExperimentError::CadenceTimeRegressed { .. } => Self::CadenceTimeRegressed,
+            ExperimentError::StepModeMismatch { .. } => Self::StepModeMismatch,
+        }
+    }
+}
 
 /// The frozen subject of a recomputation: the Plugins, Reducers and Drivers
 /// of the run, composed from the closure.
@@ -264,7 +346,7 @@ enum Halt {
 struct Recomputed {
     timeline: TimelineId,
     events: Vec<Event>,
-    failure: Option<String>,
+    failure: Option<HostFailureCodeV1>,
 }
 
 fn execute(
@@ -386,7 +468,7 @@ fn recompute(
                 Ok(Recomputed {
                     timeline,
                     events,
-                    failure: failure.map(|error| error.to_string()),
+                    failure: failure.as_ref().map(HostFailureCodeV1::from),
                 })
             }
         })
@@ -408,7 +490,7 @@ impl Recomputed {
     fn stream(
         &self,
         snapshot: &HashMap<String, StateRegistry>,
-    ) -> Result<AuthoritativeStreamV1, pos_core::CoreError> {
+    ) -> Result<AuthoritativeStreamV1, CoreError> {
         let fold_cursor = self.events.last().map_or(0, |event| event.seq.as_u64());
         authoritative_stream(RECOMPUTED_TIMELINE_ID_V1, &self.events, snapshot, |_| {
             [0; 16]
@@ -427,7 +509,7 @@ impl Recomputed {
                             output_ordinal: 0,
                         },
                         ComparedDriverOutputV1 {
-                            outcome: DriverOutcomeV1::TypedFailure(failure.as_bytes().to_vec()),
+                            outcome: DriverOutcomeV1::TypedFailure(failure.to_be_bytes().to_vec()),
                             numeric_profile_digest: [0; 32],
                             prohibited_operational_input: None,
                         },

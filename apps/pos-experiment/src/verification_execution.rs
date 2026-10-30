@@ -15,12 +15,16 @@
 //! | Event identity | `PiglorOS.RecordedReplayEventIdentity.v1` | Event id bytes, entity id bytes, Event type |
 //! | Event schema | `PiglorOS.RecordedReplayEventSchema.v1` | Event type, zero byte, schema version (`u32`) |
 //! | Checkpoint | `PiglorOS.RecordedReplayCheckpoint.v1` | canonical CBOR of the Projection Snapshot |
-//! | Authoritative result | `PiglorOS.RecordedReplayResult.v1` | the Event count (`u64`), then per Event in Timeline Order: Timeline id, sequence (`u64`), identity digest, schema digest, BLAKE3 of the payload; then the checkpoint count (`u64`) and per checkpoint: Timeline id, Fold Cursor, tick (`u64`), digest, size (`u64`) |
+//! | Authoritative result | `PiglorOS.RecordedReplayResult.v1` | the Event count (`u64`), then per Event in Timeline Order: Timeline id, sequence (`u64`), identity digest, schema digest, BLAKE3 of the payload; then the checkpoint count (`u64`) and per checkpoint: Timeline id, Fold Cursor, tick (`u64`), digest, size (`u64`); then the typed-failure count (`u64`) and per typed failure in coordinate order: Timeline id, Fold Cursor (`u64`), tick (`u64`), scheduler position (`u32`), Driver id length (`u64`), Driver id UTF-8 bytes, output ordinal (`u32`), the failure's canonical bytes (for a host failure, its closed code as a `u16`) |
 //! | Provenance | `PiglorOS.RecordedReplayProvenance.v1` | canonical request digest, the primary closure member's artifact digest (32 zero bytes if absent), BLAKE3 of the licence member (32 zero bytes if absent or empty) |
 //!
 //! Every Event and the one Projection checkpoint have tick 0. The checkpoint
-//! is keyed by the stream's Timeline id and the Fold Cursor of the last Event
-//! (0 when there is none); its size is the canonical CBOR length.
+//! is keyed by the stream's Timeline id (for `RecordedReplay`, the export's
+//! Timeline id) and the Fold Cursor of the last Event (0 when there is
+//! none); its size is the canonical CBOR length. Every Driver output a
+//! built stream carries is a typed failure; a `RecordedReplay` stream has
+//! none, so its typed-failure count is 0. The scheme is recorded on the wiki
+//! page `ADR-062_R8_Recorded_Replay_Digests`, sections 2 and 6.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -36,7 +40,7 @@ use pos_state::ProjectionRegistry;
 
 use crate::authoritative_comparison::{
     first_divergence_v1, AuthoritativeStreamV1, CheckpointDigestV1, ComparedEventV1,
-    DivergenceContextV1, TickBoundaryCoordinateV1, TimelinePositionV1,
+    DivergenceContextV1, DriverOutcomeV1, TickBoundaryCoordinateV1, TimelinePositionV1,
 };
 
 const EVENT_IDENTITY_DOMAIN_V1: &[u8] = b"PiglorOS.RecordedReplayEventIdentity.v1";
@@ -291,6 +295,19 @@ fn authoritative_result_digest(actual: &AuthoritativeStreamV1) -> [u8; 32] {
         digest.update(&coordinate.tick.to_be_bytes());
         digest.update(&checkpoint.digest);
         digest.update(&checkpoint.size.to_be_bytes());
+    }
+    digest.update(&count(actual.driver_outputs.len()));
+    for (coordinate, output) in &actual.driver_outputs {
+        digest.update(&coordinate.timeline_id);
+        digest.update(&coordinate.fold_cursor.to_be_bytes());
+        digest.update(&coordinate.tick.to_be_bytes());
+        digest.update(&coordinate.scheduler_position.to_be_bytes());
+        digest.update(&count(coordinate.driver_id.len()));
+        digest.update(coordinate.driver_id.as_bytes());
+        digest.update(&coordinate.output_ordinal.to_be_bytes());
+        let (DriverOutcomeV1::Output(bytes) | DriverOutcomeV1::TypedFailure(bytes)) =
+            &output.outcome;
+        digest.update(bytes);
     }
     *digest.finalize().as_bytes()
 }

@@ -263,6 +263,8 @@ fn result_digest(stream: &AuthoritativeStreamV1) -> [u8; 32] {
         parts.push(checkpoint.digest.to_vec());
         parts.push(checkpoint.size.to_be_bytes().to_vec());
     }
+    // A recorded export has no typed failures: the typed-failure count is 0.
+    parts.push(0_u64.to_be_bytes().to_vec());
     let parts: Vec<&[u8]> = parts.iter().map(Vec::as_slice).collect();
     digest(b"PiglorOS.RecordedReplayResult.v1", &parts)
 }
