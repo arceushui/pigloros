@@ -174,159 +174,80 @@ impl From<&ExperimentError> for HostFailureCodeV1 {
     }
 }
 
-/// The closed kind of a [`RuntimeError`], one per variant in declaration
-/// order; the sub-code of a [`HostFailureCodeV1::Runtime`] failure.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u16)]
-pub enum RuntimeErrorKindV1 {
-    /// [`RuntimeError::ManifestRegistration`].
-    ManifestRegistration = 1,
-    /// [`RuntimeError::ManifestSlot`].
-    ManifestSlot = 2,
-    /// [`RuntimeError::OutputAdmission`].
-    OutputAdmission = 3,
-    /// [`RuntimeError::WorldInstallation`].
-    WorldInstallation = 4,
-    /// [`RuntimeError::Composition`].
-    Composition = 5,
-    /// [`RuntimeError::DuplicatePlugin`].
-    DuplicatePlugin = 6,
-    /// [`RuntimeError::UnknownEventType`].
-    UnknownEventType = 7,
-    /// [`RuntimeError::InvalidPayload`].
-    InvalidPayload = 8,
-    /// [`RuntimeError::NoDriver`].
-    NoDriver = 9,
-    /// [`RuntimeError::DriverPanicked`].
-    DriverPanicked = 10,
-    /// [`RuntimeError::DriverAbortPanicked`].
-    DriverAbortPanicked = 11,
-    /// [`RuntimeError::DriverCommitPanicked`].
-    DriverCommitPanicked = 12,
-    /// [`RuntimeError::DriverRestorePanicked`].
-    DriverRestorePanicked = 13,
-    /// [`RuntimeError::DriverForkPanicked`].
-    DriverForkPanicked = 14,
-    /// [`RuntimeError::DriverForkRollbackFailed`].
-    DriverForkRollbackFailed = 15,
-    /// [`RuntimeError::ResourceExhausted`].
-    ResourceExhausted = 16,
-    /// [`RuntimeError::CapabilityMismatch`].
-    CapabilityMismatch = 17,
-    /// [`RuntimeError::ReservedGeographicEventType`].
-    ReservedGeographicEventType = 18,
-    /// [`RuntimeError::GeographicDraft`].
-    GeographicDraft = 19,
-    /// [`RuntimeError::ReservedHostDraft`].
-    ReservedHostDraft = 20,
-    /// [`RuntimeError::ReservedHostEventType`].
-    ReservedHostEventType = 21,
-    /// [`RuntimeError::ReservedConsentEventType`].
-    ReservedConsentEventType = 22,
-    /// [`RuntimeError::ConsentDraft`].
-    ConsentDraft = 23,
-    /// [`RuntimeError::ConsentOperationUnavailable`].
-    ConsentOperationUnavailable = 24,
-    /// [`RuntimeError::ErasureOperationUnavailable`].
-    ErasureOperationUnavailable = 25,
-    /// [`RuntimeError::Consent`].
-    Consent = 26,
-    /// [`RuntimeError::ErasureContainment`].
-    ErasureContainment = 27,
-    /// [`RuntimeError::Authority`].
-    Authority = 28,
-    /// [`RuntimeError::AuthorityFenceRequired`].
-    AuthorityFenceRequired = 29,
-    /// [`RuntimeError::ScheduledProfile`].
-    ScheduledProfile = 30,
-    /// [`RuntimeError::AuthorityPersistence`].
-    AuthorityPersistence = 31,
-    /// [`RuntimeError::PipelineContract`].
-    PipelineContract = 32,
-    /// [`RuntimeError::ScheduledPassNotAdmitted`].
-    ScheduledPassNotAdmitted = 33,
-    /// [`RuntimeError::NoScheduledAdmissionInDoubt`].
-    NoScheduledAdmissionInDoubt = 34,
-    /// [`RuntimeError::DependencyDeclaration`].
-    DependencyDeclaration = 35,
-    /// [`RuntimeError::CadenceOverflow`].
-    CadenceOverflow = 36,
-    /// [`RuntimeError::MissingSnapshotAnchor`].
-    MissingSnapshotAnchor = 37,
-    /// [`RuntimeError::SnapshotTimelineMismatch`].
-    SnapshotTimelineMismatch = 38,
-    /// [`RuntimeError::PendingDriverStep`].
-    PendingDriverStep = 39,
-    /// [`RuntimeError::UnappendedDriverOutput`].
-    UnappendedDriverOutput = 40,
-    /// [`RuntimeError::DriverRecoveryNotFresh`].
-    DriverRecoveryNotFresh = 41,
-    /// [`RuntimeError::DriverTickOverflow`].
-    DriverTickOverflow = 42,
-    /// [`RuntimeError::InvalidRecoveryEvidence`].
-    InvalidRecoveryEvidence = 43,
-    /// [`RuntimeError::CommunityPlugin`].
-    CommunityPlugin = 44,
-    /// [`RuntimeError::FallbackSwap`].
-    FallbackSwap = 45,
-    /// [`RuntimeError::Store`].
-    Store = 46,
-    /// [`RuntimeError::ModeMismatch`].
-    ModeMismatch = 47,
+/// Define [`RuntimeErrorKindV1`] and its exhaustive mapping from one list,
+/// so each `RuntimeError` variant and its stable value are written once.
+macro_rules! runtime_error_kinds {
+    ($($variant:ident $(($tuple:tt))? $({$fields:tt})? = $value:literal,)+) => {
+        /// The closed kind of a [`RuntimeError`], one per variant in
+        /// declaration order from 1; the sub-code of a
+        /// [`HostFailureCodeV1::Runtime`] failure.
+        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+        #[repr(u16)]
+        pub enum RuntimeErrorKindV1 {
+            $(
+                #[doc = concat!("[`RuntimeError::", stringify!($variant), "`].")]
+                $variant = $value,
+            )+
+        }
+
+        impl From<&RuntimeError> for RuntimeErrorKindV1 {
+            fn from(error: &RuntimeError) -> Self {
+                match error {
+                    $(RuntimeError::$variant $(($tuple))? $({$fields})? => Self::$variant,)+
+                }
+            }
+        }
+    };
 }
 
-impl From<&RuntimeError> for RuntimeErrorKindV1 {
-    fn from(error: &RuntimeError) -> Self {
-        match error {
-            RuntimeError::ManifestRegistration(_) => Self::ManifestRegistration,
-            RuntimeError::ManifestSlot(_) => Self::ManifestSlot,
-            RuntimeError::OutputAdmission(_) => Self::OutputAdmission,
-            RuntimeError::WorldInstallation(_) => Self::WorldInstallation,
-            RuntimeError::Composition(_) => Self::Composition,
-            RuntimeError::DuplicatePlugin { .. } => Self::DuplicatePlugin,
-            RuntimeError::UnknownEventType(_) => Self::UnknownEventType,
-            RuntimeError::InvalidPayload { .. } => Self::InvalidPayload,
-            RuntimeError::NoDriver { .. } => Self::NoDriver,
-            RuntimeError::DriverPanicked { .. } => Self::DriverPanicked,
-            RuntimeError::DriverAbortPanicked { .. } => Self::DriverAbortPanicked,
-            RuntimeError::DriverCommitPanicked { .. } => Self::DriverCommitPanicked,
-            RuntimeError::DriverRestorePanicked { .. } => Self::DriverRestorePanicked,
-            RuntimeError::DriverForkPanicked { .. } => Self::DriverForkPanicked,
-            RuntimeError::DriverForkRollbackFailed { .. } => Self::DriverForkRollbackFailed,
-            RuntimeError::ResourceExhausted { .. } => Self::ResourceExhausted,
-            RuntimeError::CapabilityMismatch { .. } => Self::CapabilityMismatch,
-            RuntimeError::ReservedGeographicEventType { .. } => Self::ReservedGeographicEventType,
-            RuntimeError::GeographicDraft { .. } => Self::GeographicDraft,
-            RuntimeError::ReservedHostDraft { .. } => Self::ReservedHostDraft,
-            RuntimeError::ReservedHostEventType { .. } => Self::ReservedHostEventType,
-            RuntimeError::ReservedConsentEventType { .. } => Self::ReservedConsentEventType,
-            RuntimeError::ConsentDraft { .. } => Self::ConsentDraft,
-            RuntimeError::ConsentOperationUnavailable => Self::ConsentOperationUnavailable,
-            RuntimeError::ErasureOperationUnavailable => Self::ErasureOperationUnavailable,
-            RuntimeError::Consent(_) => Self::Consent,
-            RuntimeError::ErasureContainment(_) => Self::ErasureContainment,
-            RuntimeError::Authority(_) => Self::Authority,
-            RuntimeError::AuthorityFenceRequired => Self::AuthorityFenceRequired,
-            RuntimeError::ScheduledProfile(_) => Self::ScheduledProfile,
-            RuntimeError::AuthorityPersistence(_) => Self::AuthorityPersistence,
-            RuntimeError::PipelineContract(_) => Self::PipelineContract,
-            RuntimeError::ScheduledPassNotAdmitted(_) => Self::ScheduledPassNotAdmitted,
-            RuntimeError::NoScheduledAdmissionInDoubt => Self::NoScheduledAdmissionInDoubt,
-            RuntimeError::DependencyDeclaration(_) => Self::DependencyDeclaration,
-            RuntimeError::CadenceOverflow { .. } => Self::CadenceOverflow,
-            RuntimeError::MissingSnapshotAnchor { .. } => Self::MissingSnapshotAnchor,
-            RuntimeError::SnapshotTimelineMismatch { .. } => Self::SnapshotTimelineMismatch,
-            RuntimeError::PendingDriverStep => Self::PendingDriverStep,
-            RuntimeError::UnappendedDriverOutput => Self::UnappendedDriverOutput,
-            RuntimeError::DriverRecoveryNotFresh { .. } => Self::DriverRecoveryNotFresh,
-            RuntimeError::DriverTickOverflow { .. } => Self::DriverTickOverflow,
-            RuntimeError::InvalidRecoveryEvidence { .. } => Self::InvalidRecoveryEvidence,
-            RuntimeError::CommunityPlugin(_) => Self::CommunityPlugin,
-            RuntimeError::FallbackSwap(_) => Self::FallbackSwap,
-            RuntimeError::Store(_) => Self::Store,
-            RuntimeError::ModeMismatch { .. } => Self::ModeMismatch,
-        }
-    }
+runtime_error_kinds! {
+    ManifestRegistration (_) = 1,
+    ManifestSlot (_) = 2,
+    OutputAdmission (_) = 3,
+    WorldInstallation (_) = 4,
+    Composition (_) = 5,
+    DuplicatePlugin { .. } = 6,
+    UnknownEventType (_) = 7,
+    InvalidPayload { .. } = 8,
+    NoDriver { .. } = 9,
+    DriverPanicked { .. } = 10,
+    DriverAbortPanicked { .. } = 11,
+    DriverCommitPanicked { .. } = 12,
+    DriverRestorePanicked { .. } = 13,
+    DriverForkPanicked { .. } = 14,
+    DriverForkRollbackFailed { .. } = 15,
+    ResourceExhausted { .. } = 16,
+    CapabilityMismatch { .. } = 17,
+    ReservedGeographicEventType { .. } = 18,
+    GeographicDraft { .. } = 19,
+    ReservedHostDraft { .. } = 20,
+    ReservedHostEventType { .. } = 21,
+    ReservedConsentEventType { .. } = 22,
+    ConsentDraft { .. } = 23,
+    ConsentOperationUnavailable = 24,
+    ErasureOperationUnavailable = 25,
+    Consent (_) = 26,
+    ErasureContainment (_) = 27,
+    Authority (_) = 28,
+    AuthorityFenceRequired = 29,
+    ScheduledProfile (_) = 30,
+    AuthorityPersistence (_) = 31,
+    PipelineContract (_) = 32,
+    ScheduledPassNotAdmitted (_) = 33,
+    NoScheduledAdmissionInDoubt = 34,
+    DependencyDeclaration (_) = 35,
+    CadenceOverflow { .. } = 36,
+    MissingSnapshotAnchor { .. } = 37,
+    SnapshotTimelineMismatch { .. } = 38,
+    PendingDriverStep = 39,
+    UnappendedDriverOutput = 40,
+    DriverRecoveryNotFresh { .. } = 41,
+    DriverTickOverflow { .. } = 42,
+    InvalidRecoveryEvidence { .. } = 43,
+    CommunityPlugin (_) = 44,
+    FallbackSwap (_) = 45,
+    Store (_) = 46,
+    ModeMismatch { .. } = 47,
 }
 
 /// One closed host typed failure: its code and, for a runtime failure, the
