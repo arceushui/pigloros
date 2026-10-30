@@ -3,6 +3,10 @@
 //! public seams, `sign_report_attestation_v1` and `verify_report_attestation_v1`, with the
 //! owner decisions of `ADR-062_R8_Report_Attestation_Binding` (split trust steps, subjects bound
 //! to their CNR1 fields).
+//!
+//! The file name sorts before the slow `bundle_contract_*` suites, so `cargo test` (and the
+//! diff-mutation job, whose test phase is bounded) reaches these tests within seconds; they are
+//! the only tests that kill mutants of `report_attestation.rs`.
 
 pub mod support;
 
