@@ -3151,17 +3151,23 @@ fn compute_retained_calibration_report(
         }],
     )
     .map_err(|error| ExperimentError::Store(pos_core::CoreError::Storage(error.to_string())))?;
-    let events = store.read(timeline, pos_core::store::SeqRange::all())?;
     // The retained eval timeline is evaluated whole: every committed Event is available,
     // and a report needs at least one scored record.
-    pos_plugin_eval::compute_report_from_events(
-        &events,
-        &|_| pos_plugin_eval::EvalEvidenceV1::Available,
-        1,
-        artifact_digest,
-        &evaluation,
-    )
-    .map_err(|error| ExperimentError::Store(pos_core::CoreError::Storage(error.to_string())))
+    store
+        .read(timeline, pos_core::store::SeqRange::all())
+        .map_err(ExperimentError::Store)
+        .and_then(|events| {
+            pos_plugin_eval::compute_report_from_events(
+                &events,
+                &|_| pos_plugin_eval::EvalEvidenceV1::Available,
+                1,
+                artifact_digest,
+                &evaluation,
+            )
+            .map_err(|error| {
+                ExperimentError::Store(pos_core::CoreError::Storage(error.to_string()))
+            })
+        })
 }
 
 // The roster of the composition the registry has admitted. A registry that was never admitted,
