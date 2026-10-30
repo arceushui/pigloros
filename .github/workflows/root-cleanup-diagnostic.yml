@@ -34,3 +34,9 @@ jobs:
             2>&1 | tee "${RUNNER_TEMP}/root-cleanup.log"
           grep -q '^test result: ok. 1 passed; 0 failed; 0 ignored;' \
             "${RUNNER_TEMP}/root-cleanup.log"
+          cargo test --package pos-sandboxd --lib --all-features --locked \
+            root_attachment::tests::intent::cases::uncertain_root_publication_rejects_record_substitution_before_cleanup \
+            -- --exact --include-ignored --nocapture \
+            2>&1 | tee "${RUNNER_TEMP}/root-substitution.log"
+          grep -q '^test result: ok. 1 passed; 0 failed; 0 ignored;' \
+            "${RUNNER_TEMP}/root-substitution.log"

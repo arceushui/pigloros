@@ -167,6 +167,73 @@ mod cases {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn uncertain_root_publication_rejects_record_substitution_before_cleanup() -> TestResult {
+        let count = {
+            let tree = prepared_tree()?;
+            let (kernel, root) = attached_root(&tree.prepared)?;
+            let (result, count) = with_io_fault(None, || {
+                recheck(&kernel, &root, &tree.prepared, Some(&root.expected), || {
+                    Ok(())
+                })
+            });
+            result?;
+            count
+        };
+        let mut exercised = [false; 2];
+        for (case, downgrade) in [false, true].into_iter().enumerate() {
+            for fail_at in 0..count {
+                let tree = prepared_tree()?;
+                let (kernel, root) = attached_root(&tree.prepared)?;
+                let key = component(&tree.prepared);
+                let path = tree.runtime.path().join("registry").join(&key);
+                let original = fs::read(&path)?;
+                let (result, observed) = with_io_fault(Some(fail_at), || {
+                    recheck(&kernel, &root, &tree.prepared, Some(&root.expected), || {
+                        Ok(())
+                    })
+                });
+                assert_eq!(result, Err(ImageActivationError::EvidenceMismatch));
+                assert_eq!(observed, fail_at + 1);
+                let mut changed = fs::read(&path)?;
+                if !changed.starts_with(b"PAI3") {
+                    continue;
+                }
+                if downgrade {
+                    changed = original;
+                } else {
+                    // A different, still nonzero mount ID in a complete root record.
+                    changed[88] ^= 1;
+                }
+                fs::write(&path, &changed)?;
+                let reads = kernel.readbacks.load(Ordering::SeqCst);
+                assert_eq!(
+                    detach_owned(root, &kernel, &tree.prepared).await,
+                    Err(ImageActivationError::EvidenceMismatch)
+                );
+                assert_eq!(kernel.detached(), 0);
+                assert_eq!(kernel.readbacks.load(Ordering::SeqCst), reads);
+                assert!(tree.prepared.remove_unmounted().is_err());
+                assert!(tree
+                    .runtime
+                    .path()
+                    .join("attempts")
+                    .join(&key)
+                    .join("root")
+                    .exists());
+                assert_eq!(fs::read(&path)?, changed);
+                assert!(tree
+                    .registry
+                    .commit_planned(&PlannedAttemptIntent::new([8; 16], [9; 32])?)
+                    .is_err());
+                exercised[case] = true;
+                break;
+            }
+        }
+        assert_eq!(exercised, [true; 2]);
+        Ok(())
+    }
+
     #[test]
     fn changed_committed_root_is_not_rewritten_or_released_for_launch() -> TestResult {
         let tree = prepared_tree()?;

@@ -43,6 +43,8 @@ pub struct PreparedAttemptDirectory {
     attempt: File,
     root: File,
     identities: [DirectoryIdentity; 2],
+    // Exact visible bytes after replacement, including an uncertain parent fsync.
+    // This permits verified cleanup without acknowledging durability or launch.
     recorded_root: OnceLock<RootRecord>,
 }
 
@@ -107,6 +109,7 @@ impl CommittedPlannedAttempt {
             sequence,
             &prepared.directory_bytes(),
             RenameFlags::empty(),
+            || {},
         )?;
         prepared.verify_record_and_tree()?;
         Ok(prepared)
@@ -254,12 +257,12 @@ impl PreparedAttemptDirectory {
                             sequence,
                             record.bytes(),
                             RenameFlags::empty(),
+                            || {
+                                let _recorded = self.recorded_root.get_or_init(|| record.clone());
+                            },
                         )
                     })
-                    .and_then(|()| {
-                        let _recorded = self.recorded_root.get_or_init(|| record);
-                        self.verify_record()
-                    })
+                    .and_then(|()| self.verify_record())
             });
         state.failed |= result.is_err();
         result
