@@ -89,6 +89,8 @@ pub mod fork_event_authority;
 pub mod fork_manifest_publication;
 pub mod fork_replay;
 pub mod memory;
+#[cfg(any(test, feature = "test-support"))]
+pub mod owner_store_admission;
 #[cfg(target_os = "linux")]
 pub mod plugin_trust_registry;
 pub mod stitch;
