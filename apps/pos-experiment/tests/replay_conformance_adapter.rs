@@ -484,6 +484,12 @@ fn an_attempt_without_its_composite_is_not_executed() -> TestResult {
         vec![artifact(composite("RCS1", &members, |_| vec![0; 32])?)],
         vec![artifact(composite("RCS1", &members, |_| vec![0; 31])?)],
         vec![artifact(composite("RCS1", &unsorted, blake3_of)?)],
+        // A duplicated entry is not strictly increasing either.
+        vec![artifact(composite(
+            "RCS1",
+            &[members[0], members[0]],
+            blake3_of,
+        )?)],
     ];
     for auxiliary in candidates {
         let mut attempt = base.clone();
