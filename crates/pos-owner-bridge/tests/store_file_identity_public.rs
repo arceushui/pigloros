@@ -1,5 +1,5 @@
 #![cfg(any(test, feature = "test-support"))]
-//! Candidate descriptor identity, not SQLite qualification or store authority.
+//! Candidate descriptor identity, not `SQLite` qualification or store authority.
 #![cfg(target_os = "linux")]
 
 use std::fs::{self, File, Permissions};
