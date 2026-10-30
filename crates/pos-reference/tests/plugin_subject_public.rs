@@ -33,9 +33,9 @@ const IND1_DIGEST: &str = "92adc8f0b327b091f85e847d3fa1f7cb46e16bdd74f389d79b2e6
 /// case in Local and Air-Gapped. `apps/pos-plugin-worker/tests/conformance_adapter_public.rs`
 /// asserts the same literal on the real worker (`POSITIVE_USAGE`); keep the two in step.
 const MEASURED_POSITIVE_USAGE: ResourceUsage = ResourceUsage {
-    memory_bytes: 2,
-    cpu_fuel: 2,
-    host_calls: 2,
+    memory_bytes: 1_179_648,
+    cpu_fuel: 42_604,
+    host_calls: 6,
     event_count: 2,
     output_bytes: 16,
     storage_bytes: 16,

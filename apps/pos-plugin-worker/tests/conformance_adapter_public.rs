@@ -77,15 +77,15 @@ const FORBIDDEN_KEYS: [&str; 5] = ["signature", "verified", "safe", "safety", "q
 /// The Plugin ID of the compatibility prototype guests.
 const PLUGIN_ID: &str = "pigloros.compatibility-prototype";
 
-/// ADR-068 R4 test 8: the usage the real worker measures for `pos.3`, two committed passes
-/// (Simulation Time 42 then 43) of one 8-byte Event and an 8-byte next state each, and so for the
-/// `positive` case, the per-counter maximum over its sub-cases (ADR-068 R4 4.2). The evaluator
-/// half, `crates/pos-reference/tests/plugin_subject_public.rs`, asserts the same literal
-/// (`MEASURED_POSITIVE_USAGE`) at and one below its budget; keep the two in step.
+/// ADR-068 R4 test 8: the usage the real worker measures for `pos.3`, two committed passes of
+/// the Rust guest (Simulation Time 42 then 43), each one 8-byte Event and an 8-byte next state,
+/// and so for the `positive` case, the per-counter maximum over its sub-cases (ADR-068 R4 4.2).
+/// The evaluator half, `crates/pos-reference/tests/plugin_subject_public.rs`, asserts the same
+/// literal (`MEASURED_POSITIVE_USAGE`) at and one below its budget; keep the two in step.
 const POSITIVE_USAGE: ResourceUsage = ResourceUsage {
-    memory_bytes: 2,
-    cpu_fuel: 2,
-    host_calls: 2,
+    memory_bytes: 1_179_648,
+    cpu_fuel: 42_604,
+    host_calls: 6,
     event_count: 2,
     output_bytes: 16,
     storage_bytes: 16,
@@ -93,11 +93,23 @@ const POSITIVE_USAGE: ResourceUsage = ResourceUsage {
     simulation_time_ns: 1,
 };
 
-/// The usage of the one-pass sub-cases `pos.1` and `pos.2`.
-const ONE_PASS_USAGE: ResourceUsage = ResourceUsage {
-    memory_bytes: 2,
-    cpu_fuel: 1,
-    host_calls: 1,
+/// The usage of `pos.1`, one committed pass of the Rust guest.
+const RUST_ONE_PASS_USAGE: ResourceUsage = ResourceUsage {
+    memory_bytes: 1_179_648,
+    cpu_fuel: 21_238,
+    host_calls: 3,
+    event_count: 1,
+    output_bytes: 8,
+    storage_bytes: 8,
+    execution_steps: 1,
+    simulation_time_ns: 0,
+};
+
+/// The usage of `pos.2`, one committed pass of the C guest.
+const C_ONE_PASS_USAGE: ResourceUsage = ResourceUsage {
+    memory_bytes: 131_072,
+    cpu_fuel: 20_841,
+    host_calls: 3,
     event_count: 1,
     output_bytes: 8,
     storage_bytes: 8,
@@ -461,8 +473,8 @@ fn adr068_r4_t8_positive_reports_the_measured_usage_in_local_and_air_gapped() ->
         assert_eq!(
             records,
             [
-                ("pos.1", ONE_PASS_USAGE),
-                ("pos.2", ONE_PASS_USAGE),
+                ("pos.1", RUST_ONE_PASS_USAGE),
+                ("pos.2", C_ONE_PASS_USAGE),
                 ("pos.3", POSITIVE_USAGE),
             ],
             "{mode:?}"
