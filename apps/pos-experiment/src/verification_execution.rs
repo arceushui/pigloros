@@ -296,6 +296,13 @@ fn authoritative_result_digest(actual: &AuthoritativeStreamV1) -> [u8; 32] {
         digest.update(&checkpoint.digest);
         digest.update(&checkpoint.size.to_be_bytes());
     }
+    digest_typed_failures(&mut digest, actual);
+    *digest.finalize().as_bytes()
+}
+
+/// Append the typed-failure count and each typed failure's coordinate and
+/// canonical bytes to the result digest.
+fn digest_typed_failures(digest: &mut blake3::Hasher, actual: &AuthoritativeStreamV1) {
     digest.update(&count(actual.driver_outputs.len()));
     for (coordinate, output) in &actual.driver_outputs {
         digest.update(&coordinate.timeline_id);
@@ -309,7 +316,6 @@ fn authoritative_result_digest(actual: &AuthoritativeStreamV1) -> [u8; 32] {
             &output.outcome;
         digest.update(bytes);
     }
-    *digest.finalize().as_bytes()
 }
 
 fn count(length: usize) -> [u8; 8] {
