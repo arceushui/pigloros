@@ -827,12 +827,11 @@ fn sec_001_an_expected_typed_failure_is_verified_exact_in_both_profiles() -> Tes
         RuntimeErrorKindV1::from(&secret_denied()),
         RuntimeErrorKindV1::CapabilityMismatch
     );
+    let failure = HostFailureV1::from(&ExperimentError::Runtime(secret_denied()));
+    assert_eq!(failure.code(), HostFailureCodeV1::Runtime);
     assert_eq!(
-        HostFailureV1::from(&ExperimentError::Runtime(secret_denied())),
-        HostFailureV1 {
-            code: HostFailureCodeV1::Runtime,
-            runtime_kind: Some(RuntimeErrorKindV1::CapabilityMismatch),
-        }
+        failure.runtime_kind(),
+        Some(RuntimeErrorKindV1::CapabilityMismatch)
     );
     let expected = expected(&[1], Some(SECRET_DENIED_FAILURE))?;
 
@@ -1117,7 +1116,14 @@ fn host_failure_codes_are_closed_and_stable() {
     for (error, code) in &errors {
         let failure = HostFailureV1::from(error);
         let [high, low] = u16::to_be_bytes(*code);
-        let subcode = u16::from(failure.code == HostFailureCodeV1::Runtime) * 17;
+        // Only the runtime case (secret_denied) has a sub-code.
+        let subcode = failure
+            .runtime_kind()
+            .map_or(0, |_| RuntimeErrorKindV1::CapabilityMismatch as u16);
+        assert_eq!(
+            failure.runtime_kind().is_some(),
+            failure.code() == HostFailureCodeV1::Runtime
+        );
         let [kind_high, kind_low] = subcode.to_be_bytes();
         assert_eq!(failure.to_be_bytes(), [high, low, kind_high, kind_low]);
     }
@@ -1133,7 +1139,7 @@ fn host_failure_codes_are_closed_and_stable() {
     let no_driver = HostFailureV1::from(&ExperimentError::Runtime(RuntimeError::NoDriver {
         name: PLUGIN_NAME.to_owned(),
     }));
-    assert_eq!(no_driver.runtime_kind, Some(RuntimeErrorKindV1::NoDriver));
+    assert_eq!(no_driver.runtime_kind(), Some(RuntimeErrorKindV1::NoDriver));
     assert_ne!(no_driver.to_be_bytes(), SECRET_DENIED_FAILURE);
 }
 
@@ -1484,15 +1490,18 @@ fn runtime_errors_33_to_47() -> Vec<(RuntimeError, RuntimeErrorKindV1)> {
 
 #[test]
 fn runtime_error_kinds_are_closed_and_stable() {
-    let kinds = [
+    let cases: Vec<_> = [
         runtime_errors_1_to_16(),
         runtime_errors_17_to_32(),
         runtime_errors_33_to_47(),
     ]
     .into_iter()
-    .flatten();
+    .flatten()
+    .collect();
+    // One case per `RuntimeError` variant, so a missing entry fails here.
+    assert_eq!(cases.len(), 47);
     // Values are stable and follow `RuntimeError` declaration order from 1.
-    for ((error, kind), value) in kinds.zip(1_u16..) {
+    for ((error, kind), value) in cases.into_iter().zip(1_u16..) {
         assert_eq!(RuntimeErrorKindV1::from(&error), kind);
         let failure = HostFailureV1::from(&ExperimentError::Runtime(error));
         let [high, low] = value.to_be_bytes();

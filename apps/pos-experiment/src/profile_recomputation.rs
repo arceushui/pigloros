@@ -200,6 +200,7 @@ macro_rules! runtime_error_kinds {
     };
 }
 
+// Append only; never renumber: these values are part of the result digest.
 runtime_error_kinds! {
     ManifestRegistration (_) = 1,
     ManifestSlot (_) = 2,
@@ -252,15 +253,29 @@ runtime_error_kinds! {
 
 /// One closed host typed failure: its code and, for a runtime failure, the
 /// runtime kind. It carries no error text and no path.
+///
+/// It is built only from an [`ExperimentError`], so its runtime kind is
+/// present exactly when its code is [`HostFailureCodeV1::Runtime`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HostFailureV1 {
-    /// The closed code of the [`ExperimentError`] variant.
-    pub code: HostFailureCodeV1,
-    /// The closed kind of the [`RuntimeError`] of a runtime failure.
-    pub runtime_kind: Option<RuntimeErrorKindV1>,
+    code: HostFailureCodeV1,
+    runtime_kind: Option<RuntimeErrorKindV1>,
 }
 
 impl HostFailureV1 {
+    /// The closed code of the [`ExperimentError`] variant.
+    #[must_use]
+    pub const fn code(self) -> HostFailureCodeV1 {
+        self.code
+    }
+
+    /// The closed kind of the [`RuntimeError`]; `Some` exactly when the code
+    /// is [`HostFailureCodeV1::Runtime`].
+    #[must_use]
+    pub const fn runtime_kind(self) -> Option<RuntimeErrorKindV1> {
+        self.runtime_kind
+    }
+
     /// The canonical bytes of the failure: the code as a big-endian `u16`,
     /// then the sub-code as a big-endian `u16` (the runtime kind, or 0 for
     /// every code other than [`HostFailureCodeV1::Runtime`]).
