@@ -23,6 +23,9 @@ use std::cell::RefCell;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
+/// One recorded trust-admission call: role, key id, artifact digest.
+type AdmissionCall = (ConformanceTrustRoleV1, [u8; 32], [u8; 32]);
+
 /// One edit of a decoded Statement.
 type Edit = fn(&mut Value);
 
@@ -46,7 +49,7 @@ fn other_signer() -> SigningKey {
 struct TrustDouble {
     keys: Vec<VerifyingKey>,
     refusal: Option<ConformanceTrustRefusalV1>,
-    calls: RefCell<Vec<(ConformanceTrustRoleV1, [u8; 32], [u8; 32])>>,
+    calls: RefCell<Vec<AdmissionCall>>,
 }
 
 impl TrustDouble {
@@ -469,14 +472,14 @@ fn every_statement_and_predicate_shape_violation_is_refused() -> TestResult {
     let statement = statement_of(&signed(&passing_cnr1()?)?)?;
     let edits: [(&str, Edit); 26] = [
         ("_type", |s| {
-            s["_type"] = json!("https://in-toto.io/Statement/v0.1")
+            s["_type"] = json!("https://in-toto.io/Statement/v0.1");
         }),
         ("predicateType", |s| {
             s["predicateType"] =
                 json!("https://piglor.com/pigloros/attestation/conformance-report/v2");
         }),
         ("schema", |s| {
-            s["predicate"]["schema"] = json!("PiglorOS.ConformanceReportPredicate.v2")
+            s["predicate"]["schema"] = json!("PiglorOS.ConformanceReportPredicate.v2");
         }),
         ("signature_meaning", |s| {
             s["predicate"]["signature_meaning"] = json!("correctness");
@@ -488,7 +491,7 @@ fn every_statement_and_predicate_shape_violation_is_refused() -> TestResult {
             }
         }),
         ("extra predicate member", |s| {
-            s["predicate"]["extra"] = json!(true)
+            s["predicate"]["extra"] = json!(true);
         }),
         ("predicate not an object", |s| s["predicate"] = json!([])),
         ("four subjects", |s| {
@@ -498,7 +501,7 @@ fn every_statement_and_predicate_shape_violation_is_refused() -> TestResult {
         }),
         ("subject not an array", |s| s["subject"] = json!({})),
         ("subject not an object", |s| {
-            s["subject"][4] = json!("evaluator-binary")
+            s["subject"][4] = json!("evaluator-binary");
         }),
         ("subjects reordered", |s| {
             if let Some(subjects) = s["subject"].as_array_mut() {
@@ -520,7 +523,7 @@ fn every_statement_and_predicate_shape_violation_is_refused() -> TestResult {
             s["subject"][2]["digest"]["blake3"] = json!(upper);
         }),
         ("short sha256 digest", |s| {
-            s["subject"][1]["digest"]["sha256"] = json!("00")
+            s["subject"][1]["digest"]["sha256"] = json!("00");
         }),
         ("independence not boolean", |s| {
             s["predicate"]["independence"]["technical"] = json!("true");
@@ -535,13 +538,13 @@ fn every_statement_and_predicate_shape_violation_is_refused() -> TestResult {
             s["predicate"]["independence"]["shared_code"] = json!(false);
         }),
         ("report_cnr1 not base64", |s| {
-            s["predicate"]["report_cnr1"] = json!("%%%%")
+            s["predicate"]["report_cnr1"] = json!("%%%%");
         }),
         ("report_cnr1 not text", |s| {
-            s["predicate"]["report_cnr1"] = json!(7)
+            s["predicate"]["report_cnr1"] = json!(7);
         }),
         ("report_digest short", |s| {
-            s["predicate"]["report_digest"] = json!("abcd")
+            s["predicate"]["report_digest"] = json!("abcd");
         }),
         ("diagnostics digest invalid", |s| {
             s["predicate"]["diagnostics_digest_or_null"] = json!("zz");
