@@ -3,6 +3,7 @@
 //! each sub-case through the slice R2 and R3 execution steps.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use pos_conformance::{
@@ -23,8 +24,8 @@ use pos_state::ProjectionRegistry;
 use pos_store::StoreConfig;
 
 use super::payload::{
-    hex, ClosureV1, DigestSizeV1 as DigestSizeRecordV1, DivergenceV1, FirstErrorV1, LegV1,
-    ManifestFieldsV1, ProfileV1, RecordV1, ScriptV1, SubCaseV1,
+    hex, ClosureV1, CompositionV1, DigestSizeV1 as DigestSizeRecordV1, DivergenceV1, FirstErrorV1,
+    LegV1, ManifestFieldsV1, ProfileV1, RecordV1, ScriptV1, SubCaseV1,
 };
 use crate::profile_recomputation::{
     execute_cross_profile_conformance_v1, execute_profile_recomputation_v1,
@@ -214,8 +215,11 @@ impl LegRequestV1 {
 }
 
 /// Counts every Event per entity from a zero the initial State seeds; the one
-/// Projection of every run.
-struct CountReducer;
+/// Projection of every run. `folded` counts every Event the attempt folds
+/// (replayed or recomputed), the attempt's metered Event count.
+struct CountReducer {
+    folded: Arc<AtomicU64>,
+}
 
 impl Reducer for CountReducer {
     fn initial(&self) -> State {
@@ -226,6 +230,7 @@ impl Reducer for CountReducer {
 
     /// Increment the counter the initial State seeds.
     fn apply(&self, state: &mut State, _event: &Event) {
+        self.folded.fetch_add(1, Ordering::Relaxed);
         let next = state
             .get("count")
             .and_then(serde_json::Value::as_u64)
@@ -237,19 +242,33 @@ impl Reducer for CountReducer {
 }
 
 /// A fresh Projection registry: the counting Reducer behind a host-bound
-/// erasure gate. The gate is the open fixture gate: the adapter has no
-/// verified erasure inventory for an imported export (Local-relaxation
-/// engineering evidence).
-fn projections() -> ProjectionRegistry {
+/// erasure gate. The gate is the open fixture gate: the adapter has no verified erasure inventory for an
+/// imported export (Local-relaxation engineering evidence).
+fn projections(folded: &Arc<AtomicU64>) -> ProjectionRegistry {
     let mut projections = ProjectionRegistry::new()
         .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
-    projections.register(REDUCER, Box::new(CountReducer));
+    projections.register(
+        REDUCER,
+        Box::new(CountReducer {
+            folded: Arc::clone(folded),
+        }),
+    );
     projections
 }
 
 struct SubjectPlugin {
     id: PluginId,
     event_type: Kind,
+}
+
+impl SubjectPlugin {
+    /// The one Plugin of `script`.
+    fn of(script: &ScriptV1) -> Self {
+        Self {
+            id: PluginId::new(),
+            event_type: Kind::new(script.event_type.clone()),
+        }
+    }
 }
 
 impl Plugin for SubjectPlugin {
@@ -276,6 +295,24 @@ impl Plugin for SubjectPlugin {
 struct ScriptDriver {
     script: ScriptV1,
     tick: u64,
+}
+
+impl ScriptDriver {
+    /// The one Driver of `script`, before its first Tick.
+    fn of(script: &ScriptV1) -> Self {
+        Self {
+            script: script.clone(),
+            tick: 0,
+        }
+    }
+}
+
+/// The Plugin and Driver names `script` composes, as its record reports them.
+fn composition(script: &ScriptV1) -> CompositionV1 {
+    CompositionV1 {
+        plugin: SubjectPlugin::of(script).name().to_owned(),
+        driver: ScriptDriver::of(script).name().to_owned(),
+    }
 }
 
 impl Driver for ScriptDriver {
@@ -326,15 +363,9 @@ impl RecomputationSubjectV1 for ScriptV1 {
         _profile: &ExecutionProfileV1,
     ) -> Result<(), RuntimeError> {
         experiment.register_generated(
-            &SubjectPlugin {
-                id: PluginId::new(),
-                event_type: Kind::new(self.event_type.clone()),
-            },
+            &SubjectPlugin::of(self),
             None,
-            Some(Box::new(ScriptDriver {
-                script: self.clone(),
-                tick: 0,
-            })),
+            Some(Box::new(ScriptDriver::of(self))),
         )
     }
 }
@@ -354,6 +385,13 @@ pub(super) fn run_subcase(
         .map(|profile| host.request(&subcase.manifest, subcase.class, *profile, mode))
         .collect();
     let licence = subcase.licence.as_deref();
+    let folded = Arc::new(AtomicU64::new(0));
+    let composed = match &subcase.closure {
+        ClosureV1::Recorded { .. } => None,
+        ClosureV1::Recomputed { subject, .. } => {
+            subject.as_ref().map(|(script, _)| composition(script))
+        }
+    };
     let outcomes: Option<Vec<VerificationExecutionOutcomeV1>> = match &subcase.closure {
         ClosureV1::Recorded { export, evaluation } => execute_recorded_replay_v1(
             RecordedReplayInputV1 {
@@ -371,7 +409,7 @@ pub(super) fn run_subcase(
                 expected: &subcase.expected,
                 fixture_digest: Some(fixture_digest),
             },
-            &mut projections(),
+            &mut projections(&folded),
         )
         .ok()
         .map(|outcome| vec![outcome]),
@@ -396,7 +434,7 @@ pub(super) fn run_subcase(
                         fixture_digest: Some(fixture_digest),
                         store_config: store_config.clone(),
                     },
-                    &mut projections(),
+                    &mut projections(&folded),
                 )
                 .ok()
                 .map(|outcome| vec![outcome.local, outcome.air_gapped])
@@ -409,7 +447,7 @@ pub(super) fn run_subcase(
                         fixture_digest: Some(fixture_digest),
                         store_config: store_config.clone(),
                     },
-                    &mut projections(),
+                    &mut projections(&folded),
                 )
                 .ok()
                 .map(|outcome| vec![outcome])
@@ -419,6 +457,8 @@ pub(super) fn run_subcase(
     outcomes.map(|outcomes| RecordV1 {
         id: subcase.id.clone(),
         fixture_id: subcase.fixture_id.clone(),
+        composition: composed,
+        folded_events: folded.load(Ordering::Relaxed),
         legs: subcase
             .profiles
             .iter()
@@ -461,33 +501,5 @@ fn digest_size(value: &DigestSizeV1) -> DigestSizeRecordV1 {
     DigestSizeRecordV1 {
         digest: value.digest.map(|digest| hex(&digest)),
         size: value.size,
-    }
-}
-
-#[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
-mod tests {
-    use super::*;
-
-    /// The subject's Plugin and Driver are named `replay-subject`; nothing
-    /// in a `VRR1` carries the name, so it is pinned here.
-    #[test]
-    fn the_subject_plugin_and_driver_carry_the_subject_name() {
-        let plugin = SubjectPlugin {
-            id: PluginId::new(),
-            event_type: Kind::new("replay.count"),
-        };
-        assert_eq!(plugin.name(), SUBJECT_PLUGIN);
-        let driver = ScriptDriver {
-            script: ScriptV1 {
-                entity: pos_core::ids::EntityId::new(),
-                event_type: "replay.count".to_owned(),
-                drafts: Vec::new(),
-                failure: None,
-            },
-            tick: 0,
-        };
-        assert_eq!(driver.name(), SUBJECT_PLUGIN);
-        assert_eq!(SUBJECT_PLUGIN, "replay-subject");
     }
 }

@@ -31,8 +31,9 @@
 //!    `namespaced-failure` family returns its family failure when every leg
 //!    is as expected, else `subcase-mismatch`.
 //!
-//! The adapter meters one execution step per leg; its other usage counters
-//! are 0. It is compiled only with the `test-support` feature: the run uses
+//! The adapter meters one execution step per leg and the Event count: every
+//! Event the attempt folds, replayed or recomputed (a run refused before its
+//! fold counts none). Its other usage counters are 0. It is compiled only with the `test-support` feature: the run uses
 //! the open fixture erasure gate and the generated Plugin registration of
 //! the Experiment host. Results are Local-relaxation engineering evidence,
 //! not hosted conformance.
@@ -227,6 +228,7 @@ fn decide(
                 || unmeasured(SubjectResult::Unavailable),
                 |records| {
                     let legs: usize = records.iter().map(|(record, _)| record.legs.len()).sum();
+                    let events: u64 = records.iter().map(|(record, _)| record.folded_events).sum();
                     let matched = records.iter().all(|(_, matched)| *matched);
                     let result = failure_code(attempt.family).map_or_else(
                         || {
@@ -243,6 +245,7 @@ fn decide(
                     SubjectObservation {
                         result,
                         usage: ResourceUsage {
+                            event_count: events,
                             execution_steps: u64::try_from(legs).unwrap_or(u64::MAX),
                             ..ResourceUsage::default()
                         },

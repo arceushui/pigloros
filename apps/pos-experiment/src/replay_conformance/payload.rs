@@ -461,7 +461,24 @@ fn closure(text: &SubCaseTextV1, members: &MembersV1) -> Option<ClosureV1> {
                 .map_or(Some(None), |subject| subject.map(Some))
                 .map(|subject| ClosureV1::Recomputed { subject, ticks })
         }),
-        _ => None,
+        // A recorded export needs its ADR-060 evaluation and has no Ticks; a
+        // recomputation has Ticks and no export evaluation.
+        (ClassV1::RecordedReplay, None, _)
+        | (ClassV1::RecordedReplay, Some(_), Some(_))
+        | (
+            ClassV1::ProfileRecomputation
+            | ClassV1::CrossProfileConformance
+            | ClassV1::LiveUnverified,
+            Some(_),
+            _,
+        )
+        | (
+            ClassV1::ProfileRecomputation
+            | ClassV1::CrossProfileConformance
+            | ClassV1::LiveUnverified,
+            None,
+            None,
+        ) => None,
     }
 }
 
@@ -678,5 +695,18 @@ pub(super) fn output_record(case_id: &str, family_text: &str, subcases: &[Record
 pub(super) struct RecordV1 {
     pub(super) id: String,
     pub(super) fixture_id: Option<String>,
+    /// The Plugin and Driver a recomputation subject composed; `None` for a
+    /// `RecordedReplay` or a missing subject.
+    pub(super) composition: Option<CompositionV1>,
     pub(super) legs: Vec<LegV1>,
+    /// The Events the sub-case folded; metered, not part of the record.
+    #[serde(skip)]
+    pub(super) folded_events: u64,
+}
+
+/// The names of the Plugin and Driver one recomputation subject composed.
+#[derive(Clone, Debug, Serialize)]
+pub(super) struct CompositionV1 {
+    pub(super) plugin: String,
+    pub(super) driver: String,
 }

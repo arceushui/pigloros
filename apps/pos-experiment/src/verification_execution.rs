@@ -40,6 +40,13 @@
 //! | 2 | recomputation subject (`ProfileRecomputation`, `CrossProfileConformance`, `LiveUnverified`) | the subject's artifact digest |
 //! | 3 | licence | BLAKE3 of the licence member bytes |
 //!
+//! The execution member is exactly one of roles 1 and 2: the two are never
+//! both present, and the same digest under different roles gives different
+//! closures. A present but empty licence counts as absent: it is refused at
+//! closure presence (`ClosureIncomplete`) and never hashed. The composition
+//! is recorded on the wiki note `ADR-062_R8_Recorded_Replay_Digests`,
+//! section 4.
+//!
 //! A complete member set whose composition is not the request's digest is
 //! refused at `artifact_closure` with `DigestMismatch` (`InvalidManifest`),
 //! unless the preflight reports an earlier coordinate first: the preflight
@@ -244,6 +251,12 @@ pub(crate) fn preflight_bound_closure(
         preflight_verification_v1(preflight)
             .map_err(|error| preflight_refusal(error, declared_claim))
     } else {
+        // The ordering is the preflight's own, not this function's: the
+        // unchanged preflight runs with `Incomplete` closure evidence, so any
+        // error at a coordinate it checks before `artifact_closure` is its
+        // first error, and only its `ClosureIncomplete` becomes the mismatch.
+        // `closure_members_that_do_not_compose_the_request_digest_are_refused`
+        // in `tests/recorded_replay.rs` pins this with a format-version error.
         let refusal = refuse_incomplete_closure(VerificationPreflightInputV1 {
             evidence: preflight.evidence.clone(),
             ..*preflight

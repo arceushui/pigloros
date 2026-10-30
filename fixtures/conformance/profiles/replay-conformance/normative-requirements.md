@@ -54,14 +54,19 @@ request's `artifact_closure_digest`: BLAKE3 over
 `PiglorOS.RecordedReplayClosure.v1`, a zero byte, the member count (2, `u64`
 big endian) and each member in role order as its one-byte role and its 32-byte
 artifact digest. The roles are 1 (exported Timeline), 2 (recomputation subject)
-and 3 (licence); the artifact digest is the BLAKE3 of the member bytes. A
+and 3 (licence); the artifact digest is the BLAKE3 of the member bytes. Roles
+1 and 2 are never both present. A present but empty licence counts as absent:
+it is refused at closure presence and never hashed. A
 complete member set whose composition is not the request's digest is refused at
 `artifact_closure` with `DigestMismatch` (`InvalidManifest`), after any earlier
 preflight coordinate.
 
 ## Results
 
-A `canonical-output` family outputs its record of every sub-case and leg; a
+A `canonical-output` family outputs its record of every sub-case: its id, its
+W8H1 entry, the Plugin and Driver a recomputation subject composed
+(`composition`, or null), and its legs; a
 `namespaced-failure` family returns its family failure when every leg is as
 expected, and otherwise `subcase-mismatch`. A payload outside this grammar is
-the failure `payload-invalid`.
+the failure `payload-invalid`. The adapter meters one execution step per leg and
+the Event count (every Event it folds).

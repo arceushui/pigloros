@@ -288,6 +288,36 @@ fn oracle_legs(family: FixtureFamily) -> TestResult<u64> {
     Ok(u64::try_from(legs)?)
 }
 
+/// The Events the attempt of `family` folds, from its fixture files: the
+/// expected-stream Events of every leg whose oracle records a result digest
+/// (a run refused before its fold records none).
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn folded_events(family: FixtureFamily) -> TestResult<u64> {
+    let name = family_name(family);
+    let payload: Value =
+        serde_json::from_slice(&read(&format!("inputs/replay-conformance/{name}.json"))?)?;
+    let record: Value = serde_json::from_slice(&oracle(family)?)?;
+    let entries = record["output"]["subcases"]
+        .as_array()
+        .or_else(|| record["subcases"].as_array())
+        .ok_or("no sub-cases")?;
+    let subcases = payload["subcases"].as_array().ok_or("no sub-cases")?;
+    let mut total = 0;
+    for (entry, subcase) in entries.iter().zip(subcases) {
+        let events = subcase["expected_stream"]["events"]
+            .as_array()
+            .map_or(0, Vec::len);
+        let folded_legs = entry["legs"]
+            .as_array()
+            .ok_or("no legs")?
+            .iter()
+            .filter(|leg| !leg["authoritative_result_digest"].is_null())
+            .count();
+        total += events * folded_legs;
+    }
+    Ok(u64::try_from(total)?)
+}
+
 /// The evaluator's budget rule: no counter above the family budget.
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn assert_within(usage: &ResourceUsage, budget: &DeterministicBudget) {
@@ -332,6 +362,7 @@ fn every_family_meets_its_oracle_through_the_process_boundary() -> TestResult {
                 "{family:?} in {mode:?}"
             );
             assert_eq!(observation.usage.execution_steps, oracle_legs(family)?);
+            assert_eq!(observation.usage.event_count, folded_events(family)?);
             assert_within(&observation.usage, &attempt.budget);
         }
     }
@@ -511,7 +542,7 @@ fn a_payload_outside_the_grammar_is_payload_invalid() -> TestResult {
     let licence = blake3::hash(b"SPDX-License-Identifier: MIT\n")
         .to_hex()
         .to_string();
-    let invalid: [fn(&mut Value); 14] = [
+    let invalid: [fn(&mut Value); 16] = [
         |payload: &mut Value| payload["schema"] = json!("pigloros.replay-conformance.case.v1"),
         |payload: &mut Value| payload["family"] = json!("denied"),
         |payload: &mut Value| payload["subcases"] = json!([]),
@@ -523,6 +554,8 @@ fn a_payload_outside_the_grammar_is_payload_invalid() -> TestResult {
             payload["subcases"][2]["profiles"] = json!(["deterministic-local-v1"]);
         },
         |payload: &mut Value| payload["subcases"][0]["ticks"] = json!(3),
+        |payload: &mut Value| payload["subcases"][0]["export_evaluation"] = Value::Null,
+        |payload: &mut Value| payload["subcases"][1]["ticks"] = Value::Null,
         |payload: &mut Value| {
             payload["subcases"][1]["export_evaluation"] =
                 json!({"rule": "PreserveExact", "state": "Retained"});
@@ -681,5 +714,47 @@ fn a_host_that_cannot_start_makes_the_attempt_unavailable() -> TestResult {
     let observation = observe_with(&unreachable, &attempt)?;
     assert_eq!(observation.result, SubjectResult::Unavailable);
     assert_eq!(observation.usage, ResourceUsage::default());
+    Ok(())
+}
+
+#[test]
+fn a_present_but_empty_licence_is_refused_at_closure_presence() -> TestResult {
+    use ciborium::value::Value as Cbor;
+    let base = attempt(FixtureFamily::Positive, ExecutionMode::Local)?;
+    let composite: Cbor =
+        ciborium::from_reader(read("inputs/replay-conformance/positive.rcs1")?.as_slice())?;
+    let Cbor::Array(fields) = composite else {
+        return Err("the composite is an array".into());
+    };
+    let Some(Cbor::Array(entries)) = fields.get(2) else {
+        return Err("the composite has entries".into());
+    };
+    let mut members: Vec<Vec<u8>> = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            Cbor::Array(pair) => match pair.get(1) {
+                Some(Cbor::Bytes(bytes)) => Some(bytes.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    members.push(Vec::new());
+    let slices: Vec<&[u8]> = members.iter().map(Vec::as_slice).collect();
+    let mut attempt = with_payload(base, |payload| {
+        payload["subcases"][1]["closure"]["licence"] =
+            json!(blake3::hash(b"").to_hex().to_string());
+    })?;
+    attempt.auxiliary = vec![artifact(composite("RCS1", &sorted(&slices), blake3_of)?)];
+    let observation = observe(&attempt)?;
+    let SubjectResult::Output(bytes) = observation.result else {
+        return Err("a positive case outputs its record".into());
+    };
+    let record: Value = serde_json::from_slice(&bytes)?;
+    let leg = &record["output"]["subcases"][1]["legs"][0];
+    assert_eq!(leg["outcome"], "UnverifiableArtifactsMissing");
+    assert_eq!(leg["first_error"]["code"], "ClosureIncomplete");
+    assert_eq!(leg["first_error"]["coordinate"], "artifact_closure");
+    assert_eq!(leg["authoritative_result_digest"], Value::Null);
     Ok(())
 }

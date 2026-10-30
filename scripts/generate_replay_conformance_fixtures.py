@@ -818,8 +818,18 @@ def subcase_object(sub: SubCase) -> dict:
     }
 
 
+# The Plugin and Driver a recomputation subject composes on the host.
+SUBJECT_COMPOSITION = {"plugin": "replay-subject", "driver": "replay-subject"}
+
+
 def oracle_entry(sub: SubCase) -> dict:
-    return {"id": sub.id, "fixture_id": sub.fixture_id, "legs": sub.expect}
+    composed = sub.role == ROLE_RECOMPUTATION_SUBJECT and sub.primary is not None
+    return {
+        "id": sub.id,
+        "fixture_id": sub.fixture_id,
+        "composition": SUBJECT_COMPOSITION if composed else None,
+        "legs": sub.expect,
+    }
 
 
 def composite(subcases: list[SubCase]) -> bytes:

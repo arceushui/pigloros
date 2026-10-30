@@ -19,9 +19,14 @@ It runs each sub-case of the payload through the `RecordedReplay` and
 `ProfileRecomputation` / `CrossProfileConformance` execution steps and compares
 the `VRR1` of every leg with the sub-case's expected legs.
 
-The adapter and the binary are compiled only with the `test-support` feature
-(it runs on the open fixture erasure gate and the generated Plugin
-registration): `cargo build -p pos-experiment --features test-support`. Results are Local-relaxation engineering evidence,
+The Experiment host binary is the replay subject adapter (ADR-062 Revision 8
+section 3.1 option A). The adapter and the binary are compiled only with the
+`test-support` feature, because they run on the open fixture erasure gate and the
+generated Plugin registration: a normal build produces no `pos-experiment`
+binary. Build it with `cargo build -p pos-experiment --features test-support`.
+Its Draft limitations are listed on the wiki note
+`ADR-062_R8_Recorded_Replay_Digests`, section 7, and in
+`fixtures/conformance/support/limitations.md`. Results are Local-relaxation engineering evidence,
 not hosted conformance. The fixtures are `fixtures/conformance` layer
 `replay-conformance`, written by `scripts/generate_replay_conformance_fixtures.py`.
 
