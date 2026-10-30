@@ -1,6 +1,7 @@
-//! RFC 8785 canonical JSON (JCS): the writer of the Plugin conformance oracle record (ADR-061
-//! revision 8 decision 2) and of the ADR-062 Revision 8 report attestation (#1236), and a
-//! canonical-only reader.
+//! RFC 8785 canonical JSON (JCS): a writer and a canonical-only reader.
+//!
+//! It writes the Plugin conformance oracle record (ADR-061 revision 8 decision 2) and the
+//! ADR-062 Revision 8 report attestation (#1236).
 //!
 //! Object members are sorted by the UTF-16 code units of their keys, strings escape `"`, `\`
 //! and control characters (`\b`, `\t`, `\n`, `\f`, `\r`, otherwise lowercase `\u00xx`), numbers

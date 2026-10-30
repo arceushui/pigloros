@@ -1,5 +1,6 @@
-//! DSSE (the in-toto Envelope) with exactly one Ed25519 signature over the PAE, as the ADR-062
-//! Revision 8 report attestation uses it (section 5.1, slice G1, #1236).
+//! DSSE (the in-toto Envelope) with exactly one Ed25519 signature over the PAE.
+//!
+//! The ADR-062 Revision 8 report attestation uses it (section 5.1, slice G1, #1236).
 //!
 //! The envelope is the RFC 8785 canonical JSON object
 //! `{"payload":…,"payloadType":…,"signatures":[{"keyid":…,"sig":…}]}`. `payload` and `sig` are
