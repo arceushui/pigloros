@@ -116,7 +116,8 @@ fn text<'a>(value: &'a Json, key: &str) -> Result<&'a str, Box<dyn std::error::E
         .ok_or_else(|| missing(key))
 }
 
-/// The canonical `MTR1`/`MQR1` bytes of each result sub-case, by sub-case id.
+/// The canonical `MTR1`/`MQR1` bytes of each result sub-case, by sub-case id. Entries
+/// without bytes (the generator check `ind.2`) carry no output.
 fn oracle_outputs(oracle: &Json) -> Result<BTreeMap<String, Vec<u8>>, Box<dyn std::error::Error>> {
     oracle
         .pointer("/output/subcases")
@@ -124,7 +125,8 @@ fn oracle_outputs(oracle: &Json) -> Result<BTreeMap<String, Vec<u8>>, Box<dyn st
         .cloned()
         .unwrap_or_default()
         .iter()
-        .map(|entry| Ok((text(entry, "id")?.to_owned(), hex(text(entry, "hex")?)?)))
+        .filter_map(|entry| Some((entry.get("id")?.as_str()?, entry.get("hex")?.as_str()?)))
+        .map(|(id, bytes)| Ok((id.to_owned(), hex(bytes)?)))
         .collect()
 }
 
