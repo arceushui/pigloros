@@ -319,6 +319,7 @@ fn reject_protected_history(
 
 pub mod authoritative_comparison;
 pub mod moat_proof;
+pub mod recorded_replay;
 
 // ---------------------------------------------------------------------------
 // Public types
