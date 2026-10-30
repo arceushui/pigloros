@@ -107,11 +107,10 @@ use pos_store::StoreConfig;
 use crate::authoritative_comparison::{
     AuthoritativeStreamV1, ComparedDriverOutputV1, DriverOutcomeV1, DriverOutputCoordinateV1,
 };
-pub use crate::verification_execution::recomputation_closure_digest_v1;
 use crate::verification_execution::{
     admit_class, authoritative_stream, event_count, incompatible, preflight_bound_closure,
-    rebuild_projections, refuse_incomplete_closure, resource_limit_exceeded, Refusal, ResultHeader,
-    VerificationExecutionOutcomeV1,
+    rebuild_projections, recomputation_closure_digest_v1, refuse_incomplete_closure,
+    resource_limit_exceeded, Refusal, ResultHeader, VerificationExecutionOutcomeV1,
 };
 use crate::{Experiment, ExperimentConfig, ExperimentError, ExperimentSession, StopCondition};
 
