@@ -68,7 +68,7 @@ fn the_reader_accepts_exactly_the_canonical_encoding() {
         &br#"{"b":{},"a":[]}"#[..],
         br#"{"a":[], "b":{}}"#,
         br#"{"a":1,"a":2}"#,
-        br#"{"a":"A"}"#,
+        br#"{"a":"\u0041"}"#,
         br#"{"a":-1}"#,
         br#"{"a":1.5}"#,
         br#"{"a":1e2}"#,
