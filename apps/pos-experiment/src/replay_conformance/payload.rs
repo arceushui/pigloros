@@ -634,7 +634,7 @@ pub(super) fn hex_bytes(text: &str) -> Option<Vec<u8>> {
         .map(|digits| {
             digits
                 .chunks_exact(2)
-                .map(|pair| (pair[0] << 4) | pair[1])
+                .map(|pair| pair[0] * 16 + pair[1])
                 .collect()
         })
 }
