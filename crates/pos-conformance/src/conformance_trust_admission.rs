@@ -1,7 +1,10 @@
-//! The evaluator/report trust-admission seam of ADR-062 Revision 8 section 5.2.
+//! The evaluator/report trust seam of ADR-062 Revision 8 section 5.2, in two steps.
 //!
-//! Slice G1 (#1236) defines only the port the report-attestation verifier calls between the
-//! `payloadType` check and the signature check. Slice G2 (#1237) implements it over the
+//! The owner decisions of 2026-10-30 (`ADR-062_R8_Report_Attestation_Binding`) split the seam.
+//! Slice G1 (#1236) defines only the two port steps the report-attestation verifier calls: key
+//! admission before the signature check, which sees nothing but the role and the key id, and
+//! artifact revocation after the embedded CNR1 report is parsed, which sees the report digest
+//! and the evaluator binary digest from that report. Slice G2 (#1237) implements both over the
 //! `ConformanceTrustPolicyV1` (CTP1) record bound to TPS1; G1 tests use a test double.
 
 use ed25519_dalek::VerifyingKey;
@@ -15,14 +18,14 @@ pub enum ConformanceTrustRoleV1 {
     ReportSigning,
 }
 
-/// Why a conformance key was not admitted.
+/// Why a conformance signing key was not admitted.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub enum ConformanceTrustRefusalV1 {
+pub enum ConformanceKeyRefusalV1 {
     /// No root of the policy has this key id.
     UnknownRoot,
     /// The key is a root for another role.
     RoleMismatch,
-    /// The key or the artifact digest is revoked.
+    /// The key is revoked.
     Revoked,
     /// The policy chain went back to a lower epoch or dropped a revocation.
     RolledBack,
@@ -30,16 +33,34 @@ pub enum ConformanceTrustRefusalV1 {
     SnapshotStale,
 }
 
-/// Admits a key id for a role and resolves it to its verifying key.
+/// Why an attested artifact was refused.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub enum ConformanceArtifactRefusalV1 {
+    /// The CNR1 report digest is revoked.
+    RevokedReport,
+    /// The evaluator binary digest is revoked.
+    RevokedEvaluatorBinary,
+}
+
+/// The two trust steps of report-attestation verification.
 pub trait ConformanceTrustAdmissionPortV1 {
-    /// Admit `key_id` for `role` over the artifact with BLAKE3 digest `artifact_digest`.
+    /// Admit `key_id` for `role` and resolve it to its verifying key.
     ///
     /// # Errors
     /// Returns the closed refusal when the key is not admitted for `role`.
-    fn admit(
+    fn admit_key(
         &self,
         role: ConformanceTrustRoleV1,
         key_id: &[u8; 32],
-        artifact_digest: &[u8; 32],
-    ) -> Result<VerifyingKey, ConformanceTrustRefusalV1>;
+    ) -> Result<VerifyingKey, ConformanceKeyRefusalV1>;
+
+    /// Refuse a revoked CNR1 report digest or evaluator binary digest.
+    ///
+    /// # Errors
+    /// Returns the closed refusal when either digest is revoked.
+    fn check_artifact_revocation(
+        &self,
+        report_digest: &[u8; 32],
+        evaluator_binary_digest: &[u8; 32],
+    ) -> Result<(), ConformanceArtifactRefusalV1>;
 }

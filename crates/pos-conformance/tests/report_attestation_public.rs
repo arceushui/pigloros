@@ -1,17 +1,22 @@
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 //! ADR-062 Revision 8 slice G1 (#1236): the signed conformance-report attestation through its
-//! public seams, `sign_report_attestation_v1` and `verify_report_attestation_v1`.
+//! public seams, `sign_report_attestation_v1` and `verify_report_attestation_v1`, with the
+//! owner decisions of `ADR-062_R8_Report_Attestation_Binding` (split trust steps, subjects bound
+//! to their CNR1 fields).
+
+pub mod support;
 
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use pos_conformance::{
-    sign_report_attestation_v1, verify_report_attestation_v1, CaseOutcomeStatusV1, CaseOutcomeV1,
-    ClaimLayerV1, ConformanceReportV1, ConformanceTrustAdmissionPortV1, ConformanceTrustRefusalV1,
-    ConformanceTrustRoleV1, ExecutionModeV1, ImplementationIdentityV1, IndependenceEvidenceV1,
-    RedactionStateV1, ReplayClaimV1, ReportAttestationArtifactsV1,
-    ReportAttestationErrorV1 as Error, SignatureMeaningV1, MAX_REPORT_ATTESTATION_BYTES_V1,
-    REPORT_ATTESTATION_SUBJECT_NAMES_V1,
+    sign_report_attestation_v1, verify_report_attestation_v1, BoundSubjectV1, BundleMemberRoleV1,
+    CaseOutcomeStatusV1, CaseOutcomeV1, ClaimLayerV1, ConformanceArtifactRefusalV1,
+    ConformanceBundleV1, ConformanceKeyRefusalV1, ConformanceProfileV1, ConformanceReportV1,
+    ConformanceTrustAdmissionPortV1, ConformanceTrustRoleV1, ExecutionModeV1,
+    ImplementationIdentityV1, IndependenceEvidenceV1, RedactionStateV1, ReplayClaimV1,
+    ReportAttestationArtifactsV1, ReportAttestationErrorV1 as Error, SignatureMeaningV1,
+    MAX_REPORT_ATTESTATION_BYTES_V1, REPORT_ATTESTATION_SUBJECT_NAMES_V1,
 };
 use pos_crypto::dsse::{
     key_id_v1, DsseEnvelopeV1, DsseParseErrorV1, DsseSignatureErrorV1, IN_TOTO_PAYLOAD_TYPE_V1,
@@ -20,21 +25,66 @@ use pos_crypto::jcs::JsonV1;
 use serde_json::{json, Value};
 use sha2::{Digest as _, Sha256};
 use std::cell::RefCell;
+use std::sync::OnceLock;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
-/// One recorded trust-admission call: role, key id, artifact digest.
-type AdmissionCall = (ConformanceTrustRoleV1, [u8; 32], [u8; 32]);
+/// One recorded artifact-revocation call: report digest, evaluator binary digest.
+type RevocationCall = ([u8; 32], [u8; 32]);
 
 /// One edit of a decoded Statement.
 type Edit = fn(&mut Value);
 
-const ARTIFACTS: ReportAttestationArtifactsV1<'static> = ReportAttestationArtifactsV1 {
-    subject_artifact: b"subject artifact",
-    profile_cpf1: b"CPF1 profile",
-    fixture_bundle: b"fixture bundle",
-    evaluator_binary: b"evaluator binary",
-};
+/// One edit of a CNR1 report before its self digest is recomputed.
+type ReportEdit = fn(&mut ConformanceReportV1);
+
+const SUBJECT_ARTIFACT: &[u8] = b"subject artifact";
+const EVALUATOR_BINARY: &[u8] = b"evaluator binary";
+
+/// The materialized CFB1 archive, its CPF1 profile member and that profile's digest.
+struct Fixture {
+    archive: Vec<u8>,
+    profile: Vec<u8>,
+    profile_digest: [u8; 32],
+}
+
+static FIXTURE: OnceLock<Result<Fixture, String>> = OnceLock::new();
+
+fn materialize() -> TestResult<Fixture> {
+    let archive = support::current_archive("report-attestation")?;
+    let bundle = ConformanceBundleV1::from_canonical_cbor(&archive)?;
+    let profile = bundle
+        .members
+        .iter()
+        .find(|member| member.role == BundleMemberRoleV1::Profile)
+        .ok_or("the archive has no CPF1 profile member")?
+        .bytes
+        .clone();
+    let profile_digest = ConformanceProfileV1::from_canonical_cbor(&profile)?.profile_digest;
+    Ok(Fixture {
+        archive,
+        profile,
+        profile_digest,
+    })
+}
+
+fn fixture() -> TestResult<&'static Fixture> {
+    FIXTURE
+        .get_or_init(|| materialize().map_err(|error| error.to_string()))
+        .as_ref()
+        .map_err(|error| error.clone().into())
+}
+
+/// The four non-report subjects: a real CPF1 profile and CFB1 archive.
+fn artifacts() -> TestResult<ReportAttestationArtifactsV1<'static>> {
+    let fixture = fixture()?;
+    Ok(ReportAttestationArtifactsV1 {
+        subject_artifact: SUBJECT_ARTIFACT,
+        profile_cpf1: &fixture.profile,
+        fixture_bundle: &fixture.archive,
+        evaluator_binary: EVALUATOR_BINARY,
+    })
+}
 
 fn signer() -> SigningKey {
     SigningKey::from_bytes(&[7; 32])
@@ -44,54 +94,73 @@ fn other_signer() -> SigningKey {
     SigningKey::from_bytes(&[8; 32])
 }
 
-/// The trust-admission double: admits the report-signing keys it holds, or refuses with a
-/// fixed refusal, and records every call.
+/// The trust double: admits the report-signing keys it holds unless it refuses every key,
+/// refuses the revoked digests it holds, and records every call of both steps.
 struct TrustDouble {
     keys: Vec<VerifyingKey>,
-    refusal: Option<ConformanceTrustRefusalV1>,
-    calls: RefCell<Vec<AdmissionCall>>,
+    key_refusal: Option<ConformanceKeyRefusalV1>,
+    revoked_reports: Vec<[u8; 32]>,
+    revoked_binaries: Vec<[u8; 32]>,
+    key_calls: RefCell<Vec<(ConformanceTrustRoleV1, [u8; 32])>>,
+    revocation_calls: RefCell<Vec<RevocationCall>>,
 }
 
 impl TrustDouble {
     fn admitting(key: &SigningKey) -> Self {
         Self {
             keys: vec![key.verifying_key()],
-            refusal: None,
-            calls: RefCell::new(Vec::new()),
+            key_refusal: None,
+            revoked_reports: Vec::new(),
+            revoked_binaries: Vec::new(),
+            key_calls: RefCell::new(Vec::new()),
+            revocation_calls: RefCell::new(Vec::new()),
         }
     }
 
-    const fn refusing(refusal: ConformanceTrustRefusalV1) -> Self {
+    fn refusing(refusal: ConformanceKeyRefusalV1) -> Self {
         Self {
-            keys: Vec::new(),
-            refusal: Some(refusal),
-            calls: RefCell::new(Vec::new()),
+            key_refusal: Some(refusal),
+            ..Self::admitting(&signer())
         }
     }
 
     fn call_count(&self) -> usize {
-        self.calls.borrow().len()
+        self.key_calls.borrow().len() + self.revocation_calls.borrow().len()
     }
 }
 
 impl ConformanceTrustAdmissionPortV1 for TrustDouble {
-    fn admit(
+    fn admit_key(
         &self,
         role: ConformanceTrustRoleV1,
         key_id: &[u8; 32],
-        artifact_digest: &[u8; 32],
-    ) -> Result<VerifyingKey, ConformanceTrustRefusalV1> {
-        self.calls
-            .borrow_mut()
-            .push((role, *key_id, *artifact_digest));
-        if let Some(refusal) = self.refusal {
+    ) -> Result<VerifyingKey, ConformanceKeyRefusalV1> {
+        self.key_calls.borrow_mut().push((role, *key_id));
+        if let Some(refusal) = self.key_refusal {
             return Err(refusal);
         }
         self.keys
             .iter()
             .copied()
             .find(|key| key_id_v1(key) == *key_id)
-            .ok_or(ConformanceTrustRefusalV1::UnknownRoot)
+            .ok_or(ConformanceKeyRefusalV1::UnknownRoot)
+    }
+
+    fn check_artifact_revocation(
+        &self,
+        report_digest: &[u8; 32],
+        evaluator_binary_digest: &[u8; 32],
+    ) -> Result<(), ConformanceArtifactRefusalV1> {
+        self.revocation_calls
+            .borrow_mut()
+            .push((*report_digest, *evaluator_binary_digest));
+        if self.revoked_reports.contains(report_digest) {
+            Err(ConformanceArtifactRefusalV1::RevokedReport)
+        } else if self.revoked_binaries.contains(evaluator_binary_digest) {
+            Err(ConformanceArtifactRefusalV1::RevokedEvaluatorBinary)
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -99,17 +168,33 @@ impl ConformanceTrustAdmissionPortV1 for TrustDouble {
 struct FixedKey(VerifyingKey);
 
 impl ConformanceTrustAdmissionPortV1 for FixedKey {
-    fn admit(
+    fn admit_key(
         &self,
         _role: ConformanceTrustRoleV1,
         _key_id: &[u8; 32],
-        _artifact_digest: &[u8; 32],
-    ) -> Result<VerifyingKey, ConformanceTrustRefusalV1> {
+    ) -> Result<VerifyingKey, ConformanceKeyRefusalV1> {
         Ok(self.0)
+    }
+
+    fn check_artifact_revocation(
+        &self,
+        _report_digest: &[u8; 32],
+        _evaluator_binary_digest: &[u8; 32],
+    ) -> Result<(), ConformanceArtifactRefusalV1> {
+        Ok(())
     }
 }
 
 fn report(outcome: CaseOutcomeStatusV1) -> TestResult<ConformanceReportV1> {
+    report_with(outcome, |_| {})
+}
+
+/// A valid CNR1 report bound to the fixture subjects, after `edit` and a fresh self digest.
+fn report_with(
+    outcome: CaseOutcomeStatusV1,
+    edit: impl FnOnce(&mut ConformanceReportV1),
+) -> TestResult<ConformanceReportV1> {
+    let fixture = fixture()?;
     let failing = outcome == CaseOutcomeStatusV1::Fail;
     let case = CaseOutcomeV1 {
         case_id: "case-00001".to_owned(),
@@ -130,12 +215,12 @@ fn report(outcome: CaseOutcomeStatusV1) -> TestResult<ConformanceReportV1> {
     let mut report = ConformanceReportV1 {
         report_id: [1; 16],
         subject_artifact_digest: [2; 32],
-        profile_digest: [3; 32],
+        profile_digest: fixture.profile_digest,
         normative_spec_digest: [4; 32],
         execution_profile_digest: [5; 32],
-        fixture_bundle_digest: [6; 32],
+        fixture_bundle_digest: *blake3::hash(&fixture.archive).as_bytes(),
         evaluator_source_digest: [7; 32],
-        evaluator_binary_digest: [8; 32],
+        evaluator_binary_digest: *blake3::hash(EVALUATOR_BINARY).as_bytes(),
         evaluator_protocol_digest: [9; 32],
         implementation: ImplementationIdentityV1 {
             implementation_id: "independent".to_owned(),
@@ -165,6 +250,7 @@ fn report(outcome: CaseOutcomeStatusV1) -> TestResult<ConformanceReportV1> {
         evaluator_build_provenance_digest: [17; 32],
         report_digest: [0; 32],
     };
+    edit(&mut report);
     report.report_digest = report.digest()?;
     report.validate()?;
     Ok(report)
@@ -188,7 +274,7 @@ fn digests(bytes: &[u8]) -> (String, String) {
 fn signed(cnr1: &[u8]) -> TestResult<Vec<u8>> {
     Ok(sign_report_attestation_v1(
         cnr1,
-        ARTIFACTS,
+        artifacts()?,
         None,
         &signer(),
     )?)
@@ -207,21 +293,24 @@ fn resigned(statement: &Value) -> TestResult<Vec<u8>> {
     Ok(DsseEnvelopeV1::sign(IN_TOTO_PAYLOAD_TYPE_V1, payload, &signer()).to_json())
 }
 
-fn verify(envelope: &[u8]) -> Result<SignatureMeaningV1, Error> {
-    verify_report_attestation_v1(envelope, &TrustDouble::admitting(&signer()), ARTIFACTS)
-        .map(|verified| verified.signature_meaning())
+fn verify(envelope: &[u8]) -> TestResult<Result<SignatureMeaningV1, Error>> {
+    Ok(
+        verify_report_attestation_v1(envelope, &TrustDouble::admitting(&signer()), artifacts()?)
+            .map(|verified| verified.signature_meaning()),
+    )
 }
 
 #[test]
 fn golden_statement_predicate_and_envelope_round_trip_canonically() -> TestResult {
     let report = report(CaseOutcomeStatusV1::Pass)?;
     let cnr1 = report.to_canonical_cbor()?;
+    let artifacts = artifacts()?;
     let subjects = [
         &cnr1[..],
-        ARTIFACTS.subject_artifact,
-        ARTIFACTS.profile_cpf1,
-        ARTIFACTS.fixture_bundle,
-        ARTIFACTS.evaluator_binary,
+        artifacts.subject_artifact,
+        artifacts.profile_cpf1,
+        artifacts.fixture_bundle,
+        artifacts.evaluator_binary,
     ]
     .into_iter()
     .zip(REPORT_ATTESTATION_SUBJECT_NAMES_V1)
@@ -251,7 +340,7 @@ fn golden_statement_predicate_and_envelope_round_trip_canonically() -> TestResul
     );
 
     let trust = TrustDouble::admitting(&signer());
-    let envelope = sign_report_attestation_v1(&cnr1, ARTIFACTS, Some([42; 32]), &signer())?;
+    let envelope = sign_report_attestation_v1(&cnr1, artifacts, Some([42; 32]), &signer())?;
     let parsed = DsseEnvelopeV1::from_json(&envelope, MAX_REPORT_ATTESTATION_BYTES_V1)?;
     assert_eq!(std::str::from_utf8(parsed.payload())?, golden_statement);
     assert!(parsed.has_payload_type(IN_TOTO_PAYLOAD_TYPE_V1));
@@ -262,7 +351,7 @@ fn golden_statement_predicate_and_envelope_round_trip_canonically() -> TestResul
         Some(parsed.payload().to_vec())
     );
 
-    let verified = verify_report_attestation_v1(&envelope, &trust, ARTIFACTS)?;
+    let verified = verify_report_attestation_v1(&envelope, &trust, artifacts)?;
     assert_eq!(verified.report(), &report);
     assert_eq!(verified.report().to_canonical_cbor()?, cnr1);
     assert_eq!(verified.key_id(), &key_id_v1(&signer().verifying_key()));
@@ -272,17 +361,21 @@ fn golden_statement_predicate_and_envelope_round_trip_canonically() -> TestResul
         SignatureMeaningV1::AttributionOnly
     );
     assert_eq!(
-        trust.calls.borrow().as_slice(),
+        trust.key_calls.borrow().as_slice(),
         &[(
             ConformanceTrustRoleV1::ReportSigning,
             key_id_v1(&signer().verifying_key()),
-            *blake3::hash(parsed.payload()).as_bytes(),
         )]
+    );
+    // Artifact revocation sees the digests of the parsed CNR1 report.
+    assert_eq!(
+        trust.revocation_calls.borrow().as_slice(),
+        &[(report.report_digest, report.evaluator_binary_digest)]
     );
 
     // Signing is deterministic, and a report without diagnostics carries `null`.
     assert_eq!(
-        sign_report_attestation_v1(&cnr1, ARTIFACTS, Some([42; 32]), &signer())?,
+        sign_report_attestation_v1(&cnr1, artifacts, Some([42; 32]), &signer())?,
         envelope
     );
     let without = signed(&cnr1)?;
@@ -290,17 +383,18 @@ fn golden_statement_predicate_and_envelope_round_trip_canonically() -> TestResul
         statement_of(&without)?["predicate"]["diagnostics_digest_or_null"],
         Value::Null
     );
-    let verified = verify_report_attestation_v1(&without, &trust, ARTIFACTS)?;
+    let verified = verify_report_attestation_v1(&without, &trust, artifacts)?;
     assert_eq!(verified.diagnostics_digest(), None);
     Ok(())
 }
 
 #[test]
 fn a_valid_signature_over_a_failing_report_stays_a_failing_report() -> TestResult {
+    let artifacts = artifacts()?;
     let failing = report(CaseOutcomeStatusV1::Fail)?;
     let envelope = signed(&failing.to_canonical_cbor()?)?;
     let verified =
-        verify_report_attestation_v1(&envelope, &TrustDouble::admitting(&signer()), ARTIFACTS)?;
+        verify_report_attestation_v1(&envelope, &TrustDouble::admitting(&signer()), artifacts)?;
     assert_eq!(verified.report(), &failing);
     assert_eq!((verified.report().passed, verified.report().failed), (0, 1));
     assert_eq!(
@@ -320,12 +414,13 @@ fn a_valid_signature_over_a_failing_report_stays_a_failing_report() -> TestResul
 
 #[test]
 fn only_a_valid_strict_cnr1_report_is_signed() -> TestResult {
+    let artifacts = artifacts()?;
     let mut cnr1 = passing_cnr1()?;
     let last = cnr1.len() - 1;
     cnr1[last] ^= 1;
     for invalid in [&b"not CNR1"[..], &cnr1[..], &[][..]] {
         assert_eq!(
-            sign_report_attestation_v1(invalid, ARTIFACTS, None, &signer()),
+            sign_report_attestation_v1(invalid, artifacts, None, &signer()),
             Err(Error::EmbeddedReport)
         );
     }
@@ -334,17 +429,18 @@ fn only_a_valid_strict_cnr1_report_is_signed() -> TestResult {
 
 #[test]
 fn oversized_or_malformed_input_is_refused_at_bounded_parse() -> TestResult {
+    let artifacts = artifacts()?;
     let trust = TrustDouble::admitting(&signer());
     // One byte over the bound and not JSON at all: refused on length before any parse.
     let oversized = vec![0xff; MAX_REPORT_ATTESTATION_BYTES_V1 + 1];
     assert_eq!(
-        verify_report_attestation_v1(&oversized, &trust, ARTIFACTS),
+        verify_report_attestation_v1(&oversized, &trust, artifacts),
         Err(Error::BoundedParse(DsseParseErrorV1::Oversized))
     );
     // Exactly at the bound: parsed, and refused as malformed rather than oversized.
     let at_bound = vec![b' '; MAX_REPORT_ATTESTATION_BYTES_V1];
     assert_eq!(
-        verify_report_attestation_v1(&at_bound, &trust, ARTIFACTS),
+        verify_report_attestation_v1(&at_bound, &trust, artifacts),
         Err(Error::BoundedParse(DsseParseErrorV1::Malformed))
     );
     let envelope = String::from_utf8(signed(&passing_cnr1()?)?)?;
@@ -356,7 +452,7 @@ fn oversized_or_malformed_input_is_refused_at_bounded_parse() -> TestResult {
         envelope.replacen('{', "{\"extra\":null,", 1),
     ] {
         assert_eq!(
-            verify_report_attestation_v1(malformed.as_bytes(), &trust, ARTIFACTS),
+            verify_report_attestation_v1(malformed.as_bytes(), &trust, artifacts),
             Err(Error::BoundedParse(DsseParseErrorV1::Malformed)),
             "{malformed:.80}"
         );
@@ -366,7 +462,8 @@ fn oversized_or_malformed_input_is_refused_at_bounded_parse() -> TestResult {
 }
 
 #[test]
-fn a_foreign_payload_type_is_refused_before_trust_admission() -> TestResult {
+fn a_foreign_payload_type_is_refused_before_key_admission() -> TestResult {
+    let artifacts = artifacts()?;
     let envelope = signed(&passing_cnr1()?)?;
     let statement = DsseEnvelopeV1::from_json(&envelope, MAX_REPORT_ATTESTATION_BYTES_V1)?
         .payload()
@@ -379,7 +476,7 @@ fn a_foreign_payload_type_is_refused_before_trust_admission() -> TestResult {
     let trust = TrustDouble::admitting(&signer());
     for envelope in [edited.into_bytes(), resigned_type] {
         assert_eq!(
-            verify_report_attestation_v1(&envelope, &trust, ARTIFACTS),
+            verify_report_attestation_v1(&envelope, &trust, artifacts),
             Err(Error::PayloadType)
         );
     }
@@ -388,19 +485,20 @@ fn a_foreign_payload_type_is_refused_before_trust_admission() -> TestResult {
 }
 
 #[test]
-fn trust_admission_refusals_and_an_unknown_key_id_are_closed() -> TestResult {
+fn key_admission_refusals_and_an_unknown_key_id_are_closed() -> TestResult {
+    let artifacts = artifacts()?;
     let envelope = signed(&passing_cnr1()?)?;
     for refusal in [
-        ConformanceTrustRefusalV1::UnknownRoot,
-        ConformanceTrustRefusalV1::RoleMismatch,
-        ConformanceTrustRefusalV1::Revoked,
-        ConformanceTrustRefusalV1::RolledBack,
-        ConformanceTrustRefusalV1::SnapshotStale,
+        ConformanceKeyRefusalV1::UnknownRoot,
+        ConformanceKeyRefusalV1::RoleMismatch,
+        ConformanceKeyRefusalV1::Revoked,
+        ConformanceKeyRefusalV1::RolledBack,
+        ConformanceKeyRefusalV1::SnapshotStale,
     ] {
         let trust = TrustDouble::refusing(refusal);
         assert_eq!(
-            verify_report_attestation_v1(&envelope, &trust, ARTIFACTS),
-            Err(Error::TrustAdmission(refusal))
+            verify_report_attestation_v1(&envelope, &trust, artifacts),
+            Err(Error::KeyAdmission(refusal))
         );
         assert_eq!(trust.call_count(), 1);
     }
@@ -409,11 +507,9 @@ fn trust_admission_refusals_and_an_unknown_key_id_are_closed() -> TestResult {
         verify_report_attestation_v1(
             &envelope,
             &TrustDouble::admitting(&other_signer()),
-            ARTIFACTS
+            artifacts
         ),
-        Err(Error::TrustAdmission(
-            ConformanceTrustRefusalV1::UnknownRoot
-        ))
+        Err(Error::KeyAdmission(ConformanceKeyRefusalV1::UnknownRoot))
     );
     // A tampered key id names no admitted root.
     let tampered = String::from_utf8(envelope)?.replace(
@@ -421,16 +517,15 @@ fn trust_admission_refusals_and_an_unknown_key_id_are_closed() -> TestResult {
         &hex(key_id_v1(&other_signer().verifying_key())),
     );
     assert_eq!(
-        verify(tampered.as_bytes()),
-        Err(Error::TrustAdmission(
-            ConformanceTrustRefusalV1::UnknownRoot
-        ))
+        verify(tampered.as_bytes())?,
+        Err(Error::KeyAdmission(ConformanceKeyRefusalV1::UnknownRoot))
     );
     Ok(())
 }
 
 #[test]
 fn a_tampered_signature_or_payload_fails_the_signature_step() -> TestResult {
+    let artifacts = artifacts()?;
     let envelope = signed(&passing_cnr1()?)?;
     let text = String::from_utf8(envelope.clone())?;
     let value: Value = serde_json::from_str(&text)?;
@@ -439,7 +534,7 @@ fn a_tampered_signature_or_payload_fails_the_signature_step() -> TestResult {
     signature[0] ^= 1;
     let bad_signature = text.replace(sig, &STANDARD.encode(&signature));
     assert_eq!(
-        verify(bad_signature.as_bytes()),
+        verify(bad_signature.as_bytes())?,
         Err(Error::Signature(DsseSignatureErrorV1::InvalidSignature))
     );
 
@@ -451,7 +546,7 @@ fn a_tampered_signature_or_payload_fails_the_signature_step() -> TestResult {
         .canonical();
     let bad_payload = text.replace(payload, &STANDARD.encode(edited));
     assert_eq!(
-        verify(bad_payload.as_bytes()),
+        verify(bad_payload.as_bytes())?,
         Err(Error::Signature(DsseSignatureErrorV1::InvalidSignature))
     );
 
@@ -460,7 +555,7 @@ fn a_tampered_signature_or_payload_fails_the_signature_step() -> TestResult {
         verify_report_attestation_v1(
             &envelope,
             &FixedKey(other_signer().verifying_key()),
-            ARTIFACTS
+            artifacts
         ),
         Err(Error::Signature(DsseSignatureErrorV1::KeyIdMismatch))
     );
@@ -558,7 +653,7 @@ fn every_statement_and_predicate_shape_violation_is_refused() -> TestResult {
         let mut edited = statement.clone();
         edit(&mut edited);
         assert_eq!(
-            verify(&resigned(&edited)?),
+            verify(&resigned(&edited)?)?,
             Err(Error::StatementShape),
             "{name}"
         );
@@ -570,12 +665,13 @@ fn every_statement_and_predicate_shape_violation_is_refused() -> TestResult {
 fn a_payload_that_is_not_canonical_json_fails_the_shape_step() {
     for payload in [&b"not JSON"[..], b"{\"_type\": 1}"] {
         let envelope = DsseEnvelopeV1::sign(IN_TOTO_PAYLOAD_TYPE_V1, payload.to_vec(), &signer());
-        assert_eq!(verify(&envelope.to_json()), Err(Error::StatementShape));
+        assert_eq!(verify(&envelope.to_json())?, Err(Error::StatementShape));
     }
 }
 
 #[test]
 fn each_subject_digest_is_recomputed() -> TestResult {
+    let artifacts = artifacts()?;
     let cnr1 = passing_cnr1()?;
     let statement = statement_of(&signed(&cnr1)?)?;
     let other = digests(b"other bytes");
@@ -584,7 +680,7 @@ fn each_subject_digest_is_recomputed() -> TestResult {
             let mut edited = statement.clone();
             edited["subject"][index]["digest"][algorithm] = json!(replacement);
             assert_eq!(
-                verify(&resigned(&edited)?),
+                verify(&resigned(&edited)?)?,
                 Err(Error::SubjectDigest),
                 "{index} {algorithm}"
             );
@@ -597,19 +693,19 @@ fn each_subject_digest_is_recomputed() -> TestResult {
     for artifacts in [
         ReportAttestationArtifactsV1 {
             subject_artifact: b"x",
-            ..ARTIFACTS
+            ..artifacts
         },
         ReportAttestationArtifactsV1 {
             profile_cpf1: b"x",
-            ..ARTIFACTS
+            ..artifacts
         },
         ReportAttestationArtifactsV1 {
             fixture_bundle: b"x",
-            ..ARTIFACTS
+            ..artifacts
         },
         ReportAttestationArtifactsV1 {
             evaluator_binary: b"x",
-            ..ARTIFACTS
+            ..artifacts
         },
     ] {
         assert_eq!(
@@ -623,7 +719,7 @@ fn each_subject_digest_is_recomputed() -> TestResult {
     let mut tampered = cnr1;
     tampered[3] ^= 1;
     edited["predicate"]["report_cnr1"] = json!(STANDARD.encode(&tampered));
-    assert_eq!(verify(&resigned(&edited)?), Err(Error::SubjectDigest));
+    assert_eq!(verify(&resigned(&edited)?)?, Err(Error::SubjectDigest));
     Ok(())
 }
 
@@ -642,7 +738,7 @@ fn embedded_bytes_that_are_not_a_strict_cnr1_report_are_refused() -> TestResult 
         let mut edited = statement.clone();
         edited["predicate"]["report_cnr1"] = json!(STANDARD.encode(&bytes));
         edited["subject"][0]["digest"] = json!({"blake3": blake3_hex, "sha256": sha256_hex});
-        assert_eq!(verify(&resigned(&edited)?), Err(Error::EmbeddedReport));
+        assert_eq!(verify(&resigned(&edited)?)?, Err(Error::EmbeddedReport));
     }
     Ok(())
 }
@@ -668,7 +764,7 @@ fn predicate_copies_that_differ_from_the_cnr1_report_are_refused() -> TestResult
         let mut edited = statement.clone();
         edit(&mut edited);
         assert_eq!(
-            verify(&resigned(&edited)?),
+            verify(&resigned(&edited)?)?,
             Err(Error::PredicateMismatch),
             "{name}"
         );
@@ -685,8 +781,16 @@ fn every_refusal_names_its_step() {
         ),
         (Error::PayloadType, "payloadType"),
         (
-            Error::TrustAdmission(ConformanceTrustRefusalV1::Revoked),
+            Error::KeyAdmission(ConformanceKeyRefusalV1::Revoked),
             "Revoked",
+        ),
+        (
+            Error::SubjectBinding(BoundSubjectV1::Profile),
+            "CNR1 field: Profile",
+        ),
+        (
+            Error::ArtifactRevocation(ConformanceArtifactRefusalV1::RevokedReport),
+            "revoked: RevokedReport",
         ),
         (
             Error::Signature(DsseSignatureErrorV1::InvalidSignature),
@@ -699,4 +803,120 @@ fn every_refusal_names_its_step() {
     ] {
         assert!(error.to_string().contains(expected), "{error}");
     }
+}
+
+#[test]
+fn each_bound_subject_must_reproduce_its_cnr1_field() -> TestResult {
+    let artifacts = artifacts()?;
+    let trust = TrustDouble::admitting(&signer());
+    let cases: [(BoundSubjectV1, ReportEdit); 3] = [
+        (BoundSubjectV1::Profile, |report| {
+            report.profile_digest = [0x51; 32];
+        }),
+        (BoundSubjectV1::FixtureBundle, |report| {
+            report.fixture_bundle_digest = [0x52; 32];
+        }),
+        (BoundSubjectV1::EvaluatorBinary, |report| {
+            report.evaluator_binary_digest = [0x53; 32];
+        }),
+    ];
+    for (subject, edit) in cases {
+        // The Statement subjects match the artifacts; only the CNR1 field differs.
+        let cnr1 = report_with(CaseOutcomeStatusV1::Pass, edit)?.to_canonical_cbor()?;
+        let envelope = sign_report_attestation_v1(&cnr1, artifacts, None, &signer())?;
+        assert_eq!(
+            verify_report_attestation_v1(&envelope, &trust, artifacts),
+            Err(Error::SubjectBinding(subject)),
+            "{subject:?}"
+        );
+    }
+
+    // Artifacts that are not a valid CPF1 profile or CFB1 archive reproduce no CNR1 field.
+    let cnr1 = passing_cnr1()?;
+    for (subject, unbound) in [
+        (
+            BoundSubjectV1::Profile,
+            ReportAttestationArtifactsV1 {
+                profile_cpf1: b"not CPF1",
+                ..artifacts
+            },
+        ),
+        (
+            BoundSubjectV1::FixtureBundle,
+            ReportAttestationArtifactsV1 {
+                fixture_bundle: b"not CFB1",
+                ..artifacts
+            },
+        ),
+    ] {
+        let envelope = sign_report_attestation_v1(&cnr1, unbound, None, &signer())?;
+        assert_eq!(
+            verify_report_attestation_v1(&envelope, &trust, unbound),
+            Err(Error::SubjectBinding(subject)),
+            "{subject:?}"
+        );
+    }
+    // Binding runs before artifact revocation.
+    assert!(trust.revocation_calls.borrow().is_empty());
+    Ok(())
+}
+
+#[test]
+fn revoked_report_or_evaluator_binary_digests_are_refused_after_the_cnr1_parse() -> TestResult {
+    let artifacts = artifacts()?;
+    let report = report(CaseOutcomeStatusV1::Pass)?;
+    let envelope = signed(&report.to_canonical_cbor()?)?;
+    let revoked_report = TrustDouble {
+        revoked_reports: vec![report.report_digest],
+        ..TrustDouble::admitting(&signer())
+    };
+    assert_eq!(
+        verify_report_attestation_v1(&envelope, &revoked_report, artifacts),
+        Err(Error::ArtifactRevocation(
+            ConformanceArtifactRefusalV1::RevokedReport
+        ))
+    );
+    assert_eq!(
+        revoked_report.revocation_calls.borrow().as_slice(),
+        &[(report.report_digest, report.evaluator_binary_digest)]
+    );
+    let revoked_binary = TrustDouble {
+        revoked_binaries: vec![report.evaluator_binary_digest],
+        ..TrustDouble::admitting(&signer())
+    };
+    assert_eq!(
+        verify_report_attestation_v1(&envelope, &revoked_binary, artifacts),
+        Err(Error::ArtifactRevocation(
+            ConformanceArtifactRefusalV1::RevokedEvaluatorBinary
+        ))
+    );
+    let unrelated = TrustDouble {
+        revoked_reports: vec![[0x61; 32]],
+        revoked_binaries: vec![[0x62; 32]],
+        ..TrustDouble::admitting(&signer())
+    };
+    assert!(verify_report_attestation_v1(&envelope, &unrelated, artifacts).is_ok());
+
+    // Revocation runs before the predicate copies are compared.
+    let mut statement = statement_of(&envelope)?;
+    statement["predicate"]["report_digest"] = json!(hex([0x5a; 32]));
+    assert_eq!(
+        verify_report_attestation_v1(&resigned(&statement)?, &revoked_report, artifacts),
+        Err(Error::ArtifactRevocation(
+            ConformanceArtifactRefusalV1::RevokedReport
+        ))
+    );
+
+    // An embedded report that does not parse never reaches revocation.
+    let mut statement = statement_of(&envelope)?;
+    let (blake3_hex, sha256_hex) = digests(b"not CNR1");
+    statement["predicate"]["report_cnr1"] = json!(STANDARD.encode(b"not CNR1"));
+    statement["subject"][0]["digest"] = json!({"blake3": blake3_hex, "sha256": sha256_hex});
+    let trust = TrustDouble::admitting(&signer());
+    assert_eq!(
+        verify_report_attestation_v1(&resigned(&statement)?, &trust, artifacts),
+        Err(Error::EmbeddedReport)
+    );
+    assert!(trust.revocation_calls.borrow().is_empty());
+    Ok(())
 }

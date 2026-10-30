@@ -63,7 +63,8 @@ pub use bundle_contract::{
     CONFORMANCE_BUNDLE_MAGIC_V1, MAX_CONFORMANCE_BUNDLE_BYTES_V1,
 };
 pub use conformance_trust_admission::{
-    ConformanceTrustAdmissionPortV1, ConformanceTrustRefusalV1, ConformanceTrustRoleV1,
+    ConformanceArtifactRefusalV1, ConformanceKeyRefusalV1, ConformanceTrustAdmissionPortV1,
+    ConformanceTrustRoleV1,
 };
 pub use execution_profile::{
     ExecutionProfileCapabilitiesV1, ExecutionProfileCompatibilityV1,
@@ -113,11 +114,12 @@ pub use provider_contract::{
     MAX_PROVIDER_ARTIFACT_BYTES_V1,
 };
 pub use report_attestation::{
-    sign_report_attestation_v1, verify_report_attestation_v1, ReportAttestationArtifactsV1,
-    ReportAttestationErrorV1, SignatureMeaningV1, VerifiedReportAttestationV1,
-    ATTRIBUTION_ONLY_SIGNATURE_MEANING_V1, CONFORMANCE_REPORT_PREDICATE_SCHEMA_V1,
-    CONFORMANCE_REPORT_PREDICATE_TYPE_V1, IN_TOTO_STATEMENT_TYPE_V1,
-    MAX_REPORT_ATTESTATION_BYTES_V1, REPORT_ATTESTATION_SUBJECT_NAMES_V1,
+    sign_report_attestation_v1, verify_report_attestation_v1, BoundSubjectV1,
+    ReportAttestationArtifactsV1, ReportAttestationErrorV1, SignatureMeaningV1,
+    VerifiedReportAttestationV1, ATTRIBUTION_ONLY_SIGNATURE_MEANING_V1,
+    CONFORMANCE_REPORT_PREDICATE_SCHEMA_V1, CONFORMANCE_REPORT_PREDICATE_TYPE_V1,
+    IN_TOTO_STATEMENT_TYPE_V1, MAX_REPORT_ATTESTATION_BYTES_V1,
+    REPORT_ATTESTATION_SUBJECT_NAMES_V1,
 };
 pub use sandbox_provider_contract::{
     AdmissionAuthorityV1, AdmissionGrantV1, LaunchPolicyV1, NetworkCapabilityV1,

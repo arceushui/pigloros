@@ -17,21 +17,40 @@
 //!
 //! The five subjects are, in [`REPORT_ATTESTATION_SUBJECT_NAMES_V1`] order, the CNR1 report
 //! bytes, the subject artifact, the CPF1 profile, the fixture bundle and the evaluator binary,
-//! each by the lowercase hexadecimal BLAKE3 and SHA-256 digest of its bytes. The Statement is
-//! the payload of one DSSE envelope (`payloadType` `application/vnd.in-toto+json`, Ed25519 over
-//! the PAE, key id the BLAKE3 digest of the verifying key).
+//! each by the BLAKE3 and SHA-256 digest of its bytes. The Statement is the payload of one DSSE
+//! envelope (`payloadType` `application/vnd.in-toto+json`, Ed25519 over the PAE, key id the
+//! BLAKE3 digest of the verifying key).
 //!
-//! [`verify_report_attestation_v1`] runs the fixed order of section 5.1 and stops at the first
-//! failing step with its closed error: bounded parse, `payloadType`, trust admission, signature,
+//! # The `blake3` digest
+//!
+//! `blake3` is not in the in-toto DigestSet registry (`spec/v1/digest_set.md`), so generic
+//! in-toto consumers ignore it and match subjects on `sha256`; that is why every subject carries
+//! both (ADR-062 Revision 8 Q12). PiglorOS encodes a `blake3` value as 64 lowercase hexadecimal
+//! characters, the 32-byte BLAKE3-256 digest of the subject bytes, the same encoding as
+//! `sha256`.
+//!
+//! # Verification order
+//!
+//! [`verify_report_attestation_v1`] runs the order of section 5.1 as amended by
+//! `ADR-062_R8_Report_Attestation_Binding` and stops at the first failing step with its closed
+//! [`ReportAttestationErrorV1`]: bounded parse, `payloadType`, key admission, signature,
 //! Statement shape, subject digests recomputed, embedded CNR1 parsed with the strict codec,
-//! predicate copies equal to the CNR1 fields. The signature establishes attribution only: a
-//! valid signature over a failing report yields that failing report. The CNR1 wire format is
-//! unchanged.
+//! subjects bound to their CNR1 fields, artifact revocation, predicate copies equal to the CNR1
+//! fields. The signature establishes attribution only: a valid signature over a failing report
+//! yields that failing report. The CNR1 wire format is unchanged.
+//!
+//! The subject binding recomputes each CNR1 field as the CNR1 producer defines it: the CPF1
+//! `profile_digest` of the validated profile, the BLAKE3 digest of the canonical CFB1 archive,
+//! and the BLAKE3 digest of the evaluator binary. The subject artifact is not bound: CNR1 copies
+//! its digest from the evaluator request, and no definition derives it from artifact bytes.
 
 use crate::conformance_trust_admission::{
-    ConformanceTrustAdmissionPortV1, ConformanceTrustRefusalV1, ConformanceTrustRoleV1,
+    ConformanceArtifactRefusalV1, ConformanceKeyRefusalV1, ConformanceTrustAdmissionPortV1,
+    ConformanceTrustRoleV1,
 };
-use crate::{decode_hex_digest, hex_digest, ConformanceReportV1};
+use crate::{
+    decode_hex_digest, hex_digest, ConformanceBundleV1, ConformanceProfileV1, ConformanceReportV1,
+};
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
 use ed25519_dalek::SigningKey;
@@ -110,6 +129,17 @@ pub enum SignatureMeaningV1 {
     AttributionOnly,
 }
 
+/// A subject whose digest is bound to a CNR1 field.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BoundSubjectV1 {
+    /// The CPF1 profile, bound to CNR1 `profile_digest`.
+    Profile,
+    /// The CFB1 fixture bundle, bound to CNR1 `fixture_bundle_digest`.
+    FixtureBundle,
+    /// The evaluator binary, bound to CNR1 `evaluator_binary_digest`.
+    EvaluatorBinary,
+}
+
 /// The step of the verification order at which an attestation was refused.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum ReportAttestationErrorV1 {
@@ -121,7 +151,7 @@ pub enum ReportAttestationErrorV1 {
     PayloadType,
     /// Step 3: the key was not admitted for report signing.
     #[error("report attestation key was not admitted: {0:?}")]
-    TrustAdmission(ConformanceTrustRefusalV1),
+    KeyAdmission(ConformanceKeyRefusalV1),
     /// Step 4: the signature does not verify with the admitted key.
     #[error("report attestation signature refused: {0}")]
     Signature(DsseSignatureErrorV1),
@@ -134,7 +164,13 @@ pub enum ReportAttestationErrorV1 {
     /// Step 7 (and signing): the embedded CNR1 bytes are not a valid strict CNR1 report.
     #[error("report attestation embeds no valid CNR1 report")]
     EmbeddedReport,
-    /// Step 8: a predicate copy differs from the embedded CNR1 report.
+    /// Step 8: a subject artifact does not reproduce its CNR1 field.
+    #[error("report attestation subject is not bound to its CNR1 field: {0:?}")]
+    SubjectBinding(BoundSubjectV1),
+    /// Step 9: the report or evaluator binary digest of the CNR1 report is revoked.
+    #[error("report attestation artifact is revoked: {0:?}")]
+    ArtifactRevocation(ConformanceArtifactRefusalV1),
+    /// Step 10: a predicate copy differs from the embedded CNR1 report.
     #[error("report attestation predicate copy differs from the CNR1 report")]
     PredicateMismatch,
 }
@@ -289,14 +325,9 @@ pub fn verify_report_attestation_v1(
     if !envelope.has_payload_type(IN_TOTO_PAYLOAD_TYPE_V1) {
         return Err(ReportAttestationErrorV1::PayloadType);
     }
-    let payload_digest = *blake3::hash(envelope.payload()).as_bytes();
     let key = trust
-        .admit(
-            ConformanceTrustRoleV1::ReportSigning,
-            envelope.key_id(),
-            &payload_digest,
-        )
-        .map_err(ReportAttestationErrorV1::TrustAdmission)?;
+        .admit_key(ConformanceTrustRoleV1::ReportSigning, envelope.key_id())
+        .map_err(ReportAttestationErrorV1::KeyAdmission)?;
     envelope
         .verify(&key)
         .map_err(ReportAttestationErrorV1::Signature)?;
@@ -307,6 +338,11 @@ pub fn verify_report_attestation_v1(
     }
     let report = ConformanceReportV1::from_canonical_cbor(&statement.report_cnr1)
         .map_err(|_| ReportAttestationErrorV1::EmbeddedReport)?;
+    bind_subjects(&report, &artifacts, statement.subjects[4][0])
+        .map_err(ReportAttestationErrorV1::SubjectBinding)?;
+    trust
+        .check_artifact_revocation(&report.report_digest, &report.evaluator_binary_digest)
+        .map_err(ReportAttestationErrorV1::ArtifactRevocation)?;
     let independence = &report.independence;
     if statement.report_digest != report.report_digest
         || statement.independence
@@ -323,6 +359,32 @@ pub fn verify_report_attestation_v1(
         key_id: *envelope.key_id(),
         diagnostics_digest: statement.diagnostics_digest,
     })
+}
+
+/// Require each bound subject to reproduce its CNR1 field; `evaluator_blake3` is the already
+/// recomputed BLAKE3 subject digest of the evaluator binary.
+fn bind_subjects(
+    report: &ConformanceReportV1,
+    artifacts: &ReportAttestationArtifactsV1<'_>,
+    evaluator_blake3: [u8; 32],
+) -> Result<(), BoundSubjectV1> {
+    let profile_digest = ConformanceProfileV1::from_canonical_cbor(artifacts.profile_cpf1)
+        .ok()
+        .map(|profile| profile.profile_digest);
+    if profile_digest != Some(report.profile_digest) {
+        return Err(BoundSubjectV1::Profile);
+    }
+    let bundle_digest = ConformanceBundleV1::from_canonical_cbor(artifacts.fixture_bundle)
+        .and_then(|bundle| bundle.archive_digest())
+        .ok();
+    if bundle_digest != Some(report.fixture_bundle_digest) {
+        return Err(BoundSubjectV1::FixtureBundle);
+    }
+    if evaluator_blake3 == report.evaluator_binary_digest {
+        Ok(())
+    } else {
+        Err(BoundSubjectV1::EvaluatorBinary)
+    }
 }
 
 fn parse_statement(payload: &[u8]) -> Option<StatementV1> {
