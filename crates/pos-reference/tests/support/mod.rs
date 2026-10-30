@@ -740,9 +740,10 @@ pub fn plugin_corpus(records: &[Vec<u8>]) -> TestResult<Corpus> {
     })
 }
 
-/// Build a signed `plugin-conformance` corpus, as [`plugin_corpus`], in Execution Mode `mode`
-/// (0 Local, 1 Air-Gapped) whose every fixture budget, and the execution profile's maximum, is
-/// `budget` (counters in `ResourceUsage` order).
+/// Build a signed `plugin-conformance` corpus with a chosen mode and budget.
+///
+/// It is [`plugin_corpus`] in Execution Mode `mode` (0 Local, 1 Air-Gapped); every fixture
+/// budget, and the execution profile's maximum, is `budget` (counters in `ResourceUsage` order).
 ///
 /// # Errors
 /// Returns an error if canonical encoding or fixture construction fails.
