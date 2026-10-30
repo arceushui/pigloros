@@ -3,8 +3,10 @@
 //!
 //! Every vector installs real signed releases into the world's Memory registry through
 //! `install_community_release_v1`, rolls back through `rollback_community_release_v1`, and
-//! observes the activation Events on the world's Timeline. The last tests list the total host
-//! error mapping of a failed rollback, one row per variant of both rollback error enums.
+//! observes the activation Events on the world's Timeline. One vector drives the same rollback
+//! through `CommunityEvaluationWorldV1::rollback` and gates both releases afterwards. The last
+//! tests list the total host error mapping of a failed rollback, one row per variant of both
+//! rollback error enums.
 #![cfg(target_os = "linux")]
 
 use ciborium::Value;
@@ -12,10 +14,11 @@ use pos_conformance::PluginTrustPolicyAnchorV1;
 use pos_core::event::{Event, SchemaVersion};
 use pos_core::ids::{EntityId, TimelineId};
 use pos_core::store::{EventStore, SeqRange};
+use pos_core::trusted_clock::ScriptedTrustedWallSourceV1;
 use pos_crypto::plugin_manifest::{PluginManifestErrorV1, PluginReleaseSignatureErrorV1 as Sig};
 use pos_crypto::plugin_trust::PluginTrustErrorV1 as Trust;
 use pos_plugin_publisher::test_support::{
-    encoding::{Material, SCOPE},
+    encoding::{Material, SCOPE, TICK},
     release::{pmf1_digest, Shape, COMPONENT_BYTES},
     world::{wall, World},
     BoxResult,
@@ -29,8 +32,10 @@ use pos_plugin_release::{
 };
 use pos_runtime::community_plugin_host::{
     host_error_for_install_v1, host_error_for_rollback_v1, install_community_release_v1,
-    rollback_community_release_v1, ActivationTargetV1, CommunityInstallErrorV1 as Install,
-    CommunityInstallRequestV1, CommunityRollbackErrorV1 as Rollback,
+    rollback_community_release_v1, ActivationTargetV1, CommunityEvaluationWorldV1,
+    CommunityInstallErrorV1 as Install, CommunityInstallRequestV1, CommunityPluginExpectationV1,
+    CommunityPluginTrustMaterialV1, CommunityRollbackErrorV1 as Rollback,
+    FixedTrustMaterialSourceV1, GatedCommunityReleaseV1,
 };
 use pos_store::plugin_trust_registry::{
     ActiveReleaseV1, PluginTrustCommitOutcomeV1, PluginTrustLedgerKindV1,
@@ -181,6 +186,91 @@ fn a_repeated_rollback_is_an_idempotent_replay_without_a_second_event() -> TestR
         rolled.receipt().activation_event()
     );
     assert_eq!(events(&world)?.len(), 3);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// The evaluation world's rollback and the gate
+// ---------------------------------------------------------------------------
+
+/// The host trust material of the publisher world's current evidence.
+fn trust_material(world: &World, material: &Material) -> CommunityPluginTrustMaterialV1 {
+    CommunityPluginTrustMaterialV1::new(
+        world.anchor.clone(),
+        material.root_anchor().clone(),
+        material.tps1.clone(),
+        vec![material.ptr1().to_vec()],
+        material.prv1_records().to_vec(),
+    )
+}
+
+/// A wall source returning the evidence second `count` times: the evaluation world samples it
+/// once for the evidence and the wrapped entry once more.
+fn seconds(material: &Material, count: usize) -> BoxResult<ScriptedTrustedWallSourceV1> {
+    let micros = u64::try_from(material.utc)? * 1_000_000;
+    Ok(ScriptedTrustedWallSourceV1::from_micros(vec![
+        micros;
+        count
+    ]))
+}
+
+/// Gate the release at `address` in `eval` for the first Driver of `plugin-a`.
+fn gate(
+    eval: &mut CommunityEvaluationWorldV1,
+    world: &World,
+    address: &BundleAddressV1,
+    trust: &CommunityPluginTrustMaterialV1,
+) -> BoxResult<Result<GatedCommunityReleaseV1, Host>> {
+    let material = world.material()?;
+    let expectation = CommunityPluginExpectationV1 {
+        plugin_id: "plugin-a".to_owned(),
+        release: None,
+    };
+    let source = FixedTrustMaterialSourceV1::new(trust.clone());
+    let mut wall = seconds(&material, 1)?;
+    Ok(eval.gate_for_driver(
+        &expectation,
+        &world.store,
+        address,
+        &source,
+        &mut wall,
+        TICK,
+    ))
+}
+
+#[test]
+fn the_evaluation_world_rollback_reactivates_the_target_for_the_gate() -> TestResult {
+    let mut world = World::new()?;
+    let material = world.material()?;
+    let trust = trust_material(&world, &material);
+    let first = world.publish(Shape::first())?;
+    let second = world.publish(Shape {
+        version: "2.0.0",
+        previous: Some(first.release_digest()),
+        ..Shape::first()
+    })?;
+    let mut eval = CommunityEvaluationWorldV1::open(&trust).map_err(|e| format!("{e:?}"))?;
+    for address in [first.address(), second.address()] {
+        let mut wall = seconds(&material, 2)?;
+        let installed = eval.install(&world.store, address, &trust, &mut wall, TICK);
+        installed.map_err(|e| format!("{e:?}"))?;
+    }
+    assert_eq!(
+        gate(&mut eval, &world, first.address(), &trust)?.err(),
+        Some(NOT_ACTIVE)
+    );
+    let mut wall = seconds(&material, 2)?;
+    let rolled = eval.rollback(&world.store, first.address(), &trust, &mut wall, TICK);
+    let rolled = rolled.map_err(|e| format!("{e:?}"))?;
+    assert_eq!(
+        rolled.receipt().outcome(),
+        PluginTrustCommitOutcomeV1::Committed
+    );
+    assert!(gate(&mut eval, &world, first.address(), &trust)?.is_ok());
+    assert_eq!(
+        gate(&mut eval, &world, second.address(), &trust)?.err(),
+        Some(NOT_ACTIVE)
+    );
     Ok(())
 }
 

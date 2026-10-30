@@ -8,7 +8,8 @@
 //! signature of and admits (or re-activates) exactly the bytes the payload describes. A rollback
 //! commits the same Event type with the payload of its target; the registry's ledger row kind
 //! tells it apart from an admission. The wrappers never call the registry's `admit` or
-//! `rollback` themselves, and no operator command, HTTP route or remote trigger reaches them.
+//! `rollback` themselves. No operator command, HTTP route or remote trigger reaches them yet:
+//! ADR-103 revision 7 adds none (Q9, a non-goal of that revision).
 
 use std::cell::RefCell;
 

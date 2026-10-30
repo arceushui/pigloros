@@ -218,7 +218,17 @@ impl Rig {
         &mut self,
         address: &BundleAddressV1,
     ) -> Result<GatedCommunityReleaseV1, CommunityPluginHostErrorV1> {
-        let source = FixedTrustMaterialSourceV1::new(self.material.clone());
+        let material = self.material.clone();
+        self.gate_release(address, &material)
+    }
+
+    /// Gate the release at `address` with `material`.
+    fn gate_release(
+        &mut self,
+        address: &BundleAddressV1,
+        material: &CommunityPluginTrustMaterialV1,
+    ) -> Result<GatedCommunityReleaseV1, CommunityPluginHostErrorV1> {
+        let source = FixedTrustMaterialSourceV1::new(material.clone());
         self.eval.gate_for_driver(
             &expectation(),
             &self.publisher.store,
@@ -283,15 +293,8 @@ impl Rig {
         &mut self,
         material: &CommunityPluginTrustMaterialV1,
     ) -> Result<GatedCommunityReleaseV1, CommunityPluginHostErrorV1> {
-        let source = FixedTrustMaterialSourceV1::new(material.clone());
-        self.eval.gate_for_driver(
-            &expectation(),
-            &self.publisher.store,
-            &self.address,
-            &source,
-            &mut one_second(),
-            TICK,
-        )
+        let address = self.address.clone();
+        self.gate_release(&address, material)
     }
 }
 

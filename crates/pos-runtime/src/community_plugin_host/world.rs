@@ -29,7 +29,9 @@ use pos_core::{
 use pos_crypto::plugin_trust::{verify_plugin_trust_v1, VerifiedPluginTrustEvidenceV1};
 use pos_plugin_publisher::{InstalledPluginReleaseV1, RolledBackPluginReleaseV1};
 use pos_plugin_release::{BundleAddressV1, ReleaseSourceV1};
-use pos_store::plugin_trust_registry::{PluginTrustPolicyRegistryErrorV1, TrustedUtcSecondV1};
+use pos_store::plugin_trust_registry::{
+    PluginTrustPolicyRegistryErrorV1, PluginTrustPolicyRegistryV1, TrustedUtcSecondV1,
+};
 use pos_store::StoreConfig;
 
 use super::error::CommunityPluginHostErrorV1;
@@ -170,18 +172,15 @@ impl CommunityEvaluationWorldV1 {
         wall: &mut impl PluginTrustWallSourceV1,
         tick: u64,
     ) -> WorldResult<InstalledPluginReleaseV1> {
-        trust_evidence(material, wall, tick).and_then(|evidence| {
-            let request = CommunityInstallRequestV1 {
-                anchor: material.policy_anchor(),
-                tps1_bytes: material.tps1_bytes(),
-                evidence: &evidence,
-                target: self.target,
-            };
-            let installed = self.registry_host.with_plugin_trust_registry(|registry| {
-                install_community_release_v1(source, address, registry, wall, &request)
-            });
-            flat(installed.map(|result| result.map_err(host_error_for_install_v1)))
-        })
+        self.activate(
+            material,
+            wall,
+            tick,
+            |registry, wall, request| {
+                install_community_release_v1(source, address, registry, wall, request)
+            },
+            host_error_for_install_v1,
+        )
     }
 
     /// Roll the active release of the target's Plugin ID back to the already installed community
@@ -206,6 +205,36 @@ impl CommunityEvaluationWorldV1 {
         wall: &mut impl PluginTrustWallSourceV1,
         tick: u64,
     ) -> WorldResult<RolledBackPluginReleaseV1> {
+        self.activate(
+            material,
+            wall,
+            tick,
+            |registry, wall, request| {
+                rollback_community_release_v1(source, address, registry, wall, request)
+            },
+            host_error_for_rollback_v1,
+        )
+    }
+
+    /// Verify `material` at one sample of `wall` and `tick`, then run `entry` (the install or the
+    /// rollback wrapper) on the world's registry with the request of that evidence on the
+    /// activation target, mapping its refusal with `host_error`.
+    fn activate<W, T, E, F>(
+        &mut self,
+        material: &CommunityPluginTrustMaterialV1,
+        wall: &mut W,
+        tick: u64,
+        entry: F,
+        host_error: fn(E) -> CommunityPluginHostErrorV1,
+    ) -> WorldResult<T>
+    where
+        W: PluginTrustWallSourceV1,
+        F: FnOnce(
+            &mut dyn PluginTrustPolicyRegistryV1,
+            &mut W,
+            &CommunityInstallRequestV1<'_>,
+        ) -> Result<T, E>,
+    {
         trust_evidence(material, wall, tick).and_then(|evidence| {
             let request = CommunityInstallRequestV1 {
                 anchor: material.policy_anchor(),
@@ -213,10 +242,10 @@ impl CommunityEvaluationWorldV1 {
                 evidence: &evidence,
                 target: self.target,
             };
-            let rolled_back = self.registry_host.with_plugin_trust_registry(|registry| {
-                rollback_community_release_v1(source, address, registry, wall, &request)
-            });
-            flat(rolled_back.map(|result| result.map_err(host_error_for_rollback_v1)))
+            let done = self
+                .registry_host
+                .with_plugin_trust_registry(|registry| entry(registry, wall, &request));
+            flat(done.map(|result| result.map_err(host_error)))
         })
     }
 
