@@ -202,6 +202,14 @@ fn composite(
     Ok(bytes)
 }
 
+/// `members` in increasing digest order, as the `RCS1` grammar requires.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn sorted<'a>(members: &[&'a [u8]]) -> Vec<&'a [u8]> {
+    let mut sorted = members.to_vec();
+    sorted.sort_by_key(|member| blake3_of(member));
+    sorted
+}
+
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn blake3_of(bytes: &[u8]) -> Vec<u8> {
     blake3::hash(bytes).as_bytes().to_vec()
@@ -586,7 +594,7 @@ fn a_subject_member_outside_its_grammar_is_payload_invalid() -> TestResult {
         })?;
         attempt.auxiliary = vec![artifact(composite(
             "RCS1",
-            &[member.as_slice(), licence.as_slice()],
+            &sorted(&[member.as_slice(), licence.as_slice()]),
             blake3_of,
         )?)];
         assert_eq!(observe(&attempt)?.result, failure(PAYLOAD_INVALID));
@@ -599,7 +607,7 @@ fn a_subject_member_outside_its_grammar_is_payload_invalid() -> TestResult {
     })?;
     attempt.auxiliary = vec![artifact(composite(
         "RCS1",
-        &[member.as_slice(), licence.as_slice()],
+        &sorted(&[member.as_slice(), licence.as_slice()]),
         blake3_of,
     )?)];
     // The request still binds the checked-in subject, so the closure is
