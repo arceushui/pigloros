@@ -31,8 +31,9 @@ use pos_experiment::{
 };
 use pos_plugin_eval::{
     draft_outcome, draft_prediction, CalibrationReport, EvalDerivationConfigV1,
-    EvalDerivationDriver, EvalDiagnosticsV1, EvalPlugin, EvalReducer, EVENT_TYPE_OUTCOME,
-    EVENT_TYPE_PREDICTION,
+    EvalDerivationDriver, EvalDiagnosticsV1, EvalPlugin, EvalReducer, MetricCountsV1,
+    MetricOutcomeV1, MetricRedactionStateV1, MetricResultV1, MetricValuesV1, ReliabilityBin,
+    EVENT_TYPE_OUTCOME, EVENT_TYPE_PREDICTION,
 };
 use pos_runtime::{Driver, ObservationView, RuntimeError, StepOutput};
 use pos_store::{memory::MemoryStore, SeqRange, StoreConfig};
@@ -429,10 +430,10 @@ fn calibration_report_waits_for_and_names_the_folding_cut() {
         .start()
         .test_ok();
     session
-        .register_pipeline_evaluator(Box::new(CalibrationReportEvaluatorV1::new(REPORT)))
+        .register_pipeline_evaluator(Box::new(CalibrationReportEvaluatorV1::new(REPORT, 1)))
         .test_ok();
     assert!(matches!(
-        session.register_pipeline_evaluator(Box::new(CalibrationReportEvaluatorV1::new(REPORT))),
+        session.register_pipeline_evaluator(Box::new(CalibrationReportEvaluatorV1::new(REPORT, 1))),
         Err(ExperimentError::DuplicatePipelineEvaluator)
     ));
 
@@ -463,9 +464,12 @@ fn calibration_report_waits_for_and_names_the_folding_cut() {
     let PipelineEvaluationOutcomeV1::CalibrationReport(report) = record.outcome() else {
         std::panic::resume_unwind(Box::new(format!("expected a report: {record:?}")));
     };
-    assert_eq!(report.n_predictions, 1);
-    assert_eq!(report.n_resolved, 1);
-    assert!((report.brier_score - 0.04).abs() < 1e-12);
+    assert_eq!(report.result.counts.record_count, 1);
+    assert_eq!(report.result.counts.scored, 1);
+    assert!(matches!(
+        &report.result.outcome,
+        MetricOutcomeV1::Computed { values, .. } if values.brier == 40_000
+    ));
 }
 
 #[test]
@@ -482,6 +486,7 @@ fn sqlite_calibration_rejects_an_unregistered_report_artifact() {
     session
         .register_pipeline_evaluator(Box::new(CalibrationReportEvaluatorV1::new(
             ErasureReferenceV1::from_digest([0x43; 32]),
+            1,
         )))
         .test_ok();
     session.submit_action(&fixture.prediction()).test_ok();
@@ -525,7 +530,7 @@ fn redacted_or_erased_evidence_only_preserves_or_weakens_the_claim() {
         .register_pipeline_evaluator(Box::new(CommittedRangeIntegrityEvaluatorV1))
         .test_ok();
     session
-        .register_pipeline_evaluator(Box::new(CalibrationReportEvaluatorV1::new(REPORT)))
+        .register_pipeline_evaluator(Box::new(CalibrationReportEvaluatorV1::new(REPORT, 1)))
         .test_ok();
     session.submit_action(&fixture.prediction()).test_ok();
     session.submit_action(&fixture.outcome()).test_ok();
@@ -583,16 +588,31 @@ impl PipelineEvaluatorV1 for ForgingEvaluator {
         PipelineEvaluatorOutputV1::CalibrationReport(Box::new(CalibrationReport {
             replay_claim: ErasureReplayClaimV1::Exact,
             redaction_state: ArtifactRedactionStateV1::None,
-            brier_score: 0.0,
-            crps: 0.0,
-            lift_vs_personal_base_rate: 1.0,
-            ece: 0.0,
-            lift_vs_population_avg: 1.0,
-            lift_vs_persistence: 1.0,
-            n_predictions: 1_000,
-            n_resolved: 1_000,
-            n_predictor_supplied: 0,
-            reliability_bins: Vec::new(),
+            result: MetricResultV1 {
+                input_digest: [0; 32],
+                counts: MetricCountsV1 {
+                    record_count: 1_000,
+                    scored: 1_000,
+                    ..MetricCountsV1::default()
+                },
+                minimum_scored_records: 1,
+                redaction_state: MetricRedactionStateV1::None,
+                outcome: MetricOutcomeV1::Computed {
+                    values: MetricValuesV1 {
+                        brier: 0,
+                        crps: 0,
+                        ece: 0,
+                        population_avg_brier: 1_000_000,
+                        lift_vs_population_avg: 1_000_000,
+                        persistence_brier: 1_000_000,
+                        lift_vs_persistence: 1_000_000,
+                        personal_base_rate_brier: 1_000_000,
+                        lift_vs_personal_base_rate: 1_000_000,
+                    },
+                    bins: Box::new([ReliabilityBin::default(); 10]),
+                },
+            },
+            orphan_outcomes: 0,
         }))
     }
 }
@@ -1035,7 +1055,7 @@ fn fold_failure_leaves_commit_evidence_without_a_projection_cut() {
         .register_pipeline_evaluator(Box::new(CommittedRangeIntegrityEvaluatorV1))
         .test_ok();
     session
-        .register_pipeline_evaluator(Box::new(CalibrationReportEvaluatorV1::new(REPORT)))
+        .register_pipeline_evaluator(Box::new(CalibrationReportEvaluatorV1::new(REPORT, 1)))
         .test_ok();
 
     adapter.armed.store(true, Ordering::SeqCst);

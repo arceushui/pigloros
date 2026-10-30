@@ -11,8 +11,9 @@ use pos_experiment::{
 };
 use pos_plugin_eval::{
     compute_report_from_events, draft_outcome, draft_prediction, CalibrationReport,
-    EvalDerivationConfigV1, EvalDerivationDriver, EvalDiagnosticsV1, EvalPlugin, EvalReducer,
-    OutcomePayload, PredictionPayload, EVENT_TYPE_OUTCOME, EVENT_TYPE_PREDICTION,
+    EvalDerivationConfigV1, EvalDerivationDriver, EvalDiagnosticsV1, EvalEvidenceV1, EvalPlugin,
+    EvalReducer, MetricOutcomeV1, OutcomePayload, PredictionPayload, EVENT_TYPE_OUTCOME,
+    EVENT_TYPE_PREDICTION,
 };
 use pos_plugin_persona::{
     draft_prediction_source, PersonaEvalDriver, PersonaModel, PersonaPlugin, PersonaReducer,
@@ -38,7 +39,7 @@ use super::{
 const LEGACY_HISTORY: &[u8] =
     include_bytes!("../../../../fixtures/conformance/pipeline/v1/legacy-eval-history.json");
 pub const LEGACY_HISTORY_SHA256: &str =
-    "27a9d670b8ea91dfc667f97f1728fdb80dcf485cd80b48a359e783201632617d";
+    "4c3a7fff17a155118023e23e5517c9dc21164b63166b14ffe9419b0bbfc5dfe1";
 const LEGACY_MAGIC: &str = "PLH1";
 const LEGACY_VERSION: u64 = 1;
 
@@ -503,13 +504,14 @@ pub fn predictor_supplied_label() -> Capture {
                 format!("{:?}", payload.evidence)
             })
             .collect();
-        let report = compute_report_from_events(&committed, REPORT, &exact_claim()).test_ok();
+        let report =
+            compute_report_from_events(&committed, &available, 1, REPORT, &exact_claim()).test_ok();
         capture.record(store, "outcome.labels", labels.join(","));
-        capture.record(store, "report.n_resolved", report.n_resolved);
+        capture.record(store, "report.n_resolved", report.result.counts.scored);
         capture.record(
             store,
             "report.n_predictor_supplied",
-            report.n_predictor_supplied,
+            report.result.counts.predictor_supplied,
         );
     }
     capture
@@ -711,37 +713,71 @@ pub fn parse_legacy_history(bytes: &[u8]) -> Result<LegacyHistory, ConformanceEr
     })
 }
 
-/// The canonical text encoding of one Calibration Report, one field per
-/// line, with every float in its shortest round-trip form.
+/// Every committed Event of these seams is authoritative evaluator input.
+const fn available(_: &Event) -> EvalEvidenceV1 {
+    EvalEvidenceV1::Available
+}
+
+/// The canonical text encoding of one Calibration Report, one field per line,
+/// every metric in integer micro-units (ADR-062 Revision 7), ending with the
+/// hex of its `MTR1` bytes.
 fn canonical_report(report: &CalibrationReport) -> Vec<String> {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let counts = report.result.counts;
     let mut lines = vec![
         format!("replay_claim={:?}", report.replay_claim),
         format!("redaction_state={:?}", report.redaction_state),
-        format!("brier_score={:?}", report.brier_score),
-        format!("crps={:?}", report.crps),
-        format!(
-            "lift_vs_personal_base_rate={:?}",
-            report.lift_vs_personal_base_rate
-        ),
-        format!("ece={:?}", report.ece),
-        format!("lift_vs_population_avg={:?}", report.lift_vs_population_avg),
-        format!("lift_vs_persistence={:?}", report.lift_vs_persistence),
-        format!("n_predictions={}", report.n_predictions),
-        format!("n_resolved={}", report.n_resolved),
-        format!("n_predictor_supplied={}", report.n_predictor_supplied),
+        format!("record_count={}", counts.record_count),
+        format!("scored={}", counts.scored),
+        format!("pending={}", counts.pending),
+        format!("redacted={}", counts.redacted),
+        format!("unavailable={}", counts.unavailable),
+        format!("predictor_supplied={}", counts.predictor_supplied),
+        format!("scored_entities={}", counts.scored_entities),
+        format!("orphan_outcomes={}", report.orphan_outcomes),
     ];
-    lines.extend(
-        report
-            .reliability_bins
-            .iter()
-            .enumerate()
-            .map(|(index, bin)| {
+    match &report.result.outcome {
+        MetricOutcomeV1::Computed { values, bins } => {
+            lines.extend([
+                format!("brier_micros={}", values.brier),
+                format!("crps_micros={}", values.crps),
+                format!("ece_micros={}", values.ece),
                 format!(
-                    "bin[{index}]={:?}..{:?} mean={:?} fraction={:?} n={}",
-                    bin.bin_lower, bin.bin_upper, bin.mean_predicted, bin.fraction_positive, bin.n
+                    "population_avg_brier_micros={}",
+                    values.population_avg_brier
+                ),
+                format!(
+                    "lift_vs_population_avg_micros={}",
+                    values.lift_vs_population_avg
+                ),
+                format!("persistence_brier_micros={}", values.persistence_brier),
+                format!("lift_vs_persistence_micros={}", values.lift_vs_persistence),
+                format!(
+                    "personal_base_rate_brier_micros={}",
+                    values.personal_base_rate_brier
+                ),
+                format!(
+                    "lift_vs_personal_base_rate_micros={}",
+                    values.lift_vs_personal_base_rate
+                ),
+            ]);
+            lines.extend(bins.iter().enumerate().map(|(index, bin)| {
+                format!(
+                    "bin[{index}] count={} probability_sum_micros={} positives={}",
+                    bin.count, bin.probability_sum_micros, bin.positives
                 )
-            }),
-    );
+            }));
+        }
+        MetricOutcomeV1::InsufficientSamples => lines.push("InsufficientSamples".to_owned()),
+    }
+    let mtr1: String = report
+        .result
+        .encode()
+        .iter()
+        .flat_map(|byte| [HEX[usize::from(byte >> 4)], HEX[usize::from(byte & 0x0f)]])
+        .map(char::from)
+        .collect();
+    lines.push(format!("mtr1={mtr1}"));
     lines
 }
 
@@ -805,7 +841,8 @@ pub fn legacy_history() -> Capture {
             );
         }
         let report = canonical_report(
-            &compute_report_from_events(&committed, REPORT, &exact_claim()).test_ok(),
+            &compute_report_from_events(&committed, &available, 1, REPORT, &exact_claim())
+                .test_ok(),
         );
         capture.record(store, "rederived", rederived.join(","));
         capture.record(
@@ -874,7 +911,7 @@ pub fn derived_evaluation_profile_tag() -> Capture {
             .with_consent_authority(authority)
             .with_protected_token(token);
         session
-            .register_pipeline_evaluator(Box::new(CalibrationReportEvaluatorV1::new(REPORT)))
+            .register_pipeline_evaluator(Box::new(CalibrationReportEvaluatorV1::new(REPORT, 1)))
             .test_ok();
 
         capture.record(store, "first-tick", emitted(session.step_tick().test_ok()));
@@ -895,7 +932,7 @@ pub fn derived_evaluation_profile_tag() -> Capture {
             match record.outcome() {
                 PipelineEvaluationOutcomeV1::CalibrationReport(report) => format!(
                     "resolved={},predictor_supplied={}",
-                    report.n_resolved, report.n_predictor_supplied
+                    report.result.counts.scored, report.result.counts.predictor_supplied
                 ),
                 other => format!("{other:?}"),
             },
