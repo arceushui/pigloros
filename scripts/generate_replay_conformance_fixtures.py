@@ -102,7 +102,6 @@ CLAIMS = (
     "IncompatibleProfile",
 )
 REDUCER = "replay-conformance.count"
-SUBJECT_PLUGIN = "replay-subject"
 EVENT_TYPE = "replay.count"
 HOST_FAILURE_DRIVER = "experiment-host"
 RECOMPUTED_TIMELINE = bytes(16)
@@ -272,16 +271,18 @@ def subject_member(script: Script) -> bytes:
     return jcs(document) + b"\n"
 
 
-def run_script(script: Script, ticks: int) -> tuple[list[bytes], str | None]:
+# The closed host-failure code of a Driver or runtime failure (`HostFailureCodeV1::Runtime`,
+# note section 6): the typed failure's canonical bytes are this code as a big-endian u16.
+HOST_FAILURE_RUNTIME = 1
+
+
+def run_script(script: Script, ticks: int) -> tuple[list[bytes], bytes | None]:
     """What the host commits for `script` over `ticks` Tick boundaries: the Event payloads in
-    Timeline Order and the typed failure text, if the Driver failed."""
+    Timeline Order and the typed failure's canonical bytes, if the Driver failed."""
     payloads: list[bytes] = []
     for tick in range(1, ticks + 1):
         if script.failure_tick == tick:
-            return payloads, (
-                f"runtime error: plugin '{SUBJECT_PLUGIN}' capability mismatch: "
-                f"{script.failure_reason}"
-            )
+            return payloads, HOST_FAILURE_RUNTIME.to_bytes(2, "big")
         if tick <= len(script.drafts):
             payloads.extend(script.drafts[tick - 1])
     return payloads, None
@@ -320,7 +321,9 @@ def snapshot_bytes(count: int) -> bytes:
     return cbor({REDUCER: {"states": states}}, canonical=True)
 
 
-def stream(timeline: bytes, events: list[tuple[int, bytes, bytes]], failure: str | None) -> Stream:
+def stream(
+    timeline: bytes, events: list[tuple[int, bytes, bytes]], failure: bytes | None
+) -> Stream:
     """`events` holds (seq, Event id bytes, payload)."""
     snapshot = snapshot_bytes(len(events))
     return Stream(
@@ -338,7 +341,7 @@ def stream(timeline: bytes, events: list[tuple[int, bytes, bytes]], failure: str
         ),
         checkpoint_digest=domain_digest(CHECKPOINT_DOMAIN, snapshot),
         checkpoint_size=len(snapshot),
-        failure=None if failure is None else failure.encode("utf-8"),
+        failure=failure,
     )
 
 
@@ -350,7 +353,7 @@ def recorded_stream(events: list[Recorded]) -> Stream:
     )
 
 
-def recomputed_stream(payloads: list[bytes], failure: str | None) -> Stream:
+def recomputed_stream(payloads: list[bytes], failure: bytes | None) -> Stream:
     return stream(
         RECOMPUTED_TIMELINE,
         [(seq, bytes(16), payload) for seq, payload in enumerate(payloads, start=1)],
@@ -359,8 +362,10 @@ def recomputed_stream(payloads: list[bytes], failure: str | None) -> Stream:
 
 
 def result_digest(value: Stream) -> bytes:
-    """The authoritative result digest: Events, then the one checkpoint (tick 0). Typed failures
-    are not covered (#1221 owner question 3)."""
+    """The authoritative result digest (note section 2): the Events, the one checkpoint (tick 0),
+    then the count-prefixed typed failures at the host coordinate (tick 0, scheduler position 0,
+    the length-prefixed Driver id, output ordinal 0, the canonical bytes). A recorded export has
+    no typed failure, so its count is 0."""
     parts = [u64(len(value.events))]
     for event in value.events:
         parts += [value.timeline, u64(event.seq), event.identity, event.schema, b3(event.payload)]
@@ -372,6 +377,20 @@ def result_digest(value: Stream) -> bytes:
         value.checkpoint_digest,
         u64(value.checkpoint_size),
     ]
+    failures = [] if value.failure is None else [value.failure]
+    parts.append(u64(len(failures)))
+    for failure in failures:
+        driver = HOST_FAILURE_DRIVER.encode()
+        parts += [
+            value.timeline,
+            u64(value.fold_cursor),
+            u64(0),
+            (0).to_bytes(4, "big"),
+            u64(len(driver)),
+            driver,
+            (0).to_bytes(4, "big"),
+            failure,
+        ]
     return domain_digest(RESULT_DOMAIN, *parts)
 
 

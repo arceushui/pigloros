@@ -84,7 +84,7 @@
     }
   ],
   "authority_inventory": "expected-authority/inventory.json",
-  "authority_inventory_sha256_digest": "147343ca91bf4fefe4e3f21503e7cbd6fd8a47c8a9ad3574f033665e09378233",
+  "authority_inventory_sha256_digest": "be110934755e099619d6b045f42d5e28b049948463bd3bd36e905ad199f713c7",
   "execution_profiles": [
     "deterministic-local-v1",
     "deterministic-air-gapped-v1"

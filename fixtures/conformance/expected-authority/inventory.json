@@ -15,9 +15,9 @@
       ],
       "expected_outcome": "VerifiedExact",
       "fixture_bytes_path": "inputs/replay-conformance/positive.json",
-      "fixture_bytes_digest": "3c37bd23fe875188516dc20c787ab3fb832e1c179757958b3808ddfca9e49bf3",
+      "fixture_bytes_digest": "46ad7adc020075d107b46d4089fcf4ee0b88a0fc90326711e680448d9367946d",
       "expected_result_path": "oracles/replay-conformance/positive.json",
-      "expected_result_digest": "dd30ebccf1a47203b3d9297735640477c353ebe382e56a2aa34a637c95107ab0",
+      "expected_result_digest": "350e28fe54e38709922186b0fcba72ab8d86cc6e973c20d095ae3b7ee5673cd2",
       "materialization_status": "materialized"
     },
     {
@@ -30,9 +30,9 @@
       ],
       "expected_outcome": "VerifiedExact",
       "fixture_bytes_path": "inputs/replay-conformance/positive.json",
-      "fixture_bytes_digest": "3c37bd23fe875188516dc20c787ab3fb832e1c179757958b3808ddfca9e49bf3",
+      "fixture_bytes_digest": "46ad7adc020075d107b46d4089fcf4ee0b88a0fc90326711e680448d9367946d",
       "expected_result_path": "oracles/replay-conformance/positive.json",
-      "expected_result_digest": "dd30ebccf1a47203b3d9297735640477c353ebe382e56a2aa34a637c95107ab0",
+      "expected_result_digest": "350e28fe54e38709922186b0fcba72ab8d86cc6e973c20d095ae3b7ee5673cd2",
       "materialization_status": "materialized"
     },
     {
@@ -46,9 +46,9 @@
       ],
       "expected_outcome": "VerifiedExact",
       "fixture_bytes_path": "inputs/replay-conformance/positive.json",
-      "fixture_bytes_digest": "3c37bd23fe875188516dc20c787ab3fb832e1c179757958b3808ddfca9e49bf3",
+      "fixture_bytes_digest": "46ad7adc020075d107b46d4089fcf4ee0b88a0fc90326711e680448d9367946d",
       "expected_result_path": "oracles/replay-conformance/positive.json",
-      "expected_result_digest": "dd30ebccf1a47203b3d9297735640477c353ebe382e56a2aa34a637c95107ab0",
+      "expected_result_digest": "350e28fe54e38709922186b0fcba72ab8d86cc6e973c20d095ae3b7ee5673cd2",
       "materialization_status": "materialized"
     },
     {
@@ -61,9 +61,9 @@
       ],
       "expected_outcome": "Diverged",
       "fixture_bytes_path": "inputs/replay-conformance/independent-evaluation.json",
-      "fixture_bytes_digest": "d55f4cafdd8958ea2a4e833430dcefae2f50a3907ee1245ae20af9e3bc73e6ab",
+      "fixture_bytes_digest": "a275ceb603956f7590b66a2dc5e2fcbd873f33c76a622210bdd9a66481a6c48a",
       "expected_result_path": "oracles/replay-conformance/independent-evaluation.json",
-      "expected_result_digest": "30aac1a5b21226a0536c7bdb0981bd4834b56dd18d0e43094e35f1b7427843d2",
+      "expected_result_digest": "54b6585b14b4738c7a47aa826d195beb0bfe613a69337ccb98d3d855f268ea16",
       "materialization_status": "materialized"
     },
     {
@@ -95,9 +95,9 @@
       ],
       "expected_outcome": "UnverifiableArtifactsMissing",
       "fixture_bytes_path": "inputs/replay-conformance/deletion-redaction.json",
-      "fixture_bytes_digest": "17037486b86d0edec63a2357a167228c1ecc1208414d1d81fc897e93110887f3",
+      "fixture_bytes_digest": "a4645b03a149d03ec0046cc6c94c73d06abf31f892f31e0d37ae76866999e37f",
       "expected_result_path": "oracles/replay-conformance/deletion-redaction.json",
-      "expected_result_digest": "ece7656c2eee7a2cd85aa684d9f7e08f1e1479096f65cc300af1ff421aca7478",
+      "expected_result_digest": "7d4af16e77baf7e7323922ca2e8c81dc1e0b8e52ae413c765df32773a14a94a2",
       "materialization_status": "materialized"
     },
     {
@@ -142,9 +142,9 @@
       ],
       "expected_outcome": "NonDeterministicAdmission",
       "fixture_bytes_path": "inputs/replay-conformance/denied.json",
-      "fixture_bytes_digest": "ab59e384cd22fcb4b33204be9124195664f935229a7d36b8a0a143477bf301ad",
+      "fixture_bytes_digest": "cc862062c4098825235ddfd2accedc7ebfec73241711a7a5cdab6b9502e4a988",
       "expected_result_path": "oracles/replay-conformance/denied.json",
-      "expected_result_digest": "1da4a04d0636754d89852b2b261ca2de73fc2c80abef30c306c143e635dce6b8",
+      "expected_result_digest": "841b2e9c193d11ed188ae7dce66bba16948cc692e5ed5bab9af9d83297d63b46",
       "materialization_status": "materialized"
     },
     {
@@ -157,9 +157,9 @@
       ],
       "expected_outcome": "OutcomePreservedReplayClaimDegraded",
       "fixture_bytes_path": "inputs/replay-conformance/deletion-redaction.json",
-      "fixture_bytes_digest": "17037486b86d0edec63a2357a167228c1ecc1208414d1d81fc897e93110887f3",
+      "fixture_bytes_digest": "a4645b03a149d03ec0046cc6c94c73d06abf31f892f31e0d37ae76866999e37f",
       "expected_result_path": "oracles/replay-conformance/deletion-redaction.json",
-      "expected_result_digest": "ece7656c2eee7a2cd85aa684d9f7e08f1e1479096f65cc300af1ff421aca7478",
+      "expected_result_digest": "7d4af16e77baf7e7323922ca2e8c81dc1e0b8e52ae413c765df32773a14a94a2",
       "materialization_status": "materialized"
     },
     {
@@ -174,9 +174,9 @@
       ],
       "expected_outcome": "TypedFailure",
       "fixture_bytes_path": "inputs/replay-conformance/denied.json",
-      "fixture_bytes_digest": "ab59e384cd22fcb4b33204be9124195664f935229a7d36b8a0a143477bf301ad",
+      "fixture_bytes_digest": "cc862062c4098825235ddfd2accedc7ebfec73241711a7a5cdab6b9502e4a988",
       "expected_result_path": "oracles/replay-conformance/denied.json",
-      "expected_result_digest": "1da4a04d0636754d89852b2b261ca2de73fc2c80abef30c306c143e635dce6b8",
+      "expected_result_digest": "841b2e9c193d11ed188ae7dce66bba16948cc692e5ed5bab9af9d83297d63b46",
       "materialization_status": "materialized"
     }
   ]
