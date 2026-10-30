@@ -49,7 +49,7 @@
 //!    recomputed result digest and is `UnverifiableArtifactsMissing` with
 //!    `ProvenanceMissing` at `replay_claim` (ADR-062 Revision 8, Q4).
 //!
-//! # ExecutionProfile enforcement
+//! # EPF1 enforcement
 //!
 //! The named EPF1 is enforced by the subject's
 //! [`RecomputationSubjectV1::compose`], not by the host: the host passes the
