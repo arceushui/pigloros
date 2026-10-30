@@ -240,8 +240,8 @@ Events build the same input:
 ## 4.5 Implementations and oracle independence
 
 1. **plugins/eval (the implementation under test).** It exposes the public
-   `MTI1`/`MTR1`/`MTQ1` codecs and computation, and `compute_report` /
-   `compute_report_from_events` build `CalibrationReport` from `MTR1`. The f64 metric fields
+   `MTI1`/`MTR1`/`MTQ1` codecs and computation, and `compute_report_from_events` builds
+   `CalibrationReport` from `MTR1`. The f64 metric fields
    become the micro-unit integers, and `InsufficientSamples` replaces the zero-filled empty
    report. No authoritative path uses f64 arithmetic for a metric.
 2. **Expected results** are public immutable data written by an offline generator that calls no
