@@ -1,0 +1,36 @@
+name: root-cleanup-diagnostic
+
+on:
+  push:
+    branches: [diagnostic/1200-root-cleanup]
+
+permissions:
+  contents: read
+
+jobs:
+  root-cleanup-regression:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      RUSTFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
+        with:
+          toolchain: 1.97.1
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16
+        with:
+          shared-key: diagnostic-1200-root-cleanup
+      - name: Record the exact diagnostic checkout
+        run: git show --no-patch --format=fuller HEAD
+      - name: Exercise cleanup after every reached publication failure
+        run: |
+          set -euo pipefail
+          cargo test --package pos-sandboxd --lib --all-features --locked \
+            root_attachment::tests::intent::cases::root_intent_io_failures_refuse_launch_and_preserve_recovery_state \
+            -- --exact --include-ignored --nocapture \
+            2>&1 | tee "${RUNNER_TEMP}/root-cleanup.log"
+          grep -q '^test result: ok. 1 passed; 0 failed; 0 ignored;' \
+            "${RUNNER_TEMP}/root-cleanup.log"
