@@ -407,7 +407,7 @@ fn provider_contract_1_0_0_has_no_reader() -> TestResult {
     let mut old_payload = attempt(FixtureFamily::Positive, ExecutionMode::Local)?;
     old_payload.payload = artifact(PROVIDER_1_0_0_PAYLOAD.to_vec());
     assert_eq!(observe(&old_payload)?.result, failure(PAYLOAD_INVALID));
-    assert!(SCHEMA_ID.ends_with(".v2"));
+    assert_eq!(SCHEMA_ID, "pigloros.replay-conformance.case.v2");
     Ok(())
 }
 
@@ -506,7 +506,7 @@ fn a_payload_outside_the_grammar_is_payload_invalid() -> TestResult {
             payload["subcases"] = Value::Array(vec![first; 17]);
         },
         |payload: &mut Value| {
-            payload["subcases"][2]["profiles"] = json!(["deterministic-local-v1"])
+            payload["subcases"][2]["profiles"] = json!(["deterministic-local-v1"]);
         },
         |payload: &mut Value| payload["subcases"][0]["ticks"] = json!(3),
         |payload: &mut Value| {
@@ -543,7 +543,7 @@ fn a_payload_outside_the_grammar_is_payload_invalid() -> TestResult {
     })?;
     let not_json = CaseAttempt {
         payload: artifact(b"not JSON".to_vec()),
-        ..positive.clone()
+        ..positive
     };
     for attempt in [
         licence_as_export,
@@ -593,7 +593,7 @@ fn a_subject_member_outside_its_grammar_is_payload_invalid() -> TestResult {
     }
     // The well-formed member with the same composite layout runs.
     let member = serde_json::to_vec(&subject)?;
-    let mut attempt = with_payload(base.clone(), |payload| {
+    let mut attempt = with_payload(base, |payload| {
         payload["subcases"][0]["closure"]["primary"] =
             json!(blake3::hash(&member).to_hex().to_string());
     })?;
