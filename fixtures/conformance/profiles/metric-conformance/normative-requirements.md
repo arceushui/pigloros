@@ -29,11 +29,6 @@ fixture sub-cases.
    Additive fixture cases that do not change the expected result of any existing case create a
    **minor** version. Changes to wording only, with no byte changes, create a **patch**.
 
-   The first normative content that replaces a Draft placeholder (item 4) keeps
-   `semantic_version` 1.0.0, because there is no earlier expected behaviour for it to change.
-   After that, any change to the expected behaviour of a case, including a change to a rule of
-   section 4.6, creates a new major version as listed above.
-
    Records carry a numeric schema version (`1`). An unknown magic, version, algorithm ID or
    algorithm major is `UnsupportedVersion` or `UnsupportedAlgorithm`. There are no upcasters,
    aliases or fallbacks. Results stay bound to the `MTI1` digest, the `MTR1` digest and the CPF1
@@ -42,6 +37,12 @@ fixture sub-cases.
    and no CNR1 report reached Candidate or Stable. The provider is
    `pigloros.fixture.metric-conformance@2.0.0`. The placeholder has no reader, alias or
    compatibility window.
+
+   The first normative content that replaces the Draft placeholder keeps profile
+   `semantic_version` 1.0.0, because there is no earlier expected behaviour for it to change.
+   This holds only while the profile is still Draft, that is, until its first Candidate or
+   Stable CNR1 report. After that, item 3 applies: any change to the expected behaviour of a
+   case, including a change to a rule of section 4.6, creates a new major version.
 
 ## 4.2 Public records
 
@@ -277,7 +278,7 @@ then records in order, with fields in index order inside each record. The first 
    - truncated items;
    - missing or trailing fields: a root that is not an array of exactly 8 fields, a `records`
      field that is not an array, or a record that is not an array of exactly 6 fields;
-   - an array nested deeper than 16 levels (G10);
+   - an array nested deeper than 16 levels (see G10 below);
    - trailing bytes after the root item.
 
    The structural pass reads the records array head but keeps no record. It does not compare
@@ -299,7 +300,8 @@ then records in order, with fields in index order inside each record. The first 
    - `outcome_state`, `outcome` and `predictor_supplied`: `InvalidOutcome`.
 
 The following points fill gaps that sections 4.2 and 4.4 leave open. The profile owner
-confirmed them as normative on 2026-10-30, and the fixtures pin them:
+confirmed them as normative on 2026-10-30: G1 to G9 in Redmine #1211 (note 3) and G10 to G12
+in Redmine #1213 (note 4). The fixtures pin them:
 
 - **G1. Identifier UTF-8.** Invalid UTF-8 in an identifier is `InvalidIdentifier` (section 5,
   `mal.11`), not a structural `InvalidEncoding`. It is checked when that field is read.
@@ -328,18 +330,20 @@ confirmed them as normative on 2026-10-30, and the fixtures pin them:
 - **G10. Nesting depth.** The root array is level 1, a header field level 2, a record level 3
   and a record field level 4. An array nested deeper than 16 levels is `InvalidEncoding` at
   the coordinate of the over-deep array (the first array at level 17), found by the structural
-  pass. An array at level 16 passes the structural pass; it is then a field of the wrong type
-  (G2). Every well-formed public record nests at most 3 levels, so the cap bounds only the walk
-  of malformed input (`mal.14a`, `mal.14b`).
+  pass. An array at level 16 or shallower is accepted by this depth rule and is then subject to
+  the type rule of the field that holds it. Every well-formed public record nests at most 3
+  levels, so the cap bounds only the walk of malformed input (`mal.14a`, `mal.14b`).
 - **G11. `MTQ1` shape.** The `MTQ1` fields are named `magic`, `version` and `patterns`, and a
-  pattern is `patterns/<i>`. The decode order is the one above: structure (a root that is not
-  an array of exactly 3 fields, or a `patterns` field that is not an array, is
-  `InvalidEncoding`), then `magic` and `version` (`UnsupportedVersion`), then `patterns`, then
-  each pattern in index order:
-  - a `patterns` field that is not an array, or an empty `patterns` array, is
-    `InvalidEncoding` at `patterns`;
-  - more than 4,096 patterns is `ResourceLimit` at `patterns`;
-  - an entry that is not an unsigned integer is `InvalidEncoding` at `patterns/<i>`.
+  pattern is `patterns/<i>`. An `MTQ1` is decoded in this order, and the first failure wins:
+  1. structure: the defects of item 1 and G10, a root that is not an array of exactly 3
+     fields (`InvalidEncoding` at `input`), and a `patterns` field that is not an array
+     (`InvalidEncoding` at `patterns`);
+  2. `magic` and `version`: `UnsupportedVersion` at that field, or `InvalidEncoding` for a
+     wrong CBOR type (G2);
+  3. the `patterns` length: an empty array is `InvalidEncoding` at `patterns`, and more than
+     4,096 patterns is `ResourceLimit` at `patterns`;
+  4. each pattern in index order: an entry that is not an unsigned integer is
+     `InvalidEncoding` at `patterns/<i>`.
 
   (`mal.16a` to `mal.16d`.)
 - **G12. Header text UTF-8.** Invalid UTF-8 in a header text field is that field's failure,

@@ -673,9 +673,9 @@ def mtq1(patterns: list[int]) -> bytes:
     return enc(["MTQ1", 1, patterns])
 
 
-def mtq1_raw(patterns: object, *, magic: object = "MTQ1", version: object = 1) -> bytes:
-    """`MTQ1` bytes with any field replaced, to build a malformed input."""
-    return enc([magic, version, patterns])
+def mtq1_raw(patterns: object) -> bytes:
+    """`MTQ1` bytes with `patterns` replaced by any item, to build a malformed input."""
+    return enc(["MTQ1", 1, patterns])
 
 
 QUANTIZATION_FIELDS = ("magic", "version", "patterns")
@@ -1696,13 +1696,15 @@ STIMULUS_KINDS = {
     "downgrade": ("provider-contract",),
     "independent-evaluation": ("recompute", "generator-check"),
 }
-# Section 4.6 G6: a field coordinate, to which a nested item appends its index (at most 15
-# times, since the root is level 1 and G10 refuses the 17th level); `patterns` is the `MTQ1`
-# field of G11.
+# Section 4.6 G6: a field coordinate, to which a nested item appends its index. G10 refuses
+# the first array at level 17, so a header field (level 2) takes at most 15 indices, an `MTQ1`
+# pattern (level 3, G11) at most 14 and a record field (level 4) at most 13.
 COORDINATE_PATTERN = (
-    "^(input|trailing|records(/(0|[1-9][0-9]*))?|patterns|"
-    "(magic|version|algorithm_id|algorithm_major|binning|minimum_scored_records|record_count|"
-    "records/(0|[1-9][0-9]*)/[0-5]|patterns/(0|[1-9][0-9]*))(/(0|[1-9][0-9]*)){0,15})$"
+    "^(input|trailing|patterns|records(/(0|[1-9][0-9]*))?|"
+    "(magic|version|algorithm_id|algorithm_major|binning|minimum_scored_records|record_count)"
+    "(/(0|[1-9][0-9]*)){0,15}|"
+    "patterns/(0|[1-9][0-9]*)(/(0|[1-9][0-9]*)){0,14}|"
+    "records/(0|[1-9][0-9]*)/[0-5](/(0|[1-9][0-9]*)){0,13})$"
 )
 
 
