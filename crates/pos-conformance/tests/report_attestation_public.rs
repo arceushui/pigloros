@@ -214,7 +214,7 @@ fn report_with(
     };
     let mut report = ConformanceReportV1 {
         report_id: [1; 16],
-        subject_artifact_digest: [2; 32],
+        subject_artifact_digest: *blake3::hash(SUBJECT_ARTIFACT).as_bytes(),
         profile_digest: fixture.profile_digest,
         normative_spec_digest: [4; 32],
         execution_profile_digest: [5; 32],
@@ -810,7 +810,10 @@ fn every_refusal_names_its_step() {
 fn each_bound_subject_must_reproduce_its_cnr1_field() -> TestResult {
     let artifacts = artifacts()?;
     let trust = TrustDouble::admitting(&signer());
-    let cases: [(BoundSubjectV1, ReportEdit); 3] = [
+    let cases: [(BoundSubjectV1, ReportEdit); 4] = [
+        (BoundSubjectV1::SubjectArtifact, |report| {
+            report.subject_artifact_digest = [0x50; 32];
+        }),
         (BoundSubjectV1::Profile, |report| {
             report.profile_digest = [0x51; 32];
         }),

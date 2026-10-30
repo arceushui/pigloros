@@ -39,10 +39,10 @@
 //! fields. The signature establishes attribution only: a valid signature over a failing report
 //! yields that failing report. The CNR1 wire format is unchanged.
 //!
-//! The subject binding recomputes each CNR1 field as the CNR1 producer defines it: the CPF1
+//! The subject binding recomputes each CNR1 field as `ADR-062_R8_Report_Attestation_Binding`
+//! defines it: the BLAKE3-256 digest of the exact subject artifact bytes, the CPF1
 //! `profile_digest` of the validated profile, the BLAKE3 digest of the canonical CFB1 archive,
-//! and the BLAKE3 digest of the evaluator binary. The subject artifact is not bound: CNR1 copies
-//! its digest from the evaluator request, and no definition derives it from artifact bytes.
+//! and the BLAKE3 digest of the evaluator binary.
 
 use crate::conformance_trust_admission::{
     ConformanceArtifactRefusalV1, ConformanceKeyRefusalV1, ConformanceTrustAdmissionPortV1,
@@ -132,6 +132,8 @@ pub enum SignatureMeaningV1 {
 /// A subject whose digest is bound to a CNR1 field.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BoundSubjectV1 {
+    /// The subject artifact, bound to CNR1 `subject_artifact_digest`.
+    SubjectArtifact,
     /// The CPF1 profile, bound to CNR1 `profile_digest`.
     Profile,
     /// The CFB1 fixture bundle, bound to CNR1 `fixture_bundle_digest`.
@@ -338,7 +340,7 @@ pub fn verify_report_attestation_v1(
     }
     let report = ConformanceReportV1::from_canonical_cbor(&statement.report_cnr1)
         .map_err(|_| ReportAttestationErrorV1::EmbeddedReport)?;
-    bind_subjects(&report, &artifacts, statement.subjects[4][0])
+    bind_subjects(&report, &artifacts, &statement.subjects)
         .map_err(ReportAttestationErrorV1::SubjectBinding)?;
     trust
         .check_artifact_revocation(&report.report_digest, &report.evaluator_binary_digest)
@@ -361,13 +363,17 @@ pub fn verify_report_attestation_v1(
     })
 }
 
-/// Require each bound subject to reproduce its CNR1 field; `evaluator_blake3` is the already
-/// recomputed BLAKE3 subject digest of the evaluator binary.
+/// Require each bound subject to reproduce its CNR1 field. `subjects` are the Statement
+/// subject digests, already recomputed from the artifact bytes; the subject artifact and the
+/// evaluator binary reuse their BLAKE3 digests.
 fn bind_subjects(
     report: &ConformanceReportV1,
     artifacts: &ReportAttestationArtifactsV1<'_>,
-    evaluator_blake3: [u8; 32],
+    subjects: &[[[u8; 32]; 2]; 5],
 ) -> Result<(), BoundSubjectV1> {
+    if subjects[1][0] != report.subject_artifact_digest {
+        return Err(BoundSubjectV1::SubjectArtifact);
+    }
     let profile_digest = ConformanceProfileV1::from_canonical_cbor(artifacts.profile_cpf1)
         .ok()
         .map(|profile| profile.profile_digest);
@@ -380,7 +386,7 @@ fn bind_subjects(
     if bundle_digest != Some(report.fixture_bundle_digest) {
         return Err(BoundSubjectV1::FixtureBundle);
     }
-    if evaluator_blake3 == report.evaluator_binary_digest {
+    if subjects[4][0] == report.evaluator_binary_digest {
         Ok(())
     } else {
         Err(BoundSubjectV1::EvaluatorBinary)
