@@ -159,7 +159,7 @@ impl ActivatedRootDirectory {
     /// [`crate::TransientServiceUnitName`], so the path is always valid.
     #[cfg(target_os = "linux")]
     pub(crate) fn for_attempt(component: &str) -> Self {
-        Self(format!("/run/pigloros/sandbox/attempts/{component}/root"))
+        Self(attempt_root_path(component))
     }
 
     /// Return the exact D-Bus `s` value for `RootDirectory`.
@@ -167,6 +167,12 @@ impl ActivatedRootDirectory {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+}
+
+/// Canonical text for persisted claims; this does not construct a verified root.
+#[cfg(target_os = "linux")]
+pub(crate) fn attempt_root_path(component: &str) -> String {
+    format!("/run/pigloros/sandbox/attempts/{component}/root")
 }
 
 /// A bounded provider-owned source path for the admitted launcher bind mount.
