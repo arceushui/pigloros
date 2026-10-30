@@ -3,14 +3,14 @@
 //!
 //! ADR-062 Revision 8 slice R3 (#1221). [`execute_profile_recomputation_v1`]
 //! is the execution step after [`preflight_verification_v1`] for a
-//! recomputation: it recomputes the run from the complete frozen
-//! closure under the named EPF1 on a fresh [`Experiment`] host, compares the
+//! recomputation: it recomputes the run from the complete frozen closure
+//! under the named EPF1 on a fresh [`Experiment`] host, compares the
 //! recomputed stream with the expected stream through
 //! [`first_divergence_v1`](crate::authoritative_comparison::first_divergence_v1)
-//! and emits one sealed `VRR1`.
-//! [`execute_cross_profile_conformance_v1`] runs the same closure under
-//! `deterministic-local-v1` and `deterministic-air-gapped-v1` and compares
-//! both runs with one expected stream.
+//! and emits one sealed `VRR1`. [`execute_cross_profile_conformance_v1`]
+//! runs the same closure under `deterministic-local-v1` and
+//! `deterministic-air-gapped-v1` and compares both runs with one expected
+//! stream.
 //!
 //! # Order
 //!
@@ -65,20 +65,21 @@
 //! `ADR-062_R8_Recorded_Replay_Digests`, section 6 (2026-10-30), and its
 //! section 2 digest table. The stream uses that accepted `RecordedReplay`
 //! digest scheme, documented in [`crate::verification_execution`], with
-//! tick 0. A recomputed run mints a
-//! fresh Timeline id and fresh Event ids (ULIDs that carry the wall clock), so
-//! those identifiers are operational: the stream is addressed by
-//! [`RECOMPUTED_TIMELINE_ID_V1`] and every Event identity digest covers 16
-//! zero bytes in place of the Event id. Entity ids, Event types, schema
-//! versions, payloads, Timeline Order and the Projection Snapshot are
-//! authoritative.
+//! tick 0. A recomputed run mints a fresh Timeline id and fresh Event ids
+//! (ULIDs that carry the wall clock), so those identifiers are operational:
+//! the stream is addressed by [`RECOMPUTED_TIMELINE_ID_V1`] and every Event
+//! identity digest covers 16 zero bytes in place of the Event id. Entity ids,
+//! Event types, schema versions, payloads, Timeline Order and the Projection
+//! Snapshot are authoritative.
 //!
 //! A typed failure is one Driver output at the host coordinate: Timeline
 //! [`RECOMPUTED_TIMELINE_ID_V1`], the Fold Cursor of the last committed Event,
 //! tick 0, scheduler position 0, Driver id [`HOST_FAILURE_DRIVER_ID_V1`] and
-//! output ordinal 0. Its canonical bytes are its closed
-//! [`HostFailureCodeV1`] as a big-endian `u16` (two bytes), never error
-//! text; its numeric profile digest is 32 zero bytes. The typed failure is
+//! output ordinal 0. Its canonical bytes are the four bytes of
+//! [`HostFailureV1::to_be_bytes`]: the closed [`HostFailureCodeV1`] as a
+//! big-endian `u16`, then the sub-code as a big-endian `u16` (the
+//! [`RuntimeErrorKindV1`] of a runtime failure, 0 otherwise), never error
+//! text. Its numeric profile digest is 32 zero bytes. The typed failure is
 //! part of the `authoritative_result_digest`. A typed failure the expected
 //! stream also holds verifies as exact (Q4).
 //!
@@ -118,7 +119,7 @@ pub const HOST_FAILURE_DRIVER_ID_V1: &str = "experiment-host";
 const EXPERIMENT_NAME: &str = "profile-recomputation";
 
 /// The closed code of a host typed failure, one per [`ExperimentError`]
-/// variant. Its canonical bytes are the code as a big-endian `u16`.
+/// variant; see [`HostFailureV1`] for its canonical bytes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u16)]
 pub enum HostFailureCodeV1 {
@@ -152,14 +153,6 @@ pub enum HostFailureCodeV1 {
     StepModeMismatch = 14,
 }
 
-impl HostFailureCodeV1 {
-    /// The canonical bytes of the code: a big-endian `u16`.
-    #[must_use]
-    pub const fn to_be_bytes(self) -> [u8; 2] {
-        (self as u16).to_be_bytes()
-    }
-}
-
 impl From<&ExperimentError> for HostFailureCodeV1 {
     fn from(error: &ExperimentError) -> Self {
         match error {
@@ -177,6 +170,200 @@ impl From<&ExperimentError> for HostFailureCodeV1 {
             ExperimentError::DuplicatePipelineEvaluator => Self::DuplicatePipelineEvaluator,
             ExperimentError::CadenceTimeRegressed { .. } => Self::CadenceTimeRegressed,
             ExperimentError::StepModeMismatch { .. } => Self::StepModeMismatch,
+        }
+    }
+}
+
+/// The closed kind of a [`RuntimeError`], one per variant in declaration
+/// order; the sub-code of a [`HostFailureCodeV1::Runtime`] failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u16)]
+pub enum RuntimeErrorKindV1 {
+    /// [`RuntimeError::ManifestRegistration`].
+    ManifestRegistration = 1,
+    /// [`RuntimeError::ManifestSlot`].
+    ManifestSlot = 2,
+    /// [`RuntimeError::OutputAdmission`].
+    OutputAdmission = 3,
+    /// [`RuntimeError::WorldInstallation`].
+    WorldInstallation = 4,
+    /// [`RuntimeError::Composition`].
+    Composition = 5,
+    /// [`RuntimeError::DuplicatePlugin`].
+    DuplicatePlugin = 6,
+    /// [`RuntimeError::UnknownEventType`].
+    UnknownEventType = 7,
+    /// [`RuntimeError::InvalidPayload`].
+    InvalidPayload = 8,
+    /// [`RuntimeError::NoDriver`].
+    NoDriver = 9,
+    /// [`RuntimeError::DriverPanicked`].
+    DriverPanicked = 10,
+    /// [`RuntimeError::DriverAbortPanicked`].
+    DriverAbortPanicked = 11,
+    /// [`RuntimeError::DriverCommitPanicked`].
+    DriverCommitPanicked = 12,
+    /// [`RuntimeError::DriverRestorePanicked`].
+    DriverRestorePanicked = 13,
+    /// [`RuntimeError::DriverForkPanicked`].
+    DriverForkPanicked = 14,
+    /// [`RuntimeError::DriverForkRollbackFailed`].
+    DriverForkRollbackFailed = 15,
+    /// [`RuntimeError::ResourceExhausted`].
+    ResourceExhausted = 16,
+    /// [`RuntimeError::CapabilityMismatch`].
+    CapabilityMismatch = 17,
+    /// [`RuntimeError::ReservedGeographicEventType`].
+    ReservedGeographicEventType = 18,
+    /// [`RuntimeError::GeographicDraft`].
+    GeographicDraft = 19,
+    /// [`RuntimeError::ReservedHostDraft`].
+    ReservedHostDraft = 20,
+    /// [`RuntimeError::ReservedHostEventType`].
+    ReservedHostEventType = 21,
+    /// [`RuntimeError::ReservedConsentEventType`].
+    ReservedConsentEventType = 22,
+    /// [`RuntimeError::ConsentDraft`].
+    ConsentDraft = 23,
+    /// [`RuntimeError::ConsentOperationUnavailable`].
+    ConsentOperationUnavailable = 24,
+    /// [`RuntimeError::ErasureOperationUnavailable`].
+    ErasureOperationUnavailable = 25,
+    /// [`RuntimeError::Consent`].
+    Consent = 26,
+    /// [`RuntimeError::ErasureContainment`].
+    ErasureContainment = 27,
+    /// [`RuntimeError::Authority`].
+    Authority = 28,
+    /// [`RuntimeError::AuthorityFenceRequired`].
+    AuthorityFenceRequired = 29,
+    /// [`RuntimeError::ScheduledProfile`].
+    ScheduledProfile = 30,
+    /// [`RuntimeError::AuthorityPersistence`].
+    AuthorityPersistence = 31,
+    /// [`RuntimeError::PipelineContract`].
+    PipelineContract = 32,
+    /// [`RuntimeError::ScheduledPassNotAdmitted`].
+    ScheduledPassNotAdmitted = 33,
+    /// [`RuntimeError::NoScheduledAdmissionInDoubt`].
+    NoScheduledAdmissionInDoubt = 34,
+    /// [`RuntimeError::DependencyDeclaration`].
+    DependencyDeclaration = 35,
+    /// [`RuntimeError::CadenceOverflow`].
+    CadenceOverflow = 36,
+    /// [`RuntimeError::MissingSnapshotAnchor`].
+    MissingSnapshotAnchor = 37,
+    /// [`RuntimeError::SnapshotTimelineMismatch`].
+    SnapshotTimelineMismatch = 38,
+    /// [`RuntimeError::PendingDriverStep`].
+    PendingDriverStep = 39,
+    /// [`RuntimeError::UnappendedDriverOutput`].
+    UnappendedDriverOutput = 40,
+    /// [`RuntimeError::DriverRecoveryNotFresh`].
+    DriverRecoveryNotFresh = 41,
+    /// [`RuntimeError::DriverTickOverflow`].
+    DriverTickOverflow = 42,
+    /// [`RuntimeError::InvalidRecoveryEvidence`].
+    InvalidRecoveryEvidence = 43,
+    /// [`RuntimeError::CommunityPlugin`].
+    CommunityPlugin = 44,
+    /// [`RuntimeError::FallbackSwap`].
+    FallbackSwap = 45,
+    /// [`RuntimeError::Store`].
+    Store = 46,
+    /// [`RuntimeError::ModeMismatch`].
+    ModeMismatch = 47,
+}
+
+impl From<&RuntimeError> for RuntimeErrorKindV1 {
+    fn from(error: &RuntimeError) -> Self {
+        match error {
+            RuntimeError::ManifestRegistration(_) => Self::ManifestRegistration,
+            RuntimeError::ManifestSlot(_) => Self::ManifestSlot,
+            RuntimeError::OutputAdmission(_) => Self::OutputAdmission,
+            RuntimeError::WorldInstallation(_) => Self::WorldInstallation,
+            RuntimeError::Composition(_) => Self::Composition,
+            RuntimeError::DuplicatePlugin { .. } => Self::DuplicatePlugin,
+            RuntimeError::UnknownEventType(_) => Self::UnknownEventType,
+            RuntimeError::InvalidPayload { .. } => Self::InvalidPayload,
+            RuntimeError::NoDriver { .. } => Self::NoDriver,
+            RuntimeError::DriverPanicked { .. } => Self::DriverPanicked,
+            RuntimeError::DriverAbortPanicked { .. } => Self::DriverAbortPanicked,
+            RuntimeError::DriverCommitPanicked { .. } => Self::DriverCommitPanicked,
+            RuntimeError::DriverRestorePanicked { .. } => Self::DriverRestorePanicked,
+            RuntimeError::DriverForkPanicked { .. } => Self::DriverForkPanicked,
+            RuntimeError::DriverForkRollbackFailed { .. } => Self::DriverForkRollbackFailed,
+            RuntimeError::ResourceExhausted { .. } => Self::ResourceExhausted,
+            RuntimeError::CapabilityMismatch { .. } => Self::CapabilityMismatch,
+            RuntimeError::ReservedGeographicEventType { .. } => Self::ReservedGeographicEventType,
+            RuntimeError::GeographicDraft { .. } => Self::GeographicDraft,
+            RuntimeError::ReservedHostDraft { .. } => Self::ReservedHostDraft,
+            RuntimeError::ReservedHostEventType { .. } => Self::ReservedHostEventType,
+            RuntimeError::ReservedConsentEventType { .. } => Self::ReservedConsentEventType,
+            RuntimeError::ConsentDraft { .. } => Self::ConsentDraft,
+            RuntimeError::ConsentOperationUnavailable => Self::ConsentOperationUnavailable,
+            RuntimeError::ErasureOperationUnavailable => Self::ErasureOperationUnavailable,
+            RuntimeError::Consent(_) => Self::Consent,
+            RuntimeError::ErasureContainment(_) => Self::ErasureContainment,
+            RuntimeError::Authority(_) => Self::Authority,
+            RuntimeError::AuthorityFenceRequired => Self::AuthorityFenceRequired,
+            RuntimeError::ScheduledProfile(_) => Self::ScheduledProfile,
+            RuntimeError::AuthorityPersistence(_) => Self::AuthorityPersistence,
+            RuntimeError::PipelineContract(_) => Self::PipelineContract,
+            RuntimeError::ScheduledPassNotAdmitted(_) => Self::ScheduledPassNotAdmitted,
+            RuntimeError::NoScheduledAdmissionInDoubt => Self::NoScheduledAdmissionInDoubt,
+            RuntimeError::DependencyDeclaration(_) => Self::DependencyDeclaration,
+            RuntimeError::CadenceOverflow { .. } => Self::CadenceOverflow,
+            RuntimeError::MissingSnapshotAnchor { .. } => Self::MissingSnapshotAnchor,
+            RuntimeError::SnapshotTimelineMismatch { .. } => Self::SnapshotTimelineMismatch,
+            RuntimeError::PendingDriverStep => Self::PendingDriverStep,
+            RuntimeError::UnappendedDriverOutput => Self::UnappendedDriverOutput,
+            RuntimeError::DriverRecoveryNotFresh { .. } => Self::DriverRecoveryNotFresh,
+            RuntimeError::DriverTickOverflow { .. } => Self::DriverTickOverflow,
+            RuntimeError::InvalidRecoveryEvidence { .. } => Self::InvalidRecoveryEvidence,
+            RuntimeError::CommunityPlugin(_) => Self::CommunityPlugin,
+            RuntimeError::FallbackSwap(_) => Self::FallbackSwap,
+            RuntimeError::Store(_) => Self::Store,
+            RuntimeError::ModeMismatch { .. } => Self::ModeMismatch,
+        }
+    }
+}
+
+/// One closed host typed failure: its code and, for a runtime failure, the
+/// runtime kind. It carries no error text and no path.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HostFailureV1 {
+    /// The closed code of the [`ExperimentError`] variant.
+    pub code: HostFailureCodeV1,
+    /// The closed kind of the [`RuntimeError`] of a runtime failure.
+    pub runtime_kind: Option<RuntimeErrorKindV1>,
+}
+
+impl HostFailureV1 {
+    /// The canonical bytes of the failure: the code as a big-endian `u16`,
+    /// then the sub-code as a big-endian `u16` (the runtime kind, or 0 for
+    /// every code other than [`HostFailureCodeV1::Runtime`]).
+    #[must_use]
+    pub fn to_be_bytes(self) -> [u8; 4] {
+        let [code_high, code_low] = (self.code as u16).to_be_bytes();
+        let [kind_high, kind_low] = self
+            .runtime_kind
+            .map_or(0, |kind| kind as u16)
+            .to_be_bytes();
+        [code_high, code_low, kind_high, kind_low]
+    }
+}
+
+impl From<&ExperimentError> for HostFailureV1 {
+    fn from(error: &ExperimentError) -> Self {
+        let runtime_kind = if let ExperimentError::Runtime(runtime) = error {
+            Some(RuntimeErrorKindV1::from(runtime))
+        } else {
+            None
+        };
+        Self {
+            code: HostFailureCodeV1::from(error),
+            runtime_kind,
         }
     }
 }
@@ -346,7 +533,7 @@ enum Halt {
 struct Recomputed {
     timeline: TimelineId,
     events: Vec<Event>,
-    failure: Option<HostFailureCodeV1>,
+    failure: Option<HostFailureV1>,
 }
 
 fn execute(
@@ -468,7 +655,7 @@ fn recompute(
                 Ok(Recomputed {
                     timeline,
                     events,
-                    failure: failure.as_ref().map(HostFailureCodeV1::from),
+                    failure: failure.as_ref().map(HostFailureV1::from),
                 })
             }
         })

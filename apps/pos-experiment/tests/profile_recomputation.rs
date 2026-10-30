@@ -32,9 +32,10 @@ use pos_experiment::authoritative_comparison::{
 use pos_experiment::profile_recomputation::{
     execute_cross_profile_conformance_v1, execute_profile_recomputation_v1,
     CrossProfileConformanceInputV1, CrossProfileConformanceOutcomeV1, HostFailureCodeV1,
-    ProfileRecomputationInputV1, RecomputationClosureV1, RecomputationSubjectMemberV1,
-    RecomputationSubjectV1, AIR_GAPPED_PROFILE_ID_V1, HOST_FAILURE_DRIVER_ID_V1,
-    LOCAL_PROFILE_ID_V1, RECOMPUTED_TIMELINE_ID_V1,
+    HostFailureV1, ProfileRecomputationInputV1, RecomputationClosureV1,
+    RecomputationSubjectMemberV1, RecomputationSubjectV1, RuntimeErrorKindV1,
+    AIR_GAPPED_PROFILE_ID_V1, HOST_FAILURE_DRIVER_ID_V1, LOCAL_PROFILE_ID_V1,
+    RECOMPUTED_TIMELINE_ID_V1,
 };
 use pos_experiment::verification_execution::VerificationExecutionOutcomeV1;
 use pos_experiment::{Experiment, ExperimentError};
@@ -57,8 +58,12 @@ const SUBJECT_DIGEST: [u8; 32] = [0xd1; 32];
 const FIXTURE_DIGEST: [u8; 32] = [0xf1; 32];
 const RESOURCE_LIMIT: u64 = 16;
 const SECRET_DENIED: &str = "secret read denied";
-/// The closed host-failure code of a runtime failure (wiki section 6).
-const RUNTIME_FAILURE_CODE: u16 = 1;
+/// The closed host-failure code of a runtime failure and the runtime kind
+/// of `RuntimeError::CapabilityMismatch` (wiki section 6): the expected
+/// typed failure of SEC-001.
+const SECRET_DENIED_FAILURE: [u8; 4] = [0, 1, 0, 17];
+/// A runtime failure of kind `RuntimeError::InvalidPayload` (8).
+const INVALID_PAYLOAD_FAILURE: [u8; 4] = [0, 1, 0, 8];
 
 /// What the subject's Driver emits at each Tick.
 #[derive(Clone, Copy)]
@@ -67,6 +72,8 @@ enum Script {
     Count,
     /// One Event at the first Tick, then a typed security failure.
     DeniedSecret,
+    /// One Event at the first Tick, then an invalid payload failure.
+    InvalidPayload,
     /// Three Events in one Tick.
     Burst,
 }
@@ -223,7 +230,11 @@ impl Driver for ScriptDriver {
         }
         match self.script {
             Script::DeniedSecret if self.tick > 1 => Err(secret_denied()),
-            Script::Count | Script::DeniedSecret => {
+            Script::InvalidPayload if self.tick > 1 => Err(RuntimeError::InvalidPayload {
+                event_type: EVENT_TYPE.to_owned(),
+                reason: SECRET_DENIED.to_owned(),
+            }),
+            Script::Count | Script::DeniedSecret | Script::InvalidPayload => {
                 Ok(StepOutput::new(vec![self.draft(self.tick)]))
             }
             Script::Burst => Ok(StepOutput::new(vec![
@@ -291,7 +302,7 @@ fn digest(domain: &[u8], parts: &[&[u8]]) -> [u8; 32] {
 /// per payload at tick 0 addressed by the recomputed Timeline id with a
 /// zero Event id, the count checkpoint and an optional typed failure.
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn expected(payloads: &[u8], failure: Option<u16>) -> TestResult<AuthoritativeStreamV1> {
+fn expected(payloads: &[u8], failure: Option<[u8; 4]>) -> TestResult<AuthoritativeStreamV1> {
     let timeline_id = RECOMPUTED_TIMELINE_ID_V1;
     let entity = entity();
     let mut events = BTreeMap::new();
@@ -346,7 +357,7 @@ fn expected(payloads: &[u8], failure: Option<u16>) -> TestResult<AuthoritativeSt
                     output_ordinal: 0,
                 },
                 ComparedDriverOutputV1 {
-                    outcome: DriverOutcomeV1::TypedFailure(failure.to_be_bytes().to_vec()),
+                    outcome: DriverOutcomeV1::TypedFailure(failure.to_vec()),
                     numeric_profile_digest: [0; 32],
                     prohibited_operational_input: None,
                 },
@@ -402,8 +413,12 @@ fn result_digest(stream: &AuthoritativeStreamV1) -> TestResult<[u8; 32]> {
         );
         parts.push(coordinate.driver_id.as_bytes().to_vec());
         parts.push(coordinate.output_ordinal.to_be_bytes().to_vec());
-        let (DriverOutcomeV1::Output(bytes) | DriverOutcomeV1::TypedFailure(bytes)) =
-            &output.outcome;
+        let (tag, bytes) = match &output.outcome {
+            DriverOutcomeV1::Output(bytes) => (0_u8, bytes),
+            DriverOutcomeV1::TypedFailure(bytes) => (1_u8, bytes),
+        };
+        parts.push(vec![tag]);
+        parts.push(u64::try_from(bytes.len())?.to_be_bytes().to_vec());
         parts.push(bytes.clone());
     }
     let parts: Vec<&[u8]> = parts.iter().map(Vec::as_slice).collect();
@@ -807,7 +822,19 @@ fn live_001_live_unverified_is_never_verified_exact() -> TestResult {
 #[test]
 fn sec_001_an_expected_typed_failure_is_verified_exact_in_both_profiles() -> TestResult {
     let subject = Subject::new(Script::DeniedSecret);
-    let expected = expected(&[1], Some(RUNTIME_FAILURE_CODE))?;
+    // The expected failure is a runtime failure of kind CapabilityMismatch.
+    assert_eq!(
+        RuntimeErrorKindV1::from(&secret_denied()),
+        RuntimeErrorKindV1::CapabilityMismatch
+    );
+    assert_eq!(
+        HostFailureV1::from(&ExperimentError::Runtime(secret_denied())),
+        HostFailureV1 {
+            code: HostFailureCodeV1::Runtime,
+            runtime_kind: Some(RuntimeErrorKindV1::CapabilityMismatch),
+        }
+    );
+    let expected = expected(&[1], Some(SECRET_DENIED_FAILURE))?;
 
     let fixture = Fixture::recomputation()?;
     let outcome = run(&fixture, subject.closure(3), &expected, StoreConfig::Memory)?;
@@ -1088,22 +1115,32 @@ fn host_failure_codes_are_closed_and_stable() {
         ),
     ];
     for (error, code) in &errors {
-        let closed = HostFailureCodeV1::from(error);
-        assert_eq!(closed.to_be_bytes(), u16::to_be_bytes(*code));
+        let failure = HostFailureV1::from(error);
+        let [high, low] = u16::to_be_bytes(*code);
+        let subcode = u16::from(failure.code == HostFailureCodeV1::Runtime) * 17;
+        let [kind_high, kind_low] = subcode.to_be_bytes();
+        assert_eq!(failure.to_be_bytes(), [high, low, kind_high, kind_low]);
     }
-    // The code ignores free text: two runtime failures share one code.
-    assert_eq!(
-        HostFailureCodeV1::from(&ExperimentError::Runtime(RuntimeError::NoDriver {
+    // No error text enters a failure: the same runtime variant with other
+    // text has the same bytes, and another runtime variant another kind.
+    let elsewhere = HostFailureV1::from(&ExperimentError::Runtime(
+        RuntimeError::CapabilityMismatch {
             name: "/tmp/elsewhere".to_owned(),
-        })),
-        HostFailureCodeV1::Runtime
-    );
+            reason: "other text".to_owned(),
+        },
+    ));
+    assert_eq!(elsewhere.to_be_bytes(), SECRET_DENIED_FAILURE);
+    let no_driver = HostFailureV1::from(&ExperimentError::Runtime(RuntimeError::NoDriver {
+        name: PLUGIN_NAME.to_owned(),
+    }));
+    assert_eq!(no_driver.runtime_kind, Some(RuntimeErrorKindV1::NoDriver));
+    assert_ne!(no_driver.to_be_bytes(), SECRET_DENIED_FAILURE);
 }
 
 #[test]
 fn operational_variation_does_not_change_a_typed_failure_vrr1() -> TestResult {
     let fixture = Fixture::recomputation()?;
-    let expected = expected(&[1], Some(RUNTIME_FAILURE_CODE))?;
+    let expected = expected(&[1], Some(SECRET_DENIED_FAILURE))?;
     let first = tempfile::tempdir()?;
     let second = tempfile::tempdir()?;
     let sqlite = |directory: &tempfile::TempDir, file: &str| StoreConfig::Sqlite {
@@ -1137,7 +1174,7 @@ fn a_typed_failure_changes_the_authoritative_result_digest() -> TestResult {
     // The same committed Event, once followed by a typed failure and once not.
     let failing = Subject::new(Script::DeniedSecret);
     let succeeding = Subject::new(Script::Count);
-    let with_failure = expected(&[1], Some(RUNTIME_FAILURE_CODE))?;
+    let with_failure = expected(&[1], Some(SECRET_DENIED_FAILURE))?;
     let without_failure = expected(&[1], None)?;
     assert_ne!(
         result_digest(&with_failure)?,
@@ -1195,6 +1232,315 @@ fn a_typed_failure_changes_the_authoritative_result_digest() -> TestResult {
     assert_ne!(
         failed.result.verification_outcome,
         VerificationOutcomeV1::VerifiedExact
+    );
+    Ok(())
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn text() -> String {
+    "runtime".to_owned()
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn runtime_errors_1_to_16() -> Vec<(RuntimeError, RuntimeErrorKindV1)> {
+    vec![
+        (
+            RuntimeError::ManifestRegistration(ManifestRegistrationErrorV1::EmptyBatch),
+            RuntimeErrorKindV1::ManifestRegistration,
+        ),
+        (
+            RuntimeError::ManifestSlot(pos_runtime::ManifestSlotErrorV1::Empty),
+            RuntimeErrorKindV1::ManifestSlot,
+        ),
+        (
+            RuntimeError::OutputAdmission(pos_runtime::OutputAdmissionErrorV1::PluginMismatch),
+            RuntimeErrorKindV1::OutputAdmission,
+        ),
+        (
+            RuntimeError::WorldInstallation(
+                pos_runtime::WorldInstallationErrorV1::UnsupportedPlatform,
+            ),
+            RuntimeErrorKindV1::WorldInstallation,
+        ),
+        (
+            RuntimeError::Composition(pos_runtime::PluginCompositionErrorV1::InvalidMetadata),
+            RuntimeErrorKindV1::Composition,
+        ),
+        (
+            RuntimeError::DuplicatePlugin {
+                id: PluginId::new(),
+                name: text(),
+            },
+            RuntimeErrorKindV1::DuplicatePlugin,
+        ),
+        (
+            RuntimeError::UnknownEventType(text()),
+            RuntimeErrorKindV1::UnknownEventType,
+        ),
+        (
+            RuntimeError::InvalidPayload {
+                event_type: text(),
+                reason: text(),
+            },
+            RuntimeErrorKindV1::InvalidPayload,
+        ),
+        (
+            RuntimeError::NoDriver { name: text() },
+            RuntimeErrorKindV1::NoDriver,
+        ),
+        (
+            RuntimeError::DriverPanicked { name: text() },
+            RuntimeErrorKindV1::DriverPanicked,
+        ),
+        (
+            RuntimeError::DriverAbortPanicked { name: text() },
+            RuntimeErrorKindV1::DriverAbortPanicked,
+        ),
+        (
+            RuntimeError::DriverCommitPanicked { name: text() },
+            RuntimeErrorKindV1::DriverCommitPanicked,
+        ),
+        (
+            RuntimeError::DriverRestorePanicked { name: text() },
+            RuntimeErrorKindV1::DriverRestorePanicked,
+        ),
+        (
+            RuntimeError::DriverForkPanicked { name: text() },
+            RuntimeErrorKindV1::DriverForkPanicked,
+        ),
+        (
+            RuntimeError::DriverForkRollbackFailed {
+                name: text(),
+                source: pos_core::CoreError::ErasureContainmentUnavailable,
+            },
+            RuntimeErrorKindV1::DriverForkRollbackFailed,
+        ),
+        (
+            RuntimeError::ResourceExhausted {
+                driver: text(),
+                requested: 2,
+                limit: 1,
+            },
+            RuntimeErrorKindV1::ResourceExhausted,
+        ),
+    ]
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn runtime_errors_17_to_32() -> Vec<(RuntimeError, RuntimeErrorKindV1)> {
+    vec![
+        (secret_denied(), RuntimeErrorKindV1::CapabilityMismatch),
+        (
+            RuntimeError::ReservedGeographicEventType {
+                name: text(),
+                event_type: text(),
+            },
+            RuntimeErrorKindV1::ReservedGeographicEventType,
+        ),
+        (
+            RuntimeError::GeographicDraft { event_type: text() },
+            RuntimeErrorKindV1::GeographicDraft,
+        ),
+        (
+            RuntimeError::ReservedHostDraft { event_type: text() },
+            RuntimeErrorKindV1::ReservedHostDraft,
+        ),
+        (
+            RuntimeError::ReservedHostEventType {
+                name: text(),
+                event_type: text(),
+            },
+            RuntimeErrorKindV1::ReservedHostEventType,
+        ),
+        (
+            RuntimeError::ReservedConsentEventType {
+                name: text(),
+                event_type: text(),
+            },
+            RuntimeErrorKindV1::ReservedConsentEventType,
+        ),
+        (
+            RuntimeError::ConsentDraft { event_type: text() },
+            RuntimeErrorKindV1::ConsentDraft,
+        ),
+        (
+            RuntimeError::ConsentOperationUnavailable,
+            RuntimeErrorKindV1::ConsentOperationUnavailable,
+        ),
+        (
+            RuntimeError::ErasureOperationUnavailable,
+            RuntimeErrorKindV1::ErasureOperationUnavailable,
+        ),
+        (
+            RuntimeError::Consent(pos_core::ConsentError::NoConsent),
+            RuntimeErrorKindV1::Consent,
+        ),
+        (
+            RuntimeError::ErasureContainment(pos_core::ErasureContainmentErrorV1::AccessFrozen),
+            RuntimeErrorKindV1::ErasureContainment,
+        ),
+        (
+            RuntimeError::Authority(pos_core::AuthorityErrorV1::InvalidEncoding),
+            RuntimeErrorKindV1::Authority,
+        ),
+        (
+            RuntimeError::AuthorityFenceRequired,
+            RuntimeErrorKindV1::AuthorityFenceRequired,
+        ),
+        (
+            RuntimeError::ScheduledProfile(pos_runtime::ScheduledProfileErrorV1::MixedProfiles),
+            RuntimeErrorKindV1::ScheduledProfile,
+        ),
+        (
+            RuntimeError::AuthorityPersistence(pos_core::AuthorityPersistenceErrorV1::Conflict),
+            RuntimeErrorKindV1::AuthorityPersistence,
+        ),
+        (
+            RuntimeError::PipelineContract(pos_core::PipelineContractErrorV1::Incomplete),
+            RuntimeErrorKindV1::PipelineContract,
+        ),
+    ]
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn runtime_errors_33_to_47() -> Vec<(RuntimeError, RuntimeErrorKindV1)> {
+    vec![
+        (
+            RuntimeError::ScheduledPassNotAdmitted(Box::new(pos_core::PipelineOutcomeV1::Rejected)),
+            RuntimeErrorKindV1::ScheduledPassNotAdmitted,
+        ),
+        (
+            RuntimeError::NoScheduledAdmissionInDoubt,
+            RuntimeErrorKindV1::NoScheduledAdmissionInDoubt,
+        ),
+        (
+            RuntimeError::DependencyDeclaration(
+                pos_core::FactualDependencyErrorV1::UndeclarableInput,
+            ),
+            RuntimeErrorKindV1::DependencyDeclaration,
+        ),
+        (
+            RuntimeError::CadenceOverflow {
+                driver: text(),
+                previous_ns: 1,
+                interval_ns: 2,
+            },
+            RuntimeErrorKindV1::CadenceOverflow,
+        ),
+        (
+            RuntimeError::MissingSnapshotAnchor { driver: text() },
+            RuntimeErrorKindV1::MissingSnapshotAnchor,
+        ),
+        (
+            RuntimeError::SnapshotTimelineMismatch {
+                expected: TimelineId::new(),
+                actual: TimelineId::new(),
+            },
+            RuntimeErrorKindV1::SnapshotTimelineMismatch,
+        ),
+        (
+            RuntimeError::PendingDriverStep,
+            RuntimeErrorKindV1::PendingDriverStep,
+        ),
+        (
+            RuntimeError::UnappendedDriverOutput,
+            RuntimeErrorKindV1::UnappendedDriverOutput,
+        ),
+        (
+            RuntimeError::DriverRecoveryNotFresh { driver: text() },
+            RuntimeErrorKindV1::DriverRecoveryNotFresh,
+        ),
+        (
+            RuntimeError::DriverTickOverflow { driver: text() },
+            RuntimeErrorKindV1::DriverTickOverflow,
+        ),
+        (
+            RuntimeError::InvalidRecoveryEvidence { reason: "recovery" },
+            RuntimeErrorKindV1::InvalidRecoveryEvidence,
+        ),
+        (
+            RuntimeError::CommunityPlugin(
+                pos_runtime::community_plugin_host::CommunityPluginHostErrorV1::InvalidManifest,
+            ),
+            RuntimeErrorKindV1::CommunityPlugin,
+        ),
+        (
+            RuntimeError::FallbackSwap(pos_runtime::FallbackSwapRefusalV1::SameAsPrimary),
+            RuntimeErrorKindV1::FallbackSwap,
+        ),
+        (
+            RuntimeError::Store(pos_core::CoreError::ErasureContainmentUnavailable),
+            RuntimeErrorKindV1::Store,
+        ),
+        (
+            RuntimeError::ModeMismatch {
+                expected: text(),
+                got: text(),
+            },
+            RuntimeErrorKindV1::ModeMismatch,
+        ),
+    ]
+}
+
+#[test]
+fn runtime_error_kinds_are_closed_and_stable() {
+    let kinds = [
+        runtime_errors_1_to_16(),
+        runtime_errors_17_to_32(),
+        runtime_errors_33_to_47(),
+    ]
+    .into_iter()
+    .flatten();
+    // Values are stable and follow `RuntimeError` declaration order from 1.
+    for ((error, kind), value) in kinds.zip(1_u16..) {
+        assert_eq!(RuntimeErrorKindV1::from(&error), kind);
+        let failure = HostFailureV1::from(&ExperimentError::Runtime(error));
+        let [high, low] = value.to_be_bytes();
+        assert_eq!(failure.to_be_bytes(), [0, 1, high, low]);
+    }
+    assert_eq!(
+        RuntimeErrorKindV1::from(&RuntimeError::ModeMismatch {
+            expected: text(),
+            got: text(),
+        }) as u16,
+        47
+    );
+}
+
+#[test]
+fn two_runtime_failures_at_one_coordinate_diverge() -> TestResult {
+    let fixture = Fixture::recomputation()?;
+    let denied = expected(&[1], Some(SECRET_DENIED_FAILURE))?;
+    let invalid = expected(&[1], Some(INVALID_PAYLOAD_FAILURE))?;
+    assert_ne!(result_digest(&denied)?, result_digest(&invalid)?);
+
+    let subject = Subject::new(Script::InvalidPayload);
+    let exact = run(&fixture, subject.closure(3), &invalid, StoreConfig::Memory)?;
+    assert_exact(&exact, &invalid)?;
+    let outcome = run(&fixture, subject.closure(3), &denied, StoreConfig::Memory)?;
+    assert_eq!(
+        outcome.result.verification_outcome,
+        VerificationOutcomeV1::Diverged
+    );
+    assert_eq!(
+        outcome.result.authoritative_result_digest,
+        Some(result_digest(&invalid)?)
+    );
+    assert_ne!(
+        outcome.result.authoritative_result_digest,
+        Some(result_digest(&denied)?)
+    );
+    let report = outcome.divergence.as_ref().ok_or("diverged without DVR1")?;
+    assert_eq!(report.location_kind, DivergenceLocationKindV1::DriverOutput);
+    assert_eq!(report.mismatch_kind, DivergenceMismatchKindV1::TypedFailure);
+    assert_eq!(report.timeline_seq_or_cut_ordinal, 1);
+    assert_eq!(
+        report.expected.digest,
+        Some(*blake3::hash(&SECRET_DENIED_FAILURE).as_bytes())
+    );
+    assert_eq!(
+        report.actual.digest,
+        Some(*blake3::hash(&INVALID_PAYLOAD_FAILURE).as_bytes())
     );
     Ok(())
 }
