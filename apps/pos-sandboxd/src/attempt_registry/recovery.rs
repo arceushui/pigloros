@@ -67,7 +67,7 @@ impl RecoveredAttemptIntent {
         let root = if bytes.len() == ROOT_RECORD_SIZE {
             let mut record = [0; ROOT_RECORD_SIZE];
             record.copy_from_slice(bytes);
-            RootRecord::decode(record, &planned).map(Some)
+            RootRecord::decode(&record, &planned).map(Some)
         } else {
             Ok(None)
         };

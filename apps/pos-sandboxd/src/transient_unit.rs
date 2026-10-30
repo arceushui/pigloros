@@ -171,7 +171,7 @@ impl ActivatedRootDirectory {
 
 /// Canonical text for persisted claims; this does not construct a verified root.
 #[cfg(target_os = "linux")]
-pub(crate) fn attempt_root_path(component: &str) -> String {
+pub(super) fn attempt_root_path(component: &str) -> String {
     format!("/run/pigloros/sandbox/attempts/{component}/root")
 }
 

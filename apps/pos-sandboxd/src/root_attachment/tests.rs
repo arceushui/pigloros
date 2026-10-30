@@ -50,7 +50,7 @@ mod release;
 
 /// Retained value facts for the registry owner's impossible-state fault tests.
 /// This creates no production constructor or lifecycle authority.
-pub(crate) fn recorded_identity(
+pub fn recorded_identity(
     directory: &PreparedAttemptDirectory,
 ) -> Result<RootResourceIdentity, String> {
     attached_root(directory)

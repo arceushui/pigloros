@@ -335,4 +335,4 @@ fn attach_and_verify<K: AttachmentKernel>(
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
-pub(crate) mod tests;
+pub(super) mod tests;

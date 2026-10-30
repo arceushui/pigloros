@@ -54,12 +54,12 @@ impl RootRecord {
         bytes[VALUES_END..PATH_END].copy_from_slice(identity.root_directory().as_str().as_bytes());
         write_text(&mut bytes[PATH_END..UUID_END], identity.mapper_uuid())
             .and_then(|()| write_text(&mut bytes[UUID_END..], identity.loop_name()))
-            .and_then(|()| Self::decode(bytes, directory.intent()))
+            .and_then(|()| Self::decode(&bytes, directory.intent()))
     }
 
     /// The caller has already checked the PAI3 stage, length and planned prefix.
     pub(super) fn decode(
-        bytes: [u8; ROOT_RECORD_SIZE],
+        bytes: &[u8; ROOT_RECORD_SIZE],
         intent: &PlannedAttemptIntent,
     ) -> Result<Self, SystemdAttemptRegistryError> {
         let mut values = [0; 12];
@@ -71,19 +71,35 @@ impl RootRecord {
             word.copy_from_slice(chunk);
             *value = u64::from_le_bytes(word);
         }
+        let [mount_id, root_major, root_minor, root_inode, _, image_inode, mapper_major, mapper_minor, mapper_sequence, loop_major, loop_minor, loop_sequence] =
+            values;
         let root = attempt_root_path(intent.unit_name().attempt_component());
-        if [0, 3, 5, 8, 11].iter().any(|index| values[*index] == 0)
-            || [1, 2, 6, 7, 9, 10]
-                .iter()
-                .any(|index| values[*index] > u64::from(u32::MAX))
-            || values[1..3] != values[6..8]
+        if [
+            mount_id,
+            root_inode,
+            image_inode,
+            mapper_sequence,
+            loop_sequence,
+        ]
+        .contains(&0)
+            || [
+                root_major,
+                root_minor,
+                mapper_major,
+                mapper_minor,
+                loop_major,
+                loop_minor,
+            ]
+            .iter()
+            .any(|component| *component > u64::from(u32::MAX))
+            || (root_major, root_minor) != (mapper_major, mapper_minor)
             || bytes[VALUES_END..PATH_END] != *root.as_bytes()
             || read_text(&bytes[PATH_END..UUID_END]).is_none()
             || read_text(&bytes[UUID_END..]).is_none()
         {
             return Err(SystemdAttemptRegistryError::InvalidIntent);
         }
-        Ok(Self(bytes))
+        Ok(Self(*bytes))
     }
 
     pub(super) const fn bytes(&self) -> &[u8; ROOT_RECORD_SIZE] {

@@ -28,7 +28,7 @@ pub use recovery::{
     SystemdAttemptRecovery, UnmountedDirectoryInventory,
 };
 #[cfg(test)]
-pub(crate) use tests::{root_record_fixture, with_io_fault};
+pub(super) use tests::{root_record_fixture, with_io_fault};
 
 const RECORD_SIZE: usize = 52;
 const REGISTRY_NAME: &str = "registry";
@@ -458,7 +458,7 @@ mod tests {
     type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
     /// One independent byte oracle for the private root stage, not its encoder.
-    pub(crate) fn root_record_fixture(mut directory: Vec<u8>, component: &str) -> Vec<u8> {
+    pub fn root_record_fixture(mut directory: Vec<u8>, component: &str) -> Vec<u8> {
         assert_eq!(directory.len(), 84);
         directory[..4].copy_from_slice(b"PAI3");
         for value in [41_u64, 253, 3, 1, 5, 6, 253, 3, 102, 7, 7, 101] {
@@ -503,10 +503,7 @@ mod tests {
         }
     }
 
-    pub(crate) fn with_io_fault<T>(
-        fail_at: Option<usize>,
-        operation: impl FnOnce() -> T,
-    ) -> (T, usize) {
+    pub fn with_io_fault<T>(fail_at: Option<usize>, operation: impl FnOnce() -> T) -> (T, usize) {
         let _restore = RestoreIoFault(IO_FAULT.with(|state| state.replace((0, fail_at))));
         let result = operation();
         (result, IO_FAULT.with(|state| state.get().0))
