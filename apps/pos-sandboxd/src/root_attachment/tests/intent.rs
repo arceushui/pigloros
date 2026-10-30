@@ -235,7 +235,7 @@ mod cases {
             executable.node.mount_id = 42;
         }
         edit_mapper(&mut observed, |mapper| {
-            mapper.identity = block_generation((253, 3), 104)
+            mapper.identity = block_generation((253, 3), 104);
         });
         edit_slaves(&mut observed, |slaves| {
             for slave in slaves {

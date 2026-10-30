@@ -50,6 +50,9 @@ mod release;
 
 /// Retained value facts for the registry owner's impossible-state fault tests.
 /// This creates no production constructor or lifecycle authority.
+///
+/// # Errors
+/// Returns the existing fake attachment fixture's construction error.
 pub fn recorded_identity(
     directory: &PreparedAttemptDirectory,
 ) -> Result<RootResourceIdentity, String> {

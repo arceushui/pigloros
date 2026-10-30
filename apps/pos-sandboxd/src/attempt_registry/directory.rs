@@ -653,6 +653,26 @@ mod tests {
     }
 
     #[test]
+    fn the_last_sequence_slot_can_commit_root_but_not_another_attempt() -> TestResult {
+        let (runtime, registry) = fixture()?;
+        let prepared = registry.commit_planned(&intent(1)?)?.prepare_directory()?;
+        let identity = crate::test_fixtures::recorded_identity(&prepared)?;
+        registry.state.lock().map_err(|_| "owner")?.next_sequence = u64::MAX - 1;
+        prepared.record_root(&identity, || Ok(()))?;
+        // An identical repeat needs no additional sequence slot.
+        prepared.record_root(&identity, || Ok(()))?;
+        let record = runtime
+            .path()
+            .join("registry")
+            .join(prepared.intent().unit_name().attempt_component());
+        let bytes = fs::read(record)?;
+        assert_eq!(&bytes[..4], b"PAI3");
+        assert_eq!(bytes.len(), 393);
+        assert!(registry.commit_planned(&intent(2)?).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn failed_exhausted_poisoned_and_refused_root_owners_cannot_commit() -> TestResult {
         for fault in 0..4 {
             let (_runtime, registry) = fixture()?;

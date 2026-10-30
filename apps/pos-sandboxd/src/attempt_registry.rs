@@ -458,6 +458,10 @@ mod tests {
     type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
     /// One independent byte oracle for the private root stage, not its encoder.
+    ///
+    /// # Panics
+    /// Panics unless `directory` has 84 bytes and `component` has 32 bytes.
+    #[must_use]
     pub fn root_record_fixture(mut directory: Vec<u8>, component: &str) -> Vec<u8> {
         assert_eq!(directory.len(), 84);
         directory[..4].copy_from_slice(b"PAI3");
