@@ -30,8 +30,9 @@ use pos_experiment::authoritative_comparison::{
 };
 use pos_experiment::recorded_replay::{
     execute_recorded_replay_v1, ExportedTimelineMemberV1, RecordedReplayClosureV1,
-    RecordedReplayInputV1, RecordedReplayOutcomeV1,
+    RecordedReplayInputV1,
 };
+use pos_experiment::verification_execution::VerificationExecutionOutcomeV1;
 use pos_runtime::{Driver, ObservationView, RuntimeError, StepOutput};
 use pos_state::ProjectionRegistry;
 use pos_store::memory::MemoryStore;
@@ -430,7 +431,7 @@ fn run(
     closure: RecordedReplayClosureV1<'_>,
     evaluation: &ReplayClaimEvaluationV1,
     projections: &mut ProjectionRegistry,
-) -> TestResult<RecordedReplayOutcomeV1> {
+) -> TestResult<VerificationExecutionOutcomeV1> {
     let expected = recording.expected(u64::try_from(recording.payloads.len())?)?;
     let outcome = execute_recorded_replay_v1(
         RecordedReplayInputV1 {
@@ -464,7 +465,7 @@ fn run(
 /// Assert a refusal with one closed first error and no comparison.
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn assert_refused(
-    outcome: &RecordedReplayOutcomeV1,
+    outcome: &VerificationExecutionOutcomeV1,
     expected: (VerificationOutcomeV1, ReplayClaimV1, SafeErrorCodeV1),
     coordinate: Option<&str>,
 ) {

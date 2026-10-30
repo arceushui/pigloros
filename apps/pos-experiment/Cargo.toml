@@ -56,6 +56,10 @@ name = "pipeline_evaluation"
 required-features = ["test-support"]
 
 [[test]]
+name = "profile_recomputation"
+required-features = ["test-support"]
+
+[[test]]
 name = "scheduled_draft_ownership"
 required-features = ["test-support"]
 
