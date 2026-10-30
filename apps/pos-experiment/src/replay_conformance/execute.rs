@@ -228,16 +228,15 @@ impl Reducer for CountReducer {
         state
     }
 
-    /// Increment the counter the initial State seeds.
+    /// Increment the counter the initial State seeds; a State without it
+    /// records `null`.
     fn apply(&self, state: &mut State, _event: &Event) {
         self.folded.fetch_add(1, Ordering::Relaxed);
         let next = state
             .get("count")
             .and_then(serde_json::Value::as_u64)
             .map(|count| count + 1);
-        if let Some(next) = next {
-            state.set("count", serde_json::json!(next));
-        }
+        state.set("count", serde_json::json!(next));
     }
 }
 
