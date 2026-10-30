@@ -2,9 +2,8 @@
 //! Experiment host.
 //!
 //! ADR-062 Revision 8 slice R3 (#1221). [`execute_profile_recomputation_v1`]
-//! is the execution step after
-//! [`preflight_verification_v1`](pos_conformance::preflight_verification_v1)
-//! for a recomputation: it recomputes the run from the complete frozen
+//! is the execution step after [`preflight_verification_v1`] for a
+//! recomputation: it recomputes the run from the complete frozen
 //! closure under the named EPF1 on a fresh [`Experiment`] host, compares the
 //! recomputed stream with the expected stream through
 //! [`first_divergence_v1`](crate::authoritative_comparison::first_divergence_v1)
