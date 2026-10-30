@@ -152,7 +152,7 @@ pub(super) fn result_of(input: &MetricInputV1) -> MetricResultV1 {
     } else {
         MetricOutcomeV1::Computed {
             values: tally.values(),
-            bins: tally.bins,
+            bins: Box::new(tally.bins),
         }
     };
     MetricResultV1 {
@@ -211,7 +211,7 @@ fn result_fields(result: &MetricResultV1) -> Vec<u8> {
         MetricOutcomeV1::Computed { values, bins } => {
             put_values(&mut out, values);
             put_array(&mut out, 10);
-            for bin in bins {
+            for bin in bins.iter() {
                 put_array(&mut out, 3);
                 put_unsigned(&mut out, bin.count);
                 put_unsigned(&mut out, bin.probability_sum_micros);

@@ -260,7 +260,7 @@ pub enum MetricOutcomeV1 {
         /// The metric values.
         values: MetricValuesV1,
         /// The ten reliability bins in index order.
-        bins: [ReliabilityBin; 10],
+        bins: Box<[ReliabilityBin; 10]>,
     },
     /// Fewer than `minimum_scored_records` records were scored; no metric is reported.
     InsufficientSamples,

@@ -608,7 +608,7 @@ impl PipelineEvaluatorV1 for ForgingEvaluator {
                         personal_base_rate_brier: 1_000_000,
                         lift_vs_personal_base_rate: 1_000_000,
                     },
-                    bins: [ReliabilityBin::default(); 10],
+                    bins: Box::new([ReliabilityBin::default(); 10]),
                 },
             },
             orphan_outcomes: 0,

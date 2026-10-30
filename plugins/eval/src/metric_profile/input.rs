@@ -3,8 +3,8 @@
 use std::cmp::Ordering;
 
 use super::cbor::{
-    boolean, check_structure, optional_unsigned, put_array, put_simple, put_text, put_unsigned,
-    require, text, unsigned, Coordinate, Reader, Shape,
+    boolean, check_structure, put_array, put_simple, put_text, put_unsigned, require, text,
+    unsigned, Coordinate, Item, Reader, Shape,
 };
 use super::{
     MetricErrorV1, MetricFailureV1, MetricInputV1, MetricRecordStateV1, MetricRecordV1,
@@ -33,6 +33,21 @@ const REDACTED: u64 = 2;
 const UNAVAILABLE: u64 = 3;
 /// The encoding of `null`.
 const NULL: u8 = 0xf6;
+
+/// The two well-typed forms of an `outcome` field.
+#[derive(Clone, Copy)]
+enum OutcomeField {
+    Unsigned(u64),
+    Null,
+}
+
+const fn outcome_field(item: Item<'_>) -> Option<OutcomeField> {
+    match item {
+        Item::Unsigned(value) => Some(OutcomeField::Unsigned(value)),
+        Item::Null => Some(OutcomeField::Null),
+        _ => None,
+    }
+}
 
 pub(super) fn decode(bytes: &[u8]) -> Result<MetricInputV1, MetricFailureV1> {
     check_structure(bytes, &SHAPE)?;
@@ -137,11 +152,11 @@ fn read_state(
     let state = reader.field(&state_at, unsigned)?;
     require(state <= UNAVAILABLE, &state_at, invalid)?;
     let outcome_at = at.child(4);
-    let outcome = reader.field(&outcome_at, optional_unsigned)?;
+    let outcome = reader.field(&outcome_at, outcome_field)?;
     let observed = state == OBSERVED;
     let outcome = match (observed, outcome) {
-        (true, Some(value @ 0..=1)) => Ok(Some(value == 1)),
-        (false, None) => Ok(None),
+        (true, OutcomeField::Unsigned(value @ 0..=1)) => Ok(Some(value == 1)),
+        (false, OutcomeField::Null) => Ok(None),
         _ => Err(outcome_at.failure(invalid)),
     }?;
     let supplied_at = at.child(5);

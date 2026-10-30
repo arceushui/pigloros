@@ -119,7 +119,7 @@ fn pairs(pairs: &[(&str, f64, bool)]) -> Vec<EventDraft> {
 
 fn values(report: &CalibrationReport) -> (MetricValuesV1, [ReliabilityBin; 10]) {
     match &report.result.outcome {
-        MetricOutcomeV1::Computed { values, bins } => (*values, *bins),
+        MetricOutcomeV1::Computed { values, bins } => (*values, **bins),
         MetricOutcomeV1::InsufficientSamples => {
             std::panic::resume_unwind(Box::new("expected computed metrics"))
         }
@@ -130,7 +130,7 @@ fn values_of(report: &CalibrationReport) -> MetricValuesV1 {
     values(report).0
 }
 
-fn all_metrics(values: MetricValuesV1) -> [i64; 9] {
+const fn all_metrics(values: MetricValuesV1) -> [i64; 9] {
     [
         values.brier,
         values.crps,
@@ -144,7 +144,7 @@ fn all_metrics(values: MetricValuesV1) -> [i64; 9] {
     ]
 }
 
-fn metric_failure(error: &EvalError) -> Option<(MetricErrorV1, &str)> {
+const fn metric_failure(error: &EvalError) -> Option<(MetricErrorV1, &str)> {
     match error {
         EvalError::Metric(MetricFailureV1 { error, coordinate }) => {
             Some((*error, coordinate.as_str()))

@@ -73,7 +73,7 @@ enum Segment {
 /// A coordinate, rendered only when a failure names it.
 #[derive(Clone, Copy)]
 pub(super) struct Coordinate<'p> {
-    parent: Option<&'p Coordinate<'p>>,
+    parent: Option<&'p Self>,
     segment: Segment,
 }
 
@@ -331,15 +331,6 @@ pub(super) const fn boolean(item: Item<'_>) -> Option<bool> {
     }
 }
 
-/// An `outcome` field: an unsigned integer or `null`.
-pub(super) const fn optional_unsigned(item: Item<'_>) -> Option<Option<u64>> {
-    match item {
-        Item::Unsigned(value) => Some(Some(value)),
-        Item::Null => Some(None),
-        _ => None,
-    }
-}
-
 /// Require `valid`, or fail with `error` at `at`.
 pub(super) fn require(
     valid: bool,
@@ -359,19 +350,19 @@ pub(super) fn put_head(out: &mut Vec<u8>, major: u8, argument: u64) {
     match argument {
         0..=23 => out.push(major | u8::try_from(argument).unwrap_or_default()),
         24..=0xff => {
-            out.push(major | 24);
+            out.push(major | 0x18);
             out.push(u8::try_from(argument).unwrap_or_default());
         }
         0x100..=0xffff => {
-            out.push(major | 25);
+            out.push(major | 0x19);
             out.extend_from_slice(&u16::try_from(argument).unwrap_or_default().to_be_bytes());
         }
         0x1_0000..=0xffff_ffff => {
-            out.push(major | 26);
+            out.push(major | 0x1a);
             out.extend_from_slice(&u32::try_from(argument).unwrap_or_default().to_be_bytes());
         }
         _ => {
-            out.push(major | 27);
+            out.push(major | 0x1b);
             out.extend_from_slice(&argument.to_be_bytes());
         }
     }
