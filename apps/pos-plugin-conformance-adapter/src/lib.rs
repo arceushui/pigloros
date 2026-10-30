@@ -35,7 +35,6 @@ use pos_runtime::community_plugin_host::CommunityPluginModeV1;
 pub mod composite;
 pub mod hex;
 pub mod invocation;
-pub use pos_crypto::jcs;
 pub mod map;
 pub mod payload;
 pub mod runner;
