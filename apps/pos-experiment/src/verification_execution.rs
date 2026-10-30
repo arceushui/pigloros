@@ -29,7 +29,7 @@
 //! # Closure binding
 //!
 //! ADR-062 Revision 8 slice R4 (#1222) binds the closure members to the
-//! request's `artifact_closure_digest`. The composition, proposed for section
+//! request's `artifact_closure_digest`. The composition, accepted in section
 //! 4 of the note, is BLAKE3 over `PiglorOS.RecordedReplayClosure.v1`, a zero
 //! byte, the member count (`u64`, always 2) and then each member in role
 //! order as its one-byte role and its 32-byte artifact digest:

@@ -41,8 +41,10 @@ use crate::Experiment;
 
 /// The name of the Projection Reducer every run folds into.
 pub(super) const REDUCER: &str = "replay-conformance.count";
-/// The name of the frozen subject's one Plugin and Driver.
+/// The name of the frozen subject's one Plugin.
 pub(super) const SUBJECT_PLUGIN: &str = "replay-subject";
+/// The name of the frozen subject's one Driver.
+pub(super) const SUBJECT_DRIVER: &str = "replay-subject.driver";
 
 /// The EPF1 records and the TPS1 the adapter's host installs.
 ///
@@ -316,7 +318,7 @@ fn composition(script: &ScriptV1) -> CompositionV1 {
 
 impl Driver for ScriptDriver {
     fn name(&self) -> &'static str {
-        SUBJECT_PLUGIN
+        SUBJECT_DRIVER
     }
 
     fn step(&mut self, _: TimelineId, _: ObservationView<'_>) -> Result<StepOutput, RuntimeError> {

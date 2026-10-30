@@ -17,7 +17,7 @@
       "fixture_bytes_path": "inputs/replay-conformance/positive.json",
       "fixture_bytes_digest": "46ad7adc020075d107b46d4089fcf4ee0b88a0fc90326711e680448d9367946d",
       "expected_result_path": "oracles/replay-conformance/positive.json",
-      "expected_result_digest": "40bafbb96789c38eeeb673520650eb044ed7e88f429cf225b86119482946ce35",
+      "expected_result_digest": "691be23da24ea04c5bb27806dc687da177ced21a7bdd49b5be6e07cb151e869e",
       "materialization_status": "materialized"
     },
     {
@@ -32,7 +32,7 @@
       "fixture_bytes_path": "inputs/replay-conformance/positive.json",
       "fixture_bytes_digest": "46ad7adc020075d107b46d4089fcf4ee0b88a0fc90326711e680448d9367946d",
       "expected_result_path": "oracles/replay-conformance/positive.json",
-      "expected_result_digest": "40bafbb96789c38eeeb673520650eb044ed7e88f429cf225b86119482946ce35",
+      "expected_result_digest": "691be23da24ea04c5bb27806dc687da177ced21a7bdd49b5be6e07cb151e869e",
       "materialization_status": "materialized"
     },
     {
@@ -48,7 +48,7 @@
       "fixture_bytes_path": "inputs/replay-conformance/positive.json",
       "fixture_bytes_digest": "46ad7adc020075d107b46d4089fcf4ee0b88a0fc90326711e680448d9367946d",
       "expected_result_path": "oracles/replay-conformance/positive.json",
-      "expected_result_digest": "40bafbb96789c38eeeb673520650eb044ed7e88f429cf225b86119482946ce35",
+      "expected_result_digest": "691be23da24ea04c5bb27806dc687da177ced21a7bdd49b5be6e07cb151e869e",
       "materialization_status": "materialized"
     },
     {
@@ -63,7 +63,7 @@
       "fixture_bytes_path": "inputs/replay-conformance/independent-evaluation.json",
       "fixture_bytes_digest": "a275ceb603956f7590b66a2dc5e2fcbd873f33c76a622210bdd9a66481a6c48a",
       "expected_result_path": "oracles/replay-conformance/independent-evaluation.json",
-      "expected_result_digest": "f533e75c38b60ed6a7e7ae999a25c89e6ab5f547dcba1baecbd655e268e72978",
+      "expected_result_digest": "fb672bd0cad46e42a4ea2c5c3a91b98fb0bbf29041460b1547b485e7f3d281f3",
       "materialization_status": "materialized"
     },
     {
@@ -80,7 +80,7 @@
       "fixture_bytes_path": "inputs/replay-conformance/malformed.json",
       "fixture_bytes_digest": "25c8c91e82b8cc008c4b4a676739827c492a5f559d988fb14956a2f3dc002e3e",
       "expected_result_path": "oracles/replay-conformance/malformed.json",
-      "expected_result_digest": "a807258e8416e8393dd87f697a3641b8c9137d2792455c3d5452fa35d5b5c9eb",
+      "expected_result_digest": "15cf931843d728c9812615f70060d6ed70b8099927773e1531a4f8c8bd15e14e",
       "materialization_status": "materialized"
     },
     {
@@ -97,7 +97,7 @@
       "fixture_bytes_path": "inputs/replay-conformance/deletion-redaction.json",
       "fixture_bytes_digest": "a4645b03a149d03ec0046cc6c94c73d06abf31f892f31e0d37ae76866999e37f",
       "expected_result_path": "oracles/replay-conformance/deletion-redaction.json",
-      "expected_result_digest": "a89c5da659a35cb34edb5aa07f70d5380e181e50588d20c3fcfdca42c90c604b",
+      "expected_result_digest": "c58b2b63a2e9ba5ab3445368fea5eaaf0d2d3fa5d1c9e253027dadf9f01be3a5",
       "materialization_status": "materialized"
     },
     {
@@ -114,7 +114,7 @@
       "fixture_bytes_path": "inputs/replay-conformance/downgrade.json",
       "fixture_bytes_digest": "4c83da36eb228afb9319b1b5a205f0e0138e642e240f2fa1273177f1c8ec9cd0",
       "expected_result_path": "oracles/replay-conformance/downgrade.json",
-      "expected_result_digest": "969bfda8ce0ee789e8f8c605ee6ab48b9df6a8230bd0355ef295a30f5ac173d1",
+      "expected_result_digest": "325b6fdb0ae7fae21e122c88a06c8c8be8584d164b3939fc25595c75e5219097",
       "materialization_status": "materialized"
     },
     {
@@ -129,7 +129,7 @@
       "fixture_bytes_path": "inputs/replay-conformance/resource-exhaustion.json",
       "fixture_bytes_digest": "7e2a2d2ed82eb68103413bef6b30415d692cf2f7746dcd765774e66ffafde2ec",
       "expected_result_path": "oracles/replay-conformance/resource-exhaustion.json",
-      "expected_result_digest": "c0d11ebd2eaef6f015f782a7227b8eb97716330cae6e7335bbc9a622de84b5a8",
+      "expected_result_digest": "91084d763d7bfd735ed92f2aa8fd6a70646477b0127fbdac71662f0bb9b284d3",
       "materialization_status": "materialized"
     },
     {
@@ -144,7 +144,7 @@
       "fixture_bytes_path": "inputs/replay-conformance/denied.json",
       "fixture_bytes_digest": "0ab5a5bcf32af4d13f3f352bfa322393f7599b7c468aef4be01e6246af10a24c",
       "expected_result_path": "oracles/replay-conformance/denied.json",
-      "expected_result_digest": "dbe5e95cf9ae85ed3dd4a5cbebeb75da4c9ef56e866e87ac3653c0959ac29c3b",
+      "expected_result_digest": "39d1dbfb8fbe135a69afe11323ef0910a2d106250da8994fa99f1ecea2b776f0",
       "materialization_status": "materialized"
     },
     {
@@ -159,7 +159,7 @@
       "fixture_bytes_path": "inputs/replay-conformance/deletion-redaction.json",
       "fixture_bytes_digest": "a4645b03a149d03ec0046cc6c94c73d06abf31f892f31e0d37ae76866999e37f",
       "expected_result_path": "oracles/replay-conformance/deletion-redaction.json",
-      "expected_result_digest": "a89c5da659a35cb34edb5aa07f70d5380e181e50588d20c3fcfdca42c90c604b",
+      "expected_result_digest": "c58b2b63a2e9ba5ab3445368fea5eaaf0d2d3fa5d1c9e253027dadf9f01be3a5",
       "materialization_status": "materialized"
     },
     {
@@ -176,7 +176,7 @@
       "fixture_bytes_path": "inputs/replay-conformance/denied.json",
       "fixture_bytes_digest": "0ab5a5bcf32af4d13f3f352bfa322393f7599b7c468aef4be01e6246af10a24c",
       "expected_result_path": "oracles/replay-conformance/denied.json",
-      "expected_result_digest": "dbe5e95cf9ae85ed3dd4a5cbebeb75da4c9ef56e866e87ac3653c0959ac29c3b",
+      "expected_result_digest": "39d1dbfb8fbe135a69afe11323ef0910a2d106250da8994fa99f1ecea2b776f0",
       "materialization_status": "materialized"
     }
   ]

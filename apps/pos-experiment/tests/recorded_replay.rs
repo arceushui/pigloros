@@ -34,7 +34,8 @@ use pos_experiment::recorded_replay::{
     RecordedReplayInputV1,
 };
 use pos_experiment::verification_execution::{
-    recorded_replay_closure_digest_v1, VerificationExecutionOutcomeV1,
+    recomputation_closure_digest_v1, recorded_replay_closure_digest_v1,
+    VerificationExecutionOutcomeV1,
 };
 use pos_runtime::{Driver, ObservationView, RuntimeError, StepOutput};
 use pos_state::ProjectionRegistry;
@@ -1111,4 +1112,15 @@ fn closure_members_that_do_not_compose_the_request_digest_are_refused() -> TestR
         Some("manifest"),
     );
     Ok(())
+}
+
+#[test]
+fn the_same_member_digest_under_the_two_roles_gives_different_closures() {
+    // Section 4 of the note: role 1 (exported Timeline) and role 2
+    // (recomputation subject) are part of the composition.
+    let digest = EXPORT_DIGEST.digest();
+    assert_ne!(
+        recorded_replay_closure_digest_v1(digest, LICENCE),
+        recomputation_closure_digest_v1(digest, LICENCE)
+    );
 }

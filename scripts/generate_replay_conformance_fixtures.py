@@ -11,7 +11,7 @@ It does not use implementation output as an oracle (ADR-062 Revision 8, Q3 (a)):
 cargo and no binary of the repository. Every expected stream, authoritative result digest,
 closure digest and first divergence is derived here from the closure members it writes, with the
 digest scheme of the ADR-062 Revision 8 note "Recorded Replay Digests" (the
-`PiglorOS.RecordedReplay*.v1` domains) and the closure composition this slice proposes for that
+`PiglorOS.RecordedReplay*.v1` domains) and the closure composition accepted in section 4 of that
 note. The only primitive it imports is the BLAKE3 hash of `generate_pmf1_golden_vectors.py`; it
 reuses the JSON Schema subset checker of `generate_metric_conformance_fixtures.py`.
 
@@ -112,7 +112,7 @@ EVENT_IDENTITY_DOMAIN = b"PiglorOS.RecordedReplayEventIdentity.v1"
 EVENT_SCHEMA_DOMAIN = b"PiglorOS.RecordedReplayEventSchema.v1"
 CHECKPOINT_DOMAIN = b"PiglorOS.RecordedReplayCheckpoint.v1"
 RESULT_DOMAIN = b"PiglorOS.RecordedReplayResult.v1"
-# Proposed by this slice for section 4 of the note: the closure composition.
+# The closure composition, accepted in section 4 of the note.
 CLOSURE_DOMAIN = b"PiglorOS.RecordedReplayClosure.v1"
 ROLE_EXPORTED_TIMELINE = 1
 ROLE_RECOMPUTATION_SUBJECT = 2
@@ -819,7 +819,7 @@ def subcase_object(sub: SubCase) -> dict:
 
 
 # The Plugin and Driver a recomputation subject composes on the host.
-SUBJECT_COMPOSITION = {"plugin": "replay-subject", "driver": "replay-subject"}
+SUBJECT_COMPOSITION = {"plugin": "replay-subject", "driver": "replay-subject.driver"}
 
 
 def oracle_entry(sub: SubCase) -> dict:
