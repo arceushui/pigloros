@@ -1,9 +1,10 @@
 //! The sub-case interpreter and its port (ADR-061 revision 8 decisions 2, 3 and 8).
 //!
 //! [`interpret()`] runs the steps of one sub-case on a [`StepPortV1`]: the step dispatch
-//! (`install`, `bind`, `refresh`, `pass`, `scan`), the carry of the Driver's state across
-//! passes (the port keeps it), the stop at the first step that refuses or does not commit, the
-//! `compute` of a `digest` expectation, and the comparison of the sub-case result with `expect`.
+//! (`install`, `rollback`, `bind`, `refresh`, `pass`, `scan`), the carry of the Driver's state
+//! across passes (the port keeps it), the stop at the first step that refuses or does not commit,
+//! the `compute` of a `digest` expectation, and the comparison of the sub-case result with
+//! `expect`.
 //! The port is a trait with one method per step so that the interpreter has a pure fake in its
 //! tests; the real port, [`crate::runner::EvaluationStepPortV1`], is a logic-free adapter over
 //! the S1c2 world.
@@ -34,8 +35,8 @@ use crate::hex;
 use crate::map::{of_outcome, of_record, SubResultV1};
 pub use crate::payload::ScanSource;
 use crate::payload::{
-    AtV1, ComputeV1, ExpectV1, Hex32, IdentityFieldV1, InvalidCaseV1, MaterialV1, MemberV1,
-    ProfileDigestV1, ReleaseV1, StepV1, SubCaseV1, Text,
+    AtV1, ComputeV1, ExpectV1, Hex32, IdentityFieldV1, InstallV1, InvalidCaseV1, MaterialV1,
+    MemberV1, ProfileDigestV1, ReleaseV1, StepV1, SubCaseV1, Text,
 };
 
 /// The closed host error of a step.
@@ -127,6 +128,9 @@ pub struct InstallArgsV1 {
     pub tick: u64,
 }
 
+/// The `rollback` step: the arguments of `install` (ADR-103 revision 7 decision 4.6).
+pub type RollbackArgsV1 = InstallArgsV1;
+
 /// The `bind` step.
 #[derive(Clone, Debug)]
 pub struct BindArgsV1 {
@@ -182,6 +186,7 @@ pub struct ScanArgsV1 {
 #[derive(Clone, Debug)]
 pub enum ResolvedStepV1 {
     Install(InstallArgsV1),
+    Rollback(RollbackArgsV1),
     Bind(BindArgsV1),
     Refresh(RefreshArgsV1),
     Pass(PassArgsV1),
@@ -205,6 +210,12 @@ pub trait StepPortV1 {
     /// # Errors
     /// Returns the install refusal as a host error.
     fn install(&mut self, args: &InstallArgsV1) -> Result<(), CommunityPluginHostErrorV1>;
+
+    /// `rollback_community_release_v1`, through `CommunityEvaluationWorldV1::rollback`.
+    ///
+    /// # Errors
+    /// Returns the rollback refusal as a host error, as for an install.
+    fn rollback(&mut self, args: &RollbackArgsV1) -> Result<(), CommunityPluginHostErrorV1>;
 
     /// `gate_for_driver`, then build and register the Driver; the identity of the gated release.
     ///
@@ -446,7 +457,7 @@ impl PreparedV1 {
 /// The trust material a step names, if it names one.
 const fn material_of_step(step: &ResolvedStepV1) -> Option<&CommunityPluginTrustMaterialV1> {
     match step {
-        ResolvedStepV1::Install(args) => args.material.as_ref(),
+        ResolvedStepV1::Install(args) | ResolvedStepV1::Rollback(args) => args.material.as_ref(),
         ResolvedStepV1::Bind(args) => args.material.as_ref(),
         ResolvedStepV1::Refresh(args) => args.material.as_ref(),
         ResolvedStepV1::Pass(_) | ResolvedStepV1::Scan(_) => None,
@@ -545,16 +556,22 @@ impl Resolver<'_> {
         })
     }
 
+    /// The arguments of an `install` or a `rollback` step.
+    fn activation(&mut self, step: &InstallV1) -> Result<InstallArgsV1, InvalidCaseV1> {
+        Ok(InstallArgsV1 {
+            address: self.address(&step.release)?,
+            material: self.material_of(step.material.as_ref())?,
+            instant_micros: step.instant_micros.0,
+            tick: step.tick.0,
+        })
+    }
+
     /// Resolve one step. A second `bind` of one Plugin ID is `payload-invalid`; `bind` and
     /// `refresh` set the material that later passes use.
     fn step(&mut self, step: &StepV1) -> Result<ResolvedStepV1, InvalidCaseV1> {
         match step {
-            StepV1::Install(install) => Ok(ResolvedStepV1::Install(InstallArgsV1 {
-                address: self.address(&install.release)?,
-                material: self.material_of(install.material.as_ref())?,
-                instant_micros: install.instant_micros.0,
-                tick: install.tick.0,
-            })),
+            StepV1::Install(install) => self.activation(install).map(ResolvedStepV1::Install),
+            StepV1::Rollback(rollback) => self.activation(rollback).map(ResolvedStepV1::Rollback),
             StepV1::Bind(bind) => {
                 if self.bound.contains_key(bind.plugin_id.as_str()) {
                     return Err(InvalidCaseV1);
@@ -708,6 +725,10 @@ impl Run<'_> {
                 let result = self.port.install(args);
                 self.settle(result)
             }
+            ResolvedStepV1::Rollback(args) => {
+                let result = self.port.rollback(args);
+                self.settle(result)
+            }
             ResolvedStepV1::Bind(args) => {
                 let result = self.port.bind(args).map(|identity| {
                     self.bound = Some(Bound {
@@ -721,16 +742,19 @@ impl Run<'_> {
                 let result = self.port.refresh(args);
                 self.settle(result)
             }
-            ResolvedStepV1::Pass(args) => {
-                let before = self.port.worker_launches();
-                let result = self.port.pass(args);
-                self.count_launches(before);
-                match result {
-                    Ok(outcomes) => self.record_pass(args, &outcomes),
-                    Err(error) => self.refuse(error),
-                }
-            }
+            ResolvedStepV1::Pass(args) => self.pass(args),
             ResolvedStepV1::Scan(scan) => self.scan(scan),
+        }
+    }
+
+    /// Run one `pass` step and count the workers it launched; `false` stops the sub-case.
+    fn pass(&mut self, args: &PassArgsV1) -> bool {
+        let before = self.port.worker_launches();
+        let result = self.port.pass(args);
+        self.count_launches(before);
+        match result {
+            Ok(outcomes) => self.record_pass(args, &outcomes),
+            Err(error) => self.refuse(error),
         }
     }
 

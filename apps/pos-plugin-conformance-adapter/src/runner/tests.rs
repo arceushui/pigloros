@@ -1,5 +1,6 @@
-//! R8-A6 and R8-A10: the real port and the S1c2 world with the fixture source, on releases of
-//! the signed-release test world (no real worker: `/bin/false` stands in).
+//! R8-A6, R8-A10 and the real-port half of R7-F1: the real port and the S1c2 world with the
+//! fixture source, on releases of the signed-release test world (no real worker: `/bin/false`
+//! stands in).
 
 use pos_core::trusted_clock::{FixtureEvaluationInstantV1, FixtureWallSourceV1};
 use pos_plugin_publisher::test_support::{encoding::TICK, release::Shape, world::World};
@@ -61,6 +62,7 @@ struct Real {
 /// What the signed-release test world published, as bytes.
 struct Published {
     address: BundleAddressV1,
+    release_digest: [u8; 32],
     manifest: Vec<u8>,
     layers: Vec<Vec<u8>>,
     pmf1_digest: [u8; 32],
@@ -70,18 +72,29 @@ struct Published {
     tps1: Vec<u8>,
 }
 
+/// The shape of a release the worker can load.
+const fn worker_shape() -> Shape {
+    Shape::first().with_optional_capability().with_worker_abi()
+}
+
 fn published() -> Result<Published, BoxError> {
     let mut publisher = World::build(None, false)?;
+    publish(&mut publisher, worker_shape())
+}
+
+/// Publish `shape` in `publisher` and read it back as bytes.
+fn publish(publisher: &mut World, shape: Shape) -> Result<Published, BoxError> {
     let current = publisher.material()?;
-    let shape = Shape::first().with_optional_capability().with_worker_abi();
-    let address = publisher.publish(shape)?.address().clone();
+    let release = publisher.publish(shape)?;
+    let address = release.address().clone();
     let bundle = publisher.store.read_verified(&address)?;
     Ok(Published {
         address,
+        release_digest: release.release_digest(),
         manifest: bundle.manifest().to_vec(),
         layers: layers_of(&bundle),
         pmf1_digest: *blake3::hash(bundle.pmf1()).as_bytes(),
-        anchor: anchor_of(&publisher),
+        anchor: anchor_of(publisher),
         roots: vec![current.ptr1().to_vec()],
         revocations: current.prv1_records().to_vec(),
         tps1: current.tps1,
@@ -108,13 +121,18 @@ fn hexes(records: &[Vec<u8>]) -> Vec<String> {
     records.iter().map(|record| hex_of(record)).collect()
 }
 
-/// Every piece of the release set, sorted and without duplicates.
-fn piece_set(published: &Published, anchor_bytes: &[u8]) -> Vec<Vec<u8>> {
+/// Every piece of the release set and of the `others` releases, sorted and without duplicates.
+fn piece_set(published: &Published, others: &[&Published], anchor_bytes: &[u8]) -> Vec<Vec<u8>> {
     let mut all = vec![published.manifest.clone(), published.tps1.clone()];
     all.push(anchor_bytes.to_vec());
     all.extend(published.layers.clone());
     all.extend(published.roots.clone());
     all.extend(published.revocations.clone());
+    all.extend(others.iter().flat_map(|other| {
+        let mut release = vec![other.manifest.clone()];
+        release.extend(other.layers.iter().cloned());
+        release
+    }));
     all.sort();
     all.dedup();
     all
@@ -126,9 +144,30 @@ fn release_source(published: &Published) -> Result<InMemoryReleaseSourceV1, BoxE
     Ok(InMemoryReleaseSourceV1::new(vec![entry])?)
 }
 
+/// R1 and its direct successor R2, published in one signed-release test world.
+fn published_pair() -> Result<(Published, Published), BoxError> {
+    let mut publisher = World::build(None, false)?;
+    let first = publish(&mut publisher, worker_shape())?;
+    let shape = Shape {
+        version: "2.0.0",
+        previous: Some(first.release_digest),
+        ..worker_shape()
+    };
+    publish(&mut publisher, shape).map(|second| (first, second))
+}
+
+/// R1 and R2 of [`published_pair()`]; the pieces of each also hold the other release.
+fn pair() -> Result<(Real, Real), BoxError> {
+    let (first, second) = published_pair()?;
+    Real::of(&first, &[&second]).and_then(|one| Real::of(&second, &[&first]).map(|two| (one, two)))
+}
+
 impl Real {
     fn new() -> Result<Self, BoxError> {
-        let published = published()?;
+        Self::of(&published()?, &[])
+    }
+
+    fn of(published: &Published, others: &[&Published]) -> Result<Self, BoxError> {
         let anchor_bytes = anchor_cbor(&published.anchor)?;
         let material = CommunityPluginTrustMaterialV1::from_bytes_v1(
             &published.anchor,
@@ -136,9 +175,9 @@ impl Real {
             published.roots.clone(),
             published.revocations.clone(),
         )?;
-        let all = piece_set(&published, &anchor_bytes);
+        let all = piece_set(published, others, &anchor_bytes);
         Ok(Self {
-            source: release_source(&published)?,
+            source: release_source(published)?,
             pieces: PiecesV1::from_blobs(all.clone()),
             all,
             release: json!({
@@ -152,9 +191,16 @@ impl Real {
                 "prv1": hexes(&published.revocations),
             }),
             material,
-            address: published.address,
+            address: published.address.clone(),
             pmf1_digest: published.pmf1_digest,
         })
+    }
+
+    /// The `rollback` step to this release: the arguments of [`Self::install()`].
+    fn rollback(&self, instant: u64) -> Value {
+        let mut step = self.install(instant);
+        step["step"] = json!("rollback");
+        step
     }
 
     fn install(&self, instant: u64) -> Value {
@@ -312,6 +358,68 @@ fn bind_gates_the_release_and_reports_its_identity() -> TestResult {
 
 fn hex_of_digest(digest: &[u8; 32]) -> String {
     crate::hex::encode(digest)
+}
+
+/// R1 installed, its successor R2 installed, then the rollback to R1.
+fn rolled_back(first: &Real, second: &Real) -> Vec<Value> {
+    vec![
+        first.install(50_000_000),
+        second.install(50_000_000),
+        first.rollback(50_000_000),
+    ]
+}
+
+#[test]
+fn r7_f1_a_rollback_step_runs_through_the_world_and_reactivates_its_target() -> TestResult {
+    let (first, second) = pair()?;
+    // After the rollback, R1 gates for its Driver...
+    let mut steps = rolled_back(&first, &second);
+    steps.push(first.bind(&first.material_json));
+    let pmf1 = json!({"what": "release_identity", "field": "pmf1"});
+    let value = hex_of_digest(&first.pmf1_digest);
+    let expect = json!({"kind": "digest", "compute": pmf1, "value": value});
+    let record = first.run(steps, expect)?;
+    assert_eq!(record.setup_refusal, None);
+    assert_eq!(record.steps_run, 4);
+    assert_eq!(record.computed, Some(first.pmf1_digest));
+    assert!(record.matched);
+    // ...and R2, which the rollback replaced, is no longer active.
+    let mut steps = rolled_back(&first, &second);
+    steps.push(second.bind(&second.material_json));
+    let record = first.run(steps, refused_expect("NotActive"))?;
+    let not_active = HostError::ArtifactTrustDenied {
+        basis: TrustDenialBasisV1::NotActive,
+    };
+    assert_eq!(record.setup_refusal, Some(not_active));
+    assert_eq!(record.steps_run, 4);
+    assert!(record.matched);
+    Ok(())
+}
+
+#[test]
+fn r7_f1_a_refused_rollback_step_is_the_closed_host_error_of_the_step() -> TestResult {
+    let (first, second) = pair()?;
+    let unavailable = refused_expect("TrustStateUnavailable");
+    // `RollbackTargetActive`, `UnknownRollbackTarget` and a step without material.
+    let mut without_material = first.rollback(50_000_000);
+    without_material["material"] = Value::Null;
+    let cases = [
+        vec![first.install(50_000_000), first.rollback(50_000_000)],
+        vec![first.install(50_000_000), second.rollback(50_000_000)],
+        vec![
+            first.install(50_000_000),
+            second.install(50_000_000),
+            without_material,
+        ],
+    ];
+    for steps in cases {
+        let count = u32::try_from(steps.len())?;
+        let record = first.run(steps, unavailable.clone())?;
+        assert_eq!(record.setup_refusal, Some(TRUST_UNAVAILABLE));
+        assert_eq!(record.steps_run, count);
+        assert!(record.matched);
+    }
+    Ok(())
 }
 
 fn absent(marker: &str) -> Value {

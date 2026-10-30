@@ -26,10 +26,12 @@ use pos_core::{
     Hash, PipelineAttemptIdV1, PipelineEvidenceRefV1, PipelineSecurityRevisionsV1, Seq, SeqRange,
     TimelineId, TimelineMeta,
 };
-use pos_crypto::plugin_trust::verify_plugin_trust_v1;
-use pos_plugin_publisher::InstalledPluginReleaseV1;
+use pos_crypto::plugin_trust::{verify_plugin_trust_v1, VerifiedPluginTrustEvidenceV1};
+use pos_plugin_publisher::{InstalledPluginReleaseV1, RolledBackPluginReleaseV1};
 use pos_plugin_release::{BundleAddressV1, ReleaseSourceV1};
-use pos_store::plugin_trust_registry::{PluginTrustPolicyRegistryErrorV1, TrustedUtcSecondV1};
+use pos_store::plugin_trust_registry::{
+    PluginTrustPolicyRegistryErrorV1, PluginTrustPolicyRegistryV1, TrustedUtcSecondV1,
+};
 use pos_store::StoreConfig;
 
 use super::error::CommunityPluginHostErrorV1;
@@ -43,8 +45,8 @@ use super::host::{
     CommunityStageV1,
 };
 use super::install::{
-    host_error_for_install_v1, install_community_release_v1, ActivationTargetV1,
-    CommunityInstallRequestV1,
+    host_error_for_install_v1, host_error_for_rollback_v1, install_community_release_v1,
+    rollback_community_release_v1, ActivationTargetV1, CommunityInstallRequestV1,
 };
 use crate::{
     ErasureCoordinatorCompositionV1, ErasureExecutionHostV1, ErasureReadSenderV1,
@@ -170,30 +172,81 @@ impl CommunityEvaluationWorldV1 {
         wall: &mut impl PluginTrustWallSourceV1,
         tick: u64,
     ) -> WorldResult<InstalledPluginReleaseV1> {
-        TrustedUtcSecondV1::from_source(wall)
-            .map_err(host_error_for_registry_v1)
-            .and_then(|utc| {
-                verify_plugin_trust_v1(
-                    material.root_anchor(),
-                    &slices(material.roots()),
-                    &slices(material.revocations()),
-                    utc.as_i64(),
-                    tick,
-                )
-                .map_err(host_error_for_trust_verification_v1)
-            })
-            .and_then(|evidence| {
-                let request = CommunityInstallRequestV1 {
-                    anchor: material.policy_anchor(),
-                    tps1_bytes: material.tps1_bytes(),
-                    evidence: &evidence,
-                    target: self.target,
-                };
-                let installed = self.registry_host.with_plugin_trust_registry(|registry| {
-                    install_community_release_v1(source, address, registry, wall, &request)
-                });
-                flat(installed.map(|result| result.map_err(host_error_for_install_v1)))
-            })
+        self.activate(
+            material,
+            wall,
+            tick,
+            |registry, wall, request| {
+                install_community_release_v1(source, address, registry, wall, request)
+            },
+            host_error_for_install_v1,
+        )
+    }
+
+    /// Roll the active release of the target's Plugin ID back to the already installed community
+    /// release at `address` with `material`, committing the target's activation Event on the
+    /// registry store: the mirror of [`Self::install()`] through the production rollback entry
+    /// (ADR-103 revision 7 decision 4.3).
+    ///
+    /// The world builds the trust evidence at one sampled UTC second and `tick`, and the rollback
+    /// entry samples `wall` again, so the source must return the same second twice, as for an
+    /// install. Repeating the same rollback is the registry's idempotent replay. This is the only
+    /// way the conformance adapter reaches a rollback.
+    ///
+    /// # Errors
+    /// Returns the host error of the failed sample, of the trust verification, or of the
+    /// rollback (`host_error_for_rollback_v1`); `WorkerCrashed` (operational) when the registry
+    /// store is unusable.
+    pub fn rollback(
+        &mut self,
+        source: &impl ReleaseSourceV1,
+        address: &BundleAddressV1,
+        material: &CommunityPluginTrustMaterialV1,
+        wall: &mut impl PluginTrustWallSourceV1,
+        tick: u64,
+    ) -> WorldResult<RolledBackPluginReleaseV1> {
+        self.activate(
+            material,
+            wall,
+            tick,
+            |registry, wall, request| {
+                rollback_community_release_v1(source, address, registry, wall, request)
+            },
+            host_error_for_rollback_v1,
+        )
+    }
+
+    /// Verify `material` at one sample of `wall` and `tick`, then run `entry` (the install or the
+    /// rollback wrapper) on the world's registry with the request of that evidence on the
+    /// activation target, mapping its refusal with `host_error`.
+    fn activate<W, T, E, F>(
+        &mut self,
+        material: &CommunityPluginTrustMaterialV1,
+        wall: &mut W,
+        tick: u64,
+        entry: F,
+        host_error: fn(E) -> CommunityPluginHostErrorV1,
+    ) -> WorldResult<T>
+    where
+        W: PluginTrustWallSourceV1,
+        F: FnOnce(
+            &mut dyn PluginTrustPolicyRegistryV1,
+            &mut W,
+            &CommunityInstallRequestV1<'_>,
+        ) -> Result<T, E>,
+    {
+        trust_evidence(material, wall, tick).and_then(|evidence| {
+            let request = CommunityInstallRequestV1 {
+                anchor: material.policy_anchor(),
+                tps1_bytes: material.tps1_bytes(),
+                evidence: &evidence,
+                target: self.target,
+            };
+            let done = self
+                .registry_host
+                .with_plugin_trust_registry(|registry| entry(registry, wall, &request));
+            flat(done.map(|result| result.map_err(host_error)))
+        })
     }
 
     /// Gate the release at `address` for the first Driver of its Plugin: [`gate_for_driver()`]
@@ -298,6 +351,26 @@ impl CommunityEvaluationWorldV1 {
             .with_plugin_trust_registry(|registry| registry.provision(anchor, tps1));
         registry_unit(provisioned)
     }
+}
+
+/// The verified trust evidence of `material` at one UTC second sampled from `wall` and `tick`.
+fn trust_evidence(
+    material: &CommunityPluginTrustMaterialV1,
+    wall: &mut impl PluginTrustWallSourceV1,
+    tick: u64,
+) -> WorldResult<VerifiedPluginTrustEvidenceV1> {
+    TrustedUtcSecondV1::from_source(wall)
+        .map_err(host_error_for_registry_v1)
+        .and_then(|utc| {
+            verify_plugin_trust_v1(
+                material.root_anchor(),
+                &slices(material.roots()),
+                &slices(material.revocations()),
+                utc.as_i64(),
+                tick,
+            )
+            .map_err(host_error_for_trust_verification_v1)
+        })
 }
 
 /// Both hosts and their Timelines.

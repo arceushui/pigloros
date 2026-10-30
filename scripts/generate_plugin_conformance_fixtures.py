@@ -25,7 +25,7 @@ The fixture seeds below are public and used for fixtures only ("repository-test-
 the signatures prove consistency, not publisher identity.
 
 The catalogue holds `positive` and `independent-evaluation` in full, every `denied`
-(`den.01` to `den.22`), `malformed` (`mal.1a` to `mal.6`) and `downgrade` (`dgr.1` to `dgr.4`)
+(`den.01` to `den.22`), `malformed` (`mal.1a` to `mal.6`) and `downgrade` (`dgr.1` to `dgr.6`)
 sub-case, `res.1` to `res.7` (the rust guest under a release whose memory, host-call or
 `event_bytes` budget it exceeds, the c guest under a fuel budget of 1, and the probe guest
 under a release whose `state_bytes`, `log_calls` or `log_bytes` budget it exceeds) and `del.1`,
@@ -886,6 +886,16 @@ def install(
     }
 
 
+def rollback(
+    release: Release,
+    tick: int = TICK,
+    instant: int = INSTANT,
+    material: Trust | Unreadable | None = None,
+) -> dict:
+    """The `rollback` step: the arguments of `install` (ADR-103 revision 7 decision 4.6)."""
+    return {**install(release, tick, instant, material), "step": "rollback"}
+
+
 def bind(
     release: Release,
     tick: int = TICK,
@@ -1449,6 +1459,8 @@ def redaction_subcases() -> list[SubCase]:
 
 
 def downgrade_subcases() -> list[SubCase]:
+    """`dgr.1` to `dgr.6` (ADR-061 revision 8 decision 8 as amended by ADR-103 revision 7
+    Appendix A): `dgr.1`, `dgr.2`, `dgr.5` and `dgr.6` roll back through the production entry."""
     first = rust_release()
     successor = make_release(default_spec(release_version="1.1.0", previous=first.release_digest))
     unlinked = make_release(default_spec(release_version="1.1.0", previous=bytes([0x77]) * 32))
@@ -1456,19 +1468,28 @@ def downgrade_subcases() -> list[SubCase]:
     minor = make_release(default_spec(abi_min_minor=1, abi_max_minor=1))
     keyed = advanced_trust(trust(), key_epochs=(1,))
     return [
+        # The rollback to R1 succeeds; the refused `bind` of R2 ends the steps. The successful
+        # `bind` of the rolled-back R1 is the in-repo R7-T9 test: a second `bind` of one
+        # Plugin ID is `payload-invalid`.
         refusal_subcase(
             "dgr.1",
-            [install(first), install(successor), bind(first)],
+            [install(first), install(successor), rollback(first), bind(successor)],
             refused("ArtifactTrustDenied", basis="NotActive"),
             [first, successor],
         ),
-        # The `den.13` shape: see `settled_subcase`.
-        settled_subcase(
+        # R1's publisher key epoch is revoked by the refresh: the rollback does not silently
+        # restore a revoked artifact.
+        refusal_subcase(
             "dgr.2",
-            first,
+            [
+                install(first),
+                install(successor),
+                refresh(keyed, LATER_TICK, LATER_INSTANT),
+                rollback(first, LATER_TICK, LATER_INSTANT, keyed),
+            ],
             refused("ArtifactRevoked", basis="PublisherKey"),
-            keyed,
-            [run_pass(REVOKED_PASS)],
+            [first, successor],
+            [keyed],
         ),
         # ADR-061 r8 says `dgr.3a` is `IncompatibleAbi` at the Driver build, but that is
         # unreachable: the PMF1 decoder accepts only ABI major 0 (`abi_u16_in(reader, 0, 0)`), so
@@ -1483,6 +1504,22 @@ def downgrade_subcases() -> list[SubCase]:
             [install(first), install(unlinked)],
             refused("ArtifactTrustDenied", basis="TrustStateUnavailable"),
             [first, unlinked],
+        ),
+        # A rollback to a release of the same Plugin ID that was never installed:
+        # `UnknownRollbackTarget`.
+        refusal_subcase(
+            "dgr.5",
+            [install(first), rollback(successor)],
+            refused("ArtifactTrustDenied", basis="TrustStateUnavailable"),
+            [first, successor],
+        ),
+        # A rollback to the active R1, whose activation identity is that of no rollback row:
+        # `RollbackTargetActive`.
+        refusal_subcase(
+            "dgr.6",
+            [install(first), rollback(first)],
+            refused("ArtifactTrustDenied", basis="TrustStateUnavailable"),
+            [first],
         ),
     ]
 

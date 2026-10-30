@@ -1,4 +1,4 @@
-//! R8-A14: the grammar, key set by key set.
+//! R8-A14 and the grammar half of R7-F1: the grammar, key set by key set.
 
 use serde_json::{json, Value};
 
@@ -67,6 +67,8 @@ fn base() -> Value {
     let refresh = json!({
         "step": "refresh", "material": material(), "instant_micros": 1, "tick": 2,
     });
+    let mut rollback = install.clone();
+    rollback["step"] = json!("rollback");
     let digest = |compute: Value| json!({"kind": "digest", "compute": compute, "value": H32});
     let profile = json!({
         "what": "profile_digest", "ceilings": [1, 2, 3, 4, 5],
@@ -78,7 +80,7 @@ fn base() -> Value {
     let mut subcases = vec![
         subcase(
             "pos.1",
-            json!([install, bind, refresh, pass(), scan()]),
+            json!([install, bind, refresh, pass(), scan(), rollback]),
             json!({"kind": "committed", "output_digest": H32}),
         ),
         subcase(
@@ -168,6 +170,35 @@ fn every_object_of_the_grammar_is_accepted_exactly() -> TestResult {
     Ok(())
 }
 
+#[test]
+fn r7_f1_a_rollback_step_has_exactly_the_arguments_of_install() -> TestResult {
+    let case = parse(&base())?;
+    let steps = &case.subcases[0].steps;
+    let (StepV1::Install(install), StepV1::Rollback(rollback)) = (&steps[0], &steps[5]) else {
+        return Err("not an install and a rollback".into());
+    };
+    assert_eq!(rollback, install);
+    // A key of another step, or a key it lacks, is payload-invalid, as for `install`.
+    for (key, extra) in [("plugin_id", json!("p")), ("members", json!([]))] {
+        let result = changed(|value| at(value, "/subcases/0/steps/5")[key] = extra.clone());
+        assert_eq!(result, Err(InvalidCaseV1), "rollback with {key}");
+    }
+    let tagged = changed(|value| *at(value, "/subcases/0/steps/5/step") = json!("roll-back"));
+    assert_eq!(tagged, Err(InvalidCaseV1));
+    // A nested document reads the step by the same grammar.
+    let whole = base();
+    let step = &whole["subcases"][0]["steps"][5];
+    let document = subcase("n.1", json!([step]), json!({"kind": "malformed"}));
+    let nested = SubCaseV1::parse_document(document.to_string().as_bytes())?;
+    assert!(matches!(nested.steps[0], StepV1::Rollback(_)));
+    let mut broken = step.clone();
+    broken["tick"] = json!(-1);
+    let document = subcase("n.1", json!([broken]), json!({"kind": "malformed"}));
+    let nested = SubCaseV1::parse_document(document.to_string().as_bytes());
+    assert_eq!(nested.err(), Some(InvalidCaseV1));
+    Ok(())
+}
+
 /// Every object of the grammar, by the pointer of an instance in `base()`.
 const OBJECTS: &[&str] = &[
     "",
@@ -183,6 +214,9 @@ const OBJECTS: &[&str] = &[
     "/subcases/0/steps/3/members/2/at",
     "/subcases/0/steps/4",
     "/subcases/0/steps/4/retained",
+    "/subcases/0/steps/5",
+    "/subcases/0/steps/5/release",
+    "/subcases/0/steps/5/material",
     "/subcases/0/expect",
     "/subcases/1/expect",
     "/subcases/2/expect",
@@ -231,8 +265,13 @@ fn a_missing_key_is_payload_invalid_in_every_object() {
 
 #[test]
 fn a_null_is_only_accepted_where_the_grammar_says_material_or_null() {
-    let null_material = changed(|value| *at(value, "/subcases/0/steps/0/material") = Value::Null);
-    assert!(null_material.is_ok());
+    for pointer in [
+        "/subcases/0/steps/0/material",
+        "/subcases/0/steps/5/material",
+    ] {
+        let null_material = changed(|value| *at(value, pointer) = Value::Null);
+        assert!(null_material.is_ok(), "{pointer}");
+    }
     for pointer in [
         "/subcases/0/steps/0/release",
         "/subcases/0/steps/1/event_type",
@@ -553,7 +592,7 @@ fn simulation_time_that_decreases_within_a_subcase_is_payload_invalid() -> TestR
     let equal = second_pass_at(7)?;
     assert_eq!(
         equal.subcases[0].steps.len(),
-        6,
+        7,
         "equal values are accepted"
     );
     assert!(second_pass_at(8).is_ok(), "an increase is accepted");

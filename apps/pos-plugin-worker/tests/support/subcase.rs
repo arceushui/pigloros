@@ -39,7 +39,7 @@ pub fn observe_attempt(attempt: &CaseAttempt) -> TestResult<SubjectObservation> 
 pub fn failure(code_id: &str) -> SubjectResult {
     SubjectResult::Failure(NamespacedFailure {
         owner_id: "pigloros.fixture.plugin-conformance".to_owned(),
-        contract_version: "2.0.0".to_owned(),
+        contract_version: "2.1.0".to_owned(),
         code_id: code_id.to_owned(),
     })
 }

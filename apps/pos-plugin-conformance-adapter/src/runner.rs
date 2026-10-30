@@ -4,10 +4,10 @@
 //! the record of each sub-case, and a test-side decorator can record its calls.
 //! [`SupervisorRunnerV1`] builds the real port, [`EvaluationStepPortV1`], and interprets the
 //! sub-case on it. The port has no logic of its own: it builds the S1c2 world, calls `install`,
-//! `gate_for_driver`, `refresh_policy` and `run_pass` with a fixture wall source at the instant
-//! of the step, builds and registers the Driver of a `bind` step, and reads the world back. Its
-//! launch count is the sum of the counts of the supervisors it built, each read through a clone
-//! the port keeps beside the Driver that owns the supervisor.
+//! `rollback`, `gate_for_driver`, `refresh_policy` and `run_pass` with a fixture wall source at
+//! the instant of the step, builds and registers the Driver of a `bind` step, and reads the world
+//! back. Its launch count is the sum of the counts of the supervisors it built, each read through
+//! a clone the port keeps beside the Driver that owns the supervisor.
 
 use std::path::PathBuf;
 use std::sync::{Arc, MutexGuard, PoisonError};
@@ -37,7 +37,7 @@ use crate::invocation::{
 use crate::payload::SubCaseV1;
 use crate::world::{
     interpret, outcome_bytes_of, BindArgsV1, HostError, InstallArgsV1, PassArgsV1, PassMemberV1,
-    RefreshArgsV1, SetupArgsV1, StepPortV1, SubCaseRecordV1,
+    RefreshArgsV1, RollbackArgsV1, SetupArgsV1, StepPortV1, SubCaseRecordV1,
 };
 
 /// The outcome records of one pass.
@@ -193,16 +193,38 @@ fn assemble_all(
 
 impl OpenWorld {
     fn install(&mut self, args: &InstallArgsV1) -> Result<(), HostError> {
+        self.activate(args, |world, source, material, wall| {
+            world
+                .install(source, &args.address, material, wall, args.tick)
+                .map(|_installed| ())
+        })
+    }
+
+    fn rollback(&mut self, args: &RollbackArgsV1) -> Result<(), HostError> {
+        self.activate(args, |world, source, material, wall| {
+            world
+                .rollback(source, &args.address, material, wall, args.tick)
+                .map(|_rolled_back| ())
+        })
+    }
+
+    /// Run `entry` (the world's install or rollback) with the release source, the material of
+    /// `args` and a fixture wall at its instant: a null material is `TrustStateUnavailable`.
+    fn activate<F>(&mut self, args: &InstallArgsV1, entry: F) -> Result<(), HostError>
+    where
+        F: FnOnce(
+            &mut CommunityEvaluationWorldV1,
+            &InMemoryReleaseSourceV1,
+            &CommunityPluginTrustMaterialV1,
+            &mut FixtureWallSourceV1,
+        ) -> Result<(), HostError>,
+    {
         let wall = fixture_wall(args.instant_micros);
         let material = args.material.as_ref().ok_or(UNAVAILABLE);
         let source = self.source.as_ref().ok_or(WIRING);
         source.and_then(|source| {
             material.and_then(|material| {
-                wall.and_then(|mut wall| {
-                    self.world
-                        .install(source, &args.address, material, &mut wall, args.tick)
-                        .map(|_installed| ())
-                })
+                wall.and_then(|mut wall| entry(&mut self.world, source, material, &mut wall))
             })
         })
     }
@@ -374,6 +396,10 @@ impl StepPortV1 for EvaluationStepPortV1 {
 
     fn install(&mut self, args: &InstallArgsV1) -> Result<(), HostError> {
         self.world().and_then(|open| open.install(args))
+    }
+
+    fn rollback(&mut self, args: &RollbackArgsV1) -> Result<(), HostError> {
+        self.world().and_then(|open| open.rollback(args))
     }
 
     fn bind(&mut self, args: &BindArgsV1) -> Result<ReleaseIdentityV1, HostError> {
