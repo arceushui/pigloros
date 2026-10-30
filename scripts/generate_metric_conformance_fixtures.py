@@ -87,6 +87,7 @@ MAX_IDENTIFIER_BYTES = 64
 MAX_MTI1_BYTES = 64 * 1024 * 1024
 MAX_MTR1_BYTES = 1024
 MAX_PATTERNS = 4096
+MAX_NESTING_DEPTH = 16  # section 4.6 G10: the root array is level 1
 INPUT_DOMAIN = b"PiglorOS.MetricInput.v1\0"
 RESULT_DOMAIN = b"PiglorOS.MetricResult.v1\0"
 
@@ -369,27 +370,33 @@ def identifier(reader: Reader, where: str) -> bytes:
     return raw
 
 
-def skip_item(reader: Reader, where: str) -> None:
-    """Consume one data item and everything inside it without keeping it."""
+def skip_item(reader: Reader, where: str, level: int) -> None:
+    """Consume one data item at nesting `level` and everything inside it without keeping it.
+    An array deeper than `MAX_NESTING_DEPTH` is `InvalidEncoding` at that array (section 4.6
+    G10), so the walk never recurses more than 16 levels."""
     major, argument = reader.head(where)
     if major in (2, 3):
         reader._take(argument, where)
     elif major == 4:
+        if level > MAX_NESTING_DEPTH:
+            raise Failure("InvalidEncoding", where)
         for index in range(argument):
-            skip_item(reader, f"{where}/{index}")
+            skip_item(reader, f"{where}/{index}", level + 1)
 
 
 def check_structure(data: bytes) -> None:
     """The structural pass over the whole input (section 4.2 failure precedence: structure
     first). It keeps nothing: deterministic-CBOR well-formedness (no map, tag, float or other
-    simple value, indefinite length, non-preferred head, truncation or trailing bytes) and the
-    record shape (a root array of 8 fields, a records array, records of 6 fields)."""
+    simple value, indefinite length, non-preferred head, truncation or trailing bytes), the
+    nesting cap (section 4.6 G10: the root is level 1, header fields level 2, records level 3
+    and record fields level 4) and the record shape (a root array of 8 fields, a records
+    array, records of 6 fields)."""
     reader = Reader(data)
     major, length = reader.head("input")
     if major != 4 or length != len(HEADER_FIELDS):
         raise Failure("InvalidEncoding", "input")
     for name in HEADER_FIELDS[:-1]:
-        skip_item(reader, name)
+        skip_item(reader, name, 2)
     major, count = reader.head("records")
     if major != 4:
         raise Failure("InvalidEncoding", "records")
@@ -399,7 +406,7 @@ def check_structure(data: bytes) -> None:
         if major != 4 or length != 6:
             raise Failure("InvalidEncoding", at)
         for field_index in range(6):
-            skip_item(reader, f"{at}/{field_index}")
+            skip_item(reader, f"{at}/{field_index}", 4)
     reader.finish()
 
 
@@ -666,6 +673,52 @@ def mtq1(patterns: list[int]) -> bytes:
     return enc(["MTQ1", 1, patterns])
 
 
+def mtq1_raw(patterns: object, *, magic: object = "MTQ1", version: object = 1) -> bytes:
+    """`MTQ1` bytes with any field replaced, to build a malformed input."""
+    return enc([magic, version, patterns])
+
+
+QUANTIZATION_FIELDS = ("magic", "version", "patterns")
+
+
+def check_mtq1_structure(data: bytes) -> None:
+    """The structural pass of an `MTQ1` (section 4.6 item 1 and G11): deterministic-CBOR
+    well-formedness, the nesting cap, a root array of 3 fields and a `patterns` array."""
+    reader = Reader(data)
+    major, length = reader.head("input")
+    if major != 4 or length != len(QUANTIZATION_FIELDS):
+        raise Failure("InvalidEncoding", "input")
+    for name in QUANTIZATION_FIELDS[:-1]:
+        skip_item(reader, name, 2)
+    major, count = reader.head("patterns")
+    if major != 4:
+        raise Failure("InvalidEncoding", "patterns")
+    for index in range(count):
+        skip_item(reader, f"patterns/{index}", 3)
+    reader.finish()
+
+
+def decode_mtq1(data: bytes) -> list[int]:
+    """Decode `MTQ1` in the section 4.6 order: structure, then `magic` and `version`, then the
+    `patterns` shape (G11: empty is `InvalidEncoding`, above 4096 is `ResourceLimit`), then
+    each pattern in index order (a non-uint entry is `InvalidEncoding` at `patterns/<i>`)."""
+    check_mtq1_structure(data)
+    reader = Reader(data)
+    reader.array("input")
+    if reader.text("magic") != b"MTQ1":
+        raise Failure("UnsupportedVersion", "magic")
+    if reader.uint("version") != 1:
+        raise Failure("UnsupportedVersion", "version")
+    count = reader.array("patterns")
+    if count == 0:
+        raise Failure("InvalidEncoding", "patterns")
+    if count > MAX_PATTERNS:
+        raise Failure("ResourceLimit", "patterns")
+    patterns = [reader.uint(f"patterns/{index}") for index in range(count)]
+    reader.finish()
+    return patterns
+
+
 def mqr1(patterns: list[int]) -> bytes:
     entries: list = []
     for bits in patterns:
@@ -706,14 +759,23 @@ def result_case(sub_id: str, title: str, data: bytes, **extra) -> SubCase:
     return SubCase(sub_id, title, record="MTI1", member=data, expect={"kind": "result"}, **extra)
 
 
-def error_case(sub_id: str, title: str, data: bytes, error: str, coordinate: str) -> SubCase:
+def error_case(
+    sub_id: str, title: str, data: bytes, error: str, coordinate: str, record: str = "MTI1"
+) -> SubCase:
     expect = {
         "kind": "metric-error",
         "error": error,
         "code": ERRORS.index(error),
         "first_coordinate": coordinate,
     }
-    return SubCase(sub_id, title, record="MTI1", member=data, expect=expect)
+    return SubCase(sub_id, title, record=record, member=data, expect=expect)
+
+
+def nested(levels: int, leaf: object) -> object:
+    """`leaf` wrapped in `levels` one-item arrays."""
+    for _ in range(levels):
+        leaf = [leaf]
+    return leaf
 
 
 def worked_example() -> bytes:
@@ -1153,6 +1215,46 @@ def malformed_subcases() -> list[SubCase]:
             "mal.13i", "precedence: a duplicate before a later invalid probability",
             mti1(_replace(record_with((1, 0), "m01"), (1, 2), 1_000_001)),
             "DuplicatePrediction", "records/1/0",
+        ),
+        # Section 4.6 G10: a record field is level 4, so 13 arrays reach level 16 (the cap
+        # accepts them and the field is then the wrong type) and 14 reach level 17.
+        error_case(
+            "mal.14a", "arrays nested 16 levels deep pass the structural walk",
+            mti1(record_with((0, 2), nested(MAX_NESTING_DEPTH - 3, 300_000))),
+            "InvalidEncoding", "records/0/2",
+        ),
+        error_case(
+            "mal.14b", "an array nested 17 levels deep is refused at that array",
+            mti1(record_with((0, 2), nested(MAX_NESTING_DEPTH - 2, 300_000))),
+            "InvalidEncoding", "records/0/2" + "/0" * (MAX_NESTING_DEPTH - 3),
+        ),
+        # Section 4.6 G12: invalid UTF-8 in a header text field is that field's version or
+        # algorithm failure, not a structural one.
+        error_case(
+            "mal.15a", "invalid UTF-8 magic",
+            mti1(BASE, magic=text_bytes(b"MTI\xff")), "UnsupportedVersion", "magic",
+        ),
+        error_case(
+            "mal.15b", "invalid UTF-8 algorithm_id",
+            mti1(BASE, algorithm_id=text_bytes(ALGORITHM_ID.encode("ascii")[:-1] + b"\xff")),
+            "UnsupportedAlgorithm", "algorithm_id",
+        ),
+        # Section 4.6 G11: the MTQ1 shape.
+        error_case(
+            "mal.16a", "MTQ1 patterns that is not an array",
+            mtq1_raw(None), "InvalidEncoding", "patterns", record="MTQ1",
+        ),
+        error_case(
+            "mal.16b", "MTQ1 with an empty patterns array",
+            mtq1_raw([]), "InvalidEncoding", "patterns", record="MTQ1",
+        ),
+        error_case(
+            "mal.16c", "MTQ1 with a text entry in patterns",
+            mtq1_raw([bits_of(0.5), "0.5"]), "InvalidEncoding", "patterns/1", record="MTQ1",
+        ),
+        error_case(
+            "mal.16d", "MTQ1 with 4097 patterns",
+            mtq1_raw([0] * (MAX_PATTERNS + 1)), "ResourceLimit", "patterns", record="MTQ1",
         ),
     ]
 
@@ -1594,9 +1696,13 @@ STIMULUS_KINDS = {
     "downgrade": ("provider-contract",),
     "independent-evaluation": ("recompute", "generator-check"),
 }
+# Section 4.6 G6: a field coordinate, to which a nested item appends its index (at most 15
+# times, since the root is level 1 and G10 refuses the 17th level); `patterns` is the `MTQ1`
+# field of G11.
 COORDINATE_PATTERN = (
-    "^(input|trailing|magic|version|algorithm_id|algorithm_major|binning|"
-    "minimum_scored_records|record_count|records(/(0|[1-9][0-9]*)(/[0-5])?)?)$"
+    "^(input|trailing|records(/(0|[1-9][0-9]*))?|patterns|"
+    "(magic|version|algorithm_id|algorithm_major|binning|minimum_scored_records|record_count|"
+    "records/(0|[1-9][0-9]*)/[0-5]|patterns/(0|[1-9][0-9]*))(/(0|[1-9][0-9]*)){0,15})$"
 )
 
 
@@ -1878,13 +1984,13 @@ def schema_errors(value: object, schema: dict, root: dict, where: str = "$") -> 
 
 def cbor_decode(data: bytes) -> object:
     """Decode the well-formed deterministic CBOR this generator writes (self-tests only)."""
-    value, end = _decode(data, 0)
+    value, end = _decode(data, 0, 1)
     if end != len(data):
         raise ValueError("trailing bytes")
     return value
 
 
-def _decode(data: bytes, pos: int) -> tuple[object, int]:
+def _decode(data: bytes, pos: int, level: int) -> tuple[object, int]:
     initial = data[pos]
     major, info = initial >> 5, initial & 31
     pos += 1
@@ -1905,9 +2011,11 @@ def _decode(data: bytes, pos: int) -> tuple[object, int]:
     if major == 3:
         return data[pos : pos + argument].decode("utf-8"), pos + argument
     if major == 4:
+        if level > MAX_NESTING_DEPTH:
+            raise ValueError("arrays nested deeper than 16 levels")
         items = []
         for _ in range(argument):
-            item, pos = _decode(data, pos)
+            item, pos = _decode(data, pos, level + 1)
             items.append(item)
         return items, pos
     raise ValueError("unsupported CBOR major type")
@@ -2039,6 +2147,19 @@ def check_subcases() -> None:
                 if sub.marker is not None and sub.marker.encode("utf-8") in sub.result():
                     raise SystemExit(f"{sub.id}: the canary appears in MTR1")
         elif sub.record == "MTQ1":
+            try:
+                patterns = decode_mtq1(sub.member)
+            except Failure as failure:
+                if expect.get("kind") != "metric-error" or (
+                    failure.error,
+                    failure.coordinate,
+                ) != (expect["error"], expect["first_coordinate"]):
+                    raise SystemExit(f"{sub.id}: the MTQ1 decoder reports {failure}") from None
+                continue
+            if expect.get("kind") == "metric-error":
+                raise SystemExit(f"{sub.id}: the MTQ1 decoder accepts a malformed input")
+            if patterns != sub.patterns:
+                raise SystemExit(f"{sub.id}: the MTQ1 member does not carry its patterns")
             check_quantization(sub)
         elif sub.record == "MTR1":
             try:
