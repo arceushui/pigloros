@@ -67,25 +67,14 @@ fn ordinary_and_callback_aliases_refuse_reentry_before_lower_effects() {
 }
 
 #[test]
-fn armed_drop_quarantines_every_existing_and_later_shared_view() {
-    let admission = Arc::new(OwnerStoreAdmissionV1::new());
-    let existing = Arc::clone(&admission);
-    drop(enter(&admission));
-    for alias in [&admission, &existing, &Arc::clone(&admission)] {
-        assert_eq!(alias.try_enter().err(), Some(Refusal::ContextQuarantined));
-    }
-    enter(&OwnerStoreAdmissionV1::new()).complete_cleanly();
-}
-
-#[test]
-fn explicit_quarantine_is_visible_before_the_caller_releases_lower_resources() {
+fn explicit_drop_quarantines_before_the_caller_releases_lower_resources() {
     let admission = Arc::new(OwnerStoreAdmissionV1::new());
     let effects = Arc::new(AtomicUsize::new(0));
     let operation = enter(&admission);
     let lower_resource = std::sync::Mutex::new(());
     let lower_guard = lower_resource.lock().map_err(|_| "unexpected poison");
     assert!(lower_guard.is_ok());
-    operation.quarantine();
+    drop(operation);
     let alias = View { admission, effects };
     assert_eq!(alias.run(|| {}), Err(Refusal::ContextQuarantined));
     assert_eq!(alias.effects.load(Ordering::Relaxed), 0);

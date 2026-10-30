@@ -60,8 +60,8 @@ impl OwnerStoreAdmissionV1 {
 
 /// One admitted operation; dropping it while armed permanently quarantines.
 ///
-/// The guard cannot be cloned. Explicit quarantine must precede lower lock
-/// release when transaction finish fails. Clean completion is permitted only
+/// The guard cannot be cloned. Explicitly drop it before releasing lower locks
+/// when transaction finish fails. Clean completion is permitted only
 /// after positively proved closure, secret cleanup and release of lower locks.
 #[derive(Debug)]
 #[must_use = "an admitted operation must finish cleanly or quarantine its context"]
@@ -78,15 +78,6 @@ impl OwnerStoreOperationV1<'_> {
     /// must not be reused; an armed guard still defaults to quarantine on unwind.
     pub fn complete_cleanly(mut self) {
         self.transition(IDLE);
-    }
-
-    /// Permanently quarantine before releasing lower resources after failed finish.
-    ///
-    /// # Panics
-    /// An unexpected internal state is an invariant violation. The bound context
-    /// must not be reused.
-    pub fn quarantine(mut self) {
-        self.transition(QUARANTINED);
     }
 
     fn transition(&mut self, next: u8) {
@@ -115,7 +106,33 @@ impl Drop for OwnerStoreOperationV1<'_> {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
+
+    #[test]
+    fn armed_drop_quarantines_every_existing_and_later_shared_view() {
+        // Exercise the public guard in the library suite so destructor
+        // regressions fail before unrelated integration and documentation tests.
+        let admission = Arc::new(OwnerStoreAdmissionV1::new());
+        let existing = Arc::clone(&admission);
+        {
+            let _operation = match admission.try_enter() {
+                Ok(operation) => operation,
+                Err(error) => std::panic::resume_unwind(Box::new(error)),
+            };
+            assert_eq!(
+                admission.try_enter().err(),
+                Some(SubjectFieldOwnerReadErrorV1::OperationActive)
+            );
+        }
+        for alias in [&admission, &existing, &Arc::clone(&admission)] {
+            assert_eq!(
+                alias.try_enter().err(),
+                Some(SubjectFieldOwnerReadErrorV1::ContextQuarantined)
+            );
+        }
+    }
 
     #[test]
     fn unexpected_transition_is_an_invariant_violation_and_does_not_reset_quarantine() {
