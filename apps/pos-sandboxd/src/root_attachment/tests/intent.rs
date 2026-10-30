@@ -7,6 +7,27 @@ mod cases {
     use crate::test_fixtures::{root_record_fixture, with_io_fault};
     use crate::SystemdAttemptRecovery;
 
+    fn root_publication_io_count() -> Result<usize, BoxError> {
+        let tree = prepared_tree()?;
+        let (kernel, root) = attached_root(&tree.prepared)?;
+        let (result, count) = with_io_fault(None, || {
+            recheck(&kernel, &root, &tree.prepared, Some(&root.expected), || {
+                Ok(())
+            })
+        });
+        result?;
+        let bytes = fs::read(
+            tree.runtime
+                .path()
+                .join("registry")
+                .join(component(&tree.prepared)),
+        )?;
+        assert_eq!(&bytes[..4], b"PAI3");
+        assert_eq!(bytes.len(), 393);
+        assert!(count > 0);
+        Ok(count)
+    }
+
     #[tokio::test]
     async fn root_intent_is_committed_once_and_retained_after_resource_cleanup() -> TestResult {
         if bounded_fixture_child(
@@ -82,26 +103,7 @@ mod cases {
         )? {
             return Ok(());
         }
-        let count = {
-            let tree = prepared_tree()?;
-            let (kernel, root) = attached_root(&tree.prepared)?;
-            let (result, count) = with_io_fault(None, || {
-                recheck(&kernel, &root, &tree.prepared, Some(&root.expected), || {
-                    Ok(())
-                })
-            });
-            result?;
-            let bytes = fs::read(
-                tree.runtime
-                    .path()
-                    .join("registry")
-                    .join(component(&tree.prepared)),
-            )?;
-            assert_eq!(&bytes[..4], b"PAI3");
-            assert_eq!(bytes.len(), 393);
-            count
-        };
-        assert!(count > 0);
+        let count = root_publication_io_count()?;
         let mut replaced_before_failure = false;
         for fail_at in 0..count {
             let tree = prepared_tree()?;
@@ -169,17 +171,7 @@ mod cases {
 
     #[tokio::test]
     async fn uncertain_root_publication_rejects_record_substitution_before_cleanup() -> TestResult {
-        let count = {
-            let tree = prepared_tree()?;
-            let (kernel, root) = attached_root(&tree.prepared)?;
-            let (result, count) = with_io_fault(None, || {
-                recheck(&kernel, &root, &tree.prepared, Some(&root.expected), || {
-                    Ok(())
-                })
-            });
-            result?;
-            count
-        };
+        let count = root_publication_io_count()?;
         let mut exercised = [false; 2];
         for (case, downgrade) in [false, true].into_iter().enumerate() {
             for fail_at in 0..count {
