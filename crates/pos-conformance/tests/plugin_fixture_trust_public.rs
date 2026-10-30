@@ -8,7 +8,9 @@
 //! strict PMF1 projection, and a release that a sub-case expects to be `Untrusted` must be
 //! refused by the authorization. A `pass` step of a sub-case that expects a refusal is not
 //! verified: its coordinates are the ones the refusal is about (an expiry, a clock regression, a
-//! revocation). The refreshed materials are verified at their `refresh` step.
+//! revocation). The refreshed materials are verified at their `refresh` step. The `rollback` of
+//! a sub-case that expects `ArtifactRevoked` (`dgr.2`) names a release whose publisher key epoch
+//! the evidence of the step revokes: the authorization must refuse it as `PublisherKeyRevoked`.
 #![cfg(target_os = "linux")]
 
 pub mod support;
@@ -141,8 +143,8 @@ enum Release {
     Valid,
     /// Refused by the closure verifier or the strict PMF1 projection.
     Invalid,
-    /// Refused by the authorization with this error: an unknown publisher key or an ungranted
-    /// Plugin ID.
+    /// Refused by the authorization with this error: an unknown publisher key, an ungranted
+    /// Plugin ID or a revoked publisher key.
     Untrusted(&'static str),
 }
 
@@ -288,6 +290,19 @@ fn verify_step(
     Ok(read.len())
 }
 
+/// A release whose publisher key epoch the evidence revokes.
+const REVOKED: Release = Release::Untrusted("PublisherKeyRevoked");
+
+/// What `step` expects of its release: the revoked target of a refused rollback (`dgr.2`), else
+/// what the sub-case expects.
+fn step_expectation<'a>(subcase: &Json, step: &Json, expected: &'a Release) -> &'a Release {
+    if step["step"] == "rollback" && subcase["expect"]["error"] == "ArtifactRevoked" {
+        &REVOKED
+    } else {
+        expected
+    }
+}
+
 /// Verify the steps of one sub-case; the number of releases verified.
 fn verify_subcase(pieces: &Pieces, subcase: &Json) -> TestResult<usize> {
     let expected = release_expectation(subcase);
@@ -297,7 +312,8 @@ fn verify_subcase(pieces: &Pieces, subcase: &Json) -> TestResult<usize> {
     for step in subcase["steps"].as_array().ok_or("no steps")? {
         last = latest_material(pieces, step, last)?;
         if let (Some(material), false) = (&last, is_unverified(step, refusal)) {
-            releases += verify_step(pieces, material, step, &expected)?;
+            let expected = step_expectation(subcase, step, &expected);
+            releases += verify_step(pieces, material, step, expected)?;
         }
     }
     Ok(releases)

@@ -797,7 +797,7 @@ fn every_failure_has_the_provider_identity_and_a_code_within_the_grammar() {
             std::panic::resume_unwind(Box::new("not a failure"));
         };
         assert_eq!(value.owner_id, "pigloros.fixture.plugin-conformance");
-        assert_eq!(value.contract_version, "2.0.0");
+        assert_eq!(value.contract_version, "2.1.0");
         assert_eq!(value.code_id, code);
         let mut chars = code.chars();
         let first = chars

@@ -20,7 +20,7 @@ validate_provider() {
     ([$families[0].families[].name]) as $names | . as $provider |
     .fixture_adapter == {id: "plugin-signed-v1", config: {}} and
     .provider_id == "pigloros.fixture.plugin-conformance" and
-    .contract_version == "2.0.0" and .abi_major == 0 and .abi_minor == 0 and
+    .contract_version == "2.1.0" and .abi_major == 0 and .abi_minor == 0 and
     .claim_layer == "plugin-conformance" and
     .artifact_media_types == {
       schema: "application/schema+json",
