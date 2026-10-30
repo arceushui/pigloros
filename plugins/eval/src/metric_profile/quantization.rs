@@ -43,7 +43,7 @@ pub fn quantize_probability(bits: u64) -> Result<u32, MetricErrorV1> {
     let (mantissa, shift) = if exponent == 0 {
         (fraction, 1074)
     } else {
-        (fraction | (1 << FRACTION_BITS), 1075 - exponent)
+        (fraction + (1 << FRACTION_BITS), 1075 - exponent)
     };
     let shift = shift.min(MAX_SHIFT);
     let scaled = u128::from(mantissa) * u128::from(MICROS_PER_UNIT);

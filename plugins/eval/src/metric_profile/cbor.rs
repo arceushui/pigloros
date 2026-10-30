@@ -49,10 +49,9 @@ fn head(bytes: &[u8], position: usize) -> Option<(Head, usize)> {
         27 => (8, 0x1_0000_0000),
         _ => return None,
     };
-    let argument = bytes
-        .get(start..start + width)?
-        .iter()
-        .fold(0_u64, |value, &byte| (value << 8) | u64::from(byte));
+    let mut padded = [0_u8; 8];
+    padded[8 - width..].copy_from_slice(bytes.get(start..start + width)?);
+    let argument = u64::from_be_bytes(padded);
     (argument >= floor).then_some((
         Head {
             major,
@@ -344,28 +343,18 @@ pub(super) fn require(
     }
 }
 
-/// Append one head of preferred width.
+/// Append one head of preferred width: the initial byte `major * 32 + info`, then the
+/// big-endian argument bytes that `info` announces.
 pub(super) fn put_head(out: &mut Vec<u8>, major: u8, argument: u64) {
-    let major = major << 5;
-    match argument {
-        0..=23 => out.push(major | u8::try_from(argument).unwrap_or_default()),
-        24..=0xff => {
-            out.push(major | 0x18);
-            out.push(u8::try_from(argument).unwrap_or_default());
-        }
-        0x100..=0xffff => {
-            out.push(major | 0x19);
-            out.extend_from_slice(&u16::try_from(argument).unwrap_or_default().to_be_bytes());
-        }
-        0x1_0000..=0xffff_ffff => {
-            out.push(major | 0x1a);
-            out.extend_from_slice(&u32::try_from(argument).unwrap_or_default().to_be_bytes());
-        }
-        _ => {
-            out.push(major | 0x1b);
-            out.extend_from_slice(&argument.to_be_bytes());
-        }
-    }
+    let (info, width) = match argument {
+        0..=23 => (u8::try_from(argument).unwrap_or_default(), 0),
+        24..=0xff => (0x18, 1),
+        0x100..=0xffff => (0x19, 2),
+        0x1_0000..=0xffff_ffff => (0x1a, 4),
+        _ => (0x1b, 8),
+    };
+    out.push(major * 32 + info);
+    out.extend_from_slice(&argument.to_be_bytes()[8 - width..]);
 }
 
 /// Append an unsigned integer.
