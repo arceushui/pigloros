@@ -260,18 +260,23 @@ impl Rig {
     /// address of R2.
     fn two_installed() -> BoxResult<(Self, BundleAddressV1)> {
         let mut rig = Self::new()?;
-        let first = rig.publisher.store.read_verified(&rig.address)?;
+        let second = rig.publish_successor()?;
+        for address in [rig.address.clone(), second.clone()] {
+            rig.install_at(&address).map_err(|e| format!("{e:?}"))?;
+        }
+        Ok((rig, second))
+    }
+
+    /// Publish the direct successor R2 of the rig's release R1; the address of R2.
+    fn publish_successor(&mut self) -> BoxResult<BundleAddressV1> {
+        let first = self.publisher.store.read_verified(&self.address)?;
         let first = PluginExecutionProjectionV1::from_verified_bundle(&first)?;
         let successor = Shape {
             version: "2.0.0",
             previous: Some(first.release_digest()),
             ..Shape::first()
         };
-        let second = rig.publisher.publish(successor)?.address().clone();
-        let address = rig.address.clone();
-        rig.install_at(&address).map_err(|e| format!("{e:?}"))?;
-        rig.install_at(&second).map_err(|e| format!("{e:?}"))?;
-        Ok((rig, second))
+        Ok(self.publisher.publish(successor)?.address().clone())
     }
 
     fn gate_with(
