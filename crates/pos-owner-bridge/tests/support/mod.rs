@@ -45,3 +45,11 @@ pub fn private_directory(path: &Path) -> io::Result<()> {
     DirBuilder::new().mode(0o700).create(path)?;
     fs::set_permissions(path, Permissions::from_mode(0o700))
 }
+
+/// Write fixture bytes and set exact owner-only file permissions.
+///
+/// # Errors
+/// Returns the filesystem error if writing or setting mode `0o600` fails.
+pub fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    fs::write(path, bytes).and_then(|()| fs::set_permissions(path, Permissions::from_mode(0o600)))
+}

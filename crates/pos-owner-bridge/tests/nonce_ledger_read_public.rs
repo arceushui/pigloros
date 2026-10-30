@@ -14,17 +14,11 @@ use pos_owner_bridge::{BridgeError, UnavailableCode};
 use rustix::fs::{flock, FlockOperation};
 
 pub mod support;
-use support::{private_directory, Sandbox};
+use support::{private_directory, write_private, Sandbox};
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 const LEDGER: &str = "subject-nonce-ledger.v1";
 const UNAVAILABLE: BridgeError = BridgeError::Unavailable(UnavailableCode::InterfaceUnavailable);
-
-fn write_private(path: &Path, bytes: &[u8]) -> TestResult {
-    fs::write(path, bytes)?;
-    fs::set_permissions(path, Permissions::from_mode(0o600))?;
-    Ok(())
-}
 
 fn assert_guard_retained(root: &Path) {
     assert_eq!(SubjectEncryptorLock::acquire(root).err(), Some(UNAVAILABLE));

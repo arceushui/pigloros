@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use rustix::fd::OwnedFd;
+use rustix::fd::{AsFd, OwnedFd};
 use rustix::fs::{self, AtFlags, FileType, FlockOperation, Mode, OFlags, Stat, StatFs, CWD};
 use rustix::io::{self, Errno};
 
@@ -20,8 +20,8 @@ const DIRECTORY_FLAGS: OFlags = OFlags::RDONLY
 ///
 /// Retain this value for the owner-process lifetime, including quarantine and
 /// recovery. Dropping it closes the descriptor. The lock file is never unlinked.
-/// This is admission only: no owner adapter, store binding or nonce reservation
-/// is created. The remaining ADR-097 activation gates still apply.
+/// This primitive creates no owner adapter, store binding or nonce reservation.
+/// The remaining ADR-097 activation gates still apply.
 #[derive(Debug)]
 #[must_use = "retain the encryptor lock for the owner-process lifetime"]
 pub struct SubjectEncryptorLock {
@@ -39,6 +39,8 @@ impl SubjectEncryptorLock {
     /// The leaf must be owned by the effective UID with exactly mode 0700; the
     /// lock must be a singly linked regular file with the same owner and 0600.
     /// NFS is refused. Other filesystems receive no durability qualification.
+    /// After locking, a safe orphan in the reserved ledger staging slot is
+    /// removed and its directory synchronized. An unsafe or busy slot is refused.
     ///
     /// # Errors
     /// Returns the closed `Unavailable(InterfaceUnavailable)` on invalid paths,
@@ -56,9 +58,11 @@ impl SubjectEncryptorLock {
                                 FILE_FLAGS.union(OFlags::CREATE),
                             )
                         })
-                        .map(|file| Self {
-                            _file: file,
-                            directory,
+                        .and_then(|file| {
+                            nonce_ledger::remove_stale_temporary(&directory).map(|()| Self {
+                                _file: file,
+                                directory,
+                            })
                         })
                 })
                 .map_err(|_| BridgeError::Unavailable(UnavailableCode::InterfaceUnavailable))
@@ -117,19 +121,23 @@ fn validate_directory(directory: &OwnedFd) -> io::Result<()> {
 }
 
 fn open_locked_file(directory: &OwnedFd, name: &str, flags: OFlags) -> io::Result<OwnedFd> {
-    fs::openat(directory, name, flags, Mode::RUSR.union(Mode::WUSR)).and_then(|file| {
-        fs::fstat(&file)
-            .and_then(|stat| {
-                enforce(private_metadata(&stat, FileType::RegularFile, 0o600) && stat.st_nlink == 1)
-            })
-            .and_then(|()| fs::flock(&file, FlockOperation::NonBlockingLockExclusive))
-            .and_then(|()| {
-                fs::fstat(&file).and_then(|locked| {
-                    fs::statat(directory, name, AtFlags::SYMLINK_NOFOLLOW)
-                        .and_then(|path| enforce(same_file(&locked, &path)))
-                })
-            })
-            .map(|()| file)
+    fs::openat(directory, name, flags, Mode::RUSR.union(Mode::WUSR))
+        .and_then(|file| lock_file(directory, name, &file).map(|()| file))
+}
+
+fn lock_file(directory: &OwnedFd, name: &str, file: &OwnedFd) -> io::Result<()> {
+    fs::fstat(file)
+        .and_then(|stat| {
+            enforce(private_metadata(&stat, FileType::RegularFile, 0o600) && stat.st_nlink == 1)
+        })
+        .and_then(|()| fs::flock(file, FlockOperation::NonBlockingLockExclusive))
+        .and_then(|()| validate_file_identity(directory, name, file))
+}
+
+fn validate_file_identity(directory: &OwnedFd, name: &str, file: &impl AsFd) -> io::Result<()> {
+    fs::fstat(file).and_then(|descriptor| {
+        fs::statat(directory, name, AtFlags::SYMLINK_NOFOLLOW)
+            .and_then(|path| enforce(same_file(&descriptor, &path)))
     })
 }
 
