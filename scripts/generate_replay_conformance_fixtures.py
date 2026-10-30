@@ -271,9 +271,12 @@ def subject_member(script: Script) -> bytes:
     return jcs(document) + b"\n"
 
 
-# The closed host-failure code of a Driver or runtime failure (`HostFailureCodeV1::Runtime`,
-# note section 6): the typed failure's canonical bytes are this code as a big-endian u16.
+# A Driver's capability failure (note section 6): the closed host-failure code
+# `HostFailureCodeV1::Runtime`, then the sub-code `RuntimeErrorKindV1::CapabilityMismatch`, each a
+# big-endian u16. In the result digest a typed failure is tagged 1.
 HOST_FAILURE_RUNTIME = 1
+RUNTIME_CAPABILITY_MISMATCH = 17
+TYPED_FAILURE_TAG = 1
 
 
 def run_script(script: Script, ticks: int) -> tuple[list[bytes], bytes | None]:
@@ -282,7 +285,10 @@ def run_script(script: Script, ticks: int) -> tuple[list[bytes], bytes | None]:
     payloads: list[bytes] = []
     for tick in range(1, ticks + 1):
         if script.failure_tick == tick:
-            return payloads, HOST_FAILURE_RUNTIME.to_bytes(2, "big")
+            return payloads, (
+                HOST_FAILURE_RUNTIME.to_bytes(2, "big")
+                + RUNTIME_CAPABILITY_MISMATCH.to_bytes(2, "big")
+            )
         if tick <= len(script.drafts):
             payloads.extend(script.drafts[tick - 1])
     return payloads, None
@@ -364,7 +370,8 @@ def recomputed_stream(payloads: list[bytes], failure: bytes | None) -> Stream:
 def result_digest(value: Stream) -> bytes:
     """The authoritative result digest (note section 2): the Events, the one checkpoint (tick 0),
     then the count-prefixed typed failures at the host coordinate (tick 0, scheduler position 0,
-    the length-prefixed Driver id, output ordinal 0, the canonical bytes). A recorded export has
+    the length-prefixed Driver id, output ordinal 0, the outcome tag 1 and the length-prefixed
+    canonical bytes). A recorded export has
     no typed failure, so its count is 0."""
     parts = [u64(len(value.events))]
     for event in value.events:
@@ -389,6 +396,8 @@ def result_digest(value: Stream) -> bytes:
             u64(len(driver)),
             driver,
             (0).to_bytes(4, "big"),
+            bytes([TYPED_FAILURE_TAG]),
+            u64(len(failure)),
             failure,
         ]
     return domain_digest(RESULT_DOMAIN, *parts)

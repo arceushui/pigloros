@@ -142,9 +142,9 @@
       ],
       "expected_outcome": "NonDeterministicAdmission",
       "fixture_bytes_path": "inputs/replay-conformance/denied.json",
-      "fixture_bytes_digest": "cc862062c4098825235ddfd2accedc7ebfec73241711a7a5cdab6b9502e4a988",
+      "fixture_bytes_digest": "0ab5a5bcf32af4d13f3f352bfa322393f7599b7c468aef4be01e6246af10a24c",
       "expected_result_path": "oracles/replay-conformance/denied.json",
-      "expected_result_digest": "841b2e9c193d11ed188ae7dce66bba16948cc692e5ed5bab9af9d83297d63b46",
+      "expected_result_digest": "2615300db7abdfea3c20b323e3b725cc71c0c4dcdca86bb99ebe2c5dc9c9ed64",
       "materialization_status": "materialized"
     },
     {
@@ -174,9 +174,9 @@
       ],
       "expected_outcome": "TypedFailure",
       "fixture_bytes_path": "inputs/replay-conformance/denied.json",
-      "fixture_bytes_digest": "cc862062c4098825235ddfd2accedc7ebfec73241711a7a5cdab6b9502e4a988",
+      "fixture_bytes_digest": "0ab5a5bcf32af4d13f3f352bfa322393f7599b7c468aef4be01e6246af10a24c",
       "expected_result_path": "oracles/replay-conformance/denied.json",
-      "expected_result_digest": "841b2e9c193d11ed188ae7dce66bba16948cc692e5ed5bab9af9d83297d63b46",
+      "expected_result_digest": "2615300db7abdfea3c20b323e3b725cc71c0c4dcdca86bb99ebe2c5dc9c9ed64",
       "materialization_status": "materialized"
     }
   ]
