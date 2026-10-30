@@ -3,6 +3,7 @@
 
 use pos_core::trusted_clock::ScriptedTrustedWallSourceV1;
 use pos_core::{CanonicalBytes, Capability, EventDraft, Kind, Plugin, PluginId, TimelineId};
+use pos_crypto::plugin_execution::PluginExecutionProjectionV1;
 use pos_plugin_publisher::test_support::{
     encoding::{Material, TICK},
     release::Shape,
@@ -210,6 +211,67 @@ impl Rig {
     fn gate(&mut self) -> Result<GatedCommunityReleaseV1, CommunityPluginHostErrorV1> {
         let material = self.material.clone();
         self.gate_with(&material)
+    }
+
+    /// Gate the release at `address` with the rig's material.
+    fn gate_at(
+        &mut self,
+        address: &BundleAddressV1,
+    ) -> Result<GatedCommunityReleaseV1, CommunityPluginHostErrorV1> {
+        let source = FixedTrustMaterialSourceV1::new(self.material.clone());
+        self.eval.gate_for_driver(
+            &expectation(),
+            &self.publisher.store,
+            address,
+            &source,
+            &mut one_second(),
+            TICK,
+        )
+    }
+
+    /// Install the release at `address` with the rig's material.
+    fn install_at(&mut self, address: &BundleAddressV1) -> WorldResult<InstalledPluginReleaseV1> {
+        self.eval.install(
+            &self.publisher.store,
+            address,
+            &self.material,
+            &mut install_wall(),
+            TICK,
+        )
+    }
+
+    /// Roll back to the release at `address` with the rig's material and `wall`.
+    fn rollback_with(
+        &mut self,
+        address: &BundleAddressV1,
+        wall: &mut ScriptedTrustedWallSourceV1,
+    ) -> WorldResult<RolledBackPluginReleaseV1> {
+        self.eval
+            .rollback(&self.publisher.store, address, &self.material, wall, TICK)
+    }
+
+    /// The activation Events committed on the registry store.
+    fn activations(&mut self) -> BoxResult<Vec<Event>> {
+        let timeline = self.eval.target.timeline;
+        read_all(&mut self.eval.registry_host, timeline).map_err(|e| format!("{e:?}").into())
+    }
+
+    /// Install the rig's release R1 and then its direct successor R2, so R2 is active; the
+    /// address of R2.
+    fn two_installed() -> BoxResult<(Self, BundleAddressV1)> {
+        let mut rig = Self::new()?;
+        let first = rig.publisher.store.read_verified(&rig.address)?;
+        let first = PluginExecutionProjectionV1::from_verified_bundle(&first)?;
+        let successor = Shape {
+            version: "2.0.0",
+            previous: Some(first.release_digest()),
+            ..Shape::first()
+        };
+        let second = rig.publisher.publish(successor)?.address().clone();
+        let address = rig.address.clone();
+        rig.install_at(&address).map_err(|e| format!("{e:?}"))?;
+        rig.install_at(&second).map_err(|e| format!("{e:?}"))?;
+        Ok((rig, second))
     }
 
     fn gate_with(
@@ -486,5 +548,84 @@ fn replace_member_swaps_one_schedule_slot_and_keeps_the_others() -> TestResult {
     assert!(matches!(refused, Err(member) if member.plugin == ids[3]));
     assert_eq!(host.member_index(ids[2]), Some(1));
     assert_eq!(host.member_index(ids[3]), None);
+    Ok(())
+}
+
+/// R7-T9: the world's rollback re-activates R1 with the target's activation Event, after which
+/// the gate of R1 succeeds and the gate of R2 is `NotActive`.
+#[test]
+fn a_rollback_reactivates_the_earlier_release_for_the_gate() -> TestResult {
+    let (mut rig, second) = Rig::two_installed()?;
+    let first = rig.address.clone();
+    let not_active = CommunityPluginHostErrorV1::ArtifactTrustDenied {
+        basis: TrustDenialBasisV1::NotActive,
+    };
+    assert!(rig.gate_at(&second).is_ok());
+    assert_eq!(rig.gate_at(&first).err(), Some(not_active));
+    let rolled = rig
+        .rollback_with(&first, &mut install_wall())
+        .map_err(|e| format!("{e:?}"))?;
+    assert_eq!(
+        rolled.receipt().outcome(),
+        PluginTrustCommitOutcomeV1::Committed
+    );
+    assert!(rig.gate_at(&first).is_ok());
+    assert_eq!(rig.gate_at(&second).err(), Some(not_active));
+    let activations = rig.activations()?;
+    assert_eq!(activations.len(), 3);
+    let event = &activations[2];
+    assert_eq!(
+        event.event_type.as_str(),
+        PLUGIN_RELEASE_ACTIVATED_EVENT_TYPE_V1
+    );
+    assert_eq!(event.entity, rig.eval.target.entity);
+    assert_eq!(event.payload, activations[0].payload);
+    assert_ne!(event.payload, activations[1].payload);
+    // The same rollback again is the registry's idempotent replay and appends nothing.
+    let replay = rig
+        .rollback_with(&first, &mut install_wall())
+        .map_err(|e| format!("{e:?}"))?;
+    assert_eq!(
+        replay.receipt().outcome(),
+        PluginTrustCommitOutcomeV1::IdempotentReplay
+    );
+    assert_eq!(rig.activations()?.len(), 3);
+    Ok(())
+}
+
+/// A rollback to the active release is the registry's `RollbackTargetActive`, which the
+/// rollback mapping makes `TrustStateUnavailable`; nothing is activated.
+#[test]
+fn a_rollback_to_the_active_release_is_refused() -> TestResult {
+    let mut rig = Rig::new()?;
+    rig.install()?;
+    let address = rig.address.clone();
+    let refused = rig.rollback_with(&address, &mut install_wall());
+    assert_eq!(refused.err(), Some(TSU));
+    assert_eq!(rig.activations()?.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn a_failed_sample_is_refused_before_any_rollback() -> TestResult {
+    let (mut rig, _second) = Rig::two_installed()?;
+    let address = rig.address.clone();
+    let refused = rig.rollback_with(&address, &mut ScriptedTrustedWallSourceV1::from_micros([]));
+    assert_eq!(refused.err(), Some(TSU));
+    assert_eq!(rig.activations()?.len(), 2);
+    Ok(())
+}
+
+#[test]
+fn a_host_fault_during_a_rollback_is_operational() -> TestResult {
+    let mut rig = Rig::new()?;
+    rig.eval.registry_host = ErasureExecutionHostV1::open_gateway_verified_empty(
+        StoreConfig::Memory,
+        ErasureRecoveryLimitsV1::compiled_maximum(),
+    )
+    .map_err(|e| format!("{e:?}"))?;
+    let address = rig.address.clone();
+    let refused = rig.rollback_with(&address, &mut install_wall());
+    assert_eq!(refused.err(), Some(OPERATIONAL));
     Ok(())
 }

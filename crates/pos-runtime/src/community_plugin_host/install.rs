@@ -1,10 +1,14 @@
-//! The community release install entry and its host-owned activation Event (ADR-061 revision 7
-//! decision 9). Linux only, like the signed installer it wraps.
+//! The community release install and rollback entries and their host-owned activation Event
+//! (ADR-061 revision 7 decision 9, ADR-103 revision 7 decision 4.3 item 3). Linux only, like the
+//! signed installer and the rollback entry they wrap.
 //!
-//! The wrapper reads and projects the release closure once, builds the activation draft from
-//! that projection, and hands the signed installer a one-shot source that holds the one bundle
-//! it read. The installer therefore projects, checks the signature of and admits exactly the
-//! bytes the payload describes. The wrapper never calls the registry's `admit` or `rollback`.
+//! Each wrapper reads and projects the release closure once, builds the activation draft from
+//! that projection, and hands the signed installer (or the production rollback entry) a one-shot
+//! source that holds the one bundle it read. The wrapped entry therefore projects, checks the
+//! signature of and admits (or re-activates) exactly the bytes the payload describes. A rollback
+//! commits the same Event type with the payload of its target; the registry's ledger row kind
+//! tells it apart from an admission. The wrappers never call the registry's `admit` or
+//! `rollback` themselves, and no operator command, HTTP route or remote trigger reaches them.
 
 use std::cell::RefCell;
 
@@ -16,8 +20,9 @@ use pos_crypto::plugin_execution::PluginExecutionProjectionV1;
 use pos_crypto::plugin_manifest::PluginManifestErrorV1;
 use pos_crypto::plugin_trust::VerifiedPluginTrustEvidenceV1;
 use pos_plugin_publisher::{
-    install_plugin_release_v1, InstalledPluginReleaseV1, PluginInstallRequestV1,
-    PluginReleaseInstallErrorV1,
+    install_plugin_release_v1, rollback_plugin_release_v1, InstalledPluginReleaseV1,
+    PluginInstallRequestV1, PluginReleaseInstallErrorV1, PluginReleaseRollbackErrorV1,
+    PluginRollbackRequestV1, RolledBackPluginReleaseV1,
 };
 use pos_plugin_release::{
     BundleAddressV1, ReleaseSourceErrorV1, ReleaseSourceV1, VerifiedReleaseBundleV1,
@@ -48,10 +53,10 @@ pub struct ActivationTargetV1 {
     pub entity: EntityId,
 }
 
-/// The trusted inputs of one community release install.
+/// The trusted inputs of one community release install or rollback.
 ///
-/// They are the installer's request without the activation Event, which the wrapper builds, plus
-/// the activation target.
+/// They are the installer's (or the rollback entry's) request without the activation Event,
+/// which the wrapper builds, plus the activation target.
 #[derive(Debug)]
 pub struct CommunityInstallRequestV1<'a> {
     /// The operator-pinned policy anchor of the scope.
@@ -80,9 +85,21 @@ pub enum CommunityInstallErrorV1 {
     Install(PluginReleaseInstallErrorV1),
 }
 
-/// The source returned a bundle that is not the one at the requested address.
-const WRONG_ADDRESS: CommunityInstallErrorV1 =
-    CommunityInstallErrorV1::Source(ReleaseSourceErrorV1::NotFound);
+/// A closed failure of the community release rollback entry.
+#[derive(Clone, Debug, Eq, Error, PartialEq)]
+pub enum CommunityRollbackErrorV1 {
+    /// The release source could not produce the target's verified closure.
+    #[error(transparent)]
+    Source(ReleaseSourceErrorV1),
+    /// The target closure's PMF1 failed strict decoding, binding, or digest checks.
+    #[error(transparent)]
+    Manifest(PluginManifestErrorV1),
+    /// The production rollback entry refused the target. Its `Source` and `Manifest` variants
+    /// cannot occur here: the entry reads the one-shot source and projects the same bundle the
+    /// wrapper already read and projected.
+    #[error(transparent)]
+    Rollback(PluginReleaseRollbackErrorV1),
+}
 
 /// Install the community release at `address`, committing its activation Event.
 ///
@@ -106,16 +123,13 @@ pub fn install_community_release_v1(
     wall: &mut impl PluginTrustWallSourceV1,
     request: &CommunityInstallRequestV1<'_>,
 ) -> Result<InstalledPluginReleaseV1, CommunityInstallErrorV1> {
-    let bundle = source
-        .read_verified(address)
-        .map_err(CommunityInstallErrorV1::Source)?;
-    if bundle.address() != address {
-        return Err(WRONG_ADDRESS);
-    }
-    let execution = PluginExecutionProjectionV1::from_verified_bundle(&bundle)
-        .map_err(CommunityInstallErrorV1::Manifest)?;
-    let activation = activation_input(request.anchor.scope(), &execution, request.target);
-    let once = OneShotSource::new(address.clone(), bundle);
+    let (once, activation) = read_once(
+        source,
+        address,
+        request,
+        CommunityInstallErrorV1::Source,
+        CommunityInstallErrorV1::Manifest,
+    )?;
     install_plugin_release_v1(
         &once,
         address,
@@ -129,6 +143,71 @@ pub fn install_community_release_v1(
         },
     )
     .map_err(CommunityInstallErrorV1::Install)
+}
+
+/// Roll the active release of the target's Plugin ID back to the already admitted community
+/// release at `address`, committing the target's activation Event.
+///
+/// The activation draft is the install wrapper's own: the type
+/// `pigloros.plugin.release-activated` and the payload `[scope, plugin_id, pmf1_digest,
+/// release_digest]` of the **target** (ADR-103 revision 7, Q5). The bundle the source returns
+/// must be the one at `address`, and the closure is read once, exactly as for
+/// [`install_community_release_v1()`]; the production rollback entry receives that same bundle
+/// through a one-shot source. Repeating the same rollback with the same evidence and target is
+/// the registry's idempotent replay and appends no second Event.
+///
+/// # Errors
+/// Returns `Source` when the closure cannot be read, `Manifest` when its PMF1 is not a canonical
+/// V1 manifest, and `Rollback` for every refusal of the production rollback entry. A source that
+/// returns a bundle of another address is `Source(NotFound)`.
+pub fn rollback_community_release_v1(
+    source: &impl ReleaseSourceV1,
+    address: &BundleAddressV1,
+    registry: &mut (impl PluginTrustPolicyRegistryV1 + ?Sized),
+    wall: &mut impl PluginTrustWallSourceV1,
+    request: &CommunityInstallRequestV1<'_>,
+) -> Result<RolledBackPluginReleaseV1, CommunityRollbackErrorV1> {
+    let (once, activation) = read_once(
+        source,
+        address,
+        request,
+        CommunityRollbackErrorV1::Source,
+        CommunityRollbackErrorV1::Manifest,
+    )?;
+    rollback_plugin_release_v1(
+        &once,
+        address,
+        registry,
+        wall,
+        PluginRollbackRequestV1 {
+            anchor: request.anchor,
+            tps1_bytes: request.tps1_bytes,
+            evidence: request.evidence,
+            activation,
+        },
+    )
+    .map_err(CommunityRollbackErrorV1::Rollback)
+}
+
+/// Read the closure at `address` once, check that it is the one asked for, and project it: the
+/// one-shot source of that bundle and the activation draft of its release on the request's
+/// target. `source_error` and `manifest_error` build the caller's own `Source` and `Manifest`
+/// failures; a bundle of another address is `source_error(NotFound)`.
+fn read_once<E>(
+    source: &impl ReleaseSourceV1,
+    address: &BundleAddressV1,
+    request: &CommunityInstallRequestV1<'_>,
+    source_error: fn(ReleaseSourceErrorV1) -> E,
+    manifest_error: fn(PluginManifestErrorV1) -> E,
+) -> Result<(OneShotSource, ActivationEventInputV1), E> {
+    let bundle = source.read_verified(address).map_err(source_error)?;
+    if bundle.address() != address {
+        return Err(source_error(ReleaseSourceErrorV1::NotFound));
+    }
+    let execution =
+        PluginExecutionProjectionV1::from_verified_bundle(&bundle).map_err(manifest_error)?;
+    let activation = activation_input(request.anchor.scope(), &execution, request.target);
+    Ok((OneShotSource::new(address.clone(), bundle), activation))
 }
 
 /// The host error of a failed community release install (ADR-061 revision 8 decision 5).
@@ -162,6 +241,44 @@ const fn host_error_for_installer_v1(
         }
         PluginReleaseInstallErrorV1::Signature(inner) => host_error_for_release_signature_v1(inner),
         PluginReleaseInstallErrorV1::Registry(inner) => host_error_for_registry_v1(inner),
+    }
+}
+
+/// The host error of a failed community release rollback (ADR-103 revision 7 decision 4.3).
+///
+/// The mapping is total and composes the same four existing ones as
+/// [`host_error_for_install_v1()`]: the source rows of the gate, the release signature rows, the
+/// trust authorization rows (the entry's own `authorize_release`, with the registry's wrapped
+/// trust errors) and the registry rows, where the rollback refusals `UnknownRollbackTarget`,
+/// `NoActiveRelease` and `RollbackTargetActive` are `TrustStateUnavailable`. A PMF1 that failed
+/// to decode or bind is `InvalidManifest`. The `Source` and `Manifest` variants of the wrapped
+/// entry error cannot occur through [`rollback_community_release_v1()`], but are mapped like
+/// their outer twins.
+#[must_use]
+pub const fn host_error_for_rollback_v1(
+    error: CommunityRollbackErrorV1,
+) -> CommunityPluginHostErrorV1 {
+    match error {
+        CommunityRollbackErrorV1::Source(inner) => host_error_for_release_source_v1(inner),
+        CommunityRollbackErrorV1::Manifest(_) => CommunityPluginHostErrorV1::InvalidManifest,
+        CommunityRollbackErrorV1::Rollback(inner) => host_error_for_rollback_entry_v1(&inner),
+    }
+}
+
+/// The host error of a refusal of the production rollback entry.
+const fn host_error_for_rollback_entry_v1(
+    error: &PluginReleaseRollbackErrorV1,
+) -> CommunityPluginHostErrorV1 {
+    match *error {
+        PluginReleaseRollbackErrorV1::Source(inner) => host_error_for_release_source_v1(inner),
+        PluginReleaseRollbackErrorV1::Manifest(_) => CommunityPluginHostErrorV1::InvalidManifest,
+        PluginReleaseRollbackErrorV1::Authorization(inner) => {
+            host_error_for_trust_authorization_v1(inner)
+        }
+        PluginReleaseRollbackErrorV1::Signature(inner) => {
+            host_error_for_release_signature_v1(inner)
+        }
+        PluginReleaseRollbackErrorV1::Registry(inner) => host_error_for_registry_v1(inner),
     }
 }
 
