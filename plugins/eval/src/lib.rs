@@ -6,8 +6,8 @@
 //!
 //! Owns event types `"eval.prediction"` and `"eval.outcome"` exclusively
 //! (ADR-024 Revision 1). Tracks predictions and outcomes in State, provides
-//! [`compute_report`] to produce a [`CalibrationReport`] from a timeline, and
-//! supplies [`EvalDerivationDriver`], the only appender of `eval.*`, which
+//! [`compute_report_from_events`] to produce a [`CalibrationReport`] from committed
+//! Events, and supplies [`EvalDerivationDriver`], the only appender of `eval.*`, which
 //! derives them from committed Persona prediction source Events.
 //!
 //! Every metric is computed by the ADR-062 Revision 7 integer micro-unit profile
@@ -26,9 +26,8 @@ pub use derivation::{
     DERIVED_PREDICTION_ID_PREFIX, MIN_DRAFTS_PER_PASS,
 };
 pub use event_mapping::{
-    compute_report, compute_report_from_evaluated_events, compute_report_from_events,
-    map_events_to_metric_input, CalibrationReport, EvalEvidenceV1, EvalMetricMappingV1,
-    DEFAULT_MINIMUM_SCORED_RECORDS,
+    compute_report_from_events, map_events_to_metric_input, CalibrationReport, EvalEvidenceV1,
+    EvalMetricMappingV1,
 };
 pub use metric_profile::{
     decode_quantization_input_v1, encode_quantization_result_v1, quantize_probability,
@@ -68,9 +67,6 @@ pub const ENTITY_KIND: &str = "eval-target";
 /// Errors from the eval plugin.
 #[derive(Debug, thiserror::Error)]
 pub enum EvalError {
-    /// Store read failed.
-    #[error("store error: {0}")]
-    Store(#[from] pos_core::CoreError),
     /// CBOR payload could not be decoded.
     #[error("payload decode error: {0}")]
     Decode(String),
@@ -585,16 +581,7 @@ mod tests {
         assert_eq!(outcomes.len(), 0);
     }
 
-    // ── compute_report tests ──────────────────────────────────────────────────
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn eval_error_store_variant() {
-        let core_err = pos_core::CoreError::Storage("test error".to_owned());
-        let eval_err: EvalError = core_err.into();
-        let s = eval_err.to_string();
-        assert!(s.contains("store error"));
-    }
+    // ── EvalError tests ───────────────────────────────────────────────────────
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]

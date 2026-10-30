@@ -430,10 +430,10 @@ fn calibration_report_waits_for_and_names_the_folding_cut() {
         .start()
         .test_ok();
     session
-        .register_pipeline_evaluator(Box::new(CalibrationReportEvaluatorV1::new(REPORT)))
+        .register_pipeline_evaluator(Box::new(CalibrationReportEvaluatorV1::new(REPORT, 1)))
         .test_ok();
     assert!(matches!(
-        session.register_pipeline_evaluator(Box::new(CalibrationReportEvaluatorV1::new(REPORT))),
+        session.register_pipeline_evaluator(Box::new(CalibrationReportEvaluatorV1::new(REPORT, 1))),
         Err(ExperimentError::DuplicatePipelineEvaluator)
     ));
 
@@ -486,6 +486,7 @@ fn sqlite_calibration_rejects_an_unregistered_report_artifact() {
     session
         .register_pipeline_evaluator(Box::new(CalibrationReportEvaluatorV1::new(
             ErasureReferenceV1::from_digest([0x43; 32]),
+            1,
         )))
         .test_ok();
     session.submit_action(&fixture.prediction()).test_ok();
@@ -529,7 +530,7 @@ fn redacted_or_erased_evidence_only_preserves_or_weakens_the_claim() {
         .register_pipeline_evaluator(Box::new(CommittedRangeIntegrityEvaluatorV1))
         .test_ok();
     session
-        .register_pipeline_evaluator(Box::new(CalibrationReportEvaluatorV1::new(REPORT)))
+        .register_pipeline_evaluator(Box::new(CalibrationReportEvaluatorV1::new(REPORT, 1)))
         .test_ok();
     session.submit_action(&fixture.prediction()).test_ok();
     session.submit_action(&fixture.outcome()).test_ok();
@@ -1054,7 +1055,7 @@ fn fold_failure_leaves_commit_evidence_without_a_projection_cut() {
         .register_pipeline_evaluator(Box::new(CommittedRangeIntegrityEvaluatorV1))
         .test_ok();
     session
-        .register_pipeline_evaluator(Box::new(CalibrationReportEvaluatorV1::new(REPORT)))
+        .register_pipeline_evaluator(Box::new(CalibrationReportEvaluatorV1::new(REPORT, 1)))
         .test_ok();
 
     adapter.armed.store(true, Ordering::SeqCst);

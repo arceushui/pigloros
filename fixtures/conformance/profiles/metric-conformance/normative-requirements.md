@@ -231,6 +231,11 @@ Events build the same input:
    host evaluation is `Redacted`, or `Unavailable` when the evidence is missing. Nothing is
    reconstructed. `CalibrationReport::apply_artifact_evaluation` keeps weakening the report's
    ReplayClaim and redaction state.
+5. The mapping walks the Events in Timeline Order and checks the fields of one Event in
+   `MTI1` record field-index order, the first failure winning as in 4.2, so an Event with an
+   invalid `prediction_id` and an invalid probability is `InvalidIdentifier`; a withheld
+   prediction's probability is never read or quantized (ADR-062 R7 Event mapping note,
+   2026-10-30).
 
 ## 4.5 Implementations and oracle independence
 

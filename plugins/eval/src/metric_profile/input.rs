@@ -45,7 +45,7 @@ const fn outcome_field(item: Item<'_>) -> Option<OutcomeField> {
     match item {
         Item::Unsigned(value) => Some(OutcomeField::Unsigned(value)),
         Item::Null => Some(OutcomeField::Null),
-        _ => None,
+        Item::Text(_) | Item::Bool(_) | Item::Other => None,
     }
 }
 

@@ -1,7 +1,7 @@
 {
   "magic": "PLH1",
   "version": 1,
-  "description": "Legacy eval.prediction / eval.outcome Events as the pre-ADR-024-R1 Persona composition emitted them: no causation, legacy pred-<n> ids, no outcome label. Entities are ULIDs from the given integers. expected_report is the canonical text of the Calibration Report, one field per line with every metric in integer micro-units (ADR-062 Revision 7), ending with the hex of its MTR1 bytes; the values and bytes were computed with exact fractions by scripts/generate_metric_conformance_fixtures.py from the MTI1 of these Events.",
+  "description": "Legacy eval.prediction / eval.outcome Events as the pre-ADR-024-R1 Persona composition emitted them: no causation, legacy pred-<n> ids, no outcome label. Entities are ULIDs from the given integers. expected_report is the canonical text of the Calibration Report, one field per line with every metric in integer micro-units (ADR-062 Revision 7), ending with the hex of its MTR1 bytes; the values and bytes were computed with exact fractions by the mti1 and compute_mtr1 helpers of scripts/generate_metric_conformance_fixtures.py, called on the records of these Events.",
   "subjects": {
     "subject-a": 4096,
     "subject-b": 8192

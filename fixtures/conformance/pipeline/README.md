@@ -256,9 +256,18 @@ pre-ADR-024-Revision-1 Persona composition emitted them: no causation,
 `pred-<n>` ids and no outcome label. `expected_report` is the canonical text of
 their Calibration Report: one field per line, every metric in integer
 micro-units (ADR-062 Revision 7), ending with the hex of its `MTR1` bytes. The
-values and bytes were computed with exact fractions by
-`scripts/generate_metric_conformance_fixtures.py` from the `MTI1` of these
-Events.
+values and bytes were computed with exact fractions by calling the `mti1` and
+`compute_mtr1` helpers of `scripts/generate_metric_conformance_fixtures.py` on
+the records of these Events. The generator has no committed mode that writes
+this file.
+
+`PLH1` version 1 was edited in place by owner decision (2026-10-30,
+[ADR-062_R7_Metric_Event_Mapping](https://redmine.piglor.com/projects/pigloros/wiki/ADR-062_R7_Metric_Event_Mapping)
+section 3, #1215). This is an explicit exception to the rule above that a
+changed expected result needs a new version directory: `expected_report` was
+rewritten from the removed floating-point report text to the micro-unit
+profile, the description was updated, and the pinned SHA-256 changed. The
+Events did not change.
 
 These files are not part of the CPF1 bundle inventories (`SHA256SUMS`,
 `BLAKE3SUMS`) and are not materialized into Draft bundles.

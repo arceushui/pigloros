@@ -312,21 +312,21 @@ impl<'a> Reader<'a> {
 pub(super) const fn unsigned(item: Item<'_>) -> Option<u64> {
     match item {
         Item::Unsigned(value) => Some(value),
-        _ => None,
+        Item::Text(_) | Item::Bool(_) | Item::Null | Item::Other => None,
     }
 }
 
 pub(super) const fn text(item: Item<'_>) -> Option<&[u8]> {
     match item {
         Item::Text(bytes) => Some(bytes),
-        _ => None,
+        Item::Unsigned(_) | Item::Bool(_) | Item::Null | Item::Other => None,
     }
 }
 
 pub(super) const fn boolean(item: Item<'_>) -> Option<bool> {
     match item {
         Item::Bool(value) => Some(value),
-        _ => None,
+        Item::Unsigned(_) | Item::Text(_) | Item::Null | Item::Other => None,
     }
 }
 

@@ -18,8 +18,8 @@ use pos_core::{
 };
 use pos_plugin_eval::{
     compute_report_from_events, EvalDerivationConfigV1, EvalDerivationDriver, EvalDiagnosticsV1,
-    EvalIntegrityFindingKindV1, EvalIntegrityFindingV1, EvalPlugin, EvalReducer, OutcomePayload,
-    PredictionPayload, EVENT_TYPE_OUTCOME, EVENT_TYPE_PREDICTION,
+    EvalEvidenceV1, EvalIntegrityFindingKindV1, EvalIntegrityFindingV1, EvalPlugin, EvalReducer,
+    OutcomePayload, PredictionPayload, EVENT_TYPE_OUTCOME, EVENT_TYPE_PREDICTION,
 };
 use pos_plugin_persona::{
     draft_prediction_source, PersonaEvalDriver, PersonaModel, PersonaPlugin, PersonaReducer,
@@ -240,6 +240,11 @@ fn assert_exactly_once(events: &[Event], name: &str) {
     }
 }
 
+/// Every committed Event is authoritative evaluator input in these seams.
+const fn available(_: &Event) -> EvalEvidenceV1 {
+    EvalEvidenceV1::Available
+}
+
 fn report_claim() -> pos_core::ReplayClaimEvaluationV1 {
     ReplayClaimEvaluatorV1::evaluate(
         ErasureReplayClaimV1::Exact,
@@ -295,6 +300,8 @@ fn persona_sources_are_derived_by_eval_in_a_later_pass_exactly_once() {
 
         let report = compute_report_from_events(
             &committed,
+            &available,
+            1,
             ErasureReferenceV1::from_digest([221; 32]),
             &report_claim(),
         )
@@ -335,7 +342,8 @@ fn a_legacy_persona_emitted_eval_timeline_folds_and_reports_unchanged() {
             .test_ok();
         let legacy = events(store.as_ref(), timeline);
         let digest = ErasureReferenceV1::from_digest([221; 32]);
-        let before = compute_report_from_events(&legacy, digest, &report_claim()).test_ok();
+        let before =
+            compute_report_from_events(&legacy, &available, 1, digest, &report_claim()).test_ok();
         assert_eq!(before.result.counts.record_count, 3, "{name}");
         assert_eq!(before.result.counts.scored, 2, "{name}");
         assert_eq!(before.result.counts.predictor_supplied, 0, "{name}");
@@ -377,8 +385,9 @@ fn a_legacy_persona_emitted_eval_timeline_folds_and_reports_unchanged() {
             "{name}"
         );
         assert_eq!(of_type(&committed, EVENT_TYPE_OUTCOME).len(), 2, "{name}");
-        let after = compute_report_from_events(&committed, digest, &report_claim()).test_ok();
-        assert_eq!(format!("{after:?}"), format!("{before:?}"), "{name}");
+        let after = compute_report_from_events(&committed, &available, 1, digest, &report_claim())
+            .test_ok();
+        assert_eq!(after, before, "{name}");
         assert!(diagnostics.findings().is_empty(), "{name}");
     }
 }

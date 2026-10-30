@@ -34,7 +34,7 @@ use pos_core::{
     PipelineCommitEvidenceV1, PipelineCommittedRangeV1, PipelineProjectionCutV1,
     ReplayClaimEvaluationV1, ScheduledObservationProfileV1, Seq,
 };
-use pos_plugin_eval::CalibrationReport;
+use pos_plugin_eval::{CalibrationReport, EvalEvidenceV1, MetricOutcomeV1};
 
 use crate::ExperimentError;
 
@@ -315,14 +315,26 @@ impl PipelineEvaluatorV1 for CommittedRangeIntegrityEvaluatorV1 {
 #[derive(Clone, Copy, Debug)]
 pub struct CalibrationReportEvaluatorV1 {
     artifact_digest: ErasureReferenceV1,
+    minimum_scored_records: u32,
 }
 
 impl CalibrationReportEvaluatorV1 {
-    /// Bind the registered ADR-060 Calibration Report artifact identity.
+    /// Bind the registered ADR-060 Calibration Report artifact identity and the
+    /// minimum number of scored records below which no metric is reported.
     #[must_use]
-    pub const fn new(artifact_digest: ErasureReferenceV1) -> Self {
-        Self { artifact_digest }
+    pub const fn new(artifact_digest: ErasureReferenceV1, minimum_scored_records: u32) -> Self {
+        Self {
+            artifact_digest,
+            minimum_scored_records,
+        }
     }
+}
+
+/// The host's per-Event ADR-060 classification of the folded prefix: the
+/// whole prefix is admitted through the claim's authoritative-use check, and
+/// the claim carries no per-Event withholding, so every Event is available.
+const fn admitted(_: &pos_core::Event) -> EvalEvidenceV1 {
+    EvalEvidenceV1::Available
 }
 
 impl PipelineEvaluatorV1 for CalibrationReportEvaluatorV1 {
@@ -337,10 +349,12 @@ impl PipelineEvaluatorV1 for CalibrationReportEvaluatorV1 {
     fn evaluate(&self, input: &PipelineEvaluationInputV1<'_>) -> PipelineEvaluatorOutputV1 {
         match pos_plugin_eval::compute_report_from_events(
             input.folded_prefix(),
+            &admitted,
+            self.minimum_scored_records,
             self.artifact_digest,
             input.claim(),
         ) {
-            Ok(report) if report.result.counts.scored > 0 => {
+            Ok(report) if matches!(report.result.outcome, MetricOutcomeV1::Computed { .. }) => {
                 PipelineEvaluatorOutputV1::CalibrationReport(Box::new(report))
             }
             Err(pos_plugin_eval::EvalError::ArtifactUnavailable) => {

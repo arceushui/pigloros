@@ -11,8 +11,9 @@ use pos_experiment::{
 };
 use pos_plugin_eval::{
     compute_report_from_events, draft_outcome, draft_prediction, CalibrationReport,
-    EvalDerivationConfigV1, EvalDerivationDriver, EvalDiagnosticsV1, EvalPlugin, EvalReducer,
-    MetricOutcomeV1, OutcomePayload, PredictionPayload, EVENT_TYPE_OUTCOME, EVENT_TYPE_PREDICTION,
+    EvalDerivationConfigV1, EvalDerivationDriver, EvalDiagnosticsV1, EvalEvidenceV1, EvalPlugin,
+    EvalReducer, MetricOutcomeV1, OutcomePayload, PredictionPayload, EVENT_TYPE_OUTCOME,
+    EVENT_TYPE_PREDICTION,
 };
 use pos_plugin_persona::{
     draft_prediction_source, PersonaEvalDriver, PersonaModel, PersonaPlugin, PersonaReducer,
@@ -38,7 +39,7 @@ use super::{
 const LEGACY_HISTORY: &[u8] =
     include_bytes!("../../../../fixtures/conformance/pipeline/v1/legacy-eval-history.json");
 pub const LEGACY_HISTORY_SHA256: &str =
-    "c42c7ccef36e657b35ba9b35279ab607dbda32e70f5d1f1fc2a1e89dc9cf0581";
+    "4c3a7fff17a155118023e23e5517c9dc21164b63166b14ffe9419b0bbfc5dfe1";
 const LEGACY_MAGIC: &str = "PLH1";
 const LEGACY_VERSION: u64 = 1;
 
@@ -503,7 +504,8 @@ pub fn predictor_supplied_label() -> Capture {
                 format!("{:?}", payload.evidence)
             })
             .collect();
-        let report = compute_report_from_events(&committed, REPORT, &exact_claim()).test_ok();
+        let report =
+            compute_report_from_events(&committed, &available, 1, REPORT, &exact_claim()).test_ok();
         capture.record(store, "outcome.labels", labels.join(","));
         capture.record(store, "report.n_resolved", report.result.counts.scored);
         capture.record(
@@ -711,6 +713,11 @@ pub fn parse_legacy_history(bytes: &[u8]) -> Result<LegacyHistory, ConformanceEr
     })
 }
 
+/// Every committed Event of these seams is authoritative evaluator input.
+const fn available(_: &Event) -> EvalEvidenceV1 {
+    EvalEvidenceV1::Available
+}
+
 /// The canonical text encoding of one Calibration Report, one field per line,
 /// every metric in integer micro-units (ADR-062 Revision 7), ending with the
 /// hex of its `MTR1` bytes.
@@ -834,7 +841,8 @@ pub fn legacy_history() -> Capture {
             );
         }
         let report = canonical_report(
-            &compute_report_from_events(&committed, REPORT, &exact_claim()).test_ok(),
+            &compute_report_from_events(&committed, &available, 1, REPORT, &exact_claim())
+                .test_ok(),
         );
         capture.record(store, "rederived", rederived.join(","));
         capture.record(
@@ -903,7 +911,7 @@ pub fn derived_evaluation_profile_tag() -> Capture {
             .with_consent_authority(authority)
             .with_protected_token(token);
         session
-            .register_pipeline_evaluator(Box::new(CalibrationReportEvaluatorV1::new(REPORT)))
+            .register_pipeline_evaluator(Box::new(CalibrationReportEvaluatorV1::new(REPORT, 1)))
             .test_ok();
 
         capture.record(store, "first-tick", emitted(session.step_tick().test_ok()));

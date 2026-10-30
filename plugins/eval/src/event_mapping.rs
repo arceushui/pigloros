@@ -4,23 +4,18 @@
 use std::collections::BTreeMap;
 
 use pos_core::{
-    event::Event, ids::TimelineId, store::EventStore, store::SeqRange, ArtifactRedactionStateV1,
-    ErasureArtifactClassV1, ErasureReferenceV1, ErasureReplayClaimV1, ReplayClaimEvaluationV1,
+    event::Event, ArtifactRedactionStateV1, ErasureArtifactClassV1, ErasureReferenceV1,
+    ErasureReplayClaimV1, ReplayClaimEvaluationV1,
 };
 
 use crate::metric_profile::{
-    quantize_probability, MetricFailureV1, MetricInputV1, MetricRecordStateV1, MetricRecordV1,
-    MetricRedactionStateV1, MetricResultV1,
+    quantize_probability, MetricErrorV1, MetricFailureV1, MetricInputV1, MetricRecordStateV1,
+    MetricRecordV1, MetricRedactionStateV1, MetricResultV1, MAX_METRIC_IDENTIFIER_BYTES,
 };
 use crate::{
     EvalError, OutcomeEvidenceV1, OutcomePayload, PredictionPayload, EVENT_TYPE_OUTCOME,
     EVENT_TYPE_PREDICTION,
 };
-
-/// The minimum number of scored records [`compute_report`] and
-/// [`compute_report_from_events`] declare: a report with no scored record is
-/// `InsufficientSamples`, never zeros.
-pub const DEFAULT_MINIMUM_SCORED_RECORDS: u32 = 1;
 
 /// The host's ADR-060 classification of one committed `eval.*` Event.
 ///
@@ -93,40 +88,47 @@ struct ResolvedOutcome {
 
 /// Map a committed `eval.*` Event sequence to `MTI1` (section 4.4).
 ///
-/// Each `eval.prediction` becomes one record. Its `predicted_prob` is quantized from its
-/// binary64 bit pattern with no clamping. A prediction without outcome is Pending; one whose
-/// prediction or outcome Event `evidence` classifies as withheld is Redacted, or Unavailable
-/// when either is Unavailable. Failures are reported in Event order, then in `MTI1` decode
-/// order.
+/// Each `eval.prediction` becomes one record. A prediction without outcome is Pending; one
+/// whose prediction or outcome Event `evidence` classifies as withheld is Redacted, or
+/// Unavailable when either is Unavailable. A withheld prediction yields its record from its
+/// identifiers only: its probability is never read, and its record carries 0. An available
+/// prediction's `predicted_prob` is quantized from its binary64 bit pattern with no clamping.
+///
+/// The Events are walked in Timeline Order, and the fields of one Event in `MTI1` record
+/// field-index order (section 4.2): `prediction_id` and its uniqueness, then `entity_id`,
+/// then the probability. The first failure wins.
 ///
 /// # Errors
-/// Returns [`EvalError::Decode`] for an undecodable payload,
-/// [`EvalError::Metric`] with `InvalidProbability` at `events/<i>` for a probability that is
-/// not in `[0, 1]`, [`EvalError::DuplicateOutcome`] at `events/<i>` for a second outcome of
-/// one prediction, and [`EvalError::Metric`] for an input the profile rejects, such as
-/// `InvalidIdentifier`, `DuplicatePrediction`, `InvalidMinimum` or `ResourceLimit`.
+/// Returns [`EvalError::Decode`] for an undecodable payload; [`EvalError::Metric`] at
+/// `events/<i>` with `InvalidIdentifier` for an identifier outside 1..=64 bytes,
+/// `DuplicatePrediction` for a second prediction with the same id, or `InvalidProbability`
+/// for an available probability outside `[0, 1]`; [`EvalError::DuplicateOutcome`] at
+/// `events/<i>` for a second outcome of one prediction; and [`EvalError::Metric`] for an
+/// input the profile rejects as a whole (`InvalidMinimum`, `ResourceLimit`).
 pub fn map_events_to_metric_input(
     events: &[Event],
     evidence: &dyn Fn(&Event) -> EvalEvidenceV1,
     minimum_scored_records: u32,
 ) -> Result<EvalMetricMappingV1, EvalError> {
-    let mut predictions = Vec::new();
+    let mut predictions: BTreeMap<String, (MetricRecordV1, EvalEvidenceV1)> = BTreeMap::new();
     let mut outcomes: BTreeMap<String, ResolvedOutcome> = BTreeMap::new();
     for (index, event) in events.iter().enumerate() {
         match event.event_type.as_str() {
-            EVENT_TYPE_PREDICTION => predictions.push(prediction(event, index, evidence(event))?),
+            EVENT_TYPE_PREDICTION => {
+                add_prediction(&mut predictions, event, index, evidence(event))?;
+            }
             EVENT_TYPE_OUTCOME => add_outcome(&mut outcomes, event, index, evidence(event))?,
             _ => {}
         }
     }
-    let mut records: Vec<MetricRecordV1> = predictions
-        .into_iter()
+    // The map is keyed by `prediction_id`, so the records are in canonical order.
+    let records: Vec<MetricRecordV1> = predictions
+        .into_values()
         .map(|(mut record, withheld)| {
             record.state = state(withheld, outcomes.remove(&record.prediction_id));
             record
         })
         .collect();
-    records.sort_by(|left, right| left.prediction_id.cmp(&right.prediction_id));
     let input = MetricInputV1::from_records(minimum_scored_records, &records)?;
     Ok(EvalMetricMappingV1 {
         input,
@@ -139,32 +141,71 @@ fn decode<T: serde::de::DeserializeOwned>(event: &Event) -> Result<T, EvalError>
         .map_err(|error| EvalError::Decode(error.to_string()))
 }
 
-fn event_coordinate(index: usize) -> String {
-    format!("events/{index}")
+fn event_failure(error: MetricErrorV1, index: usize) -> EvalError {
+    EvalError::Metric(MetricFailureV1 {
+        error,
+        coordinate: format!("events/{index}"),
+    })
 }
 
-fn prediction(
+const fn check(valid: bool, error: MetricErrorV1) -> Result<(), MetricErrorV1> {
+    if valid {
+        Ok(())
+    } else {
+        Err(error)
+    }
+}
+
+fn valid_identifier(identifier: &str) -> bool {
+    (1..=MAX_METRIC_IDENTIFIER_BYTES).contains(&identifier.len())
+}
+
+fn add_prediction(
+    predictions: &mut BTreeMap<String, (MetricRecordV1, EvalEvidenceV1)>,
     event: &Event,
     index: usize,
     evidence: EvalEvidenceV1,
-) -> Result<(MetricRecordV1, EvalEvidenceV1), EvalError> {
+) -> Result<(), EvalError> {
     let payload: PredictionPayload = decode(event)?;
-    let probability_micros =
-        quantize_probability(payload.predicted_prob.to_bits()).map_err(|error| {
-            EvalError::Metric(MetricFailureV1 {
-                error,
-                coordinate: event_coordinate(index),
-            })
-        })?;
-    Ok((
-        MetricRecordV1 {
-            prediction_id: payload.prediction_id,
-            entity_id: payload.entity_id,
-            probability_micros,
-            state: MetricRecordStateV1::Pending,
-        },
-        evidence,
-    ))
+    // MTI1 record field-index order: prediction_id and its uniqueness, entity_id, then the
+    // probability, which is read only for an available prediction.
+    let probability = check(
+        valid_identifier(&payload.prediction_id),
+        MetricErrorV1::InvalidIdentifier,
+    )
+    .and_then(|()| {
+        check(
+            !predictions.contains_key(&payload.prediction_id),
+            MetricErrorV1::DuplicatePrediction,
+        )
+    })
+    .and_then(|()| {
+        check(
+            valid_identifier(&payload.entity_id),
+            MetricErrorV1::InvalidIdentifier,
+        )
+    })
+    .and_then(|()| {
+        if evidence == EvalEvidenceV1::Available {
+            quantize_probability(payload.predicted_prob.to_bits())
+        } else {
+            Ok(0)
+        }
+    });
+    let probability_micros = probability.map_err(|error| event_failure(error, index))?;
+    predictions.insert(
+        payload.prediction_id.clone(),
+        (
+            MetricRecordV1 {
+                prediction_id: payload.prediction_id,
+                entity_id: payload.entity_id,
+                probability_micros,
+                state: MetricRecordStateV1::Pending,
+            },
+            evidence,
+        ),
+    );
+    Ok(())
 }
 
 fn add_outcome(
@@ -181,7 +222,7 @@ fn add_outcome(
     };
     if outcomes.insert(payload.prediction_id, outcome).is_some() {
         Err(EvalError::DuplicateOutcome {
-            coordinate: event_coordinate(index),
+            coordinate: format!("events/{index}"),
         })
     } else {
         Ok(())
@@ -202,86 +243,27 @@ fn state(prediction: EvalEvidenceV1, outcome: Option<ResolvedOutcome>) -> Metric
     }
 }
 
-/// Read all events from the given timeline and compute a [`CalibrationReport`].
+/// Compute a [`CalibrationReport`] from an authorized, committed Event sequence, for
+/// example the source prefix folded through one Projection cut.
 ///
-/// # Errors
-/// Returns [`EvalError::ArtifactUnavailable`] when the report closure is not
-/// authoritative, [`EvalError::Store`] if the store cannot be read, or a mapping error of
-/// [`map_events_to_metric_input`].
-pub fn compute_report(
-    store: &dyn EventStore,
-    timeline_id: TimelineId,
-    artifact_digest: ErasureReferenceV1,
-    evaluation: &ReplayClaimEvaluationV1,
-) -> Result<CalibrationReport, EvalError> {
-    authorize(artifact_digest, evaluation)
-        .and_then(|()| {
-            store
-                .read(timeline_id, SeqRange::all())
-                .map_err(EvalError::Store)
-        })
-        .and_then(|events| report(&events, &available, DEFAULT_MINIMUM_SCORED_RECORDS))
-}
-
-/// Compute a [`CalibrationReport`] from an already authorized Event sequence.
-///
-/// This is [`compute_report`] for a host that reads the Events itself, for
-/// example the source prefix folded through one Projection cut. The same
-/// ADR-060 authoritative-use check runs before any Event is decoded. Every Event is
-/// [`EvalEvidenceV1::Available`].
+/// The ADR-060 authoritative-use check of the report artifact runs before any Event is
+/// decoded. `evidence` is the host's ADR-060 classification of each Event, and
+/// `minimum_scored_records` is the caller's declared minimum: fewer scored records is
+/// `InsufficientSamples`.
 ///
 /// # Errors
 /// Returns [`EvalError::ArtifactUnavailable`] when the report closure is not
 /// authoritative, or a mapping error of [`map_events_to_metric_input`].
 pub fn compute_report_from_events(
     events: &[Event],
-    artifact_digest: ErasureReferenceV1,
-    evaluation: &ReplayClaimEvaluationV1,
-) -> Result<CalibrationReport, EvalError> {
-    compute_report_from_evaluated_events(
-        events,
-        &available,
-        DEFAULT_MINIMUM_SCORED_RECORDS,
-        artifact_digest,
-        evaluation,
-    )
-}
-
-/// Compute a [`CalibrationReport`] from an authorized Event sequence whose Events the host
-/// classified under ADR-060, with a caller-declared minimum number of scored records.
-///
-/// # Errors
-/// Returns [`EvalError::ArtifactUnavailable`] when the report closure is not
-/// authoritative, or a mapping error of [`map_events_to_metric_input`].
-pub fn compute_report_from_evaluated_events(
-    events: &[Event],
     evidence: &dyn Fn(&Event) -> EvalEvidenceV1,
     minimum_scored_records: u32,
     artifact_digest: ErasureReferenceV1,
     evaluation: &ReplayClaimEvaluationV1,
 ) -> Result<CalibrationReport, EvalError> {
-    authorize(artifact_digest, evaluation)
-        .and_then(|()| report(events, evidence, minimum_scored_records))
-}
-
-fn authorize(
-    artifact_digest: ErasureReferenceV1,
-    evaluation: &ReplayClaimEvaluationV1,
-) -> Result<(), EvalError> {
     evaluation
         .require_authoritative_use(ErasureArtifactClassV1::CalibrationReport, artifact_digest)
         .map_err(|_| EvalError::ArtifactUnavailable)
-}
-
-const fn available(_: &Event) -> EvalEvidenceV1 {
-    EvalEvidenceV1::Available
-}
-
-fn report(
-    events: &[Event],
-    evidence: &dyn Fn(&Event) -> EvalEvidenceV1,
-    minimum_scored_records: u32,
-) -> Result<CalibrationReport, EvalError> {
-    map_events_to_metric_input(events, evidence, minimum_scored_records)
+        .and_then(|()| map_events_to_metric_input(events, evidence, minimum_scored_records))
         .map(|mapping| CalibrationReport::from_mapping(&mapping))
 }

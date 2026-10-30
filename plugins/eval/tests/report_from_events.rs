@@ -6,18 +6,17 @@ use std::sync::Arc;
 
 use pos_core::{
     event::{CanonicalBytes, Event, EventDraft, Kind},
-    ids::{EntityId, TimelineId},
+    ids::EntityId,
     ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactRedactionStateV1,
     ArtifactStateV1, ArtifactTransitionRuleV1, ErasureArtifactClassV1, ErasureContainmentGateV1,
     ErasureKeyRoleV1, ErasureReferenceV1, ErasureReplayClaimV1, RegisteredArtifactV1,
     ReplayClaimEvaluationV1, ReplayClaimEvaluatorV1,
 };
 use pos_plugin_eval::{
-    compute_report, compute_report_from_evaluated_events, compute_report_from_events,
-    draft_outcome, draft_prediction, map_events_to_metric_input, CalibrationReport, EvalError,
-    EvalEvidenceV1, MetricErrorV1, MetricFailureV1, MetricInputV1, MetricOutcomeV1,
-    MetricRecordStateV1, MetricRedactionStateV1, MetricValuesV1, OutcomeEvidenceV1, OutcomePayload,
-    ReliabilityBin, EVENT_TYPE_OUTCOME, EVENT_TYPE_PREDICTION,
+    compute_report_from_events, draft_outcome, draft_prediction, map_events_to_metric_input,
+    CalibrationReport, EvalError, EvalEvidenceV1, MetricErrorV1, MetricFailureV1, MetricInputV1,
+    MetricOutcomeV1, MetricRecordStateV1, MetricRedactionStateV1, MetricValuesV1,
+    OutcomeEvidenceV1, OutcomePayload, ReliabilityBin, EVENT_TYPE_OUTCOME, EVENT_TYPE_PREDICTION,
 };
 use pos_store::{open_store, EventStore, SeqRange, StoreConfig};
 
@@ -95,7 +94,7 @@ fn committed(drafts: &[EventDraft]) -> Vec<Event> {
 }
 
 fn report_of(drafts: &[EventDraft]) -> CalibrationReport {
-    compute_report_from_events(&committed(drafts), REPORT, &exact()).test_ok()
+    compute_report_from_events(&committed(drafts), &available, 1, REPORT, &exact()).test_ok()
 }
 
 const fn available(_: &Event) -> EvalEvidenceV1 {
@@ -154,56 +153,34 @@ const fn metric_failure(error: &EvalError) -> Option<(MetricErrorV1, &str)> {
 }
 
 #[test]
-fn events_read_by_the_host_produce_the_store_report() {
-    let mut store = store();
-    let timeline = store.create_timeline("report-from-events").test_ok();
+fn committed_events_produce_the_report_in_micros_only_under_an_authoritative_claim() {
     let entity = EntityId::new();
-    store
-        .append(
-            timeline.id(),
-            &[
-                draft_prediction(entity, "subject", 0.8, "p1"),
-                draft_outcome(entity, "p1", true),
-                draft_prediction(entity, "subject", 0.3, "p2"),
-                draft_outcome(entity, "p2", false),
-            ],
-        )
-        .test_ok();
-    let events = store.read(timeline.id(), SeqRange::all()).test_ok();
-
-    let from_store = compute_report(store.as_ref(), timeline.id(), REPORT, &exact()).test_ok();
-    let from_events = compute_report_from_events(&events, REPORT, &exact()).test_ok();
-    assert_eq!(from_events, from_store);
-    assert_eq!(from_events.result.encode(), from_store.result.encode());
-    assert_eq!(from_events.result.counts.record_count, 2);
-    assert_eq!(from_events.result.counts.scored, 2);
+    let events = committed(&[
+        draft_prediction(entity, "subject", 0.8, "p1"),
+        draft_outcome(entity, "p1", true),
+        draft_prediction(entity, "subject", 0.3, "p2"),
+        draft_outcome(entity, "p2", false),
+    ]);
+    let report = compute_report_from_events(&events, &available, 1, REPORT, &exact()).test_ok();
+    assert_eq!(report.result.counts.record_count, 2);
+    assert_eq!(report.result.counts.scored, 2);
     assert_eq!(
-        all_metrics(values_of(&from_events)),
+        all_metrics(values_of(&report)),
         [65_000, 65_000, 250_000, 252_500, 187_500, 250_000, 185_000, 1_000_000, 935_000]
     );
-    assert_eq!(from_events.replay_claim, ErasureReplayClaimV1::Exact);
-    assert_eq!(from_events.redaction_state, ArtifactRedactionStateV1::None);
-    assert_eq!(from_events.orphan_outcomes, 0);
+    assert_eq!(report.replay_claim, ErasureReplayClaimV1::Exact);
+    assert_eq!(report.redaction_state, ArtifactRedactionStateV1::None);
+    assert_eq!(report.orphan_outcomes, 0);
 
     assert!(matches!(
-        compute_report_from_events(&events, REPORT, &structural()),
+        compute_report_from_events(&events, &available, 1, REPORT, &structural()),
         Err(EvalError::ArtifactUnavailable)
     ));
+    let unregistered = ErasureReferenceV1::from_digest([3; 32]);
     assert!(matches!(
-        compute_report(store.as_ref(), timeline.id(), REPORT, &structural()),
+        compute_report_from_events(&events, &available, 1, unregistered, &exact()),
         Err(EvalError::ArtifactUnavailable)
     ));
-    assert!(matches!(
-        compute_report_from_events(&events, ErasureReferenceV1::from_digest([3; 32]), &exact()),
-        Err(EvalError::ArtifactUnavailable)
-    ));
-    let missing = rejected(compute_report(
-        store.as_ref(),
-        TimelineId::new(),
-        REPORT,
-        &exact(),
-    ));
-    assert!(missing.to_string().contains("store error"), "{missing}");
 }
 
 #[test]
@@ -236,14 +213,12 @@ fn no_scored_record_is_insufficient_samples_never_zeros() {
 
     // A caller-declared minimum above the scored count is also InsufficientSamples.
     let events = committed(&pairs(&[("p1", 0.8, true), ("p2", 0.3, false)]));
-    let below =
-        compute_report_from_evaluated_events(&events, &available, 3, REPORT, &exact()).test_ok();
+    let below = compute_report_from_events(&events, &available, 3, REPORT, &exact()).test_ok();
     assert_eq!(below.result.outcome, MetricOutcomeV1::InsufficientSamples);
     assert_eq!(below.result.minimum_scored_records, 3);
-    let at =
-        compute_report_from_evaluated_events(&events, &available, 2, REPORT, &exact()).test_ok();
+    let at = compute_report_from_events(&events, &available, 2, REPORT, &exact()).test_ok();
     assert_eq!(values_of(&at).brier, 65_000);
-    let zero = rejected(compute_report_from_evaluated_events(
+    let zero = rejected(compute_report_from_events(
         &events,
         &available,
         0,
@@ -255,7 +230,7 @@ fn no_scored_record_is_insufficient_samples_never_zeros() {
         Some((MetricErrorV1::InvalidMinimum, "minimum_scored_records"))
     );
     assert!(matches!(
-        compute_report_from_evaluated_events(&events, &available, 2, REPORT, &structural()),
+        compute_report_from_events(&events, &available, 2, REPORT, &structural()),
         Err(EvalError::ArtifactUnavailable)
     ));
 }
@@ -402,16 +377,18 @@ fn each_prediction_maps_to_one_record_in_canonical_order() {
 fn duplicates_are_refused_and_never_resolved_first_wins() {
     let duplicate_prediction = rejected(compute_report_from_events(
         &committed(&[prediction(0.4, "p1"), prediction(0.6, "p1")]),
+        &available,
+        1,
         REPORT,
         &exact(),
     ));
     assert_eq!(
         metric_failure(&duplicate_prediction),
-        Some((MetricErrorV1::DuplicatePrediction, "records/1/0"))
+        Some((MetricErrorV1::DuplicatePrediction, "events/1"))
     );
     assert_eq!(
         duplicate_prediction.to_string(),
-        "metric input rejected: DuplicatePrediction at records/1/0"
+        "metric input rejected: DuplicatePrediction at events/1"
     );
     let duplicate_outcome = rejected(compute_report_from_events(
         &committed(&[
@@ -419,6 +396,8 @@ fn duplicates_are_refused_and_never_resolved_first_wins() {
             outcome("p1", true),
             outcome("p1", false),
         ]),
+        &available,
+        1,
         REPORT,
         &exact(),
     ));
@@ -487,8 +466,7 @@ fn withheld_events_are_redacted_or_unavailable_and_never_scored() {
             MetricRecordStateV1::Redacted,
         ]
     );
-    let report =
-        compute_report_from_evaluated_events(&events, &evidence, 1, REPORT, &exact()).test_ok();
+    let report = compute_report_from_events(&events, &evidence, 1, REPORT, &exact()).test_ok();
     assert_eq!(
         report.result.redaction_state,
         MetricRedactionStateV1::EvidenceMissing
@@ -508,8 +486,7 @@ fn withheld_events_are_redacted_or_unavailable_and_never_scored() {
             EvalEvidenceV1::Available
         }
     };
-    let report = compute_report_from_evaluated_events(&events, &redacted_only, 1, REPORT, &exact())
-        .test_ok();
+    let report = compute_report_from_events(&events, &redacted_only, 1, REPORT, &exact()).test_ok();
     assert_eq!(
         report.redaction_state,
         ArtifactRedactionStateV1::RedactedViews
@@ -519,12 +496,11 @@ fn withheld_events_are_redacted_or_unavailable_and_never_scored() {
 #[test]
 fn identifiers_outside_one_to_sixty_four_bytes_are_invalid() {
     let long = "x".repeat(65);
-    for (entity, id, coordinate) in [
-        ("e", "", "records/0/0"),
-        (long.as_str(), "p1", "records/0/1"),
-    ] {
+    for (entity, id, coordinate) in [("e", "", "events/0"), (long.as_str(), "p1", "events/0")] {
         let error = rejected(compute_report_from_events(
             &committed(&[draft_prediction(EntityId::new(), entity, 0.5, id)]),
+            &available,
+            1,
             REPORT,
             &exact(),
         ));
@@ -547,6 +523,8 @@ fn probabilities_are_quantized_from_their_bits_and_never_clamped() {
     ] {
         let error = rejected(compute_report_from_events(
             &committed(&[outcome("p0", true), prediction(probability, "p1")]),
+            &available,
+            1,
             REPORT,
             &exact(),
         ));
@@ -563,7 +541,7 @@ fn probabilities_are_quantized_from_their_bits_and_never_clamped() {
     assert_eq!(payload.predicted_prob.to_bits(), 0x8000_0000_0000_0000);
     let mapping = map_events_to_metric_input(&events, &available, 1).test_ok();
     assert_eq!(mapping.input.records()[0].probability_micros, 0);
-    let report = compute_report_from_events(&events, REPORT, &exact()).test_ok();
+    let report = compute_report_from_events(&events, &available, 1, REPORT, &exact()).test_ok();
     assert_eq!(values(&report).1[0].count, 1);
     assert_eq!(values_of(&report).brier, 0);
 }
@@ -602,6 +580,8 @@ fn undecodable_payloads_are_decode_errors() {
         );
         let error = rejected(compute_report_from_events(
             &committed(&[bad]),
+            &available,
+            1,
             REPORT,
             &exact(),
         ));
@@ -610,4 +590,81 @@ fn undecodable_payloads_are_decode_errors() {
             "{error}"
         );
     }
+}
+
+fn mapping_failure(drafts: &[EventDraft]) -> Option<(MetricErrorV1, String)> {
+    map_events_to_metric_input(&committed(drafts), &available, 1)
+        .err()
+        .as_ref()
+        .and_then(metric_failure)
+        .map(|(error, coordinate)| (error, coordinate.to_owned()))
+}
+
+/// ADR-062 R7 Event mapping note §1: Events in Timeline Order, and the fields of one Event
+/// in `MTI1` record field-index order.
+#[test]
+fn mapping_failures_follow_timeline_order_then_field_index_order() {
+    let failure = |error, coordinate: &str| Some((error, coordinate.to_owned()));
+    let identifier = MetricErrorV1::InvalidIdentifier;
+    let long = "x".repeat(65);
+    // One Event with an invalid prediction_id and an invalid probability.
+    assert_eq!(
+        mapping_failure(&[prediction(f64::NAN, "")]),
+        failure(identifier, "events/0")
+    );
+    // entity_id (field 1) before the probability (field 2).
+    assert_eq!(
+        mapping_failure(&[draft_prediction(EntityId::new(), &long, 1.5, "p1")]),
+        failure(identifier, "events/0")
+    );
+    // A duplicate prediction_id is checked with field 0, before the probability.
+    assert_eq!(
+        mapping_failure(&[prediction(0.5, "p1"), prediction(f64::INFINITY, "p1")]),
+        failure(MetricErrorV1::DuplicatePrediction, "events/1")
+    );
+    // An earlier Event's probability failure wins over a later Event's identifier.
+    assert_eq!(
+        mapping_failure(&[prediction(-0.5, "p1"), prediction(0.5, "")]),
+        failure(MetricErrorV1::InvalidProbability, "events/0")
+    );
+}
+
+/// ADR-062 R7 Event mapping note §2: a withheld prediction is never quantized.
+#[test]
+fn withheld_predictions_are_never_quantized() {
+    let events = committed(&[
+        prediction(f64::NAN, "p1"),
+        prediction(1.5, "p2"),
+        outcome("p2", true),
+    ]);
+    let (redacted, unavailable) = (events[0].id, events[1].id);
+    let evidence = move |event: &Event| {
+        if event.id == redacted {
+            EvalEvidenceV1::Redacted
+        } else if event.id == unavailable {
+            EvalEvidenceV1::Unavailable
+        } else {
+            EvalEvidenceV1::Available
+        }
+    };
+    let mapping = map_events_to_metric_input(&events, &evidence, 1).test_ok();
+    let records: Vec<_> = mapping
+        .input
+        .records()
+        .iter()
+        .map(|record| (record.probability_micros, record.state))
+        .collect();
+    assert_eq!(
+        records,
+        [
+            (0, MetricRecordStateV1::Redacted),
+            (0, MetricRecordStateV1::Unavailable),
+        ]
+    );
+    let report = compute_report_from_events(&events, &evidence, 1, REPORT, &exact()).test_ok();
+    assert_eq!(report.result.outcome, MetricOutcomeV1::InsufficientSamples);
+    assert_eq!(
+        report.redaction_state,
+        ArtifactRedactionStateV1::EvidenceMissing
+    );
 }
