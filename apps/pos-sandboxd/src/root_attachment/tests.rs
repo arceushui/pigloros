@@ -45,7 +45,21 @@ type AbsenceProbe = (std::time::Duration, Result<bool, ImageActivationError>);
 
 mod absence;
 mod generations;
+mod intent;
 mod release;
+
+/// Retained value facts for the registry owner's impossible-state fault tests.
+/// This creates no production constructor or lifecycle authority.
+///
+/// # Errors
+/// Returns the existing fake attachment fixture's construction error.
+pub fn recorded_identity(
+    directory: &PreparedAttemptDirectory,
+) -> Result<RootResourceIdentity, String> {
+    attached_root(directory)
+        .map(|(_, root)| root.resource_identity())
+        .map_err(|error| error.to_string())
+}
 
 fn cleanup_deadline() -> tokio::time::Instant {
     tokio::time::Instant::now() + std::time::Duration::from_secs(1)
@@ -1107,43 +1121,66 @@ fn the_host_kernel_hashes_the_executable_through_the_mount_descriptor() -> TestR
 #[test]
 fn recheck_mints_a_checked_root_only_for_the_same_authority_and_mount() -> TestResult {
     let tree = prepared_tree()?;
-    let expected = expected(&component(&tree.prepared));
-    let kernel = FakeKernel::accepting(matching(&expected));
-    let verified = attach_and_verify(&kernel, &tree.prepared, &expected, file_mount()?, || Ok(()))?;
-    let checked = recheck(&kernel, &verified, &tree.prepared, Some(&expected), || {
+    let activated = expected(&component(&tree.prepared));
+    let kernel = FakeKernel::accepting(matching(&activated));
+    let verified = attach_and_verify(
+        &kernel,
+        &tree.prepared,
+        &activated,
+        file_mount()?,
+        || Ok(()),
+    )?;
+    let checked = recheck(&kernel, &verified, &tree.prepared, Some(&activated), || {
         Ok(())
     })?;
-    assert_eq!(checked, expected.root_directory);
+    assert_eq!(checked, activated.root_directory);
 
     // Authority drift or a floor above the admission refuses.
-    for error in [
-        StagingError::AuthorityChanged,
-        StagingError::BelowControlFloor,
-    ] {
+    for below_floor in [false, true] {
         assert_eq!(
-            recheck(&kernel, &verified, &tree.prepared, Some(&expected), || Err(
-                error
-            )),
+            recheck(
+                &kernel,
+                &verified,
+                &tree.prepared,
+                Some(&activated),
+                || Err(if below_floor {
+                    StagingError::BelowControlFloor
+                } else {
+                    StagingError::AuthorityChanged
+                })
+            ),
             Err(ImageActivationError::EvidenceMismatch)
         );
     }
 
     // Any readback difference refuses.
     for (name, mutate) in readback_mutations() {
-        let mut observed = matching(&expected);
+        // A failed readback permanently quarantines this registry owner.
+        let tree = prepared_tree()?;
+        let activated = expected(&component(&tree.prepared));
+        let (_, verified) = attached_root(&tree.prepared)?;
+        let mut observed = matching(&activated);
         mutate(&mut observed);
         let drifted = FakeKernel::accepting(observed);
         assert_eq!(
-            recheck(&drifted, &verified, &tree.prepared, Some(&expected), || Ok(
-                ()
-            )),
+            recheck(
+                &drifted,
+                &verified,
+                &tree.prepared,
+                Some(&activated),
+                || Ok(())
+            ),
             Err(ImageActivationError::EvidenceMismatch),
             "{name}"
         );
+        assert_eq!(drifted.readbacks.load(Ordering::SeqCst), 1, "{name}");
     }
 
     // A consistent readback of a different mount ID refuses.
-    let mut replaced = matching(&expected);
+    let tree = prepared_tree()?;
+    let activated = expected(&component(&tree.prepared));
+    let (_, verified) = attached_root(&tree.prepared)?;
+    let mut replaced = matching(&activated);
     let other = Node {
         mount_id: 42,
         device: (253, 3),
@@ -1156,7 +1193,7 @@ fn recheck_mints_a_checked_root_only_for_the_same_authority_and_mount() -> TestR
         executable.node.mount_id = 42;
     }
     assert_eq!(
-        expected
+        activated
             .verify(&replaced)
             .map(|identity| identity.mount.mount_id),
         Ok(42)
@@ -1166,7 +1203,7 @@ fn recheck_mints_a_checked_root_only_for_the_same_authority_and_mount() -> TestR
             &FakeKernel::accepting(replaced),
             &verified,
             &tree.prepared,
-            Some(&expected),
+            Some(&activated),
             || Ok(())
         ),
         Err(ImageActivationError::EvidenceMismatch)
@@ -1449,11 +1486,12 @@ fn check_admitted_recheck(
     let (_staging, input) = crate::test_fixtures::staged_execution::verified_input(staged, &ledger)
         .map_err(|error| error.to_string())?;
     let entry = input.entry();
-    assert_eq!(
-        verified.recheck(prepared, &entry).err(),
-        Some(ImageActivationError::EvidenceMismatch)
-    );
+    let record = Path::new("/run/pigloros/sandbox/registry").join(component(prepared));
+    assert_eq!(&fs::read(&record)?[..4], b"PAI2");
     let checked = verified.recheck_with(kernel, prepared, &entry)?;
+    let committed = fs::read(&record)?;
+    assert_eq!(&committed[..4], b"PAI3");
+    assert_eq!(committed.len(), 393);
     assert_eq!(checked.root_directory(), verified.root_directory());
     assert!(checked.matches_attempt(&AdmittedAttempt::from_entry(&entry, prepared)?));
     let foreign = registry
@@ -1466,5 +1504,14 @@ fn check_admitted_recheck(
         verified.recheck_with(kernel, &foreign, &entry).err(),
         Some(ImageActivationError::EvidenceMismatch)
     );
+    // The real host contradicts this fixture and permanently quarantines it.
+    assert_eq!(
+        verified.recheck(prepared, &entry).err(),
+        Some(ImageActivationError::EvidenceMismatch)
+    );
+    assert_eq!(fs::read(&record)?, committed);
+    assert!(registry
+        .commit_planned(&PlannedAttemptIntent::new([0x45; 16], [9; 32])?)
+        .is_err());
     Ok(())
 }
