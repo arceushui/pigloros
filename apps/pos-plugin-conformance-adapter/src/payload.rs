@@ -1,4 +1,5 @@
-//! The payload grammar (ADR-061 revision 8 decision 8), parsed strictly with `serde_json`.
+//! The payload grammar (ADR-061 revision 8 decision 8, and the `rollback` step of ADR-103
+//! revision 7 decision 4.6), parsed strictly with `serde_json`.
 //!
 //! Unknown keys, missing keys, a value of the wrong type, a hex value of the wrong length or
 //! case, a number that is not an integer from 0 to 9,007,199,254,740,991 and a text with a
@@ -167,7 +168,8 @@ pub struct StateV1 {
     pub bytes: HexBytes,
 }
 
-/// Step `install`.
+/// Step `install`, and step `rollback`, which takes the same arguments (ADR-103 revision 7
+/// decision 4.6).
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct InstallV1 {
@@ -283,6 +285,7 @@ pub struct ScanV1 {
 #[serde(tag = "step", rename_all = "lowercase")]
 pub enum StepV1 {
     Install(InstallV1),
+    Rollback(InstallV1),
     Bind(BindV1),
     Refresh(RefreshV1),
     Pass(PassV1),
@@ -458,7 +461,11 @@ impl SubCaseV1 {
     fn scans(&self) -> impl Iterator<Item = &ScanV1> {
         self.steps.iter().filter_map(|step| match step {
             StepV1::Scan(scan) => Some(scan),
-            StepV1::Install(_) | StepV1::Bind(_) | StepV1::Refresh(_) | StepV1::Pass(_) => None,
+            StepV1::Install(_)
+            | StepV1::Rollback(_)
+            | StepV1::Bind(_)
+            | StepV1::Refresh(_)
+            | StepV1::Pass(_) => None,
         })
     }
 
@@ -479,7 +486,11 @@ impl SubCaseV1 {
     fn simulation_times(&self) -> impl Iterator<Item = u64> + '_ {
         self.steps.iter().filter_map(|step| match step {
             StepV1::Pass(pass) => Some(pass.simulation_time.0),
-            StepV1::Install(_) | StepV1::Bind(_) | StepV1::Refresh(_) | StepV1::Scan(_) => None,
+            StepV1::Install(_)
+            | StepV1::Rollback(_)
+            | StepV1::Bind(_)
+            | StepV1::Refresh(_)
+            | StepV1::Scan(_) => None,
         })
     }
 

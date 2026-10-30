@@ -238,7 +238,7 @@ expect_adapter_rejection "${divergent_positive_root}" \
 plugin_provider="providers/plugin-conformance/provider.json"
 
 # R8-F3: the checked-in Plugin provider declares the v2 contract, and nothing names the old one.
-jq -e '.contract_version == "2.0.0" and .abi_major == 0 and .abi_minor == 0 and
+jq -e '.contract_version == "2.1.0" and .abi_major == 0 and .abi_minor == 0 and
   has("auxiliary") and .fixture_adapter.id == "plugin-signed-v1"' \
   "${source_root}/${plugin_provider}" >/dev/null
 if git grep -nIF -e 'plugin-conformance@1.0.0' -- . \

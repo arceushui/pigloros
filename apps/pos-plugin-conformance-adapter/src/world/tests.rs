@@ -1,4 +1,5 @@
-//! R8-A11, R8-A12 and R8-A13: the interpreter, on a pure fake of the world port.
+//! R8-A11, R8-A12, R8-A13 and the interpreter half of R7-F1: the interpreter, on a pure fake of
+//! the world port.
 
 use std::collections::VecDeque;
 
@@ -95,6 +96,7 @@ struct Fake {
     setup: Option<SetupArgsV1>,
     open_error: Option<E>,
     installs: VecDeque<Result<(), E>>,
+    rollbacks: VecDeque<Result<(), E>>,
     binds: VecDeque<Result<ReleaseIdentityV1, E>>,
     refreshes: VecDeque<Result<(), E>>,
     passes: VecDeque<Result<Vec<CommunityPluginSubjectOutcomeV1>, E>>,
@@ -104,6 +106,7 @@ struct Fake {
     outcome: Vec<u8>,
     seen_states: Vec<Vec<u8>>,
     install_args: Vec<InstallArgsV1>,
+    rollback_args: Vec<RollbackArgsV1>,
     bind_args: Vec<BindArgsV1>,
     refresh_args: Vec<RefreshArgsV1>,
     pass_args: Vec<PassArgsV1>,
@@ -124,6 +127,12 @@ impl StepPortV1 for Fake {
         self.log.push("install");
         self.install_args.push(args.clone());
         self.installs.pop_front().unwrap_or(Ok(()))
+    }
+
+    fn rollback(&mut self, args: &RollbackArgsV1) -> Result<(), E> {
+        self.log.push("rollback");
+        self.rollback_args.push(args.clone());
+        self.rollbacks.pop_front().unwrap_or(Ok(()))
     }
 
     fn bind(&mut self, args: &BindArgsV1) -> Result<ReleaseIdentityV1, E> {
@@ -174,6 +183,16 @@ fn install_step(name: &str) -> Value {
         "step": "install", "release": release(name), "material": material(),
         "instant_micros": 40_000_000, "tick": 5,
     })
+}
+
+/// The `rollback` step to release `name`: the arguments of an `install`.
+fn rollback_step(name: &str, with_material: Value) -> Value {
+    let mut step = json!({
+        "step": "rollback", "release": release(name),
+        "instant_micros": 45_000_000, "tick": 7,
+    });
+    step["material"] = with_material;
+    step
 }
 
 fn bind_step(name: &str, plugin: &str, with_material: Value) -> Value {
@@ -605,6 +624,103 @@ fn a_step_that_refuses_partway_is_the_result_and_later_steps_do_not_run() -> Tes
         let record = run(&mut fake, &subcase("dgr.4", steps.clone(), wrong.clone()))?;
         assert!(!record.matched, "{wrong}");
     }
+    Ok(())
+}
+
+fn trust_expect(basis: &str) -> Value {
+    json!({"kind": "refused", "error": "ArtifactTrustDenied",
+        "class": "PreExecutionRejection", "basis": basis})
+}
+
+#[test]
+fn r7_f1_a_rollback_step_resolves_to_the_install_arguments_and_runs_on_the_port() -> TestResult {
+    // dgr.1: R1 and R2 installed, the rollback to R1 succeeds, the bind of R2 is refused.
+    let not_active = E::ArtifactTrustDenied {
+        basis: TrustDenialBasisV1::NotActive,
+    };
+    let mut fake = Fake::default();
+    fake.binds.push_back(Err(not_active));
+    let steps = vec![
+        install_step("a"),
+        install_step("b"),
+        rollback_step("a", material()),
+        bind_step("b", "p", material()),
+    ];
+    let record = run(
+        &mut fake,
+        &subcase("dgr.1", steps, trust_expect("NotActive")),
+    )?;
+    assert_eq!(fake.log, ["open", "install", "install", "rollback", "bind"]);
+    assert_eq!(
+        record.steps_run, 4,
+        "a successful rollback lets the sub-case continue"
+    );
+    assert_eq!(record.setup_refusal, Some(not_active));
+    assert!(record.matched);
+    let rollback = &fake.rollback_args[0];
+    assert_eq!(rollback.address, address_of("a")?);
+    assert_eq!(rollback.address, fake.install_args[0].address);
+    assert!(rollback.material.is_some());
+    assert_eq!((rollback.instant_micros, rollback.tick), (45_000_000, 7));
+    Ok(())
+}
+
+#[test]
+fn r7_f1_a_refused_rollback_is_the_result_and_later_steps_do_not_run() -> TestResult {
+    // dgr.6: the rollback to the active R1 is refused.
+    let mut fake = Fake::default();
+    fake.rollbacks.push_back(Err(TRUST));
+    let steps = vec![
+        install_step("a"),
+        rollback_step("a", material()),
+        bind_step("a", "p", material()),
+    ];
+    let expect = trust_expect("TrustStateUnavailable");
+    let record = run(&mut fake, &subcase("dgr.6", steps, expect))?;
+    assert_eq!(fake.log, ["open", "install", "rollback"]);
+    assert_eq!(record.steps_run, 2, "the refusing rollback is counted");
+    assert_eq!(record.setup_refusal, Some(TRUST));
+    assert!(record.matched);
+    Ok(())
+}
+
+#[test]
+fn r7_f1_the_material_of_a_rollback_may_be_null_or_the_genesis() -> TestResult {
+    let null = build(&subcase(
+        "x",
+        vec![rollback_step("a", Value::Null)],
+        committed_expect([0; 32]),
+    ))?;
+    let ResolvedStepV1::Rollback(args) = &null.steps[0] else {
+        return Err("not a rollback".into());
+    };
+    assert!(args.material.is_none());
+    assert!(null.genesis.is_none(), "no step names a material");
+    let named = build(&subcase(
+        "x",
+        vec![rollback_step("b", material())],
+        committed_expect([0; 32]),
+    ))?;
+    assert!(
+        named.genesis.is_some(),
+        "the rollback material is the first non-null one"
+    );
+    assert!(named.source.is_some());
+    // A rollback names its release like an install: a digest that names no piece is invalid.
+    let mut nowhere = rollback_step("a", material());
+    nowhere["release"]["manifest"] = json!(hex::encode(&[0xee; 32]));
+    assert!(invalid(&subcase(
+        "x",
+        vec![nowhere],
+        committed_expect([0; 32])
+    ))?);
+    let mut no_anchor = rollback_step("a", material());
+    no_anchor["material"]["anchor"] = json!(hex::encode(&[0xee; 32]));
+    assert!(invalid(&subcase(
+        "x",
+        vec![no_anchor],
+        committed_expect([0; 32])
+    ))?);
     Ok(())
 }
 
@@ -1139,6 +1255,41 @@ fn a_nested_document_decides_the_malformed_expectation() -> TestResult {
         !record.matched,
         "a well-formed nested document is not malformed"
     );
+    Ok(())
+}
+
+#[test]
+fn r7_f1_a_nested_document_with_a_malformed_rollback_step_is_malformed() -> TestResult {
+    let mut fake = Fake::default();
+    let decide = |nested: &Value, fake: &mut Fake| -> Result<bool, Box<dyn std::error::Error>> {
+        let bytes = nested.to_string().into_bytes();
+        let digest = hex::encode(blake3::hash(&bytes).as_bytes());
+        let mut document = subcase("mal.6", Vec::new(), json!({"kind": "malformed"}));
+        document["nested"] = json!(digest);
+        let with_nested = PiecesV1::from_blobs([bytes]);
+        let parsed = parsed(&document)?;
+        let record = interpret(&parsed, &with_nested, fake, CommunityPluginModeV1::Local);
+        Ok(record.matched)
+    };
+    let well_formed = subcase(
+        "n.1",
+        vec![rollback_step("a", material())],
+        json!({"kind": "malformed"}),
+    );
+    assert!(
+        !decide(&well_formed, &mut fake)?,
+        "a well-formed rollback is not malformed"
+    );
+    let mut extra = rollback_step("a", material());
+    extra["plugin_id"] = json!("p");
+    let mut no_tick = rollback_step("a", Value::Null);
+    if let Some(object) = no_tick.as_object_mut() {
+        object.remove("tick");
+    }
+    for step in [extra, no_tick] {
+        let nested = subcase("n.1", vec![step.clone()], json!({"kind": "malformed"}));
+        assert!(decide(&nested, &mut fake)?, "{step}");
+    }
     Ok(())
 }
 
