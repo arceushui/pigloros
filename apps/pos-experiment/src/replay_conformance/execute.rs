@@ -195,7 +195,7 @@ impl LegRequestV1 {
     const fn preflight(&self) -> VerificationPreflightInputV1<'_> {
         VerificationPreflightInputV1 {
             request: &self.request,
-            canonical_request_bytes: &self.canonical_request_bytes,
+            canonical_request_bytes: self.canonical_request_bytes.as_slice(),
             canonical_request_digest: self.canonical_request_digest,
             manifest: &self.manifest,
             execution_profile: &self.execution_profile,
