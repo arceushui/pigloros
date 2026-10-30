@@ -145,24 +145,24 @@ impl JsonV1 {
         }
     }
 
+    /// The JSON literal of `true`, `false` or `null`; [`Self::write`] calls it for no other
+    /// value.
+    const fn literal(&self) -> &'static [u8] {
+        match self {
+            Self::Bool(true) => b"true",
+            Self::Bool(false) => b"false",
+            _ => b"null",
+        }
+    }
+
     fn write(&self, out: &mut Vec<u8>) {
         match self {
-            Self::Null => out.extend_from_slice(b"null"),
-            Self::Bool(value) => out.extend_from_slice(literal(*value).as_bytes()),
             Self::Number(value) => out.extend_from_slice(value.to_string().as_bytes()),
             Self::Text(value) => write_text(value, out),
             Self::Array(items) => write_list(items.iter(), out),
             Self::Object(entries) => write_object(entries, out),
+            literal => out.extend_from_slice(literal.literal()),
         }
-    }
-}
-
-/// The JSON literal of a boolean.
-const fn literal(value: bool) -> &'static str {
-    if value {
-        "true"
-    } else {
-        "false"
     }
 }
 
