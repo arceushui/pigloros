@@ -128,12 +128,17 @@ impl VerifiedRootMount {
     /// loop, dm-verity and executable readback is repeated and must name the
     /// same mount node, device-mapper UUID, loop name and boot-local block
     /// device generations retained at activation.
+    /// Their exact private activation-intent extension is committed and read
+    /// back under registry ownership before a launch token can be returned.
+    /// An identical repeat verifies the original record without replacing it.
+    /// Current authority is checked again after the filesystem work.
     /// The returned [`CheckedRoot`] is the only `RootDirectory` a launch input
     /// accepts.
     ///
     /// # Errors
     /// [`ImageActivationError::EvidenceMismatch`] for changed authority, a
-    /// floor above the admission, or any readback difference.
+    /// floor above the admission, any readback difference, or uncertain intent
+    /// publication. Failed publication quarantines the registry.
     pub fn recheck(
         &self,
         directory: &PreparedAttemptDirectory,
@@ -199,13 +204,21 @@ fn recheck<K: AttachmentKernel>(
     root: &VerifiedRootMount,
     directory: &PreparedAttemptDirectory,
     activated: Option<&Expected>,
-    authority: impl FnOnce() -> Result<(), StagingError>,
+    mut authority: impl FnMut() -> Result<(), StagingError>,
 ) -> Result<ActivatedRootDirectory, ImageActivationError> {
     binds(&root.expected, activated)
         .then_some(())
         .ok_or(ImageActivationError::EvidenceMismatch)
         .and_then(|()| authority().map_err(|_| ImageActivationError::EvidenceMismatch))
-        .and_then(|()| root.verify_mount(kernel, directory))
+        .and_then(|()| {
+            directory
+                .record_root(&root.resource_identity(), || {
+                    root.verify_mount(kernel, directory)
+                        .map_err(|_| crate::SystemdAttemptRegistryError::InvalidIntent)
+                })
+                .map_err(|_| ImageActivationError::EvidenceMismatch)
+        })
+        .and_then(|()| authority().map_err(|_| ImageActivationError::EvidenceMismatch))
         .map(|()| root.expected.root_directory.clone())
 }
 
@@ -323,3 +336,5 @@ fn attach_and_verify<K: AttachmentKernel>(
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests;
+#[cfg(test)]
+pub use tests::recorded_identity;
