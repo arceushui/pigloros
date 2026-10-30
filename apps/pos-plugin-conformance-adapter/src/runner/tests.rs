@@ -94,7 +94,7 @@ fn publish(publisher: &mut World, shape: Shape) -> Result<Published, BoxError> {
         manifest: bundle.manifest().to_vec(),
         layers: layers_of(&bundle),
         pmf1_digest: *blake3::hash(bundle.pmf1()).as_bytes(),
-        anchor: anchor_of(&publisher),
+        anchor: anchor_of(publisher),
         roots: vec![current.ptr1().to_vec()],
         revocations: current.prv1_records().to_vec(),
         tps1: current.tps1,
