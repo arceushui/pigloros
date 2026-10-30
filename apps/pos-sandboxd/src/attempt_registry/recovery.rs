@@ -409,26 +409,44 @@ mod tests {
     fn malformed_complete_root_claims_never_enter_recovery_inventory() -> TestResult {
         let (runtime, held) = fixture()?;
         let valid = root_record()?;
+        for value in [0, u64::from(u32::MAX)] {
+            let mut bytes = valid.clone();
+            for index in [1, 2, 6, 7, 9, 10] {
+                bytes[84 + index * 8..84 + (index + 1) * 8].copy_from_slice(&value.to_le_bytes());
+            }
+            write_record(runtime.path(), KEY, &bytes)?;
+            assert!(
+                read_entry(&held, KEY)?.intent().is_some(),
+                "device limit {value}"
+            );
+        }
         for index in [0, 3, 5, 8, 11] {
             let mut bytes = valid.clone();
             bytes[84 + index * 8..84 + (index + 1) * 8].fill(0);
             write_record(runtime.path(), KEY, &bytes)?;
             assert!(read_entry(&held, KEY).is_err(), "zero word {index}");
         }
-        for index in [1, 2, 6, 7, 9, 10] {
+        // Keep matching pairs coherent so device correlation cannot mask width.
+        for indices in [&[1, 6][..], &[2, 7], &[9], &[10]] {
             let mut bytes = valid.clone();
-            bytes[84 + index * 8..84 + (index + 1) * 8].copy_from_slice(&u64::MAX.to_le_bytes());
+            for &index in indices {
+                bytes[84 + index * 8..84 + (index + 1) * 8]
+                    .copy_from_slice(&(u64::from(u32::MAX) + 1).to_le_bytes());
+            }
             write_record(runtime.path(), KEY, &bytes)?;
-            assert!(read_entry(&held, KEY).is_err(), "device word {index}");
+            assert!(read_entry(&held, KEY).is_err(), "device words {indices:?}");
         }
-        let mut wrong_mapper = valid.clone();
-        wrong_mapper[84 + 6 * 8..84 + 7 * 8].copy_from_slice(&254_u64.to_le_bytes());
+        for index in [6, 7] {
+            let mut wrong_mapper = valid.clone();
+            wrong_mapper[84 + index * 8..84 + (index + 1) * 8]
+                .copy_from_slice(&254_u64.to_le_bytes());
+            write_record(runtime.path(), KEY, &wrong_mapper)?;
+            assert!(read_entry(&held, KEY).is_err(), "mapper word {index}");
+        }
         let mut wrong_path = valid.clone();
         wrong_path[180] ^= 1;
-        for bytes in [wrong_mapper, wrong_path] {
-            write_record(runtime.path(), KEY, &bytes)?;
-            assert!(read_entry(&held, KEY).is_err());
-        }
+        write_record(runtime.path(), KEY, &wrong_path)?;
+        assert!(read_entry(&held, KEY).is_err());
         for (start, end) in [(248, 377), (377, 393)] {
             for fault in 0..4 {
                 let mut bytes = valid.clone();
