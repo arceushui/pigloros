@@ -133,8 +133,12 @@ const NO_USAGE: ResourceUsage = ResourceUsage {
 };
 
 /// The usage of `deletion-redaction`: `del.1` and `del.2` are each one committed pass of the
-/// Rust guest over the same `del.1` observation.
-const DELETION_REDACTION_USAGE: ResourceUsage = RUST_ONE_PASS_USAGE;
+/// Rust guest over the same 34-byte `del.1` observation, which costs more fuel than the 17-byte
+/// observation of `pos.1`; the two sub-cases measure the same.
+const DELETION_REDACTION_USAGE: ResourceUsage = ResourceUsage {
+    cpu_fuel: 21_510,
+    ..RUST_ONE_PASS_USAGE
+};
 
 /// The usage of `independent-evaluation`: `ind.3` is the pass of `pos.1`, and `ind.1`, `ind.2a`,
 /// `ind.2b` and `ind.4` run no pass.

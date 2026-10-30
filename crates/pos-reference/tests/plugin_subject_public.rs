@@ -44,8 +44,8 @@ const MEASURED_POSITIVE_USAGE: ResourceUsage = ResourceUsage {
     simulation_time_ns: 1,
 };
 
-/// The usage of one committed pass of the Rust guest, measured on the real worker for
-/// `deletion-redaction` (`del.1`, `del.2`) and `independent-evaluation` (`ind.3`).
+/// The usage of one committed pass of the Rust guest over the `pos.1` observation, measured on
+/// the real worker for `pos.1` and for `independent-evaluation` (`ind.3`).
 const MEASURED_RUST_ONE_PASS_USAGE: ResourceUsage = ResourceUsage {
     memory_bytes: 1_179_648,
     cpu_fuel: 21_238,
@@ -66,10 +66,17 @@ const MEASURED_USAGE: [ResourceUsage; 7] = [
     NO_USAGE,
     NO_USAGE,
     NO_USAGE,
-    MEASURED_RUST_ONE_PASS_USAGE,
+    MEASURED_DELETION_REDACTION_USAGE,
     NO_USAGE,
     MEASURED_RUST_ONE_PASS_USAGE,
 ];
+
+/// The usage of `deletion-redaction`, measured on the real worker: `del.1` and `del.2` are each
+/// one committed pass of the Rust guest over the longer `del.1` observation.
+const MEASURED_DELETION_REDACTION_USAGE: ResourceUsage = ResourceUsage {
+    cpu_fuel: 21_510,
+    ..MEASURED_RUST_ONE_PASS_USAGE
+};
 
 /// The usage of a case none of whose sub-cases commits.
 const NO_USAGE: ResourceUsage = ResourceUsage {
