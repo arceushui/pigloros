@@ -628,6 +628,19 @@ fn a_leg_that_is_not_as_expected_fails_its_oracle() -> TestResult {
     assert_eq!(observation.result, failure(SUBCASE_MISMATCH));
     assert_eq!(observation.usage.execution_steps, 4);
 
+    // Every other declared claim is read and runs; none is what den.2 expects.
+    for claim in [
+        "ExactAuthoritativeWithRedactedViews",
+        "UnverifiableArtifactsMissing",
+        "IncompatibleProfile",
+    ] {
+        let declared = with_payload(
+            attempt(FixtureFamily::Denied, ExecutionMode::Local)?,
+            |payload| payload["subcases"][2]["manifest"]["replay_claim"] = json!(claim),
+        )?;
+        assert_eq!(observe(&declared)?.result, failure(SUBCASE_MISMATCH));
+    }
+
     // A canonical-output family outputs what it observed, which is then not
     // its oracle: here a recorded Event payload the expected stream changes.
     let positive = with_payload(
