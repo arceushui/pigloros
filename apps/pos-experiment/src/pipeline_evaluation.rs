@@ -333,7 +333,7 @@ impl CalibrationReportEvaluatorV1 {
 /// The host's per-Event ADR-060 classification of the folded prefix: the
 /// whole prefix is admitted through the claim's authoritative-use check, and
 /// the claim carries no per-Event withholding, so every Event is available.
-const fn admitted(_: &pos_core::Event) -> EvalEvidenceV1 {
+pub(crate) const fn admitted(_: &pos_core::Event) -> EvalEvidenceV1 {
     EvalEvidenceV1::Available
 }
 
