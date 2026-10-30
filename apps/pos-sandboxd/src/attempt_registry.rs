@@ -5,6 +5,8 @@
 //! `AttemptId`. Unknown versions/stages fail closed. This local record does not
 //! replace ADR-069 lifecycle evidence or authorize image activation. The PAI2
 //! directory stage adds the held attempt/root device and inode identities.
+//! PAI3 records verified root facts before launch; none of these private stages
+//! substitutes for the separate ADR-069 lifecycle binding.
 
 use std::fs::File;
 use std::io::{self, Write};
@@ -19,11 +21,14 @@ use crate::TransientServiceUnitName;
 
 mod directory;
 mod recovery;
+mod root;
 pub use directory::PreparedAttemptDirectory;
 pub use recovery::{
     RecoveredAttemptIntent, RecoveredUnmountedDirectory, RegistryRecoveryEntry,
     SystemdAttemptRecovery, UnmountedDirectoryInventory,
 };
+#[cfg(test)]
+pub use tests::{root_record_fixture, with_io_fault};
 
 const RECORD_SIZE: usize = 52;
 const REGISTRY_NAME: &str = "registry";
@@ -156,7 +161,7 @@ impl RegistryDirectory {
 /// The fixed root-owned registry at `/run/pigloros/sandbox/registry`.
 ///
 /// Startup provisions the directory with mode 0700. This component records
-/// planned and directory ownership only. Restart inventory, reconciliation and
+/// planned, directory and pre-launch root ownership. Restart reconciliation and
 /// subsequent lifecycle extensions must finish before provider admission opens.
 #[derive(Debug)]
 pub struct SystemdAttemptRegistry {
@@ -168,6 +173,15 @@ pub struct SystemdAttemptRegistry {
 struct RegistryState {
     failed: bool,
     next_sequence: u64,
+}
+
+impl RegistryState {
+    fn reserve_sequence(&mut self) -> Result<u64, SystemdAttemptRegistryError> {
+        self.next_sequence
+            .checked_add(1)
+            .ok_or(SystemdAttemptRegistryError::ReconciliationRequired)
+            .inspect(|sequence| self.next_sequence = *sequence)
+    }
 }
 
 impl SystemdAttemptRegistry {
@@ -221,13 +235,8 @@ impl SystemdAttemptRegistry {
             return Err(SystemdAttemptRegistryError::ReconciliationRequired);
         }
         let result = state
-            .next_sequence
-            .checked_add(1)
-            .ok_or(SystemdAttemptRegistryError::ReconciliationRequired)
-            .and_then(|sequence| {
-                state.next_sequence = sequence;
-                self.write_planned(intent, sequence)
-            });
+            .reserve_sequence()
+            .and_then(|sequence| self.write_planned(intent, sequence));
         state.failed = result.is_err();
         drop(state);
         result.map(|()| CommittedPlannedAttempt {
@@ -448,6 +457,32 @@ mod tests {
 
     type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
+    /// One independent byte oracle for the private root stage, not its encoder.
+    ///
+    /// # Panics
+    /// Panics unless `directory` has 84 bytes and `component` has 32 bytes.
+    #[must_use]
+    pub fn root_record_fixture(mut directory: Vec<u8>, component: &str) -> Vec<u8> {
+        assert_eq!(directory.len(), 84);
+        directory[..4].copy_from_slice(b"PAI3");
+        for value in [41_u64, 253, 3, 1, 5, 6, 253, 3, 102, 7, 7, 101] {
+            directory.extend_from_slice(&value.to_le_bytes());
+        }
+        directory.extend_from_slice(
+            format!("/run/pigloros/sandbox/attempts/{component}/root").as_bytes(),
+        );
+        for (capacity, text) in [
+            (129, b"CRYPT-VERITY-5f0e5a1c-root".as_slice()),
+            (16, b"loop7".as_slice()),
+        ] {
+            let start = directory.len();
+            directory.resize(start + capacity, 0);
+            directory[start..start + text.len()].copy_from_slice(text);
+        }
+        assert_eq!(directory.len(), 393);
+        directory
+    }
+
     std::thread_local! {
         static IO_FAULT: Cell<(usize, Option<usize>)> = const { Cell::new((0, None)) };
     }
@@ -472,10 +507,7 @@ mod tests {
         }
     }
 
-    pub(super) fn with_io_fault<T>(
-        fail_at: Option<usize>,
-        operation: impl FnOnce() -> T,
-    ) -> (T, usize) {
+    pub fn with_io_fault<T>(fail_at: Option<usize>, operation: impl FnOnce() -> T) -> (T, usize) {
         let _restore = RestoreIoFault(IO_FAULT.with(|state| state.replace((0, fail_at))));
         let result = operation();
         (result, IO_FAULT.with(|state| state.get().0))

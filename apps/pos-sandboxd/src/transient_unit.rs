@@ -159,7 +159,13 @@ impl ActivatedRootDirectory {
     /// [`crate::TransientServiceUnitName`], so the path is always valid.
     #[cfg(target_os = "linux")]
     pub(crate) fn for_attempt(component: &str) -> Self {
-        Self(format!("/run/pigloros/sandbox/attempts/{component}/root"))
+        Self(Self::path_for_attempt(component))
+    }
+
+    /// Canonical text for recorded claims; this constructs no verified root.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn path_for_attempt(component: &str) -> String {
+        format!("/run/pigloros/sandbox/attempts/{component}/root")
     }
 
     /// Return the exact D-Bus `s` value for `RootDirectory`.

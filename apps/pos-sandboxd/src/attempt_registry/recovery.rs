@@ -6,13 +6,14 @@ use std::os::unix::fs::MetadataExt;
 
 use rustix::fs::{openat2, Dir, Mode, OFlags, ResolveFlags};
 
+use super::root::{RootRecord, ROOT_RECORD_SIZE};
 use super::{
     registry_io, validate_directory, PlannedAttemptIntent, RegistryDirectory,
     SystemdAttemptRegistryError, TransientServiceUnitName,
 };
 
 type RegistryResult<T> = Result<T, SystemdAttemptRegistryError>;
-const MAX_RECORD_SIZE: usize = 84;
+const MAX_RECORD_SIZE: usize = ROOT_RECORD_SIZE;
 
 mod directories;
 pub use directories::{RecoveredUnmountedDirectory, UnmountedDirectoryInventory};
@@ -22,6 +23,7 @@ pub use directories::{RecoveredUnmountedDirectory, UnmountedDirectoryInventory};
 pub struct RecoveredAttemptIntent {
     planned: PlannedAttemptIntent,
     directory_identities: Option<[(u64, u64); 2]>,
+    root: Option<RootRecord>,
 }
 
 impl RecoveredAttemptIntent {
@@ -45,9 +47,9 @@ impl RecoveredAttemptIntent {
         planned_bytes.copy_from_slice(&bytes[..52]);
         planned_bytes[..4].copy_from_slice(b"PAI1");
         let planned = PlannedAttemptIntent::decode(&planned_bytes)?;
-        let directory_identities = if bytes.len() == MAX_RECORD_SIZE {
+        let directory_identities = if bytes.len() >= 84 {
             let mut identities = [0; 4];
-            for (slot, chunk) in identities.iter_mut().zip(bytes[52..].chunks_exact(8)) {
+            for (slot, chunk) in identities.iter_mut().zip(bytes[52..84].chunks_exact(8)) {
                 let mut word = [0; 8];
                 word.copy_from_slice(chunk);
                 *slot = u64::from_le_bytes(word);
@@ -62,9 +64,10 @@ impl RecoveredAttemptIntent {
         } else {
             None
         };
-        Ok(Self {
+        RootRecord::decode_extension(bytes, &planned).map(|root| Self {
             planned,
             directory_identities,
+            root,
         })
     }
 }
@@ -126,6 +129,12 @@ pub struct SystemdAttemptRecovery {
 }
 
 impl SystemdAttemptRecovery {
+    #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    pub(crate) fn from_runtime_directory(parent: &File, owner: u32) -> RegistryResult<Self> {
+        RegistryDirectory::from_runtime_directory(parent, owner).and_then(Self::from_directory)
+    }
+
     /// Open and inventory the fixed root-owned registry while admission is closed.
     ///
     /// # Errors
@@ -277,13 +286,10 @@ fn parse_content(
     temporary: bool,
 ) -> RegistryResult<Option<RecoveredAttemptIntent>> {
     let header = &bytes[..bytes.len().min(4)];
-    let size = if b"PAI1".starts_with(header) {
-        52
-    } else if b"PAI2".starts_with(header) {
-        84
-    } else {
-        return Err(SystemdAttemptRegistryError::InvalidIntent);
-    };
+    let size = [(b"PAI1", 52), (b"PAI2", 84), (b"PAI3", ROOT_RECORD_SIZE)]
+        .into_iter()
+        .find_map(|(tag, size)| tag.starts_with(header).then_some(size))
+        .ok_or(SystemdAttemptRegistryError::InvalidIntent)?;
     if bytes.len() > size || !temporary && bytes.len() != size {
         return Err(SystemdAttemptRegistryError::InvalidIntent);
     }
@@ -312,7 +318,7 @@ fn validate_record_prefix(bytes: &[u8], attempt_id: [u8; 16]) -> RegistryResult<
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use super::super::tests::with_io_fault;
+    use super::super::tests::{root_record_fixture, with_io_fault};
     use std::fs;
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::{symlink, PermissionsExt};
@@ -342,6 +348,112 @@ mod tests {
             bytes.extend_from_slice(&value.to_le_bytes());
         }
         Ok(bytes)
+    }
+
+    fn root_record() -> TestResult<Vec<u8>> {
+        directory_record().map(|bytes| root_record_fixture(bytes, KEY))
+    }
+
+    #[test]
+    fn root_stage_preserves_complete_claims_and_recognizes_interrupted_writes() -> TestResult {
+        let (runtime, held) = fixture()?;
+        let bytes = root_record()?;
+        let name = format!(".planned-{KEY}-1-1");
+        for length in 0..=bytes.len() {
+            write_record(runtime.path(), &name, &bytes[..length])?;
+            let entry = read_entry(&held, &name)?;
+            assert_eq!(
+                entry.intent().is_some(),
+                length == bytes.len(),
+                "prefix {length}"
+            );
+        }
+        fs::remove_file(runtime.path().join("registry").join(&name))?;
+        write_record(runtime.path(), KEY, &bytes)?;
+        let recovery = SystemdAttemptRecovery::from_directory(held)?;
+        let intent = recovery.entries()[0]
+            .intent()
+            .ok_or("complete root claims")?;
+        assert_eq!(intent.planned().attempt_id(), [1; 16]);
+        assert_eq!(intent.directory_identities(), Some([(7, 11), (7, 13)]));
+        assert_eq!(
+            intent
+                .root
+                .as_ref()
+                .ok_or("root claims")?
+                .bytes()
+                .as_slice(),
+            bytes
+        );
+        recovery.verify_unchanged()?;
+        let mut changed = bytes;
+        changed[84] ^= 1;
+        write_record(runtime.path(), KEY, &changed)?;
+        assert!(recovery.verify_unchanged().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_complete_root_claims_never_enter_recovery_inventory() -> TestResult {
+        let (runtime, held) = fixture()?;
+        let valid = root_record()?;
+        for value in [0, u64::from(u32::MAX)] {
+            let mut bytes = valid.clone();
+            for index in [1, 2, 6, 7, 9, 10] {
+                bytes[84 + index * 8..84 + (index + 1) * 8].copy_from_slice(&value.to_le_bytes());
+            }
+            write_record(runtime.path(), KEY, &bytes)?;
+            assert!(
+                read_entry(&held, KEY)?.intent().is_some(),
+                "device limit {value}"
+            );
+        }
+        for index in [0, 3, 5, 8, 11] {
+            let mut bytes = valid.clone();
+            bytes[84 + index * 8..84 + (index + 1) * 8].fill(0);
+            write_record(runtime.path(), KEY, &bytes)?;
+            assert!(read_entry(&held, KEY).is_err(), "zero word {index}");
+        }
+        // Keep matching pairs coherent so device correlation cannot mask width.
+        for indices in [&[1, 6][..], &[2, 7], &[9], &[10]] {
+            let mut bytes = valid.clone();
+            for &index in indices {
+                bytes[84 + index * 8..84 + (index + 1) * 8]
+                    .copy_from_slice(&(u64::from(u32::MAX) + 1).to_le_bytes());
+            }
+            write_record(runtime.path(), KEY, &bytes)?;
+            assert!(read_entry(&held, KEY).is_err(), "device words {indices:?}");
+        }
+        for index in [6, 7] {
+            let mut wrong_mapper = valid.clone();
+            wrong_mapper[84 + index * 8..84 + (index + 1) * 8]
+                .copy_from_slice(&254_u64.to_le_bytes());
+            write_record(runtime.path(), KEY, &wrong_mapper)?;
+            assert!(read_entry(&held, KEY).is_err(), "mapper word {index}");
+        }
+        let mut wrong_path = valid.clone();
+        wrong_path[180] ^= 1;
+        write_record(runtime.path(), KEY, &wrong_path)?;
+        assert!(read_entry(&held, KEY).is_err());
+        for (start, end) in [(248, 377), (377, 393)] {
+            for fault in 0..4 {
+                let mut bytes = valid.clone();
+                match fault {
+                    0 => bytes[start..end].fill(0),
+                    1 => bytes[start..end].fill(b'x'),
+                    2 => bytes[start] = 0xff,
+                    _ => bytes[end - 1] = 1,
+                }
+                write_record(runtime.path(), KEY, &bytes)?;
+                assert!(
+                    read_entry(&held, KEY).is_err(),
+                    "text {start} fault {fault}"
+                );
+            }
+        }
+        write_record(runtime.path(), KEY, &valid)?;
+        assert!(read_entry(&held, KEY)?.intent().is_some());
+        Ok(())
     }
 
     fn write_record(root: &std::path::Path, name: &str, bytes: &[u8]) -> TestResult {
