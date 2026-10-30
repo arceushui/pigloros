@@ -583,6 +583,8 @@ fn measured_report(
 fn measured_positive_usage_passes_at_an_equal_budget_and_fails_one_below() -> TestResult {
     let records = oracle_records();
     let measured = counters(MEASURED_POSITIVE_USAGE);
+    // The one-below cases take the first seven counters: Simulation Time must be the last.
+    assert_eq!(COUNTERS[7].0, "simulation_time_ns");
     for mode in CORPUS_MODES {
         let equal = measured_report(&records, mode, measured)?;
         expect_all(&equal, CaseStatus::Pass)
