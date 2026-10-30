@@ -84,7 +84,7 @@ fn with_record_field(field: usize, value: Value) -> Vec<u8> {
 /// The valid input with the encoding of record `b`'s probability (777777) replaced by `raw`.
 fn splice(raw: &[u8]) -> Vec<u8> {
     let valid = encode(&Value::Array(fields()));
-    let marker = [0x1a, 0x00, 0x0b, 0xde, 0x31];
+    let marker: [u8; 5] = [0x1a, 0x00, 0x0b, 0xde, 0x31];
     let at = valid
         .windows(marker.len())
         .position(|window| window == marker)
