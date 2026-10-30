@@ -637,7 +637,7 @@ fn provider_budgets() -> TestResult<[[u64; 8]; 7]> {
 fn measured_report(
     records: &[Vec<u8>],
     mode: u64,
-    budgets: [[u64; 8]; 7],
+    budgets: &[[u64; 8]; 7],
 ) -> TestResult<ConformanceReport> {
     let corpus = support::plugin_corpus_with_budgets(records, mode, budgets)?;
     run(&corpus, |attempt| {
@@ -667,7 +667,7 @@ fn measured_usage_passes_at_the_provider_budgets_and_fails_one_below() -> TestRe
     let records = oracle_records();
     let budgets = provider_budgets()?;
     for mode in CORPUS_MODES {
-        let equal = measured_report(&records, mode, budgets)?;
+        let equal = measured_report(&records, mode, &budgets)?;
         expect_all(&equal, CaseStatus::Pass)
             .map_err(|error| io::Error::other(format!("mode {mode} at the budget: {error}")))?;
         for (family, budget) in budgets.iter().enumerate() {
@@ -679,7 +679,7 @@ fn measured_usage_passes_at_the_provider_budgets_and_fails_one_below() -> TestRe
             for (index, (name, _)) in lowered {
                 let mut below = budgets;
                 below[family][index] -= 1;
-                let report = measured_report(&records, mode, below)?;
+                let report = measured_report(&records, mode, &below)?;
                 let lowered_case = case(&report, code)?;
                 assert_eq!(
                     (lowered_case.outcome, lowered_case.actual_error),
