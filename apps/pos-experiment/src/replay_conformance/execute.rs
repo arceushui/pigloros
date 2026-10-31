@@ -23,6 +23,7 @@ use pos_runtime::{Driver, ObservationView, RuntimeError, StepOutput};
 use pos_state::ProjectionRegistry;
 use pos_store::StoreConfig;
 
+use super::pair::LegEvidenceV1;
 use super::payload::{
     hex, ClosureV1, CompositionV1, DigestSizeV1 as DigestSizeRecordV1, DivergenceV1, FirstErrorV1,
     LegV1, ManifestFieldsV1, ProfileV1, RecordV1, ScriptV1, SubCaseV1,
@@ -371,15 +372,15 @@ impl RecomputationSubjectV1 for ScriptV1 {
     }
 }
 
-/// Run one sub-case: one leg per profile. `None` is an operational host or
-/// codec failure.
+/// Run one sub-case: one leg per profile. Returns its record and the manifest
+/// and `VRR1` of each leg; `None` is an operational host or codec failure.
 pub(super) fn run_subcase(
     host: &HostV1,
     subcase: &SubCaseV1,
     fixture_digest: [u8; 32],
     mode: ExecutionModeV1,
     store_config: &StoreConfig,
-) -> Option<RecordV1> {
+) -> Option<(RecordV1, Vec<LegEvidenceV1>)> {
     let requests: Vec<LegRequestV1> = subcase
         .profiles
         .iter()
@@ -455,17 +456,30 @@ pub(super) fn run_subcase(
             }
         }
     };
-    outcomes.map(|outcomes| RecordV1 {
-        id: subcase.id.clone(),
-        fixture_id: subcase.fixture_id.clone(),
-        composition: composed,
-        folded_events: folded.load(Ordering::Relaxed),
-        legs: subcase
-            .profiles
+    outcomes.map(|outcomes| {
+        let record = RecordV1 {
+            id: subcase.id.clone(),
+            fixture_id: subcase.fixture_id.clone(),
+            composition: composed,
+            folded_events: folded.load(Ordering::Relaxed),
+            legs: subcase
+                .profiles
+                .iter()
+                .zip(&outcomes)
+                .map(|(profile, outcome)| leg(*profile, outcome))
+                .collect(),
+        };
+        let evidence = requests
             .iter()
-            .zip(&outcomes)
-            .map(|(profile, outcome)| leg(*profile, outcome))
-            .collect(),
+            .zip(outcomes)
+            .map(|(request, outcome)| LegEvidenceV1 {
+                subcase_id: subcase.id.clone(),
+                manifest: request.manifest.clone(),
+                result: outcome.result,
+                divergence: outcome.divergence,
+            })
+            .collect();
+        (record, evidence)
     })
 }
 
