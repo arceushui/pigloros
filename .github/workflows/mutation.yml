@@ -35,7 +35,7 @@ jobs:
           toolchain: 1.97.1
           components: rustfmt
       - name: Report exact pinned formatting diff
-        run: rustfmt --check --edition 2021 crates/pos-reference/src/root_selector/tests/admission_bounds.rs
+        run: rustfmt +1.97.1 --check --edition 2021 crates/pos-reference/src/root_selector/tests/admission_bounds.rs
   admission-bound-proof:
     if: ${{ inputs.mode != 'format' }}
     name: admission bound proof (${{ matrix.case }})
