@@ -774,6 +774,14 @@ fn public_registry_traits_and_role_boundaries_are_exercised(
         assert_eq!(role.is_signing(), signing);
         assert_eq!(role.is_encryption(), encryption);
         assert_eq!(role.is_conformance_signing(), conformance);
+        let role_bound = if conformance {
+            Err(pos_core::KeyRegistryErrorV1::SigningPurposeMismatch)
+        } else if signing {
+            Ok(())
+        } else {
+            Err(pos_core::KeyRegistryErrorV1::SigningRoleRequired)
+        };
+        assert_eq!(role.require_role_bound_signing(), role_bound, "{role:?}");
     }
     assert_eq!(
         KeyRoleV1::from_code(7),
