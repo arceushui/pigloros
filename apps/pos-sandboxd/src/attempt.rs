@@ -16,7 +16,8 @@ use pos_reference::{
 };
 
 use crate::{
-    AdmittedEntry, ExecuteError, LauncherFacts, PreparedAttemptDirectory, TransientServiceUnitName,
+    AdmittedEntry, ExecuteError, ExecutionOwnership, LauncherFacts, PreparedAttemptDirectory,
+    TransientServiceUnitName,
 };
 
 /// The launch-policy view of an admitted attempt: everything a Local grant
@@ -106,6 +107,7 @@ pub struct AdmittedAttempt {
     syscall_set: Arc<SandboxSyscallSet>,
     policy: Arc<ExecutionPolicyFacts>,
     lease: Option<ExecutionLease>,
+    execution: ExecutionOwnership,
 }
 
 impl AdmittedAttempt {
@@ -159,7 +161,12 @@ impl AdmittedAttempt {
                 input: entry.policy().input_descriptor().clone(),
             }),
             lease: Some(ExecutionLease(entry.retain())),
+            execution: directory.execution_ownership(),
         })
+    }
+
+    pub(crate) fn claim_execution(&self) -> Result<(), ExecuteError> {
+        self.execution.claim()
     }
 
     /// Exact ELM1 projection from this attempt's independently derived policy.
@@ -314,6 +321,7 @@ impl AdmittedAttempt {
                             },
                         }),
                         lease: None,
+                        execution: ExecutionOwnership::default(),
                     })
                 })
             })
@@ -328,6 +336,13 @@ impl AdmittedAttempt {
     #[cfg(all(test, unix))]
     pub(crate) fn with_readback(mut self, digest: [u8; 32]) -> Self {
         Arc::make_mut(&mut self.policy).readback_digest = digest;
+        self
+    }
+
+    /// Deliberately change only authority while retaining this test owner's identity.
+    #[cfg(all(test, unix))]
+    pub(crate) const fn with_authority(mut self, authority: AdmittedAuthority) -> Self {
+        self.authority = authority;
         self
     }
 

@@ -7,6 +7,12 @@
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
 #[cfg(target_os = "linux")]
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+
+#[cfg(target_os = "linux")]
 mod attempt;
 #[cfg(target_os = "linux")]
 mod attempt_registry;
@@ -41,6 +47,31 @@ mod transient_unit;
 
 #[derive(Debug)]
 struct CgroupRoot(std::fs::File);
+
+/// One irreversible execution claim, shared by the exact prepared directory.
+#[cfg(target_os = "linux")]
+#[derive(Clone, Debug, Default)]
+struct ExecutionOwnership(Arc<AtomicBool>);
+
+#[cfg(target_os = "linux")]
+impl PartialEq for ExecutionOwnership {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Eq for ExecutionOwnership {}
+
+#[cfg(target_os = "linux")]
+impl ExecutionOwnership {
+    fn claim(&self) -> Result<(), ExecuteError> {
+        self.0
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map(|_| ())
+            .map_err(|_| ExecuteError::AttemptAlreadyClaimed)
+    }
+}
 
 /// Facts copied only from the authenticated, retained SIC1 provider binary.
 #[cfg(target_os = "linux")]
