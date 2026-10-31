@@ -141,8 +141,50 @@ pub const fn host_verified_execution_profile_bytes_v1(
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use super::{draft_execution_profile_bytes_v1, host_verified_execution_profile_bytes_v1};
+    use super::{
+        draft_execution_profile_bytes_v1, host_verified_execution_profile_bytes_v1,
+        prohibited_text_material, TOKEN_PREFIXES,
+    };
     use crate::BundleContractErrorV1;
+
+    fn token(prefix: &[u8], length: usize) -> Vec<u8> {
+        [b"x=".as_slice(), prefix, &vec![b'A'; length], b" tail"].concat()
+    }
+
+    #[test]
+    fn every_token_prefix_needs_its_full_token_in_either_case() {
+        for (prefix, minimum) in TOKEN_PREFIXES {
+            for prefix in [prefix.to_ascii_lowercase(), prefix.to_ascii_uppercase()] {
+                assert!(prohibited_text_material(&token(&prefix, minimum)));
+                assert!(!prohibited_text_material(&token(&prefix, minimum - 1)));
+            }
+        }
+    }
+
+    #[test]
+    fn tokens_count_only_ascii_token_bytes() {
+        assert!(prohibited_text_material(b"ghp_._~+/=-123456789"));
+        assert!(!prohibited_text_material(b"ghp_._~+/=-12345678 9"));
+        assert!(prohibited_text_material(b"\xff\xfeghp_abcdefghijklmnop"));
+        assert!(!prohibited_text_material(b"ghp_abcdefgh\xffijklmnop"));
+        assert!(!prohibited_text_material(b""));
+        assert!(!prohibited_text_material(b"g"));
+    }
+
+    #[test]
+    fn private_key_armour_needs_both_markers_in_any_order() {
+        assert!(prohibited_text_material(
+            b"-----BEGIN TEST PRIVATE KEY-----"
+        ));
+        assert!(prohibited_text_material(
+            b"private key----- before -----begin"
+        ));
+        assert!(prohibited_text_material(
+            b"-----BEGIN PRIVATE KEY-----\n-----BEGIN PRIVATE KEY-----"
+        ));
+        assert!(!prohibited_text_material(b"-----BEGIN PUBLIC KEY-----"));
+        assert!(!prohibited_text_material(b"PRIVATE KEY-----"));
+    }
 
     #[test]
     fn draft_profiles_do_not_become_host_verified_profiles() {
@@ -1878,49 +1920,84 @@ fn cbor_secret(value: &Value) -> bool {
     }
 }
 
-fn prohibited_secret_material(bytes: &[u8]) -> bool {
-    const TOKEN_PREFIXES: &[(&str, usize)] = &[
-        ("bearer ", 16),
-        ("basic ", 16),
-        ("akia", 16),
-        ("asia", 16),
-        ("ghp_", 16),
-        ("gho_", 16),
-        ("ghu_", 16),
-        ("ghs_", 16),
-        ("ghr_", 16),
-        ("github_pat_", 16),
-        ("glpat-", 16),
-        ("xoxb-", 16),
-        ("xoxa-", 16),
-        ("xoxp-", 16),
-        ("xoxr-", 16),
-        ("xoxs-", 16),
-        ("sk_live_", 16),
-        ("sk_test_", 16),
-        ("aiza", 16),
-        ("eyj", 20),
-    ];
+/// Credential prefixes, matched without regard to ASCII case, and the number of token bytes that
+/// must follow each one.
+const TOKEN_PREFIXES: [(&[u8], usize); 20] = [
+    (b"bearer ", 16),
+    (b"basic ", 16),
+    (b"akia", 16),
+    (b"asia", 16),
+    (b"ghp_", 16),
+    (b"gho_", 16),
+    (b"ghu_", 16),
+    (b"ghs_", 16),
+    (b"ghr_", 16),
+    (b"github_pat_", 16),
+    (b"glpat-", 16),
+    (b"xoxb-", 16),
+    (b"xoxa-", 16),
+    (b"xoxp-", 16),
+    (b"xoxr-", 16),
+    (b"xoxs-", 16),
+    (b"sk_live_", 16),
+    (b"sk_test_", 16),
+    (b"aiza", 16),
+    (b"eyj", 20),
+];
 
+fn prohibited_secret_material(bytes: &[u8]) -> bool {
     let json = serde_json::from_slice(bytes).is_ok_and(|value| json_secret(&value));
     let mut cursor = Cursor::new(bytes);
     let cbor = ciborium::from_reader::<Value, _>(&mut cursor).ok();
     let complete_cbor = u64::try_from(bytes.len()).is_ok_and(|length| cursor.position() == length);
     let cbor = complete_cbor && cbor.is_some_and(|value| cbor_secret(&value));
-    let lowercase = bytes.iter().map(u8::to_ascii_lowercase).collect::<Vec<_>>();
-    let text = String::from_utf8_lossy(&lowercase);
-    let private_key = text.contains("-----begin") && text.contains("private key-----");
-    let prefixed = TOKEN_PREFIXES.iter().any(|(prefix, minimum)| {
-        text.match_indices(prefix).any(|(offset, _)| {
-            text[offset + prefix.len()..]
-                .bytes()
-                .take_while(|byte| byte.is_ascii_alphanumeric() || b"._~+/=-".contains(byte))
-                .take(*minimum)
-                .count()
-                == *minimum
-        })
-    });
-    json || cbor || private_key || prefixed
+    json || cbor || prohibited_text_material(bytes)
+}
+
+/// Find a PEM private-key armour or a credential token in one pass over the bytes. Only the
+/// byte pairs that can begin one of those ASCII patterns are compared in full, so the cost of a
+/// member stays linear in its length.
+fn prohibited_text_material(bytes: &[u8]) -> bool {
+    let mut private_key_begin = false;
+    let mut private_key_end = false;
+    for (offset, pair) in bytes.windows(2).enumerate() {
+        if matches!(
+            pair,
+            [b'-', b'-']
+                | [b'p' | b'P', b'r' | b'R']
+                | [b'a' | b'A', b'i' | b'I' | b'k' | b'K' | b's' | b'S']
+                | [b'b' | b'B', b'a' | b'A' | b'e' | b'E']
+                | [b'e' | b'E', b'y' | b'Y']
+                | [b'g' | b'G', b'h' | b'H' | b'i' | b'I' | b'l' | b'L']
+                | [b's' | b'S', b'k' | b'K']
+                | [b'x' | b'X', b'o' | b'O']
+        ) {
+            let rest = &bytes[offset..];
+            private_key_begin |= starts_with_ignore_ascii_case(rest, b"-----begin");
+            private_key_end |= starts_with_ignore_ascii_case(rest, b"private key-----");
+            if TOKEN_PREFIXES.iter().any(|&(prefix, minimum)| {
+                starts_with_ignore_ascii_case(rest, prefix)
+                    && rest[prefix.len()..]
+                        .iter()
+                        .copied()
+                        .take_while(|byte| {
+                            byte.is_ascii_alphanumeric() || b"._~+/=-".contains(byte)
+                        })
+                        .take(minimum)
+                        .count()
+                        == minimum
+            }) {
+                return true;
+            }
+        }
+    }
+    private_key_begin && private_key_end
+}
+
+fn starts_with_ignore_ascii_case(bytes: &[u8], prefix: &[u8]) -> bool {
+    bytes
+        .get(..prefix.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
 }
 
 fn ordered_descriptors(descriptors: &[BundleMemberDescriptorV1]) -> bool {

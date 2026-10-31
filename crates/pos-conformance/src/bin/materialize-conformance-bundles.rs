@@ -59,7 +59,7 @@ enum MaterializationCommand {
 }
 
 enum PreparedMaterializationCommand {
-    Publish(AtomicPublication),
+    Publish(PublicationParent),
     Fingerprint,
 }
 
@@ -496,10 +496,10 @@ fn run(
             signing_key_from_encoded(encoded_signing_key).map(|signing_key| (command, signing_key))
         })
         .and_then(|(command, signing_key)| {
-            materialized_files(&signing_key).map(|outputs| (command, outputs))
+            prepare_command(command).map(|command| (command, signing_key))
         })
-        .and_then(|(command, outputs)| {
-            prepare_command(command).and_then(|command| execute_command(command, &outputs))
+        .and_then(|(command, signing_key)| {
+            materialized_files(&signing_key).and_then(|outputs| execute_command(command, &outputs))
         })
 }
 
@@ -507,16 +507,14 @@ fn prepare_command(
     command: MaterializationCommand,
 ) -> Result<PreparedMaterializationCommand, Box<dyn Error>> {
     match command {
-        MaterializationCommand::Publish(output_root) => prepare_atomic_publication(&output_root)
+        MaterializationCommand::Publish(output_root) => open_publication_parent(&output_root)
             .map(PreparedMaterializationCommand::Publish)
             .map_err(Into::into),
         MaterializationCommand::Fingerprint => Ok(PreparedMaterializationCommand::Fingerprint),
     }
 }
 
-fn prepare_atomic_publication(
-    destination: &Path,
-) -> Result<AtomicPublication, MaterializationError> {
+fn open_publication_parent(destination: &Path) -> Result<PublicationParent, MaterializationError> {
     let expected = pos_conformance::hex_digest(&SOURCE_INVENTORY_DIGEST);
     if destination
         .file_name()
@@ -525,7 +523,7 @@ fn prepare_atomic_publication(
     {
         CString::new(expected)
             .map_err(|_| MaterializationError::AtomicPublicationUnsupported)
-            .and_then(|destination_name| AtomicPublication::prepare(destination, destination_name))
+            .and_then(|destination_name| PublicationParent::open(destination, destination_name))
     } else {
         Err(MaterializationError::SourceInventoryAddressMismatch)
     }
@@ -536,8 +534,8 @@ fn execute_command(
     outputs: &[MaterializedFile],
 ) -> Result<(), Box<dyn Error>> {
     match command {
-        PreparedMaterializationCommand::Publish(publication) => {
-            publish_materialized_tree(publication, outputs).map_err(Into::into)
+        PreparedMaterializationCommand::Publish(parent) => {
+            publish_materialized_tree(parent, outputs).map_err(Into::into)
         }
         PreparedMaterializationCommand::Fingerprint => {
             let fingerprint = format!(

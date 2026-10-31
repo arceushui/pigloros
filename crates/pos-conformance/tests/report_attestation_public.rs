@@ -3,11 +3,6 @@
 //! public seams, `sign_report_attestation_v1` and `verify_report_attestation_v1`, with the
 //! owner decisions of `ADR-062_R8_Report_Attestation_Binding` (split trust steps, subjects bound
 //! to their CNR1 fields).
-//!
-//! The file name only places this suite before the slow `bundle_contract_*` suites in
-//! `cargo test`'s alphabetical order. That is incidental: it keeps the bounded test phase of the
-//! diff-mutation job from being spent in those pre-existing suites before it reaches the only
-//! tests that kill mutants of `report_attestation.rs`, but it does not make them faster.
 
 pub mod support;
 
@@ -56,7 +51,7 @@ struct Fixture {
 static FIXTURE: OnceLock<Result<Fixture, String>> = OnceLock::new();
 
 fn materialize() -> TestResult<Fixture> {
-    let archive = support::current_archive("report-attestation")?;
+    let archive = support::current_archive()?;
     let bundle = ConformanceBundleV1::from_canonical_cbor(&archive)?;
     let profile = bundle
         .members
