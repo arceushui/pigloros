@@ -747,7 +747,13 @@ def gateway_report(root: Path, report: dict, metadata: dict, graph: dict) -> dic
     crates = {crate["package"]["id"]: crate for crate in report["crates"]}
     if len(crates) != len(report["crates"]) or not selected <= crates.keys():
         raise NoticeError("gateway notice report has duplicate IDs or omits a gateway build crate")
+    locked = {
+        (package["name"], package["version"], package.get("source"))
+        for package in load_toml(root, Path(HOST_LOCK)).get("package", [])
+    }
     for identity in selected:
+        if tuple(packages[identity].get(key) for key in ("name", "version", "source")) not in locked:
+            raise NoticeError("gateway registry package identity is not pinned by Cargo.lock")
         if any(
             crates[identity]["package"].get(key) != packages[identity].get(key)
             for key in ("name", "version", "source")

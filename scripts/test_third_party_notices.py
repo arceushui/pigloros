@@ -8,6 +8,7 @@ import copy
 import hashlib
 import io
 import json
+import shlex
 import shutil
 import sys
 import tempfile
@@ -1000,6 +1001,24 @@ class GatewayAssembleTests(WorkspaceTest):
         with self.assertRaisesRegex(notices.NoticeError, "identity differs"):
             self.assemble(graphs, metadata, units)
 
+    def test_consistent_foreign_registry_witnesses_do_not_match_the_lockfile(self) -> None:
+        graphs, metadata, units = self.inputs()
+        source = graphs[notices.HOST_LOCK]
+        original = source["crates"][0]["package"]["id"]
+        foreign = {"id": "foreign-registry#anyhow", "source": "registry+https://example.invalid/index"}
+        for package in (
+            *(crate["package"] for crate in source["crates"]),
+            *(used["crate"] for licence in source["licenses"] for used in licence["used_by"]),
+            *metadata["packages"],
+        ):
+            if package["id"] == original:
+                package.update(foreign)
+        for unit in units["units"]:
+            if unit["pkg_id"] == original:
+                unit["pkg_id"] = foreign["id"]
+        with self.assertRaisesRegex(notices.NoticeError, "identity is not pinned by Cargo.lock"):
+            self.assemble(graphs, metadata, units)
+
     def test_guest_graphs_and_unpinned_runtime_sources_fail(self) -> None:
         graphs, metadata, units = self.inputs()
         graphs[GUEST] = report("wit-bindgen", lock=GUEST)
@@ -1091,21 +1110,27 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertEqual(set(workflow["jobs"]), {"notices"})
         job = workflow["jobs"]["notices"]
         self.assertEqual(set(job), {"name", "runs-on", "timeout-minutes", "env", "steps"})
+        self.assertEqual((job["name"], job["runs-on"], job["timeout-minutes"]), ("generate", "ubuntu-24.04", 20))
         self.assertEqual(job["env"], {"NOTICE_SCOPE": "${{ inputs.scope }}"})
-        steps = job["steps"]
-        self.assertEqual(steps[0], {"uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"})
-        for step in steps:
-            self.assertNotIn("if", step)
-            self.assertNotIn("continue-on-error", step)
-            self.assertNotIn("shell", step)
-            self.assertNotIn("working-directory", step)
-        programs = [step for step in steps if "run" in step]
-        self.assertEqual([step["name"] for step in programs], list(NOTICE_PROGRAM_SHA256))
-        for step in programs:
-            self.assertEqual(hashlib.sha256(step["run"].encode()).hexdigest(), NOTICE_PROGRAM_SHA256[step["name"]])
-        self.assertNotIn("env", programs[0])
-        self.assertEqual(programs[2]["env"], {"REPORTS": "${{ runner.temp }}/cargo-about"})
-        self.assertEqual(programs[3]["env"], {"REPORTS": "${{ runner.temp }}/cargo-about", "BUNDLE": "${{ runner.temp }}/third-party-notices"})
+        # Compare the complete ordered step graph, including each allowed key.
+        steps = [
+            {**step, "run": hashlib.sha256(step["run"].encode()).hexdigest()} if "run" in step else step
+            for step in job["steps"]
+        ]
+        validate, verify, generate, assemble = NOTICE_PROGRAM_SHA256
+        self.assertEqual(steps, [
+            {"uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"},
+            {"name": validate, "run": NOTICE_PROGRAM_SHA256[validate]},
+            {"uses": "dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de",
+             "with": {"toolchain": "1.97.1", "components": "rust-src", "targets": "wasm32-unknown-unknown"}},
+            {"name": "Install cargo-about", "uses": TAKI, "with": {"tool": "cargo-about@0.9.2"}},
+            {"name": verify, "env": {"GITHUB_TOKEN": "${{ github.token }}"}, "run": NOTICE_PROGRAM_SHA256[verify]},
+            {"name": generate, "env": {"REPORTS": "${{ runner.temp }}/cargo-about"}, "run": NOTICE_PROGRAM_SHA256[generate]},
+            {"name": assemble, "env": {"REPORTS": "${{ runner.temp }}/cargo-about", "BUNDLE": "${{ runner.temp }}/third-party-notices"},
+             "run": NOTICE_PROGRAM_SHA256[assemble]},
+            {"name": "Upload the notice bundle", "uses": "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+             "with": {"name": "third-party-notices", "path": "${{ runner.temp }}/third-party-notices", "if-no-files-found": "error"}},
+        ])
 
     def test_generator_pins_cargo_about_and_runs_every_stage(self) -> None:
         steps = self.reusable["jobs"]["notices"]["steps"]
@@ -1152,6 +1177,9 @@ class WorkflowContractTests(unittest.TestCase):
             lambda w: w.update(defaults={"run": {"shell": "bash -c 'exit 0'"}}),
             lambda w: w["jobs"]["notices"].update({"continue-on-error": True}),
             lambda w: steps(w)[0].update({"with": {"ref": "main"}}),
+            lambda w: steps(w).insert(-2, {"uses": "example/unreviewed@" + "1" * 40}),
+            lambda w: steps(w)[2].update({"id": "unreviewed-output"}),
+            lambda w: steps(w)[2]["with"].update(toolchain="nightly"),
             lambda w: program(w, generate).update({"if": "false"}),
             lambda w: program(w, assemble).update({"continue-on-error": True}),
             lambda w: program(w, generate).update(run="echo fabricated graph"),
@@ -1167,7 +1195,33 @@ class WorkflowContractTests(unittest.TestCase):
 
     def test_unit_graph_build_selection_matches_the_gateway_image(self) -> None:
         dockerfile = (ROOT / "Dockerfile").read_text()
-        self.assertIn("cargo build --locked --release --bin piglor-gateway", dockerfile)
+        self.assert_gateway_build_contract(dockerfile)
+
+    def assert_gateway_build_contract(self, dockerfile: str) -> None:
+        # This reviewed builder has exactly one RUN; do not accept extra flags
+        # or shell commands after the default-feature release build.
+        builder, separator, _ = dockerfile.partition("\nFROM ")
+        self.assertTrue(separator)
+        commands = [
+            shlex.split(line, comments=True)
+            for line in builder.replace("\\\n", " ").splitlines()
+            if line.split(maxsplit=1) and line.split(maxsplit=1)[0].upper() == "RUN"
+        ]
+        self.assertEqual(commands, [[
+            "RUN", "--mount=type=cache,target=/usr/local/cargo/registry",
+            "cargo", "build", "--locked", "--release", "--bin", "piglor-gateway",
+        ]])
+
+    def test_image_build_feature_or_extra_command_drift_is_rejected(self) -> None:
+        dockerfile = (ROOT / "Dockerfile").read_text()
+        command = "cargo build --locked --release --bin piglor-gateway"
+        for replacement in (
+            command + " --all-features",
+            command + " && cargo build --all-features --bin piglor-gateway",
+            command + "\nRUN cargo build --all-features --bin piglor-gateway",
+        ):
+            with self.subTest(replacement=replacement), self.assertRaises(AssertionError):
+                self.assert_gateway_build_contract(dockerfile.replace(command, replacement))
 
     def test_ci_calls_the_generator_and_requires_it(self) -> None:
         jobs = self.ci["jobs"]
