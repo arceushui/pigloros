@@ -154,6 +154,13 @@ opt-level = 3
 [profile.dev.package.blake3]
 opt-level = 3
 
+# Bundled SQLite repeatedly prepares and validates the full store schema in
+# public adapter tests. Keep its C engine optimized as well: unoptimized
+# pos-store worker baselines approach the 120-second mutation test limit (#399).
+# Workspace crates retain their default coverage and debugging profile.
+[profile.dev.package.libsqlite3-sys]
+opt-level = 3
+
 # P-256 (WebAuthn) and its arithmetic stack.
 [profile.dev.package.p256]
 opt-level = 3
