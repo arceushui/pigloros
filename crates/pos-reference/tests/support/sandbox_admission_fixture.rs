@@ -600,12 +600,14 @@ fn payload_digest(domain: &[u8], payload: &[u8]) -> [u8; 32] {
     *hasher.finalize().as_bytes()
 }
 
+public_admission_tests! {
 fn execute_request(
     fixture: &Fixture,
     launch: &LaunchPolicy,
     capability_ids: &[&str],
 ) -> TestResult<Vec<u8>> {
     execute_request_with_input(fixture, launch, capability_ids, b"input")
+}
 }
 
 fn execute_request_with_input(
