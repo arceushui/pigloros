@@ -35,7 +35,9 @@ impl DirectoryIdentity {
 ///
 /// This owns the held descriptors and registry lock. It grants no mount or
 /// execution authority; current image/control admission is still required.
-/// Dropping it leaves the intent and directories for identity-safe recovery.
+/// Dropping it closes its unclaimed execution permission before closing these
+/// descriptors and leaves the intent and directories for identity-safe recovery.
+/// An already claimed execution is not cancelled or proved clean by this drop.
 #[derive(Debug)]
 pub struct PreparedAttemptDirectory {
     planned: CommittedPlannedAttempt,
@@ -47,6 +49,12 @@ pub struct PreparedAttemptDirectory {
     // This permits verified cleanup without acknowledging durability or launch.
     recorded_root: OnceLock<RootRecord>,
     execution: crate::attempt::ExecutionOwnership,
+}
+
+impl Drop for PreparedAttemptDirectory {
+    fn drop(&mut self) {
+        self.execution.close();
+    }
 }
 
 impl CommittedPlannedAttempt {

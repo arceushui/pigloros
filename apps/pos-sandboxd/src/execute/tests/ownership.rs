@@ -1,7 +1,49 @@
 use super::*;
 use crate::{
-    PlannedAttemptIntent, StagingLedger, StagingLimits, StagingUsage, SystemdAttemptRegistry,
+    PlannedAttemptIntent, PreparedAttemptDirectory, StagingLedger, StagingLimits, StagingUsage,
+    SystemdAttemptRegistry, VerifiedStagedInput,
 };
+use pos_reference::provider_admission::test_support::StagedInstallation;
+
+mod abandonment;
+
+struct AuthenticatedOwner {
+    directory: PreparedAttemptDirectory,
+    _registry: SystemdAttemptRegistry,
+    input: VerifiedStagedInput,
+    ledger: StagingLedger,
+    // Keep cleanup guards alive until admitted input descriptors have closed.
+    _staging: tempfile::TempDir,
+    installation: StagedInstallation,
+}
+
+fn authenticated_owner() -> TestResult<AuthenticatedOwner> {
+    let installation = StagedInstallation::stage_execution().map_err(|error| error.to_string())?;
+    let ledger = StagingLedger::new(StagingLimits {
+        aggregate_bytes: 512 * 1024 * 1024,
+    });
+    let (staging, input) =
+        crate::test_fixtures::staged_execution::verified_input(&installation, &ledger)
+            .map_err(|error| error.to_string())?;
+    crate::test_fixtures::attempt_directory::fixed_registry().map_err(|error| error.to_string())?;
+    let registry = SystemdAttemptRegistry::open()?;
+    let entry = input.entry();
+    let request = entry.admission().snapshot().request().clone();
+    let directory = registry
+        .commit_planned(&PlannedAttemptIntent::new(
+            request.attempt_id,
+            request.authority.sim1_digest,
+        )?)?
+        .prepare_directory()?;
+    Ok(AuthenticatedOwner {
+        directory,
+        _registry: registry,
+        input,
+        ledger,
+        _staging: staging,
+        installation,
+    })
+}
 
 fn job(scenario: &Scenario, attempt: &AdmittedAttempt) -> ExecuteJob {
     ExecuteJob {
@@ -233,8 +275,7 @@ async fn concurrent_contenders_cannot_prepare_a_second_execution() -> TestResult
 
 #[tokio::test]
 async fn authenticated_reconstruction_preserves_a_refused_execution_owner() -> TestResult {
-    use crate::test_fixtures::attempt_directory::{fixed_registry, require_isolated_root};
-    use pos_reference::provider_admission::test_support::StagedInstallation;
+    use crate::test_fixtures::attempt_directory::require_isolated_root;
 
     if !require_isolated_root(
         "execute::tests::ownership::authenticated_reconstruction_preserves_a_refused_execution_owner",
@@ -243,24 +284,11 @@ async fn authenticated_reconstruction_preserves_a_refused_execution_owner() -> T
     {
         return Ok(());
     }
-    let staged = StagedInstallation::stage_execution().map_err(|error| error.to_string())?;
-    let ledger = StagingLedger::new(StagingLimits {
-        aggregate_bytes: 512 * 1024 * 1024,
-    });
-    let (_staging, input) =
-        crate::test_fixtures::staged_execution::verified_input(&staged, &ledger)
-            .map_err(|error| error.to_string())?;
-    let entry = input.entry();
-    let request = entry.admission().snapshot().request().clone();
-    fixed_registry().map_err(|error| error.to_string())?;
-    let registry = SystemdAttemptRegistry::open()?;
-    let directory = registry
-        .commit_planned(&PlannedAttemptIntent::new(
-            request.attempt_id,
-            request.authority.sim1_digest,
-        )?)?
-        .prepare_directory()?;
-    let attempt = AdmittedAttempt::from_entry(&entry, &directory)?;
+    let owner = authenticated_owner()?;
+    let entry = owner.input.entry();
+    let ledger = &owner.ledger;
+    let directory = &owner.directory;
+    let attempt = AdmittedAttempt::from_entry(&entry, directory)?;
     let mut scenario = Scenario::new()?;
     let mismatched = if attempt.mode() == SandboxExecutionMode::AirGapped {
         ModePlan::Fork
@@ -283,18 +311,18 @@ async fn authenticated_reconstruction_preserves_a_refused_execution_owner() -> T
     assert!(matches!(failed.error, ExecuteError::ModeMismatch));
     assert!(scenario.entries().is_empty());
     drop(failed);
-    let reconstructed = AdmittedAttempt::from_entry(&entry, &directory)?;
+    let reconstructed = AdmittedAttempt::from_entry(&entry, directory)?;
     assert_eq!(ledger.usage().attempts, 1);
-    drop(input);
+    drop(owner.input);
     assert_eq!(ledger.usage().attempts, 1);
     refused_owner(&mut scenario, &reconstructed).await?;
     drop(reconstructed);
     assert_eq!(ledger.usage(), StagingUsage::default());
     // Dropping the admitted handles does not reset the prepared directory owner.
     let (_next_staging, next_input) =
-        crate::test_fixtures::staged_execution::verified_input(&staged, &ledger)
+        crate::test_fixtures::staged_execution::verified_input(&owner.installation, ledger)
             .map_err(|error| error.to_string())?;
-    let next = AdmittedAttempt::from_entry(&next_input.entry(), &directory)?;
+    let next = AdmittedAttempt::from_entry(&next_input.entry(), directory)?;
     refused_owner(&mut scenario, &next).await?;
     Ok(())
 }

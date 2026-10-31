@@ -94,6 +94,11 @@ impl PartialEq for ExecutionOwnership {
 impl Eq for ExecutionOwnership {}
 
 impl ExecutionOwnership {
+    /// Close this owner's start permission without releasing admission resources.
+    pub(super) fn close(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+
     fn claim(&self) -> Result<(), ExecuteError> {
         self.0
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
