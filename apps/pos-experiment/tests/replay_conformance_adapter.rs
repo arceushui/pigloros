@@ -907,6 +907,9 @@ fn every_kind_of_authoritative_result_is_paired() -> TestResult {
                 (&local_leg.divergence, &air_gapped_leg.divergence)
             {
                 divergence = true;
+                // The DVR1 binds each mode's own manifest; its location does
+                // not depend on the mode.
+                assert_ne!(local.manifest_digest, air_gapped.manifest_digest);
                 assert_eq!(
                     (
                         local.location_kind,
@@ -939,7 +942,9 @@ fn every_kind_of_authoritative_result_is_paired() -> TestResult {
             }
         }
     }
-    assert!(events && refusal && divergence);
+    assert!(events, "no leg folded Events");
+    assert!(refusal, "no leg was refused");
+    assert!(divergence, "no leg diverged");
     assert!(typed_failures > 0);
 
     // Two different legs do not have the same authoritative result.
