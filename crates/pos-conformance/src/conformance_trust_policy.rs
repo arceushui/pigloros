@@ -252,7 +252,7 @@ fn head(out: &mut Vec<u8>, major: u8, value: u64) {
         0x1_0000..=0xffff_ffff => (26, 4),
         _ => (27, 8),
     };
-    out.push((major << 5) | additional);
+    out.push((major << 5) + additional);
     out.extend_from_slice(&be[8 - width..]);
 }
 

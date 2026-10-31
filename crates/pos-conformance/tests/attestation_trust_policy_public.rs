@@ -259,6 +259,8 @@ fn every_integer_width_is_encoded_in_its_shortest_form() -> TestResult {
     ] {
         let policy = with(|policy| policy.epoch = epoch)?;
         assert_eq!(fields(&policy)?[3], Value::Integer(epoch.into()), "{epoch}");
+        // ciborium re-encodes every head in its shortest form.
+        assert_eq!(encode(&value(&policy)?)?, policy, "{epoch}");
         assert_eq!(decoded(&policy)?.epoch, epoch);
     }
     Ok(())
@@ -650,6 +652,8 @@ fn a_record_exactly_at_every_limit_is_valid() -> TestResult {
         policy.revoked_report_digests = revocations(MAX_CONFORMANCE_TRUST_REVOCATIONS_V1);
         policy.minimum_evaluator_protocol_version = format!("1.0.0-{}", "a".repeat(58));
     })?;
+    // The 4096-entry list heads are in their shortest (two-byte) form.
+    assert_eq!(encode(&value(&at_limit)?)?, at_limit);
     let policy = decoded(&at_limit)?;
     assert_eq!(
         policy.evaluator_release_roots.len(),
