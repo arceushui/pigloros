@@ -130,7 +130,8 @@ fn simultaneous_execution_claims_have_exactly_one_owner() -> TestResult {
                 .enable_time()
                 .build()
                 .map_err(|error| error.to_string())?;
-            await_contender(ready, peer, deadline).map_err(|error| error.to_string())?;
+            await_contender(&ready, &peer, deadline).map_err(|error| error.to_string())?;
+            drop((ready, peer));
             let outcome = runtime.block_on(scenario.run_on(
                 &LoopbackNetwork,
                 job(&scenario, attempt),
@@ -163,8 +164,8 @@ fn simultaneous_execution_claims_have_exactly_one_owner() -> TestResult {
 }
 
 fn await_contender(
-    ready: std::sync::mpsc::Sender<()>,
-    peer: std::sync::mpsc::Receiver<()>,
+    ready: &std::sync::mpsc::Sender<()>,
+    peer: &std::sync::mpsc::Receiver<()>,
     deadline: Instant,
 ) -> Result<(), std::sync::mpsc::RecvTimeoutError> {
     ready
@@ -181,7 +182,7 @@ fn a_missing_or_unready_contender_cannot_hold_its_peer_forever() -> TestResult {
     let (missing, peer) = channel();
     drop(missing);
     assert_eq!(
-        await_contender(ready, peer, Instant::now() + Duration::from_secs(5)),
+        await_contender(&ready, &peer, Instant::now() + Duration::from_secs(5)),
         Err(RecvTimeoutError::Disconnected)
     );
     observed.try_recv()?;
@@ -189,7 +190,7 @@ fn a_missing_or_unready_contender_cannot_hold_its_peer_forever() -> TestResult {
     let (ready, observed) = channel();
     let (_unready, peer) = channel();
     assert_eq!(
-        await_contender(ready, peer, Instant::now()),
+        await_contender(&ready, &peer, Instant::now()),
         Err(RecvTimeoutError::Timeout)
     );
     observed.try_recv()?;
@@ -198,7 +199,7 @@ fn a_missing_or_unready_contender_cannot_hold_its_peer_forever() -> TestResult {
     let (_unready, peer) = channel();
     drop(missing);
     assert_eq!(
-        await_contender(ready, peer, Instant::now() + Duration::from_secs(5)),
+        await_contender(&ready, &peer, Instant::now() + Duration::from_secs(5)),
         Err(RecvTimeoutError::Disconnected)
     );
     Ok(())

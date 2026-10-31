@@ -617,7 +617,14 @@ impl Scenario {
         job: ExecuteJob,
         recheck: impl FnOnce() -> Result<CheckedRoot, ImageActivationError> + Send,
     ) -> Outcome {
-        execute(&self.host, &mut self.barrier, network, job, recheck).await
+        Box::pin(execute(
+            &self.host,
+            &mut self.barrier,
+            network,
+            job,
+            recheck,
+        ))
+        .await
     }
 
     async fn run_as(
