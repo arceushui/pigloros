@@ -231,12 +231,17 @@ Events build the same input:
    host evaluation is `Redacted`, or `Unavailable` when the evidence is missing. Nothing is
    reconstructed. `CalibrationReport::apply_artifact_evaluation` keeps weakening the report's
    ReplayClaim and redaction state.
+5. The mapping walks the Events in Timeline Order and checks the fields of one Event in
+   `MTI1` record field-index order, the first failure winning as in 4.2, so an Event with an
+   invalid `prediction_id` and an invalid probability is `InvalidIdentifier`; a withheld
+   prediction's probability is never read or quantized (ADR-062 R7 Event mapping note,
+   2026-10-30).
 
 ## 4.5 Implementations and oracle independence
 
 1. **plugins/eval (the implementation under test).** It exposes the public
-   `MTI1`/`MTR1`/`MTQ1` codecs and computation, and `compute_report` /
-   `compute_report_from_events` build `CalibrationReport` from `MTR1`. The f64 metric fields
+   `MTI1`/`MTR1`/`MTQ1` codecs and computation, and `compute_report_from_events` builds
+   `CalibrationReport` from `MTR1`. The f64 metric fields
    become the micro-unit integers, and `InsufficientSamples` replaces the zero-filled empty
    report. No authoritative path uses f64 arithmetic for a metric.
 2. **Expected results** are public immutable data written by an offline generator that calls no
