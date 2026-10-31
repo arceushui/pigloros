@@ -157,7 +157,8 @@ per invocation.
 Gateway scope starts with the licensed workspace report, then binds selection
 to Cargo 1.97.1's `build --locked --release --bin piglor-gateway --unit-graph`
 output. Its version, gateway root, release profile and complete reachable units
-are checked; Cargo metadata supplies package identities, not feature reachability.
+are checked; selected package names, versions and registry sources must match
+`Cargo.lock`. Cargo metadata supplies identities, not feature reachability.
 The unit-graph command only prints build metadata. Its pinned unstable interface
 uses `RUSTC_BOOTSTRAP=1` on that command alone, as the existing std report does.
 A toolchain or graph-format change must preserve these checks. Missing selected
