@@ -757,26 +757,40 @@ fn public_registry_validation_rejects_duplicate_and_pending_material(
 }
 
 #[test]
-fn public_registry_traits_and_role_boundaries_are_exercised(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn every_role_code_and_purpose_is_closed() {
     let role_cases = [
-        (0, KeyRoleV1::SubjectDataEncryption, false, true),
-        (1, KeyRoleV1::SubjectAttributionSigning, true, false),
-        (2, KeyRoleV1::TimelineIntegritySigning, true, false),
-        (3, KeyRoleV1::PluginReleaseSigning, true, false),
-        (4, KeyRoleV1::ExportRecipientEncryption, false, true),
+        (0, KeyRoleV1::SubjectDataEncryption, false, true, false),
+        (1, KeyRoleV1::SubjectAttributionSigning, true, false, false),
+        (2, KeyRoleV1::TimelineIntegritySigning, true, false, false),
+        (3, KeyRoleV1::PluginReleaseSigning, true, false, false),
+        (4, KeyRoleV1::ExportRecipientEncryption, false, true, false),
+        (5, KeyRoleV1::ConformanceEvaluatorSigning, true, false, true),
+        (6, KeyRoleV1::ConformanceReportSigning, true, false, true),
     ];
-    for (code, role, signing, encryption) in role_cases {
+    for (code, role, signing, encryption, conformance) in role_cases {
         assert_eq!(role.code(), code);
         assert_eq!(KeyRoleV1::from_code(code), Ok(role));
         assert_eq!(role.is_signing(), signing);
         assert_eq!(role.is_encryption(), encryption);
+        assert_eq!(role.is_conformance_signing(), conformance);
+        let role_bound = if conformance {
+            Err(pos_core::KeyRegistryErrorV1::SigningPurposeMismatch)
+        } else if signing {
+            Ok(())
+        } else {
+            Err(pos_core::KeyRegistryErrorV1::SigningRoleRequired)
+        };
+        assert_eq!(role.require_role_bound_signing(), role_bound, "{role:?}");
     }
     assert_eq!(
-        KeyRoleV1::from_code(5),
+        KeyRoleV1::from_code(7),
         Err(pos_core::KeyRegistryErrorV1::InvalidRoleCode)
     );
+}
 
+#[test]
+fn public_registry_traits_and_role_boundaries_are_exercised(
+) -> Result<(), Box<dyn std::error::Error>> {
     let signing_identity = KeyIdentityV1::new("test-owner", KeyRoleV1::TimelineIntegritySigning, 1);
     let signing_material = Hash::from_bytes([21; 32]);
     let signing_public_key = PublicKey::from_bytes([22; 32]);

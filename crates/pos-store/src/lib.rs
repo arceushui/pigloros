@@ -440,18 +440,32 @@ fn authorize_prepared_subject_append(
             || (),
         )
         .map_err(|error| CoreError::Storage(format!("subject encryption authorization: {error}")))
-        .and_then(|()| {
-            registry
-                .with_signing_authorization(
-                    authorization.signing_identity,
-                    authorization.signing_material_digest,
-                    authorization.signing_public_key,
-                    || (),
-                )
-                .map_err(|error| {
-                    CoreError::Storage(format!("Timeline signing authorization: {error}"))
-                })
-        })
+        .and_then(|()| authorize_prepared_timeline_signing(registry, authorization))
+}
+
+/// Authorize the prepared append's signing identity. It must be a
+/// `TimelineIntegritySigning` identity: no other signing role, including the
+/// DSSE-only conformance roles, signs a Timeline Event, and the role is pinned
+/// here before any crypto callback can run.
+fn authorize_prepared_timeline_signing(
+    registry: &mut pos_core::KeyRegistryStateV1,
+    authorization: &pos_core::PreparedSubjectAppendAuthorizationV1,
+) -> Result<(), CoreError> {
+    let identity = authorization.signing_identity;
+    (if identity.role == pos_core::KeyRoleV1::TimelineIntegritySigning {
+        Ok(())
+    } else {
+        Err(pos_core::KeyRegistryErrorV1::SigningPurposeMismatch)
+    })
+    .and_then(|()| {
+        registry.with_signing_authorization(
+            identity,
+            authorization.signing_material_digest,
+            authorization.signing_public_key,
+            || (),
+        )
+    })
+    .map_err(|error| CoreError::Storage(format!("Timeline signing authorization: {error}")))
 }
 
 /// The two caller-owned, non-escaping crypto callbacks of one prepared append.
@@ -1302,8 +1316,9 @@ fn resolve_import_trust_context(
 > {
     let mut anchors = std::collections::BTreeMap::new();
     for (identity, public_key) in trust_anchors {
+        // Only Timeline integrity keys sign Timeline Events.
         if identity.epoch == 0
-            || !identity.role.is_signing()
+            || identity.role != pos_core::KeyRoleV1::TimelineIntegritySigning
             || pos_crypto::signing::verifying_key_from_public_key(public_key).is_err()
             || anchors.insert(*identity, *public_key).is_some()
         {

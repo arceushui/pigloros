@@ -341,10 +341,26 @@ pub fn shared_setup<T: Clone>(
 /// Returns an error when setup, materialization, publication discovery, or archive reading fails.
 pub fn current_archive() -> TestResult<Vec<u8>> {
     static ARCHIVE: OnceLock<Vec<u8>> = OnceLock::new();
-    shared_setup(&ARCHIVE, materialize_current_archive)
+    shared_setup(&ARCHIVE, || {
+        current_archives()?
+            .into_iter()
+            .next()
+            .ok_or_else(|| "materializer did not publish a CFB1 archive".into())
+    })
 }
 
-fn materialize_current_archive() -> TestResult<Vec<u8>> {
+/// Returns every CFB1 archive of the current public conformance release, in path order,
+/// materialized once per process.
+///
+/// # Errors
+///
+/// Returns an error when setup, materialization, publication discovery, or archive reading fails.
+pub fn current_archives() -> TestResult<Vec<Vec<u8>>> {
+    static ARCHIVES: OnceLock<Vec<Vec<u8>>> = OnceLock::new();
+    shared_setup(&ARCHIVES, materialize_current_archives)
+}
+
+fn materialize_current_archives() -> TestResult<Vec<Vec<u8>>> {
     let root = temporary_root("current-archive")?;
     let _cleanup = TemporaryOutput(root.clone());
     fs::create_dir_all(&root)?;
@@ -362,14 +378,15 @@ fn materialize_current_archive() -> TestResult<Vec<u8>> {
     if !status.success() {
         return Err("materializer did not publish a public archive".into());
     }
-    let archive = release_files(&publication)?
+    release_files(&publication)?
         .into_iter()
-        .find(|path| {
+        .filter(|path| {
             path.extension()
                 .is_some_and(|extension| extension == "cfb1")
         })
-        .ok_or("materializer did not publish a CFB1 archive")?;
-    Ok(fs::read(archive)?)
+        .map(fs::read)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(Into::into)
 }
 
 /// Encodes a CBOR value for a public-boundary mutation.
