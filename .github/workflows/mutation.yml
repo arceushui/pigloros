@@ -1,5 +1,5 @@
 # Temporary #438 diagnostic producer; never workflow_call or a shipping gate.
-name: GPT usable-range proof
+name: mutation
 
 on:
   workflow_dispatch:
@@ -116,9 +116,12 @@ jobs:
           baselines = [row for row in outcomes["outcomes"] if row["scenario"] == "Baseline"]
           assert len(baselines) == 1 and baselines[0]["summary"] == "Success"
           assert [phase["process_status"] for phase in baselines[0]["phase_results"]] == ["Success", "Success"]
+          baseline_log = (Path("mutants.out") / baselines[0]["log_path"]).read_text()
+          assert re.search(r"running [1-9][0-9]* tests?", baseline_log)
+          positive = "root_selector::tests::admission_bounds::held_image_admission_accepts_full_length_arguments"
+          assert re.search(r"test " + re.escape(positive) + r" \.\.\. ok", baseline_log)
           test_name = "root_selector::tests::admission_bounds::held_image_admission_enforces_inclusive_gpt_usable_bounds"
           if os.environ["EXPECTED_SUMMARY"] == "CaughtMutant":
-              baseline_log = (Path("mutants.out") / baselines[0]["log_path"]).read_text()
               assert re.search(r"test " + re.escape(test_name) + r" \.\.\. ok", baseline_log)
           mutants = [row for row in outcomes["outcomes"] if row["scenario"] != "Baseline"]
           assert len(mutants) == outcomes["total_mutants"] == 4
@@ -135,7 +138,8 @@ jobs:
               assert "the option `Z` is only accepted on the nightly compiler" not in log
               if os.environ["EXPECTED_SUMMARY"] == "CaughtMutant":
                   assert test["process_status"] == {"Failure": 101}
-                  assert test_name in log and "running 1 test" in log
+                  assert re.search(r"test " + re.escape(test_name) + r" \.\.\. FAILED", log)
+                  assert "running 1 test" in log
                   assert "valid bounded image rejected by public snapshot admission: Some(ArtifactInvalid)" in log
                   assert "panicked at crates/pos-reference/src/root_selector/tests/admission_bounds.rs:" in log
                   assert "test result: FAILED" in log
