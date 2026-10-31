@@ -19,6 +19,14 @@ It runs each sub-case of the payload through the `RecordedReplay` and
 `ProfileRecomputation` / `CrossProfileConformance` execution steps and compares
 the `VRR1` of every leg with the sub-case's expected legs.
 
+Every family runs in Local and in Air-Gapped mode against the same oracle
+(slice R5, #1224). `pos_experiment::replay_conformance::pair_report` runs the
+Local and the Air-Gapped attempt of one case and reports the manifest and
+`VRR1` of every leg of both; the two must have identical authoritative
+results. An Air-Gapped attempt has no network: a network attempt is the
+failure `network-denied`. Air-Gapped results are Local-relaxation engineering
+evidence until the Sandbox Provider runs them.
+
 The Experiment host binary is the replay subject adapter (ADR-062 Revision 8
 section 3.1 option A). The adapter and the binary are compiled only with the
 `test-support` feature, because they run on the open fixture erasure gate and the
