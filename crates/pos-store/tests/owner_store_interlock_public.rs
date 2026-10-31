@@ -518,7 +518,9 @@ mod tests {
         assert_eq!(command, "retry\n");
         let deadline = Instant::now() + Duration::from_secs(10);
         let held = loop {
-            match OwnerStoreFileInterlockV1::try_acquire(&operation, Path::new(&directory), MAIN) {
+            let attempt =
+                OwnerStoreFileInterlockV1::try_acquire(&operation, Path::new(&directory), MAIN);
+            match attempt {
                 Ok(held) => break held,
                 Err(error) => {
                     if Instant::now() >= deadline {
