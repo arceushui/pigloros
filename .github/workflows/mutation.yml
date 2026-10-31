@@ -126,7 +126,8 @@ jobs:
           git diff --relative --unified=0 \
             "origin/${base_ref}...HEAD" \
             > "${RUNNER_TEMP}/changes.diff"
-      # The blocking baseline above proves this exact nightly harness first.
+      # The shared baseline proves the workspace harness. Each worker also
+      # proves its own unmutated scratch copy before reporting caught mutants.
       # Each mutant retains the owning-package test selection used on main;
       # One worker retains four harness threads without competing with another
       # owning-package suite or compiler on this runner. Sixteen shards retain
@@ -147,7 +148,7 @@ jobs:
             --in-diff "${{ runner.temp }}/changes.diff" \
             --no-shuffle \
             --shard "${{ matrix.shard }}/16" \
-            --baseline skip \
+            --baseline run \
             --jobs 1 \
             --timeout 120 \
             --build-timeout 600 \
