@@ -5,8 +5,8 @@ use crate::provider_admission::tests::request_for;
 use crate::provider_admission::ProviderImageSnapshot;
 use crate::sandbox_provider_protocol::PartitionDescriptor;
 use crate::selector::installation::fixture::{
-    admitted_state_with_arguments, admitted_state_with_salt, ddi_fixture, ddi_salt, materialize_state,
-    ImageSigning,
+    admitted_state_with_arguments, admitted_state_with_salt, ddi_fixture, ddi_salt,
+    materialize_state, ImageSigning,
 };
 use crate::selector::installation::{InstalledSelectorState, SANDBOX_ARTIFACT_ROOT};
 
