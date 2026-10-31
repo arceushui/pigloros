@@ -38,7 +38,7 @@
 //! [`pair_report()`] runs the Local and the Air-Gapped attempt of one case
 //! (ADR-062 Revision 8 slice R5, #1224) and reports both against the same
 //! expected-result record, with the manifest and `VRR1` of every leg; it
-//! labels every result Local-relaxation engineering evidence.
+//! labels the Air-Gapped results Local-relaxation engineering evidence.
 //!
 //! The adapter meters one execution step per leg and the Event count: every
 //! Event the attempt folds, replayed or recomputed (a run refused before its
@@ -63,7 +63,7 @@ mod payload;
 mod schema_digests;
 
 pub use pair::{
-    pair_report, LegEvidenceV1, ModeEvidenceV1, PairErrorV1, PairReportV1, EVIDENCE_LEVEL,
+    pair_report, LegEvidenceV1, ModeEvidenceV1, PairErrorV1, PairReportV1, AIR_GAPPED_EVIDENCE,
 };
 pub use payload::SCHEMA_ID;
 
@@ -142,7 +142,9 @@ pub fn run_with_store(
 ) -> Result<(), AdapterRunErrorV1> {
     read_attempt(reader)
         .or(Err(AdapterRunErrorV1::Wire))
-        .and_then(|attempt| execute_attempt(store_config, &attempt))
+        .and_then(|attempt| {
+            execute_attempt(store_config, &attempt).ok_or(AdapterRunErrorV1::NotExecuted)
+        })
         .and_then(|execution| {
             write_observation(writer, &execution.observation).or(Err(AdapterRunErrorV1::Output))
         })
@@ -201,24 +203,24 @@ fn unmeasured(result: SubjectResult) -> AttemptExecutionV1 {
     }
 }
 
-/// Checks (2) to (4) of the order.
+/// Checks (2) to (4) of the order: `None` is an attempt that is not
+/// executed.
 fn execute_attempt(
     store_config: &StoreConfig,
     attempt: &CaseAttempt,
-) -> Result<AttemptExecutionV1, AdapterRunErrorV1> {
+) -> Option<AttemptExecutionV1> {
     let mode = match attempt.mode {
         ExecutionMode::Local => Some(ExecutionModeV1::Local),
         ExecutionMode::AirGapped => Some(ExecutionModeV1::AirGapped),
         ExecutionMode::Replay | ExecutionMode::Fork => None,
     };
     let Some(mode) = mode.filter(|_| attempt.claim_layer == ClaimLayer::ReplayConformance) else {
-        return Ok(unmeasured(SubjectResult::Unavailable));
+        return Some(unmeasured(SubjectResult::Unavailable));
     };
     let pinned = schema_digests::pinned_digest(attempt.family);
     payload::find_composite(&attempt.auxiliary)
         .filter(|_| blake3::hash(&attempt.schema.bytes).as_bytes() == &pinned)
         .map(|members| decide(store_config, attempt, mode, &members))
-        .ok_or(AdapterRunErrorV1::NotExecuted)
 }
 
 /// Checks (5) to (8) of the order.
@@ -239,8 +241,8 @@ fn decide(
             if mode == ExecutionModeV1::AirGapped && network {
                 return unmeasured(failure(NETWORK_DENIED));
             }
-            let records: Option<Vec<(payload::RecordV1, bool)>> = execute::HostV1::install()
-                .and_then(|host| {
+            let records: Option<Vec<(payload::RecordV1, Vec<LegEvidenceV1>, bool)>> =
+                execute::HostV1::install().and_then(|host| {
                     subcases
                         .iter()
                         .map(|subcase| {
@@ -251,9 +253,9 @@ fn decide(
                                 mode,
                                 store_config,
                             )
-                            .map(|record| {
+                            .map(|(record, evidence)| {
                                 let matched = record.legs == subcase.expect;
-                                (record, matched)
+                                (record, evidence, matched)
                             })
                         })
                         .collect()
@@ -261,17 +263,19 @@ fn decide(
             records.map_or_else(
                 || unmeasured(SubjectResult::Unavailable),
                 |records| {
-                    let legs: usize = records.iter().map(|(record, _)| record.legs.len()).sum();
-                    let events: u64 = records.iter().map(|(record, _)| record.folded_events).sum();
-                    let matched = records.iter().all(|(_, matched)| *matched);
-                    let evidence: Vec<LegEvidenceV1> = records
+                    let legs: usize = records.iter().map(|(record, _, _)| record.legs.len()).sum();
+                    let events: u64 = records
                         .iter()
-                        .flat_map(|(record, _)| record.evidence.iter().cloned())
-                        .collect();
+                        .map(|(record, _, _)| record.folded_events)
+                        .sum();
+                    let matched = records.iter().all(|(_, _, matched)| *matched);
+                    let (records, evidence): (Vec<payload::RecordV1>, Vec<Vec<LegEvidenceV1>>) =
+                        records
+                            .into_iter()
+                            .map(|(record, evidence, _)| (record, evidence))
+                            .unzip();
                     let result = failure_code(attempt.family).map_or_else(
                         || {
-                            let records: Vec<payload::RecordV1> =
-                                records.into_iter().map(|(record, _)| record).collect();
                             SubjectResult::Output(payload::output_record(
                                 &attempt.case_id,
                                 family,
@@ -289,7 +293,7 @@ fn decide(
                                 ..ResourceUsage::default()
                             },
                         },
-                        legs: evidence,
+                        legs: evidence.into_iter().flatten().collect(),
                     }
                 },
             )
