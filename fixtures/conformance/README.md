@@ -71,6 +71,23 @@ failure expectation, and then compares every output. The profile text, including
 is `profiles/metric-conformance/normative-requirements.md`. Every
 `expected/metric-conformance/*.json` stays `pending`.
 
+The `replay-cbor-v1` adapter (`scripts/conformance-fixture-adapters/replay-cbor-v1.sh`) owns the
+`replay-conformance` layer (ADR-062 Revision 8 slice R4, #1222); provider
+`pigloros.fixture.replay-conformance@2.0.0` replaces the 1.0.0 placeholder with no reader or alias.
+`scripts/generate_replay_conformance_fixtures.py` is the only writer of its seven schemas, payloads
+(`inputs/replay-conformance/<family>.json`, JCS, schema `pigloros.replay-conformance.case.v2`),
+`RCS1` composites (`inputs/replay-conformance/<family>.rcs1`, one auxiliary member per family
+carrying the closure members: exported Timelines, recomputation subjects and licences, addressed by
+BLAKE3 digest), oracles and evidence-status records, and of the subject adapter's
+`apps/pos-experiment/src/replay_conformance/schema_digests.rs`. It runs offline, calls no Rust and
+derives every expected stream, authoritative result digest, closure digest and first divergence from
+the closure members it writes, with the `PiglorOS.RecordedReplay*.v1` digests of the ADR-062
+Revision 8 note "Recorded Replay Digests". The sub-cases carry all eleven entries of
+`expected-authority/inventory.json`; each entry's fixture bytes and expected result are the payload
+and oracle of one family, and its `materialization_status` is `materialized`. Every
+`expected/replay-conformance/*.json` stays `pending`: materialized is not executed. The profile text
+is `profiles/replay-conformance/normative-requirements.md`.
+
 The immutable bundle boundary in `pos-conformance` accepts these bytes from a
 caller, recomputes each BLAKE3 content address, binds the CPF1 profile digest,
 and signs only the canonical manifest. Local and Air-Gapped manifests must be
@@ -131,11 +148,12 @@ non-interference rows and their 192 required Local/Air-Gapped/Replay/Fork
 variant cases, with the row-specific AuthEq/PublicEq/OpEq predicates from
 ADR-059. Every coordinate is deliberately `executed: false` and has no result
 digest until #193 supplies independently produced execution evidence.
-`expected-authority/inventory.json` records the eleven #172 handoff slots as
-pending. Its `expected_outcome` values are planned authority targets, not
-observed results; the null paths/digests and pending materialization status are
-the authoritative Draft state. #190 does not invent authority fixture/result
-bytes.
+`expected-authority/inventory.json` records the eleven #172 handoff slots. Its
+`expected_outcome` values are planned authority targets, not observed results.
+Since ADR-062 Revision 8 slice R4 (#1222) every slot is `materialized`: its
+fixture bytes and expected result are the replay-conformance payload and oracle
+that carry it, bound by BLAKE3 digest. Materialized is not executed and claims
+no conformance.
 
 The checked-in Draft inventory produces Draft Local/Air-Gapped bundles only.
 Materialized bytes are CI transport artifacts, not Candidate evidence or a
