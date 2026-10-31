@@ -906,8 +906,8 @@ fn outcome_subcases(budget: u64, pos1: &[u8], empty_patterns: &[u8]) -> TestResu
         subcase(FixtureFamily::Positive, "pos.7")?,
         gate_subcase(
             "g.12",
-            member_json("MTQ1", empty_patterns),
-            json!({"kind": "recompute", "families": ["positive"]}),
+            &member_json("MTQ1", empty_patterns),
+            &json!({"kind": "recompute", "families": ["positive"]}),
         ),
     ])
 }
