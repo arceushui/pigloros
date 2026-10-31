@@ -9,15 +9,18 @@
 //! (ADR-087 section 5, #444).
 #![cfg(target_os = "linux")]
 
+#[path = "support/attempt_directory.rs"]
+mod attempt_directory;
 #[path = "support/staged_execution.rs"]
 pub mod staged_execution;
+
+use attempt_directory::{fixed_registry, require_isolated_root};
 
 use std::{
     error::Error,
     fs,
     os::unix::fs::{MetadataExt, PermissionsExt},
     path::Path,
-    process::Command,
 };
 
 use pos_reference::provider_admission::{test_support::StagedInstallation, ProviderImageSnapshot};
@@ -36,50 +39,6 @@ use std::{
 
 type BoxError = Box<dyn Error + Send + Sync>;
 type TestResult = Result<(), BoxError>;
-
-const PRIVILEGED_COMPOSITION_TEST: &str = "PIGLOROS_PRIVILEGED_COMPOSITION_TEST";
-
-fn run_isolated(test_name: &str) -> TestResult {
-    let runner = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/run-isolated-test.sh");
-    let output = Command::new(runner)
-        .arg(std::env::current_exe()?)
-        .arg(test_name)
-        .output()?;
-    if output.status.success() {
-        return Ok(());
-    }
-    Err(format!(
-        "isolated test {test_name} failed with {}:\nstdout:\n{}\nstderr:\n{}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    )
-    .into())
-}
-
-fn fixed_registry() -> TestResult {
-    for component in [
-        "/run/pigloros",
-        "/run/pigloros/sandbox",
-        "/run/pigloros/sandbox/registry",
-        "/run/pigloros/sandbox/attempts",
-    ] {
-        fs::create_dir(component)?;
-        fs::set_permissions(component, fs::Permissions::from_mode(0o700))?;
-    }
-    Ok(())
-}
-
-fn require_isolated_root(test_name: &str) -> Result<bool, BoxError> {
-    if std::env::var_os(PRIVILEGED_COMPOSITION_TEST).is_none() {
-        run_isolated(test_name)?;
-        return Ok(false);
-    }
-    if fs::metadata("/proc/self")?.uid() != 0 {
-        return Err("the isolated child is not root".into());
-    }
-    Ok(true)
-}
 
 #[test]
 fn the_entry_facts_need_the_directory_prepared_for_the_same_attempt() -> TestResult {

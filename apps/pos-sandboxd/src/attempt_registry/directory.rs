@@ -46,6 +46,7 @@ pub struct PreparedAttemptDirectory {
     // Exact visible bytes after replacement, including an uncertain parent fsync.
     // This permits verified cleanup without acknowledging durability or launch.
     recorded_root: OnceLock<RootRecord>,
+    execution: crate::attempt::ExecutionOwnership,
 }
 
 impl CommittedPlannedAttempt {
@@ -100,6 +101,7 @@ impl CommittedPlannedAttempt {
             root,
             identities,
             recorded_root: OnceLock::new(),
+            execution: crate::attempt::ExecutionOwnership::default(),
         };
         prepared.verify_tree()?;
         verify_intent(&prepared.planned.directory, &prepared.planned.intent)?;
@@ -117,6 +119,10 @@ impl CommittedPlannedAttempt {
 }
 
 impl PreparedAttemptDirectory {
+    pub(crate) fn execution_ownership(&self) -> crate::attempt::ExecutionOwnership {
+        self.execution.clone()
+    }
+
     /// The exact original planned ownership, preserved by the extension.
     #[must_use]
     pub const fn intent(&self) -> &PlannedAttemptIntent {

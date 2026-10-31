@@ -283,3 +283,10 @@ pub mod staged_execution {
         "/tests/support/staged_execution.rs"
     ));
 }
+
+pub(crate) mod attempt_directory {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/support/attempt_directory.rs"
+    ));
+}

@@ -31,6 +31,8 @@ use crate::{
     EstablishedNetwork, LocalProxyBindError, SystemdTransientUnitValue, TransientServiceUnitName,
 };
 
+mod ownership;
+
 const HOST_SERVICE: &str = "piglor-host-service-v1";
 const RELEASE: &str = "piglor-release-v1";
 const WORK: &str = "size=4096,nosuid,nodev,noexec";
