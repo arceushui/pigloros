@@ -3105,7 +3105,7 @@ mod tests {
                     }
                     Ok(frames)
                 })();
-                let _ = send.send(result);
+                drop(send.send(result));
             });
             write_input(
                 &mut root,
