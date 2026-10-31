@@ -30,8 +30,9 @@ use pos_experiment::authoritative_comparison::{
 };
 use pos_experiment::recorded_replay::{
     execute_recorded_replay_v1, ExportedTimelineMemberV1, RecordedReplayClosureV1,
-    RecordedReplayInputV1, RecordedReplayOutcomeV1,
+    RecordedReplayInputV1,
 };
+use pos_experiment::verification_execution::VerificationExecutionOutcomeV1;
 use pos_runtime::{Driver, ObservationView, RuntimeError, StepOutput};
 use pos_state::ProjectionRegistry;
 use pos_store::memory::MemoryStore;
@@ -262,6 +263,8 @@ fn result_digest(stream: &AuthoritativeStreamV1) -> [u8; 32] {
         parts.push(checkpoint.digest.to_vec());
         parts.push(checkpoint.size.to_be_bytes().to_vec());
     }
+    // A recorded export has no typed failures: the typed-failure count is 0.
+    parts.push(0_u64.to_be_bytes().to_vec());
     let parts: Vec<&[u8]> = parts.iter().map(Vec::as_slice).collect();
     digest(b"PiglorOS.RecordedReplayResult.v1", &parts)
 }
@@ -430,7 +433,7 @@ fn run(
     closure: RecordedReplayClosureV1<'_>,
     evaluation: &ReplayClaimEvaluationV1,
     projections: &mut ProjectionRegistry,
-) -> TestResult<RecordedReplayOutcomeV1> {
+) -> TestResult<VerificationExecutionOutcomeV1> {
     let expected = recording.expected(u64::try_from(recording.payloads.len())?)?;
     let outcome = execute_recorded_replay_v1(
         RecordedReplayInputV1 {
@@ -464,7 +467,7 @@ fn run(
 /// Assert a refusal with one closed first error and no comparison.
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn assert_refused(
-    outcome: &RecordedReplayOutcomeV1,
+    outcome: &VerificationExecutionOutcomeV1,
     expected: (VerificationOutcomeV1, ReplayClaimV1, SafeErrorCodeV1),
     coordinate: Option<&str>,
 ) {
