@@ -1,9 +1,9 @@
-# Diff-scoped mutation testing keeps new or changed logic covered without
-# turning the normal pull-request suite into a full-workspace mutation run.
+# Redmine #777 diagnostic branch only: audit all production mutants in
+# pos-owner-bridge-codec. This file is not proposed for the normal pull-request gate.
+# Omitting workflow_call makes an accidental PR from this branch fail closed.
 name: mutation
 
 on:
-  workflow_call:
   workflow_dispatch:
 
 permissions:
@@ -24,42 +24,104 @@ env:
   CARGO_BUILD_JOBS: "1"
 
 jobs:
-  mutation-changes:
-    name: detect mutation-relevant changes
+  mutation-harness-control:
+    name: scratch-copy harness red-green control
     runs-on: ubuntu-24.04
-    outputs:
-      relevant: ${{ steps.changes.outputs.relevant }}
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
-          fetch-depth: 0
-      - id: changes
-        name: Classify changed paths
+          toolchain: ${{ env.RUSTUP_TOOLCHAIN }}
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
+        with:
+          tool: cargo-mutants@27.1.0
+      - name: Distinguish a caught mutant from a broken scratch-copy harness
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-          FORCE_MUTATION: ${{ github.event_name == 'workflow_dispatch' }}
+          CARGO_INCREMENTAL: "1"
         run: |
           set -euo pipefail
-          relevant=false
-          if [[ "$FORCE_MUTATION" = true ]]; then
-            relevant=true
-          else
-            while IFS= read -r path; do
-              case "$path" in
-                *.rs|Cargo.toml|*/Cargo.toml|Cargo.lock|rust-toolchain.toml|fixtures/conformance/*|.github/workflows/mutation.yml|scripts/test_mutation_workflow_policy.py)
-                  relevant=true
-                  break
-                  ;;
-              esac
-            done < <(git diff --name-only --diff-filter=ACMRT "$BASE_SHA...$HEAD_SHA")
-          fi
-          echo "relevant=$relevant" >> "$GITHUB_OUTPUT"
+          control_root="${RUNNER_TEMP}/mutation-harness-control"
+          mkdir -p "$control_root"
+          export CONTROL_ROOT="$control_root"
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          root = Path(os.environ["CONTROL_ROOT"])
+          (root / "required.fixture").write_text("available only in original workspace\n")
+          for mode in ("skip", "run"):
+              crate = root / mode
+              (crate / "src").mkdir(parents=True)
+              (crate / "Cargo.toml").write_text('[package]\nname = "harness-control"\nversion = "0.0.0"\nedition = "2024"\n')
+              (crate / "src/lib.rs").write_text('''pub fn answer() -> bool { true }
+          #[test]
+          fn check_answer() {
+              std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../required.fixture"))
+                  .expect("HARNESS_FIXTURE_MISSING");
+              assert!(answer());
+          }
+          ''')
+          PY
+          rustc --version
+          cargo mutants --version
+          for mode in skip run; do
+            (
+              cd "$control_root/$mode"
+              cargo generate-lockfile --offline
+              cargo test --all-features --locked -- \
+                -Zunstable-options --fail-fast --include-ignored --test-threads=4 \
+                > baseline.log 2>&1
+              set +e
+              timeout --foreground 5m cargo mutants \
+                --all-features --no-shuffle --baseline "$mode" --jobs 1 \
+                --timeout 120 --build-timeout 600 --cap-lints true --cargo-arg=--locked \
+                -- -- -Zunstable-options --fail-fast --include-ignored --test-threads=4 \
+                > control.log 2>&1
+              status=$?
+              set -e
+              printf '%s\n' "$status" > exit-status.txt
+              cat control.log
+            )
+          done
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          root = Path(os.environ["CONTROL_ROOT"])
+          verdicts = {}
+          for mode in ("skip", "run"):
+              crate = root / mode
+              status = int((crate / "exit-status.txt").read_text())
+              caught = crate / "mutants.out/caught.txt"
+              caught_rows = caught.read_text().splitlines() if caught.exists() else []
+              logs = list((crate / "mutants.out").rglob("*.log"))
+              assert any("HARNESS_FIXTURE_MISSING" in p.read_text() for p in logs), mode
+              if mode == "skip":
+                  assert status == 0 and caught_rows, (status, caught_rows)
+              else:
+                  assert status not in (0, 124, 137) and not caught_rows, (status, caught_rows)
+              verdicts[mode] = {"exit_status": status, "caught": len(caught_rows)}
+          (root / "control-verdicts.json").write_text(json.dumps(verdicts, indent=2) + "\n")
+          print(json.dumps(verdicts))
+          PY
+      - name: Upload control evidence without build products
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mutation-harness-control
+          path: |
+            ${{ runner.temp }}/mutation-harness-control/control-verdicts.json
+            ${{ runner.temp }}/mutation-harness-control/required.fixture
+            ${{ runner.temp }}/mutation-harness-control/*/Cargo.toml
+            ${{ runner.temp }}/mutation-harness-control/*/Cargo.lock
+            ${{ runner.temp }}/mutation-harness-control/*/src
+            ${{ runner.temp }}/mutation-harness-control/*/*.log
+            ${{ runner.temp }}/mutation-harness-control/*/exit-status.txt
+            ${{ runner.temp }}/mutation-harness-control/*/mutants.out
+          if-no-files-found: error
 
   mutation-baseline:
-    name: mutation test baseline
-    needs: mutation-changes
-    if: needs.mutation-changes.outputs.relevant == 'true'
+    name: full-crate pos-owner-bridge-codec baseline
+    needs: mutation-harness-control
     runs-on: ubuntu-24.04
     # The baseline builds one workspace with three compiler jobs;
     # mutant workers retain the single-job workflow default above.
@@ -74,15 +136,30 @@ jobs:
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           shared-key: mutation
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
+        with:
+          tool: cargo-mutants@27.1.0
+      - name: Record the full-crate inventory and exact source
+        run: |
+          set -euo pipefail
+          rustc --version
+          cargo mutants --version
+          git rev-parse HEAD
+          git ls-files -z crates/pos-owner-bridge-codec Cargo.toml Cargo.lock rust-toolchain.toml .cargo/mutants.toml \
+            | xargs -0 sha256sum > "${RUNNER_TEMP}/mutation-source.sha256"
+          cargo mutants --package pos-owner-bridge-codec --all-features --no-shuffle --list --json \
+            > "${RUNNER_TEMP}/mutation-inventory.json"
+          python3 -c 'import json,sys; rows=json.load(open(sys.argv[1])); assert isinstance(rows,list) and rows; print(f"Full-crate inventory: {len(rows)} mutants")' \
+            "${RUNNER_TEMP}/mutation-inventory.json"
       # The stable core suite does not prove nightly-only libtest arguments.
-      # Prove them once on the full unmutated workspace before any shard starts.
+      # Prove the same complete owning-package harness before any shard starts.
       - name: Prove the mutation test harness
         # rust-cache exports 0; step scope keeps baseline and mutant builds aligned.
         env:
           CARGO_INCREMENTAL: "1"
         run: |
           set -euo pipefail
-          cargo test --workspace --all-features --locked -- \
+          cargo test --package pos-owner-bridge-codec --all-features --locked -- \
             -Zunstable-options --fail-fast --include-ignored --test-threads=4 \
             2>&1 | tee "${RUNNER_TEMP}/mutation-baseline.log"
           bash scripts/assert-no-ignored-in-test-summary.sh "${RUNNER_TEMP}/mutation-baseline.log"
@@ -93,19 +170,28 @@ jobs:
           name: mutation-baseline
           path: ${{ runner.temp }}/mutation-baseline.log
           if-no-files-found: error
+      - name: Upload the complete inventory and source hashes
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mutation-audit-inventory
+          path: |
+            ${{ runner.temp }}/mutation-inventory.json
+            ${{ runner.temp }}/mutation-source.sha256
+          if-no-files-found: error
 
   mutation:
-    name: diff mutation testing (shard ${{ matrix.shard }})
-    needs: [mutation-changes, mutation-baseline]
-    if: needs.mutation-changes.outputs.relevant == 'true' && needs.mutation-baseline.result == 'success'
+    name: full-crate pos-owner-bridge-codec (shard ${{ matrix.shard }})
+    needs: mutation-baseline
+    if: needs.mutation-baseline.result == 'success'
     runs-on: ubuntu-24.04
     # The shell watchdog below exits with diagnostics before this outer limit.
     timeout-minutes: 70
     strategy:
       fail-fast: false
-      max-parallel: 8
+      max-parallel: 4
       matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+        shard: [0, 1, 2, 3]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -119,35 +205,27 @@ jobs:
       - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
         with:
           tool: cargo-mutants@27.1.0
-      - name: Capture pull-request diff
-        run: |
-          set -euo pipefail
-          base_ref="${{ github.event.pull_request.base.ref || github.event.repository.default_branch }}"
-          git diff --relative --unified=0 \
-            "origin/${base_ref}...HEAD" \
-            > "${RUNNER_TEMP}/changes.diff"
-      # The blocking baseline above proves this exact nightly harness first.
+      # Each scratch copy must independently prove its unmutated harness.
       # Each mutant retains the owning-package test selection used on main;
       # One worker retains four harness threads without competing with another
-      # owning-package suite or compiler on this runner. Sixteen shards retain
-      # the full selection and unchanged watchdogs; at most eight run together.
-      - name: Run mutants in changed lines
+      # owning-package suite or compiler on this runner. Four shards retain
+      # the full selection and unchanged watchdogs; at most four run together.
+      - name: Run full-crate mutants
         # Reuse each worker's compiler state instead of rebuilding every edit.
         env:
           CARGO_INCREMENTAL: "1"
         run: |
           set -euo pipefail
+          rustc --version
+          cargo mutants --version
           set +e
-          # Each worker has an isolated target directory. A changed
-          # world-client fixture can cold-build Bevy and WASM dependencies;
-          # the build allowance stays separate from the per-test timeout.
+          # Keep the build allowance separate from the per-test timeout.
           timeout --foreground 60m cargo mutants \
-            --workspace \
+            --package pos-owner-bridge-codec \
             --all-features \
-            --in-diff "${{ runner.temp }}/changes.diff" \
             --no-shuffle \
-            --shard "${{ matrix.shard }}/16" \
-            --baseline skip \
+            --shard "${{ matrix.shard }}/4" \
+            --baseline run \
             --jobs 1 \
             --timeout 120 \
             --build-timeout 600 \
@@ -185,20 +263,14 @@ jobs:
           if-no-files-found: ignore
 
   mutation-gate:
-    # The caller waits on this fan-in before starting ASan. Individual shards
-    # must never be configured as independent merge approvals.
-    name: diff mutation testing
+    # This diagnostic is complete only after its baseline and every shard pass.
+    name: full-crate mutation audit
     if: always()
-    needs: [mutation-changes, mutation-baseline, mutation]
+    needs: [mutation-harness-control, mutation-baseline, mutation]
     runs-on: ubuntu-24.04
     steps:
-      - name: Require every relevant mutation shard to pass
+      - name: Require the baseline and every audit shard to pass
         run: |
-          test "${{ needs.mutation-changes.result }}" = success
-          if [[ "${{ needs.mutation-changes.outputs.relevant }}" = true ]]; then
-            test "${{ needs.mutation-baseline.result }}" = success
-            test "${{ needs.mutation.result }}" = success
-          else
-            test "${{ needs.mutation-baseline.result }}" = skipped
-            test "${{ needs.mutation.result }}" = skipped
-          fi
+          test "${{ needs.mutation-harness-control.result }}" = success
+          test "${{ needs.mutation-baseline.result }}" = success
+          test "${{ needs.mutation.result }}" = success
