@@ -15,7 +15,7 @@ use pos_reference::evaluator::AttemptArtifact;
 use serde::de::IgnoredAny;
 use serde::Deserialize;
 
-use crate::{CONTRACT_VERSION, PROVIDER_ID, SCHEMA_ID};
+use super::{CONTRACT_VERSION, PROVIDER_ID, SCHEMA_ID};
 
 /// The magic of the member composite.
 const COMPOSITE_MAGIC: &str = "MCS1";

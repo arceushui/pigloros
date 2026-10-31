@@ -15,8 +15,8 @@ use pos_reference::adapter_transport::{write_attempt, TransportError};
 use pos_reference::evaluator::{AttemptArtifact, AttemptTransportCaps, CaseAttempt};
 use serde_json::{json, Value};
 
-use crate::payload::{GateV1, InputV1, OutcomeV1, OutputRecordV1, StepV1, SubCaseV1};
-use crate::CAPABILITY_ID;
+use super::payload::{GateV1, InputV1, OutcomeV1, OutputRecordV1, StepV1, SubCaseV1};
+use super::CAPABILITY_ID;
 
 /// The aggregate attempt ceiling of the oversized-member probe: the #222 transport's compiled
 /// maximum, 1 GiB.
@@ -64,7 +64,7 @@ impl ObservedV1 {
             Self::ResourceLimit => OutcomeV1::ResourceLimit,
             Self::IncompatibleContract => OutcomeV1::IncompatibleContract,
             Self::NoInput => OutcomeV1::NoInput,
-            Self::EvaluatorOwned(kind) => OutcomeV1::EvaluatorOwned(*kind),
+            Self::EvaluatorOwned(kind) => OutcomeV1::EvaluatorOwned(kind),
         }
     }
 }
@@ -247,7 +247,7 @@ fn refusal(gate: &GateV1, attempt: &CaseAttempt) -> Option<ObservedV1> {
 /// Run one sub-case: its gate, then its input.
 pub(super) fn run_subcase(subcase: &SubCaseV1, attempt: &CaseAttempt) -> RecordV1 {
     let (observed, decoded) = match &subcase.step {
-        StepV1::EvaluatorOwned(kind) => (ObservedV1::EvaluatorOwned(*kind), false),
+        StepV1::EvaluatorOwned(kind) => (ObservedV1::EvaluatorOwned(kind), false),
         StepV1::Subject { gate, input } => gate
             .as_ref()
             .and_then(|gate| refusal(gate, attempt))

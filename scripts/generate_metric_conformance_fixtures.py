@@ -3,7 +3,7 @@
 
 This is the only writer of the payloads, `MCS1` composites, oracles and evidence-status records
 of the `metric-conformance` layer, of its seven provider schemas and of the subject adapter's
-`apps/pos-metric-conformance-adapter/src/schema_digests.rs`. It is called by
+`apps/pos-metric-conformance-adapter/src/subject/schema_digests.rs`. It is called by
 `scripts/conformance-fixture-adapters/metric-cbor-v1.sh render` (through the `render`
 subcommand) and runs offline.
 
@@ -49,7 +49,7 @@ import generate_pmf1_golden_vectors as golden  # noqa: E402
 
 FIXTURES = ROOT / "fixtures/conformance"
 BLAKE3_VECTORS = HERE / "data/blake3_test_vectors.json"
-SCHEMA_DIGESTS_RUST = ROOT / "apps/pos-metric-conformance-adapter/src/schema_digests.rs"
+SCHEMA_DIGESTS_RUST = ROOT / "apps/pos-metric-conformance-adapter/src/subject/schema_digests.rs"
 
 CLAIM_LAYER = "metric-conformance"
 SCHEMA_ID = "pigloros.metric-conformance.case.v2"

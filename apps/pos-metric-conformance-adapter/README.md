@@ -41,7 +41,7 @@ mode is `Unavailable`.
 ## Fixtures and tests
 
 `scripts/generate_metric_conformance_fixtures.py` writes the fixtures, the oracles and
-`src/schema_digests.rs` (the pinned digest of each family's schema member) and verifies them
+`src/subject/schema_digests.rs` (the pinned digest of each family's schema member) and verifies them
 with `--check`. `tests/adapter_public.rs` builds the attempts from the checked-in files, drives
 the binary through its process boundary with the pos-reference EAI1/EAO1 codec in both modes,
 judges each observation as the evaluator judges a CNR1 case, and recomputes `ind.1`, `ind.3`
