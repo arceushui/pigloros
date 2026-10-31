@@ -317,6 +317,18 @@ pub fn release_files(root: &Path) -> TestResult<Vec<PathBuf>> {
     Ok(files)
 }
 
+/// Materializes and returns the current public conformance archive.
+///
+/// # Errors
+///
+/// Returns an error when setup, materialization, publication discovery, or archive reading fails.
+pub fn current_archive(label: &str) -> TestResult<Vec<u8>> {
+    current_archives(label)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| "materializer did not publish a CFB1 archive".into())
+}
+
 /// Materializes the current public conformance release and returns every CFB1 archive in it,
 /// in path order.
 ///

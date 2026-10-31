@@ -271,12 +271,12 @@ fn decode_policy(
     let [magic, version, policy_id, epoch, previous, rest @ ..] = fields;
     let [snapshot, evaluator_roots, report_roots, revoked_keys, rest @ ..] = rest;
     let [revoked_binaries, revoked_reports, minimum_version, valid_through, signature] = rest;
-    if into_text(magic)? != CONFORMANCE_TRUST_POLICY_MAGIC_V1 || into_uint(version)? != 1 {
+    if into_text(magic)? != CONFORMANCE_TRUST_POLICY_MAGIC_V1 || uint(&version)? != 1 {
         return Err(ConformanceTrustPolicyContractErrorV1::UnsupportedSchemaVersion);
     }
     Ok(ConformanceTrustPolicyV1 {
         policy_id: into_text(policy_id)?,
-        epoch: into_uint(epoch)?,
+        epoch: uint(&epoch)?,
         previous_policy_digest: match previous {
             Value::Null => None,
             digest => Some(into_fixed(digest)?),
@@ -307,9 +307,9 @@ fn into_text(value: Value) -> Result<String, ConformanceTrustPolicyContractError
     }
 }
 
-fn into_uint(value: Value) -> Result<u64, ConformanceTrustPolicyContractErrorV1> {
+fn uint(value: &Value) -> Result<u64, ConformanceTrustPolicyContractErrorV1> {
     match value {
-        Value::Integer(integer) => u64::try_from(integer)
+        Value::Integer(integer) => u64::try_from(*integer)
             .map_err(|_| ConformanceTrustPolicyContractErrorV1::InvalidEncoding),
         _ => Err(ConformanceTrustPolicyContractErrorV1::InvalidEncoding),
     }
