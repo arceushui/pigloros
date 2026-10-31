@@ -26,6 +26,7 @@ use pos_core::{
 use pos_reference::evaluator::AttemptArtifact;
 use serde::{Deserialize, Serialize};
 
+use super::pair::LegEvidenceV1;
 use crate::authoritative_comparison::{
     AuthoritativeStreamV1, CheckpointDigestV1, ComparedDriverOutputV1, ComparedEventV1,
     DriverOutcomeV1, DriverOutputCoordinateV1, TickBoundaryCoordinateV1, TimelinePositionV1,
@@ -702,6 +703,10 @@ pub(super) struct RecordV1 {
     /// The Events the sub-case folded; metered, not part of the record.
     #[serde(skip)]
     pub(super) folded_events: u64,
+    /// The manifest and `VRR1` of each leg, for a pair report; not part of
+    /// the record.
+    #[serde(skip)]
+    pub(super) evidence: Vec<LegEvidenceV1>,
 }
 
 /// The names of the Plugin and Driver one recomputation subject composed.

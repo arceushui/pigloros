@@ -23,6 +23,7 @@ use pos_runtime::{Driver, ObservationView, RuntimeError, StepOutput};
 use pos_state::ProjectionRegistry;
 use pos_store::StoreConfig;
 
+use super::pair::LegEvidenceV1;
 use super::payload::{
     hex, ClosureV1, CompositionV1, DigestSizeV1 as DigestSizeRecordV1, DivergenceV1, FirstErrorV1,
     LegV1, ManifestFieldsV1, ProfileV1, RecordV1, ScriptV1, SubCaseV1,
@@ -465,6 +466,16 @@ pub(super) fn run_subcase(
             .iter()
             .zip(&outcomes)
             .map(|(profile, outcome)| leg(*profile, outcome))
+            .collect(),
+        evidence: requests
+            .iter()
+            .zip(outcomes)
+            .map(|(request, outcome)| LegEvidenceV1 {
+                subcase_id: subcase.id.clone(),
+                manifest: request.manifest.clone(),
+                result: outcome.result,
+                divergence: outcome.divergence,
+            })
             .collect(),
     })
 }
