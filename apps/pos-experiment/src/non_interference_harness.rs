@@ -389,10 +389,10 @@ impl NonInterferenceHarnessV1 {
         fixture: &NonInterferenceFixturePairV1,
     ) -> NonInterferenceRunOutcomeV1 {
         let preparation = NonInterferencePreparationV1::for_variant(fixture.variant);
-        let case = self
+        let compared = self
             .runner(fixture.mode)
             .and_then(|runner| run_case(runner, fixture, preparation));
-        match case.and_then(|case| self.sign(case, preparation)) {
+        match compared.and_then(|compared| self.sign(compared, preparation)) {
             Ok(execution) => NonInterferenceRunOutcomeV1::Executed(Box::new(execution)),
             Err(cause) => NonInterferenceRunOutcomeV1::NonExecuted {
                 fixture_id: fixture.fixture_id.clone(),
