@@ -1,7 +1,8 @@
 #![cfg(target_os = "linux")]
 
 //! R8-S1 to R8-S11: the acceptance tests of the community Plugin conformance profile (ADR-061
-//! revision 8, S5), on the real `pos-plugin-worker`.
+//! revision 8, S5), on the real `pos-plugin-worker`, and R7-F2: the `downgrade` family through
+//! the production rollback entry (ADR-103 revision 7 decision 4.6).
 //!
 //! The attempts are built from the checked-in files of `fixtures/conformance` and run through
 //! the adapter library's `run_with` with a recording runner. The runner interprets each
@@ -27,8 +28,8 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use pos_plugin_conformance_adapter::payload::{StepV1, SubCaseV1};
 use pos_plugin_conformance_adapter::world::{
-    interpret, outcome_bytes_of, BindArgsV1, InstallArgsV1, PassArgsV1, RefreshArgsV1, SetupArgsV1,
-    StepPortV1, SubCaseRecordV1,
+    interpret, outcome_bytes_of, BindArgsV1, InstallArgsV1, PassArgsV1, RefreshArgsV1,
+    RollbackArgsV1, SetupArgsV1, StepPortV1, SubCaseRecordV1,
 };
 use pos_plugin_conformance_adapter::{
     run_with, AdapterRunErrorV1, EvaluationStepPortV1, PiecesV1, SubCaseRunnerV1,
@@ -42,7 +43,8 @@ use pos_reference::adapter_transport::{read_observation, write_attempt};
 use pos_reference::evaluator::{CaseAttempt, SubjectObservation, SubjectResult};
 use pos_reference::evaluator_domain::{ExecutionMode, FixtureFamily};
 use pos_runtime::community_plugin_host::{
-    CommunityPluginHostErrorV1, CommunityPluginModeV1, ReleaseIdentityV1,
+    CommunityPluginHostErrorV1, CommunityPluginModeV1, ReleaseIdentityV1, RevocationBasisV1,
+    TrustDenialBasisV1,
 };
 use serde_json::Value;
 use support::attempts::{attempt_from_fixture_files, oracle_bytes, rewrite_subcases};
@@ -96,16 +98,22 @@ struct PassCapture {
     launches: u64,
 }
 
-/// One sub-case: its record and the passes it ran.
+/// The result of a `rollback` step.
+type RollbackResult = Result<(), CommunityPluginHostErrorV1>;
+
+/// One sub-case: its record, the passes it ran and the result of each `rollback` step.
 struct Capture {
     record: SubCaseRecordV1,
     passes: Vec<PassCapture>,
+    rollbacks: Vec<RollbackResult>,
 }
 
-/// The real evaluation port, which also snapshots the world around every pass.
+/// The real evaluation port, which also snapshots the world around every pass and records the
+/// result of every rollback.
 struct SpyPort {
     inner: EvaluationStepPortV1,
     passes: Vec<PassCapture>,
+    rollbacks: Vec<RollbackResult>,
 }
 
 impl SpyPort {
@@ -125,6 +133,12 @@ impl StepPortV1 for SpyPort {
 
     fn install(&mut self, args: &InstallArgsV1) -> Result<(), CommunityPluginHostErrorV1> {
         self.inner.install(args)
+    }
+
+    fn rollback(&mut self, args: &RollbackArgsV1) -> RollbackResult {
+        let result = self.inner.rollback(args);
+        self.rollbacks.push(result);
+        result
     }
 
     fn bind(&mut self, args: &BindArgsV1) -> Result<ReleaseIdentityV1, CommunityPluginHostErrorV1> {
@@ -222,11 +236,13 @@ impl SubCaseRunnerV1 for Spy {
         let mut port = SpyPort {
             inner: EvaluationStepPortV1::new(self.program.clone()),
             passes: Vec::new(),
+            rollbacks: Vec::new(),
         };
         let record = interpret(&edited, pieces, &mut port, mode);
         let capture = Capture {
             record: record.clone(),
             passes: port.passes,
+            rollbacks: port.rollbacks,
         };
         self.captures
             .lock()
@@ -542,9 +558,85 @@ fn r8_s5_the_marker_is_in_no_committed_event_state_or_outcome() -> TestResult {
 }
 
 #[test]
-fn r8_s6_downgrade_is_incompatible_contract_after_dgr_1_to_dgr_4_matched() -> TestResult {
-    let ids = ["dgr.1", "dgr.2", "dgr.3a", "dgr.3b", "dgr.4"];
+fn r8_s6_downgrade_is_incompatible_contract_after_dgr_1_to_dgr_6_matched() -> TestResult {
+    let ids = [
+        "dgr.1", "dgr.2", "dgr.3a", "dgr.3b", "dgr.4", "dgr.5", "dgr.6",
+    ];
     assert_family_failure(FixtureFamily::Downgrade, "incompatible-contract", &ids)
+}
+
+const UNAVAILABLE: CommunityPluginHostErrorV1 = CommunityPluginHostErrorV1::ArtifactTrustDenied {
+    basis: TrustDenialBasisV1::TrustStateUnavailable,
+};
+
+/// One `downgrade` sub-case: the refusal that decides it, the steps that ran (the refusing step
+/// included) and the result of each `rollback` step.
+struct Downgrade {
+    id: &'static str,
+    refusal: CommunityPluginHostErrorV1,
+    steps_run: u32,
+    rollbacks: Vec<RollbackResult>,
+}
+
+const fn downgrade(
+    id: &'static str,
+    refusal: CommunityPluginHostErrorV1,
+    steps_run: u32,
+    rollbacks: Vec<RollbackResult>,
+) -> Downgrade {
+    Downgrade {
+        id,
+        refusal,
+        steps_run,
+        rollbacks,
+    }
+}
+
+/// The `downgrade` table of ADR-103 revision 7 decision 4.6.
+fn downgrade_table() -> [Downgrade; 7] {
+    let not_active = CommunityPluginHostErrorV1::ArtifactTrustDenied {
+        basis: TrustDenialBasisV1::NotActive,
+    };
+    let revoked = CommunityPluginHostErrorV1::ArtifactRevoked {
+        basis: RevocationBasisV1::PublisherKey,
+    };
+    let invalid = CommunityPluginHostErrorV1::InvalidManifest;
+    let abi = CommunityPluginHostErrorV1::IncompatibleAbi;
+    [
+        // The rollback to R1 succeeds, then the bind of the replaced R2 is refused.
+        downgrade("dgr.1", not_active, 4, vec![Ok(())]),
+        // A revoked R1 is not silently restored.
+        downgrade("dgr.2", revoked, 4, vec![Err(revoked)]),
+        downgrade("dgr.3a", invalid, 1, Vec::new()),
+        downgrade("dgr.3b", abi, 2, Vec::new()),
+        downgrade("dgr.4", UNAVAILABLE, 2, Vec::new()),
+        // `UnknownRollbackTarget`, then `RollbackTargetActive`.
+        downgrade("dgr.5", UNAVAILABLE, 2, vec![Err(UNAVAILABLE)]),
+        downgrade("dgr.6", UNAVAILABLE, 2, vec![Err(UNAVAILABLE)]),
+    ]
+}
+
+#[test]
+fn r7_f2_downgrade_rolls_back_through_the_production_entry() -> TestResult {
+    for mode in MODES {
+        let run = family_run(FixtureFamily::Downgrade, mode)?;
+        for expected in downgrade_table() {
+            let id = expected.id;
+            let capture = capture_of(&run.captures, id)?;
+            let record = &capture.record;
+            assert_eq!(
+                record.setup_refusal,
+                Some(expected.refusal),
+                "{id} {mode:?}"
+            );
+            assert_eq!(record.steps_run, expected.steps_run, "{id} {mode:?}");
+            assert_eq!(capture.rollbacks, expected.rollbacks, "{id} {mode:?}");
+            assert_eq!(capture.record.worker_launches, 0, "{id} {mode:?}");
+            assert!(capture.passes.is_empty(), "{id} {mode:?}");
+            assert!(capture.record.matched, "{id} {mode:?}");
+        }
+    }
+    Ok(())
 }
 
 #[test]

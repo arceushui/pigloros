@@ -1,16 +1,19 @@
 //! Planned ownership extended with the exact, still-unmounted directory tree.
 
 use rustix::fs::mkdirat;
+use std::sync::OnceLock;
 
 mod removal;
 
+use super::root::{RootRecord, ROOT_RECORD_SIZE};
 use super::{
     open_directory, publish_record, read_record_bytes, registry_io, require_empty,
     validate_directory, verify_intent, Arc, CommittedPlannedAttempt, File, MetadataExt, Mode,
     PlannedAttemptIntent, RenameFlags, ResolveFlags, SystemdAttemptRegistryError,
 };
+use crate::RootResourceIdentity;
 
-const DIRECTORY_RECORD_SIZE: usize = 84;
+pub(super) const DIRECTORY_RECORD_SIZE: usize = 84;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct DirectoryIdentity {
@@ -28,7 +31,7 @@ impl DirectoryIdentity {
     }
 }
 
-/// A durably recorded pair of private, unmounted attempt/root directories.
+/// A durably recorded private attempt/root tree, created before attachment.
 ///
 /// This owns the held descriptors and registry lock. It grants no mount or
 /// execution authority; current image/control admission is still required.
@@ -40,6 +43,9 @@ pub struct PreparedAttemptDirectory {
     attempt: File,
     root: File,
     identities: [DirectoryIdentity; 2],
+    // Exact visible bytes after replacement, including an uncertain parent fsync.
+    // This permits verified cleanup without acknowledging durability or launch.
+    recorded_root: OnceLock<RootRecord>,
 }
 
 impl CommittedPlannedAttempt {
@@ -63,13 +69,8 @@ impl CommittedPlannedAttempt {
             return Err(SystemdAttemptRegistryError::ReconciliationRequired);
         }
         let result = state
-            .next_sequence
-            .checked_add(1)
-            .ok_or(SystemdAttemptRegistryError::ReconciliationRequired)
-            .and_then(|sequence| {
-                state.next_sequence = sequence;
-                self.create_directory(sequence)
-            });
+            .reserve_sequence()
+            .and_then(|sequence| self.create_directory(sequence));
         state.failed = result.is_err();
         result
     }
@@ -98,6 +99,7 @@ impl CommittedPlannedAttempt {
             attempt,
             root,
             identities,
+            recorded_root: OnceLock::new(),
         };
         prepared.verify_tree()?;
         verify_intent(&prepared.planned.directory, &prepared.planned.intent)?;
@@ -105,8 +107,9 @@ impl CommittedPlannedAttempt {
             &prepared.planned.directory,
             &prepared.planned.intent,
             sequence,
-            &prepared.record_bytes(),
+            &prepared.directory_bytes(),
             RenameFlags::empty(),
+            || {},
         )?;
         prepared.verify_record_and_tree()?;
         Ok(prepared)
@@ -173,7 +176,7 @@ impl PreparedAttemptDirectory {
             .failed = true;
     }
 
-    fn record_bytes(&self) -> [u8; DIRECTORY_RECORD_SIZE] {
+    pub(super) fn directory_bytes(&self) -> [u8; DIRECTORY_RECORD_SIZE] {
         let mut bytes = [0; DIRECTORY_RECORD_SIZE];
         bytes[..52].copy_from_slice(&self.planned.intent.encode());
         // PAI2 is the closed directory stage of this private registry format.
@@ -194,14 +197,75 @@ impl PreparedAttemptDirectory {
     }
 
     fn verify_record(&self) -> Result<(), SystemdAttemptRegistryError> {
-        let observed = read_record_bytes::<DIRECTORY_RECORD_SIZE>(
-            &self.planned.directory,
-            &self.planned.intent.unit_name,
-        )?;
-        if observed != self.record_bytes() {
-            return Err(SystemdAttemptRegistryError::InvalidIntent);
+        let directory_bytes = self.directory_bytes();
+        let recorded = self.recorded_root.get();
+        let expected = recorded.map_or(directory_bytes.as_slice(), |record| {
+            record.bytes().as_slice()
+        });
+        let observed = if recorded.is_some() {
+            read_record_bytes::<ROOT_RECORD_SIZE>(
+                &self.planned.directory,
+                &self.planned.intent.unit_name,
+            )
+            .map(Vec::from)
+        } else {
+            read_record_bytes::<DIRECTORY_RECORD_SIZE>(
+                &self.planned.directory,
+                &self.planned.intent.unit_name,
+            )
+            .map(Vec::from)
+        };
+        observed.and_then(|bytes| {
+            (bytes.as_slice() == expected)
+                .then_some(())
+                .ok_or(SystemdAttemptRegistryError::InvalidIntent)
+        })
+    }
+
+    /// Verify and commit exact root facts while retaining registry ownership.
+    /// An identical repeat only reads back; uncertain writes close admission.
+    pub(crate) fn record_root(
+        &self,
+        identity: &RootResourceIdentity,
+        verify: impl FnOnce() -> Result<(), SystemdAttemptRegistryError>,
+    ) -> Result<(), SystemdAttemptRegistryError> {
+        let mut state = self
+            .planned
+            .state
+            .lock()
+            .map_err(|_| SystemdAttemptRegistryError::ReconciliationRequired)?;
+        if state.failed {
+            return Err(SystemdAttemptRegistryError::ReconciliationRequired);
         }
-        Ok(())
+        let result = self
+            .verify_record()
+            .and_then(|()| self.verify_attempt().map(|_| ()))
+            .and_then(|()| verify())
+            .and_then(|()| RootRecord::new(self, identity))
+            .and_then(|record| {
+                if let Some(recorded) = self.recorded_root.get() {
+                    return (recorded == &record)
+                        .then_some(())
+                        .ok_or(SystemdAttemptRegistryError::InvalidIntent);
+                }
+                state
+                    .reserve_sequence()
+                    .and_then(|sequence| {
+                        publish_record(
+                            &self.planned.directory,
+                            &self.planned.intent,
+                            sequence,
+                            record.bytes(),
+                            RenameFlags::empty(),
+                            || {
+                                let _recorded = self.recorded_root.get_or_init(|| record.clone());
+                            },
+                        )
+                    })
+                    .and_then(|()| self.verify_record())
+            });
+        state.failed |= result.is_err();
+        result
     }
 
     fn verify_tree(&self) -> Result<(), SystemdAttemptRegistryError> {
@@ -588,6 +652,58 @@ mod tests {
             })
             .is_err());
         assert!(!invoked.get());
+        Ok(())
+    }
+
+    #[test]
+    fn the_last_sequence_slot_can_commit_root_but_not_another_attempt() -> TestResult {
+        let (runtime, registry) = fixture()?;
+        let prepared = registry.commit_planned(&intent(1)?)?.prepare_directory()?;
+        let identity = crate::test_fixtures::recorded_identity(&prepared)?;
+        registry.state.lock().map_err(|_| "owner")?.next_sequence = u64::MAX - 1;
+        prepared.record_root(&identity, || Ok(()))?;
+        // An identical repeat needs no additional sequence slot.
+        prepared.record_root(&identity, || Ok(()))?;
+        let record = runtime
+            .path()
+            .join("registry")
+            .join(prepared.intent().unit_name().attempt_component());
+        let bytes = fs::read(record)?;
+        assert_eq!(&bytes[..4], b"PAI3");
+        assert_eq!(bytes.len(), 393);
+        assert!(registry.commit_planned(&intent(2)?).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn failed_exhausted_poisoned_and_refused_root_owners_cannot_commit() -> TestResult {
+        for fault in 0..4 {
+            let (_runtime, registry) = fixture()?;
+            let prepared = registry.commit_planned(&intent(1)?)?.prepare_directory()?;
+            let identity = crate::test_fixtures::recorded_identity(&prepared)?;
+            match fault {
+                0 => registry.state.lock().map_err(|_| "owner")?.failed = true,
+                1 => registry.state.lock().map_err(|_| "owner")?.next_sequence = u64::MAX,
+                2 => assert!(std::panic::catch_unwind(|| {
+                    let _guard = registry.state.lock();
+                    std::panic::resume_unwind(Box::new(()));
+                })
+                .is_err()),
+                _ => {}
+            }
+            let reached = std::cell::Cell::new(false);
+            let result = prepared.record_root(&identity, || {
+                reached.set(true);
+                if fault == 3 {
+                    Err(SystemdAttemptRegistryError::InvalidIntent)
+                } else {
+                    Ok(())
+                }
+            });
+            assert!(result.is_err(), "fault {fault}");
+            assert_eq!(reached.get(), fault == 1 || fault == 3);
+            assert!(registry.commit_planned(&intent(2)?).is_err());
+        }
         Ok(())
     }
 

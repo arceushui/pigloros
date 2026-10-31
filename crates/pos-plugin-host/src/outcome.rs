@@ -74,7 +74,7 @@ impl std::error::Error for RuntimeNotPinnedV1 {}
 /// failing on guest-provided values, such as a guest return that does not
 /// lift: `InvalidGuestOutput`, never a trap.
 ///
-/// In Wasmtime 49.0.4 the host lifts a guest return in Rust and reports a
+/// In Wasmtime 49.0.5 the host lifts a guest return in Rust and reports a
 /// malformed value with a plain error, never a `Trap` code: for example
 /// `bail!("list pointer/length out of bounds of memory")` in
 /// `src/runtime/component/func/typed.rs` and the field and case checks in

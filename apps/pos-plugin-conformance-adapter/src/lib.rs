@@ -35,7 +35,6 @@ use pos_runtime::community_plugin_host::CommunityPluginModeV1;
 pub mod composite;
 pub mod hex;
 pub mod invocation;
-pub mod jcs;
 pub mod map;
 pub mod payload;
 pub mod runner;
@@ -50,7 +49,7 @@ pub use world::{interpret, ScanResultV1, ScanSource, StepPortV1, SubCaseRecordV1
 pub const PROVIDER_ID: &str = "pigloros.fixture.plugin-conformance";
 
 /// The contract version of every failure the adapter returns.
-pub const CONTRACT_VERSION: &str = "2.0.0";
+pub const CONTRACT_VERSION: &str = "2.1.0";
 
 /// The `schema` string of a case payload.
 pub const SCHEMA_ID: &str = "pigloros.plugin-conformance.case.v2";

@@ -3153,7 +3153,21 @@ fn compute_retained_calibration_report(
         }],
     )
     .map_err(|error| ExperimentError::Store(pos_core::CoreError::Storage(error.to_string())))?;
-    pos_plugin_eval::compute_report(store, timeline, artifact_digest, &evaluation)
+    // The retained eval timeline is admitted whole, so every committed Event is available,
+    // and a report needs at least one scored record.
+    store
+        .read(timeline, pos_core::store::SeqRange::all())
+        .map_err(Box::<dyn std::error::Error>::from)
+        .and_then(|events| {
+            pos_plugin_eval::compute_report_from_events(
+                &events,
+                &pipeline_evaluation::admitted,
+                1,
+                artifact_digest,
+                &evaluation,
+            )
+            .map_err(Box::<dyn std::error::Error>::from)
+        })
         .map_err(|error| ExperimentError::Store(pos_core::CoreError::Storage(error.to_string())))
 }
 
@@ -11343,7 +11357,7 @@ mod fault_injection_tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn backtest_runner_compute_report_error_propagates() {
+    fn backtest_runner_calibration_report_read_error_propagates() {
         let mut store = FailReadAfterStore {
             base: pos_store::memory::MemoryStore::new(),
             ok_reads_left: Cell::new(2),
@@ -11363,7 +11377,7 @@ mod fault_injection_tests {
     }
 
     // `run_experiment_on_store` reads once per phase for chain_head; allow those
-    // two reads, then fail the `compute_report` read.
+    // two reads, then fail the calibration report read.
     struct FailReadAfterStore {
         base: pos_store::memory::MemoryStore,
         ok_reads_left: Cell<u32>,
@@ -11422,7 +11436,7 @@ mod fault_injection_tests {
             let left = self.ok_reads_left.get();
             if left == 0 {
                 return Err(CoreError::Storage(
-                    "read failed for compute_report".to_owned(),
+                    "read failed for the calibration report".to_owned(),
                 ));
             }
             self.ok_reads_left.set(left - 1);

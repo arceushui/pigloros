@@ -23,6 +23,7 @@ pub(crate) const TPS1_MAX_REVOKED_ARTIFACTS: usize = 4_096;
 mod bundle_contract;
 #[cfg(test)]
 pub mod catalog_auxiliary;
+mod conformance_trust_admission;
 pub mod counterfactual;
 mod execution_profile;
 mod non_interference;
@@ -30,6 +31,7 @@ mod non_interference_report;
 mod plugin_trust_bridge;
 mod profile_contract;
 mod provider_contract;
+mod report_attestation;
 mod sandbox_provider_contract;
 mod trust_policy_snapshot;
 mod verification_preflight;
@@ -59,6 +61,10 @@ pub use bundle_contract::{
     BundleExpectedResultV1, BundleManifestV1, BundleMemberDescriptorV1, BundleMemberRoleV1,
     BundleMemberV1, BundleModeV1, ConformanceBundlePairV1, ConformanceBundleV1,
     CONFORMANCE_BUNDLE_MAGIC_V1, MAX_CONFORMANCE_BUNDLE_BYTES_V1,
+};
+pub use conformance_trust_admission::{
+    ConformanceArtifactRefusalV1, ConformanceKeyRefusalV1, ConformanceTrustAdmissionPortV1,
+    ConformanceTrustRoleV1,
 };
 pub use execution_profile::{
     ExecutionProfileCapabilitiesV1, ExecutionProfileCompatibilityV1,
@@ -106,6 +112,14 @@ pub use provider_contract::{
     ProviderContractErrorV1, ProviderFamilySchemaV1, FIXTURE_PROVIDER_PACKAGE_MAGIC_V1,
     FIXTURE_PROVIDER_REGISTRY_MAGIC_V1, FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1,
     MAX_PROVIDER_ARTIFACT_BYTES_V1,
+};
+pub use report_attestation::{
+    sign_report_attestation_v1, verify_report_attestation_v1, BoundSubjectV1,
+    ReportAttestationArtifactsV1, ReportAttestationErrorV1, SignatureMeaningV1,
+    VerifiedReportAttestationV1, ATTRIBUTION_ONLY_SIGNATURE_MEANING_V1,
+    CONFORMANCE_REPORT_PREDICATE_SCHEMA_V1, CONFORMANCE_REPORT_PREDICATE_TYPE_V1,
+    IN_TOTO_STATEMENT_TYPE_V1, MAX_REPORT_ATTESTATION_BYTES_V1,
+    REPORT_ATTESTATION_SUBJECT_NAMES_V1,
 };
 pub use sandbox_provider_contract::{
     AdmissionAuthorityV1, AdmissionGrantV1, LaunchPolicyV1, NetworkCapabilityV1,

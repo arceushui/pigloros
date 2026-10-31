@@ -358,18 +358,17 @@ fn invalid_probabilities_are_quarantined_and_the_closed_bounds_derive() {
                 .collect::<Vec<_>>(),
             "{name}"
         );
-        let derived: Vec<f64> = events(store.as_ref(), timeline)
+        let derived: Vec<u64> = events(store.as_ref(), timeline)
             .iter()
             .filter(|event| event.event_type.as_str() == EVENT_TYPE_PREDICTION)
             .map(|event| {
                 ciborium::from_reader::<PredictionPayload, _>(event.payload.as_slice())
                     .test_ok()
                     .predicted_prob
+                    .to_bits()
             })
             .collect();
-        assert_eq!(derived.len(), 2, "{name}");
-        assert!(derived[0].abs() < f64::EPSILON, "{name}");
-        assert!((derived[1] - 1.0).abs() < f64::EPSILON, "{name}");
+        assert_eq!(derived, [0.0_f64.to_bits(), 1.0_f64.to_bits()], "{name}");
     }
 }
 
