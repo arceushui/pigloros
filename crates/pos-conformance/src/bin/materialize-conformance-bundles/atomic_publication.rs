@@ -13,6 +13,7 @@ use std::io::Read as _;
 use std::os::fd::OwnedFd;
 #[cfg(target_os = "linux")]
 use std::os::unix::ffi::OsStrExt;
+
 /// The trusted parent of a publication, opened and validated before any output is computed so
 /// that an unusable destination is rejected without materializing.
 #[cfg(target_os = "linux")]

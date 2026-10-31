@@ -175,6 +175,21 @@ mod tests {
         assert!(!prohibited_text_material(b"ghp_abcdefgh\xffijklmnop"));
         assert!(!prohibited_text_material(b""));
         assert!(!prohibited_text_material(b"g"));
+        assert!(prohibited_text_material(b"aizaizaABCDEFGHIJKLMN"));
+        assert!(!prohibited_text_material(b"aizaizaABCDEFGHIJKL"));
+        assert!(!prohibited_text_material(
+            "ghp_abcdefgh\u{e9}ijklmnop".as_bytes()
+        ));
+        assert!(prohibited_text_material(b"GhP_abcdefghijklmnop"));
+        assert!(!prohibited_text_material(b"trailing ghp_"));
+    }
+
+    #[test]
+    fn scanning_a_mebibyte_of_pattern_starts_stays_linear() {
+        let candidates = b"ai".repeat(512 * 1024);
+        let started = std::time::Instant::now();
+        assert!(!prohibited_text_material(&candidates));
+        assert!(started.elapsed() < std::time::Duration::from_secs(30));
     }
 
     #[test]

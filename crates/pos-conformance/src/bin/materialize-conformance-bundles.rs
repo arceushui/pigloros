@@ -484,12 +484,16 @@ fn main() -> Result<(), Box<dyn Error>> {
     run(
         std::env::args_os(),
         std::env::var("PIGLOROS_CONFORMANCE_SIGNING_KEY"),
+        materialized_files,
     )
 }
 
+/// Parse the command and key, validate the destination, and only then compute the outputs with
+/// `materialize`, so that an unusable destination is rejected before any output exists.
 fn run(
     arguments: impl Iterator<Item = OsString>,
     encoded_signing_key: Result<String, std::env::VarError>,
+    materialize: impl FnOnce(&SigningKey) -> Result<Vec<MaterializedFile>, Box<dyn Error>>,
 ) -> Result<(), Box<dyn Error>> {
     command_from_arguments(arguments)
         .and_then(|command| {
@@ -499,7 +503,7 @@ fn run(
             prepare_command(command).map(|command| (command, signing_key))
         })
         .and_then(|(command, signing_key)| {
-            materialized_files(&signing_key).and_then(|outputs| execute_command(command, &outputs))
+            materialize(&signing_key).and_then(|outputs| execute_command(command, &outputs))
         })
 }
 
@@ -1438,6 +1442,40 @@ fn verify_public_archive(
         .and_then(|_| {
             verify_archive_release_filename(archive_bytes, release_filename).map_err(Into::into)
         })
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod command_order_tests {
+    use super::{run, MaterializationError};
+    use std::cell::Cell;
+    use std::ffi::OsString;
+
+    const KEY: &str = "0707070707070707070707070707070707070707070707070707070707070707";
+
+    #[test]
+    fn an_unusable_destination_is_rejected_before_any_output_is_computed() {
+        let materialized = Cell::new(false);
+        let error = run(
+            [
+                OsString::from("materialize-conformance-bundles"),
+                OsString::from("not-the-source-inventory-digest"),
+            ]
+            .into_iter(),
+            Ok(KEY.to_owned()),
+            |_| {
+                materialized.set(true);
+                Err("materialization must not run for an unusable destination".into())
+            },
+        )
+        .err()
+        .and_then(|error| error.downcast::<MaterializationError>().ok());
+        assert!(matches!(
+            error.as_deref(),
+            Some(MaterializationError::SourceInventoryAddressMismatch)
+        ));
+        assert!(!materialized.get());
+    }
 }
 
 #[cfg(test)]
