@@ -10,8 +10,9 @@ use ed25519_dalek::{Signer as _, SigningKey};
 use pos_conformance::{
     draft_trust_policy_snapshot_bytes_v1, ConformanceArtifactRefusalV1, ConformanceKeyRefusalV1,
     ConformanceTrustAdmissionErrorV1 as AdmissionError, ConformanceTrustAdmissionPortV1,
-    ConformanceTrustAdmissionV1, ConformanceTrustPolicyContractErrorV1 as PolicyError,
-    ConformanceTrustPolicyV1, ConformanceTrustRoleV1, TrustPolicySnapshotContractErrorV1,
+    ConformanceTrustAdmissionV1, ConformanceTrustAnchorV1,
+    ConformanceTrustPolicyContractErrorV1 as PolicyError, ConformanceTrustPolicyV1,
+    ConformanceTrustRoleV1, TrustPolicySnapshotContractErrorV1, TrustPolicySnapshotV1,
     CONFORMANCE_TRUST_POLICY_MAGIC_V1, MAX_CONFORMANCE_TRUST_POLICY_BYTES_V1,
     MAX_CONFORMANCE_TRUST_REVOCATIONS_V1, MAX_CONFORMANCE_TRUST_ROOTS_V1,
 };
@@ -111,16 +112,46 @@ fn successor(
     bytes(policy)
 }
 
+/// The high-water mark pinning the policy with these exact bytes.
+fn pinned(bytes: &[u8]) -> TestResult<ConformanceTrustAnchorV1> {
+    Ok(ConformanceTrustAnchorV1 {
+        epoch: decoded(bytes)?.epoch,
+        policy_digest: *blake3::hash(bytes).as_bytes(),
+    })
+}
+
+/// A mark no chain contains, for chains that fail before the mark is examined.
+const UNUSED_MARK: ConformanceTrustAnchorV1 = ConformanceTrustAnchorV1 {
+    epoch: 1,
+    policy_digest: [0; 32],
+};
+
+/// The admission of `chain` over the TPS1 bytes `tps1`, pinned at `anchor`.
+fn load_with(
+    chain: &[&[u8]],
+    tps1: &[u8],
+    anchor: ConformanceTrustAnchorV1,
+    now: i64,
+) -> Result<ConformanceTrustAdmissionV1, AdmissionError> {
+    ConformanceTrustAdmissionV1::from_chain_v1(chain, tps1, &operator_key(), anchor, now)
+}
+
+/// The admission of `chain` over the draft TPS1, pinned at its oldest policy.
 fn load(
     chain: &[&[u8]],
     now: i64,
 ) -> TestResult<Result<ConformanceTrustAdmissionV1, AdmissionError>> {
-    Ok(ConformanceTrustAdmissionV1::from_chain_v1(
-        chain,
-        &snapshot()?,
-        &operator_key(),
-        now,
-    ))
+    let anchor = chain
+        .first()
+        .map_or(UNUSED_MARK, |oldest| pinned(oldest).unwrap_or(UNUSED_MARK));
+    Ok(load_with(chain, &snapshot()?, anchor, now))
+}
+
+/// The draft TPS1 after `edit`, re-encoded (its operator signature is not checked here).
+fn snapshot_with(edit: impl FnOnce(&mut TrustPolicySnapshotV1)) -> TestResult<Vec<u8>> {
+    let mut snapshot = TrustPolicySnapshotV1::from_canonical_cbor(&snapshot()?)?;
+    edit(&mut snapshot);
+    Ok(snapshot.to_canonical_cbor()?)
 }
 
 fn admit(
@@ -886,7 +917,13 @@ fn a_chain_that_cannot_be_authenticated_or_bound_is_not_loaded() -> TestResult {
     let mut off_curve = [0; 32];
     off_curve[0] = 2;
     assert_eq!(
-        ConformanceTrustAdmissionV1::from_chain_v1(&[&policy], &snapshot, &off_curve, NOW),
+        ConformanceTrustAdmissionV1::from_chain_v1(
+            &[&policy],
+            &snapshot,
+            &off_curve,
+            pinned(&policy)?,
+            NOW
+        ),
         Err(AdmissionError::OperatorKey)
     );
     assert_eq!(
@@ -894,6 +931,7 @@ fn a_chain_that_cannot_be_authenticated_or_bound_is_not_loaded() -> TestResult {
             &[&policy],
             &snapshot,
             &key(STRANGER).verifying_key().to_bytes(),
+            pinned(&policy)?,
             NOW
         ),
         Err(AdmissionError::OperatorSignature)
@@ -921,7 +959,7 @@ fn a_chain_that_cannot_be_authenticated_or_bound_is_not_loaded() -> TestResult {
     );
     assert_eq!(load(&[], NOW)?, Err(AdmissionError::EmptyChain));
     assert_eq!(
-        ConformanceTrustAdmissionV1::from_chain_v1(&[&policy], b"not TPS1", &operator_key(), NOW),
+        load_with(&[&policy], b"not TPS1", pinned(&policy)?, NOW),
         Err(AdmissionError::Snapshot(
             TrustPolicySnapshotContractErrorV1::InvalidEncoding
         ))
@@ -981,4 +1019,131 @@ fn every_error_names_its_reason() {
     ] {
         assert!(error.contains(expected), "{error}");
     }
+}
+
+#[test]
+fn the_pinned_high_water_mark_refuses_older_or_divergent_chains() -> TestResult {
+    let first = with(|_| {})?;
+    let second = successor(&first, 2, |_| {})?;
+    let third = successor(&second, 3, |_| {})?;
+    // Another policy at the pinned epoch, and a chain that links past the pinned policy.
+    let divergent = successor(&first, 2, |p| p.revoked_key_ids = vec![[0x40; 32]])?;
+    let after_divergent = successor(&divergent, 3, |_| {})?;
+    let skipping = successor(&first, 3, |_| {})?;
+    let tps1 = snapshot()?;
+    let mark = pinned(&second)?;
+    let standing =
+        |chain: &[&[u8]], anchor| -> TestResult<Result<[u8; 32], ConformanceKeyRefusalV1>> {
+            Ok(admit(
+                &load_with(chain, &tps1, anchor, NOW)?,
+                ConformanceTrustRoleV1::ReportSigning,
+                REPORTER,
+            ))
+        };
+    // A chain that reaches the mark exactly, or continues past it, stands.
+    for chain in [
+        vec![&second[..]],
+        vec![&first[..], &second[..]],
+        vec![&first[..], &second[..], &third[..]],
+    ] {
+        assert_eq!(standing(&chain, mark)?, Ok(public(REPORTER)));
+    }
+    let rolled_back: [(&str, Vec<&[u8]>, ConformanceTrustAnchorV1); 5] = [
+        (
+            "an old chain",
+            vec![&first[..], &second[..]],
+            pinned(&third)?,
+        ),
+        ("one record below the mark", vec![&first[..]], mark),
+        (
+            "skips the pinned policy",
+            vec![&first[..], &skipping[..]],
+            mark,
+        ),
+        (
+            "another policy at the pinned epoch",
+            vec![&first[..], &divergent[..], &after_divergent[..]],
+            mark,
+        ),
+        (
+            "a mark whose epoch is not the pinned policy's",
+            vec![&first[..], &second[..], &third[..]],
+            ConformanceTrustAnchorV1 {
+                epoch: 3,
+                policy_digest: mark.policy_digest,
+            },
+        ),
+    ];
+    for (name, chain, anchor) in rolled_back {
+        assert_eq!(
+            standing(&chain, anchor)?,
+            Err(ConformanceKeyRefusalV1::RolledBack),
+            "{name}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn a_key_id_revoked_by_the_bound_tps1_is_refused_even_as_a_ctp1_root() -> TestResult {
+    let reporter = blake3::Hash::from_bytes(key_id(REPORTER))
+        .to_hex()
+        .to_string();
+    // Entries that are not a DSSE key id revoke no conformance key.
+    let tps1 = snapshot_with(|s| {
+        s.revoked_key_ids = vec![reporter, "unrelated-key".to_owned()];
+    })?;
+    let policy = with(|p| p.trust_policy_snapshot_digest = *blake3::hash(&tps1).as_bytes())?;
+    let trust = load_with(&[&policy], &tps1, pinned(&policy)?, NOW)?;
+    assert!(trust
+        .policy()
+        .report_signing_roots
+        .contains(&public(REPORTER)));
+    for role in [
+        ConformanceTrustRoleV1::ReportSigning,
+        ConformanceTrustRoleV1::EvaluatorRelease,
+    ] {
+        assert_eq!(
+            admit(&trust, role, REPORTER),
+            Err(ConformanceKeyRefusalV1::Revoked)
+        );
+    }
+    assert_eq!(
+        admit(&trust, ConformanceTrustRoleV1::EvaluatorRelease, EVALUATOR),
+        Ok(public(EVALUATOR))
+    );
+    Ok(())
+}
+
+#[test]
+fn a_bound_tps1_past_offline_valid_through_makes_the_admission_stale() -> TestResult {
+    for (tps1_valid_through, now, expected) in [
+        (VALID_THROUGH, NOW, Ok(public(REPORTER))),
+        (
+            VALID_THROUGH,
+            NOW + 1,
+            Err(ConformanceKeyRefusalV1::SnapshotStale),
+        ),
+        (
+            "2027-01-15T08:00:00Z",
+            NOW,
+            Err(ConformanceKeyRefusalV1::SnapshotStale),
+        ),
+        // An unreadable TPS1 bound is stale.
+        ("never", NOW, Err(ConformanceKeyRefusalV1::SnapshotStale)),
+    ] {
+        let tps1 = snapshot_with(|s| s.offline_valid_through = tps1_valid_through.to_owned())?;
+        // The CTP1 itself stays valid for years.
+        let policy = with(|p| {
+            p.trust_policy_snapshot_digest = *blake3::hash(&tps1).as_bytes();
+            p.offline_valid_through = "2030-06-01T00:00:00Z".to_owned();
+        })?;
+        let trust = load_with(&[&policy], &tps1, pinned(&policy)?, now)?;
+        assert_eq!(
+            admit(&trust, ConformanceTrustRoleV1::ReportSigning, REPORTER),
+            expected,
+            "{tps1_valid_through} at {now}"
+        );
+    }
+    Ok(())
 }

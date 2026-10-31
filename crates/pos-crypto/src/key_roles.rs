@@ -7,8 +7,8 @@ use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 use pos_core::{
     deletion_receipt, CanonicalBytes, Hash, KeyDestructionBeginOutcomeV1, KeyDestructionOutcomeV1,
     KeyDestructionRequestV1, KeyIdentityV1, KeyRegistryEncryptionPortV1, KeyRegistryErrorV1,
-    KeyRegistrySigningPortV1, KeyRoleV1, Signature, TimelineEventEnvelopeErrorV1,
-    TimelineEventEnvelopeV1, TimelineEventVerificationV1,
+    KeyRegistrySigningPortV1, Signature, TimelineEventEnvelopeErrorV1, TimelineEventEnvelopeV1,
+    TimelineEventVerificationV1,
 };
 use zeroize::{Zeroize, Zeroizing};
 
@@ -323,35 +323,34 @@ pub fn sign_for_registered_role<R: KeyRegistrySigningPortV1>(
     })
 }
 
-/// Sign one DSSE envelope for the conformance purpose `purpose` under the
-/// registry's atomic authorization (ADR-062 Revision 8 section 5.2, K-A).
+/// Sign one DSSE envelope with a conformance signing key under the registry's
+/// atomic authorization (ADR-062 Revision 8 section 5.2, K-A).
 ///
 /// The DSSE signature covers the pre-authentication encoding, which carries no
 /// owner, role or epoch framing. Only the two conformance roles
 /// (`ConformanceEvaluatorSigning`, `ConformanceReportSigning`) may therefore
-/// sign a DSSE envelope, each only for its own purpose, and
-/// [`sign_for_registered_role`] refuses them. The envelope's key id is the
-/// BLAKE3 digest of the registered verification key.
+/// sign a DSSE envelope, and [`sign_for_registered_role`] refuses them. A
+/// caller that signs for one of the two purposes pins the matching role, as
+/// `sign_report_attestation_v1` does. The envelope's key id is the BLAKE3
+/// digest of the registered verification key.
 ///
 /// # Errors
 ///
 /// Returns [`KeyRegistryErrorV1::InvalidEpoch`] for epoch zero,
-/// [`KeyRegistryErrorV1::SigningPurposeMismatch`] when `purpose` is not a
-/// conformance role or `identity` has another role, and the registry's closed
-/// error when the identity is inactive, destroyed, absent, or does not match
-/// the supplied signing key.
+/// [`KeyRegistryErrorV1::SigningPurposeMismatch`] for any other role, and the
+/// registry's closed error when the identity is inactive, destroyed, absent, or
+/// does not match the supplied signing key.
 pub fn sign_dsse_for_registered_role<R: KeyRegistrySigningPortV1>(
     registry: &mut R,
     signing_key: &SigningKeyMaterial,
     identity: KeyIdentityV1,
-    purpose: KeyRoleV1,
     payload_type: &str,
     payload: Vec<u8>,
 ) -> Result<DsseEnvelopeV1, KeyRegistryErrorV1> {
     if identity.epoch == 0 {
         return Err(KeyRegistryErrorV1::InvalidEpoch);
     }
-    if !purpose.is_conformance_signing() || identity.role != purpose {
+    if !identity.role.is_conformance_signing() {
         return Err(KeyRegistryErrorV1::SigningPurposeMismatch);
     }
     let signing_key_ref = signing_key.as_key()?;

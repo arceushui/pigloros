@@ -65,7 +65,8 @@ pub use bundle_contract::{
 };
 pub use conformance_trust_admission::{
     ConformanceArtifactRefusalV1, ConformanceKeyRefusalV1, ConformanceTrustAdmissionErrorV1,
-    ConformanceTrustAdmissionPortV1, ConformanceTrustAdmissionV1, ConformanceTrustRoleV1,
+    ConformanceTrustAdmissionPortV1, ConformanceTrustAdmissionV1, ConformanceTrustAnchorV1,
+    ConformanceTrustRoleV1,
 };
 pub use conformance_trust_policy::{
     ConformanceTrustPolicyContractErrorV1, ConformanceTrustPolicyV1,

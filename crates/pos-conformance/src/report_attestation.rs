@@ -233,19 +233,31 @@ pub fn sign_report_attestation_v1<R: KeyRegistrySigningPortV1>(
 ) -> Result<Vec<u8>, ReportAttestationErrorV1> {
     ConformanceReportV1::from_canonical_cbor(cnr1)
         .map_err(|_| ReportAttestationErrorV1::EmbeddedReport)
+        .and_then(|report| report_signing_identity(identity).map(|()| report))
         .and_then(|report| {
             let statement = statement_value(cnr1, &report, &artifacts, diagnostics_digest);
             sign_dsse_for_registered_role(
                 registry,
                 signing_key,
                 identity,
-                KeyRoleV1::ConformanceReportSigning,
                 IN_TOTO_PAYLOAD_TYPE_V1,
                 statement.canonical(),
             )
             .map(|envelope| envelope.to_canonical_json())
             .map_err(ReportAttestationErrorV1::Signing)
         })
+}
+
+/// Pin the report-signing purpose: only a `ConformanceReportSigning` identity signs a report
+/// attestation; an evaluator-release key is refused.
+fn report_signing_identity(identity: KeyIdentityV1) -> Result<(), ReportAttestationErrorV1> {
+    if identity.role == KeyRoleV1::ConformanceReportSigning {
+        Ok(())
+    } else {
+        Err(ReportAttestationErrorV1::Signing(
+            KeyRegistryErrorV1::SigningPurposeMismatch,
+        ))
+    }
 }
 
 fn statement_value(

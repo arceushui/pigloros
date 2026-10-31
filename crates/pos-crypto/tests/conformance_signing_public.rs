@@ -60,41 +60,9 @@ fn dsse(
         registry,
         material,
         identity,
-        identity.role,
         IN_TOTO_PAYLOAD_TYPE_V1,
         PAYLOAD.to_vec(),
     )
-}
-
-#[test]
-fn a_conformance_key_signs_only_for_its_own_purpose() -> TestResult {
-    for (seed, (role, other)) in (80..).zip([
-        (
-            KeyRoleV1::ConformanceEvaluatorSigning,
-            KeyRoleV1::ConformanceReportSigning,
-        ),
-        (
-            KeyRoleV1::ConformanceReportSigning,
-            KeyRoleV1::ConformanceEvaluatorSigning,
-        ),
-    ]) {
-        let (mut registry, material, identity) = registered(role, seed)?;
-        for purpose in [other, KeyRoleV1::PluginReleaseSigning] {
-            assert_eq!(
-                sign_dsse_for_registered_role(
-                    &mut registry,
-                    &material,
-                    identity,
-                    purpose,
-                    IN_TOTO_PAYLOAD_TYPE_V1,
-                    PAYLOAD.to_vec(),
-                ),
-                Err(KeyRegistryErrorV1::SigningPurposeMismatch),
-                "{role:?} for {purpose:?}"
-            );
-        }
-    }
-    Ok(())
 }
 
 #[test]

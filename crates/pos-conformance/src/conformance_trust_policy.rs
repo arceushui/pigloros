@@ -71,6 +71,10 @@ pub struct ConformanceTrustPolicyV1 {
     pub revoked_key_ids: Vec<[u8; 32]>,
     pub revoked_evaluator_binary_digests: Vec<[u8; 32]>,
     pub revoked_report_digests: Vec<[u8; 32]>,
+    /// The lowest admitted evaluator protocol version. It is signed and validated here but
+    /// not enforced: the trust port receives no version and CNR1 carries only a protocol
+    /// digest. Enforcement belongs to G4 (#1239) or G5 (#1240); until then an old evaluator
+    /// is blocked by revoking its binary digest.
     pub minimum_evaluator_protocol_version: String,
     pub offline_valid_through: String,
     pub operator_signature: [u8; 64],

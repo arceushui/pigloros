@@ -97,26 +97,50 @@ pub enum ConformanceTrustAdmissionErrorV1 {
     SnapshotBinding,
 }
 
+/// The caller-pinned anti-rollback high-water mark: the newest CTP1 policy the host already
+/// accepted, by epoch and by the BLAKE3 digest of its exact bytes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ConformanceTrustAnchorV1 {
+    /// The pinned policy's epoch, the lowest epoch a supplied chain may end at.
+    pub epoch: u64,
+    /// The BLAKE3 digest of the pinned policy's exact CTP1 bytes.
+    pub policy_digest: [u8; 32],
+}
+
 /// The CTP1 implementation of [`ConformanceTrustAdmissionPortV1`].
 ///
-/// The chain runs from the oldest policy the verifier already trusts to the current policy.
-/// Along it each policy must name the BLAKE3 digest of its predecessor's exact bytes as
-/// `previous_policy_digest`, have a strictly greater epoch, and keep every revocation of its
-/// predecessor; otherwise every key is refused as [`ConformanceKeyRefusalV1::RolledBack`]. When
-/// the trusted UTC second is not before the current policy's `offline_valid_through`, every key
-/// is refused as [`ConformanceKeyRefusalV1::SnapshotStale`]. Among the keys of a standing
-/// policy, a revoked key id is [`ConformanceKeyRefusalV1::Revoked`], a root of the other role is
+/// The chain runs from older to newer policies and must contain the caller-pinned
+/// [`ConformanceTrustAnchorV1`] policy at its epoch, so a chain whose newest policy is below the
+/// mark, or that skips the pinned policy, is [`ConformanceKeyRefusalV1::RolledBack`]. Along the
+/// chain each policy must name the BLAKE3 digest of its predecessor's exact bytes as
+/// `previous_policy_digest`, have a strictly greater epoch and keep every revocation of its
+/// predecessor; otherwise every key is refused as `RolledBack`.
+///
+/// A CTP1 policy only adds restrictions to the TPS1 snapshot it extends: when the trusted UTC
+/// second is not before the `offline_valid_through` of the current CTP1 policy or of that TPS1,
+/// every key is refused as [`ConformanceKeyRefusalV1::SnapshotStale`], and a key whose DSSE key
+/// id (64 lowercase hexadecimal characters) is in the TPS1 `revoked_key_ids` is refused as
+/// [`ConformanceKeyRefusalV1::Revoked`] like a key id the CTP1 revokes, even when the CTP1 lists
+/// it as a root. Among the other keys of a standing policy, a root of the other role is
 /// [`ConformanceKeyRefusalV1::RoleMismatch`] and any other key is
 /// [`ConformanceKeyRefusalV1::UnknownRoot`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConformanceTrustAdmissionV1 {
     policy: ConformanceTrustPolicyV1,
+    snapshot_revoked_key_ids: Vec<[u8; 32]>,
     standing: Result<(), ConformanceKeyRefusalV1>,
 }
 
 impl ConformanceTrustAdmissionV1 {
     /// Load a CTP1 chain (oldest first, current last) and the TPS1 snapshot the current policy
-    /// extends, authenticating every CTP1 record with the pinned operator key.
+    /// extends.
+    ///
+    /// Every CTP1 record is authenticated with the pinned operator key; hosts pin the same
+    /// deployment-operator key as for TPS1. The TPS1 snapshot is decoded structurally and bound
+    /// by the BLAKE3 digest of its exact bytes, which the current CTP1 names under its operator
+    /// signature; its own signature stays with the ADR-058 preflight. From it the admission
+    /// inherits the revoked key ids and the `offline_valid_through` bound (an unreadable bound
+    /// is stale). Nothing is fetched: Air-Gapped hosts pass the bundled CTP1/TPS1 pair.
     ///
     /// # Errors
     /// Returns the closed [`ConformanceTrustAdmissionErrorV1`] of the first failing check, in
@@ -125,6 +149,7 @@ impl ConformanceTrustAdmissionV1 {
         chain: &[&[u8]],
         trust_policy_snapshot: &[u8],
         operator_public_key: &[u8; 32],
+        anchor: ConformanceTrustAnchorV1,
         trusted_utc_second: i64,
     ) -> Result<Self, ConformanceTrustAdmissionErrorV1> {
         let operator_key = VerifyingKey::from_bytes(operator_public_key)
@@ -143,19 +168,26 @@ impl ConformanceTrustAdmissionV1 {
                     })
             })
             .collect::<Result<Vec<_>, _>>()?;
-        TrustPolicySnapshotV1::from_canonical_cbor(trust_policy_snapshot)
+        let snapshot = TrustPolicySnapshotV1::from_canonical_cbor(trust_policy_snapshot)
             .map_err(ConformanceTrustAdmissionErrorV1::Snapshot)?;
         let rolled_back = policies
             .windows(2)
-            .any(|pair| !extends(&pair[0], &pair[1].0));
+            .any(|pair| !extends(&pair[0], &pair[1].0))
+            || !policies.iter().any(|(policy, digest)| {
+                policy.epoch == anchor.epoch && *digest == anchor.policy_digest
+            });
         let (policy, _) = policies
             .pop()
             .ok_or(ConformanceTrustAdmissionErrorV1::EmptyChain)?;
         if policy.trust_policy_snapshot_digest != *blake3::hash(trust_policy_snapshot).as_bytes() {
             return Err(ConformanceTrustAdmissionErrorV1::SnapshotBinding);
         }
-        let stale = crate::parse_offline_valid_through_v1(&policy.offline_valid_through)
-            .is_ok_and(|valid_through| trusted_utc_second >= valid_through);
+        let valid = |offline_valid_through: &str| {
+            crate::parse_offline_valid_through_v1(offline_valid_through)
+                .is_ok_and(|valid_through| trusted_utc_second < valid_through)
+        };
+        let stale =
+            !valid(&policy.offline_valid_through) || !valid(&snapshot.offline_valid_through);
         let standing = if rolled_back {
             Err(ConformanceKeyRefusalV1::RolledBack)
         } else if stale {
@@ -163,7 +195,16 @@ impl ConformanceTrustAdmissionV1 {
         } else {
             Ok(())
         };
-        Ok(Self { policy, standing })
+        let snapshot_revoked_key_ids = snapshot
+            .revoked_key_ids
+            .iter()
+            .filter_map(|key_id| crate::decode_hex_digest(key_id))
+            .collect();
+        Ok(Self {
+            policy,
+            snapshot_revoked_key_ids,
+            standing,
+        })
     }
 
     /// The current CTP1 policy.
@@ -202,7 +243,9 @@ impl ConformanceTrustAdmissionPortV1 for ConformanceTrustAdmissionV1 {
         key_id: &[u8; 32],
     ) -> Result<VerifyingKey, ConformanceKeyRefusalV1> {
         self.standing?;
-        if self.policy.revoked_key_ids.binary_search(key_id).is_ok() {
+        if self.policy.revoked_key_ids.binary_search(key_id).is_ok()
+            || self.snapshot_revoked_key_ids.contains(key_id)
+        {
             return Err(ConformanceKeyRefusalV1::Revoked);
         }
         let root = |role| {

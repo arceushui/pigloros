@@ -21,10 +21,10 @@ use pos_conformance::{
     BundleModeV1, CaseOutcomeStatusV1, CaseOutcomeV1, ClaimLayerV1, ConformanceArtifactRefusalV1,
     ConformanceBundleV1, ConformanceKeyRefusalV1, ConformanceProfileV1, ConformanceReportV1,
     ConformanceTrustAdmissionErrorV1, ConformanceTrustAdmissionPortV1, ConformanceTrustAdmissionV1,
-    ConformanceTrustPolicyV1, ConformanceTrustRoleV1, ExecutionModeV1, ImplementationIdentityV1,
-    IndependenceEvidenceV1, RedactionStateV1, ReplayClaimV1, ReportAttestationArtifactsV1,
-    ReportAttestationErrorV1 as Error, SignatureMeaningV1, TrustPolicySnapshotV1,
-    MAX_REPORT_ATTESTATION_BYTES_V1, REPORT_ATTESTATION_SUBJECT_NAMES_V1,
+    ConformanceTrustAnchorV1, ConformanceTrustPolicyV1, ConformanceTrustRoleV1, ExecutionModeV1,
+    ImplementationIdentityV1, IndependenceEvidenceV1, RedactionStateV1, ReplayClaimV1,
+    ReportAttestationArtifactsV1, ReportAttestationErrorV1 as Error, SignatureMeaningV1,
+    TrustPolicySnapshotV1, MAX_REPORT_ATTESTATION_BYTES_V1, REPORT_ATTESTATION_SUBJECT_NAMES_V1,
 };
 use pos_core::{
     KeyIdentityV1, KeyRegistrationV1, KeyRegistryErrorV1, KeyRegistryStateV1, KeyRoleV1,
@@ -153,15 +153,26 @@ fn policy_bytes(edit: impl FnOnce(&mut ConformanceTrustPolicyV1)) -> TestResult<
     Ok(policy.to_canonical_cbor()?)
 }
 
-/// The CTP1 admission of the chain `chain` over the fixture TPS1 snapshot at `utc_second`.
+/// The high-water mark pinning the policy with these exact bytes.
+fn pinned(bytes: &[u8]) -> TestResult<ConformanceTrustAnchorV1> {
+    Ok(ConformanceTrustAnchorV1 {
+        epoch: ConformanceTrustPolicyV1::from_canonical_cbor(bytes)?.epoch,
+        policy_digest: *blake3::hash(bytes).as_bytes(),
+    })
+}
+
+/// The CTP1 admission of the chain `chain` (pinned at its oldest policy) over the fixture TPS1
+/// snapshot at `utc_second`.
 fn admission(
     chain: &[&[u8]],
     utc_second: i64,
 ) -> TestResult<Result<ConformanceTrustAdmissionV1, ConformanceTrustAdmissionErrorV1>> {
+    let oldest = chain.first().ok_or("an empty chain")?;
     Ok(ConformanceTrustAdmissionV1::from_chain_v1(
         chain,
         &fixture()?.snapshot,
         &operator().verifying_key().to_bytes(),
+        pinned(oldest)?,
         utc_second,
     ))
 }
@@ -1060,7 +1071,6 @@ fn an_evaluator_release_key_cannot_sign_a_report_attestation() -> TestResult {
         &mut registry,
         &material,
         identity,
-        KeyRoleV1::ConformanceEvaluatorSigning,
         IN_TOTO_PAYLOAD_TYPE_V1,
         payload,
     )?
@@ -1085,6 +1095,7 @@ fn air_gapped_verification_uses_the_bundled_ctp1_tps1_pair() -> TestResult {
         &[&ctp1],
         &fixture.snapshot,
         &operator().verifying_key().to_bytes(),
+        pinned(&ctp1)?,
         TRUSTED_UTC_SECOND,
     )?;
     assert_eq!(
@@ -1102,6 +1113,7 @@ fn air_gapped_verification_uses_the_bundled_ctp1_tps1_pair() -> TestResult {
             &[&ctp1],
             &other.to_canonical_cbor()?,
             &operator().verifying_key().to_bytes(),
+            pinned(&ctp1)?,
             TRUSTED_UTC_SECOND,
         ),
         Err(ConformanceTrustAdmissionErrorV1::SnapshotBinding)
