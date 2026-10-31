@@ -468,6 +468,7 @@ pub struct SandboxRequirementV1 {
 pub struct EvaluatorRequestV1 {
     pub request_id: [u8; 16],
     pub conformance_profile_digest: [u8; 32],
+    /// BLAKE3-256 of the exact CFB1 archive bytes.
     pub fixture_bundle_digest: [u8; 32],
     pub subject_adapter: SubjectAdapterKindV1,
     pub subject_artifact_digest: [u8; 32],
@@ -555,31 +556,36 @@ impl EvaluatorRequestV1 {
         })
     }
 
-    /// Validate this request against the selected immutable CPF1 inventory.
+    /// Validate this request against the selected immutable CPF1 inventory
+    /// and the delivered CFB1 fixture bundle.
     ///
-    /// A structurally valid request is not enough: the profile, fixture
-    /// bundle, execution profile, adapter, evaluator protocol, and output
-    /// capability must all be identities from the same selected profile.
+    /// A structurally valid request is not enough: the profile, execution
+    /// profile, adapter, evaluator protocol, and output capability must all be
+    /// identities from the same selected profile, and `fixture_bundle_digest`
+    /// must be the BLAKE3-256 digest of the exact CFB1 archive bytes.
     ///
     /// # Errors
     ///
-    /// Returns a closed safe error when the request or any selected profile identity is invalid.
+    /// Returns a closed safe error when the request, any selected profile
+    /// identity, or the fixture bundle digest is invalid.
     pub fn validate_against_profile(
         &self,
         profile: &ConformanceProfileV1,
+        fixture_bundle_archive: &[u8],
     ) -> Result<(), ConformanceContractError> {
         self.validate().and_then(|()| {
             profile.validate()?;
-            self.validate_against_validated_profile(profile)
+            self.validate_against_validated_profile(profile, fixture_bundle_archive)
         })
     }
 
     fn validate_against_validated_profile(
         &self,
         profile: &ConformanceProfileV1,
+        fixture_bundle_archive: &[u8],
     ) -> Result<(), ConformanceContractError> {
         if self.conformance_profile_digest != profile.profile_digest
-            || self.fixture_bundle_digest != fixture_bundle_digest(profile)
+            || self.fixture_bundle_digest != *blake3::hash(fixture_bundle_archive).as_bytes()
             || self.trust_policy_snapshot_digest
                 != profile
                     .independence_requirements
@@ -1065,13 +1071,6 @@ fn validate_fixture(
                 Err(ConformanceContractError::FixtureDigestMismatch)
             }
         })
-}
-
-fn fixture_bundle_digest(profile: &ConformanceProfileV1) -> [u8; 32] {
-    contract_digest(
-        b"PiglorOS.ConformanceFixtureBundle.v1",
-        &Value::Array(profile.fixtures.iter().map(encode_fixture).collect()),
-    )
 }
 
 fn validate_identity(identity: &ImplementationIdentityV1) -> Result<(), ConformanceContractError> {
