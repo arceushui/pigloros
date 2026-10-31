@@ -265,7 +265,7 @@ fn open_observed_lock(
     } else {
         (
             LOCK_FLAGS.union(OFlags::CREATE).union(OFlags::EXCL),
-            Mode::RUSR | Mode::WUSR,
+            Mode::RUSR.union(Mode::WUSR),
         )
     };
     fs::openat2(directory, name, flags, mode, RESOLVE).and_then(|descriptor| {

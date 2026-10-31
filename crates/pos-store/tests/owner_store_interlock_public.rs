@@ -27,7 +27,12 @@ mod tests {
 
     impl Fixture {
         fn new() -> Result<Self, Box<dyn std::error::Error>> {
-            let directory = tempfile::tempdir()?;
+            Self::from_directory(tempfile::tempdir()?)
+        }
+
+        fn from_directory(
+            directory: tempfile::TempDir,
+        ) -> Result<Self, Box<dyn std::error::Error>> {
             fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))?;
             create(directory.path(), MAIN)?;
             Ok(Self { directory })
@@ -115,6 +120,10 @@ mod tests {
     #[test]
     fn invalid_names_and_missing_or_unsafe_main_refuse_before_namespace_creation() -> TestResult {
         let fixture = Fixture::new()?;
+        let nested = fixture.path().join("sub");
+        fs::create_dir(&nested)?;
+        create(&nested, MAIN)?;
+        create(fixture.path(), "file:main")?;
         let admission = OwnerStoreAdmissionV1::new();
         let operation = enter(&admission);
         for name in [
@@ -151,6 +160,24 @@ mod tests {
             MAIN,
         ));
         assert!(!fixture.coordination().exists());
+        operation.complete_cleanly();
+        Ok(())
+    }
+
+    #[test]
+    fn an_existing_relative_directory_refuses_before_namespace_creation() -> TestResult {
+        let working_directory = std::env::current_dir()?;
+        let fixture = Fixture::from_directory(tempfile::tempdir_in(&working_directory)?)?;
+        let relative = fixture.path().strip_prefix(&working_directory)?;
+        assert!(relative.is_relative());
+        let admission = OwnerStoreAdmissionV1::new();
+        let operation = enter(&admission);
+        refused(OwnerStoreFileInterlockV1::try_acquire(
+            &operation, relative, MAIN,
+        ));
+        assert!(!fixture.coordination().exists());
+        let held = OwnerStoreFileInterlockV1::try_acquire(&operation, fixture.path(), MAIN)?;
+        drop(held);
         operation.complete_cleanly();
         Ok(())
     }
