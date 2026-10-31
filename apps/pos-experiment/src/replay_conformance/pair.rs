@@ -11,10 +11,7 @@
 //! results [`AIR_GAPPED_EVIDENCE`] (owner decision 1 on the wiki page
 //! `ADR-062_R8_Paired_Executions`).
 
-use pos_conformance::{
-    DivergenceReportV1, ExecutionModeV1, ReplayClaimV1, ReproManifestV1, VerificationErrorV1,
-    VerificationOutcomeV1, VerificationResultV1,
-};
+use pos_conformance::{DivergenceReportV1, ExecutionModeV1, ReproManifestV1, VerificationResultV1};
 use pos_reference::evaluator::{CaseAttempt, SubjectObservation};
 use pos_reference::evaluator_domain::{ExecutionMode, FixtureFamily};
 use pos_store::StoreConfig;
@@ -22,7 +19,8 @@ use pos_store::StoreConfig;
 use super::execute_attempt;
 
 /// The evidence level of the Air-Gapped results of a pair report.
-pub const AIR_GAPPED_EVIDENCE: &str = "Local-relaxation engineering evidence";
+pub const AIR_GAPPED_EVIDENCE: &str =
+    "Local-relaxation engineering evidence, not hosted conformance";
 
 /// Why no pair report was made.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
@@ -52,40 +50,37 @@ pub struct LegEvidenceV1 {
 }
 
 /// The authoritative part of a leg: what a Local and an Air-Gapped leg must
-/// share.
+/// share. It is the sub-case, the whole `VRR1` and the whole `DVR1`, less
+/// the fields that differ only because the Execution Mode differs:
 ///
-/// The request, manifest, provenance and result digests are not part of it,
-/// and leaving them out cannot hide a divergence. The first three are digests
-/// of the leg's inputs (the request and manifest, which carry the Execution
-/// Mode, and the closure members), not of anything the run produced. The
-/// result digest seals the whole `VRR1`, inputs included; every result field
-/// it seals is compared here: the outcome, the replay claim, the first error,
-/// the checked artifact count and the authoritative result digest, which
-/// covers every Event in Timeline Order, the Projection checkpoint and every
-/// typed failure. In place of the `DVR1` digest, a diverged leg compares its
-/// `DVR1` without its request, manifest and report digests, so its location,
-/// mismatch and expected and actual digests must agree. The
-/// paired tests show that the two manifests of a leg differ only in their
-/// Execution Mode.
+/// - `VRR1` `request_digest` and `manifest_digest`: the digests of the
+///   request and the manifest, and the manifest carries the Execution Mode;
+/// - `VRR1` `provenance_digest`: it seals the request digest;
+/// - `VRR1` `result_digest`: it seals the three digests above;
+/// - `VRR1` `divergence_report_digest` and `DVR1` `report_digest`: the
+///   `DVR1` digest, which seals the `DVR1` request and manifest digests;
+/// - `DVR1` `request_digest` and `manifest_digest`: as for the `VRR1`.
+///
+/// Every other field is compared, among them the outcome, the replay claim,
+/// the first error, the checked artifact count, the EPF1, TPS1, closure,
+/// fixture and evaluator digests, the reproducibility class, the
+/// authoritative result digest (every Event in Timeline Order, the
+/// Projection checkpoint and every typed failure) and the location,
+/// mismatch and expected and actual digests of a divergence. No excluded
+/// field is produced by the run, so leaving them out cannot hide a
+/// divergence. The paired tests show that the two manifests of a leg differ
+/// only in their Execution Mode.
 #[derive(Eq, PartialEq)]
 struct AuthoritativeResultV1<'a> {
     subcase_id: &'a str,
-    execution_profile_digest: [u8; 32],
-    outcome: VerificationOutcomeV1,
-    replay_claim: ReplayClaimV1,
-    authoritative_result_digest: Option<[u8; 32]>,
-    first_error: Option<&'a VerificationErrorV1>,
-    checked_artifact_count: u64,
+    result: VerificationResultV1,
     divergence: Option<DivergenceReportV1>,
 }
 
 impl LegEvidenceV1 {
     /// Whether two legs have the same authoritative result: the same
-    /// sub-case, EPF1, outcome, replay claim, authoritative result digest
-    /// (Events in Timeline Order, the Projection checkpoint and the typed
-    /// failures), first error and first divergence. The request, manifest,
-    /// provenance and result digests bind the Execution Mode and are not
-    /// compared.
+    /// sub-case, `VRR1` and `DVR1` except for the digests that bind the
+    /// Execution Mode (see the private `AuthoritativeResultV1`).
     #[must_use]
     pub fn same_authoritative_result(&self, other: &Self) -> bool {
         self.authoritative() == other.authoritative()
@@ -94,13 +89,14 @@ impl LegEvidenceV1 {
     fn authoritative(&self) -> AuthoritativeResultV1<'_> {
         AuthoritativeResultV1 {
             subcase_id: &self.subcase_id,
-            execution_profile_digest: self.manifest.execution_profile_digest,
-            outcome: self.result.verification_outcome,
-            replay_claim: self.result.replay_claim,
-            authoritative_result_digest: self.result.authoritative_result_digest,
-            first_error: self.result.first_error.as_ref(),
-            checked_artifact_count: self.result.checked_artifact_count,
-            // A `DVR1` without the digests that bind its request.
+            result: VerificationResultV1 {
+                request_digest: [0; 32],
+                manifest_digest: [0; 32],
+                provenance_digest: [0; 32],
+                result_digest: [0; 32],
+                divergence_report_digest: None,
+                ..self.result.clone()
+            },
             divergence: self.divergence.as_ref().map(|report| DivergenceReportV1 {
                 request_digest: [0; 32],
                 manifest_digest: [0; 32],

@@ -50,6 +50,6 @@ family payload and oracle, keyed by their sub-case; the manifest Execution Mode
 is the attempt's mode.
 
 For the replay-conformance layer: Air-Gapped results are Local-relaxation
-engineering evidence. The host runs the `deterministic-air-gapped-v1`
+engineering evidence, not hosted conformance. The host runs the `deterministic-air-gapped-v1`
 semantics (no network, the bundled trust policy snapshot) in its own process,
 not as a kernel-audited Air-Gapped execution under the Sandbox Provider.

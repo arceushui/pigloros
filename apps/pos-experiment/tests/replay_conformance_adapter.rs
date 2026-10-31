@@ -21,7 +21,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-use pos_conformance::{ExecutionModeV1, ReproManifestV1};
+use pos_conformance::{ExecutionModeV1, ReproManifestV1, ReproducibilityClassV1};
 use pos_experiment::replay_conformance::{
     exit_code, pair_report, run, run_with_store, AdapterRunErrorV1, PairErrorV1, CONTRACT_VERSION,
     NETWORK_DENIED, PAYLOAD_INVALID, PROVIDER_ID, SCHEMA_ID, SUBCASE_MISMATCH,
@@ -818,7 +818,7 @@ fn every_family_pair_has_identical_authoritative_results_in_local_and_air_gapped
         // give them.
         assert_eq!(
             report.air_gapped_evidence,
-            "Local-relaxation engineering evidence"
+            "Local-relaxation engineering evidence, not hosted conformance"
         );
         let limitations = String::from_utf8(read("support/limitations.md")?)?;
         assert!(limitations
@@ -959,12 +959,38 @@ fn every_kind_of_authoritative_result_is_paired() -> TestResult {
     assert!(typed_failures > 0);
 
     // Two different legs do not have the same authoritative result.
-    let report = pair_report(
+    let mut report = pair_report(
         &StoreConfig::Memory,
         &attempt(FixtureFamily::Positive, ExecutionMode::Local)?,
         &attempt(FixtureFamily::Positive, ExecutionMode::AirGapped)?,
     )?;
     assert!(!report.local.legs[0].same_authoritative_result(&report.air_gapped.legs[1]));
+
+    // A pair whose Air-Gapped leg differs in one sealed input or result field
+    // only is not identical; one that differs in the digests that bind the
+    // Execution Mode only is.
+    assert!(report.identical());
+    let sealed: [fn(&mut pos_conformance::VerificationResultV1); 7] = [
+        |result| result.reproducibility_class = ReproducibilityClassV1::LiveUnverified,
+        |result| result.artifact_closure_digest[0] ^= 1,
+        |result| result.trust_policy_snapshot_digest[0] ^= 1,
+        |result| result.evaluator_digest[0] ^= 1,
+        |result| result.fixture_digest = None,
+        |result| result.execution_profile_digest[0] ^= 1,
+        |result| result.checked_artifact_count += 1,
+    ];
+    for change in sealed {
+        let mut changed = report.clone();
+        change(&mut changed.air_gapped.legs[0].result);
+        assert!(!changed.identical());
+    }
+    let result = &mut report.air_gapped.legs[0].result;
+    result.request_digest[0] ^= 1;
+    result.manifest_digest[0] ^= 1;
+    result.provenance_digest[0] ^= 1;
+    result.result_digest[0] ^= 1;
+    result.divergence_report_digest = Some([1; 32]);
+    assert!(report.identical());
     Ok(())
 }
 
