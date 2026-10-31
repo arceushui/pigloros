@@ -69,7 +69,10 @@ arithmetic; `--check` reproduces the worked example and the quantization table o
 recomputes every result by a second, definitional route, checks the strict decoder against every
 failure expectation, and then compares every output. The profile text, including the record CDDL,
 is `profiles/metric-conformance/normative-requirements.md`. Every
-`expected/metric-conformance/*.json` stays `pending`.
+`expected/metric-conformance/*.json` stays `pending`. The generator also writes the pinned schema
+digests of the plugins/eval subject adapter (`apps/pos-metric-conformance-adapter`, slice 4,
+#1217), which outputs the exact canonical-output oracles; the oracle entry of the generator check
+`ind.2` therefore names only the sub-case and its kind.
 
 The immutable bundle boundary in `pos-conformance` accepts these bytes from a
 caller, recomputes each BLAKE3 content address, binds the CPF1 profile digest,
