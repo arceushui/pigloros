@@ -27,11 +27,11 @@ jobs:
       matrix:
         include:
           - case: before
-            ref: fbf7fa397ce4beb56a98d8d7b3d511bbb548e267
+            ref: 27fa7cf05fcc2a469e8c09723b70d99d1bec62f1
             expected: MissedMutant
             exit_status: 2
           - case: after
-            ref: a2835936402b9b8356626f4b660aab2aec0b82aa
+            ref: 8813613dd98132eb9461a10a9133adf45a7a5494
             expected: CaughtMutant
             exit_status: 0
     steps:
