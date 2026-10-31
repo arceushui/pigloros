@@ -146,6 +146,24 @@ The generator is `cargo-about` 0.9.2, pinned exactly, plus
 - the `about.toml` or `about-guest.toml` accepted lists drift from the
   `deny.toml` allow list and its crate-scoped exceptions.
 
+The reusable workflow accepts `scope: gateway`; the default `workspace` scope
+and its artifact are unchanged. Gateway scope selects the registry packages
+from the native `piglor-gateway` release build, including build dependencies,
+and retains the pinned shared Rust runtime source notices. It includes no guest
+graphs, fixture mappings or unrelated workspace crates. It returns the same
+`third-party-notices` artifact and index schema, so callers choose one scope
+per invocation.
+
+Gateway scope starts with the licensed workspace report, then binds selection
+to Cargo 1.97.1's `build --locked --release --bin piglor-gateway --unit-graph`
+output. Its version, gateway root, release profile and complete reachable units
+are checked; selected package names, versions and registry sources must match
+`Cargo.lock`. Cargo metadata supplies identities, not feature reachability.
+The unit-graph command only prints build metadata. Its pinned unstable interface
+uses `RUSTC_BOOTSTRAP=1` on that command alone, as the existing std report does.
+A toolchain or graph-format change must preserve these checks. Missing selected
+crates, licence text, locked identity or graph inputs fail generation.
+
 Never edit a notice text by hand. To bump a component, update its pin in
 `install-tools.sh` or the guest toolchain, re-fetch every file from the new
 upstream commit, and update the manifest in the same reviewed change.
@@ -178,5 +196,5 @@ The `piglor-gateway` image ships the same bundle (#798) at
 - The ci `docker-build` job builds the same image without pushing and runs the
   same check. `scripts/test_deploy_workflow_policy.py` pins the `deploy.yml`
   contract, which cannot run outside a manual dispatch.
-- The bundle is the workspace-wide superset described above, not only the
-  gateway's own graph. A gateway-only mode is tracked in Redmine #1093.
+- Existing image callers still choose the default workspace-wide superset.
+  They can select `scope: gateway` when adopting the gateway-only mode (#1093).
