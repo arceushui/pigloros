@@ -267,4 +267,136 @@ mod tests {
         );
         assert!(native_lookup("no port").is_empty());
     }
+
+    // Diagnostic branch only: the hosted driver supplies real glibc/NSS DNS
+    // through a controlled server in a private network and mount namespace.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn native_probe_control(
+        command: &str,
+    ) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+        use std::io::{Read as _, Write as _};
+        use std::os::unix::net::UnixStream;
+
+        let mut control = UnixStream::connect(std::env::var("REMOTE_PROBE_CONTROL")?)?;
+        control.set_read_timeout(Some(Duration::from_secs(5)))?;
+        control.set_write_timeout(Some(Duration::from_secs(5)))?;
+        control.write_all(command.as_bytes())?;
+        control.shutdown(std::net::Shutdown::Write)?;
+        let mut response = String::new();
+        control.take(16 * 1024).read_to_string(&mut response)?;
+        Ok(serde_json::from_str(&response)?)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn native_probe_thread_count() -> Result<usize, Box<dyn std::error::Error>> {
+        Ok(std::fs::read_dir("/proc/self/task")?
+            .collect::<Result<Vec<_>, _>>()?
+            .len())
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn native_system_resolver_resource_probe() -> Result<(), Box<dyn std::error::Error>> {
+        let proc_status = std::fs::read_to_string("/proc/self/status")?;
+        let effective_uid = proc_status
+            .lines()
+            .find_map(|line| line.strip_prefix("Uid:"))
+            .and_then(|line| line.split_whitespace().nth(1))
+            .ok_or("effective UID missing")?;
+        assert_eq!(effective_uid, std::env::var("REMOTE_PROBE_UID")?);
+        assert_ne!(effective_uid, "0");
+
+        let initial_threads = native_probe_thread_count()?;
+        let config = Config::default();
+        let (waited, busy_wait, peak_threads) = {
+            let first = BoundedResolver::shared();
+            let ready = first.resolve(
+                &uri("https://ready.remote-probe.invalid:9/")?,
+                &config,
+                wait(5),
+            )?;
+            assert_eq!(
+                ready.iter().copied().collect::<Vec<_>>(),
+                vec![SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 13)), 9)]
+            );
+            assert_eq!(native_probe_thread_count()?, initial_threads + 1);
+
+            let started = Instant::now();
+            let stalled = first.resolve(
+                &uri("https://wedged.remote-probe.invalid:1/")?,
+                &config,
+                wait(1),
+            );
+            let waited = started.elapsed();
+            assert!(matches!(stalled, Err(ureq::Error::HostNotFound)));
+            assert!(waited >= Duration::from_secs(1) && waited < Duration::from_secs(5));
+            assert_eq!(
+                native_probe_control("state")?["hosts"],
+                serde_json::json!(["ready.remote-probe.invalid", "wedged.remote-probe.invalid"])
+            );
+
+            let busy_started = Instant::now();
+            let mut peak_threads = native_probe_thread_count()?;
+            for index in 0..100 {
+                let handle = BoundedResolver::shared();
+                assert!(std::ptr::eq(first.worker, handle.worker));
+                let queued = handle.resolve(
+                    &uri(&format!("https://queued-{index}.remote-probe.invalid:2/"))?,
+                    &config,
+                    wait(30),
+                );
+                assert!(matches!(queued, Err(ureq::Error::HostNotFound)));
+                peak_threads = peak_threads.max(native_probe_thread_count()?);
+            }
+            let busy_wait = busy_started.elapsed();
+            assert!(busy_wait < Duration::from_secs(5));
+            assert_eq!(peak_threads, initial_threads + 1);
+            (waited, busy_wait, peak_threads)
+        };
+        native_probe_control("release")?;
+
+        let recovered = BoundedResolver::shared();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut answer = None;
+        while answer.is_none() && Instant::now() < deadline {
+            answer = recovered
+                .resolve(
+                    &uri("https://next.remote-probe.invalid:3/")?,
+                    &config,
+                    wait(1),
+                )
+                .ok();
+            thread::yield_now();
+        }
+        let actual = answer.ok_or("native worker never recovered")?;
+        assert_eq!(
+            actual.iter().copied().collect::<Vec<_>>(),
+            vec![SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 12)), 3)]
+        );
+        assert_eq!(native_probe_thread_count()?, initial_threads + 1);
+        let state = native_probe_control("state")?;
+        assert_eq!(
+            state["hosts"],
+            serde_json::json!([
+                "next.remote-probe.invalid",
+                "ready.remote-probe.invalid",
+                "wedged.remote-probe.invalid"
+            ])
+        );
+        println!(
+            "NATIVE_RESOLVER_PROBE={}",
+            serde_json::json!({
+                "uid": effective_uid,
+                "threads_before_worker": initial_threads,
+                "peak_threads_while_busy": peak_threads,
+                "threads_after_recovery": native_probe_thread_count()?,
+                "caller_wait_ms": waited.as_millis(),
+                "busy_callers": 100,
+                "busy_wait_ms": busy_wait.as_millis(),
+                "dns": state,
+                "recovered": actual.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            })
+        );
+        Ok(())
+    }
 }

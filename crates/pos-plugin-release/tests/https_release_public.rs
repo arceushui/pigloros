@@ -1274,5 +1274,14 @@ fn the_production_log_ceiling_hides_every_secret_and_names_every_target() -> Tes
             );
         }
     }
+    println!(
+        "REMOTE_TARGET_INVENTORY={}",
+        serde_json::to_string(
+            &records
+                .iter()
+                .map(|(level, target, _)| format!("{level} {target}"))
+                .collect::<std::collections::BTreeSet<_>>()
+        )?
+    );
     Ok(())
 }
