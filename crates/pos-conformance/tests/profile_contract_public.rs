@@ -2267,7 +2267,7 @@ fn public_request_rejects_output_limits_above_the_selected_profile() {
 /// `PiglorOS.ConformanceFixtureBundle.v1` digest are both refused.
 #[test]
 fn public_request_binds_fixture_bundle_digest_to_the_exact_cfb1_archive() -> TestResult {
-    let archive = support::current_archive("evr1-fixture-bundle")?;
+    let archive = support::current_archive()?;
     let bundle = ConformanceBundleV1::from_canonical_cbor(&archive)?;
     let profile_member = bundle
         .members
