@@ -25,6 +25,33 @@
 //! built stream carries is a typed failure. A `RecordedReplay` stream has
 //! none, so its typed-failure count is 0. The scheme is recorded on the
 //! wiki page `ADR-062_R8_Recorded_Replay_Digests`, sections 2 and 6.
+//!
+//! # Closure binding
+//!
+//! ADR-062 Revision 8 slice R4 (#1222) binds the closure members to the
+//! request's `artifact_closure_digest`. The composition, accepted in section
+//! 4 of the note, is BLAKE3 over `PiglorOS.RecordedReplayClosure.v1`, a zero
+//! byte, the member count (`u64`, always 2) and then each member in role
+//! order as its one-byte role and its 32-byte artifact digest:
+//!
+//! | Role | Member | Artifact digest |
+//! |---|---|---|
+//! | 1 | exported Timeline (`RecordedReplay`) | the export's ADR-060 artifact digest |
+//! | 2 | recomputation subject (`ProfileRecomputation`, `CrossProfileConformance`, `LiveUnverified`) | the subject's artifact digest |
+//! | 3 | licence | BLAKE3 of the licence member bytes |
+//!
+//! The execution member is exactly one of roles 1 and 2: the two are never
+//! both present, and the same digest under different roles gives different
+//! closures. A present but empty licence counts as absent: it is refused at
+//! closure presence (`ClosureIncomplete`) and never hashed. The composition
+//! is recorded on the wiki note `ADR-062_R8_Recorded_Replay_Digests`,
+//! section 4.
+//!
+//! A complete member set whose composition is not the request's digest is
+//! refused at `artifact_closure` with `DigestMismatch` (`InvalidManifest`),
+//! unless the preflight reports an earlier coordinate first: the preflight
+//! is run with `Incomplete` closure evidence, and its `ClosureIncomplete` is
+//! replaced by the mismatch.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -48,6 +75,36 @@ const EVENT_SCHEMA_DOMAIN_V1: &[u8] = b"PiglorOS.RecordedReplayEventSchema.v1";
 const CHECKPOINT_DOMAIN_V1: &[u8] = b"PiglorOS.RecordedReplayCheckpoint.v1";
 const AUTHORITATIVE_RESULT_DOMAIN_V1: &[u8] = b"PiglorOS.RecordedReplayResult.v1";
 const PROVENANCE_DOMAIN_V1: &[u8] = b"PiglorOS.RecordedReplayProvenance.v1";
+const CLOSURE_DOMAIN_V1: &[u8] = b"PiglorOS.RecordedReplayClosure.v1";
+const EXPORTED_TIMELINE_ROLE_V1: u8 = 1;
+const RECOMPUTATION_SUBJECT_ROLE_V1: u8 = 2;
+const LICENCE_ROLE_V1: u8 = 3;
+
+/// The `artifact_closure_digest` of a `RecordedReplay` closure: the exported
+/// Timeline's ADR-060 artifact digest and the licence member bytes, composed
+/// as the module documentation states.
+#[must_use]
+pub fn recorded_replay_closure_digest_v1(export_digest: [u8; 32], licence: &[u8]) -> [u8; 32] {
+    closure_digest(EXPORTED_TIMELINE_ROLE_V1, export_digest, licence)
+}
+
+/// The `artifact_closure_digest` of a recomputation closure: the frozen
+/// subject's artifact digest and the licence member bytes, composed as the
+/// module documentation states.
+#[must_use]
+pub fn recomputation_closure_digest_v1(subject_digest: [u8; 32], licence: &[u8]) -> [u8; 32] {
+    closure_digest(RECOMPUTATION_SUBJECT_ROLE_V1, subject_digest, licence)
+}
+
+fn closure_digest(role: u8, primary: [u8; 32], licence: &[u8]) -> [u8; 32] {
+    let mut digest = domain_hasher(CLOSURE_DOMAIN_V1);
+    digest.update(&2_u64.to_be_bytes());
+    digest.update(&[role]);
+    digest.update(&primary);
+    digest.update(&[LICENCE_ROLE_V1]);
+    digest.update(blake3::hash(licence).as_bytes());
+    *digest.finalize().as_bytes()
+}
 
 /// The result of one verification execution.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -179,6 +236,42 @@ pub(crate) fn refuse_incomplete_closure(preflight: VerificationPreflightInputV1<
         .map_or(CLOSURE_INCOMPLETE, |error| {
             preflight_refusal(error, declared_claim)
         })
+}
+
+/// Run the preflight for a complete member set whose composition is
+/// `closure_digest`. When it is not the request's `artifact_closure_digest`,
+/// the set is refused at `artifact_closure` with `DigestMismatch`, after any
+/// error the preflight reports at an earlier coordinate.
+pub(crate) fn preflight_bound_closure(
+    preflight: &VerificationPreflightInputV1<'_>,
+    closure_digest: [u8; 32],
+) -> Result<VerificationPreflightResultV1, Refusal> {
+    let declared_claim = preflight.manifest.replay_claim;
+    if closure_digest == preflight.request.artifact_closure_digest {
+        preflight_verification_v1(preflight)
+            .map_err(|error| preflight_refusal(error, declared_claim))
+    } else {
+        // The ordering is the preflight's own, not this function's: the
+        // unchanged preflight runs with `Incomplete` closure evidence, so any
+        // error at a coordinate it checks before `artifact_closure` is its
+        // first error, and only its `ClosureIncomplete` becomes the mismatch.
+        // `closure_members_that_do_not_compose_the_request_digest_are_refused`
+        // in `tests/recorded_replay.rs` pins this with a format-version error.
+        let refusal = refuse_incomplete_closure(VerificationPreflightInputV1 {
+            evidence: preflight.evidence.clone(),
+            ..*preflight
+        });
+        Err(if refusal.code == SafeErrorCodeV1::ClosureIncomplete {
+            Refusal {
+                outcome: VerificationOutcomeV1::InvalidManifest,
+                replay_claim: declared_claim,
+                code: SafeErrorCodeV1::DigestMismatch,
+                coordinate: Some(VerificationPreflightCoordinateV1::ArtifactClosure),
+            }
+        } else {
+            refusal
+        })
+    }
 }
 
 /// Admit only the listed reproducibility classes; any other class is

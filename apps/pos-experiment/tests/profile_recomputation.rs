@@ -3,7 +3,8 @@
 //! Public-interface tests for the ADR-062 Revision 8 slice R3
 //! `ProfileRecomputation` and `CrossProfileConformance` execution step
 //! (#1221): PRF-001, PRF-002, DIV-001, LIVE-001 and SEC-001, a missing
-//! closure member, an incompatible profile and operational variation.
+//! closure member, an incompatible profile and operational variation, and
+//! the slice R4 closure binding (#1222).
 //!
 //! Expected streams are hand-derived from the frozen subject's script (Q3):
 //! the digests below follow the documented `verification_execution` and
@@ -37,7 +38,9 @@ use pos_experiment::profile_recomputation::{
     AIR_GAPPED_PROFILE_ID_V1, HOST_FAILURE_DRIVER_ID_V1, LOCAL_PROFILE_ID_V1,
     RECOMPUTED_TIMELINE_ID_V1,
 };
-use pos_experiment::verification_execution::VerificationExecutionOutcomeV1;
+use pos_experiment::verification_execution::{
+    recomputation_closure_digest_v1, VerificationExecutionOutcomeV1,
+};
 use pos_experiment::{Experiment, ExperimentError};
 use pos_runtime::{
     Driver, HumanActionAdmissionErrorV1, ManifestRegistrationErrorV1, ManifestRosterBuildErrorV1,
@@ -287,6 +290,23 @@ fn projections() -> ProjectionRegistry {
     projections
 }
 
+/// The closure composition of slice R4, hand-derived: the member count, then
+/// the recomputation subject (role 2) and the licence (role 3), each as its
+/// role and its 32-byte artifact digest.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn closure_digest(subject: [u8; 32], licence: &[u8]) -> [u8; 32] {
+    digest(
+        b"PiglorOS.RecordedReplayClosure.v1",
+        &[
+            &2_u64.to_be_bytes(),
+            &[2],
+            &subject,
+            &[3],
+            blake3::hash(licence).as_bytes(),
+        ],
+    )
+}
+
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn digest(domain: &[u8], parts: &[&[u8]]) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
@@ -450,6 +470,7 @@ impl Fixture {
         execution_profile.profile_digest = execution_profile.digest();
         let profile_digest = execution_profile.profile_digest;
         let trust_digest = trust_policy_snapshot.digest()?;
+        let closure = closure_digest(SUBJECT_DIGEST, LICENCE);
         let mode = if source == AIR_GAPPED_PROFILE_ID_V1 {
             ExecutionModeV1::AirGapped
         } else {
@@ -467,7 +488,7 @@ impl Fixture {
             execution_profile: execution_profile.profile_id.clone(),
             execution_profile_digest: profile_digest,
             trust_policy_snapshot_digest: trust_digest,
-            artifact_closure_digest: [8; 32],
+            artifact_closure_digest: closure,
             evaluator_digest: [9; 32],
             replay_claim: ReplayClaimV1::Exact,
             plugin_versions: BTreeMap::new(),
@@ -481,7 +502,7 @@ impl Fixture {
             reproducibility_class: class,
             execution_profile_digest: profile_digest,
             trust_policy_snapshot_digest: trust_digest,
-            artifact_closure_digest: [8; 32],
+            artifact_closure_digest: closure,
             evaluator_digest: [9; 32],
             report_bytes_limit: 1024,
         };
@@ -1551,5 +1572,42 @@ fn two_runtime_failures_at_one_coordinate_diverge() -> TestResult {
         report.actual.digest,
         Some(*blake3::hash(&INVALID_PAYLOAD_FAILURE).as_bytes())
     );
+    Ok(())
+}
+
+#[test]
+fn closure_members_that_do_not_compose_the_request_digest_are_refused() -> TestResult {
+    assert_eq!(
+        recomputation_closure_digest_v1(SUBJECT_DIGEST, LICENCE),
+        closure_digest(SUBJECT_DIGEST, LICENCE)
+    );
+    let subject = Subject::new(Script::Count);
+    let expected = expected(&[1, 2], None)?;
+    let mismatch = (
+        VerificationOutcomeV1::InvalidManifest,
+        ReplayClaimV1::Exact,
+        SafeErrorCodeV1::DigestMismatch,
+    );
+    let other_licence = RecomputationClosureV1 {
+        licence: Some(b"SPDX-License-Identifier: Apache-2.0\n".as_slice()),
+        ..subject.closure(2)
+    };
+    let other_subject = RecomputationClosureV1 {
+        subject: Some(RecomputationSubjectMemberV1 {
+            artifact_digest: [0xd2; 32],
+            ..subject.member(2)
+        }),
+        ..subject.closure(2)
+    };
+    let fixture = Fixture::recomputation()?;
+    for closure in [other_licence, other_subject] {
+        let outcome = run(&fixture, closure, &expected, StoreConfig::Memory)?;
+        assert_refused(&outcome, mismatch, Some("artifact_closure"));
+    }
+    let local = Fixture::cross(LOCAL_PROFILE_ID_V1)?;
+    let air_gapped = Fixture::cross(AIR_GAPPED_PROFILE_ID_V1)?;
+    let outcome = run_cross(&local, &air_gapped, other_licence, &expected)?;
+    assert_refused(&outcome.local, mismatch, Some("artifact_closure"));
+    assert_refused(&outcome.air_gapped, mismatch, Some("artifact_closure"));
     Ok(())
 }

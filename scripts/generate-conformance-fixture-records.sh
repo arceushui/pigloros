@@ -224,13 +224,14 @@ while IFS=$'\t' read -r case_id claim_layer family schema_path declared_schema_p
       }
     fi
     # An adapter may also render the auxiliary members the provider declares for the family
-    # (the Plugin and metric composites). `plugin-signed-v1` and `metric-cbor-v1` must render
-    # every one of them; an adapter that renders none is left to the verifier to find the
-    # missing file.
+    # (the Plugin, metric and replay composites). `plugin-signed-v1`, `metric-cbor-v1` and
+    # `replay-cbor-v1` must render every one of them; an adapter that renders none is left to
+    # the verifier to find the missing file.
     while IFS= read -r auxiliary_path; do
       generated_auxiliary="${generated_root}/${auxiliary_path}"
       if [[ ! -f "${generated_auxiliary}" ]]; then
-        [[ "${adapter_id}" != "plugin-signed-v1" && "${adapter_id}" != "metric-cbor-v1" ]] || {
+        [[ "${adapter_id}" != "plugin-signed-v1" && "${adapter_id}" != "metric-cbor-v1" &&
+          "${adapter_id}" != "replay-cbor-v1" ]] || {
           echo "adapter did not render the auxiliary member: ${auxiliary_path}" >&2
           exit 1
         }
@@ -480,26 +481,47 @@ fi
 
 generated_authority="${generated_root}/expected-authority/inventory.json"
 mkdir -p "$(dirname "${generated_authority}")"
-jq -n '
+# ADR-062 Revision 8 slice R4 (#1222) materializes every W8H1 entry in one replay-conformance
+# family: the entry's fixture bytes are that family's payload (which names its RCS1 closure
+# members by BLAKE3 digest) and its expected result is that family's oracle. The digests are
+# those of the files regenerated above, never of the checked-in ones. Materialized is not
+# executed: the evidence-status records stay pending.
+declare -A w8h1_digests=()
+for family in positive denied malformed resource-exhaustion deletion-redaction downgrade independent-evaluation; do
+  for kind in inputs oracles; do
+    generated_member="${generated_root}/${kind}/replay-conformance/${family}.json"
+    [[ -s "${generated_member}" ]] || {
+      echo "the replay-conformance family ${family} was not regenerated" >&2
+      exit 1
+    }
+    w8h1_digests["${kind}/${family}"]="$(b3sum "${generated_member}" | awk '{print $1}')"
+  done
+done
+w8h1_digest_object="$(
+  for key in "${!w8h1_digests[@]}"; do
+    jq -n --arg key "${key}" --arg digest "${w8h1_digests[${key}]}" '{($key): $digest}'
+  done | jq -s 'add'
+)"
+jq -n --argjson digests "${w8h1_digest_object}" '
   [
-    {fixture_id: "RPL-001", execution_classes: ["RecordedReplay"], profiles: ["replay-v1"], expected_outcome: "VerifiedExact"},
-    {fixture_id: "PRF-001", execution_classes: ["ProfileRecomputation"], profiles: ["deterministic-local-v1"], expected_outcome: "VerifiedExact"},
-    {fixture_id: "PRF-002", execution_classes: ["CrossProfileConformance"], profiles: ["deterministic-air-gapped-v1", "deterministic-local-v1"], expected_outcome: "VerifiedExact"},
-    {fixture_id: "DIV-001", execution_classes: ["ProfileRecomputation"], profiles: ["deterministic-local-v1"], expected_outcome: "Diverged"},
-    {fixture_id: "INV-001", execution_classes: ["CrossProfileConformance", "ProfileRecomputation"], profiles: ["deterministic-air-gapped-v1", "deterministic-local-v1"], expected_outcome: "InvalidManifest"},
-    {fixture_id: "INV-002", execution_classes: ["CrossProfileConformance", "ProfileRecomputation"], profiles: ["deterministic-air-gapped-v1", "deterministic-local-v1"], expected_outcome: "UnverifiableArtifactsMissing"},
-    {fixture_id: "INV-003", execution_classes: ["CrossProfileConformance", "ProfileRecomputation"], profiles: ["deterministic-air-gapped-v1", "deterministic-local-v1"], expected_outcome: "IncompatibleProfile"},
-    {fixture_id: "RES-001", execution_classes: ["ProfileRecomputation"], profiles: ["deterministic-local-v1"], expected_outcome: "ResourceLimitExceeded"},
-    {fixture_id: "LIVE-001", execution_classes: ["LiveUnverified"], profiles: ["live-local-v1"], expected_outcome: "NonDeterministicAdmission"},
-    {fixture_id: "ERA-001", execution_classes: ["RecordedReplay"], profiles: ["replay-v1"], expected_outcome: "OutcomePreservedReplayClaimDegraded"},
-    {fixture_id: "SEC-001", execution_classes: ["CrossProfileConformance", "ProfileRecomputation"], profiles: ["deterministic-air-gapped-v1", "deterministic-local-v1"], expected_outcome: "TypedFailure"}
+    {fixture_id: "RPL-001", execution_classes: ["RecordedReplay"], profiles: ["replay-v1"], expected_outcome: "VerifiedExact", family: "positive"},
+    {fixture_id: "PRF-001", execution_classes: ["ProfileRecomputation"], profiles: ["deterministic-local-v1"], expected_outcome: "VerifiedExact", family: "positive"},
+    {fixture_id: "PRF-002", execution_classes: ["CrossProfileConformance"], profiles: ["deterministic-air-gapped-v1", "deterministic-local-v1"], expected_outcome: "VerifiedExact", family: "positive"},
+    {fixture_id: "DIV-001", execution_classes: ["ProfileRecomputation"], profiles: ["deterministic-local-v1"], expected_outcome: "Diverged", family: "independent-evaluation"},
+    {fixture_id: "INV-001", execution_classes: ["CrossProfileConformance", "ProfileRecomputation"], profiles: ["deterministic-air-gapped-v1", "deterministic-local-v1"], expected_outcome: "InvalidManifest", family: "malformed"},
+    {fixture_id: "INV-002", execution_classes: ["CrossProfileConformance", "ProfileRecomputation"], profiles: ["deterministic-air-gapped-v1", "deterministic-local-v1"], expected_outcome: "UnverifiableArtifactsMissing", family: "deletion-redaction"},
+    {fixture_id: "INV-003", execution_classes: ["CrossProfileConformance", "ProfileRecomputation"], profiles: ["deterministic-air-gapped-v1", "deterministic-local-v1"], expected_outcome: "IncompatibleProfile", family: "downgrade"},
+    {fixture_id: "RES-001", execution_classes: ["ProfileRecomputation"], profiles: ["deterministic-local-v1"], expected_outcome: "ResourceLimitExceeded", family: "resource-exhaustion"},
+    {fixture_id: "LIVE-001", execution_classes: ["LiveUnverified"], profiles: ["live-local-v1"], expected_outcome: "NonDeterministicAdmission", family: "denied"},
+    {fixture_id: "ERA-001", execution_classes: ["RecordedReplay"], profiles: ["replay-v1"], expected_outcome: "OutcomePreservedReplayClaimDegraded", family: "deletion-redaction"},
+    {fixture_id: "SEC-001", execution_classes: ["CrossProfileConformance", "ProfileRecomputation"], profiles: ["deterministic-air-gapped-v1", "deterministic-local-v1"], expected_outcome: "TypedFailure", family: "denied"}
   ] |
-  map(. + {
-    fixture_bytes_path: null,
-    fixture_bytes_digest: null,
-    expected_result_path: null,
-    expected_result_digest: null,
-    materialization_status: "pending"
+  map(.family as $family | del(.family) + {
+    fixture_bytes_path: ("inputs/replay-conformance/" + $family + ".json"),
+    fixture_bytes_digest: $digests["inputs/" + $family],
+    expected_result_path: ("oracles/replay-conformance/" + $family + ".json"),
+    expected_result_digest: $digests["oracles/" + $family],
+    materialization_status: "materialized"
   }) |
   {
     magic: "W8H1",
