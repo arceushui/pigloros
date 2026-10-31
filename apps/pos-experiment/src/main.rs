@@ -1,18 +1,16 @@
-#![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
+#![forbid(unsafe_code)]
+
+//! `pos-experiment`: the replay-conformance subject adapter (ADR-062
+//! Revision 8 slice R4, section 3.1 option A).
+//!
+//! All logic lives in `pos_experiment::replay_conformance`; this entry point
+//! only wires the process's streams to it. It reads one EAI1 attempt from
+//! standard input and writes one EAO1 observation to standard output, or
+//! writes nothing and exits non-zero. The binary requires the `test-support`
+//! feature, which compiles the adapter.
 
 fn main() -> std::process::ExitCode {
-    drop(std::io::Write::write_all(
-        &mut std::io::stderr().lock(),
-        format!("{} {}\n", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")).as_bytes(),
-    ));
-    std::process::ExitCode::SUCCESS
-}
-
-#[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
-mod tests {
-    #[test]
-    fn cover_main_stub() {
-        let _ = super::main();
-    }
+    let result =
+        pos_experiment::replay_conformance::run(std::io::stdin().lock(), std::io::stdout().lock());
+    pos_experiment::replay_conformance::exit_code(result)
 }

@@ -317,6 +317,24 @@ impl DriverOutputCoordinateV1 {
 }
 
 impl DriverOutcomeV1 {
+    /// The one-byte outcome tag of the result digest: 0 for an output, 1 for
+    /// a typed failure.
+    #[must_use]
+    pub const fn tag_v1(&self) -> u8 {
+        match self {
+            Self::Output(_) => 0,
+            Self::TypedFailure(_) => 1,
+        }
+    }
+
+    /// The canonical bytes of the output or typed failure.
+    #[must_use]
+    pub fn canonical_bytes(&self) -> &[u8] {
+        match self {
+            Self::Output(bytes) | Self::TypedFailure(bytes) => bytes,
+        }
+    }
+
     const fn missing_kind(&self) -> DivergenceMismatchKindV1 {
         match self {
             Self::Output(_) => DivergenceMismatchKindV1::CanonicalBytes,
