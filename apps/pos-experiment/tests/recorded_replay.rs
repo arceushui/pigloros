@@ -1,7 +1,8 @@
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
 //! Public-interface tests for the ADR-062 Revision 8 slice R2 `RecordedReplay`
-//! execution step (#1220): RPL-001, ERA-001, INV-001..003 and RES-001.
+//! execution step (#1220): RPL-001, ERA-001, INV-001..003 and RES-001, and
+//! the slice R4 closure binding (#1222).
 //!
 //! Expected streams are hand-derived from the recorded drafts (Q3): the
 //! digests below follow the documented `recorded_replay` conventions and do
@@ -30,7 +31,11 @@ use pos_experiment::authoritative_comparison::{
 };
 use pos_experiment::recorded_replay::{
     execute_recorded_replay_v1, ExportedTimelineMemberV1, RecordedReplayClosureV1,
-    RecordedReplayInputV1, RecordedReplayOutcomeV1,
+    RecordedReplayInputV1,
+};
+use pos_experiment::verification_execution::{
+    recomputation_closure_digest_v1, recorded_replay_closure_digest_v1,
+    VerificationExecutionOutcomeV1,
 };
 use pos_runtime::{Driver, ObservationView, RuntimeError, StepOutput};
 use pos_state::ProjectionRegistry;
@@ -224,6 +229,23 @@ impl Recording {
     }
 }
 
+/// The closure composition of slice R4, hand-derived: the member count, then
+/// the exported Timeline (role 1) and the licence (role 3), each as its role
+/// and its 32-byte artifact digest.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn closure_digest(export: [u8; 32], licence: &[u8]) -> [u8; 32] {
+    digest(
+        b"PiglorOS.RecordedReplayClosure.v1",
+        &[
+            &2_u64.to_be_bytes(),
+            &[1],
+            &export,
+            &[3],
+            blake3::hash(licence).as_bytes(),
+        ],
+    )
+}
+
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn digest(domain: &[u8], parts: &[&[u8]]) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
@@ -262,6 +284,8 @@ fn result_digest(stream: &AuthoritativeStreamV1) -> [u8; 32] {
         parts.push(checkpoint.digest.to_vec());
         parts.push(checkpoint.size.to_be_bytes().to_vec());
     }
+    // A recorded export has no typed failures: the typed-failure count is 0.
+    parts.push(0_u64.to_be_bytes().to_vec());
     let parts: Vec<&[u8]> = parts.iter().map(Vec::as_slice).collect();
     digest(b"PiglorOS.RecordedReplayResult.v1", &parts)
 }
@@ -333,6 +357,7 @@ impl Fixture {
         execution_profile.profile_digest = execution_profile.digest();
         let profile_digest = execution_profile.profile_digest;
         let trust_digest = trust_policy_snapshot.digest()?;
+        let closure = closure_digest(EXPORT_DIGEST.digest(), LICENCE);
         let manifest = ReproManifestV1 {
             format_version: 1,
             input_digest: [10; 32],
@@ -345,7 +370,7 @@ impl Fixture {
             execution_profile: execution_profile.profile_id.clone(),
             execution_profile_digest: profile_digest,
             trust_policy_snapshot_digest: trust_digest,
-            artifact_closure_digest: [8; 32],
+            artifact_closure_digest: closure,
             evaluator_digest: [9; 32],
             replay_claim: ReplayClaimV1::Exact,
             plugin_versions: BTreeMap::new(),
@@ -359,7 +384,7 @@ impl Fixture {
             reproducibility_class: class,
             execution_profile_digest: profile_digest,
             trust_policy_snapshot_digest: trust_digest,
-            artifact_closure_digest: [8; 32],
+            artifact_closure_digest: closure,
             evaluator_digest: [9; 32],
             report_bytes_limit: 1024,
         };
@@ -430,7 +455,7 @@ fn run(
     closure: RecordedReplayClosureV1<'_>,
     evaluation: &ReplayClaimEvaluationV1,
     projections: &mut ProjectionRegistry,
-) -> TestResult<RecordedReplayOutcomeV1> {
+) -> TestResult<VerificationExecutionOutcomeV1> {
     let expected = recording.expected(u64::try_from(recording.payloads.len())?)?;
     let outcome = execute_recorded_replay_v1(
         RecordedReplayInputV1 {
@@ -464,7 +489,7 @@ fn run(
 /// Assert a refusal with one closed first error and no comparison.
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn assert_refused(
-    outcome: &RecordedReplayOutcomeV1,
+    outcome: &VerificationExecutionOutcomeV1,
     expected: (VerificationOutcomeV1, ReplayClaimV1, SafeErrorCodeV1),
     coordinate: Option<&str>,
 ) {
@@ -1020,4 +1045,82 @@ fn an_empty_export_is_verified_exact_at_fold_cursor_zero() -> TestResult {
         Some(result_digest(&recording.expected(0)?))
     );
     Ok(())
+}
+
+#[test]
+fn closure_members_that_do_not_compose_the_request_digest_are_refused() -> TestResult {
+    let recording = Recording::new()?;
+    let fixture = Fixture::recorded()?;
+    assert_eq!(
+        recorded_replay_closure_digest_v1(EXPORT_DIGEST.digest(), LICENCE),
+        closure_digest(EXPORT_DIGEST.digest(), LICENCE)
+    );
+    assert_eq!(
+        fixture.request.artifact_closure_digest,
+        closure_digest(EXPORT_DIGEST.digest(), LICENCE)
+    );
+    let mismatch = (
+        VerificationOutcomeV1::InvalidManifest,
+        ReplayClaimV1::Exact,
+        SafeErrorCodeV1::DigestMismatch,
+    );
+    let other_licence = RecordedReplayClosureV1 {
+        licence: Some(b"SPDX-License-Identifier: Apache-2.0\n".as_slice()),
+        ..recording.closure()
+    };
+    let other_export = RecordedReplayClosureV1 {
+        timeline_export: Some(ExportedTimelineMemberV1 {
+            export: &recording.export,
+            artifact_digest: FOREIGN_DIGEST,
+        }),
+        ..recording.closure()
+    };
+    for closure in [other_licence, other_export] {
+        let mut projections = projections();
+        let outcome = run(
+            &recording,
+            &fixture,
+            closure,
+            &evaluation_exact()?,
+            &mut projections,
+        )?;
+        assert_refused(&outcome, mismatch, Some("artifact_closure"));
+        assert_eq!(
+            projections.state_for(recording.timeline, &recording.entity)?,
+            None
+        );
+    }
+
+    // A coordinate the preflight checks before the closure is still first.
+    let mut unsupported = Fixture::recorded()?;
+    unsupported.manifest.format_version = 2;
+    unsupported.refresh_manifest_binding()?;
+    let outcome = run(
+        &recording,
+        &unsupported,
+        other_licence,
+        &evaluation_exact()?,
+        &mut projections(),
+    )?;
+    assert_refused(
+        &outcome,
+        (
+            VerificationOutcomeV1::InvalidManifest,
+            ReplayClaimV1::Exact,
+            SafeErrorCodeV1::UnsupportedVersion,
+        ),
+        Some("manifest"),
+    );
+    Ok(())
+}
+
+#[test]
+fn the_same_member_digest_under_the_two_roles_gives_different_closures() {
+    // Section 4 of the note: role 1 (exported Timeline) and role 2
+    // (recomputation subject) are part of the composition.
+    let digest = EXPORT_DIGEST.digest();
+    assert_ne!(
+        recorded_replay_closure_digest_v1(digest, LICENCE),
+        recomputation_closure_digest_v1(digest, LICENCE)
+    );
 }
