@@ -318,7 +318,7 @@ struct SessionProbe {
     gate: bool,
     fork_factory: bool,
     primed: bool,
-    hit: bool,
+    cache_class: &'static [u8],
 }
 
 impl SessionProbe {
@@ -327,7 +327,7 @@ impl SessionProbe {
             gate: true,
             fork_factory: true,
             primed: false,
-            hit: false,
+            cache_class: b"cache-miss",
         }
     }
 }
@@ -360,7 +360,11 @@ impl NonInterferenceSessionSubjectV1 for SessionProbe {
         if run.subject.fixture_id != LOCAL_PROBE_FIXTURE_ID_V1 {
             return Err(NonInterferenceNonExecutedCauseV1::Unsupported);
         }
-        self.hit = preparation == NonInterferencePreparationV1::Warm && self.primed;
+        self.cache_class = if preparation == NonInterferencePreparationV1::Warm && self.primed {
+            b"cache-hit"
+        } else {
+            b"cache-miss"
+        };
         self.primed = true;
         let plugin = PluginId::new();
         let payload = run.subject.permitted_input.to_vec();
@@ -410,11 +414,7 @@ impl NonInterferenceSessionSubjectV1 for SessionProbe {
             .collect::<Vec<_>>();
         let names = pos_conformance::non_interference_surface_names_v1(run.subject.fixture_id)
             .ok_or(NonInterferenceNonExecutedCauseV1::Unsupported)?;
-        let class: &[u8] = if self.hit {
-            b"cache-hit"
-        } else {
-            b"cache-miss"
-        };
+        let class = self.cache_class;
         Ok(NonInterferenceRawCaptureV1 {
             surface_names: names.iter().map(|name| (*name).to_owned()).collect(),
             authoritative: names
@@ -1244,5 +1244,9 @@ fn exactly_192_trusted_nia1_build_a_report_the_independent_verifier_accepts() ->
 }
 
 fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    bytes.iter().fold(String::new(), |mut text, byte| {
+        text.push(char::from(b"0123456789abcdef"[usize::from(byte >> 4)]));
+        text.push(char::from(b"0123456789abcdef"[usize::from(byte & 0x0f)]));
+        text
+    })
 }
