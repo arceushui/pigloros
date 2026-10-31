@@ -50,6 +50,123 @@ class AsanCiPolicyTests(unittest.TestCase):
     def test_repository_workflow_passes(self) -> None:
         CHECKER.check_workflow(ROOT / ".github" / "workflows" / "ci.yml")
 
+    def test_sdk_headroom_shell_parses_without_execution(self) -> None:
+        result = subprocess.run(
+            ["bash", "-n"],
+            input=self.headroom_step(self.workflow)["run"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_sdk_headroom_rejects_widened_paths_and_required_tools(self) -> None:
+        for path in (
+            "/usr/local/lib/android",
+            "/usr/share/dotnet",
+            "/usr/share/dotnet/shared",
+            "/usr/share/dotnet/host",
+            "/usr/lib/llvm-18",
+            '"${HOME}/.rustup"',
+            '"${HOME}/.cargo"',
+            "/var/lib/docker",
+            '"${RUNNER_TEMP}"',
+            '"${GITHUB_WORKSPACE}"',
+            "/home/runner/actions-runner",
+        ):
+            with self.subTest(path=path):
+
+                def widen_allowlist(workflow: dict) -> None:
+                    step = self.headroom_step(workflow)
+                    step["run"] = step["run"].replace(
+                        "/usr/share/dotnet/sdk; do", f"{path}; do"
+                    )
+
+                self.assert_rejected(widen_allowlist)
+
+        def add_sdk_parent(workflow: dict) -> None:
+            step = self.headroom_step(workflow)
+            step["run"] = step["run"].replace(
+                "/usr/share/dotnet/sdk; do",
+                "/usr/share/dotnet/sdk /usr/share/dotnet; do",
+            )
+
+        self.assert_rejected(add_sdk_parent)
+
+    def test_sdk_headroom_requires_all_capacity_receipts(self) -> None:
+        for phase in ("before", "after"):
+            for kind, command in (("bytes", "df -B1"), ("inodes", "df -i")):
+                with self.subTest(phase=phase, kind=kind):
+                    receipt = (
+                        f"printf 'ASan SDK headroom {phase} ({kind})\\n'\n"
+                        f'{command} -- / "${{GITHUB_WORKSPACE}}" "${{RUNNER_TEMP}}"\n'
+                    )
+                    self.assertIn(receipt, self.headroom_step(self.workflow)["run"])
+
+                    def remove_receipt(workflow: dict) -> None:
+                        step = self.headroom_step(workflow)
+                        step["run"] = step["run"].replace(receipt, "")
+
+                    self.assert_rejected(remove_receipt)
+
+    def test_sdk_headroom_requires_guards_and_sdk_receipts(self) -> None:
+        protected_lines = (
+            "set -euo pipefail\n",
+            '  if [[ ! -e "${asan_sdk_path}" && ! -L "${asan_sdk_path}" ]]; then\n',
+            '    printf \'ASan SDK absent: %s\\n\' "${asan_sdk_path}"\n',
+            '  test -d "${asan_sdk_path}"\n',
+            '  test ! -L "${asan_sdk_path}"\n',
+            '  test "$(readlink -e -- "${asan_sdk_path}")" = "${asan_sdk_path}"\n',
+            '  test "${asan_sdk_device}" = "${asan_root_device}"\n',
+            '  sudo du -sx -B1 -- "${asan_sdk_path}"\n',
+            '  printf \'ASan SDK removed: %s\\n\' "${asan_sdk_path}"\n',
+        )
+        for line in protected_lines:
+            with self.subTest(line=line):
+                self.assertIn(line, self.headroom_step(self.workflow)["run"])
+
+                def remove_guard(workflow: dict) -> None:
+                    step = self.headroom_step(workflow)
+                    step["run"] = step["run"].replace(line, "")
+
+                self.assert_rejected(remove_guard)
+
+        def cross_filesystems(workflow: dict) -> None:
+            step = self.headroom_step(workflow)
+            step["run"] = step["run"].replace("--one-file-system ", "")
+
+        self.assert_rejected(cross_filesystems)
+
+    def test_sdk_headroom_requires_hosted_linux_guard(self) -> None:
+        for guard in (
+            False,
+            "${{ runner.os == 'Linux' }}",
+            "${{ runner.environment == 'github-hosted' }}",
+        ):
+            with self.subTest(guard=guard):
+                self.assert_rejected(
+                    lambda workflow: self.headroom_step(workflow).update({"if": guard})
+                )
+        self.assert_rejected(lambda workflow: self.headroom_step(workflow).pop("if"))
+
+    def test_sdk_headroom_requires_trusted_early_failing_setup(self) -> None:
+        def move_after_download(workflow: dict) -> None:
+            steps = workflow["jobs"]["asan"]["steps"]
+            step = self.headroom_step(workflow)
+            steps.remove(step)
+            steps.insert(6, step)
+
+        self.assert_rejected(move_after_download)
+        for extra in (
+            {"continue-on-error": True},
+            {"shell": "bash {0}"},
+            {"env": {"GITHUB_WORKSPACE": "/"}},
+        ):
+            with self.subTest(extra=extra):
+                self.assert_rejected(
+                    lambda workflow: self.headroom_step(workflow).update(extra)
+                )
+
     def test_rejects_repository_nextest_configuration(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace_root = pathlib.Path(directory)
@@ -272,10 +389,10 @@ class AsanCiPolicyTests(unittest.TestCase):
             )
 
         def add_rust_src(workflow: dict) -> None:
-            workflow["jobs"]["asan"]["steps"][2]["with"]["components"] = "rust-src"
+            workflow["jobs"]["asan"]["steps"][3]["with"]["components"] = "rust-src"
 
         def move_download(workflow: dict) -> None:
-            workflow["jobs"]["asan"]["steps"][5]["with"]["path"] = "asan-archive"
+            workflow["jobs"]["asan"]["steps"][6]["with"]["path"] = "asan-archive"
 
         for mutate in (add_rust_cache, add_rust_src, move_download):
             with self.subTest(mutation=mutate.__name__):
@@ -800,6 +917,14 @@ class AsanCiPolicyTests(unittest.TestCase):
     def test_rejects_test_skip_argument(self) -> None:
         self.assert_rejected(
             lambda workflow: self.append_to_command(workflow, " -- --skip anything")
+        )
+
+    @staticmethod
+    def headroom_step(workflow: dict) -> dict:
+        return next(
+            step
+            for step in workflow["jobs"]["asan"]["steps"]
+            if step.get("name") == "Reclaim unused SDK headroom for ASan"
         )
 
     @staticmethod

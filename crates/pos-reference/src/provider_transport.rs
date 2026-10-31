@@ -3077,33 +3077,64 @@ mod tests {
     }
 
     #[test]
-    fn input_writer_emits_the_exact_parent_bound_chunk() -> TestResult {
-        let fixture = crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
-        let deadline = Deadline::new(Duration::from_secs(1))?;
-        let (mut root, mut provider) = UnixStream::pair()?;
-        write_input(
-            &mut root,
-            &fixture.request,
-            &mut std::io::Cursor::new(b"input"),
-            &deadline,
-        )
-        .map_err(|error| format!("input write failed: {error:?}"))?;
-        root.shutdown(std::net::Shutdown::Write)?;
+    fn input_writer_emits_the_exact_parent_bound_chunks() -> TestResult {
+        // ADR-069 fixes the wire chunk size independently of the writer constant.
+        const WIRE_CHUNK_BYTES: usize = 1_048_576;
+        let mut multiple_chunks = vec![b'a'; WIRE_CHUNK_BYTES];
+        multiple_chunks.extend_from_slice(b"final chunk");
+        for input in [b"input".to_vec(), multiple_chunks] {
+            let fixture =
+                crate::selector_transport_test_fixture::authenticated_transport_fixture_with_input(
+                    &input,
+                )?;
+            validate_staged_input(
+                &fixture.request.adapter_input,
+                &mut std::io::Cursor::new(&input),
+            )?;
+            let deadline = Deadline::new(Duration::from_secs(5))?;
+            let read_deadline = Deadline::new(Duration::from_secs(5))?;
+            let (mut root, mut provider) = UnixStream::pair()?;
+            let (send, received) = std::sync::mpsc::sync_channel(1);
+            let reader = std::thread::spawn(move || {
+                let result = (|| -> Result<Vec<Vec<u8>>, String> {
+                    let mut frames = Vec::new();
+                    while let Some(frame) = read_frame(&mut provider, &read_deadline)
+                        .map_err(|error| format!("input read failed: {error:?}"))?
+                    {
+                        frames.push(frame);
+                    }
+                    Ok(frames)
+                })();
+                drop(send.send(result));
+            });
+            write_input(
+                &mut root,
+                &fixture.request,
+                &mut std::io::Cursor::new(&input),
+                &deadline,
+            )
+            .map_err(|error| format!("input write failed: {error:?}"))?;
+            root.shutdown(std::net::Shutdown::Write)?;
 
-        let bytes = read_frame(&mut provider, &deadline)
-            .map_err(|error| format!("input read failed: {error:?}"))?
-            .ok_or("input chunk missing")?;
-        let chunk = SandboxPayloadChunk::from_canonical_cbor(&bytes)?;
-        assert_eq!(chunk.parent_digest, fixture.request.request_digest);
-        assert_eq!(chunk.request_id, fixture.request.request.request_id);
-        assert_eq!(chunk.attempt_id, fixture.request.attempt_id);
-        assert_eq!(chunk.direction, PayloadDirection::Input);
-        assert_eq!(chunk.index, 0);
-        assert_eq!(chunk.offset, 0);
-        assert_eq!(chunk.bytes, b"input");
-        assert!(read_frame(&mut provider, &deadline)
-            .map_err(|error| format!("input EOF read failed: {error:?}"))?
-            .is_none());
+            // Receive the completed, deadline-bounded I/O before joining the reader.
+            let frames = received.recv_timeout(Duration::from_secs(5))??;
+            reader.join().map_err(|_| "input reader thread panicked")?;
+            assert_eq!(frames.len(), input.len().div_ceil(WIRE_CHUNK_BYTES));
+            for (index, (bytes, expected)) in frames
+                .iter()
+                .zip(input.chunks(WIRE_CHUNK_BYTES))
+                .enumerate()
+            {
+                let chunk = SandboxPayloadChunk::from_canonical_cbor(bytes)?;
+                assert_eq!(chunk.parent_digest, fixture.request.request_digest);
+                assert_eq!(chunk.request_id, fixture.request.request.request_id);
+                assert_eq!(chunk.attempt_id, fixture.request.attempt_id);
+                assert_eq!(chunk.direction, PayloadDirection::Input);
+                assert_eq!(chunk.index, u64::try_from(index)?);
+                assert_eq!(chunk.offset, u64::try_from(index * WIRE_CHUNK_BYTES)?);
+                assert_eq!(chunk.bytes, expected);
+            }
+        }
         Ok(())
     }
 

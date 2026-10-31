@@ -48,6 +48,7 @@ EXPECTED_TEST_ONLY_EXCLUSIONS = (
     "src/system_bus/tests.rs",
     "src/image_activator/tests.rs",
     "src/root_attachment/tests.rs",
+    "src/root_selector/tests/admission_bounds.rs",
     "src/selector/installation/fixture.rs",
     "src/provider_admission/test_support.rs",
     "src/e2e_determinism.rs",
@@ -199,6 +200,9 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
             "src/protocol_tests.rs",
             "src/examples/production.rs",
             "src/system_bus/transport.rs",
+            "src/root_selector.rs",
+            "src/provider_admission.rs",
+            "src/root_selector/tests/admission_bounds_production.rs",
             "src/fork_event_authority/tests/production.rs",
             "src/sqlite/tests/production.rs",
             "src/sqlite/fork_replay/production.rs",
@@ -262,6 +266,33 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
                             )
 
                         self.assert_rejected(change_scope)
+
+    def test_rejects_admission_bounds_allowlist_scope_changes(self) -> None:
+        path = "src/root_selector/tests/admission_bounds.rs"
+        scope_changes = (
+            "",
+            "--exclude 'src/root_selector/tests/**'",
+            "--exclude 'src/root_selector/**'",
+            "--exclude 'src/root_selector.rs'",
+            "--exclude 'src/provider_admission.rs'",
+            f"--exclude '{path}' "
+            "--exclude 'src/root_selector/tests/admission_bounds_production.rs'",
+        )
+        for step_name in (
+            "Generate trusted current baseline",
+            "Analyze CRAP score changes",
+        ):
+            for replacement in scope_changes:
+                with self.subTest(step=step_name, replacement=replacement):
+                    def change_scope(
+                        workflow, *, step_name=step_name, replacement=replacement,
+                    ):
+                        step = self.cargo_crap_step(workflow, step_name)
+                        step["run"] = step["run"].replace(
+                            f"--exclude '{path}'", replacement
+                        )
+
+                    self.assert_rejected(change_scope)
 
     def test_rejects_excluding_production_source(self) -> None:
         def exclude_production(workflow: dict) -> None:
