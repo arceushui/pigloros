@@ -56,7 +56,7 @@ impl ObservedV1 {
             },
             Self::MetricError(failure) => OutcomeV1::MetricError {
                 code: failure.error.code(),
-                error: error_name(failure.error),
+                error: error_name(failure.error).to_owned(),
                 coordinate: failure.coordinate.clone(),
             },
             Self::Denied => OutcomeV1::Denied,
@@ -89,9 +89,22 @@ impl RecordV1 {
     }
 }
 
-/// The profile name of a closed `MetricErrorV1`.
-fn error_name(error: MetricErrorV1) -> String {
-    format!("{error:?}")
+/// The profile name of a closed `MetricErrorV1` (section 4.2).
+const fn error_name(error: MetricErrorV1) -> &'static str {
+    match error {
+        MetricErrorV1::InvalidEncoding => "InvalidEncoding",
+        MetricErrorV1::UnsupportedVersion => "UnsupportedVersion",
+        MetricErrorV1::UnsupportedAlgorithm => "UnsupportedAlgorithm",
+        MetricErrorV1::InvalidBinning => "InvalidBinning",
+        MetricErrorV1::InconsistentLength => "InconsistentLength",
+        MetricErrorV1::InvalidProbability => "InvalidProbability",
+        MetricErrorV1::InvalidOutcome => "InvalidOutcome",
+        MetricErrorV1::InvalidIdentifier => "InvalidIdentifier",
+        MetricErrorV1::DuplicatePrediction => "DuplicatePrediction",
+        MetricErrorV1::NonCanonicalOrder => "NonCanonicalOrder",
+        MetricErrorV1::InvalidMinimum => "InvalidMinimum",
+        MetricErrorV1::ResourceLimit => "ResourceLimit",
+    }
 }
 
 /// Lowercase hexadecimal.
