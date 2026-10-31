@@ -24,7 +24,7 @@ use std::process::{Command, Stdio};
 use pos_conformance::{ExecutionModeV1, ReproManifestV1};
 use pos_experiment::replay_conformance::{
     exit_code, pair_report, run, run_with_store, AdapterRunErrorV1, PairErrorV1, CONTRACT_VERSION,
-    EVIDENCE_LEVEL, NETWORK_DENIED, PAYLOAD_INVALID, PROVIDER_ID, SCHEMA_ID, SUBCASE_MISMATCH,
+    NETWORK_DENIED, PAYLOAD_INVALID, PROVIDER_ID, SCHEMA_ID, SUBCASE_MISMATCH,
 };
 use pos_reference::adapter_transport::{read_observation, write_attempt};
 use pos_reference::evaluator::{
@@ -812,12 +812,23 @@ fn every_family_pair_has_identical_authoritative_results_in_local_and_air_gapped
         assert_eq!(report.local.observation.result, expected, "{family:?}");
         assert_eq!(report.air_gapped.observation.result, expected, "{family:?}");
         assert_eq!(report.local.observation, report.air_gapped.observation);
-        // Both results are labelled Local-relaxation engineering evidence.
         assert_eq!(report.local.mode, ExecutionModeV1::Local);
         assert_eq!(report.air_gapped.mode, ExecutionModeV1::AirGapped);
-        assert_eq!(report.air_gapped.evidence, EVIDENCE_LEVEL);
-        assert_eq!(report.local.evidence, EVIDENCE_LEVEL);
-        assert!(EVIDENCE_LEVEL.starts_with("Local-relaxation engineering evidence"));
+        // The Air-Gapped results carry the label the published limitations
+        // give them.
+        assert_eq!(
+            report.air_gapped_evidence,
+            "Local-relaxation engineering evidence"
+        );
+        let limitations = String::from_utf8(read("support/limitations.md")?)?;
+        assert!(limitations
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .contains(&format!(
+                "Air-Gapped results are {}.",
+                report.air_gapped_evidence
+            )));
 
         let digests = expected_result_digests(family)?;
         assert_eq!(

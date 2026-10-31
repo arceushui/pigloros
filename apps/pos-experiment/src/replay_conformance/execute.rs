@@ -372,15 +372,15 @@ impl RecomputationSubjectV1 for ScriptV1 {
     }
 }
 
-/// Run one sub-case: one leg per profile. `None` is an operational host or
-/// codec failure.
+/// Run one sub-case: one leg per profile. Returns its record and the manifest
+/// and `VRR1` of each leg; `None` is an operational host or codec failure.
 pub(super) fn run_subcase(
     host: &HostV1,
     subcase: &SubCaseV1,
     fixture_digest: [u8; 32],
     mode: ExecutionModeV1,
     store_config: &StoreConfig,
-) -> Option<RecordV1> {
+) -> Option<(RecordV1, Vec<LegEvidenceV1>)> {
     let requests: Vec<LegRequestV1> = subcase
         .profiles
         .iter()
@@ -456,18 +456,20 @@ pub(super) fn run_subcase(
             }
         }
     };
-    outcomes.map(|outcomes| RecordV1 {
-        id: subcase.id.clone(),
-        fixture_id: subcase.fixture_id.clone(),
-        composition: composed,
-        folded_events: folded.load(Ordering::Relaxed),
-        legs: subcase
-            .profiles
-            .iter()
-            .zip(&outcomes)
-            .map(|(profile, outcome)| leg(*profile, outcome))
-            .collect(),
-        evidence: requests
+    outcomes.map(|outcomes| {
+        let record = RecordV1 {
+            id: subcase.id.clone(),
+            fixture_id: subcase.fixture_id.clone(),
+            composition: composed,
+            folded_events: folded.load(Ordering::Relaxed),
+            legs: subcase
+                .profiles
+                .iter()
+                .zip(&outcomes)
+                .map(|(profile, outcome)| leg(*profile, outcome))
+                .collect(),
+        };
+        let evidence = requests
             .iter()
             .zip(outcomes)
             .map(|(request, outcome)| LegEvidenceV1 {
@@ -476,7 +478,8 @@ pub(super) fn run_subcase(
                 result: outcome.result,
                 divergence: outcome.divergence,
             })
-            .collect(),
+            .collect();
+        (record, evidence)
     })
 }
 

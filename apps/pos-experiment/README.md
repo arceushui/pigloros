@@ -24,8 +24,10 @@ Every family runs in Local and in Air-Gapped mode against the same oracle
 Local and the Air-Gapped attempt of one case and reports the manifest and
 `VRR1` of every leg of both; the two must have identical authoritative
 results. An Air-Gapped attempt has no network: a network attempt is the
-failure `network-denied`. Air-Gapped results are Local-relaxation engineering
-evidence until the Sandbox Provider runs them.
+failure `network-denied` of provider
+`pigloros.fixture.replay-conformance@2.0.0`. The report labels the Air-Gapped
+results Local-relaxation engineering evidence until the Sandbox Provider runs
+them.
 
 The Experiment host binary is the replay subject adapter (ADR-062 Revision 8
 section 3.1 option A). The adapter and the binary are compiled only with the
