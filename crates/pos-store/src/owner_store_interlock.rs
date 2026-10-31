@@ -30,7 +30,7 @@ const LOCK_FLAGS: OFlags = OFlags::RDWR
 ///
 /// Retain it across the entire eventual native operation and its cleanup. Drop
 /// closes only the separate coordination file and metadata-only descriptors;
-/// it never calls SQLite, unlinks an entry or releases admission.
+/// it never calls `SQLite`, unlinks an entry or releases admission.
 #[must_use = "retain the interlock through all lower native work and cleanup"]
 pub struct OwnerStoreFileInterlockV1<'operation> {
     _admission: PhantomData<&'operation ()>,
@@ -74,7 +74,7 @@ impl<'operation> OwnerStoreFileInterlockV1<'operation> {
     /// # Errors
     /// Returns a fixed storage refusal for unsafe metadata, unsupported lookup,
     /// a changed object, contention or any filesystem failure. No path or OS
-    /// diagnostic escapes. A failure creates no native SQLite connection.
+    /// diagnostic escapes. A failure creates no native `SQLite` connection.
     pub fn try_acquire(
         _operation: &'operation OwnerStoreOperationV1<'_>,
         test_database_directory: &Path,
@@ -260,12 +260,15 @@ fn open_observed_lock(
     name: &str,
     observed: Option<&FileWitness>,
 ) -> io::Result<OwnedFd> {
-    let flags = if observed.is_some() {
-        LOCK_FLAGS
+    let (flags, mode) = if observed.is_some() {
+        (LOCK_FLAGS, Mode::empty())
     } else {
-        LOCK_FLAGS.union(OFlags::CREATE).union(OFlags::EXCL)
+        (
+            LOCK_FLAGS.union(OFlags::CREATE).union(OFlags::EXCL),
+            Mode::RUSR | Mode::WUSR,
+        )
     };
-    fs::openat2(directory, name, flags, Mode::RUSR | Mode::WUSR, RESOLVE).and_then(|descriptor| {
+    fs::openat2(directory, name, flags, mode, RESOLVE).and_then(|descriptor| {
         check_regular(&descriptor).and_then(|stat| {
             enforce(observed.is_none_or(|witness| same_file(&witness.stat, &stat)))
                 .map(|()| descriptor)
@@ -290,11 +293,17 @@ const fn same_file(first: &Stat, second: &Stat) -> bool {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
     use super::*;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    fn private_directory() -> std::io::Result<tempfile::TempDir> {
+        tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()
+    }
 
     fn create(directory: &Path, name: &str) -> TestResult {
         std::fs::OpenOptions::new()
@@ -307,7 +316,7 @@ mod tests {
 
     #[test]
     fn metadata_policy_distinguishes_owner_kind_mode_and_physical_identity() -> TestResult {
-        let directory = tempfile::tempdir()?;
+        let directory = private_directory()?;
         create(directory.path(), "main")?;
         let namespace = CheckedNamespace::open(directory.path(), "main")?;
         let original = &namespace.main.stat;
@@ -330,7 +339,7 @@ mod tests {
 
     #[test]
     fn retained_namespace_rejects_replaced_main_and_companion_objects() -> TestResult {
-        let directory = tempfile::tempdir()?;
+        let directory = private_directory()?;
         create(directory.path(), "main")?;
         create(directory.path(), "main-wal")?;
         let namespace = CheckedNamespace::open(directory.path(), "main")?;
@@ -352,7 +361,7 @@ mod tests {
 
     #[test]
     fn coordination_creation_and_observation_failures_do_not_replace_entries() -> TestResult {
-        let directory = tempfile::tempdir()?;
+        let directory = private_directory()?;
         create(directory.path(), "main")?;
         let namespace = CheckedNamespace::open(directory.path(), "main")?;
         assert!(open_coordination_directory(&namespace.main.descriptor).is_err());
