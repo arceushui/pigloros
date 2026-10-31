@@ -22,6 +22,8 @@ Commands:
   writes ``THIRD-PARTY-NOTICES.txt`` and ``third-party-notices.json``. It fails
   on an unknown or unaccepted licence and on any crate or component with no
   licence text.
+  Its ``--scope gateway`` mode selects the native gateway release unit graph
+  from the licensed workspace report and retains the shared Rust notices.
 
 The output depends only on the committed inputs and the locked graphs, so two
 runs on one commit write identical bytes.
@@ -53,6 +55,7 @@ DENY = Path("deny.toml")
 HOST_ABOUT = Path("about.toml")
 GUEST_ABOUT = Path("third_party/about-guest.toml")
 HOST_LOCK = "Cargo.lock"
+GATEWAY_MANIFEST = Path("apps/piglor-gateway/Cargo.toml")
 GUEST_ROOT = Path("plugins/community/examples")
 GUEST_TARGETS = ["wasm32-unknown-unknown"]
 RUST_STD = "rust-std"
@@ -679,6 +682,85 @@ def text_source(licence: dict) -> str:
     return f"the crate's {Path(path).name}"
 
 
+def gateway_report(root: Path, report: dict, metadata: dict, graph: dict) -> dict:
+    """Select the exact gateway release units, not metadata's feature-unified graph."""
+    if (
+        type(metadata.get("version")) is not int or metadata["version"] != 1
+        or type(graph.get("version")) is not int or graph["version"] != 1
+    ):
+        raise NoticeError("gateway Cargo metadata and unit graph must have version 1")
+    packages = {package["id"]: package for package in metadata["packages"]}
+    if len(packages) != len(metadata["packages"]):
+        raise NoticeError("gateway Cargo metadata contains duplicate package IDs")
+    root_id = metadata["resolve"]["root"]
+    package = packages.get(root_id, {})
+    if (
+        package.get("name") != "piglor-gateway"
+        or Path(package.get("manifest_path", "")).resolve() != (root / GATEWAY_MANIFEST).resolve()
+        or Path(metadata["workspace_root"]).resolve() != root.resolve()
+    ):
+        raise NoticeError("gateway Cargo metadata must name this checkout's gateway manifest")
+    units = graph["units"]
+
+    def unit(index: int) -> dict:
+        if type(index) is not int or not 0 <= index < len(units):
+            raise NoticeError("gateway unit graph has an invalid unit index")
+        return units[index]
+
+    if len(graph["roots"]) != 1:
+        raise NoticeError("gateway unit graph must have exactly one root")
+    first = unit(graph["roots"][0])
+    if (
+        first["pkg_id"] != root_id
+        or first["target"]["name"] != "piglor-gateway"
+        or first["target"]["kind"] != ["bin"]
+        or Path(first["target"]["src_path"]).resolve()
+        != (root / GATEWAY_MANIFEST.parent / "src/main.rs").resolve()
+        or first["profile"]["name"] != "release"
+        or first["mode"] != "build"
+        or first["platform"] is not None
+    ):
+        raise NoticeError("gateway unit graph must describe the native gateway release binary")
+    pending, visited, selected = list(graph["roots"]), set(), set()
+    while pending:
+        index = pending.pop()
+        current = unit(index)
+        if index in visited:
+            continue
+        visited.add(index)
+        if current["mode"] not in ("build", "run-custom-build"):
+            raise NoticeError("gateway unit graph contains a non-build unit")
+        package = packages.get(current["pkg_id"])
+        if package is None:
+            raise NoticeError("gateway unit graph names a package missing from Cargo metadata")
+        if str(package.get("source", "")).startswith("registry+"):
+            selected.add(package["id"])
+        elif not (
+            package.get("source") is None
+            and package["id"] in metadata["workspace_members"]
+            and Path(package["manifest_path"]).resolve().is_relative_to(root.resolve())
+        ):
+            raise NoticeError("gateway build contains an unsupported non-registry package")
+        pending.extend(dependency["index"] for dependency in current["dependencies"])
+    if len(visited) != len(units) or not selected:
+        raise NoticeError("gateway unit graph has unrelated units or no registry packages")
+    crates = {crate["package"]["id"]: crate for crate in report["crates"]}
+    if len(crates) != len(report["crates"]) or not selected <= crates.keys():
+        raise NoticeError("gateway notice report has duplicate IDs or omits a gateway build crate")
+    for identity in selected:
+        if any(
+            crates[identity]["package"].get(key) != packages[identity].get(key)
+            for key in ("name", "version", "source")
+        ):
+            raise NoticeError("gateway notice report package identity differs from Cargo metadata")
+    licences = []
+    for licence in report["licenses"]:
+        users = [used for used in licence["used_by"] if used["crate"]["id"] in selected]
+        if users:
+            licences.append({**licence, "used_by": users})
+    return {"crates": [crates[identity] for identity in sorted(selected)], "licenses": licences}
+
+
 def render_report(lock: str, lock_digest: str, report: dict) -> tuple[list[str], dict]:
     crates = sorted(report["crates"], key=lambda crate: crate["package"]["id"])
     lines = [
@@ -846,6 +928,52 @@ def assemble(root: Path, reports: dict[str, dict], sysroot: Path) -> tuple[str, 
     return text, json.dumps(index, indent=2, sort_keys=True) + "\n"
 
 
+def assemble_gateway(
+    root: Path, reports: dict[str, dict], sysroot: Path, metadata: dict, graph: dict
+) -> tuple[str, str]:
+    """Scope the licensed workspace report to the gateway, retaining shared Rust notices."""
+    errors = offline_errors(root)
+    if sorted(reports) != [HOST_LOCK]:
+        errors.append("gateway scope requires exactly the Cargo.lock report")
+    if errors:
+        raise NoticeError("\n".join(errors))
+    manifest = load_toml(root, MANIFEST)
+    errors = rust_src_errors(manifest, sysroot)
+    errors += check_report(reports[HOST_LOCK], HOST_LOCK)
+    errors += check_report_graph(reports[HOST_LOCK], lock_packages(root / HOST_LOCK), HOST_LOCK)
+    if errors:
+        raise NoticeError("\n".join(errors))
+    report = gateway_report(root, reports[HOST_LOCK], metadata, graph)
+    errors = check_report(report, "piglor-gateway")
+    if errors:
+        raise NoticeError("\n".join(errors))
+    lines = [
+        "PiglorOS third-party notices",
+        "",
+        "This bundle covers the Cargo registry packages in the locked release build",
+        "of piglor-gateway (x86_64-unknown-linux-gnu), including build dependencies.",
+        "Shared Rust runtime source notices are retained from the pinned manifest.",
+        "Other workspace binaries, guest graphs and fixture components are excluded.",
+        "PiglorOS's own crates are MIT-licensed and not listed.",
+        "",
+    ]
+    graph_lines, graph_index = render_report(
+        "Cargo.lock: piglor-gateway release, x86_64-unknown-linux-gnu",
+        sha256((root / HOST_LOCK).read_bytes()),
+        report,
+    )
+    rust_id = manifest["rust_std"]["component"]
+    (rust,) = (component for component in manifest["component"] if component["id"] == rust_id)
+    shared_rust = {**rust, "name": f"Rust {rust['tag']} shared runtime source notices"}
+    component_lines, components = render_components(
+        {"component": [shared_rust]}, root / NOTICES_DIR
+    )
+    index = {"schema": 1, "graphs": [graph_index], "components": components, "fixtures": {}}
+    return "\n".join([*lines, *graph_lines, "", *component_lines]) + "\n", (
+        json.dumps(index, indent=2, sort_keys=True) + "\n"
+    )
+
+
 # ── Command line ─────────────────────────────────────────────────────────────
 
 
@@ -863,6 +991,9 @@ def main(argv: list[str] | None = None, root: Path = ROOT) -> int:
     commands.add_parser("verify-upstream")
     assemble_parser = commands.add_parser("assemble")
     assemble_parser.add_argument("--graph", action="append", type=parse_graph, default=[])
+    assemble_parser.add_argument("--scope", choices=("workspace", "gateway"), default="workspace")
+    assemble_parser.add_argument("--cargo-metadata", type=Path)
+    assemble_parser.add_argument("--unit-graph", type=Path)
     assemble_parser.add_argument("--sysroot", type=Path, required=True)
     assemble_parser.add_argument("--output", type=Path, required=True)
     std_parser = commands.add_parser("rust-std-report")
@@ -880,12 +1011,27 @@ def main(argv: list[str] | None = None, root: Path = ROOT) -> int:
         elif args.command == "rust-std-report":
             errors = run_rust_std_report(root, args.sysroot, args.output)
         else:
+            if args.scope == "gateway" and (
+                args.cargo_metadata is None or args.unit_graph is None
+            ):
+                raise NoticeError("gateway scope requires --cargo-metadata and --unit-graph")
+            if args.scope == "workspace" and (
+                args.cargo_metadata is not None or args.unit_graph is not None
+            ):
+                raise NoticeError("workspace scope does not accept gateway graph inputs")
             reports = {}
             for lock, path in args.graph:
                 if lock in reports:
                     raise NoticeError(f"cargo-about report for {lock} given twice")
                 reports[lock] = json.loads(path.read_text(encoding="utf-8"))
-            text, index = assemble(root, reports, args.sysroot)
+            if args.scope == "gateway":
+                text, index = assemble_gateway(
+                    root, reports, args.sysroot,
+                    json.loads(args.cargo_metadata.read_text(encoding="utf-8")),
+                    json.loads(args.unit_graph.read_text(encoding="utf-8")),
+                )
+            else:
+                text, index = assemble(root, reports, args.sysroot)
             args.output.mkdir(parents=True, exist_ok=True)
             (args.output / TEXT_NAME).write_text(text, encoding="utf-8")
             (args.output / INDEX_NAME).write_text(index, encoding="utf-8")

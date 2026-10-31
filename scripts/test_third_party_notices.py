@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import hashlib
 import io
 import json
 import shutil
@@ -28,6 +29,13 @@ PROBE = "plugins/community/examples/compatibility-prototype/probe-guest/Cargo.lo
 REUSABLE = ROOT / ".github/workflows/third-party-notices.yml"
 CI = ROOT / ".github/workflows/ci.yml"
 TAKI = "taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29"
+# Complete reviewed parsed programs; changes require review of the executable paths.
+NOTICE_PROGRAM_SHA256 = {
+    "Validate the requested notice scope": "b26c9526bcd9f8a7add40473dd18cc1dc8341f18f4049d76e7ac3fe25f957d15",
+    "Check the committed notice texts against their upstream commits": "5d7c90b14de34db75dde33174466abbb0eee349c14ec8ba421e3a387323810e9",
+    "Generate the cargo-about reports from the locked graphs": "0209a36a0b9c89548aebcf05628ae635dd1f13b9e63fc614a26312a452eb4d22",
+    "Assemble the notice bundle": "5d2933f5df2d39e75fa99055e8da45a474525c239ae68df542c77396d0390e7c",
+}
 REGISTRY = "registry+https://github.com/rust-lang/crates.io-index"
 # A stand-in for the toolchain's rust-src library/Cargo.lock and std manifest.
 STD_LOCK = f"""version = 4
@@ -102,6 +110,35 @@ def reports() -> dict[str, dict]:
         PROBE: report("blake3", lock=PROBE),
         notices.RUST_STD: report("dlmalloc", "rustc-demangle", lock="std"),
     }
+
+
+def gateway_inputs(root: Path) -> tuple[dict, dict]:
+    """A build graph with a shared dependency and an unrelated metadata package."""
+    crates = report("anyhow", "memchr", "wasmtime", lock=notices.HOST_LOCK)["crates"]
+    local = [
+        {"id": "gateway", "name": "piglor-gateway", "version": "0.1.0", "source": None,
+         "manifest_path": str(root / notices.GATEWAY_MANIFEST)},
+        {"id": "core", "name": "pos-core", "version": "0.1.0", "source": None,
+         "manifest_path": str(root / "crates/pos-core/Cargo.toml")},
+    ]
+    metadata = {
+        "version": 1,
+        "workspace_root": str(root),
+        "workspace_members": ["gateway", "core"],
+        "packages": [*local, *(crate["package"] for crate in crates)],
+        "resolve": {"root": "gateway"},
+    }
+    anyhow, memchr = (crate["package"]["id"] for crate in crates[:2])
+    units = [
+        {"pkg_id": "gateway", "target": {"name": "piglor-gateway", "kind": ["bin"],
+         "src_path": str(root / "apps/piglor-gateway/src/main.rs")},
+         "profile": {"name": "release"}, "platform": None, "mode": "build",
+         "dependencies": [{"index": 1}, {"index": 2}]},
+        {"pkg_id": anyhow, "mode": "build", "dependencies": []},
+        {"pkg_id": "core", "mode": "run-custom-build", "dependencies": [{"index": 1}, {"index": 3}]},
+        {"pkg_id": memchr, "mode": "build", "dependencies": []},
+    ]
+    return metadata, {"version": 1, "roots": [0], "units": units}
 
 
 class Workspace:
@@ -902,6 +939,137 @@ class CommandLineTests(WorkspaceTest):
         self.assertIn("does not match its digest", stderr)
 
 
+class GatewayAssembleTests(WorkspaceTest):
+    def inputs(self) -> tuple[dict, dict, dict]:
+        metadata, units = gateway_inputs(self.workspace.root)
+        return {notices.HOST_LOCK: report("anyhow", "memchr", "wasmtime", lock=notices.HOST_LOCK)}, metadata, units
+
+    def assemble(self, reports: dict, metadata: dict, units: dict) -> tuple[str, str]:
+        return notices.assemble_gateway(
+            self.workspace.root, reports, self.workspace.sysroot, metadata, units
+        )
+
+    def test_exact_build_crates_and_shared_runtime_notices_are_deterministic(self) -> None:
+        inputs = self.inputs()
+        text, index = self.assemble(*inputs)
+        self.assertEqual((text, index), self.assemble(*copy.deepcopy(inputs)))
+        for expected in ("MIT text of anyhow", "MIT text of memchr", "Rust 1.97.1 shared runtime source notices"):
+            self.assertIn(expected, text)
+        for excluded in ("MIT text of wasmtime", "Cargo graph: rust-std", "Component: wasi-libc", "Fixtures in", "Component: wit-bindgen"):
+            self.assertNotIn(excluded, text)
+        parsed = json.loads(index)
+        self.assertEqual(parsed["schema"], 1)
+        self.assertEqual(len(parsed["graphs"]), 1)
+        self.assertEqual([c["name"] for c in parsed["graphs"][0]["crates"]], ["anyhow", "memchr"])
+        self.assertEqual([component["id"] for component in parsed["components"]], ["rust"])
+        self.assertEqual(parsed["fixtures"], {})
+        self.assertEqual(parsed["graphs"][0]["lockfile_sha256"], notices.sha256(self.workspace.path(notices.HOST_LOCK).read_bytes()))
+
+    def test_missing_reachable_crates_and_duplicate_report_ids_fail(self) -> None:
+        for mutation in (
+            lambda report: report["crates"].pop(1),
+            lambda report: report["crates"].append(copy.deepcopy(report["crates"][0])),
+        ):
+            graphs, metadata, units = self.inputs()
+            mutation(graphs[notices.HOST_LOCK])
+            with self.assertRaisesRegex(notices.NoticeError, "omits a gateway build crate"):
+                self.assemble(graphs, metadata, units)
+
+    def test_licence_and_locked_identity_checks_remain_blocking(self) -> None:
+        for field, value, message in (
+            ("license", "Unknown", "unknown licence"),
+            ("text", "", "empty text"),
+            ("version", "0.0.0", "not a registry package"),
+        ):
+            graphs, metadata, units = self.inputs()
+            source = graphs[notices.HOST_LOCK]
+            if field == "text":
+                source["licenses"][0][field] = value
+            elif field == "version":
+                source["crates"][0]["package"][field] = value
+            else:
+                source["crates"][0][field] = value
+            with self.subTest(field=field), self.assertRaisesRegex(notices.NoticeError, message):
+                self.assemble(graphs, metadata, units)
+
+    def test_package_id_cannot_name_a_different_locked_package(self) -> None:
+        graphs, metadata, units = self.inputs()
+        crate = graphs[notices.HOST_LOCK]["crates"][0]["package"]
+        other = graphs[notices.HOST_LOCK]["crates"][2]["package"]
+        crate.update({key: other[key] for key in ("name", "version")})
+        with self.assertRaisesRegex(notices.NoticeError, "identity differs"):
+            self.assemble(graphs, metadata, units)
+
+    def test_guest_graphs_and_unpinned_runtime_sources_fail(self) -> None:
+        graphs, metadata, units = self.inputs()
+        graphs[GUEST] = report("wit-bindgen", lock=GUEST)
+        with self.assertRaisesRegex(notices.NoticeError, "exactly the Cargo.lock report"):
+            self.assemble(graphs, metadata, units)
+        del graphs[GUEST]
+        (self.workspace.sysroot / notices.RUST_SRC / "library/std/Cargo.toml").write_text("changed")
+        with self.assertRaisesRegex(notices.NoticeError, "differs from the pinned Rust tag"):
+            self.assemble(graphs, metadata, units)
+
+    def test_wrong_graph_source_root_profile_or_units_fail(self) -> None:
+        mutations = (
+            lambda m, g: m.update(version=2),
+            lambda m, g: m.update(version=True),
+            lambda m, g: g.update(version=2),
+            lambda m, g: g.update(version=1.0),
+            lambda m, g: m["packages"].append(copy.deepcopy(m["packages"][0])),
+            lambda m, g: m.update(workspace_root=str(self.workspace.root.parent)),
+            lambda m, g: m["packages"][0].update(name="another-binary"),
+            lambda m, g: m["packages"][0].update(manifest_path=str(self.workspace.root / "other/Cargo.toml")),
+            lambda m, g: g.update(roots=[]),
+            lambda m, g: g.update(roots=[0, 1]),
+            lambda m, g: g.update(roots=[-1]),
+            lambda m, g: g.update(roots=[True]),
+            lambda m, g: g["units"][0].update(pkg_id="core"),
+            lambda m, g: g["units"][0].update(mode="test"),
+            lambda m, g: g["units"][0].update(platform="wasm32-unknown-unknown"),
+            lambda m, g: g["units"][0]["target"].update(name="other"),
+            lambda m, g: g["units"][0]["target"].update(kind=["lib"]),
+            lambda m, g: g["units"][0]["target"].update(src_path=str(self.workspace.root / "other/main.rs")),
+            lambda m, g: g["units"][0]["profile"].update(name="dev"),
+            lambda m, g: g["units"][0]["dependencies"][0].update(index=-1),
+            lambda m, g: g["units"][0]["dependencies"][0].update(index=99),
+            lambda m, g: g["units"][1].update(mode="check"),
+            lambda m, g: g["units"][1].update(pkg_id="unknown"),
+            lambda m, g: m["packages"][2].update(source="git+https://example.invalid/crate"),
+            lambda m, g: m["workspace_members"].remove("core"),
+            lambda m, g: m["packages"][1].update(manifest_path="/outside/Cargo.toml"),
+            lambda m, g: g["units"].append(copy.deepcopy(g["units"][1])),
+        )
+        for number, mutate in enumerate(mutations):
+            graphs, metadata, units = self.inputs()
+            mutate(metadata, units)
+            with self.subTest(number=number), self.assertRaises(notices.NoticeError):
+                self.assemble(graphs, metadata, units)
+
+    def test_public_gateway_command_requires_both_witnesses_and_writes_exact_scope(self) -> None:
+        graphs, metadata, units = self.inputs()
+        files = {"report.json": graphs[notices.HOST_LOCK], "metadata.json": metadata, "units.json": units}
+        for name, value in files.items():
+            self.workspace.path(name).write_text(json.dumps(value))
+        output = self.workspace.path("gateway-output")
+        args = ["assemble", "--scope", "gateway", "--graph", f"Cargo.lock={self.workspace.path('report.json')}",
+                "--sysroot", str(self.workspace.sysroot), "--output", str(output)]
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            self.assertEqual(notices.main(args, root=self.workspace.root), 1)
+        self.assertIn("requires --cargo-metadata and --unit-graph", stderr.getvalue())
+        self.assertFalse(output.exists())
+        args += ["--cargo-metadata", str(self.workspace.path("metadata.json")), "--unit-graph", str(self.workspace.path("units.json"))]
+        self.assertEqual(notices.main(args, root=self.workspace.root), 0)
+        text = (output / notices.TEXT_NAME).read_text()
+        self.assertIn("MIT text of memchr", text)
+        self.assertNotIn("MIT text of wasmtime", text)
+        self.assertEqual(json.loads((output / notices.INDEX_NAME).read_text())["fixtures"], {})
+        args[args.index("gateway")] = "workspace"
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(notices.main(args, root=self.workspace.root), 1)
+
+
 class WorkflowContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -909,10 +1077,35 @@ class WorkflowContractTests(unittest.TestCase):
         cls.ci = yaml.safe_load(CI.read_text(encoding="utf-8"))
 
     def test_generator_is_a_reusable_workflow_only(self) -> None:
+        self.assert_scope_contract(self.reusable)
+
+    def assert_scope_contract(self, workflow: dict) -> None:
         # PyYAML 1.1 reads the bare `on` key as True.
-        triggers = self.reusable.get("on", self.reusable.get(True))
-        self.assertEqual(triggers, {"workflow_call": None})
-        self.assertEqual(self.reusable["permissions"], {"contents": "read"})
+        trigger_key = "on" if "on" in workflow else True
+        self.assertEqual(set(workflow), {"name", trigger_key, "permissions", "jobs"})
+        self.assertEqual(workflow[trigger_key], {"workflow_call": {"inputs": {"scope": {
+            "description": "workspace or gateway notice bundle", "type": "string",
+            "required": False, "default": "workspace",
+        }}}})
+        self.assertEqual(workflow["permissions"], {"contents": "read"})
+        self.assertEqual(set(workflow["jobs"]), {"notices"})
+        job = workflow["jobs"]["notices"]
+        self.assertEqual(set(job), {"name", "runs-on", "timeout-minutes", "env", "steps"})
+        self.assertEqual(job["env"], {"NOTICE_SCOPE": "${{ inputs.scope }}"})
+        steps = job["steps"]
+        self.assertEqual(steps[0], {"uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"})
+        for step in steps:
+            self.assertNotIn("if", step)
+            self.assertNotIn("continue-on-error", step)
+            self.assertNotIn("shell", step)
+            self.assertNotIn("working-directory", step)
+        programs = [step for step in steps if "run" in step]
+        self.assertEqual([step["name"] for step in programs], list(NOTICE_PROGRAM_SHA256))
+        for step in programs:
+            self.assertEqual(hashlib.sha256(step["run"].encode()).hexdigest(), NOTICE_PROGRAM_SHA256[step["name"]])
+        self.assertNotIn("env", programs[0])
+        self.assertEqual(programs[2]["env"], {"REPORTS": "${{ runner.temp }}/cargo-about"})
+        self.assertEqual(programs[3]["env"], {"REPORTS": "${{ runner.temp }}/cargo-about", "BUNDLE": "${{ runner.temp }}/third-party-notices"})
 
     def test_generator_pins_cargo_about_and_runs_every_stage(self) -> None:
         steps = self.reusable["jobs"]["notices"]["steps"]
@@ -935,7 +1128,7 @@ class WorkflowContractTests(unittest.TestCase):
             '--sysroot "$(rustc --print sysroot)"',
         ):
             self.assertIn(fragment, script)
-        toolchain = steps[1]["with"]
+        (toolchain,) = (step["with"] for step in steps if step.get("uses", "").startswith("dtolnay/"))
         self.assertEqual(
             (toolchain["toolchain"], toolchain["components"], toolchain["targets"]),
             ("1.97.1", "rust-src", "wasm32-unknown-unknown"),
@@ -943,6 +1136,38 @@ class WorkflowContractTests(unittest.TestCase):
         upload = steps[-1]
         self.assertEqual(upload["with"]["name"], "third-party-notices")
         self.assertEqual(upload["with"]["if-no-files-found"], "error")
+
+    def test_gateway_scope_rejects_program_bypass_or_producer_drift(self) -> None:
+        def steps(workflow):
+            return workflow["jobs"]["notices"]["steps"]
+
+        def program(workflow, name):
+            return next(step for step in steps(workflow) if step.get("name") == name)
+
+        generate = "Generate the cargo-about reports from the locked graphs"
+        assemble = "Assemble the notice bundle"
+        mutations = (
+            lambda w: w[True]["workflow_call"]["inputs"]["scope"].update(default="gateway"),
+            lambda w: w["permissions"].update(contents="write"),
+            lambda w: w.update(defaults={"run": {"shell": "bash -c 'exit 0'"}}),
+            lambda w: w["jobs"]["notices"].update({"continue-on-error": True}),
+            lambda w: steps(w)[0].update({"with": {"ref": "main"}}),
+            lambda w: program(w, generate).update({"if": "false"}),
+            lambda w: program(w, assemble).update({"continue-on-error": True}),
+            lambda w: program(w, generate).update(run="echo fabricated graph"),
+            lambda w: program(w, generate).update(run=program(w, generate)["run"].replace("--release --bin piglor-gateway", "--all-features --bin piglor-gateway")),
+            lambda w: program(w, assemble).update(run=program(w, assemble)["run"].replace('"${scope_args[@]}"', '"--scope=workspace"')),
+            lambda w: steps(w).reverse(),
+        )
+        for number, mutate in enumerate(mutations):
+            workflow = copy.deepcopy(self.reusable)
+            mutate(workflow)
+            with self.subTest(number=number), self.assertRaises(AssertionError):
+                self.assert_scope_contract(workflow)
+
+    def test_unit_graph_build_selection_matches_the_gateway_image(self) -> None:
+        dockerfile = (ROOT / "Dockerfile").read_text()
+        self.assertIn("cargo build --locked --release --bin piglor-gateway", dockerfile)
 
     def test_ci_calls_the_generator_and_requires_it(self) -> None:
         jobs = self.ci["jobs"]
