@@ -65,6 +65,11 @@ impl Eq for ExecutionOwnership {}
 
 #[cfg(target_os = "linux")]
 impl ExecutionOwnership {
+    /// Close this owner's start permission without releasing admission resources.
+    fn close(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+
     fn claim(&self) -> Result<(), ExecuteError> {
         self.0
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)

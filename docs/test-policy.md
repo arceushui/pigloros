@@ -96,8 +96,9 @@ the report.
 The internal-test allowlist includes the `#[cfg(test)]` imported Fork Replay,
 cumulative-budget, public-consumer lifecycle (including native begin refusal),
 native Local replay, and protected-interval acquisition/cleanup companions.
-It also includes the sandbox execution-ownership and provider-barrier internal
-tests, whose fixture control flow is separate from the production score.
+It also includes the sandbox execution-ownership (including owner-abandonment)
+and provider-barrier internal tests, whose fixture control flow is separate from
+the production score.
 Keep these fixtures in their private module trees; moving a private
 unit module beneath `tests/**` does not turn it into a Cargo integration target.
 Each companion has an exact literal path in both baseline and analysis commands,
