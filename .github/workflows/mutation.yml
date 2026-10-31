@@ -31,7 +31,7 @@ jobs:
             expected: MissedMutant
             exit_status: 2
           - case: after
-            ref: fbf7fa397ce4beb56a98d8d7b3d511bbb548e267
+            ref: 27fa7cf05fcc2a469e8c09723b70d99d1bec62f1
             expected: CaughtMutant
             exit_status: 0
     steps:
