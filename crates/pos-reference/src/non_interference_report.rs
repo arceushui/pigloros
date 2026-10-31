@@ -398,6 +398,25 @@ pub fn verify_non_interference_report_v1(
         .all(|outcome| outcome.modes.iter().all(|mode| mode.equal)))
 }
 
+/// Independently verify one signed NIA1 execution artifact and return its
+/// content address (the digest an NIR1 mode reference names).
+///
+/// This is the per-case acceptance the ADR-062 Revision 8 slice N0 harness
+/// publication is checked against (owner answer Q9): the same bounded
+/// canonical decode, profile, coordinate, trusted-executor and signature
+/// checks the complete report applies to each of its 192 artifacts. Accepting
+/// one artifact is not a report and makes no pass/fail claim for its row.
+///
+/// # Errors
+/// Rejects oversized, noncanonical, malformed, untrusted or incorrectly
+/// signed artifacts.
+pub fn verify_non_interference_execution_artifact_v1(
+    bytes: &[u8],
+    trusted_executor_public_keys: &[[u8; 32]],
+) -> Result<[u8; 32], IndependentNonInterferenceReportErrorV1> {
+    decode_execution_artifact(bytes, trusted_executor_public_keys).map(|(digest, _)| digest)
+}
+
 fn validate_shape(report: &Report) -> Result<(), IndependentNonInterferenceReportErrorV1> {
     if report.magic != "NIR1" || report.version != 1 || report.outcomes.len() != 48 {
         return Err(IndependentNonInterferenceReportErrorV1::InvalidShape);
