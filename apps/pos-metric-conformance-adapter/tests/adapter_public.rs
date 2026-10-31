@@ -557,11 +557,11 @@ fn a_failure_family_with_a_subcase_that_is_not_as_expected_is_subcase_mismatch()
     let rewrites: [fn(&mut Value); 3] = [
         // Another first coordinate, another code, another name.
         |payload: &mut Value| {
-            payload["subcases"][0]["expect"]["first_coordinate"] = json!("records/0/1")
+            payload["subcases"][0]["expect"]["first_coordinate"] = json!("records/0/1");
         },
         |payload: &mut Value| payload["subcases"][0]["expect"]["code"] = json!(5),
         |payload: &mut Value| {
-            payload["subcases"][0]["expect"]["error"] = json!("InvalidProbability")
+            payload["subcases"][0]["expect"]["error"] = json!("InvalidProbability");
         },
     ];
     for rewrite in rewrites {
@@ -844,7 +844,7 @@ fn member_json(record: &str, member: &[u8]) -> Value {
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn gate_subcase(id: &str, member: Value, stimulus: Value) -> Value {
+fn gate_subcase(id: &str, member: &Value, stimulus: &Value) -> Value {
     json!({
         "id": id,
         "title": "a gate",
@@ -879,25 +879,25 @@ fn outcome_subcases(budget: u64, pos1: &[u8], empty_patterns: &[u8]) -> TestResu
         subcase(FixtureFamily::Positive, "pos.1")?,
         gate_subcase(
             "g.1",
-            input.clone(),
-            json!({"kind": "capability-request", "capability": "mutate-subject"}),
+            &input,
+            &json!({"kind": "capability-request", "capability": "mutate-subject"}),
         ),
         gate_subcase(
             "g.2",
-            input.clone(),
-            json!({"kind": "capability-request", "capability": CAPABILITY_ID}),
+            &input,
+            &json!({"kind": "capability-request", "capability": CAPABILITY_ID}),
         ),
         gate_subcase(
             "g.3",
-            input.clone(),
-            json!({"kind": "network-request", "execution_profile": "deterministic-air-gapped-v1"}),
+            &input,
+            &json!({"kind": "network-request", "execution_profile": "deterministic-air-gapped-v1"}),
         ),
-        gate_subcase("g.4", input.clone(), steps(budget + 1)),
-        gate_subcase("g.5", input.clone(), steps(budget)),
-        gate_subcase("g.6", Value::Null, contract("1.0.0")),
-        gate_subcase("g.7", Value::Null, contract(CONTRACT_VERSION)),
-        gate_subcase("g.8", Value::Null, oversized(1)),
-        gate_subcase("g.9", Value::Null, oversized(MEMBER_CEILING + 1)),
+        gate_subcase("g.4", &input, &steps(budget + 1)),
+        gate_subcase("g.5", &input, &steps(budget)),
+        gate_subcase("g.6", &Value::Null, &contract("1.0.0")),
+        gate_subcase("g.7", &Value::Null, &contract(CONTRACT_VERSION)),
+        gate_subcase("g.8", &Value::Null, &oversized(1)),
+        gate_subcase("g.9", &Value::Null, &oversized(MEMBER_CEILING + 1)),
         json!({"id": "g.10", "title": "a check", "member": null,
                "expect": {"kind": "generator-check"}}),
         json!({"id": "g.11", "title": "a foreign result", "member": input,
