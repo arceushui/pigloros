@@ -84,7 +84,7 @@
     }
   ],
   "authority_inventory": "expected-authority/inventory.json",
-  "authority_inventory_sha256_digest": "7ced8a78a721e17b15ebce91f6fe583382f5eb31fd3c832db407819806470770",
+  "authority_inventory_sha256_digest": "29cd583a6ffd840b4faac4240fe66d7028eab5cc4f7057dc2ea752d3caaab454",
   "adr_059_execution_matrix": "matrix/execution-matrix.json",
   "adr_059_execution_matrix_blake3_digest": "3eee92bb8eaeb5e2bc8f0eff5b33e36532caa278f2b4139bbd50250da236a660",
   "adr_059_execution_matrix_status": "Draft",

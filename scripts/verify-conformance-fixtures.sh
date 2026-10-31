@@ -279,14 +279,40 @@ jq -e '
       "expected_result_path", "fixture_bytes_digest", "fixture_bytes_path",
       "fixture_id", "materialization_status", "profiles"
     ] | sort) and
-    (.fixture_bytes_path == null) and (.expected_result_path == null) and
-    (.fixture_bytes_digest == null) and (.expected_result_digest == null) and
-    .materialization_status == "pending"
+    (.fixture_bytes_path | type == "string" and
+      test("^inputs/replay-conformance/[a-z-]+[.]json$")) and
+    (.expected_result_path | type == "string" and
+      test("^oracles/replay-conformance/[a-z-]+[.]json$")) and
+    ((.fixture_bytes_path | ltrimstr("inputs/")) == (.expected_result_path | ltrimstr("oracles/"))) and
+    (.fixture_bytes_digest | type == "string" and test("^[0-9a-f]{64}$")) and
+    (.expected_result_digest | type == "string" and test("^[0-9a-f]{64}$")) and
+    .materialization_status == "materialized"
   )
 ' "${authority_path}" >/dev/null || {
   echo "invalid #172 expected-authority inventory lifecycle or entries" >&2
   exit 1
 }
+# ADR-062 Revision 8 slice R4 (#1222): every W8H1 entry is materialized, never executed. Its
+# fixture bytes and expected result are the payload and oracle of one replay-conformance family;
+# both digests are the BLAKE3 of those files, and the payload and oracle carry a sub-case with the
+# entry's id.
+while IFS=$'\t' read -r fixture_id fixture_bytes_path fixture_bytes_digest expected_result_path expected_result_digest; do
+  for pair in "${fixture_bytes_path}:${fixture_bytes_digest}" "${expected_result_path}:${expected_result_digest}"; do
+    member="${fixture_root}/${pair%%:*}"
+    [[ -s "${member}" && "$(b3sum "${member}" | awk '{print $1}')" == "${pair##*:}" ]] || {
+      echo "W8H1 entry ${fixture_id} does not bind ${pair%%:*}" >&2
+      exit 1
+    }
+  done
+  jq -e --arg fixture_id "${fixture_id}" \
+    'any(.subcases[]; .fixture_id == $fixture_id)' "${fixture_root}/${fixture_bytes_path}" >/dev/null &&
+    jq -e --arg fixture_id "${fixture_id}" \
+      'any((.output.subcases // .subcases)[]; .fixture_id == $fixture_id)' \
+      "${fixture_root}/${expected_result_path}" >/dev/null || {
+    echo "W8H1 entry ${fixture_id} has no sub-case in ${fixture_bytes_path}" >&2
+    exit 1
+  }
+done < <(jq -r '.entries[] | [.fixture_id, .fixture_bytes_path, .fixture_bytes_digest, .expected_result_path, .expected_result_digest] | @tsv' "${authority_path}")
 
 jq -e '
   (keys | sort) == ([
