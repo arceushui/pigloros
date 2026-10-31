@@ -781,7 +781,7 @@ async fn a_barrier_rejects_a_different_valid_attempt_before_handoff_or_identity_
     // Even a reused attempt ID cannot substitute another admitted authority.
     let mut changed = authority();
     changed.policy_epoch += 1;
-    other = AdmittedAttempt::for_test(ATTEMPT, changed, SandboxExecutionMode::AirGapped)?;
+    other = attempt.clone().with_authority(changed);
     assert!(matches!(
         barrier.prepare(&other),
         Err(BarrierError::AttemptMismatch)
@@ -854,28 +854,35 @@ async fn a_substituted_running_launcher_cannot_self_assert_the_admitted_digest()
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_recheck_for_another_admitted_context_cannot_authorize_release() -> TestResult {
-    let mut changed = authority();
-    changed.policy_epoch += 1;
-    let alternatives = [
-        AdmittedAttempt::for_test(
-            crate::test_fixtures::OTHER,
-            authority(),
-            SandboxExecutionMode::AirGapped,
-        )?,
-        AdmittedAttempt::for_test(ATTEMPT, changed, SandboxExecutionMode::AirGapped)?,
-    ];
-    for other in alternatives {
-        assert_foreign_root_refuses_release(&other).await?;
+    for different_owner in [true, false] {
+        assert_foreign_root_refuses_release(|attempt| {
+            if different_owner {
+                AdmittedAttempt::for_test(
+                    crate::test_fixtures::OTHER,
+                    authority(),
+                    SandboxExecutionMode::AirGapped,
+                )
+            } else {
+                let mut changed = attempt.authority();
+                changed.policy_epoch += 1;
+                Ok(attempt.clone().with_authority(changed))
+            }
+        })
+        .await?;
     }
     Ok(())
 }
 
-async fn assert_foreign_root_refuses_release(other: &AdmittedAttempt) -> TestResult {
+async fn assert_foreign_root_refuses_release(
+    substitute: impl FnOnce(&AdmittedAttempt) -> TestResult<AdmittedAttempt>,
+) -> TestResult {
     let (mut barrier, attempt) =
         barrier_for(SandboxExecutionMode::AirGapped, Refusal::None, own_pid())?;
-    // The barrier, job and Ready all agree on A. Only the otherwise valid
-    // recheck belongs to B, including the same-ID/different-authority case.
-    barrier.check.root = root_check(Refusal::None, other);
+    // The barrier, job and Ready all agree. Same-owner substitutions vary only
+    // the named authority or policy fact; a different attempt has another owner.
+    assert!(crate::test_fixtures::checked_root(&attempt).matches_attempt(&attempt));
+    let other = substitute(&attempt)?;
+    barrier.check.root = root_check(Refusal::None, &other);
     let launcher = launcher(&mut barrier)?;
     assert!(matches!(
         barrier.release(&active(attempt, GENEROUS_MS)).await,
@@ -890,14 +897,18 @@ async fn assert_foreign_root_refuses_release(other: &AdmittedAttempt) -> TestRes
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn same_identity_roots_with_crossed_execution_policy_cannot_release() -> TestResult {
-    let same = AdmittedAttempt::for_test(ATTEMPT, authority(), SandboxExecutionMode::AirGapped)?;
-    let mut limits = crate::test_fixtures::execution_limits(5_000);
-    limits[9].value += 1;
-    for other in [
-        same.clone().with_limits(limits),
-        same.with_readback([0x79; 32]),
-    ] {
-        assert_foreign_root_refuses_release(&other).await?;
+    for vary_limits in [true, false] {
+        assert_foreign_root_refuses_release(|attempt| {
+            let other = if vary_limits {
+                let mut limits = crate::test_fixtures::execution_limits(5_000);
+                limits[9].value += 1;
+                attempt.clone().with_limits(limits)
+            } else {
+                attempt.clone().with_readback([0x79; 32])
+            };
+            Ok(other)
+        })
+        .await?;
     }
     Ok(())
 }

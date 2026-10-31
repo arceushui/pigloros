@@ -904,7 +904,7 @@ async fn an_unencodable_launch_never_reaches_the_recheck() -> TestResult {
 }
 
 async fn recheck_failure(
-    recheck: impl FnOnce() -> Result<CheckedRoot, ImageActivationError> + Send,
+    substitute: impl FnOnce(&AdmittedAttempt) -> Result<CheckedRoot, ImageActivationError>,
 ) -> TestResult<(Scenario, ExecuteFailure)> {
     let mut scenario = Scenario::new()?;
     let job = scenario.job(
@@ -913,7 +913,9 @@ async fn recheck_failure(
         ModePlan::AirGapped,
         GENEROUS_WATCHDOG_MS,
     )?;
-    let outcome = scenario.run_on(&LoopbackNetwork, job, recheck).await;
+    assert!(crate::test_fixtures::checked_root(&job.attempt).matches_attempt(&job.attempt));
+    let root = substitute(&job.attempt);
+    let outcome = scenario.run_on(&LoopbackNetwork, job, || root).await;
     let failed = failure(outcome)?;
     Ok((scenario, failed))
 }
@@ -921,7 +923,7 @@ async fn recheck_failure(
 #[tokio::test]
 async fn a_failed_root_recheck_never_starts_the_unit() -> TestResult {
     let (scenario, failed) =
-        recheck_failure(|| Err(ImageActivationError::EvidenceMismatch)).await?;
+        recheck_failure(|_| Err(ImageActivationError::EvidenceMismatch)).await?;
     assert!(matches!(
         failed.error,
         ExecuteError::Recheck(ImageActivationError::EvidenceMismatch)
@@ -932,9 +934,10 @@ async fn a_failed_root_recheck_never_starts_the_unit() -> TestResult {
 }
 
 #[tokio::test]
-async fn a_root_of_another_attempt_never_starts_the_unit() -> TestResult {
+async fn a_root_of_another_attempt_owner_never_starts_the_unit() -> TestResult {
     let other = AdmittedAttempt::for_test(OTHER, authority(), SandboxExecutionMode::AirGapped)?;
-    let (scenario, failed) = recheck_failure(root_for(&Log::default(), &other)).await?;
+    let (scenario, failed) =
+        recheck_failure(|_| Ok(crate::test_fixtures::checked_root(&other))).await?;
     assert!(matches!(failed.error, ExecuteError::RootIdentity));
     assert_eq!(failed.unit, UnitState::NotStarted);
     assert!(!scenario.entries().iter().any(|entry| entry == "start"));
@@ -943,10 +946,13 @@ async fn a_root_of_another_attempt_never_starts_the_unit() -> TestResult {
 
 #[tokio::test]
 async fn a_recheck_with_the_same_attempt_id_but_different_authority_never_starts() -> TestResult {
-    let mut changed = authority();
-    changed.policy_epoch += 1;
-    let other = AdmittedAttempt::for_test(ATTEMPT, changed, SandboxExecutionMode::AirGapped)?;
-    let (scenario, failed) = recheck_failure(root_for(&Log::default(), &other)).await?;
+    let (scenario, failed) = recheck_failure(|attempt| {
+        let mut changed = attempt.authority();
+        changed.policy_epoch += 1;
+        let other = attempt.clone().with_authority(changed);
+        Ok(crate::test_fixtures::checked_root(&other))
+    })
+    .await?;
     assert!(matches!(failed.error, ExecuteError::RootIdentity));
     assert_eq!(failed.unit, UnitState::NotStarted);
     assert!(!scenario.entries().iter().any(|entry| entry == "start"));
@@ -976,15 +982,18 @@ async fn unenforceable_admitted_limits_fail_before_any_launch_side_effect() -> T
 
 #[tokio::test]
 async fn the_same_ids_and_authority_cannot_substitute_limits_or_readback_policy() -> TestResult {
-    let same = AdmittedAttempt::for_test(ATTEMPT, authority(), SandboxExecutionMode::AirGapped)?
-        .with_limits(crate::test_fixtures::execution_limits(GENEROUS_WATCHDOG_MS));
-    let mut limits = crate::test_fixtures::execution_limits(GENEROUS_WATCHDOG_MS);
-    limits[9].value += 1;
-    for other in [
-        same.clone().with_limits(limits),
-        same.with_readback([0x79; 32]),
-    ] {
-        let (scenario, failed) = recheck_failure(root_for(&Log::default(), &other)).await?;
+    for vary_limits in [true, false] {
+        let (scenario, failed) = recheck_failure(|attempt| {
+            let other = if vary_limits {
+                let mut limits = crate::test_fixtures::execution_limits(GENEROUS_WATCHDOG_MS);
+                limits[9].value += 1;
+                attempt.clone().with_limits(limits)
+            } else {
+                attempt.clone().with_readback([0x79; 32])
+            };
+            Ok(crate::test_fixtures::checked_root(&other))
+        })
+        .await?;
         assert!(matches!(failed.error, ExecuteError::RootIdentity));
         assert_eq!(failed.unit, UnitState::NotStarted);
         assert!(!scenario.entries().iter().any(|entry| entry == "start"));

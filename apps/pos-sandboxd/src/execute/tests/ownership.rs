@@ -119,14 +119,16 @@ fn simultaneous_execution_claims_have_exactly_one_owner() -> TestResult {
         GENEROUS_WATCHDOG_MS,
     )?;
     let attempt = original.attempt;
-    let start = std::sync::Barrier::new(2);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let (left_ready, right_peer) = std::sync::mpsc::channel();
+    let (right_ready, left_peer) = std::sync::mpsc::channel();
     let outcomes = std::thread::scope(|scope| {
-        let run = |mut scenario: Scenario, attempt: &AdmittedAttempt| {
+        let run = |mut scenario: Scenario, attempt: &AdmittedAttempt, ready, peer| {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_time()
                 .build()
                 .map_err(|error| error.to_string())?;
-            start.wait();
+            await_contender(ready, peer, deadline).map_err(|error| error.to_string())?;
             let outcome = runtime.block_on(scenario.run_on(
                 &LoopbackNetwork,
                 job(&scenario, attempt),
@@ -134,8 +136,8 @@ fn simultaneous_execution_claims_have_exactly_one_owner() -> TestResult {
             ));
             Ok::<_, String>((outcome, scenario.entries()))
         };
-        let left = scope.spawn(|| run(first, &attempt));
-        let right = scope.spawn(|| run(second, &attempt));
+        let left = scope.spawn(|| run(first, &attempt, left_ready, left_peer));
+        let right = scope.spawn(|| run(second, &attempt, right_ready, right_peer));
         [left.join(), right.join()]
     });
     let mut successes = 0;
@@ -155,6 +157,48 @@ fn simultaneous_execution_claims_have_exactly_one_owner() -> TestResult {
         }
     }
     assert_eq!((successes, refusals), (1, 1));
+    Ok(())
+}
+
+fn await_contender(
+    ready: std::sync::mpsc::Sender<()>,
+    peer: std::sync::mpsc::Receiver<()>,
+    deadline: Instant,
+) -> Result<(), std::sync::mpsc::RecvTimeoutError> {
+    ready
+        .send(())
+        .map_err(|_| std::sync::mpsc::RecvTimeoutError::Disconnected)?;
+    peer.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+}
+
+#[test]
+fn a_missing_or_unready_contender_cannot_hold_its_peer_forever() -> TestResult {
+    use std::sync::mpsc::{channel, RecvTimeoutError};
+
+    let (ready, observed) = channel();
+    let (missing, peer) = channel();
+    drop(missing);
+    assert_eq!(
+        await_contender(ready, peer, Instant::now() + Duration::from_secs(5)),
+        Err(RecvTimeoutError::Disconnected)
+    );
+    observed.try_recv()?;
+
+    let (ready, observed) = channel();
+    let (_unready, peer) = channel();
+    assert_eq!(
+        await_contender(ready, peer, Instant::now()),
+        Err(RecvTimeoutError::Timeout)
+    );
+    observed.try_recv()?;
+
+    let (ready, missing) = channel();
+    let (_unready, peer) = channel();
+    drop(missing);
+    assert_eq!(
+        await_contender(ready, peer, Instant::now() + Duration::from_secs(5)),
+        Err(RecvTimeoutError::Disconnected)
+    );
     Ok(())
 }
 

@@ -365,6 +365,13 @@ impl AdmittedAttempt {
         self
     }
 
+    /// Deliberately change only authority while retaining this test owner's identity.
+    #[cfg(all(test, unix))]
+    pub(crate) const fn with_authority(mut self, authority: AdmittedAuthority) -> Self {
+        self.authority = authority;
+        self
+    }
+
     /// The same attempt, with a launch policy that allows `capabilities`.
     #[cfg(all(test, unix))]
     pub(crate) fn allowing(mut self, capabilities: Vec<NetworkCapability>) -> Self {
