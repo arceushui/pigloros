@@ -730,3 +730,86 @@ fn sort_map_keys(value: Value) -> Value {
         other => other,
     }
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+    use ed25519_dalek::Signer;
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    /// One NIA1 signed with `secret`, encoded the way the slice N0 harness
+    /// publishes it.
+    fn signed_artifact(secret: &[u8; 32]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let signing = ed25519_dalek::SigningKey::from_bytes(secret);
+        let (fixture_id, surfaces, normalizations) = FIXTURES[6];
+        let profile = profile_digest(fixture_id, surfaces, normalizations);
+        let mut artifact = ExecutionArtifact {
+            magic: "NIA1".to_owned(),
+            version: 1,
+            fixture_id: fixture_id.to_owned(),
+            variant: Variant::Success,
+            mode: Mode::Local,
+            fixture_digest: [1; 32],
+            profile_digest: profile,
+            normalization_digest: domain_digest(
+                b"PiglorOS.NonInterference.Normalization.v1",
+                &profile,
+            ),
+            result_digest: [2; 32],
+            execution_provenance_digest: [3; 32],
+            equal: true,
+            divergence: None,
+            executor_public_key: signing.verifying_key().to_bytes(),
+            signature: Vec::new(),
+        };
+        let unsigned = encode(&UnsignedExecutionArtifact {
+            magic: artifact.magic.clone(),
+            version: artifact.version,
+            fixture_id: artifact.fixture_id.clone(),
+            variant: artifact.variant,
+            mode: artifact.mode,
+            fixture_digest: artifact.fixture_digest,
+            profile_digest: artifact.profile_digest,
+            normalization_digest: artifact.normalization_digest,
+            result_digest: artifact.result_digest,
+            execution_provenance_digest: artifact.execution_provenance_digest,
+            equal: artifact.equal,
+            divergence: None,
+            executor_public_key: artifact.executor_public_key,
+        })?;
+        artifact.signature = signing
+            .sign(&execution_artifact_signature_message(&unsigned))
+            .to_bytes()
+            .to_vec();
+        Ok(encode(&artifact)?)
+    }
+
+    #[test]
+    fn one_execution_artifact_is_verified_at_its_content_address() -> TestResult {
+        let secret = [7; 32];
+        let bytes = signed_artifact(&secret)?;
+        let executor = ed25519_dalek::SigningKey::from_bytes(&secret)
+            .verifying_key()
+            .to_bytes();
+        // The content address, derived here from its definition.
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"PiglorOS.NonInterference.ExecutionArtifact.v1\0");
+        hasher.update(&bytes);
+        let address = *hasher.finalize().as_bytes();
+        assert_eq!(
+            verify_non_interference_execution_artifact_v1(&bytes, &[executor]),
+            Ok(address)
+        );
+        assert_eq!(
+            verify_non_interference_execution_artifact_v1(&bytes, &[[9; 32]]),
+            Err(IndependentNonInterferenceReportErrorV1::InvalidShape)
+        );
+        let mut tampered = bytes;
+        let last = tampered.len() - 1;
+        tampered[last] ^= 1;
+        assert!(verify_non_interference_execution_artifact_v1(&tampered, &[executor]).is_err());
+        Ok(())
+    }
+}

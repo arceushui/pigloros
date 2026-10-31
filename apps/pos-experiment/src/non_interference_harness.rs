@@ -562,14 +562,16 @@ pub fn non_interference_publication_path_v1(
 /// Publish one executed case's canonical NIA1 at its content address below
 /// the `fixtures/conformance` root and return the path.
 ///
-/// Publication is immutable: an existing file is never rewritten. Publishing
-/// the same artifact again returns the same path; different bytes at the
-/// address are a [`NonInterferencePublicationErrorV1::Conflict`]. Only an
-/// executed case can be published; publication changes no inventory.
+/// Publication is immutable: an existing file is never rewritten. When the
+/// artifact cannot be written, the bytes already at its address decide:
+/// the same bytes are the same publication and return the same path,
+/// different bytes are a [`NonInterferencePublicationErrorV1::Conflict`].
+/// Only an executed case can be published; publication changes no
+/// inventory.
 ///
 /// # Errors
-/// Returns the I/O error kind when the directory or file cannot be written or
-/// read, or `Conflict`.
+/// Returns the write's I/O error kind when the artifact can be neither
+/// written nor read at its address, or `Conflict`.
 pub fn publish_non_interference_execution_v1(
     fixtures_root: &Path,
     execution: &NonInterferenceSignedExecutionV1,
@@ -586,19 +588,19 @@ pub fn publish_non_interference_execution_v1(
             file.write_all(&execution.bytes)
                 .and_then(|()| file.sync_all())
         });
-    match written {
-        Ok(()) => Ok(path),
-        Err(error) if error.kind() == ErrorKind::AlreadyExists => fs::read(&path)
-            .map_err(|error| NonInterferencePublicationErrorV1::Io(error.kind()))
-            .and_then(|existing| {
-                if existing == execution.bytes {
-                    Ok(path)
-                } else {
-                    Err(NonInterferencePublicationErrorV1::Conflict)
-                }
-            }),
-        Err(error) => Err(NonInterferencePublicationErrorV1::Io(error.kind())),
-    }
+    written
+        .or_else(|error| {
+            fs::read(&path)
+                .map_err(|_| NonInterferencePublicationErrorV1::Io(error.kind()))
+                .and_then(|existing| {
+                    if existing == execution.bytes {
+                        Ok(())
+                    } else {
+                        Err(NonInterferencePublicationErrorV1::Conflict)
+                    }
+                })
+        })
+        .map(|()| path)
 }
 
 /// Build and host-sign an NIR1 from exactly 192 NIA1 artifacts, one per
