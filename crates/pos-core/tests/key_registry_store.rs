@@ -757,8 +757,7 @@ fn public_registry_validation_rejects_duplicate_and_pending_material(
 }
 
 #[test]
-fn public_registry_traits_and_role_boundaries_are_exercised(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn every_role_code_and_purpose_is_closed() {
     let role_cases = [
         (0, KeyRoleV1::SubjectDataEncryption, false, true, false),
         (1, KeyRoleV1::SubjectAttributionSigning, true, false, false),
@@ -787,7 +786,11 @@ fn public_registry_traits_and_role_boundaries_are_exercised(
         KeyRoleV1::from_code(7),
         Err(pos_core::KeyRegistryErrorV1::InvalidRoleCode)
     );
+}
 
+#[test]
+fn public_registry_traits_and_role_boundaries_are_exercised(
+) -> Result<(), Box<dyn std::error::Error>> {
     let signing_identity = KeyIdentityV1::new("test-owner", KeyRoleV1::TimelineIntegritySigning, 1);
     let signing_material = Hash::from_bytes([21; 32]);
     let signing_public_key = PublicKey::from_bytes([22; 32]);
