@@ -148,7 +148,13 @@ mod tests {
     use crate::BundleContractErrorV1;
 
     fn token(prefix: &[u8], length: usize) -> Vec<u8> {
-        [b"x=".as_slice(), prefix, &vec![b'A'; length], b" tail"].concat()
+        [
+            b"x=".as_slice(),
+            prefix,
+            vec![b'A'; length].as_slice(),
+            b" tail".as_slice(),
+        ]
+        .concat()
     }
 
     #[test]
