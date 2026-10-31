@@ -5595,6 +5595,7 @@ name = "pos-experiment"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "ciborium",
  "pos-conformance",
  "pos-core",
  "pos-crypto",
@@ -5611,6 +5612,7 @@ dependencies = [
  "pos-time",
  "rusqlite",
  "serde",
+ "serde_bytes",
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",

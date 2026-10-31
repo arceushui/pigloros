@@ -54,6 +54,9 @@ TEST_ONLY_EXCLUSIONS = (
     "src/nested_imported_fork_replay_tests.rs",
     "src/nested_imported_fork_replay_tests/intermediate_privacy.rs",
     "src/ordinary_fork_lineage_tests.rs",
+    "src/execute/tests/ownership.rs",
+    "src/provider_barrier/tests.rs",
+    "src/execute/tests/ownership/abandonment.rs",
 )
 EXCLUSION_ARGS = "".join(f"--exclude '{path}' " for path in TEST_ONLY_EXCLUSIONS)
 GENERATE_BASELINE_COMMAND = (
