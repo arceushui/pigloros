@@ -916,6 +916,10 @@ fn every_refusal_names_its_step() {
         (Error::SubjectDigest, "subject digest"),
         (Error::EmbeddedReport, "CNR1"),
         (Error::PredicateMismatch, "predicate copy"),
+        (
+            Error::Signing(KeyRegistryErrorV1::SigningPurposeMismatch),
+            "signing was refused: key role is not admitted for this signing purpose",
+        ),
     ] {
         assert!(error.to_string().contains(expected), "{error}");
     }

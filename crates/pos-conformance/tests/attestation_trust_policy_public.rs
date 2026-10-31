@@ -346,10 +346,7 @@ fn every_field_of_the_wrong_type_is_refused() -> TestResult {
         (5, vec![Value::Null, Value::Bytes(vec![0; 33])]),
         (
             6,
-            vec![
-                digest.clone(),
-                Value::Array(vec![Value::Bytes(vec![0; 31])]),
-            ],
+            vec![digest, Value::Array(vec![Value::Bytes(vec![0; 31])])],
         ),
         (7, vec![Value::Null, Value::Array(vec![Value::Null])]),
         (8, vec![Value::Text(String::new())]),
@@ -398,22 +395,22 @@ fn root_and_revocation_lists_must_be_strictly_sorted() -> TestResult {
     let [low, high] = roots;
     let unsorted: [(&str, fn(&mut ConformanceTrustPolicyV1, [u8; 32], [u8; 32])); 10] = [
         ("evaluator roots descending", |p, low, high| {
-            p.evaluator_release_roots = vec![high, low]
+            p.evaluator_release_roots = vec![high, low];
         }),
         ("evaluator roots duplicate", |p, low, _| {
-            p.evaluator_release_roots = vec![low, low]
+            p.evaluator_release_roots = vec![low, low];
         }),
         ("report roots descending", |p, low, high| {
-            p.report_signing_roots = vec![high, low]
+            p.report_signing_roots = vec![high, low];
         }),
         ("report roots duplicate", |p, _, high| {
-            p.report_signing_roots = vec![high, high]
+            p.report_signing_roots = vec![high, high];
         }),
         ("revoked keys descending", |p, _, _| {
-            p.revoked_key_ids = vec![[2; 32], [1; 32]]
+            p.revoked_key_ids = vec![[2; 32], [1; 32]];
         }),
         ("revoked keys duplicate", |p, _, _| {
-            p.revoked_key_ids = vec![[1; 32], [1; 32]]
+            p.revoked_key_ids = vec![[1; 32], [1; 32]];
         }),
         ("revoked binaries descending", |p, _, _| {
             p.revoked_evaluator_binary_digests = vec![[2; 32], [1; 32]];
@@ -706,7 +703,7 @@ fn a_revoked_key_id_is_refused_for_every_role() -> TestResult {
     // A revoked public key (rather than its key id) revokes nothing.
     let trust = load(
         &[&with(|policy| {
-            policy.revoked_key_ids = vec![public(REPORTER)]
+            policy.revoked_key_ids = vec![public(REPORTER)];
         })?],
         NOW,
     )??;
@@ -869,7 +866,7 @@ fn a_policy_past_offline_valid_through_is_stale() -> TestResult {
     // Only the current policy's bound counts.
     let expired = with(|p| p.offline_valid_through = "2020-01-01T00:00:00Z".to_owned())?;
     let current = successor(&expired, 2, |p| {
-        p.offline_valid_through = VALID_THROUGH.to_owned()
+        p.offline_valid_through = VALID_THROUGH.to_owned();
     })?;
     let trust = load(&[&expired, &current], NOW)??;
     assert_eq!(
