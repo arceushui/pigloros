@@ -262,12 +262,19 @@ pub mod selector_transport_test_fixture {
     }
 
     pub(crate) fn authenticated_transport_fixture() -> TestResult<TransportAdmissionFixture> {
+        authenticated_transport_fixture_with_input(b"input")
+    }
+
+    pub(crate) fn authenticated_transport_fixture_with_input(
+        input: &[u8],
+    ) -> TestResult<TransportAdmissionFixture> {
         let fixture = Fixture::new()?;
         let provider = fixture.admit()?;
         let image =
             provider.admit_image(&fixture.sim1, &fixture.root_image, &fixture.executable)?;
         let launch = provider.admit_launch_policy(&fixture.lps1, &image)?;
-        let execute_request_bytes = execute_request(&fixture, &launch, &["execute"])?;
+        let execute_request_bytes =
+            execute_request_with_input(&fixture, &launch, &["execute"], input)?;
         let request = crate::sandbox_provider_protocol::SandboxExecuteRequest::from_canonical_cbor(
             &execute_request_bytes,
         )?;
