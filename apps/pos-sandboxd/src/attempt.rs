@@ -5,13 +5,7 @@
 //! that was started for it and not yet released; the Local binding token is
 //! minted only from it.
 
-use std::{
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
-    time::Instant,
-};
+use std::{sync::Arc, time::Instant};
 
 use pos_reference::{
     provider_admission::{execution::AdmittedProviderExecution, AdmittedAuthority},
@@ -22,7 +16,8 @@ use pos_reference::{
 };
 
 use crate::{
-    AdmittedEntry, ExecuteError, LauncherFacts, PreparedAttemptDirectory, TransientServiceUnitName,
+    AdmittedEntry, ExecuteError, ExecutionOwnership, LauncherFacts, PreparedAttemptDirectory,
+    TransientServiceUnitName,
 };
 
 /// The launch-policy view of an admitted attempt: everything a Local grant
@@ -80,27 +75,6 @@ impl PartialEq for ExecutionLease {
     }
 }
 impl Eq for ExecutionLease {}
-
-/// One irreversible execution claim, shared by the exact prepared directory.
-#[derive(Clone, Debug, Default)]
-pub(super) struct ExecutionOwnership(Arc<AtomicBool>);
-
-impl PartialEq for ExecutionOwnership {
-    fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.0, &other.0)
-    }
-}
-
-impl Eq for ExecutionOwnership {}
-
-impl ExecutionOwnership {
-    fn claim(&self) -> Result<(), ExecuteError> {
-        self.0
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .map(|_| ())
-            .map_err(|_| ExecuteError::AttemptAlreadyClaimed)
-    }
-}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ExecutionPolicyFacts {
