@@ -27,7 +27,8 @@ mod non_interference_report;
 pub mod image_read_fault;
 
 pub use non_interference_report::{
-    verify_non_interference_report_v1, IndependentNonInterferenceReportErrorV1,
+    verify_non_interference_execution_artifact_v1, verify_non_interference_report_v1,
+    IndependentNonInterferenceReportErrorV1,
 };
 
 pub mod adapter_transport;
