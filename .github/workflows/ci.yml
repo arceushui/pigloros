@@ -934,6 +934,7 @@ jobs:
           --exclude 'src/ordinary_fork_lineage_tests.rs'
           --exclude 'src/execute/tests/ownership.rs'
           --exclude 'src/provider_barrier/tests.rs'
+          --exclude 'src/execute/tests/ownership/abandonment.rs'
           --format json
           --output "${{ runner.temp }}/cargo-crap-baseline.json"
       - name: Analyze CRAP score changes
@@ -973,6 +974,7 @@ jobs:
           --exclude 'src/ordinary_fork_lineage_tests.rs'
           --exclude 'src/execute/tests/ownership.rs'
           --exclude 'src/provider_barrier/tests.rs'
+          --exclude 'src/execute/tests/ownership/abandonment.rs'
           --baseline "${{ runner.temp }}/cargo-crap-baseline.json"
           --epsilon 0
           --format json
