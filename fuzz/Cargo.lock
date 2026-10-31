@@ -1018,6 +1018,7 @@ dependencies = [
 name = "pos-conformance"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "blake3",
  "ciborium",
  "ed25519-dalek",
@@ -1051,6 +1052,7 @@ name = "pos-crypto"
 version = "0.1.0"
 dependencies = [
  "aes-gcm",
+ "base64",
  "blake3",
  "ciborium",
  "ed25519-dalek",
