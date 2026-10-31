@@ -598,6 +598,8 @@ struct CorpusOptions<'a> {
     profile_mutation: Option<ProfileMutation>,
     bundle_mutation: Option<BundleMutation>,
     trust_mutation: Option<TrustMutation>,
+    /// The deterministic budget of every fixture and the execution profile's maximum.
+    fixture_budget: [u64; 8],
 }
 
 impl Default for CorpusOptions<'_> {
@@ -616,6 +618,7 @@ impl Default for CorpusOptions<'_> {
             profile_mutation: None,
             bundle_mutation: None,
             trust_mutation: None,
+            fixture_budget: [100; 8],
         }
     }
 }
@@ -733,6 +736,28 @@ pub fn plugin_corpus(records: &[Vec<u8>]) -> TestResult<Corpus> {
         claim_layer: 4,
         subject_adapter: SubjectAdapterKind::PublicPluginProtocol,
         plugin_records: Some(records),
+        ..CorpusOptions::default()
+    })
+}
+
+/// Build a signed `plugin-conformance` corpus with a chosen mode and budget.
+///
+/// It is [`plugin_corpus`] in Execution Mode `mode` (0 Local, 1 Air-Gapped); every fixture
+/// budget, and the execution profile's maximum, is `budget` (counters in `ResourceUsage` order).
+///
+/// # Errors
+/// Returns an error if canonical encoding or fixture construction fails.
+pub fn plugin_corpus_with_budget(
+    records: &[Vec<u8>],
+    mode: u64,
+    budget: [u64; 8],
+) -> TestResult<Corpus> {
+    corpus_for_options(CorpusOptions {
+        mode,
+        claim_layer: 4,
+        subject_adapter: SubjectAdapterKind::PublicPluginProtocol,
+        plugin_records: Some(records),
+        fixture_budget: budget,
         ..CorpusOptions::default()
     })
 }
@@ -867,9 +892,10 @@ fn corpus_for_options(options: CorpusOptions<'_>) -> TestResult<Corpus> {
         profile_mutation,
         bundle_mutation,
         trust_mutation,
+        fixture_budget,
     } = options;
     let signing_key = SigningKey::from_bytes(&[9; 32]);
-    let execution_profile = execution_profile(profile_mutation)?;
+    let execution_profile = execution_profile(profile_mutation, fixture_budget)?;
     let execution_digest = hash(&execution_profile);
     let trust_policy = trust_policy(&signing_key, trust_mutation, execution_digest)?;
     let trust_digest = hash(&trust_policy);
@@ -1596,7 +1622,7 @@ fn fixtures(
                 expectation.expected_error,
                 uint(u64::from(replay_claim)),
                 uint(u64::from(replay_claim)),
-                array(vec![uint(100); 8]),
+                budget_value(options.fixture_budget),
                 array(vec![uint(options.watchdog_ms)]),
                 array(vec![
                     Value::Bool(false),
@@ -3359,7 +3385,12 @@ fn provider_key(minor: u64) -> Value {
     ])
 }
 
-fn execution_profile(mutation: Option<ProfileMutation>) -> TestResult<Vec<u8>> {
+/// The CBOR array of the eight deterministic budget counters.
+fn budget_value(budget: [u64; 8]) -> Value {
+    array(budget.into_iter().map(uint).collect())
+}
+
+fn execution_profile(mutation: Option<ProfileMutation>, budget: [u64; 8]) -> TestResult<Vec<u8>> {
     let mut fields = vec![
         text("EPF1"),
         uint(1),
@@ -3373,7 +3404,7 @@ fn execution_profile(mutation: Option<ProfileMutation>) -> TestResult<Vec<u8>> {
         array(vec![text("explicit-schema-version")]),
         array(vec![text("digest-bound-artifacts")]),
         array(vec![Value::Bool(false), array(Vec::new())]),
-        array(vec![uint(100); 8]),
+        budget_value(budget),
         array(Vec::new()),
         array(vec![text("1.0.0"), text("1.0.0")]),
         Value::Null,

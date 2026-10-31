@@ -16,8 +16,9 @@ install refusals `IncompatibleAbi`, `InvalidManifest` (an ABI major other than
 0, which the PMF1 decoder does not accept), and `TrustStateUnavailable` (a
 broken release chain).
 
-For the plugin-conformance layer: five usage counters are unmeasured and are
-reported as 0.
+For the plugin-conformance layer: usage counters are measured after the
+attempt; the resource family is bounded by the signed release's limits. One
+execution step is one committed guest-v1 invocation.
 
 For the plugin-conformance layer: Publisher signature proves attribution only.
 

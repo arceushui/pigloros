@@ -29,6 +29,23 @@ const IND1_INPUT: &[u8] = b"PiglorOS independent fixture plugin-conformance";
 /// The checked-in BLAKE3 of `IND1_INPUT`, shared with the host-side `independent-evaluation` test.
 const IND1_DIGEST: &str = "92adc8f0b327b091f85e847d3fa1f7cb46e16bdd74f389d79b2e61171c2715c3";
 
+/// ADR-068 R4 test 8, evaluator half: the usage the real worker measures for the `positive`
+/// case in Local and Air-Gapped. `apps/pos-plugin-worker/tests/conformance_adapter_public.rs`
+/// asserts the same literal on the real worker (`POSITIVE_USAGE`); keep the two in step.
+const MEASURED_POSITIVE_USAGE: ResourceUsage = ResourceUsage {
+    memory_bytes: 1_179_648,
+    cpu_fuel: 42_604,
+    host_calls: 6,
+    event_count: 2,
+    output_bytes: 16,
+    storage_bytes: 16,
+    execution_steps: 2,
+    simulation_time_ns: 1,
+};
+
+/// The Execution Modes of the evaluator corpus: 0 is Local and 1 is Air-Gapped.
+const CORPUS_MODES: [u64; 2] = [0, 1];
+
 const FAILURE_FAMILIES: [(u8, &str); 4] = [
     (1, "capability-denied"),
     (2, "malformed-payload"),
@@ -518,6 +535,72 @@ fn usage_at_the_budget_passes_and_one_above_fails_for_every_counter() -> TestRes
                 Some(SafeErrorCode::ResourceLimitExceeded),
                 "counter {name}, case-{family}"
             );
+        }
+    }
+    Ok(())
+}
+
+/// The eight counters of `usage` in `COUNTERS` order.
+const fn counters(usage: ResourceUsage) -> [u64; 8] {
+    [
+        usage.memory_bytes,
+        usage.cpu_fuel,
+        usage.host_calls,
+        usage.event_count,
+        usage.output_bytes,
+        usage.storage_bytes,
+        usage.execution_steps,
+        usage.simulation_time_ns,
+    ]
+}
+
+/// The report of a subject that gives every case its faithful result and the `positive` case the
+/// measured usage, over a corpus in `mode` whose every fixture budget is `budget`.
+fn measured_report(
+    records: &[Vec<u8>],
+    mode: u64,
+    budget: [u64; 8],
+) -> TestResult<ConformanceReport> {
+    let corpus = support::plugin_corpus_with_budget(records, mode, budget)?;
+    run(&corpus, |attempt| {
+        let usage = if attempt.family == FixtureFamily::Positive {
+            MEASURED_POSITIVE_USAGE
+        } else {
+            ResourceUsage::default()
+        };
+        Ok(SubjectObservation {
+            result: faithful(attempt.family, records),
+            usage,
+        })
+    })
+}
+
+/// ADR-068 R4 test 8, evaluator half: a budget equal to the measured `positive` usage passes,
+/// and a budget one below it in any counter fails `ResourceLimitExceeded`, in Local and
+/// Air-Gapped. The measured Simulation Time is 1 ns, the lowest legal budget (a zero budget is
+/// rejected), so one below it is not a budget and the last counter has no below case.
+#[test]
+fn measured_positive_usage_passes_at_an_equal_budget_and_fails_one_below() -> TestResult {
+    let records = oracle_records();
+    let measured = counters(MEASURED_POSITIVE_USAGE);
+    // The one-below cases take the first seven counters: Simulation Time must be the last.
+    assert_eq!(COUNTERS[7].0, "simulation_time_ns");
+    for mode in CORPUS_MODES {
+        let equal = measured_report(&records, mode, measured)?;
+        expect_all(&equal, CaseStatus::Pass)
+            .map_err(|error| io::Error::other(format!("mode {mode} at the budget: {error}")))?;
+        for (index, (name, _)) in COUNTERS.iter().enumerate().take(7) {
+            let mut below = measured;
+            below[index] -= 1;
+            let report = measured_report(&records, mode, below)?;
+            let positive = case(&report, 0)?;
+            assert_eq!(positive.outcome, CaseStatus::Fail, "{name} mode {mode}");
+            assert_eq!(
+                positive.actual_error,
+                Some(SafeErrorCode::ResourceLimitExceeded),
+                "{name} mode {mode}"
+            );
+            expect_status(&report, 6, CaseStatus::Pass)?;
         }
     }
     Ok(())
