@@ -6,6 +6,7 @@
 pub mod support;
 
 use std::error::Error;
+use std::fs;
 use std::io;
 use std::sync::OnceLock;
 
@@ -28,6 +29,86 @@ const IND1_INPUT: &[u8] = b"PiglorOS independent fixture plugin-conformance";
 
 /// The checked-in BLAKE3 of `IND1_INPUT`, shared with the host-side `independent-evaluation` test.
 const IND1_DIGEST: &str = "92adc8f0b327b091f85e847d3fa1f7cb46e16bdd74f389d79b2e61171c2715c3";
+
+/// ADR-068 R4 test 8, evaluator half: the usage the real worker measures for the `positive`
+/// case in Local and Air-Gapped. `apps/pos-plugin-worker/tests/conformance_adapter_public.rs`
+/// asserts the same literal on the real worker (`POSITIVE_USAGE`); keep the two in step.
+const MEASURED_POSITIVE_USAGE: ResourceUsage = ResourceUsage {
+    memory_bytes: 1_179_648,
+    cpu_fuel: 42_604,
+    host_calls: 6,
+    event_count: 2,
+    output_bytes: 16,
+    storage_bytes: 16,
+    execution_steps: 2,
+    simulation_time_ns: 1,
+};
+
+/// The usage of one committed pass of the Rust guest over the `pos.1` observation, measured on
+/// the real worker for `pos.1` and for `independent-evaluation` (`ind.3`).
+const MEASURED_RUST_ONE_PASS_USAGE: ResourceUsage = ResourceUsage {
+    memory_bytes: 1_179_648,
+    cpu_fuel: 21_238,
+    host_calls: 3,
+    event_count: 1,
+    output_bytes: 8,
+    storage_bytes: 8,
+    execution_steps: 1,
+    simulation_time_ns: 0,
+};
+
+/// ADR-061 R11: the usage the real worker measures for each family, by family code, in Local
+/// and Air-Gapped. No sub-case of the four failure families commits, so they report none.
+/// `apps/pos-plugin-worker/tests/conformance_adapter_public.rs` asserts the same literals on the
+/// real worker (`MEASURED_USAGE`); keep the two in step.
+const MEASURED_USAGE: [ResourceUsage; 7] = [
+    MEASURED_POSITIVE_USAGE,
+    NO_USAGE,
+    NO_USAGE,
+    NO_USAGE,
+    MEASURED_DELETION_REDACTION_USAGE,
+    NO_USAGE,
+    MEASURED_RUST_ONE_PASS_USAGE,
+];
+
+/// The usage of `deletion-redaction`, measured on the real worker: `del.1` and `del.2` are each
+/// one committed pass of the Rust guest over the longer `del.1` observation.
+const MEASURED_DELETION_REDACTION_USAGE: ResourceUsage = ResourceUsage {
+    cpu_fuel: 21_510,
+    ..MEASURED_RUST_ONE_PASS_USAGE
+};
+
+/// The usage of a case none of whose sub-cases commits.
+const NO_USAGE: ResourceUsage = ResourceUsage {
+    memory_bytes: 0,
+    cpu_fuel: 0,
+    host_calls: 0,
+    event_count: 0,
+    output_bytes: 0,
+    storage_bytes: 0,
+    execution_steps: 0,
+    simulation_time_ns: 0,
+};
+
+/// The provider manifest of the checked-in Plugin conformance fixtures.
+const PLUGIN_PROVIDER: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../fixtures/conformance/providers/plugin-conformance/provider.json"
+);
+
+/// The provider's family names, by family code.
+const PROVIDER_FAMILIES: [&str; 7] = [
+    "positive",
+    "denied",
+    "malformed",
+    "resource-exhaustion",
+    "deletion-redaction",
+    "downgrade",
+    "independent-evaluation",
+];
+
+/// The Execution Modes of the evaluator corpus: 0 is Local and 1 is Air-Gapped.
+const CORPUS_MODES: [u64; 2] = [0, 1];
 
 const FAILURE_FAMILIES: [(u8, &str); 4] = [
     (1, "capability-denied"),
@@ -518,6 +599,104 @@ fn usage_at_the_budget_passes_and_one_above_fails_for_every_counter() -> TestRes
                 Some(SafeErrorCode::ResourceLimitExceeded),
                 "counter {name}, case-{family}"
             );
+        }
+    }
+    Ok(())
+}
+
+/// The eight counters of `usage` in `COUNTERS` order.
+const fn counters(usage: ResourceUsage) -> [u64; 8] {
+    [
+        usage.memory_bytes,
+        usage.cpu_fuel,
+        usage.host_calls,
+        usage.event_count,
+        usage.output_bytes,
+        usage.storage_bytes,
+        usage.execution_steps,
+        usage.simulation_time_ns,
+    ]
+}
+
+/// ADR-061 R11: the lowest budget `usage` passes, per counter. A counter measured at 0 takes 1,
+/// because a zero budget is rejected.
+fn measured_floor(usage: ResourceUsage) -> [u64; 8] {
+    counters(usage).map(|counter| counter.max(1))
+}
+
+/// The Draft budgets of the checked-in Plugin provider manifest, by family code.
+fn provider_budgets() -> TestResult<[[u64; 8]; 7]> {
+    let provider: serde_json::Value = serde_json::from_slice(&fs::read(PLUGIN_PROVIDER)?)?;
+    let mut budgets = [[0; 8]; 7];
+    for (budget, family) in budgets.iter_mut().zip(PROVIDER_FAMILIES) {
+        let declared = &provider["fixture_contracts"][family]["deterministic_budget"];
+        for (counter, (name, _)) in budget.iter_mut().zip(COUNTERS) {
+            *counter = declared[name]
+                .as_u64()
+                .ok_or_else(|| io::Error::other(format!("{family} has no {name} budget")))?;
+        }
+    }
+    Ok(budgets)
+}
+
+/// The report of a subject that gives every case its faithful result and its family's measured
+/// usage, over a corpus in `mode` whose fixture of family code `n` has budget `budgets[n]`.
+fn measured_report(
+    records: &[Vec<u8>],
+    mode: u64,
+    budgets: &[[u64; 8]; 7],
+) -> TestResult<ConformanceReport> {
+    let corpus = support::plugin_corpus_with_budgets(records, mode, budgets)?;
+    run(&corpus, |attempt| {
+        Ok(SubjectObservation {
+            result: faithful(attempt.family, records),
+            usage: MEASURED_USAGE[usize::from(attempt.family.code())],
+        })
+    })
+}
+
+/// ADR-061 R11: the Draft budget of every family in the provider manifest is the lowest budget
+/// its measured usage passes, so a change in measured usage fails here until the literals and
+/// `provider.json` move together.
+#[test]
+fn provider_budgets_are_the_floor_of_the_measured_usage() -> TestResult {
+    assert_eq!(provider_budgets()?, MEASURED_USAGE.map(measured_floor));
+    Ok(())
+}
+
+/// ADR-068 R4 test 8, evaluator half, for every family at the provider budgets (ADR-061 R11):
+/// with every family reporting its measured usage, every case passes, and a budget one below in
+/// any counter of one family fails that case `ResourceLimitExceeded` while the others pass, in
+/// Local and Air-Gapped. A counter whose budget is 1, the lowest legal budget (a zero budget is
+/// rejected), has no below case.
+#[test]
+fn measured_usage_passes_at_the_provider_budgets_and_fails_one_below() -> TestResult {
+    let records = oracle_records();
+    let budgets = provider_budgets()?;
+    for mode in CORPUS_MODES {
+        let equal = measured_report(&records, mode, &budgets)?;
+        expect_all(&equal, CaseStatus::Pass)
+            .map_err(|error| io::Error::other(format!("mode {mode} at the budget: {error}")))?;
+        for (family, budget) in budgets.iter().enumerate() {
+            let code = u8::try_from(family)?;
+            let lowered = COUNTERS
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| budget[*index] > 1);
+            for (index, (name, _)) in lowered {
+                let mut below = budgets;
+                below[family][index] -= 1;
+                let report = measured_report(&records, mode, &below)?;
+                let lowered_case = case(&report, code)?;
+                assert_eq!(
+                    (lowered_case.outcome, lowered_case.actual_error),
+                    (CaseStatus::Fail, Some(SafeErrorCode::ResourceLimitExceeded)),
+                    "case-{code} {name} mode {mode}"
+                );
+                for other in (0..FAMILY_COUNT).filter(|other| *other != code) {
+                    expect_status(&report, other, CaseStatus::Pass)?;
+                }
+            }
         }
     }
     Ok(())
