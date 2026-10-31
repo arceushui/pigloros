@@ -2,19 +2,22 @@
 
 include!("support/sandbox_vector.rs");
 
+pub mod support;
+
 use ciborium::value::Value;
 use pos_conformance::{
-    AllowedDivergenceV1, ArtifactDescriptorV1, CapabilityPolicyV1, CaseOutcomeStatusV1,
-    CaseOutcomeV1, ClaimLayerV1, ConformanceContractError, ConformanceProfileV1,
-    ConformanceReportV1, DeterministicBudgetV1, DigestSizeV1, DivergenceLocationKindV1,
-    DivergenceMismatchKindV1, DivergenceReportV1, ErasureDispositionV1, EvaluatorHardCapsV1,
-    EvaluatorOutputCapabilityV1, EvaluatorProtocolV1, EvaluatorRequestV1, ExecutionModeV1,
-    FixtureDescriptorV1, FixtureFamilyV1, FixtureProvenanceV1, FixtureProviderKeyV1,
-    FixtureProviderRegistryBindingV1, FollowOnMismatchV1, ImplementationIdentityV1,
-    IndependenceEvidenceV1, IndependenceRequirementsV1, NamespacedFailureV1, OperationalSafetyV1,
-    ProviderCapabilityV1, RedactionStateV1, ReplayClaimV1, ReproducibilityClassV1,
-    SandboxRequirementV1, StrictOracleKindV1, StrictOracleV1, SubjectAdapterKindV1,
-    VerificationOutcomeV1, VerificationResultV1, DETERMINISTIC_BUDGET_HARD_CAPS_V1,
+    AllowedDivergenceV1, ArtifactDescriptorV1, BundleMemberRoleV1, CapabilityPolicyV1,
+    CaseOutcomeStatusV1, CaseOutcomeV1, ClaimLayerV1, ConformanceBundleV1,
+    ConformanceContractError, ConformanceProfileV1, ConformanceReportV1, DeterministicBudgetV1,
+    DigestSizeV1, DivergenceLocationKindV1, DivergenceMismatchKindV1, DivergenceReportV1,
+    ErasureDispositionV1, EvaluatorHardCapsV1, EvaluatorOutputCapabilityV1, EvaluatorProtocolV1,
+    EvaluatorRequestV1, ExecutionModeV1, FixtureDescriptorV1, FixtureFamilyV1, FixtureProvenanceV1,
+    FixtureProviderKeyV1, FixtureProviderRegistryBindingV1, FollowOnMismatchV1,
+    ImplementationIdentityV1, IndependenceEvidenceV1, IndependenceRequirementsV1,
+    NamespacedFailureV1, OperationalSafetyV1, ProviderCapabilityV1, RedactionStateV1,
+    ReplayClaimV1, ReproducibilityClassV1, SandboxRequirementV1, StrictOracleKindV1,
+    StrictOracleV1, SubjectAdapterKindV1, VerificationOutcomeV1, VerificationResultV1,
+    DETERMINISTIC_BUDGET_HARD_CAPS_V1,
 };
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
@@ -590,15 +593,16 @@ fn fixture_bundle_digest(
     )
 }
 
-fn request_for_profile(
-    profile: &ConformanceProfileV1,
-) -> Result<EvaluatorRequestV1, Box<dyn std::error::Error>> {
+/// Stand-in CFB1 archive bytes for requests built over the synthetic profile.
+const SYNTHETIC_ARCHIVE: &[u8] = b"synthetic CFB1 archive bytes";
+
+fn request_for_profile(profile: &ConformanceProfileV1, archive: &[u8]) -> EvaluatorRequestV1 {
     let caps = &profile.evaluator_protocol.hard_caps;
     let mut request = request_for_caps(caps);
     request.conformance_profile_digest = profile.profile_digest;
-    request.fixture_bundle_digest = fixture_bundle_digest(profile)?;
+    request.fixture_bundle_digest = *blake3::hash(archive).as_bytes();
     request.subject_adapter = profile.fixtures[0].subject_adapter;
-    request.execution_profile_digest = profile.execution_profile_digests[0];
+    request.execution_profile_digest = profile.fixtures[0].execution_profile_digest;
     request.trust_policy_snapshot_digest = profile
         .independence_requirements
         .trust_policy_snapshot_digest;
@@ -606,7 +610,7 @@ fn request_for_profile(
     request.evaluator_hard_caps_digest = caps.digest();
     request.output_capability.capability_digest = request.expected_output_capability_digest();
     request.request_digest = request.digest();
-    Ok(request)
+    request
 }
 
 fn refresh(profile: &mut ConformanceProfileV1) {
@@ -1111,8 +1115,11 @@ fn public_profile_validation_rejects_each_top_level_authority() {
 fn public_request_and_compression_contracts_bind_the_selected_profile(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let profile = profile_for_digest();
-    let request = request_for_profile(&profile)?;
-    assert_eq!(request.validate_against_profile(&profile), Ok(()));
+    let request = request_for_profile(&profile, SYNTHETIC_ARCHIVE);
+    assert_eq!(
+        request.validate_against_profile(&profile, SYNTHETIC_ARCHIVE),
+        Ok(())
+    );
     let canonical = request.to_canonical_cbor()?;
     assert_eq!(
         EvaluatorRequestV1::from_canonical_cbor(&canonical),
@@ -1155,7 +1162,9 @@ fn public_request_and_compression_contracts_bind_the_selected_profile(
         invalid.output_capability.capability_digest = invalid.expected_output_capability_digest();
         invalid.request_digest = invalid.digest();
         assert!(
-            invalid.validate_against_profile(&profile).is_err(),
+            invalid
+                .validate_against_profile(&profile, SYNTHETIC_ARCHIVE)
+                .is_err(),
             "{name} must bind to the selected profile"
         );
     }
@@ -1174,7 +1183,7 @@ fn public_request_and_compression_contracts_bind_the_selected_profile(
 #[test]
 fn public_request_validation_rejects_each_closed_invalid_field(
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let request = request_for_profile(&profile_for_digest())?;
+    let request = request_for_profile(&profile_for_digest(), SYNTHETIC_ARCHIVE);
     for mutation in 0..15 {
         let mut invalid = request.clone();
         match mutation {
@@ -1366,15 +1375,15 @@ fn public_request_rejects_every_malformed_sandbox_requirement_field() -> TestRes
 }
 
 #[test]
-fn public_request_rejects_invalid_selected_profile_authorities() -> TestResult {
+fn public_request_rejects_invalid_selected_profile_authorities() {
     let profile = profile_for_digest();
-    let request = request_for_profile(&profile)?;
+    let request = request_for_profile(&profile, SYNTHETIC_ARCHIVE);
 
     let mut invalid_profile = profile.clone();
     invalid_profile.evaluator_protocol.protocol_id.clear();
     invalid_profile.profile_digest = invalid_profile.digest();
     assert_eq!(
-        request.validate_against_profile(&invalid_profile),
+        request.validate_against_profile(&invalid_profile, SYNTHETIC_ARCHIVE),
         Err(ConformanceContractError::ProvenanceMissing)
     );
 
@@ -1391,7 +1400,6 @@ fn public_request_rejects_invalid_selected_profile_authorities() -> TestResult {
         request.validate_with_protocol(&invalid_protocol),
         Err(ConformanceContractError::ProvenanceMissing)
     );
-    Ok(())
 }
 
 #[test]
@@ -2239,10 +2247,9 @@ fn public_request_output_limits_accept_exact_caps_and_reject_each_overflow() {
 }
 
 #[test]
-fn public_request_rejects_output_limits_above_the_selected_profile(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn public_request_rejects_output_limits_above_the_selected_profile() {
     let mut profile = profile_for_digest();
-    let mut request = request_for_profile(&profile)?;
+    let mut request = request_for_profile(&profile, SYNTHETIC_ARCHIVE);
     profile.evaluator_protocol.hard_caps.max_diagnostic_bytes = 1;
     profile.profile_digest = profile.digest();
     request.conformance_profile_digest = profile.profile_digest;
@@ -2250,8 +2257,44 @@ fn public_request_rejects_output_limits_above_the_selected_profile(
     request.output_capability.capability_digest = request.expected_output_capability_digest();
     request.request_digest = request.digest();
     assert_eq!(
-        request.validate_against_profile(&profile),
+        request.validate_against_profile(&profile, SYNTHETIC_ARCHIVE),
         Err(ConformanceContractError::FieldOutOfBounds)
+    );
+}
+
+/// ADR-062 R8 section 3 (#1265): EVR1 `fixture_bundle_digest` is BLAKE3-256 of the exact CFB1
+/// archive bytes. A one-byte archive change and the retired profile-derived
+/// `PiglorOS.ConformanceFixtureBundle.v1` digest are both refused.
+#[test]
+fn public_request_binds_fixture_bundle_digest_to_the_exact_cfb1_archive() -> TestResult {
+    let archive = support::current_archive("evr1-fixture-bundle")?;
+    let bundle = ConformanceBundleV1::from_canonical_cbor(&archive)?;
+    let profile_member = bundle
+        .members
+        .iter()
+        .find(|member| member.role == BundleMemberRoleV1::Profile)
+        .ok_or("the archive has no CPF1 profile member")?;
+    let profile = ConformanceProfileV1::from_canonical_cbor(&profile_member.bytes)?;
+    let request = request_for_profile(&profile, &archive);
+    assert_eq!(request.fixture_bundle_digest, bundle.archive_digest()?);
+    assert_eq!(request.validate_against_profile(&profile, &archive), Ok(()));
+
+    let mut changed = archive.clone();
+    let last = changed.last_mut().ok_or("the archive is empty")?;
+    *last ^= 1;
+    assert_eq!(
+        request.validate_against_profile(&profile, &changed),
+        Err(ConformanceContractError::FixtureDigestMismatch)
+    );
+
+    let mut retired = request;
+    retired.fixture_bundle_digest = fixture_bundle_digest(&profile)?;
+    retired.output_capability.capability_digest = retired.expected_output_capability_digest();
+    retired.request_digest = retired.digest();
+    assert_eq!(retired.validate(), Ok(()));
+    assert_eq!(
+        retired.validate_against_profile(&profile, &archive),
+        Err(ConformanceContractError::FixtureDigestMismatch)
     );
     Ok(())
 }
@@ -2402,7 +2445,7 @@ fn public_profile_and_request_decoders_reject_truncated_and_trailing_records(
     );
 
     let mut request_value: Value = ciborium::from_reader(
-        request_for_profile(&profile_for_digest())?
+        request_for_profile(&profile_for_digest(), SYNTHETIC_ARCHIVE)
             .to_canonical_cbor()?
             .as_slice(),
     )?;
