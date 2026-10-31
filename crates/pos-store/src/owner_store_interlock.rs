@@ -286,8 +286,8 @@ const fn file_id(stat: &Stat) -> [u64; 2] {
     [stat.st_dev, stat.st_ino]
 }
 
-const fn same_file(first: &Stat, second: &Stat) -> bool {
-    first.st_dev == second.st_dev && first.st_ino == second.st_ino
+fn same_file(first: &Stat, second: &Stat) -> bool {
+    file_id(first) == file_id(second)
 }
 
 #[cfg(test)]

@@ -6,11 +6,10 @@
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::fs::{self, OpenOptions};
-    use std::io::{BufRead, BufReader, Write};
+    use std::io::{Read, Write};
     use std::os::unix::fs::{symlink, MetadataExt, OpenOptionsExt, PermissionsExt};
     use std::path::{Path, PathBuf};
-    use std::process::{Command, Stdio};
-    use std::sync::mpsc;
+    use std::process::{Child, ChildStdout, Command, Stdio};
     use std::time::{Duration, Instant};
 
     use pos_core::CoreError;
@@ -224,7 +223,7 @@ mod tests {
     }
 
     #[test]
-    fn safe_existing_companions_are_neither_opened_for_writing_nor_changed() -> TestResult {
+    fn safe_existing_companions_keep_their_contents() -> TestResult {
         let fixture = Fixture::new()?;
         for suffix in ["-wal", "-shm"] {
             create(fixture.path(), &format!("{MAIN}{suffix}"))?;
@@ -313,13 +312,113 @@ mod tests {
         Ok(())
     }
 
-    fn await_marker(receiver: &mpsc::Receiver<String>, marker: &str) -> TestResult {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            let line = receiver.recv_timeout(deadline.saturating_duration_since(Instant::now()))?;
-            if line.ends_with(marker) {
-                return Ok(());
+    struct ChildPeer {
+        child: Child,
+        output: Option<ChildStdout>,
+        pending: Vec<u8>,
+    }
+
+    impl ChildPeer {
+        fn spawn(directory: &Path) -> Result<Self, Box<dyn std::error::Error>> {
+            let child = Command::new(std::env::current_exe()?)
+                .args([
+                    "--exact",
+                    "tests::interlock_child",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(CHILD_DIRECTORY, directory)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()?;
+            let mut peer = Self {
+                child,
+                output: None,
+                pending: Vec::new(),
+            };
+            let output = peer.child.stdout.take().ok_or("missing child stdout")?;
+            let flags = rustix::fs::fcntl_getfl(&output)?;
+            rustix::fs::fcntl_setfl(&output, flags | rustix::fs::OFlags::NONBLOCK)?;
+            peer.output = Some(output);
+            Ok(peer)
+        }
+
+        fn command(&mut self, command: &[u8]) -> TestResult {
+            self.child
+                .stdin
+                .as_mut()
+                .ok_or("missing child stdin")?
+                .write_all(command)?;
+            Ok(())
+        }
+
+        fn await_marker(&mut self, marker: &str) -> TestResult {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let mut exited = false;
+            loop {
+                if Instant::now() >= deadline {
+                    return Err("child marker deadline exceeded".into());
+                }
+                let mut bytes = [0; 1024];
+                match self
+                    .output
+                    .as_mut()
+                    .ok_or("missing child stdout")?
+                    .read(&mut bytes)
+                {
+                    Ok(0) => return Err("child closed stdout before its marker".into()),
+                    Ok(count) => {
+                        self.pending.extend_from_slice(&bytes[..count]);
+                        if self.pending.len() > 65_536 {
+                            return Err("child output line exceeded fixture bound".into());
+                        }
+                        while let Some(end) = self.pending.iter().position(|byte| *byte == b'\n') {
+                            let found = self.pending[..end].ends_with(marker.as_bytes());
+                            let _removed = self.pending.drain(..=end).count();
+                            if found {
+                                return Ok(());
+                            }
+                        }
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if exited {
+                            return Err("child exited before its marker".into());
+                        }
+                        exited = self.child.try_wait()?.is_some();
+                        // Polling backoff only; readiness is proved by the pipe
+                        // marker or child exit, never by elapsed sleep time.
+                        if !exited {
+                            std::thread::sleep(Duration::from_millis(10));
+                        }
+                    }
+                    Err(error) => return Err(error.into()),
+                }
             }
+        }
+
+        fn finish(&mut self, timeout: Duration) -> TestResult {
+            let deadline = Instant::now() + timeout;
+            loop {
+                if let Some(status) = self.child.try_wait()? {
+                    return status
+                        .success()
+                        .then_some(())
+                        .ok_or_else(|| "child failed".into());
+                }
+                if Instant::now() >= deadline {
+                    return Err("child termination deadline exceeded".into());
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
+
+    impl Drop for ChildPeer {
+        fn drop(&mut self) {
+            // Child caches a reaped status; kill cannot target a reused PID.
+            // On every error/unwind, terminate first and synchronously reap.
+            let _kill_result = self.child.kill();
+            let _wait_result = self.child.wait();
         }
     }
 
@@ -329,39 +428,41 @@ mod tests {
         let admission = OwnerStoreAdmissionV1::new();
         let operation = enter(&admission);
         let held = OwnerStoreFileInterlockV1::try_acquire(&operation, fixture.path(), MAIN)?;
-        let mut child = Command::new(std::env::current_exe()?)
-            .args([
-                "--exact",
-                "tests::interlock_child",
-                "--nocapture",
-                "--test-threads=1",
-            ])
-            .env(CHILD_DIRECTORY, fixture.path())
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .spawn()?;
-        let output = child.stdout.take().ok_or("missing child stdout")?;
-        let (sender, receiver) = mpsc::channel();
-        let reader = std::thread::spawn(move || -> Result<(), String> {
-            for line in BufReader::new(output).lines() {
-                sender
-                    .send(line.map_err(|error| error.to_string())?)
-                    .map_err(|error| error.to_string())?;
-            }
-            Ok(())
-        });
-        await_marker(&receiver, "INTERLOCK_REFUSED")?;
+        let mut child = ChildPeer::spawn(fixture.path())?;
+        child.await_marker("INTERLOCK_REFUSED")?;
         drop(held);
         operation.complete_cleanly();
-        child
-            .stdin
-            .take()
-            .ok_or("missing child stdin")?
-            .write_all(b"retry\n")?;
-        await_marker(&receiver, "INTERLOCK_ACQUIRED")?;
-        assert!(child.wait()?.success());
-        reader.join().map_err(|_| "child reader panicked")??;
+        child.command(b"retry\n")?;
+        child.await_marker("INTERLOCK_ACQUIRED")?;
+        child.finish(Duration::from_secs(10))?;
         assert!(fixture.lock_path()?.is_file());
+        Ok(())
+    }
+
+    #[test]
+    fn child_owner_reaps_after_abandoned_wait_and_termination_timeout() -> TestResult {
+        let fixture = Fixture::new()?;
+        let admission = OwnerStoreAdmissionV1::new();
+        let operation = enter(&admission);
+        let held = OwnerStoreFileInterlockV1::try_acquire(&operation, fixture.path(), MAIN)?;
+        for time_out in [false, true] {
+            let mut child = ChildPeer::spawn(fixture.path())?;
+            let pid = rustix::process::Pid::from_raw(i32::try_from(child.child.id())?)
+                .ok_or("missing child PID")?;
+            child.await_marker("INTERLOCK_REFUSED")?;
+            if time_out {
+                child.command(b"stall\n")?;
+                child.await_marker("INTERLOCK_STALLED")?;
+                assert!(child.finish(Duration::from_millis(20)).is_err());
+            }
+            drop(child);
+            assert_eq!(
+                rustix::process::waitpid(Some(pid), rustix::process::WaitOptions::NOHANG).err(),
+                Some(rustix::io::Errno::CHILD)
+            );
+        }
+        drop(held);
+        operation.complete_cleanly();
         Ok(())
     }
 
@@ -380,6 +481,12 @@ mod tests {
         std::io::stdout().lock().write_all(b"INTERLOCK_REFUSED\n")?;
         let mut command = String::new();
         std::io::stdin().read_line(&mut command)?;
+        if command == "stall\n" {
+            std::io::stdout().lock().write_all(b"INTERLOCK_STALLED\n")?;
+            command.clear();
+            std::io::stdin().read_line(&mut command)?;
+            return Err("stalled fixture unexpectedly resumed".into());
+        }
         assert_eq!(command, "retry\n");
         let held = OwnerStoreFileInterlockV1::try_acquire(&operation, Path::new(&directory), MAIN)?;
         std::io::stdout()
