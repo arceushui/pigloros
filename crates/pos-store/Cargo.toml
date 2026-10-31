@@ -10,8 +10,8 @@ publish.workspace = true
 [features]
 default = ["sqlite"]
 sqlite = ["dep:rusqlite"]
-# Exposes recipient-export acceptance fixtures only. Never enable this in a
-# deployable dependency graph; CI enforces that policy.
+# Exposes acceptance fixtures and protected owner/store admission. Never enable
+# this in a deployable dependency graph; CI enforces that policy.
 test-support = ["sqlite", "pos-core/test-support"]
 
 [dependencies]
@@ -61,6 +61,10 @@ required-features = ["test-support"]
 
 [[test]]
 name = "counterfactual_dependency_sqlite_public"
+required-features = ["test-support"]
+
+[[test]]
+name = "owner_store_admission_public"
 required-features = ["test-support"]
 
 [lints]
