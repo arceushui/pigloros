@@ -605,7 +605,15 @@ fn execute_request(
     launch: &LaunchPolicy,
     capability_ids: &[&str],
 ) -> TestResult<Vec<u8>> {
-    let input = b"input";
+    execute_request_with_input(fixture, launch, capability_ids, b"input")
+}
+
+fn execute_request_with_input(
+    fixture: &Fixture,
+    launch: &LaunchPolicy,
+    capability_ids: &[&str],
+    input: &[u8],
+) -> TestResult<Vec<u8>> {
     let evaluation = fixture.evaluation_request(launch)?;
     let attempt = selector_attempt();
     self_digested_record(
