@@ -107,9 +107,10 @@ pub struct ConformanceTrustAnchorV1 {
     pub policy_digest: [u8; 32],
 }
 
-/// The TPS1 `revoked_key_ids` entry that revokes the conformance signing key with this DSSE key
-/// id: `ckr1-` plus its 64 lowercase hexadecimal characters. Only this form revokes a
-/// conformance key; a bare, uppercase or Plugin-prefixed entry does not.
+/// The TPS1 `revoked_key_ids` entry that revokes this conformance key id.
+///
+/// It is `ckr1-` plus the 64 lowercase hexadecimal characters of the DSSE key id. Only this
+/// form revokes a conformance key; a bare, uppercase or Plugin-prefixed entry does not.
 #[must_use]
 pub fn conformance_revoked_key_id_v1(key_id: &[u8; 32]) -> String {
     format!(

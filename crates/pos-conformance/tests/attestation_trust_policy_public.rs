@@ -1144,16 +1144,16 @@ fn a_ckr1_key_id_revoked_by_the_bound_tps1_is_refused_even_as_a_ctp1_root() -> T
         admit(&trust, ConformanceTrustRoleV1::ReportSigning, REPORTER),
         Ok(public(REPORTER))
     );
-    // An uppercase entry is not even a valid TPS1 identifier, so it never revokes either.
+    // An uppercase entry is not even a valid TPS1 identifier, so no TPS1 can carry it.
+    let mut tps1 = TrustPolicySnapshotV1::from_canonical_cbor(&snapshot()?)?;
     for uppercase in [
         format!("CKR1-{hex}"),
         format!("ckr1-{}", hex.to_uppercase()),
     ] {
+        tps1.revoked_key_ids = vec![uppercase];
         assert_eq!(
-            with_tps1_revocations(vec![uppercase])?.err(),
-            Some(AdmissionError::Snapshot(
-                TrustPolicySnapshotContractErrorV1::FieldOutOfBounds
-            ))
+            tps1.validate(),
+            Err(TrustPolicySnapshotContractErrorV1::FieldOutOfBounds)
         );
     }
     Ok(())
