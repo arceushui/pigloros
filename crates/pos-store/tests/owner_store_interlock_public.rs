@@ -457,9 +457,10 @@ mod tests {
         let held = OwnerStoreFileInterlockV1::try_acquire(&operation, fixture.path(), MAIN)?;
         let mut child = ChildPeer::spawn(fixture.path())?;
         child.await_marker("INTERLOCK_REFUSED")?;
+        child.command(b"retry\n")?;
+        child.await_marker("INTERLOCK_RETRY_REFUSED")?;
         drop(held);
         operation.complete_cleanly();
-        child.command(b"retry\n")?;
         child.await_marker("INTERLOCK_ACQUIRED")?;
         child.finish(Duration::from_secs(10))?;
         assert!(fixture.lock_path()?.is_file());
@@ -515,7 +516,23 @@ mod tests {
             return Err("stalled fixture unexpectedly resumed".into());
         }
         assert_eq!(command, "retry\n");
-        let held = OwnerStoreFileInterlockV1::try_acquire(&operation, Path::new(&directory), MAIN)?;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let held = loop {
+            match OwnerStoreFileInterlockV1::try_acquire(&operation, Path::new(&directory), MAIN) {
+                Ok(held) => break held,
+                Err(error) => {
+                    if Instant::now() >= deadline {
+                        return Err(error.into());
+                    }
+                    std::io::stdout()
+                        .lock()
+                        .write_all(b"INTERLOCK_RETRY_REFUSED\n")?;
+                    // A concurrent spawn may still hold a fork-inherited lock
+                    // descriptor until exec. Only acquisition proves release.
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+        };
         std::io::stdout()
             .lock()
             .write_all(b"INTERLOCK_ACQUIRED\n")?;
