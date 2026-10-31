@@ -5618,6 +5618,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "pos-metric-conformance-adapter"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "ciborium",
+ "pos-plugin-eval",
+ "pos-reference",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "pos-owner-bridge"
 version = "0.1.0"
 dependencies = [

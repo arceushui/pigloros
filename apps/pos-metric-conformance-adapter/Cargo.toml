@@ -1,0 +1,27 @@
+[package]
+name = "pos-metric-conformance-adapter"
+edition.workspace = true
+version.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# The metric-conformance `exported-artifact` subject adapter of plugins/eval (ADR-062 Revision 7
+# slice 4, #1217): it reads one EAI1 attempt, runs the sub-cases of its payload through the
+# public `MTI1`/`MTQ1` codecs and computation of plugins/eval, and writes one EAO1 observation.
+# It speaks the pos-reference codec; pos-reference does not import it.
+[[bin]]
+name = "pos-metric-conformance-adapter"
+path = "src/main.rs"
+
+[dependencies]
+blake3 = { workspace = true }
+ciborium = { workspace = true }
+pos-plugin-eval = { path = "../../plugins/eval" }
+pos-reference = { path = "../../crates/pos-reference" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true
