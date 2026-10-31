@@ -858,7 +858,7 @@ async fn a_recheck_for_another_admitted_context_cannot_authorize_release() -> Te
         assert_foreign_root_refuses_release(|attempt| {
             if different_owner {
                 AdmittedAttempt::for_test(
-                    crate::test_fixtures::OTHER,
+                    crate::test_fixtures::ATTEMPT,
                     authority(),
                     SandboxExecutionMode::AirGapped,
                 )
@@ -879,7 +879,7 @@ async fn assert_foreign_root_refuses_release(
     let (mut barrier, attempt) =
         barrier_for(SandboxExecutionMode::AirGapped, Refusal::None, own_pid())?;
     // The barrier, job and Ready all agree. Same-owner substitutions vary only
-    // the named authority or policy fact; a different attempt has another owner.
+    // the named authority or policy fact; rebuilding the same facts varies owner.
     assert!(crate::test_fixtures::checked_root(&attempt).matches_attempt(&attempt));
     let other = substitute(&attempt)?;
     barrier.check.root = root_check(Refusal::None, &other);
