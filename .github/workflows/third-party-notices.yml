@@ -34,6 +34,8 @@ jobs:
       NOTICE_SCOPE: ${{ inputs.scope }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: 2360a7c2f4b5f0f053ba7a7afa4f2dd8cd4b9609
       - name: Validate the requested notice scope
         run: |
           case "$NOTICE_SCOPE" in
@@ -107,4 +109,21 @@ jobs:
         with:
           name: third-party-notices
           path: ${{ runner.temp }}/third-party-notices
+          if-no-files-found: error
+      - name: Capture the exact gateway proof inputs
+        env:
+          REPORTS: ${{ runner.temp }}/cargo-about
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD HEAD^{tree} > "${REPORTS}/source.txt"
+          git ls-files -z -- '*.rs' '**/Cargo.toml' Cargo.toml Cargo.lock rust-toolchain.toml \
+            Dockerfile about.toml .cargo/config.toml scripts/third_party_notices.py \
+            .github/workflows/third-party-notices.yml \
+            | xargs -0 sha256sum > "${REPORTS}/source.sha256"
+      - name: Upload the bounded gateway proof inputs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gateway-mode-inputs
+          path: ${{ runner.temp }}/cargo-about
           if-no-files-found: error
