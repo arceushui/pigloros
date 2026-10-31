@@ -83,7 +83,7 @@ impl Eq for ExecutionLease {}
 
 /// One irreversible execution claim, shared by the exact prepared directory.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct ExecutionOwnership(Arc<AtomicBool>);
+pub struct ExecutionOwnership(Arc<AtomicBool>);
 
 impl PartialEq for ExecutionOwnership {
     fn eq(&self, other: &Self) -> bool {

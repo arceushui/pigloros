@@ -79,7 +79,8 @@ async fn cancellation_keeps_the_execution_owner_spent() -> TestResult {
         assert!(!ready);
     }
     assert!(logged(&scenario.log, "guard_kill").await);
-    refused_owner(&mut scenario, &attempt).await
+    refused_owner(&mut scenario, &attempt).await?;
+    Ok(())
 }
 
 #[tokio::test]
@@ -122,8 +123,9 @@ fn simultaneous_execution_claims_have_exactly_one_owner() -> TestResult {
     let deadline = Instant::now() + Duration::from_secs(5);
     let (left_ready, right_peer) = std::sync::mpsc::channel();
     let (right_ready, left_peer) = std::sync::mpsc::channel();
+    let admitted = &attempt;
     let outcomes = std::thread::scope(|scope| {
-        let run = |mut scenario: Scenario, attempt: &AdmittedAttempt, ready, peer| {
+        let run = move |mut scenario: Scenario, attempt: &AdmittedAttempt, ready, peer| {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_time()
                 .build()
@@ -136,8 +138,8 @@ fn simultaneous_execution_claims_have_exactly_one_owner() -> TestResult {
             ));
             Ok::<_, String>((outcome, scenario.entries()))
         };
-        let left = scope.spawn(|| run(first, &attempt, left_ready, left_peer));
-        let right = scope.spawn(|| run(second, &attempt, right_ready, right_peer));
+        let left = scope.spawn(move || run(first, admitted, left_ready, left_peer));
+        let right = scope.spawn(move || run(second, admitted, right_ready, right_peer));
         [left.join(), right.join()]
     });
     let mut successes = 0;
@@ -225,7 +227,8 @@ async fn concurrent_contenders_cannot_prepare_a_second_execution() -> TestResult
         refused_owner(&mut second, &attempt).await?;
     }
     assert!(logged(&first.log, "guard_kill").await);
-    refused_owner(&mut second, &attempt).await
+    refused_owner(&mut second, &attempt).await?;
+    Ok(())
 }
 
 #[tokio::test]
