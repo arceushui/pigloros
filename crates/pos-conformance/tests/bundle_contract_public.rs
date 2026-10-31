@@ -26,9 +26,10 @@ use pos_conformance::{
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 use support::{
-    ArchiveField, ArtifactDescriptorField, DescriptorField, FixtureField, ManifestField,
-    MemberField, ProfileField, ProviderBindingField, TemporaryOutput,
+    shared_setup, ArchiveField, ArtifactDescriptorField, DescriptorField, FixtureField,
+    ManifestField, MemberField, ProfileField, ProviderBindingField, TemporaryOutput,
 };
 
 #[cfg(target_os = "linux")]
@@ -1062,11 +1063,34 @@ fn current_bundle_inputs_for_key(
     })
 }
 
+/// The signed current bundle is immutable setup: each process builds it once per mode, and every
+/// caller receives its own copy to mutate.
 fn signed_current_bundle(mode: BundleModeV1) -> TestResult<ConformanceBundleV1> {
-    let inputs = current_bundle_inputs(mode)?;
-    ConformanceBundleV1::materialize(&inputs.profile, mode, inputs.members, inputs.expected)
-        .and_then(|bundle| bundle.sign(&SigningKey::from_bytes(&[7; 32])))
-        .map_err(Into::into)
+    static LOCAL: OnceLock<ConformanceBundleV1> = OnceLock::new();
+    static AIR_GAPPED: OnceLock<ConformanceBundleV1> = OnceLock::new();
+    let bundle = match mode {
+        BundleModeV1::Local => &LOCAL,
+        BundleModeV1::AirGapped => &AIR_GAPPED,
+    };
+    shared_setup(bundle, || {
+        let inputs = current_bundle_inputs(mode)?;
+        Ok(ConformanceBundleV1::materialize(
+            &inputs.profile,
+            mode,
+            inputs.members,
+            inputs.expected,
+        )?
+        .sign(&SigningKey::from_bytes(&[7; 32]))?)
+    })
+}
+
+/// The decoded canonical archive of the signed current Local bundle, shared like the bundle.
+fn current_archive_value() -> TestResult<Value> {
+    static ARCHIVE: OnceLock<Value> = OnceLock::new();
+    shared_setup(&ARCHIVE, || {
+        let archive = signed_current_bundle(BundleModeV1::Local)?.to_canonical_cbor()?;
+        Ok(ciborium::from_reader(archive.as_slice())?)
+    })
 }
 
 #[test]
@@ -1277,8 +1301,7 @@ fn bundle_rejects_tampered_policy_and_authority_declaration() -> TestResult {
         )
         .is_err());
 
-        let bundle = signed_current_bundle(BundleModeV1::Local)?;
-        let mut archive: Value = ciborium::from_reader(bundle.to_canonical_cbor()?.as_slice())?;
+        let mut archive = current_archive_value()?;
         let Value::Array(fields) = &mut archive else {
             return Err("archive is not an array".into());
         };
@@ -1325,8 +1348,7 @@ fn mutate_draft_authority_archive(
     path: &str,
     mutate: impl FnOnce(&mut [Value]) -> TestResult,
 ) -> TestResult<Vec<u8>> {
-    let bundle = signed_current_bundle(BundleModeV1::Local)?;
-    let mut archive: Value = ciborium::from_reader(bundle.to_canonical_cbor()?.as_slice())?;
+    let mut archive = current_archive_value()?;
     let Value::Array(archive_fields) = &mut archive else {
         return Err("archive is not an array".into());
     };
@@ -1398,8 +1420,7 @@ fn authority_members_reject_closed_contract_mutations() -> TestResult {
         })?;
     assert_authority_archive_rejected_by_both(&changed_epoch);
 
-    let bundle = signed_current_bundle(BundleModeV1::Local)?;
-    let mut archive: Value = ciborium::from_reader(bundle.to_canonical_cbor()?.as_slice())?;
+    let mut archive = current_archive_value()?;
     let Value::Array(archive_fields) = &mut archive else {
         return Err("archive is not an array".into());
     };
@@ -1488,8 +1509,7 @@ fn mutate_profile_archive_staged(
     mutate_after_fixture_digest: impl FnOnce(&mut [Value]) -> TestResult,
     mutate_after_profile_digest: impl FnOnce(&mut [Value]) -> TestResult,
 ) -> TestResult<Vec<u8>> {
-    let bundle = signed_current_bundle(BundleModeV1::Local)?;
-    let mut archive: Value = ciborium::from_reader(bundle.to_canonical_cbor()?.as_slice())?;
+    let mut archive = current_archive_value()?;
     let Value::Array(archive_fields) = &mut archive else {
         return Err("archive is not an array".into());
     };
@@ -1572,8 +1592,7 @@ fn mutate_profile_archive_staged(
 }
 
 fn mutate_archive(mutate: impl FnOnce(&mut [Value]) -> TestResult) -> TestResult<Vec<u8>> {
-    let bundle = signed_current_bundle(BundleModeV1::Local)?;
-    let mut archive: Value = ciborium::from_reader(bundle.to_canonical_cbor()?.as_slice())?;
+    let mut archive = current_archive_value()?;
     let Value::Array(fields) = &mut archive else {
         return Err("archive is not an array".into());
     };
@@ -1583,8 +1602,7 @@ fn mutate_archive(mutate: impl FnOnce(&mut [Value]) -> TestResult) -> TestResult
 }
 
 fn mutate_unsealed_archive(mutate: impl FnOnce(&mut [Value]) -> TestResult) -> TestResult<Vec<u8>> {
-    let bundle = signed_current_bundle(BundleModeV1::Local)?;
-    let mut archive: Value = ciborium::from_reader(bundle.to_canonical_cbor()?.as_slice())?;
+    let mut archive = current_archive_value()?;
     let Value::Array(fields) = &mut archive else {
         return Err("archive is not an array".into());
     };
@@ -2199,8 +2217,7 @@ fn mutate_provider_registry_archive(mutation: ProviderRegistryMutation) -> TestR
 fn mutate_provider_registry_archive_with(
     mutate: impl FnOnce(&mut [Value]) -> TestResult<bool>,
 ) -> TestResult<Vec<u8>> {
-    let bundle = signed_current_bundle(BundleModeV1::Local)?;
-    let mut archive: Value = ciborium::from_reader(bundle.to_canonical_cbor()?.as_slice())?;
+    let mut archive = current_archive_value()?;
     let Value::Array(archive_fields) = &mut archive else {
         return Err("archive is not an array".into());
     };
@@ -2545,8 +2562,7 @@ fn mutate_provider_package_archive(mutation: ProviderPackageMutation) -> TestRes
 fn mutate_provider_package_archive_with(
     mutate: impl FnOnce(&mut [Value]) -> TestResult<bool>,
 ) -> TestResult<Vec<u8>> {
-    let bundle = signed_current_bundle(BundleModeV1::Local)?;
-    let mut archive: Value = ciborium::from_reader(bundle.to_canonical_cbor()?.as_slice())?;
+    let mut archive = current_archive_value()?;
     let Value::Array(archive_fields) = &mut archive else {
         return Err("archive is not an array".into());
     };
