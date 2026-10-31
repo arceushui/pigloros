@@ -10,8 +10,10 @@
 //! by the independent #181 verifier in `pos-reference`. The probe captures
 //! prove the harness, not any ADR-059 row: they are not inventory evidence.
 
+use std::cell::RefCell;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use pos_conformance::{
     non_interference_capture_profiles_v1, non_interference_normalization_digest_v1,
@@ -34,8 +36,8 @@ use pos_experiment::non_interference_harness::{
     NonInterferencePreparationV1, NonInterferencePublicationErrorV1, NonInterferenceReplayRunnerV1,
     NonInterferenceRunOutcomeV1, NonInterferenceSessionObservationV1,
     NonInterferenceSessionSubjectV1, NonInterferenceSignedExecutionV1,
-    NON_INTERFERENCE_LOCAL_CAPTURE_MAGIC_V1, NON_INTERFERENCE_LOCAL_REQUEST_MAGIC_V1,
-    NON_INTERFERENCE_PUBLICATION_DIRECTORY_V1,
+    DEFAULT_NON_INTERFERENCE_LOCAL_OUTPUT_BUDGET_V1, NON_INTERFERENCE_LOCAL_CAPTURE_MAGIC_V1,
+    NON_INTERFERENCE_LOCAL_REQUEST_MAGIC_V1, NON_INTERFERENCE_PUBLICATION_DIRECTORY_V1,
 };
 use pos_experiment::{Experiment, ExperimentConfig, StopCondition};
 use pos_reference::{
@@ -319,17 +321,47 @@ struct SessionProbe {
     fork_factory: bool,
     primed: bool,
     cache_class: &'static [u8],
+    prepare_cause: Option<NonInterferenceNonExecutedCauseV1>,
+    /// For each capture: the observed Events, each as its length-prefixed
+    /// type and payload, and the canonical replayed State.
+    observed: Rc<RefCell<Vec<(Vec<u8>, Vec<u8>)>>>,
 }
 
 impl SessionProbe {
-    const fn new() -> Self {
+    fn new() -> Self {
         Self {
             gate: true,
             fork_factory: true,
             primed: false,
             cache_class: b"cache-miss",
+            prepare_cause: None,
+            observed: Rc::new(RefCell::new(Vec::new())),
         }
     }
+}
+
+fn length_prefixed(target: &mut Vec<u8>, value: &[u8]) {
+    target.extend_from_slice(&(value.len() as u64).to_be_bytes());
+    target.extend_from_slice(value);
+}
+
+/// `BLAKE3(domain || 0x00 || parts...)`, the digest every harness domain uses.
+fn domain_hash(domain: &[u8], parts: &[&[u8]]) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(domain);
+    hasher.update(&[0]);
+    for part in parts {
+        hasher.update(part);
+    }
+    *hasher.finalize().as_bytes()
+}
+
+/// The #181 case provenance over the control and canary run provenances.
+fn case_provenance(fixture_digest: &[u8; 32], control: &[u8; 32], canary: &[u8; 32]) -> [u8; 32] {
+    domain_hash(
+        b"PiglorOS.NonInterference.Provenance.v1",
+        &[fixture_digest, control, canary],
+    )
 }
 
 fn probe_registry(plugin: PluginId, payload: Vec<u8>) -> Result<PluginRegistry, RuntimeError> {
@@ -349,7 +381,7 @@ impl NonInterferenceSessionSubjectV1 for SessionProbe {
         _preparation: NonInterferencePreparationV1,
     ) -> Result<(), NonInterferenceNonExecutedCauseV1> {
         self.primed = false;
-        Ok(())
+        self.prepare_cause.map_or(Ok(()), Err)
     }
 
     fn compose(
@@ -407,6 +439,14 @@ impl NonInterferenceSessionSubjectV1 for SessionProbe {
     ) -> Result<NonInterferenceRawCaptureV1, NonInterferenceNonExecutedCauseV1> {
         let state = pos_crypto::canonical::encode(observation.snapshot)
             .map_err(|_| NonInterferenceNonExecutedCauseV1::Unavailable)?;
+        let mut events = Vec::new();
+        for event in observation.events {
+            length_prefixed(&mut events, event.event_type.as_str().as_bytes());
+            length_prefixed(&mut events, event.payload.as_slice());
+        }
+        self.observed
+            .borrow_mut()
+            .push((events, state.as_slice().to_vec()));
         let payloads = observation
             .events
             .iter()
@@ -459,6 +499,22 @@ fn each_runner_signs_a_published_nia1_the_independent_verifier_accepts() -> Test
         assert_eq!(execution.artifact().executor_public_key, key().public_key());
         assert_eq!(execution.case().mode, mode);
         assert_eq!(execution.preparation(), NonInterferencePreparationV1::Cold);
+        // The mode-independent result: the control run's authoritative and
+        // public capture digests under the harness result domain.
+        assert_eq!(
+            execution.artifact().result_digest,
+            domain_hash(
+                b"PiglorOS.NonInterference.HarnessResult.v1",
+                &[
+                    &execution.case().authoritative_digest,
+                    &execution.case().public_digest
+                ],
+            )
+        );
+        assert_eq!(
+            execution.artifact().execution_provenance_digest,
+            execution.case().provenance_digest
+        );
         assert!(execution.canonical_bytes().len() <= 4 * 1024);
         assert_eq!(
             verify_non_interference_execution_artifact_v1(
@@ -1074,15 +1130,24 @@ fn publication_is_immutable_and_changes_no_inventory() -> TestResult {
     // A directory at the address cannot be read as the artifact.
     fs::remove_file(&address)?;
     fs::create_dir(&address)?;
-    let unreadable = publish_non_interference_execution_v1(root.path(), execution);
-    assert!(unreadable.is_err());
-    assert_ne!(unreadable, Err(NonInterferencePublicationErrorV1::Conflict));
+    // The write's own error is reported, not the read's (a directory).
+    assert_eq!(
+        publish_non_interference_execution_v1(root.path(), execution),
+        Err(NonInterferencePublicationErrorV1::Io(
+            std::io::ErrorKind::AlreadyExists
+        ))
+    );
     // A root that is a file cannot hold the publication directory.
     let file_root = root.path().join("file-root");
     fs::write(&file_root, b"file")?;
-    let unwritable = publish_non_interference_execution_v1(&file_root, execution);
-    assert!(unwritable.is_err());
-    assert_ne!(unwritable, Err(NonInterferencePublicationErrorV1::Conflict));
+    let expected = fs::create_dir_all(file_root.join(NON_INTERFERENCE_PUBLICATION_DIRECTORY_V1))
+        .err()
+        .map(|error| NonInterferencePublicationErrorV1::Io(error.kind()));
+    assert_eq!(
+        publish_non_interference_execution_v1(&file_root, execution).err(),
+        expected
+    );
+    assert!(expected.is_some());
     assert_eq!(published.len(), VARIANTS.len());
     Ok(())
 }
@@ -1249,4 +1314,254 @@ fn hex(bytes: &[u8]) -> String {
         text.push(char::from(b"0123456789abcdef"[usize::from(byte & 0x0f)]));
         text
     })
+}
+
+// ---------------------------------------------------------------------------
+// Exact provenance, budgets and delegation
+// ---------------------------------------------------------------------------
+
+/// The Local request the runner writes for `unauthorized` in a cold case.
+fn local_request_bytes(permitted: &[u8], unauthorized: &[u8]) -> TestResult<Vec<u8>> {
+    let request = NonInterferenceLocalRequestV1 {
+        magic: NON_INTERFERENCE_LOCAL_REQUEST_MAGIC_V1.to_owned(),
+        version: 1,
+        fixture_id: LOCAL_PROBE_FIXTURE_ID_V1.to_owned(),
+        variant: NonInterferenceVariantV1::Success,
+        mode: ExecutionModeV1::Local,
+        preparation: NonInterferencePreparationV1::Cold,
+        permitted_input: permitted.to_vec(),
+        unauthorized_value: unauthorized.to_vec(),
+    };
+    Ok(pos_crypto::canonical::encode(&request)?.as_slice().to_vec())
+}
+
+/// A valid probe capture frame, as the probe process writes it.
+fn probe_frame(directory: &Path) -> TestResult<Vec<u8>> {
+    let capture = local_probe_subject_v1(
+        &NonInterferenceLocalRequestV1 {
+            magic: NON_INTERFERENCE_LOCAL_REQUEST_MAGIC_V1.to_owned(),
+            version: 1,
+            fixture_id: LOCAL_PROBE_FIXTURE_ID_V1.to_owned(),
+            variant: NonInterferenceVariantV1::Success,
+            mode: ExecutionModeV1::Local,
+            preparation: NonInterferencePreparationV1::Cold,
+            permitted_input: b"probe-input".to_vec(),
+            unauthorized_value: CONTROL.to_vec(),
+        },
+        directory,
+    )?;
+    let frame = json!({
+        "magic": NON_INTERFERENCE_LOCAL_CAPTURE_MAGIC_V1,
+        "version": 1,
+        "capture": serde_json::to_value(&capture)?,
+    });
+    Ok(pos_crypto::canonical::encode(&frame)?.as_slice().to_vec())
+}
+
+#[test]
+fn the_local_runner_binds_the_exact_program_request_and_response_provenance() -> TestResult {
+    let work = tempfile::tempdir()?;
+    let frames = tempfile::tempdir()?;
+    let frame = probe_frame(frames.path())?;
+    let path = frames.path().join("frame");
+    fs::write(&path, &frame)?;
+    let fixture = probe_fixture(
+        NonInterferenceVariantV1::Success,
+        ExecutionModeV1::Local,
+        b"probe-input",
+    )?;
+    let mut harness = harness_with(vec![Box::new(shell_runner(
+        work.path(),
+        "cat >/dev/null; cat \"$1\"",
+        &path,
+    )?)]);
+    let outcome = harness.execute_case(&fixture);
+    let execution = executed(&outcome)?;
+    let program = *blake3::hash(&fs::read("/bin/sh")?).as_bytes();
+    let run = |unauthorized: &[u8]| -> TestResult<[u8; 32]> {
+        let mut bytes = program.to_vec();
+        length_prefixed(
+            &mut bytes,
+            &local_request_bytes(b"probe-input", unauthorized)?,
+        );
+        length_prefixed(&mut bytes, &frame);
+        Ok(domain_hash(
+            b"PiglorOS.NonInterference.LocalProvenance.v1",
+            &[&bytes],
+        ))
+    };
+    assert_eq!(
+        execution.artifact().execution_provenance_digest,
+        case_provenance(&fixture.fixture_digest, &run(CONTROL)?, &run(CANARY)?)
+    );
+    Ok(())
+}
+
+#[test]
+fn the_local_output_budget_is_inclusive_and_defaults_to_16_mib() -> TestResult {
+    let work = tempfile::tempdir()?;
+    let frames = tempfile::tempdir()?;
+    let frame = probe_frame(frames.path())?;
+    let path = frames.path().join("frame");
+    fs::write(&path, &frame)?;
+    let fixture = probe_fixture(
+        NonInterferenceVariantV1::Success,
+        ExecutionModeV1::Local,
+        b"probe-input",
+    )?;
+    let echo = "cat >/dev/null; cat \"$1\"";
+    let length = u64::try_from(frame.len())?;
+    // An output of exactly the budget executes; one byte over is refused.
+    let mut exact = harness_with(vec![Box::new(
+        shell_runner(&work.path().join("exact"), echo, &path)?.with_output_budget(length),
+    )]);
+    assert_eq!(exact.execute_case(&fixture).claim(), Some(true));
+    let mut over = harness_with(vec![Box::new(
+        shell_runner(&work.path().join("over"), echo, &path)?.with_output_budget(length - 1),
+    )]);
+    assert_eq!(
+        cause_of(&mut over, &fixture),
+        Some(NonInterferenceNonExecutedCauseV1::Budget)
+    );
+    // The default budget is 16 MiB: 16 MiB of output is read (and is not a
+    // frame), one byte more is over the budget.
+    assert_eq!(
+        DEFAULT_NON_INTERFERENCE_LOCAL_OUTPUT_BUDGET_V1,
+        16 * 1024 * 1024
+    );
+    for (bytes, cause) in [
+        (
+            16_777_216_u64,
+            NonInterferenceNonExecutedCauseV1::Unavailable,
+        ),
+        (16_777_217_u64, NonInterferenceNonExecutedCauseV1::Budget),
+    ] {
+        let mut harness = harness_with(vec![Box::new(shell_runner(
+            &work.path().join(format!("default-{bytes}")),
+            &format!("cat >/dev/null; head -c {bytes} /dev/zero"),
+            &path,
+        )?)]);
+        assert_eq!(cause_of(&mut harness, &fixture), Some(cause), "{bytes}");
+    }
+    Ok(())
+}
+
+#[test]
+fn the_local_probe_reads_a_request_larger_than_one_mebibyte() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    // 600 000 permitted bytes encode as about 1.2 MB, below the 8 MiB bound.
+    let request = local_request_bytes(&vec![b'a'; 600_000], CONTROL)?;
+    assert!(request.len() > 1_100_000 && request.len() < 8 * 1024 * 1024);
+    let mut output = Vec::new();
+    serve_local_probe_v1(request.as_slice(), &mut output, directory.path())?;
+    assert!(!output.is_empty());
+    Ok(())
+}
+
+/// A Replay or Fork runner of `subject`.
+fn session_runner(
+    mode: ExecutionModeV1,
+    subject: SessionProbe,
+) -> Box<dyn NonInterferenceModeRunnerV1> {
+    if mode == ExecutionModeV1::Replay {
+        Box::new(NonInterferenceReplayRunnerV1::new(subject))
+    } else {
+        Box::new(NonInterferenceForkRunnerV1::new(subject, 1))
+    }
+}
+
+#[test]
+fn the_session_runners_bind_the_exact_observed_provenance() -> TestResult {
+    for (mode, label) in [
+        (ExecutionModeV1::Replay, b"replay".as_slice()),
+        (ExecutionModeV1::Fork, b"fork".as_slice()),
+    ] {
+        let subject = SessionProbe::new();
+        let observed = Rc::clone(&subject.observed);
+        let mut harness = harness_with(vec![session_runner(mode, subject)]);
+        let fixture = probe_fixture(NonInterferenceVariantV1::Success, mode, b"probe-input")?;
+        let outcome = harness.execute_case(&fixture);
+        let execution = executed(&outcome)?;
+        let runs = observed
+            .borrow()
+            .iter()
+            .map(|(events, state)| {
+                let mut bytes = Vec::new();
+                length_prefixed(&mut bytes, label);
+                bytes.extend_from_slice(events);
+                length_prefixed(&mut bytes, state);
+                domain_hash(b"PiglorOS.NonInterference.SessionProvenance.v1", &[&bytes])
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(runs.len(), 2, "{mode:?}");
+        assert_eq!(
+            execution.artifact().execution_provenance_digest,
+            case_provenance(&fixture.fixture_digest, &runs[0], &runs[1]),
+            "{mode:?}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn the_session_runners_delegate_preparation_to_their_subject() -> TestResult {
+    for mode in [ExecutionModeV1::Replay, ExecutionModeV1::Fork] {
+        let mut subject = SessionProbe::new();
+        subject.prepare_cause = Some(NonInterferenceNonExecutedCauseV1::Skipped);
+        let mut harness = harness_with(vec![session_runner(mode, subject)]);
+        let fixture = probe_fixture(NonInterferenceVariantV1::Success, mode, b"probe-input")?;
+        assert_eq!(
+            cause_of(&mut harness, &fixture),
+            Some(NonInterferenceNonExecutedCauseV1::Skipped),
+            "{mode:?}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn a_report_names_the_first_unequal_mode_divergence() -> TestResult {
+    let mut artifacts = synthetic_artifacts(&SECRET)?;
+    let signing = ed25519_dalek::SigningKey::from_bytes(&SECRET);
+    // Row 0, Success: the Replay artifact (index 2) diverges.
+    let mut replay = NonInterferenceExecutionArtifactV1::from_canonical_cbor(&artifacts[2])?;
+    let divergence = pos_conformance::NonInterferenceDivergenceCoordinateV1 {
+        fixture_id: replay.fixture_id.clone(),
+        variant: replay.variant,
+        mode: replay.mode,
+        surface_ordinal: 1,
+        byte_offset: 3,
+    };
+    replay.equal = false;
+    replay.divergence = Some(divergence.clone());
+    artifacts[2] = NonInterferenceExecutionArtifactV1::sign(
+        NonInterferenceExecutionArtifactBodyV1 {
+            fixture_id: replay.fixture_id.clone(),
+            variant: replay.variant,
+            mode: replay.mode,
+            fixture_digest: replay.fixture_digest,
+            profile_digest: replay.profile_digest,
+            normalization_digest: replay.normalization_digest,
+            result_digest: replay.result_digest,
+            execution_provenance_digest: replay.execution_provenance_digest,
+            equal: replay.equal,
+            divergence: replay.divergence,
+        },
+        &signing,
+    )?
+    .to_canonical_cbor()?;
+    let trusted = [key().public_key()];
+    let report = build_non_interference_report_v1(&artifacts, &trusted, &key())?;
+    assert_eq!(report.outcomes[0].first_divergence, Some(divergence));
+    assert!(!report.is_conformant());
+    assert_eq!(
+        verify_non_interference_report_v1(
+            &report.to_canonical_cbor()?,
+            &key().public_key(),
+            &trusted,
+            &artifacts
+        ),
+        Ok(false)
+    );
+    Ok(())
 }
