@@ -35,7 +35,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: 2360a7c2f4b5f0f053ba7a7afa4f2dd8cd4b9609
+          ref: 89bd7070f6feae6df7ce3ba642c32b2685aa5b40
       - name: Validate the requested notice scope
         run: |
           case "$NOTICE_SCOPE" in
