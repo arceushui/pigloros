@@ -151,6 +151,8 @@ fn historical_decryption_checks_exact_identity_and_never_calls_on_failure(
         KeyRoleV1::SubjectAttributionSigning,
         KeyRoleV1::TimelineIntegritySigning,
         KeyRoleV1::PluginReleaseSigning,
+        KeyRoleV1::ConformanceEvaluatorSigning,
+        KeyRoleV1::ConformanceReportSigning,
     ] {
         denied(
             &mut registry,

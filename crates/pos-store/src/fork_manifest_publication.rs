@@ -210,7 +210,10 @@ impl From<KeyRegistryErrorV1> for ForkManifestPublicationErrorV1 {
     fn from(error: KeyRegistryErrorV1) -> Self {
         match error {
             KeyRegistryErrorV1::InvalidEpoch => Self::InvalidEpoch,
-            KeyRegistryErrorV1::SigningRoleRequired => Self::SigningRoleRequired,
+            // `SigningPurposeMismatch` is unreachable here: `validate_publication_request`
+            // pins the request to `SubjectAttributionSigning` before authorization.
+            KeyRegistryErrorV1::SigningRoleRequired
+            | KeyRegistryErrorV1::SigningPurposeMismatch => Self::SigningRoleRequired,
             KeyRegistryErrorV1::NotFound => Self::NotFound,
             KeyRegistryErrorV1::Destroyed => Self::Destroyed,
             KeyRegistryErrorV1::DestructionPending => Self::DestructionPending,
