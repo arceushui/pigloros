@@ -231,23 +231,21 @@ pub fn sign_report_attestation_v1<R: KeyRegistrySigningPortV1>(
     signing_key: &SigningKeyMaterial,
     identity: KeyIdentityV1,
 ) -> Result<Vec<u8>, ReportAttestationErrorV1> {
-    let report = ConformanceReportV1::from_canonical_cbor(cnr1)
-        .map_err(|_| ReportAttestationErrorV1::EmbeddedReport)?;
-    if identity.role != KeyRoleV1::ConformanceReportSigning {
-        return Err(ReportAttestationErrorV1::Signing(
-            KeyRegistryErrorV1::SigningPurposeMismatch,
-        ));
-    }
-    let statement = statement_value(cnr1, &report, &artifacts, diagnostics_digest);
-    sign_dsse_for_registered_role(
-        registry,
-        signing_key,
-        identity,
-        IN_TOTO_PAYLOAD_TYPE_V1,
-        statement.canonical(),
-    )
-    .map(|envelope| envelope.to_canonical_json())
-    .map_err(ReportAttestationErrorV1::Signing)
+    ConformanceReportV1::from_canonical_cbor(cnr1)
+        .map_err(|_| ReportAttestationErrorV1::EmbeddedReport)
+        .and_then(|report| {
+            let statement = statement_value(cnr1, &report, &artifacts, diagnostics_digest);
+            sign_dsse_for_registered_role(
+                registry,
+                signing_key,
+                identity,
+                KeyRoleV1::ConformanceReportSigning,
+                IN_TOTO_PAYLOAD_TYPE_V1,
+                statement.canonical(),
+            )
+            .map(|envelope| envelope.to_canonical_json())
+            .map_err(ReportAttestationErrorV1::Signing)
+        })
 }
 
 fn statement_value(

@@ -1060,6 +1060,7 @@ fn an_evaluator_release_key_cannot_sign_a_report_attestation() -> TestResult {
         &mut registry,
         &material,
         identity,
+        KeyRoleV1::ConformanceEvaluatorSigning,
         IN_TOTO_PAYLOAD_TYPE_V1,
         payload,
     )?
