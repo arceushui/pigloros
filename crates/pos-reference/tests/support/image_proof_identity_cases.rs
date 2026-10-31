@@ -121,8 +121,8 @@ mod identity_cases {
         verify(&fixture(PROOF, CERTIFICATE)?, NOW)??;
         let proof = issuer_proof(96 * 1024, false)?;
         let outer = ContentInfo::from_der(&proof)?;
-        let signed: SignedData = outer.content.decode_as()?;
-        let signer = signed.signer_infos.0.get(0).ok_or("missing signer")?;
+        let cms_data: SignedData = outer.content.decode_as()?;
+        let signer = cms_data.signer_infos.0.get(0).ok_or("missing signer")?;
         let SignerIdentifier::IssuerAndSerialNumber(sid) = &signer.sid else {
             return Err("expected issuer-and-serial SID".into());
         };
