@@ -13,6 +13,16 @@ use std::io::Read as _;
 use std::os::fd::OwnedFd;
 #[cfg(target_os = "linux")]
 use std::os::unix::ffi::OsStrExt;
+
+/// The trusted parent of a publication, opened and validated before any output is computed so
+/// that an unusable destination is rejected without materializing.
+#[cfg(target_os = "linux")]
+struct PublicationParent {
+    parent: OwnedFd,
+    destination_name: CString,
+    parent_identity: DirectoryIdentity,
+}
+
 #[cfg(target_os = "linux")]
 struct AtomicPublication {
     parent: OwnedFd,
@@ -68,31 +78,41 @@ struct VerifiedPublication<'a> {
 }
 
 #[cfg(target_os = "linux")]
-impl AtomicPublication {
-    fn prepare(
-        destination: &Path,
-        destination_name: CString,
-    ) -> Result<Self, MaterializationError> {
+impl PublicationParent {
+    fn open(destination: &Path, destination_name: CString) -> Result<Self, MaterializationError> {
         let parent_path = destination
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
             .unwrap_or_else(|| Path::new("."));
-        let effective_uid = effective_uid();
-        open_trusted_parent(parent_path, effective_uid).and_then(|(parent, parent_identity)| {
-            create_private_staging(&parent, parent_identity, effective_uid).map(
-                |(staging_name, staging, staging_identity)| Self {
-                    parent,
-                    staging,
-                    staging_name,
-                    destination_name,
-                    parent_identity,
-                    staging_identity,
-                    staging_present: true,
-                },
-            )
+        open_trusted_parent(parent_path, effective_uid()).map(|(parent, parent_identity)| Self {
+            parent,
+            destination_name,
+            parent_identity,
         })
     }
 
+    fn stage(self) -> Result<AtomicPublication, MaterializationError> {
+        let Self {
+            parent,
+            destination_name,
+            parent_identity,
+        } = self;
+        create_private_staging(&parent, parent_identity, effective_uid()).map(
+            |(staging_name, staging, staging_identity)| AtomicPublication {
+                parent,
+                staging,
+                staging_name,
+                destination_name,
+                parent_identity,
+                staging_identity,
+                staging_present: true,
+            },
+        )
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl AtomicPublication {
     fn write_file(&self, relative_path: &str, bytes: &[u8]) -> Result<(), MaterializationError> {
         let path = relative_file_path(Path::new(relative_path));
         self.write_parent(path.directories()).and_then(|directory| {
@@ -188,16 +208,18 @@ impl Drop for AtomicPublication {
 
 #[cfg(target_os = "linux")]
 fn publish_materialized_tree(
-    mut publication: AtomicPublication,
+    parent: PublicationParent,
     files: &[MaterializedFile],
 ) -> Result<(), MaterializationError> {
-    let result = files
-        .iter()
-        .try_for_each(|file| publication.write_file(&file.relative_path, &file.bytes));
-    match result {
-        Ok(()) => VerifiedPublication { publication, files }.publish(),
-        Err(error) => publication.abort().and(Err(error)),
-    }
+    parent.stage().and_then(|mut publication| {
+        let result = files
+            .iter()
+            .try_for_each(|file| publication.write_file(&file.relative_path, &file.bytes));
+        match result {
+            Ok(()) => VerifiedPublication { publication, files }.publish(),
+            Err(error) => publication.abort().and(Err(error)),
+        }
+    })
 }
 
 #[cfg(target_os = "linux")]

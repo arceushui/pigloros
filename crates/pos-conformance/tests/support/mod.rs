@@ -13,6 +13,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
 
 pub mod plugin_composite;
 
@@ -317,13 +318,34 @@ pub fn release_files(root: &Path) -> TestResult<Vec<PathBuf>> {
     Ok(files)
 }
 
-/// Materializes and returns the current public conformance archive.
+/// Returns a copy of immutable test setup, building it on the first call in this process.
+///
+/// # Errors
+///
+/// Returns the error of `build` when the setup cannot be built.
+pub fn shared_setup<T: Clone>(
+    cell: &OnceLock<T>,
+    build: impl FnOnce() -> TestResult<T>,
+) -> TestResult<T> {
+    if let Some(value) = cell.get() {
+        return Ok(value.clone());
+    }
+    let value = build()?;
+    Ok(cell.get_or_init(|| value).clone())
+}
+
+/// Returns the current public conformance archive, materialized once per process.
 ///
 /// # Errors
 ///
 /// Returns an error when setup, materialization, publication discovery, or archive reading fails.
-pub fn current_archive(label: &str) -> TestResult<Vec<u8>> {
-    let root = temporary_root(label)?;
+pub fn current_archive() -> TestResult<Vec<u8>> {
+    static ARCHIVE: OnceLock<Vec<u8>> = OnceLock::new();
+    shared_setup(&ARCHIVE, materialize_current_archive)
+}
+
+fn materialize_current_archive() -> TestResult<Vec<u8>> {
+    let root = temporary_root("current-archive")?;
     let _cleanup = TemporaryOutput(root.clone());
     fs::create_dir_all(&root)?;
     let publication = root.join(source_inventory_address());
