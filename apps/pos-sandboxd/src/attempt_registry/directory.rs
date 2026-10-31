@@ -11,7 +11,7 @@ use super::{
     validate_directory, verify_intent, Arc, CommittedPlannedAttempt, File, MetadataExt, Mode,
     PlannedAttemptIntent, RenameFlags, ResolveFlags, SystemdAttemptRegistryError,
 };
-use crate::RootResourceIdentity;
+use crate::{ExecutionOwnership, RootResourceIdentity};
 
 pub(super) const DIRECTORY_RECORD_SIZE: usize = 84;
 
@@ -48,7 +48,7 @@ pub struct PreparedAttemptDirectory {
     // Exact visible bytes after replacement, including an uncertain parent fsync.
     // This permits verified cleanup without acknowledging durability or launch.
     recorded_root: OnceLock<RootRecord>,
-    execution: crate::attempt::ExecutionOwnership,
+    execution: ExecutionOwnership,
 }
 
 impl Drop for PreparedAttemptDirectory {
@@ -109,7 +109,7 @@ impl CommittedPlannedAttempt {
             root,
             identities,
             recorded_root: OnceLock::new(),
-            execution: crate::attempt::ExecutionOwnership::default(),
+            execution: ExecutionOwnership::default(),
         };
         prepared.verify_tree()?;
         verify_intent(&prepared.planned.directory, &prepared.planned.intent)?;
@@ -127,7 +127,7 @@ impl CommittedPlannedAttempt {
 }
 
 impl PreparedAttemptDirectory {
-    pub(crate) fn execution_ownership(&self) -> crate::attempt::ExecutionOwnership {
+    pub(crate) fn execution_ownership(&self) -> ExecutionOwnership {
         self.execution.clone()
     }
 
