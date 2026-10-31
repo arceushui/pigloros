@@ -284,7 +284,7 @@ pub mod staged_execution {
     ));
 }
 
-pub(crate) mod attempt_directory {
+pub mod attempt_directory {
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/support/attempt_directory.rs"

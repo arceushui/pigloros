@@ -10,7 +10,7 @@
 #![cfg(target_os = "linux")]
 
 #[path = "support/attempt_directory.rs"]
-mod attempt_directory;
+pub mod attempt_directory;
 #[path = "support/staged_execution.rs"]
 pub mod staged_execution;
 
