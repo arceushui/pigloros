@@ -36,7 +36,8 @@ const FIELD_COUNT: u8 = 14;
 const MAX_IDENTIFIER_BYTES: usize = 128;
 const MAX_SEMANTIC_VERSION_BYTES: usize = 64;
 const MAX_NESTING_DEPTH: u8 = 2;
-const MAX_ARRAY_ITEMS: u64 = MAX_CONFORMANCE_TRUST_REVOCATIONS_V1 as u64 + 1;
+/// The largest list, checked again by `validate`; a longer one is refused before decoding.
+const MAX_ARRAY_ITEMS: u64 = MAX_CONFORMANCE_TRUST_REVOCATIONS_V1 as u64;
 const OPERATOR_SIGNATURE_DOMAIN_V1: &[u8] = b"PiglorOS.CTP1.operator-signature.v1\0";
 
 /// Closed errors of the CTP1 codec and validator.
