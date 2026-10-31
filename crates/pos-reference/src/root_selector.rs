@@ -2401,7 +2401,11 @@ mod tests {
             Ok(())
         }
 
-        fn refresh_table_crc(image: &mut [u8], header: usize, sector: usize) -> TestResult {
+        pub(super) fn refresh_table_crc(
+            image: &mut [u8],
+            header: usize,
+            sector: usize,
+        ) -> TestResult {
             let entries = usize::try_from(u64::from_le_bytes(
                 image[header + 72..header + 80].try_into()?,
             ))? * sector;

@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use super::image_files::refresh_table_crc;
 use super::{isolated_role, FixedCompositionFixture, IsolatedCompositionRole, TestResult};
 use crate::provider_admission::tests::request_for;
 use crate::provider_admission::ProviderImageSnapshot;
@@ -117,13 +118,7 @@ fn pad_signature_partition(
                 entry[40..48].copy_from_slice(&signature_last.to_le_bytes());
             }
         }
-        let mut crc = flate2::Crc::new();
-        crc.update(table);
-        image[header + 88..header + 92].copy_from_slice(&crc.sum().to_le_bytes());
-        image[header + 16..header + 20].fill(0);
-        let mut crc = flate2::Crc::new();
-        crc.update(&image[header..header + 92]);
-        image[header + 16..header + 20].copy_from_slice(&crc.sum().to_le_bytes());
+        refresh_table_crc(&mut image, header, SECTOR)?;
     }
     let start = usize::try_from(signature.start_bytes)?;
     let end = usize::try_from(signature.start_bytes + signature.length_bytes)?;
