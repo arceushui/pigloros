@@ -3,6 +3,11 @@ name: mutation
 
 on:
   workflow_dispatch:
+    inputs:
+      mode:
+        type: choice
+        options: [proof, format]
+        default: proof
 
 permissions:
   contents: read
@@ -17,7 +22,22 @@ env:
   CARGO_BUILD_JOBS: "1"
 
 jobs:
+  format-evidence:
+    if: ${{ inputs.mode == 'format' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 0957273a1b2f1cf7f07711b82cc9aad6d763a6b8
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
+        with:
+          toolchain: 1.97.1
+          components: rustfmt
+      - name: Report exact pinned formatting diff
+        run: rustfmt --check --edition 2021 crates/pos-reference/src/root_selector/tests/admission_bounds.rs
   admission-bound-proof:
+    if: ${{ inputs.mode != 'format' }}
     name: admission bound proof (${{ matrix.case }})
     runs-on: ubuntu-24.04
     timeout-minutes: 70
