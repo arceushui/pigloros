@@ -316,6 +316,10 @@ impl Reducer for CountReducer {
 /// unauthorized value stays with the host; the Driver only sees the
 /// permitted input. A warm run after priming reports a
 /// cache hit on its operational surfaces.
+/// Each capture's observed Events (length-prefixed type and payload) and
+/// canonical replayed State, shared with the test.
+type Observed = Rc<RefCell<Vec<(Vec<u8>, Vec<u8>)>>>;
+
 struct SessionProbe {
     gate: bool,
     fork_factory: bool,
@@ -324,7 +328,7 @@ struct SessionProbe {
     prepare_cause: Option<NonInterferenceNonExecutedCauseV1>,
     /// For each capture: the observed Events, each as its length-prefixed
     /// type and payload, and the canonical replayed State.
-    observed: Rc<RefCell<Vec<(Vec<u8>, Vec<u8>)>>>,
+    observed: Observed,
 }
 
 impl SessionProbe {
