@@ -105,7 +105,7 @@ pigloros/
     agent/                # Wave 5 ✅ — AgentPolicy + RoundRobin/RandomSeed (no LLM yet)
     geo/                  # Wave 5 ✅ — SpatialCloaker degree-grid cloaking (not H3)
     bridges/              # Wave 6+ ✅ — BridgeIngestor + minimized OwnTracks observations (ADR-026 / #60); gateway owns opt-in loopback HTTP ingress; MQTT/public ingress deferred
-    eval/                 # Wave 5 ✅ — compute_report → CalibrationReport (Brier/ECE/lift); EvalDerivationDriver closes the eval loop (ADR-024 R1)
+    eval/                 # Wave 5 ✅ — compute_report_from_events → CalibrationReport (Brier/ECE/lift, micro-units); EvalDerivationDriver closes the eval loop (ADR-024 R1)
     society/              # Wave 6 ✅ — SocietySignal + SocietyReducer (trust/opinion/… metrics)
     ledger/               # Wave 4 ✅ — Prediction Ledger domain, port, adapters (ADR-017 / #58)
 ```
