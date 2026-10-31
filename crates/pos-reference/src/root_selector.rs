@@ -3188,6 +3188,8 @@ mod tests {
         Ok(IsolatedCompositionRole::Delegated)
     }
 
+    mod admission_bounds;
+
     /// Held-image admission through the real public entry point, with the
     /// fixed root-owned installation staged in each rejecting state, after a
     /// snapshot open rejected for a root-verity-sig partition other than SIM1.
