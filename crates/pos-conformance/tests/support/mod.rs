@@ -323,6 +323,19 @@ pub fn release_files(root: &Path) -> TestResult<Vec<PathBuf>> {
 ///
 /// Returns an error when setup, materialization, publication discovery, or archive reading fails.
 pub fn current_archive(label: &str) -> TestResult<Vec<u8>> {
+    current_archives(label)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| "materializer did not publish a CFB1 archive".into())
+}
+
+/// Materializes the current public conformance release and returns every CFB1 archive in it,
+/// in path order.
+///
+/// # Errors
+///
+/// Returns an error when setup, materialization, publication discovery, or archive reading fails.
+pub fn current_archives(label: &str) -> TestResult<Vec<Vec<u8>>> {
     let root = temporary_root(label)?;
     let _cleanup = TemporaryOutput(root.clone());
     fs::create_dir_all(&root)?;
@@ -340,14 +353,15 @@ pub fn current_archive(label: &str) -> TestResult<Vec<u8>> {
     if !status.success() {
         return Err("materializer did not publish a public archive".into());
     }
-    let archive = release_files(&publication)?
+    release_files(&publication)?
         .into_iter()
-        .find(|path| {
+        .filter(|path| {
             path.extension()
                 .is_some_and(|extension| extension == "cfb1")
         })
-        .ok_or("materializer did not publish a CFB1 archive")?;
-    Ok(fs::read(archive)?)
+        .map(fs::read)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(Into::into)
 }
 
 /// Encodes a CBOR value for a public-boundary mutation.

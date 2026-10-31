@@ -12,6 +12,8 @@ use pos_core::{
 };
 use zeroize::{Zeroize, Zeroizing};
 
+use crate::dsse::DsseEnvelopeV1;
+
 const KEY_MATERIAL_DOMAIN: &[u8] = b"pigloros/key-material/v1";
 const ROLE_SIGNATURE_DOMAIN: &[u8] = b"pigloros/role-signature/v1";
 
@@ -295,10 +297,14 @@ fn sign_for_role_unchecked(
 /// digest. It must hold its transaction or lock through the signing callback,
 /// so destruction and signing have a defined ordering.
 ///
+/// The conformance signing roles sign only DSSE envelopes
+/// ([`sign_dsse_for_registered_role`]) and are refused here.
+///
 /// # Errors
 ///
 /// Returns a closed [`KeyRegistryErrorV1`] when the identity is invalid,
-/// inactive, destroyed, absent, or does not match the supplied signing key.
+/// inactive, destroyed, absent, a conformance role, or does not match the
+/// supplied signing key.
 pub fn sign_for_registered_role<R: KeyRegistrySigningPortV1>(
     registry: &mut R,
     signing_key: &SigningKeyMaterial,
@@ -311,12 +317,52 @@ pub fn sign_for_registered_role<R: KeyRegistrySigningPortV1>(
     if !identity.role.is_signing() {
         return Err(KeyRegistryErrorV1::SigningRoleRequired);
     }
+    if identity.role.is_conformance_signing() {
+        return Err(KeyRegistryErrorV1::SigningPurposeMismatch);
+    }
     let signing_key_ref = signing_key.as_key()?;
     let material_digest = signing_key.material_digest;
     let public_verification_key = signing_key.public_verification_key;
     registry.with_signing_authorization(identity, material_digest, public_verification_key, || {
         sign_for_role_unchecked(signing_key_ref, identity, payload)
     })
+}
+
+/// Sign one DSSE envelope with a conformance signing key under the registry's
+/// atomic authorization (ADR-062 Revision 8 section 5.2, K-A).
+///
+/// The DSSE signature covers the pre-authentication encoding, which carries no
+/// owner, role or epoch framing. Only the two conformance roles
+/// (`ConformanceEvaluatorSigning`, `ConformanceReportSigning`) may therefore
+/// sign a DSSE envelope, and [`sign_for_registered_role`] refuses them. The
+/// envelope's key id is the BLAKE3 digest of the registered verification key.
+///
+/// # Errors
+///
+/// Returns [`KeyRegistryErrorV1::InvalidEpoch`] for epoch zero,
+/// [`KeyRegistryErrorV1::SigningPurposeMismatch`] for any other role, and the
+/// registry's closed error when the identity is inactive, destroyed, absent, or
+/// does not match the supplied signing key.
+pub fn sign_dsse_for_registered_role<R: KeyRegistrySigningPortV1>(
+    registry: &mut R,
+    signing_key: &SigningKeyMaterial,
+    identity: KeyIdentityV1,
+    payload_type: &str,
+    payload: Vec<u8>,
+) -> Result<DsseEnvelopeV1, KeyRegistryErrorV1> {
+    if identity.epoch == 0 {
+        return Err(KeyRegistryErrorV1::InvalidEpoch);
+    }
+    if !identity.role.is_conformance_signing() {
+        return Err(KeyRegistryErrorV1::SigningPurposeMismatch);
+    }
+    let signing_key_ref = signing_key.as_key()?;
+    registry.with_signing_authorization(
+        identity,
+        signing_key.material_digest,
+        signing_key.public_verification_key,
+        || DsseEnvelopeV1::sign(payload_type, payload, signing_key_ref),
+    )
 }
 
 /// Failure at the dedicated Timeline signing boundary.
@@ -479,20 +525,22 @@ where
 /// the exact owner bytes, the role code, the epoch as a big-endian integer,
 /// and the canonical payload bytes.
 ///
+/// The conformance signing roles create no role-bound signatures, so no
+/// signature verifies for them.
+///
 /// # Errors
 ///
 /// Returns [`pos_core::CoreError::SignatureVerificationFailed`] if the owner,
-/// role, epoch, payload, or signature does not match.
+/// role, epoch, payload, or signature does not match, or the role is a
+/// conformance signing role.
 pub fn verify_for_role(
     verifying_key: &VerifyingKey,
     identity: KeyIdentityV1,
     payload: &CanonicalBytes,
     signature: &Signature,
 ) -> Result<(), pos_core::CoreError> {
-    if identity.epoch == 0 {
-        return Err(pos_core::CoreError::SignatureVerificationFailed);
-    }
-    if !identity.role.is_signing() {
+    if identity.epoch == 0 || !identity.role.is_signing() || identity.role.is_conformance_signing()
+    {
         return Err(pos_core::CoreError::SignatureVerificationFailed);
     }
     let message = RoleMessageParts::new(&identity, payload);

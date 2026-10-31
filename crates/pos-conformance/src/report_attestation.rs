@@ -19,7 +19,8 @@
 //! bytes, the subject artifact, the CPF1 profile, the fixture bundle and the evaluator binary,
 //! each by the BLAKE3 and SHA-256 digest of its bytes. The Statement is the payload of one DSSE
 //! envelope (`payloadType` `application/vnd.in-toto+json`, Ed25519 over the PAE, key id the
-//! BLAKE3 digest of the verifying key).
+//! BLAKE3 digest of the verifying key), signed by a registered `ConformanceReportSigning` key
+//! through `KeyRegistrySigningPortV1` (ADR-062 Revision 8 section 5.2, K-A, #1237).
 //!
 //! # The `blake3` digest
 //!
@@ -52,11 +53,12 @@ use crate::conformance_trust_admission::{
 use crate::{decode_hex_digest, hex_digest, ConformanceProfileV1, ConformanceReportV1};
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
-use ed25519_dalek::SigningKey;
+use pos_core::{KeyIdentityV1, KeyRegistryErrorV1, KeyRegistrySigningPortV1, KeyRoleV1};
 use pos_crypto::dsse::{
     DsseEnvelopeV1, DsseParseErrorV1, DsseSignatureErrorV1, IN_TOTO_PAYLOAD_TYPE_V1,
 };
 use pos_crypto::jcs::JsonV1;
+use pos_crypto::key_roles::{sign_dsse_for_registered_role, SigningKeyMaterial};
 use sha2::{Digest as _, Sha256};
 
 /// The in-toto Statement `_type`.
@@ -174,6 +176,9 @@ pub enum ReportAttestationErrorV1 {
     /// Step 10: a predicate copy differs from the embedded CNR1 report.
     #[error("report attestation predicate copy differs from the CNR1 report")]
     PredicateMismatch,
+    /// Signing only: the key registry refused the signing identity.
+    #[error("report attestation signing was refused: {0}")]
+    Signing(KeyRegistryErrorV1),
 }
 
 /// A report attestation that passed every verification step.
@@ -210,24 +215,39 @@ impl VerifiedReportAttestationV1 {
     }
 }
 
-/// Sign the attestation of the exact CNR1 bytes `cnr1` and return the canonical envelope.
+/// Sign the attestation of the exact CNR1 bytes `cnr1` with the registered
+/// `ConformanceReportSigning` key `identity` and return the canonical envelope.
 ///
 /// # Errors
 /// Returns [`ReportAttestationErrorV1::EmbeddedReport`] when `cnr1` is not a valid strict CNR1
-/// report.
-pub fn sign_report_attestation_v1(
+/// report, and [`ReportAttestationErrorV1::Signing`] when `identity` is not a
+/// `ConformanceReportSigning` identity
+/// ([`KeyRegistryErrorV1::SigningPurposeMismatch`]) or the registry refuses it.
+pub fn sign_report_attestation_v1<R: KeyRegistrySigningPortV1>(
     cnr1: &[u8],
     artifacts: ReportAttestationArtifactsV1<'_>,
     diagnostics_digest: Option<[u8; 32]>,
-    key: &SigningKey,
+    registry: &mut R,
+    signing_key: &SigningKeyMaterial,
+    identity: KeyIdentityV1,
 ) -> Result<Vec<u8>, ReportAttestationErrorV1> {
-    ConformanceReportV1::from_canonical_cbor(cnr1)
-        .map_err(|_| ReportAttestationErrorV1::EmbeddedReport)
-        .map(|report| {
-            let statement = statement_value(cnr1, &report, &artifacts, diagnostics_digest);
-            DsseEnvelopeV1::sign(IN_TOTO_PAYLOAD_TYPE_V1, statement.canonical(), key)
-                .to_canonical_json()
-        })
+    let report = ConformanceReportV1::from_canonical_cbor(cnr1)
+        .map_err(|_| ReportAttestationErrorV1::EmbeddedReport)?;
+    if identity.role != KeyRoleV1::ConformanceReportSigning {
+        return Err(ReportAttestationErrorV1::Signing(
+            KeyRegistryErrorV1::SigningPurposeMismatch,
+        ));
+    }
+    let statement = statement_value(cnr1, &report, &artifacts, diagnostics_digest);
+    sign_dsse_for_registered_role(
+        registry,
+        signing_key,
+        identity,
+        IN_TOTO_PAYLOAD_TYPE_V1,
+        statement.canonical(),
+    )
+    .map(|envelope| envelope.to_canonical_json())
+    .map_err(ReportAttestationErrorV1::Signing)
 }
 
 fn statement_value(

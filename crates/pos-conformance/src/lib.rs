@@ -24,6 +24,7 @@ mod bundle_contract;
 #[cfg(test)]
 pub mod catalog_auxiliary;
 mod conformance_trust_admission;
+mod conformance_trust_policy;
 pub mod counterfactual;
 mod execution_profile;
 mod non_interference;
@@ -63,8 +64,13 @@ pub use bundle_contract::{
     CONFORMANCE_BUNDLE_MAGIC_V1, MAX_CONFORMANCE_BUNDLE_BYTES_V1,
 };
 pub use conformance_trust_admission::{
-    ConformanceArtifactRefusalV1, ConformanceKeyRefusalV1, ConformanceTrustAdmissionPortV1,
-    ConformanceTrustRoleV1,
+    ConformanceArtifactRefusalV1, ConformanceKeyRefusalV1, ConformanceTrustAdmissionErrorV1,
+    ConformanceTrustAdmissionPortV1, ConformanceTrustAdmissionV1, ConformanceTrustRoleV1,
+};
+pub use conformance_trust_policy::{
+    ConformanceTrustPolicyContractErrorV1, ConformanceTrustPolicyV1,
+    CONFORMANCE_TRUST_POLICY_MAGIC_V1, MAX_CONFORMANCE_TRUST_POLICY_BYTES_V1,
+    MAX_CONFORMANCE_TRUST_REVOCATIONS_V1, MAX_CONFORMANCE_TRUST_ROOTS_V1,
 };
 pub use execution_profile::{
     ExecutionProfileCapabilitiesV1, ExecutionProfileCompatibilityV1,
