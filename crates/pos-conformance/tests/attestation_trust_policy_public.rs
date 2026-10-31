@@ -19,6 +19,9 @@ use pos_crypto::dsse::key_id_v1;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
+/// One edit of a policy's lists, given a low and a high root.
+type Reorder = fn(&mut ConformanceTrustPolicyV1, [u8; 32], [u8; 32]);
+
 /// One edit of a policy.
 type Edit = Box<dyn Fn(&mut ConformanceTrustPolicyV1)>;
 
@@ -393,7 +396,7 @@ fn root_and_revocation_lists_must_be_strictly_sorted() -> TestResult {
     let mut roots = [public(10), public(11)];
     roots.sort_unstable();
     let [low, high] = roots;
-    let unsorted: [(&str, fn(&mut ConformanceTrustPolicyV1, [u8; 32], [u8; 32])); 10] = [
+    let unsorted: [(&str, Reorder); 10] = [
         ("evaluator roots descending", |p, low, high| {
             p.evaluator_release_roots = vec![high, low];
         }),
@@ -514,7 +517,7 @@ fn revocations(count: usize) -> Vec<[u8; 32]> {
         .collect()
 }
 
-fn off_curve() -> [u8; 32] {
+const fn off_curve() -> [u8; 32] {
     let mut key = [0; 32];
     key[0] = 2;
     key

@@ -406,7 +406,7 @@ fn nested_key_rows_and_counts_are_bounded_before_allocation() -> TestResult {
         );
     }
     for (role, error) in [
-        (5, WorldArtifactErrorV1::UnsupportedValue),
+        (7, WorldArtifactErrorV1::UnsupportedValue),
         (256, WorldArtifactErrorV1::FieldOutOfBounds),
     ] {
         let mut row = good_key.clone();
