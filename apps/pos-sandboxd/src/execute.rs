@@ -33,6 +33,7 @@ use std::io;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use futures_util::TryFutureExt as _;
 use pos_reference::sandbox_provider_protocol::{
     LocalNetworkAdmission, LocalNetworkTermination, NetworkCaptureStore, NetworkCaptureStoreError,
     NetworkEndpointConnector, NetworkExchangePlan, NetworkExchangeTranscript,
@@ -446,16 +447,21 @@ where
     B: LaunchBarrier + Send,
     N: LocalNetworkPort + Sync,
 {
-    job.attempt
-        .claim_execution()
-        .map_err(|error| ExecuteFailure {
-            error,
-            unit: UnitState::NotStarted,
-        })?;
-    let mut guard = SubmissionGuard::new();
-    let result = drive(host, barrier, network, job, recheck, &mut guard).await;
-    guard.disarm();
-    result
+    std::future::ready(
+        job.attempt
+            .claim_execution()
+            .map_err(|error| ExecuteFailure {
+                error,
+                unit: UnitState::NotStarted,
+            }),
+    )
+    .and_then(|()| async move {
+        let mut guard = SubmissionGuard::new();
+        let result = drive(host, barrier, network, job, recheck, &mut guard).await;
+        guard.disarm();
+        result
+    })
+    .await
 }
 
 /// The wall-clock bounds of one attempt: the unit's watchdog deadline for the
