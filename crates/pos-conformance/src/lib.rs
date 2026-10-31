@@ -64,9 +64,9 @@ pub use bundle_contract::{
     CONFORMANCE_BUNDLE_MAGIC_V1, MAX_CONFORMANCE_BUNDLE_BYTES_V1,
 };
 pub use conformance_trust_admission::{
-    ConformanceArtifactRefusalV1, ConformanceKeyRefusalV1, ConformanceTrustAdmissionErrorV1,
-    ConformanceTrustAdmissionPortV1, ConformanceTrustAdmissionV1, ConformanceTrustAnchorV1,
-    ConformanceTrustRoleV1,
+    conformance_revoked_key_id_v1, ConformanceArtifactRefusalV1, ConformanceKeyRefusalV1,
+    ConformanceTrustAdmissionErrorV1, ConformanceTrustAdmissionPortV1, ConformanceTrustAdmissionV1,
+    ConformanceTrustAnchorV1, ConformanceTrustRoleV1,
 };
 pub use conformance_trust_policy::{
     ConformanceTrustPolicyContractErrorV1, ConformanceTrustPolicyV1,
@@ -102,8 +102,9 @@ pub use plugin_trust_bridge::{
     plugin_revoked_key_id_v1, plugin_root_key_id_v1, verify_plugin_tps1_policy_v1,
     AuthenticatedPluginTps1V1, PluginFloorErrorV1, PluginFloorKindV1, PluginFloorPlanV1,
     PluginFloorStateV1, PluginFloorTransitionV1, PluginTrustBridgeErrorV1,
-    PluginTrustPolicyAnchorV1, OFFLINE_VALID_THROUGH_BYTES_V1, PLUGIN_OPERATOR_ROLE_V1,
-    PLUGIN_REVOKED_KEY_ID_PREFIX_V1, PLUGIN_ROOT_KEY_ID_PREFIX_V1, PLUGIN_TPS1_BRIDGE_ID_BYTES_V1,
+    PluginTrustPolicyAnchorV1, CONFORMANCE_REVOKED_KEY_ID_PREFIX_V1,
+    OFFLINE_VALID_THROUGH_BYTES_V1, PLUGIN_OPERATOR_ROLE_V1, PLUGIN_REVOKED_KEY_ID_PREFIX_V1,
+    PLUGIN_ROOT_KEY_ID_PREFIX_V1, PLUGIN_TPS1_BRIDGE_ID_BYTES_V1,
 };
 pub use profile_contract::{
     AllowedDivergenceV1, CapabilityPolicyV1, ConformanceContractError, ConformanceProfileV1,

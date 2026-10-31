@@ -107,6 +107,18 @@ pub struct ConformanceTrustAnchorV1 {
     pub policy_digest: [u8; 32],
 }
 
+/// The TPS1 `revoked_key_ids` entry that revokes the conformance signing key with this DSSE key
+/// id: `ckr1-` plus its 64 lowercase hexadecimal characters. Only this form revokes a
+/// conformance key; a bare, uppercase or Plugin-prefixed entry does not.
+#[must_use]
+pub fn conformance_revoked_key_id_v1(key_id: &[u8; 32]) -> String {
+    format!(
+        "{}{}",
+        crate::CONFORMANCE_REVOKED_KEY_ID_PREFIX_V1,
+        crate::hex_digest(key_id)
+    )
+}
+
 /// The CTP1 implementation of [`ConformanceTrustAdmissionPortV1`].
 ///
 /// The chain runs from older to newer policies and must contain the caller-pinned
@@ -119,7 +131,8 @@ pub struct ConformanceTrustAnchorV1 {
 /// A CTP1 policy only adds restrictions to the TPS1 snapshot it extends: when the trusted UTC
 /// second is not before the `offline_valid_through` of the current CTP1 policy or of that TPS1,
 /// every key is refused as [`ConformanceKeyRefusalV1::SnapshotStale`], and a key whose DSSE key
-/// id (64 lowercase hexadecimal characters) is in the TPS1 `revoked_key_ids` is refused as
+/// id is in the TPS1 `revoked_key_ids` as [`conformance_revoked_key_id_v1`] writes it
+/// (`ckr1-` plus 64 lowercase hexadecimal characters) is refused as
 /// [`ConformanceKeyRefusalV1::Revoked`] like a key id the CTP1 revokes, even when the CTP1 lists
 /// it as a root. Among the other keys of a standing policy, a root of the other role is
 /// [`ConformanceKeyRefusalV1::RoleMismatch`] and any other key is
@@ -198,7 +211,11 @@ impl ConformanceTrustAdmissionV1 {
         let snapshot_revoked_key_ids = snapshot
             .revoked_key_ids
             .iter()
-            .filter_map(|key_id| crate::decode_hex_digest(key_id))
+            .filter_map(|key_id| {
+                key_id
+                    .strip_prefix(crate::CONFORMANCE_REVOKED_KEY_ID_PREFIX_V1)
+                    .and_then(crate::decode_hex_digest)
+            })
             .collect();
         Ok(Self {
             policy,

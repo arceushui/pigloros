@@ -331,8 +331,9 @@ pub fn sign_for_registered_role<R: KeyRegistrySigningPortV1>(
 /// (`ConformanceEvaluatorSigning`, `ConformanceReportSigning`) may therefore
 /// sign a DSSE envelope, and [`sign_for_registered_role`] refuses them. A
 /// caller that signs for one of the two purposes pins the matching role, as
-/// `sign_report_attestation_v1` does. The envelope's key id is the BLAKE3
-/// digest of the registered verification key.
+/// `sign_report_attestation_v1` does; the G5 evaluator-release signer must
+/// likewise pin `ConformanceEvaluatorSigning` at its call site. The envelope's
+/// key id is the BLAKE3 digest of the registered verification key.
 ///
 /// # Errors
 ///

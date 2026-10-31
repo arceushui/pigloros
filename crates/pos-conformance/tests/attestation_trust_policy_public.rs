@@ -8,13 +8,15 @@
 use ciborium::value::Value;
 use ed25519_dalek::{Signer as _, SigningKey};
 use pos_conformance::{
-    draft_trust_policy_snapshot_bytes_v1, ConformanceArtifactRefusalV1, ConformanceKeyRefusalV1,
+    conformance_revoked_key_id_v1, draft_trust_policy_snapshot_bytes_v1,
+    ConformanceArtifactRefusalV1, ConformanceKeyRefusalV1,
     ConformanceTrustAdmissionErrorV1 as AdmissionError, ConformanceTrustAdmissionPortV1,
     ConformanceTrustAdmissionV1, ConformanceTrustAnchorV1,
     ConformanceTrustPolicyContractErrorV1 as PolicyError, ConformanceTrustPolicyV1,
     ConformanceTrustRoleV1, TrustPolicySnapshotContractErrorV1, TrustPolicySnapshotV1,
-    CONFORMANCE_TRUST_POLICY_MAGIC_V1, MAX_CONFORMANCE_TRUST_POLICY_BYTES_V1,
-    MAX_CONFORMANCE_TRUST_REVOCATIONS_V1, MAX_CONFORMANCE_TRUST_ROOTS_V1,
+    CONFORMANCE_REVOKED_KEY_ID_PREFIX_V1, CONFORMANCE_TRUST_POLICY_MAGIC_V1,
+    MAX_CONFORMANCE_TRUST_POLICY_BYTES_V1, MAX_CONFORMANCE_TRUST_REVOCATIONS_V1,
+    MAX_CONFORMANCE_TRUST_ROOTS_V1,
 };
 use pos_crypto::dsse::key_id_v1;
 
@@ -1088,17 +1090,30 @@ fn the_pinned_high_water_mark_refuses_older_or_divergent_chains() -> TestResult 
     Ok(())
 }
 
+/// The admission of the default policy bound to the draft TPS1 with these revoked key ids.
+fn with_tps1_revocations(
+    mut revoked: Vec<String>,
+) -> TestResult<Result<ConformanceTrustAdmissionV1, AdmissionError>> {
+    revoked.sort_unstable();
+    let tps1 = snapshot_with(|s| s.revoked_key_ids = revoked)?;
+    let policy = with(|p| p.trust_policy_snapshot_digest = *blake3::hash(&tps1).as_bytes())?;
+    Ok(load_with(&[&policy], &tps1, pinned(&policy)?, NOW))
+}
+
 #[test]
-fn a_key_id_revoked_by_the_bound_tps1_is_refused_even_as_a_ctp1_root() -> TestResult {
-    let reporter = blake3::Hash::from_bytes(key_id(REPORTER))
+fn a_ckr1_key_id_revoked_by_the_bound_tps1_is_refused_even_as_a_ctp1_root() -> TestResult {
+    let hex = blake3::Hash::from_bytes(key_id(REPORTER))
         .to_hex()
         .to_string();
-    // Entries that are not a DSSE key id revoke no conformance key.
-    let tps1 = snapshot_with(|s| {
-        s.revoked_key_ids = vec![reporter, "unrelated-key".to_owned()];
-    })?;
-    let policy = with(|p| p.trust_policy_snapshot_digest = *blake3::hash(&tps1).as_bytes())?;
-    let trust = load_with(&[&policy], &tps1, pinned(&policy)?, NOW)?;
+    assert_eq!(CONFORMANCE_REVOKED_KEY_ID_PREFIX_V1, "ckr1-");
+    assert_eq!(
+        conformance_revoked_key_id_v1(&key_id(REPORTER)),
+        format!("ckr1-{hex}")
+    );
+    let trust = with_tps1_revocations(vec![
+        conformance_revoked_key_id_v1(&key_id(REPORTER)),
+        "unrelated-key".to_owned(),
+    ])??;
     assert!(trust
         .policy()
         .report_signing_roots
@@ -1116,6 +1131,31 @@ fn a_key_id_revoked_by_the_bound_tps1_is_refused_even_as_a_ctp1_root() -> TestRe
         admit(&trust, ConformanceTrustRoleV1::EvaluatorRelease, EVALUATOR),
         Ok(public(EVALUATOR))
     );
+
+    // A bare key id, a Plugin-prefixed entry or a malformed `ckr1-` entry revokes nothing.
+    let trust = with_tps1_revocations(vec![
+        hex.clone(),
+        format!("pkr1-{hex}"),
+        format!("ptr1-{hex}"),
+        format!("ckr1-{hex}0"),
+        "ckr1-".to_owned(),
+    ])??;
+    assert_eq!(
+        admit(&trust, ConformanceTrustRoleV1::ReportSigning, REPORTER),
+        Ok(public(REPORTER))
+    );
+    // An uppercase entry is not even a valid TPS1 identifier, so it never revokes either.
+    for uppercase in [
+        format!("CKR1-{hex}"),
+        format!("ckr1-{}", hex.to_uppercase()),
+    ] {
+        assert_eq!(
+            with_tps1_revocations(vec![uppercase])?.err(),
+            Some(AdmissionError::Snapshot(
+                TrustPolicySnapshotContractErrorV1::FieldOutOfBounds
+            ))
+        );
+    }
     Ok(())
 }
 
