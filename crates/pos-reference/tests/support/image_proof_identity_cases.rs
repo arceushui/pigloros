@@ -117,6 +117,28 @@ mod identity_cases {
     }
 
     #[test]
+    fn public_proof_verification_bounds_sid_before_signer_selection() -> TestResult {
+        verify(&fixture(PROOF, CERTIFICATE)?, NOW)??;
+        let proof = issuer_proof(96 * 1024, false)?;
+        let outer = ContentInfo::from_der(&proof)?;
+        let signed: SignedData = outer.content.decode_as()?;
+        let signer = signed.signer_infos.0.get(0).ok_or("missing signer")?;
+        let SignerIdentifier::IssuerAndSerialNumber(sid) = &signer.sid else {
+            return Err("expected issuer-and-serial SID".into());
+        };
+        assert!(sid.to_der()?.len() > 64 * 1024);
+        // The later per-RDN count limit must not mask the earlier SID bound.
+        assert!(sid.issuer.as_ref().iter().all(|rdn| rdn.len() < 32_768));
+        assert!(proof.len() <= 1024 * 1024);
+        assert_eq!(
+            verify(&fixture(&proof, CERTIFICATE)?, NOW)?,
+            Err(SandboxImageProofError::ResourceLimit),
+            "oversized SID must be rejected before signer selection"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn public_proof_verification_rejects_reverse_ordered_bounded_issuer() -> TestResult {
         let proof = issuer_proof(64 * 1024 - 4096, true)?;
         assert!(proof.len() > 64 * 1024 - 4096);
