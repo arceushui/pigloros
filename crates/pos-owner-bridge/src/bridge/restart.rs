@@ -6,6 +6,7 @@
 //! [`PROBE_ATTEMPTS`] repeats. It must run before any ceremony starts: the orphan-folder sweep
 //! of the first pass would otherwise remove the folder of a live ceremony.
 
+use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
 use pos_owner_bridge_codec::{decode_cleanup_record, ImagePathSha256};
@@ -69,7 +70,11 @@ fn clear(store: &mut dyn CleanupStore, entry: &Entry) -> bool {
     store.remove_folder(&entry.folder).is_ok() && store.delete_record(&entry.bytes).is_ok()
 }
 
-fn sweep(store: &mut dyn CleanupStore, probe: &mut dyn ProcessProbe, entries: Vec<Entry>) -> Sweep {
+fn sweep(
+    store: &mut dyn CleanupStore,
+    probe: &mut dyn ProcessProbe,
+    entries: Vec<Entry>,
+) -> Result<Sweep, BridgeError> {
     let mut found = Sweep::default();
     for entry in entries {
         let verdict = probe.probe(
@@ -80,9 +85,14 @@ fn sweep(store: &mut dyn CleanupStore, probe: &mut dyn ProcessProbe, entries: Ve
         match verdict {
             ProbeResult::Present => found.present.push(entry),
             ProbeResult::Absent => found.deferred += usize::from(!clear(store, &entry)),
+            ProbeResult::Indeterminate => {
+                return Err(BridgeError::Unavailable(
+                    UnavailableCode::InterfaceUnavailable,
+                ));
+            }
         }
     }
-    found
+    Ok(found)
 }
 
 /// A restart check that is waiting for a recorded process to exit.
@@ -136,10 +146,14 @@ fn is_ceremony_folder(name: &str) -> bool {
 /// A folder without a record never held a shared buffer, because the record precedes buffer
 /// creation (ADR-110 §16), so it holds no ceremony bytes. A sharing violation defers its removal
 /// to the next start.
-fn sweep_orphans(store: &mut dyn CleanupStore, folders: &[String], named: &[&str]) -> usize {
+fn sweep_orphans(
+    store: &mut dyn CleanupStore,
+    folders: &[String],
+    named: &BTreeSet<&str>,
+) -> usize {
     folders
         .iter()
-        .filter(|name| is_ceremony_folder(name) && !named.contains(&name.as_str()))
+        .filter(|name| is_ceremony_folder(name) && !named.contains(name.as_str()))
         .filter(|name| store.remove_folder(name).is_err())
         .count()
 }
@@ -155,6 +169,11 @@ fn sweep_orphans(store: &mut dyn CleanupStore, folders: &[String], named: &[&str
 ///   ceremony ID, names no process or path the bridge can trust. It is left in the store and the
 ///   check ends at once, before anything is removed, with `Quarantine(StaleProcessPresent)`; the
 ///   host application must inspect and delete it.
+/// - Repeated derived folders, even byte-identical duplicate records, are refused in the same
+///   way before listing folders, probing or removing anything (ADR-125). Otherwise an absent
+///   entry could remove the folder of another unproven process identity.
+/// - An indeterminate probe stops the pass immediately with `Unavailable(InterfaceUnavailable)`.
+///   Unproven named records/folders stay; earlier eligible cleanup may already have happened.
 /// - When a folder or record of an absent process cannot be removed (a sharing violation is the
 ///   expected cause), the record stays in the store for the next start, which retries it. That
 ///   never blocks a fresh ceremony, because every ceremony uses a new folder name. The count of
@@ -165,8 +184,9 @@ fn sweep_orphans(store: &mut dyn CleanupStore, folders: &[String], named: &[&str
 ///
 /// # Errors
 ///
-/// Returns `Quarantine(StaleProcessPresent)` when a record is unreadable, and
-/// `Unavailable(InterfaceUnavailable)` when the store cannot list its records.
+/// Returns `Quarantine(StaleProcessPresent)` when a record is unreadable or names a repeated
+/// folder, and `Unavailable(InterfaceUnavailable)` when records cannot be listed or a probe is
+/// indeterminate.
 pub(super) fn begin(
     store: &mut dyn CleanupStore,
     probe: &mut dyn ProcessProbe,
@@ -180,13 +200,15 @@ pub(super) fn begin(
         .map(parse)
         .collect::<Option<Vec<Entry>>>()
         .ok_or(STALE)?;
-    let named: Vec<String> = entries.iter().map(|entry| entry.folder.clone()).collect();
-    let named: Vec<&str> = named.iter().map(String::as_str).collect();
+    let named: BTreeSet<&str> = entries.iter().map(|entry| entry.folder.as_str()).collect();
+    if named.len() != entries.len() {
+        return Err(STALE);
+    }
     let orphans = store
         .folders()
         .map_or(1, |folders| sweep_orphans(store, &folders, &named));
-    let first = sweep(store, probe, entries);
-    Ok(settle(first.present, first.deferred + orphans, 0, now))
+    sweep(store, probe, entries)
+        .map(|first| settle(first.present, first.deferred + orphans, 0, now))
 }
 
 /// Probe the records whose process was still present, if the next probe is due at `now`.
@@ -194,7 +216,8 @@ pub(super) fn begin(
 /// # Errors
 ///
 /// Returns `Quarantine(StaleProcessPresent)` once a recorded process is still present after
-/// [`PROBE_ATTEMPTS`] repeats.
+/// [`PROBE_ATTEMPTS`] repeats, or `Unavailable(InterfaceUnavailable)` as soon as a probe is
+/// indeterminate.
 pub(super) fn poll(
     pending: Pending,
     store: &mut dyn CleanupStore,
@@ -204,10 +227,11 @@ pub(super) fn poll(
     if now < pending.wake {
         return Ok(Progress::Waiting(pending));
     }
-    let next = sweep(store, probe, pending.present);
-    let (deferred, repeats) = (pending.deferred + next.deferred, pending.repeats + 1);
-    if !next.present.is_empty() && repeats >= PROBE_ATTEMPTS {
-        return Err(STALE);
-    }
-    Ok(settle(next.present, deferred, repeats, now))
+    sweep(store, probe, pending.present).and_then(|next| {
+        let (deferred, repeats) = (pending.deferred + next.deferred, pending.repeats + 1);
+        if !next.present.is_empty() && repeats >= PROBE_ATTEMPTS {
+            return Err(STALE);
+        }
+        Ok(settle(next.present, deferred, repeats, now))
+    })
 }
