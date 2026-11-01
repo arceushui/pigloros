@@ -4,8 +4,9 @@
 //! admission host and an in-memory store, with the `test-support` probe worker
 //! standing in for the Component worker. The probe's Component bytes name the
 //! behaviour: `draft:<type>` returns one Event, `chain:<type>` echoes the
-//! prior state into the Event and appends `+` to it, and the other names are
-//! the probe's faults (see `tests/support/worker_probe.rs`).
+//! prior state into the Event and appends `+` to it. `output` returns no Events
+//! and `next` as the next state. Fault modes are described in
+//! `tests/support/worker_probe.rs`.
 
 use std::time::Duration;
 
