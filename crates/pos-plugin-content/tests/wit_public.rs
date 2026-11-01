@@ -159,9 +159,7 @@ fn refuses_unsafe_paths_order_and_case_or_prefix_collisions() {
 
 #[test]
 fn refuses_extensions_links_devices_and_non_wit_members() {
-    for flag in [
-        b'1', b'2', b'3', b'4', b'5', b'6', b'x', b'g', b'L', b'K', b'S',
-    ] {
+    for flag in *b"123456xgLKS" {
         let mut bytes = archive(&[("main.wit", WORLD)]);
         reheader(&mut bytes, |header| header[156] = flag);
         assert_eq!(
@@ -192,7 +190,7 @@ fn refuses_extensions_links_devices_and_non_wit_members() {
 fn refuses_bad_checksum_numeric_fields_and_ambiguous_header_strings() {
     let bytes = archive(&[("main.wit", WORLD)]);
     let mut changed = bytes.clone();
-    changed[148..156].fill(b'0');
+    changed[148..156].copy_from_slice(b"000000\0 ");
     assert_eq!(validate_plugin_wit_v1(&changed), Err(Error::Malformed));
     for value in [b'8', b'+', 0xff] {
         let mut changed = bytes.clone();
@@ -228,7 +226,7 @@ fn refuses_truncated_data_padding_or_end_markers() {
     }
     let mut changed = bytes.clone();
     reheader(&mut changed, |header| {
-        header[124..136].copy_from_slice(b"00077777777\0")
+        header[124..136].copy_from_slice(b"00077777777\0");
     });
     assert_eq!(validate_plugin_wit_v1(&changed), Err(Error::Malformed));
     let mut changed = bytes.clone();
@@ -313,4 +311,110 @@ fn preserves_the_pinned_parsers_type_depth_guard() {
             "type depth {depth}"
         );
     }
+}
+
+#[test]
+fn validates_ustar_numeric_metadata_and_terminators() -> Result<(), Error> {
+    let mut legal = archive(&[("main.wit", WORLD)]);
+    reheader(&mut legal, |header| {
+        header[100..108].copy_from_slice(b"0000644 ");
+        header[136..148].copy_from_slice(b"77777777777\0");
+        header[329..337].copy_from_slice(b"0000000\0");
+        header[337..345].fill(b' ');
+    });
+    validate_plugin_wit_v1(&legal)?;
+    for start in [100, 108, 116, 136, 329, 337] {
+        let mut bytes = archive(&[("main.wit", WORLD)]);
+        reheader(&mut bytes, |header| header[start] = b'X');
+        assert_eq!(
+            validate_plugin_wit_v1(&bytes),
+            Err(Error::Malformed),
+            "field {start}"
+        );
+    }
+    for (start, len) in [
+        (100, 8),
+        (108, 8),
+        (116, 8),
+        (124, 12),
+        (136, 12),
+        (329, 8),
+        (337, 8),
+    ] {
+        let mut bytes = archive(&[("main.wit", WORLD)]);
+        reheader(&mut bytes, |header| {
+            header[start..start + len].fill(b'0');
+            header[start] = 0;
+        });
+        assert_eq!(
+            validate_plugin_wit_v1(&bytes),
+            Err(Error::Malformed),
+            "NUL in field {start}"
+        );
+        let mut bytes = archive(&[("main.wit", WORLD)]);
+        reheader(&mut bytes, |header| header[start..start + len].fill(b'0'));
+        assert_eq!(
+            validate_plugin_wit_v1(&bytes),
+            Err(Error::Malformed),
+            "unterminated field {start}"
+        );
+    }
+    let mut bytes = archive(&[("main.wit", WORLD)]);
+    let digits = bytes[148..154].to_vec();
+    bytes[148] = 0;
+    bytes[149..155].copy_from_slice(&digits);
+    assert_eq!(validate_plugin_wit_v1(&bytes), Err(Error::Malformed));
+    let mut bytes = archive(&[("main.wit", WORLD)]);
+    bytes[148..150].fill(b'0');
+    bytes[150..156].copy_from_slice(&digits);
+    assert_eq!(validate_plugin_wit_v1(&bytes), Err(Error::Malformed));
+    Ok(())
+}
+
+fn package_chain(count: usize) -> String {
+    (0..count)
+        .map(|index| {
+            let body = if index + 1 == count {
+                String::from("type value = u8;")
+            } else {
+                format!("use local:p{}/api.{{value}};", index + 1)
+            };
+            format!("package local:p{index} {{ interface api {{ {body} }} }}\n")
+        })
+        .collect()
+}
+
+#[test]
+fn bounds_all_packages_including_inline_declarations_before_resolution() {
+    for (nested, expected) in [(255, Ok(())), (256, Err(Error::BoundsExceeded))] {
+        let source = format!(
+            "package pigloros:plugin@0.1.0; world community-plugin {{ import local:p0/api; }} {}",
+            package_chain(nested)
+        );
+        assert_eq!(
+            validate_plugin_wit_v1(&archive(&[("main.wit", source.as_bytes())])),
+            expected
+        );
+    }
+    for (nested, expected) in [(254, Ok(())), (255, Err(Error::BoundsExceeded))] {
+        let source = format!("package local:other; {}", package_chain(nested));
+        assert_eq!(
+            validate_plugin_wit_v1(&archive(&[
+                ("a/main.wit", WORLD),
+                ("b/deps.wit", source.as_bytes())
+            ])),
+            expected
+        );
+    }
+}
+
+#[test]
+fn parses_a_maximum_archive_with_an_actual_large_wit_source() -> Result<(), Error> {
+    let mut source = WORLD.to_vec();
+    source.extend_from_slice(b"\n/*");
+    source.resize(4 * 1024 * 1024 - 1536 - 2, b'x');
+    source.extend_from_slice(b"*/");
+    let bytes = archive(&[("main.wit", &source)]);
+    assert_eq!(bytes.len(), 4 * 1024 * 1024);
+    validate_plugin_wit_v1(&bytes)
 }

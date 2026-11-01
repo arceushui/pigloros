@@ -33,10 +33,7 @@ pub(super) fn read(bytes: &[u8]) -> Result<Vec<WitFile<'_>>, Error> {
         let path = path(header)?;
         check_path(&path, &files)?;
         let rest = &bytes[cursor + BLOCK..];
-        let size = octal(&header[124..136])?;
-        if size > rest.len() {
-            return Err(Error::Malformed);
-        }
+        let size = payload_size(&header[124..136], rest.len())?;
         // size is at most the remaining 4 MiB, including on 32-bit targets.
         let padded = size.div_ceil(BLOCK) * BLOCK;
         // rest contains complete blocks and size <= rest.len(), so rounding
@@ -71,7 +68,10 @@ fn path(header: &[u8]) -> Result<String, Error> {
             }
         })
         .sum();
-    if checksum != octal(&header[148..156])? {
+    let expected = octal(&header[148..156])?
+        .bytes()
+        .fold(0_usize, |value, byte| value * 8 + usize::from(byte - b'0'));
+    if checksum != expected {
         return Err(Error::Malformed);
     }
     if &header[257..263] != b"ustar\0" || &header[263..265] != b"00" {
@@ -84,6 +84,7 @@ fn path(header: &[u8]) -> Result<String, Error> {
     {
         return Err(Error::Malformed);
     }
+    metadata(header)?;
     let name = text(&header[..100])?;
     let prefix = text(&header[345..500])?;
     if prefix.is_empty() {
@@ -104,17 +105,60 @@ fn text(field: &[u8]) -> Result<&str, Error> {
     std::str::from_utf8(&field[..end]).map_err(|_| Error::Malformed)
 }
 
-fn octal(field: &[u8]) -> Result<usize, Error> {
-    std::str::from_utf8(field)
+fn metadata(header: &[u8]) -> Result<(), Error> {
+    for field in [
+        &header[100..108],
+        &header[108..116],
+        &header[116..124],
+        &header[136..148],
+    ] {
+        octal(field)?;
+    }
+    // Device identifiers have no meaning on regular entries. Accept blank
+    // fields, but require a well-formed number when they are populated.
+    for field in [&header[329..337], &header[337..345]] {
+        if field.iter().any(|byte| *byte != 0 && *byte != b' ') {
+            octal(field)?;
+        }
+    }
+    Ok(())
+}
+
+fn octal(field: &[u8]) -> Result<&str, Error> {
+    let end = field
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(field.len());
+    if (end == field.len() && field.last() != Some(&b' '))
+        || field[end..].iter().any(|byte| *byte != 0 && *byte != b' ')
+    {
+        return Err(Error::Malformed);
+    }
+    std::str::from_utf8(&field[..end])
         .map_err(|_| Error::Malformed)
         .and_then(|field| {
-            let digits = field.trim_matches(['\0', ' ']);
-            if digits.bytes().any(|byte| !(b'0'..=b'7').contains(&byte)) {
+            let digits = field.trim_matches(' ');
+            if digits.is_empty() || digits.bytes().any(|byte| !(b'0'..=b'7').contains(&byte)) {
                 Err(Error::Malformed)
             } else {
-                usize::from_str_radix(digits, 8).map_err(|_| Error::Malformed)
+                Ok(digits)
             }
         })
+}
+
+fn payload_size(field: &[u8], available: usize) -> Result<usize, Error> {
+    octal(field).and_then(|digits| {
+        digits.bytes().try_fold(0_usize, |size, byte| {
+            // Each successful prefix is at most the remaining 4 MiB, so the
+            // next octal digit cannot overflow even on a 32-bit host.
+            let size = size * 8 + usize::from(byte - b'0');
+            if size > available {
+                Err(Error::Malformed)
+            } else {
+                Ok(size)
+            }
+        })
+    })
 }
 
 fn check_path(path: &str, files: &[WitFile<'_>]) -> Result<(), Error> {

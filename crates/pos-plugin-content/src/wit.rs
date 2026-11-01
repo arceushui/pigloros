@@ -9,10 +9,12 @@ use pos_crypto::plugin_execution::COMMUNITY_PLUGIN_WORLD_V1;
 use thiserror::Error;
 use wit_parser::{Resolve, SourceMap};
 
+const MAX_PACKAGES: usize = 256;
+
 /// A closed WIT content refusal, containing no untrusted source text or paths.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum PluginWitContentErrorV1 {
-    /// The archive, file count or path depth exceeds the fixed profile.
+    /// The archive, file/package count or path depth exceeds the fixed profile.
     #[error("WIT content exceeds a V1 bound")]
     BoundsExceeded,
     /// The archive or entry uses a format outside the fixed ustar profile.
@@ -29,6 +31,9 @@ pub enum PluginWitContentErrorV1 {
 /// Validate a bounded ustar WIT archive without extraction or external I/O.
 ///
 /// Every entry is a regular UTF-8 `.wit` file at a sorted safe ASCII path.
+/// The fixed maxima are 4 MiB, 256 files, 256 total packages (including inline
+/// declarations), and 32 path segments. Numeric header metadata is checked
+/// for well-formedness and never applied to the host.
 /// Files in one directory form one package group; all groups are resolved
 /// together from the supplied bytes. The archive must define the exact
 /// [`COMMUNITY_PLUGIN_WORLD_V1`] world. A different world at a compatible-looking
@@ -59,6 +64,15 @@ fn resolve(files: &[archive::WitFile<'_>]) -> Result<(), PluginWitContentErrorV1
         .ok_or(PluginWitContentErrorV1::Malformed)
         .and_then(parse)?;
     let dependencies = groups.map(parse).collect::<Result<Vec<_>, _>>()?;
+    // Each parsed group has at most 256 packages and the archive at most
+    // 256 file groups, so this sum fits usize on every supported host.
+    let packages: usize = std::iter::once(&main)
+        .chain(&dependencies)
+        .map(|group| group.nested.len() + 1)
+        .sum();
+    if packages > MAX_PACKAGES {
+        return Err(PluginWitContentErrorV1::BoundsExceeded);
+    }
     let mut resolver = Resolve::default();
     resolver
         .push_groups(main, dependencies)
@@ -72,5 +86,13 @@ fn resolve(files: &[archive::WitFile<'_>]) -> Result<(), PluginWitContentErrorV1
 }
 
 fn parse(map: SourceMap) -> Result<wit_parser::UnresolvedPackageGroup, PluginWitContentErrorV1> {
-    map.parse().map_err(|_| PluginWitContentErrorV1::Malformed)
+    map.parse()
+        .map_err(|_| PluginWitContentErrorV1::Malformed)
+        .and_then(|group| {
+            if group.nested.len() >= MAX_PACKAGES {
+                Err(PluginWitContentErrorV1::BoundsExceeded)
+            } else {
+                Ok(group)
+            }
+        })
 }
