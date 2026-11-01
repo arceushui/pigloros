@@ -312,7 +312,7 @@ jobs:
             --partition "slice:${SHARD}/3" 2>&1 | tee -a "${log}"
       - name: Upload shard summary log
         if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: test-shard-log-${{ matrix.shard }}
           path: ${{ runner.temp }}/nextest-shard.log
@@ -386,7 +386,7 @@ jobs:
           test -d "${POS_REFERENCE_EVALUATOR_PACKAGE}"
           cargo test --locked -p pos-reference --test evaluator_package_public
       - name: Upload standalone evaluator release evidence
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: reference-evaluator-${{ github.sha }}
           path: ${{ runner.temp }}/reference-evaluator
@@ -492,7 +492,7 @@ jobs:
           cargo test --locked -p pos-conformance --test profile_contract_public
       - name: Upload Sandbox Provider public vectors
         if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sandbox-provider-v1-${{ github.sha }}
           path: ${{ runner.temp }}/sandbox-provider-v1
@@ -500,7 +500,7 @@ jobs:
           if-no-files-found: warn
       - name: Upload main-branch Draft verification artifact
         if: ${{ github.ref == 'refs/heads/main' && github.event_name != 'pull_request' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: conformance-bundles-${{ github.sha }}
           path: fixtures/conformance/published
@@ -508,7 +508,7 @@ jobs:
           if-no-files-found: error
       - name: Upload pull-request Draft verification artifact
         if: ${{ github.event_name == 'pull_request' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: conformance-bundles-pr-draft-${{ github.sha }}
           path: ${{ runner.temp }}/conformance-draft
@@ -576,7 +576,7 @@ jobs:
       # to the prototype's fixtures directory.
       - name: Upload the rebuilt compatibility Components
         if: ${{ failure() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: rebuilt-plugin-fixtures
           path: ${{ runner.temp }}/rebuilt-plugin-fixtures
@@ -778,7 +778,7 @@ jobs:
           --base "${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'push' && github.event.before || 'origin/main' }}"
           --no-github-summary
       - name: Upload coverage JSON for region diagnosis
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: coverage-json-${{ github.sha }}
           path: ${{ runner.temp }}/coverage.json
@@ -795,7 +795,7 @@ jobs:
             --fail-under-regions 99
       - name: Preserve failed coverage diagnostics
         if: ${{ failure() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: coverage-diagnostics-${{ github.sha }}
           path: ${{ runner.temp }}/coverage.json
@@ -805,7 +805,7 @@ jobs:
         run: cargo llvm-cov report --lcov
           --output-path "${{ runner.temp }}/coverage.lcov"
       - name: Upload LCOV for cargo-crap
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: coverage-lcov-${{ github.sha }}
           path: ${{ runner.temp }}/coverage.lcov
@@ -988,14 +988,14 @@ jobs:
           "${{ runner.temp }}/cargo-crap-report.json"
       - name: Upload cargo-crap report
         if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: cargo-crap-report-${{ github.sha }}
           path: ${{ runner.temp }}/cargo-crap-report.json
           if-no-files-found: ignore
       - name: Publish trusted main baseline
         if: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: cargo-crap-baseline-${{ github.sha }}
           path: ${{ runner.temp }}/cargo-crap-baseline.json
@@ -1130,7 +1130,7 @@ jobs:
             --archive-file "${RUNNER_TEMP}/asan-tests.tar.zst"
           test -f "${RUNNER_TEMP}/asan-link.lock"
       - name: Upload ASan test archive
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: asan-nextest-archive
           path: ${{ runner.temp }}/asan-tests.tar.zst
@@ -1669,7 +1669,7 @@ jobs:
           done
       - name: Upload module reports
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: module-structures
           path: artifacts/modules/
@@ -1698,7 +1698,7 @@ jobs:
           cargo depgraph --locked --all-deps --dedup-transitive-deps > artifacts/depgraph.svg
       - name: Upload dependency graph
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: depgraph
           path: artifacts/depgraph.svg
