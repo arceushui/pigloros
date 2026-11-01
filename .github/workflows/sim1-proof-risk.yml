@@ -68,8 +68,35 @@ jobs:
           openssl smime -sign -binary -noattr -md sha256 \
             -in root-hash.txt -signer certificate.pem -inkey key.pem \
             -outform DER -out "$FIXTURE_OUTPUT/zero-width-proof.der"
-          openssl verify -no_check_time -check_ss_sig -purpose any \
-            -CAfile certificate.pem certificate.pem > "$FIXTURE_OUTPUT/crypto-controls.log" 2>&1
+          openssl x509 -in certificate.pem -pubkey -noout > public.pem
+          python3 - <<'CERT'
+          import os
+          from pathlib import Path
+          data = (Path(os.environ['FIXTURE_OUTPUT']) / 'zero-width-signer.der').read_bytes()
+          def tlv(offset):
+              tag = data[offset]
+              length = data[offset + 1]
+              start = offset + 2
+              if length & 128:
+                  count = length & 127
+                  assert 0 < count <= 4
+                  length = int.from_bytes(data[start:start + count], 'big')
+                  start += count
+              end = start + length
+              assert end <= len(data)
+              return tag, start, end
+          tag, start, end = tlv(0)
+          assert tag == 48 and end == len(data)
+          tbs_tag, _, tbs_end = tlv(start)
+          assert tbs_tag == 48
+          _, _, algorithm_end = tlv(tbs_end)
+          signature_tag, signature_start, signature_end = tlv(algorithm_end)
+          assert signature_tag == 3 and signature_end == end and data[signature_start] == 0
+          Path('certificate-tbs.der').write_bytes(data[start:tbs_end])
+          Path('certificate-signature.bin').write_bytes(data[signature_start + 1:signature_end])
+          CERT
+          openssl dgst -sha256 -verify public.pem -signature certificate-signature.bin \
+            certificate-tbs.der > "$FIXTURE_OUTPUT/crypto-controls.log" 2>&1
           openssl cms -verify -binary -inform DER -in "$FIXTURE_OUTPUT/zero-width-proof.der" \
             -content root-hash.txt -noverify -out verified-content.bin \
             >> "$FIXTURE_OUTPUT/crypto-controls.log" 2>&1
@@ -96,7 +123,7 @@ jobs:
           manifest = {'source_checkout': os.environ['FIXTURE_SOURCE'], 'producer_commit': os.environ['GITHUB_SHA'],
                       'validity_unix_seconds': [1_800_000_000, 1_800_000_000], 'files': files,
                       'root_hash_sha256': hashlib.sha256(Path('root-hash.txt').read_bytes()).hexdigest(),
-                      'controls': ['certificate self-signature verified with time checking disabled', 'detached CMS signature verified without certificate path validation', 'detached content byte equality'],
+                      'controls': ['certificate self-signature verified directly with extracted public key', 'detached CMS signature verified without certificate path validation', 'detached content byte equality'],
                       'limits': 'Offline fixture generation only. No project public-verifier, time-acceptance, native, heap or whole-ticket claim. Private key never uploaded.'}
           (output / 'fixture-manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
           print(json.dumps({'generated_public_files': list(files), 'validity_unix_seconds': manifest['validity_unix_seconds']}))
