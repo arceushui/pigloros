@@ -50,20 +50,23 @@ fn checksum(header: &mut [u8]) {
 #[test]
 fn accepts_regular_ustar_files_and_both_regular_type_flags() -> Result<(), Error> {
     let mut bytes = archive(&[("main.wit", WORLD)]);
-    validate_plugin_wit_v1(&bytes)?;
+    assert_eq!(validate_plugin_wit_v1(&bytes), Ok(()));
     reheader(&mut bytes, |header| header[156] = 0);
     validate_plugin_wit_v1(&bytes)
 }
 
 #[test]
 fn resolves_split_packages_and_supplied_dependencies() -> Result<(), Error> {
-    validate_plugin_wit_v1(&archive(&[
-        (
-            "a.wit",
-            b"package pigloros:plugin@0.1.0; interface helper {}",
-        ),
-        ("b.wit", b"world community-plugin { import helper; }"),
-    ]))?;
+    assert_eq!(
+        validate_plugin_wit_v1(&archive(&[
+            (
+                "a.wit",
+                b"package pigloros:plugin@0.1.0; interface helper {}",
+            ),
+            ("b.wit", b"world community-plugin { import helper; }"),
+        ])),
+        Ok(())
+    );
     validate_plugin_wit_v1(&archive(&[
         ("deps/other/other.wit", b"package local:other@1.0.0; interface api {}"),
         ("main.wit", b"package pigloros:plugin@0.1.0; world community-plugin { import local:other/api@1.0.0; }"),
@@ -85,9 +88,9 @@ fn accepts_exact_archive_file_count_and_path_depth_limits() -> Result<(), Error>
             )
         })
         .collect();
-    validate_plugin_wit_v1(&archive(&files))?;
+    assert_eq!(validate_plugin_wit_v1(&archive(&files)), Ok(()));
     let name = format!("{}main.wit", "d/".repeat(31));
-    validate_plugin_wit_v1(&archive(&[(&name, WORLD)]))?;
+    assert_eq!(validate_plugin_wit_v1(&archive(&[(&name, WORLD)])), Ok(()));
     let mut bytes = archive(&[("main.wit", WORLD)]);
     bytes.resize(4 * 1024 * 1024, 0);
     validate_plugin_wit_v1(&bytes)
@@ -116,7 +119,7 @@ fn refuses_one_over_each_admissibility_limit() {
 #[test]
 fn accepts_full_width_name_and_prefix_without_nul_terminators() -> Result<(), Error> {
     let name = format!("{}.wit", "x".repeat(96));
-    validate_plugin_wit_v1(&archive(&[(&name, WORLD)]))?;
+    assert_eq!(validate_plugin_wit_v1(&archive(&[(&name, WORLD)])), Ok(()));
     let path = format!("{}/{name}", "d".repeat(155));
     assert_eq!(path.len(), 256);
     validate_plugin_wit_v1(&archive(&[(&path, WORLD)]))
@@ -323,7 +326,7 @@ fn validates_ustar_numeric_metadata_and_terminators() -> Result<(), Error> {
         header[329..337].copy_from_slice(b"0000000\0");
         header[337..345].fill(b' ');
     });
-    validate_plugin_wit_v1(&legal)?;
+    assert_eq!(validate_plugin_wit_v1(&legal), Ok(()));
     for start in [100, 108, 116, 136, 329, 337] {
         let mut bytes = archive(&[("main.wit", WORLD)]);
         reheader(&mut bytes, |header| header[start] = b'X');
