@@ -75,24 +75,25 @@ fn sweep(
     probe: &mut dyn ProcessProbe,
     entries: Vec<Entry>,
 ) -> Result<Sweep, BridgeError> {
-    let mut found = Sweep::default();
-    for entry in entries {
-        let verdict = probe.probe(
-            entry.browser_pid,
-            entry.creation_filetime,
-            &entry.image_path_sha256,
-        );
-        match verdict {
-            ProbeResult::Present => found.present.push(entry),
-            ProbeResult::Absent => found.deferred += usize::from(!clear(store, &entry)),
-            ProbeResult::Indeterminate => {
-                return Err(BridgeError::Unavailable(
-                    UnavailableCode::InterfaceUnavailable,
-                ));
+    entries
+        .into_iter()
+        .try_fold(Sweep::default(), |mut found, entry| {
+            let verdict = probe.probe(
+                entry.browser_pid,
+                entry.creation_filetime,
+                &entry.image_path_sha256,
+            );
+            match verdict {
+                ProbeResult::Present => found.present.push(entry),
+                ProbeResult::Absent => found.deferred += usize::from(!clear(store, &entry)),
+                ProbeResult::Indeterminate => {
+                    return Err(BridgeError::Unavailable(
+                        UnavailableCode::InterfaceUnavailable,
+                    ));
+                }
             }
-        }
-    }
-    Ok(found)
+            Ok(found)
+        })
 }
 
 /// A restart check that is waiting for a recorded process to exit.
@@ -149,7 +150,7 @@ fn is_ceremony_folder(name: &str) -> bool {
 fn sweep_orphans(
     store: &mut dyn CleanupStore,
     folders: &[String],
-    named: &BTreeSet<&str>,
+    named: &BTreeSet<String>,
 ) -> usize {
     folders
         .iter()
@@ -195,15 +196,17 @@ pub(super) fn begin(
     let records = store.records().or(Err(BridgeError::Unavailable(
         UnavailableCode::InterfaceUnavailable,
     )))?;
+    let mut named = BTreeSet::new();
     let entries = records
         .into_iter()
         .map(parse)
         .collect::<Option<Vec<Entry>>>()
+        .filter(|entries| {
+            entries
+                .iter()
+                .all(|entry| named.insert(entry.folder.clone()))
+        })
         .ok_or(STALE)?;
-    let named: BTreeSet<&str> = entries.iter().map(|entry| entry.folder.as_str()).collect();
-    if named.len() != entries.len() {
-        return Err(STALE);
-    }
     let orphans = store
         .folders()
         .map_or(1, |folders| sweep_orphans(store, &folders, &named));
