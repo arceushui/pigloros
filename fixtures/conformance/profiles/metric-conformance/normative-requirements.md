@@ -38,6 +38,12 @@ fixture sub-cases.
    `pigloros.fixture.metric-conformance@2.0.0`. The placeholder has no reader, alias or
    compatibility window.
 
+   The first normative content that replaces the Draft placeholder keeps profile
+   `semantic_version` 1.0.0, because there is no earlier expected behaviour for it to change.
+   This holds only while the profile is still Draft, that is, until its first Candidate or
+   Stable CNR1 report. After that, item 3 applies: any change to the expected behaviour of a
+   case, including a change to a rule of section 4.6, creates a new major version.
+
 ## 4.2 Public records
 
 All records are RFC 8949 core-deterministic, definite-length CBOR arrays of exact length.
@@ -272,6 +278,7 @@ then records in order, with fields in index order inside each record. The first 
    - truncated items;
    - missing or trailing fields: a root that is not an array of exactly 8 fields, a `records`
      field that is not an array, or a record that is not an array of exactly 6 fields;
+   - an array nested deeper than 16 levels (see G10 below);
    - trailing bytes after the root item.
 
    The structural pass reads the records array head but keeps no record. It does not compare
@@ -292,8 +299,9 @@ then records in order, with fields in index order inside each record. The first 
    - `probability_micros`: `InvalidProbability`;
    - `outcome_state`, `outcome` and `predictor_supplied`: `InvalidOutcome`.
 
-The following points fill gaps that sections 4.2 and 4.4 leave open. The fixtures pin them,
-and they are recorded for the profile owner's confirmation:
+The following points fill gaps that sections 4.2 and 4.4 leave open. The profile owner
+confirmed them as normative on 2026-10-30: G1 to G9 in Redmine #1211 (note 3) and G10 to G12
+in Redmine #1213 (note 4). The fixtures pin them:
 
 - **G1. Identifier UTF-8.** Invalid UTF-8 in an identifier is `InvalidIdentifier` (section 5,
   `mal.11`), not a structural `InvalidEncoding`. It is checked when that field is read.
@@ -319,6 +327,28 @@ and they are recorded for the profile owner's confirmation:
   (`[MetricErrorV1]`), so it cannot be confused with an unsigned result.
 - **G9. `MTR1` acceptance.** A result whose magic or version differs is `UnsupportedVersion`.
   One whose algorithm id or algorithm major differs is `UnsupportedAlgorithm`, at that field.
+- **G10. Nesting depth.** The root array is level 1, a header field level 2, a record level 3
+  and a record field level 4. An array nested deeper than 16 levels is `InvalidEncoding` at
+  the coordinate of the over-deep array (the first array at level 17), found by the structural
+  pass. An array at level 16 or shallower is accepted by this depth rule and is then subject to
+  the type rule of the field that holds it. Every well-formed public record nests at most 3
+  levels, so the cap bounds only the walk of malformed input (`mal.14a`, `mal.14b`).
+- **G11. `MTQ1` shape.** The `MTQ1` fields are named `magic`, `version` and `patterns`, and a
+  pattern is `patterns/<i>`. An `MTQ1` is decoded in this order, and the first failure wins:
+  1. structure: the defects of item 1 and G10, a root that is not an array of exactly 3
+     fields (`InvalidEncoding` at `input`), and a `patterns` field that is not an array
+     (`InvalidEncoding` at `patterns`);
+  2. `magic` and `version`: `UnsupportedVersion` at that field, or `InvalidEncoding` for a
+     wrong CBOR type (G2);
+  3. the `patterns` length: an empty array is `InvalidEncoding` at `patterns`, and more than
+     4,096 patterns is `ResourceLimit` at `patterns`;
+  4. each pattern in index order: an entry that is not an unsigned integer is
+     `InvalidEncoding` at `patterns/<i>`.
+
+  (`mal.16a` to `mal.16d`.)
+- **G12. Header text UTF-8.** Invalid UTF-8 in a header text field is that field's failure,
+  not a structural `InvalidEncoding`: in `magic` it is `UnsupportedVersion` and in
+  `algorithm_id` it is `UnsupportedAlgorithm`, at that field (`mal.15a`, `mal.15b`).
 
 ## 4.7 CDDL
 
@@ -434,7 +464,10 @@ budget or contract failure). Every family is materialized for both `deterministi
 - **denied**: `den.1` a capability other than `read-public-bundle`; `den.2` network use.
 - **malformed**: `mal.1a` to `mal.12b`, and `mal.13a` to `mal.13i`, which have several defects
   each and pin the precedence and first coordinate. Structural defects come before header
-  failures, record failures and trailing bytes.
+  failures, record failures and trailing bytes. `mal.14a` and `mal.14b` nest arrays 16 and 17
+  levels deep (G10); `mal.15a` and `mal.15b` carry invalid UTF-8 in `magic` and `algorithm_id`
+  (G12); `mal.16a` to `mal.16d` are `MTQ1` inputs whose `patterns` is not an array, is empty,
+  holds a text entry or holds 4,097 entries (G11).
 - **resource-exhaustion**: `res.1` declared `record_count` 262,145; `res.2` an `MTI1` member of
   64 MiB + 1 byte, described by its length and rejected by the #222 transport
   (`FieldOutOfBounds`) without being stored in the repository; `res.3` the execution-step
