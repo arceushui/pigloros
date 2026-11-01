@@ -130,7 +130,10 @@ fn check_path(path: &str, files: &[WitFile<'_>]) -> Result<(), Error> {
     if path.split('/').count() > MAX_PATH_SEGMENTS {
         return Err(Error::BoundsExceeded);
     }
-    if !path.ends_with(".wit") {
+    if path
+        .rsplit_once('.')
+        .is_none_or(|(_, extension)| extension != "wit")
+    {
         return Err(Error::UnsupportedFormat);
     }
     if files
