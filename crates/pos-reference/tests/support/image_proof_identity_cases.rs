@@ -1,17 +1,30 @@
 mod identity_cases {
     use super::*;
 
-    fn issuer_proof(attribute_bytes: usize, reverse: bool) -> TestResult<Vec<u8>> {
-        fn attribute(index: usize) -> TestResult<Vec<u8>> {
-            let label = format!("{index:08x}");
+    fn issuer_proof(
+        attribute_bytes: usize,
+        reverse: bool,
+        last_label_padding: usize,
+    ) -> TestResult<Vec<u8>> {
+        fn attribute(index: usize, padding: usize) -> TestResult<Vec<u8>> {
+            let label = format!("{index:0width$x}", width = 8 + padding);
             Ok(x509_cert::attr::AttributeTypeAndValue {
                 oid: ObjectIdentifier::new("2.5.4.3")?,
                 value: der::Any::encode_from(&der::asn1::Utf8StringRef::new(&label)?)?,
             }
             .to_der()?)
         }
-        let count = attribute_bytes / attribute(0)?.len();
-        let mut attributes = (0..count).map(attribute).collect::<TestResult<Vec<_>>>()?;
+        let count = attribute_bytes / attribute(0, 0)?.len();
+        let mut attributes = (0..count)
+            .map(|index| {
+                let padding = if index + 1 == count {
+                    last_label_padding
+                } else {
+                    0
+                };
+                attribute(index, padding)
+            })
+            .collect::<TestResult<Vec<_>>>()?;
         if reverse {
             attributes.reverse();
         }
@@ -27,6 +40,18 @@ mod identity_cases {
                 })
             })
         })
+    }
+
+    fn signer_identifier(proof: &[u8]) -> TestResult<SignerIdentifier> {
+        let outer = ContentInfo::from_der(proof)?;
+        let cms_data: SignedData = outer.content.decode_as()?;
+        Ok(cms_data
+            .signer_infos
+            .0
+            .get(0)
+            .ok_or("missing signer")?
+            .sid
+            .clone())
     }
 
     #[test]
@@ -106,7 +131,7 @@ mod identity_cases {
 
     #[test]
     fn public_proof_verification_bounds_near_limit_issuer_before_decoding() -> TestResult {
-        let proof = issuer_proof(1024 * 1024 - 4096, false)?;
+        let proof = issuer_proof(1024 * 1024 - 4096, false, 0)?;
         assert!(proof.len() > 1024 * 1024 - 4096);
         assert!(proof.len() <= 1024 * 1024);
         assert_eq!(
@@ -119,11 +144,8 @@ mod identity_cases {
     #[test]
     fn public_proof_verification_bounds_sid_before_signer_selection() -> TestResult {
         verify(&fixture(PROOF, CERTIFICATE)?, NOW)??;
-        let proof = issuer_proof(96 * 1024, false)?;
-        let outer = ContentInfo::from_der(&proof)?;
-        let cms_data: SignedData = outer.content.decode_as()?;
-        let signer = cms_data.signer_infos.0.get(0).ok_or("missing signer")?;
-        let SignerIdentifier::IssuerAndSerialNumber(sid) = &signer.sid else {
+        let proof = issuer_proof(96 * 1024, false, 0)?;
+        let SignerIdentifier::IssuerAndSerialNumber(sid) = signer_identifier(&proof)? else {
             return Err("expected issuer-and-serial SID".into());
         };
         assert!(sid.to_der()?.len() > 64 * 1024);
@@ -139,8 +161,23 @@ mod identity_cases {
     }
 
     #[test]
+    fn public_proof_verification_reaches_signer_selection_at_sid_limit() -> TestResult {
+        verify(&fixture(PROOF, CERTIFICATE)?, NOW)??;
+        // 3,854 attributes plus three final-label bytes and 15 bytes of SID structure.
+        let proof = issuer_proof(3_854 * 17, false, 3)?;
+        assert_eq!(signer_identifier(&proof)?.to_der()?.len(), 64 * 1024);
+        assert!(proof.len() <= 1024 * 1024);
+        assert_eq!(
+            verify(&fixture(&proof, CERTIFICATE)?, NOW)?,
+            Err(SandboxImageProofError::UnauthorizedSigner),
+            "at-limit SID must reach signer selection"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn public_proof_verification_rejects_reverse_ordered_bounded_issuer() -> TestResult {
-        let proof = issuer_proof(64 * 1024 - 4096, true)?;
+        let proof = issuer_proof(64 * 1024 - 4096, true, 0)?;
         assert!(proof.len() > 64 * 1024 - 4096);
         assert!(proof.len() <= 64 * 1024);
         assert_eq!(
@@ -152,7 +189,7 @@ mod identity_cases {
 
     #[test]
     fn public_proof_verification_decodes_canonical_bounded_issuer() -> TestResult {
-        let proof = issuer_proof(64 * 1024 - 4096, false)?;
+        let proof = issuer_proof(64 * 1024 - 4096, false, 0)?;
         assert!(proof.len() > 64 * 1024 - 4096);
         assert!(proof.len() <= 64 * 1024);
         assert_eq!(
