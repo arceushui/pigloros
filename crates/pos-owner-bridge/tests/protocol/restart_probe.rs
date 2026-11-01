@@ -424,8 +424,10 @@ fn duplicate_folders_are_refused_before_any_probe_or_orphan_cleanup() -> TestRes
         assert!(log.borrow().is_empty());
 
         // The host corrects the collection through the public store, then explicitly retries.
-        store.delete_record(&a)?;
-        store.delete_record(&b)?;
+        store.delete_record(&records[0])?;
+        if records[1] != records[0] {
+            store.delete_record(&records[1])?;
+        }
         store.write_record(&a)?;
         log.borrow_mut().clear();
         assert_eq!(
