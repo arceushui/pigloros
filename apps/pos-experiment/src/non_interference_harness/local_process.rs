@@ -11,11 +11,26 @@
 //! row's denied channel and runs the subject on the permitted input. The
 //! runner binds the run's provenance (the program bytes, the request and the
 //! response) into the capture.
+//!
+//! The request is written on its own thread while the output is drained, so
+//! a process that writes before it reads cannot deadlock the runner. A host
+//! kill timeout ([`NonInterferenceLocalProcessRunnerV1::with_timeout`]) bounds
+//! every run: a process still running at the deadline is killed and the run
+//! is the operational
+//! [`NonInterferenceNonExecutedCauseV1::Unavailable`], never `Budget`, which
+//! stays reserved for deterministic budgets. Frames are decoded straight into
+//! their typed schema; a frame that fails it is `UnknownField` when its
+//! top-level or capture keys include a key the schema does not declare, and
+//! `Unavailable` otherwise.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use pos_conformance::{
     ExecutionModeV1, NonInterferenceHostRunV1, NonInterferenceRawCaptureV1,
@@ -33,6 +48,29 @@ pub const NON_INTERFERENCE_LOCAL_REQUEST_MAGIC_V1: &str = "NLQ1";
 pub const NON_INTERFERENCE_LOCAL_CAPTURE_MAGIC_V1: &str = "NLC1";
 /// The default bound on one process's standard output.
 pub const DEFAULT_NON_INTERFERENCE_LOCAL_OUTPUT_BUDGET_V1: u64 = 16 * 1024 * 1024;
+/// The default host kill timeout of one process.
+pub const DEFAULT_NON_INTERFERENCE_LOCAL_TIMEOUT_V1: Duration = Duration::from_secs(120);
+
+const REQUEST_FIELDS_V1: [&str; 8] = [
+    "magic",
+    "version",
+    "fixture_id",
+    "variant",
+    "mode",
+    "preparation",
+    "permitted_input",
+    "unauthorized_value",
+];
+const FRAME_FIELDS_V1: [&str; 3] = ["magic", "version", "capture"];
+const CAPTURE_FIELDS_V1: [&str; 6] = [
+    "surface_names",
+    "authoritative",
+    "public",
+    "operational",
+    "unexpected_network_accesses",
+    "provenance_digest",
+];
+const EXIT_POLL_INTERVAL: Duration = Duration::from_millis(5);
 
 const PROVENANCE_DOMAIN_V1: &[u8] = b"PiglorOS.NonInterference.LocalProvenance.v1";
 const MAX_REQUEST_BYTES_V1: u64 = 8 * 1024 * 1024;
@@ -61,6 +99,13 @@ struct CaptureFrameV1 {
     capture: NonInterferenceRawCaptureV1,
 }
 
+/// Only the capture's keys, every value ignored: the second, structural
+/// reading of a frame that failed its schema.
+#[derive(Deserialize)]
+struct CaptureKeysV1 {
+    capture: BTreeMap<String, serde::de::IgnoredAny>,
+}
+
 /// The Local runner: one fresh process per run.
 #[derive(Debug)]
 pub struct NonInterferenceLocalProcessRunnerV1 {
@@ -72,6 +117,7 @@ pub struct NonInterferenceLocalProcessRunnerV1 {
     warm_directory: PathBuf,
     directories: u64,
     output_budget: u64,
+    timeout: Duration,
 }
 
 impl NonInterferenceLocalProcessRunnerV1 {
@@ -92,6 +138,7 @@ impl NonInterferenceLocalProcessRunnerV1 {
             work_root,
             directories: 0,
             output_budget: DEFAULT_NON_INTERFERENCE_LOCAL_OUTPUT_BUDGET_V1,
+            timeout: DEFAULT_NON_INTERFERENCE_LOCAL_TIMEOUT_V1,
         })
     }
 
@@ -118,6 +165,15 @@ impl NonInterferenceLocalProcessRunnerV1 {
         self
     }
 
+    /// Bound one process's run time; a process still running at the
+    /// deadline is killed and the run is
+    /// [`NonInterferenceNonExecutedCauseV1::Unavailable`].
+    #[must_use]
+    pub const fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
     fn fresh_directory(&mut self) -> Result<PathBuf, NonInterferenceNonExecutedCauseV1> {
         self.directories += 1;
         let directory = self.work_root.join(format!("run-{}", self.directories));
@@ -132,6 +188,7 @@ impl NonInterferenceLocalProcessRunnerV1 {
         directory: &Path,
         request: &[u8],
     ) -> Result<Vec<u8>, NonInterferenceNonExecutedCauseV1> {
+        let deadline = Instant::now() + self.timeout;
         let mut child = Command::new(&self.program)
             .args(&self.arguments)
             .env_clear()
@@ -142,36 +199,46 @@ impl NonInterferenceLocalProcessRunnerV1 {
             .stderr(Stdio::null())
             .spawn()
             .map_err(NonInterferenceNonExecutedCauseV1::from)?;
-        let written = child
-            .stdin
-            .take()
-            .map_or(Ok(()), |mut stdin| stdin.write_all(request));
-        let mut output = Vec::new();
-        let read = child.stdout.take().map_or(Ok(0), |stdout| {
-            stdout
-                .take(self.output_budget.saturating_add(1))
-                .read_to_end(&mut output)
+        let writer = child.stdin.take().map(|mut stdin| {
+            let request = request.to_vec();
+            thread::spawn(move || stdin.write_all(&request))
         });
-        if output.len() as u64 > self.output_budget {
-            return child
-                .kill()
-                .and_then(|()| child.wait())
-                .map_err(NonInterferenceNonExecutedCauseV1::from)
-                .and(Err(NonInterferenceNonExecutedCauseV1::Budget));
-        }
-        let status = child
-            .wait()
-            .map_err(NonInterferenceNonExecutedCauseV1::from)?;
-        written
-            .and(read)
-            .map_err(NonInterferenceNonExecutedCauseV1::from)
-            .and_then(|_| {
-                if status.success() {
-                    Ok(output)
+        let (sender, receiver) = mpsc::channel();
+        let limit = self.output_budget.saturating_add(1);
+        let _reader = child.stdout.take().map(|stdout| {
+            thread::spawn(move || {
+                let mut output = Vec::new();
+                sender
+                    .send(stdout.take(limit).read_to_end(&mut output).map(|_| output))
+                    .is_ok()
+            })
+        });
+        let budget = self.output_budget;
+        let outcome = receiver
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .map_err(|_| NonInterferenceNonExecutedCauseV1::Unavailable)
+            .and_then(|read| read.map_err(NonInterferenceNonExecutedCauseV1::from))
+            .and_then(|output| {
+                if output.len() as u64 > budget {
+                    Err(NonInterferenceNonExecutedCauseV1::Budget)
                 } else {
-                    Err(NonInterferenceNonExecutedCauseV1::Unavailable)
+                    Ok(output)
                 }
             })
+            .and_then(|output| exit_status(&mut child, deadline).map(|status| (output, status)));
+        if outcome.is_err() {
+            child.kill().and_then(|()| child.wait()).ok();
+        }
+        let written = writer
+            .and_then(|handle| handle.join().ok())
+            .is_some_and(|written| written.is_ok());
+        outcome.and_then(|(output, status)| {
+            if written && status.success() {
+                Ok(output)
+            } else {
+                Err(NonInterferenceNonExecutedCauseV1::Unavailable)
+            }
+        })
     }
 
     fn provenance(&self, request: &[u8], response: &[u8]) -> [u8; 32] {
@@ -279,7 +346,7 @@ where
 fn decode_request(
     bytes: &[u8],
 ) -> Result<NonInterferenceLocalRequestV1, NonInterferenceNonExecutedCauseV1> {
-    decode::<NonInterferenceLocalRequestV1>(bytes).and_then(|request| {
+    decode::<NonInterferenceLocalRequestV1>(bytes, &REQUEST_FIELDS_V1, None).and_then(|request| {
         if request.magic == NON_INTERFERENCE_LOCAL_REQUEST_MAGIC_V1 && request.version == 1 {
             Ok(request)
         } else {
@@ -291,7 +358,7 @@ fn decode_request(
 fn decode_capture(
     bytes: &[u8],
 ) -> Result<NonInterferenceRawCaptureV1, NonInterferenceNonExecutedCauseV1> {
-    decode::<CaptureFrameV1>(bytes).and_then(|frame| {
+    decode::<CaptureFrameV1>(bytes, &FRAME_FIELDS_V1, Some(&CAPTURE_FIELDS_V1)).and_then(|frame| {
         if frame.magic == NON_INTERFERENCE_LOCAL_CAPTURE_MAGIC_V1 && frame.version == 1 {
             Ok(frame.capture)
         } else {
@@ -306,23 +373,44 @@ fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>, NonInterferenceNonExecuted
         .map_err(|_| NonInterferenceNonExecutedCauseV1::Unavailable)
 }
 
-/// Decode one canonical frame. A field the schema does not declare, at any
-/// depth, is [`NonInterferenceNonExecutedCauseV1::UnknownField`]; any other
-/// malformed frame is [`NonInterferenceNonExecutedCauseV1::Unavailable`].
+/// Wait for the process to exit until `deadline`.
+fn exit_status(
+    child: &mut Child,
+    deadline: Instant,
+) -> Result<ExitStatus, NonInterferenceNonExecutedCauseV1> {
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            Ok(None) if Instant::now() < deadline => thread::sleep(EXIT_POLL_INTERVAL),
+            Ok(None) | Err(_) => return Err(NonInterferenceNonExecutedCauseV1::Unavailable),
+        }
+    }
+}
+
+/// Decode one frame straight into its typed schema. A frame that fails it
+/// is [`NonInterferenceNonExecutedCauseV1::UnknownField`] when a top-level
+/// key is not in `fields` or, with `capture_fields`, a key of its capture is
+/// not in them; any other failure is
+/// [`NonInterferenceNonExecutedCauseV1::Unavailable`].
 fn decode<T: serde::de::DeserializeOwned>(
     bytes: &[u8],
+    fields: &[&str],
+    capture_fields: Option<&[&str]>,
 ) -> Result<T, NonInterferenceNonExecutedCauseV1> {
-    pos_crypto::canonical::decode::<serde_json::Value>(&pos_core::CanonicalBytes::from_vec(
-        bytes.to_vec(),
-    ))
-    .map_err(|_| NonInterferenceNonExecutedCauseV1::Unavailable)
-    .and_then(|value| {
-        serde_json::from_value(value).map_err(|error: serde_json::Error| {
-            if error.to_string().contains("unknown field") {
-                NonInterferenceNonExecutedCauseV1::UnknownField
-            } else {
-                NonInterferenceNonExecutedCauseV1::Unavailable
-            }
-        })
+    ciborium::from_reader::<T, _>(bytes).map_err(|_| {
+        let unknown = |keys: &BTreeMap<String, serde::de::IgnoredAny>, declared: &[&str]| {
+            keys.keys().any(|key| !declared.contains(&key.as_str()))
+        };
+        let top = ciborium::from_reader::<BTreeMap<String, serde::de::IgnoredAny>, _>(bytes)
+            .is_ok_and(|keys| unknown(&keys, fields));
+        let nested = capture_fields.is_some_and(|declared| {
+            ciborium::from_reader::<CaptureKeysV1, _>(bytes)
+                .is_ok_and(|frame| unknown(&frame.capture, declared))
+        });
+        if top || nested {
+            NonInterferenceNonExecutedCauseV1::UnknownField
+        } else {
+            NonInterferenceNonExecutedCauseV1::Unavailable
+        }
     })
 }

@@ -13,11 +13,16 @@
 //! # Modes
 //!
 //! - Local: [`NonInterferenceLocalProcessRunnerV1`] spawns a fresh host
-//!   process for every run.
+//!   process for every run, bounded by a host kill timeout.
 //! - Replay: [`NonInterferenceReplayRunnerV1`] records the subject's run and
 //!   rebuilds its Projection State from the recorded Events alone.
-//! - Fork: [`NonInterferenceForkRunnerV1`] runs the subject in a Fork of its
-//!   Timeline cut at a Tick Boundary.
+//! - Fork: [`NonInterferenceForkRunnerV1`] runs the subject in an ordinary
+//!   Fork of its Timeline cut at a Tick Boundary (`ExperimentSession::fork`).
+//!   Its F-mode evidence is engineering evidence (owner note
+//!   `ADR-062_R8_NonInterference_Harness`, decision 4): it counts for every
+//!   row except `NI-FORK-008`, which needs the ADR-064 records-form artifact
+//!   path of slice R6 (#1225) in slice N4 (#1232), and every F case is re-run
+//!   when Driver-declared provisional Ticks land (#1204).
 //! - Air-Gapped: [`NonInterferenceAirGappedRunnerV1`] is the only runner the
 //!   harness uses for this mode, and every run is the typed non-executed
 //!   [`NonInterferenceNonExecutedCauseV1::Unavailable`] until the
@@ -60,6 +65,7 @@ use std::fmt;
 use std::fs;
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use pos_conformance::{
     execute_non_interference_pair, non_interference_capture_profiles_v1,
@@ -77,7 +83,8 @@ use serde::{Deserialize, Serialize};
 pub use local_process::{
     serve_non_interference_local_subject_v1, NonInterferenceLocalProcessRunnerV1,
     NonInterferenceLocalRequestV1, DEFAULT_NON_INTERFERENCE_LOCAL_OUTPUT_BUDGET_V1,
-    NON_INTERFERENCE_LOCAL_CAPTURE_MAGIC_V1, NON_INTERFERENCE_LOCAL_REQUEST_MAGIC_V1,
+    DEFAULT_NON_INTERFERENCE_LOCAL_TIMEOUT_V1, NON_INTERFERENCE_LOCAL_CAPTURE_MAGIC_V1,
+    NON_INTERFERENCE_LOCAL_REQUEST_MAGIC_V1,
 };
 pub use session::{
     NonInterferenceForkRunnerV1, NonInterferenceReplayRunnerV1,
@@ -92,6 +99,9 @@ pub const NON_INTERFERENCE_PUBLICATION_EXTENSION_V1: &str = "nia1";
 
 const RESULT_DOMAIN_V1: &[u8] = b"PiglorOS.NonInterference.HarnessResult.v1";
 const ARTIFACT_DOMAIN_V1: &[u8] = b"PiglorOS.NonInterference.ExecutionArtifact.v1";
+
+/// Distinguishes the staged files of concurrent publications in one process.
+static STAGED_PUBLICATIONS: AtomicU64 = AtomicU64::new(0);
 
 /// The host executor key that signs every NIA1 the harness produces.
 ///
@@ -156,7 +166,8 @@ pub enum NonInterferenceNonExecutedCauseV1 {
     /// No runner, fixture or capture exists for the coordinate.
     #[error("non-interference case is missing")]
     Missing,
-    /// The case was deliberately not run.
+    /// The case was deliberately not run. Only a runner or its subject
+    /// reports it: no harness source emits `Skipped`.
     #[error("non-interference case was skipped")]
     Skipped,
     /// The runner or its subject does not support the coordinate.
@@ -562,10 +573,14 @@ pub fn non_interference_publication_path_v1(
 /// Publish one executed case's canonical NIA1 at its content address below
 /// the `fixtures/conformance` root and return the path.
 ///
-/// Publication is immutable: an existing file is never rewritten. When the
-/// artifact cannot be written, the bytes already at its address decide:
-/// the same bytes are the same publication and return the same path,
-/// different bytes are a [`NonInterferencePublicationErrorV1::Conflict`].
+/// Publication is atomic and immutable: the bytes are written and synced to
+/// a staged file in the publication directory, which is then hard-linked to
+/// the content address, so the address never holds a partial artifact, and
+/// an existing file is never rewritten. The staged file is removed. When the
+/// artifact cannot be linked, the bytes already at its address decide: the
+/// same bytes are the same publication and return the same path, any other
+/// bytes (a stray truncated file included) are a
+/// [`NonInterferencePublicationErrorV1::Conflict`].
 /// Only an executed case can be published; publication changes no
 /// inventory.
 ///
@@ -576,18 +591,27 @@ pub fn publish_non_interference_execution_v1(
     fixtures_root: &Path,
     execution: &NonInterferenceSignedExecutionV1,
 ) -> Result<PathBuf, NonInterferencePublicationErrorV1> {
+    let directory = fixtures_root.join(NON_INTERFERENCE_PUBLICATION_DIRECTORY_V1);
     let path = non_interference_publication_path_v1(fixtures_root, &execution.content_digest);
-    let written = fs::create_dir_all(fixtures_root.join(NON_INTERFERENCE_PUBLICATION_DIRECTORY_V1))
-        .and_then(|()| {
-            fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&path)
-        })
-        .and_then(|mut file| {
-            file.write_all(&execution.bytes)
-                .and_then(|()| file.sync_all())
-        });
+    let staged = directory.join(format!(
+        ".{}.{}.{}.staged",
+        hex(&execution.content_digest),
+        std::process::id(),
+        STAGED_PUBLICATIONS.fetch_add(1, Ordering::Relaxed)
+    ));
+    let written = fs::create_dir_all(&directory).and_then(|()| {
+        let linked = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&staged)
+            .and_then(|mut file| {
+                file.write_all(&execution.bytes)
+                    .and_then(|()| file.sync_all())
+            })
+            .and_then(|()| fs::hard_link(&staged, &path));
+        let removed = fs::remove_file(&staged);
+        linked.and(removed)
+    });
     written
         .or_else(|error| {
             fs::read(&path)

@@ -1,4 +1,6 @@
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+// The Local runner tests spawn `/bin/sh` and the probe binary as POSIX processes.
+#![cfg(unix)]
 
 //! Public-interface tests for the ADR-059 non-interference mode harness
 //! (ADR-062 Revision 8 slice N0, #1227).
@@ -844,6 +846,33 @@ fn the_local_runner_refuses_malformed_unknown_and_over_budget_frames() -> TestRe
             b"\xff\x00".to_vec(),
             NonInterferenceNonExecutedCauseV1::Unavailable,
         ),
+        (
+            "capture-unknown",
+            {
+                let mut value = json!({
+                    "magic": NON_INTERFERENCE_LOCAL_CAPTURE_MAGIC_V1,
+                    "version": 1,
+                    "capture": serde_json::to_value(&capture)?,
+                });
+                if let Some(object) = value["capture"].as_object_mut() {
+                    object.insert("extra".to_owned(), json!(1));
+                }
+                pos_crypto::canonical::encode(&value)?.as_slice().to_vec()
+            },
+            NonInterferenceNonExecutedCauseV1::UnknownField,
+        ),
+        (
+            "mistyped",
+            {
+                let value = json!({
+                    "magic": 7,
+                    "version": 1,
+                    "capture": serde_json::to_value(&capture)?,
+                });
+                pos_crypto::canonical::encode(&value)?.as_slice().to_vec()
+            },
+            NonInterferenceNonExecutedCauseV1::Unavailable,
+        ),
     ] {
         let path = frames.path().join(name);
         fs::write(&path, bytes)?;
@@ -1123,6 +1152,17 @@ fn publication_is_immutable_and_changes_no_inventory() -> TestResult {
         b"other-input",
     )?);
     let execution = executed(&outcome)?;
+    // A stray truncated file at the content address is a conflict, never
+    // mistaken for the publication, and is left as it is.
+    let truncated = &execution.canonical_bytes()[..execution.canonical_bytes().len() / 2];
+    let stray = non_interference_publication_path_v1(root.path(), &execution.content_digest());
+    fs::write(&stray, truncated)?;
+    assert_eq!(
+        publish_non_interference_execution_v1(root.path(), execution),
+        Err(NonInterferencePublicationErrorV1::Conflict)
+    );
+    assert_eq!(fs::read(&stray)?, truncated);
+    fs::remove_file(&stray)?;
     // Different bytes at the content address are a conflict, never a rewrite.
     let address = non_interference_publication_path_v1(root.path(), &execution.content_digest());
     fs::write(&address, b"other bytes")?;
@@ -1430,7 +1470,7 @@ fn the_local_output_budget_is_inclusive_and_defaults_to_16_mib() -> TestResult {
     // The default budget is 16 MiB: 16 MiB of output is read (and is not a
     // frame), one byte more is over the budget.
     assert_eq!(
-        DEFAULT_NON_INTERFERENCE_LOCAL_OUTPUT_BUDGET_V1,
+        DEFAULT_NON_INTERFERENCE_LOCAL_OUTPUT_BUDGET_V1, DEFAULT_NON_INTERFERENCE_LOCAL_TIMEOUT_V1,
         16 * 1024 * 1024
     );
     for (bytes, cause) in [
@@ -1567,5 +1607,85 @@ fn a_report_names_the_first_unequal_mode_divergence() -> TestResult {
         ),
         Ok(false)
     );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Hang guard and concurrent pipes
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_local_process_that_outlives_the_timeout_is_killed_and_unavailable() -> TestResult {
+    let work = tempfile::tempdir()?;
+    let unused = work.path().join("unused");
+    let fixture = probe_fixture(
+        NonInterferenceVariantV1::Success,
+        ExecutionModeV1::Local,
+        b"probe-input",
+    )?;
+    let timeout = std::time::Duration::from_millis(400);
+    assert!(DEFAULT_NON_INTERFERENCE_LOCAL_TIMEOUT_V1 > timeout);
+    for (name, script) in [
+        // Never writes and never exits.
+        ("silent", "cat >/dev/null; exec sleep 30"),
+        // Closes its output, then never exits.
+        ("closed", "cat >/dev/null; exec 1>&-; exec sleep 30"),
+    ] {
+        let started = std::time::Instant::now();
+        let mut harness = harness_with(vec![Box::new(
+            shell_runner(&work.path().join(name), script, &unused)?.with_timeout(timeout),
+        )]);
+        assert_eq!(
+            cause_of(&mut harness, &fixture),
+            Some(NonInterferenceNonExecutedCauseV1::Unavailable),
+            "{name}"
+        );
+        // Both runs of the pair are bounded by the timeout.
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(20),
+            "{name}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn a_local_process_that_writes_over_64_kib_before_reading_does_not_deadlock() -> TestResult {
+    let work = tempfile::tempdir()?;
+    let frames = tempfile::tempdir()?;
+    let mut capture = local_probe_subject_v1(
+        &NonInterferenceLocalRequestV1 {
+            magic: NON_INTERFERENCE_LOCAL_REQUEST_MAGIC_V1.to_owned(),
+            version: 1,
+            fixture_id: LOCAL_PROBE_FIXTURE_ID_V1.to_owned(),
+            variant: NonInterferenceVariantV1::Success,
+            mode: ExecutionModeV1::Local,
+            preparation: NonInterferencePreparationV1::Cold,
+            permitted_input: b"probe-input".to_vec(),
+            unauthorized_value: CONTROL.to_vec(),
+        },
+        frames.path(),
+    )?;
+    capture.public[0].extend(std::iter::repeat_n(b'p', 70_000));
+    let frame = json!({
+        "magic": NON_INTERFERENCE_LOCAL_CAPTURE_MAGIC_V1,
+        "version": 1,
+        "capture": serde_json::to_value(&capture)?,
+    });
+    let frame = pos_crypto::canonical::encode(&frame)?.as_slice().to_vec();
+    assert!(frame.len() > 64 * 1024);
+    let path = frames.path().join("large");
+    fs::write(&path, &frame)?;
+    // The request is larger than a pipe buffer too.
+    let fixture = probe_fixture(
+        NonInterferenceVariantV1::Success,
+        ExecutionModeV1::Local,
+        &vec![b'a'; 70_000],
+    )?;
+    let mut harness = harness_with(vec![Box::new(
+        shell_runner(work.path(), "cat \"$1\"; cat >/dev/null", &path)?
+            .with_timeout(std::time::Duration::from_secs(60)),
+    )]);
+    assert_eq!(harness.execute_case(&fixture).claim(), Some(true));
     Ok(())
 }
