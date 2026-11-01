@@ -10,6 +10,7 @@ use crate::selector::installation::fixture::{
     materialize_state, ImageSigning,
 };
 use crate::selector::installation::{InstalledSelectorState, SANDBOX_ARTIFACT_ROOT};
+use crate::selector::SelectorBoundaryError;
 
 #[test]
 fn held_image_admission_accepts_full_length_arguments() -> TestResult {
@@ -32,7 +33,7 @@ fn held_image_admission_accepts_full_length_arguments() -> TestResult {
             ddi_salt("x86-64")?,
             arguments,
         )?;
-        assert_public_admission(state, |snapshot| {
+        assert_public_admission(state, true, "full-length arguments", |snapshot| {
             assert_eq!(snapshot.image().manifest().arguments.as_slice(), arguments);
         })?;
     }
@@ -60,24 +61,84 @@ fn held_image_admission_accepts_two_mib_signature_partition() -> TestResult {
             &ImageSigning::ddi("x86-64")?,
             ddi_salt("x86-64")?,
         )?;
-        assert_public_admission(state, |snapshot| {
+        assert_public_admission(state, true, "signature partition length", |snapshot| {
             assert_eq!(snapshot.image().manifest().partitions, *partitions);
         })?;
     }
     Ok(())
 }
 
+#[test]
+fn held_image_admission_enforces_inclusive_gpt_usable_bounds() -> TestResult {
+    const SECTOR: usize = 512;
+    if matches!(
+        isolated_role(
+            "root_selector::tests::admission_bounds::held_image_admission_enforces_inclusive_gpt_usable_bounds"
+        )?,
+        IsolatedCompositionRole::Delegated
+    ) {
+        return Ok(());
+    }
+    // The whole-installation fixture's signed records select x86-64.
+    let (original, partitions) = ddi_fixture("x86-64")?;
+    let first = partitions[0].start_bytes / 512;
+    let signature = &partitions[2];
+    let last = (signature.start_bytes + signature.length_bytes) / 512 - 1;
+    for (field, usable, accepted) in [
+        (40, first, true),
+        (40, first + 1, false),
+        (48, last, true),
+        (48, last - 1, false),
+    ] {
+        let mut image = original.clone();
+        let backup = image.len() - SECTOR;
+        // Keep both tables and all signed partition extents unchanged.
+        // Equal header bounds admit the edge partition; moving a bound
+        // inward by one sector excludes it without another GPT mismatch.
+        for header in [SECTOR, backup] {
+            image[header + field..header + field + 8].copy_from_slice(&usable.to_le_bytes());
+            refresh_table_crc(&mut image, header, SECTOR)?;
+        }
+        let state = admitted_state_with_salt(
+            &image,
+            b"adapter",
+            &partitions,
+            &ImageSigning::ddi("x86-64")?,
+            ddi_salt("x86-64")?,
+        )?;
+        assert_public_admission(
+            state,
+            accepted,
+            &format!("GPT header field {field}, usable LBA {usable}"),
+            |snapshot| {
+                assert_eq!(snapshot.image().manifest().partitions, partitions);
+            },
+        )?;
+    }
+    Ok(())
+}
+
 fn assert_public_admission(
     state: InstalledSelectorState,
+    accepted: bool,
+    context: &str,
     check: impl FnOnce(&ProviderImageSnapshot),
 ) -> TestResult {
     let _paths = FixedCompositionFixture::create()?;
     let installed = materialize_state(Path::new(SANDBOX_ARTIFACT_ROOT), state)?;
     let request = request_for(&installed)?.to_canonical_cbor()?;
     let opened = ProviderImageSnapshot::open(&request);
+    if !accepted {
+        assert_eq!(
+            opened.err(),
+            Some(SelectorBoundaryError::ArtifactInvalid),
+            "{context}"
+        );
+        return Ok(());
+    }
     assert!(
         opened.is_ok(),
-        "valid bounded image rejected by public snapshot admission: {:?}",
+        "valid bounded image rejected by public snapshot admission: {:?}; {context}",
         opened.as_ref().err()
     );
     let snapshot = opened?;
