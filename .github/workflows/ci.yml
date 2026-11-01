@@ -935,6 +935,9 @@ jobs:
           --exclude 'src/nested_imported_fork_replay_tests.rs'
           --exclude 'src/nested_imported_fork_replay_tests/intermediate_privacy.rs'
           --exclude 'src/ordinary_fork_lineage_tests.rs'
+          --exclude 'src/execute/tests/ownership.rs'
+          --exclude 'src/provider_barrier/tests.rs'
+          --exclude 'src/execute/tests/ownership/abandonment.rs'
           --format json
           --output "${{ runner.temp }}/cargo-crap-baseline.json"
       - name: Analyze CRAP score changes
@@ -973,6 +976,9 @@ jobs:
           --exclude 'src/nested_imported_fork_replay_tests.rs'
           --exclude 'src/nested_imported_fork_replay_tests/intermediate_privacy.rs'
           --exclude 'src/ordinary_fork_lineage_tests.rs'
+          --exclude 'src/execute/tests/ownership.rs'
+          --exclude 'src/provider_barrier/tests.rs'
+          --exclude 'src/execute/tests/ownership/abandonment.rs'
           --baseline "${{ runner.temp }}/cargo-crap-baseline.json"
           --epsilon 0
           --format json
