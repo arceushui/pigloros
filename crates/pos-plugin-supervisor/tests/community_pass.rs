@@ -100,6 +100,74 @@ fn a_pass_commits_every_draft_atomically_and_only_then_the_state() {
     assert_eq!(alpha.committed_state().bytes, b"initial++");
 }
 
+/// ADR-124 gate 1: an empty Event batch may still change Plugin state.
+/// Both stores below are in-memory fixtures; this is not restart-durability evidence.
+#[test]
+fn a_state_only_pass_adopts_state_without_an_event_or_pipeline_receipt() {
+    for kind in StoreKind::ALL {
+        let mut world = World::on(kind, PROBE);
+        let handle = world.add("alpha", "community.alpha", b"output", PROMPT);
+        let staged = ok(world.stage());
+        assert_eq!(handle.committed_state(), initial(), "{}", kind.tag());
+        assert_eq!(dispositions(&handle), [ReceiptDispositionV1::Staged]);
+        assert!(world.events().is_empty());
+
+        assert!(ok(world.admit(&staged)).is_none(), "{}", kind.tag());
+        assert_eq!(handle.committed_state().schema, [1; 32]);
+        assert_eq!(handle.committed_state().bytes, b"next");
+        assert_eq!(dispositions(&handle), [ReceiptDispositionV1::Committed]);
+        assert!(world.events().is_empty());
+        assert_eq!(ok(world.store.logical_head(world.timeline)).as_u64(), 0);
+    }
+}
+
+#[test]
+fn aborting_a_state_only_pass_discards_its_staged_state() {
+    for kind in StoreKind::ALL {
+        let mut world = World::on(kind, PROBE);
+        let handle = world.add("alpha", "community.alpha", b"output", PROMPT);
+        let _staged = ok(world.stage());
+        assert_eq!(dispositions(&handle), [ReceiptDispositionV1::Staged]);
+        world.registry.abort_step();
+        assert_eq!(handle.committed_state(), initial(), "{}", kind.tag());
+        assert_eq!(dispositions(&handle), [ReceiptDispositionV1::Discarded]);
+        assert!(world.events().is_empty());
+
+        assert!(ok(world.pass()).is_none());
+        assert_eq!(handle.committed_state().bytes, b"next");
+        assert_eq!(
+            dispositions(&handle),
+            [
+                ReceiptDispositionV1::Discarded,
+                ReceiptDispositionV1::Committed
+            ]
+        );
+        assert!(world.events().is_empty());
+    }
+}
+
+#[test]
+fn a_failed_peer_discards_a_state_only_members_output() {
+    for kind in StoreKind::ALL {
+        let mut world = World::on(kind, PROBE);
+        let alpha = world.add("alpha", "community.alpha", b"output", PROMPT);
+        let beta = world.add("beta", "community.beta", b"fuel", PROMPT);
+        let failure = err(world.pass());
+        assert_eq!(
+            classify_pass_failure(&failure),
+            PassFailureV1::Host(Error::FuelExhausted),
+            "{}",
+            kind.tag()
+        );
+        for handle in [&alpha, &beta] {
+            assert_eq!(handle.committed_state(), initial());
+            assert_eq!(dispositions(handle), [ReceiptDispositionV1::Discarded]);
+        }
+        assert!(world.events().is_empty());
+        assert_eq!(ok(world.store.logical_head(world.timeline)).as_u64(), 0);
+    }
+}
+
 /// The store-independent fields of one committed Event.
 ///
 /// The Event ID and wall time are left out: every store mints its own.
