@@ -318,7 +318,7 @@ fn preserves_the_pinned_parsers_type_depth_guard() {
 }
 
 #[test]
-fn validates_ustar_numeric_metadata_and_terminators() -> Result<(), Error> {
+fn validates_ustar_numeric_metadata_and_terminators() {
     let mut legal = archive(&[("main.wit", WORLD)]);
     reheader(&mut legal, |header| {
         header[100..108].copy_from_slice(b"0000644 ");
@@ -372,7 +372,6 @@ fn validates_ustar_numeric_metadata_and_terminators() -> Result<(), Error> {
     bytes[148..150].fill(b'0');
     bytes[150..156].copy_from_slice(&digits);
     assert_eq!(validate_plugin_wit_v1(&bytes), Err(Error::Malformed));
-    Ok(())
 }
 
 fn package_chain(count: usize) -> String {
