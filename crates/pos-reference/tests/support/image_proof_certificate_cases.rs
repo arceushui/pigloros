@@ -187,6 +187,51 @@ fn certificate_defect(certificate: &mut Certificate, defect: CertificateDefect) 
 }
 
 #[test]
+fn public_proof_verification_rejects_signed_non_profile_rsa_moduli() -> TestResult {
+    #[derive(der::Sequence)]
+    struct FixtureRsaKey<'a> {
+        modulus: der::asn1::UintRef<'a>,
+        exponent: der::asn1::UintRef<'a>,
+    }
+
+    verify(&fixture(PROOF, CERTIFICATE)?, NOW)??;
+    for (bits, proof, certificate) in [
+        (
+            2047_usize,
+            &include_bytes!("../vectors/sim1-pkcs7/rsa-2047-proof.der")[..],
+            &include_bytes!("../vectors/sim1-pkcs7/rsa-2047-signer.der")[..],
+        ),
+        (
+            3072_usize,
+            &include_bytes!("../vectors/sim1-pkcs7/rsa-3072-proof.der")[..],
+            &include_bytes!("../vectors/sim1-pkcs7/rsa-3072-signer.der")[..],
+        ),
+    ] {
+        let parsed = Certificate::from_der(certificate)?;
+        let tbs = &parsed.tbs_certificate;
+        assert!(tbs.validity.not_before.to_unix_duration().as_secs() < NOW);
+        assert!(tbs.validity.not_after.to_unix_duration().as_secs() > NOW);
+        let key_bytes = tbs
+            .subject_public_key_info
+            .subject_public_key
+            .as_bytes()
+            .ok_or("unaligned fixture public key")?;
+        let key = FixtureRsaKey::from_der(key_bytes)?;
+        let modulus = key.modulus.as_bytes();
+        let first = modulus.first().ok_or("empty fixture modulus")?;
+        let actual_bits = modulus.len() * 8 - usize::try_from(first.leading_zeros())?;
+        assert_eq!(actual_bits, bits);
+        assert_eq!(key.exponent.as_bytes(), &[1, 0, 1]);
+        assert_eq!(
+            verify(&fixture(proof, certificate)?, NOW)?,
+            Err(SandboxImageProofError::UnsupportedProfile),
+            "signed RSA-{bits} proof must be rejected by the RSA-2048 profile"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn public_proof_verification_rejects_invalid_certificate_identity_and_crypto() -> TestResult {
     for (defect, expected) in [
         (
