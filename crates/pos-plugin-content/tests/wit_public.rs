@@ -56,6 +56,21 @@ fn accepts_regular_ustar_files_and_both_regular_type_flags() -> Result<(), Error
 }
 
 #[test]
+fn bounds_the_final_payload_without_consuming_the_two_end_blocks() {
+    for size in [512, 1024] {
+        let mut source = WORLD.to_vec();
+        source.resize(size, b' ');
+        let mut bytes = archive(&[("main.wit", &source)]);
+        assert_eq!(bytes.len(), 512 + size + 1024);
+        assert_eq!(validate_plugin_wit_v1(&bytes), Ok(()));
+        reheader(&mut bytes, |header| {
+            header[124..136].copy_from_slice(format!("{:011o}\0", size + 1).as_bytes());
+        });
+        assert_eq!(validate_plugin_wit_v1(&bytes), Err(Error::Malformed));
+    }
+}
+
+#[test]
 fn resolves_split_packages_and_supplied_dependencies() -> Result<(), Error> {
     assert_eq!(
         validate_plugin_wit_v1(&archive(&[

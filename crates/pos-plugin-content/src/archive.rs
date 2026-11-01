@@ -3,6 +3,8 @@
 use super::PluginWitContentErrorV1 as Error;
 
 const BLOCK: usize = 512;
+// The ustar terminator occupies two complete 512-byte blocks.
+const END_BYTES: usize = 1024;
 const MAX_ARCHIVE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_FILES: usize = 256;
 const MAX_PATH_SEGMENTS: usize = 32;
@@ -33,7 +35,9 @@ pub(super) fn read(bytes: &[u8]) -> Result<Vec<WitFile<'_>>, Error> {
         let path = path(header)?;
         check_path(&path, &files)?;
         let rest = &bytes[cursor + BLOCK..];
-        let size = payload_size(&header[124..136], rest.len())?;
+        // Payload bytes cannot consume the mandatory archive terminator.
+        let available = rest.len().saturating_sub(END_BYTES);
+        let size = payload_size(&header[124..136], available)?;
         // size is at most the remaining 4 MiB, including on 32-bit targets.
         let padded = size.div_ceil(BLOCK) * BLOCK;
         // rest contains complete blocks and size <= rest.len(), so rounding
@@ -49,7 +53,8 @@ pub(super) fn read(bytes: &[u8]) -> Result<Vec<WitFile<'_>>, Error> {
 }
 
 fn end(bytes: &[u8]) -> Result<(), Error> {
-    if bytes.len() < 2 * BLOCK || bytes.iter().any(|byte| *byte != 0) {
+    // read already obtained one whole block; only a single-block tail is short.
+    if bytes.len() == BLOCK || bytes.iter().any(|byte| *byte != 0) {
         Err(Error::Malformed)
     } else {
         Ok(())
