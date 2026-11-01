@@ -1,88 +1,172 @@
+# Temporary manual-only #437 offline fixture producer, not a shipping workflow.
 name: sim1-proof-risk
 
 on:
-  pull_request:
-    paths:
-      - Cargo.lock
-      - Cargo.toml
-      - rust-toolchain.toml
-      - crates/pos-reference/**
-      - scripts/measure_sim1_proof_heap.py
-      - .github/workflows/sim1-proof-risk.yml
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: sim1-proof-risk-${{ github.ref }}
-  cancel-in-progress: true
+  group: rsa-profile-fixtures-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  heap-measurement:
+  rsa-profile-fixtures:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    env:
-      CARGO_TERM_COLOR: never
-      RUSTFLAGS: -D warnings
-      PROFILE_SOURCE_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: 7c322f838127662601c24c01225c14d3f854c11e
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
-        with:
-          toolchain: 1.97.1
-      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
-        with:
-          # Pull-request-only workflow: it never runs on main, so like the
-          # mutation workflow it keeps its own PR-scoped cache key.
-          shared-key: sim1-proof-risk
-      - name: Install heap profiler
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends valgrind
-      - name: Build the public admission test executable
+      - name: Generate signed non-profile RSA fixtures with valid admission times
+        env:
+          FIXTURE_SOURCE: 7c322f838127662601c24c01225c14d3f854c11e
+          FIXTURE_OUTPUT: ${{ runner.temp }}/rsa-profile-fixtures
         run: |
           set -euo pipefail
-          cargo test -p pos-reference --test sandbox_admission_contract_public \
-            --all-features --locked --no-run --message-format=json > /tmp/sim1-build.json
-      - name: Measure adversarial near-limit proof inputs
-        run: python3 scripts/measure_sim1_proof_heap.py /tmp/sim1-build.json sim1-heap-report
-      - name: Check all public admission cases on the measured build
-        run: |
-          cargo test -p pos-reference --test sandbox_admission_contract_public \
-            --all-features --locked -- --include-ignored
-      - name: Retain heap traces and exact-source metadata
-        if: ${{ always() && !cancelled() }}
+          umask 077
+          test "$(git rev-parse HEAD)" = "$FIXTURE_SOURCE"
+          mkdir -m 700 "$FIXTURE_OUTPUT"
+          fixture_private="$(mktemp -d "${RUNNER_TEMP}/rsa-profile-private.XXXXXX")"
+          trap 'rm -rf -- "$fixture_private"' EXIT
+          cp crates/pos-reference/tests/vectors/sim1-pkcs7/root-hash.txt "$fixture_private/root-hash.txt"
+          openssl version -a > "$FIXTURE_OUTPUT/openssl-version.txt"
+          for bits in 2047 3072; do
+            export RSA_FIXTURE_BITS="$bits"
+            mkdir "$fixture_private/rsa-$bits"
+            cd "$fixture_private/rsa-$bits"
+            mkdir issued
+            : > index.txt
+            printf '01\n' > serial
+            cat > ca.cnf <<'CONFIG'
+          [ca]
+          default_ca = fixture_ca
+          [fixture_ca]
+          database = index.txt
+          new_certs_dir = issued
+          serial = serial
+          certificate = bootstrap.pem
+          private_key = key.pem
+          default_md = sha256
+          default_days = 1
+          policy = fixture_policy
+          x509_extensions = fixture_leaf
+          [fixture_policy]
+          commonName = supplied
+          [fixture_leaf]
+          basicConstraints = critical,CA:FALSE
+          keyUsage = critical,digitalSignature
+          extendedKeyUsage = codeSigning
+          CONFIG
+            openssl req -new -newkey "rsa:$bits" -nodes -sha256 \
+              -keyout key.pem -out request.pem -subj "/CN=SIM1 RSA-$bits fixture"
+            openssl x509 -req -in request.pem -signkey key.pem -sha256 \
+              -set_serial 2 -days 1 -out bootstrap.pem
+            openssl ca -batch -selfsign -config ca.cnf -in request.pem \
+              -keyfile key.pem -cert bootstrap.pem -md sha256 -notext \
+              -startdate 20260101000000Z -enddate 20360101000000Z -out certificate.pem
+            openssl x509 -in certificate.pem -outform DER -out "$FIXTURE_OUTPUT/rsa-$bits-signer.der"
+            openssl smime -sign -binary -noattr -md sha256 \
+              -in ../root-hash.txt -signer certificate.pem -inkey key.pem \
+              -outform DER -out "$FIXTURE_OUTPUT/rsa-$bits-proof.der"
+            openssl x509 -in certificate.pem -pubkey -noout > public.pem
+            openssl rsa -in key.pem -modulus -noout > modulus.txt
+            python3 - <<'CERT'
+          import os
+          from pathlib import Path
+          data = (Path(os.environ['FIXTURE_OUTPUT']) / ('rsa-' + os.environ['RSA_FIXTURE_BITS'] + '-signer.der')).read_bytes()
+          def tlv(offset):
+              tag = data[offset]
+              length = data[offset + 1]
+              start = offset + 2
+              if length & 128:
+                  count = length & 127
+                  assert 0 < count <= 4
+                  length = int.from_bytes(data[start:start + count], 'big')
+                  start += count
+              end = start + length
+              assert end <= len(data)
+              return tag, start, end
+          tag, start, end = tlv(0)
+          assert tag == 48 and end == len(data)
+          tbs_tag, _, tbs_end = tlv(start)
+          assert tbs_tag == 48
+          _, _, algorithm_end = tlv(tbs_end)
+          sig_tag, sig_start, sig_end = tlv(algorithm_end)
+          assert sig_tag == 3 and sig_end == end and data[sig_start] == 0
+          Path('certificate-tbs.der').write_bytes(data[start:tbs_end])
+          Path('certificate-signature.bin').write_bytes(data[sig_start + 1:sig_end])
+          CERT
+            printf 'RSA-%s controls\n' "$bits" >> "$FIXTURE_OUTPUT/crypto-controls.log"
+            openssl pkey -in key.pem -check -noout >> "$FIXTURE_OUTPUT/crypto-controls.log" 2>&1
+            openssl dgst -sha256 -verify public.pem -signature certificate-signature.bin \
+              certificate-tbs.der >> "$FIXTURE_OUTPUT/crypto-controls.log" 2>&1
+            openssl cms -verify -binary -inform DER -in "$FIXTURE_OUTPUT/rsa-$bits-proof.der" \
+              -content ../root-hash.txt -noverify -out verified-content.bin \
+              >> "$FIXTURE_OUTPUT/crypto-controls.log" 2>&1
+            cmp ../root-hash.txt verified-content.bin
+            openssl x509 -in certificate.pem -noout -startdate -enddate -serial -subject -issuer \
+              > certificate-identity.txt
+            python3 - <<'PROFILE'
+          import datetime
+          import json
+          import os
+          from pathlib import Path
+          bits = int(os.environ['RSA_FIXTURE_BITS'])
+          text = Path('modulus.txt').read_text().strip()
+          assert text.startswith('Modulus=')
+          modulus = int(text.split('=', 1)[1], 16)
+          assert modulus.bit_length() == bits
+          encoded = modulus.to_bytes((bits + 7) // 8, 'big')
+          identity = dict(line.split('=', 1) for line in Path('certificate-identity.txt').read_text().splitlines())
+          dates = [int(datetime.datetime.strptime(identity[n], '%b %d %H:%M:%S %Y GMT').replace(tzinfo=datetime.timezone.utc).timestamp()) for n in ['notBefore', 'notAfter']]
+          assert dates == [1_767_225_600, 2_082_758_400] and dates[0] < 1_800_000_000 < dates[1]
+          assert identity['issuer'] == identity['subject']
+          expected_length = 256 if bits == 2047 else 384
+          assert len(encoded) == expected_length
+          assert (encoded[0] < 128) == (bits == 2047)
+          row = {'bits': bits, 'unsigned_modulus_bytes': len(encoded), 'first_modulus_byte': encoded[0],
+                 'validity_unix_seconds': dates, 'subject': identity['subject'], 'serial_hex': identity['serial']}
+          (Path(os.environ['FIXTURE_OUTPUT']) / ('profile-' + str(bits) + '.json')).write_text(json.dumps(row))
+          PROFILE
+          done
+          cd "$fixture_private"
+          python3 - <<'MANIFEST'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          output = Path(os.environ['FIXTURE_OUTPUT'])
+          profiles = [json.loads((output / ('profile-' + str(bits) + '.json')).read_text()) for bits in [2047, 3072]]
+          for bits in [2047, 3072]:
+              (output / ('profile-' + str(bits) + '.json')).unlink()
+          names = ['rsa-2047-signer.der', 'rsa-2047-proof.der', 'rsa-3072-signer.der', 'rsa-3072-proof.der', 'openssl-version.txt', 'crypto-controls.log']
+          files = {}
+          for name in names:
+              data = (output / name).read_bytes()
+              assert 0 < len(data) < 64 * 1024
+              files[name] = {'bytes': len(data), 'sha256': hashlib.sha256(data).hexdigest()}
+          manifest = {'source_checkout': os.environ['FIXTURE_SOURCE'], 'producer_commit': os.environ['GITHUB_SHA'],
+                      'profiles': profiles, 'files': files,
+                      'root_hash_sha256': hashlib.sha256(Path('root-hash.txt').read_bytes()).hexdigest(),
+                      'controls': ['OpenSSL private-key consistency check', 'direct certificate TBS self-signature', 'detached CMS signature without path validation', 'exact detached content equality'],
+                      'limits': 'Offline signed fixture production only; no project acceptance, profile bypass, native, heap or full-ticket claim. Private keys never uploaded.'}
+          (output / 'fixture-manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
+          print(json.dumps({'generated_profiles': profiles, 'public_files': names}))
+          MANIFEST
+      - name: Upload public signed fixtures and bounded provenance only
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: sim1-proof-heap-${{ github.event.pull_request.head.sha || github.sha }}
-          path: sim1-heap-report/
+          name: rsa-profile-fixtures
+          path: |
+            ${{ runner.temp }}/rsa-profile-fixtures/rsa-2047-signer.der
+            ${{ runner.temp }}/rsa-profile-fixtures/rsa-2047-proof.der
+            ${{ runner.temp }}/rsa-profile-fixtures/rsa-3072-signer.der
+            ${{ runner.temp }}/rsa-profile-fixtures/rsa-3072-proof.der
+            ${{ runner.temp }}/rsa-profile-fixtures/openssl-version.txt
+            ${{ runner.temp }}/rsa-profile-fixtures/crypto-controls.log
+            ${{ runner.temp }}/rsa-profile-fixtures/fixture-manifest.json
           if-no-files-found: error
-          retention-days: 30
-
-  # #437 verifier evidence: the public admission contract cases, including the
-  # SIM1 verifier and systemd-repart fixture cases, must pass on aarch64 too.
-  # No systemd or kernel runs here; that two-architecture gate is #444.
-  public-admission-aarch64:
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 30
-    env:
-      CARGO_TERM_COLOR: never
-      RUSTFLAGS: -D warnings
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
-        with:
-          toolchain: 1.97.1
-      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
-        with:
-          shared-key: sim1-proof-risk-aarch64
-      - name: Check all public admission cases on aarch64
-        run: |
-          test "$(uname -m)" = aarch64
-          cargo test -p pos-reference --test sandbox_admission_contract_public \
-            --all-features --locked -- --include-ignored
+          retention-days: 7
