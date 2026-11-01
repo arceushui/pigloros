@@ -5694,6 +5694,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "pos-plugin-content"
+version = "0.1.0"
+dependencies = [
+ "pos-crypto",
+ "thiserror 2.0.21",
+ "wit-parser",
+]
+
+[[package]]
 name = "pos-plugin-eval"
 version = "0.1.0"
 dependencies = [
