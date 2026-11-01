@@ -1,0 +1,272 @@
+//! WIT preflight contracts through the public seam; no filesystem fixture is read.
+
+use pos_plugin_content::{validate_plugin_wit_v1, PluginWitContentErrorV1 as Error};
+
+mod support;
+
+use support::{archive, reheader, WORLD};
+
+#[test]
+fn accepts_regular_ustar_files_and_both_regular_type_flags() -> Result<(), Error> {
+    let mut bytes = archive(&[("main.wit", WORLD)]);
+    validate_plugin_wit_v1(&bytes)?;
+    reheader(&mut bytes, |header| header[156] = 0);
+    validate_plugin_wit_v1(&bytes)
+}
+
+#[test]
+fn resolves_split_packages_and_supplied_dependencies() -> Result<(), Error> {
+    validate_plugin_wit_v1(&archive(&[
+        (
+            "a.wit",
+            b"package pigloros:plugin@0.1.0; interface helper {}",
+        ),
+        ("b.wit", b"world community-plugin { import helper; }"),
+    ]))?;
+    validate_plugin_wit_v1(&archive(&[
+        ("deps/other/other.wit", b"package local:other@1.0.0; interface api {}"),
+        ("main.wit", b"package pigloros:plugin@0.1.0; world community-plugin { import local:other/api@1.0.0; }"),
+    ]))
+}
+
+#[test]
+fn accepts_exact_archive_file_count_and_path_depth_limits() -> Result<(), Error> {
+    let names: Vec<_> = (0..256)
+        .map(|index| format!("file-{index:03}.wit"))
+        .collect();
+    let files: Vec<_> = names
+        .iter()
+        .enumerate()
+        .map(|(index, name)| {
+            (
+                name.as_str(),
+                if index == 0 { WORLD } else { b"// sibling\n" },
+            )
+        })
+        .collect();
+    validate_plugin_wit_v1(&archive(&files))?;
+    let name = format!("{}main.wit", "d/".repeat(31));
+    validate_plugin_wit_v1(&archive(&[(&name, WORLD)]))?;
+    let mut bytes = archive(&[("main.wit", WORLD)]);
+    bytes.resize(4 * 1024 * 1024, 0);
+    validate_plugin_wit_v1(&bytes)
+}
+
+#[test]
+fn refuses_one_over_each_admissibility_limit() {
+    let mut bytes = archive(&[("main.wit", WORLD)]);
+    bytes.resize(4 * 1024 * 1024 + 1, 0);
+    assert_eq!(validate_plugin_wit_v1(&bytes), Err(Error::BoundsExceeded));
+    let names: Vec<_> = (0..257)
+        .map(|index| format!("file-{index:03}.wit"))
+        .collect();
+    let files: Vec<_> = names.iter().map(|name| (name.as_str(), WORLD)).collect();
+    assert_eq!(
+        validate_plugin_wit_v1(&archive(&files)),
+        Err(Error::BoundsExceeded)
+    );
+    let name = format!("{}main.wit", "d/".repeat(32));
+    assert_eq!(
+        validate_plugin_wit_v1(&archive(&[(&name, WORLD)])),
+        Err(Error::BoundsExceeded)
+    );
+}
+
+#[test]
+fn accepts_full_width_name_and_prefix_without_nul_terminators() -> Result<(), Error> {
+    let name = format!("{}.wit", "x".repeat(96));
+    validate_plugin_wit_v1(&archive(&[(&name, WORLD)]))?;
+    let path = format!("{}/{name}", "d".repeat(155));
+    assert_eq!(path.len(), 256);
+    validate_plugin_wit_v1(&archive(&[(&path, WORLD)]))
+}
+
+#[test]
+fn refuses_unsafe_paths_order_and_case_or_prefix_collisions() {
+    for path in [
+        "",
+        "/main.wit",
+        "../main.wit",
+        "./main.wit",
+        "a/../main.wit",
+        "a//main.wit",
+        "a/./main.wit",
+        "C:main.wit",
+        "a\\main.wit",
+        "a\n.wit",
+        "é.wit",
+    ] {
+        assert_eq!(
+            validate_plugin_wit_v1(&archive(&[(path, WORLD)])),
+            Err(Error::Malformed),
+            "{path:?}"
+        );
+    }
+    for (first, second) in [
+        ("b.wit", "a.wit"),
+        ("a.wit", "a.wit"),
+        ("A.wit", "a.wit"),
+        ("a.wit", "a.wit/b.wit"),
+        ("Z.wit/a.wit", "z.wit"),
+    ] {
+        assert_eq!(
+            validate_plugin_wit_v1(&archive(&[(first, WORLD), (second, WORLD)])),
+            Err(Error::Malformed),
+            "{first:?}, {second:?}"
+        );
+    }
+}
+
+#[test]
+fn refuses_extensions_links_devices_and_non_wit_members() {
+    for flag in [
+        b'1', b'2', b'3', b'4', b'5', b'6', b'x', b'g', b'L', b'K', b'S',
+    ] {
+        let mut bytes = archive(&[("main.wit", WORLD)]);
+        reheader(&mut bytes, |header| header[156] = flag);
+        assert_eq!(
+            validate_plugin_wit_v1(&bytes),
+            Err(Error::UnsupportedFormat),
+            "{flag}"
+        );
+    }
+    assert_eq!(
+        validate_plugin_wit_v1(&archive(&[("README", WORLD)])),
+        Err(Error::UnsupportedFormat)
+    );
+    for field in [257, 263] {
+        let mut bytes = archive(&[("main.wit", WORLD)]);
+        reheader(&mut bytes, |header| header[field] = b'X');
+        assert_eq!(
+            validate_plugin_wit_v1(&bytes),
+            Err(Error::UnsupportedFormat)
+        );
+    }
+}
+
+#[test]
+fn refuses_bad_checksum_numeric_fields_and_ambiguous_header_strings() {
+    let bytes = archive(&[("main.wit", WORLD)]);
+    let mut changed = bytes.clone();
+    changed[148..156].fill(b'0');
+    assert_eq!(validate_plugin_wit_v1(&changed), Err(Error::Malformed));
+    for value in [b'8', b'+', 0xff] {
+        let mut changed = bytes.clone();
+        reheader(&mut changed, |header| header[124] = value);
+        assert_eq!(validate_plugin_wit_v1(&changed), Err(Error::Malformed));
+    }
+    let mut changed = bytes.clone();
+    reheader(&mut changed, |header| header[124..136].fill(0));
+    assert_eq!(validate_plugin_wit_v1(&changed), Err(Error::Malformed));
+    let mut changed = bytes.clone();
+    changed[148] = 0xff;
+    assert_eq!(validate_plugin_wit_v1(&changed), Err(Error::Malformed));
+    for field in [0, 99, 157, 345, 499, 500] {
+        let mut changed = bytes.clone();
+        reheader(&mut changed, |header| header[field] = 0xff);
+        assert_eq!(
+            validate_plugin_wit_v1(&changed),
+            Err(Error::Malformed),
+            "{field}"
+        );
+    }
+}
+
+#[test]
+fn refuses_truncated_data_padding_or_end_markers() {
+    let bytes = archive(&[("main.wit", WORLD)]);
+    for len in [0, 1, 511, 512, 1024, 1536, bytes.len() - 1] {
+        assert_eq!(
+            validate_plugin_wit_v1(&bytes[..len]),
+            Err(Error::Malformed),
+            "{len}"
+        );
+    }
+    let mut changed = bytes.clone();
+    reheader(&mut changed, |header| {
+        header[124..136].copy_from_slice(b"00077777777\0")
+    });
+    assert_eq!(validate_plugin_wit_v1(&changed), Err(Error::Malformed));
+    let mut changed = bytes.clone();
+    changed[512 + WORLD.len()] = 1;
+    assert_eq!(validate_plugin_wit_v1(&changed), Err(Error::Malformed));
+    let mut changed = bytes;
+    changed[1536] = 1;
+    assert_eq!(validate_plugin_wit_v1(&changed), Err(Error::Malformed));
+}
+
+#[test]
+fn refuses_invalid_utf8_syntax_and_inconsistent_package_or_world_references() {
+    for source in [&[0xff][..], b"not WIT".as_slice()] {
+        assert_eq!(
+            validate_plugin_wit_v1(&archive(&[("main.wit", source)])),
+            Err(Error::Malformed)
+        );
+    }
+    assert_eq!(validate_plugin_wit_v1(&[0; 1024]), Err(Error::Malformed));
+    for source in [
+        b"package pigloros:plugin@0.1.0;".as_slice(),
+        b"package pigloros:plugin@0.2.0; world community-plugin {}".as_slice(),
+        b"package pigloros:plugin@0.1.0; world other {}".as_slice(),
+        b"package pigloros:plugin@0.1.0; world community-plugin { import missing:dep/api@1.0.0; }"
+            .as_slice(),
+    ] {
+        assert_eq!(
+            validate_plugin_wit_v1(&archive(&[("main.wit", source)])),
+            Err(Error::ReferenceMismatch)
+        );
+    }
+    assert_eq!(
+        validate_plugin_wit_v1(&archive(&[
+            ("a.wit", WORLD),
+            ("b.wit", b"package different:package; interface api {}")
+        ])),
+        Err(Error::Malformed)
+    );
+    let duplicate = b"package pigloros:plugin@0.1.0; interface extra {}";
+    assert_eq!(
+        validate_plugin_wit_v1(&archive(&[
+            ("a/main.wit", WORLD),
+            ("b/main.wit", duplicate)
+        ])),
+        Err(Error::ReferenceMismatch)
+    );
+}
+
+#[test]
+fn keeps_parser_diagnostics_out_of_closed_errors() {
+    let error =
+        validate_plugin_wit_v1(&archive(&[("private-name.wit", b"private contents")])).err();
+    assert_eq!(error, Some(Error::Malformed));
+    for error in [
+        Error::BoundsExceeded,
+        Error::UnsupportedFormat,
+        Error::Malformed,
+        Error::ReferenceMismatch,
+    ] {
+        assert!(!format!("{error:?}: {error}").contains("private"));
+    }
+}
+
+#[test]
+fn rejects_malformed_supplied_dependency_before_resolution() {
+    let bytes = archive(&[("a/main.wit", WORLD), ("b/bad.wit", b"not WIT")]);
+    assert_eq!(validate_plugin_wit_v1(&bytes), Err(Error::Malformed));
+}
+
+#[test]
+fn preserves_the_pinned_parsers_type_depth_guard() {
+    // The pinned grammar permits 100 type nodes: 99 list constructors plus u8.
+    for (depth, expected) in [(99, Ok(())), (100, Err(Error::Malformed))] {
+        let source = format!(
+            "package pigloros:plugin@0.1.0; interface api {{ type nested = {}u8{}; }} world community-plugin {{}}",
+            "list<".repeat(depth),
+            ">".repeat(depth)
+        );
+        assert_eq!(
+            validate_plugin_wit_v1(&archive(&[("main.wit", source.as_bytes())])),
+            expected,
+            "type depth {depth}"
+        );
+    }
+}
