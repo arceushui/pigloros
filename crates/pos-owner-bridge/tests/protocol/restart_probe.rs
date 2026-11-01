@@ -146,12 +146,18 @@ fn an_indeterminate_first_probe_retains_data_and_latches_until_a_fresh_absence_c
             Operation::Probe(101, CREATED, IMAGE)
         ]
     );
-    assert_eq!(rig.store.records_now(), [bytes.clone()]);
-    assert_eq!(rig.store.folders_now(), [folder.clone()]);
+    assert_eq!(
+        rig.store.records_now().as_slice(),
+        std::slice::from_ref(&bytes)
+    );
+    assert_eq!(
+        rig.store.folders_now().as_slice(),
+        std::slice::from_ref(&folder)
+    );
     assert_admission_refused(&mut rig, UNAVAILABLE)?;
 
     log.borrow_mut().clear();
-    rig.clock.advance(Duration::from_secs(60));
+    rig.clock.advance(Duration::from_mins(1));
     for _ in 0..2 {
         assert_eq!(
             rig.bridge.poll_restart_check(&mut store, &mut probe),
@@ -216,7 +222,7 @@ fn both_initial_and_due_sweeps_stop_before_later_entries_after_uncertainty() -> 
         }
 
         let outcome = if due_poll {
-            start_mixed_pending(&mut rig, &mut store, &mut probe, &log)?;
+            start_mixed_pending(&mut rig, &mut store, &mut probe, &log);
             rig.bridge.poll_restart_check(&mut store, &mut probe)
         } else {
             rig.bridge.start_restart_check(&mut store, &mut probe)
@@ -252,7 +258,7 @@ fn both_initial_and_due_sweeps_stop_before_later_entries_after_uncertainty() -> 
         );
         assert_admission_refused(&mut rig, UNAVAILABLE)?;
         log.borrow_mut().clear();
-        rig.clock.advance(Duration::from_secs(60));
+        rig.clock.advance(Duration::from_mins(1));
         assert_eq!(
             rig.bridge.poll_restart_check(&mut store, &mut probe),
             Err(UNAVAILABLE)
@@ -271,7 +277,7 @@ fn start_mixed_pending(
     store: &mut ObservedStore,
     probe: &mut ObservedProbe,
     log: &Log,
-) -> TestResult {
+) {
     let waiting = RestartProgress::Waiting {
         wake: rig.clock.now() + Duration::from_secs(1),
     };
@@ -291,7 +297,6 @@ fn start_mixed_pending(
     assert_eq!(rig.bridge.poll_restart_check(store, probe), Ok(waiting));
     assert!(log.borrow().is_empty());
     rig.clock.advance(Duration::from_secs(1));
-    Ok(())
 }
 
 #[test]
@@ -393,7 +398,7 @@ fn duplicate_folders_are_refused_before_any_probe_or_orphan_cleanup() -> TestRes
     for records in [
         [a.clone(), a.clone()],
         [a.clone(), b.clone()],
-        [b.clone(), a.clone()],
+        [b, a.clone()],
     ] {
         let mut rig = Rig::new(honest(0), FakeRandom::seeded(3))?;
         let (mut store, mut probe, log) =
