@@ -59,20 +59,14 @@ fn resolve(files: &[archive::WitFile<'_>]) -> Result<(), PluginWitContentErrorV1
             .push_str(&file.path, file.source);
     }
     let mut groups = groups.into_values();
+    let mut remaining_packages = MAX_PACKAGES;
     let main = groups
         .next()
         .ok_or(PluginWitContentErrorV1::Malformed)
-        .and_then(parse)?;
-    let dependencies = groups.map(parse).collect::<Result<Vec<_>, _>>()?;
-    // Each parsed group has at most 256 packages and the archive at most
-    // 256 file groups, so this sum fits usize on every supported host.
-    let packages: usize = std::iter::once(&main)
-        .chain(&dependencies)
-        .map(|group| group.nested.len() + 1)
-        .sum();
-    if packages > MAX_PACKAGES {
-        return Err(PluginWitContentErrorV1::BoundsExceeded);
-    }
+        .and_then(|map| parse(map, &mut remaining_packages))?;
+    let dependencies = groups
+        .map(|map| parse(map, &mut remaining_packages))
+        .collect::<Result<Vec<_>, _>>()?;
     let mut resolver = Resolve::default();
     resolver
         .push_groups(main, dependencies)
@@ -85,14 +79,25 @@ fn resolve(files: &[archive::WitFile<'_>]) -> Result<(), PluginWitContentErrorV1
         .map(|_| ())
 }
 
-fn parse(map: SourceMap) -> Result<wit_parser::UnresolvedPackageGroup, PluginWitContentErrorV1> {
+fn parse(
+    map: SourceMap,
+    remaining_packages: &mut usize,
+) -> Result<wit_parser::UnresolvedPackageGroup, PluginWitContentErrorV1> {
+    if *remaining_packages == 0 {
+        return Err(PluginWitContentErrorV1::BoundsExceeded);
+    }
+    // SourceMap parses one whole group under the archive byte and native
+    // syntax-depth limits. It exposes no per-declaration budget callback.
+    // Debit the graph budget before retaining that group or parsing another.
     map.parse()
         .map_err(|_| PluginWitContentErrorV1::Malformed)
         .and_then(|group| {
-            if group.nested.len() >= MAX_PACKAGES {
-                Err(PluginWitContentErrorV1::BoundsExceeded)
-            } else {
-                Ok(group)
-            }
+            remaining_packages
+                .checked_sub(group.nested.len() + 1)
+                .ok_or(PluginWitContentErrorV1::BoundsExceeded)
+                .map(|remaining| {
+                    *remaining_packages = remaining;
+                    group
+                })
         })
 }

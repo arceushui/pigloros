@@ -1,6 +1,7 @@
 //! WIT preflight contracts through the public seam; no filesystem fixture is read.
 
 use pos_plugin_content::{validate_plugin_wit_v1, PluginWitContentErrorV1 as Error};
+use std::fmt::Write as _;
 
 const WORLD: &[u8] = b"package pigloros:plugin@0.1.0; world community-plugin {}";
 
@@ -372,21 +373,29 @@ fn validates_ustar_numeric_metadata_and_terminators() -> Result<(), Error> {
 }
 
 fn package_chain(count: usize) -> String {
-    (0..count)
-        .map(|index| {
-            let body = if index + 1 == count {
-                String::from("type value = u8;")
-            } else {
-                format!("use local:p{}/api.{{value}};", index + 1)
-            };
-            format!("package local:p{index} {{ interface api {{ {body} }} }}\n")
-        })
-        .collect()
+    let mut source = String::new();
+    for index in 0..count {
+        let body = if index + 1 == count {
+            String::from("type value = u8;")
+        } else {
+            format!("use local:p{}/api.{{value}};", index + 1)
+        };
+        assert!(writeln!(
+            source,
+            "package local:p{index} {{ interface api {{ {body} }} }}"
+        )
+        .is_ok());
+    }
+    source
 }
 
 #[test]
 fn bounds_all_packages_including_inline_declarations_before_resolution() {
-    for (nested, expected) in [(255, Ok(())), (256, Err(Error::BoundsExceeded))] {
+    for (nested, expected) in [
+        (255, Ok(())),
+        (256, Err(Error::BoundsExceeded)),
+        (4096, Err(Error::BoundsExceeded)),
+    ] {
         let source = format!(
             "package pigloros:plugin@0.1.0; world community-plugin {{ import local:p0/api; }} {}",
             package_chain(nested)
@@ -417,4 +426,18 @@ fn parses_a_maximum_archive_with_an_actual_large_wit_source() -> Result<(), Erro
     let bytes = archive(&[("main.wit", &source)]);
     assert_eq!(bytes.len(), 4 * 1024 * 1024);
     validate_plugin_wit_v1(&bytes)
+}
+
+#[test]
+fn stops_before_parsing_a_later_group_after_the_package_budget_is_exhausted() {
+    let source = format!(
+        "package pigloros:plugin@0.1.0; world community-plugin {{ import local:p0/api; }} {}",
+        package_chain(255)
+    );
+    let bytes = archive(&[
+        ("a/full.wit", source.as_bytes()),
+        ("b/malformed.wit", b"not WIT"),
+    ]);
+    // Parsing the later group would produce Malformed instead of this bound refusal.
+    assert_eq!(validate_plugin_wit_v1(&bytes), Err(Error::BoundsExceeded));
 }
