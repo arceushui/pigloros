@@ -2073,6 +2073,7 @@ impl SqliteStore {
     ) -> Result<Self, CoreError> {
         let conn = Connection::open_with_flags(path, flags)
             .map_err(|e| CoreError::Storage(e.to_string()))?;
+        conn.set_prepared_statement_cache_capacity(SQLITE_STATEMENT_CACHE_CAPACITY);
 
         let writer_reservation_connection = Self::open_writer_reservation_connection(path, flags);
 
@@ -15009,6 +15010,12 @@ fn parse_entity_id(s: &str) -> Result<EntityId, CoreError> {
 }
 
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(4);
+
+/// Prepared statements kept per store connection. A protected Replay read alone cycles through
+/// more distinct cached statements than rusqlite's default of 16, and a least-recently-used
+/// cache smaller than such a cycle misses on every lookup, so each read re-parsed its SQL.
+/// The cache holds compiled SQL only; every execution still binds and steps its own rows.
+const SQLITE_STATEMENT_CACHE_CAPACITY: usize = 128;
 
 #[cfg(test)]
 use pos_core::geo_cell_admission::{

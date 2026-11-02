@@ -574,6 +574,9 @@ impl ConformanceBundleV1 {
     }
     /// Sign the canonical manifest after revalidating the complete unsigned bundle.
     ///
+    /// Signing sets only the signer key and the signature, which the unsigned checks never read,
+    /// so the signed bundle needs only its signature checked to be valid.
+    ///
     /// # Errors
     ///
     /// Returns a closed bundle error when validation, encoding, or signature verification fails.
@@ -584,7 +587,7 @@ impl ConformanceBundleV1 {
                 .map(|manifest| {
                     self.signature = Signature::from_bytes(key.sign(&manifest).to_bytes());
                 })
-                .and_then(|()| self.validate())
+                .and_then(|()| self.validate_signature())
                 .map(|()| self)
         })
     }
@@ -629,19 +632,21 @@ impl ConformanceBundleV1 {
     ///
     /// Returns a closed bundle error for the first rejected invariant.
     pub fn validate(&self) -> Result<(), BundleContractErrorV1> {
-        self.validate_unsigned().and_then(|()| {
-            if self.signer_public_key.as_bytes() != &crate::DRAFT_AUTHORITY_PUBLIC_KEY_BYTES {
-                return Err(BundleContractErrorV1::SignatureInvalid);
-            }
-            signing::verifying_key_from_public_key(&self.signer_public_key)
-                .map_err(|_| BundleContractErrorV1::SignatureInvalid)
-                .and_then(|key| {
-                    self.manifest_bytes().and_then(|manifest| {
-                        signing::verify(&key, &CanonicalBytes::from_vec(manifest), &self.signature)
-                            .map_err(|_| BundleContractErrorV1::SignatureInvalid)
-                    })
+        self.validate_unsigned()
+            .and_then(|()| self.validate_signature())
+    }
+    fn validate_signature(&self) -> Result<(), BundleContractErrorV1> {
+        if self.signer_public_key.as_bytes() != &crate::DRAFT_AUTHORITY_PUBLIC_KEY_BYTES {
+            return Err(BundleContractErrorV1::SignatureInvalid);
+        }
+        signing::verifying_key_from_public_key(&self.signer_public_key)
+            .map_err(|_| BundleContractErrorV1::SignatureInvalid)
+            .and_then(|key| {
+                self.manifest_bytes().and_then(|manifest| {
+                    signing::verify(&key, &CanonicalBytes::from_vec(manifest), &self.signature)
+                        .map_err(|_| BundleContractErrorV1::SignatureInvalid)
                 })
-        })
+            })
     }
     /// Encode the canonical six-field CFB1 manifest.
     ///
@@ -1976,43 +1981,52 @@ fn prohibited_secret_material(bytes: &[u8]) -> bool {
 }
 
 /// Find a PEM private-key armour or a credential token in one pass over the bytes. Only the
-/// byte pairs that can begin one of those ASCII patterns are compared in full, so the cost of a
-/// member stays linear in its length.
+/// byte pairs that can begin one of those ASCII patterns are compared in full, and each pair is
+/// compared only with the patterns it can begin, so the cost of a member stays linear in its
+/// length. The pass indexes the bytes directly because this scan runs over every member on every
+/// typed and independent validation.
 fn prohibited_text_material(bytes: &[u8]) -> bool {
     let mut private_key_begin = false;
     let mut private_key_end = false;
-    for (offset, pair) in bytes.windows(2).enumerate() {
-        if matches!(
-            pair,
-            [b'-', b'-']
-                | [b'p' | b'P', b'r' | b'R']
-                | [b'a' | b'A', b'i' | b'I' | b'k' | b'K' | b's' | b'S']
-                | [b'b' | b'B', b'a' | b'A' | b'e' | b'E']
-                | [b'e' | b'E', b'y' | b'Y']
-                | [b'g' | b'G', b'h' | b'H' | b'i' | b'I' | b'l' | b'L']
-                | [b's' | b'S', b'k' | b'K']
-                | [b'x' | b'X', b'o' | b'O']
-        ) {
-            let rest = &bytes[offset..];
-            private_key_begin |= starts_with_ignore_ascii_case(rest, b"-----begin");
-            private_key_end |= starts_with_ignore_ascii_case(rest, b"private key-----");
-            if TOKEN_PREFIXES.iter().any(|&(prefix, minimum)| {
-                starts_with_ignore_ascii_case(rest, prefix)
-                    && rest[prefix.len()..]
-                        .iter()
-                        .copied()
-                        .take_while(|byte| {
-                            byte.is_ascii_alphanumeric() || b"._~+/=-".contains(byte)
-                        })
-                        .take(minimum)
-                        .count()
-                        == minimum
-            }) {
-                return true;
+    let mut offset = 0;
+    while offset + 1 < bytes.len() {
+        match (bytes[offset], bytes[offset + 1]) {
+            (b'-', b'-') => {
+                private_key_begin |= starts_with_ignore_ascii_case(&bytes[offset..], b"-----begin");
             }
+            (b'p' | b'P', b'r' | b'R') => {
+                private_key_end |=
+                    starts_with_ignore_ascii_case(&bytes[offset..], b"private key-----");
+            }
+            (b'a' | b'A', b'i' | b'I' | b'k' | b'K' | b's' | b'S')
+            | (b'b' | b'B', b'a' | b'A' | b'e' | b'E')
+            | (b'e' | b'E', b'y' | b'Y')
+            | (b'g' | b'G', b'h' | b'H' | b'i' | b'I' | b'l' | b'L')
+            | (b's' | b'S', b'k' | b'K')
+            | (b'x' | b'X', b'o' | b'O') => {
+                if credential_token_at(&bytes[offset..]) {
+                    return true;
+                }
+            }
+            _ => {}
         }
+        offset += 1;
     }
     private_key_begin && private_key_end
+}
+
+/// Whether `rest` begins with a credential prefix followed by its minimum count of token bytes.
+fn credential_token_at(rest: &[u8]) -> bool {
+    TOKEN_PREFIXES.iter().any(|&(prefix, minimum)| {
+        starts_with_ignore_ascii_case(rest, prefix)
+            && rest[prefix.len()..]
+                .iter()
+                .copied()
+                .take_while(|byte| byte.is_ascii_alphanumeric() || b"._~+/=-".contains(byte))
+                .take(minimum)
+                .count()
+                == minimum
+    })
 }
 
 fn starts_with_ignore_ascii_case(bytes: &[u8], prefix: &[u8]) -> bool {
