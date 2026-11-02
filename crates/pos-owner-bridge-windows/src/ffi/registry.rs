@@ -1,7 +1,11 @@
 #![cfg(windows)]
 
+#[cfg(target_arch = "x86_64")]
+use windows::core::w;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::WIN32_ERROR;
+#[cfg(target_arch = "x86_64")]
+use windows::Win32::System::Registry::RRF_RT_REG_SZ;
 use windows::Win32::System::Registry::{
     RegGetValueW, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RRF_NOEXPAND, RRF_RT_ANY,
     RRF_SUBKEY_WOW6432KEY, RRF_SUBKEY_WOW6464KEY,
@@ -36,5 +40,51 @@ pub(super) fn query_policy(
             None,
             None,
         )
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+fn local_machine_text(subkey: PCWSTR, name: PCWSTR) -> Result<String, ()> {
+    let mut buffer = [0_u16; 256];
+    let mut bytes = 512_u32;
+    // SAFETY: both PCWSTR inputs are static UTF-16 literals below. Fixed HKLM
+    // 64-bit read, owned initialized 512-byte output and independent byte bound;
+    // no pointer is retained and only REG_SZ is admitted without expansion.
+    unsafe {
+        RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            subkey,
+            name,
+            RRF_RT_REG_SZ | RRF_NOEXPAND | RRF_SUBKEY_WOW6464KEY,
+            None,
+            Some(buffer.as_mut_ptr().cast()),
+            Some(&raw mut bytes),
+        )
+    }
+    .ok()
+    .map_err(|_| ())?;
+    if bytes % 2 != 0 {
+        return Err(());
+    }
+    let units = buffer.get(..(bytes / 2) as usize).ok_or(())?;
+    let text = units.strip_suffix(&[0]).ok_or(())?;
+    if text.contains(&0) {
+        return Err(());
+    }
+    String::from_utf16(text).map_err(|_| ())
+}
+
+impl crate::Native {
+    #[cfg(target_arch = "x86_64")]
+    pub(crate) fn os_profile() -> Result<(String, String), ()> {
+        let build = local_machine_text(
+            w!("SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion"),
+            w!("CurrentBuildNumber"),
+        )?;
+        let product = local_machine_text(
+            w!("SYSTEM\\CurrentControlSet\\Control\\ProductOptions"),
+            w!("ProductType"),
+        )?;
+        Ok((build, product))
     }
 }

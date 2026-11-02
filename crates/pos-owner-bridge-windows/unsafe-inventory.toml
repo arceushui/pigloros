@@ -1,10 +1,18 @@
 # One `[[block]]` record per explicit unsafe block in src/ffi, with `file`,
 # `line`, `function`, `operation`, `invariant` and `hosted_test`. The rules and
 # their enforcement live in scripts/check_owner_bridge_unsafe_policy.py.
+[[block]]
+file = "src/ffi/registry.rs"
+line = 53
+function = "local_machine_text"
+operation = "RegGetValueW for Windows profile"
+invariant = "Static NUL-terminated UTF-16 key/value literals; HKLM64 REG_SZ-only read into owned initialized512-byte storage with independent byte count; validate bounds and UTF-16 before admission."
+hosted_test = "windows_profile_matches_independent_os_and_cpu_observations"
+
 
 [[block]]
 file = "src/ffi/directory.rs"
-line = 30
+line = 31
 function = "drop"
 operation = "LocalFree"
 invariant = "Exactly one release of each Windows LocalAlloc result, after every dependent descriptor or UTF-16 read."
@@ -12,7 +20,7 @@ hosted_test = "private_directory_is_current_sid_only_and_rejects_weakened_acl_an
 
 [[block]]
 file = "src/ffi/directory.rs"
-line = 38
+line = 39
 function = "allocated_text"
 operation = "PWSTR::to_string"
 invariant = "Successful Windows conversion returned a NUL-terminated allocated string; LocalMemory retains ownership throughout the copy."
@@ -20,7 +28,7 @@ hosted_test = "private_directory_is_current_sid_only_and_rejects_weakened_acl_an
 
 [[block]]
 file = "src/ffi/directory.rs"
-line = 43
+line = 44
 function = "current_sid"
 operation = "GetCurrentProcess"
 invariant = "Borrowed current-process pseudo-handle; never closed or transferred."
@@ -28,7 +36,7 @@ hosted_test = "private_directory_is_current_sid_only_and_rejects_weakened_acl_an
 
 [[block]]
 file = "src/ffi/directory.rs"
-line = 47
+line = 48
 function = "current_sid"
 operation = "OpenProcessToken(TOKEN_QUERY)"
 invariant = "Query-only current-process token with initialized writable output; one later close on every outcome."
@@ -36,7 +44,7 @@ hosted_test = "private_directory_is_current_sid_only_and_rejects_weakened_acl_an
 
 [[block]]
 file = "src/ffi/directory.rs"
-line = 51
+line = 52
 function = "current_sid"
 operation = "CloseHandle token"
 invariant = "Single close of the successfully acquired token after all SID data was copied."
@@ -44,7 +52,7 @@ hosted_test = "private_directory_is_current_sid_only_and_rejects_weakened_acl_an
 
 [[block]]
 file = "src/ffi/directory.rs"
-line = 62
+line = 63
 function = "token_sid"
 operation = "GetTokenInformation(TokenUser)"
 invariant = "Live query-only token and distinct initialized 1024-byte aligned storage/length outputs; errors never inspected."
@@ -52,7 +60,7 @@ hosted_test = "private_directory_is_current_sid_only_and_rejects_weakened_acl_an
 
 [[block]]
 file = "src/ffi/directory.rs"
-line = 77
+line = 78
 function = "token_sid"
 operation = "TOKEN_USER pointer read"
 invariant = "Successful TokenUser wrote at least sizeof TOKEN_USER into aligned storage; pointee SID remains inside the live storage."
@@ -60,7 +68,7 @@ hosted_test = "private_directory_is_current_sid_only_and_rejects_weakened_acl_an
 
 [[block]]
 file = "src/ffi/directory.rs"
-line = 81
+line = 82
 function = "token_sid"
 operation = "ConvertSidToStringSidW"
 invariant = "Valid SID from successful TokenUser remains live; independently allocated output transfers once to LocalMemory."
@@ -68,7 +76,7 @@ hosted_test = "private_directory_is_current_sid_only_and_rejects_weakened_acl_an
 
 [[block]]
 file = "src/ffi/directory.rs"
-line = 94
+line = 95
 function = "expected_descriptor"
 operation = "ConvertStringSecurityDescriptorToSecurityDescriptorW"
 invariant = "NUL-terminated current-SID-only protected SDDL; initialized descriptor output transfers once to LocalMemory."
@@ -76,7 +84,7 @@ hosted_test = "private_directory_is_current_sid_only_and_rejects_weakened_acl_an
 
 [[block]]
 file = "src/ffi/directory.rs"
-line = 112
+line = 113
 function = "descriptor_text"
 operation = "SetSecurityDescriptorControl on allocated descriptor copy"
 invariant = "Uniquely owned writable Windows-allocated copy; clear only AUTO_INHERITED/AUTO_INHERIT_REQ bookkeeping, never protection, owner or ACEs, and never filesystem security."
@@ -84,7 +92,7 @@ hosted_test = "private_directory_is_current_sid_only_and_rejects_weakened_acl_an
 
 [[block]]
 file = "src/ffi/directory.rs"
-line = 123
+line = 124
 function = "descriptor_text"
 operation = "ConvertSecurityDescriptorToStringSecurityDescriptorW"
 invariant = "Windows-created descriptor remains live; owner/DACL-only output is independently allocated and owned."
@@ -92,7 +100,7 @@ hosted_test = "private_directory_is_current_sid_only_and_rejects_weakened_acl_an
 
 [[block]]
 file = "src/ffi/directory.rs"
-line = 140
+line = 141
 function = "read_descriptor"
 operation = "GetNamedSecurityInfoW"
 invariant = "NUL-terminated owned path, initialized output, omitted interior aliases; successful descriptor transfers once to LocalMemory."
@@ -100,7 +108,7 @@ hosted_test = "private_directory_is_current_sid_only_and_rejects_weakened_acl_an
 
 [[block]]
 file = "src/ffi/directory.rs"
-line = 190
+line = 191
 function = "private_directory"
 operation = "CreateDirectoryW"
 invariant = "Owned path and initialized non-inheritable SECURITY_ATTRIBUTES reference a live current-SID-only protected descriptor."
@@ -108,7 +116,7 @@ hosted_test = "private_directory_is_current_sid_only_and_rejects_weakened_acl_an
 
 [[block]]
 file = "src/ffi/directory.rs"
-line = 162
+line = 163
 function = "file_identity"
 operation = "GetFileInformationByHandle"
 invariant = "Borrowed live std::fs::File handle; initialized uniquely writable metadata output; success checked; volume/file index used solely for ADR110 section1a cache validation."
@@ -116,7 +124,7 @@ hosted_test = "runtime_checks_all_members_metadata_cache_and_per_start_binaries"
 
 [[block]]
 file = "src/ffi/registry.rs"
-line = 29
+line = 33
 function = "query_policy"
 operation = "RegGetValueW"
 invariant = "Borrowed predefined hive, owned NUL-terminated UTF-16 key and value names, both WOW64 views; no output buffers or retained pointers."

@@ -20,20 +20,23 @@ mod adapter {
     // retains both ADR-110 checks without duplicate attributes on one module.
     mod directory;
     mod overrides;
+    mod platform;
     mod process;
     mod runtime;
     mod socket;
 
     pub use directory::{create_private_directory, verify_private_directory};
     pub use overrides::refuse_overrides;
+    pub use platform::{cpu_requirements, require_windows_profile, CpuFeatures};
     pub use process::{process_identity, WindowsProcessProbe};
     pub use runtime::{verify_fixed_runtime, VerifiedRuntime};
     pub use socket::WindowsLoopbackBinder;
 }
 
 pub use adapter::{
-    create_private_directory, process_identity, refuse_overrides, verify_fixed_runtime,
-    verify_private_directory, VerifiedRuntime, WindowsLoopbackBinder, WindowsProcessProbe,
+    cpu_requirements, create_private_directory, process_identity, refuse_overrides,
+    require_windows_profile, verify_fixed_runtime, verify_private_directory, CpuFeatures,
+    VerifiedRuntime, WindowsLoopbackBinder, WindowsProcessProbe,
 };
 
 #[cfg(test)]

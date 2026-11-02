@@ -13,8 +13,9 @@ use windows::Win32::Security::Authorization::{
 };
 use windows::Win32::Security::{
     GetTokenInformation, SetSecurityDescriptorControl, TokenUser, DACL_SECURITY_INFORMATION,
-    OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, SE_DACL_AUTO_INHERITED,
-    SE_DACL_AUTO_INHERIT_REQ, TOKEN_QUERY, TOKEN_USER,
+    OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
+    SECURITY_DESCRIPTOR_CONTROL, SE_DACL_AUTO_INHERITED, SE_DACL_AUTO_INHERIT_REQ, TOKEN_QUERY,
+    TOKEN_USER,
 };
 use windows::Win32::Storage::FileSystem::{
     CreateDirectoryW, GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
@@ -113,7 +114,7 @@ fn descriptor_text(descriptor: &LocalMemory) -> Result<String, ()> {
         SetSecurityDescriptorControl(
             PSECURITY_DESCRIPTOR(descriptor.0 .0),
             SE_DACL_AUTO_INHERITED | SE_DACL_AUTO_INHERIT_REQ,
-            Default::default(),
+            SECURITY_DESCRIPTOR_CONTROL(0),
         )
     }
     .map_err(|_| ())?;
