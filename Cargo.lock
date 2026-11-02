@@ -5644,6 +5644,12 @@ dependencies = [
 [[package]]
 name = "pos-owner-bridge-windows"
 version = "0.1.0"
+dependencies = [
+ "pos-owner-bridge",
+ "pos-owner-bridge-codec",
+ "sha2",
+ "windows",
+]
 
 [[package]]
 name = "pos-plugin-agent"

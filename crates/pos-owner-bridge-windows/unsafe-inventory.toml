@@ -1,4 +1,34 @@
 # One `[[block]]` record per explicit unsafe block in src/ffi, with `file`,
 # `line`, `function`, `operation`, `invariant` and `hosted_test`. The rules and
 # their enforcement live in scripts/check_owner_bridge_unsafe_policy.py.
-# No FFI unsafe block exists yet, so there are no records.
+[[block]]
+file = "src/ffi/process.rs"
+line = 22
+function = "inspect"
+operation = "OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)"
+invariant = "Fixed query-only access, disabled inheritance, nonzero PID; no caller pointer."
+hosted_test = "current_process_identity_matches_independent_os_observations"
+
+[[block]]
+file = "src/ffi/process.rs"
+line = 33
+function = "inspect"
+operation = "CloseHandle"
+invariant = "Exactly one close after all queries, including every query error path."
+hosted_test = "current_process_identity_matches_independent_os_observations"
+
+[[block]]
+file = "src/ffi/process.rs"
+line = 45
+function = "read_identity"
+operation = "GetProcessTimes"
+invariant = "Live query-only handle and four distinct initialized output FILETIME values."
+hosted_test = "current_process_identity_matches_independent_os_observations"
+
+[[block]]
+file = "src/ffi/process.rs"
+line = 63
+function = "image_digest"
+operation = "QueryFullProcessImageNameW"
+invariant = "Live handle; owned32768code-unit writable buffer with an initialized in-out bound."
+hosted_test = "current_process_identity_matches_independent_os_observations"

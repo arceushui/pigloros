@@ -7,6 +7,15 @@ license.workspace = true
 publish.workspace = true
 description = "Windows-only WebView2 owner-bridge shim (ADR-110)"
 
+[target.'cfg(windows)'.dependencies]
+pos-owner-bridge = { path = "../pos-owner-bridge" }
+pos-owner-bridge-codec = { path = "../pos-owner-bridge-codec" }
+sha2.workspace = true
+windows = { workspace = true, features = [
+  "Win32_Foundation",
+  "Win32_System_Threading",
+] }
+
 # This crate intentionally does not inherit workspace lints. ADR-110 permits
 # unsafe only here; the source policy checker proves the four narrow deviations
 # below and rejects unsafe code everywhere else in the workspace.

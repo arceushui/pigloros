@@ -1,0 +1,71 @@
+name: owner-bridge-windows
+
+on:
+  workflow_call:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/owner-bridge-windows.yml
+      - crates/pos-owner-bridge-windows/**
+      - crates/pos-owner-bridge/**
+      - crates/pos-owner-bridge-codec/**
+      - apps/piglor-owner/**
+      - Cargo.toml
+      - Cargo.lock
+
+permissions:
+  contents: read
+
+jobs:
+  owner-bridge-windows:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      RUSTC_BOOTSTRAP: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: 1.97.1
+          components: clippy,llvm-tools-preview
+      - name: Install coverage producer
+        uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
+        with:
+          tool: cargo-llvm-cov
+      - name: Install coverage gate
+        uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
+        with:
+          tool: covgate@0.2.0
+      - name: Enforce the Windows unsafe inventory
+        run: python scripts/check_owner_bridge_unsafe_policy.py
+      - name: Lint native adapter and portable bridge
+        run: cargo clippy -p pos-owner-bridge-windows -p pos-owner-bridge --all-features --all-targets --locked -- -D warnings -W clippy::pedantic
+      - name: Test native adapter and portable bridge including ignored tests
+        run: cargo test -p pos-owner-bridge-windows -p pos-owner-bridge --all-features --locked -- --include-ignored
+      - name: Measure only shim source coverage
+        id: coverage
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $metadata = cargo metadata --locked --no-deps --format-version 1
+          if ($LASTEXITCODE -ne 0) { throw 'Cargo metadata failed' }
+          $ignore = $metadata | python scripts/owner_bridge_windows_cov_ignore.py
+          if ($LASTEXITCODE -ne 0 -or -not $ignore) { throw 'Unsafe coverage scope' }
+          cargo llvm-cov -p pos-owner-bridge-windows --all-features --locked --json --output-path "$env:RUNNER_TEMP/owner-windows-coverage.json" --ignore-filename-regex "$ignore" -- --include-ignored
+          if ($LASTEXITCODE -ne 0) { throw 'Native coverage execution failed' }
+      - name: Enforce both Windows coverage floors
+        shell: pwsh
+        env:
+          COVERAGE_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || 'origin/main' }}
+        working-directory: crates/pos-owner-bridge-windows
+        run: covgate check "$env:RUNNER_TEMP/owner-windows-coverage.json" --base "$env:COVERAGE_BASE" --no-github-summary
+      - name: Retain the measured shim report
+        if: ${{ !cancelled() && steps.coverage.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: owner-windows-coverage-${{ github.sha }}
+          path: ${{ runner.temp }}/owner-windows-coverage.json
+          if-no-files-found: error
