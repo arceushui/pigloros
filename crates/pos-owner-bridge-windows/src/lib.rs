@@ -10,7 +10,7 @@
 //! declared here carries `#[forbid(unsafe_code)]` instead, and the policy
 //! checker enforces it.
 
-pub(crate) mod ffi;
+mod ffi;
 #[forbid(unsafe_code)]
 mod adapter {
     // The inline boundary and each child file are separate lint scopes. This
@@ -21,6 +21,8 @@ mod adapter {
     pub use process::{process_identity, WindowsProcessProbe};
     pub use socket::WindowsLoopbackBinder;
 }
+
+pub use adapter::{process_identity, WindowsLoopbackBinder, WindowsProcessProbe};
 
 #[cfg(test)]
 #[forbid(unsafe_code)]
@@ -53,7 +55,7 @@ mod tests {
         assert_eq!(peer.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
         drop(client);
         assert!(TcpListener::bind(v4.local_addr()?).is_err());
-        let competing = crate::ffi::socket::competing_reuse(v4.local_addr()?.port());
+        let competing = crate::ffi::competing_reuse(v4.local_addr()?.port());
         let error = competing
             .err()
             .ok_or("a reusing competitor took the exclusive port")?;
@@ -69,5 +71,3 @@ mod tests {
         Ok(())
     }
 }
-
-pub use adapter::{process_identity, WindowsLoopbackBinder, WindowsProcessProbe};

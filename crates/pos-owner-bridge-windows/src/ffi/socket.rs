@@ -2,7 +2,7 @@
 
 use std::io;
 use std::net::TcpListener;
-use std::os::windows::io::{AsRawSocket, FromRawSocket, OwnedSocket, RawSocket};
+use std::os::windows::io::{FromRawSocket, OwnedSocket, RawSocket};
 use std::sync::OnceLock;
 
 use windows::Win32::Networking::WinSock::{
@@ -29,10 +29,15 @@ fn initialize() -> io::Result<()> {
             Err(code)
         }
     });
-    initialized.map_err(|code| io::Error::from_raw_os_error(code))
+    initialized.map_err(io::Error::from_raw_os_error)
 }
 
-fn open(family: ADDRESS_FAMILY) -> io::Result<OwnedSocket> {
+struct NativeSocket {
+    raw: SOCKET,
+    owned: OwnedSocket,
+}
+
+fn open(family: ADDRESS_FAMILY) -> io::Result<NativeSocket> {
     initialize()?;
     // SAFETY: fixed TCP stream parameters and a supported family; no protocol
     // info pointer, no handle inheritance and no retained caller memory.
@@ -49,7 +54,8 @@ fn open(family: ADDRESS_FAMILY) -> io::Result<OwnedSocket> {
     .map_err(|error| io::Error::from_raw_os_error(error.code().0 & 0xffff))?;
     // SAFETY: WSASocketW returned a new owned socket. Ownership transfers once
     // to OwnedSocket; all error paths then close it through standard-library RAII.
-    Ok(unsafe { OwnedSocket::from_raw_socket(raw.0 as RawSocket) })
+    let owned = unsafe { OwnedSocket::from_raw_socket(raw.0 as RawSocket) };
+    Ok(NativeSocket { raw, owned })
 }
 
 fn failed() -> io::Error {
@@ -58,17 +64,10 @@ fn failed() -> io::Error {
     io::Error::from_raw_os_error(error.0)
 }
 
-fn set_option(socket: &OwnedSocket, level: i32, option: i32) -> io::Result<()> {
+fn set_option(socket: &NativeSocket, level: i32, option: i32) -> io::Result<()> {
     // SAFETY: the owned socket stays live and the initialized four-byte BOOL
     // slice is borrowed only for this synchronous setsockopt call.
-    let status = unsafe {
-        setsockopt(
-            SOCKET(socket.as_raw_socket() as usize),
-            level,
-            option,
-            Some(&1_i32.to_ne_bytes()),
-        )
-    };
+    let status = unsafe { setsockopt(socket.raw, level, option, Some(&1_i32.to_ne_bytes())) };
     if status == 0 {
         Ok(())
     } else {
@@ -76,23 +75,23 @@ fn set_option(socket: &OwnedSocket, level: i32, option: i32) -> io::Result<()> {
     }
 }
 
-fn listening(socket: OwnedSocket) -> io::Result<TcpListener> {
+fn listening(socket: NativeSocket) -> io::Result<TcpListener> {
     // SAFETY: a live, exclusively bound TCP socket; the fixed backlog is four.
-    let status = unsafe { listen(SOCKET(socket.as_raw_socket() as usize), 4) };
+    let status = unsafe { listen(socket.raw, 4) };
     if status == 0 {
-        Ok(TcpListener::from(socket))
+        Ok(TcpListener::from(socket.owned))
     } else {
         Err(failed())
     }
 }
 
-pub(crate) fn bind_v4(port: u16) -> io::Result<TcpListener> {
+pub(super) fn bind_v4(port: u16) -> io::Result<TcpListener> {
     let socket = open(AF_INET)?;
     set_option(&socket, SOL_SOCKET, SO_EXCLUSIVEADDRUSE)?;
     bind_v4_socket(socket, port)
 }
 
-fn bind_v4_socket(socket: OwnedSocket, port: u16) -> io::Result<TcpListener> {
+fn bind_v4_socket(socket: NativeSocket, port: u16) -> io::Result<TcpListener> {
     let address = SOCKADDR_IN {
         sin_family: AF_INET,
         sin_port: port.to_be(),
@@ -107,7 +106,7 @@ fn bind_v4_socket(socket: OwnedSocket, port: u16) -> io::Result<TcpListener> {
     // the synchronous call; the socket is live and no pointer is retained.
     let status = unsafe {
         bind(
-            SOCKET(socket.as_raw_socket() as usize),
+            socket.raw,
             std::ptr::from_ref(&address).cast::<SOCKADDR>(),
             16,
         )
@@ -119,7 +118,7 @@ fn bind_v4_socket(socket: OwnedSocket, port: u16) -> io::Result<TcpListener> {
     }
 }
 
-pub(crate) fn bind_v6(port: u16) -> io::Result<TcpListener> {
+pub(super) fn bind_v6(port: u16) -> io::Result<TcpListener> {
     let socket = open(AF_INET6)?;
     set_option(&socket, SOL_SOCKET, SO_EXCLUSIVEADDRUSE)?;
     set_option(&socket, IPPROTO_IPV6.0, IPV6_V6ONLY)?;
@@ -137,7 +136,7 @@ pub(crate) fn bind_v6(port: u16) -> io::Result<TcpListener> {
     // outlives the call; scope and flow are zero for the loopback address.
     let status = unsafe {
         bind(
-            SOCKET(socket.as_raw_socket() as usize),
+            socket.raw,
             std::ptr::from_ref(&address).cast::<SOCKADDR>(),
             28,
         )
@@ -150,7 +149,7 @@ pub(crate) fn bind_v6(port: u16) -> io::Result<TcpListener> {
 }
 
 #[cfg(test)]
-pub(crate) fn competing_reuse(port: u16) -> io::Result<TcpListener> {
+pub(super) fn competing_reuse(port: u16) -> io::Result<TcpListener> {
     use windows::Win32::Networking::WinSock::SO_REUSEADDR;
     let socket = open(AF_INET)?;
     set_option(&socket, SOL_SOCKET, SO_REUSEADDR)?;

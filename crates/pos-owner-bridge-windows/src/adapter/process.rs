@@ -13,7 +13,7 @@ use pos_owner_bridge_codec::ImagePathSha256;
 ///
 /// Returns `Unavailable(InterfaceUnavailable)` on absence or incomplete inspection.
 pub fn process_identity(pid: u32) -> Result<ProcessIdentity, BridgeError> {
-    crate::ffi::process::inspect(pid)
+    crate::ffi::inspect_process(pid)
         .ok()
         .flatten()
         .ok_or(BridgeError::Unavailable(
@@ -27,7 +27,7 @@ pub struct WindowsProcessProbe;
 
 impl ProcessProbe for WindowsProcessProbe {
     fn probe(&mut self, pid: u32, created: u64, image: &ImagePathSha256) -> ProbeResult {
-        match crate::ffi::process::inspect(pid) {
+        match crate::ffi::inspect_process(pid) {
             Ok(Some(identity)) => {
                 if identity.creation_filetime == created && identity.image_path_sha256 == *image {
                     ProbeResult::Present

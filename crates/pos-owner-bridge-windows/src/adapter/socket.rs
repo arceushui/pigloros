@@ -30,14 +30,14 @@ fn classified(result: io::Result<TcpListener>) -> Result<TcpListener, BindError>
 
 impl LoopbackBinder for WindowsLoopbackBinder {
     fn bind_v4(&mut self) -> Result<TcpListener, BindError> {
-        classified(crate::ffi::socket::bind_v4(self.port))
+        classified(crate::ffi::bind_v4(self.port))
     }
 
     fn bind_v6(&mut self) -> Result<TcpListener, BindError> {
-        classified(crate::ffi::socket::bind_v6(self.port))
+        classified(crate::ffi::bind_v6(self.port))
     }
 
     fn probe_v6(&mut self) -> Result<(), BindError> {
-        classified(crate::ffi::socket::bind_v6(0)).map(drop)
+        classified(crate::ffi::bind_v6(0)).map(drop)
     }
 }

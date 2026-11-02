@@ -12,7 +12,7 @@ use windows::Win32::System::Threading::{
     PROCESS_QUERY_LIMITED_INFORMATION,
 };
 
-pub(crate) fn inspect(pid: u32) -> Result<Option<ProcessIdentity>, ()> {
+pub(super) fn inspect(pid: u32) -> Result<Option<ProcessIdentity>, ()> {
     // PID zero is a special invalid argument, not evidence of a missing process.
     if pid == 0 {
         return Err(());

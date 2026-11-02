@@ -43,7 +43,7 @@ hosted_test = "exclusive_loopback_sockets_block_a_reusing_competitor"
 
 [[block]]
 file = "src/ffi/socket.rs"
-line = 39
+line = 44
 function = "open"
 operation = "WSASocketW"
 invariant = "Fixed TCP parameters; supported address family; disabled handle inheritance."
@@ -51,7 +51,7 @@ hosted_test = "exclusive_loopback_sockets_block_a_reusing_competitor"
 
 [[block]]
 file = "src/ffi/socket.rs"
-line = 52
+line = 57
 function = "open"
 operation = "OwnedSocket::from_raw_socket"
 invariant = "Single ownership transfer of the new valid socket into standard-library RAII."
@@ -59,7 +59,7 @@ hosted_test = "exclusive_loopback_sockets_block_a_reusing_competitor"
 
 [[block]]
 file = "src/ffi/socket.rs"
-line = 57
+line = 63
 function = "failed"
 operation = "WSAGetLastError"
 invariant = "Read this thread's Winsock error immediately after the failing operation."
@@ -67,7 +67,7 @@ hosted_test = "exclusive_loopback_sockets_block_a_reusing_competitor"
 
 [[block]]
 file = "src/ffi/socket.rs"
-line = 64
+line = 70
 function = "set_option"
 operation = "setsockopt"
 invariant = "Live owned socket and initialized four-byte BOOL borrowed only during the call."
@@ -75,7 +75,7 @@ hosted_test = "exclusive_loopback_sockets_block_a_reusing_competitor"
 
 [[block]]
 file = "src/ffi/socket.rs"
-line = 81
+line = 80
 function = "listening"
 operation = "listen(4)"
 invariant = "Live TCP socket bound exclusively before listening; ownership retained through conversion."
@@ -83,7 +83,7 @@ hosted_test = "exclusive_loopback_sockets_block_a_reusing_competitor"
 
 [[block]]
 file = "src/ffi/socket.rs"
-line = 108
+line = 107
 function = "bind_v4_socket"
 operation = "bind IPv4"
 invariant = "Live owned socket; initialized16byte SOCKADDR_IN; synchronous borrowing only."
@@ -91,7 +91,7 @@ hosted_test = "exclusive_loopback_sockets_block_a_reusing_competitor"
 
 [[block]]
 file = "src/ffi/socket.rs"
-line = 138
+line = 137
 function = "bind_v6"
 operation = "bind IPv6"
 invariant = "Live owned v6-only socket; initialized28byte SOCKADDR_IN6 for loopback."
