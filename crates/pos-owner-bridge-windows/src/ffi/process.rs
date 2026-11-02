@@ -41,8 +41,15 @@ fn read_identity(handle: HANDLE, pid: u32) -> Result<ProcessIdentity, ()> {
     let mut user = FILETIME::default();
     // SAFETY: the live query-only handle outlives this call; the four output
     // pointers refer to distinct initialized, writable FILETIME values.
-    let times =
-        unsafe { GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user) };
+    let times = unsafe {
+        GetProcessTimes(
+            handle,
+            &raw mut creation,
+            &raw mut exit,
+            &raw mut kernel,
+            &raw mut user,
+        )
+    };
     times.map_err(|_| ()).and_then(|()| {
         image_digest(handle).map(|image_path_sha256| ProcessIdentity {
             browser_pid: pid,
@@ -56,7 +63,7 @@ fn read_identity(handle: HANDLE, pid: u32) -> Result<ProcessIdentity, ()> {
 fn image_digest(handle: HANDLE) -> Result<ImagePathSha256, ()> {
     // The Win32 extended path bound. An insufficient buffer is indeterminate;
     // it never changes the observation to absence.
-    let mut image = [0_u16; 32_768];
+    let mut image = vec![0_u16; 32_768].into_boxed_slice();
     let mut length = 32_768_u32;
     // SAFETY: image owns length UTF-16 code units for the duration of the call;
     // the handle is live and length is an initialized in/out bound.
@@ -65,7 +72,7 @@ fn image_digest(handle: HANDLE) -> Result<ImagePathSha256, ()> {
             handle,
             PROCESS_NAME_WIN32,
             PWSTR(image.as_mut_ptr()),
-            &mut length,
+            &raw mut length,
         )
     };
     queried.map_err(|_| ()).map(|()| {

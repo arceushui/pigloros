@@ -19,7 +19,7 @@ hosted_test = "current_process_identity_matches_independent_os_observations"
 
 [[block]]
 file = "src/ffi/process.rs"
-line = 45
+line = 44
 function = "read_identity"
 operation = "GetProcessTimes"
 invariant = "Live query-only handle and four distinct initialized output FILETIME values."
@@ -27,8 +27,72 @@ hosted_test = "current_process_identity_matches_independent_os_observations"
 
 [[block]]
 file = "src/ffi/process.rs"
-line = 63
+line = 70
 function = "image_digest"
 operation = "QueryFullProcessImageNameW"
 invariant = "Live handle; owned32768code-unit writable buffer with an initialized in-out bound."
 hosted_test = "current_process_identity_matches_independent_os_observations"
+
+[[block]]
+file = "src/ffi/socket.rs"
+line = 25
+function = "initialize"
+operation = "WSAStartup"
+invariant = "One process-lifetime Winsock2.2 initialization; valid writable WSADATA."
+hosted_test = "exclusive_loopback_sockets_block_a_reusing_competitor"
+
+[[block]]
+file = "src/ffi/socket.rs"
+line = 39
+function = "open"
+operation = "WSASocketW"
+invariant = "Fixed TCP parameters; supported address family; disabled handle inheritance."
+hosted_test = "exclusive_loopback_sockets_block_a_reusing_competitor"
+
+[[block]]
+file = "src/ffi/socket.rs"
+line = 52
+function = "open"
+operation = "OwnedSocket::from_raw_socket"
+invariant = "Single ownership transfer of the new valid socket into standard-library RAII."
+hosted_test = "exclusive_loopback_sockets_block_a_reusing_competitor"
+
+[[block]]
+file = "src/ffi/socket.rs"
+line = 57
+function = "failed"
+operation = "WSAGetLastError"
+invariant = "Read this thread's Winsock error immediately after the failing operation."
+hosted_test = "exclusive_loopback_sockets_block_a_reusing_competitor"
+
+[[block]]
+file = "src/ffi/socket.rs"
+line = 64
+function = "set_option"
+operation = "setsockopt"
+invariant = "Live owned socket and initialized four-byte BOOL borrowed only during the call."
+hosted_test = "exclusive_loopback_sockets_block_a_reusing_competitor"
+
+[[block]]
+file = "src/ffi/socket.rs"
+line = 81
+function = "listening"
+operation = "listen(4)"
+invariant = "Live TCP socket bound exclusively before listening; ownership retained through conversion."
+hosted_test = "exclusive_loopback_sockets_block_a_reusing_competitor"
+
+[[block]]
+file = "src/ffi/socket.rs"
+line = 108
+function = "bind_v4_socket"
+operation = "bind IPv4"
+invariant = "Live owned socket; initialized16byte SOCKADDR_IN; synchronous borrowing only."
+hosted_test = "exclusive_loopback_sockets_block_a_reusing_competitor"
+
+[[block]]
+file = "src/ffi/socket.rs"
+line = 138
+function = "bind_v6"
+operation = "bind IPv6"
+invariant = "Live owned v6-only socket; initialized28byte SOCKADDR_IN6 for loopback."
+hosted_test = "exclusive_loopback_sockets_block_a_reusing_competitor"
