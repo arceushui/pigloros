@@ -1846,12 +1846,12 @@ impl SqliteStore {
         self
     }
 
-    fn configure_busy_timeout(conn: &Connection) -> rusqlite::Result<()> {
+    fn configure_busy_timeout(conn: &Connection, busy_timeout: Duration) -> rusqlite::Result<()> {
         #[cfg(test)]
         if FAIL_BUSY_TIMEOUT.with(std::cell::Cell::get) {
             return Err(rusqlite::Error::InvalidQuery);
         }
-        conn.busy_timeout(SQLITE_BUSY_TIMEOUT)
+        conn.busy_timeout(busy_timeout)
     }
 
     fn geo_cell_consent_in_transaction(
@@ -2042,11 +2042,12 @@ impl SqliteStore {
     /// Returns `CoreError::Storage` if the database cannot be opened, has an
     /// unsupported encoding/schema, or fails invariant validation.
     pub fn open_read_only(path: &str) -> Result<Self, CoreError> {
-        Self::open_with_options(
+        Self::open_connections(
             path,
             Box::new(pos_crypto::chain::Blake3Hasher),
             OpenFlags::SQLITE_OPEN_READ_ONLY.union(OpenFlags::SQLITE_OPEN_URI),
             false,
+            SqliteStoreOpenOptionsV1::default(),
         )
     }
 
@@ -2055,29 +2056,53 @@ impl SqliteStore {
     /// # Errors
     /// Returns `CoreError::Storage` if the database cannot be opened or schema initialisation fails.
     pub fn open_with_hasher(path: &str, hasher: Box<dyn Hasher>) -> Result<Self, CoreError> {
-        Self::open_with_options(
+        Self::open_read_write(path, hasher, SqliteStoreOpenOptionsV1::default())
+    }
+
+    /// Open a `SQLite` WAL store with explicit connection options. [`Self::open`] uses
+    /// [`SqliteStoreOpenOptionsV1::default`].
+    ///
+    /// # Errors
+    /// Returns `CoreError::Storage` if the database cannot be opened or schema initialisation fails.
+    pub fn open_with_options(
+        path: &str,
+        options: SqliteStoreOpenOptionsV1,
+    ) -> Result<Self, CoreError> {
+        Self::open_read_write(path, Box::new(pos_crypto::chain::Blake3Hasher), options)
+    }
+
+    fn open_read_write(
+        path: &str,
+        hasher: Box<dyn Hasher>,
+        options: SqliteStoreOpenOptionsV1,
+    ) -> Result<Self, CoreError> {
+        Self::open_connections(
             path,
             hasher,
             OpenFlags::SQLITE_OPEN_READ_WRITE
                 | OpenFlags::SQLITE_OPEN_CREATE
                 | OpenFlags::SQLITE_OPEN_URI,
             true,
+            options,
         )
     }
 
-    fn open_with_options(
+    fn open_connections(
         path: &str,
         hasher: Box<dyn Hasher>,
         flags: OpenFlags,
         initialize_schema: bool,
+        options: SqliteStoreOpenOptionsV1,
     ) -> Result<Self, CoreError> {
         let conn = Connection::open_with_flags(path, flags)
             .map_err(|e| CoreError::Storage(e.to_string()))?;
         conn.set_prepared_statement_cache_capacity(SQLITE_STATEMENT_CACHE_CAPACITY);
 
-        let writer_reservation_connection = Self::open_writer_reservation_connection(path, flags);
+        let writer_reservation_connection =
+            Self::open_writer_reservation_connection(path, flags, options);
 
-        Self::configure_busy_timeout(&conn).map_err(|e| CoreError::Storage(e.to_string()))?;
+        Self::configure_busy_timeout(&conn, options.busy_timeout)
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
 
         Self::require_utf8_encoding(&conn)?;
         let erasure_inventory_data_version =
@@ -2116,7 +2141,11 @@ impl SqliteStore {
         Ok(store)
     }
 
-    fn open_writer_reservation_connection(path: &str, flags: OpenFlags) -> Option<Connection> {
+    fn open_writer_reservation_connection(
+        path: &str,
+        flags: OpenFlags,
+        options: SqliteStoreOpenOptionsV1,
+    ) -> Option<Connection> {
         if flags.contains(OpenFlags::SQLITE_OPEN_READ_ONLY) {
             Connection::open_with_flags(
                 path,
@@ -2124,7 +2153,7 @@ impl SqliteStore {
             )
             .ok()
             .and_then(|connection| {
-                Self::configure_busy_timeout(&connection)
+                Self::configure_busy_timeout(&connection, options.busy_timeout)
                     .ok()
                     .map(|()| connection)
             })
@@ -15011,6 +15040,22 @@ fn parse_entity_id(s: &str) -> Result<EntityId, CoreError> {
 
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(4);
 
+/// Connection options of a [`SqliteStore`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SqliteStoreOpenOptionsV1 {
+    /// How long a store connection waits for a lock held by another connection before the
+    /// operation fails closed. The default is four seconds.
+    pub busy_timeout: Duration,
+}
+
+impl Default for SqliteStoreOpenOptionsV1 {
+    fn default() -> Self {
+        Self {
+            busy_timeout: SQLITE_BUSY_TIMEOUT,
+        }
+    }
+}
+
 /// Prepared statements kept per store connection. A protected Replay read alone cycles through
 /// more distinct cached statements than rusqlite's default of 16, and a least-recently-used
 /// cache smaller than such a cycle misses on every lookup, so each read re-parsed its SQL.
@@ -22122,7 +22167,11 @@ mod tests {
     fn append_fails_when_database_is_locked() {
         let tmp = tempfile::NamedTempFile::new().test_ok();
         let path = tmp.path().to_str().test_ok().to_owned();
-        let mut store = open_store_at(&path);
+        // The lock is held throughout, so a short wait fails exactly as the default one.
+        let options = SqliteStoreOpenOptionsV1 {
+            busy_timeout: std::time::Duration::from_millis(100),
+        };
+        let mut store = fixture_store(SqliteStore::open_with_options(&path, options).test_ok());
         let tl = store.create_timeline("main").test_ok();
         let locker = Connection::open(&path).test_ok();
         locker.execute("BEGIN IMMEDIATE", []).test_ok();
@@ -22131,6 +22180,56 @@ mod tests {
         let result = store.append(tl.id(), &[make_draft(entity, b"x")]);
         locker.execute("ROLLBACK", []).test_ok();
         assert_storage_err(result.map(|_| ()));
+    }
+
+    fn busy_timeout_millis(connection: &Connection) -> i64 {
+        connection
+            .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+            .test_ok()
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn a_default_store_waits_four_seconds_for_a_held_lock() {
+        let store = SqliteStore::open_in_memory().test_ok();
+        assert_eq!(busy_timeout_millis(&store.conn), 4_000);
+        assert_eq!(
+            SqliteStoreOpenOptionsV1::default().busy_timeout,
+            std::time::Duration::from_secs(4)
+        );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn open_options_set_the_wait_of_the_store_and_writer_reservation_connections() {
+        let tmp = tempfile::NamedTempFile::new().test_ok();
+        let path = tmp.path().to_str().test_ok().to_owned();
+        let options = SqliteStoreOpenOptionsV1 {
+            busy_timeout: std::time::Duration::from_millis(250),
+        };
+        let store = SqliteStore::open_with_options(&path, options).test_ok();
+        assert_eq!(busy_timeout_millis(&store.conn), 250);
+        assert!(store.writer_reservation_connection.is_none());
+        drop(store);
+
+        let read_only = SqliteStore::open_connections(
+            &path,
+            Box::new(pos_crypto::chain::Blake3Hasher),
+            OpenFlags::SQLITE_OPEN_READ_ONLY.union(OpenFlags::SQLITE_OPEN_URI),
+            false,
+            options,
+        )
+        .test_ok();
+        assert_eq!(busy_timeout_millis(&read_only.conn), 250);
+        let reservation = read_only.writer_reservation_connection.as_ref().test_ok();
+        assert_eq!(busy_timeout_millis(reservation), 250);
+
+        let default_read_only = SqliteStore::open_read_only(&path).test_ok();
+        let reservation = default_read_only
+            .writer_reservation_connection
+            .as_ref()
+            .test_ok();
+        assert_eq!(busy_timeout_millis(reservation), 4_000);
     }
 
     #[test]

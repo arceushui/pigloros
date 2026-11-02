@@ -20,7 +20,7 @@ use std::sync::{
 };
 
 #[cfg(feature = "sqlite")]
-use pos_store::sqlite::SqliteStore;
+use pos_store::sqlite::{SqliteStore, SqliteStoreOpenOptionsV1};
 
 const CELL_BYTES: &[u8] =
     b"\xa4eindexo8928308280fffff\x66systemeh3-v4\x6aresolution\x09kcell_format\x01";
@@ -1067,7 +1067,7 @@ fn sqlite_geo_cell_consent_records_are_immutable_and_resolver_fail_closed() {
 fn sqlite_geo_cell_consent_storage_type_errors_fail_closed() {
     let database = tempfile::NamedTempFile::new().test_ok();
     let path = database.path().to_str().test_ok();
-    let mut store = SqliteStore::open(path).test_ok();
+    let mut store = SqliteStore::open_with_options(path, contended_store_options()).test_ok();
     let id = consent_id();
     let record = consent_record(id.clone(), 12);
     let inspection = rusqlite::Connection::open(path).test_ok();
@@ -1728,7 +1728,7 @@ fn sqlite_geo_cell_admin_fails_closed_on_durable_write_errors() {
 fn sqlite_geo_cell_admission_reports_unavailable_when_writer_is_locked() {
     let database = tempfile::NamedTempFile::new().test_ok();
     let path = database.path().to_str().test_ok();
-    let mut store = SqliteStore::open(path).test_ok();
+    let mut store = SqliteStore::open_with_options(path, contended_store_options()).test_ok();
     let timeline = store.create_timeline("geo-cell-writer-lock").test_ok();
     let entity = EntityId::new();
     store
@@ -2377,4 +2377,13 @@ fn sqlite_geo_cell_replay_reaches_payload_and_snapshot_row_decode_errors() {
             snapshot_hash,
         ))
         .is_err());
+}
+
+/// Store options for a test that holds a lock until the store fails closed: the lock is held
+/// throughout, so a short wait reaches the same outcome as the four-second default.
+#[cfg(feature = "sqlite")]
+fn contended_store_options() -> SqliteStoreOpenOptionsV1 {
+    SqliteStoreOpenOptionsV1 {
+        busy_timeout: std::time::Duration::from_millis(100),
+    }
 }

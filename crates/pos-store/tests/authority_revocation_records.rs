@@ -23,7 +23,10 @@ use pos_core::{
     PipelineSecurityRevisionsDraftV1, PipelineSecurityRevisionsV1, PrincipalRefV1, Seq, SeqRange,
     TentativePipelineResultV1, TimelineId, DELEGATE_ACTION_V1, PIPELINE_CONTRACT_VERSION_V1,
 };
-use pos_store::{memory::MemoryStore, sqlite::SqliteStore};
+use pos_store::{
+    memory::MemoryStore,
+    sqlite::{SqliteStore, SqliteStoreOpenOptionsV1},
+};
 use tempfile::tempdir;
 use ulid::Ulid;
 
@@ -76,7 +79,14 @@ fn stores() -> Vec<(&'static str, Box<dyn Harness>)> {
 }
 
 fn open_file(path: &Path) -> SqliteStore {
-    let mut store = ok(SqliteStore::open(path.to_str().unwrap_or_default()));
+    open_file_with(path, SqliteStoreOpenOptionsV1::default())
+}
+
+fn open_file_with(path: &Path, options: SqliteStoreOpenOptionsV1) -> SqliteStore {
+    let mut store = ok(SqliteStore::open_with_options(
+        path.to_str().unwrap_or_default(),
+        options,
+    ));
     ok(store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open())));
     store
 }
@@ -707,7 +717,7 @@ fn an_unchanged_sqlite_replay_needs_no_write_lock_but_a_new_record_does() {
     let current = view(&grants, &[], &grants.child);
     let learned = view(&grants, &[&grants.sibling], &grants.child);
     let authority = host(&grants);
-    let mut store = open_file(&path);
+    let mut store = open_file_with(&path, contended_store_options());
     let persisted = ok(authority.persist_authority(&mut store, &current));
 
     let writer = ok(rusqlite::Connection::open(&path));
@@ -782,4 +792,12 @@ fn a_read_only_sqlite_store_answers_an_exact_retry_but_refuses_a_new_record() {
         ok(read_only.load_authority(grants.child.grant_id())),
         persisted
     );
+}
+
+/// Store options for a test that holds a lock until the store fails closed: the lock is held
+/// throughout, so a short wait reaches the same outcome as the four-second default.
+fn contended_store_options() -> SqliteStoreOpenOptionsV1 {
+    SqliteStoreOpenOptionsV1 {
+        busy_timeout: std::time::Duration::from_millis(100),
+    }
 }

@@ -22,8 +22,10 @@ use pos_crypto::fork_authentication::{
     ForkHostSigningKeyV1,
 };
 use pos_store::{
-    memory::MemoryStore, sqlite::SqliteStore, ForkAdmissionAuthorityBootstrapPortV1,
-    ForkAdmissionAuthorityErrorV1, ForkAdmissionAuthorityPortV1, ForkAdmissionAuthoritySessionV1,
+    memory::MemoryStore,
+    sqlite::{SqliteStore, SqliteStoreOpenOptionsV1},
+    ForkAdmissionAuthorityBootstrapPortV1, ForkAdmissionAuthorityErrorV1,
+    ForkAdmissionAuthorityPortV1, ForkAdmissionAuthoritySessionV1,
     ForkAdmissionDeliveryJournalPortV1, ForkDeliveryClaimOutcomeV1, ForkDeliveryClaimV1,
     ForkDeliveryExecutionV1, ForkDeliveryJournalErrorV1, ForkDeliveryStartupOutcomeV1,
     ForkDeliveryStateV1, ForkDeliveryTupleV1,
@@ -408,10 +410,25 @@ fn sqlite_principal_recovery_fixture(
     ),
     Box<dyn Error>,
 > {
+    sqlite_principal_recovery_fixture_with(path, operation_id, SqliteStoreOpenOptionsV1::default())
+}
+
+fn sqlite_principal_recovery_fixture_with(
+    path: &str,
+    operation_id: [u8; 32],
+    options: SqliteStoreOpenOptionsV1,
+) -> Result<
+    (
+        SqliteStore,
+        ForkHostSigningKeyV1,
+        pos_store::ForkAdmissionAuthoritySessionV1,
+    ),
+    Box<dyn Error>,
+> {
     let host = ForkHostSigningKeyV1::from_seed([111; 32])?;
     let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([112; 32])?;
     let policy = authority_policy(&adapter)?;
-    let mut store = SqliteStore::open(path)?;
+    let mut store = SqliteStore::open_with_options(path, options)?;
     let session = open_session(&mut store, &host, &policy)?;
     let command = principal_command(
         &store,
@@ -1585,13 +1602,19 @@ struct SqliteDeliveryFaultContext {
 }
 
 fn sqlite_delivery_fault_context() -> Result<SqliteDeliveryFaultContext, Box<dyn Error>> {
+    sqlite_delivery_fault_context_with(SqliteStoreOpenOptionsV1::default())
+}
+
+fn sqlite_delivery_fault_context_with(
+    options: SqliteStoreOpenOptionsV1,
+) -> Result<SqliteDeliveryFaultContext, Box<dyn Error>> {
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("delivery-write-faults.db");
     let path = path.to_string_lossy().into_owned();
     let host = ForkHostSigningKeyV1::from_seed([81; 32])?;
     let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([82; 32])?;
     let policy = authority_policy(&adapter)?;
-    let mut store = SqliteStore::open(&path)?;
+    let mut store = SqliteStore::open_with_options(&path, options)?;
     let session = open_session(&mut store, &host, &policy)?;
     let fault = Connection::open(&path)?;
     Ok(SqliteDeliveryFaultContext {
@@ -1613,7 +1636,7 @@ fn sqlite_delivery_journal_claim_fence_faults() -> Result<(), Box<dyn Error>> {
         session,
         fault,
         ..
-    } = sqlite_delivery_fault_context()?;
+    } = sqlite_delivery_fault_context_with(contended_store_options())?;
     fault.execute_batch("BEGIN EXCLUSIVE")?;
     let locked_tuple = ForkDeliveryTupleV1::new(
         Hash::from_bytes([83; 32]),
@@ -1793,7 +1816,7 @@ fn sqlite_delivery_execution_begin_and_rejection_delete_faults() -> Result<(), B
         session,
         fault,
         ..
-    } = sqlite_delivery_fault_context()?;
+    } = sqlite_delivery_fault_context_with(contended_store_options())?;
     let begin_operation = [110; 32];
     let begin_tuple = ForkDeliveryTupleV1::new(
         Hash::from_bytes([111; 32]),
@@ -2003,7 +2026,7 @@ fn sqlite_delivery_startup_rejects_invalid_proofs_and_lock_contention() -> Resul
         session,
         fault,
         ..
-    } = sqlite_delivery_fault_context()?;
+    } = sqlite_delivery_fault_context_with(contended_store_options())?;
     let wrong_host = ForkHostSigningKeyV1::from_seed([115; 32])?;
 
     let startup_invalid_proof_operation = [122; 32];
@@ -3189,7 +3212,7 @@ fn sqlite_authority_fails_closed_for_malformed_rows_and_lock_contention(
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("fork-admission-lock.db");
     let path = path.to_string_lossy().into_owned();
-    let mut store = SqliteStore::open(&path)?;
+    let mut store = SqliteStore::open_with_options(&path, contended_store_options())?;
     let lock = Connection::open(&path)?;
     lock.execute_batch("BEGIN EXCLUSIVE")?;
     assert_eq!(
@@ -3927,7 +3950,8 @@ fn sqlite_frp1_maps_a_recovery_transaction_lock_to_storage_indeterminate(
     let path = directory.path().join("fork-admission-recovery-lock.db");
     let path = path.to_string_lossy().into_owned();
     let operation_id = [131; 32];
-    let (mut store, host, session) = sqlite_principal_recovery_fixture(&path, operation_id)?;
+    let (mut store, host, session) =
+        sqlite_principal_recovery_fixture_with(&path, operation_id, contended_store_options())?;
     let proof = recovery_proof(&store, &host, &session, 1, operation_id)?;
     let lock = Connection::open(&path)?;
     lock.execute_batch("BEGIN EXCLUSIVE")?;
@@ -5506,8 +5530,16 @@ fn sqlite_store_at(
     directory: &tempfile::TempDir,
     name: &str,
 ) -> Result<(SqliteStore, String), Box<dyn Error>> {
+    sqlite_store_at_with(directory, name, SqliteStoreOpenOptionsV1::default())
+}
+
+fn sqlite_store_at_with(
+    directory: &tempfile::TempDir,
+    name: &str,
+    options: SqliteStoreOpenOptionsV1,
+) -> Result<(SqliteStore, String), Box<dyn Error>> {
     let path = directory.path().join(name).to_string_lossy().into_owned();
-    Ok((SqliteStore::open(&path)?, path))
+    Ok((SqliteStore::open_with_options(&path, options)?, path))
 }
 
 /// T1, T7, T8: permit-method containment, publication and exact recovery.
@@ -5978,7 +6010,8 @@ fn sqlite_committed_corruption_and_clock_rollback_precede_containment() -> Resul
 fn sqlite_admitted_fork_under_an_external_write_lock_releases_the_gate_fence(
 ) -> Result<(), Box<dyn Error>> {
     let directory = tempfile::tempdir()?;
-    let (mut store, path) = sqlite_store_at(&directory, "r3-lock.db")?;
+    let (mut store, path) =
+        sqlite_store_at_with(&directory, "r3-lock.db", contended_store_options())?;
     let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
     store.bind_erasure_gate(Arc::clone(&gate))?;
     let fixture = AdmittedForkFixture::open(&mut store, 224, true)?;
@@ -6730,7 +6763,8 @@ fn sqlite_permit_delivery_corruption_and_clock_rollback_precede_containment(
 fn sqlite_permit_delivery_under_an_external_write_lock_releases_the_gate_fence(
 ) -> Result<(), Box<dyn Error>> {
     let directory = tempfile::tempdir()?;
-    let (mut store, path) = sqlite_store_at(&directory, "r9-delivery-lock.db")?;
+    let (mut store, path) =
+        sqlite_store_at_with(&directory, "r9-delivery-lock.db", contended_store_options())?;
     let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
     store.bind_erasure_gate(Arc::clone(&gate))?;
     let fixture = AdmittedForkFixture::open(&mut store, 161, true)?;
@@ -6780,4 +6814,12 @@ fn sqlite_permit_delivery_under_an_external_write_lock_releases_the_gate_fence(
     assert!(admitted.published && !admitted.nothing_written);
     assert_eq!(delivery_label(&admitted.result), "committed-fork");
     Ok(())
+}
+
+/// Store options for a test that holds a lock until the store fails closed: the lock is held
+/// throughout, so a short wait reaches the same outcome as the four-second default.
+fn contended_store_options() -> SqliteStoreOpenOptionsV1 {
+    SqliteStoreOpenOptionsV1 {
+        busy_timeout: std::time::Duration::from_millis(100),
+    }
 }
