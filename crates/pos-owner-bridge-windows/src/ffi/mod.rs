@@ -1,5 +1,6 @@
 #![cfg(windows)]
 
+mod directory;
 mod process;
 mod registry;
 mod socket;

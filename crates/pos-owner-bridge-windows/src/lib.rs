@@ -18,6 +18,7 @@ struct Native;
 mod adapter {
     // The inline boundary and each child file are separate lint scopes. This
     // retains both ADR-110 checks without duplicate attributes on one module.
+    mod directory;
     mod overrides;
     mod process;
     mod socket;
@@ -27,7 +28,10 @@ mod adapter {
     pub use socket::WindowsLoopbackBinder;
 }
 
-pub use adapter::{process_identity, refuse_overrides, WindowsLoopbackBinder, WindowsProcessProbe};
+pub use adapter::{
+    create_private_directory, process_identity, refuse_overrides, verify_private_directory,
+    WindowsLoopbackBinder, WindowsProcessProbe,
+};
 
 #[cfg(test)]
 #[forbid(unsafe_code)]
@@ -76,3 +80,4 @@ mod tests {
         Ok(())
     }
 }
+pub use directory::{create_private_directory, verify_private_directory};

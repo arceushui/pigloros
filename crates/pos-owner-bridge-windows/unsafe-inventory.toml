@@ -1,6 +1,103 @@
 # One `[[block]]` record per explicit unsafe block in src/ffi, with `file`,
 # `line`, `function`, `operation`, `invariant` and `hosted_test`. The rules and
 # their enforcement live in scripts/check_owner_bridge_unsafe_policy.py.
+
+[[block]]
+file = "src/ffi/directory.rs"
+line = 26
+function = "drop"
+operation = "LocalFree"
+invariant = "Exactly one release of each Windows LocalAlloc result, after every dependent descriptor or UTF-16 read."
+hosted_test = "private_directory_is_current_sid_only_and_rejects_weakened_acl_and_links"
+
+[[block]]
+file = "src/ffi/directory.rs"
+line = 34
+function = "allocated_text"
+operation = "PWSTR::to_string"
+invariant = "Successful Windows conversion returned a NUL-terminated allocated string; LocalMemory retains ownership throughout the copy."
+hosted_test = "private_directory_is_current_sid_only_and_rejects_weakened_acl_and_links"
+
+[[block]]
+file = "src/ffi/directory.rs"
+line = 39
+function = "current_sid"
+operation = "GetCurrentProcess"
+invariant = "Borrowed current-process pseudo-handle; never closed or transferred."
+hosted_test = "private_directory_is_current_sid_only_and_rejects_weakened_acl_and_links"
+
+[[block]]
+file = "src/ffi/directory.rs"
+line = 43
+function = "current_sid"
+operation = "OpenProcessToken(TOKEN_QUERY)"
+invariant = "Query-only current-process token with initialized writable output; one later close on every outcome."
+hosted_test = "private_directory_is_current_sid_only_and_rejects_weakened_acl_and_links"
+
+[[block]]
+file = "src/ffi/directory.rs"
+line = 47
+function = "current_sid"
+operation = "CloseHandle token"
+invariant = "Single close of the successfully acquired token after all SID data was copied."
+hosted_test = "private_directory_is_current_sid_only_and_rejects_weakened_acl_and_links"
+
+[[block]]
+file = "src/ffi/directory.rs"
+line = 58
+function = "token_sid"
+operation = "GetTokenInformation(TokenUser)"
+invariant = "Live query-only token and distinct initialized 1024-byte aligned storage/length outputs; errors never inspected."
+hosted_test = "private_directory_is_current_sid_only_and_rejects_weakened_acl_and_links"
+
+[[block]]
+file = "src/ffi/directory.rs"
+line = 73
+function = "token_sid"
+operation = "TOKEN_USER pointer read"
+invariant = "Successful TokenUser wrote at least sizeof TOKEN_USER into aligned storage; pointee SID remains inside the live storage."
+hosted_test = "private_directory_is_current_sid_only_and_rejects_weakened_acl_and_links"
+
+[[block]]
+file = "src/ffi/directory.rs"
+line = 77
+function = "token_sid"
+operation = "ConvertSidToStringSidW"
+invariant = "Valid SID from successful TokenUser remains live; independently allocated output transfers once to LocalMemory."
+hosted_test = "private_directory_is_current_sid_only_and_rejects_weakened_acl_and_links"
+
+[[block]]
+file = "src/ffi/directory.rs"
+line = 90
+function = "expected_descriptor"
+operation = "ConvertStringSecurityDescriptorToSecurityDescriptorW"
+invariant = "NUL-terminated current-SID-only protected SDDL; initialized descriptor output transfers once to LocalMemory."
+hosted_test = "private_directory_is_current_sid_only_and_rejects_weakened_acl_and_links"
+
+[[block]]
+file = "src/ffi/directory.rs"
+line = 106
+function = "descriptor_text"
+operation = "ConvertSecurityDescriptorToStringSecurityDescriptorW"
+invariant = "Windows-created descriptor remains live; owner/DACL-only output is independently allocated and owned."
+hosted_test = "private_directory_is_current_sid_only_and_rejects_weakened_acl_and_links"
+
+[[block]]
+file = "src/ffi/directory.rs"
+line = 123
+function = "read_descriptor"
+operation = "GetNamedSecurityInfoW"
+invariant = "NUL-terminated owned path, initialized output, omitted interior aliases; successful descriptor transfers once to LocalMemory."
+hosted_test = "private_directory_is_current_sid_only_and_rejects_weakened_acl_and_links"
+
+[[block]]
+file = "src/ffi/directory.rs"
+line = 158
+function = "private_directory"
+operation = "CreateDirectoryW"
+invariant = "Owned path and initialized non-inheritable SECURITY_ATTRIBUTES reference a live current-SID-only protected descriptor."
+hosted_test = "private_directory_is_current_sid_only_and_rejects_weakened_acl_and_links"
+
 [[block]]
 file = "src/ffi/registry.rs"
 line = 29
