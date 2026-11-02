@@ -3,7 +3,6 @@
 
 use std::collections::BTreeMap;
 use std::fs::OpenOptions;
-use std::io::{Read, Write};
 use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
@@ -13,7 +12,9 @@ use windows::Win32::Storage::FileSystem::{
     FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
 };
 
+mod io;
 mod manifest;
+use io::{OsIo, RuntimeIo};
 
 const PER_START: [&str; 4] = [
     "msedgewebview2.exe",
@@ -103,16 +104,29 @@ fn verify_installation(
     expected: &[RuntimeFile],
     manifest_digest: &[u8; 32],
 ) -> Result<PathBuf, ()> {
+    verify_with_io(root, marker_directory, expected, manifest_digest, &OsIo)
+}
+
+fn verify_with_io(
+    root: &Path,
+    marker_directory: &Path,
+    expected: &[RuntimeFile],
+    manifest_digest: &[u8; 32],
+    io: &impl RuntimeIo,
+) -> Result<PathBuf, ()> {
     super::directory::inspect_path(root, false).map_err(failed)?;
-    let root = root.canonicalize().map_err(failed)?;
-    let directory = OpenOptions::new()
-        .read(true)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS.0 | FILE_FLAG_OPEN_REPARSE_POINT.0)
-        .open(&root)
+    let root = io.canonicalize(root).map_err(failed)?;
+    let directory = io
+        .open(
+            &root,
+            OpenOptions::new()
+                .read(true)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS.0 | FILE_FLAG_OPEN_REPARSE_POINT.0),
+        )
         .map_err(failed)?;
-    let (volume, index) = crate::Native::file_identity(&directory)?;
+    let (volume, index) = io.identity(&directory)?;
     let mut members = BTreeMap::new();
-    collect_members(&root, "", &mut members)?;
+    collect_members(io, &root, "", &mut members)?;
     if members.len() != expected.len() {
         return Err(());
     }
@@ -129,42 +143,44 @@ fn verify_installation(
         cache.extend_from_slice(&metadata.last_write_time().to_le_bytes());
         admitted.push((entry, path));
     }
-    match std::fs::symlink_metadata(marker_directory) {
-        Ok(_) => super::verify_private_directory(marker_directory).map_err(failed)?,
+    match io.metadata(marker_directory) {
+        Ok(_) => io.private_directory(marker_directory, false)?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            super::create_private_directory(marker_directory).map_err(failed)?;
+            io.private_directory(marker_directory, true)?;
         }
         Err(_) => return Err(()),
     }
     let marker = marker_directory.join(MARKER_NAME);
-    let cached = read_marker(&marker, cache.len()).is_ok_and(|bytes| bytes == cache);
+    let cached = read_marker(io, &marker, cache.len()).is_ok_and(|bytes| bytes == cache);
     for (entry, path) in admitted {
-        if (!cached || PER_START.contains(&entry.path)) && hash_file(path)? != entry.sha256 {
+        if (!cached || PER_START.contains(&entry.path)) && hash_file(io, path)? != entry.sha256 {
             return Err(());
         }
     }
     // A cache record holds public metadata only. A partial write is simply a
     // cache miss next start, so it needs no durable cleanup-file protocol.
     if !cached {
-        write_marker(&marker, &cache)?;
+        write_marker(io, &marker, &cache)?;
     }
     Ok(root)
 }
 
 fn collect_members(
+    io: &impl RuntimeIo,
     directory: &Path,
     prefix: &str,
     members: &mut BTreeMap<String, (PathBuf, std::fs::Metadata)>,
 ) -> Result<(), ()> {
-    for entry in std::fs::read_dir(directory).map_err(failed)? {
-        let entry = entry.map_err(failed)?;
-        let path = entry.path();
-        let metadata = std::fs::symlink_metadata(&path).map_err(failed)?;
+    for entry in io.entries(directory).map_err(failed)? {
+        let path = entry.map_err(failed)?;
+        let metadata = io.metadata(&path).map_err(failed)?;
         if metadata.file_attributes() & 0x400 != 0 {
             return Err(());
         }
-        let name = entry.file_name();
-        let name = name.to_str().ok_or(())?;
+        let name = path
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .ok_or(())?;
         let relative = format!("{prefix}{name}");
         if metadata.is_file() {
             // Directory enumeration gives each exact relative name once. The
@@ -174,25 +190,28 @@ fn collect_members(
         } else {
             // Directories recurse. An unsupported non-file kind fails at
             // read_dir, so it cannot enter the admitted file inventory.
-            collect_members(&path, &format!("{relative}/"), members)?;
+            collect_members(io, &path, &format!("{relative}/"), members)?;
         }
     }
     Ok(())
 }
 
-fn hash_file(path: &Path) -> Result<[u8; 32], ()> {
-    let mut file = OpenOptions::new()
-        .read(true)
-        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
-        .open(path)
+fn hash_file(io: &impl RuntimeIo, path: &Path) -> Result<[u8; 32], ()> {
+    let mut file = io
+        .open(
+            path,
+            OpenOptions::new()
+                .read(true)
+                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0),
+        )
         .map_err(failed)?;
-    if file.metadata().map_err(failed)?.file_attributes() & 0x400 != 0 {
+    if io.file_metadata(&file).map_err(failed)?.file_attributes() & 0x400 != 0 {
         return Err(());
     }
     let mut hash = Sha256::new();
     let mut buffer = vec![0_u8; 1_048_576].into_boxed_slice();
     loop {
-        let read = file.read(&mut buffer).map_err(failed)?;
+        let read = io.read(&mut file, &mut buffer).map_err(failed)?;
         if read == 0 {
             break;
         }
@@ -201,38 +220,46 @@ fn hash_file(path: &Path) -> Result<[u8; 32], ()> {
     Ok(hash.finalize().into())
 }
 
-fn read_marker(path: &Path, length: usize) -> Result<Vec<u8>, ()> {
-    let metadata = std::fs::symlink_metadata(path).map_err(failed)?;
+fn read_marker(io: &impl RuntimeIo, path: &Path, length: usize) -> Result<Vec<u8>, ()> {
+    let metadata = io.metadata(path).map_err(failed)?;
     if !metadata.is_file() || metadata.file_attributes() & 0x400 != 0 {
         return Err(());
     }
-    let mut bytes = Vec::new();
-    OpenOptions::new()
-        .read(true)
-        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
-        .open(path)
-        .map_err(failed)?
-        .take(u64::try_from(length).map_err(failed)? + 1)
-        .read_to_end(&mut bytes)
+    let mut file = io
+        .open(
+            path,
+            OpenOptions::new()
+                .read(true)
+                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0),
+        )
         .map_err(failed)?;
-    Ok(bytes)
+    // Windows pointer widths are at most 64 bits, so this widening conversion
+    // cannot fail. The bound is the already-allocated cache length plus one.
+    io.read_bounded(&mut file, length as u64 + 1)
+        .map_err(failed)
 }
 
-fn write_marker(path: &Path, cache: &[u8]) -> Result<(), ()> {
-    if let Ok(metadata) = std::fs::symlink_metadata(path) {
-        if !metadata.is_file() || metadata.file_attributes() & 0x400 != 0 {
-            return Err(());
+fn write_marker(io: &impl RuntimeIo, path: &Path, cache: &[u8]) -> Result<(), ()> {
+    match io.metadata(path) {
+        Ok(metadata) => {
+            if !metadata.is_file() || metadata.file_attributes() & 0x400 != 0 {
+                return Err(());
+            }
         }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err(()),
     }
-    OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
-        .open(path)
-        .map_err(failed)?
-        .write_all(cache)
-        .map_err(failed)
+    let mut file = io
+        .open(
+            path,
+            OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0),
+        )
+        .map_err(failed)?;
+    io.write(&mut file, cache).map_err(failed)
 }
 
 #[cfg(test)]

@@ -56,39 +56,61 @@ mod tests {
     }
 
     #[test]
-    fn exclusive_loopback_sockets_block_a_reusing_competitor(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    fn exclusive_loopback_sockets_block_a_reusing_competitor() {
         let mut fixed = WindowsLoopbackBinder::default();
         // No connections/TIME_WAIT on the port used by later lifecycle fixtures.
-        let fixed_v4 = fixed.bind_v4()?;
-        let fixed_v6 = fixed.bind_v6()?;
-        assert_eq!(fixed_v4.local_addr()?.port(), 49_291);
-        assert_eq!(fixed_v6.local_addr()?.port(), 49_291);
-        assert!(fixed.bind_v4().is_err());
-        assert!(fixed.bind_v6().is_err());
-        drop((fixed_v4, fixed_v6));
-
+        assert!(fixed
+            .bind_v4()
+            .is_ok_and(|v4| fixed.bind_v6().is_ok_and(|v6| {
+                assert!(v4
+                    .local_addr()
+                    .is_ok_and(|address| address.port() == 49_291));
+                assert!(v6
+                    .local_addr()
+                    .is_ok_and(|address| address.port() == 49_291));
+                assert!(fixed.bind_v4().is_err());
+                assert!(fixed.bind_v6().is_err());
+                true
+            })));
         let mut binder = WindowsLoopbackBinder::ephemeral();
-        let v4 = binder.bind_v4()?;
-        assert_eq!(v4.local_addr()?.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
-        let client = TcpStream::connect(v4.local_addr()?)?;
-        let (_, peer) = v4.accept()?;
-        assert_eq!(peer.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
-        drop(client);
-        assert!(TcpListener::bind(v4.local_addr()?).is_err());
-        let competing = crate::Native::competing_reuse(v4.local_addr()?.port());
-        let error = competing
-            .err()
-            .ok_or("a reusing competitor took the exclusive port")?;
-        assert!([io::ErrorKind::AddrInUse, io::ErrorKind::PermissionDenied].contains(&error.kind()));
-        let v6 = binder.bind_v6()?;
-        assert_eq!(v6.local_addr()?.ip(), IpAddr::V6(Ipv6Addr::LOCALHOST));
-        let client = TcpStream::connect(v6.local_addr()?)?;
-        assert!(v6.accept().is_ok());
-        drop(client);
-        assert!(TcpListener::bind(v6.local_addr()?).is_err());
+        assert!(binder.bind_v4().is_ok_and(exercise_v4));
+        assert!(binder.bind_v6().is_ok_and(exercise_v6));
         assert_eq!(binder.probe_v6(), Ok(()));
-        drop((v4, v6));
-        Ok(())
+    }
+
+    fn exercise_v4(listener: TcpListener) -> bool {
+        listener.local_addr().is_ok_and(|address| {
+            assert_eq!(address.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
+            assert!(TcpStream::connect(address).is_ok_and(|client| {
+                let accepted = listener
+                    .accept()
+                    .is_ok_and(|(_, peer)| peer.ip() == IpAddr::V4(Ipv4Addr::LOCALHOST));
+                drop(client);
+                accepted
+            }));
+            assert!(TcpListener::bind(address).is_err());
+            assert!(
+                crate::Native::competing_reuse(address.port()).is_err_and(|error| {
+                    matches!(
+                        error.kind(),
+                        io::ErrorKind::AddrInUse | io::ErrorKind::PermissionDenied
+                    )
+                })
+            );
+            true
+        })
+    }
+
+    fn exercise_v6(listener: TcpListener) -> bool {
+        listener.local_addr().is_ok_and(|address| {
+            assert_eq!(address.ip(), IpAddr::V6(Ipv6Addr::LOCALHOST));
+            assert!(TcpStream::connect(address).is_ok_and(|client| {
+                let accepted = listener.accept().is_ok();
+                drop(client);
+                accepted
+            }));
+            assert!(TcpListener::bind(address).is_err());
+            true
+        })
     }
 }

@@ -9,6 +9,8 @@ use std::time::{Duration, SystemTime};
 
 use super::*;
 
+mod faults;
+
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 struct Fixture {
@@ -78,7 +80,8 @@ impl crate::Native {
         let fixture = Fixture::new()?;
         verify_identity(&fixture)?;
         verify_cache(&fixture)?;
-        verify_inventory(&fixture)
+        verify_inventory(&fixture)?;
+        faults::verify(&fixture)
     }
 }
 
@@ -194,7 +197,7 @@ fn verify_inventory(f: &Fixture) -> TestResult {
     let link = f.runtime.join("linked.pak");
     symlink_file(&resource, &link)?;
     assert!(f.verify().is_err());
-    assert!(hash_file(&link).is_err());
+    assert!(hash_file(&OsIo, &link).is_err());
     std::fs::remove_file(link)?;
     let junction = f.runtime.join("alias");
     let output = Command::new("cmd.exe")
