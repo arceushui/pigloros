@@ -9,6 +9,10 @@ a Linux compiler run cannot audit its FFI boundary.
 Policy, enforced over every ``.rs`` file under every workspace member (except
 ``<member>/target``):
 
+* ADR110 section5.2 API families for script injection, DevTools, extensions,
+  WebMessages and frame-interface posting are forbidden in the shim, including
+  imports/aliases and newer method variants. The SDK's unbounded async pump
+  helper is forbidden; native opening must preserve the selected phase bounds.
 * Allowed unsafe form: only an explicit ``unsafe { }`` block, only inside
   ``crates/pos-owner-bridge-windows/src/ffi/*.rs``. Each block needs a
   ``// SAFETY:`` comment (immediately above the block or above the statement it
@@ -116,6 +120,15 @@ from pathlib import Path, PurePosixPath
 SHIM = "crates/pos-owner-bridge-windows"
 INVENTORY = "unsafe-inventory.toml"
 REQUIRED_BLOCK_FIELDS = ("file", "line", "function", "operation", "invariant", "hosted_test")
+# ADR110 section5.2 prohibits these API families even inside an inventoried
+# FFI block. Scan identifiers after masking comments/data, so aliases/imports
+# and method variants cannot introduce host injection, messages or frame posts.
+FORBIDDEN_WEBVIEW_API = re.compile(
+    r"(?<!\w)(?:ExecuteScript\w*|AddScriptToExecuteOnDocumentCreated\w*|"
+    r"CallDevToolsProtocolMethod\w*|GetDevToolsProtocolEventReceiver\w*|"
+    r"AddBrowserExtension\w*|\w*WebMessageReceived\w*|PostWebMessage\w*|"
+    r"ICoreWebView2Frame(?:[0-9]+)?|wait_for_async_operation)(?!\w)"
+)
 UNSAFE_TOKEN = re.compile(r"(?<!\w)unsafe(?!\w)")
 UNSAFE_BLOCK = re.compile(r"(?<!\w)unsafe\s*\{")
 UNSAFE_KIND = re.compile(r"unsafe\s*(\w+|\()")
@@ -910,6 +923,10 @@ def _check_shim_sources(shim: Path, scanned_dirs: tuple[Path, ...], found: list[
         text = _read(source)
         scanned = scan(text)
         code = scanned.code
+        for api in FORBIDDEN_WEBVIEW_API.finditer(code):
+            found.append(
+                f"{label}:{_line_of(code, api.start())}: forbidden owner WebView API {api.group()}"
+            )
         attributes = _attributes(code)
         scans[relative] = (scanned, attributes)
         is_ffi = relative.startswith("src/ffi/")

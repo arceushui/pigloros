@@ -1284,6 +1284,33 @@ def run_cli(extra: dict[str, str | None] | None = None) -> subprocess.CompletedP
         )
 
 
+def test_forbidden_webview_authority() -> None:
+    names = [
+        "ExecuteScript", "ExecuteScriptWithResult", "AddScriptToExecuteOnDocumentCreated",
+        "CallDevToolsProtocolMethod", "CallDevToolsProtocolMethodWithSessionId",
+        "GetDevToolsProtocolEventReceiver", "AddBrowserExtension",
+        "WebMessageReceived", "add_WebMessageReceived", "WebMessageReceivedEventHandler",
+        "PostWebMessageAsJson", "PostWebMessageAsString", "ICoreWebView2Frame",
+        "ICoreWebView2Frame4", "ICoreWebView2Frame10", "wait_for_async_operation",
+    ]
+    for name in names:
+        for statement in [f"view.{name}();", f"use sdk::{name} as alias;"]:
+            source = HOST_MODULE + f"fn forbidden() {{ {statement} }}\n"
+            line = source[:source.index(name)].count("\n") + 1
+            require_rejected(
+                f"forbidden WebView authority {name}", {HOST: source},
+                [at(HOST, line, f"forbidden owner WebView API {name}")],
+            )
+    require_accepted("API names in comments and data", {
+        HOST: HOST_MODULE + '// ExecuteScript /* WebMessageReceived */\n'
+        + 'const NOTE: &str = r#"CallDevToolsProtocolMethod AddBrowserExtension"#;\n'
+        + 'fn allowed() { view.PostSharedBufferToScript(); view.add_FrameCreated(); }\n',
+    })
+    require_accepted("scope stays within native shim", {
+        SAFE_LIB_PATH: FORBID + 'pub fn ExecuteScript() {}\n',
+    })
+
+
 def test_cli() -> None:
     clean = run_cli()
     if clean.returncode != 0 or "owner-bridge Windows unsafe policy holds" not in clean.stdout:
@@ -1309,6 +1336,7 @@ def main() -> None:
     test_inventory()
     test_manifests()
     test_cli()
+    test_forbidden_webview_authority()
     test_hardening()
     test_symlinks()
     test_hosted_liveness()
