@@ -11,18 +11,23 @@
 //! checker enforces it.
 
 mod ffi;
+// Safe entry points implemented by the private native boundary. The type and
+// its associated operations are accessible only inside this crate.
+struct Native;
 #[forbid(unsafe_code)]
 mod adapter {
     // The inline boundary and each child file are separate lint scopes. This
     // retains both ADR-110 checks without duplicate attributes on one module.
+    mod overrides;
     mod process;
     mod socket;
 
+    pub use overrides::refuse_overrides;
     pub use process::{process_identity, WindowsProcessProbe};
     pub use socket::WindowsLoopbackBinder;
 }
 
-pub use adapter::{process_identity, WindowsLoopbackBinder, WindowsProcessProbe};
+pub use adapter::{process_identity, refuse_overrides, WindowsLoopbackBinder, WindowsProcessProbe};
 
 #[cfg(test)]
 #[forbid(unsafe_code)]
@@ -55,7 +60,7 @@ mod tests {
         assert_eq!(peer.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
         drop(client);
         assert!(TcpListener::bind(v4.local_addr()?).is_err());
-        let competing = crate::ffi::competing_reuse(v4.local_addr()?.port());
+        let competing = crate::Native::competing_reuse(v4.local_addr()?.port());
         let error = competing
             .err()
             .ok_or("a reusing competitor took the exclusive port")?;

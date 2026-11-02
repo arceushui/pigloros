@@ -2,6 +2,14 @@
 # `line`, `function`, `operation`, `invariant` and `hosted_test`. The rules and
 # their enforcement live in scripts/check_owner_bridge_unsafe_policy.py.
 [[block]]
+file = "src/ffi/registry.rs"
+line = 29
+function = "query_policy"
+operation = "RegGetValueW"
+invariant = "Borrowed predefined hive, owned NUL-terminated UTF-16 key and value names, both WOW64 views; no output buffers or retained pointers."
+hosted_test = "override_refusal_checks_environment_and_both_registry_views"
+
+[[block]]
 file = "src/ffi/process.rs"
 line = 22
 function = "inspect"
