@@ -21,17 +21,19 @@ mod adapter {
     mod directory;
     mod overrides;
     mod process;
+    mod runtime;
     mod socket;
 
     pub use directory::{create_private_directory, verify_private_directory};
     pub use overrides::refuse_overrides;
     pub use process::{process_identity, WindowsProcessProbe};
+    pub use runtime::{verify_fixed_runtime, VerifiedRuntime};
     pub use socket::WindowsLoopbackBinder;
 }
 
 pub use adapter::{
-    create_private_directory, process_identity, refuse_overrides, verify_private_directory,
-    WindowsLoopbackBinder, WindowsProcessProbe,
+    create_private_directory, process_identity, refuse_overrides, verify_fixed_runtime,
+    verify_private_directory, VerifiedRuntime, WindowsLoopbackBinder, WindowsProcessProbe,
 };
 
 #[cfg(test)]
@@ -43,6 +45,12 @@ mod tests {
     use pos_owner_bridge::listener::bind::LoopbackBinder;
 
     use crate::WindowsLoopbackBinder;
+
+    #[test]
+    fn runtime_checks_all_members_metadata_cache_and_per_start_binaries(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        crate::Native::verify_runtime_cache_fixture()
+    }
 
     #[test]
     fn exclusive_loopback_sockets_block_a_reusing_competitor(

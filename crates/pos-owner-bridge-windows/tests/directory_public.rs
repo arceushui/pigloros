@@ -40,6 +40,7 @@ fn private_directory_is_current_sid_only_and_rejects_weakened_acl_and_links() ->
     assert!(verify_private_directory(&file).is_err());
 
     let output = Command::new("powershell.exe")
+        .env_remove("PSModulePath")
         .args(["-NoProfile", "-NonInteractive", "-Command", r"
             $ErrorActionPreference = 'Stop'
             $acl = Get-Acl -LiteralPath $env:PIGLOR_DIRECTORY_FIXTURE

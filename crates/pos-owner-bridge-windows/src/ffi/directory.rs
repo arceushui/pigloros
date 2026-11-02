@@ -1,6 +1,7 @@
 #![cfg(windows)]
 
 use std::os::windows::ffi::OsStrExt;
+use std::os::windows::io::AsRawHandle;
 use std::path::Path;
 
 use windows::core::{PCWSTR, PWSTR};
@@ -14,7 +15,9 @@ use windows::Win32::Security::{
     GetTokenInformation, TokenUser, DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
     PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER,
 };
-use windows::Win32::Storage::FileSystem::CreateDirectoryW;
+use windows::Win32::Storage::FileSystem::{
+    CreateDirectoryW, GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+};
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
 struct LocalMemory(HLOCAL);
@@ -138,6 +141,21 @@ fn read_descriptor(path: &[u16]) -> Result<LocalMemory, ()> {
 }
 
 impl crate::Native {
+    pub(crate) fn file_identity(file: &std::fs::File) -> Result<(u32, u64), ()> {
+        let mut information = BY_HANDLE_FILE_INFORMATION::default();
+        // SAFETY: the borrowed File retains its live handle throughout this
+        // synchronous metadata query; the initialized output is uniquely writable.
+        unsafe { GetFileInformationByHandle(HANDLE(file.as_raw_handle()), &raw mut information) }
+            .map_err(|_| ())
+            .map(|()| {
+                (
+                    information.dwVolumeSerialNumber,
+                    (u64::from(information.nFileIndexHigh) << 32)
+                        | u64::from(information.nFileIndexLow),
+                )
+            })
+    }
+
     pub(crate) fn private_directory(path: &Path, create: bool) -> Result<(), ()> {
         let mut path: Vec<u16> = path.as_os_str().encode_wide().collect();
         if path.contains(&0) {

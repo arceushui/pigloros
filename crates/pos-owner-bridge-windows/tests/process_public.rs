@@ -17,6 +17,7 @@ fn current_process_identity_matches_independent_os_observations() -> TestResult 
     let identity = process_identity(pid)?;
     let script = format!("(Get-Process -Id {pid}).StartTime.ToFileTimeUtc().ToString([System.Globalization.CultureInfo]::InvariantCulture)");
     let output = Command::new("powershell.exe")
+        .env_remove("PSModulePath")
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])
         .output()?;
     assert!(output.status.success());

@@ -26,7 +26,7 @@ pub fn verify_private_directory(path: &Path) -> Result<(), BridgeError> {
         .and_then(|()| crate::Native::private_directory(path, false).map_err(|()| unavailable()))
 }
 
-fn inspect_path(path: &Path, create: bool) -> Result<(), BridgeError> {
+pub(super) fn inspect_path(path: &Path, create: bool) -> Result<(), BridgeError> {
     if !path.is_absolute() {
         return Err(unavailable());
     }
