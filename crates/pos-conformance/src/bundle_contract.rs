@@ -10,6 +10,7 @@ use pos_core::{CanonicalBytes, PublicKey, Signature};
 use pos_crypto::signing;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Cursor;
+use std::sync::{Mutex, MutexGuard, PoisonError};
 use thiserror::Error;
 
 use crate::{
@@ -143,9 +144,10 @@ pub const fn host_verified_execution_profile_bytes_v1(
 mod tests {
     use super::{
         draft_execution_profile_bytes_v1, host_verified_execution_profile_bytes_v1,
-        prohibited_text_material, TOKEN_PREFIXES,
+        prohibited_text_material, CleanMemberScans, TOKEN_PREFIXES,
     };
     use crate::BundleContractErrorV1;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn token(prefix: &[u8], length: usize) -> Vec<u8> {
         [
@@ -182,6 +184,27 @@ mod tests {
         ));
         assert!(prohibited_text_material(b"GhP_abcdefghijklmnop"));
         assert!(!prohibited_text_material(b"trailing ghp_"));
+    }
+
+    #[test]
+    fn only_clean_scans_are_recorded_and_only_up_to_the_capacity() {
+        static SCANS: AtomicUsize = AtomicUsize::new(0);
+        fn counted(bytes: &[u8]) -> bool {
+            SCANS.fetch_add(1, Ordering::SeqCst);
+            bytes == b"secret"
+        }
+        let scans = CleanMemberScans::new(1);
+        assert!(!scans.contains_secret(b"first", counted));
+        assert!(!scans.contains_secret(b"first", counted));
+        assert_eq!(SCANS.load(Ordering::SeqCst), 1);
+        assert!(scans.contains_secret(b"secret", counted));
+        assert!(scans.contains_secret(b"secret", counted));
+        assert_eq!(SCANS.load(Ordering::SeqCst), 3);
+        assert!(!scans.contains_secret(b"second", counted));
+        assert!(!scans.contains_secret(b"second", counted));
+        assert_eq!(SCANS.load(Ordering::SeqCst), 5);
+        assert!(!scans.contains_secret(b"first", counted));
+        assert_eq!(SCANS.load(Ordering::SeqCst), 5);
     }
 
     #[test]
@@ -1971,7 +1994,59 @@ const TOKEN_PREFIXES: [(&[u8], usize); 20] = [
     (b"eyj", 20),
 ];
 
+/// The most clean member scans one process records: 2 MiB of digests.
+const CLEAN_MEMBER_SCAN_CAPACITY: usize = 65_536;
+
+static CLEAN_MEMBER_SCANS: CleanMemberScans = CleanMemberScans::new(CLEAN_MEMBER_SCAN_CAPACITY);
+
+/// The BLAKE3 digests of member bytes this process has scanned and found free of secret material.
+///
+/// Every typed and independent validation scans every member, and one archive is validated many
+/// times while it is built, published, and verified, so the same bytes were rescanned each time.
+/// The scan is a pure function of the bytes, so a recorded digest answers as a rescan would. Only
+/// clean results are recorded: bytes with secret material are rescanned and rejected every time.
+struct CleanMemberScans {
+    digests: Mutex<BTreeSet<[u8; 32]>>,
+    capacity: usize,
+}
+
+impl CleanMemberScans {
+    const fn new(capacity: usize) -> Self {
+        Self {
+            digests: Mutex::new(BTreeSet::new()),
+            capacity,
+        }
+    }
+
+    /// Whether `bytes` contain secret material, scanning them with `scan` unless they are
+    /// recorded clean. The lock is not held during a scan, so concurrent scans do not wait.
+    fn contains_secret(&self, bytes: &[u8], scan: fn(&[u8]) -> bool) -> bool {
+        let digest = *blake3::hash(bytes).as_bytes();
+        if self.digests().contains(&digest) {
+            return false;
+        }
+        let secret = scan(bytes);
+        if !secret {
+            let mut clean = self.digests();
+            if clean.len() < self.capacity {
+                clean.insert(digest);
+            }
+        }
+        secret
+    }
+
+    fn digests(&self) -> MutexGuard<'_, BTreeSet<[u8; 32]>> {
+        // The set is only read or extended by one insert, so a panic elsewhere cannot leave it
+        // inconsistent.
+        self.digests.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
 fn prohibited_secret_material(bytes: &[u8]) -> bool {
+    CLEAN_MEMBER_SCANS.contains_secret(bytes, scan_secret_material)
+}
+
+fn scan_secret_material(bytes: &[u8]) -> bool {
     let json = serde_json::from_slice(bytes).is_ok_and(|value| json_secret(&value));
     let mut cursor = Cursor::new(bytes);
     let cbor = ciborium::from_reader::<Value, _>(&mut cursor).ok();
@@ -1981,52 +2056,43 @@ fn prohibited_secret_material(bytes: &[u8]) -> bool {
 }
 
 /// Find a PEM private-key armour or a credential token in one pass over the bytes. Only the
-/// byte pairs that can begin one of those ASCII patterns are compared in full, and each pair is
-/// compared only with the patterns it can begin, so the cost of a member stays linear in its
-/// length. The pass indexes the bytes directly because this scan runs over every member on every
-/// typed and independent validation.
+/// byte pairs that can begin one of those ASCII patterns are compared in full, so the cost of a
+/// member stays linear in its length.
 fn prohibited_text_material(bytes: &[u8]) -> bool {
     let mut private_key_begin = false;
     let mut private_key_end = false;
-    let mut offset = 0;
-    while offset + 1 < bytes.len() {
-        match (bytes[offset], bytes[offset + 1]) {
-            (b'-', b'-') => {
-                private_key_begin |= starts_with_ignore_ascii_case(&bytes[offset..], b"-----begin");
-            }
-            (b'p' | b'P', b'r' | b'R') => {
-                private_key_end |=
-                    starts_with_ignore_ascii_case(&bytes[offset..], b"private key-----");
-            }
-            (b'a' | b'A', b'i' | b'I' | b'k' | b'K' | b's' | b'S')
-            | (b'b' | b'B', b'a' | b'A' | b'e' | b'E')
-            | (b'e' | b'E', b'y' | b'Y')
-            | (b'g' | b'G', b'h' | b'H' | b'i' | b'I' | b'l' | b'L')
-            | (b's' | b'S', b'k' | b'K')
-            | (b'x' | b'X', b'o' | b'O')
-                if credential_token_at(&bytes[offset..]) =>
-            {
+    for (offset, pair) in bytes.windows(2).enumerate() {
+        if matches!(
+            pair,
+            [b'-', b'-']
+                | [b'p' | b'P', b'r' | b'R']
+                | [b'a' | b'A', b'i' | b'I' | b'k' | b'K' | b's' | b'S']
+                | [b'b' | b'B', b'a' | b'A' | b'e' | b'E']
+                | [b'e' | b'E', b'y' | b'Y']
+                | [b'g' | b'G', b'h' | b'H' | b'i' | b'I' | b'l' | b'L']
+                | [b's' | b'S', b'k' | b'K']
+                | [b'x' | b'X', b'o' | b'O']
+        ) {
+            let rest = &bytes[offset..];
+            private_key_begin |= starts_with_ignore_ascii_case(rest, b"-----begin");
+            private_key_end |= starts_with_ignore_ascii_case(rest, b"private key-----");
+            if TOKEN_PREFIXES.iter().any(|&(prefix, minimum)| {
+                starts_with_ignore_ascii_case(rest, prefix)
+                    && rest[prefix.len()..]
+                        .iter()
+                        .copied()
+                        .take_while(|byte| {
+                            byte.is_ascii_alphanumeric() || b"._~+/=-".contains(byte)
+                        })
+                        .take(minimum)
+                        .count()
+                        == minimum
+            }) {
                 return true;
             }
-            _ => {}
         }
-        offset += 1;
     }
     private_key_begin && private_key_end
-}
-
-/// Whether `rest` begins with a credential prefix followed by its minimum count of token bytes.
-fn credential_token_at(rest: &[u8]) -> bool {
-    TOKEN_PREFIXES.iter().any(|&(prefix, minimum)| {
-        starts_with_ignore_ascii_case(rest, prefix)
-            && rest[prefix.len()..]
-                .iter()
-                .copied()
-                .take_while(|byte| byte.is_ascii_alphanumeric() || b"._~+/=-".contains(byte))
-                .take(minimum)
-                .count()
-                == minimum
-    })
 }
 
 fn starts_with_ignore_ascii_case(bytes: &[u8], prefix: &[u8]) -> bool {
