@@ -2003,10 +2003,10 @@ fn prohibited_text_material(bytes: &[u8]) -> bool {
             | (b'e' | b'E', b'y' | b'Y')
             | (b'g' | b'G', b'h' | b'H' | b'i' | b'I' | b'l' | b'L')
             | (b's' | b'S', b'k' | b'K')
-            | (b'x' | b'X', b'o' | b'O') => {
-                if credential_token_at(&bytes[offset..]) {
-                    return true;
-                }
+            | (b'x' | b'X', b'o' | b'O')
+                if credential_token_at(&bytes[offset..]) =>
+            {
+                return true;
             }
             _ => {}
         }
