@@ -101,6 +101,75 @@ signing command above. Their private keys were discarded:
 These fixtures exercise proof verification only. They still do not supply a
 mountable image or systemd/kernel acceptance evidence.
 
+## Signed zero-width validity case
+
+`zero-width-signer.der` is a self-signed RSA-2048 certificate whose notBefore
+and notAfter are both 2027-01-15 08:00:00 UTC, Unix second 1,800,000,000. The
+matching `zero-width-proof.der` uses the same detached SHA-256/no-attributes
+profile and synthetic root-hash content as the original fixture. Its sole
+SignerInfo selects serial 1 and `CN=SIM1 zero-width fixture`; the certificate
+has critical CA:FALSE and digitalSignature, plus codeSigning EKU.
+
+The public proof-verifier test requires acceptance at that instant and
+CertificateTime one second before and after it, while retaining the original
+signed positive control. Both dates are asserted from the decoded fixture.
+This exercises the inclusive interval in
+[RFC 5280 section 4.1.2.5](https://www.rfc-editor.org/rfc/rfc5280#section-4.1.2.5)
+with valid certificate and content signatures. It does not establish a new
+root-expiry policy, systemd/kernel interoperability or a memory ceiling.
+
+The fixture was produced offline with OpenSSL 3.0.13 (library 3.0.13). Its
+private key was discarded. In a fresh disposable private directory containing
+the same 64-byte `root-hash.txt`, regeneration uses explicit equal dates:
+
+```sh
+umask 077
+mkdir issued
+: > index.txt
+printf '01\n' > serial
+cat > ca.cnf <<'CONFIG'
+[ca]
+default_ca = fixture_ca
+[fixture_ca]
+database = index.txt
+new_certs_dir = issued
+serial = serial
+certificate = bootstrap.pem
+private_key = key.pem
+default_md = sha256
+default_days = 1
+policy = fixture_policy
+x509_extensions = fixture_leaf
+[fixture_policy]
+commonName = supplied
+[fixture_leaf]
+basicConstraints = critical,CA:FALSE
+keyUsage = critical,digitalSignature
+extendedKeyUsage = codeSigning
+CONFIG
+openssl req -new -newkey rsa:2048 -nodes -sha256 \
+  -keyout key.pem -out request.pem -subj '/CN=SIM1 zero-width fixture'
+openssl x509 -req -in request.pem -signkey key.pem -sha256 \
+  -set_serial 2 -days 1 -out bootstrap.pem
+openssl ca -batch -selfsign -config ca.cnf -in request.pem \
+  -keyfile key.pem -cert bootstrap.pem -md sha256 -notext \
+  -startdate 20270115080000Z -enddate 20270115080000Z -out certificate.pem
+openssl x509 -in certificate.pem -outform DER -out zero-width-signer.der
+openssl smime -sign -binary -noattr -md sha256 \
+  -in root-hash.txt -signer certificate.pem -inkey key.pem \
+  -outform DER -out zero-width-proof.der
+```
+
+The bootstrap certificate supplies the disposable CA command's identity; the
+final certificate is self-signed with the same key and explicit fixed dates.
+Regeneration creates a fresh random key and different bytes, so update the
+fixture hashes. Only the two public DER files belong in the test corpus.
+
+| File | Bytes | SHA-256 |
+| --- | ---: | --- |
+| `zero-width-signer.der` | 791 | `38c8454f7ff7571531e206d20fb8653ce20c3c9b74fba2c16b42fcd4f0c71df3` |
+| `zero-width-proof.der` | 1193 | `3647dbf9334d1c29c2f42fd70d63db147de8a51fa575252f8830dc989d8133ce` |
+
 ## Hosted allocation evidence
 
 The `sim1-proof-risk` workflow builds the public admission test executable and
