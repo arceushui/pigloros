@@ -846,6 +846,23 @@ fn the_local_runner_refuses_malformed_unknown_and_over_budget_frames() -> TestRe
             b"\xff\x00".to_vec(),
             NonInterferenceNonExecutedCauseV1::Unavailable,
         ),
+        // A map with a non-text key, and a map whose value is cut off.
+        (
+            "integer-key",
+            b"\xa1\x01\x02".to_vec(),
+            NonInterferenceNonExecutedCauseV1::Unavailable,
+        ),
+        (
+            "truncated-value",
+            b"\xa1\x61\x61".to_vec(),
+            NonInterferenceNonExecutedCauseV1::Unavailable,
+        ),
+        // Not a map at all.
+        (
+            "integer",
+            b"\x00".to_vec(),
+            NonInterferenceNonExecutedCauseV1::Unavailable,
+        ),
         (
             "capture-unknown",
             {

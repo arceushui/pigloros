@@ -23,7 +23,8 @@
 //! top-level or capture keys include a key the schema does not declare, and
 //! `Unavailable` otherwise.
 
-use std::collections::BTreeMap;
+use std::collections::BTreeSet;
+use std::fmt;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -49,7 +50,7 @@ pub const NON_INTERFERENCE_LOCAL_CAPTURE_MAGIC_V1: &str = "NLC1";
 /// The default bound on one process's standard output.
 pub const DEFAULT_NON_INTERFERENCE_LOCAL_OUTPUT_BUDGET_V1: u64 = 16 * 1024 * 1024;
 /// The default host kill timeout of one process.
-pub const DEFAULT_NON_INTERFERENCE_LOCAL_TIMEOUT_V1: Duration = Duration::from_secs(120);
+pub const DEFAULT_NON_INTERFERENCE_LOCAL_TIMEOUT_V1: Duration = Duration::from_mins(2);
 
 const REQUEST_FIELDS_V1: [&str; 8] = [
     "magic",
@@ -103,7 +104,35 @@ struct CaptureFrameV1 {
 /// reading of a frame that failed its schema.
 #[derive(Deserialize)]
 struct CaptureKeysV1 {
-    capture: BTreeMap<String, serde::de::IgnoredAny>,
+    capture: KeySetV1,
+}
+
+/// The key set of one CBOR map; every value is skipped without being kept.
+struct KeySetV1(BTreeSet<String>);
+
+impl<'de> Deserialize<'de> for KeySetV1 {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_map(KeySetVisitorV1)
+    }
+}
+
+struct KeySetVisitorV1;
+
+impl<'de> serde::de::Visitor<'de> for KeySetVisitorV1 {
+    type Value = KeySetV1;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a map with text keys")
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<KeySetV1, A::Error> {
+        let mut keys = BTreeSet::new();
+        while let Some(key) = map.next_key::<String>()? {
+            map.next_value::<serde::de::IgnoredAny>()?;
+            keys.insert(key);
+        }
+        Ok(KeySetV1(keys))
+    }
 }
 
 /// The Local runner: one fresh process per run.
@@ -398,11 +427,11 @@ fn decode<T: serde::de::DeserializeOwned>(
     capture_fields: Option<&[&str]>,
 ) -> Result<T, NonInterferenceNonExecutedCauseV1> {
     ciborium::from_reader::<T, _>(bytes).map_err(|_| {
-        let unknown = |keys: &BTreeMap<String, serde::de::IgnoredAny>, declared: &[&str]| {
-            keys.keys().any(|key| !declared.contains(&key.as_str()))
+        let unknown = |keys: &KeySetV1, declared: &[&str]| {
+            keys.0.iter().any(|key| !declared.contains(&key.as_str()))
         };
-        let top = ciborium::from_reader::<BTreeMap<String, serde::de::IgnoredAny>, _>(bytes)
-            .is_ok_and(|keys| unknown(&keys, fields));
+        let top =
+            ciborium::from_reader::<KeySetV1, _>(bytes).is_ok_and(|keys| unknown(&keys, fields));
         let nested = capture_fields.is_some_and(|declared| {
             ciborium::from_reader::<CaptureKeysV1, _>(bytes)
                 .is_ok_and(|frame| unknown(&frame.capture, declared))
