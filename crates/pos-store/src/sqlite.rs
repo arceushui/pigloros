@@ -1322,14 +1322,10 @@ fn sqlite_schema_ddl(tables: &[SqliteSchemaTable]) -> String {
 /// Lowercase `sql` and drop all whitespace, so two `CREATE` statements
 /// compare equal only when they differ in case and layout alone.
 pub(crate) fn normalize_schema_sql(sql: &str) -> String {
-    // One pass: every open normalizes the stored and the reviewed statement of each object.
-    let mut normalized = String::with_capacity(sql.len());
-    for character in sql.chars() {
-        if !character.is_whitespace() {
-            normalized.push(character.to_ascii_lowercase());
-        }
-    }
-    normalized
+    sql.to_ascii_lowercase()
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect()
 }
 
 const ARTIFACT_REGISTRATION_SCHEMA_SQL: &str = "CREATE TABLE IF NOT EXISTS artifact_registrations (
