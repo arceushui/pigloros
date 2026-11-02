@@ -5647,7 +5647,7 @@ version = "0.1.0"
 dependencies = [
  "pos-owner-bridge",
  "pos-owner-bridge-codec",
- "sha2",
+ "sha2 0.11.0",
  "windows",
 ]
 
