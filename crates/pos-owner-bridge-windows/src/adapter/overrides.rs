@@ -15,7 +15,7 @@ const POLICIES: [&str; 5] = [
     "ChannelSearchKind",
 ];
 
-/// Refuse environment or policy-registry overrides before creating WebView2.
+/// Refuse environment or policy-registry overrides before creating `WebView2`.
 ///
 /// Both registry views and both OS-user/machine policy hives are checked for
 /// this executable and the wildcard. Values are refused regardless of type or
@@ -66,7 +66,7 @@ fn is_override(name: &OsStr) -> bool {
         .eq("WEBVIEW2_".encode_utf16())
 }
 
-fn unavailable() -> BridgeError {
+const fn unavailable() -> BridgeError {
     BridgeError::Unavailable(UnavailableCode::InterfaceUnavailable)
 }
 
