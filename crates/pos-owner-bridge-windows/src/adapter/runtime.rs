@@ -7,7 +7,7 @@ use std::io::{Read, Write};
 use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
-use pos_owner_bridge::{BridgeError, UnavailableCode};
+use pos_owner_bridge::{BridgeError, ProcessIdentity, UnavailableCode};
 use sha2::{Digest, Sha256};
 use windows::Win32::Storage::FileSystem::{
     FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
@@ -42,6 +42,31 @@ impl VerifiedRuntime {
     #[must_use]
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Require the reported browser process image to lie inside this runtime.
+    ///
+    /// Creation time, exact UTF-16LE path digest and the path readback come from
+    /// one query-only process handle, so PID reuse cannot mix two observations.
+    ///
+    /// # Errors
+    ///
+    /// Incomplete inspection returns `Unavailable(InterfaceUnavailable)`; an
+    /// inaccessible or outside-runtime image returns `Unavailable(RuntimeIntegrity)`.
+    pub fn browser_identity(&self, pid: u32) -> Result<ProcessIdentity, BridgeError> {
+        let (identity, path) = crate::Native::inspect_process_with_image(pid)
+            .ok()
+            .flatten()
+            .ok_or(BridgeError::Unavailable(
+                UnavailableCode::InterfaceUnavailable,
+            ))?;
+        let path = path
+            .canonicalize()
+            .map_err(|_| BridgeError::Unavailable(UnavailableCode::RuntimeIntegrity))?;
+        if !path.starts_with(&self.root) {
+            return Err(BridgeError::Unavailable(UnavailableCode::RuntimeIntegrity));
+        }
+        Ok(identity)
     }
 }
 

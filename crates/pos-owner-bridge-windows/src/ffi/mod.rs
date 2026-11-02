@@ -9,6 +9,12 @@ impl crate::Native {
     pub(super) fn inspect_process(
         pid: u32,
     ) -> Result<Option<pos_owner_bridge::ProcessIdentity>, ()> {
+        process::inspect(pid).map(|observation| observation.map(|(identity, _path)| identity))
+    }
+
+    pub(super) fn inspect_process_with_image(
+        pid: u32,
+    ) -> Result<Option<(pos_owner_bridge::ProcessIdentity, std::path::PathBuf)>, ()> {
         process::inspect(pid)
     }
 

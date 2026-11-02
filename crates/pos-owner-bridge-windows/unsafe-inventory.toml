@@ -132,7 +132,7 @@ hosted_test = "override_refusal_checks_environment_and_both_registry_views"
 
 [[block]]
 file = "src/ffi/process.rs"
-line = 22
+line = 26
 function = "inspect"
 operation = "OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)"
 invariant = "Fixed query-only access, disabled inheritance, nonzero PID; no caller pointer."
@@ -140,7 +140,7 @@ hosted_test = "current_process_identity_matches_independent_os_observations"
 
 [[block]]
 file = "src/ffi/process.rs"
-line = 33
+line = 37
 function = "inspect"
 operation = "CloseHandle"
 invariant = "Exactly one close after all queries, including every query error path."
@@ -148,7 +148,7 @@ hosted_test = "current_process_identity_matches_independent_os_observations"
 
 [[block]]
 file = "src/ffi/process.rs"
-line = 44
+line = 48
 function = "read_identity"
 operation = "GetProcessTimes"
 invariant = "Live query-only handle and four distinct initialized output FILETIME values."
@@ -156,7 +156,7 @@ hosted_test = "current_process_identity_matches_independent_os_observations"
 
 [[block]]
 file = "src/ffi/process.rs"
-line = 70
+line = 79
 function = "image_digest"
 operation = "QueryFullProcessImageNameW"
 invariant = "Live handle; owned32768code-unit writable buffer with an initialized in-out bound."

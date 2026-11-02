@@ -2,6 +2,10 @@
 
 //! One limited-information handle; no enumeration, signalling or termination.
 
+use std::ffi::OsString;
+use std::os::windows::ffi::OsStringExt;
+use std::path::PathBuf;
+
 use pos_owner_bridge::ProcessIdentity;
 use pos_owner_bridge_codec::ImagePathSha256;
 use sha2::{Digest, Sha256};
@@ -12,7 +16,7 @@ use windows::Win32::System::Threading::{
     PROCESS_QUERY_LIMITED_INFORMATION,
 };
 
-pub(super) fn inspect(pid: u32) -> Result<Option<ProcessIdentity>, ()> {
+pub(super) fn inspect(pid: u32) -> Result<Option<(ProcessIdentity, PathBuf)>, ()> {
     // PID zero is a special invalid argument, not evidence of a missing process.
     if pid == 0 {
         return Err(());
@@ -34,7 +38,7 @@ pub(super) fn inspect(pid: u32) -> Result<Option<ProcessIdentity>, ()> {
     observed.and_then(|identity| closed.map(|()| Some(identity)).map_err(|_| ()))
 }
 
-fn read_identity(handle: HANDLE, pid: u32) -> Result<ProcessIdentity, ()> {
+fn read_identity(handle: HANDLE, pid: u32) -> Result<(ProcessIdentity, PathBuf), ()> {
     let mut creation = FILETIME::default();
     let mut exit = FILETIME::default();
     let mut kernel = FILETIME::default();
@@ -51,16 +55,21 @@ fn read_identity(handle: HANDLE, pid: u32) -> Result<ProcessIdentity, ()> {
         )
     };
     times.map_err(|_| ()).and_then(|()| {
-        image_digest(handle).map(|image_path_sha256| ProcessIdentity {
-            browser_pid: pid,
-            creation_filetime: (u64::from(creation.dwHighDateTime) << 32)
-                | u64::from(creation.dwLowDateTime),
-            image_path_sha256,
+        image_digest(handle).map(|(image_path_sha256, path)| {
+            (
+                ProcessIdentity {
+                    browser_pid: pid,
+                    creation_filetime: (u64::from(creation.dwHighDateTime) << 32)
+                        | u64::from(creation.dwLowDateTime),
+                    image_path_sha256,
+                },
+                path,
+            )
         })
     })
 }
 
-fn image_digest(handle: HANDLE) -> Result<ImagePathSha256, ()> {
+fn image_digest(handle: HANDLE) -> Result<(ImagePathSha256, PathBuf), ()> {
     // The Win32 extended path bound. An insufficient buffer is indeterminate;
     // it never changes the observation to absence.
     let mut image = vec![0_u16; 32_768].into_boxed_slice();
@@ -75,13 +84,20 @@ fn image_digest(handle: HANDLE) -> Result<ImagePathSha256, ()> {
             &raw mut length,
         )
     };
-    queried.map_err(|_| ()).map(|()| {
-        // On success the API bounds length by the supplied capacity. PBCR
-        // stores the exact returned UTF-16LE path digest, without lossy conversion.
+    queried.map_err(|_| ()).and_then(|()| {
+        let image = image
+            .get(..length as usize)
+            .filter(|image| !image.is_empty())
+            .ok_or(())?;
+        // PBCR stores the exact returned UTF-16LE path digest, without lossy
+        // conversion. The same handle observation supplies the activation path.
         let mut digest = Sha256::new();
-        for unit in image.iter().take(length as usize) {
+        for unit in image {
             digest.update(unit.to_le_bytes());
         }
-        ImagePathSha256::from_bytes(digest.finalize().into())
+        Ok((
+            ImagePathSha256::from_bytes(digest.finalize().into()),
+            PathBuf::from(OsString::from_wide(image)),
+        ))
     })
 }

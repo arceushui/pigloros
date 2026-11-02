@@ -78,6 +78,29 @@ impl crate::Native {
         assert_eq!(verified, f.runtime.canonicalize()?);
         let proof = VerifiedRuntime { root: verified };
         assert_eq!(proof.root(), f.runtime.canonicalize()?);
+        assert_eq!(
+            proof.browser_identity(std::process::id()),
+            Err(BridgeError::Unavailable(UnavailableCode::RuntimeIntegrity))
+        );
+        assert_eq!(
+            proof.browser_identity(u32::MAX),
+            Err(BridgeError::Unavailable(
+                UnavailableCode::InterfaceUnavailable
+            ))
+        );
+        // Exercise the process-path admission seam independently of the
+        // install fixture. Production callers cannot construct this proof.
+        let executable = std::env::current_exe()?.canonicalize()?;
+        let process_root = VerifiedRuntime {
+            root: executable
+                .parent()
+                .ok_or("fixture executable has no parent")?
+                .to_owned(),
+        };
+        assert_eq!(
+            process_root.browser_identity(std::process::id())?,
+            crate::process_identity(std::process::id())?
+        );
         assert!(f.marker().is_file());
 
         // An independent sharing denial proves a matching cache does not rehash

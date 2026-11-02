@@ -63,7 +63,7 @@ fn local_machine_text(subkey: PCWSTR, name: PCWSTR) -> Result<String, ()> {
     }
     .ok()
     .map_err(|_| ())?;
-    if bytes % 2 != 0 {
+    if !bytes.is_multiple_of(2) {
         return Err(());
     }
     let units = buffer.get(..(bytes / 2) as usize).ok_or(())?;
