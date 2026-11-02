@@ -798,7 +798,7 @@ fn each_non_executed_cause_arises_at_its_harness_boundary() -> TestResult {
 }
 
 #[test]
-fn the_local_runner_refuses_malformed_unknown_and_over_budget_frames() -> TestResult {
+fn the_local_runner_classifies_malformed_and_unknown_field_frames() -> TestResult {
     let work = tempfile::tempdir()?;
     let frames = tempfile::tempdir()?;
     let fixture = probe_fixture(
@@ -806,7 +806,7 @@ fn the_local_runner_refuses_malformed_unknown_and_over_budget_frames() -> TestRe
         ExecutionModeV1::Local,
         b"probe-input",
     )?;
-    let capture = local_probe_subject_v1(
+    let capture = serde_json::to_value(local_probe_subject_v1(
         &NonInterferenceLocalRequestV1 {
             magic: NON_INTERFERENCE_LOCAL_REQUEST_MAGIC_V1.to_owned(),
             version: 1,
@@ -818,36 +818,49 @@ fn the_local_runner_refuses_malformed_unknown_and_over_budget_frames() -> TestRe
             unauthorized_value: CONTROL.to_vec(),
         },
         frames.path(),
-    )?;
-    let frame = |magic: &str, extra: Option<(&str, Value)>| -> TestResult<Vec<u8>> {
-        let mut value =
-            json!({ "magic": magic, "version": 1, "capture": serde_json::to_value(&capture)? });
-        if let (Some((name, field)), Some(object)) = (extra, value.as_object_mut()) {
-            object.insert(name.to_owned(), field);
+    )?)?;
+    // A frame with `magic`, and an extra key at the top level and/or in the
+    // capture.
+    let frame = |magic: Value, top_extra: bool, capture_extra: bool| -> TestResult<Vec<u8>> {
+        let mut value = json!({ "magic": magic, "version": 1, "capture": capture.clone() });
+        if top_extra {
+            value["extra"] = json!(1);
         }
-        Ok(pos_crypto::canonical::encode(&value)?.as_slice().to_vec())
+        if capture_extra {
+            value["capture"]["extra"] = json!(1);
+        }
+        let encoded = pos_crypto::canonical::encode(&value)?;
+        Ok(encoded.as_slice().to_vec())
     };
-    let echo = "cat >/dev/null; cat \"$1\"";
+    let magic = || json!(NON_INTERFERENCE_LOCAL_CAPTURE_MAGIC_V1);
     for (name, bytes, cause) in [
         (
             "unknown",
-            frame(
-                NON_INTERFERENCE_LOCAL_CAPTURE_MAGIC_V1,
-                Some(("extra", json!(1))),
-            )?,
+            frame(magic(), true, false)?,
+            NonInterferenceNonExecutedCauseV1::UnknownField,
+        ),
+        (
+            "capture-unknown",
+            frame(magic(), false, true)?,
             NonInterferenceNonExecutedCauseV1::UnknownField,
         ),
         (
             "magic",
-            frame("XXXX", None)?,
+            frame(json!("XXXX"), false, false)?,
             NonInterferenceNonExecutedCauseV1::Unsupported,
+        ),
+        (
+            "mistyped",
+            frame(json!(7), false, false)?,
+            NonInterferenceNonExecutedCauseV1::Unavailable,
         ),
         (
             "garbage",
             b"\xff\x00".to_vec(),
             NonInterferenceNonExecutedCauseV1::Unavailable,
         ),
-        // A map with a non-text key, and a map whose value is cut off.
+        // A map with a non-text key, a map whose value is cut off, and no
+        // map at all.
         (
             "integer-key",
             b"\xa1\x01\x02".to_vec(),
@@ -858,39 +871,9 @@ fn the_local_runner_refuses_malformed_unknown_and_over_budget_frames() -> TestRe
             b"\xa1\x61\x61".to_vec(),
             NonInterferenceNonExecutedCauseV1::Unavailable,
         ),
-        // Not a map at all.
         (
             "integer",
             b"\x00".to_vec(),
-            NonInterferenceNonExecutedCauseV1::Unavailable,
-        ),
-        (
-            "capture-unknown",
-            {
-                let mut value = json!({
-                    "magic": NON_INTERFERENCE_LOCAL_CAPTURE_MAGIC_V1,
-                    "version": 1,
-                    "capture": serde_json::to_value(&capture)?,
-                });
-                if let Some(object) = value["capture"].as_object_mut() {
-                    object.insert("extra".to_owned(), json!(1));
-                }
-                let encoded = pos_crypto::canonical::encode(&value)?;
-                encoded.as_slice().to_vec()
-            },
-            NonInterferenceNonExecutedCauseV1::UnknownField,
-        ),
-        (
-            "mistyped",
-            {
-                let value = json!({
-                    "magic": 7,
-                    "version": 1,
-                    "capture": serde_json::to_value(&capture)?,
-                });
-                let encoded = pos_crypto::canonical::encode(&value)?;
-                encoded.as_slice().to_vec()
-            },
             NonInterferenceNonExecutedCauseV1::Unavailable,
         ),
     ] {
@@ -898,17 +881,27 @@ fn the_local_runner_refuses_malformed_unknown_and_over_budget_frames() -> TestRe
         fs::write(&path, bytes)?;
         let mut harness = harness_with(vec![Box::new(shell_runner(
             &work.path().join(name),
-            echo,
+            "cat >/dev/null; cat \"$1\"",
             &path,
         )?)]);
         assert_eq!(cause_of(&mut harness, &fixture), Some(cause), "{name}");
     }
+    Ok(())
+}
+
+#[test]
+fn the_local_runner_executes_a_frame_only_from_a_successful_bounded_process() -> TestResult {
+    let work = tempfile::tempdir()?;
+    let frames = tempfile::tempdir()?;
+    let fixture = probe_fixture(
+        NonInterferenceVariantV1::Success,
+        ExecutionModeV1::Local,
+        b"probe-input",
+    )?;
+    let echo = "cat >/dev/null; cat \"$1\"";
     // A well-formed frame from a process that then fails is unavailable.
     let valid = frames.path().join("valid");
-    fs::write(
-        &valid,
-        frame(NON_INTERFERENCE_LOCAL_CAPTURE_MAGIC_V1, None)?,
-    )?;
+    fs::write(&valid, probe_frame(frames.path())?)?;
     let mut failing = harness_with(vec![Box::new(shell_runner(
         &work.path().join("failing"),
         "cat >/dev/null; cat \"$1\"; exit 3",
@@ -1704,7 +1697,7 @@ fn a_local_process_that_writes_over_64_kib_before_reading_does_not_deadlock() ->
     )?;
     let mut harness = harness_with(vec![Box::new(
         shell_runner(work.path(), "cat \"$1\"; cat >/dev/null", &path)?
-            .with_timeout(std::time::Duration::from_secs(60)),
+            .with_timeout(std::time::Duration::from_mins(1)),
     )]);
     assert_eq!(harness.execute_case(&fixture).claim(), Some(true));
     Ok(())
