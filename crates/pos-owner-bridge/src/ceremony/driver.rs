@@ -398,7 +398,7 @@ impl CeremonyDriver {
             Ok(identity) => identity,
             Err(error) => {
                 let now = env.clock.now();
-                let error = self.pre_post_failure(now).unwrap_or(error.error());
+                let error = self.pre_post_failure(now).unwrap_or_else(|| error.error());
                 return self.fail(env, now, error);
             }
         };
