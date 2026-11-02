@@ -58,6 +58,73 @@ trust anchor or grant it authority.
 | `signer.der` | 854 | `ed34156300de1831b61c44eaef5ba11f44db19bf793c2cfb78f89cc84b42c246` |
 | `proof.der` | 1271 | `773b7635b2b63568855d1e833f5db9e5c1c6588f7c8db86bf627b09eea3d7d68` |
 
+## Signed non-profile RSA fixtures
+
+`rsa-2047-*` and `rsa-3072-*` are independently signed negative fixtures for
+the public proof verifier's RSA-2048 profile. They retain coherent certificate
+dates, self-signatures and detached CMS signatures so a malformed or stale
+signature does not substitute for the profile check. The public test first
+accepts the original RSA-2048 fixture, checks each negative fixture's actual
+modulus bit length and exponent, then requires `UnsupportedProfile`.
+
+Both certificates are self-issued, serial 1, with validity from
+2026-01-01 00:00:00 UTC through 2036-01-01 00:00:00 UTC. This interval contains
+the fixed admission time, Unix second 1,800,000,000. The exponent is 65537.
+The 2047-bit modulus has 256 unsigned bytes beginning with `0x5f`; the
+3072-bit modulus has 384 unsigned bytes beginning with `0xbc`. Their respective
+certificate and CMS signatures have 256 and 384 bytes. These are profile
+rejection cases, not additional accepted RSA key sizes.
+
+OpenSSL 3.0.13 produced fresh keys using the following procedure in a disposable
+private directory containing the same `root-hash.txt` above. Use a separate
+private directory for each iteration, with an empty `index` file, a `newcerts`
+directory and a `serial` file containing `01`. Set `BITS` to 2047 or 3072:
+
+```sh
+openssl req -new -newkey "rsa:$BITS" -nodes -sha256 \
+  -keyout key.pem -out request.pem -subj "/CN=SIM1 RSA-$BITS fixture"
+openssl x509 -req -in request.pem -signkey key.pem \
+  -out bootstrap.pem -set_serial 2 -days 1 -sha256
+cat > ca.cnf <<'EOF'
+[ca]
+default_ca=fixture
+[fixture]
+database=index
+new_certs_dir=newcerts
+serial=serial
+default_md=sha256
+default_days=3650
+policy=subject
+x509_extensions=leaf
+unique_subject=no
+[subject]
+commonName=supplied
+[leaf]
+basicConstraints=critical,CA:FALSE
+keyUsage=critical,digitalSignature
+extendedKeyUsage=codeSigning
+EOF
+openssl ca -batch -selfsign -config ca.cnf -in request.pem \
+  -keyfile key.pem -cert bootstrap.pem -out certificate.pem -notext \
+  -startdate 20260101000000Z -enddate 20360101000000Z
+openssl x509 -in certificate.pem -outform DER -out "rsa-$BITS-signer.der"
+openssl smime -sign -binary -noattr -md sha256 -in root-hash.txt \
+  -signer certificate.pem -inkey key.pem -outform DER -out "rsa-$BITS-proof.der"
+```
+
+Discard the private keys after generation. Regeneration creates different
+bytes; check actual key geometry, certificate self-signatures and detached
+signatures against the exact content before updating the fixture hashes.
+These fixtures have the same one-certificate, detached, no-attributes CMS
+structure and algorithm parameter encodings as the original fixture.
+
+| File | Bytes | SHA-256 |
+| --- | ---: | --- |
+| `rsa-2047-signer.der` | 786 | `da0cfd0711c4b70066b2c9820be541b978d85a6c76796cff12663f3c2cc3b00e` |
+| `rsa-2047-proof.der` | 1186 | `27715660ee8b467618863f94a94cfbeb91da5c77ceffca7bc460bce1e19518fb` |
+| `rsa-3072-signer.der` | 1043 | `c26a10e3900bf34a4eb029142ccd512e37c2c4e1ca19961dafabbaaca7421985` |
+| `rsa-3072-proof.der` | 1571 | `5e12e3ed24e5b735710d1ebcaaae51b3337d101ba1ef9daca0eb8f6e7ad9894e` |
+
 Hosted workspace tests execute `sim1_pkcs7_interoperability`. The runtime
 OpenSSL dependency ban remains in force: OpenSSL is only the offline fixture
 producer, never a production verifier or subprocess fallback.
