@@ -73,12 +73,12 @@ mod tests {
                 true
             })));
         let mut binder = WindowsLoopbackBinder::ephemeral();
-        assert!(binder.bind_v4().is_ok_and(exercise_v4));
-        assert!(binder.bind_v6().is_ok_and(exercise_v6));
+        assert!(binder.bind_v4().as_ref().is_ok_and(exercise_v4));
+        assert!(binder.bind_v6().as_ref().is_ok_and(exercise_v6));
         assert_eq!(binder.probe_v6(), Ok(()));
     }
 
-    fn exercise_v4(listener: TcpListener) -> bool {
+    fn exercise_v4(listener: &TcpListener) -> bool {
         listener.local_addr().is_ok_and(|address| {
             assert_eq!(address.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
             assert!(TcpStream::connect(address).is_ok_and(|client| {
@@ -101,7 +101,7 @@ mod tests {
         })
     }
 
-    fn exercise_v6(listener: TcpListener) -> bool {
+    fn exercise_v6(listener: &TcpListener) -> bool {
         listener.local_addr().is_ok_and(|address| {
             assert_eq!(address.ip(), IpAddr::V6(Ipv6Addr::LOCALHOST));
             assert!(TcpStream::connect(address).is_ok_and(|client| {
