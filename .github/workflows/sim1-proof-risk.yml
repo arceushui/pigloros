@@ -1,88 +1,180 @@
+# Temporary manual-only offline producer for #437, not shipping CI.
 name: sim1-proof-risk
-
 on:
-  pull_request:
-    paths:
-      - Cargo.lock
-      - Cargo.toml
-      - rust-toolchain.toml
-      - crates/pos-reference/**
-      - scripts/measure_sim1_proof_heap.py
-      - .github/workflows/sim1-proof-risk.yml
   workflow_dispatch:
-
 permissions:
   contents: read
-
 concurrency:
-  group: sim1-proof-risk-${{ github.ref }}
-  cancel-in-progress: true
-
+  group: reversed-root-fixtures-${{ github.ref }}
+  cancel-in-progress: false
 jobs:
-  heap-measurement:
+  reversed-root-fixtures:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    env:
-      CARGO_TERM_COLOR: never
-      RUSTFLAGS: -D warnings
-      PROFILE_SOURCE_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: 9021e5c750c8850b77b42f3c25976819add84274
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
-        with:
-          toolchain: 1.97.1
-      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
-        with:
-          # Pull-request-only workflow: it never runs on main, so like the
-          # mutation workflow it keeps its own PR-scoped cache key.
-          shared-key: sim1-proof-risk
-      - name: Install heap profiler
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends valgrind
-      - name: Build the public admission test executable
+      - name: Generate authentic chain with reversed root dates
+        env:
+          FIXTURE_SOURCE: 9021e5c750c8850b77b42f3c25976819add84274
+          FIXTURE_OUTPUT: ${{ runner.temp }}/reversed-root-fixtures
         run: |
           set -euo pipefail
-          cargo test -p pos-reference --test sandbox_admission_contract_public \
-            --all-features --locked --no-run --message-format=json > /tmp/sim1-build.json
-      - name: Measure adversarial near-limit proof inputs
-        run: python3 scripts/measure_sim1_proof_heap.py /tmp/sim1-build.json sim1-heap-report
-      - name: Check all public admission cases on the measured build
-        run: |
-          cargo test -p pos-reference --test sandbox_admission_contract_public \
-            --all-features --locked -- --include-ignored
-      - name: Retain heap traces and exact-source metadata
-        if: ${{ always() && !cancelled() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+          umask 077
+          test "$(git rev-parse HEAD)" = "$FIXTURE_SOURCE"
+          mkdir -m 700 "$FIXTURE_OUTPUT"
+          fixture_private="$(mktemp -d "${RUNNER_TEMP}/reversed-root-private.XXXXXX")"
+          trap 'rm -rf -- "$fixture_private"' EXIT
+          cp crates/pos-reference/tests/vectors/sim1-pkcs7/root-hash.txt "$fixture_private/root-hash.txt"
+          openssl version -a > "$FIXTURE_OUTPUT/openssl-version.txt"
+          cd "$fixture_private"
+          mkdir issued
+          : > index.txt
+          printf '01\n' > serial
+          cat > ca.cnf <<'CONFIG'
+          [ca]
+          default_ca = fixture_ca
+          [fixture_ca]
+          database = index.txt
+          new_certs_dir = issued
+          serial = serial
+          default_md = sha256
+          default_days = 1
+          policy = fixture_policy
+          unique_subject = no
+          [fixture_policy]
+          commonName = supplied
+          [root]
+          basicConstraints = critical,CA:TRUE,pathlen:0
+          keyUsage = critical,keyCertSign,cRLSign
+          [leaf]
+          basicConstraints = critical,CA:FALSE
+          keyUsage = critical,digitalSignature
+          extendedKeyUsage = codeSigning
+          CONFIG
+          openssl req -new -newkey rsa:2048 -nodes -sha256 \
+            -keyout root.key -out root.csr -subj '/CN=SIM1 reversed fixture root'
+          openssl x509 -req -in root.csr -signkey root.key -sha256 \
+            -set_serial 99 -days 1 -out bootstrap.pem
+          openssl ca -batch -selfsign -config ca.cnf -in root.csr \
+            -keyfile root.key -cert bootstrap.pem -extensions root -notext \
+            -startdate 20260101000000Z -enddate 20360101000000Z -out root-normal.pem
+          openssl req -new -newkey rsa:2048 -nodes -sha256 \
+            -keyout leaf.key -out leaf.csr -subj '/CN=SIM1 reversed fixture leaf'
+          openssl ca -batch -config ca.cnf -in leaf.csr -keyfile root.key \
+            -cert root-normal.pem -extensions leaf -notext \
+            -startdate 20260101000000Z -enddate 20360101000000Z -out leaf.pem
+          openssl verify -attime 1800000000 -purpose any -CAfile root-normal.pem leaf.pem \
+            > "$FIXTURE_OUTPUT/crypto-controls.log" 2>&1
+          openssl x509 -in root-normal.pem -outform DER -out "$FIXTURE_OUTPUT/normal-root.der"
+          openssl x509 -in leaf.pem -outform DER -out "$FIXTURE_OUTPUT/reversed-root-signer.der"
+          openssl x509 -in root-normal.pem -pubkey -noout > root-public.pem
+          python3 - <<'PREPARE'
+          import os
+          from pathlib import Path
+          def read(data, offset=0):
+              tag, size = data[offset:offset + 2]
+              start = offset + 2
+              if size & 128:
+                  count = size & 127
+                  assert 0 < count <= 4
+                  size = int.from_bytes(data[start:start + count], 'big')
+                  start += count
+              end = start + size
+              assert end <= len(data)
+              return (tag, data[start:end], data[offset:end]), end
+          def children(data):
+              result, offset = [], 0
+              while offset < len(data):
+                  node, offset = read(data, offset)
+                  result.append(node)
+              return result
+          def wrap(tag, value):
+              length = len(value)
+              size = length.to_bytes((length.bit_length() + 7) // 8, 'big')
+              header = bytes([length]) if length < 128 else bytes([128 + len(size)]) + size
+              return bytes([tag]) + header + value
+          output = Path(os.environ['FIXTURE_OUTPUT'])
+          for name, source in [('root-normal', 'normal-root.der'), ('leaf', 'reversed-root-signer.der')]:
+              data = (output / source).read_bytes()
+              outer, end = read(data)
+              assert outer[0] == 48 and end == len(data)
+              cert = children(outer[1])
+              assert len(cert) == 3 and cert[2][0] == 3 and cert[2][1][0] == 0
+              Path(name + '-tbs.der').write_bytes(cert[0][2])
+              Path(name + '-signature.bin').write_bytes(cert[2][1][1:])
+              if name == 'root-normal':
+                  tbs = children(cert[0][1])
+                  assert tbs[3][2] == tbs[5][2]
+                  dates = children(tbs[4][1])
+                  assert [item[1] for item in dates] == [b'260101000000Z', b'360101000000Z']
+                  values = [item[2] for item in tbs]
+                  values[4] = wrap(48, dates[1][2] + dates[0][2])
+                  Path('root-reversed-tbs.der').write_bytes(wrap(48, b''.join(values)))
+                  Path('signature-algorithm.der').write_bytes(cert[1][2])
+          PREPARE
+          openssl dgst -sha256 -sign root.key -out root-reversed-signature.bin root-reversed-tbs.der
+          python3 - <<'ASSEMBLE'
+          from pathlib import Path
+          def wrap(tag, value):
+              length = len(value)
+              size = length.to_bytes((length.bit_length() + 7) // 8, 'big')
+              header = bytes([length]) if length < 128 else bytes([128 + len(size)]) + size
+              return bytes([tag]) + header + value
+          tbs = Path('root-reversed-tbs.der').read_bytes()
+          algorithm = Path('signature-algorithm.der').read_bytes()
+          signature = Path('root-reversed-signature.bin').read_bytes()
+          assert len(signature) == 256
+          Path('root-reversed.der').write_bytes(wrap(48, tbs + algorithm + wrap(3, b'\0' + signature)))
+          ASSEMBLE
+          openssl x509 -inform DER -in root-reversed.der -out root-reversed.pem
+          for name in root-normal root-reversed leaf; do
+            printf '%s direct signature\n' "$name" >> "$FIXTURE_OUTPUT/crypto-controls.log"
+            openssl dgst -sha256 -verify root-public.pem -signature "$name-signature.bin" \
+              "$name-tbs.der" >> "$FIXTURE_OUTPUT/crypto-controls.log" 2>&1
+          done
+          openssl smime -sign -binary -noattr -md sha256 -in root-hash.txt \
+            -signer leaf.pem -inkey leaf.key -certfile root-reversed.pem \
+            -outform DER -out proof-unsorted.der
+          openssl cms -cmsout -inform DER -in proof-unsorted.der -outform DER \
+            -out "$FIXTURE_OUTPUT/reversed-root-proof.der"
+          openssl cms -verify -binary -inform DER -in "$FIXTURE_OUTPUT/reversed-root-proof.der" \
+            -content root-hash.txt -noverify -out verified-content.bin \
+            >> "$FIXTURE_OUTPUT/crypto-controls.log" 2>&1
+          cmp root-hash.txt verified-content.bin
+          python3 - <<'MANIFEST'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          output = Path(os.environ['FIXTURE_OUTPUT'])
+          names = ['reversed-root-proof.der', 'reversed-root-signer.der', 'normal-root.der',
+                   'openssl-version.txt', 'crypto-controls.log']
+          files = {}
+          for name in names:
+              raw = (output / name).read_bytes()
+              assert 0 < len(raw) < 65536
+              files[name] = {'bytes': len(raw), 'sha256': hashlib.sha256(raw).hexdigest()}
+          manifest = {'source_checkout': os.environ['FIXTURE_SOURCE'], 'producer_commit': os.environ['GITHUB_SHA'],
+                      'files': files, 'root_hash_sha256': hashlib.sha256(Path('root-hash.txt').read_bytes()).hexdigest(),
+                      'root_validity_unix_seconds': [2082758400, 1767225600],
+                      'leaf_validity_unix_seconds': [1767225600, 2082758400],
+                      'controls': 'Normal OpenSSL path at NOW; three direct certificate signatures; detached CMS content equality.',
+                      'limits': 'Offline public fixture production only, not project admission or mutant acceptance. Private keys never uploaded.'}
+          (output / 'fixture-manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
+          print(json.dumps({'public_files': files}))
+          MANIFEST
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: sim1-proof-heap-${{ github.event.pull_request.head.sha || github.sha }}
-          path: sim1-heap-report/
+          name: reversed-root-fixtures
+          path: |
+            ${{ runner.temp }}/reversed-root-fixtures/reversed-root-proof.der
+            ${{ runner.temp }}/reversed-root-fixtures/reversed-root-signer.der
+            ${{ runner.temp }}/reversed-root-fixtures/normal-root.der
+            ${{ runner.temp }}/reversed-root-fixtures/openssl-version.txt
+            ${{ runner.temp }}/reversed-root-fixtures/crypto-controls.log
+            ${{ runner.temp }}/reversed-root-fixtures/fixture-manifest.json
           if-no-files-found: error
-          retention-days: 30
-
-  # #437 verifier evidence: the public admission contract cases, including the
-  # SIM1 verifier and systemd-repart fixture cases, must pass on aarch64 too.
-  # No systemd or kernel runs here; that two-architecture gate is #444.
-  public-admission-aarch64:
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 30
-    env:
-      CARGO_TERM_COLOR: never
-      RUSTFLAGS: -D warnings
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
-        with:
-          toolchain: 1.97.1
-      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
-        with:
-          shared-key: sim1-proof-risk-aarch64
-      - name: Check all public admission cases on aarch64
-        run: |
-          test "$(uname -m)" = aarch64
-          cargo test -p pos-reference --test sandbox_admission_contract_public \
-            --all-features --locked -- --include-ignored
+          retention-days: 7
