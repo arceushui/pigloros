@@ -23,6 +23,7 @@ mod adapter {
     mod process;
     mod socket;
 
+    pub use directory::{create_private_directory, verify_private_directory};
     pub use overrides::refuse_overrides;
     pub use process::{process_identity, WindowsProcessProbe};
     pub use socket::WindowsLoopbackBinder;
@@ -80,4 +81,3 @@ mod tests {
         Ok(())
     }
 }
-pub use directory::{create_private_directory, verify_private_directory};

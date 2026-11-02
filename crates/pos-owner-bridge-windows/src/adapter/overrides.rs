@@ -70,7 +70,7 @@ const fn unavailable() -> BridgeError {
     BridgeError::Unavailable(UnavailableCode::InterfaceUnavailable)
 }
 
-fn classify(status: WIN32_ERROR) -> Result<(), BridgeError> {
+const fn classify(status: WIN32_ERROR) -> Result<(), BridgeError> {
     match status {
         ERROR_FILE_NOT_FOUND => Ok(()),
         ERROR_SUCCESS => Err(BridgeError::Unavailable(UnavailableCode::OverridePresent)),
