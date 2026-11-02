@@ -38,7 +38,7 @@ pub struct VerifiedRuntime {
 }
 
 impl VerifiedRuntime {
-    /// The canonical directory to pass explicitly to the WebView2 loader.
+    /// The canonical directory to pass explicitly to the `WebView2` loader.
     #[must_use]
     pub fn root(&self) -> &Path {
         &self.root

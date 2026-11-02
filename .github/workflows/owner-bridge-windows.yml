@@ -3,15 +3,6 @@ name: owner-bridge-windows
 on:
   workflow_call:
   workflow_dispatch:
-  pull_request:
-    paths:
-      - .github/workflows/owner-bridge-windows.yml
-      - crates/pos-owner-bridge-windows/**
-      - crates/pos-owner-bridge/**
-      - crates/pos-owner-bridge-codec/**
-      - apps/piglor-owner/**
-      - Cargo.toml
-      - Cargo.lock
 
 permissions:
   contents: read

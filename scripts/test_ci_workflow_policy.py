@@ -88,7 +88,7 @@ RUSTDOC_JOB_IF = (
 )
 MAIN_PUSH_TRIGGER = {"branches": ["main"]}
 PREFLIGHT_GATE_IF = "${{ always() }}"
-REQUIRED_PREFLIGHT_NEEDS = ("ci_change_scope", "pinned-dependencies")
+REQUIRED_PREFLIGHT_NEEDS = ("ci_change_scope", "pinned-dependencies", "owner-bridge-windows")
 PINNED_DEPENDENCIES_NEEDS = "ci_change_scope"
 PINNED_DEPENDENCIES_IF = (
     "${{ needs.ci_change_scope.outputs.rust == 'true' || "
@@ -342,6 +342,38 @@ def assert_standard_stage_runner_cap(workflow: dict) -> None:
     missing = sorted(started - set(gate_needs))
     if missing:
         raise AssertionError(f"standard-gate must wait for every standard-stage job: {missing}")
+
+
+def assert_owner_windows_lane(workflow: dict, native: dict) -> None:
+    """The Windows lane blocks core CI and reuses the completed ledger slot."""
+    expected = {
+        "name": "owner-bridge-windows",
+        "needs": ["ci_change_scope", "ledger-windows"],
+        "if": "${{ needs.ci_change_scope.outputs.rust == 'true' }}",
+        "uses": "./.github/workflows/owner-bridge-windows.yml",
+        "permissions": {"contents": "read"},
+    }
+    if workflow["jobs"].get("owner-bridge-windows") != expected:
+        raise AssertionError("owner Windows lane must follow the completed ledger runner")
+    gate = workflow["jobs"]["preflight-gate"]
+    if "owner-bridge-windows" not in job_needs(gate):
+        raise AssertionError("owner Windows lane must block preflight")
+    step = gate["steps"][0]
+    if step["env"].get("OWNER_WINDOWS_RESULT") != "${{ needs.owner-bridge-windows.result }}":
+        raise AssertionError("preflight must use the actual owner Windows result")
+    for result in ("success", "skipped"):
+        if f'test "${{OWNER_WINDOWS_RESULT}}" = {result}' not in step["run"]:
+            raise AssertionError("preflight must enforce the owner Windows scope result")
+    if set(workflow_triggers(native)) != {"workflow_call", "workflow_dispatch"}:
+        raise AssertionError("native validation must not launch a duplicate PR runner")
+    if native["permissions"] != {"contents": "read"}:
+        raise AssertionError("native validation must remain read-only")
+    job = native["jobs"]["owner-bridge-windows"]
+    if job["runs-on"] != "windows-latest" or "continue-on-error" in job:
+        raise AssertionError("native Windows validation must remain blocking")
+    for candidate in job["steps"]:
+        if "continue-on-error" in candidate:
+            raise AssertionError("native validation cannot ignore a failing step")
 
 
 def excluded(path: str, patterns: list[str]) -> bool:
@@ -682,6 +714,46 @@ class CiWorkflowPolicyTests(unittest.TestCase):
     def test_core_gates_run_after_successful_preflight_on_push(self) -> None:
         workflow = load_workflow(CI_WORKFLOW_PATH)
         assert_core_jobs_run_on_main_push(workflow)
+
+    def test_windows_owner_lane_is_blocking_and_sequenced_before_core(self) -> None:
+        workflow = load_workflow(CI_WORKFLOW_PATH)
+        native = load_workflow(ROOT / ".github/workflows/owner-bridge-windows.yml")
+        assert_owner_windows_lane(workflow, native)
+        assert_standard_stage_runner_cap(workflow)
+
+    def test_windows_owner_lane_rejects_missing_or_weakened_gates(self) -> None:
+        workflow = load_workflow(CI_WORKFLOW_PATH)
+        native = load_workflow(ROOT / ".github/workflows/owner-bridge-windows.yml")
+        for change in (
+            lambda w: w["jobs"].pop("owner-bridge-windows"),
+            lambda w: w["jobs"]["owner-bridge-windows"].update(needs=["ci_change_scope"]),
+            lambda w: w["jobs"]["owner-bridge-windows"].update(**{"continue-on-error": True}),
+            lambda w: w["jobs"]["preflight-gate"]["needs"].remove("owner-bridge-windows"),
+            lambda w: w["jobs"]["preflight-gate"]["steps"][0]["env"].update(OWNER_WINDOWS_RESULT="success"),
+            lambda w: w["jobs"]["preflight-gate"]["steps"][0].update(run="true"),
+        ):
+            mutated = copy.deepcopy(workflow)
+            change(mutated)
+            with self.assertRaises(AssertionError):
+                assert_owner_windows_lane(mutated, native)
+
+    def test_windows_owner_preflight_executes_fail_closed_for_every_result(self) -> None:
+        gate = load_workflow(CI_WORKFLOW_PATH)["jobs"]["preflight-gate"]["steps"][0]
+        base = dict(os.environ, **{name: "success" for name in gate["env"]})
+        base.update(EVENT_NAME="pull_request", RUST_SCOPE="true")
+        for scope, expected in (("true", "success"), ("false", "skipped")):
+            env = dict(base, RUST_SCOPE=scope)
+            for name in ("POLICY_RESULT", "PLUGIN_FIXTURES_RESULT", "NOTICES_RESULT"):
+                env[name] = expected
+            for result in ("success", "failure", "cancelled", "skipped", ""):
+                with self.subTest(scope=scope, result=result):
+                    actual = subprocess.run(
+                        ["bash", "-c", gate["run"]],
+                        env=dict(env, OWNER_WINDOWS_RESULT=result),
+                        capture_output=True,
+                        check=False,
+                    )
+                    self.assertEqual(actual.returncode == 0, result == expected)
 
     def test_parallel_validation_preserves_every_required_command(self) -> None:
         assert_parallel_validation_contract(load_workflow(CI_WORKFLOW_PATH))
@@ -1210,6 +1282,7 @@ STATIC_LAUNCHER_JOB_SET = ['asan',
  'modules-structure',
  'mutation-checks',
  'mutation-required',
+ 'owner-bridge-windows',
  'pinned-dependencies',
  'plugin-component-fixtures',
  'preflight-gate',
