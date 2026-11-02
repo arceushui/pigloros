@@ -60,8 +60,8 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut fixed = WindowsLoopbackBinder::default();
         // No connections/TIME_WAIT on the port used by later lifecycle fixtures.
-        let fixed_v4 = fixed.bind_v4().map_err(|error| error.to_string())?;
-        let fixed_v6 = fixed.bind_v6().map_err(|error| error.to_string())?;
+        let fixed_v4 = fixed.bind_v4()?;
+        let fixed_v6 = fixed.bind_v6()?;
         assert_eq!(fixed_v4.local_addr()?.port(), 49_291);
         assert_eq!(fixed_v6.local_addr()?.port(), 49_291);
         assert!(fixed.bind_v4().is_err());
@@ -69,7 +69,7 @@ mod tests {
         drop((fixed_v4, fixed_v6));
 
         let mut binder = WindowsLoopbackBinder::ephemeral();
-        let v4 = binder.bind_v4().map_err(|error| error.to_string())?;
+        let v4 = binder.bind_v4()?;
         assert_eq!(v4.local_addr()?.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
         let client = TcpStream::connect(v4.local_addr()?)?;
         let (_, peer) = v4.accept()?;
@@ -81,7 +81,7 @@ mod tests {
             .err()
             .ok_or("a reusing competitor took the exclusive port")?;
         assert!([io::ErrorKind::AddrInUse, io::ErrorKind::PermissionDenied].contains(&error.kind()));
-        let v6 = binder.bind_v6().map_err(|error| error.to_string())?;
+        let v6 = binder.bind_v6()?;
         assert_eq!(v6.local_addr()?.ip(), IpAddr::V6(Ipv6Addr::LOCALHOST));
         let client = TcpStream::connect(v6.local_addr()?)?;
         assert!(v6.accept().is_ok());

@@ -1,8 +1,9 @@
 #![cfg(windows)]
 #![forbid(unsafe_code)]
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::os::windows::ffi::OsStrExt;
+use std::path::PathBuf;
 
 use pos_owner_bridge::{BridgeError, UnavailableCode};
 use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS, WIN32_ERROR};
@@ -26,10 +27,22 @@ const POLICIES: [&str; 5] = [
 /// Returns `Unavailable(OverridePresent)` when an override exists, or
 /// `Unavailable(InterfaceUnavailable)` when inspection cannot establish absence.
 pub fn refuse_overrides() -> Result<(), BridgeError> {
-    if std::env::vars_os().any(|(name, _)| is_override(&name)) {
+    inspect_overrides(
+        std::env::vars_os().map(|(name, _)| name),
+        std::env::current_exe(),
+        crate::Native::query_policy,
+    )
+}
+
+fn inspect_overrides(
+    mut environment: impl Iterator<Item = OsString>,
+    executable: std::io::Result<PathBuf>,
+    mut query: impl FnMut(bool, bool, &[u16], &[u16]) -> WIN32_ERROR,
+) -> Result<(), BridgeError> {
+    if environment.any(|name| is_override(&name)) {
         return Err(BridgeError::Unavailable(UnavailableCode::OverridePresent));
     }
-    let executable = std::env::current_exe()
+    let executable = executable
         .map_err(|_| unavailable())?
         .file_name()
         .map(wide)
@@ -41,7 +54,7 @@ pub fn refuse_overrides() -> Result<(), BridgeError> {
         for machine in [false, true] {
             for view64 in [false, true] {
                 for name in [&executable, &wide(OsStr::new("*"))] {
-                    classify(crate::Native::query_policy(machine, view64, &subkey, name))?;
+                    classify(query(machine, view64, &subkey, name))?;
                 }
             }
         }
@@ -99,6 +112,23 @@ mod tests {
         for name in ["", "WEBVIEW2", "WEBVIEW3_", "XWEBVIEW2_", "WEBVIEW2x"] {
             assert!(!is_override(OsStr::new(name)));
         }
+    }
+
+    #[test]
+    fn incomplete_executable_observation_refuses_registry_admission() {
+        let absent = |_, _, _: &[u16], _: &[u16]| ERROR_FILE_NOT_FOUND;
+        assert_eq!(
+            inspect_overrides(
+                std::iter::empty(),
+                Err(std::io::ErrorKind::PermissionDenied.into()),
+                absent
+            ),
+            Err(unavailable())
+        );
+        assert_eq!(
+            inspect_overrides(std::iter::empty(), Ok(PathBuf::from(r"C:\")), absent),
+            Err(unavailable())
+        );
     }
 
     #[test]

@@ -54,21 +54,29 @@ impl VerifiedRuntime {
     /// Incomplete inspection returns `Unavailable(InterfaceUnavailable)`; an
     /// inaccessible or outside-runtime image returns `Unavailable(RuntimeIntegrity)`.
     pub fn browser_identity(&self, pid: u32) -> Result<ProcessIdentity, BridgeError> {
-        let (identity, path) = crate::Native::inspect_process_with_image(pid)
-            .ok()
-            .flatten()
-            .ok_or(BridgeError::Unavailable(
-                UnavailableCode::InterfaceUnavailable,
-            ))?;
-        let path = path
-            .canonicalize()
-            .map_err(|_| BridgeError::Unavailable(UnavailableCode::RuntimeIntegrity))?;
-        if !path.starts_with(&self.root) {
-            return Err(BridgeError::Unavailable(UnavailableCode::RuntimeIntegrity));
-        }
-        Ok(identity)
+        admit_image(&self.root, crate::Native::inspect_process_with_image(pid))
     }
 }
+
+fn admit_image(
+    root: &Path,
+    observation: Result<Option<(ProcessIdentity, PathBuf)>, ()>,
+) -> Result<ProcessIdentity, BridgeError> {
+    let (identity, path) = observation.ok().flatten().ok_or(BridgeError::Unavailable(
+        UnavailableCode::InterfaceUnavailable,
+    ))?;
+    let path = path.canonicalize().map_err(integrity)?;
+    if !path.starts_with(root) {
+        return Err(integrity(()));
+    }
+    Ok(identity)
+}
+
+fn integrity<T>(_: T) -> BridgeError {
+    BridgeError::Unavailable(UnavailableCode::RuntimeIntegrity)
+}
+
+fn failed<T>(_: T) {}
 
 /// Verify all runtime members and use only a current-SID-only metadata cache.
 ///
@@ -86,7 +94,7 @@ pub fn verify_fixed_runtime(
 ) -> Result<VerifiedRuntime, BridgeError> {
     verify_installation(root, marker_directory, manifest::FILES, &manifest::DIGEST)
         .map(|root| VerifiedRuntime { root })
-        .map_err(|()| BridgeError::Unavailable(UnavailableCode::RuntimeIntegrity))
+        .map_err(integrity)
 }
 
 fn verify_installation(
@@ -95,16 +103,16 @@ fn verify_installation(
     expected: &[RuntimeFile],
     manifest_digest: &[u8; 32],
 ) -> Result<PathBuf, ()> {
-    super::directory::inspect_path(root, false).map_err(|_| ())?;
-    let root = root.canonicalize().map_err(|_| ())?;
+    super::directory::inspect_path(root, false).map_err(failed)?;
+    let root = root.canonicalize().map_err(failed)?;
     let directory = OpenOptions::new()
         .read(true)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS.0 | FILE_FLAG_OPEN_REPARSE_POINT.0)
         .open(&root)
-        .map_err(|_| ())?;
+        .map_err(failed)?;
     let (volume, index) = crate::Native::file_identity(&directory)?;
     let mut members = BTreeMap::new();
-    collect_members(&root, &root, &mut members)?;
+    collect_members(&root, "", &mut members)?;
     if members.len() != expected.len() {
         return Err(());
     }
@@ -112,28 +120,27 @@ fn verify_installation(
     cache.extend_from_slice(manifest_digest);
     cache.extend_from_slice(&volume.to_le_bytes());
     cache.extend_from_slice(&index.to_le_bytes());
+    let mut admitted = Vec::with_capacity(expected.len());
     for entry in expected {
         let (path, metadata) = members.get(entry.path).ok_or(())?;
-        if metadata.len() != entry.size || !path.starts_with(&root) {
+        if metadata.len() != entry.size {
             return Err(());
         }
         cache.extend_from_slice(&metadata.last_write_time().to_le_bytes());
+        admitted.push((entry, path));
     }
     match std::fs::symlink_metadata(marker_directory) {
-        Ok(_) => super::verify_private_directory(marker_directory).map_err(|_| ())?,
+        Ok(_) => super::verify_private_directory(marker_directory).map_err(failed)?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            super::create_private_directory(marker_directory).map_err(|_| ())?;
+            super::create_private_directory(marker_directory).map_err(failed)?;
         }
         Err(_) => return Err(()),
     }
     let marker = marker_directory.join(MARKER_NAME);
     let cached = read_marker(&marker, cache.len()).is_ok_and(|bytes| bytes == cache);
-    for entry in expected {
-        if !cached || PER_START.contains(&entry.path) {
-            let (path, _) = members.get(entry.path).ok_or(())?;
-            if hash_file(path)? != entry.sha256 {
-                return Err(());
-            }
+    for (entry, path) in admitted {
+        if (!cached || PER_START.contains(&entry.path)) && hash_file(path)? != entry.sha256 {
+            return Err(());
         }
     }
     // A cache record holds public metadata only. A partial write is simply a
@@ -145,30 +152,29 @@ fn verify_installation(
 }
 
 fn collect_members(
-    root: &Path,
     directory: &Path,
+    prefix: &str,
     members: &mut BTreeMap<String, (PathBuf, std::fs::Metadata)>,
 ) -> Result<(), ()> {
-    for entry in std::fs::read_dir(directory).map_err(|_| ())? {
-        let path = entry.map_err(|_| ())?.path();
-        let metadata = std::fs::symlink_metadata(&path).map_err(|_| ())?;
+    for entry in std::fs::read_dir(directory).map_err(failed)? {
+        let entry = entry.map_err(failed)?;
+        let path = entry.path();
+        let metadata = std::fs::symlink_metadata(&path).map_err(failed)?;
         if metadata.file_attributes() & 0x400 != 0 {
             return Err(());
         }
-        if metadata.is_dir() {
-            collect_members(root, &path, members)?;
-        } else if metadata.is_file() {
-            let name = path
-                .strip_prefix(root)
-                .map_err(|_| ())?
-                .to_str()
-                .ok_or(())?
-                .replace('\\', "/");
-            if members.insert(name, (path, metadata)).is_some() {
-                return Err(());
-            }
+        let name = entry.file_name();
+        let name = name.to_str().ok_or(())?;
+        let relative = format!("{prefix}{name}");
+        if metadata.is_file() {
+            // Directory enumeration gives each exact relative name once. The
+            // path is assembled from that same entry; no prefix fallbacks,
+            // normalization aliases or second fallible lookup are needed.
+            let _previous = members.insert(relative, (path, metadata));
         } else {
-            return Err(());
+            // Directories recurse. An unsupported non-file kind fails at
+            // read_dir, so it cannot enter the admitted file inventory.
+            collect_members(&path, &format!("{relative}/"), members)?;
         }
     }
     Ok(())
@@ -179,14 +185,14 @@ fn hash_file(path: &Path) -> Result<[u8; 32], ()> {
         .read(true)
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
         .open(path)
-        .map_err(|_| ())?;
-    if file.metadata().map_err(|_| ())?.file_attributes() & 0x400 != 0 {
+        .map_err(failed)?;
+    if file.metadata().map_err(failed)?.file_attributes() & 0x400 != 0 {
         return Err(());
     }
     let mut hash = Sha256::new();
     let mut buffer = vec![0_u8; 1_048_576].into_boxed_slice();
     loop {
-        let read = file.read(&mut buffer).map_err(|_| ())?;
+        let read = file.read(&mut buffer).map_err(failed)?;
         if read == 0 {
             break;
         }
@@ -196,7 +202,7 @@ fn hash_file(path: &Path) -> Result<[u8; 32], ()> {
 }
 
 fn read_marker(path: &Path, length: usize) -> Result<Vec<u8>, ()> {
-    let metadata = std::fs::symlink_metadata(path).map_err(|_| ())?;
+    let metadata = std::fs::symlink_metadata(path).map_err(failed)?;
     if !metadata.is_file() || metadata.file_attributes() & 0x400 != 0 {
         return Err(());
     }
@@ -205,10 +211,10 @@ fn read_marker(path: &Path, length: usize) -> Result<Vec<u8>, ()> {
         .read(true)
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
         .open(path)
-        .map_err(|_| ())?
-        .take(u64::try_from(length).map_err(|_| ())? + 1)
+        .map_err(failed)?
+        .take(u64::try_from(length).map_err(failed)? + 1)
         .read_to_end(&mut bytes)
-        .map_err(|_| ())?;
+        .map_err(failed)?;
     Ok(bytes)
 }
 
@@ -224,9 +230,9 @@ fn write_marker(path: &Path, cache: &[u8]) -> Result<(), ()> {
         .truncate(true)
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
         .open(path)
-        .map_err(|_| ())?
+        .map_err(failed)?
         .write_all(cache)
-        .map_err(|_| ())
+        .map_err(failed)
 }
 
 #[cfg(test)]

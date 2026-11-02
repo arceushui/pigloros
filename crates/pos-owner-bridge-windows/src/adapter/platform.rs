@@ -54,9 +54,7 @@ pub const fn cpu_requirements(features: CpuFeatures) -> Result<(), UnavailableCo
 /// capabilities. Failed OS inspection returns `InterfaceUnavailable`.
 #[cfg(target_arch = "x86_64")]
 pub fn require_windows_profile() -> Result<(), BridgeError> {
-    let (build, product) = crate::Native::os_profile()
-        .map_err(|()| BridgeError::Unavailable(UnavailableCode::InterfaceUnavailable))?;
-    admit(&build, &product, CpuFeatures::current())
+    admit_observation(crate::Native::os_profile(), CpuFeatures::current())
 }
 
 /// Refuse architectures outside the selected x64 adapter profile.
@@ -69,6 +67,16 @@ pub const fn require_windows_profile() -> Result<(), BridgeError> {
     Err(BridgeError::Unavailable(
         UnavailableCode::PlatformUnsupported,
     ))
+}
+
+#[cfg(any(target_arch = "x86_64", test))]
+fn admit_observation(
+    profile: Result<(String, String), ()>,
+    cpu: CpuFeatures,
+) -> Result<(), BridgeError> {
+    let (build, product) =
+        profile.map_err(|()| BridgeError::Unavailable(UnavailableCode::InterfaceUnavailable))?;
+    admit(&build, &product, cpu)
 }
 
 #[cfg(any(target_arch = "x86_64", test))]
@@ -94,6 +102,16 @@ mod tests {
             aes_ni: true,
             pclmulqdq: true,
         };
+        assert_eq!(
+            admit_observation(Err(()), available),
+            Err(BridgeError::Unavailable(
+                UnavailableCode::InterfaceUnavailable
+            ))
+        );
+        assert_eq!(
+            admit_observation(Ok(("26100".into(), "WinNT".into())), available),
+            Ok(())
+        );
         for build in ["26100", "26200", "4294967295"] {
             assert_eq!(admit(build, "WinNT", available), Ok(()));
         }
