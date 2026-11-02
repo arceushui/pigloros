@@ -10,6 +10,7 @@ members = [
   "crates/pos-conformance",
   "crates/pos-reference",
   "crates/pos-plugin-release",
+  "crates/pos-plugin-content",
   "crates/pos-plugin-publisher",
   "crates/pos-owner-bridge",
   "crates/pos-owner-bridge-codec",
@@ -113,6 +114,7 @@ tempfile = "3"
 # Component text fixtures for the community Plugin host tests; the same
 # wasm-tools release (wasmparser 0.258) that builds the guest fixtures.
 wat = "=1.262.0"
+wit-parser = { version = "=0.258.3", default-features = false }
 
 # Data files
 toml = "1.1"
@@ -153,6 +155,13 @@ opt-level = 3
 opt-level = 3
 
 [profile.dev.package.blake3]
+opt-level = 3
+
+# Bundled SQLite repeatedly prepares and validates the full store schema in
+# public adapter tests. Keep its C engine optimized as well: unoptimized
+# pos-store worker baselines approach the 120-second mutation test limit (#399).
+# Workspace crates retain their default coverage and debugging profile.
+[profile.dev.package.libsqlite3-sys]
 opt-level = 3
 
 # P-256 (WebAuthn) and its arithmetic stack.

@@ -59,7 +59,7 @@ enum MaterializationCommand {
 }
 
 enum PreparedMaterializationCommand {
-    Publish(AtomicPublication),
+    Publish(PublicationParent),
     Fingerprint,
 }
 
@@ -484,22 +484,26 @@ fn main() -> Result<(), Box<dyn Error>> {
     run(
         std::env::args_os(),
         std::env::var("PIGLOROS_CONFORMANCE_SIGNING_KEY"),
+        materialized_files,
     )
 }
 
+/// Parse the command and key, validate the destination, and only then compute the outputs with
+/// `materialize`, so that an unusable destination is rejected before any output exists.
 fn run(
     arguments: impl Iterator<Item = OsString>,
     encoded_signing_key: Result<String, std::env::VarError>,
+    materialize: impl FnOnce(&SigningKey) -> Result<Vec<MaterializedFile>, Box<dyn Error>>,
 ) -> Result<(), Box<dyn Error>> {
     command_from_arguments(arguments)
         .and_then(|command| {
             signing_key_from_encoded(encoded_signing_key).map(|signing_key| (command, signing_key))
         })
         .and_then(|(command, signing_key)| {
-            materialized_files(&signing_key).map(|outputs| (command, outputs))
+            prepare_command(command).map(|command| (command, signing_key))
         })
-        .and_then(|(command, outputs)| {
-            prepare_command(command).and_then(|command| execute_command(command, &outputs))
+        .and_then(|(command, signing_key)| {
+            materialize(&signing_key).and_then(|outputs| execute_command(command, &outputs))
         })
 }
 
@@ -507,16 +511,14 @@ fn prepare_command(
     command: MaterializationCommand,
 ) -> Result<PreparedMaterializationCommand, Box<dyn Error>> {
     match command {
-        MaterializationCommand::Publish(output_root) => prepare_atomic_publication(&output_root)
+        MaterializationCommand::Publish(output_root) => open_publication_parent(&output_root)
             .map(PreparedMaterializationCommand::Publish)
             .map_err(Into::into),
         MaterializationCommand::Fingerprint => Ok(PreparedMaterializationCommand::Fingerprint),
     }
 }
 
-fn prepare_atomic_publication(
-    destination: &Path,
-) -> Result<AtomicPublication, MaterializationError> {
+fn open_publication_parent(destination: &Path) -> Result<PublicationParent, MaterializationError> {
     let expected = pos_conformance::hex_digest(&SOURCE_INVENTORY_DIGEST);
     if destination
         .file_name()
@@ -525,7 +527,7 @@ fn prepare_atomic_publication(
     {
         CString::new(expected)
             .map_err(|_| MaterializationError::AtomicPublicationUnsupported)
-            .and_then(|destination_name| AtomicPublication::prepare(destination, destination_name))
+            .and_then(|destination_name| PublicationParent::open(destination, destination_name))
     } else {
         Err(MaterializationError::SourceInventoryAddressMismatch)
     }
@@ -536,8 +538,8 @@ fn execute_command(
     outputs: &[MaterializedFile],
 ) -> Result<(), Box<dyn Error>> {
     match command {
-        PreparedMaterializationCommand::Publish(publication) => {
-            publish_materialized_tree(publication, outputs).map_err(Into::into)
+        PreparedMaterializationCommand::Publish(parent) => {
+            publish_materialized_tree(parent, outputs).map_err(Into::into)
         }
         PreparedMaterializationCommand::Fingerprint => {
             let fingerprint = format!(
@@ -1440,6 +1442,40 @@ fn verify_public_archive(
         .and_then(|_| {
             verify_archive_release_filename(archive_bytes, release_filename).map_err(Into::into)
         })
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod command_order_tests {
+    use super::{run, MaterializationError};
+    use std::cell::Cell;
+    use std::ffi::OsString;
+
+    const KEY: &str = "0707070707070707070707070707070707070707070707070707070707070707";
+
+    #[test]
+    fn an_unusable_destination_is_rejected_before_any_output_is_computed() {
+        let materialized = Cell::new(false);
+        let error = run(
+            [
+                OsString::from("materialize-conformance-bundles"),
+                OsString::from("not-the-source-inventory-digest"),
+            ]
+            .into_iter(),
+            Ok(KEY.to_owned()),
+            |_| {
+                materialized.set(true);
+                Err("materialization must not run for an unusable destination".into())
+            },
+        )
+        .err()
+        .and_then(|error| error.downcast::<MaterializationError>().ok());
+        assert!(matches!(
+            error.as_deref(),
+            Some(MaterializationError::SourceInventoryAddressMismatch)
+        ));
+        assert!(!materialized.get());
+    }
 }
 
 #[cfg(test)]

@@ -217,8 +217,40 @@ EXPECTED_GATE_JOB = {
         }
     ],
 }
+EXPECTED_SDK_HEADROOM_STEP = {
+    "name": "Reclaim unused SDK headroom for ASan",
+    "if": "${{ runner.environment == 'github-hosted' && runner.os == 'Linux' }}",
+    "run": """set -euo pipefail
+printf 'ASan SDK headroom before (bytes)\\n'
+df -B1 -- / "${GITHUB_WORKSPACE}" "${RUNNER_TEMP}"
+printf 'ASan SDK headroom before (inodes)\\n'
+df -i -- / "${GITHUB_WORKSPACE}" "${RUNNER_TEMP}"
+asan_root_device="$(stat -c '%d' -- /)"
+for asan_sdk_path in /usr/local/lib/android/sdk /usr/share/dotnet/sdk; do
+  if [[ ! -e "${asan_sdk_path}" && ! -L "${asan_sdk_path}" ]]; then
+    printf 'ASan SDK absent: %s\\n' "${asan_sdk_path}"
+    continue
+  fi
+  printf 'ASan SDK candidate: %s\\n' "${asan_sdk_path}"
+  test -d "${asan_sdk_path}"
+  test ! -L "${asan_sdk_path}"
+  test "$(readlink -e -- "${asan_sdk_path}")" = "${asan_sdk_path}"
+  asan_sdk_device="$(stat -c '%d' -- "${asan_sdk_path}")"
+  printf 'ASan SDK device: %s root=%s sdk=%s\\n' "${asan_sdk_path}" "${asan_root_device}" "${asan_sdk_device}"
+  test "${asan_sdk_device}" = "${asan_root_device}"
+  sudo du -sx -B1 -- "${asan_sdk_path}"
+  sudo rm -rf --one-file-system -- "${asan_sdk_path}"
+  printf 'ASan SDK removed: %s\\n' "${asan_sdk_path}"
+done
+printf 'ASan SDK headroom after (bytes)\\n'
+df -B1 -- / "${GITHUB_WORKSPACE}" "${RUNNER_TEMP}"
+printf 'ASan SDK headroom after (inodes)\\n'
+df -i -- / "${GITHUB_WORKSPACE}" "${RUNNER_TEMP}"
+""",
+}
 EXPECTED_SETUP_STEPS = [
     {"uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"},
+    EXPECTED_SDK_HEADROOM_STEP,
     {"run": "rm -f rust-toolchain.toml"},
     {
         "uses": "dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de",
@@ -352,13 +384,13 @@ def check_workflow(
 
     steps = job.get("steps")
     require(isinstance(steps, list), "ASan job steps must be a list")
-    require(len(steps) == 8, "ASan job must contain the exact trusted step sequence")
+    require(len(steps) == 9, "ASan job must contain the exact trusted step sequence")
     require(
-        steps[:6] == EXPECTED_SETUP_STEPS,
+        steps[:7] == EXPECTED_SETUP_STEPS,
         "ASan setup steps must match the exact pinned trusted sequence",
     )
     require(
-        steps[6] == EXPECTED_NEGATIVE_CONTROL_STEP,
+        steps[7] == EXPECTED_NEGATIVE_CONTROL_STEP,
         "ASan negative control must match the exact trusted step",
     )
     test_steps = [
@@ -368,7 +400,7 @@ def check_workflow(
     ]
     require(len(test_steps) == 1, "ASan job must contain exactly one named test step")
     step = test_steps[0]
-    require(step is steps[7], "ASan test must be the final trusted step")
+    require(step is steps[8], "ASan test must be the final trusted step")
     require(
         set(step) == {"name", "env", "run"},
         "ASan test step must contain exactly name, env, and run",
