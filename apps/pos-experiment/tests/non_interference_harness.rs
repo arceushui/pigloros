@@ -1184,6 +1184,11 @@ fn publication_is_immutable_and_changes_no_inventory() -> TestResult {
         Err(NonInterferencePublicationErrorV1::Conflict)
     );
     assert_eq!(fs::read(&address)?, b"other bytes");
+    // A failed publication leaves no staged file behind.
+    assert_eq!(
+        fs::read_dir(root.path().join(NON_INTERFERENCE_PUBLICATION_DIRECTORY_V1))?.count(),
+        VARIANTS.len() + 1
+    );
     // A directory at the address cannot be read as the artifact.
     fs::remove_file(&address)?;
     fs::create_dir(&address)?;
@@ -1193,6 +1198,11 @@ fn publication_is_immutable_and_changes_no_inventory() -> TestResult {
         Err(NonInterferencePublicationErrorV1::Io(
             std::io::ErrorKind::AlreadyExists
         ))
+    );
+    // A failed publication leaves no staged file behind.
+    assert_eq!(
+        fs::read_dir(root.path().join(NON_INTERFERENCE_PUBLICATION_DIRECTORY_V1))?.count(),
+        VARIANTS.len() + 1
     );
     // A root that is a file cannot hold the publication directory.
     let file_root = root.path().join("file-root");

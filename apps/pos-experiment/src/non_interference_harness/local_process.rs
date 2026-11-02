@@ -335,7 +335,7 @@ impl NonInterferenceModeRunnerV1 for NonInterferenceLocalProcessRunnerV1 {
 /// the capture frame to `output`.
 ///
 /// # Errors
-/// Returns the cause when the request is not a canonical `NLQ1` request, the
+/// Returns the cause when the request is not a well-formed `NLQ1` request, the
 /// subject does not execute, or the frame cannot be written; the process
 /// should then exit non-zero without a frame.
 pub fn serve_non_interference_local_subject_v1<R, W, F>(
