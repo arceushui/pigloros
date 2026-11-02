@@ -40,7 +40,7 @@ fn private_directory_is_current_sid_only_and_rejects_weakened_acl_and_links() ->
     assert!(verify_private_directory(&file).is_err());
 
     let output = Command::new("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-Command", r#"
+        .args(["-NoProfile", "-NonInteractive", "-Command", r"
             $ErrorActionPreference = 'Stop'
             $acl = Get-Acl -LiteralPath $env:PIGLOR_DIRECTORY_FIXTURE
             $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
@@ -50,7 +50,7 @@ fn private_directory_is_current_sid_only_and_rejects_weakened_acl_and_links() ->
             if ($rules.Count -ne 1 -or $rules[0].IdentityReference.Value -ne $sid) { throw 'additional principal' }
             if ($rules[0].AccessControlType -ne 'Allow' -or $rules[0].FileSystemRights -ne 'FullControl') { throw 'wrong rights' }
             if ($rules[0].InheritanceFlags -ne 'ContainerInherit, ObjectInherit') { throw 'children are not private' }
-        "#])
+        "])
         .env("PIGLOR_DIRECTORY_FIXTURE", &path)
         .output()?;
     assert!(
