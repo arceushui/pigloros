@@ -1322,10 +1322,14 @@ fn sqlite_schema_ddl(tables: &[SqliteSchemaTable]) -> String {
 /// Lowercase `sql` and drop all whitespace, so two `CREATE` statements
 /// compare equal only when they differ in case and layout alone.
 pub(crate) fn normalize_schema_sql(sql: &str) -> String {
-    sql.to_ascii_lowercase()
-        .chars()
-        .filter(|character| !character.is_whitespace())
-        .collect()
+    // One pass: every open normalizes the stored and the reviewed statement of each object.
+    let mut normalized = String::with_capacity(sql.len());
+    for character in sql.chars() {
+        if !character.is_whitespace() {
+            normalized.push(character.to_ascii_lowercase());
+        }
+    }
+    normalized
 }
 
 const ARTIFACT_REGISTRATION_SCHEMA_SQL: &str = "CREATE TABLE IF NOT EXISTS artifact_registrations (
@@ -2530,13 +2534,14 @@ impl SqliteStore {
     }
 
     fn validate_sqlite_schema_table(&self, table: &SqliteSchemaTable) -> Result<(), CoreError> {
+        // Every open validates dozens of tables through these two statements, so they are
+        // compiled once per connection.
         let sql = self
             .conn
-            .query_row(
-                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
-                params![table.name],
-                |row| row.get::<_, String>(0),
-            )
+            .prepare_cached("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1")
+            .and_then(|mut statement| {
+                statement.query_row(params![table.name], |row| row.get::<_, String>(0))
+            })
             .optional()
             .map_err(|error| Self::storage_error(&error))?
             .ok_or_else(|| {
@@ -2555,7 +2560,7 @@ impl SqliteStore {
         }
         let mut statement = self
             .conn
-            .prepare(table.columns_query)
+            .prepare_cached(table.columns_query)
             .map_err(Self::into_storage_error)?;
         let columns = statement
             .query_map([], |row| {
