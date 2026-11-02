@@ -38,8 +38,9 @@ use pos_experiment::non_interference_harness::{
     NonInterferencePreparationV1, NonInterferencePublicationErrorV1, NonInterferenceReplayRunnerV1,
     NonInterferenceRunOutcomeV1, NonInterferenceSessionObservationV1,
     NonInterferenceSessionSubjectV1, NonInterferenceSignedExecutionV1,
-    DEFAULT_NON_INTERFERENCE_LOCAL_OUTPUT_BUDGET_V1, NON_INTERFERENCE_LOCAL_CAPTURE_MAGIC_V1,
-    NON_INTERFERENCE_LOCAL_REQUEST_MAGIC_V1, NON_INTERFERENCE_PUBLICATION_DIRECTORY_V1,
+    DEFAULT_NON_INTERFERENCE_LOCAL_OUTPUT_BUDGET_V1, DEFAULT_NON_INTERFERENCE_LOCAL_TIMEOUT_V1,
+    NON_INTERFERENCE_LOCAL_CAPTURE_MAGIC_V1, NON_INTERFERENCE_LOCAL_REQUEST_MAGIC_V1,
+    NON_INTERFERENCE_PUBLICATION_DIRECTORY_V1,
 };
 use pos_experiment::{Experiment, ExperimentConfig, StopCondition};
 use pos_reference::{
@@ -874,7 +875,8 @@ fn the_local_runner_refuses_malformed_unknown_and_over_budget_frames() -> TestRe
                 if let Some(object) = value["capture"].as_object_mut() {
                     object.insert("extra".to_owned(), json!(1));
                 }
-                pos_crypto::canonical::encode(&value)?.as_slice().to_vec()
+                let encoded = pos_crypto::canonical::encode(&value)?;
+                encoded.as_slice().to_vec()
             },
             NonInterferenceNonExecutedCauseV1::UnknownField,
         ),
@@ -886,7 +888,8 @@ fn the_local_runner_refuses_malformed_unknown_and_over_budget_frames() -> TestRe
                     "version": 1,
                     "capture": serde_json::to_value(&capture)?,
                 });
-                pos_crypto::canonical::encode(&value)?.as_slice().to_vec()
+                let encoded = pos_crypto::canonical::encode(&value)?;
+                encoded.as_slice().to_vec()
             },
             NonInterferenceNonExecutedCauseV1::Unavailable,
         ),
@@ -1487,7 +1490,7 @@ fn the_local_output_budget_is_inclusive_and_defaults_to_16_mib() -> TestResult {
     // The default budget is 16 MiB: 16 MiB of output is read (and is not a
     // frame), one byte more is over the budget.
     assert_eq!(
-        DEFAULT_NON_INTERFERENCE_LOCAL_OUTPUT_BUDGET_V1, DEFAULT_NON_INTERFERENCE_LOCAL_TIMEOUT_V1,
+        DEFAULT_NON_INTERFERENCE_LOCAL_OUTPUT_BUDGET_V1,
         16 * 1024 * 1024
     );
     for (bytes, cause) in [
