@@ -396,7 +396,11 @@ impl CeremonyDriver {
         };
         let identity = match env.surface.open(&spec) {
             Ok(identity) => identity,
-            Err(error) => return self.fail(env, now, error.error()),
+            Err(error) => {
+                let now = env.clock.now();
+                let error = self.pre_post_failure(now).unwrap_or(error.error());
+                return self.fail(env, now, error);
+            }
         };
         self.identity = Some(identity);
         let ceremony_id = self.plan.ceremony_id;
@@ -409,6 +413,13 @@ impl CeremonyDriver {
         }
         self.record = Some(record);
         if let Err(error) = env.loopback.probe_ipv6() {
+            return self.fail(env, now, error);
+        }
+        // Native opening pumps async COM work; durable storage and the socket
+        // probe can also consume time. Re-read the clock before navigation,
+        // after recording the observed browser so cleanup still owns its exit.
+        let now = env.clock.now();
+        if let Some(error) = self.pre_post_failure(now) {
             return self.fail(env, now, error);
         }
         env.loopback.begin_navigation();
