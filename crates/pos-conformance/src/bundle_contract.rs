@@ -719,10 +719,8 @@ impl ConformanceBundleV1 {
     ///
     /// Returns a closed bundle error when the archive cannot be validated or encoded.
     pub fn release_filename(&self) -> Result<String, BundleContractErrorV1> {
-        self.archive_digest().map(|digest| {
-            let hexadecimal = crate::hex_digest(&digest);
-            format!("{hexadecimal}.cfb1")
-        })
+        self.to_canonical_cbor()
+            .map(|bytes| archive_release_filename(&bytes))
     }
     fn validate_unsigned(&self) -> Result<(), BundleContractErrorV1> {
         let maximum_items = usize::try_from(MAX_CONFORMANCE_ITEMS_V1).unwrap_or(usize::MAX);
@@ -1896,12 +1894,21 @@ pub fn verify_archive_release_filename(
     filename: &str,
 ) -> Result<(), BundleContractErrorV1> {
     verify_archive_independently(bytes).and_then(|()| {
-        if filename == format!("{}.cfb1", crate::hex_digest(blake3::hash(bytes).as_bytes())) {
+        if filename == archive_release_filename(bytes) {
             Ok(())
         } else {
             Err(BundleContractErrorV1::ReleaseFilenameInvalid)
         }
     })
+}
+/// The content-addressed `.cfb1` release filename of exact archive bytes: the lowercase hex
+/// BLAKE3 digest of the bytes. It does not validate the archive.
+#[must_use]
+pub fn archive_release_filename(archive_bytes: &[u8]) -> String {
+    format!(
+        "{}.cfb1",
+        crate::hex_digest(blake3::hash(archive_bytes).as_bytes())
+    )
 }
 fn ordered_members(members: &[BundleMemberV1]) -> bool {
     members.windows(2).all(|pair| pair[0].path < pair[1].path)

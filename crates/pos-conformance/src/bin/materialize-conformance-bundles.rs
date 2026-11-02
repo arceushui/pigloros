@@ -735,10 +735,7 @@ fn materialized_bundle_files(
         })
         .and_then(|(manifest_digest, manifest_bytes)| {
             bundle.to_canonical_cbor().map(|bundle_bytes| {
-                let release_filename = format!(
-                    "{}.cfb1",
-                    pos_conformance::hex_digest(blake3::hash(&bundle_bytes).as_bytes())
-                );
+                let release_filename = pos_conformance::archive_release_filename(&bundle_bytes);
                 (
                     manifest_digest,
                     release_filename,

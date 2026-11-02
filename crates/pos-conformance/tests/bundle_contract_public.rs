@@ -3088,11 +3088,13 @@ fn public_materializer_fingerprint_is_stable_and_invalid_invocations_fail() -> T
     let relative_root = temporary_root("relative-materializer")?;
     let _relative_cleanup = TemporaryOutput(relative_root.clone());
     fs::create_dir_all(&relative_root)?;
-    let relative = Command::new(&materializer)
-        .current_dir(&relative_root)
-        .env("PIGLOROS_CONFORMANCE_SIGNING_KEY", key)
-        .arg(source_inventory_address())
-        .spawn()?;
+    let mut relative = KilledOnDrop(
+        Command::new(&materializer)
+            .current_dir(&relative_root)
+            .env("PIGLOROS_CONFORMANCE_SIGNING_KEY", key)
+            .arg(source_inventory_address())
+            .spawn()?,
+    );
     let first = first.wait_with_output()?;
     let second = second.wait_with_output()?;
     assert!(first.status.success());
@@ -3146,8 +3148,19 @@ fn public_materializer_fingerprint_is_stable_and_invalid_invocations_fail() -> T
         })
     }));
 
-    assert!(relative.wait_with_output()?.status.success());
+    assert!(relative.0.wait()?.success());
     Ok(())
+}
+
+/// A child process that is killed and reaped if the test stops before waiting for it.
+struct KilledOnDrop(std::process::Child);
+
+impl Drop for KilledOnDrop {
+    fn drop(&mut self) {
+        // An exited child refuses the kill; either way the wait reaps it.
+        drop(self.0.kill());
+        drop(self.0.wait());
+    }
 }
 
 #[cfg(target_os = "linux")]
