@@ -1182,12 +1182,11 @@ impl SqliteStore {
         object: &CounterfactualSchemaObjectV1,
     ) -> Result<Option<String>, CoreError> {
         self.conn
-            .prepare_cached("SELECT sql FROM sqlite_master WHERE type = ?1 AND name = ?2")
-            .and_then(|mut statement| {
-                statement.query_row(params![object.kind, object.name], |row| {
-                    row.get::<_, String>(0)
-                })
-            })
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = ?1 AND name = ?2",
+                params![object.kind, object.name],
+                |row| row.get::<_, String>(0),
+            )
             .optional()
             .map_err(Self::into_storage_error)
     }

@@ -2530,14 +2530,13 @@ impl SqliteStore {
     }
 
     fn validate_sqlite_schema_table(&self, table: &SqliteSchemaTable) -> Result<(), CoreError> {
-        // Every open validates dozens of tables through these two statements, so they are
-        // compiled once per connection.
         let sql = self
             .conn
-            .prepare_cached("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1")
-            .and_then(|mut statement| {
-                statement.query_row(params![table.name], |row| row.get::<_, String>(0))
-            })
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                params![table.name],
+                |row| row.get::<_, String>(0),
+            )
             .optional()
             .map_err(|error| Self::storage_error(&error))?
             .ok_or_else(|| {
@@ -2556,7 +2555,7 @@ impl SqliteStore {
         }
         let mut statement = self
             .conn
-            .prepare_cached(table.columns_query)
+            .prepare(table.columns_query)
             .map_err(Self::into_storage_error)?;
         let columns = statement
             .query_map([], |row| {
