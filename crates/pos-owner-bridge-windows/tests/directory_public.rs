@@ -28,8 +28,10 @@ impl Drop for Fixture {
 fn private_directory_is_current_sid_only_and_rejects_weakened_acl_and_links() -> TestResult {
     let fixture = Fixture::new()?;
     let path = fixture.0.join("private");
-    create_private_directory(&path)?;
-    verify_private_directory(&path)?;
+    create_private_directory(&path)
+        .map_err(|error| format!("create private directory: {error}"))?;
+    verify_private_directory(&path)
+        .map_err(|error| format!("verify initial directory: {error}"))?;
     assert!(create_private_directory(&path).is_err());
     assert!(create_private_directory(std::path::Path::new("relative")).is_err());
     assert!(verify_private_directory(std::path::Path::new("relative")).is_err());
@@ -71,7 +73,7 @@ fn private_directory_is_current_sid_only_and_rejects_weakened_acl_and_links() ->
         .args(["/remove:g", "*S-1-1-0"])
         .output()?;
     assert!(restored.status.success());
-    verify_private_directory(&path)?;
+    verify_private_directory(&path).map_err(|error| format!("verify restored ACL: {error}"))?;
 
     let junction = fixture.0.join("junction");
     let linked = Command::new("cmd.exe")

@@ -12,8 +12,9 @@ use windows::Win32::Security::Authorization::{
     SE_FILE_OBJECT,
 };
 use windows::Win32::Security::{
-    GetTokenInformation, TokenUser, DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
-    PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER,
+    GetTokenInformation, SetSecurityDescriptorControl, TokenUser, DACL_SECURITY_INFORMATION,
+    OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, SE_DACL_AUTO_INHERITED,
+    SE_DACL_AUTO_INHERIT_REQ, TOKEN_QUERY, TOKEN_USER,
 };
 use windows::Win32::Storage::FileSystem::{
     CreateDirectoryW, GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
@@ -103,6 +104,19 @@ fn expected_descriptor() -> Result<LocalMemory, ()> {
 }
 
 fn descriptor_text(descriptor: &LocalMemory) -> Result<String, ()> {
+    // Automatic-propagation bookkeeping may change after an ACL edit even
+    // when owner, protection, sole principal, rights and ACE flags are restored.
+    // Normalize only those two bookkeeping bits in this allocated COPY.
+    // SAFETY: writable Windows-allocated descriptor remains uniquely owned.
+    // This never changes filesystem security, SE_DACL_PROTECTED or any ACE.
+    unsafe {
+        SetSecurityDescriptorControl(
+            PSECURITY_DESCRIPTOR(descriptor.0 .0),
+            SE_DACL_AUTO_INHERITED | SE_DACL_AUTO_INHERIT_REQ,
+            Default::default(),
+        )
+    }
+    .map_err(|_| ())?;
     let mut text = PWSTR::null();
     // SAFETY: the live LocalMemory holds a valid security descriptor returned
     // by Windows. Only owner/DACL information is requested; output is owned.
