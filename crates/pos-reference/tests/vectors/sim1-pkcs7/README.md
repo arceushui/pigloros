@@ -270,3 +270,63 @@ Measurements include fixture construction and the test harness. They exclude
 stack and RSS, and do not establish a production memory ceiling or replace
 systemd/kernel conformance. Inspect the allocation trees and independent review
 alongside the recorded peak before accepting the resource-risk evidence.
+
+## Signed reversed-root validity fixture
+
+`reversed-root-proof.der` contains one self-signed root (serial 1,
+`CN=SIM1 reversed fixture root`) and its directly issued signer (serial 2,
+`CN=SIM1 reversed fixture leaf`). Both keys are RSA-2048 with exponent 65537.
+The root's notBefore is 2036-01-01 00:00:00 UTC and its notAfter is
+2026-01-01 00:00:00 UTC. The leaf's interval has the same endpoints in the
+normal order, containing fixed admission time 1,800,000,000.
+
+The root's self-signature, leaf certificate signature and detached CMS signature
+are authentic. This isolates root interval coherence from signature corruption.
+The public verifier requires `CertificateTime`; the existing coherent expired
+root chain remains a passing control. Root expiry and reversed root dates are
+separate policy cases. This does not establish a new root-expiry requirement.
+
+To regenerate with OpenSSL 3.0.13 in a disposable private directory:
+
+1. Create fresh RSA-2048 root and leaf keys and CSRs. Issue the root with
+   `openssl ca -selfsign` and the leaf with `openssl ca`, setting
+   `-startdate 20260101000000Z -enddate 20360101000000Z` and serials 1 and 2.
+   The root has critical CA:TRUE/pathlen:0 and keyCertSign/cRLSign KU. The leaf
+   has critical CA:FALSE, digitalSignature KU and codeSigning EKU.
+2. Export the root's DER, exchange the two complete UTCTime elements in its
+   TBSCertificate validity sequence, and DER-encode that changed TBSCertificate
+   as `root-reversed-tbs.der`. Keep all its other fields unchanged. Sign it
+   with the root's private key:
+
+   ```sh
+   openssl dgst -sha256 -sign root.key \
+     -out root-reversed-signature.bin root-reversed-tbs.der
+   ```
+
+   Assemble the final certificate SEQUENCE from the changed TBSCertificate,
+   the original signatureAlgorithm and a BIT STRING containing zero unused
+   bits followed by that signature. Convert it to `root-reversed.pem` with
+   `openssl x509 -inform DER`. This signs the malformed interval deliberately;
+   editing a signed certificate without re-signing is not this fixture.
+3. Export the leaf as `reversed-root-signer.der`, then sign the same 64-byte
+   `root-hash.txt` and canonicalize the certificate SET:
+
+   ```sh
+   openssl smime -sign -binary -noattr -md sha256 -in root-hash.txt \
+     -signer leaf.pem -inkey leaf.key -certfile root-reversed.pem \
+     -outform DER -out proof-unsorted.der
+   openssl cms -cmsout -inform DER -in proof-unsorted.der \
+     -outform DER -out reversed-root-proof.der
+   ```
+
+Check both certificate signatures directly against the root's public key and
+the detached signature against the leaf's public key and exact content.
+OpenSSL's normal path-time policy is not the root-time policy tested here.
+Discard both private keys. Fresh keys change the bytes; update these hashes.
+CMS uses one v1 issuer-and-serial signer, SHA-256/RSA with NULL parameters,
+no embedded content, attributes or CRLs, and a 256-byte signature.
+
+| File | Bytes | SHA-256 |
+| --- | ---: | --- |
+| `reversed-root-signer.der` | 830 | `a9fc317b88600f95efc7a3417e19d41233107785de18946ecc09e0d4a05bec0b` |
+| `reversed-root-proof.der` | 2017 | `a022f225f52f410dda089625eb23144bf4df7e720ba81fc374b85fd961e2ca82` |
