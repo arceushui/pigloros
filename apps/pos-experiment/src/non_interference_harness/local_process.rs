@@ -377,7 +377,8 @@ fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>, NonInterferenceNonExecuted
 }
 
 /// Wait for the process to exit until `deadline`. A failed status poll is
-/// retried like a running process, so it too ends the run as unavailable.
+/// treated like a still-running process: it is retried until `deadline`,
+/// after which the run is unavailable.
 fn exit_status(
     child: &mut Child,
     deadline: Instant,
