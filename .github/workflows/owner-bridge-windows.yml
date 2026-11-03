@@ -67,9 +67,9 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or -not $safe) { throw 'Unsafe full-file safe scope' }
           $ffi = $metadata | python scripts/owner_bridge_windows_cov_ignore.py --report "$report" --scope ffi
           if ($LASTEXITCODE -ne 0 -or -not $ffi) { throw 'Unsafe full-file ffi scope' }
-          cargo llvm-cov report -p pos-owner-bridge-windows --all-features --locked --json --output-path "$env:RUNNER_TEMP/owner-windows-safe-full.json" --ignore-filename-regex "$safe" --fail-under-lines 99 --fail-under-regions 99
+          cargo llvm-cov report -p pos-owner-bridge-windows --locked --json --output-path "$env:RUNNER_TEMP/owner-windows-safe-full.json" --ignore-filename-regex "$safe" --fail-under-lines 99 --fail-under-regions 99
           $safeResult = $LASTEXITCODE
-          cargo llvm-cov report -p pos-owner-bridge-windows --all-features --locked --json --output-path "$env:RUNNER_TEMP/owner-windows-ffi-full.json" --ignore-filename-regex "$ffi" --fail-under-lines 95 --fail-under-regions 80
+          cargo llvm-cov report -p pos-owner-bridge-windows --locked --json --output-path "$env:RUNNER_TEMP/owner-windows-ffi-full.json" --ignore-filename-regex "$ffi" --fail-under-lines 95 --fail-under-regions 80
           $ffiResult = $LASTEXITCODE
           if ($safeResult -ne 0 -or $ffiResult -ne 0) { throw 'Full-file Windows coverage floor failed' }
       - name: Retain the measured shim report
