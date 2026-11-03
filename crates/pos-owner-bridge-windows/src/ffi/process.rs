@@ -73,7 +73,7 @@ fn image_digest(handle: HANDLE) -> Result<(ImagePathSha256, PathBuf), ()> {
     // The Win32 extended path bound. An insufficient buffer is indeterminate;
     // it never changes the observation to absence.
     let mut image = vec![0_u16; 32_768].into_boxed_slice();
-    let mut length = 32_768_u32;
+    let mut length: u32 = 32_768;
     // SAFETY: image owns length UTF-16 code units for the duration of the call;
     // the handle is live and length is an initialized in/out bound.
     let queried = unsafe {

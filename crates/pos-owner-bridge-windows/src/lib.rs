@@ -49,6 +49,33 @@ mod tests {
 
     use crate::WindowsLoopbackBinder;
 
+    // Deliberate negative coverage proof. This scratch commit is never merged.
+    #[test]
+    fn coverage_gate_deliberately_uncovered_scratch_branch() {
+        let triggered = std::env::var_os("PIGLOR_COVERAGE_NEGATIVE_SMOKE").is_some();
+        if triggered {
+            let mut scratch = String::new();
+            scratch.push_str("one");
+            scratch.push_str("two");
+            scratch.push_str("three");
+            scratch.push_str("four");
+            scratch.push_str("five");
+            scratch.push_str("six");
+            scratch.push_str("seven");
+            scratch.push_str("eight");
+            scratch.push_str("nine");
+            scratch.push_str("ten");
+            scratch.push_str("eleven");
+            scratch.push_str("twelve");
+            scratch.push_str("thirteen");
+            scratch.push_str("fourteen");
+            scratch.push_str("fifteen");
+            scratch.push_str("sixteen");
+            assert!(!scratch.is_empty());
+        }
+        assert!(!triggered);
+    }
+
     #[test]
     fn runtime_checks_all_members_metadata_cache_and_per_start_binaries(
     ) -> Result<(), Box<dyn std::error::Error>> {
