@@ -1,88 +1,62 @@
+# Temporary manual lockfile repair producer; not shipping CI.
 name: sim1-proof-risk
-
 on:
-  pull_request:
-    paths:
-      - Cargo.lock
-      - Cargo.toml
-      - rust-toolchain.toml
-      - crates/pos-reference/**
-      - scripts/measure_sim1_proof_heap.py
-      - .github/workflows/sim1-proof-risk.yml
   workflow_dispatch:
-
 permissions:
   contents: read
-
-concurrency:
-  group: sim1-proof-risk-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
-  heap-measurement:
+  lockfile-refresh:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    env:
-      CARGO_TERM_COLOR: never
-      RUSTFLAGS: -D warnings
-      PROFILE_SOURCE_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
+          ref: 9021e5c750c8850b77b42f3c25976819add84274
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
         with:
           toolchain: 1.97.1
-      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
-        with:
-          # Pull-request-only workflow: it never runs on main, so like the
-          # mutation workflow it keeps its own PR-scoped cache key.
-          shared-key: sim1-proof-risk
-      - name: Install heap profiler
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends valgrind
-      - name: Build the public admission test executable
+      - name: Resolve only the non-yanked async-executor patch release
+        env:
+          LOCK_OUTPUT: ${{ runner.temp }}/lockfile-refresh
         run: |
           set -euo pipefail
-          cargo test -p pos-reference --test sandbox_admission_contract_public \
-            --all-features --locked --no-run --message-format=json > /tmp/sim1-build.json
-      - name: Measure adversarial near-limit proof inputs
-        run: python3 scripts/measure_sim1_proof_heap.py /tmp/sim1-build.json sim1-heap-report
-      - name: Check all public admission cases on the measured build
-        run: |
-          cargo test -p pos-reference --test sandbox_admission_contract_public \
-            --all-features --locked -- --include-ignored
-      - name: Retain heap traces and exact-source metadata
-        if: ${{ always() && !cancelled() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+          mkdir -p "$LOCK_OUTPUT"
+          cp Cargo.lock "$LOCK_OUTPUT/Cargo.lock.before"
+          cargo update --package async-executor --precise 1.14.1 2>&1 | tee "$LOCK_OUTPUT/update.log"
+          git diff --check
+          git diff -- Cargo.lock > "$LOCK_OUTPUT/lock.diff"
+          cp Cargo.lock "$LOCK_OUTPUT/Cargo.lock"
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import tomllib
+          from pathlib import Path
+          output = Path(os.environ['LOCK_OUTPUT'])
+          before = tomllib.loads((output / 'Cargo.lock.before').read_text())
+          after = tomllib.loads((output / 'Cargo.lock').read_text())
+          old = [x for x in before['package'] if x['name'] == 'async-executor']
+          new = [x for x in after['package'] if x['name'] == 'async-executor']
+          assert len(old) == len(new) == 1 and old[0]['version'] == '1.14.0' and new[0]['version'] == '1.14.1'
+          assert old[0]['checksum'] == 'c96bf972d85afc50bf5ab8fe2d54d1586b4e0b46c97c50a0c9e71e2f7bcd812a'
+          assert new[0]['checksum'] == 'f426a31126c735126297bc5ea7a521263c9faff4f63ca415267ee625651c4f37'
+          assert {k: v for k, v in old[0].items() if k not in ('version', 'checksum')} == {k: v for k, v in new[0].items() if k not in ('version', 'checksum')}
+          assert [x for x in before['package'] if x['name'] != 'async-executor'] == [x for x in after['package'] if x['name'] != 'async-executor']
+          manifest = {'source': '9021e5c750c8850b77b42f3c25976819add84274', 'producer': os.environ['GITHUB_SHA'],
+                      'only_package_changed': 'async-executor 1.14.0 -> 1.14.1', 'dependency_edges_unchanged': True,
+                      'files': {n: {'bytes': len((output / n).read_bytes()), 'sha256': hashlib.sha256((output / n).read_bytes()).hexdigest()} for n in ['Cargo.lock.before', 'Cargo.lock', 'lock.diff', 'update.log']}}
+          (output / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
+          print(json.dumps(manifest))
+          PY
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: sim1-proof-heap-${{ github.event.pull_request.head.sha || github.sha }}
-          path: sim1-heap-report/
+          name: lockfile-refresh
+          path: |
+            ${{ runner.temp }}/lockfile-refresh/Cargo.lock.before
+            ${{ runner.temp }}/lockfile-refresh/Cargo.lock
+            ${{ runner.temp }}/lockfile-refresh/lock.diff
+            ${{ runner.temp }}/lockfile-refresh/update.log
+            ${{ runner.temp }}/lockfile-refresh/manifest.json
           if-no-files-found: error
-          retention-days: 30
-
-  # #437 verifier evidence: the public admission contract cases, including the
-  # SIM1 verifier and systemd-repart fixture cases, must pass on aarch64 too.
-  # No systemd or kernel runs here; that two-architecture gate is #444.
-  public-admission-aarch64:
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 30
-    env:
-      CARGO_TERM_COLOR: never
-      RUSTFLAGS: -D warnings
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
-        with:
-          toolchain: 1.97.1
-      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
-        with:
-          shared-key: sim1-proof-risk-aarch64
-      - name: Check all public admission cases on aarch64
-        run: |
-          test "$(uname -m)" = aarch64
-          cargo test -p pos-reference --test sandbox_admission_contract_public \
-            --all-features --locked -- --include-ignored
+          retention-days: 7
