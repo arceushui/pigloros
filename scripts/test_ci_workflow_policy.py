@@ -391,7 +391,7 @@ def assert_owner_windows_lane(workflow: dict, native: dict) -> None:
     run = full.get("run", "")
     commands = [line for line in run.splitlines() if line.startswith("cargo llvm-cov report ")]
     expected = [
-        'cargo llvm-cov report -p pos-owner-bridge-windows --all-features --locked --json '
+        'cargo llvm-cov report -p pos-owner-bridge-windows --locked --json '
         f'--output-path "$env:RUNNER_TEMP/owner-windows-{scope}-full.json" '
         f'--ignore-filename-regex "${scope}" --fail-under-lines {lines} --fail-under-regions {regions}'
         for scope, lines, regions in (("safe", 99, 99), ("ffi", 95, 80))
