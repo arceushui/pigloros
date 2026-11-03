@@ -112,7 +112,7 @@ fn verify_with_io(
     marker_directory: &Path,
     expected: &[RuntimeFile],
     manifest_digest: &[u8; 32],
-    io: &impl RuntimeIo,
+    io: &dyn RuntimeIo,
 ) -> Result<PathBuf, ()> {
     super::directory::inspect_path(root, false).map_err(failed)?;
     let root = io.canonicalize(root).map_err(failed)?;
@@ -166,7 +166,7 @@ fn verify_with_io(
 }
 
 fn collect_members(
-    io: &impl RuntimeIo,
+    io: &dyn RuntimeIo,
     directory: &Path,
     prefix: &str,
     members: &mut BTreeMap<String, (PathBuf, std::fs::Metadata)>,
@@ -196,7 +196,7 @@ fn collect_members(
     Ok(())
 }
 
-fn hash_file(io: &impl RuntimeIo, path: &Path) -> Result<[u8; 32], ()> {
+fn hash_file(io: &dyn RuntimeIo, path: &Path) -> Result<[u8; 32], ()> {
     let mut file = io
         .open(
             path,
@@ -220,7 +220,7 @@ fn hash_file(io: &impl RuntimeIo, path: &Path) -> Result<[u8; 32], ()> {
     Ok(hash.finalize().into())
 }
 
-fn read_marker(io: &impl RuntimeIo, path: &Path, length: usize) -> Result<Vec<u8>, ()> {
+fn read_marker(io: &dyn RuntimeIo, path: &Path, length: usize) -> Result<Vec<u8>, ()> {
     let metadata = io.metadata(path).map_err(failed)?;
     if !metadata.is_file() || metadata.file_attributes() & 0x400 != 0 {
         return Err(());
@@ -239,7 +239,7 @@ fn read_marker(io: &impl RuntimeIo, path: &Path, length: usize) -> Result<Vec<u8
         .map_err(failed)
 }
 
-fn write_marker(io: &impl RuntimeIo, path: &Path, cache: &[u8]) -> Result<(), ()> {
+fn write_marker(io: &dyn RuntimeIo, path: &Path, cache: &[u8]) -> Result<(), ()> {
     match io.metadata(path) {
         Ok(metadata) => {
             if !metadata.is_file() || metadata.file_attributes() & 0x400 != 0 {

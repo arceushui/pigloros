@@ -118,10 +118,8 @@ mod tests {
             assert!(TcpListener::bind(address).is_err());
             assert!(
                 crate::Native::competing_reuse(address.port()).is_err_and(|error| {
-                    matches!(
-                        error.kind(),
-                        io::ErrorKind::AddrInUse | io::ErrorKind::PermissionDenied
-                    )
+                    [io::ErrorKind::AddrInUse, io::ErrorKind::PermissionDenied]
+                        .contains(&error.kind())
                 })
             );
             true
