@@ -484,7 +484,7 @@ fn recipient_decryption_public_contract_errors_display_their_closed_cause() {
 
 /// Store options for a test that holds a lock until the store fails closed: the lock is held
 /// throughout, so a short wait reaches the same outcome as the four-second default.
-fn contended_store_options() -> SqliteStoreOpenOptionsV1 {
+const fn contended_store_options() -> SqliteStoreOpenOptionsV1 {
     SqliteStoreOpenOptionsV1 {
         busy_timeout: std::time::Duration::from_millis(100),
     }

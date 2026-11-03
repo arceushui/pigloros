@@ -4627,7 +4627,7 @@ fn raw_index_variants_remain_explicitly_named() {
 /// Store options for a test that holds a lock until the store fails closed: the lock is held
 /// throughout, so a short wait reaches the same outcome as the four-second default.
 #[cfg(feature = "sqlite")]
-fn contended_store_options() -> SqliteStoreOpenOptionsV1 {
+const fn contended_store_options() -> SqliteStoreOpenOptionsV1 {
     SqliteStoreOpenOptionsV1 {
         busy_timeout: std::time::Duration::from_millis(100),
     }
