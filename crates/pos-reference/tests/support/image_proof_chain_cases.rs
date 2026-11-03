@@ -107,8 +107,10 @@ mod chain_cases {
         let proof = include_bytes!("../vectors/sim1-pkcs7/reversed-root-proof.der");
         let signer = include_bytes!("../vectors/sim1-pkcs7/reversed-root-signer.der");
         let outer = ContentInfo::from_der(proof)?;
-        let signed: SignedData = outer.content.decode_as()?;
-        let certificates = signed.certificates.ok_or("missing fixture certificates")?;
+        let cms_data: SignedData = outer.content.decode_as()?;
+        let certificates = cms_data
+            .certificates
+            .ok_or("missing fixture certificates")?;
         assert_eq!(certificates.0.len(), 2);
         let mut roots = 0;
         for choice in certificates.0.iter() {
