@@ -23,8 +23,7 @@
 //! top-level or capture keys include a key the schema does not declare, and
 //! `Unavailable` otherwise.
 
-use std::collections::BTreeSet;
-use std::fmt;
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -100,40 +99,15 @@ struct CaptureFrameV1 {
     capture: NonInterferenceRawCaptureV1,
 }
 
-/// Only the capture's keys, every value ignored: the second, structural
-/// reading of a frame that failed its schema.
+/// Only the capture's keys are compared: the second, structural reading
+/// of a frame that failed its schema.
 #[derive(Deserialize)]
 struct CaptureKeysV1 {
     capture: KeySetV1,
 }
 
-/// The key set of one CBOR map; every value is skipped without being kept.
-struct KeySetV1(BTreeSet<String>);
-
-impl<'de> Deserialize<'de> for KeySetV1 {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        deserializer.deserialize_map(KeySetVisitorV1)
-    }
-}
-
-struct KeySetVisitorV1;
-
-impl<'de> serde::de::Visitor<'de> for KeySetVisitorV1 {
-    type Value = KeySetV1;
-
-    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("a map with text keys")
-    }
-
-    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<KeySetV1, A::Error> {
-        let mut keys = BTreeSet::new();
-        while let Some(key) = map.next_key::<String>()? {
-            map.next_value::<serde::de::IgnoredAny>()?;
-            keys.insert(key);
-        }
-        Ok(KeySetV1(keys))
-    }
-}
+/// The entries of one CBOR map with text keys; only the keys are read.
+type KeySetV1 = BTreeMap<String, ciborium::Value>;
 
 /// The Local runner: one fresh process per run.
 #[derive(Debug)]
@@ -410,8 +384,14 @@ fn exit_status(
     loop {
         match child.try_wait() {
             Ok(Some(status)) => return Ok(status),
-            Ok(None) if Instant::now() < deadline => thread::sleep(EXIT_POLL_INTERVAL),
-            Ok(None) | Err(_) => return Err(NonInterferenceNonExecutedCauseV1::Unavailable),
+            Ok(None) => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Err(NonInterferenceNonExecutedCauseV1::Unavailable);
+                }
+                thread::sleep(EXIT_POLL_INTERVAL.min(remaining));
+            }
+            Err(_) => return Err(NonInterferenceNonExecutedCauseV1::Unavailable),
         }
     }
 }
@@ -428,7 +408,7 @@ fn decode<T: serde::de::DeserializeOwned>(
 ) -> Result<T, NonInterferenceNonExecutedCauseV1> {
     ciborium::from_reader::<T, _>(bytes).map_err(|_| {
         let unknown = |keys: &KeySetV1, declared: &[&str]| {
-            keys.0.iter().any(|key| !declared.contains(&key.as_str()))
+            keys.keys().any(|key| !declared.contains(&key.as_str()))
         };
         let top =
             ciborium::from_reader::<KeySetV1, _>(bytes).is_ok_and(|keys| unknown(&keys, fields));
