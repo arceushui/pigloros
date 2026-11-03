@@ -39,8 +39,10 @@ fn inspect_overrides(
     executable: std::io::Result<PathBuf>,
     query: &mut dyn FnMut(bool, bool, &[u16], &[u16]) -> WIN32_ERROR,
 ) -> Result<(), BridgeError> {
-    if environment.any(|name| is_override(&name)) {
-        return Err(BridgeError::Unavailable(UnavailableCode::OverridePresent));
+    for name in environment {
+        if is_override(&name) {
+            return Err(BridgeError::Unavailable(UnavailableCode::OverridePresent));
+        }
     }
     let executable = executable
         .map_err(|_| unavailable())?
