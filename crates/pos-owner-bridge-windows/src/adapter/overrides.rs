@@ -16,6 +16,8 @@ const POLICIES: [&str; 5] = [
     "ChannelSearchKind",
 ];
 
+type PolicyQuery<'a> = dyn FnMut(bool, bool, &[u16], &[u16]) -> WIN32_ERROR + 'a;
+
 /// Refuse environment or policy-registry overrides before creating `WebView2`.
 ///
 /// Both registry views and both OS-user/machine policy hives are checked for
@@ -37,7 +39,7 @@ pub fn refuse_overrides() -> Result<(), BridgeError> {
 fn inspect_overrides(
     environment: &mut dyn Iterator<Item = OsString>,
     executable: std::io::Result<PathBuf>,
-    query: &mut dyn FnMut(bool, bool, &[u16], &[u16]) -> WIN32_ERROR,
+    query: &mut PolicyQuery<'_>,
 ) -> Result<(), BridgeError> {
     for name in environment {
         if is_override(&name) {
