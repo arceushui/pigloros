@@ -151,9 +151,9 @@ pub(super) fn verify(f: &Fixture) -> TestResult {
                 // be read and a validated replacement marker must be produced.
                 let observed = fault.calls.borrow();
                 for file in &f.files {
-                    assert!(observed
-                        .iter()
-                        .any(|op| op.kind == "read" && op.path == f.runtime.join(file.path)));
+                    let expected = f.runtime.join(file.path).canonicalize()?;
+                    assert!(observed.iter().any(|op| op.kind == "read" && op.path == expected),
+                        "cache failure {operation:?}, state {state} did not fully hash {expected:?}");
                 }
                 assert_eq!(std::fs::read(f.marker())?, canonical);
             }
