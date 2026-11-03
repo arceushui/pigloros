@@ -374,6 +374,39 @@ def assert_owner_windows_lane(workflow: dict, native: dict) -> None:
     for candidate in job["steps"]:
         if "continue-on-error" in candidate:
             raise AssertionError("native validation cannot ignore a failing step")
+    steps = {step.get("name"): step for step in job["steps"]}
+    changed = steps.get("Enforce both changed-line Windows coverage floors", {})
+    base = "${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || " \
+        "github.event_name == 'push' && github.event.before || 'origin/main' }}"
+    if changed.get("env", {}).get("COVERAGE_BASE") != base:
+        raise AssertionError("changed-line coverage must use the actual PR or push base")
+    if changed.get("working-directory") != "crates/pos-owner-bridge-windows" or changed.get("run") != (
+        'covgate check "$env:RUNNER_TEMP/owner-windows-coverage.json" '
+        '--base "$env:COVERAGE_BASE" --no-github-summary'
+    ):
+        raise AssertionError("changed-line coverage must enforce both nested shim floors")
+    full = steps.get("Enforce both full-file Windows coverage floors", {})
+    if full.get("if") != "${{ !cancelled() && steps.coverage.outcome == 'success' }}":
+        raise AssertionError("full-file coverage must run after a successful producer even if covgate fails")
+    run = full.get("run", "")
+    commands = [line for line in run.splitlines() if line.startswith("cargo llvm-cov report ")]
+    expected = [
+        'cargo llvm-cov report -p pos-owner-bridge-windows --all-features --locked --json '
+        f'--output-path "$env:RUNNER_TEMP/owner-windows-{scope}-full.json" '
+        f'--ignore-filename-regex "${scope}" --fail-under-lines {lines} --fail-under-regions {regions}'
+        for scope, lines, regions in (("safe", 99, 99), ("ffi", 95, 80))
+    ]
+    if commands != expected:
+        raise AssertionError("full-file coverage must enforce both approved scope floors")
+    for proof in (
+        '--report "$report" --list-report',
+        '$safe = $metadata | python scripts/owner_bridge_windows_cov_ignore.py --report "$report" --scope safe',
+        '$ffi = $metadata | python scripts/owner_bridge_windows_cov_ignore.py --report "$report" --scope ffi',
+        '$safeResult = $LASTEXITCODE', '$ffiResult = $LASTEXITCODE',
+        "if ($safeResult -ne 0 -or $ffiResult -ne 0) { throw 'Full-file Windows coverage floor failed' }",
+    ):
+        if proof not in run:
+            raise AssertionError("full-file scopes must prove source membership and preserve both exit statuses")
 
 
 def excluded(path: str, patterns: list[str]) -> bool:
@@ -754,6 +787,35 @@ class CiWorkflowPolicyTests(unittest.TestCase):
                         check=False,
                     )
                     self.assertEqual(actual.returncode == 0, result == expected)
+
+    def test_windows_full_file_coverage_rejects_weakened_or_missing_scopes(self) -> None:
+        workflow = load_workflow(CI_WORKFLOW_PATH)
+        native = load_workflow(ROOT / ".github/workflows/owner-bridge-windows.yml")
+        name = "Enforce both full-file Windows coverage floors"
+        for before, after in (
+            ("--fail-under-lines 99", "--fail-under-lines 98"),
+            ("--fail-under-regions 99", "--fail-under-regions 98"),
+            ("--fail-under-lines 95", "--fail-under-lines 94"),
+            ("--fail-under-regions 80", "--fail-under-regions 79"),
+            ("--scope safe", "--scope ffi"),
+            ("--list-report", "--scope all"),
+            ("$ffiResult = $LASTEXITCODE", "$ffiResult = 0"),
+        ):
+            mutated = copy.deepcopy(native)
+            step = next(s for s in mutated["jobs"]["owner-bridge-windows"]["steps"] if s.get("name") == name)
+            step["run"] = step["run"].replace(before, after)
+            with self.subTest(before=before), self.assertRaises(AssertionError):
+                assert_owner_windows_lane(workflow, mutated)
+        for replacement in (None, "${{ success() }}"):
+            mutated = copy.deepcopy(native)
+            steps = mutated["jobs"]["owner-bridge-windows"]["steps"]
+            step = next(s for s in steps if s.get("name") == name)
+            if replacement is None:
+                steps.remove(step)
+            else:
+                step["if"] = replacement
+            with self.subTest(replacement=replacement), self.assertRaises(AssertionError):
+                assert_owner_windows_lane(workflow, mutated)
 
     def test_parallel_validation_preserves_every_required_command(self) -> None:
         assert_parallel_validation_contract(load_workflow(CI_WORKFLOW_PATH))

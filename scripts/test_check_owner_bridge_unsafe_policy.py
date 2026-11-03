@@ -1284,6 +1284,19 @@ def run_cli(extra: dict[str, str | None] | None = None) -> subprocess.CompletedP
         )
 
 
+def test_windows_case_insensitive_source_suffix_cannot_hide_code() -> None:
+    for suffix in [".RS", ".Rs", ".rS"]:
+        path = f"{SHIM}/src/ffi/bypass{suffix}"
+        require_rejected("noncanonical native Rust suffix", {path: CFG + "unsafe fn bypass() {}\n"}, [
+            f"{path}: Rust source suffix must be canonical .rs",
+            at(path, 2, f"unsafe fn is forbidden; {BLOCK_ONLY}"),
+        ])
+        path = f"crates/safe/src/bypass{suffix}"
+        require_rejected("uppercase source is still scanned", {path: FORBID + "fn bypass() { unsafe {} }\n"}, [
+            at(path, 2, RESERVED),
+        ])
+
+
 def test_forbidden_webview_authority() -> None:
     names = [
         "ExecuteScript", "ExecuteScriptWithResult", "AddScriptToExecuteOnDocumentCreated",
@@ -1337,6 +1350,7 @@ def main() -> None:
     test_manifests()
     test_cli()
     test_forbidden_webview_authority()
+    test_windows_case_insensitive_source_suffix_cannot_hide_code()
     test_hardening()
     test_symlinks()
     test_hosted_liveness()

@@ -43,20 +43,42 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $metadata = cargo metadata --locked --no-deps --format-version 1
           if ($LASTEXITCODE -ne 0) { throw 'Cargo metadata failed' }
+          $metadata | Set-Content -Encoding utf8 "$env:RUNNER_TEMP/owner-windows-metadata.json"
           $ignore = $metadata | python scripts/owner_bridge_windows_cov_ignore.py
           if ($LASTEXITCODE -ne 0 -or -not $ignore) { throw 'Unsafe coverage scope' }
           cargo llvm-cov -p pos-owner-bridge-windows --all-features --locked --json --output-path "$env:RUNNER_TEMP/owner-windows-coverage.json" --ignore-filename-regex "$ignore" -- --include-ignored
           if ($LASTEXITCODE -ne 0) { throw 'Native coverage execution failed' }
-      - name: Enforce both Windows coverage floors
+      - name: Enforce both changed-line Windows coverage floors
         shell: pwsh
         env:
-          COVERAGE_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || 'origin/main' }}
+          COVERAGE_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'push' && github.event.before || 'origin/main' }}
         working-directory: crates/pos-owner-bridge-windows
         run: covgate check "$env:RUNNER_TEMP/owner-windows-coverage.json" --base "$env:COVERAGE_BASE" --no-github-summary
+      - name: Enforce both full-file Windows coverage floors
+        if: ${{ !cancelled() && steps.coverage.outcome == 'success' }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $metadata = Get-Content -Raw "$env:RUNNER_TEMP/owner-windows-metadata.json"
+          $report = "$env:RUNNER_TEMP/owner-windows-coverage.json"
+          $metadata | python scripts/owner_bridge_windows_cov_ignore.py --report "$report" --list-report
+          if ($LASTEXITCODE -ne 0) { throw 'Coverage source scope is invalid' }
+          $safe = $metadata | python scripts/owner_bridge_windows_cov_ignore.py --report "$report" --scope safe
+          if ($LASTEXITCODE -ne 0 -or -not $safe) { throw 'Unsafe full-file safe scope' }
+          $ffi = $metadata | python scripts/owner_bridge_windows_cov_ignore.py --report "$report" --scope ffi
+          if ($LASTEXITCODE -ne 0 -or -not $ffi) { throw 'Unsafe full-file ffi scope' }
+          cargo llvm-cov report -p pos-owner-bridge-windows --all-features --locked --json --output-path "$env:RUNNER_TEMP/owner-windows-safe-full.json" --ignore-filename-regex "$safe" --fail-under-lines 99 --fail-under-regions 99
+          $safeResult = $LASTEXITCODE
+          cargo llvm-cov report -p pos-owner-bridge-windows --all-features --locked --json --output-path "$env:RUNNER_TEMP/owner-windows-ffi-full.json" --ignore-filename-regex "$ffi" --fail-under-lines 95 --fail-under-regions 80
+          $ffiResult = $LASTEXITCODE
+          if ($safeResult -ne 0 -or $ffiResult -ne 0) { throw 'Full-file Windows coverage floor failed' }
       - name: Retain the measured shim report
         if: ${{ !cancelled() && steps.coverage.outcome == 'success' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: owner-windows-coverage-${{ github.sha }}
-          path: ${{ runner.temp }}/owner-windows-coverage.json
+          path: |
+            ${{ runner.temp }}/owner-windows-coverage.json
+            ${{ runner.temp }}/owner-windows-safe-full.json
+            ${{ runner.temp }}/owner-windows-ffi-full.json
           if-no-files-found: error

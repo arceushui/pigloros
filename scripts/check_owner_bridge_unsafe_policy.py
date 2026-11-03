@@ -477,7 +477,7 @@ def _walk(directory: Path) -> tuple[tuple[Path, ...], tuple[Path, ...]]:
             dirnames[:] = [name for name in dirnames if name != "target"]
         dirnames.sort()
         links.extend(here / name for name in dirnames + filenames if (here / name).is_symlink())
-        files.extend(here / name for name in sorted(filenames) if name.endswith(".rs") and (here / name).is_file())
+        files.extend(here / name for name in sorted(filenames) if name.lower().endswith(".rs") and (here / name).is_file())
     return tuple(sorted(files)), tuple(sorted(links))
 
 
@@ -915,6 +915,8 @@ def _check_shim_sources(shim: Path, scanned_dirs: tuple[Path, ...], found: list[
     for source in _walk(shim)[0]:
         relative = source.relative_to(shim).as_posix()
         label = f"{SHIM}/{relative}"
+        if source.suffix != ".rs":
+            found.append(f"{label}: Rust source suffix must be canonical .rs")
         if relative == "build.rs":
             found.append(f"{label}: build scripts are forbidden in the shim")
             continue
