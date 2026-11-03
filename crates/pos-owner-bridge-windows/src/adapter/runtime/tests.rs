@@ -47,6 +47,7 @@ impl Fixture {
 
     fn verify(&self) -> Result<PathBuf, ()> {
         verify_installation(&self.runtime, &self.cache, &self.files, &[7; 32])
+            .map(|runtime| runtime.root)
     }
 
     fn marker(&self) -> PathBuf {

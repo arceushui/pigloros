@@ -94,7 +94,6 @@ pub fn verify_fixed_runtime(
     marker_directory: &Path,
 ) -> Result<VerifiedRuntime, BridgeError> {
     verify_installation(root, marker_directory, manifest::FILES, &manifest::DIGEST)
-        .map(|root| VerifiedRuntime { root })
         .map_err(integrity)
 }
 
@@ -103,8 +102,9 @@ fn verify_installation(
     marker_directory: &Path,
     expected: &[RuntimeFile],
     manifest_digest: &[u8; 32],
-) -> Result<PathBuf, ()> {
+) -> Result<VerifiedRuntime, ()> {
     verify_with_io(root, marker_directory, expected, manifest_digest, &OsIo)
+        .map(|root| VerifiedRuntime { root })
 }
 
 fn verify_with_io(
