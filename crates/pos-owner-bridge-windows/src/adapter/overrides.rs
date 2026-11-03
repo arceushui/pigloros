@@ -28,16 +28,16 @@ const POLICIES: [&str; 5] = [
 /// `Unavailable(InterfaceUnavailable)` when inspection cannot establish absence.
 pub fn refuse_overrides() -> Result<(), BridgeError> {
     inspect_overrides(
-        std::env::vars_os().map(|(name, _)| name),
+        &mut std::env::vars_os().map(|(name, _)| name),
         std::env::current_exe(),
-        crate::Native::query_policy,
+        &mut crate::Native::query_policy,
     )
 }
 
 fn inspect_overrides(
-    mut environment: impl Iterator<Item = OsString>,
+    environment: &mut dyn Iterator<Item = OsString>,
     executable: std::io::Result<PathBuf>,
-    mut query: impl FnMut(bool, bool, &[u16], &[u16]) -> WIN32_ERROR,
+    query: &mut dyn FnMut(bool, bool, &[u16], &[u16]) -> WIN32_ERROR,
 ) -> Result<(), BridgeError> {
     if environment.any(|name| is_override(&name)) {
         return Err(BridgeError::Unavailable(UnavailableCode::OverridePresent));
@@ -116,17 +116,21 @@ mod tests {
 
     #[test]
     fn incomplete_executable_observation_refuses_registry_admission() {
-        let absent = |_, _, _: &[u16], _: &[u16]| ERROR_FILE_NOT_FOUND;
+        let mut absent = |_, _, _: &[u16], _: &[u16]| ERROR_FILE_NOT_FOUND;
         assert_eq!(
             inspect_overrides(
-                std::iter::empty(),
+                &mut std::iter::empty(),
                 Err(std::io::ErrorKind::PermissionDenied.into()),
-                absent
+                &mut absent
             ),
             Err(unavailable())
         );
         assert_eq!(
-            inspect_overrides(std::iter::empty(), Ok(PathBuf::from(r"C:\")), absent),
+            inspect_overrides(
+                &mut std::iter::empty(),
+                Ok(PathBuf::from(r"C:\")),
+                &mut absent
+            ),
             Err(unavailable())
         );
     }
