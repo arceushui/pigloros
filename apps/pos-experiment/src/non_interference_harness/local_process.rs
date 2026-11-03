@@ -376,23 +376,21 @@ fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>, NonInterferenceNonExecuted
         .map_err(|_| NonInterferenceNonExecutedCauseV1::Unavailable)
 }
 
-/// Wait for the process to exit until `deadline`.
+/// Wait for the process to exit until `deadline`. A failed status poll is
+/// retried like a running process, so it too ends the run as unavailable.
 fn exit_status(
     child: &mut Child,
     deadline: Instant,
 ) -> Result<ExitStatus, NonInterferenceNonExecutedCauseV1> {
     loop {
-        match child.try_wait() {
-            Ok(Some(status)) => return Ok(status),
-            Ok(None) => {
-                let remaining = deadline.saturating_duration_since(Instant::now());
-                if remaining.is_zero() {
-                    return Err(NonInterferenceNonExecutedCauseV1::Unavailable);
-                }
-                thread::sleep(EXIT_POLL_INTERVAL.min(remaining));
-            }
-            Err(_) => return Err(NonInterferenceNonExecutedCauseV1::Unavailable),
+        if let Ok(Some(status)) = child.try_wait() {
+            return Ok(status);
         }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(NonInterferenceNonExecutedCauseV1::Unavailable);
+        }
+        thread::sleep(EXIT_POLL_INTERVAL.min(remaining));
     }
 }
 
