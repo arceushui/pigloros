@@ -4,17 +4,14 @@ on:
   pull_request:
     paths:
       - .github/workflows/owner-runtime-custody.yml
+      - scripts/check_owner_runtime_custody_policy.py
+      - scripts/test_check_owner_runtime_custody_policy.py
+      - scripts/test_ci_workflow_policy.py
       - scripts/owner_bridge_runtime.py
       - scripts/test_owner_bridge_runtime.py
       - scripts/prepare-owner-runtime.ps1
       - crates/pos-owner-bridge-windows/runtime-manifest.v1
   workflow_dispatch:
-    inputs:
-      mode:
-        description: Verify the retained release or prepare the selected CAB for decider publication
-        type: choice
-        options: [Package, PrepareCustody]
-        default: Package
 
 permissions:
   contents: read
@@ -27,7 +24,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - run: python scripts/test_owner_bridge_runtime.py
+      - name: Enforce retained runtime workflow policy
+        run: python scripts/check_owner_runtime_custody_policy.py
+      - name: Test retained runtime workflow policy
+        run: python scripts/test_check_owner_runtime_custody_policy.py
+      - name: Test retained runtime manifest contract
+        run: python scripts/test_owner_bridge_runtime.py
 
   verify-runtime:
     needs: manifest-contract
@@ -41,8 +43,7 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-          RUNTIME_MODE: ${{ github.event_name == 'pull_request' && 'PrepareCustody' || inputs.mode }}
-        run: ./scripts/prepare-owner-runtime.ps1 -Mode $env:RUNTIME_MODE -OutputRoot "$env:RUNNER_TEMP/owner-runtime-evidence"
+        run: ./scripts/prepare-owner-runtime.ps1 -OutputRoot "$env:RUNNER_TEMP/owner-runtime-evidence"
       - name: Retain the verified custody candidate and public provenance
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

@@ -2,14 +2,12 @@
 .SYNOPSIS
 Verify and extract the retained ADR-110 Fixed Runtime for packaging or CI.
 .DESCRIPTION
-Package mode reads only the canonical GitHub Release. PrepareCustody fetches
-the already-selected Microsoft CAB to produce a reviewable custody candidate;
-it never publishes a release and is not an alternate build runtime source.
+Read only the canonical GitHub Release asset selected by Accepted ADR-110.
+An unavailable Release fails closed; every downloaded byte is verified before
+extraction and no alternative runtime source is selected.
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('Package', 'PrepareCustody')]
-    [string] $Mode = 'Package',
     [Parameter(Mandatory)]
     [string] $OutputRoot
 )
@@ -19,7 +17,6 @@ $ErrorActionPreference = 'Stop'
 $version = '153.0.4234.48'
 $cabName = "Microsoft.WebView2.FixedVersionRuntime.$version.x64.cab"
 $expectedHash = '11e8240cb0bc56dcd3e4498907203c251346f65107fe35a3a13e152c7d51c79e'
-$selector = "https://msedge.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/08cd33ee-d109-49b8-9301-9f0bea43c575/$cabName"
 if (Test-Path -LiteralPath $OutputRoot) {
     throw 'OutputRoot must be fresh; retained evidence must not be overwritten'
 }
@@ -27,12 +24,8 @@ $null = New-Item -ItemType Directory -Path $OutputRoot
 $OutputRoot = (Resolve-Path -LiteralPath $OutputRoot).Path
 $cab = Join-Path $OutputRoot $cabName
 
-if ($Mode -eq 'PrepareCustody') {
-    Invoke-WebRequest -Uri $selector -OutFile $cab
-} else {
-    & gh release download "owner-bridge-runtime-$version" --repo arceushui/pigloros --pattern $cabName --dir $OutputRoot
-    if ($LASTEXITCODE -ne 0) { throw 'The retained runtime release is unavailable' }
-}
+& gh release download "owner-bridge-runtime-$version" --repo arceushui/pigloros --pattern $cabName --dir $OutputRoot
+if ($LASTEXITCODE -ne 0) { throw 'The retained runtime release is unavailable' }
 if ((Get-FileHash -LiteralPath $cab -Algorithm SHA256).Hash.ToLowerInvariant() -cne $expectedHash) {
     throw 'CAB digest differs from Accepted ADR-110'
 }
@@ -84,8 +77,8 @@ if ($LASTEXITCODE -ne 0) { throw 'Extracted runtime differs from the retained ma
 [ordered]@{
     runtime_version = $version
     cab_sha256 = $expectedHash
-    mode = $Mode
-    source = if ($Mode -eq 'Package') { "https://github.com/arceushui/pigloros/releases/tag/owner-bridge-runtime-$version" } else { $selector }
+    mode = 'Package'
+    source = "https://github.com/arceushui/pigloros/releases/tag/owner-bridge-runtime-$version"
     commit = $env:GITHUB_SHA
     windows_build = [System.Environment]::OSVersion.Version.ToString()
     signatures = $signatures
