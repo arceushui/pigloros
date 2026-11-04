@@ -1,205 +1,256 @@
-# Diff-scoped mutation testing keeps new or changed logic covered without
-# turning the normal pull-request suite into a full-workspace mutation run.
 name: mutation
-
-on:
-  workflow_call:
-  workflow_dispatch:
-
+'on':
+  workflow_dispatch: null
 permissions:
   contents: read
-
+  actions: read
 concurrency:
-  group: mutation-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
-
-# Installing nightly alone does not override the repository's stable pin.
-# Baseline and mutant subprocesses must select the same libtest harness.
+  group: asan-capacity-${{ github.ref }}
+  cancel-in-progress: false
 env:
-  # Match ASan's nightly to avoid a reported Bevy solver memory regression.
-  # https://github.com/rust-lang/rust/issues/161748
-  RUSTUP_TOOLCHAIN: nightly-2026-07-01
-  CARGO_PROFILE_TEST_DEBUG: line-tables-only
-  # Each mutation runner uses one worker with one compiler job.
-  CARGO_BUILD_JOBS: "1"
-
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
 jobs:
-  mutation-changes:
-    name: detect mutation-relevant changes
+  asan-capacity-probe:
+    name: ASan capacity diagnostic (${{ matrix.case }})
     runs-on: ubuntu-24.04
-    outputs:
-      relevant: ${{ steps.changes.outputs.relevant }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-      - id: changes
-        name: Classify changed paths
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-          FORCE_MUTATION: ${{ github.event_name == 'workflow_dispatch' }}
-        run: |
-          set -euo pipefail
-          relevant=false
-          if [[ "$FORCE_MUTATION" = true ]]; then
-            relevant=true
-          else
-            while IFS= read -r path; do
-              case "$path" in
-                *.rs|Cargo.toml|*/Cargo.toml|Cargo.lock|rust-toolchain.toml|fixtures/conformance/*|.github/workflows/mutation.yml|scripts/test_mutation_workflow_policy.py)
-                  relevant=true
-                  break
-                  ;;
-              esac
-            done < <(git diff --name-only --diff-filter=ACMRT "$BASE_SHA...$HEAD_SHA")
-          fi
-          echo "relevant=$relevant" >> "$GITHUB_OUTPUT"
-
-  mutation-baseline:
-    name: mutation test baseline
-    needs: mutation-changes
-    if: needs.mutation-changes.outputs.relevant == 'true'
-    runs-on: ubuntu-24.04
-    # The baseline builds one workspace with three compiler jobs;
-    # mutant workers retain the single-job workflow default above.
-    env:
-      CARGO_BUILD_JOBS: "3"
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
-        with:
-          toolchain: ${{ env.RUSTUP_TOOLCHAIN }}
-      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
-        with:
-          shared-key: mutation
-      # The stable core suite does not prove nightly-only libtest arguments.
-      # Prove them once on the full unmutated workspace before any shard starts.
-      - name: Prove the mutation test harness
-        # rust-cache exports 0; step scope keeps baseline and mutant builds aligned.
-        env:
-          CARGO_INCREMENTAL: "1"
-        run: |
-          set -euo pipefail
-          cargo test --workspace --all-features --locked -- \
-            -Zunstable-options --fail-fast --include-ignored --test-threads=4 \
-            2>&1 | tee "${RUNNER_TEMP}/mutation-baseline.log"
-          bash scripts/assert-no-ignored-in-test-summary.sh "${RUNNER_TEMP}/mutation-baseline.log"
-      - name: Upload mutation baseline log
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: mutation-baseline
-          path: ${{ runner.temp }}/mutation-baseline.log
-          if-no-files-found: error
-
-  mutation:
-    name: diff mutation testing (shard ${{ matrix.shard }})
-    needs: [mutation-changes, mutation-baseline]
-    if: needs.mutation-changes.outputs.relevant == 'true' && needs.mutation-baseline.result == 'success'
-    runs-on: ubuntu-24.04
-    # The shell watchdog below exits with diagnostics before this outer limit.
-    timeout-minutes: 70
+    timeout-minutes: 60
     strategy:
       fail-fast: false
-      max-parallel: 8
+      max-parallel: 2
       matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+        include:
+        - case: cached
+          cache_targets: 'true'
+        - case: registry-only
+          cache_targets: 'false'
+    env:
+      CAPACITY_CASE: ${{ matrix.case }}
+      PROBE_CHECKOUT: 772854501e747d6ef5b09f83785250df98d0f85e
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
-        with:
-          toolchain: ${{ env.RUSTUP_TOOLCHAIN }}
-      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
-        with:
-          shared-key: mutation
-      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
-        with:
-          tool: cargo-mutants@27.1.0
-      - name: Capture pull-request diff
-        run: |
-          set -euo pipefail
-          base_ref="${{ github.event.pull_request.base.ref || github.event.repository.default_branch }}"
-          git diff --relative --unified=0 \
-            "origin/${base_ref}...HEAD" \
-            > "${RUNNER_TEMP}/changes.diff"
-      # The shared baseline proves the workspace harness. Each worker also
-      # proves its own unmutated scratch copy before reporting caught mutants.
-      # Each mutant retains the owning-package test selection used on main;
-      # One worker retains four harness threads without competing with another
-      # owning-package suite or compiler on this runner. Sixteen shards retain
-      # the full selection and unchanged watchdogs; at most eight run together.
-      - name: Run mutants in changed lines
-        # Reuse each worker's compiler state instead of rebuilding every edit.
-        env:
-          CARGO_INCREMENTAL: "1"
-        run: |
-          set -euo pipefail
-          set +e
-          # Each worker has an isolated target directory. A changed
-          # world-client fixture can cold-build Bevy and WASM dependencies;
-          # the build allowance stays separate from the per-test timeout.
-          timeout --foreground 60m cargo mutants \
-            --workspace \
-            --all-features \
-            --in-diff "${{ runner.temp }}/changes.diff" \
-            --no-shuffle \
-            --shard "${{ matrix.shard }}/16" \
-            --baseline run \
-            --jobs 1 \
-            --timeout 120 \
-            --build-timeout 600 \
-            --cap-lints true \
-            --cargo-arg=--locked \
-            -- \
-            -- \
-            -Zunstable-options \
-            --fail-fast \
-            --include-ignored \
-            --test-threads=4
-          mutation_status=$?
-          set -e
-          if [[ "$mutation_status" -eq 124 ]]; then
-            echo "Mutation shard watchdog timed out after 60 minutes."
-            latest_log=""
-            if [[ -d mutants.out ]]; then
-              # Consume the whole listing: head can SIGPIPE sort under pipefail,
-              # hiding both the latest log and the original timeout status.
-              latest_log="$(find mutants.out -type f -name '*.log' -printf '%T@ %p\n' \
-                | sort -nr | sed -n '1p' | cut -d' ' -f2-)"
-            fi
-            if [[ -n "$latest_log" ]]; then
-              echo "Most recent mutant log: $latest_log"
-              tail -n 120 "$latest_log"
-            fi
-          fi
-          exit "$mutation_status"
-      - name: Upload mutation report
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: mutation-report-shard-${{ matrix.shard }}
-          path: mutants.out
-          if-no-files-found: ignore
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        ref: 772854501e747d6ef5b09f83785250df98d0f85e
+        persist-credentials: false
+    - name: Prepare bounded capacity monitor
+      run: |
+        cat > "${RUNNER_TEMP}/asan-capacity-probe.py" <<'PY'
+        """Hosted diagnostic only. Never run this Cargo-producing monitor locally."""
+        import datetime
+        import json
+        import os
+        from pathlib import Path
+        import signal
+        import stat
+        import subprocess
+        import sys
+        import time
 
-  mutation-gate:
-    # The caller waits on this fan-in before starting ASan. Individual shards
-    # must never be configured as independent merge approvals.
-    name: diff mutation testing
-    if: always()
-    needs: [mutation-changes, mutation-baseline, mutation]
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Require every relevant mutation shard to pass
-        run: |
-          test "${{ needs.mutation-changes.result }}" = success
-          if [[ "${{ needs.mutation-changes.outputs.relevant }}" = true ]]; then
-            test "${{ needs.mutation-baseline.result }}" = success
-            test "${{ needs.mutation.result }}" = success
-          else
-            test "${{ needs.mutation-baseline.result }}" = skipped
-            test "${{ needs.mutation.result }}" = skipped
+        WORKSPACE = Path(os.environ["GITHUB_WORKSPACE"])
+        TEMP = Path(os.environ["RUNNER_TEMP"])
+        RECORD = TEMP / "asan-capacity-evidence"
+        RECORD.mkdir(exist_ok=True)
+        REPORT = RECORD / "capacity.json"
+        MIN_FREE = 8 * 1024 ** 3
+
+
+        def load():
+            return json.loads(REPORT.read_text()) if REPORT.exists() else {
+                "case": os.environ["CAPACITY_CASE"], "checkout": os.environ["PROBE_CHECKOUT"],
+                "guard_bytes": MIN_FREE, "phases": [], "samples": [],
+            }
+
+
+        def save(report):
+            REPORT.write_text(json.dumps(report, indent=2) + "\n")
+
+
+        def capacity():
+            rows = []
+            for path in (Path("/"), WORKSPACE, TEMP, Path("/mnt")):
+                try:
+                    info = path.stat()
+                    fs = os.statvfs(path)
+                    rows.append({"path": str(path), "device": info.st_dev,
+                                 "total_bytes": fs.f_blocks * fs.f_frsize,
+                                 "available_bytes": fs.f_bavail * fs.f_frsize,
+                                 "total_inodes": fs.f_files, "available_inodes": fs.f_favail})
+                except OSError as error:
+                    rows.append({"path": str(path), "error_type": type(error).__name__})
+            archive = TEMP / "asan-tests.tar.zst"
+            return {"at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "volumes": rows,
+                    "archive_bytes": archive.stat().st_size if archive.exists() else 0}
+
+
+        def footprint():
+            rows = []
+            paths = [WORKSPACE / "target", Path.home() / ".cargo", Path.home() / ".rustup",
+                     Path("/usr/local/.ghcup"), Path("/opt/ghc"), Path("/usr/local/swift"),
+                     Path("/opt/hostedtoolcache/CodeQL"), Path("/usr/local/lib/android/sdk"),
+                     Path("/usr/share/dotnet/sdk")]
+            for path in paths:
+                if not path.exists():
+                    rows.append({"path": str(path), "absent": True})
+                    continue
+                result = subprocess.run(["du", "-sx", "-B1", "--", str(path)],
+                                        text=True, capture_output=True, timeout=45, check=False)
+                first = result.stdout.split(None, 1)
+                rows.append({"path": str(path), "allocated_bytes": int(first[0]) if first else None,
+                             "measurement_status": result.returncode})
+            target = WORKSPACE / "target"
+            totals = {}
+            largest = []
+            seen = set()
+            for directory, _, names in os.walk(target, followlinks=False):
+                for name in names:
+                    path = Path(directory) / name
+                    try:
+                        info = path.lstat()
+                    except OSError:
+                        continue
+                    identity = (info.st_dev, info.st_ino)
+                    if not stat.S_ISREG(info.st_mode) or identity in seen:
+                        continue
+                    seen.add(identity)
+                    suffix = path.suffix or "<no-extension>"
+                    row = totals.setdefault(suffix, {"files": 0, "allocated_bytes": 0, "logical_bytes": 0})
+                    row["files"] += 1
+                    row["allocated_bytes"] += info.st_blocks * 512
+                    row["logical_bytes"] += info.st_size
+                    largest.append({"path": str(path.relative_to(WORKSPACE)),
+                                    "allocated_bytes": info.st_blocks * 512, "logical_bytes": info.st_size})
+            largest.sort(key=lambda row: row["allocated_bytes"], reverse=True)
+            return {"directories": rows, "target_by_suffix": totals, "largest_target_files": largest[:30]}
+
+
+        if sys.argv[1] == "snapshot":
+            report = load()
+            report["phases"].append({"phase": sys.argv[2], **capacity(), **footprint(),
+                                     "cache_hit": os.environ.get("CACHE_HIT")})
+            save(report)
+            print(json.dumps({"phase": sys.argv[2], "report": str(REPORT)}), flush=True)
+            raise SystemExit(0)
+
+        assert sys.argv[1] == "build"
+        report = load()
+        argv = ["cargo", "+nightly-2026-07-01", "nextest", "archive", "--workspace", "--all-features",
+                "--locked", "-Z", "build-std", "--target", "x86_64-unknown-linux-gnu", "--tests",
+                "--archive-file", str(TEMP / "asan-tests.tar.zst")]
+        report["argv"] = argv
+        report["phases"].append({"phase": "before-build", **capacity()})
+        save(report)
+        child = subprocess.Popen(argv, cwd=WORKSPACE,
+                                 env={**os.environ, "RUSTFLAGS": "-Z sanitizer=address"},
+                                 start_new_session=True)
+        started = time.monotonic()
+        last_recorded = -100.0
+        guarded = False
+        while child.poll() is None:
+            sample = capacity()
+            guarded_volumes = [row for row in sample["volumes"]
+                               if row["path"] != "/mnt" and "available_bytes" in row]
+            assert guarded_volumes
+            if min(row["available_bytes"] for row in guarded_volumes) < MIN_FREE:
+                report["guard_sample"] = sample
+                guarded = True
+                # Stop only this diagnostic's Cargo process group before worker log loss.
+                os.killpg(child.pid, signal.SIGKILL)
+                child.wait(timeout=15)
+                break
+            elapsed = time.monotonic() - started
+            if elapsed - last_recorded >= 15:
+                report["samples"].append(sample)
+                report["samples"] = report["samples"][-256:]
+                save(report)
+                last_recorded = elapsed
+            if elapsed > 55 * 60:
+                os.killpg(child.pid, signal.SIGKILL)
+                child.wait(timeout=15)
+                report["time_guard"] = True
+                break
+            time.sleep(1)
+
+        report["returncode"] = child.wait(timeout=15)
+        report["outcome"] = "capacity-guard" if guarded else "build-finished"
+        report["serial_link_lock_present"] = (TEMP / "asan-link.lock").is_file()
+        report["phases"].append({"phase": "after-build", **capacity(), **footprint()})
+        save(report)
+        print(json.dumps({"outcome": report["outcome"], "returncode": report["returncode"],
+                          "archive_bytes": report["phases"][-1]["archive_bytes"]}), flush=True)
+        if guarded:
+            raise SystemExit(97)
+        if report.get("time_guard"):
+            raise SystemExit(124)
+        assert report["serial_link_lock_present"]
+        raise SystemExit(report["returncode"])
+
+        PY
+        python3 "${RUNNER_TEMP}/asan-capacity-probe.py" snapshot before-setup
+    - name: Reclaim unused SDK headroom
+      if: ${{ runner.environment == 'github-hosted' && runner.os == 'Linux' }}
+      run: |
+        set -euo pipefail
+        printf 'CI SDK headroom before (bytes)\n'
+        df -B1 -- / "${GITHUB_WORKSPACE}" "${RUNNER_TEMP}"
+        printf 'CI SDK headroom before (inodes)\n'
+        df -i -- / "${GITHUB_WORKSPACE}" "${RUNNER_TEMP}"
+        ci_root_device="$(stat -c '%d' -- /)"
+        for ci_sdk_path in /usr/local/lib/android/sdk /usr/share/dotnet/sdk; do
+          if [[ ! -e "${ci_sdk_path}" && ! -L "${ci_sdk_path}" ]]; then
+            printf 'CI SDK absent: %s\n' "${ci_sdk_path}"
+            continue
           fi
+          printf 'CI SDK candidate: %s\n' "${ci_sdk_path}"
+          test -d "${ci_sdk_path}"
+          test ! -L "${ci_sdk_path}"
+          test "$(readlink -e -- "${ci_sdk_path}")" = "${ci_sdk_path}"
+          ci_sdk_device="$(stat -c '%d' -- "${ci_sdk_path}")"
+          printf 'CI SDK device: %s root=%s sdk=%s\n' "${ci_sdk_path}" "${ci_root_device}" "${ci_sdk_device}"
+          test "${ci_sdk_device}" = "${ci_root_device}"
+          sudo du -sx -B1 -- "${ci_sdk_path}"
+          sudo rm -rf --one-file-system -- "${ci_sdk_path}"
+          printf 'CI SDK removed: %s\n' "${ci_sdk_path}"
+        done
+        printf 'CI SDK headroom after (bytes)\n'
+        df -B1 -- / "${GITHUB_WORKSPACE}" "${RUNNER_TEMP}"
+        printf 'CI SDK headroom after (inodes)\n'
+        df -i -- / "${GITHUB_WORKSPACE}" "${RUNNER_TEMP}"
+    - run: rm -f rust-toolchain.toml
+    - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
+      with:
+        toolchain: nightly-2026-07-01
+        components: rust-src
+    - name: Install cargo-nextest for the ASan archive
+      uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29
+      with:
+        tool: cargo-nextest@0.9.146
+        fallback: none
+    - name: Measure before cache restore
+      run: python3 "${RUNNER_TEMP}/asan-capacity-probe.py" snapshot before-cache
+    - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16
+      with:
+        shared-key: asan-nightly-2026-07-01
+        save-if: 'false'
+        cache-targets: ${{ matrix.cache_targets }}
+      id: cache
+    - name: Measure after cache restore
+      env:
+        CACHE_HIT: ${{ steps.cache.outputs['cache-hit'] }}
+      run: python3 "${RUNNER_TEMP}/asan-capacity-probe.py" snapshot after-cache
+    - name: Build the same ASan archive with an early capacity guard
+      env:
+        RUSTC_BOOTSTRAP: '1'
+        CARGO_BUILD_JOBS: '4'
+        CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: ${{ github.workspace }}/scripts/asan/serial-link.sh
+        CARGO_INCREMENTAL: '0'
+        CARGO_PROFILE_TEST_DEBUG: line-tables-only
+      run: python3 "${RUNNER_TEMP}/asan-capacity-probe.py" build
+    - name: Upload bounded numeric capacity report only
+      if: ${{ always() }}
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: asan-capacity-${{ matrix.case }}
+        path: ${{ runner.temp }}/asan-capacity-evidence/capacity.json
+        if-no-files-found: error
+        retention-days: 3
