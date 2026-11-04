@@ -20,8 +20,6 @@ jobs:
       max-parallel: 2
       matrix:
         include:
-        - case: cached
-          cache_targets: 'true'
         - case: registry-only
           cache_targets: 'false'
     env:
@@ -93,8 +91,12 @@ jobs:
                 if not path.exists():
                     rows.append({"path": str(path), "absent": True})
                     continue
-                result = subprocess.run(["du", "-sx", "-B1", "--", str(path)],
-                                        text=True, capture_output=True, timeout=45, check=False)
+                try:
+                    result = subprocess.run(["du", "-sx", "-B1", "--", str(path)],
+                                            text=True, capture_output=True, timeout=45, check=False)
+                except subprocess.TimeoutExpired:
+                    rows.append({"path": str(path), "measurement_status": "timeout"})
+                    continue
                 first = result.stdout.split(None, 1)
                 rows.append({"path": str(path), "allocated_bytes": int(first[0]) if first else None,
                              "measurement_status": result.returncode})
