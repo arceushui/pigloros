@@ -98,7 +98,7 @@ class AsanCiPolicyTests(unittest.TestCase):
             for kind, command in (("bytes", "df -B1"), ("inodes", "df -i")):
                 with self.subTest(phase=phase, kind=kind):
                     receipt = (
-                        f"printf 'ASan SDK headroom {phase} ({kind})\\n'\n"
+                        f"printf 'CI SDK headroom {phase} ({kind})\\n'\n"
                         f'{command} -- / "${{GITHUB_WORKSPACE}}" "${{RUNNER_TEMP}}"\n'
                     )
                     self.assertIn(receipt, self.headroom_step(self.workflow)["run"])
@@ -112,14 +112,14 @@ class AsanCiPolicyTests(unittest.TestCase):
     def test_sdk_headroom_requires_guards_and_sdk_receipts(self) -> None:
         protected_lines = (
             "set -euo pipefail\n",
-            '  if [[ ! -e "${asan_sdk_path}" && ! -L "${asan_sdk_path}" ]]; then\n',
-            '    printf \'ASan SDK absent: %s\\n\' "${asan_sdk_path}"\n',
-            '  test -d "${asan_sdk_path}"\n',
-            '  test ! -L "${asan_sdk_path}"\n',
-            '  test "$(readlink -e -- "${asan_sdk_path}")" = "${asan_sdk_path}"\n',
-            '  test "${asan_sdk_device}" = "${asan_root_device}"\n',
-            '  sudo du -sx -B1 -- "${asan_sdk_path}"\n',
-            '  printf \'ASan SDK removed: %s\\n\' "${asan_sdk_path}"\n',
+            '  if [[ ! -e "${ci_sdk_path}" && ! -L "${ci_sdk_path}" ]]; then\n',
+            '    printf \'CI SDK absent: %s\\n\' "${ci_sdk_path}"\n',
+            '  test -d "${ci_sdk_path}"\n',
+            '  test ! -L "${ci_sdk_path}"\n',
+            '  test "$(readlink -e -- "${ci_sdk_path}")" = "${ci_sdk_path}"\n',
+            '  test "${ci_sdk_device}" = "${ci_root_device}"\n',
+            '  sudo du -sx -B1 -- "${ci_sdk_path}"\n',
+            '  printf \'CI SDK removed: %s\\n\' "${ci_sdk_path}"\n',
         )
         for line in protected_lines:
             with self.subTest(line=line):
@@ -924,7 +924,7 @@ class AsanCiPolicyTests(unittest.TestCase):
         return next(
             step
             for step in workflow["jobs"]["asan"]["steps"]
-            if step.get("name") == "Reclaim unused SDK headroom for ASan"
+            if step.get("name") == "Reclaim unused SDK headroom"
         )
 
     @staticmethod

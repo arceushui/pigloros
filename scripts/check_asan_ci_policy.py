@@ -218,33 +218,33 @@ EXPECTED_GATE_JOB = {
     ],
 }
 EXPECTED_SDK_HEADROOM_STEP = {
-    "name": "Reclaim unused SDK headroom for ASan",
+    "name": "Reclaim unused SDK headroom",
     "if": "${{ runner.environment == 'github-hosted' && runner.os == 'Linux' }}",
     "run": """set -euo pipefail
-printf 'ASan SDK headroom before (bytes)\\n'
+printf 'CI SDK headroom before (bytes)\\n'
 df -B1 -- / "${GITHUB_WORKSPACE}" "${RUNNER_TEMP}"
-printf 'ASan SDK headroom before (inodes)\\n'
+printf 'CI SDK headroom before (inodes)\\n'
 df -i -- / "${GITHUB_WORKSPACE}" "${RUNNER_TEMP}"
-asan_root_device="$(stat -c '%d' -- /)"
-for asan_sdk_path in /usr/local/lib/android/sdk /usr/share/dotnet/sdk; do
-  if [[ ! -e "${asan_sdk_path}" && ! -L "${asan_sdk_path}" ]]; then
-    printf 'ASan SDK absent: %s\\n' "${asan_sdk_path}"
+ci_root_device="$(stat -c '%d' -- /)"
+for ci_sdk_path in /usr/local/lib/android/sdk /usr/share/dotnet/sdk; do
+  if [[ ! -e "${ci_sdk_path}" && ! -L "${ci_sdk_path}" ]]; then
+    printf 'CI SDK absent: %s\\n' "${ci_sdk_path}"
     continue
   fi
-  printf 'ASan SDK candidate: %s\\n' "${asan_sdk_path}"
-  test -d "${asan_sdk_path}"
-  test ! -L "${asan_sdk_path}"
-  test "$(readlink -e -- "${asan_sdk_path}")" = "${asan_sdk_path}"
-  asan_sdk_device="$(stat -c '%d' -- "${asan_sdk_path}")"
-  printf 'ASan SDK device: %s root=%s sdk=%s\\n' "${asan_sdk_path}" "${asan_root_device}" "${asan_sdk_device}"
-  test "${asan_sdk_device}" = "${asan_root_device}"
-  sudo du -sx -B1 -- "${asan_sdk_path}"
-  sudo rm -rf --one-file-system -- "${asan_sdk_path}"
-  printf 'ASan SDK removed: %s\\n' "${asan_sdk_path}"
+  printf 'CI SDK candidate: %s\\n' "${ci_sdk_path}"
+  test -d "${ci_sdk_path}"
+  test ! -L "${ci_sdk_path}"
+  test "$(readlink -e -- "${ci_sdk_path}")" = "${ci_sdk_path}"
+  ci_sdk_device="$(stat -c '%d' -- "${ci_sdk_path}")"
+  printf 'CI SDK device: %s root=%s sdk=%s\\n' "${ci_sdk_path}" "${ci_root_device}" "${ci_sdk_device}"
+  test "${ci_sdk_device}" = "${ci_root_device}"
+  sudo du -sx -B1 -- "${ci_sdk_path}"
+  sudo rm -rf --one-file-system -- "${ci_sdk_path}"
+  printf 'CI SDK removed: %s\\n' "${ci_sdk_path}"
 done
-printf 'ASan SDK headroom after (bytes)\\n'
+printf 'CI SDK headroom after (bytes)\\n'
 df -B1 -- / "${GITHUB_WORKSPACE}" "${RUNNER_TEMP}"
-printf 'ASan SDK headroom after (inodes)\\n'
+printf 'CI SDK headroom after (inodes)\\n'
 df -i -- / "${GITHUB_WORKSPACE}" "${RUNNER_TEMP}"
 """,
 }
