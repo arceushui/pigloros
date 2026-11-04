@@ -17,6 +17,8 @@ import unittest
 
 import yaml
 
+import test_check_owner_runtime_custody_policy as custody_policy_tests
+
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 FILTER_PATH = ROOT / ".github" / "rust-scope.yml"
@@ -1438,6 +1440,13 @@ class StaticLauncherPolicyTests(unittest.TestCase):
                 environment["STATIC_LAUNCHER_RESULT"] = result
                 completed = subprocess.run(["bash", "-c", gate["run"]], env=environment, capture_output=True, check=False)
                 self.assertEqual(completed.returncode == 0, result == "success")
+
+
+def load_tests(loader, tests, pattern):
+    # The required central CI policy step also exercises the separately
+    # triggered custody workflow, including its producer indirection.
+    tests.addTests(loader.loadTestsFromModule(custody_policy_tests))
+    return tests
 
 
 if __name__ == "__main__":
