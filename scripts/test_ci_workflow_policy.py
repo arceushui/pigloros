@@ -18,6 +18,9 @@ import unittest
 import yaml
 
 import test_check_owner_runtime_custody_policy as custody_policy_tests
+import test_merge_owner_bridge_lcov as native_lcov_tests
+import owner_bridge_windows_workflow_policy as native_policy
+from check_owner_runtime_custody_policy import UniqueKeys
 
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -118,7 +121,7 @@ CORE_JOB_IF = (
 
 def load_patterns() -> list[str]:
     with FILTER_PATH.open(encoding="utf-8") as stream:
-        filters = yaml.safe_load(stream)
+        filters = yaml.load(stream, Loader=UniqueKeys)
     if not isinstance(filters, dict) or not isinstance(filters.get("rust"), list):
         raise AssertionError("rust-scope.yml must define a rust pattern list")
     patterns = filters["rust"]
@@ -129,7 +132,7 @@ def load_patterns() -> list[str]:
 
 def load_workflow(workflow_path: pathlib.Path) -> dict:
     with workflow_path.open(encoding="utf-8") as stream:
-        workflow = yaml.safe_load(stream)
+        workflow = yaml.load(stream, Loader=UniqueKeys)
     if not isinstance(workflow, dict):
         raise AssertionError(f"{workflow_path} must contain a mapping")
     return workflow
@@ -366,49 +369,10 @@ def assert_owner_windows_lane(workflow: dict, native: dict) -> None:
     for result in ("success", "skipped"):
         if f'test "${{OWNER_WINDOWS_RESULT}}" = {result}' not in step["run"]:
             raise AssertionError("preflight must enforce the owner Windows scope result")
-    if set(workflow_triggers(native)) != {"workflow_call", "workflow_dispatch"}:
-        raise AssertionError("native validation must not launch a duplicate PR runner")
-    if native["permissions"] != {"contents": "read"}:
-        raise AssertionError("native validation must remain read-only")
-    job = native["jobs"]["owner-bridge-windows"]
-    if job["runs-on"] != "windows-latest" or "continue-on-error" in job:
-        raise AssertionError("native Windows validation must remain blocking")
-    for candidate in job["steps"]:
-        if "continue-on-error" in candidate:
-            raise AssertionError("native validation cannot ignore a failing step")
-    steps = {step.get("name"): step for step in job["steps"]}
-    changed = steps.get("Enforce both changed-line Windows coverage floors", {})
-    base = "${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || " \
-        "github.event_name == 'push' && github.event.before || 'origin/main' }}"
-    if changed.get("env", {}).get("COVERAGE_BASE") != base:
-        raise AssertionError("changed-line coverage must use the actual PR or push base")
-    if changed.get("working-directory") != "crates/pos-owner-bridge-windows" or changed.get("run") != (
-        'covgate check "$env:RUNNER_TEMP/owner-windows-coverage.json" '
-        '--base "$env:COVERAGE_BASE" --no-github-summary'
-    ):
-        raise AssertionError("changed-line coverage must enforce both nested shim floors")
-    full = steps.get("Enforce both full-file Windows coverage floors", {})
-    if full.get("if") != "${{ !cancelled() && steps.coverage.outcome == 'success' }}":
-        raise AssertionError("full-file coverage must run after a successful producer even if covgate fails")
-    run = full.get("run", "")
-    commands = [line for line in run.splitlines() if line.startswith("cargo llvm-cov report ")]
-    expected = [
-        'cargo llvm-cov report -p pos-owner-bridge-windows --locked --json '
-        f'--output-path "$env:RUNNER_TEMP/owner-windows-{scope}-full.json" '
-        f'--ignore-filename-regex "${scope}" --fail-under-lines {lines} --fail-under-regions {regions}'
-        for scope, lines, regions in (("safe", 99, 99), ("ffi", 95, 80))
-    ]
-    if commands != expected:
-        raise AssertionError("full-file coverage must enforce both approved scope floors")
-    for proof in (
-        '--report "$report" --list-report',
-        '$safe = $metadata | python scripts/owner_bridge_windows_cov_ignore.py --report "$report" --scope safe',
-        '$ffi = $metadata | python scripts/owner_bridge_windows_cov_ignore.py --report "$report" --scope ffi',
-        '$safeResult = $LASTEXITCODE', '$ffiResult = $LASTEXITCODE',
-        "if ($safeResult -ne 0 -or $ffiResult -ne 0) { throw 'Full-file Windows coverage floor failed' }",
-    ):
-        if proof not in run:
-            raise AssertionError("full-file scopes must prove source membership and preserve both exit statuses")
+    try:
+        native_policy.check(native)
+    except native_policy.PolicyError as error:
+        raise AssertionError(str(error)) from error
 
 
 def excluded(path: str, patterns: list[str]) -> bool:
@@ -755,6 +719,52 @@ class CiWorkflowPolicyTests(unittest.TestCase):
         native = load_workflow(ROOT / ".github/workflows/owner-bridge-windows.yml")
         assert_owner_windows_lane(workflow, native)
         assert_standard_stage_runner_cap(workflow)
+
+    def test_every_native_evidence_step_is_mandatory_and_ordered(self) -> None:
+        workflow = load_workflow(CI_WORKFLOW_PATH)
+        native = load_workflow(ROOT / ".github/workflows/owner-bridge-windows.yml")
+        assert_owner_windows_lane(workflow, native)
+        steps = native["jobs"]["owner-bridge-windows"]["steps"]
+        for index, _ in enumerate(steps):
+            for action in ("remove", "skip", "ignore", "fabricate", "duplicate"):
+                changed = copy.deepcopy(native)
+                candidates = changed["jobs"]["owner-bridge-windows"]["steps"]
+                if action == "remove": candidates.pop(index)
+                elif action == "skip": candidates[index]["if"] = "false"
+                elif action == "ignore": candidates[index]["continue-on-error"] = True
+                elif action == "fabricate": candidates[index] = {"run": "echo fabricated > coverage.json"}
+                else: candidates.insert(index, copy.deepcopy(candidates[index]))
+                with self.subTest(index=index, action=action), self.assertRaises(AssertionError):
+                    assert_owner_windows_lane(workflow, changed)
+        changed = copy.deepcopy(native)
+        changed["jobs"]["owner-bridge-windows"]["steps"].reverse()
+        with self.assertRaises(AssertionError):
+            assert_owner_windows_lane(workflow, changed)
+
+    def test_native_graph_controls_types_and_producer_indirection_fail_closed(self) -> None:
+        workflow = load_workflow(CI_WORKFLOW_PATH)
+        native = load_workflow(ROOT / ".github/workflows/owner-bridge-windows.yml")
+        for mutate in (
+            lambda w: w.update(permissions={"contents": "write"}),
+            lambda w: w.update(env={"FAKE_COVERAGE": "1"}),
+            lambda w: w[True].update(pull_request_target={}),
+            lambda w: w["jobs"].update(fabricate={"runs-on": "ubuntu-latest"}),
+            lambda w: w["jobs"]["owner-bridge-windows"].update(**{"timeout-minutes": 45.0}),
+            lambda w: w["jobs"]["owner-bridge-windows"].update(**{"if": "false"}),
+            lambda w: w["jobs"]["owner-bridge-windows"]["steps"][0]["with"].update(**{"persist-credentials": 0}),
+        ):
+            changed = copy.deepcopy(native); mutate(changed)
+            with self.subTest(mutate=mutate), self.assertRaises(AssertionError):
+                assert_owner_windows_lane(workflow, changed)
+        native_policy.check_repository()
+        original = native_policy.producer_sources()
+        for name, source in original.items():
+            for changed in ("", source + "\n# unreviewed producer\n", "print('fabricated')\n"):
+                sources = dict(original, **{name: changed})
+                with self.subTest(name=name), self.assertRaises(native_policy.PolicyError):
+                    native_policy.check(native, sources)
+        with self.assertRaises(native_policy.PolicyError):
+            native_policy.check(native, {})
 
     def test_windows_owner_lane_rejects_missing_or_weakened_gates(self) -> None:
         workflow = load_workflow(CI_WORKFLOW_PATH)
@@ -1446,6 +1456,7 @@ def load_tests(loader, tests, pattern):
     # The required central CI policy step also exercises the separately
     # triggered custody workflow, including its producer indirection.
     tests.addTests(loader.loadTestsFromModule(custody_policy_tests))
+    tests.addTests(loader.loadTestsFromModule(native_lcov_tests))
     return tests
 
 

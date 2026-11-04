@@ -385,6 +385,25 @@ impl CeremonyDriver {
         self.readiness_failure(now)
     }
 
+    fn record_browser(
+        &mut self,
+        store: &mut dyn CleanupStore,
+        folder: &str,
+        identity: ProcessIdentity,
+    ) -> Result<(), BridgeError> {
+        // Retain the observed browser even when encoding or persistence fails.
+        // The record is owned only after the store's durability boundary succeeds.
+        self.identity = Some(identity);
+        cleanup_record_bytes(self.plan.ceremony_id, folder, &identity).and_then(|record| {
+            store
+                .write_record(&record)
+                .map_err(|_| CLEANUP_STORE_FAILED)
+                .map(|()| {
+                    self.record = Some(record);
+                })
+        })
+    }
+
     fn open(&mut self, env: &mut StepEnv<'_>, now: Instant) -> Step {
         if let Some(error) = self.pre_post_failure(now) {
             return self.fail(env, now, error);
@@ -402,16 +421,9 @@ impl CeremonyDriver {
                 return self.fail(env, now, error);
             }
         };
-        self.identity = Some(identity);
-        let ceremony_id = self.plan.ceremony_id;
-        let record = match cleanup_record_bytes(ceremony_id, &spec.folder_name, &identity) {
-            Ok(record) => record,
-            Err(error) => return self.fail(env, now, error),
-        };
-        if env.store.write_record(&record).is_err() {
-            return self.fail(env, now, CLEANUP_STORE_FAILED);
+        if let Err(error) = self.record_browser(env.store, &spec.folder_name, identity) {
+            return self.fail(env, now, error);
         }
-        self.record = Some(record);
         if let Err(error) = env.loopback.probe_ipv6() {
             return self.fail(env, now, error);
         }

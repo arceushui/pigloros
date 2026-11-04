@@ -72,6 +72,40 @@ jobs:
           cargo llvm-cov report -p pos-owner-bridge-windows --locked --json --output-path "$env:RUNNER_TEMP/owner-windows-ffi-full.json" --ignore-filename-regex "$ffi" --fail-under-lines 95 --fail-under-regions 80
           $ffiResult = $LASTEXITCODE
           if ($safeResult -ne 0 -or $ffiResult -ne 0) { throw 'Full-file Windows coverage floor failed' }
+      - name: Export native LCOV for cargo-crap
+        id: native-lcov
+        if: ${{ !cancelled() && steps.coverage.outcome == 'success' }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $rawMetadata = Get-Content -Raw "$env:RUNNER_TEMP/owner-windows-metadata.json"
+          $metadata = $rawMetadata | ConvertFrom-Json
+          $ignore = $rawMetadata | python scripts/owner_bridge_windows_cov_ignore.py
+          if ($LASTEXITCODE -ne 0 -or -not $ignore) { throw 'Unsafe native LCOV scope' }
+          cargo llvm-cov report -p pos-owner-bridge-windows --locked --lcov --no-default-ignore-filename-regex --ignore-filename-regex "$ignore" --output-path "$env:RUNNER_TEMP/owner-windows.lcov"
+          if ($LASTEXITCODE -ne 0) { throw 'Native LCOV export failed' }
+          $checkout = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $checkout -cne $env:GITHUB_SHA) { throw 'Native coverage checkout mismatch' }
+          $rustupRoot = rustup show home
+          if ($LASTEXITCODE -ne 0 -or -not $rustupRoot) { throw 'Rustup source root is unavailable' }
+          [ordered]@{
+            version = 1
+            checkout = $checkout
+            workspace_root = $metadata.workspace_root
+            target_directory = $metadata.target_directory
+            cargo_home = $env:CARGO_HOME
+            rustup_home = $rustupRoot
+            lcov_sha256 = (Get-FileHash -LiteralPath "$env:RUNNER_TEMP/owner-windows.lcov" -Algorithm SHA256).Hash.ToLowerInvariant()
+          } | ConvertTo-Json | Set-Content -LiteralPath "$env:RUNNER_TEMP/owner-windows-lcov-receipt.json" -Encoding utf8
+      - name: Retain native LCOV and checkout receipt
+        if: ${{ !cancelled() && steps.native-lcov.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: owner-windows-lcov-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/owner-windows.lcov
+            ${{ runner.temp }}/owner-windows-lcov-receipt.json
+          if-no-files-found: error
       - name: Retain the measured shim report
         if: ${{ !cancelled() && steps.coverage.outcome == 'success' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

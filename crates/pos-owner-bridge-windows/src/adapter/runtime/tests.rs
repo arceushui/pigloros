@@ -45,9 +45,8 @@ impl Fixture {
         })
     }
 
-    fn verify(&self) -> Result<PathBuf, ()> {
+    fn verify(&self) -> Result<VerifiedRuntime, ()> {
         verify_installation(&self.runtime, &self.cache, &self.files, &[7; 32])
-            .map(|runtime| runtime.root)
     }
 
     fn marker(&self) -> PathBuf {
@@ -87,9 +86,7 @@ impl crate::Native {
 }
 
 fn verify_identity(f: &Fixture) -> TestResult {
-    let verified = f.verify().map_err(|()| "initial runtime rejected")?;
-    assert_eq!(verified, f.runtime.canonicalize()?);
-    let proof = VerifiedRuntime { root: verified };
+    let proof = f.verify().map_err(|()| "initial runtime rejected")?;
     assert_eq!(proof.root(), f.runtime.canonicalize()?);
     assert_eq!(
         proof.browser_identity(std::process::id()),
@@ -101,17 +98,16 @@ fn verify_identity(f: &Fixture) -> TestResult {
             UnavailableCode::InterfaceUnavailable
         ))
     );
-    // Exercise the process-path admission seam independently of the
-    // install fixture. Production callers cannot construct this proof.
+    // Exercise image admission with an OS observation without minting a
+    // verified-runtime capability for the running fixture executable.
     let executable = std::env::current_exe()?.canonicalize()?;
-    let process_root = VerifiedRuntime {
-        root: executable
-            .parent()
-            .ok_or("fixture executable has no parent")?
-            .to_owned(),
-    };
     assert_eq!(
-        process_root.browser_identity(std::process::id())?,
+        admit_image(
+            executable
+                .parent()
+                .ok_or("fixture executable has no parent")?,
+            crate::Native::inspect_process_with_image(std::process::id())
+        )?,
         crate::process_identity(std::process::id())?
     );
     assert_eq!(
