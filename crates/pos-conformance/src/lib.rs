@@ -54,7 +54,7 @@ pub(crate) fn domain_digest(domain: &[u8], value: &[u8]) -> [u8; 32] {
 }
 
 pub use bundle_contract::{
-    draft_execution_profile_bytes_v1, draft_release_admission_bytes_v1,
+    archive_release_filename, draft_execution_profile_bytes_v1, draft_release_admission_bytes_v1,
     draft_trust_policy_snapshot_bytes_v1, expected_result_member_path, fixture_input_member_path,
     host_verified_execution_profile_bytes_v1, verify_archive_independently,
     verify_archive_release_filename, verify_release_tree_independently, BundleContractErrorV1,
