@@ -93,6 +93,37 @@ EXPECTED_BUILD_ENV = {
     "CARGO_INCREMENTAL": "0",
     "CARGO_PROFILE_TEST_DEBUG": "line-tables-only",
 }
+EXPECTED_SDK_HEADROOM_STEP = {
+    "name": "Reclaim unused SDK headroom",
+    "if": "${{ runner.environment == 'github-hosted' && runner.os == 'Linux' }}",
+    "run": """set -euo pipefail
+printf 'CI SDK headroom before (bytes)\\n'
+df -B1 -- / "${GITHUB_WORKSPACE}" "${RUNNER_TEMP}"
+printf 'CI SDK headroom before (inodes)\\n'
+df -i -- / "${GITHUB_WORKSPACE}" "${RUNNER_TEMP}"
+ci_root_device="$(stat -c '%d' -- /)"
+for ci_sdk_path in /usr/local/lib/android/sdk /usr/share/dotnet/sdk; do
+  if [[ ! -e "${ci_sdk_path}" && ! -L "${ci_sdk_path}" ]]; then
+    printf 'CI SDK absent: %s\\n' "${ci_sdk_path}"
+    continue
+  fi
+  printf 'CI SDK candidate: %s\\n' "${ci_sdk_path}"
+  test -d "${ci_sdk_path}"
+  test ! -L "${ci_sdk_path}"
+  test "$(readlink -e -- "${ci_sdk_path}")" = "${ci_sdk_path}"
+  ci_sdk_device="$(stat -c '%d' -- "${ci_sdk_path}")"
+  printf 'CI SDK device: %s root=%s sdk=%s\\n' "${ci_sdk_path}" "${ci_root_device}" "${ci_sdk_device}"
+  test "${ci_sdk_device}" = "${ci_root_device}"
+  sudo du -sx -B1 -- "${ci_sdk_path}"
+  sudo rm -rf --one-file-system -- "${ci_sdk_path}"
+  printf 'CI SDK removed: %s\\n' "${ci_sdk_path}"
+done
+printf 'CI SDK headroom after (bytes)\\n'
+df -B1 -- / "${GITHUB_WORKSPACE}" "${RUNNER_TEMP}"
+printf 'CI SDK headroom after (inodes)\\n'
+df -i -- / "${GITHUB_WORKSPACE}" "${RUNNER_TEMP}"
+""",
+}
 EXPECTED_BUILD_JOB = {
     "name": "asan build (nextest archive)",
     "needs": ["ci_change_scope", "cargo-crap"],
@@ -105,6 +136,7 @@ EXPECTED_BUILD_JOB = {
     "timeout-minutes": 60,
     "steps": [
         {"uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"},
+        EXPECTED_SDK_HEADROOM_STEP,
         {"run": "rm -f rust-toolchain.toml"},
         {
             "uses": "dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de",
@@ -219,6 +251,7 @@ EXPECTED_GATE_JOB = {
 }
 EXPECTED_SETUP_STEPS = [
     {"uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"},
+    EXPECTED_SDK_HEADROOM_STEP,
     {"run": "rm -f rust-toolchain.toml"},
     {
         "uses": "dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de",
@@ -352,13 +385,13 @@ def check_workflow(
 
     steps = job.get("steps")
     require(isinstance(steps, list), "ASan job steps must be a list")
-    require(len(steps) == 8, "ASan job must contain the exact trusted step sequence")
+    require(len(steps) == 9, "ASan job must contain the exact trusted step sequence")
     require(
-        steps[:6] == EXPECTED_SETUP_STEPS,
+        steps[:7] == EXPECTED_SETUP_STEPS,
         "ASan setup steps must match the exact pinned trusted sequence",
     )
     require(
-        steps[6] == EXPECTED_NEGATIVE_CONTROL_STEP,
+        steps[7] == EXPECTED_NEGATIVE_CONTROL_STEP,
         "ASan negative control must match the exact trusted step",
     )
     test_steps = [
@@ -368,7 +401,7 @@ def check_workflow(
     ]
     require(len(test_steps) == 1, "ASan job must contain exactly one named test step")
     step = test_steps[0]
-    require(step is steps[7], "ASan test must be the final trusted step")
+    require(step is steps[8], "ASan test must be the final trusted step")
     require(
         set(step) == {"name", "env", "run"},
         "ASan test step must contain exactly name, env, and run",

@@ -9,10 +9,11 @@ use pos_core::{
     Plugin,
 };
 use pos_plugin_eval::{
-    derive_eval_units, EvalDerivationConfigV1, EvalDerivationDriver, EvalDiagnosticsV1, EvalError,
-    EvalIntegrityFindingKindV1, EvalIntegrityFindingV1, EvalPlugin, OutcomeEvidenceV1,
-    OutcomePayload, PredictionPayload, DERIVED_PREDICTION_ID_PREFIX, EVENT_TYPE_OUTCOME,
-    EVENT_TYPE_PREDICTION, MIN_DRAFTS_PER_PASS,
+    derive_eval_units, map_events_to_metric_input, EvalDerivationConfigV1, EvalDerivationDriver,
+    EvalDiagnosticsV1, EvalError, EvalEvidenceV1, EvalIntegrityFindingKindV1,
+    EvalIntegrityFindingV1, EvalPlugin, MetricRecordStateV1, OutcomeEvidenceV1, OutcomePayload,
+    PredictionPayload, DERIVED_PREDICTION_ID_PREFIX, EVENT_TYPE_OUTCOME, EVENT_TYPE_PREDICTION,
+    MIN_DRAFTS_PER_PASS,
 };
 use pos_plugin_persona::{
     draft_prediction_source, PredictionOutcomeV1, EVENT_TYPE_PREDICTION_SOURCE,
@@ -96,7 +97,7 @@ fn an_eligible_source_yields_one_whole_unit_caused_by_the_source() {
     );
     assert_eq!(prediction.prediction_id, format!("eval:src:{with_outcome}"));
     assert_eq!(prediction.entity_id, entity.to_string());
-    assert!((prediction.predicted_prob - 0.75).abs() < f64::EPSILON);
+    assert_eq!(prediction.predicted_prob.to_bits(), 0.75_f64.to_bits());
     let outcome: OutcomePayload =
         ciborium::from_reader(derivation.drafts[1].payload.as_slice()).test_ok();
     assert_eq!(outcome.prediction_id, prediction.prediction_id);
@@ -406,7 +407,7 @@ fn predicted_probabilities_must_be_finite_and_within_the_closed_unit_interval() 
             "{rejected}"
         );
     }
-    for accepted in [0.0, 1.0] {
+    for accepted in [0.0, -0.0, 1.0] {
         let mut prefix = Vec::new();
         let good = commit(
             &mut prefix,
@@ -420,8 +421,43 @@ fn predicted_probabilities_must_be_finite_and_within_the_closed_unit_interval() 
         );
         let prediction: PredictionPayload =
             ciborium::from_reader(derivation.drafts[0].payload.as_slice()).test_ok();
-        assert!((prediction.predicted_prob - accepted).abs() < f64::EPSILON);
+        assert_eq!(prediction.predicted_prob.to_bits(), accepted.to_bits());
     }
+}
+
+/// ADR-062 Revision 7 open check: -0.0 passes check 4 (`-0.0 >= 0.0`), so it reaches the
+/// metric mapping with its sign bit set, which quantizes it to 0 micro-units (section 4.4).
+#[test]
+fn negative_zero_reaches_the_metric_mapping_and_quantizes_to_zero() {
+    let mut prefix = Vec::new();
+    commit(
+        &mut prefix,
+        raw_source(
+            EntityId::new(),
+            1,
+            -0.0,
+            PredictionOutcomeV1::Observed(false),
+        ),
+    );
+    let derivation = derive_eval_units(&prefix, &config(64));
+    assert!(derivation.findings.is_empty());
+    let prediction: PredictionPayload =
+        ciborium::from_reader(derivation.drafts[0].payload.as_slice()).test_ok();
+    assert_eq!(prediction.predicted_prob.to_bits(), 0x8000_0000_0000_0000);
+    for draft in derivation.drafts {
+        commit(&mut prefix, draft);
+    }
+    let mapping =
+        map_events_to_metric_input(&prefix, &|_: &Event| EvalEvidenceV1::Available, 1).test_ok();
+    let record = &mapping.input.records()[0];
+    assert_eq!(record.probability_micros, 0);
+    assert_eq!(
+        record.state,
+        MetricRecordStateV1::Observed {
+            outcome: false,
+            predictor_supplied: true,
+        }
+    );
 }
 
 /// The one full precedence scenario (Revision 2 Decision 0); the seam tests

@@ -18,16 +18,20 @@
 //! input it accepts is decoded a second time into the exact sums, so a declared `record_count`
 //! above 262,144 is `ResourceLimit` before any record is allocated.
 //!
-//! Gap-fills this module adds, recorded for the profile owner:
+//! The following decoder rules are confirmed normative: the profile owner confirmed them on
+//! 2026-10-30, and profile section 4.6 pins them as gap-fills G10 to G12 (#1248 / PR #762):
 //!
-//! - **Nesting depth.** An array nested more than [`MAX_NESTING_DEPTH`] levels deep (the root
+//! - **Nesting depth (G10).** An array nested more than [`MAX_NESTING_DEPTH`] levels deep (the root
 //!   array is level 1) is `InvalidEncoding` at that array's coordinate. Every well-formed public
 //!   record nests at most 3 levels, so the cap only bounds the structural walk of malformed
 //!   input.
-//! - **`MTQ1` shape.** The quantization coordinates follow G6: `input`, `magic`, `version`,
+//! - **`MTQ1` shape (G11).** The quantization coordinates follow G6: `input`, `magic`, `version`,
 //!   `patterns`, `patterns/<i>` and `trailing`. A `patterns` field that is not an array is a
 //!   structural `InvalidEncoding`, an empty pattern list is `InvalidEncoding` at `patterns`, and
 //!   more than 4,096 patterns is `ResourceLimit` at `patterns`.
+//! - **Header text UTF-8 (G12).** Invalid UTF-8 in `magic` is `UnsupportedVersion` and in
+//!   `algorithm_id` is `UnsupportedAlgorithm`, at that field: the text is compared as bytes
+//!   with the expected value, not rejected structurally.
 //! - **`MTR1` acceptance (G9).** The root coordinate of a result is `result`. Acceptance checks
 //!   the core-deterministic structure, a 13-field root and the four identity fields; it does not
 //!   recompute a result.

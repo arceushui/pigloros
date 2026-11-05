@@ -32,6 +32,7 @@ TEST_ONLY_EXCLUSIONS = (
     "src/system_bus/tests.rs",
     "src/image_activator/tests.rs",
     "src/root_attachment/tests.rs",
+    "src/root_selector/tests/admission_bounds.rs",
     "src/selector/installation/fixture.rs",
     "src/provider_admission/test_support.rs",
     "src/e2e_determinism.rs",
@@ -53,6 +54,9 @@ TEST_ONLY_EXCLUSIONS = (
     "src/nested_imported_fork_replay_tests.rs",
     "src/nested_imported_fork_replay_tests/intermediate_privacy.rs",
     "src/ordinary_fork_lineage_tests.rs",
+    "src/execute/tests/ownership.rs",
+    "src/provider_barrier/tests.rs",
+    "src/execute/tests/ownership/abandonment.rs",
 )
 EXCLUSION_ARGS = "".join(f"--exclude '{path}' " for path in TEST_ONLY_EXCLUSIONS)
 GENERATE_BASELINE_COMMAND = (

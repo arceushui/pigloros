@@ -257,6 +257,7 @@ impl SystemdAttemptRegistry {
             sequence,
             &intent.encode(),
             RenameFlags::NOREPLACE,
+            || {},
         )?;
         verify_intent(&self.directory, intent)
     }
@@ -302,6 +303,7 @@ fn publish_record(
     sequence: u64,
     bytes: &[u8],
     rename: RenameFlags,
+    on_replaced: impl FnOnce(),
 ) -> Result<(), SystemdAttemptRegistryError> {
     validate_directory(&directory.file, directory.owner, true)?;
     let temporary = format!(
@@ -331,6 +333,9 @@ fn publish_record(
         )
         .map_err(io::Error::from)
     })?;
+    // Replacement is visible even if synchronizing its parent later fails.
+    // Retain that exact expectation before returning any durability error.
+    on_replaced();
     registry_io(|| directory.file.sync_all())?;
     Ok(())
 }

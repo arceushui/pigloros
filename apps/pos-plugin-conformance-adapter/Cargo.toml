@@ -19,6 +19,7 @@ path = "src/main.rs"
 blake3 = { workspace = true }
 ciborium = { workspace = true }
 pos-core = { path = "../../crates/pos-core", features = ["fixture-instant"] }
+pos-crypto = { path = "../../crates/pos-crypto" }
 pos-plugin-release = { path = "../../crates/pos-plugin-release" }
 pos-plugin-supervisor = { path = "../../crates/pos-plugin-supervisor" }
 pos-reference = { path = "../../crates/pos-reference" }

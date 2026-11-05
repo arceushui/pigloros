@@ -282,9 +282,11 @@ selection and the existing 60-minute watchdog, 120-second Test limit and
 600-second Build limit; they do not omit slow tests or extend their deadlines.
 A separate `mutation-baseline` first runs the full unmutated workspace with all features,
 the locked dependency graph, and the same pinned nightly and libtest arguments
-as the shards. Stable core tests cannot prove the nightly-only harness. Only
-after that same-run baseline succeeds may shards use `--baseline skip`; the
-aggregate requires both the baseline and every shard.
+as the shards. Stable core tests cannot prove the nightly-only harness. After
+that same-run baseline succeeds, every shard uses `--baseline run` to prove its
+own unmutated scratch copy before testing mutations. This prevents missing
+scratch-copy fixtures from counting as caught mutants. The aggregate requires
+both the shared baseline and every shard.
 
 ```mermaid
 flowchart TD

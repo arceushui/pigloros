@@ -8,9 +8,11 @@
 pub mod canonical;
 pub mod chain;
 pub mod consent_v2;
+pub mod dsse;
 pub mod fork_attribution;
 pub mod fork_attribution_authority;
 pub mod fork_authentication;
+pub mod jcs;
 pub mod key_roles;
 pub mod plugin_execution;
 pub mod plugin_manifest;

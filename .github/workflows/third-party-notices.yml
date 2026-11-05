@@ -15,6 +15,12 @@ name: third-party-notices
 
 on:
   workflow_call:
+    inputs:
+      scope:
+        description: workspace or gateway notice bundle
+        type: string
+        required: false
+        default: workspace
 
 permissions:
   contents: read
@@ -24,8 +30,16 @@ jobs:
     name: generate
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    env:
+      NOTICE_SCOPE: ${{ inputs.scope }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Validate the requested notice scope
+        run: |
+          case "$NOTICE_SCOPE" in
+            workspace|gateway) ;;
+            *) echo "scope must be workspace or gateway" >&2; exit 1 ;;
+          esac
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
           toolchain: 1.97.1
@@ -50,18 +64,26 @@ jobs:
           cargo about generate --locked --fail --workspace --all-features \
             --config about.toml --format json --output-file "${REPORTS}/workspace.json"
           printf '%s\n' "Cargo.lock=${REPORTS}/workspace.json" >"${REPORTS}/graphs"
-          index=0
-          while IFS= read -r lock; do
-            index=$((index + 1))
-            cargo about generate --locked --fail \
-              --manifest-path "$(dirname -- "${lock}")/Cargo.toml" \
-              --config third_party/about-guest.toml --format json \
-              --output-file "${REPORTS}/guest-${index}.json"
-            printf '%s\n' "${lock}=${REPORTS}/guest-${index}.json" >>"${REPORTS}/graphs"
-          done < <(find plugins/community/examples -name Cargo.lock -type f | LC_ALL=C sort)
-          python3 scripts/third_party_notices.py rust-std-report \
-            --sysroot "$(rustc --print sysroot)" --output "${REPORTS}/rust-std.json"
-          printf '%s\n' "rust-std=${REPORTS}/rust-std.json" >>"${REPORTS}/graphs"
+          if [[ "$NOTICE_SCOPE" == gateway ]]; then
+            cargo metadata --locked --format-version 1 \
+              --manifest-path apps/piglor-gateway/Cargo.toml \
+              --filter-platform x86_64-unknown-linux-gnu > "${REPORTS}/gateway-metadata.json"
+            RUSTC_BOOTSTRAP=1 cargo build --locked --release --bin piglor-gateway \
+              --unit-graph -Z unstable-options > "${REPORTS}/gateway-units.json"
+          else
+            index=0
+            while IFS= read -r lock; do
+              index=$((index + 1))
+              cargo about generate --locked --fail \
+                --manifest-path "$(dirname -- "${lock}")/Cargo.toml" \
+                --config third_party/about-guest.toml --format json \
+                --output-file "${REPORTS}/guest-${index}.json"
+              printf '%s\n' "${lock}=${REPORTS}/guest-${index}.json" >>"${REPORTS}/graphs"
+            done < <(find plugins/community/examples -name Cargo.lock -type f | LC_ALL=C sort)
+            python3 scripts/third_party_notices.py rust-std-report \
+              --sysroot "$(rustc --print sysroot)" --output "${REPORTS}/rust-std.json"
+            printf '%s\n' "rust-std=${REPORTS}/rust-std.json" >>"${REPORTS}/graphs"
+          fi
       - name: Assemble the notice bundle
         env:
           REPORTS: ${{ runner.temp }}/cargo-about
@@ -72,8 +94,13 @@ jobs:
           while IFS= read -r graph; do
             graphs+=(--graph "${graph}")
           done <"${REPORTS}/graphs"
+          scope_args=(--scope "$NOTICE_SCOPE")
+          if [[ "$NOTICE_SCOPE" == gateway ]]; then
+            scope_args+=(--cargo-metadata "${REPORTS}/gateway-metadata.json"
+              --unit-graph "${REPORTS}/gateway-units.json")
+          fi
           python3 scripts/third_party_notices.py assemble "${graphs[@]}" \
-            --sysroot "$(rustc --print sysroot)" --output "${BUNDLE}"
+            "${scope_args[@]}" --sysroot "$(rustc --print sysroot)" --output "${BUNDLE}"
           sha256sum -- "${BUNDLE}"/*
       - name: Upload the notice bundle
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

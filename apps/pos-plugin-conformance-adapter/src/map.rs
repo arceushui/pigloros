@@ -5,6 +5,7 @@
 //! the evaluator never turns into `Pass` or `Fail`. [`case_result`] is the only place a case
 //! result is decided.
 
+use pos_crypto::jcs::JsonV1;
 use pos_plugin_supervisor::{
     CommunityPluginSubjectOutcomeV1, CommunityPluginSubjectResultV1, OutputUsageV1,
 };
@@ -16,7 +17,6 @@ use pos_runtime::community_plugin_host::{
 };
 
 use crate::hex;
-use crate::jcs::JsonV1;
 use crate::payload::family_text;
 use crate::world::SubCaseRecordV1;
 use crate::{CONTRACT_VERSION, PAYLOAD_INVALID, PROVIDER_ID, SUBCASE_MISMATCH};

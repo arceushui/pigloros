@@ -7,6 +7,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+base64 = { workspace = true, features = ["alloc"] }
 blake3 = { workspace = true }
 ciborium = { workspace = true }
 ed25519-dalek = { workspace = true }
