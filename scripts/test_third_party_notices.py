@@ -29,7 +29,7 @@ GUEST = "plugins/community/examples/compatibility-prototype/rust-guest/Cargo.loc
 PROBE = "plugins/community/examples/compatibility-prototype/probe-guest/Cargo.lock"
 REUSABLE = ROOT / ".github/workflows/third-party-notices.yml"
 CI = ROOT / ".github/workflows/ci.yml"
-TAKI = "taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29"
+TAKI = "taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32"
 # Complete reviewed parsed programs; changes require review of the executable paths.
 NOTICE_PROGRAM_SHA256 = {
     "Validate the requested notice scope": "b26c9526bcd9f8a7add40473dd18cc1dc8341f18f4049d76e7ac3fe25f957d15",

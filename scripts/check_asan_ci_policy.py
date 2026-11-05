@@ -144,7 +144,7 @@ EXPECTED_BUILD_JOB = {
         },
         {
             "name": "Install cargo-nextest for the ASan archive",
-            "uses": "taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29",
+            "uses": "taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32",
             "with": {"tool": "cargo-nextest@0.9.146", "fallback": "none"},
         },
         {
@@ -259,7 +259,7 @@ EXPECTED_SETUP_STEPS = [
     },
     {
         "name": "Install cargo-nextest for partitioned ASan tests",
-        "uses": "taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29",
+        "uses": "taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32",
         "with": {"tool": "cargo-nextest@0.9.146", "fallback": "none"},
     },
     {
