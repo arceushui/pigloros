@@ -272,7 +272,7 @@ grep -Fqx "Ubuntu LLVM version 18.1.3" <<<"${symbolizer_version}"
     },
     {
         "name": "Download ASan test archive",
-        "uses": "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
+        "uses": "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333",
         "with": {"name": ARCHIVE_ARTIFACT, "path": "${{ runner.temp }}/asan-archive"},
     },
 ]
