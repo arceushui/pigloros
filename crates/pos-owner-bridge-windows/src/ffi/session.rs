@@ -196,6 +196,10 @@ impl NativeOperations for Session {
             Ok(())
         }))
     }
+    fn has_controller(&self) -> NativeResult<bool> {
+        self.check().map(|()| self.controller.is_some())
+    }
+
     fn browser_pid(&self) -> NativeResult<u32> {
         let view = self.view_ref()?;
         let mut pid = 0;

@@ -95,7 +95,7 @@ impl WindowsOwnerHost {
                 // factory and apartment are released on this creating thread.
                 if let Ok(mut factory) = Rc::try_unwrap(factory) {
                     let _stopped = factory.stop();
-                }
+                };
             })
             .map_err(|_| UNAVAILABLE)?;
         match started.recv() {

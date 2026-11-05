@@ -11,8 +11,6 @@
 //! checker enforces it.
 
 mod ffi;
-#[forbid(unsafe_code)]
-mod native_api;
 // Safe entry points implemented by the private native boundary. The type and
 // its associated operations are accessible only inside this crate.
 struct Native;
@@ -24,6 +22,7 @@ mod adapter {
     mod events;
     mod host;
     mod loopback;
+    pub(crate) mod native_api;
     mod overrides;
     mod platform;
     mod process;
@@ -47,7 +46,7 @@ mod adapter {
     pub(crate) use store::WindowsCleanupStore;
 }
 
-use adapter::{SharedLoopback, WindowsCleanupStore};
+use adapter::{native_api, SharedLoopback, WindowsCleanupStore};
 
 pub use adapter::{
     cpu_requirements, create_private_directory, process_identity, refuse_overrides,

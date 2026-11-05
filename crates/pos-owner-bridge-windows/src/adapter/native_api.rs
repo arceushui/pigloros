@@ -13,11 +13,11 @@ use std::rc::Rc;
 use pos_owner_bridge::ReplyImage;
 use pos_owner_bridge_codec::CeremonyKind;
 
-pub(super) const OWNER_URL: &str = "http://localhost:49291/owner.html";
-pub(super) const MAX_TEXT_UNITS: usize = 32_768;
+pub(crate) const OWNER_URL: &str = "http://localhost:49291/owner.html";
+pub(crate) const MAX_TEXT_UNITS: usize = 32_768;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum Operation {
+pub(crate) enum Operation {
     Sta,
     Window,
     Environment,
@@ -30,7 +30,7 @@ pub(super) enum Operation {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum Failure {
+pub(crate) enum Failure {
     CallFailed,
     InvalidOutput,
     TooLarge,
@@ -41,9 +41,9 @@ pub(super) enum Failure {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct NativeError {
-    pub(super) operation: Operation,
-    pub(super) failure: Failure,
+pub(crate) struct NativeError {
+    pub(crate) operation: Operation,
+    pub(crate) failure: Failure,
 }
 
 impl fmt::Display for NativeError {
@@ -54,20 +54,20 @@ impl fmt::Display for NativeError {
 
 impl std::error::Error for NativeError {}
 
-pub(super) type NativeResult<T> = Result<T, NativeError>;
+pub(crate) type NativeResult<T> = Result<T, NativeError>;
 
 /// Native extraction bounds the UTF-16 scan before allocation. This owned value
 /// additionally validates the length and encoding at the safe seam.
 #[derive(Clone, Eq, PartialEq)]
-pub(super) struct NativeText(String);
+pub(crate) struct NativeText(String);
 
 impl NativeText {
     #[cfg(test)]
-    pub(super) fn fixture(value: &str) -> Self {
+    pub(crate) fn fixture(value: &str) -> Self {
         Self(value.to_owned())
     }
 
-    pub(super) fn from_utf16(units: &[u16]) -> NativeResult<Self> {
+    pub(crate) fn from_utf16(units: &[u16]) -> NativeResult<Self> {
         if units.len() > MAX_TEXT_UNITS {
             return Err(NativeError {
                 operation: Operation::Text,
@@ -82,7 +82,7 @@ impl NativeText {
             })
     }
 
-    pub(super) fn as_str(&self) -> &str {
+    pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
 }
@@ -97,10 +97,10 @@ impl fmt::Debug for NativeText {
 }
 
 #[derive(Clone, Eq, PartialEq)]
-pub(super) struct NativePath(PathBuf);
+pub(crate) struct NativePath(PathBuf);
 
 impl NativePath {
-    pub(super) fn from_utf16(units: &[u16]) -> NativeResult<Self> {
+    pub(crate) fn from_utf16(units: &[u16]) -> NativeResult<Self> {
         if units.len() > MAX_TEXT_UNITS {
             return Err(NativeError {
                 operation: Operation::Text,
@@ -116,13 +116,13 @@ impl NativePath {
         Ok(Self(PathBuf::from(OsString::from_wide(units))))
     }
 
-    pub(super) fn as_path(&self) -> &Path {
+    pub(crate) fn as_path(&self) -> &Path {
         &self.0
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum BoolProperty {
+pub(crate) enum BoolProperty {
     Script,
     WebMessage,
     ScriptDialogs,
@@ -142,52 +142,52 @@ pub(super) enum BoolProperty {
 }
 
 #[derive(Clone, Copy)]
-pub(super) struct EnvironmentOptions {
-    pub(super) extensions: bool,
-    pub(super) custom_crash_reporting: bool,
-    pub(super) exclusive_folder: bool,
+pub(crate) struct EnvironmentOptions {
+    pub(crate) extensions: bool,
+    pub(crate) custom_crash_reporting: bool,
+    pub(crate) exclusive_folder: bool,
 }
 
-pub(super) struct EnvironmentSnapshot {
-    pub(super) version: NativeText,
+pub(crate) struct EnvironmentSnapshot {
+    pub(crate) version: NativeText,
     // The path has its own bounded, lossless native UTF-16 extraction; paths
     // are never converted through the diagnostic/display string interface.
-    pub(super) folder: NativePath,
-    pub(super) arguments: NativeText,
-    pub(super) options: EnvironmentOptions,
+    pub(crate) folder: NativePath,
+    pub(crate) arguments: NativeText,
+    pub(crate) options: EnvironmentOptions,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct ClientBounds {
-    pub(super) left: i32,
-    pub(super) top: i32,
-    pub(super) right: i32,
-    pub(super) bottom: i32,
+pub(crate) struct ClientBounds {
+    pub(crate) left: i32,
+    pub(crate) top: i32,
+    pub(crate) right: i32,
+    pub(crate) bottom: i32,
 }
 
-pub(super) struct WindowSnapshot {
-    pub(super) exists: bool,
-    pub(super) close_requested: bool,
-    pub(super) dpi: u32,
-    pub(super) client: ClientBounds,
-    pub(super) foreground: bool,
+pub(crate) struct WindowSnapshot {
+    pub(crate) exists: bool,
+    pub(crate) close_requested: bool,
+    pub(crate) dpi: u32,
+    pub(crate) client: ClientBounds,
+    pub(crate) foreground: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum BufferSlot {
+pub(crate) enum BufferSlot {
     Request,
     Reply,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum NativePulse {
+pub(crate) enum NativePulse {
     Timer,
     Dispatched,
     Quit,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum EventKind {
+pub(crate) enum EventKind {
     Navigation,
     Source,
     Content,
@@ -206,7 +206,7 @@ pub(super) enum EventKind {
     BrowserExited,
 }
 
-pub(super) enum NativeEvent {
+pub(crate) enum NativeEvent {
     Navigation {
         uri: NativeText,
         id: u64,
@@ -246,7 +246,7 @@ pub(super) enum NativeEvent {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum NativeAction {
+pub(crate) enum NativeAction {
     Observe,
     Allow,
     Cancel,
@@ -257,12 +257,12 @@ pub(super) enum NativeAction {
 
 /// Callbacks own an Rc to a separate safe policy/queue object. They never borrow
 /// the surface that owns their COM session, and cannot cross the STA thread.
-pub(super) trait EventSink {
+pub(crate) trait EventSink {
     fn event(&self, event: NativeEvent) -> NativeAction;
     fn failed(&self, kind: EventKind, error: NativeError) -> NativeAction;
 }
 
-pub(super) trait StaPump {
+pub(crate) trait StaPump {
     fn next(&self) -> NativeResult<NativePulse>;
     fn stop(&mut self) -> NativeResult<()>;
 }
@@ -271,14 +271,14 @@ pub(super) trait StaPump {
 /// surface constructor accepts one factory, never an independently paired
 /// session/pump. Native implementations additionally retain and check the same
 /// opaque !Send STA token on every operation.
-pub(super) trait NativeFactory: StaPump {
+pub(crate) trait NativeFactory: StaPump {
     fn session(&self) -> NativeResult<Box<dyn NativeOperations>>;
 }
 
 /// Native ownership operations; lifecycle outcomes are selected by the adapter.
 /// No SDK pointer, HRESULT, token, arbitrary property ID, script, header, URL,
 /// buffer offset, or caller-provided COM callback crosses this interface.
-pub(super) trait NativeOperations {
+pub(crate) trait NativeOperations {
     fn create_window(
         &mut self,
         owner: Option<u64>,
@@ -302,6 +302,7 @@ pub(super) trait NativeOperations {
     fn environment(&self) -> NativeResult<EnvironmentSnapshot>;
     fn create_controller(&mut self) -> NativeResult<()>;
     fn controller_completion(&mut self) -> Option<NativeResult<()>>;
+    fn has_controller(&self) -> NativeResult<bool>;
     fn browser_pid(&self) -> NativeResult<u32>;
     fn require_shared_interfaces(&mut self) -> NativeResult<()>;
     fn subscribe_view(&mut self, sink: Rc<dyn EventSink>) -> NativeResult<()>;

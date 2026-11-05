@@ -244,7 +244,7 @@ fn navigation_snapshot(args: &ICoreWebView2NavigationStartingEventArgs) -> Resul
     })
 }
 
-pub(super) fn source(view: &ICoreWebView2) -> Result<NativeText> {
+pub(in crate::ffi) fn source(view: &ICoreWebView2) -> Result<NativeText> {
     super::super::text::read_text(|out| {
         // SAFETY: retained live STA view and helper-owned initialized string output.
         unsafe { view.Source(out) }

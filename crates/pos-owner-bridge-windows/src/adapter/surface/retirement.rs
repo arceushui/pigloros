@@ -5,7 +5,7 @@ use super::{unavailable, Ownership, Result, Surface};
 use pos_owner_bridge::OwnerWebSurface;
 
 impl Surface {
-    pub(super) fn poll_failed_open(&mut self) -> Result<bool> {
+    pub(in crate::adapter) fn poll_failed_open(&mut self) -> Result<bool> {
         if !self.failed_open {
             return Ok(self.idle());
         }
@@ -26,7 +26,7 @@ impl Surface {
         ) {
             // No controller request was ever issued, so no browser collection
             // was started. Pending environment callbacks have all completed.
-            self.finish_unrecorded()?;
+            self.retire_unrecorded(false)?;
             return Ok(true);
         }
         if self.ownership == Ownership::CreatingController {
@@ -35,6 +35,14 @@ impl Surface {
             }
             if self.native.pending() {
                 return Ok(false);
+            }
+            if !self.native.has_controller().map_err(unavailable)? {
+                // A completed failed creation owns no controller or mapping.
+                // This says nothing about a browser process having existed:
+                // preserve its recordless folder for the conservative restart
+                // orphan sweep instead of waiting for an exit that may not exist.
+                self.retire_unrecorded(false)?;
+                return Ok(true);
             }
         }
         if matches!(
@@ -60,11 +68,11 @@ impl Surface {
         // Only this fresh exclusive environment's own callback can retire a
         // pre-identity open. No PBCR/mapping ever existed and no PID-absence
         // inference is made. Recorded cleanup uses the stricter finish path.
-        self.finish_unrecorded()?;
+        self.retire_unrecorded(true)?;
         Ok(true)
     }
 
-    fn finish_unrecorded(&mut self) -> Result<()> {
+    fn retire_unrecorded(&mut self, remove_folder: bool) -> Result<()> {
         self.native.unsubscribe_view().map_err(unavailable)?;
         self.native.unsubscribe_exit().map_err(unavailable)?;
         self.native.drop_environment().map_err(unavailable)?;
@@ -72,7 +80,9 @@ impl Surface {
         if let Some(folder) = self.folder.take() {
             // Sharing failure leaves a recognized recordless orphan. The next
             // portable restart sweep retries it; no PBCR is fabricated.
-            let _removed_or_deferred = self.store.remove_folder(&folder);
+            if remove_folder {
+                let _removed_or_deferred = self.store.remove_folder(&folder);
+            }
         }
         self.identity = None;
         self.failed_open = false;

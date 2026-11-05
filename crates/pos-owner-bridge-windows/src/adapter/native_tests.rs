@@ -123,7 +123,7 @@ pub(crate) fn native_window_environment_and_buffers_lifecycle() -> TestResult {
         snapshot.folder.as_path().canonicalize()?,
         folder.canonicalize()?
     );
-    super::settings::verify_options(&snapshot)?;
+    super::settings::verify_options(&snapshot).map_err(pos_owner_bridge::SurfaceError::error)?;
     let sink: Rc<dyn EventSink> = events.clone();
     assert!(native
         .create_environment(runtime.root(), &folder, super::settings::OPTIONS, sink)
@@ -136,7 +136,7 @@ pub(crate) fn native_window_environment_and_buffers_lifecycle() -> TestResult {
     native.require_shared_interfaces()?;
     let sink: Rc<dyn EventSink> = events.clone();
     native.subscribe_view(sink)?;
-    super::settings::apply(native.as_ref())?;
+    super::settings::apply(native.as_ref()).map_err(pos_owner_bridge::SurfaceError::error)?;
     native.fit_controller()?;
     native.show_window()?;
     native.focus_controller()?;
@@ -150,10 +150,14 @@ pub(crate) fn native_window_environment_and_buffers_lifecycle() -> TestResult {
     let id = CeremonyId::from_bytes([1; 16]);
     let mut request = [0; 4096];
     request[..64].copy_from_slice(
-        &OwnerBridgeControlV1::new_request(CeremonyKind::Create, 1, id, 1)?.encode(),
+        &OwnerBridgeControlV1::new_request(CeremonyKind::Create, 1, id, 1)
+            .map_err(|error| error.to_string())?
+            .encode(),
     );
     request[64] = 0xff; // Invalid closed CBOR, independent of WebAuthn hardware.
-    let reply_header = OwnerBridgeControlV1::new_reply(CeremonyKind::Create, 1, id)?.encode();
+    let reply_header = OwnerBridgeControlV1::new_reply(CeremonyKind::Create, 1, id)
+        .map_err(|error| error.to_string())?
+        .encode();
     native.create_buffers(CeremonyKind::Create, &request, &reply_header)?;
     assert!(native
         .create_buffers(CeremonyKind::Create, &request, &reply_header)

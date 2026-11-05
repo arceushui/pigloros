@@ -845,7 +845,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/session.rs"
-line = 203
+line = 207
 function = "browser_pid"
 operation = "view.BrowserProcessId(&raw mut pid)"
 invariant = "retained creating-STA view and initialized unique PID output."
@@ -853,7 +853,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/session.rs"
-line = 225
+line = 229
 function = "navigate_owner"
 operation = "view.Navigate(w!( ))"
 invariant = "retained creating-STA view and the fixed packaged owner document URL."
@@ -861,7 +861,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/session.rs"
-line = 284
+line = 288
 function = "close_controller"
 operation = "controller.Close()"
 invariant = "retained creating-STA controller; all buffer borrows ended. Failure retains the COM owner so the safe policy can quarantine/retry."

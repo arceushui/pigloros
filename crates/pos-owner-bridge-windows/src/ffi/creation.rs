@@ -122,5 +122,5 @@ fn path_string(path: &Path) -> Result<HSTRING> {
     if units.is_empty() || units.contains(&0) {
         return Err(unavailable());
     }
-    HSTRING::from_wide(&units).map_err(|_| unavailable())
+    Ok(HSTRING::from_wide(&units))
 }
