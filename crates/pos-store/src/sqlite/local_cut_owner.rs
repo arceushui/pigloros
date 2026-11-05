@@ -3222,7 +3222,6 @@ mod local_cut_owner_coverage {
     #[test]
     fn world_recording_reads_report_unreadable_rows() -> TestResult {
         let mut fixture = committed()?;
-        let connection = &fixture.store.conn;
         deny_read(
             &mut fixture.store.conn,
             "local_cut_world_recordings",
