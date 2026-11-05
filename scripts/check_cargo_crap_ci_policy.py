@@ -11,7 +11,7 @@ import yaml
 
 CHECKOUT_ACTION = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
 INSTALL_ACTION = "taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29"
-UPLOAD_ACTION = "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
+UPLOAD_ACTION = "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9"
 DOWNLOAD_ACTION = "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"
 BASELINE_RESOLVER = "scripts/resolve_cargo_crap_baseline.sh"
 SCOPED_JOB_IF = (
