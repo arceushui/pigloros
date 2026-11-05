@@ -109,6 +109,23 @@ impl Driver for StagingDriver {
     }
 }
 
+/// A reachable commit fault poisons the registry without private-state injection.
+struct CommitPanickingDriver;
+
+impl Driver for CommitPanickingDriver {
+    fn name(&self) -> &'static str {
+        "commit-panicking"
+    }
+
+    fn step(&mut self, _: TimelineId, _: ObservationView<'_>) -> Result<StepOutput, RuntimeError> {
+        Ok(StepOutput::new(Vec::new()))
+    }
+
+    fn commit_step(&mut self) {
+        panic!("injected Driver commit panic");
+    }
+}
+
 /// A member over the release of the test world.
 struct FakeMember {
     plugin: PluginId,
@@ -421,6 +438,47 @@ fn an_unfinished_pass_rejects_a_new_request_without_touching_members() -> TestRe
             Ok(usize::from(emit_event)),
         );
     }
+    Ok(())
+}
+
+#[test]
+fn a_poisoned_driver_rejects_a_new_pass_without_touching_members() -> TestResult {
+    let mut rig = Rig::ready()?;
+    let member = rig.member()?;
+    let calls = Rc::clone(&member.calls);
+    rig.eval.plugins_mut().register_generated(
+        &StagingPlugin(member.plugin),
+        None,
+        Some(Box::new(CommitPanickingDriver)),
+    )?;
+    rig.eval.plugins_mut().compose_non_participant_drivers()?;
+    let mut host = CommunityPluginHostV1::new(vec![member]);
+    let timeline = rig.eval.pass_timeline;
+    let observed = observe(&mut rig.eval.pass_host, &rig.eval.plugins, timeline)
+        .map_err(|e| format!("{e:?}"))?;
+    rig.eval
+        .plugins
+        .step_all_anchored(timeline, &observed.chain, observed.head)?;
+    rig.eval.plugins.commit_step_at(observed.head, 1)?;
+
+    let mut clock = one_second();
+    let outcome = rig
+        .eval
+        .run_pass(&mut host, &mut clock, TICK + 1)
+        .map_err(|e| format!("{e:?}"))?;
+    assert_eq!(outcome.tick, TICK + 1);
+    assert_eq!(outcome.utc, None);
+    assert!(outcome.gates.is_empty(), "{outcome:?}");
+    let PassResultV1::Failed { host: None, error } = outcome.result else {
+        return Err(format!("unexpected result: {:?}", outcome.result).into());
+    };
+    let RuntimeError::DriverCommitPanicked { name } = *error else {
+        return Err(format!("unexpected error: {error:?}").into());
+    };
+    assert_eq!(name, "commit-panicking");
+    assert_eq!(clock.remaining(), 1);
+    assert_eq!(calls.get(), 0);
+    assert_eq!(rig.eval.committed_events().map(|e| e.len()), Ok(0));
     Ok(())
 }
 
