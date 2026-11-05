@@ -122,7 +122,7 @@ impl Driver for CommitPanickingDriver {
     }
 
     fn commit_step(&mut self) {
-        panic!("injected Driver commit panic");
+        std::panic::resume_unwind(Box::new("injected Driver commit panic"));
     }
 }
 
