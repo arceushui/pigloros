@@ -7,6 +7,7 @@ mod enrollment;
 mod fakes;
 mod oracle;
 mod quarantine;
+mod restart_probe;
 mod timing;
 mod unlock;
 
