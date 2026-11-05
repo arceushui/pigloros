@@ -98,14 +98,14 @@ impl Driver for StagingDriver {
     }
 
     fn step(&mut self, _: TimelineId, _: ObservationView<'_>) -> Result<StepOutput, RuntimeError> {
-        if !self.emit_event {
-            return Ok(StepOutput::new(Vec::new()));
-        }
-        Ok(StepOutput::new(vec![EventDraft::new(
-            EntityId::new(),
-            Kind::new(EVENT_TYPE),
-            CanonicalBytes::from_static(b"staged"),
-        )]))
+        let draft = self.emit_event.then(|| {
+            EventDraft::new(
+                EntityId::new(),
+                Kind::new(EVENT_TYPE),
+                CanonicalBytes::from_static(b"staged"),
+            )
+        });
+        Ok(StepOutput::new(draft.into_iter().collect()))
     }
 }
 
