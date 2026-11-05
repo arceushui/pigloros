@@ -211,29 +211,31 @@ impl<M: CommunityPluginMemberV1> CommunityPluginHostV1<M> {
         request: CommunityPassRequestV1<'_>,
     ) -> CommunityPassOutcomeV1 {
         let tick = request.tick;
-        if let Err(error) = registry.ensure_no_pending_step() {
-            return CommunityPassOutcomeV1 {
+        registry.ensure_no_pending_step().map_or_else(
+            |error| CommunityPassOutcomeV1 {
                 tick,
                 utc: None,
                 gates: Vec::new(),
                 result: failed(error),
-            };
-        }
-        let utc = TrustedUtcSecondV1::from_source(wall).ok();
-        let guard = PassGuard::open(&self.members, utc, tick);
-        let (verdicts, result) = guard.pass().map_or_else(
-            || (refuse_all(&self.members), PassResultV1::Refused),
-            |pass| self.run_open(registry, trust, pass, request),
-        );
-        let mut entries = report(&self.members, verdicts);
-        drop(guard);
-        sync_all(&self.members, registry, &mut entries);
-        CommunityPassOutcomeV1 {
-            tick,
-            utc: utc.map(TrustedUtcSecondV1::as_i64),
-            gates: entries,
-            result,
-        }
+            },
+            |()| {
+                let utc = TrustedUtcSecondV1::from_source(wall).ok();
+                let guard = PassGuard::open(&self.members, utc, tick);
+                let (verdicts, result) = guard.pass().map_or_else(
+                    || (refuse_all(&self.members), PassResultV1::Refused),
+                    |pass| self.run_open(registry, trust, pass, request),
+                );
+                let mut entries = report(&self.members, verdicts);
+                drop(guard);
+                sync_all(&self.members, registry, &mut entries);
+                CommunityPassOutcomeV1 {
+                    tick,
+                    utc: utc.map(TrustedUtcSecondV1::as_i64),
+                    gates: entries,
+                    result,
+                }
+            },
+        )
     }
 
     /// Adopt newer policy: close the pass of every member, then record `material` through the
