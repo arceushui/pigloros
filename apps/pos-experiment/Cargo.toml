@@ -18,6 +18,13 @@ name = "pos-experiment"
 path = "src/main.rs"
 required-features = ["test-support"]
 
+# The harness probe subject of the non-interference fresh-process Local
+# runner (ADR-062 Revision 8 slice N0); it is compiled only with `test-support`.
+[[bin]]
+name = "pos-ni-local-probe"
+path = "src/bin/pos-ni-local-probe.rs"
+required-features = ["test-support"]
+
 [dependencies]
 pos-core = { path = "../../crates/pos-core" }
 pos-crypto = { path = "../../crates/pos-crypto" }
@@ -32,6 +39,7 @@ pos-plugin-eval = { path = "../../plugins/eval" }
 pos-plugin-society = { path = "../../plugins/society" }
 pos-plugin-world = { path = "../../plugins/world" }
 blake3 = { workspace = true }
+ed25519-dalek = { workspace = true }
 ciborium = { workspace = true }
 serde = { workspace = true }
 serde_bytes = { workspace = true }
@@ -60,6 +68,10 @@ required-features = ["test-support"]
 
 [[test]]
 name = "factual_counterfactual_end_to_end"
+required-features = ["test-support"]
+
+[[test]]
+name = "non_interference_harness"
 required-features = ["test-support"]
 
 [[test]]
