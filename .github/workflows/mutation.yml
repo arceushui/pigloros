@@ -12,9 +12,12 @@ env:
   RUSTFLAGS: -D warnings
 jobs:
   asan-consumer-capacity:
-    name: ASan consumer capacity diagnostic (remainder-1)
+    name: ASan read-only archive inventory diagnostic
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    env:
+      PROBE_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+      PROBE_RUNNER_OS: ${{ runner.os }}
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       with:
@@ -60,7 +63,7 @@ jobs:
         df -B1 -- / "${GITHUB_WORKSPACE}" "${RUNNER_TEMP}"
         printf 'CI SDK headroom after (inodes)\n'
         df -i -- / "${GITHUB_WORKSPACE}" "${RUNNER_TEMP}"
-    - name: Measure after the unchanged SDK cleanup
+    - name: Measure after unchanged SDK cleanup
       run: |
         python3 "${RUNNER_TEMP}/asan-consumer-capacity-probe.py" snapshot after-sdk
     - run: rm -f rust-toolchain.toml
@@ -78,100 +81,25 @@ jobs:
         test -x "${symbolizer}"
         symbolizer_version="$("${symbolizer}" --version)"
         grep -Fqx "Ubuntu LLVM version 18.1.3" <<<"${symbolizer_version}"
-    - name: Measure before archive download
+    - name: Measure and guard archive download headroom
       run: |
         python3 "${RUNNER_TEMP}/asan-consumer-capacity-probe.py" snapshot before-download
     - name: Download ASan test archive
       uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
       with:
-        name: asan-nextest-archive
         path: ${{ runner.temp }}/asan-archive
-        github-token: ${{ github.token }}
+        artifact-ids: '13379068961'
         run-id: 41944696339
-    - name: Measure after archive download
+        github-token: ${{ github.token }}
+    - name: Measure after exact artifact download
       run: |
+        test -f "${RUNNER_TEMP}/asan-archive/asan-tests.tar.zst"
         python3 "${RUNNER_TEMP}/asan-consumer-capacity-probe.py" snapshot after-download
-    - name: Prove unrelated leaks still fail LSan
-      env:
-        ASAN_OPTIONS: detect_leaks=1:detect_odr_violation=0
-        LSAN_OPTIONS: suppressions=${{ github.workspace }}/scripts/asan/bevy-reflect.lsan:print_suppressions=1
+    - name: Read bounded archive headers without extracting or running binaries
       run: |
-        set -euo pipefail
-        binary="${RUNNER_TEMP}/asan-intentional-leak"
-        log="${RUNNER_TEMP}/asan-intentional-leak.log"
-        trap 'rm -f "${binary}" "${log}"' EXIT
-        rustc +nightly-2026-07-01 -Z sanitizer=address -C debuginfo=1 \
-          --target x86_64-unknown-linux-gnu \
-          scripts/asan/intentional-leak.rs -o "${binary}"
-        set +e
-        ASAN_SYMBOLIZER_PATH="/usr/bin/llvm-symbolizer-18" \
-          "${binary}" 2>&1 | tee "${log}"
-        status=${PIPESTATUS[0]}
-        set -e
-        test "${status}" -ne 0
-        grep -Fqx "SUMMARY: AddressSanitizer: 1234 byte(s) leaked in 1 allocation(s)." "${log}"
-        ! grep -F "Suppressions used:" "${log}"
-        ! grep -F "bevy_reflect::utility::GenericTypeCell" "${log}"
-    - name: Run the unchanged remainder-1 commands with a capacity guard
-      env:
-        ASAN_SHARD: remainder-1
-        ASAN_OPTIONS: detect_leaks=1:detect_odr_violation=0
-        LSAN_OPTIONS: suppressions=${{ github.workspace }}/scripts/asan/bevy-reflect.lsan:print_suppressions=1
-      run: |
-        set -euo pipefail
-        test -x "/usr/bin/llvm-symbolizer-18"
-        nextest_args=(
-          +nightly-2026-07-01 nextest run
-          --archive-file "${RUNNER_TEMP}/asan-archive/asan-tests.tar.zst"
-          --extract-to "${GITHUB_WORKSPACE}"
-          --extract-overwrite
-          --workspace-remap "${GITHUB_WORKSPACE}"
-          --user-config-file none
-          --ignore-default-filter
-          --success-output final
-          --no-output-indent
-          --test-threads 2
-        )
-        run_asan_partition() {
-          ASAN_SYMBOLIZER_PATH="/usr/bin/llvm-symbolizer-18" \
-            python3 "${RUNNER_TEMP}/asan-consumer-capacity-probe.py" run \
-              cargo "${nextest_args[@]}" "$@"
-        }
-        case "${ASAN_SHARD}" in
-          bundle-coverage)
-            run_asan_partition \
-              -E 'binary_id(pos-conformance::bundle_contract_coverage_public)'
-            ;;
-          bundle-public-1)
-            run_asan_partition \
-              -E 'binary_id(pos-conformance::bundle_contract_public)' \
-              --partition slice:1/2 --run-ignored all
-            ;;
-          bundle-public-2)
-            run_asan_partition \
-              -E 'binary_id(pos-conformance::bundle_contract_public)' \
-              --partition slice:2/2 --run-ignored all
-            ;;
-          moat-proof)
-            run_asan_partition \
-              -E 'binary_id(pos-conformance::moat_proof_public)'
-            ;;
-          remainder-1)
-            run_asan_partition -E 'not package(pos-conformance)' \
-              --partition slice:1/2
-            run_asan_partition \
-              -E 'package(pos-conformance) & not (binary_id(pos-conformance::bundle_contract_coverage_public) | binary_id(pos-conformance::bundle_contract_public) | binary_id(pos-conformance::moat_proof_public))'
-            ;;
-          remainder-2)
-            run_asan_partition -E 'not package(pos-conformance)' \
-              --partition slice:2/2
-            ;;
-          *)
-            printf 'unknown ASan shard: %s\n' "${ASAN_SHARD}" >&2
-            exit 2
-            ;;
-        esac 2>&1 | tee "${RUNNER_TEMP}/asan.log"
-        python scripts/check_lsan_suppression_report.py "${RUNNER_TEMP}/asan.log"
+        command -v zstd
+        zstd --version
+        python3 "${RUNNER_TEMP}/asan-consumer-capacity-probe.py" inventory
     - name: Upload bounded numeric consumer report only
       if: ${{ always() }}
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
