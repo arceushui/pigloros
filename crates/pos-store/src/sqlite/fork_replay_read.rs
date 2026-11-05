@@ -187,7 +187,7 @@ mod tests {
     type Fallible<T> = Result<T, Box<dyn std::error::Error>>;
     type ReadTranscript = Arc<Mutex<Vec<(String, String, bool)>>>;
 
-    fn redact_projected_sequence(conn: &rusqlite::Connection) -> Fallible<ReadTranscript> {
+    fn redact_projected_sequence(conn: &mut rusqlite::Connection) -> Fallible<ReadTranscript> {
         let transcript = Arc::new(Mutex::new(Vec::new()));
         let observed = Arc::clone(&transcript);
         conn.authorizer(Some(move |request: AuthContext<'_>| {
@@ -289,7 +289,7 @@ mod tests {
             let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
             let bounds =
                 EventReadBounds::new_with_total_bytes_and_elapsed(1, 8, 1, 1, 9, 30_000_000);
-            let observed = redact_projected_sequence(&store.conn)?;
+            let observed = redact_projected_sequence(&mut store.conn)?;
             let failed = store.probe_replay_event(
                 &key,
                 (1, 1),

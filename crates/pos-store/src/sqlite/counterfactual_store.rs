@@ -1659,7 +1659,7 @@ mod tests {
     /// Make the next commit fail and its rollback fail too, so every write
     /// reports an unknown outcome although nothing committed.
     #[cfg_attr(coverage_nightly, coverage(off))]
-    pub(super) fn fail_commits(store: &SqliteStore, fail: bool) {
+    pub(super) fn fail_commits(store: &mut SqliteStore, fail: bool) {
         if fail {
             ok(store.conn.commit_hook(Some(|| true)));
         } else {
@@ -1674,9 +1674,9 @@ mod tests {
         let command = command(fork);
         let next = command.new_generation();
 
-        fail_commits(&store, true);
+        fail_commits(&mut store, true);
         let in_doubt = store.commit_counterfactual_invalidation(&command);
-        fail_commits(&store, false);
+        fail_commits(&mut store, false);
 
         assert_eq!(in_doubt, Err(StoreError::OutcomeUnknown));
         // The recovery read finds nothing committed at the new generation, so
@@ -1709,10 +1709,10 @@ mod tests {
         };
         let expected = receipt.tick_basis(receipt.first_tick_head());
 
-        fail_commits(&store, true);
+        fail_commits(&mut store, true);
         let tick = store.append_counterfactual_tick(fork, &expected, &drafts());
         let publication = store.publish_counterfactual_facts(fork, facts());
-        fail_commits(&store, false);
+        fail_commits(&mut store, false);
 
         assert_eq!(tick, Err(StoreError::OutcomeUnknown));
         assert_eq!(publication, Err(StoreError::OutcomeUnknown));
