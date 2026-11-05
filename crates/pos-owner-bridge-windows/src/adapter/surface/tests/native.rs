@@ -50,7 +50,7 @@ impl StaPump for Rc<Factory> {
 impl NativeFactory for Rc<Factory> {
     fn session(&self) -> NativeResult<Box<dyn NativeOperations>> {
         Ok(Box::new(Session {
-            factory: Rc::clone(self),
+            factory: Self::clone(self),
             folder: PathBuf::new(),
             environment_pending: false,
             controller_pending: false,

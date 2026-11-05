@@ -34,6 +34,8 @@ jobs:
         run: python scripts/check_owner_bridge_unsafe_policy.py
       - name: Lint native adapter and portable bridge
         run: cargo clippy -p pos-owner-bridge-windows -p pos-owner-bridge --all-features --all-targets --locked -- -D warnings -W clippy::pedantic
+      - name: Test safe controller-retirement regressions
+        run: 'cargo test -p pos-owner-bridge-windows --all-features --locked adapter::surface::tests:: -- --include-ignored'
       - name: Prepare retained runtime for real native fixtures
         id: runtime
         shell: pwsh

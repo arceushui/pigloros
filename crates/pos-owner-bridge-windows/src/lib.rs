@@ -22,7 +22,7 @@ pub(crate) mod adapter {
     mod events;
     mod host;
     mod loopback;
-    pub(crate) mod native_api;
+    pub mod native_api;
     mod overrides;
     mod platform;
     mod process;
@@ -33,17 +33,17 @@ pub(crate) mod adapter {
     mod surface;
 
     #[cfg(test)]
-    pub(crate) mod native_tests;
+    pub mod native_tests;
 
     pub use directory::{create_private_directory, verify_private_directory};
     pub use host::WindowsOwnerHost;
-    pub(crate) use loopback::SharedLoopback;
+    pub use loopback::SharedLoopback;
     pub use overrides::refuse_overrides;
     pub use platform::{cpu_requirements, require_windows_profile, CpuFeatures};
     pub use process::{process_identity, WindowsProcessProbe};
     pub use runtime::{verify_fixed_runtime, VerifiedRuntime};
     pub use socket::WindowsLoopbackBinder;
-    pub(crate) use store::WindowsCleanupStore;
+    pub use store::WindowsCleanupStore;
 }
 
 use adapter::{native_api, SharedLoopback, WindowsCleanupStore};
@@ -64,7 +64,7 @@ mod tests {
 
     use crate::WindowsLoopbackBinder;
 
-    pub(super) fn fixed_port_fixture() -> std::sync::MutexGuard<'static, ()> {
+    pub fn fixed_port_fixture() -> std::sync::MutexGuard<'static, ()> {
         static PORT: std::sync::Mutex<()> = std::sync::Mutex::new(());
         PORT.lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)

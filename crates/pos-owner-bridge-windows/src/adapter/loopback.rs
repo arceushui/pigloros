@@ -5,7 +5,7 @@ use pos_owner_bridge::listener::{ListenerConfig, LoopbackListener};
 use pos_owner_bridge::{BridgeError, LoopbackPort, ServedSnapshot, UnavailableCode};
 use std::sync::{Arc, Mutex};
 
-pub(crate) struct SharedLoopback(Arc<Mutex<LoopbackListener>>);
+pub struct SharedLoopback(Arc<Mutex<LoopbackListener>>);
 
 impl SharedLoopback {
     pub(super) fn start() -> Result<Self, BridgeError> {

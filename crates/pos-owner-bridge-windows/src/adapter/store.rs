@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 /// `OwnerBridge` uses a clone for restart admission. A poisoned lock refuses every
 /// operation; it never turns an incomplete read into an empty record list.
 #[derive(Clone)]
-pub(crate) struct WindowsCleanupStore(Arc<Mutex<Box<dyn CleanupStore + Send>>>);
+pub struct WindowsCleanupStore(Arc<Mutex<Box<dyn CleanupStore + Send>>>);
 
 impl WindowsCleanupStore {
     pub(super) fn new(store: impl CleanupStore + Send + 'static) -> Self {

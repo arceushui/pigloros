@@ -90,7 +90,7 @@ fn empty_session(native: &mut dyn NativeOperations) {
 
 /// Real SDK ownership and mappings, with malformed fixture input that the
 /// packaged page refuses before any authenticator request can begin.
-pub(crate) fn native_window_environment_and_buffers_lifecycle() -> TestResult {
+pub fn native_window_environment_and_buffers_lifecycle() -> TestResult {
     let _port = crate::tests::fixed_port_fixture();
     let root = FixtureRoot::new()?;
     let runtime_path = std::env::var_os("OWNER_BRIDGE_TEST_RUNTIME")
