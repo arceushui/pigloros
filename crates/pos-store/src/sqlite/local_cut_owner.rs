@@ -2240,7 +2240,7 @@ mod local_cut_owner_coverage {
     }
 
     fn deny_read(
-        connection: &Connection,
+        connection: &mut Connection,
         table: &'static str,
         column: &'static str,
         allowed: usize,
@@ -2264,7 +2264,7 @@ mod local_cut_owner_coverage {
         Ok(())
     }
 
-    fn clear_authorizer(connection: &Connection) -> TestResult {
+    fn clear_authorizer(connection: &mut Connection) -> TestResult {
         connection.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)?;
         Ok(())
     }
@@ -2525,7 +2525,7 @@ mod local_cut_owner_coverage {
 
     #[test]
     fn read_ports_fail_closed_without_a_snapshot_or_commit() -> TestResult {
-        let store = SqliteStore::open_in_memory()?;
+        let mut store = SqliteStore::open_in_memory()?;
         store.conn.execute_batch("BEGIN")?;
         assert_read_ports_fail(&store, LocalError::StorageFailure);
         store.conn.execute_batch("ROLLBACK")?;
@@ -2542,7 +2542,7 @@ mod local_cut_owner_coverage {
             }
         }))?;
         assert_read_ports_fail(&store, LocalError::StorageFailure);
-        clear_authorizer(&store.conn)?;
+        clear_authorizer(&mut store.conn)?;
 
         let orphaned = SqliteStore::open_in_memory()?;
         orphaned.conn.execute(
@@ -3414,7 +3414,7 @@ mod local_cut_owner_coverage {
 
     #[test]
     fn owner_link_snapshot_rejects_mistyped_or_undecodable_rows() -> TestResult {
-        let (fixture, second) = with_history()?;
+        let (mut fixture, second) = with_history()?;
         let store = &fixture.store;
         let newest = link_identity(&second)?;
         let oldest = link_identity(&fixture.batch)?;
@@ -3439,9 +3439,14 @@ mod local_cut_owner_coverage {
             })?;
             assert_eq!(read, Err(LocalError::CorruptState));
         }
-        deny_read(&store.conn, "world_dependency_branches", "node_cbor", 0)?;
-        let denied = link_snapshot(store, &store.conn, newest);
-        clear_authorizer(&store.conn)?;
+        deny_read(
+            &mut fixture.store.conn,
+            "world_dependency_branches",
+            "node_cbor",
+            0,
+        )?;
+        let denied = link_snapshot(&fixture.store, &fixture.store.conn, newest);
+        clear_authorizer(&mut fixture.store.conn)?;
         assert_eq!(denied, Err(LocalError::StorageFailure));
         Ok(())
     }
