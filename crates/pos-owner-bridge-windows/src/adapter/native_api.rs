@@ -24,7 +24,6 @@ pub(crate) enum Operation {
     Controller,
     Subscription,
     Settings,
-    Resource,
     Buffers,
     Text,
 }
@@ -193,15 +192,11 @@ pub(crate) enum EventKind {
     Content,
     DomLoaded,
     NavigationCompleted,
-    Frame,
-    ProcessFailed,
-    CloseRequested,
     NewWindow,
     Permission,
     Download,
     ExternalUri,
     Authentication,
-    ScriptDialog,
     Resource,
     BrowserExited,
 }

@@ -7,6 +7,9 @@ license.workspace = true
 publish.workspace = true
 description = "Windows-only WebView2 owner-bridge shim (ADR-110)"
 
+[target.'cfg(windows)'.dev-dependencies]
+pos-owner-bridge = { path = "../pos-owner-bridge", features = ["test-support"] }
+
 [target.'cfg(windows)'.dependencies]
 pos-owner-bridge = { path = "../pos-owner-bridge" }
 pos-owner-bridge-codec = { path = "../pos-owner-bridge-codec" }

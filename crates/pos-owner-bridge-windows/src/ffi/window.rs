@@ -53,12 +53,10 @@ pub(super) fn intercept(message: &MSG) -> bool {
             .borrow()
             .get(&(message.hwnd.0 as usize))
             .and_then(Weak::upgrade);
-        if let Some(signal) = signal {
+        signal.is_some_and(|signal| {
             signal.close_requested.set(true);
             true
-        } else {
-            false
-        }
+        })
     })
 }
 
@@ -98,7 +96,7 @@ fn register_class() -> std::result::Result<(), ()> {
     };
     // SAFETY: fixed class name and system procedure remain valid for the
     // process lifetime; initialized class references a live executable module.
-    if unsafe { RegisterClassW(&class) } == 0 {
+    if unsafe { RegisterClassW(&raw const class) } == 0 {
         return Err(());
     }
     Ok(())
@@ -265,14 +263,17 @@ impl Window {
 }
 
 fn initial_dpi(owner: Option<HWND>) -> u32 {
-    if let Some(owner) = owner {
-        // SAFETY: query the supplied opaque owner HWND; a zero readback fails
-        // later checked dimension conversion rather than selecting a fallback.
-        unsafe { GetDpiForWindow(owner) }
-    } else {
-        // SAFETY: scalar system DPI query for placement on the primary monitor.
-        unsafe { GetDpiForSystem() }
-    }
+    owner.map_or_else(
+        || {
+            // SAFETY: scalar system DPI query for placement on the primary monitor.
+            unsafe { GetDpiForSystem() }
+        },
+        |owner| {
+            // SAFETY: query the supplied opaque owner HWND; a zero readback fails
+            // later checked dimension conversion rather than selecting a fallback.
+            unsafe { GetDpiForWindow(owner) }
+        },
+    )
 }
 
 fn outer_rectangle(width: u32, height: u32, dpi: u32) -> Result<RECT> {

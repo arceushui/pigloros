@@ -21,6 +21,9 @@ use crate::VerifiedRuntime;
 mod opening;
 mod retirement;
 
+#[cfg(test)]
+mod tests;
+
 const WIDTH: u32 = 480;
 const HEIGHT: u32 = 640;
 
@@ -107,7 +110,7 @@ impl Surface {
         })
     }
 
-    pub(super) fn set_deadline(&mut self, deadline: Instant) {
+    pub(super) const fn set_deadline(&mut self, deadline: Instant) {
         self.deadline = deadline;
     }
     pub(super) fn idle(&self) -> bool {

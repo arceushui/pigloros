@@ -99,10 +99,10 @@ impl Pump {
         }
         // SAFETY: only a successful GetMessage result is translated. Its BOOL
         // reports whether translation occurred, not success/failure.
-        let _translated = unsafe { TranslateMessage(&message) };
+        let _translated = unsafe { TranslateMessage(&raw const message) };
         // SAFETY: the same valid initialized message is dispatched on its
         // owning STA. The LRESULT is the procedure's message-specific result.
-        let _result = unsafe { DispatchMessageW(&message) };
+        let _result = unsafe { DispatchMessageW(&raw const message) };
         Ok(NativePulse::Dispatched)
     }
 

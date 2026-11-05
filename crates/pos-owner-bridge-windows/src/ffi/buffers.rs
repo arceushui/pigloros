@@ -63,7 +63,7 @@ impl Mapping {
             return Err(unavailable());
         }
         let base = self.base.ok_or_else(unavailable)?;
-        let pointer = base.as_ptr().wrapping_add(index * 8).cast::<u64>();
+        let pointer = base.cast::<u64>().as_ptr().wrapping_add(index);
         // SAFETY: the admitted live COM mapping is 64-byte aligned; the checked
         // eight-byte range is in-bounds and excludes the two 32-bit control
         // words. This borrow cannot outlive self or a mutable close operation.
@@ -74,14 +74,14 @@ impl Mapping {
         let base = self.base.ok_or_else(unavailable)?;
         // SAFETY: all fixed capacities contain the aligned 32-bit state at40;
         // the live COM mapping outlives this borrow. No 64-bit access overlaps it.
-        Ok(unsafe { AtomicU32::from_ptr(base.as_ptr().wrapping_add(40).cast::<u32>()) })
+        Ok(unsafe { AtomicU32::from_ptr(base.cast::<u32>().as_ptr().wrapping_add(10)) })
     }
 
     fn flags(&self) -> Result<&AtomicU32> {
         let base = self.base.ok_or_else(unavailable)?;
         // SAFETY: the aligned zero-flags word at44 is inside every admitted
         // mapping and disjoint from state. No 64-bit access spans either word.
-        Ok(unsafe { AtomicU32::from_ptr(base.as_ptr().wrapping_add(44).cast::<u32>()) })
+        Ok(unsafe { AtomicU32::from_ptr(base.cast::<u32>().as_ptr().wrapping_add(11)) })
     }
 
     fn initialize(&self, bytes: &[u8]) -> Result<()> {

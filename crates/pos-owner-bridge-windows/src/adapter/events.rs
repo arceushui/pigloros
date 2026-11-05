@@ -30,19 +30,20 @@ impl Events {
     pub(super) fn begin(&self) {
         self.allow_start.set(true);
     }
-    pub(super) fn started(&self) -> Option<NavigationId> {
+    pub(super) const fn started(&self) -> Option<NavigationId> {
         self.started.get()
     }
-    pub(super) fn loaded(&self) -> Option<NavigationId> {
+    pub(super) const fn loaded(&self) -> Option<NavigationId> {
         self.loaded.get()
     }
-    pub(super) fn invalid(&self) -> bool {
+    pub(super) const fn invalid(&self) -> bool {
         self.invalid.get()
     }
-    pub(super) fn exited(&self) -> Option<u32> {
+    pub(super) const fn exited(&self) -> Option<u32> {
         self.exited.get()
     }
-    pub(super) fn blocked_resources(&self) -> u32 {
+    #[cfg(test)]
+    pub(super) const fn blocked_resources(&self) -> u32 {
         self.blocked_resources.get()
     }
 
@@ -213,10 +214,6 @@ impl EventSink for Events {
             | EventKind::Content
             | EventKind::DomLoaded
             | EventKind::NavigationCompleted
-            | EventKind::Frame
-            | EventKind::ProcessFailed
-            | EventKind::CloseRequested
-            | EventKind::ScriptDialog
             | EventKind::BrowserExited => NativeAction::Observe,
         }
     }

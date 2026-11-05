@@ -63,13 +63,11 @@ impl WindowsOwnerHost {
         let worker = thread::Builder::new()
             .name("piglor-owner-sta".to_owned())
             .spawn(move || {
-                let factory = match crate::Native::owner_factory() {
-                    Ok(factory) => Rc::new(factory),
-                    Err(_) => {
-                        let _sent = ready.send(Err(UNAVAILABLE));
-                        return;
-                    }
+                let Ok(factory) = crate::Native::owner_factory() else {
+                    let _sent = ready.send(Err(UNAVAILABLE));
+                    return;
                 };
+                let factory = Rc::new(factory);
                 let shared_factory = Rc::clone(&factory);
                 let surface = Surface::new(
                     shared_factory,
@@ -79,12 +77,9 @@ impl WindowsOwnerHost {
                     Box::new(store.clone()),
                     Box::new(SystemClock),
                 );
-                let surface = match surface {
-                    Ok(surface) => surface,
-                    Err(_) => {
-                        let _sent = ready.send(Err(UNAVAILABLE));
-                        return;
-                    }
+                let Ok(surface) = surface else {
+                    let _sent = ready.send(Err(UNAVAILABLE));
+                    return;
                 };
                 // A caller never receives a host whose apartment, independent
                 // timer and initial native session have not been constructed.
@@ -93,9 +88,10 @@ impl WindowsOwnerHost {
                 }
                 // Surface/driver/keeper owners have all gone before the last
                 // factory and apartment are released on this creating thread.
-                if let Ok(mut factory) = Rc::try_unwrap(factory) {
+                let factory = Rc::try_unwrap(factory);
+                if let Ok(mut factory) = factory {
                     let _stopped = factory.stop();
-                };
+                }
             })
             .map_err(|_| UNAVAILABLE)?;
         match started.recv() {
@@ -155,7 +151,7 @@ struct Worker {
 }
 
 impl Worker {
-    fn new(
+    const fn new(
         endpoint: SurfaceEndpoint,
         surface: Surface,
         loopback: SharedLoopback,

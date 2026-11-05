@@ -265,9 +265,9 @@ pub(super) fn observe_options(
     Ok((
         arguments,
         EnvironmentOptions {
-            exclusive_folder,
-            custom_crash_reporting,
             extensions,
+            custom_crash_reporting,
+            exclusive_folder,
         },
     ))
 }

@@ -20,10 +20,10 @@ use crate::native_api::{
 
 use super::{buffers::Pair, creation, environment::Environment, events, pump, settings, window};
 
-pub(crate) struct Factory(pump::Pump);
+struct Factory(pump::Pump);
 
 impl crate::Native {
-    pub(crate) fn owner_factory() -> NativeResult<Factory> {
+    pub(crate) fn owner_factory() -> NativeResult<impl NativeFactory> {
         Factory::new()
     }
 }
@@ -63,7 +63,7 @@ impl NativeFactory for Factory {
     }
 }
 
-pub(crate) struct Session {
+struct Session {
     window: Option<window::Window>,
     environment_creation: Option<creation::EnvironmentCreation>,
     controller_creation: Option<creation::ControllerCreation>,

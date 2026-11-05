@@ -147,6 +147,26 @@ pub(crate) fn native_window_environment_and_buffers_lifecycle() -> TestResult {
     assert!(!events.invalid());
     assert_eq!(listener.served().count, 1);
     assert_eq!(native.source()?.as_str(), crate::native_api::OWNER_URL);
+    exercise_buffers(&factory, native.as_mut())?;
+    native.unsubscribe_view()?;
+    native.unsubscribe_view()?;
+    native.close_controller()?;
+    native.close_controller()?;
+    pump_until(&factory, || events.exited() == Some(identity.browser_pid))?;
+    assert!(native.drop_environment().is_err()); // Exit subscription still owned.
+    native.unsubscribe_exit()?;
+    native.unsubscribe_exit()?;
+    native.drop_environment()?;
+    native.destroy_window()?;
+    native.destroy_window()?;
+    empty_session(native.as_mut());
+    drop(native);
+    factory.stop()?;
+    listener.shutdown();
+    Ok(())
+}
+
+fn exercise_buffers(factory: &dyn StaPump, native: &mut dyn NativeOperations) -> TestResult {
     let id = CeremonyId::from_bytes([1; 16]);
     let mut request = [0; 4096];
     request[..64].copy_from_slice(
@@ -172,7 +192,7 @@ pub(crate) fn native_window_environment_and_buffers_lifecycle() -> TestResult {
     native.post(BufferSlot::Request)?;
     native.post(BufferSlot::Reply)?;
     let mut observed = Ok(0);
-    pump_until(&factory, || {
+    pump_until(factory, || {
         observed = native.load_state();
         observed
             .as_ref()
@@ -183,7 +203,7 @@ pub(crate) fn native_window_environment_and_buffers_lifecycle() -> TestResult {
         ControlState::Failed as u32,
         ControlState::ReleaseRequested as u32
     )?);
-    pump_until(&factory, || {
+    pump_until(factory, || {
         native
             .load_state()
             .is_ok_and(|value| value == ControlState::Releasing as u32)
@@ -191,20 +211,5 @@ pub(crate) fn native_window_environment_and_buffers_lifecycle() -> TestResult {
     native.close_buffers()?;
     native.close_buffers()?;
     assert!(native.load_state().is_err());
-    native.unsubscribe_view()?;
-    native.unsubscribe_view()?;
-    native.close_controller()?;
-    native.close_controller()?;
-    pump_until(&factory, || events.exited() == Some(identity.browser_pid))?;
-    assert!(native.drop_environment().is_err()); // Exit subscription still owned.
-    native.unsubscribe_exit()?;
-    native.unsubscribe_exit()?;
-    native.drop_environment()?;
-    native.destroy_window()?;
-    native.destroy_window()?;
-    empty_session(native.as_mut());
-    drop(native);
-    factory.stop()?;
-    listener.shutdown();
     Ok(())
 }

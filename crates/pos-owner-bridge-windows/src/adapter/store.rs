@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 /// A synchronized handle to the same cleanup store used by the surface STA.
 ///
-/// OwnerBridge uses a clone for restart admission. A poisoned lock refuses every
+/// `OwnerBridge` uses a clone for restart admission. A poisoned lock refuses every
 /// operation; it never turns an incomplete read into an empty record list.
 #[derive(Clone)]
 pub(crate) struct WindowsCleanupStore(Arc<Mutex<Box<dyn CleanupStore + Send>>>);

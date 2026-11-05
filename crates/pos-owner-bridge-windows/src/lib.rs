@@ -15,7 +15,7 @@ mod ffi;
 // its associated operations are accessible only inside this crate.
 struct Native;
 #[forbid(unsafe_code)]
-mod adapter {
+pub(crate) mod adapter {
     // The inline boundary and each child file are separate lint scopes. This
     // retains both ADR-110 checks without duplicate attributes on one module.
     mod directory;
@@ -64,7 +64,7 @@ mod tests {
 
     use crate::WindowsLoopbackBinder;
 
-    pub(crate) fn fixed_port_fixture() -> std::sync::MutexGuard<'static, ()> {
+    pub(super) fn fixed_port_fixture() -> std::sync::MutexGuard<'static, ()> {
         static PORT: std::sync::Mutex<()> = std::sync::Mutex::new(());
         PORT.lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
