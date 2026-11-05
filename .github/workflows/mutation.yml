@@ -15,9 +15,6 @@ jobs:
     name: ASan read-only archive inventory diagnostic
     runs-on: ubuntu-24.04
     timeout-minutes: 60
-    env:
-      PROBE_RUNNER_ENVIRONMENT: ${{ runner.environment }}
-      PROBE_RUNNER_OS: ${{ runner.os }}
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       with:
@@ -34,6 +31,9 @@ jobs:
         test "$(git rev-parse HEAD)" = "fa5b199853290bc21187b48efce96ad030a0c86e"
         test "$(git rev-parse HEAD^{tree})" = "cea76bff501e81e6079eaf290a09d4bde64b543e"
         python3 "${RUNNER_TEMP}/asan-consumer-capacity-probe.py" snapshot before-setup
+      env:
+        PROBE_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        PROBE_RUNNER_OS: ${{ runner.os }}
     - name: Reclaim unused SDK headroom
       if: ${{ runner.environment == 'github-hosted' && runner.os == 'Linux' }}
       run: |
@@ -66,6 +66,9 @@ jobs:
     - name: Measure after unchanged SDK cleanup
       run: |
         python3 "${RUNNER_TEMP}/asan-consumer-capacity-probe.py" snapshot after-sdk
+      env:
+        PROBE_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        PROBE_RUNNER_OS: ${{ runner.os }}
     - run: rm -f rust-toolchain.toml
     - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
       with:
@@ -84,6 +87,9 @@ jobs:
     - name: Measure and guard archive download headroom
       run: |
         python3 "${RUNNER_TEMP}/asan-consumer-capacity-probe.py" snapshot before-download
+      env:
+        PROBE_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        PROBE_RUNNER_OS: ${{ runner.os }}
     - name: Download ASan test archive
       uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
       with:
@@ -95,11 +101,17 @@ jobs:
       run: |
         test -f "${RUNNER_TEMP}/asan-archive/asan-tests.tar.zst"
         python3 "${RUNNER_TEMP}/asan-consumer-capacity-probe.py" snapshot after-download
+      env:
+        PROBE_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        PROBE_RUNNER_OS: ${{ runner.os }}
     - name: Read bounded archive headers without extracting or running binaries
       run: |
         command -v zstd
         zstd --version
         python3 "${RUNNER_TEMP}/asan-consumer-capacity-probe.py" inventory
+      env:
+        PROBE_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        PROBE_RUNNER_OS: ${{ runner.os }}
     - name: Upload bounded numeric consumer report only
       if: ${{ always() }}
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
