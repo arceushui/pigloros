@@ -2755,7 +2755,7 @@ mod local_cut_owner_coverage {
 
     #[test]
     fn operation_lookup_and_insert_reject_corrupt_or_existing_cuts() -> TestResult {
-        let fixture = committed()?;
+        let mut fixture = committed()?;
         let connection = &fixture.store.conn;
         let batch = &fixture.batch;
         let op_id = batch.request().operation_id;
@@ -2785,15 +2785,23 @@ mod local_cut_owner_coverage {
         let renamed = [hash(119).as_bytes().to_vec()];
         let renamed_insert = after_cut_update(connection, "operation_id = ?1", &renamed, insert)?;
         assert_eq!(renamed_insert, conflict);
-        deny_read(connection, "local_cut_owner_cuts", "operation_id", 0)?;
-        assert_eq!(insert(connection), Some(LocalError::StorageFailure));
-        clear_authorizer(connection)?;
+        deny_read(
+            &mut fixture.store.conn,
+            "local_cut_owner_cuts",
+            "operation_id",
+            0,
+        )?;
+        assert_eq!(
+            insert(&fixture.store.conn),
+            Some(LocalError::StorageFailure)
+        );
+        clear_authorizer(&mut fixture.store.conn)?;
         Ok(())
     }
 
     #[test]
     fn owner_state_read_rejects_inconsistent_visible_cuts() -> TestResult {
-        let fixture = committed()?;
+        let mut fixture = committed()?;
         let connection = &fixture.store.conn;
         let read = |conn: &Connection| sqlite_read_local_cut_owner_state(conn, OWNER).err();
         let corrupt = Some(LocalError::CorruptState);
@@ -2814,20 +2822,25 @@ mod local_cut_owner_coverage {
         ] {
             assert_eq!(with_rollback(connection, setup, read)?, corrupt, "{setup}");
         }
-        deny_read(connection, "local_cut_owner_cuts", "cut_id", 0)?;
+        deny_read(&mut fixture.store.conn, "local_cut_owner_cuts", "cut_id", 0)?;
         assert_eq!(
             fixture.store.read_local_cut_owner_state_v1(OWNER),
             Err(LocalError::StorageFailure)
         );
-        clear_authorizer(connection)?;
-        deny_read(connection, "local_cut_owner_cuts", "receipt_cbor", 1)?;
+        clear_authorizer(&mut fixture.store.conn)?;
+        deny_read(
+            &mut fixture.store.conn,
+            "local_cut_owner_cuts",
+            "receipt_cbor",
+            1,
+        )?;
         assert_eq!(
             fixture
                 .store
                 .read_local_cut_owner_commit_v1(OWNER, FIRST_CUT.cut_id),
             Err(LocalError::StorageFailure)
         );
-        clear_authorizer(connection)?;
+        clear_authorizer(&mut fixture.store.conn)?;
         Ok(())
     }
 
@@ -3020,7 +3033,7 @@ mod local_cut_owner_coverage {
 
     #[test]
     fn admitted_state_read_rejects_orphan_or_unreadable_local_cut_rows() -> TestResult {
-        let fixture = admitted()?;
+        let mut fixture = admitted()?;
         let connection = &fixture.store.conn;
         let read = |conn: &Connection| sqlite_read_manifest_owner_current_state(conn, OWNER).err();
         assert_eq!(read(connection), None);
@@ -3028,13 +3041,21 @@ mod local_cut_owner_coverage {
              SELECT owner_id, zeroblob(16) FROM manifest_owner_admission_state";
         let orphaned = with_rollback(connection, orphan, read)?;
         assert_eq!(orphaned, Some(AdmissionError::CorruptState));
-        deny_read(connection, "local_cut_owner_state_timelines", "owner_id", 0)?;
-        assert_eq!(read(connection), Some(AdmissionError::StorageFailure));
-        clear_authorizer(connection)?;
+        deny_read(
+            &mut fixture.store.conn,
+            "local_cut_owner_state_timelines",
+            "owner_id",
+            0,
+        )?;
+        assert_eq!(
+            read(&fixture.store.conn),
+            Some(AdmissionError::StorageFailure)
+        );
+        clear_authorizer(&mut fixture.store.conn)?;
         let damaged = "UPDATE manifest_owner_admissions SET scope = X'01'
              WHERE timeline_id = (SELECT MAX(timeline_id) FROM manifest_owner_admissions)";
         let store = &fixture.store;
-        let snapshot = with_rollback(connection, damaged, |_| {
+        let snapshot = with_rollback(&fixture.store.conn, damaged, |_| {
             store.read_manifest_owner_admission_v1(OWNER, 1, TIMELINES[0])
         })?;
         assert_eq!(snapshot.err(), Some(AdmissionError::CorruptState));
@@ -3200,20 +3221,36 @@ mod local_cut_owner_coverage {
 
     #[test]
     fn world_recording_reads_report_unreadable_rows() -> TestResult {
-        let fixture = committed()?;
+        let mut fixture = committed()?;
         let connection = &fixture.store.conn;
-        deny_read(connection, "local_cut_world_recordings", "receipt_cbor", 0)?;
-        let recordings = sqlite_local_cut_world_recordings(connection, OWNER, FIRST_CUT.cut_id);
+        deny_read(
+            &mut fixture.store.conn,
+            "local_cut_world_recordings",
+            "receipt_cbor",
+            0,
+        )?;
+        let recordings =
+            sqlite_local_cut_world_recordings(&fixture.store.conn, OWNER, FIRST_CUT.cut_id);
         assert_eq!(recordings.err(), Some(LocalError::StorageFailure));
-        clear_authorizer(connection)?;
-        deny_read(connection, "local_cut_world_recordings", "binding_hash", 0)?;
-        let latest = sqlite_latest_local_cut_world_binding(connection, OWNER, timeline(1));
+        clear_authorizer(&mut fixture.store.conn)?;
+        deny_read(
+            &mut fixture.store.conn,
+            "local_cut_world_recordings",
+            "binding_hash",
+            0,
+        )?;
+        let latest = sqlite_latest_local_cut_world_binding(&fixture.store.conn, OWNER, timeline(1));
         assert_eq!(latest, Err(LocalError::StorageFailure));
-        clear_authorizer(connection)?;
-        deny_read(connection, "world_dependency_branches", "node_hash", 0)?;
-        let exists = sqlite_world_dependency_branch_exists(connection, hash(1), hash(2));
+        clear_authorizer(&mut fixture.store.conn)?;
+        deny_read(
+            &mut fixture.store.conn,
+            "world_dependency_branches",
+            "node_hash",
+            0,
+        )?;
+        let exists = sqlite_world_dependency_branch_exists(&fixture.store.conn, hash(1), hash(2));
         assert_eq!(exists, Err(LocalError::StorageFailure));
-        clear_authorizer(connection)?;
+        clear_authorizer(&mut fixture.store.conn)?;
         Ok(())
     }
 

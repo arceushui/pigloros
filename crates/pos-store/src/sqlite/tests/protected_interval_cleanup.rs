@@ -50,6 +50,13 @@ impl ReadOnlyFixture {
             .ok_or_else(|| "missing writer reservation".into())
     }
 
+    fn writer_mut(&mut self) -> Fallible<&mut Connection> {
+        self.store
+            .writer_reservation_connection
+            .as_mut()
+            .ok_or_else(|| "missing writer reservation".into())
+    }
+
     fn assert_released(&self) -> Fallible<()> {
         assert!(self.store.conn.is_autocommit());
         assert!(self.writer()?.is_autocommit());
@@ -216,11 +223,11 @@ fn read_only_reader_rollback_refusal_still_releases_the_writer() -> Fallible<()>
 
 #[test]
 fn read_only_writer_commit_refusal_falls_back_to_rollback() -> Fallible<()> {
-    let fixture = ReadOnlyFixture::new()?;
+    let mut fixture = ReadOnlyFixture::new()?;
     let interval = fixture.store.begin_protected_effect_interval()?;
     assert_eq!(interval, ErasureProtectedEffectIntervalV1::Owned);
     // Pinned rusqlite maps COMMIT to Unknown, not Release or a Commit variant.
-    let attempts = deny_transaction(fixture.writer()?, TransactionOperation::Unknown)?;
+    let attempts = deny_transaction(fixture.writer_mut()?, TransactionOperation::Unknown)?;
     assert_eq!(
         fixture.store.finish_protected_effect_interval(
             interval,
@@ -229,16 +236,16 @@ fn read_only_writer_commit_refusal_falls_back_to_rollback() -> Fallible<()> {
         Err(ErasureErrorV1::ReceiptCommitFailed)
     );
     assert_eq!(attempts.load(Ordering::SeqCst), 1);
-    allow_all(fixture.writer()?)?;
+    allow_all(fixture.writer_mut()?)?;
     fixture.assert_released()
 }
 
 #[test]
 fn read_only_writer_rollback_refusal_attempts_fallback_without_claiming_release() -> Fallible<()> {
-    let fixture = ReadOnlyFixture::new()?;
+    let mut fixture = ReadOnlyFixture::new()?;
     let interval = fixture.store.begin_protected_effect_interval()?;
     assert_eq!(interval, ErasureProtectedEffectIntervalV1::Owned);
-    let attempts = deny_transaction(fixture.writer()?, TransactionOperation::Rollback)?;
+    let attempts = deny_transaction(fixture.writer_mut()?, TransactionOperation::Rollback)?;
     assert_eq!(
         fixture.store.finish_protected_effect_interval(
             interval,
@@ -249,7 +256,7 @@ fn read_only_writer_rollback_refusal_attempts_fallback_without_claiming_release(
     assert_eq!(attempts.load(Ordering::SeqCst), 2);
     assert!(fixture.store.conn.is_autocommit());
     assert!(!fixture.writer()?.is_autocommit());
-    allow_all(fixture.writer()?)?;
+    allow_all(fixture.writer_mut()?)?;
     fixture.writer()?.execute_batch("ROLLBACK")?;
     fixture.assert_released()
 }
