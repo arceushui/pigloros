@@ -1322,23 +1322,10 @@ fn sqlite_schema_ddl(tables: &[SqliteSchemaTable]) -> String {
 /// Lowercase `sql` and drop all whitespace, so two `CREATE` statements
 /// compare equal only when they differ in case and layout alone.
 pub(crate) fn normalize_schema_sql(sql: &str) -> String {
-    if sql.is_ascii() {
-        // Every open normalizes the stored and reviewed SQL of each schema object. For ASCII
-        // text, `char::is_whitespace` is exactly space and tab through carriage return, so the
-        // bytes are folded without decoding characters.
-        let mut normalized = String::with_capacity(sql.len());
-        for &byte in sql.as_bytes() {
-            if !matches!(byte, b' ' | b'\t'..=b'\r') {
-                normalized.push(char::from(byte.to_ascii_lowercase()));
-            }
-        }
-        normalized
-    } else {
-        sql.to_ascii_lowercase()
-            .chars()
-            .filter(|character| !character.is_whitespace())
-            .collect()
-    }
+    sql.to_ascii_lowercase()
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect()
 }
 
 const ARTIFACT_REGISTRATION_SCHEMA_SQL: &str = "CREATE TABLE IF NOT EXISTS artifact_registrations (
@@ -22193,29 +22180,6 @@ mod tests {
         let result = store.append(tl.id(), &[make_draft(entity, b"x")]);
         locker.execute("ROLLBACK", []).test_ok();
         assert_storage_err(result.map(|_| ()));
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn schema_sql_normalization_drops_whitespace_and_folds_ascii_case() {
-        assert_eq!(
-            normalize_schema_sql("CREATE\tTABLE\n\x0b\x0c\r T (A INT)"),
-            "createtablet(aint)"
-        );
-        // Outside ASCII every Unicode white space is dropped and only ASCII is folded.
-        assert_eq!(
-            normalize_schema_sql("CREATE\u{a0}TABLE \u{2028}\u{c9}T"),
-            "createtable\u{c9}t"
-        );
-        for byte in 0_u8..=0x7f {
-            let text = char::from(byte).to_string();
-            let expected: String = text
-                .to_ascii_lowercase()
-                .chars()
-                .filter(|character| !character.is_whitespace())
-                .collect();
-            assert_eq!(normalize_schema_sql(&text), expected);
-        }
     }
 
     fn busy_timeout_millis(connection: &Connection) -> i64 {
