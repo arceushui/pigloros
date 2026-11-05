@@ -6,9 +6,9 @@ use ciborium::value::Value;
 use ed25519_dalek::{Signer, SigningKey};
 use pos_conformance::{BundleContractErrorV1, BundleMemberRoleV1, ConformanceBundleV1};
 use support::{
-    array_field, array_mut, assert_independent_rejects, current_archive as materialized_archive,
-    encode_value as encode, member_bytes, member_path_by_role, mutate_archive, mutate_member,
-    mutate_profile, mutate_release_admission, mutate_selected_fixture,
+    array_field, array_mut, assert_independent_rejects, current_archive, encode_value as encode,
+    member_bytes, member_path_by_role, mutate_archive, mutate_member, mutate_profile,
+    mutate_release_admission, mutate_selected_fixture,
     replace_archive_member_bytes as replace_member_bytes, update_typed_member,
 };
 use support::{
@@ -16,10 +16,6 @@ use support::{
     IndependenceRequirementField, ManifestField, MemberField, ProfileField, ProviderBindingField,
     ProviderKeyField, RecordField, ReleaseAdmissionField, TestResult, ARCHIVE_SIGNING_KEY,
 };
-
-fn current_archive() -> TestResult<Vec<u8>> {
-    materialized_archive("bundle-contract-coverage")
-}
 
 #[test]
 fn public_verifiers_require_one_draft_evidence_record_per_fixture() -> TestResult {

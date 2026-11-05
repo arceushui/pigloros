@@ -108,6 +108,52 @@ mod image_proof_cases {
     }
 
     #[test]
+    fn public_proof_verification_accepts_inclusive_certificate_time_endpoints() -> TestResult {
+        let fixture = fixture(PROOF, CERTIFICATE)?;
+        // The signed fixture's UTCTimes are 260928022435Z and 360925022435Z.
+        for time in [NOW, 1_790_562_275, 2_105_922_275] {
+            let result = verify(&fixture, time)?;
+            assert!(
+                result.is_ok(),
+                "signed certificate rejected at valid time {time}: {result:?}"
+            );
+        }
+        for time in [1_790_562_274, 2_105_922_276] {
+            assert_eq!(
+                verify(&fixture, time)?,
+                Err(SandboxImageProofError::CertificateTime),
+                "signed certificate accepted outside its validity interval at {time}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn public_proof_verification_accepts_zero_width_certificate_validity() -> TestResult {
+        verify(&fixture(PROOF, CERTIFICATE)?, NOW)??;
+        let proof = include_bytes!("../vectors/sim1-pkcs7/zero-width-proof.der");
+        let certificate = include_bytes!("../vectors/sim1-pkcs7/zero-width-signer.der");
+        let parsed = Certificate::from_der(certificate)?;
+        let validity = parsed.tbs_certificate.validity;
+        assert_eq!(validity.not_before.to_unix_duration().as_secs(), NOW);
+        assert_eq!(validity.not_after.to_unix_duration().as_secs(), NOW);
+        let fixture = fixture(proof, certificate)?;
+        let result = verify(&fixture, NOW)?;
+        assert!(
+            result.is_ok(),
+            "signed zero-width certificate rejected at its valid instant: {result:?}"
+        );
+        for time in [NOW - 1, NOW + 1] {
+            assert_eq!(
+                verify(&fixture, time)?,
+                Err(SandboxImageProofError::CertificateTime),
+                "signed zero-width certificate accepted outside its validity at {time}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn public_proof_verification_accepts_ski_and_absent_cms_parameters() -> TestResult {
         let certificate = Certificate::from_der(CERTIFICATE)?;
         let (_, key_id) = certificate

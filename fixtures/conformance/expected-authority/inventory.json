@@ -14,11 +14,11 @@
         "replay-v1"
       ],
       "expected_outcome": "VerifiedExact",
-      "fixture_bytes_path": null,
-      "fixture_bytes_digest": null,
-      "expected_result_path": null,
-      "expected_result_digest": null,
-      "materialization_status": "pending"
+      "fixture_bytes_path": "inputs/replay-conformance/positive.json",
+      "fixture_bytes_digest": "46ad7adc020075d107b46d4089fcf4ee0b88a0fc90326711e680448d9367946d",
+      "expected_result_path": "oracles/replay-conformance/positive.json",
+      "expected_result_digest": "691be23da24ea04c5bb27806dc687da177ced21a7bdd49b5be6e07cb151e869e",
+      "materialization_status": "materialized"
     },
     {
       "fixture_id": "PRF-001",
@@ -29,11 +29,11 @@
         "deterministic-local-v1"
       ],
       "expected_outcome": "VerifiedExact",
-      "fixture_bytes_path": null,
-      "fixture_bytes_digest": null,
-      "expected_result_path": null,
-      "expected_result_digest": null,
-      "materialization_status": "pending"
+      "fixture_bytes_path": "inputs/replay-conformance/positive.json",
+      "fixture_bytes_digest": "46ad7adc020075d107b46d4089fcf4ee0b88a0fc90326711e680448d9367946d",
+      "expected_result_path": "oracles/replay-conformance/positive.json",
+      "expected_result_digest": "691be23da24ea04c5bb27806dc687da177ced21a7bdd49b5be6e07cb151e869e",
+      "materialization_status": "materialized"
     },
     {
       "fixture_id": "PRF-002",
@@ -45,11 +45,11 @@
         "deterministic-local-v1"
       ],
       "expected_outcome": "VerifiedExact",
-      "fixture_bytes_path": null,
-      "fixture_bytes_digest": null,
-      "expected_result_path": null,
-      "expected_result_digest": null,
-      "materialization_status": "pending"
+      "fixture_bytes_path": "inputs/replay-conformance/positive.json",
+      "fixture_bytes_digest": "46ad7adc020075d107b46d4089fcf4ee0b88a0fc90326711e680448d9367946d",
+      "expected_result_path": "oracles/replay-conformance/positive.json",
+      "expected_result_digest": "691be23da24ea04c5bb27806dc687da177ced21a7bdd49b5be6e07cb151e869e",
+      "materialization_status": "materialized"
     },
     {
       "fixture_id": "DIV-001",
@@ -60,11 +60,11 @@
         "deterministic-local-v1"
       ],
       "expected_outcome": "Diverged",
-      "fixture_bytes_path": null,
-      "fixture_bytes_digest": null,
-      "expected_result_path": null,
-      "expected_result_digest": null,
-      "materialization_status": "pending"
+      "fixture_bytes_path": "inputs/replay-conformance/independent-evaluation.json",
+      "fixture_bytes_digest": "a275ceb603956f7590b66a2dc5e2fcbd873f33c76a622210bdd9a66481a6c48a",
+      "expected_result_path": "oracles/replay-conformance/independent-evaluation.json",
+      "expected_result_digest": "fb672bd0cad46e42a4ea2c5c3a91b98fb0bbf29041460b1547b485e7f3d281f3",
+      "materialization_status": "materialized"
     },
     {
       "fixture_id": "INV-001",
@@ -77,11 +77,11 @@
         "deterministic-local-v1"
       ],
       "expected_outcome": "InvalidManifest",
-      "fixture_bytes_path": null,
-      "fixture_bytes_digest": null,
-      "expected_result_path": null,
-      "expected_result_digest": null,
-      "materialization_status": "pending"
+      "fixture_bytes_path": "inputs/replay-conformance/malformed.json",
+      "fixture_bytes_digest": "25c8c91e82b8cc008c4b4a676739827c492a5f559d988fb14956a2f3dc002e3e",
+      "expected_result_path": "oracles/replay-conformance/malformed.json",
+      "expected_result_digest": "15cf931843d728c9812615f70060d6ed70b8099927773e1531a4f8c8bd15e14e",
+      "materialization_status": "materialized"
     },
     {
       "fixture_id": "INV-002",
@@ -94,11 +94,11 @@
         "deterministic-local-v1"
       ],
       "expected_outcome": "UnverifiableArtifactsMissing",
-      "fixture_bytes_path": null,
-      "fixture_bytes_digest": null,
-      "expected_result_path": null,
-      "expected_result_digest": null,
-      "materialization_status": "pending"
+      "fixture_bytes_path": "inputs/replay-conformance/deletion-redaction.json",
+      "fixture_bytes_digest": "a4645b03a149d03ec0046cc6c94c73d06abf31f892f31e0d37ae76866999e37f",
+      "expected_result_path": "oracles/replay-conformance/deletion-redaction.json",
+      "expected_result_digest": "c58b2b63a2e9ba5ab3445368fea5eaaf0d2d3fa5d1c9e253027dadf9f01be3a5",
+      "materialization_status": "materialized"
     },
     {
       "fixture_id": "INV-003",
@@ -111,11 +111,11 @@
         "deterministic-local-v1"
       ],
       "expected_outcome": "IncompatibleProfile",
-      "fixture_bytes_path": null,
-      "fixture_bytes_digest": null,
-      "expected_result_path": null,
-      "expected_result_digest": null,
-      "materialization_status": "pending"
+      "fixture_bytes_path": "inputs/replay-conformance/downgrade.json",
+      "fixture_bytes_digest": "4c83da36eb228afb9319b1b5a205f0e0138e642e240f2fa1273177f1c8ec9cd0",
+      "expected_result_path": "oracles/replay-conformance/downgrade.json",
+      "expected_result_digest": "325b6fdb0ae7fae21e122c88a06c8c8be8584d164b3939fc25595c75e5219097",
+      "materialization_status": "materialized"
     },
     {
       "fixture_id": "RES-001",
@@ -126,11 +126,11 @@
         "deterministic-local-v1"
       ],
       "expected_outcome": "ResourceLimitExceeded",
-      "fixture_bytes_path": null,
-      "fixture_bytes_digest": null,
-      "expected_result_path": null,
-      "expected_result_digest": null,
-      "materialization_status": "pending"
+      "fixture_bytes_path": "inputs/replay-conformance/resource-exhaustion.json",
+      "fixture_bytes_digest": "7e2a2d2ed82eb68103413bef6b30415d692cf2f7746dcd765774e66ffafde2ec",
+      "expected_result_path": "oracles/replay-conformance/resource-exhaustion.json",
+      "expected_result_digest": "91084d763d7bfd735ed92f2aa8fd6a70646477b0127fbdac71662f0bb9b284d3",
+      "materialization_status": "materialized"
     },
     {
       "fixture_id": "LIVE-001",
@@ -141,11 +141,11 @@
         "live-local-v1"
       ],
       "expected_outcome": "NonDeterministicAdmission",
-      "fixture_bytes_path": null,
-      "fixture_bytes_digest": null,
-      "expected_result_path": null,
-      "expected_result_digest": null,
-      "materialization_status": "pending"
+      "fixture_bytes_path": "inputs/replay-conformance/denied.json",
+      "fixture_bytes_digest": "0ab5a5bcf32af4d13f3f352bfa322393f7599b7c468aef4be01e6246af10a24c",
+      "expected_result_path": "oracles/replay-conformance/denied.json",
+      "expected_result_digest": "39d1dbfb8fbe135a69afe11323ef0910a2d106250da8994fa99f1ecea2b776f0",
+      "materialization_status": "materialized"
     },
     {
       "fixture_id": "ERA-001",
@@ -156,11 +156,11 @@
         "replay-v1"
       ],
       "expected_outcome": "OutcomePreservedReplayClaimDegraded",
-      "fixture_bytes_path": null,
-      "fixture_bytes_digest": null,
-      "expected_result_path": null,
-      "expected_result_digest": null,
-      "materialization_status": "pending"
+      "fixture_bytes_path": "inputs/replay-conformance/deletion-redaction.json",
+      "fixture_bytes_digest": "a4645b03a149d03ec0046cc6c94c73d06abf31f892f31e0d37ae76866999e37f",
+      "expected_result_path": "oracles/replay-conformance/deletion-redaction.json",
+      "expected_result_digest": "c58b2b63a2e9ba5ab3445368fea5eaaf0d2d3fa5d1c9e253027dadf9f01be3a5",
+      "materialization_status": "materialized"
     },
     {
       "fixture_id": "SEC-001",
@@ -173,11 +173,11 @@
         "deterministic-local-v1"
       ],
       "expected_outcome": "TypedFailure",
-      "fixture_bytes_path": null,
-      "fixture_bytes_digest": null,
-      "expected_result_path": null,
-      "expected_result_digest": null,
-      "materialization_status": "pending"
+      "fixture_bytes_path": "inputs/replay-conformance/denied.json",
+      "fixture_bytes_digest": "0ab5a5bcf32af4d13f3f352bfa322393f7599b7c468aef4be01e6246af10a24c",
+      "expected_result_path": "oracles/replay-conformance/denied.json",
+      "expected_result_digest": "39d1dbfb8fbe135a69afe11323ef0910a2d106250da8994fa99f1ecea2b776f0",
+      "materialization_status": "materialized"
     }
   ]
 }

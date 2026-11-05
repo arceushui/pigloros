@@ -33,6 +33,7 @@ use std::io;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use futures_util::TryFutureExt as _;
 use pos_reference::sandbox_provider_protocol::{
     LocalNetworkAdmission, LocalNetworkTermination, NetworkCaptureStore, NetworkCaptureStoreError,
     NetworkEndpointConnector, NetworkExchangePlan, NetworkExchangeTranscript,
@@ -213,6 +214,9 @@ pub struct ExecuteJob {
 /// Why an execution could not start or continue.
 #[derive(Debug, thiserror::Error)]
 pub enum ExecuteError {
+    /// This prepared directory's execution ownership was already consumed.
+    #[error("the attempt already has an execution owner")]
+    AttemptAlreadyClaimed,
     /// The authenticated limits cannot be enforced exactly on systemd.
     #[error(transparent)]
     Limits(#[from] crate::SystemdServiceLimitsError),
@@ -263,7 +267,7 @@ pub enum ExecuteError {
 /// What is known of the unit when an execution failed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UnitState {
-    /// No unit was submitted.
+    /// This call submitted no unit. A prior call may still own the unit.
     NotStarted,
     /// The unit was started or submitted, and SIGKILL was acknowledged for it.
     ///
@@ -416,6 +420,12 @@ struct Prepared<C> {
 ///
 /// The runtime must have its time driver enabled.
 ///
+/// All attempts reconstructed or cloned from the same prepared directory share
+/// one execution claim. It is consumed before preparing any execution resources
+/// and never reset by completion, refusal or cancellation. A retry must use a
+/// fresh admitted attempt and directory; neither an execution result nor a kill
+/// acknowledgement proves that the previous owner's resources are gone.
+///
 /// Dropping the returned future after the unit was submitted spawns a
 /// best-effort kill and stop of that unit on the current runtime, bounded like
 /// any other termination, so cancellation does not leave a released-looking
@@ -437,10 +447,21 @@ where
     B: LaunchBarrier + Send,
     N: LocalNetworkPort + Sync,
 {
-    let mut guard = SubmissionGuard::new();
-    let result = drive(host, barrier, network, job, recheck, &mut guard).await;
-    guard.disarm();
-    result
+    std::future::ready(
+        job.attempt
+            .claim_execution()
+            .map_err(|error| ExecuteFailure {
+                error,
+                unit: UnitState::NotStarted,
+            }),
+    )
+    .and_then(|()| async move {
+        let mut guard = SubmissionGuard::new();
+        let result = drive(host, barrier, network, job, recheck, &mut guard).await;
+        guard.disarm();
+        result
+    })
+    .await
 }
 
 /// The wall-clock bounds of one attempt: the unit's watchdog deadline for the

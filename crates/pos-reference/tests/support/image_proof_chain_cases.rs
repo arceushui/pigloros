@@ -101,6 +101,40 @@ mod chain_cases {
     }
 
     #[test]
+    fn public_proof_verification_rejects_signed_reversed_root_validity() -> TestResult {
+        // A coherent expired root remains allowed by the existing root-time policy.
+        verify(&fixture(CHAIN, CHAIN_SIGNER)?, NOW)??;
+        let proof = include_bytes!("../vectors/sim1-pkcs7/reversed-root-proof.der");
+        let signer = include_bytes!("../vectors/sim1-pkcs7/reversed-root-signer.der");
+        let outer = ContentInfo::from_der(proof)?;
+        let cms_data: SignedData = outer.content.decode_as()?;
+        let certificates = cms_data
+            .certificates
+            .ok_or("missing fixture certificates")?;
+        assert_eq!(certificates.0.len(), 2);
+        let mut roots = 0;
+        for choice in certificates.0.iter() {
+            let certificate = Certificate::from_der(&choice.to_der()?)?;
+            let tbs = certificate.tbs_certificate;
+            let start = tbs.validity.not_before.to_unix_duration().as_secs();
+            let end = tbs.validity.not_after.to_unix_duration().as_secs();
+            if tbs.issuer == tbs.subject {
+                roots += 1;
+                assert_eq!((start, end), (2_082_758_400, 1_767_225_600));
+            } else {
+                assert!(start < NOW && NOW < end);
+            }
+        }
+        assert_eq!(roots, 1);
+        assert_eq!(
+            verify(&fixture(proof, signer)?, NOW)?,
+            Err(SandboxImageProofError::CertificateTime),
+            "signed chain with reversed root validity must be rejected"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn public_proof_verification_checks_intermediate_time_and_signatures() -> TestResult {
         let (proof, leaf) = edited_chain(|certificates, _, _, intermediate| {
             let validity = &mut certificates[intermediate].tbs_certificate.validity;

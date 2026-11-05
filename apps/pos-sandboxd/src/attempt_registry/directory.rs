@@ -11,7 +11,7 @@ use super::{
     validate_directory, verify_intent, Arc, CommittedPlannedAttempt, File, MetadataExt, Mode,
     PlannedAttemptIntent, RenameFlags, ResolveFlags, SystemdAttemptRegistryError,
 };
-use crate::RootResourceIdentity;
+use crate::{ExecutionOwnership, RootResourceIdentity};
 
 pub(super) const DIRECTORY_RECORD_SIZE: usize = 84;
 
@@ -35,7 +35,9 @@ impl DirectoryIdentity {
 ///
 /// This owns the held descriptors and registry lock. It grants no mount or
 /// execution authority; current image/control admission is still required.
-/// Dropping it leaves the intent and directories for identity-safe recovery.
+/// Dropping it closes its unclaimed execution permission before closing these
+/// descriptors and leaves the intent and directories for identity-safe recovery.
+/// An already claimed execution is not cancelled or proved clean by this drop.
 #[derive(Debug)]
 pub struct PreparedAttemptDirectory {
     planned: CommittedPlannedAttempt,
@@ -43,7 +45,16 @@ pub struct PreparedAttemptDirectory {
     attempt: File,
     root: File,
     identities: [DirectoryIdentity; 2],
+    // Exact visible bytes after replacement, including an uncertain parent fsync.
+    // This permits verified cleanup without acknowledging durability or launch.
     recorded_root: OnceLock<RootRecord>,
+    execution: ExecutionOwnership,
+}
+
+impl Drop for PreparedAttemptDirectory {
+    fn drop(&mut self) {
+        self.execution.close();
+    }
 }
 
 impl CommittedPlannedAttempt {
@@ -98,6 +109,7 @@ impl CommittedPlannedAttempt {
             root,
             identities,
             recorded_root: OnceLock::new(),
+            execution: ExecutionOwnership::default(),
         };
         prepared.verify_tree()?;
         verify_intent(&prepared.planned.directory, &prepared.planned.intent)?;
@@ -107,6 +119,7 @@ impl CommittedPlannedAttempt {
             sequence,
             &prepared.directory_bytes(),
             RenameFlags::empty(),
+            || {},
         )?;
         prepared.verify_record_and_tree()?;
         Ok(prepared)
@@ -114,6 +127,10 @@ impl CommittedPlannedAttempt {
 }
 
 impl PreparedAttemptDirectory {
+    pub(crate) fn execution_ownership(&self) -> ExecutionOwnership {
+        self.execution.clone()
+    }
+
     /// The exact original planned ownership, preserved by the extension.
     #[must_use]
     pub const fn intent(&self) -> &PlannedAttemptIntent {
@@ -254,12 +271,12 @@ impl PreparedAttemptDirectory {
                             sequence,
                             record.bytes(),
                             RenameFlags::empty(),
+                            || {
+                                let _recorded = self.recorded_root.get_or_init(|| record.clone());
+                            },
                         )
                     })
-                    .and_then(|()| {
-                        let _recorded = self.recorded_root.get_or_init(|| record);
-                        self.verify_record()
-                    })
+                    .and_then(|()| self.verify_record())
             });
         state.failed |= result.is_err();
         result

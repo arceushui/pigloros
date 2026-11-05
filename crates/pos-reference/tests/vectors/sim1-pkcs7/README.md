@@ -58,6 +58,73 @@ trust anchor or grant it authority.
 | `signer.der` | 854 | `ed34156300de1831b61c44eaef5ba11f44db19bf793c2cfb78f89cc84b42c246` |
 | `proof.der` | 1271 | `773b7635b2b63568855d1e833f5db9e5c1c6588f7c8db86bf627b09eea3d7d68` |
 
+## Signed non-profile RSA fixtures
+
+`rsa-2047-*` and `rsa-3072-*` are independently signed negative fixtures for
+the public proof verifier's RSA-2048 profile. They retain coherent certificate
+dates, self-signatures and detached CMS signatures so a malformed or stale
+signature does not substitute for the profile check. The public test first
+accepts the original RSA-2048 fixture, checks each negative fixture's actual
+modulus bit length and exponent, then requires `UnsupportedProfile`.
+
+Both certificates are self-issued, serial 1, with validity from
+2026-01-01 00:00:00 UTC through 2036-01-01 00:00:00 UTC. This interval contains
+the fixed admission time, Unix second 1,800,000,000. The exponent is 65537.
+The 2047-bit modulus has 256 unsigned bytes beginning with `0x5f`; the
+3072-bit modulus has 384 unsigned bytes beginning with `0xbc`. Their respective
+certificate and CMS signatures have 256 and 384 bytes. These are profile
+rejection cases, not additional accepted RSA key sizes.
+
+OpenSSL 3.0.13 produced fresh keys using the following procedure in a disposable
+private directory containing the same `root-hash.txt` above. Use a separate
+private directory for each iteration, with an empty `index` file, a `newcerts`
+directory and a `serial` file containing `01`. Set `BITS` to 2047 or 3072:
+
+```sh
+openssl req -new -newkey "rsa:$BITS" -nodes -sha256 \
+  -keyout key.pem -out request.pem -subj "/CN=SIM1 RSA-$BITS fixture"
+openssl x509 -req -in request.pem -signkey key.pem \
+  -out bootstrap.pem -set_serial 2 -days 1 -sha256
+cat > ca.cnf <<'EOF'
+[ca]
+default_ca=fixture
+[fixture]
+database=index
+new_certs_dir=newcerts
+serial=serial
+default_md=sha256
+default_days=3650
+policy=subject
+x509_extensions=leaf
+unique_subject=no
+[subject]
+commonName=supplied
+[leaf]
+basicConstraints=critical,CA:FALSE
+keyUsage=critical,digitalSignature
+extendedKeyUsage=codeSigning
+EOF
+openssl ca -batch -selfsign -config ca.cnf -in request.pem \
+  -keyfile key.pem -cert bootstrap.pem -out certificate.pem -notext \
+  -startdate 20260101000000Z -enddate 20360101000000Z
+openssl x509 -in certificate.pem -outform DER -out "rsa-$BITS-signer.der"
+openssl smime -sign -binary -noattr -md sha256 -in root-hash.txt \
+  -signer certificate.pem -inkey key.pem -outform DER -out "rsa-$BITS-proof.der"
+```
+
+Discard the private keys after generation. Regeneration creates different
+bytes; check actual key geometry, certificate self-signatures and detached
+signatures against the exact content before updating the fixture hashes.
+These fixtures have the same one-certificate, detached, no-attributes CMS
+structure and algorithm parameter encodings as the original fixture.
+
+| File | Bytes | SHA-256 |
+| --- | ---: | --- |
+| `rsa-2047-signer.der` | 786 | `da0cfd0711c4b70066b2c9820be541b978d85a6c76796cff12663f3c2cc3b00e` |
+| `rsa-2047-proof.der` | 1186 | `27715660ee8b467618863f94a94cfbeb91da5c77ceffca7bc460bce1e19518fb` |
+| `rsa-3072-signer.der` | 1043 | `c26a10e3900bf34a4eb029142ccd512e37c2c4e1ca19961dafabbaaca7421985` |
+| `rsa-3072-proof.der` | 1571 | `5e12e3ed24e5b735710d1ebcaaae51b3337d101ba1ef9daca0eb8f6e7ad9894e` |
+
 Hosted workspace tests execute `sim1_pkcs7_interoperability`. The runtime
 OpenSSL dependency ban remains in force: OpenSSL is only the offline fixture
 producer, never a production verifier or subprocess fallback.
@@ -101,6 +168,75 @@ signing command above. Their private keys were discarded:
 These fixtures exercise proof verification only. They still do not supply a
 mountable image or systemd/kernel acceptance evidence.
 
+## Signed zero-width validity case
+
+`zero-width-signer.der` is a self-signed RSA-2048 certificate whose notBefore
+and notAfter are both 2027-01-15 08:00:00 UTC, Unix second 1,800,000,000. The
+matching `zero-width-proof.der` uses the same detached SHA-256/no-attributes
+profile and synthetic root-hash content as the original fixture. Its sole
+SignerInfo selects serial 1 and `CN=SIM1 zero-width fixture`; the certificate
+has critical CA:FALSE and digitalSignature, plus codeSigning EKU.
+
+The public proof-verifier test requires acceptance at that instant and
+CertificateTime one second before and after it, while retaining the original
+signed positive control. Both dates are asserted from the decoded fixture.
+This exercises the inclusive interval in
+[RFC 5280 section 4.1.2.5](https://www.rfc-editor.org/rfc/rfc5280#section-4.1.2.5)
+with valid certificate and content signatures. It does not establish a new
+root-expiry policy, systemd/kernel interoperability or a memory ceiling.
+
+The fixture was produced offline with OpenSSL 3.0.13 (library 3.0.13). Its
+private key was discarded. In a fresh disposable private directory containing
+the same 64-byte `root-hash.txt`, regeneration uses explicit equal dates:
+
+```sh
+umask 077
+mkdir issued
+: > index.txt
+printf '01\n' > serial
+cat > ca.cnf <<'CONFIG'
+[ca]
+default_ca = fixture_ca
+[fixture_ca]
+database = index.txt
+new_certs_dir = issued
+serial = serial
+certificate = bootstrap.pem
+private_key = key.pem
+default_md = sha256
+default_days = 1
+policy = fixture_policy
+x509_extensions = fixture_leaf
+[fixture_policy]
+commonName = supplied
+[fixture_leaf]
+basicConstraints = critical,CA:FALSE
+keyUsage = critical,digitalSignature
+extendedKeyUsage = codeSigning
+CONFIG
+openssl req -new -newkey rsa:2048 -nodes -sha256 \
+  -keyout key.pem -out request.pem -subj '/CN=SIM1 zero-width fixture'
+openssl x509 -req -in request.pem -signkey key.pem -sha256 \
+  -set_serial 2 -days 1 -out bootstrap.pem
+openssl ca -batch -selfsign -config ca.cnf -in request.pem \
+  -keyfile key.pem -cert bootstrap.pem -md sha256 -notext \
+  -startdate 20270115080000Z -enddate 20270115080000Z -out certificate.pem
+openssl x509 -in certificate.pem -outform DER -out zero-width-signer.der
+openssl smime -sign -binary -noattr -md sha256 \
+  -in root-hash.txt -signer certificate.pem -inkey key.pem \
+  -outform DER -out zero-width-proof.der
+```
+
+The bootstrap certificate supplies the disposable CA command's identity; the
+final certificate is self-signed with the same key and explicit fixed dates.
+Regeneration creates a fresh random key and different bytes, so update the
+fixture hashes. Only the two public DER files belong in the test corpus.
+
+| File | Bytes | SHA-256 |
+| --- | ---: | --- |
+| `zero-width-signer.der` | 791 | `38c8454f7ff7571531e206d20fb8653ce20c3c9b74fba2c16b42fcd4f0c71df3` |
+| `zero-width-proof.der` | 1193 | `3647dbf9334d1c29c2f42fd70d63db147de8a51fa575252f8830dc989d8133ce` |
+
 ## Hosted allocation evidence
 
 The `sim1-proof-risk` workflow builds the public admission test executable and
@@ -134,3 +270,63 @@ Measurements include fixture construction and the test harness. They exclude
 stack and RSS, and do not establish a production memory ceiling or replace
 systemd/kernel conformance. Inspect the allocation trees and independent review
 alongside the recorded peak before accepting the resource-risk evidence.
+
+## Signed reversed-root validity fixture
+
+`reversed-root-proof.der` contains one self-signed root (serial 1,
+`CN=SIM1 reversed fixture root`) and its directly issued signer (serial 2,
+`CN=SIM1 reversed fixture leaf`). Both keys are RSA-2048 with exponent 65537.
+The root's notBefore is 2036-01-01 00:00:00 UTC and its notAfter is
+2026-01-01 00:00:00 UTC. The leaf's interval has the same endpoints in the
+normal order, containing fixed admission time 1,800,000,000.
+
+The root's self-signature, leaf certificate signature and detached CMS signature
+are authentic. This isolates root interval coherence from signature corruption.
+The public verifier requires `CertificateTime`; the existing coherent expired
+root chain remains a passing control. Root expiry and reversed root dates are
+separate policy cases. This does not establish a new root-expiry requirement.
+
+To regenerate with OpenSSL 3.0.13 in a disposable private directory:
+
+1. Create fresh RSA-2048 root and leaf keys and CSRs. Issue the root with
+   `openssl ca -selfsign` and the leaf with `openssl ca`, setting
+   `-startdate 20260101000000Z -enddate 20360101000000Z` and serials 1 and 2.
+   The root has critical CA:TRUE/pathlen:0 and keyCertSign/cRLSign KU. The leaf
+   has critical CA:FALSE, digitalSignature KU and codeSigning EKU.
+2. Export the root's DER, exchange the two complete UTCTime elements in its
+   TBSCertificate validity sequence, and DER-encode that changed TBSCertificate
+   as `root-reversed-tbs.der`. Keep all its other fields unchanged. Sign it
+   with the root's private key:
+
+   ```sh
+   openssl dgst -sha256 -sign root.key \
+     -out root-reversed-signature.bin root-reversed-tbs.der
+   ```
+
+   Assemble the final certificate SEQUENCE from the changed TBSCertificate,
+   the original signatureAlgorithm and a BIT STRING containing zero unused
+   bits followed by that signature. Convert it to `root-reversed.pem` with
+   `openssl x509 -inform DER`. This signs the malformed interval deliberately;
+   editing a signed certificate without re-signing is not this fixture.
+3. Export the leaf as `reversed-root-signer.der`, then sign the same 64-byte
+   `root-hash.txt` and canonicalize the certificate SET:
+
+   ```sh
+   openssl smime -sign -binary -noattr -md sha256 -in root-hash.txt \
+     -signer leaf.pem -inkey leaf.key -certfile root-reversed.pem \
+     -outform DER -out proof-unsorted.der
+   openssl cms -cmsout -inform DER -in proof-unsorted.der \
+     -outform DER -out reversed-root-proof.der
+   ```
+
+Check both certificate signatures directly against the root's public key and
+the detached signature against the leaf's public key and exact content.
+OpenSSL's normal path-time policy is not the root-time policy tested here.
+Discard both private keys. Fresh keys change the bytes; update these hashes.
+CMS uses one v1 issuer-and-serial signer, SHA-256/RSA with NULL parameters,
+no embedded content, attributes or CRLs, and a 256-byte signature.
+
+| File | Bytes | SHA-256 |
+| --- | ---: | --- |
+| `reversed-root-signer.der` | 830 | `a9fc317b88600f95efc7a3417e19d41233107785de18946ecc09e0d4a05bec0b` |
+| `reversed-root-proof.der` | 2017 | `a022f225f52f410dda089625eb23144bf4df7e720ba81fc374b85fd961e2ca82` |

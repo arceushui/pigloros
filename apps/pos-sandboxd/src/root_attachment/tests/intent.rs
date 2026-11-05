@@ -7,6 +7,27 @@ mod cases {
     use crate::test_fixtures::{root_record_fixture, with_io_fault};
     use crate::SystemdAttemptRecovery;
 
+    fn root_publication_io_count() -> Result<usize, BoxError> {
+        let tree = prepared_tree()?;
+        let (kernel, root) = attached_root(&tree.prepared)?;
+        let (result, count) = with_io_fault(None, || {
+            recheck(&kernel, &root, &tree.prepared, Some(&root.expected), || {
+                Ok(())
+            })
+        });
+        result?;
+        let bytes = fs::read(
+            tree.runtime
+                .path()
+                .join("registry")
+                .join(component(&tree.prepared)),
+        )?;
+        assert_eq!(&bytes[..4], b"PAI3");
+        assert_eq!(bytes.len(), 393);
+        assert!(count > 0);
+        Ok(count)
+    }
+
     #[tokio::test]
     async fn root_intent_is_committed_once_and_retained_after_resource_cleanup() -> TestResult {
         if bounded_fixture_child(
@@ -71,8 +92,8 @@ mod cases {
         Ok(())
     }
 
-    #[test]
-    fn root_intent_io_failures_refuse_launch_and_preserve_recovery_state() -> TestResult {
+    #[tokio::test]
+    async fn root_intent_io_failures_refuse_launch_and_preserve_recovery_state() -> TestResult {
         if bounded_fixture_child(
             "PIGLOROS_ROOT_INTENT_IO_CHILD",
             concat!(
@@ -82,26 +103,8 @@ mod cases {
         )? {
             return Ok(());
         }
-        let count = {
-            let tree = prepared_tree()?;
-            let (kernel, root) = attached_root(&tree.prepared)?;
-            let (result, count) = with_io_fault(None, || {
-                recheck(&kernel, &root, &tree.prepared, Some(&root.expected), || {
-                    Ok(())
-                })
-            });
-            result?;
-            let bytes = fs::read(
-                tree.runtime
-                    .path()
-                    .join("registry")
-                    .join(component(&tree.prepared)),
-            )?;
-            assert_eq!(&bytes[..4], b"PAI3");
-            assert_eq!(bytes.len(), 393);
-            count
-        };
-        assert!(count > 0);
+        let count = root_publication_io_count()?;
+        let mut replaced_before_failure = false;
         for fail_at in 0..count {
             let tree = prepared_tree()?;
             let (kernel, root) = attached_root(&tree.prepared)?;
@@ -119,6 +122,7 @@ mod cases {
             );
             assert_eq!(observed, fail_at + 1, "fault {fail_at} must be reached");
             let retained = fs::read(&path)?;
+            replaced_before_failure |= retained.starts_with(b"PAI3");
             assert!(
                 recheck(&kernel, &root, &tree.prepared, Some(&root.expected), || Ok(
                     ()
@@ -131,8 +135,20 @@ mod cases {
                 .commit_planned(&PlannedAttemptIntent::new([8; 16], [9; 32])?)
                 .is_err());
             assert_eq!(kernel.detached(), 0);
-            drop(root);
-            drop(tree.prepared);
+            assert_eq!(
+                detach_owned(root, &kernel, &tree.prepared).await,
+                Ok(()),
+                "cleanup after publication fault {fail_at}, record size {}",
+                retained.len()
+            );
+            assert_eq!(kernel.detached(), 1);
+            tree.prepared.remove_unmounted()?;
+            assert!(!tree.runtime.path().join("attempts").join(&key).exists());
+            assert_eq!(fs::read(&path)?, retained);
+            assert!(tree
+                .registry
+                .commit_planned(&PlannedAttemptIntent::new([8; 16], [9; 32])?)
+                .is_err());
             drop(tree.registry);
             let parent = fs::File::open(tree.runtime.path())?;
             let recovery =
@@ -149,6 +165,64 @@ mod cases {
             )
             .is_err());
         }
+        assert!(replaced_before_failure, "the post-rename frontier must run");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn uncertain_root_publication_rejects_record_substitution_before_cleanup() -> TestResult {
+        let count = root_publication_io_count()?;
+        let mut exercised = [false; 2];
+        for (case, downgrade) in [false, true].into_iter().enumerate() {
+            for fail_at in 0..count {
+                let tree = prepared_tree()?;
+                let (kernel, root) = attached_root(&tree.prepared)?;
+                let key = component(&tree.prepared);
+                let path = tree.runtime.path().join("registry").join(&key);
+                let original = fs::read(&path)?;
+                let (result, observed) = with_io_fault(Some(fail_at), || {
+                    recheck(&kernel, &root, &tree.prepared, Some(&root.expected), || {
+                        Ok(())
+                    })
+                });
+                assert_eq!(result, Err(ImageActivationError::EvidenceMismatch));
+                assert_eq!(observed, fail_at + 1);
+                let mut changed = fs::read(&path)?;
+                if !changed.starts_with(b"PAI3") {
+                    continue;
+                }
+                if downgrade {
+                    changed = original;
+                } else {
+                    // A different, still nonzero mount ID in a complete root record.
+                    changed[88] ^= 1;
+                }
+                fs::write(&path, &changed)?;
+                let reads = kernel.readbacks.load(Ordering::SeqCst);
+                assert_eq!(
+                    detach_owned(root, &kernel, &tree.prepared).await,
+                    Err(ImageActivationError::EvidenceMismatch)
+                );
+                assert_eq!(kernel.detached(), 0);
+                assert_eq!(kernel.readbacks.load(Ordering::SeqCst), reads);
+                assert!(tree.prepared.remove_unmounted().is_err());
+                assert!(tree
+                    .runtime
+                    .path()
+                    .join("attempts")
+                    .join(&key)
+                    .join("root")
+                    .exists());
+                assert_eq!(fs::read(&path)?, changed);
+                assert!(tree
+                    .registry
+                    .commit_planned(&PlannedAttemptIntent::new([8; 16], [9; 32])?)
+                    .is_err());
+                exercised[case] = true;
+                break;
+            }
+        }
+        assert_eq!(exercised, [true; 2]);
         Ok(())
     }
 
