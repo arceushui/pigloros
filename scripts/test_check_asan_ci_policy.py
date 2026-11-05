@@ -47,8 +47,26 @@ class AsanCiPolicyTests(unittest.TestCase):
             with self.assertRaises(CHECKER.PolicyError):
                 CHECKER.check_workflow(fixture)
 
+    def assert_headroom_rejected(self, mutate) -> None:
+        for job_name in ("asan-build", "asan"):
+            with self.subTest(job=job_name):
+
+                def change(workflow: dict) -> None:
+                    steps = workflow["jobs"][job_name]["steps"]
+                    step = self.headroom_step(workflow, job_name)
+                    index = steps.index(step)
+                    # Keep a malformed consumer independent of YAML aliases.
+                    steps[index] = copy.deepcopy(step)
+                    mutate(steps[index])
+
+                self.assert_rejected(change)
+
     def test_repository_workflow_passes(self) -> None:
         CHECKER.check_workflow(ROOT / ".github" / "workflows" / "ci.yml")
+
+    def test_archive_producer_reclaims_sdk_headroom_before_build(self) -> None:
+        steps = self.workflow["jobs"]["asan-build"]["steps"]
+        self.assertEqual(steps[1], CHECKER.EXPECTED_SDK_HEADROOM_STEP)
 
     def test_sdk_headroom_shell_parses_without_execution(self) -> None:
         result = subprocess.run(
@@ -76,66 +94,61 @@ class AsanCiPolicyTests(unittest.TestCase):
         ):
             with self.subTest(path=path):
 
-                def widen_allowlist(workflow: dict) -> None:
-                    step = self.headroom_step(workflow)
+                def widen_allowlist(step: dict) -> None:
                     step["run"] = step["run"].replace(
                         "/usr/share/dotnet/sdk; do", f"{path}; do"
                     )
 
-                self.assert_rejected(widen_allowlist)
+                self.assert_headroom_rejected(widen_allowlist)
 
-        def add_sdk_parent(workflow: dict) -> None:
-            step = self.headroom_step(workflow)
+        def add_sdk_parent(step: dict) -> None:
             step["run"] = step["run"].replace(
                 "/usr/share/dotnet/sdk; do",
                 "/usr/share/dotnet/sdk /usr/share/dotnet; do",
             )
 
-        self.assert_rejected(add_sdk_parent)
+        self.assert_headroom_rejected(add_sdk_parent)
 
     def test_sdk_headroom_requires_all_capacity_receipts(self) -> None:
         for phase in ("before", "after"):
             for kind, command in (("bytes", "df -B1"), ("inodes", "df -i")):
                 with self.subTest(phase=phase, kind=kind):
                     receipt = (
-                        f"printf 'ASan SDK headroom {phase} ({kind})\\n'\n"
+                        f"printf 'CI SDK headroom {phase} ({kind})\\n'\n"
                         f'{command} -- / "${{GITHUB_WORKSPACE}}" "${{RUNNER_TEMP}}"\n'
                     )
                     self.assertIn(receipt, self.headroom_step(self.workflow)["run"])
 
-                    def remove_receipt(workflow: dict) -> None:
-                        step = self.headroom_step(workflow)
+                    def remove_receipt(step: dict) -> None:
                         step["run"] = step["run"].replace(receipt, "")
 
-                    self.assert_rejected(remove_receipt)
+                    self.assert_headroom_rejected(remove_receipt)
 
     def test_sdk_headroom_requires_guards_and_sdk_receipts(self) -> None:
         protected_lines = (
             "set -euo pipefail\n",
-            '  if [[ ! -e "${asan_sdk_path}" && ! -L "${asan_sdk_path}" ]]; then\n',
-            '    printf \'ASan SDK absent: %s\\n\' "${asan_sdk_path}"\n',
-            '  test -d "${asan_sdk_path}"\n',
-            '  test ! -L "${asan_sdk_path}"\n',
-            '  test "$(readlink -e -- "${asan_sdk_path}")" = "${asan_sdk_path}"\n',
-            '  test "${asan_sdk_device}" = "${asan_root_device}"\n',
-            '  sudo du -sx -B1 -- "${asan_sdk_path}"\n',
-            '  printf \'ASan SDK removed: %s\\n\' "${asan_sdk_path}"\n',
+            '  if [[ ! -e "${ci_sdk_path}" && ! -L "${ci_sdk_path}" ]]; then\n',
+            '    printf \'CI SDK absent: %s\\n\' "${ci_sdk_path}"\n',
+            '  test -d "${ci_sdk_path}"\n',
+            '  test ! -L "${ci_sdk_path}"\n',
+            '  test "$(readlink -e -- "${ci_sdk_path}")" = "${ci_sdk_path}"\n',
+            '  test "${ci_sdk_device}" = "${ci_root_device}"\n',
+            '  sudo du -sx -B1 -- "${ci_sdk_path}"\n',
+            '  printf \'CI SDK removed: %s\\n\' "${ci_sdk_path}"\n',
         )
         for line in protected_lines:
             with self.subTest(line=line):
                 self.assertIn(line, self.headroom_step(self.workflow)["run"])
 
-                def remove_guard(workflow: dict) -> None:
-                    step = self.headroom_step(workflow)
+                def remove_guard(step: dict) -> None:
                     step["run"] = step["run"].replace(line, "")
 
-                self.assert_rejected(remove_guard)
+                self.assert_headroom_rejected(remove_guard)
 
-        def cross_filesystems(workflow: dict) -> None:
-            step = self.headroom_step(workflow)
+        def cross_filesystems(step: dict) -> None:
             step["run"] = step["run"].replace("--one-file-system ", "")
 
-        self.assert_rejected(cross_filesystems)
+        self.assert_headroom_rejected(cross_filesystems)
 
     def test_sdk_headroom_requires_hosted_linux_guard(self) -> None:
         for guard in (
@@ -144,27 +157,36 @@ class AsanCiPolicyTests(unittest.TestCase):
             "${{ runner.environment == 'github-hosted' }}",
         ):
             with self.subTest(guard=guard):
-                self.assert_rejected(
-                    lambda workflow: self.headroom_step(workflow).update({"if": guard})
+                self.assert_headroom_rejected(
+                    lambda step: step.update({"if": guard})
                 )
-        self.assert_rejected(lambda workflow: self.headroom_step(workflow).pop("if"))
+        self.assert_headroom_rejected(lambda step: step.pop("if"))
 
     def test_sdk_headroom_requires_trusted_early_failing_setup(self) -> None:
-        def move_after_download(workflow: dict) -> None:
-            steps = workflow["jobs"]["asan"]["steps"]
-            step = self.headroom_step(workflow)
-            steps.remove(step)
-            steps.insert(6, step)
+        for job_name in ("asan-build", "asan"):
+            for change in ("missing", "duplicate", "before-checkout", "after-build"):
+                with self.subTest(job=job_name, change=change):
 
-        self.assert_rejected(move_after_download)
+                    def change_setup(workflow: dict) -> None:
+                        steps = workflow["jobs"][job_name]["steps"]
+                        step = self.headroom_step(workflow, job_name)
+                        steps.remove(step)
+                        if change == "duplicate":
+                            steps[1:1] = [step, copy.deepcopy(step)]
+                        elif change == "before-checkout":
+                            steps.insert(0, step)
+                        elif change == "after-build":
+                            steps.append(step)
+
+                    self.assert_rejected(change_setup)
         for extra in (
             {"continue-on-error": True},
             {"shell": "bash {0}"},
             {"env": {"GITHUB_WORKSPACE": "/"}},
         ):
             with self.subTest(extra=extra):
-                self.assert_rejected(
-                    lambda workflow: self.headroom_step(workflow).update(extra)
+                self.assert_headroom_rejected(
+                    lambda step: step.update(extra)
                 )
 
     def test_rejects_repository_nextest_configuration(self) -> None:
@@ -920,11 +942,11 @@ class AsanCiPolicyTests(unittest.TestCase):
         )
 
     @staticmethod
-    def headroom_step(workflow: dict) -> dict:
+    def headroom_step(workflow: dict, job_name: str = "asan") -> dict:
         return next(
             step
-            for step in workflow["jobs"]["asan"]["steps"]
-            if step.get("name") == "Reclaim unused SDK headroom for ASan"
+            for step in workflow["jobs"][job_name]["steps"]
+            if step.get("name") == "Reclaim unused SDK headroom"
         )
 
     @staticmethod
