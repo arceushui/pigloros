@@ -203,9 +203,10 @@ impl<H: CeremonyHost, R: SecureRandom, C: MonotonicClock> OwnerBridge<H, R, C> {
     /// # Errors
     ///
     /// Returns `Unavailable(InterfaceUnavailable)` when a ceremony was ever started or the store
-    /// cannot list its records, and `Quarantine(StaleProcessPresent)` when a record cannot be
-    /// decoded or does not name the folder its ceremony ID derives. The last two hold the bridge
-    /// in their status until the next check succeeds.
+    /// cannot list its records or a probe is indeterminate. Returns `Quarantine(StaleProcessPresent)`
+    /// when a record cannot be decoded, does not name its ceremony ID's derived folder, or repeats
+    /// another record's folder (ADR-125). A failed check holds the bridge in that status until a
+    /// fresh check succeeds; unproven records/folders remain stored.
     pub fn start_restart_check(
         &mut self,
         store: &mut dyn CleanupStore,
@@ -231,7 +232,8 @@ impl<H: CeremonyHost, R: SecureRandom, C: MonotonicClock> OwnerBridge<H, R, C> {
     ///
     /// Returns `Quarantine(StaleProcessPresent)` once a recorded process is still present after
     /// 30 repeats; the surface then stays quarantined, and so does every later poll until a new
-    /// check succeeds.
+    /// check succeeds. An indeterminate probe returns `Unavailable(InterfaceUnavailable)` and
+    /// similarly latches that failure without processing any later entries (ADR-125).
     pub fn poll_restart_check(
         &mut self,
         store: &mut dyn CleanupStore,
