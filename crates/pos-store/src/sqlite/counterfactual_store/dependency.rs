@@ -2463,10 +2463,10 @@ mod tests {
         let command = command(fork);
         let record = one_node_record(1, 1);
 
-        fail_commits(&store, true);
+        fail_commits(&mut store, true);
         let in_doubt =
             store.commit_counterfactual_invalidation_with_dependencies(&command, &record);
-        fail_commits(&store, false);
+        fail_commits(&mut store, false);
 
         assert_eq!(in_doubt, Err(StoreError::OutcomeUnknown));
         assert_eq!(recorded(&store), 0);
@@ -2494,10 +2494,10 @@ mod tests {
         let expected = ok(store.current_counterfactual_basis(fork));
         let record = one_node_record(2, 2);
 
-        fail_commits(&store, true);
+        fail_commits(&mut store, true);
         let in_doubt =
             store.append_counterfactual_tick_with_dependencies(fork, &expected, &drafts(), &record);
-        fail_commits(&store, false);
+        fail_commits(&mut store, false);
 
         assert_eq!(in_doubt, Err(StoreError::OutcomeUnknown));
         assert_eq!(recorded(&store), 2);
@@ -2527,10 +2527,10 @@ mod tests {
         let command = command(fork);
         let record = one_node_record(1, 1);
 
-        fail_commits(&store, true);
+        fail_commits(&mut store, true);
         let in_doubt =
             store.commit_counterfactual_invalidation_with_dependencies(&command, &record);
-        fail_commits(&store, false);
+        fail_commits(&mut store, false);
         assert_eq!(in_doubt, Err(StoreError::OutcomeUnknown));
         drop(store);
 
@@ -2548,14 +2548,14 @@ mod tests {
         let expected = ok(reopened.current_counterfactual_basis(fork));
         let later = one_node_record(2, 2);
 
-        fail_commits(&reopened, true);
+        fail_commits(&mut reopened, true);
         let tick_in_doubt = reopened.append_counterfactual_tick_with_dependencies(
             fork,
             &expected,
             &drafts(),
             &later,
         );
-        fail_commits(&reopened, false);
+        fail_commits(&mut reopened, false);
         assert_eq!(tick_in_doubt, Err(StoreError::OutcomeUnknown));
         drop(reopened);
 

@@ -23,7 +23,7 @@ impl SqliteStore {
     /// # Errors
     /// Returns an error if `SQLite` cannot install its native authorizer.
     pub fn observe_interval_transactions_for_test(
-        &self,
+        &mut self,
         observer: Arc<dyn Fn(IntervalConnectionV1, TransactionOperation) -> bool + Send + Sync>,
     ) -> Result<(), CoreError> {
         let reader_kind = if self.writer_reservation_connection.is_some() {
@@ -33,11 +33,11 @@ impl SqliteStore {
         };
         let writer = self
             .writer_reservation_connection
-            .as_ref()
+            .as_mut()
             .map(|writer| (writer, IntervalConnectionV1::Writer, Arc::clone(&observer)));
         // The primary callback takes the caller's Arc; only a second
         // connection needs a separately owned observer clone.
-        std::iter::once((&self.conn, reader_kind, observer))
+        std::iter::once((&mut self.conn, reader_kind, observer))
             .chain(writer)
             .try_for_each(|(connection, kind, observer)| {
                 connection.authorizer(Some(move |context: AuthContext<'_>| {
@@ -89,22 +89,11 @@ mod tests {
         let directory = ok(tempfile::tempdir());
         let path = directory.path().join("native-interval-observer.sqlite");
         let path = ok(path.to_str().ok_or("fixture path"));
-        let writer = ok(SqliteStore::open(path));
-        let reader = ok(SqliteStore::open_read_only(path));
+        let mut writer = ok(SqliteStore::open(path));
+        let mut reader = ok(SqliteStore::open_read_only(path));
         assert!(writer.writer_reservation_connection.is_none());
         assert!(reader.writer_reservation_connection.is_some());
-        for store in [&writer, &reader] {
-            let mut connections = vec![(
-                &store.conn,
-                if store.writer_reservation_connection.is_some() {
-                    IntervalConnectionV1::Reader
-                } else {
-                    IntervalConnectionV1::Writer
-                },
-            )];
-            if let Some(connection) = &store.writer_reservation_connection {
-                connections.push((connection, IntervalConnectionV1::Writer));
-            }
+        for store in [&mut writer, &mut reader] {
             for allow_begin in [true, false] {
                 let observed = Arc::new(Mutex::new(Vec::new()));
                 let callback_observed = Arc::clone(&observed);
@@ -117,6 +106,17 @@ mod tests {
                         allow_begin || operation != TransactionOperation::Begin
                     },
                 )));
+                let mut connections = vec![(
+                    &store.conn,
+                    if store.writer_reservation_connection.is_some() {
+                        IntervalConnectionV1::Reader
+                    } else {
+                        IntervalConnectionV1::Writer
+                    },
+                )];
+                if let Some(connection) = &store.writer_reservation_connection {
+                    connections.push((connection, IntervalConnectionV1::Writer));
+                }
                 let mut expected = Vec::new();
                 for &(connection, kind) in &connections {
                     assert_eq!(

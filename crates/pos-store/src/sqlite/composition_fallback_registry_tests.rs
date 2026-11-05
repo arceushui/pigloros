@@ -437,7 +437,7 @@ fn a_failing_schema_creation_is_storage_failed_and_leaves_no_tables() -> TestRes
 // Statement failures
 // ---------------------------------------------------------------------------
 
-fn deny_reads_of(h: &H, denied: &'static str) -> TestResult {
+fn deny_reads_of(h: &mut H, denied: &'static str) -> TestResult {
     h.store
         .conn
         .authorizer(Some(move |context: AuthContext<'_>| match context.action {
@@ -447,7 +447,7 @@ fn deny_reads_of(h: &H, denied: &'static str) -> TestResult {
     Ok(())
 }
 
-fn allow_all(h: &H) -> TestResult {
+fn allow_all(h: &mut H) -> TestResult {
     h.store
         .conn
         .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)?;
@@ -465,14 +465,14 @@ fn a_denied_read_of_each_registry_table_is_storage_failed() -> TestResult {
         let (mut h, first) = declared()?;
         let before = snapshot(&h)?;
         let request = successor_request(&h, &first)?;
-        deny_reads_of(&h, table)?;
+        deny_reads_of(&mut h, table)?;
         let refused = h.store.declare(&request);
         let read = match table {
             "composition_fallback_rows" => h.store.registry_row(SCOPE, h.timeline).err(),
             "composition_fallback_ledger" => h.store.fallback_ledger(SCOPE, h.timeline).err(),
             _ => h.store.retained_policy(first.policy_digest()).err(),
         };
-        allow_all(&h)?;
+        allow_all(&mut h)?;
         assert_eq!(refused.err(), Some(Error::StorageFailed), "{table}");
         assert_eq!(read, Some(Error::StorageFailed), "{table}");
         assert_eq!(snapshot(&h)?, before, "{table}");
@@ -485,9 +485,9 @@ fn a_target_timeline_that_cannot_be_read_is_unavailable() -> TestResult {
     let (mut h, first) = declared()?;
     let before = snapshot(&h)?;
     let request = successor_request(&h, &first)?;
-    deny_reads_of(&h, "events")?;
+    deny_reads_of(&mut h, "events")?;
     let refused = h.store.declare(&request);
-    allow_all(&h)?;
+    allow_all(&mut h)?;
     assert_eq!(refused.err(), Some(Error::TimelineUnavailable));
     assert_eq!(snapshot(&h)?, before);
     Ok(())

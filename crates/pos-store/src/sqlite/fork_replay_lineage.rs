@@ -358,7 +358,7 @@ mod tests {
 
     type ReadTranscript = Arc<std::sync::Mutex<Vec<(String, String, bool)>>>;
 
-    fn redact_read(conn: &rusqlite::Connection, ordinal: usize) -> Fallible<ReadTranscript> {
+    fn redact_read(conn: &mut rusqlite::Connection, ordinal: usize) -> Fallible<ReadTranscript> {
         use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
 
         let transcript = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -408,7 +408,7 @@ mod tests {
     fn metadata_where_redaction_refuses_only_the_raw_fetch_and_preserves_debits() -> Fallible<()> {
         use rusqlite::hooks::{AuthContext, Authorization};
 
-        let (store, root, _) = fixture()?;
+        let (mut store, root, _) = fixture()?;
         let interval = store.begin_protected_effect_interval()?;
         let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
         let start = clock.mark();
@@ -417,7 +417,7 @@ mod tests {
         let limits = ForkReplayReadLimitsV1::new(8, 2, 5, 151, 1_000_000)?;
         let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
         // Eleven shape reads, then four projected metadata fields and WHERE id.
-        let observed = redact_read(&store.conn, 15)?;
+        let observed = redact_read(&mut store.conn, 15)?;
         let failed = store.lineage_metadata_and_visibility(
             root,
             &mut Vec::new(),
@@ -476,7 +476,7 @@ mod tests {
     fn geographic_where_redaction_refuses_only_the_raw_kind_and_preserves_debits() -> Fallible<()> {
         use rusqlite::hooks::{AuthContext, Authorization};
 
-        let (store, root, _) = fixture()?;
+        let (mut store, root, _) = fixture()?;
         let key = root.to_string();
         let interval = store.begin_protected_effect_interval()?;
         let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
@@ -486,7 +486,7 @@ mod tests {
         let limits = ForkReplayReadLimitsV1::new(8, 1, 3, 24, 1_000_000)?;
         let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
         // Five candidate reads, raw event_type, then the raw WHERE timeline key.
-        let observed = redact_read(&store.conn, 6)?;
+        let observed = redact_read(&mut store.conn, 6)?;
         let failed =
             store.lineage_geographic_events(&key, &mut LineageReadContextV1::new(&mut budget, 8)?);
         store
@@ -546,7 +546,7 @@ mod tests {
         use rusqlite::hooks::{AuthContext, Authorization};
 
         for ignored in [0, 8] {
-            let (store, root, child) = fixture()?;
+            let (mut store, root, child) = fixture()?;
             for (timeline, expected) in [
                 (root, ForkReplayLineageNodeV1::new(root, None)),
                 (
@@ -560,7 +560,7 @@ mod tests {
                 // Redact only the shape probe's typeof(id) or typeof(head_seq).
                 // The stored row and later metadata projection remain healthy:
                 // rejecting it must not depend on that second decoder barrier.
-                let observed = redact_read(&store.conn, ignored)?;
+                let observed = redact_read(&mut store.conn, ignored)?;
                 let failed = read(&store, timeline, &mut clock)?;
                 store
                     .conn
@@ -1083,7 +1083,7 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         for refused in [1, 2] {
-            let (store, root, _) = fixture()?;
+            let (mut store, root, _) = fixture()?;
             let interval = store.begin_protected_effect_interval()?;
             let calls = Arc::new(AtomicUsize::new(0));
             let observed = Arc::clone(&calls);
