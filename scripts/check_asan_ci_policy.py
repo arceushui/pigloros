@@ -139,7 +139,7 @@ EXPECTED_BUILD_JOB = {
         EXPECTED_SDK_HEADROOM_STEP,
         {"run": "rm -f rust-toolchain.toml"},
         {
-            "uses": "dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de",
+            "uses": "dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8",
             "with": {"toolchain": "nightly-2026-07-01", "components": "rust-src"},
         },
         {
@@ -254,7 +254,7 @@ EXPECTED_SETUP_STEPS = [
     EXPECTED_SDK_HEADROOM_STEP,
     {"run": "rm -f rust-toolchain.toml"},
     {
-        "uses": "dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de",
+        "uses": "dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8",
         "with": {"toolchain": "nightly-2026-07-01"},
     },
     {

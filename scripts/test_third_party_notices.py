@@ -1121,7 +1121,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertEqual(steps, [
             {"uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"},
             {"name": validate, "run": NOTICE_PROGRAM_SHA256[validate]},
-            {"uses": "dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de",
+            {"uses": "dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8",
              "with": {"toolchain": "1.97.1", "components": "rust-src", "targets": "wasm32-unknown-unknown"}},
             {"name": "Install cargo-about", "uses": TAKI, "with": {"tool": "cargo-about@0.9.2"}},
             {"name": verify, "env": {"GITHUB_TOKEN": "${{ github.token }}"}, "run": NOTICE_PROGRAM_SHA256[verify]},
