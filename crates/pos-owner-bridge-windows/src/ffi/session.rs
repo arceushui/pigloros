@@ -12,7 +12,7 @@ use webview2_com::Microsoft::Web::WebView2::Win32::{
 };
 use windows::core::{w, Interface};
 
-use crate::native_api::{
+use crate::{
     BoolProperty, BufferSlot, EnvironmentOptions, EnvironmentSnapshot, EventSink, Failure,
     NativeError, NativeFactory, NativeOperations, NativePulse, NativeResult, NativeText, Operation,
     StaPump, WindowSnapshot,

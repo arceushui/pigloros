@@ -5,9 +5,7 @@ use std::collections::BTreeMap;
 use std::rc::{Rc, Weak};
 use std::sync::OnceLock;
 
-use crate::native_api::{
-    ClientBounds, Failure, NativeError, NativeResult, Operation, WindowSnapshot,
-};
+use crate::{ClientBounds, Failure, NativeError, NativeResult, Operation, WindowSnapshot};
 use windows::core::{w, PCSTR};
 use windows::Win32::Foundation::{FARPROC, HINSTANCE, HWND, RECT};
 use windows::Win32::Graphics::Gdi::{

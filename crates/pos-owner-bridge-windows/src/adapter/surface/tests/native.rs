@@ -5,12 +5,14 @@ use std::cell::{Cell, RefCell};
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::time::Duration;
 
-use crate::native_api::{
+use crate::{
     BoolProperty, BufferSlot, ClientBounds, EnvironmentOptions, EnvironmentSnapshot, EventSink,
     Failure, NativeError, NativeFactory, NativeOperations, NativePath, NativePulse, NativeResult,
     NativeText, Operation, StaPump, WindowSnapshot,
 };
+use pos_owner_bridge::fake::clock::FakeClock;
 use pos_owner_bridge::ReplyImage;
 use pos_owner_bridge_codec::CeremonyKind;
 
@@ -19,6 +21,7 @@ pub(super) enum Creation {
     SynchronousFailure,
     CallbackFailure,
     MissingView,
+    Pending,
     Ready,
 }
 
@@ -26,20 +29,25 @@ pub(super) struct Factory {
     pub(super) creation: Cell<Creation>,
     pub(super) calls: RefCell<Vec<&'static str>>,
     pub(super) sink: RefCell<Option<Rc<dyn EventSink>>>,
+    clock: FakeClock,
 }
 
 impl Factory {
-    pub(super) fn new(creation: Creation) -> Rc<Self> {
+    pub(super) fn new(creation: Creation, clock: FakeClock) -> Rc<Self> {
         Rc::new(Self {
             creation: Cell::new(creation),
             calls: RefCell::new(Vec::new()),
             sink: RefCell::new(None),
+            clock,
         })
     }
 }
 
 impl StaPump for Rc<Factory> {
     fn next(&self) -> NativeResult<NativePulse> {
+        if self.creation.get() == Creation::Pending {
+            self.clock.advance(Duration::from_secs(31));
+        }
         Ok(NativePulse::Timer)
     }
     fn stop(&mut self) -> NativeResult<()> {
@@ -139,6 +147,9 @@ impl NativeOperations for Session {
         Ok(())
     }
     fn controller_completion(&mut self) -> Option<NativeResult<()>> {
+        if self.factory.creation.get() == Creation::Pending {
+            return None;
+        }
         if !std::mem::take(&mut self.controller_pending) {
             return None;
         }

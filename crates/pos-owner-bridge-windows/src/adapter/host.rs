@@ -17,8 +17,9 @@ use pos_owner_bridge::{
 };
 
 use super::surface::Surface;
-use crate::native_api::{NativePulse, StaPump};
-use crate::{SharedLoopback, VerifiedRuntime, WindowsCleanupStore};
+use super::{loopback::SharedLoopback, store::WindowsCleanupStore};
+use crate::VerifiedRuntime;
+use crate::{NativePulse, StaPump};
 
 const UNAVAILABLE: BridgeError = BridgeError::Unavailable(UnavailableCode::InterfaceUnavailable);
 

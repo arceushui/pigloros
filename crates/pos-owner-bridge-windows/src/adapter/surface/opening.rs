@@ -3,7 +3,7 @@
 
 use super::super::settings;
 use super::{lost, unavailable, Ownership, Result, Surface, HEIGHT, WIDTH};
-use crate::native_api::{EventSink, NativePulse};
+use crate::{EventSink, NativePulse};
 use pos_owner_bridge::{
     folder_name, BridgeError, LifecycleCode, ProcessIdentity, SurfaceError, SurfaceSpec,
     UnavailableCode,

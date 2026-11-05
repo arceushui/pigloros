@@ -4,7 +4,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 
-use crate::native_api::{EventKind, EventSink, NativeAction, NativeError, NativeEvent, OWNER_URL};
+use crate::{EventKind, EventSink, NativeAction, NativeError, NativeEvent, OWNER_URL};
 use pos_owner_bridge::{NavigationId, SurfaceEvent};
 
 const MAX_EVENTS: usize = 16;

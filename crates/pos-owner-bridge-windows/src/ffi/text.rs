@@ -3,7 +3,7 @@
 use webview2_com::CoTaskMemPWSTR;
 use windows::core::PWSTR;
 
-use crate::native_api::{
+use crate::{
     Failure, NativeError, NativePath, NativeResult, NativeText, Operation, MAX_TEXT_UNITS,
 };
 

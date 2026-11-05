@@ -15,8 +15,8 @@ use pos_owner_bridge::{
 use pos_owner_bridge_codec::{ControlRole, ControlState, OwnerBridgeControlV1};
 
 use super::events::Events;
-use crate::native_api::{BufferSlot, ClientBounds, NativeFactory, NativeOperations, OWNER_URL};
 use crate::VerifiedRuntime;
+use crate::{BufferSlot, ClientBounds, NativeFactory, NativeOperations, OWNER_URL};
 
 mod opening;
 mod retirement;
@@ -121,7 +121,7 @@ impl Surface {
         self.events.controller_lost();
     }
 
-    pub(super) fn pump(&self) -> crate::native_api::NativeResult<crate::native_api::NativePulse> {
+    pub(super) fn pump(&self) -> crate::NativeResult<crate::NativePulse> {
         self.factory.next()
     }
 

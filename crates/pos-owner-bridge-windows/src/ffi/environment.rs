@@ -1,6 +1,6 @@
 #![cfg(windows)]
 
-use crate::native_api::{
+use crate::{
     EnvironmentSnapshot, EventKind, EventSink, Failure, NativeError, NativeEvent, NativeResult,
     Operation,
 };

@@ -17,7 +17,7 @@ use webview2_com::{
 use windows::core::{HSTRING, PCWSTR};
 use windows::Win32::Foundation::{E_POINTER, HWND};
 
-use crate::native_api::{EnvironmentOptions, Failure, NativeError, NativeResult, Operation};
+use crate::{EnvironmentOptions, Failure, NativeError, NativeResult, Operation};
 type Result<T> = NativeResult<T>;
 const fn unavailable() -> NativeError {
     NativeError {

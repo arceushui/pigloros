@@ -3,7 +3,7 @@
 use std::marker::PhantomData;
 use std::rc::Rc;
 
-use crate::native_api::{Failure, NativeError, NativePulse, NativeResult, Operation};
+use crate::{Failure, NativeError, NativePulse, NativeResult, Operation};
 use windows::Win32::System::Com::{
     CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE,
 };

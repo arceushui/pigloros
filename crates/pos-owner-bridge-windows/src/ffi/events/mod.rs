@@ -1,6 +1,6 @@
 #![cfg(windows)]
 
-use crate::native_api::{
+use crate::{
     EventKind, EventSink, Failure, NativeAction, NativeError, NativeEvent, NativeResult, Operation,
 };
 use std::rc::Rc;

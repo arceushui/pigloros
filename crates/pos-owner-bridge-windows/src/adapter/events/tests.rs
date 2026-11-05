@@ -2,7 +2,7 @@
 #![forbid(unsafe_code)]
 
 use super::*;
-use crate::native_api::{Failure, NativeText, Operation};
+use crate::{Failure, NativeText, Operation};
 
 fn text(value: &str) -> NativeText {
     NativeText::fixture(value)

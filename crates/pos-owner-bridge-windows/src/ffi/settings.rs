@@ -1,6 +1,6 @@
 #![cfg(windows)]
 
-use crate::native_api::{
+use crate::{
     BoolProperty, EnvironmentOptions, Failure, NativeError, NativeResult, NativeText, Operation,
 };
 use webview2_com::CoreWebView2EnvironmentOptions;

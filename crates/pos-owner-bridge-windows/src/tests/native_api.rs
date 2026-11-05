@@ -1,7 +1,7 @@
 #![cfg(windows)]
 #![forbid(unsafe_code)]
 
-use super::{Failure, NativeError, NativePath, NativeText, Operation, MAX_TEXT_UNITS};
+use crate::{Failure, NativeError, NativePath, NativeText, Operation, MAX_TEXT_UNITS};
 use std::os::windows::ffi::OsStrExt;
 
 #[test]

@@ -1,7 +1,7 @@
 #![cfg(windows)]
 
 use super::{action, observe, unavailable, Result, Subscriptions};
-use crate::native_api::{EventKind, EventSink, NativeAction, NativeEvent, NativeText};
+use crate::{EventKind, EventSink, NativeAction, NativeEvent, NativeText};
 use std::rc::Rc;
 use webview2_com::Microsoft::Web::WebView2::Win32::{
     ICoreWebView2, ICoreWebView2ContentLoadingEventArgs, ICoreWebView2DOMContentLoadedEventArgs,

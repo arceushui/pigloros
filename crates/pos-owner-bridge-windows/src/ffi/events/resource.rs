@@ -9,7 +9,7 @@ use webview2_com::WebResourceRequestedEventHandler;
 use windows::core::w;
 
 use super::{action, observe, unavailable, Result, Subscriptions};
-use crate::native_api::{EventKind, EventSink, NativeAction, NativeEvent};
+use crate::{EventKind, EventSink, NativeAction, NativeEvent};
 
 pub(super) fn install(
     view: &ICoreWebView2,

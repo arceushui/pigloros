@@ -15,7 +15,7 @@ use pos_owner_bridge::{
 use pos_owner_bridge_codec::{CeremonyId, ImagePathSha256};
 
 use super::{RuntimeAdmission, Surface};
-use crate::native_api::{NativeEvent, NativeFactory};
+use crate::{NativeEvent, NativeFactory};
 use native::{Creation, Factory};
 
 mod native;
@@ -26,6 +26,7 @@ struct Fixture {
     root: PathBuf,
     factory: Rc<Factory>,
     store: FakeStore,
+    clock: FakeClock,
     surface: Surface,
 }
 
@@ -38,10 +39,10 @@ impl Fixture {
             std::process::id()
         ));
         crate::create_private_directory(&root)?;
-        let factory = Factory::new(creation);
+        let clock = FakeClock::start();
+        let factory = Factory::new(creation, clock.clone());
         let native: Rc<dyn NativeFactory> = Rc::new(Rc::clone(&factory));
         let store = FakeStore::default();
-        let clock = FakeClock::start();
         let deadline = clock.now() + Duration::from_secs(30);
         let mut surface = Surface::new(
             native,
@@ -49,7 +50,7 @@ impl Fixture {
             root.clone(),
             Box::<FakeLoopback>::default(),
             Box::new(store.clone()),
-            Box::new(clock),
+            Box::new(clock.clone()),
         )
         .map_err(pos_owner_bridge::SurfaceError::error)?;
         surface.set_deadline(deadline);
@@ -57,6 +58,7 @@ impl Fixture {
             root,
             factory,
             store,
+            clock,
             surface,
         })
     }
@@ -179,5 +181,47 @@ fn controller_without_view_waits_for_its_environment_exit() -> TestResult {
         .map_err(pos_owner_bridge::SurfaceError::error)?);
     assert!(fixture.surface.idle());
     assert_eq!(fixture.store.removed_folders(), vec![failed.folder_name]);
+    Ok(())
+}
+
+#[test]
+fn timed_out_controller_keeps_native_owners_until_the_late_callback() -> TestResult {
+    let mut fixture = Fixture::new(Creation::Pending)?;
+    let failed = spec(4);
+    assert!(fixture.surface.open(&failed).is_err());
+    assert!(!fixture
+        .surface
+        .poll_failed_open()
+        .map_err(pos_owner_bridge::SurfaceError::error)?);
+    assert!(!fixture.surface.idle());
+    assert!(!fixture.factory.calls.borrow().contains(&"drop_environment"));
+    assert!(!fixture.factory.calls.borrow().contains(&"destroy_window"));
+    assert!(fixture.store.removed_folders().is_empty());
+    fixture.assert_no_ceremony_data();
+
+    fixture.factory.creation.set(Creation::CallbackFailure);
+    assert!(fixture
+        .surface
+        .poll_failed_open()
+        .map_err(pos_owner_bridge::SurfaceError::error)?);
+    assert!(fixture.surface.idle());
+    assert!(fixture.root.join(&failed.folder_name).is_dir());
+    assert!(fixture.store.removed_folders().is_empty());
+    fixture.factory.creation.set(Creation::Ready);
+    fixture
+        .surface
+        .set_deadline(fixture.clock.now() + Duration::from_secs(30));
+    assert!(fixture.surface.open(&spec(5)).is_ok());
+    fixture
+        .surface
+        .close_controller()
+        .map_err(pos_owner_bridge::SurfaceError::error)?;
+    fixture.exit();
+    fixture
+        .surface
+        .finish()
+        .map_err(pos_owner_bridge::SurfaceError::error)?;
+    assert!(fixture.surface.idle());
+    fixture.assert_no_ceremony_data();
     Ok(())
 }

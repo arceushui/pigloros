@@ -5,7 +5,7 @@ use std::ptr::NonNull;
 use std::rc::Rc;
 use std::sync::atomic::{fence, AtomicU32, AtomicU64, Ordering};
 
-use crate::native_api::{Failure, NativeError, NativeResult, Operation};
+use crate::{Failure, NativeError, NativeResult, Operation};
 use pos_owner_bridge::ReplyImage;
 use pos_owner_bridge_codec::{
     CeremonyKind, ControlRole, CREATE_REPLY_BUFFER_CAPACITY, GET_REPLY_BUFFER_CAPACITY,

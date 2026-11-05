@@ -11,7 +11,7 @@ use pos_owner_bridge::{LoopbackPort, ReplyImage};
 use pos_owner_bridge_codec::{CeremonyId, CeremonyKind, ControlState, OwnerBridgeControlV1};
 
 use super::events::Events;
-use crate::native_api::{
+use crate::{
     BufferSlot, EventSink, NativeFactory, NativeOperations, NativePulse, NativeResult, StaPump,
 };
 
@@ -90,80 +90,83 @@ fn empty_session(native: &mut dyn NativeOperations) {
 
 /// Real SDK ownership and mappings, with malformed fixture input that the
 /// packaged page refuses before any authenticator request can begin.
-pub fn native_window_environment_and_buffers_lifecycle() -> TestResult {
-    let _port = crate::tests::fixed_port_fixture();
-    let root = FixtureRoot::new()?;
-    let runtime_path = std::env::var_os("OWNER_BRIDGE_TEST_RUNTIME")
-        .map(PathBuf::from)
-        .ok_or("canonical retained runtime is required by this native fixture")?;
-    let runtime = crate::verify_fixed_runtime(&runtime_path, &root.0)?;
-    let folder = root.0.join("01010101010101010101010101010101");
-    crate::create_private_directory(&folder)?;
-    let mut listener = LoopbackListener::start(
-        Box::new(crate::WindowsLoopbackBinder::default()),
-        ListenerConfig::adr(),
-    )?;
-    let mut factory = crate::Native::owner_factory()?;
-    let mut native = factory.session()?;
-    empty_session(native.as_mut());
-    native.create_window(None, 480, 640)?;
-    assert!(native.create_window(None, 480, 640).is_err());
-    let window = native.window()?;
-    assert!(window.exists);
-    assert!(window.dpi > 0);
-    native.resize_window(480, 640, window.dpi)?;
-    let events = Rc::new(Events::default());
-    let sink: Rc<dyn EventSink> = events.clone();
-    native.create_environment(runtime.root(), &folder, super::settings::OPTIONS, sink)?;
-    assert!(native.pending());
-    completion(&factory, || native.environment_completion())?;
-    let snapshot = native.environment()?;
-    assert_eq!(snapshot.version.as_str(), "153.0.4234.48");
-    assert_eq!(
-        snapshot.folder.as_path().canonicalize()?,
-        folder.canonicalize()?
-    );
-    super::settings::verify_options(&snapshot).map_err(pos_owner_bridge::SurfaceError::error)?;
-    let sink: Rc<dyn EventSink> = events.clone();
-    assert!(native
-        .create_environment(runtime.root(), &folder, super::settings::OPTIONS, sink)
-        .is_err());
-    native.create_controller()?;
-    completion(&factory, || native.controller_completion())?;
-    assert!(native.create_controller().is_err());
-    let identity = runtime.browser_identity(native.browser_pid()?)?;
-    events.expect_browser(identity.browser_pid);
-    native.require_shared_interfaces()?;
-    let sink: Rc<dyn EventSink> = events.clone();
-    native.subscribe_view(sink)?;
-    super::settings::apply(native.as_ref()).map_err(pos_owner_bridge::SurfaceError::error)?;
-    native.fit_controller()?;
-    native.show_window()?;
-    native.focus_controller()?;
-    listener.begin_navigation();
-    events.begin();
-    native.navigate_owner()?;
-    pump_until(&factory, || events.loaded().is_some())?;
-    assert!(!events.invalid());
-    assert_eq!(listener.served().count, 1);
-    assert_eq!(native.source()?.as_str(), crate::native_api::OWNER_URL);
-    exercise_buffers(&factory, native.as_mut())?;
-    native.unsubscribe_view()?;
-    native.unsubscribe_view()?;
-    native.close_controller()?;
-    native.close_controller()?;
-    pump_until(&factory, || events.exited() == Some(identity.browser_pid))?;
-    assert!(native.drop_environment().is_err()); // Exit subscription still owned.
-    native.unsubscribe_exit()?;
-    native.unsubscribe_exit()?;
-    native.drop_environment()?;
-    native.destroy_window()?;
-    native.destroy_window()?;
-    empty_session(native.as_mut());
-    drop(native);
-    factory.stop()?;
-    listener.shutdown();
-    Ok(())
+impl crate::Native {
+    pub(crate) fn native_window_environment_and_buffers_lifecycle() -> TestResult {
+        let _port = crate::Native::fixed_port_fixture();
+        let root = FixtureRoot::new()?;
+        let runtime_path = std::env::var_os("OWNER_BRIDGE_TEST_RUNTIME")
+            .map(PathBuf::from)
+            .ok_or("canonical retained runtime is required by this native fixture")?;
+        let runtime = crate::verify_fixed_runtime(&runtime_path, &root.0)?;
+        let folder = root.0.join("01010101010101010101010101010101");
+        crate::create_private_directory(&folder)?;
+        let mut listener = LoopbackListener::start(
+            Box::new(crate::WindowsLoopbackBinder::default()),
+            ListenerConfig::adr(),
+        )?;
+        let mut factory = crate::Native::owner_factory()?;
+        let mut native = factory.session()?;
+        empty_session(native.as_mut());
+        native.create_window(None, 480, 640)?;
+        assert!(native.create_window(None, 480, 640).is_err());
+        let window = native.window()?;
+        assert!(window.exists);
+        assert!(window.dpi > 0);
+        native.resize_window(480, 640, window.dpi)?;
+        let events = Rc::new(Events::default());
+        let sink: Rc<dyn EventSink> = events.clone();
+        native.create_environment(runtime.root(), &folder, super::settings::OPTIONS, sink)?;
+        assert!(native.pending());
+        completion(&factory, || native.environment_completion())?;
+        let snapshot = native.environment()?;
+        assert_eq!(snapshot.version.as_str(), "153.0.4234.48");
+        assert_eq!(
+            snapshot.folder.as_path().canonicalize()?,
+            folder.canonicalize()?
+        );
+        super::settings::verify_options(&snapshot)
+            .map_err(pos_owner_bridge::SurfaceError::error)?;
+        let sink: Rc<dyn EventSink> = events.clone();
+        assert!(native
+            .create_environment(runtime.root(), &folder, super::settings::OPTIONS, sink)
+            .is_err());
+        native.create_controller()?;
+        completion(&factory, || native.controller_completion())?;
+        assert!(native.create_controller().is_err());
+        let identity = runtime.browser_identity(native.browser_pid()?)?;
+        events.expect_browser(identity.browser_pid);
+        native.require_shared_interfaces()?;
+        let sink: Rc<dyn EventSink> = events.clone();
+        native.subscribe_view(sink)?;
+        super::settings::apply(native.as_ref()).map_err(pos_owner_bridge::SurfaceError::error)?;
+        native.fit_controller()?;
+        native.show_window()?;
+        native.focus_controller()?;
+        listener.begin_navigation();
+        events.begin();
+        native.navigate_owner()?;
+        pump_until(&factory, || events.loaded().is_some())?;
+        assert!(!events.invalid());
+        assert_eq!(listener.served().count, 1);
+        assert_eq!(native.source()?.as_str(), crate::OWNER_URL);
+        exercise_buffers(&factory, native.as_mut())?;
+        native.unsubscribe_view()?;
+        native.unsubscribe_view()?;
+        native.close_controller()?;
+        native.close_controller()?;
+        pump_until(&factory, || events.exited() == Some(identity.browser_pid))?;
+        assert!(native.drop_environment().is_err()); // Exit subscription still owned.
+        native.unsubscribe_exit()?;
+        native.unsubscribe_exit()?;
+        native.drop_environment()?;
+        native.destroy_window()?;
+        native.destroy_window()?;
+        empty_session(native.as_mut());
+        drop(native);
+        factory.stop()?;
+        listener.shutdown();
+        Ok(())
+    }
 }
 
 fn exercise_buffers(factory: &dyn StaPump, native: &mut dyn NativeOperations) -> TestResult {

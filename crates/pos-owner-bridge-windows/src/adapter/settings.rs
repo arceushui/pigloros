@@ -1,7 +1,7 @@
 #![cfg(windows)]
 #![forbid(unsafe_code)]
 
-use crate::native_api::{BoolProperty, EnvironmentOptions, EnvironmentSnapshot, NativeOperations};
+use crate::{BoolProperty, EnvironmentOptions, EnvironmentSnapshot, NativeOperations};
 use pos_owner_bridge::{BridgeError, SurfaceError, UnavailableCode};
 
 pub(super) const OPTIONS: EnvironmentOptions = EnvironmentOptions {
