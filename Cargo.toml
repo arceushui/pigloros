@@ -163,6 +163,15 @@ opt-level = 3
 [profile.dev.package.libsqlite3-sys]
 opt-level = 3
 
+# The rusqlite wrapper and its statement-cache map run on every prepare, bind
+# and row step of the store tests; optimizing them trims the pos-store worker
+# baselines further (#1279).
+[profile.dev.package.rusqlite]
+opt-level = 3
+
+[profile.dev.package.hashlink]
+opt-level = 3
+
 # P-256 (WebAuthn) and its arithmetic stack.
 [profile.dev.package.p256]
 opt-level = 3

@@ -144,7 +144,7 @@ pub const fn host_verified_execution_profile_bytes_v1(
 mod tests {
     use super::{
         draft_execution_profile_bytes_v1, host_verified_execution_profile_bytes_v1,
-        prohibited_text_material, CleanMemberScans, TOKEN_PREFIXES,
+        prohibited_text_material, VerifiedBytes, TOKEN_PREFIXES,
     };
     use crate::BundleContractErrorV1;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -187,24 +187,28 @@ mod tests {
     }
 
     #[test]
-    fn only_clean_scans_are_recorded_and_only_up_to_the_capacity() {
-        static SCANS: AtomicUsize = AtomicUsize::new(0);
-        fn counted(bytes: &[u8]) -> bool {
-            SCANS.fetch_add(1, Ordering::SeqCst);
-            bytes == b"secret"
+    fn only_successful_checks_are_recorded_and_only_up_to_the_capacity() {
+        static CHECKS: AtomicUsize = AtomicUsize::new(0);
+        fn counted(bytes: &[u8]) -> Result<usize, ()> {
+            CHECKS.fetch_add(1, Ordering::SeqCst);
+            if bytes == b"rejected" {
+                Err(())
+            } else {
+                Ok(bytes.len())
+            }
         }
-        let scans = CleanMemberScans::new(1);
-        assert!(!scans.contains_secret(b"first", counted));
-        assert!(!scans.contains_secret(b"first", counted));
-        assert_eq!(SCANS.load(Ordering::SeqCst), 1);
-        assert!(scans.contains_secret(b"secret", counted));
-        assert!(scans.contains_secret(b"secret", counted));
-        assert_eq!(SCANS.load(Ordering::SeqCst), 3);
-        assert!(!scans.contains_secret(b"second", counted));
-        assert!(!scans.contains_secret(b"second", counted));
-        assert_eq!(SCANS.load(Ordering::SeqCst), 5);
-        assert!(!scans.contains_secret(b"first", counted));
-        assert_eq!(SCANS.load(Ordering::SeqCst), 5);
+        let record = VerifiedBytes::new(1);
+        assert_eq!(record.get_or_check(b"first", counted), Ok(5));
+        assert_eq!(record.get_or_check(b"first", counted), Ok(5));
+        assert_eq!(CHECKS.load(Ordering::SeqCst), 1);
+        assert_eq!(record.get_or_check(b"rejected", counted), Err(()));
+        assert_eq!(record.get_or_check(b"rejected", counted), Err(()));
+        assert_eq!(CHECKS.load(Ordering::SeqCst), 3);
+        assert_eq!(record.get_or_check(b"second", counted), Ok(6));
+        assert_eq!(record.get_or_check(b"second", counted), Ok(6));
+        assert_eq!(CHECKS.load(Ordering::SeqCst), 5);
+        assert_eq!(record.get_or_check(b"first", counted), Ok(5));
+        assert_eq!(CHECKS.load(Ordering::SeqCst), 5);
     }
 
     #[test]
@@ -753,7 +757,11 @@ impl ConformanceBundleV1 {
         }
         member_by_role_and_path(&self.members, BundleMemberRoleV1::Profile, PROFILE_PATH).and_then(
             |profile_member| {
-                ConformanceProfileV1::from_canonical_cbor(&profile_member.bytes)
+                DECODED_PROFILES
+                    .get_or_check(
+                        &profile_member.bytes,
+                        ConformanceProfileV1::from_canonical_cbor,
+                    )
                     .map_err(|error| match error {
                         ConformanceContractError::ProfileLifecycleInvalid => {
                             BundleContractErrorV1::LifecycleInvalid
@@ -2002,55 +2010,77 @@ const TOKEN_PREFIXES: [(&[u8], usize); 20] = [
 ];
 
 /// The most clean member scans one process records: 2 MiB of digests.
-const CLEAN_MEMBER_SCAN_CAPACITY: usize = 65_536;
+const CLEAN_MEMBER_CAPACITY: usize = 65_536;
 
-static CLEAN_MEMBER_SCANS: CleanMemberScans = CleanMemberScans::new(CLEAN_MEMBER_SCAN_CAPACITY);
+/// The most valid CPF1 profiles one process records.
+const DECODED_PROFILE_CAPACITY: usize = 1_024;
 
-/// The BLAKE3 digests of member bytes this process has scanned and found free of secret material.
+/// Member bytes found free of secret material.
+static CLEAN_MEMBERS: VerifiedBytes<()> = VerifiedBytes::new(CLEAN_MEMBER_CAPACITY);
+
+/// Profile member bytes that decoded to a valid CPF1 profile.
+static DECODED_PROFILES: VerifiedBytes<ConformanceProfileV1> =
+    VerifiedBytes::new(DECODED_PROFILE_CAPACITY);
+
+/// Successful checks of exact bytes, keyed by the BLAKE3 digest of the bytes.
 ///
-/// Every typed and independent validation scans every member, and one archive is validated many
-/// times while it is built, published, and verified, so the same bytes were rescanned each time.
-/// The scan is a pure function of the bytes, so a recorded digest answers as a rescan would. Only
-/// clean results are recorded: bytes with secret material are rescanned and rejected every time.
-struct CleanMemberScans {
-    digests: Mutex<BTreeSet<[u8; 32]>>,
+/// Every typed and independent validation scans every member and decodes the profile member, and
+/// one archive is validated many times while it is built, published, and verified, so the same
+/// bytes were checked again each time. Both checks are pure functions of the bytes, so a recorded
+/// result answers as a fresh check would. Only successes are recorded: rejected bytes are checked
+/// and rejected again every time. The record is bounded.
+struct VerifiedBytes<T> {
+    entries: Mutex<BTreeMap<[u8; 32], T>>,
     capacity: usize,
 }
 
-impl CleanMemberScans {
+impl<T: Clone> VerifiedBytes<T> {
     const fn new(capacity: usize) -> Self {
         Self {
-            digests: Mutex::new(BTreeSet::new()),
+            entries: Mutex::new(BTreeMap::new()),
             capacity,
         }
     }
 
-    /// Whether `bytes` contain secret material, scanning them with `scan` unless they are
-    /// recorded clean. The lock is not held during a scan, so concurrent scans do not wait.
-    fn contains_secret(&self, bytes: &[u8], scan: fn(&[u8]) -> bool) -> bool {
+    /// The recorded result for `bytes`, or `check(bytes)`, recorded if it succeeds and the
+    /// record has room. The lock is not held while checking.
+    fn get_or_check<E>(
+        &self,
+        bytes: &[u8],
+        check: impl FnOnce(&[u8]) -> Result<T, E>,
+    ) -> Result<T, E> {
         let digest = *blake3::hash(bytes).as_bytes();
-        if self.digests().contains(&digest) {
-            return false;
+        let recorded = self.entries().get(&digest).cloned();
+        if let Some(value) = recorded {
+            return Ok(value);
         }
-        let secret = scan(bytes);
-        if !secret {
-            let mut clean = self.digests();
-            if clean.len() < self.capacity {
-                clean.insert(digest);
+        let checked = check(bytes);
+        if let Ok(value) = &checked {
+            let mut entries = self.entries();
+            if entries.len() < self.capacity {
+                entries.insert(digest, value.clone());
             }
         }
-        secret
+        checked
     }
 
-    fn digests(&self) -> MutexGuard<'_, BTreeSet<[u8; 32]>> {
-        // The set is only read or extended by one insert, so a panic elsewhere cannot leave it
+    fn entries(&self) -> MutexGuard<'_, BTreeMap<[u8; 32], T>> {
+        // The map is only read or extended by one insert, so a panic elsewhere cannot leave it
         // inconsistent.
-        self.digests.lock().unwrap_or_else(PoisonError::into_inner)
+        self.entries.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
 fn prohibited_secret_material(bytes: &[u8]) -> bool {
-    CLEAN_MEMBER_SCANS.contains_secret(bytes, scan_secret_material)
+    CLEAN_MEMBERS
+        .get_or_check(bytes, |bytes| {
+            if scan_secret_material(bytes) {
+                Err(())
+            } else {
+                Ok(())
+            }
+        })
+        .is_err()
 }
 
 fn scan_secret_material(bytes: &[u8]) -> bool {
