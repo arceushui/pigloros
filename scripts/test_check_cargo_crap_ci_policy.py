@@ -39,6 +39,11 @@ EXPECTED_FORK_REPLAY_TEST_EXCLUSIONS = (
     "src/nested_imported_fork_replay_tests/intermediate_privacy.rs",
     "src/ordinary_fork_lineage_tests.rs",
 )
+EXPECTED_SANDBOX_EXECUTION_TEST_EXCLUSIONS = (
+    "src/execute/tests/ownership.rs",
+    "src/provider_barrier/tests.rs",
+    "src/execute/tests/ownership/abandonment.rs",
+)
 EXPECTED_TEST_ONLY_EXCLUSIONS = (
     "tests/**",
     "benches/**",
@@ -48,11 +53,13 @@ EXPECTED_TEST_ONLY_EXCLUSIONS = (
     "src/system_bus/tests.rs",
     "src/image_activator/tests.rs",
     "src/root_attachment/tests.rs",
+    "src/root_selector/tests/admission_bounds.rs",
     "src/selector/installation/fixture.rs",
     "src/provider_admission/test_support.rs",
     "src/e2e_determinism.rs",
     "src/action_admission_tests.rs",
     *EXPECTED_FORK_REPLAY_TEST_EXCLUSIONS,
+    *EXPECTED_SANDBOX_EXECUTION_TEST_EXCLUSIONS,
 )
 SPEC = importlib.util.spec_from_file_location("check_cargo_crap_ci_policy", CHECKER_PATH)
 if SPEC is None or SPEC.loader is None:
@@ -199,6 +206,9 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
             "src/protocol_tests.rs",
             "src/examples/production.rs",
             "src/system_bus/transport.rs",
+            "src/root_selector.rs",
+            "src/provider_admission.rs",
+            "src/root_selector/tests/admission_bounds_production.rs",
             "src/fork_event_authority/tests/production.rs",
             "src/sqlite/tests/production.rs",
             "src/sqlite/fork_replay/production.rs",
@@ -208,6 +218,11 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
             "src/imported_fork_replay_tests/runtime_budget/production.rs",
             "src/nested_imported_fork_replay_tests/production.rs",
             "src/ordinary_fork_lineage_tests/production.rs",
+            "src/execute.rs",
+            "src/execute/tests/production.rs",
+            "src/execute/tests/ownership/production.rs",
+            "src/provider_barrier.rs",
+            "src/provider_barrier/production.rs",
         )
         for path in production_paths:
             with self.subTest(path=path):
@@ -218,8 +233,11 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
                     )
                 )
 
-    def test_internal_fork_replay_allowlist_paths_are_exact(self) -> None:
-        for path in EXPECTED_FORK_REPLAY_TEST_EXCLUSIONS:
+    def test_internal_test_allowlist_paths_are_exact(self) -> None:
+        for path in (
+            *EXPECTED_FORK_REPLAY_TEST_EXCLUSIONS,
+            *EXPECTED_SANDBOX_EXECUTION_TEST_EXCLUSIONS,
+        ):
             with self.subTest(path=path):
                 self.assertTrue(
                     any(
@@ -237,12 +255,15 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
                     )
                 )
 
-    def test_rejects_internal_fork_replay_allowlist_scope_changes(self) -> None:
+    def test_rejects_internal_test_allowlist_scope_changes(self) -> None:
         for step_name in (
             "Generate trusted current baseline",
             "Analyze CRAP score changes",
         ):
-            for path in EXPECTED_FORK_REPLAY_TEST_EXCLUSIONS:
+            for path in (
+                *EXPECTED_FORK_REPLAY_TEST_EXCLUSIONS,
+                *EXPECTED_SANDBOX_EXECUTION_TEST_EXCLUSIONS,
+            ):
                 parent = str(pathlib.PurePosixPath(path).parent)
                 neighbor = path.removesuffix(".rs") + "_production.rs"
                 scope_changes = {
@@ -262,6 +283,33 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
                             )
 
                         self.assert_rejected(change_scope)
+
+    def test_rejects_admission_bounds_allowlist_scope_changes(self) -> None:
+        path = "src/root_selector/tests/admission_bounds.rs"
+        scope_changes = (
+            "",
+            "--exclude 'src/root_selector/tests/**'",
+            "--exclude 'src/root_selector/**'",
+            "--exclude 'src/root_selector.rs'",
+            "--exclude 'src/provider_admission.rs'",
+            f"--exclude '{path}' "
+            "--exclude 'src/root_selector/tests/admission_bounds_production.rs'",
+        )
+        for step_name in (
+            "Generate trusted current baseline",
+            "Analyze CRAP score changes",
+        ):
+            for replacement in scope_changes:
+                with self.subTest(step=step_name, replacement=replacement):
+                    def change_scope(
+                        workflow, *, step_name=step_name, replacement=replacement,
+                    ):
+                        step = self.cargo_crap_step(workflow, step_name)
+                        step["run"] = step["run"].replace(
+                            f"--exclude '{path}'", replacement
+                        )
+
+                    self.assert_rejected(change_scope)
 
     def test_rejects_excluding_production_source(self) -> None:
         def exclude_production(workflow: dict) -> None:

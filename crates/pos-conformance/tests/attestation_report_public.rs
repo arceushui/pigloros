@@ -56,7 +56,7 @@ struct Fixture {
 static FIXTURE: OnceLock<Result<Fixture, String>> = OnceLock::new();
 
 fn materialize() -> TestResult<Fixture> {
-    let archive = support::current_archive("report-attestation")?;
+    let archive = support::current_archive()?;
     let bundle = ConformanceBundleV1::from_canonical_cbor(&archive)?;
     let profile = bundle
         .members

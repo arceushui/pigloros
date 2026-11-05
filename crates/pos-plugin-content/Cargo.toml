@@ -1,0 +1,15 @@
+[package]
+name = "pos-plugin-content"
+edition.workspace = true
+version.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+pos-crypto = { path = "../pos-crypto" }
+thiserror = { workspace = true }
+wit-parser = { workspace = true }
+
+[lints]
+workspace = true

@@ -40,14 +40,17 @@ use pos_plugin_supervisor::{
     ContentValidationV1, WorkerProgramV1,
 };
 use pos_reference::adapter_transport::{read_observation, write_attempt};
-use pos_reference::evaluator::{CaseAttempt, SubjectObservation, SubjectResult};
+use pos_reference::evaluator::{CaseAttempt, ResourceUsage, SubjectObservation, SubjectResult};
 use pos_reference::evaluator_domain::{ExecutionMode, FixtureFamily};
+use pos_reference::profile::DeterministicBudget;
 use pos_runtime::community_plugin_host::{
     CommunityPluginHostErrorV1, CommunityPluginModeV1, ReleaseIdentityV1, RevocationBasisV1,
     TrustDenialBasisV1,
 };
 use serde_json::Value;
-use support::attempts::{attempt_from_fixture_files, oracle_bytes, rewrite_subcases};
+use support::attempts::{
+    attempt_from_fixture_files, family_budget, oracle_bytes, rewrite_subcases,
+};
 use support::subcase::{
     assert_output_is_the_oracle, assert_within_budget, expecting, failure, observe_attempt,
     one_subcase, WORKER,
@@ -76,6 +79,88 @@ const FORBIDDEN_KEYS: [&str; 5] = ["signature", "verified", "safe", "safety", "q
 
 /// The Plugin ID of the compatibility prototype guests.
 const PLUGIN_ID: &str = "pigloros.compatibility-prototype";
+
+/// ADR-068 R4 test 8: the usage the real worker measures for `pos.3`, two committed passes of
+/// the Rust guest (Simulation Time 42 then 43), each one 8-byte Event and an 8-byte next state,
+/// and so for the `positive` case, the per-counter maximum over its sub-cases (ADR-068 R4 4.2).
+/// The evaluator half, `crates/pos-reference/tests/plugin_subject_public.rs`, asserts the same
+/// literal (`MEASURED_POSITIVE_USAGE`) at and one below its budget; keep the two in step.
+const POSITIVE_USAGE: ResourceUsage = ResourceUsage {
+    memory_bytes: 1_179_648,
+    cpu_fuel: 42_604,
+    host_calls: 6,
+    event_count: 2,
+    output_bytes: 16,
+    storage_bytes: 16,
+    execution_steps: 2,
+    simulation_time_ns: 1,
+};
+
+/// The usage of `pos.1`, one committed pass of the Rust guest.
+const RUST_ONE_PASS_USAGE: ResourceUsage = ResourceUsage {
+    memory_bytes: 1_179_648,
+    cpu_fuel: 21_238,
+    host_calls: 3,
+    event_count: 1,
+    output_bytes: 8,
+    storage_bytes: 8,
+    execution_steps: 1,
+    simulation_time_ns: 0,
+};
+
+/// The usage of `pos.2`, one committed pass of the C guest.
+const C_ONE_PASS_USAGE: ResourceUsage = ResourceUsage {
+    memory_bytes: 131_072,
+    cpu_fuel: 20_841,
+    host_calls: 3,
+    event_count: 1,
+    output_bytes: 8,
+    storage_bytes: 8,
+    execution_steps: 1,
+    simulation_time_ns: 0,
+};
+
+/// The usage of a case none of whose sub-cases commits: 0 for all eight counters.
+const NO_USAGE: ResourceUsage = ResourceUsage {
+    memory_bytes: 0,
+    cpu_fuel: 0,
+    host_calls: 0,
+    event_count: 0,
+    output_bytes: 0,
+    storage_bytes: 0,
+    execution_steps: 0,
+    simulation_time_ns: 0,
+};
+
+/// The usage of `deletion-redaction`: `del.1` and `del.2` are each one committed pass of the
+/// Rust guest over the same 34-byte `del.1` observation, which costs more fuel than the 17-byte
+/// observation of `pos.1`; the two sub-cases measure the same.
+const DELETION_REDACTION_USAGE: ResourceUsage = ResourceUsage {
+    cpu_fuel: 21_510,
+    ..RUST_ONE_PASS_USAGE
+};
+
+/// The usage of `independent-evaluation`: `ind.3` is the pass of `pos.1`, and `ind.1`, `ind.2a`,
+/// `ind.2b` and `ind.4` run no pass.
+const INDEPENDENT_EVALUATION_USAGE: ResourceUsage = RUST_ONE_PASS_USAGE;
+
+/// ADR-061 R11: the usage the real worker measures for each family in Local and Air-Gapped, the
+/// per-counter maximum over its sub-cases (ADR-068 R4 4.2(2)). Only a committed sub-case reports
+/// usage, so the four failure families report none. The evaluator half,
+/// `crates/pos-reference/tests/plugin_subject_public.rs`, asserts the same literals
+/// (`MEASURED_USAGE`) against the provider budgets; keep the two in step.
+const MEASURED_USAGE: [(FixtureFamily, ResourceUsage); 7] = [
+    (FixtureFamily::Positive, POSITIVE_USAGE),
+    (FixtureFamily::Denied, NO_USAGE),
+    (FixtureFamily::Malformed, NO_USAGE),
+    (FixtureFamily::ResourceExhaustion, NO_USAGE),
+    (FixtureFamily::DeletionRedaction, DELETION_REDACTION_USAGE),
+    (FixtureFamily::Downgrade, NO_USAGE),
+    (
+        FixtureFamily::IndependentEvaluation,
+        INDEPENDENT_EVALUATION_USAGE,
+    ),
+];
 
 const fn is_refused_or_failed(outcome: &Outcome) -> bool {
     matches!(
@@ -408,6 +493,117 @@ fn r8_s1_positive_output_is_the_oracle_in_local_and_air_gapped() -> TestResult {
     let air_gapped = family_run(FixtureFamily::Positive, ExecutionMode::AirGapped)?;
     assert_eq!(local.observation.usage, air_gapped.observation.usage);
     assert!(local.observation.usage.cpu_fuel > 0);
+    Ok(())
+}
+
+/// ADR-068 R4 test 8, worker half: `positive` reports nonzero Event count, output bytes, storage
+/// bytes and steps, and exactly the measured usage, in Local and Air-Gapped.
+#[test]
+fn adr068_r4_t8_positive_reports_the_measured_usage_in_local_and_air_gapped() -> TestResult {
+    for mode in MODES {
+        let run = family_run(FixtureFamily::Positive, mode)?;
+        let usage = run.observation.usage;
+        let measured = [
+            usage.event_count,
+            usage.output_bytes,
+            usage.storage_bytes,
+            usage.execution_steps,
+        ];
+        let records: Vec<(&str, ResourceUsage)> = run
+            .captures
+            .iter()
+            .map(|capture| (capture.record.id.as_str(), capture.record.usage))
+            .collect();
+        assert_eq!(usage, POSITIVE_USAGE, "{mode:?} {records:?}");
+        assert_eq!(
+            records,
+            [
+                ("pos.1", RUST_ONE_PASS_USAGE),
+                ("pos.2", C_ONE_PASS_USAGE),
+                ("pos.3", POSITIVE_USAGE),
+            ],
+            "{mode:?}"
+        );
+        assert!(measured.iter().all(|counter| *counter > 0), "{mode:?}");
+    }
+    Ok(())
+}
+
+/// ADR-068 R4 open check of slice 3: no `res.*` sub-case commits, so each reports zero usage and
+/// so does the `resource-exhaustion` case.
+#[test]
+fn adr068_r4_no_resource_exhaustion_subcase_commits_or_reports_usage() -> TestResult {
+    for mode in MODES {
+        let run = family_run(FixtureFamily::ResourceExhaustion, mode)?;
+        for capture in &run.captures {
+            let id = &capture.record.id;
+            assert!(!capture.record.outcomes.is_empty(), "{mode:?} {id}");
+            assert!(
+                !capture.record.outcomes.iter().any(is_committed),
+                "{mode:?} {id}"
+            );
+            assert_eq!(
+                capture.record.usage,
+                ResourceUsage::default(),
+                "{mode:?} {id}"
+            );
+        }
+        assert_eq!(run.captures.len(), 7, "{mode:?}");
+        assert_eq!(run.observation.usage, ResourceUsage::default(), "{mode:?}");
+    }
+    Ok(())
+}
+
+/// ADR-061 R11: the lowest budget `usage` passes, per counter. A counter measured at 0 takes 1,
+/// because a zero budget is rejected.
+const fn measured_floor(usage: ResourceUsage) -> DeterministicBudget {
+    const fn floor(counter: u64) -> u64 {
+        if counter == 0 {
+            1
+        } else {
+            counter
+        }
+    }
+    DeterministicBudget {
+        memory_bytes: floor(usage.memory_bytes),
+        cpu_fuel: floor(usage.cpu_fuel),
+        host_calls: floor(usage.host_calls),
+        event_count: floor(usage.event_count),
+        output_bytes: floor(usage.output_bytes),
+        storage_bytes: floor(usage.storage_bytes),
+        execution_steps: floor(usage.execution_steps),
+        simulation_time_ns: floor(usage.simulation_time_ns),
+    }
+}
+
+/// ADR-061 R11: every family reports exactly its measured usage on the real worker in Local and
+/// Air-Gapped, and the Draft budget the provider declares for it is the lowest budget that usage
+/// passes. A change in measured usage fails here until the literal and `provider.json` move
+/// together.
+#[test]
+fn adr061_r11_every_family_budget_is_the_floor_of_its_measured_usage() -> TestResult {
+    let families: Vec<FixtureFamily> = MEASURED_USAGE.iter().map(|(family, _)| *family).collect();
+    assert_eq!(families, FixtureFamily::ALL);
+    for (family, measured) in MEASURED_USAGE {
+        assert_eq!(
+            family_budget(family)?,
+            measured_floor(measured),
+            "{family:?}"
+        );
+        for mode in MODES {
+            let run = family_run(family, mode)?;
+            let records: Vec<(&str, ResourceUsage)> = run
+                .captures
+                .iter()
+                .map(|capture| (capture.record.id.as_str(), capture.record.usage))
+                .collect();
+            assert_eq!(
+                run.observation.usage, measured,
+                "{family:?} {mode:?} {records:?}"
+            );
+            assert_within_budget(family, &run.observation)?;
+        }
+    }
     Ok(())
 }
 

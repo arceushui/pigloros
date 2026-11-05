@@ -361,6 +361,7 @@ fn image_manifest(
     descriptors: &[PartitionDescriptor; 3],
     signing: &ImageSigning,
     salt: [u8; 32],
+    arguments: &[String],
 ) -> TestResult<Vec<u8>> {
     let der = signing.proof.as_slice();
     let partitions = descriptors
@@ -401,7 +402,7 @@ fn image_manifest(
             Value::Text(signing.key_description.to_owned()),
             Value::Text("/adapter".to_owned()),
             digest(*blake3::hash(executable).as_bytes()),
-            Value::Array(Vec::new()),
+            Value::Array(arguments.iter().cloned().map(Value::Text).collect()),
             integer(2),
             Value::Text("image".to_owned()),
         ]),
@@ -546,6 +547,17 @@ pub(crate) fn admitted_state_with_salt(
     signing: &ImageSigning,
     salt: [u8; 32],
 ) -> TestResult<InstalledSelectorState> {
+    admitted_state_with_arguments(root_image, executable, partitions, signing, salt, &[])
+}
+
+pub(crate) fn admitted_state_with_arguments(
+    root_image: &[u8],
+    executable: &[u8],
+    partitions: &[PartitionDescriptor; 3],
+    signing: &ImageSigning,
+    salt: [u8; 32],
+    arguments: &[String],
+) -> TestResult<InstalledSelectorState> {
     let authority = provider_authority();
     let trust = provider_trust(&authority, signing)?;
     let trust_digest = signed_record_digest(&trust)?;
@@ -573,7 +585,7 @@ pub(crate) fn admitted_state_with_salt(
     )?;
     let report_digest = signed_record_digest(&report)?;
     let image = image_manifest(
-        &authority, root_image, executable, partitions, signing, salt,
+        &authority, root_image, executable, partitions, signing, salt, arguments,
     )?;
     let image_digest = signed_record_digest(&image)?;
     let launch = launch_policy(image_digest)?;

@@ -93,11 +93,17 @@ pub enum ProbeResult {
     Present,
     /// No such process, or its creation time or image differs.
     Absent,
+    /// Inspection could establish neither a complete identity match nor absence/mismatch.
+    /// This never grants eligibility to remove the recorded folder or cleanup record.
+    Indeterminate,
 }
 
 /// Probes a recorded browser process by identity without enumerating, signalling or killing.
 pub trait ProcessProbe {
     /// Probe `(pid, creation_filetime, image_path_sha256)`.
+    ///
+    /// Access denial or an incomplete query alone is [`ProbeResult::Indeterminate`], not
+    /// evidence of absence. Native diagnostics stay inside the adapter (ADR-125).
     fn probe(
         &mut self,
         browser_pid: u32,
