@@ -199,6 +199,10 @@ impl<M: CommunityPluginMemberV1> CommunityPluginHostV1<M> {
     /// member; a gate refusal or a failed offer refuses the whole pass before anything is
     /// staged. The pass is closed on every exit, a panic that unwinds out of a member included;
     /// the registry is synced with every member after each pass that returns.
+    ///
+    /// An unfinished pass or poisoned Driver rejects the request before a pass opens: no clock
+    /// sample, member access, authorization, cleanup or sync occurs. The outcome has no UTC
+    /// sample or gate entries and preserves the registry's error and existing pass.
     pub fn run_pass(
         &mut self,
         registry: &mut PluginRegistry,
@@ -207,6 +211,14 @@ impl<M: CommunityPluginMemberV1> CommunityPluginHostV1<M> {
         request: CommunityPassRequestV1<'_>,
     ) -> CommunityPassOutcomeV1 {
         let tick = request.tick;
+        if let Err(error) = registry.ensure_no_pending_step() {
+            return CommunityPassOutcomeV1 {
+                tick,
+                utc: None,
+                gates: Vec::new(),
+                result: failed(error),
+            };
+        }
         let utc = TrustedUtcSecondV1::from_source(wall).ok();
         let guard = PassGuard::open(&self.members, utc, tick);
         let (verdicts, result) = guard.pass().map_or_else(
