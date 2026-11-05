@@ -17,6 +17,8 @@ import unittest
 
 import yaml
 
+from check_asan_ci_policy import EXPECTED_SDK_HEADROOM_STEP
+
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 FILTER_PATH = ROOT / ".github" / "rust-scope.yml"
@@ -112,6 +114,26 @@ CORE_JOB_IF = (
     "(needs.ci_change_scope.outputs.rust == 'true' || "
     "github.event_name != 'pull_request') }}"
 )
+
+
+def assert_core_sdk_headroom(workflow: dict) -> None:
+    """Protect the two workers observed exhausting disk during compilation."""
+    for job_name in ("test-shard", "coverage"):
+        steps = workflow["jobs"][job_name]["steps"]
+        if (
+            len(steps) < 2
+            or steps[0].get("uses")
+            != "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+            or steps[1] != EXPECTED_SDK_HEADROOM_STEP
+            or sum(
+                step.get("name") == EXPECTED_SDK_HEADROOM_STEP["name"]
+                for step in steps
+            )
+            != 1
+        ):
+            raise AssertionError(
+                f"{job_name} must reclaim bounded SDK headroom immediately after checkout"
+            )
 
 
 def load_patterns() -> list[str]:
@@ -816,6 +838,72 @@ class CiWorkflowPolicyTests(unittest.TestCase):
         scoped = dict(environment, RUST_SCOPE="false")
         scoped.update(dict.fromkeys(results, "skipped"))
         self.assertEqual(verdict(scoped), 0)
+
+    def test_core_workers_reclaim_sdk_headroom_before_cache_and_build(self) -> None:
+        workflow = load_workflow(CI_WORKFLOW_PATH)
+        assert_core_sdk_headroom(workflow)
+        program = workflow["jobs"]["test-shard"]["steps"][1]["run"]
+        result = subprocess.run(
+            ["bash", "-n"], input=program, text=True, capture_output=True, check=False
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_core_headroom_rejects_missing_duplicate_or_late_setup(self) -> None:
+        for job_name in ("test-shard", "coverage"):
+            for change in ("missing", "duplicate", "before-checkout", "after-cache"):
+                with self.subTest(job=job_name, change=change):
+                    workflow = copy.deepcopy(load_workflow(CI_WORKFLOW_PATH))
+                    steps = workflow["jobs"][job_name]["steps"]
+                    headroom = steps.pop(1)
+                    if change == "duplicate":
+                        steps[1:1] = [headroom, copy.deepcopy(headroom)]
+                    elif change == "before-checkout":
+                        steps.insert(0, headroom)
+                    elif change == "after-cache":
+                        steps.append(headroom)
+                    with self.assertRaisesRegex(AssertionError, "SDK headroom"):
+                        assert_core_sdk_headroom(workflow)
+
+    def test_core_headroom_rejects_unsafe_cleanup_or_missing_receipts(self) -> None:
+        edits = (
+            ("/usr/share/dotnet/sdk", "/usr/share/dotnet"),
+            ("/usr/local/lib/android/sdk", "/usr/local"),
+            ("test ! -L", "true #"),
+            ("readlink -e", "printf"),
+            ("--one-file-system", ""),
+            ("sudo du -sx -B1", "true #"),
+            ("df -B1", "true #"),
+            ("df -i", "true #"),
+            ("set -euo pipefail", "set +e"),
+        )
+        for job_name in ("test-shard", "coverage"):
+            for old, new in edits:
+                with self.subTest(job=job_name, edit=old):
+                    workflow = copy.deepcopy(load_workflow(CI_WORKFLOW_PATH))
+                    steps = workflow["jobs"][job_name]["steps"]
+                    # Mutate one consumer independently of the parsed YAML alias.
+                    steps[1] = copy.deepcopy(steps[1])
+                    self.assertIn(old, steps[1]["run"])
+                    steps[1]["run"] = steps[1]["run"].replace(old, new)
+                    with self.assertRaisesRegex(AssertionError, "SDK headroom"):
+                        assert_core_sdk_headroom(workflow)
+
+    def test_core_headroom_rejects_guard_bypasses_and_permissive_steps(self) -> None:
+        for job_name in ("test-shard", "coverage"):
+            for extra in (
+                {"if": "${{ true }}"},
+                {"if": "${{ runner.os == 'Linux' }}"},
+                {"continue-on-error": True},
+                {"shell": "bash {0} || true"},
+                {"working-directory": "/tmp"},
+            ):
+                with self.subTest(job=job_name, extra=extra):
+                    workflow = copy.deepcopy(load_workflow(CI_WORKFLOW_PATH))
+                    steps = workflow["jobs"][job_name]["steps"]
+                    steps[1] = copy.deepcopy(steps[1])
+                    steps[1].update(extra)
+                    with self.assertRaisesRegex(AssertionError, "SDK headroom"):
+                        assert_core_sdk_headroom(workflow)
 
     def test_core_rust_caches_restore_on_prs_and_save_only_from_main(self) -> None:
         workflow = load_workflow(CI_WORKFLOW_PATH)
