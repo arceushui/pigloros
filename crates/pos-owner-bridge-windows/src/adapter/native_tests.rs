@@ -92,7 +92,7 @@ fn empty_session(native: &mut dyn NativeOperations) {
 /// packaged page refuses before any authenticator request can begin.
 impl crate::Native {
     pub(crate) fn native_window_environment_and_buffers_lifecycle() -> TestResult {
-        let _port = crate::Native::fixed_port_fixture();
+        let _port = Self::fixed_port_fixture();
         let root = FixtureRoot::new()?;
         let runtime_path = std::env::var_os("OWNER_BRIDGE_TEST_RUNTIME")
             .map(PathBuf::from)
@@ -104,7 +104,7 @@ impl crate::Native {
             Box::new(crate::WindowsLoopbackBinder::default()),
             ListenerConfig::adr(),
         )?;
-        let mut factory = crate::Native::owner_factory()?;
+        let mut factory = Self::owner_factory()?;
         let mut native = factory.session()?;
         empty_session(native.as_mut());
         native.create_window(None, 480, 640)?;
