@@ -11,6 +11,8 @@
 //! checker enforces it.
 
 mod ffi;
+#[forbid(unsafe_code)]
+mod native_api;
 // Safe entry points implemented by the private native boundary. The type and
 // its associated operations are accessible only inside this crate.
 struct Native;
@@ -19,24 +21,38 @@ mod adapter {
     // The inline boundary and each child file are separate lint scopes. This
     // retains both ADR-110 checks without duplicate attributes on one module.
     mod directory;
+    mod events;
+    mod host;
+    mod loopback;
     mod overrides;
     mod platform;
     mod process;
     mod runtime;
+    mod settings;
     mod socket;
+    mod store;
+    mod surface;
+
+    #[cfg(test)]
+    pub(crate) mod native_tests;
 
     pub use directory::{create_private_directory, verify_private_directory};
+    pub use host::WindowsOwnerHost;
+    pub(crate) use loopback::SharedLoopback;
     pub use overrides::refuse_overrides;
     pub use platform::{cpu_requirements, require_windows_profile, CpuFeatures};
     pub use process::{process_identity, WindowsProcessProbe};
     pub use runtime::{verify_fixed_runtime, VerifiedRuntime};
     pub use socket::WindowsLoopbackBinder;
+    pub(crate) use store::WindowsCleanupStore;
 }
+
+use adapter::{SharedLoopback, WindowsCleanupStore};
 
 pub use adapter::{
     cpu_requirements, create_private_directory, process_identity, refuse_overrides,
     require_windows_profile, verify_fixed_runtime, verify_private_directory, CpuFeatures,
-    VerifiedRuntime, WindowsLoopbackBinder, WindowsProcessProbe,
+    VerifiedRuntime, WindowsLoopbackBinder, WindowsOwnerHost, WindowsProcessProbe,
 };
 
 #[cfg(test)]
@@ -49,6 +65,17 @@ mod tests {
 
     use crate::WindowsLoopbackBinder;
 
+    pub(crate) fn fixed_port_fixture() -> std::sync::MutexGuard<'static, ()> {
+        static PORT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        PORT.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    #[test]
+    fn native_window_environment_and_buffers_lifecycle() -> Result<(), Box<dyn std::error::Error>> {
+        crate::adapter::native_tests::native_window_environment_and_buffers_lifecycle()
+    }
+
     #[test]
     fn runtime_checks_all_members_metadata_cache_and_per_start_binaries(
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -57,6 +84,7 @@ mod tests {
 
     #[test]
     fn exclusive_loopback_sockets_block_a_reusing_competitor() {
+        let _port = fixed_port_fixture();
         let mut fixed = WindowsLoopbackBinder::default();
         // No connections/TIME_WAIT on the port used by later lifecycle fixtures.
         assert!(fixed

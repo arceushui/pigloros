@@ -225,3 +225,1156 @@ function = "bind_v6"
 operation = "bind IPv6"
 invariant = "Live owned v6-only socket; initialized28byte SOCKADDR_IN6 for loopback."
 hosted_test = "exclusive_loopback_sockets_block_a_reusing_competitor"
+
+
+[[block]]
+file = "src/ffi/buffers.rs"
+line = 40
+function = "new"
+operation = "environment.CreateSharedBuffer(u64::from(capacity))"
+invariant = "live STA environment and a fixed codec-validated capacity; the returned COM interface uniquely owns this new shared buffer."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/buffers.rs"
+line = 70
+function = "word64"
+operation = "AtomicU64::from_ptr(pointer)"
+invariant = "the admitted live COM mapping is 64-byte aligned; the checked eight-byte range is in-bounds and excludes the two 32-bit control words. This borrow cannot outlive self or a mutable close operation."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/buffers.rs"
+line = 77
+function = "state"
+operation = "AtomicU32::from_ptr(base.as_ptr().wrapping_add(40).cast::<u32>())"
+invariant = "all fixed capacities contain the aligned 32-bit state at40; the live COM mapping outlives this borrow. No 64-bit access overlaps it."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/buffers.rs"
+line = 84
+function = "flags"
+operation = "AtomicU32::from_ptr(base.as_ptr().wrapping_add(44).cast::<u32>())"
+invariant = "the aligned zero-flags word at44 is inside every admitted mapping and disjoint from state. No 64-bit access spans either word."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/buffers.rs"
+line = 178
+function = "observe_mapping"
+operation = "object.Size(&raw mut size)"
+invariant = "live owned STA buffer and initialized distinct writable output."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/buffers.rs"
+line = 182
+function = "observe_mapping"
+operation = "object.Buffer(&raw mut pointer)"
+invariant = "the live buffer owns the mapping; initialized output receives a borrowed pointer used only while that interface is held and not closed."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/buffers.rs"
+line = 194
+function = "close_object"
+operation = "object.Close()"
+invariant = "a live owned STA interface; all atomic borrows ended before this call and no pointer access is attempted after it, including on error."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/buffers.rs"
+line = 244
+function = "post_request"
+operation = "view.PostSharedBufferToScript( &self.request.object, COREWEBVIEW2_SHARED_BUFFER_ACCESS_READ_ONLY, w!( ), )"
+invariant = "live main-frame interface and admitted mapping, constant JSON; pointer/COM owners remain on this STA. Request access is read-only."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/buffers.rs"
+line = 257
+function = "post_reply"
+operation = "view.PostSharedBufferToScript( &self.reply.object, COREWEBVIEW2_SHARED_BUFFER_ACCESS_READ_WRITE, w!( ), )"
+invariant = "live main-frame interface and admitted mapping, constant JSON; this is the reply buffer's sole allowed read/write exposure."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/creation.rs"
+line = 59
+function = "start"
+operation = "CreateCoreWebView2EnvironmentWithOptions( PCWSTR(runtime.as_ptr()), PCWSTR(folder.as_ptr()), &options, &callback, )"
+invariant = "fixed verified runtime and fresh protected folder, live STA options/callback, all UTF-16 inputs retained in this owner until completion."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/creation.rs"
+line = 103
+function = "start"
+operation = "environment.CreateCoreWebView2Controller(hwnd, &callback)"
+invariant = "retained live STA environment and callback; the surface keeps its owned top-level HWND alive until this async operation completes."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/environment.rs"
+line = 47
+function = "subscribe"
+operation = "exit.add_BrowserProcessExited(&callback, &raw mut token)"
+invariant = "newly-created retained STA environment and live callback; initialized unique token output, subscription precedes controller creation."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/environment.rs"
+line = 60
+function = "snapshot"
+operation = "self.raw.BrowserVersionString(out)"
+invariant = "retained STA environment and initialized helper-owned string output."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/environment.rs"
+line = 65
+function = "snapshot"
+operation = "environment7.UserDataFolder(out)"
+invariant = "retained STA environment and initialized helper-owned string output."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/environment.rs"
+line = 84
+function = "unsubscribe"
+operation = "self.exit.remove_BrowserProcessExited(token)"
+invariant = "exact retained environment and registration token on its creating STA; successful removal is recorded before any retry."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/environment.rs"
+line = 99
+function = "browser_exited"
+operation = "args.BrowserProcessId(&raw mut pid)"
+invariant = "retained invoking-STA arguments and initialized unique PID output."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/events/controls.rs"
+line = 58
+function = "new_window"
+operation = "view.add_NewWindowRequested(&handler, token)"
+invariant = "live STA interface/handler; initialized token output, retained by Subscriptions."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/events/controls.rs"
+line = 62
+function = "new_window"
+operation = "remove.remove_NewWindowRequested(token)"
+invariant = "this exact token belongs to the retained live interface on its creating STA."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/events/controls.rs"
+line = 70
+function = "block_new_window"
+operation = "args.SetHandled(true)"
+invariant = "live event arguments on the invoking STA; fixed fail-closed setting."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/events/controls.rs"
+line = 97
+function = "permission"
+operation = "view.add_PermissionRequested(&handler, token)"
+invariant = "live STA interface/handler; initialized token output, retained by Subscriptions."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/events/controls.rs"
+line = 101
+function = "permission"
+operation = "remove.remove_PermissionRequested(token)"
+invariant = "this exact token belongs to the retained live interface on its creating STA."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/events/controls.rs"
+line = 109
+function = "block_permission"
+operation = "args.SetState(COREWEBVIEW2_PERMISSION_STATE_DENY)"
+invariant = "live event arguments on the invoking STA; fixed fail-closed setting."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/events/controls.rs"
+line = 136
+function = "download"
+operation = "view.add_DownloadStarting(&handler, token)"
+invariant = "live STA interface/handler; initialized token output, retained by Subscriptions."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/events/controls.rs"
+line = 140
+function = "download"
+operation = "remove.remove_DownloadStarting(token)"
+invariant = "this exact token belongs to the retained live interface on its creating STA."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/events/controls.rs"
+line = 148
+function = "block_download"
+operation = "args.SetCancel(true)"
+invariant = "live event arguments on the invoking STA; fixed fail-closed setting."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/events/controls.rs"
+line = 175
+function = "external"
+operation = "view.add_LaunchingExternalUriScheme(&handler, token)"
+invariant = "live STA interface/handler; initialized token output, retained by Subscriptions."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/events/controls.rs"
+line = 179
+function = "external"
+operation = "remove.remove_LaunchingExternalUriScheme(token)"
+invariant = "this exact token belongs to the retained live interface on its creating STA."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/events/controls.rs"
+line = 187
+function = "block_external"
+operation = "args.SetCancel(true)"
+invariant = "live event arguments on the invoking STA; fixed fail-closed setting."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/events/controls.rs"
+line = 215
+function = "authentication"
+operation = "view.add_BasicAuthenticationRequested(&handler, token)"
+invariant = "live STA interface/handler; initialized token output, retained by Subscriptions."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/events/controls.rs"
+line = 219
+function = "authentication"
+operation = "remove.remove_BasicAuthenticationRequested(token)"
+invariant = "this exact token belongs to the retained live interface on its creating STA."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/events/controls.rs"
+line = 229
+function = "block_authentication"
+operation = "args.SetCancel(true)"
+invariant = "live event arguments on the invoking STA; fixed fail-closed setting."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/events/controls.rs"
+line = 248
+function = "dialog"
+operation = "view.add_ScriptDialogOpening(&handler, token)"
+invariant = "live STA interface/handler and initialized token output."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/events/controls.rs"
+line = 252
+function = "dialog"
+operation = "remove.remove_ScriptDialogOpening(token)"
+invariant = "matching token on the retained interface's creating STA."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/events/controls.rs"
+line = 271
+function = "close_request"
+operation = "view.add_WindowCloseRequested(&handler, token)"
+invariant = "live STA interface/handler and initialized token output."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/events/controls.rs"
+line = 275
+function = "close_request"
+operation = "remove.remove_WindowCloseRequested(token)"
+invariant = "matching token on the retained interface's creating STA."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/events/navigation.rs"
+line = 47
+function = "starting"
+operation = "view.add_NavigationStarting(&handler, token)"
+invariant = "live STA interface/handler and initialized unique token output."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/events/navigation.rs"
+line = 51
+function = "starting"
+operation = "remove.remove_NavigationStarting(token)"
+invariant = "exact registered token on its retained creating-STA interface."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/events/navigation.rs"
+line = 75
+function = "source_changed"
+operation = "view.add_SourceChanged(&handler, token)"
+invariant = "live STA interface/handler and initialized unique token output."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/events/navigation.rs"
+line = 79
+function = "source_changed"
+operation = "remove.remove_SourceChanged(token)"
+invariant = "exact registered token on its retained creating-STA interface."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/events/navigation.rs"
+line = 99
+function = "content"
+operation = "view.add_ContentLoading(&handler, token)"
+invariant = "live STA interface/handler and initialized unique token output."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/events/navigation.rs"
+line = 103
+function = "content"
+operation = "remove.remove_ContentLoading(token)"
+invariant = "exact registered token on its retained creating-STA interface."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/events/navigation.rs"
+line = 127
+function = "loaded"
+operation = "view.add_DOMContentLoaded(&handler, token)"
+invariant = "live STA interface/handler and initialized unique token output."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/events/navigation.rs"
+line = 131
+function = "loaded"
+operation = "remove.remove_DOMContentLoaded(token)"
+invariant = "exact registered token on its retained creating-STA interface."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/events/navigation.rs"
+line = 155
+function = "completed"
+operation = "view.add_NavigationCompleted(&handler, token)"
+invariant = "live STA interface/handler and initialized unique token output."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/events/navigation.rs"
+line = 159
+function = "completed"
+operation = "remove.remove_NavigationCompleted(token)"
+invariant = "exact registered token on its retained creating-STA interface."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/events/navigation.rs"
+line = 179
+function = "frame"
+operation = "view.add_FrameCreated(&handler, token)"
+invariant = "live STA interface/handler and initialized unique token output."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/events/navigation.rs"
+line = 183
+function = "frame"
+operation = "remove.remove_FrameCreated(token)"
+invariant = "exact registered token on its retained creating-STA interface."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/events/navigation.rs"
+line = 203
+function = "process"
+operation = "view.add_ProcessFailed(&handler, token)"
+invariant = "live STA interface/handler and initialized unique token output."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/events/navigation.rs"
+line = 207
+function = "process"
+operation = "remove.remove_ProcessFailed(token)"
+invariant = "exact registered token on its retained creating-STA interface."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/events/navigation.rs"
+line = 224
+function = "navigation_start"
+operation = "args.SetCancel(!allow)"
+invariant = "live invoking-STA arguments; only the safe policy can select Allow."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/events/navigation.rs"
+line = 232
+function = "navigation_snapshot"
+operation = "args.Uri(out)"
+invariant = "live arguments and helper-owned initialized writable string output."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/events/navigation.rs"
+line = 236
+function = "navigation_snapshot"
+operation = "args.IsRedirected(&raw mut redirected)"
+invariant = "live invoking-STA arguments and initialized unique BOOL output."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/events/navigation.rs"
+line = 239
+function = "navigation_snapshot"
+operation = "args.NavigationId(&raw mut id)"
+invariant = "live invoking-STA arguments and initialized unique navigation-ID output."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/events/navigation.rs"
+line = 250
+function = "source"
+operation = "view.Source(out)"
+invariant = "retained live STA view and helper-owned initialized string output."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/events/navigation.rs"
+line = 258
+function = "content_loading"
+operation = "args.NavigationId(&raw mut id)"
+invariant = "live invoking-STA arguments and initialized unique navigation-ID output."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/events/navigation.rs"
+line = 261
+function = "content_loading"
+operation = "args.IsErrorPage(&raw mut error_page)"
+invariant = "live invoking-STA arguments and initialized unique BOOL output."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/events/navigation.rs"
+line = 276
+function = "dom_loaded"
+operation = "args.NavigationId(&raw mut id)"
+invariant = "live invoking-STA arguments and initialized unique navigation-ID output."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/events/navigation.rs"
+line = 289
+function = "navigation_completed"
+operation = "args.NavigationId(&raw mut id)"
+invariant = "live invoking-STA arguments and initialized unique navigation-ID output."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/events/navigation.rs"
+line = 292
+function = "navigation_completed"
+operation = "args.IsSuccess(&raw mut success)"
+invariant = "live invoking-STA arguments and initialized unique BOOL output."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/events/resource.rs"
+line = 32
+function = "install"
+operation = "view.add_WebResourceRequested(&handler, token)"
+invariant = "live STA interface/handler and initialized unique token output."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/events/resource.rs"
+line = 36
+function = "install"
+operation = "remove.remove_WebResourceRequested(token)"
+invariant = "exact subscription token on its retained STA interface."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/events/resource.rs"
+line = 41
+function = "install"
+operation = "view.AddWebResourceRequestedFilter(w!( ), COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL)"
+invariant = "fixed wildcard and ALL context; the installed handler always supplies a local denial unless the exact owner document is admitted."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/events/resource.rs"
+line = 61
+function = "filter"
+operation = "environment.CreateWebResourceResponse( None, 403, w!( ), w!( ), )"
+invariant = "retained STA environment; null body, fixed status and static header strings produce no network request or untrusted response data."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/events/resource.rs"
+line = 72
+function = "filter"
+operation = "args.SetResponse(&response)"
+invariant = "live event arguments and host-created denial response; COM retains its own reference for this intercepted request."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/events/resource.rs"
+line = 79
+function = "owner_request"
+operation = "args.Request()"
+invariant = "live event arguments on the callback STA; COM-owned request result."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/events/resource.rs"
+line = 82
+function = "owner_request"
+operation = "request.Uri(out)"
+invariant = "the string helper provides initialized uniquely writable output."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/events/resource.rs"
+line = 86
+function = "owner_request"
+operation = "args.ResourceContext(&raw mut context)"
+invariant = "live arguments and initialized writable context scalar."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/pump.rs"
+line = 23
+function = "new"
+operation = "CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE)"
+invariant = "initialize this dedicated surface thread as a COM STA. Both S_OK and S_FALSE require one matching CoUninitialize on this thread; an existing incompatible apartment is refused."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/pump.rs"
+line = 34
+function = "drop"
+operation = "CoUninitialize()"
+invariant = "!Send affinity and stack/field order keep this on the thread initialized above, after every WebView COM owner has been released."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/pump.rs"
+line = 68
+function = "new"
+operation = "SetTimer(None, 0, 10, None)"
+invariant = "create a thread timer without any callback pointer or HWND. Its WM_TIMER messages survive ceremony-window loss, so every release and browser-exit timeout can still advance the portable driver."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/pump.rs"
+line = 86
+function = "next"
+operation = "GetMessageW(&raw mut message, None, 0, 0)"
+invariant = "initialized writable MSG; this dedicated STA owns this queue; no HWND restriction, so thread timers and COM callbacks are serviced."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/pump.rs"
+line = 102
+function = "next"
+operation = "TranslateMessage(&message)"
+invariant = "only a successful GetMessage result is translated. Its BOOL reports whether translation occurred, not success/failure."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/pump.rs"
+line = 105
+function = "next"
+operation = "DispatchMessageW(&message)"
+invariant = "the same valid initialized message is dispatched on its owning STA. The LRESULT is the procedure's message-specific result."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/pump.rs"
+line = 113
+function = "stop_timer"
+operation = "KillTimer(None, self.timer)"
+invariant = "this thread owns the still-live timer identifier."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/session.rs"
+line = 131
+function = "fit_controller"
+operation = "controller.SetBounds(bounds)"
+invariant = "retained creating-STA controller and copied initialized client RECT."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/session.rs"
+line = 136
+function = "focus_controller"
+operation = "controller.MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC)"
+invariant = "retained creating-STA controller; fixed programmatic focus reason."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/session.rs"
+line = 195
+function = "controller_completion"
+operation = "controller.CoreWebView2()"
+invariant = "successfully completed retained controller on its creating STA."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/session.rs"
+line = 203
+function = "browser_pid"
+operation = "view.BrowserProcessId(&raw mut pid)"
+invariant = "retained creating-STA view and initialized unique PID output."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/session.rs"
+line = 225
+function = "navigate_owner"
+operation = "view.Navigate(w!( ))"
+invariant = "retained creating-STA view and the fixed packaged owner document URL."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/session.rs"
+line = 284
+function = "close_controller"
+operation = "controller.Close()"
+invariant = "retained creating-STA controller; all buffer borrows ended. Failure retains the COM owner so the safe policy can quarantine/retry."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/settings.rs"
+line = 31
+function = "settings"
+operation = "view.Settings()"
+invariant = "a retained live WebView on its creating STA; COM owns the returned interface."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/settings.rs"
+line = 44
+function = "set_bool"
+operation = "property.SetIsScriptEnabled(value)"
+invariant = "live same-STA typed interface; the bool is supplied by the safe policy."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/settings.rs"
+line = 49
+function = "set_bool"
+operation = "property.SetIsWebMessageEnabled(value)"
+invariant = "live same-STA typed interface; the bool is supplied by the safe policy."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/settings.rs"
+line = 54
+function = "set_bool"
+operation = "property.SetAreDefaultScriptDialogsEnabled(value)"
+invariant = "live same-STA typed interface; the bool is supplied by the safe policy."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/settings.rs"
+line = 59
+function = "set_bool"
+operation = "property.SetIsStatusBarEnabled(value)"
+invariant = "live same-STA typed interface; the bool is supplied by the safe policy."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/settings.rs"
+line = 64
+function = "set_bool"
+operation = "property.SetAreDevToolsEnabled(value)"
+invariant = "live same-STA typed interface; the bool is supplied by the safe policy."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/settings.rs"
+line = 69
+function = "set_bool"
+operation = "property.SetAreDefaultContextMenusEnabled(value)"
+invariant = "live same-STA typed interface; the bool is supplied by the safe policy."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/settings.rs"
+line = 74
+function = "set_bool"
+operation = "property.SetAreHostObjectsAllowed(value)"
+invariant = "live same-STA typed interface; the bool is supplied by the safe policy."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/settings.rs"
+line = 79
+function = "set_bool"
+operation = "property.SetIsZoomControlEnabled(value)"
+invariant = "live same-STA typed interface; the bool is supplied by the safe policy."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/settings.rs"
+line = 84
+function = "set_bool"
+operation = "property.SetIsBuiltInErrorPageEnabled(value)"
+invariant = "live same-STA typed interface; the bool is supplied by the safe policy."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/settings.rs"
+line = 89
+function = "set_bool"
+operation = "property.SetAreBrowserAcceleratorKeysEnabled(value)"
+invariant = "live same-STA typed interface; the bool is supplied by the safe policy."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/settings.rs"
+line = 94
+function = "set_bool"
+operation = "property.SetIsPasswordAutosaveEnabled(value)"
+invariant = "live same-STA typed interface; the bool is supplied by the safe policy."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/settings.rs"
+line = 99
+function = "set_bool"
+operation = "property.SetIsGeneralAutofillEnabled(value)"
+invariant = "live same-STA typed interface; the bool is supplied by the safe policy."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/settings.rs"
+line = 104
+function = "set_bool"
+operation = "property.SetIsPinchZoomEnabled(value)"
+invariant = "live same-STA typed interface; the bool is supplied by the safe policy."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/settings.rs"
+line = 109
+function = "set_bool"
+operation = "property.SetIsSwipeNavigationEnabled(value)"
+invariant = "live same-STA typed interface; the bool is supplied by the safe policy."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/settings.rs"
+line = 114
+function = "set_bool"
+operation = "property.SetIsReputationCheckingRequired(value)"
+invariant = "live same-STA typed interface; the bool is supplied by the safe policy."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/settings.rs"
+line = 119
+function = "set_bool"
+operation = "property.SetAllowExternalDrop(value)"
+invariant = "live same-STA typed interface; the bool is supplied by the safe policy."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/settings.rs"
+line = 135
+function = "get_bool"
+operation = "property.IsScriptEnabled(&raw mut value)"
+invariant = "live same-STA typed interface and initialized uniquely writable BOOL."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/settings.rs"
+line = 140
+function = "get_bool"
+operation = "property.IsWebMessageEnabled(&raw mut value)"
+invariant = "live same-STA typed interface and initialized uniquely writable BOOL."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/settings.rs"
+line = 145
+function = "get_bool"
+operation = "property.AreDefaultScriptDialogsEnabled(&raw mut value)"
+invariant = "live same-STA typed interface and initialized uniquely writable BOOL."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/settings.rs"
+line = 150
+function = "get_bool"
+operation = "property.IsStatusBarEnabled(&raw mut value)"
+invariant = "live same-STA typed interface and initialized uniquely writable BOOL."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/settings.rs"
+line = 155
+function = "get_bool"
+operation = "property.AreDevToolsEnabled(&raw mut value)"
+invariant = "live same-STA typed interface and initialized uniquely writable BOOL."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/settings.rs"
+line = 160
+function = "get_bool"
+operation = "property.AreDefaultContextMenusEnabled(&raw mut value)"
+invariant = "live same-STA typed interface and initialized uniquely writable BOOL."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/settings.rs"
+line = 165
+function = "get_bool"
+operation = "property.AreHostObjectsAllowed(&raw mut value)"
+invariant = "live same-STA typed interface and initialized uniquely writable BOOL."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/settings.rs"
+line = 170
+function = "get_bool"
+operation = "property.IsZoomControlEnabled(&raw mut value)"
+invariant = "live same-STA typed interface and initialized uniquely writable BOOL."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/settings.rs"
+line = 175
+function = "get_bool"
+operation = "property.IsBuiltInErrorPageEnabled(&raw mut value)"
+invariant = "live same-STA typed interface and initialized uniquely writable BOOL."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/settings.rs"
+line = 180
+function = "get_bool"
+operation = "property.AreBrowserAcceleratorKeysEnabled(&raw mut value)"
+invariant = "live same-STA typed interface and initialized uniquely writable BOOL."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/settings.rs"
+line = 185
+function = "get_bool"
+operation = "property.IsPasswordAutosaveEnabled(&raw mut value)"
+invariant = "live same-STA typed interface and initialized uniquely writable BOOL."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/settings.rs"
+line = 190
+function = "get_bool"
+operation = "property.IsGeneralAutofillEnabled(&raw mut value)"
+invariant = "live same-STA typed interface and initialized uniquely writable BOOL."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/settings.rs"
+line = 195
+function = "get_bool"
+operation = "property.IsPinchZoomEnabled(&raw mut value)"
+invariant = "live same-STA typed interface and initialized uniquely writable BOOL."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/settings.rs"
+line = 200
+function = "get_bool"
+operation = "property.IsSwipeNavigationEnabled(&raw mut value)"
+invariant = "live same-STA typed interface and initialized uniquely writable BOOL."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/settings.rs"
+line = 205
+function = "get_bool"
+operation = "property.IsReputationCheckingRequired(&raw mut value)"
+invariant = "live same-STA typed interface and initialized uniquely writable BOOL."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/settings.rs"
+line = 210
+function = "get_bool"
+operation = "property.AllowExternalDrop(&raw mut value)"
+invariant = "live same-STA typed interface and initialized uniquely writable BOOL."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/settings.rs"
+line = 222
+function = "options"
+operation = "options.SetAdditionalBrowserArguments(w!( ))"
+invariant = "live unshared STA options and static empty browser arguments."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/settings.rs"
+line = 225
+function = "options"
+operation = "exclusive.SetExclusiveUserDataFolderAccess(required.exclusive_folder)"
+invariant = "live typed STA options; value is selected by the safe environment policy."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/settings.rs"
+line = 229
+function = "options"
+operation = "crash.SetIsCustomCrashReportingEnabled(required.custom_crash_reporting)"
+invariant = "live typed STA options and caller-selected bounded boolean."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/settings.rs"
+line = 233
+function = "options"
+operation = "extensions.SetAreBrowserExtensionsEnabled(required.extensions)"
+invariant = "live typed STA options and caller-selected bounded boolean."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/settings.rs"
+line = 248
+function = "observe_options"
+operation = "options.AdditionalBrowserArguments(out)"
+invariant = "live STA options and helper-owned initialized string output."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/settings.rs"
+line = 253
+function = "observe_options"
+operation = "exclusive.ExclusiveUserDataFolderAccess(out)"
+invariant = "live typed STA options and helper-owned initialized BOOL output."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/settings.rs"
+line = 258
+function = "observe_options"
+operation = "crash.IsCustomCrashReportingEnabled(out)"
+invariant = "live typed STA options and helper-owned initialized BOOL output."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/settings.rs"
+line = 263
+function = "observe_options"
+operation = "extensions.AreBrowserExtensionsEnabled(out)"
+invariant = "live typed STA options and helper-owned initialized BOOL output."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/text.rs"
+line = 24
+function = "extract"
+operation = "raw.0.wrapping_add(index).read()"
+invariant = "the successful getter transfers a valid NUL-terminated COM allocation retained by _memory. Read only through its first NUL or the fixed extraction bound, whichever occurs first. No unbounded length scan, borrowed native string, or native allocation escapes."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/window.rs"
+line = 75
+function = "register_class"
+operation = "SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)"
+invariant = "process-once setup before any ceremony window; incompatible existing awareness refuses activation rather than silently degrading DPI."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/window.rs"
+line = 79
+function = "register_class"
+operation = "GetModuleHandleW(w!( ))"
+invariant = "borrow the already-loaded fixed system module; never load a DLL or accept a caller-selected search path. This handle is never released."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/window.rs"
+line = 82
+function = "register_class"
+operation = "GetProcAddress(module, PCSTR( .as_ptr().cast()))"
+invariant = "fixed exact ASCII export name, with its terminating NUL, from the system module; no ordinal lookup and no caller-selected symbol."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/window.rs"
+line = 89
+function = "register_class"
+operation = "std::mem::transmute::<FARPROC, WNDPROC>(procedure)"
+invariant = "Microsoft's User32 DefWindowProcW export has exactly WNDPROC's HWND/u32/WPARAM/LPARAM -> LRESULT signature and system ABI. Both values are function-pointer Options; no integer round-trip or app ABI definition."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/window.rs"
+line = 92
+function = "register_class"
+operation = "GetModuleHandleW(None)"
+invariant = "borrow the current executable module for the process-lifetime registered class; no ownership transfer or FreeLibrary obligation."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/window.rs"
+line = 101
+function = "register_class"
+operation = "RegisterClassW(&class)"
+invariant = "fixed class name and system procedure remain valid for the process lifetime; initialized class references a live executable module."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/window.rs"
+line = 121
+function = "create"
+operation = "GetModuleHandleW(None)"
+invariant = "borrowed current executable module matches the registered class instance; no reference is released or transferred by this call."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/window.rs"
+line = 133
+function = "create"
+operation = "CreateWindowExW( WINDOW_EX_STYLE(0), w!( ), w!( ), WS_OVERLAPPEDWINDOW, x, y, width, height, owner, None, Some(HINSTANCE(executable.0)), None, )"
+invariant = "registered system-procedure class and static title; checked scalar placement/size and optional opaque owner HWND. The window is top-level, never child or message-only, and starts hidden."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/window.rs"
+line = 166
+function = "show"
+operation = "ShowWindow(self.hwnd, SW_SHOWNORMAL)"
+invariant = "live owned top-level window on this STA. This return value reports prior visibility, not whether showing succeeded."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/window.rs"
+line = 169
+function = "show"
+operation = "SetForegroundWindow(self.hwnd)"
+invariant = "live owned window. Foreground rights may deny the request; the caller independently verifies the actual foreground within 1s."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/window.rs"
+line = 174
+function = "foreground"
+operation = "GetForegroundWindow()"
+invariant = "a scalar observation of the current foreground HWND."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/window.rs"
+line = 182
+function = "foreground"
+operation = "GetWindow(foreground, GW_OWNER)"
+invariant = "HWNDs are opaque identifiers checked by Windows. This queries the owner chain without dereferencing process memory."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/window.rs"
+line = 194
+function = "bounds"
+operation = "GetClientRect(self.hwnd, &raw mut rectangle)"
+invariant = "live owned window and distinct initialized writable RECT."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/window.rs"
+line = 201
+function = "snapshot"
+operation = "IsWindow(Some(self.hwnd))"
+invariant = "scalar existence observation of our STA-owned HWND. No new ceremony window is created before this session's retirement ends."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/window.rs"
+line = 218
+function = "snapshot"
+operation = "GetDpiForWindow(self.hwnd)"
+invariant = "our still-live creating-STA HWND; scalar observation only."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/window.rs"
+line = 238
+function = "resize"
+operation = "SetWindowPos( self.hwnd, None, 0, 0, width, height, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE, )"
+invariant = "checked dimensions and live STA HWND, preserving position, stacking and activation. No retained application pointer."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/window.rs"
+line = 259
+function = "destroy"
+operation = "DestroyWindow(self.hwnd)"
+invariant = "exactly one successful destruction of this STA-owned window after normal controller/buffer/environment cleanup."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/window.rs"
+line = 271
+function = "initial_dpi"
+operation = "GetDpiForWindow(owner)"
+invariant = "query the supplied opaque owner HWND; a zero readback fails later checked dimension conversion rather than selecting a fallback."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/window.rs"
+line = 274
+function = "initial_dpi"
+operation = "GetDpiForSystem()"
+invariant = "scalar system DPI query for placement on the primary monitor."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/window.rs"
+line = 293
+function = "outer_rectangle"
+operation = "AdjustWindowRectExForDpi( &raw mut rectangle, WS_OVERLAPPEDWINDOW, false, WINDOW_EX_STYLE(0), dpi, )"
+invariant = "initialized writable client RECT, fixed top-level style, no menu, checked nonzero DPI and no retained pointer."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/window.rs"
+line = 318
+function = "centered"
+operation = "MonitorFromWindow(owner.unwrap_or_default(), MONITOR_DEFAULTTOPRIMARY)"
+invariant = "opaque optional owner HWND; Windows selects its monitor or the primary monitor when no window is supplied. No application pointer."
+hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/window.rs"
+line = 325
+function = "centered"
+operation = "GetMonitorInfoW(monitor, &raw mut information)"
+invariant = "monitor returned by Windows, initialized MONITORINFO of its documented 40-byte layout, distinct writable output."
+hosted_test = "native_window_environment_and_buffers_lifecycle"

@@ -40,14 +40,21 @@ EXPECTED_NATIVE = {'name': 'owner-bridge-windows',
                                                      'pos-owner-bridge --all-features '
                                                      '--all-targets --locked -- -D warnings -W '
                                                      'clippy::pedantic'},
+                                             {'name': 'Prepare retained runtime for real native fixtures',
+                                              'id': 'runtime',
+                                              'shell': 'pwsh',
+                                              'env': {'GH_TOKEN': '${{ github.token }}'},
+                                              'run': './scripts/prepare-owner-runtime.ps1 -OutputRoot "$env:RUNNER_TEMP/owner-native-runtime"'},
                                              {'name': 'Test native adapter and portable bridge '
                                                       'including ignored tests',
+                                              'env': {'OWNER_BRIDGE_TEST_RUNTIME': '${{ steps.runtime.outputs.runtime }}'},
                                               'run': 'cargo test -p pos-owner-bridge-windows -p '
                                                      'pos-owner-bridge --all-features --locked -- '
                                                      '--include-ignored'},
                                              {'name': 'Measure only shim source coverage',
                                               'id': 'coverage',
                                               'shell': 'pwsh',
+                                              'env': {'OWNER_BRIDGE_TEST_RUNTIME': '${{ steps.runtime.outputs.runtime }}'},
                                               'run': "$ErrorActionPreference = 'Stop'\n"
                                                      '$metadata = cargo metadata --locked '
                                                      '--no-deps --format-version 1\n'

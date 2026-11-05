@@ -1,9 +1,18 @@
 #![cfg(windows)]
 
+mod buffers;
+mod creation;
 mod directory;
+mod environment;
+mod events;
 mod process;
+mod pump;
 mod registry;
+mod session;
+mod settings;
 mod socket;
+mod text;
+mod window;
 
 impl crate::Native {
     pub(super) fn inspect_process(
