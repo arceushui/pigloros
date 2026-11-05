@@ -5596,6 +5596,7 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "ciborium",
+ "ed25519-dalek",
  "pos-conformance",
  "pos-core",
  "pos-crypto",
@@ -5617,6 +5618,19 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "ulid",
+]
+
+[[package]]
+name = "pos-metric-conformance-adapter"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "ciborium",
+ "pos-plugin-eval",
+ "pos-reference",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
