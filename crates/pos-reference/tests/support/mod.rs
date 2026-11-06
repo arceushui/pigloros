@@ -907,6 +907,24 @@ pub fn plugin_corpus_with_budgets(
     })
 }
 
+/// Build a signed `replay-conformance` corpus with a chosen mode and budgets.
+///
+/// Every family carries the canonical-output oracle `Corpus::expected_output` for the
+/// `exported-artifact` subject adapter, in Execution Mode `mode` (0 Local, 1 Air-Gapped); the
+/// fixture of family code `n` has budget `budgets[n]` (counters in `ResourceUsage` order), and
+/// the execution profile's maximum is their per-counter maximum.
+///
+/// # Errors
+/// Returns an error if canonical encoding or fixture construction fails.
+pub fn replay_corpus_with_budgets(mode: u64, budgets: &[[u64; 8]; 7]) -> TestResult<Corpus> {
+    corpus_for_options(CorpusOptions {
+        mode,
+        claim_layer: 1,
+        fixture_budgets: budgets,
+        ..CorpusOptions::default()
+    })
+}
+
 /// Build a signed `plugin-conformance` corpus whose bundle carries one CFB1 attack shape.
 ///
 /// # Errors
