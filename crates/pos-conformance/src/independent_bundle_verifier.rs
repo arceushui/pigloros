@@ -894,7 +894,13 @@ fn raw_trust_policy_snapshot_fields(fields: &[Value]) -> Result<(), BundleContra
             Ok(expiry),
             Ok(signature),
         ) => encode(&Value::Array(fields[..11].to_vec())).and_then(|unsigned| {
-            raw_fixture_authority_signature(&unsigned, &signature).and_then(|()| {
+            raw_fixture_authority_signature(
+                &crate::TrustPolicySnapshotV1::operator_signature_message_from_unsigned_v1(
+                    &unsigned,
+                ),
+                &signature,
+            )
+            .and_then(|()| {
                 if magic == "TPS1"
                     && version == 1
                     && policy_id == DRAFT_AUTHORITY_TRUST_POLICY_ID

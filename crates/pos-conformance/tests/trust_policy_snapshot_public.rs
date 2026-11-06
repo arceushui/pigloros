@@ -1,12 +1,19 @@
 use ciborium::value::Value;
+use ed25519_dalek::{Signer, SigningKey};
 use pos_conformance::{
     draft_trust_policy_snapshot_bytes_v1, MinimumArtifactVersionV1, TrustPolicyRootV1,
+    TrustPolicySnapshotAuthenticationErrorV1 as AuthenticationError,
     TrustPolicySnapshotContractErrorV1 as SnapshotError, TrustPolicySnapshotV1,
     MAX_TRUST_POLICY_SNAPSHOT_BYTES_V1,
 };
 use std::io::Cursor;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
+/// The public deterministic repository fixture-authority signing key.
+const DRAFT_AUTHORITY_SIGNING_KEY: [u8; 32] = [7; 32];
+const OPERATOR_ROLE: &str = "deployment-operator";
+const OPERATOR_SIGNATURE_DOMAIN: &[u8] = b"PiglorOS.TPS1.operator-signature.v1\0";
 
 const FIELD_TRUST_ROOTS: usize = 5;
 const FIELD_REVOKED_KEYS: usize = 6;
@@ -80,6 +87,30 @@ fn public_codec_preserves_draft_tps1_bytes_and_hashes_the_complete_signed_record
     snapshot.operator_signature[0] ^= 1;
     assert!(snapshot.validate().is_ok());
     assert_ne!(snapshot.digest()?, original_digest);
+    Ok(())
+}
+
+#[test]
+fn draft_tps1_authenticates_through_the_operator_signature_and_refuses_one_without_the_domain(
+) -> TestResult {
+    let (_, mut snapshot) = draft_snapshot()?;
+    let authority = SigningKey::from_bytes(&DRAFT_AUTHORITY_SIGNING_KEY);
+    let authority_public_key = authority.verifying_key().to_bytes();
+    assert_eq!(snapshot.trust_roots[0].public_key, authority_public_key);
+    assert_eq!(
+        snapshot.verify_operator_signature_v1(&authority_public_key, OPERATOR_ROLE),
+        Ok(())
+    );
+
+    let message = snapshot.operator_signature_message_v1()?;
+    let unsigned = message
+        .strip_prefix(OPERATOR_SIGNATURE_DOMAIN)
+        .ok_or("the TPS1 operator-signature message must start with its domain")?;
+    snapshot.operator_signature = authority.sign(unsigned).to_bytes();
+    assert_eq!(
+        snapshot.verify_operator_signature_v1(&authority_public_key, OPERATOR_ROLE),
+        Err(AuthenticationError::InvalidOperatorSignature)
+    );
     Ok(())
 }
 
