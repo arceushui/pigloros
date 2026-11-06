@@ -90,6 +90,7 @@ impl AuthorizationCacheEntryV1 {
 /// The bounded hit-class counters of one authorization cache: the operational
 /// cache channel of the ADR-059 row `NI-CACHE-002`. They carry no key, value
 /// or latency.
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct AuthorizationCacheCountsV1 {
     /// Lookups that returned a cached decision.

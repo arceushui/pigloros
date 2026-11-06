@@ -154,18 +154,21 @@ def time_records(row: str, variant: str) -> list[bytes]:
 
 
 def crash_records(_row: str, _variant: str) -> list[bytes]:
+    """Two denied sibling community Drivers: the declaring one stays `Available`; the trapping one
+    is quarantined `Trapped`, so its next Tick is refused before it runs and it keeps its one
+    receipt. The subject stays `Available`."""
     report = [
         ["guest-error", DECLARED_CODE],
         ["host-error", TRAP_NAME],
-        ["quarantine", "Some(Trapped)"],
+        ["quarantine", "Trapped"],
     ]
     return [
         cbor([DECLARED_CODE, True]),
         cbor([TRAP_NAME, TRAP_TEXT]),
-        cbor(["Some(Trapped)", "None"]),
+        cbor(["Available", "Trapped"]),
         cbor(report),
         cbor([["crash-report.cbor", padded(cbor(report))]]),
-        cbor(["Available", DISPOSITION]),
+        cbor(["Available", "Trapped", 1]),
     ]
 
 

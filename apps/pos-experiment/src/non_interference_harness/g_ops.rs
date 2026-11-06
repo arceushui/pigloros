@@ -35,8 +35,9 @@
 //!   cache's entries, size and evictions.
 //! - `NI-OBS-004` and `NI-CRASH-012`: a sibling invocation whose observation
 //!   is the value, so the value becomes its log message and its declared
-//!   failure's canonical coordinate; `NI-CRASH-012` also runs a sibling that
-//!   logs the value and traps, and names its support archive after the value.
+//!   failure's canonical coordinate; for `NI-CRASH-012` the value is the
+//!   observation of two sibling community Drivers, one declaring a failure
+//!   and one trapping, and names the support archive.
 //! - `NI-TIME-005`: a wall-clock offset before a sibling invocation and its
 //!   watchdog margin. Neither reaches Simulation Time, and the margin never
 //!   fires.
@@ -100,14 +101,13 @@ use pos_plugin_supervisor::{
     WorkerProgramV1,
 };
 use pos_runtime::community_plugin_host::{
-    pinned_runtime_v1, quarantine_for, CommunityPluginCeilingsV1,
-    CommunityPluginExecutionProfileV1, CommunityPluginHostAbiV1, CommunityPluginHostErrorV1,
-    CommunityPluginModeV1, HostInputs, InvocationReportV1, NegotiatedCommunityPluginV1,
-    PluginOutputV1,
+    pinned_runtime_v1, CommunityPluginCeilingsV1, CommunityPluginExecutionProfileV1,
+    CommunityPluginHostAbiV1, CommunityPluginHostErrorV1, CommunityPluginModeV1, HostInputs,
+    InvocationReportV1, NegotiatedCommunityPluginV1, PluginOutputV1,
 };
 use pos_runtime::{
-    AuthorizationCacheKeyV1, ErasureCommandSenderV1, ErasureExecutionHostV1, ObservationView,
-    PluginRegistry, RuntimeError,
+    AuthorizationCacheKeyV1, Driver, ErasureCommandSenderV1, ErasureExecutionHostV1,
+    ObservationView, PluginRegistry, RuntimeError,
 };
 use pos_state::ProjectionRegistry;
 use pos_store::StoreConfig;
@@ -297,6 +297,7 @@ impl GOpsSubjectHandlesV1 {
 /// Simulation Time 0, under the fixed invocation ID.
 struct GOpsSource {
     observation: Vec<u8>,
+    selector: u64,
 }
 
 impl InvocationContextSourceV1 for GOpsSource {
@@ -312,19 +313,20 @@ impl InvocationContextSourceV1 for GOpsSource {
         Ok(InvocationContextV1 {
             invocation,
             host_inputs: HostInputs {
-                simulation_time: SELECT_OUTPUT,
+                simulation_time: self.selector,
             },
         })
     }
 }
 
-/// A subject Driver over `permitted_input` holding its pass authorization,
-/// recorded in `handles`.
-fn subject_driver(
+/// A community Driver of the guest whose invocations carry `observation` at
+/// Simulation Time `selector`, holding its pass authorization, and its
+/// handle.
+fn community_driver(
     host: &GOpsHostV1,
-    permitted_input: &[u8],
-    handles: &GOpsSubjectHandlesV1,
-) -> Result<CommunityDriverV1, CommunityPluginHostErrorV1> {
+    observation: &[u8],
+    selector: u64,
+) -> Result<(CommunityDriverV1, CommunityPluginHandleV1), CommunityPluginHostErrorV1> {
     let settings = CommunityDriverSettingsV1 {
         plugin_id: G_OPS_PLUGIN_ID,
         name: DRIVER_NAME,
@@ -332,7 +334,8 @@ fn subject_driver(
         subscriptions: Vec::new(),
         supervisor: host.supervisor.clone(),
         source: Box::new(GOpsSource {
-            observation: permitted_input.to_vec(),
+            observation: observation.to_vec(),
+            selector,
         }),
         initial_state: CommunityStateV1 {
             schema: STATE_SCHEMA,
@@ -355,10 +358,19 @@ fn subject_driver(
     .and_then(|(driver, handle)| {
         handle
             .offer_authorization(authorization_for(&negotiated(), &host.component))
-            .map(|()| {
-                handles.push(handle);
-                driver
-            })
+            .map(|()| (driver, handle))
+    })
+}
+
+/// A subject Driver over `permitted_input`, recorded in `handles`.
+fn subject_driver(
+    host: &GOpsHostV1,
+    permitted_input: &[u8],
+    handles: &GOpsSubjectHandlesV1,
+) -> Result<CommunityDriverV1, CommunityPluginHostErrorV1> {
+    community_driver(host, permitted_input, SELECT_OUTPUT).map(|(driver, handle)| {
+        handles.push(handle);
+        driver
     })
 }
 
@@ -437,7 +449,7 @@ pub fn g_ops_capture_v1(
         G_OPS_CACHE_FIXTURE_ID_V1 => cache_surfaces(run, &subject, directory),
         G_OPS_OBSERVABILITY_FIXTURE_ID_V1 => observability_surfaces(host, run, &subject, directory),
         G_OPS_TIME_FIXTURE_ID_V1 => time_surfaces(host, run, &subject),
-        G_OPS_CRASH_FIXTURE_ID_V1 => crash_surfaces(host, run, &subject, observation.handle),
+        G_OPS_CRASH_FIXTURE_ID_V1 => crash_surfaces(host, run, observation.handle),
         _ => Err(NonInterferenceNonExecutedCauseV1::Missing),
     }
     .map(|surfaces| surfaces.into_capture(run.fixture_id))
@@ -1370,64 +1382,90 @@ fn time_surfaces(
 // NI-CRASH-012: failure and archive handoff
 // ---------------------------------------------------------------------------
 
-/// The six `NI-CRASH-012` surfaces.
+/// Run `ticks` Ticks of a host-owned denied sibling Driver over
+/// `observation` at Simulation Time `selector`, outside the subject's
+/// Timeline, and return its handle.
+fn sibling_ticks(
+    host: &GOpsHostV1,
+    observation: &[u8],
+    selector: u64,
+    ticks: usize,
+) -> Result<CommunityPluginHandleV1, NonInterferenceNonExecutedCauseV1> {
+    community_driver(host, observation, selector)
+        .map(|(mut driver, handle)| {
+            let timeline = TimelineId::new();
+            for _ in 0..ticks {
+                drop(driver.step(timeline, ObservationView::empty()));
+            }
+            handle
+        })
+        .map_err(|_| NonInterferenceNonExecutedCauseV1::Unavailable)
+}
+
+/// The six `NI-CRASH-012` surfaces, from two denied sibling community
+/// Drivers over the value: one declares a failure on its one Tick, the other
+/// traps on its first Tick and is refused on its next.
 ///
 /// - Guest error: `[code, coordinate present]` of the declared failure.
-/// - host error mapping: `[error name, error text]` of the trapping sibling.
-/// - quarantine: the quarantine of the trap and of the declared failure.
+/// - host error mapping: `[error name, error text]` of the trap.
+/// - quarantine: the availability of the declaring and the trapping sibling.
 /// - crash report: `[["guest-error", code], ["host-error", name],
-///   ["quarantine", trap quarantine]]`.
+///   ["quarantine", trapping sibling's availability]]`.
 /// - support archive: `[["crash-report.cbor", padded crash report length]]`.
-/// - next Tick status: `[subject availability, subject disposition]` after
-///   both siblings.
+/// - next Tick status: `[subject availability, trapping sibling's
+///   availability, its receipts]` after its refused next Tick.
 ///
 /// Operationally each keeps category, count and padded length; the
-/// coordinate, the log messages and the archive's file name, which the value
-/// names, are excluded.
+/// coordinate and the archive's file name, which the value names, are
+/// excluded.
 fn crash_surfaces(
     host: &GOpsHostV1,
     run: &GOpsRunV1<'_>,
-    subject: &SubjectV1,
     handle: &CommunityPluginHandleV1,
 ) -> Result<SurfacesV1, NonInterferenceNonExecutedCauseV1> {
-    DeclaredV1::run(host, run.unauthorized_value).and_then(|declared| {
-        sibling(host, run.unauthorized_value, SELECT_TRAP, SIBLING_WATCHDOG).and_then(|trapped| {
-            trapped
-                .err()
+    sibling_ticks(host, run.unauthorized_value, SELECT_DECLARED_FAILURE, 1).and_then(|declared| {
+        sibling_ticks(host, run.unauthorized_value, SELECT_TRAP, 2).and_then(|trapped| {
+            declared
+                .receipts()
+                .last()
+                .and_then(|receipt| receipt.guest_error.clone())
+                .zip(trapped.last_failure())
                 .ok_or(NonInterferenceNonExecutedCauseV1::Unavailable)
-                .map(|error| {
-                    let mapping = array([text(error.name()), text(&error.to_string())]);
-                    let quarantine = array([
-                        debug_text(&quarantine_for(error)),
-                        debug_text(&quarantine_for(
-                            CommunityPluginHostErrorV1::GuestDeclaredFailure,
-                        )),
-                    ]);
+                .map(|(guest, error)| {
+                    let code = debug_text(&guest.code);
+                    let coordinate = guest.canonical_coordinate.unwrap_or_default();
                     let report = array([
-                        array([text("guest-error"), declared.code.clone()]),
+                        array([text("guest-error"), code.clone()]),
                         array([text("host-error"), text(error.name())]),
-                        array([text("quarantine"), debug_text(&quarantine_for(error))]),
+                        array([text("quarantine"), debug_text(&trapped.availability())]),
                     ]);
                     let report_bytes = encode(&report);
                     let records = records([
-                        declared.error(),
-                        mapping,
-                        quarantine,
+                        array([code, Value::Bool(!coordinate.is_empty())]),
+                        array([text(error.name()), text(&error.to_string())]),
+                        array([
+                            debug_text(&declared.availability()),
+                            debug_text(&trapped.availability()),
+                        ]),
                         report,
                         array([array([
                             text("crash-report.cbor"),
                             uint(u64::from(padded(&report_bytes))),
                         ])]),
-                        array([debug_text(&handle.availability()), subject.disposition()]),
+                        array([
+                            debug_text(&handle.availability()),
+                            debug_text(&trapped.availability()),
+                            uint(trapped.receipts().len() as u64),
+                        ]),
                     ]);
                     let archive = format!("crash-{}.cbor", hex(run.unauthorized_value));
                     let operational = vec![
-                        padded_facet(&records[0], 0, 1, declared.coordinate.clone()),
+                        padded_facet(&records[0], 0, 1, coordinate.clone()),
                         padded_facet(&records[1], 0, 1, Vec::new()),
                         padded_facet(&records[2], 0, 2, Vec::new()),
-                        padded_facet(&records[3], 0, 3, declared.diagnostics()),
+                        padded_facet(&records[3], 0, 3, coordinate),
                         padded_facet(&records[4], 0, 1, archive.into_bytes()),
-                        padded_facet(&records[5], 0, 2, Vec::new()),
+                        padded_facet(&records[5], 0, 3, Vec::new()),
                     ];
                     surfaces(records, operational)
                 })

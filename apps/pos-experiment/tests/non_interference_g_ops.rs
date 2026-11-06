@@ -49,10 +49,11 @@ use pos_experiment::non_interference_harness::g_ops::{
     G_OPS_TIME_FIXTURE_ID_V1, G_OPS_WORKER_ENV_V1,
 };
 use pos_experiment::non_interference_harness::{
-    NonInterferenceForkRunnerV1, NonInterferenceHarnessV1, NonInterferenceLocalProcessRunnerV1,
-    NonInterferenceLocalRequestV1, NonInterferenceNonExecutedCauseV1, NonInterferencePreparationV1,
-    NonInterferenceReplayRunnerV1, NonInterferenceSignedExecutionV1,
-    NON_INTERFERENCE_LOCAL_REQUEST_MAGIC_V1, NON_INTERFERENCE_PUBLICATION_DIRECTORY_V1,
+    publish_non_interference_execution_v1, NonInterferenceForkRunnerV1, NonInterferenceHarnessV1,
+    NonInterferenceLocalProcessRunnerV1, NonInterferenceLocalRequestV1,
+    NonInterferenceNonExecutedCauseV1, NonInterferencePreparationV1, NonInterferenceReplayRunnerV1,
+    NonInterferenceSignedExecutionV1, NON_INTERFERENCE_LOCAL_REQUEST_MAGIC_V1,
+    NON_INTERFERENCE_PUBLICATION_DIRECTORY_V1,
 };
 use pos_runtime::community_plugin_host::{quarantine_for, CommunityPluginHostErrorV1};
 use pos_runtime::PluginAvailabilityV1;
@@ -75,6 +76,9 @@ const MODES: [ExecutionModeV1; 4] = [
     ExecutionModeV1::Replay,
     ExecutionModeV1::Fork,
 ];
+/// Temporary (removed before review): the directory the matrix test exports
+/// the recorded NIA1 and the control records to.
+const EXPORT_ENV: &str = "PIGLOROS_NI_G_OPS_EXPORT";
 
 fn fixtures_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/conformance")
@@ -263,12 +267,51 @@ fn execute_every_coordinate(
     Ok(executed)
 }
 
+/// Temporary (removed before review): export the executed NIA1 and every
+/// control capture's authoritative records.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn export(
+    directory: &Path,
+    executed: &BTreeMap<Coordinate, NonInterferenceSignedExecutionV1>,
+) -> TestResult {
+    for execution in executed.values() {
+        publish_non_interference_execution_v1(directory, execution)?;
+    }
+    let host = host()?;
+    let mut records = Vec::new();
+    for fixture_id in G_OPS_FIXTURE_IDS_V1 {
+        for variant in VARIANTS {
+            let store = tempfile::tempdir()?;
+            let (_, captured) = capture(
+                &host,
+                fixture_id,
+                variant,
+                G_OPS_CONTROL_UNAUTHORIZED_V1,
+                store.path(),
+            )?;
+            records.push(json!({
+                "row": fixture_id,
+                "variant": variant_letter(variant),
+                "authoritative": captured.authoritative.iter().map(|value| hex(value)).collect::<Vec<_>>(),
+            }));
+        }
+    }
+    fs::write(
+        directory.join("records.json"),
+        serde_json::to_vec_pretty(&records)?,
+    )?;
+    Ok(())
+}
+
 #[test]
 fn every_g_ops_coordinate_executes_or_stays_typed_non_executed_and_matches_its_nia1() -> TestResult
 {
     let work = tempfile::tempdir()?;
     let executed = execute_every_coordinate(work.path())?;
     assert_eq!(executed.len(), 48);
+    if let Ok(directory) = std::env::var(EXPORT_ENV) {
+        export(Path::new(&directory), &executed)?;
+    }
 
     let matrix = matrix()?;
     let checked_in = checked_in()?;
