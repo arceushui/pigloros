@@ -780,6 +780,9 @@ fn the_fixture_guest_answers_describe_reduce_and_drive_over_the_protocol() -> Te
         assert_eq!(decoded.component, G_PLUG_COMPONENT_V1);
         assert_eq!(decoded.call, call);
         assert_eq!(decoded.negotiation.not_granted_capabilities.len(), 4);
+        // Every negotiated limit is 1 MiB.
+        assert_eq!(decoded.negotiation.limits.memory_bytes, 1_048_576);
+        assert_eq!(decoded.negotiation.limits.log_bytes, 1_048_576);
     }
     Ok(())
 }

@@ -164,7 +164,7 @@ const WORLD: &str = "pigloros:plugin/community-plugin";
 const STATE_SCHEMA_TEXT: &[u8] = b"pigloros.ni.g-plug.state.v1";
 const EVENT_SCHEMA_ID: u32 = 1;
 const BUDGET_ID: &str = "ni.g-plug";
-const BUDGET_UNIT: u64 = 1024 * 1024;
+const BUDGET_UNIT: u64 = 1_048_576;
 const WATCHDOG_MILLIS: u64 = 1_000;
 /// The authorized initial state: 32 zero bytes.
 const INITIAL_STATE: [u8; 32] = [0; 32];
