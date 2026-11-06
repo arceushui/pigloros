@@ -33,7 +33,7 @@ tokio = { version = "1", default-features = false, features = [
   "rt-multi-thread",
   "time",
 ] }
-zbus = { version = "=6.0.0", default-features = false, features = [
+zbus = { version = "=6.2.1", default-features = false, features = [
   "proxy",
   "tokio",
 ] }
@@ -63,7 +63,7 @@ zlink = { version = "=0.7.1", default-features = false, features = [
   "tokio",
   "tracing",
 ] }
-zbus = { version = "=6.0.0", default-features = false, features = [
+zbus = { version = "=6.2.1", default-features = false, features = [
   "p2p",
   "service",
   "tokio",
