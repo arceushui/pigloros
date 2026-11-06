@@ -828,8 +828,7 @@ fn verify_source_inventory(
     let declared_paths = snapshots
         .sha256_entries
         .keys()
-        .filter(|path| bundle_source_path(path))
-        .cloned()
+        .filter_map(|path| bundle_source_path(path).then(|| path.clone()))
         .collect::<BTreeSet<_>>();
     if declared_paths != expected_paths {
         return Err(invalid_data(
@@ -851,8 +850,7 @@ fn verify_source_inventory(
     if snapshots
         .blake3_entries
         .keys()
-        .filter(|path| bundle_source_path(path))
-        .cloned()
+        .filter_map(|path| bundle_source_path(path).then(|| path.clone()))
         .collect::<BTreeSet<_>>()
         != blake3_paths
     {
