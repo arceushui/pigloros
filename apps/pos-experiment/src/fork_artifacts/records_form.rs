@@ -212,9 +212,11 @@ impl BuilderV1<'_> {
                     consumed.extend_from_slice(seed);
                 }
                 let key = FactualNodeKeyV1 {
+                    tick,
+                    scheduler_position: lane.position,
+                    owner: &lane.owner,
                     output_ordinal: 1,
                     schema_id: factual_event_schema_id(lane.event_type),
-                    ..key
                 };
                 (step, self.endogenous(key, draft, &consumed))
             })

@@ -30,6 +30,7 @@ use pos_core::{
     factual_event_schema_id, ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1,
     ArtifactStateV1, ArtifactTransitionRuleV1, ErasureArtifactClassV1, ErasureReferenceV1,
     ErasureReplayClaimV1, RegisteredArtifactV1, ReplayClaimEvaluationV1, ReplayClaimEvaluatorV1,
+    FACTUAL_STEP_SCHEMA_ID_V1,
 };
 use pos_experiment::authoritative_comparison::DivergenceContextV1;
 use pos_experiment::fork_artifacts::{
@@ -333,6 +334,25 @@ fn check_drivers(drivers: &[ForkDriverV1], frontier: &RecomputationFrontierV1) {
             ("gamma", "gamma", 3)
         ]
     );
+    // The records form declares the lead Driver's step nodes with the step
+    // schema and its output nodes with its Event schema; the Intervention
+    // assigns the lead output, so both are affected.
+    let lead = &drivers[0].owner_id;
+    let lead_nodes: Vec<(u32, u32)> = frontier
+        .affected_nodes
+        .iter()
+        .filter(|node| node.owner_id == *lead)
+        .map(|node| (node.output_ordinal, node.schema_id))
+        .collect();
+    assert!(lead_nodes.contains(&(1, factual_event_schema_id(LEAD_EVENT_TYPE_V1))));
+    for (ordinal, schema) in lead_nodes {
+        let expected = if ordinal == 0 {
+            FACTUAL_STEP_SCHEMA_ID_V1
+        } else {
+            factual_event_schema_id(LEAD_EVENT_TYPE_V1)
+        };
+        assert_eq!(schema, expected);
+    }
     for driver in drivers {
         let owned = frontier
             .owner_frontiers
