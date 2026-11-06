@@ -258,15 +258,16 @@ pub trait StepPortV1 {
 
 /// The canonical bytes of the outcome record.
 ///
-/// It is the deterministic CBOR array `["POB1", 1,
+/// It is the deterministic CBOR array `["POB1", 2,
 /// plugin_id, pmf1_digest, release_digest, tps1_digest, execution_profile_digest, tick, mode,
-/// content_validation, result]` (ADR-061 revision 8 decision 2).
+/// content_validation, result]` (ADR-061 revision 8 decision 2; version 2 adds the trap class
+/// of a `Trapped` result, ADR-061 R13).
 #[must_use]
 pub fn outcome_bytes_of(outcome: &CommunityPluginSubjectOutcomeV1) -> Vec<u8> {
     let mut out = Vec::new();
     cbor::array(&mut out, 11);
     cbor::text(&mut out, "POB1");
-    cbor::unsigned(&mut out, 1);
+    cbor::unsigned(&mut out, 2);
     cbor::text(&mut out, &outcome.plugin_id);
     for digest in [
         outcome.pmf1_digest,
@@ -379,6 +380,12 @@ fn result_bytes(out: &mut Vec<u8>, result: CommunityPluginSubjectResultV1) {
                 Some(basis) => cbor::text(out, basis),
                 None => out.push(NULL),
             }
+            cbor::text(out, class);
+        }
+        CommunityPluginSubjectResultV1::Trapped { trap_class, class } => {
+            cbor::array(out, 3);
+            cbor::text(out, "Trapped");
+            cbor::text(out, trap_class);
             cbor::text(out, class);
         }
         CommunityPluginSubjectResultV1::Failed { error, class } => {
@@ -865,6 +872,7 @@ impl Run<'_> {
                     SubResultV1::Committed { output_digest, .. } => Some(output_digest),
                     SubResultV1::Refused { .. }
                     | SubResultV1::Failed { .. }
+                    | SubResultV1::Trapped { .. }
                     | SubResultV1::Operational => None,
                 }),
             ComputeV1::ProfileDigest(profile) => profile_digest(profile),
@@ -894,6 +902,9 @@ impl Run<'_> {
             (ExpectV1::Failed(expect), Some(SubResultV1::Failed { error, class })) => {
                 error == expect.error.as_str() && class == expect.class.as_str()
             }
+            (ExpectV1::Trapped(expect), Some(SubResultV1::Trapped { class })) => {
+                class == expect.class.as_str()
+            }
             (ExpectV1::Malformed(_), _) => subcase
                 .nested
                 .and_then(|digest| pieces.get(&digest.0))
@@ -904,7 +915,13 @@ impl Run<'_> {
                 .as_ref()
                 .is_some_and(|scan| scan.found.is_empty() && scan.retained_ok),
             (ExpectV1::Digest(expect), _) => self.record.computed == Some(expect.value.0),
-            (ExpectV1::Committed(_) | ExpectV1::Refused(_) | ExpectV1::Failed(_), _) => false,
+            (
+                ExpectV1::Committed(_)
+                | ExpectV1::Refused(_)
+                | ExpectV1::Failed(_)
+                | ExpectV1::Trapped(_),
+                _,
+            ) => false,
         }
     }
 }

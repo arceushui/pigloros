@@ -46,7 +46,17 @@ pub enum CommunityPluginSubjectResultV1 {
         /// The `HostFailureClassV1` variant name.
         class: &'static str,
     },
-    /// A failure of the class `Authoritative` or `Operational`.
+    /// A `ComponentTrap`: the guest trapped with this canonical trap class (ADR-061 revision 4
+    /// decision 6). The invocation coordinate is the record's own fields and the `drive`
+    /// export of the pass (ADR-061 R13).
+    Trapped {
+        /// The exact ADR-061 trap class name (`ComponentTrapClassV1::name()`).
+        trap_class: &'static str,
+        /// The `HostFailureClassV1` variant name: `Operational` while the host reports the trap
+        /// `Unverified`.
+        class: &'static str,
+    },
+    /// A failure of the class `Authoritative` or `Operational` that is not a trap.
     Failed {
         /// The closed error name.
         error: &'static str,
@@ -97,10 +107,10 @@ impl CommunityPluginSubjectOutcomeV1 {
     ///
     /// The result precedence is:
     /// - a gate error is `Refused`;
-    /// - else a receipt governs: its failure is `Refused` for the class `PreExecutionRejection`
-    ///   and `Failed` otherwise, and with no failure its disposition gives `Staged`,
+    /// - else a receipt governs: its failure is `Trapped` for a `ComponentTrap`, `Refused` for
+    ///   the class `PreExecutionRejection` and `Failed` otherwise, and with no failure its disposition gives `Staged`,
     ///   `Committed` or `Discarded`;
-    /// - else the pass's `launch_failure` is `Refused` or `Failed` by class;
+    /// - else the pass's `launch_failure` is `Trapped`, `Refused` or `Failed` the same way;
     /// - else `NotRun`.
     #[must_use]
     pub fn assemble(
@@ -162,11 +172,18 @@ const fn settled(receipt: &CommunityInvocationReceiptV1) -> CommunityPluginSubje
     }
 }
 
-/// `Refused` for a pre-execution rejection, `Failed` for every other class.
+/// `Trapped` for a trap, `Refused` for a pre-execution rejection, `Failed` for every other
+/// class.
 const fn by_class(error: CommunityPluginHostErrorV1) -> CommunityPluginSubjectResultV1 {
-    match error.class() {
-        HostFailureClassV1::PreExecutionRejection => refused(error),
-        HostFailureClassV1::Authoritative | HostFailureClassV1::Operational => failed(error),
+    match (error, error.class()) {
+        (CommunityPluginHostErrorV1::ComponentTrap { class, .. }, host_class) => {
+            CommunityPluginSubjectResultV1::Trapped {
+                trap_class: class.name(),
+                class: host_class.name(),
+            }
+        }
+        (_, HostFailureClassV1::PreExecutionRejection) => refused(error),
+        (_, HostFailureClassV1::Authoritative | HostFailureClassV1::Operational) => failed(error),
     }
 }
 

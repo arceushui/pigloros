@@ -225,9 +225,15 @@ fn without_a_receipt_the_launch_failure_or_not_run_decides() {
         class: PRE,
     };
     assert_eq!(pre.result, expected);
-    let failed = without_receipt(Ok(summary()), Some(trap));
+    let trapped = without_receipt(Ok(summary()), Some(trap));
+    let expected = Verdict::Trapped {
+        trap_class: "other",
+        class: "Operational",
+    };
+    assert_eq!(trapped.result, expected);
+    let failed = without_receipt(Ok(summary()), Some(Error::WorkerCrashed));
     let expected = Verdict::Failed {
-        error: "ComponentTrap",
+        error: "WorkerCrashed",
         class: "Operational",
     };
     assert_eq!(failed.result, expected);

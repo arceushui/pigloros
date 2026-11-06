@@ -276,6 +276,10 @@ fn an_unknown_name_or_class_is_operational() {
             error: "FuelExhausted",
             class: "PreExecutionRejection",
         },
+        R::Trapped {
+            trap_class: "Bogus",
+            class: "Operational",
+        },
     ];
     for result in unknown {
         assert_eq!(
@@ -335,10 +339,6 @@ fn an_operational_result_is_never_a_failure_or_an_output() {
         },
         R::Failed {
             error: "OperationalWatchdogStop",
-            class: "Operational",
-        },
-        R::Failed {
-            error: "ComponentTrap",
             class: "Operational",
         },
         R::Failed {
@@ -593,6 +593,90 @@ fn the_deletion_and_independent_entries_have_their_shapes() {
     assert_eq!(seen, format!("{opening}{entries}]}}}}\n"));
 }
 
+/// A record whose one pass trapped with `trap_class`; `matched` is the interpreter's comparison.
+fn trap_record(id: &str, trap_class: &'static str, matches: bool) -> SubCaseRecordV1 {
+    SubCaseRecordV1 {
+        outcomes: vec![outcome(R::Trapped {
+            trap_class,
+            class: "Operational",
+        })],
+        matched: matches,
+        ..SubCaseRecordV1::empty(id)
+    }
+}
+
+/// ADR-061 R13: every canonical trap class is a trapped sub-result, whatever the host class.
+#[test]
+fn a_trap_of_a_canonical_class_is_a_trapped_subresult() {
+    for class in WORKER_TRAP_CLASSES_V1 {
+        for host_class in ["Operational", "Authoritative"] {
+            let result = R::Trapped {
+                trap_class: class.name(),
+                class: host_class,
+            };
+            assert_eq!(
+                of_outcome(&outcome(result)),
+                SubResultV1::Trapped {
+                    class: class.name()
+                },
+                "{class:?} {host_class}"
+            );
+        }
+    }
+}
+
+/// ADR-061 R13: a trap is a result only for a sub-case that expects it with its class; an
+/// unexpected trap, or one of another class, is operational and the case is `Unavailable`.
+#[test]
+fn a_trap_is_operational_unless_its_subcase_matched_it() {
+    for family in FixtureFamily::ALL {
+        let decided = case_result("c", *family, &[trap_record("ind.5", "unreachable", false)]);
+        assert_eq!(decided.result, SubjectResult::Unavailable, "{family:?}");
+        assert_eq!(decided.usage, ResourceUsage::default());
+    }
+    let expected = [matched("a"), trap_record("b", "unreachable", true)];
+    let decided = case_result("c", FixtureFamily::ResourceExhaustion, &expected);
+    assert_eq!(failure_of(&decided), Some("resource-limit"));
+    assert_eq!(decided.usage, ResourceUsage::default());
+}
+
+/// ADR-061 R13: the entry of a matched trap carries its class and the `drive` export, so the
+/// evaluator compares them with the oracle; a matched record of `independent-evaluation` that is
+/// neither a digest nor a trap is a mismatch.
+#[test]
+fn the_entry_of_a_matched_trap_is_its_class_and_export() {
+    let records = [
+        trap_record("ind.5", "unreachable", true),
+        trap_record("ind.6", "other", true),
+        SubCaseRecordV1 {
+            outcomes: vec![outcome(committed_of(METERING, OUTPUT))],
+            ..matched("ind.7")
+        },
+    ];
+    let seen = output_of(&case_result(
+        "c",
+        FixtureFamily::IndependentEvaluation,
+        &records,
+    ));
+    let entries = concat!(
+        "{\"class\":\"unreachable\",\"export\":\"drive\",\"id\":\"ind.5\",\"kind\":\"trapped\"},",
+        "{\"class\":\"other\",\"export\":\"drive\",\"id\":\"ind.6\",\"kind\":\"trapped\"},",
+        "{\"id\":\"ind.7\",\"kind\":\"mismatch\"}"
+    );
+    let opening = head("independent-evaluation");
+    assert_eq!(seen, format!("{opening}{entries}]}}}}\n"));
+    // In another canonical family a trap has no entry of its own.
+    let seen = output_of(&case_result(
+        "c",
+        FixtureFamily::Positive,
+        &[trap_record("pos.9", "unreachable", true)],
+    ));
+    assert!(
+        seen.contains("{\"id\":\"pos.9\",\"kind\":\"mismatch\"}"),
+        "{seen}"
+    );
+}
+
 #[test]
 fn a_failure_family_has_no_entries() {
     let record = matched("x");
@@ -797,7 +881,7 @@ fn every_failure_has_the_provider_identity_and_a_code_within_the_grammar() {
             std::panic::resume_unwind(Box::new("not a failure"));
         };
         assert_eq!(value.owner_id, "pigloros.fixture.plugin-conformance");
-        assert_eq!(value.contract_version, "2.1.0");
+        assert_eq!(value.contract_version, "2.2.0");
         assert_eq!(value.code_id, code);
         let mut chars = code.chars();
         let first = chars
