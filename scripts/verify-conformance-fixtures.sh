@@ -662,7 +662,7 @@ while IFS= read -r -d '' erasure_file; do
     cases.json | executions.json | requests/*.erq1) ;;
     records/*.ers1 | records/*.erc1 | records/*.errj1)
       name="${relative_path#records/}"
-      actual_address="$(b3sum --no-names -- "${erasure_file}")"
+      actual_address="$(b3sum --no-names "${erasure_file}")"
       [[ "${name%.*}" == "${actual_address}" ]] || {
         echo "erasure record is not named by its BLAKE3: ${relative_path}" >&2
         exit 1

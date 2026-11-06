@@ -552,11 +552,14 @@ fn assert_no_resurrection(
         let text = format!("{refusal:?} {}", ErasureHostErrorV1::AccessFrozen);
         assert!(!contains(text.as_bytes(), CANARY));
     }
-    let retry = receipt_input(
-        receipt.inventories().clone(),
-        receipt.issue_position(),
-        receipt.signature(),
-    );
+    let retry = ErasureReceiptInputV1 {
+        replay_claim: receipt.replay_claim(),
+        ..receipt_input(
+            receipt.inventories().clone(),
+            receipt.issue_position(),
+            receipt.signature(),
+        )
+    };
     assert_eq!(
         commands
             .finalize_erasure_request(request, &retry)
@@ -690,39 +693,4 @@ fn malformed_digests_and_missing_request_files_are_closed_errors() -> TestResult
         Some(ErasureCaseErrorV1::Read(std::io::ErrorKind::NotFound))
     );
     Ok(())
-}
-
-// TEMPORARY probe (removed before the PR is ready).
-#[test]
-fn probe_complete_case_variants() -> TestResult {
-    let (catalogue, _) = load()?;
-    let case = find(&catalogue, "complete-all-categories")?;
-    let mut summary = Vec::new();
-    let mut deduplicated = case.clone();
-    deduplicated.attempts[0].acknowledgements.remove(2);
-    let mut two_categories = deduplicated.clone();
-    two_categories.obligations.truncate(2);
-    two_categories.attempts[0].acknowledgements.retain(|ack| ack.obligation < 2);
-    two_categories.attempts[0].rows.truncate(2);
-    two_categories.rejoins.clear();
-    let mut no_rejoin = deduplicated.clone();
-    no_rejoin.rejoins.clear();
-    let mut single_ack = no_rejoin.clone();
-    single_ack.attempts[0].acknowledgements.truncate(1);
-    for (label, variant) in [
-        ("original", case.clone()),
-        ("deduplicated", deduplicated),
-        ("two-categories", two_categories),
-        ("no-rejoin", no_rejoin),
-        ("single-ack", single_ack),
-    ] {
-        let mut run = open(&catalogue, &variant, StoreConfig::Memory)?;
-        let result = run.execute(&fixture_root());
-        summary.push(format!("{label}: {:?}", result.map(|record| record.histories.len())));
-    }
-    for case in &catalogue.cases {
-        let result = run(&catalogue, case, StoreConfig::Memory).map(|record| record.histories.len());
-        summary.push(format!("{}: {:?}", case.case_id, result.map_err(|error| error.to_string())));
-    }
-    Err(summary.join("\n").into())
 }
