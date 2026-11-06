@@ -635,7 +635,7 @@ impl SubjectV1 {
         receipts
             .last()
             .cloned()
-            .zip(event_stream(observation.events))
+            .zip(event_stream(observation.events, None))
             .map(|(receipt, stream)| Self {
                 stream: encode(&stream),
                 events: observation.events.len() as u64,

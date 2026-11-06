@@ -27,7 +27,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from non_interference_fixtures import cbor, result_digest  # noqa: E402
+from non_interference_fixtures import b3, cbor, result_digest  # noqa: E402
 
 CACHE = "NI-CACHE-002"
 OBS = "NI-OBS-004"
@@ -98,9 +98,11 @@ def permitted_input(row: str, variant: str) -> bytes:
 
 
 def stream() -> bytes:
-    """`[seq, entity ordinal, event type, schema version, causation seq, payload]` of the one
-    subject Event: seq 1, the one entity, no cause."""
-    return cbor([[1, 0, EVENT_TYPE, 1, None, EVENT_PAYLOAD]])
+    """`[seq, entity ordinal, event type, schema version, causation seq, correlation ordinal,
+    payload hash, payload]` of the one subject Event: seq 1; the subject Timeline has no owner,
+    so the one entity has ordinal 0; no cause or correlation; the payload hash is the BLAKE3
+    digest of the payload."""
+    return cbor([[1, 0, EVENT_TYPE, 1, None, None, b3(EVENT_PAYLOAD), EVENT_PAYLOAD]])
 
 
 def imports(row: str, variant: str) -> bytes:
@@ -185,9 +187,15 @@ def expected_result_digest(row: str, variant: str) -> bytes:
 
 
 def self_test() -> None:
-    # A hand-derived stream: array(1) of array(6) [1, 0, text(17), 1, null, bytes(8)].
+    # A hand-derived stream: array(1) of array(8)
+    # [1, 0, text(17), 1, null, null, bytes(32), bytes(8)].
     expected = bytes.fromhex(
-        "8186010071" + EVENT_TYPE.encode().hex() + "01f648" + EVENT_PAYLOAD.hex()
+        "8188010071"
+        + EVENT_TYPE.encode().hex()
+        + "01f6f65820"
+        + b3(EVENT_PAYLOAD).hex()
+        + "48"
+        + EVENT_PAYLOAD.hex()
     )
     if stream() != expected:
         raise SystemExit("the G-OPS Event stream encoding is wrong")
