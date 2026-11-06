@@ -318,6 +318,8 @@ fn reject_protected_history(
 }
 
 pub mod authoritative_comparison;
+#[cfg(feature = "test-support")]
+pub mod erasure_conformance;
 pub mod moat_proof;
 pub mod non_interference_harness;
 pub mod profile_recomputation;
