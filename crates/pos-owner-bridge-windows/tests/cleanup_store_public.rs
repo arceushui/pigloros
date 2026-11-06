@@ -121,10 +121,25 @@ fn uncertain_pending_and_committed_pairs_are_never_deduplicated_or_bulk_deleted(
         let mut store = WindowsCleanupStore::open(fixture.0.clone())?;
         let bytes = record(3)?;
         store.write_record(&bytes)?;
-        let mut pending = bytes.clone();
-        if different {
-            pending.push(0);
-        }
+        let pending = if different {
+            // Both records decode and name the same ceremony folder. Only the
+            // process identity differs, so admission must reject the collision
+            // before probing rather than merely reject malformed CBOR.
+            cleanup_record_bytes(
+                CeremonyId::from_bytes([3; 16]),
+                &name(3),
+                &ProcessIdentity {
+                    browser_pid: 43,
+                    creation_filetime: 1,
+                    image_path_sha256: ImagePathSha256::from_bytes([7; 32]),
+                },
+            )?
+        } else {
+            bytes.clone()
+        };
+        assert!(pos_owner_bridge_codec::decode_cleanup_record(&bytes).is_ok());
+        assert!(pos_owner_bridge_codec::decode_cleanup_record(&pending).is_ok());
+        assert_eq!(bytes != pending, different);
         fs::write(fixture.record_path(3, "pending"), &pending)?;
         let listed = store.records()?;
         assert_eq!(listed.len(), 2);
