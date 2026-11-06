@@ -7,6 +7,52 @@ SQLite file; live concurrent commands must share one erasure host.
 Human action submission additionally requires a host-bound Gateway authority adapter
 and World body catalogue.
 
+## Replay-conformance subject adapter
+
+The `pos-experiment` binary is the replay-conformance subject adapter of ADR-062
+Revision 8 slice R4 (#1222). It reads one EAI1 attempt from standard input and
+writes one EAO1 observation to standard output (the `pos-reference` codec), or
+writes nothing and exits with code 2 (wire fault), 3 (not executed: a schema
+member other than provider contract 2.0.0, or no `RCS1` composite) or 4 (the
+output could not be written). The logic is `pos_experiment::replay_conformance`.
+It runs each sub-case of the payload through the `RecordedReplay` and
+`ProfileRecomputation` / `CrossProfileConformance` execution steps and compares
+the `VRR1` of every leg with the sub-case's expected legs.
+
+The Experiment host binary is the replay subject adapter (ADR-062 Revision 8
+section 3.1 option A). The adapter and the binary are compiled only with the
+`test-support` feature, because they run on the open fixture erasure gate and the
+generated Plugin registration: a normal build produces no `pos-experiment`
+binary. Build it with `cargo build -p pos-experiment --features test-support`.
+Its Draft limitations are listed on the wiki note
+`ADR-062_R8_Recorded_Replay_Digests`, section 7, and in
+`fixtures/conformance/support/limitations.md`. Results are Local-relaxation engineering evidence,
+not hosted conformance. The fixtures are `fixtures/conformance` layer
+`replay-conformance`, written by `scripts/generate_replay_conformance_fixtures.py`.
+
+## Non-interference mode harness
+
+`pos_experiment::non_interference_harness` is the ADR-059 mode harness of
+ADR-062 Revision 8 slice N0 (#1227). It runs one control/canary fixture pair
+in its Execution Mode, normalizes and compares the captures through the #181
+framework in `pos-conformance`, signs the case as one `NIA1` (at most 4 KiB)
+with the host executor key, and publishes the canonical bytes at their content
+address `fixtures/conformance/non-interference/executions/<digest>.nia1`. The
+Local runner spawns a fresh host process per run under a host kill timeout (a
+killed run is non-executed `Unavailable`); the Replay runner rebuilds Projection
+State from the recorded Events; the Fork runner runs the subject in an ordinary
+Fork cut at a Tick Boundary. That F-mode evidence is engineering evidence for
+every row except `NI-FORK-008`, which needs the ADR-064 records-form artifact
+path of slice R6 (#1225) in slice N4 (#1232); F cases are re-run when #1204
+lands (wiki `ADR-062_R8_NonInterference_Harness`). `WarmCache` cases are primed once before the pair,
+every other variant runs cold. The Air-Gapped runner returns the typed
+non-executed `Unavailable` until slice N7, and every non-executed case has no
+artifact and no claim. An `NIR1` is built only from exactly 192 trusted `NIA1`.
+The harness flips no inventory: `execution-matrix.json` changes only when the
+capture adapters of slices N1 to N4 supply verifier-accepted executions. The
+`pos-ni-local-probe` binary (feature `test-support`) is the harness probe of the
+Local runner, not a capture adapter of any row.
+
 ## Sequential SQLite multi-rate demo
 
 Start the local-only Gateway with an explicit SQLite file:

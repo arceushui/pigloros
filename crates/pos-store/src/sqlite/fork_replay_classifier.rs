@@ -32,7 +32,7 @@ fn raw_classifier_blob(
     context
         .check()
         .map_err(|_| CorruptAuthority)
-        .and_then(|()| conn.prepare(probe).map_err(|_| CorruptAuthority))
+        .and_then(|()| conn.prepare_cached(probe).map_err(|_| CorruptAuthority))
         .and_then(|mut statement| {
             context
                 .check()
@@ -88,7 +88,10 @@ fn classifier_bytes_from_row(
                         .and_then(|()| context.suffix_row().map_err(|_| CorruptAuthority))
                         .and_then(|()| context.bytes(length).map_err(|_| CorruptAuthority))
                         .and_then(|()| {
-                            conn.query_row(fetch, arguments, |row| row.get::<_, Vec<u8>>(0))
+                            conn.prepare_cached(fetch)
+                                .and_then(|mut statement| {
+                                    statement.query_row(arguments, |row| row.get::<_, Vec<u8>>(0))
+                                })
                                 .map_err(|_| CorruptAuthority)
                         })
                         .and_then(|bytes| {
