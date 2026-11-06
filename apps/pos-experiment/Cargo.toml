@@ -122,6 +122,10 @@ name = "non_interference_g_fork"
 required-features = ["test-support"]
 
 [[test]]
+name = "non_interference_g_archive"
+required-features = ["test-support"]
+
+[[test]]
 name = "pipeline_evaluation"
 required-features = ["test-support"]
 

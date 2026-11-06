@@ -14,9 +14,10 @@ from the documented capture contract in
 The digests then follow the #181 capture profile and the harness result domain
 (`non_interference_fixtures.py`).
 
-NI-ARCHIVE-009 moved to slice N1b (#1284) and Air-Gapped stays non-executed until N7 (#1235):
-none of their cases is ever flipped. `scripts/generate_non_interference_fixtures.py` plugs this
-oracle into the evidence binder.
+NI-ARCHIVE-009 (slice N1b, #1284) shares this subject; its oracle is
+`generate_non_interference_g_archive_fixtures.py`. Air-Gapped stays non-executed until N7
+(#1235): none of its cases is ever flipped. `scripts/generate_non_interference_fixtures.py` plugs
+this oracle into the evidence binder.
 """
 
 from __future__ import annotations

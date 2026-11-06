@@ -72,8 +72,16 @@ Local runner, not a capture adapter of any row.
 Every mode imports the Events it produced into that public seam. The host
 places the unauthorized value in a denied sibling Timeline of the seam store.
 Run-local identities are captured position-relative. `pos-ni-g-pub-subject` is
-the Local fresh-process subject of these rows. `NI-ARCHIVE-009` is non-executed
-`Missing` until slice N1b (#1284).
+the Local fresh-process subject of these rows.
+
+`non_interference_harness::g_archive` holds the `NI-ARCHIVE-009` capture adapter
+of slice N1b (#1284, wiki `ADR-127_Deterministic_Run_Evidence_Archive`). It uses
+the G-PUB subject and seam: the export is projected onto the RVA1 members
+(`pos_conformance::run_evidence_archive`), written by the RVA1 builder from
+value-named staging files in a value-dependent order and chunking, and imported
+by the independent reader `pos_reference::run_evidence_archive`. The six
+surfaces are byte-exact; the `Denial` variant also records an import refused for
+a wrong digest.
 
 `non_interference_harness::g_fork` holds the G-FORK capture adapter of slice N4
 (#1232, wiki `ADR-062_R8_NonInterference_Fork`) for `NI-FORK-008`, over the R6
