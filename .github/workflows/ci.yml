@@ -842,27 +842,6 @@ jobs:
           path: ${{ runner.temp }}/coverage.lcov
           retention-days: 1
           if-no-files-found: error
-      - name: "DIAGNOSTIC #1302 (branch only, removed before review): stress the over-budget Local probe"
-        if: ${{ always() }}
-        run: |
-          set -u
-          ls target/llvm-cov-target/*.profraw 2>/dev/null | sort > "${{ runner.temp }}/before.txt" || true
-          cargo llvm-cov nextest --no-report --no-clean --workspace --all-features --locked \
-            --user-config-file none --stress-count 1000 \
-            -E 'test(=the_local_runner_executes_a_frame_only_from_a_successful_bounded_process)' \
-            --hide-progress-bar --status-level fail --final-status-level fail
-          ls target/llvm-cov-target/*.profraw | sort > "${{ runner.temp }}/after.txt"
-          profdata="$(rustc --print sysroot)/lib/rustlib/x86_64-unknown-linux-gnu/bin/llvm-profdata"
-          total=0; corrupt=0; empty=0
-          for f in $(comm -13 "${{ runner.temp }}/before.txt" "${{ runner.temp }}/after.txt"); do
-            total=$((total+1))
-            if [ ! -s "$f" ]; then empty=$((empty+1)); continue; fi
-            if ! "$profdata" merge -sparse -o /dev/null "$f" 2>"${{ runner.temp }}/err.txt"; then
-              corrupt=$((corrupt+1))
-              echo "CORRUPT size=$(stat -c %s "$f") $f"; cat "${{ runner.temp }}/err.txt"
-            fi
-          done
-          echo "DIAGNOSTIC new profraw files: $total empty: $empty corrupt: $corrupt"
 
   core-gate:
     name: core-gate
