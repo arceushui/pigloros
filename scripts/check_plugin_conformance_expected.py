@@ -6,8 +6,8 @@ null time, and binds the BLAKE3 digest of its payload (`inputs/plugin-conformanc
 The Local and Air-Gapped bundles are materialized from this one record per family, so their
 digests are equal by construction; the profile must list exactly one `expected` path per family
 and nothing else. The execution matrix holds no Plugin row, and no executed case outside the
-G-PUB rows that ADR-062 Revision 8 slice N1 (#1229) flips; those cases are owned and checked by
-`generate_non_interference_g_pub_fixtures.py`.
+non-interference rows declared in `non_interference_executed_rows.json` (ADR-062 Revision 8
+slices N1-N4); those cases are owned and checked by `generate_non_interference_fixtures.py`.
 """
 
 from __future__ import annotations
@@ -22,9 +22,11 @@ sys.path.insert(0, str(HERE))
 import generate_pmf1_golden_vectors as golden  # noqa: E402
 
 LAYER = "plugin-conformance"
-# The rows whose verifier-accepted cases slice N1 flips (owner note
-# ADR-062_R8_NonInterference_Executions); this checker does not own their execution fields.
-NON_INTERFERENCE_EXECUTED_ROWS = ("NI-PUBLIC-006", "NI-EVAL-007")
+# The rows whose verifier-accepted cases the non-interference slices flip (owner answer Q9);
+# this checker does not own their execution fields.
+NON_INTERFERENCE_EXECUTED_ROWS = tuple(
+    json.loads((HERE / "non_interference_executed_rows.json").read_text(encoding="utf-8"))["rows"]
+)
 HEX = "0123456789abcdef"
 FAMILIES = (
     "positive",
@@ -90,9 +92,9 @@ def profile_errors(root: Path) -> list[str]:
     return [f"the profile binds {bound}, not one record per family {wanted}"]
 
 
-def n1_case_errors(label: str, case: dict[str, object]) -> list[str]:
-    """The faults of one case of a slice N1 row: only an L, R or F case may be executed, and then
-    with a 64-hex expected result digest; every other case stays open."""
+def executed_row_case_errors(label: str, case: dict[str, object]) -> list[str]:
+    """The faults of one case of an executed non-interference row: only an L, R or F case may be
+    executed, and then with a 64-hex expected result digest; every other case stays open."""
     faults = []
     if case.get("authority_result_digest") is not None:
         faults.append(f"{label}: authority_result_digest is not null")
@@ -115,9 +117,9 @@ def row_errors(label: str, row: dict[str, object]) -> list[str]:
     if LAYER in (row.get("claim_layer"), row.get("authority_fixture_id"), row.get("fixture_id")):
         faults.append(f"{label}: a {LAYER} row")
     if row.get("fixture_id") in NON_INTERFERENCE_EXECUTED_ROWS:
-        # A slice N1 row's count is checked against its cases by `count_errors`.
+        # An executed row's count is checked against its cases by `count_errors`.
         if "case_id" in row:
-            faults.extend(n1_case_errors(label, row))
+            faults.extend(executed_row_case_errors(label, row))
         elif row.get("authority_result_digest") is not None:
             faults.append(f"{label}: authority_result_digest is not null")
         return faults
@@ -150,7 +152,7 @@ def count_errors(matrix: dict[str, object]) -> list[str]:
 
 
 def matrix_errors(root: Path) -> list[str]:
-    """No Plugin conformance row, and no executed case or digest outside the slice N1 rows."""
+    """No Plugin conformance row, and no executed case or digest outside the executed rows."""
     matrix = as_dict(load(root / "matrix/execution-matrix.json"))
     faults = count_errors(matrix)
     for kind in ("rows", "cases"):

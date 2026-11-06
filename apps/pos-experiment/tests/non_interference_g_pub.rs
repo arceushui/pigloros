@@ -16,14 +16,15 @@
 //! - be equal at every surface;
 //! - have the same result digest in every mode;
 //! - match the independently derived expected digest in `execution-matrix.json`
-//!   (`scripts/generate_non_interference_g_pub_fixtures.py`);
+//!   (the G-PUB oracle `scripts/generate_non_interference_g_pub_fixtures.py`);
 //! - equal the checked-in NIA1 in every body field except its provenance and
 //!   signature.
 //!
 //! The checked-in NIA1 are engineering evidence signed with the repository
-//! test-fixture-only executor key.
+//! test-fixture-only executor key; `non_interference_evidence.rs` checks that
+//! the verifier accepts them and that they flip exactly their matrix cases.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -42,25 +43,24 @@ use pos_core::{
     store::{EventStore, SeqRange},
     ErasureContainmentGateV1, Event,
 };
+use pos_experiment::non_interference_harness::fixture_evidence::non_interference_fixture_executor_key_v1;
 use pos_experiment::non_interference_harness::g_pub::{
-    execute_g_pub_case_v1, g_pub_capture_v1, g_pub_experiment_v1, g_pub_fixture_executor_key_v1,
-    g_pub_fixture_v1, g_pub_permitted_input_v1, g_pub_signals_v1, serve_g_pub_local_subject_v1,
-    GPubRunV1, GPubSessionSubjectV1, G_PUB_ARCHIVE_FIXTURE_ID_V1, G_PUB_CANARY_UNAUTHORIZED_V1,
+    execute_g_pub_case_v1, g_pub_capture_v1, g_pub_experiment_v1, g_pub_fixture_v1,
+    g_pub_permitted_input_v1, g_pub_signals_v1, serve_g_pub_local_subject_v1, GPubRunV1,
+    GPubSessionSubjectV1, G_PUB_ARCHIVE_FIXTURE_ID_V1, G_PUB_CANARY_UNAUTHORIZED_V1,
     G_PUB_CONTROL_UNAUTHORIZED_V1, G_PUB_EVALUATOR_SCHEMA_V1, G_PUB_EVAL_FIXTURE_ID_V1,
-    G_PUB_EXECUTOR_KEY_ID_V1, G_PUB_FIXTURE_IDS_V1, G_PUB_PUBLIC_FIXTURE_ID_V1,
-    G_PUB_STORE_FILE_V1, G_PUB_SUBJECT_TIMELINE_V1,
+    G_PUB_FIXTURE_IDS_V1, G_PUB_PUBLIC_FIXTURE_ID_V1, G_PUB_STORE_FILE_V1,
+    G_PUB_SUBJECT_TIMELINE_V1,
 };
 use pos_experiment::non_interference_harness::{
-    non_interference_publication_path_v1, NonInterferenceForkRunnerV1, NonInterferenceHarnessV1,
-    NonInterferenceLocalProcessRunnerV1, NonInterferenceLocalRequestV1,
-    NonInterferenceNonExecutedCauseV1, NonInterferencePreparationV1, NonInterferenceReplayRunnerV1,
-    NonInterferenceSignedExecutionV1, NON_INTERFERENCE_LOCAL_REQUEST_MAGIC_V1,
-    NON_INTERFERENCE_PUBLICATION_DIRECTORY_V1,
+    NonInterferenceForkRunnerV1, NonInterferenceHarnessV1, NonInterferenceLocalProcessRunnerV1,
+    NonInterferenceLocalRequestV1, NonInterferenceNonExecutedCauseV1, NonInterferencePreparationV1,
+    NonInterferenceReplayRunnerV1, NonInterferenceSignedExecutionV1,
+    NON_INTERFERENCE_LOCAL_REQUEST_MAGIC_V1, NON_INTERFERENCE_PUBLICATION_DIRECTORY_V1,
 };
 use pos_plugin_society::{SocietyDimension, SocietySignal};
 use pos_reference::adapter_transport::read_attempt;
 use pos_reference::evaluator_domain::{ClaimLayer, ExecutionMode, FixtureFamily};
-use pos_reference::verify_non_interference_execution_artifact_v1;
 use serde_json::{json, Value};
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
@@ -80,11 +80,6 @@ const MODES: [ExecutionModeV1; 4] = [
     ExecutionModeV1::Fork,
 ];
 const EXECUTED_ROWS: [&str; 2] = [G_PUB_PUBLIC_FIXTURE_ID_V1, G_PUB_EVAL_FIXTURE_ID_V1];
-const EXECUTABLE_MODES: [ExecutionModeV1; 3] = [
-    ExecutionModeV1::Local,
-    ExecutionModeV1::Replay,
-    ExecutionModeV1::Fork,
-];
 /// The closed body of the Gateway's page-bound error.
 const PAGE_LIMIT_ERROR: &[u8] = b"{\"error\":\"event poll limit must be between 1 and 100\"}";
 
@@ -156,9 +151,9 @@ fn local_runner(work: &Path) -> TestResult<NonInterferenceLocalProcessRunnerV1> 
 }
 
 fn g_pub_harness(work: &Path) -> TestResult<NonInterferenceHarnessV1> {
-    let public = g_pub_fixture_executor_key_v1().public_key();
+    let public = non_interference_fixture_executor_key_v1().public_key();
     Ok(
-        NonInterferenceHarnessV1::new(g_pub_fixture_executor_key_v1(), vec![public])
+        NonInterferenceHarnessV1::new(non_interference_fixture_executor_key_v1(), vec![public])
             .with_runner(Box::new(local_runner(work)?))
             .with_runner(Box::new(NonInterferenceReplayRunnerV1::new(
                 GPubSessionSubjectV1::new(work.join("replay")),
@@ -329,87 +324,6 @@ fn every_g_pub_coordinate_executes_or_stays_typed_non_executed_and_matches_its_n
             14,
             "{runner}"
         );
-    }
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Checked-in evidence
-// ---------------------------------------------------------------------------
-
-#[test]
-fn the_checked_in_g_pub_evidence_is_verifier_accepted_and_flips_exactly_its_cases() -> TestResult {
-    let root = fixtures_root();
-    let public = g_pub_fixture_executor_key_v1().public_key();
-    let executor: Value =
-        serde_json::from_slice(&fs::read(root.join("non-interference/executor.json"))?)?;
-    assert_eq!(executor["public_key_hex"], json!(hex(&public)));
-    assert_eq!(executor["key_id"], json!(G_PUB_EXECUTOR_KEY_ID_V1));
-    assert_eq!(
-        executor["authority_kind"],
-        json!("repository-test-fixture-only")
-    );
-    assert_eq!(executor["algorithm"], json!("Ed25519"));
-
-    let mut accepted = BTreeMap::new();
-    for entry in fs::read_dir(root.join(NON_INTERFERENCE_PUBLICATION_DIRECTORY_V1))? {
-        let path = entry?.path();
-        let bytes = fs::read(&path)?;
-        assert_no_unauthorized_bytes(&bytes, "a checked-in NIA1");
-        let address = verify_non_interference_execution_artifact_v1(&bytes, &[public])?;
-        assert_eq!(path, non_interference_publication_path_v1(&root, &address));
-        let artifact = NonInterferenceExecutionArtifactV1::from_canonical_cbor(&bytes)?;
-        assert!(artifact.equal);
-        accepted.insert(
-            case_id(&artifact.fixture_id, artifact.variant, artifact.mode),
-            (hex(&address), artifact.result_digest),
-        );
-    }
-    let expected = EXECUTED_ROWS
-        .iter()
-        .flat_map(|row| {
-            VARIANTS.iter().flat_map(move |variant| {
-                EXECUTABLE_MODES
-                    .iter()
-                    .map(move |mode| case_id(row, *variant, *mode))
-            })
-        })
-        .collect::<BTreeSet<_>>();
-    assert_eq!(accepted.keys().cloned().collect::<BTreeSet<_>>(), expected);
-
-    let matrix = matrix()?;
-    let cases = matrix["cases"].as_array().ok_or("no cases")?;
-    assert_eq!(cases.len(), 192);
-    for case in cases {
-        let id = case["case_id"].as_str().ok_or("no case id")?;
-        if let Some((address, result_digest)) = accepted.get(id) {
-            assert_eq!(case["executed"], json!(true), "{id}");
-            assert_eq!(
-                case["expected_result"],
-                json!({"equal": true, "first_divergence": null, "nia1_content_digest": address}),
-                "{id}"
-            );
-            assert_eq!(
-                case["expected_result_digest"],
-                json!(hex(result_digest)),
-                "{id}"
-            );
-        } else {
-            assert_eq!(case["executed"], json!(false), "{id}");
-            assert_eq!(case["expected_result"], Value::Null, "{id}");
-            assert_eq!(case["expected_result_digest"], Value::Null, "{id}");
-        }
-        assert_eq!(case["authority_fixture_id"], Value::Null, "{id}");
-        assert_eq!(case["authority_result_digest"], Value::Null, "{id}");
-    }
-    assert_eq!(matrix["executed_case_count"], json!(24));
-    for row in matrix["rows"].as_array().ok_or("no rows")? {
-        let executed = if EXECUTED_ROWS.contains(&row["fixture_id"].as_str().unwrap_or_default()) {
-            12
-        } else {
-            0
-        };
-        assert_eq!(row["executed_case_count"], json!(executed), "{row}");
     }
     Ok(())
 }

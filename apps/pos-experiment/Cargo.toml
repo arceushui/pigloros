@@ -107,6 +107,10 @@ name = "non_interference_g_pub"
 required-features = ["test-support"]
 
 [[test]]
+name = "non_interference_evidence"
+required-features = ["test-support"]
+
+[[test]]
 name = "pipeline_evaluation"
 required-features = ["test-support"]
 
