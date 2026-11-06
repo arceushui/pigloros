@@ -54,7 +54,8 @@ use pos_experiment::non_interference_harness::{
     non_interference_publication_path_v1, NonInterferenceForkRunnerV1, NonInterferenceHarnessV1,
     NonInterferenceLocalProcessRunnerV1, NonInterferenceLocalRequestV1,
     NonInterferenceNonExecutedCauseV1, NonInterferencePreparationV1, NonInterferenceReplayRunnerV1,
-    NON_INTERFERENCE_LOCAL_REQUEST_MAGIC_V1, NON_INTERFERENCE_PUBLICATION_DIRECTORY_V1,
+    NonInterferenceSignedExecutionV1, NON_INTERFERENCE_LOCAL_REQUEST_MAGIC_V1,
+    NON_INTERFERENCE_PUBLICATION_DIRECTORY_V1,
 };
 use pos_plugin_society::{SocietyDimension, SocietySignal};
 use pos_reference::adapter_transport::read_attempt;
@@ -205,34 +206,6 @@ fn checked_in() -> TestResult<BTreeMap<Coordinate, (String, NonInterferenceExecu
     Ok(artifacts)
 }
 
-/// The NIA1 body fields a re-execution must reproduce: everything but the
-/// execution provenance digest and the signature.
-fn reproducible_body(
-    artifact: &NonInterferenceExecutionArtifactV1,
-) -> (
-    String,
-    String,
-    [u8; 32],
-    [u8; 32],
-    [u8; 32],
-    [u8; 32],
-    bool,
-    String,
-    [u8; 32],
-) {
-    (
-        artifact.fixture_id.clone(),
-        format!("{:?}/{:?}", artifact.variant, artifact.mode),
-        artifact.fixture_digest,
-        artifact.profile_digest,
-        artifact.normalization_digest,
-        artifact.result_digest,
-        artifact.equal,
-        format!("{:?}", artifact.divergence),
-        artifact.executor_public_key,
-    )
-}
-
 /// The subject's Events of one live run.
 fn subject_events(permitted_input: &[u8]) -> TestResult<Vec<Event>> {
     let mut session = g_pub_experiment_v1(permitted_input)?.start()?;
@@ -324,11 +297,11 @@ fn every_g_pub_coordinate_executes_or_stays_typed_non_executed_and_matches_its_n
         let (name, recorded) = checked_in
             .get(&(fixture_id.clone(), *variant, *mode))
             .ok_or_else(|| format!("no checked-in NIA1 for {id}"))?;
-        assert_eq!(
-            reproducible_body(recorded),
-            reproducible_body(artifact),
-            "{id}"
-        );
+        // Every body field but the execution provenance and the signature.
+        let mut reproduced = artifact.clone();
+        reproduced.execution_provenance_digest = recorded.execution_provenance_digest;
+        reproduced.signature = recorded.signature;
+        assert_eq!(&reproduced, recorded, "{id}");
         assert_eq!(
             case["expected_result"]["nia1_content_digest"],
             json!(name.trim_end_matches(".nia1"))

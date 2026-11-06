@@ -49,7 +49,10 @@
 //! - A cursor's inventory generation and Timeline by their ordinals.
 //!
 //! `wall_time`, `origin` and signatures are declared operational and are not
-//! captured. Every other byte stays exact. Response lengths are exact, since
+//! captured. The subject's Events carry no `correlation_id`, so none is
+//! captured; the payload hash is the digest of the captured payload bytes.
+//! The seam import re-appends each Event's entity, type and payload; its
+//! schema version and causation are read back from the seam. Every other byte stays exact. Response lengths are exact, since
 //! a ULID's text always has the same width.
 //!
 //! # Warm and cold
@@ -683,7 +686,7 @@ fn evaluator_records(run: &GPubRunV1<'_>, export: &TimelineExport) -> Option<Sur
     let stream = event_stream(&export.events);
     let stream_bytes = encode(&stream);
     let exported = encode(&Value::Array(vec![
-        text(&export.timeline.meta.name.clone().unwrap_or_default()),
+        text(export.timeline.meta.name.as_deref().unwrap_or_default()),
         uint(export.timeline.head.as_u64()),
         stream,
     ]));

@@ -1131,6 +1131,11 @@ fn publication_is_immutable_and_changes_no_inventory() -> TestResult {
     let matrix: Value = serde_json::from_slice(&matrix_bytes)?;
     let cases = matrix["cases"].as_array().ok_or("no cases")?;
     assert_eq!(cases.len(), 192);
+    let executed = cases
+        .iter()
+        .filter(|case| case["executed"] == json!(true))
+        .count();
+    assert_eq!(matrix["executed_case_count"], json!(executed));
     let copied_matrix = root.path().join("matrix/execution-matrix.json");
     fs::create_dir_all(root.path().join("matrix"))?;
     fs::write(&copied_matrix, &matrix_bytes)?;

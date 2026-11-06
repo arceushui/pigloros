@@ -5,7 +5,9 @@ Decision 11: every `expected/plugin-conformance/*.json` stays `pending` with a n
 null time, and binds the BLAKE3 digest of its payload (`inputs/plugin-conformance/<family>.json`).
 The Local and Air-Gapped bundles are materialized from this one record per family, so their
 digests are equal by construction; the profile must list exactly one `expected` path per family
-and nothing else. The execution matrix holds no executed case and no Plugin row.
+and nothing else. The execution matrix holds no Plugin row, and no executed case outside the
+G-PUB rows that ADR-062 Revision 8 slice N1 (#1229) flips; those cases are owned and checked by
+`generate_non_interference_g_pub_fixtures.py`.
 """
 
 from __future__ import annotations
@@ -20,6 +22,9 @@ sys.path.insert(0, str(HERE))
 import generate_pmf1_golden_vectors as golden  # noqa: E402
 
 LAYER = "plugin-conformance"
+# The rows whose verifier-accepted cases slice N1 flips (owner note
+# ADR-062_R8_NonInterference_Executions); this checker does not own their execution fields.
+NON_INTERFERENCE_EXECUTED_ROWS = ("NI-PUBLIC-006", "NI-EVAL-007")
 FAMILIES = (
     "positive",
     "denied",
@@ -87,6 +92,10 @@ def profile_errors(root: Path) -> list[str]:
 def row_errors(label: str, row: dict[str, object]) -> list[str]:
     """The faults of one matrix row or case: executed, digest-bearing or Plugin layer."""
     faults = []
+    if LAYER in (row.get("claim_layer"), row.get("authority_fixture_id"), row.get("fixture_id")):
+        faults.append(f"{label}: a {LAYER} row")
+    if row.get("fixture_id") in NON_INTERFERENCE_EXECUTED_ROWS:
+        return faults
     if row.get("executed") is not False and "executed" in row:
         faults.append(f"{label}: executed is not false")
     for key in ("expected_result_digest", "expected_result", "authority_result_digest"):
@@ -94,8 +103,6 @@ def row_errors(label: str, row: dict[str, object]) -> list[str]:
             faults.append(f"{label}: {key} is not null")
     if row.get("executed_case_count", 0) != 0:
         faults.append(f"{label}: executed_case_count is not 0")
-    if LAYER in (row.get("claim_layer"), row.get("authority_fixture_id"), row.get("fixture_id")):
-        faults.append(f"{label}: a {LAYER} row")
     return faults
 
 
@@ -106,13 +113,14 @@ def count_errors(matrix: dict[str, object]) -> list[str]:
     for key, size in (("row_count", len(rows)), ("case_count", len(cases))):
         if matrix.get(key) != size:
             faults.append(f"{key} is {matrix.get(key)!r}, the list has {size}")
-    if matrix.get("executed_case_count") != 0:
-        faults.append("executed_case_count is not 0")
+    executed = sum(1 for case in cases if isinstance(case, dict) and case.get("executed") is True)
+    if matrix.get("executed_case_count") != executed:
+        faults.append(f"executed_case_count is not the {executed} executed cases")
     return faults
 
 
 def matrix_errors(root: Path) -> list[str]:
-    """No executed case, no digest and no Plugin conformance row in the execution matrix."""
+    """No Plugin conformance row, and no executed case or digest outside the slice N1 rows."""
     matrix = as_dict(load(root / "matrix/execution-matrix.json"))
     faults = count_errors(matrix)
     for kind in ("rows", "cases"):

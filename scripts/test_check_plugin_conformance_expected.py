@@ -94,6 +94,10 @@ class CheckerTest(unittest.TestCase):
         self.edit(MATRIX, lambda m: m["rows"][2].update(executed_case_count=1))
         self.assert_fault("rows[2]: executed_case_count is not 0")
 
+    def test_an_unexecuted_total_fails(self) -> None:
+        self.edit(MATRIX, lambda m: m.update(executed_case_count=0))
+        self.assert_fault("executed_case_count is not the 24 executed cases")
+
     def test_inconsistent_counts_fail(self) -> None:
         self.edit(MATRIX, lambda m: m.update(row_count=11, case_count=191))
         self.assert_fault("row_count is 11, the list has 12")
