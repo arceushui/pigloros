@@ -345,6 +345,74 @@ fn the_archive_is_canonical_and_independent_of_insertion_order_and_chunking() ->
     Ok(())
 }
 
+/// A deterministic generator of small exports: owners, repeated and new
+/// entities and correlations, and causes.
+fn generated(seed: u64) -> TimelineExport {
+    let mut state = seed;
+    let mut next = move |bound: u64| {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (state >> 33) % bound
+    };
+    let entities = [EntityId::new(), EntityId::new(), EntityId::new()];
+    let correlations = [CorrelationId::new(), CorrelationId::new()];
+    let length = next(6);
+    let mut events: Vec<Event> = Vec::new();
+    for seq in 1..=length {
+        let mut current = event(seq, entities[usize::try_from(next(3)).unwrap_or_default()]);
+        current.correlation_id = match next(3) {
+            0 => None,
+            index => Some(correlations[usize::try_from(index - 1).unwrap_or_default()]),
+        };
+        current.causation_id = (seq > 1 && next(2) == 0)
+            .then(|| events[usize::try_from(next(seq - 1)).unwrap_or_default()].id);
+        events.push(current);
+    }
+    let meta = if next(2) == 0 {
+        TimelineMeta::root("g")
+    } else {
+        TimelineMeta::root_owned("g", entities[0])
+    };
+    export(meta, events)
+}
+
+#[test]
+fn every_generated_export_writes_an_archive_that_imports_in_any_order() -> TestResult {
+    for seed in 0..24 {
+        let members = members_of(&generated(seed))?;
+        let one_shot = build(
+            &members
+                .iter()
+                .map(|(name, data)| (name.as_str(), data.clone()))
+                .collect::<Vec<_>>(),
+        )?;
+        let mut reversed = RunEvidenceArchiveBuilderV1::new();
+        for (name, data) in members.iter().rev() {
+            reversed.insert(name, OneByte(data.as_slice()))?;
+        }
+        assert_eq!(reversed.finish()?, one_shot, "{seed}");
+        let imported = import_run_evidence_archive_v1(&one_shot.bytes, &one_shot.digest)?;
+        assert_eq!(imported.members.len(), members.len(), "{seed}");
+    }
+    // A correlation table that grows: 0, 1, then 0 again.
+    let correlations = [CorrelationId::new(), CorrelationId::new()];
+    let entity = EntityId::new();
+    let mut events = vec![event(1, entity), event(2, entity), event(3, entity)];
+    for (current, correlation) in events.iter_mut().zip([0, 1, 0]) {
+        current.correlation_id = Some(correlations[correlation]);
+    }
+    let members = members_of(&export(TimelineMeta::root("c"), events))?;
+    let archive = build(
+        &members
+            .iter()
+            .map(|(name, data)| (name.as_str(), data.clone()))
+            .collect::<Vec<_>>(),
+    )?;
+    import_run_evidence_archive_v1(&archive.bytes, &archive.digest)?;
+    Ok(())
+}
+
 #[test]
 fn the_builder_refuses_names_duplicates_and_incomplete_closures() -> TestResult {
     let members = sample()?;

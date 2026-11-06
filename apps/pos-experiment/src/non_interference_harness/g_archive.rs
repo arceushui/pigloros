@@ -651,6 +651,14 @@ mod tests {
     fn the_header_walk_stops_at_a_zero_block_or_an_invalid_size() {
         let archive = ustar(&[("RVA1".to_owned(), 0, vec![1]), ("x".to_owned(), 0, vec![])]);
         assert_eq!(header_walk(&archive).len(), 2 * BLOCK);
+        // A multi-digit size steps over three data blocks.
+        let long = ustar(&[
+            ("a".to_owned(), 0, vec![1; 1100]),
+            ("b".to_owned(), 0, vec![2]),
+        ]);
+        let walk = header_walk(&long);
+        assert_eq!(walk.len(), 2 * BLOCK);
+        assert_eq!(walk[BLOCK], b'b');
         let mut broken = archive;
         broken[124] = b'9';
         assert_eq!(header_walk(&broken).len(), BLOCK);
