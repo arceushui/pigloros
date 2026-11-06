@@ -25,7 +25,7 @@ CI = ROOT / ".github" / "workflows" / "ci.yml"
 DOCKERFILE = ROOT / "Dockerfile"
 REUSABLE = "./.github/workflows/third-party-notices.yml"
 DOWNLOAD = (
-    "actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131"
+    "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333"
 )
 BUILD_PUSH = "docker/build-push-action@"
 NOTICES_DIR = "third-party-notices"
