@@ -98,17 +98,17 @@ use pos_plugin_supervisor::{
     CommunityDriverConfigV1, CommunityDriverSettingsV1, CommunityDriverV1,
     CommunityInvocationReceiptV1, CommunityPluginHandleV1, CommunityPluginSupervisorV1,
     CommunityStateV1, InvocationBindingV1, InvocationContextSourceV1, InvocationContextV1,
-    WorkerProgramV1,
+    ReceiptDispositionV1, WorkerProgramV1,
 };
 use pos_runtime::community_plugin_host::{
     classify_pass_failure, pinned_runtime_v1, CommunityPluginCeilingsV1,
     CommunityPluginExecutionProfileV1, CommunityPluginHostAbiV1, CommunityPluginHostErrorV1,
-    CommunityPluginModeV1, HostInputs, InvocationReportV1, NegotiatedCommunityPluginV1,
-    PluginOutputV1,
+    CommunityPluginModeV1, HostInputs, InvocationReportV1, MeteringV1, NegotiatedCommunityPluginV1,
+    PassFailureV1, PluginErrorCodeV1, PluginOutputV1,
 };
 use pos_runtime::{
     AuthorizationCacheKeyV1, Driver, ErasureCommandSenderV1, ErasureExecutionHostV1,
-    ObservationView, PluginRegistry, RuntimeError,
+    ObservationView, PluginAvailabilityV1, PluginRegistry, RuntimeError,
 };
 use pos_state::ProjectionRegistry;
 use pos_store::StoreConfig;
@@ -664,7 +664,7 @@ impl SubjectV1 {
     }
 
     fn disposition(&self) -> Value {
-        debug_text(&self.receipt.disposition)
+        closed_code(&DISPOSITIONS, &self.receipt.disposition)
     }
 
     fn failure(&self) -> Value {
@@ -673,12 +673,68 @@ impl SubjectV1 {
 
     /// The subject's metering, operational only.
     fn metering(&self) -> Vec<u8> {
-        format!("{:?}", self.receipt.metering).into_bytes()
+        self.receipt
+            .metering
+            .as_ref()
+            .map_or_else(Vec::new, metering_bytes)
     }
 }
 
-fn debug_text(value: &impl std::fmt::Debug) -> Value {
-    Value::Text(format!("{value:?}"))
+/// The closed receipt disposition codes, by position.
+const DISPOSITIONS: [ReceiptDispositionV1; 3] = [
+    ReceiptDispositionV1::Staged,
+    ReceiptDispositionV1::Committed,
+    ReceiptDispositionV1::Discarded,
+];
+
+/// The closed Plugin availability codes, by position.
+const AVAILABILITIES: [PluginAvailabilityV1; 6] = [
+    PluginAvailabilityV1::Available,
+    PluginAvailabilityV1::Disabled,
+    PluginAvailabilityV1::Unavailable,
+    PluginAvailabilityV1::Revoked,
+    PluginAvailabilityV1::Trapped,
+    PluginAvailabilityV1::ResourceExhausted,
+];
+
+/// The guest's declared failure: `guest-declared-failure(7)`.
+const DECLARED_FAILURE: u16 = 7;
+const DECLARED_FAILURE_CASE: &str = "guest-declared-failure";
+
+/// The closed code of `value`: its position in `codes`.
+fn closed_code<T: PartialEq>(codes: &[T], value: &T) -> Value {
+    uint(
+        codes
+            .iter()
+            .position(|code| code == value)
+            .map_or(u64::MAX, |position| position as u64),
+    )
+}
+
+fn availability(handle: &CommunityPluginHandleV1) -> Value {
+    closed_code(&AVAILABILITIES, &handle.availability())
+}
+
+/// `[case, code, whether the guest declared exactly that failure]`.
+fn declared_code(code: &PluginErrorCodeV1) -> Value {
+    array([
+        text(DECLARED_FAILURE_CASE),
+        uint(u64::from(DECLARED_FAILURE)),
+        Value::Bool(*code == PluginErrorCodeV1::GuestDeclaredFailure(DECLARED_FAILURE)),
+    ])
+}
+
+/// The metering's four counters, big-endian: operational only.
+fn metering_bytes(metering: &MeteringV1) -> Vec<u8> {
+    [
+        metering.startup_fuel,
+        metering.call_fuel,
+        metering.memory_bytes,
+        metering.host_calls,
+    ]
+    .iter()
+    .flat_map(|value| value.to_be_bytes())
+    .collect()
 }
 
 fn failure_text(failure: Option<CommunityPluginHostErrorV1>) -> Value {
@@ -800,7 +856,7 @@ impl DeclaredV1 {
                             .iter()
                             .map(|record| record.category)
                             .collect(),
-                        code: debug_text(&guest.code),
+                        code: declared_code(&guest.code),
                         coordinate: guest.canonical_coordinate.unwrap_or_default(),
                     })
                 })
@@ -1114,7 +1170,15 @@ fn cache_seam(store: &Path, unauthorized_value: &[u8]) -> Option<CacheSeamV1> {
                     lookups,
                     hits: counts.hits,
                     misses: counts.misses,
-                    excluded: [format!("{counts:?}").into_bytes(), elapsed(start)].concat(),
+                    excluded: [
+                        counts.hits.to_be_bytes(),
+                        counts.misses.to_be_bytes(),
+                        counts.evictions.to_be_bytes(),
+                    ]
+                    .concat()
+                    .into_iter()
+                    .chain(elapsed(start))
+                    .collect(),
                     evictions,
                 }
             })
@@ -1366,7 +1430,7 @@ fn time_surfaces(
             NonInterferenceRawOperationalV1::CategoryCount {
                 category,
                 count: count(logs.len() as u64),
-                excluded_sensitive: [format!("{:?}", report.metering).into_bytes(), wall].concat(),
+                excluded_sensitive: [metering_bytes(&report.metering), wall].concat(),
             },
             NonInterferenceRawOperationalV1::ByteExact(records[5].clone()),
         ];
@@ -1410,10 +1474,12 @@ fn sibling_ticks(
 ///   ["quarantine", trapping sibling's availability]]`.
 /// - support archive: `[["crash-report.cbor", padded crash report length]]`.
 /// - next Tick status: `[subject availability, trapping sibling's
-///   availability, its receipts, the pass classification of its next
-///   Tick's error]`. The quarantined sibling's next Tick is refused before
-///   the host runs it, so it adds no receipt and is not a community host
-///   failure (`Unrelated`).
+///   availability, its receipts, whether its next Tick was refused as no
+///   community host failure]`. The quarantined sibling's next Tick is refused
+///   before the host runs it, so it adds no receipt.
+///
+/// Availabilities and dispositions are closed codes: their positions in
+/// [`AVAILABILITIES`] and [`DISPOSITIONS`]. No record holds `Debug` text.
 ///
 /// Operationally each keeps category, count and padded length; the
 /// coordinate and the archive's file name, which the value names, are
@@ -1434,33 +1500,30 @@ fn crash_surfaces(
                         .zip(trapped.last_failure())
                         .ok_or(NonInterferenceNonExecutedCauseV1::Unavailable)
                         .map(|(guest, error)| {
-                            let code = debug_text(&guest.code);
+                            let code = declared_code(&guest.code);
                             let coordinate = guest.canonical_coordinate.unwrap_or_default();
                             let report = array([
                                 array([text("guest-error"), code.clone()]),
                                 array([text("host-error"), text(error.name())]),
-                                array([text("quarantine"), debug_text(&trapped.availability())]),
+                                array([text("quarantine"), availability(&trapped)]),
                             ]);
                             let report_bytes = encode(&report);
                             let records = records([
                                 array([code, Value::Bool(!coordinate.is_empty())]),
                                 array([text(error.name()), text(&error.to_string())]),
-                                array([
-                                    debug_text(&declared.availability()),
-                                    debug_text(&trapped.availability()),
-                                ]),
+                                array([availability(&declared), availability(&trapped)]),
                                 report,
                                 array([array([
                                     text("crash-report.cbor"),
                                     uint(u64::from(padded(&report_bytes))),
                                 ])]),
                                 array([
-                                    debug_text(&handle.availability()),
-                                    debug_text(&trapped.availability()),
+                                    availability(handle),
+                                    availability(&trapped),
                                     uint(trapped.receipts().len() as u64),
-                                    next.as_ref().map_or(text(NONE), |error| {
-                                        debug_text(&classify_pass_failure(error))
-                                    }),
+                                    Value::Bool(next.as_ref().is_some_and(|error| {
+                                        classify_pass_failure(error) == PassFailureV1::Unrelated
+                                    })),
                                 ]),
                             ]);
                             let archive = format!("crash-{}.cbor", hex(run.unauthorized_value));

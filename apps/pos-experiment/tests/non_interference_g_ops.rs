@@ -483,8 +483,11 @@ fn assert_row_operational_details(
     let siblings = value.len() % 3 + 1;
     match fixture_id {
         G_OPS_CACHE_FIXTURE_ID_V1 => {
-            let counts = format!("hits: 2, misses: 0, evictions: {siblings} }}");
-            assert!(contains(&excluded[0], counts.as_bytes()), "{counts}");
+            let counts = [2_u64, 0, siblings as u64]
+                .iter()
+                .flat_map(|count| count.to_be_bytes())
+                .collect::<Vec<_>>();
+            assert!(excluded[0].starts_with(&counts));
             assert!(excluded[0].ends_with(b"us"));
             assert_eq!(excluded[3], vec![1; siblings]);
             assert_eq!(
@@ -496,7 +499,8 @@ fn assert_row_operational_details(
             );
         }
         G_OPS_OBSERVABILITY_FIXTURE_ID_V1 => {
-            assert!(contains(&excluded[1], b"call_fuel"));
+            // The subject's four metering counters.
+            assert_eq!(excluded[1].len(), 32);
             assert_eq!(excluded[2], directory.to_string_lossy().as_bytes());
         }
         G_OPS_TIME_FIXTURE_ID_V1 => {
@@ -504,7 +508,8 @@ fn assert_row_operational_details(
             let wall = format!("{}ms+{margin}ms/{}ms", value.len() % 3, 30_000 + margin);
             assert!(contains(&excluded[1], wall.as_bytes()), "{wall}");
             assert!(contains(&excluded[3], &u128::from(margin).to_be_bytes()));
-            assert!(contains(&excluded[4], b"call_fuel"));
+            // The sibling's four metering counters, then the wall clock.
+            assert!(excluded[4].len() > 32 && excluded[4].ends_with(wall.as_bytes()));
         }
         _ => assert_eq!(
             excluded[4],

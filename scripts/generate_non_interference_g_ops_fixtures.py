@@ -82,13 +82,17 @@ FUEL = 1_000_000  # min(budget 1,000,000, V1 ceiling 1,000,000,000)
 LOG_MESSAGE_BOUND = 256
 COORDINATE_BOUND = 128
 LOG_SCHEMA = "pigloros.operational-log.v1"
-DISPOSITION = "Committed"
+# Closed codes: positions in g_ops.rs `DISPOSITIONS` (Staged, Committed, Discarded) and
+# `AVAILABILITIES` (Available, Disabled, Unavailable, Revoked, Trapped, ResourceExhausted).
+DISPOSITION = 1  # Committed
+AVAILABLE = 0
+TRAPPED = 4
 NONE = "none"
 # The guest logs under category Simulation Time + 1: 1 for the output, 2 for the declared
 # failure; the declared failure is `guest-declared-failure(7)`.
 OUTPUT_LOG_CATEGORY = 1
 DECLARED_LOG_CATEGORY = 2
-DECLARED_CODE = "GuestDeclaredFailure(7)"
+DECLARED_CODE = ["guest-declared-failure", 7, True]
 TRAP_NAME = "ComponentTrap"
 TRAP_TEXT = "community Plugin Component trapped: unreachable"
 
@@ -156,20 +160,19 @@ def time_records(row: str, variant: str) -> list[bytes]:
 def crash_records(_row: str, _variant: str) -> list[bytes]:
     """Two denied sibling community Drivers: the declaring one stays `Available`; the trapping one
     is quarantined `Trapped`, so its next Tick is refused before the host runs it: it keeps its one
-    receipt, and the refusal is not a community host failure (`Unrelated`). The subject stays
-    `Available`."""
+    receipt, and the refusal is no community host failure. The subject stays `Available`."""
     report = [
         ["guest-error", DECLARED_CODE],
         ["host-error", TRAP_NAME],
-        ["quarantine", "Trapped"],
+        ["quarantine", TRAPPED],
     ]
     return [
         cbor([DECLARED_CODE, True]),
         cbor([TRAP_NAME, TRAP_TEXT]),
-        cbor(["Available", "Trapped"]),
+        cbor([AVAILABLE, TRAPPED]),
         cbor(report),
         cbor([["crash-report.cbor", padded(cbor(report))]]),
-        cbor(["Available", "Trapped", 1, "Unrelated"]),
+        cbor([AVAILABLE, TRAPPED, 1, True]),
     ]
 
 
