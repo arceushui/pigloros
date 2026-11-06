@@ -21,32 +21,42 @@ pub use read_guard::{
 };
 use read_guard::{OrdinaryReadGuard, ReadContext};
 
-/// The five independent key roles required by the Wave 8 boundary.
+/// The independent key roles of the Wave 8 boundary: the five of ADR-065 and the two
+/// conformance signing roles of ADR-062 Revision 8 section 5.2 (K-A).
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[repr(u8)]
 pub enum KeyRoleV1 {
     /// Encrypts subject data at rest.
-    SubjectDataEncryption,
+    SubjectDataEncryption = 0,
     /// Signs subject-attribution records.
-    SubjectAttributionSigning,
+    SubjectAttributionSigning = 1,
     /// Signs Timeline integrity evidence.
-    TimelineIntegritySigning,
+    TimelineIntegritySigning = 2,
     /// Signs Plugin releases.
-    PluginReleaseSigning,
+    PluginReleaseSigning = 3,
     /// Encrypts exported data for recipients.
-    ExportRecipientEncryption,
+    ExportRecipientEncryption = 4,
+    /// Signs conformance evaluator releases (DSSE envelopes only).
+    ConformanceEvaluatorSigning = 5,
+    /// Signs conformance-report attestations (DSSE envelopes only).
+    ConformanceReportSigning = 6,
 }
 
 impl KeyRoleV1 {
+    const ROLES_BY_CODE: [Self; 7] = [
+        Self::SubjectDataEncryption,
+        Self::SubjectAttributionSigning,
+        Self::TimelineIntegritySigning,
+        Self::PluginReleaseSigning,
+        Self::ExportRecipientEncryption,
+        Self::ConformanceEvaluatorSigning,
+        Self::ConformanceReportSigning,
+    ];
+
     /// Return the stable wire code for this role.
     #[must_use]
     pub const fn code(self) -> u8 {
-        match self {
-            Self::SubjectDataEncryption => 0,
-            Self::SubjectAttributionSigning => 1,
-            Self::TimelineIntegritySigning => 2,
-            Self::PluginReleaseSigning => 3,
-            Self::ExportRecipientEncryption => 4,
-        }
+        self as u8
     }
 
     /// Decode a stable role code.
@@ -55,13 +65,31 @@ impl KeyRoleV1 {
     ///
     /// Returns [`KeyRegistryErrorV1::InvalidRoleCode`] for an unknown code.
     pub const fn from_code(code: u8) -> Result<Self, KeyRegistryErrorV1> {
-        match code {
-            0 => Ok(Self::SubjectDataEncryption),
-            1 => Ok(Self::SubjectAttributionSigning),
-            2 => Ok(Self::TimelineIntegritySigning),
-            3 => Ok(Self::PluginReleaseSigning),
-            4 => Ok(Self::ExportRecipientEncryption),
-            _ => Err(KeyRegistryErrorV1::InvalidRoleCode),
+        if code <= Self::ConformanceReportSigning as u8 {
+            Ok(Self::ROLES_BY_CODE[code as usize])
+        } else {
+            Err(KeyRegistryErrorV1::InvalidRoleCode)
+        }
+    }
+
+    /// Require that this role may create ADR-065 role-bound signatures.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KeyRegistryErrorV1::SigningRoleRequired`] for an encryption
+    /// role and [`KeyRegistryErrorV1::SigningPurposeMismatch`] for a
+    /// conformance role, which signs only DSSE envelopes.
+    pub const fn require_role_bound_signing(self) -> Result<(), KeyRegistryErrorV1> {
+        match self {
+            Self::SubjectAttributionSigning
+            | Self::TimelineIntegritySigning
+            | Self::PluginReleaseSigning => Ok(()),
+            Self::ConformanceEvaluatorSigning | Self::ConformanceReportSigning => {
+                Err(KeyRegistryErrorV1::SigningPurposeMismatch)
+            }
+            Self::SubjectDataEncryption | Self::ExportRecipientEncryption => {
+                Err(KeyRegistryErrorV1::SigningRoleRequired)
+            }
         }
     }
 
@@ -74,6 +102,19 @@ impl KeyRoleV1 {
             Self::SubjectAttributionSigning
                 | Self::TimelineIntegritySigning
                 | Self::PluginReleaseSigning
+                | Self::ConformanceEvaluatorSigning
+                | Self::ConformanceReportSigning
+        )
+    }
+
+    /// Whether this role signs DSSE envelopes for conformance evidence. These roles sign the
+    /// DSSE pre-authentication encoding, which carries no role framing, so they sign nothing
+    /// else, and no other role signs a DSSE envelope.
+    #[must_use]
+    pub const fn is_conformance_signing(self) -> bool {
+        matches!(
+            self,
+            Self::ConformanceEvaluatorSigning | Self::ConformanceReportSigning
         )
     }
 
@@ -216,7 +257,9 @@ impl KeyIdentityV1 {
             KeyRoleV1::SubjectDataEncryption | KeyRoleV1::ExportRecipientEncryption => Ok(()),
             KeyRoleV1::SubjectAttributionSigning
             | KeyRoleV1::TimelineIntegritySigning
-            | KeyRoleV1::PluginReleaseSigning => {
+            | KeyRoleV1::PluginReleaseSigning
+            | KeyRoleV1::ConformanceEvaluatorSigning
+            | KeyRoleV1::ConformanceReportSigning => {
                 Err(KeyRegistryErrorV1::HistoricalDecryptionRoleRequired)
             }
         }
@@ -399,6 +442,10 @@ pub enum KeyRegistryErrorV1 {
     /// An encryption operation was requested for a signing role.
     #[error("only encryption roles may authorize protected material use")]
     EncryptionRoleRequired,
+    /// A signing role was used for another role's signing purpose: a conformance role for a
+    /// role-bound signature, or another role for a DSSE envelope or a report attestation.
+    #[error("key role is not admitted for this signing purpose")]
+    SigningPurposeMismatch,
     /// The identity is permanently tombstoned.
     #[error("key identity has been irreversibly destroyed")]
     Destroyed,
@@ -1534,6 +1581,8 @@ mod tests {
             KeyRoleV1::TimelineIntegritySigning,
             KeyRoleV1::PluginReleaseSigning,
             KeyRoleV1::ExportRecipientEncryption,
+            KeyRoleV1::ConformanceEvaluatorSigning,
+            KeyRoleV1::ConformanceReportSigning,
         ] {
             assert_eq!(KeyRoleV1::from_code(role.code()), Ok(role));
         }
