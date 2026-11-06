@@ -18,7 +18,7 @@
 //! Slice N4 (#1232) adds the hidden participant field and the replay of a
 //! recorded run: `a_differing_factual_suffix_never_reaches_an_artifact` also
 //! varies the field, and
-//! `a_replay_rebuilds_the_export_from_the_recorded_store_alone` replays one.
+//! `a_replay_rebuilds_the_export_from_the_recorded_store_and_plan` replays one.
 
 use pos_conformance::counterfactual::checkpoint::RecomputeCheckpointV1;
 use pos_conformance::counterfactual::dependency::InputDependencyV1;
@@ -34,15 +34,16 @@ use pos_conformance::{
 };
 use pos_core::{
     factual_event_schema_id, ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1,
-    ArtifactStateV1, ArtifactTransitionRuleV1, ErasureArtifactClassV1, ErasureReferenceV1,
-    ErasureReplayClaimV1, EventStore, RegisteredArtifactV1, ReplayClaimEvaluationV1,
-    ReplayClaimEvaluatorV1, SeqRange, TimelineId, FACTUAL_STEP_SCHEMA_ID_V1,
+    ArtifactStateV1, ArtifactTransitionRuleV1, CounterfactualStorePortV1, ErasureArtifactClassV1,
+    ErasureReferenceV1, ErasureReplayClaimV1, EventStore, RegisteredArtifactV1,
+    ReplayClaimEvaluationV1, ReplayClaimEvaluatorV1, SeqRange, TimelineId,
+    FACTUAL_STEP_SCHEMA_ID_V1,
 };
 use pos_experiment::authoritative_comparison::DivergenceContextV1;
 use pos_experiment::fork_artifacts::{
     compare_fork_artifacts_v1, record_fork_v1, replay_recorded_fork_v1, run_fork_v1,
     ForkArtifactExportV1, ForkArtifactKindV1, ForkDriverV1, ForkFixtureV1, ForkRunErrorV1,
-    FACTUAL_TIMELINE_ID_V1, FORK_TIMELINE_ID_V1, LEAD_EVENT_TYPE_V1,
+    RecordedForkV1, FACTUAL_TIMELINE_ID_V1, FORK_TIMELINE_ID_V1, LEAD_EVENT_TYPE_V1,
 };
 use pos_runtime::counterfactual::coordinator::CounterfactualAdmissionErrorV1;
 use pos_runtime::counterfactual::suffix::CounterfactualSuffixErrorV1;
@@ -678,7 +679,7 @@ fn timeline(id: [u8; 16]) -> TimelineId {
 }
 
 #[test]
-fn a_replay_rebuilds_the_export_from_the_recorded_store_alone() -> TestResult {
+fn a_replay_rebuilds_the_export_from_the_recorded_store_and_plan() -> TestResult {
     let fixture = ForkFixtureV1 {
         factual_suffix: vec![b"after".to_vec(), b"later".to_vec()],
         hidden_participant_field: b"hidden".to_vec(),
@@ -686,13 +687,26 @@ fn a_replay_rebuilds_the_export_from_the_recorded_store_alone() -> TestResult {
     };
     let (live, mut recorded) = record_fork_v1(&fixture, ExecutionModeV1::Local)?;
     assert_eq!(live, run_fork_v1(&fixture, ExecutionModeV1::Local)?);
-    let fork = timeline(FORK_TIMELINE_ID_V1);
-    let head = recorded.store().logical_head(fork)?;
-    // A complete generation stages nothing: the replay appends no Event, and
-    // a Tick it staged would be refused and leave a failed result.
+    let timelines = [
+        timeline(FACTUAL_TIMELINE_ID_V1),
+        timeline(FORK_TIMELINE_ID_V1),
+    ];
+    let recorded_events = |recorded: &RecordedForkV1| {
+        timelines
+            .iter()
+            .map(|id| recorded.store().read(*id, SeqRange::all()))
+            .collect::<Result<Vec<_>, _>>()
+    };
+    let before = recorded_events(&recorded)?;
+    let fork = timelines[1];
+    let generation = recorded.store().current_fork_generation(fork)?;
+    // A complete generation stages nothing: the replay appends no Event to
+    // either Timeline and commits no generation, and a Tick it staged would
+    // be refused and leave a failed result.
     for _ in 0..2 {
         assert_eq!(replay_recorded_fork_v1(&mut recorded)?, live);
-        assert_eq!(recorded.store().logical_head(fork)?, head);
+        assert_eq!(recorded_events(&recorded)?, before);
+        assert_eq!(recorded.store().current_fork_generation(fork)?, generation);
     }
 
     // The participant Driver's factual Events carry the hidden field after

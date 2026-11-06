@@ -80,7 +80,9 @@ the Local fresh-process subject of these rows. `NI-ARCHIVE-009` is non-executed
 Fork artifact exports below:
 - Local runs the records-form Fork in the fresh process `pos-ni-g-fork-subject`.
 - Replay records a run and rebuilds its export from the recorded Event Store
-  alone (`replay_recorded_fork_v1`): no Driver runs and no Event is appended.
+  (`replay_recorded_fork_v1`): `RCF1`/`SIV1` are read back and `RCP1`/`CFR1`
+  recovered from the committed Fork Events, with `INT1`/`CFP1` from the recorded
+  plan. No Driver runs and no Event is appended.
 - Fork runs the records-form Fork in-process (owner answer Q7: a genuine ADR-064
   Fork execution, re-run when #1204 lands).
 
