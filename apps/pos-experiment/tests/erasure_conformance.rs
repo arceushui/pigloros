@@ -18,13 +18,13 @@ use pos_core::erasure::{
     ErasureAcknowledgementOutcomeV1, ErasureAcknowledgementV1,
     ErasureAdministrativeResolutionActionV1, ErasureAdministrativeResolutionInputV1,
     ErasureAdministrativeResolutionV1, ErasureArtifactTransitionV1, ErasureAuthorizationDecisionV1,
-    ErasureErrorV1, ErasureHostErrorV1, ErasureInventoryResultV1, ErasureLifecycleV1,
-    ErasureObligationV1, ErasureReceiptInputV1, ErasureReceiptInventoriesV1, ErasureReceiptV1,
-    ErasureRecoveryAuthorizationVerifierV1, ErasureReferenceV1, ErasureReplayClaimV1,
-    ErasureRequestV1, ErasureRetryAdmissionInputV1, ErasureRetryAdmissionV1,
-    ErasureScopeExtensionInputV1, ErasureScopeExtensionV1,
+    ErasureErrorV1, ErasureForkAdmissionInputV1, ErasureHostErrorV1, ErasureInventoryResultV1,
+    ErasureLifecycleV1, ErasureObligationV1, ErasureReceiptInputV1, ErasureReceiptInventoriesV1,
+    ErasureReceiptV1, ErasureRecoveryAuthorizationVerifierV1, ErasureReferenceV1,
+    ErasureReplayClaimV1, ErasureRequestV1, ErasureRetryAdmissionInputV1, ErasureRetryAdmissionV1,
+    ErasureScopeExtensionInputV1, ErasureScopeExtensionV1, ErasureVerifiedTopologyObservationV1,
 };
-use pos_core::{CanonicalBytes, EntityId, EventDraft, Kind, Seq, TimelineId};
+use pos_core::{CanonicalBytes, EntityId, EventDraft, Kind, Seq, TimelineId, TimelineMeta};
 use pos_experiment::erasure_conformance::{
     case_obligations, ErasureCaseCatalogueV1, ErasureCaseDigestV1, ErasureCaseErrorV1,
     ErasureCaseRecordV1, ErasureCaseRunV1, ErasureCaseV1,
@@ -345,7 +345,7 @@ fn reordered_and_duplicated_acknowledgements_give_identical_records() -> TestRes
     Ok(())
 }
 
-fn receipt_input(
+const fn receipt_input(
     rows: ErasureReceiptInventoriesV1,
     issue_position: u64,
     signature: ErasureReferenceV1,
@@ -480,7 +480,6 @@ fn a_receipt_row_that_upgrades_its_replay_claim_is_refused() -> TestResult {
         .map_err(fail)?;
     assert_eq!(receipt.lifecycle(), ErasureLifecycleV1::Complete);
     assert_eq!(receipt.replay_claim(), ErasureReplayClaimV1::StructuralOnly);
-    drop(commands);
     assert_eq!(run.host().status(), ErasureHostStatusV1::Ready);
     Ok(())
 }
@@ -599,7 +598,6 @@ fn assert_no_resurrection(
         Some(ErasureHostErrorV1::Conflict),
         "no Fork of an erased Timeline is admitted after Complete"
     );
-    drop(commands);
     assert_eq!(run.host().status(), ErasureHostStatusV1::Ready);
     Ok(())
 }
@@ -658,6 +656,30 @@ fn the_fixture_authority_refuses_only_the_conflicted_authorization() -> TestResu
         .map_err(fail)?;
     assert_eq!(
         authority.validate_administrative_resolution(&resolution),
+        Ok(())
+    );
+    let child = TimelineMeta::root("erasure-fork-candidate");
+    assert_eq!(
+        authority.verified_topology_observation_for_candidate(digest(91), digest(92), &child),
+        Ok(Some(ErasureVerifiedTopologyObservationV1::new(
+            digest(92),
+            Vec::new(),
+            vec![child.id],
+        ))),
+        "before the freeze a Fork candidate is known and unaffected"
+    );
+    assert_eq!(
+        authority.resolve_fork_child_scope(child.id, &child),
+        Ok(catalogue.scope_member.reference())
+    );
+    let admission = ErasureForkAdmissionInputV1 {
+        operation: digest(93),
+        expected_inventory_generation: digest(94),
+        child_scope: catalogue.scope_member.reference(),
+        child,
+    };
+    assert_eq!(
+        authority.admit_fork_scope_extension(&extension, &admission),
         Ok(())
     );
     assert_eq!(
