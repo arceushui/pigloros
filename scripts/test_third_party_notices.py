@@ -1128,7 +1128,7 @@ class WorkflowContractTests(unittest.TestCase):
             {"name": generate, "env": {"REPORTS": "${{ runner.temp }}/cargo-about"}, "run": NOTICE_PROGRAM_SHA256[generate]},
             {"name": assemble, "env": {"REPORTS": "${{ runner.temp }}/cargo-about", "BUNDLE": "${{ runner.temp }}/third-party-notices"},
              "run": NOTICE_PROGRAM_SHA256[assemble]},
-            {"name": "Upload the notice bundle", "uses": "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+            {"name": "Upload the notice bundle", "uses": "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9",
              "with": {"name": "third-party-notices", "path": "${{ runner.temp }}/third-party-notices", "if-no-files-found": "error"}},
         ])
 
