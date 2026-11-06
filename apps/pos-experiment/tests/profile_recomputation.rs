@@ -198,10 +198,12 @@ impl RecomputationSubjectV1 for Subject {
                 })
                 .map(|()| {
                     // The subject ignores whether its host admitted the roster.
-                    let _ = experiment.admit_local_manifest_registration(
-                        pos_core::OwnerIdV1::from_static("recomputation-subject"),
-                        1,
-                    );
+                    experiment
+                        .admit_local_manifest_registration(
+                            pos_core::OwnerIdV1::from_static("recomputation-subject"),
+                            1,
+                        )
+                        .map_or((), drop);
                 }),
             Behaviour::ReplaceHost(ticks) => {
                 *experiment = Experiment::new(ExperimentConfig {
