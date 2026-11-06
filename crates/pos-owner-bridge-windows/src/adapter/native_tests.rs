@@ -6,6 +6,7 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use pos_owner_bridge::ceremony::timing::RELEASE_WINDOW;
 use pos_owner_bridge::listener::{ListenerConfig, LoopbackListener};
 use pos_owner_bridge::{LoopbackPort, ReplyImage};
 use pos_owner_bridge_codec::{CeremonyId, CeremonyKind, ControlState, OwnerBridgeControlV1};
@@ -95,8 +96,9 @@ fn empty_session(native: &mut dyn NativeOperations) {
     assert!(!native.buffer_close_uncertain());
 }
 
-/// Real SDK ownership and mappings, with malformed fixture input that the
-/// packaged page refuses before any authenticator request can begin.
+/// Real SDK ownership and mappings, with deliberately malformed input and
+/// bounded host cleanup without a page acknowledgement. Malformed CBOR is
+/// discarded before EMPTY -> RECEIVED, so it cannot produce FAILED/RELEASING.
 impl crate::Native {
     pub(crate) fn native_window_environment_and_buffers_lifecycle() -> TestResult {
         let _port = Self::fixed_port_fixture();
@@ -162,7 +164,7 @@ impl crate::Native {
         assert!(!events.invalid());
         assert_eq!(listener.served().count, 1);
         assert_eq!(native.source()?.as_str(), crate::OWNER_URL);
-        exercise_buffers(&factory, native.as_mut())?;
+        exercise_unacknowledged_buffers(&factory, native.as_mut())?;
         native.unsubscribe_view()?;
         native.unsubscribe_view()?;
         native.close_controller()?;
@@ -184,7 +186,10 @@ impl crate::Native {
     }
 }
 
-fn exercise_buffers(factory: &dyn StaPump, native: &mut dyn NativeOperations) -> TestResult {
+fn exercise_unacknowledged_buffers(
+    factory: &dyn StaPump,
+    native: &mut dyn NativeOperations,
+) -> TestResult {
     let id = CeremonyId::from_bytes([1; 16]);
     let mut request = [0; 4096];
     request[..64].copy_from_slice(
@@ -209,23 +214,20 @@ fn exercise_buffers(factory: &dyn StaPump, native: &mut dyn NativeOperations) ->
     assert_eq!(&copied.as_bytes()[..64], &reply_header);
     native.post(BufferSlot::Request)?;
     native.post(BufferSlot::Reply)?;
-    let mut observed = Ok(0);
-    pump_until(factory, "page rejection of malformed CBOR", || {
-        observed = native.load_state();
-        observed
-            .as_ref()
-            .is_ok_and(|value| *value == ControlState::Failed as u32)
-    })?;
-    assert_eq!(observed?, ControlState::Failed as u32);
+    // The packaged page releases a malformed pair without accepting it or
+    // invoking WebAuthn. Retire it through the same EMPTY CAS and fixed release
+    // window used when a page never acknowledges; do not invent a page write.
     assert!(native.compare_exchange(
-        ControlState::Failed as u32,
+        ControlState::Empty as u32,
         ControlState::ReleaseRequested as u32
     )?);
-    pump_until(factory, "page release acknowledgement", || {
-        native
-            .load_state()
-            .is_ok_and(|value| value == ControlState::Releasing as u32)
-    })?;
+    let release_deadline = Instant::now() + RELEASE_WINDOW;
+    while Instant::now() < release_deadline {
+        assert_eq!(native.load_state()?, ControlState::ReleaseRequested as u32);
+        if factory.next()? == NativePulse::Quit {
+            return Err("native fixture received quit during unacknowledged release".into());
+        }
+    }
     native.close_buffers()?;
     native.close_buffers()?;
     assert!(native.load_state().is_err());
