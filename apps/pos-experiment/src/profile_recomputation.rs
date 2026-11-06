@@ -628,6 +628,12 @@ const fn profile_unsupported() -> Refusal {
     )
 }
 
+/// The host after `compose`, or the run's typed registration failure.
+enum Composed {
+    Host(Box<Experiment>),
+    Failed(Recomputed),
+}
+
 /// Steps 5 to 7: the execution-step budget, the composition and the run.
 fn recompute(
     member: RecomputationSubjectMemberV1<'_>,
@@ -636,12 +642,51 @@ fn recompute(
     mode: PluginExecutionModeV1,
     store_config: StoreConfig,
 ) -> Result<Recomputed, Halt> {
+    let manifest = preflight.manifest;
     let budgets = preflight.execution_profile.deterministic_budgets;
-    if member.ticks > budgets[EXECUTION_STEPS_BUDGET_SLOT_V1] {
-        return Err(Halt::Refused(resource_limit_exceeded(
+    let event_cap = manifest
+        .resource_limit
+        .min(budgets[EVENT_COUNT_BUDGET_SLOT_V1]);
+    step_budget(
+        member.ticks,
+        budgets[EXECUTION_STEPS_BUDGET_SLOT_V1],
+        admitted,
+    )
+    .and_then(|()| compose(member, preflight, mode, store_config))
+    .and_then(|composed| match composed {
+        Composed::Host(experiment) => run(
+            (*experiment).with_resource_limit(manifest.resource_limit),
+            member.ticks,
+            event_cap,
+            admitted,
+        ),
+        Composed::Failed(failed) => Ok(failed),
+    })
+}
+
+/// The frozen Ticks must not exceed the EPF1 execution-step budget.
+fn step_budget(
+    ticks: u64,
+    budget: u64,
+    admitted: VerificationPreflightResultV1,
+) -> Result<(), Halt> {
+    if ticks > budget {
+        Err(Halt::Refused(resource_limit_exceeded(
             admitted.replay_claim,
-        )));
+        )))
+    } else {
+        Ok(())
     }
+}
+
+/// Compose the subject on a fresh host in `mode`. The host's own stop
+/// condition is the frozen Ticks, whatever host the subject left.
+fn compose(
+    member: RecomputationSubjectMemberV1<'_>,
+    preflight: &VerificationPreflightInputV1<'_>,
+    mode: PluginExecutionModeV1,
+    store_config: StoreConfig,
+) -> Result<Composed, Halt> {
     let config = ExperimentConfig {
         name: EXPERIMENT_NAME.to_owned(),
         stop: StopCondition::MaxTicks(member.ticks),
@@ -659,28 +704,19 @@ fn recompute(
         Err(RecomputationComposeErrorV1::ProfileUnsupported) => {
             Err(Halt::Refused(profile_unsupported()))
         }
-        Err(RecomputationComposeErrorV1::Registration(error)) => Ok(Recomputed {
+        Err(RecomputationComposeErrorV1::Registration(error)) => Ok(Composed::Failed(Recomputed {
             timeline: TimelineId::new(),
             events: Vec::new(),
             failure: Some(HostFailureV1::from(&ExperimentError::Runtime(error))),
-        }),
+        })),
         Ok(())
             if experiment.execution_mode() != mode || experiment.refused_mode_gated_operation() =>
         {
             Err(Halt::Refused(profile_unsupported()))
         }
         Ok(()) => {
-            // The host's own stop condition, whatever host the subject left.
             experiment.config.stop = StopCondition::MaxTicks(member.ticks);
-            run(
-                experiment.with_resource_limit(preflight.manifest.resource_limit),
-                member.ticks,
-                preflight
-                    .manifest
-                    .resource_limit
-                    .min(budgets[EVENT_COUNT_BUDGET_SLOT_V1]),
-                admitted,
-            )
+            Ok(Composed::Host(Box::new(experiment)))
         }
     }
 }

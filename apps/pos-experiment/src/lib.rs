@@ -1562,9 +1562,8 @@ impl Experiment {
             .admit_local_manifest_registration(owner_id, configuration_generation);
         // The host's registry is always live, so a registry-state refusal is
         // the Execution Mode refusing the admission.
-        if admitted.as_ref().err() == Some(&ManifestRegistrationErrorV1::RegistryState) {
-            self.refused_mode_gated_operation = true;
-        }
+        self.refused_mode_gated_operation |=
+            admitted.as_ref().err() == Some(&ManifestRegistrationErrorV1::RegistryState);
         admitted
     }
 
