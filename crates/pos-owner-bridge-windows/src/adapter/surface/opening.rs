@@ -2,17 +2,27 @@
 #![forbid(unsafe_code)]
 
 use super::super::settings;
-use super::{lost, unavailable, Ownership, Result, Surface, HEIGHT, WIDTH};
-use crate::{EventSink, NativePulse};
+use super::{unavailable, Ownership, Result, Surface, HEIGHT, WIDTH};
+use crate::EventSink;
 use pos_owner_bridge::{
     folder_name, BridgeError, LifecycleCode, ProcessIdentity, SurfaceError, SurfaceSpec,
     UnavailableCode,
 };
+use std::task::Poll;
 use std::time::Duration;
 
 impl Surface {
-    pub(super) fn open_native(&mut self, spec: &SurfaceSpec) -> Result<ProcessIdentity> {
+    pub(super) fn open_native(&mut self, spec: &SurfaceSpec) -> Result<Poll<ProcessIdentity>> {
         self.before_deadline()?;
+        match self.ownership {
+            Ownership::Idle => self.start_opening(spec),
+            Ownership::CreatingEnvironment => self.poll_environment(),
+            Ownership::CreatingController => self.poll_controller(),
+            _ => Err(unavailable(())),
+        }
+    }
+
+    fn start_opening(&mut self, spec: &SurfaceSpec) -> Result<Poll<ProcessIdentity>> {
         if spec.folder_name != folder_name(&spec.ceremony_id) {
             return Err(unavailable(()));
         }
@@ -29,19 +39,34 @@ impl Surface {
         self.native
             .create_environment(self.runtime.root(), &path, settings::OPTIONS, sink)
             .map_err(unavailable)?;
-        self.await_environment()?;
+        Ok(Poll::Pending)
+    }
+
+    fn poll_environment(&mut self) -> Result<Poll<ProcessIdentity>> {
+        let Some(completion) = self.native.environment_completion() else {
+            return Ok(Poll::Pending);
+        };
         self.ownership = Ownership::Environment;
-        self.admit_environment(&path)?;
+        completion.map_err(unavailable)?;
+        let folder = self.folder.as_ref().ok_or_else(|| unavailable(()))?;
+        self.admit_environment(&self.root.join(folder))?;
         self.ownership = Ownership::CreatingController;
         self.native.create_controller().map_err(unavailable)?;
-        self.await_controller()?;
+        Ok(Poll::Pending)
+    }
+
+    fn poll_controller(&mut self) -> Result<Poll<ProcessIdentity>> {
+        let Some(completion) = self.native.controller_completion() else {
+            return Ok(Poll::Pending);
+        };
+        completion.map_err(unavailable)?;
         self.ownership = Ownership::Controller;
         let identity = self.observe_controller()?;
         // The portable driver records this complete identity before navigate
         // reports a later activation failure. No navigation or buffer can occur
         // when the required settings, capabilities or foreground did not pass.
         self.activation_error = self.prepare_controller().err();
-        Ok(identity)
+        Ok(Poll::Ready(identity))
     }
 
     fn admit_environment(&self, folder: &std::path::Path) -> Result<()> {
@@ -78,43 +103,43 @@ impl Surface {
         settings::apply(self.native.as_ref())?;
         self.native.fit_controller().map_err(unavailable)?;
         self.native.show_window().map_err(unavailable)?;
+        self.foreground_deadline =
+            Some((self.clock.now() + Duration::from_secs(1)).min(self.deadline));
         self.native.focus_controller().map_err(unavailable)?;
-        let focus_deadline = (self.clock.now() + Duration::from_secs(1)).min(self.deadline);
-        while !self.native.window().map_err(unavailable)?.foreground {
-            if self.clock.now() >= focus_deadline {
+        Ok(())
+    }
+
+    pub(super) fn navigate_native(&mut self) -> Result<Poll<pos_owner_bridge::NavigationId>> {
+        if let Some(error) = self.activation_error {
+            return Err(error);
+        }
+        self.refresh()?;
+        self.before_deadline()?;
+        if self.events.invalid() {
+            return Err(super::navigation_lost());
+        }
+        if !self.navigation_issued {
+            let deadline = self.foreground_deadline.ok_or_else(|| unavailable(()))?;
+            if !self.native.window().map_err(unavailable)?.foreground {
+                if self.clock.now() < deadline {
+                    return Ok(Poll::Pending);
+                }
                 return Err(SurfaceError::new(BridgeError::Lifecycle(
                     LifecycleCode::ForegroundUnavailable,
                 )));
             }
-            self.pulse()?;
+            self.events.begin();
+            self.native.navigate_owner().map_err(unavailable)?;
+            self.navigation_issued = true;
         }
-        Ok(())
-    }
-
-    fn await_environment(&mut self) -> Result<()> {
-        loop {
-            if let Some(result) = self.native.environment_completion() {
-                return result.map_err(unavailable);
-            }
-            self.pulse()?;
+        if self.events.invalid() {
+            return Err(super::navigation_lost());
         }
-    }
-
-    fn await_controller(&mut self) -> Result<()> {
-        loop {
-            if let Some(result) = self.native.controller_completion() {
-                return result.map_err(unavailable);
-            }
-            self.pulse()?;
+        if let Some(navigation) = self.events.started() {
+            Ok(Poll::Ready(navigation))
+        } else {
+            Ok(Poll::Pending)
         }
-    }
-
-    pub(super) fn pulse(&self) -> Result<()> {
-        self.before_deadline()?;
-        if self.factory.next().map_err(unavailable)? == NativePulse::Quit {
-            return Err(lost());
-        }
-        self.refresh()
     }
 
     pub(super) fn before_deadline(&self) -> Result<()> {

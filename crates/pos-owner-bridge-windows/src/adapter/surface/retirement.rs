@@ -5,6 +5,12 @@ use super::{unavailable, Ownership, Result, Surface};
 use pos_owner_bridge::OwnerWebSurface;
 
 impl Surface {
+    pub(in crate::adapter) fn abandon_opening(&mut self) {
+        if self.identity.is_none() && !self.idle() {
+            self.failed_open = true;
+        }
+    }
+
     pub(in crate::adapter) fn poll_failed_open(&mut self) -> Result<bool> {
         if !self.failed_open {
             return Ok(self.idle());
@@ -86,6 +92,7 @@ impl Surface {
         }
         self.identity = None;
         self.failed_open = false;
+        self.opening_spec = None;
         self.ownership = Ownership::Idle;
         Ok(())
     }

@@ -29,6 +29,8 @@ pub(super) struct Factory {
     pub(super) creation: Cell<Creation>,
     pub(super) calls: RefCell<Vec<&'static str>>,
     pub(super) sink: RefCell<Option<Rc<dyn EventSink>>>,
+    pub(super) foreground: Cell<bool>,
+    pub(super) navigation_succeeds: Cell<bool>,
     clock: FakeClock,
 }
 
@@ -38,6 +40,8 @@ impl Factory {
             creation: Cell::new(creation),
             calls: RefCell::new(Vec::new()),
             sink: RefCell::new(None),
+            foreground: Cell::new(true),
+            navigation_succeeds: Cell::new(false),
             clock,
         })
     }
@@ -45,7 +49,9 @@ impl Factory {
 
 impl StaPump for Rc<Factory> {
     fn next(&self) -> NativeResult<NativePulse> {
-        if self.creation.get() == Creation::Pending {
+        if self.creation.get() == Creation::Pending
+            && self.calls.borrow().contains(&"create_controller")
+        {
             self.clock.advance(Duration::from_secs(31));
         }
         Ok(NativePulse::Timer)
@@ -97,7 +103,7 @@ impl NativeOperations for Session {
                 right: 480,
                 bottom: 640,
             },
-            foreground: true,
+            foreground: self.factory.foreground.get(),
         })
     }
     fn resize_window(&self, _: u32, _: u32, _: u32) -> NativeResult<()> {
@@ -185,7 +191,11 @@ impl NativeOperations for Session {
     }
     fn navigate_owner(&self) -> NativeResult<()> {
         self.call("navigate");
-        Err(failed())
+        if self.factory.navigation_succeeds.get() {
+            Ok(())
+        } else {
+            Err(failed())
+        }
     }
     fn source(&self) -> NativeResult<NativeText> {
         Err(failed())

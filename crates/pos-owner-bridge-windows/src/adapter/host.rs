@@ -239,6 +239,7 @@ impl Worker {
             Step::Done => Err(BridgeError::Quarantine(QuarantineCode::CleanupTimeout)),
         };
         if let Some(driver) = self.active.take() {
+            self.surface.abandon_opening();
             let reply = self.keeper.finish(driver, result);
             self.quarantined |= reply.driver.is_none();
             let _delivered = self.endpoint.reply_run(reply);

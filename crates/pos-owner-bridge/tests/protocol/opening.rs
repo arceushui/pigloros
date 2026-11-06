@@ -1,7 +1,7 @@
 //! Opening and durable writes count inside the existing readiness/budget window.
 
 use super::{create_plan, honest, new_driver, DriverRig, TestResult};
-use pos_owner_bridge::ceremony::driver::StepEnv;
+use pos_owner_bridge::ceremony::driver::{Step, StepEnv};
 use pos_owner_bridge::ceremony::plan::Budget;
 use pos_owner_bridge::ceremony::timing::READINESS;
 use pos_owner_bridge::fake::clock::FakeClock;
@@ -13,22 +13,41 @@ use pos_owner_bridge::{
     OwnerWebSurface, PostGuard, ProcessIdentity, ReplyImage, RequestImage, SurfaceError,
     SurfaceEvent, SurfaceSpec, UnavailableCode,
 };
+use std::task::Poll;
 use std::time::Duration;
 
 struct DelayedOpening<'a> {
     inner: &'a mut dyn OwnerWebSurface,
     clock: FakeClock,
     delay: Duration,
+    open_pending: u32,
+    navigation_pending: u32,
+    navigation: Poll<Result<NavigationId, SurfaceError>>,
 }
 
 impl OwnerWebSurface for DelayedOpening<'_> {
-    fn open(&mut self, spec: &SurfaceSpec) -> Result<ProcessIdentity, SurfaceError> {
+    fn open(
+        &mut self,
+        spec: &SurfaceSpec,
+    ) -> std::task::Poll<Result<ProcessIdentity, SurfaceError>> {
+        if self.open_pending > 0 {
+            self.open_pending -= 1;
+            return Poll::Pending;
+        }
         let result = self.inner.open(spec);
         self.clock.advance(self.delay);
         result
     }
-    fn navigate(&mut self) -> Result<NavigationId, SurfaceError> {
-        self.inner.navigate()
+    fn navigate(&mut self) -> std::task::Poll<Result<NavigationId, SurfaceError>> {
+        if self.navigation.is_pending() {
+            self.navigation = self.inner.navigate();
+        }
+        if self.navigation_pending > 0 {
+            self.navigation_pending -= 1;
+            Poll::Pending
+        } else {
+            self.navigation
+        }
     }
     fn create_and_write(
         &mut self,
@@ -90,6 +109,133 @@ impl CleanupStore for DelayedStore {
 }
 
 #[test]
+fn pending_open_and_navigation_return_control_and_preserve_early_load() -> TestResult {
+    let mut rig = DriverRig::new(
+        honest(0),
+        SurfaceConfig {
+            load_delay: Duration::ZERO,
+            ..SurfaceConfig::default()
+        },
+    )?;
+    let mut driver = new_driver(create_plan(&rig.clock));
+    let mut store = rig.store.clone();
+    let mut loopback = rig.loopback.clone();
+    let mut surface = DelayedOpening {
+        inner: &mut rig.surface,
+        clock: rig.clock.clone(),
+        delay: Duration::ZERO,
+        open_pending: 2,
+        navigation_pending: 2,
+        navigation: Poll::Pending,
+    };
+    let mut env = StepEnv {
+        surface: &mut surface,
+        clock: &rig.clock,
+        loopback: &mut loopback,
+        store: &mut store,
+    };
+    let started = rig.clock.now();
+    for _ in 0..2 {
+        assert!(matches!(driver.step(&mut env), Step::Pending));
+        assert!(rig.store.records_now().is_empty());
+        assert_eq!(rig.handle.pair_count(), 0);
+        assert_eq!(rig.clock.now(), started);
+    }
+    // Opening finishes once; navigation has started but its ID is still withheld.
+    assert!(matches!(driver.step(&mut env), Step::Pending));
+    let record = rig.store.records_now();
+    assert_eq!(record.len(), 1);
+    assert_eq!(rig.loopback.resets(), 1);
+    // DOMContentLoaded is already queued before navigate returns Ready.
+    assert!(matches!(driver.step(&mut env), Step::Pending));
+    assert!(matches!(driver.step(&mut env), Step::Pending));
+    assert_eq!(rig.store.records_now(), record);
+    assert_eq!(rig.loopback.resets(), 1);
+    assert_eq!(rig.handle.pair_count(), 0);
+    let result = FakeStepper::new(rig.clock.clone()).run(&mut driver, &mut env);
+    assert!(result.is_ok());
+    assert!(rig.store.records_now().is_empty());
+    assert_eq!(rig.handle.finished(), 1);
+    Ok(())
+}
+
+#[test]
+fn pending_stages_do_not_restart_the_readiness_deadline() -> TestResult {
+    for opening in [true, false] {
+        let mut rig = DriverRig::new(honest(0), SurfaceConfig::default())?;
+        let mut driver = new_driver(create_plan(&rig.clock));
+        let mut store = rig.store.clone();
+        let mut loopback = rig.loopback.clone();
+        let mut surface = DelayedOpening {
+            inner: &mut rig.surface,
+            clock: rig.clock.clone(),
+            delay: Duration::ZERO,
+            open_pending: if opening { u32::MAX } else { 0 },
+            navigation_pending: if opening { 0 } else { u32::MAX },
+            navigation: Poll::Pending,
+        };
+        let mut env = StepEnv {
+            surface: &mut surface,
+            clock: &rig.clock,
+            loopback: &mut loopback,
+            store: &mut store,
+        };
+        assert!(matches!(driver.step(&mut env), Step::Pending));
+        rig.clock.advance(READINESS);
+        let result = FakeStepper::new(rig.clock.clone()).run(&mut driver, &mut env);
+        assert!(matches!(
+            result,
+            Err(BridgeError::Lifecycle(LifecycleCode::ReadinessTimeout))
+        ));
+        assert_eq!(rig.handle.pair_count(), 0);
+        assert!(rig.store.records_now().is_empty());
+        assert!(driver.request_clear());
+    }
+    Ok(())
+}
+
+#[test]
+fn duplicate_document_completion_while_navigation_is_pending_prevents_posting() -> TestResult {
+    let mut rig = DriverRig::new(
+        honest(0),
+        SurfaceConfig {
+            load_delay: Duration::ZERO,
+            ..SurfaceConfig::default()
+        },
+    )?;
+    let mut driver = new_driver(create_plan(&rig.clock));
+    let mut store = rig.store.clone();
+    let mut loopback = rig.loopback.clone();
+    let mut surface = DelayedOpening {
+        inner: &mut rig.surface,
+        clock: rig.clock.clone(),
+        delay: Duration::ZERO,
+        open_pending: 0,
+        navigation_pending: 2,
+        navigation: Poll::Pending,
+    };
+    let mut env = StepEnv {
+        surface: &mut surface,
+        clock: &rig.clock,
+        loopback: &mut loopback,
+        store: &mut store,
+    };
+    assert!(matches!(driver.step(&mut env), Step::Pending));
+    rig.handle.schedule(
+        Duration::ZERO,
+        SurfaceEvent::DomContentLoaded(NavigationId(1)),
+    );
+    let result = FakeStepper::new(rig.clock.clone()).run(&mut driver, &mut env);
+    assert!(matches!(
+        result,
+        Err(BridgeError::Lifecycle(LifecycleCode::NavigationViolation))
+    ));
+    assert_eq!(rig.handle.pair_count(), 0);
+    assert!(rig.store.records_now().is_empty());
+    Ok(())
+}
+
+#[test]
 fn opening_and_durable_write_time_expire_before_navigation_or_buffer_creation() -> TestResult {
     for budget in [None, Some(Duration::from_secs(5))] {
         for (opening, failure) in [(true, false), (true, true), (false, false)] {
@@ -115,6 +261,9 @@ fn opening_and_durable_write_time_expire_before_navigation_or_buffer_creation() 
                 inner: &mut rig.surface,
                 clock: rig.clock.clone(),
                 delay: if opening { delay } else { Duration::ZERO },
+                open_pending: 0,
+                navigation_pending: 0,
+                navigation: Poll::Pending,
             };
             let mut store = DelayedStore {
                 inner: rig.store.clone(),

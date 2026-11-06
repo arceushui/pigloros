@@ -18,6 +18,7 @@
 //! ends at E4 verification, so it is not checked while the driver releases and waits for exit,
 //! and `next_wake` ignores it from then on.
 
+use std::task::Poll;
 use std::time::Instant;
 
 use pos_owner_bridge_codec::{
@@ -106,6 +107,7 @@ pub enum Step {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Phase {
     Opening,
+    Navigating,
     AwaitingLoad { navigation: NavigationId },
     Posted { navigation: NavigationId },
     Releasing { since: Instant, state_live: bool },
@@ -217,7 +219,7 @@ impl CeremonyDriver {
         &self.slots.prf
     }
 
-    /// Advance the ceremony. Never blocks beyond the surface calls it makes.
+    /// Advance the ceremony without waiting for a surface completion.
     ///
     /// A host calls this from its timer and from each surface event until it returns
     /// `Finished`; after that it returns `Done`, which a host that loops must also stop on. A
@@ -232,6 +234,7 @@ impl CeremonyDriver {
         }
         match self.phase {
             Phase::Opening => self.open(env, now),
+            Phase::Navigating => self.navigate(env, now),
             Phase::AwaitingLoad { navigation } => self.await_load(env, now, navigation),
             Phase::Posted { navigation } => self.posted(env, now, navigation),
             Phase::Releasing { since, state_live } => self.releasing(env, now, since, state_live),
@@ -260,7 +263,7 @@ impl CeremonyDriver {
     #[must_use]
     pub fn next_wake(&self) -> Option<Instant> {
         let phase = match self.phase {
-            Phase::Opening | Phase::AwaitingLoad { .. } => self.load_wake(),
+            Phase::Opening | Phase::Navigating | Phase::AwaitingLoad { .. } => self.load_wake(),
             Phase::Posted { .. } => self.posted_wake(),
             Phase::Releasing { since, .. } => Some(since + RELEASE_WINDOW),
             Phase::AwaitingExit { since } => Some(since + EXIT_WINDOW),
@@ -304,7 +307,7 @@ impl CeremonyDriver {
     const fn pre_release(&self) -> bool {
         matches!(
             self.phase,
-            Phase::Opening | Phase::AwaitingLoad { .. } | Phase::Posted { .. }
+            Phase::Opening | Phase::Navigating | Phase::AwaitingLoad { .. } | Phase::Posted { .. }
         )
     }
 
@@ -352,7 +355,9 @@ impl CeremonyDriver {
     }
 
     const fn apply_loaded(&mut self, id: NavigationId) -> Option<BridgeError> {
-        if matches!(self.phase, Phase::AwaitingLoad { .. }) && self.loaded.is_none() {
+        if matches!(self.phase, Phase::Navigating | Phase::AwaitingLoad { .. })
+            && self.loaded.is_none()
+        {
             self.loaded = Some(id);
             None
         } else {
@@ -414,8 +419,9 @@ impl CeremonyDriver {
             owner_window: self.plan.owner_window,
         };
         let identity = match env.surface.open(&spec) {
-            Ok(identity) => identity,
-            Err(error) => {
+            Poll::Pending => return Step::Pending,
+            Poll::Ready(Ok(identity)) => identity,
+            Poll::Ready(Err(error)) => {
                 let now = env.clock.now();
                 let error = self.pre_post_failure(now).unwrap_or_else(|| error.error());
                 return self.fail(env, now, error);
@@ -427,20 +433,28 @@ impl CeremonyDriver {
         if let Err(error) = env.loopback.probe_ipv6() {
             return self.fail(env, now, error);
         }
-        // Native opening pumps async COM work; durable storage and the socket
-        // probe can also consume time. Re-read the clock before navigation,
+        // Durable storage and the socket probe can consume time. Re-read the clock before navigation,
         // after recording the observed browser so cleanup still owns its exit.
         let now = env.clock.now();
         if let Some(error) = self.pre_post_failure(now) {
             return self.fail(env, now, error);
         }
         env.loopback.begin_navigation();
+        self.phase = Phase::Navigating;
+        self.navigate(env, now)
+    }
+
+    fn navigate(&mut self, env: &mut StepEnv<'_>, now: Instant) -> Step {
+        if let Some(error) = self.pre_post_failure(now) {
+            return self.fail(env, now, error);
+        }
         match env.surface.navigate() {
-            Ok(navigation) => {
+            Poll::Pending => Step::Pending,
+            Poll::Ready(Ok(navigation)) => {
                 self.phase = Phase::AwaitingLoad { navigation };
                 Step::Pending
             }
-            Err(error) => self.fail(env, now, error.error()),
+            Poll::Ready(Err(error)) => self.fail(env, now, error.error()),
         }
     }
 

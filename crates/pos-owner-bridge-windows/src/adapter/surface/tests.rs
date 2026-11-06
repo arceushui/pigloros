@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::task::Poll;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use pos_owner_bridge::fake::clock::FakeClock;
@@ -70,6 +71,19 @@ impl Fixture {
         }
     }
 
+    fn open(
+        &mut self,
+        spec: &SurfaceSpec,
+    ) -> Result<ProcessIdentity, pos_owner_bridge::SurfaceError> {
+        loop {
+            if let Poll::Ready(result) = self.surface.open(spec) {
+                return result;
+            }
+            // Only the host/test harness pumps; a surface poll must return first.
+            self.surface.pump().map_err(super::unavailable)?;
+        }
+    }
+
     fn assert_no_ceremony_data(&self) {
         assert!(self.store.records_now().is_empty());
         for forbidden in ["navigate", "create_buffers", "post"] {
@@ -109,11 +123,100 @@ fn spec(value: u8) -> SurfaceSpec {
 }
 
 #[test]
+fn native_creation_and_navigation_polls_return_before_host_dispatch() -> TestResult {
+    let mut fixture = Fixture::new(Creation::Ready)?;
+    fixture.factory.foreground.set(false);
+    fixture.factory.navigation_succeeds.set(true);
+    let selected = spec(6);
+    let started = fixture.clock.now();
+    for _ in 0..2 {
+        assert!(fixture.surface.open(&selected).is_pending());
+        assert_eq!(fixture.clock.now(), started);
+    }
+    assert!(
+        matches!(fixture.surface.open(&selected), Poll::Ready(Ok(identity)) if identity.browser_pid == 42)
+    );
+    assert!(fixture.surface.navigate().is_pending());
+    assert!(!fixture.factory.calls.borrow().contains(&"navigate"));
+    fixture.factory.foreground.set(true);
+    for _ in 0..3 {
+        assert!(fixture.surface.navigate().is_pending());
+    }
+    assert_eq!(
+        fixture
+            .factory
+            .calls
+            .borrow()
+            .iter()
+            .filter(|call| **call == "navigate")
+            .count(),
+        1
+    );
+    let sink = fixture
+        .factory
+        .sink
+        .borrow()
+        .clone()
+        .ok_or("missing event sink")?;
+    assert_eq!(
+        sink.event(NativeEvent::Navigation {
+            uri: crate::NativeText::fixture(crate::OWNER_URL),
+            id: 7,
+            redirected: false,
+        }),
+        crate::NativeAction::Allow
+    );
+    assert!(matches!(
+        fixture.surface.navigate(),
+        Poll::Ready(Ok(pos_owner_bridge::NavigationId(7)))
+    ));
+    assert_eq!(fixture.clock.now(), started);
+    fixture
+        .surface
+        .close_controller()
+        .map_err(pos_owner_bridge::SurfaceError::error)?;
+    fixture.exit();
+    fixture
+        .surface
+        .finish()
+        .map_err(pos_owner_bridge::SurfaceError::error)?;
+    assert!(fixture.surface.idle());
+    Ok(())
+}
+
+#[test]
+fn abandoned_pending_open_keeps_the_original_completion_owned() -> TestResult {
+    let mut fixture = Fixture::new(Creation::Pending)?;
+    let selected = spec(7);
+    assert!(fixture.surface.open(&selected).is_pending());
+    assert!(fixture.surface.open(&selected).is_pending());
+    assert!(matches!(
+        fixture.surface.open(&spec(8)),
+        Poll::Ready(Err(_))
+    ));
+    assert!(fixture.surface.open(&selected).is_pending());
+    fixture.surface.abandon_opening();
+    assert!(!fixture
+        .surface
+        .poll_failed_open()
+        .map_err(pos_owner_bridge::SurfaceError::error)?);
+    assert!(!fixture.surface.idle());
+    fixture.factory.creation.set(Creation::CallbackFailure);
+    assert!(fixture
+        .surface
+        .poll_failed_open()
+        .map_err(pos_owner_bridge::SurfaceError::error)?);
+    assert!(fixture.surface.idle());
+    fixture.assert_no_ceremony_data();
+    Ok(())
+}
+
+#[test]
 fn failed_controller_without_exit_preserves_orphan_and_allows_fresh_ceremony() -> TestResult {
     for creation in [Creation::SynchronousFailure, Creation::CallbackFailure] {
         let mut fixture = Fixture::new(creation)?;
         let failed = spec(1);
-        assert!(fixture.surface.open(&failed).is_err());
+        assert!(fixture.open(&failed).is_err());
         assert!(fixture
             .surface
             .poll_failed_open()
@@ -136,7 +239,6 @@ fn failed_controller_without_exit_preserves_orphan_and_allows_fresh_ceremony() -
         let fresh = spec(2);
         assert_eq!(
             fixture
-                .surface
                 .open(&fresh)
                 .map_err(pos_owner_bridge::SurfaceError::error)?
                 .browser_pid,
@@ -165,7 +267,7 @@ fn failed_controller_without_exit_preserves_orphan_and_allows_fresh_ceremony() -
 fn controller_without_view_waits_for_its_environment_exit() -> TestResult {
     let mut fixture = Fixture::new(Creation::MissingView)?;
     let failed = spec(3);
-    assert!(fixture.surface.open(&failed).is_err());
+    assert!(fixture.open(&failed).is_err());
     assert!(!fixture
         .surface
         .poll_failed_open()
@@ -189,7 +291,7 @@ fn controller_without_view_waits_for_its_environment_exit() -> TestResult {
 fn timed_out_controller_keeps_native_owners_until_the_late_callback() -> TestResult {
     let mut fixture = Fixture::new(Creation::Pending)?;
     let failed = spec(4);
-    assert!(fixture.surface.open(&failed).is_err());
+    assert!(fixture.open(&failed).is_err());
     assert!(!fixture
         .surface
         .poll_failed_open()
@@ -212,7 +314,7 @@ fn timed_out_controller_keeps_native_owners_until_the_late_callback() -> TestRes
     fixture
         .surface
         .set_deadline(fixture.clock.now() + Duration::from_secs(30));
-    assert!(fixture.surface.open(&spec(5)).is_ok());
+    assert!(fixture.open(&spec(5)).is_ok());
     fixture
         .surface
         .close_controller()

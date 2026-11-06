@@ -5,6 +5,7 @@ use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
+use std::task::Poll;
 use std::time::Instant;
 
 use pos_owner_bridge::{
@@ -73,6 +74,9 @@ pub(super) struct Surface {
     buffers: bool,
     activation_error: Option<SurfaceError>,
     failed_open: bool,
+    opening_spec: Option<SurfaceSpec>,
+    foreground_deadline: Option<Instant>,
+    navigation_issued: bool,
     dpi: Cell<Option<u32>>,
     client: Cell<Option<ClientBounds>>,
 }
@@ -105,6 +109,9 @@ impl Surface {
             buffers: false,
             activation_error: None,
             failed_open: false,
+            opening_spec: None,
+            foreground_deadline: None,
+            navigation_issued: false,
             dpi: Cell::new(None),
             client: Cell::new(None),
         })
@@ -180,40 +187,43 @@ impl Surface {
 }
 
 impl OwnerWebSurface for Surface {
-    fn open(&mut self, spec: &SurfaceSpec) -> Result<ProcessIdentity> {
-        if !self.idle() {
-            return Err(unavailable(()));
+    fn open(&mut self, spec: &SurfaceSpec) -> Poll<Result<ProcessIdentity>> {
+        if let Some(opening) = &self.opening_spec {
+            if opening != spec || self.failed_open {
+                return Poll::Ready(Err(unavailable(())));
+            }
+        } else {
+            if !self.idle() {
+                return Poll::Ready(Err(unavailable(())));
+            }
+            self.native = match self.factory.session() {
+                Ok(native) => native,
+                Err(error) => return Poll::Ready(Err(unavailable(error))),
+            };
+            self.events = Rc::new(Events::default());
+            self.activation_error = None;
+            self.generation = None;
+            self.foreground_deadline = None;
+            self.navigation_issued = false;
+            self.dpi.set(None);
+            self.client.set(None);
+            self.opening_spec = Some(spec.clone());
         }
-        self.native = self.factory.session().map_err(unavailable)?;
-        self.events = Rc::new(Events::default());
-        self.activation_error = None;
-        self.generation = None;
-        self.dpi.set(None);
-        self.client.set(None);
         let result = self.open_native(spec);
         self.failed_open = result.is_err() && !self.idle();
-        result
+        if result.is_err() && self.idle() {
+            self.opening_spec = None;
+        }
+        match result {
+            Ok(poll) => poll.map(Ok),
+            Err(error) => Poll::Ready(Err(error)),
+        }
     }
 
-    fn navigate(&mut self) -> Result<NavigationId> {
-        if let Some(error) = self.activation_error {
-            return Err(error);
-        }
-        self.refresh()?;
-        if self.events.invalid() {
-            return Err(navigation_lost());
-        }
-        self.before_deadline()?;
-        self.events.begin();
-        self.native.navigate_owner().map_err(unavailable)?;
-        loop {
-            if self.events.invalid() {
-                return Err(navigation_lost());
-            }
-            if let Some(navigation) = self.events.started() {
-                return Ok(navigation);
-            }
-            self.pulse()?;
+    fn navigate(&mut self) -> Poll<Result<NavigationId>> {
+        match self.navigate_native() {
+            Ok(poll) => poll.map(Ok),
+            Err(error) => Poll::Ready(Err(error)),
         }
     }
 
@@ -306,6 +316,7 @@ impl OwnerWebSurface for Surface {
         self.finish_folder()?;
         self.identity = None;
         self.failed_open = false;
+        self.opening_spec = None;
         self.ownership = Ownership::Idle;
         Ok(())
     }
