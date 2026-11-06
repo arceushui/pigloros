@@ -53,6 +53,9 @@ pub enum ConformanceGovernanceErrorV1 {
     /// A stored retention bound is not the recomputed one.
     #[error("retention bound does not recompute")]
     RetentionBoundMismatch,
+    /// Two of a promotion's four report digests are equal.
+    #[error("promotion report digests are not distinct")]
+    DuplicateReportDigest,
     /// A promotion is not a single forward step to Candidate or Stable.
     #[error("promotion lifecycle transition is invalid")]
     InvalidLifecycleTransition,

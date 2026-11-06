@@ -15,12 +15,12 @@ use pos_conformance::{
     ConformanceAffectedReportV1, ConformanceArtifactKindV1, ConformanceConflictKindV1,
     ConformanceConflictResolutionV1, ConformanceConflictV1, ConformanceCorrectionReasonV1,
     ConformanceCorrectionV1, ConformanceGovernanceErrorV1 as Error, ConformanceImpactAnalysisV1,
-    ConformanceImpactEffectV1, ConformanceProfileV1, ConformancePromotionV1, ConformanceReportV1,
-    ConformanceRetentionV1, ConformanceWaiverEffectV1, ConformanceWaiverReasonV1,
-    ConformanceWaiverV1, ConformanceWithdrawalReasonV1, ConformanceWithdrawalSourceKindV1,
-    ConformanceWithdrawalSourceV1, ConformanceWithdrawalV1, EvaluatorHardCapsV1,
-    EvaluatorProtocolV1, ExecutionModeV1, FixtureDescriptorV1, FixtureFamilyV1,
-    FixtureProvenanceV1, FixtureProviderKeyV1, FixtureProviderRegistryBindingV1,
+    ConformanceImpactEffectV1, ConformanceProfileV1, ConformancePromotionReportsV1,
+    ConformancePromotionV1, ConformanceReportV1, ConformanceRetentionV1, ConformanceWaiverEffectV1,
+    ConformanceWaiverReasonV1, ConformanceWaiverV1, ConformanceWithdrawalReasonV1,
+    ConformanceWithdrawalSourceKindV1, ConformanceWithdrawalSourceV1, ConformanceWithdrawalV1,
+    EvaluatorHardCapsV1, EvaluatorProtocolV1, ExecutionModeV1, FixtureDescriptorV1,
+    FixtureFamilyV1, FixtureProvenanceV1, FixtureProviderKeyV1, FixtureProviderRegistryBindingV1,
     ImplementationIdentityV1, IndependenceEvidenceV1, IndependenceRequirementsV1,
     OperationalSafetyV1, ProfileLifecycleV1, RedactionStateV1, ReplayClaimV1, StrictOracleKindV1,
     StrictOracleV1, SubjectAdapterKindV1, VerificationOutcomeV1, DETERMINISTIC_BUDGET_HARD_CAPS_V1,
@@ -241,8 +241,14 @@ fn promotions() -> Vec<ConformancePromotionV1> {
         profile_digest: [0x21; 32],
         from_lifecycle: ProfileLifecycleV1::Candidate,
         to_lifecycle: ProfileLifecycleV1::Stable,
-        first_report_digest: [0x81; 32],
-        second_report_digest: [0x82; 32],
+        first_reports: ConformancePromotionReportsV1 {
+            local_report_digest: [0x81; 32],
+            air_gapped_report_digest: [0x8c; 32],
+        },
+        second_reports: ConformancePromotionReportsV1 {
+            local_report_digest: [0x82; 32],
+            air_gapped_report_digest: [0x8b; 32],
+        },
         first_implementation: identity("impl-a", 0x83, Some("org-a")),
         second_implementation: identity("impl-b", 0x86, None),
         shared_code_audit_digest: [0x89; 32],
@@ -1575,19 +1581,55 @@ fn cpr1_shape_rules() -> TestResult {
                 Error::FieldOutOfBounds,
             ),
             ("zero epoch", |p| p.epoch = 0, Error::FieldOutOfBounds),
-            (
-                "equal report digests",
-                |p| p.second_report_digest = p.first_report_digest,
-                Error::NonCanonicalOrder,
-            ),
-            (
-                "reversed report digests",
-                |p| {
-                    std::mem::swap(&mut p.first_report_digest, &mut p.second_report_digest);
-                },
-                Error::NonCanonicalOrder,
-            ),
         ],
     );
     Ok(())
+}
+
+#[test]
+fn cpr1_report_pairs_are_ordered_by_local_report_and_distinct() {
+    refuses(
+        &promotions().remove(0),
+        &[
+            (
+                "equal Local report digests",
+                |p| p.second_reports.local_report_digest = p.first_reports.local_report_digest,
+                Error::NonCanonicalOrder,
+            ),
+            (
+                "implementations not ordered by Local report digest",
+                |p| {
+                    std::mem::swap(&mut p.first_reports, &mut p.second_reports);
+                    std::mem::swap(&mut p.first_implementation, &mut p.second_implementation);
+                },
+                Error::NonCanonicalOrder,
+            ),
+            (
+                "one implementation's Local and Air-Gapped reports equal",
+                |p| p.first_reports.air_gapped_report_digest = p.first_reports.local_report_digest,
+                Error::DuplicateReportDigest,
+            ),
+            (
+                "equal Air-Gapped report digests",
+                |p| {
+                    p.second_reports.air_gapped_report_digest =
+                        p.first_reports.air_gapped_report_digest;
+                },
+                Error::DuplicateReportDigest,
+            ),
+            (
+                "Air-Gapped report reused as the other Local report",
+                |p| p.first_reports.air_gapped_report_digest = p.second_reports.local_report_digest,
+                Error::DuplicateReportDigest,
+            ),
+            (
+                "second implementation's Local and Air-Gapped reports equal",
+                |p| {
+                    p.second_reports.air_gapped_report_digest =
+                        p.second_reports.local_report_digest;
+                },
+                Error::DuplicateReportDigest,
+            ),
+        ],
+    );
 }

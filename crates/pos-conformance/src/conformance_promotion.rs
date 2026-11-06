@@ -3,15 +3,18 @@
 //! A CPR1 record is the exact deterministic-CBOR array
 //!
 //! ```text
-//! [ "CPR1", 1, profile_digest, from_lifecycle, to_lifecycle, first_report_digest,
-//!   second_report_digest, first_implementation, second_implementation,
-//!   shared_code_audit_digest, waiver_conflict_snapshot_digest, [approver_id, ...], epoch,
-//!   record_digest ]
+//! [ "CPR1", 1, profile_digest, from_lifecycle, to_lifecycle,
+//!   [first_local_report_digest, first_air_gapped_report_digest],
+//!   [second_local_report_digest, second_air_gapped_report_digest],
+//!   first_implementation, second_implementation, shared_code_audit_digest,
+//!   waiver_conflict_snapshot_digest, [approver_id, ...], epoch, record_digest ]
 //! ```
 //!
-//! The implementations are exact CNR1 `ImplementationIdentityV1` arrays in the order of the
-//! strictly ascending report digests. This slice validates the shape only; the promotion gate
-//! is slice G4 (#1239).
+//! One CNR1 report covers one mode, so each implementation contributes its Local and its
+//! Air-Gapped report. The implementations are exact CNR1 `ImplementationIdentityV1` arrays, in
+//! the order of their pairs: the first Local report digest is strictly below the second, and
+//! the four report digests are distinct. This slice validates the shape only; the promotion
+//! gate is slice G4 (#1239).
 
 use crate::{
     ConformanceGovernanceErrorV1 as Error, GovernanceEncoder, GovernanceRecordV1,
@@ -22,14 +25,21 @@ use ciborium::value::Value;
 /// Magic of the CPR1 conformance promotion record.
 pub const CONFORMANCE_PROMOTION_MAGIC_V1: &str = "CPR1";
 
+/// The Local and the Air-Gapped CNR1 report digest of one implementation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ConformancePromotionReportsV1 {
+    pub local_report_digest: [u8; 32],
+    pub air_gapped_report_digest: [u8; 32],
+}
+
 /// One CPR1 conformance promotion record.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConformancePromotionV1 {
     pub profile_digest: [u8; 32],
     pub from_lifecycle: ProfileLifecycleV1,
     pub to_lifecycle: ProfileLifecycleV1,
-    pub first_report_digest: [u8; 32],
-    pub second_report_digest: [u8; 32],
+    pub first_reports: ConformancePromotionReportsV1,
+    pub second_reports: ConformancePromotionReportsV1,
     pub first_implementation: ImplementationIdentityV1,
     pub second_implementation: ImplementationIdentityV1,
     pub shared_code_audit_digest: [u8; 32],
@@ -80,8 +90,8 @@ impl GovernanceRecordV1 for ConformancePromotionV1 {
         encoder.bytes(&self.profile_digest);
         encoder.uint(self.from_lifecycle.wire_code());
         encoder.uint(self.to_lifecycle.wire_code());
-        encoder.bytes(&self.first_report_digest);
-        encoder.bytes(&self.second_report_digest);
+        encode_reports(encoder, &self.first_reports);
+        encode_reports(encoder, &self.second_reports);
         encode_identity(encoder, &self.first_implementation);
         encode_identity(encoder, &self.second_implementation);
         encoder.bytes(&self.shared_code_audit_digest);
@@ -91,15 +101,15 @@ impl GovernanceRecordV1 for ConformancePromotionV1 {
     }
 
     fn decode_body(body: Vec<Value>, record_digest: [u8; 32]) -> Result<Self, Error> {
-        let [profile, from, to, first_report, second_report, first, second, rest @ ..] =
+        let [profile, from, to, first_reports, second_reports, first, second, rest @ ..] =
             crate::governance_fields::<11>(body)?;
         let [audit, snapshot, approvers, epoch] = rest;
         Ok(Self {
             profile_digest: crate::governance_fixed(profile)?,
             from_lifecycle: crate::governance_code(&from, ProfileLifecycleV1::from_wire_code)?,
             to_lifecycle: crate::governance_code(&to, ProfileLifecycleV1::from_wire_code)?,
-            first_report_digest: crate::governance_fixed(first_report)?,
-            second_report_digest: crate::governance_fixed(second_report)?,
+            first_reports: decode_reports(first_reports)?,
+            second_reports: decode_reports(second_reports)?,
             first_implementation: decode_identity(first)?,
             second_implementation: decode_identity(second)?,
             shared_code_audit_digest: crate::governance_fixed(audit)?,
@@ -129,10 +139,20 @@ impl GovernanceRecordV1 for ConformancePromotionV1 {
         }
         crate::governance_approvers(&self.approver_ids)?;
         crate::governance_epoch(self.epoch)?;
-        if self.first_report_digest < self.second_report_digest {
+        if self.first_reports.local_report_digest >= self.second_reports.local_report_digest {
+            return Err(Error::NonCanonicalOrder);
+        }
+        let mut digests = [
+            self.first_reports.local_report_digest,
+            self.first_reports.air_gapped_report_digest,
+            self.second_reports.local_report_digest,
+            self.second_reports.air_gapped_report_digest,
+        ];
+        digests.sort_unstable();
+        if crate::strictly_ordered(&digests) {
             Ok(())
         } else {
-            Err(Error::NonCanonicalOrder)
+            Err(Error::DuplicateReportDigest)
         }
     }
 }
@@ -143,6 +163,20 @@ fn valid_identity(identity: &ImplementationIdentityV1) -> bool {
             .organization_id
             .as_deref()
             .is_none_or(crate::governance_utf8_id)
+}
+
+fn encode_reports(encoder: &mut GovernanceEncoder, reports: &ConformancePromotionReportsV1) {
+    encoder.open_array(2);
+    encoder.bytes(&reports.local_report_digest);
+    encoder.bytes(&reports.air_gapped_report_digest);
+}
+
+fn decode_reports(value: Value) -> Result<ConformancePromotionReportsV1, Error> {
+    let [local, air_gapped] = crate::governance_fields::<2>(crate::governance_array(value)?)?;
+    Ok(ConformancePromotionReportsV1 {
+        local_report_digest: crate::governance_fixed(local)?,
+        air_gapped_report_digest: crate::governance_fixed(air_gapped)?,
+    })
 }
 
 fn encode_identity(encoder: &mut GovernanceEncoder, identity: &ImplementationIdentityV1) {
