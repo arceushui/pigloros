@@ -439,7 +439,7 @@ impl LaunchPolicyV1 {
             value_text(LPS1),
             value_uint(1),
             value_text(&self.policy_id),
-            value_uint(mode_code(self.execution_mode)),
+            value_uint(u64::from(self.execution_mode.wire_code())),
             value_bytes(&self.sim1_digest),
             Value::Array(
                 self.effective_limits
@@ -830,23 +830,12 @@ fn decode_limits(value: &Value) -> Result<Vec<SandboxLimitV1>, SandboxContractEr
         .collect()
 }
 
-const fn mode_code(value: ExecutionModeV1) -> u64 {
-    match value {
-        ExecutionModeV1::Local => 0,
-        ExecutionModeV1::AirGapped => 1,
-        ExecutionModeV1::Replay => 2,
-        ExecutionModeV1::Fork => 3,
-    }
-}
-
 fn decode_mode(value: &Value) -> Result<ExecutionModeV1, SandboxContractErrorV1> {
-    match uint(value)? {
-        0 => Ok(ExecutionModeV1::Local),
-        1 => Ok(ExecutionModeV1::AirGapped),
-        2 => Ok(ExecutionModeV1::Replay),
-        3 => Ok(ExecutionModeV1::Fork),
-        _ => Err(SandboxContractErrorV1::InvalidEncoding),
-    }
+    let code = uint(value)?;
+    u8::try_from(code)
+        .ok()
+        .and_then(ExecutionModeV1::from_wire_code)
+        .ok_or(SandboxContractErrorV1::InvalidEncoding)
 }
 
 fn partition_value(value: &PartitionDescriptorV1) -> Value {
