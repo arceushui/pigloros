@@ -33,7 +33,7 @@ use pos_core::{
 };
 use pos_experiment::authoritative_comparison::DivergenceContextV1;
 use pos_experiment::fork_artifacts::{
-    compare_fork_artifacts_v1, run_fork_v1, ForkArtifactExportV1, ForkArtifactKindV1,
+    compare_fork_artifacts_v1, run_fork_v1, ForkArtifactExportV1, ForkArtifactKindV1, ForkDriverV1,
     ForkFixtureV1, ForkRunErrorV1, FACTUAL_TIMELINE_ID_V1, FORK_TIMELINE_ID_V1, LEAD_EVENT_TYPE_V1,
 };
 use pos_runtime::counterfactual::coordinator::CounterfactualAdmissionErrorV1;
@@ -223,6 +223,7 @@ fn every_artifact_is_exported_at_the_world_cut_and_decodes() -> TestResult {
 
     let frontier = RecomputationFrontierV1::from_canonical_cbor(artifact(&export, 2)?)?;
     check_frontier(&frontier, &plan, &fixture)?;
+    check_drivers(&export.drivers, &frontier);
 
     let invalidation = SuffixInvalidationV1::from_canonical_cbor(artifact(&export, 3)?)?;
     check_invalidation(&invalidation, &plan, &frontier, &fixture);
@@ -310,6 +311,33 @@ fn check_recomputation(
         .collect();
     assert_eq!(references, recorded);
     Ok(())
+}
+
+/// The three Drivers in schedule order, each the owner of its frontier.
+fn check_drivers(drivers: &[ForkDriverV1], frontier: &RecomputationFrontierV1) {
+    let names: Vec<(&str, &str, u32)> = drivers
+        .iter()
+        .map(|driver| {
+            let names = (driver.plugin_name.as_str(), driver.driver_name.as_str());
+            (names.0, names.1, driver.scheduler_position)
+        })
+        .collect();
+    assert_eq!(
+        names,
+        [
+            ("alpha", "alpha", 1),
+            ("beta", "beta", 2),
+            ("gamma", "gamma", 3)
+        ]
+    );
+    for driver in drivers {
+        let owned = frontier
+            .owner_frontiers
+            .iter()
+            .filter(|owner| owner.owner_id == driver.owner_id)
+            .map(|owner| owner.earliest_scheduler_position);
+        assert_eq!(owned.collect::<Vec<_>>(), [driver.scheduler_position]);
+    }
 }
 
 /// The frontier the Intervention implies: the Intervention root at the
@@ -475,6 +503,30 @@ fn an_invalidation_mismatch_is_a_divergence_at_the_invalidation() -> TestResult 
     };
     let (report, expected, actual) = divergence(&base, &changed)?;
     check_report(&report, (&expected, &actual), INVALIDATION_ORDINAL, 4)
+}
+
+#[test]
+fn every_refusal_is_described() {
+    let errors = [
+        ForkRunErrorV1::ModeUnsupported,
+        ForkRunErrorV1::NetworkDenied,
+        ForkRunErrorV1::Host,
+        ForkRunErrorV1::Admission(Box::new(
+            CounterfactualAdmissionErrorV1::ReplayClaimInsufficient,
+        )),
+        ForkRunErrorV1::Suffix(CounterfactualSuffixErrorV1::InvalidResultIdentity),
+    ];
+    let texts: Vec<String> = errors.iter().map(ToString::to_string).collect();
+    assert_eq!(
+        texts[..3],
+        [
+            "the execution mode is not Local or Air-Gapped",
+            "an Air-Gapped run cannot use network",
+            "the Fork host failed",
+        ]
+    );
+    assert!(texts[3].starts_with("the counterfactual admission was refused: "));
+    assert!(texts[4].starts_with("the suffix recomputation was refused: "));
 }
 
 #[test]

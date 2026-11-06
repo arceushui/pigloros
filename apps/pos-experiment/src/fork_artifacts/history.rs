@@ -1,10 +1,9 @@
 //! The factual history of a Fork run and the Fork cut from it.
 //!
-//! Three Drivers commit every factual Tick through scheduled admission on a
-//! fresh `MemoryStore`: `alpha` reads the external input, `beta` reads
-//! `alpha`, and `gamma` reads the verified prefix, so the recorded prefix holds
-//! step, output, ingress, snapshot and verified-prefix nodes. Each Driver
-//! emits one draft per Tick.
+//! Three Drivers, `alpha`, `beta` and `gamma`, commit every factual Tick
+//! through scheduled admission on a fresh `MemoryStore`; each emits one draft
+//! per Tick. The history also appends one external input before its first
+//! Tick and before every Tick after the cut.
 //!
 //! The history is deterministic: the factual and Fork Timeline ids are
 //! [`super::FACTUAL_TIMELINE_ID_V1`] and [`super::FORK_TIMELINE_ID_V1`], and
@@ -40,32 +39,24 @@ struct DriverSpecV1 {
     plugin: u128,
     name: &'static str,
     event_type: &'static str,
-    subscriptions: &'static [&'static str],
-    verified_prefix: bool,
 }
 
-/// The Drivers in schedule order. None subscribes to a Projection.
+/// The Drivers in schedule order. None subscribes to anything.
 const DRIVERS: [DriverSpecV1; 3] = [
     DriverSpecV1 {
         plugin: 0x6201,
         name: "alpha",
         event_type: LEAD_EVENT_TYPE,
-        subscriptions: &[INPUT_EVENT_TYPE],
-        verified_prefix: false,
     },
     DriverSpecV1 {
         plugin: 0x6202,
         name: "beta",
         event_type: "agent.forkrun.beta",
-        subscriptions: &[LEAD_EVENT_TYPE],
-        verified_prefix: false,
     },
     DriverSpecV1 {
         plugin: 0x6203,
         name: "gamma",
         event_type: "agent.forkrun.gamma",
-        subscriptions: &[],
-        verified_prefix: true,
     },
 ];
 
@@ -98,21 +89,11 @@ impl Plugin for HistoryPlugin {
 struct HistoryDriver {
     name: &'static str,
     event_type: &'static str,
-    subscriptions: Vec<Kind>,
-    verified_prefix: bool,
 }
 
 impl Driver for HistoryDriver {
     fn name(&self) -> &'static str {
         self.name
-    }
-
-    fn event_subscriptions(&self) -> &[Kind] {
-        &self.subscriptions
-    }
-
-    fn requires_verified_event_prefix(&self) -> bool {
-        self.verified_prefix
     }
 
     fn step(&mut self, _: TimelineId, _: ObservationView<'_>) -> Result<StepOutput, RuntimeError> {
@@ -124,12 +105,24 @@ impl Driver for HistoryDriver {
     }
 }
 
-/// One Driver of the Fork: its owner, scheduler position and Event type.
+/// One Driver of the Fork: the names it was registered under, its owner,
+/// scheduler position and Event type.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct LaneV1 {
+    pub(super) plugin_name: &'static str,
+    pub(super) driver_name: &'static str,
     pub(super) owner: String,
     pub(super) position: u32,
     pub(super) event_type: &'static str,
+}
+
+/// One registered Driver: its Plugin ID, the names its Plugin and Driver
+/// report, and its Event type.
+struct RegisteredV1 {
+    plugin: PluginId,
+    plugin_name: &'static str,
+    driver_name: &'static str,
+    event_type: &'static str,
 }
 
 /// What the Fork reads of the recorded prefix at its cut.
@@ -175,7 +168,7 @@ pub(super) fn record(
     });
     created
         .and_then(|_| registry(gate))
-        .and_then(|mut registry| {
+        .and_then(|(mut registry, registered)| {
             let input = append_input(&mut store, root, b"input");
             let prefix = input.and_then(|()| {
                 (1..=cut_tick)
@@ -193,7 +186,7 @@ pub(super) fn record(
                     .and_then(|()| store.last_committed_factual_tick(root).ok())
                     .map(|head| (cut, head))
             });
-            suffix.zip(owners(&registry))
+            suffix.zip(owners(&registry, registered))
         })
         .and_then(|((cut, head), owners)| {
             let meta = TimelineMeta {
@@ -215,12 +208,13 @@ pub(super) fn record(
         })
 }
 
-/// A registry of the Drivers under their Plugin IDs, bound to `gate`.
-fn registry(gate: Arc<ErasureContainmentGateV1>) -> Option<PluginRegistry> {
+/// A registry of the Drivers under their Plugin IDs, bound to `gate`, and
+/// every registered Driver in schedule order.
+fn registry(gate: Arc<ErasureContainmentGateV1>) -> Option<(PluginRegistry, Vec<RegisteredV1>)> {
     let mut registry = PluginRegistry::new().with_erasure_gate(gate);
-    DRIVERS
+    let registered: Option<Vec<RegisteredV1>> = DRIVERS
         .iter()
-        .try_for_each(|spec| {
+        .map(|spec| {
             let plugin = HistoryPlugin {
                 id: PluginId::from_ulid(Ulid::from(spec.plugin)),
                 name: spec.name,
@@ -229,28 +223,37 @@ fn registry(gate: Arc<ErasureContainmentGateV1>) -> Option<PluginRegistry> {
             let driver = HistoryDriver {
                 name: spec.name,
                 event_type: spec.event_type,
-                subscriptions: spec.subscriptions.iter().copied().map(Kind::new).collect(),
-                verified_prefix: spec.verified_prefix,
+            };
+            let entry = RegisteredV1 {
+                plugin: plugin.id(),
+                plugin_name: plugin.name(),
+                driver_name: driver.name(),
+                event_type: spec.event_type,
             };
             registry
                 .register_generated(&plugin, None, Some(Box::new(driver)))
                 .ok()
+                .map(|()| entry)
         })
-        .and_then(|()| registry.compose_non_participant_drivers().ok())
-        .map(|()| registry)
+        .collect();
+    registered
+        .filter(|_| registry.compose_non_participant_drivers().is_ok())
+        .map(|registered| (registry, registered))
 }
 
-/// The factual owner ID of every Driver, in schedule order.
-fn owners(registry: &PluginRegistry) -> Option<Vec<(FactualOwnerIdV1, &'static str)>> {
+/// The factual owner ID of every registered Driver, in schedule order.
+fn owners(
+    registry: &PluginRegistry,
+    registered: Vec<RegisteredV1>,
+) -> Option<Vec<(FactualOwnerIdV1, RegisteredV1)>> {
     let owners = registry.factual_owner_ids();
-    DRIVERS
-        .iter()
-        .map(|spec| {
-            let plugin = PluginId::from_ulid(Ulid::from(spec.plugin));
+    registered
+        .into_iter()
+        .map(|entry| {
             owners
                 .iter()
-                .find(|(id, _)| *id == plugin)
-                .map(|(_, owner)| (owner.clone(), spec.event_type))
+                .find(|(id, _)| *id == entry.plugin)
+                .map(|(_, owner)| (owner.clone(), entry))
         })
         .collect()
 }
@@ -357,7 +360,7 @@ fn resolve_prefix(
     store: &MemoryStore,
     fork: TimelineId,
     cut: FactualHeadV1,
-    owners: Vec<(FactualOwnerIdV1, &'static str)>,
+    owners: Vec<(FactualOwnerIdV1, RegisteredV1)>,
 ) -> Option<(Vec<LaneV1>, PrefixV1)> {
     let steps: Option<Vec<DependencyNodeRecordV1>> = owners
         .iter()
@@ -377,10 +380,12 @@ fn resolve_prefix(
         let lanes = owners
             .into_iter()
             .zip(&steps)
-            .map(|((owner, event_type), step)| LaneV1 {
+            .map(|((owner, entry), step)| LaneV1 {
+                plugin_name: entry.plugin_name,
+                driver_name: entry.driver_name,
                 owner: owner.as_str().to_owned(),
                 position: step.coordinate().scheduler_position(),
-                event_type,
+                event_type: entry.event_type,
             })
             .collect();
         forwarded.map(|forwarded| (lanes, PrefixV1 { steps, forwarded }))

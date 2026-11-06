@@ -159,6 +159,19 @@ pub struct ForkArtifactV1 {
     pub bytes: Vec<u8>,
 }
 
+/// One Driver of the run, as its registration recorded it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ForkDriverV1 {
+    /// The name its Plugin reports.
+    pub plugin_name: String,
+    /// The name the Driver reports.
+    pub driver_name: String,
+    /// Its factual owner ID, the owner of its nodes in the artifacts.
+    pub owner_id: String,
+    /// Its scheduler position.
+    pub scheduler_position: u32,
+}
+
 /// The artifacts of one run, in export order.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ForkArtifactExportV1 {
@@ -166,6 +179,9 @@ pub struct ForkArtifactExportV1 {
     /// artifact and is never compared; it shows how far the factual history
     /// ran past the cut.
     pub factual_head: FactualHeadV1,
+    /// The Drivers of the run in schedule order. They are no artifact and
+    /// are never compared.
+    pub drivers: Vec<ForkDriverV1>,
     /// The artifacts, in the export order of the module documentation.
     pub artifacts: Vec<ForkArtifactV1>,
 }
@@ -366,6 +382,15 @@ fn execute(
         lanes,
         prefix,
     } = factual;
+    let drivers: Vec<ForkDriverV1> = lanes
+        .iter()
+        .map(|lane| ForkDriverV1 {
+            plugin_name: lane.plugin_name.to_owned(),
+            driver_name: lane.driver_name.to_owned(),
+            owner_id: lane.owner.clone(),
+            scheduler_position: lane.position,
+        })
+        .collect();
     let grant = LocalScheduledAdmissionHostV1::shared()
         .ok()
         .map(LocalScheduledAdmissionHostV1::authority_grant);
@@ -411,6 +436,7 @@ fn execute(
                 )
                 .map(|artifacts| ForkArtifactExportV1 {
                     factual_head: head,
+                    drivers,
                     artifacts,
                 })
             })
