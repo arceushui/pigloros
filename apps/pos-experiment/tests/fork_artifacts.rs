@@ -129,7 +129,7 @@ fn fixture() -> TestResult<ForkFixtureV1> {
     })
 }
 
-fn context(fixture: &ForkFixtureV1) -> DivergenceContextV1 {
+const fn context(fixture: &ForkFixtureV1) -> DivergenceContextV1 {
     DivergenceContextV1 {
         request_digest: [0x41; 32],
         manifest_digest: [0x42; 32],
@@ -213,7 +213,10 @@ fn every_artifact_is_exported_at_the_world_cut_and_decodes() -> TestResult {
         (plan.first_tick, plan.horizon_tick),
         (FIRST_TICK, HORIZON_TICK)
     );
-    assert_eq!(plan.interventions, [fixture.intervention.clone()]);
+    assert_eq!(
+        plan.interventions,
+        std::slice::from_ref(&fixture.intervention)
+    );
     assert_eq!(plan.plan_id, fixture.plan_id);
     assert_eq!(
         plan.execution_profile.profile_digest,
