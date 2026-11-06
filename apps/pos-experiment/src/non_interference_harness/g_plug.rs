@@ -232,9 +232,10 @@ pub fn g_plug_migration_canary_v1(
     )
 }
 
-/// The migration-only canary on a V1 host: there is no migrate-state call, so
-/// an admitted pair is non-executed `Unsupported` (scoped to PMF1 v2, #621)
-/// and an invalid one `Missing`. It never has an NIA1.
+/// The migration-only canary on a V1 host, which never has an NIA1.
+///
+/// There is no migrate-state call, so an admitted pair is non-executed
+/// `Unsupported` (scoped to PMF1 v2, #621) and an invalid one `Missing`.
 #[must_use]
 pub fn execute_g_plug_migration_canary_v1(
     fixture: &NonInterferenceFixturePairV1,
@@ -410,9 +411,11 @@ fn host_record(row: RowV1, run: &GPlugRunV1<'_>, state: &[u8]) -> Value {
 /// response, or nothing for a refused request.
 pub type GPlugEndpointV1 = fn(&[u8]) -> Option<Vec<u8>>;
 
-/// The host side of the public Plugin protocol: it encodes PWQ1 requests,
-/// decodes PWR1 responses and admits only a response for the export it
-/// invoked whose output echoes the invocation and carries its output digest.
+/// The host side of the public Plugin protocol.
+///
+/// It encodes PWQ1 requests, decodes PWR1 responses and admits only a
+/// response for the export it invoked whose output echoes the invocation and
+/// carries its output digest.
 #[derive(Clone, Debug)]
 pub struct GPlugProtocolHostV1 {
     endpoint: GPlugEndpointV1,
@@ -448,10 +451,10 @@ impl GPlugProtocolHostV1 {
             .filter(|result| admitted(invocation, result))
     }
 
-    /// Send a migrate-state request over `invocation` and return the raw
-    /// answer, if any. The protocol has no migrate-state call: the request is
-    /// the `reduce` envelope with the call code set to 3, which the codec
-    /// refuses.
+    /// Send a migrate-state request over `invocation`; return the raw answer.
+    ///
+    /// The protocol has no migrate-state call: the request is the `reduce`
+    /// envelope with the call code set to 3, which the codec refuses.
     #[must_use]
     pub fn migrate_state(&self, invocation: &PluginInvocationV1) -> Option<Vec<u8>> {
         let reduce = encode_worker_request_v1(&request(WorkerCallV1::Reduce(invocation.clone())));
@@ -545,13 +548,10 @@ fn produced(returned: WorkerReturnV1) -> Option<GuestReturnV1<PluginOutputV1>> {
 /// An output must echo its invocation and carry its own output digest; a
 /// guest error is admitted as the guest's typed outcome.
 fn admitted(invocation: &PluginInvocationV1, result: &GuestReturnV1<PluginOutputV1>) -> bool {
-    match result {
-        Ok(output) => {
-            output.invocation_id == invocation.invocation_id
-                && output.output_digest == plugin_output_digest_v1(output)
-        }
-        Err(_) => true,
-    }
+    result.as_ref().map_or(true, |output| {
+        output.invocation_id == invocation.invocation_id
+            && output.output_digest == plugin_output_digest_v1(output)
+    })
 }
 
 /// The invocation the host builds for one call. Its Timeline is the
@@ -601,8 +601,9 @@ pub fn g_plug_invocation_v1(
 // The fixture guest
 // ---------------------------------------------------------------------------
 
-/// The in-process deterministic fixture guest: it decodes one PWQ1 request
-/// with the protocol codec and answers `describe`, `reduce` or `drive` with
+/// The in-process deterministic fixture guest.
+///
+/// It decodes one PWQ1 request with the protocol codec and answers `describe`, `reduce` or `drive` with
 /// one PWR1 response. A request for another Component, or one the codec
 /// refuses (a migrate-state request included), gets no response.
 ///
