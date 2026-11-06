@@ -94,7 +94,7 @@ pub const G_FORK_STORE_DIRECTORY_V1: &str = "g-fork-artifacts";
 /// The control member's unauthorized value of every G-FORK fixture.
 pub const G_FORK_CONTROL_UNAUTHORIZED_V1: &[u8] = b"fork-denied-control-0";
 /// The canary member's unauthorized value of every G-FORK fixture.
-pub const G_FORK_CANARY_UNAUTHORIZED_V1: &[u8] = b"fork-canary-hidden-participant-value-08";
+pub const G_FORK_CANARY_UNAUTHORIZED_V1: &[u8] = b"fork-canary-hidden-participant-value-008";
 /// Factual Ticks before the Fork's cut.
 pub const G_FORK_CUT_TICK_V1: u64 = 1;
 /// Recomputation Ticks after the first one.

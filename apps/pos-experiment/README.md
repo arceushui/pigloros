@@ -75,6 +75,22 @@ Run-local identities are captured position-relative. `pos-ni-g-pub-subject` is
 the Local fresh-process subject of these rows. `NI-ARCHIVE-009` is non-executed
 `Missing` until slice N1b (#1284).
 
+`non_interference_harness::g_fork` holds the G-FORK capture adapter of slice N4
+(#1232, wiki `ADR-062_R8_NonInterference_Fork`) for `NI-FORK-008`, over the R6
+Fork artifact exports below:
+- Local runs the records-form Fork in the fresh process `pos-ni-g-fork-subject`.
+- Replay records a run and rebuilds its export from the recorded Event Store
+  alone (`replay_recorded_fork_v1`): no Driver runs and no Event is appended.
+- Fork runs the records-form Fork in-process (owner answer Q7: a genuine ADR-064
+  Fork execution, re-run when #1204 lands).
+
+The host places the unauthorized value in the factual Timeline after the cut:
+in the factual suffix inputs and in the participant Driver's hidden participant
+field. The nine byte-exact surfaces are captured from the exported artifacts;
+snapshots and ReproManifest are empty until #1204. The shared executor key and
+capture helpers live in `non_interference_harness::fixture_evidence` and the
+private `capture` module.
+
 ## ADR-064 Fork artifact comparison
 
 `pos_experiment::fork_artifacts` is ADR-062 Revision 8 slice R6 (#1225).
@@ -97,6 +113,11 @@ that allows network (the run is in-process; no isolation is claimed). The module
 fixture erasure gate and the generated Plugin registration) and Linux (the
 `pos-time` counterfactual module). Results are Local-relaxation engineering
 evidence, not hosted conformance.
+`record_fork_v1` also keeps the run's recorded Event Store, which
+`replay_recorded_fork_v1` rebuilds the export from (slice N4, #1232). The
+participant Driver `beta` writes the fixture's hidden participant field into
+its factual Events after the cut; like the factual suffix it never reaches an
+artifact.
 
 ## Sequential SQLite multi-rate demo
 
