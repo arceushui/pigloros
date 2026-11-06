@@ -665,7 +665,7 @@ fn recompute(
 }
 
 /// The frozen Ticks must not exceed the EPF1 execution-step budget.
-fn step_budget(
+const fn step_budget(
     ticks: u64,
     budget: u64,
     admitted: VerificationPreflightResultV1,
