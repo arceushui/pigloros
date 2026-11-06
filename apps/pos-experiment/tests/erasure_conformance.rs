@@ -607,7 +607,8 @@ fn a_completed_erasure_stays_contained_and_admits_no_resurrection() -> TestResul
     let (catalogue, _) = load()?;
     let case = find(&catalogue, "complete-all-categories")?;
     let (mut run, record, timeline) = run_with_canary(&catalogue, case, StoreConfig::Memory)?;
-    assert_no_resurrection(&catalogue, &mut run, &record, timeline, &canary_draft())
+    let draft = canary_draft();
+    assert_no_resurrection(&catalogue, &mut run, &record, timeline, &draft)
 }
 
 /// After `Complete`: the erased Timeline stays contained, an exact finalize
