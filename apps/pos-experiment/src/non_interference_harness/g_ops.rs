@@ -807,11 +807,6 @@ impl DeclaredV1 {
         })
     }
 
-    /// `[code, coordinate present]`.
-    fn error(&self) -> Value {
-        array([self.code.clone(), Value::Bool(!self.coordinate.is_empty())])
-    }
-
     /// The secret-bearing diagnostics, operational only.
     fn diagnostics(&self) -> Vec<u8> {
         [self.messages.as_slice(), self.coordinate.as_slice()].concat()
