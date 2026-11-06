@@ -52,8 +52,10 @@
 //! `wall_time`, `origin`, signatures and signature identities are declared
 //! operational and are not captured; a test pins that the subject emits no
 //! signature. A `causation_id` outside the captured stream refuses the
-//! capture. The payload hash, the schema version and the Timeline name, mode
-//! and head are captured byte-exact. The seam import re-appends each Event's
+//! capture. The payload hash, the schema version and the Timeline name and
+//! head are captured byte-exact, the Timeline mode as its ADR-127 code and the
+//! owner as ordinal 0 or null. The Event record is the ADR-127 section 2
+//! record. The seam import re-appends each Event's
 //! entity, type, payload and correlation; its schema version, causation and
 //! payload hash are read back from the seam. Every other byte stays exact.
 //! Response lengths are exact, since a ULID's text always has the same width.
@@ -87,6 +89,7 @@ use pos_core::{
     ids::{EntityId, PluginId, TimelineId},
     plugin::{Capability, Plugin},
     store::{export_timeline_own, EventStore, TimelineExport},
+    timeline::TimelineMode,
     ErasureContainmentGateV1, ErasureReferenceV1, Event,
 };
 use pos_plugin_society::{draft_signal, SocietyDimension, SocietySignal, EVENT_TYPE_SIGNAL};
@@ -427,19 +430,29 @@ fn live_events(experiment: Experiment) -> Result<Vec<Event>, NonInterferenceNonE
 // ---------------------------------------------------------------------------
 
 /// The position-relative export: its Event stream and the export record
-/// `[name, mode, owner ordinal or null, head, stream]`.
+/// `[mode code, name or null, owner ordinal or null, head, stream]`, the
+/// ADR-127 `timeline.cbor` record followed by the stream.
 fn export_record(export: &TimelineExport) -> Option<(Value, Value)> {
     let meta = &export.timeline.meta;
     event_stream(&export.events, meta.owner).map(|stream| {
         let record = Value::Array(vec![
-            text(meta.name.as_deref().unwrap_or_default()),
-            text(&format!("{:?}", meta.mode)),
+            uint(timeline_mode_code(meta.mode)),
+            meta.name.as_deref().map_or(Value::Null, text),
             meta.owner.map_or(Value::Null, |_| uint(0)),
             uint(export.timeline.head.as_u64()),
             stream.clone(),
         ]);
         (stream, record)
     })
+}
+
+/// The closed ADR-127 Timeline mode code.
+const fn timeline_mode_code(mode: TimelineMode) -> u64 {
+    match mode {
+        TimelineMode::Historical => 0,
+        TimelineMode::Live => 1,
+        TimelineMode::Future => 2,
+    }
 }
 
 /// Whether the denied sibling is created before the subject Timeline.
@@ -587,7 +600,7 @@ fn export_evaluation() -> Option<pos_core::ReplayClaimEvaluationV1> {
 /// The five `NI-EVAL-007` surfaces from the export and its Event stream.
 ///
 /// - Export bundle: the Event stream; publicly the export record
-///   `[name, mode, owner, head, stream]`; operationally its digest.
+///   `[mode code, name, owner, head, stream]`; operationally its digest.
 /// - manifest: the bundle member table `[[name, size, digest]]`.
 /// - fixture descriptor: `[fixture id, variant, permitted-input digest,
 ///   subject Plugin id, Plugin name, Driver name]`.
@@ -1087,8 +1100,8 @@ mod tests {
             uint(1),
             cause,
             correlation,
-            Value::Bytes(vec![payload; 32]),
             Value::Bytes(vec![payload]),
+            Value::Bytes(vec![payload; 32]),
         ])
     }
 
@@ -1127,7 +1140,7 @@ mod tests {
         signed.id = EventId::new();
         assert_eq!(
             event_stream(&[signed], None),
-            event_stream(&[first.clone()], None)
+            event_stream(std::slice::from_ref(&first), None)
         );
         // A cause outside the stream refuses the capture.
         assert_eq!(event_stream(&[first, second, dangling], None), None);
@@ -1136,12 +1149,12 @@ mod tests {
     #[test]
     fn the_export_record_keeps_name_mode_owner_and_head() {
         let owner = EntityId::from_ulid(ulid::Ulid::from(7_u128));
-        let export = |owner: Option<EntityId>| TimelineExport {
+        let export = |owner: Option<EntityId>, name: Option<&str>| TimelineExport {
             timeline: pos_core::timeline::Timeline {
                 meta: pos_core::timeline::TimelineMeta {
                     id: TimelineId::new(),
-                    mode: pos_core::timeline::TimelineMode::Future,
-                    name: Some("subject".to_owned()),
+                    mode: TimelineMode::Future,
+                    name: name.map(str::to_owned),
                     owner,
                     fork_point: None,
                 },
@@ -1151,22 +1164,25 @@ mod tests {
             parent_fork_hash: None,
         };
         let stream = Value::Array(vec![row(1, 0, Value::Null, Value::Null, 1)]);
-        let record = |owner: Value| {
-            Value::Array(vec![
-                text("subject"),
-                text("Future"),
-                owner,
-                uint(1),
-                stream.clone(),
-            ])
+        let record = |name: Value, owner: Value| {
+            Value::Array(vec![uint(2), name, owner, uint(1), stream.clone()])
         };
         assert_eq!(
-            export_record(&export(Some(owner))),
-            Some((stream.clone(), record(uint(0))))
+            export_record(&export(Some(owner), Some("subject"))),
+            Some((stream.clone(), record(text("subject"), uint(0))))
         );
         assert_eq!(
-            export_record(&export(None)),
-            Some((stream.clone(), record(Value::Null)))
+            export_record(&export(None, None)),
+            Some((stream.clone(), record(Value::Null, Value::Null)))
+        );
+        assert_eq!(
+            [
+                TimelineMode::Historical,
+                TimelineMode::Live,
+                TimelineMode::Future,
+            ]
+            .map(timeline_mode_code),
+            [0, 1, 2]
         );
     }
 

@@ -53,11 +53,10 @@ use pos_experiment::non_interference_harness::g_pub::{
     G_PUB_STORE_FILE_V1, G_PUB_SUBJECT_TIMELINE_V1,
 };
 use pos_experiment::non_interference_harness::{
-    publish_non_interference_execution_v1, NonInterferenceForkRunnerV1, NonInterferenceHarnessV1,
-    NonInterferenceLocalProcessRunnerV1, NonInterferenceLocalRequestV1,
-    NonInterferenceNonExecutedCauseV1, NonInterferencePreparationV1, NonInterferenceReplayRunnerV1,
-    NonInterferenceSignedExecutionV1, NON_INTERFERENCE_LOCAL_REQUEST_MAGIC_V1,
-    NON_INTERFERENCE_PUBLICATION_DIRECTORY_V1,
+    NonInterferenceForkRunnerV1, NonInterferenceHarnessV1, NonInterferenceLocalProcessRunnerV1,
+    NonInterferenceLocalRequestV1, NonInterferenceNonExecutedCauseV1, NonInterferencePreparationV1,
+    NonInterferenceReplayRunnerV1, NonInterferenceSignedExecutionV1,
+    NON_INTERFERENCE_LOCAL_REQUEST_MAGIC_V1, NON_INTERFERENCE_PUBLICATION_DIRECTORY_V1,
 };
 use pos_plugin_society::{SocietyDimension, SocietySignal};
 use pos_reference::adapter_transport::read_attempt;
@@ -68,9 +67,6 @@ type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 type Coordinate = (String, NonInterferenceVariantV1, ExecutionModeV1);
 
 const SUBJECT: &str = env!("CARGO_BIN_EXE_pos-ni-g-pub-subject");
-/// Temporary (removed before review): the directory the matrix test exports
-/// its NIA1 and capture records to.
-const EXPORT_ENV: &str = "PIGLOROS_NI_G_PUB_EXPORT";
 const VARIANTS: [NonInterferenceVariantV1; 4] = [
     NonInterferenceVariantV1::Success,
     NonInterferenceVariantV1::Denial,
@@ -225,51 +221,6 @@ fn subject_events(permitted_input: &[u8]) -> TestResult<Vec<Event>> {
     Ok(events)
 }
 
-/// Temporary (removed before review): export the executed NIA1, the
-/// executor public key and every control capture's records.
-#[cfg_attr(coverage_nightly, coverage(off))]
-fn export(
-    directory: &Path,
-    executed: &BTreeMap<Coordinate, NonInterferenceSignedExecutionV1>,
-) -> TestResult {
-    for execution in executed.values() {
-        publish_non_interference_execution_v1(directory, execution)?;
-    }
-    fs::write(
-        directory.join("executor-public-key.hex"),
-        hex(&non_interference_fixture_executor_key_v1().public_key()),
-    )?;
-    let mut records = Vec::new();
-    for fixture_id in EXECUTED_ROWS {
-        for variant in VARIANTS {
-            let permitted = g_pub_permitted_input_v1(fixture_id, variant);
-            let events = subject_events(&permitted)?;
-            let store = tempfile::tempdir()?;
-            let capture = g_pub_capture_v1(
-                &GPubRunV1 {
-                    fixture_id,
-                    variant,
-                    permitted_input: &permitted,
-                    unauthorized_value: G_PUB_CONTROL_UNAUTHORIZED_V1,
-                },
-                &events,
-                &store.path().join(G_PUB_STORE_FILE_V1),
-            )?;
-            records.push(json!({
-                "fixture_id": fixture_id,
-                "variant": format!("{variant:?}"),
-                "authoritative": capture.authoritative.iter().map(|value| hex(value.as_slice())).collect::<Vec<_>>(),
-                "public": capture.public.iter().map(|value| hex(value.as_slice())).collect::<Vec<_>>(),
-            }));
-        }
-    }
-    fs::write(
-        directory.join("control-captures.json"),
-        serde_json::to_vec_pretty(&records)?,
-    )?;
-    Ok(())
-}
-
 // ---------------------------------------------------------------------------
 // Matrix
 // ---------------------------------------------------------------------------
@@ -311,9 +262,6 @@ fn every_g_pub_coordinate_executes_or_stays_typed_non_executed_and_matches_its_n
 {
     let work = tempfile::tempdir()?;
     let executed = execute_every_coordinate(work.path())?;
-    if let Ok(directory) = std::env::var(EXPORT_ENV) {
-        export(Path::new(&directory), &executed)?;
-    }
     assert_eq!(executed.len(), 24);
 
     let matrix = matrix()?;

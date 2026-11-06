@@ -15,15 +15,16 @@
 //!   `a_raw_g_fork_capture_is_admitted_only_through_the_normalizer`.
 //! - Row-specific equality and first-coordinate order: the matrix test
 //!   requires equality at every surface and one result digest in every mode;
-//!   `a_spliced_value_diverges_at_its_first_coordinate` requires the first
-//!   divergence at the first surface a leak reaches.
+//!   `a_leaking_capture_diverges_at_the_first_surface_it_reaches` requires the
+//!   #181 comparison to report the first surface a leak reaches.
 //! - No factual-suffix splicing and no unauthorized bytes in Fork artifacts:
 //!   `the_unauthorized_value_reaches_the_factual_timeline_and_no_fork_artifact`.
 //! - One verifier-accepted signed NIA1 per executed case, only those flipped,
 //!   mode A non-executed: the matrix test, with
 //!   `non_interference_evidence.rs` for the verifier and the flips.
-//! - Snapshots and `ReproManifest` are empty surfaces:
-//!   `the_records_form_run_makes_no_snapshot_and_no_repro_manifest`.
+//! - Snapshots and `ReproManifest` are empty surfaces, and no `RCP1` carries a
+//!   Plugin or Projection snapshot digest:
+//!   `the_snapshot_surfaces_are_empty_and_no_checkpoint_holds_a_snapshot`.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -76,6 +77,8 @@ const MODES: [ExecutionModeV1; 4] = [
 ];
 /// The surface ordinal of the `CounterfactualPlan` surface.
 const PLAN_SURFACE: u16 = 1;
+/// The surface ordinal of the exports surface, the last one.
+const EXPORTS_SURFACE: u16 = 8;
 
 fn fixtures_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/conformance")
@@ -429,7 +432,7 @@ fn the_unauthorized_value_reaches_the_factual_timeline_and_no_fork_artifact() ->
 // ---------------------------------------------------------------------------
 
 #[test]
-fn the_records_form_run_makes_no_snapshot_and_no_repro_manifest() -> TestResult {
+fn the_snapshot_surfaces_are_empty_and_no_checkpoint_holds_a_snapshot() -> TestResult {
     let fixture = g_fork_subject_fixture_v1(
         &g_fork_permitted_input_v1(NonInterferenceVariantV1::Success),
         G_FORK_CONTROL_UNAUTHORIZED_V1,
@@ -527,32 +530,52 @@ fn a_raw_g_fork_capture_is_admitted_only_through_the_normalizer() -> TestResult 
     Ok(())
 }
 
-#[test]
-fn a_spliced_value_diverges_at_its_first_coordinate() -> TestResult {
-    // A leaking subject that spliced the factual suffix into the Fork would
-    // reach the plan first: here the canary's value decides the plan's
-    // Intervention. The pair is unequal, and its first divergence is the
-    // `CounterfactualPlan` surface; the Fork parent/cut before it is equal.
-    let fixture = g_fork_fixture_v1(NonInterferenceVariantV1::Success, ExecutionModeV1::Fork)?;
-    let case = execute_non_interference_pair(&fixture, |run| {
-        let spliced = [run.subject.permitted_input, run.unauthorized_value].concat();
-        let mut raw = fork_capture(NonInterferenceVariantV1::Success, b"x")
-            .ok()
-            .ok_or(NonInterferenceExecutionErrorV1::CaptureUnavailable)?;
-        if run.unauthorized_value == G_FORK_CANARY_UNAUTHORIZED_V1 {
-            let leaked = g_fork_subject_fixture_v1(&spliced, b"x")
-                .ok()
-                .and_then(|leaked| run_fork_v1(&leaked, ExecutionModeV1::Local).ok())
-                .and_then(|export| g_fork_capture_v1(&export).ok())
-                .ok_or(NonInterferenceExecutionErrorV1::CaptureUnavailable)?;
-            raw = leaked;
-        }
+/// Compare the pair of `fixture` through the #181 framework with a control
+/// capture of the honest subject and a canary capture that `leak` alters.
+fn leaking_case(
+    fixture: &NonInterferenceFixturePairV1,
+    leak: impl Fn(&[u8], &[u8]) -> Option<NonInterferenceRawCaptureV1>,
+) -> TestResult<pos_conformance::NonInterferenceCaseV1> {
+    Ok(execute_non_interference_pair(fixture, |run| {
+        let raw = if run.unauthorized_value == G_FORK_CANARY_UNAUTHORIZED_V1 {
+            leak(run.subject.permitted_input, run.unauthorized_value)
+        } else {
+            fork_capture(NonInterferenceVariantV1::Success, run.unauthorized_value).ok()
+        };
+        let mut raw = raw.ok_or(NonInterferenceExecutionErrorV1::CaptureUnavailable)?;
         raw.provenance_digest = [1; 32];
         normalize_non_interference_capture_v1(run.subject.fixture_id, raw)
+    })?)
+}
+
+#[test]
+fn a_leaking_capture_diverges_at_the_first_surface_it_reaches() -> TestResult {
+    let fixture = g_fork_fixture_v1(NonInterferenceVariantV1::Success, ExecutionModeV1::Fork)?;
+    // A value that reached the plan reaches the plan surface first: here it
+    // decides the Intervention. The Fork parent/cut before it stays equal.
+    let case = leaking_case(&fixture, |permitted, value| {
+        let spliced = [permitted, value].concat();
+        g_fork_subject_fixture_v1(&spliced, value)
+            .ok()
+            .and_then(|leaked| run_fork_v1(&leaked, ExecutionModeV1::Local).ok())
+            .and_then(|export| g_fork_capture_v1(&export).ok())
     })?;
     assert!(!case.authoritative_equal && !case.public_equal && !case.operational_equal);
     let divergence = case.first_divergence.ok_or("no divergence")?;
     assert_eq!(divergence.surface_ordinal, PLAN_SURFACE);
+    // A value that reached only the last surface is reported there: every
+    // surface before it is equal.
+    let case = leaking_case(&fixture, |_, value| {
+        fork_capture(NonInterferenceVariantV1::Success, value)
+            .ok()
+            .map(|mut raw| {
+                raw.authoritative[8].extend_from_slice(value);
+                raw
+            })
+    })?;
+    assert!(!case.authoritative_equal && case.public_equal && case.operational_equal);
+    let divergence = case.first_divergence.ok_or("no divergence")?;
+    assert_eq!(divergence.surface_ordinal, EXPORTS_SURFACE);
     Ok(())
 }
 

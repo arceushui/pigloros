@@ -18,8 +18,10 @@
 //! - Local: a fresh process runs the records-form Fork
 //!   ([`serve_g_fork_local_subject_v1`]).
 //! - Replay: the run is recorded in-process, and the export is rebuilt from
-//!   its recorded Event Store alone ([`replay_recorded_fork_v1`]): no Driver
-//!   runs and no Event is appended.
+//!   its recorded Event Store ([`replay_recorded_fork_v1`]): the `RCF1` and
+//!   `SIV1` are read back and every `RCP1` and the `CFR1` recovered from the
+//!   committed Fork Events, while the `INT1` and `CFP1` are the recorded
+//!   plan. No Driver runs and no Event is appended.
 //! - Fork: the records-form Fork runs in-process. Per owner answer Q7 it is a
 //!   genuine ADR-064 Fork execution; it is re-run when #1204 lands.
 //!
@@ -27,8 +29,8 @@
 //!
 //! The nine `NI-FORK-008` surfaces, every one byte-exact:
 //! - Fork parent/cut: the plan's `[parent Timeline id, parent cut seq, parent
-//!   cut Tick, parent cut digest]`; publicly the export coordinate
-//!   `[WorldCut id, cut ordinal, Tick]`.
+//!   cut Tick, parent cut digest]`; publicly the plan artifact's export
+//!   coordinate `[WorldCut id, cut ordinal, Tick]`.
 //! - `CounterfactualPlan`, `RecomputationFrontier`, `SuffixInvalidation`,
 //!   checkpoints and result: the exact artifact bytes of that kind, as one
 //!   array; publicly the `[ordinal, size, digest]` of each.
@@ -51,7 +53,9 @@
 //! digest. A warm case keeps one directory for
 //! its priming run, control run and canary run; a cold run always starts
 //! from a new directory. The capture is built from the run's own export,
-//! never from the store.
+//! never from the store: the warm and cold variants differ in directory
+//! reuse, not in any cached input, so a warm run cannot observe its priming
+//! run.
 //!
 //! The executions are engineering evidence signed with the repository
 //! test-fixture-only executor key
@@ -279,22 +283,23 @@ pub fn g_fork_capture_v1(
         .artifacts
         .iter()
         .find(|artifact| artifact.kind == ForkArtifactKindV1::CounterfactualPlan)
-        .and_then(|artifact| CounterfactualPlanV1::from_canonical_cbor(&artifact.bytes).ok());
-    plan.map(|plan| {
-        let coordinate = export.artifacts.first().map(|artifact| artifact.coordinate);
+        .and_then(|artifact| {
+            CounterfactualPlanV1::from_canonical_cbor(&artifact.bytes)
+                .ok()
+                .map(|plan| (artifact.coordinate, plan))
+        });
+    plan.map(|(coordinate, plan)| {
         let parent_cut = encode(&Value::Array(vec![
             Value::Bytes(plan.parent_timeline_id.to_vec()),
             uint(plan.parent_cut_seq),
             uint(plan.parent_cut_tick),
             Value::Bytes(plan.parent_cut_digest.to_vec()),
         ]));
-        let world_cut = encode(&coordinate.map_or(Value::Null, |coordinate| {
-            Value::Array(vec![
-                Value::Bytes(coordinate.world_cut_id.to_vec()),
-                uint(coordinate.cut_ordinal),
-                uint(coordinate.tick),
-            ])
-        }));
+        let world_cut = encode(&Value::Array(vec![
+            Value::Bytes(coordinate.world_cut_id.to_vec()),
+            uint(coordinate.cut_ordinal),
+            uint(coordinate.tick),
+        ]));
         let empty = encode(&Value::Array(Vec::new()));
         let stream = encode(&Value::Array(
             export
@@ -421,7 +426,7 @@ pub fn serve_g_fork_local_subject_v1<R: Read, W: Write>(
 /// How one in-process runner exports a run of a fixture.
 type ExportV1 = fn(&ForkFixtureV1) -> Result<ForkArtifactExportV1, ForkRunErrorV1>;
 
-/// Record the run and rebuild its export from the recorded Event Store alone.
+/// Record the run and rebuild its export from the recorded Event Store.
 fn replayed(fixture: &ForkFixtureV1) -> Result<ForkArtifactExportV1, ForkRunErrorV1> {
     record_fork_v1(fixture, ExecutionModeV1::Local)
         .and_then(|(_, mut recorded)| replay_recorded_fork_v1(&mut recorded))
@@ -446,7 +451,7 @@ pub struct GForkRunnerV1 {
 impl GForkRunnerV1 {
     /// The Replay runner, whose run directories are created below
     /// `work_root`: it records each run and rebuilds its export from the
-    /// recorded Event Store alone.
+    /// recorded Event Store and the recorded plan.
     #[must_use]
     pub const fn replay(work_root: PathBuf) -> Self {
         Self::new((ExecutionModeV1::Replay, b"replay", replayed), work_root)
