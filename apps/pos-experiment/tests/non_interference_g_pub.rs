@@ -51,10 +51,9 @@ use pos_experiment::non_interference_harness::g_pub::{
     G_PUB_STORE_FILE_V1, G_PUB_SUBJECT_TIMELINE_V1,
 };
 use pos_experiment::non_interference_harness::{
-    non_interference_publication_path_v1, publish_non_interference_execution_v1,
-    NonInterferenceForkRunnerV1, NonInterferenceHarnessV1, NonInterferenceLocalProcessRunnerV1,
-    NonInterferenceLocalRequestV1, NonInterferenceNonExecutedCauseV1, NonInterferencePreparationV1,
-    NonInterferenceReplayRunnerV1, NonInterferenceSignedExecutionV1,
+    non_interference_publication_path_v1, NonInterferenceForkRunnerV1, NonInterferenceHarnessV1,
+    NonInterferenceLocalProcessRunnerV1, NonInterferenceLocalRequestV1,
+    NonInterferenceNonExecutedCauseV1, NonInterferencePreparationV1, NonInterferenceReplayRunnerV1,
     NON_INTERFERENCE_LOCAL_REQUEST_MAGIC_V1, NON_INTERFERENCE_PUBLICATION_DIRECTORY_V1,
 };
 use pos_plugin_society::{SocietyDimension, SocietySignal};
@@ -87,9 +86,6 @@ const EXECUTABLE_MODES: [ExecutionModeV1; 3] = [
 ];
 /// The closed body of the Gateway's page-bound error.
 const PAGE_LIMIT_ERROR: &[u8] = b"{\"error\":\"event poll limit must be between 1 and 100\"}";
-/// Temporary (removed before review): the directory the matrix test exports
-/// its NIA1 and capture records to.
-const EXPORT_ENV: &str = "PIGLOROS_NI_G_PUB_EXPORT";
 
 fn fixtures_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/conformance")
@@ -244,60 +240,16 @@ fn subject_events(permitted_input: &[u8]) -> TestResult<Vec<Event>> {
     Ok(session.source_events()?)
 }
 
-/// Temporary (removed before review): export the executed NIA1, the
-/// executor public key and every control capture's records.
-#[cfg_attr(coverage_nightly, coverage(off))]
-fn export(
-    directory: &Path,
-    executed: &BTreeMap<Coordinate, NonInterferenceSignedExecutionV1>,
-) -> TestResult {
-    for execution in executed.values() {
-        publish_non_interference_execution_v1(directory, execution)?;
-    }
-    fs::write(
-        directory.join("executor-public-key.hex"),
-        hex(&g_pub_fixture_executor_key_v1().public_key()),
-    )?;
-    let mut records = Vec::new();
-    for fixture_id in EXECUTED_ROWS {
-        for variant in VARIANTS {
-            let permitted = g_pub_permitted_input_v1(fixture_id, variant);
-            let events = subject_events(&permitted)?;
-            let store = tempfile::tempdir()?;
-            let capture = g_pub_capture_v1(
-                &GPubRunV1 {
-                    fixture_id,
-                    variant,
-                    permitted_input: &permitted,
-                    unauthorized_value: G_PUB_CONTROL_UNAUTHORIZED_V1,
-                },
-                &events,
-                &store.path().join(G_PUB_STORE_FILE_V1),
-            )?;
-            records.push(json!({
-                "fixture_id": fixture_id,
-                "variant": format!("{variant:?}"),
-                "authoritative": capture.authoritative.iter().map(|value| hex(value.as_slice())).collect::<Vec<_>>(),
-                "public": capture.public.iter().map(|value| hex(value.as_slice())).collect::<Vec<_>>(),
-            }));
-        }
-    }
-    fs::write(
-        directory.join("control-captures.json"),
-        serde_json::to_vec_pretty(&records)?,
-    )?;
-    Ok(())
-}
-
 // ---------------------------------------------------------------------------
 // Matrix
 // ---------------------------------------------------------------------------
 
-#[test]
-fn every_g_pub_coordinate_executes_or_stays_typed_non_executed_and_matches_its_nia1() -> TestResult
-{
-    let work = tempfile::tempdir()?;
-    let mut harness = g_pub_harness(work.path())?;
+/// Run every G-PUB coordinate once and return the executed cases. Every
+/// non-executed case must carry its typed cause and no claim.
+fn execute_every_coordinate(
+    work: &Path,
+) -> TestResult<BTreeMap<Coordinate, NonInterferenceSignedExecutionV1>> {
+    let mut harness = g_pub_harness(work)?;
     let mut executed = BTreeMap::new();
     for fixture_id in G_PUB_FIXTURE_IDS_V1 {
         for variant in VARIANTS {
@@ -328,9 +280,14 @@ fn every_g_pub_coordinate_executes_or_stays_typed_non_executed_and_matches_its_n
             }
         }
     }
-    if let Ok(directory) = std::env::var(EXPORT_ENV) {
-        export(Path::new(&directory), &executed)?;
-    }
+    Ok(executed)
+}
+
+#[test]
+fn every_g_pub_coordinate_executes_or_stays_typed_non_executed_and_matches_its_nia1() -> TestResult
+{
+    let work = tempfile::tempdir()?;
+    let executed = execute_every_coordinate(work.path())?;
     assert_eq!(executed.len(), 24);
 
     let matrix = matrix()?;

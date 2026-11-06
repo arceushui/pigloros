@@ -203,6 +203,28 @@ rm -- "${opaque_auxiliary_root}/inputs/artifact-integrity/positive.pcw2"
 bash scripts/generate-conformance-fixture-records.sh "${opaque_auxiliary_root}" --write
 expect_rejection "${opaque_auxiliary_root}" "empty conformance fixture"
 
+# ADR-062 Revision 8 slice N1 (#1229): only a verifier-backed G-PUB case in mode L, R or F is
+# flipped, and every checked-in NIA1 is named by its content address.
+air_gapped_flip_root="$(new_fixture_copy air-gapped-matrix-flip)"
+replace_json "${air_gapped_flip_root}/matrix/execution-matrix.json" \
+  '(.cases[] | select(.case_id == "NI-PUBLIC-006-S-A")) |= (
+     .executed = true | .expected_result_digest = ("0" * 64) |
+     .expected_result = {equal: true, first_divergence: null, nia1_content_digest: ("0" * 64)})'
+expect_rejection "${air_gapped_flip_root}" "invalid ADR-059 matrix inventory"
+
+archive_flip_root="$(new_fixture_copy archive-matrix-flip)"
+replace_json "${archive_flip_root}/matrix/execution-matrix.json" \
+  '(.cases[] | select(.case_id == "NI-ARCHIVE-009-S-L")) |= (
+     .executed = true | .expected_result_digest = ("0" * 64) |
+     .expected_result = {equal: true, first_divergence: null, nia1_content_digest: ("0" * 64)})'
+expect_rejection "${archive_flip_root}" "invalid ADR-059 matrix inventory"
+
+tampered_nia1_root="$(new_fixture_copy tampered-nia1)"
+tampered_nia1="$(find "${tampered_nia1_root}/non-interference/executions" -type f | sort | sed -n '1p')"
+printf '\0' >>"${tampered_nia1}"
+refresh_checksums "${tampered_nia1_root}" "${tampered_nia1}"
+expect_rejection "${tampered_nia1_root}" "NIA1 file name is not its content address"
+
 watchdog_root="$(new_fixture_copy plugin-watchdog-drift)"
 replace_json "${watchdog_root}/providers/plugin-conformance/provider.json" \
   '.fixture_contracts.denied.watchdog_ms = 1000'

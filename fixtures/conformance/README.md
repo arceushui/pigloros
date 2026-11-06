@@ -149,8 +149,21 @@ immutable bundle manifest must declare.
 The Draft `matrix/execution-matrix.json` records all twelve accepted
 non-interference rows and their 192 required Local/Air-Gapped/Replay/Fork
 variant cases, with the row-specific AuthEq/PublicEq/OpEq predicates from
-ADR-059. Every coordinate is deliberately `executed: false` and has no result
-digest until #193 supplies independently produced execution evidence.
+ADR-059. A coordinate stays `executed: false`, with no result digest, until #193
+supplies execution evidence that the independent verifier accepts.
+
+ADR-062 Revision 8 slice N1 (#1229, owner note `ADR-062_R8_NonInterference_Executions`)
+flips the 24 cases of `NI-PUBLIC-006` and `NI-EVAL-007` in modes L, R and F.
+- Each flipped case has one checked-in NIA1 at
+  `non-interference/executions/<content address>.nia1`.
+- The NIA1 are signed with the repository test-fixture-only executor key in
+  `non-interference/executor.json`. They are engineering evidence, not an
+  attestation.
+- Each flipped case's `expected_result_digest` is its NIA1 result digest, derived
+  independently by `scripts/generate_non_interference_g_pub_fixtures.py`.
+  `executed: true` never implies a pass.
+- Air-Gapped cases stay non-executed until N7 (#1235), and `NI-ARCHIVE-009` until
+  N1b (#1284).
 `expected-authority/inventory.json` records the eleven #172 handoff slots. Its
 `expected_outcome` values are planned authority targets, not observed results.
 Since ADR-062 Revision 8 slice R4 (#1222) every slot is `materialized`: its

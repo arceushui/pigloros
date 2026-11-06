@@ -53,6 +53,18 @@ capture adapters of slices N1 to N4 supply verifier-accepted executions. The
 `pos-ni-local-probe` binary (feature `test-support`) is the harness probe of the
 Local runner, not a capture adapter of any row.
 
+`non_interference_harness::g_pub` holds the G-PUB capture adapters of slice N1
+(#1229, wiki `ADR-062_R8_NonInterference_Executions`):
+- `NI-PUBLIC-006` speaks HTTP to a fresh `piglor-gateway` router.
+- `NI-EVAL-007` captures the `export_timeline_own` export and the EAI1 attempt
+  over it.
+
+Every mode imports the Events it produced into that public seam. The host
+places the unauthorized value in a denied sibling Timeline of the seam store.
+Run-local identities are captured position-relative. `pos-ni-g-pub-subject` is
+the Local fresh-process subject of these rows. `NI-ARCHIVE-009` is non-executed
+`Missing` until slice N1b (#1284).
+
 ## Sequential SQLite multi-rate demo
 
 Start the local-only Gateway with an explicit SQLite file:

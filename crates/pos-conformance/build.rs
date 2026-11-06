@@ -818,6 +818,13 @@ fn source_snapshots(root: &CatalogRoot) -> Result<SourceSnapshots, io::Error> {
     })
 }
 
+/// The non-interference evidence (ADR-062 Revision 8 slice N1, #1229): the executor key
+/// declaration and the checked-in NIA1 are inventoried and digest-checked like every source, but
+/// they are not members of any conformance bundle. The fixture verify script owns their closure.
+fn is_non_interference_evidence(path: &str) -> bool {
+    path.starts_with("non-interference/")
+}
+
 fn verify_source_inventory(
     snapshots: &SourceSnapshots,
     profiles: &[ProfilePaths],
@@ -828,6 +835,7 @@ fn verify_source_inventory(
     let declared_paths = snapshots
         .sha256_entries
         .keys()
+        .filter(|path| !is_non_interference_evidence(path))
         .cloned()
         .collect::<BTreeSet<_>>();
     if declared_paths != expected_paths {
@@ -850,6 +858,7 @@ fn verify_source_inventory(
     if snapshots
         .blake3_entries
         .keys()
+        .filter(|path| !is_non_interference_evidence(path))
         .cloned()
         .collect::<BTreeSet<_>>()
         != blake3_paths
