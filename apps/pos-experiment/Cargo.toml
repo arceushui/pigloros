@@ -19,6 +19,7 @@ test-support = [
   "pos-runtime/test-support",
   "dep:pos-time",
   "dep:pos-plugin-supervisor",
+  "pos-plugin-supervisor/test-support",
   "dep:pos-plugin-worker",
   "dep:wat",
   "dep:axum",
@@ -106,12 +107,10 @@ tempfile = "3"
 [target.'cfg(target_os = "linux")'.dependencies]
 pos-time = { path = "../../crates/pos-time", optional = true }
 # The G-OPS capture adapters (feature `test-support`, slice N3): the community
-# Plugin supervisor with its `test-support` release fixtures, the worker library
-# and the WAT text compiler of the checked-in guest. The supervisor runs workers
-# only on Linux.
-pos-plugin-supervisor = { path = "../../crates/pos-plugin-supervisor", features = [
-  "test-support",
-], optional = true }
+# Plugin supervisor, whose `test-support` release fixtures the feature forwards,
+# the worker library and the WAT text compiler of the checked-in guest. The
+# supervisor runs workers only on Linux.
+pos-plugin-supervisor = { path = "../../crates/pos-plugin-supervisor", optional = true }
 pos-plugin-worker = { path = "../pos-plugin-worker", optional = true }
 wat = { workspace = true, optional = true }
 

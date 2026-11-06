@@ -31,7 +31,8 @@
 //! After the subject run the host places the unauthorized value in denied
 //! sibling work the subject never sees:
 //! - `NI-CACHE-002`: one to three sibling decisions cached under grants
-//!   derived from the value, then invalidated in an order the value decides.
+//!   derived from the value, then invalidated, so the value decides the
+//!   cache's entries, size and evictions.
 //! - `NI-OBS-004` and `NI-CRASH-012`: a sibling invocation whose observation
 //!   is the value, so the value becomes its log message and its declared
 //!   failure's canonical coordinate; `NI-CRASH-012` also runs a sibling that
@@ -82,11 +83,11 @@ use pos_core::{
     ids::{EntityId, PluginId, TimelineId},
     plugin::{Capability, Plugin},
     AssuranceLevelV1, AuthenticatedPrincipalDraftV1, AuthenticatedPrincipalResultV1,
-    AuthorityEvaluatorV1, AuthorityGranteeV1, AuthorityPersistenceHostV1,
-    AuthorityPersistenceStateV1, AuthorityRegistrySnapshotV1, AuthorityRoleV1,
-    AuthorizationRequestDraftV1, AuthorizationRequestV1, CapabilityGrantDraftV1, CapabilityGrantV1,
-    CapabilityScopeDraftV1, CapabilityScopeV1, ConsentEvidenceV1, ErasureRecoveryLimitsV1, Event,
-    Hash, PersistedAuthorityV1, PrincipalRefV1, Seq, WallTime,
+    AuthorityGranteeV1, AuthorityPersistenceHostV1, AuthorityPersistenceStateV1,
+    AuthorityRegistrySnapshotV1, AuthorityRoleV1, AuthorizationRequestDraftV1,
+    AuthorizationRequestV1, CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityScopeDraftV1,
+    CapabilityScopeV1, ConsentEvidenceV1, ErasureRecoveryLimitsV1, Event, Hash,
+    PersistedAuthorityV1, PrincipalRefV1, Seq, WallTime,
 };
 use pos_crypto::plugin_execution::DeterministicBudgetV1;
 use pos_plugin_supervisor::test_support::{
@@ -212,18 +213,6 @@ impl GOpsHostV1 {
                 supervisor,
             })
         })
-    }
-
-    /// The guest Component bytes.
-    #[must_use]
-    pub fn component(&self) -> &[u8] {
-        &self.component
-    }
-
-    /// The workers the subject's supervisor and its clones have launched.
-    #[must_use]
-    pub fn subject_worker_launches(&self) -> u64 {
-        self.supervisor.worker_launches()
     }
 }
 
@@ -871,12 +860,6 @@ impl DecisionV1 {
                     })
             })
     }
-
-    /// Whether the decision evaluates as allowed now.
-    fn allowed(&self) -> bool {
-        AuthorityEvaluatorV1::authorize(&self.request, self.authority.chain(), &self.registry)
-            .is_allowed()
-    }
 }
 
 const REGISTRY_DIGEST: [u8; 32] = [7; 32];
@@ -994,7 +977,7 @@ fn sibling_grants(unauthorized_value: &[u8]) -> Vec<Hash> {
 
 /// What the cache seam showed the subject.
 struct CacheSeamV1 {
-    allowed: bool,
+    /// Per subject lookup: whether it returned an allowed cached decision.
     lookups: Vec<bool>,
     hits: u64,
     misses: u64,
@@ -1004,7 +987,7 @@ struct CacheSeamV1 {
     evictions: Vec<u8>,
 }
 
-/// Whether the cached decision of `key` is still returned.
+/// Whether the cached decision of `key` is still returned, and allowed.
 fn lookup(
     sender: &mut ErasureCommandSenderV1<'_>,
     key: &AuthorizationCacheKeyV1,
@@ -1020,7 +1003,7 @@ fn lookup(
             &decision.registry,
         )
         .ok()
-        .map(|cached| cached.is_some())
+        .map(|cached| cached.is_some_and(|decision| decision.is_allowed()))
 }
 
 /// Cache `decision` for `resource`.
@@ -1040,25 +1023,23 @@ fn cache(
         .flatten()
 }
 
-/// Cache the denied sibling's decisions, then invalidate their grants in an
-/// order the value decides; what each invalidation evicted.
+/// Cache the denied sibling's decisions, then invalidate their grants, which
+/// the value derives, in their order; what each invalidation evicted.
 fn sibling_evictions(
     sender: &mut ErasureCommandSenderV1<'_>,
     authority: TimelineId,
     resource: TimelineId,
     unauthorized_value: &[u8],
 ) -> Option<Vec<u8>> {
-    let first = unauthorized_value.first().copied().unwrap_or_default();
     sibling_grants(unauthorized_value)
         .into_iter()
         .map(|grant| DecisionV1::active(authority, grant))
         .collect::<Option<Vec<_>>>()
-        .and_then(|mut siblings| {
+        .and_then(|siblings| {
             siblings
                 .iter()
                 .try_for_each(|decision| cache(sender, resource, decision).map(drop))
                 .map(|()| {
-                    siblings.sort_by_key(|decision| decision.grant_id.as_bytes()[0] ^ first);
                     siblings
                         .iter()
                         .map(|decision| {
@@ -1071,13 +1052,13 @@ fn sibling_evictions(
 }
 
 /// The subject's decision, looked up before and after the denied sibling's
-/// work: `(allowed, lookups, sibling evictions)`.
+/// work: `(lookups, sibling evictions)`.
 fn subject_lookups(
     sender: &mut ErasureCommandSenderV1<'_>,
     authority: TimelineId,
     resource: TimelineId,
     unauthorized_value: &[u8],
-) -> Option<(bool, Vec<bool>, Vec<u8>)> {
+) -> Option<(Vec<bool>, Vec<u8>)> {
     DecisionV1::active(authority, Hash::from_bytes(SUBJECT_GRANT)).and_then(|subject| {
         cache(sender, resource, &subject).and_then(|key| {
             let before = lookup(sender, &key, &subject);
@@ -1086,9 +1067,7 @@ fn subject_lookups(
             before
                 .zip(evictions)
                 .zip(after)
-                .map(|((before, evictions), after)| {
-                    (subject.allowed(), vec![before, after], evictions)
-                })
+                .map(|((before, evictions), after)| (vec![before, after], evictions))
         })
     })
 }
@@ -1121,10 +1100,9 @@ fn cache_seam(store: &Path, unauthorized_value: &[u8]) -> Option<CacheSeamV1> {
                         )
                     })
             })
-            .map(|(allowed, lookups, evictions)| {
+            .map(|(lookups, evictions)| {
                 let counts = host.authorization_cache_counts();
                 CacheSeamV1 {
-                    allowed,
                     lookups,
                     hits: counts.hits,
                     misses: counts.misses,
@@ -1137,7 +1115,8 @@ fn cache_seam(store: &Path, unauthorized_value: &[u8]) -> Option<CacheSeamV1> {
 
 /// The six `NI-CACHE-002` surfaces.
 ///
-/// - Cache API return: `[allowed, [hit per lookup]]`.
+/// - Cache API return: per subject lookup, whether it returned the allowed
+///   cached decision.
 /// - snapshot bytes: the position-relative Event stream.
 /// - Plugin inputs: `[observation, Simulation Time, Tick]`.
 /// - typed errors: the subject's failure, or `none`.
@@ -1162,10 +1141,7 @@ fn cache_surfaces(
         .map(|seam| {
             let hits = seam.lookups.iter().filter(|hit| **hit).count() as u64;
             let records = records([
-                array([
-                    Value::Bool(seam.allowed),
-                    array(seam.lookups.iter().copied().map(Value::Bool)),
-                ]),
+                array(seam.lookups.iter().copied().map(Value::Bool)),
                 Value::Bytes(subject.stream.clone()),
                 Value::Bytes(subject.imports.clone()),
                 array([subject.failure()]),
@@ -1319,13 +1295,14 @@ fn time_surfaces(
     let margin = Duration::from_millis(u64::from(
         run.unauthorized_value.first().copied().unwrap_or_default(),
     ));
+    let watchdog = SIBLING_WATCHDOG + margin;
     std::thread::sleep(offset);
     let start = Instant::now();
     sibling(
         host,
         G_OPS_TIME_SIBLING_OBSERVATION_V1,
         SELECT_OUTPUT,
-        SIBLING_WATCHDOG + margin,
+        watchdog,
     )
     .and_then(|report| {
         report
@@ -1336,7 +1313,13 @@ fn time_surfaces(
     .map(|report| {
         let wall = [
             elapsed(start),
-            format!("{}ms+{}ms", offset.as_millis(), margin.as_millis()).into_bytes(),
+            format!(
+                "{}ms+{}ms/{}ms",
+                offset.as_millis(),
+                margin.as_millis(),
+                watchdog.as_millis()
+            )
+            .into_bytes(),
         ]
         .concat();
         let logs = report
@@ -1484,8 +1467,10 @@ mod tests {
         assert_eq!(plugin_output_digest_v1(&output), G_OPS_OUTPUT_DIGEST_V1);
         let embedded = G_OPS_OUTPUT_DIGEST_V1
             .iter()
-            .map(|byte| format!("\\{byte:02x}"))
-            .collect::<String>();
+            .fold(String::new(), |mut text, byte| {
+                text.push_str(&format!("\\{byte:02x}"));
+                text
+            });
         assert!(GUEST_WAT.contains(&embedded));
     }
 

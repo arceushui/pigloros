@@ -472,6 +472,47 @@ fn other_facet(normalization: NonInterferenceNormalizationV1) -> NonInterference
     }
 }
 
+/// The value-driven details each row keeps only in its excluded bytes.
+fn assert_row_operational_details(
+    fixture_id: &str,
+    value: &[u8],
+    directory: &Path,
+    excluded: &[Vec<u8>],
+) {
+    // One to three sibling decisions, by the value's length.
+    let siblings = value.len() % 3 + 1;
+    match fixture_id {
+        G_OPS_CACHE_FIXTURE_ID_V1 => {
+            let counts = format!("hits: 2, misses: 0, evictions: {siblings} }}");
+            assert!(contains(&excluded[0], counts.as_bytes()), "{counts}");
+            assert!(excluded[0].ends_with(b"us"));
+            assert_eq!(excluded[3], vec![1; siblings]);
+            assert_eq!(
+                excluded[5],
+                directory
+                    .join(G_OPS_STORE_FILE_V1)
+                    .to_string_lossy()
+                    .as_bytes()
+            );
+        }
+        G_OPS_OBSERVABILITY_FIXTURE_ID_V1 => {
+            assert!(contains(&excluded[1], b"call_fuel"));
+            assert_eq!(excluded[2], directory.to_string_lossy().as_bytes());
+        }
+        G_OPS_TIME_FIXTURE_ID_V1 => {
+            let margin = u64::from(value[0]);
+            let wall = format!("{}ms+{margin}ms/{}ms", value.len() % 3, 30_000 + margin);
+            assert!(contains(&excluded[1], wall.as_bytes()), "{wall}");
+            assert!(contains(&excluded[3], &u128::from(margin).to_be_bytes()));
+            assert!(contains(&excluded[4], b"call_fuel"));
+        }
+        _ => assert_eq!(
+            excluded[4],
+            format!("crash-{}.cbor", hex(value)).into_bytes()
+        ),
+    }
+}
+
 #[test]
 fn every_g_ops_capture_normalizes_only_its_row_listed_operational_fields() -> TestResult {
     let host = host()?;
@@ -521,9 +562,7 @@ fn every_g_ops_capture_normalizes_only_its_row_listed_operational_fields() -> Te
                     "{fixture_id} surface {surface}"
                 );
             }
-            if fixture_id == G_OPS_CRASH_FIXTURE_ID_V1 {
-                assert!(contains(&excluded[4], hex(value).as_bytes()));
-            }
+            assert_row_operational_details(fixture_id, value, &directory, &excluded);
             // Any other normalizer for any surface is refused.
             for (surface, normalization) in profile.surface_normalizations.iter().enumerate() {
                 let mut renormalized = captured.clone();

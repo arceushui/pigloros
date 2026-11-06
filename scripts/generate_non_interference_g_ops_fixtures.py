@@ -114,7 +114,7 @@ def padded(record: bytes) -> int:
 
 def cache_records(row: str, variant: str) -> list[bytes]:
     return [
-        cbor([True, [True, True]]),
+        cbor([True, True]),
         cbor(stream()),
         cbor(imports(row, variant)),
         cbor([NONE]),

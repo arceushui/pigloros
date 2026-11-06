@@ -30,13 +30,16 @@ jobs:
         with:
           shared-key: tmp-ni-g-ops-export
       - name: Clippy the changed crates
+        continue-on-error: true
         run: |
           set -uo pipefail
           mkdir -p "${RUNNER_TEMP}/ni-export"
           cargo clippy -p pos-runtime -p pos-experiment --all-features --all-targets --locked -- \
             -D warnings -W clippy::pedantic > "${RUNNER_TEMP}/ni-export/clippy.log" 2>&1 || true
-          grep -E "^(error|warning)" -A12 "${RUNNER_TEMP}/ni-export/clippy.log" | head -n 400
+          grep -E "^(error|warning)" -A12 "${RUNNER_TEMP}/ni-export/clippy.log" > "${RUNNER_TEMP}/ni-export/clippy-findings.log" || true
+          head -n 400 "${RUNNER_TEMP}/ni-export/clippy-findings.log"
       - name: Record the G-OPS executions
+        if: always()
         run: |
           set -uo pipefail
           cargo test -p pos-runtime --all-features --locked --lib authorization_cache \
