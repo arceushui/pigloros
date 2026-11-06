@@ -14,6 +14,11 @@
 //! - Local = Air-Gapped for every artifact comparison: every test above runs
 //!   each fixture in both modes and requires the same exports and the same
 //!   `DVR1`.
+//!
+//! Slice N4 (#1232) adds the hidden participant field and the replay of a
+//! recorded run: `a_differing_factual_suffix_never_reaches_an_artifact` also
+//! varies the field, and
+//! `a_replay_rebuilds_the_export_from_the_recorded_store_alone` replays one.
 
 use pos_conformance::counterfactual::checkpoint::RecomputeCheckpointV1;
 use pos_conformance::counterfactual::dependency::InputDependencyV1;
@@ -30,13 +35,14 @@ use pos_conformance::{
 use pos_core::{
     factual_event_schema_id, ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1,
     ArtifactStateV1, ArtifactTransitionRuleV1, ErasureArtifactClassV1, ErasureReferenceV1,
-    ErasureReplayClaimV1, RegisteredArtifactV1, ReplayClaimEvaluationV1, ReplayClaimEvaluatorV1,
-    FACTUAL_STEP_SCHEMA_ID_V1,
+    ErasureReplayClaimV1, EventStore, RegisteredArtifactV1, ReplayClaimEvaluationV1,
+    ReplayClaimEvaluatorV1, SeqRange, TimelineId, FACTUAL_STEP_SCHEMA_ID_V1,
 };
 use pos_experiment::authoritative_comparison::DivergenceContextV1;
 use pos_experiment::fork_artifacts::{
-    compare_fork_artifacts_v1, run_fork_v1, ForkArtifactExportV1, ForkArtifactKindV1, ForkDriverV1,
-    ForkFixtureV1, ForkRunErrorV1, FACTUAL_TIMELINE_ID_V1, FORK_TIMELINE_ID_V1, LEAD_EVENT_TYPE_V1,
+    compare_fork_artifacts_v1, record_fork_v1, replay_recorded_fork_v1, run_fork_v1,
+    ForkArtifactExportV1, ForkArtifactKindV1, ForkDriverV1, ForkFixtureV1, ForkRunErrorV1,
+    FACTUAL_TIMELINE_ID_V1, FORK_TIMELINE_ID_V1, LEAD_EVENT_TYPE_V1,
 };
 use pos_runtime::counterfactual::coordinator::CounterfactualAdmissionErrorV1;
 use pos_runtime::counterfactual::suffix::CounterfactualSuffixErrorV1;
@@ -107,6 +113,7 @@ fn fixture() -> TestResult<ForkFixtureV1> {
     Ok(ForkFixtureV1 {
         cut_tick: CUT_TICK,
         factual_suffix: Vec::new(),
+        hidden_participant_field: Vec::new(),
         horizon_span: HORIZON_SPAN,
         plan_id: [0x11; 16],
         room_id: "room.alpha".to_owned(),
@@ -453,10 +460,11 @@ fn check_frontier(
 fn a_differing_factual_suffix_never_reaches_an_artifact() -> TestResult {
     let base = fixture()?;
     let expected = run_both(&base)?;
-    let suffixes: [&[&[u8]]; 2] = [&[b"one", b"two"], &[b"other"]];
-    for suffix in suffixes {
+    let suffixes: [(&[&[u8]], &[u8]); 2] = [(&[b"one", b"two"], b"hidden"), (&[b"other"], b"")];
+    for (suffix, hidden) in suffixes {
         let fixture = ForkFixtureV1 {
             factual_suffix: suffix.iter().copied().map(<[u8]>::to_vec).collect(),
+            hidden_participant_field: hidden.to_vec(),
             ..base.clone()
         };
         let actual = run_both(&fixture)?;
@@ -662,5 +670,65 @@ fn refused_runs_export_nothing() -> TestResult {
             ))
         );
     }
+    Ok(())
+}
+
+fn timeline(id: [u8; 16]) -> TimelineId {
+    TimelineId::from_ulid(ulid::Ulid::from_bytes(id))
+}
+
+#[test]
+fn a_replay_rebuilds_the_export_from_the_recorded_store_alone() -> TestResult {
+    let fixture = ForkFixtureV1 {
+        factual_suffix: vec![b"after".to_vec(), b"later".to_vec()],
+        hidden_participant_field: b"hidden".to_vec(),
+        ..fixture()?
+    };
+    let (live, mut recorded) = record_fork_v1(&fixture, ExecutionModeV1::Local)?;
+    assert_eq!(live, run_fork_v1(&fixture, ExecutionModeV1::Local)?);
+    let fork = timeline(FORK_TIMELINE_ID_V1);
+    let head = recorded.store().logical_head(fork)?;
+    // A complete generation stages nothing: the replay appends no Event, and
+    // a Tick it staged would be refused and leave a failed result.
+    for _ in 0..2 {
+        assert_eq!(replay_recorded_fork_v1(&mut recorded)?, live);
+        assert_eq!(recorded.store().logical_head(fork)?, head);
+    }
+
+    // The participant Driver's factual Events carry the hidden field after
+    // the cut only, and the inputs after the cut are the factual suffix.
+    let events = recorded
+        .store()
+        .read(timeline(FACTUAL_TIMELINE_ID_V1), SeqRange::all())?;
+    let payloads = |event_type: &str| -> Vec<(u64, Vec<u8>)> {
+        events
+            .iter()
+            .filter(|event| event.event_type.as_str() == event_type)
+            .map(|event| (event.seq.as_u64(), event.payload.as_slice().to_vec()))
+            .collect()
+    };
+    let beta = payloads("agent.forkrun.beta");
+    assert_eq!(beta.len(), 4);
+    for (seq, payload) in beta {
+        let expected: &[u8] = if seq <= CUT_SEQ {
+            b"factual"
+        } else {
+            b"factualhidden"
+        };
+        assert_eq!(payload, expected, "seq {seq}");
+    }
+    for event_type in ["agent.forkrun.alpha", "agent.forkrun.gamma"] {
+        for (_, payload) in payloads(event_type) {
+            assert_eq!(payload, b"factual");
+        }
+    }
+    let inputs: Vec<Vec<u8>> = payloads("agent.forkrun.input")
+        .into_iter()
+        .map(|(_, payload)| payload)
+        .collect();
+    assert_eq!(
+        inputs,
+        [b"input".to_vec(), b"after".to_vec(), b"later".to_vec()]
+    );
     Ok(())
 }
