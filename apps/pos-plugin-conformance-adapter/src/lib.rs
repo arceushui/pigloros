@@ -15,10 +15,10 @@
 //!    result is `Unavailable` with zero usage.
 //! 3. The payload's `schema` string, when it carries one, is the pinned one, and
 //! 4. the BLAKE3 of the schema member is the digest pinned for the family: either mismatch is a
-//!    non-executed outcome (no EAO1 stream, a non-zero exit).
-//! 4a. A sub-case step that requests `migrate-state` is a typed non-executed `Unsupported`
-//!    outcome (no EAO1 stream, a non-zero exit): a V1 host invokes only `describe`, `reduce`
-//!    and `drive` (ADR-061 revision 4, ADR-062 Revision 8 slice N6).
+//!    non-executed outcome (no EAO1 stream, a non-zero exit). Then a sub-case step that
+//!    requests `migrate-state` is the typed non-executed outcome `Unsupported` (no EAO1
+//!    stream, a non-zero exit): a V1 host invokes only `describe`, `reduce` and `drive`
+//!    (ADR-061 revision 4, ADR-062 Revision 8 slice N6).
 //! 5. The composite is found and verified ([`composite`]): a fault is a non-executed outcome.
 //! 6. A payload that violates the grammar, or that names a piece the composite lacks, is the
 //!    failure `payload-invalid`.
