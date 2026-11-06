@@ -2495,20 +2495,14 @@ fn decode_adapter(value: &Value) -> Result<SubjectAdapterKindV1, ConformanceCont
     })
 }
 fn mode(value: ExecutionModeV1) -> Value {
-    uint(match value {
-        ExecutionModeV1::Local => 0,
-        ExecutionModeV1::AirGapped => 1,
-        ExecutionModeV1::Replay => 2,
-        ExecutionModeV1::Fork => 3,
-    })
+    uint(u64::from(value.wire_code()))
 }
 fn decode_mode(value: &Value) -> Result<ExecutionModeV1, ConformanceContractError> {
-    uint_value(value).and_then(|code| match code {
-        0 => Ok(ExecutionModeV1::Local),
-        1 => Ok(ExecutionModeV1::AirGapped),
-        2 => Ok(ExecutionModeV1::Replay),
-        3 => Ok(ExecutionModeV1::Fork),
-        _ => Err(ConformanceContractError::InvalidEncoding),
+    uint_value(value).and_then(|code| {
+        u8::try_from(code)
+            .ok()
+            .and_then(ExecutionModeV1::from_wire_code)
+            .ok_or(ConformanceContractError::InvalidEncoding)
     })
 }
 fn claim_layer(value: ClaimLayerV1) -> Value {

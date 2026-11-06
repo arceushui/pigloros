@@ -11,7 +11,12 @@ pub const MAX_CONFORMANCE_GOVERNANCE_APPROVERS_V1: usize = 32;
 /// Most items in any governance record list.
 pub const MAX_CONFORMANCE_GOVERNANCE_LIST_ITEMS_V1: usize = 4096;
 
-/// The record array, a list, and a list entry such as a CIA1 `[report_digest, effect]` pair.
+/// The deepest item admitted by `preflight_array_cbor`, which counts the record array as depth
+/// 0 and every item inside an array as one deeper: list items and tuple fields such as a CPR1
+/// identity at 2, and the scalars of a CIA1 `[report_digest, effect]` entry at 3. Any item may
+/// sit at depth 3, including an empty array, so the wiki's "two arrays deep" (a list and its
+/// entry arrays below the record) is only an upper bound here; the per-record decoders refuse
+/// any array whose shape is not the exact record layout.
 const GOVERNANCE_MAX_NESTING_DEPTH: u8 = 3;
 const GOVERNANCE_MAX_IDENTIFIER_BYTES: usize = 128;
 
@@ -447,24 +452,10 @@ pub(crate) fn governance_code<T>(
         .and_then(|code| from_wire_code(code).ok_or(ConformanceGovernanceErrorV1::FieldOutOfBounds))
 }
 
-/// The CNR1 `mode` code.
-pub(crate) const fn governance_mode_code(mode: ExecutionModeV1) -> u64 {
-    match mode {
-        ExecutionModeV1::Local => 0,
-        ExecutionModeV1::AirGapped => 1,
-        ExecutionModeV1::Replay => 2,
-        ExecutionModeV1::Fork => 3,
-    }
-}
-
-pub(crate) const fn governance_mode(code: u64) -> Option<ExecutionModeV1> {
-    match code {
-        0 => Some(ExecutionModeV1::Local),
-        1 => Some(ExecutionModeV1::AirGapped),
-        2 => Some(ExecutionModeV1::Replay),
-        3 => Some(ExecutionModeV1::Fork),
-        _ => None,
-    }
+pub(crate) fn governance_mode(code: u64) -> Option<ExecutionModeV1> {
+    u8::try_from(code)
+        .ok()
+        .and_then(ExecutionModeV1::from_wire_code)
 }
 
 pub(crate) fn governance_claim_layer(code: u64) -> Option<ClaimLayerV1> {

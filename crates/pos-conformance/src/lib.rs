@@ -400,6 +400,31 @@ pub enum ExecutionModeV1 {
     Fork,
 }
 
+impl ExecutionModeV1 {
+    /// Decode the canonical `mode` wire code shared by every record that carries a mode.
+    #[must_use]
+    pub(crate) const fn from_wire_code(code: u8) -> Option<Self> {
+        match code {
+            0 => Some(Self::Local),
+            1 => Some(Self::AirGapped),
+            2 => Some(Self::Replay),
+            3 => Some(Self::Fork),
+            _ => None,
+        }
+    }
+
+    /// The canonical `mode` wire code: `Local=0 | AirGapped=1 | Replay=2 | Fork=3`.
+    #[must_use]
+    pub(crate) const fn wire_code(self) -> u8 {
+        match self {
+            Self::Local => 0,
+            Self::AirGapped => 1,
+            Self::Replay => 2,
+            Self::Fork => 3,
+        }
+    }
+}
+
 /// The independently reportable conformance claim layers.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -2788,24 +2813,17 @@ pub mod strict_codec {
     }
 
     fn enum_mode(value: ExecutionModeV1) -> Value {
-        uint(match value {
-            ExecutionModeV1::Local => 0,
-            ExecutionModeV1::AirGapped => 1,
-            ExecutionModeV1::Replay => 2,
-            ExecutionModeV1::Fork => 3,
-        })
+        uint(u64::from(value.wire_code()))
     }
 
     fn decode_mode(value: &Value) -> Result<ExecutionModeV1, StrictCborError> {
-        match uint_value(value, "execution_mode")? {
-            0 => Ok(ExecutionModeV1::Local),
-            1 => Ok(ExecutionModeV1::AirGapped),
-            2 => Ok(ExecutionModeV1::Replay),
-            3 => Ok(ExecutionModeV1::Fork),
-            _ => Err(StrictCborError::InvalidField {
+        let code = uint_value(value, "execution_mode")?;
+        u8::try_from(code)
+            .ok()
+            .and_then(ExecutionModeV1::from_wire_code)
+            .ok_or_else(|| StrictCborError::InvalidField {
                 field: "execution_mode".to_owned(),
-            }),
-        }
+            })
     }
 
     fn enum_claim_layer(value: ClaimLayerV1) -> Value {

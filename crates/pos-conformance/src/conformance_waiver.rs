@@ -129,7 +129,7 @@ impl GovernanceRecordV1 for ConformanceWaiverV1 {
         encoder.text(&self.waiver_id);
         encoder.bytes(&self.profile_digest);
         encoder.text(&self.case_id);
-        encoder.uint(crate::governance_mode_code(self.mode));
+        encoder.uint(u64::from(self.mode.wire_code()));
         encoder.uint(u64::from(self.claim_layer.wire_code()));
         encoder.uint(self.reason.wire_code());
         encoder.bytes(&self.rationale_digest);
