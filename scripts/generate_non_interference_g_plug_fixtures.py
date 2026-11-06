@@ -151,9 +151,9 @@ def row_surfaces(row: str, variant: str) -> list[bytes]:
     permitted = permitted_input(row, variant)
     payload = drive_payload(row, permitted)
     seqs = list(range(1, TICKS + 1))
-    # `[seq, entity ordinal, type, schema version, cause, correlation, payload hash, payload]`;
-    # the subject Timeline has no owner, so the guest's entity takes ordinal 0.
-    stream = cbor([[seq, 0, EVENT_TYPE, 1, None, None, b3(payload), payload] for seq in seqs])
+    # `[seq, entity ordinal, type, schema version, cause, correlation, payload, payload hash]`
+    # (ADR-127); the subject Timeline has no owner, so the guest's entity takes ordinal 0.
+    stream = cbor([[seq, 0, EVENT_TYPE, 1, None, None, payload, b3(payload)] for seq in seqs])
     rebuilt = rebuild(row, variant, payload, seqs)
     imports = cbor([descriptor_record(), [PLUGIN_NAME, DRIVER_NAME], rebuilt["invocations"]])
     outputs = cbor(rebuilt["outputs"])

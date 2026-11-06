@@ -261,21 +261,17 @@ impl Cursor<'_> {
                 self.return_header(header);
             }
             self.nested(context, |cursor, context| {
-                let code = match cursor.identifier(context)? {
-                    b"SubjectDataEncryption" => 0,
-                    b"SubjectAttributionSigning" => 1,
-                    b"TimelineIntegritySigning" => 2,
-                    b"PluginReleaseSigning" => 3,
-                    b"ExportRecipientEncryption" => 4,
+                let role = match cursor.identifier(context)? {
+                    b"SubjectDataEncryption" => KeyRoleV1::SubjectDataEncryption,
+                    b"SubjectAttributionSigning" => KeyRoleV1::SubjectAttributionSigning,
+                    b"TimelineIntegritySigning" => KeyRoleV1::TimelineIntegritySigning,
+                    b"PluginReleaseSigning" => KeyRoleV1::PluginReleaseSigning,
+                    b"ExportRecipientEncryption" => KeyRoleV1::ExportRecipientEncryption,
+                    b"ConformanceEvaluatorSigning" => KeyRoleV1::ConformanceEvaluatorSigning,
+                    b"ConformanceReportSigning" => KeyRoleV1::ConformanceReportSigning,
                     _ => return Err(Error::InvalidSnapshot),
                 };
-                context.materialize(1).map(|()| match code {
-                    0 => KeyRoleV1::SubjectDataEncryption,
-                    1 => KeyRoleV1::SubjectAttributionSigning,
-                    2 => KeyRoleV1::TimelineIntegritySigning,
-                    3 => KeyRoleV1::PluginReleaseSigning,
-                    _ => KeyRoleV1::ExportRecipientEncryption,
-                })
+                context.materialize(1).map(|()| role)
             })
         })
     }

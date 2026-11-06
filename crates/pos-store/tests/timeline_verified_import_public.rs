@@ -18,8 +18,9 @@ use pos_crypto::{
     signing::generate_keypair,
 };
 use pos_store::{
-    export_timeline_own, import_timeline_verified_v1, memory::MemoryStore, sqlite::SqliteStore,
-    verify_signed_timeline_range_v1, TimelineSignedRangeClaimV1,
+    export_timeline_own, import_timeline_verified_v1, memory::MemoryStore,
+    resolve_timeline_import_public_keys_v1, sqlite::SqliteStore, verify_signed_timeline_range_v1,
+    TimelineSignedRangeClaimV1,
 };
 
 const EXPORT_DIGEST: ErasureReferenceV1 = ErasureReferenceV1::from_digest([201; 32]);
@@ -527,6 +528,44 @@ fn invalid_signature_origin_and_trust_reject_without_partial_import(
     )?;
     let wrong_anchor = [(fixture.anchors[0].0, fixture.anchors[1].1)];
     reject_export(&mut MemoryStore::new(), &fixture, original, &wrong_anchor)?;
+    Ok(())
+}
+
+#[test]
+fn import_trust_anchors_admit_only_timeline_integrity_keys(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = fixture()?;
+    let export = export_timeline_own(
+        &fixture.source,
+        fixture.root,
+        EXPORT_DIGEST,
+        &export_evaluation()?,
+    )?;
+    let mut store = MemoryStore::new();
+    gated(&mut store)?;
+    seed_destination_registry(&mut store, &fixture)?;
+    assert_eq!(
+        resolve_timeline_import_public_keys_v1(&store, &export, &fixture.anchors)?.len(),
+        export.events.len()
+    );
+    // One extra anchor of any other signing role makes the whole trust set invalid.
+    let (_, key) = fixture.anchors[0];
+    for role in [
+        KeyRoleV1::SubjectAttributionSigning,
+        KeyRoleV1::PluginReleaseSigning,
+        KeyRoleV1::ConformanceEvaluatorSigning,
+        KeyRoleV1::ConformanceReportSigning,
+    ] {
+        let mut anchors = fixture.anchors.to_vec();
+        anchors.push((KeyIdentityV1::new("import-owner", role, 1), key));
+        assert!(
+            matches!(
+                resolve_timeline_import_public_keys_v1(&store, &export, &anchors),
+                Err(CoreError::SignatureVerificationFailed)
+            ),
+            "{role:?}"
+        );
+    }
     Ok(())
 }
 
