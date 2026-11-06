@@ -391,11 +391,8 @@ pub enum BundleModeV1 {
     AirGapped,
 }
 impl BundleModeV1 {
-    const fn code(self) -> u64 {
-        match self {
-            Self::Local => 0,
-            Self::AirGapped => 1,
-        }
+    const fn code(self) -> u8 {
+        self.execution().wire_code()
     }
     const fn execution(self) -> ExecutionModeV1 {
         match self {
