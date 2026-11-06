@@ -28,6 +28,9 @@ pub const PLUGIN_OPERATOR_ROLE_V1: &str = "deployment-operator";
 pub const PLUGIN_ROOT_KEY_ID_PREFIX_V1: &str = "ptr1-";
 /// Reserved TPS1 `revoked_key_ids` prefix for PRV1 publisher-key denials.
 pub const PLUGIN_REVOKED_KEY_ID_PREFIX_V1: &str = "pkr1-";
+/// Reserved TPS1 `revoked_key_ids` prefix for conformance signing-key revocations (ADR-062
+/// Revision 8, CTP1): `ckr1-` plus the 64 lowercase hexadecimal DSSE key id.
+pub const CONFORMANCE_REVOKED_KEY_ID_PREFIX_V1: &str = "ckr1-";
 /// Exact length of every `ptr1-` and `pkr1-` TPS1 identifier.
 pub const PLUGIN_TPS1_BRIDGE_ID_BYTES_V1: usize = 69;
 /// Exact length of an `offline_valid_through` value.
