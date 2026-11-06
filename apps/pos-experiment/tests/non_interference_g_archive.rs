@@ -42,10 +42,9 @@ use pos_experiment::non_interference_harness::g_pub::{
     G_PUB_CONTROL_UNAUTHORIZED_V1, G_PUB_STORE_FILE_V1,
 };
 use pos_experiment::non_interference_harness::{
-    publish_non_interference_execution_v1, NonInterferenceForkRunnerV1, NonInterferenceHarnessV1,
-    NonInterferenceLocalProcessRunnerV1, NonInterferenceNonExecutedCauseV1,
-    NonInterferencePreparationV1, NonInterferenceReplayRunnerV1, NonInterferenceSignedExecutionV1,
-    NON_INTERFERENCE_PUBLICATION_DIRECTORY_V1,
+    NonInterferenceForkRunnerV1, NonInterferenceHarnessV1, NonInterferenceLocalProcessRunnerV1,
+    NonInterferenceNonExecutedCauseV1, NonInterferencePreparationV1, NonInterferenceReplayRunnerV1,
+    NonInterferenceSignedExecutionV1, NON_INTERFERENCE_PUBLICATION_DIRECTORY_V1,
 };
 use pos_reference::run_evidence_archive::{
     import_run_evidence_archive_v1, RunEvidenceArchiveErrorV1,
@@ -56,9 +55,6 @@ type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 type Coordinate = (NonInterferenceVariantV1, ExecutionModeV1);
 
 const SUBJECT: &str = env!("CARGO_BIN_EXE_pos-ni-g-pub-subject");
-/// Temporary (removed before review): the directory the matrix test exports
-/// its NIA1 to.
-const EXPORT_ENV: &str = "PIGLOROS_NI_G_ARCHIVE_EXPORT";
 const ROW: &str = G_PUB_ARCHIVE_FIXTURE_ID_V1;
 const VARIANTS: [NonInterferenceVariantV1; 4] = [
     NonInterferenceVariantV1::Success,
@@ -182,18 +178,6 @@ fn checked_in() -> TestResult<BTreeMap<Coordinate, (String, NonInterferenceExecu
     Ok(artifacts)
 }
 
-/// Temporary (removed before review): export the executed NIA1.
-#[cfg_attr(coverage_nightly, coverage(off))]
-fn export(
-    directory: &Path,
-    executed: &BTreeMap<Coordinate, NonInterferenceSignedExecutionV1>,
-) -> TestResult {
-    for execution in executed.values() {
-        publish_non_interference_execution_v1(directory, execution)?;
-    }
-    Ok(())
-}
-
 /// Run every `NI-ARCHIVE-009` coordinate once and return the executed cases.
 fn execute_every_coordinate(
     work: &Path,
@@ -227,9 +211,6 @@ fn every_archive_coordinate_executes_or_stays_typed_non_executed_and_matches_its
 {
     let work = tempfile::tempdir()?;
     let executed = execute_every_coordinate(work.path())?;
-    if let Ok(directory) = std::env::var(EXPORT_ENV) {
-        export(Path::new(&directory), &executed)?;
-    }
     assert_eq!(executed.len(), 12);
     let checked_in = checked_in()?;
     assert_eq!(checked_in.len(), 12);
@@ -385,6 +366,20 @@ fn the_archive_capture_imports_the_rva1_archive_of_the_export() -> TestResult {
             uint(EVENTS)
         ])
     );
+    Ok(())
+}
+
+#[test]
+fn the_archive_capture_records_every_facet_of_an_admitted_import() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let captured = capture(
+        NonInterferenceVariantV1::Success,
+        G_PUB_CONTROL_UNAUTHORIZED_V1,
+        &directory.path().join(G_PUB_STORE_FILE_V1),
+    )?;
+    let archive = &captured.public[1];
+    let digest = *blake3::hash(archive).as_bytes();
+    let imported = import_run_evidence_archive_v1(archive, &digest)?;
     // The member table and the bundle.
     let table = Cbor::Array(
         imported
