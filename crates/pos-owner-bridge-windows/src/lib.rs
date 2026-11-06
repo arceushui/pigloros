@@ -412,6 +412,37 @@ mod tests {
     }
 
     #[test]
+    fn native_host_fixture_child() -> Result<(), Box<dyn std::error::Error>> {
+        if std::env::var_os("PIGLOR_HOST_LIFECYCLE_CHILD").is_some() {
+            crate::Native::native_host_lifecycle()?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn native_host_opens_fresh_environments_and_retires_before_reuse(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let _port = crate::Native::fixed_port_fixture();
+        let mut child = std::process::Command::new(std::env::current_exe()?)
+            .args(["--exact", "tests::native_host_fixture_child", "--nocapture"])
+            .env("PIGLOR_HOST_LIFECYCLE_CHILD", "1")
+            .spawn()?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            if let Some(status) = child.try_wait()? {
+                assert!(status.success());
+                return Ok(());
+            }
+            if std::time::Instant::now() >= deadline {
+                let _stopped = child.kill();
+                let _reaped = child.wait();
+                return Err("native host fixture exceeded its independent wall deadline".into());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    #[test]
     fn runtime_checks_all_members_metadata_cache_and_per_start_binaries(
     ) -> Result<(), Box<dyn std::error::Error>> {
         crate::Native::verify_runtime_cache_fixture()

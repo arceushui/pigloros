@@ -6,10 +6,15 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use pos_owner_bridge::ceremony::driver::CeremonyDriver;
+use pos_owner_bridge::ceremony::plan::CeremonyPlan;
 use pos_owner_bridge::ceremony::timing::RELEASE_WINDOW;
 use pos_owner_bridge::listener::{ListenerConfig, LoopbackListener};
-use pos_owner_bridge::{LoopbackPort, ReplyImage};
-use pos_owner_bridge_codec::{CeremonyId, CeremonyKind, ControlState, OwnerBridgeControlV1};
+use pos_owner_bridge::{CeremonyHost, CleanupStore, LoopbackPort, ReplyImage};
+use pos_owner_bridge_codec::{
+    CeremonyId, CeremonyKind, ControlState, OwnerBridgeControlV1, OwnerUserHandle, PrfInput,
+    WebAuthnChallenge,
+};
 
 use super::events::Events;
 use crate::{
@@ -100,6 +105,56 @@ fn empty_session(native: &mut dyn NativeOperations) {
 /// bounded host cleanup without a page acknowledgement. Malformed CBOR is
 /// discarded before EMPTY -> RECEIVED, so it cannot produce FAILED/RELEASING.
 impl crate::Native {
+    pub(crate) fn native_host_lifecycle() -> TestResult {
+        let _port = Self::fixed_port_fixture();
+        let root = FixtureRoot::new()?;
+        let runtime_path = std::env::var_os("OWNER_BRIDGE_TEST_RUNTIME")
+            .map(PathBuf::from)
+            .ok_or("canonical retained runtime is required by the host fixture")?;
+        let runtime = crate::verify_fixed_runtime(&runtime_path, &root.0)?;
+        let mut store = crate::WindowsCleanupStore::open(root.0.clone())?;
+        let mut host = crate::WindowsOwnerHost::start(runtime, root.0.clone(), store.clone())?;
+        // A second host cannot acquire this host's exclusive listener.
+        let runtime = crate::verify_fixed_runtime(&runtime_path, &root.0)?;
+        assert!(matches!(
+            crate::WindowsOwnerHost::start(runtime, root.0.clone(), store.clone()),
+            Err(pos_owner_bridge::BridgeError::Unavailable(
+                pos_owner_bridge::UnavailableCode::PortUnavailable
+            ))
+        ));
+        for value in [0x10, 0x11] {
+            // Narrow impossible-state injection: Get has no stored credential.
+            // Opening, settings, real document navigation and durable recording
+            // must finish before encoding rejects it, before any mapping or
+            // authenticator call can exist. No fake credential adapter is used.
+            let plan = CeremonyPlan::for_test(
+                CeremonyKind::Get,
+                CeremonyId::from_bytes([value; 16]),
+                WebAuthnChallenge::from_bytes([1; 32]),
+                OwnerUserHandle::from_bytes([2; 32]),
+                PrfInput::from_bytes([3; 32]),
+                Instant::now(),
+            );
+            let reply = host.run(CeremonyDriver::for_test(plan));
+            assert!(matches!(
+                reply.result,
+                Err(pos_owner_bridge::BridgeError::Protocol(
+                    pos_owner_bridge::ProtocolCode::LengthOutOfBounds
+                ))
+            ));
+            let driver = reply
+                .driver
+                .ok_or("completed host did not return its driver")?;
+            assert!(driver.request_clear());
+            assert!(store.records()?.is_empty());
+            assert!(store.folders()?.is_empty());
+            let poll = host.poll_quarantine();
+            assert!(!poll.remaining && poll.driver.is_none());
+        }
+        drop(host);
+        Ok(())
+    }
+
     pub(crate) fn native_window_environment_and_buffers_lifecycle() -> TestResult {
         let _port = Self::fixed_port_fixture();
         let root = FixtureRoot::new()?;
