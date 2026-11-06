@@ -150,7 +150,6 @@ const G_PUB_PLUGIN_ID: PluginId = PluginId::from_ulid(ulid::Ulid::from_parts(1, 
 /// The one simulation entity of every subject signal.
 const G_PUB_ENTITY: EntityId = EntityId::from_ulid(ulid::Ulid::from_parts(1, 0x4750_5542));
 const ATTEMPT_OUTCOME: &str = "admitted";
-const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 const EXPORT_DIGEST: ErasureReferenceV1 = ErasureReferenceV1::from_digest([0x47; 32]);
 const EXPORT_PROVENANCE: ErasureReferenceV1 = ErasureReferenceV1::from_digest([0x48; 32]);
 const BUDGET_UNIT: u64 = 1024 * 1024;
@@ -892,7 +891,7 @@ impl PublicClientV1<'_> {
                 self.runtime
                     .block_on(axum::body::to_bytes(
                         response.into_body(),
-                        MAX_RESPONSE_BYTES,
+                        piglor_gateway::MAX_EVENTS_RESPONSE_BYTES,
                     ))
                     .ok()
                     .map(|bytes| (status, bytes.to_vec()))
