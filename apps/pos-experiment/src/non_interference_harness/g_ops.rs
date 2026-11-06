@@ -101,9 +101,10 @@ use pos_plugin_supervisor::{
     WorkerProgramV1,
 };
 use pos_runtime::community_plugin_host::{
-    pinned_runtime_v1, CommunityPluginCeilingsV1, CommunityPluginExecutionProfileV1,
-    CommunityPluginHostAbiV1, CommunityPluginHostErrorV1, CommunityPluginModeV1, HostInputs,
-    InvocationReportV1, NegotiatedCommunityPluginV1, PluginOutputV1,
+    classify_pass_failure, pinned_runtime_v1, CommunityPluginCeilingsV1,
+    CommunityPluginExecutionProfileV1, CommunityPluginHostAbiV1, CommunityPluginHostErrorV1,
+    CommunityPluginModeV1, HostInputs, InvocationReportV1, NegotiatedCommunityPluginV1,
+    PluginOutputV1,
 };
 use pos_runtime::{
     AuthorizationCacheKeyV1, Driver, ErasureCommandSenderV1, ErasureExecutionHostV1,
@@ -1379,20 +1380,21 @@ fn time_surfaces(
 
 /// Run `ticks` Ticks of a host-owned denied sibling Driver over
 /// `observation` at Simulation Time `selector`, outside the subject's
-/// Timeline, and return its handle.
+/// Timeline: its handle and the error of its last Tick.
 fn sibling_ticks(
     host: &GOpsHostV1,
     observation: &[u8],
     selector: u64,
     ticks: usize,
-) -> Result<CommunityPluginHandleV1, NonInterferenceNonExecutedCauseV1> {
+) -> Result<(CommunityPluginHandleV1, Option<RuntimeError>), NonInterferenceNonExecutedCauseV1> {
     community_driver(host, observation, selector)
         .map(|(mut driver, handle)| {
             let timeline = TimelineId::new();
+            let mut last = None;
             for _ in 0..ticks {
-                drop(driver.step(timeline, ObservationView::empty()));
+                last = driver.step(timeline, ObservationView::empty()).err();
             }
-            handle
+            (handle, last)
         })
         .map_err(|_| NonInterferenceNonExecutedCauseV1::Unavailable)
 }
@@ -1408,7 +1410,10 @@ fn sibling_ticks(
 ///   ["quarantine", trapping sibling's availability]]`.
 /// - support archive: `[["crash-report.cbor", padded crash report length]]`.
 /// - next Tick status: `[subject availability, trapping sibling's
-///   availability, its receipts]` after its refused next Tick.
+///   availability, its receipts, the pass classification of its next
+///   Tick's error]`. The quarantined sibling's next Tick is refused before
+///   the host runs it, so it adds no receipt and is not a community host
+///   failure (`Unrelated`).
 ///
 /// Operationally each keeps category, count and padded length; the
 /// coordinate and the archive's file name, which the value names, are
@@ -1418,54 +1423,61 @@ fn crash_surfaces(
     run: &GOpsRunV1<'_>,
     handle: &CommunityPluginHandleV1,
 ) -> Result<SurfacesV1, NonInterferenceNonExecutedCauseV1> {
-    sibling_ticks(host, run.unauthorized_value, SELECT_DECLARED_FAILURE, 1).and_then(|declared| {
-        sibling_ticks(host, run.unauthorized_value, SELECT_TRAP, 2).and_then(|trapped| {
-            declared
-                .receipts()
-                .last()
-                .and_then(|receipt| receipt.guest_error.clone())
-                .zip(trapped.last_failure())
-                .ok_or(NonInterferenceNonExecutedCauseV1::Unavailable)
-                .map(|(guest, error)| {
-                    let code = debug_text(&guest.code);
-                    let coordinate = guest.canonical_coordinate.unwrap_or_default();
-                    let report = array([
-                        array([text("guest-error"), code.clone()]),
-                        array([text("host-error"), text(error.name())]),
-                        array([text("quarantine"), debug_text(&trapped.availability())]),
-                    ]);
-                    let report_bytes = encode(&report);
-                    let records = records([
-                        array([code, Value::Bool(!coordinate.is_empty())]),
-                        array([text(error.name()), text(&error.to_string())]),
-                        array([
-                            debug_text(&declared.availability()),
-                            debug_text(&trapped.availability()),
-                        ]),
-                        report,
-                        array([array([
-                            text("crash-report.cbor"),
-                            uint(u64::from(padded(&report_bytes))),
-                        ])]),
-                        array([
-                            debug_text(&handle.availability()),
-                            debug_text(&trapped.availability()),
-                            uint(trapped.receipts().len() as u64),
-                        ]),
-                    ]);
-                    let archive = format!("crash-{}.cbor", hex(run.unauthorized_value));
-                    let operational = vec![
-                        padded_facet(&records[0], 0, 1, coordinate.clone()),
-                        padded_facet(&records[1], 0, 1, Vec::new()),
-                        padded_facet(&records[2], 0, 2, Vec::new()),
-                        padded_facet(&records[3], 0, 3, coordinate),
-                        padded_facet(&records[4], 0, 1, archive.into_bytes()),
-                        padded_facet(&records[5], 0, 3, Vec::new()),
-                    ];
-                    surfaces(records, operational)
-                })
-        })
-    })
+    sibling_ticks(host, run.unauthorized_value, SELECT_DECLARED_FAILURE, 1).and_then(
+        |(declared, _)| {
+            sibling_ticks(host, run.unauthorized_value, SELECT_TRAP, 2).and_then(
+                |(trapped, next)| {
+                    declared
+                        .receipts()
+                        .last()
+                        .and_then(|receipt| receipt.guest_error.clone())
+                        .zip(trapped.last_failure())
+                        .ok_or(NonInterferenceNonExecutedCauseV1::Unavailable)
+                        .map(|(guest, error)| {
+                            let code = debug_text(&guest.code);
+                            let coordinate = guest.canonical_coordinate.unwrap_or_default();
+                            let report = array([
+                                array([text("guest-error"), code.clone()]),
+                                array([text("host-error"), text(error.name())]),
+                                array([text("quarantine"), debug_text(&trapped.availability())]),
+                            ]);
+                            let report_bytes = encode(&report);
+                            let records = records([
+                                array([code, Value::Bool(!coordinate.is_empty())]),
+                                array([text(error.name()), text(&error.to_string())]),
+                                array([
+                                    debug_text(&declared.availability()),
+                                    debug_text(&trapped.availability()),
+                                ]),
+                                report,
+                                array([array([
+                                    text("crash-report.cbor"),
+                                    uint(u64::from(padded(&report_bytes))),
+                                ])]),
+                                array([
+                                    debug_text(&handle.availability()),
+                                    debug_text(&trapped.availability()),
+                                    uint(trapped.receipts().len() as u64),
+                                    next.as_ref().map_or(text(NONE), |error| {
+                                        debug_text(&classify_pass_failure(error))
+                                    }),
+                                ]),
+                            ]);
+                            let archive = format!("crash-{}.cbor", hex(run.unauthorized_value));
+                            let operational = vec![
+                                padded_facet(&records[0], 0, 1, coordinate.clone()),
+                                padded_facet(&records[1], 0, 1, Vec::new()),
+                                padded_facet(&records[2], 0, 2, Vec::new()),
+                                padded_facet(&records[3], 0, 3, coordinate),
+                                padded_facet(&records[4], 0, 1, archive.into_bytes()),
+                                padded_facet(&records[5], 0, 4, Vec::new()),
+                            ];
+                            surfaces(records, operational)
+                        })
+                },
+            )
+        },
+    )
 }
 
 #[cfg(test)]
