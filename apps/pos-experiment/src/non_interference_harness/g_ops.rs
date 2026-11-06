@@ -1576,7 +1576,8 @@ mod tests {
         let embedded = G_OPS_OUTPUT_DIGEST_V1
             .iter()
             .fold(String::new(), |mut text, byte| {
-                text.push_str(&format!("\\{byte:02x}"));
+                text.push('\\');
+                text.push_str(&hex(&[*byte]));
                 text
             });
         assert!(GUEST_WAT.contains(&embedded));
