@@ -41,12 +41,14 @@ mod adapter {
     pub use process::{process_identity, WindowsProcessProbe};
     pub use runtime::{verify_fixed_runtime, VerifiedRuntime};
     pub use socket::WindowsLoopbackBinder;
+    pub use store::WindowsCleanupStore;
 }
 
 pub use adapter::{
     cpu_requirements, create_private_directory, process_identity, refuse_overrides,
     require_windows_profile, verify_fixed_runtime, verify_private_directory, CpuFeatures,
-    VerifiedRuntime, WindowsLoopbackBinder, WindowsOwnerHost, WindowsProcessProbe,
+    VerifiedRuntime, WindowsCleanupStore, WindowsLoopbackBinder, WindowsOwnerHost,
+    WindowsProcessProbe,
 };
 
 // Private, SDK-neutral capabilities shared by sibling safe/native modules.

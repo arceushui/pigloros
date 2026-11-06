@@ -2,16 +2,35 @@
 #![forbid(unsafe_code)]
 
 use pos_owner_bridge::{CleanupError, CleanupStore};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+
+mod files;
+mod io;
 
 /// A synchronized handle to the same cleanup store used by the surface STA.
 ///
 /// `OwnerBridge` uses a clone for restart admission. A poisoned lock refuses every
 /// operation; it never turns an incomplete read into an empty record list.
 #[derive(Clone)]
-pub(super) struct WindowsCleanupStore(Arc<Mutex<Box<dyn CleanupStore + Send>>>);
+pub struct WindowsCleanupStore(Arc<Mutex<Box<dyn CleanupStore + Send>>>);
 
 impl WindowsCleanupStore {
+    /// Open the E17 cleanup store beneath an existing private state root.
+    ///
+    /// The local fixed NTFS profile uses flushed, exclusive pending files,
+    /// no-replace write-through publication and exact readback. Its durability
+    /// claim is conditional on the storage assumptions accepted in ADR-110 E17.
+    /// Clones share the same scan/write provenance and synchronization.
+    ///
+    /// # Errors
+    ///
+    /// Refuses an unprotected root, non-DOS path, reparse ancestry, unsupported
+    /// volume or failed native/filesystem admission.
+    pub fn open(root: PathBuf) -> Result<Self, CleanupError> {
+        files::Files::open(root).map(Self::new)
+    }
+
     pub(super) fn new(store: impl CleanupStore + Send + 'static) -> Self {
         Self(Arc::new(Mutex::new(Box::new(store))))
     }

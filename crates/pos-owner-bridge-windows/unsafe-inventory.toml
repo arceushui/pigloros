@@ -2,6 +2,46 @@
 # `line`, `function`, `operation`, `invariant` and `hosted_test`. The rules and
 # their enforcement live in scripts/check_owner_bridge_unsafe_policy.py.
 [[block]]
+file = "src/ffi/cleanup.rs"
+line = 30
+function = "cleanup_path_ntfs"
+operation = "GetVolumePathNameW"
+invariant = "Owned NUL-terminated qualified DOS path and distinct initialized bounded mount output remain live; validate the returned terminator before use."
+hosted_test = "cleanup_store_publishes_exact_records_and_recovery_uses_shared_provenance"
+
+[[block]]
+file = "src/ffi/cleanup.rs"
+line = 38
+function = "cleanup_path_ntfs"
+operation = "GetDriveTypeW"
+invariant = "Owned terminated mount point from the successful volume query; read-only classification must be DRIVE_FIXED before store admission."
+hosted_test = "cleanup_store_publishes_exact_records_and_recovery_uses_shared_provenance"
+
+[[block]]
+file = "src/ffi/cleanup.rs"
+line = 44
+function = "cleanup_path_ntfs"
+operation = "GetVolumeInformationW"
+invariant = "Retained terminated mount string and initialized independent filesystem-name output; no unused output or volume-wide flush; require NTFS."
+hosted_test = "cleanup_store_publishes_exact_records_and_recovery_uses_shared_provenance"
+
+[[block]]
+file = "src/ffi/cleanup.rs"
+line = 66
+function = "cleanup_file_volume"
+operation = "GetVolumeInformationByHandleW"
+invariant = "Borrowed handle stays owned by the live File; distinct initialized scalar/name outputs; require NTFS and consistent volume serial for actual opened files."
+hosted_test = "cleanup_store_publishes_exact_records_and_recovery_uses_shared_provenance"
+
+[[block]]
+file = "src/ffi/cleanup.rs"
+line = 89
+function = "publish_cleanup"
+operation = "MoveFileExW MOVEFILE_WRITE_THROUGH"
+invariant = "Owned terminated same-directory paths; pending File was flushed and dropped; WRITE_THROUGH alone never requests copy or replacement; preserve both possible names on failure."
+hosted_test = "cleanup_store_publishes_exact_records_and_recovery_uses_shared_provenance"
+
+[[block]]
 file = "src/ffi/registry.rs"
 line = 53
 function = "local_machine_text"

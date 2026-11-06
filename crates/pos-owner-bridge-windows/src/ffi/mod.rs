@@ -1,6 +1,7 @@
 #![cfg(windows)]
 
 mod buffers;
+mod cleanup;
 mod creation;
 mod directory;
 mod environment;
