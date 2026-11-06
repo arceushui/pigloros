@@ -108,8 +108,8 @@ impl CommunityPluginSubjectOutcomeV1 {
     /// The result precedence is:
     /// - a gate error is `Refused`;
     /// - else a receipt governs: its failure is `Trapped` for a `ComponentTrap`, `Refused` for
-    ///   the class `PreExecutionRejection` and `Failed` otherwise, and with no failure its disposition gives `Staged`,
-    ///   `Committed` or `Discarded`;
+    ///   the class `PreExecutionRejection` and `Failed` otherwise, and with no failure its
+    ///   disposition gives `Staged`, `Committed` or `Discarded`;
     /// - else the pass's `launch_failure` is `Trapped`, `Refused` or `Failed` the same way;
     /// - else `NotRun`.
     #[must_use]
