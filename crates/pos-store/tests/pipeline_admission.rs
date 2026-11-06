@@ -97,19 +97,38 @@ impl AdmissionClock for TestClock {
 }
 
 fn stores(clock: &TestClock) -> Vec<(&'static str, Box<dyn Harness>)> {
-    vec![
-        (
-            "memory",
-            Box::new(MemoryStore::with_clock(Box::new(clock.clone()))),
-        ),
-        (
-            "sqlite",
-            Box::new(ok(SqliteStore::open_with_clock(
-                ":memory:",
-                Box::new(clock.clone()),
-            ))),
-        ),
-    ]
+    vec![memory_store(clock), sqlite_store(clock)]
+}
+
+fn memory_store(clock: &TestClock) -> (&'static str, Box<dyn Harness>) {
+    (
+        "memory",
+        Box::new(MemoryStore::with_clock(Box::new(clock.clone()))),
+    )
+}
+
+fn sqlite_store(clock: &TestClock) -> (&'static str, Box<dyn Harness>) {
+    (
+        "sqlite",
+        Box::new(ok(SqliteStore::open_with_clock(
+            ":memory:",
+            Box::new(clock.clone()),
+        ))),
+    )
+}
+
+/// Run `check` on each store at once, each store opened in its own thread. The stores share
+/// nothing but a clock that `check` never advances, and the domain-maximum checks below would
+/// otherwise run one store after the other.
+fn on_each_store_at_once(clock: &TestClock, check: fn(&str, &mut dyn Harness)) {
+    std::thread::scope(|scope| {
+        for open in [memory_store, sqlite_store] {
+            scope.spawn(move || {
+                let (name, mut store) = open(clock);
+                check(name, store.as_mut());
+            });
+        }
+    });
 }
 
 fn open_file(path: &Path, clock: &TestClock) -> SqliteStore {
@@ -3375,10 +3394,7 @@ fn assert_chunks_and_collapse(name: &str, store: &mut dyn Harness) {
 /// exactly the oldest, and refuses six checkpoints or two history entries.
 #[test]
 fn the_store_recomputes_the_chunks_and_the_collapse_of_large_windows() {
-    let clock = TestClock::at(1_000);
-    for (name, mut store) in stores(&clock) {
-        assert_chunks_and_collapse(name, store.as_mut());
-    }
+    on_each_store_at_once(&TestClock::at(1_000), assert_chunks_and_collapse);
 }
 
 /// The store part of conformance test 4 of ADR-064 R4, a truncated window,
@@ -3404,10 +3420,7 @@ fn assert_truncated_window(name: &str, store: &mut dyn Harness) {
 /// fold node; the assembly tests of `pos_core` cover that vector.)
 #[test]
 fn the_store_recomputes_the_collapse_of_a_truncated_window() {
-    let clock = TestClock::at(1_000);
-    for (name, mut store) in stores(&clock) {
-        assert_truncated_window(name, store.as_mut());
-    }
+    on_each_store_at_once(&TestClock::at(1_000), assert_truncated_window);
 }
 
 /// The contents of `count` verified-prefix nodes.
@@ -3534,10 +3547,7 @@ fn assert_fit_and_reserve(name: &str, store: &mut dyn Harness) {
 /// rest exceeds 262,141 edges is refused.
 #[test]
 fn the_store_recomputes_the_fit_and_refuses_a_rest_over_the_reserve() {
-    let clock = TestClock::at(1_000);
-    for (name, mut store) in stores(&clock) {
-        assert_fit_and_reserve(name, store.as_mut());
-    }
+    on_each_store_at_once(&TestClock::at(1_000), assert_fit_and_reserve);
 }
 
 /// The node part of the reserved headroom, on one store: a rest of 65,535
@@ -3591,8 +3601,5 @@ fn assert_node_reserve(name: &str, store: &mut dyn Harness) {
 /// exactly 65,534, an orphan ingress node included.
 #[test]
 fn the_store_refuses_a_rest_over_the_node_reserve_and_fits_one_at_it() {
-    let clock = TestClock::at(1_000);
-    for (name, mut store) in stores(&clock) {
-        assert_node_reserve(name, store.as_mut());
-    }
+    on_each_store_at_once(&TestClock::at(1_000), assert_node_reserve);
 }

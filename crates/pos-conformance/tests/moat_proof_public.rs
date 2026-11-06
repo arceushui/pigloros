@@ -1463,22 +1463,31 @@ fn malformed_canonical_records_reach_closed_decoder_boundaries() {
     let mut paths = Vec::new();
     structural_paths(&exhaustive_value, &mut Vec::new(), &mut paths);
     assert!(paths.len() > 512);
-    let mut mutant = exhaustive_value.clone();
-    for path in paths {
-        let displaced = replace_at_path(
-            &mut mutant,
-            &path,
-            ciborium::Value::Tag(u64::MAX, Box::new(ciborium::Value::Null)),
-        );
-        expect_err(&MoatProofEvidenceV1::from_canonical_cbor(&encode_value(
-            &mutant,
-        )));
-        drop(replace_at_path(&mut mutant, &path, displaced));
-    }
-    assert_eq!(
-        mutant, exhaustive_value,
-        "tag mutation helper must restore its input"
-    );
+    // Every path is mutated and restored on one of four copies at once; each copy must come
+    // back equal to its input.
+    let exhaustive_value = &exhaustive_value;
+    std::thread::scope(|scope| {
+        for chunk in paths.chunks(paths.len().div_ceil(4)) {
+            scope.spawn(move || {
+                let mut mutant = exhaustive_value.clone();
+                for path in chunk {
+                    let displaced = replace_at_path(
+                        &mut mutant,
+                        path,
+                        ciborium::Value::Tag(u64::MAX, Box::new(ciborium::Value::Null)),
+                    );
+                    expect_err(&MoatProofEvidenceV1::from_canonical_cbor(&encode_value(
+                        &mutant,
+                    )));
+                    drop(replace_at_path(&mut mutant, path, displaced));
+                }
+                assert_eq!(
+                    &mutant, exhaustive_value,
+                    "tag mutation helper must restore its input"
+                );
+            });
+        }
+    });
     expect_err(&MoatProofEvidenceV1::from_canonical_cbor(&encode_value(
         &replace_field(
             value.clone(),
