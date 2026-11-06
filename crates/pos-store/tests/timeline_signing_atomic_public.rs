@@ -333,6 +333,55 @@ fn prepared_append_rejects_wrong_roles_before_crypto_in_both_adapters(
     reject_prepared_authorization(&mut SqliteStore::open_in_memory()?)
 }
 
+/// A registered, active conformance signing key is refused as the Timeline
+/// signer before either crypto callback runs.
+fn reject_prepared_conformance_signer(
+    store: &mut dyn EventStore,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (_material, mut registry, timeline, authorization) = prepared_fixture(store, false)?;
+    let calls = CallbackCounts::default();
+    for role in [
+        KeyRoleV1::ConformanceEvaluatorSigning,
+        KeyRoleV1::ConformanceReportSigning,
+    ] {
+        let (key, _) = generate_keypair();
+        let conformance = SigningKeyMaterial::new(key);
+        let identity = KeyIdentityV1::new("timeline-owner", role, 1);
+        registry.register_key(KeyRegistrationV1::new(
+            identity,
+            conformance.material_digest(),
+            Some(conformance.public_verification_key()),
+        ))?;
+        store.save_key_registry(&registry)?;
+        let request = PreparedSubjectAppendAuthorizationV1 {
+            signing_identity: identity,
+            signing_material_digest: conformance.material_digest(),
+            signing_public_key: conformance.public_verification_key(),
+            ..authorization
+        };
+        let error = calls
+            .append(store, timeline, &registry, &request)
+            .err()
+            .ok_or("a conformance signer was accepted for a Timeline Event")?;
+        assert!(
+            error
+                .to_string()
+                .contains("Timeline signing authorization: key role is not admitted"),
+            "{error}"
+        );
+    }
+    calls.assert_not_invoked();
+    assert!(store.read_own(timeline, SeqRange::all())?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn prepared_append_refuses_a_conformance_signer_in_both_adapters(
+) -> Result<(), Box<dyn std::error::Error>> {
+    reject_prepared_conformance_signer(&mut MemoryStore::new())?;
+    reject_prepared_conformance_signer(&mut SqliteStore::open_in_memory()?)
+}
+
 fn reject_prepared_missing_timeline(
     store: &mut dyn EventStore,
 ) -> Result<(), Box<dyn std::error::Error>> {

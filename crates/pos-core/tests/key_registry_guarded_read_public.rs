@@ -167,12 +167,14 @@ fn lifecycle(owner: &str, role: KeyRoleV1) -> Fallible<Vec<(KeyRegistryStateV1, 
     ])
 }
 
-const ROLES: [KeyRoleV1; 5] = [
+const ROLES: [KeyRoleV1; 7] = [
     KeyRoleV1::SubjectDataEncryption,
     KeyRoleV1::SubjectAttributionSigning,
     KeyRoleV1::TimelineIntegritySigning,
     KeyRoleV1::PluginReleaseSigning,
     KeyRoleV1::ExportRecipientEncryption,
+    KeyRoleV1::ConformanceEvaluatorSigning,
+    KeyRoleV1::ConformanceReportSigning,
 ];
 
 #[test]
