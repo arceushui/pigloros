@@ -885,6 +885,53 @@ fn a_trap_matches_only_a_trapped_expectation_of_its_class() -> TestResult {
     Ok(())
 }
 
+/// ADR-061 R13: a trap matches only a `trapped` expectation. A `digest` expectation whose value
+/// does not depend on the pass, an `absent` one and a `malformed` one never match a sub-case
+/// whose pass trapped, so the trap stays operational and the case is `Unavailable`.
+#[test]
+fn a_trap_under_another_expectation_never_matches_and_is_unavailable() -> TestResult {
+    let mut trapping = prefix();
+    trapping.push(pass_step(vec![member("p")]));
+    let blake3_of = json!({"what": "blake3_of", "input": "x"});
+    let value = hex::encode(blake3::hash(b"x").as_bytes());
+    let mut nested = subcase("mal.6", trapping.clone(), json!({"kind": "malformed"}));
+    nested["nested"] = json!(hex::encode(blake3::hash(b"manifest-a").as_bytes()));
+    let documents = [
+        subcase("ind.1", trapping.clone(), digest_expect(&blake3_of, &value)),
+        subcase(
+            "del.1",
+            {
+                let mut steps = trapping.clone();
+                steps.push(scan_step("m", &["events", "state", "outcome"], "p"));
+                steps
+            },
+            absent("m", "p"),
+        ),
+        nested,
+    ];
+    for document in documents {
+        let mut fake = Fake::default();
+        fake.passes.push_back(Ok(vec![trapped("unreachable")]));
+        let record = run(&mut fake, &document)?;
+        assert!(!record.matched, "{document}");
+        for family in FixtureFamily::ALL {
+            let decided = crate::map::case_result("c", *family, std::slice::from_ref(&record));
+            assert_eq!(
+                decided.result,
+                pos_reference::evaluator::SubjectResult::Unavailable,
+                "{family:?} {document}"
+            );
+        }
+    }
+    // The control: the same digest sub-case whose pass commits matches.
+    let record = run(
+        &mut Fake::default(),
+        &subcase("ind.1", trapping, digest_expect(&blake3_of, &value)),
+    )?;
+    assert!(record.matched);
+    Ok(())
+}
+
 #[test]
 fn an_operational_outcome_matches_no_expectation() -> TestResult {
     let crashed = outcome(

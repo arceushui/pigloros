@@ -944,6 +944,39 @@ fn r13_a_trap_of_another_class_or_an_unexpected_trap_is_unavailable() -> TestRes
         observe_attempt(&unexpected)?.result,
         SubjectResult::Unavailable
     );
+    // A trap under a `digest` expectation whose value does not depend on the pass: `ind.3` with
+    // the observation `trap` and a `blake3_of` compute, which the trap cannot satisfy.
+    let value = blake3::hash(b"x").to_hex().to_string();
+    let digest = one_subcase(family, "ind.3", |subcase| {
+        for step in pass_steps(subcase) {
+            step["observation"] = TRAP_OBSERVATION_HEX.into();
+        }
+        subcase["expect"] = json!({
+            "kind": "digest",
+            "compute": {"what": "blake3_of", "input": "x"},
+            "value": value.as_str(),
+        });
+    })?;
+    assert_eq!(observe_attempt(&digest)?.result, SubjectResult::Unavailable);
+    Ok(())
+}
+
+/// The observation `trap`, as hexadecimal: the guests' `drive` logs once and traps on it.
+const TRAP_OBSERVATION_HEX: &str = "74726170";
+
+/// ADR-061 R13: a trap under an `absent` expectation is `Unavailable`: `del.1` with the
+/// observation `trap` stops at the pass, and its scan never runs.
+#[test]
+fn r13_a_trap_under_an_absent_expectation_is_unavailable() -> TestResult {
+    let attempt = one_subcase(FixtureFamily::DeletionRedaction, "del.1", |subcase| {
+        for step in pass_steps(subcase) {
+            step["observation"] = TRAP_OBSERVATION_HEX.into();
+        }
+    })?;
+    assert_eq!(
+        observe_attempt(&attempt)?.result,
+        SubjectResult::Unavailable
+    );
     Ok(())
 }
 

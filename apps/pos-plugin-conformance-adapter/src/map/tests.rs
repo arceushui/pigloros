@@ -634,15 +634,24 @@ fn a_trap_is_operational_unless_its_subcase_matched_it() {
         assert_eq!(decided.result, SubjectResult::Unavailable, "{family:?}");
         assert_eq!(decided.usage, ResourceUsage::default());
     }
-    let expected = [matched("a"), trap_record("b", "unreachable", true)];
-    let decided = case_result("c", FixtureFamily::ResourceExhaustion, &expected);
-    assert_eq!(failure_of(&decided), Some("resource-limit"));
-    assert_eq!(decided.usage, ResourceUsage::default());
+    // A matched trap is a result in `independent-evaluation` only (ADR-061 R13): in every other
+    // family it is operational, so it cannot become an output or a family failure code.
+    for family in FixtureFamily::ALL {
+        let expected = [matched("a"), trap_record("b", "unreachable", true)];
+        let decided = case_result("c", *family, &expected);
+        let reproduced = *family == FixtureFamily::IndependentEvaluation;
+        assert_eq!(
+            decided.result == SubjectResult::Unavailable,
+            !reproduced,
+            "{family:?}"
+        );
+        assert_eq!(decided.usage, ResourceUsage::default());
+    }
 }
 
-/// ADR-061 R13: the entry of a matched trap carries its class and the `drive` export, so the
-/// evaluator compares them with the oracle; a matched record of `independent-evaluation` that is
-/// neither a digest nor a trap is a mismatch.
+/// ADR-061 R13: the entry of a matched trap of `independent-evaluation` carries its class and
+/// the `drive` export, so the evaluator compares them with the oracle; a matched record of that
+/// family that is neither a digest nor a trap is a mismatch.
 #[test]
 fn the_entry_of_a_matched_trap_is_its_class_and_export() {
     let records = [
@@ -665,17 +674,6 @@ fn the_entry_of_a_matched_trap_is_its_class_and_export() {
     );
     let opening = head("independent-evaluation");
     assert_eq!(seen, format!("{opening}{entries}]}}}}\n"));
-    // The entry of a matched trap is the same in every canonical family.
-    let seen = output_of(&case_result(
-        "c",
-        FixtureFamily::Positive,
-        &[trap_record("pos.9", "unreachable", true)],
-    ));
-    let entry = concat!(
-        "{\"class\":\"unreachable\",\"export\":\"drive\",",
-        "\"id\":\"pos.9\",\"kind\":\"trapped\"}"
-    );
-    assert!(seen.contains(entry), "{seen}");
 }
 
 #[test]

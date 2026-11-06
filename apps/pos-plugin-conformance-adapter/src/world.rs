@@ -856,8 +856,17 @@ impl Run<'_> {
         if let ExpectV1::Digest(digest) = &subcase.expect {
             self.record.computed = self.compute(&digest.compute);
         }
-        self.record.matched = self.matches(subcase, result, pieces);
+        self.record.matched = self.decides(subcase, result, pieces);
         self.record
+    }
+
+    /// Whether the sub-case matched: a trap matches only a `trapped` expectation, whatever
+    /// the record shows for a `digest`, `absent` or `malformed` one (ADR-061 R13), and every
+    /// other result is compared with [`Self::matches()`].
+    fn decides(&self, subcase: &SubCaseV1, result: Option<SubResultV1>, pieces: &PiecesV1) -> bool {
+        let trapped = matches!(result, Some(SubResultV1::Trapped { .. }));
+        let expects_trap = matches!(subcase.expect, ExpectV1::Trapped(_));
+        (!trapped || expects_trap) && self.matches(subcase, result, pieces)
     }
 
     /// The value of a `compute`; `None` when it does not exist.

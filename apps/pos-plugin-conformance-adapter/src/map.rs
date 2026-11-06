@@ -362,13 +362,16 @@ const fn greater(left: u64, right: u64) -> u64 {
     }
 }
 
-/// Whether the sub-result of `record` is operational: an operational fault, or a trap that its
-/// sub-case did not expect with this class (an unverified trap is operational, ADR-061
-/// revision 8 O-18 as narrowed by R13).
-fn is_operational(record: &SubCaseRecordV1) -> bool {
+/// Whether the sub-result of `record` in a case of `family` is operational: an operational
+/// fault, or a trap other than one that a sub-case of `independent-evaluation` expected with
+/// this class and matched (an unverified trap is operational, ADR-061 revision 8 O-18 as
+/// narrowed by R13).
+fn is_operational(family: FixtureFamily, record: &SubCaseRecordV1) -> bool {
     match of_record(record) {
         Some(SubResultV1::Operational) => true,
-        Some(SubResultV1::Trapped { .. }) => !record.matched,
+        Some(SubResultV1::Trapped { .. }) => {
+            !(record.matched && family == FixtureFamily::IndependentEvaluation)
+        }
         Some(
             SubResultV1::Committed { .. }
             | SubResultV1::Refused { .. }
@@ -380,8 +383,8 @@ fn is_operational(record: &SubCaseRecordV1) -> bool {
 
 /// The result of the case `case_id` of `family` over the records of its sub-cases.
 ///
-/// 1. If any sub-result is operational, or is a trap that its sub-case did not match, the case
-///    is `Unavailable`.
+/// 1. If any sub-result is operational, or is a trap other than a matched one of
+///    `independent-evaluation`, the case is `Unavailable`.
 /// 2. Else for a `canonical-output` family it is `Output`, the canonical record.
 /// 3. Else it is the family's fixed failure when every sub-case matched, and
 ///    `subcase-mismatch` otherwise.
@@ -394,7 +397,7 @@ pub fn case_result(
     family: FixtureFamily,
     records: &[SubCaseRecordV1],
 ) -> CaseResultV1 {
-    if records.iter().any(is_operational) {
+    if records.iter().any(|record| is_operational(family, record)) {
         return CaseResultV1 {
             result: SubjectResult::Unavailable,
             usage: ResourceUsage::default(),
@@ -490,8 +493,9 @@ fn entry(family: FixtureFamily, record: &SubCaseRecordV1) -> JsonV1 {
     }
 }
 
-/// The entry of a matched record that is no family's own kind: a trap gives its class and the
-/// `drive` export (a pass step invokes only `drive`, ADR-061 R13), anything else is a mismatch.
+/// The entry of a matched record that is no family's own kind: a trap (which reaches here only
+/// in `independent-evaluation`, [`case_result()`]) gives its class and the `drive` export (a
+/// pass step invokes only `drive`, ADR-061 R13), anything else is a mismatch.
 fn trap_entry(id: JsonV1, record: &SubCaseRecordV1) -> JsonV1 {
     match of_record(record) {
         Some(SubResultV1::Trapped { class }) => JsonV1::object([
