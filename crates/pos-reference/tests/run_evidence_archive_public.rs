@@ -205,8 +205,7 @@ fn every_header_byte_is_canonical() {
         edited(|bytes| bytes[..100].fill(b'a')),
         Err(Error::InvalidEncoding)
     );
-    let mut empty_name = header(b"", 7, 0);
-    empty_name[..4].fill(0);
+    let empty_name = header(b"", 7, 0);
     assert_eq!(
         edited(|bytes| bytes[..512].copy_from_slice(&empty_name)),
         Err(Error::InvalidEncoding)

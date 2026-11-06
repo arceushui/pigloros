@@ -287,11 +287,14 @@ fn unsigned(value: &Value) -> Option<u64> {
     }
 }
 
-fn nullable(value: &Value) -> Option<Option<u64>> {
+/// A field that is neither null nor an unsigned integer.
+struct NotNullable;
+
+fn nullable(value: &Value) -> Result<Option<u64>, NotNullable> {
     if value.is_null() {
-        Some(None)
+        Ok(None)
     } else {
-        unsigned(value).map(Some)
+        unsigned(value).map(Some).ok_or(NotNullable)
     }
 }
 
@@ -315,9 +318,7 @@ fn timeline_shape(data: &[u8]) -> Option<TimelineShape> {
         let owner = nullable(&fields[2]);
         let head = unsigned(&fields[3]);
         match (mode, named, owner, head) {
-            (Some(mode), true, Some(owner), Some(head)) => {
-                Some(TimelineShape { mode, owner, head })
-            }
+            (Some(mode), true, Ok(owner), Some(head)) => Some(TimelineShape { mode, owner, head }),
             _ => None,
         }
     })
@@ -328,13 +329,13 @@ fn event_shape(data: &[u8]) -> Option<EventShape> {
         let seq = unsigned(&fields[0]);
         let entity = unsigned(&fields[1]);
         let typed = fields[2].is_text()
-            && unsigned(&fields[3]).is_some_and(|version| version <= u64::from(u32::MAX))
+            && unsigned(&fields[3]).is_some_and(|version| u32::try_from(version).is_ok())
             && fields[6].is_bytes()
             && fields[7].as_bytes().is_some_and(|hash| hash.len() == 32);
         let cause = nullable(&fields[4]);
         let correlation = nullable(&fields[5]);
         match (seq, entity, typed, cause, correlation) {
-            (Some(seq), Some(entity), true, Some(cause), Some(correlation)) => Some(EventShape {
+            (Some(seq), Some(entity), true, Ok(cause), Ok(correlation)) => Some(EventShape {
                 seq,
                 entity,
                 cause,

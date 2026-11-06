@@ -102,7 +102,7 @@ fn ustar(entries: &[(&str, &[u8])]) -> Vec<u8> {
         header[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
         bytes.extend(header);
         bytes.extend_from_slice(data);
-        while bytes.len() % 512 != 0 {
+        while !bytes.len().is_multiple_of(512) {
             bytes.push(0);
         }
     }

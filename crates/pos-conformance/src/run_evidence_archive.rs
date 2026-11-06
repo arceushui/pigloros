@@ -364,11 +364,14 @@ fn as_uint(value: &Value) -> Option<u64> {
     }
 }
 
-/// `Some(None)` for null, `Some(Some(n))` for an unsigned integer.
-fn as_optional_uint(value: &Value) -> Option<Option<u64>> {
+/// A field that is neither null nor an unsigned integer.
+struct NotOptionalUint;
+
+/// `Ok(None)` for null, `Ok(Some(n))` for an unsigned integer.
+fn as_optional_uint(value: &Value) -> Result<Option<u64>, NotOptionalUint> {
     match value {
-        Value::Null => Some(None),
-        other => as_uint(other).map(Some),
+        Value::Null => Ok(None),
+        other => as_uint(other).map(Some).ok_or(NotOptionalUint),
     }
 }
 
@@ -387,7 +390,11 @@ fn event_fields(data: &[u8]) -> Option<EventFields> {
             && matches!(&items[7], Value::Bytes(hash) if hash.len() == 32);
         as_uint(&items[0])
             .zip(as_uint(&items[1]))
-            .zip(as_optional_uint(&items[4]).zip(as_optional_uint(&items[5])))
+            .zip(
+                as_optional_uint(&items[4])
+                    .ok()
+                    .zip(as_optional_uint(&items[5]).ok()),
+            )
             .filter(|_| typed)
             .map(|((seq, entity), (cause, correlation))| EventFields {
                 seq,
@@ -408,7 +415,7 @@ fn timeline_fields(data: &[u8]) -> Option<TimelineFields> {
     canonical_fields(data, TIMELINE_FIELDS).and_then(|items| {
         let named = matches!(items[1], Value::Null | Value::Text(_));
         as_uint(&items[0])
-            .zip(as_optional_uint(&items[2]))
+            .zip(as_optional_uint(&items[2]).ok())
             .zip(as_uint(&items[3]))
             .filter(|_| named)
             .map(|((mode, owner), head)| TimelineFields { mode, owner, head })
@@ -427,7 +434,7 @@ fn rules_hold(timeline: &TimelineFields, events: &[EventFields]) -> bool {
                 (u64::from(timeline.owner.is_some()), 0_u64),
                 |(entities, correlations), (event, seq)| {
                     (event.seq == seq
-                        && event.cause.is_none_or(|cause| cause >= 1 && cause < seq)
+                        && event.cause.is_none_or(|cause| (1..seq).contains(&cause))
                         && event.entity <= entities
                         && event
                             .correlation
