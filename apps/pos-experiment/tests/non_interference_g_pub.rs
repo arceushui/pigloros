@@ -16,7 +16,7 @@
 //! - be equal at every surface;
 //! - have the same result digest in every mode;
 //! - match the independently derived expected digest in `execution-matrix.json`
-//!   (scripts/generate_non_interference_g_pub_fixtures.py);
+//!   (`scripts/generate_non_interference_g_pub_fixtures.py`);
 //! - equal the checked-in NIA1 in every body field except its provenance and
 //!   signature.
 //!
@@ -368,25 +368,22 @@ fn the_checked_in_g_pub_evidence_is_verifier_accepted_and_flips_exactly_its_case
     assert_eq!(cases.len(), 192);
     for case in cases {
         let id = case["case_id"].as_str().ok_or("no case id")?;
-        match accepted.get(id) {
-            Some((address, result_digest)) => {
-                assert_eq!(case["executed"], json!(true), "{id}");
-                assert_eq!(
-                    case["expected_result"],
-                    json!({"equal": true, "first_divergence": null, "nia1_content_digest": address}),
-                    "{id}"
-                );
-                assert_eq!(
-                    case["expected_result_digest"],
-                    json!(hex(result_digest)),
-                    "{id}"
-                );
-            }
-            None => {
-                assert_eq!(case["executed"], json!(false), "{id}");
-                assert_eq!(case["expected_result"], Value::Null, "{id}");
-                assert_eq!(case["expected_result_digest"], Value::Null, "{id}");
-            }
+        if let Some((address, result_digest)) = accepted.get(id) {
+            assert_eq!(case["executed"], json!(true), "{id}");
+            assert_eq!(
+                case["expected_result"],
+                json!({"equal": true, "first_divergence": null, "nia1_content_digest": address}),
+                "{id}"
+            );
+            assert_eq!(
+                case["expected_result_digest"],
+                json!(hex(result_digest)),
+                "{id}"
+            );
+        } else {
+            assert_eq!(case["executed"], json!(false), "{id}");
+            assert_eq!(case["expected_result"], Value::Null, "{id}");
+            assert_eq!(case["expected_result_digest"], Value::Null, "{id}");
         }
         assert_eq!(case["authority_fixture_id"], Value::Null, "{id}");
         assert_eq!(case["authority_result_digest"], Value::Null, "{id}");
@@ -514,7 +511,7 @@ fn denied_sibling(store: &Path) -> TestResult<(bool, Vec<Option<String>>)> {
     let mut seam = pos_store::sqlite::SqliteStore::open(&store.to_string_lossy())?;
     seam.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
     let mut timelines = seam.list_timelines()?;
-    timelines.sort_by_key(|timeline| timeline.id());
+    timelines.sort_by_key(pos_core::timeline::Timeline::id);
     let names = timelines
         .iter()
         .map(|timeline| timeline.meta.name.clone().unwrap_or_default())
