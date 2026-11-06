@@ -57,7 +57,7 @@
 //!
 //! # Warm and cold
 //!
-//! The seam store is the SQLite file [`G_PUB_STORE_FILE_V1`] in the run's
+//! The seam store is the `SQLite` file [`G_PUB_STORE_FILE_V1`] in the run's
 //! working directory. A warm case keeps one directory for its priming run,
 //! control run and canary run. A cold run always starts from a new file.
 //!
@@ -116,7 +116,7 @@ pub const G_PUB_FIXTURE_IDS_V1: [&str; 3] = [
     G_PUB_EVAL_FIXTURE_ID_V1,
     G_PUB_ARCHIVE_FIXTURE_ID_V1,
 ];
-/// The SQLite file of a run's public seam store.
+/// The `SQLite` file of a run's public seam store.
 pub const G_PUB_STORE_FILE_V1: &str = "g-pub-seam.sqlite";
 /// The Ticks of one subject run.
 pub const G_PUB_TICKS_V1: u64 = 2;
