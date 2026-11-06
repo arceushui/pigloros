@@ -854,13 +854,7 @@ fn every_family_pair_has_identical_authoritative_results_in_local_and_air_gapped
                 local_leg.result.first_error,
                 air_gapped_leg.result.first_error
             );
-            // The manifest Execution Mode is the attempt's mode, and the
-            // `VRR1` is bound to that manifest.
-            assert_eq!(local_leg.manifest.execution_mode, ExecutionModeV1::Local);
-            assert_eq!(
-                air_gapped_leg.manifest.execution_mode,
-                ExecutionModeV1::AirGapped
-            );
+            // The `VRR1` is bound to the manifest of its leg.
             assert_eq!(
                 local_leg.result.manifest_digest,
                 manifest_digest(&local_leg.manifest)?
@@ -869,14 +863,31 @@ fn every_family_pair_has_identical_authoritative_results_in_local_and_air_gapped
                 air_gapped_leg.result.manifest_digest,
                 manifest_digest(&air_gapped_leg.manifest)?
             );
-            // The two manifests differ in their Execution Mode only.
-            let mut moved = local_leg.manifest.clone();
-            moved.execution_mode = ExecutionModeV1::AirGapped;
-            assert_eq!(moved, air_gapped_leg.manifest);
-            assert_ne!(
-                local_leg.result.provenance_digest,
-                air_gapped_leg.result.provenance_digest
-            );
+            if local_leg.manifest.reproducibility_class
+                == ReproducibilityClassV1::CrossProfileConformance
+            {
+                // A cross-profile leg is in its own profile's Execution
+                // Mode in both attempts (#1266), so both manifests are one.
+                let own_mode =
+                    if local_leg.manifest.execution_profile == "deterministic-air-gapped-v1" {
+                        ExecutionModeV1::AirGapped
+                    } else {
+                        ExecutionModeV1::Local
+                    };
+                assert_eq!(local_leg.manifest.execution_mode, own_mode);
+                assert_eq!(local_leg.manifest, air_gapped_leg.manifest);
+            } else {
+                // Every other manifest is in the attempt's Execution Mode,
+                // and the two manifests differ in their Execution Mode only.
+                assert_eq!(local_leg.manifest.execution_mode, ExecutionModeV1::Local);
+                let mut moved = local_leg.manifest.clone();
+                moved.execution_mode = ExecutionModeV1::AirGapped;
+                assert_eq!(moved, air_gapped_leg.manifest);
+                assert_ne!(
+                    local_leg.result.provenance_digest,
+                    air_gapped_leg.result.provenance_digest
+                );
+            }
         }
     }
     Ok(())
