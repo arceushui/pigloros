@@ -161,7 +161,7 @@ EXPECTED_BUILD_JOB = {
         },
         {
             "name": "Upload ASan test archive",
-            "uses": "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+            "uses": "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9",
             "with": {
                 "name": ARCHIVE_ARTIFACT,
                 "path": "${{ runner.temp }}/asan-tests.tar.zst",
