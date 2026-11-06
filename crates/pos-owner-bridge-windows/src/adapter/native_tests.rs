@@ -39,14 +39,20 @@ impl Drop for FixtureRoot {
     }
 }
 
-fn pump_until(factory: &dyn StaPump, mut observed: impl FnMut() -> bool) -> TestResult {
+fn pump_until(
+    factory: &dyn StaPump,
+    stage: &str,
+    mut observed: impl FnMut() -> bool,
+) -> TestResult {
     let deadline = Instant::now() + Duration::from_secs(15);
     while !observed() {
         if Instant::now() >= deadline {
-            return Err("native fixture deadline expired".into());
+            return Err(
+                format!("native fixture deadline expired while waiting for {stage}").into(),
+            );
         }
         if factory.next()? == NativePulse::Quit {
-            return Err("native fixture received quit".into());
+            return Err(format!("native fixture received quit while waiting for {stage}").into());
         }
     }
     Ok(())
@@ -54,10 +60,11 @@ fn pump_until(factory: &dyn StaPump, mut observed: impl FnMut() -> bool) -> Test
 
 fn completion(
     factory: &dyn StaPump,
+    stage: &str,
     mut take: impl FnMut() -> Option<NativeResult<()>>,
 ) -> TestResult {
     let mut result = None;
-    pump_until(factory, || {
+    pump_until(factory, stage, || {
         result = take();
         result.is_some()
     })?;
@@ -117,7 +124,9 @@ impl crate::Native {
         let sink: Rc<dyn EventSink> = events.clone();
         native.create_environment(runtime.root(), &folder, super::settings::OPTIONS, sink)?;
         assert!(native.pending());
-        completion(&factory, || native.environment_completion())?;
+        completion(&factory, "environment creation", || {
+            native.environment_completion()
+        })?;
         let snapshot = native.environment()?;
         assert_eq!(snapshot.version.as_str(), "153.0.4234.48");
         assert_eq!(
@@ -131,7 +140,9 @@ impl crate::Native {
             .create_environment(runtime.root(), &folder, super::settings::OPTIONS, sink)
             .is_err());
         native.create_controller()?;
-        completion(&factory, || native.controller_completion())?;
+        completion(&factory, "controller creation", || {
+            native.controller_completion()
+        })?;
         assert!(native.create_controller().is_err());
         let identity = runtime.browser_identity(native.browser_pid()?)?;
         events.expect_browser(identity.browser_pid);
@@ -145,7 +156,9 @@ impl crate::Native {
         listener.begin_navigation();
         events.begin();
         native.navigate_owner()?;
-        pump_until(&factory, || events.loaded().is_some())?;
+        pump_until(&factory, "owner document completion", || {
+            events.loaded().is_some()
+        })?;
         assert!(!events.invalid());
         assert_eq!(listener.served().count, 1);
         assert_eq!(native.source()?.as_str(), crate::OWNER_URL);
@@ -154,7 +167,9 @@ impl crate::Native {
         native.unsubscribe_view()?;
         native.close_controller()?;
         native.close_controller()?;
-        pump_until(&factory, || events.exited() == Some(identity.browser_pid))?;
+        pump_until(&factory, "browser exit", || {
+            events.exited() == Some(identity.browser_pid)
+        })?;
         assert!(native.drop_environment().is_err()); // Exit subscription still owned.
         native.unsubscribe_exit()?;
         native.unsubscribe_exit()?;
@@ -195,7 +210,7 @@ fn exercise_buffers(factory: &dyn StaPump, native: &mut dyn NativeOperations) ->
     native.post(BufferSlot::Request)?;
     native.post(BufferSlot::Reply)?;
     let mut observed = Ok(0);
-    pump_until(factory, || {
+    pump_until(factory, "page rejection of malformed CBOR", || {
         observed = native.load_state();
         observed
             .as_ref()
@@ -206,7 +221,7 @@ fn exercise_buffers(factory: &dyn StaPump, native: &mut dyn NativeOperations) ->
         ControlState::Failed as u32,
         ControlState::ReleaseRequested as u32
     )?);
-    pump_until(factory, || {
+    pump_until(factory, "page release acknowledgement", || {
         native
             .load_state()
             .is_ok_and(|value| value == ControlState::Releasing as u32)
