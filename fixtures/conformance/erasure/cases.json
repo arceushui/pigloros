@@ -3,6 +3,28 @@
   "authority_kind": "repository-test-fixture-only",
   "cases": [
     {
+      "applicability": [
+        {
+          "category": "Artifact",
+          "decision": "Applicable",
+          "target": 0
+        },
+        {
+          "category": "Key",
+          "decision": "Applicable",
+          "target": 0
+        },
+        {
+          "category": "Replica",
+          "decision": "Applicable",
+          "target": 0
+        },
+        {
+          "category": "Backup",
+          "decision": "Applicable",
+          "target": 0
+        }
+      ],
       "attempts": [
         {
           "acknowledgements": [
@@ -238,6 +260,28 @@
       "title": "Complete over the artifact, key, replica and backup obligations of one target; acknowledgements arrive out of canonical order with an exact duplicate; replica and backup rejoin (not distributed)."
     },
     {
+      "applicability": [
+        {
+          "category": "Artifact",
+          "decision": "Applicable",
+          "target": 0
+        },
+        {
+          "category": "Key",
+          "decision": "Applicable",
+          "target": 0
+        },
+        {
+          "category": "Replica",
+          "decision": "Inapplicable",
+          "target": 0
+        },
+        {
+          "category": "Backup",
+          "decision": "Inapplicable",
+          "target": 0
+        }
+      ],
       "attempts": [
         {
           "acknowledgements": [
@@ -433,6 +477,28 @@
       "title": "A negative key acknowledgement gives PartialFailure; the retry closes it to Complete and a PreserveExact rule cannot restore the redacted claim."
     },
     {
+      "applicability": [
+        {
+          "category": "Artifact",
+          "decision": "Applicable",
+          "target": 0
+        },
+        {
+          "category": "Key",
+          "decision": "Inapplicable",
+          "target": 0
+        },
+        {
+          "category": "Replica",
+          "decision": "Applicable",
+          "target": 0
+        },
+        {
+          "category": "Backup",
+          "decision": "Applicable",
+          "target": 0
+        }
+      ],
       "attempts": [
         {
           "acknowledgements": [
@@ -599,6 +665,28 @@
       "title": "A stale artifact acknowledgement and a missing replica acknowledgement leave the attempt PartialFailure at its deadline; a rejoin against it is refused."
     },
     {
+      "applicability": [
+        {
+          "category": "Artifact",
+          "decision": "Applicable",
+          "target": 0
+        },
+        {
+          "category": "Key",
+          "decision": "Inapplicable",
+          "target": 0
+        },
+        {
+          "category": "Replica",
+          "decision": "Inapplicable",
+          "target": 0
+        },
+        {
+          "category": "Backup",
+          "decision": "Inapplicable",
+          "target": 0
+        }
+      ],
       "attempts": [
         {
           "acknowledgements": [
@@ -711,6 +799,48 @@
       "title": "The authority refuses authorization with PolicyConflict; the request is Rejected and a corrected ERQ1 bound to its ErasureCorrectionProvenanceV1 completes."
     },
     {
+      "applicability": [
+        {
+          "category": "Artifact",
+          "decision": "Applicable",
+          "target": 0
+        },
+        {
+          "category": "Artifact",
+          "decision": "Applicable",
+          "target": 1
+        },
+        {
+          "category": "Key",
+          "decision": "Applicable",
+          "target": 0
+        },
+        {
+          "category": "Key",
+          "decision": "Inapplicable",
+          "target": 1
+        },
+        {
+          "category": "Replica",
+          "decision": "Inapplicable",
+          "target": 0
+        },
+        {
+          "category": "Replica",
+          "decision": "Inapplicable",
+          "target": 1
+        },
+        {
+          "category": "Backup",
+          "decision": "Inapplicable",
+          "target": 0
+        },
+        {
+          "category": "Backup",
+          "decision": "Inapplicable",
+          "target": 1
+        }
+      ],
       "attempts": [
         {
           "acknowledgements": [
@@ -870,6 +1000,308 @@
       "title": "The pinned policy holds one artifact: its key, replica and backup obligations are Inapplicable, it keeps Exact with a retained-disclosure digest, and the request completes on the remaining obligations."
     },
     {
+      "applicability": [
+        {
+          "category": "Artifact",
+          "decision": "Applicable",
+          "target": 0
+        },
+        {
+          "category": "Artifact",
+          "decision": "Applicable",
+          "target": 1
+        },
+        {
+          "category": "Artifact",
+          "decision": "Applicable",
+          "target": 2
+        },
+        {
+          "category": "Artifact",
+          "decision": "Applicable",
+          "target": 3
+        },
+        {
+          "category": "Artifact",
+          "decision": "Applicable",
+          "target": 4
+        },
+        {
+          "category": "Artifact",
+          "decision": "Applicable",
+          "target": 5
+        },
+        {
+          "category": "Artifact",
+          "decision": "Applicable",
+          "target": 6
+        },
+        {
+          "category": "Artifact",
+          "decision": "Applicable",
+          "target": 7
+        },
+        {
+          "category": "Artifact",
+          "decision": "Applicable",
+          "target": 8
+        },
+        {
+          "category": "Artifact",
+          "decision": "Applicable",
+          "target": 9
+        },
+        {
+          "category": "Artifact",
+          "decision": "Applicable",
+          "target": 10
+        },
+        {
+          "category": "Artifact",
+          "decision": "Applicable",
+          "target": 11
+        },
+        {
+          "category": "Artifact",
+          "decision": "Applicable",
+          "target": 12
+        },
+        {
+          "category": "Artifact",
+          "decision": "Applicable",
+          "target": 13
+        },
+        {
+          "category": "Artifact",
+          "decision": "Applicable",
+          "target": 14
+        },
+        {
+          "category": "Key",
+          "decision": "Inapplicable",
+          "target": 0
+        },
+        {
+          "category": "Key",
+          "decision": "Inapplicable",
+          "target": 1
+        },
+        {
+          "category": "Key",
+          "decision": "Inapplicable",
+          "target": 2
+        },
+        {
+          "category": "Key",
+          "decision": "Inapplicable",
+          "target": 3
+        },
+        {
+          "category": "Key",
+          "decision": "Inapplicable",
+          "target": 4
+        },
+        {
+          "category": "Key",
+          "decision": "Inapplicable",
+          "target": 5
+        },
+        {
+          "category": "Key",
+          "decision": "Inapplicable",
+          "target": 6
+        },
+        {
+          "category": "Key",
+          "decision": "Inapplicable",
+          "target": 7
+        },
+        {
+          "category": "Key",
+          "decision": "Inapplicable",
+          "target": 8
+        },
+        {
+          "category": "Key",
+          "decision": "Inapplicable",
+          "target": 9
+        },
+        {
+          "category": "Key",
+          "decision": "Inapplicable",
+          "target": 10
+        },
+        {
+          "category": "Key",
+          "decision": "Inapplicable",
+          "target": 11
+        },
+        {
+          "category": "Key",
+          "decision": "Inapplicable",
+          "target": 12
+        },
+        {
+          "category": "Key",
+          "decision": "Inapplicable",
+          "target": 13
+        },
+        {
+          "category": "Key",
+          "decision": "Inapplicable",
+          "target": 14
+        },
+        {
+          "category": "Replica",
+          "decision": "Inapplicable",
+          "target": 0
+        },
+        {
+          "category": "Replica",
+          "decision": "Inapplicable",
+          "target": 1
+        },
+        {
+          "category": "Replica",
+          "decision": "Inapplicable",
+          "target": 2
+        },
+        {
+          "category": "Replica",
+          "decision": "Inapplicable",
+          "target": 3
+        },
+        {
+          "category": "Replica",
+          "decision": "Inapplicable",
+          "target": 4
+        },
+        {
+          "category": "Replica",
+          "decision": "Inapplicable",
+          "target": 5
+        },
+        {
+          "category": "Replica",
+          "decision": "Inapplicable",
+          "target": 6
+        },
+        {
+          "category": "Replica",
+          "decision": "Inapplicable",
+          "target": 7
+        },
+        {
+          "category": "Replica",
+          "decision": "Inapplicable",
+          "target": 8
+        },
+        {
+          "category": "Replica",
+          "decision": "Inapplicable",
+          "target": 9
+        },
+        {
+          "category": "Replica",
+          "decision": "Inapplicable",
+          "target": 10
+        },
+        {
+          "category": "Replica",
+          "decision": "Inapplicable",
+          "target": 11
+        },
+        {
+          "category": "Replica",
+          "decision": "Inapplicable",
+          "target": 12
+        },
+        {
+          "category": "Replica",
+          "decision": "Inapplicable",
+          "target": 13
+        },
+        {
+          "category": "Replica",
+          "decision": "Inapplicable",
+          "target": 14
+        },
+        {
+          "category": "Backup",
+          "decision": "Inapplicable",
+          "target": 0
+        },
+        {
+          "category": "Backup",
+          "decision": "Inapplicable",
+          "target": 1
+        },
+        {
+          "category": "Backup",
+          "decision": "Inapplicable",
+          "target": 2
+        },
+        {
+          "category": "Backup",
+          "decision": "Inapplicable",
+          "target": 3
+        },
+        {
+          "category": "Backup",
+          "decision": "Inapplicable",
+          "target": 4
+        },
+        {
+          "category": "Backup",
+          "decision": "Inapplicable",
+          "target": 5
+        },
+        {
+          "category": "Backup",
+          "decision": "Inapplicable",
+          "target": 6
+        },
+        {
+          "category": "Backup",
+          "decision": "Inapplicable",
+          "target": 7
+        },
+        {
+          "category": "Backup",
+          "decision": "Inapplicable",
+          "target": 8
+        },
+        {
+          "category": "Backup",
+          "decision": "Inapplicable",
+          "target": 9
+        },
+        {
+          "category": "Backup",
+          "decision": "Inapplicable",
+          "target": 10
+        },
+        {
+          "category": "Backup",
+          "decision": "Inapplicable",
+          "target": 11
+        },
+        {
+          "category": "Backup",
+          "decision": "Inapplicable",
+          "target": 12
+        },
+        {
+          "category": "Backup",
+          "decision": "Inapplicable",
+          "target": 13
+        },
+        {
+          "category": "Backup",
+          "decision": "Inapplicable",
+          "target": 14
+        }
+      ],
       "attempts": [
         {
           "acknowledgements": [

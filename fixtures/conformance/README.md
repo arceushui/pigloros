@@ -102,8 +102,10 @@ and `erasure/records/` (the `ERS1`, `ERC1` and `ERRJ1` artifacts, each named by 
 recorded artifacts of one run of `apps/pos-experiment/tests/erasure_conformance.rs`, which executes
 every case through the public `ErasureExecutionHostV1` over `MemoryStore` and `SQLite` and requires
 byte equality with these files. The generator's `--check` decodes every recorded artifact,
-recomputes its digests and links, compares it with the expected projection and scans the directory
-for the erased canary bytes. The cases cover every lifecycle terminal state, canonical
+recomputes its digests and links, derives the ERFP1/ERFA1 applicability matrix and the
+ERAO1/ERPR1 provenance from the case inputs and compares them with the recorded bindings, compares
+everything with the expected projection, scans the directory for the erased canary bytes and pins
+that the erasure path writes no log. The cases cover every lifecycle terminal state, canonical
 acknowledgement ordering, retry, legal hold and policy conflict, and replica, backup and rejoin
 evidence of one host (not distributed). They are engineering evidence, make no ADR-059 mode claim
 and do not change `expected/replay-conformance/deletion-redaction.json`.

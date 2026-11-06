@@ -490,42 +490,124 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
         .any(|window| window == needle)
 }
 
-#[test]
-fn a_completed_erasure_stays_contained_and_never_carries_erased_bytes() -> TestResult {
-    let (catalogue, raw) = load()?;
-    let case = find(&catalogue, "complete-all-categories")?;
-    let mut run = open(&catalogue, case, StoreConfig::Memory)?;
-    let draft = EventDraft::new(
+fn canary_draft() -> EventDraft {
+    EventDraft::new(
         EntityId::new(),
         Kind::new("erasure-conformance.subject"),
         CanonicalBytes::from_static(CANARY),
-    );
+    )
+}
+
+/// Run one case with the canary subject Event on a Timeline bound to its
+/// frozen scope. The Timeline id is a random ULID inside the scope
+/// commitment, so the run is compared with the projection, not the bytes.
+fn run_with_canary(
+    catalogue: &ErasureCaseCatalogueV1,
+    case: &ErasureCaseV1,
+    store: StoreConfig,
+) -> TestResult<(ErasureCaseRunV1, ErasureCaseRecordV1, TimelineId)> {
+    let mut run = open(catalogue, case, store)?;
     let timeline = {
         let mut commands = run.host().command_sender().map_err(fail)?;
         let timeline = commands.create_timeline("erasure-subject").map_err(fail)?;
         commands
-            .append(timeline.id(), std::slice::from_ref(&draft))
+            .append(timeline.id(), &[canary_draft()])
             .map_err(fail)?;
         timeline.id()
     };
     run.authority().bind_affected_timeline(timeline);
     let record = run.execute(&fixture_root()).map_err(fail)?;
-    let expected = raw["cases"]
-        .as_array()
-        .and_then(|cases| {
-            cases
-                .iter()
-                .find(|raw_case| raw_case["case_id"] == case.case_id.as_str())
-        })
-        .ok_or("missing raw case")?;
-    assert_eq!(projection(case, &record)?, expected["expected"]);
-    let mut records = BTreeMap::new();
-    case_files(case, &record, &mut records)?;
-    for (name, bytes) in &records {
-        assert!(!contains(bytes, CANARY), "{name} carries erased bytes");
+    Ok((run, record, timeline))
+}
+
+fn assert_no_canary(context: &str, text: &str) {
+    assert!(
+        !contains(text.as_bytes(), CANARY),
+        "{context} carries erased bytes"
+    );
+}
+
+/// Every error value a case run returned, as `Display` and `Debug` text.
+fn returned_error_texts(record: &ErasureCaseRecordV1) -> Vec<String> {
+    let mut texts = Vec::new();
+    for refusal in record
+        .histories
+        .iter()
+        .filter_map(|history| history.authorization_refusal)
+    {
+        texts.push(format!("{refusal} {refusal:?}"));
+        let wrapped = ErasureCaseErrorV1::Host(refusal);
+        texts.push(format!("{wrapped} {wrapped:?}"));
     }
-    assert!(!contains(format!("{record:?}").as_bytes(), CANARY));
-    assert_no_resurrection(&catalogue, &mut run, &record, timeline, &draft)
+    for error in record
+        .rejoins
+        .iter()
+        .filter_map(|rejoin| rejoin.outcome.as_ref().err())
+    {
+        texts.push(format!("{error} {error:?}"));
+        let wrapped = ErasureCaseErrorV1::Fixture(*error);
+        texts.push(format!("{wrapped} {wrapped:?}"));
+    }
+    texts
+}
+
+/// Owner decision 10, for every case on both adapters: the erased canary
+/// payload is in the store before the erasure, yet it appears in no record,
+/// in no `Debug` text of a record, and in no `Display` or `Debug` text of an
+/// error the run returned. The erasure path writes no log: its crates have no
+/// logging dependency and no logging or print call, which
+/// `scripts/generate_erasure_conformance_fixtures.py --check` pins.
+#[test]
+fn no_case_carries_erased_bytes_on_either_adapter() -> TestResult {
+    let (catalogue, raw) = load()?;
+    let raw_cases = raw["cases"].as_array().ok_or("cases.json has no cases")?;
+    for (case, raw_case) in catalogue.cases.iter().zip(raw_cases) {
+        for store in [StoreConfig::Memory, StoreConfig::SqliteInMemory] {
+            let context = format!("{} on {store:?}", case.case_id);
+            let (_, record, _) = run_with_canary(&catalogue, case, store)?;
+            assert_eq!(
+                projection(case, &record)?,
+                raw_case["expected"],
+                "{context}: the canary run differs from the projection"
+            );
+            let mut records = BTreeMap::new();
+            case_files(case, &record, &mut records)?;
+            for (name, bytes) in &records {
+                assert!(
+                    !contains(bytes, CANARY),
+                    "{context}: {name} carries erased bytes"
+                );
+            }
+            assert_no_canary(&context, &format!("{record:?}"));
+            for text in returned_error_texts(&record) {
+                assert_no_canary(&context, &text);
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn every_case_error_text_is_closed_and_payload_free() {
+    for error in [
+        ErasureCaseErrorV1::Read(std::io::ErrorKind::NotFound),
+        ErasureCaseErrorV1::Fixture(ErasureErrorV1::PolicyConflict),
+        ErasureCaseErrorV1::Host(ErasureHostErrorV1::AccessFrozen),
+        ErasureCaseErrorV1::InvalidIndex,
+        ErasureCaseErrorV1::MissingHistory,
+    ] {
+        let text = error.to_string();
+        assert!(text.starts_with("erasure case "), "{text}");
+        assert_no_canary("case error", &format!("{text} {error:?}"));
+    }
+}
+
+#[test]
+fn a_completed_erasure_stays_contained_and_admits_no_resurrection() -> TestResult {
+    let (catalogue, _) = load()?;
+    let case = find(&catalogue, "complete-all-categories")?;
+    let (mut run, record, timeline) = run_with_canary(&catalogue, case, StoreConfig::Memory)?;
+    assert_no_resurrection(&catalogue, &mut run, &record, timeline, &canary_draft())
 }
 
 /// After `Complete`: the erased Timeline stays contained, an exact finalize

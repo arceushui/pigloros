@@ -28,8 +28,15 @@ ERS1, ERC1 and ERRJ1 and requires:
   destruction-dispatch states to equal the bytes derived here;
 - each ERC1 to bind its terminal ERS1, the frozen targets, the canonical acknowledgements, the
   derived owners and the expected rows, and each row and the aggregate never to upgrade;
+- the AccessFrozen ERS1 provenance to equal the ERFP1 derived here through EROS1, the ERFA1
+  applicability matrix (the pinned policy: the case's obligation lists, Applicable with the owner
+  for a listed (category, target) pair, else Inapplicable) and its ERFAA1 authorization;
+- each terminal ERS1 provenance to equal the derived ERAO1 and each ERC1 provenance the derived
+  ERPR1, both over the derived ERAP1 acknowledgement provenance of the effective acknowledgements;
 - each ERRJ1 to bind its receipt and to carry the expected outcome;
 - no file of the erasure fixtures to contain the erased canary bytes.
+- no crate on the executed erasure path to declare a logging dependency, and no source on that path
+  to log or print (owner decision 10: the path writes no log that could carry erased bytes).
 
 Usage:
     python3 scripts/generate_erasure_conformance_fixtures.py          # write cases and requests
@@ -333,6 +340,174 @@ def evaluate_row(current: str, rule: str, state: str) -> str:
     else:
         candidate = "UnverifiableArtifactsMissing"
     return weakened_to(current, candidate)
+
+
+def reference_set(domain: bytes, references: list[bytes]) -> bytes:
+    """`reference_set_digest`: BLAKE3 of the domain and the sorted references."""
+    return b3(domain + b"".join(sorted(references)))
+
+
+def target_closure(targets: list[dict]) -> bytes:
+    """`target_closure_digest` of the canonical target closure."""
+    data = b"pigloros/erasure-freeze-closure/v1"
+    for target in targets:
+        data += (
+            CLASSES.index(target["artifact_class"]).to_bytes(8, "big")
+            + bytes.fromhex(target["artifact_digest"])
+            + KEY_ROLES.index(target["key_role"]).to_bytes(8, "big")
+            + bytes.fromhex(target["key_digest"])
+            + bytes.fromhex(target["replica_set"])
+            + bytes.fromhex(target["replica_id"])
+        )
+    return b3(data)
+
+
+def scope_commitment_reference(request: bytes, targets: list[dict]) -> bytes:
+    """ERSC1: the frozen scope member (no Timeline is bound in a recorded run)."""
+    record = [
+        "ERSC1",
+        VERSION,
+        request,
+        [[0, COMMON["scope_member"]]],
+        target_closure(targets),
+        COMMON["lineage_rule"],
+    ]
+    return domain_digest("ERSC1", enc(record))
+
+
+def applicability_rows(case: dict) -> list[list]:
+    """The pinned policy as an ERFA1 matrix: one row per (category, target), Applicable with the
+    owner when the case lists that obligation, else Inapplicable (a legal hold)."""
+    rows = []
+    for category_index, category in enumerate(CATEGORIES):
+        for target_index in range(len(case["targets"])):
+            owner = next(
+                (
+                    bytes.fromhex(obligation["owner"])
+                    for obligation in case["obligations"]
+                    if obligation["category"] == category and obligation["target"] == target_index
+                ),
+                None,
+            )
+            rows.append([category_index, target_index, 0 if owner is None else 1, owner])
+    return rows
+
+
+def freeze_provenance_reference(case: dict, request: bytes) -> bytes:
+    """ERFP1, through EROS1, the ERFA1 applicability matrix and its ERFAA1 authorization."""
+    policy, trust = COMMON["policy"], COMMON["trust"]
+    scope = scope_commitment_reference(request, case["targets"])
+    obligations = sorted(
+        obligation_reference(request, o, case["targets"]) for o in case["obligations"]
+    )
+    obligation_set = domain_digest(
+        "EROS1", enc(["EROS1", VERSION, request, obligations, policy, trust])
+    )
+    matrix = applicability_rows(case)
+    body = domain_digest(
+        "ERFA1-AUTH",
+        enc(["ERFA1-AUTH", VERSION, request, scope, obligation_set, matrix, FREEZE_POSITION, policy, trust]),
+    )
+    authorization = domain_digest(
+        "ERFAA1",
+        enc(["ERFAA1", VERSION, body, policy, trust, bytes.fromhex(case["freeze_provenance"])]),
+    )
+    admission = domain_digest(
+        "ERFA1",
+        enc(
+            [
+                "ERFA1",
+                VERSION,
+                request,
+                scope,
+                obligation_set,
+                matrix,
+                FREEZE_POSITION,
+                policy,
+                trust,
+                authorization,
+            ]
+        ),
+    )
+    return domain_digest(
+        "ERFP1",
+        enc(["ERFP1", VERSION, request, scope, obligation_set, FREEZE_POSITION, admission]),
+    )
+
+
+def acknowledgement_reference(
+    request: bytes, case: dict, ack: dict, attempt: bytes, scope: bytes
+) -> bytes:
+    """ERAP1 of one admitted acknowledgement."""
+    obligation = case["obligations"][ack["obligation"]]
+    target = case["targets"][obligation["target"]]
+    record = [
+        "ERAP1",
+        VERSION,
+        request,
+        command_identity(request, target),
+        attempt,
+        obligation_reference(request, obligation, case["targets"]),
+        bytes.fromhex(obligation["owner"]),
+        scope,
+        OUTCOMES.index(ack["outcome"]),
+        bytes.fromhex(ack["evidence"]),
+        COMMON["policy"],
+        COMMON["trust"],
+    ]
+    return domain_digest("ERAP1", enc(record))
+
+
+def attempt_outcome_reference(
+    request: bytes,
+    attempt: bytes,
+    source: bytes | None,
+    lifecycle: str,
+    unresolved: list[bytes],
+    acknowledgements: list[bytes],
+    issue: int,
+) -> bytes:
+    """ERAO1, the provenance of the attempt's terminal ERS1."""
+    record = [
+        "ERAO1",
+        VERSION,
+        request,
+        attempt,
+        source,
+        LIFECYCLES.index(lifecycle),
+        reference_set(b"pigloros/erasure-selected-obligations/v1", unresolved),
+        reference_set(b"pigloros/erasure-acknowledgement-inventory/v1", acknowledgements),
+        issue,
+        COMMON["policy"],
+        COMMON["trust"],
+    ]
+    return domain_digest("ERAO1", enc(record))
+
+
+def receipt_provenance_reference(
+    request: bytes,
+    attempt: bytes,
+    ordinal: int,
+    source: bytes | None,
+    terminal_state: bytes,
+    acknowledgements: list[bytes],
+    issue: int,
+) -> bytes:
+    """ERPR1, the provenance of the attempt's ERC1."""
+    record = [
+        "ERPR1",
+        VERSION,
+        request,
+        attempt,
+        ordinal,
+        source,
+        terminal_state,
+        reference_set(b"pigloros/erasure-evidence-set/v1", acknowledgements),
+        COMMON["policy"],
+        COMMON["trust"],
+        issue,
+    ]
+    return domain_digest("ERPR1", enc(record))
 
 
 # --- Case catalogue ---
@@ -839,7 +1014,20 @@ def expected_case(case: dict) -> dict:
 def catalogue() -> dict:
     entries = []
     for case in cases():
-        entries.append({**case, "expected": expected_case(case)})
+        entries.append(
+            {
+                **case,
+                "applicability": [
+                    {
+                        "category": CATEGORIES[row[0]],
+                        "target": row[1],
+                        "decision": "Applicable" if row[2] else "Inapplicable",
+                    }
+                    for row in applicability_rows(case)
+                ],
+                "expected": expected_case(case),
+            }
+        )
     return {
         "schema": "pigloros.erasure-conformance.cases.v1",
         "adr": "ADR-060; ADR-062 Revision 8 note ADR-062_R8_Erasure_Cases (#1233)",
@@ -1065,6 +1253,13 @@ def check_history(case: dict, history: dict, expected: dict, request_label: str)
         fail(f"{case['case_id']}: Submitted/Authorized differ from their derivation")
     if states[2]["freeze_position"] != FREEZE_POSITION:
         fail(f"{case['case_id']}: wrong freeze position")
+    if states[2]["provenance"] != freeze_provenance_reference(case, request):
+        fail(
+            f"{case['case_id']}: the AccessFrozen ERS1 is not bound to the ERFP1/ERFA1 derived "
+            "from the case's applicability matrix"
+        )
+    scope = scope_commitment_reference(request, case["targets"])
+    effective: dict[int, tuple[bytes, str]] = {}
     if len(history["receipts"]) != len(case["attempts"]):
         fail(f"{case['case_id']}: one ERC1 per attempt is required")
     receipts = []
@@ -1087,8 +1282,31 @@ def check_history(case: dict, history: dict, expected: dict, request_label: str)
         ):
             fail(f"{case['case_id']}: dispatch states are not bound to the ERRA1 admission")
         expected_receipt = expected["receipts"][ordinal]
+        for ack in case["attempts"][ordinal]["acknowledgements"]:
+            effective[ack["obligation"]] = (
+                acknowledgement_reference(request, case, ack, admission, scope),
+                ack["outcome"],
+            )
+        acknowledgement_refs = [reference for reference, _ in effective.values()]
+        issue = ATTEMPT_POSITIONS[ordinal][2]
+        terminal = terminal_states[ordinal]
+        if terminal["provenance"] != attempt_outcome_reference(
+            request,
+            admission,
+            previous_receipt,
+            expected_receipt["lifecycle"],
+            [reference for reference, _ in unresolved],
+            acknowledgement_refs,
+            issue,
+        ):
+            fail(f"{case['case_id']}: terminal ERS1 is not bound to the derived ERAO1")
+        if decode_exact(record_bytes(path), "ERC1", 19)[14] != receipt_provenance_reference(
+            request, admission, ordinal, previous_receipt, terminal["digest"], acknowledgement_refs, issue
+        ):
+            fail(f"{case['case_id']}: ERC1 is not bound to the derived ERPR1")
+        effective = {i: v for i, v in effective.items() if v[1] == "Acknowledged"}
         digest = check_receipt(
-            path, case, request, terminal_states[ordinal], expected_receipt, ordinal
+            path, case, request, terminal, expected_receipt, ordinal
         )
         acknowledged |= {
             a["obligation"]
@@ -1152,6 +1370,41 @@ def check_executions() -> None:
         fail("records/ holds files that executions.json does not reference, or misses some")
 
 
+# The crates and sources on the executed erasure path. Owner decision 10 requires that no log or
+# diagnostic carries erased bytes; this path writes none, which this check pins.
+ERASURE_PATH_MANIFESTS = (
+    "crates/pos-core/Cargo.toml",
+    "crates/pos-store/Cargo.toml",
+    "crates/pos-runtime/Cargo.toml",
+    "apps/pos-experiment/Cargo.toml",
+)
+ERASURE_PATH_SOURCES = (
+    "crates/pos-core/src/erasure.rs",
+    "crates/pos-core/src/erasure",
+    "crates/pos-store/src",
+    "crates/pos-runtime/src/erasure_host.rs",
+    "apps/pos-experiment/src/erasure_conformance.rs",
+)
+LOGGING_CALLS = ("log::", "tracing::", "println!", "eprintln!", "print!(", "eprint!(", "dbg!(")
+
+
+def check_no_logging_path() -> None:
+    for manifest in ERASURE_PATH_MANIFESTS:
+        for line in (ROOT / manifest).read_text(encoding="utf-8").splitlines():
+            name = line.split("=")[0].strip()
+            if name in ("log", "tracing", "tracing-subscriber", "env_logger"):
+                fail(f"{manifest} declares the logging dependency {name}")
+    files = []
+    for source in ERASURE_PATH_SOURCES:
+        path = ROOT / source
+        files.extend(sorted(path.rglob("*.rs")) if path.is_dir() else [path])
+    for path in files:
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            code = line.split("//")[0]
+            if any(call in code for call in LOGGING_CALLS):
+                fail(f"{path.relative_to(ROOT)}:{number} logs or prints on the erasure path")
+
+
 def check_no_canary() -> None:
     for path in sorted(ERASURE.rglob("*")):
         if path.is_file() and CANARY in path.read_bytes():
@@ -1212,6 +1465,7 @@ def main() -> int:
         return 1
     check_executions()
     check_no_canary()
+    check_no_logging_path()
     return 0
 
 

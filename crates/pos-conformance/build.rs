@@ -828,7 +828,8 @@ fn verify_source_inventory(
     let declared_paths = snapshots
         .sha256_entries
         .keys()
-        .filter_map(|path| bundle_source_path(path))
+        .filter(|path| bundle_source_path(path))
+        .cloned()
         .collect::<BTreeSet<_>>();
     if declared_paths != expected_paths {
         return Err(invalid_data(
@@ -850,7 +851,8 @@ fn verify_source_inventory(
     if snapshots
         .blake3_entries
         .keys()
-        .filter_map(|path| bundle_source_path(path))
+        .filter(|path| bundle_source_path(path))
+        .cloned()
         .collect::<BTreeSet<_>>()
         != blake3_paths
     {
@@ -2762,6 +2764,6 @@ fn expected_paths_with_auxiliary(
 /// erasure conformance cases (ADR-062 Revision 8 slice N5, #1233) are inventoried and
 /// digest-checked like every source, but they are not a member of any conformance bundle: the
 /// fixture verify script and `scripts/generate_erasure_conformance_fixtures.py` own their closure.
-fn bundle_source_path(path: &str) -> Option<String> {
-    (!path.starts_with("erasure/")).then(|| path.to_owned())
+fn bundle_source_path(path: &str) -> bool {
+    !path.starts_with("erasure/")
 }

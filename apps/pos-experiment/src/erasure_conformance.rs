@@ -29,7 +29,6 @@
 
 use std::collections::BTreeSet;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use pos_core::erasure::{
@@ -473,6 +472,19 @@ pub enum ErasureCaseErrorV1 {
     MissingHistory,
 }
 
+impl std::fmt::Display for ErasureCaseErrorV1 {
+    /// Closed, payload-free text: no request, record or subject bytes.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Read(kind) => write!(formatter, "erasure case request unreadable: {kind}"),
+            Self::Fixture(error) => write!(formatter, "erasure case record refused: {error}"),
+            Self::Host(error) => write!(formatter, "erasure case command refused: {error}"),
+            Self::InvalidIndex => formatter.write_str("erasure case index outside the case"),
+            Self::MissingHistory => formatter.write_str("erasure case has no ERS1 history"),
+        }
+    }
+}
+
 impl From<std::io::Error> for ErasureCaseErrorV1 {
     fn from(error: std::io::Error) -> Self {
         Self::Read(error.kind())
@@ -556,7 +568,7 @@ pub struct FixtureErasureAuthorityV1 {
     catalogue: ErasureCaseCatalogueV1,
     case: ErasureCaseV1,
     conflicted_request: Option<ErasureReferenceV1>,
-    frozen: AtomicBool,
+    frozen: Mutex<Option<ErasureReferenceV1>>,
     timelines: Mutex<BTreeSet<TimelineId>>,
 }
 
@@ -575,7 +587,7 @@ impl FixtureErasureAuthorityV1 {
             },
             case: case.clone(),
             conflicted_request,
-            frozen: AtomicBool::new(false),
+            frozen: Mutex::new(None),
             timelines: Mutex::new(BTreeSet::new()),
         }
     }
@@ -597,15 +609,18 @@ impl FixtureErasureAuthorityV1 {
             .collect()
     }
 
-    /// Before the freeze every known Timeline is unaffected; from the freeze
-    /// on every known Timeline is bound to the frozen scope member.
+    /// Every known Timeline is bound to the frozen scope member for the
+    /// request whose access was frozen, and unaffected for every other
+    /// request (including that request before its freeze).
     fn observation(
         &self,
+        request: ErasureReferenceV1,
         manifest_digest: ErasureReferenceV1,
     ) -> ErasureVerifiedTopologyObservationV1 {
         let timelines = self.affected_timelines();
         let scope_member = self.catalogue.scope_member.reference();
-        if self.frozen.load(Ordering::Acquire) {
+        let frozen = *self.frozen.lock().unwrap_or_else(PoisonError::into_inner);
+        if frozen == Some(request) {
             ErasureVerifiedTopologyObservationV1::new(
                 manifest_digest,
                 timelines
@@ -788,20 +803,20 @@ impl ErasureRecoveryAuthorizationVerifierV1 for FixtureErasureAuthorityV1 {
 impl ErasureCoordinatorAuthorityV1 for FixtureErasureAuthorityV1 {
     fn verified_topology_observation(
         &self,
-        _request: ErasureReferenceV1,
+        request: ErasureReferenceV1,
         manifest_digest: ErasureReferenceV1,
     ) -> Result<Option<ErasureVerifiedTopologyObservationV1>, ErasureErrorV1> {
-        Ok(Some(self.observation(manifest_digest)))
+        Ok(Some(self.observation(request, manifest_digest)))
     }
 
     fn verified_topology_observation_for_candidate(
         &self,
-        _request: ErasureReferenceV1,
+        request: ErasureReferenceV1,
         manifest_digest: ErasureReferenceV1,
         candidate: &TimelineMeta,
     ) -> Result<Option<ErasureVerifiedTopologyObservationV1>, ErasureErrorV1> {
         self.bind_affected_timeline(candidate.id);
-        Ok(Some(self.observation(manifest_digest)))
+        Ok(Some(self.observation(request, manifest_digest)))
     }
 
     fn authenticate(&self, _request: &ErasureRequestV1) -> Result<(), ErasureErrorV1> {
@@ -834,7 +849,7 @@ impl ErasureCoordinatorAuthorityV1 for FixtureErasureAuthorityV1 {
         requested: &ErasureStateTransitionV1,
     ) -> Result<ErasureAtomicFreezeResultV1, ErasureErrorV1> {
         self.admission(request, requested).map(|admission| {
-            self.frozen.store(true, Ordering::Release);
+            *self.frozen.lock().unwrap_or_else(PoisonError::into_inner) = Some(request);
             ErasureAtomicFreezeResultV1::Admitted(Box::new(admission))
         })
     }
