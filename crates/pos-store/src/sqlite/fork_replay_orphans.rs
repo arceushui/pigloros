@@ -81,7 +81,10 @@ fn scan(
             context
                 .check()
                 .map_err(|_| Error::CorruptAuthority)
-                .and_then(|()| conn.prepare(sql).map_err(|_| Error::CorruptAuthority))
+                .and_then(|()| {
+                    conn.prepare_cached(sql)
+                        .map_err(|_| Error::CorruptAuthority)
+                })
                 .and_then(|mut statement| {
                     context
                         .check()
