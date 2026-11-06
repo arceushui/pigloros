@@ -135,11 +135,7 @@ impl Surface {
         if self.events.invalid() {
             return Err(super::navigation_lost());
         }
-        if let Some(navigation) = self.events.started() {
-            Ok(Poll::Ready(navigation))
-        } else {
-            Ok(Poll::Pending)
-        }
+        Ok(self.events.started().map_or(Poll::Pending, Poll::Ready))
     }
 
     pub(super) fn before_deadline(&self) -> Result<()> {
