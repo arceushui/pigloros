@@ -1345,7 +1345,7 @@ line = 272
 function = "initial_dpi"
 operation = "GetDpiForWindow(owner)"
 invariant = "query the supplied opaque owner HWND; a zero readback fails later checked dimension conversion rather than selecting a fallback."
-hosted_test = "native_window_environment_and_buffers_lifecycle"
+hosted_test = "native_owned_window_reads_owner_dpi"
 
 [[block]]
 file = "src/ffi/window.rs"

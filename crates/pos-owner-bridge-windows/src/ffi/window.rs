@@ -346,3 +346,27 @@ impl Drop for Window {
         let _destroyed = self.destroy();
     }
 }
+
+#[cfg(test)]
+impl crate::Native {
+    pub(crate) fn verify_owned_window_dpi() -> Result<()> {
+        let mut owner = Window::create(None, 320, 240)?;
+        let mut owned = Window::create(Some(owner.hwnd.0 as u64), 480, 640)?;
+        let owner_dpi = owner.snapshot()?.dpi;
+        let snapshot = owned.snapshot()?;
+        assert!(owner_dpi > 0);
+        assert_eq!(snapshot.dpi, owner_dpi);
+        let expected_width =
+            i32::try_from((u64::from(owner_dpi) * 480 + 48) / 96).map_err(|_| unavailable())?;
+        let expected_height =
+            i32::try_from((u64::from(owner_dpi) * 640 + 48) / 96).map_err(|_| unavailable())?;
+        assert_eq!(snapshot.client.right - snapshot.client.left, expected_width);
+        assert_eq!(
+            snapshot.client.bottom - snapshot.client.top,
+            expected_height
+        );
+        owned.destroy()?;
+        owner.destroy()?;
+        Ok(())
+    }
+}

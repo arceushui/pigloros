@@ -405,6 +405,11 @@ mod tests {
     }
 
     #[test]
+    fn native_owned_window_reads_owner_dpi() -> crate::NativeResult<()> {
+        crate::Native::verify_owned_window_dpi()
+    }
+
+    #[test]
     fn runtime_checks_all_members_metadata_cache_and_per_start_binaries(
     ) -> Result<(), Box<dyn std::error::Error>> {
         crate::Native::verify_runtime_cache_fixture()
