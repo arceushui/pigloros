@@ -32,8 +32,19 @@ needs the open fixture erasure gate and the generated Plugin registration.
 
 For the replay-conformance layer: the `replay-v1` and `live-local-v1`
 execution profiles are derived from `deterministic-local-v1`, each restricted
-to one reproducibility class; the Draft authority declares neither. Host-side
-execution-profile enforcement is #1266.
+to one reproducibility class; the Draft authority declares neither.
+
+For the replay-conformance layer: the recomputation host enforces only part of
+the named execution profile. It refuses a manifest that enables network when
+the profile denies network or the Execution Mode is Air-Gapped; this is an
+input check, not runtime network denial. It builds its host in the manifest
+Execution Mode, recomputes only in Local or Air-Gapped mode, and refuses a
+composition that the Air-Gapped host refused. It caps the recomputed Event
+count and the stepped Ticks at the profile's Event-count and execution-step
+budgets. It does not enforce the scheduler and Driver order, the schema and
+upcaster set, capability identifiers, numeric or architecture rules, or the
+memory, fuel, host-call, output, storage and Simulation Time budgets, and it
+claims no network or process isolation.
 
 For the replay-conformance layer: the host asserts the trust evidence of the
 bundled Draft trust policy snapshot instead of verifying it (the snapshot is
@@ -46,8 +57,10 @@ counters are reported as 0. The watchdogs are 10 seconds for CI shard latency;
 budgets later follow the measured-floor rule.
 
 For the replay-conformance layer: several expected-authority entries share one
-family payload and oracle, keyed by their sub-case; the manifest Execution Mode
-is the attempt's mode.
+family payload and oracle, keyed by their sub-case. A manifest's Execution Mode
+is the attempt's mode, except for a cross-profile leg under
+`deterministic-local-v1` or `deterministic-air-gapped-v1`, which is in that
+profile's mode in every attempt.
 
 For the replay-conformance layer: Air-Gapped results are Local-relaxation
 engineering evidence, not hosted conformance. The host runs the `deterministic-air-gapped-v1`
