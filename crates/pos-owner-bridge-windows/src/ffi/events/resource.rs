@@ -3,7 +3,8 @@
 use std::rc::Rc;
 use webview2_com::Microsoft::Web::WebView2::Win32::{
     ICoreWebView2, ICoreWebView2Environment, ICoreWebView2WebResourceRequestedEventArgs,
-    COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL, COREWEBVIEW2_WEB_RESOURCE_CONTEXT_DOCUMENT,
+    ICoreWebView2WebResourceResponse, COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL,
+    COREWEBVIEW2_WEB_RESOURCE_CONTEXT_DOCUMENT,
 };
 use webview2_com::WebResourceRequestedEventHandler;
 use windows::core::w;
@@ -17,11 +18,23 @@ pub(super) fn install(
     signals: &Rc<dyn EventSink>,
     subscriptions: &mut Subscriptions,
 ) -> Result<()> {
-    let environment = environment.clone();
+    // Prepare the immutable, bodyless denial before subscribing or navigating.
+    // Allocation failure here refuses activation before any request is in flight.
+    // SAFETY: retained STA environment; null body and fixed status/header strings
+    // create only a host-owned denial response with no network or input data.
+    let response = unsafe {
+        environment.CreateWebResourceResponse(
+            None,
+            403,
+            w!("Forbidden"),
+            w!("Content-Length: 0\r\nCache-Control: no-store\r\n"),
+        )
+    }
+    .map_err(|_| unavailable())?;
     let observed = Rc::clone(signals);
     let remove = view.clone();
     let handler = WebResourceRequestedEventHandler::create(Box::new(move |_sender, args| {
-        if let Err(error) = filter(args, &environment, observed.as_ref()) {
+        if let Err(error) = filter(args, &response, observed.as_ref()) {
             observed.failed(EventKind::Resource, error);
         }
         Ok(())
@@ -36,15 +49,15 @@ pub(super) fn install(
             unsafe { remove.remove_WebResourceRequested(token) }
         },
     )?;
-    // SAFETY: fixed wildcard and ALL context; the installed handler always
-    // supplies a local denial unless the exact owner document is admitted.
+    // SAFETY: fixed wildcard and ALL context; the installed handler selects
+    // the pre-created denial unless the exact owner document is admitted.
     unsafe { view.AddWebResourceRequestedFilter(w!("*"), COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL) }
         .map_err(|_| unavailable())
 }
 
 fn filter(
     args: Option<ICoreWebView2WebResourceRequestedEventArgs>,
-    environment: &ICoreWebView2Environment,
+    response: &ICoreWebView2WebResourceResponse,
     signals: &dyn EventSink,
 ) -> Result<()> {
     let args = args.ok_or_else(unavailable)?;
@@ -56,20 +69,9 @@ fn filter(
             selected,
             NativeAction::BlockResource,
         );
-        // SAFETY: retained STA environment; null body, fixed status and static
-        // header strings produce no network request or untrusted response data.
-        let response = unsafe {
-            environment.CreateWebResourceResponse(
-                None,
-                403,
-                w!("Forbidden"),
-                w!("Content-Length: 0\r\nCache-Control: no-store\r\n"),
-            )
-        }
-        .map_err(|_| unavailable())?;
         // SAFETY: live event arguments and host-created denial response; COM
         // retains its own reference for this intercepted request.
-        unsafe { args.SetResponse(&response) }.map_err(|_| unavailable())?;
+        unsafe { args.SetResponse(response) }.map_err(|_| unavailable())?;
     }
     Ok(())
 }
