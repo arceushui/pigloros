@@ -14,8 +14,10 @@
 //!
 //! # The run
 //!
-//! 1. The Execution Mode: Local, or Air-Gapped (the run gets no network and
-//!    uses the fixture's bundled TPS1); a Replay or Fork mode is
+//! 1. The Execution Mode: Local, or Air-Gapped (the run uses the fixture's
+//!    bundled TPS1 and refuses an EPF1 that allows network; the run is
+//!    in-process and opens no network in either mode, and no isolation is
+//!    claimed); a Replay or Fork mode is
 //!    [`ForkRunErrorV1::ModeUnsupported`]. An Air-Gapped run whose EPF1
 //!    allows network is [`ForkRunErrorV1::NetworkDenied`] before anything
 //!    runs (as slice R5 decided for the replay adapter). Nothing else depends
@@ -583,6 +585,11 @@ impl CounterfactualDependencyReadPortV1 for PrefixReadsV1<'_> {
 
 /// The frontier `PrefixSeededFrontierSourceV1` derived before admission,
 /// handed to the coordinator, which re-validates it.
+///
+/// Invariant: it was derived for the same plan, frontier id and provenance
+/// digest the admission request carries; `execute` and `admit` take all
+/// three from one plan and one fixture, so the arguments are not compared
+/// again here.
 struct AdmittedFrontierV1(CounterfactualFrontierDerivationV1);
 
 impl CounterfactualFrontierSourceV1 for AdmittedFrontierV1 {
