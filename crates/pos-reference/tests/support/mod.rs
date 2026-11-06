@@ -1763,44 +1763,15 @@ fn fixtures(
             let payload_path = format!("fixtures/case-{family}.input");
             let evidence_path = format!("fixtures/case-{family}.evidence");
             let output_path = format!("fixtures/case-{family}.expected");
-            let payload = match real {
-                Some(real) => real.payload.clone(),
-                None => vec![u8::try_from(family)?],
-            };
-            members.insert(payload_path.clone(), (payload, 0));
-            let evidence = real.map_or_else(|| b"draft".to_vec(), |real| real.evidence.clone());
-            members.insert(evidence_path.clone(), (evidence, 17));
-            let output = match real {
-                Some(real) => real.oracle.clone(),
-                None => plugin_record(options.plugin_records, family)?
-                    .unwrap_or(expected)
-                    .to_vec(),
-            };
-            members.insert(output_path.clone(), (output, 1));
+            insert_family_members(members, family, real, expected, options)?;
             let provider = identity.key();
-            let transition = if family == 5 {
-                array(vec![identity.newer_key(), provider.clone()])
-            } else {
-                Value::Null
-            };
-            let pinned = if matches!(
-                options.release_mutation,
-                Some(ReleaseMutation::PinnedSnapshot)
-            ) {
-                [8; 32]
-            } else {
-                trust
-            };
-            let trust_binding = if family == 5 {
-                bytes(&pinned)
-            } else {
-                Value::Null
-            };
-            let release_binding = if family == 5 {
-                release_binding(members, signing_key, &case_id, [execution, pinned], options)?
-            } else {
-                Value::Null
-            };
+            let (transition, trust_binding, release_binding) = downgrade_bindings(
+                members,
+                signing_key,
+                (&case_id, family),
+                [execution, trust],
+                options,
+            )?;
             let expectation = match real {
                 Some(real) => real_fixture_expectation(
                     members,
@@ -1860,6 +1831,60 @@ fn fixtures(
             Ok(array(fixture))
         })
         .collect()
+}
+
+/// Insert the payload, evidence-status and oracle members of `family`.
+fn insert_family_members(
+    members: &mut BTreeMap<String, (Vec<u8>, u8)>,
+    family: u64,
+    real: Option<&RealFamilyMembers>,
+    expected: &[u8],
+    options: CorpusOptions<'_>,
+) -> TestResult<()> {
+    let payload = match real {
+        Some(real) => real.payload.clone(),
+        None => vec![u8::try_from(family)?],
+    };
+    members.insert(format!("fixtures/case-{family}.input"), (payload, 0));
+    let evidence = real.map_or_else(|| b"draft".to_vec(), |real| real.evidence.clone());
+    members.insert(format!("fixtures/case-{family}.evidence"), (evidence, 17));
+    let output = match real {
+        Some(real) => real.oracle.clone(),
+        None => plugin_record(options.plugin_records, family)?
+            .unwrap_or(expected)
+            .to_vec(),
+    };
+    members.insert(format!("fixtures/case-{family}.expected"), (output, 1));
+    Ok(())
+}
+
+/// The contract transition, trust-policy binding and release-admission binding of `family`:
+/// all null except for the downgrade family.
+fn downgrade_bindings(
+    members: &mut BTreeMap<String, (Vec<u8>, u8)>,
+    signing_key: &SigningKey,
+    (case_id, family): (&str, u64),
+    [execution, trust]: [[u8; 32]; 2],
+    options: CorpusOptions<'_>,
+) -> TestResult<(Value, Value, Value)> {
+    if family != 5 {
+        return Ok((Value::Null, Value::Null, Value::Null));
+    }
+    let identity = options.identity();
+    let pinned = if matches!(
+        options.release_mutation,
+        Some(ReleaseMutation::PinnedSnapshot)
+    ) {
+        [8; 32]
+    } else {
+        trust
+    };
+    let release = release_binding(members, signing_key, case_id, [execution, pinned], options)?;
+    Ok((
+        array(vec![identity.newer_key(), identity.key()]),
+        bytes(&pinned),
+        release,
+    ))
 }
 
 /// The expectation of one real-provider family: its evidence-status record, its oracle record
