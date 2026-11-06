@@ -59,7 +59,7 @@ fn oracle_digest(domain: &[u8], value: &Value) -> TestResult<[u8; 32]> {
     Ok(*hasher.finalize().as_bytes())
 }
 
-fn bytes(value: &[u8]) -> Value {
+fn cbor_bytes(value: &[u8]) -> Value {
     Value::Bytes(value.to_vec())
 }
 
@@ -67,9 +67,9 @@ fn oracle_entry_digest(entry: &ConformanceHistoryEntryV1) -> TestResult<[u8; 32]
     oracle_digest(
         b"PiglorOS.ConformanceHistoryEntry.v1",
         &Value::Array(vec![
-            bytes(&entry.previous_digest),
+            cbor_bytes(&entry.previous_digest),
             Value::Integer(entry.record_kind.wire_code().into()),
-            bytes(&entry.record_digest),
+            cbor_bytes(&entry.record_digest),
         ]),
     )
 }
@@ -295,16 +295,16 @@ fn chs1_round_trips_exactly_and_recomputes_every_digest_independently() -> TestR
         assert_eq!(entry.entry_digest(), oracle_entry_digest(entry)?);
         previous = entry.entry_digest();
         entries.push(Value::Array(vec![
-            bytes(&entry.previous_digest),
+            cbor_bytes(&entry.previous_digest),
             Value::Integer(entry.record_kind.wire_code().into()),
-            bytes(&entry.record_digest),
+            cbor_bytes(&entry.record_digest),
         ]));
     }
     assert_eq!(history.head_digest(), previous);
     let body = vec![
         Value::Text(CONFORMANCE_HISTORY_MAGIC_V1.to_owned()),
         Value::Integer(1.into()),
-        bytes(&PROFILE),
+        cbor_bytes(&PROFILE),
         Value::Array(entries),
     ];
     let digest = oracle_digest(
@@ -313,7 +313,7 @@ fn chs1_round_trips_exactly_and_recomputes_every_digest_independently() -> TestR
     )?;
     assert_eq!(history.record_digest, digest);
     let mut sealed = body;
-    sealed.push(bytes(&digest));
+    sealed.push(cbor_bytes(&digest));
     assert_eq!(encode(&Value::Array(sealed))?, bytes);
     Ok(())
 }
@@ -339,7 +339,7 @@ fn edited(history: &ConformanceHistoryV1, path: &[usize], value: Value) -> TestR
         b"PiglorOS.ConformanceHistory.v1",
         &Value::Array(fields.clone()),
     )?;
-    fields.push(bytes(&digest));
+    fields.push(cbor_bytes(&digest));
     encode(&Value::Array(fields))
 }
 
@@ -349,9 +349,9 @@ fn chs1_refuses_every_malformed_entry() -> TestResult {
     let entry = |index: usize| -> TestResult<Value> {
         let entry = history.entries.get(index).ok_or("no entry")?;
         Ok(Value::Array(vec![
-            bytes(&entry.previous_digest),
+            cbor_bytes(&entry.previous_digest),
             Value::Integer(entry.record_kind.wire_code().into()),
-            bytes(&entry.record_digest),
+            cbor_bytes(&entry.record_digest),
         ]))
     };
     let invalid = Error::InvalidEncoding;
@@ -363,7 +363,7 @@ fn chs1_refuses_every_malformed_entry() -> TestResult {
         ),
         (
             "short profile",
-            edited(&history, &[2], bytes(&[1; 31]))?,
+            edited(&history, &[2], cbor_bytes(&[1; 31]))?,
             invalid,
         ),
         (
@@ -413,12 +413,12 @@ fn chs1_refuses_every_malformed_entry() -> TestResult {
         ),
         (
             "first entry not linked to the profile",
-            edited(&history, &[3, 0, 0], bytes(&[0x22; 32]))?,
+            edited(&history, &[3, 0, 0], cbor_bytes(&[0x22; 32]))?,
             Error::BrokenHistoryLink,
         ),
         (
             "rewritten record digest",
-            edited(&history, &[3, 0, 2], bytes(&[0x44; 32]))?,
+            edited(&history, &[3, 0, 2], cbor_bytes(&[0x44; 32]))?,
             Error::BrokenHistoryLink,
         ),
     ];
@@ -670,7 +670,7 @@ fn chs1_snapshot_digest_covers_exactly_the_history_waivers_and_conflicts() -> Te
         Value::Array(
             digests
                 .iter()
-                .map(|digest| bytes(digest.as_slice()))
+                .map(|digest| cbor_bytes(digest.as_slice()))
                 .collect(),
         )
     };
