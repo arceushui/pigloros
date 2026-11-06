@@ -25,7 +25,7 @@ use pos_conformance::{
 };
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 use support::{
     shared_setup, ArchiveField, ArtifactDescriptorField, DescriptorField, FixtureField,
@@ -88,7 +88,9 @@ fn await_staging_directory(parent: &Path, child: &mut std::process::Child) -> Te
         }) {
             return Ok(staging);
         }
-        std::thread::yield_now();
+        // Outputs are computed before staging exists. Sleep rather than spin so that
+        // concurrent cases leave the CPU to their materializers.
+        std::thread::sleep(std::time::Duration::from_millis(1));
     }
     child.kill()?;
     child.wait()?;
@@ -320,8 +322,6 @@ fn mutate_live_staging(
     key: &str,
     mutation: StagingMutation,
 ) -> TestResult<String> {
-    use std::process::Stdio;
-
     let root = temporary_root("materializer-staging-mutation")?;
     let _cleanup = TemporaryOutput(root.clone());
     fs::create_dir_all(&root)?;
@@ -3073,14 +3073,30 @@ fn public_materializer_fingerprint_is_stable_and_invalid_invocations_fail() -> T
     let materializer = std::env::var_os("CARGO_BIN_EXE_materialize-conformance-bundles")
         .ok_or("materializer binary path is unavailable")?;
     let key = "0707070707070707070707070707070707070707070707070707070707070707";
-    let first = Command::new(&materializer)
-        .env("PIGLOROS_CONFORMANCE_SIGNING_KEY", key)
-        .arg("--fingerprint")
-        .output()?;
-    let second = Command::new(&materializer)
-        .env("PIGLOROS_CONFORMANCE_SIGNING_KEY", key)
-        .arg("--fingerprint")
-        .output()?;
+    // The three invocations that compute every output run together, and the cheap invalid
+    // invocations run while they compute.
+    let fingerprint = || {
+        Command::new(&materializer)
+            .env("PIGLOROS_CONFORMANCE_SIGNING_KEY", key)
+            .arg("--fingerprint")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+    };
+    let first = fingerprint()?;
+    let second = fingerprint()?;
+    let relative_root = temporary_root("relative-materializer")?;
+    let _relative_cleanup = TemporaryOutput(relative_root.clone());
+    fs::create_dir_all(&relative_root)?;
+    let mut relative = KilledOnDrop(
+        Command::new(&materializer)
+            .current_dir(&relative_root)
+            .env("PIGLOROS_CONFORMANCE_SIGNING_KEY", key)
+            .arg(source_inventory_address())
+            .spawn()?,
+    );
+    let first = first.wait_with_output()?;
+    let second = second.wait_with_output()?;
     assert!(first.status.success());
     assert_eq!(first.stdout, second.stdout);
     assert_eq!(first.stdout.strip_suffix(b"\n").map(<[u8]>::len), Some(64));
@@ -3132,16 +3148,19 @@ fn public_materializer_fingerprint_is_stable_and_invalid_invocations_fail() -> T
         })
     }));
 
-    let relative_root = temporary_root("relative-materializer")?;
-    let _relative_cleanup = TemporaryOutput(relative_root.clone());
-    fs::create_dir_all(&relative_root)?;
-    assert!(Command::new(&materializer)
-        .current_dir(&relative_root)
-        .env("PIGLOROS_CONFORMANCE_SIGNING_KEY", key)
-        .arg(source_inventory_address())
-        .status()?
-        .success());
+    assert!(relative.0.wait()?.success());
     Ok(())
+}
+
+/// A child process that is killed and reaped if the test stops before waiting for it.
+struct KilledOnDrop(std::process::Child);
+
+impl Drop for KilledOnDrop {
+    fn drop(&mut self) {
+        // An exited child refuses the kill; either way the wait reaps it.
+        drop(self.0.kill());
+        drop(self.0.wait());
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -3149,9 +3168,30 @@ fn public_materializer_fingerprint_is_stable_and_invalid_invocations_fail() -> T
 fn assert_live_staging_rejections(cases: &[(StagingMutation, &str)]) -> TestResult {
     let materializer = std::env::var_os("CARGO_BIN_EXE_materialize-conformance-bundles")
         .ok_or("materializer binary path is unavailable")?;
+    let materializer = materializer.as_os_str();
     let key = "0707070707070707070707070707070707070707070707070707070707070707";
-    for &(mutation, expected_error) in cases {
-        let stderr = mutate_live_staging(materializer.as_os_str(), key, mutation)?;
+    // Each case owns its temporary root and its materializer process, so the cases run
+    // together; each outcome is then checked in case order.
+    let outcomes = std::thread::scope(|scope| {
+        cases
+            .iter()
+            .map(|&(mutation, expected_error)| {
+                let case = scope.spawn(move || {
+                    mutate_live_staging(materializer, key, mutation)
+                        .map_err(|error| ToString::to_string(&error))
+                });
+                (case, expected_error)
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|(case, expected_error)| (case.join(), expected_error))
+            .collect::<Vec<_>>()
+    });
+    for (outcome, expected_error) in outcomes {
+        let stderr = match outcome {
+            Ok(stderr) => stderr?,
+            Err(panic) => std::panic::resume_unwind(panic),
+        };
         assert!(stderr.contains(expected_error));
     }
     Ok(())
