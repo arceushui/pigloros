@@ -1793,6 +1793,13 @@ fn a_subject_that_replaces_its_host_does_not_escape_the_host() -> TestResult {
     let local = Fixture::recomputation()?;
     let outcome = run(&local, replacing.closure(2), &expected, StoreConfig::Memory)?;
     assert_exact(&outcome, &expected)?;
+    // A replaced host that would stop after one Tick: the host still steps two.
+    let stopping = Subject {
+        behaviour: Behaviour::ReplaceHost(1),
+        ..Subject::new(Script::Count)
+    };
+    let outcome = run(&local, stopping.closure(2), &expected, StoreConfig::Memory)?;
+    assert_exact(&outcome, &expected)?;
     // Under the Air-Gapped mode the replacement Local host is refused.
     let air_gapped = Fixture::recomputation()?.in_mode(ExecutionModeV1::AirGapped)?;
     let outcome = run(

@@ -52,8 +52,8 @@
 //!    ([`RecomputationComposeErrorV1::Registration`]) is not a profile
 //!    refusal: it is the run's typed failure, with no Events.
 //! 7. The host applies the manifest `resource_limit` as its per-Tick Event
-//!    budget and steps exactly the frozen number of Ticks, whatever stop
-//!    condition the composed host carries. A step error is the run's typed
+//!    budget and its own stop condition, and steps exactly the frozen number
+//!    of Ticks, whatever stop condition the composed host carried. A step error is the run's typed
 //!    failure and ends the run; an exhausted host budget is
 //!    `ResourceLimitExceeded` instead. A recomputed Timeline with more
 //!    Events than the smaller of `resource_limit` and the EPF1 Event-count
@@ -669,15 +669,19 @@ fn recompute(
         {
             Err(Halt::Refused(profile_unsupported()))
         }
-        Ok(()) => run(
-            experiment.with_resource_limit(preflight.manifest.resource_limit),
-            member.ticks,
-            preflight
-                .manifest
-                .resource_limit
-                .min(budgets[EVENT_COUNT_BUDGET_SLOT_V1]),
-            admitted,
-        ),
+        Ok(()) => {
+            // The host's own stop condition, whatever host the subject left.
+            experiment.config.stop = StopCondition::MaxTicks(member.ticks);
+            run(
+                experiment.with_resource_limit(preflight.manifest.resource_limit),
+                member.ticks,
+                preflight
+                    .manifest
+                    .resource_limit
+                    .min(budgets[EVENT_COUNT_BUDGET_SLOT_V1]),
+                admitted,
+            )
+        }
     }
 }
 
