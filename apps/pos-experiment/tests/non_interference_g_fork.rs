@@ -22,7 +22,7 @@
 //! - One verifier-accepted signed NIA1 per executed case, only those flipped,
 //!   mode A non-executed: the matrix test, with
 //!   `non_interference_evidence.rs` for the verifier and the flips.
-//! - Snapshots and ReproManifest are empty surfaces:
+//! - Snapshots and `ReproManifest` are empty surfaces:
 //!   `the_records_form_run_makes_no_snapshot_and_no_repro_manifest`.
 
 use std::collections::BTreeMap;
@@ -74,7 +74,7 @@ const MODES: [ExecutionModeV1; 4] = [
     ExecutionModeV1::Replay,
     ExecutionModeV1::Fork,
 ];
-/// The surface ordinal of the CounterfactualPlan surface.
+/// The surface ordinal of the `CounterfactualPlan` surface.
 const PLAN_SURFACE: u16 = 1;
 
 fn fixtures_root() -> PathBuf {
@@ -318,7 +318,7 @@ fn every_g_fork_coordinate_executes_or_stays_typed_non_executed_and_matches_its_
             execution.preparation(),
             NonInterferencePreparationV1::for_variant(*variant)
         );
-        // AuthEq = PublicEq = OpEq across L = R = F: one result in every mode.
+        // `AuthEq` = `PublicEq` = `OpEq` across L = R = F: one result in every mode.
         let local = executed
             .get(&(*variant, ExecutionModeV1::Local))
             .ok_or("no Local execution")?;
@@ -598,7 +598,7 @@ fn a_spliced_value_diverges_at_its_first_coordinate() -> TestResult {
     // A leaking subject that spliced the factual suffix into the Fork would
     // reach the plan first: here the canary's value decides the plan's
     // Intervention. The pair is unequal, and its first divergence is the
-    // CounterfactualPlan surface; the Fork parent/cut before it is equal.
+    // `CounterfactualPlan` surface; the Fork parent/cut before it is equal.
     let fixture = g_fork_fixture_v1(NonInterferenceVariantV1::Success, ExecutionModeV1::Fork)?;
     let case = execute_non_interference_pair(&fixture, |run| {
         let spliced = [run.subject.permitted_input, run.unauthorized_value].concat();

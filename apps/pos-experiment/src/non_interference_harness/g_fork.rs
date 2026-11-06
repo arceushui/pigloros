@@ -29,12 +29,12 @@
 //! - Fork parent/cut: the plan's `[parent Timeline id, parent cut seq, parent
 //!   cut Tick, parent cut digest]`; publicly the export coordinate
 //!   `[WorldCut id, cut ordinal, Tick]`.
-//! - CounterfactualPlan, RecomputationFrontier, SuffixInvalidation,
+//! - `CounterfactualPlan`, `RecomputationFrontier`, `SuffixInvalidation`,
 //!   checkpoints and result: the exact artifact bytes of that kind, as one
 //!   array; publicly the `[ordinal, size, digest]` of each.
 //! - snapshots: empty. The records-form run makes no Snapshot: every `RCP1`
 //!   carries no Plugin state and no Projection digest.
-//! - ReproManifest: empty. No ReproManifest exists for a records-form Fork
+//! - `ReproManifest`: empty. No `ReproManifest` exists for a records-form Fork
 //!   until the ADR-064 R7 steps form (#1204).
 //! - exports: the whole export stream `[kind, WorldCut id, cut ordinal,
 //!   Tick, ordinal, bytes]`; publicly `[kind, ordinal, size, digest]`.
