@@ -1,7 +1,8 @@
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
 //! Public-interface tests for the ADR-062 Revision 8 slice R4 replay-conformance
-//! subject adapter (#1222).
+//! subject adapter (#1222), and for the slice R5 paired Local and Air-Gapped
+//! executions of every #172 family (#1224).
 //!
 //! The attempts are built from the checked-in files of `fixtures/conformance`
 //! the way the evaluator delivers them: the schema member, the payload, then
@@ -20,9 +21,10 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
+use pos_conformance::{ExecutionModeV1, ReproManifestV1, ReproducibilityClassV1};
 use pos_experiment::replay_conformance::{
-    exit_code, run, run_with_store, AdapterRunErrorV1, CONTRACT_VERSION, PAYLOAD_INVALID,
-    PROVIDER_ID, SCHEMA_ID, SUBCASE_MISMATCH,
+    exit_code, pair_report, run, run_with_store, AdapterRunErrorV1, PairErrorV1, CONTRACT_VERSION,
+    NETWORK_DENIED, PAYLOAD_INVALID, PROVIDER_ID, SCHEMA_ID, SUBCASE_MISMATCH,
 };
 use pos_reference::adapter_transport::{read_observation, write_attempt};
 use pos_reference::evaluator::{
@@ -756,5 +758,323 @@ fn a_present_but_empty_licence_is_refused_at_closure_presence() -> TestResult {
     assert_eq!(leg["first_error"]["code"], "ClosureIncomplete");
     assert_eq!(leg["first_error"]["coordinate"], "artifact_closure");
     assert_eq!(leg["authoritative_result_digest"], Value::Null);
+    Ok(())
+}
+
+/// The ADR-058 digest of a manifest.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn manifest_digest(manifest: &ReproManifestV1) -> TestResult<[u8; 32]> {
+    let bytes = pos_crypto::canonical::encode(manifest)?;
+    let mut input = b"PiglorOS.ReproManifest.v1\0".to_vec();
+    input.extend_from_slice(bytes.as_slice());
+    Ok(*blake3::hash(&input).as_bytes())
+}
+
+/// The expected authoritative result digest of every leg of `family`, in
+/// sub-case and profile order, as the independent generator wrote it.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn expected_result_digests(family: FixtureFamily) -> TestResult<Vec<Option<[u8; 32]>>> {
+    let payload: Value = serde_json::from_slice(&read(&format!(
+        "inputs/replay-conformance/{}.json",
+        family_name(family)
+    ))?)?;
+    let mut digests = Vec::new();
+    for subcase in payload["subcases"].as_array().ok_or("no sub-cases")? {
+        for leg in subcase["expect"].as_array().ok_or("no legs")? {
+            digests.push(match leg["authoritative_result_digest"].as_str() {
+                Some(text) => Some(
+                    <[u8; 32]>::try_from(
+                        (0..text.len())
+                            .step_by(2)
+                            .map(|at| u8::from_str_radix(&text[at..at + 2], 16))
+                            .collect::<Result<Vec<u8>, _>>()?,
+                    )
+                    .map_err(|_| "a digest is 32 bytes")?,
+                ),
+                None => None,
+            });
+        }
+    }
+    Ok(digests)
+}
+
+#[test]
+fn every_family_pair_has_identical_authoritative_results_in_local_and_air_gapped() -> TestResult {
+    for family in FAMILIES {
+        let local = attempt(family, ExecutionMode::Local)?;
+        let air_gapped = attempt(family, ExecutionMode::AirGapped)?;
+        let report = pair_report(&StoreConfig::Memory, &local, &air_gapped)?;
+        assert!(report.identical(), "{family:?}");
+        assert_eq!(report.case_id, local.case_id);
+        assert_eq!(report.family, family);
+        // Both executions are judged against the one expected-result record.
+        let expected = oracle_result(family)?;
+        assert_eq!(report.local.observation.result, expected, "{family:?}");
+        assert_eq!(report.air_gapped.observation.result, expected, "{family:?}");
+        assert_eq!(report.local.observation, report.air_gapped.observation);
+        assert_eq!(report.local.mode, ExecutionModeV1::Local);
+        assert_eq!(report.air_gapped.mode, ExecutionModeV1::AirGapped);
+        // The Air-Gapped results carry the label the published limitations
+        // give them.
+        assert_eq!(
+            report.air_gapped_evidence,
+            "Local-relaxation engineering evidence, not hosted conformance"
+        );
+        let limitations = String::from_utf8(read("support/limitations.md")?)?;
+        assert!(limitations
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .contains(&format!(
+                "Air-Gapped results are {}.",
+                report.air_gapped_evidence
+            )));
+
+        let digests = expected_result_digests(family)?;
+        assert_eq!(
+            u64::try_from(report.local.legs.len())?,
+            oracle_legs(family)?
+        );
+        assert_eq!(report.local.legs.len(), digests.len());
+        assert_eq!(report.air_gapped.legs.len(), digests.len());
+        for ((local_leg, air_gapped_leg), expected) in report
+            .local
+            .legs
+            .iter()
+            .zip(&report.air_gapped.legs)
+            .zip(digests)
+        {
+            assert!(local_leg.same_authoritative_result(air_gapped_leg));
+            // Identical Events in Timeline Order, Projection checkpoint and
+            // typed failures: the authoritative result digest of both legs is
+            // the one the independent generator wrote.
+            assert_eq!(local_leg.result.authoritative_result_digest, expected);
+            assert_eq!(air_gapped_leg.result.authoritative_result_digest, expected);
+            assert_eq!(
+                local_leg.result.first_error,
+                air_gapped_leg.result.first_error
+            );
+            // The manifest Execution Mode is the attempt's mode, and the
+            // `VRR1` is bound to that manifest.
+            assert_eq!(local_leg.manifest.execution_mode, ExecutionModeV1::Local);
+            assert_eq!(
+                air_gapped_leg.manifest.execution_mode,
+                ExecutionModeV1::AirGapped
+            );
+            assert_eq!(
+                local_leg.result.manifest_digest,
+                manifest_digest(&local_leg.manifest)?
+            );
+            assert_eq!(
+                air_gapped_leg.result.manifest_digest,
+                manifest_digest(&air_gapped_leg.manifest)?
+            );
+            // The two manifests differ in their Execution Mode only.
+            let mut moved = local_leg.manifest.clone();
+            moved.execution_mode = ExecutionModeV1::AirGapped;
+            assert_eq!(moved, air_gapped_leg.manifest);
+            assert_ne!(
+                local_leg.result.provenance_digest,
+                air_gapped_leg.result.provenance_digest
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn every_kind_of_authoritative_result_is_paired() -> TestResult {
+    // The pairs cover recorded and recomputed Events, a host typed failure, a
+    // refusal and a divergence.
+    let mut events = false;
+    let mut typed_failures = 0;
+    let mut refusal = false;
+    let mut divergence = false;
+    for family in FAMILIES {
+        let payload: Value = serde_json::from_slice(&read(&format!(
+            "inputs/replay-conformance/{}.json",
+            family_name(family)
+        ))?)?;
+        let failing: Vec<&str> = payload["subcases"]
+            .as_array()
+            .ok_or("no sub-cases")?
+            .iter()
+            .filter(|subcase| !subcase["expected_stream"]["failure"].is_null())
+            .filter_map(|subcase| subcase["id"].as_str())
+            .collect();
+        let report = pair_report(
+            &StoreConfig::Memory,
+            &attempt(family, ExecutionMode::Local)?,
+            &attempt(family, ExecutionMode::AirGapped)?,
+        )?;
+        for (local_leg, air_gapped_leg) in report.local.legs.iter().zip(&report.air_gapped.legs) {
+            events |= local_leg.result.authoritative_result_digest.is_some();
+            refusal |= local_leg.result.first_error.is_some();
+            assert_eq!(
+                local_leg.divergence.is_some(),
+                air_gapped_leg.divergence.is_some()
+            );
+            if let (Some(local), Some(air_gapped)) =
+                (&local_leg.divergence, &air_gapped_leg.divergence)
+            {
+                divergence = true;
+                // The DVR1 binds each mode's own manifest; its location does
+                // not depend on the mode.
+                assert_ne!(local.manifest_digest, air_gapped.manifest_digest);
+                assert_eq!(
+                    (
+                        local.location_kind,
+                        local.timeline_or_worldcut_id,
+                        local.timeline_seq_or_cut_ordinal,
+                        local.tick,
+                        local.mismatch_kind,
+                        &local.expected,
+                        &local.actual,
+                        &local.follow_on_counts,
+                    ),
+                    (
+                        air_gapped.location_kind,
+                        air_gapped.timeline_or_worldcut_id,
+                        air_gapped.timeline_seq_or_cut_ordinal,
+                        air_gapped.tick,
+                        air_gapped.mismatch_kind,
+                        &air_gapped.expected,
+                        &air_gapped.actual,
+                        &air_gapped.follow_on_counts,
+                    )
+                );
+            }
+            // A sub-case whose expected stream ends in a typed failure folds
+            // its Events and records the failure in both legs.
+            if failing.contains(&local_leg.subcase_id.as_str()) {
+                typed_failures += 1;
+                assert!(local_leg.result.authoritative_result_digest.is_some());
+                assert!(local_leg.same_authoritative_result(air_gapped_leg));
+            }
+        }
+    }
+    assert!(events, "no leg folded Events");
+    assert!(refusal, "no leg was refused");
+    assert!(divergence, "no leg diverged");
+    assert!(typed_failures > 0);
+
+    // Two different legs do not have the same authoritative result.
+    let mut report = pair_report(
+        &StoreConfig::Memory,
+        &attempt(FixtureFamily::Positive, ExecutionMode::Local)?,
+        &attempt(FixtureFamily::Positive, ExecutionMode::AirGapped)?,
+    )?;
+    assert!(!report.local.legs[0].same_authoritative_result(&report.air_gapped.legs[1]));
+
+    // A pair whose Air-Gapped leg differs in one sealed input or result field
+    // only is not identical; one that differs in the digests that bind the
+    // Execution Mode only is.
+    assert!(report.identical());
+    let sealed: [fn(&mut pos_conformance::VerificationResultV1); 7] = [
+        |result| result.reproducibility_class = ReproducibilityClassV1::LiveUnverified,
+        |result| result.artifact_closure_digest[0] ^= 1,
+        |result| result.trust_policy_snapshot_digest[0] ^= 1,
+        |result| result.evaluator_digest[0] ^= 1,
+        |result| result.fixture_digest = None,
+        |result| result.execution_profile_digest[0] ^= 1,
+        |result| result.checked_artifact_count += 1,
+    ];
+    for change in sealed {
+        let mut changed = report.clone();
+        change(&mut changed.air_gapped.legs[0].result);
+        assert!(!changed.identical());
+    }
+    let result = &mut report.air_gapped.legs[0].result;
+    result.request_digest[0] ^= 1;
+    result.manifest_digest[0] ^= 1;
+    result.provenance_digest[0] ^= 1;
+    result.result_digest[0] ^= 1;
+    result.divergence_report_digest = Some([1; 32]);
+    assert!(report.identical());
+    Ok(())
+}
+
+#[test]
+fn a_network_attempt_in_air_gapped_is_a_typed_failure() -> TestResult {
+    let denied = SubjectObservation {
+        result: failure(NETWORK_DENIED),
+        usage: ResourceUsage::default(),
+    };
+    // An Air-Gapped attempt that is granted network, through the process
+    // boundary and the library.
+    let mut granted = attempt(FixtureFamily::Positive, ExecutionMode::AirGapped)?;
+    granted.network_allowed = true;
+    let mut stream = Vec::new();
+    write_attempt(&mut stream, &granted)?;
+    let (code, stdout) = spawn(&stream)?;
+    assert_eq!(code, Some(0));
+    assert_eq!(read_observation(stdout.as_slice(), OUTPUT_LIMIT)?, denied);
+    assert_eq!(observe(&granted)?, denied);
+
+    // A sub-case whose manifest enables network, in every family.
+    for family in FAMILIES {
+        let enabled = |mode: ExecutionMode| -> TestResult<CaseAttempt> {
+            with_payload(attempt(family, mode)?, |payload| {
+                payload["subcases"][0]["manifest"]["network_enabled"] = json!(true);
+            })
+        };
+        let report = pair_report(
+            &StoreConfig::Memory,
+            &enabled(ExecutionMode::Local)?,
+            &enabled(ExecutionMode::AirGapped)?,
+        )?;
+        assert_eq!(report.air_gapped.observation, denied, "{family:?}");
+        assert!(report.air_gapped.legs.is_empty());
+        // Network denial is the Air-Gapped semantics: the Local attempt runs.
+        assert_ne!(report.local.observation, denied);
+        assert!(!report.local.legs.is_empty());
+        assert!(!report.identical());
+    }
+    Ok(())
+}
+
+#[test]
+fn a_pair_report_needs_the_two_attempts_of_one_case() -> TestResult {
+    let local = attempt(FixtureFamily::Positive, ExecutionMode::Local)?;
+    let air_gapped = attempt(FixtureFamily::Positive, ExecutionMode::AirGapped)?;
+    let other_case = attempt(FixtureFamily::Denied, ExecutionMode::AirGapped)?;
+    let mut granted = air_gapped.clone();
+    granted.network_allowed = true;
+    for (first, second) in [
+        (&local, &local),
+        (&air_gapped, &air_gapped),
+        (&air_gapped, &local),
+        (&local, &other_case),
+        (&local, &granted),
+    ] {
+        assert_eq!(
+            pair_report(&StoreConfig::Memory, first, second),
+            Err(PairErrorV1::NotAPair)
+        );
+    }
+
+    // A pair of provider contract 1.0.0 is not executed.
+    let old = |mode: ExecutionMode| -> TestResult<CaseAttempt> {
+        let mut old = attempt(FixtureFamily::Positive, mode)?;
+        old.schema = artifact(PROVIDER_1_0_0_SCHEMA.to_vec());
+        old.payload = artifact(PROVIDER_1_0_0_PAYLOAD.to_vec());
+        Ok(old)
+    };
+    assert_eq!(
+        pair_report(
+            &StoreConfig::Memory,
+            &old(ExecutionMode::Local)?,
+            &old(ExecutionMode::AirGapped)?
+        ),
+        Err(PairErrorV1::NotExecuted)
+    );
+    assert_eq!(
+        PairErrorV1::NotAPair.to_string(),
+        "the attempts are not the Local and Air-Gapped attempt of one case"
+    );
+    assert_eq!(
+        PairErrorV1::NotExecuted.to_string(),
+        "the attempts are not executed"
+    );
     Ok(())
 }

@@ -19,6 +19,16 @@ It runs each sub-case of the payload through the `RecordedReplay` and
 `ProfileRecomputation` / `CrossProfileConformance` execution steps and compares
 the `VRR1` of every leg with the sub-case's expected legs.
 
+Every family runs in Local and in Air-Gapped mode against the same oracle
+(slice R5, #1224). `pos_experiment::replay_conformance::pair_report` runs the
+Local and the Air-Gapped attempt of one case and reports the manifest and
+`VRR1` of every leg of both; the two must have identical authoritative
+results. An Air-Gapped attempt has no network: a network attempt is the
+failure `network-denied` of provider
+`pigloros.fixture.replay-conformance@2.0.0`. The report labels the Air-Gapped
+results Local-relaxation engineering evidence until the Sandbox Provider runs
+them.
+
 The Experiment host binary is the replay subject adapter (ADR-062 Revision 8
 section 3.1 option A). The adapter and the binary are compiled only with the
 `test-support` feature, because they run on the open fixture erasure gate and the
@@ -52,6 +62,18 @@ The harness flips no inventory: `execution-matrix.json` changes only when the
 capture adapters of slices N1 to N4 supply verifier-accepted executions. The
 `pos-ni-local-probe` binary (feature `test-support`) is the harness probe of the
 Local runner, not a capture adapter of any row.
+
+`non_interference_harness::g_pub` holds the G-PUB capture adapters of slice N1
+(#1229, wiki `ADR-062_R8_NonInterference_Executions`):
+- `NI-PUBLIC-006` speaks HTTP to a fresh `piglor-gateway` router.
+- `NI-EVAL-007` captures the `export_timeline_own` export and the EAI1 attempt
+  over it.
+
+Every mode imports the Events it produced into that public seam. The host
+places the unauthorized value in a denied sibling Timeline of the seam store.
+Run-local identities are captured position-relative. `pos-ni-g-pub-subject` is
+the Local fresh-process subject of these rows. `NI-ARCHIVE-009` is non-executed
+`Missing` until slice N1b (#1284).
 
 ## ADR-064 Fork artifact comparison
 
