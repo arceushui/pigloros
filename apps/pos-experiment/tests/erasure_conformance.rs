@@ -530,8 +530,8 @@ fn a_completed_erasure_stays_contained_and_never_carries_erased_bytes() -> TestR
 }
 
 /// After `Complete`: the erased Timeline stays contained, an exact finalize
-/// retry returns the committed `ERC1`, no further destruction attempt is
-/// admitted, and a Fork of the erased Timeline inherits its containment.
+/// retry returns the committed `ERC1`, and neither a further destruction
+/// attempt nor a Fork of the erased Timeline is admitted.
 fn assert_no_resurrection(
     catalogue: &ErasureCaseCatalogueV1,
     run: &mut ErasureCaseRunV1,
@@ -587,18 +587,17 @@ fn assert_no_resurrection(
         Some(ErasureHostErrorV1::Conflict),
         "a Complete request admits no further destruction attempt"
     );
-    let child = commands
-        .fork_timeline_identified(
-            digest(78),
-            timeline,
-            Seq::from_u64(1),
-            "erasure-subject-fork",
-        )
-        .map_err(fail)?;
     assert_eq!(
-        commands.timeline(child.id()).err(),
-        Some(ErasureHostErrorV1::AccessFrozen),
-        "a Fork of an erased Timeline inherits its containment"
+        commands
+            .fork_timeline_identified(
+                digest(78),
+                timeline,
+                Seq::from_u64(1),
+                "erasure-subject-fork",
+            )
+            .err(),
+        Some(ErasureHostErrorV1::Conflict),
+        "no Fork of an erased Timeline is admitted after Complete"
     );
     drop(commands);
     assert_eq!(run.host().status(), ErasureHostStatusV1::Ready);
