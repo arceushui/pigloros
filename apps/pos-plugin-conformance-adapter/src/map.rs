@@ -197,11 +197,15 @@ fn is_authoritative(error: &str, class: &str) -> bool {
     is_known(error) && class == AUTHORITATIVE
 }
 
-/// Whether `class` is one of the seven canonical trap class names.
-fn is_trap_class(class: &str) -> bool {
+/// The sub-result of a trap of class `class`: `Trapped` for one of the seven canonical trap
+/// class names, else operational.
+fn of_trap(class: &str) -> SubResultV1 {
     WORKER_TRAP_CLASSES_V1
         .iter()
-        .any(|known| known.name() == class)
+        .find(|known| known.name() == class)
+        .map_or(SubResultV1::Operational, |known| SubResultV1::Trapped {
+            class: known.name(),
+        })
 }
 
 /// The sub-result of an outcome record.
@@ -233,13 +237,10 @@ pub fn of_outcome(outcome: &CommunityPluginSubjectOutcomeV1) -> SubResultV1 {
         {
             SubResultV1::Failed { error, class }
         }
-        CommunityPluginSubjectResultV1::Trapped { trap_class, .. } if is_trap_class(trap_class) => {
-            SubResultV1::Trapped { class: trap_class }
-        }
+        CommunityPluginSubjectResultV1::Trapped { trap_class, .. } => of_trap(trap_class),
         CommunityPluginSubjectResultV1::Committed { .. }
         | CommunityPluginSubjectResultV1::Refused { .. }
         | CommunityPluginSubjectResultV1::Failed { .. }
-        | CommunityPluginSubjectResultV1::Trapped { .. }
         | CommunityPluginSubjectResultV1::Staged { .. }
         | CommunityPluginSubjectResultV1::NotRun
         | CommunityPluginSubjectResultV1::Discarded => SubResultV1::Operational,
