@@ -88,8 +88,8 @@ TICKS = 2
 SIGNALS_PER_TICK = 2
 PAGE_LIMIT = 3
 SUBJECT_TIMELINE = "ni-g-pub-subject"
-# `TimelineMeta::root` creates a `Live` Timeline with no owner.
-SUBJECT_TIMELINE_MODE = "Live"
+# `TimelineMeta::root` creates a `Live` Timeline (ADR-127 mode code 1) with no owner.
+SUBJECT_TIMELINE_MODE_CODE = 1
 EVENT_TYPE = "society.signal"
 DIMENSIONS = ("trust", "opinion", "economy", "culture", "polarization")
 EVALUATOR_SCHEMA = b"pigloros.g-pub.evaluator-input.v1"
@@ -239,14 +239,14 @@ def subject_events(permitted: bytes) -> list[tuple[int, str, float]]:
 
 
 def event_stream(events: list[tuple[int, str, float]]) -> list:
-    """`[seq, entity ordinal, event type, schema version, causation seq, correlation ordinal,
-    payload hash, payload]`. The subject Timeline has no owner, so its one entity has ordinal 0;
+    """The ADR-127 section 2 Event record `[seq, entity ordinal, event type, schema version,
+    causation seq, correlation ordinal, payload, payload hash]`. The subject Timeline has no owner, so its one entity has ordinal 0;
     no subject Event names a cause or a correlation; the payload hash is the BLAKE3 digest of the
     payload (`pos_crypto::chain::hash_payload`)."""
     rows = []
     for seq, dimension, value in events:
         payload = signal_payload(dimension, value)
-        rows.append([seq, 0, EVENT_TYPE, 1, None, None, b3(payload), payload])
+        rows.append([seq, 0, EVENT_TYPE, 1, None, None, payload, b3(payload)])
     return rows
 
 
@@ -257,7 +257,8 @@ def evaluator_surfaces(row: str, variant: str) -> tuple[list[bytes], list[bytes]
     permitted = permitted_input(row, variant)
     events = subject_events(permitted)
     stream = event_stream(events)
-    exported = cbor([SUBJECT_TIMELINE, SUBJECT_TIMELINE_MODE, None, len(events), stream])
+    # The ADR-127 `timeline.cbor` record `[mode code, name, owner ordinal, head]`, then the stream.
+    exported = cbor([SUBJECT_TIMELINE_MODE_CODE, SUBJECT_TIMELINE, None, len(events), stream])
     manifest = cbor([[EXPORT_MEMBER, len(exported), b3(exported)]])
     descriptor = cbor(
         [row, variant, b3(permitted), ulid_text(PLUGIN_ID), PLUGIN_NAME, DRIVER_NAME]
