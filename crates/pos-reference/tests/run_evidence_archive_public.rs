@@ -235,6 +235,12 @@ fn every_header_byte_is_canonical() {
         edited(|bytes| bytes[..512].copy_from_slice(&oversized)),
         Err(Error::InvalidEncoding)
     );
+    // The last record's size past the input.
+    let past = header(b"timeline.cbor", 2000, 0);
+    assert_eq!(
+        edited(|bytes| bytes[3072..3584].copy_from_slice(&past)),
+        Err(Error::InvalidEncoding)
+    );
     // Non-zero padding after the marker data.
     assert_eq!(
         edited(|bytes| bytes[512 + 7] = 1),
