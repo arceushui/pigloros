@@ -42,7 +42,7 @@ fn event(seq: u64, entity: EntityId) -> Event {
     }
 }
 
-fn export(meta: TimelineMeta, events: Vec<Event>) -> TimelineExport {
+const fn export(meta: TimelineMeta, events: Vec<Event>) -> TimelineExport {
     let mut timeline = Timeline::new(meta);
     timeline.head = Seq::from_u64(events.len() as u64);
     TimelineExport {
