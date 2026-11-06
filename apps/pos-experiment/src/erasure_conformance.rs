@@ -682,12 +682,14 @@ impl FixtureErasureAuthorityV1 {
             })
     }
 
-    /// The case's obligations for `request` and their content-addressed set.
+    /// The case's obligations for `request` in bytewise order of their
+    /// content addresses (the order `EROS1` requires) and their set.
     fn frozen_obligations(
         &self,
         request: ErasureReferenceV1,
     ) -> Result<(Vec<ErasureObligationV1>, ErasureObligationSetV1), ErasureErrorV1> {
-        obligations_for(&self.case, request).and_then(|obligations| {
+        obligations_for(&self.case, request).and_then(|mut obligations| {
+            obligations.sort_unstable_by_key(ErasureObligationV1::reference);
             ErasureObligationSetV1::new(ErasureObligationSetInputV1 {
                 request,
                 obligations: obligations
