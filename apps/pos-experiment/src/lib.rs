@@ -319,6 +319,7 @@ fn reject_protected_history(
 
 pub mod authoritative_comparison;
 pub mod moat_proof;
+pub mod non_interference_harness;
 pub mod profile_recomputation;
 pub mod recorded_replay;
 #[cfg(feature = "test-support")]

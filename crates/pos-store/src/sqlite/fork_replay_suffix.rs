@@ -653,7 +653,7 @@ mod tests {
         };
 
         for held_snapshot in [false, true] {
-            let (_directory, store, world, _built) = fixture(Shape::Mixed)?;
+            let (_directory, mut store, world, _built) = fixture(Shape::Mixed)?;
             let key = world.child_at(0)?.id.to_string();
             let expected = next_row(
                 &store.conn,
@@ -734,7 +734,7 @@ mod tests {
     }
 
     fn ignore_suffix_probe_function(
-        conn: &Connection,
+        conn: &mut Connection,
         ignored_index: usize,
     ) -> rusqlite::Result<std::sync::Arc<std::sync::Mutex<SuffixFunctionAuthorization>>> {
         use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
@@ -765,7 +765,7 @@ mod tests {
         for (label, ignored_index) in [("sequence_type", 0), ("event_id_type", 1), ("fop_type", 3)]
         {
             for held_snapshot in [false, true] {
-                let (_directory, store, world, _built) = fixture(Shape::Mixed)?;
+                let (_directory, mut store, world, _built) = fixture(Shape::Mixed)?;
                 let key = world.child_at(0)?.id.to_string();
                 let expected = next_row(
                     &store.conn,
@@ -785,7 +785,7 @@ mod tests {
                 if held_snapshot {
                     store.conn.execute_batch("BEGIN DEFERRED")?;
                 }
-                let observed = ignore_suffix_probe_function(&store.conn, ignored_index)?;
+                let observed = ignore_suffix_probe_function(&mut store.conn, ignored_index)?;
                 let failed = next_row(
                     &store.conn,
                     &key,
