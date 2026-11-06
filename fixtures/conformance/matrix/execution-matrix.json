@@ -2664,13 +2664,13 @@
       "variant": "S",
       "mode": "L",
       "executed": true,
-      "expected_result_digest": "b434afe0307c59548599ff5e74a990e6ee88a3e1215e906ebd2156eaacc14f04",
+      "expected_result_digest": "0be04fceb2e71acd0d738b87781f67f7b5a1d404c7b84c79d3716de2ffefb755",
       "authority_fixture_id": null,
       "authority_result_digest": null,
       "expected_result": {
         "equal": true,
         "first_divergence": null,
-        "nia1_content_digest": "756392a37525f750a7ea3a816943f3ab9dd8ce785f92071bdf1e6759a8e93362"
+        "nia1_content_digest": "ed2121376e5cce3fc288f4a752a4e414cbf3394c3d82d3f5fffe91687e3d2f93"
       }
     },
     {
@@ -2690,13 +2690,13 @@
       "variant": "S",
       "mode": "R",
       "executed": true,
-      "expected_result_digest": "b434afe0307c59548599ff5e74a990e6ee88a3e1215e906ebd2156eaacc14f04",
+      "expected_result_digest": "0be04fceb2e71acd0d738b87781f67f7b5a1d404c7b84c79d3716de2ffefb755",
       "authority_fixture_id": null,
       "authority_result_digest": null,
       "expected_result": {
         "equal": true,
         "first_divergence": null,
-        "nia1_content_digest": "eb877171bf5312f22b51a45613fe10051fd7f1e46cf6a5ad864932f1dc184659"
+        "nia1_content_digest": "557c8a506e270c21122bd0693cf1f181cdf6850465d2251ec5e9bf69c67fab6f"
       }
     },
     {
@@ -2705,13 +2705,13 @@
       "variant": "S",
       "mode": "F",
       "executed": true,
-      "expected_result_digest": "b434afe0307c59548599ff5e74a990e6ee88a3e1215e906ebd2156eaacc14f04",
+      "expected_result_digest": "0be04fceb2e71acd0d738b87781f67f7b5a1d404c7b84c79d3716de2ffefb755",
       "authority_fixture_id": null,
       "authority_result_digest": null,
       "expected_result": {
         "equal": true,
         "first_divergence": null,
-        "nia1_content_digest": "627cc84a86fa46a5d33948d244b5789c2d1fc0dcf6e70049a960074765864e4c"
+        "nia1_content_digest": "6eb66cc92ab297131220bce4446adf155eb223ad91553a977224819679197b23"
       }
     },
     {
@@ -2720,13 +2720,13 @@
       "variant": "D",
       "mode": "L",
       "executed": true,
-      "expected_result_digest": "b434afe0307c59548599ff5e74a990e6ee88a3e1215e906ebd2156eaacc14f04",
+      "expected_result_digest": "0be04fceb2e71acd0d738b87781f67f7b5a1d404c7b84c79d3716de2ffefb755",
       "authority_fixture_id": null,
       "authority_result_digest": null,
       "expected_result": {
         "equal": true,
         "first_divergence": null,
-        "nia1_content_digest": "b5feab3535ab626da3f93dce26c9cf80e7a7f9df1cc70af191e222478297bc39"
+        "nia1_content_digest": "f676f40fc38959a2ee1ca9384e647562ef432487f5e87935eaf503592c8857ac"
       }
     },
     {
@@ -2746,13 +2746,13 @@
       "variant": "D",
       "mode": "R",
       "executed": true,
-      "expected_result_digest": "b434afe0307c59548599ff5e74a990e6ee88a3e1215e906ebd2156eaacc14f04",
+      "expected_result_digest": "0be04fceb2e71acd0d738b87781f67f7b5a1d404c7b84c79d3716de2ffefb755",
       "authority_fixture_id": null,
       "authority_result_digest": null,
       "expected_result": {
         "equal": true,
         "first_divergence": null,
-        "nia1_content_digest": "659070422a149642d8f362f9b559ee1e8a9a9a034bcfff5df6244dacfdc1f3bd"
+        "nia1_content_digest": "4c045c2a25f0b223eb64cd0669dabdaa6caa7d3c1b643368a0becfa0006da7a0"
       }
     },
     {
@@ -2761,13 +2761,13 @@
       "variant": "D",
       "mode": "F",
       "executed": true,
-      "expected_result_digest": "b434afe0307c59548599ff5e74a990e6ee88a3e1215e906ebd2156eaacc14f04",
+      "expected_result_digest": "0be04fceb2e71acd0d738b87781f67f7b5a1d404c7b84c79d3716de2ffefb755",
       "authority_fixture_id": null,
       "authority_result_digest": null,
       "expected_result": {
         "equal": true,
         "first_divergence": null,
-        "nia1_content_digest": "b15e7b01c6d4c38ba594fc9f31b60e4b1e587ce573480eada5fe736721bf844e"
+        "nia1_content_digest": "4ade698375e727e6c174c833f19d2712dd42b1db2c1ea091771adfe5768438b8"
       }
     },
     {
@@ -2776,13 +2776,13 @@
       "variant": "W",
       "mode": "L",
       "executed": true,
-      "expected_result_digest": "b434afe0307c59548599ff5e74a990e6ee88a3e1215e906ebd2156eaacc14f04",
+      "expected_result_digest": "0be04fceb2e71acd0d738b87781f67f7b5a1d404c7b84c79d3716de2ffefb755",
       "authority_fixture_id": null,
       "authority_result_digest": null,
       "expected_result": {
         "equal": true,
         "first_divergence": null,
-        "nia1_content_digest": "4e095ab8a8fc231e7b0bbfff99aae799c735147e1337c469a74bdc2002f9b66b"
+        "nia1_content_digest": "baa43b93113878ef293d95782535ddf0473c20cfd110eb2db8c8de80d47edfae"
       }
     },
     {
@@ -2802,13 +2802,13 @@
       "variant": "W",
       "mode": "R",
       "executed": true,
-      "expected_result_digest": "b434afe0307c59548599ff5e74a990e6ee88a3e1215e906ebd2156eaacc14f04",
+      "expected_result_digest": "0be04fceb2e71acd0d738b87781f67f7b5a1d404c7b84c79d3716de2ffefb755",
       "authority_fixture_id": null,
       "authority_result_digest": null,
       "expected_result": {
         "equal": true,
         "first_divergence": null,
-        "nia1_content_digest": "61069243201dcb42e205bd7e4a9f43eeeb2032a09371aa3aec58ad0e27b47d43"
+        "nia1_content_digest": "091278f8e5ac8904503ef8ff79d2891d6c47e8f5e878cb6544cbcb1bc02845e8"
       }
     },
     {
@@ -2817,13 +2817,13 @@
       "variant": "W",
       "mode": "F",
       "executed": true,
-      "expected_result_digest": "b434afe0307c59548599ff5e74a990e6ee88a3e1215e906ebd2156eaacc14f04",
+      "expected_result_digest": "0be04fceb2e71acd0d738b87781f67f7b5a1d404c7b84c79d3716de2ffefb755",
       "authority_fixture_id": null,
       "authority_result_digest": null,
       "expected_result": {
         "equal": true,
         "first_divergence": null,
-        "nia1_content_digest": "bfa1e7db7cd748e1d024402bbc60ad4f041d5c2f9e9a97d14938b0dd914832a4"
+        "nia1_content_digest": "3b950c180e4701ce1ae5b6a5a3847d147d49c6a892038259d5b799b23a8307b2"
       }
     },
     {
@@ -2832,13 +2832,13 @@
       "variant": "C",
       "mode": "L",
       "executed": true,
-      "expected_result_digest": "b434afe0307c59548599ff5e74a990e6ee88a3e1215e906ebd2156eaacc14f04",
+      "expected_result_digest": "0be04fceb2e71acd0d738b87781f67f7b5a1d404c7b84c79d3716de2ffefb755",
       "authority_fixture_id": null,
       "authority_result_digest": null,
       "expected_result": {
         "equal": true,
         "first_divergence": null,
-        "nia1_content_digest": "9dec5d91be895cec284e2024b00c5bbc0f1c0cc04a55b23786d5ed9acb988d9d"
+        "nia1_content_digest": "3bef1eaf11f42ced2f5f01ef7a35d59a57e2b9e0c472304fcdba2e3b33b7d100"
       }
     },
     {
@@ -2858,13 +2858,13 @@
       "variant": "C",
       "mode": "R",
       "executed": true,
-      "expected_result_digest": "b434afe0307c59548599ff5e74a990e6ee88a3e1215e906ebd2156eaacc14f04",
+      "expected_result_digest": "0be04fceb2e71acd0d738b87781f67f7b5a1d404c7b84c79d3716de2ffefb755",
       "authority_fixture_id": null,
       "authority_result_digest": null,
       "expected_result": {
         "equal": true,
         "first_divergence": null,
-        "nia1_content_digest": "db90512891e08a5347a34612231a52792c253d5b31a6257dc4ee57306998cb43"
+        "nia1_content_digest": "427584eb8ee6acff8be1ee840b8797ffa487b9103fb7926d33ba0db805077a7f"
       }
     },
     {
@@ -2873,13 +2873,13 @@
       "variant": "C",
       "mode": "F",
       "executed": true,
-      "expected_result_digest": "b434afe0307c59548599ff5e74a990e6ee88a3e1215e906ebd2156eaacc14f04",
+      "expected_result_digest": "0be04fceb2e71acd0d738b87781f67f7b5a1d404c7b84c79d3716de2ffefb755",
       "authority_fixture_id": null,
       "authority_result_digest": null,
       "expected_result": {
         "equal": true,
         "first_divergence": null,
-        "nia1_content_digest": "e2e1c12d4f30b652589b06ecbdb01b99aac3cb37038ffc22e618d39d29f38292"
+        "nia1_content_digest": "9906cf5724e55b7e2121154ffcd6fb730ce5c0c6aea5a91c49ecf4fd34854f50"
       }
     }
   ],
