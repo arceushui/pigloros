@@ -25,6 +25,7 @@ LAYER = "plugin-conformance"
 # The rows whose verifier-accepted cases slice N1 flips (owner note
 # ADR-062_R8_NonInterference_Executions); this checker does not own their execution fields.
 NON_INTERFERENCE_EXECUTED_ROWS = ("NI-PUBLIC-006", "NI-EVAL-007")
+HEX = "0123456789abcdef"
 FAMILIES = (
     "positive",
     "denied",
@@ -89,17 +90,37 @@ def profile_errors(root: Path) -> list[str]:
     return [f"the profile binds {bound}, not one record per family {wanted}"]
 
 
+def n1_case_errors(label: str, case: dict[str, object]) -> list[str]:
+    """The faults of one case of a slice N1 row: only an L, R or F case may be executed, and then
+    with a 64-hex expected result digest; every other case stays open."""
+    faults = []
+    if case.get("authority_result_digest") is not None:
+        faults.append(f"{label}: authority_result_digest is not null")
+    digest = case.get("expected_result_digest")
+    if case.get("executed") is True and case.get("mode") in ("L", "R", "F"):
+        if not (isinstance(digest, str) and len(digest) == 64 and all(c in HEX for c in digest)):
+            faults.append(f"{label}: expected_result_digest is not 64 lowercase hex digits")
+        return faults
+    if case.get("executed") is not False:
+        faults.append(f"{label}: executed is not false")
+    for key in ("expected_result_digest", "expected_result"):
+        if case.get(key) is not None:
+            faults.append(f"{label}: {key} is not null")
+    return faults
+
+
 def row_errors(label: str, row: dict[str, object]) -> list[str]:
     """The faults of one matrix row or case: executed, digest-bearing or Plugin layer."""
     faults = []
     if LAYER in (row.get("claim_layer"), row.get("authority_fixture_id"), row.get("fixture_id")):
         faults.append(f"{label}: a {LAYER} row")
     if row.get("fixture_id") in NON_INTERFERENCE_EXECUTED_ROWS:
-        # Only an L, R or F case of these rows may be executed (and carry its result); an
-        # Air-Gapped case stays open until N7 (#1235). Their row counts are checked against the
-        # cases by `count_errors`.
-        if "case_id" not in row or row.get("mode") in ("L", "R", "F"):
-            return faults
+        # A slice N1 row's count is checked against its cases by `count_errors`.
+        if "case_id" in row:
+            faults.extend(n1_case_errors(label, row))
+        elif row.get("authority_result_digest") is not None:
+            faults.append(f"{label}: authority_result_digest is not null")
+        return faults
     if row.get("executed") is not False and "executed" in row:
         faults.append(f"{label}: executed is not false")
     for key in ("expected_result_digest", "expected_result", "authority_result_digest"):

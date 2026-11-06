@@ -225,6 +225,20 @@ printf '\0' >>"${tampered_nia1}"
 refresh_checksums "${tampered_nia1_root}" "${tampered_nia1}"
 expect_rejection "${tampered_nia1_root}" "NIA1 file name is not its content address"
 
+# build.rs leaves non-interference/ out of the bundle closure, so the checksum inventories must
+# still cover it: a NIA1 missing from SHA256SUMS is not reproducible, and one missing from
+# BLAKE3SUMS leaves the inventory incomplete.
+sha256_gap_root="$(new_fixture_copy non-interference-sha256-gap)"
+sed -i '0,\|  non-interference/executions/|{\|  non-interference/executions/|d}' "${sha256_gap_root}/SHA256SUMS"
+expect_adapter_rejection "${sha256_gap_root}" "SHA256SUMS is not independently reproducible"
+
+blake3_gap_root="$(new_fixture_copy non-interference-blake3-gap)"
+sed -i '0,\|  non-interference/executions/|{\|  non-interference/executions/|d}' "${blake3_gap_root}/BLAKE3SUMS"
+blake3_inventory_sha256="$(sha256sum "${blake3_gap_root}/BLAKE3SUMS" | awk '{print $1}')"
+sed -i -E "s|^[0-9a-f]{64}  BLAKE3SUMS$|${blake3_inventory_sha256}  BLAKE3SUMS|" \
+  "${blake3_gap_root}/SHA256SUMS"
+expect_rejection "${blake3_gap_root}" "BLAKE3SUMS does not cover the complete public fixture inventory"
+
 watchdog_root="$(new_fixture_copy plugin-watchdog-drift)"
 replace_json "${watchdog_root}/providers/plugin-conformance/provider.json" \
   '.fixture_contracts.denied.watchdog_ms = 1000'

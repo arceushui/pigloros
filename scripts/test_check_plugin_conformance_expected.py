@@ -107,6 +107,32 @@ class CheckerTest(unittest.TestCase):
         self.edit(MATRIX, lambda m: m["cases"][index].update(executed=True))
         self.assert_fault(f"cases[{index}]: executed is not false")
 
+    def case_index(self, case_id: str) -> int:
+        cases = json.loads((FIXTURES / MATRIX).read_text(encoding="utf-8"))["cases"]
+        return next(index for index, case in enumerate(cases) if case["case_id"] == case_id)
+
+    def test_an_n1_authority_result_digest_fails(self) -> None:
+        index = self.case_index("NI-EVAL-007-D-R")
+        self.edit(MATRIX, lambda m: m["cases"][index].update(authority_result_digest="ab" * 32))
+        self.assert_fault(f"cases[{index}]: authority_result_digest is not null")
+
+    def test_an_executed_n1_case_without_a_hex_digest_fails(self) -> None:
+        index = self.case_index("NI-EVAL-007-D-R")
+        for digest in (None, "AB" * 32, "ab" * 31, 7):
+            self.edit(MATRIX, lambda m, d=digest: m["cases"][index].update(expected_result_digest=d))
+            self.assert_fault(f"cases[{index}]: expected_result_digest is not 64 lowercase hex")
+
+    def test_an_open_n1_case_carrying_a_digest_fails(self) -> None:
+        index = self.case_index("NI-PUBLIC-006-W-A")
+        self.edit(MATRIX, lambda m: m["cases"][index].update(expected_result_digest="ab" * 32))
+        self.assert_fault(f"cases[{index}]: expected_result_digest is not null")
+
+    def test_an_unexecuted_n1_case_with_a_result_fails(self) -> None:
+        index = self.case_index("NI-EVAL-007-S-L")
+        self.edit(MATRIX, lambda m: m["cases"][index].update(executed=False))
+        self.assert_fault(f"cases[{index}]: expected_result_digest is not null")
+        self.assert_fault(f"cases[{index}]: expected_result is not null")
+
     def test_an_n1_row_count_disagreeing_with_its_cases_fails(self) -> None:
         self.edit(MATRIX, lambda m: m["rows"][5].update(executed_case_count=11))
         self.assert_fault("rows[5]: executed_case_count is not its 12 cases")

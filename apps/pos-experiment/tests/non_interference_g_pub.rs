@@ -211,8 +211,19 @@ fn subject_events(permitted_input: &[u8]) -> TestResult<Vec<Event>> {
     let mut session = g_pub_experiment_v1(permitted_input)?.start()?;
     while session.step()? {}
     let events = session.source_events()?;
-    // The capture records no correlation: the subject must emit none.
-    assert!(events.iter().all(|event| event.correlation_id.is_none()));
+    // The capture records no correlation, signature or signature identity,
+    // and keeps the payload whose BLAKE3 digest is the payload hash: the
+    // subject must emit exactly such Events.
+    let hasher = pos_crypto::chain::Blake3Hasher;
+    for event in &events {
+        assert!(event.correlation_id.is_none());
+        assert!(event.signature.is_none());
+        assert!(event.signature_identity.is_none());
+        assert_eq!(
+            event.payload_hash,
+            pos_core::Hasher::hash_payload(&hasher, &event.payload)
+        );
+    }
     Ok(events)
 }
 

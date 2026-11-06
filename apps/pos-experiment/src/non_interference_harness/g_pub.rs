@@ -49,8 +49,10 @@
 //! - A cursor's inventory generation and Timeline by their ordinals.
 //!
 //! `wall_time`, `origin` and signatures are declared operational and are not
-//! captured. The subject's Events carry no `correlation_id`, so none is
-//! captured; the payload hash is the digest of the captured payload bytes.
+//! captured. The subject's Events carry no `correlation_id`, signature or
+//! signature identity, so none is captured; the payload hash is the BLAKE3
+//! digest of the captured payload bytes. A test pins all four. A
+//! `causation_id` outside the captured stream refuses the capture.
 //! The seam import re-appends each Event's entity, type and payload; its
 //! schema version and causation are read back from the seam. Every other byte
 //! stays exact. Response lengths are exact, since a ULID's text always has the
@@ -521,27 +523,36 @@ fn ordinal<T: PartialEq + Clone>(seen: &mut Vec<T>, value: &T) -> u64 {
 
 /// The position-relative record of an Event stream in Timeline Order:
 /// `[seq, entity ordinal, event type, schema version, causation seq or
-/// null, payload]` per Event.
-fn event_stream(events: &[Event]) -> Value {
+/// null, payload]` per Event. A cause outside the stream has no position, so
+/// the stream is refused (`None`): the authoritative field is never
+/// normalized to "no cause".
+fn event_stream(events: &[Event]) -> Option<Value> {
     let mut entities = Vec::new();
-    Value::Array(
-        events
-            .iter()
-            .map(|event| {
+    events
+        .iter()
+        .map(|event| {
+            let cause = event.causation_id.map_or_else(
+                || Some(Value::Null),
+                |cause| {
+                    events
+                        .iter()
+                        .find(|candidate| candidate.id == cause)
+                        .map(|candidate| uint(candidate.seq.as_u64()))
+                },
+            );
+            cause.map(|cause| {
                 Value::Array(vec![
                     uint(event.seq.as_u64()),
                     uint(ordinal(&mut entities, &event.entity)),
                     text(event.event_type.as_str()),
                     uint(u64::from(event.schema_version.as_u32())),
-                    event
-                        .causation_id
-                        .and_then(|cause| events.iter().find(|candidate| candidate.id == cause))
-                        .map_or(Value::Null, |cause| uint(cause.seq.as_u64())),
+                    cause,
                     Value::Bytes(event.payload.as_slice().to_vec()),
                 ])
             })
-            .collect(),
-    )
+        })
+        .collect::<Option<Vec<_>>>()
+        .map(Value::Array)
 }
 
 /// Whether the denied sibling is created before the subject Timeline.
@@ -599,7 +610,9 @@ fn evaluator_surfaces(
                     })
                 })
         })
-        .and_then(|export| evaluator_records(run, &export))
+        .and_then(|export| {
+            event_stream(&export.events).and_then(|stream| evaluator_records(run, &export, stream))
+        })
         .ok_or(NonInterferenceNonExecutedCauseV1::Unavailable)
 }
 
@@ -670,7 +683,7 @@ fn export_evaluation() -> Option<pos_core::ReplayClaimEvaluationV1> {
     .ok()
 }
 
-/// The five `NI-EVAL-007` surfaces from the export.
+/// The five `NI-EVAL-007` surfaces from the export and its Event stream.
 ///
 /// - Export bundle: the Event stream; publicly the export record
 ///   `[name, head, stream]`; operationally its digest.
@@ -682,8 +695,11 @@ fn export_evaluation() -> Option<pos_core::ReplayClaimEvaluationV1> {
 ///   stream.
 /// - `ConformanceReport`: the ordered case outcomes `[[case id, outcome,
 ///   payload digest]]`.
-fn evaluator_records(run: &GPubRunV1<'_>, export: &TimelineExport) -> Option<SurfacesV1> {
-    let stream = event_stream(&export.events);
+fn evaluator_records(
+    run: &GPubRunV1<'_>,
+    export: &TimelineExport,
+    stream: Value,
+) -> Option<SurfacesV1> {
     let stream_bytes = encode(&stream);
     let exported = encode(&Value::Array(vec![
         text(export.timeline.meta.name.as_deref().unwrap_or_default()),
@@ -1174,7 +1190,7 @@ mod tests {
     fn the_event_stream_is_position_relative() {
         let first = event(1, 7, None);
         let second = event(2, 9, Some(first.id));
-        let third = event(3, 7, Some(EventId::new()));
+        let dangling = event(3, 7, Some(EventId::new()));
         let expected = Value::Array(vec![
             Value::Array(vec![
                 uint(1),
@@ -1192,16 +1208,13 @@ mod tests {
                 uint(1),
                 Value::Bytes(vec![2]),
             ]),
-            Value::Array(vec![
-                uint(3),
-                uint(0),
-                text(EVENT_TYPE_SIGNAL),
-                uint(1),
-                Value::Null,
-                Value::Bytes(vec![3]),
-            ]),
         ]);
-        assert_eq!(event_stream(&[first, second, third]), expected);
+        assert_eq!(
+            event_stream(&[first.clone(), second.clone()]),
+            Some(expected)
+        );
+        // A cause outside the stream refuses the capture.
+        assert_eq!(event_stream(&[first, second, dangling]), None);
     }
 
     #[test]
