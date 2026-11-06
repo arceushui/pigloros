@@ -757,7 +757,7 @@ mod tests {
         }
     }
 
-    fn deny(store: &SqliteStore, denied: TransactionOperation) -> rusqlite::Result<()> {
+    fn deny(store: &mut SqliteStore, denied: TransactionOperation) -> rusqlite::Result<()> {
         store.conn.authorizer(Some(move |context: AuthContext<'_>| {
             if matches!(
                 context.action,
@@ -770,7 +770,7 @@ mod tests {
         }))
     }
 
-    fn allow_all(store: &SqliteStore) -> rusqlite::Result<()> {
+    fn allow_all(store: &mut SqliteStore) -> rusqlite::Result<()> {
         store
             .conn
             .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
@@ -1321,17 +1321,17 @@ mod tests {
         let world = World::new(Shape::Mixed, false)?;
         let built = world.build(&Spec::default())?;
         let mut store = prepared(&world, &built)?;
-        deny(&store, TransactionOperation::Begin)?;
+        deny(&mut store, TransactionOperation::Begin)?;
         let outcome = store.import_verified(&request_for(&world, &built));
         assert_eq!(outcome, Err(INDETERMINATE));
-        allow_all(&store)?;
+        allow_all(&mut store)?;
         assert_nothing_installed(&store, &world)?;
 
         // A denied COMMIT rolls back, so the identical retry installs it.
-        deny(&store, TransactionOperation::Unknown)?;
+        deny(&mut store, TransactionOperation::Unknown)?;
         let outcome = store.import_verified(&request_for(&world, &built));
         assert_eq!(outcome, Err(INDETERMINATE));
-        allow_all(&store)?;
+        allow_all(&mut store)?;
         assert_nothing_installed(&store, &world)?;
         let receipt = store.import_verified(&request_for(&world, &built))?;
         assert_eq!(
@@ -1346,7 +1346,7 @@ mod tests {
             ..Spec::distinct(0)
         })?;
         let mut store = prepared(&world, &wrong)?;
-        deny(&store, TransactionOperation::Rollback)?;
+        deny(&mut store, TransactionOperation::Rollback)?;
         let outcome = store.import_verified(&request_for(&world, &wrong));
         assert_eq!(outcome, Err(INDETERMINATE));
         Ok(())

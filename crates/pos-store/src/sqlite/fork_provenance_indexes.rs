@@ -218,7 +218,7 @@ mod tests {
 
     #[test]
     fn fresh_helper_orders_retained_work_before_indexes_and_commits_once() -> Fallible<()> {
-        let store = fresh_helper_store()?;
+        let mut store = fresh_helper_store()?;
         let actions = Arc::new(Mutex::new(Vec::new()));
         let observed = Arc::clone(&actions);
         store
@@ -273,7 +273,7 @@ mod tests {
 
     #[test]
     fn repeat_open_does_not_recreate_indexes_or_reset_a_nonzero_fence() -> Fallible<()> {
-        let store = SqliteStore::open(":memory:")?;
+        let mut store = SqliteStore::open(":memory:")?;
         store.conn.execute(
             "UPDATE fork_delivery_fence_counter SET last_fence=73 WHERE id=1",
             [],
@@ -410,7 +410,7 @@ mod tests {
                 INDEXES[1].name,
             ]);
         for name in names {
-            let store = fresh_helper_store()?;
+            let mut store = fresh_helper_store()?;
             let before = schema(&store.conn)?;
             let hit = Arc::new(AtomicUsize::new(0));
             let denied = Arc::clone(&hit);
@@ -449,7 +449,7 @@ mod tests {
             "commit",
             "rollback",
         ] {
-            let store = fresh_helper_store()?;
+            let mut store = fresh_helper_store()?;
             let before = schema(&store.conn)?;
             let hit = Arc::new(AtomicUsize::new(0));
             let denied = Arc::clone(&hit);
@@ -502,7 +502,7 @@ mod tests {
             assert!(store.conn.is_autocommit(), "{stage}");
             assert_eq!(schema(&store.conn)?, before, "{stage}");
         }
-        let store = fresh_helper_store()?;
+        let mut store = fresh_helper_store()?;
         let before = schema(&store.conn)?;
         store.conn.commit_hook(Some(|| true))?;
         storage_error(&store.prepare_fork_admission_authority_schema());
@@ -514,7 +514,7 @@ mod tests {
 
     #[test]
     fn helper_never_rolls_back_a_transaction_it_did_not_acquire() -> Fallible<()> {
-        let store = SqliteStore::open(":memory:")?;
+        let mut store = SqliteStore::open(":memory:")?;
         store
             .conn
             .execute_batch("BEGIN; CREATE TABLE caller_owned (id)")?;
@@ -708,7 +708,7 @@ mod tests {
 
     #[test]
     fn final_revalidation_failure_rolls_back_both_new_indexes() -> Fallible<()> {
-        let store = fresh_helper_store()?;
+        let mut store = fresh_helper_store()?;
         let before = schema(&store.conn)?;
         let reads = Arc::new(AtomicUsize::new(0));
         let observed = Arc::clone(&reads);
