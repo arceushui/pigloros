@@ -66,6 +66,8 @@ TICKS = 2
 SIGNALS_PER_TICK = 2
 PAGE_LIMIT = 3
 SUBJECT_TIMELINE = "ni-g-pub-subject"
+# `TimelineMeta::root` creates a `Live` Timeline with no owner.
+SUBJECT_TIMELINE_MODE = "Live"
 EVENT_TYPE = "society.signal"
 DIMENSIONS = ("trust", "opinion", "economy", "culture", "polarization")
 EVALUATOR_SCHEMA = b"pigloros.g-pub.evaluator-input.v1"
@@ -107,9 +109,15 @@ def subject_events(permitted: bytes) -> list[tuple[int, str, float]]:
 
 
 def event_stream(events: list[tuple[int, str, float]]) -> list:
-    """`[seq, entity ordinal, event type, schema version, causation seq, payload]`; the one
-    subject entity has ordinal 0 and no subject Event names a cause."""
-    return [[seq, 0, EVENT_TYPE, 1, None, signal_payload(d, v)] for seq, d, v in events]
+    """`[seq, entity ordinal, event type, schema version, causation seq, correlation ordinal,
+    payload hash, payload]`. The subject Timeline has no owner, so its one entity has ordinal 0;
+    no subject Event names a cause or a correlation; the payload hash is the BLAKE3 digest of the
+    payload (`pos_crypto::chain::hash_payload`)."""
+    rows = []
+    for seq, dimension, value in events:
+        payload = signal_payload(dimension, value)
+        rows.append([seq, 0, EVENT_TYPE, 1, None, None, b3(payload), payload])
+    return rows
 
 
 # --- NI-EVAL-007 ---
@@ -119,7 +127,7 @@ def evaluator_surfaces(row: str, variant: str) -> tuple[list[bytes], list[bytes]
     permitted = permitted_input(row, variant)
     events = subject_events(permitted)
     stream = event_stream(events)
-    exported = cbor([SUBJECT_TIMELINE, len(events), stream])
+    exported = cbor([SUBJECT_TIMELINE, SUBJECT_TIMELINE_MODE, None, len(events), stream])
     manifest = cbor([[EXPORT_MEMBER, len(exported), b3(exported)]])
     descriptor = cbor(
         [row, variant, b3(permitted), ulid_text(PLUGIN_ID), PLUGIN_NAME, DRIVER_NAME]
