@@ -59,6 +59,8 @@
 mod capture;
 #[cfg(feature = "test-support")]
 pub mod fixture_evidence;
+#[cfg(all(feature = "test-support", target_os = "linux"))]
+pub mod g_ops;
 #[cfg(feature = "test-support")]
 pub mod g_pub;
 mod local_process;

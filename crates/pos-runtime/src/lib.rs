@@ -46,7 +46,7 @@ pub mod trusted_clock;
 pub mod world_profile;
 pub mod world_replay;
 
-pub use authorization_cache::AuthorizationCacheKeyV1;
+pub use authorization_cache::{AuthorizationCacheCountsV1, AuthorizationCacheKeyV1};
 pub use composition::{
     community_pin_v1, AdmittedCompositionV1, AdmittedManifestPolicySourceV1,
     DomainImplementationKindV1, ManifestRegistrationErrorV1, ManifestSlotErrorV1, ManifestSlotV1,
