@@ -23,8 +23,15 @@ pub(crate) const TPS1_MAX_REVOKED_ARTIFACTS: usize = 4_096;
 mod bundle_contract;
 #[cfg(test)]
 pub mod catalog_auxiliary;
+mod conformance_conflict;
+mod conformance_correction;
+mod conformance_impact_analysis;
+mod conformance_promotion;
+mod conformance_retention;
 mod conformance_trust_admission;
 mod conformance_trust_policy;
+mod conformance_waiver;
+mod conformance_withdrawal;
 pub mod counterfactual;
 mod execution_profile;
 mod non_interference;
@@ -38,6 +45,7 @@ mod trust_policy_snapshot;
 mod verification_preflight;
 mod verification_request;
 include!("wire_syntax.rs");
+include!("governance_codec.rs");
 include!(concat!(env!("OUT_DIR"), "/draft_authority.rs"));
 
 pub(crate) const MAX_PROVIDER_ENTRIES: usize = 4096;
@@ -63,6 +71,19 @@ pub use bundle_contract::{
     BundleMemberV1, BundleModeV1, ConformanceBundlePairV1, ConformanceBundleV1,
     CONFORMANCE_BUNDLE_MAGIC_V1, MAX_CONFORMANCE_BUNDLE_BYTES_V1,
 };
+pub use conformance_conflict::{
+    ConformanceConflictV1, CONFORMANCE_CONFLICT_MAGIC_V1,
+    MAX_CONFORMANCE_CONFLICT_COORDINATE_BYTES_V1, MAX_CONFORMANCE_CONFLICT_REPORTS_V1,
+};
+pub use conformance_correction::{ConformanceCorrectionV1, CONFORMANCE_CORRECTION_MAGIC_V1};
+pub use conformance_impact_analysis::{
+    ConformanceAffectedReportV1, ConformanceImpactAnalysisV1, CONFORMANCE_IMPACT_ANALYSIS_MAGIC_V1,
+};
+pub use conformance_promotion::{ConformancePromotionV1, CONFORMANCE_PROMOTION_MAGIC_V1};
+pub use conformance_retention::{
+    ConformanceRetentionV1, CONFORMANCE_RETENTION_MAGIC_V1, CONFORMANCE_RETENTION_MONTHS_V1,
+    CONFORMANCE_RETENTION_STABLE_MAJORS_V1,
+};
 pub use conformance_trust_admission::{
     conformance_revoked_key_id_v1, ConformanceArtifactRefusalV1, ConformanceKeyRefusalV1,
     ConformanceTrustAdmissionErrorV1, ConformanceTrustAdmissionPortV1, ConformanceTrustAdmissionV1,
@@ -72,6 +93,13 @@ pub use conformance_trust_policy::{
     ConformanceTrustPolicyContractErrorV1, ConformanceTrustPolicyV1,
     CONFORMANCE_TRUST_POLICY_MAGIC_V1, MAX_CONFORMANCE_TRUST_POLICY_BYTES_V1,
     MAX_CONFORMANCE_TRUST_REVOCATIONS_V1, MAX_CONFORMANCE_TRUST_ROOTS_V1,
+};
+pub use conformance_waiver::{
+    ConformanceWaiverEffectV1, ConformanceWaiverV1, CONFORMANCE_WAIVER_MAGIC_V1,
+};
+pub use conformance_withdrawal::{
+    ConformanceWithdrawalSourceV1, ConformanceWithdrawalV1, ConformanceWithdrawnReportV1,
+    CONFORMANCE_WITHDRAWAL_MAGIC_V1,
 };
 pub use execution_profile::{
     ExecutionProfileCapabilitiesV1, ExecutionProfileCompatibilityV1,
