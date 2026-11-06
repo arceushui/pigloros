@@ -60,6 +60,8 @@ mod capture;
 #[cfg(feature = "test-support")]
 pub mod fixture_evidence;
 #[cfg(feature = "test-support")]
+pub mod g_plug;
+#[cfg(feature = "test-support")]
 pub mod g_pub;
 mod local_process;
 #[cfg(feature = "test-support")]

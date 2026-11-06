@@ -19,6 +19,7 @@ test-support = [
   "dep:axum",
   "dep:piglor-gateway",
   "dep:pos-plugin-ledger",
+  "dep:pos-plugin-supervisor",
   "dep:tokio",
   "dep:tower",
 ]
@@ -41,6 +42,13 @@ required-features = ["test-support"]
 [[bin]]
 name = "pos-ni-g-pub-subject"
 path = "src/bin/pos-ni-g-pub-subject.rs"
+required-features = ["test-support"]
+
+# The fresh-process Local subject of the G-PLUG rows (ADR-062 Revision 8 slice
+# N2); it is compiled only with `test-support`.
+[[bin]]
+name = "pos-ni-g-plug-subject"
+path = "src/bin/pos-ni-g-plug-subject.rs"
 required-features = ["test-support"]
 
 [dependencies]
@@ -67,6 +75,9 @@ ulid = { workspace = true }
 axum = { workspace = true, optional = true }
 piglor-gateway = { path = "../piglor-gateway", optional = true }
 pos-plugin-ledger = { path = "../../plugins/ledger", optional = true }
+# The PWQ1/PWR1 public Plugin protocol codec of the G-PLUG capture adapters
+# (ADR-062 Revision 8 slice N2, #1230).
+pos-plugin-supervisor = { path = "../../crates/pos-plugin-supervisor", optional = true }
 tokio = { workspace = true, optional = true }
 tower = { workspace = true, optional = true }
 
@@ -100,6 +111,10 @@ required-features = ["test-support"]
 
 [[test]]
 name = "non_interference_harness"
+required-features = ["test-support"]
+
+[[test]]
+name = "non_interference_g_plug"
 required-features = ["test-support"]
 
 [[test]]
