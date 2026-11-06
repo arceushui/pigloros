@@ -1266,7 +1266,7 @@ mod tests {
         signed.id = EventId::new();
         assert_eq!(
             event_stream(&[signed], None),
-            event_stream(&[first.clone()], None)
+            event_stream(std::slice::from_ref(&first), None)
         );
         // A cause outside the stream refuses the capture.
         assert_eq!(event_stream(&[first, second, dangling], None), None);
