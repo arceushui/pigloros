@@ -170,6 +170,13 @@ flips the 24 cases of `NI-PUBLIC-006` and `NI-EVAL-007` in modes L, R and F.
 - Air-Gapped cases stay non-executed until N7 (#1235), and `NI-ARCHIVE-009` until
   N1b (#1284).
 
+ADR-062 Revision 8 slice N4 (#1232, owner note `ADR-062_R8_NonInterference_Fork`)
+flips the 12 cases of `NI-FORK-008` in modes L, R and F the same way, over the
+ADR-064 Fork artifacts of slice R6. Their expected result digests are derived by
+`scripts/generate_non_interference_g_fork_fixtures.py`, which rebuilds every
+`INT1`, `CFP1`, `RCF1`, `SIV1`, `RCP1` and `CFR1` byte in pure Python. The F-mode
+evidence is re-run when #1204 lands.
+
 ADR-062 Revision 8 slice N3 (#1231, owner note `ADR-062_R8_NonInterference_Operations`)
 flips the 48 cases of `NI-CACHE-002`, `NI-OBS-004`, `NI-TIME-005` and `NI-CRASH-012`
 in modes L, R and F, under the same rules. Their oracle is
