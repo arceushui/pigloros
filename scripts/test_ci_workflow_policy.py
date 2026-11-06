@@ -433,9 +433,9 @@ def assert_codeql_preparation_contract(workflow: dict) -> None:
     if job["timeout-minutes"] != 30 or len(steps) != 5:
         raise AssertionError("retain the analysis deadline and complete step inventory")
     if steps[3:] != [
-        {"uses": "github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2",
+        {"uses": "github/codeql-action/init@9b3254085494b55a0f7c4c2b3d2d52cc712ce370",
          "with": {"languages": "rust", "build-mode": "none"}},
-        {"uses": "github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2",
+        {"uses": "github/codeql-action/analyze@9b3254085494b55a0f7c4c2b3d2d52cc712ce370",
          "with": {"category": "/language:rust"}},
     ]:
         raise AssertionError("retain the unchanged full CodeQL initialization and analysis")
