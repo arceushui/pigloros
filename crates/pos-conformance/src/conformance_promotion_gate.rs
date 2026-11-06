@@ -14,6 +14,12 @@
 //! the caller and is not yet bound to the evaluator binary; G5 (#1240) binds it with the
 //! evaluator signing hook. `minimum_evaluator_protocol_version` is not enforced here: CPF1 and
 //! CNR1 carry only an evaluator protocol digest, so G5 enforces it.
+//!
+//! The gate takes no pinned history head: it replays the history the caller supplies. A
+//! caller can therefore pass a truncated history that leaves out an Open CCF1 conflict or a
+//! waiver, together with a CPR1 whose snapshot digest matches that truncation. Binding the
+//! history to its published head (for example with [`ConformanceHistoryV1::extends`]) is left
+//! to G5 (#1240) or the host; this is a stated weakness, like the evaluator-release key above.
 
 use crate::{
     CaseOutcomeStatusV1, CaseOutcomeV1, ConformanceArtifactRefusalV1, ConformanceGovernanceErrorV1,
@@ -65,6 +71,9 @@ pub enum ConformancePromotionRefusalV1 {
     /// The evaluator protocol, or per mode the fixture bundle or execution profile, differs.
     #[error("the reports do not share profile, fixture bundle and evaluator protocol evidence")]
     EvidenceMismatch,
+    /// The profile has no mandatory fixture, so no case could support Stable.
+    #[error("the profile has no mandatory fixture")]
+    NoMandatoryFixture,
     /// A mandatory fixture does not declare both Local and Air-Gapped.
     #[error("a mandatory fixture lacks Local or Air-Gapped")]
     MandatoryModeMissing,
@@ -176,6 +185,9 @@ pub fn check_stable_promotion_v1(
         second.air_gapped,
     ];
     check_identities(promotion, &reports)?;
+    if !profile.fixtures.iter().any(|fixture| fixture.mandatory) {
+        return Err(Refusal::NoMandatoryFixture);
+    }
     check_cases(profile, [first.local, second.local], ExecutionModeV1::Local)?;
     check_cases(
         profile,

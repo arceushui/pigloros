@@ -221,6 +221,9 @@ impl ConformanceHistoryStateV1 {
     /// BLAKE3(`PiglorOS.ConformanceWaiverConflictSnapshot.v1` || 0x00 || canonical
     /// `[[CWV1 record digests ascending], [CCF1 record digests ascending]]`): the CPR1
     /// `waiver_conflict_snapshot_digest` of exactly the waivers and conflicts of the history.
+    ///
+    /// The same record digest may appear more than once: the history deliberately allows a
+    /// record to be appended again, and the snapshot keeps every occurrence in sorted order.
     #[must_use]
     pub fn waiver_conflict_snapshot_digest(&self) -> [u8; 32] {
         let ascending = |mut digests: Vec<[u8; 32]>| {
@@ -320,6 +323,9 @@ impl GovernanceRecordV1 for ConformanceHistoryV1 {
         self.record_digest
     }
 
+    /// Only the bound and the links are checked. Duplicate record digests are deliberately
+    /// allowed; a replay applies every occurrence, so a repeated CPR1 is still refused as a
+    /// lifecycle step.
     fn check(&self) -> Result<(), Error> {
         if self.entries.len() > crate::MAX_CONFORMANCE_GOVERNANCE_LIST_ITEMS_V1 {
             return Err(Error::FieldOutOfBounds);

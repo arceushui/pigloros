@@ -28,8 +28,9 @@ use pos_conformance::{
     ExecutionModeV1, FixtureDescriptorV1, FixtureFamilyV1, FixtureProvenanceV1,
     FixtureProviderKeyV1, FixtureProviderRegistryBindingV1, ImplementationIdentityV1,
     IndependenceEvidenceV1, IndependenceRequirementsV1, OperationalSafetyV1, ProfileLifecycleV1,
-    RedactionStateV1, ReplayClaimV1, StrictOracleKindV1, StrictOracleV1, SubjectAdapterKindV1,
-    VerificationOutcomeV1, CONFORMANCE_HISTORY_MAGIC_V1, DETERMINISTIC_BUDGET_HARD_CAPS_V1,
+    RedactionStateV1, ReplayClaimV1, SafeErrorCodeV1, StrictOracleKindV1, StrictOracleV1,
+    SubjectAdapterKindV1, VerificationOutcomeV1, CONFORMANCE_HISTORY_MAGIC_V1,
+    DETERMINISTIC_BUDGET_HARD_CAPS_V1,
 };
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
@@ -37,6 +38,7 @@ type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 const PROFILE: [u8; 32] = [0x21; 32];
 const REPORT_KEY: [u8; 32] = [0x71; 32];
 const EVALUATOR_KEY: [u8; 32] = [0x72; 32];
+const REVOKED_KEY: [u8; 32] = [0x74; 32];
 const AUDIT: [u8; 32] = [0xaa; 32];
 const COORDINATE: &[u8] = b"tick/3";
 const LOCAL: ExecutionModeV1 = ExecutionModeV1::Local;
@@ -947,7 +949,9 @@ impl ConformanceTrustAdmissionPortV1 for Trust {
             ConformanceTrustRoleV1::ReportSigning => (REPORT_KEY, EVALUATOR_KEY),
             ConformanceTrustRoleV1::EvaluatorRelease => (EVALUATOR_KEY, REPORT_KEY),
         };
-        if *key_id == own {
+        if *key_id == REVOKED_KEY {
+            Err(ConformanceKeyRefusalV1::Revoked)
+        } else if *key_id == own {
             Ok(self.key)
         } else if *key_id == other {
             Err(ConformanceKeyRefusalV1::RoleMismatch)
@@ -1182,6 +1186,10 @@ fn every_mandatory_local_and_air_gapped_case_must_pass_in_both() -> TestResult {
     local_only.profile.fixtures[0].modes = vec![LOCAL];
     let mut air_only = Scenario::new();
     air_only.profile.fixtures[0].modes = vec![AIR];
+    let mut none_mandatory = Scenario::new();
+    for fixture in &mut none_mandatory.profile.fixtures {
+        fixture.mandatory = false;
+    }
     refused(vec![
         (
             "mandatory Skip",
@@ -1243,6 +1251,11 @@ fn every_mandatory_local_and_air_gapped_case_must_pass_in_both() -> TestResult {
             air_only,
             Refusal::MandatoryModeMissing,
         ),
+        (
+            "a profile without a mandatory fixture",
+            none_mandatory,
+            Refusal::NoMandatoryFixture,
+        ),
     ])
 }
 
@@ -1287,7 +1300,34 @@ fn only_the_same_profile_allowed_divergence_at_the_same_first_coordinate_passes(
             }),
             Refusal::OutcomeMismatch,
         ),
+        (
+            "a different expected digest",
+            Scenario::new().second(|report| {
+                for case in &mut report.cases {
+                    if case.case_id == "case-b" {
+                        case.expected_digest = Some([0x45; 32]);
+                    }
+                }
+            }),
+            Refusal::OutcomeMismatch,
+        ),
+        (
+            "a different typed failure",
+            Scenario::new()
+                .all(|report| typed_failure(report, SafeErrorCodeV1::DigestMismatch))
+                .second(|report| typed_failure(report, SafeErrorCodeV1::FieldOutOfBounds)),
+            Refusal::OutcomeMismatch,
+        ),
     ])
+}
+
+/// Make the exact case `case-a` an expected typed failure in `report`.
+fn typed_failure(report: &mut ConformanceReportV1, error: SafeErrorCodeV1) {
+    let case = &mut report.cases[0];
+    case.expected_digest = None;
+    case.actual_digest = None;
+    case.expected_error = Some(error);
+    case.actual_error = Some(error);
 }
 
 #[test]
@@ -1374,6 +1414,14 @@ fn unadmitted_evaluator_or_report_keys_and_revoked_artifacts_are_refused() -> Te
             Refusal::KeyRefused(
                 ConformanceTrustRoleV1::ReportSigning,
                 ConformanceKeyRefusalV1::UnknownRoot,
+            ),
+        ),
+        (
+            "a revoked report key",
+            keyed((REVOKED_KEY, EVALUATOR_KEY)),
+            Refusal::KeyRefused(
+                ConformanceTrustRoleV1::ReportSigning,
+                ConformanceKeyRefusalV1::Revoked,
             ),
         ),
         (
@@ -1558,6 +1606,7 @@ fn every_refusal_and_history_error_is_displayed() {
         Refusal::PublicContractMismatch,
         Refusal::EvaluatorAsImplementation,
         Refusal::EvidenceMismatch,
+        Refusal::NoMandatoryFixture,
         Refusal::MandatoryModeMissing,
         Refusal::CaseNotExecuted,
         Refusal::CaseNotPassed,
