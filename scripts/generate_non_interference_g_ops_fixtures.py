@@ -103,10 +103,10 @@ def permitted_input(row: str, variant: str) -> bytes:
 
 def stream() -> bytes:
     """`[seq, entity ordinal, event type, schema version, causation seq, correlation ordinal,
-    payload hash, payload]` of the one subject Event: seq 1; the subject Timeline has no owner,
+    payload, payload hash]` (the ADR-127 Event record) of the one subject Event: seq 1; the subject Timeline has no owner,
     so the one entity has ordinal 0; no cause or correlation; the payload hash is the BLAKE3
     digest of the payload."""
-    return cbor([[1, 0, EVENT_TYPE, 1, None, None, b3(EVENT_PAYLOAD), EVENT_PAYLOAD]])
+    return cbor([[1, 0, EVENT_TYPE, 1, None, None, EVENT_PAYLOAD, b3(EVENT_PAYLOAD)]])
 
 
 def imports(row: str, variant: str) -> bytes:
@@ -195,14 +195,14 @@ def expected_result_digest(row: str, variant: str) -> bytes:
 
 def self_test() -> None:
     # A hand-derived stream: array(1) of array(8)
-    # [1, 0, text(17), 1, null, null, bytes(32), bytes(8)].
+    # [1, 0, text(17), 1, null, null, bytes(8), bytes(32)].
     expected = bytes.fromhex(
         "8188010071"
         + EVENT_TYPE.encode().hex()
-        + "01f6f65820"
-        + b3(EVENT_PAYLOAD).hex()
-        + "48"
+        + "01f6f648"
         + EVENT_PAYLOAD.hex()
+        + "5820"
+        + b3(EVENT_PAYLOAD).hex()
     )
     if stream() != expected:
         raise SystemExit("the G-OPS Event stream encoding is wrong")
