@@ -233,77 +233,11 @@ fn execute_every_coordinate(
     Ok(executed)
 }
 
-/// TEMPORARY (removed before review): the directory the matrix test exports
-/// its NIA1 and control captures to, for the recorded CI run.
-const EXPORT_ENV: &str = "PIGLOROS_NI_G_FORK_EXPORT";
-
-#[cfg_attr(coverage_nightly, coverage(off))]
-fn export(
-    directory: &Path,
-    executed: &BTreeMap<Coordinate, NonInterferenceSignedExecutionV1>,
-) -> TestResult {
-    for execution in executed.values() {
-        pos_experiment::non_interference_harness::publish_non_interference_execution_v1(
-            directory, execution,
-        )?;
-    }
-    let mut records = Vec::new();
-    for variant in VARIANTS {
-        let fixture = g_fork_subject_fixture_v1(
-            &g_fork_permitted_input_v1(variant),
-            G_FORK_CONTROL_UNAUTHORIZED_V1,
-        )?;
-        let (export, recorded) = record_fork_v1(&fixture, ExecutionModeV1::Local)?;
-        let capture = g_fork_capture_v1(&export)?;
-        let factual = TimelineId::from_ulid(ulid::Ulid::from_bytes(FACTUAL_TIMELINE_ID_V1));
-        let scope = pos_core::DependencyReadScopeV1::ParentPrefix {
-            timeline: factual,
-            through_tick: G_FORK_CUT_TICK_V1,
-        };
-        let request = pos_core::DependencyPageRequestV1::try_new(
-            scope,
-            None,
-            pos_core::MAX_DEPENDENCY_PAGE_ROWS_V1,
-        )?;
-        let nodes = pos_core::CounterfactualDependencyReadPortV1::read_dependency_nodes(
-            recorded.store(),
-            &request,
-        )?;
-        let edges = pos_core::CounterfactualDependencyReadPortV1::read_dependency_edges(
-            recorded.store(),
-            &request,
-        )?;
-        records.push(json!({
-            "variant": format!("{variant:?}"),
-            "artifacts": export.artifacts.iter().map(|artifact| json!({
-                "kind": format!("{:?}", artifact.kind),
-                "bytes": hex(&artifact.bytes),
-            })).collect::<Vec<_>>(),
-            "provisional_edges": export.provisional_edges.iter().map(|edge| format!("{edge:?}")).collect::<Vec<_>>(),
-            "drivers": export.drivers.iter().map(|driver| format!("{driver:?}")).collect::<Vec<_>>(),
-            "prefix_nodes": nodes.items().iter().map(|node| format!("{node:?}")).collect::<Vec<_>>(),
-            "prefix_edges": edges.items().iter().map(|edge| format!("{edge:?}")).collect::<Vec<_>>(),
-            "authoritative": capture.authoritative.iter().map(|value| hex(value)).collect::<Vec<_>>(),
-            "public": capture.public.iter().map(|value| hex(value)).collect::<Vec<_>>(),
-            "execution_profile": format!("{:?}", fixture.execution_profile),
-            "trust_policy": format!("{:?}", fixture.trust_policy),
-        }));
-    }
-    fs::write(
-        directory.join("control-captures.json"),
-        serde_json::to_vec_pretty(&records)?,
-    )?;
-    Ok(())
-}
-
 #[test]
 fn every_g_fork_coordinate_executes_or_stays_typed_non_executed_and_matches_its_nia1() -> TestResult
 {
     let work = tempfile::tempdir()?;
     let executed = execute_every_coordinate(work.path())?;
-    if let Ok(directory) = std::env::var(EXPORT_ENV) {
-        export(Path::new(&directory), &executed)?;
-    }
     assert_eq!(executed.len(), 12);
 
     let checked_in = checked_in()?;
