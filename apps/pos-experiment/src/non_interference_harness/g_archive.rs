@@ -43,8 +43,8 @@
 //! A refused import records `["refused", category]` in the authoritative
 //! facets of the first four surfaces and in the decompressed bundle, and
 //! `[archive digest, null]` publicly for the digest. The `Denial` variant also
-//! imports the archive once with a wrong expected digest (its byte 0 XORed
-//! with `0xff`), as the G-PUB public probe does, and records the closed
+//! imports the archive once with a wrong expected digest (its byte 0 is
+//! flipped by XOR with `0xff`), as the G-PUB public probe does, and records the closed
 //! `DigestMismatch` category.
 
 use std::fs::{self, File, FileTimes};
