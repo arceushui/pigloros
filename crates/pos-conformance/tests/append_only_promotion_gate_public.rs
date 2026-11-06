@@ -466,7 +466,7 @@ fn chs1_is_append_only_and_refuses_a_broken_reordered_or_rewritten_link() -> Tes
         assert_eq!(invalid.to_canonical_cbor(), Err(Error::BrokenHistoryLink));
         assert_eq!(invalid.extends(&PROFILE), Err(Error::BrokenHistoryLink));
     }
-    let mut tampered = history.clone();
+    let mut tampered = history;
     tampered.record_digest = [0; 32];
     assert_eq!(tampered.validate(), Err(Error::RecordDigestMismatch));
     assert_eq!(tampered.replay(&[]), Err(Error::RecordDigestMismatch));
@@ -557,7 +557,7 @@ fn chs1_lifecycle_moves_only_draft_candidate_stable_retired() -> TestResult {
         ),
         (
             "promotion after retirement",
-            vec![to_candidate.clone(), retire.clone(), to_stable.clone()],
+            vec![to_candidate.clone(), retire, to_stable.clone()],
         ),
         (
             "stable twice",
@@ -597,7 +597,7 @@ fn chs1_replay_binds_each_record_to_its_entry_and_profile() -> TestResult {
         );
     }
     assert_eq!(
-        replay(other, &[to_candidate.clone()])?,
+        replay(other, std::slice::from_ref(&to_candidate))?,
         Err(Error::ProfileMismatch),
         "a promotion of another profile"
     );
