@@ -17,13 +17,15 @@
 //! the nodes of the cut Tick's Events (first Tick only) and every output node
 //! of the previous Tick. An output node consumes its step node and, for the
 //! lead lane at the first Tick, the `InterventionAssigned` root of the
-//! plan's Intervention. Every provisional node is `EndogenousRecomputed` and
-//! stands for its lane's staged draft: its content digest is the draft's
-//! output content digest.
+//! plan's Intervention. Every provisional node other than that root is
+//! `EndogenousRecomputed` and stands for its lane's staged draft: its content
+//! digest is the draft's output content digest.
 //!
 //! An edge from the Intervention root carries the Intervention's consent
 //! decision digest; every other edge carries the host's authority grant.
-//! Every provisional node and edge carries the run's provenance digest.
+//! The Intervention root carries the Intervention's provenance digest; every
+//! other provisional node and every edge carries the run's provenance
+//! digest.
 
 use std::collections::BTreeMap;
 

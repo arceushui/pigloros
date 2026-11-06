@@ -16,14 +16,15 @@
 //!   `DVR1`.
 
 use pos_conformance::counterfactual::checkpoint::RecomputeCheckpointV1;
-use pos_conformance::counterfactual::plan::CounterfactualPlanV1;
+use pos_conformance::counterfactual::dependency::InputDependencyV1;
+use pos_conformance::counterfactual::plan::{CounterfactualPlanV1, FrozenArtifactDescriptorV1};
 use pos_conformance::counterfactual::result::CounterfactualResultV1;
 use pos_conformance::counterfactual::{InterventionOperationV1, InterventionV1};
 use pos_conformance::{
-    draft_execution_profile_bytes_v1, draft_trust_policy_snapshot_bytes_v1, DigestSizeV1,
-    DivergenceLocationKindV1, DivergenceMismatchKindV1, DivergenceReportV1, ExecutionModeV1,
-    ExecutionProfileV1, FollowOnMismatchV1, RecomputationFrontierV1, ReplayClaimV1,
-    ReproducibilityClassV1, SuffixInvalidationReasonV1, SuffixInvalidationV1,
+    draft_execution_profile_bytes_v1, draft_trust_policy_snapshot_bytes_v1, DependencyClassV1,
+    DigestSizeV1, DivergenceLocationKindV1, DivergenceMismatchKindV1, DivergenceReportV1,
+    ExecutionModeV1, ExecutionProfileV1, FollowOnMismatchV1, RecomputationFrontierV1,
+    ReplayClaimV1, ReproducibilityClassV1, SuffixInvalidationReasonV1, SuffixInvalidationV1,
     TrustPolicySnapshotV1,
 };
 use pos_core::{
@@ -39,6 +40,7 @@ use pos_experiment::fork_artifacts::{
 };
 use pos_runtime::counterfactual::coordinator::CounterfactualAdmissionErrorV1;
 use pos_runtime::counterfactual::suffix::CounterfactualSuffixErrorV1;
+use pos_runtime::LocalScheduledAdmissionHostV1;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
@@ -111,6 +113,7 @@ fn fixture() -> TestResult<ForkFixtureV1> {
         room_digest: [0x12; 32],
         parent_cut_digest: [0x13; 32],
         intervention: intervention(),
+        exogenous_descriptors: Vec::new(),
         plugin_composition_digest: [0x14; 32],
         scheduler_digest: [0x15; 32],
         numeric_profile_digest: [0x16; 32],
@@ -228,6 +231,7 @@ fn every_artifact_is_exported_at_the_world_cut_and_decodes() -> TestResult {
     let frontier = RecomputationFrontierV1::from_canonical_cbor(artifact(&export, 2)?)?;
     check_frontier(&frontier, &plan, &fixture)?;
     check_drivers(&export.drivers, &frontier);
+    check_edges(&export.provisional_edges, &fixture)?;
 
     let invalidation = SuffixInvalidationV1::from_canonical_cbor(artifact(&export, 3)?)?;
     check_invalidation(&invalidation, &plan, &frontier, &fixture);
@@ -314,6 +318,29 @@ fn check_recomputation(
         .map(|checkpoint| (checkpoint.tick, checkpoint.checkpoint_digest))
         .collect();
     assert_eq!(references, recorded);
+    Ok(())
+}
+
+/// Every edge from the Intervention root carries its consent decision; every
+/// other provisional edge carries the local host's authority grant. Every
+/// edge carries the run's provenance.
+fn check_edges(edges: &[InputDependencyV1], fixture: &ForkFixtureV1) -> TestResult {
+    let grant = *LocalScheduledAdmissionHostV1::shared()?
+        .authority_grant()
+        .as_bytes();
+    let mut classes = Vec::new();
+    for edge in edges {
+        let intervention = edge.dependency_class == DependencyClassV1::InterventionAssigned;
+        let expected = if intervention {
+            fixture.intervention.consent_decision_digest
+        } else {
+            grant
+        };
+        assert_eq!(edge.authorization_digest, expected);
+        assert_eq!(edge.provenance_digest, fixture.provenance_digest);
+        classes.push(intervention);
+    }
+    assert!(classes.contains(&true) && classes.contains(&false));
     Ok(())
 }
 
@@ -550,6 +577,28 @@ fn every_refusal_is_described() {
     );
     assert!(texts[3].starts_with("the counterfactual admission was refused: "));
     assert!(texts[4].starts_with("the suffix recomputation was refused: "));
+}
+
+#[test]
+fn a_descriptor_outside_the_frozen_closure_is_refused() -> TestResult {
+    let fixture = ForkFixtureV1 {
+        exogenous_descriptors: vec![FrozenArtifactDescriptorV1 {
+            schema_id: 1,
+            artifact_digest: [0x51; 32],
+            authorization_digest: [0x52; 32],
+            provenance_digest: [0x53; 32],
+        }],
+        ..fixture()?
+    };
+    for mode in MODES {
+        assert_eq!(
+            run_fork_v1(&fixture, mode),
+            Err(ForkRunErrorV1::Admission(Box::new(
+                CounterfactualAdmissionErrorV1::FrozenArtifactMissing
+            )))
+        );
+    }
+    Ok(())
 }
 
 #[test]

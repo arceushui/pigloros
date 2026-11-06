@@ -76,6 +76,7 @@
 //! module. Its results are Local-relaxation engineering evidence, not hosted
 //! conformance.
 
+use pos_conformance::counterfactual::dependency::InputDependencyV1;
 use pos_conformance::counterfactual::plan::{
     CounterfactualPlanV1, FrozenArtifactDescriptorV1, PlanExecutionProfileRefV1,
     PlanTrustPolicyRefV1,
@@ -184,6 +185,9 @@ pub struct ForkArtifactExportV1 {
     /// The Drivers of the run in schedule order. They are no artifact and
     /// are never compared.
     pub drivers: Vec<ForkDriverV1>,
+    /// Every provisional edge the records form declared, in canonical order.
+    /// They are no artifact and are never compared.
+    pub provisional_edges: Vec<InputDependencyV1>,
     /// The artifacts, in the export order of the module documentation.
     pub artifacts: Vec<ForkArtifactV1>,
 }
@@ -239,6 +243,10 @@ pub struct ForkFixtureV1 {
     pub parent_cut_digest: [u8; 32],
     /// The plan's one Intervention, effective at the first recomputation Tick.
     pub intervention: InterventionV1,
+    /// The plan's `ExogenousFrozen` descriptors. The run's frozen closure
+    /// holds no artifact, so a plan with a descriptor is refused at
+    /// admission.
+    pub exogenous_descriptors: Vec<FrozenArtifactDescriptorV1>,
     /// Pinned Plugin composition digest, also the host's expected one.
     pub plugin_composition_digest: [u8; 32],
     /// Pinned scheduler and Driver order digest.
@@ -347,7 +355,7 @@ fn plan(
                 first_tick,
                 horizon_tick: first_tick.saturating_add(fixture.horizon_span),
                 interventions: vec![fixture.intervention.clone()],
-                exogenous_descriptors: Vec::new(),
+                exogenous_descriptors: fixture.exogenous_descriptors.clone(),
                 fixed_policy_descriptors: Vec::new(),
                 classification_bundle_digest: *factual_classification_bundle_digest().as_bytes(),
                 unknown_edge_policy: UnknownEdgePolicyV1::Reject,
@@ -409,6 +417,7 @@ fn execute(
         })
         .ok_or(ForkRunErrorV1::Host)
         .and_then(|(plan, graph, mut stager)| {
+            let provisional_edges = graph.edges.clone();
             let derived = {
                 let mut source = PrefixSeededFrontierSourceV1::new(
                     PrefixReadsV1(&store),
@@ -439,6 +448,7 @@ fn execute(
                 .map(|artifacts| ForkArtifactExportV1 {
                     factual_head: head,
                     drivers,
+                    provisional_edges,
                     artifacts,
                 })
             })
@@ -604,7 +614,9 @@ impl CounterfactualFrontierSourceV1 for AdmittedFrontierV1 {
 }
 
 /// The run's frozen closure holds no `ExogenousFrozen` or `FixedPolicy`
-/// artifact, so every descriptor is missing.
+/// artifact (the records form stages no exogenous input), so every
+/// descriptor is missing and the admission is refused with
+/// `FrozenArtifactMissing`.
 struct FrozenClosureV1;
 
 impl CounterfactualFrozenArtifactsV1 for FrozenClosureV1 {
@@ -620,28 +632,5 @@ struct HostAuthorityV1;
 impl CounterfactualInterventionAuthorityV1 for HostAuthorityV1 {
     fn decide(&self, _: &InterventionV1) -> InterventionDecisionV1 {
         InterventionDecisionV1::Authorized
-    }
-}
-
-#[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
-mod tests {
-    use super::{
-        CounterfactualFrozenArtifactsV1, FrozenArtifactAvailabilityV1, FrozenArtifactDescriptorV1,
-        FrozenClosureV1,
-    };
-
-    #[test]
-    fn the_frozen_closure_holds_no_descriptor() {
-        let descriptor = FrozenArtifactDescriptorV1 {
-            schema_id: 1,
-            artifact_digest: [1; 32],
-            authorization_digest: [2; 32],
-            provenance_digest: [3; 32],
-        };
-        assert_eq!(
-            FrozenClosureV1.availability(&descriptor),
-            FrozenArtifactAvailabilityV1::Missing
-        );
     }
 }
