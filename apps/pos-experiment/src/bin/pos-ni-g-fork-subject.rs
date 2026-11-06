@@ -31,7 +31,17 @@ fn main() -> std::process::ExitCode {
         })
 }
 
+// Off Linux the package still builds, so the workspace does; the binary only
+// exits non-zero. A macro keeps this stub out of the mutation scope, as in
+// `pos-sandboxd`: it is never compiled, and so never tested, on Linux.
 #[cfg(not(target_os = "linux"))]
-fn main() -> std::process::ExitCode {
-    std::process::ExitCode::FAILURE
+macro_rules! unsupported_platform_main {
+    () => {
+        fn main() -> std::process::ExitCode {
+            std::process::ExitCode::FAILURE
+        }
+    };
 }
+
+#[cfg(not(target_os = "linux"))]
+unsupported_platform_main!();
