@@ -4,6 +4,7 @@
 use std::fs;
 use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -227,5 +228,88 @@ fn recognized_directory_and_malformed_names_refuse_whole_store_scan() -> TestRes
     assert!(WindowsCleanupStore::open(Path::new("relative").to_path_buf()).is_err());
     assert!(WindowsCleanupStore::open(Path::new(r"\\server\share\state").to_path_buf()).is_err());
     assert!(WindowsCleanupStore::open(Path::new(r"\\.\pipe\state").to_path_buf()).is_err());
+    Ok(())
+}
+
+#[test]
+fn folder_first_sharing_failure_defers_record_and_a_fresh_restart_retries() -> TestResult {
+    let fixture = Fixture::new()?;
+    let mut store = WindowsCleanupStore::open(fixture.0.clone())?;
+    create_private_directory(&fixture.0.join(name(6)))?;
+    let child = fixture.0.join(name(6)).join("held");
+    fs::write(&child, b"held open by the fixture")?;
+    let held = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(&child)?;
+    store.write_record(&record(6)?)?;
+    let mut probe = FakeProbe::new(vec![]);
+    assert!(matches!(
+        restart(&mut store, &mut probe)?,
+        RestartProgress::Done { deferred: 1 }
+    ));
+    assert!(fixture.record_path(6, "pbcr").exists());
+    assert!(child.exists());
+    drop(held);
+    assert!(matches!(
+        restart(&mut store, &mut probe)?,
+        RestartProgress::Done { deferred: 0 }
+    ));
+    assert!(!fixture.record_path(6, "pbcr").exists());
+    assert!(!fixture.0.join(name(6)).exists());
+    Ok(())
+}
+
+#[test]
+fn record_and_folder_junctions_never_remove_the_external_target() -> TestResult {
+    let outside = Fixture::new()?;
+    fs::write(outside.0.join("keep"), b"outside the cleanup namespace")?;
+    for record_link in [false, true] {
+        let fixture = Fixture::new()?;
+        let mut store = WindowsCleanupStore::open(fixture.0.clone())?;
+        let link = if record_link {
+            fixture.record_path(7, "pbcr")
+        } else {
+            fixture.0.join(name(7))
+        };
+        let output = Command::new("cmd.exe")
+            .args(["/d", "/c", "mklink", "/J"])
+            .arg(&link)
+            .arg(&outside.0)
+            .output()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if record_link {
+            assert!(store.records().is_err());
+        } else {
+            assert!(store.folders().is_err());
+            assert!(store.remove_folder(&name(7)).is_err());
+        }
+        assert_eq!(
+            fs::read(outside.0.join("keep"))?,
+            b"outside the cleanup namespace"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn deletion_requires_one_remaining_exact_path_from_prior_scan_or_write() -> TestResult {
+    let fixture = Fixture::new()?;
+    let mut store = WindowsCleanupStore::open(fixture.0.clone())?;
+    let bytes = record(8)?;
+    fs::write(fixture.record_path(8, "pbcr"), &bytes)?;
+    assert!(store.delete_record(&bytes).is_err());
+    fs::write(fixture.record_path(8, "pending"), &bytes)?;
+    assert_eq!(store.records()?.len(), 2);
+    assert!(store.delete_record(&bytes).is_err());
+    fs::remove_file(fixture.record_path(8, "pending"))?;
+    store.delete_record(&bytes)?;
+    store.write_record(&record(9)?)?;
+    fs::remove_file(fixture.record_path(9, "pbcr"))?;
+    assert!(store.delete_record(&record(9)?).is_err());
     Ok(())
 }

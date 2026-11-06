@@ -282,7 +282,7 @@ fn every_observed_write_failure_preserves_pending_or_committed_recovery_input() 
         let committed = fixture.record_path("pbcr");
         match fault {
             Fault::Open(2) | Fault::VolumeError(2) => {
-                assert!(!pending.exists() && !committed.exists())
+                assert!(!pending.exists() && !committed.exists());
             }
             Fault::PublishFinalOnly
             | Fault::Open(3)
