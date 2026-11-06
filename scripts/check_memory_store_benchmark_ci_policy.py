@@ -88,7 +88,7 @@ BENCHMARK_TRIGGERS = {
     "schedule": [{"cron": "17 4 * * 1"}],
     "workflow_dispatch": None,
 }
-TOOLCHAIN_ACTION = "dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de"
+TOOLCHAIN_ACTION = "dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8"
 RUST_CACHE_ACTION = "Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16"
 BENCHMARK_WORKFLOW_ID = "350682006"
 BENCHMARK_JOB_ENVIRONMENT = {
