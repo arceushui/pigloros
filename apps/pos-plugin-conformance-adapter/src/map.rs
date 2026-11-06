@@ -380,7 +380,8 @@ fn is_operational(record: &SubCaseRecordV1) -> bool {
 
 /// The result of the case `case_id` of `family` over the records of its sub-cases.
 ///
-/// 1. If any sub-result is operational ([`is_operational()`]) the case is `Unavailable`.
+/// 1. If any sub-result is operational, or is a trap that its sub-case did not match, the case
+///    is `Unavailable`.
 /// 2. Else for a `canonical-output` family it is `Output`, the canonical record.
 /// 3. Else it is the family's fixed failure when every sub-case matched, and
 ///    `subcase-mismatch` otherwise.
