@@ -366,11 +366,11 @@ fn drive_observation(row: RowV1, fixture_id: &str, permitted_input: &[u8]) -> Ve
     ]))
 }
 
-/// How many lookups of one run had no frozen record (live calls).
-fn live_calls(row: RowV1, fixture_id: &str, permitted_input: &[u8]) -> u32 {
-    lookup_kind(row).map_or(0, |kind| {
-        u32::from(frozen_projection(fixture_id, kind, permitted_input).is_none())
-    })
+/// Whether the run's lookup has no frozen record and so would need a live
+/// call.
+fn live_call(row: RowV1, fixture_id: &str, permitted_input: &[u8]) -> bool {
+    lookup_kind(row)
+        .is_some_and(|kind| frozen_projection(fixture_id, kind, permitted_input).is_none())
 }
 
 /// The host-owned record of the row, which carries the unauthorized value.
@@ -1008,7 +1008,7 @@ fn capture_row(
                     };
                     let mut capture = context.surfaces().into_capture(run.fixture_id);
                     capture.unexpected_network_accesses =
-                        live_calls(row, run.fixture_id, run.permitted_input);
+                        u32::from(live_call(row, run.fixture_id, run.permitted_input));
                     capture
                 })
         })
@@ -1291,7 +1291,11 @@ impl ContextV1<'_> {
     /// Plugin output, Timeline, logs and evaluator bundle; operationally
     /// category/count, endpoint, DNS, body and timing excluded.
     fn network(&self) -> (Vec<Vec<u8>>, Vec<NonInterferenceRawOperationalV1>) {
-        let live = live_calls(self.row, self.run.fixture_id, self.run.permitted_input) as usize;
+        let live = usize::from(live_call(
+            self.row,
+            self.run.fixture_id,
+            self.run.permitted_input,
+        ));
         let capability = encode(&Value::Array(vec![Value::Array(vec![
             text(RowV1::Net.capability()),
             Value::Bool(false),

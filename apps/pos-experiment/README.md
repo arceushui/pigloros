@@ -75,6 +75,23 @@ Run-local identities are captured position-relative. `pos-ni-g-pub-subject` is
 the Local fresh-process subject of these rows. `NI-ARCHIVE-009` is non-executed
 `Missing` until slice N1b (#1284).
 
+`non_interference_harness::g_plug` holds the G-PLUG capture adapters of slice N2
+(#1230, wiki `ADR-062_R8_NonInterference_Plugin`) for `NI-TOOL-001`,
+`NI-STATE-003` (state members), `NI-NET-010` and `NI-SERVICE-011`:
+- The Plugin is reached only through the PWQ1/PWR1 public Plugin protocol codec
+  of `pos-plugin-supervisor`, answered by an in-process deterministic fixture
+  guest (`describe`, `reduce`, `drive`). A migrate-state request is refused.
+- Every mode produces the Events of the guest's `drive`; the capture rebuilds
+  the Plugin's state from them through `reduce` alone.
+- Tools, frozen services and the network sequence are host-owned records. A
+  lookup without a frozen record is a live call: non-executed `LiveCall`.
+- The host writes the unauthorized value only to its own record file.
+- The `NI-STATE-003` migration-only canary is non-executed `Unsupported` until
+  PMF1 v2 (#621, wiki `ADR-059_R9_State_Migration_Scoping`).
+
+`pos-ni-g-plug-subject` is the Local fresh-process subject of these rows. The
+executions are engineering evidence, re-run on the Wasm worker path later.
+
 ## ADR-064 Fork artifact comparison
 
 `pos_experiment::fork_artifacts` is ADR-062 Revision 8 slice R6 (#1225).
