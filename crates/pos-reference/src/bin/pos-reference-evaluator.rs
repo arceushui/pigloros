@@ -117,11 +117,15 @@ fn run() -> Result<(), CommandError> {
     })?;
     let archive_bytes = read_bounded_file(&mut archive, MAX_ARCHIVE_BYTES)?;
     let mut adapter = SelectorAdapter::new(request).map_evaluation_error()?;
+    // The Sandbox Provider path has no reviewed source of fixture executor
+    // declarations yet (ADR-062 R8 N7, #623), so this binary dispatches no
+    // fixture: every selected case is a typed non-executed `Unavailable`.
     evaluate(
         &request_bytes,
         &archive_bytes,
         &trust_policy_bytes,
         &identity,
+        &[],
         &mut adapter,
     )
     .map_evaluation_error()
