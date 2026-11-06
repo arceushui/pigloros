@@ -95,7 +95,11 @@ def row_errors(label: str, row: dict[str, object]) -> list[str]:
     if LAYER in (row.get("claim_layer"), row.get("authority_fixture_id"), row.get("fixture_id")):
         faults.append(f"{label}: a {LAYER} row")
     if row.get("fixture_id") in NON_INTERFERENCE_EXECUTED_ROWS:
-        return faults
+        # Only an L, R or F case of these rows may be executed (and carry its result); an
+        # Air-Gapped case stays open until N7 (#1235). Their row counts are checked against the
+        # cases by `count_errors`.
+        if "case_id" not in row or row.get("mode") in ("L", "R", "F"):
+            return faults
     if row.get("executed") is not False and "executed" in row:
         faults.append(f"{label}: executed is not false")
     for key in ("expected_result_digest", "expected_result", "authority_result_digest"):
@@ -113,9 +117,14 @@ def count_errors(matrix: dict[str, object]) -> list[str]:
     for key, size in (("row_count", len(rows)), ("case_count", len(cases))):
         if matrix.get(key) != size:
             faults.append(f"{key} is {matrix.get(key)!r}, the list has {size}")
-    executed = sum(1 for case in cases if isinstance(case, dict) and case.get("executed") is True)
-    if matrix.get("executed_case_count") != executed:
-        faults.append(f"executed_case_count is not the {executed} executed cases")
+    executed = [case for case in cases if isinstance(case, dict) and case.get("executed") is True]
+    if matrix.get("executed_case_count") != len(executed):
+        faults.append(f"executed_case_count is not the {len(executed)} executed cases")
+    for index, row in enumerate(rows):
+        if isinstance(row, dict) and row.get("fixture_id") in NON_INTERFERENCE_EXECUTED_ROWS:
+            count = sum(1 for case in executed if case.get("fixture_id") == row["fixture_id"])
+            if row.get("executed_case_count") != count:
+                faults.append(f"rows[{index}]: executed_case_count is not its {count} cases")
     return faults
 
 

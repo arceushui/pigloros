@@ -52,8 +52,9 @@
 //! captured. The subject's Events carry no `correlation_id`, so none is
 //! captured; the payload hash is the digest of the captured payload bytes.
 //! The seam import re-appends each Event's entity, type and payload; its
-//! schema version and causation are read back from the seam. Every other byte stays exact. Response lengths are exact, since
-//! a ULID's text always has the same width.
+//! schema version and causation are read back from the seam. Every other byte
+//! stays exact. Response lengths are exact, since a ULID's text always has the
+//! same width.
 //!
 //! # Warm and cold
 //!

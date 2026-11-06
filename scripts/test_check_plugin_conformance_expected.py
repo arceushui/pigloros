@@ -98,6 +98,19 @@ class CheckerTest(unittest.TestCase):
         self.edit(MATRIX, lambda m: m.update(executed_case_count=0))
         self.assert_fault("executed_case_count is not the 24 executed cases")
 
+    def test_an_executed_air_gapped_n1_case_fails(self) -> None:
+        index = next(
+            position
+            for position, case in enumerate(json.loads((FIXTURES / MATRIX).read_text())["cases"])
+            if case["case_id"] == "NI-PUBLIC-006-S-A"
+        )
+        self.edit(MATRIX, lambda m: m["cases"][index].update(executed=True))
+        self.assert_fault(f"cases[{index}]: executed is not false")
+
+    def test_an_n1_row_count_disagreeing_with_its_cases_fails(self) -> None:
+        self.edit(MATRIX, lambda m: m["rows"][5].update(executed_case_count=11))
+        self.assert_fault("rows[5]: executed_case_count is not its 12 cases")
+
     def test_inconsistent_counts_fail(self) -> None:
         self.edit(MATRIX, lambda m: m.update(row_count=11, case_count=191))
         self.assert_fault("row_count is 11, the list has 12")

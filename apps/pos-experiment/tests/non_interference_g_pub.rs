@@ -210,7 +210,10 @@ fn checked_in() -> TestResult<BTreeMap<Coordinate, (String, NonInterferenceExecu
 fn subject_events(permitted_input: &[u8]) -> TestResult<Vec<Event>> {
     let mut session = g_pub_experiment_v1(permitted_input)?.start()?;
     while session.step()? {}
-    Ok(session.source_events()?)
+    let events = session.source_events()?;
+    // The capture records no correlation: the subject must emit none.
+    assert!(events.iter().all(|event| event.correlation_id.is_none()));
+    Ok(events)
 }
 
 // ---------------------------------------------------------------------------
