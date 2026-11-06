@@ -34,9 +34,10 @@ jobs:
           mkdir -p "${RUNNER_TEMP}/ni-export"
           PIGLOROS_NI_G_PUB_EXPORT="${RUNNER_TEMP}/ni-export" \
             cargo test -p pos-experiment --features test-support --locked \
-            --test non_interference_g_pub -- --test-threads=1 2>&1 | tee "${RUNNER_TEMP}/ni-export/test.log"
-          exit 0
+            --test non_interference_g_pub -- --test-threads=1 > "${RUNNER_TEMP}/ni-export/test.log" 2>&1 || true
+          tail -n 60 "${RUNNER_TEMP}/ni-export/test.log"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
         with:
           name: ni-g-pub-export
           path: ${{ runner.temp }}/ni-export
