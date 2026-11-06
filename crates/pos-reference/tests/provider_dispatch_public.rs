@@ -70,12 +70,19 @@ impl SubjectAdapter for Recording {
 }
 
 /// The faithful subject: it outputs the oracle of every case.
-fn faithful(_: &CaseAttempt, output: &[u8]) -> Result<SubjectObservation, AdapterError> {
+const FAITHFUL: Script = |_, output| {
     Ok(SubjectObservation {
         result: SubjectResult::Output(output.to_vec()),
         usage: ResourceUsage::default(),
     })
-}
+};
+
+/// One declaration mismatch: its label, the edit, and the cases it leaves non-executed.
+type Mismatch = (
+    &'static str,
+    fn(&mut FixtureExecutorV1),
+    &'static [&'static str],
+);
 
 fn evaluator_identity() -> TestResult<VerifiedEvaluatorBuildIdentity> {
     static IDENTITY: OnceLock<Result<VerifiedEvaluatorBuildIdentity, String>> = OnceLock::new();
@@ -150,7 +157,7 @@ fn exported() -> FixtureExecutorV1 {
 #[test]
 fn the_exact_cpf1_provider_identity_dispatches_every_case() -> TestResult {
     let corpus = support::corpus()?;
-    let mut adapter = Recording::new(&corpus, SubjectAdapterKind::ExportedArtifact, faithful);
+    let mut adapter = Recording::new(&corpus, SubjectAdapterKind::ExportedArtifact, FAITHFUL);
     let report = run(&corpus, &corpus.request, &[exported()], &mut adapter)?;
     assert_dispatch(&report, &adapter, &[], "exact identity")?;
     assert_eq!(adapter.executed.len(), CASES.len());
@@ -160,7 +167,7 @@ fn the_exact_cpf1_provider_identity_dispatches_every_case() -> TestResult {
 #[test]
 fn a_different_provider_contract_abi_or_schema_is_not_executed() -> TestResult {
     let corpus = support::corpus()?;
-    let mismatches: [(&str, fn(&mut FixtureExecutorV1), &[&str]); 9] = [
+    let mismatches: [Mismatch; 9] = [
         (
             "provider id",
             |executor| executor.provider.provider_id = "other-provider".to_owned(),
@@ -210,7 +217,7 @@ fn a_different_provider_contract_abi_or_schema_is_not_executed() -> TestResult {
     for (label, mutate, unavailable) in mismatches {
         let mut executor = exported();
         mutate(&mut executor);
-        let mut adapter = Recording::new(&corpus, SubjectAdapterKind::ExportedArtifact, faithful);
+        let mut adapter = Recording::new(&corpus, SubjectAdapterKind::ExportedArtifact, FAITHFUL);
         let report = run(&corpus, &corpus.request, &[executor], &mut adapter)?;
         assert_dispatch(&report, &adapter, unavailable, label)?;
     }
@@ -228,7 +235,7 @@ fn a_missing_or_duplicated_executor_is_not_executed() -> TestResult {
         ("same key twice", vec![exported(), other_digest]),
     ];
     for (label, executors) in registries {
-        let mut adapter = Recording::new(&corpus, SubjectAdapterKind::ExportedArtifact, faithful);
+        let mut adapter = Recording::new(&corpus, SubjectAdapterKind::ExportedArtifact, FAITHFUL);
         let report = run(&corpus, &corpus.request, &executors, &mut adapter)?;
         assert_dispatch(&report, &adapter, &CASES, label)?;
         assert!(adapter.executed.is_empty(), "{label}");
@@ -245,7 +252,7 @@ fn each_public_protocol_dispatches_only_through_its_own_declaration() -> TestRes
     ];
     for kind in kinds {
         let corpus = support::corpus_for_adapter(kind)?;
-        let mut adapter = Recording::new(&corpus, kind, faithful);
+        let mut adapter = Recording::new(&corpus, kind, FAITHFUL);
         let report = run(
             &corpus,
             &corpus.request,
@@ -258,7 +265,7 @@ fn each_public_protocol_dispatches_only_through_its_own_declaration() -> TestRes
             .filter(|other| **other != kind)
             .map(|other| support::test_executor(*other))
             .collect();
-        let mut adapter = Recording::new(&corpus, kind, faithful);
+        let mut adapter = Recording::new(&corpus, kind, FAITHFUL);
         let report = run(&corpus, &corpus.request, &others, &mut adapter)?;
         assert_dispatch(&report, &adapter, &CASES, "other declarations")?;
     }
@@ -282,7 +289,7 @@ fn the_executor_digest_is_provenance_and_never_changes_an_outcome() -> TestResul
         let request = request_for_subject(&corpus, subject)?;
         let mut executor = exported();
         executor.implementation_digest = subject;
-        let mut adapter = Recording::new(&corpus, SubjectAdapterKind::ExportedArtifact, faithful);
+        let mut adapter = Recording::new(&corpus, SubjectAdapterKind::ExportedArtifact, FAITHFUL);
         adapter.subject_digest = subject;
         let report = run(&corpus, &request, &[executor], &mut adapter)?;
         assert_dispatch(&report, &adapter, &[], "executor digest")?;
@@ -332,7 +339,7 @@ fn a_watchdog_expiry_cannot_satisfy_resource_exhaustion() -> TestResult {
             if attempt.case_id == "case-3" {
                 return Err(AdapterError::WatchdogExpired);
             }
-            faithful(attempt, output)
+            FAITHFUL(attempt, output)
         },
     );
     let report = run(&corpus, &corpus.request, &[exported()], &mut adapter)?;
