@@ -351,9 +351,9 @@ impl Drop for Window {
 impl crate::Native {
     pub(crate) fn verify_owned_window_dpi() -> Result<()> {
         let mut owner = Window::create(None, 320, 240)?;
-        let mut owned = Window::create(Some(owner.hwnd.0 as u64), 480, 640)?;
+        let mut dialog = Window::create(Some(owner.hwnd.0 as u64), 480, 640)?;
         let owner_dpi = owner.snapshot()?.dpi;
-        let snapshot = owned.snapshot()?;
+        let snapshot = dialog.snapshot()?;
         assert!(owner_dpi > 0);
         assert_eq!(snapshot.dpi, owner_dpi);
         let expected_width =
@@ -365,7 +365,7 @@ impl crate::Native {
             snapshot.client.bottom - snapshot.client.top,
             expected_height
         );
-        owned.destroy()?;
+        dialog.destroy()?;
         owner.destroy()?;
         Ok(())
     }
