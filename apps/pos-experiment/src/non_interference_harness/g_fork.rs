@@ -48,7 +48,7 @@
 //!
 //! Every run publishes its exported artifacts into the artifact store
 //! [`G_FORK_STORE_DIRECTORY_V1`] of its working directory, each at its BLAKE3
-//! digest, keeping a file already there. A warm case keeps one directory for
+//! digest. A warm case keeps one directory for
 //! its priming run, control run and canary run; a cold run always starts
 //! from a new directory. The capture is built from the run's own export,
 //! never from the store.
@@ -84,7 +84,7 @@ use super::{
 };
 use crate::fork_artifacts::{
     record_fork_v1, replay_recorded_fork_v1, run_fork_v1, ForkArtifactExportV1, ForkArtifactKindV1,
-    ForkFixtureV1, LEAD_EVENT_TYPE_V1,
+    ForkFixtureV1, ForkRunErrorV1, LEAD_EVENT_TYPE_V1,
 };
 
 /// The Fork-artifact row.
@@ -369,7 +369,8 @@ pub fn g_fork_capture_v1(
 }
 
 /// Publish every exported artifact into the artifact store of `directory` at
-/// its BLAKE3 digest, keeping a file already there.
+/// its BLAKE3 digest. The store is content-addressed, so an artifact already
+/// there is rewritten with the same bytes.
 fn publish(
     directory: &Path,
     export: &ForkArtifactExportV1,
@@ -378,12 +379,7 @@ fn publish(
     fs::create_dir_all(&store)
         .and_then(|()| {
             export.artifacts.iter().try_for_each(|artifact| {
-                let path = store.join(hex(&digest(&artifact.bytes)));
-                if path.exists() {
-                    Ok(())
-                } else {
-                    fs::write(path, &artifact.bytes)
-                }
+                fs::write(store.join(hex(&digest(&artifact.bytes))), &artifact.bytes)
             })
         })
         .map_err(NonInterferenceNonExecutedCauseV1::from)
@@ -422,10 +418,26 @@ pub fn serve_g_fork_local_subject_v1<R: Read, W: Write>(
     })
 }
 
+/// How one in-process runner exports a run of a fixture.
+type ExportV1 = fn(&ForkFixtureV1) -> Result<ForkArtifactExportV1, ForkRunErrorV1>;
+
+/// Record the run and rebuild its export from the recorded Event Store alone.
+fn replayed(fixture: &ForkFixtureV1) -> Result<ForkArtifactExportV1, ForkRunErrorV1> {
+    record_fork_v1(fixture, ExecutionModeV1::Local)
+        .and_then(|(_, mut recorded)| replay_recorded_fork_v1(&mut recorded))
+}
+
+/// Run the records-form Fork.
+fn forked(fixture: &ForkFixtureV1) -> Result<ForkArtifactExportV1, ForkRunErrorV1> {
+    run_fork_v1(fixture, ExecutionModeV1::Local)
+}
+
 /// The in-process Replay and Fork runners of the G-FORK subject.
 #[derive(Debug)]
 pub struct GForkRunnerV1 {
     mode: ExecutionModeV1,
+    label: &'static [u8],
+    export: ExportV1,
     work_root: PathBuf,
     directories: u64,
     warm: Option<PathBuf>,
@@ -437,19 +449,24 @@ impl GForkRunnerV1 {
     /// recorded Event Store alone.
     #[must_use]
     pub const fn replay(work_root: PathBuf) -> Self {
-        Self::new(ExecutionModeV1::Replay, work_root)
+        Self::new((ExecutionModeV1::Replay, b"replay", replayed), work_root)
     }
 
     /// The Fork runner, whose run directories are created below `work_root`:
     /// it runs the records-form Fork.
     #[must_use]
     pub const fn fork(work_root: PathBuf) -> Self {
-        Self::new(ExecutionModeV1::Fork, work_root)
+        Self::new((ExecutionModeV1::Fork, b"fork", forked), work_root)
     }
 
-    const fn new(mode: ExecutionModeV1, work_root: PathBuf) -> Self {
+    const fn new(
+        (mode, label, export): (ExecutionModeV1, &'static [u8], ExportV1),
+        work_root: PathBuf,
+    ) -> Self {
         Self {
             mode,
+            label,
+            export,
             work_root,
             directories: 0,
             warm: None,
@@ -462,22 +479,6 @@ impl GForkRunnerV1 {
         fs::create_dir_all(&directory)
             .map(|()| directory)
             .map_err(NonInterferenceNonExecutedCauseV1::from)
-    }
-
-    /// The export of one run in this runner's mode.
-    fn export(
-        &self,
-        fixture: &ForkFixtureV1,
-    ) -> Result<ForkArtifactExportV1, NonInterferenceNonExecutedCauseV1> {
-        let exported = if self.mode == ExecutionModeV1::Replay {
-            record_fork_v1(fixture, ExecutionModeV1::Local)
-                .and_then(|(_, mut recorded)| replay_recorded_fork_v1(&mut recorded))
-        } else {
-            run_fork_v1(fixture, ExecutionModeV1::Local)
-        };
-        exported
-            .ok()
-            .ok_or(NonInterferenceNonExecutedCauseV1::Unavailable)
     }
 }
 
@@ -508,7 +509,11 @@ impl NonInterferenceModeRunnerV1 for GForkRunnerV1 {
         directory
             .and_then(|directory| {
                 g_fork_subject_fixture_v1(run.subject.permitted_input, run.unauthorized_value)
-                    .and_then(|fixture| self.export(&fixture))
+                    .and_then(|fixture| {
+                        (self.export)(&fixture)
+                            .ok()
+                            .ok_or(NonInterferenceNonExecutedCauseV1::Unavailable)
+                    })
                     .and_then(|export| captured(export, &directory))
             })
             .map(|(export, mut capture)| {
@@ -519,18 +524,14 @@ impl NonInterferenceModeRunnerV1 for GForkRunnerV1 {
 }
 
 impl GForkRunnerV1 {
-    /// The run's provenance: the mode and every exported artifact.
+    /// The run's provenance: the runner's mode label and every exported
+    /// artifact.
     fn provenance(&self, export: &ForkArtifactExportV1) -> [u8; 32] {
-        let mode: &[u8] = if self.mode == ExecutionModeV1::Replay {
-            b"replay"
-        } else {
-            b"fork"
-        };
         let mut hasher = blake3::Hasher::new();
         hasher.update(PROVENANCE_DOMAIN_V1);
         hasher.update(&[0]);
-        hasher.update(&(mode.len() as u64).to_be_bytes());
-        hasher.update(mode);
+        hasher.update(&(self.label.len() as u64).to_be_bytes());
+        hasher.update(self.label);
         for artifact in &export.artifacts {
             hasher.update(&(artifact.bytes.len() as u64).to_be_bytes());
             hasher.update(&artifact.bytes);
