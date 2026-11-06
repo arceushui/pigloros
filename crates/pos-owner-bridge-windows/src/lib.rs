@@ -37,7 +37,7 @@ mod adapter {
     pub use directory::{create_private_directory, verify_private_directory};
     pub use host::WindowsOwnerHost;
     pub use overrides::refuse_overrides;
-    pub use platform::{cpu_requirements, require_windows_profile, CpuFeatures};
+    pub use platform::{cpu_requirements, owner_startup, require_windows_profile, CpuFeatures};
     pub use process::{process_identity, WindowsProcessProbe};
     pub use runtime::{verify_fixed_runtime, VerifiedRuntime};
     pub use socket::WindowsLoopbackBinder;
@@ -45,7 +45,7 @@ mod adapter {
 }
 
 pub use adapter::{
-    cpu_requirements, create_private_directory, process_identity, refuse_overrides,
+    cpu_requirements, create_private_directory, owner_startup, process_identity, refuse_overrides,
     require_windows_profile, verify_fixed_runtime, verify_private_directory, CpuFeatures,
     VerifiedRuntime, WindowsCleanupStore, WindowsLoopbackBinder, WindowsOwnerHost,
     WindowsProcessProbe,

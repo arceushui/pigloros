@@ -3,6 +3,18 @@
 
 use pos_owner_bridge::{BridgeError, UnavailableCode};
 
+/// Admission for the minimal owner executable selected by ADR-110 §1a.
+///
+/// # Errors
+///
+/// The accepted E16 profile refuses Windows owner operations until #741;
+/// #399 supplies the actual owner adapter. This gate starts no ceremony.
+pub const fn owner_startup() -> Result<(), BridgeError> {
+    pos_owner_bridge::encryptor_lock::nonce_ledger_support(
+        pos_owner_bridge::encryptor_lock::HOST_TARGET_OS,
+    )
+}
+
 /// CPU capabilities required by the first Windows owner profile.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CpuFeatures {
@@ -98,6 +110,12 @@ mod tests {
 
     #[test]
     fn platform_admission_is_capability_based_and_fails_closed() {
+        assert_eq!(
+            owner_startup(),
+            Err(BridgeError::Unavailable(
+                UnavailableCode::PlatformUnsupported
+            ))
+        );
         let available = CpuFeatures {
             aes_ni: true,
             pclmulqdq: true,

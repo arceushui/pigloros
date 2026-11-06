@@ -33,6 +33,7 @@ members = [
   "apps/pos-plugin-conformance-adapter",
   "apps/piglor-gateway",
   "apps/piglor-ledger",
+  "apps/piglor-owner",
   "apps/piglor-world-client",
 ]
 resolver = "2"

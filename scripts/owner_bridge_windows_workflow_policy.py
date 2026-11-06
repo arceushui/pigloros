@@ -37,7 +37,7 @@ EXPECTED_NATIVE = {'name': 'owner-bridge-windows',
                                                      'scripts/check_owner_bridge_unsafe_policy.py'},
                                              {'name': 'Lint native adapter and portable bridge',
                                               'run': 'cargo clippy -p pos-owner-bridge-windows -p '
-                                                     'pos-owner-bridge --all-features '
+                                                     'pos-owner-bridge -p piglor-owner --all-features '
                                                      '--all-targets --locked -- -D warnings -W '
                                                      'clippy::pedantic'},
                                              {'name': 'Test runtime-independent native adapter',
@@ -52,7 +52,7 @@ EXPECTED_NATIVE = {'name': 'owner-bridge-windows',
                                                       'including ignored tests',
                                               'env': {'OWNER_BRIDGE_TEST_RUNTIME': '${{ steps.runtime.outputs.runtime }}'},
                                               'run': 'cargo test -p pos-owner-bridge-windows -p '
-                                                     'pos-owner-bridge --all-features --locked -- '
+                                                     'pos-owner-bridge -p piglor-owner --all-features --locked -- '
                                                      '--include-ignored'},
                                              {'name': 'Measure only shim source coverage',
                                               'id': 'coverage',

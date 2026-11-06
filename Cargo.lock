@@ -5379,6 +5379,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "piglor-owner"
+version = "0.1.0"
+dependencies = [
+ "pos-owner-bridge",
+ "pos-owner-bridge-windows",
+]
+
+[[package]]
 name = "piglor-world-client"
 version = "0.1.0"
 dependencies = [
