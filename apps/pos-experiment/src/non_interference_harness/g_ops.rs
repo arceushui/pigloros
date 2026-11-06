@@ -168,7 +168,12 @@ pub const G_OPS_CANARY_UNAUTHORIZED_V1: &[u8] = b"canary-operational-secret-valu
 pub const G_OPS_BUDGET_V1: DeterministicBudgetV1 = DeterministicBudgetV1 {
     memory_bytes: 65_536,
     fuel: 1_000_000,
-    ..DeterministicBudgetV1::MAXIMA
+    host_calls: DeterministicBudgetV1::MAXIMA.host_calls,
+    event_count: DeterministicBudgetV1::MAXIMA.event_count,
+    event_bytes: DeterministicBudgetV1::MAXIMA.event_bytes,
+    state_bytes: DeterministicBudgetV1::MAXIMA.state_bytes,
+    log_calls: DeterministicBudgetV1::MAXIMA.log_calls,
+    log_bytes: DeterministicBudgetV1::MAXIMA.log_bytes,
 };
 
 /// The guest's Simulation Time selectors.
@@ -352,7 +357,8 @@ fn community_driver(
         ),
         &CommunityPluginHostAbiV1::v1(),
         &g_ops_profile_v1(),
-        G_OPS_PLUGIN_NAME_V1,
+        // The Plugin's name is its PMF1 Plugin ID text.
+        GOpsPlugin.name(),
         settings,
     )
     .map(CommunityDriverV1::new)

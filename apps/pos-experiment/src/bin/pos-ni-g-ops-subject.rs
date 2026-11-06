@@ -11,35 +11,37 @@
 //! capture frame to standard output, or writes nothing and exits non-zero. It
 //! requires the `test-support` feature and runs only on Linux.
 
-#[cfg(target_os = "linux")]
 fn main() -> std::process::ExitCode {
-    use pos_experiment::non_interference_harness::g_ops::{
-        serve_g_ops_local_subject_v1, GOpsHostV1, G_OPS_SUBJECT_WATCHDOG_V1, G_OPS_WORKER_ENV_V1,
-    };
-    use pos_experiment::non_interference_harness::NonInterferenceNonExecutedCauseV1;
+    // The worker supervisor runs only on Linux; elsewhere this program fails.
+    #[cfg(target_os = "linux")]
+    {
+        use pos_experiment::non_interference_harness::g_ops::{
+            serve_g_ops_local_subject_v1, GOpsHostV1, G_OPS_SUBJECT_WATCHDOG_V1,
+            G_OPS_WORKER_ENV_V1,
+        };
+        use pos_experiment::non_interference_harness::NonInterferenceNonExecutedCauseV1;
 
-    std::env::var_os(G_OPS_WORKER_ENV_V1)
-        .and_then(|worker| GOpsHostV1::new(worker.into(), G_OPS_SUBJECT_WATCHDOG_V1))
-        .ok_or(NonInterferenceNonExecutedCauseV1::Unavailable)
-        .and_then(|host| {
-            std::env::current_dir()
-                .map_err(NonInterferenceNonExecutedCauseV1::from)
-                .and_then(|directory| {
-                    serve_g_ops_local_subject_v1(
-                        &host,
-                        std::io::stdin().lock(),
-                        std::io::stdout().lock(),
-                        &directory,
-                    )
-                })
-        })
-        .map_or(std::process::ExitCode::FAILURE, |()| {
-            std::process::ExitCode::SUCCESS
-        })
-}
-
-/// The G-OPS subject runs only on Linux, where the worker supervisor runs.
-#[cfg(not(target_os = "linux"))]
-fn main() -> std::process::ExitCode {
-    std::process::ExitCode::FAILURE
+        std::env::var_os(G_OPS_WORKER_ENV_V1)
+            .and_then(|worker| GOpsHostV1::new(worker.into(), G_OPS_SUBJECT_WATCHDOG_V1))
+            .ok_or(NonInterferenceNonExecutedCauseV1::Unavailable)
+            .and_then(|host| {
+                std::env::current_dir()
+                    .map_err(NonInterferenceNonExecutedCauseV1::from)
+                    .and_then(|directory| {
+                        serve_g_ops_local_subject_v1(
+                            &host,
+                            std::io::stdin().lock(),
+                            std::io::stdout().lock(),
+                            &directory,
+                        )
+                    })
+            })
+            .map_or(std::process::ExitCode::FAILURE, |()| {
+                std::process::ExitCode::SUCCESS
+            })
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        std::process::ExitCode::FAILURE
+    }
 }

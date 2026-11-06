@@ -8,17 +8,18 @@
 //! tests of this crate can name the program the supervisor launches. It
 //! requires the `test-support` feature and runs only on Linux.
 
-#[cfg(target_os = "linux")]
 fn main() -> std::process::ExitCode {
-    pos_plugin_worker::run_worker(
-        std::env::args_os(),
-        &mut std::io::stdin().lock(),
-        &mut std::io::stdout().lock(),
-    )
-}
-
-/// The worker runs only on Linux, where the supervisor launches it.
-#[cfg(not(target_os = "linux"))]
-fn main() -> std::process::ExitCode {
-    std::process::ExitCode::FAILURE
+    // The worker supervisor runs only on Linux; elsewhere this program fails.
+    #[cfg(target_os = "linux")]
+    {
+        pos_plugin_worker::run_worker(
+            std::env::args_os(),
+            &mut std::io::stdin().lock(),
+            &mut std::io::stdout().lock(),
+        )
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        std::process::ExitCode::FAILURE
+    }
 }
