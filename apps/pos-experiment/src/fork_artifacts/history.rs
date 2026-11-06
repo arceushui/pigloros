@@ -5,6 +5,11 @@
 //! per Tick. The history also appends one external input before its first
 //! Tick and before every Tick after the cut.
 //!
+//! The participant Driver `beta` carries a hidden participant field: its
+//! payload is `factual` through the cut and `factual` followed by the
+//! fixture's hidden participant field after it. The Fork is cut before the
+//! field is written, so it never observes it.
+//!
 //! The history is deterministic: the factual and Fork Timeline ids are
 //! [`super::FACTUAL_TIMELINE_ID_V1`] and [`super::FORK_TIMELINE_ID_V1`], and
 //! the pipeline attempt, idempotency and validation identities of each pass
@@ -12,7 +17,7 @@
 //! and wall times stay store-assigned; no recorded node and no exported
 //! artifact covers them.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use pos_core::{
     fork_ancestry, pipeline_draft_vector_digest_v1, AppendDedupKey, AppendDedupScope,
@@ -39,6 +44,9 @@ struct DriverSpecV1 {
     plugin: u128,
     name: &'static str,
     event_type: &'static str,
+    /// Whether its factual Events after the cut carry the hidden participant
+    /// field.
+    hidden: bool,
 }
 
 /// The Drivers in schedule order. None subscribes to anything.
@@ -47,16 +55,19 @@ const DRIVERS: [DriverSpecV1; 3] = [
         plugin: 0x6201,
         name: "alpha",
         event_type: LEAD_EVENT_TYPE,
+        hidden: false,
     },
     DriverSpecV1 {
         plugin: 0x6202,
         name: "beta",
         event_type: "agent.forkrun.beta",
+        hidden: true,
     },
     DriverSpecV1 {
         plugin: 0x6203,
         name: "gamma",
         event_type: "agent.forkrun.gamma",
+        hidden: false,
     },
 ];
 
@@ -85,10 +96,18 @@ impl Plugin for HistoryPlugin {
     }
 }
 
+/// The payload of every factual Driver output.
+const FACTUAL_PAYLOAD: &[u8] = b"factual";
+
 /// A Driver that emits one draft of its Event type every Tick.
+///
+/// A participant Driver holds the cell of the hidden participant field: its
+/// payload is [`FACTUAL_PAYLOAD`] until the history writes the field into the
+/// cell after the cut, and the payload followed by the field afterwards.
 struct HistoryDriver {
     name: &'static str,
     event_type: &'static str,
+    hidden: Option<Arc<OnceLock<Vec<u8>>>>,
 }
 
 impl Driver for HistoryDriver {
@@ -97,10 +116,14 @@ impl Driver for HistoryDriver {
     }
 
     fn step(&mut self, _: TimelineId, _: ObservationView<'_>) -> Result<StepOutput, RuntimeError> {
+        let mut payload = FACTUAL_PAYLOAD.to_vec();
+        if let Some(field) = self.hidden.as_deref().and_then(OnceLock::get) {
+            payload.extend_from_slice(field);
+        }
         Ok(StepOutput::new(vec![EventDraft::new(
             EntityId::from_ulid(Ulid::from(0x07_u128)),
             Kind::new(self.event_type),
-            CanonicalBytes::from_static(b"factual"),
+            CanonicalBytes::from_vec(payload),
         )]))
     }
 }
@@ -147,15 +170,17 @@ pub(super) struct FactualV1 {
 }
 
 /// Record `cut_tick` factual Ticks, then one Tick per `factual_suffix` input
-/// after the cut, and create the Fork at the cut. `None` when the host cannot
-/// record the history or the cut has no recorded step of every Driver.
+/// after the cut, whose participant output carries `hidden_field`, and create
+/// the Fork at the cut. `None` when the host cannot record the history or the
+/// cut has no recorded step of every Driver.
 pub(super) fn record(
     root: TimelineId,
     fork: TimelineId,
     cut_tick: u64,
-    factual_suffix: &[Vec<u8>],
+    (factual_suffix, hidden_field): (&[Vec<u8>], &[u8]),
 ) -> Option<FactualV1> {
     let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
+    let hidden = Arc::new(OnceLock::new());
     let mut store = MemoryStore::new();
     let bound = store.bind_erasure_gate(Arc::clone(&gate)).ok();
     let created = bound.and_then(|()| {
@@ -167,7 +192,7 @@ pub(super) fn record(
             .ok()
     });
     created
-        .and_then(|_| registry(gate))
+        .and_then(|_| registry(gate, &hidden))
         .and_then(|(mut registry, registered)| {
             let input = append_input(&mut store, root, b"input");
             let prefix = input.and_then(|()| {
@@ -176,6 +201,9 @@ pub(super) fn record(
             });
             let cut = prefix.and_then(|()| store.last_committed_factual_tick(root).ok());
             let suffix = cut.and_then(|cut| {
+                // Written after the cut: no factual Tick through it carries
+                // the field. The cell is fresh, so the write cannot fail.
+                hidden.get_or_init(|| hidden_field.to_vec());
                 factual_suffix
                     .iter()
                     .zip(cut.tick + 1..)
@@ -208,9 +236,13 @@ pub(super) fn record(
         })
 }
 
-/// A registry of the Drivers under their Plugin IDs, bound to `gate`, and
-/// every registered Driver in schedule order.
-fn registry(gate: Arc<ErasureContainmentGateV1>) -> Option<(PluginRegistry, Vec<RegisteredV1>)> {
+/// A registry of the Drivers under their Plugin IDs, bound to `gate`, with
+/// the participant Driver holding `hidden`, and every registered Driver in
+/// schedule order.
+fn registry(
+    gate: Arc<ErasureContainmentGateV1>,
+    hidden: &Arc<OnceLock<Vec<u8>>>,
+) -> Option<(PluginRegistry, Vec<RegisteredV1>)> {
     let mut registry = PluginRegistry::new().with_erasure_gate(gate);
     let registered: Option<Vec<RegisteredV1>> = DRIVERS
         .iter()
@@ -223,6 +255,7 @@ fn registry(gate: Arc<ErasureContainmentGateV1>) -> Option<(PluginRegistry, Vec<
             let driver = HistoryDriver {
                 name: spec.name,
                 event_type: spec.event_type,
+                hidden: spec.hidden.then(|| Arc::clone(hidden)),
             };
             let entry = RegisteredV1 {
                 plugin: plugin.id(),
