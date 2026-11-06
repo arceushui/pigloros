@@ -22,14 +22,23 @@
 //!    reader for provider contract 1.0.0, so its attempts are not executed.
 //! 5. A payload that violates the grammar of the `payload` module is the failure
 //!    `payload-invalid`.
-//! 6. Each sub-case runs one leg per profile on the host's EPF1 table and
+//! 6. An Air-Gapped attempt runs the `deterministic-air-gapped-v1` semantics:
+//!    no network and the bundled trust snapshot. A network attempt (an
+//!    attempt that is granted network, or a sub-case whose manifest enables
+//!    it) is the failure `network-denied`, before any leg runs.
+//! 7. Each sub-case runs one leg per profile on the host's EPF1 table and
 //!    bundled TPS1 (the `execute` module); an operational host or codec failure makes
 //!    the attempt `Unavailable`.
-//! 7. A `canonical-output` family (positive, deletion-redaction,
+//! 8. A `canonical-output` family (positive, deletion-redaction,
 //!    independent-evaluation) outputs its record of every sub-case and leg,
 //!    which equals the oracle only when every leg is as expected. A
 //!    `namespaced-failure` family returns its family failure when every leg
 //!    is as expected, else `subcase-mismatch`.
+//!
+//! [`pair_report()`] runs the Local and the Air-Gapped attempt of one case
+//! (ADR-062 Revision 8 slice R5, #1224) and reports both against the same
+//! expected-result record, with the manifest and `VRR1` of every leg; it
+//! labels the Air-Gapped results Local-relaxation engineering evidence.
 //!
 //! The adapter meters one execution step per leg and the Event count: every
 //! Event the attempt folds, replayed or recomputed (a run refused before its
@@ -49,9 +58,13 @@ use pos_reference::profile::NamespacedFailure;
 use pos_store::StoreConfig;
 
 mod execute;
+mod pair;
 mod payload;
 mod schema_digests;
 
+pub use pair::{
+    pair_report, LegEvidenceV1, ModeEvidenceV1, PairErrorV1, PairReportV1, AIR_GAPPED_EVIDENCE,
+};
 pub use payload::SCHEMA_ID;
 
 /// The provider ID of every failure the adapter returns.
@@ -67,6 +80,10 @@ pub const PAYLOAD_INVALID: &str = "payload-invalid";
 /// The code of the failure for a case in which a leg was not as expected.
 /// It equals no oracle.
 pub const SUBCASE_MISMATCH: &str = "subcase-mismatch";
+
+/// The code of the failure for a network attempt in an Air-Gapped attempt.
+/// It equals no oracle.
+pub const NETWORK_DENIED: &str = "network-denied";
 
 /// Why the adapter wrote no observation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
@@ -125,9 +142,11 @@ pub fn run_with_store(
 ) -> Result<(), AdapterRunErrorV1> {
     read_attempt(reader)
         .or(Err(AdapterRunErrorV1::Wire))
-        .and_then(|attempt| observe(store_config, &attempt))
-        .and_then(|observation| {
-            write_observation(writer, &observation).or(Err(AdapterRunErrorV1::Output))
+        .and_then(|attempt| {
+            execute_attempt(store_config, &attempt).ok_or(AdapterRunErrorV1::NotExecuted)
+        })
+        .and_then(|execution| {
+            write_observation(writer, &execution.observation).or(Err(AdapterRunErrorV1::Output))
         })
 }
 
@@ -166,47 +185,64 @@ fn failure(code: &str) -> SubjectResult {
     })
 }
 
-/// An observation with no usage.
-fn unmeasured(result: SubjectResult) -> SubjectObservation {
-    SubjectObservation {
-        result,
-        usage: ResourceUsage::default(),
+/// What one attempt observed, with the manifest and `VRR1` of every leg it
+/// ran (none when it ran no leg).
+struct AttemptExecutionV1 {
+    observation: SubjectObservation,
+    legs: Vec<LegEvidenceV1>,
+}
+
+/// An execution that ran no leg and has no usage.
+fn unmeasured(result: SubjectResult) -> AttemptExecutionV1 {
+    AttemptExecutionV1 {
+        observation: SubjectObservation {
+            result,
+            usage: ResourceUsage::default(),
+        },
+        legs: Vec::new(),
     }
 }
 
-/// Checks (2) to (4) of the order.
-fn observe(
+/// Checks (2) to (4) of the order: `None` is an attempt that is not
+/// executed.
+fn execute_attempt(
     store_config: &StoreConfig,
     attempt: &CaseAttempt,
-) -> Result<SubjectObservation, AdapterRunErrorV1> {
+) -> Option<AttemptExecutionV1> {
     let mode = match attempt.mode {
         ExecutionMode::Local => Some(ExecutionModeV1::Local),
         ExecutionMode::AirGapped => Some(ExecutionModeV1::AirGapped),
         ExecutionMode::Replay | ExecutionMode::Fork => None,
     };
     let Some(mode) = mode.filter(|_| attempt.claim_layer == ClaimLayer::ReplayConformance) else {
-        return Ok(unmeasured(SubjectResult::Unavailable));
+        return Some(unmeasured(SubjectResult::Unavailable));
     };
     let pinned = schema_digests::pinned_digest(attempt.family);
     payload::find_composite(&attempt.auxiliary)
         .filter(|_| blake3::hash(&attempt.schema.bytes).as_bytes() == &pinned)
         .map(|members| decide(store_config, attempt, mode, &members))
-        .ok_or(AdapterRunErrorV1::NotExecuted)
 }
 
-/// Checks (5) to (7) of the order.
+/// Checks (5) to (8) of the order.
 fn decide(
     store_config: &StoreConfig,
     attempt: &CaseAttempt,
     mode: ExecutionModeV1,
     members: &payload::MembersV1,
-) -> SubjectObservation {
+) -> AttemptExecutionV1 {
     let family = family_text(attempt.family);
     payload::parse(&attempt.payload.bytes, family, members).map_or_else(
         || unmeasured(failure(PAYLOAD_INVALID)),
         |subcases| {
-            let records: Option<Vec<(payload::RecordV1, bool)>> = execute::HostV1::install()
-                .and_then(|host| {
+            let network = attempt.network_allowed
+                || subcases
+                    .iter()
+                    .any(|subcase| subcase.manifest.network_enabled);
+            if mode == ExecutionModeV1::AirGapped && network {
+                return unmeasured(failure(NETWORK_DENIED));
+            }
+            let records: Option<Vec<(payload::RecordV1, Vec<LegEvidenceV1>, bool)>> =
+                execute::HostV1::install().and_then(|host| {
                     subcases
                         .iter()
                         .map(|subcase| {
@@ -217,9 +253,9 @@ fn decide(
                                 mode,
                                 store_config,
                             )
-                            .map(|record| {
+                            .map(|(record, evidence)| {
                                 let matched = record.legs == subcase.expect;
-                                (record, matched)
+                                (record, evidence, matched)
                             })
                         })
                         .collect()
@@ -227,13 +263,19 @@ fn decide(
             records.map_or_else(
                 || unmeasured(SubjectResult::Unavailable),
                 |records| {
-                    let legs: usize = records.iter().map(|(record, _)| record.legs.len()).sum();
-                    let events: u64 = records.iter().map(|(record, _)| record.folded_events).sum();
-                    let matched = records.iter().all(|(_, matched)| *matched);
+                    let legs: usize = records.iter().map(|(record, _, _)| record.legs.len()).sum();
+                    let events: u64 = records
+                        .iter()
+                        .map(|(record, _, _)| record.folded_events)
+                        .sum();
+                    let matched = records.iter().all(|(_, _, matched)| *matched);
+                    let (records, evidence): (Vec<payload::RecordV1>, Vec<Vec<LegEvidenceV1>>) =
+                        records
+                            .into_iter()
+                            .map(|(record, evidence, _)| (record, evidence))
+                            .unzip();
                     let result = failure_code(attempt.family).map_or_else(
                         || {
-                            let records: Vec<payload::RecordV1> =
-                                records.into_iter().map(|(record, _)| record).collect();
                             SubjectResult::Output(payload::output_record(
                                 &attempt.case_id,
                                 family,
@@ -242,13 +284,16 @@ fn decide(
                         },
                         |code| failure(if matched { code } else { SUBCASE_MISMATCH }),
                     );
-                    SubjectObservation {
-                        result,
-                        usage: ResourceUsage {
-                            event_count: events,
-                            execution_steps: u64::try_from(legs).unwrap_or(u64::MAX),
-                            ..ResourceUsage::default()
+                    AttemptExecutionV1 {
+                        observation: SubjectObservation {
+                            result,
+                            usage: ResourceUsage {
+                                event_count: events,
+                                execution_steps: u64::try_from(legs).unwrap_or(u64::MAX),
+                                ..ResourceUsage::default()
+                            },
                         },
+                        legs: evidence.into_iter().flatten().collect(),
                     }
                 },
             )
