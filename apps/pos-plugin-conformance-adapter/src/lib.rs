@@ -114,36 +114,33 @@ pub const SUBCASE_MISMATCH: &str = "subcase-mismatch";
 pub const WORKER_PROGRAM: &str = "pos-plugin-worker";
 
 /// Why the adapter wrote no observation.
+///
+/// Each discriminant is the process exit code of the error.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[repr(u8)]
 pub enum AdapterRunErrorV1 {
     /// The EAI1 stream did not decode.
     #[error("the EAI1 attempt stream is invalid")]
-    Wire,
+    Wire = 2,
     /// The attempt is not executed: its schema, its schema member or its composite is wrong.
     #[error("the attempt is not executed")]
-    NotExecuted,
+    NotExecuted = 3,
     /// The attempt is not executed: it requests `migrate-state`, which a V1 host never invokes.
     #[error("the attempt requests an operation a V1 host does not support")]
-    Unsupported,
+    Unsupported = 6,
     /// The worker program cannot be located next to the adapter binary.
     #[error("the worker program cannot be located")]
-    Worker,
+    Worker = 4,
     /// The EAO1 stream could not be written.
     #[error("the EAO1 observation stream could not be written")]
-    Output,
+    Output = 5,
 }
 
 impl AdapterRunErrorV1 {
     /// The exit code of the process.
     #[must_use]
     pub const fn code(self) -> u8 {
-        match self {
-            Self::Wire => 2,
-            Self::NotExecuted => 3,
-            Self::Worker => 4,
-            Self::Output => 5,
-            Self::Unsupported => 6,
-        }
+        self as u8
     }
 }
 
@@ -267,6 +264,14 @@ fn execute(
     attempt: &CaseAttempt,
     mode: CommunityPluginModeV1,
 ) -> Result<SubjectObservation, AdapterRunErrorV1> {
+    admission(attempt).and_then(|()| match PiecesV1::find(&attempt.auxiliary) {
+        Ok(pieces) => Ok(decide(runner, attempt, mode, &pieces)),
+        Err(_fault) => Err(AdapterRunErrorV1::NotExecuted),
+    })
+}
+
+/// Checks (3) and (4) of the order, then the `migrate-state` refusal.
+fn admission(attempt: &CaseAttempt) -> Result<(), AdapterRunErrorV1> {
     let pinned = schema_digests::pinned_digest(attempt.family);
     let schema_ok = blake3::hash(&attempt.schema.bytes).as_bytes() == &pinned
         && schema_text_is_pinned(&attempt.payload.bytes);
@@ -276,10 +281,7 @@ fn execute(
     if requests_migrate_state(&attempt.payload.bytes) {
         return Err(AdapterRunErrorV1::Unsupported);
     }
-    match PiecesV1::find(&attempt.auxiliary) {
-        Ok(pieces) => Ok(decide(runner, attempt, mode, &pieces)),
-        Err(_fault) => Err(AdapterRunErrorV1::NotExecuted),
-    }
+    Ok(())
 }
 
 /// Checks (6) and (7) of the order.
