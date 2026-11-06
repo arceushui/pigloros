@@ -53,6 +53,25 @@ capture adapters of slices N1 to N4 supply verifier-accepted executions. The
 `pos-ni-local-probe` binary (feature `test-support`) is the harness probe of the
 Local runner, not a capture adapter of any row.
 
+## ADR-064 Fork artifact comparison
+
+`pos_experiment::fork_artifacts` is ADR-062 Revision 8 slice R6 (#1225).
+`run_fork_v1` records a deterministic factual history, cuts an ADR-064
+counterfactual Fork from it and exports the run's `INT1` Interventions, `CFP1`
+plan, `RCF1` frontier, `SIV1` invalidation, `RCP1` checkpoints and `CFR1`
+result through their public encodings, each at the run's `WorldCut`
+coordinate. `compare_fork_artifacts_v1` compares two exports with the R1
+comparator, so a mismatching artifact is one `DVR1` at its coordinate. The
+provisional Ticks come from the records form: the host declares the
+provisional graph and a records-form stager stages it. Per owner answer Q7 such
+a run is a genuine ADR-064 Fork execution, re-run when the ADR-064 R7 steps form
+(#1204) lands. A factual suffix after the cut never reaches an artifact. Local
+and Air-Gapped runs export the same bytes; an Air-Gapped run whose EPF1 allows
+network is refused. The module needs the `test-support` feature (the open
+fixture erasure gate and the generated Plugin registration) and Linux (the
+`pos-time` counterfactual module). Results are Local-relaxation engineering
+evidence, not hosted conformance.
+
 ## Sequential SQLite multi-rate demo
 
 Start the local-only Gateway with an explicit SQLite file:
