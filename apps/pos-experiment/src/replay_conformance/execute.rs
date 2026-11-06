@@ -393,16 +393,9 @@ const fn leg_mode(
     }
 }
 
-/// Run one sub-case: one leg per profile. Returns its record and the manifest
-/// and `VRR1` of each leg; `None` is an operational host or codec failure.
-pub(super) fn run_subcase(
-    host: &HostV1,
-    subcase: &SubCaseV1,
-    fixture_digest: [u8; 32],
-    mode: ExecutionModeV1,
-    store_config: &StoreConfig,
-) -> Option<(RecordV1, Vec<LegEvidenceV1>)> {
-    let requests: Vec<LegRequestV1> = subcase
+/// The request of every leg of `subcase`, in profile order.
+fn leg_requests(host: &HostV1, subcase: &SubCaseV1, mode: ExecutionModeV1) -> Vec<LegRequestV1> {
+    subcase
         .profiles
         .iter()
         .map(|profile| {
@@ -413,7 +406,19 @@ pub(super) fn run_subcase(
                 leg_mode(subcase.class, *profile, mode),
             )
         })
-        .collect();
+        .collect()
+}
+
+/// Run one sub-case: one leg per profile. Returns its record and the manifest
+/// and `VRR1` of each leg; `None` is an operational host or codec failure.
+pub(super) fn run_subcase(
+    host: &HostV1,
+    subcase: &SubCaseV1,
+    fixture_digest: [u8; 32],
+    mode: ExecutionModeV1,
+    store_config: &StoreConfig,
+) -> Option<(RecordV1, Vec<LegEvidenceV1>)> {
+    let requests = leg_requests(host, subcase, mode);
     let licence = subcase.licence.as_deref();
     let folded = Arc::new(AtomicU64::new(0));
     let composed = match &subcase.closure {
