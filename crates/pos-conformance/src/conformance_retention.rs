@@ -22,10 +22,11 @@ use ciborium::value::Value;
 
 /// Magic of the CRT1 conformance retention record.
 pub const CONFORMANCE_RETENTION_MAGIC_V1: &str = "CRT1";
-/// Calendar months a retired artifact stays available.
-pub const CONFORMANCE_RETENTION_MONTHS_V1: u32 = 24;
+/// A retired artifact stays available for 24 calendar months: two whole years, the day clamped
+/// to the end of the month.
+const RETENTION_YEARS: u32 = 2;
 /// Subsequent Stable majors a retired artifact stays available for.
-pub const CONFORMANCE_RETENTION_STABLE_MAJORS_V1: u64 = 2;
+const RETENTION_STABLE_MAJORS: u64 = 2;
 
 /// One CRT1 conformance retention record.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -169,9 +170,9 @@ impl GovernanceRecordV1 for ConformanceRetentionV1 {
 /// The earliest removal date and Stable major for a retirement.
 fn removal_bounds(retirement_date: &str, last_stable_major: u64) -> Result<(String, u64), Error> {
     let (year, month, day) = calendar_date(retirement_date).ok_or(Error::FieldOutOfBounds)?;
-    let removal_year = year + CONFORMANCE_RETENTION_MONTHS_V1 / 12;
+    let removal_year = year + RETENTION_YEARS;
     let removal_major = last_stable_major
-        .checked_add(CONFORMANCE_RETENTION_STABLE_MAJORS_V1)
+        .checked_add(RETENTION_STABLE_MAJORS)
         .ok_or(Error::FieldOutOfBounds)?;
     if removal_year > 9999 {
         return Err(Error::FieldOutOfBounds);
@@ -203,7 +204,9 @@ fn calendar_date(value: &str) -> Option<(u32, u32, u32)> {
 
 const fn days_in_month(year: u32, month: u32) -> u32 {
     match month {
-        2 if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) => 29,
+        2 if year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400)) => {
+            29
+        }
         2 => 28,
         4 | 6 | 9 | 11 => 30,
         _ => 31,

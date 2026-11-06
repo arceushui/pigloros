@@ -80,10 +80,7 @@ pub use conformance_impact_analysis::{
     ConformanceAffectedReportV1, ConformanceImpactAnalysisV1, CONFORMANCE_IMPACT_ANALYSIS_MAGIC_V1,
 };
 pub use conformance_promotion::{ConformancePromotionV1, CONFORMANCE_PROMOTION_MAGIC_V1};
-pub use conformance_retention::{
-    ConformanceRetentionV1, CONFORMANCE_RETENTION_MAGIC_V1, CONFORMANCE_RETENTION_MONTHS_V1,
-    CONFORMANCE_RETENTION_STABLE_MAJORS_V1,
-};
+pub use conformance_retention::{ConformanceRetentionV1, CONFORMANCE_RETENTION_MAGIC_V1};
 pub use conformance_trust_admission::{
     conformance_revoked_key_id_v1, ConformanceArtifactRefusalV1, ConformanceKeyRefusalV1,
     ConformanceTrustAdmissionErrorV1, ConformanceTrustAdmissionPortV1, ConformanceTrustAdmissionV1,
