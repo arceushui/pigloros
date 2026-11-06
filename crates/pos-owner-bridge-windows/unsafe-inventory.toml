@@ -741,67 +741,67 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/resource.rs"
-line = 45
+line = 68
 function = "install"
 operation = "view.add_WebResourceRequested(&handler, token)"
 invariant = "live STA interface/handler and initialized unique token output."
-hosted_test = "native_window_environment_and_buffers_lifecycle"
+hosted_test = "native_resource_denial_callback_failure_does_not_contact_listener"
 
 [[block]]
 file = "src/ffi/events/resource.rs"
-line = 49
+line = 72
 function = "install"
 operation = "remove.remove_WebResourceRequested(token)"
 invariant = "exact subscription token on its retained STA interface."
-hosted_test = "native_window_environment_and_buffers_lifecycle"
+hosted_test = "native_resource_denial_callback_failure_does_not_contact_listener"
 
 [[block]]
 file = "src/ffi/events/resource.rs"
-line = 54
+line = 77
 function = "install"
 operation = "view.AddWebResourceRequestedFilter(w!( ), COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL)"
 invariant = "fixed wildcard and ALL context; the installed handler selects the pre-created local denial unless the exact owner document is admitted."
-hosted_test = "native_window_environment_and_buffers_lifecycle"
+hosted_test = "native_resource_denial_callback_failure_does_not_contact_listener"
 
 [[block]]
 file = "src/ffi/events/resource.rs"
-line = 25
+line = 39
 function = "install"
 operation = "environment.CreateWebResourceResponse( None, 403, w!( ), w!( ), )"
 invariant = "Retained STA environment; host-only fixed bodyless 403 is created before subscriptions/navigation, so response allocation failure cannot occur in an in-flight request callback."
-hosted_test = "native_window_environment_and_buffers_lifecycle"
+hosted_test = "native_resource_denial_callback_failure_does_not_contact_listener"
 
 [[block]]
 file = "src/ffi/events/resource.rs"
-line = 74
+line = 101
 function = "filter"
 operation = "args.SetResponse(response)"
 invariant = "live event arguments and host-created denial response; COM retains its own reference for this intercepted request."
-hosted_test = "native_window_environment_and_buffers_lifecycle"
+hosted_test = "native_resource_denial_callback_failure_does_not_contact_listener"
 
 [[block]]
 file = "src/ffi/events/resource.rs"
-line = 81
+line = 108
 function = "owner_request"
 operation = "args.Request()"
 invariant = "live event arguments on the callback STA; COM-owned request result."
-hosted_test = "native_window_environment_and_buffers_lifecycle"
+hosted_test = "native_resource_denial_callback_failure_does_not_contact_listener"
 
 [[block]]
 file = "src/ffi/events/resource.rs"
-line = 84
+line = 111
 function = "owner_request"
 operation = "request.Uri(out)"
 invariant = "the string helper provides initialized uniquely writable output."
-hosted_test = "native_window_environment_and_buffers_lifecycle"
+hosted_test = "native_resource_denial_callback_failure_does_not_contact_listener"
 
 [[block]]
 file = "src/ffi/events/resource.rs"
-line = 88
+line = 115
 function = "owner_request"
 operation = "args.ResourceContext(&raw mut context)"
 invariant = "live arguments and initialized writable context scalar."
-hosted_test = "native_window_environment_and_buffers_lifecycle"
+hosted_test = "native_resource_denial_callback_failure_does_not_contact_listener"
 
 [[block]]
 file = "src/ffi/pump.rs"

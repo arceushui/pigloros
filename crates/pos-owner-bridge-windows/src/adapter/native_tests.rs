@@ -1,6 +1,7 @@
 #![cfg(windows)]
 #![forbid(unsafe_code)]
 
+use std::cell::Cell;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -22,6 +23,58 @@ use crate::{
 };
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+struct ResourceProbe {
+    policy: Events,
+    deny: bool,
+    requested: Cell<bool>,
+    completed: Cell<bool>,
+    failures: Cell<u32>,
+}
+
+impl ResourceProbe {
+    fn new(deny: bool) -> Self {
+        Self {
+            policy: Events::default(),
+            deny,
+            requested: Cell::new(false),
+            completed: Cell::new(false),
+            failures: Cell::new(0),
+        }
+    }
+}
+
+impl EventSink for ResourceProbe {
+    fn event(&self, event: crate::NativeEvent) -> crate::NativeAction {
+        if matches!(&event, crate::NativeEvent::Resource { document: true, .. }) {
+            self.requested.set(true);
+            if self.deny {
+                return crate::NativeAction::BlockResource;
+            }
+        }
+        if matches!(&event, crate::NativeEvent::NavigationCompleted { .. }) {
+            self.completed.set(true);
+        }
+        self.policy.event(event)
+    }
+    fn failed(&self, kind: crate::EventKind, error: crate::NativeError) -> crate::NativeAction {
+        self.failures.set(self.failures.get() + 1);
+        self.policy.failed(kind, error)
+    }
+}
+
+struct ResourceProbeGuard;
+impl ResourceProbeGuard {
+    fn new(mode: crate::ResourceDenialFixture) -> Self {
+        crate::Native::set_resource_denial_fixture(mode);
+        Self
+    }
+}
+impl Drop for ResourceProbeGuard {
+    fn drop(&mut self) {
+        crate::Native::set_resource_denial_fixture(crate::ResourceDenialFixture::Normal);
+    }
+}
 
 struct FixtureRoot(PathBuf);
 
@@ -105,6 +158,99 @@ fn empty_session(native: &mut dyn NativeOperations) {
 /// bounded host cleanup without a page acknowledgement. Malformed CBOR is
 /// discarded before EMPTY -> RECEIVED, so it cannot produce FAILED/RELEASING.
 impl crate::Native {
+    pub(crate) fn native_resource_denial_failure() -> TestResult {
+        let _port = Self::fixed_port_fixture();
+        let root = FixtureRoot::new()?;
+        let runtime_path = std::env::var_os("OWNER_BRIDGE_TEST_RUNTIME")
+            .map(PathBuf::from)
+            .ok_or("canonical retained runtime is required by resource denial fixture")?;
+        let runtime = crate::verify_fixed_runtime(&runtime_path, &root.0)?;
+        let mut listener = LoopbackListener::start(
+            Box::new(crate::WindowsLoopbackBinder::default()),
+            ListenerConfig::adr(),
+        )?;
+        let mut factory = Self::owner_factory()?;
+        for (value, deny, mode, served) in [
+            (0x20, false, crate::ResourceDenialFixture::Normal, 1),
+            (0x21, true, crate::ResourceDenialFixture::Normal, 0),
+            // A real native negative control: the former swallowed error must
+            // let the request reach the actual digest-pinned listener.
+            (0x22, true, crate::ResourceDenialFixture::SwallowFailure, 1),
+            (
+                0x23,
+                true,
+                crate::ResourceDenialFixture::PropagateFailure,
+                0,
+            ),
+        ] {
+            let _mode = ResourceProbeGuard::new(mode);
+            let folder = root
+                .0
+                .join(pos_owner_bridge::folder_name(&CeremonyId::from_bytes(
+                    [value; 16],
+                )));
+            crate::create_private_directory(&folder)?;
+            let mut native = factory.session()?;
+            native.create_window(None, 480, 640)?;
+            let probe = Rc::new(ResourceProbe::new(deny));
+            let sink: Rc<dyn EventSink> = probe.clone();
+            native.create_environment(runtime.root(), &folder, super::settings::OPTIONS, sink)?;
+            completion(&factory, "resource environment creation", || {
+                native.environment_completion()
+            })?;
+            let snapshot = native.environment()?;
+            assert_eq!(
+                snapshot.folder.as_path().canonicalize()?,
+                folder.canonicalize()?
+            );
+            assert_eq!(snapshot.version.as_str(), "153.0.4234.48");
+            native.create_controller()?;
+            completion(&factory, "resource controller creation", || {
+                native.controller_completion()
+            })?;
+            let identity = runtime.browser_identity(native.browser_pid()?)?;
+            probe.policy.expect_browser(identity.browser_pid);
+            native.require_shared_interfaces()?;
+            let sink: Rc<dyn EventSink> = probe.clone();
+            native.subscribe_view(sink)?;
+            super::settings::apply(native.as_ref())
+                .map_err(pos_owner_bridge::SurfaceError::error)?;
+            listener.begin_navigation();
+            probe.policy.begin();
+            native.navigate_owner()?;
+            pump_until(
+                &factory,
+                "resource callback and navigation completion",
+                || probe.requested.get() && probe.completed.get(),
+            )?;
+            if served == 1 {
+                pump_until(&factory, "positive control reaching the listener", || {
+                    listener.served().count == 1
+                })?;
+            }
+            assert_eq!(
+                listener.served().count,
+                served,
+                "resource denial mode differs from its qualified behavior"
+            );
+            if mode != crate::ResourceDenialFixture::Normal {
+                assert!(probe.failures.get() > 0);
+            }
+            native.unsubscribe_view()?;
+            native.close_controller()?;
+            pump_until(&factory, "resource browser exit", || {
+                probe.policy.exited() == Some(identity.browser_pid)
+            })?;
+            assert_eq!(listener.served().count, served);
+            native.unsubscribe_exit()?;
+            native.drop_environment()?;
+            native.destroy_window()?;
+        }
+        factory.stop()?;
+        listener.shutdown();
+        Ok(())
+    }
+
     pub(crate) fn native_host_lifecycle() -> TestResult {
         let _port = Self::fixed_port_fixture();
         let root = FixtureRoot::new()?;
@@ -113,11 +259,24 @@ impl crate::Native {
             .ok_or("canonical retained runtime is required by the host fixture")?;
         let runtime = crate::verify_fixed_runtime(&runtime_path, &root.0)?;
         let mut store = crate::WindowsCleanupStore::open(root.0.clone())?;
-        let mut host = crate::WindowsOwnerHost::start(runtime, root.0.clone(), store.clone())?;
+        let mut host = match crate::WindowsOwnerHost::start(runtime, root.0.clone(), store.clone())
+        {
+            Ok(host) => host,
+            Err(pos_owner_bridge::BridgeError::Unavailable(
+                pos_owner_bridge::UnavailableCode::PlatformUnsupported,
+            )) => {
+                // Hosted Windows Server is deliberately refused by the public
+                // desktop profile. Exercise the same STA worker beneath that
+                // admission boundary without qualifying Server as a product OS.
+                let runtime = crate::verify_fixed_runtime(&runtime_path, &root.0)?;
+                let loopback = super::loopback::SharedLoopback::start()?;
+                crate::WindowsOwnerHost::spawn(runtime, root.0.clone(), loopback, store.clone())?
+            }
+            Err(error) => return Err(error.into()),
+        };
         // A second host cannot acquire this host's exclusive listener.
-        let runtime = crate::verify_fixed_runtime(&runtime_path, &root.0)?;
         assert!(matches!(
-            crate::WindowsOwnerHost::start(runtime, root.0.clone(), store.clone()),
+            super::loopback::SharedLoopback::start(),
             Err(pos_owner_bridge::BridgeError::Unavailable(
                 pos_owner_bridge::UnavailableCode::PortUnavailable
             ))

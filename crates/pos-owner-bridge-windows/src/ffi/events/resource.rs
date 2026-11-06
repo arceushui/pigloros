@@ -8,9 +8,23 @@ use webview2_com::Microsoft::Web::WebView2::Win32::{
 };
 use webview2_com::WebResourceRequestedEventHandler;
 use windows::core::w;
+use windows::Win32::Foundation::E_ABORT;
 
 use super::{action, observe, unavailable, Result, Subscriptions};
 use crate::{EventKind, EventSink, NativeAction, NativeEvent};
+
+#[cfg(test)]
+std::thread_local! {
+    static DENIAL_FIXTURE: std::cell::Cell<crate::ResourceDenialFixture> =
+        const { std::cell::Cell::new(crate::ResourceDenialFixture::Normal) };
+}
+
+#[cfg(test)]
+impl crate::Native {
+    pub(crate) fn set_resource_denial_fixture(mode: crate::ResourceDenialFixture) {
+        DENIAL_FIXTURE.with(|current| current.set(mode));
+    }
+}
 
 pub(super) fn install(
     view: &ICoreWebView2,
@@ -36,6 +50,15 @@ pub(super) fn install(
     let handler = WebResourceRequestedEventHandler::create(Box::new(move |_sender, args| {
         if let Err(error) = filter(args, &response, observed.as_ref()) {
             observed.failed(EventKind::Resource, error);
+            // The negative control deliberately reproduces the former swallowed
+            // failure. It exists only in the native qualification test binary.
+            #[cfg(test)]
+            if DENIAL_FIXTURE
+                .with(|mode| mode.get() == crate::ResourceDenialFixture::SwallowFailure)
+            {
+                return Ok(());
+            }
+            return Err(windows::core::Error::from_hresult(E_ABORT));
         }
         Ok(())
     }));
@@ -69,6 +92,10 @@ fn filter(
             selected,
             NativeAction::BlockResource,
         );
+        #[cfg(test)]
+        if DENIAL_FIXTURE.with(|mode| mode.get() != crate::ResourceDenialFixture::Normal) {
+            return Err(unavailable());
+        }
         // SAFETY: live event arguments and host-created denial response; COM
         // retains its own reference for this intercepted request.
         unsafe { args.SetResponse(response) }.map_err(|_| unavailable())?;

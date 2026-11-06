@@ -105,6 +105,14 @@ impl std::error::Error for NativeError {}
 
 pub(crate) type NativeResult<T> = Result<T, NativeError>;
 
+#[cfg(test)]
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum ResourceDenialFixture {
+    Normal,
+    SwallowFailure,
+    PropagateFailure,
+}
+
 /// Native extraction bounds the UTF-16 scan before allocation. This owned value
 /// additionally validates the length and encoding at the safe seam.
 #[derive(Clone, Eq, PartialEq)]
@@ -409,6 +417,12 @@ mod tests {
     #[test]
     fn native_owned_window_reads_owner_dpi() -> crate::NativeResult<()> {
         crate::Native::verify_owned_window_dpi()
+    }
+
+    #[test]
+    fn native_resource_denial_callback_failure_does_not_contact_listener(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        crate::Native::native_resource_denial_failure()
     }
 
     #[test]

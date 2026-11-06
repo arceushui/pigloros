@@ -43,7 +43,8 @@ EXPECTED_NATIVE = {'name': 'owner-bridge-windows',
                                              {'name': 'Test runtime-independent native adapter',
                                               'run': 'cargo test -p pos-owner-bridge-windows --all-features --locked -- '
                                                      '--include-ignored --skip tests::native_window_environment_and_buffers_lifecycle '
-                                                     '--skip tests::native_host_opens_fresh_environments_and_retires_before_reuse'},
+                                                     '--skip tests::native_host_opens_fresh_environments_and_retires_before_reuse '
+                                                     '--skip tests::native_resource_denial_callback_failure_does_not_contact_listener'},
                                              {'name': 'Prepare retained runtime for real native fixtures',
                                               'id': 'runtime',
                                               'shell': 'pwsh',
