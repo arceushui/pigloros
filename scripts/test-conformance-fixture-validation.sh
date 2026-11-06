@@ -212,6 +212,14 @@ replace_json "${air_gapped_flip_root}/matrix/execution-matrix.json" \
      .expected_result = {equal: true, first_divergence: null, nia1_content_digest: ("0" * 64)})'
 expect_rejection "${air_gapped_flip_root}" "invalid ADR-059 matrix inventory"
 
+# ADR-062 Revision 8 slice N4 (#1232): a G-FORK Air-Gapped case stays non-executed until N7.
+fork_air_gapped_flip_root="$(new_fixture_copy fork-air-gapped-matrix-flip)"
+replace_json "${fork_air_gapped_flip_root}/matrix/execution-matrix.json" \
+  '(.cases[] | select(.case_id == "NI-FORK-008-W-A")) |= (
+     .executed = true | .expected_result_digest = ("0" * 64) |
+     .expected_result = {equal: true, first_divergence: null, nia1_content_digest: ("0" * 64)})'
+expect_rejection "${fork_air_gapped_flip_root}" "invalid ADR-059 matrix inventory"
+
 archive_flip_root="$(new_fixture_copy archive-matrix-flip)"
 replace_json "${archive_flip_root}/matrix/execution-matrix.json" \
   '(.cases[] | select(.case_id == "NI-ARCHIVE-009-S-L")) |= (

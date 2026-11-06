@@ -26,11 +26,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import generate_non_interference_g_fork_fixtures as g_fork  # noqa: E402
 import generate_non_interference_g_plug_fixtures as g_plug  # noqa: E402
 import generate_non_interference_g_pub_fixtures as g_pub  # noqa: E402
 import non_interference_fixtures as shared  # noqa: E402
 
-ORACLES = (g_pub, g_plug)
+ORACLES = (g_pub, g_fork, g_plug)
 
 
 def main() -> None:

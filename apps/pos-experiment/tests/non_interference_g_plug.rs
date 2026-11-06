@@ -79,6 +79,10 @@ const MODES: [ExecutionModeV1; 4] = [
     ExecutionModeV1::Replay,
     ExecutionModeV1::Fork,
 ];
+/// Temporary (removed before review): the directory the matrix test exports
+/// one recorded run's NIA1 and control captures to.
+const EXPORT_ENV: &str = "PIGLOROS_NI_G_PLUG_EXPORT";
+
 fn fixtures_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/conformance")
 }
@@ -226,6 +230,47 @@ fn capture(
     )
 }
 
+/// Temporary (removed before review): export the executed NIA1 and every
+/// row's control captures of one recorded run.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn export(
+    directory: &Path,
+    executed: &BTreeMap<Coordinate, NonInterferenceSignedExecutionV1>,
+) -> TestResult {
+    let executions = directory.join("executions");
+    fs::create_dir_all(&executions)?;
+    for execution in executed.values() {
+        fs::write(
+            executions.join(format!("{}.nia1", hex(&execution.content_digest()))),
+            execution.canonical_bytes(),
+        )?;
+    }
+    let mut records = Vec::new();
+    for fixture_id in G_PLUG_FIXTURE_IDS_V1 {
+        for variant in VARIANTS {
+            let work = tempfile::tempdir()?;
+            let permitted = g_plug_permitted_input_v1(fixture_id, variant);
+            let captured = capture(
+                fixture_id,
+                variant,
+                &permitted,
+                G_PLUG_CONTROL_UNAUTHORIZED_V1,
+                work.path(),
+            )?;
+            records.push(json!({
+                "fixture_id": fixture_id,
+                "variant": format!("{variant:?}"),
+                "authoritative": captured.authoritative.iter().map(|value| hex(value)).collect::<Vec<_>>(),
+            }));
+        }
+    }
+    fs::write(
+        directory.join("control-captures.json"),
+        serde_json::to_vec_pretty(&records)?,
+    )?;
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Matrix
 // ---------------------------------------------------------------------------
@@ -268,6 +313,9 @@ fn every_g_plug_coordinate_executes_or_stays_typed_non_executed_and_matches_its_
     let work = tempfile::tempdir()?;
     let executed = execute_every_coordinate(work.path())?;
     assert_eq!(executed.len(), 48);
+    if let Ok(directory) = std::env::var(EXPORT_ENV) {
+        export(Path::new(&directory), &executed)?;
+    }
 
     let matrix = matrix()?;
     let checked_in = checked_in()?;
@@ -438,7 +486,7 @@ fn the_host_writes_the_unauthorized_value_only_to_its_own_record() -> TestResult
     Ok(())
 }
 
-/// The operational facet of every row's `Success` capture, exactly.
+/// The operational facet of every row's `Denial` capture, exactly.
 #[test]
 fn each_row_keeps_only_its_declared_operational_facet() -> TestResult {
     let directory = tempfile::tempdir()?;

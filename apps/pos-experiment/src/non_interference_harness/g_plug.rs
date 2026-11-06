@@ -989,7 +989,7 @@ fn capture_row(
                 .map(|descriptor| encode(&descriptor_record(&descriptor)))
                 .filter(|record| fs::write(&cache, record).is_ok())
         })
-        .zip(event_stream(events).map(|stream| encode(&stream)))
+        .zip(event_stream(events, None).map(|stream| encode(&stream)))
         .zip(rebuild(&host, row, run.variant, events))
         .and_then(|((descriptor, stream), rebuilt)| {
             let record = encode(&host_record(row, run, &rebuilt.state));

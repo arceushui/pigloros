@@ -44,19 +44,19 @@
 //! `origin` and signatures differ per run. So each surface replaces every
 //! run-local identity by its Timeline Order position or first-appearance
 //! ordinal:
-//! - Events by `seq`, entities by ordinal, and `causation_id` by the `seq`
-//!   it names.
+//! - Events by `seq`; entities by ordinal, the Timeline owner (when
+//!   present) first; `causation_id` by the `seq` it names; `correlation_id`
+//!   by its own first-appearance ordinal.
 //! - A cursor's inventory generation and Timeline by their ordinals.
 //!
-//! `wall_time`, `origin` and signatures are declared operational and are not
-//! captured. The subject's Events carry no `correlation_id`, signature or
-//! signature identity, so none is captured; the payload hash is the BLAKE3
-//! digest of the captured payload bytes. A test pins all four. A
-//! `causation_id` outside the captured stream refuses the capture.
-//! The seam import re-appends each Event's entity, type and payload; its
-//! schema version and causation are read back from the seam. Every other byte
-//! stays exact. Response lengths are exact, since a ULID's text always has the
-//! same width.
+//! `wall_time`, `origin`, signatures and signature identities are declared
+//! operational and are not captured; a test pins that the subject emits no
+//! signature. A `causation_id` outside the captured stream refuses the
+//! capture. The payload hash, the schema version and the Timeline name, mode
+//! and head are captured byte-exact. The seam import re-appends each Event's
+//! entity, type, payload and correlation; its schema version, causation and
+//! payload hash are read back from the seam. Every other byte stays exact.
+//! Response lengths are exact, since a ULID's text always has the same width.
 //!
 //! # Warm and cold
 //!
@@ -443,6 +443,22 @@ fn live_events(experiment: Experiment) -> Result<Vec<Event>, NonInterferenceNonE
 // Surfaces
 // ---------------------------------------------------------------------------
 
+/// The position-relative export: its Event stream and the export record
+/// `[name, mode, owner ordinal or null, head, stream]`.
+fn export_record(export: &TimelineExport) -> Option<(Value, Value)> {
+    let meta = &export.timeline.meta;
+    event_stream(&export.events, meta.owner).map(|stream| {
+        let record = Value::Array(vec![
+            text(meta.name.as_deref().unwrap_or_default()),
+            text(&format!("{:?}", meta.mode)),
+            meta.owner.map_or(Value::Null, |_| uint(0)),
+            uint(export.timeline.head.as_u64()),
+            stream.clone(),
+        ]);
+        (stream, record)
+    })
+}
+
 /// Whether the denied sibling is created before the subject Timeline.
 fn denied_first(unauthorized_value: &[u8]) -> bool {
     unauthorized_value.first().is_some_and(|byte| byte % 2 == 0)
@@ -499,7 +515,8 @@ fn evaluator_surfaces(
                 })
         })
         .and_then(|export| {
-            event_stream(&export.events).and_then(|stream| evaluator_records(run, &export, stream))
+            export_record(&export)
+                .and_then(|(stream, exported)| evaluator_records(run, &stream, &encode(&exported)))
         })
         .ok_or(NonInterferenceNonExecutedCauseV1::Unavailable)
 }
@@ -529,11 +546,13 @@ fn imported_timeline(
                 let drafts = events
                     .iter()
                     .map(|event| {
-                        EventDraft::new(
+                        let mut draft = EventDraft::new(
                             event.entity,
                             event.event_type.clone(),
                             event.payload.clone(),
-                        )
+                        );
+                        draft.correlation_id = event.correlation_id;
+                        draft
                     })
                     .collect::<Vec<_>>();
                 store
@@ -574,7 +593,7 @@ fn export_evaluation() -> Option<pos_core::ReplayClaimEvaluationV1> {
 /// The five `NI-EVAL-007` surfaces from the export and its Event stream.
 ///
 /// - Export bundle: the Event stream; publicly the export record
-///   `[name, head, stream]`; operationally its digest.
+///   `[name, mode, owner, head, stream]`; operationally its digest.
 /// - manifest: the bundle member table `[[name, size, digest]]`.
 /// - fixture descriptor: `[fixture id, variant, permitted-input digest,
 ///   subject Plugin id, Plugin name, Driver name]`.
@@ -583,17 +602,9 @@ fn export_evaluation() -> Option<pos_core::ReplayClaimEvaluationV1> {
 ///   stream.
 /// - `ConformanceReport`: the ordered case outcomes `[[case id, outcome,
 ///   payload digest]]`.
-fn evaluator_records(
-    run: &GPubRunV1<'_>,
-    export: &TimelineExport,
-    stream: Value,
-) -> Option<SurfacesV1> {
-    let stream_bytes = encode(&stream);
-    let exported = encode(&Value::Array(vec![
-        text(export.timeline.meta.name.as_deref().unwrap_or_default()),
-        uint(export.timeline.head.as_u64()),
-        stream,
-    ]));
+fn evaluator_records(run: &GPubRunV1<'_>, stream: &Value, exported: &[u8]) -> Option<SurfacesV1> {
+    let stream_bytes = encode(stream);
+    let exported = exported.to_vec();
     let manifest = encode(&Value::Array(vec![Value::Array(vec![
         text(G_PUB_EXPORT_MEMBER_V1),
         uint(exported.len() as u64),
@@ -1070,39 +1081,99 @@ mod tests {
             signature: None,
             signature_identity: None,
             origin: None,
-            payload_hash: Hash::from_bytes([0; 32]),
+            payload_hash: Hash::from_bytes([seq; 32]),
         }
+    }
+
+    fn row(seq: u64, entity: u64, cause: Value, correlation: Value, payload: u8) -> Value {
+        Value::Array(vec![
+            uint(seq),
+            uint(entity),
+            text(EVENT_TYPE_SIGNAL),
+            uint(1),
+            cause,
+            correlation,
+            Value::Bytes(vec![payload; 32]),
+            Value::Bytes(vec![payload]),
+        ])
     }
 
     #[test]
     fn the_event_stream_is_position_relative() {
         let first = event(1, 7, None);
-        let second = event(2, 9, Some(first.id));
-        let dangling = event(3, 7, Some(EventId::new()));
+        let mut second = event(2, 9, Some(first.id));
+        let mut third = event(3, 7, None);
+        let correlation = pos_core::ids::CorrelationId::new();
+        second.correlation_id = Some(correlation);
+        third.correlation_id = Some(correlation);
+        let mut fourth = event(4, 9, None);
+        fourth.correlation_id = Some(pos_core::ids::CorrelationId::new());
+        let dangling = event(5, 7, Some(EventId::new()));
         let expected = Value::Array(vec![
-            Value::Array(vec![
-                uint(1),
-                uint(0),
-                text(EVENT_TYPE_SIGNAL),
-                uint(1),
-                Value::Null,
-                Value::Bytes(vec![1]),
-            ]),
-            Value::Array(vec![
-                uint(2),
-                uint(1),
-                text(EVENT_TYPE_SIGNAL),
-                uint(1),
-                uint(1),
-                Value::Bytes(vec![2]),
-            ]),
+            row(1, 0, Value::Null, Value::Null, 1),
+            row(2, 1, uint(1), uint(0), 2),
+            row(3, 0, Value::Null, uint(0), 3),
+            row(4, 1, Value::Null, uint(1), 4),
         ]);
+        let stream = [first.clone(), second.clone(), third, fourth];
+        assert_eq!(event_stream(&stream, None), Some(expected));
+        // The Timeline owner takes entity ordinal 0.
+        let owner = EntityId::from_ulid(ulid::Ulid::from(9_u128));
         assert_eq!(
-            event_stream(&[first.clone(), second.clone()]),
-            Some(expected)
+            event_stream(&stream[..2], Some(owner)),
+            Some(Value::Array(vec![
+                row(1, 1, Value::Null, Value::Null, 1),
+                row(2, 0, uint(1), uint(0), 2),
+            ]))
+        );
+        // Signatures, wall time and first-commit origin are operational.
+        let mut signed = first.clone();
+        signed.signature = Some(pos_core::Signature::from_bytes([3; 64]));
+        signed.wall_time = WallTime::from_micros(99);
+        signed.id = EventId::new();
+        assert_eq!(
+            event_stream(&[signed], None),
+            event_stream(&[first.clone()], None)
         );
         // A cause outside the stream refuses the capture.
-        assert_eq!(event_stream(&[first, second, dangling]), None);
+        assert_eq!(event_stream(&[first, second, dangling], None), None);
+    }
+
+    #[test]
+    fn the_export_record_keeps_name_mode_owner_and_head() {
+        let owner = EntityId::from_ulid(ulid::Ulid::from(7_u128));
+        let export = |owner: Option<EntityId>| TimelineExport {
+            timeline: pos_core::timeline::Timeline {
+                meta: pos_core::timeline::TimelineMeta {
+                    id: TimelineId::new(),
+                    mode: pos_core::timeline::TimelineMode::Future,
+                    name: Some("subject".to_owned()),
+                    owner,
+                    fork_point: None,
+                },
+                head: Seq::from_u64(1),
+            },
+            events: vec![event(1, 7, None)],
+            parent_fork_hash: None,
+        };
+        let stream = Value::Array(vec![row(1, 0, Value::Null, Value::Null, 1)]);
+        let record = |owner: Value| {
+            Value::Array(vec![
+                text("subject"),
+                text("Future"),
+                owner,
+                uint(1),
+                stream.clone(),
+            ])
+        };
+        assert_eq!(
+            export_record(&export(Some(owner))),
+            Some((stream.clone(), record(uint(0))))
+        );
+        assert_eq!(
+            export_record(&export(None)),
+            Some((stream.clone(), record(Value::Null)))
+        );
     }
 
     #[test]

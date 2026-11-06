@@ -1,13 +1,13 @@
-# TEMPORARY (ADR-062 R8 slice N4, #1232; owner decision 2 of
-# ADR-062_R8_NonInterference_Executions): records one CI run of the G-FORK
+# TEMPORARY (ADR-062 R8 slice N2, #1230; owner decision 2 of
+# ADR-062_R8_NonInterference_Executions, applied by ADR-062_R8_NonInterference_Plugin): records one CI run of the G-PLUG
 # non-interference cases and uploads its NIA1 for check-in. Removed before the
 # pull request is ready.
-name: tmp-ni-g-fork-export
+name: tmp-ni-g-plug-export
 
 on:
   push:
     branches:
-      - redmine/1232-n4-gfork
+      - redmine/1230-n2-gplug
 
 permissions:
   contents: read
@@ -27,18 +27,18 @@ jobs:
           toolchain: 1.97.1
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
-          shared-key: tmp-ni-g-fork-export
-      - name: Record the G-FORK executions
+          shared-key: tmp-ni-g-plug-export
+      - name: Record the G-PLUG executions
         run: |
           set -uo pipefail
           mkdir -p "${RUNNER_TEMP}/ni-export"
-          PIGLOROS_NI_G_FORK_EXPORT="${RUNNER_TEMP}/ni-export" \
+          PIGLOROS_NI_G_PLUG_EXPORT="${RUNNER_TEMP}/ni-export" \
             cargo test -p pos-experiment --features test-support --locked \
-            --test non_interference_g_fork -- --test-threads=1 > "${RUNNER_TEMP}/ni-export/test.log" 2>&1 || true
+            --test non_interference_g_plug -- --test-threads=1 > "${RUNNER_TEMP}/ni-export/test.log" 2>&1 || true
           tail -n 60 "${RUNNER_TEMP}/ni-export/test.log"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
-          name: ni-g-fork-export
+          name: ni-g-plug-export
           path: ${{ runner.temp }}/ni-export
           if-no-files-found: error

@@ -8,7 +8,7 @@ use pos_conformance::{
     non_interference_surface_names_v1, NonInterferenceRawCaptureV1,
     NonInterferenceRawOperationalV1, NonInterferenceVariantV1,
 };
-use pos_core::Event;
+use pos_core::{EntityId, Event};
 
 /// Every runner replaces a capture's provenance digest with its own execution
 /// provenance; a capture adapter's placeholder is never compared.
@@ -80,11 +80,14 @@ pub(super) fn ordinal<T: PartialEq + Clone>(seen: &mut Vec<T>, value: &T) -> u64
 
 /// The position-relative record of an Event stream in Timeline Order:
 /// `[seq, entity ordinal, event type, schema version, causation seq or
-/// null, payload]` per Event. A cause outside the stream has no position, so
-/// the stream is refused (`None`): the authoritative field is never
-/// normalized to "no cause".
-pub(super) fn event_stream(events: &[Event]) -> Option<Value> {
-    let mut entities = Vec::new();
+/// null, correlation ordinal or null, payload hash, payload]` per Event.
+/// The Timeline `owner`, when present, takes entity ordinal 0. A cause
+/// outside the stream has no position, so the stream is refused (`None`):
+/// the authoritative field is never normalized to "no cause". Signatures and
+/// their identities are operational and are not captured.
+pub(super) fn event_stream(events: &[Event], owner: Option<EntityId>) -> Option<Value> {
+    let mut entities = owner.into_iter().collect::<Vec<_>>();
+    let mut correlations = Vec::new();
     events
         .iter()
         .map(|event| {
@@ -104,6 +107,10 @@ pub(super) fn event_stream(events: &[Event]) -> Option<Value> {
                     text(event.event_type.as_str()),
                     uint(u64::from(event.schema_version.as_u32())),
                     cause,
+                    event.correlation_id.map_or(Value::Null, |correlation| {
+                        uint(ordinal(&mut correlations, &correlation))
+                    }),
+                    Value::Bytes(event.payload_hash.as_bytes().to_vec()),
                     Value::Bytes(event.payload.as_slice().to_vec()),
                 ])
             })
