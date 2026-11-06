@@ -118,7 +118,25 @@ fn a_process_that_stays_present_leaves_the_surface_quarantined() -> TestResult {
     let (bytes, _) = record()?;
     rig.store.preload(bytes.clone());
     let mut probe = FakeProbe::new(vec![ProbeResult::Present]);
-    let outcome = restart(&mut rig, &mut probe);
+    let interval = Duration::from_secs(1);
+    assert_eq!(
+        rig.bridge.start_restart_check(&mut rig.store, &mut probe),
+        Ok(RestartProgress::Waiting {
+            wake: rig.clock.now() + interval
+        })
+    );
+    // Use the contract's fixed repeat count as the independent termination oracle.
+    for _ in 1..30 {
+        rig.clock.advance(interval);
+        assert_eq!(
+            rig.bridge.poll_restart_check(&mut rig.store, &mut probe),
+            Ok(RestartProgress::Waiting {
+                wake: rig.clock.now() + interval
+            })
+        );
+    }
+    rig.clock.advance(interval);
+    let outcome = rig.bridge.poll_restart_check(&mut rig.store, &mut probe);
     assert_eq!(
         outcome,
         Err(BridgeError::Quarantine(QuarantineCode::StaleProcessPresent))

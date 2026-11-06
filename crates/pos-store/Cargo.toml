@@ -10,7 +10,7 @@ publish.workspace = true
 [features]
 default = ["sqlite"]
 sqlite = ["dep:rusqlite"]
-# Exposes acceptance fixtures and protected owner/store admission. Never enable
+# Exposes acceptance fixtures and protected owner/store primitives. Never enable
 # this in a deployable dependency graph; CI enforces that policy.
 test-support = ["sqlite", "pos-core/test-support"]
 
@@ -29,12 +29,12 @@ rand = { workspace = true }
 thiserror = { workspace = true }
 zeroize = { workspace = true }
 
-# Linux-only: recipient-key custody uses openat2/renameat2 semantics (libc, rustix);
+# Linux-only: recipient custody and owner/store coordination use rustix semantics;
 # the trust policy registries read conformance snapshots (pos-conformance), which
 # fails to build elsewhere, so non-Linux builds expose no Plugin admission surface.
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = { workspace = true }
-rustix = { workspace = true }
+rustix = { workspace = true, features = ["process"] }
 pos-conformance = { path = "../pos-conformance" }
 
 [dev-dependencies]
@@ -65,6 +65,10 @@ required-features = ["test-support"]
 
 [[test]]
 name = "owner_store_admission_public"
+required-features = ["test-support"]
+
+[[test]]
+name = "owner_store_interlock_public"
 required-features = ["test-support"]
 
 [lints]

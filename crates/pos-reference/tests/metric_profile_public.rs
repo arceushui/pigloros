@@ -269,7 +269,12 @@ fn malformed_subcases_give_the_oracle_error_and_first_coordinate() -> TestResult
     for subcase in subcases("malformed")? {
         let entry = oracle.get(&subcase.id).ok_or("oracle entry")?;
         assert_eq!(text(entry, "kind")?, "metric-error");
-        let found = rejected(recompute_result_v1(&subcase.member))?;
+        let decoded = if subcase.record == "MTQ1" {
+            recompute_quantization_v1(&subcase.member)
+        } else {
+            recompute_result_v1(&subcase.member)
+        };
+        let found = rejected(decoded)?;
         expect_oracle_failure(&found, entry)?;
         expect_oracle_failure(&found, &subcase.expect)?;
         checked += 1;

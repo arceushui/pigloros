@@ -42,6 +42,9 @@ python3 "$ROOT/scripts/test_check_plugin_conformance_expected.py"
 echo "==> metric conformance fixtures match their independent generator"
 python3 "$ROOT/scripts/generate_metric_conformance_fixtures.py" --check
 
+echo "==> replay conformance fixtures match their independent generator"
+python3 "$ROOT/scripts/generate_replay_conformance_fixtures.py" --check
+
 echo "==> owner-bridge codec vectors match their independent generator"
 python3 "$ROOT/scripts/owner_bridge_vectors.py" --check
 
