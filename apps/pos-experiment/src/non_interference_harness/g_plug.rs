@@ -1120,7 +1120,7 @@ fn rebuild(
                         Err(error) => {
                             let record = Value::Array(vec![
                                 text("error"),
-                                text(&format!("{:?}", error.code)),
+                                text(guest_error_code(&error.code)),
                             ]);
                             rebuilt.outputs.push(record.clone());
                             rebuilt.errors.push(record);
@@ -1130,6 +1130,21 @@ fn rebuild(
                 })
             },
         )
+}
+
+/// The closed contract-v1 name of a guest error code, so the capture never
+/// depends on Rust `Debug` text.
+const fn guest_error_code(code: &PluginErrorCodeV1) -> &'static str {
+    match code {
+        PluginErrorCodeV1::InvalidInvocation(_) => "invalid-invocation",
+        PluginErrorCodeV1::UnsupportedSchema(_) => "unsupported-schema",
+        PluginErrorCodeV1::CapabilityRequired(_) => "capability-required",
+        PluginErrorCodeV1::DependencyMissing(_) => "dependency-missing",
+        PluginErrorCodeV1::DeterministicBudgetExhausted => "deterministic-budget-exhausted",
+        PluginErrorCodeV1::InvalidState(_) => "invalid-state",
+        PluginErrorCodeV1::MigrationRejected(_) => "migration-rejected",
+        PluginErrorCodeV1::GuestDeclaredFailure(_) => "guest-declared-failure",
+    }
 }
 
 /// Everything one row's surfaces are built from.
@@ -1173,10 +1188,21 @@ fn category_count(
 }
 
 impl ContextV1<'_> {
-    /// `[descriptor record bytes, [invocation...]]`.
+    /// `[descriptor record bytes, [Plugin name, Driver name],
+    /// [invocation...]]`: the guest's descriptor, the host composition that
+    /// invokes it, and every invocation.
     fn invocations(&self) -> Vec<u8> {
         encode(&Value::Array(vec![
             Value::Bytes(self.descriptor.clone()),
+            Value::Array(vec![
+                text(GPlugPlugin.name()),
+                text(
+                    GPlugDriver {
+                        observation: Vec::new(),
+                    }
+                    .name(),
+                ),
+            ]),
             Value::Array(self.rebuilt.invocations.clone()),
         ]))
     }
@@ -1365,5 +1391,54 @@ impl ContextV1<'_> {
             .map(|surface| NonInterferenceRawOperationalV1::ByteExact(surface.clone()))
             .collect();
         (surfaces, operational)
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+    use pos_runtime::community_plugin_host::FieldRefV1;
+
+    #[test]
+    fn every_guest_error_code_has_its_closed_contract_name() {
+        let at = FieldRefV1 {
+            schema_id: 1,
+            field_ordinal: 2,
+        };
+        let codes = [
+            (
+                PluginErrorCodeV1::InvalidInvocation(at),
+                "invalid-invocation",
+            ),
+            (
+                PluginErrorCodeV1::UnsupportedSchema(1),
+                "unsupported-schema",
+            ),
+            (
+                PluginErrorCodeV1::CapabilityRequired("ni.cap.tool".to_owned()),
+                "capability-required",
+            ),
+            (
+                PluginErrorCodeV1::DependencyMissing([1; 32]),
+                "dependency-missing",
+            ),
+            (
+                PluginErrorCodeV1::DeterministicBudgetExhausted,
+                "deterministic-budget-exhausted",
+            ),
+            (PluginErrorCodeV1::InvalidState(at), "invalid-state"),
+            (
+                PluginErrorCodeV1::MigrationRejected(at),
+                "migration-rejected",
+            ),
+            (
+                PluginErrorCodeV1::GuestDeclaredFailure(3),
+                "guest-declared-failure",
+            ),
+        ];
+        for (code, name) in codes {
+            assert_eq!(guest_error_code(&code), name);
+        }
     }
 }

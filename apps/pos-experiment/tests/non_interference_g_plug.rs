@@ -514,7 +514,11 @@ fn each_row_keeps_only_its_declared_operational_facet() -> TestResult {
         &mut migration,
     )?;
     assert_eq!(state.authoritative[0], migration);
-    assert!(contains(&state.authoritative[5], b"CapabilityRequired"));
+    assert!(contains(&state.authoritative[5], b"capability-required"));
+    // The host composition that invokes the guest is part of the capture.
+    for name in [&b"ni-g-plug"[..], b"ni-g-plug.driver"] {
+        assert!(contains(&state.authoritative[2], name));
+    }
 
     let (network, record) = run(G_PLUG_NET_FIXTURE_ID_V1)?;
     assert_eq!(

@@ -74,6 +74,8 @@ SURFACES = {
 TICKS = 2
 EVENT_TYPE = "ni.g-plug.output"
 GUEST_PLUGIN_ID = "ni.g-plug"
+PLUGIN_NAME = "ni-g-plug"
+DRIVER_NAME = "ni-g-plug.driver"
 WORLD = "pigloros:plugin/community-plugin"
 STATE_SCHEMA_TEXT = b"pigloros.ni.g-plug.state.v1"
 PROBE_PREFIX = b"ni.g-plug.probe:"
@@ -133,8 +135,7 @@ def rebuild(row: str, variant: str, payload: bytes, seqs: list[int]) -> dict:
     for ordinal, (seq, observation) in enumerate(calls, start=1):
         rebuilt["invocations"].append([ordinal, seq, b3(observation), b3(state)])
         if observation.startswith(PROBE_PREFIX):
-            capability = observation[len(PROBE_PREFIX) :].decode()
-            record = ["error", f'CapabilityRequired("{capability}")']
+            record = ["error", "capability-required"]
             rebuilt["outputs"].append(record)
             rebuilt["errors"].append(record)
         else:
@@ -154,7 +155,7 @@ def row_surfaces(row: str, variant: str) -> list[bytes]:
     # the subject Timeline has no owner, so the guest's entity takes ordinal 0.
     stream = cbor([[seq, 0, EVENT_TYPE, 1, None, None, b3(payload), payload] for seq in seqs])
     rebuilt = rebuild(row, variant, payload, seqs)
-    imports = cbor([descriptor_record(), rebuilt["invocations"]])
+    imports = cbor([descriptor_record(), [PLUGIN_NAME, DRIVER_NAME], rebuilt["invocations"]])
     outputs = cbor(rebuilt["outputs"])
     if row == TOOL:
         return [
@@ -209,7 +210,7 @@ def self_test() -> None:
     if rebuild(STATE, "success", b"\x01", [1])["state"] != b3(bytes(32) + b"\x01"):
         raise SystemExit("the reduce state chain is wrong")
     denial = rebuild(TOOL, "denial", b"\x01", [1, 2])
-    if denial["errors"] != [["error", 'CapabilityRequired("ni.cap.tool")']]:
+    if denial["errors"] != [["error", "capability-required"]]:
         raise SystemExit("the Denial probe is wrong")
     if [item[0] for item in denial["invocations"]] != [1, 2, 3]:
         raise SystemExit("the invocation ordinals are wrong")
