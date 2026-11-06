@@ -173,6 +173,13 @@ fn the_length_alignment_and_digest_come_first() {
             "{length}"
         );
     }
+    // A valid archive one byte too long, with a header where the end marker
+    // would start: only the alignment check refuses it.
+    let mut unaligned = archive(&members());
+    let end = unaligned.len() - 1024;
+    unaligned[end..end + 512].copy_from_slice(&header(b"x", 0, 0));
+    unaligned.push(0);
+    assert_eq!(import(&unaligned), Err(Error::InvalidEncoding));
     let bytes = archive(&members());
     let mut wrong = *blake3::hash(&bytes).as_bytes();
     wrong[0] ^= 0xff;
@@ -223,7 +230,7 @@ fn every_header_byte_is_canonical() {
         edited(|bytes| bytes[124] = b' '),
         Err(Error::InvalidEncoding)
     );
-    let oversized = header(b"RVA1", 7 * 512 + 1, 0);
+    let oversized = header(b"RVA1", 10 * 512 + 1, 0);
     assert_eq!(
         edited(|bytes| bytes[..512].copy_from_slice(&oversized)),
         Err(Error::InvalidEncoding)
@@ -288,6 +295,14 @@ fn names_follow_the_grammar_the_marker_and_the_order() {
     ] {
         assert_eq!(
             reordered(&[marker(), (name, vec![0]), end()]),
+            Err(Error::ClosureIncomplete),
+            "{name}"
+        );
+    }
+    // A repeated name outside the grammar fails the grammar first.
+    for name in ["events/1.cbor", "events/0000000000000000000a.cbor"] {
+        assert_eq!(
+            reordered(&[marker(), (name, vec![0]), (name, vec![0]), end()]),
             Err(Error::ClosureIncomplete),
             "{name}"
         );

@@ -273,6 +273,12 @@ fn refusal(error: RunEvidenceArchiveErrorV1) -> Value {
     Value::Array(vec![text("refused"), text(&format!("{error:?}"))])
 }
 
+/// The `Denial` probe's expected digest: byte 0 flipped by XOR with `0xff`.
+const fn wrong_digest(mut digest: [u8; 32]) -> [u8; 32] {
+    digest[0] ^= 0xff;
+    digest
+}
+
 fn exact(bytes: &[u8]) -> NonInterferenceRawOperationalV1 {
     NonInterferenceRawOperationalV1::ByteExact(bytes.to_vec())
 }
@@ -282,9 +288,10 @@ fn surfaces(variant: NonInterferenceVariantV1, count: usize, bytes: &[u8]) -> Su
     let archive_digest = digest(bytes);
     let mut imports = vec![import_run_evidence_archive_v1(bytes, &archive_digest)];
     if variant == NonInterferenceVariantV1::Denial {
-        let mut wrong = archive_digest;
-        wrong[0] ^= 0xff;
-        imports.push(import_run_evidence_archive_v1(bytes, &wrong));
+        imports.push(import_run_evidence_archive_v1(
+            bytes,
+            &wrong_digest(archive_digest),
+        ));
     }
     let outcomes = Value::Array(imports.iter().map(outcome).collect());
     let import_public = encode(&Value::Array(vec![
@@ -645,6 +652,13 @@ mod tests {
         let file = tempfile::NamedTempFile::new()?;
         assert!(stage(&file.path().join("staging"), b"\x02", &members).is_none());
         Ok(())
+    }
+
+    #[test]
+    fn the_wrong_digest_flips_byte_zero() {
+        let mut expected = [0x0f; 32];
+        expected[0] = 0xf0;
+        assert_eq!(wrong_digest([0x0f; 32]), expected);
     }
 
     #[test]

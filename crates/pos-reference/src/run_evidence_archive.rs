@@ -121,12 +121,14 @@ pub fn import_run_evidence_archive_v1(
 
 type Record<'a> = (&'a [u8], &'a [u8]);
 
-/// Steps 4 and 5: every record in archive order, then the end marker.
+/// Steps 4 and 5: every record in archive order up to the end marker, then
+/// the end marker.
 fn walk(bytes: &[u8]) -> ImportResult<Vec<Record<'_>>> {
     let end = bytes.len() - END_MARKER;
     let mut records: Vec<Record<'_>> = Vec::new();
     let mut cursor = 0;
-    while cursor < end && bytes[cursor..cursor + BLOCK].iter().any(|byte| *byte != 0) {
+    // A zero block before the end marker fails as a header.
+    while cursor < end {
         let block = &bytes[cursor..cursor + BLOCK];
         let start = cursor + BLOCK;
         let record = name_and_size(block)
@@ -160,7 +162,8 @@ fn walk(bytes: &[u8]) -> ImportResult<Vec<Record<'_>>> {
         records.push(record);
         cursor = start + padded;
     }
-    if bytes.len() - cursor == END_MARKER && bytes[cursor..].iter().all(|byte| *byte == 0) {
+    // Every record ends at or before `end`, so the walk stops exactly there.
+    if bytes[end..].iter().all(|byte| *byte == 0) {
         Ok(records)
     } else {
         Err(RunEvidenceArchiveErrorV1::InvalidEncoding)

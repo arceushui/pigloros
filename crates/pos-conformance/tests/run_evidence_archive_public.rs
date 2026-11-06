@@ -439,6 +439,14 @@ fn the_builder_refuses_names_duplicates_and_incomplete_closures() -> TestResult 
             "{name}"
         );
     }
+    // A repeated name outside the grammar fails the grammar first.
+    for name in ["events/1.cbor", "events/0000000000000000000a.cbor"] {
+        assert_eq!(
+            with(&[(name, vec![0]), (name, vec![0])], ""),
+            Err(Error::ClosureIncomplete),
+            "{name}"
+        );
+    }
     // The grammar is checked before duplicates, in sorted order.
     assert_eq!(
         with(&[("RVA1", MARKER.to_vec()), ("zz", vec![0])], ""),
@@ -595,7 +603,10 @@ fn the_builder_bounds_the_bytes_it_reads_and_the_archive_it_writes() -> TestResu
     // The bound is cumulative and sticky.
     let mut cumulative = RunEvidenceArchiveBuilderV1::new();
     cumulative.insert("bogus", vec![0; MAX].as_slice())?;
-    cumulative.insert("more", &[0][..])?;
+    // Past the bound one byte more is read, and no further.
+    let mut source: &[u8] = &[0; 10];
+    cumulative.insert("more", &mut source)?;
+    assert_eq!(source.len(), 9);
     cumulative.insert("after", Failing)?;
     assert_eq!(cumulative.finish(), Err(Error::FieldOutOfBounds));
     // An archive of exactly 1 MiB, and one block over.
