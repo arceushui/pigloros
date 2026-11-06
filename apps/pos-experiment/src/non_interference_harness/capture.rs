@@ -80,7 +80,8 @@ pub(super) fn ordinal<T: PartialEq + Clone>(seen: &mut Vec<T>, value: &T) -> u64
 
 /// The position-relative record of an Event stream in Timeline Order:
 /// `[seq, entity ordinal, event type, schema version, causation seq or
-/// null, correlation ordinal or null, payload hash, payload]` per Event.
+/// null, correlation ordinal or null, payload, payload hash]` per Event,
+/// the ADR-127 section 2 Event record.
 /// The Timeline `owner`, when present, takes entity ordinal 0. A cause
 /// outside the stream has no position, so the stream is refused (`None`):
 /// the authoritative field is never normalized to "no cause". Signatures and
@@ -110,8 +111,8 @@ pub(super) fn event_stream(events: &[Event], owner: Option<EntityId>) -> Option<
                     event.correlation_id.map_or(Value::Null, |correlation| {
                         uint(ordinal(&mut correlations, &correlation))
                     }),
-                    Value::Bytes(event.payload_hash.as_bytes().to_vec()),
                     Value::Bytes(event.payload.as_slice().to_vec()),
+                    Value::Bytes(event.payload_hash.as_bytes().to_vec()),
                 ])
             })
         })
