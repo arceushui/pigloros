@@ -103,9 +103,9 @@ def permitted_input(row: str, variant: str) -> bytes:
 
 def stream() -> bytes:
     """`[seq, entity ordinal, event type, schema version, causation seq, correlation ordinal,
-    payload, payload hash]` (the ADR-127 Event record) of the one subject Event: seq 1; the subject Timeline has no owner,
-    so the one entity has ordinal 0; no cause or correlation; the payload hash is the BLAKE3
-    digest of the payload."""
+    payload, payload hash]` (the ADR-127 Event record) of the one subject Event: seq 1; the
+    subject Timeline has no owner, so the one entity has ordinal 0; no cause or correlation; the
+    payload hash is the BLAKE3 digest of the payload."""
     return cbor([[1, 0, EVENT_TYPE, 1, None, None, EVENT_PAYLOAD, b3(EVENT_PAYLOAD)]])
 
 
