@@ -8,6 +8,9 @@ use std::sync::{Arc, Mutex};
 mod files;
 mod io;
 
+#[cfg(test)]
+mod tests;
+
 /// A synchronized handle to the same cleanup store used by the surface STA.
 ///
 /// `OwnerBridge` uses a clone for restart admission. A poisoned lock refuses every

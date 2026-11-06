@@ -207,10 +207,9 @@ impl CleanupStore for Files {
         let path = self.root.join(name);
         match fs::symlink_metadata(&path) {
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
-            Err(_) => return Err(CleanupError),
             Ok(metadata)
                 if metadata.is_dir() && metadata.file_attributes() & REPARSE_POINT == 0 => {}
-            Ok(_) => return Err(CleanupError),
+            _ => return Err(CleanupError),
         }
         // The fixed root/name were qualified above. The standard library's
         // recursive removal does not follow symbolic links within the tree.
