@@ -9,7 +9,7 @@
 //! the adapter's exact `FixtureExecutorV1` declaration, and executes each dispatched case
 //! through the EAI1/EAO1 byte codec of the Plugin conformance adapter: every pass launches a
 //! fresh `pos-plugin-worker` process. The evaluator's CNR1 report is the verifier verdict.
-//! Local and Air-Gapped are both ExecutionProfile runs and Local-relaxation engineering
+//! Local and Air-Gapped are both `ExecutionProfile` runs and Local-relaxation engineering
 //! evidence (ADR-062 Revision 8 Q6 and Q10); kernel-audited Air-Gapped is slice N7.
 //!
 //! A family's evidence-status record is `executed` exactly when its case passes in both runs;
@@ -61,7 +61,7 @@ const BUDGET_COUNTERS: [&str; 8] = [
     "execution_steps",
     "simulation_time_ns",
 ];
-/// The two ExecutionProfile runs: the CFB1 mode code and its record name.
+/// The two `ExecutionProfile` runs: the CFB1 mode code and its record name.
 const MODES: [(u64, &str); 2] = [(0, "local"), (1, "air-gapped")];
 
 fn fixture_root() -> PathBuf {
