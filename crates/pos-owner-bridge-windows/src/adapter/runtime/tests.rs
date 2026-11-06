@@ -5,7 +5,8 @@ use std::fs::{File, FileTimes};
 use std::os::windows::ffi::OsStringExt;
 use std::os::windows::fs::symlink_file;
 use std::process::Command;
-use std::time::{Duration, SystemTime};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::*;
 
@@ -22,7 +23,16 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Result<Self, std::io::Error> {
-        let base = std::env::temp_dir().join(format!("piglor-runtime-{}", std::process::id()));
+        static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+        let base = std::env::temp_dir().join(format!(
+            "piglor-runtime-{}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(std::io::Error::other)?
+                .as_nanos(),
+            SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
         std::fs::create_dir(&base)?;
         let runtime = base.join("runtime");
         std::fs::create_dir(&runtime)?;

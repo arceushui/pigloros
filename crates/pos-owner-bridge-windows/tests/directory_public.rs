@@ -3,6 +3,8 @@
 
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use pos_owner_bridge_windows::{create_private_directory, verify_private_directory};
 
@@ -12,7 +14,16 @@ struct Fixture(PathBuf);
 
 impl Fixture {
     fn new() -> Result<Self, std::io::Error> {
-        let root = std::env::temp_dir().join(format!("piglor-private-dir-{}", std::process::id()));
+        static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "piglor-private-dir-{}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(std::io::Error::other)?
+                .as_nanos(),
+            SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
         std::fs::create_dir(&root)?;
         Ok(Self(root))
     }

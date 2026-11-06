@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use pos_owner_bridge::fake::clock::FakeClock;
 use pos_owner_bridge::fake::host::{FakeLoopback, FakeStore};
@@ -35,8 +35,9 @@ impl Fixture {
         static SEQUENCE: AtomicU64 = AtomicU64::new(0);
         let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let root = std::env::temp_dir().join(format!(
-            "owner-retirement-{}-{sequence}",
-            std::process::id()
+            "owner-retirement-{}-{}-{sequence}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
         ));
         crate::create_private_directory(&root)?;
         let clock = FakeClock::start();

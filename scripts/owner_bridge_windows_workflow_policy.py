@@ -40,9 +40,9 @@ EXPECTED_NATIVE = {'name': 'owner-bridge-windows',
                                                      'pos-owner-bridge --all-features '
                                                      '--all-targets --locked -- -D warnings -W '
                                                      'clippy::pedantic'},
-                                             {'name': 'Test safe controller-retirement regressions',
-                                              'run': 'cargo test -p pos-owner-bridge-windows --all-features --locked '
-                                                     'adapter::surface::tests:: -- --include-ignored'},
+                                             {'name': 'Test runtime-independent native adapter',
+                                              'run': 'cargo test -p pos-owner-bridge-windows --all-features --locked -- '
+                                                     '--include-ignored --skip tests::native_window_environment_and_buffers_lifecycle'},
                                              {'name': 'Prepare retained runtime for real native fixtures',
                                               'id': 'runtime',
                                               'shell': 'pwsh',
