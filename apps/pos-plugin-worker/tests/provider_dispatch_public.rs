@@ -29,12 +29,14 @@ use pos_reference::evaluator::{
 };
 use pos_reference::evaluator_build_identity::VerifiedEvaluatorBuildIdentity;
 use pos_reference::evaluator_protocol::{
-    CaseOutcome, CaseStatus, ConformanceReport, SubjectAdapterKind,
+    CaseOutcome, CaseStatus, ConformanceReport, EvaluationRequest, SubjectAdapterKind,
 };
+use pos_reference::profile::Profile;
 use pos_reference::selector_test_support::{
     real_plugin_corpus, verified_evaluator_identity, Corpus, RealFamilyMembers,
     RealProviderFixtures,
 };
+use pos_reference::signed_bundle::verify_signed_bundle;
 use serde_json::{json, Value};
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
@@ -192,6 +194,12 @@ fn evaluate_corpus(
     corpus: &Corpus,
     executors: &[FixtureExecutorV1],
 ) -> TestResult<(ConformanceReport, usize)> {
+    // Name the inner bundle or profile failure, which `evaluate` folds into one closed error.
+    let request = EvaluationRequest::from_canonical_cbor(&corpus.request)?;
+    let bundle = verify_signed_bundle(&corpus.archive, &corpus.trust_policy, &request)
+        .map_err(|error| format!("the corpus bundle is invalid: {error:?}"))?;
+    Profile::from_bundle(&bundle, &request)
+        .map_err(|error| format!("the corpus profile is invalid: {error:?}"))?;
     let mut subject = WorkerSubject::new(corpus)?;
     let report = evaluate(
         &corpus.request,

@@ -3178,7 +3178,7 @@ fn archive(
         })
         .collect();
     let expected = (0_u64..=6)
-        .map(|family| -> TestResult<(Vec<u8>, Value)> {
+        .map(|family| -> TestResult<((String, Vec<u8>), Value)> {
             let case_id = options.case_id(family)?;
             let path = format!("fixtures/case-{family}.expected");
             let value = array(vec![
@@ -3193,10 +3193,12 @@ fn archive(
                         .map_or(expected_output_digest, |(member, _)| hash(member)),
                 ),
             ]);
-            Ok((canonical(&value)?, value))
+            Ok(((case_id, canonical(&value)?), value))
         })
         .collect::<TestResult<Vec<_>>>()?;
     let mut expected = expected;
+    // CFB1 orders expected results by case ID text, then the rest of the key; the
+    // canonical CBOR bytes alone would order a shorter case ID first.
     expected.sort_by(|left, right| left.0.cmp(&right.0));
     let expected: Vec<Value> = expected.into_iter().map(|(_, value)| value).collect();
     let mut manifest = array(vec![
