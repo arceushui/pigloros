@@ -131,9 +131,11 @@ fn the_output_usage_is_copied_into_staged_and_committed_only() {
         Verdict::Staged { output_usage, .. } | Verdict::Committed { output_usage, .. } => {
             output_usage
         }
-        Verdict::Refused { .. } | Verdict::Failed { .. } | Verdict::NotRun | Verdict::Discarded => {
-            None
-        }
+        Verdict::Refused { .. }
+        | Verdict::Trapped { .. }
+        | Verdict::Failed { .. }
+        | Verdict::NotRun
+        | Verdict::Discarded => None,
     };
     for disposition in [
         ReceiptDispositionV1::Staged,

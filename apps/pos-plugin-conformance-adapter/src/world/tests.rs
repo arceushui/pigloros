@@ -1565,6 +1565,28 @@ fn the_outcome_record_encoding_has_a_golden() {
     );
 }
 
+/// ADR-061 R13: a trap is `["Trapped", trap_class, class]` in the version-2 record.
+#[test]
+fn a_trapped_result_encodes_its_trap_class_and_host_class() {
+    let record = CommunityPluginSubjectOutcomeV1 {
+        tick: 0,
+        ..outcome(
+            Result1::Trapped {
+                trap_class: "unreachable",
+                class: "Operational",
+            },
+            false,
+        )
+    };
+    assert_eq!(
+        hex::encode(&outcome_bytes_of(&record)),
+        concat!(
+            "8b64504f4231026170f6f6f6f60000008367547261707065646b756e72656163",
+            "6861626c656b4f7065726174696f6e616c",
+        )
+    );
+}
+
 fn full_digests(
     result: Result1,
     tick: u64,
@@ -1664,16 +1686,6 @@ fn every_result_of_the_outcome_record_has_its_encoding() {
             concat!(
                 "8b64504f4231026170f6f6f6f600000083664661696c65646d4675656c457868",
                 "6175737465646d417574686f7269746174697665",
-            ),
-        ),
-        (
-            Result1::Trapped {
-                trap_class: "unreachable",
-                class: "Operational",
-            },
-            concat!(
-                "8b64504f4231026170f6f6f6f60000008367547261707065646b756e72656163",
-                "6861626c656b4f7065726174696f6e616c",
             ),
         ),
         (
