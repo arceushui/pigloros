@@ -50,13 +50,17 @@
 //!
 //! [`record_fork_v1`] also returns the run's recorded Event Store as a
 //! [`RecordedForkV1`]. [`replay_recorded_fork_v1`] rebuilds the export from
-//! that store alone: it reads the committed generation's receipt, reads the
+//! that store and the recorded run's host inputs: it reads the committed
+//! generation's receipt, reads the
 //! `RCF1` and `SIV1` back with `read_generation_artifact`, and has the
 //! coordinator recover every `RCP1` and the `CFR1` from the committed Fork
 //! Events. A complete generation stages nothing, so no Driver runs and no
 //! Event is appended; its stager declares no provisional Tick, so a Tick it
 //! were asked to stage would be an empty batch, which the coordinator
-//! refuses. The `INT1` and `CFP1` are the recorded run's plan.
+//! refuses. Only the host inputs come from the recorded run rather than the
+//! store: the `INT1` and `CFP1` are the recorded run's plan, and the `CFR1`
+//! result id, its evaluator identity and the export's uncompared metadata
+//! (factual head, Drivers, provisional edges) are the run's.
 //!
 //! # No factual-suffix splicing
 //!
@@ -355,8 +359,9 @@ pub fn run_fork_v1(
     record_fork_v1(fixture, mode).map(|(export, _)| export)
 }
 
-/// Rebuild the export of a recorded run from its Event Store alone (see the
-/// module documentation): no Driver runs and no Event is appended.
+/// Rebuild the export of a recorded run from its Event Store and its host
+/// inputs (see the module documentation): no Driver runs and no Event is
+/// appended.
 ///
 /// # Errors
 /// Returns [`ForkRunErrorV1::Host`] when the store holds no committed
