@@ -225,9 +225,11 @@ fn stage(
         })
 }
 
-/// The 512-byte header blocks, found by stepping over each header's declared
-/// padded size, up to an all-zero block, the end of the input or a size field
-/// that is not 11 octal digits.
+/// The 512-byte header blocks of an archive.
+///
+/// They are found by stepping over each header's declared padded size, up
+/// to an all-zero block, the end of the input or a size field that is not 11
+/// octal digits.
 fn header_walk(bytes: &[u8]) -> Vec<u8> {
     let mut walk = Vec::new();
     let mut cursor = 0;
@@ -342,9 +344,10 @@ fn surfaces(variant: NonInterferenceVariantV1, count: usize, bytes: &[u8]) -> Su
     }
 }
 
-/// The member table `[[name, mode, size, digest]...]`, the bundle `[[name,
-/// data]...]` and the digests `[archive digest, [member digests]]` of an
-/// admitted archive.
+/// The records of an admitted archive.
+///
+/// They are the member table `[[name, mode, size, digest]...]`, the bundle
+/// `[[name, data]...]` and the digests `[archive digest, [member digests]]`.
 fn imported_records(
     archive_digest: &[u8; 32],
     imported: &ImportedRunEvidenceArchiveV1,

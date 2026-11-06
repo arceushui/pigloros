@@ -120,10 +120,11 @@ fn ordinal<T: PartialEq + Copy>(seen: &mut Vec<T>, value: T) -> u64 {
     position as u64
 }
 
-/// The position-relative records of an Event stream, one canonical CBOR
-/// array per Event, in stream order (ADR-127 section 2):
-/// `[seq, entity ordinal, event type, schema version, causation seq or
-/// null, correlation ordinal or null, payload, payload hash]`.
+/// The position-relative records of an Event stream (ADR-127 section 2).
+///
+/// One canonical CBOR array per Event, in stream order: `[seq, entity
+/// ordinal, event type, schema version, causation seq or null, correlation
+/// ordinal or null, payload, payload hash]`.
 ///
 /// Entities are numbered by first appearance, the Timeline `owner` (when
 /// present) first; correlations by first appearance in their own table; a
@@ -249,8 +250,9 @@ impl RunEvidenceArchiveBuilderV1 {
         Self::default()
     }
 
-    /// Read one member from `source`. The builder keeps a running total of
-    /// the bytes read; once it passes 1 MiB, no further byte is read and
+    /// Read one member from `source`.
+    ///
+    /// The builder keeps a running total of the bytes read; once it passes 1 MiB, no further byte is read and
     /// [`Self::finish`] reports `FieldOutOfBounds`. A duplicate name is kept
     /// for [`Self::finish`] to report.
     ///
