@@ -174,6 +174,10 @@ fn complete_pending_recovers_but_partial_and_oversized_records_quarantine() -> T
             store.records()?[0].len(),
             bytes.len().min(MAX_CLEANUP_RECORD_BYTES + 1)
         );
+        if bytes.len() > MAX_CLEANUP_RECORD_BYTES {
+            let observed = store.records()?.remove(0);
+            assert!(store.delete_record(&observed).is_err());
+        }
         let mut probe = FakeProbe::new(vec![]);
         let result = restart(&mut store, &mut probe);
         if bytes == record(4)? {
@@ -199,6 +203,16 @@ fn collisions_sharing_and_changed_deletion_content_preserve_metadata() -> TestRe
     let mut store = WindowsCleanupStore::open(fixture.0.clone())?;
     let bytes = record(5)?;
     assert!(store.write_record(b"malformed").is_err());
+    let foreign_folder = cleanup_record_bytes(
+        CeremonyId::from_bytes([1; 16]),
+        &name(2),
+        &ProcessIdentity {
+            browser_pid: 42,
+            creation_filetime: 1,
+            image_path_sha256: ImagePathSha256::from_bytes([7; 32]),
+        },
+    )?;
+    assert!(store.write_record(&foreign_folder).is_err());
     store.write_record(&bytes)?;
     assert!(store.write_record(&bytes).is_err());
     assert_eq!(fs::read(fixture.record_path(5, "pbcr"))?, bytes);
@@ -213,10 +227,47 @@ fn collisions_sharing_and_changed_deletion_content_preserve_metadata() -> TestRe
     assert!(store.delete_record(&bytes).is_err());
     drop(held);
     assert_eq!(store.records()?, vec![bytes.clone()]);
-    fs::write(&path, b"changed")?;
+    let mut changed = bytes.clone();
+    changed[0] ^= 1;
+    fs::write(&path, &changed)?;
     assert!(store.delete_record(&bytes).is_err());
-    assert_eq!(fs::read(&path)?, b"changed");
+    assert_eq!(fs::read(&path)?, changed);
     assert!(store.remove_folder("../escape").is_err());
+    Ok(())
+}
+
+#[test]
+fn weakened_root_or_record_directory_refuses_constructor_and_live_operations() -> TestResult {
+    for records in [false, true] {
+        let fixture = Fixture::new()?;
+        let mut store = WindowsCleanupStore::open(fixture.0.clone())?;
+        let bytes = record(10)?;
+        store.write_record(&bytes)?;
+        let path = if records {
+            fixture.0.join("records")
+        } else {
+            fixture.0.clone()
+        };
+        let broadened = Command::new("icacls.exe")
+            .arg(&path)
+            .args(["/grant", "*S-1-1-0:(RX)"])
+            .output()?;
+        assert!(broadened.status.success());
+        assert!(WindowsCleanupStore::open(fixture.0.clone()).is_err());
+        assert!(store.records().is_err());
+        assert!(store.folders().is_err());
+        assert!(store.write_record(&record(11)?).is_err());
+        assert!(store.remove_folder(&name(10)).is_err());
+        assert!(store.delete_record(&bytes).is_err());
+        assert!(fixture.record_path(10, "pbcr").exists());
+        let restored = Command::new("icacls.exe")
+            .arg(&path)
+            .args(["/remove:g", "*S-1-1-0"])
+            .output()?;
+        assert!(restored.status.success());
+        assert_eq!(store.records()?, vec![bytes.clone()]);
+        store.delete_record(&bytes)?;
+    }
     Ok(())
 }
 
@@ -239,8 +290,10 @@ fn recognized_directory_and_malformed_names_refuse_whole_store_scan() -> TestRes
     assert!(store.records().is_err());
     fs::remove_dir(directory)?;
     fs::write(fixture.0.join("records/notes.txt"), b"not a cleanup record")?;
+    fs::write(fixture.0.join("records/notes"), b"no recognized suffix")?;
     assert!(store.records()?.is_empty());
     assert!(WindowsCleanupStore::open(Path::new("relative").to_path_buf()).is_err());
+    assert!(WindowsCleanupStore::open(fixture.0.join("..")).is_err());
     assert!(WindowsCleanupStore::open(Path::new(r"\\server\share\state").to_path_buf()).is_err());
     assert!(WindowsCleanupStore::open(Path::new(r"\\.\pipe\state").to_path_buf()).is_err());
     Ok(())

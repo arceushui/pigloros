@@ -1,9 +1,9 @@
 #![cfg(windows)]
 #![forbid(unsafe_code)]
 
-use std::fs::{File, OpenOptions};
+use std::fs::{self, File, Metadata, OpenOptions};
 use std::io::{self, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use pos_owner_bridge_codec::MAX_CLEANUP_RECORD_BYTES;
 
@@ -16,6 +16,12 @@ pub(super) trait FileIo: Send {
     fn flush(&self, file: &File) -> io::Result<()>;
     fn publish(&self, pending: &Path, committed: &Path) -> io::Result<()>;
     fn read(&self, file: &mut File) -> io::Result<Vec<u8>>;
+    fn metadata(&self, file: &File) -> io::Result<Metadata>;
+    fn inspect(&self, path: &Path) -> io::Result<Metadata>;
+    fn entries(&self, path: &Path) -> io::Result<Vec<PathBuf>>;
+    fn create_directory(&self, path: &Path) -> io::Result<()>;
+    fn remove_file(&self, path: &Path) -> io::Result<()>;
+    fn remove_tree(&self, path: &Path) -> io::Result<()>;
 }
 
 pub(super) struct OsIo;
@@ -44,6 +50,26 @@ impl FileIo for OsIo {
         file.take((MAX_CLEANUP_RECORD_BYTES + 1) as u64)
             .read_to_end(&mut bytes)?;
         Ok(bytes)
+    }
+    fn metadata(&self, file: &File) -> io::Result<Metadata> {
+        file.metadata()
+    }
+    fn inspect(&self, path: &Path) -> io::Result<Metadata> {
+        fs::symlink_metadata(path)
+    }
+    fn entries(&self, path: &Path) -> io::Result<Vec<PathBuf>> {
+        fs::read_dir(path)?
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect()
+    }
+    fn create_directory(&self, path: &Path) -> io::Result<()> {
+        crate::create_private_directory(path).map_err(io::Error::other)
+    }
+    fn remove_file(&self, path: &Path) -> io::Result<()> {
+        fs::remove_file(path)
+    }
+    fn remove_tree(&self, path: &Path) -> io::Result<()> {
+        fs::remove_dir_all(path)
     }
 }
 

@@ -2,7 +2,7 @@
 #![forbid(unsafe_code)]
 
 use std::collections::BTreeMap;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{File, OpenOptions};
 use std::io::ErrorKind;
 use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Component, Path, PathBuf, Prefix};
@@ -37,10 +37,10 @@ impl Files {
         crate::verify_private_directory(&root).map_err(|_| CleanupError)?;
         io.qualify_path(&root).map_err(|_| CleanupError)?;
         let records = root.join("records");
-        match fs::symlink_metadata(&records) {
+        match io.inspect(&records) {
             Ok(_) => crate::verify_private_directory(&records).map_err(|_| CleanupError)?,
             Err(error) if error.kind() == ErrorKind::NotFound => {
-                crate::create_private_directory(&records).map_err(|_| CleanupError)?;
+                io.create_directory(&records).map_err(|_| CleanupError)?;
             }
             Err(_) => return Err(CleanupError),
         }
@@ -88,7 +88,7 @@ impl Files {
                     .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0),
             )
             .map_err(|_| CleanupError)?;
-        let metadata = file.metadata().map_err(|_| CleanupError)?;
+        let metadata = self.io.metadata(&file).map_err(|_| CleanupError)?;
         if !metadata.is_file() || metadata.file_attributes() & REPARSE_POINT != 0 {
             return Err(CleanupError);
         }
@@ -129,7 +129,7 @@ impl CleanupStore for Files {
             .publish(&pending, &committed)
             .map_err(|_| CleanupError)?;
         let (observed, length) = self.read_path(&committed)?;
-        if observed != bytes || length != bytes.len() as u64 {
+        if length != bytes.len() as u64 || observed != bytes {
             return Err(CleanupError);
         }
         self.provenance
@@ -143,8 +143,7 @@ impl CleanupStore for Files {
         self.admit()?;
         let mut listed = Vec::new();
         let mut provenance: BTreeMap<Vec<u8>, Vec<PathBuf>> = BTreeMap::new();
-        for entry in fs::read_dir(&self.records).map_err(|_| CleanupError)? {
-            let path = entry.map_err(|_| CleanupError)?.path();
+        for path in self.io.entries(&self.records).map_err(|_| CleanupError)? {
             if !recognized_record(&path)? {
                 continue;
             }
@@ -162,13 +161,13 @@ impl CleanupStore for Files {
         let paths = self.provenance.get(bytes).ok_or(CleanupError)?;
         let mut candidates = Vec::new();
         for path in paths {
-            match fs::symlink_metadata(path) {
+            match self.io.inspect(path) {
                 Err(error) if error.kind() == ErrorKind::NotFound => continue,
                 Err(_) => return Err(CleanupError),
                 Ok(_) => {}
             }
             let (observed, length) = self.read_path(path)?;
-            if observed != bytes || length != bytes.len() as u64 {
+            if length != bytes.len() as u64 || observed != bytes {
                 return Err(CleanupError);
             }
             candidates.push(path);
@@ -176,7 +175,7 @@ impl CleanupStore for Files {
         let [path] = candidates.as_slice() else {
             return Err(CleanupError);
         };
-        fs::remove_file(path).map_err(|_| CleanupError)?;
+        self.io.remove_file(path).map_err(|_| CleanupError)?;
         self.provenance.remove(bytes);
         Ok(())
     }
@@ -184,13 +183,15 @@ impl CleanupStore for Files {
     fn folders(&mut self) -> Result<Vec<String>> {
         self.admit()?;
         let mut folders = Vec::new();
-        for entry in fs::read_dir(&self.root).map_err(|_| CleanupError)? {
-            let entry = entry.map_err(|_| CleanupError)?;
-            let name = entry.file_name();
-            let Some(name) = name.to_str().filter(|name| ceremony_name(name)) else {
+        for path in self.io.entries(&self.root).map_err(|_| CleanupError)? {
+            let Some(name) = path
+                .file_name()
+                .and_then(std::ffi::OsStr::to_str)
+                .filter(|name| ceremony_name(name))
+            else {
                 continue;
             };
-            let metadata = fs::symlink_metadata(entry.path()).map_err(|_| CleanupError)?;
+            let metadata = self.io.inspect(&path).map_err(|_| CleanupError)?;
             if !metadata.is_dir() || metadata.file_attributes() & REPARSE_POINT != 0 {
                 return Err(CleanupError);
             }
@@ -205,7 +206,7 @@ impl CleanupStore for Files {
         }
         self.admit()?;
         let path = self.root.join(name);
-        match fs::symlink_metadata(&path) {
+        match self.io.inspect(&path) {
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
             Ok(metadata)
                 if metadata.is_dir() && metadata.file_attributes() & REPARSE_POINT == 0 => {}
@@ -213,7 +214,7 @@ impl CleanupStore for Files {
         }
         // The fixed root/name were qualified above. The standard library's
         // recursive removal does not follow symbolic links within the tree.
-        fs::remove_dir_all(path).map_err(|_| CleanupError)
+        self.io.remove_tree(&path).map_err(|_| CleanupError)
     }
 }
 

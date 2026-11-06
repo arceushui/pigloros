@@ -1,7 +1,7 @@
 #![cfg(windows)]
 #![forbid(unsafe_code)]
 
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File, Metadata, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
@@ -70,9 +70,17 @@ enum Fault {
     PublishSourceOnly,
     PublishFinalOnly,
     PublishBoth,
+    PublishChangedSize,
     Read,
     ChangedReadback,
     Pause(Stage),
+    Metadata,
+    NotRegular,
+    Inspect(usize),
+    Entries(usize),
+    CreateDirectory,
+    RemoveFile,
+    RemoveTree,
 }
 
 struct Effects {
@@ -81,6 +89,10 @@ struct Effects {
     opens: AtomicUsize,
     volumes: AtomicUsize,
     reads: AtomicUsize,
+    inspections: AtomicUsize,
+    listings: AtomicUsize,
+    file_removals: AtomicUsize,
+    tree_removals: AtomicUsize,
 }
 
 impl Effects {
@@ -91,6 +103,10 @@ impl Effects {
             opens: AtomicUsize::new(0),
             volumes: AtomicUsize::new(0),
             reads: AtomicUsize::new(0),
+            inspections: AtomicUsize::new(0),
+            listings: AtomicUsize::new(0),
+            file_removals: AtomicUsize::new(0),
+            tree_removals: AtomicUsize::new(0),
         }
     }
 
@@ -178,6 +194,12 @@ impl FileIo for Effects {
             _ => {}
         }
         OsIo.publish(pending, committed)?;
+        if matches!(self.fault, Fault::PublishChangedSize) {
+            OpenOptions::new()
+                .append(true)
+                .open(committed)?
+                .write_all(&[0])?;
+        }
         if matches!(self.fault, Fault::PublishFinalOnly) {
             return Err(failure());
         }
@@ -195,6 +217,50 @@ impl FileIo for Effects {
         }
         self.checkpoint(Stage::Readback)?;
         Ok(bytes)
+    }
+
+    fn metadata(&self, file: &File) -> io::Result<Metadata> {
+        match self.fault {
+            Fault::Metadata => Err(failure()),
+            // Narrow impossible-state injection: an opened record must never
+            // be admitted if its observed native type is not a regular file.
+            Fault::NotRegular => fs::metadata(&self.root),
+            _ => OsIo.metadata(file),
+        }
+    }
+    fn inspect(&self, path: &Path) -> io::Result<Metadata> {
+        let call = self.inspections.fetch_add(1, Ordering::Relaxed) + 1;
+        if matches!(self.fault, Fault::Inspect(selected) if selected == call) {
+            return Err(failure());
+        }
+        OsIo.inspect(path)
+    }
+    fn entries(&self, path: &Path) -> io::Result<Vec<PathBuf>> {
+        let call = self.listings.fetch_add(1, Ordering::Relaxed) + 1;
+        if matches!(self.fault, Fault::Entries(selected) if selected == call) {
+            return Err(failure());
+        }
+        OsIo.entries(path)
+    }
+    fn create_directory(&self, path: &Path) -> io::Result<()> {
+        if matches!(self.fault, Fault::CreateDirectory) {
+            return Err(failure());
+        }
+        OsIo.create_directory(path)
+    }
+    fn remove_file(&self, path: &Path) -> io::Result<()> {
+        let call = self.file_removals.fetch_add(1, Ordering::Relaxed);
+        if matches!(self.fault, Fault::RemoveFile) && call == 0 {
+            return Err(failure());
+        }
+        OsIo.remove_file(path)
+    }
+    fn remove_tree(&self, path: &Path) -> io::Result<()> {
+        let call = self.tree_removals.fetch_add(1, Ordering::Relaxed);
+        if matches!(self.fault, Fault::RemoveTree) && call == 0 {
+            return Err(failure());
+        }
+        OsIo.remove_tree(path)
     }
 }
 
@@ -274,6 +340,9 @@ fn every_observed_write_failure_preserves_pending_or_committed_recovery_input() 
         Fault::VolumeChanged(4),
         Fault::Read,
         Fault::ChangedReadback,
+        Fault::PublishChangedSize,
+        Fault::Metadata,
+        Fault::NotRegular,
     ] {
         let fixture = Fixture::new()?;
         let mut store = fixture.open(fault)?;
@@ -289,7 +358,10 @@ fn every_observed_write_failure_preserves_pending_or_committed_recovery_input() 
             | Fault::VolumeError(4)
             | Fault::VolumeChanged(4)
             | Fault::Read
-            | Fault::ChangedReadback => assert!(!pending.exists() && committed.exists()),
+            | Fault::ChangedReadback
+            | Fault::PublishChangedSize
+            | Fault::Metadata
+            | Fault::NotRegular => assert!(!pending.exists() && committed.exists()),
             Fault::PublishBoth => assert!(pending.exists() && committed.exists()),
             _ => assert!(pending.exists() && !committed.exists()),
         }
@@ -310,7 +382,13 @@ fn every_observed_write_failure_preserves_pending_or_committed_recovery_input() 
 
 #[test]
 fn qualification_and_directory_access_errors_refuse_opening() -> TestResult {
-    for fault in [Fault::Qualify, Fault::Open(1), Fault::VolumeError(1)] {
+    for fault in [
+        Fault::Qualify,
+        Fault::Open(1),
+        Fault::VolumeError(1),
+        Fault::Inspect(1),
+        Fault::CreateDirectory,
+    ] {
         let fixture = Fixture::new()?;
         assert!(fixture.open(fault).is_err());
     }
@@ -321,6 +399,102 @@ fn qualification_and_directory_access_errors_refuse_opening() -> TestResult {
     let mut store = fixture.open(Fault::None)?;
     store.write_record(&record()?)?;
     assert_eq!(store.records()?.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn incomplete_scans_and_removal_errors_preserve_restart_ownership() -> TestResult {
+    for fault in [
+        Fault::Entries(1),
+        Fault::Entries(2),
+        Fault::Inspect(2),
+        Fault::Inspect(3),
+        Fault::Inspect(4),
+        Fault::RemoveFile,
+        Fault::RemoveTree,
+    ] {
+        let fixture = Fixture::new()?;
+        let mut store = fixture.open(fault)?;
+        store.write_record(&record()?)?;
+        crate::create_private_directory(&fixture.0.join(folder_name(&ID)))?;
+        let mut probe = FakeProbe::new(vec![]);
+        let result = restart(&mut store, &mut probe);
+        if matches!(fault, Fault::Entries(1)) {
+            assert!(result.is_err());
+            assert_eq!(probe.calls(), 0);
+            assert!(fixture.record_path("pbcr").exists());
+            assert!(fixture.0.join(folder_name(&ID)).is_dir());
+        } else if matches!(fault, Fault::Entries(2) | Fault::Inspect(2)) {
+            // Only the recordless-orphan sweep is deferred when folders cannot
+            // be listed. A fully admitted record still owns its known folder.
+            assert!(matches!(result?, RestartProgress::Done { deferred: 1 }));
+            assert_eq!(probe.calls(), 1);
+            assert!(!fixture.record_path("pbcr").exists());
+        } else {
+            assert!(matches!(result?, RestartProgress::Done { deferred: 1 }));
+            assert!(fixture.record_path("pbcr").exists());
+        }
+        assert!(matches!(
+            restart(&mut store, &mut probe)?,
+            RestartProgress::Done { deferred: 0 }
+        ));
+        assert!(!fixture.record_path("pbcr").exists());
+    }
+    Ok(())
+}
+
+#[test]
+fn a_failed_second_record_read_never_promotes_the_first_record_to_a_complete_scan() -> TestResult {
+    let fixture = Fixture::new()?;
+    let mut store = fixture.open(Fault::Open(3))?;
+    for id in [ID, CeremonyId::from_bytes([10; 16])] {
+        let folder = folder_name(&id);
+        crate::create_private_directory(&fixture.0.join(&folder))?;
+        let bytes = cleanup_record_bytes(
+            id,
+            &folder,
+            &ProcessIdentity {
+                browser_pid: 42,
+                creation_filetime: 1,
+                image_path_sha256: ImagePathSha256::from_bytes([7; 32]),
+            },
+        )?;
+        fs::write(
+            fixture.0.join("records").join(format!("{folder}.pbcr")),
+            bytes,
+        )?;
+    }
+    let mut probe = FakeProbe::new(vec![]);
+    assert!(restart(&mut store, &mut probe).is_err());
+    assert_eq!(probe.calls(), 0);
+    assert!(fixture.0.join(folder_name(&ID)).is_dir());
+    assert!(fixture
+        .0
+        .join(folder_name(&CeremonyId::from_bytes([10; 16])))
+        .is_dir());
+    assert!(matches!(
+        restart(&mut store, &mut probe)?,
+        RestartProgress::Done { deferred: 0 }
+    ));
+    assert_eq!(probe.calls(), 2);
+    assert!(store.records()?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn native_io_errors_keep_the_closed_storage_result() -> TestResult {
+    let fixture = Fixture::new()?;
+    let path = fixture.0.join("write-only");
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)?;
+    assert!(OsIo.read(&mut file).is_err());
+    assert!(OsIo.qualify_path(Path::new("\0")).is_err());
+    let null = File::open("NUL")?;
+    assert!(OsIo.volume(&null).is_err());
+    assert!(OsIo.entries(&path).is_err());
+    assert!(OsIo.create_directory(&fixture.0).is_err());
     Ok(())
 }
 
