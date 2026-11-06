@@ -42,8 +42,9 @@ roots.
 
 For the replay-conformance layer: metering covers execution steps and the
 Event count (every Event folded, replayed or recomputed); the other usage
-counters are reported as 0. The watchdogs are 10 seconds for CI shard latency;
-budgets later follow the measured-floor rule.
+counters are reported as 0. Each budget is the measured floor: the attempt's
+measured usage, and 1 for a counter measured at 0. The watchdogs are 10 seconds
+for CI shard latency.
 
 For the replay-conformance layer: several expected-authority entries share one
 family payload and oracle, keyed by their sub-case; the manifest Execution Mode

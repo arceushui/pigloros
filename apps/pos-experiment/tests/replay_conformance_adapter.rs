@@ -48,6 +48,36 @@ const FAMILIES: [FixtureFamily; 7] = [
     FixtureFamily::IndependentEvaluation,
 ];
 
+/// The usage of an attempt that runs `execution_steps` legs and folds `event_count` Events. The
+/// adapter meters only these two counters; the other six are 0.
+#[cfg_attr(coverage_nightly, coverage(off))]
+const fn usage(event_count: u64, execution_steps: u64) -> ResourceUsage {
+    ResourceUsage {
+        memory_bytes: 0,
+        cpu_fuel: 0,
+        host_calls: 0,
+        event_count,
+        output_bytes: 0,
+        storage_bytes: 0,
+        execution_steps,
+        simulation_time_ns: 0,
+    }
+}
+
+/// ADR-061 R11: the usage the adapter measures for each family's attempt in Local and
+/// Air-Gapped: one execution step per leg and every Event the attempt folds. The evaluator half,
+/// `crates/pos-reference/tests/replay_subject_public.rs`, asserts the same literals
+/// (`MEASURED_USAGE`) against the provider budgets; keep the two in step.
+const MEASURED_USAGE: [(FixtureFamily, ResourceUsage); 7] = [
+    (FixtureFamily::Positive, usage(11, 4)),
+    (FixtureFamily::Denied, usage(6, 4)),
+    (FixtureFamily::Malformed, usage(0, 4)),
+    (FixtureFamily::ResourceExhaustion, usage(0, 1)),
+    (FixtureFamily::DeletionRedaction, usage(2, 4)),
+    (FixtureFamily::Downgrade, usage(0, 3)),
+    (FixtureFamily::IndependentEvaluation, usage(3, 1)),
+];
+
 /// The positive payload of provider contract 1.0.0 (before slice R4).
 const PROVIDER_1_0_0_PAYLOAD: &[u8] = br#"{"case_id":"replay-conformance-positive","claim_layer":"replay-conformance","family":"positive","provider_contract":"pigloros.fixture.replay-conformance@1.0.0","subject_adapter":"exported-artifact","stimulus":{"operation":"verify-replay-determinism","recorded_events":[{"sequence":0,"event_type":"fixture-created"},{"sequence":1,"event_type":"fixture-verified"}]},"expected":{"replay":"deterministic","final_sequence":1}}
 "#;
@@ -331,6 +361,29 @@ fn assert_within(usage: &ResourceUsage, budget: &DeterministicBudget) {
     assert!(usage.simulation_time_ns <= budget.simulation_time_ns);
 }
 
+/// ADR-061 R11: the lowest budget `usage` passes, per counter. A counter measured at 0 takes 1,
+/// because a zero budget is rejected.
+#[cfg_attr(coverage_nightly, coverage(off))]
+const fn measured_floor(usage: ResourceUsage) -> DeterministicBudget {
+    const fn floor(counter: u64) -> u64 {
+        if counter == 0 {
+            1
+        } else {
+            counter
+        }
+    }
+    DeterministicBudget {
+        memory_bytes: floor(usage.memory_bytes),
+        cpu_fuel: floor(usage.cpu_fuel),
+        host_calls: floor(usage.host_calls),
+        event_count: floor(usage.event_count),
+        output_bytes: floor(usage.output_bytes),
+        storage_bytes: floor(usage.storage_bytes),
+        execution_steps: floor(usage.execution_steps),
+        simulation_time_ns: floor(usage.simulation_time_ns),
+    }
+}
+
 /// A standard output that is closed.
 struct Unwritable;
 
@@ -346,9 +399,12 @@ impl Write for Unwritable {
     }
 }
 
+/// Every family meets its oracle through the binary in Local and Air-Gapped, and reports
+/// exactly its measured usage (`MEASURED_USAGE`, ADR-061 R11), which is within the provider
+/// budget.
 #[test]
 fn every_family_meets_its_oracle_through_the_process_boundary() -> TestResult {
-    for family in FAMILIES {
+    for (family, measured) in MEASURED_USAGE {
         for mode in [ExecutionMode::Local, ExecutionMode::AirGapped] {
             let attempt = attempt(family, mode)?;
             let mut stream = Vec::new();
@@ -361,10 +417,27 @@ fn every_family_meets_its_oracle_through_the_process_boundary() -> TestResult {
                 oracle_result(family)?,
                 "{family:?} in {mode:?}"
             );
+            assert_eq!(observation.usage, measured, "{family:?} in {mode:?}");
             assert_eq!(observation.usage.execution_steps, oracle_legs(family)?);
             assert_eq!(observation.usage.event_count, folded_events(family)?);
             assert_within(&observation.usage, &attempt.budget);
         }
+    }
+    Ok(())
+}
+
+/// ADR-061 R11: the Draft budget the provider declares for every family is the lowest budget
+/// its measured usage passes. A change in measured usage fails the process-boundary test above
+/// until the literal and `provider.json` move together.
+#[test]
+fn every_family_budget_is_the_floor_of_its_measured_usage() -> TestResult {
+    assert_eq!(MEASURED_USAGE.map(|(family, _)| family), FAMILIES);
+    for (family, measured) in MEASURED_USAGE {
+        assert_eq!(
+            family_budget(family)?,
+            measured_floor(measured),
+            "{family:?}"
+        );
     }
     Ok(())
 }
