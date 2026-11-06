@@ -190,6 +190,71 @@ fn a_wrong_schema_string_or_schema_member_is_not_executed() -> TestResult {
 }
 
 #[test]
+fn a_migrate_state_request_is_unsupported_and_never_payload_invalid() -> TestResult {
+    let mut migrate = blake3_subcase("ind.1", "a");
+    migrate["steps"] = json!([{"step": MIGRATE_STATE}]);
+    let requests = [
+        vec![migrate.clone()],
+        vec![blake3_subcase("ind.0", "b"), migrate],
+    ];
+    for subcases in requests {
+        let case = attempt(
+            FixtureFamily::Positive,
+            ExecutionMode::Local,
+            payload("positive", subcases).to_string().into_bytes(),
+            vec![composite(&[])?],
+        );
+        let (result, out, calls) = run_matching(&case)?;
+        assert_eq!(result, Err(AdapterRunErrorV1::Unsupported));
+        assert!(out.is_empty());
+        assert_eq!(calls, 0);
+    }
+    // Another unknown step stays outside the grammar: the typed failure `payload-invalid`.
+    let mut other = blake3_subcase("ind.1", "a");
+    other["steps"] = json!([{"step": "migrate"}]);
+    let case = attempt(
+        FixtureFamily::Positive,
+        ExecutionMode::Local,
+        payload("positive", vec![other]).to_string().into_bytes(),
+        vec![composite(&[])?],
+    );
+    let (result, out, _) = run_matching(&case)?;
+    assert_eq!(result, Ok(()));
+    assert_eq!(observation(&out)?.result, failure("payload-invalid"));
+    Ok(())
+}
+
+#[test]
+fn the_executor_declaration_names_the_exact_provider_and_pinned_schemas() {
+    let declaration = executor_declaration([5; 32]);
+    assert_eq!(declaration.provider.provider_id, PROVIDER_ID);
+    assert_eq!(declaration.provider.contract_version, CONTRACT_VERSION);
+    assert_eq!(
+        (
+            declaration.provider.abi_major,
+            declaration.provider.abi_minor
+        ),
+        (ABI_MAJOR, ABI_MINOR)
+    );
+    assert_eq!(
+        declaration.subject_adapter,
+        pos_reference::evaluator_protocol::SubjectAdapterKind::PublicPluginProtocol
+    );
+    for family in FixtureFamily::ALL {
+        assert_eq!(
+            declaration.schema_digests[usize::from(family.code())],
+            *blake3::hash(schema_member(*family)).as_bytes(),
+            "{family:?}"
+        );
+    }
+    assert_eq!(declaration.implementation_digest, [5; 32]);
+    assert_eq!(
+        declaration.capability_ids,
+        CAPABILITY_IDS.map(str::to_owned)
+    );
+}
+
+#[test]
 fn a_pinned_schema_payload_that_is_not_json_or_invalid_is_payload_invalid() -> TestResult {
     let mut unknown_key = payload("positive", vec![blake3_subcase("ind.1", "a")]);
     unknown_key["extra"] = json!(1);
@@ -392,6 +457,7 @@ fn the_exit_code_names_the_error() {
         (AdapterRunErrorV1::NotExecuted, 3),
         (AdapterRunErrorV1::Worker, 4),
         (AdapterRunErrorV1::Output, 5),
+        (AdapterRunErrorV1::Unsupported, 6),
     ];
     for (error, code) in codes {
         assert_eq!(error.code(), code);
