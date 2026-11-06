@@ -192,6 +192,11 @@ fn is_known(error: &str) -> bool {
     KNOWN_ERRORS.contains(&error)
 }
 
+/// Whether `error` is one of the 20 closed names and `class` is `Authoritative`.
+fn is_authoritative(error: &str, class: &str) -> bool {
+    is_known(error) && class == AUTHORITATIVE
+}
+
 /// Whether `class` is one of the seven canonical trap class names.
 fn is_trap_class(class: &str) -> bool {
     WORKER_TRAP_CLASSES_V1
@@ -224,7 +229,7 @@ pub fn of_outcome(outcome: &CommunityPluginSubjectOutcomeV1) -> SubResultV1 {
             index: None,
         },
         CommunityPluginSubjectResultV1::Failed { error, class }
-            if is_known(error) && class == AUTHORITATIVE =>
+            if is_authoritative(error, class) =>
         {
             SubResultV1::Failed { error, class }
         }
@@ -479,16 +484,20 @@ fn entry(family: FixtureFamily, record: &SubCaseRecordV1) -> JsonV1 {
             ("kind", JsonV1::text("digest")),
             ("value", JsonV1::text(&hex::encode(digest))),
         ]),
-        (FixtureFamily::IndependentEvaluation, _) => match of_record(record) {
-            // A pass step invokes only `drive`, so `drive` is the export of every trap.
-            Some(SubResultV1::Trapped { class }) => JsonV1::object([
-                ("class", JsonV1::text(class)),
-                ("export", JsonV1::text("drive")),
-                ("id", id),
-                ("kind", JsonV1::text("trapped")),
-            ]),
-            _ => JsonV1::object([("id", id), ("kind", JsonV1::text("mismatch"))]),
-        },
+        _ => trap_entry(id, record),
+    }
+}
+
+/// The entry of a matched record that is no family's own kind: a trap gives its class and the
+/// `drive` export (a pass step invokes only `drive`, ADR-061 R13), anything else is a mismatch.
+fn trap_entry(id: JsonV1, record: &SubCaseRecordV1) -> JsonV1 {
+    match of_record(record) {
+        Some(SubResultV1::Trapped { class }) => JsonV1::object([
+            ("class", JsonV1::text(class)),
+            ("export", JsonV1::text("drive")),
+            ("id", id),
+            ("kind", JsonV1::text("trapped")),
+        ]),
         _ => JsonV1::object([("id", id), ("kind", JsonV1::text("mismatch"))]),
     }
 }

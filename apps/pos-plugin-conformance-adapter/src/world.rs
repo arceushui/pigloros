@@ -36,7 +36,7 @@ use crate::map::{of_outcome, of_record, SubResultV1};
 pub use crate::payload::ScanSource;
 use crate::payload::{
     AtV1, ComputeV1, ExpectV1, Hex32, IdentityFieldV1, InstallV1, InvalidCaseV1, MaterialV1,
-    MemberV1, ProfileDigestV1, ReleaseV1, StepV1, SubCaseV1, Text,
+    MemberV1, ProfileDigestV1, RefusedV1, ReleaseV1, StepV1, SubCaseV1, Text,
 };
 
 /// The closed host error of a step.
@@ -310,6 +310,14 @@ fn optional_digest(out: &mut Vec<u8>, digest: Option<[u8; 32]>) {
     }
 }
 
+/// A text, or null.
+fn optional_text(out: &mut Vec<u8>, text: Option<&str>) {
+    match text {
+        Some(text) => cbor::text(out, text),
+        None => out.push(NULL),
+    }
+}
+
 /// The counters of a measurement as an array of unsigned integers, or null.
 fn optional_counters<const N: usize>(out: &mut Vec<u8>, counters: Option<[u64; N]>) {
     match counters {
@@ -376,10 +384,7 @@ fn result_bytes(out: &mut Vec<u8>, result: CommunityPluginSubjectResultV1) {
             cbor::array(out, 4);
             cbor::text(out, "Refused");
             cbor::text(out, error);
-            match basis {
-                Some(basis) => cbor::text(out, basis),
-                None => out.push(NULL),
-            }
+            optional_text(out, basis);
             cbor::text(out, class);
         }
         CommunityPluginSubjectResultV1::Trapped { trap_class, class } => {
@@ -893,12 +898,7 @@ impl Run<'_> {
                     class,
                     index,
                 }),
-            ) => {
-                error == expect.error.as_str()
-                    && class == expect.class.as_str()
-                    && basis == expect.basis.as_ref().map(Text::as_str)
-                    && index == expect.index.map(|index| index.0)
-            }
+            ) => refusal_matches(expect, error, basis, class, index),
             (ExpectV1::Failed(expect), Some(SubResultV1::Failed { error, class })) => {
                 error == expect.error.as_str() && class == expect.class.as_str()
             }
@@ -924,6 +924,20 @@ impl Run<'_> {
             ) => false,
         }
     }
+}
+
+/// Whether a refusal has the error, class, basis and index that `expect` names.
+fn refusal_matches(
+    expect: &RefusedV1,
+    error: &str,
+    basis: Option<&str>,
+    class: &str,
+    index: Option<u64>,
+) -> bool {
+    error == expect.error.as_str()
+        && class == expect.class.as_str()
+        && basis == expect.basis.as_ref().map(Text::as_str)
+        && index == expect.index.map(|index| index.0)
 }
 
 /// The unkeyed BLAKE3-256 of the UTF-8 bytes of `input`.

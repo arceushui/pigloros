@@ -665,16 +665,17 @@ fn the_entry_of_a_matched_trap_is_its_class_and_export() {
     );
     let opening = head("independent-evaluation");
     assert_eq!(seen, format!("{opening}{entries}]}}}}\n"));
-    // In another canonical family a trap has no entry of its own.
+    // The entry of a matched trap is the same in every canonical family.
     let seen = output_of(&case_result(
         "c",
         FixtureFamily::Positive,
         &[trap_record("pos.9", "unreachable", true)],
     ));
-    assert!(
-        seen.contains("{\"id\":\"pos.9\",\"kind\":\"mismatch\"}"),
-        "{seen}"
+    let entry = concat!(
+        "{\"class\":\"unreachable\",\"export\":\"drive\",",
+        "\"id\":\"pos.9\",\"kind\":\"trapped\"}"
     );
+    assert!(seen.contains(entry), "{seen}");
 }
 
 #[test]

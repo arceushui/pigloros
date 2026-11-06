@@ -146,13 +146,13 @@ fn result_of(
         .err()
         .map(|error| refused(*error))
         .or_else(|| receipt.map(receipt_result))
-        .or_else(|| entry.launch_failure.map(by_class))
+        .or_else(|| entry.launch_failure.map(of_failure))
         .unwrap_or(CommunityPluginSubjectResultV1::NotRun)
 }
 
 /// The result a receipt governs: its failure by class, else its disposition.
 fn receipt_result(receipt: &CommunityInvocationReceiptV1) -> CommunityPluginSubjectResultV1 {
-    receipt.failure.map_or_else(|| settled(receipt), by_class)
+    receipt.failure.map_or_else(|| settled(receipt), of_failure)
 }
 
 /// The result of a receipt that records no failure.
@@ -172,18 +172,24 @@ const fn settled(receipt: &CommunityInvocationReceiptV1) -> CommunityPluginSubje
     }
 }
 
-/// `Trapped` for a trap, `Refused` for a pre-execution rejection, `Failed` for every other
-/// class.
-const fn by_class(error: CommunityPluginHostErrorV1) -> CommunityPluginSubjectResultV1 {
-    match (error, error.class()) {
-        (CommunityPluginHostErrorV1::ComponentTrap { class, .. }, host_class) => {
+/// `Trapped` for a trap with its trap class (ADR-061 R13), else the result of `by_class`.
+const fn of_failure(error: CommunityPluginHostErrorV1) -> CommunityPluginSubjectResultV1 {
+    match error {
+        CommunityPluginHostErrorV1::ComponentTrap { class, .. } => {
             CommunityPluginSubjectResultV1::Trapped {
                 trap_class: class.name(),
-                class: host_class.name(),
+                class: error.class().name(),
             }
         }
-        (_, HostFailureClassV1::PreExecutionRejection) => refused(error),
-        (_, HostFailureClassV1::Authoritative | HostFailureClassV1::Operational) => failed(error),
+        _ => by_class(error),
+    }
+}
+
+/// `Refused` for a pre-execution rejection, `Failed` for every other class.
+const fn by_class(error: CommunityPluginHostErrorV1) -> CommunityPluginSubjectResultV1 {
+    match error.class() {
+        HostFailureClassV1::PreExecutionRejection => refused(error),
+        HostFailureClassV1::Authoritative | HostFailureClassV1::Operational => failed(error),
     }
 }
 
