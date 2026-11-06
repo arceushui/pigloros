@@ -55,7 +55,7 @@ pub(crate) fn domain_digest(domain: &[u8], value: &[u8]) -> [u8; 32] {
 }
 
 pub use bundle_contract::{
-    draft_execution_profile_bytes_v1, draft_release_admission_bytes_v1,
+    archive_release_filename, draft_execution_profile_bytes_v1, draft_release_admission_bytes_v1,
     draft_trust_policy_snapshot_bytes_v1, expected_result_member_path, fixture_input_member_path,
     host_verified_execution_profile_bytes_v1, verify_archive_independently,
     verify_archive_release_filename, verify_release_tree_independently, BundleContractErrorV1,
@@ -7111,98 +7111,103 @@ pub mod tests {
 
     #[test]
     fn public_cnr1_codec_validates_shape_and_fields_zero_through_twenty_two() {
-        let report = test_report();
-        let bytes = report.to_canonical_cbor().unwrap_or_default();
-        assert_eq!(
-            ConformanceReportV1::from_canonical_cbor(&bytes),
-            Ok(report.clone())
-        );
+        // The two domain-maximum reports are built and checked while the other cases run.
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let (at_limit, at_limit_bytes) = report_at_canonical_byte_limit();
+                assert_eq!(at_limit_bytes.len(), 16 * 1024 * 1024);
+                assert_eq!(at_limit.to_canonical_cbor(), Ok(at_limit_bytes.clone()));
+                assert_eq!(
+                    ConformanceReportV1::from_canonical_cbor(&at_limit_bytes),
+                    Ok(at_limit)
+                );
+            });
+            scope.spawn(|| {
+                let mut oversized_report = test_report();
+                let template = oversized_report.cases[0].clone();
+                oversized_report.cases = (0..=65_535)
+                    .map(|index| {
+                        let mut case = template.clone();
+                        case.case_id = format!("{index:05}{}", "x".repeat(123));
+                        case.outcome = CaseOutcomeStatusV1::Fail;
+                        case.actual_digest = Some([99; 32]);
+                        case.first_coordinate = Some(vec![b'x'; 128]);
+                        case
+                    })
+                    .collect();
+                refresh_test_report(&mut oversized_report);
+                assert_eq!(
+                    oversized_report.to_canonical_cbor(),
+                    Err(EvidenceError::InvalidConformanceReport)
+                );
+            });
+            let report = test_report();
+            let bytes = report.to_canonical_cbor().unwrap_or_default();
+            assert_eq!(
+                ConformanceReportV1::from_canonical_cbor(&bytes),
+                Ok(report.clone())
+            );
 
-        let mut trailing = bytes.clone();
-        trailing.push(0);
-        assert_eq!(
-            ConformanceReportV1::from_canonical_cbor(&trailing),
-            Err(EvidenceError::InvalidConformanceReport)
-        );
+            let mut trailing = bytes.clone();
+            trailing.push(0);
+            assert_eq!(
+                ConformanceReportV1::from_canonical_cbor(&trailing),
+                Err(EvidenceError::InvalidConformanceReport)
+            );
 
-        for index in 0..23 {
-            let mut fields =
+            for index in 0..23 {
+                let mut fields =
+                    ciborium::from_reader::<Value, _>(Cursor::new(&bytes)).unwrap_or(Value::Null);
+                if let Value::Array(ref mut values) = fields {
+                    values[index] = Value::Null;
+                }
+                let mut malformed = Vec::new();
+                ciborium::into_writer(&fields, &mut malformed).unwrap_or_default();
+                assert_eq!(
+                    ConformanceReportV1::from_canonical_cbor(&malformed),
+                    Err(EvidenceError::InvalidConformanceReport)
+                );
+            }
+
+            let mut tampered_digest =
                 ciborium::from_reader::<Value, _>(Cursor::new(&bytes)).unwrap_or(Value::Null);
-            if let Value::Array(ref mut values) = fields {
-                values[index] = Value::Null;
+            if let Value::Array(ref mut values) = tampered_digest {
+                values[22] = Value::Bytes(vec![0; 32]);
             }
             let mut malformed = Vec::new();
-            ciborium::into_writer(&fields, &mut malformed).unwrap_or_default();
+            ciborium::into_writer(&tampered_digest, &mut malformed).unwrap_or_default();
             assert_eq!(
                 ConformanceReportV1::from_canonical_cbor(&malformed),
                 Err(EvidenceError::InvalidConformanceReport)
             );
-        }
 
-        let mut tampered_digest =
-            ciborium::from_reader::<Value, _>(Cursor::new(&bytes)).unwrap_or(Value::Null);
-        if let Value::Array(ref mut values) = tampered_digest {
-            values[22] = Value::Bytes(vec![0; 32]);
-        }
-        let mut malformed = Vec::new();
-        ciborium::into_writer(&tampered_digest, &mut malformed).unwrap_or_default();
-        assert_eq!(
-            ConformanceReportV1::from_canonical_cbor(&malformed),
-            Err(EvidenceError::InvalidConformanceReport)
-        );
+            let oversized = vec![0; 16 * 1024 * 1024 + 1];
+            assert_eq!(
+                ConformanceReportV1::from_canonical_cbor(&oversized),
+                Err(EvidenceError::InvalidConformanceReport)
+            );
 
-        let (at_limit, at_limit_bytes) = report_at_canonical_byte_limit();
-        assert_eq!(at_limit_bytes.len(), 16 * 1024 * 1024);
-        assert_eq!(at_limit.to_canonical_cbor(), Ok(at_limit_bytes.clone()));
-        assert_eq!(
-            ConformanceReportV1::from_canonical_cbor(&at_limit_bytes),
-            Ok(at_limit)
-        );
+            let mut mixed_profile_report = report;
+            mixed_profile_report.cases[0].execution_profile_digest = [99; 32];
+            mixed_profile_report.report_digest = mixed_profile_report.digest().unwrap_or([0; 32]);
+            // CNR1 permits a per-case execution-profile matrix; CPF1 performs
+            // the authoritative fixture/profile membership check.
+            assert_eq!(mixed_profile_report.validate(), Ok(()));
 
-        let oversized = vec![0; 16 * 1024 * 1024 + 1];
-        assert_eq!(
-            ConformanceReportV1::from_canonical_cbor(&oversized),
-            Err(EvidenceError::InvalidConformanceReport)
-        );
-
-        let mut mixed_profile_report = report;
-        mixed_profile_report.cases[0].execution_profile_digest = [99; 32];
-        mixed_profile_report.report_digest = mixed_profile_report.digest().unwrap_or([0; 32]);
-        // CNR1 permits a per-case execution-profile matrix; CPF1 performs
-        // the authoritative fixture/profile membership check.
-        assert_eq!(mixed_profile_report.validate(), Ok(()));
-
-        let mut unordered_cases =
-            ciborium::from_reader::<Value, _>(Cursor::new(&bytes)).unwrap_or(Value::Null);
-        if let Value::Array(ref mut values) = unordered_cases {
-            if let Value::Array(ref mut cases) = values[13] {
-                cases.swap(0, 1);
+            let mut unordered_cases =
+                ciborium::from_reader::<Value, _>(Cursor::new(&bytes)).unwrap_or(Value::Null);
+            if let Value::Array(ref mut values) = unordered_cases {
+                if let Value::Array(ref mut cases) = values[13] {
+                    cases.swap(0, 1);
+                }
             }
-        }
-        let mut malformed = Vec::new();
-        ciborium::into_writer(&unordered_cases, &mut malformed).unwrap_or_default();
-        assert_eq!(
-            ConformanceReportV1::from_canonical_cbor(&malformed),
-            Err(EvidenceError::InvalidConformanceReport)
-        );
-
-        let mut oversized_report = test_report();
-        let template = oversized_report.cases[0].clone();
-        oversized_report.cases = (0..=65_535)
-            .map(|index| {
-                let mut case = template.clone();
-                case.case_id = format!("{index:05}{}", "x".repeat(123));
-                case.outcome = CaseOutcomeStatusV1::Fail;
-                case.actual_digest = Some([99; 32]);
-                case.first_coordinate = Some(vec![b'x'; 128]);
-                case
-            })
-            .collect();
-        refresh_test_report(&mut oversized_report);
-        assert_eq!(
-            oversized_report.to_canonical_cbor(),
-            Err(EvidenceError::InvalidConformanceReport)
-        );
+            let mut malformed = Vec::new();
+            ciborium::into_writer(&unordered_cases, &mut malformed).unwrap_or_default();
+            assert_eq!(
+                ConformanceReportV1::from_canonical_cbor(&malformed),
+                Err(EvidenceError::InvalidConformanceReport)
+            );
+        });
     }
 
     fn test_contract() -> Wave8ProofContractV1 {

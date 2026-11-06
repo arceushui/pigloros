@@ -308,7 +308,7 @@ mod tests {
     }
 
     /// Deny one transaction statement; `Unknown` is how `SQLite` names `COMMIT`.
-    fn deny(store: &SqliteStore, denied: TransactionOperation) -> rusqlite::Result<()> {
+    fn deny(store: &mut SqliteStore, denied: TransactionOperation) -> rusqlite::Result<()> {
         store.conn.authorizer(Some(move |context: AuthContext<'_>| {
             if context.action == (AuthAction::Transaction { operation: denied }) {
                 Authorization::Deny
@@ -318,7 +318,7 @@ mod tests {
         }))
     }
 
-    fn allow_all(store: &SqliteStore) -> rusqlite::Result<()> {
+    fn allow_all(store: &mut SqliteStore) -> rusqlite::Result<()> {
         store
             .conn
             .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
@@ -348,16 +348,16 @@ mod tests {
     fn begin_commit_and_rollback_failures_are_indeterminate() -> Fallible<()> {
         let policies = lifecycle()?;
         let mut store = SqliteStore::open_in_memory()?;
-        deny(&store, TransactionOperation::Begin)?;
+        deny(&mut store, TransactionOperation::Begin)?;
         assert_eq!(install(&mut store, &policies[0]), Err(INDETERMINATE));
-        allow_all(&store)?;
+        allow_all(&mut store)?;
         assert_eq!(store.issuer_policy_floor(), Ok(None));
 
         // The denied COMMIT rolled back, so the exact retry installs it, and
         // a further retry recovers the committed result.
-        deny(&store, TransactionOperation::Unknown)?;
+        deny(&mut store, TransactionOperation::Unknown)?;
         assert_eq!(install(&mut store, &policies[0]), Err(INDETERMINATE));
-        allow_all(&store)?;
+        allow_all(&mut store)?;
         assert_eq!(store.issuer_policy_floor(), Ok(None));
         let installed = Ok(IssuerPolicyInstallOutcomeV1::Installed);
         assert_eq!(install(&mut store, &policies[0]), installed);
@@ -365,7 +365,7 @@ mod tests {
         assert_eq!(install(&mut store, &policies[0]), recovered);
 
         let mut store = SqliteStore::open_in_memory()?;
-        deny(&store, TransactionOperation::Rollback)?;
+        deny(&mut store, TransactionOperation::Rollback)?;
         assert_eq!(install(&mut store, &policies[1]), Err(INDETERMINATE));
         Ok(())
     }

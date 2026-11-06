@@ -2,7 +2,8 @@
 """Generate the metric-conformance fixtures (ADR-062 Revision 7 section 5, slice 1, #1211).
 
 This is the only writer of the payloads, `MCS1` composites, oracles and evidence-status records
-of the `metric-conformance` layer and of its seven provider schemas. It is called by
+of the `metric-conformance` layer, of its seven provider schemas and of the subject adapter's
+`apps/pos-metric-conformance-adapter/src/subject/schema_digests.rs`. It is called by
 `scripts/conformance-fixture-adapters/metric-cbor-v1.sh render` (through the `render`
 subcommand) and runs offline.
 
@@ -48,6 +49,7 @@ import generate_pmf1_golden_vectors as golden  # noqa: E402
 
 FIXTURES = ROOT / "fixtures/conformance"
 BLAKE3_VECTORS = HERE / "data/blake3_test_vectors.json"
+SCHEMA_DIGESTS_RUST = ROOT / "apps/pos-metric-conformance-adapter/src/subject/schema_digests.rs"
 
 CLAIM_LAYER = "metric-conformance"
 SCHEMA_ID = "pigloros.metric-conformance.case.v2"
@@ -87,6 +89,7 @@ MAX_IDENTIFIER_BYTES = 64
 MAX_MTI1_BYTES = 64 * 1024 * 1024
 MAX_MTR1_BYTES = 1024
 MAX_PATTERNS = 4096
+MAX_NESTING_DEPTH = 16  # section 4.6 G10: the root array is level 1
 INPUT_DOMAIN = b"PiglorOS.MetricInput.v1\0"
 RESULT_DOMAIN = b"PiglorOS.MetricResult.v1\0"
 
@@ -369,27 +372,33 @@ def identifier(reader: Reader, where: str) -> bytes:
     return raw
 
 
-def skip_item(reader: Reader, where: str) -> None:
-    """Consume one data item and everything inside it without keeping it."""
+def skip_item(reader: Reader, where: str, level: int) -> None:
+    """Consume one data item at nesting `level` and everything inside it without keeping it.
+    An array deeper than `MAX_NESTING_DEPTH` is `InvalidEncoding` at that array (section 4.6
+    G10), so the walk never recurses more than 16 levels."""
     major, argument = reader.head(where)
     if major in (2, 3):
         reader._take(argument, where)
     elif major == 4:
+        if level > MAX_NESTING_DEPTH:
+            raise Failure("InvalidEncoding", where)
         for index in range(argument):
-            skip_item(reader, f"{where}/{index}")
+            skip_item(reader, f"{where}/{index}", level + 1)
 
 
 def check_structure(data: bytes) -> None:
     """The structural pass over the whole input (section 4.2 failure precedence: structure
     first). It keeps nothing: deterministic-CBOR well-formedness (no map, tag, float or other
-    simple value, indefinite length, non-preferred head, truncation or trailing bytes) and the
-    record shape (a root array of 8 fields, a records array, records of 6 fields)."""
+    simple value, indefinite length, non-preferred head, truncation or trailing bytes), the
+    nesting cap (section 4.6 G10: the root is level 1, header fields level 2, records level 3
+    and record fields level 4) and the record shape (a root array of 8 fields, a records
+    array, records of 6 fields)."""
     reader = Reader(data)
     major, length = reader.head("input")
     if major != 4 or length != len(HEADER_FIELDS):
         raise Failure("InvalidEncoding", "input")
     for name in HEADER_FIELDS[:-1]:
-        skip_item(reader, name)
+        skip_item(reader, name, 2)
     major, count = reader.head("records")
     if major != 4:
         raise Failure("InvalidEncoding", "records")
@@ -399,7 +408,7 @@ def check_structure(data: bytes) -> None:
         if major != 4 or length != 6:
             raise Failure("InvalidEncoding", at)
         for field_index in range(6):
-            skip_item(reader, f"{at}/{field_index}")
+            skip_item(reader, f"{at}/{field_index}", 4)
     reader.finish()
 
 
@@ -666,6 +675,52 @@ def mtq1(patterns: list[int]) -> bytes:
     return enc(["MTQ1", 1, patterns])
 
 
+def mtq1_raw(patterns: object) -> bytes:
+    """`MTQ1` bytes with `patterns` replaced by any item, to build a malformed input."""
+    return enc(["MTQ1", 1, patterns])
+
+
+QUANTIZATION_FIELDS = ("magic", "version", "patterns")
+
+
+def check_mtq1_structure(data: bytes) -> None:
+    """The structural pass of an `MTQ1` (section 4.6 item 1 and G11): deterministic-CBOR
+    well-formedness, the nesting cap, a root array of 3 fields and a `patterns` array."""
+    reader = Reader(data)
+    major, length = reader.head("input")
+    if major != 4 or length != len(QUANTIZATION_FIELDS):
+        raise Failure("InvalidEncoding", "input")
+    for name in QUANTIZATION_FIELDS[:-1]:
+        skip_item(reader, name, 2)
+    major, count = reader.head("patterns")
+    if major != 4:
+        raise Failure("InvalidEncoding", "patterns")
+    for index in range(count):
+        skip_item(reader, f"patterns/{index}", 3)
+    reader.finish()
+
+
+def decode_mtq1(data: bytes) -> list[int]:
+    """Decode `MTQ1` in the section 4.6 order: structure, then `magic` and `version`, then the
+    `patterns` shape (G11: empty is `InvalidEncoding`, above 4096 is `ResourceLimit`), then
+    each pattern in index order (a non-uint entry is `InvalidEncoding` at `patterns/<i>`)."""
+    check_mtq1_structure(data)
+    reader = Reader(data)
+    reader.array("input")
+    if reader.text("magic") != b"MTQ1":
+        raise Failure("UnsupportedVersion", "magic")
+    if reader.uint("version") != 1:
+        raise Failure("UnsupportedVersion", "version")
+    count = reader.array("patterns")
+    if count == 0:
+        raise Failure("InvalidEncoding", "patterns")
+    if count > MAX_PATTERNS:
+        raise Failure("ResourceLimit", "patterns")
+    patterns = [reader.uint(f"patterns/{index}") for index in range(count)]
+    reader.finish()
+    return patterns
+
+
 def mqr1(patterns: list[int]) -> bytes:
     entries: list = []
     for bits in patterns:
@@ -706,14 +761,23 @@ def result_case(sub_id: str, title: str, data: bytes, **extra) -> SubCase:
     return SubCase(sub_id, title, record="MTI1", member=data, expect={"kind": "result"}, **extra)
 
 
-def error_case(sub_id: str, title: str, data: bytes, error: str, coordinate: str) -> SubCase:
+def error_case(
+    sub_id: str, title: str, data: bytes, error: str, coordinate: str, record: str = "MTI1"
+) -> SubCase:
     expect = {
         "kind": "metric-error",
         "error": error,
         "code": ERRORS.index(error),
         "first_coordinate": coordinate,
     }
-    return SubCase(sub_id, title, record="MTI1", member=data, expect=expect)
+    return SubCase(sub_id, title, record=record, member=data, expect=expect)
+
+
+def nested(levels: int, leaf: object) -> object:
+    """`leaf` wrapped in `levels` one-item arrays."""
+    for _ in range(levels):
+        leaf = [leaf]
+    return leaf
 
 
 def worked_example() -> bytes:
@@ -1154,6 +1218,46 @@ def malformed_subcases() -> list[SubCase]:
             mti1(_replace(record_with((1, 0), "m01"), (1, 2), 1_000_001)),
             "DuplicatePrediction", "records/1/0",
         ),
+        # Section 4.6 G10: a record field is level 4, so 13 arrays reach level 16 (the cap
+        # accepts them and the field is then the wrong type) and 14 reach level 17.
+        error_case(
+            "mal.14a", "arrays nested 16 levels deep pass the structural walk",
+            mti1(record_with((0, 2), nested(MAX_NESTING_DEPTH - 3, 300_000))),
+            "InvalidEncoding", "records/0/2",
+        ),
+        error_case(
+            "mal.14b", "an array nested 17 levels deep is refused at that array",
+            mti1(record_with((0, 2), nested(MAX_NESTING_DEPTH - 2, 300_000))),
+            "InvalidEncoding", "records/0/2" + "/0" * (MAX_NESTING_DEPTH - 3),
+        ),
+        # Section 4.6 G12: invalid UTF-8 in a header text field is that field's version or
+        # algorithm failure, not a structural one.
+        error_case(
+            "mal.15a", "invalid UTF-8 magic",
+            mti1(BASE, magic=text_bytes(b"MTI\xff")), "UnsupportedVersion", "magic",
+        ),
+        error_case(
+            "mal.15b", "invalid UTF-8 algorithm_id",
+            mti1(BASE, algorithm_id=text_bytes(ALGORITHM_ID.encode("ascii")[:-1] + b"\xff")),
+            "UnsupportedAlgorithm", "algorithm_id",
+        ),
+        # Section 4.6 G11: the MTQ1 shape.
+        error_case(
+            "mal.16a", "MTQ1 patterns that is not an array",
+            mtq1_raw(None), "InvalidEncoding", "patterns", record="MTQ1",
+        ),
+        error_case(
+            "mal.16b", "MTQ1 with an empty patterns array",
+            mtq1_raw([]), "InvalidEncoding", "patterns", record="MTQ1",
+        ),
+        error_case(
+            "mal.16c", "MTQ1 with a text entry in patterns",
+            mtq1_raw([bits_of(0.5), "0.5"]), "InvalidEncoding", "patterns/1", record="MTQ1",
+        ),
+        error_case(
+            "mal.16d", "MTQ1 with 4097 patterns",
+            mtq1_raw([0] * (MAX_PATTERNS + 1)), "ResourceLimit", "patterns", record="MTQ1",
+        ),
     ]
 
 
@@ -1476,7 +1580,7 @@ def mqr1_values(sub: SubCase) -> dict:
     return {"entries": entries}
 
 
-def oracle_entry(sub: SubCase, every_result: dict[str, str]) -> dict:
+def oracle_entry(sub: SubCase) -> dict:
     expect = sub.expect or {}
     if expect.get("kind") == "result":
         result = sub.result()
@@ -1488,19 +1592,9 @@ def oracle_entry(sub: SubCase, every_result: dict[str, str]) -> dict:
         }
         entry["values"] = mqr1_values(sub) if sub.record == "MTQ1" else mtr1_values(result)
         return entry
-    if expect.get("kind") == "generator-check":
-        return {"id": sub.id, "kind": "generator-check", "reproduced": every_result}
+    # A generator check (`ind.2`) is not executed by a subject: its entry names the sub-case and
+    # its kind only, which the subject adapter can output (ADR-062 R7 slice 4, #1217).
     return {"id": sub.id, **expect}
-
-
-def all_results(context_for) -> dict[str, str]:
-    """The digest of every `MTR1`/`MQR1` oracle of every family, by sub-case id."""
-    reproduced: dict[str, str] = {}
-    for family in FAMILIES:
-        for sub in subcases_of(family, context_for(family)):
-            if (sub.expect or {}).get("kind") == "result":
-                reproduced[sub.id] = golden.blake3(sub.result()).hex()
-    return dict(sorted(reproduced.items()))
 
 
 def composite(subcases: list[SubCase]) -> bytes:
@@ -1518,12 +1612,7 @@ def render_family(family: str, context: Context) -> Outputs:
         "subcases": [subcase_object(sub) for sub in subcases],
     }
     payload = jcs(payload_object) + b"\n"
-    every_result = (
-        all_results(lambda name: replace_context(context, name))
-        if family == "independent-evaluation"
-        else {}
-    )
-    entries = [oracle_entry(sub, every_result) for sub in subcases]
+    entries = [oracle_entry(sub) for sub in subcases]
     if context.oracle_kind == "canonical-output":
         oracle_object = {
             "case_id": context.case_id,
@@ -1562,18 +1651,6 @@ def render_family(family: str, context: Context) -> Outputs:
     )
 
 
-def replace_context(context: Context, family: str) -> Context:
-    contract = json.loads((FIXTURES / "support/fixture-family-contract.json").read_text())
-    entry = next(item for item in contract["families"] if item["name"] == family)
-    return Context(
-        case_id=f"{CLAIM_LAYER}-{family}",
-        provider_id=context.provider_id,
-        contract_version=context.contract_version,
-        oracle_kind=entry["oracle"]["kind"],
-        code_id=entry["oracle"].get("code_id", ""),
-    )
-
-
 # --- Provider schemas ---
 
 EXPECT_KINDS = {
@@ -1594,9 +1671,15 @@ STIMULUS_KINDS = {
     "downgrade": ("provider-contract",),
     "independent-evaluation": ("recompute", "generator-check"),
 }
+# Section 4.6 G6: a field coordinate, to which a nested item appends its index. G10 refuses
+# the first array at level 17, so a header field (level 2) takes at most 15 indices, an `MTQ1`
+# pattern (level 3, G11) at most 14 and a record field (level 4) at most 13.
 COORDINATE_PATTERN = (
-    "^(input|trailing|magic|version|algorithm_id|algorithm_major|binning|"
-    "minimum_scored_records|record_count|records(/(0|[1-9][0-9]*)(/[0-5])?)?)$"
+    "^(input|trailing|patterns|records(/(0|[1-9][0-9]*))?|"
+    "(magic|version|algorithm_id|algorithm_major|binning|minimum_scored_records|record_count)"
+    "(/(0|[1-9][0-9]*)){0,15}|"
+    "patterns/(0|[1-9][0-9]*)(/(0|[1-9][0-9]*)){0,14}|"
+    "records/(0|[1-9][0-9]*)/[0-5](/(0|[1-9][0-9]*)){0,13})$"
 )
 
 
@@ -1878,13 +1961,13 @@ def schema_errors(value: object, schema: dict, root: dict, where: str = "$") -> 
 
 def cbor_decode(data: bytes) -> object:
     """Decode the well-formed deterministic CBOR this generator writes (self-tests only)."""
-    value, end = _decode(data, 0)
+    value, end = _decode(data, 0, 1)
     if end != len(data):
         raise ValueError("trailing bytes")
     return value
 
 
-def _decode(data: bytes, pos: int) -> tuple[object, int]:
+def _decode(data: bytes, pos: int, level: int) -> tuple[object, int]:
     initial = data[pos]
     major, info = initial >> 5, initial & 31
     pos += 1
@@ -1905,9 +1988,11 @@ def _decode(data: bytes, pos: int) -> tuple[object, int]:
     if major == 3:
         return data[pos : pos + argument].decode("utf-8"), pos + argument
     if major == 4:
+        if level > MAX_NESTING_DEPTH:
+            raise ValueError("arrays nested deeper than 16 levels")
         items = []
         for _ in range(argument):
-            item, pos = _decode(data, pos)
+            item, pos = _decode(data, pos, level + 1)
             items.append(item)
         return items, pos
     raise ValueError("unsupported CBOR major type")
@@ -2039,6 +2124,19 @@ def check_subcases() -> None:
                 if sub.marker is not None and sub.marker.encode("utf-8") in sub.result():
                     raise SystemExit(f"{sub.id}: the canary appears in MTR1")
         elif sub.record == "MTQ1":
+            try:
+                patterns = decode_mtq1(sub.member)
+            except Failure as failure:
+                if expect.get("kind") != "metric-error" or (
+                    failure.error,
+                    failure.coordinate,
+                ) != (expect["error"], expect["first_coordinate"]):
+                    raise SystemExit(f"{sub.id}: the MTQ1 decoder reports {failure}") from None
+                continue
+            if expect.get("kind") == "metric-error":
+                raise SystemExit(f"{sub.id}: the MTQ1 decoder accepts a malformed input")
+            if patterns != sub.patterns:
+                raise SystemExit(f"{sub.id}: the MTQ1 member does not carry its patterns")
             check_quantization(sub)
         elif sub.record == "MTR1":
             try:
@@ -2165,8 +2263,54 @@ def composite_path(family: str) -> str:
     return f"inputs/{CLAIM_LAYER}/{family}.mcs1"
 
 
+def rust_digest_const(name: str, digest: bytes) -> list[str]:
+    lines = [f"const {name}: [u8; 32] = ["]
+    for start in range(0, 32, 16):
+        lines.append("    " + " ".join(f"0x{byte:02x}," for byte in digest[start : start + 16]))
+    lines.append("];")
+    return lines
+
+
+def schema_digests_rust() -> str:
+    """The subject adapter's pinned digest of each family's schema member (#1217)."""
+    constants: list[str] = []
+    for family in FAMILIES:
+        name = family.upper().replace("-", "_")
+        constants.extend(rust_digest_const(name, golden.blake3(jcs(family_schema(family)) + b"\n")))
+    names = "".join(f"    {family.upper().replace('-', '_')},\n" for family in FAMILIES)
+    header = """\
+// @generated by scripts/generate_metric_conformance_fixtures.py; do not edit.
+
+//! The pinned digests of the metric-conformance schema members of the seven families
+//! (provider contract 2.0.0, ADR-062 Revision 7 slice 4).
+//!
+//! The digest of the schema member of an attempt must equal the digest pinned here for its
+//! family; a mismatch, such as a schema member of the Draft provider contract 1.0.0, is a
+//! non-executed outcome: there is no reader for 1.0.0. The fixture generator writes this file
+//! from the checked-in schema members and its `--check` verifies it.
+
+use pos_reference::evaluator_domain::FixtureFamily;
+
+"""
+    footer = """\
+
+/// The pinned digests, in the wire order of `FixtureFamily`.
+const PINNED: [[u8; 32]; 7] = [
+"""
+    tail = """\
+];
+
+/// The pinned digest of the schema member of `family`.
+#[must_use]
+pub(super) fn pinned_digest(family: FixtureFamily) -> [u8; 32] {
+    PINNED[usize::from(family.code())]
+}
+"""
+    return header + "\n".join(constants) + "\n" + footer + names + tail
+
+
 def outputs_on_disk() -> dict[Path, bytes]:
-    wanted: dict[Path, bytes] = {}
+    wanted: dict[Path, bytes] = {SCHEMA_DIGESTS_RUST: schema_digests_rust().encode("utf-8")}
     for family in FAMILIES:
         wanted[schema_path(family)] = jcs(family_schema(family)) + b"\n"
         outputs = render_family(family, provider_context(family))

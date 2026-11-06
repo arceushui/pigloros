@@ -194,6 +194,18 @@ are #443, and complete resource/lifecycle cleanup is #1199/#1200. A watchdog tha
 closed the channel is reported by `ServedProxy::watchdog_expired`, not by the
 termination, which reads a closed channel as a clean close.
 
+Each prepared directory owns one shared execution-start claim. Cloning or
+reconstructing its admitted attempt does not create another execution owner.
+`execute` consumes the claim before preparing resources and refuses subsequent
+calls before touching the execution ports. Completion, refusal and cancellation
+leave the claim spent; a retry needs a fresh planned, admitted attempt and
+directory. This fences one live directory owner only. It does not provide
+restart fencing, lease retention, complete teardown or admission reopening.
+Dropping the unique prepared-directory owner also closes an unclaimed start
+permission before its descriptors close. Surviving admitted handles and unpolled
+executions cannot start afterward. This does not cancel an already claimed
+execution or establish resource absence; intent remains available for recovery.
+
 `ExecStart=` is requested as `a(sasb)`: the bind-mounted launcher at
 `/.pigloros/release-launcher`, `launch-barrier` and one lowercase-hexadecimal
 LPV1 argument, and read back as path, argument vector and ignore-failure flag.

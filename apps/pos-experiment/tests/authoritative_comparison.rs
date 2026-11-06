@@ -1122,3 +1122,13 @@ fn the_prior_checkpoint_is_the_latest_matching_one_before_the_tick() -> TestResu
     assert_eq!(report.prior_matching_checkpoint_digest, Some(CHECKPOINT_1));
     Ok(())
 }
+
+#[test]
+fn driver_outcomes_have_distinct_digest_tags_and_their_canonical_bytes() {
+    let output = DriverOutcomeV1::Output(b"same".to_vec());
+    let failure = DriverOutcomeV1::TypedFailure(b"same".to_vec());
+    assert_eq!(output.tag_v1(), 0);
+    assert_eq!(failure.tag_v1(), 1);
+    assert_eq!(output.canonical_bytes(), b"same");
+    assert_eq!(failure.canonical_bytes(), b"same");
+}
