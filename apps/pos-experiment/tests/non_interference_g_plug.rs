@@ -693,8 +693,8 @@ fn fails_everything(_: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// Answers every request, even one the codec refuses, with garbage.
-fn answers_garbage(_: &[u8]) -> Option<Vec<u8>> {
-    Some(b"not a response".to_vec())
+fn answers_garbage(request: &[u8]) -> Option<Vec<u8>> {
+    (!request.is_empty()).then(|| b"not a response".to_vec())
 }
 
 thread_local! {
@@ -718,13 +718,13 @@ fn request_bytes(call: WorkerCallV1) -> Vec<u8> {
     let host = GPlugProtocolHostV1::new(record);
     match call {
         WorkerCallV1::Describe => {
-            let _ = host.describe();
+            assert!(host.describe().is_none());
         }
         WorkerCallV1::Reduce(invocation) => {
-            let _ = host.reduce(&invocation);
+            assert!(host.reduce(&invocation).is_none());
         }
         WorkerCallV1::Drive(invocation) => {
-            let _ = host.drive(&invocation);
+            assert!(host.drive(&invocation).is_none());
         }
     }
     seen()
