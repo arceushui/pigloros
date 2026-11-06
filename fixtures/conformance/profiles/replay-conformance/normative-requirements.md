@@ -68,5 +68,16 @@ W8H1 entry, the Plugin and Driver a recomputation subject composed
 (`composition`, or null), and its legs; a
 `namespaced-failure` family returns its family failure when every leg is as
 expected, and otherwise `subcase-mismatch`. A payload outside this grammar is
-the failure `payload-invalid`. The adapter meters one execution step per leg and
+the failure `payload-invalid`.
+
+## Local and Air-Gapped pairs (ADR-062 Revision 8 slice R5)
+
+Every family runs in Local and in Air-Gapped mode against the same oracle, and
+both executions must give the same Events in Timeline Order, the same
+Projection checkpoint and the same typed failures. The manifest of every leg
+carries the attempt's Execution Mode. An Air-Gapped attempt has the
+`deterministic-air-gapped-v1` semantics: no network and the bundled trust
+policy snapshot. A network attempt in an Air-Gapped attempt (the attempt is
+granted network, or a sub-case manifest enables it) is the failure
+`network-denied`, and no leg runs. The adapter meters one execution step per leg and
 the Event count (every Event it folds).
