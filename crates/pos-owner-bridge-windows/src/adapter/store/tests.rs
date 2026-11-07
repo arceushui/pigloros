@@ -12,8 +12,8 @@ use pos_owner_bridge::channel::channel;
 use pos_owner_bridge::fake::clock::{FakeClock, FakeRandom};
 use pos_owner_bridge::fake::host::FakeProbe;
 use pos_owner_bridge::{
-    cleanup_record_bytes, folder_name, BridgeConfig, BridgeError, CleanupStore, OwnerBridge,
-    ProcessIdentity, QuarantineCode, RestartProgress,
+    cleanup_record_bytes, folder_name, BridgeConfig, BridgeError, CleanupError, CleanupStore,
+    OwnerBridge, ProcessIdentity, QuarantineCode, RestartProgress,
 };
 use pos_owner_bridge_codec::{CeremonyId, ImagePathSha256};
 
@@ -320,6 +320,38 @@ fn restart(
         BridgeConfig::new(None),
     )
     .start_restart_check(store, probe)
+}
+
+#[test]
+fn poisoned_store_clones_refuse_reads_and_mutations_without_removing_survivors() -> TestResult {
+    let fixture = Fixture::new()?;
+    let mut store = fixture.open(Fault::None)?;
+    let bytes = record()?;
+    let folder = folder_name(&ID);
+    crate::create_private_directory(&fixture.0.join(&folder))?;
+    store.write_record(&bytes)?;
+    assert_eq!(store.records()?, [bytes.clone()]);
+    let mut peer = store.clone();
+    // Narrow fault injection at the shared lock: callers must not receive an
+    // empty scan or perform cleanup after a worker unwinds with the lock held.
+    let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _locked = peer.0.lock();
+        std::panic::resume_unwind(Box::new("controlled cleanup-store lock poison"));
+    }));
+    assert!(poisoned.is_err());
+    assert_eq!(store.records(), Err(CleanupError));
+    assert_eq!(peer.folders(), Err(CleanupError));
+    assert_eq!(store.write_record(&bytes), Err(CleanupError));
+    assert_eq!(peer.delete_record(&bytes), Err(CleanupError));
+    assert_eq!(store.remove_folder(&folder), Err(CleanupError));
+    assert_eq!(peer.records(), Err(CleanupError));
+    assert_eq!(store.folders(), Err(CleanupError));
+    // Independent reopening observes the same durable record and folder;
+    // failure through a poisoned clone did not silently mutate either.
+    let mut reopened = WindowsCleanupStore::open(fixture.0.clone())?;
+    assert_eq!(reopened.records()?, [bytes]);
+    assert_eq!(reopened.folders()?, [folder]);
+    Ok(())
 }
 
 #[test]
