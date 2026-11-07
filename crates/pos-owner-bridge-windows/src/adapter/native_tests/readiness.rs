@@ -1,6 +1,7 @@
 #![cfg(windows)]
 #![forbid(unsafe_code)]
 
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
@@ -45,8 +46,20 @@ pub(super) fn run(runtime_path: &Path, root: &Path) -> TestResult {
         results.push(worker.join());
     }
     let mut completed = 0;
-    for result in results {
-        completed += result.map_err(|_| "readiness STA worker panicked")??;
+    let mut reports = Vec::new();
+    for (worker, result) in results.into_iter().enumerate() {
+        let result = match result {
+            Ok(result) => result,
+            Err(_) => Err(format!("readiness STA worker {worker} panicked")),
+        };
+        writeln!(
+            std::io::stderr(),
+            "NATIVE_READINESS worker={worker} result={result:?}"
+        )?;
+        reports.push(result);
+    }
+    for result in reports {
+        completed += result?;
     }
     assert_eq!(completed, 1_000);
     Ok(())
@@ -77,6 +90,7 @@ fn run_worker(
         let number = u64::try_from(worker * RUNS_PER_WORKER + iteration + 1)?;
         let mut bytes = [0; 16];
         bytes[..8].copy_from_slice(&number.to_le_bytes());
+        let started = Instant::now();
         run_ceremony(
             &mut surface,
             &mut loopback,
@@ -84,7 +98,10 @@ fn run_worker(
             foreground,
             CeremonyId::from_bytes(bytes),
         )
-        .map_err(|error| format!("native readiness worker {worker} case {number}: {error}"))?;
+        .map_err(|error| format!(
+            "native readiness worker {worker} case {number}, {iteration} completed, elapsed={:?}: {error}",
+            started.elapsed()
+        ))?;
     }
     drop(surface);
     assert!(store.records()?.is_empty());
@@ -157,7 +174,7 @@ fn open<'a>(
     deadline: Instant,
 ) -> Result<(ProcessIdentity, MutexGuard<'a, ()>), Box<dyn std::error::Error>> {
     loop {
-        match foreground.try_lock() {
+        let stage = match foreground.try_lock() {
             Ok(visible) => match surface.open(spec) {
                 Poll::Ready(result) => {
                     return Ok((
@@ -165,14 +182,17 @@ fn open<'a>(
                         visible,
                     ));
                 }
-                Poll::Pending => drop(visible),
+                Poll::Pending => {
+                    drop(visible);
+                    "waiting for native opening completion"
+                }
             },
-            Err(TryLockError::WouldBlock) => {}
+            Err(TryLockError::WouldBlock) => "waiting for the foreground coordination gate",
             Err(TryLockError::Poisoned(_)) => {
                 return Err("readiness foreground lock poisoned".into())
             }
-        }
-        pump(surface, deadline)?;
+        };
+        pump(surface, deadline, stage)?;
     }
 }
 
@@ -186,26 +206,27 @@ fn navigate(
                 .map_err(pos_owner_bridge::SurfaceError::error)
                 .map_err(Into::into);
         }
-        pump(surface, deadline)?;
+        pump(surface, deadline, "waiting for the native navigation ID")?;
     }
 }
 
 fn await_event(surface: &mut Surface, deadline: Instant, expected: SurfaceEvent) -> TestResult {
+    let stage = format!("waiting for {expected:?}");
     loop {
         if let Some(event) = surface.take_event() {
             assert_eq!(event, expected);
             return Ok(());
         }
-        pump(surface, deadline)?;
+        pump(surface, deadline, &stage)?;
     }
 }
 
-fn pump(surface: &Surface, deadline: Instant) -> TestResult {
+fn pump(surface: &Surface, deadline: Instant, stage: &str) -> TestResult {
     if Instant::now() >= deadline {
-        return Err("native readiness fixture deadline expired".into());
+        return Err(format!("native readiness fixture deadline expired while {stage}").into());
     }
     if surface.pump()? == NativePulse::Quit {
-        return Err("native readiness STA received quit".into());
+        return Err(format!("native readiness STA received quit while {stage}").into());
     }
     Ok(())
 }
@@ -261,7 +282,7 @@ fn receive(
             == ControlState::Empty as u32
             && Instant::now() < receipt
         {
-            pump(surface, deadline)?;
+            pump(surface, deadline, "waiting for packaged Get receipt")?;
         }
         if surface
             .reply_load_state()
@@ -305,7 +326,7 @@ fn cancel(surface: &mut Surface) -> TestResult {
         .map_err(pos_owner_bridge::SurfaceError::error)?
         != ControlState::Releasing as u32
     {
-        pump(surface, deadline)?;
+        pump(surface, deadline, "waiting for Get release acknowledgement")?;
     }
     surface
         .zero_close_buffers()
