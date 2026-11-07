@@ -28,7 +28,7 @@ class CheckerTest(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
-        for part in ("expected", "inputs", "profiles", "matrix"):
+        for part in ("expected", "inputs", "oracles", "profiles", "matrix"):
             shutil.copytree(FIXTURES / part, self.root / part)
 
     def edit(self, relative: str, change: Callable[[Any], object]) -> None:
@@ -51,14 +51,31 @@ class CheckerTest(unittest.TestCase):
         self.record(lambda value: value.update(input_blake3_digest="0" * 64))
         self.assert_fault("resource-exhaustion: input_blake3_digest is not")
 
-    def test_an_executed_record_fails(self) -> None:
-        self.record(lambda value: value.update(status="executed", executed_at="now"))
-        self.assert_fault("resource-exhaustion: status is not 'pending'")
+    def test_a_pending_record_fails(self) -> None:
+        self.record(lambda value: value.update(status="pending", execution_result=None))
+        self.assert_fault("resource-exhaustion: status is not 'executed'")
+        self.assert_fault("resource-exhaustion: execution_result is not")
+
+    def test_an_execution_time_fails(self) -> None:
+        self.record(lambda value: value.update(executed_at="now"))
         self.assert_fault("resource-exhaustion: executed_at is not None")
 
-    def test_a_result_fails(self) -> None:
-        self.record(lambda value: value.update(execution_result="pass"))
-        self.assert_fault("resource-exhaustion: execution_result is not None")
+    def test_a_result_other_than_both_passing_runs_fails(self) -> None:
+        self.record(lambda value: value["execution_result"]["modes"].pop())
+        self.record(lambda value: value["execution_result"]["modes"][0].update(outcome="fail"), "denied")
+        self.record(lambda value: value["execution_result"].update(evidence="hosted"), "downgrade")
+        self.assert_fault("resource-exhaustion: execution_result is not")
+        self.assert_fault("denied: execution_result is not")
+        self.assert_fault("downgrade: execution_result is not")
+
+    def test_an_output_digest_that_is_not_the_oracle_fails(self) -> None:
+        oracle = self.root / f"oracles/{LAYER}/positive.json"
+        oracle.write_bytes(oracle.read_bytes() + b" ")
+        self.assert_fault("positive: execution_result is not")
+
+    def test_a_failure_code_that_is_not_the_oracle_fails(self) -> None:
+        self.edit(f"oracles/{LAYER}/malformed.json", lambda o: o["oracle"].update(code_id="x"))
+        self.assert_fault("malformed: execution_result is not")
 
     def test_an_extra_key_fails(self) -> None:
         self.record(lambda value: value.update(extra=1), "denied")

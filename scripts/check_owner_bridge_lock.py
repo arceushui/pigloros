@@ -11,8 +11,8 @@ import sys
 import tomllib
 from pathlib import Path
 
-VERSION = "1.1.5"
-CHECKSUM = "891efababe418670775f199f0d233d84843c227a0949a883ce15b37c78d6629d"
+VERSION = "1.1.6"
+CHECKSUM = "e5e76742e5294153d4dde1207dbec5bdd81eef6fabdc0d2118babadabfd858aa"
 SOURCE = "registry+https://github.com/rust-lang/crates.io-index"
 TARGET = 'cfg(target_os = "linux")'
 
@@ -28,13 +28,13 @@ def check(lock: dict, owner: dict, workspace: dict) -> list[str]:
         for p in selected
         for key, value in [("version", VERSION), ("source", SOURCE), ("checksum", CHECKSUM)]
     ):
-        errors.append("expected exactly rustix 1.1.5 with the ADR-110 E16 source/checksum")
+        errors.append("expected exactly rustix 1.1.6 with the ADR-110 E16 source/checksum")
     consumers = [p for p in packages if p.get("name") == "pos-owner-bridge"]
     if len(consumers) != 1 or [
         dependency for dependency in consumers[0].get("dependencies", [])
         if dependency.split()[0] == "rustix"
-    ] != ["rustix 1.1.5"]:
-        errors.append("pos-owner-bridge must resolve the pinned rustix 1.1.5")
+    ] != ["rustix 1.1.6"]:
+        errors.append("pos-owner-bridge must resolve the pinned rustix 1.1.6")
     expected = {"workspace": True, "features": ["process"]}
     targets = owner.get("target", {})
     actual = targets.get(TARGET, {}).get("dependencies", {}).get("rustix")
