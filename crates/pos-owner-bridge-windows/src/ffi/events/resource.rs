@@ -28,13 +28,20 @@ std::thread_local! {
     // an explicit controlled Complete. Never an automatically completing guard.
     static PROTOTYPE_HELD: std::cell::RefCell<Vec<PrototypeHeldResource>> =
         const { std::cell::RefCell::new(Vec::new()) };
+    static PROTOTYPE_STOP_VIEW: std::cell::RefCell<Option<ICoreWebView2>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
 impl crate::Native {
     pub(crate) fn prototype_before_close() -> Result<()> {
-        if DENIAL_FIXTURE.with(|mode| mode.get() == crate::ResourceDenialFixture::PrototypeHeld)
-            && PROTOTYPE_HELD.with(|held| !held.borrow().is_empty())
+        if DENIAL_FIXTURE.with(|mode| {
+            matches!(
+                mode.get(),
+                crate::ResourceDenialFixture::PrototypeHeld
+                    | crate::ResourceDenialFixture::PrototypeStopHeld
+            )
+        }) && PROTOTYPE_HELD.with(|held| !held.borrow().is_empty())
         {
             return Err(unavailable());
         }
@@ -44,7 +51,19 @@ impl crate::Native {
     pub(crate) fn set_resource_denial_fixture(mode: crate::ResourceDenialFixture) {
         DENIAL_FIXTURE.with(|current| current.set(mode));
         PROTOTYPE_HELD.with(|held| held.borrow_mut().clear());
+        PROTOTYPE_STOP_VIEW.with(|view| *view.borrow_mut() = None);
         super::response_prototype::reset();
+    }
+    pub(crate) fn prototype_retry_stop() -> Result<()> {
+        let view = PROTOTYPE_STOP_VIEW
+            .with(|view| view.borrow().clone())
+            .ok_or_else(unavailable)?;
+        // SAFETY: exact callback view retained on its creating STA; this retry
+        // occurs only from the outer test pump, with the request still deferred.
+        unsafe { view.Stop() }.map_err(|_| unavailable())?;
+        Self::prototype_complete_resource(false)?;
+        PROTOTYPE_STOP_VIEW.with(|view| *view.borrow_mut() = None);
+        Ok(())
     }
     pub(crate) fn prototype_complete_resource(deny: bool) -> Result<()> {
         PROTOTYPE_HELD.with(|held| {
@@ -83,8 +102,20 @@ pub(super) fn install(
     let observed = Rc::clone(signals);
     let remove = view.clone();
     let handler = WebResourceRequestedEventHandler::create(Box::new(move |sender, args| {
+        #[cfg(test)]
+        let retained = args.clone();
         if let Err(error) = filter(args, &response, observed.as_ref()) {
             observed.failed(EventKind::Resource, error);
+            #[cfg(test)]
+            if hold_failed_stop(sender.clone(), retained, &response)
+                .map_err(|_| windows::core::Error::from_hresult(E_ABORT))?
+            {
+                // Model a failed Stop with no native effect, after the modeled
+                // SetResponse failure. Successful acquisition keeps this event
+                // deferred; callback success alone is never cancellation proof.
+                observed.failed(EventKind::Resource, unavailable());
+                return Ok(());
+            }
             #[cfg(test)]
             stop_prototype(sender).map_err(|_| windows::core::Error::from_hresult(E_ABORT))?;
             #[cfg(not(test))]
@@ -116,6 +147,25 @@ pub(super) fn install(
     // the pre-created denial unless the exact owner document is admitted.
     unsafe { view.AddWebResourceRequestedFilter(w!("*"), COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL) }
         .map_err(|_| unavailable())
+}
+
+#[cfg(test)]
+fn hold_failed_stop(
+    sender: Option<ICoreWebView2>,
+    args: Option<ICoreWebView2WebResourceRequestedEventArgs>,
+    response: &ICoreWebView2WebResourceResponse,
+) -> Result<bool> {
+    if !DENIAL_FIXTURE.with(|mode| mode.get() == crate::ResourceDenialFixture::PrototypeStopHeld) {
+        return Ok(false);
+    }
+    let view = sender.ok_or_else(unavailable)?;
+    let args = args.ok_or_else(unavailable)?;
+    // SAFETY: retained live callback arguments; acquisition is deliberately
+    // after the modeled setter failure and before unwinding the callback.
+    let deferral = unsafe { args.GetDeferral() }.map_err(|_| unavailable())?;
+    PROTOTYPE_HELD.with(|held| held.borrow_mut().push((deferral, args, response.clone())));
+    PROTOTYPE_STOP_VIEW.with(|held| *held.borrow_mut() = Some(view));
+    Ok(true)
 }
 
 #[cfg(test)]

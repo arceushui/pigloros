@@ -49,7 +49,8 @@ fn resource_cases() -> Vec<(u8, bool, crate::ResourceDenialFixture, u32)> {
     use crate::ResourceDenialFixture::{
         Normal, PropagateFailure, PrototypeCloseFirst, PrototypeCompleteAllowed,
         PrototypeCompleteDenied, PrototypeDeferredStop, PrototypeDeferredStopClose, PrototypeDrop,
-        PrototypeHeld, PrototypeResponseBarrier, PrototypeStop, PrototypeStopClose, SwallowFailure,
+        PrototypeHeld, PrototypeResponseBarrier, PrototypeStop, PrototypeStopClose,
+        PrototypeStopHeld, SwallowFailure,
     };
     let mut cases = vec![
         (0x20, false, Normal, 1),
@@ -64,11 +65,19 @@ fn resource_cases() -> Vec<(u8, bool, crate::ResourceDenialFixture, u32)> {
         (0x2b, true, PrototypeStopClose, 0),
         (0x2c, true, PrototypeDeferredStop, 0),
         (0x2d, true, PrototypeDeferredStopClose, 0),
+        (0x2e, true, PrototypeStopHeld, 0),
         (0x28, true, PrototypeCloseFirst, 0),
         (0x24, true, PrototypeHeld, 0),
         (0x27, true, PrototypeDrop, 0),
     ];
-    cases.extend((0x40..0x60).map(|value| (value, true, PrototypeStopClose, 0)));
+    cases.extend((0x40_u8..0x60).map(|value| {
+        let mode = if value.is_multiple_of(2) {
+            PrototypeStopHeld
+        } else {
+            PrototypeStopClose
+        };
+        (value, true, mode, 0)
+    }));
     cases
 }
 
@@ -80,10 +89,12 @@ const fn resource_stays_deferred(mode: crate::ResourceDenialFixture) -> bool {
             | crate::ResourceDenialFixture::PrototypeCloseFirst
             | crate::ResourceDenialFixture::PrototypeStopClose
             | crate::ResourceDenialFixture::PrototypeDeferredStopClose
+            | crate::ResourceDenialFixture::PrototypeStopHeld
     )
 }
 
 fn restore_denial(
+    factory: &dyn StaPump,
     native: &mut dyn NativeOperations,
     mode: crate::ResourceDenialFixture,
 ) -> TestResult {
@@ -91,6 +102,18 @@ fn restore_denial(
         assert!(native.unsubscribe_view().is_err());
         assert!(native.close_controller().is_err());
         crate::Native::prototype_complete_resource(true)?;
+    }
+    if mode == crate::ResourceDenialFixture::PrototypeStopHeld {
+        assert!(native.unsubscribe_view().is_err());
+        assert!(native.close_controller().is_err());
+        if factory.next()? == NativePulse::Quit {
+            return Err("prototype quit before deferred cancellation retry".into());
+        }
+        // Both request arguments and exact view remain owned across this real
+        // outer-pump turn. No native Close/removal may occur before retry.
+        assert!(native.unsubscribe_view().is_err());
+        assert!(native.close_controller().is_err());
+        crate::Native::prototype_retry_stop()?;
     }
     Ok(())
 }
@@ -341,7 +364,7 @@ impl crate::Native {
             if mode != crate::ResourceDenialFixture::Normal {
                 assert!(probe.failures.get() > 0);
             }
-            restore_denial(native.as_mut(), mode)?;
+            restore_denial(&factory, native.as_mut(), mode)?;
             if mode != crate::ResourceDenialFixture::PrototypeCloseFirst {
                 native.unsubscribe_view()?;
             }
