@@ -263,6 +263,21 @@ impl AuthenticatedSelectorBootstrap {
     pub const fn policy(&self) -> &SandboxAdministratorPolicy {
         &self.policy
     }
+
+    /// Resolves the TRS1 deployment-operator key: the only key that
+    /// authenticates an installed TPS1 operator signature (ADR-069 R8). It is
+    /// evaluated per case against the current TRS1/RVS1 pair and never comes
+    /// from the TPS1's own trust roots, EVR1, CFB1, or APT1.
+    ///
+    /// # Errors
+    /// Returns [`SelectorBoundaryError::ArtifactInvalid`] unless TRS1 holds
+    /// exactly one deployment-operator record that RVS1 does not revoke and
+    /// whose bytes are an Ed25519 verifying key.
+    pub fn trust_policy_operator_key(&self) -> Result<VerifyingKey, SelectorBoundaryError> {
+        self.revocation
+            .deployment_operator_key(&self.trust)
+            .map_err(|_| SelectorBoundaryError::ArtifactInvalid)
+    }
 }
 
 impl AdmittedSelectorProvider {
