@@ -55,6 +55,8 @@
 //! 192 trusted NIA1 artifacts, one per coordinate; with fewer it is
 //! [`NonInterferenceReportErrorV1::InvalidShape`].
 
+#[cfg(feature = "test-support")]
+pub mod g_pub;
 mod local_process;
 #[cfg(feature = "test-support")]
 pub mod probe;

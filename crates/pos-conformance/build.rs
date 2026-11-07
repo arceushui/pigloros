@@ -828,7 +828,7 @@ fn verify_source_inventory(
     let declared_paths = snapshots
         .sha256_entries
         .keys()
-        .cloned()
+        .filter_map(|path| bundle_source_path(path))
         .collect::<BTreeSet<_>>();
     if declared_paths != expected_paths {
         return Err(invalid_data(
@@ -850,7 +850,7 @@ fn verify_source_inventory(
     if snapshots
         .blake3_entries
         .keys()
-        .cloned()
+        .filter_map(|path| bundle_source_path(path))
         .collect::<BTreeSet<_>>()
         != blake3_paths
     {
@@ -2756,4 +2756,12 @@ fn expected_paths_with_auxiliary(
         }
     }
     paths
+}
+
+/// An inventoried source path that belongs to the bundle materialization closure. The
+/// non-interference evidence (ADR-062 Revision 8 slice N1, #1229) is inventoried and
+/// digest-checked like every source, but it is not a member of any conformance bundle: the
+/// fixture verify script owns its closure.
+fn bundle_source_path(path: &str) -> Option<String> {
+    (!path.starts_with("non-interference/")).then(|| path.to_owned())
 }
