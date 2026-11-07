@@ -48,10 +48,8 @@ pub(super) fn run(runtime_path: &Path, root: &Path) -> TestResult {
     let mut completed = 0;
     let mut reports = Vec::new();
     for (worker, result) in results.into_iter().enumerate() {
-        let result = result.map_or_else(
-            |_| Err(format!("readiness STA worker {worker} panicked")),
-            std::convert::identity,
-        );
+        let result =
+            result.unwrap_or_else(|_| Err(format!("readiness STA worker {worker} panicked")));
         writeln!(
             std::io::stderr(),
             "NATIVE_READINESS worker={worker} result={result:?}"
