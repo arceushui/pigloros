@@ -184,6 +184,13 @@ ADR-064 Fork artifacts of slice R6. Their expected result digests are derived by
 `scripts/generate_non_interference_g_fork_fixtures.py`, which rebuilds every
 `INT1`, `CFP1`, `RCF1`, `SIV1`, `RCP1` and `CFR1` byte in pure Python. The F-mode
 evidence is re-run when #1204 lands.
+
+ADR-062 Revision 8 slice N3 (#1231, owner note `ADR-062_R8_NonInterference_Operations`)
+flips the 48 cases of `NI-CACHE-002`, `NI-OBS-004`, `NI-TIME-005` and `NI-CRASH-012`
+in modes L, R and F, under the same rules. Their oracle is
+`scripts/generate_non_interference_g_ops_fixtures.py`; only each row's #181
+operational normalization is applied, and their Air-Gapped cases stay non-executed
+until N7.
 `expected-authority/inventory.json` records the eleven #172 handoff slots. Its
 `expected_outcome` values are planned authority targets, not observed results.
 Since ADR-062 Revision 8 slice R4 (#1222) every slot is `materialized`: its
