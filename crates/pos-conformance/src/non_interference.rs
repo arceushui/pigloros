@@ -649,7 +649,7 @@ fn profile_digest(profile: &NonInterferenceCaptureProfileV1) -> [u8; 32] {
         bytes.push(variant_code(*variant));
     }
     for mode in &profile.modes {
-        bytes.push(mode_code(*mode));
+        bytes.push(mode.wire_code());
     }
     bytes.extend_from_slice(&profile.normalization_version.to_be_bytes());
     bytes.extend_from_slice(&profile.max_surface_bytes.to_be_bytes());
@@ -976,15 +976,6 @@ const fn variant_code(variant: NonInterferenceVariantV1) -> u8 {
         NonInterferenceVariantV1::Denial => 1,
         NonInterferenceVariantV1::WarmCache => 2,
         NonInterferenceVariantV1::ColdCache => 3,
-    }
-}
-
-const fn mode_code(mode: ExecutionModeV1) -> u8 {
-    match mode {
-        ExecutionModeV1::Local => 0,
-        ExecutionModeV1::AirGapped => 1,
-        ExecutionModeV1::Replay => 2,
-        ExecutionModeV1::Fork => 3,
     }
 }
 

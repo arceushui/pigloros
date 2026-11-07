@@ -16,10 +16,11 @@ use thiserror::Error;
 use crate::{
     ArtifactDescriptorV1, ConformanceContractError, ConformanceProfileV1, ExecutionModeV1,
     FixtureFamilyV1, FixtureProviderKeyV1, FixtureProviderPackageV1, FixtureProviderRegistryV1,
-    ProfileLifecycleV1, DRAFT_AUTHORITY_EFFECTIVE_TIMELINE_POSITION, DRAFT_AUTHORITY_KEY_ID,
-    DRAFT_AUTHORITY_MINIMUM_VERSIONS, DRAFT_AUTHORITY_OFFLINE_VALID_THROUGH,
-    DRAFT_AUTHORITY_ROOT_ALGORITHM, DRAFT_AUTHORITY_ROOT_VERSION,
-    DRAFT_AUTHORITY_TRUST_POLICY_EPOCH, DRAFT_AUTHORITY_TRUST_POLICY_ID, DRAFT_EXECUTION_PROFILES,
+    ProfileLifecycleV1, TrustPolicySnapshotV1, DRAFT_AUTHORITY_EFFECTIVE_TIMELINE_POSITION,
+    DRAFT_AUTHORITY_KEY_ID, DRAFT_AUTHORITY_MINIMUM_VERSIONS,
+    DRAFT_AUTHORITY_OFFLINE_VALID_THROUGH, DRAFT_AUTHORITY_ROOT_ALGORITHM,
+    DRAFT_AUTHORITY_ROOT_VERSION, DRAFT_AUTHORITY_TRUST_POLICY_EPOCH,
+    DRAFT_AUTHORITY_TRUST_POLICY_ID, DRAFT_EXECUTION_PROFILES,
     FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1,
 };
 
@@ -293,7 +294,9 @@ pub fn draft_trust_policy_snapshot_bytes_v1() -> Result<Vec<u8>, BundleContractE
         let mut signed_fields = fields;
         signed_fields.push(Value::Bytes(
             draft_fixture_authority_signing_key()
-                .sign(&unsigned)
+                .sign(
+                    &TrustPolicySnapshotV1::operator_signature_message_from_unsigned_v1(&unsigned),
+                )
                 .to_bytes()
                 .to_vec(),
         ));
@@ -391,11 +394,8 @@ pub enum BundleModeV1 {
     AirGapped,
 }
 impl BundleModeV1 {
-    const fn code(self) -> u64 {
-        match self {
-            Self::Local => 0,
-            Self::AirGapped => 1,
-        }
+    const fn code(self) -> u8 {
+        self.execution().wire_code()
     }
     const fn execution(self) -> ExecutionModeV1 {
         match self {
@@ -1115,7 +1115,12 @@ fn validate_trust_policy_snapshot_fields(fields: &[Value]) -> Result<(), BundleC
             draft_authority_verifying_key()
                 .and_then(|verifying_key| {
                     verifying_key
-                        .verify(&unsigned, &ed25519_dalek::Signature::from_bytes(&signature))
+                        .verify(
+                            &TrustPolicySnapshotV1::operator_signature_message_from_unsigned_v1(
+                                &unsigned,
+                            ),
+                            &ed25519_dalek::Signature::from_bytes(&signature),
+                        )
                         .map_err(|_| BundleContractErrorV1::SignatureInvalid)
                 })
                 .and_then(|()| {
