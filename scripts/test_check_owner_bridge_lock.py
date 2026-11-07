@@ -12,8 +12,8 @@ class OwnerBridgeLockTests(unittest.TestCase):
         self.lock = {
             "package": [
                 {"name": "rustix", "version": "0.38.44"},
-                {"name": "rustix", "version": "1.1.5", "source": SOURCE, "checksum": CHECKSUM},
-                {"name": "pos-owner-bridge", "dependencies": ["rustix 1.1.5"]},
+                {"name": "rustix", "version": "1.1.6", "source": SOURCE, "checksum": CHECKSUM},
+                {"name": "pos-owner-bridge", "dependencies": ["rustix 1.1.6"]},
             ]
         }
         self.owner = {"target": {TARGET: {"dependencies": {
@@ -39,7 +39,7 @@ class OwnerBridgeLockTests(unittest.TestCase):
                 else:
                     lock["package"].pop(index)
                 self.assertTrue(check(lock, self.owner, self.workspace))
-        for dependencies in [["rustix 0.38.44"], ["rustix 1.1.5", "rustix 0.38.44"]]:
+        for dependencies in [["rustix 0.38.44"], ["rustix 1.1.6", "rustix 0.38.44"]]:
             self.lock["package"][2]["dependencies"] = dependencies
             self.assertTrue(check(self.lock, self.owner, self.workspace))
 
@@ -63,7 +63,7 @@ class OwnerBridgeLockTests(unittest.TestCase):
                         continue
                     owner = copy.deepcopy(self.owner)
                     table = owner if target is None else owner["target"].setdefault(target, {})
-                    table.setdefault(kind, {})[name] = {"package": "rustix", "version": "1.1.5"}
+                    table.setdefault(kind, {})[name] = {"package": "rustix", "version": "1.1.6"}
                     self.assertTrue(check(self.lock, owner, self.workspace), (target, kind, name))
 
     def test_workspace_features_stay_unchanged(self):
