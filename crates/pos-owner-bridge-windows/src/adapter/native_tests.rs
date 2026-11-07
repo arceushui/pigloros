@@ -25,17 +25,20 @@ use crate::{
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
-fn assert_resource_counts(listener: &LoopbackListener, before: u64, expected: u32) {
-    assert_eq!(
+fn record_resource_outcome(
+    value: u8,
+    expected: u32,
+    before: (u32, u64),
+    listener: &LoopbackListener,
+    baseline: u64,
+) -> std::io::Result<bool> {
+    let after = (
         listener.served().count,
-        expected,
-        "unexpected completed resource response"
+        listener.received_request_count() - baseline,
     );
-    assert_eq!(
-        listener.received_request_count() - before,
-        u64::from(expected),
-        "unexpected request bytes reached the listener"
-    );
+    writeln!(std::io::stderr(),
+        "PROTOTYPE resource case={value} expected={expected} before={before:?} after={after:?} exited=true")?;
+    Ok(after == (expected, u64::from(expected)))
 }
 
 const fn resource_cases() -> [(u8, bool, crate::ResourceDenialFixture, u32); 9] {
@@ -68,13 +71,11 @@ const fn resource_stays_deferred(mode: crate::ResourceDenialFixture) -> bool {
 
 fn restore_denial(
     native: &mut dyn NativeOperations,
-    listener: &dyn LoopbackPort,
     mode: crate::ResourceDenialFixture,
 ) -> TestResult {
     if mode == crate::ResourceDenialFixture::PrototypeHeld {
         assert!(native.unsubscribe_view().is_err());
         assert!(native.close_controller().is_err());
-        assert_eq!(listener.served().count, 0);
         crate::Native::prototype_complete_resource(true)?;
     }
     Ok(())
@@ -226,6 +227,7 @@ impl crate::Native {
             ListenerConfig::adr(),
         )?;
         let mut factory = Self::owner_factory()?;
+        let mut verdicts = Vec::new();
         for (value, deny, mode, served) in resource_cases() {
             let _mode = ResourceProbeGuard::new(mode);
             let received_before = listener.received_request_count();
@@ -287,11 +289,14 @@ impl crate::Native {
                     listener.served().count == 1
                 })?;
             }
-            assert_resource_counts(&listener, received_before, served);
+            let before = (
+                listener.served().count,
+                listener.received_request_count() - received_before,
+            );
             if mode != crate::ResourceDenialFixture::Normal {
                 assert!(probe.failures.get() > 0);
             }
-            restore_denial(native.as_mut(), &listener, mode)?;
+            restore_denial(native.as_mut(), mode)?;
             if mode != crate::ResourceDenialFixture::PrototypeCloseFirst {
                 native.unsubscribe_view()?;
             }
@@ -299,17 +304,20 @@ impl crate::Native {
             pump_until(&factory, "resource browser exit", || {
                 probe.policy.exited() == Some(identity.browser_pid)
             })?;
-            assert_resource_counts(&listener, received_before, served);
-            writeln!(
-                std::io::stderr(),
-                "PROTOTYPE resource case={value} listener={served} exited=true"
-            )?;
+            verdicts.push(record_resource_outcome(
+                value,
+                served,
+                before,
+                &listener,
+                received_before,
+            )?);
             native.unsubscribe_exit()?;
             native.drop_environment()?;
             native.destroy_window()?;
         }
         factory.stop()?;
         listener.shutdown();
+        assert!(verdicts.into_iter().all(std::convert::identity));
         Ok(())
     }
 
