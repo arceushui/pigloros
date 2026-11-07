@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
 """Check the evidence-status records of the Plugin conformance layer (ADR-061 r8, R8-F5).
 
-Decision 11: every `expected/plugin-conformance/*.json` stays `pending` with a null result and a
-null time, and binds the BLAKE3 digest of its payload (`inputs/plugin-conformance/<family>.json`).
+ADR-062 Revision 8 slice N6 (#1234) replaces decision 11: every `expected/plugin-conformance/*.json`
+is `executed`, because the evaluator passes its case in both the Local and the Air-Gapped
+ExecutionProfile run (Local-relaxation engineering evidence; the Rust test
+`apps/pos-plugin-worker/tests/provider_dispatch_public.rs` re-executes and requires it). The
+result names each run's outcome and the actual output digest (the BLAKE3 of the oracle member) or
+failure code (the oracle's), both derived here from the oracle alone; the time stays null. The
+record binds the BLAKE3 digest of its payload (`inputs/plugin-conformance/<family>.json`).
 The Local and Air-Gapped bundles are materialized from this one record per family, so their
 digests are equal by construction; the profile must list exactly one `expected` path per family
 and nothing else. The execution matrix holds no executed case and no Plugin row.
@@ -20,6 +25,7 @@ sys.path.insert(0, str(HERE))
 import generate_pmf1_golden_vectors as golden  # noqa: E402
 
 LAYER = "plugin-conformance"
+MODES = ("local", "air-gapped")
 FAMILIES = (
     "positive",
     "denied",
@@ -53,6 +59,20 @@ def as_list(value: object) -> list[object]:
     return value if isinstance(value, list) else []
 
 
+def execution_result(root: Path, family: str) -> dict[str, object]:
+    """The verifier-accepted result of `family`, derived from its oracle member alone."""
+    oracle_bytes = (root / f"oracles/{LAYER}/{family}.json").read_bytes()
+    oracle = as_dict(as_dict(json.loads(oracle_bytes)).get("oracle"))
+    if oracle.get("kind") == "canonical-output":
+        observed: dict[str, object] = {"actual_digest": golden.blake3(oracle_bytes).hex()}
+    else:
+        observed = {"actual_error": oracle.get("code_id")}
+    return {
+        "evidence": "local-relaxation",
+        "modes": [{"mode": mode, "outcome": "pass", **observed} for mode in MODES],
+    }
+
+
 def record_errors(root: Path, family: str) -> list[str]:
     """The faults of the evidence-status record of `family`."""
     record = load(root / f"expected/{LAYER}/{family}.json")
@@ -62,8 +82,8 @@ def record_errors(root: Path, family: str) -> list[str]:
         "case_id": f"{LAYER}-{family}",
         "family": family,
         "input_blake3_digest": digest,
-        "status": "pending",
-        "execution_result": None,
+        "status": "executed",
+        "execution_result": execution_result(root, family),
         "executed_at": None,
     }
     if not isinstance(record, dict) or set(record) != KEYS:
