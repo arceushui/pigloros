@@ -203,6 +203,7 @@ fn measured_report(mode: u64, budgets: &[[u64; 8]; 7]) -> TestResult<Conformance
         &corpus.archive,
         &corpus.trust_policy,
         &evaluator_identity()?,
+        &support::test_executors(),
         &mut adapter,
     )?;
     Ok(artifacts.report)

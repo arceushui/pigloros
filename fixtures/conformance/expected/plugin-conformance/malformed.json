@@ -3,7 +3,21 @@
   "case_id": "plugin-conformance-malformed",
   "family": "malformed",
   "input_blake3_digest": "223401ae14534953e037f78c11ab17993c2f671044ef16d7fe5726617fba23c5",
-  "status": "pending",
-  "execution_result": null,
+  "status": "executed",
+  "execution_result": {
+    "evidence": "local-relaxation",
+    "modes": [
+      {
+        "mode": "local",
+        "outcome": "pass",
+        "actual_error": "malformed-payload"
+      },
+      {
+        "mode": "air-gapped",
+        "outcome": "pass",
+        "actual_error": "malformed-payload"
+      }
+    ]
+  },
   "executed_at": null
 }
