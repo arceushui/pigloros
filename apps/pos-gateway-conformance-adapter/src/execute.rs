@@ -34,7 +34,7 @@ use crate::{ACTOR_ENTITY_ID, BODY_ENTITY_ID};
 const ACTOR_HEADER: &str = "x-piglor-actor-entity";
 
 /// The largest response body read; a Gateway response is at most 1 MiB.
-const RESPONSE_LIMIT: usize = 2 * 1024 * 1024;
+const RESPONSE_LIMIT: usize = 2_097_152;
 
 /// The executed sub-cases of one attempt.
 pub(super) struct CaseRunV2 {

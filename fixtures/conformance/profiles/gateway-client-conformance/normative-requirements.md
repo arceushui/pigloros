@@ -17,8 +17,11 @@ A case payload is RFC 8785 JSON with exactly the members `schema`
 (`<prefix>.<n>`), `title`, `composition` (`open` or `authorized`), `exchanges` (1 to 128), and
 optionally `canary` (1 to 64 printable ASCII bytes). An exchange has exactly `router`
 (`loopback` or `spectator`), `method` (`GET` or `POST`), `path`, `expect`, and optionally
-`actor` (`true`), `body` (any JSON value) and `capture` (`"timeline"`). A payload outside this
-grammar is the failure `payload-invalid`.
+`actor` (`true`), `body` (any JSON value other than null) and `capture` (`"timeline"`). An
+optional member that is null is the same as an absent one. A `title` is 1 to 160 printable ASCII
+bytes (space allowed), a `path` 1 to 256 printable ASCII bytes without space, and a sub-case `id`
+is the family prefix, a dot and one or more decimal digits. A payload outside
+this grammar is the failure `payload-invalid`.
 
 ## 2. Routes and capabilities
 
@@ -35,8 +38,10 @@ The path without its query names one route; any other path is outside the gramma
 
 An exchange whose route capability the attempt does not hold is not sent; its observation is
 `{"refused": "capability-denied"}`. The literal `{timeline}` in a path is replaced by the `id`
-of the response of the last earlier exchange of the sub-case that sets `capture`; a path that
-uses it before any capture is outside the grammar.
+of the response of the last earlier sent exchange of the sub-case that sets `capture`; a path that
+uses it before any capture is outside the grammar. A capturing exchange that is refused captures
+nothing, and a captured response with no text `id` leaves the slot empty, so the exchanges that use
+it cannot match.
 
 ## 3. Compositions
 
