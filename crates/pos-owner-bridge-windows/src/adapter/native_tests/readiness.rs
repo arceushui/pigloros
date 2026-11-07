@@ -245,7 +245,7 @@ fn receive(
             .map_err(|error| error.to_string())?
             .encode();
         surface
-            .prepare(&request, &reply)
+            .create_and_write(&request, &reply)
             .map_err(pos_owner_bridge::SurfaceError::error)?;
         surface
             .post(&PostGuard {
