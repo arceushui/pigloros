@@ -24,6 +24,8 @@ use crate::{
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
+mod readiness;
+
 fn assert_resource_counts(listener: &LoopbackListener, before: u64, expected: u32) {
     assert_eq!(
         listener.served().count,
@@ -407,6 +409,8 @@ impl crate::Native {
         drop(native);
         factory.stop()?;
         listener.shutdown();
+        drop(listener);
+        readiness::run(&runtime_path, &root.0)?;
         Ok(())
     }
 }
