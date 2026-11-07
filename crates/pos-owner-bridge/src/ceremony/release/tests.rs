@@ -38,12 +38,15 @@ const fn refused() -> SurfaceError {
 }
 
 impl OwnerWebSurface for StateWord {
-    fn open(&mut self, _spec: &SurfaceSpec) -> Result<ProcessIdentity, SurfaceError> {
-        Err(refused())
+    fn open(
+        &mut self,
+        _spec: &SurfaceSpec,
+    ) -> std::task::Poll<Result<ProcessIdentity, SurfaceError>> {
+        std::task::Poll::Ready(Err(refused()))
     }
 
-    fn navigate(&mut self) -> Result<NavigationId, SurfaceError> {
-        Err(refused())
+    fn navigate(&mut self) -> std::task::Poll<Result<NavigationId, SurfaceError>> {
+        std::task::Poll::Ready(Err(refused()))
     }
 
     fn create_and_write(&mut self, _r: &RequestImage, _h: &[u8; 64]) -> Result<(), SurfaceError> {

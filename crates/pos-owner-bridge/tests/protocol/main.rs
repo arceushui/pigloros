@@ -5,6 +5,7 @@ mod channel;
 mod driver_paths;
 mod enrollment;
 mod fakes;
+mod opening;
 mod oracle;
 mod quarantine;
 mod restart_probe;

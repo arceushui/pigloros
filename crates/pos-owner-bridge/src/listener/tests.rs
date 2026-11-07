@@ -312,6 +312,7 @@ fn responses_to_a_broken_peer_leave_the_ledger_untouched() {
     let ledger = Arc::new(ServedLedger::default());
     let context = ServeContext {
         ledger: Arc::clone(&ledger),
+        received: Arc::default(),
         timeouts: ADR_TIMEOUTS,
         expected_digest: ADR_DIGEST,
     };
@@ -444,8 +445,26 @@ fn read_scripted(
 ) -> (ReadOutcome, Vec<Duration>) {
     let mut reader = Scripted::new(chunks);
     let mut buffer = [0_u8; REQUEST_BUFFER_BYTES];
-    let outcome = read_request(&mut reader, &mut buffer, timeouts);
+    let outcome = read_request(&mut reader, &mut buffer, timeouts, || {});
     (outcome, reader.limits)
+}
+
+#[test]
+fn first_request_byte_is_observed_once_even_without_complete_headers() {
+    for (bytes, expected) in [(&b""[..], 0), (&b"G"[..], 1), (OWNER_REQUEST, 1)] {
+        let chunks = bytes.chunks(2).map(|part| Ok(part.to_vec())).collect();
+        let mut reader = Scripted::new(chunks);
+        let mut buffer = [0; REQUEST_BUFFER_BYTES];
+        let mut received = 0;
+        let outcome = read_request(&mut reader, &mut buffer, ADR_TIMEOUTS, || received += 1);
+        assert_eq!(received, expected);
+        let expected_outcome = if bytes == OWNER_REQUEST {
+            ReadOutcome::Complete(bytes.len())
+        } else {
+            ReadOutcome::Silent
+        };
+        assert_eq!(outcome, expected_outcome);
+    }
 }
 
 #[test]
@@ -504,6 +523,7 @@ fn a_passed_deadline_still_reads_for_the_shortest_limit_a_socket_accepts() {
 fn the_fixed_error_responses_are_written_exactly() {
     let context = ServeContext {
         ledger: Arc::new(ServedLedger::default()),
+        received: Arc::default(),
         timeouts: ADR_TIMEOUTS,
         expected_digest: ADR_DIGEST,
     };
@@ -545,6 +565,7 @@ fn held(shared: &Arc<Shared>) -> usize {
 fn serve_context() -> Arc<ServeContext> {
     Arc::new(ServeContext {
         ledger: Arc::new(ServedLedger::default()),
+        received: Arc::default(),
         timeouts: ADR_TIMEOUTS,
         expected_digest: ADR_DIGEST,
     })

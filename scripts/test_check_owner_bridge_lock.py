@@ -4,7 +4,9 @@
 import copy
 import unittest
 
-from check_owner_bridge_lock import CHECKSUM, SOURCE, TARGET, check
+from check_owner_bridge_lock import (
+    CHECKSUM, SOURCE, TARGET, WINDOWS_PINS, WEBVIEW_PINS, WINDOWS_TARGET, COMPANIONS, check, check_windows,
+)
 
 
 class OwnerBridgeLockTests(unittest.TestCase):
@@ -71,6 +73,112 @@ class OwnerBridgeLockTests(unittest.TestCase):
             workspace = copy.deepcopy(self.workspace)
             workspace["workspace"]["dependencies"]["rustix"][field] = value
             self.assertTrue(check(self.lock, self.owner, workspace))
+
+
+class WindowsFamilyLockTests(unittest.TestCase):
+    def setUp(self):
+        self.lock = {"package": [
+            {"name": name, "version": version, "source": SOURCE, "checksum": checksum}
+            for name, (version, checksum) in WINDOWS_PINS.items()
+        ] + [{"name": "pos-owner-bridge-windows", "dependencies": ["windows"]}]}
+        self.shim = {"target": {WINDOWS_TARGET: {"dependencies": {
+            "windows": {"workspace": True, "features": ["Win32_Foundation"]}
+        }}}}
+        self.workspace = {"workspace": {"dependencies": {"windows": {
+            "version": "=0.62.2", "default-features": False, "features": ["std"]
+        }}}}
+
+    def enable_webview(self):
+        self.workspace["workspace"]["dependencies"]["webview2-com"] = "=0.39.1"
+        self.shim["target"][WINDOWS_TARGET]["dependencies"]["webview2-com"] = {"workspace": True}
+        self.lock["package"][-1]["dependencies"].append("webview2-com")
+        self.lock["package"].extend(
+            {"name": name, "version": version, "source": SOURCE, "checksum": checksum}
+            for name, (version, checksum) in WEBVIEW_PINS.items()
+        )
+
+    def test_current_and_full_consumed_graphs(self):
+        self.assertEqual(check_windows(self.lock, self.shim, self.workspace), [])
+        self.enable_webview()
+        self.assertEqual(check_windows(self.lock, self.shim, self.workspace), [])
+
+    def test_every_selected_version_source_checksum_and_single_version_rule(self):
+        self.enable_webview()
+        for name in WINDOWS_PINS | WEBVIEW_PINS:
+            index = next(i for i, package in enumerate(self.lock["package"]) if package["name"] == name)
+            for field in ["version", "source", "checksum"]:
+                lock = copy.deepcopy(self.lock)
+                lock["package"][index][field] = "unapproved"
+                self.assertTrue(check_windows(lock, self.shim, self.workspace), (name, field))
+            for duplicate in [False, True]:
+                lock = copy.deepcopy(self.lock)
+                if duplicate:
+                    lock["package"].append(copy.deepcopy(lock["package"][index]))
+                else:
+                    lock["package"].pop(index)
+                self.assertTrue(check_windows(lock, self.shim, self.workspace), (name, duplicate))
+
+    def test_pins_are_added_only_when_consumed(self):
+        for name, (version, checksum) in WEBVIEW_PINS.items():
+            lock = copy.deepcopy(self.lock)
+            lock["package"].append({"name": name, "version": version, "source": SOURCE, "checksum": checksum})
+            self.assertTrue(check_windows(lock, self.shim, self.workspace), name)
+        self.workspace["workspace"]["dependencies"]["webview2-com"] = "=0.39.1"
+        self.assertTrue(check_windows(self.lock, self.shim, self.workspace))
+        self.enable_webview()
+        for dependency in ["0.39.1", {"workspace": True, "features": []}, {"workspace": False}]:
+            shim = copy.deepcopy(self.shim)
+            shim["target"][WINDOWS_TARGET]["dependencies"]["webview2-com"] = dependency
+            self.assertTrue(check_windows(self.lock, shim, self.workspace), dependency)
+        self.workspace["workspace"]["dependencies"]["webview2-com"] = "0.39.1"
+        self.assertTrue(check_windows(self.lock, self.shim, self.workspace))
+
+    def test_windows_workspace_pin_and_shim_scope_are_exact(self):
+        for field, value in [("version", "0.62.2"), ("default-features", True), ("features", [])]:
+            workspace = copy.deepcopy(self.workspace)
+            workspace["workspace"]["dependencies"]["windows"][field] = value
+            self.assertTrue(check_windows(self.lock, self.shim, workspace), field)
+        self.enable_webview()
+        for name in ["windows", "webview2-com"]:
+            for target in [None, WINDOWS_TARGET, TARGET]:
+                for kind in ["dependencies", "dev-dependencies", "build-dependencies"]:
+                    for alias in [name, "renamed"]:
+                        if (target, kind, alias) == (WINDOWS_TARGET, "dependencies", name):
+                            continue
+                        shim = copy.deepcopy(self.shim)
+                        table = shim if target is None else shim["target"].setdefault(target, {})
+                        table.setdefault(kind, {})[alias] = {"package": name, "workspace": True}
+                        self.assertTrue(check_windows(self.lock, shim, self.workspace), (name, target, kind, alias))
+        self.assertTrue(check_windows(self.lock, {}, self.workspace))
+
+    def test_companions_remain_transitive_and_lock_edges_match(self):
+        self.enable_webview()
+        for name in COMPANIONS:
+            for alias in [name, "renamed"]:
+                workspace = copy.deepcopy(self.workspace)
+                workspace["workspace"]["dependencies"][alias] = {"package": name, "version": "=0.1.0"}
+                self.assertTrue(check_windows(self.lock, self.shim, workspace), (name, alias))
+                shim = copy.deepcopy(self.shim)
+                shim["target"][WINDOWS_TARGET]["dependencies"][alias] = {"package": name, "version": "=0.1.0"}
+                self.assertTrue(check_windows(self.lock, shim, self.workspace), (name, alias))
+        index = next(i for i, package in enumerate(self.lock["package"]) if package["name"] == "pos-owner-bridge-windows")
+        for dependencies in [["windows"], ["webview2-com"], ["windows", "webview2-com", "windows-core"], ["windows", "windows", "webview2-com"]]:
+            lock = copy.deepcopy(self.lock)
+            lock["package"][index]["dependencies"] = dependencies
+            self.assertTrue(check_windows(lock, self.shim, self.workspace), dependencies)
+        for duplicate in [False, True]:
+            lock = copy.deepcopy(self.lock)
+            if duplicate:
+                lock["package"].append(copy.deepcopy(lock["package"][index]))
+            else:
+                lock["package"].pop(index)
+            self.assertTrue(check_windows(lock, self.shim, self.workspace))
+
+    def test_forbidden_dependency_families(self):
+        for name in ["openssl", "openssl-sys", "openssl-src", "tauri", "wry", "webauthn-rs", "webauthn-rs-core"]:
+            lock = copy.deepcopy(self.lock)
+            lock["package"].append({"name": name})
+            self.assertTrue(check_windows(lock, self.shim, self.workspace), name)
 
 
 if __name__ == "__main__":

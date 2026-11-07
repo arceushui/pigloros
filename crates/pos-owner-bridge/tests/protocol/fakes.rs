@@ -365,8 +365,14 @@ fn a_surface_re_checks_the_guard_and_exposes_the_state_word() -> TestResult {
         folder_name: "folder".to_owned(),
         owner_window: None,
     };
-    rig.surface.open(&spec).map_err(SurfaceError::error)?;
-    let navigation = rig.surface.navigate().map_err(SurfaceError::error)?;
+    assert!(matches!(
+        rig.surface.open(&spec),
+        std::task::Poll::Ready(Ok(_))
+    ));
+    let std::task::Poll::Ready(navigation) = rig.surface.navigate() else {
+        return Err("the immediate fake navigation remained pending".into());
+    };
+    let navigation = navigation.map_err(SurfaceError::error)?;
     let (request, header) = request_with_header(1)?;
     rig.surface
         .create_and_write(&request, &header)
