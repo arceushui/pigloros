@@ -7,7 +7,7 @@
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::SCHEMA_ID;
+use super::SCHEMA_ID;
 
 /// The literal a path names the captured Timeline by.
 pub(super) const TIMELINE_SLOT: &str = "{timeline}";

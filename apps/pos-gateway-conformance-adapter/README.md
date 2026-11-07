@@ -36,7 +36,7 @@ Air-Gapped modes; any other claim layer or mode is `Unavailable`.
 ## Fixtures and tests
 
 `scripts/generate_gateway_conformance_fixtures.py` writes the fixtures, the oracles, the executed
-evidence-status records and `src/schema_digests.rs`, and verifies them with `--check`.
+evidence-status records and `src/subject/schema_digests.rs`, and verifies them with `--check`.
 `tests/adapter_public.rs` builds the attempts from the checked-in files and drives the library and
 the binary through the pos-reference EAI1/EAO1 codec in both modes. `tests/provider_dispatch_public.rs`
 runs every family through the evaluator's exact-identity dispatch (ADR-062 R8 N6) in the Local and

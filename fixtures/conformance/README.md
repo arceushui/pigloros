@@ -105,7 +105,7 @@ alias and declares no auxiliary member. `scripts/generate_gateway_conformance_fi
 only writer of its seven schemas, payloads (`inputs/gateway-client-conformance/<family>.json`, JCS,
 schema `pigloros.gateway-client-conformance.case.v2`: ordered HTTP exchanges with their expected
 normalized observations), oracles and evidence-status records, and of the subject adapter's
-`apps/pos-gateway-conformance-adapter/src/schema_digests.rs`. It runs offline, calls no Rust and
+`apps/pos-gateway-conformance-adapter/src/subject/schema_digests.rs`. It runs offline, calls no Rust and
 writes every expected exchange from the documented ADR-014 route table; `--check` decodes every
 Society Signal payload a second time, checks the normalization rules, the routes and captures, the
 capability set and step and Event usage of every family against the provider, and every payload

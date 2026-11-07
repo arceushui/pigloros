@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{header, HeaderValue, Method, Request, Uri};
+use axum::Router;
 use piglor_gateway::{
     gateway_with_erasure_host_and_authorization, router, spectator_router, AppState, Gateway,
     GatewayAuthorization, LedgerWriteMode, LocalAuthenticationAdapter,
@@ -26,9 +27,9 @@ use tokio::runtime::Runtime;
 use tower::ServiceExt;
 use ulid::Ulid;
 
-use crate::normalize::normalize_response_v1;
-use crate::payload::{CompositionV2, ExchangeV2, MethodV2, RouterV2, SubCaseV2, TIMELINE_SLOT};
-use crate::{ACTOR_ENTITY_ID, BODY_ENTITY_ID};
+use super::payload::{CompositionV2, ExchangeV2, MethodV2, RouterV2, SubCaseV2, TIMELINE_SLOT};
+use super::{ACTOR_ENTITY_ID, BODY_ENTITY_ID};
+use crate::normalize_response_v1;
 
 /// The header an exchange with `actor` sends.
 const ACTOR_HEADER: &str = "x-piglor-actor-entity";
@@ -293,6 +294,16 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
         .any(|window| window == needle)
 }
 
+/// The loopback and public-listener routers of one Gateway.
+fn routers(gateway: &Gateway) -> (Router, Router) {
+    let state = AppState {
+        gateway: gateway.clone(),
+        ledger_view: LedgerView::default(),
+        ledger_write: LedgerWriteMode::Disabled,
+    };
+    (router(state.clone()), spectator_router(state))
+}
+
 /// Send every exchange of a sub-case in order and record its observations.
 async fn exchange_all(
     gateway: Gateway,
@@ -300,13 +311,7 @@ async fn exchange_all(
     capabilities: &[String],
     independent: bool,
 ) -> SubCaseRunV2 {
-    let state = AppState {
-        gateway: gateway.clone(),
-        ledger_view: LedgerView::default(),
-        ledger_write: LedgerWriteMode::Disabled,
-    };
-    let loopback = router(state.clone());
-    let spectator = spectator_router(state);
+    let (loopback, spectator) = routers(&gateway);
     let mut timeline: Option<String> = None;
     let mut observations = Vec::with_capacity(subcase.exchanges.len());
     let mut run = SubCaseRunV2 {
