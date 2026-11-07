@@ -928,14 +928,12 @@ pub mod tests {
         authenticated_state_with(vec![operator_record("operator")], Vec::new())
     }
 
-    /// Builds the minimal SIC1 state with the given TRS1 deployment-operator
-    /// records (beside the policy key) and RVS1 revoked key IDs.
-    fn authenticated_state_with(
+    /// Signs the minimal TRS1: the policy key plus `operators`, in canonical order.
+    fn minimal_trust(
         operators: Vec<Value>,
-        revoked: Vec<&str>,
-    ) -> TestResult<InstalledSelectorState> {
-        let root = SigningKey::from_bytes(&[1; 32]);
-        let policy_signer = SigningKey::from_bytes(&[2; 32]);
+        root: &SigningKey,
+        policy_signer: &SigningKey,
+    ) -> TestResult<Vec<u8>> {
         let mut keys = operators
             .into_iter()
             .chain([trust_record(
@@ -949,7 +947,7 @@ pub mod tests {
             })
             .collect::<Result<Vec<_>, _>>()?;
         keys.sort_by(|left, right| left.0.cmp(&right.0));
-        let trust_bytes = sign_record(
+        sign_record(
             "TRS1",
             Value::Array(vec![
                 Value::Text("TRS1".to_owned()),
@@ -959,8 +957,19 @@ pub mod tests {
                 Value::Array(Vec::new()),
                 Value::Text("root".to_owned()),
             ]),
-            &root,
-        )?;
+            root,
+        )
+    }
+
+    /// Builds the minimal SIC1 state with the given TRS1 deployment-operator
+    /// records (beside the policy key) and RVS1 revoked key IDs.
+    fn authenticated_state_with(
+        operators: Vec<Value>,
+        revoked: Vec<&str>,
+    ) -> TestResult<InstalledSelectorState> {
+        let root = SigningKey::from_bytes(&[1; 32]);
+        let policy_signer = SigningKey::from_bytes(&[2; 32]);
+        let trust_bytes = minimal_trust(operators, &root, &policy_signer)?;
         let trust_digest = signed_record_digest(&trust_bytes)?;
         let revocation_bytes = sign_record(
             "RVS1",
