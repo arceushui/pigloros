@@ -330,7 +330,7 @@ fn poisoned_store_clones_refuse_reads_and_mutations_without_removing_survivors()
     let folder = folder_name(&ID);
     crate::create_private_directory(&fixture.0.join(&folder))?;
     store.write_record(&bytes)?;
-    assert_eq!(store.records()?, [bytes.clone()]);
+    assert_eq!(store.records()?.as_slice(), std::slice::from_ref(&bytes));
     let mut peer = store.clone();
     // Narrow fault injection at the shared lock: callers must not receive an
     // empty scan or perform cleanup after a worker unwinds with the lock held.
