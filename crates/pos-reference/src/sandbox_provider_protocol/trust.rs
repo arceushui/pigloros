@@ -29,17 +29,24 @@ pub enum SandboxTrustRole {
 }
 
 impl SandboxTrustRole {
+    /// Closed role codes in ADR-069 order: the code is the index.
+    const BY_CODE: [Self; 7] = [
+        Self::OfflineTrustRoot,
+        Self::AdministratorPolicy,
+        Self::ProviderRelease,
+        Self::ProviderRuntimeAttestation,
+        Self::IndependentConformanceReviewer,
+        Self::ImageProject,
+        Self::DeploymentOperator,
+    ];
+
     fn decode(value: &Value) -> Result<Self, SandboxProviderProtocolError> {
-        match uint(value)? {
-            0 => Ok(Self::OfflineTrustRoot),
-            1 => Ok(Self::AdministratorPolicy),
-            2 => Ok(Self::ProviderRelease),
-            3 => Ok(Self::ProviderRuntimeAttestation),
-            4 => Ok(Self::IndependentConformanceReviewer),
-            5 => Ok(Self::ImageProject),
-            6 => Ok(Self::DeploymentOperator),
-            _ => Err(SandboxProviderProtocolError::FieldOutOfBounds),
-        }
+        uint(value).and_then(|code| {
+            usize::try_from(code)
+                .ok()
+                .and_then(|index| Self::BY_CODE.get(index).copied())
+                .ok_or(SandboxProviderProtocolError::FieldOutOfBounds)
+        })
     }
 }
 
