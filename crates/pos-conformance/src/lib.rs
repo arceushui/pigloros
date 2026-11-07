@@ -50,6 +50,17 @@ include!("wire_syntax.rs");
 include!("governance_codec.rs");
 include!(concat!(env!("OUT_DIR"), "/draft_authority.rs"));
 
+/// The release-pinned deployment-operator public key of the Draft authority
+/// (DFA1, `support/draft-execution-authority.json`), as the build pins it.
+///
+/// It authenticates the operator signature of
+/// [`draft_trust_policy_snapshot_bytes_v1`] through
+/// [`TrustPolicySnapshotV1::verify_operator_signature_v1`]. The Draft authority
+/// is repository-test-fixture-only: this key proves Draft trust, never a
+/// production release. A host pins it as its own input; it is never read from
+/// the TPS1's `trust_roots`.
+pub const DRAFT_TRUST_POLICY_OPERATOR_KEY_V1: [u8; 32] = DRAFT_AUTHORITY_PUBLIC_KEY_BYTES;
+
 pub(crate) const MAX_PROVIDER_ENTRIES: usize = 4096;
 
 pub(crate) fn strictly_ordered<T: Ord>(values: &[T]) -> bool {
