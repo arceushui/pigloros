@@ -1555,7 +1555,12 @@ fn make_first_matrix_case_executed(
 ) -> TestResult<()> {
     set_executed_case(root, serde_json::json!("0".repeat(64)))?;
     set_nested_json(root, "rows", 0, "executed_case_count", serde_json::json!(1))?;
-    set_json(root, "executed_case_count", serde_json::json!(1));
+    // One more executed case than the checked-in matrix records.
+    let executed = root
+        .get("executed_case_count")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| io::Error::other("matrix has no executed case count"))?;
+    set_json(root, "executed_case_count", serde_json::json!(executed + 1));
     Ok(())
 }
 

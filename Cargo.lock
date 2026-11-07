@@ -5597,14 +5597,17 @@ dependencies = [
 name = "pos-experiment"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "blake3",
  "ciborium",
  "ed25519-dalek",
+ "piglor-gateway",
  "pos-conformance",
  "pos-core",
  "pos-crypto",
  "pos-plugin-agent",
  "pos-plugin-eval",
+ "pos-plugin-ledger",
  "pos-plugin-rule-agent",
  "pos-plugin-society",
  "pos-plugin-synthetic-obs",
@@ -5620,6 +5623,8 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",
+ "tokio",
+ "tower",
  "ulid",
 ]
 
