@@ -116,14 +116,16 @@ impl FixtureRoot {
 
 #[test]
 fn failed_fixture_preserves_recovery_files_until_explicit_retirement() -> TestResult {
+    fn failing_fixture(root: FixtureRoot) -> TestResult {
+        std::fs::metadata(&root.0)?;
+        Err("modeled fixture failure".into())
+    }
+
     let root = FixtureRoot::new()?;
     let path = root.0.clone();
     let record = path.join("recovery-record");
     std::fs::write(&record, b"retained cleanup evidence")?;
-    let failed: TestResult = (|| {
-        let _retained_on_failure = root;
-        Err("modeled fixture failure".into())
-    })();
+    let failed = failing_fixture(root);
     assert!(failed.is_err());
     assert_eq!(std::fs::read(&record)?, b"retained cleanup evidence");
     FixtureRoot(path.clone()).remove()?;

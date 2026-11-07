@@ -88,13 +88,14 @@ fn run_worker(
         let mut bytes = [0; 16];
         bytes[..8].copy_from_slice(&number.to_le_bytes());
         let started = Instant::now();
-        if let Err(error) = run_ceremony(
+        let attempt = run_ceremony(
             &mut surface,
             &mut loopback,
             &mut store,
             foreground,
             CeremonyId::from_bytes(bytes),
-        ) {
+        );
+        if let Err(error) = attempt {
             outcome = Err(format!(
                 "native readiness worker {worker} case {number}, {iteration} completed, elapsed={:?}: {error}",
                 started.elapsed()
@@ -202,7 +203,7 @@ fn run_ceremony(
     if let Some(error) = failure {
         return Err(error);
     }
-    if !receipt.is_some_and(|received| received < deadline)
+    if receipt.is_none_or(|received| received >= deadline)
         || result_error != Some(BridgeError::Lifecycle(LifecycleCode::ControllerLost))
     {
         return Err(format!("packaged Get readiness/cancellation failed: receipt={receipt:?}, result={result_error:?}").into());
