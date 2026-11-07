@@ -15,7 +15,6 @@ publish.workspace = true
 test-support = [
   "pos-core/test-support",
   "pos-runtime/test-support",
-  "dep:pos-time",
   "dep:axum",
   "dep:piglor-gateway",
   "dep:pos-plugin-ledger",
