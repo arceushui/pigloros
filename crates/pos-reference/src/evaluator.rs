@@ -14,7 +14,8 @@ use crate::profile::{
     ProviderKey, StrictOracle,
 };
 use crate::signed_bundle::{
-    preflight_signed_bundle_bytes, verify_signed_bundle, BundleError, VerifiedBundle,
+    preflight_signed_bundle_bytes, verify_signed_bundle, BundleError, TrustPolicyOperatorAnchor,
+    VerifiedBundle,
 };
 
 /// Deterministic resource consumption reported by a public subject adapter.
@@ -257,6 +258,9 @@ impl From<ProfileError> for EvaluatorError {
 /// other selected fixture is a typed non-executed `Unavailable` outcome and the
 /// adapter is not called for it.
 ///
+/// The TPS1 is authenticated only by the caller-pinned `operator` anchor,
+/// never by its own trust roots.
+///
 /// # Errors
 /// Returns a closed failure when the request, bundle, profile, adapter
 /// identity, output capability, or emitted report is invalid. Individual
@@ -265,6 +269,7 @@ pub fn evaluate(
     request_bytes: &[u8],
     archive_bytes: &[u8],
     trust_policy_bytes: &[u8],
+    operator: &TrustPolicyOperatorAnchor,
     evaluator: &VerifiedEvaluatorBuildIdentity,
     executors: &[FixtureExecutorV1],
     adapter: &mut impl SubjectAdapter,
@@ -273,6 +278,7 @@ pub fn evaluate(
         request_bytes,
         archive_bytes,
         trust_policy_bytes,
+        operator,
         evaluator,
         adapter.kind(),
         adapter.subject_artifact_digest(),
@@ -345,6 +351,7 @@ fn verified_inputs(
     request_bytes: &[u8],
     archive_bytes: &[u8],
     trust_policy_bytes: &[u8],
+    operator: &TrustPolicyOperatorAnchor,
     evaluator: &VerifiedEvaluatorBuildIdentity,
     adapter_kind: SubjectAdapterKind,
     subject_artifact_digest: [u8; 32],
@@ -355,11 +362,12 @@ fn verified_inputs(
     {
         return Err(EvaluatorError::AdapterIdentity);
     }
-    let caps = enforce_authenticated_selected_caps(archive_bytes, trust_policy_bytes, &request)?;
+    let caps =
+        enforce_authenticated_selected_caps(archive_bytes, trust_policy_bytes, operator, &request)?;
     if !evaluator.admits_compression_expansion(caps.max_compression_expansion) {
         return Err(EvaluatorError::Profile);
     }
-    let bundle = verify_signed_bundle(archive_bytes, trust_policy_bytes, &request)?;
+    let bundle = verify_signed_bundle(archive_bytes, trust_policy_bytes, operator, &request)?;
     let profile = Profile::from_bundle(&bundle, &request)?;
     Ok((request, bundle, profile))
 }
@@ -367,9 +375,11 @@ fn verified_inputs(
 fn enforce_authenticated_selected_caps(
     archive_bytes: &[u8],
     trust_policy_bytes: &[u8],
+    operator: &TrustPolicyOperatorAnchor,
     request: &EvaluationRequest,
 ) -> Result<EvaluatorHardCaps, EvaluatorError> {
-    let preflight = preflight_signed_bundle_bytes(archive_bytes, trust_policy_bytes, request)?;
+    let preflight =
+        preflight_signed_bundle_bytes(archive_bytes, trust_policy_bytes, operator, request)?;
     let caps = Profile::authenticated_hard_caps(preflight.profile_bytes(), request)?;
     preflight
         .enforce_selected_caps(caps.into())
