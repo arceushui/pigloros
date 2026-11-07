@@ -10,7 +10,8 @@ use pos_conformance::{
     TrustRootStatusV1, TrustSignatureStatusV1, TrustSnapshotContinuityV1,
     VerificationPreflightCoordinateV1, VerificationPreflightErrorV1,
     VerificationPreflightEvidenceV1, VerificationPreflightInputV1,
-    MAX_REPRO_VERIFICATION_REQUEST_BYTES_V1, MAX_VERIFICATION_PREFLIGHT_PLUGIN_VERSIONS_V1,
+    DRAFT_TRUST_POLICY_OPERATOR_KEY_V1, MAX_REPRO_VERIFICATION_REQUEST_BYTES_V1,
+    MAX_VERIFICATION_PREFLIGHT_PLUGIN_VERSIONS_V1, PLUGIN_OPERATOR_ROLE_V1,
 };
 use std::collections::BTreeMap;
 
@@ -38,6 +39,14 @@ impl Fixture {
         execution_profile.profile_digest = execution_profile.digest();
         let profile_digest = execution_profile.profile_digest;
         let trust_digest = trust_policy_snapshot.digest()?;
+        // The signature evidence is `Valid` only once the Draft TPS1
+        // authenticates under the pinned Draft authority key.
+        let trust_signature = trust_policy_snapshot
+            .verify_operator_signature_v1(
+                &DRAFT_TRUST_POLICY_OPERATOR_KEY_V1,
+                PLUGIN_OPERATOR_ROLE_V1,
+            )
+            .map(|()| TrustSignatureStatusV1::Valid)?;
         let closure_digest = [8; 32];
         let evaluator_digest = [9; 32];
         let manifest = ReproManifestV1 {
@@ -86,7 +95,7 @@ impl Fixture {
             trust_policy_snapshot,
             evidence: VerificationPreflightEvidenceV1 {
                 trust_root: TrustRootStatusV1::Known,
-                trust_signature: TrustSignatureStatusV1::Valid,
+                trust_signature,
                 artifact_revocation: ArtifactRevocationStatusV1::Clear,
                 trust_continuity: TrustSnapshotContinuityV1 {
                     previous_epoch: None,
