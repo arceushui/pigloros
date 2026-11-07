@@ -43,6 +43,22 @@ pub fn trust_policy_operator_public_key() -> [u8; 32] {
         .to_bytes()
 }
 
+/// The corpus deployment-operator public key as the 64 lowercase hexadecimal
+/// characters `--trust-policy-operator-key` takes.
+#[must_use]
+pub fn trust_policy_operator_public_key_hex() -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    trust_policy_operator_public_key()
+        .iter()
+        .flat_map(|byte| {
+            [
+                char::from(HEX[usize::from(byte >> 4)]),
+                char::from(HEX[usize::from(byte & 0x0f)]),
+            ]
+        })
+        .collect()
+}
+
 /// The caller-pinned anchor that authenticates every corpus TPS1.
 ///
 /// # Errors

@@ -86,14 +86,20 @@ fn replacing_argument(command: &Command, option: &str, value: &Path) -> TestResu
 }
 
 fn hex(bytes: &[u8]) -> String {
-    bytes.iter().fold(String::new(), |mut text, byte| {
-        text.push_str(&format!("{byte:02x}"));
-        text
-    })
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    bytes
+        .iter()
+        .flat_map(|byte| {
+            [
+                char::from(HEX[usize::from(byte >> 4)]),
+                char::from(HEX[usize::from(byte & 0x0f)]),
+            ]
+        })
+        .collect()
 }
 
 fn operator_key_hex() -> String {
-    hex(&support::trust_policy_operator_public_key())
+    support::trust_policy_operator_public_key_hex()
 }
 
 fn complete_command(directory: &Path) -> TestResult<Command> {

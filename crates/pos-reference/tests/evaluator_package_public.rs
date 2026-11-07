@@ -51,13 +51,7 @@ fn packaged_evaluator_verifies_its_own_script_output_and_emits_a_report() -> Tes
         .arg(&policy)
         .args([
             "--trust-policy-operator-key",
-            support::trust_policy_operator_public_key()
-                .iter()
-                .fold(String::new(), |mut text, byte| {
-                    text.push_str(&format!("{byte:02x}"));
-                    text
-                })
-                .as_str(),
+            support::trust_policy_operator_public_key_hex().as_str(),
         ])
         .arg("--evaluator-source")
         .arg(package.join(PACKAGE_EVIDENCE_FILES.source))

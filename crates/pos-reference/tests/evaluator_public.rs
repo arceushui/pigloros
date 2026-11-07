@@ -2274,9 +2274,9 @@ fn signed_bundle_verifiers_reject_invalid_member_paths_and_noncanonical_manifest
 }
 
 #[test]
-fn staged_preflight_closes_authenticated_identity_and_io_failures() -> TestResult {
+fn staged_preflight_closes_authenticated_identity_failures() -> TestResult {
     let corpus = support::corpus()?;
-    let request = EvaluationRequest::from_canonical_cbor(&corpus.request)?;
+    let operator = support::trust_policy_operator()?;
 
     let mismatched_archive_request = request_with(&corpus.request, |request| {
         request.fixture_bundle_digest = [90; 32];
@@ -2287,7 +2287,7 @@ fn staged_preflight_closes_authenticated_identity_and_io_failures() -> TestResul
         verify_signed_bundle(
             &corpus.archive,
             &corpus.trust_policy,
-            &support::trust_policy_operator()?,
+            &operator,
             &mismatched_archive_request,
         ),
         Err(BundleError::DigestMismatch)
@@ -2295,7 +2295,7 @@ fn staged_preflight_closes_authenticated_identity_and_io_failures() -> TestResul
     assert!(preflight_signed_bundle(
         &mut Cursor::new(&corpus.archive),
         &corpus.trust_policy,
-        &support::trust_policy_operator()?,
+        &operator,
         &mismatched_archive_request,
     )
     .is_err());
@@ -2309,7 +2309,7 @@ fn staged_preflight_closes_authenticated_identity_and_io_failures() -> TestResul
         verify_signed_bundle(
             &corpus.archive,
             &corpus.trust_policy,
-            &support::trust_policy_operator()?,
+            &operator,
             &mismatched_trust_request,
         ),
         Err(BundleError::TrustPolicyMismatch)
@@ -2317,7 +2317,7 @@ fn staged_preflight_closes_authenticated_identity_and_io_failures() -> TestResul
     assert!(preflight_signed_bundle(
         &mut Cursor::new(&corpus.archive),
         &corpus.trust_policy,
-        &support::trust_policy_operator()?,
+        &operator,
         &mismatched_trust_request,
     )
     .is_err());
@@ -2328,7 +2328,7 @@ fn staged_preflight_closes_authenticated_identity_and_io_failures() -> TestResul
         verify_signed_bundle(
             &revoked.archive,
             &revoked.trust_policy,
-            &support::trust_policy_operator()?,
+            &operator,
             &revoked_request
         ),
         Err(BundleError::TrustPolicyMismatch)
@@ -2336,39 +2336,32 @@ fn staged_preflight_closes_authenticated_identity_and_io_failures() -> TestResul
     assert!(preflight_signed_bundle(
         &mut Cursor::new(&revoked.archive),
         &revoked.trust_policy,
-        &support::trust_policy_operator()?,
+        &operator,
         &revoked_request,
     )
     .is_err());
 
+    Ok(())
+}
+
+#[test]
+fn staged_preflight_closes_snapshot_io_and_size_failures() -> TestResult {
+    let corpus = support::corpus()?;
+    let request = EvaluationRequest::from_canonical_cbor(&corpus.request)?;
+    let operator = support::trust_policy_operator()?;
     for failing_seek in 1..=2 {
         let mut archive = FaultingArchive::new(corpus.archive.clone(), None, Some(failing_seek));
         assert_eq!(
-            preflight_signed_bundle(
-                &mut archive,
-                &corpus.trust_policy,
-                &support::trust_policy_operator()?,
-                &request
-            ),
+            preflight_signed_bundle(&mut archive, &corpus.trust_policy, &operator, &request),
             Err(BundleError::SnapshotUnavailable)
         );
     }
     let mut counted = FaultingArchive::new(corpus.archive.clone(), None, None);
-    preflight_signed_bundle(
-        &mut counted,
-        &corpus.trust_policy,
-        &support::trust_policy_operator()?,
-        &request,
-    )?;
+    preflight_signed_bundle(&mut counted, &corpus.trust_policy, &operator, &request)?;
     for failing_read in 1..=counted.reads {
         let mut archive = FaultingArchive::new(corpus.archive.clone(), Some(failing_read), None);
         assert_eq!(
-            preflight_signed_bundle(
-                &mut archive,
-                &corpus.trust_policy,
-                &support::trust_policy_operator()?,
-                &request
-            ),
+            preflight_signed_bundle(&mut archive, &corpus.trust_policy, &operator, &request),
             Err(BundleError::SnapshotUnavailable)
         );
     }
@@ -2378,12 +2371,7 @@ fn staged_preflight_closes_authenticated_identity_and_io_failures() -> TestResul
         replacement: vec![0; corpus.archive.len()],
         starts: 0,
     };
-    preflight_signed_bundle(
-        &mut changing,
-        &corpus.trust_policy,
-        &support::trust_policy_operator()?,
-        &request,
-    )?;
+    preflight_signed_bundle(&mut changing, &corpus.trust_policy, &operator, &request)?;
 
     let mut changed_length = LengthMismatchArchive {
         inner: Cursor::new(corpus.archive.clone()),
@@ -2391,7 +2379,7 @@ fn staged_preflight_closes_authenticated_identity_and_io_failures() -> TestResul
     assert!(preflight_signed_bundle(
         &mut changed_length,
         &corpus.trust_policy,
-        &support::trust_policy_operator()?,
+        &operator,
         &request,
     )
     .is_err());
@@ -2399,29 +2387,21 @@ fn staged_preflight_closes_authenticated_identity_and_io_failures() -> TestResul
     assert!(preflight_signed_bundle(
         &mut Cursor::new(Vec::new()),
         &corpus.trust_policy,
-        &support::trust_policy_operator()?,
+        &operator,
         &request,
     )
     .is_err());
     assert_eq!(
-        verify_signed_bundle(
-            &[],
-            &corpus.trust_policy,
-            &support::trust_policy_operator()?,
-            &request
-        ),
+        verify_signed_bundle(&[], &corpus.trust_policy, &operator, &request),
         Err(BundleError::FieldOutOfBounds)
     );
 
     let mut oversized = tempfile::tempfile()?;
     oversized.set_len(1024 * 1024 * 1024 + 1)?;
-    assert!(preflight_signed_bundle(
-        &mut oversized,
-        &corpus.trust_policy,
-        &support::trust_policy_operator()?,
-        &request,
-    )
-    .is_err());
+    assert!(
+        preflight_signed_bundle(&mut oversized, &corpus.trust_policy, &operator, &request,)
+            .is_err()
+    );
     Ok(())
 }
 
