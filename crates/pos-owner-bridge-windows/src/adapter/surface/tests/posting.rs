@@ -31,6 +31,10 @@ const fn guard() -> PostGuard {
     }
 }
 
+const fn unavailable() -> BridgeError {
+    BridgeError::Unavailable(UnavailableCode::InterfaceUnavailable)
+}
+
 fn posts(fixture: &Fixture) -> Vec<&'static str> {
     fixture
         .factory
@@ -69,6 +73,11 @@ fn post_rechecks_the_current_document_between_native_calls() -> TestResult {
             assert_eq!(
                 result.map_err(pos_owner_bridge::SurfaceError::error),
                 Err(BridgeError::Lifecycle(LifecycleCode::NavigationViolation))
+            );
+        } else if failure.is_some() {
+            assert_eq!(
+                result.map_err(pos_owner_bridge::SurfaceError::error),
+                Err(unavailable())
             );
         }
         assert_eq!(posts(&fixture), expected);
@@ -160,7 +169,18 @@ fn current_source_is_read_again_before_a_pair_is_posted() -> TestResult {
             .map_err(pos_owner_bridge::SurfaceError::error)?;
         *fixture.factory.source.borrow_mut() = "https://example.invalid/".to_owned();
         fixture.factory.failure.set(failure);
-        assert!(fixture.surface.post(&guard()).is_err());
+        let expected = if failure.is_some() {
+            unavailable()
+        } else {
+            BridgeError::Lifecycle(LifecycleCode::NavigationViolation)
+        };
+        assert_eq!(
+            fixture
+                .surface
+                .post(&guard())
+                .map_err(pos_owner_bridge::SurfaceError::error),
+            Err(expected)
+        );
         assert!(posts(&fixture).is_empty());
         fixture.finish()?;
     }
@@ -200,7 +220,13 @@ fn malformed_or_mismatched_headers_never_create_a_mapping() -> TestResult {
     fixture.ready()?;
     let (request, header) = pair()?;
     fixture.factory.failure.set(Some("create_buffers"));
-    assert!(fixture.surface.create_and_write(&request, &header).is_err());
+    assert_eq!(
+        fixture
+            .surface
+            .create_and_write(&request, &header)
+            .map_err(pos_owner_bridge::SurfaceError::error),
+        Err(unavailable())
+    );
     fixture.factory.failure.set(None);
     fixture
         .surface
@@ -242,11 +268,29 @@ fn buffer_operations_map_native_errors_and_preserve_observed_results() -> TestRe
         .map_err(pos_owner_bridge::SurfaceError::error)?;
     assert!(copy.as_bytes().iter().all(|byte| *byte == 0x5a));
     fixture.factory.failure.set(Some("load_state"));
-    assert!(fixture.surface.reply_load_state().is_err());
+    assert_eq!(
+        fixture
+            .surface
+            .reply_load_state()
+            .map_err(pos_owner_bridge::SurfaceError::error),
+        Err(unavailable())
+    );
     fixture.factory.failure.set(Some("compare_exchange"));
-    assert!(fixture.surface.reply_compare_exchange(4, 5).is_err());
+    assert_eq!(
+        fixture
+            .surface
+            .reply_compare_exchange(4, 5)
+            .map_err(pos_owner_bridge::SurfaceError::error),
+        Err(unavailable())
+    );
     fixture.factory.failure.set(Some("copy_reply"));
-    assert!(fixture.surface.reply_copy(&mut copy).is_err());
+    assert_eq!(
+        fixture
+            .surface
+            .reply_copy(&mut copy)
+            .map_err(pos_owner_bridge::SurfaceError::error),
+        Err(unavailable())
+    );
     fixture.finish()?;
     Ok(())
 }
@@ -257,7 +301,13 @@ fn cleanup_attempts_controller_close_after_buffer_and_subscription_errors() -> T
         let mut fixture = Fixture::new(Creation::Ready)?;
         fixture.ready()?;
         fixture.factory.failure.set(Some(failure));
-        assert!(fixture.surface.close_controller().is_err());
+        assert_eq!(
+            fixture
+                .surface
+                .close_controller()
+                .map_err(pos_owner_bridge::SurfaceError::error),
+            Err(unavailable())
+        );
         let calls = fixture.factory.calls.borrow();
         assert_eq!(
             &calls[calls.len() - 3..],
@@ -269,7 +319,13 @@ fn cleanup_attempts_controller_close_after_buffer_and_subscription_errors() -> T
     let mut fixture = Fixture::new(Creation::Ready)?;
     fixture.ready()?;
     fixture.factory.close_uncertain.set(true);
-    assert!(fixture.surface.close_controller().is_err());
+    assert_eq!(
+        fixture
+            .surface
+            .close_controller()
+            .map_err(pos_owner_bridge::SurfaceError::error),
+        Err(unavailable())
+    );
     fixture.finish()?;
     Ok(())
 }
