@@ -6,7 +6,9 @@ binary of the repository. Every surface is rebuilt from the accepted ADR-127 con
 capture contract in `apps/pos-experiment/src/non_interference_harness/g_archive.rs`:
 - the G-PUB subject's Events (`generate_non_interference_g_pub_fixtures.py`), imported into a
   fresh root `Live` Timeline without owner, so every entity ordinal is 0 and no Event names a
-  cause or a correlation;
+  cause or a correlation. The subject's signals come from the first two permitted-input bytes
+  only, and every variant's permitted input starts with `g-`; so S, W and C share one result
+  digest by design (as in N1), and D differs only through its refused-import probe;
 - the RVA1 members: the marker `["RVA1", 1]`, one `events/<seq>.cbor` record per Event and the
   Timeline record, in bytewise name order, written by the shared canonical ustar encoder
   (`ustar.py`);

@@ -95,17 +95,57 @@ pub fn run_evidence_event_member_name_v1(seq: u64) -> String {
     format!("{EVENTS_PREFIX}{seq:020}{EVENTS_SUFFIX}")
 }
 
-fn uint(value: u64) -> Value {
-    Value::Integer(value.into())
+/// One scalar of an RVA1 record: every record is one definite-length array
+/// of these.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum Scalar {
+    Uint(u64),
+    Null,
+    Text(String),
+    Bytes(Vec<u8>),
 }
 
-fn optional_uint(value: Option<u64>) -> Value {
-    value.map_or(Value::Null, uint)
+fn optional(value: Option<u64>) -> Scalar {
+    value.map_or(Scalar::Null, Scalar::Uint)
 }
 
-fn encode(value: &Value) -> Vec<u8> {
-    let mut bytes = Vec::new();
-    ciborium::into_writer(value, &mut bytes).map_or(Vec::new(), |()| bytes)
+/// The shortest CBOR head of `major` with argument `value`.
+fn head(out: &mut Vec<u8>, major: u8, value: u64) {
+    let bytes = value.to_be_bytes();
+    let (info, width) = if value < 24 {
+        (bytes[7], 0)
+    } else if value <= 0xff {
+        (24, 1)
+    } else if value <= 0xffff {
+        (25, 2)
+    } else if value <= 0xffff_ffff {
+        (26, 4)
+    } else {
+        (27, 8)
+    };
+    out.push((major << 5) | info);
+    out.extend_from_slice(&bytes[8 - width..]);
+}
+
+/// The canonical CBOR of one record: an array of `fields`.
+fn encode(fields: &[Scalar]) -> Vec<u8> {
+    let mut out = Vec::new();
+    head(&mut out, 4, fields.len() as u64);
+    for field in fields {
+        match field {
+            Scalar::Uint(value) => head(&mut out, 0, *value),
+            Scalar::Null => out.push(0xf6),
+            Scalar::Text(text) => {
+                head(&mut out, 3, text.len() as u64);
+                out.extend_from_slice(text.as_bytes());
+            }
+            Scalar::Bytes(bytes) => {
+                head(&mut out, 2, bytes.len() as u64);
+                out.extend_from_slice(bytes);
+            }
+        }
+    }
+    out
 }
 
 /// The first-appearance ordinal of `value` in `seen`.
@@ -155,20 +195,20 @@ pub fn run_evidence_event_records_v1(
             cause
                 .filter(|_| earlier.iter().all(|candidate| candidate.id != event.id))
                 .map(|cause| {
-                    encode(&Value::Array(vec![
-                        uint(event.seq.as_u64()),
-                        uint(ordinal(&mut entities, event.entity)),
-                        Value::Text(event.event_type.as_str().to_owned()),
-                        uint(u64::from(event.schema_version.as_u32())),
-                        optional_uint(cause),
-                        optional_uint(
+                    encode(&[
+                        Scalar::Uint(event.seq.as_u64()),
+                        Scalar::Uint(ordinal(&mut entities, event.entity)),
+                        Scalar::Text(event.event_type.as_str().to_owned()),
+                        Scalar::Uint(u64::from(event.schema_version.as_u32())),
+                        optional(cause),
+                        optional(
                             event
                                 .correlation_id
                                 .map(|correlation| ordinal(&mut correlations, correlation)),
                         ),
-                        Value::Bytes(event.payload.as_slice().to_vec()),
-                        Value::Bytes(event.payload_hash.as_bytes().to_vec()),
-                    ]))
+                        Scalar::Bytes(event.payload.as_slice().to_vec()),
+                        Scalar::Bytes(event.payload_hash.as_bytes().to_vec()),
+                    ])
                 })
                 .ok_or(RunEvidenceArchiveWriteErrorV1::RecordInvalid)
         })
@@ -212,12 +252,12 @@ pub fn run_evidence_members_v1(export: &TimelineExport) -> WriteResult<Vec<RunEv
         };
         let timeline = RunEvidenceMemberV1 {
             name: RUN_EVIDENCE_ARCHIVE_TIMELINE_V1.to_owned(),
-            data: encode(&Value::Array(vec![
-                uint(mode_code(meta.mode)),
-                meta.name.clone().map_or(Value::Null, Value::Text),
-                optional_uint(meta.owner.map(|_| 0)),
-                uint(head),
-            ])),
+            data: encode(&[
+                Scalar::Uint(mode_code(meta.mode)),
+                meta.name.clone().map_or(Scalar::Null, Scalar::Text),
+                optional(meta.owner.map(|_| 0)),
+                Scalar::Uint(head),
+            ]),
         };
         std::iter::once(marker)
             .chain(
@@ -348,20 +388,26 @@ fn closure_complete(entries: &[(String, Vec<u8>)]) -> WriteResult<()> {
     }
 }
 
-/// One definite-length array of exactly `fields` scalars in canonical CBOR.
-fn canonical_fields(data: &[u8], fields: usize) -> Option<Vec<Value>> {
+/// One definite-length array of exactly `fields` scalars in canonical CBOR:
+/// decoded with a recursion limit of one, then re-encoded and compared.
+fn canonical_fields(data: &[u8], fields: usize) -> Option<Vec<Scalar>> {
     ciborium::de::from_reader_with_recursion_limit::<Value, _>(data, 1)
         .ok()
-        .filter(|value| encode(value) == data)
         .and_then(|value| match value {
-            Value::Array(items) if items.len() == fields => Some(items),
+            Value::Array(items) if items.len() == fields => {
+                items.into_iter().map(scalar).collect::<Option<Vec<_>>>()
+            }
             _ => None,
         })
+        .filter(|scalars| encode(scalars) == data)
 }
 
-fn as_uint(value: &Value) -> Option<u64> {
+fn scalar(value: Value) -> Option<Scalar> {
     match value {
-        Value::Integer(integer) => u64::try_from(*integer).ok(),
+        Value::Integer(integer) => u64::try_from(integer).ok().map(Scalar::Uint),
+        Value::Null => Some(Scalar::Null),
+        Value::Text(text) => Some(Scalar::Text(text)),
+        Value::Bytes(bytes) => Some(Scalar::Bytes(bytes)),
         _ => None,
     }
 }
@@ -370,10 +416,11 @@ fn as_uint(value: &Value) -> Option<u64> {
 struct NotOptionalUint;
 
 /// `Ok(None)` for null, `Ok(Some(n))` for an unsigned integer.
-fn as_optional_uint(value: &Value) -> Result<Option<u64>, NotOptionalUint> {
+const fn as_optional_uint(value: &Scalar) -> Result<Option<u64>, NotOptionalUint> {
     match value {
-        Value::Null => Ok(None),
-        other => as_uint(other).map(Some).ok_or(NotOptionalUint),
+        Scalar::Null => Ok(None),
+        Scalar::Uint(value) => Ok(Some(*value)),
+        _ => Err(NotOptionalUint),
     }
 }
 
@@ -385,25 +432,21 @@ struct EventFields {
 }
 
 fn event_fields(data: &[u8]) -> Option<EventFields> {
-    canonical_fields(data, EVENT_FIELDS).and_then(|items| {
-        let typed = matches!(items[2], Value::Text(_))
-            && as_uint(&items[3]).is_some_and(|version| u32::try_from(version).is_ok())
-            && matches!(items[6], Value::Bytes(_))
-            && matches!(&items[7], Value::Bytes(hash) if hash.len() == 32);
-        as_uint(&items[0])
-            .zip(as_uint(&items[1]))
-            .zip(
-                as_optional_uint(&items[4])
-                    .ok()
-                    .zip(as_optional_uint(&items[5]).ok()),
-            )
-            .filter(|_| typed)
-            .map(|((seq, entity), (cause, correlation))| EventFields {
-                seq,
-                entity,
-                cause,
-                correlation,
-            })
+    canonical_fields(data, EVENT_FIELDS).and_then(|items| match items.as_slice() {
+        [Scalar::Uint(seq), Scalar::Uint(entity), Scalar::Text(_), Scalar::Uint(version), cause, correlation, Scalar::Bytes(_), Scalar::Bytes(hash)]
+            if u32::try_from(*version).is_ok() && hash.len() == 32 =>
+        {
+            match (as_optional_uint(cause), as_optional_uint(correlation)) {
+                (Ok(cause), Ok(correlation)) => Some(EventFields {
+                    seq: *seq,
+                    entity: *entity,
+                    cause,
+                    correlation,
+                }),
+                _ => None,
+            }
+        }
+        _ => None,
     })
 }
 
@@ -414,13 +457,15 @@ struct TimelineFields {
 }
 
 fn timeline_fields(data: &[u8]) -> Option<TimelineFields> {
-    canonical_fields(data, TIMELINE_FIELDS).and_then(|items| {
-        let named = matches!(items[1], Value::Null | Value::Text(_));
-        as_uint(&items[0])
-            .zip(as_optional_uint(&items[2]).ok())
-            .zip(as_uint(&items[3]))
-            .filter(|_| named)
-            .map(|((mode, owner), head)| TimelineFields { mode, owner, head })
+    canonical_fields(data, TIMELINE_FIELDS).and_then(|items| match items.as_slice() {
+        [Scalar::Uint(mode), Scalar::Null | Scalar::Text(_), owner, Scalar::Uint(head)] => {
+            as_optional_uint(owner).ok().map(|owner| TimelineFields {
+                mode: *mode,
+                owner,
+                head: *head,
+            })
+        }
+        _ => None,
     })
 }
 

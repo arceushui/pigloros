@@ -191,6 +191,30 @@ fn the_projection_is_position_relative_and_byte_exact() -> TestResult {
 }
 
 #[test]
+fn every_integer_head_width_is_the_shortest() -> TestResult {
+    let entity = EntityId::new();
+    for seq in [
+        0,
+        23,
+        24,
+        255,
+        256,
+        65_535,
+        65_536,
+        u64::from(u32::MAX),
+        u64::from(u32::MAX) + 1,
+        u64::MAX,
+    ] {
+        assert_eq!(
+            run_evidence_event_records_v1(&[event(seq, entity)], None)?,
+            vec![cbor(&record(seq, 0, None, None))],
+            "{seq}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn the_timeline_record_carries_mode_name_owner_and_head() -> TestResult {
     for (mode, code) in [
         (TimelineMode::Historical, 0),

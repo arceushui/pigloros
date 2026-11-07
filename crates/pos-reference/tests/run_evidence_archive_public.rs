@@ -355,6 +355,16 @@ fn the_marker_is_checked_before_any_later_record() {
     };
     assert_eq!(broken(text("RVA1", 2)), Err(Error::UnsupportedVersion));
     assert_eq!(broken(text("RVA0", 1)), Err(Error::InvalidEncoding));
+    // A version that is not an unsigned integer is invalid, not unsupported.
+    for version in [Value::Integer((-1).into()), Value::Text("1".to_owned())] {
+        assert_eq!(
+            broken(cbor(&Value::Array(vec![
+                Value::Text("RVA1".to_owned()),
+                version
+            ]))),
+            Err(Error::InvalidEncoding)
+        );
+    }
     assert_eq!(broken(cbor(&uint(1))), Err(Error::InvalidEncoding));
     assert_eq!(
         broken(vec![0x82, 0x64, b'R', b'V', b'A', b'1', 0x18, 0x01]),

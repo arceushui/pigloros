@@ -248,15 +248,16 @@ fn scalars(data: &[u8], fields: usize) -> Option<Vec<Value>> {
         })
 }
 
-/// Step 4.7: the marker is `["RVA1", 1]`; another magic is invalid, another
-/// version unsupported.
+/// Step 4.7: the marker is `["RVA1", 1]`. Another magic or a version that is
+/// not an unsigned integer is invalid; another unsigned version is
+/// unsupported.
 fn marker(data: &[u8]) -> ImportResult<()> {
     match scalars(data, 2).as_deref() {
         Some([Value::Text(magic), Value::Integer(version)]) if magic.as_bytes() == MARKER => {
-            if u64::try_from(*version) == Ok(VERSION) {
-                Ok(())
-            } else {
-                Err(RunEvidenceArchiveErrorV1::UnsupportedVersion)
+            match u64::try_from(*version) {
+                Ok(VERSION) => Ok(()),
+                Ok(_) => Err(RunEvidenceArchiveErrorV1::UnsupportedVersion),
+                Err(_) => Err(RunEvidenceArchiveErrorV1::InvalidEncoding),
             }
         }
         _ => Err(RunEvidenceArchiveErrorV1::InvalidEncoding),
