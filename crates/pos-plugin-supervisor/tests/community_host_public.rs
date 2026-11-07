@@ -867,12 +867,41 @@ fn a_lost_commit_is_in_doubt_and_keeps_the_staged_state() -> TestResult {
         assert_eq!(handle.committed_state(), initial());
         assert_eq!(dispositions(handle), [ReceiptDispositionV1::Staged]);
     }
-    assert!(rig.all_slots_empty());
+
+    let receipts = [rig.handle(0).receipts(), rig.handle(1).receipts()];
+    let trust_calls = rig.signed.registry.calls.borrow().len();
+    let mut clock = wall(UTC)?;
+    let retry = rig.run_clocked(&mut clock, TICK + 1)?;
+    assert_eq!(retry.tick, TICK + 1);
+    assert_eq!(retry.utc, None);
+    assert!(retry.gates.is_empty(), "{retry:?}");
+    let PassResultV1::Failed { host: None, error } = retry.result else {
+        return Err(format!("unexpected result: {:?}", retry.result).into());
+    };
+    assert!(matches!(*error, RuntimeError::PendingDriverStep));
+    assert_eq!(clock.remaining(), 1);
+    assert_eq!(rig.signed.registry.calls.borrow().len(), trust_calls);
+    for (index, before) in receipts.iter().enumerate() {
+        assert_eq!(&rig.handle(index).receipts(), before);
+        assert_eq!(rig.handle(index).committed_state(), initial());
+        assert_eq!(rig.registry_availability(index), AVAILABLE);
+    }
 
     let store = &mut *rig.pass.store;
     let recovered = rig.pass.registry.recover_scheduled_pass(store)?;
     assert_eq!(recovered.map(|r| r.committed_events().len()), Some(2));
     assert_eq!(rig.handle(0).committed_state().bytes, b"initial+");
+    for (index, before) in receipts.iter().enumerate() {
+        let mut expected = before.clone();
+        for receipt in &mut expected {
+            receipt.disposition = ReceiptDispositionV1::Committed;
+        }
+        assert_eq!(rig.handle(index).receipts(), expected);
+    }
+    let fresh = rig.run_clocked(&mut clock, TICK + 1)?;
+    assert_eq!(committed_events(&fresh), Some(2), "{fresh:?}");
+    assert_eq!(clock.remaining(), 0);
+    assert_eq!(rig.handle(0).committed_state().bytes, b"initial++");
     Ok(())
 }
 
