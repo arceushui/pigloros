@@ -454,6 +454,7 @@ fn a_mismatched_exchange_or_a_present_canary_is_a_subcase_mismatch() -> TestResu
         }]);
     })?;
     canary.capability_ids.push("gateway.ledger.read".to_owned());
+    canary.capability_ids.sort();
     assert_eq!(observation(&canary)?.result, failure(SUBCASE_MISMATCH));
     Ok(())
 }
