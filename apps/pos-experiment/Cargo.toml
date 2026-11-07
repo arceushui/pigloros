@@ -25,6 +25,7 @@ test-support = [
   "dep:axum",
   "dep:piglor-gateway",
   "dep:pos-plugin-ledger",
+  "dep:pos-time",
   "dep:tokio",
   "dep:tower",
 ]

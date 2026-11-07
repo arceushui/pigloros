@@ -1344,8 +1344,19 @@ fn bundle_rejects_self_declared_noncanonical_authority_sources() -> TestResult {
     Ok(())
 }
 
+const TPS1_OPERATOR_SIGNATURE_DOMAIN: &[u8] = b"PiglorOS.TPS1.operator-signature.v1\0";
+
 fn mutate_draft_authority_archive(
     path: &str,
+    mutate: impl FnOnce(&mut [Value]) -> TestResult,
+) -> TestResult<Vec<u8>> {
+    mutate_draft_authority_archive_signed(path, TPS1_OPERATOR_SIGNATURE_DOMAIN, mutate)
+}
+
+/// Mutate one authority member and re-sign a TPS1 member over `tps1_domain || unsigned`.
+fn mutate_draft_authority_archive_signed(
+    path: &str,
+    tps1_domain: &[u8],
     mutate: impl FnOnce(&mut [Value]) -> TestResult,
 ) -> TestResult<Vec<u8>> {
     let mut archive = current_archive_value()?;
@@ -1365,7 +1376,7 @@ fn mutate_draft_authority_archive(
         let unsigned = encode_value(&Value::Array(fields[..11].to_vec()))?;
         fields[11] = Value::Bytes(
             SigningKey::from_bytes(&DRAFT_FIXTURE_AUTHORITY_KEY)
-                .sign(&unsigned)
+                .sign(&[tps1_domain, unsigned.as_slice()].concat())
                 .to_bytes()
                 .to_vec(),
         );
@@ -1419,6 +1430,19 @@ fn authority_members_reject_closed_contract_mutations() -> TestResult {
             )
         })?;
     assert_authority_archive_rejected_by_both(&changed_epoch);
+
+    let resigned_without_domain =
+        mutate_draft_authority_archive_signed("authority/trust-policy-snapshot.tps1", &[], |_| {
+            Ok(())
+        })?;
+    assert_eq!(
+        ConformanceBundleV1::from_canonical_cbor(&resigned_without_domain).err(),
+        Some(BundleContractErrorV1::SignatureInvalid)
+    );
+    assert_eq!(
+        verify_archive_independently(&resigned_without_domain),
+        Err(BundleContractErrorV1::SignatureInvalid)
+    );
 
     let mut archive = current_archive_value()?;
     let Value::Array(archive_fields) = &mut archive else {
