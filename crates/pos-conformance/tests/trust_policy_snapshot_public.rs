@@ -4,7 +4,7 @@ use pos_conformance::{
     draft_trust_policy_snapshot_bytes_v1, MinimumArtifactVersionV1, TrustPolicyRootV1,
     TrustPolicySnapshotAuthenticationErrorV1 as AuthenticationError,
     TrustPolicySnapshotContractErrorV1 as SnapshotError, TrustPolicySnapshotV1,
-    MAX_TRUST_POLICY_SNAPSHOT_BYTES_V1,
+    DRAFT_TRUST_POLICY_OPERATOR_KEY_V1, MAX_TRUST_POLICY_SNAPSHOT_BYTES_V1,
 };
 use std::io::Cursor;
 
@@ -96,6 +96,7 @@ fn draft_tps1_authenticates_through_the_operator_signature_and_refuses_one_witho
     let (_, mut snapshot) = draft_snapshot()?;
     let authority = SigningKey::from_bytes(&DRAFT_AUTHORITY_SIGNING_KEY);
     let authority_public_key = authority.verifying_key().to_bytes();
+    assert_eq!(DRAFT_TRUST_POLICY_OPERATOR_KEY_V1, authority_public_key);
     assert_eq!(snapshot.trust_roots[0].public_key, authority_public_key);
     assert_eq!(
         snapshot.verify_operator_signature_v1(&authority_public_key, OPERATOR_ROLE),
