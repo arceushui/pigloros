@@ -20,6 +20,7 @@ use crate::{NativeEvent, NativeFactory};
 use native::{Creation, Factory};
 
 mod native;
+mod posting;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -27,6 +28,7 @@ struct Fixture {
     root: PathBuf,
     factory: Rc<Factory>,
     store: FakeStore,
+    loopback: FakeLoopback,
     clock: FakeClock,
     surface: Surface,
 }
@@ -45,12 +47,13 @@ impl Fixture {
         let factory = Factory::new(creation, clock.clone());
         let native: Rc<dyn NativeFactory> = Rc::new(Rc::clone(&factory));
         let store = FakeStore::default();
+        let loopback = FakeLoopback::default();
         let deadline = clock.now() + Duration::from_secs(30);
         let mut surface = Surface::new(
             native,
             Arc::new(Runtime(root.clone())),
             root.clone(),
-            Box::<FakeLoopback>::default(),
+            Box::new(loopback.clone()),
             Box::new(store.clone()),
             Box::new(clock.clone()),
         )
@@ -60,6 +63,7 @@ impl Fixture {
             root,
             factory,
             store,
+            loopback,
             clock,
             surface,
         })
@@ -89,6 +93,46 @@ impl Fixture {
         for forbidden in ["navigate", "create_buffers", "post"] {
             assert!(!self.factory.calls.borrow().contains(&forbidden));
         }
+    }
+
+    fn ready(&mut self) -> TestResult {
+        self.factory.navigation_succeeds.set(true);
+        self.open(&spec(40))
+            .map_err(pos_owner_bridge::SurfaceError::error)?;
+        assert!(self.surface.navigate().is_pending());
+        let sink = self.factory.sink.borrow().clone().ok_or("missing sink")?;
+        assert_eq!(
+            sink.event(NativeEvent::Navigation {
+                uri: crate::NativeText::fixture(crate::OWNER_URL),
+                id: 7,
+                redirected: false,
+            }),
+            crate::NativeAction::Allow
+        );
+        sink.event(NativeEvent::DomLoaded {
+            id: 7,
+            uri: crate::NativeText::fixture(crate::OWNER_URL),
+        });
+        assert!(matches!(
+            self.surface.navigate(),
+            Poll::Ready(Ok(pos_owner_bridge::NavigationId(7)))
+        ));
+        self.loopback.set_served(1, true);
+        Ok(())
+    }
+
+    fn finish(&mut self) -> TestResult {
+        self.factory.failure.set(None);
+        self.factory.close_uncertain.set(false);
+        self.surface
+            .close_controller()
+            .map_err(pos_owner_bridge::SurfaceError::error)?;
+        self.exit();
+        self.surface
+            .finish()
+            .map_err(pos_owner_bridge::SurfaceError::error)?;
+        assert!(self.surface.idle());
+        Ok(())
     }
 }
 
