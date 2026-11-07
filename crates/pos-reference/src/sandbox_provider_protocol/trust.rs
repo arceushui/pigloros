@@ -24,6 +24,8 @@ pub enum SandboxTrustRole {
     IndependentConformanceReviewer,
     /// Image project manifest signer.
     ImageProject,
+    /// TPS1 trust-policy operator signer for installed cases (ADR-069 R8).
+    DeploymentOperator,
 }
 
 impl SandboxTrustRole {
@@ -35,6 +37,7 @@ impl SandboxTrustRole {
             3 => Ok(Self::ProviderRuntimeAttestation),
             4 => Ok(Self::IndependentConformanceReviewer),
             5 => Ok(Self::ImageProject),
+            6 => Ok(Self::DeploymentOperator),
             _ => Err(SandboxProviderProtocolError::FieldOutOfBounds),
         }
     }
