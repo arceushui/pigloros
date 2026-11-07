@@ -36,9 +36,9 @@ const fn resource_cases() -> [(u8, bool, crate::ResourceDenialFixture, u32); 8] 
         (0x22, true, SwallowFailure, 1),
         // PROTOTYPE: actual e1a3 observation, not a containment fix.
         (0x23, true, PropagateFailure, 1),
-        (0x24, true, PrototypeHeld, 0),
         (0x25, true, PrototypeCompleteAllowed, 1),
         (0x26, true, PrototypeCompleteDenied, 0),
+        (0x24, true, PrototypeHeld, 0),
         (0x27, true, PrototypeDrop, 0),
     ]
 }
@@ -48,6 +48,20 @@ const fn resource_stays_deferred(mode: crate::ResourceDenialFixture) -> bool {
         mode,
         crate::ResourceDenialFixture::PrototypeHeld | crate::ResourceDenialFixture::PrototypeDrop
     )
+}
+
+fn restore_denial(
+    native: &mut dyn NativeOperations,
+    listener: &dyn LoopbackPort,
+    mode: crate::ResourceDenialFixture,
+) -> TestResult {
+    if mode == crate::ResourceDenialFixture::PrototypeHeld {
+        assert!(native.unsubscribe_view().is_err());
+        assert!(native.close_controller().is_err());
+        assert_eq!(listener.served().count, 0);
+        crate::Native::prototype_complete_resource(true)?;
+    }
+    Ok(())
 }
 
 struct ResourceProbe {
@@ -264,6 +278,7 @@ impl crate::Native {
             if mode != crate::ResourceDenialFixture::Normal {
                 assert!(probe.failures.get() > 0);
             }
+            restore_denial(native.as_mut(), &listener, mode)?;
             native.unsubscribe_view()?;
             native.close_controller()?;
             pump_until(&factory, "resource browser exit", || {

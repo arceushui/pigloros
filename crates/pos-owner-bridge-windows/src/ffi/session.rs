@@ -278,10 +278,14 @@ impl NativeOperations for Session {
     }
     fn unsubscribe_view(&mut self) -> NativeResult<()> {
         self.check()?;
+        #[cfg(test)]
+        crate::Native::prototype_before_close()?;
         self.subscriptions.close()
     }
     fn close_controller(&mut self) -> NativeResult<()> {
         self.check()?;
+        #[cfg(test)]
+        crate::Native::prototype_before_close()?;
         if let Some(controller) = &self.controller {
             // SAFETY: retained creating-STA controller; all buffer borrows ended.
             // Failure retains the COM owner so the safe policy can quarantine/retry.

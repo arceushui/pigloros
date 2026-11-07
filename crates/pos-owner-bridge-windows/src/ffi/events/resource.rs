@@ -32,6 +32,15 @@ std::thread_local! {
 
 #[cfg(test)]
 impl crate::Native {
+    pub(crate) fn prototype_before_close() -> Result<()> {
+        if DENIAL_FIXTURE.with(|mode| mode.get() == crate::ResourceDenialFixture::PrototypeHeld)
+            && PROTOTYPE_HELD.with(|held| !held.borrow().is_empty())
+        {
+            return Err(unavailable());
+        }
+        Ok(())
+    }
+
     pub(crate) fn set_resource_denial_fixture(mode: crate::ResourceDenialFixture) {
         DENIAL_FIXTURE.with(|current| current.set(mode));
         PROTOTYPE_HELD.with(|held| held.borrow_mut().clear());

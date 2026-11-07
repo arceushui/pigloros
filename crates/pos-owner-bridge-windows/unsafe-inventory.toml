@@ -741,7 +741,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/resource.rs"
-line = 92
+line = 101
 function = "install"
 operation = "view.add_WebResourceRequested(&handler, token)"
 invariant = "live STA interface/handler and initialized unique token output."
@@ -749,7 +749,7 @@ hosted_test = "native_resource_denial_callback_failure_does_not_contact_listener
 
 [[block]]
 file = "src/ffi/events/resource.rs"
-line = 96
+line = 105
 function = "install"
 operation = "remove.remove_WebResourceRequested(token)"
 invariant = "exact subscription token on its retained STA interface."
@@ -757,7 +757,7 @@ hosted_test = "native_resource_denial_callback_failure_does_not_contact_listener
 
 [[block]]
 file = "src/ffi/events/resource.rs"
-line = 101
+line = 110
 function = "install"
 operation = "view.AddWebResourceRequestedFilter(w!( ), COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL)"
 invariant = "fixed wildcard and ALL context; the installed handler selects the pre-created local denial unless the exact owner document is admitted."
@@ -765,7 +765,7 @@ hosted_test = "native_resource_denial_callback_failure_does_not_contact_listener
 
 [[block]]
 file = "src/ffi/events/resource.rs"
-line = 62
+line = 71
 function = "install"
 operation = "environment.CreateWebResourceResponse( None, 403, w!( ), w!( ), )"
 invariant = "Retained STA environment; host-only fixed bodyless 403 is created before subscriptions/navigation, so response allocation failure cannot occur in an in-flight request callback."
@@ -773,7 +773,7 @@ hosted_test = "native_resource_denial_callback_failure_does_not_contact_listener
 
 [[block]]
 file = "src/ffi/events/resource.rs"
-line = 147
+line = 156
 function = "filter"
 operation = "args.SetResponse(response)"
 invariant = "live event arguments and host-created denial response; COM retains its own reference for this intercepted request."
@@ -781,7 +781,7 @@ hosted_test = "native_resource_denial_callback_failure_does_not_contact_listener
 
 [[block]]
 file = "src/ffi/events/resource.rs"
-line = 154
+line = 163
 function = "owner_request"
 operation = "args.Request()"
 invariant = "live event arguments on the callback STA; COM-owned request result."
@@ -789,7 +789,7 @@ hosted_test = "native_resource_denial_callback_failure_does_not_contact_listener
 
 [[block]]
 file = "src/ffi/events/resource.rs"
-line = 157
+line = 166
 function = "owner_request"
 operation = "request.Uri(out)"
 invariant = "the string helper provides initialized uniquely writable output."
@@ -797,7 +797,7 @@ hosted_test = "native_resource_denial_callback_failure_does_not_contact_listener
 
 [[block]]
 file = "src/ffi/events/resource.rs"
-line = 161
+line = 170
 function = "owner_request"
 operation = "args.ResourceContext(&raw mut context)"
 invariant = "live arguments and initialized writable context scalar."
@@ -901,7 +901,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/session.rs"
-line = 288
+line = 292
 function = "close_controller"
 operation = "controller.Close()"
 invariant = "retained creating-STA controller; all buffer borrows ended. Failure retains the COM owner so the safe policy can quarantine/retry."
@@ -1422,7 +1422,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/resource.rs"
-line = 44
+line = 53
 function = "prototype_complete_resource"
 operation = "args.SetResponse(&response)"
 invariant = "PROTOTYPE only: retained argument and fixed response remain on invoking STA."
@@ -1431,7 +1431,7 @@ hosted_test = "native_resource_denial_callback_failure_does_not_contact_listener
 
 [[block]]
 file = "src/ffi/events/resource.rs"
-line = 47
+line = 56
 function = "prototype_complete_resource"
 operation = "deferral.Complete()"
 invariant = "PROTOTYPE only: retained owned deferral is explicitly completed once on invoking STA."
@@ -1440,7 +1440,7 @@ hosted_test = "native_resource_denial_callback_failure_does_not_contact_listener
 
 [[block]]
 file = "src/ffi/events/resource.rs"
-line = 132
+line = 141
 function = "filter"
 operation = "args.GetDeferral()"
 invariant = "PROTOTYPE only: live invoking-STA args; returned hold retained until observed exit or explicit controlled completion."
