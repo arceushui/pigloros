@@ -2,8 +2,22 @@
   "claim_layer": "gateway-client-conformance",
   "case_id": "gateway-client-conformance-downgrade",
   "family": "downgrade",
-  "input_blake3_digest": "ddbe7ef2edc969b87c199cbe3b1d6ca27fba097cf0eec9f9cfa5074e1cef2c25",
-  "status": "pending",
-  "execution_result": null,
+  "input_blake3_digest": "027761dc9308b47b1369abc2e280f29ee9cf1aaae1c5722a4d7b48b72c0f2765",
+  "status": "executed",
+  "execution_result": {
+    "evidence": "local-relaxation",
+    "modes": [
+      {
+        "mode": "local",
+        "outcome": "pass",
+        "actual_error": "incompatible-contract"
+      },
+      {
+        "mode": "air-gapped",
+        "outcome": "pass",
+        "actual_error": "incompatible-contract"
+      }
+    ]
+  },
   "executed_at": null
 }

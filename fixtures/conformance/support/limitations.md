@@ -54,3 +54,21 @@ For the replay-conformance layer: Air-Gapped results are Local-relaxation
 engineering evidence, not hosted conformance. The host runs the `deterministic-air-gapped-v1`
 semantics (no network, the bundled trust policy snapshot) in its own process,
 not as a kernel-audited Air-Gapped execution under the Sandbox Provider.
+
+For the gateway-client-conformance layer: results are Local-relaxation
+engineering evidence, not hosted conformance. The subject is the in-process
+Gateway router of `apps/pos-gateway-conformance-adapter`, which exists only
+with the `test-support` feature because its `authorized` composition uses the
+nonproduction fixture registration of the Gateway action registry and a
+fixture authority; no production authority is sourced from it.
+
+For the gateway-client-conformance layer: the normative surface is the
+documented ADR-014 route table only; there is no OpenAPI document, Golden Path
+transition or public client action or authentication contract. Timeline and
+Event IDs, cursors and error messages are normalized away.
+
+For the gateway-client-conformance layer: deletion-redaction is redaction from
+the public (spectator) listener, not ADR-060 deletion. The ADR-060 erasure
+lifecycle cannot be reached through the Gateway until a Gateway erasure route
+exists: once the Gateway owns its erasure host, no Gateway API or route runs an
+erasure command.
