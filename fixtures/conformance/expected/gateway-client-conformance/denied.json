@@ -2,8 +2,22 @@
   "claim_layer": "gateway-client-conformance",
   "case_id": "gateway-client-conformance-denied",
   "family": "denied",
-  "input_blake3_digest": "755862848634804fa869a18a99bbbccec8d2e9bc931c60e817b0f11273f9e66a",
-  "status": "pending",
-  "execution_result": null,
+  "input_blake3_digest": "6f7ae04aca286d317a9bcb4b6cfe2f6f8d5da02d69f74f83b007e83427a0cf2e",
+  "status": "executed",
+  "execution_result": {
+    "evidence": "local-relaxation",
+    "modes": [
+      {
+        "mode": "local",
+        "outcome": "pass",
+        "actual_error": "capability-denied"
+      },
+      {
+        "mode": "air-gapped",
+        "outcome": "pass",
+        "actual_error": "capability-denied"
+      }
+    ]
+  },
   "executed_at": null
 }
