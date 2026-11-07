@@ -95,7 +95,16 @@ the closure members it writes, with the `PiglorOS.RecordedReplay*.v1` digests of
 Revision 8 note "Recorded Replay Digests". The sub-cases carry all eleven entries of
 `expected-authority/inventory.json`; each entry's fixture bytes and expected result are the payload
 and oracle of one family, and its `materialization_status` is `materialized`. Every
-`expected/replay-conformance/*.json` stays `pending`: materialized is not executed. The profile text
+`expected/replay-conformance/*.json` stays `pending`: materialized is not executed. The one exception
+is `expected/replay-conformance/deletion-redaction.json` (ERA-001, degraded Replay; ADR-062 Revision 8,
+#1296), which is `executed` with the record shape and fixed-point rule of the `plugin-conformance`
+flip: the independent evaluator dispatches the family through the adapter's exact
+`FixtureExecutorV1` declaration and passes it in both the Local and the Air-Gapped ExecutionProfile
+run (Local-relaxation engineering evidence, not hosted conformance). The record names each run's
+outcome and the actual output digest (the BLAKE3 of the oracle member) and the time stays null; the
+generator derives it from the oracle alone, and
+`apps/pos-experiment/tests/replay_provider_dispatch_public.rs` re-executes every family and requires
+every record. The profile text
 is `profiles/replay-conformance/normative-requirements.md`.
 
 The immutable bundle boundary in `pos-conformance` accepts these bytes from a
@@ -115,8 +124,9 @@ deterministic-air-gapped-v1, so every emitted descriptor has exactly one
 ExecutionProfile while the paired bundles retain identical oracle bytes.
 Provider-owned records under `oracles/` define canonical outputs or namespaced
 failures. Records under `expected/` bind the exact input digest; outside the
-`plugin-conformance` layer they contain only `status: "pending"`, null execution
-result, and null execution timestamp. The
+`plugin-conformance` layer and `expected/replay-conformance/deletion-redaction.json`
+they contain only `status: "pending"`, null execution result, and null execution
+timestamp. The
 materializer packages both artifacts separately using the provider-declared media
 types, and only the oracle is bound as the manifest's expected result. Pending
 evidence metadata is never used as

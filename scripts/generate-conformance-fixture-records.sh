@@ -485,7 +485,8 @@ mkdir -p "$(dirname "${generated_authority}")"
 # family: the entry's fixture bytes are that family's payload (which names its RCS1 closure
 # members by BLAKE3 digest) and its expected result is that family's oracle. The digests are
 # those of the files regenerated above, never of the checked-in ones. Materialized is not
-# executed: the evidence-status records stay pending.
+# executed: only the `deletion-redaction` evidence-status record (ERA-001, #1296) is executed,
+# for a case the evaluator passes in both ExecutionProfile runs; the others stay pending.
 declare -A w8h1_digests=()
 for family in positive denied malformed resource-exhaustion deletion-redaction downgrade independent-evaluation; do
   for kind in inputs oracles; do
