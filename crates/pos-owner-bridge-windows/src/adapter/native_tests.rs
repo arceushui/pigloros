@@ -105,12 +105,30 @@ impl FixtureRoot {
         crate::create_private_directory(&path)?;
         Ok(Self(path))
     }
+
+    // Only successful, explicitly retired fixtures may erase recovery metadata.
+    // Errors and unwinds leave the protected root available for diagnosis/restart.
+    fn remove(self) -> TestResult {
+        std::fs::remove_dir_all(self.0)?;
+        Ok(())
+    }
 }
 
-impl Drop for FixtureRoot {
-    fn drop(&mut self) {
-        let _removed = std::fs::remove_dir_all(&self.0);
-    }
+#[test]
+fn failed_fixture_preserves_recovery_files_until_explicit_retirement() -> TestResult {
+    let root = FixtureRoot::new()?;
+    let path = root.0.clone();
+    let record = path.join("recovery-record");
+    std::fs::write(&record, b"retained cleanup evidence")?;
+    let failed: TestResult = (|| {
+        let _retained_on_failure = root;
+        Err("modeled fixture failure".into())
+    })();
+    assert!(failed.is_err());
+    assert_eq!(std::fs::read(&record)?, b"retained cleanup evidence");
+    FixtureRoot(path.clone()).remove()?;
+    assert!(!path.exists());
+    Ok(())
 }
 
 fn pump_until(
@@ -260,6 +278,7 @@ impl crate::Native {
         }
         factory.stop()?;
         listener.shutdown();
+        root.remove()?;
         Ok(())
     }
 
@@ -323,6 +342,7 @@ impl crate::Native {
             assert!(!poll.remaining && poll.driver.is_none());
         }
         drop(host);
+        root.remove()?;
         Ok(())
     }
 
@@ -411,6 +431,7 @@ impl crate::Native {
         listener.shutdown();
         drop(listener);
         readiness::run(&runtime_path, &root.0)?;
+        root.remove()?;
         Ok(())
     }
 }

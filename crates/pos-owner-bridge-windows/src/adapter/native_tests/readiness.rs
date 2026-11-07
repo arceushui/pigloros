@@ -2,19 +2,21 @@
 #![forbid(unsafe_code)]
 
 use std::io::Write as _;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
-use std::task::Poll;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use pos_owner_bridge::ceremony::driver::{CeremonyDriver, Step, StepEnv};
+use pos_owner_bridge::ceremony::plan::{CeremonyPlan, StoredGet, Verified};
+use pos_owner_bridge::fake::signer::FIXTURE_COSE_KEY;
 use pos_owner_bridge::{
-    cleanup_record_bytes, folder_name, CleanupStore, LoopbackPort, NavigationId, OwnerWebSurface,
-    PostGuard, ProcessIdentity, RequestImage, SurfaceEvent, SurfaceSpec, SystemClock,
+    BridgeError, CleanupStore, LifecycleCode, OwnerWebSurface, QuarantineKeeper, SystemClock,
 };
 use pos_owner_bridge_codec::{
-    CeremonyId, CeremonyKind, ControlState, GetOptionsV1, OwnerBridgeControlV1, PrfInput,
+    CeremonyId, CeremonyKind, ControlState, CoseEs256PublicKey, OwnerUserHandle, PrfInput,
     WebAuthnChallenge,
 };
 
@@ -39,13 +41,8 @@ pub(super) fn run(runtime_path: &Path, root: &Path) -> TestResult {
                 .map_err(|error| error.to_string())
         }));
     }
-    // Join every STA even if an earlier worker failed. Only the final aggregate
-    // decides the fixture result; a dropped JoinHandle must not detach an owner.
-    let mut results = Vec::new();
-    for worker in workers {
-        results.push(worker.join());
-    }
-    let mut completed = 0;
+    // Every creating STA retires its accepted owners before its join completes.
+    let results: Vec<_> = workers.into_iter().map(thread::JoinHandle::join).collect();
     let mut reports = Vec::new();
     for (worker, result) in results.into_iter().enumerate() {
         let result =
@@ -56,6 +53,7 @@ pub(super) fn run(runtime_path: &Path, root: &Path) -> TestResult {
         )?;
         reports.push(result);
     }
+    let mut completed = 0;
     for result in reports {
         completed += result?;
     }
@@ -84,31 +82,34 @@ fn run_worker(
         Box::new(SystemClock),
     )
     .map_err(pos_owner_bridge::SurfaceError::error)?;
+    let mut outcome = Ok(RUNS_PER_WORKER);
     for iteration in 0..RUNS_PER_WORKER {
         let number = u64::try_from(worker * RUNS_PER_WORKER + iteration + 1)?;
         let mut bytes = [0; 16];
         bytes[..8].copy_from_slice(&number.to_le_bytes());
         let started = Instant::now();
-        run_ceremony(
+        if let Err(error) = run_ceremony(
             &mut surface,
             &mut loopback,
             &mut store,
             foreground,
             CeremonyId::from_bytes(bytes),
-        )
-        .map_err(|error| format!(
-            "native readiness worker {worker} case {number}, {iteration} completed, elapsed={:?}: {error}",
-            started.elapsed()
-        ))?;
+        ) {
+            outcome = Err(format!(
+                "native readiness worker {worker} case {number}, {iteration} completed, elapsed={:?}: {error}",
+                started.elapsed()
+            ).into());
+            break;
+        }
     }
+    // run_ceremony also retires failed and panicking cases before returning.
     drop(surface);
     assert!(store.records()?.is_empty());
     assert!(store.folders()?.is_empty());
     drop(store);
-    // All sessions and their COM objects have gone before this creating STA.
     let mut factory = Rc::try_unwrap(factory).map_err(|_| "readiness factory still shared")?;
     factory.stop()?;
-    Ok(RUNS_PER_WORKER)
+    outcome
 }
 
 fn run_ceremony(
@@ -118,216 +119,157 @@ fn run_ceremony(
     foreground: &Mutex<()>,
     id: CeremonyId,
 ) -> TestResult {
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let started = Instant::now();
+    let deadline = started + Duration::from_secs(15);
     surface.set_deadline(deadline);
-    let spec = SurfaceSpec {
-        ceremony_id: id,
-        folder_name: folder_name(&id),
-        owner_window: None,
-    };
-    let (identity, visible) = open(surface, &spec, foreground, deadline)?;
-    let record = cleanup_record_bytes(id, &spec.folder_name, &identity)?;
-    store.write_record(&record)?;
-    loopback.probe_ipv6()?;
-    loopback.begin_navigation();
-    let navigation = navigate(surface, deadline)?;
-    await_event(
-        surface,
-        deadline,
-        SurfaceEvent::DomContentLoaded(navigation),
-    )?;
-    assert_eq!(loopback.served().count, 1);
-    assert!(loopback.served().integrity_ok);
-    receive(surface, id, navigation, deadline)?;
-    assert!(
-        Instant::now() < deadline,
-        "readiness exceeded the original T0 bound"
+    let mut visible = Some(acquire_foreground(surface, foreground, deadline)?);
+    let stored = StoredGet::new(
+        vec![0x80, 0x81],
+        OwnerUserHandle::from_bytes([4; 32]),
+        CoseEs256PublicKey::from_canonical_encoding(&FIXTURE_COSE_KEY)
+            .map_err(|error| error.to_string())?,
+        false,
+        false,
+        0,
     );
-    cancel(surface)?;
-    surface
-        .close_controller()
-        .map_err(pos_owner_bridge::SurfaceError::error)?;
-    // Only showing/navigation/posting need the shared foreground. Environment
-    // creation and exact browser-exit cleanup remain concurrent, on separate STAs.
-    drop(visible);
-    await_event(
-        surface,
-        Instant::now() + Duration::from_secs(5),
-        SurfaceEvent::BrowserExited {
-            browser_pid: identity.browser_pid,
+    let plan = CeremonyPlan::for_test(
+        CeremonyKind::Get,
+        id,
+        WebAuthnChallenge::from_bytes([2; 32]),
+        OwnerUserHandle::from_bytes([4; 32]),
+        PrfInput::from_bytes([3; 32]),
+        started,
+    )
+    .with_stored(Some(stored));
+    let mut driver = CeremonyDriver::for_test(plan);
+    let mut receipt = None;
+    // Keep both the driver and its native owners outside the unwind boundary.
+    // An assertion failure must enter the same release/exit path as an error.
+    let attempt = catch_unwind(AssertUnwindSafe(
+        || -> Result<Result<Verified, BridgeError>, Box<dyn std::error::Error>> {
+            loop {
+                if receipt.is_none() && driver.posts() > 0 && !driver.request_clear() {
+                    let state = surface
+                        .reply_load_state()
+                        .map_err(pos_owner_bridge::SurfaceError::error)?;
+                    if state != ControlState::Empty as u32 {
+                        receipt = Some(Instant::now());
+                        // Controlled lifecycle cancellation after actual packaged-page
+                        // receipt; this does not claim an authenticator result.
+                        surface.controller_lost();
+                        drop(visible.take());
+                    }
+                }
+                match driver.step(&mut env(surface, loopback, store)) {
+                    Step::Finished(result) => return Ok(result),
+                    Step::Done => return Err("readiness driver finished without a result".into()),
+                    Step::Pending => pump(surface)?,
+                }
+            }
         },
-    )?;
-    surface
-        .finish()
-        .map_err(pos_owner_bridge::SurfaceError::error)?;
-    store.delete_record(&record)?;
-    assert!(surface.idle());
+    ));
+    drop(visible);
+    let (result, failure) = match attempt {
+        Ok(Ok(result)) => (result, None),
+        Ok(Err(error)) => (
+            cancel_driver(&mut driver, surface, loopback, store),
+            Some(error),
+        ),
+        Err(_) => (
+            cancel_driver(&mut driver, surface, loopback, store),
+            Some("native readiness case panicked".into()),
+        ),
+    };
+    let result_error = result.as_ref().err().copied();
+    let mut keeper = QuarantineKeeper::new();
+    let reply = keeper.finish(driver, result);
+    let mut quarantined = reply.driver.is_none();
+    surface.abandon_opening();
+    // Caller timeouts do not authorize destruction. Keep the exact environment,
+    // exit handler, record, driver and STA until actual retirement succeeds.
+    while quarantined || !surface.idle() {
+        if quarantined {
+            let poll =
+                keeper.poll(|driver| driver.poll_cleanup(&mut env(surface, loopback, store)));
+            quarantined = poll.remaining;
+        } else {
+            let _retired_or_retained = surface.poll_failed_open();
+        }
+        if quarantined || !surface.idle() {
+            pump_retaining(surface);
+        }
+    }
+    if let Some(error) = failure {
+        return Err(error);
+    }
+    if !receipt.is_some_and(|received| received < deadline)
+        || result_error != Some(BridgeError::Lifecycle(LifecycleCode::ControllerLost))
+    {
+        return Err(format!("packaged Get readiness/cancellation failed: receipt={receipt:?}, result={result_error:?}").into());
+    }
     Ok(())
 }
 
-fn open<'a>(
+fn env<'a>(
+    surface: &'a mut Surface,
+    loopback: &'a mut SharedLoopback,
+    store: &'a mut WindowsCleanupStore,
+) -> StepEnv<'a> {
+    StepEnv {
+        surface,
+        clock: &SystemClock,
+        loopback,
+        store,
+    }
+}
+
+fn cancel_driver(
+    driver: &mut CeremonyDriver,
     surface: &mut Surface,
-    spec: &SurfaceSpec,
+    loopback: &mut SharedLoopback,
+    store: &mut WindowsCleanupStore,
+) -> Result<Verified, BridgeError> {
+    surface.controller_lost();
+    loop {
+        match driver.step(&mut env(surface, loopback, store)) {
+            Step::Finished(result) => return result,
+            Step::Done => return Err(BridgeError::Lifecycle(LifecycleCode::ControllerLost)),
+            Step::Pending => pump_retaining(surface),
+        }
+    }
+}
+
+fn acquire_foreground<'a>(
+    surface: &Surface,
     foreground: &'a Mutex<()>,
     deadline: Instant,
-) -> Result<(ProcessIdentity, MutexGuard<'a, ()>), Box<dyn std::error::Error>> {
+) -> Result<MutexGuard<'a, ()>, Box<dyn std::error::Error>> {
     loop {
-        let stage = match foreground.try_lock() {
-            Ok(visible) => match surface.open(spec) {
-                Poll::Ready(result) => {
-                    return Ok((
-                        result.map_err(pos_owner_bridge::SurfaceError::error)?,
-                        visible,
-                    ));
-                }
-                Poll::Pending => {
-                    drop(visible);
-                    "waiting for native opening completion"
-                }
-            },
-            Err(TryLockError::WouldBlock) => "waiting for the foreground coordination gate",
+        match foreground.try_lock() {
+            Ok(visible) => return Ok(visible),
+            Err(TryLockError::WouldBlock) => {}
             Err(TryLockError::Poisoned(_)) => {
                 return Err("readiness foreground lock poisoned".into())
             }
-        };
-        pump(surface, deadline, stage)?;
-    }
-}
-
-fn navigate(
-    surface: &mut Surface,
-    deadline: Instant,
-) -> Result<NavigationId, Box<dyn std::error::Error>> {
-    loop {
-        if let Poll::Ready(result) = surface.navigate() {
-            return result
-                .map_err(pos_owner_bridge::SurfaceError::error)
-                .map_err(Into::into);
         }
-        pump(surface, deadline, "waiting for the native navigation ID")?;
-    }
-}
-
-fn await_event(surface: &mut Surface, deadline: Instant, expected: SurfaceEvent) -> TestResult {
-    let stage = format!("waiting for {expected:?}");
-    loop {
-        if let Some(event) = surface.take_event() {
-            assert_eq!(event, expected);
-            return Ok(());
+        if Instant::now() >= deadline {
+            return Err("readiness expired waiting for the foreground coordination gate".into());
         }
-        pump(surface, deadline, &stage)?;
+        pump(surface)?;
     }
 }
 
-fn pump(surface: &Surface, deadline: Instant, stage: &str) -> TestResult {
-    if Instant::now() >= deadline {
-        return Err(format!("native readiness fixture deadline expired while {stage}").into());
-    }
+fn pump(surface: &Surface) -> TestResult {
     if surface.pump()? == NativePulse::Quit {
-        return Err(format!("native readiness STA received quit while {stage}").into());
+        return Err("native readiness STA received quit".into());
     }
     Ok(())
 }
 
-fn receive(
-    surface: &mut Surface,
-    id: CeremonyId,
-    navigation: NavigationId,
-    deadline: Instant,
-) -> TestResult {
-    let options = GetOptionsV1::new(
-        id,
-        WebAuthnChallenge::from_bytes([2; 32]),
-        &[0x80, 0x81],
-        PrfInput::from_bytes([3; 32]),
-    )
-    .map_err(|error| error.to_string())?;
-    let mut request = RequestImage::zeroed();
-    let length =
-        pos_owner_bridge_codec::encode_get_options(&options, &mut request.as_mut_bytes()[64..])
-            .map_err(|error| error.to_string())?;
-    for (attempt, millis) in [250, 250, 500, 500, 1_000, 1_000, 2_000, 2_000]
-        .into_iter()
-        .enumerate()
-    {
-        let generation = u32::try_from(attempt + 1)?;
-        let header = OwnerBridgeControlV1::new_request(
-            CeremonyKind::Get,
-            generation,
-            id,
-            u32::try_from(length)?,
-        )
-        .map_err(|error| error.to_string())?
-        .encode();
-        request.as_mut_bytes()[..64].copy_from_slice(&header);
-        let reply = OwnerBridgeControlV1::new_reply(CeremonyKind::Get, generation, id)
-            .map_err(|error| error.to_string())?
-            .encode();
-        surface
-            .create_and_write(&request, &reply)
-            .map_err(pos_owner_bridge::SurfaceError::error)?;
-        surface
-            .post(&PostGuard {
-                generation,
-                navigation_id: navigation,
-                served_count: 1,
-            })
-            .map_err(pos_owner_bridge::SurfaceError::error)?;
-        let receipt = (Instant::now() + Duration::from_millis(millis)).min(deadline);
-        while surface
-            .reply_load_state()
-            .map_err(pos_owner_bridge::SurfaceError::error)?
-            == ControlState::Empty as u32
-            && Instant::now() < receipt
-        {
-            pump(surface, deadline, "waiting for packaged Get receipt")?;
-        }
-        if surface
-            .reply_load_state()
-            .map_err(pos_owner_bridge::SurfaceError::error)?
-            != ControlState::Empty as u32
-            || !surface
-                .reply_compare_exchange(
-                    ControlState::Empty as u32,
-                    ControlState::ReleaseRequested as u32,
-                )
-                .map_err(pos_owner_bridge::SurfaceError::error)?
-        {
-            return Ok(());
-        }
-        surface
-            .zero_close_buffers()
-            .map_err(pos_owner_bridge::SurfaceError::error)?;
+fn pump_retaining(surface: &Surface) {
+    if pump(surface).is_err() {
+        // Match the host's retention behavior after a pump failure. No owner is
+        // discarded merely because the event loop is temporarily unavailable.
+        thread::sleep(Duration::from_millis(10));
     }
-    Err("packaged page lost all eight readiness pairs".into())
-}
-
-fn cancel(surface: &mut Surface) -> TestResult {
-    let mut retired = false;
-    for _ in 0..8 {
-        let state = surface
-            .reply_load_state()
-            .map_err(pos_owner_bridge::SurfaceError::error)?;
-        assert!([1, 2, 6, 7].contains(&state));
-        if surface
-            .reply_compare_exchange(state, ControlState::ReleaseRequested as u32)
-            .map_err(pos_owner_bridge::SurfaceError::error)?
-        {
-            retired = true;
-            break;
-        }
-    }
-    assert!(retired, "native readiness cancellation CAS bound exhausted");
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while surface
-        .reply_load_state()
-        .map_err(pos_owner_bridge::SurfaceError::error)?
-        != ControlState::Releasing as u32
-    {
-        pump(surface, deadline, "waiting for Get release acknowledgement")?;
-    }
-    surface
-        .zero_close_buffers()
-        .map_err(pos_owner_bridge::SurfaceError::error)?;
-    Ok(())
 }
