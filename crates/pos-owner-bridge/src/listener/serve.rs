@@ -24,6 +24,9 @@ pub(super) struct ServeContext {
     pub(super) timeouts: ListenerTimeouts,
     /// The digest every completed owner response must match.
     pub(super) expected_digest: [u8; 32],
+    /// Test-only count of connections that supplied at least one request byte.
+    #[cfg(feature = "test-support")]
+    pub(super) received: Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// How reading one request ended.
@@ -69,6 +72,7 @@ pub(super) fn read_request<S: TimedRead>(
     stream: &mut S,
     buffer: &mut [u8; REQUEST_BUFFER_BYTES],
     timeouts: ListenerTimeouts,
+    mut first_byte: impl FnMut(),
 ) -> ReadOutcome {
     let mut deadline = Instant::now() + timeouts.first_byte;
     let mut filled = 0;
@@ -83,6 +87,7 @@ pub(super) fn read_request<S: TimedRead>(
             Ok(received) => received,
         };
         if filled == 0 {
+            first_byte();
             deadline = Instant::now() + timeouts.header;
         }
         filled += received;
@@ -167,7 +172,13 @@ pub(super) fn respond<W: Write>(
 /// Serve one accepted connection to completion, then close it.
 pub(super) fn serve_connection(mut stream: TcpStream, context: &ServeContext) {
     let mut buffer = [0_u8; REQUEST_BUFFER_BYTES];
-    let admitted = match read_request(&mut stream, &mut buffer, context.timeouts) {
+    let outcome = read_request(&mut stream, &mut buffer, context.timeouts, || {
+        #[cfg(feature = "test-support")]
+        context
+            .received
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    });
+    let admitted = match outcome {
         ReadOutcome::Silent => return,
         ReadOutcome::TooLarge => None,
         ReadOutcome::Complete(length) => buffer

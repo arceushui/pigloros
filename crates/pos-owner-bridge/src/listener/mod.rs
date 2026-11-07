@@ -224,6 +224,8 @@ fn accept_loop(listener: &TcpListener, context: &Arc<ServeContext>, shared: &Arc
 /// The running loopback listener. Dropping it stops the accept threads.
 pub struct LoopbackListener {
     ledger: Arc<ServedLedger>,
+    #[cfg(feature = "test-support")]
+    received: Arc<std::sync::atomic::AtomicU64>,
     shared: Arc<Shared>,
     workers: Vec<JoinHandle<()>>,
     v4_addr: SocketAddr,
@@ -250,10 +252,14 @@ impl LoopbackListener {
             .as_ref()
             .and_then(|socket| socket.local_addr().ok());
         let ledger = Arc::new(ServedLedger::default());
+        #[cfg(feature = "test-support")]
+        let received = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let context = Arc::new(ServeContext {
             ledger: Arc::clone(&ledger),
             timeouts: config.timeouts,
             expected_digest: config.expected_digest,
+            #[cfg(feature = "test-support")]
+            received: Arc::clone(&received),
         });
         let shared = Arc::new(Shared::default());
         let accepting = std::iter::once(sockets.v4).chain(sockets.v6);
@@ -267,6 +273,8 @@ impl LoopbackListener {
         .map_err(|_| BridgeError::Unavailable(UnavailableCode::PortUnavailable))?;
         Ok(Self {
             ledger,
+            #[cfg(feature = "test-support")]
+            received,
             shared,
             workers,
             v4_addr,
@@ -280,6 +288,15 @@ impl LoopbackListener {
     #[must_use]
     pub const fn v4_addr(&self) -> SocketAddr {
         self.v4_addr
+    }
+
+    /// Count connections that supplied any request byte, including incomplete
+    /// requests or responses. Silent speculative preconnects are excluded.
+    /// This cumulative test observation is not reset by navigation.
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn received_request_count(&self) -> u64 {
+        self.received.load(Ordering::SeqCst)
     }
 
     /// The bound IPv6 loopback address, when IPv6 is held.

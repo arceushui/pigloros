@@ -47,6 +47,7 @@ fn serves_the_exact_pinned_owner_response_once() -> TestResult {
     let served = listener.served();
     assert_eq!(served.count, 1);
     assert!(served.integrity_ok);
+    assert_eq!(listener.received_request_count(), 1);
     Ok(())
 }
 
@@ -70,6 +71,7 @@ fn a_second_completion_raises_the_served_count_and_navigation_resets_it() -> Tes
     assert_eq!(listener.served().count, 2);
     listener.begin_navigation();
     assert_eq!(listener.served().count, 0);
+    assert_eq!(listener.received_request_count(), 2);
     assert!(listener.served().integrity_ok);
     Ok(())
 }
@@ -82,6 +84,7 @@ Sec-Fetch-Dest: document\r\nSec-Fetch-Mode: navigate\r\n\r\n";
     let response = exchange(listener.v4_addr(), request)?;
     assert!(response.starts_with(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n"));
     assert_eq!(listener.served().count, 0);
+    assert_eq!(listener.received_request_count(), 1);
     Ok(())
 }
 
@@ -91,6 +94,7 @@ fn a_malformed_request_gets_the_fixed_400() -> TestResult {
     let response = exchange(listener.v4_addr(), b"POST /owner.html HTTP/1.1\r\n\r\n")?;
     assert!(response.starts_with(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n"));
     assert_eq!(listener.served().count, 0);
+    assert_eq!(listener.received_request_count(), 1);
     Ok(())
 }
 
@@ -108,6 +112,7 @@ fn a_silent_connection_is_closed_after_the_first_byte_timeout_without_a_response
     let started = Instant::now();
     let response = exchange(listener.v4_addr(), b"")?;
     assert!(response.is_empty());
+    assert_eq!(listener.received_request_count(), 0);
     // Only the lower bound is deterministic. A loaded runner may take longer, and the client's
     // own ten-second read timeout turns a hung listener into a failure.
     assert!(started.elapsed() >= Duration::from_millis(900));
@@ -127,6 +132,7 @@ fn an_incomplete_header_block_is_closed_at_the_header_deadline_without_a_respons
     let response = exchange(listener.v4_addr(), b"GET /owner.html HTTP/1.1\r\nHost")?;
     assert!(response.is_empty());
     assert!(started.elapsed() >= Duration::from_millis(250));
+    assert_eq!(listener.received_request_count(), 1);
     Ok(())
 }
 
@@ -140,6 +146,7 @@ fn silent_preconnect_sockets_cannot_starve_a_real_navigation() -> TestResult {
     let started = Instant::now();
     let response = exchange(address, OWNER_REQUEST)?;
     assert!(is_the_pinned_owner_response(&response));
+    assert_eq!(listener.received_request_count(), 1);
     // The three silent sockets hold every slot until their first-byte deadline, so the real
     // request cannot have been answered earlier. There is no upper bound: see above.
     assert!(started.elapsed() >= Duration::from_millis(900));
