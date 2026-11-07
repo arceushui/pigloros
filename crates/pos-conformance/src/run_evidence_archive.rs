@@ -46,8 +46,6 @@ const BLOCK: usize = 512;
 const END_MARKER: usize = 2 * BLOCK;
 /// The canonical CBOR of `["RVA1", 1]`.
 const MARKER_BYTES: [u8; 7] = [0x82, 0x64, b'R', b'V', b'A', b'1', 0x01];
-const EVENT_FIELDS: usize = 8;
-const TIMELINE_FIELDS: usize = 4;
 
 /// A closed RVA1 writer refusal. It carries no member name, path or byte.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Error)]
@@ -123,7 +121,7 @@ fn head(out: &mut Vec<u8>, major: u8, value: u64) {
     } else {
         (27, 8)
     };
-    out.push((major << 5) | info);
+    out.push((major << 5) + info);
     out.extend_from_slice(&bytes[8 - width..]);
 }
 
@@ -388,15 +386,14 @@ fn closure_complete(entries: &[(String, Vec<u8>)]) -> WriteResult<()> {
     }
 }
 
-/// One definite-length array of exactly `fields` scalars in canonical CBOR:
-/// decoded with a recursion limit of one, then re-encoded and compared.
-fn canonical_fields(data: &[u8], fields: usize) -> Option<Vec<Scalar>> {
+/// One definite-length array of scalars in canonical CBOR: decoded with a
+/// recursion limit of one, then re-encoded and compared. Each record's
+/// pattern fixes its length.
+fn canonical_fields(data: &[u8]) -> Option<Vec<Scalar>> {
     ciborium::de::from_reader_with_recursion_limit::<Value, _>(data, 1)
         .ok()
         .and_then(|value| match value {
-            Value::Array(items) if items.len() == fields => {
-                items.into_iter().map(scalar).collect::<Option<Vec<_>>>()
-            }
+            Value::Array(items) => items.into_iter().map(scalar).collect::<Option<Vec<_>>>(),
             _ => None,
         })
         .filter(|scalars| encode(scalars) == data)
@@ -432,7 +429,7 @@ struct EventFields {
 }
 
 fn event_fields(data: &[u8]) -> Option<EventFields> {
-    canonical_fields(data, EVENT_FIELDS).and_then(|items| match items.as_slice() {
+    canonical_fields(data).and_then(|items| match items.as_slice() {
         [Scalar::Uint(seq), Scalar::Uint(entity), Scalar::Text(_), Scalar::Uint(version), cause, correlation, Scalar::Bytes(_), Scalar::Bytes(hash)]
             if u32::try_from(*version).is_ok() && hash.len() == 32 =>
         {
@@ -457,7 +454,7 @@ struct TimelineFields {
 }
 
 fn timeline_fields(data: &[u8]) -> Option<TimelineFields> {
-    canonical_fields(data, TIMELINE_FIELDS).and_then(|items| match items.as_slice() {
+    canonical_fields(data).and_then(|items| match items.as_slice() {
         [Scalar::Uint(mode), Scalar::Null | Scalar::Text(_), owner, Scalar::Uint(head)] => {
             as_optional_uint(owner).ok().map(|owner| TimelineFields {
                 mode: *mode,
