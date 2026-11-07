@@ -82,8 +82,9 @@ FUEL = 1_000_000  # min(budget 1,000,000, V1 ceiling 1,000,000,000)
 LOG_MESSAGE_BOUND = 256
 COORDINATE_BOUND = 128
 LOG_SCHEMA = "pigloros.operational-log.v1"
-# Closed codes: positions in g_ops.rs `DISPOSITIONS` (Staged, Committed, Discarded) and
-# `AVAILABILITIES` (Available, Disabled, Unavailable, Revoked, Trapped, ResourceExhausted).
+# Closed codes: the declaration ordinals of `ReceiptDispositionV1` (Staged, Committed, Discarded)
+# and `PluginAvailabilityV1` (Available, Disabled, Unavailable, Revoked, Trapped,
+# ResourceExhausted).
 DISPOSITION = 1  # Committed
 AVAILABLE = 0
 TRAPPED = 4

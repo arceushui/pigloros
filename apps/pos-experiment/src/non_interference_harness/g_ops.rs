@@ -670,7 +670,7 @@ impl SubjectV1 {
     }
 
     fn disposition(&self) -> Value {
-        closed_code(&DISPOSITIONS, &self.receipt.disposition)
+        disposition_code(self.receipt.disposition)
     }
 
     fn failure(&self) -> Value {
@@ -686,39 +686,21 @@ impl SubjectV1 {
     }
 }
 
-/// The closed receipt disposition codes, by position.
-const DISPOSITIONS: [ReceiptDispositionV1; 3] = [
-    ReceiptDispositionV1::Staged,
-    ReceiptDispositionV1::Committed,
-    ReceiptDispositionV1::Discarded,
-];
-
-/// The closed Plugin availability codes, by position.
-const AVAILABILITIES: [PluginAvailabilityV1; 6] = [
-    PluginAvailabilityV1::Available,
-    PluginAvailabilityV1::Disabled,
-    PluginAvailabilityV1::Unavailable,
-    PluginAvailabilityV1::Revoked,
-    PluginAvailabilityV1::Trapped,
-    PluginAvailabilityV1::ResourceExhausted,
-];
-
 /// The guest's declared failure: `guest-declared-failure(7)`.
 const DECLARED_FAILURE: u16 = 7;
 const DECLARED_FAILURE_CASE: &str = "guest-declared-failure";
 
-/// The closed code of `value`: its position in `codes`.
-fn closed_code<T: PartialEq>(codes: &[T], value: &T) -> Value {
-    uint(
-        codes
-            .iter()
-            .position(|code| code == value)
-            .map_or(u64::MAX, |position| position as u64),
-    )
+/// The closed code of a receipt disposition: its declaration ordinal
+/// (`Staged` 0, `Committed` 1, `Discarded` 2), pinned by a test.
+fn disposition_code(disposition: ReceiptDispositionV1) -> Value {
+    uint(disposition as u64)
 }
 
+/// The closed code of a Plugin's availability: its declaration ordinal
+/// (`Available` 0, `Disabled` 1, `Unavailable` 2, `Revoked` 3, `Trapped` 4,
+/// `ResourceExhausted` 5), pinned by a test.
 fn availability(handle: &CommunityPluginHandleV1) -> Value {
-    closed_code(&AVAILABILITIES, &handle.availability())
+    uint(handle.availability() as u64)
 }
 
 /// `[case, code, whether the guest declared exactly that failure]`.
@@ -806,6 +788,12 @@ fn elapsed(start: Instant) -> Vec<u8> {
 
 /// One host-owned sibling invocation of the guest with `observation`, at
 /// Simulation Time `selector`, under a supervisor with `watchdog`.
+///
+/// The `NI-OBS-004` and `NI-TIME-005` siblings call the supervisor's
+/// `drive` directly because it is the only path that returns the guest's
+/// `InvocationReportV1::operational_log`: the community Driver adapter keeps
+/// only a receipt. The subject and the `NI-CRASH-012` siblings run through
+/// `CommunityDriverV1`.
 fn sibling(
     host: &GOpsHostV1,
     observation: &[u8],
@@ -1369,6 +1357,9 @@ fn time_surfaces(
     run: &GOpsRunV1<'_>,
     subject: &SubjectV1,
 ) -> Result<SurfacesV1, NonInterferenceNonExecutedCauseV1> {
+    // The timing channels are deliberately small (a 0-2 ms offset and a
+    // 0-255 ms watchdog margin under a 30 s watchdog): they only show that the
+    // normalizer excludes wall time, and the margin never fires.
     let offset = Duration::from_millis((run.unauthorized_value.len() % 3) as u64);
     let margin = Duration::from_millis(u64::from(
         run.unauthorized_value.first().copied().unwrap_or_default(),
@@ -1484,8 +1475,8 @@ fn sibling_ticks(
 ///   community host failure]`. The quarantined sibling's next Tick is refused
 ///   before the host runs it, so it adds no receipt.
 ///
-/// Availabilities and dispositions are closed codes: their positions in
-/// [`AVAILABILITIES`] and [`DISPOSITIONS`]. No record holds `Debug` text.
+/// Availabilities and dispositions are closed codes: their declaration
+/// ordinals. No record holds `Debug` text.
 ///
 /// Operationally each keeps category, count and padded length; the
 /// coordinate and the archive's file name, which the value names, are
@@ -1587,6 +1578,27 @@ mod tests {
                 text
             });
         assert!(GUEST_WAT.contains(&embedded));
+    }
+
+    #[test]
+    fn the_closed_codes_are_the_declaration_ordinals() {
+        let codes = [
+            ReceiptDispositionV1::Staged,
+            ReceiptDispositionV1::Committed,
+            ReceiptDispositionV1::Discarded,
+        ]
+        .map(disposition_code);
+        assert_eq!(codes, [uint(0), uint(1), uint(2)]);
+        let availabilities = [
+            PluginAvailabilityV1::Available,
+            PluginAvailabilityV1::Disabled,
+            PluginAvailabilityV1::Unavailable,
+            PluginAvailabilityV1::Revoked,
+            PluginAvailabilityV1::Trapped,
+            PluginAvailabilityV1::ResourceExhausted,
+        ]
+        .map(|availability| availability as u64);
+        assert_eq!(availabilities, [0, 1, 2, 3, 4, 5]);
     }
 
     #[test]
