@@ -168,10 +168,22 @@ flips the 24 cases of `NI-PUBLIC-006` and `NI-EVAL-007` in modes L, R and F.
   `non-interference/executor.json`. They are engineering evidence, not an
   attestation.
 - Each flipped case's `expected_result_digest` is its NIA1 result digest, derived
-  independently by `scripts/generate_non_interference_g_pub_fixtures.py`.
-  `executed: true` never implies a pass.
+  independently by the row's oracle (for these rows
+  `scripts/generate_non_interference_g_pub_fixtures.py`) and bound by
+  `scripts/generate_non_interference_fixtures.py`. `executed: true` never implies a
+  pass.
+- The rows that may be flipped are declared once in
+  `scripts/non_interference_executed_rows.json`, which the binder, the fixture
+  verify script and the Plugin conformance checker read.
 - Air-Gapped cases stay non-executed until N7 (#1235), and `NI-ARCHIVE-009` until
   N1b (#1284).
+
+ADR-062 Revision 8 slice N4 (#1232, owner note `ADR-062_R8_NonInterference_Fork`)
+flips the 12 cases of `NI-FORK-008` in modes L, R and F the same way, over the
+ADR-064 Fork artifacts of slice R6. Their expected result digests are derived by
+`scripts/generate_non_interference_g_fork_fixtures.py`, which rebuilds every
+`INT1`, `CFP1`, `RCF1`, `SIV1`, `RCP1` and `CFR1` byte in pure Python. The F-mode
+evidence is re-run when #1204 lands.
 `expected-authority/inventory.json` records the eleven #172 handoff slots. Its
 `expected_outcome` values are planned authority targets, not observed results.
 Since ADR-062 Revision 8 slice R4 (#1222) every slot is `materialized`: its

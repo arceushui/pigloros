@@ -192,7 +192,16 @@ case "${matrix_lifecycle}" in
     ;;
 esac
 
+# ADR-062 Revision 8 slices N1-N4: the rows whose verifier-accepted cases may be flipped, and the
+# modes they may be flipped in, are declared once in scripts/non_interference_executed_rows.json.
+executed_rows_declaration="$(dirname -- "${BASH_SOURCE[0]}")/non_interference_executed_rows.json"
+jq -e '(.rows | type == "array" and all(type == "string")) and .modes == ["L", "R", "F"]' \
+  "${executed_rows_declaration}" >/dev/null || {
+  echo "invalid non-interference executed-row declaration" >&2
+  exit 1
+}
 jq -e --arg matrix_lifecycle "${matrix_lifecycle}" \
+  --slurpfile executed_rows "${executed_rows_declaration}" \
   '
   . as $root |
   ($root | keys | sort) == ([
@@ -241,12 +250,12 @@ jq -e --arg matrix_lifecycle "${matrix_lifecycle}" \
     if .executed == false then
       .expected_result_digest == null and .expected_result == null
     else
-      # ADR-062 Revision 8 slice N1 (#1229): only a G-PUB case of NI-PUBLIC-006 or NI-EVAL-007
-      # in mode L, R or F is ever flipped, and only over its checked-in NIA1 (owner note
-      # ADR-062_R8_NonInterference_Executions). Executed never implies a pass.
+      # ADR-062 Revision 8 slices N1-N4: only a case of a declared executed row in a declared
+      # mode is ever flipped, and only over its checked-in NIA1 (owner answer Q9). Executed never
+      # implies a pass.
       .executed == true and
-      (.fixture_id | IN("NI-PUBLIC-006", "NI-EVAL-007")) and
-      (.mode | IN("L", "R", "F")) and
+      (.fixture_id | IN($executed_rows[0].rows[])) and
+      (.mode | IN($executed_rows[0].modes[])) and
       (.expected_result_digest | type == "string" and test("^[0-9a-f]{64}$")) and
       (.expected_result | type == "object" and
         (keys == ["equal", "first_divergence", "nia1_content_digest"]) and
@@ -667,7 +676,7 @@ fi
 # checked-in NIA1, each named by its content address (the BLAKE3 of the NIA1 artifact domain, a
 # zero byte and the artifact bytes). The executed matrix cases name exactly those artifacts. The
 # pos-reference verifier's acceptance of each file is checked by the Rust test
-# apps/pos-experiment/tests/non_interference_g_pub.rs.
+# apps/pos-experiment/tests/non_interference_evidence.rs.
 non_interference_root="${fixture_root}/non-interference"
 jq -e '
   (keys | sort) == (["algorithm", "authority_kind", "evidence", "key_id", "public_key_hex"] | sort) and

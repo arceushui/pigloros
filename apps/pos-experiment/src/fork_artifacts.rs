@@ -46,13 +46,31 @@
 //! [`ForkRunErrorV1::Host`]; an admission or recomputation refusal is
 //! [`ForkRunErrorV1::Admission`] or [`ForkRunErrorV1::Suffix`].
 //!
+//! # Replay of a recorded run
+//!
+//! [`record_fork_v1`] also returns the run's recorded Event Store as a
+//! [`RecordedForkV1`]. [`replay_recorded_fork_v1`] rebuilds the export from
+//! that store and the recorded run's host inputs: it reads the committed
+//! generation's receipt, reads the
+//! `RCF1` and `SIV1` back with `read_generation_artifact`, and has the
+//! coordinator recover every `RCP1` and the `CFR1` from the committed Fork
+//! Events. A complete generation stages nothing, so no Driver runs and no
+//! Event is appended; its stager declares no provisional Tick, so a Tick it
+//! were asked to stage would be an empty batch, which the coordinator
+//! refuses. Only the host inputs come from the recorded run rather than the
+//! store: the `INT1` and `CFP1` are the recorded run's plan, and the `CFR1`
+//! result id, its evaluator identity and the export's uncompared metadata
+//! (factual head, Drivers, provisional edges) are the run's.
+//!
 //! # No factual-suffix splicing
 //!
 //! The Fork sees the factual Timeline only through its cut: the frontier
 //! source pages the recorded prefix through the plan's parent-cut Tick, and
 //! every recomputed Tick is staged from the plan and the records form alone.
 //! The factual suffix therefore never reaches an exported artifact: two
-//! fixtures that differ only in their factual suffix export the same bytes.
+//! fixtures that differ only in their factual suffix, or in the hidden
+//! participant field their factual Events carry after the cut, export the
+//! same bytes.
 //!
 //! # Coordinates
 //!
@@ -117,7 +135,7 @@ mod history;
 mod records_form;
 
 use history::FactualV1;
-use records_form::{BindingsV1, RecordsFormStagerV1};
+use records_form::{BindingsV1, ProvisionalGraphV1, RecordsFormStagerV1};
 
 /// The id of the factual Timeline of every run.
 pub const FACTUAL_TIMELINE_ID_V1: [u8; 16] = *b"pigloros.factual";
@@ -231,6 +249,10 @@ pub struct ForkFixtureV1 {
     /// The input of each factual Tick after the cut; it never reaches an
     /// exported artifact.
     pub factual_suffix: Vec<Vec<u8>>,
+    /// The hidden participant field: the participant Driver `beta` appends
+    /// it to the payload of each of its factual Events after the cut. It
+    /// never reaches an exported artifact.
+    pub hidden_participant_field: Vec<u8>,
     /// Recomputation Ticks after the first one, through the plan horizon.
     pub horizon_span: u64,
     /// `CFP1` plan id.
@@ -303,6 +325,28 @@ pub enum ForkRunErrorV1 {
     Suffix(CounterfactualSuffixErrorV1),
 }
 
+/// One executed run's recorded Event Store, which
+/// [`replay_recorded_fork_v1`] rebuilds the export from.
+pub struct RecordedForkV1 {
+    coordinator: CounterfactualCoordinatorV1<MemoryStore>,
+    plan: CounterfactualPlanV1,
+    fork: TimelineId,
+    result_id: [u8; 16],
+    evaluator_identity_digest: [u8; 32],
+    factual_head: FactualHeadV1,
+    drivers: Vec<ForkDriverV1>,
+    provisional_edges: Vec<InputDependencyV1>,
+}
+
+impl RecordedForkV1 {
+    /// The recorded Event Store: the factual Timeline
+    /// ([`FACTUAL_TIMELINE_ID_V1`]) and the Fork ([`FORK_TIMELINE_ID_V1`]).
+    #[must_use]
+    pub const fn store(&self) -> &MemoryStore {
+        self.coordinator.store()
+    }
+}
+
 /// Execute `fixture` in `mode` and export its artifacts.
 ///
 /// # Errors
@@ -312,6 +356,64 @@ pub fn run_fork_v1(
     fixture: &ForkFixtureV1,
     mode: ExecutionModeV1,
 ) -> Result<ForkArtifactExportV1, ForkRunErrorV1> {
+    record_fork_v1(fixture, mode).map(|(export, _)| export)
+}
+
+/// Rebuild the export of a recorded run from its Event Store and its host
+/// inputs (see the module documentation): no Driver runs and no Event is
+/// appended.
+///
+/// # Errors
+/// Returns [`ForkRunErrorV1::Host`] when the store holds no committed
+/// generation or one of its artifacts cannot be read back, and the
+/// coordinator's [`ForkRunErrorV1::Suffix`] refusal of the recovery.
+pub fn replay_recorded_fork_v1(
+    recorded: &mut RecordedForkV1,
+) -> Result<ForkArtifactExportV1, ForkRunErrorV1> {
+    let store = recorded.coordinator.store();
+    let receipt = store
+        .current_fork_generation(recorded.fork)
+        .ok()
+        .and_then(|at| store.committed_generation_receipt(at).ok().flatten());
+    let no_provisional_tick = ProvisionalGraphV1 {
+        nodes: Vec::new(),
+        edges: Vec::new(),
+    };
+    receipt
+        .zip(RecordsFormStagerV1::new(&no_provisional_tick, Vec::new()))
+        .ok_or(ForkRunErrorV1::Host)
+        .and_then(|(receipt, mut stager)| {
+            let suffix = CounterfactualSuffixRequestV1 {
+                plan: &recorded.plan,
+                receipt,
+                fork_append_authority: CounterfactualForkAppendAuthorityV1::Generic,
+                result_id: recorded.result_id,
+                evaluator_identity_digest: recorded.evaluator_identity_digest,
+            };
+            recorded
+                .coordinator
+                .recompute_suffix(&suffix, &mut stager, &mut GenericForksOnlyV1)
+                .map_err(ForkRunErrorV1::Suffix)
+                .and_then(|run| export(recorded.coordinator.store(), &recorded.plan, receipt, run))
+        })
+        .map(|artifacts| ForkArtifactExportV1 {
+            factual_head: recorded.factual_head,
+            drivers: recorded.drivers.clone(),
+            provisional_edges: recorded.provisional_edges.clone(),
+            artifacts,
+        })
+}
+
+/// Execute `fixture` in `mode`, export its artifacts and keep its recorded
+/// Event Store for [`replay_recorded_fork_v1`].
+///
+/// # Errors
+/// Returns the [`ForkRunErrorV1`] of the first refused step, in the order of
+/// the module documentation.
+pub fn record_fork_v1(
+    fixture: &ForkFixtureV1,
+    mode: ExecutionModeV1,
+) -> Result<(ForkArtifactExportV1, RecordedForkV1), ForkRunErrorV1> {
     let network = fixture
         .execution_profile
         .capabilities_and_network
@@ -325,8 +427,11 @@ pub fn run_fork_v1(
         .and_then(|()| {
             let root = TimelineId::from_ulid(Ulid::from_bytes(FACTUAL_TIMELINE_ID_V1));
             let fork = TimelineId::from_ulid(Ulid::from_bytes(FORK_TIMELINE_ID_V1));
-            history::record(root, fork, fixture.cut_tick, &fixture.factual_suffix)
-                .ok_or(ForkRunErrorV1::Host)
+            let suffix = (
+                fixture.factual_suffix.as_slice(),
+                fixture.hidden_participant_field.as_slice(),
+            );
+            history::record(root, fork, fixture.cut_tick, suffix).ok_or(ForkRunErrorV1::Host)
         })
         .and_then(|factual| execute(fixture, factual))
 }
@@ -382,7 +487,7 @@ fn plan(
 fn execute(
     fixture: &ForkFixtureV1,
     factual: FactualV1,
-) -> Result<ForkArtifactExportV1, ForkRunErrorV1> {
+) -> Result<(ForkArtifactExportV1, RecordedForkV1), ForkRunErrorV1> {
     let FactualV1 {
         store,
         root,
@@ -445,18 +550,31 @@ fn execute(
                     (digest, derivation),
                     &mut stager,
                 )
-                .map(|artifacts| ForkArtifactExportV1 {
-                    factual_head: head,
-                    drivers,
-                    provisional_edges,
-                    artifacts,
+                .map(|(artifacts, coordinator)| {
+                    let recorded = RecordedForkV1 {
+                        coordinator,
+                        plan,
+                        fork,
+                        result_id: fixture.result_id,
+                        evaluator_identity_digest: fixture.evaluator_identity_digest,
+                        factual_head: head,
+                        drivers: drivers.clone(),
+                        provisional_edges: provisional_edges.clone(),
+                    };
+                    let export = ForkArtifactExportV1 {
+                        factual_head: head,
+                        drivers,
+                        provisional_edges,
+                        artifacts,
+                    };
+                    (export, recorded)
                 })
             })
         })
 }
 
 /// Publish the generation's facts, admit it, recompute its suffix and export
-/// its artifacts.
+/// its artifacts; the coordinator keeps the recorded store.
 fn admit(
     fixture: &ForkFixtureV1,
     mut store: MemoryStore,
@@ -464,7 +582,13 @@ fn admit(
     plan: &CounterfactualPlanV1,
     (digest, derivation): ([u8; 32], CounterfactualFrontierDerivationV1),
     stager: &mut RecordsFormStagerV1,
-) -> Result<Vec<ForkArtifactV1>, ForkRunErrorV1> {
+) -> Result<
+    (
+        Vec<ForkArtifactV1>,
+        CounterfactualCoordinatorV1<MemoryStore>,
+    ),
+    ForkRunErrorV1,
+> {
     let facts = CounterfactualFactsV1 {
         plan_digest: Hash::from_bytes(plan.plan_digest),
         dependency_graph_digest: Hash::from_bytes(digest),
@@ -522,6 +646,7 @@ fn admit(
                 .map_err(ForkRunErrorV1::Suffix)
                 .and_then(|run| export(coordinator.store(), plan, receipt, run))
         })
+        .map(|artifacts| (artifacts, coordinator))
 }
 
 /// Export the run's artifacts in export order. The frontier and the
