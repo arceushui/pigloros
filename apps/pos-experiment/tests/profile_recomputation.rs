@@ -16,8 +16,8 @@ use pos_conformance::{
     DivergenceMismatchKindV1, DivergenceReportV1, ExecutionModeV1, ExecutionProfileV1,
     ProfileSupportStatusV1, ReplayClaimV1, ReproManifestV1, ReproVerificationRequestV1,
     ReproducibilityClassV1, SafeErrorCodeV1, TrustPolicySnapshotV1, TrustRootStatusV1,
-    TrustSignatureStatusV1, TrustSnapshotContinuityV1, VerificationOutcomeV1,
-    VerificationPreflightEvidenceV1, VerificationPreflightInputV1, VerificationResultV1,
+    TrustSnapshotContinuityV1, VerificationOutcomeV1, VerificationPreflightEvidenceV1,
+    VerificationPreflightInputV1, VerificationResultV1, DRAFT_TRUST_POLICY_OPERATOR_KEY_V1,
 };
 use pos_core::{
     clock::WallTime,
@@ -39,7 +39,7 @@ use pos_experiment::profile_recomputation::{
     RECOMPUTED_TIMELINE_ID_V1,
 };
 use pos_experiment::verification_execution::{
-    recomputation_closure_digest_v1, VerificationExecutionOutcomeV1,
+    recomputation_closure_digest_v1, trust_signature_evidence_v1, VerificationExecutionOutcomeV1,
 };
 use pos_experiment::{Experiment, ExperimentError};
 use pos_runtime::{
@@ -508,6 +508,10 @@ impl Fixture {
         };
         let canonical_request_bytes = request.to_canonical_cbor()?;
         let canonical_request_digest = request.digest()?;
+        let trust_signature = trust_signature_evidence_v1(
+            &trust_policy_snapshot,
+            &DRAFT_TRUST_POLICY_OPERATOR_KEY_V1,
+        );
         Ok(Self {
             request,
             canonical_request_bytes,
@@ -517,7 +521,7 @@ impl Fixture {
             trust_policy_snapshot,
             evidence: VerificationPreflightEvidenceV1 {
                 trust_root: TrustRootStatusV1::Known,
-                trust_signature: TrustSignatureStatusV1::Valid,
+                trust_signature,
                 artifact_revocation: ArtifactRevocationStatusV1::Clear,
                 trust_continuity: TrustSnapshotContinuityV1 {
                     previous_epoch: None,
