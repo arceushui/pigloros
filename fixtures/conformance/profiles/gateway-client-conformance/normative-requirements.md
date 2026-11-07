@@ -100,7 +100,8 @@ Event per `201` response of the signals or actions route. The other counters are
   empty.
 - **denied** (`capability-denied`): an action without a host authorizer is `401` and an action
   the fixture authority does not grant is `403`, each followed by an empty poll (denial without
-  state change); a route whose capability the attempt does not hold is refused.
+  state change); a route whose capability the attempt does not hold is refused; a read on the
+  `authorized` Gateway without the actor header is `401`.
 - **malformed** (`malformed-payload`): `cursor` with `from_seq` and `limit=101` are `400`; a
   Timeline ID that is not a ULID is `400`; integer action `params` are `422`, and nothing is
   committed.

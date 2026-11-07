@@ -336,6 +336,12 @@ def denied_subcases() -> list[SubCase]:
             "open",
             [Exchange("loopback", "GET", "/v1/ledger", REFUSED)],
         ),
+        SubCase(
+            "den.4",
+            "a read without the actor header on an authorized Gateway is unauthorized",
+            "authorized",
+            [create("den-4"), poll(error(401))],
+        ),
     ]
 
 
