@@ -57,6 +57,8 @@ const FIXTURE_DIGEST: [u8; 32] = [0xf1; 32];
 const REDUCER: &str = "counter";
 /// The public deterministic repository fixture-authority signing key.
 const DRAFT_AUTHORITY_SIGNING_KEY: [u8; 32] = [7; 32];
+/// A signing key the Draft authority never pinned.
+const ATTACKER_SIGNING_KEY: [u8; 32] = [0xa7; 32];
 const OPERATOR_SIGNATURE_DOMAIN: &[u8] = b"PiglorOS.TPS1.operator-signature.v1\0";
 
 /// Counts every Reducer-visible Event per entity.
@@ -980,15 +982,17 @@ fn a_denied_snapshot_fence_is_unverifiable_artifacts_missing() -> TestResult {
 
 /// A TPS1 whose operator signature does not authenticate under the pinned
 /// Draft authority key is refused at `trust_signature`: one with a flipped
-/// signature bit, and one re-signed by the Draft authority over the unsigned
-/// fields without the operator-signature domain.
+/// signature bit, one re-signed by the Draft authority over the unsigned
+/// fields without the operator-signature domain, and one whose `trust_roots`
+/// name an attacker key that signed it over the correct domain (the operator
+/// key is never read from the TPS1's own roots).
 #[test]
 fn a_tps1_that_does_not_authenticate_is_refused_at_trust_signature() -> TestResult {
     let recording = Recording::new()?;
     let draft = Fixture::recorded()?.trust_policy_snapshot;
     let mut flipped = draft.clone();
     flipped.operator_signature[0] ^= 1;
-    let mut domain_less = draft;
+    let mut domain_less = draft.clone();
     let message = domain_less.operator_signature_message_v1()?;
     let unsigned = message
         .strip_prefix(OPERATOR_SIGNATURE_DOMAIN)
@@ -996,7 +1000,18 @@ fn a_tps1_that_does_not_authenticate_is_refused_at_trust_signature() -> TestResu
     domain_less.operator_signature = SigningKey::from_bytes(&DRAFT_AUTHORITY_SIGNING_KEY)
         .sign(unsigned)
         .to_bytes();
-    for snapshot in [flipped, domain_less] {
+    let attacker = SigningKey::from_bytes(&ATTACKER_SIGNING_KEY);
+    let mut self_rooted = draft;
+    self_rooted.trust_roots[0].public_key = attacker.verifying_key().to_bytes();
+    self_rooted.operator_signature = attacker
+        .sign(&self_rooted.operator_signature_message_v1()?)
+        .to_bytes();
+    // Well formed and authentic under its own root: only the pin refuses it.
+    assert_eq!(
+        trust_signature_evidence_v1(&self_rooted, &self_rooted.trust_roots[0].public_key),
+        TrustSignatureStatusV1::Valid
+    );
+    for snapshot in [flipped, domain_less, self_rooted] {
         let mut fixture = Fixture::recorded()?;
         fixture.bind_snapshot(snapshot)?;
         assert_eq!(
