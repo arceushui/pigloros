@@ -3645,7 +3645,9 @@ fn mutate_trust_policy(
         TrustMutation::Encoding
         | TrustMutation::Shape
         | TrustMutation::Signature
-        | TrustMutation::SignatureType => {}
+        | TrustMutation::SignatureType
+        | TrustMutation::DomainlessSignature
+        | TrustMutation::SignedByTrustRoot => {}
     }
     Ok(())
 }
