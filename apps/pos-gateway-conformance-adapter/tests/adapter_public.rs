@@ -223,10 +223,9 @@ fn every_family_meets_its_oracle_identically_in_local_and_air_gapped() -> TestRe
             let result = observation(&attempt)?;
             let oracle_bytes = oracle(family)?;
             let oracle: Value = serde_json::from_slice(&oracle_bytes)?;
-            let wanted = match oracle["oracle"]["code_id"].as_str() {
-                Some(code) => failure(code),
-                None => SubjectResult::Output(oracle_bytes),
-            };
+            let wanted = oracle["oracle"]["code_id"]
+                .as_str()
+                .map_or(SubjectResult::Output(oracle_bytes), failure);
             assert_eq!(result.result, wanted, "{family:?} {mode:?}");
             let (steps, events) = wanted_steps_and_events(&attempt)?;
             let usage = result.usage;
@@ -309,7 +308,7 @@ fn grammar_violations() -> Vec<Rewrite> {
         case("not an object", |p| *p = json!([])),
         case("unknown member", |p| p["extra"] = json!(1)),
         case("schema", |p| {
-            p["schema"] = json!("pigloros.gateway-client-conformance.case.v1")
+            p["schema"] = json!("pigloros.gateway-client-conformance.case.v1");
         }),
         case("family", |p| p["family"] = json!("denied")),
         case("no sub-case", |p| p["subcases"] = json!([])),
@@ -318,29 +317,29 @@ fn grammar_violations() -> Vec<Rewrite> {
             p["subcases"] = Value::Array(vec![one; 65]);
         }),
         case("foreign prefix", |p| {
-            p["subcases"][0]["id"] = json!("den.1")
+            p["subcases"][0]["id"] = json!("den.1");
         }),
         case("no number", |p| p["subcases"][0]["id"] = json!("pos.")),
         case("letter number", |p| {
-            p["subcases"][0]["id"] = json!("pos.1a")
+            p["subcases"][0]["id"] = json!("pos.1a");
         }),
         case("no separator", |p| p["subcases"][0]["id"] = json!("pos1")),
         case("empty title", |p| p["subcases"][0]["title"] = json!("")),
         case("control title", |p| {
-            p["subcases"][0]["title"] = json!("a\tb")
+            p["subcases"][0]["title"] = json!("a\tb");
         }),
         case("long title", |p| {
-            p["subcases"][0]["title"] = json!("t".repeat(161))
+            p["subcases"][0]["title"] = json!("t".repeat(161));
         }),
         case("empty canary", |p| p["subcases"][0]["canary"] = json!("")),
         case("spaced canary", |p| {
-            p["subcases"][0]["canary"] = json!("a b")
+            p["subcases"][0]["canary"] = json!("a b");
         }),
         case("long canary", |p| {
-            p["subcases"][0]["canary"] = json!("c".repeat(65))
+            p["subcases"][0]["canary"] = json!("c".repeat(65));
         }),
         case("composition", |p| {
-            p["subcases"][0]["composition"] = json!("sandboxed")
+            p["subcases"][0]["composition"] = json!("sandboxed");
         }),
         case("no exchange", |p| p["subcases"][0]["exchanges"] = json!([])),
         case("129 exchanges", |p| {
@@ -352,25 +351,25 @@ fn grammar_violations() -> Vec<Rewrite> {
         case("capture", |p| first_exchange(p)["capture"] = json!("event")),
         case("actor false", |p| first_exchange(p)["actor"] = json!(false)),
         case("exchange member", |p| {
-            first_exchange(p)["headers"] = json!({})
+            first_exchange(p)["headers"] = json!({});
         }),
         case("unknown route", |p| {
-            first_exchange(p)["path"] = json!("/v2/health")
+            first_exchange(p)["path"] = json!("/v2/health");
         }),
         case("relative path", |p| {
-            first_exchange(p)["path"] = json!("health")
+            first_exchange(p)["path"] = json!("health");
         }),
         case("no Timeline", |p| {
-            first_exchange(p)["path"] = json!("/v1/timelines//events")
+            first_exchange(p)["path"] = json!("/v1/timelines//events");
         }),
         case("no tail", |p| {
-            first_exchange(p)["path"] = json!("/v1/timelines/t")
+            first_exchange(p)["path"] = json!("/v1/timelines/t");
         }),
         case("unknown tail", |p| {
-            first_exchange(p)["path"] = json!("/v1/timelines/t/forks")
+            first_exchange(p)["path"] = json!("/v1/timelines/t/forks");
         }),
         case("spaced path", |p| {
-            first_exchange(p)["path"] = json!("/v1/timelines/a b/events")
+            first_exchange(p)["path"] = json!("/v1/timelines/a b/events");
         }),
         case("long path", |p| {
             first_exchange(p)["path"] = json!(format!("/v1/timelines/{}/events", "a".repeat(250)));
