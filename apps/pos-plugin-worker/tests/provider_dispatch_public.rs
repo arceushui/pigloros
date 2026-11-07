@@ -196,8 +196,13 @@ fn evaluate_corpus(
 ) -> TestResult<(ConformanceReport, usize)> {
     // Name the inner bundle or profile failure, which `evaluate` folds into one closed error.
     let request = EvaluationRequest::from_canonical_cbor(&corpus.request)?;
-    let bundle = verify_signed_bundle(&corpus.archive, &corpus.trust_policy, &request)
-        .map_err(|error| format!("the corpus bundle is invalid: {error:?}"))?;
+    let bundle = verify_signed_bundle(
+        &corpus.archive,
+        &corpus.trust_policy,
+        &pos_reference::selector_test_support::trust_policy_operator()?,
+        &request,
+    )
+    .map_err(|error| format!("the corpus bundle is invalid: {error:?}"))?;
     Profile::from_bundle(&bundle, &request)
         .map_err(|error| format!("the corpus profile is invalid: {error:?}"))?;
     let mut subject = WorkerSubject::new(corpus)?;
@@ -205,6 +210,7 @@ fn evaluate_corpus(
         &corpus.request,
         &corpus.archive,
         &corpus.trust_policy,
+        &pos_reference::selector_test_support::trust_policy_operator()?,
         &evaluator_identity()?,
         executors,
         &mut subject,

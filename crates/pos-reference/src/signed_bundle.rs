@@ -58,6 +58,8 @@ pub enum BundleError {
     ProhibitedMaterial,
     #[error("private archive snapshot is unavailable")]
     SnapshotUnavailable,
+    #[error("trust-policy operator anchor is invalid")]
+    OperatorAnchorInvalid,
 }
 
 impl From<ProtocolError> for BundleError {
@@ -84,6 +86,46 @@ fn snapshot_unavailable(_: std::io::Error) -> BundleError {
 impl<T, E> InvalidEncodingResult<T> for Result<T, E> {
     fn map_invalid_encoding(self) -> Result<T, BundleError> {
         self.map_err(|_| BundleError::InvalidEncoding)
+    }
+}
+
+/// The only TPS1 operator role (ADR-103, ADR-062 R8, ADR-069 R8). Defined
+/// here independently of pos-conformance.
+pub const DEPLOYMENT_OPERATOR_ROLE: &str = "deployment-operator";
+
+const OPERATOR_SIGNATURE_DOMAIN: &[u8] = b"PiglorOS.TPS1.operator-signature.v1\0";
+
+/// The pinned deployment-operator key that alone authenticates a TPS1
+/// operator signature.
+///
+/// It is supplied by the caller (the standalone evaluator) or by the
+/// root-authenticated TRS1 (the root selector), never read from the TPS1's
+/// own trust roots, EVR1, or CFB1.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TrustPolicyOperatorAnchor {
+    key: ed25519_dalek::VerifyingKey,
+}
+
+impl TrustPolicyOperatorAnchor {
+    /// Pin a deployment-operator key for TPS1 authentication.
+    ///
+    /// # Errors
+    /// Returns [`BundleError::OperatorAnchorInvalid`] for any role other than
+    /// [`DEPLOYMENT_OPERATOR_ROLE`] or bytes that are not an Ed25519
+    /// verifying key.
+    pub fn new(role: &str, public_key: [u8; 32]) -> Result<Self, BundleError> {
+        if role != DEPLOYMENT_OPERATOR_ROLE {
+            return Err(BundleError::OperatorAnchorInvalid);
+        }
+        ed25519_dalek::VerifyingKey::from_bytes(&public_key)
+            .map(|key| Self { key })
+            .map_err(|_| BundleError::OperatorAnchorInvalid)
+    }
+
+    /// Pin the TRS1 deployment-operator key authenticated by the SIC1
+    /// offline root; its role is fixed by TRS1 role 6.
+    pub(crate) const fn from_trusted_registry(key: ed25519_dalek::VerifyingKey) -> Self {
+        Self { key }
     }
 }
 
@@ -295,16 +337,21 @@ impl TrustPolicy {
 /// Verify exact CFB1 bytes against an externally selected, immutable TPS1
 /// snapshot and the authority identities carried by EVR1.
 ///
+/// The TPS1 operator signature is authenticated only by `operator`, over the
+/// `PiglorOS.TPS1.operator-signature.v1` domain; the snapshot's own trust roots
+/// authorize only the CFB1 signer.
+///
 /// # Errors
 /// Returns a closed failure before exposing any member when encoding,
 /// signature, trust, closure, ordering, digest, or size validation fails.
 pub fn verify_signed_bundle(
     archive_bytes: &[u8],
     trust_policy_bytes: &[u8],
+    operator: &TrustPolicyOperatorAnchor,
     request: &EvaluationRequest,
 ) -> Result<VerifiedBundle, BundleError> {
     let (trust_policy, archive_digest) =
-        validate_requested_artifacts(archive_bytes, trust_policy_bytes, request)?;
+        validate_requested_artifacts(archive_bytes, trust_policy_bytes, operator, request)?;
     let decoded = decode_archive(archive_bytes, request)?;
     validate_archive_closure(&decoded, &trust_policy)?;
     let (authority, authority_verifying_key) = verify_archive_signature(&decoded, &trust_policy)?;
@@ -345,11 +392,18 @@ pub fn verify_signed_bundle(
 pub fn preflight_signed_bundle<R: Read + Seek>(
     archive: &mut R,
     trust_policy_bytes: &[u8],
+    operator: &TrustPolicyOperatorAnchor,
     request: &EvaluationRequest,
 ) -> Result<AuthenticatedBundlePreflight, BundleError> {
     let (mut snapshot, archive_length) =
         authenticated_snapshot(archive, request.fixture_bundle_digest)?;
-    preflight_archive(&mut snapshot, archive_length, trust_policy_bytes, request)
+    preflight_archive(
+        &mut snapshot,
+        archive_length,
+        trust_policy_bytes,
+        operator,
+        request,
+    )
 }
 
 /// Authenticate and measure an immutable retained CFB1 descriptor without
@@ -365,10 +419,17 @@ pub fn preflight_signed_bundle<R: Read + Seek>(
 pub(crate) fn preflight_signed_bundle_reader<R: Read + Seek>(
     archive: &mut R,
     trust_policy_bytes: &[u8],
+    operator: &TrustPolicyOperatorAnchor,
     request: &EvaluationRequest,
 ) -> Result<AuthenticatedBundlePreflight, BundleError> {
     let archive_length = authenticate_reader(archive, request.fixture_bundle_digest)?;
-    preflight_archive(archive, archive_length, trust_policy_bytes, request)
+    preflight_archive(
+        archive,
+        archive_length,
+        trust_policy_bytes,
+        operator,
+        request,
+    )
 }
 
 /// Fully validate a CFB1 closure from an immutable retained descriptor.
@@ -382,6 +443,7 @@ pub(crate) fn preflight_signed_bundle_reader<R: Read + Seek>(
 pub(crate) fn verify_signed_bundle_reader<R: Read + Seek>(
     archive: &mut R,
     trust_policy_bytes: &[u8],
+    operator: &TrustPolicyOperatorAnchor,
     request: &EvaluationRequest,
 ) -> Result<VerifiedBundle, BundleError> {
     authenticate_reader(archive, request.fixture_bundle_digest)
@@ -394,7 +456,7 @@ pub(crate) fn verify_signed_bundle_reader<R: Read + Seek>(
                 .map(|manifest| (archive_length, scanned, manifest))
         })
         .and_then(|(archive_length, scanned, manifest)| {
-            verified_trust_policy(trust_policy_bytes, request)
+            verified_trust_policy(trust_policy_bytes, operator, request)
                 .map(|trust_policy| (archive_length, scanned, manifest, trust_policy))
         })
         .and_then(|(archive_length, scanned, manifest, trust_policy)| {
@@ -468,6 +530,7 @@ pub(crate) fn verify_signed_bundle_reader<R: Read + Seek>(
 pub(crate) fn preflight_signed_bundle_bytes(
     archive_bytes: &[u8],
     trust_policy_bytes: &[u8],
+    operator: &TrustPolicyOperatorAnchor,
     request: &EvaluationRequest,
 ) -> Result<AuthenticatedBundlePreflight, BundleError> {
     if archive_bytes.is_empty() || archive_bytes.len() > MAX_ARCHIVE_BYTES {
@@ -481,6 +544,7 @@ pub(crate) fn preflight_signed_bundle_bytes(
         &mut Cursor::new(archive_bytes),
         archive_length,
         trust_policy_bytes,
+        operator,
         request,
     )
 }
@@ -489,12 +553,13 @@ fn preflight_archive(
     archive: &mut dyn ArchiveReader,
     archive_length: u64,
     trust_policy_bytes: &[u8],
+    operator: &TrustPolicyOperatorAnchor,
     request: &EvaluationRequest,
 ) -> Result<AuthenticatedBundlePreflight, BundleError> {
     let scanned = scan_archive(archive, archive_length)?;
     let manifest = read_range(archive, scanned.manifest_range.clone())
         .and_then(|manifest_bytes| decode_manifest_bytes(manifest_bytes, request))?;
-    let trust_policy = verified_trust_policy(trust_policy_bytes, request)?;
+    let trust_policy = verified_trust_policy(trust_policy_bytes, operator, request)?;
     verify_signature(
         &manifest.manifest_bytes,
         scanned.signer_key,
@@ -928,12 +993,13 @@ fn read_range<R: Read + Seek + ?Sized>(
 
 fn verified_trust_policy(
     trust_policy_bytes: &[u8],
+    operator: &TrustPolicyOperatorAnchor,
     request: &EvaluationRequest,
 ) -> Result<TrustPolicy, BundleError> {
     if *blake3::hash(trust_policy_bytes).as_bytes() != request.trust_policy_snapshot_digest {
         return Err(BundleError::TrustPolicyMismatch);
     }
-    decode_trust_policy(trust_policy_bytes)
+    decode_trust_policy(trust_policy_bytes, operator)
 }
 
 fn validate_scanned_closure(
@@ -978,6 +1044,7 @@ fn validate_scanned_closure(
 fn validate_requested_artifacts(
     archive_bytes: &[u8],
     trust_policy_bytes: &[u8],
+    operator: &TrustPolicyOperatorAnchor,
     request: &EvaluationRequest,
 ) -> Result<(TrustPolicy, [u8; 32]), BundleError> {
     if archive_bytes.is_empty() || archive_bytes.len() > MAX_ARCHIVE_BYTES {
@@ -987,7 +1054,7 @@ fn validate_requested_artifacts(
     if trust_digest != request.trust_policy_snapshot_digest {
         return Err(BundleError::TrustPolicyMismatch);
     }
-    let trust_policy = decode_trust_policy(trust_policy_bytes)?;
+    let trust_policy = decode_trust_policy(trust_policy_bytes, operator)?;
     let archive_digest = *blake3::hash(archive_bytes).as_bytes();
     if archive_digest != request.fixture_bundle_digest {
         return Err(BundleError::DigestMismatch);
@@ -1222,7 +1289,10 @@ fn prohibited_secret_material(bytes: &[u8]) -> bool {
     })
 }
 
-fn decode_trust_policy(bytes: &[u8]) -> Result<TrustPolicy, BundleError> {
+fn decode_trust_policy(
+    bytes: &[u8],
+    operator: &TrustPolicyOperatorAnchor,
+) -> Result<TrustPolicy, BundleError> {
     let value = decode_canonical(bytes)?;
     let fields = array(&value, 12)?;
     if text(&fields[0])? != "TPS1" || uint(&fields[1])? != 1 {
@@ -1239,24 +1309,22 @@ fn decode_trust_policy(bytes: &[u8]) -> Result<TrustPolicy, BundleError> {
     if !valid_minimum_versions(&fields[8])? || !valid_expiry(text(&fields[9])?) {
         return Err(BundleError::TrustPolicyMismatch);
     }
-    let signature: [u8; 64] = fixed_bytes(&fields[11])?;
+    let signature = ed25519_dalek::Signature::from_bytes(&fixed_bytes(&fields[11])?);
     encode(&Value::Array(fields[..11].to_vec()))
         .map_err(BundleError::from)
         .and_then(|unsigned| {
-            let signature = ed25519_dalek::Signature::from_bytes(&signature);
-            let signed_by_active_root = roots.iter().any(|root| {
-                !revoked_key_ids.contains(&root.key_id)
-                    && ed25519_dalek::VerifyingKey::from_bytes(&root.public_key)
-                        .is_ok_and(|key| key.verify(&unsigned, &signature).is_ok())
-            });
-            if !signed_by_active_root {
-                return Err(BundleError::TrustPolicyMismatch);
-            }
-            Ok(TrustPolicy {
-                roots,
-                revoked_key_ids,
-                revoked_artifact_digests,
-            })
+            // Only the caller-pinned deployment-operator key authenticates TPS1;
+            // the snapshot's own trust roots never authorize their own policy.
+            let message = [OPERATOR_SIGNATURE_DOMAIN, unsigned.as_slice()].concat();
+            operator
+                .key
+                .verify_strict(&message, &signature)
+                .map_err(|_| BundleError::TrustPolicyMismatch)
+        })
+        .map(|()| TrustPolicy {
+            roots,
+            revoked_key_ids,
+            revoked_artifact_digests,
         })
 }
 
@@ -1627,12 +1695,14 @@ mod tests {
         let preflight = preflight_signed_bundle_reader(
             &mut Cursor::new(&corpus.archive),
             &corpus.trust_policy,
+            &crate::selector_test_support::trust_policy_operator()?,
             &request,
         )?;
         assert!(!preflight.profile_bytes().is_empty());
         let verified = verify_signed_bundle_reader(
             &mut Cursor::new(&corpus.archive),
             &corpus.trust_policy,
+            &crate::selector_test_support::trust_policy_operator()?,
             &request,
         )?;
         assert_eq!(verified.archive_digest, request.fixture_bundle_digest);
@@ -1642,6 +1712,7 @@ mod tests {
         assert!(preflight_signed_bundle_reader(
             &mut Cursor::new(&corpus.archive),
             &corpus.trust_policy,
+            &crate::selector_test_support::trust_policy_operator()?,
             &foreign_request,
         )
         .is_err());
@@ -1654,6 +1725,7 @@ mod tests {
             verify_signed_bundle_reader(
                 &mut Cursor::new(&secret.archive),
                 &secret.trust_policy,
+                &crate::selector_test_support::trust_policy_operator()?,
                 &request,
             ),
             Err(BundleError::ProhibitedMaterial)
@@ -1666,6 +1738,7 @@ mod tests {
         assert!(verify_signed_bundle_reader(
             &mut Cursor::new(&invalid.archive),
             &invalid.trust_policy,
+            &crate::selector_test_support::trust_policy_operator()?,
             &request,
         )
         .is_err());
