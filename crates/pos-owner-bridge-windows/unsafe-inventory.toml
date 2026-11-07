@@ -741,7 +741,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/resource.rs"
-line = 101
+line = 104
 function = "install"
 operation = "view.add_WebResourceRequested(&handler, token)"
 invariant = "live STA interface/handler and initialized unique token output."
@@ -749,7 +749,7 @@ hosted_test = "native_resource_denial_callback_failure_does_not_contact_listener
 
 [[block]]
 file = "src/ffi/events/resource.rs"
-line = 105
+line = 108
 function = "install"
 operation = "remove.remove_WebResourceRequested(token)"
 invariant = "exact subscription token on its retained STA interface."
@@ -757,7 +757,7 @@ hosted_test = "native_resource_denial_callback_failure_does_not_contact_listener
 
 [[block]]
 file = "src/ffi/events/resource.rs"
-line = 110
+line = 113
 function = "install"
 operation = "view.AddWebResourceRequestedFilter(w!( ), COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL)"
 invariant = "fixed wildcard and ALL context; the installed handler selects the pre-created local denial unless the exact owner document is admitted."
@@ -765,7 +765,7 @@ hosted_test = "native_resource_denial_callback_failure_does_not_contact_listener
 
 [[block]]
 file = "src/ffi/events/resource.rs"
-line = 71
+line = 74
 function = "install"
 operation = "environment.CreateWebResourceResponse( None, 403, w!( ), w!( ), )"
 invariant = "Retained STA environment; host-only fixed bodyless 403 is created before subscriptions/navigation, so response allocation failure cannot occur in an in-flight request callback."
@@ -773,7 +773,7 @@ hosted_test = "native_resource_denial_callback_failure_does_not_contact_listener
 
 [[block]]
 file = "src/ffi/events/resource.rs"
-line = 157
+line = 161
 function = "filter"
 operation = "args.SetResponse(response)"
 invariant = "live event arguments and host-created denial response; COM retains its own reference for this intercepted request."
@@ -781,7 +781,7 @@ hosted_test = "native_resource_denial_callback_failure_does_not_contact_listener
 
 [[block]]
 file = "src/ffi/events/resource.rs"
-line = 164
+line = 168
 function = "owner_request"
 operation = "args.Request()"
 invariant = "live event arguments on the callback STA; COM-owned request result."
@@ -789,7 +789,7 @@ hosted_test = "native_resource_denial_callback_failure_does_not_contact_listener
 
 [[block]]
 file = "src/ffi/events/resource.rs"
-line = 167
+line = 173
 function = "owner_request"
 operation = "request.Uri(out)"
 invariant = "the string helper provides initialized uniquely writable output."
@@ -797,7 +797,7 @@ hosted_test = "native_resource_denial_callback_failure_does_not_contact_listener
 
 [[block]]
 file = "src/ffi/events/resource.rs"
-line = 171
+line = 177
 function = "owner_request"
 operation = "args.ResourceContext(&raw mut context)"
 invariant = "live arguments and initialized writable context scalar."
@@ -1422,7 +1422,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/resource.rs"
-line = 53
+line = 54
 function = "prototype_complete_resource"
 operation = "args.SetResponse(&response)"
 invariant = "PROTOTYPE only: retained argument and fixed response remain on invoking STA."
@@ -1431,7 +1431,7 @@ hosted_test = "native_resource_denial_callback_failure_does_not_contact_listener
 
 [[block]]
 file = "src/ffi/events/resource.rs"
-line = 56
+line = 57
 function = "prototype_complete_resource"
 operation = "deferral.Complete()"
 invariant = "PROTOTYPE only: retained owned deferral is explicitly completed once on invoking STA."
@@ -1440,8 +1440,62 @@ hosted_test = "native_resource_denial_callback_failure_does_not_contact_listener
 
 [[block]]
 file = "src/ffi/events/resource.rs"
-line = 142
+line = 146
 function = "filter"
 operation = "args.GetDeferral()"
 invariant = "PROTOTYPE only: live invoking-STA args; returned hold retained until observed exit or explicit controlled completion."
+hosted_test = "native_resource_denial_callback_failure_does_not_contact_listener"
+
+
+[[block]]
+file = "src/ffi/events/response_prototype.rs"
+line = 53
+function = "install"
+operation = "view.add_WebResourceResponseReceived(&handler, token)"
+invariant = "PROTOTYPE: live STA interface/handler and unique initialized token output."
+hosted_test = "native_resource_denial_callback_failure_does_not_contact_listener"
+
+
+[[block]]
+file = "src/ffi/events/response_prototype.rs"
+line = 57
+function = "install"
+operation = "remove.remove_WebResourceResponseReceived(token)"
+invariant = "PROTOTYPE: exact retained subscription on its creating STA."
+hosted_test = "native_resource_denial_callback_failure_does_not_contact_listener"
+
+
+[[block]]
+file = "src/ffi/events/response_prototype.rs"
+line = 65
+function = "observe_response"
+operation = "args.Request()"
+invariant = "PROTOTYPE: live event args; returned owned request queried only on callback STA."
+hosted_test = "native_resource_denial_callback_failure_does_not_contact_listener"
+
+
+[[block]]
+file = "src/ffi/events/response_prototype.rs"
+line = 68
+function = "observe_response"
+operation = "request.Uri(out)"
+invariant = "PROTOTYPE: native string helper owns initialized unique output; fixed owner URL comparison only."
+hosted_test = "native_resource_denial_callback_failure_does_not_contact_listener"
+
+
+[[block]]
+file = "src/ffi/events/response_prototype.rs"
+line = 75
+function = "observe_response"
+operation = "args.Response()"
+invariant = "PROTOTYPE: live invoking-STA args; retained read-only response view, no body copy."
+hosted_test = "native_resource_denial_callback_failure_does_not_contact_listener"
+
+
+[[block]]
+file = "src/ffi/events/response_prototype.rs"
+line = 78
+function = "observe_response"
+operation = "response.StatusCode(&raw mut status)"
+invariant = "PROTOTYPE: retained response view and initialized distinct scalar output."
 hosted_test = "native_resource_denial_callback_failure_does_not_contact_listener"

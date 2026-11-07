@@ -44,6 +44,7 @@ impl crate::Native {
     pub(crate) fn set_resource_denial_fixture(mode: crate::ResourceDenialFixture) {
         DENIAL_FIXTURE.with(|current| current.set(mode));
         PROTOTYPE_HELD.with(|held| held.borrow_mut().clear());
+        super::response_prototype::reset();
     }
     pub(crate) fn prototype_complete_resource(deny: bool) -> Result<()> {
         PROTOTYPE_HELD.with(|held| {
@@ -64,6 +65,8 @@ pub(super) fn install(
     signals: &Rc<dyn EventSink>,
     subscriptions: &mut Subscriptions,
 ) -> Result<()> {
+    #[cfg(test)]
+    super::response_prototype::install(view, subscriptions)?;
     // Prepare the immutable, bodyless denial before subscribing or navigating.
     // Allocation failure here refuses activation before any request is in flight.
     // SAFETY: retained STA environment; null body and fixed status/header strings
@@ -131,6 +134,7 @@ fn filter(
                 matches!(
                     mode.get(),
                     crate::ResourceDenialFixture::PrototypeHeld
+                        | crate::ResourceDenialFixture::PrototypeResponseBarrier
                         | crate::ResourceDenialFixture::PrototypeCloseFirst
                         | crate::ResourceDenialFixture::PrototypeDrop
                         | crate::ResourceDenialFixture::PrototypeCompleteAllowed
@@ -162,6 +166,8 @@ fn filter(
 fn owner_request(args: &ICoreWebView2WebResourceRequestedEventArgs) -> Result<NativeEvent> {
     // SAFETY: live event arguments on the callback STA; COM-owned request result.
     let request = unsafe { args.Request() }.map_err(|_| unavailable())?;
+    #[cfg(test)]
+    super::response_prototype::requested(&request)?;
     let uri = super::super::text::read_text(|out| {
         // SAFETY: the string helper provides initialized uniquely writable output.
         unsafe { request.Uri(out) }

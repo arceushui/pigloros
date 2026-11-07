@@ -9,6 +9,8 @@ use webview2_com::Microsoft::Web::WebView2::Win32::{ICoreWebView2, ICoreWebView2
 mod controls;
 mod navigation;
 mod resource;
+#[cfg(test)]
+mod response_prototype;
 pub(super) use navigation::source;
 type Result<T> = NativeResult<T>;
 

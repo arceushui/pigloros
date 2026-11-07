@@ -36,15 +36,20 @@ fn record_resource_outcome(
         listener.served().count,
         listener.received_request_count() - baseline,
     );
+    let response = crate::Native::prototype_resource_response();
     writeln!(std::io::stderr(),
-        "PROTOTYPE resource case={value} expected={expected} before={before:?} after={after:?} exited=true")?;
-    Ok(after == (expected, u64::from(expected)))
+        "PROTOTYPE resource case={value} expected={expected} before={before:?} after={after:?} response={response:?} exited=true")?;
+    Ok(
+        after == (expected, u64::from(expected))
+            && (value != 0x29 || response == Some((true, 403))),
+    )
 }
 
-const fn resource_cases() -> [(u8, bool, crate::ResourceDenialFixture, u32); 9] {
+const fn resource_cases() -> [(u8, bool, crate::ResourceDenialFixture, u32); 10] {
     use crate::ResourceDenialFixture::{
         Normal, PropagateFailure, PrototypeCloseFirst, PrototypeCompleteAllowed,
-        PrototypeCompleteDenied, PrototypeDrop, PrototypeHeld, SwallowFailure,
+        PrototypeCompleteDenied, PrototypeDrop, PrototypeHeld, PrototypeResponseBarrier,
+        SwallowFailure,
     };
     [
         (0x20, false, Normal, 1),
@@ -54,6 +59,7 @@ const fn resource_cases() -> [(u8, bool, crate::ResourceDenialFixture, u32); 9] 
         (0x23, true, PropagateFailure, 1),
         (0x25, true, PrototypeCompleteAllowed, 1),
         (0x26, true, PrototypeCompleteDenied, 0),
+        (0x29, true, PrototypeResponseBarrier, 0),
         (0x28, true, PrototypeCloseFirst, 0),
         (0x24, true, PrototypeHeld, 0),
         (0x27, true, PrototypeDrop, 0),
@@ -86,9 +92,29 @@ fn complete_deferred_probe(mode: crate::ResourceDenialFixture) -> TestResult {
         mode,
         crate::ResourceDenialFixture::PrototypeCompleteAllowed
             | crate::ResourceDenialFixture::PrototypeCompleteDenied
+            | crate::ResourceDenialFixture::PrototypeResponseBarrier
     ) {
         crate::Native::prototype_complete_resource(
-            mode == crate::ResourceDenialFixture::PrototypeCompleteDenied,
+            mode != crate::ResourceDenialFixture::PrototypeCompleteAllowed,
+        )?;
+    }
+    Ok(())
+}
+
+fn await_resource_result(
+    factory: &dyn StaPump,
+    probe: &ResourceProbe,
+    mode: crate::ResourceDenialFixture,
+) -> TestResult {
+    if mode == crate::ResourceDenialFixture::PrototypeResponseBarrier {
+        pump_until(factory, "native resource response callback", || {
+            crate::Native::prototype_resource_response().is_some()
+        })?;
+    } else if !resource_stays_deferred(mode) {
+        pump_until(
+            factory,
+            "resource callback and navigation completion",
+            || probe.requested.get() && probe.completed.get(),
         )?;
     }
     Ok(())
@@ -282,13 +308,7 @@ impl crate::Native {
                 probe.requested.get()
             })?;
             complete_deferred_probe(mode)?;
-            if !resource_stays_deferred(mode) {
-                pump_until(
-                    &factory,
-                    "resource callback and navigation completion",
-                    || probe.requested.get() && probe.completed.get(),
-                )?;
-            }
+            await_resource_result(&factory, probe.as_ref(), mode)?;
             if served == 1 {
                 pump_until(&factory, "positive control reaching the listener", || {
                     listener.served().count == 1
