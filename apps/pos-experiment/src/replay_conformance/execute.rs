@@ -32,7 +32,7 @@ use super::payload::{
 use crate::profile_recomputation::{
     execute_cross_profile_conformance_v1, execute_profile_recomputation_v1,
     CrossProfileConformanceInputV1, ProfileRecomputationInputV1, RecomputationClosureV1,
-    RecomputationSubjectMemberV1, RecomputationSubjectV1,
+    RecomputationComposeErrorV1, RecomputationSubjectMemberV1, RecomputationSubjectV1,
 };
 use crate::recorded_replay::{
     execute_recorded_replay_v1, ExportedTimelineMemberV1, RecordedReplayClosureV1,
@@ -128,7 +128,7 @@ impl HostV1 {
 
     /// The request of one leg: the manifest the fixture owns, bound by the
     /// host to the leg's EPF1, the bundled TPS1, the sub-case's class and the
-    /// attempt's Execution Mode.
+    /// leg's Execution Mode ([`leg_mode`]).
     fn request(
         &self,
         fields: &ManifestFieldsV1,
@@ -371,13 +371,50 @@ impl RecomputationSubjectV1 for ScriptV1 {
         &self,
         experiment: &mut Experiment,
         _profile: &ExecutionProfileV1,
-    ) -> Result<(), RuntimeError> {
-        experiment.register_generated(
-            &SubjectPlugin::of(self),
-            None,
-            Some(Box::new(ScriptDriver::of(self))),
-        )
+    ) -> Result<(), RecomputationComposeErrorV1> {
+        experiment
+            .register_generated(
+                &SubjectPlugin::of(self),
+                None,
+                Some(Box::new(ScriptDriver::of(self))),
+            )
+            .map_err(RecomputationComposeErrorV1::Registration)
     }
+}
+
+/// The Execution Mode of a leg's manifest: a cross-profile leg under the
+/// Local or the Air-Gapped EPF1 is in that profile's mode (#1266); every
+/// other leg is in the attempt's mode.
+const fn leg_mode(
+    class: ReproducibilityClassV1,
+    profile: ProfileV1,
+    attempt: ExecutionModeV1,
+) -> ExecutionModeV1 {
+    match (class, profile) {
+        (ReproducibilityClassV1::CrossProfileConformance, ProfileV1::Local) => {
+            ExecutionModeV1::Local
+        }
+        (ReproducibilityClassV1::CrossProfileConformance, ProfileV1::AirGapped) => {
+            ExecutionModeV1::AirGapped
+        }
+        _ => attempt,
+    }
+}
+
+/// The request of every leg of `subcase`, in profile order.
+fn leg_requests(host: &HostV1, subcase: &SubCaseV1, mode: ExecutionModeV1) -> Vec<LegRequestV1> {
+    subcase
+        .profiles
+        .iter()
+        .map(|profile| {
+            host.request(
+                &subcase.manifest,
+                subcase.class,
+                *profile,
+                leg_mode(subcase.class, *profile, mode),
+            )
+        })
+        .collect()
 }
 
 /// Run one sub-case: one leg per profile. Returns its record and the manifest
@@ -389,11 +426,7 @@ pub(super) fn run_subcase(
     mode: ExecutionModeV1,
     store_config: &StoreConfig,
 ) -> Option<(RecordV1, Vec<LegEvidenceV1>)> {
-    let requests: Vec<LegRequestV1> = subcase
-        .profiles
-        .iter()
-        .map(|profile| host.request(&subcase.manifest, subcase.class, *profile, mode))
-        .collect();
+    let requests = leg_requests(host, subcase, mode);
     let licence = subcase.licence.as_deref();
     let folded = Arc::new(AtomicU64::new(0));
     let composed = match &subcase.closure {

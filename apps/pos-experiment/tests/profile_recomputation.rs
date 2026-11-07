@@ -3,8 +3,9 @@
 //! Public-interface tests for the ADR-062 Revision 8 slice R3
 //! `ProfileRecomputation` and `CrossProfileConformance` execution step
 //! (#1221): PRF-001, PRF-002, DIV-001, LIVE-001 and SEC-001, a missing
-//! closure member, an incompatible profile and operational variation, and
-//! the slice R4 closure binding (#1222).
+//! closure member, an incompatible profile and operational variation, the
+//! slice R4 closure binding (#1222), and the host-side enforcement of the
+//! named EPF1 (#1266, wiki `ADR-062_R8_Profile_Recomputation_Enforcement`).
 //!
 //! Expected streams are hand-derived from the frozen subject's script (Q3):
 //! the digests below follow the documented `verification_execution` and
@@ -34,17 +35,18 @@ use pos_experiment::profile_recomputation::{
     execute_cross_profile_conformance_v1, execute_profile_recomputation_v1,
     CrossProfileConformanceInputV1, CrossProfileConformanceOutcomeV1, HostFailureCodeV1,
     HostFailureV1, ProfileRecomputationInputV1, RecomputationClosureV1,
-    RecomputationSubjectMemberV1, RecomputationSubjectV1, RuntimeErrorKindV1,
-    AIR_GAPPED_PROFILE_ID_V1, HOST_FAILURE_DRIVER_ID_V1, LOCAL_PROFILE_ID_V1,
+    RecomputationComposeErrorV1, RecomputationSubjectMemberV1, RecomputationSubjectV1,
+    RuntimeErrorKindV1, AIR_GAPPED_PROFILE_ID_V1, EVENT_COUNT_BUDGET_SLOT_V1,
+    EXECUTION_STEPS_BUDGET_SLOT_V1, HOST_FAILURE_DRIVER_ID_V1, LOCAL_PROFILE_ID_V1,
     RECOMPUTED_TIMELINE_ID_V1,
 };
 use pos_experiment::verification_execution::{
     recomputation_closure_digest_v1, trust_signature_evidence_v1, VerificationExecutionOutcomeV1,
 };
-use pos_experiment::{Experiment, ExperimentError};
+use pos_experiment::{Experiment, ExperimentConfig, ExperimentError, StopCondition};
 use pos_runtime::{
     Driver, HumanActionAdmissionErrorV1, ManifestRegistrationErrorV1, ManifestRosterBuildErrorV1,
-    ObservationView, RuntimeError, StepOutput,
+    ManifestSlotV1, ObservationView, RuntimeError, StepOutput,
 };
 use pos_state::ProjectionRegistry;
 use pos_store::StoreConfig;
@@ -67,6 +69,24 @@ const SECRET_DENIED: &str = "secret read denied";
 const SECRET_DENIED_FAILURE: [u8; 4] = [0, 1, 0, 17];
 /// A runtime failure of kind `RuntimeError::InvalidPayload` (8).
 const INVALID_PAYLOAD_FAILURE: [u8; 4] = [0, 1, 0, 8];
+/// The registration failure of a Plugin that declares a Driver it does not
+/// supply: a runtime failure of kind `RuntimeError::CapabilityMismatch` (17).
+const REGISTRATION_FAILURE: [u8; 4] = [0, 1, 0, 17];
+
+/// How the subject treats the host it composes on.
+#[derive(Clone, Copy)]
+enum Behaviour {
+    /// Registers its Plugin and Driver, nothing else.
+    Faithful,
+    /// Registers in a manifest slot, admits the roster and ignores the
+    /// admission's result.
+    AdmitRoster,
+    /// Replaces the host with a fresh Local host that stops after the given
+    /// number of Ticks.
+    ReplaceHost(u64),
+    /// Registers a Plugin that declares a Driver without supplying one.
+    RegistrationBug,
+}
 
 /// What the subject's Driver emits at each Tick.
 #[derive(Clone, Copy)]
@@ -111,6 +131,7 @@ struct Subject {
     entity: EntityId,
     operational: Operational,
     refused_profile: Option<&'static str>,
+    behaviour: Behaviour,
 }
 
 impl Subject {
@@ -121,6 +142,7 @@ impl Subject {
             entity: entity(),
             operational: Operational::new(1_000, 0),
             refused_profile: None,
+            behaviour: Behaviour::Faithful,
         }
     }
 
@@ -148,25 +170,52 @@ impl RecomputationSubjectV1 for Subject {
         &self,
         experiment: &mut Experiment,
         profile: &ExecutionProfileV1,
-    ) -> Result<(), RuntimeError> {
+    ) -> Result<(), RecomputationComposeErrorV1> {
         if self.refused_profile == Some(profile.profile_id.as_str()) {
-            return Err(RuntimeError::CapabilityMismatch {
-                name: PLUGIN_NAME.to_owned(),
-                reason: "the subject needs a network capability".to_owned(),
-            });
+            return Err(RecomputationComposeErrorV1::ProfileUnsupported);
         }
-        experiment.register_generated(
-            &CounterPlugin {
-                id: PluginId::new(),
-            },
-            None,
-            Some(Box::new(ScriptDriver {
-                script: self.script,
-                entity: self.entity,
-                tick: 0,
-                operational: self.operational.clone(),
-            })),
-        )
+        let plugin = CounterPlugin {
+            id: PluginId::new(),
+        };
+        let driver: Box<dyn Driver> = Box::new(ScriptDriver {
+            script: self.script,
+            entity: self.entity,
+            tick: 0,
+            operational: self.operational.clone(),
+        });
+        match self.behaviour {
+            Behaviour::Faithful => experiment.register_generated(&plugin, None, Some(driver)),
+            Behaviour::AdmitRoster => ManifestSlotV1::try_new("counter.primary")
+                .map_err(RuntimeError::ManifestSlot)
+                .and_then(|slot| {
+                    experiment.register_local(
+                        &plugin,
+                        slot,
+                        vec![REDUCER.to_owned()],
+                        None,
+                        Some(driver),
+                    )
+                })
+                .map(|()| {
+                    // The subject ignores whether its host admitted the roster.
+                    if let Ok(admitted) = experiment.admit_local_manifest_registration(
+                        pos_core::OwnerIdV1::from_static("recomputation-subject"),
+                        1,
+                    ) {
+                        drop(admitted);
+                    }
+                }),
+            Behaviour::ReplaceHost(ticks) => {
+                *experiment = Experiment::new(ExperimentConfig {
+                    name: "replaced-host".to_owned(),
+                    stop: StopCondition::MaxTicks(ticks),
+                    store_config: StoreConfig::Memory,
+                });
+                experiment.register_generated(&plugin, None, Some(driver))
+            }
+            Behaviour::RegistrationBug => experiment.register_generated(&plugin, None, None),
+        }
+        .map_err(RecomputationComposeErrorV1::Registration)
     }
 }
 
@@ -549,6 +598,33 @@ impl Fixture {
             profile_id,
             profile_id,
         )
+    }
+
+    /// This fixture with its manifest in `mode`.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn in_mode(mut self, mode: ExecutionModeV1) -> TestResult<Self> {
+        self.manifest.execution_mode = mode;
+        self.refresh_manifest_binding()?;
+        Ok(self)
+    }
+
+    /// This fixture with a manifest that enables network.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn networked(mut self) -> TestResult<Self> {
+        self.manifest.network_enabled = true;
+        self.refresh_manifest_binding()?;
+        Ok(self)
+    }
+
+    /// This fixture with an edited EPF1, re-bound in the manifest and RVR1.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn with_profile(mut self, edit: impl FnOnce(&mut ExecutionProfileV1)) -> TestResult<Self> {
+        edit(&mut self.execution_profile);
+        self.execution_profile.profile_digest = self.execution_profile.digest();
+        self.manifest.execution_profile_digest = self.execution_profile.profile_digest;
+        self.request.execution_profile_digest = self.execution_profile.profile_digest;
+        self.refresh_manifest_binding()?;
+        Ok(self)
     }
 
     /// Re-bind RVR1 to the edited manifest.
@@ -1613,5 +1689,214 @@ fn closure_members_that_do_not_compose_the_request_digest_are_refused() -> TestR
     let outcome = run_cross(&local, &air_gapped, other_licence, &expected)?;
     assert_refused(&outcome.local, mismatch, Some("artifact_closure"));
     assert_refused(&outcome.air_gapped, mismatch, Some("artifact_closure"));
+    Ok(())
+}
+
+#[test]
+fn only_a_local_or_air_gapped_manifest_recomputes() -> TestResult {
+    let subject = Subject::new(Script::Count);
+    let expected = expected(&[1, 2], None)?;
+    for mode in [ExecutionModeV1::Replay, ExecutionModeV1::Fork] {
+        let fixture = Fixture::recomputation()?.in_mode(mode)?;
+        let outcome = run(&fixture, subject.closure(2), &expected, StoreConfig::Memory)?;
+        assert_refused(&outcome, INCOMPATIBLE, Some("execution_profile"));
+    }
+    let air_gapped = Fixture::recomputation()?.in_mode(ExecutionModeV1::AirGapped)?;
+    let outcome = run(
+        &air_gapped,
+        subject.closure(2),
+        &expected,
+        StoreConfig::Memory,
+    )?;
+    assert_exact(&outcome, &expected)?;
+
+    // A cross-profile leg whose manifest is not in its own leg's mode.
+    let local = Fixture::cross(LOCAL_PROFILE_ID_V1)?.in_mode(ExecutionModeV1::AirGapped)?;
+    let air_gapped = Fixture::cross(AIR_GAPPED_PROFILE_ID_V1)?;
+    let outcome = run_cross(&local, &air_gapped, subject.closure(2), &expected)?;
+    assert_refused(&outcome.local, INCOMPATIBLE, Some("execution_profile"));
+    assert_exact(&outcome.air_gapped, &expected)?;
+    let local = Fixture::cross(LOCAL_PROFILE_ID_V1)?;
+    let air_gapped = Fixture::cross(AIR_GAPPED_PROFILE_ID_V1)?.in_mode(ExecutionModeV1::Local)?;
+    let outcome = run_cross(&local, &air_gapped, subject.closure(2), &expected)?;
+    assert_exact(&outcome.local, &expected)?;
+    assert_refused(&outcome.air_gapped, INCOMPATIBLE, Some("execution_profile"));
+    Ok(())
+}
+
+#[test]
+fn a_manifest_that_enables_network_under_a_denying_profile_is_refused() -> TestResult {
+    let subject = Subject::new(Script::Count);
+    let expected = expected(&[1, 2], None)?;
+    // Both Draft EPF1 deny network, in either mode.
+    let local = Fixture::recomputation()?.networked()?;
+    let outcome = run(&local, subject.closure(2), &expected, StoreConfig::Memory)?;
+    assert_refused(&outcome, INCOMPATIBLE, Some("execution_profile"));
+    let outcome = run_cross(
+        &Fixture::cross(LOCAL_PROFILE_ID_V1)?,
+        &Fixture::cross(AIR_GAPPED_PROFILE_ID_V1)?.networked()?,
+        subject.closure(2),
+        &expected,
+    )?;
+    assert_exact(&outcome.local, &expected)?;
+    assert_refused(&outcome.air_gapped, INCOMPATIBLE, Some("execution_profile"));
+    Ok(())
+}
+
+#[test]
+fn local_and_air_gapped_hosts_differ_in_the_enforced_property() -> TestResult {
+    let expected = expected(&[1, 2], None)?;
+
+    // The network gate: under an EPF1 that allows network, a networked
+    // manifest recomputes in Local mode and is refused in Air-Gapped mode.
+    let allowing = Fixture::recomputation()?
+        .with_profile(|profile| profile.capabilities_and_network.network_allowed = true)?
+        .networked()?;
+    let subject = Subject::new(Script::Count);
+    let outcome = run(
+        &allowing,
+        subject.closure(2),
+        &expected,
+        StoreConfig::Memory,
+    )?;
+    assert_exact(&outcome, &expected)?;
+    let air_gapped = allowing.in_mode(ExecutionModeV1::AirGapped)?;
+    let outcome = run(
+        &air_gapped,
+        subject.closure(2),
+        &expected,
+        StoreConfig::Memory,
+    )?;
+    assert_refused(&outcome, INCOMPATIBLE, Some("execution_profile"));
+
+    // The composition mode: the Local host admits the subject's local
+    // manifest roster; the Air-Gapped host refuses it, and the subject that
+    // ignores the refusal is still refused.
+    let admitting = Subject {
+        behaviour: Behaviour::AdmitRoster,
+        ..Subject::new(Script::Count)
+    };
+    let outcome = run_cross(
+        &Fixture::cross(LOCAL_PROFILE_ID_V1)?,
+        &Fixture::cross(AIR_GAPPED_PROFILE_ID_V1)?,
+        admitting.closure(2),
+        &expected,
+    )?;
+    assert_exact(&outcome.local, &expected)?;
+    assert_refused(&outcome.air_gapped, INCOMPATIBLE, Some("execution_profile"));
+    Ok(())
+}
+
+#[test]
+fn a_subject_that_replaces_its_host_does_not_escape_the_host() -> TestResult {
+    let expected = expected(&[1, 2], None)?;
+    // A replaced host that would step four Ticks: the host still steps the
+    // frozen two.
+    let replacing = Subject {
+        behaviour: Behaviour::ReplaceHost(4),
+        ..Subject::new(Script::Count)
+    };
+    let local = Fixture::recomputation()?;
+    let outcome = run(&local, replacing.closure(2), &expected, StoreConfig::Memory)?;
+    assert_exact(&outcome, &expected)?;
+    // A replaced host that would stop after one Tick: the host still steps two.
+    let stopping = Subject {
+        behaviour: Behaviour::ReplaceHost(1),
+        ..Subject::new(Script::Count)
+    };
+    let outcome = run(&local, stopping.closure(2), &expected, StoreConfig::Memory)?;
+    assert_exact(&outcome, &expected)?;
+    // Under the Air-Gapped mode the replacement Local host is refused.
+    let air_gapped = Fixture::recomputation()?.in_mode(ExecutionModeV1::AirGapped)?;
+    let outcome = run(
+        &air_gapped,
+        replacing.closure(2),
+        &expected,
+        StoreConfig::Memory,
+    )?;
+    assert_refused(&outcome, INCOMPATIBLE, Some("execution_profile"));
+    Ok(())
+}
+
+#[test]
+fn a_registration_error_is_a_typed_failure_not_an_incompatible_profile() -> TestResult {
+    let buggy = Subject {
+        behaviour: Behaviour::RegistrationBug,
+        ..Subject::new(Script::Count)
+    };
+    let fixture = Fixture::recomputation()?;
+    // The failure has no Events and Fold Cursor 0, and verifies as exact
+    // against a record that holds it.
+    let failed = expected(&[], Some(REGISTRATION_FAILURE))?;
+    let outcome = run(&fixture, buggy.closure(2), &failed, StoreConfig::Memory)?;
+    assert_exact(&outcome, &failed)?;
+    // Against the run's expected Events it is a divergence, not a refusal.
+    let outcome = run(
+        &fixture,
+        buggy.closure(2),
+        &expected(&[1, 2], None)?,
+        StoreConfig::Memory,
+    )?;
+    assert_eq!(
+        outcome.result.verification_outcome,
+        VerificationOutcomeV1::Diverged
+    );
+    assert_eq!(outcome.result.first_error, None);
+    assert_eq!(
+        outcome.result.authoritative_result_digest,
+        Some(result_digest(&failed)?)
+    );
+    Ok(())
+}
+
+#[test]
+fn the_profile_event_count_budget_caps_recomputed_events() -> TestResult {
+    let subject = Subject::new(Script::Count);
+    let fixture = Fixture::recomputation()?.with_profile(|profile| {
+        profile.deterministic_budgets[EVENT_COUNT_BUDGET_SLOT_V1] = 2;
+    })?;
+    // Exactly the budget, below the manifest `resource_limit`, is admitted.
+    let expected_two = expected(&[1, 2], None)?;
+    let outcome = run(
+        &fixture,
+        subject.closure(2),
+        &expected_two,
+        StoreConfig::Memory,
+    )?;
+    assert_exact(&outcome, &expected_two)?;
+    // One Event over the budget.
+    let outcome = run(
+        &fixture,
+        subject.closure(3),
+        &expected(&[1, 2, 3], None)?,
+        StoreConfig::Memory,
+    )?;
+    assert_refused(&outcome, RESOURCE, None);
+    Ok(())
+}
+
+#[test]
+fn the_profile_execution_step_budget_caps_the_frozen_ticks() -> TestResult {
+    let subject = Subject::new(Script::Count);
+    let fixture = Fixture::recomputation()?.with_profile(|profile| {
+        profile.deterministic_budgets[EXECUTION_STEPS_BUDGET_SLOT_V1] = 2;
+    })?;
+    // Exactly the budget is admitted.
+    let expected_two = expected(&[1, 2], None)?;
+    let outcome = run(
+        &fixture,
+        subject.closure(2),
+        &expected_two,
+        StoreConfig::Memory,
+    )?;
+    assert_exact(&outcome, &expected_two)?;
+    // One Tick over the budget is refused before the run.
+    let outcome = run(
+        &fixture,
+        subject.closure(3),
+        &expected(&[1, 2, 3], None)?,
+        StoreConfig::Memory,
+    )?;
+    assert_refused(&outcome, RESOURCE, None);
     Ok(())
 }
