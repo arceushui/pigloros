@@ -14,15 +14,38 @@ use super::{action, observe, unavailable, Result, Subscriptions};
 use crate::{EventKind, EventSink, NativeAction, NativeEvent};
 
 #[cfg(test)]
+type PrototypeHeldResource = (
+    webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Deferral,
+    ICoreWebView2WebResourceRequestedEventArgs,
+    ICoreWebView2WebResourceResponse,
+);
+
+#[cfg(test)]
 std::thread_local! {
     static DENIAL_FIXTURE: std::cell::Cell<crate::ResourceDenialFixture> =
         const { std::cell::Cell::new(crate::ResourceDenialFixture::Normal) };
+    // PROTOTYPE ONLY: deliberately retained until an observed browser exit or
+    // an explicit controlled Complete. Never an automatically completing guard.
+    static PROTOTYPE_HELD: std::cell::RefCell<Vec<PrototypeHeldResource>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 #[cfg(test)]
 impl crate::Native {
     pub(crate) fn set_resource_denial_fixture(mode: crate::ResourceDenialFixture) {
         DENIAL_FIXTURE.with(|current| current.set(mode));
+        PROTOTYPE_HELD.with(|held| held.borrow_mut().clear());
+    }
+    pub(crate) fn prototype_complete_resource(deny: bool) -> Result<()> {
+        PROTOTYPE_HELD.with(|held| {
+            let (deferral, args, response) = held.borrow_mut().pop().ok_or_else(unavailable)?;
+            if deny {
+                // SAFETY: test-only retained arguments and response, on their callback STA.
+                unsafe { args.SetResponse(&response) }.map_err(|_| unavailable())?;
+            }
+            // SAFETY: test-only retained deferral, completed exactly once on its STA.
+            unsafe { deferral.Complete() }.map_err(|_| unavailable())
+        })
     }
 }
 
@@ -94,6 +117,21 @@ fn filter(
         );
         #[cfg(test)]
         if DENIAL_FIXTURE.with(|mode| mode.get() != crate::ResourceDenialFixture::Normal) {
+            if DENIAL_FIXTURE.with(|mode| {
+                matches!(
+                    mode.get(),
+                    crate::ResourceDenialFixture::PrototypeHeld
+                        | crate::ResourceDenialFixture::PrototypeCompleteAllowed
+                        | crate::ResourceDenialFixture::PrototypeCompleteDenied
+                )
+            }) {
+                // SAFETY: live event arguments on their callback STA; prototype
+                // retains the owned deferral and args instead of completing it.
+                let deferral = unsafe { args.GetDeferral() }.map_err(|_| unavailable())?;
+                PROTOTYPE_HELD.with(|held| {
+                    held.borrow_mut().push((deferral, args, response.clone()));
+                });
+            }
             return Err(unavailable());
         }
         // SAFETY: live event arguments and host-created denial response; COM

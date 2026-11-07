@@ -24,6 +24,23 @@ use crate::{
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
+const fn resource_cases() -> [(u8, bool, crate::ResourceDenialFixture, u32); 7] {
+    use crate::ResourceDenialFixture::{
+        Normal, PropagateFailure, PrototypeCompleteAllowed, PrototypeCompleteDenied, PrototypeHeld,
+        SwallowFailure,
+    };
+    [
+        (0x20, false, Normal, 1),
+        (0x21, true, Normal, 0),
+        (0x22, true, SwallowFailure, 1),
+        // PROTOTYPE: actual e1a3 observation, not a containment fix.
+        (0x23, true, PropagateFailure, 1),
+        (0x24, true, PrototypeHeld, 0),
+        (0x25, true, PrototypeCompleteAllowed, 1),
+        (0x26, true, PrototypeCompleteDenied, 0),
+    ]
+}
+
 struct ResourceProbe {
     policy: Events,
     deny: bool,
@@ -170,19 +187,7 @@ impl crate::Native {
             ListenerConfig::adr(),
         )?;
         let mut factory = Self::owner_factory()?;
-        for (value, deny, mode, served) in [
-            (0x20, false, crate::ResourceDenialFixture::Normal, 1),
-            (0x21, true, crate::ResourceDenialFixture::Normal, 0),
-            // A real native negative control: the former swallowed error must
-            // let the request reach the actual digest-pinned listener.
-            (0x22, true, crate::ResourceDenialFixture::SwallowFailure, 1),
-            (
-                0x23,
-                true,
-                crate::ResourceDenialFixture::PropagateFailure,
-                0,
-            ),
-        ] {
+        for (value, deny, mode, served) in resource_cases() {
             let _mode = ResourceProbeGuard::new(mode);
             let folder = root
                 .0
@@ -218,11 +223,25 @@ impl crate::Native {
             listener.begin_navigation();
             probe.policy.begin();
             native.navigate_owner()?;
-            pump_until(
-                &factory,
-                "resource callback and navigation completion",
-                || probe.requested.get() && probe.completed.get(),
-            )?;
+            pump_until(&factory, "prototype resource callback", || {
+                probe.requested.get()
+            })?;
+            if matches!(
+                mode,
+                crate::ResourceDenialFixture::PrototypeCompleteAllowed
+                    | crate::ResourceDenialFixture::PrototypeCompleteDenied
+            ) {
+                Self::prototype_complete_resource(
+                    mode == crate::ResourceDenialFixture::PrototypeCompleteDenied,
+                )?;
+            }
+            if mode != crate::ResourceDenialFixture::PrototypeHeld {
+                pump_until(
+                    &factory,
+                    "resource callback and navigation completion",
+                    || probe.requested.get() && probe.completed.get(),
+                )?;
+            }
             if served == 1 {
                 pump_until(&factory, "positive control reaching the listener", || {
                     listener.served().count == 1
@@ -242,6 +261,7 @@ impl crate::Native {
                 probe.policy.exited() == Some(identity.browser_pid)
             })?;
             assert_eq!(listener.served().count, served);
+            eprintln!("PROTOTYPE resource case={value} listener={served} exited=true");
             native.unsubscribe_exit()?;
             native.drop_environment()?;
             native.destroy_window()?;

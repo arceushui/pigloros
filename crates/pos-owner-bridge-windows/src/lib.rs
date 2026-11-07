@@ -111,6 +111,9 @@ enum ResourceDenialFixture {
     Normal,
     SwallowFailure,
     PropagateFailure,
+    PrototypeHeld,
+    PrototypeCompleteAllowed,
+    PrototypeCompleteDenied,
 }
 
 /// Native extraction bounds the UTF-16 scan before allocation. This owned value
