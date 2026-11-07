@@ -108,7 +108,7 @@ use pos_runtime::community_plugin_host::{
 };
 use pos_runtime::{
     AuthorizationCacheKeyV1, Driver, ErasureCommandSenderV1, ErasureExecutionHostV1,
-    ObservationView, PluginAvailabilityV1, PluginRegistry, RuntimeError,
+    ObservationView, PluginRegistry, RuntimeError,
 };
 use pos_state::ProjectionRegistry;
 use pos_store::StoreConfig;
@@ -1547,6 +1547,7 @@ mod tests {
     use pos_runtime::community_plugin_host::{
         plugin_output_digest_v1, EventDraftV1, TraceAnnotationV1,
     };
+    use pos_runtime::PluginAvailabilityV1;
 
     #[test]
     fn the_guest_embeds_the_output_digest_of_its_documented_output() {
