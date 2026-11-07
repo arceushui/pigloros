@@ -24,6 +24,19 @@ use crate::{
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
+fn assert_resource_counts(listener: &LoopbackListener, before: u64, expected: u32) {
+    assert_eq!(
+        listener.served().count,
+        expected,
+        "unexpected completed resource response"
+    );
+    assert_eq!(
+        listener.received_request_count() - before,
+        u64::from(expected),
+        "unexpected request bytes reached the listener"
+    );
+}
+
 struct ResourceProbe {
     policy: Events,
     deny: bool,
@@ -184,6 +197,7 @@ impl crate::Native {
             ),
         ] {
             let _mode = ResourceProbeGuard::new(mode);
+            let received_before = listener.received_request_count();
             let folder = root
                 .0
                 .join(pos_owner_bridge::folder_name(&CeremonyId::from_bytes(
@@ -228,11 +242,7 @@ impl crate::Native {
                     listener.served().count == 1
                 })?;
             }
-            assert_eq!(
-                listener.served().count,
-                served,
-                "resource denial mode differs from its qualified behavior"
-            );
+            assert_resource_counts(&listener, received_before, served);
             if mode != crate::ResourceDenialFixture::Normal {
                 assert!(probe.failures.get() > 0);
             }
@@ -241,7 +251,7 @@ impl crate::Native {
             pump_until(&factory, "resource browser exit", || {
                 probe.policy.exited() == Some(identity.browser_pid)
             })?;
-            assert_eq!(listener.served().count, served);
+            assert_resource_counts(&listener, received_before, served);
             native.unsubscribe_exit()?;
             native.drop_environment()?;
             native.destroy_window()?;
