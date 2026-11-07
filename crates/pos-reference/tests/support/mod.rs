@@ -26,6 +26,37 @@ use pos_reference::evaluator_protocol::{
 };
 use pos_reference::profile::ProviderKey;
 
+/// The deployment-operator key that signs every corpus TPS1 (ADR-069 R8). The
+/// root-selector installation fixture pins the same key as its TRS1 role 6.
+pub const TRUST_POLICY_OPERATOR_SECRET: [u8; 32] = [12; 32];
+const TRUST_POLICY_OPERATOR_DOMAIN: &[u8] = b"PiglorOS.TPS1.operator-signature.v1\0";
+
+fn trust_policy_operator_signing_key() -> SigningKey {
+    SigningKey::from_bytes(&TRUST_POLICY_OPERATOR_SECRET)
+}
+
+/// The deployment-operator public key that verifies every corpus TPS1.
+#[must_use]
+pub fn trust_policy_operator_public_key() -> [u8; 32] {
+    trust_policy_operator_signing_key()
+        .verifying_key()
+        .to_bytes()
+}
+
+/// The caller-pinned anchor that authenticates every corpus TPS1.
+///
+/// # Errors
+/// Never in practice: the fixture key is valid and the role is exact.
+pub fn trust_policy_operator() -> Result<
+    pos_reference::signed_bundle::TrustPolicyOperatorAnchor,
+    pos_reference::signed_bundle::BundleError,
+> {
+    pos_reference::signed_bundle::TrustPolicyOperatorAnchor::new(
+        pos_reference::signed_bundle::DEPLOYMENT_OPERATOR_ROLE,
+        trust_policy_operator_public_key(),
+    )
+}
+
 pub struct Corpus {
     pub request: Vec<u8>,
     pub archive: Vec<u8>,
@@ -660,6 +691,8 @@ pub enum TrustMutation {
     PreviousInvalid,
     Signature,
     SignatureType,
+    DomainlessSignature,
+    SignedByTrustRoot,
 }
 
 #[derive(Clone, Copy)]
@@ -3497,9 +3530,16 @@ fn trust_policy(
     if let Some(mutation) = mutation {
         mutate_trust_policy(&mut fields, mutation, revoked_artifact)?;
     }
-    let signature = signing_key
-        .sign(&canonical(&array(fields.clone()))?)
-        .to_bytes();
+    let unsigned = canonical(&array(fields.clone()))?;
+    let domain_separated = [TRUST_POLICY_OPERATOR_DOMAIN, unsigned.as_slice()].concat();
+    let signature = match mutation {
+        Some(TrustMutation::DomainlessSignature) => {
+            trust_policy_operator_signing_key().sign(&unsigned)
+        }
+        Some(TrustMutation::SignedByTrustRoot) => signing_key.sign(&domain_separated),
+        _ => trust_policy_operator_signing_key().sign(&domain_separated),
+    }
+    .to_bytes();
     fields.push(if matches!(mutation, Some(TrustMutation::Signature)) {
         bytes(&[0; 64])
     } else if matches!(mutation, Some(TrustMutation::SignatureType)) {

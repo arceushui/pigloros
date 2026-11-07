@@ -202,6 +202,7 @@ fn measured_report(mode: u64, budgets: &[[u64; 8]; 7]) -> TestResult<Conformance
         &corpus.request,
         &corpus.archive,
         &corpus.trust_policy,
+        &support::trust_policy_operator()?,
         &evaluator_identity()?,
         &support::test_executors(),
         &mut adapter,
