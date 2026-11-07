@@ -5610,6 +5610,7 @@ dependencies = [
  "pos-plugin-ledger",
  "pos-plugin-rule-agent",
  "pos-plugin-society",
+ "pos-plugin-supervisor",
  "pos-plugin-synthetic-obs",
  "pos-plugin-world",
  "pos-reference",

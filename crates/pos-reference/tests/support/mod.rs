@@ -1465,58 +1465,87 @@ fn mutate_matrix_predicate(
     Ok(())
 }
 
+/// The matrix case every case mutation edits: `NI-TOOL-001-S-A`, an
+/// Air-Gapped case of the first row, which stays non-executed until ADR-062
+/// Revision 8 slice N7 (the row's L, R and F cases are flipped by slice N2).
+const OPEN_CASE: usize = 1;
+
 fn mutate_matrix_case(
     root: &mut serde_json::Map<String, serde_json::Value>,
     index: u8,
 ) -> TestResult<()> {
     match index {
-        0 => set_json_array_value(root, "cases", 0, serde_json::Value::Null)?,
-        1 => drop_nested_json_field(root, "cases", 0, "case_id")?,
-        2 => set_nested_json(root, "cases", 0, "executed", serde_json::json!("false"))?,
-        3 => set_nested_json(root, "cases", 0, "case_id", serde_json::json!("wrong"))?,
-        4 => set_nested_json(root, "cases", 0, "fixture_id", serde_json::json!("wrong"))?,
-        5 => set_nested_json(root, "cases", 0, "variant", serde_json::json!("D"))?,
-        6 => set_nested_json(root, "cases", 0, "mode", serde_json::json!("A"))?,
+        0 => set_json_array_value(root, "cases", OPEN_CASE, serde_json::Value::Null)?,
+        1 => drop_nested_json_field(root, "cases", OPEN_CASE, "case_id")?,
+        2 => set_nested_json(
+            root,
+            "cases",
+            OPEN_CASE,
+            "executed",
+            serde_json::json!("false"),
+        )?,
+        3 => set_nested_json(
+            root,
+            "cases",
+            OPEN_CASE,
+            "case_id",
+            serde_json::json!("wrong"),
+        )?,
+        4 => set_nested_json(
+            root,
+            "cases",
+            OPEN_CASE,
+            "fixture_id",
+            serde_json::json!("wrong"),
+        )?,
+        5 => set_nested_json(root, "cases", OPEN_CASE, "variant", serde_json::json!("D"))?,
+        6 => set_nested_json(root, "cases", OPEN_CASE, "mode", serde_json::json!("L"))?,
         7 => set_nested_json(
             root,
             "cases",
-            0,
+            OPEN_CASE,
             "expected_result",
             serde_json::json!("accepted"),
         )?,
         8 => set_nested_json(
             root,
             "cases",
-            0,
+            OPEN_CASE,
             "expected_result_digest",
             serde_json::json!("0".repeat(64)),
         )?,
         9 => set_executed_case(root, serde_json::Value::Null)?,
         10 => set_executed_case(root, serde_json::json!("invalid"))?,
-        11 => set_nested_json(root, "cases", 0, "case_id", serde_json::Value::Null)?,
-        12 => set_nested_json(root, "cases", 0, "fixture_id", serde_json::Value::Null)?,
-        13 => set_nested_json(root, "cases", 0, "variant", serde_json::Value::Null)?,
-        14 => set_nested_json(root, "cases", 0, "mode", serde_json::Value::Null)?,
+        11 => set_nested_json(root, "cases", OPEN_CASE, "case_id", serde_json::Value::Null)?,
+        12 => set_nested_json(
+            root,
+            "cases",
+            OPEN_CASE,
+            "fixture_id",
+            serde_json::Value::Null,
+        )?,
+        13 => set_nested_json(root, "cases", OPEN_CASE, "variant", serde_json::Value::Null)?,
+        14 => set_nested_json(root, "cases", OPEN_CASE, "mode", serde_json::Value::Null)?,
         15 => set_nested_json(
             root,
             "cases",
-            0,
+            OPEN_CASE,
             "authority_fixture_id",
             serde_json::json!("authority-case"),
         )?,
         16 => set_nested_json(
             root,
             "cases",
-            0,
+            OPEN_CASE,
             "authority_result_digest",
             serde_json::json!("0".repeat(64)),
         )?,
         17 => set_executed_case_without_result(root)?,
         18 => set_executed_case(root, serde_json::json!(1))?,
         19 => set_executed_case(root, serde_json::json!("A".repeat(64)))?,
-        20 => set_nested_json(root, "cases", 0, "extra", serde_json::json!(true))?,
-        21 => drop_nested_json_field(root, "cases", 0, "expected_result")?,
-        22 => drop_nested_json_field(root, "cases", 0, "expected_result_digest")?,
+        20 => set_nested_json(root, "cases", OPEN_CASE, "extra", serde_json::json!(true))?,
+        21 => drop_nested_json_field(root, "cases", OPEN_CASE, "expected_result")?,
+        22 => drop_nested_json_field(root, "cases", OPEN_CASE, "expected_result_digest")?,
         _ => return Err(io::Error::other("unknown matrix case mutation").into()),
     }
     Ok(())
@@ -1525,11 +1554,17 @@ fn mutate_matrix_case(
 fn set_executed_case_without_result(
     root: &mut serde_json::Map<String, serde_json::Value>,
 ) -> TestResult<()> {
-    set_nested_json(root, "cases", 0, "executed", serde_json::json!(true))?;
     set_nested_json(
         root,
         "cases",
-        0,
+        OPEN_CASE,
+        "executed",
+        serde_json::json!(true),
+    )?;
+    set_nested_json(
+        root,
+        "cases",
+        OPEN_CASE,
         "expected_result_digest",
         serde_json::json!("0".repeat(64)),
     )
@@ -1539,27 +1574,48 @@ fn set_executed_case(
     root: &mut serde_json::Map<String, serde_json::Value>,
     digest: serde_json::Value,
 ) -> TestResult<()> {
-    set_nested_json(root, "cases", 0, "executed", serde_json::json!(true))?;
     set_nested_json(
         root,
         "cases",
-        0,
+        OPEN_CASE,
+        "executed",
+        serde_json::json!(true),
+    )?;
+    set_nested_json(
+        root,
+        "cases",
+        OPEN_CASE,
         "expected_result",
         serde_json::json!("accepted"),
     )?;
-    set_nested_json(root, "cases", 0, "expected_result_digest", digest)
+    set_nested_json(root, "cases", OPEN_CASE, "expected_result_digest", digest)
 }
 
 fn make_first_matrix_case_executed(
     root: &mut serde_json::Map<String, serde_json::Value>,
 ) -> TestResult<()> {
     set_executed_case(root, serde_json::json!("0".repeat(64)))?;
-    set_nested_json(root, "rows", 0, "executed_case_count", serde_json::json!(1))?;
-    // One more executed case than the checked-in matrix records.
-    let executed = root
-        .get("executed_case_count")
-        .and_then(serde_json::Value::as_u64)
-        .ok_or_else(|| io::Error::other("matrix has no executed case count"))?;
+    // One more executed case than the checked-in matrix records, in the open
+    // case's row and in total.
+    let count = |value: Option<&serde_json::Value>| {
+        value
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| io::Error::other("matrix has no executed case count"))
+    };
+    let row = count(
+        root.get("rows")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|rows| rows.first())
+            .and_then(|row| row.get("executed_case_count")),
+    )?;
+    set_nested_json(
+        root,
+        "rows",
+        0,
+        "executed_case_count",
+        serde_json::json!(row + 1),
+    )?;
+    let executed = count(root.get("executed_case_count"))?;
     set_json(root, "executed_case_count", serde_json::json!(executed + 1));
     Ok(())
 }
