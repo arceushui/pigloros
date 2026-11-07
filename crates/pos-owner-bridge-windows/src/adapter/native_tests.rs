@@ -118,6 +118,7 @@ impl FixtureRoot {
 fn failed_fixture_preserves_recovery_files_until_explicit_retirement() -> TestResult {
     fn failing_fixture(root: FixtureRoot) -> TestResult {
         std::fs::metadata(&root.0)?;
+        drop(root);
         Err("modeled fixture failure".into())
     }
 
