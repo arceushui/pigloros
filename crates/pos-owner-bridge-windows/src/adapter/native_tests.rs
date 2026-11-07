@@ -81,6 +81,19 @@ fn restore_denial(
     Ok(())
 }
 
+fn complete_deferred_probe(mode: crate::ResourceDenialFixture) -> TestResult {
+    if matches!(
+        mode,
+        crate::ResourceDenialFixture::PrototypeCompleteAllowed
+            | crate::ResourceDenialFixture::PrototypeCompleteDenied
+    ) {
+        crate::Native::prototype_complete_resource(
+            mode == crate::ResourceDenialFixture::PrototypeCompleteDenied,
+        )?;
+    }
+    Ok(())
+}
+
 struct ResourceProbe {
     policy: Events,
     deny: bool,
@@ -268,15 +281,7 @@ impl crate::Native {
             pump_until(&factory, "prototype resource callback", || {
                 probe.requested.get()
             })?;
-            if matches!(
-                mode,
-                crate::ResourceDenialFixture::PrototypeCompleteAllowed
-                    | crate::ResourceDenialFixture::PrototypeCompleteDenied
-            ) {
-                Self::prototype_complete_resource(
-                    mode == crate::ResourceDenialFixture::PrototypeCompleteDenied,
-                )?;
-            }
+            complete_deferred_probe(mode)?;
             if !resource_stays_deferred(mode) {
                 pump_until(
                     &factory,
