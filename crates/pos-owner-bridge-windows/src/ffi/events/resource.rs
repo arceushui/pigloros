@@ -131,6 +131,7 @@ fn filter(
                 matches!(
                     mode.get(),
                     crate::ResourceDenialFixture::PrototypeHeld
+                        | crate::ResourceDenialFixture::PrototypeCloseFirst
                         | crate::ResourceDenialFixture::PrototypeDrop
                         | crate::ResourceDenialFixture::PrototypeCompleteAllowed
                         | crate::ResourceDenialFixture::PrototypeCompleteDenied

@@ -25,10 +25,23 @@ use crate::{
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
-const fn resource_cases() -> [(u8, bool, crate::ResourceDenialFixture, u32); 8] {
+fn assert_resource_counts(listener: &LoopbackListener, before: u64, expected: u32) {
+    assert_eq!(
+        listener.served().count,
+        expected,
+        "unexpected completed resource response"
+    );
+    assert_eq!(
+        listener.received_request_count() - before,
+        u64::from(expected),
+        "unexpected request bytes reached the listener"
+    );
+}
+
+const fn resource_cases() -> [(u8, bool, crate::ResourceDenialFixture, u32); 9] {
     use crate::ResourceDenialFixture::{
-        Normal, PropagateFailure, PrototypeCompleteAllowed, PrototypeCompleteDenied, PrototypeDrop,
-        PrototypeHeld, SwallowFailure,
+        Normal, PropagateFailure, PrototypeCloseFirst, PrototypeCompleteAllowed,
+        PrototypeCompleteDenied, PrototypeDrop, PrototypeHeld, SwallowFailure,
     };
     [
         (0x20, false, Normal, 1),
@@ -38,6 +51,7 @@ const fn resource_cases() -> [(u8, bool, crate::ResourceDenialFixture, u32); 8] 
         (0x23, true, PropagateFailure, 1),
         (0x25, true, PrototypeCompleteAllowed, 1),
         (0x26, true, PrototypeCompleteDenied, 0),
+        (0x28, true, PrototypeCloseFirst, 0),
         (0x24, true, PrototypeHeld, 0),
         (0x27, true, PrototypeDrop, 0),
     ]
@@ -46,7 +60,9 @@ const fn resource_cases() -> [(u8, bool, crate::ResourceDenialFixture, u32); 8] 
 const fn resource_stays_deferred(mode: crate::ResourceDenialFixture) -> bool {
     matches!(
         mode,
-        crate::ResourceDenialFixture::PrototypeHeld | crate::ResourceDenialFixture::PrototypeDrop
+        crate::ResourceDenialFixture::PrototypeHeld
+            | crate::ResourceDenialFixture::PrototypeDrop
+            | crate::ResourceDenialFixture::PrototypeCloseFirst
     )
 }
 
@@ -212,6 +228,7 @@ impl crate::Native {
         let mut factory = Self::owner_factory()?;
         for (value, deny, mode, served) in resource_cases() {
             let _mode = ResourceProbeGuard::new(mode);
+            let received_before = listener.received_request_count();
             let folder = root
                 .0
                 .join(pos_owner_bridge::folder_name(&CeremonyId::from_bytes(
@@ -270,21 +287,19 @@ impl crate::Native {
                     listener.served().count == 1
                 })?;
             }
-            assert_eq!(
-                listener.served().count,
-                served,
-                "resource denial mode differs from its qualified behavior"
-            );
+            assert_resource_counts(&listener, received_before, served);
             if mode != crate::ResourceDenialFixture::Normal {
                 assert!(probe.failures.get() > 0);
             }
             restore_denial(native.as_mut(), &listener, mode)?;
-            native.unsubscribe_view()?;
+            if mode != crate::ResourceDenialFixture::PrototypeCloseFirst {
+                native.unsubscribe_view()?;
+            }
             native.close_controller()?;
             pump_until(&factory, "resource browser exit", || {
                 probe.policy.exited() == Some(identity.browser_pid)
             })?;
-            assert_eq!(listener.served().count, served);
+            assert_resource_counts(&listener, received_before, served);
             writeln!(
                 std::io::stderr(),
                 "PROTOTYPE resource case={value} listener={served} exited=true"
