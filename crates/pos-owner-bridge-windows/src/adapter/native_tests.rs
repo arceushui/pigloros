@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 
 use std::cell::Cell;
+use std::io::Write as _;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -261,7 +262,10 @@ impl crate::Native {
                 probe.policy.exited() == Some(identity.browser_pid)
             })?;
             assert_eq!(listener.served().count, served);
-            eprintln!("PROTOTYPE resource case={value} listener={served} exited=true");
+            writeln!(
+                std::io::stderr(),
+                "PROTOTYPE resource case={value} listener={served} exited=true"
+            )?;
             native.unsubscribe_exit()?;
             native.drop_environment()?;
             native.destroy_window()?;
