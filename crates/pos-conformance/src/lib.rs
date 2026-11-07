@@ -23,8 +23,17 @@ pub(crate) const TPS1_MAX_REVOKED_ARTIFACTS: usize = 4_096;
 mod bundle_contract;
 #[cfg(test)]
 pub mod catalog_auxiliary;
+mod conformance_conflict;
+mod conformance_correction;
+mod conformance_history;
+mod conformance_impact_analysis;
+mod conformance_promotion;
+mod conformance_promotion_gate;
+mod conformance_retention;
 mod conformance_trust_admission;
 mod conformance_trust_policy;
+mod conformance_waiver;
+mod conformance_withdrawal;
 pub mod counterfactual;
 mod execution_profile;
 mod non_interference;
@@ -38,6 +47,7 @@ mod trust_policy_snapshot;
 mod verification_preflight;
 mod verification_request;
 include!("wire_syntax.rs");
+include!("governance_codec.rs");
 include!(concat!(env!("OUT_DIR"), "/draft_authority.rs"));
 
 pub(crate) const MAX_PROVIDER_ENTRIES: usize = 4096;
@@ -63,6 +73,27 @@ pub use bundle_contract::{
     BundleMemberV1, BundleModeV1, ConformanceBundlePairV1, ConformanceBundleV1,
     CONFORMANCE_BUNDLE_MAGIC_V1, MAX_CONFORMANCE_BUNDLE_BYTES_V1,
 };
+pub use conformance_conflict::{
+    ConformanceConflictV1, CONFORMANCE_CONFLICT_MAGIC_V1,
+    MAX_CONFORMANCE_CONFLICT_COORDINATE_BYTES_V1, MAX_CONFORMANCE_CONFLICT_REPORTS_V1,
+};
+pub use conformance_correction::{ConformanceCorrectionV1, CONFORMANCE_CORRECTION_MAGIC_V1};
+pub use conformance_history::{
+    ConformanceHistoryEntryV1, ConformanceHistoryStateV1, ConformanceHistoryV1,
+    CONFORMANCE_HISTORY_MAGIC_V1,
+};
+pub use conformance_impact_analysis::{
+    ConformanceAffectedReportV1, ConformanceImpactAnalysisV1, CONFORMANCE_IMPACT_ANALYSIS_MAGIC_V1,
+};
+pub use conformance_promotion::{
+    ConformancePromotionReportsV1, ConformancePromotionV1, CONFORMANCE_PROMOTION_MAGIC_V1,
+};
+pub use conformance_promotion_gate::{
+    check_stable_promotion_v1, ConformancePromotionGateInputV1,
+    ConformancePromotionImplementationEvidenceV1, ConformancePromotionRefusalV1,
+    ConformancePromotionReportEvidenceV1,
+};
+pub use conformance_retention::{ConformanceRetentionV1, CONFORMANCE_RETENTION_MAGIC_V1};
 pub use conformance_trust_admission::{
     conformance_revoked_key_id_v1, ConformanceArtifactRefusalV1, ConformanceKeyRefusalV1,
     ConformanceTrustAdmissionErrorV1, ConformanceTrustAdmissionPortV1, ConformanceTrustAdmissionV1,
@@ -72,6 +103,13 @@ pub use conformance_trust_policy::{
     ConformanceTrustPolicyContractErrorV1, ConformanceTrustPolicyV1,
     CONFORMANCE_TRUST_POLICY_MAGIC_V1, MAX_CONFORMANCE_TRUST_POLICY_BYTES_V1,
     MAX_CONFORMANCE_TRUST_REVOCATIONS_V1, MAX_CONFORMANCE_TRUST_ROOTS_V1,
+};
+pub use conformance_waiver::{
+    ConformanceWaiverEffectV1, ConformanceWaiverV1, CONFORMANCE_WAIVER_MAGIC_V1,
+};
+pub use conformance_withdrawal::{
+    ConformanceWithdrawalSourceV1, ConformanceWithdrawalV1, ConformanceWithdrawnReportV1,
+    CONFORMANCE_WITHDRAWAL_MAGIC_V1,
 };
 pub use execution_profile::{
     ExecutionProfileCapabilitiesV1, ExecutionProfileCompatibilityV1,
@@ -373,6 +411,31 @@ pub enum ExecutionModeV1 {
     Replay,
     /// Re-execution of an immutable counterfactual Fork.
     Fork,
+}
+
+impl ExecutionModeV1 {
+    /// Decode the canonical `mode` wire code shared by every record that carries a mode.
+    #[must_use]
+    pub(crate) const fn from_wire_code(code: u8) -> Option<Self> {
+        match code {
+            0 => Some(Self::Local),
+            1 => Some(Self::AirGapped),
+            2 => Some(Self::Replay),
+            3 => Some(Self::Fork),
+            _ => None,
+        }
+    }
+
+    /// The canonical `mode` wire code: `Local=0 | AirGapped=1 | Replay=2 | Fork=3`.
+    #[must_use]
+    pub(crate) const fn wire_code(self) -> u8 {
+        match self {
+            Self::Local => 0,
+            Self::AirGapped => 1,
+            Self::Replay => 2,
+            Self::Fork => 3,
+        }
+    }
 }
 
 /// The independently reportable conformance claim layers.
@@ -2763,24 +2826,17 @@ pub mod strict_codec {
     }
 
     fn enum_mode(value: ExecutionModeV1) -> Value {
-        uint(match value {
-            ExecutionModeV1::Local => 0,
-            ExecutionModeV1::AirGapped => 1,
-            ExecutionModeV1::Replay => 2,
-            ExecutionModeV1::Fork => 3,
-        })
+        uint(u64::from(value.wire_code()))
     }
 
     fn decode_mode(value: &Value) -> Result<ExecutionModeV1, StrictCborError> {
-        match uint_value(value, "execution_mode")? {
-            0 => Ok(ExecutionModeV1::Local),
-            1 => Ok(ExecutionModeV1::AirGapped),
-            2 => Ok(ExecutionModeV1::Replay),
-            3 => Ok(ExecutionModeV1::Fork),
-            _ => Err(StrictCborError::InvalidField {
+        let code = uint_value(value, "execution_mode")?;
+        u8::try_from(code)
+            .ok()
+            .and_then(ExecutionModeV1::from_wire_code)
+            .ok_or_else(|| StrictCborError::InvalidField {
                 field: "execution_mode".to_owned(),
-            }),
-        }
+            })
     }
 
     fn enum_claim_layer(value: ClaimLayerV1) -> Value {

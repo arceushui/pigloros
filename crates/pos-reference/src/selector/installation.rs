@@ -2086,6 +2086,32 @@ pub mod tests {
     }
 
     #[test]
+    fn retained_sic1_case_resolution_refuses_an_unauthorized_downgrade() -> TestResult {
+        let corpus = crate::selector_test_support::corpus()?;
+        let (request, bootstrap) = installed_case_bootstrap(&corpus)?;
+        assert_eq!(
+            bootstrap
+                .resolve_installed_case(&request, 5)?
+                .attempt()
+                .case_id,
+            "case-5"
+        );
+        let unauthorized = crate::selector_test_support::corpus_with_release_mutation(
+            crate::selector_test_support::ReleaseMutation::Signature,
+        )?;
+        let (request, bootstrap) = installed_case_bootstrap(&unauthorized)?;
+        assert!(bootstrap.resolve_installed_case(&request, 5).is_err());
+        assert_eq!(
+            bootstrap
+                .resolve_installed_case(&request, 0)?
+                .attempt()
+                .case_id,
+            "case-0"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn retained_sic1_case_resolution_enforces_preflight_and_verified_closure() -> TestResult {
         let invalid_signature = crate::selector_test_support::corpus_with_bundle_mutation(
             crate::selector_test_support::BundleMutation::Signature,

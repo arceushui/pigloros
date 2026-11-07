@@ -1,7 +1,7 @@
 # Public conformance fixture sources
 
 These files are the public, deterministic inputs, provider-owned oracle records,
-and pending execution-evidence records
+and execution-evidence records
 for the seven CPF1 claim layers. Each directory under `profiles/` is a
 separate public profile manifest and binds exactly one claim layer to all seven
 required fixture families: positive, denied, malformed, resource exhaustion, deletion/redaction,
@@ -50,8 +50,15 @@ vectors (`scripts/data/blake3_test_vectors.json`) before it compares every outpu
 carry every sub-case of the catalogue: `pos.1` to `pos.3`, `den.01` to `den.22`, `mal.1a` to
 `mal.6`, `res.1` to `res.7`, `del.1`, `del.2`, `dgr.1` to `dgr.6` and `ind.1` to `ind.4`; `dgr.1`,
 `dgr.2`, `dgr.5` and `dgr.6` roll back through the production entry (ADR-103 revision 7). Every
-`expected/plugin-conformance/*.json` stays `pending` with a null result and a null time
-(`scripts/check_plugin_conformance_expected.py` checks it).
+`expected/plugin-conformance/*.json` is `executed` (ADR-062 Revision 8 slice N6, #1234): the
+independent evaluator dispatches the family through the adapter's exact `FixtureExecutorV1`
+declaration and passes it in both the Local and the Air-Gapped ExecutionProfile run, which are
+Local-relaxation engineering evidence, not hosted conformance. The result names each run's outcome
+and the actual output digest (the BLAKE3 of the oracle member) or failure code (the oracle's), and
+the time stays null; the generator derives the record from the oracle alone,
+`scripts/check_plugin_conformance_expected.py` checks it, and
+`apps/pos-plugin-worker/tests/provider_dispatch_public.rs` re-executes every family and requires
+it.
 Payloads are RFC 8785 canonical JSON and, like the oracles, end with one LF byte (the adapter reads
 the payload with `serde_json`, which ignores it; the oracle LF is required by ADR-061 revision 8
 decision 2). The `--check` validates every payload against its checked-in schema.
@@ -107,8 +114,9 @@ Materialization binds every family to deterministic-local-v1 or
 deterministic-air-gapped-v1, so every emitted descriptor has exactly one
 ExecutionProfile while the paired bundles retain identical oracle bytes.
 Provider-owned records under `oracles/` define canonical outputs or namespaced
-failures. Records under `expected/` bind the exact input digest but contain only
-`status: "pending"`, null execution result, and null execution timestamp. The
+failures. Records under `expected/` bind the exact input digest; outside the
+`plugin-conformance` layer they contain only `status: "pending"`, null execution
+result, and null execution timestamp. The
 materializer packages both artifacts separately using the provider-declared media
 types, and only the oracle is bound as the manifest's expected result. Pending
 evidence metadata is never used as
