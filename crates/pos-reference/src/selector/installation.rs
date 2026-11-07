@@ -903,26 +903,73 @@ pub mod tests {
             .collect()
     }
 
+    const OPERATOR_KEY: [u8; 32] = [12; 32];
+
+    fn trust_record(id: &str, role: u64, public_key: [u8; 32]) -> Value {
+        Value::Array(vec![
+            Value::Text(id.to_owned()),
+            integer(role),
+            Value::Bytes(public_key.to_vec()),
+            integer(1),
+        ])
+    }
+
+    fn operator_record(id: &str) -> Value {
+        trust_record(
+            id,
+            6,
+            SigningKey::from_bytes(&OPERATOR_KEY)
+                .verifying_key()
+                .to_bytes(),
+        )
+    }
+
     fn authenticated_state() -> TestResult<InstalledSelectorState> {
-        let root = SigningKey::from_bytes(&[1; 32]);
-        let policy_signer = SigningKey::from_bytes(&[2; 32]);
-        let trust_bytes = sign_record(
+        authenticated_state_with(vec![operator_record("operator")], Vec::new())
+    }
+
+    /// Signs the minimal TRS1: the policy key plus `operators`, in canonical order.
+    fn minimal_trust(
+        operators: Vec<Value>,
+        root: &SigningKey,
+        policy_signer: &SigningKey,
+    ) -> TestResult<Vec<u8>> {
+        let mut keys = operators
+            .into_iter()
+            .chain([trust_record(
+                "policy",
+                1,
+                policy_signer.verifying_key().to_bytes(),
+            )])
+            .map(|key| {
+                let mut encoded = Vec::new();
+                ciborium::into_writer(&key, &mut encoded).map(|()| (encoded, key))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        keys.sort_by(|left, right| left.0.cmp(&right.0));
+        sign_record(
             "TRS1",
             Value::Array(vec![
                 Value::Text("TRS1".to_owned()),
                 integer(1),
                 integer(1),
-                Value::Array(vec![Value::Array(vec![
-                    Value::Text("policy".to_owned()),
-                    integer(1),
-                    Value::Bytes(policy_signer.verifying_key().to_bytes().to_vec()),
-                    integer(1),
-                ])]),
+                Value::Array(keys.into_iter().map(|(_, key)| key).collect()),
                 Value::Array(Vec::new()),
                 Value::Text("root".to_owned()),
             ]),
-            &root,
-        )?;
+            root,
+        )
+    }
+
+    /// Builds the minimal SIC1 state with the given TRS1 deployment-operator
+    /// records (beside the policy key) and RVS1 revoked key IDs.
+    fn authenticated_state_with(
+        operators: Vec<Value>,
+        revoked: Vec<&str>,
+    ) -> TestResult<InstalledSelectorState> {
+        let root = SigningKey::from_bytes(&[1; 32]);
+        let policy_signer = SigningKey::from_bytes(&[2; 32]);
+        let trust_bytes = minimal_trust(operators, &root, &policy_signer)?;
         let trust_digest = signed_record_digest(&trust_bytes)?;
         let revocation_bytes = sign_record(
             "RVS1",
@@ -931,7 +978,12 @@ pub mod tests {
                 integer(1),
                 Value::Bytes(trust_digest.to_vec()),
                 integer(1),
-                Value::Array(Vec::new()),
+                Value::Array(
+                    revoked
+                        .into_iter()
+                        .map(|id| Value::Text(id.to_owned()))
+                        .collect(),
+                ),
                 Value::Array(Vec::new()),
                 Value::Array(Vec::new()),
                 Value::Text("policy".to_owned()),
@@ -1884,6 +1936,40 @@ pub mod tests {
             .installed()
             .artifact(InstallationObjectKind::from_code(3)?, [10; 32])
             .is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn bootstrap_resolves_the_single_unrevoked_trs1_deployment_operator_key() -> TestResult {
+        let bootstrap = authenticated_state()?.authenticate_bootstrap()?;
+        assert_eq!(
+            bootstrap.trust_policy_operator_key(),
+            Ok(SigningKey::from_bytes(&OPERATOR_KEY).verifying_key())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn operator_key_is_unavailable_per_case_without_bootstrap_failure() -> TestResult {
+        let mut invalid_point = [0; 32];
+        invalid_point[0] = 2;
+        for (operators, revoked) in [
+            (Vec::new(), Vec::new()),
+            (vec![trust_record("operator", 5, [12; 32])], Vec::new()),
+            (vec![operator_record("operator")], vec!["operator"]),
+            (
+                vec![operator_record("operator-a"), operator_record("operator-b")],
+                vec!["operator-b"],
+            ),
+            (vec![trust_record("operator", 6, invalid_point)], Vec::new()),
+        ] {
+            let bootstrap =
+                authenticated_state_with(operators, revoked)?.authenticate_bootstrap()?;
+            assert_eq!(
+                bootstrap.trust_policy_operator_key(),
+                Err(SelectorBoundaryError::ArtifactInvalid)
+            );
+        }
         Ok(())
     }
 
