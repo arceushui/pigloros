@@ -260,6 +260,16 @@ fn command_rejects_incomplete_duplicate_and_noncanonical_identity_arguments() ->
         .args(["--request", "one", "--request", "two"])
         .output()?;
     assert!(!duplicated.status.success());
+    let operator_key = operator_key_hex();
+    let duplicated_operator_key = evaluator()
+        .args([
+            "--trust-policy-operator-key",
+            operator_key.as_str(),
+            "--trust-policy-operator-key",
+            operator_key.as_str(),
+        ])
+        .output()?;
+    assert!(!duplicated_operator_key.status.success());
 
     let unknown = evaluator().arg("--legacy-protocol").output()?;
     assert!(!unknown.status.success());
