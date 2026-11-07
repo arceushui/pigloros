@@ -233,10 +233,14 @@ fn stage(
 fn header_walk(bytes: &[u8]) -> Vec<u8> {
     let mut walk = Vec::new();
     let mut cursor = 0;
-    while let Some(block) = bytes
-        .get(cursor..cursor + BLOCK)
-        .filter(|block| block.iter().any(|byte| *byte != 0))
-    {
+    // At most one header per block, so the walk is bounded by construction.
+    for _ in 0..bytes.len() / BLOCK {
+        let Some(block) = bytes
+            .get(cursor..cursor + BLOCK)
+            .filter(|block| block.iter().any(|byte| *byte != 0))
+        else {
+            break;
+        };
         walk.extend_from_slice(block);
         let digits = &block[124..135];
         if !digits.iter().all(|digit| (b'0'..=b'7').contains(digit)) {
