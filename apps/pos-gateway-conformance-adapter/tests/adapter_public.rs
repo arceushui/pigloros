@@ -603,10 +603,13 @@ fn wire_and_output_faults_have_their_exit_codes() -> TestResult {
     ]
     .map(AdapterRunErrorV1::code);
     assert_eq!(codes, [2, 3, 4]);
-    assert_eq!(exit_code(Ok(())), std::process::ExitCode::SUCCESS);
     assert_eq!(
-        exit_code(Err(AdapterRunErrorV1::Output)),
-        std::process::ExitCode::from(4)
+        format!("{:?}", exit_code(Ok(()))),
+        format!("{:?}", std::process::ExitCode::SUCCESS)
+    );
+    assert_eq!(
+        format!("{:?}", exit_code(Err(AdapterRunErrorV1::Output))),
+        format!("{:?}", std::process::ExitCode::from(4))
     );
     Ok(())
 }
