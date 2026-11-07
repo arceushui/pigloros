@@ -114,6 +114,8 @@ enum ResourceDenialFixture {
     PrototypeHeld,
     PrototypeCloseFirst,
     PrototypeResponseBarrier,
+    PrototypeStop,
+    PrototypeStopClose,
     PrototypeDrop,
     PrototypeCompleteAllowed,
     PrototypeCompleteDenied,

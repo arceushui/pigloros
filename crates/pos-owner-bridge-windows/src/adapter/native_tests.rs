@@ -45,11 +45,11 @@ fn record_resource_outcome(
     )
 }
 
-const fn resource_cases() -> [(u8, bool, crate::ResourceDenialFixture, u32); 10] {
+const fn resource_cases() -> [(u8, bool, crate::ResourceDenialFixture, u32); 12] {
     use crate::ResourceDenialFixture::{
         Normal, PropagateFailure, PrototypeCloseFirst, PrototypeCompleteAllowed,
         PrototypeCompleteDenied, PrototypeDrop, PrototypeHeld, PrototypeResponseBarrier,
-        SwallowFailure,
+        PrototypeStop, PrototypeStopClose, SwallowFailure,
     };
     [
         (0x20, false, Normal, 1),
@@ -60,6 +60,8 @@ const fn resource_cases() -> [(u8, bool, crate::ResourceDenialFixture, u32); 10]
         (0x25, true, PrototypeCompleteAllowed, 1),
         (0x26, true, PrototypeCompleteDenied, 0),
         (0x29, true, PrototypeResponseBarrier, 0),
+        (0x2a, true, PrototypeStop, 0),
+        (0x2b, true, PrototypeStopClose, 0),
         (0x28, true, PrototypeCloseFirst, 0),
         (0x24, true, PrototypeHeld, 0),
         (0x27, true, PrototypeDrop, 0),
@@ -72,6 +74,7 @@ const fn resource_stays_deferred(mode: crate::ResourceDenialFixture) -> bool {
         crate::ResourceDenialFixture::PrototypeHeld
             | crate::ResourceDenialFixture::PrototypeDrop
             | crate::ResourceDenialFixture::PrototypeCloseFirst
+            | crate::ResourceDenialFixture::PrototypeStopClose
     )
 }
 

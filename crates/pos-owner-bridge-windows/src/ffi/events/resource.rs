@@ -82,9 +82,13 @@ pub(super) fn install(
     .map_err(|_| unavailable())?;
     let observed = Rc::clone(signals);
     let remove = view.clone();
-    let handler = WebResourceRequestedEventHandler::create(Box::new(move |_sender, args| {
+    let handler = WebResourceRequestedEventHandler::create(Box::new(move |sender, args| {
         if let Err(error) = filter(args, &response, observed.as_ref()) {
             observed.failed(EventKind::Resource, error);
+            #[cfg(test)]
+            stop_prototype(sender).map_err(|_| windows::core::Error::from_hresult(E_ABORT))?;
+            #[cfg(not(test))]
+            drop(sender);
             // The negative control deliberately reproduces the former swallowed
             // failure. It exists only in the native qualification test binary.
             #[cfg(test)]
@@ -112,6 +116,23 @@ pub(super) fn install(
     // the pre-created denial unless the exact owner document is admitted.
     unsafe { view.AddWebResourceRequestedFilter(w!("*"), COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL) }
         .map_err(|_| unavailable())
+}
+
+#[cfg(test)]
+fn stop_prototype(sender: Option<ICoreWebView2>) -> Result<()> {
+    if DENIAL_FIXTURE.with(|mode| {
+        matches!(
+            mode.get(),
+            crate::ResourceDenialFixture::PrototypeStop
+                | crate::ResourceDenialFixture::PrototypeStopClose
+        )
+    }) {
+        let view = sender.ok_or_else(unavailable)?;
+        // SAFETY: callback's live STA view; prototype cancels this view's pending
+        // navigation/fetches through the documented native Stop operation.
+        unsafe { view.Stop() }.map_err(|_| unavailable())?;
+    }
+    Ok(())
 }
 
 fn filter(
