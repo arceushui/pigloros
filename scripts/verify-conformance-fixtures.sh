@@ -636,7 +636,7 @@ mapfile -t blake3_paths < <(
 )
 mapfile -t expected_blake3_paths < <(
   cd "${fixture_root}" &&
-    find expected-authority expected inputs matrix oracles profiles providers support \
+    find erasure expected-authority expected inputs matrix oracles profiles providers support \
       -type f -printf '%p\n' | sort
 )
 if ! diff -u \
@@ -645,6 +645,35 @@ if ! diff -u \
   echo "BLAKE3SUMS does not cover the complete public fixture inventory" >&2
   exit 1
 fi
+
+# ADR-062 Revision 8 slice N5 (#1233), owner note ADR-062_R8_Erasure_Cases: the erasure cases are
+# the generator-written cases.json and ERQ1 requests, one recorded executions.json and the recorded
+# ERS1/ERC1/ERRJ1 artifacts, each named by its BLAKE3. The generator's --check verifies the
+# records against the independently derived projection; the Rust test
+# apps/pos-experiment/tests/erasure_conformance.rs re-executes every case.
+erasure_root="${fixture_root}/erasure"
+[[ -s "${erasure_root}/cases.json" && -s "${erasure_root}/executions.json" ]] || {
+  echo "missing erasure conformance cases or recorded executions" >&2
+  exit 1
+}
+while IFS= read -r -d '' erasure_file; do
+  relative_path="${erasure_file#"${erasure_root}/"}"
+  case "${relative_path}" in
+    cases.json | executions.json | requests/*.erq1) ;;
+    records/*.ers1 | records/*.erc1 | records/*.errj1)
+      name="${relative_path#records/}"
+      actual_address="$(b3sum --no-names "${erasure_file}")"
+      [[ "${name%.*}" == "${actual_address}" ]] || {
+        echo "erasure record is not named by its BLAKE3: ${relative_path}" >&2
+        exit 1
+      }
+      ;;
+    *)
+      echo "unexpected erasure conformance file: ${relative_path}" >&2
+      exit 1
+      ;;
+  esac
+done < <(find -P "${erasure_root}" -type f -print0)
 
 for input in "${inputs[@]}"; do
   relative_path="${input#"${fixture_root}/inputs/"}"
@@ -657,6 +686,7 @@ for input in "${inputs[@]}"; do
 done
 
 publishable_roots=(
+  "${fixture_root}/erasure"
   "${fixture_root}/inputs"
   "${fixture_root}/expected"
   "${fixture_root}/oracles"

@@ -318,6 +318,8 @@ fn reject_protected_history(
 }
 
 pub mod authoritative_comparison;
+#[cfg(feature = "test-support")]
+pub mod erasure_conformance;
 #[cfg(all(feature = "test-support", target_os = "linux"))]
 pub mod fork_artifacts;
 pub mod moat_proof;
