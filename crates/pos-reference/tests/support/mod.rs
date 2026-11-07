@@ -1043,21 +1043,45 @@ pub fn corpus_with_release_mutation(mutation: ReleaseMutation) -> TestResult<Cor
 /// Build a signed corpus of a real provider's checked-in fixtures in Execution Mode `mode`
 /// (0 Local, 1 Air-Gapped) for the public Plugin protocol.
 ///
-/// Every family carries the provider's schema, payload, evidence-status record, oracle and
-/// auxiliary input bytes, its budget, watchdog and capabilities, and the provider's exact key;
-/// the downgrade family rolls back from the next minor release under a signed RAD1.
+/// It is `real_corpus` for the `plugin-conformance` claim layer.
 ///
 /// # Errors
 /// Returns an error if canonical encoding or fixture construction fails.
 pub fn real_plugin_corpus(real: &RealProviderFixtures, mode: u64) -> TestResult<Corpus> {
+    real_corpus(real, mode, 4, SubjectAdapterKind::PublicPluginProtocol)
+}
+
+/// Build a signed corpus of a real provider's checked-in fixtures in Execution Mode `mode`
+/// (0 Local, 1 Air-Gapped) for the `exported-artifact` subject adapter.
+///
+/// It is `real_corpus` for the `replay-conformance` claim layer.
+///
+/// # Errors
+/// Returns an error if canonical encoding or fixture construction fails.
+pub fn real_replay_corpus(real: &RealProviderFixtures, mode: u64) -> TestResult<Corpus> {
+    real_corpus(real, mode, 1, SubjectAdapterKind::ExportedArtifact)
+}
+
+/// Build a signed corpus of a real provider's checked-in fixtures in Execution Mode `mode`
+/// for one claim layer and subject adapter.
+///
+/// Every family carries the provider's schema, payload, evidence-status record, oracle and
+/// auxiliary input bytes, its budget, watchdog and capabilities, and the provider's exact key;
+/// the downgrade family rolls back from the next minor release under a signed RAD1.
+fn real_corpus(
+    real: &RealProviderFixtures,
+    mode: u64,
+    claim_layer: u64,
+    subject_adapter: SubjectAdapterKind,
+) -> TestResult<Corpus> {
     let mut budgets = [[0; 8]; 7];
     for (family, budget) in (0_u64..).zip(budgets.iter_mut()) {
         *budget = real_family(real, family)?.budget;
     }
     corpus_for_options(CorpusOptions {
         mode,
-        claim_layer: 4,
-        subject_adapter: SubjectAdapterKind::PublicPluginProtocol,
+        claim_layer,
+        subject_adapter,
         fixture_budgets: &budgets,
         real: Some(real),
         ..CorpusOptions::default()

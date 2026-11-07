@@ -35,6 +35,10 @@
 //!    `namespaced-failure` family returns its family failure when every leg
 //!    is as expected, else `subcase-mismatch`.
 //!
+//! [`executor_declaration()`] is the adapter's exact ADR-068 `FixtureExecutorV1`
+//! declaration, which the composition root hands to the independent
+//! evaluator (ADR-062 Revision 8 provider dispatch).
+//!
 //! [`pair_report()`] runs the Local and the Air-Gapped attempt of one case
 //! (ADR-062 Revision 8 slice R5, #1224) and reports both against the same
 //! expected-result record, with the manifest and `VRR1` of every leg; it
@@ -52,9 +56,12 @@ use std::process::ExitCode;
 
 use pos_conformance::ExecutionModeV1;
 use pos_reference::adapter_transport::{read_attempt, write_observation};
-use pos_reference::evaluator::{CaseAttempt, ResourceUsage, SubjectObservation, SubjectResult};
+use pos_reference::evaluator::{
+    CaseAttempt, FixtureExecutorV1, ResourceUsage, SubjectObservation, SubjectResult,
+};
 use pos_reference::evaluator_domain::{ClaimLayer, ExecutionMode, FixtureFamily};
-use pos_reference::profile::NamespacedFailure;
+use pos_reference::evaluator_protocol::SubjectAdapterKind;
+use pos_reference::profile::{NamespacedFailure, ProviderKey};
 use pos_store::StoreConfig;
 
 mod execute;
@@ -72,6 +79,48 @@ pub const PROVIDER_ID: &str = "pigloros.fixture.replay-conformance";
 
 /// The contract version of every failure the adapter returns.
 pub const CONTRACT_VERSION: &str = "2.0.0";
+
+/// The ABI major version of the provider contract the adapter implements.
+pub const ABI_MAJOR: u16 = 1;
+
+/// The ABI minor version of the provider contract the adapter implements.
+pub const ABI_MINOR: u16 = 0;
+
+/// The fixture capabilities whose semantics the adapter's sub-case runs
+/// implement.
+pub const CAPABILITY_IDS: [&str; 5] = [
+    "consume-execution-steps",
+    "mutate-subject",
+    "read-public-bundle",
+    "redact-synthetic-subject",
+    "verify-release-admission",
+];
+
+/// The exact ADR-068 executor declaration of this adapter, reached as the
+/// implementation `implementation_digest` (provenance only).
+///
+/// It names the exact provider key, the `exported-artifact` subject adapter,
+/// the pinned schema digest of every family and the capabilities the adapter
+/// implements; the composition root hands it to the evaluator.
+#[must_use]
+pub fn executor_declaration(implementation_digest: [u8; 32]) -> FixtureExecutorV1 {
+    let mut pinned = [[0; 32]; 7];
+    for family in FixtureFamily::ALL {
+        pinned[usize::from(family.code())] = schema_digests::pinned_digest(*family);
+    }
+    FixtureExecutorV1 {
+        provider: ProviderKey {
+            provider_id: PROVIDER_ID.to_owned(),
+            contract_version: CONTRACT_VERSION.to_owned(),
+            abi_major: ABI_MAJOR,
+            abi_minor: ABI_MINOR,
+        },
+        subject_adapter: SubjectAdapterKind::ExportedArtifact,
+        schema_digests: pinned,
+        implementation_digest,
+        capability_ids: CAPABILITY_IDS.map(str::to_owned).to_vec(),
+    }
+}
 
 /// The code of the failure for a payload that violates the grammar. It
 /// equals no oracle.

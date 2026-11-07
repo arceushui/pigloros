@@ -54,6 +54,11 @@ ulid = { workspace = true }
 [dev-dependencies]
 pos-core = { path = "../../crates/pos-core", features = ["test-support"] }
 pos-runtime = { path = "../../crates/pos-runtime", features = ["test-support"] }
+# `test-support` gives the replay provider-dispatch vectors (ADR-062 Revision 8, #1296) the signed
+# in-memory CFB1 corpus builder of `pos-reference`'s public tests.
+pos-reference = { path = "../../crates/pos-reference", features = [
+  "test-support",
+] }
 pos-plugin-agent = { path = "../../plugins/agent" }
 pos-plugin-rule-agent = { path = "../../plugins/entities/rule-agent" }
 pos-plugin-synthetic-obs = { path = "../../plugins/observations/synthetic" }
@@ -93,6 +98,10 @@ required-features = ["test-support"]
 
 [[test]]
 name = "replay_conformance_adapter"
+required-features = ["test-support"]
+
+[[test]]
+name = "replay_provider_dispatch_public"
 required-features = ["test-support"]
 
 [[test]]
