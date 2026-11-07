@@ -29,6 +29,15 @@ failure `network-denied` of provider
 results Local-relaxation engineering evidence until the Sandbox Provider runs
 them.
 
+`pos_experiment::profile_recomputation` enforces the named EPF1 on the host
+side, independently of the subject (#1266, wiki
+`ADR-062_R8_Profile_Recomputation_Enforcement`): a network gate on the request
+inputs, the manifest Execution Mode through the composition mode of the host it
+builds (`Experiment::new` or `Experiment::new_air_gapped`), and the EPF1
+Event-count and execution-step (Tick) budgets. A cross-profile leg runs in its
+own profile's Execution Mode. It enforces no other EPF1 field and claims no
+network or process isolation.
+
 The Experiment host binary is the replay subject adapter (ADR-062 Revision 8
 section 3.1 option A). The adapter and the binary are compiled only with the
 `test-support` feature, because they run on the open fixture erasure gate and the

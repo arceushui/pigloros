@@ -1565,6 +1565,30 @@ def subcase_object(sub: SubCase) -> dict:
     return value
 
 
+EXECUTION_MODES = ("local", "air-gapped")
+
+
+def execution_result(context: Context, oracle: bytes) -> dict[str, object]:
+    """The verifier-accepted execution result of one family (ADR-062 R8 provider dispatch).
+
+    ADR-062 Revision 8 slice N6 (#1234) flips a record only when the evaluator passes the case
+    in both the Local and the Air-Gapped ExecutionProfile run, both Local-relaxation engineering
+    evidence. A pass means the subject output is the exact oracle member, so the actual digest
+    is the BLAKE3 of the oracle bytes, or the subject failure is the oracle's, so the actual
+    error is its code. Both follow from the oracle alone; the record has no time. The Rust test
+    `apps/pos-plugin-worker/tests/provider_dispatch_public.rs` re-executes every family and
+    requires this record.
+    """
+    if context.oracle_kind == "canonical-output":
+        observed = {"actual_digest": golden.blake3(oracle).hex()}
+    else:
+        observed = {"actual_error": context.code_id}
+    return {
+        "evidence": "local-relaxation",
+        "modes": [{"mode": mode, "outcome": "pass", **observed} for mode in EXECUTION_MODES],
+    }
+
+
 def render_family(family: str, context: Context) -> Outputs:
     subcases = SUBCASES[family]()
     payload_object = {
@@ -1609,18 +1633,19 @@ def render_family(family: str, context: Context) -> Outputs:
                 "code_id": context.code_id,
             },
         }
+    oracle = jcs(oracle_object) + b"\n"
     evidence_object = {
         "claim_layer": CLAIM_LAYER,
         "case_id": context.case_id,
         "family": family,
         "input_blake3_digest": golden.blake3(payload).hex(),
-        "status": "pending",
-        "execution_result": None,
+        "status": "executed",
+        "execution_result": execution_result(context, oracle),
         "executed_at": None,
     }
     return Outputs(
         payload=payload,
-        oracle=jcs(oracle_object) + b"\n",
+        oracle=oracle,
         evidence=(json.dumps(evidence_object, indent=2) + "\n").encode("ascii"),
         composite=composite(pieces),
     )

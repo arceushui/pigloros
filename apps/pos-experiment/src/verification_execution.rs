@@ -57,10 +57,10 @@ use std::collections::{BTreeMap, HashMap};
 
 use pos_conformance::{
     preflight_verification_v1, ArtifactClosureStatusV1, DivergenceReportV1, ReplayClaimV1,
-    ReproducibilityClassV1, SafeErrorCodeV1, VerificationErrorV1, VerificationOutcomeV1,
-    VerificationPreflightCoordinateV1, VerificationPreflightErrorV1,
-    VerificationPreflightEvidenceV1, VerificationPreflightInputV1, VerificationPreflightResultV1,
-    VerificationResultV1,
+    ReproducibilityClassV1, SafeErrorCodeV1, TrustPolicySnapshotV1, TrustSignatureStatusV1,
+    VerificationErrorV1, VerificationOutcomeV1, VerificationPreflightCoordinateV1,
+    VerificationPreflightErrorV1, VerificationPreflightEvidenceV1, VerificationPreflightInputV1,
+    VerificationPreflightResultV1, VerificationResultV1, PLUGIN_OPERATOR_ROLE_V1,
 };
 use pos_core::{CoreError, Event, StateRegistry, TimelineId};
 use pos_state::ProjectionRegistry;
@@ -104,6 +104,26 @@ fn closure_digest(role: u8, primary: [u8; 32], licence: &[u8]) -> [u8; 32] {
     digest.update(&[LICENCE_ROLE_V1]);
     digest.update(blake3::hash(licence).as_bytes());
     *digest.finalize().as_bytes()
+}
+
+/// The ADR-058 preflight trust-signature evidence of `snapshot`.
+///
+/// `Valid` only when the TPS1 operator signature authenticates through
+/// [`TrustPolicySnapshotV1::verify_operator_signature_v1`] under the host's
+/// release-pinned `operator_key` and the deployment-operator role; any
+/// authentication failure is `Invalid`, which the preflight refuses with
+/// `SignatureInvalid` at `trust_signature`. The key is the host's own pinned
+/// input, never one of the snapshot's `trust_roots`.
+#[must_use]
+pub fn trust_signature_evidence_v1(
+    snapshot: &TrustPolicySnapshotV1,
+    operator_key: &[u8; 32],
+) -> TrustSignatureStatusV1 {
+    snapshot
+        .verify_operator_signature_v1(operator_key, PLUGIN_OPERATOR_ROLE_V1)
+        .map_or(TrustSignatureStatusV1::Invalid, |()| {
+            TrustSignatureStatusV1::Valid
+        })
 }
 
 /// The result of one verification execution.

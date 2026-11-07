@@ -18,6 +18,9 @@ pub enum SandboxTrustError {
     /// The key is trusted for a different signing responsibility.
     #[error("sandbox signer has the wrong trust role")]
     WrongRole,
+    /// More than one key holds a role that must have exactly one.
+    #[error("sandbox trust role has more than one key")]
+    AmbiguousRole,
     /// The current revocation snapshot explicitly revokes this identity.
     #[error("sandbox signing key is revoked")]
     Revoked,
@@ -102,6 +105,39 @@ impl SandboxRevocationSnapshot {
             return Err(SandboxTrustError::Revoked);
         }
         trust.key_for_role(id, role)
+    }
+
+    /// Resolve the installed TPS1 deployment-operator key (ADR-069 R8).
+    ///
+    /// TPS1 names no signer, so the key is selected by role: the bound
+    /// registry must hold exactly one [`SandboxTrustRole::DeploymentOperator`]
+    /// record, and this snapshot must not revoke it. Rotation replaces TRS1,
+    /// so revocation can never switch between operator keys.
+    ///
+    /// # Errors
+    /// Rejects a foreign registry, no or more than one deployment-operator
+    /// record, a revoked record, or key bytes that are not an Ed25519
+    /// verifying key.
+    pub fn deployment_operator_key(
+        &self,
+        trust: &SandboxTrustSnapshot,
+    ) -> Result<ed25519_dalek::VerifyingKey, SandboxTrustError> {
+        if self.trust_digest != trust.snapshot_digest() {
+            return Err(SandboxTrustError::AuthorityMismatch);
+        }
+        let mut operators = trust
+            .keys()
+            .iter()
+            .filter(|key| key.role == SandboxTrustRole::DeploymentOperator);
+        match (operators.next(), operators.next()) {
+            (None, _) => Err(SandboxTrustError::UnknownKey),
+            (Some(_), Some(_)) => Err(SandboxTrustError::AmbiguousRole),
+            (Some(key), None) if self.revoked_keys.contains(&key.key_id) => {
+                Err(SandboxTrustError::Revoked)
+            }
+            (Some(key), None) => ed25519_dalek::VerifyingKey::from_bytes(&key.public_key)
+                .map_err(|_| SandboxProviderProtocolError::SignatureInvalid.into()),
+        }
     }
 
     /// Check only immediate epoch continuity for snapshots from one registry.

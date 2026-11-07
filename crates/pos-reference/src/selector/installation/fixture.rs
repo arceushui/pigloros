@@ -99,6 +99,7 @@ struct ProviderAuthority {
     runtime: SigningKey,
     reviewer: SigningKey,
     image: SigningKey,
+    operator: SigningKey,
 }
 
 fn provider_authority() -> ProviderAuthority {
@@ -109,6 +110,7 @@ fn provider_authority() -> ProviderAuthority {
         runtime: SigningKey::from_bytes(&[4; 32]),
         reviewer: SigningKey::from_bytes(&[5; 32]),
         image: SigningKey::from_bytes(&[6; 32]),
+        operator: SigningKey::from_bytes(&[12; 32]),
     }
 }
 
@@ -148,6 +150,7 @@ fn provider_trust(authority: &ProviderAuthority, signing: &ImageSigning) -> Test
         trust_key("runtime", 3, &authority.runtime),
         trust_key("reviewer", 4, &authority.reviewer),
         trust_key("image", 5, &authority.image),
+        trust_key("operator", 6, &authority.operator),
     ])?;
     sign_record(
         "TRS1",

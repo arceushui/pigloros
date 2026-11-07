@@ -288,6 +288,7 @@ where
         &corpus.archive,
         &corpus.trust_policy,
         &evaluator_identity()?,
+        &support::test_executors(),
         &mut adapter,
     )?;
     Ok(artifacts.report)
@@ -518,6 +519,7 @@ fn a_member_that_fails_its_descriptor_digest_never_reaches_the_adapter() -> Test
                 &corpus.archive,
                 &corpus.trust_policy,
                 &evaluator_identity()?,
+                &support::test_executors(),
                 &mut adapter,
             )
         };
@@ -567,6 +569,7 @@ fn lost_authenticated_evidence_is_an_evaluator_error_not_a_case_status() -> Test
         &corpus.archive,
         &corpus.trust_policy,
         &evaluator_identity()?,
+        &support::test_executors(),
         &mut adapter,
     );
     assert_eq!(result.err(), Some(EvaluatorError::AdapterIdentity));

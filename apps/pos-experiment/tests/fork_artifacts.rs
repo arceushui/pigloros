@@ -674,7 +674,7 @@ fn refused_runs_export_nothing() -> TestResult {
     Ok(())
 }
 
-fn timeline(id: [u8; 16]) -> TimelineId {
+const fn timeline(id: [u8; 16]) -> TimelineId {
     TimelineId::from_ulid(ulid::Ulid::from_bytes(id))
 }
 
