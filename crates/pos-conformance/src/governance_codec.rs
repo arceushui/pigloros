@@ -89,6 +89,15 @@ pub enum ConformanceGovernanceErrorV1 {
     /// Removal of a retired artifact before both retention bounds are met.
     #[error("retired artifact removal is too early")]
     RemovalTooEarly,
+    /// A history entry does not link to the profile digest or to the entry before it.
+    #[error("history entry link is broken")]
+    BrokenHistoryLink,
+    /// The pinned history head is neither the profile digest nor an entry of the history.
+    #[error("history is not an append-only extension of the pinned head")]
+    HistoryNotAppendOnly,
+    /// The supplied records are not exactly the records the history entries name.
+    #[error("history records do not match the history entries")]
+    HistoryRecordMismatch,
 }
 
 macro_rules! governance_code_enum {
@@ -198,6 +207,19 @@ governance_code_enum! {
     ConformanceWithdrawalSourceKindV1 {
         Correction = 0,
         Conflict = 1,
+    }
+}
+
+governance_code_enum! {
+    /// The kind of the record a CHS1 history entry names.
+    ConformanceHistoryRecordKindV1 {
+        Waiver = 0,
+        Conflict = 1,
+        Correction = 2,
+        ImpactAnalysis = 3,
+        Withdrawal = 4,
+        Retention = 5,
+        Promotion = 6,
     }
 }
 

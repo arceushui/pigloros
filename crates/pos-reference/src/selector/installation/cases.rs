@@ -65,7 +65,10 @@ impl AuthenticatedSelectorBootstrap {
                     .selected_fixtures(request)
                     .into_iter()
                     .nth(usize::from(ordinal))
-                    .filter(|fixture| fixture.modes.contains(&verified.mode))
+                    .filter(|fixture| {
+                        fixture.modes.contains(&verified.mode)
+                            && fixture.release_admission_authorized()
+                    })
                     .cloned()
                     .ok_or(SelectorBoundaryError::ArtifactInvalid)
                     .map(|fixture| (verified, hard_caps, profile, fixture))

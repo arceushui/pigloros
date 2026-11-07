@@ -25,8 +25,10 @@ mod bundle_contract;
 pub mod catalog_auxiliary;
 mod conformance_conflict;
 mod conformance_correction;
+mod conformance_history;
 mod conformance_impact_analysis;
 mod conformance_promotion;
+mod conformance_promotion_gate;
 mod conformance_retention;
 mod conformance_trust_admission;
 mod conformance_trust_policy;
@@ -76,11 +78,20 @@ pub use conformance_conflict::{
     MAX_CONFORMANCE_CONFLICT_COORDINATE_BYTES_V1, MAX_CONFORMANCE_CONFLICT_REPORTS_V1,
 };
 pub use conformance_correction::{ConformanceCorrectionV1, CONFORMANCE_CORRECTION_MAGIC_V1};
+pub use conformance_history::{
+    ConformanceHistoryEntryV1, ConformanceHistoryStateV1, ConformanceHistoryV1,
+    CONFORMANCE_HISTORY_MAGIC_V1,
+};
 pub use conformance_impact_analysis::{
     ConformanceAffectedReportV1, ConformanceImpactAnalysisV1, CONFORMANCE_IMPACT_ANALYSIS_MAGIC_V1,
 };
 pub use conformance_promotion::{
     ConformancePromotionReportsV1, ConformancePromotionV1, CONFORMANCE_PROMOTION_MAGIC_V1,
+};
+pub use conformance_promotion_gate::{
+    check_stable_promotion_v1, ConformancePromotionGateInputV1,
+    ConformancePromotionImplementationEvidenceV1, ConformancePromotionRefusalV1,
+    ConformancePromotionReportEvidenceV1,
 };
 pub use conformance_retention::{ConformanceRetentionV1, CONFORMANCE_RETENTION_MAGIC_V1};
 pub use conformance_trust_admission::{
