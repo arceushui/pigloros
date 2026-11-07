@@ -389,6 +389,7 @@ impl crate::Native {
         assert_eq!(listener.served().count, 1);
         assert_eq!(native.source()?.as_str(), crate::OWNER_URL);
         exercise_unacknowledged_buffers(&factory, native.as_mut())?;
+        exercise_packaged_get_receipt(&factory, native.as_mut())?;
         native.unsubscribe_view()?;
         native.unsubscribe_view()?;
         native.close_controller()?;
@@ -408,6 +409,94 @@ impl crate::Native {
         listener.shutdown();
         Ok(())
     }
+}
+
+fn exercise_packaged_get_receipt(
+    factory: &dyn StaPump,
+    native: &mut dyn NativeOperations,
+) -> TestResult {
+    let id = CeremonyId::from_bytes([1; 16]);
+    let options = pos_owner_bridge_codec::GetOptionsV1::new(
+        id,
+        WebAuthnChallenge::from_bytes([2; 32]),
+        &[0x80, 0x81],
+        PrfInput::from_bytes([3; 32]),
+    )
+    .map_err(|error| error.to_string())?;
+    let mut request = pos_owner_bridge::RequestImage::zeroed();
+    let length =
+        pos_owner_bridge_codec::encode_get_options(&options, &mut request.as_mut_bytes()[64..])
+            .map_err(|error| error.to_string())?;
+    receive_packaged_get(factory, native, &mut request, u32::try_from(length)?, id)?;
+    // Receipt is transport evidence only. Immediately cancel the synthetic Get;
+    // no authenticator result is needed or accepted by this fixture.
+    let mut retired = false;
+    for _ in 0..8 {
+        let state = native.load_state()?;
+        assert!([1, 2, 6, 7].contains(&state));
+        if native.compare_exchange(state, ControlState::ReleaseRequested as u32)? {
+            retired = true;
+            break;
+        }
+    }
+    assert!(
+        retired,
+        "packaged Get state did not retire within the fixed CAS bound"
+    );
+    let deadline = Instant::now() + RELEASE_WINDOW;
+    while native.load_state()? != ControlState::Releasing as u32 && Instant::now() < deadline {
+        if factory.next()? == NativePulse::Quit {
+            return Err("native fixture quit while cancelling the synthetic Get".into());
+        }
+    }
+    assert_eq!(native.load_state()?, ControlState::Releasing as u32);
+    native.close_buffers()?;
+    Ok(())
+}
+
+fn receive_packaged_get(
+    factory: &dyn StaPump,
+    native: &mut dyn NativeOperations,
+    request: &mut pos_owner_bridge::RequestImage,
+    length: u32,
+    id: CeremonyId,
+) -> TestResult {
+    // Independent ADR110 receipt windows. The earlier malformed generation was
+    // never accepted; every repost has a new mapping and a preserved retired header.
+    for (attempt, millis) in [250, 250, 500, 500, 1_000, 1_000, 2_000, 2_000]
+        .into_iter()
+        .enumerate()
+    {
+        let generation = 2 + u32::try_from(attempt)?;
+        let header = OwnerBridgeControlV1::new_request(CeremonyKind::Get, generation, id, length)
+            .map_err(|error| error.to_string())?
+            .encode();
+        request.as_mut_bytes()[..64].copy_from_slice(&header);
+        let reply = OwnerBridgeControlV1::new_reply(CeremonyKind::Get, generation, id)
+            .map_err(|error| error.to_string())?
+            .encode();
+        native.create_buffers(CeremonyKind::Get, request.as_bytes(), &reply)?;
+        assert_eq!(native.source()?.as_str(), crate::OWNER_URL);
+        native.post(BufferSlot::Request)?;
+        assert_eq!(native.source()?.as_str(), crate::OWNER_URL);
+        native.post(BufferSlot::Reply)?;
+        let deadline = Instant::now() + Duration::from_millis(millis);
+        while native.load_state()? == ControlState::Empty as u32 && Instant::now() < deadline {
+            if factory.next()? == NativePulse::Quit {
+                return Err("native fixture quit before the packaged page accepted a pair".into());
+            }
+        }
+        if native.load_state()? != ControlState::Empty as u32
+            || !native.compare_exchange(
+                ControlState::Empty as u32,
+                ControlState::ReleaseRequested as u32,
+            )?
+        {
+            return Ok(());
+        }
+        native.close_buffers()?;
+    }
+    Err("packaged page never accepted a Get pair within eight posts".into())
 }
 
 fn exercise_unacknowledged_buffers(
