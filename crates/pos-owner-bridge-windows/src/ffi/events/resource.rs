@@ -76,9 +76,10 @@ pub(super) fn install(
             // The negative control deliberately reproduces the former swallowed
             // failure. It exists only in the native qualification test binary.
             #[cfg(test)]
-            if DENIAL_FIXTURE
-                .with(|mode| mode.get() == crate::ResourceDenialFixture::SwallowFailure)
-            {
+            if DENIAL_FIXTURE.with(|mode| {
+                mode.get() != crate::ResourceDenialFixture::PropagateFailure
+                    && mode.get() != crate::ResourceDenialFixture::Normal
+            }) {
                 return Ok(());
             }
             return Err(windows::core::Error::from_hresult(E_ABORT));
