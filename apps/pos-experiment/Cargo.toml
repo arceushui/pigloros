@@ -17,7 +17,6 @@ publish.workspace = true
 test-support = [
   "pos-core/test-support",
   "pos-runtime/test-support",
-  "dep:pos-time",
   "dep:pos-plugin-supervisor",
   "pos-plugin-supervisor/test-support",
   "dep:pos-plugin-worker",
