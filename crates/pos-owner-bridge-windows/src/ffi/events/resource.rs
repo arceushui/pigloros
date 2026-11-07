@@ -125,6 +125,8 @@ fn stop_prototype(sender: Option<ICoreWebView2>) -> Result<()> {
             mode.get(),
             crate::ResourceDenialFixture::PrototypeStop
                 | crate::ResourceDenialFixture::PrototypeStopClose
+                | crate::ResourceDenialFixture::PrototypeDeferredStop
+                | crate::ResourceDenialFixture::PrototypeDeferredStopClose
         )
     }) {
         let view = sender.ok_or_else(unavailable)?;
@@ -155,6 +157,8 @@ fn filter(
                 matches!(
                     mode.get(),
                     crate::ResourceDenialFixture::PrototypeHeld
+                        | crate::ResourceDenialFixture::PrototypeDeferredStop
+                        | crate::ResourceDenialFixture::PrototypeDeferredStopClose
                         | crate::ResourceDenialFixture::PrototypeResponseBarrier
                         | crate::ResourceDenialFixture::PrototypeCloseFirst
                         | crate::ResourceDenialFixture::PrototypeDrop

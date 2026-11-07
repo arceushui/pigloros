@@ -45,13 +45,13 @@ fn record_resource_outcome(
     )
 }
 
-const fn resource_cases() -> [(u8, bool, crate::ResourceDenialFixture, u32); 12] {
+fn resource_cases() -> Vec<(u8, bool, crate::ResourceDenialFixture, u32)> {
     use crate::ResourceDenialFixture::{
         Normal, PropagateFailure, PrototypeCloseFirst, PrototypeCompleteAllowed,
-        PrototypeCompleteDenied, PrototypeDrop, PrototypeHeld, PrototypeResponseBarrier,
-        PrototypeStop, PrototypeStopClose, SwallowFailure,
+        PrototypeCompleteDenied, PrototypeDeferredStop, PrototypeDeferredStopClose, PrototypeDrop,
+        PrototypeHeld, PrototypeResponseBarrier, PrototypeStop, PrototypeStopClose, SwallowFailure,
     };
-    [
+    let mut cases = vec![
         (0x20, false, Normal, 1),
         (0x21, true, Normal, 0),
         (0x22, true, SwallowFailure, 1),
@@ -62,10 +62,14 @@ const fn resource_cases() -> [(u8, bool, crate::ResourceDenialFixture, u32); 12]
         (0x29, true, PrototypeResponseBarrier, 0),
         (0x2a, true, PrototypeStop, 0),
         (0x2b, true, PrototypeStopClose, 0),
+        (0x2c, true, PrototypeDeferredStop, 0),
+        (0x2d, true, PrototypeDeferredStopClose, 0),
         (0x28, true, PrototypeCloseFirst, 0),
         (0x24, true, PrototypeHeld, 0),
         (0x27, true, PrototypeDrop, 0),
-    ]
+    ];
+    cases.extend((0x40..0x60).map(|value| (value, true, PrototypeStopClose, 0)));
+    cases
 }
 
 const fn resource_stays_deferred(mode: crate::ResourceDenialFixture) -> bool {
@@ -75,6 +79,7 @@ const fn resource_stays_deferred(mode: crate::ResourceDenialFixture) -> bool {
             | crate::ResourceDenialFixture::PrototypeDrop
             | crate::ResourceDenialFixture::PrototypeCloseFirst
             | crate::ResourceDenialFixture::PrototypeStopClose
+            | crate::ResourceDenialFixture::PrototypeDeferredStopClose
     )
 }
 
@@ -91,6 +96,18 @@ fn restore_denial(
 }
 
 fn complete_deferred_probe(mode: crate::ResourceDenialFixture) -> TestResult {
+    if matches!(
+        mode,
+        crate::ResourceDenialFixture::PrototypeDeferredStop
+            | crate::ResourceDenialFixture::PrototypeDeferredStopClose
+    ) {
+        let result = crate::Native::prototype_complete_resource(false);
+        writeln!(
+            std::io::stderr(),
+            "PROTOTYPE stopped deferral completion={result:?}"
+        )?;
+        return Ok(());
+    }
     if matches!(
         mode,
         crate::ResourceDenialFixture::PrototypeCompleteAllowed
