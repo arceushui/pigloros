@@ -1040,9 +1040,10 @@ pub fn corpus_with_release_mutation(mutation: ReleaseMutation) -> TestResult<Cor
     })
 }
 
-/// Build a signed corpus of a real provider's checked-in fixtures of claim layer `claim_layer`
-/// (its CPF1 wire code) and subject adapter `subject_adapter`, in Execution Mode `mode` (0 Local,
-/// 1 Air-Gapped).
+/// Build a signed corpus of a real provider's checked-in fixtures.
+///
+/// `claim_layer` is the CPF1 wire code of the provider's claim layer, `subject_adapter` its public
+/// protocol and `mode` the Execution Mode (0 Local, 1 Air-Gapped).
 ///
 /// Every family carries the provider's schema, payload, evidence-status record, oracle and
 /// auxiliary input bytes, its budget, watchdog and capabilities, and the provider's exact key;
