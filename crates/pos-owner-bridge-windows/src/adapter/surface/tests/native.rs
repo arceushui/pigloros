@@ -31,6 +31,15 @@ pub(super) struct Factory {
     pub(super) sink: RefCell<Option<Rc<dyn EventSink>>>,
     pub(super) foreground: Cell<bool>,
     pub(super) navigation_succeeds: Cell<bool>,
+    pub(super) failure: Cell<Option<&'static str>>,
+    pub(super) source: RefCell<String>,
+    pub(super) state: Cell<u32>,
+    pub(super) invalidate_request: Cell<bool>,
+    pub(super) close_uncertain: Cell<bool>,
+    pub(super) dpi: Cell<u32>,
+    pub(super) window_exists: Cell<bool>,
+    pub(super) close_requested: Cell<bool>,
+    pub(super) client: Cell<ClientBounds>,
     clock: FakeClock,
 }
 
@@ -42,6 +51,20 @@ impl Factory {
             sink: RefCell::new(None),
             foreground: Cell::new(true),
             navigation_succeeds: Cell::new(false),
+            failure: Cell::new(None),
+            source: RefCell::new(crate::OWNER_URL.to_owned()),
+            state: Cell::new(0),
+            invalidate_request: Cell::new(false),
+            close_uncertain: Cell::new(false),
+            dpi: Cell::new(96),
+            window_exists: Cell::new(true),
+            close_requested: Cell::new(false),
+            client: Cell::new(ClientBounds {
+                left: 0,
+                top: 0,
+                right: 480,
+                bottom: 640,
+            }),
             clock,
         })
     }
@@ -63,6 +86,9 @@ impl StaPump for Rc<Factory> {
 
 impl NativeFactory for Rc<Factory> {
     fn session(&self) -> NativeResult<Box<dyn NativeOperations>> {
+        if self.failure.get() == Some("session") {
+            return Err(failed());
+        }
         Ok(Box::new(Session {
             factory: Self::clone(self),
             folder: PathBuf::new(),
@@ -85,38 +111,44 @@ impl Session {
     fn call(&self, name: &'static str) {
         self.factory.calls.borrow_mut().push(name);
     }
+    fn check(&self, name: &'static str) -> NativeResult<()> {
+        if self.factory.failure.get() == Some(name) {
+            Err(failed())
+        } else {
+            Ok(())
+        }
+    }
+    fn effect(&self, name: &'static str) -> NativeResult<()> {
+        self.call(name);
+        self.check(name)
+    }
 }
 
 impl NativeOperations for Session {
     fn create_window(&mut self, _: Option<u64>, _: u32, _: u32) -> NativeResult<()> {
-        self.call("create_window");
-        Ok(())
+        self.effect("create_window")
     }
     fn window(&self) -> NativeResult<WindowSnapshot> {
+        self.check("window")?;
         Ok(WindowSnapshot {
-            exists: true,
-            close_requested: false,
-            dpi: 96,
-            client: ClientBounds {
-                left: 0,
-                top: 0,
-                right: 480,
-                bottom: 640,
-            },
+            exists: self.factory.window_exists.get(),
+            close_requested: self.factory.close_requested.get(),
+            dpi: self.factory.dpi.get(),
+            client: self.factory.client.get(),
             foreground: self.factory.foreground.get(),
         })
     }
     fn resize_window(&self, _: u32, _: u32, _: u32) -> NativeResult<()> {
-        Ok(())
+        self.effect("resize_window")
     }
     fn show_window(&self) -> NativeResult<()> {
-        Ok(())
+        self.effect("show_window")
     }
     fn fit_controller(&self) -> NativeResult<()> {
-        Ok(())
+        self.effect("fit_controller")
     }
     fn focus_controller(&self) -> NativeResult<()> {
-        Ok(())
+        self.effect("focus_controller")
     }
     fn create_environment(
         &mut self,
@@ -125,7 +157,7 @@ impl NativeOperations for Session {
         _: EnvironmentOptions,
         sink: Rc<dyn EventSink>,
     ) -> NativeResult<()> {
-        self.call("create_environment");
+        self.effect("create_environment")?;
         self.folder = folder.to_owned();
         *self.factory.sink.borrow_mut() = Some(sink);
         self.environment_pending = true;
@@ -135,6 +167,7 @@ impl NativeOperations for Session {
         std::mem::take(&mut self.environment_pending).then_some(Ok(()))
     }
     fn environment(&self) -> NativeResult<EnvironmentSnapshot> {
+        self.check("environment")?;
         Ok(EnvironmentSnapshot {
             version: NativeText::fixture("153.0.4234.48"),
             folder: NativePath::from_utf16(
@@ -178,15 +211,16 @@ impl NativeOperations for Session {
         }
     }
     fn require_shared_interfaces(&mut self) -> NativeResult<()> {
-        Ok(())
+        self.effect("require_shared_interfaces")
     }
     fn subscribe_view(&mut self, _: Rc<dyn EventSink>) -> NativeResult<()> {
-        Ok(())
+        self.effect("subscribe_view")
     }
     fn set_bool(&self, _: BoolProperty, _: bool) -> NativeResult<()> {
-        Ok(())
+        self.check("set_bool")
     }
     fn get_bool(&self, property: BoolProperty) -> NativeResult<bool> {
+        self.check("get_bool")?;
         Ok(property == BoolProperty::Script)
     }
     fn navigate_owner(&self) -> NativeResult<()> {
@@ -198,52 +232,64 @@ impl NativeOperations for Session {
         }
     }
     fn source(&self) -> NativeResult<NativeText> {
-        Err(failed())
+        self.check("source")?;
+        Ok(NativeText::fixture(&self.factory.source.borrow()))
     }
     fn create_buffers(&mut self, _: CeremonyKind, _: &[u8], _: &[u8; 64]) -> NativeResult<()> {
-        self.call("create_buffers");
-        Err(failed())
+        self.effect("create_buffers")
     }
-    fn post(&self, _: BufferSlot) -> NativeResult<()> {
+    fn post(&self, slot: BufferSlot) -> NativeResult<()> {
         self.call("post");
-        Err(failed())
+        self.effect(match slot {
+            BufferSlot::Request => "post_request",
+            BufferSlot::Reply => "post_reply",
+        })?;
+        if slot == BufferSlot::Request && self.factory.invalidate_request.get() {
+            if let Some(sink) = self.factory.sink.borrow().as_ref() {
+                sink.event(crate::NativeEvent::ProcessFailed);
+            }
+        }
+        Ok(())
     }
     fn load_state(&self) -> NativeResult<u32> {
-        Err(failed())
+        self.check("load_state")?;
+        Ok(self.factory.state.get())
     }
-    fn compare_exchange(&self, _: u32, _: u32) -> NativeResult<bool> {
-        Err(failed())
+    fn compare_exchange(&self, current: u32, new: u32) -> NativeResult<bool> {
+        self.check("compare_exchange")?;
+        let matched = self.factory.state.get() == current;
+        if matched {
+            self.factory.state.set(new);
+        }
+        Ok(matched)
     }
-    fn copy_reply(&self, _: &mut ReplyImage) -> NativeResult<()> {
-        Err(failed())
+    fn copy_reply(&self, out: &mut ReplyImage) -> NativeResult<()> {
+        self.check("copy_reply")?;
+        out.as_mut_bytes().fill(0x5a);
+        Ok(())
     }
     fn close_buffers(&mut self) -> NativeResult<()> {
-        self.call("close_buffers");
-        Ok(())
+        self.effect("close_buffers")
     }
     fn buffer_close_uncertain(&self) -> bool {
-        false
+        self.factory.close_uncertain.get()
     }
     fn unsubscribe_view(&mut self) -> NativeResult<()> {
-        self.call("unsubscribe_view");
-        Ok(())
+        self.effect("unsubscribe_view")
     }
     fn close_controller(&mut self) -> NativeResult<()> {
-        self.call("close_controller");
+        self.effect("close_controller")?;
         self.controller = false;
         Ok(())
     }
     fn unsubscribe_exit(&mut self) -> NativeResult<()> {
-        self.call("unsubscribe_exit");
-        Ok(())
+        self.effect("unsubscribe_exit")
     }
     fn drop_environment(&mut self) -> NativeResult<()> {
-        self.call("drop_environment");
-        Ok(())
+        self.effect("drop_environment")
     }
     fn destroy_window(&mut self) -> NativeResult<()> {
-        self.call("destroy_window");
-        Ok(())
+        self.effect("destroy_window")
     }
     fn pending(&self) -> bool {
         self.environment_pending || self.controller_pending
