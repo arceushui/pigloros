@@ -56,8 +56,7 @@ impl<T, E> CommandResult<T> for Result<T, E> {
 struct Options {
     request: PathBuf,
     archive: PathBuf,
-    trust_policy: PathBuf,
-    trust_policy_operator_key: [u8; 32],
+    trust_policy: TrustPolicyInput,
     evaluator_evidence: EvaluatorBuildEvidence,
     declaration_digest: [u8; 32],
     shared_code_audit_digest: [u8; 32],
@@ -70,14 +69,26 @@ struct Options {
 struct OptionsBuilder {
     request: Option<PathBuf>,
     archive: Option<PathBuf>,
-    trust_policy: Option<PathBuf>,
-    trust_policy_operator_key: Option<[u8; 32]>,
+    trust_policy: TrustPolicyInputBuilder,
     evaluator_evidence: EvaluatorEvidenceBuilder,
     declaration_digest: Option<[u8; 32]>,
     shared_code_audit_digest: Option<[u8; 32]>,
     reviewer_ids: Vec<String>,
     authorship_independent: bool,
     organizational_independent: bool,
+}
+
+/// The caller-selected TPS1 bytes and the caller-pinned operator that alone
+/// authenticates them; the binary binds the deployment-operator role.
+struct TrustPolicyInput {
+    path: PathBuf,
+    operator: TrustPolicyOperatorAnchor,
+}
+
+#[derive(Default)]
+struct TrustPolicyInputBuilder {
+    path: Option<PathBuf>,
+    operator: Option<TrustPolicyOperatorAnchor>,
 }
 
 #[derive(Default)]
@@ -100,13 +111,9 @@ fn run() -> Result<(), CommandError> {
             CommandError::Input
         }
     })?;
-    // The binary pins the only accepted role; the caller supplies only the key.
-    let operator =
-        TrustPolicyOperatorAnchor::new(DEPLOYMENT_OPERATOR_ROLE, options.trust_policy_operator_key)
-            .map_err(|_| CommandError::Arguments)?;
-    let trust_policy_bytes = read_bounded(&options.trust_policy, MAX_TRUST_POLICY_BYTES)?;
+    let trust_policy_bytes = read_bounded(&options.trust_policy.path, MAX_TRUST_POLICY_BYTES)?;
     let (mut archive, caps) =
-        preflight_authenticated_archive(&options, &trust_policy_bytes, &operator, &request)?;
+        preflight_authenticated_archive(&options, &trust_policy_bytes, &request)?;
     let identity = verify_evaluator_build_identity(
         &options.evaluator_evidence,
         IndependenceEvidence {
@@ -132,7 +139,7 @@ fn run() -> Result<(), CommandError> {
         &request_bytes,
         &archive_bytes,
         &trust_policy_bytes,
-        &operator,
+        &options.trust_policy.operator,
         &identity,
         &[],
         &mut adapter,
@@ -160,12 +167,16 @@ fn write_artifacts(
 fn preflight_authenticated_archive(
     options: &Options,
     trust_policy_bytes: &[u8],
-    operator: &TrustPolicyOperatorAnchor,
     request: &EvaluationRequest,
 ) -> Result<(File, EvaluatorHardCaps), CommandError> {
     let mut archive = snapshot_bounded(&options.archive, MAX_ARCHIVE_BYTES)?;
-    let preflight = preflight_signed_bundle(&mut archive, trust_policy_bytes, operator, request)
-        .map_evaluation_error()?;
+    let preflight = preflight_signed_bundle(
+        &mut archive,
+        trust_policy_bytes,
+        &options.trust_policy.operator,
+        request,
+    )
+    .map_evaluation_error()?;
     let caps = Profile::authenticated_hard_caps(preflight.profile_bytes(), request)
         .map_evaluation_error()?;
     preflight
@@ -189,17 +200,14 @@ fn parse_option(
     argument: &OsString,
 ) -> Result<(), CommandError> {
     let argument = argument.to_str().ok_or(CommandError::Arguments)?;
-    if parse_evaluator_evidence_option(&mut builder.evaluator_evidence, arguments, argument)? {
+    if parse_evaluator_evidence_option(&mut builder.evaluator_evidence, arguments, argument)?
+        || parse_trust_policy_option(&mut builder.trust_policy, arguments, argument)?
+    {
         return Ok(());
     }
     match argument {
         "--request" => set_once(&mut builder.request, next_path(arguments)?)?,
         "--bundle" => set_once(&mut builder.archive, next_path(arguments)?)?,
-        "--trust-policy" => set_once(&mut builder.trust_policy, next_path(arguments)?)?,
-        "--trust-policy-operator-key" => set_once(
-            &mut builder.trust_policy_operator_key,
-            next_public_key(arguments)?,
-        )?,
         "--declaration-digest" => {
             set_once(&mut builder.declaration_digest, next_digest(arguments)?)?;
         }
@@ -239,6 +247,24 @@ fn parse_evaluator_evidence_option(
     }
 }
 
+fn parse_trust_policy_option(
+    builder: &mut TrustPolicyInputBuilder,
+    arguments: &mut impl Iterator<Item = OsString>,
+    argument: &str,
+) -> Result<bool, CommandError> {
+    match argument {
+        "--trust-policy" => {
+            set_once(&mut builder.path, next_path(arguments)?)?;
+            Ok(true)
+        }
+        "--trust-policy-operator-key" => {
+            set_once(&mut builder.operator, next_operator(arguments)?)?;
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
+
 impl OptionsBuilder {
     fn finish(self) -> Result<Options, CommandError> {
         if self.reviewer_ids.is_empty()
@@ -252,10 +278,7 @@ impl OptionsBuilder {
         Ok(Options {
             request: self.request.ok_or(CommandError::Arguments)?,
             archive: self.archive.ok_or(CommandError::Arguments)?,
-            trust_policy: self.trust_policy.ok_or(CommandError::Arguments)?,
-            trust_policy_operator_key: self
-                .trust_policy_operator_key
-                .ok_or(CommandError::Arguments)?,
+            trust_policy: self.trust_policy.finish()?,
             evaluator_evidence: self.evaluator_evidence.finish()?,
             declaration_digest: self.declaration_digest.ok_or(CommandError::Arguments)?,
             shared_code_audit_digest: self
@@ -265,6 +288,15 @@ impl OptionsBuilder {
             authorship_independent: self.authorship_independent,
             organizational_independent: self.organizational_independent,
         })
+    }
+}
+
+impl TrustPolicyInputBuilder {
+    fn finish(self) -> Result<TrustPolicyInput, CommandError> {
+        self.path
+            .zip(self.operator)
+            .map(|(path, operator)| TrustPolicyInput { path, operator })
+            .ok_or(CommandError::Arguments)
     }
 }
 
@@ -299,11 +331,18 @@ fn next_digest(arguments: &mut impl Iterator<Item = OsString>) -> Result<[u8; 32
     parse_digest(&next_text(arguments)?)
 }
 
-fn next_public_key(
+/// Parse the caller-pinned operator key; the binary binds the only accepted role.
+fn next_operator(
     arguments: &mut impl Iterator<Item = OsString>,
-) -> Result<[u8; 32], CommandError> {
-    next_text(arguments)
-        .and_then(|value| parse_nonzero_digest(&value).ok_or(CommandError::Arguments))
+) -> Result<TrustPolicyOperatorAnchor, CommandError> {
+    next_text(arguments).and_then(|value| {
+        parse_nonzero_digest(&value)
+            .ok_or(CommandError::Arguments)
+            .and_then(|key| {
+                TrustPolicyOperatorAnchor::new(DEPLOYMENT_OPERATOR_ROLE, key)
+                    .map_err(|_| CommandError::Arguments)
+            })
+    })
 }
 
 fn next_argument(arguments: &mut impl Iterator<Item = OsString>) -> Result<OsString, CommandError> {
