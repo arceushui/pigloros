@@ -25,10 +25,10 @@ use crate::{
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
-const fn resource_cases() -> [(u8, bool, crate::ResourceDenialFixture, u32); 7] {
+const fn resource_cases() -> [(u8, bool, crate::ResourceDenialFixture, u32); 8] {
     use crate::ResourceDenialFixture::{
-        Normal, PropagateFailure, PrototypeCompleteAllowed, PrototypeCompleteDenied, PrototypeHeld,
-        SwallowFailure,
+        Normal, PropagateFailure, PrototypeCompleteAllowed, PrototypeCompleteDenied, PrototypeDrop,
+        PrototypeHeld, SwallowFailure,
     };
     [
         (0x20, false, Normal, 1),
@@ -39,7 +39,15 @@ const fn resource_cases() -> [(u8, bool, crate::ResourceDenialFixture, u32); 7] 
         (0x24, true, PrototypeHeld, 0),
         (0x25, true, PrototypeCompleteAllowed, 1),
         (0x26, true, PrototypeCompleteDenied, 0),
+        (0x27, true, PrototypeDrop, 0),
     ]
+}
+
+const fn resource_stays_deferred(mode: crate::ResourceDenialFixture) -> bool {
+    matches!(
+        mode,
+        crate::ResourceDenialFixture::PrototypeHeld | crate::ResourceDenialFixture::PrototypeDrop
+    )
 }
 
 struct ResourceProbe {
@@ -236,7 +244,7 @@ impl crate::Native {
                     mode == crate::ResourceDenialFixture::PrototypeCompleteDenied,
                 )?;
             }
-            if mode != crate::ResourceDenialFixture::PrototypeHeld {
+            if !resource_stays_deferred(mode) {
                 pump_until(
                     &factory,
                     "resource callback and navigation completion",

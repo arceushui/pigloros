@@ -121,6 +121,7 @@ fn filter(
                 matches!(
                     mode.get(),
                     crate::ResourceDenialFixture::PrototypeHeld
+                        | crate::ResourceDenialFixture::PrototypeDrop
                         | crate::ResourceDenialFixture::PrototypeCompleteAllowed
                         | crate::ResourceDenialFixture::PrototypeCompleteDenied
                 )
@@ -128,9 +129,15 @@ fn filter(
                 // SAFETY: live event arguments on their callback STA; prototype
                 // retains the owned deferral and args instead of completing it.
                 let deferral = unsafe { args.GetDeferral() }.map_err(|_| unavailable())?;
-                PROTOTYPE_HELD.with(|held| {
-                    held.borrow_mut().push((deferral, args, response.clone()));
-                });
+                if DENIAL_FIXTURE
+                    .with(|mode| mode.get() == crate::ResourceDenialFixture::PrototypeDrop)
+                {
+                    drop(deferral);
+                } else {
+                    PROTOTYPE_HELD.with(|held| {
+                        held.borrow_mut().push((deferral, args, response.clone()));
+                    });
+                }
             }
             return Err(unavailable());
         }
