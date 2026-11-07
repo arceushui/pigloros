@@ -104,8 +104,7 @@ run (Local-relaxation engineering evidence, not hosted conformance). The record 
 outcome and the actual output digest (the BLAKE3 of the oracle member) and the time stays null; the
 generator derives it from the oracle alone, and
 `apps/pos-experiment/tests/replay_provider_dispatch_public.rs` re-executes every family and requires
-every record. The profile text
-is `profiles/replay-conformance/normative-requirements.md`.
+every record. The profile text is `profiles/replay-conformance/normative-requirements.md`.
 
 The immutable bundle boundary in `pos-conformance` accepts these bytes from a
 caller, recomputes each BLAKE3 content address, binds the CPF1 profile digest,

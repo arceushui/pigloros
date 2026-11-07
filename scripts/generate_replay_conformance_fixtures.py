@@ -24,13 +24,13 @@ Usage:
 key order, the eleven W8H1 entries (each exactly in its family), every closure digest against the
 members the payload names (and the one deliberate mismatch), a second derivation of every
 expected stream from its closure member, every payload against its schema, and that every
-executed family has a `canonical-output` oracle.
+executed family has a `canonical-output` oracle. It then regenerates every output and compares it
+with the checked-in file.
 
 The evidence-status record of `deletion-redaction` (ERA-001, degraded Replay) is `executed`
 (ADR-062 Revision 8, #1296): the independent evaluator passes the case in both the Local and the
 Air-Gapped ExecutionProfile run, with the record shape and fixed-point rule of slice N6 (#1234).
-Every other record stays `pending`. It then
-regenerates every output and compares it with the checked-in file.
+Every other record stays `pending`.
 """
 
 from __future__ import annotations
