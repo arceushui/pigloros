@@ -21,6 +21,7 @@ use pos_owner_bridge_codec::{
 };
 
 use super::super::{loopback::SharedLoopback, store::WindowsCleanupStore, surface::Surface};
+use super::trace::Trace;
 use super::TestResult;
 use crate::{NativeFactory, NativePulse, StaPump};
 
@@ -94,6 +95,7 @@ fn run_worker(
             &mut store,
             foreground,
             CeremonyId::from_bytes(bytes),
+            number,
         );
         if let Err(error) = attempt {
             outcome = Err(format!(
@@ -119,18 +121,23 @@ fn run_ceremony(
     store: &mut WindowsCleanupStore,
     foreground: &Mutex<()>,
     id: CeremonyId,
+    number: u64,
 ) -> TestResult {
     let started = Instant::now();
     let deadline = started + Duration::from_secs(15);
     surface.set_deadline(deadline);
-    let mut visible = Some(acquire_foreground(surface, foreground, deadline)?);
     let mut driver = new_driver(id, started)?;
+    let mut trace = Trace::new(number, started);
+    let mut visible = Some(acquire_foreground(
+        surface, foreground, deadline, &driver, &mut trace,
+    )?);
     let mut receipt = None;
     // Keep both the driver and its native owners outside the unwind boundary.
     // An assertion failure must enter the same release/exit path as an error.
     let attempt = catch_unwind(AssertUnwindSafe(
         || -> Result<Result<Verified, BridgeError>, Box<dyn std::error::Error>> {
             loop {
+                trace.update("active", surface, &driver);
                 if receipt.is_none() && driver.posts() > 0 && !driver.request_clear() {
                     let state = surface
                         .reply_load_state()
@@ -164,6 +171,7 @@ fn run_ceremony(
         ),
     };
     let result_error = result.as_ref().err().copied();
+    trace.update("caller-complete", surface, &driver);
     let mut keeper = QuarantineKeeper::new();
     let reply = keeper.finish(driver, result);
     let mut quarantined = reply.driver.is_none();
@@ -172,8 +180,10 @@ fn run_ceremony(
     // exit handler, record, driver and STA until actual retirement succeeds.
     while quarantined || !surface.idle() {
         if quarantined {
-            let poll =
-                keeper.poll(|driver| driver.poll_cleanup(&mut env(surface, loopback, store)));
+            let poll = keeper.poll(|driver| {
+                trace.update("quarantine", surface, driver);
+                driver.poll_cleanup(&mut env(surface, loopback, store))
+            });
             quarantined = poll.remaining;
         } else {
             let _retired_or_retained = surface.poll_failed_open();
@@ -251,8 +261,11 @@ fn acquire_foreground<'a>(
     surface: &Surface,
     foreground: &'a Mutex<()>,
     deadline: Instant,
+    driver: &CeremonyDriver,
+    trace: &mut Trace,
 ) -> Result<MutexGuard<'a, ()>, Box<dyn std::error::Error>> {
     loop {
+        trace.update("foreground", surface, driver);
         match foreground.try_lock() {
             Ok(visible) => return Ok(visible),
             Err(TryLockError::WouldBlock) => {}

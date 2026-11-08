@@ -44,7 +44,7 @@ impl RuntimeAdmission for VerifiedRuntime {
     }
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Ownership {
     Idle,
     Folder,
@@ -57,7 +57,7 @@ enum Ownership {
     EnvironmentDropped,
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CloseState {
     Idle,
     Pending,
@@ -138,6 +138,20 @@ impl Surface {
 
     pub(super) fn pump(&self) -> crate::NativeResult<crate::NativePulse> {
         self.factory.next()
+    }
+
+    #[cfg(test)]
+    pub(in crate::adapter) fn fixture_progress(&self) -> String {
+        format!(
+            "ownership={:?} close={:?} pending={} pid={:?} started={:?} loaded={:?} exited={:?}",
+            self.ownership,
+            self.close,
+            self.native.pending(),
+            self.identity.map(|identity| identity.browser_pid),
+            self.events.started(),
+            self.events.loaded(),
+            self.events.exited(),
+        )
     }
 
     pub(super) fn refresh(&self) -> Result<()> {

@@ -25,6 +25,7 @@ type TestResult = Result<(), Box<dyn std::error::Error>>;
 mod denial;
 mod readiness;
 mod session;
+mod trace;
 
 fn assert_resource_counts(listener: &LoopbackListener, before: u64, expected: u32) {
     assert_eq!(
