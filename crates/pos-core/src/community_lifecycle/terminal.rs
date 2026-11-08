@@ -34,7 +34,7 @@ pub struct CommunityCommitInputV1 {
     pub factual_range: Option<CommunityFactualRangeV1>,
     /// Exact CPD1, including for a state-only pass.
     pub dependency_commit_digest: Hash,
-    /// Exact admitted InventoryCommit preimage identity.
+    /// Exact admitted `InventoryCommit` preimage identity.
     pub inventory_commit_digest: Hash,
     /// Original fixed admitted evidence horizon.
     pub evidence_not_after_micros: u64,
@@ -77,7 +77,7 @@ impl CommunityCommitV1 {
     pub fn to_canonical_cbor(&self) -> Zeroizing<Vec<u8>> {
         let input = self.as_input();
         let mut out = Zeroizing::new(Vec::with_capacity(1024));
-        record_prefix(&mut out, 10, b"CPC1");
+        record_prefix(&mut out, 10, *b"CPC1");
         let key_bytes = Zeroizing::new(input.pass_key.to_canonical_cbor());
         encode_bytes(&mut out, &key_bytes, 2);
         for hash in [
@@ -100,7 +100,7 @@ impl CommunityCommitV1 {
     /// Rejects malformed, nonpreferred, trailing, oversized, unsupported or
     /// locally invalid records, including invalid nested pass coordinates.
     pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self> {
-        record_cursor(bytes, 1024, 10, b"CPC1").and_then(|mut cursor| {
+        record_cursor(bytes, 1024, 10, *b"CPC1").and_then(|mut cursor| {
             read_commit(&mut cursor)
                 .and_then(Self::new)
                 .and_then(|record| canonical_end(&cursor).map(|()| record))
@@ -182,7 +182,7 @@ impl CommunityAbortV1 {
     pub fn to_canonical_cbor(&self) -> Zeroizing<Vec<u8>> {
         let input = self.as_input();
         let mut out = Zeroizing::new(Vec::with_capacity(1024));
-        record_prefix(&mut out, 9, b"CAB1");
+        record_prefix(&mut out, 9, *b"CAB1");
         let key_bytes = Zeroizing::new(input.pass_key.to_canonical_cbor());
         encode_bytes(&mut out, &key_bytes, 2);
         encode_hash(&mut out, input.reservation_digest);
@@ -207,7 +207,7 @@ impl CommunityAbortV1 {
     /// Rejects malformed, nonpreferred, trailing, oversized, unsupported or
     /// locally invalid records, unknown reasons and missing required evidence.
     pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self> {
-        record_cursor(bytes, 1024, 9, b"CAB1").and_then(|mut cursor| {
+        record_cursor(bytes, 1024, 9, *b"CAB1").and_then(|mut cursor| {
             read_abort(&mut cursor)
                 .and_then(Self::new)
                 .and_then(|record| canonical_end(&cursor).map(|()| record))

@@ -60,7 +60,7 @@ impl<'a> CommunityStateContentV1<'a> {
         // framing allowance covers every preferred header, so no growth can
         // leave a previous prefix allocation outside the zeroizing owner.
         let mut out = Zeroizing::new(Vec::with_capacity(self.state.len() + 48));
-        record_prefix(&mut out, 4, b"CSC1");
+        record_prefix(&mut out, 4, *b"CSC1");
         crate::encode_hash(&mut out, self.schema);
         encode_head(&mut out, 2, self.state.len() as u64);
         out.extend_from_slice(self.state);
@@ -73,7 +73,7 @@ impl<'a> CommunityStateContentV1<'a> {
     /// Rejects malformed/nonpreferred/trailing bytes, unsupported versions,
     /// zero schema identity and oversized records or state lengths.
     pub fn from_canonical_cbor(bytes: &'a [u8]) -> Result<Self> {
-        record_cursor(bytes, MAX_RECORD_BYTES, 4, b"CSC1").and_then(|mut cursor| {
+        record_cursor(bytes, MAX_RECORD_BYTES, 4, *b"CSC1").and_then(|mut cursor| {
             fixed_bytes(&mut cursor).and_then(|schema| {
                 bounded_bytes(&mut cursor, MAX_COMMUNITY_STATE_BYTES_V1)
                     .and_then(|state| Self::new(Hash::from_bytes(schema), state))

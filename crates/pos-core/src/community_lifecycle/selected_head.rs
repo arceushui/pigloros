@@ -150,7 +150,7 @@ impl<'a> CommunitySelectedHeadV1<'a> {
     pub fn to_canonical_cbor(&self) -> Zeroizing<Vec<u8>> {
         let input = self.as_input();
         let mut out = Zeroizing::new(Vec::with_capacity(65_536));
-        record_prefix(&mut out, 9, b"CSH1");
+        record_prefix(&mut out, 9, *b"CSH1");
         encode_coordinates(&mut out, input.timeline, input.generation);
         encode_frontier(&mut out, input.frontier);
         encode_head(&mut out, 4, input.member_heads.len() as u64);
@@ -172,7 +172,7 @@ impl<'a> CommunitySelectedHeadV1<'a> {
     /// locally inconsistent records. Complete live roster/source checks remain
     /// mandatory at the qualified owner, independently of this decoder.
     pub fn from_canonical_cbor(bytes: &'a [u8]) -> Result<Self> {
-        record_cursor(bytes, 65_536, 9, b"CSH1").and_then(|mut cursor| {
+        record_cursor(bytes, 65_536, 9, *b"CSH1").and_then(|mut cursor| {
             read_selected_head(&mut cursor)
                 .and_then(Self::new)
                 .and_then(|record| canonical_end(&cursor).map(|()| record))

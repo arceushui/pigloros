@@ -63,7 +63,7 @@ impl CommunityHostProgressV1 {
     #[must_use]
     pub fn to_canonical_cbor(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(128);
-        record_prefix(&mut out, 6, b"CST1");
+        record_prefix(&mut out, 6, *b"CST1");
         encode_coordinates(&mut out, self.timeline, self.generation);
         encode_boundary(&mut out, self.host_tick);
         encode_boundary(&mut out, self.simulation_time);
@@ -82,7 +82,7 @@ impl CommunityHostProgressV1 {
     /// Rejects malformed tags/framing, unknown versions, zero coordinates,
     /// nonpreferred encodings and records longer than128 bytes.
     pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self> {
-        record_cursor(bytes, 128, 6, b"CST1").and_then(|mut cursor| {
+        record_cursor(bytes, 128, 6, *b"CST1").and_then(|mut cursor| {
             read_coordinates(&mut cursor).and_then(|(timeline, generation)| {
                 read_boundary(&mut cursor).and_then(|host_tick| {
                     read_boundary(&mut cursor).and_then(|simulation_time| {

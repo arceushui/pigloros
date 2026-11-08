@@ -51,7 +51,7 @@ fn pass_bytes() -> Fallible<Vec<u8>> {
     ]))
 }
 
-fn range(tick: u64, first: u64, last: u64) -> Range {
+const fn range(tick: u64, first: u64, last: u64) -> Range {
     Range {
         tick,
         first_logical_sequence: Seq::from_u64(first),

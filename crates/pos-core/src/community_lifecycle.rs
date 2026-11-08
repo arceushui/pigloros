@@ -55,16 +55,14 @@ impl CommunityPassKeyV1 {
     /// # Errors
     /// Returns `InvalidBinding` for a zero Timeline, generation or ordinal.
     pub fn new(timeline: TimelineId, generation: [u8; 16], ordinal: u64) -> Result<Self> {
-        validate_coordinates(timeline, generation).and_then(|()| {
-            if ordinal == 0 {
-                Err(CommunityLifecycleErrorV1::InvalidBinding)
-            } else {
-                Ok(Self {
-                    timeline,
-                    generation,
-                    ordinal,
-                })
-            }
+        validate_coordinates(timeline, generation).and(if ordinal == 0 {
+            Err(CommunityLifecycleErrorV1::InvalidBinding)
+        } else {
+            Ok(Self {
+                timeline,
+                generation,
+                ordinal,
+            })
         })
     }
 
@@ -90,7 +88,7 @@ impl CommunityPassKeyV1 {
     #[must_use]
     pub fn to_canonical_cbor(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(MAX_COMMUNITY_PASS_KEY_BYTES_V1);
-        record_prefix(&mut out, 5, b"CPK1");
+        record_prefix(&mut out, 5, *b"CPK1");
         encode_coordinates(&mut out, self.timeline, self.generation);
         encode_head(&mut out, 0, self.ordinal);
         out
@@ -108,7 +106,7 @@ impl CommunityPassKeyV1 {
     /// Rejects malformed/nonpreferred framing, unknown versions, oversized
     /// records, zero coordinates and trailing bytes.
     pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self> {
-        record_cursor(bytes, MAX_COMMUNITY_PASS_KEY_BYTES_V1, 5, b"CPK1").and_then(|mut cursor| {
+        record_cursor(bytes, MAX_COMMUNITY_PASS_KEY_BYTES_V1, 5, *b"CPK1").and_then(|mut cursor| {
             read_coordinates(&mut cursor).and_then(|(timeline, generation)| {
                 read_head(&mut cursor, 0)
                     .and_then(|ordinal| Self::new(timeline, generation, ordinal))
@@ -132,7 +130,7 @@ fn validate_coordinates(timeline: TimelineId, generation: [u8; 16]) -> Result<()
     }
 }
 
-fn validate_horizon(horizon: u64) -> Result<()> {
+const fn validate_horizon(horizon: u64) -> Result<()> {
     if horizon == 0 || horizon > u64::MAX / 2 {
         Err(CommunityLifecycleErrorV1::BoundsExceeded)
     } else {
@@ -145,9 +143,9 @@ fn read_pass_key(cursor: &mut CborCursor<'_>) -> Result<CommunityPassKeyV1> {
         .and_then(CommunityPassKeyV1::from_canonical_cbor)
 }
 
-fn record_prefix(out: &mut Vec<u8>, fields: u64, magic: &[u8; 4]) {
+fn record_prefix(out: &mut Vec<u8>, fields: u64, magic: [u8; 4]) {
     encode_head(out, 4, fields);
-    encode_bytes(out, magic, 2);
+    encode_bytes(out, &magic, 2);
     encode_head(out, 0, 1);
 }
 
@@ -160,14 +158,14 @@ fn record_cursor<'a>(
     bytes: &'a [u8],
     maximum: usize,
     fields: u64,
-    magic: &[u8; 4],
+    magic: [u8; 4],
 ) -> Result<CborCursor<'a>> {
     if bytes.len() > maximum {
         return Err(CommunityLifecycleErrorV1::BoundsExceeded);
     }
     let mut expected = Vec::with_capacity(6);
     encode_head(&mut expected, 4, fields);
-    encode_bytes(&mut expected, magic, 2);
+    encode_bytes(&mut expected, &magic, 2);
     let mut cursor = CborCursor::new(bytes);
     cursor
         .fixed(&expected)
@@ -260,7 +258,7 @@ fn read_coordinates(cursor: &mut CborCursor<'_>) -> Result<(TimelineId, [u8; 16]
     })
 }
 
-fn canonical_end(cursor: &CborCursor<'_>) -> Result<()> {
+const fn canonical_end(cursor: &CborCursor<'_>) -> Result<()> {
     if cursor.is_finished() {
         Ok(())
     } else {

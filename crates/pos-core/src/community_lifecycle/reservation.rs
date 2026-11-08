@@ -72,7 +72,7 @@ impl CommunityReservationRequestV1 {
     pub fn to_canonical_cbor(&self) -> Zeroizing<Vec<u8>> {
         let input = self.as_input();
         let mut out = Zeroizing::new(Vec::with_capacity(1024));
-        record_prefix(&mut out, 12, b"CRI1");
+        record_prefix(&mut out, 12, *b"CRI1");
         encode_coordinates(&mut out, input.timeline, input.generation);
         encode_bytes(&mut out, &input.reservation_operation_id, 2);
         for hash in [
@@ -95,7 +95,7 @@ impl CommunityReservationRequestV1 {
     /// Rejects malformed, nonpreferred, trailing, oversized, unsupported or
     /// locally invalid records. A successful decode grants no authority.
     pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self> {
-        record_cursor(bytes, 1024, 12, b"CRI1").and_then(|mut cursor| {
+        record_cursor(bytes, 1024, 12, *b"CRI1").and_then(|mut cursor| {
             read_request(&mut cursor)
                 .and_then(Self::new)
                 .and_then(|record| canonical_end(&cursor).map(|()| record))
@@ -160,7 +160,7 @@ impl CommunityReservationV1 {
     pub fn to_canonical_cbor(&self) -> Zeroizing<Vec<u8>> {
         let input = self.as_input();
         let mut out = Zeroizing::new(Vec::with_capacity(512));
-        record_prefix(&mut out, 10, b"CPR1");
+        record_prefix(&mut out, 10, *b"CPR1");
         let key_bytes = Zeroizing::new(input.pass_key.to_canonical_cbor());
         encode_bytes(&mut out, &key_bytes, 2);
         encode_hash(&mut out, input.request_digest);
@@ -183,7 +183,7 @@ impl CommunityReservationV1 {
     /// Rejects malformed, nonpreferred, trailing, oversized, unsupported or
     /// locally invalid records, including invalid nested CPK1 coordinates.
     pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self> {
-        record_cursor(bytes, 512, 10, b"CPR1").and_then(|mut cursor| {
+        record_cursor(bytes, 512, 10, *b"CPR1").and_then(|mut cursor| {
             read_reservation(&mut cursor)
                 .and_then(Self::new)
                 .and_then(|record| canonical_end(&cursor).map(|()| record))

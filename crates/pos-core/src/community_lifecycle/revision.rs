@@ -92,7 +92,7 @@ impl CommunityStateRevisionV1 {
     pub fn to_canonical_cbor(&self) -> Zeroizing<Vec<u8>> {
         let input = self.as_input();
         let mut out = Zeroizing::new(Vec::with_capacity(MAX_RECORD_BYTES));
-        record_prefix(&mut out, 9, b"CSR1");
+        record_prefix(&mut out, 9, *b"CSR1");
         encode_origin(&mut out, input.producer_origin);
         encode_hash(&mut out, input.member_binding_digest);
         encode_optional_hash(&mut out, input.predecessor_revision_digest);
@@ -109,7 +109,7 @@ impl CommunityStateRevisionV1 {
     /// Rejects malformed/nonpreferred/trailing data, unknown versions, bounds
     /// and invalid identities or origin/predecessor combinations.
     pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self> {
-        record_cursor(bytes, MAX_RECORD_BYTES, 9, b"CSR1").and_then(|mut cursor| {
+        record_cursor(bytes, MAX_RECORD_BYTES, 9, *b"CSR1").and_then(|mut cursor| {
             read_input(&mut cursor)
                 .and_then(Self::new)
                 .and_then(|record| canonical_end(&cursor).map(|()| record))
