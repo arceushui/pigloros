@@ -56,7 +56,7 @@ same 99% line and 99% region thresholds to changed production Rust files under
 `**/src/**/*.rs`, except `crates/pos-owner-bridge-windows`, which is excluded from
 the root gate. That crate has its own thresholds (99% lines and regions for `src`
 outside `src/ffi`, 95% lines and 80% regions for `src/ffi`) in its crate-local
-`covgate.toml`, read by the Windows-only owner-bridge CI job (not yet landed), so
+`covgate.toml`, read by the Windows-only `owner-bridge-windows` CI job, so
 the Linux coverage job intentionally does not evaluate them.
 
 `covgate` reads the detailed LLVM JSON report produced by the completed

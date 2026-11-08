@@ -287,7 +287,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 file = "src/ffi/buffers.rs"
 line = 77
 function = "state"
-operation = "AtomicU32::from_ptr(base.as_ptr().wrapping_add(40).cast::<u32>())"
+operation = "AtomicU32::from_ptr(base.cast::<u32>().as_ptr().wrapping_add(10))"
 invariant = "all fixed capacities contain the aligned 32-bit state at40; the live COM mapping outlives this borrow. No 64-bit access overlaps it."
 hosted_test = "native_window_environment_and_buffers_lifecycle"
 
@@ -295,7 +295,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 file = "src/ffi/buffers.rs"
 line = 84
 function = "flags"
-operation = "AtomicU32::from_ptr(base.as_ptr().wrapping_add(44).cast::<u32>())"
+operation = "AtomicU32::from_ptr(base.cast::<u32>().as_ptr().wrapping_add(11))"
 invariant = "the aligned zero-flags word at44 is inside every admitted mapping and disjoint from state. No 64-bit access spans either word."
 hosted_test = "native_window_environment_and_buffers_lifecycle"
 
