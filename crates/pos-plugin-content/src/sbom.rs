@@ -113,7 +113,7 @@ pub(super) fn validate(value: &Value, component: &str) -> Result<(), Refusal> {
     }
 }
 
-fn items<'a>(value: &'a Value, field: &str) -> impl Iterator<Item = &'a Value> {
+fn items<'a>(value: &'a Value, field: &str) -> impl Iterator<Item = &'a Value> + use<'a> {
     value
         .get(field)
         .and_then(Value::as_array)
