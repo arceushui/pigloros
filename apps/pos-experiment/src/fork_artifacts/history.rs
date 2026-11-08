@@ -116,10 +116,8 @@ impl Driver for HistoryDriver {
     }
 
     fn step(&mut self, _: TimelineId, _: ObservationView<'_>) -> Result<StepOutput, RuntimeError> {
-        let mut payload = FACTUAL_PAYLOAD.to_vec();
-        if let Some(field) = self.hidden.as_deref().and_then(OnceLock::get) {
-            payload.extend_from_slice(field);
-        }
+        let field = self.hidden.as_deref().and_then(OnceLock::get);
+        let payload = [FACTUAL_PAYLOAD, field.map_or(&[][..], Vec::as_slice)].concat();
         Ok(StepOutput::new(vec![EventDraft::new(
             EntityId::from_ulid(Ulid::from(0x07_u128)),
             Kind::new(self.event_type),
