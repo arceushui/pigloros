@@ -25,6 +25,7 @@ use crate::{
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 mod readiness;
+mod session;
 
 fn assert_resource_counts(listener: &LoopbackListener, before: u64, expected: u32) {
     assert_eq!(
@@ -40,7 +41,7 @@ fn assert_resource_counts(listener: &LoopbackListener, before: u64, expected: u3
 }
 
 struct ResourceProbe {
-    policy: Events,
+    policy: Rc<Events>,
     deny: bool,
     requested: Cell<bool>,
     completed: Cell<bool>,
@@ -50,7 +51,7 @@ struct ResourceProbe {
 impl ResourceProbe {
     fn new(deny: bool) -> Self {
         Self {
-            policy: Events::default(),
+            policy: Rc::new(Events::default()),
             deny,
             requested: Cell::new(false),
             completed: Cell::new(false),
@@ -227,9 +228,9 @@ impl crate::Native {
                     [value; 16],
                 )));
             crate::create_private_directory(&folder)?;
-            let mut native = factory.session()?;
-            native.create_window(None, 480, 640)?;
             let probe = Rc::new(ResourceProbe::new(deny));
+            let mut native = session::Session::new(&factory, Rc::clone(&probe.policy))?;
+            native.create_window(None, 480, 640)?;
             let sink: Rc<dyn EventSink> = probe.clone();
             native.create_environment(runtime.root(), &folder, super::settings::OPTIONS, sink)?;
             completion(&factory, "resource environment creation", || {
@@ -345,6 +346,7 @@ impl crate::Native {
             assert!(!poll.remaining && poll.driver.is_none());
         }
         drop(host);
+        drop(store);
         root.remove()?;
         Ok(())
     }
@@ -363,7 +365,8 @@ impl crate::Native {
             ListenerConfig::adr(),
         )?;
         let mut factory = Self::owner_factory()?;
-        let mut native = factory.session()?;
+        let events = Rc::new(Events::default());
+        let mut native = session::Session::new(&factory, Rc::clone(&events))?;
         empty_session(native.as_mut());
         native.create_window(None, 480, 640)?;
         assert!(native.create_window(None, 480, 640).is_err());
@@ -371,7 +374,6 @@ impl crate::Native {
         assert!(window.exists);
         assert!(window.dpi > 0);
         native.resize_window(480, 640, window.dpi)?;
-        let events = Rc::new(Events::default());
         let sink: Rc<dyn EventSink> = events.clone();
         native.create_environment(runtime.root(), &folder, super::settings::OPTIONS, sink)?;
         assert!(native.pending());
