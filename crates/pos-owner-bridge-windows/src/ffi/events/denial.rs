@@ -56,9 +56,9 @@ impl Recovery {
         }
     }
 
-    /// No RefCell borrow crosses a COM call: Stop/Complete can dispatch another
+    /// No `RefCell` borrow crosses a COM call: Stop/Complete can dispatch another
     /// callback. Uncertain Complete owners remain held, but known cancellation
-    /// allows Close so the exact BrowserProcessExited can retire those owners.
+    /// allows Close so the exact `BrowserProcessExited` can retire those owners.
     pub(in crate::ffi) fn retry(&self) -> Result<()> {
         if self.exited.get() {
             return Ok(());

@@ -90,6 +90,27 @@ impl Drop for ResourceProbeGuard {
     }
 }
 
+const RESOURCE_CASES: [(u8, bool, crate::ResourceDenialFixture, u32); 7] = [
+    (0x20, false, crate::ResourceDenialFixture::Normal, 1),
+    (0x21, true, crate::ResourceDenialFixture::Normal, 0),
+    // Reproduce the former swallowed error against the real pinned listener.
+    (0x22, true, crate::ResourceDenialFixture::SwallowFailure, 1),
+    (
+        0x23,
+        true,
+        crate::ResourceDenialFixture::PropagateFailure,
+        0,
+    ),
+    (0x24, true, crate::ResourceDenialFixture::RetryStop, 0),
+    (
+        0x25,
+        true,
+        crate::ResourceDenialFixture::UncertainComplete,
+        0,
+    ),
+    (0x26, true, crate::ResourceDenialFixture::MissingDeferral, 0),
+];
+
 struct FixtureRoot(PathBuf);
 
 impl FixtureRoot {
@@ -205,27 +226,7 @@ impl crate::Native {
             ListenerConfig::adr(),
         )?;
         let mut factory = Self::owner_factory()?;
-        for (value, deny, mode, served) in [
-            (0x20, false, crate::ResourceDenialFixture::Normal, 1),
-            (0x21, true, crate::ResourceDenialFixture::Normal, 0),
-            // A real native negative control: the former swallowed error must
-            // let the request reach the actual digest-pinned listener.
-            (0x22, true, crate::ResourceDenialFixture::SwallowFailure, 1),
-            (
-                0x23,
-                true,
-                crate::ResourceDenialFixture::PropagateFailure,
-                0,
-            ),
-            (0x24, true, crate::ResourceDenialFixture::RetryStop, 0),
-            (
-                0x25,
-                true,
-                crate::ResourceDenialFixture::UncertainComplete,
-                0,
-            ),
-            (0x26, true, crate::ResourceDenialFixture::MissingDeferral, 0),
-        ] {
+        for (value, deny, mode, served) in RESOURCE_CASES {
             let _mode = ResourceProbeGuard::new(mode);
             let received_before = listener.received_request_count();
             let folder = root

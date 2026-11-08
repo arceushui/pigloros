@@ -57,6 +57,12 @@ enum Ownership {
     EnvironmentDropped,
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum CloseState {
+    Idle,
+    Pending,
+}
+
 pub(super) struct Surface {
     factory: Rc<dyn NativeFactory>,
     clock: Box<dyn MonotonicClock>,
@@ -77,7 +83,7 @@ pub(super) struct Surface {
     opening_spec: Option<SurfaceSpec>,
     foreground_deadline: Option<Instant>,
     navigation_issued: bool,
-    close_requested: bool,
+    close: CloseState,
     dpi: Cell<Option<u32>>,
     client: Cell<Option<ClientBounds>>,
 }
@@ -113,7 +119,7 @@ impl Surface {
             opening_spec: None,
             foreground_deadline: None,
             navigation_issued: false,
-            close_requested: false,
+            close: CloseState::Idle,
             dpi: Cell::new(None),
             client: Cell::new(None),
         })
@@ -207,7 +213,7 @@ impl OwnerWebSurface for Surface {
             self.generation = None;
             self.foreground_deadline = None;
             self.navigation_issued = false;
-            self.close_requested = false;
+            self.close = CloseState::Idle;
             self.dpi.set(None);
             self.client.set(None);
             self.opening_spec = Some(spec.clone());
@@ -286,7 +292,7 @@ impl OwnerWebSurface for Surface {
     }
 
     fn close_controller(&mut self) -> Result<()> {
-        self.close_requested = true;
+        self.close = CloseState::Pending;
         let buffers = self.zero_close_buffers();
         let removed = self.native.unsubscribe_view().map_err(unavailable);
         let closed = self.native.close_controller().map_err(unavailable);
@@ -297,13 +303,13 @@ impl OwnerWebSurface for Surface {
         if self.native.buffer_close_uncertain() {
             Err(unavailable(()))
         } else {
-            self.close_requested = false;
+            self.close = CloseState::Idle;
             Ok(())
         }
     }
 
     fn take_event(&mut self) -> Option<SurfaceEvent> {
-        if self.close_requested {
+        if self.close == CloseState::Pending {
             // The driver may already have returned quarantine. Continue native
             // retirement on its keeper's ordinary STA ticks without new clocks.
             let _closed_or_retained = self.close_controller();
@@ -326,7 +332,7 @@ impl OwnerWebSurface for Surface {
         self.finish_folder()?;
         self.identity = None;
         self.failed_open = false;
-        self.close_requested = false;
+        self.close = CloseState::Idle;
         self.opening_spec = None;
         self.ownership = Ownership::Idle;
         Ok(())
