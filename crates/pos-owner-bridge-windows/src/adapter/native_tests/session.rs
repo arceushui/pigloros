@@ -50,6 +50,10 @@ impl<'a> Session<'a> {
         self.native.as_mut()
     }
 
+    pub(super) fn as_ref(&self) -> &(dyn NativeOperations + 'static) {
+        self.native.as_ref()
+    }
+
     fn pump_retaining(&self) {
         if !matches!(
             self.factory.next(),

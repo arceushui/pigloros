@@ -18,9 +18,7 @@ use pos_owner_bridge_codec::{
 };
 
 use super::events::Events;
-use crate::{
-    BufferSlot, EventSink, NativeFactory, NativeOperations, NativePulse, NativeResult, StaPump,
-};
+use crate::{BufferSlot, EventSink, NativeOperations, NativePulse, NativeResult, StaPump};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
