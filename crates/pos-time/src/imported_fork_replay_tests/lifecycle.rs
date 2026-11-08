@@ -168,7 +168,7 @@ const fn deny_cleanup(record: &mut Transcript, connection: Connection, cleanup: 
 }
 
 fn install_native_observer(
-    store: &SqliteStore,
+    store: &mut SqliteStore,
     record: Arc<Mutex<Transcript>>,
     armed: Arc<AtomicBool>,
     verifier: Arc<ReservationVerifier>,
@@ -505,7 +505,7 @@ fn sqlite_case(
     let writer = SqliteStore::open(&path)?;
     drop(seed);
     let (verifier, before_keys) = reservation_verifier(writer, &world, requirements, call)?;
-    let store = if read_only {
+    let mut store = if read_only {
         SqliteStore::open_read_only(&path)?
     } else {
         SqliteStore::open(&path)?
@@ -513,7 +513,7 @@ fn sqlite_case(
     let record = Arc::new(Mutex::new(Transcript::default()));
     let armed = Arc::new(AtomicBool::new(false));
     install_native_observer(
-        &store,
+        &mut store,
         Arc::clone(&record),
         Arc::clone(&armed),
         Arc::clone(&verifier),

@@ -93,6 +93,37 @@ EXPECTED_BUILD_ENV = {
     "CARGO_INCREMENTAL": "0",
     "CARGO_PROFILE_TEST_DEBUG": "line-tables-only",
 }
+EXPECTED_SDK_HEADROOM_STEP = {
+    "name": "Reclaim unused SDK headroom",
+    "if": "${{ runner.environment == 'github-hosted' && runner.os == 'Linux' }}",
+    "run": """set -euo pipefail
+printf 'CI SDK headroom before (bytes)\\n'
+df -B1 -- / "${GITHUB_WORKSPACE}" "${RUNNER_TEMP}"
+printf 'CI SDK headroom before (inodes)\\n'
+df -i -- / "${GITHUB_WORKSPACE}" "${RUNNER_TEMP}"
+ci_root_device="$(stat -c '%d' -- /)"
+for ci_sdk_path in /usr/local/lib/android/sdk /usr/share/dotnet/sdk; do
+  if [[ ! -e "${ci_sdk_path}" && ! -L "${ci_sdk_path}" ]]; then
+    printf 'CI SDK absent: %s\\n' "${ci_sdk_path}"
+    continue
+  fi
+  printf 'CI SDK candidate: %s\\n' "${ci_sdk_path}"
+  test -d "${ci_sdk_path}"
+  test ! -L "${ci_sdk_path}"
+  test "$(readlink -e -- "${ci_sdk_path}")" = "${ci_sdk_path}"
+  ci_sdk_device="$(stat -c '%d' -- "${ci_sdk_path}")"
+  printf 'CI SDK device: %s root=%s sdk=%s\\n' "${ci_sdk_path}" "${ci_root_device}" "${ci_sdk_device}"
+  test "${ci_sdk_device}" = "${ci_root_device}"
+  sudo du -sx -B1 -- "${ci_sdk_path}"
+  sudo rm -rf --one-file-system -- "${ci_sdk_path}"
+  printf 'CI SDK removed: %s\\n' "${ci_sdk_path}"
+done
+printf 'CI SDK headroom after (bytes)\\n'
+df -B1 -- / "${GITHUB_WORKSPACE}" "${RUNNER_TEMP}"
+printf 'CI SDK headroom after (inodes)\\n'
+df -i -- / "${GITHUB_WORKSPACE}" "${RUNNER_TEMP}"
+""",
+}
 EXPECTED_BUILD_JOB = {
     "name": "asan build (nextest archive)",
     "needs": ["ci_change_scope", "cargo-crap"],
@@ -105,14 +136,15 @@ EXPECTED_BUILD_JOB = {
     "timeout-minutes": 60,
     "steps": [
         {"uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"},
+        EXPECTED_SDK_HEADROOM_STEP,
         {"run": "rm -f rust-toolchain.toml"},
         {
-            "uses": "dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de",
+            "uses": "dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8",
             "with": {"toolchain": "nightly-2026-07-01", "components": "rust-src"},
         },
         {
             "name": "Install cargo-nextest for the ASan archive",
-            "uses": "taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29",
+            "uses": "taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32",
             "with": {"tool": "cargo-nextest@0.9.146", "fallback": "none"},
         },
         {
@@ -129,7 +161,7 @@ EXPECTED_BUILD_JOB = {
         },
         {
             "name": "Upload ASan test archive",
-            "uses": "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+            "uses": "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9",
             "with": {
                 "name": ARCHIVE_ARTIFACT,
                 "path": "${{ runner.temp }}/asan-tests.tar.zst",
@@ -217,48 +249,17 @@ EXPECTED_GATE_JOB = {
         }
     ],
 }
-EXPECTED_SDK_HEADROOM_STEP = {
-    "name": "Reclaim unused SDK headroom for ASan",
-    "if": "${{ runner.environment == 'github-hosted' && runner.os == 'Linux' }}",
-    "run": """set -euo pipefail
-printf 'ASan SDK headroom before (bytes)\\n'
-df -B1 -- / "${GITHUB_WORKSPACE}" "${RUNNER_TEMP}"
-printf 'ASan SDK headroom before (inodes)\\n'
-df -i -- / "${GITHUB_WORKSPACE}" "${RUNNER_TEMP}"
-asan_root_device="$(stat -c '%d' -- /)"
-for asan_sdk_path in /usr/local/lib/android/sdk /usr/share/dotnet/sdk; do
-  if [[ ! -e "${asan_sdk_path}" && ! -L "${asan_sdk_path}" ]]; then
-    printf 'ASan SDK absent: %s\\n' "${asan_sdk_path}"
-    continue
-  fi
-  printf 'ASan SDK candidate: %s\\n' "${asan_sdk_path}"
-  test -d "${asan_sdk_path}"
-  test ! -L "${asan_sdk_path}"
-  test "$(readlink -e -- "${asan_sdk_path}")" = "${asan_sdk_path}"
-  asan_sdk_device="$(stat -c '%d' -- "${asan_sdk_path}")"
-  printf 'ASan SDK device: %s root=%s sdk=%s\\n' "${asan_sdk_path}" "${asan_root_device}" "${asan_sdk_device}"
-  test "${asan_sdk_device}" = "${asan_root_device}"
-  sudo du -sx -B1 -- "${asan_sdk_path}"
-  sudo rm -rf --one-file-system -- "${asan_sdk_path}"
-  printf 'ASan SDK removed: %s\\n' "${asan_sdk_path}"
-done
-printf 'ASan SDK headroom after (bytes)\\n'
-df -B1 -- / "${GITHUB_WORKSPACE}" "${RUNNER_TEMP}"
-printf 'ASan SDK headroom after (inodes)\\n'
-df -i -- / "${GITHUB_WORKSPACE}" "${RUNNER_TEMP}"
-""",
-}
 EXPECTED_SETUP_STEPS = [
     {"uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"},
     EXPECTED_SDK_HEADROOM_STEP,
     {"run": "rm -f rust-toolchain.toml"},
     {
-        "uses": "dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de",
+        "uses": "dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8",
         "with": {"toolchain": "nightly-2026-07-01"},
     },
     {
         "name": "Install cargo-nextest for partitioned ASan tests",
-        "uses": "taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29",
+        "uses": "taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32",
         "with": {"tool": "cargo-nextest@0.9.146", "fallback": "none"},
     },
     {
@@ -271,7 +272,7 @@ grep -Fqx "Ubuntu LLVM version 18.1.3" <<<"${symbolizer_version}"
     },
     {
         "name": "Download ASan test archive",
-        "uses": "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
+        "uses": "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333",
         "with": {"name": ARCHIVE_ARTIFACT, "path": "${{ runner.temp }}/asan-archive"},
     },
 ]

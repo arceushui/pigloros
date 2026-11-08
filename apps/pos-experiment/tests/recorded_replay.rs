@@ -1,12 +1,14 @@
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
 //! Public-interface tests for the ADR-062 Revision 8 slice R2 `RecordedReplay`
-//! execution step (#1220): RPL-001, ERA-001, INV-001..003 and RES-001.
+//! execution step (#1220): RPL-001, ERA-001, INV-001..003 and RES-001, and
+//! the slice R4 closure binding (#1222).
 //!
 //! Expected streams are hand-derived from the recorded drafts (Q3): the
 //! digests below follow the documented `recorded_replay` conventions and do
 //! not call the execution step.
 
+use ed25519_dalek::{Signer, SigningKey};
 use pos_conformance::{
     draft_execution_profile_bytes_v1, draft_trust_policy_snapshot_bytes_v1,
     ArtifactClosureStatusV1, ArtifactRevocationStatusV1, DivergenceLocationKindV1,
@@ -14,7 +16,7 @@ use pos_conformance::{
     ReplayClaimV1, ReproManifestV1, ReproVerificationRequestV1, ReproducibilityClassV1,
     SafeErrorCodeV1, TrustPolicySnapshotV1, TrustRootStatusV1, TrustSignatureStatusV1,
     TrustSnapshotContinuityV1, VerificationOutcomeV1, VerificationPreflightEvidenceV1,
-    VerificationPreflightInputV1, VerificationResultV1,
+    VerificationPreflightInputV1, VerificationResultV1, DRAFT_TRUST_POLICY_OPERATOR_KEY_V1,
 };
 use pos_core::{
     store::{export_timeline, EventStore, SeqRange},
@@ -30,7 +32,11 @@ use pos_experiment::authoritative_comparison::{
 };
 use pos_experiment::recorded_replay::{
     execute_recorded_replay_v1, ExportedTimelineMemberV1, RecordedReplayClosureV1,
-    RecordedReplayInputV1, RecordedReplayOutcomeV1,
+    RecordedReplayInputV1,
+};
+use pos_experiment::verification_execution::{
+    recomputation_closure_digest_v1, recorded_replay_closure_digest_v1,
+    trust_signature_evidence_v1, VerificationExecutionOutcomeV1,
 };
 use pos_runtime::{Driver, ObservationView, RuntimeError, StepOutput};
 use pos_state::ProjectionRegistry;
@@ -49,6 +55,11 @@ const PAYLOADS: [u8; 2] = [7, 9];
 const LICENCE: &[u8] = b"SPDX-License-Identifier: MIT\n";
 const FIXTURE_DIGEST: [u8; 32] = [0xf1; 32];
 const REDUCER: &str = "counter";
+/// The public deterministic repository fixture-authority signing key.
+const DRAFT_AUTHORITY_SIGNING_KEY: [u8; 32] = [7; 32];
+/// A signing key the Draft authority never pinned.
+const ATTACKER_SIGNING_KEY: [u8; 32] = [0xa7; 32];
+const OPERATOR_SIGNATURE_DOMAIN: &[u8] = b"PiglorOS.TPS1.operator-signature.v1\0";
 
 /// Counts every Reducer-visible Event per entity.
 struct CountReducer;
@@ -224,6 +235,23 @@ impl Recording {
     }
 }
 
+/// The closure composition of slice R4, hand-derived: the member count, then
+/// the exported Timeline (role 1) and the licence (role 3), each as its role
+/// and its 32-byte artifact digest.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn closure_digest(export: [u8; 32], licence: &[u8]) -> [u8; 32] {
+    digest(
+        b"PiglorOS.RecordedReplayClosure.v1",
+        &[
+            &2_u64.to_be_bytes(),
+            &[1],
+            &export,
+            &[3],
+            blake3::hash(licence).as_bytes(),
+        ],
+    )
+}
+
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn digest(domain: &[u8], parts: &[&[u8]]) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
@@ -262,6 +290,8 @@ fn result_digest(stream: &AuthoritativeStreamV1) -> [u8; 32] {
         parts.push(checkpoint.digest.to_vec());
         parts.push(checkpoint.size.to_be_bytes().to_vec());
     }
+    // A recorded export has no typed failures: the typed-failure count is 0.
+    parts.push(0_u64.to_be_bytes().to_vec());
     let parts: Vec<&[u8]> = parts.iter().map(Vec::as_slice).collect();
     digest(b"PiglorOS.RecordedReplayResult.v1", &parts)
 }
@@ -333,6 +363,7 @@ impl Fixture {
         execution_profile.profile_digest = execution_profile.digest();
         let profile_digest = execution_profile.profile_digest;
         let trust_digest = trust_policy_snapshot.digest()?;
+        let closure = closure_digest(EXPORT_DIGEST.digest(), LICENCE);
         let manifest = ReproManifestV1 {
             format_version: 1,
             input_digest: [10; 32],
@@ -345,7 +376,7 @@ impl Fixture {
             execution_profile: execution_profile.profile_id.clone(),
             execution_profile_digest: profile_digest,
             trust_policy_snapshot_digest: trust_digest,
-            artifact_closure_digest: [8; 32],
+            artifact_closure_digest: closure,
             evaluator_digest: [9; 32],
             replay_claim: ReplayClaimV1::Exact,
             plugin_versions: BTreeMap::new(),
@@ -359,12 +390,16 @@ impl Fixture {
             reproducibility_class: class,
             execution_profile_digest: profile_digest,
             trust_policy_snapshot_digest: trust_digest,
-            artifact_closure_digest: [8; 32],
+            artifact_closure_digest: closure,
             evaluator_digest: [9; 32],
             report_bytes_limit: 1024,
         };
         let canonical_request_bytes = request.to_canonical_cbor()?;
         let canonical_request_digest = request.digest()?;
+        let trust_signature = trust_signature_evidence_v1(
+            &trust_policy_snapshot,
+            &DRAFT_TRUST_POLICY_OPERATOR_KEY_V1,
+        );
         Ok(Self {
             request,
             canonical_request_bytes,
@@ -374,7 +409,7 @@ impl Fixture {
             trust_policy_snapshot,
             evidence: VerificationPreflightEvidenceV1 {
                 trust_root: TrustRootStatusV1::Known,
-                trust_signature: TrustSignatureStatusV1::Valid,
+                trust_signature,
                 artifact_revocation: ArtifactRevocationStatusV1::Clear,
                 trust_continuity: TrustSnapshotContinuityV1 {
                     previous_epoch: None,
@@ -389,6 +424,19 @@ impl Fixture {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn recorded() -> TestResult<Self> {
         Self::new(ReproducibilityClassV1::RecordedReplay)
+    }
+
+    /// Bind the request to `snapshot` and take its trust-signature evidence
+    /// from the same authentication the host runs.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn bind_snapshot(&mut self, snapshot: TrustPolicySnapshotV1) -> TestResult {
+        let digest = snapshot.digest()?;
+        self.evidence.trust_signature =
+            trust_signature_evidence_v1(&snapshot, &DRAFT_TRUST_POLICY_OPERATOR_KEY_V1);
+        self.trust_policy_snapshot = snapshot;
+        self.manifest.trust_policy_snapshot_digest = digest;
+        self.request.trust_policy_snapshot_digest = digest;
+        self.refresh_manifest_binding()
     }
 
     /// Re-bind RVR1 to the edited manifest.
@@ -430,7 +478,7 @@ fn run(
     closure: RecordedReplayClosureV1<'_>,
     evaluation: &ReplayClaimEvaluationV1,
     projections: &mut ProjectionRegistry,
-) -> TestResult<RecordedReplayOutcomeV1> {
+) -> TestResult<VerificationExecutionOutcomeV1> {
     let expected = recording.expected(u64::try_from(recording.payloads.len())?)?;
     let outcome = execute_recorded_replay_v1(
         RecordedReplayInputV1 {
@@ -464,7 +512,7 @@ fn run(
 /// Assert a refusal with one closed first error and no comparison.
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn assert_refused(
-    outcome: &RecordedReplayOutcomeV1,
+    outcome: &VerificationExecutionOutcomeV1,
     expected: (VerificationOutcomeV1, ReplayClaimV1, SafeErrorCodeV1),
     coordinate: Option<&str>,
 ) {
@@ -932,6 +980,64 @@ fn a_denied_snapshot_fence_is_unverifiable_artifacts_missing() -> TestResult {
     Ok(())
 }
 
+/// A TPS1 whose operator signature does not authenticate under the pinned
+/// Draft authority key is refused at `trust_signature`: one with a flipped
+/// signature bit, one re-signed by the Draft authority over the unsigned
+/// fields without the operator-signature domain, and one whose `trust_roots`
+/// name an attacker key that signed it over the correct domain (the operator
+/// key is never read from the TPS1's own roots).
+#[test]
+fn a_tps1_that_does_not_authenticate_is_refused_at_trust_signature() -> TestResult {
+    let recording = Recording::new()?;
+    let draft = Fixture::recorded()?.trust_policy_snapshot;
+    let mut flipped = draft.clone();
+    flipped.operator_signature[0] ^= 1;
+    let mut domain_less = draft.clone();
+    let message = domain_less.operator_signature_message_v1()?;
+    let unsigned = message
+        .strip_prefix(OPERATOR_SIGNATURE_DOMAIN)
+        .ok_or("the TPS1 operator-signature message must start with its domain")?;
+    domain_less.operator_signature = SigningKey::from_bytes(&DRAFT_AUTHORITY_SIGNING_KEY)
+        .sign(unsigned)
+        .to_bytes();
+    let attacker = SigningKey::from_bytes(&ATTACKER_SIGNING_KEY);
+    let mut self_rooted = draft;
+    self_rooted.trust_roots[0].public_key = attacker.verifying_key().to_bytes();
+    self_rooted.operator_signature = attacker
+        .sign(&self_rooted.operator_signature_message_v1()?)
+        .to_bytes();
+    // Well formed and authentic under its own root: only the pin refuses it.
+    assert_eq!(
+        trust_signature_evidence_v1(&self_rooted, &self_rooted.trust_roots[0].public_key),
+        TrustSignatureStatusV1::Valid
+    );
+    for snapshot in [flipped, domain_less, self_rooted] {
+        let mut fixture = Fixture::recorded()?;
+        fixture.bind_snapshot(snapshot)?;
+        assert_eq!(
+            fixture.evidence.trust_signature,
+            TrustSignatureStatusV1::Invalid
+        );
+        let outcome = run(
+            &recording,
+            &fixture,
+            recording.closure(),
+            &evaluation_exact()?,
+            &mut projections(),
+        )?;
+        assert_refused(
+            &outcome,
+            (
+                VerificationOutcomeV1::InvalidManifest,
+                ReplayClaimV1::Exact,
+                SafeErrorCodeV1::SignatureInvalid,
+            ),
+            Some("trust_signature"),
+        );
+    }
+    Ok(())
+}
+
 #[test]
 fn a_revoked_artifact_is_invalid_manifest_at_revocation() -> TestResult {
     let recording = Recording::new()?;
@@ -1020,4 +1126,82 @@ fn an_empty_export_is_verified_exact_at_fold_cursor_zero() -> TestResult {
         Some(result_digest(&recording.expected(0)?))
     );
     Ok(())
+}
+
+#[test]
+fn closure_members_that_do_not_compose_the_request_digest_are_refused() -> TestResult {
+    let recording = Recording::new()?;
+    let fixture = Fixture::recorded()?;
+    assert_eq!(
+        recorded_replay_closure_digest_v1(EXPORT_DIGEST.digest(), LICENCE),
+        closure_digest(EXPORT_DIGEST.digest(), LICENCE)
+    );
+    assert_eq!(
+        fixture.request.artifact_closure_digest,
+        closure_digest(EXPORT_DIGEST.digest(), LICENCE)
+    );
+    let mismatch = (
+        VerificationOutcomeV1::InvalidManifest,
+        ReplayClaimV1::Exact,
+        SafeErrorCodeV1::DigestMismatch,
+    );
+    let other_licence = RecordedReplayClosureV1 {
+        licence: Some(b"SPDX-License-Identifier: Apache-2.0\n".as_slice()),
+        ..recording.closure()
+    };
+    let other_export = RecordedReplayClosureV1 {
+        timeline_export: Some(ExportedTimelineMemberV1 {
+            export: &recording.export,
+            artifact_digest: FOREIGN_DIGEST,
+        }),
+        ..recording.closure()
+    };
+    for closure in [other_licence, other_export] {
+        let mut projections = projections();
+        let outcome = run(
+            &recording,
+            &fixture,
+            closure,
+            &evaluation_exact()?,
+            &mut projections,
+        )?;
+        assert_refused(&outcome, mismatch, Some("artifact_closure"));
+        assert_eq!(
+            projections.state_for(recording.timeline, &recording.entity)?,
+            None
+        );
+    }
+
+    // A coordinate the preflight checks before the closure is still first.
+    let mut unsupported = Fixture::recorded()?;
+    unsupported.manifest.format_version = 2;
+    unsupported.refresh_manifest_binding()?;
+    let outcome = run(
+        &recording,
+        &unsupported,
+        other_licence,
+        &evaluation_exact()?,
+        &mut projections(),
+    )?;
+    assert_refused(
+        &outcome,
+        (
+            VerificationOutcomeV1::InvalidManifest,
+            ReplayClaimV1::Exact,
+            SafeErrorCodeV1::UnsupportedVersion,
+        ),
+        Some("manifest"),
+    );
+    Ok(())
+}
+
+#[test]
+fn the_same_member_digest_under_the_two_roles_gives_different_closures() {
+    // Section 4 of the note: role 1 (exported Timeline) and role 2
+    // (recomputation subject) are part of the composition.
+    let digest = EXPORT_DIGEST.digest();
+    assert_ne!(
+        recorded_replay_closure_digest_v1(digest, LICENCE),
+        recomputation_closure_digest_v1(digest, LICENCE)
+    );
 }

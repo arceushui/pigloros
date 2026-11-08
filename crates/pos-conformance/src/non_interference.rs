@@ -58,7 +58,12 @@ pub struct NonInterferenceCaptureProfileV1 {
 }
 
 /// One raw operational surface captured before allowed normalization.
-#[derive(Clone, Debug, Eq, PartialEq)]
+///
+/// The serde form is the host transport of a capture taken in another host
+/// process (for example the fresh-process Local runner of slice N0); it is
+/// not an NIA1 or NIR1 wire member.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum NonInterferenceRawOperationalV1 {
     CategoryCountDigest {
         category: u16,
@@ -90,7 +95,8 @@ pub enum NonInterferenceRawOperationalV1 {
 
 /// Host-owned raw capture input. Only the normalizer can produce the capture
 /// accepted by the matrix runner.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NonInterferenceRawCaptureV1 {
     pub surface_names: Vec<String>,
     pub authoritative: Vec<Vec<u8>>,
@@ -643,7 +649,7 @@ fn profile_digest(profile: &NonInterferenceCaptureProfileV1) -> [u8; 32] {
         bytes.push(variant_code(*variant));
     }
     for mode in &profile.modes {
-        bytes.push(mode_code(*mode));
+        bytes.push(mode.wire_code());
     }
     bytes.extend_from_slice(&profile.normalization_version.to_be_bytes());
     bytes.extend_from_slice(&profile.max_surface_bytes.to_be_bytes());
@@ -970,15 +976,6 @@ const fn variant_code(variant: NonInterferenceVariantV1) -> u8 {
         NonInterferenceVariantV1::Denial => 1,
         NonInterferenceVariantV1::WarmCache => 2,
         NonInterferenceVariantV1::ColdCache => 3,
-    }
-}
-
-const fn mode_code(mode: ExecutionModeV1) -> u8 {
-    match mode {
-        ExecutionModeV1::Local => 0,
-        ExecutionModeV1::AirGapped => 1,
-        ExecutionModeV1::Replay => 2,
-        ExecutionModeV1::Fork => 3,
     }
 }
 

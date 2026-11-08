@@ -137,6 +137,11 @@ fn base() -> Value {
     let mut malformed = subcase("mal.6", json!([]), json!({"kind": "malformed"}));
     malformed["nested"] = json!(H32);
     subcases.push(malformed);
+    subcases.push(subcase(
+        "ind.5",
+        json!([]),
+        json!({"kind": "trapped", "class": "unreachable", "export": "drive"}),
+    ));
     json!({
         "schema": SCHEMA_ID,
         "family": "positive",
@@ -164,8 +169,13 @@ fn at<'a>(value: &'a mut Value, pointer: &str) -> &'a mut Value {
 #[test]
 fn every_object_of_the_grammar_is_accepted_exactly() -> TestResult {
     let case = parse(&base())?;
-    assert_eq!(case.subcases.len(), 11);
+    assert_eq!(case.subcases.len(), 12);
     assert_eq!(case.provider, None);
+    let trapped = TrappedV1 {
+        class: Text("unreachable".to_owned()),
+        export: TrapExportV1::Drive,
+    };
+    assert_eq!(case.subcases[11].expect, ExpectV1::Trapped(trapped));
     assert!(matches!(case.subcases[0].steps[3], StepV1::Pass(_)));
     Ok(())
 }
@@ -230,6 +240,7 @@ const OBJECTS: &[&str] = &[
     "/subcases/9/expect/compute",
     "/subcases/9/expect/compute/runtime",
     "/subcases/10/expect",
+    "/subcases/11/expect",
 ];
 
 #[test]
@@ -626,6 +637,10 @@ fn a_step_or_expectation_kind_outside_the_grammar_is_payload_invalid() {
     assert_eq!(untagged, Err(InvalidCaseV1));
     let kind = changed(|value| *at(value, "/subcases/0/expect/kind") = json!("operational"));
     assert_eq!(kind, Err(InvalidCaseV1));
+    // ADR-061 R13: a pass step invokes only `drive`, so a trap of another export is outside
+    // the grammar.
+    let export = changed(|value| *at(value, "/subcases/11/expect/export") = json!("reduce"));
+    assert_eq!(export, Err(InvalidCaseV1));
     let compute = changed(|value| *at(value, "/subcases/6/expect/compute/what") = json!("sha"));
     assert_eq!(compute, Err(InvalidCaseV1));
     let field = changed(|value| *at(value, "/subcases/7/expect/compute/field") = json!("digest"));

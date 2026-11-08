@@ -8,7 +8,9 @@ use crate::evaluator::{case_attempt, selector_bounded_hard_caps};
 use crate::evaluator_protocol::EvaluationRequest;
 use crate::profile::Profile;
 use crate::selector::SelectorBoundaryError;
-use crate::signed_bundle::{preflight_signed_bundle_reader, verify_signed_bundle_reader};
+use crate::signed_bundle::{
+    preflight_signed_bundle_reader, verify_signed_bundle_reader, TrustPolicyOperatorAnchor,
+};
 
 const CFB1_OBJECT: InstallationObjectKind = InstallationObjectKind(14);
 const TPS1_OBJECT: InstallationObjectKind = InstallationObjectKind(15);
@@ -22,7 +24,9 @@ impl AuthenticatedSelectorBootstrap {
     ///
     /// CFB1 is preflighted against CPF1-selected hard caps before full closure
     /// materialization. TPS1 comes only from the typed SIC1 index; it cannot be
-    /// supplied in EVR1 or substituted from a CFB1 member.
+    /// supplied in EVR1 or substituted from a CFB1 member. Its operator
+    /// signature is authenticated only by the TRS1 deployment-operator key
+    /// (ADR-069 R8), never by its own trust roots.
     ///
     /// # Errors
     /// Returns a closed failure when either selected descriptor is absent or
@@ -33,25 +37,30 @@ impl AuthenticatedSelectorBootstrap {
         request: &EvaluationRequest,
         ordinal: u16,
     ) -> Result<ResolvedInstalledCase, SelectorBoundaryError> {
-        self.retained_case_descriptors(request)
-            .and_then(|(mut archive, policy_bytes)| {
-                preflight_signed_bundle_reader(&mut archive, &policy_bytes, request)
-                    .map_err(artifact_invalid)
-                    .map(|preflight| (archive, policy_bytes, preflight))
+        self.trust_policy_operator_key()
+            .map(TrustPolicyOperatorAnchor::from_trusted_registry)
+            .and_then(|operator| {
+                self.retained_case_descriptors(request)
+                    .map(|(archive, policy_bytes)| (operator, archive, policy_bytes))
             })
-            .and_then(|(archive, policy_bytes, preflight)| {
+            .and_then(|(operator, mut archive, policy_bytes)| {
+                preflight_signed_bundle_reader(&mut archive, &policy_bytes, &operator, request)
+                    .map_err(artifact_invalid)
+                    .map(|preflight| (operator, archive, policy_bytes, preflight))
+            })
+            .and_then(|(operator, archive, policy_bytes, preflight)| {
                 Profile::authenticated_hard_caps(preflight.profile_bytes(), request)
                     .map_err(artifact_invalid)
-                    .map(|hard_caps| (archive, policy_bytes, preflight, hard_caps))
+                    .map(|hard_caps| (operator, archive, policy_bytes, preflight, hard_caps))
             })
-            .and_then(|(archive, policy_bytes, preflight, hard_caps)| {
+            .and_then(|(operator, archive, policy_bytes, preflight, hard_caps)| {
                 preflight
                     .enforce_selected_caps(hard_caps.into())
                     .map_err(artifact_invalid)
-                    .map(|()| (archive, policy_bytes, hard_caps))
+                    .map(|()| (operator, archive, policy_bytes, hard_caps))
             })
-            .and_then(|(mut archive, policy_bytes, hard_caps)| {
-                verify_signed_bundle_reader(&mut archive, &policy_bytes, request)
+            .and_then(|(operator, mut archive, policy_bytes, hard_caps)| {
+                verify_signed_bundle_reader(&mut archive, &policy_bytes, &operator, request)
                     .map_err(artifact_invalid)
                     .map(|verified| (verified, hard_caps))
             })
@@ -65,7 +74,10 @@ impl AuthenticatedSelectorBootstrap {
                     .selected_fixtures(request)
                     .into_iter()
                     .nth(usize::from(ordinal))
-                    .filter(|fixture| fixture.modes.contains(&verified.mode))
+                    .filter(|fixture| {
+                        fixture.modes.contains(&verified.mode)
+                            && fixture.release_admission_authorized()
+                    })
                     .cloned()
                     .ok_or(SelectorBoundaryError::ArtifactInvalid)
                     .map(|fixture| (verified, hard_caps, profile, fixture))

@@ -29,7 +29,7 @@ GUEST = "plugins/community/examples/compatibility-prototype/rust-guest/Cargo.loc
 PROBE = "plugins/community/examples/compatibility-prototype/probe-guest/Cargo.lock"
 REUSABLE = ROOT / ".github/workflows/third-party-notices.yml"
 CI = ROOT / ".github/workflows/ci.yml"
-TAKI = "taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29"
+TAKI = "taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32"
 # Complete reviewed parsed programs; changes require review of the executable paths.
 NOTICE_PROGRAM_SHA256 = {
     "Validate the requested notice scope": "b26c9526bcd9f8a7add40473dd18cc1dc8341f18f4049d76e7ac3fe25f957d15",
@@ -1121,14 +1121,14 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertEqual(steps, [
             {"uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"},
             {"name": validate, "run": NOTICE_PROGRAM_SHA256[validate]},
-            {"uses": "dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de",
+            {"uses": "dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8",
              "with": {"toolchain": "1.97.1", "components": "rust-src", "targets": "wasm32-unknown-unknown"}},
             {"name": "Install cargo-about", "uses": TAKI, "with": {"tool": "cargo-about@0.9.2"}},
             {"name": verify, "env": {"GITHUB_TOKEN": "${{ github.token }}"}, "run": NOTICE_PROGRAM_SHA256[verify]},
             {"name": generate, "env": {"REPORTS": "${{ runner.temp }}/cargo-about"}, "run": NOTICE_PROGRAM_SHA256[generate]},
             {"name": assemble, "env": {"REPORTS": "${{ runner.temp }}/cargo-about", "BUNDLE": "${{ runner.temp }}/third-party-notices"},
              "run": NOTICE_PROGRAM_SHA256[assemble]},
-            {"name": "Upload the notice bundle", "uses": "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+            {"name": "Upload the notice bundle", "uses": "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9",
              "with": {"name": "third-party-notices", "path": "${{ runner.temp }}/third-party-notices", "if-no-files-found": "error"}},
         ])
 

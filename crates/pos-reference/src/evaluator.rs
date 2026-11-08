@@ -11,10 +11,11 @@ use crate::evaluator_protocol::{
 };
 use crate::profile::{
     DeterministicBudget, EvaluatorHardCaps, Fixture, NamespacedFailure, Profile, ProfileError,
-    StrictOracle,
+    ProviderKey, StrictOracle,
 };
 use crate::signed_bundle::{
-    preflight_signed_bundle_bytes, verify_signed_bundle, BundleError, VerifiedBundle,
+    preflight_signed_bundle_bytes, verify_signed_bundle, BundleError, TrustPolicyOperatorAnchor,
+    VerifiedBundle,
 };
 
 /// Deterministic resource consumption reported by a public subject adapter.
@@ -40,6 +41,61 @@ impl ResourceUsage {
             || self.storage_bytes > budget.storage_bytes
             || self.execution_steps > budget.execution_steps
             || self.simulation_time_ns > budget.simulation_time_ns
+    }
+}
+
+/// One reviewed fixture executor declaration (ADR-068 `FixtureExecutorV1`).
+///
+/// The composition root that builds the subject adapter supplies the
+/// declarations; the evaluator never discovers them. A selected fixture is
+/// dispatched only when exactly one declaration names its exact CPF1 provider
+/// key, its subject adapter and its pinned schema digest: there is no version
+/// range, fallback or compatibility reader. The implementation digest is
+/// provenance only: it must equal the EVR1 subject artifact digest and never
+/// enters fixture identity or the pass/fail decision.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FixtureExecutorV1 {
+    /// The exact provider ID, contract version and ABI the executor implements.
+    pub provider: ProviderKey,
+    /// The public protocol through which the executor is reached.
+    pub subject_adapter: SubjectAdapterKind,
+    /// The BLAKE3 digest of the schema member the executor recognizes, by family code.
+    pub schema_digests: [[u8; 32]; 7],
+    /// The digest of the executor implementation, recorded as provenance.
+    pub implementation_digest: [u8; 32],
+    /// The capabilities whose semantics the executor implements.
+    pub capability_ids: Vec<String>,
+}
+
+impl FixtureExecutorV1 {
+    fn implements(&self, fixture: &Fixture) -> bool {
+        self.provider == fixture.provider
+            && self.subject_adapter == fixture.subject_adapter
+            && self.schema_digests[usize::from(fixture.family.code())] == fixture.schema.digest
+    }
+}
+
+/// Whether `fixture` is dispatched: exactly one declaration implements it, its
+/// implementation is the EVR1 subject, it implements every fixture capability,
+/// and the fixture's downgrade authority holds.
+fn dispatches(
+    fixture: &Fixture,
+    request: &EvaluationRequest,
+    executors: &[FixtureExecutorV1],
+) -> bool {
+    let mut implementing = executors
+        .iter()
+        .filter(|executor| executor.implements(fixture));
+    match (implementing.next(), implementing.next()) {
+        (Some(executor), None) => {
+            executor.implementation_digest == request.subject_artifact_digest
+                && fixture
+                    .capability_ids
+                    .iter()
+                    .all(|capability| executor.capability_ids.contains(capability))
+                && fixture.release_admission_authorized()
+        }
+        _ => false,
     }
 }
 
@@ -197,6 +253,14 @@ impl From<ProfileError> for EvaluatorError {
 /// Execute a complete, independently parsed evaluation and emit reverified
 /// CNR1 bytes. Exit/process policy belongs to the thin executable adapter.
 ///
+/// Each selected fixture is dispatched through `adapter` only when exactly one
+/// of `executors` implements its exact CPF1 provider identity (ADR-068); every
+/// other selected fixture is a typed non-executed `Unavailable` outcome and the
+/// adapter is not called for it.
+///
+/// The TPS1 is authenticated only by the caller-pinned `operator` anchor,
+/// never by its own trust roots.
+///
 /// # Errors
 /// Returns a closed failure when the request, bundle, profile, adapter
 /// identity, output capability, or emitted report is invalid. Individual
@@ -205,13 +269,16 @@ pub fn evaluate(
     request_bytes: &[u8],
     archive_bytes: &[u8],
     trust_policy_bytes: &[u8],
+    operator: &TrustPolicyOperatorAnchor,
     evaluator: &VerifiedEvaluatorBuildIdentity,
+    executors: &[FixtureExecutorV1],
     adapter: &mut impl SubjectAdapter,
 ) -> Result<EvaluationArtifacts, EvaluatorError> {
     let (request, bundle, profile) = verified_inputs(
         request_bytes,
         archive_bytes,
         trust_policy_bytes,
+        operator,
         evaluator,
         adapter.kind(),
         adapter.subject_artifact_digest(),
@@ -225,7 +292,7 @@ pub fn evaluate(
     {
         return Err(EvaluatorError::Independence);
     }
-    let mut cases = evaluate_cases(&profile, &bundle, &request, adapter)?;
+    let mut cases = evaluate_cases(&profile, &bundle, &request, executors, adapter)?;
     cases.sort_by(compare_cases);
 
     let replay_claim = cases
@@ -284,6 +351,7 @@ fn verified_inputs(
     request_bytes: &[u8],
     archive_bytes: &[u8],
     trust_policy_bytes: &[u8],
+    operator: &TrustPolicyOperatorAnchor,
     evaluator: &VerifiedEvaluatorBuildIdentity,
     adapter_kind: SubjectAdapterKind,
     subject_artifact_digest: [u8; 32],
@@ -294,11 +362,12 @@ fn verified_inputs(
     {
         return Err(EvaluatorError::AdapterIdentity);
     }
-    let caps = enforce_authenticated_selected_caps(archive_bytes, trust_policy_bytes, &request)?;
+    let caps =
+        enforce_authenticated_selected_caps(archive_bytes, trust_policy_bytes, operator, &request)?;
     if !evaluator.admits_compression_expansion(caps.max_compression_expansion) {
         return Err(EvaluatorError::Profile);
     }
-    let bundle = verify_signed_bundle(archive_bytes, trust_policy_bytes, &request)?;
+    let bundle = verify_signed_bundle(archive_bytes, trust_policy_bytes, operator, &request)?;
     let profile = Profile::from_bundle(&bundle, &request)?;
     Ok((request, bundle, profile))
 }
@@ -306,9 +375,11 @@ fn verified_inputs(
 fn enforce_authenticated_selected_caps(
     archive_bytes: &[u8],
     trust_policy_bytes: &[u8],
+    operator: &TrustPolicyOperatorAnchor,
     request: &EvaluationRequest,
 ) -> Result<EvaluatorHardCaps, EvaluatorError> {
-    let preflight = preflight_signed_bundle_bytes(archive_bytes, trust_policy_bytes, request)?;
+    let preflight =
+        preflight_signed_bundle_bytes(archive_bytes, trust_policy_bytes, operator, request)?;
     let caps = Profile::authenticated_hard_caps(preflight.profile_bytes(), request)?;
     preflight
         .enforce_selected_caps(caps.into())
@@ -320,13 +391,14 @@ fn evaluate_cases(
     profile: &Profile,
     bundle: &VerifiedBundle,
     request: &EvaluationRequest,
+    executors: &[FixtureExecutorV1],
     adapter: &mut impl SubjectAdapter,
 ) -> Result<Vec<CaseOutcome>, EvaluatorError> {
     let mut outcomes = Vec::new();
     for (ordinal, fixture) in profile.selected_fixtures(request).into_iter().enumerate() {
-        if let Some(outcome) =
-            evaluate_selected_fixture(profile, bundle, request, fixture, ordinal, adapter)?
-        {
+        if let Some(outcome) = evaluate_selected_fixture(
+            profile, bundle, request, fixture, ordinal, executors, adapter,
+        )? {
             outcomes.push(outcome);
         }
     }
@@ -341,12 +413,21 @@ fn evaluate_selected_fixture(
     request: &EvaluationRequest,
     fixture: &Fixture,
     ordinal: usize,
+    executors: &[FixtureExecutorV1],
     adapter: &mut impl SubjectAdapter,
 ) -> Result<Option<CaseOutcome>, EvaluatorError> {
     fixture
         .modes
         .contains(&bundle.mode)
         .then(|| {
+            if !dispatches(fixture, request, executors) {
+                return Ok(case_outcome(
+                    fixture,
+                    bundle.mode,
+                    Err(AdapterError::Unavailable),
+                    fixture.provenance_digest,
+                ));
+            }
             u16::try_from(ordinal)
                 .map_err(|_| EvaluatorError::Profile)
                 .map(|ordinal| adapter.set_case_ordinal(ordinal))

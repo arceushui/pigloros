@@ -352,7 +352,7 @@ mod tests {
     }
 
     fn write_before_second_select(
-        reader: &Connection,
+        reader: &mut Connection,
         writer: Connection,
         sql: &'static str,
     ) -> rusqlite::Result<std::sync::Arc<std::sync::Mutex<InterStatementWrite>>> {
@@ -398,7 +398,7 @@ mod tests {
             for held_snapshot in [false, true] {
                 let directory = tempfile::tempdir()?;
                 let path = directory.path().join("operation.sqlite");
-                let store = super::super::SqliteStore::open(
+                let mut store = super::super::SqliteStore::open(
                     path.to_str().ok_or("non-UTF-8 test path")?,
                 )?;
                 super::super::sqlite_insert_fork_admission_operation(&store.conn, &row)?;
@@ -410,7 +410,7 @@ mod tests {
                 if held_snapshot {
                     store.conn.execute_batch("BEGIN DEFERRED")?;
                 }
-                let observation = write_before_second_select(&store.conn, writer, sql)?;
+                let observation = write_before_second_select(&mut store.conn, writer, sql)?;
                 let result = operation_with_context(
                     &store.conn,
                     row.kind,
@@ -460,7 +460,7 @@ mod tests {
             for held_snapshot in [false, true] {
                 let directory = tempfile::tempdir()?;
                 let path = directory.path().join("principal-operation.sqlite");
-                let store = super::super::SqliteStore::open(
+                let mut store = super::super::SqliteStore::open(
                     path.to_str().ok_or("non-UTF-8 test path")?,
                 )?;
                 super::super::sqlite_insert_fork_admission_operation(&store.conn, &row)?;
@@ -480,7 +480,7 @@ mod tests {
                 if held_snapshot {
                     store.conn.execute_batch("BEGIN DEFERRED")?;
                 }
-                let observation = write_before_second_select(&store.conn, writer, sql)?;
+                let observation = write_before_second_select(&mut store.conn, writer, sql)?;
                 let result = principal_operation_id_with_context(
                     &store.conn,
                     row.result_digest,
@@ -521,7 +521,7 @@ mod tests {
     }
 
     fn ignore_principal_raw_column(
-        conn: &Connection,
+        conn: &mut Connection,
         column: &'static str,
     ) -> rusqlite::Result<std::sync::Arc<std::sync::Mutex<PrincipalReadAuthorization>>> {
         use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
@@ -567,7 +567,7 @@ mod tests {
             ("result_digest", Error::CorruptAuthority, 1, 0),
         ] {
             for held_snapshot in [false, true] {
-                let (store, row) = fixture(ForkAdmissionOperationKindV1::PrincipalOwner)?;
+                let (mut store, row) = fixture(ForkAdmissionOperationKindV1::PrincipalOwner)?;
                 let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
                 let start = clock.mark();
                 let limits = ForkReplayReadLimitsV1::new(
@@ -581,7 +581,7 @@ mod tests {
                 if held_snapshot {
                     store.conn.execute_batch("BEGIN DEFERRED")?;
                 }
-                let observed = ignore_principal_raw_column(&store.conn, column)?;
+                let observed = ignore_principal_raw_column(&mut store.conn, column)?;
                 let failed = principal_operation_id_with_context(
                     &store.conn,
                     row.result_digest,
@@ -645,7 +645,7 @@ mod tests {
     }
 
     fn ignore_probe_function(
-        conn: &Connection,
+        conn: &mut Connection,
         ignored_index: usize,
     ) -> rusqlite::Result<std::sync::Arc<std::sync::Mutex<ProbeFunctionAuthorization>>> {
         use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
@@ -680,7 +680,7 @@ mod tests {
         // with NULL. No builtin, production query, schema or getter is replaced.
         for (label, ignored_index) in [("operation_type", 0), ("operation_length", 1)] {
             for held_snapshot in [false, true] {
-                let (store, row) = fixture(ForkAdmissionOperationKindV1::PrincipalOwner)?;
+                let (mut store, row) = fixture(ForkAdmissionOperationKindV1::PrincipalOwner)?;
                 let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
                 let start = clock.mark();
                 // One failed probe followed by the unchanged two-row/32-byte read.
@@ -689,7 +689,7 @@ mod tests {
                 if held_snapshot {
                     store.conn.execute_batch("BEGIN DEFERRED")?;
                 }
-                let observed = ignore_probe_function(&store.conn, ignored_index)?;
+                let observed = ignore_probe_function(&mut store.conn, ignored_index)?;
                 let failed = principal_operation_id_with_context(
                     &store.conn,
                     row.result_digest,
@@ -750,7 +750,7 @@ mod tests {
             ("child_length", 7),
         ] {
             for held_snapshot in [false, true] {
-                let (store, row) = fixture(ForkAdmissionOperationKindV1::Fork)?;
+                let (mut store, row) = fixture(ForkAdmissionOperationKindV1::Fork)?;
                 let bytes = expected_bytes(&row);
                 let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
                 let start = clock.mark();
@@ -759,7 +759,7 @@ mod tests {
                 if held_snapshot {
                     store.conn.execute_batch("BEGIN DEFERRED")?;
                 }
-                let observed = ignore_probe_function(&store.conn, ignored_index)?;
+                let observed = ignore_probe_function(&mut store.conn, ignored_index)?;
                 let failed = operation_with_context(
                     &store.conn,
                     row.kind,

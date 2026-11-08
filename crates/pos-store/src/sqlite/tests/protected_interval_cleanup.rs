@@ -50,6 +50,13 @@ impl ReadOnlyFixture {
             .ok_or_else(|| "missing writer reservation".into())
     }
 
+    fn writer_mut(&mut self) -> Fallible<&mut Connection> {
+        self.store
+            .writer_reservation_connection
+            .as_mut()
+            .ok_or_else(|| "missing writer reservation".into())
+    }
+
     fn assert_released(&self) -> Fallible<()> {
         assert!(self.store.conn.is_autocommit());
         assert!(self.writer()?.is_autocommit());
@@ -71,7 +78,7 @@ impl ReadOnlyFixture {
 // Private native faults: public store constructors cannot deny one transaction
 // statement. No production hook or extra public adapter is exposed for them.
 fn deny_transaction(
-    connection: &Connection,
+    connection: &mut Connection,
     denied: TransactionOperation,
 ) -> Fallible<Arc<AtomicUsize>> {
     let attempts = Arc::new(AtomicUsize::new(0));
@@ -87,7 +94,7 @@ fn deny_transaction(
     Ok(attempts)
 }
 
-fn allow_all(connection: &Connection) -> Fallible<()> {
+fn allow_all(connection: &mut Connection) -> Fallible<()> {
     connection.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)?;
     Ok(())
 }
@@ -95,7 +102,7 @@ fn allow_all(connection: &Connection) -> Fallible<()> {
 #[test]
 fn read_only_reader_begin_refusals_release_only_the_owned_writer() -> Fallible<()> {
     for preexisting_reader in [false, true] {
-        let fixture = ReadOnlyFixture::new()?;
+        let mut fixture = ReadOnlyFixture::new()?;
         let attempts = if preexisting_reader {
             // Private lifecycle invariant: do not borrow an older reader
             // transaction, or roll it back as if this interval had owned it.
@@ -103,7 +110,7 @@ fn read_only_reader_begin_refusals_release_only_the_owned_writer() -> Fallible<(
             None
         } else {
             Some(deny_transaction(
-                &fixture.store.conn,
+                &mut fixture.store.conn,
                 TransactionOperation::Begin,
             )?)
         };
@@ -116,7 +123,7 @@ fn read_only_reader_begin_refusals_release_only_the_owned_writer() -> Fallible<(
         if let Some(attempts) = attempts {
             assert_eq!(attempts.load(Ordering::SeqCst), 1);
         }
-        allow_all(&fixture.store.conn)?;
+        allow_all(&mut fixture.store.conn)?;
         if preexisting_reader {
             fixture.store.conn.execute_batch("ROLLBACK")?;
         }
@@ -127,7 +134,7 @@ fn read_only_reader_begin_refusals_release_only_the_owned_writer() -> Fallible<(
 
 #[test]
 fn read_only_data_version_refusal_releases_reader_and_writer() -> Fallible<()> {
-    let fixture = ReadOnlyFixture::new()?;
+    let mut fixture = ReadOnlyFixture::new()?;
     let attempts = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&attempts);
     fixture
@@ -150,7 +157,7 @@ fn read_only_data_version_refusal_releases_reader_and_writer() -> Fallible<()> {
         Err(ErasureErrorV1::ReceiptCommitFailed)
     );
     assert_eq!(attempts.load(Ordering::SeqCst), 1);
-    allow_all(&fixture.store.conn)?;
+    allow_all(&mut fixture.store.conn)?;
     fixture.assert_released()
 }
 
@@ -193,10 +200,10 @@ fn read_only_public_gate_poisoning_releases_both_transactions() -> Fallible<()> 
 
 #[test]
 fn read_only_reader_rollback_refusal_still_releases_the_writer() -> Fallible<()> {
-    let fixture = ReadOnlyFixture::new()?;
+    let mut fixture = ReadOnlyFixture::new()?;
     let interval = fixture.store.begin_protected_effect_interval()?;
     assert_eq!(interval, ErasureProtectedEffectIntervalV1::Owned);
-    let attempts = deny_transaction(&fixture.store.conn, TransactionOperation::Rollback)?;
+    let attempts = deny_transaction(&mut fixture.store.conn, TransactionOperation::Rollback)?;
     assert_eq!(
         fixture.store.finish_protected_effect_interval(
             interval,
@@ -209,18 +216,18 @@ fn read_only_reader_rollback_refusal_still_releases_the_writer() -> Fallible<()>
     assert!(!fixture.store.conn.is_autocommit());
     // Refused cleanup is not successful cleanup. Remove the injection and
     // explicitly settle the reader before checking independent writer progress.
-    allow_all(&fixture.store.conn)?;
+    allow_all(&mut fixture.store.conn)?;
     fixture.store.conn.execute_batch("ROLLBACK")?;
     fixture.assert_released()
 }
 
 #[test]
 fn read_only_writer_commit_refusal_falls_back_to_rollback() -> Fallible<()> {
-    let fixture = ReadOnlyFixture::new()?;
+    let mut fixture = ReadOnlyFixture::new()?;
     let interval = fixture.store.begin_protected_effect_interval()?;
     assert_eq!(interval, ErasureProtectedEffectIntervalV1::Owned);
     // Pinned rusqlite maps COMMIT to Unknown, not Release or a Commit variant.
-    let attempts = deny_transaction(fixture.writer()?, TransactionOperation::Unknown)?;
+    let attempts = deny_transaction(fixture.writer_mut()?, TransactionOperation::Unknown)?;
     assert_eq!(
         fixture.store.finish_protected_effect_interval(
             interval,
@@ -229,16 +236,16 @@ fn read_only_writer_commit_refusal_falls_back_to_rollback() -> Fallible<()> {
         Err(ErasureErrorV1::ReceiptCommitFailed)
     );
     assert_eq!(attempts.load(Ordering::SeqCst), 1);
-    allow_all(fixture.writer()?)?;
+    allow_all(fixture.writer_mut()?)?;
     fixture.assert_released()
 }
 
 #[test]
 fn read_only_writer_rollback_refusal_attempts_fallback_without_claiming_release() -> Fallible<()> {
-    let fixture = ReadOnlyFixture::new()?;
+    let mut fixture = ReadOnlyFixture::new()?;
     let interval = fixture.store.begin_protected_effect_interval()?;
     assert_eq!(interval, ErasureProtectedEffectIntervalV1::Owned);
-    let attempts = deny_transaction(fixture.writer()?, TransactionOperation::Rollback)?;
+    let attempts = deny_transaction(fixture.writer_mut()?, TransactionOperation::Rollback)?;
     assert_eq!(
         fixture.store.finish_protected_effect_interval(
             interval,
@@ -249,7 +256,7 @@ fn read_only_writer_rollback_refusal_attempts_fallback_without_claiming_release(
     assert_eq!(attempts.load(Ordering::SeqCst), 2);
     assert!(fixture.store.conn.is_autocommit());
     assert!(!fixture.writer()?.is_autocommit());
-    allow_all(fixture.writer()?)?;
+    allow_all(fixture.writer_mut()?)?;
     fixture.writer()?.execute_batch("ROLLBACK")?;
     fixture.assert_released()
 }

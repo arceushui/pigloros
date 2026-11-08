@@ -15,7 +15,10 @@
 //!    result is `Unavailable` with zero usage.
 //! 3. The payload's `schema` string, when it carries one, is the pinned one, and
 //! 4. the BLAKE3 of the schema member is the digest pinned for the family: either mismatch is a
-//!    non-executed outcome (no EAO1 stream, a non-zero exit).
+//!    non-executed outcome (no EAO1 stream, a non-zero exit). Then a sub-case step that
+//!    requests `migrate-state` is the typed non-executed outcome `Unsupported` (no EAO1
+//!    stream, a non-zero exit): a V1 host invokes only `describe`, `reduce` and `drive`
+//!    (ADR-061 revision 4, ADR-062 Revision 8 slice N6).
 //! 5. The composite is found and verified ([`composite`]): a fault is a non-executed outcome.
 //! 6. A payload that violates the grammar, or that names a piece the composite lacks, is the
 //!    failure `payload-invalid`.
@@ -28,8 +31,12 @@ use std::io::{Read, Write};
 use std::process::ExitCode;
 
 use pos_reference::adapter_transport::{read_attempt, write_observation};
-use pos_reference::evaluator::{CaseAttempt, ResourceUsage, SubjectObservation, SubjectResult};
-use pos_reference::evaluator_domain::{ClaimLayer, ExecutionMode};
+use pos_reference::evaluator::{
+    CaseAttempt, FixtureExecutorV1, ResourceUsage, SubjectObservation, SubjectResult,
+};
+use pos_reference::evaluator_domain::{ClaimLayer, ExecutionMode, FixtureFamily};
+use pos_reference::evaluator_protocol::SubjectAdapterKind;
+use pos_reference::profile::ProviderKey;
 use pos_runtime::community_plugin_host::CommunityPluginModeV1;
 
 pub mod composite;
@@ -49,10 +56,53 @@ pub use world::{interpret, ScanResultV1, ScanSource, StepPortV1, SubCaseRecordV1
 pub const PROVIDER_ID: &str = "pigloros.fixture.plugin-conformance";
 
 /// The contract version of every failure the adapter returns.
-pub const CONTRACT_VERSION: &str = "2.1.0";
+pub const CONTRACT_VERSION: &str = "2.2.0";
+
+/// The ABI major version of the provider contract the adapter implements.
+pub const ABI_MAJOR: u16 = 0;
+
+/// The ABI minor version of the provider contract the adapter implements.
+pub const ABI_MINOR: u16 = 0;
 
 /// The `schema` string of a case payload.
 pub const SCHEMA_ID: &str = "pigloros.plugin-conformance.case.v2";
+
+/// The fixture capabilities whose semantics the adapter's evaluation world implements.
+pub const CAPABILITY_IDS: [&str; 5] = [
+    "consume-execution-steps",
+    "mutate-subject",
+    "read-public-bundle",
+    "redact-synthetic-subject",
+    "verify-release-admission",
+];
+
+/// The `migrate-state` operation, which no V1 host invokes.
+pub const MIGRATE_STATE: &str = "migrate-state";
+
+/// The exact ADR-068 executor declaration of this adapter, reached as the implementation
+/// `implementation_digest` (provenance only).
+///
+/// It names the exact provider key, the pinned schema digest of every family and the
+/// capabilities the adapter implements; the composition root hands it to the evaluator.
+#[must_use]
+pub fn executor_declaration(implementation_digest: [u8; 32]) -> FixtureExecutorV1 {
+    let mut pinned = [[0; 32]; 7];
+    for family in FixtureFamily::ALL {
+        pinned[usize::from(family.code())] = schema_digests::pinned_digest(*family);
+    }
+    FixtureExecutorV1 {
+        provider: ProviderKey {
+            provider_id: PROVIDER_ID.to_owned(),
+            contract_version: CONTRACT_VERSION.to_owned(),
+            abi_major: ABI_MAJOR,
+            abi_minor: ABI_MINOR,
+        },
+        subject_adapter: SubjectAdapterKind::PublicPluginProtocol,
+        schema_digests: pinned,
+        implementation_digest,
+        capability_ids: CAPABILITY_IDS.map(str::to_owned).to_vec(),
+    }
+}
 
 /// The code of the failure for a payload that violates the grammar. It equals no oracle.
 pub const PAYLOAD_INVALID: &str = "payload-invalid";
@@ -64,32 +114,33 @@ pub const SUBCASE_MISMATCH: &str = "subcase-mismatch";
 pub const WORKER_PROGRAM: &str = "pos-plugin-worker";
 
 /// Why the adapter wrote no observation.
+///
+/// Each discriminant is the process exit code of the error.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[repr(u8)]
 pub enum AdapterRunErrorV1 {
     /// The EAI1 stream did not decode.
     #[error("the EAI1 attempt stream is invalid")]
-    Wire,
+    Wire = 2,
     /// The attempt is not executed: its schema, its schema member or its composite is wrong.
     #[error("the attempt is not executed")]
-    NotExecuted,
+    NotExecuted = 3,
+    /// The attempt is not executed: it requests `migrate-state`, which a V1 host never invokes.
+    #[error("the attempt requests an operation a V1 host does not support")]
+    Unsupported = 6,
     /// The worker program cannot be located next to the adapter binary.
     #[error("the worker program cannot be located")]
-    Worker,
+    Worker = 4,
     /// The EAO1 stream could not be written.
     #[error("the EAO1 observation stream could not be written")]
-    Output,
+    Output = 5,
 }
 
 impl AdapterRunErrorV1 {
     /// The exit code of the process.
     #[must_use]
     pub const fn code(self) -> u8 {
-        match self {
-            Self::Wire => 2,
-            Self::NotExecuted => 3,
-            Self::Worker => 4,
-            Self::Output => 5,
-        }
+        self as u8
     }
 }
 
@@ -189,22 +240,48 @@ fn schema_text_is_pinned(payload: &[u8]) -> bool {
         .unwrap_or(true)
 }
 
+/// Whether a sub-case step of the payload requests `migrate-state`.
+fn requests_migrate_state(payload: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(payload)
+        .ok()
+        .as_ref()
+        .and_then(|value| value.get("subcases"))
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|subcases| {
+            subcases
+                .iter()
+                .filter_map(|subcase| subcase.get("steps").and_then(serde_json::Value::as_array))
+                .flatten()
+                .any(|step| {
+                    step.get("step").and_then(serde_json::Value::as_str) == Some(MIGRATE_STATE)
+                })
+        })
+}
+
 /// Checks (3) to (5) of the order, then the sub-cases.
 fn execute(
     runner: &dyn SubCaseRunnerV1,
     attempt: &CaseAttempt,
     mode: CommunityPluginModeV1,
 ) -> Result<SubjectObservation, AdapterRunErrorV1> {
+    admission(attempt).and_then(|()| match PiecesV1::find(&attempt.auxiliary) {
+        Ok(pieces) => Ok(decide(runner, attempt, mode, &pieces)),
+        Err(_fault) => Err(AdapterRunErrorV1::NotExecuted),
+    })
+}
+
+/// Checks (3) and (4) of the order, then the `migrate-state` refusal.
+fn admission(attempt: &CaseAttempt) -> Result<(), AdapterRunErrorV1> {
     let pinned = schema_digests::pinned_digest(attempt.family);
     let schema_ok = blake3::hash(&attempt.schema.bytes).as_bytes() == &pinned
         && schema_text_is_pinned(&attempt.payload.bytes);
     if !schema_ok {
         return Err(AdapterRunErrorV1::NotExecuted);
     }
-    match PiecesV1::find(&attempt.auxiliary) {
-        Ok(pieces) => Ok(decide(runner, attempt, mode, &pieces)),
-        Err(_fault) => Err(AdapterRunErrorV1::NotExecuted),
+    if requests_migrate_state(&attempt.payload.bytes) {
+        return Err(AdapterRunErrorV1::Unsupported);
     }
+    Ok(())
 }
 
 /// Checks (6) and (7) of the order.
