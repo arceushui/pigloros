@@ -3,7 +3,21 @@
   "case_id": "plugin-conformance-positive",
   "family": "positive",
   "input_blake3_digest": "ed6b89c2dc0ed7c4df1d06c95a2cff8719597f86277468156676fa97abd12b4c",
-  "status": "pending",
-  "execution_result": null,
+  "status": "executed",
+  "execution_result": {
+    "evidence": "local-relaxation",
+    "modes": [
+      {
+        "mode": "local",
+        "outcome": "pass",
+        "actual_digest": "f7b0338a463958401e1f36fa8814839603db2b8dd88bf436087f8345ae061f12"
+      },
+      {
+        "mode": "air-gapped",
+        "outcome": "pass",
+        "actual_digest": "f7b0338a463958401e1f36fa8814839603db2b8dd88bf436087f8345ae061f12"
+      }
+    ]
+  },
   "executed_at": null
 }

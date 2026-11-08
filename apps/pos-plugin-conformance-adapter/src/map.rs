@@ -2,10 +2,12 @@
 //!
 //! The mapping is total over the variants of [`CommunityPluginSubjectResultV1`]. An operational
 //! result is never a typed failure and never an output: the case becomes `Unavailable`, which
-//! the evaluator never turns into `Pass` or `Fail`. [`case_result`] is the only place a case
+//! the evaluator never turns into `Pass` or `Fail`. A trap is operational unless its sub-case
+//! expects it and the class matches (ADR-061 R13). [`case_result`] is the only place a case
 //! result is decided.
 
 use pos_crypto::jcs::JsonV1;
+use pos_plugin_supervisor::ipc::WORKER_TRAP_CLASSES_V1;
 use pos_plugin_supervisor::{
     CommunityPluginSubjectOutcomeV1, CommunityPluginSubjectResultV1, OutputUsageV1,
 };
@@ -70,6 +72,10 @@ pub enum SubResultV1 {
         error: &'static str,
         class: &'static str,
     },
+    /// A `ComponentTrap` of the `drive` export of a pass, with its canonical trap class. It is
+    /// a result only for a sub-case that expects it with this class; otherwise it is
+    /// operational ([`case_result()`]).
+    Trapped { class: &'static str },
     /// An operational fault: there is no expectation for it.
     Operational,
 }
@@ -186,6 +192,22 @@ fn is_known(error: &str) -> bool {
     KNOWN_ERRORS.contains(&error)
 }
 
+/// Whether `error` is one of the 20 closed names and `class` is `Authoritative`.
+fn is_authoritative(error: &str, class: &str) -> bool {
+    is_known(error) && class == AUTHORITATIVE
+}
+
+/// The sub-result of a trap of class `class`: `Trapped` for one of the seven canonical trap
+/// class names, else operational.
+fn of_trap(class: &str) -> SubResultV1 {
+    WORKER_TRAP_CLASSES_V1
+        .iter()
+        .find(|known| known.name() == class)
+        .map_or(SubResultV1::Operational, |known| SubResultV1::Trapped {
+            class: known.name(),
+        })
+}
+
 /// The sub-result of an outcome record.
 #[must_use]
 pub fn of_outcome(outcome: &CommunityPluginSubjectOutcomeV1) -> SubResultV1 {
@@ -211,10 +233,11 @@ pub fn of_outcome(outcome: &CommunityPluginSubjectOutcomeV1) -> SubResultV1 {
             index: None,
         },
         CommunityPluginSubjectResultV1::Failed { error, class }
-            if is_known(error) && class == AUTHORITATIVE =>
+            if is_authoritative(error, class) =>
         {
             SubResultV1::Failed { error, class }
         }
+        CommunityPluginSubjectResultV1::Trapped { trap_class, .. } => of_trap(trap_class),
         CommunityPluginSubjectResultV1::Committed { .. }
         | CommunityPluginSubjectResultV1::Refused { .. }
         | CommunityPluginSubjectResultV1::Failed { .. }
@@ -339,9 +362,29 @@ const fn greater(left: u64, right: u64) -> u64 {
     }
 }
 
+/// Whether the sub-result of `record` in a case of `family` is operational: an operational
+/// fault, or a trap other than one that a sub-case of `independent-evaluation` expected with
+/// this class and matched (an unverified trap is operational, ADR-061 revision 8 O-18 as
+/// narrowed by R13).
+fn is_operational(family: FixtureFamily, record: &SubCaseRecordV1) -> bool {
+    match of_record(record) {
+        Some(SubResultV1::Operational) => true,
+        Some(SubResultV1::Trapped { .. }) => {
+            !(record.matched && family == FixtureFamily::IndependentEvaluation)
+        }
+        Some(
+            SubResultV1::Committed { .. }
+            | SubResultV1::Refused { .. }
+            | SubResultV1::Failed { .. },
+        )
+        | None => false,
+    }
+}
+
 /// The result of the case `case_id` of `family` over the records of its sub-cases.
 ///
-/// 1. If any sub-result is operational the case is `Unavailable`.
+/// 1. If any sub-result is operational, or is a trap other than a matched one of
+///    `independent-evaluation`, the case is `Unavailable`.
 /// 2. Else for a `canonical-output` family it is `Output`, the canonical record.
 /// 3. Else it is the family's fixed failure when every sub-case matched, and
 ///    `subcase-mismatch` otherwise.
@@ -354,10 +397,7 @@ pub fn case_result(
     family: FixtureFamily,
     records: &[SubCaseRecordV1],
 ) -> CaseResultV1 {
-    let operational = records
-        .iter()
-        .any(|record| of_record(record) == Some(SubResultV1::Operational));
-    if operational {
+    if records.iter().any(|record| is_operational(family, record)) {
         return CaseResultV1 {
             result: SubjectResult::Unavailable,
             usage: ResourceUsage::default(),
@@ -448,6 +488,21 @@ fn entry(family: FixtureFamily, record: &SubCaseRecordV1) -> JsonV1 {
             ("id", id),
             ("kind", JsonV1::text("digest")),
             ("value", JsonV1::text(&hex::encode(digest))),
+        ]),
+        _ => trap_entry(id, record),
+    }
+}
+
+/// The entry of a matched record that is no family's own kind: a trap (which reaches here only
+/// in `independent-evaluation`, [`case_result()`]) gives its class and the `drive` export (a
+/// pass step invokes only `drive`, ADR-061 R13), anything else is a mismatch.
+fn trap_entry(id: JsonV1, record: &SubCaseRecordV1) -> JsonV1 {
+    match of_record(record) {
+        Some(SubResultV1::Trapped { class }) => JsonV1::object([
+            ("class", JsonV1::text(class)),
+            ("export", JsonV1::text("drive")),
+            ("id", id),
+            ("kind", JsonV1::text("trapped")),
         ]),
         _ => JsonV1::object([("id", id), ("kind", JsonV1::text("mismatch"))]),
     }

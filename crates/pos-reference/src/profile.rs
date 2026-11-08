@@ -252,6 +252,18 @@ pub struct Fixture {
     pub provenance_digest: [u8; 32],
     pub fixture_digest: [u8; 32],
     release_admission: Option<ReleaseAdmissionBinding>,
+    release_admission_authorized: bool,
+}
+
+impl Fixture {
+    /// Whether the fixture's downgrade authority holds: a fixture without a
+    /// release-admission binding is authorized; a downgrade fixture is authorized
+    /// only when its RAD1 member verifies against the bundle authority and its
+    /// CPF1 field 19 names the pinned trust-policy snapshot (ADR-068).
+    #[must_use]
+    pub const fn release_admission_authorized(&self) -> bool {
+        self.release_admission_authorized
+    }
 }
 
 struct FixtureHeader {
@@ -411,7 +423,7 @@ impl Profile {
             evaluator_artifact_digests,
             trust_policy_snapshot_digest,
         )?;
-        let profile = Self {
+        let mut profile = Self {
             profile_id: header.profile_id,
             profile_digest,
             normative_spec_digest: header.normative_spec_digest,
@@ -427,7 +439,11 @@ impl Profile {
         };
         profile.validate_request(request)?;
         profile.validate_bundle_closure(bundle)?;
-        validate_release_admissions(bundle, &profile.fixtures)?;
+        authorize_release_admissions(
+            bundle,
+            &mut profile.fixtures,
+            profile.trust_policy_snapshot_digest,
+        )?;
         validate_provider_contracts(
             bundle,
             registry_member,
@@ -504,10 +520,30 @@ impl Profile {
     }
 }
 
-fn validate_release_admissions(
+/// Record per fixture whether its release admission authorizes the downgrade.
+///
+/// A missing, extra or duplicated RAD1 member is an archive closure failure. A
+/// RAD1 member that is present but does not verify, or a fixture whose CPF1
+/// field 19 is not the pinned trust-policy snapshot, leaves that fixture
+/// unauthorized: the evaluator reports it non-executed without dispatching it.
+fn authorize_release_admissions(
+    bundle: &VerifiedBundle,
+    fixtures: &mut [Fixture],
+    pinned_snapshot_digest: [u8; 32],
+) -> Result<(), ProfileError> {
+    let authorizations =
+        release_admission_authorizations(bundle, fixtures, pinned_snapshot_digest)?;
+    for (fixture, authorized) in fixtures.iter_mut().zip(authorizations) {
+        fixture.release_admission_authorized = authorized;
+    }
+    Ok(())
+}
+
+fn release_admission_authorizations(
     bundle: &VerifiedBundle,
     fixtures: &[Fixture],
-) -> Result<(), ProfileError> {
+    pinned_snapshot_digest: [u8; 32],
+) -> Result<Vec<bool>, ProfileError> {
     let selected = fixtures
         .iter()
         .filter(|fixture| fixture.modes.contains(&bundle.mode))
@@ -537,14 +573,22 @@ fn validate_release_admissions(
     {
         return Err(ProfileError::ClosureIncomplete);
     }
-    selected.into_iter().try_for_each(|(fixture, binding)| {
-        validate_release_admission(
-            bundle,
-            fixture,
-            binding,
-            actual[&binding.release_admission_digest],
-        )
-    })
+    Ok(fixtures
+        .iter()
+        .map(|fixture| {
+            !fixture.modes.contains(&bundle.mode)
+                || fixture.release_admission.as_ref().is_none_or(|binding| {
+                    binding.trust_policy_snapshot_digest == pinned_snapshot_digest
+                        && validate_release_admission(
+                            bundle,
+                            fixture,
+                            binding,
+                            actual[&binding.release_admission_digest],
+                        )
+                        .is_ok()
+                })
+        })
+        .collect())
 }
 
 fn validate_release_admission(
@@ -634,6 +678,7 @@ fn decode_fixture(value: &Value, hard_caps: EvaluatorHardCaps) -> Result<Fixture
         provenance_digest: policy.provenance_digest,
         fixture_digest,
         release_admission: policy.release_admission,
+        release_admission_authorized: true,
     };
     validate_fixture(&fixture).map(|()| fixture)
 }

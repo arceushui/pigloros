@@ -139,7 +139,7 @@ fn decoder_rejects_missing_extra_and_invalid_evidence_bytes() -> TestResult<()> 
         (7, 0x60, WorldKeyEvidenceErrorV1::FieldOutOfBounds),
         (8, 0xff, WorldKeyEvidenceErrorV1::InvalidEncoding),
         (13, 0x20, WorldKeyEvidenceErrorV1::InvalidEncoding),
-        (13, 5, WorldKeyEvidenceErrorV1::InvalidKey),
+        (13, 7, WorldKeyEvidenceErrorV1::InvalidKey),
         (14, 0, WorldKeyEvidenceErrorV1::InvalidKey),
         (16, 31, WorldKeyEvidenceErrorV1::InvalidEncoding),
         (49, 0xf6, WorldKeyEvidenceErrorV1::InvalidEncoding),

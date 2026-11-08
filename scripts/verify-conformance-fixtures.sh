@@ -192,7 +192,16 @@ case "${matrix_lifecycle}" in
     ;;
 esac
 
+# ADR-062 Revision 8 slices N1-N4: the rows whose verifier-accepted cases may be flipped, and the
+# modes they may be flipped in, are declared once in scripts/non_interference_executed_rows.json.
+executed_rows_declaration="$(dirname -- "${BASH_SOURCE[0]}")/non_interference_executed_rows.json"
+jq -e '(.rows | type == "array" and all(type == "string")) and .modes == ["L", "R", "F"]' \
+  "${executed_rows_declaration}" >/dev/null || {
+  echo "invalid non-interference executed-row declaration" >&2
+  exit 1
+}
 jq -e --arg matrix_lifecycle "${matrix_lifecycle}" \
+  --slurpfile executed_rows "${executed_rows_declaration}" \
   '
   . as $root |
   ($root | keys | sort) == ([
@@ -227,7 +236,7 @@ jq -e --arg matrix_lifecycle "${matrix_lifecycle}" \
     (.fixture_id | test("^NI-[A-Z]+-[0-9]{3}$")) and
     (.variants == ["S", "D", "W", "C"]) and
     (.modes == ["L", "A", "R", "F"]) and .case_count == 16 and
-    .executed_case_count == 0) and
+    (.executed_case_count | type == "number")) and
   all($root.cases[];
     (keys | sort) == ([
       "authority_fixture_id", "authority_result_digest", "case_id", "executed",
@@ -237,11 +246,26 @@ jq -e --arg matrix_lifecycle "${matrix_lifecycle}" \
     (.variant | IN("S", "D", "W", "C")) and
     (.mode | IN("L", "A", "R", "F")) and
     .case_id == ("\(.fixture_id)-\(.variant)-\(.mode)") and
-    .executed == false and .expected_result_digest == null and
     .authority_fixture_id == null and .authority_result_digest == null and
-    .expected_result == null)
-  and .executed_case_count == 0
+    if .executed == false then
+      .expected_result_digest == null and .expected_result == null
+    else
+      # ADR-062 Revision 8 slices N1-N4: only a case of a declared executed row in a declared
+      # mode is ever flipped, and only over its checked-in NIA1 (owner answer Q9). Executed never
+      # implies a pass.
+      .executed == true and
+      (.fixture_id | IN($executed_rows[0].rows[])) and
+      (.mode | IN($executed_rows[0].modes[])) and
+      (.expected_result_digest | type == "string" and test("^[0-9a-f]{64}$")) and
+      (.expected_result | type == "object" and
+        (keys == ["equal", "first_divergence", "nia1_content_digest"]) and
+        .equal == true and .first_divergence == null and
+        (.nia1_content_digest | type == "string" and test("^[0-9a-f]{64}$")))
+    end)
+  and .executed_case_count == ([$root.cases[] | select(.executed)] | length)
   and all($root.rows[]; . as $row | ([$root.cases[] | select(.fixture_id == $row.fixture_id)] | length == 16))
+  and all($root.rows[]; . as $row |
+    $row.executed_case_count == ([$root.cases[] | select(.fixture_id == $row.fixture_id and .executed)] | length))
 ' "${matrix_path}" >/dev/null || {
   echo "invalid ADR-059 matrix inventory" >&2
   exit 1
@@ -279,14 +303,40 @@ jq -e '
       "expected_result_path", "fixture_bytes_digest", "fixture_bytes_path",
       "fixture_id", "materialization_status", "profiles"
     ] | sort) and
-    (.fixture_bytes_path == null) and (.expected_result_path == null) and
-    (.fixture_bytes_digest == null) and (.expected_result_digest == null) and
-    .materialization_status == "pending"
+    (.fixture_bytes_path | type == "string" and
+      test("^inputs/replay-conformance/[a-z-]+[.]json$")) and
+    (.expected_result_path | type == "string" and
+      test("^oracles/replay-conformance/[a-z-]+[.]json$")) and
+    ((.fixture_bytes_path | ltrimstr("inputs/")) == (.expected_result_path | ltrimstr("oracles/"))) and
+    (.fixture_bytes_digest | type == "string" and test("^[0-9a-f]{64}$")) and
+    (.expected_result_digest | type == "string" and test("^[0-9a-f]{64}$")) and
+    .materialization_status == "materialized"
   )
 ' "${authority_path}" >/dev/null || {
   echo "invalid #172 expected-authority inventory lifecycle or entries" >&2
   exit 1
 }
+# ADR-062 Revision 8 slice R4 (#1222): every W8H1 entry is materialized, never executed. Its
+# fixture bytes and expected result are the payload and oracle of one replay-conformance family;
+# both digests are the BLAKE3 of those files, and the payload and oracle carry a sub-case with the
+# entry's id.
+while IFS=$'\t' read -r fixture_id fixture_bytes_path fixture_bytes_digest expected_result_path expected_result_digest; do
+  for pair in "${fixture_bytes_path}:${fixture_bytes_digest}" "${expected_result_path}:${expected_result_digest}"; do
+    member="${fixture_root}/${pair%%:*}"
+    [[ -s "${member}" && "$(b3sum "${member}" | awk '{print $1}')" == "${pair##*:}" ]] || {
+      echo "W8H1 entry ${fixture_id} does not bind ${pair%%:*}" >&2
+      exit 1
+    }
+  done
+  jq -e --arg fixture_id "${fixture_id}" \
+    'any(.subcases[]; .fixture_id == $fixture_id)' "${fixture_root}/${fixture_bytes_path}" >/dev/null &&
+    jq -e --arg fixture_id "${fixture_id}" \
+      'any((.output.subcases // .subcases)[]; .fixture_id == $fixture_id)' \
+      "${fixture_root}/${expected_result_path}" >/dev/null || {
+    echo "W8H1 entry ${fixture_id} has no sub-case in ${fixture_bytes_path}" >&2
+    exit 1
+  }
+done < <(jq -r '.entries[] | [.fixture_id, .fixture_bytes_path, .fixture_bytes_digest, .expected_result_path, .expected_result_digest] | @tsv' "${authority_path}")
 
 jq -e '
   (keys | sort) == ([
@@ -581,7 +631,8 @@ fi
 jq -e \
   --arg authority_lifecycle "${authority_lifecycle}" \
   --arg matrix_lifecycle "${matrix_lifecycle}" \
-  --arg matrix_blake3 "${matrix_blake3_digest}" '
+  --arg matrix_blake3 "${matrix_blake3_digest}" \
+  --argjson matrix_executed "$(jq '.executed_case_count' "${matrix_path}")" '
   .authority_inventory.path == "expected-authority/inventory.json" and
   .authority_inventory.digest_algorithm == "SHA-256" and
   .authority_inventory.status == $authority_lifecycle and
@@ -589,7 +640,7 @@ jq -e \
   .adr_059_execution_matrix.digest_algorithm == "BLAKE3-256" and
   .adr_059_execution_matrix.blake3_digest == $matrix_blake3 and
   .adr_059_execution_matrix.status == $matrix_lifecycle and
-  .adr_059_execution_matrix.executed_case_count == 0
+  .adr_059_execution_matrix.executed_case_count == $matrix_executed
 ' "${fixture_root}/support/publication-review.json" >/dev/null || {
   echo "Draft authority handoff metadata is invalid" >&2
   exit 1
@@ -610,7 +661,7 @@ mapfile -t blake3_paths < <(
 )
 mapfile -t expected_blake3_paths < <(
   cd "${fixture_root}" &&
-    find expected-authority expected inputs matrix oracles profiles providers support \
+    find erasure expected-authority expected inputs matrix non-interference oracles profiles providers support \
       -type f -printf '%p\n' | sort
 )
 if ! diff -u \
@@ -619,6 +670,80 @@ if ! diff -u \
   echo "BLAKE3SUMS does not cover the complete public fixture inventory" >&2
   exit 1
 fi
+
+# ADR-062 Revision 8 slice N1 (#1229), owner note ADR-062_R8_NonInterference_Executions: the
+# non-interference evidence is one repository test-fixture-only executor key declaration and the
+# checked-in NIA1, each named by its content address (the BLAKE3 of the NIA1 artifact domain, a
+# zero byte and the artifact bytes). The executed matrix cases name exactly those artifacts. The
+# pos-reference verifier's acceptance of each file is checked by the Rust test
+# apps/pos-experiment/tests/non_interference_evidence.rs.
+non_interference_root="${fixture_root}/non-interference"
+jq -e '
+  (keys | sort) == (["algorithm", "authority_kind", "evidence", "key_id", "public_key_hex"] | sort) and
+  .algorithm == "Ed25519" and .authority_kind == "repository-test-fixture-only" and
+  .evidence == "engineering-evidence" and
+  .key_id == "pigloros.fixture.non-interference-executor" and
+  (.public_key_hex | type == "string" and test("^[0-9a-f]{64}$"))
+' "${non_interference_root}/executor.json" >/dev/null || {
+  echo "invalid non-interference executor key declaration" >&2
+  exit 1
+}
+mapfile -t non_interference_files < <(
+  cd "${non_interference_root}" && find . -type f -printf '%P\n' | sort
+)
+mapfile -t executed_addresses < <(
+  jq -r '.cases[] | select(.executed) | .expected_result.nia1_content_digest' "${matrix_path}" | sort
+)
+expected_non_interference_files=("executor.json")
+for address in "${executed_addresses[@]}"; do
+  expected_non_interference_files+=("executions/${address}.nia1")
+done
+if ! diff -u \
+  <(printf '%s\n' "${expected_non_interference_files[@]}" | sort) \
+  <(printf '%s\n' "${non_interference_files[@]}") >/dev/null; then
+  echo "non-interference evidence does not match the executed matrix cases" >&2
+  exit 1
+fi
+for address in "${executed_addresses[@]}"; do
+  artifact="${non_interference_root}/executions/${address}.nia1"
+  actual_address="$(
+    { printf 'PiglorOS.NonInterference.ExecutionArtifact.v1\0'; cat -- "${artifact}"; } |
+      b3sum | awk '{print $1}'
+  )"
+  [[ "${actual_address}" == "${address}" ]] || {
+    echo "NIA1 file name is not its content address: executions/${address}.nia1" >&2
+    exit 1
+  }
+done
+
+# ADR-062 Revision 8 slice N5 (#1233), owner note ADR-062_R8_Erasure_Cases: the erasure cases are
+# the generator-written cases.json and ERQ1 requests, one recorded executions.json and the recorded
+# ERS1/ERC1/ERRJ1 artifacts, each named by its BLAKE3. The generator's --check verifies the
+# records against the independently derived projection; the Rust test
+# apps/pos-experiment/tests/erasure_conformance.rs re-executes every case.
+erasure_root="${fixture_root}/erasure"
+[[ -s "${erasure_root}/cases.json" && -s "${erasure_root}/executions.json" ]] || {
+  echo "missing erasure conformance cases or recorded executions" >&2
+  exit 1
+}
+while IFS= read -r -d '' erasure_file; do
+  relative_path="${erasure_file#"${erasure_root}/"}"
+  case "${relative_path}" in
+    cases.json | executions.json | requests/*.erq1) ;;
+    records/*.ers1 | records/*.erc1 | records/*.errj1)
+      name="${relative_path#records/}"
+      actual_address="$(b3sum --no-names "${erasure_file}")"
+      [[ "${name%.*}" == "${actual_address}" ]] || {
+        echo "erasure record is not named by its BLAKE3: ${relative_path}" >&2
+        exit 1
+      }
+      ;;
+    *)
+      echo "unexpected erasure conformance file: ${relative_path}" >&2
+      exit 1
+      ;;
+  esac
+done < <(find -P "${erasure_root}" -type f -print0)
 
 for input in "${inputs[@]}"; do
   relative_path="${input#"${fixture_root}/inputs/"}"
@@ -631,11 +756,13 @@ for input in "${inputs[@]}"; do
 done
 
 publishable_roots=(
+  "${fixture_root}/erasure"
   "${fixture_root}/inputs"
   "${fixture_root}/expected"
   "${fixture_root}/oracles"
   "${fixture_root}/profiles"
   "${fixture_root}/matrix"
+  "${fixture_root}/non-interference"
   "${fixture_root}/expected-authority"
   "${fixture_root}/providers"
   "${fixture_root}/support"

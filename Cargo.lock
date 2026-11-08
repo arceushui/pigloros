@@ -346,9 +346,9 @@ dependencies = [
 
 [[package]]
 name = "async-executor"
-version = "1.14.0"
+version = "1.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c96bf972d85afc50bf5ab8fe2d54d1586b4e0b46c97c50a0c9e71e2f7bcd812a"
+checksum = "f426a31126c735126297bc5ea7a521263c9faff4f63ca415267ee625651c4f37"
 dependencies = [
  "async-task",
  "concurrent-queue",
@@ -382,7 +382,7 @@ dependencies = [
  "futures-lite",
  "parking",
  "polling",
- "rustix 1.1.5",
+ "rustix 1.1.6",
  "slab",
  "windows-sys 0.61.2",
 ]
@@ -2291,6 +2291,7 @@ dependencies = [
  "cipher",
  "cpufeatures 0.3.0",
  "rand_core",
+ "zeroize",
 ]
 
 [[package]]
@@ -2303,6 +2304,7 @@ dependencies = [
  "chacha20",
  "cipher",
  "poly1305",
+ "zeroize",
 ]
 
 [[package]]
@@ -3479,7 +3481,7 @@ version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1bd49230192a3797a9a4d6abe9b3eed6f7fa4c8a8a4947977c6f80025f92cbd8"
 dependencies = [
- "rustix 1.1.5",
+ "rustix 1.1.6",
  "windows-link",
 ]
 
@@ -3822,12 +3824,13 @@ dependencies = [
 
 [[package]]
 name = "hpke"
-version = "0.14.1"
+version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a5324110b02044183df000f0bd7d2d7e61f1000631508627e77f63983b6fdffb"
+checksum = "92041268e41ff204ac89aac70ea9ad4cdaf7b04625a1cc2fa785b100c77f3c9e"
 dependencies = [
  "aead",
  "chacha20poly1305",
+ "curve25519-dalek",
  "getrandom 0.4.3",
  "hkdf",
  "hybrid-array",
@@ -4407,9 +4410,9 @@ dependencies = [
 
 [[package]]
 name = "libsqlite3-sys"
-version = "0.38.2"
+version = "0.39.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1d20bef17f513b9b3004532233187769cd072d790971f4e4da0e346eb6401e8"
+checksum = "14a5f01b87b92705d07b433c06f96cbc764637d81a0bffb5734ce17cf0f9a2b3"
 dependencies = [
  "cc",
  "pkg-config",
@@ -4457,9 +4460,9 @@ dependencies = [
 
 [[package]]
 name = "log"
-version = "0.4.33"
+version = "0.4.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
+checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
 name = "logos"
@@ -4535,7 +4538,7 @@ version = "0.6.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "57804b2c9b69967f1536a56f86297e367a33b19e98852ed624b84551cdbc0d90"
 dependencies = [
- "rustix 1.1.5",
+ "rustix 1.1.6",
 ]
 
 [[package]]
@@ -5344,7 +5347,7 @@ dependencies = [
  "pos-store",
  "rand",
  "rusqlite",
- "rustix 1.1.5",
+ "rustix 1.1.6",
  "serde",
  "serde_json",
  "sha2 0.11.1",
@@ -5477,7 +5480,7 @@ dependencies = [
  "concurrent-queue",
  "hermit-abi",
  "pin-project-lite",
- "rustix 1.1.5",
+ "rustix 1.1.6",
  "windows-sys 0.61.2",
 ]
 
@@ -5550,7 +5553,7 @@ dependencies = [
  "pos-crypto",
  "pos-plugin-release",
  "pos-reference",
- "rustix 1.1.5",
+ "rustix 1.1.6",
  "serde",
  "serde_json",
  "sha2 0.11.1",
@@ -5602,12 +5605,17 @@ dependencies = [
 name = "pos-experiment"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "blake3",
+ "ciborium",
+ "ed25519-dalek",
+ "piglor-gateway",
  "pos-conformance",
  "pos-core",
  "pos-crypto",
  "pos-plugin-agent",
  "pos-plugin-eval",
+ "pos-plugin-ledger",
  "pos-plugin-rule-agent",
  "pos-plugin-society",
  "pos-plugin-synthetic-obs",
@@ -5619,10 +5627,46 @@ dependencies = [
  "pos-time",
  "rusqlite",
  "serde",
+ "serde_bytes",
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",
+ "tokio",
+ "tower",
  "ulid",
+]
+
+[[package]]
+name = "pos-gateway-conformance-adapter"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "blake3",
+ "piglor-gateway",
+ "piglor-ledger",
+ "pos-core",
+ "pos-reference",
+ "pos-runtime",
+ "pos-store",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "tower",
+ "ulid",
+]
+
+[[package]]
+name = "pos-metric-conformance-adapter"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "ciborium",
+ "pos-plugin-eval",
+ "pos-reference",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -5633,7 +5677,7 @@ dependencies = [
  "p256",
  "pos-crypto",
  "pos-owner-bridge-codec",
- "rustix 1.1.5",
+ "rustix 1.1.6",
  "sha2 0.11.1",
  "thiserror 2.0.21",
  "zeroize",
@@ -5704,6 +5748,15 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "pos-plugin-content"
+version = "0.1.0"
+dependencies = [
+ "pos-crypto",
+ "thiserror 2.0.21",
+ "wit-parser",
 ]
 
 [[package]]
@@ -5797,7 +5850,7 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "log",
- "rustix 1.1.5",
+ "rustix 1.1.6",
  "rustls",
  "serde_json",
  "sha2 0.11.1",
@@ -5842,7 +5895,7 @@ dependencies = [
  "pos-plugin-release",
  "pos-runtime",
  "pos-store",
- "rustix 1.1.5",
+ "rustix 1.1.6",
  "thiserror 2.0.21",
  "ulid",
 ]
@@ -5915,7 +5968,7 @@ dependencies = [
  "libc",
  "rand",
  "ring",
- "rustix 1.1.5",
+ "rustix 1.1.6",
  "rustls-pki-types",
  "rustls-webpki",
  "serde",
@@ -5958,7 +6011,7 @@ dependencies = [
  "nix",
  "pos-conformance",
  "pos-reference",
- "rustix 1.1.5",
+ "rustix 1.1.6",
  "sd-listen-fds",
  "serde",
  "serde_json",
@@ -5994,7 +6047,7 @@ dependencies = [
  "pos-crypto",
  "rand",
  "rusqlite",
- "rustix 1.1.5",
+ "rustix 1.1.6",
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",
@@ -6393,9 +6446,9 @@ dependencies = [
 
 [[package]]
 name = "rusqlite"
-version = "0.40.2"
+version = "0.41.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "23f2a97da3e3873c73cb2a2e71b35c40ff95e0b1eefa8d72d8499a6928c3b5b3"
+checksum = "da9bba6f3506135e120a6586df05be18b48d18896600646a4bec8f993d91a594"
 dependencies = [
  "bitflags 2.13.2",
  "fallible-iterator",
@@ -6448,9 +6501,9 @@ dependencies = [
 
 [[package]]
 name = "rustix"
-version = "1.1.5"
+version = "1.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "891efababe418670775f199f0d233d84843c227a0949a883ce15b37c78d6629d"
+checksum = "e5e76742e5294153d4dde1207dbec5bdd81eef6fabdc0d2118babadabfd858aa"
 dependencies = [
  "bitflags 2.13.2",
  "errno",
@@ -6989,7 +7042,7 @@ dependencies = [
  "fastrand",
  "getrandom 0.4.3",
  "once_cell",
- "rustix 1.1.5",
+ "rustix 1.1.6",
  "windows-sys 0.61.2",
 ]
 
@@ -7732,7 +7785,7 @@ dependencies = [
  "once_cell",
  "postcard",
  "pulley-interpreter",
- "rustix 1.1.5",
+ "rustix 1.1.6",
  "semver",
  "serde",
  "serde_derive",
@@ -7849,7 +7902,7 @@ checksum = "fa4dfa39e58735b24ce3d28bfc8c2b3041603cc8a941bb268395351beff90172"
 dependencies = [
  "cc",
  "libc",
- "rustix 1.1.5",
+ "rustix 1.1.6",
  "wasmtime-environ",
  "wasmtime-internal-versioned-export-macros",
  "windows-sys 0.61.2",
@@ -8720,7 +8773,7 @@ dependencies = [
  "libc",
  "libloading",
  "once_cell",
- "rustix 1.1.5",
+ "rustix 1.1.6",
  "x11rb-protocol",
 ]
 
@@ -8820,7 +8873,7 @@ dependencies = [
  "hex",
  "libc",
  "ordered-stream",
- "rustix 1.1.5",
+ "rustix 1.1.6",
  "serde",
  "serde_repr",
  "socket2",
@@ -9008,7 +9061,7 @@ dependencies = [
  "itoa",
  "libc",
  "pin-project-lite",
- "rustix 1.1.5",
+ "rustix 1.1.6",
  "ryu",
  "serde",
  "serde_json",

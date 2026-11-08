@@ -26,7 +26,8 @@ the signatures prove consistency, not publisher identity.
 
 The catalogue holds `positive` and `independent-evaluation` in full, every `denied`
 (`den.01` to `den.22`), `malformed` (`mal.1a` to `mal.6`) and `downgrade` (`dgr.1` to `dgr.6`)
-sub-case, `res.1` to `res.7` (the rust guest under a release whose memory, host-call or
+sub-case, `ind.5` (the probe guest's `drive` traps `unreachable` on the observation `trap`,
+ADR-061 R13), `res.1` to `res.7` (the rust guest under a release whose memory, host-call or
 `event_bytes` budget it exceeds, the c guest under a fuel budget of 1, and the probe guest
 under a release whose `state_bytes`, `log_calls` or `log_bytes` budget it exceeds) and `del.1`,
 `del.2`.
@@ -1039,6 +1040,38 @@ def positive_subcases() -> list[SubCase]:
     return [committed_subcase("pos.1", rust), committed_subcase("pos.2", c_release()), carried]
 
 
+# The observation that makes the guests' `drive` log once and trap with `unreachable`
+# (docs/evidence/adr-061-r4-prototype.md, guest behaviour 1).
+TRAP_PASS = PassInputs(
+    invocation_id=bytes([0x15]) * 16,
+    domain=bytes([7]) * 32,
+    offset=0,
+    observation=b"trap",
+    simulation_time=45,
+    tick=TICK,
+    instant=INSTANT,
+)
+
+
+@lru_cache(maxsize=None)
+def probe_release() -> Release:
+    return make_release(default_spec(component=component("probe-guest.wasm")))
+
+
+def trapped_subcase() -> SubCase:
+    """`ind.5` (ADR-061 R13): the probe guest's `drive` traps; the trap class and the
+    export are the oracle the independent evaluator compares."""
+    release = probe_release()
+    trap = {"kind": "trapped", "class": "unreachable", "export": "drive"}
+    return SubCase(
+        id="ind.5",
+        steps=[install(release), bind(release), run_pass(TRAP_PASS)],
+        expect=trap,
+        entry={"id": "ind.5", **trap},
+        releases=[release],
+    )
+
+
 def digest_subcase(sub_id: str, steps: list, compute: dict, value: bytes, releases) -> SubCase:
     return SubCase(
         id=sub_id,
@@ -1097,6 +1130,7 @@ def independent_subcases() -> list[SubCase]:
             r7_d1_digest(),
             [],
         ),
+        trapped_subcase(),
     ]
 
 
@@ -1582,6 +1616,30 @@ def subcase_object(sub: SubCase) -> dict:
     return value
 
 
+EXECUTION_MODES = ("local", "air-gapped")
+
+
+def execution_result(context: Context, oracle: bytes) -> dict[str, object]:
+    """The verifier-accepted execution result of one family (ADR-062 R8 provider dispatch).
+
+    ADR-062 Revision 8 slice N6 (#1234) flips a record only when the evaluator passes the case
+    in both the Local and the Air-Gapped ExecutionProfile run, both Local-relaxation engineering
+    evidence. A pass means the subject output is the exact oracle member, so the actual digest
+    is the BLAKE3 of the oracle bytes, or the subject failure is the oracle's, so the actual
+    error is its code. Both follow from the oracle alone; the record has no time. The Rust test
+    `apps/pos-plugin-worker/tests/provider_dispatch_public.rs` re-executes every family and
+    requires this record.
+    """
+    if context.oracle_kind == "canonical-output":
+        observed = {"actual_digest": golden.blake3(oracle).hex()}
+    else:
+        observed = {"actual_error": context.code_id}
+    return {
+        "evidence": "local-relaxation",
+        "modes": [{"mode": mode, "outcome": "pass", **observed} for mode in EXECUTION_MODES],
+    }
+
+
 def render_family(family: str, context: Context) -> Outputs:
     subcases = SUBCASES[family]()
     payload_object = {
@@ -1626,18 +1684,19 @@ def render_family(family: str, context: Context) -> Outputs:
                 "code_id": context.code_id,
             },
         }
+    oracle = jcs(oracle_object) + b"\n"
     evidence_object = {
         "claim_layer": CLAIM_LAYER,
         "case_id": context.case_id,
         "family": family,
         "input_blake3_digest": golden.blake3(payload).hex(),
-        "status": "pending",
-        "execution_result": None,
+        "status": "executed",
+        "execution_result": execution_result(context, oracle),
         "executed_at": None,
     }
     return Outputs(
         payload=payload,
-        oracle=jcs(oracle_object) + b"\n",
+        oracle=oracle,
         evidence=(json.dumps(evidence_object, indent=2) + "\n").encode("ascii"),
         composite=composite(pieces),
     )

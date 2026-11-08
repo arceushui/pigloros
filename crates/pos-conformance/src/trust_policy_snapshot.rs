@@ -122,13 +122,18 @@ impl TrustPolicySnapshotV1 {
         self.validate()?;
         let mut fields = encode_snapshot_fields(self);
         fields.truncate(FIELD_COUNT - 1);
-        encode_value(&Value::Array(fields)).map(|unsigned| {
-            let mut message =
-                Vec::with_capacity(OPERATOR_SIGNATURE_DOMAIN_V1.len() + unsigned.len());
-            message.extend_from_slice(OPERATOR_SIGNATURE_DOMAIN_V1);
-            message.extend_from_slice(&unsigned);
-            message
-        })
+        encode_value(&Value::Array(fields))
+            .map(|unsigned| Self::operator_signature_message_from_unsigned_v1(&unsigned))
+    }
+
+    /// Frame the canonical encoding of TPS1 fields 0 through 10 as the exact
+    /// operator-signature message: `PiglorOS.TPS1.operator-signature.v1\0 || unsigned`.
+    ///
+    /// This is the one definition of the message. The typed snapshot, the Draft
+    /// fixture signer and the raw CFB1 verifiers all frame through it.
+    #[must_use]
+    pub(crate) fn operator_signature_message_from_unsigned_v1(unsigned: &[u8]) -> Vec<u8> {
+        [OPERATOR_SIGNATURE_DOMAIN_V1, unsigned].concat()
     }
 
     /// Authenticate the operator signature using a release-pinned key and role.

@@ -14,7 +14,9 @@ use pos_crypto::recipient_export::{
     RecipientTimelineExportV1,
 };
 use pos_crypto::recipient_key::derive_recipient_keypair_v1;
-use pos_store::sqlite::{RecipientExportDecryptionErrorV1, RecipientKeyOwnerV1, SqliteStore};
+use pos_store::sqlite::{
+    RecipientExportDecryptionErrorV1, RecipientKeyOwnerV1, SqliteStore, SqliteStoreOpenOptionsV1,
+};
 use rand::{rngs::StdRng, SeedableRng};
 use ulid::Ulid;
 
@@ -37,10 +39,20 @@ fn database(temporary: &tempfile::TempDir) -> std::path::PathBuf {
 fn owner_for(
     grantee: EntityId,
 ) -> TestResult<(tempfile::TempDir, SqliteStore, RecipientKeyOwnerV1)> {
+    owner_with(grantee, SqliteStoreOpenOptionsV1::default())
+}
+
+fn owner_with(
+    grantee: EntityId,
+    options: SqliteStoreOpenOptionsV1,
+) -> TestResult<(tempfile::TempDir, SqliteStore, RecipientKeyOwnerV1)> {
     let temporary = tempfile::tempdir()?;
     let directory = private_directory(temporary.path(), "recipient-private")?;
     let path = database(&temporary);
-    let store = SqliteStore::open(path.to_str().ok_or("database path is not UTF-8")?)?;
+    let store = SqliteStore::open_with_options(
+        path.to_str().ok_or("database path is not UTF-8")?,
+        options,
+    )?;
     let owner = RecipientKeyOwnerV1::open(directory, grantee)?;
     Ok((temporary, store, owner))
 }
@@ -207,7 +219,7 @@ fn recipient_decryption_public_contract_decrypts_from_a_read_only_store() -> Tes
 #[test]
 fn recipient_decryption_public_contract_checks_the_envelope_before_the_locked_registry(
 ) -> TestResult {
-    let (temporary, mut store, owner) = owner_for(EntityId::new())?;
+    let (temporary, mut store, owner) = owner_with(EntityId::new(), contended_store_options())?;
     let old = store.enroll_recipient_key(&owner)?;
     let current = store.enroll_recipient_key(&owner)?;
     let encrypted = encrypt(old, 1)?;
@@ -467,5 +479,13 @@ fn recipient_decryption_public_contract_errors_display_their_closed_cause() {
     for (error, message) in cases {
         assert_eq!(error.to_string(), message);
         assert!(error.source().is_none());
+    }
+}
+
+/// Store options for a test that holds a lock until the store fails closed: the lock is held
+/// throughout, so a short wait reaches the same outcome as the four-second default.
+const fn contended_store_options() -> SqliteStoreOpenOptionsV1 {
+    SqliteStoreOpenOptionsV1 {
+        busy_timeout: std::time::Duration::from_millis(100),
     }
 }

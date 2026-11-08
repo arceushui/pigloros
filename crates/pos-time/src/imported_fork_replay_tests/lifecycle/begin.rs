@@ -599,7 +599,7 @@ fn refused_begin(call: ConsumerCall, read_only: bool, denied: Connection) -> Fal
     let writer = SqliteStore::open(path)?;
     drop(seed);
     let (verifier, before_keys) = reservation_verifier(writer, &world, requirements, call)?;
-    let store = if read_only {
+    let mut store = if read_only {
         SqliteStore::open_read_only(path)?
     } else {
         SqliteStore::open(path)?
@@ -764,7 +764,7 @@ fn ordinary_sqlite_host(
     )?;
     let (timelines, event) = ordinary_pair(&mut seed)?;
     drop(seed);
-    let store = if read_only {
+    let mut store = if read_only {
         SqliteStore::open_read_only(path)?
     } else {
         SqliteStore::open(path)?

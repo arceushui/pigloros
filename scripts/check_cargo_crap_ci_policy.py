@@ -11,9 +11,9 @@ import yaml
 
 
 CHECKOUT_ACTION = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
-INSTALL_ACTION = "taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29"
-UPLOAD_ACTION = "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
-DOWNLOAD_ACTION = "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"
+INSTALL_ACTION = "taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32"
+UPLOAD_ACTION = "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9"
+DOWNLOAD_ACTION = "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333"
 BASELINE_RESOLVER = "scripts/resolve_cargo_crap_baseline.sh"
 COVERAGE_MERGER = "scripts/merge_owner_bridge_lcov.py"
 COVERAGE_MERGER_SHA256 = '1513c5b117bdf18dbb2b731867ccc26f50025ddfaba99c361afdf69dc9cda18e'
@@ -58,6 +58,9 @@ TEST_ONLY_EXCLUSIONS = (
     "src/nested_imported_fork_replay_tests.rs",
     "src/nested_imported_fork_replay_tests/intermediate_privacy.rs",
     "src/ordinary_fork_lineage_tests.rs",
+    "src/execute/tests/ownership.rs",
+    "src/provider_barrier/tests.rs",
+    "src/execute/tests/ownership/abandonment.rs",
 )
 EXCLUSION_ARGS = "".join(f"--exclude '{path}' " for path in TEST_ONLY_EXCLUSIONS)
 GENERATE_BASELINE_COMMAND = (

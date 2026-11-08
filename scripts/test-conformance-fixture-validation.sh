@@ -203,6 +203,67 @@ rm -- "${opaque_auxiliary_root}/inputs/artifact-integrity/positive.pcw2"
 bash scripts/generate-conformance-fixture-records.sh "${opaque_auxiliary_root}" --write
 expect_rejection "${opaque_auxiliary_root}" "empty conformance fixture"
 
+# ADR-062 Revision 8 slice N1 (#1229): only a verifier-backed G-PUB case in mode L, R or F is
+# flipped, and every checked-in NIA1 is named by its content address.
+air_gapped_flip_root="$(new_fixture_copy air-gapped-matrix-flip)"
+replace_json "${air_gapped_flip_root}/matrix/execution-matrix.json" \
+  '(.cases[] | select(.case_id == "NI-PUBLIC-006-S-A")) |= (
+     .executed = true | .expected_result_digest = ("0" * 64) |
+     .expected_result = {equal: true, first_divergence: null, nia1_content_digest: ("0" * 64)})'
+expect_rejection "${air_gapped_flip_root}" "invalid ADR-059 matrix inventory"
+
+# ADR-062 Revision 8 slice N4 (#1232): a G-FORK Air-Gapped case stays non-executed until N7.
+fork_air_gapped_flip_root="$(new_fixture_copy fork-air-gapped-matrix-flip)"
+replace_json "${fork_air_gapped_flip_root}/matrix/execution-matrix.json" \
+  '(.cases[] | select(.case_id == "NI-FORK-008-W-A")) |= (
+     .executed = true | .expected_result_digest = ("0" * 64) |
+     .expected_result = {equal: true, first_divergence: null, nia1_content_digest: ("0" * 64)})'
+expect_rejection "${fork_air_gapped_flip_root}" "invalid ADR-059 matrix inventory"
+
+archive_flip_root="$(new_fixture_copy archive-matrix-flip)"
+replace_json "${archive_flip_root}/matrix/execution-matrix.json" \
+  '(.cases[] | select(.case_id == "NI-ARCHIVE-009-S-L")) |= (
+     .executed = true | .expected_result_digest = ("0" * 64) |
+     .expected_result = {equal: true, first_divergence: null, nia1_content_digest: ("0" * 64)})'
+expect_rejection "${archive_flip_root}" "invalid ADR-059 matrix inventory"
+
+tampered_nia1_root="$(new_fixture_copy tampered-nia1)"
+tampered_nia1="$(find "${tampered_nia1_root}/non-interference/executions" -type f | sort | sed -n '1p')"
+printf '\0' >>"${tampered_nia1}"
+refresh_checksums "${tampered_nia1_root}" "${tampered_nia1}"
+expect_rejection "${tampered_nia1_root}" "NIA1 file name is not its content address"
+
+# build.rs leaves non-interference/ out of the bundle closure, so the checksum inventories must
+# still cover it: a NIA1 missing from SHA256SUMS is not reproducible, and one missing from
+# BLAKE3SUMS leaves the inventory incomplete.
+sha256_gap_root="$(new_fixture_copy non-interference-sha256-gap)"
+sed -i '0,\|  non-interference/executions/|{\|  non-interference/executions/|d}' "${sha256_gap_root}/SHA256SUMS"
+expect_adapter_rejection "${sha256_gap_root}" "SHA256SUMS is not independently reproducible"
+
+blake3_gap_root="$(new_fixture_copy non-interference-blake3-gap)"
+sed -i '0,\|  non-interference/executions/|{\|  non-interference/executions/|d}' "${blake3_gap_root}/BLAKE3SUMS"
+blake3_inventory_sha256="$(sha256sum "${blake3_gap_root}/BLAKE3SUMS" | awk '{print $1}')"
+sed -i -E "s|^[0-9a-f]{64}  BLAKE3SUMS$|${blake3_inventory_sha256}  BLAKE3SUMS|" \
+  "${blake3_gap_root}/SHA256SUMS"
+expect_rejection "${blake3_gap_root}" "BLAKE3SUMS does not cover the complete public fixture inventory"
+
+# ADR-062 Revision 8 slice N5 (#1233): every recorded erasure artifact is named by its BLAKE3, the
+# erasure directory holds only the declared kinds of file, and the byte inventories cover it.
+tampered_erasure_root="$(new_fixture_copy tampered-erasure-record)"
+tampered_erasure="$(find "${tampered_erasure_root}/erasure/records" -type f | sort | sed -n '1p')"
+printf '\0' >>"${tampered_erasure}"
+refresh_checksums "${tampered_erasure_root}" "${tampered_erasure}"
+expect_rejection "${tampered_erasure_root}" "erasure record is not named by its BLAKE3"
+
+unexpected_erasure_root="$(new_fixture_copy unexpected-erasure-file)"
+printf 'not an erasure record\n' >"${unexpected_erasure_root}/erasure/notes.txt"
+bash scripts/generate-conformance-fixture-records.sh "${unexpected_erasure_root}" --write
+expect_rejection "${unexpected_erasure_root}" "unexpected erasure conformance file"
+
+erasure_gap_root="$(new_fixture_copy erasure-sha256-gap)"
+sed -i '0,\|  erasure/records/|{\|  erasure/records/|d}' "${erasure_gap_root}/SHA256SUMS"
+expect_adapter_rejection "${erasure_gap_root}" "SHA256SUMS is not independently reproducible"
+
 watchdog_root="$(new_fixture_copy plugin-watchdog-drift)"
 replace_json "${watchdog_root}/providers/plugin-conformance/provider.json" \
   '.fixture_contracts.denied.watchdog_ms = 1000'
@@ -238,7 +299,7 @@ expect_adapter_rejection "${divergent_positive_root}" \
 plugin_provider="providers/plugin-conformance/provider.json"
 
 # R8-F3: the checked-in Plugin provider declares the v2 contract, and nothing names the old one.
-jq -e '.contract_version == "2.1.0" and .abi_major == 0 and .abi_minor == 0 and
+jq -e '.contract_version == "2.2.0" and .abi_major == 0 and .abi_minor == 0 and
   has("auxiliary") and .fixture_adapter.id == "plugin-signed-v1"' \
   "${source_root}/${plugin_provider}" >/dev/null
 if git grep -nIF -e 'plugin-conformance@1.0.0' -- . \
@@ -349,6 +410,71 @@ cmp -- "${rendered_metric_root}/oracle.json" \
   "${source_root}/oracles/metric-conformance/malformed.json"
 cmp -- "${rendered_metric_root}/evidence.json" \
   "${source_root}/expected/metric-conformance/malformed.json"
+
+# The replay provider's replay-cbor-v1 adapter (ADR-062 Revision 8 slice R4, #1222). Provider
+# contract 1.0.0 has no reader: a 1.0.0 declaration is rejected.
+replay_provider="providers/replay-conformance/provider.json"
+jq -e '.contract_version == "2.0.0" and .fixture_adapter == {id: "replay-cbor-v1", config: {}}' \
+  "${source_root}/${replay_provider}" >/dev/null
+if grep -rlF 'pigloros.fixture.replay-conformance@1.0.0' "${source_root}/inputs/replay-conformance" \
+  "${source_root}/providers/replay-conformance" "${source_root}/oracles/replay-conformance"; then
+  echo "a replay provider, input or oracle file still names provider contract 1.0.0" >&2
+  exit 1
+fi
+
+replay_old_contract_root="$(new_fixture_copy replay-old-contract-version)"
+replace_json "${replay_old_contract_root}/${replay_provider}" '.contract_version = "1.0.0"'
+expect_adapter_rejection "${replay_old_contract_root}" \
+  "invalid replay-cbor-v1 fixture adapter declaration"
+expect_rejection "${replay_old_contract_root}" \
+  "invalid replay-cbor-v1 fixture adapter declaration"
+
+replay_moved_composite_root="$(new_fixture_copy replay-moved-composite)"
+replace_json "${replay_moved_composite_root}/${replay_provider}" \
+  '.auxiliary.positive[0].path = "inputs/replay-conformance/elsewhere.rcs1"'
+expect_adapter_rejection "${replay_moved_composite_root}" \
+  "invalid replay-cbor-v1 fixture adapter declaration"
+
+replay_corrupt_composite_root="$(new_fixture_copy replay-corrupt-composite)"
+printf '\x00' | dd of="${replay_corrupt_composite_root}/inputs/replay-conformance/positive.rcs1" \
+  bs=1 seek=100 count=1 conv=notrunc status=none
+expect_adapter_rejection "${replay_corrupt_composite_root}" \
+  "auxiliary fixture member is not independently reproducible"
+
+replay_oracle_root="$(new_fixture_copy replay-edited-oracle)"
+sed -i 's/"outcome":"VerifiedExact"/"outcome":"Diverged"/' \
+  "${replay_oracle_root}/oracles/replay-conformance/positive.json"
+expect_adapter_rejection "${replay_oracle_root}" \
+  "oracle fixture is not independently reproducible: replay-conformance-positive"
+
+# A W8H1 entry put back to pending, or bound to another file's digest, is rejected.
+replay_pending_root="$(new_fixture_copy replay-pending-w8h1)"
+replace_json "${replay_pending_root}/expected-authority/inventory.json" \
+  '.entries[0].materialization_status = "pending"'
+expect_rejection "${replay_pending_root}" \
+  "invalid #172 expected-authority inventory lifecycle or entries"
+replay_rebound_root="$(new_fixture_copy replay-rebound-w8h1)"
+replace_json "${replay_rebound_root}/expected-authority/inventory.json" \
+  '.entries[0].fixture_bytes_digest = .entries[3].fixture_bytes_digest'
+expect_rejection "${replay_rebound_root}" "W8H1 entry RPL-001 does not bind"
+
+# `render` writes the payload, oracle, evidence-status record and composite of one family, and
+# they are the checked-in bytes.
+rendered_replay_root="${temporary_base}/rendered-replay-family"
+mkdir -p "${rendered_replay_root}/inputs/replay-conformance"
+bash scripts/conformance-fixture-adapters/replay-cbor-v1.sh render \
+  "${source_root}/${replay_provider}" "${source_root}/support/fixture-family-contract.json" \
+  replay-conformance-denied replay-conformance denied exported-artifact \
+  "${rendered_replay_root}/inputs/replay-conformance/denied.json" \
+  "${rendered_replay_root}/oracle.json" "${rendered_replay_root}/evidence.json"
+cmp -- "${rendered_replay_root}/inputs/replay-conformance/denied.json" \
+  "${source_root}/inputs/replay-conformance/denied.json"
+cmp -- "${rendered_replay_root}/inputs/replay-conformance/denied.rcs1" \
+  "${source_root}/inputs/replay-conformance/denied.rcs1"
+cmp -- "${rendered_replay_root}/oracle.json" \
+  "${source_root}/oracles/replay-conformance/denied.json"
+cmp -- "${rendered_replay_root}/evidence.json" \
+  "${source_root}/expected/replay-conformance/denied.json"
 
 publication_wrapper_prefix="${temporary_base}/publication-wrapper-prefix.sh"
 sed -n '1,/^first_fingerprint=/p' scripts/materialize-conformance-bundles.sh \

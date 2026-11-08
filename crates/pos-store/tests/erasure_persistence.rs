@@ -41,7 +41,7 @@ use erasure_support::{
 };
 
 #[cfg(feature = "sqlite")]
-use pos_store::sqlite::SqliteStore;
+use pos_store::sqlite::{SqliteStore, SqliteStoreOpenOptionsV1};
 
 fn admission(
     request: ErasureReferenceV1,
@@ -3458,7 +3458,10 @@ fn sqlite_fresh_fork_rejects_a_locked_database() -> Result<(), Box<dyn std::erro
         .path()
         .to_str()
         .ok_or(ErasureErrorV1::InvalidEncoding)?;
-    let (store, gate, _, _, prepared) = prepared_fork(SqliteStore::open(path)?)?;
+    let (store, gate, _, _, prepared) = prepared_fork(SqliteStore::open_with_options(
+        path,
+        contended_store_options(),
+    )?)?;
     let connection = rusqlite::Connection::open(path)?;
     connection.execute_batch("BEGIN IMMEDIATE")?;
     assert_eq!(
@@ -4619,4 +4622,13 @@ fn raw_index_variants_remain_explicitly_named() {
         },
         ErasureIndexInsertV1::AdministrativeResolution { .. }
     ));
+}
+
+/// Store options for a test that holds a lock until the store fails closed: the lock is held
+/// throughout, so a short wait reaches the same outcome as the four-second default.
+#[cfg(feature = "sqlite")]
+const fn contended_store_options() -> SqliteStoreOpenOptionsV1 {
+    SqliteStoreOpenOptionsV1 {
+        busy_timeout: std::time::Duration::from_millis(100),
+    }
 }

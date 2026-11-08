@@ -724,20 +724,18 @@ fn materialized_bundle_files(
     mode_name: &str,
     bundle: &ConformanceBundleV1,
 ) -> Result<[MaterializedFile; 2], Box<dyn Error>> {
+    // Validate and encode the archive once. Its content-addressed release filename is the
+    // digest of exactly these bytes, and `verify_public_archive` below checks that binding.
     bundle
         .manifest_digest()
         .and_then(|manifest_digest| {
             bundle
-                .release_filename()
-                .map(|release_filename| (manifest_digest, release_filename))
-        })
-        .and_then(|(manifest_digest, release_filename)| {
-            bundle
                 .manifest_bytes()
-                .map(|manifest_bytes| (manifest_digest, release_filename, manifest_bytes))
+                .map(|manifest_bytes| (manifest_digest, manifest_bytes))
         })
-        .and_then(|(manifest_digest, release_filename, manifest_bytes)| {
+        .and_then(|(manifest_digest, manifest_bytes)| {
             bundle.to_canonical_cbor().map(|bundle_bytes| {
+                let release_filename = pos_conformance::archive_release_filename(&bundle_bytes);
                 (
                     manifest_digest,
                     release_filename,

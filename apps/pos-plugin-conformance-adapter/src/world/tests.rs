@@ -827,6 +827,111 @@ fn the_worker_launches_are_the_ports_count_across_each_pass() -> TestResult {
     Ok(())
 }
 
+/// The outcome of a pass whose `drive` trapped with `trap_class`, as the host reports it.
+fn trapped(trap_class: &'static str) -> CommunityPluginSubjectOutcomeV1 {
+    outcome(
+        Result1::Trapped {
+            trap_class,
+            class: "Operational",
+        },
+        true,
+    )
+}
+
+fn trapped_expect(class: &str) -> Value {
+    json!({"kind": "trapped", "class": class, "export": "drive"})
+}
+
+/// ADR-061 R13: a trap stops the sub-case and matches a `trapped` expectation of its class
+/// only; it is no committed output and no failure, and it reports no usage.
+#[test]
+fn a_trap_matches_only_a_trapped_expectation_of_its_class() -> TestResult {
+    let mut steps = prefix();
+    steps.push(pass_step(vec![member("p")]));
+    let mut fake = Fake::default();
+    fake.passes.push_back(Ok(vec![trapped("unreachable")]));
+    fake.pass_launches.push_back(1);
+    let record = run(
+        &mut fake,
+        &subcase("ind.5", steps.clone(), trapped_expect("unreachable")),
+    )?;
+    assert!(record.matched);
+    assert_eq!(record.steps_run, 3, "the second pass does not run");
+    assert_eq!(record.worker_launches, 1);
+    assert_eq!(record.committed, None);
+    assert_eq!(record.usage, ResourceUsage::default());
+    assert_eq!(record.outcomes, vec![trapped("unreachable")]);
+    for expect in [
+        trapped_expect("other"),
+        json!({"kind": "failed", "error": "ComponentTrap", "class": "Operational"}),
+        committed_expect([7; 32]),
+    ] {
+        let mut fake = Fake::default();
+        fake.passes.push_back(Ok(vec![trapped("unreachable")]));
+        let record = run(&mut fake, &subcase("ind.5", steps.clone(), expect.clone()))?;
+        assert!(!record.matched, "{expect}");
+    }
+    // A pass that commits does not satisfy a `trapped` expectation.
+    let record = run(
+        &mut Fake::default(),
+        &subcase("ind.5", prefix(), trapped_expect("unreachable")),
+    )?;
+    assert!(!record.matched);
+    // The output digest of a trapped pass does not exist.
+    let output = json!({"what": "output_digest", "pass_index": 0});
+    let mut trapping = Fake::default();
+    trapping.passes.push_back(Ok(vec![trapped("unreachable")]));
+    assert_eq!(computed(&output, prefix(), &mut trapping)?, None);
+    Ok(())
+}
+
+/// ADR-061 R13: a trap matches only a `trapped` expectation. A `digest` expectation whose value
+/// does not depend on the pass, an `absent` one and a `malformed` one never match a sub-case
+/// whose pass trapped, so the trap stays operational and the case is `Unavailable`.
+#[test]
+fn a_trap_under_another_expectation_never_matches_and_is_unavailable() -> TestResult {
+    let mut trapping = prefix();
+    trapping.push(pass_step(vec![member("p")]));
+    let blake3_of = json!({"what": "blake3_of", "input": "x"});
+    let value = hex::encode(blake3::hash(b"x").as_bytes());
+    let mut nested = subcase("mal.6", trapping.clone(), json!({"kind": "malformed"}));
+    nested["nested"] = json!(hex::encode(blake3::hash(b"manifest-a").as_bytes()));
+    let documents = [
+        subcase("ind.1", trapping.clone(), digest_expect(&blake3_of, &value)),
+        subcase(
+            "del.1",
+            {
+                let mut steps = trapping.clone();
+                steps.push(scan_step("m", &["events", "state", "outcome"], "p"));
+                steps
+            },
+            absent("m", "p"),
+        ),
+        nested,
+    ];
+    for document in documents {
+        let mut fake = Fake::default();
+        fake.passes.push_back(Ok(vec![trapped("unreachable")]));
+        let record = run(&mut fake, &document)?;
+        assert!(!record.matched, "{document}");
+        for family in FixtureFamily::ALL {
+            let decided = crate::map::case_result("c", *family, std::slice::from_ref(&record));
+            assert_eq!(
+                decided.result,
+                pos_reference::evaluator::SubjectResult::Unavailable,
+                "{family:?} {document}"
+            );
+        }
+    }
+    // The control: the same digest sub-case whose pass commits matches.
+    let record = run(
+        &mut Fake::default(),
+        &subcase("ind.1", trapping, digest_expect(&blake3_of, &value)),
+    )?;
+    assert!(record.matched);
+    Ok(())
+}
+
 #[test]
 fn an_operational_outcome_matches_no_expectation() -> TestResult {
     let crashed = outcome(
@@ -1503,7 +1608,29 @@ fn the_outcome_record_encoding_has_a_golden() {
     };
     assert_eq!(
         hex::encode(&outcome_bytes_of(&not_run)),
-        "8b64504f4231016170f6f6f6f600000081664e6f7452756e"
+        "8b64504f4231026170f6f6f6f600000081664e6f7452756e"
+    );
+}
+
+/// ADR-061 R13: a trap is `["Trapped", trap_class, class]` in the version-2 record.
+#[test]
+fn a_trapped_result_encodes_its_trap_class_and_host_class() {
+    let record = CommunityPluginSubjectOutcomeV1 {
+        tick: 0,
+        ..outcome(
+            Result1::Trapped {
+                trap_class: "unreachable",
+                class: "Operational",
+            },
+            false,
+        )
+    };
+    assert_eq!(
+        hex::encode(&outcome_bytes_of(&record)),
+        concat!(
+            "8b64504f4231026170f6f6f6f60000008367547261707065646b756e72656163",
+            "6861626c656b4f7065726174696f6e616c",
+        )
     );
 }
 
@@ -1542,7 +1669,7 @@ fn every_result_of_the_outcome_record_has_its_encoding() {
         output_usage: Some(output_usage),
     };
     let golden = concat!(
-        "8b64504f42310161705820010101010101010101010101010101010101010101",
+        "8b64504f42310261705820010101010101010101010101010101010101010101",
         "0101010101010101010101582002020202020202020202020202020202020202",
         "0202020202020202020202020258200303030303030303030303030303030303",
         "0303030303030303030303030303035820040404040404040404040404040404",
@@ -1569,7 +1696,7 @@ fn every_result_of_the_outcome_record_has_its_encoding() {
     assert_eq!(
         hex::encode(&outcome_bytes_of(&record)),
         concat!(
-            "8b64504f4231016170f658200202020202020202020202020202020202020202",
+            "8b64504f4231026170f658200202020202020202020202020202020202020202",
             "020202020202020202020202f6f619012c00008466537461676564f6f6f6",
         )
     );
@@ -1582,7 +1709,7 @@ fn every_result_of_the_outcome_record_has_its_encoding() {
                 class: "PreExecutionRejection",
             },
             concat!(
-                "8b64504f4231016170f6f6f6f600000084675265667573656473417274696661",
+                "8b64504f4231026170f6f6f6f600000084675265667573656473417274696661",
                 "6374547275737444656e696564694e6f74416374697665755072654578656375",
                 "74696f6e52656a656374696f6e",
             ),
@@ -1594,7 +1721,7 @@ fn every_result_of_the_outcome_record_has_its_encoding() {
                 class: "PreExecutionRejection",
             },
             concat!(
-                "8b64504f4231016170f6f6f6f60000008467526566757365646f496e636f6d70",
+                "8b64504f4231026170f6f6f6f60000008467526566757365646f496e636f6d70",
                 "617469626c65416269f675507265457865637574696f6e52656a656374696f6e",
             ),
         ),
@@ -1604,13 +1731,13 @@ fn every_result_of_the_outcome_record_has_its_encoding() {
                 class: "Authoritative",
             },
             concat!(
-                "8b64504f4231016170f6f6f6f600000083664661696c65646d4675656c457868",
+                "8b64504f4231026170f6f6f6f600000083664661696c65646d4675656c457868",
                 "6175737465646d417574686f7269746174697665",
             ),
         ),
         (
             Result1::Discarded,
-            "8b64504f4231016170f6f6f6f60000008169446973636172646564",
+            "8b64504f4231026170f6f6f6f60000008169446973636172646564",
         ),
     ];
     for (result, expected) in cases {
