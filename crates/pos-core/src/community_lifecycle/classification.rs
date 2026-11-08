@@ -152,7 +152,7 @@ impl<'a> CommunityClassificationProofV1<'a> {
         &self.0
     }
 
-    /// Encode exact15-field CAR1, using only class0 PrivateSubjectData.
+    /// Encode exact15-field CAR1, using only class0 `PrivateSubjectData`.
     #[must_use]
     pub fn to_canonical_cbor(&self) -> Zeroizing<Vec<u8>> {
         let input = self.as_input();

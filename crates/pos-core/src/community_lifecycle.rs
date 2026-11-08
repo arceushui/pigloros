@@ -13,6 +13,7 @@ mod progress;
 mod protected_object;
 mod reservation;
 mod revision;
+mod seal;
 mod selected_head;
 mod state;
 mod terminal;
@@ -42,6 +43,7 @@ pub use reservation::{
 pub use revision::{
     CommunityStateProducerV1, CommunityStateRevisionInputV1, CommunityStateRevisionV1,
 };
+pub use seal::{CommunityDigestListV1, CommunitySealedResultInputV1, CommunitySealedResultV1};
 pub use selected_head::{
     CommunityMemberHeadV1, CommunityMemberHeadsV1, CommunityPassFrontierV1,
     CommunitySelectedHeadInputV1, CommunitySelectedHeadV1, MAX_COMMUNITY_MEMBERS_V1,
