@@ -798,25 +798,12 @@ mod tests {
             );
             assert!(!Path::new(":memory:").exists());
             assert_eq!(std::fs::read_dir(directory.path())?.count(), 1);
-            println!("protected-memory-literal-refused");
             return Ok(());
         }
-        let output = std::process::Command::new(std::env::current_exe()?)
-            .args([
-                "--exact",
-                "trust_policy_registry::tests::reserved_literal_memory_name_cannot_be_provisioned",
-                "--nocapture",
-            ])
-            .env(CHILD, "1")
-            .output()?;
-        assert!(
-            output.status.success(),
-            "isolated literal-path refusal failed: {output:?}"
-        );
-        assert!(
-            String::from_utf8_lossy(&output.stdout).contains("protected-memory-literal-refused")
-        );
-        Ok(())
+        run_isolated_namespace_case(
+            "trust_policy_registry::tests::reserved_literal_memory_name_cannot_be_provisioned",
+            CHILD,
+        )
     }
 
     #[test]
@@ -854,18 +841,24 @@ mod tests {
             );
             assert!(!literal.exists());
             assert_eq!(std::fs::read(&native)?, original);
-            println!("implicit-native-uri-refused");
             return Ok(());
         }
+        run_isolated_namespace_case("trust_policy_registry::tests::implicit_native_uri_target_is_checked_before_literal_trust_file_creation", CHILD)
+    }
+
+    fn run_isolated_namespace_case(
+        name: &str,
+        child_flag: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let output = std::process::Command::new(std::env::current_exe()?)
-            .args(["--exact", "trust_policy_registry::tests::implicit_native_uri_target_is_checked_before_literal_trust_file_creation", "--nocapture"])
-            .env(CHILD, "1")
+            .args(["--exact", name, "--nocapture", "--format=pretty"])
+            .env(child_flag, "1")
             .output()?;
         assert!(
             output.status.success(),
-            "isolated implicit URI refusal failed: {output:?}"
+            "isolated namespace refusal failed: {output:?}"
         );
-        assert!(String::from_utf8_lossy(&output.stdout).contains("implicit-native-uri-refused"));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed;"));
         Ok(())
     }
 

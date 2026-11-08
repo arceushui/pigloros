@@ -87,16 +87,12 @@ pub fn refuse_reserved_path(path: &Path) -> Result<(), CoreError> {
 
 fn check_ancestors(path: &Path) -> Result<(), CoreError> {
     path.ancestors().try_for_each(|ancestor| {
-        match std::fs::symlink_metadata(ancestor.join(COORDINATION_DIRECTORY)) {
-            Ok(_) => Err(refused()),
-            Err(error)
-                if error.kind() == ErrorKind::NotFound
-                    || error.kind() == ErrorKind::NotADirectory =>
-            {
-                Ok(())
-            }
-            Err(_) => Err(refused()),
-        }
+        std::fs::symlink_metadata(ancestor.join(COORDINATION_DIRECTORY))
+            .is_err_and(|error| {
+                error.kind() == ErrorKind::NotFound || error.kind() == ErrorKind::NotADirectory
+            })
+            .then_some(())
+            .ok_or_else(refused)
     })
 }
 
@@ -159,19 +155,16 @@ fn filename_path(filename: &[u8]) -> Result<PathBuf, CoreError> {
         } else {
             None
         };
-        match octet {
-            Some((first, second)) => {
-                let byte = (first << 4) | second;
-                if byte == 0 {
-                    break;
-                }
-                decoded.push(byte);
-                position += 3;
+        if let Some((first, second)) = octet {
+            let byte = (first << 4) | second;
+            if byte == 0 {
+                break;
             }
-            None => {
-                decoded.push(raw[position]);
-                position += 1;
-            }
+            decoded.push(byte);
+            position += 3;
+        } else {
+            decoded.push(raw[position]);
+            position += 1;
         }
     }
     Ok(PathBuf::from(OsString::from_vec(decoded)))

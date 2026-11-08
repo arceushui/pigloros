@@ -138,7 +138,7 @@ fn member_matches_exact_nine_field_wire_and_borrows_original_implementation() ->
     ));
     let entry = decoded.as_input().stable_entry;
     assert!(entry.as_ptr() >= expected.as_ptr());
-    assert!(entry.as_ptr_range().end <= expected.as_ptr_range().end);
+    assert!(entry.as_bytes().as_ptr_range().end <= expected.as_ptr_range().end);
     Ok(())
 }
 
