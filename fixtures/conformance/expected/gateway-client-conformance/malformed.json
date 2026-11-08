@@ -2,8 +2,22 @@
   "claim_layer": "gateway-client-conformance",
   "case_id": "gateway-client-conformance-malformed",
   "family": "malformed",
-  "input_blake3_digest": "a4c50e9719f65c549ba5042752f83c92edd4640ac00df3f8fc9065051d1fc4b6",
-  "status": "pending",
-  "execution_result": null,
+  "input_blake3_digest": "2f0e507c478ded8da77ab49da60961e38bec66a3574592ee7c1fcd39d732c173",
+  "status": "executed",
+  "execution_result": {
+    "evidence": "local-relaxation",
+    "modes": [
+      {
+        "mode": "local",
+        "outcome": "pass",
+        "actual_error": "malformed-payload"
+      },
+      {
+        "mode": "air-gapped",
+        "outcome": "pass",
+        "actual_error": "malformed-payload"
+      }
+    ]
+  },
   "executed_at": null
 }

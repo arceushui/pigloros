@@ -29,6 +29,15 @@ failure `network-denied` of provider
 results Local-relaxation engineering evidence until the Sandbox Provider runs
 them.
 
+`pos_experiment::replay_conformance::executor_declaration` is the adapter's
+exact ADR-068 `FixtureExecutorV1` declaration (provider key, `exported-artifact`
+subject adapter, pinned schema digests and capabilities). The composition root
+of `tests/replay_provider_dispatch_public.rs` hands it to the independent
+evaluator, which runs every family through a fresh `pos-experiment` process in
+the Local and the Air-Gapped ExecutionProfile run; that test requires
+`expected/replay-conformance/deletion-redaction.json` (ERA-001, #1296) to be
+`executed` and every other replay record to stay `pending`.
+
 `pos_experiment::profile_recomputation` enforces the named EPF1 on the host
 side, independently of the subject (#1266, wiki
 `ADR-062_R8_Profile_Recomputation_Enforcement`): a network gate on the request
