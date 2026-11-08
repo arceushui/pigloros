@@ -14,6 +14,7 @@ mod guest_error;
 mod host_error;
 mod invocation;
 mod member;
+mod owner_binding;
 mod prepared;
 mod profile;
 mod progress;
@@ -61,6 +62,10 @@ pub use invocation::{
     MeteringV1,
 };
 pub use member::{CommunityMemberBindingInputV1, CommunityMemberBindingV1};
+pub use owner_binding::{
+    CommunityMetadataAnchorInputV1, CommunityMetadataAnchorV1, CommunityMetadataPolicyInputV1,
+    CommunityMetadataPolicyV1, CommunityOwnerBindingInputV1, CommunityOwnerBindingV1,
+};
 pub use prepared::{
     CommunityPreparedInputSetV1, CommunityPreparedInvocationInputV1, CommunityPreparedInvocationV1,
     TimelinePositionV1, MAX_COMMUNITY_PREPARED_INVOCATION_BYTES_V1,
