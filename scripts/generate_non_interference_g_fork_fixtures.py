@@ -454,6 +454,8 @@ REPRODUCIBILITY_CODES = {
     "LiveUnverified": 3,
 }
 FIXTURE_AUTHORITY_SEED = bytes([7] * 32)  # DRAFT_FIXTURE_AUTHORITY_SIGNING_BYTES
+# `OPERATOR_SIGNATURE_DOMAIN_V1` of trust_policy_snapshot.rs.
+TPS1_OPERATOR_SIGNATURE_DOMAIN = b"PiglorOS.TPS1.operator-signature.v1\0"
 
 
 @lru_cache(maxsize=None)
@@ -491,7 +493,8 @@ def execution_profile_bytes(profile_id: str = EXECUTION_PROFILE_ID) -> bytes:
 @lru_cache(maxsize=None)
 def trust_policy_bytes() -> bytes:
     """`draft_trust_policy_snapshot_bytes_v1`: the DFA1 policy, its unsigned 11 fields signed
-    with the fixture authority key."""
+    with the fixture authority key over the ADR-103 operator-signature message
+    `PiglorOS.TPS1.operator-signature.v1\\0 || canonical CBOR(fields 0..10)` (#1299)."""
     dfa = authority()
     fields = [
         "TPS1",
@@ -509,7 +512,8 @@ def trust_policy_bytes() -> bytes:
         dfa["offline_valid_through"],
         dfa["previous_trust_policy_snapshot_digest"],
     ]
-    return cbor(fields + [golden.ed25519_sign(FIXTURE_AUTHORITY_SEED, cbor(fields))])
+    message = TPS1_OPERATOR_SIGNATURE_DOMAIN + cbor(fields)
+    return cbor(fields + [golden.ed25519_sign(FIXTURE_AUTHORITY_SEED, message)])
 
 
 @lru_cache(maxsize=None)

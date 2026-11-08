@@ -18,6 +18,10 @@
 //! the "baseline plus three launches" control of R8-S2 uses the same count. The evaluator-path
 //! half of R8-S8 lives in `crates/pos-reference/tests/plugin_subject_public.rs`.
 //!
+//! ADR-061 R13 (FU-7, #627): `ind.5` reproduces a `ComponentTrap` of the class `unreachable` at
+//! the `drive` export on the real worker, and the controls show that a trap of another class, or
+//! a trap that its sub-case does not expect, is `Unavailable`.
+//!
 //! The sharing of a family run between tests (`OnceLock`) assumes the single-process `cargo
 //! test` runner; under nextest every test is its own process and recomputes the runs it uses.
 
@@ -47,7 +51,7 @@ use pos_runtime::community_plugin_host::{
     CommunityPluginHostErrorV1, CommunityPluginModeV1, ReleaseIdentityV1, RevocationBasisV1,
     TrustDenialBasisV1,
 };
-use serde_json::Value;
+use serde_json::{json, Value};
 use support::attempts::{
     attempt_from_fixture_files, family_budget, oracle_bytes, rewrite_subcases,
 };
@@ -140,8 +144,8 @@ const DELETION_REDACTION_USAGE: ResourceUsage = ResourceUsage {
     ..RUST_ONE_PASS_USAGE
 };
 
-/// The usage of `independent-evaluation`: `ind.3` is the pass of `pos.1`, and `ind.1`, `ind.2a`,
-/// `ind.2b` and `ind.4` run no pass.
+/// The usage of `independent-evaluation`: `ind.3` is the pass of `pos.1`, `ind.1`, `ind.2a`,
+/// `ind.2b` and `ind.4` run no pass, and the pass of `ind.5` traps, which reports no usage.
 const INDEPENDENT_EVALUATION_USAGE: ResourceUsage = RUST_ONE_PASS_USAGE;
 
 /// ADR-061 R11: the usage the real worker measures for each family in Local and Air-Gapped, the
@@ -165,7 +169,7 @@ const MEASURED_USAGE: [(FixtureFamily, ResourceUsage); 7] = [
 const fn is_refused_or_failed(outcome: &Outcome) -> bool {
     matches!(
         outcome.result,
-        Verdict::Refused { .. } | Verdict::Failed { .. }
+        Verdict::Refused { .. } | Verdict::Failed { .. } | Verdict::Trapped { .. }
     )
 }
 
@@ -860,6 +864,122 @@ fn r8_s7_ind_1_is_the_checked_in_literal() -> TestResult {
     Ok(())
 }
 
+/// The `ind.5` entry of the oracle record, written by the generator from the specification.
+fn trap_entry() -> Value {
+    json!({"class": "unreachable", "export": "drive", "id": "ind.5", "kind": "trapped"})
+}
+
+/// The sub-case entries of a canonical record.
+fn entries_of(bytes: &[u8]) -> TestResult<Vec<Value>> {
+    let record: Value = serde_json::from_slice(bytes)?;
+    let entries = record["output"]["subcases"]
+        .as_array()
+        .ok_or("no entries")?;
+    Ok(entries.clone())
+}
+
+/// ADR-061 R13: `ind.5`, the probe guest's `drive` on the observation `trap`, traps with
+/// `unreachable` on the real worker in Local and Air-Gapped. The host reports the trap
+/// `Unverified` (`Operational`); the sub-case launched one worker, committed nothing, and its
+/// entry of the output is the oracle's, which the evaluator compares.
+#[test]
+fn r13_ind_5_traps_unreachable_at_drive_in_local_and_air_gapped() -> TestResult {
+    let family = FixtureFamily::IndependentEvaluation;
+    assert!(entries_of(&oracle_bytes(family)?)?.contains(&trap_entry()));
+    for mode in MODES {
+        let run = family_run(family, mode)?;
+        let capture = capture_of(&run.captures, "ind.5")?;
+        let record = &capture.record;
+        assert!(record.matched, "{mode:?}");
+        assert_eq!(record.steps_run, 3, "{mode:?}");
+        assert_eq!(record.worker_launches, 1, "{mode:?}");
+        assert_eq!(record.committed, None, "{mode:?}");
+        let results: Vec<Verdict> = record
+            .outcomes
+            .iter()
+            .map(|outcome| outcome.result)
+            .collect();
+        let trapped = Verdict::Trapped {
+            trap_class: "unreachable",
+            class: "Operational",
+        };
+        assert_eq!(results, vec![trapped], "{mode:?}");
+        assert!(
+            capture
+                .passes
+                .iter()
+                .all(|pass| pass.unsuccessful && pass.before == pass.after),
+            "{mode:?}"
+        );
+        let SubjectResult::Output(bytes) = &run.observation.result else {
+            return Err(format!("{mode:?} gave no output").into());
+        };
+        assert!(entries_of(bytes)?.contains(&trap_entry()), "{mode:?}");
+    }
+    Ok(())
+}
+
+/// ADR-061 R13: a trap is reproduced only against its own class. `ind.5` alone gives the trap
+/// entry; expecting another class, or expecting a commit, makes the case `Unavailable`, because
+/// an unverified trap that its sub-case does not match is operational.
+#[test]
+fn r13_a_trap_of_another_class_or_an_unexpected_trap_is_unavailable() -> TestResult {
+    let family = FixtureFamily::IndependentEvaluation;
+    let alone = observe_attempt(&one_subcase(family, "ind.5", |_| {})?)?;
+    let SubjectResult::Output(bytes) = &alone.result else {
+        return Err("ind.5 alone gave no output".into());
+    };
+    assert_eq!(entries_of(bytes)?, vec![trap_entry()]);
+    let another_class = one_subcase(family, "ind.5", |subcase| {
+        subcase["expect"]["class"] = "other".into();
+    })?;
+    assert_eq!(
+        observe_attempt(&another_class)?.result,
+        SubjectResult::Unavailable
+    );
+    let unexpected = one_subcase(family, "ind.5", |subcase| {
+        subcase["expect"] = json!({"kind": "committed", "output_digest": "00".repeat(32)});
+    })?;
+    assert_eq!(
+        observe_attempt(&unexpected)?.result,
+        SubjectResult::Unavailable
+    );
+    // A trap under a `digest` expectation whose value does not depend on the pass: `ind.3` with
+    // the observation `trap` and a `blake3_of` compute, which the trap cannot satisfy.
+    let value = blake3::hash(b"x").to_hex().to_string();
+    let digest = one_subcase(family, "ind.3", |subcase| {
+        for step in pass_steps(subcase) {
+            step["observation"] = TRAP_OBSERVATION_HEX.into();
+        }
+        subcase["expect"] = json!({
+            "kind": "digest",
+            "compute": {"what": "blake3_of", "input": "x"},
+            "value": value.as_str(),
+        });
+    })?;
+    assert_eq!(observe_attempt(&digest)?.result, SubjectResult::Unavailable);
+    Ok(())
+}
+
+/// The observation `trap`, as hexadecimal: the guests' `drive` logs once and traps on it.
+const TRAP_OBSERVATION_HEX: &str = "74726170";
+
+/// ADR-061 R13: a trap under an `absent` expectation is `Unavailable`: `del.1` with the
+/// observation `trap` stops at the pass, and its scan never runs.
+#[test]
+fn r13_a_trap_under_an_absent_expectation_is_unavailable() -> TestResult {
+    let attempt = one_subcase(FixtureFamily::DeletionRedaction, "del.1", |subcase| {
+        for step in pass_steps(subcase) {
+            step["observation"] = TRAP_OBSERVATION_HEX.into();
+        }
+    })?;
+    assert_eq!(
+        observe_attempt(&attempt)?.result,
+        SubjectResult::Unavailable
+    );
+    Ok(())
+}
+
 /// Assert that `run_with` does not execute `attempt`.
 fn assert_not_executed(attempt: &CaseAttempt) -> TestResult {
     let runner = SupervisorRunnerV1::with_program(WORKER).ok_or("a relative program")?;
@@ -970,7 +1090,7 @@ fn r8_s8_an_instant_inside_the_same_window_still_passes() -> TestResult {
 fn launching_ids(family: FixtureFamily, run: &FamilyRun) -> Vec<String> {
     match family {
         FixtureFamily::Denied => (3..=12).map(|number| format!("den.{number:02}")).collect(),
-        FixtureFamily::IndependentEvaluation => vec!["ind.3".to_owned()],
+        FixtureFamily::IndependentEvaluation => vec!["ind.3".to_owned(), "ind.5".to_owned()],
         _ => run.ids().into_iter().map(str::to_owned).collect(),
     }
 }

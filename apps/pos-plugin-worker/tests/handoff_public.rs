@@ -158,6 +158,17 @@ const fn fail(error: Error, name: &'static str, class: &'static str) -> Row {
     (error, failed(name, class))
 }
 
+/// A trap of the class `other` with the host failure class `class` (ADR-061 R13).
+const fn trapped(error: Error, class: &'static str) -> Row {
+    (
+        error,
+        Verdict::Trapped {
+            trap_class: "other",
+            class,
+        },
+    )
+}
+
 const fn deny(basis: Denial, name: &'static str) -> Row {
     (Error::ArtifactTrustDenied { basis }, refused_by(name))
 }
@@ -196,8 +207,8 @@ fn golden() -> Vec<Row> {
         fail(Error::UnsupportedSchema, "UnsupportedSchema", AUTH),
         fail(Error::StateMigrationFailed, "StateMigrationFailed", AUTH),
         fail(Error::GuestDeclaredFailure, "GuestDeclaredFailure", AUTH),
-        fail(unverified, "ComponentTrap", OP),
-        fail(reproduced, "ComponentTrap", AUTH),
+        trapped(unverified, OP),
+        trapped(reproduced, AUTH),
         fail(Error::WorkerCrashed, "WorkerCrashed", OP),
         fail(Error::FuelExhausted, "FuelExhausted", AUTH),
         fail(Error::MemoryLimitExceeded, "MemoryLimitExceeded", AUTH),
@@ -230,6 +241,7 @@ fn not_run_entry() -> BoxResult<MemberPassV1> {
 const fn error_of(result: &Verdict) -> &'static str {
     match result {
         Verdict::Refused { error, .. } | Verdict::Failed { error, .. } => error,
+        Verdict::Trapped { .. } => "ComponentTrap",
         _ => "none",
     }
 }
@@ -243,7 +255,9 @@ const fn basis_of(result: &Verdict) -> Option<&'static str> {
 
 const fn class_of(result: &Verdict) -> &'static str {
     match result {
-        Verdict::Refused { class, .. } | Verdict::Failed { class, .. } => class,
+        Verdict::Refused { class, .. }
+        | Verdict::Failed { class, .. }
+        | Verdict::Trapped { class, .. } => class,
         _ => "none",
     }
 }

@@ -48,8 +48,10 @@ Rust and uses fixed public fixture seeds ("repository-test-fixture-only"); `--ch
 PMF1, PTR1, PRV1, TPS1 and execution-profile vectors of the repository and the official BLAKE3
 vectors (`scripts/data/blake3_test_vectors.json`) before it compares every output. The composites
 carry every sub-case of the catalogue: `pos.1` to `pos.3`, `den.01` to `den.22`, `mal.1a` to
-`mal.6`, `res.1` to `res.7`, `del.1`, `del.2`, `dgr.1` to `dgr.6` and `ind.1` to `ind.4`; `dgr.1`,
-`dgr.2`, `dgr.5` and `dgr.6` roll back through the production entry (ADR-103 revision 7). Every
+`mal.6`, `res.1` to `res.7`, `del.1`, `del.2`, `dgr.1` to `dgr.6` and `ind.1` to `ind.5`; `dgr.1`,
+`dgr.2`, `dgr.5` and `dgr.6` roll back through the production entry (ADR-103 revision 7), and
+`ind.5` is a `ComponentTrap` of the class `unreachable` at the probe guest's `drive`, which the
+evaluator compares with its oracle entry (ADR-061 R13). Every
 `expected/plugin-conformance/*.json` is `executed` (ADR-062 Revision 8 slice N6, #1234): the
 independent evaluator dispatches the family through the adapter's exact `FixtureExecutorV1`
 declaration and passes it in both the Local and the Air-Gapped ExecutionProfile run, which are
@@ -95,8 +97,52 @@ the closure members it writes, with the `PiglorOS.RecordedReplay*.v1` digests of
 Revision 8 note "Recorded Replay Digests". The sub-cases carry all eleven entries of
 `expected-authority/inventory.json`; each entry's fixture bytes and expected result are the payload
 and oracle of one family, and its `materialization_status` is `materialized`. Every
-`expected/replay-conformance/*.json` stays `pending`: materialized is not executed. The profile text
-is `profiles/replay-conformance/normative-requirements.md`.
+`expected/replay-conformance/*.json` stays `pending`: materialized is not executed. The one exception
+is `expected/replay-conformance/deletion-redaction.json` (ERA-001, degraded Replay; ADR-062 Revision 8,
+#1296), which is `executed` with the record shape and fixed-point rule of the `plugin-conformance`
+flip: the independent evaluator dispatches the family through the adapter's exact
+`FixtureExecutorV1` declaration and passes it in both the Local and the Air-Gapped ExecutionProfile
+run (Local-relaxation engineering evidence, not hosted conformance). The record names each run's
+outcome and the actual output digest (the BLAKE3 of the oracle member) and the time stays null; the
+generator derives it from the oracle alone, and
+`apps/pos-experiment/tests/replay_provider_dispatch_public.rs` re-executes every family and requires
+every record. The profile text is `profiles/replay-conformance/normative-requirements.md`.
+
+The `erasure/` directory holds the ADR-060 erasure conformance cases (ADR-062 Revision 8 slice
+N5, #1233; owner note `ADR-062_R8_Erasure_Cases` on the Redmine wiki). It is not a CPF1 claim
+layer and is not a member of any bundle: `SHA256SUMS`, `BLAKE3SUMS` and the verify script cover
+it, and `crates/pos-conformance/build.rs` leaves it out of the materialization closure.
+`scripts/generate_erasure_conformance_fixtures.py` is the only writer of `erasure/cases.json` (the
+case definitions and the independently derived expected projection of every case) and of the exact
+`ERQ1` requests under `erasure/requests/`. It runs offline and calls no Rust. `erasure/executions.json`
+and `erasure/records/` (the `ERS1`, `ERC1` and `ERRJ1` artifacts, each named by its BLAKE3) are the
+recorded artifacts of one run of `apps/pos-experiment/tests/erasure_conformance.rs`, which executes
+every case through the public `ErasureExecutionHostV1` over `MemoryStore` and `SQLite` and requires
+byte equality with these files. The generator's `--check` decodes every recorded artifact,
+recomputes its digests and links, derives the ERFP1/ERFA1 applicability matrix and the
+ERAO1/ERPR1 provenance from the case inputs and compares them with the recorded bindings, compares
+everything with the expected projection, scans the directory for the erased canary bytes and pins
+that the erasure path writes no log. The cases cover every lifecycle terminal state, canonical
+acknowledgement ordering, retry, legal hold and policy conflict, and replica, backup and rejoin
+evidence of one host (not distributed). They are engineering evidence, make no ADR-059 mode claim
+and do not change `expected/replay-conformance/deletion-redaction.json`.
+
+The `gateway-http-v1` adapter (`scripts/conformance-fixture-adapters/gateway-http-v1.sh`) owns the
+`gateway-client-conformance` layer (#1295); provider
+`pigloros.fixture.gateway-client-conformance@2.0.0` replaces the 1.0.0 placeholder with no reader or
+alias and declares no auxiliary member. `scripts/generate_gateway_conformance_fixtures.py` is the
+only writer of its seven schemas, payloads (`inputs/gateway-client-conformance/<family>.json`, JCS,
+schema `pigloros.gateway-client-conformance.case.v2`: ordered HTTP exchanges with their expected
+normalized observations), oracles and evidence-status records, and of the subject adapter's
+`apps/pos-gateway-conformance-adapter/src/subject/schema_digests.rs`. It runs offline, calls no Rust and
+writes every expected exchange from the documented ADR-014 route table; `--check` decodes every
+Society Signal payload a second time, checks the normalization rules, the routes and captures, the
+capability set and step and Event usage of every family against the provider, and every payload
+against its schema. The profile text is `profiles/gateway-client-conformance/normative-requirements.md`.
+Every `expected/gateway-client-conformance/*.json` is `executed` under the same rule as the Plugin
+records (ADR-062 R8 provider dispatch, section 10, as amended for #1295):
+`apps/pos-gateway-conformance-adapter/tests/provider_dispatch_public.rs` re-executes every family
+in both ExecutionProfile runs and requires it.
 
 The immutable bundle boundary in `pos-conformance` accepts these bytes from a
 caller, recomputes each BLAKE3 content address, binds the CPF1 profile digest,
@@ -115,8 +161,9 @@ deterministic-air-gapped-v1, so every emitted descriptor has exactly one
 ExecutionProfile while the paired bundles retain identical oracle bytes.
 Provider-owned records under `oracles/` define canonical outputs or namespaced
 failures. Records under `expected/` bind the exact input digest; outside the
-`plugin-conformance` layer they contain only `status: "pending"`, null execution
-result, and null execution timestamp. The
+`plugin-conformance` layer and `expected/replay-conformance/deletion-redaction.json`
+they contain only `status: "pending"`, null execution result, and null execution
+timestamp. The
 materializer packages both artifacts separately using the provider-declared media
 types, and only the oracle is bound as the manifest's expected result. Pending
 evidence metadata is never used as

@@ -3,7 +3,21 @@
   "case_id": "replay-conformance-deletion-redaction",
   "family": "deletion-redaction",
   "input_blake3_digest": "a4645b03a149d03ec0046cc6c94c73d06abf31f892f31e0d37ae76866999e37f",
-  "status": "pending",
-  "execution_result": null,
+  "status": "executed",
+  "execution_result": {
+    "evidence": "local-relaxation",
+    "modes": [
+      {
+        "mode": "local",
+        "outcome": "pass",
+        "actual_digest": "c58b2b63a2e9ba5ab3445368fea5eaaf0d2d3fa5d1c9e253027dadf9f01be3a5"
+      },
+      {
+        "mode": "air-gapped",
+        "outcome": "pass",
+        "actual_digest": "c58b2b63a2e9ba5ab3445368fea5eaaf0d2d3fa5d1c9e253027dadf9f01be3a5"
+      }
+    ]
+  },
   "executed_at": null
 }

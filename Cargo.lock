@@ -5630,6 +5630,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "pos-gateway-conformance-adapter"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "blake3",
+ "piglor-gateway",
+ "piglor-ledger",
+ "pos-core",
+ "pos-reference",
+ "pos-runtime",
+ "pos-store",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "tower",
+ "ulid",
+]
+
+[[package]]
 name = "pos-metric-conformance-adapter"
 version = "0.1.0"
 dependencies = [
