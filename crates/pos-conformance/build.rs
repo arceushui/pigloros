@@ -2764,6 +2764,11 @@ fn expected_paths_with_auxiliary(
 /// but they are not a member of any conformance bundle: the fixture verify script (and, for
 /// the erasure cases, `scripts/generate_erasure_conformance_fixtures.py`) owns their closure.
 fn bundle_source_path(path: &str) -> Option<String> {
-    (!path.starts_with("non-interference/") && !path.starts_with("erasure/"))
-        .then(|| path.to_owned())
+    let unbundled = UNBUNDLED_SOURCE_DIRS
+        .iter()
+        .any(|dir| path.starts_with(dir));
+    (!unbundled).then(|| path.to_owned())
 }
+
+/// The inventoried source directories outside every bundle closure (see [`bundle_source_path`]).
+const UNBUNDLED_SOURCE_DIRS: [&str; 2] = ["non-interference/", "erasure/"];
