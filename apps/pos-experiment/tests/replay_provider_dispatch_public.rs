@@ -113,7 +113,7 @@ fn family_members(provider: &Value, name: &str) -> TestResult<RealFamilyMembers>
         evidence: read(&format!("expected/{LAYER}/{name}.json"))?,
         oracle,
         failure_code,
-        auxiliary_input: read(&text(&provider["auxiliary"][name][0], "path")?)?,
+        auxiliary_input: Some(read(&text(&provider["auxiliary"][name][0], "path")?)?),
         budget,
         watchdog_ms: number(contract, "watchdog_ms")?,
         capability_ids,
