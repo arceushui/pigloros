@@ -131,7 +131,7 @@ fn pass_decoder_rejects_truncation_unknown_version_and_nonpreferred_input() -> T
     long_version.splice(6..7, [0x18, 1]);
     let mut long_ordinal = valid.clone();
     long_ordinal.splice(valid.len() - 1.., [0x18, 1]);
-    let mut trailing = valid.clone();
+    let mut trailing = valid;
     trailing.push(0);
     for wrong in [long_version, long_ordinal, trailing] {
         assert_eq!(
