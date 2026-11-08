@@ -145,7 +145,7 @@ fn run_ceremony(
     let attempt = catch_unwind(AssertUnwindSafe(
         || -> Result<Result<Verified, BridgeError>, Box<dyn std::error::Error>> {
             loop {
-                trace.update("active", surface, &driver);
+                trace.update("active", surface, &driver, loopback);
                 let step = driver.step(&mut env(surface, loopback, store));
                 if receipt.is_none() {
                     if let Some(observed) = driver.first_receipt_at() {
@@ -176,7 +176,7 @@ fn run_ceremony(
         ),
     };
     let result_error = result.as_ref().err().copied();
-    trace.update("caller-complete", surface, &driver);
+    trace.update("caller-complete", surface, &driver, loopback);
     let mut keeper = QuarantineKeeper::new();
     let reply = keeper.finish(driver, result);
     let mut quarantined = reply.driver.is_none();
@@ -186,7 +186,7 @@ fn run_ceremony(
     while quarantined || !surface.idle() {
         if quarantined {
             let poll = keeper.poll(|driver| {
-                trace.update("quarantine", surface, driver);
+                trace.update("quarantine", surface, driver, loopback);
                 driver.poll_cleanup(&mut env(surface, loopback, store))
             });
             quarantined = poll.remaining;

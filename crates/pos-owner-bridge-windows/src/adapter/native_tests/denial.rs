@@ -55,7 +55,8 @@ impl Fixture {
         driver: &mut CeremonyDriver,
     ) -> Result<Result<Verified, BridgeError>, Box<dyn std::error::Error>> {
         loop {
-            self.trace.update("denial-active", &self.surface, driver);
+            self.trace
+                .update("denial-active", &self.surface, driver, &self.loopback);
             match driver.step(&mut readiness::env(
                 &mut self.surface,
                 &mut self.loopback,
@@ -78,8 +79,12 @@ impl Fixture {
             if quarantined {
                 quarantined = keeper
                     .poll(|driver| {
-                        self.trace
-                            .update("denial-quarantine", &self.surface, driver);
+                        self.trace.update(
+                            "denial-quarantine",
+                            &self.surface,
+                            driver,
+                            &self.loopback,
+                        );
                         driver.poll_cleanup(&mut readiness::env(
                             &mut self.surface,
                             &mut self.loopback,

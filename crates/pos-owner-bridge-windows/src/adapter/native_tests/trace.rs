@@ -5,7 +5,9 @@ use std::io::Write as _;
 use std::time::{Duration, Instant};
 
 use pos_owner_bridge::ceremony::driver::CeremonyDriver;
+use pos_owner_bridge::LoopbackPort as _;
 
+use crate::adapter::loopback::SharedLoopback;
 use crate::adapter::surface::Surface;
 
 pub(super) fn worker_stage(worker: usize, stage: &str) {
@@ -32,14 +34,24 @@ impl Trace {
         }
     }
 
-    pub(super) fn update(&mut self, stage: &str, surface: &Surface, driver: &CeremonyDriver) {
+    pub(super) fn update(
+        &mut self,
+        stage: &str,
+        surface: &Surface,
+        driver: &CeremonyDriver,
+        loopback: &SharedLoopback,
+    ) {
+        let served = loopback.served();
         let progress = format!(
-            "stage={stage} posts={} request_clear={} receipt={:?} {}",
+            "stage={stage} posts={} request_clear={} receipt={:?} reads={:?} served={} integrity={} {}",
             driver.posts(),
             driver.request_clear(),
             driver
                 .first_receipt_at()
                 .map(|at| at.saturating_duration_since(self.started)),
+            loopback.received_request_count(),
+            served.count,
+            served.integrity_ok,
             surface.fixture_progress(),
         );
         self.report(progress);
