@@ -1,7 +1,8 @@
 //! Exact retained CNT1; a tuple comparison never authenticates a release/owner.
 
 use pos_core::community_lifecycle::{
-    CommunityLifecycleErrorV1 as Error, CommunityMemberBindingInputV1, CommunityMemberBindingV1,
+    ArtifactRefV1, CommunityLifecycleErrorV1 as Error, CommunityMemberBindingInputV1,
+    CommunityMemberBindingV1, CommunityProfileMemberV1,
 };
 use pos_core::{Hash, ImplementationKeyV1};
 use pos_crypto::plugin_execution::{
@@ -104,20 +105,53 @@ impl<'a> CommunityNegotiatedTupleV1<'a> {
         initial_state_content_digest: Hash,
         protected_owner_binding_digest: Hash,
     ) -> Result<CommunityMemberBindingV1<'binding>> {
+        self.require_implementation(implementation).and_then(|()| {
+            CommunityMemberBindingV1::new(CommunityMemberBindingInputV1 {
+                stable_entry,
+                implementation,
+                pmf1_digest: Hash::from_bytes(self.negotiated.pmf1_digest()),
+                state_schema_digest,
+                negotiated_tuple_digest: self.digest(),
+                initial_state_content_digest,
+                protected_owner_binding_digest,
+            })
+        })
+    }
+
+    /// Build the profile's cycle-free roster policy from the actual full CNT1.
+    ///
+    /// This row excludes the later CMB1/COB1 identities. The installed owner
+    /// still verifies the actual State schema and admitted initializer source.
+    ///
+    /// # Errors
+    /// Rejects a foreign implementation, invalid entry or zero required identity.
+    pub fn profile_member<'binding>(
+        &self,
+        stable_entry: &'binding str,
+        implementation: &'binding ImplementationKeyV1,
+        state_schema_digest: Hash,
+        initializer: ArtifactRefV1,
+    ) -> Result<CommunityProfileMemberV1<'binding>> {
+        self.require_implementation(implementation).and_then(|()| {
+            CommunityProfileMemberV1::new(
+                stable_entry,
+                implementation,
+                Hash::from_bytes(self.negotiated.pmf1_digest()),
+                state_schema_digest,
+                self.digest(),
+                initializer,
+            )
+        })
+    }
+
+    fn require_implementation(&self, implementation: &ImplementationKeyV1) -> Result<()> {
         if implementation.plugin_id() != self.negotiated.plugin_id()
             || implementation.release_digest().as_bytes() != &self.negotiated.release_digest()
         {
-            return Err(Error::InvalidBinding);
+            Err(Error::InvalidBinding)
+        } else {
+            Ok(())
         }
-        CommunityMemberBindingV1::new(CommunityMemberBindingInputV1 {
-            stable_entry,
-            implementation,
-            pmf1_digest: Hash::from_bytes(self.negotiated.pmf1_digest()),
-            state_schema_digest,
-            negotiated_tuple_digest: self.digest(),
-            initial_state_content_digest,
-            protected_owner_binding_digest,
-        })
     }
 
     /// Encode exact16-field CNT1 with all eight limits and explicit live mode.

@@ -581,3 +581,84 @@ fn member_binding_uses_cnt_live_mode_instead_of_mode_independent_profile_digest(
     assert_ne!(local_member.digest(), air_gapped_member.digest());
     Ok(())
 }
+
+#[test]
+fn durable_profile_roster_uses_actual_tuple_and_excludes_future_member_owner_hashes() -> TestResult
+{
+    use pos_core::community_lifecycle::{
+        ArtifactRefV1, CommunityDurableBackendV1, CommunityDurableProfileInputV1,
+        CommunityDurableProfileV1, CommunityProfileRetentionV1,
+    };
+    let profile = profile(Mode::Local)?;
+    let negotiated = negotiated(&profile)?;
+    let tuple = Tuple::new(&negotiated, &profile)?;
+    let key = ImplementationKeyV1::new(
+        "plugin-a".into(),
+        "host-v1".into(),
+        Hash::from_bytes([2; 32]),
+    )?;
+    let schema = Hash::from_bytes([3; 32]);
+    let initializer = ArtifactRefV1 {
+        schema_id: 4,
+        byte_length: 5,
+        digest: [6; 32],
+    };
+    let roster = [tuple.profile_member("entry", &key, schema, initializer)?];
+    assert_eq!(
+        roster[0].digests(),
+        [
+            Hash::from_bytes(negotiated.pmf1_digest()),
+            schema,
+            tuple.digest()
+        ]
+    );
+    assert!(std::ptr::eq(roster[0].implementation(), &raw const key));
+    assert_eq!(roster[0].initializer(), initializer);
+    let input = CommunityDurableProfileInputV1 {
+        backend: CommunityDurableBackendV1::RetainedMemory,
+        execution_profile_digest: Hash::from_bytes(
+            profile.digest().ok_or("profile digest absent")?,
+        ),
+        roster: &roster,
+        source_catalogue_digest: Hash::from_bytes([7; 32]),
+        authority_catalogue_digest: Hash::from_bytes([8; 32]),
+        retention: CommunityProfileRetentionV1 {
+            generation_not_after_micros: 9,
+            recovery_window_micros: 10,
+            quarantine_not_after_micros: 11,
+            metadata_not_after_micros: 12,
+        },
+    };
+    let durable = CommunityDurableProfileV1::new(input)?;
+    assert_eq!(
+        CommunityDurableProfileV1::validate_canonical_cbor(&durable.to_canonical_cbor(), input)?
+            .digest(),
+        durable.digest()
+    );
+    for foreign in [
+        ImplementationKeyV1::new(
+            "plugin-b".into(),
+            "host-v1".into(),
+            Hash::from_bytes([2; 32]),
+        )?,
+        ImplementationKeyV1::new(
+            "plugin-a".into(),
+            "host-v1".into(),
+            Hash::from_bytes([9; 32]),
+        )?,
+    ] {
+        assert_eq!(
+            tuple
+                .profile_member("entry", &foreign, schema, initializer)
+                .err(),
+            Some(Error::InvalidBinding)
+        );
+    }
+    assert_eq!(
+        tuple
+            .profile_member("invalid/entry", &key, schema, initializer)
+            .err(),
+        Some(Error::InvalidBinding)
+    );
+    Ok(())
+}

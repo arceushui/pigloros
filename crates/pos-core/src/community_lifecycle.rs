@@ -15,6 +15,7 @@ mod host_error;
 mod invocation;
 mod member;
 mod prepared;
+mod profile;
 mod progress;
 mod protected_object;
 mod quarantine;
@@ -63,6 +64,10 @@ pub use member::{CommunityMemberBindingInputV1, CommunityMemberBindingV1};
 pub use prepared::{
     CommunityPreparedInputSetV1, CommunityPreparedInvocationInputV1, CommunityPreparedInvocationV1,
     TimelinePositionV1, MAX_COMMUNITY_PREPARED_INVOCATION_BYTES_V1,
+};
+pub use profile::{
+    CommunityDurableBackendV1, CommunityDurableProfileInputV1, CommunityDurableProfileV1,
+    CommunityProfileMemberV1, CommunityProfileRetentionV1,
 };
 pub use progress::CommunityHostProgressV1;
 pub use protected_object::{
