@@ -1,0 +1,7 @@
+{
+  "algorithm": "Ed25519",
+  "authority_kind": "repository-test-fixture-only",
+  "evidence": "engineering-evidence",
+  "key_id": "pigloros.fixture.non-interference-executor",
+  "public_key_hex": "dad7e850d68d4198f60b4c18460456bb8c47e0b0d01a809cbd464211231aae37"
+}

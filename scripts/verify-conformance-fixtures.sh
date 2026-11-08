@@ -227,7 +227,7 @@ jq -e --arg matrix_lifecycle "${matrix_lifecycle}" \
     (.fixture_id | test("^NI-[A-Z]+-[0-9]{3}$")) and
     (.variants == ["S", "D", "W", "C"]) and
     (.modes == ["L", "A", "R", "F"]) and .case_count == 16 and
-    .executed_case_count == 0) and
+    (.executed_case_count | type == "number")) and
   all($root.cases[];
     (keys | sort) == ([
       "authority_fixture_id", "authority_result_digest", "case_id", "executed",
@@ -237,11 +237,26 @@ jq -e --arg matrix_lifecycle "${matrix_lifecycle}" \
     (.variant | IN("S", "D", "W", "C")) and
     (.mode | IN("L", "A", "R", "F")) and
     .case_id == ("\(.fixture_id)-\(.variant)-\(.mode)") and
-    .executed == false and .expected_result_digest == null and
     .authority_fixture_id == null and .authority_result_digest == null and
-    .expected_result == null)
-  and .executed_case_count == 0
+    if .executed == false then
+      .expected_result_digest == null and .expected_result == null
+    else
+      # ADR-062 Revision 8 slice N1 (#1229): only a G-PUB case of NI-PUBLIC-006 or NI-EVAL-007
+      # in mode L, R or F is ever flipped, and only over its checked-in NIA1 (owner note
+      # ADR-062_R8_NonInterference_Executions). Executed never implies a pass.
+      .executed == true and
+      (.fixture_id | IN("NI-PUBLIC-006", "NI-EVAL-007")) and
+      (.mode | IN("L", "R", "F")) and
+      (.expected_result_digest | type == "string" and test("^[0-9a-f]{64}$")) and
+      (.expected_result | type == "object" and
+        (keys == ["equal", "first_divergence", "nia1_content_digest"]) and
+        .equal == true and .first_divergence == null and
+        (.nia1_content_digest | type == "string" and test("^[0-9a-f]{64}$")))
+    end)
+  and .executed_case_count == ([$root.cases[] | select(.executed)] | length)
   and all($root.rows[]; . as $row | ([$root.cases[] | select(.fixture_id == $row.fixture_id)] | length == 16))
+  and all($root.rows[]; . as $row |
+    $row.executed_case_count == ([$root.cases[] | select(.fixture_id == $row.fixture_id and .executed)] | length))
 ' "${matrix_path}" >/dev/null || {
   echo "invalid ADR-059 matrix inventory" >&2
   exit 1
@@ -607,7 +622,8 @@ fi
 jq -e \
   --arg authority_lifecycle "${authority_lifecycle}" \
   --arg matrix_lifecycle "${matrix_lifecycle}" \
-  --arg matrix_blake3 "${matrix_blake3_digest}" '
+  --arg matrix_blake3 "${matrix_blake3_digest}" \
+  --argjson matrix_executed "$(jq '.executed_case_count' "${matrix_path}")" '
   .authority_inventory.path == "expected-authority/inventory.json" and
   .authority_inventory.digest_algorithm == "SHA-256" and
   .authority_inventory.status == $authority_lifecycle and
@@ -615,7 +631,7 @@ jq -e \
   .adr_059_execution_matrix.digest_algorithm == "BLAKE3-256" and
   .adr_059_execution_matrix.blake3_digest == $matrix_blake3 and
   .adr_059_execution_matrix.status == $matrix_lifecycle and
-  .adr_059_execution_matrix.executed_case_count == 0
+  .adr_059_execution_matrix.executed_case_count == $matrix_executed
 ' "${fixture_root}/support/publication-review.json" >/dev/null || {
   echo "Draft authority handoff metadata is invalid" >&2
   exit 1
@@ -636,7 +652,7 @@ mapfile -t blake3_paths < <(
 )
 mapfile -t expected_blake3_paths < <(
   cd "${fixture_root}" &&
-    find erasure expected-authority expected inputs matrix oracles profiles providers support \
+    find erasure expected-authority expected inputs matrix non-interference oracles profiles providers support \
       -type f -printf '%p\n' | sort
 )
 if ! diff -u \
@@ -645,6 +661,51 @@ if ! diff -u \
   echo "BLAKE3SUMS does not cover the complete public fixture inventory" >&2
   exit 1
 fi
+
+# ADR-062 Revision 8 slice N1 (#1229), owner note ADR-062_R8_NonInterference_Executions: the
+# non-interference evidence is one repository test-fixture-only executor key declaration and the
+# checked-in NIA1, each named by its content address (the BLAKE3 of the NIA1 artifact domain, a
+# zero byte and the artifact bytes). The executed matrix cases name exactly those artifacts. The
+# pos-reference verifier's acceptance of each file is checked by the Rust test
+# apps/pos-experiment/tests/non_interference_g_pub.rs.
+non_interference_root="${fixture_root}/non-interference"
+jq -e '
+  (keys | sort) == (["algorithm", "authority_kind", "evidence", "key_id", "public_key_hex"] | sort) and
+  .algorithm == "Ed25519" and .authority_kind == "repository-test-fixture-only" and
+  .evidence == "engineering-evidence" and
+  .key_id == "pigloros.fixture.non-interference-executor" and
+  (.public_key_hex | type == "string" and test("^[0-9a-f]{64}$"))
+' "${non_interference_root}/executor.json" >/dev/null || {
+  echo "invalid non-interference executor key declaration" >&2
+  exit 1
+}
+mapfile -t non_interference_files < <(
+  cd "${non_interference_root}" && find . -type f -printf '%P\n' | sort
+)
+mapfile -t executed_addresses < <(
+  jq -r '.cases[] | select(.executed) | .expected_result.nia1_content_digest' "${matrix_path}" | sort
+)
+expected_non_interference_files=("executor.json")
+for address in "${executed_addresses[@]}"; do
+  expected_non_interference_files+=("executions/${address}.nia1")
+done
+if ! diff -u \
+  <(printf '%s\n' "${expected_non_interference_files[@]}" | sort) \
+  <(printf '%s\n' "${non_interference_files[@]}") >/dev/null; then
+  echo "non-interference evidence does not match the executed matrix cases" >&2
+  exit 1
+fi
+for address in "${executed_addresses[@]}"; do
+  artifact="${non_interference_root}/executions/${address}.nia1"
+  actual_address="$(
+    { printf 'PiglorOS.NonInterference.ExecutionArtifact.v1\0'; cat -- "${artifact}"; } |
+      b3sum | awk '{print $1}'
+  )"
+  [[ "${actual_address}" == "${address}" ]] || {
+    echo "NIA1 file name is not its content address: executions/${address}.nia1" >&2
+    exit 1
+  }
+done
 
 # ADR-062 Revision 8 slice N5 (#1233), owner note ADR-062_R8_Erasure_Cases: the erasure cases are
 # the generator-written cases.json and ERQ1 requests, one recorded executions.json and the recorded
@@ -692,6 +753,7 @@ publishable_roots=(
   "${fixture_root}/oracles"
   "${fixture_root}/profiles"
   "${fixture_root}/matrix"
+  "${fixture_root}/non-interference"
   "${fixture_root}/expected-authority"
   "${fixture_root}/providers"
   "${fixture_root}/support"

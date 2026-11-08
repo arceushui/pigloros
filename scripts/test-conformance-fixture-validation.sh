@@ -203,6 +203,42 @@ rm -- "${opaque_auxiliary_root}/inputs/artifact-integrity/positive.pcw2"
 bash scripts/generate-conformance-fixture-records.sh "${opaque_auxiliary_root}" --write
 expect_rejection "${opaque_auxiliary_root}" "empty conformance fixture"
 
+# ADR-062 Revision 8 slice N1 (#1229): only a verifier-backed G-PUB case in mode L, R or F is
+# flipped, and every checked-in NIA1 is named by its content address.
+air_gapped_flip_root="$(new_fixture_copy air-gapped-matrix-flip)"
+replace_json "${air_gapped_flip_root}/matrix/execution-matrix.json" \
+  '(.cases[] | select(.case_id == "NI-PUBLIC-006-S-A")) |= (
+     .executed = true | .expected_result_digest = ("0" * 64) |
+     .expected_result = {equal: true, first_divergence: null, nia1_content_digest: ("0" * 64)})'
+expect_rejection "${air_gapped_flip_root}" "invalid ADR-059 matrix inventory"
+
+archive_flip_root="$(new_fixture_copy archive-matrix-flip)"
+replace_json "${archive_flip_root}/matrix/execution-matrix.json" \
+  '(.cases[] | select(.case_id == "NI-ARCHIVE-009-S-L")) |= (
+     .executed = true | .expected_result_digest = ("0" * 64) |
+     .expected_result = {equal: true, first_divergence: null, nia1_content_digest: ("0" * 64)})'
+expect_rejection "${archive_flip_root}" "invalid ADR-059 matrix inventory"
+
+tampered_nia1_root="$(new_fixture_copy tampered-nia1)"
+tampered_nia1="$(find "${tampered_nia1_root}/non-interference/executions" -type f | sort | sed -n '1p')"
+printf '\0' >>"${tampered_nia1}"
+refresh_checksums "${tampered_nia1_root}" "${tampered_nia1}"
+expect_rejection "${tampered_nia1_root}" "NIA1 file name is not its content address"
+
+# build.rs leaves non-interference/ out of the bundle closure, so the checksum inventories must
+# still cover it: a NIA1 missing from SHA256SUMS is not reproducible, and one missing from
+# BLAKE3SUMS leaves the inventory incomplete.
+sha256_gap_root="$(new_fixture_copy non-interference-sha256-gap)"
+sed -i '0,\|  non-interference/executions/|{\|  non-interference/executions/|d}' "${sha256_gap_root}/SHA256SUMS"
+expect_adapter_rejection "${sha256_gap_root}" "SHA256SUMS is not independently reproducible"
+
+blake3_gap_root="$(new_fixture_copy non-interference-blake3-gap)"
+sed -i '0,\|  non-interference/executions/|{\|  non-interference/executions/|d}' "${blake3_gap_root}/BLAKE3SUMS"
+blake3_inventory_sha256="$(sha256sum "${blake3_gap_root}/BLAKE3SUMS" | awk '{print $1}')"
+sed -i -E "s|^[0-9a-f]{64}  BLAKE3SUMS$|${blake3_inventory_sha256}  BLAKE3SUMS|" \
+  "${blake3_gap_root}/SHA256SUMS"
+expect_rejection "${blake3_gap_root}" "BLAKE3SUMS does not cover the complete public fixture inventory"
+
 # ADR-062 Revision 8 slice N5 (#1233): every recorded erasure artifact is named by its BLAKE3, the
 # erasure directory holds only the declared kinds of file, and the byte inventories cover it.
 tampered_erasure_root="$(new_fixture_copy tampered-erasure-record)"

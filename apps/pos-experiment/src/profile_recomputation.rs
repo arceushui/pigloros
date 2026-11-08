@@ -29,25 +29,40 @@
 //!    for a single run, `CrossProfileConformance` for each leg of a
 //!    cross-profile run. Any other class is `IncompatibleProfile` at
 //!    `profile_class`.
-//! 4. A cross-profile leg must name its own EPF1 (`deterministic-local-v1`
-//!    or `deterministic-air-gapped-v1`); another profile is
-//!    `IncompatibleProfile` with `ProfileUnsupported` at `execution_profile`.
-//! 5. The subject composes its frozen Plugins on a fresh Experiment host
-//!    under the named EPF1, with the manifest `resource_limit` as the host's
-//!    per-Tick Event budget. A subject that cannot run under the EPF1 is
-//!    `IncompatibleProfile` with `ProfileUnsupported` at `execution_profile`.
-//!    Every `compose` error currently maps to `ProfileUnsupported`, including
-//!    a Plugin registration error that is not about the profile.
-//! 6. The host steps the frozen number of Ticks, or until the run is
-//!    quiescent. A step error is the run's typed failure and ends the run;
-//!    an exhausted host budget is `ResourceLimitExceeded` instead. A
-//!    recomputed Timeline with more Events than `resource_limit` is
-//!    `ResourceLimitExceeded` too (`resource_limit` counts Events).
-//! 7. The recomputed Events are folded into the caller's
+//! 4. The host's checks of the request against the named EPF1 (#1266), each
+//!    `IncompatibleProfile` with `ProfileUnsupported` at `execution_profile`:
+//!    - a cross-profile leg must name its own EPF1 (`deterministic-local-v1`
+//!      or `deterministic-air-gapped-v1`) and its manifest must be in its
+//!      own Execution Mode (Local or Air-Gapped);
+//!    - the manifest Execution Mode must be Local or Air-Gapped;
+//!    - the network gate: a manifest that enables network is refused when
+//!      the EPF1 denies network or the mode is Air-Gapped.
+//! 5. The execution-step budget: a frozen number of Ticks above the EPF1
+//!    execution-step budget is `ResourceLimitExceeded`, before any run.
+//! 6. The subject composes its frozen Plugins on a fresh Experiment host in
+//!    the manifest's Execution Mode ([`Experiment::new`] or
+//!    [`Experiment::new_air_gapped`]) under the named EPF1. A subject that
+//!    reports it cannot run under the EPF1
+//!    ([`RecomputationComposeErrorV1::ProfileUnsupported`]) is
+//!    `IncompatibleProfile` with `ProfileUnsupported` at `execution_profile`,
+//!    and so is a composition the host itself refused: a host that is no
+//!    longer in the manifest's mode, or one that refused a mode-gated
+//!    operation ([`Experiment::refused_mode_gated_operation`]), even when the
+//!    subject ignored the refusal. A registration error
+//!    ([`RecomputationComposeErrorV1::Registration`]) is not a profile
+//!    refusal: it is the run's typed failure, with no Events.
+//! 7. The host applies the manifest `resource_limit` as its per-Tick Event
+//!    budget and its own stop condition, and steps exactly the frozen number
+//!    of Ticks, whatever stop condition the composed host carried. A step error is the run's typed
+//!    failure and ends the run; an exhausted host budget is
+//!    `ResourceLimitExceeded` instead. A recomputed Timeline with more
+//!    Events than the smaller of `resource_limit` and the EPF1 Event-count
+//!    budget is `ResourceLimitExceeded` too.
+//! 8. The recomputed Events are folded into the caller's
 //!    [`ProjectionRegistry`] from empty State and its Snapshot is read under
 //!    the registry's erasure fence; a denied fence is
 //!    `UnverifiableArtifactsMissing`.
-//! 8. When the admitted request can claim exact verification, the stream is
+//! 9. When the admitted request can claim exact verification, the stream is
 //!    compared: `VerifiedExact` or `Diverged` with the `DVR1` digest. A
 //!    `LiveUnverified` run (or a non-exact claim) is never compared and
 //!    never exact: its `VRR1` keeps its class and claim, records the
@@ -56,13 +71,25 @@
 //!
 //! # EPF1 enforcement
 //!
-//! The named EPF1 is enforced by the subject's
-//! [`RecomputationSubjectV1::compose`], not by the host: the host passes the
-//! EPF1 to the subject and applies only the manifest `resource_limit`.
-//! Host-side enforcement of the EPF1, and a finer mapping of `compose`
-//! errors than `ProfileUnsupported`, are follow-up #1266. Until then, and
-//! until the Sandbox Provider runs Air-Gapped (Q6), results are
-//! Local-relaxation engineering evidence.
+//! The owner decisions are recorded on the wiki page
+//! `ADR-062_R8_Profile_Recomputation_Enforcement` (2026-11-07). The host
+//! enforces, independently of the subject:
+//!
+//! - the network gate on the request inputs (step 4). It is an input check:
+//!   the subject's native Plugins run in the host process, and the host
+//!   claims no runtime network denial;
+//! - the Execution Mode, through the composition mode of the host it builds
+//!   (steps 4 and 6). It claims no isolation;
+//! - the Event-count budget (EPF1 budget slot [`EVENT_COUNT_BUDGET_SLOT_V1`])
+//!   and the execution-step budget (slot [`EXECUTION_STEPS_BUDGET_SLOT_V1`]),
+//!   whose steps are Ticks here (steps 5 and 7). The EPF1 budget slots follow
+//!   the order of `pos_conformance::DeterministicBudgetV1`.
+//!
+//! It does not enforce `scheduler_driver_order`, `schemas_and_upcasters`,
+//! `capability_ids`, the numeric and architecture rules, or the memory,
+//! fuel, host-call, output, storage and Simulation Time budgets. Until the
+//! Sandbox Provider runs Air-Gapped (Q6), results are Local-relaxation
+//! engineering evidence.
 //!
 //! # Recomputed stream
 //!
@@ -96,11 +123,11 @@
 use std::collections::HashMap;
 
 use pos_conformance::{
-    ExecutionProfileV1, ReproducibilityClassV1, SafeErrorCodeV1, VerificationPreflightCoordinateV1,
-    VerificationPreflightInputV1, VerificationPreflightResultV1,
+    ExecutionModeV1, ExecutionProfileV1, ReproducibilityClassV1, SafeErrorCodeV1,
+    VerificationPreflightCoordinateV1, VerificationPreflightInputV1, VerificationPreflightResultV1,
 };
 use pos_core::{CoreError, Event, StateRegistry, TimelineId};
-use pos_runtime::RuntimeError;
+use pos_runtime::{PluginExecutionModeV1, RuntimeError};
 use pos_state::ProjectionRegistry;
 use pos_store::StoreConfig;
 
@@ -122,6 +149,12 @@ pub const AIR_GAPPED_PROFILE_ID_V1: &str = "deterministic-air-gapped-v1";
 pub const RECOMPUTED_TIMELINE_ID_V1: [u8; 16] = [0; 16];
 /// The Driver id of a host typed failure.
 pub const HOST_FAILURE_DRIVER_ID_V1: &str = "experiment-host";
+/// The EPF1 `deterministic_budgets` slot of the Event-count budget: a cap on
+/// the total Events of a recomputed Timeline.
+pub const EVENT_COUNT_BUDGET_SLOT_V1: usize = 3;
+/// The EPF1 `deterministic_budgets` slot of the execution-step budget: a cap
+/// on the Ticks a recomputation steps.
+pub const EXECUTION_STEPS_BUDGET_SLOT_V1: usize = 6;
 
 const EXPERIMENT_NAME: &str = "profile-recomputation";
 
@@ -311,21 +344,33 @@ impl From<&ExperimentError> for HostFailureV1 {
     }
 }
 
+/// Why a subject did not compose.
+#[derive(Debug)]
+pub enum RecomputationComposeErrorV1 {
+    /// The subject cannot run under the named EPF1; the run is
+    /// `IncompatibleProfile`.
+    ProfileUnsupported,
+    /// A Plugin of the subject cannot be registered; the run is this typed
+    /// failure, with no Events.
+    Registration(RuntimeError),
+}
+
 /// The frozen subject of a recomputation: the Plugins, Reducers and Drivers
 /// of the run, composed from the closure.
 pub trait RecomputationSubjectV1 {
     /// Register the frozen composition on a fresh Experiment host that runs
-    /// under `profile`.
+    /// under `profile`, in the manifest's Execution Mode.
     ///
     /// # Errors
-    /// Returns the runtime error when the subject cannot run under `profile`
-    /// or its Plugins cannot be registered; the run is then
-    /// `IncompatibleProfile`.
+    /// Returns [`RecomputationComposeErrorV1::ProfileUnsupported`] when the
+    /// subject cannot run under `profile`, and
+    /// [`RecomputationComposeErrorV1::Registration`] when its Plugins cannot
+    /// be registered.
     fn compose(
         &self,
         experiment: &mut Experiment,
         profile: &ExecutionProfileV1,
-    ) -> Result<(), RuntimeError>;
+    ) -> Result<(), RecomputationComposeErrorV1>;
 }
 
 /// The subject member of a recomputation closure.
@@ -415,7 +460,7 @@ pub fn execute_profile_recomputation_v1(
                 ReproducibilityClassV1::ProfileRecomputation,
                 ReproducibilityClassV1::LiveUnverified,
             ],
-            profile_id: None,
+            own_leg: None,
         },
     )
 }
@@ -439,7 +484,7 @@ pub fn execute_cross_profile_conformance_v1(
         fixture_digest,
         store_config,
     } = input;
-    let leg = |preflight, profile_id, projections: &mut ProjectionRegistry| {
+    let leg = |preflight, leg, projections: &mut ProjectionRegistry| {
         execute(
             ProfileRecomputationInputV1 {
                 preflight,
@@ -451,12 +496,14 @@ pub fn execute_cross_profile_conformance_v1(
             projections,
             &Leg {
                 classes: &[ReproducibilityClassV1::CrossProfileConformance],
-                profile_id: Some(profile_id),
+                own_leg: Some(leg),
             },
         )
     };
-    leg(local, LOCAL_PROFILE_ID_V1, &mut *projections).and_then(|local| {
-        leg(air_gapped, AIR_GAPPED_PROFILE_ID_V1, &mut *projections)
+    let local_leg = (LOCAL_PROFILE_ID_V1, ExecutionModeV1::Local);
+    let air_gapped_leg = (AIR_GAPPED_PROFILE_ID_V1, ExecutionModeV1::AirGapped);
+    leg(local, local_leg, &mut *projections).and_then(|local| {
+        leg(air_gapped, air_gapped_leg, &mut *projections)
             .map(|air_gapped| CrossProfileConformanceOutcomeV1 { local, air_gapped })
     })
 }
@@ -464,7 +511,8 @@ pub fn execute_cross_profile_conformance_v1(
 /// What one execution admits.
 struct Leg {
     classes: &'static [ReproducibilityClassV1],
-    profile_id: Option<&'static str>,
+    /// The EPF1 and the Execution Mode a cross-profile leg must name.
+    own_leg: Option<(&'static str, ExecutionModeV1)>,
 }
 
 /// Why an execution stopped before its comparison.
@@ -505,8 +553,8 @@ fn execute(
             leg,
         )
         .map_err(Halt::Refused)
-        .and_then(|admitted| {
-            recompute(member, &preflight, admitted, store_config).map(|run| (admitted, run))
+        .and_then(|(admitted, mode)| {
+            recompute(member, &preflight, admitted, mode, store_config).map(|run| (admitted, run))
         })
         .and_then(|(admitted, run)| {
             rebuild_projections(
@@ -536,23 +584,41 @@ fn execute(
     }
 }
 
+/// The preflight, the class and the host's checks of the request against
+/// the named EPF1 (steps 2 to 4); the admitted result and the composition
+/// mode of the host.
 fn admit(
     preflight: &VerificationPreflightInputV1<'_>,
     closure_digest: [u8; 32],
     leg: &Leg,
-) -> Result<VerificationPreflightResultV1, Refusal> {
+) -> Result<(VerificationPreflightResultV1, PluginExecutionModeV1), Refusal> {
     preflight_bound_closure(preflight, closure_digest)
         .and_then(|admitted| admit_class(admitted, leg.classes))
         .and_then(|admitted| {
-            if leg
-                .profile_id
-                .is_none_or(|profile_id| preflight.execution_profile.profile_id == profile_id)
-            {
-                Ok(admitted)
-            } else {
-                Err(profile_unsupported())
+            let manifest = preflight.manifest;
+            let profile = preflight.execution_profile;
+            let own_leg = leg.own_leg.is_none_or(|(profile_id, mode)| {
+                profile.profile_id == profile_id && manifest.execution_mode == mode
+            });
+            let mode = host_mode(manifest.execution_mode);
+            let network_denied = manifest.network_enabled
+                && (!profile.capabilities_and_network.network_allowed
+                    || mode == Some(PluginExecutionModeV1::AirGapped));
+            match mode {
+                Some(mode) if own_leg && !network_denied => Ok((admitted, mode)),
+                _ => Err(profile_unsupported()),
             }
         })
+}
+
+/// The composition mode of the host of a manifest Execution Mode; only Local
+/// and Air-Gapped recompute.
+const fn host_mode(mode: ExecutionModeV1) -> Option<PluginExecutionModeV1> {
+    match mode {
+        ExecutionModeV1::Local => Some(PluginExecutionModeV1::Local),
+        ExecutionModeV1::AirGapped => Some(PluginExecutionModeV1::AirGapped),
+        ExecutionModeV1::Replay | ExecutionModeV1::Fork => None,
+    }
 }
 
 const fn profile_unsupported() -> Refusal {
@@ -562,26 +628,112 @@ const fn profile_unsupported() -> Refusal {
     )
 }
 
+/// The host after `compose`, or the run's typed registration failure.
+enum Composed {
+    Host(Box<Experiment>),
+    Failed(Recomputed),
+}
+
+/// Steps 5 to 7: the execution-step budget, the composition and the run.
 fn recompute(
     member: RecomputationSubjectMemberV1<'_>,
     preflight: &VerificationPreflightInputV1<'_>,
     admitted: VerificationPreflightResultV1,
+    mode: PluginExecutionModeV1,
     store_config: StoreConfig,
 ) -> Result<Recomputed, Halt> {
-    let resource_limit = preflight.manifest.resource_limit;
-    let mut experiment = Experiment::new(ExperimentConfig {
+    let manifest = preflight.manifest;
+    let budgets = preflight.execution_profile.deterministic_budgets;
+    let event_cap = manifest
+        .resource_limit
+        .min(budgets[EVENT_COUNT_BUDGET_SLOT_V1]);
+    step_budget(
+        member.ticks,
+        budgets[EXECUTION_STEPS_BUDGET_SLOT_V1],
+        admitted,
+    )
+    .and_then(|()| compose(member, preflight, mode, store_config))
+    .and_then(|composed| match composed {
+        Composed::Host(experiment) => run(
+            (*experiment).with_resource_limit(manifest.resource_limit),
+            member.ticks,
+            event_cap,
+            admitted,
+        ),
+        Composed::Failed(failed) => Ok(failed),
+    })
+}
+
+/// The frozen Ticks must not exceed the EPF1 execution-step budget.
+const fn step_budget(
+    ticks: u64,
+    budget: u64,
+    admitted: VerificationPreflightResultV1,
+) -> Result<(), Halt> {
+    if ticks > budget {
+        Err(Halt::Refused(resource_limit_exceeded(
+            admitted.replay_claim,
+        )))
+    } else {
+        Ok(())
+    }
+}
+
+/// Compose the subject on a fresh host in `mode`. The host's own stop
+/// condition is the frozen Ticks, whatever host the subject left.
+fn compose(
+    member: RecomputationSubjectMemberV1<'_>,
+    preflight: &VerificationPreflightInputV1<'_>,
+    mode: PluginExecutionModeV1,
+    store_config: StoreConfig,
+) -> Result<Composed, Halt> {
+    let config = ExperimentConfig {
         name: EXPERIMENT_NAME.to_owned(),
         stop: StopCondition::MaxTicks(member.ticks),
         store_config,
-    })
-    .with_resource_limit(resource_limit);
-    member
+    };
+    let mut experiment = if mode == PluginExecutionModeV1::AirGapped {
+        Experiment::new_air_gapped(config)
+    } else {
+        Experiment::new(config)
+    };
+    match member
         .subject
         .compose(&mut experiment, preflight.execution_profile)
-        .map_err(|_| Halt::Refused(profile_unsupported()))
-        .and_then(|()| experiment.start().map_err(Halt::Host))
+    {
+        Err(RecomputationComposeErrorV1::ProfileUnsupported) => {
+            Err(Halt::Refused(profile_unsupported()))
+        }
+        Err(RecomputationComposeErrorV1::Registration(error)) => Ok(Composed::Failed(Recomputed {
+            timeline: TimelineId::new(),
+            events: Vec::new(),
+            failure: Some(HostFailureV1::from(&ExperimentError::Runtime(error))),
+        })),
+        Ok(())
+            if experiment.execution_mode() != mode || experiment.refused_mode_gated_operation() =>
+        {
+            Err(Halt::Refused(profile_unsupported()))
+        }
+        Ok(()) => {
+            experiment.config.stop = StopCondition::MaxTicks(member.ticks);
+            Ok(Composed::Host(Box::new(experiment)))
+        }
+    }
+}
+
+/// Run the composed host for `ticks` Ticks and cap its Events at
+/// `event_cap`.
+fn run(
+    experiment: Experiment,
+    ticks: u64,
+    event_cap: u64,
+    admitted: VerificationPreflightResultV1,
+) -> Result<Recomputed, Halt> {
+    experiment
+        .start()
+        .map_err(Halt::Host)
         .and_then(|mut session| {
-            let failure = drive(&mut session);
+            let failure = drive(&mut session, ticks);
             session
                 .source_events()
                 .map_err(Halt::Host)
@@ -594,7 +746,7 @@ fn recompute(
                     RuntimeError::ResourceExhausted { .. }
                 ))
             );
-            if exhausted || event_count(&events) > resource_limit {
+            if exhausted || event_count(&events) > event_cap {
                 Err(Halt::Refused(resource_limit_exceeded(
                     admitted.replay_claim,
                 )))
@@ -608,16 +760,10 @@ fn recompute(
         })
 }
 
-/// Step the session until it stops or is quiescent; a step error ends the
-/// run and is returned.
-fn drive(session: &mut ExperimentSession) -> Option<ExperimentError> {
-    loop {
-        match session.step() {
-            Ok(true) => {}
-            Ok(false) => return None,
-            Err(error) => return Some(error),
-        }
-    }
+/// Step the session exactly `ticks` Ticks; a step error ends the run and is
+/// returned.
+fn drive(session: &mut ExperimentSession, ticks: u64) -> Option<ExperimentError> {
+    (0..ticks).find_map(|_| session.step().err())
 }
 
 impl Recomputed {

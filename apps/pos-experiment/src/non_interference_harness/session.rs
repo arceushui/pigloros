@@ -184,7 +184,7 @@ impl<S: NonInterferenceSessionSubjectV1> NonInterferenceModeRunnerV1
 }
 
 /// Step a session to quiescence or its stop condition and read its Events.
-fn recorded(
+pub(super) fn recorded(
     session: &mut ExperimentSession,
 ) -> Result<(TimelineId, Vec<Event>), NonInterferenceNonExecutedCauseV1> {
     while session.step()? {}

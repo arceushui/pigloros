@@ -8,6 +8,7 @@
 //! digests below follow the documented `recorded_replay` conventions and do
 //! not call the execution step.
 
+use ed25519_dalek::{Signer, SigningKey};
 use pos_conformance::{
     draft_execution_profile_bytes_v1, draft_trust_policy_snapshot_bytes_v1,
     ArtifactClosureStatusV1, ArtifactRevocationStatusV1, DivergenceLocationKindV1,
@@ -15,7 +16,7 @@ use pos_conformance::{
     ReplayClaimV1, ReproManifestV1, ReproVerificationRequestV1, ReproducibilityClassV1,
     SafeErrorCodeV1, TrustPolicySnapshotV1, TrustRootStatusV1, TrustSignatureStatusV1,
     TrustSnapshotContinuityV1, VerificationOutcomeV1, VerificationPreflightEvidenceV1,
-    VerificationPreflightInputV1, VerificationResultV1,
+    VerificationPreflightInputV1, VerificationResultV1, DRAFT_TRUST_POLICY_OPERATOR_KEY_V1,
 };
 use pos_core::{
     store::{export_timeline, EventStore, SeqRange},
@@ -35,7 +36,7 @@ use pos_experiment::recorded_replay::{
 };
 use pos_experiment::verification_execution::{
     recomputation_closure_digest_v1, recorded_replay_closure_digest_v1,
-    VerificationExecutionOutcomeV1,
+    trust_signature_evidence_v1, VerificationExecutionOutcomeV1,
 };
 use pos_runtime::{Driver, ObservationView, RuntimeError, StepOutput};
 use pos_state::ProjectionRegistry;
@@ -54,6 +55,11 @@ const PAYLOADS: [u8; 2] = [7, 9];
 const LICENCE: &[u8] = b"SPDX-License-Identifier: MIT\n";
 const FIXTURE_DIGEST: [u8; 32] = [0xf1; 32];
 const REDUCER: &str = "counter";
+/// The public deterministic repository fixture-authority signing key.
+const DRAFT_AUTHORITY_SIGNING_KEY: [u8; 32] = [7; 32];
+/// A signing key the Draft authority never pinned.
+const ATTACKER_SIGNING_KEY: [u8; 32] = [0xa7; 32];
+const OPERATOR_SIGNATURE_DOMAIN: &[u8] = b"PiglorOS.TPS1.operator-signature.v1\0";
 
 /// Counts every Reducer-visible Event per entity.
 struct CountReducer;
@@ -390,6 +396,10 @@ impl Fixture {
         };
         let canonical_request_bytes = request.to_canonical_cbor()?;
         let canonical_request_digest = request.digest()?;
+        let trust_signature = trust_signature_evidence_v1(
+            &trust_policy_snapshot,
+            &DRAFT_TRUST_POLICY_OPERATOR_KEY_V1,
+        );
         Ok(Self {
             request,
             canonical_request_bytes,
@@ -399,7 +409,7 @@ impl Fixture {
             trust_policy_snapshot,
             evidence: VerificationPreflightEvidenceV1 {
                 trust_root: TrustRootStatusV1::Known,
-                trust_signature: TrustSignatureStatusV1::Valid,
+                trust_signature,
                 artifact_revocation: ArtifactRevocationStatusV1::Clear,
                 trust_continuity: TrustSnapshotContinuityV1 {
                     previous_epoch: None,
@@ -414,6 +424,19 @@ impl Fixture {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn recorded() -> TestResult<Self> {
         Self::new(ReproducibilityClassV1::RecordedReplay)
+    }
+
+    /// Bind the request to `snapshot` and take its trust-signature evidence
+    /// from the same authentication the host runs.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn bind_snapshot(&mut self, snapshot: TrustPolicySnapshotV1) -> TestResult {
+        let digest = snapshot.digest()?;
+        self.evidence.trust_signature =
+            trust_signature_evidence_v1(&snapshot, &DRAFT_TRUST_POLICY_OPERATOR_KEY_V1);
+        self.trust_policy_snapshot = snapshot;
+        self.manifest.trust_policy_snapshot_digest = digest;
+        self.request.trust_policy_snapshot_digest = digest;
+        self.refresh_manifest_binding()
     }
 
     /// Re-bind RVR1 to the edited manifest.
@@ -954,6 +977,64 @@ fn a_denied_snapshot_fence_is_unverifiable_artifacts_missing() -> TestResult {
         ),
         Some("replay_claim"),
     );
+    Ok(())
+}
+
+/// A TPS1 whose operator signature does not authenticate under the pinned
+/// Draft authority key is refused at `trust_signature`: one with a flipped
+/// signature bit, one re-signed by the Draft authority over the unsigned
+/// fields without the operator-signature domain, and one whose `trust_roots`
+/// name an attacker key that signed it over the correct domain (the operator
+/// key is never read from the TPS1's own roots).
+#[test]
+fn a_tps1_that_does_not_authenticate_is_refused_at_trust_signature() -> TestResult {
+    let recording = Recording::new()?;
+    let draft = Fixture::recorded()?.trust_policy_snapshot;
+    let mut flipped = draft.clone();
+    flipped.operator_signature[0] ^= 1;
+    let mut domain_less = draft.clone();
+    let message = domain_less.operator_signature_message_v1()?;
+    let unsigned = message
+        .strip_prefix(OPERATOR_SIGNATURE_DOMAIN)
+        .ok_or("the TPS1 operator-signature message must start with its domain")?;
+    domain_less.operator_signature = SigningKey::from_bytes(&DRAFT_AUTHORITY_SIGNING_KEY)
+        .sign(unsigned)
+        .to_bytes();
+    let attacker = SigningKey::from_bytes(&ATTACKER_SIGNING_KEY);
+    let mut self_rooted = draft;
+    self_rooted.trust_roots[0].public_key = attacker.verifying_key().to_bytes();
+    self_rooted.operator_signature = attacker
+        .sign(&self_rooted.operator_signature_message_v1()?)
+        .to_bytes();
+    // Well formed and authentic under its own root: only the pin refuses it.
+    assert_eq!(
+        trust_signature_evidence_v1(&self_rooted, &self_rooted.trust_roots[0].public_key),
+        TrustSignatureStatusV1::Valid
+    );
+    for snapshot in [flipped, domain_less, self_rooted] {
+        let mut fixture = Fixture::recorded()?;
+        fixture.bind_snapshot(snapshot)?;
+        assert_eq!(
+            fixture.evidence.trust_signature,
+            TrustSignatureStatusV1::Invalid
+        );
+        let outcome = run(
+            &recording,
+            &fixture,
+            recording.closure(),
+            &evaluation_exact()?,
+            &mut projections(),
+        )?;
+        assert_refused(
+            &outcome,
+            (
+                VerificationOutcomeV1::InvalidManifest,
+                ReplayClaimV1::Exact,
+                SafeErrorCodeV1::SignatureInvalid,
+            ),
+            Some("trust_signature"),
+        );
+    }
     Ok(())
 }
 

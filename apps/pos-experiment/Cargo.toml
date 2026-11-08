@@ -9,11 +9,18 @@ publish.workspace = true
 [features]
 # Also compiles the replay-conformance subject adapter (`replay_conformance`, the
 # binary's EAI1/EAO1 entry): it runs on the open fixture erasure gate and the
-# generated Plugin registration of the Experiment host.
+# generated Plugin registration of the Experiment host. It also compiles the
+# G-PUB non-interference capture adapters (ADR-062 Revision 8 slice N1), whose
+# public Gateway protocol seam needs the Gateway router and a Tokio runtime.
 test-support = [
   "pos-core/test-support",
   "pos-runtime/test-support",
+  "dep:axum",
+  "dep:piglor-gateway",
+  "dep:pos-plugin-ledger",
   "dep:pos-time",
+  "dep:tokio",
+  "dep:tower",
 ]
 
 # The replay-conformance subject adapter; it is compiled only with `test-support`.
@@ -27,6 +34,13 @@ required-features = ["test-support"]
 [[bin]]
 name = "pos-ni-local-probe"
 path = "src/bin/pos-ni-local-probe.rs"
+required-features = ["test-support"]
+
+# The fresh-process Local subject of the G-PUB rows (ADR-062 Revision 8 slice
+# N1); it is compiled only with `test-support`.
+[[bin]]
+name = "pos-ni-g-pub-subject"
+path = "src/bin/pos-ni-g-pub-subject.rs"
 required-features = ["test-support"]
 
 [dependencies]
@@ -50,6 +64,11 @@ serde_bytes = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 ulid = { workspace = true }
+axum = { workspace = true, optional = true }
+piglor-gateway = { path = "../piglor-gateway", optional = true }
+pos-plugin-ledger = { path = "../../plugins/ledger", optional = true }
+tokio = { workspace = true, optional = true }
+tower = { workspace = true, optional = true }
 
 [dev-dependencies]
 pos-core = { path = "../../crates/pos-core", features = ["test-support"] }
@@ -85,6 +104,10 @@ required-features = ["test-support"]
 
 [[test]]
 name = "non_interference_harness"
+required-features = ["test-support"]
+
+[[test]]
+name = "non_interference_g_pub"
 required-features = ["test-support"]
 
 [[test]]

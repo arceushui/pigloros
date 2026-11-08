@@ -12,6 +12,7 @@ use pos_conformance::{
     ExecutionProfileV1, ProfileSupportStatusV1, ReproManifestV1, ReproVerificationRequestV1,
     ReproducibilityClassV1, TrustPolicySnapshotV1, TrustRootStatusV1, TrustSignatureStatusV1,
     TrustSnapshotContinuityV1, VerificationPreflightEvidenceV1, VerificationPreflightInputV1,
+    DRAFT_TRUST_POLICY_OPERATOR_KEY_V1,
 };
 use pos_core::{
     event::{CanonicalBytes, EventDraft, Kind},
@@ -31,13 +32,13 @@ use super::payload::{
 use crate::profile_recomputation::{
     execute_cross_profile_conformance_v1, execute_profile_recomputation_v1,
     CrossProfileConformanceInputV1, ProfileRecomputationInputV1, RecomputationClosureV1,
-    RecomputationSubjectMemberV1, RecomputationSubjectV1,
+    RecomputationComposeErrorV1, RecomputationSubjectMemberV1, RecomputationSubjectV1,
 };
 use crate::recorded_replay::{
     execute_recorded_replay_v1, ExportedTimelineMemberV1, RecordedReplayClosureV1,
     RecordedReplayInputV1,
 };
-use crate::verification_execution::VerificationExecutionOutcomeV1;
+use crate::verification_execution::{trust_signature_evidence_v1, VerificationExecutionOutcomeV1};
 use crate::Experiment;
 
 /// The name of the Projection Reducer every run folds into.
@@ -54,7 +55,10 @@ pub(super) const SUBJECT_DRIVER: &str = "replay-subject.driver";
 /// for `RecordedReplay` or `LiveUnverified`, so `replay-v1` and
 /// `live-local-v1` are `deterministic-local-v1` restricted to that one class,
 /// under their own id and digest. The TPS1 is the bundled Draft snapshot, so
-/// its root, signature, revocation and continuity evidence is the host's own.
+/// its root, revocation and continuity evidence is the host's own. Its
+/// signature evidence is not: the host authenticates the TPS1 operator
+/// signature under its own pin of the Draft authority's deployment-operator
+/// key, never a key the snapshot carries, and reports that result.
 pub(super) struct HostV1 {
     local: ExecutionProfileV1,
     air_gapped: ExecutionProfileV1,
@@ -62,6 +66,7 @@ pub(super) struct HostV1 {
     live: ExecutionProfileV1,
     snapshot: TrustPolicySnapshotV1,
     snapshot_digest: [u8; 32],
+    operator_key: [u8; 32],
 }
 
 fn draft_profile(profile: ProfileV1) -> Option<ExecutionProfileV1> {
@@ -107,6 +112,7 @@ impl HostV1 {
                     air_gapped,
                     snapshot,
                     snapshot_digest,
+                    operator_key: DRAFT_TRUST_POLICY_OPERATOR_KEY_V1,
                 })
             })
     }
@@ -122,7 +128,7 @@ impl HostV1 {
 
     /// The request of one leg: the manifest the fixture owns, bound by the
     /// host to the leg's EPF1, the bundled TPS1, the sub-case's class and the
-    /// attempt's Execution Mode.
+    /// leg's Execution Mode ([`leg_mode`]).
     fn request(
         &self,
         fields: &ManifestFieldsV1,
@@ -170,6 +176,7 @@ impl HostV1 {
             manifest,
             execution_profile,
             snapshot: self.snapshot.clone(),
+            trust_signature: trust_signature_evidence_v1(&self.snapshot, &self.operator_key),
         }
     }
 }
@@ -191,6 +198,7 @@ struct LegRequestV1 {
     manifest: ReproManifestV1,
     execution_profile: ExecutionProfileV1,
     snapshot: TrustPolicySnapshotV1,
+    trust_signature: TrustSignatureStatusV1,
 }
 
 impl LegRequestV1 {
@@ -204,7 +212,7 @@ impl LegRequestV1 {
             trust_policy_snapshot: &self.snapshot,
             evidence: VerificationPreflightEvidenceV1 {
                 trust_root: TrustRootStatusV1::Known,
-                trust_signature: TrustSignatureStatusV1::Valid,
+                trust_signature: self.trust_signature,
                 artifact_revocation: ArtifactRevocationStatusV1::Clear,
                 trust_continuity: TrustSnapshotContinuityV1 {
                     previous_epoch: None,
@@ -363,13 +371,50 @@ impl RecomputationSubjectV1 for ScriptV1 {
         &self,
         experiment: &mut Experiment,
         _profile: &ExecutionProfileV1,
-    ) -> Result<(), RuntimeError> {
-        experiment.register_generated(
-            &SubjectPlugin::of(self),
-            None,
-            Some(Box::new(ScriptDriver::of(self))),
-        )
+    ) -> Result<(), RecomputationComposeErrorV1> {
+        experiment
+            .register_generated(
+                &SubjectPlugin::of(self),
+                None,
+                Some(Box::new(ScriptDriver::of(self))),
+            )
+            .map_err(RecomputationComposeErrorV1::Registration)
     }
+}
+
+/// The Execution Mode of a leg's manifest: a cross-profile leg under the
+/// Local or the Air-Gapped EPF1 is in that profile's mode (#1266); every
+/// other leg is in the attempt's mode.
+const fn leg_mode(
+    class: ReproducibilityClassV1,
+    profile: ProfileV1,
+    attempt: ExecutionModeV1,
+) -> ExecutionModeV1 {
+    match (class, profile) {
+        (ReproducibilityClassV1::CrossProfileConformance, ProfileV1::Local) => {
+            ExecutionModeV1::Local
+        }
+        (ReproducibilityClassV1::CrossProfileConformance, ProfileV1::AirGapped) => {
+            ExecutionModeV1::AirGapped
+        }
+        _ => attempt,
+    }
+}
+
+/// The request of every leg of `subcase`, in profile order.
+fn leg_requests(host: &HostV1, subcase: &SubCaseV1, mode: ExecutionModeV1) -> Vec<LegRequestV1> {
+    subcase
+        .profiles
+        .iter()
+        .map(|profile| {
+            host.request(
+                &subcase.manifest,
+                subcase.class,
+                *profile,
+                leg_mode(subcase.class, *profile, mode),
+            )
+        })
+        .collect()
 }
 
 /// Run one sub-case: one leg per profile. Returns its record and the manifest
@@ -381,11 +426,7 @@ pub(super) fn run_subcase(
     mode: ExecutionModeV1,
     store_config: &StoreConfig,
 ) -> Option<(RecordV1, Vec<LegEvidenceV1>)> {
-    let requests: Vec<LegRequestV1> = subcase
-        .profiles
-        .iter()
-        .map(|profile| host.request(&subcase.manifest, subcase.class, *profile, mode))
-        .collect();
+    let requests = leg_requests(host, subcase, mode);
     let licence = subcase.licence.as_deref();
     let folded = Arc::new(AtomicU64::new(0));
     let composed = match &subcase.closure {

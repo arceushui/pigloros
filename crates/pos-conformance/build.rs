@@ -2758,10 +2758,12 @@ fn expected_paths_with_auxiliary(
     paths
 }
 
-/// An inventoried source path that belongs to the bundle materialization closure. The ADR-060
-/// erasure conformance cases (ADR-062 Revision 8 slice N5, #1233) are inventoried and
-/// digest-checked like every source, but they are not a member of any conformance bundle: the
-/// fixture verify script and `scripts/generate_erasure_conformance_fixtures.py` own their closure.
+/// An inventoried source path that belongs to the bundle materialization closure. The
+/// non-interference evidence (ADR-062 Revision 8 slice N1, #1229) and the ADR-060 erasure
+/// conformance cases (slice N5, #1233) are inventoried and digest-checked like every source,
+/// but they are not a member of any conformance bundle: the fixture verify script (and, for
+/// the erasure cases, `scripts/generate_erasure_conformance_fixtures.py`) owns their closure.
 fn bundle_source_path(path: &str) -> Option<String> {
-    (!path.starts_with("erasure/")).then(|| path.to_owned())
+    (!path.starts_with("non-interference/") && !path.starts_with("erasure/"))
+        .then(|| path.to_owned())
 }
