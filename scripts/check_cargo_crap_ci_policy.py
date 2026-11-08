@@ -331,7 +331,7 @@ def check_workflow(
         "Generate trusted current baseline", "Analyze CRAP score changes", "Enforce cargo-crap policy",
         "Upload cargo-crap report", "Publish trusted main baseline",
     ], "cargo-crap evidence steps must retain their reviewed order")
-    require(steps[1] == {"uses": "dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de",
+    require(steps[1] == {"uses": "dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8",
                          "with": {"toolchain": "1.97.1"}}, "cargo-crap toolchain changed")
 
     require(

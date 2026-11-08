@@ -188,6 +188,18 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
     def test_repository_workflow_passes(self) -> None:
         CHECKER.check_workflow(ROOT / ".github/workflows/ci.yml")
 
+    def test_native_coverage_download_and_toolchain_pins_cannot_be_substituted(self) -> None:
+        for index, action in (
+            (1, "dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de"),
+            (4, "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"),
+        ):
+            with self.subTest(step=index):
+                self.assert_rejected(
+                    lambda workflow: workflow["jobs"]["cargo-crap"]["steps"][index].update(
+                        {"uses": action}
+                    )
+                )
+
     def test_native_coverage_steps_cannot_skip_ignore_or_substitute_evidence(self) -> None:
         for name in (
             "Download hosted native LCOV",

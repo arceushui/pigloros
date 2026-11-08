@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 // A separate harness ceiling before any ceremony plan/T0 exists. This is not
 // a product readiness allowance and cannot extend an already-created plan.
-const SLOT_WAIT: Duration = Duration::from_secs(120);
+const SLOT_WAIT: Duration = Duration::from_mins(2);
 
 /// Unique fixture case numbers wait in arrival order. The queue lock is never
 /// held across COM; its front ticket retains ownership through cancellation and
@@ -110,8 +110,8 @@ fn expired_unstarted_cases_refuse_admission_and_release_their_place(
     let start = Instant::now();
     let active = foreground.request(1, start)?;
     let expired = foreground.request(2, start)?;
-    let limit = start + Duration::from_secs(120);
-    assert!(!expired.is_next(limit - Duration::from_millis(1))?);
+    let limit = start + Duration::from_mins(2);
+    assert!(!expired.is_next(start + Duration::from_millis(119_999))?);
     assert!(expired.is_next(limit).is_err());
     drop(active);
     // Becoming first after the ceiling does not restart its admission budget.
