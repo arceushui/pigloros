@@ -184,7 +184,7 @@ fn negotiated_tuple_has_exact_sixteen_fields_and_existing_profile_hash() -> Test
     let tuple = Tuple::new(&negotiated, &profile)?;
     let expected = expected(0)?;
     assert_eq!(&*tuple.to_canonical_cbor(), &expected);
-    assert!(std::ptr::eq(tuple.negotiated(), &negotiated));
+    assert!(std::ptr::eq(tuple.negotiated(), &raw const negotiated));
     let mut preimage = b"PiglorOS.Community.CNT1.v1\0".to_vec();
     preimage.extend_from_slice(&expected);
     assert_eq!(
@@ -281,9 +281,9 @@ fn tuple_refuses_missing_foreign_profile_and_zero_release_identities() -> TestRe
 fn tuple_bounds_version_and_resolved_feature_metadata_before_staging() -> TestResult {
     for (version, features, acceptable) in [
         ("v".repeat(64), vec!["f".repeat(128)], true),
-        ("".into(), vec![], false),
+        (String::new(), vec![], false),
         ("v".repeat(65), vec![], false),
-        ("v".into(), vec!["".into()], false),
+        ("v".into(), vec![String::new()], false),
         ("v".into(), vec!["f".repeat(129)], false),
     ] {
         let runtime = Runtime::new(version, features, engine(), vec![])?;
@@ -360,7 +360,7 @@ fn tuple_rejects_unordered_duplicate_or_invalid_optional_capabilities() -> TestR
             2 => cap.resource_pattern = text.into(),
             3 => cap.purpose = text.into(),
             _ => cap.audience = text.into(),
-        };
+        }
         invalid.push(cap);
     }
     for index in 0..5 {
@@ -371,7 +371,7 @@ fn tuple_rejects_unordered_duplicate_or_invalid_optional_capabilities() -> TestR
             2 => cap.resource_pattern = "a".repeat(513),
             3 => cap.purpose = "a".repeat(129),
             _ => cap.audience = "a".repeat(129),
-        };
+        }
         invalid.push(cap);
     }
     for index in 0..3 {
@@ -380,7 +380,7 @@ fn tuple_rejects_unordered_duplicate_or_invalid_optional_capabilities() -> TestR
             0 => cap.max_calls = Budget::MAXIMA.host_calls + 1,
             1 => cap.max_request_bytes = Budget::MAXIMA.event_bytes + 1,
             _ => cap.max_response_bytes = Budget::MAXIMA.event_bytes + 1,
-        };
+        }
         invalid.push(cap);
     }
     for cap in invalid {

@@ -1,8 +1,9 @@
 //! Stable quarantine identities and retained ledger data, never reset authority.
 
 use super::{
-    bounded_bytes, canonical_end, digest, fixed_bytes, read_hash, read_head, read_optional_hash,
-    record_cursor, record_prefix, validate_horizon, CommunityLifecycleErrorV1 as Error, Result,
+    bounded_bytes, bounded_text, canonical_end, digest, fixed_bytes, read_hash, read_head,
+    read_optional_hash, record_cursor, record_prefix, validate_horizon,
+    CommunityLifecycleErrorV1 as Error, Result,
 };
 use crate::{
     encode_bytes, encode_hash, encode_head, CborCursor, Hash, ImplementationKeyV1, TimelineId,
@@ -93,7 +94,7 @@ impl<'a> CommunityQuarantineKeyV1<'a> {
     ) -> Result<Self> {
         record_cursor(bytes, 512, 5, *b"CQK1").and_then(|mut cursor| {
             fixed_bytes(&mut cursor).and_then(|timeline| {
-                read_entry(&mut cursor).and_then(|entry| {
+                bounded_text(&mut cursor, 64).and_then(|entry| {
                     bounded_bytes(&mut cursor, MAX_IMPLEMENTATION_KEY_BYTES_V1).and_then(|nested| {
                         let mut expected =
                             Zeroizing::new(Vec::with_capacity(MAX_IMPLEMENTATION_KEY_BYTES_V1));
@@ -112,19 +113,6 @@ impl<'a> CommunityQuarantineKeyV1<'a> {
             })
         })
     }
-}
-
-fn read_entry<'a>(cursor: &mut CborCursor<'a>) -> Result<&'a str> {
-    read_head(cursor, 3).and_then(|length| {
-        let length = usize::try_from(length).unwrap_or(usize::MAX);
-        if length > 64 {
-            return Err(Error::BoundsExceeded);
-        }
-        cursor
-            .take(length)
-            .map_err(Error::from)
-            .and_then(|bytes| std::str::from_utf8(bytes).map_err(|_| Error::InvalidEncoding))
-    })
 }
 
 /// Existing failure mapping, with no severity/chronological ordering invented.

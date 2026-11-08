@@ -141,7 +141,10 @@ fn quarantine_key_has_exact_stable_identity_without_generation_or_run_id() -> Te
     let decoded = Key::from_canonical_cbor(&expected, &implementation)?;
     assert_eq!(decoded.timeline(), timeline(1));
     assert_eq!(decoded.stable_entry(), "Entry-A_1");
-    assert!(std::ptr::eq(decoded.implementation(), &implementation));
+    assert!(std::ptr::eq(
+        decoded.implementation(),
+        &raw const implementation
+    ));
     let offset = decoded.stable_entry().as_ptr() as usize - expected.as_ptr() as usize;
     assert!(offset + decoded.stable_entry().len() <= expected.len());
     let same = ImplementationKeyV1::new("plugin-a".into(), "host-v1".into(), hash(3))?;

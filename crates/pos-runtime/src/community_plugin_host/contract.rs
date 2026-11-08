@@ -25,7 +25,9 @@
 //!   - a record: its fields in WIT order;
 //!   - `u32`: four big-endian bytes.
 
-pub use pos_core::community_lifecycle::{ArtifactRefV1, MeteringV1};
+pub use pos_core::community_lifecycle::{
+    ArtifactRefV1, FieldRefV1, GuestPluginErrorV1, MeteringV1, PluginErrorCodeV1,
+};
 use pos_crypto::plugin_execution::is_valid_id_v1;
 
 use super::error::CommunityPluginHostErrorV1;
@@ -187,50 +189,6 @@ pub struct PluginDescriptorV1 {
     pub manifest_digest: [u8; 32],
     /// Release digest: 32 zero bytes in V1, for the same reason.
     pub release_digest: [u8; 32],
-}
-
-/// `contract-v1.field-ref`.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct FieldRefV1 {
-    /// Schema ID.
-    pub schema_id: u32,
-    /// Field ordinal.
-    pub field_ordinal: u16,
-}
-
-/// `contract-v1.plugin-error-code`.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum PluginErrorCodeV1 {
-    /// `invalid-invocation`.
-    InvalidInvocation(FieldRefV1),
-    /// `unsupported-schema`.
-    UnsupportedSchema(u32),
-    /// `capability-required`, with an ADR-061 capability ID.
-    CapabilityRequired(String),
-    /// `dependency-missing`.
-    DependencyMissing([u8; 32]),
-    /// `deterministic-budget-exhausted`.
-    DeterministicBudgetExhausted,
-    /// `invalid-state`.
-    InvalidState(FieldRefV1),
-    /// `migration-rejected`.
-    MigrationRejected(FieldRefV1),
-    /// `guest-declared-failure`.
-    GuestDeclaredFailure(u16),
-}
-
-/// `contract-v1.plugin-error`: the guest's own typed failure, validated.
-///
-/// ADR-061 records the exact variant, ordinal, coordinate and digest as the
-/// outcome. No `EventDraft` or state accompanies it.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct GuestPluginErrorV1 {
-    /// The error code.
-    pub code: PluginErrorCodeV1,
-    /// Canonical coordinate, at most 128 bytes.
-    pub canonical_coordinate: Option<Vec<u8>>,
-    /// Related digest.
-    pub related_digest: Option<[u8; 32]>,
 }
 
 /// Deterministic values that `host-v1` exposes to one invocation.

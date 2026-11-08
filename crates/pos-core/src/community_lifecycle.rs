@@ -8,7 +8,10 @@
 mod classification;
 mod envelope;
 mod error;
+mod failure;
 mod guest_claim;
+mod guest_error;
+mod host_error;
 mod invocation;
 mod progress;
 mod protected_object;
@@ -32,10 +35,22 @@ pub use envelope::{
     MAX_COMMUNITY_ENVELOPE_PLAINTEXT_BYTES_V1,
 };
 pub use error::CommunityLifecycleErrorV1;
+pub use failure::{
+    CommunityInvocationFailureInputV1, CommunityInvocationFailureV1, CommunityPassFailureInputV1,
+    CommunityPassFailureV1,
+};
 pub use guest_claim::{
     CommunityClaimArtifactV1, CommunityGuestClaimContextV1, CommunityGuestClaimKindV1,
     CommunityGuestClaimReferenceV1, CommunityGuestClaimReferencesV1, CommunityGuestClaimV1,
     COMMUNITY_CLAIM_STATE_SCHEMA_V1, COMMUNITY_GUEST_CLAIM_SCHEMA_V1,
+};
+pub use guest_error::{
+    is_valid_community_id_v1, CommunityGuestErrorCodeV1, CommunityGuestErrorV1, FieldRefV1,
+    GuestPluginErrorV1, PluginErrorCodeV1,
+};
+pub use host_error::{
+    AtomicCommitFailureV1, CommunityPluginHostErrorV1, ComponentTrapClassV1, HostFailureClassV1,
+    RevocationBasisV1, TrapReproductionV1, TrustDenialBasisV1,
 };
 pub use invocation::{
     CommunityInvocationEvidenceInputV1, CommunityInvocationEvidenceV1, CommunityOutputUsageV1,
@@ -233,7 +248,7 @@ fn read_head(cursor: &mut CborCursor<'_>, major: u8) -> Result<u64> {
         .head(major)
         .map_err(CommunityLifecycleErrorV1::from)
         .and_then(|value| {
-            let mut preferred = Vec::with_capacity(9);
+            let mut preferred = Zeroizing::new(Vec::with_capacity(9));
             encode_head(&mut preferred, major, value);
             original
                 .fixed(&preferred)
@@ -264,6 +279,21 @@ fn bounded_bytes<'a>(cursor: &mut CborCursor<'a>, maximum: usize) -> Result<&'a 
         } else {
             cursor.take(length).map_err(CommunityLifecycleErrorV1::from)
         }
+    })
+}
+
+fn bounded_text<'a>(cursor: &mut CborCursor<'a>, maximum: usize) -> Result<&'a str> {
+    read_head(cursor, 3).and_then(|length| {
+        let length = usize::try_from(length).unwrap_or(usize::MAX);
+        if length > maximum {
+            return Err(CommunityLifecycleErrorV1::BoundsExceeded);
+        }
+        cursor
+            .take(length)
+            .map_err(CommunityLifecycleErrorV1::from)
+            .and_then(|bytes| {
+                std::str::from_utf8(bytes).map_err(|_| CommunityLifecycleErrorV1::InvalidEncoding)
+            })
     })
 }
 
