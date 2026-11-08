@@ -56,6 +56,12 @@
 //! [`NonInterferenceReportErrorV1::InvalidShape`].
 
 #[cfg(feature = "test-support")]
+mod capture;
+#[cfg(feature = "test-support")]
+pub mod fixture_evidence;
+#[cfg(all(feature = "test-support", target_os = "linux"))]
+pub mod g_fork;
+#[cfg(feature = "test-support")]
 pub mod g_pub;
 mod local_process;
 #[cfg(feature = "test-support")]

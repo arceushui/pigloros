@@ -67,8 +67,9 @@
 //! control run and canary run. A cold run always starts from a new file.
 //!
 //! The executions are engineering evidence signed with the repository
-//! test-fixture-only executor key ([`g_pub_fixture_executor_key_v1`]), not
-//! an attestation.
+//! test-fixture-only executor key
+//! ([`super::fixture_evidence::non_interference_fixture_executor_key_v1`]),
+//! not an attestation.
 
 use std::fs;
 use std::io::{Read, Write};
@@ -79,9 +80,9 @@ use axum::body::Body;
 use axum::http::{header::CONTENT_TYPE, Method, Request};
 use ciborium::Value;
 use pos_conformance::{
-    non_interference_surface_names_v1, ExecutionModeV1, NonInterferenceExecutionErrorV1,
-    NonInterferenceFixturePairV1, NonInterferenceHostRunV1, NonInterferenceRawCaptureV1,
-    NonInterferenceRawOperationalV1, NonInterferenceVariantV1,
+    ExecutionModeV1, NonInterferenceExecutionErrorV1, NonInterferenceFixturePairV1,
+    NonInterferenceHostRunV1, NonInterferenceRawCaptureV1, NonInterferenceRawOperationalV1,
+    NonInterferenceVariantV1,
 };
 use pos_core::{
     event::{EventDraft, Kind},
@@ -102,11 +103,11 @@ use pos_store::StoreConfig;
 use serde_json::json;
 use tower::ServiceExt;
 
+use super::capture::{digest, encode, event_stream, ordinal, text, uint, variant_name, SurfacesV1};
 use super::{
-    hex, serve_non_interference_local_subject_v1, session::recorded, HostExecutorKeyV1,
-    NonInterferenceHarnessV1, NonInterferenceNonExecutedCauseV1, NonInterferencePreparationV1,
-    NonInterferenceRunOutcomeV1, NonInterferenceSessionObservationV1,
-    NonInterferenceSessionSubjectV1,
+    hex, serve_non_interference_local_subject_v1, session::recorded, NonInterferenceHarnessV1,
+    NonInterferenceNonExecutedCauseV1, NonInterferencePreparationV1, NonInterferenceRunOutcomeV1,
+    NonInterferenceSessionObservationV1, NonInterferenceSessionSubjectV1,
 };
 use crate::{Experiment, ExperimentConfig, StopCondition};
 
@@ -140,15 +141,8 @@ pub const G_PUB_EXPORT_MEMBER_V1: &str = "timeline-export";
 pub const G_PUB_CONTROL_UNAUTHORIZED_V1: &[u8] = b"denied-control-0";
 /// The canary member's unauthorized value of every G-PUB fixture.
 pub const G_PUB_CANARY_UNAUTHORIZED_V1: &[u8] = b"canary-denied-object-value-002";
-/// The key id of the repository test-fixture-only executor key.
-pub const G_PUB_EXECUTOR_KEY_ID_V1: &str = "pigloros.fixture.non-interference-executor";
 
 const DENIED_TIMELINE: &str = "ni-g-pub-denied";
-const EXECUTOR_KEY_CONTEXT: &str =
-    "PiglorOS repository test-fixture-only non-interference executor key v1";
-/// Every runner replaces a capture's provenance digest with its own
-/// execution provenance; the subject's placeholder is never compared.
-const RUNNER_BOUND_PROVENANCE: [u8; 32] = [0xff; 32];
 /// The run-independent identity of the subject Plugin, so every mode and
 /// every Fork registers the same composition.
 const G_PUB_PLUGIN_ID: PluginId = PluginId::from_ulid(ulid::Ulid::from_parts(1, 0x4750_5550));
@@ -158,14 +152,6 @@ const ATTEMPT_OUTCOME: &str = "admitted";
 const EXPORT_DIGEST: ErasureReferenceV1 = ErasureReferenceV1::from_digest([0x47; 32]);
 const EXPORT_PROVENANCE: ErasureReferenceV1 = ErasureReferenceV1::from_digest([0x48; 32]);
 const BUDGET_UNIT: u64 = 1024 * 1024;
-
-/// The repository test-fixture-only executor key of the G-PUB evidence. Its
-/// secret is a public derivation, so its signatures are engineering
-/// evidence and attest nothing.
-#[must_use]
-pub fn g_pub_fixture_executor_key_v1() -> HostExecutorKeyV1 {
-    HostExecutorKeyV1::from_secret_bytes(&blake3::derive_key(EXECUTOR_KEY_CONTEXT, b""))
-}
 
 /// The permitted input of one G-PUB fixture. It is the same in every mode.
 #[must_use]
@@ -459,112 +445,6 @@ fn live_events(experiment: Experiment) -> Result<Vec<Event>, NonInterferenceNonE
 // ---------------------------------------------------------------------------
 // Surfaces
 // ---------------------------------------------------------------------------
-
-/// The three facets of every surface of one row, in surface order.
-struct SurfacesV1 {
-    authoritative: Vec<Vec<u8>>,
-    public: Vec<Vec<u8>>,
-    operational: Vec<NonInterferenceRawOperationalV1>,
-}
-
-impl SurfacesV1 {
-    fn into_capture(self, fixture_id: &str) -> NonInterferenceRawCaptureV1 {
-        NonInterferenceRawCaptureV1 {
-            surface_names: non_interference_surface_names_v1(fixture_id)
-                .unwrap_or_default()
-                .into_iter()
-                .map(str::to_owned)
-                .collect(),
-            authoritative: self.authoritative,
-            public: self.public,
-            operational: self.operational,
-            unexpected_network_accesses: 0,
-            provenance_digest: RUNNER_BOUND_PROVENANCE,
-        }
-    }
-}
-
-/// The canonical CBOR encoding of one record. An encoding failure yields no
-/// bytes, which the #181 normalizer refuses as out of bounds.
-fn encode(value: &Value) -> Vec<u8> {
-    let mut bytes = Vec::new();
-    ciborium::into_writer(value, &mut bytes).map_or(Vec::new(), |()| bytes)
-}
-
-fn uint(value: u64) -> Value {
-    Value::Integer(value.into())
-}
-
-fn text(value: &str) -> Value {
-    Value::Text(value.to_owned())
-}
-
-fn digest(bytes: &[u8]) -> [u8; 32] {
-    *blake3::hash(bytes).as_bytes()
-}
-
-const fn variant_name(variant: NonInterferenceVariantV1) -> &'static str {
-    match variant {
-        NonInterferenceVariantV1::Success => "success",
-        NonInterferenceVariantV1::Denial => "denial",
-        NonInterferenceVariantV1::WarmCache => "warm_cache",
-        NonInterferenceVariantV1::ColdCache => "cold_cache",
-    }
-}
-
-/// The first-appearance ordinal of `value` in `seen`.
-fn ordinal<T: PartialEq + Clone>(seen: &mut Vec<T>, value: &T) -> u64 {
-    let position = seen
-        .iter()
-        .position(|known| known == value)
-        .unwrap_or_else(|| {
-            seen.push(value.clone());
-            seen.len() - 1
-        });
-    position as u64
-}
-
-/// The position-relative record of an Event stream in Timeline Order:
-/// `[seq, entity ordinal, event type, schema version, causation seq or
-/// null, correlation ordinal or null, payload, payload hash]` per Event,
-/// the ADR-127 section 2 Event record.
-/// The Timeline `owner`, when present, takes entity ordinal 0. A cause
-/// outside the stream has no position, so the stream is refused (`None`):
-/// the authoritative field is never normalized to "no cause". Signatures and
-/// their identities are operational and are not captured.
-fn event_stream(events: &[Event], owner: Option<EntityId>) -> Option<Value> {
-    let mut entities = owner.into_iter().collect::<Vec<_>>();
-    let mut correlations = Vec::new();
-    events
-        .iter()
-        .map(|event| {
-            let cause = event.causation_id.map_or_else(
-                || Some(Value::Null),
-                |cause| {
-                    events
-                        .iter()
-                        .find(|candidate| candidate.id == cause)
-                        .map(|candidate| uint(candidate.seq.as_u64()))
-                },
-            );
-            cause.map(|cause| {
-                Value::Array(vec![
-                    uint(event.seq.as_u64()),
-                    uint(ordinal(&mut entities, &event.entity)),
-                    text(event.event_type.as_str()),
-                    uint(u64::from(event.schema_version.as_u32())),
-                    cause,
-                    event.correlation_id.map_or(Value::Null, |correlation| {
-                        uint(ordinal(&mut correlations, &correlation))
-                    }),
-                    Value::Bytes(event.payload.as_slice().to_vec()),
-                    Value::Bytes(event.payload_hash.as_bytes().to_vec()),
-                ])
-            })
-        })
-        .collect::<Option<Vec<_>>>()
-        .map(Value::Array)
-}
 
 /// The position-relative export: its Event stream and the export record
 /// `[mode code, name or null, owner ordinal or null, head, stream]`, the

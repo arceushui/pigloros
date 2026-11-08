@@ -112,8 +112,10 @@ class CheckerTest(unittest.TestCase):
         self.assert_fault("rows[2]: executed_case_count is not 0")
 
     def test_an_unexecuted_total_fails(self) -> None:
+        cases = json.loads((FIXTURES / MATRIX).read_text(encoding="utf-8"))["cases"]
+        executed = sum(1 for case in cases if case["executed"] is True)
         self.edit(MATRIX, lambda m: m.update(executed_case_count=0))
-        self.assert_fault("executed_case_count is not the 24 executed cases")
+        self.assert_fault(f"executed_case_count is not the {executed} executed cases")
 
     def test_an_executed_air_gapped_n1_case_fails(self) -> None:
         index = next(

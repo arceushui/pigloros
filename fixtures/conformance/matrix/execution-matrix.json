@@ -314,7 +314,7 @@
       ],
       "equality": "AuthEq=PublicEq=OpEq across L=A=R=F as declared by ADR-059",
       "case_count": 16,
-      "executed_case_count": 0
+      "executed_case_count": 12
     },
     {
       "fixture_id": "NI-ARCHIVE-009",
@@ -1767,11 +1767,15 @@
       "fixture_id": "NI-FORK-008",
       "variant": "S",
       "mode": "L",
-      "executed": false,
-      "expected_result_digest": null,
+      "executed": true,
+      "expected_result_digest": "c79da22939d7577932adea15f3c996a2c81890a3eeb52f36025979f93aded846",
       "authority_fixture_id": null,
       "authority_result_digest": null,
-      "expected_result": null
+      "expected_result": {
+        "equal": true,
+        "first_divergence": null,
+        "nia1_content_digest": "8a9387618fc122f8c3197726a42fece450b385ea2e28b410cf88566464fd5147"
+      }
     },
     {
       "case_id": "NI-FORK-008-S-A",
@@ -1789,33 +1793,45 @@
       "fixture_id": "NI-FORK-008",
       "variant": "S",
       "mode": "R",
-      "executed": false,
-      "expected_result_digest": null,
+      "executed": true,
+      "expected_result_digest": "c79da22939d7577932adea15f3c996a2c81890a3eeb52f36025979f93aded846",
       "authority_fixture_id": null,
       "authority_result_digest": null,
-      "expected_result": null
+      "expected_result": {
+        "equal": true,
+        "first_divergence": null,
+        "nia1_content_digest": "04c1442b53bcbcaa284232639d9f0515bc078ffb9dab0ef6737a36fc03c628a6"
+      }
     },
     {
       "case_id": "NI-FORK-008-S-F",
       "fixture_id": "NI-FORK-008",
       "variant": "S",
       "mode": "F",
-      "executed": false,
-      "expected_result_digest": null,
+      "executed": true,
+      "expected_result_digest": "c79da22939d7577932adea15f3c996a2c81890a3eeb52f36025979f93aded846",
       "authority_fixture_id": null,
       "authority_result_digest": null,
-      "expected_result": null
+      "expected_result": {
+        "equal": true,
+        "first_divergence": null,
+        "nia1_content_digest": "0c09ca5e1160885eae9d2c0f9e76b5caf92f485fef78fbebb3c5dc40698f4d0b"
+      }
     },
     {
       "case_id": "NI-FORK-008-D-L",
       "fixture_id": "NI-FORK-008",
       "variant": "D",
       "mode": "L",
-      "executed": false,
-      "expected_result_digest": null,
+      "executed": true,
+      "expected_result_digest": "caad04d2cd4890a586f04f0c10542cb3f35cab2917a6832859858cd0bb52c332",
       "authority_fixture_id": null,
       "authority_result_digest": null,
-      "expected_result": null
+      "expected_result": {
+        "equal": true,
+        "first_divergence": null,
+        "nia1_content_digest": "a15ccacfd92d41f460b10a19be042a55eacd98373e84191b52c871c7a60536f2"
+      }
     },
     {
       "case_id": "NI-FORK-008-D-A",
@@ -1833,33 +1849,45 @@
       "fixture_id": "NI-FORK-008",
       "variant": "D",
       "mode": "R",
-      "executed": false,
-      "expected_result_digest": null,
+      "executed": true,
+      "expected_result_digest": "caad04d2cd4890a586f04f0c10542cb3f35cab2917a6832859858cd0bb52c332",
       "authority_fixture_id": null,
       "authority_result_digest": null,
-      "expected_result": null
+      "expected_result": {
+        "equal": true,
+        "first_divergence": null,
+        "nia1_content_digest": "0a4387262a768dde53fa1bdd989ecb1f30d8f5b77e3f6a532cd443d98f7beca1"
+      }
     },
     {
       "case_id": "NI-FORK-008-D-F",
       "fixture_id": "NI-FORK-008",
       "variant": "D",
       "mode": "F",
-      "executed": false,
-      "expected_result_digest": null,
+      "executed": true,
+      "expected_result_digest": "caad04d2cd4890a586f04f0c10542cb3f35cab2917a6832859858cd0bb52c332",
       "authority_fixture_id": null,
       "authority_result_digest": null,
-      "expected_result": null
+      "expected_result": {
+        "equal": true,
+        "first_divergence": null,
+        "nia1_content_digest": "ce10656de9a4b73422baa945c9ee7088864d5f1bf52ef17af13c5e01828c02bc"
+      }
     },
     {
       "case_id": "NI-FORK-008-W-L",
       "fixture_id": "NI-FORK-008",
       "variant": "W",
       "mode": "L",
-      "executed": false,
-      "expected_result_digest": null,
+      "executed": true,
+      "expected_result_digest": "b1bec47ffa7369337532d45b081cc318da1dddf5f9c93ebd12280978dbd5a442",
       "authority_fixture_id": null,
       "authority_result_digest": null,
-      "expected_result": null
+      "expected_result": {
+        "equal": true,
+        "first_divergence": null,
+        "nia1_content_digest": "0305e5909ec7488b53acd58b1552abe20cf04bfd8858fcde8125c2a3bf0a8a56"
+      }
     },
     {
       "case_id": "NI-FORK-008-W-A",
@@ -1877,33 +1905,45 @@
       "fixture_id": "NI-FORK-008",
       "variant": "W",
       "mode": "R",
-      "executed": false,
-      "expected_result_digest": null,
+      "executed": true,
+      "expected_result_digest": "b1bec47ffa7369337532d45b081cc318da1dddf5f9c93ebd12280978dbd5a442",
       "authority_fixture_id": null,
       "authority_result_digest": null,
-      "expected_result": null
+      "expected_result": {
+        "equal": true,
+        "first_divergence": null,
+        "nia1_content_digest": "dd22f98cbff99659b83bd6f1c535e4b72b6b83bf7dbc99c1403e50278019a9c5"
+      }
     },
     {
       "case_id": "NI-FORK-008-W-F",
       "fixture_id": "NI-FORK-008",
       "variant": "W",
       "mode": "F",
-      "executed": false,
-      "expected_result_digest": null,
+      "executed": true,
+      "expected_result_digest": "b1bec47ffa7369337532d45b081cc318da1dddf5f9c93ebd12280978dbd5a442",
       "authority_fixture_id": null,
       "authority_result_digest": null,
-      "expected_result": null
+      "expected_result": {
+        "equal": true,
+        "first_divergence": null,
+        "nia1_content_digest": "fb6b2d43440be88efac19594f2a01289498e0c587d566cbbc467621f058dbf00"
+      }
     },
     {
       "case_id": "NI-FORK-008-C-L",
       "fixture_id": "NI-FORK-008",
       "variant": "C",
       "mode": "L",
-      "executed": false,
-      "expected_result_digest": null,
+      "executed": true,
+      "expected_result_digest": "1eac1c616cd82db8a7fdec3c44bfd906323276959de9e3f70ffe7268671cb0b0",
       "authority_fixture_id": null,
       "authority_result_digest": null,
-      "expected_result": null
+      "expected_result": {
+        "equal": true,
+        "first_divergence": null,
+        "nia1_content_digest": "c7273d31d906d1f9a4bd1908ae963ddeb420f897e2a23c6034444b80311a4624"
+      }
     },
     {
       "case_id": "NI-FORK-008-C-A",
@@ -1921,22 +1961,30 @@
       "fixture_id": "NI-FORK-008",
       "variant": "C",
       "mode": "R",
-      "executed": false,
-      "expected_result_digest": null,
+      "executed": true,
+      "expected_result_digest": "1eac1c616cd82db8a7fdec3c44bfd906323276959de9e3f70ffe7268671cb0b0",
       "authority_fixture_id": null,
       "authority_result_digest": null,
-      "expected_result": null
+      "expected_result": {
+        "equal": true,
+        "first_divergence": null,
+        "nia1_content_digest": "0573e5cd19a21ccaef644efa8c91b401f1ddf2a5d60d88736340a811b3871127"
+      }
     },
     {
       "case_id": "NI-FORK-008-C-F",
       "fixture_id": "NI-FORK-008",
       "variant": "C",
       "mode": "F",
-      "executed": false,
-      "expected_result_digest": null,
+      "executed": true,
+      "expected_result_digest": "1eac1c616cd82db8a7fdec3c44bfd906323276959de9e3f70ffe7268671cb0b0",
       "authority_fixture_id": null,
       "authority_result_digest": null,
-      "expected_result": null
+      "expected_result": {
+        "equal": true,
+        "first_divergence": null,
+        "nia1_content_digest": "14ff9fd5ed71397141138ed2e527858650e3e535cc6492e22a19a572c6f8d04e"
+      }
     },
     {
       "case_id": "NI-ARCHIVE-009-S-L",
@@ -2643,5 +2691,5 @@
       "expected_result": null
     }
   ],
-  "executed_case_count": 24
+  "executed_case_count": 36
 }
