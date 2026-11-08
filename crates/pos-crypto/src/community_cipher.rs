@@ -13,8 +13,7 @@ use pos_core::Hash;
 use thiserror::Error;
 use zeroize::Zeroizing;
 
-/// Maximum plaintext in one ADR-128 encrypted envelope: 3 MiB.
-pub const MAX_COMMUNITY_ENVELOPE_PLAINTEXT_BYTES_V1: usize = 3 * 1024 * 1024;
+pub use pos_core::community_lifecycle::MAX_COMMUNITY_ENVELOPE_PLAINTEXT_BYTES_V1;
 /// Maximum primitive encryptions per staged operation/purpose key.
 pub const MAX_COMMUNITY_KEY_ENCRYPTIONS_V1: u32 = 65_536;
 const TAG_BYTES: usize = 16;
@@ -215,19 +214,19 @@ impl CommunityArtifactCipherV1 {
         let mut buffer = Zeroizing::new(Vec::with_capacity(plaintext.len() + TAG_BYTES));
         buffer.extend_from_slice(plaintext);
         self.remaining_encryptions -= 1;
-        match primitive(&self.material, &nonce, associated_data, &mut buffer) {
-            Ok(tag) => {
+        primitive(&self.material, &nonce, associated_data, &mut buffer).map_or_else(
+            |_| {
+                self.close_encryption();
+                Err(CommunityCipherErrorV1::EncryptionFailed)
+            },
+            |tag| {
                 buffer.extend_from_slice(&tag);
                 Ok(CommunityCiphertextV1 {
                     nonce,
                     ciphertext_and_tag: buffer,
                 })
-            }
-            Err(_) => {
-                self.close_encryption();
-                Err(CommunityCipherErrorV1::EncryptionFailed)
-            }
-        }
+            },
+        )
     }
 }
 

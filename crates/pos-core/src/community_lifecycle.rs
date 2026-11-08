@@ -5,6 +5,7 @@
 //! source, selected generation, current head and actual protected use. These
 //! codecs cannot issue a guest permit or restore a live state cell.
 
+mod envelope;
 mod error;
 mod progress;
 mod reservation;
@@ -13,6 +14,11 @@ mod selected_head;
 mod state;
 mod terminal;
 
+pub use envelope::{
+    CommunityArtifactHeaderInputV1, CommunityArtifactHeaderV1, CommunityArtifactKindV1,
+    CommunityArtifactOperationV1, CommunityArtifactPurposeV1, CommunityEncryptedEnvelopeV1,
+    MAX_COMMUNITY_ENVELOPE_PLAINTEXT_BYTES_V1,
+};
 pub use error::CommunityLifecycleErrorV1;
 pub use progress::CommunityHostProgressV1;
 pub use reservation::{
@@ -33,6 +39,7 @@ pub use terminal::{
 };
 
 use crate::{encode_bytes, encode_head, CborCursor, CborReadError, Hash, TimelineId};
+use zeroize::Zeroizing;
 
 type Result<T> = std::result::Result<T, CommunityLifecycleErrorV1>;
 
@@ -97,7 +104,8 @@ impl CommunityPassKeyV1 {
     /// Derive `BLAKE3("PiglorOS.Community.CPK1.v1\0" || CPK1)`.
     #[must_use]
     pub fn digest(&self) -> Hash {
-        digest(b"PiglorOS.Community.CPK1.v1\0", &self.to_canonical_cbor())
+        let bytes = Zeroizing::new(self.to_canonical_cbor());
+        digest(b"PiglorOS.Community.CPK1.v1\0", &bytes)
     }
 
     /// Decode one complete preferred CPK1 record without issuing a permit.
@@ -267,7 +275,7 @@ const fn canonical_end(cursor: &CborCursor<'_>) -> Result<()> {
 }
 
 fn digest(domain: &[u8], bytes: &[u8]) -> Hash {
-    let mut hasher = blake3::Hasher::new();
+    let mut hasher = Zeroizing::new(blake3::Hasher::new());
     hasher.update(domain);
     hasher.update(bytes);
     Hash::from_bytes(*hasher.finalize().as_bytes())

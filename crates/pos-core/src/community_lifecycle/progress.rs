@@ -73,7 +73,8 @@ impl CommunityHostProgressV1 {
     /// Derive the exact domain-separated CST1 content identity.
     #[must_use]
     pub fn digest(&self) -> Hash {
-        digest(b"PiglorOS.Community.CST1.v1\0", &self.to_canonical_cbor())
+        let bytes = zeroize::Zeroizing::new(self.to_canonical_cbor());
+        digest(b"PiglorOS.Community.CST1.v1\0", &bytes)
     }
 
     /// Decode the whole preferred record; this does not advance a live clock.
