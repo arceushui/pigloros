@@ -14,7 +14,8 @@
 //!    is non-zero.
 //! 2. The claim layer is `replay-conformance` and the mode is Local or
 //!    Air-Gapped, else the result is `Unavailable` with zero usage. Every
-//!    manifest of the attempt carries that Execution Mode.
+//!    manifest of the attempt carries that Execution Mode, except a
+//!    cross-profile leg's, which carries its own profile's mode (#1266).
 //! 3. The BLAKE3 of the schema member is the digest pinned for the family
 //!    (provider contract 2.0.0), and
 //! 4. an auxiliary member is the family's `RCS1` composite: otherwise the
