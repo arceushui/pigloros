@@ -1,13 +1,12 @@
 //! Stable quarantine identities and retained ledger data, never reset authority.
 
 use super::{
-    bounded_bytes, bounded_text, canonical_end, digest, fixed_bytes, read_hash, read_head,
-    read_optional_hash, record_cursor, record_prefix, validate_horizon,
-    CommunityLifecycleErrorV1 as Error, Result,
+    bounded_bytes, bounded_text, canonical_end, digest, encode_implementation_key, fixed_bytes,
+    read_hash, read_head, read_implementation_key, read_optional_hash, record_cursor,
+    record_prefix, validate_horizon, CommunityLifecycleErrorV1 as Error, Result,
 };
 use crate::{
     encode_bytes, encode_hash, encode_head, CborCursor, Hash, ImplementationKeyV1, TimelineId,
-    MAX_IMPLEMENTATION_KEY_BYTES_V1,
 };
 use zeroize::Zeroizing;
 
@@ -69,10 +68,7 @@ impl<'a> CommunityQuarantineKeyV1<'a> {
         record_prefix(&mut out, 5, *b"CQK1");
         encode_bytes(&mut out, &self.timeline.inner().to_bytes(), 2);
         encode_bytes(&mut out, self.stable_entry.as_bytes(), 3);
-        let mut implementation =
-            Zeroizing::new(Vec::with_capacity(MAX_IMPLEMENTATION_KEY_BYTES_V1));
-        self.implementation.write(&mut implementation);
-        encode_bytes(&mut out, &implementation, 2);
+        encode_implementation_key(&mut out, self.implementation);
         out
     }
 
@@ -95,13 +91,7 @@ impl<'a> CommunityQuarantineKeyV1<'a> {
         record_cursor(bytes, 512, 5, *b"CQK1").and_then(|mut cursor| {
             fixed_bytes(&mut cursor).and_then(|timeline| {
                 bounded_text(&mut cursor, 64).and_then(|entry| {
-                    bounded_bytes(&mut cursor, MAX_IMPLEMENTATION_KEY_BYTES_V1).and_then(|nested| {
-                        let mut expected =
-                            Zeroizing::new(Vec::with_capacity(MAX_IMPLEMENTATION_KEY_BYTES_V1));
-                        implementation.write(&mut expected);
-                        if nested != expected.as_slice() {
-                            return Err(Error::InvalidBinding);
-                        }
+                    read_implementation_key(&mut cursor, implementation).and_then(|()| {
                         Self::new(
                             TimelineId::from_ulid(ulid::Ulid::from_bytes(timeline)),
                             entry,

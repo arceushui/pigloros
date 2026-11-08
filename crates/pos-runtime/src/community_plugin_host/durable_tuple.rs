@@ -1,7 +1,9 @@
 //! Exact retained CNT1; a tuple comparison never authenticates a release/owner.
 
-use pos_core::community_lifecycle::CommunityLifecycleErrorV1 as Error;
-use pos_core::Hash;
+use pos_core::community_lifecycle::{
+    CommunityLifecycleErrorV1 as Error, CommunityMemberBindingInputV1, CommunityMemberBindingV1,
+};
+use pos_core::{Hash, ImplementationKeyV1};
 use pos_crypto::plugin_execution::{
     is_valid_id_v1, DeterministicBudgetV1, PluginCapabilityDescriptorV1,
 };
@@ -83,6 +85,39 @@ impl<'a> CommunityNegotiatedTupleV1<'a> {
     #[must_use]
     pub const fn negotiated(&self) -> &'a NegotiatedCommunityPluginV1 {
         self.negotiated
+    }
+
+    /// Bind the exact installed implementation to this complete retained CNT1.
+    ///
+    /// PMF1 and tuple identities are derived from actual negotiated data; callers
+    /// cannot substitute their hashes. State/initializer/owner arguments remain
+    /// data until the qualified owner verifies the admitted release/generation.
+    ///
+    /// # Errors
+    /// Rejects a foreign Plugin ID/release, invalid stable entry or zero required
+    /// identity. This does not install or authorize a new member/generation.
+    pub fn member_binding<'binding>(
+        &self,
+        stable_entry: &'binding str,
+        implementation: &'binding ImplementationKeyV1,
+        state_schema_digest: Hash,
+        initial_state_content_digest: Hash,
+        protected_owner_binding_digest: Hash,
+    ) -> Result<CommunityMemberBindingV1<'binding>> {
+        if implementation.plugin_id() != self.negotiated.plugin_id()
+            || implementation.release_digest().as_bytes() != &self.negotiated.release_digest()
+        {
+            return Err(Error::InvalidBinding);
+        }
+        CommunityMemberBindingV1::new(CommunityMemberBindingInputV1 {
+            stable_entry,
+            implementation,
+            pmf1_digest: Hash::from_bytes(self.negotiated.pmf1_digest()),
+            state_schema_digest,
+            negotiated_tuple_digest: self.digest(),
+            initial_state_content_digest,
+            protected_owner_binding_digest,
+        })
     }
 
     /// Encode exact16-field CNT1 with all eight limits and explicit live mode.

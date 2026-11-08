@@ -13,6 +13,7 @@ mod guest_claim;
 mod guest_error;
 mod host_error;
 mod invocation;
+mod member;
 mod prepared;
 mod progress;
 mod protected_object;
@@ -24,6 +25,7 @@ mod revision;
 mod seal;
 mod selected_head;
 mod state;
+mod step;
 mod terminal;
 
 pub use classification::{
@@ -57,6 +59,7 @@ pub use invocation::{
     CommunityInvocationEvidenceInputV1, CommunityInvocationEvidenceV1, CommunityOutputUsageV1,
     MeteringV1,
 };
+pub use member::{CommunityMemberBindingInputV1, CommunityMemberBindingV1};
 pub use prepared::{
     CommunityPreparedInputSetV1, CommunityPreparedInvocationInputV1, CommunityPreparedInvocationV1,
     TimelinePositionV1, MAX_COMMUNITY_PREPARED_INVOCATION_BYTES_V1,
@@ -92,12 +95,16 @@ pub use selected_head::{
     CommunitySelectedHeadInputV1, CommunitySelectedHeadV1, MAX_COMMUNITY_MEMBERS_V1,
 };
 pub use state::{CommunityStateContentV1, MAX_COMMUNITY_STATE_BYTES_V1};
+pub use step::{CommunityInvocationStepInputV1, CommunityInvocationStepV1};
 pub use terminal::{
     CommunityAbortInputV1, CommunityAbortReasonV1, CommunityAbortV1, CommunityCommitInputV1,
     CommunityCommitV1, CommunityFactualRangeV1,
 };
 
-use crate::{encode_bytes, encode_head, CborCursor, CborReadError, Hash, TimelineId};
+use crate::{
+    encode_bytes, encode_head, CborCursor, CborReadError, Hash, ImplementationKeyV1, TimelineId,
+    MAX_IMPLEMENTATION_KEY_BYTES_V1,
+};
 use zeroize::Zeroizing;
 
 type Result<T> = std::result::Result<T, CommunityLifecycleErrorV1>;
@@ -312,6 +319,27 @@ fn read_hashes<const N: usize>(cursor: &mut CborCursor<'_>) -> Result<[Hash; N]>
         .iter_mut()
         .try_for_each(|slot| read_hash(cursor).map(|hash| *slot = hash))
         .map(|()| hashes)
+}
+
+fn encode_implementation_key(out: &mut Vec<u8>, implementation: &ImplementationKeyV1) {
+    let mut encoded = Zeroizing::new(Vec::with_capacity(MAX_IMPLEMENTATION_KEY_BYTES_V1));
+    implementation.write(&mut encoded);
+    encode_bytes(out, &encoded, 2);
+}
+
+fn read_implementation_key(
+    cursor: &mut CborCursor<'_>,
+    implementation: &ImplementationKeyV1,
+) -> Result<()> {
+    bounded_bytes(cursor, MAX_IMPLEMENTATION_KEY_BYTES_V1).and_then(|nested| {
+        let mut expected = Zeroizing::new(Vec::with_capacity(MAX_IMPLEMENTATION_KEY_BYTES_V1));
+        implementation.write(&mut expected);
+        if nested == expected.as_slice() {
+            Ok(())
+        } else {
+            Err(CommunityLifecycleErrorV1::InvalidBinding)
+        }
+    })
 }
 
 fn read_optional_hash(cursor: &mut CborCursor<'_>) -> Result<Option<Hash>> {

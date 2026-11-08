@@ -2,7 +2,7 @@
 
 use ciborium::value::Value;
 use pos_core::community_lifecycle::CommunityLifecycleErrorV1 as Error;
-use pos_core::Hash;
+use pos_core::{Hash, ImplementationKeyV1};
 use pos_crypto::plugin_execution::{
     DeterministicBudgetV1 as Budget, PluginCapabilityDescriptorV1 as Capability,
     COMMUNITY_PLUGIN_WORLD_V1,
@@ -468,5 +468,116 @@ fn tuple_rejects_any_truncation_nonpreferred_field_or_default_substitution() -> 
         Tuple::validate_canonical_cbor(&vec![0; 1_048_577], &negotiated, &profile).err(),
         Some(Error::BoundsExceeded)
     );
+    Ok(())
+}
+
+#[test]
+fn member_binding_derives_actual_pmf_and_complete_tuple_with_original_implementation() -> TestResult
+{
+    let profile = profile(Mode::Local)?;
+    let negotiated = negotiated(&profile)?;
+    let tuple = Tuple::new(&negotiated, &profile)?;
+    let key = ImplementationKeyV1::new(
+        "plugin-a".into(),
+        "host-v1".into(),
+        Hash::from_bytes([2; 32]),
+    )?;
+    let schema = Hash::from_bytes([3; 32]);
+    let initial = Hash::from_bytes([4; 32]);
+    let owner = Hash::from_bytes([5; 32]);
+    let member = tuple.member_binding("Entry-A_1", &key, schema, initial, owner)?;
+    let input = member.as_input();
+    assert_eq!(input.stable_entry, "Entry-A_1");
+    assert!(std::ptr::eq(input.implementation, &raw const key));
+    assert_eq!(
+        input.pmf1_digest,
+        Hash::from_bytes(negotiated.pmf1_digest())
+    );
+    assert_eq!(input.negotiated_tuple_digest, tuple.digest());
+    assert_eq!(input.state_schema_digest, schema);
+    assert_eq!(input.initial_state_content_digest, initial);
+    assert_eq!(input.protected_owner_binding_digest, owner);
+    let encoded = member.to_canonical_cbor();
+    let retained = pos_core::community_lifecycle::CommunityMemberBindingV1::from_canonical_cbor(
+        &encoded, &key,
+    )?;
+    assert_eq!(retained.digest(), member.digest());
+    Ok(())
+}
+
+#[test]
+fn member_binding_rejects_foreign_plugin_release_and_missing_required_identity() -> TestResult {
+    let profile = profile(Mode::Local)?;
+    let negotiated = negotiated(&profile)?;
+    let tuple = Tuple::new(&negotiated, &profile)?;
+    let identity = Hash::from_bytes([3; 32]);
+    for key in [
+        ImplementationKeyV1::new(
+            "plugin-b".into(),
+            "host-v1".into(),
+            Hash::from_bytes([2; 32]),
+        )?,
+        ImplementationKeyV1::new(
+            "plugin-a".into(),
+            "host-v1".into(),
+            Hash::from_bytes([9; 32]),
+        )?,
+    ] {
+        assert_eq!(
+            tuple
+                .member_binding("entry", &key, identity, identity, identity)
+                .err(),
+            Some(Error::InvalidBinding)
+        );
+    }
+    let key = ImplementationKeyV1::new(
+        "plugin-a".into(),
+        "host-v1".into(),
+        Hash::from_bytes([2; 32]),
+    )?;
+    for (schema, initial, owner) in [
+        (Hash::zero(), identity, identity),
+        (identity, Hash::zero(), identity),
+        (identity, identity, Hash::zero()),
+    ] {
+        assert_eq!(
+            tuple
+                .member_binding("entry", &key, schema, initial, owner)
+                .err(),
+            Some(Error::InvalidBinding)
+        );
+    }
+    assert_eq!(
+        tuple
+            .member_binding("invalid/slot", &key, identity, identity, identity)
+            .err(),
+        Some(Error::InvalidBinding)
+    );
+    Ok(())
+}
+
+#[test]
+fn member_binding_uses_cnt_live_mode_instead_of_mode_independent_profile_digest() -> TestResult {
+    let local = profile(Mode::Local)?;
+    let air_gapped = profile(Mode::AirGapped)?;
+    assert_eq!(local.digest(), air_gapped.digest());
+    let local_negotiated = negotiated(&local)?;
+    let air_gapped_negotiated = negotiated(&air_gapped)?;
+    let local_tuple = Tuple::new(&local_negotiated, &local)?;
+    let air_gapped_tuple = Tuple::new(&air_gapped_negotiated, &air_gapped)?;
+    let key = ImplementationKeyV1::new(
+        "plugin-a".into(),
+        "host-v1".into(),
+        Hash::from_bytes([2; 32]),
+    )?;
+    let identity = Hash::from_bytes([3; 32]);
+    let local_member = local_tuple.member_binding("entry", &key, identity, identity, identity)?;
+    let air_gapped_member =
+        air_gapped_tuple.member_binding("entry", &key, identity, identity, identity)?;
+    assert_ne!(
+        local_member.as_input().negotiated_tuple_digest,
+        air_gapped_member.as_input().negotiated_tuple_digest
+    );
+    assert_ne!(local_member.digest(), air_gapped_member.digest());
     Ok(())
 }
