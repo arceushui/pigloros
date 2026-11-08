@@ -178,6 +178,14 @@ impl CeremonyDriver {
         self.posts
     }
 
+    /// The first reply-state advance accepted from `EMPTY` on the owned pair.
+    /// Retained after request wiping and cleanup for native readiness evidence.
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub const fn first_receipt_at(&self) -> Option<Instant> {
+        self.first_past_empty
+    }
+
     /// Whether the request image is all zero.
     #[cfg(feature = "test-support")]
     #[must_use]

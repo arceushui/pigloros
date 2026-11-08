@@ -12,12 +12,9 @@ use std::time::{Duration, Instant};
 use pos_owner_bridge::ceremony::driver::{CeremonyDriver, Step, StepEnv};
 use pos_owner_bridge::ceremony::plan::{CeremonyPlan, StoredGet, Verified};
 use pos_owner_bridge::fake::signer::FIXTURE_COSE_KEY;
-use pos_owner_bridge::{
-    BridgeError, CleanupStore, LifecycleCode, OwnerWebSurface, QuarantineKeeper, SystemClock,
-};
+use pos_owner_bridge::{BridgeError, CleanupStore, LifecycleCode, QuarantineKeeper, SystemClock};
 use pos_owner_bridge_codec::{
-    CeremonyId, CeremonyKind, ControlState, CoseEs256PublicKey, OwnerUserHandle, PrfInput,
-    WebAuthnChallenge,
+    CeremonyId, CeremonyKind, CoseEs256PublicKey, OwnerUserHandle, PrfInput, WebAuthnChallenge,
 };
 
 use super::super::{loopback::SharedLoopback, store::WindowsCleanupStore, surface::Surface};
@@ -124,14 +121,15 @@ fn run_ceremony(
     id: CeremonyId,
     number: u64,
 ) -> TestResult {
+    // Coordinate independent test STAs before constructing this synthetic plan.
+    // Once T0 exists it is never reset; all native opening/foreground work and
+    // receipt still share the original fifteen-second ceremony deadline.
+    let mut visible = Some(acquire_foreground(surface, foreground, number)?);
     let started = Instant::now();
     let deadline = started + Duration::from_secs(15);
     surface.set_deadline(deadline);
     let mut driver = new_driver(id, started)?;
     let mut trace = Trace::new(number, started);
-    let mut visible = Some(acquire_foreground(
-        surface, foreground, deadline, &driver, &mut trace, number,
-    )?);
     let mut receipt = None;
     // Keep both the driver and its native owners outside the unwind boundary.
     // An assertion failure must enter the same release/exit path as an error.
@@ -139,19 +137,18 @@ fn run_ceremony(
         || -> Result<Result<Verified, BridgeError>, Box<dyn std::error::Error>> {
             loop {
                 trace.update("active", surface, &driver);
-                if receipt.is_none() && driver.posts() > 0 && !driver.request_clear() {
-                    let state = surface
-                        .reply_load_state()
-                        .map_err(pos_owner_bridge::SurfaceError::error)?;
-                    if state != ControlState::Empty as u32 {
-                        receipt = Some(Instant::now());
-                        // Controlled lifecycle cancellation after actual packaged-page
-                        // receipt; this does not claim an authenticator result.
+                let step = driver.step(&mut env(surface, loopback, store));
+                if receipt.is_none() {
+                    if let Some(observed) = driver.first_receipt_at() {
+                        // Observe the driver's accepted page advance, including
+                        // one consumed/wiped within that same step. Host release
+                        // states and invalid values cannot satisfy this oracle.
+                        receipt = Some(observed);
                         surface.controller_lost();
                         drop(visible.take());
                     }
                 }
-                match driver.step(&mut env(surface, loopback, store)) {
+                match step {
                     Step::Finished(result) => return Ok(result),
                     Step::Done => return Err("readiness driver finished without a result".into()),
                     Step::Pending => pump(surface)?,
@@ -261,19 +258,14 @@ pub(super) fn cancel_driver(
 fn acquire_foreground<'a>(
     surface: &Surface,
     foreground: &'a Foreground,
-    deadline: Instant,
-    driver: &CeremonyDriver,
-    trace: &mut Trace,
     number: u64,
 ) -> Result<Ticket<'a>, Box<dyn std::error::Error>> {
     let ticket = foreground.request(number)?;
+    let mut trace = Trace::new(number, Instant::now());
     loop {
-        trace.update("foreground", surface, driver);
+        trace.queued(surface);
         if ticket.is_next()? {
             return Ok(ticket);
-        }
-        if Instant::now() >= deadline {
-            return Err("readiness expired waiting for the foreground coordination gate".into());
         }
         pump(surface)?;
     }

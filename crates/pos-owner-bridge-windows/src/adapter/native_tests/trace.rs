@@ -27,11 +27,22 @@ impl Trace {
 
     pub(super) fn update(&mut self, stage: &str, surface: &Surface, driver: &CeremonyDriver) {
         let progress = format!(
-            "stage={stage} posts={} request_clear={} {}",
+            "stage={stage} posts={} request_clear={} receipt={:?} {}",
             driver.posts(),
             driver.request_clear(),
+            driver
+                .first_receipt_at()
+                .map(|at| at.saturating_duration_since(self.started)),
             surface.fixture_progress(),
         );
+        self.report(progress);
+    }
+
+    pub(super) fn queued(&mut self, surface: &Surface) {
+        self.report(format!("stage=before-plan {}", surface.fixture_progress()));
+    }
+
+    fn report(&mut self, progress: String) {
         let now = Instant::now();
         if progress != self.previous || now.duration_since(self.reported) >= Duration::from_secs(5)
         {

@@ -77,6 +77,11 @@ fn an_honest_create_registers_the_credential_and_cleans_up() -> TestResult {
     assert_eq!(registration.sign_count, 0);
     assert_eq!(*driver.prf(), prf);
     assert!(driver.request_clear());
+    let receipt = driver
+        .first_receipt_at()
+        .ok_or("page receipt was not retained after cleanup")?;
+    assert!(receipt >= driver.t0());
+    assert!(receipt < driver.t0() + pos_owner_bridge::ceremony::timing::READINESS);
     let log = rig.handle.log();
     assert_eq!(rig.handle.pair_count(), 1);
     let opened = log
