@@ -1,9 +1,9 @@
 //! CSR1 producer identity and required predecessor; no live selection authority.
 
 use super::{
-    bounded_bytes, canonical_end, fixed_bytes, read_hash, read_hashes, read_head,
-    read_optional_hash, record_cursor, record_prefix, CommunityLifecycleErrorV1,
-    CommunityPassKeyV1, Result, MAX_COMMUNITY_PASS_KEY_BYTES_V1,
+    canonical_end, fixed_bytes, read_hash, read_hashes, read_head, read_optional_hash,
+    read_pass_key, record_cursor, record_prefix, validate_horizon, CommunityLifecycleErrorV1,
+    CommunityPassKeyV1, Result,
 };
 use crate::{encode_bytes, encode_hash, encode_head, CborCursor, Hash};
 use zeroize::Zeroizing;
@@ -77,12 +77,7 @@ impl CommunityStateRevisionV1 {
             {
                 return Err(CommunityLifecycleErrorV1::InvalidBinding);
             }
-            if input.evidence_not_after_micros == 0
-                || input.evidence_not_after_micros > u64::MAX / 2
-            {
-                return Err(CommunityLifecycleErrorV1::BoundsExceeded);
-            }
-            Ok(Self(input))
+            validate_horizon(input.evidence_not_after_micros).map(|()| Self(input))
         })
     }
 
@@ -166,9 +161,7 @@ fn read_origin(cursor: &mut CborCursor<'_>) -> Result<CommunityStateProducerV1> 
                     operation_id,
                 })
             }),
-            (2, 1) => bounded_bytes(cursor, MAX_COMMUNITY_PASS_KEY_BYTES_V1)
-                .and_then(CommunityPassKeyV1::from_canonical_cbor)
-                .map(CommunityStateProducerV1::Pass),
+            (2, 1) => read_pass_key(cursor).map(CommunityStateProducerV1::Pass),
             _ => Err(CommunityLifecycleErrorV1::InvalidEncoding),
         })
     })

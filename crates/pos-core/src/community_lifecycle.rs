@@ -7,13 +7,23 @@
 
 mod error;
 mod progress;
+mod reservation;
 mod revision;
+mod selected_head;
 mod state;
 
 pub use error::CommunityLifecycleErrorV1;
 pub use progress::CommunityHostProgressV1;
+pub use reservation::{
+    CommunityReservationInputV1, CommunityReservationRequestInputV1, CommunityReservationRequestV1,
+    CommunityReservationV1,
+};
 pub use revision::{
     CommunityStateProducerV1, CommunityStateRevisionInputV1, CommunityStateRevisionV1,
+};
+pub use selected_head::{
+    CommunityMemberHeadV1, CommunityPassFrontierV1, CommunitySelectedHeadInputV1,
+    CommunitySelectedHeadV1, MAX_COMMUNITY_MEMBERS_V1,
 };
 pub use state::{CommunityStateContentV1, MAX_COMMUNITY_STATE_BYTES_V1};
 
@@ -115,6 +125,19 @@ fn validate_coordinates(timeline: TimelineId, generation: [u8; 16]) -> Result<()
     } else {
         Ok(())
     }
+}
+
+fn validate_horizon(horizon: u64) -> Result<()> {
+    if horizon == 0 || horizon > u64::MAX / 2 {
+        Err(CommunityLifecycleErrorV1::BoundsExceeded)
+    } else {
+        Ok(())
+    }
+}
+
+fn read_pass_key(cursor: &mut CborCursor<'_>) -> Result<CommunityPassKeyV1> {
+    bounded_bytes(cursor, MAX_COMMUNITY_PASS_KEY_BYTES_V1)
+        .and_then(CommunityPassKeyV1::from_canonical_cbor)
 }
 
 fn record_prefix(out: &mut Vec<u8>, fields: u64, magic: &[u8; 4]) {
