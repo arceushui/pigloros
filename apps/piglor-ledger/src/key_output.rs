@@ -106,7 +106,7 @@ pub(crate) fn bind_owned_secret_key(
     use std::os::unix::fs::OpenOptionsExt;
 
     #[cfg(target_os = "linux")]
-    pos_store::protected_sqlite_namespace::refuse_reserved_path(database)?;
+    pos_store::protected_sqlite_namespace::refuse_reserved_database_path(database)?;
     let absolute = absolute_output(path).map_err(binding_error)?;
     let parent = absolute
         .parent()
@@ -269,7 +269,7 @@ fn require_owned_secret_key_binding(
     use rusqlite::{Connection, OpenFlags};
 
     #[cfg(target_os = "linux")]
-    pos_store::protected_sqlite_namespace::refuse_reserved_path(database)?;
+    pos_store::protected_sqlite_namespace::refuse_reserved_database_path(database)?;
     let absolute = absolute_output(path).map_err(binding_error)?;
     let connection = Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_WRITE)
         .map_err(binding_error)?;
@@ -952,20 +952,26 @@ mod binding_tests {
         let database = directory.path().join("main.db");
         let key = directory.path().join("not-created.key");
         let expected = "storage error: ordinary SQLite open cannot use the protected namespace";
-        assert_eq!(
-            bind_owned_secret_key(&database, &key, identity(1), digest())
-                .err()
-                .map(|error| error.to_string())
-                .as_deref(),
-            Some(expected)
-        );
-        assert_eq!(
-            require_owned_secret_key_binding(&database, &key, request(1, digest()))
-                .err()
-                .map(|error| error.to_string())
-                .as_deref(),
-            Some(expected)
-        );
+        let uri = std::path::PathBuf::from(format!(
+            "file:{}",
+            database.to_str().ok_or("fixture path is not UTF-8")?
+        ));
+        for database in [&database, &uri] {
+            assert_eq!(
+                bind_owned_secret_key(database, &key, identity(1), digest())
+                    .err()
+                    .map(|error| error.to_string())
+                    .as_deref(),
+                Some(expected)
+            );
+            assert_eq!(
+                require_owned_secret_key_binding(database, &key, request(1, digest()))
+                    .err()
+                    .map(|error| error.to_string())
+                    .as_deref(),
+                Some(expected)
+            );
+        }
         assert_eq!(std::fs::read_dir(directory.path())?.count(), 1);
         assert!(!key.exists());
         assert!(!database.exists());

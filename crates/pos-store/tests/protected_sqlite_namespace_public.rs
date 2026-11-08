@@ -2,7 +2,9 @@
 //! Ordinary factory refusals, not qualified native/owner activation evidence.
 
 use pos_core::CoreError;
-use pos_store::protected_sqlite_namespace::{refuse_reserved_filename, refuse_reserved_path};
+use pos_store::protected_sqlite_namespace::{
+    refuse_reserved_database_path, refuse_reserved_filename, refuse_reserved_path,
+};
 use pos_store::sqlite::SqliteStore;
 use pos_store::trusted_clock::SqliteTrustedClockAuthorityV1;
 use pos_store::{
@@ -149,6 +151,28 @@ fn directory_and_leaf_aliases_including_dangling_links_refuse() -> TestResult {
     let relative = aliases.path().join("relative.db");
     std::os::unix::fs::symlink("leaf.db", &relative)?;
     closed(refuse_reserved_path(&relative));
+    Ok(())
+}
+
+#[test]
+fn native_database_paths_screen_implicit_uri_targets_and_exact_non_utf8_bytes() -> TestResult {
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+    let private = tempfile::tempdir()?;
+    mark(private.path())?;
+    let uri = format!("file:{}/main.db", path_text(private.path())?);
+    // Its literal path is outside the reserved namespace, while SQLite's
+    // default URI interpretation names the reserved directory directly.
+    refuse_reserved_path(Path::new(&uri))?;
+    closed(refuse_reserved_database_path(Path::new(&uri)));
+    let mut bytes = b"file:".to_vec();
+    bytes.extend_from_slice(private.path().as_os_str().as_bytes());
+    bytes.extend_from_slice(b"/non-utf8-\xff.db");
+    let non_utf8 = PathBuf::from(std::ffi::OsString::from_vec(bytes));
+    refuse_reserved_path(&non_utf8)?;
+    closed(refuse_reserved_database_path(&non_utf8));
+    let ordinary = tempfile::tempdir()?;
+    refuse_reserved_database_path(&ordinary.path().join("main.db"))?;
+    assert_eq!(std::fs::read_dir(private.path())?.count(), 1);
     Ok(())
 }
 

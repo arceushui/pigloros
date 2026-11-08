@@ -431,7 +431,7 @@ fn raw_digest(bytes: &[u8]) -> [u8; 32] {
 
 /// Atomically create the private state file; an existing path is never reused.
 fn create_state_file(path: &Path) -> Result<(), TrustPolicyRegistryErrorV1> {
-    crate::protected_sqlite_namespace::refuse_reserved_path(path)
+    crate::protected_sqlite_namespace::refuse_reserved_database_path(path)
         .or(Err(TrustPolicyRegistryErrorV1::StorageUnavailable))?;
     OpenOptions::new()
         .write(true)
@@ -451,7 +451,7 @@ fn create_state_file(path: &Path) -> Result<(), TrustPolicyRegistryErrorV1> {
 /// Open an existing state file. Callers establish that the path exists, so an
 /// unopenable or non-database file is corrupt state, not missing state.
 fn open_connection(path: &Path) -> Result<Connection, TrustPolicyRegistryErrorV1> {
-    crate::protected_sqlite_namespace::refuse_reserved_path(path)
+    crate::protected_sqlite_namespace::refuse_reserved_database_path(path)
         .or(Err(TrustPolicyRegistryErrorV1::StorageUnavailable))?;
     let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
         .map_err(|_| TrustPolicyRegistryErrorV1::CorruptState)?;
@@ -816,6 +816,56 @@ mod tests {
         assert!(
             String::from_utf8_lossy(&output.stdout).contains("protected-memory-literal-refused")
         );
+        Ok(())
+    }
+
+    #[test]
+    fn implicit_native_uri_target_is_checked_before_literal_trust_file_creation(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        const CHILD: &str = "PIGLOROS_NAMESPACE_TRUST_URI_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let root = tempfile::tempdir()?;
+            let private = root.path().join("private");
+            let ordinary = root.path().join("ordinary");
+            std::fs::create_dir(&private)?;
+            std::fs::create_dir(&ordinary)?;
+            let native = private.join("trust.db");
+            drop(crate::sqlite::SqliteStore::open(
+                native.to_str().ok_or("fixture path is not UTF-8")?,
+            )?);
+            let original = std::fs::read(&native)?;
+            std::fs::create_dir(
+                private.join(crate::protected_sqlite_namespace::COORDINATION_DIRECTORY),
+            )?;
+            std::env::set_current_dir(&ordinary)?;
+            let uri = format!(
+                "file:{}",
+                native.to_str().ok_or("fixture path is not UTF-8")?
+            );
+            let literal = Path::new(&uri);
+            std::fs::create_dir_all(literal.parent().ok_or("literal fixture parent missing")?)?;
+            crate::protected_sqlite_namespace::refuse_reserved_path(literal)?;
+            let snapshot = fixture_snapshot()?;
+            let genesis = signed(snapshot.clone())?;
+            let anchor = release(&snapshot, &genesis);
+            assert_eq!(
+                DeploymentTrustPolicyRegistryV1::provision_explicit(literal, &anchor, &genesis),
+                Err(TrustPolicyRegistryErrorV1::StorageUnavailable)
+            );
+            assert!(!literal.exists());
+            assert_eq!(std::fs::read(&native)?, original);
+            println!("implicit-native-uri-refused");
+            return Ok(());
+        }
+        let output = std::process::Command::new(std::env::current_exe()?)
+            .args(["--exact", "trust_policy_registry::tests::implicit_native_uri_target_is_checked_before_literal_trust_file_creation", "--nocapture"])
+            .env(CHILD, "1")
+            .output()?;
+        assert!(
+            output.status.success(),
+            "isolated implicit URI refusal failed: {output:?}"
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("implicit-native-uri-refused"));
         Ok(())
     }
 

@@ -46,8 +46,10 @@ On Linux, `protected_sqlite_namespace` checks the fixed
 It checks lexical and resolved ancestry, including existing and dangling leaf
 aliases. URI-enabled factories screen the filename after its SQLite path
 interpretation: `file:` authority, percent escapes, query/fragment removal and
-the pinned parser's `%00` path termination. Literal-path factories do not
-reinterpret `file:` text as a URI. Main, WAL, SHM and unrelated names inside the
+the pinned parser's `%00` path termination. The pinned bundled build script
+enables `SQLITE_USE_URI`, so even native factories without an explicit URI flag
+check both the literal filesystem path and its native URI interpretation.
+Filesystem provisioning itself still uses the literal path. Main, WAL, SHM and unrelated names inside the
 reserved directory receive the same refusal.
 
 The empty/`:memory:` exemption applies only to SQLite filename interpretation.

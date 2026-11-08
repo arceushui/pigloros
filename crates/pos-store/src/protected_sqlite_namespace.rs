@@ -8,7 +8,7 @@
 
 use std::ffi::OsString;
 use std::io::ErrorKind;
-use std::os::unix::ffi::OsStringExt;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
 use pos_core::CoreError;
@@ -30,6 +30,30 @@ fn refused() -> CoreError {
 /// Returns a closed storage refusal for a reserved/uncertain path, invalid URI
 /// authority or an unresolvable filesystem view, before creating a connection.
 pub fn refuse_reserved_filename(filename: &str) -> Result<(), CoreError> {
+    check_native_filename(filename.as_bytes())
+}
+
+/// Check both filesystem creation and native interpretation of a database path.
+///
+/// The pinned bundled build enables URI filenames by default, even without an
+/// explicit open flag. A literal provisioning file and the native URI target
+/// must therefore both be outside the reserved namespace. Non-UTF-8 path bytes
+/// are checked exactly, without a lossy conversion.
+///
+/// # Errors
+/// Returns the same closed pre-open refusal for either reserved interpretation.
+pub fn refuse_reserved_database_path(path: &Path) -> Result<(), CoreError> {
+    refuse_reserved_path(path).and_then(|()| {
+        let filename = path.as_os_str().as_bytes();
+        if filename.starts_with(b"file:") {
+            check_native_filename(filename)
+        } else {
+            Ok(())
+        }
+    })
+}
+
+fn check_native_filename(filename: &[u8]) -> Result<(), CoreError> {
     filename_path(filename).and_then(|path| {
         if path.as_os_str().is_empty() || path == Path::new(":memory:") {
             Ok(())
@@ -41,8 +65,9 @@ pub fn refuse_reserved_filename(filename: &str) -> Result<(), CoreError> {
 
 /// Refuse an ordinary literal filesystem path in the reserved namespace.
 ///
-/// This entry is for callers that do not enable URI interpretation. Marker
-/// metadata is denial-only; caller-created markers never create authority.
+/// This checks filesystem operations such as literal file creation. Native
+/// database callers use [`refuse_reserved_database_path`] to check both path
+/// interpretations. Marker metadata is denial-only and never creates authority.
 ///
 /// # Errors
 /// Refuses a reserved coordination entry (of any kind), an uncertain lookup or
@@ -104,22 +129,26 @@ fn resolved_ancestor(mut path: PathBuf, remaining: usize) -> Result<PathBuf, Cor
     }
 }
 
-fn filename_path(filename: &str) -> Result<PathBuf, CoreError> {
-    let Some(mut uri) = filename.strip_prefix("file:") else {
-        return Ok(PathBuf::from(filename));
+fn filename_path(filename: &[u8]) -> Result<PathBuf, CoreError> {
+    let Some(mut uri) = filename.strip_prefix(b"file:") else {
+        return Ok(PathBuf::from(OsString::from_vec(filename.to_vec())));
     };
-    if let Some(authority_and_path) = uri.strip_prefix("//") {
+    if let Some(authority_and_path) = uri.strip_prefix(b"//") {
         let end = authority_and_path
-            .find('/')
+            .iter()
+            .position(|byte| *byte == b'/')
             .unwrap_or(authority_and_path.len());
         let authority = &authority_and_path[..end];
-        if !authority.is_empty() && authority != "localhost" {
+        if !authority.is_empty() && authority != b"localhost" {
             return Err(refused());
         }
         uri = &authority_and_path[end..];
     }
-    let end = uri.find(['?', '#']).unwrap_or(uri.len());
-    let raw = &uri.as_bytes()[..end];
+    let end = uri
+        .iter()
+        .position(|byte| *byte == b'?' || *byte == b'#')
+        .unwrap_or(uri.len());
+    let raw = &uri[..end];
     let mut decoded = Vec::with_capacity(raw.len());
     let mut position = 0;
     while position < raw.len() {
