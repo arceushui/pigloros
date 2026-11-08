@@ -772,6 +772,54 @@ mod tests {
     }
 
     #[test]
+    fn reserved_literal_memory_name_cannot_be_provisioned() -> Result<(), Box<dyn std::error::Error>>
+    {
+        const CHILD: &str = "PIGLOROS_NAMESPACE_TRUST_MEMORY_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let directory = tempfile::tempdir()?;
+            std::fs::create_dir(
+                directory
+                    .path()
+                    .join(crate::protected_sqlite_namespace::COORDINATION_DIRECTORY),
+            )?;
+            // This process runs only this exact test, so its owned cwd cannot
+            // affect parallel tests or a caller-supplied directory.
+            std::env::set_current_dir(directory.path())?;
+            let snapshot = fixture_snapshot()?;
+            let genesis = signed(snapshot.clone())?;
+            let anchor = release(&snapshot, &genesis);
+            assert_eq!(
+                DeploymentTrustPolicyRegistryV1::provision_explicit(
+                    Path::new(":memory:"),
+                    &anchor,
+                    &genesis
+                ),
+                Err(TrustPolicyRegistryErrorV1::StorageUnavailable)
+            );
+            assert!(!Path::new(":memory:").exists());
+            assert_eq!(std::fs::read_dir(directory.path())?.count(), 1);
+            println!("protected-memory-literal-refused");
+            return Ok(());
+        }
+        let output = std::process::Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "trust_policy_registry::tests::reserved_literal_memory_name_cannot_be_provisioned",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()?;
+        assert!(
+            output.status.success(),
+            "isolated literal-path refusal failed: {output:?}"
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("protected-memory-literal-refused")
+        );
+        Ok(())
+    }
+
+    #[test]
     fn genesis_rejects_wrong_anchor_shape_and_nonzero_position(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let directory = tempfile::tempdir()?;

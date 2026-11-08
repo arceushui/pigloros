@@ -30,7 +30,13 @@ fn refused() -> CoreError {
 /// Returns a closed storage refusal for a reserved/uncertain path, invalid URI
 /// authority or an unresolvable filesystem view, before creating a connection.
 pub fn refuse_reserved_filename(filename: &str) -> Result<(), CoreError> {
-    filename_path(filename).and_then(|path| refuse_reserved_path(&path))
+    filename_path(filename).and_then(|path| {
+        if path.as_os_str().is_empty() || path == Path::new(":memory:") {
+            Ok(())
+        } else {
+            refuse_reserved_path(&path)
+        }
+    })
 }
 
 /// Refuse an ordinary literal filesystem path in the reserved namespace.
@@ -42,9 +48,6 @@ pub fn refuse_reserved_filename(filename: &str) -> Result<(), CoreError> {
 /// Refuses a reserved coordination entry (of any kind), an uncertain lookup or
 /// an unresolvable alias. No private native connection is opened by this check.
 pub fn refuse_reserved_path(path: &Path) -> Result<(), CoreError> {
-    if path.as_os_str().is_empty() || path == Path::new(":memory:") {
-        return Ok(());
-    }
     let absolute = if path.is_absolute() {
         Ok(path.to_path_buf())
     } else {

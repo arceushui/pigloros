@@ -50,6 +50,10 @@ the pinned parser's `%00` path termination. Literal-path factories do not
 reinterpret `file:` text as a URI. Main, WAL, SHM and unrelated names inside the
 reserved directory receive the same refusal.
 
+The empty/`:memory:` exemption applies only to SQLite filename interpretation.
+Literal filesystem provisioning checks those names like any other path before
+creating a file; it cannot use a SQLite special name to escape a reserved cwd.
+
 SQLite URI semantics are grounded in the [official URI specification](https://sqlite.org/uri.html)
 and the pinned `libsqlite3-sys 0.38.2` amalgamation's `sqlite3ParseUri`. The
 guard only denies; it does not implement a new VFS or certify a native file.

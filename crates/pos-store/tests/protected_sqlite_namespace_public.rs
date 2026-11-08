@@ -214,6 +214,7 @@ fn vanished_current_directory_refuses_without_native_open() -> TestResult {
         std::fs::remove_dir(&working)?;
         closed(refuse_reserved_path(Path::new("main.db")));
         assert_eq!(std::fs::read_dir(root.path())?.count(), 0);
+        println!("missing-cwd-refused");
         return Ok(());
     }
     let output = std::process::Command::new(std::env::current_exe()?)
@@ -228,5 +229,6 @@ fn vanished_current_directory_refuses_without_native_open() -> TestResult {
         output.status.success(),
         "isolated cwd refusal failed: {output:?}"
     );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("missing-cwd-refused"));
     Ok(())
 }
