@@ -34,7 +34,7 @@ pub struct TimelinePositionV1 {
 pub struct CommunityPreparedInvocationInputV1<'a> {
     /// Exact immutable CMB1 identity.
     pub member_binding_digest: Hash,
-    /// Fresh nonzero invocation identity, independent of the later PassKey.
+    /// Fresh nonzero invocation identity, independent of the later pass key.
     pub invocation_id: [u8; 16],
     /// Original WIT coordinate, not a native producer or factual dependency coordinate.
     pub timeline_position: TimelinePositionV1,
@@ -284,7 +284,7 @@ impl<'a> CommunityPreparedInputSetV1<'a> {
         if bytes.len() > 9 + MAX_COMMUNITY_MEMBERS_V1 * 69 {
             return Err(Error::BoundsExceeded);
         }
-        if bytes == &*self.to_canonical_cbor() {
+        if bytes == self.to_canonical_cbor().as_slice() {
             Ok(())
         } else {
             Err(Error::InvalidBinding)

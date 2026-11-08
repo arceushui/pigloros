@@ -116,7 +116,7 @@ impl CommunityInvocationStepV1 {
         if bytes.len() > 1024 {
             return Err(Error::BoundsExceeded);
         }
-        if bytes == &*self.to_canonical_cbor() {
+        if bytes == self.to_canonical_cbor().as_slice() {
             Ok(())
         } else {
             Err(Error::InvalidBinding)

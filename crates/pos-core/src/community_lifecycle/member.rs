@@ -8,6 +8,8 @@ use super::{
 use crate::{encode_bytes, encode_hash, Hash, ImplementationKeyV1};
 use zeroize::Zeroizing;
 
+const _: () = assert!(7 + 66 + 3 + crate::MAX_IMPLEMENTATION_KEY_BYTES_V1 + 5 * 34 <= 1024);
+
 /// Untrusted immutable member fields, including the exact retained IMK1.
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub struct CommunityMemberBindingInputV1<'a> {
