@@ -39,7 +39,11 @@ pub(super) fn validate(value: &Value, component: &str) -> Result<(), Refusal> {
     }
     let creation = &value["creationInfo"];
     nonempty(creation.get("created"))?;
-    for creator in creation["creators"].as_array().ok_or(Refusal::Malformed)? {
+    let creators = creation["creators"]
+        .as_array()
+        .filter(|creators| !creators.is_empty())
+        .ok_or(Refusal::Malformed)?;
+    for creator in creators {
         nonempty(Some(creator))?;
     }
     let mut elements = BTreeMap::new();

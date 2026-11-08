@@ -321,3 +321,51 @@ fn spdx_schema_is_the_exact_attributed_upstream_resource() {
         "4126dc29f15e92feec92e9622f4939131ad58b125d6f578aa93e980a6e6f3212"
     );
 }
+
+#[test]
+fn refuses_missing_spdx_creation_metadata_and_wrong_document_constants() -> TestResult {
+    for (pointer, value) in [
+        ("/creationInfo/creators", json!([])),
+        ("/creationInfo/creators/0", json!("")),
+        ("/creationInfo/created", json!("invalid date")),
+        ("/documentNamespace", json!("")),
+        ("/name", json!(" ")),
+        ("/SPDXID", json!("SPDXRef-other-document")),
+        ("/dataLicense", json!("MIT")),
+    ] {
+        let mut fixture = Fixture::new();
+        fixture
+            .sbom(|value_json| *value_json.pointer_mut(pointer).expect("fixture field") = value)?;
+        assert_eq!(
+            result(&fixture)?,
+            Err(Error::Malformed {
+                artifact: Artifact::Sbom
+            })
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn preserves_optional_vocabulary_annotations_and_all_json_scalar_kinds() -> TestResult {
+    let mut fixture = Fixture::new();
+    fixture.schemas[0] = bytes(&json!({
+        "$vocabulary": {"https://unknown.invalid/annotation": false},
+        "examples": [null, true, -1, 1, 1.25, "escaped\ntext"]
+    }));
+    assert_eq!(result(&fixture)?, Ok(()));
+    Ok(())
+}
+
+#[test]
+fn changes_the_bound_evidence_when_another_licence_closure_is_checked() -> TestResult {
+    let mut fixture = Fixture::new();
+    let first = validate(&fixture.bundle()?)?;
+    fixture.licences =
+        vec![b"An alternative local licence with no allowlist classification".to_vec()];
+    let second = validate(&fixture.bundle()?)?;
+    assert_ne!(first.pmf1_digest(), second.pmf1_digest());
+    assert_ne!(first.release_digest(), second.release_digest());
+    assert_ne!(first, second);
+    Ok(())
+}
