@@ -131,9 +131,11 @@ fn the_output_usage_is_copied_into_staged_and_committed_only() {
         Verdict::Staged { output_usage, .. } | Verdict::Committed { output_usage, .. } => {
             output_usage
         }
-        Verdict::Refused { .. } | Verdict::Failed { .. } | Verdict::NotRun | Verdict::Discarded => {
-            None
-        }
+        Verdict::Refused { .. }
+        | Verdict::Trapped { .. }
+        | Verdict::Failed { .. }
+        | Verdict::NotRun
+        | Verdict::Discarded => None,
     };
     for disposition in [
         ReceiptDispositionV1::Staged,
@@ -225,9 +227,15 @@ fn without_a_receipt_the_launch_failure_or_not_run_decides() {
         class: PRE,
     };
     assert_eq!(pre.result, expected);
-    let failed = without_receipt(Ok(summary()), Some(trap));
+    let trapped = without_receipt(Ok(summary()), Some(trap));
+    let expected = Verdict::Trapped {
+        trap_class: "other",
+        class: "Operational",
+    };
+    assert_eq!(trapped.result, expected);
+    let failed = without_receipt(Ok(summary()), Some(Error::WorkerCrashed));
     let expected = Verdict::Failed {
-        error: "ComponentTrap",
+        error: "WorkerCrashed",
         class: "Operational",
     };
     assert_eq!(failed.result, expected);

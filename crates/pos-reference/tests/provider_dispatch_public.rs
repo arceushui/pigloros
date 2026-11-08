@@ -104,6 +104,7 @@ fn run(
         request,
         &corpus.archive,
         &corpus.trust_policy,
+        &support::trust_policy_operator()?,
         &evaluator_identity()?,
         executors,
         adapter,

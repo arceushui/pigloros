@@ -36,7 +36,7 @@ use crate::map::{of_outcome, of_record, SubResultV1};
 pub use crate::payload::ScanSource;
 use crate::payload::{
     AtV1, ComputeV1, ExpectV1, Hex32, IdentityFieldV1, InstallV1, InvalidCaseV1, MaterialV1,
-    MemberV1, ProfileDigestV1, ReleaseV1, StepV1, SubCaseV1, Text,
+    MemberV1, ProfileDigestV1, RefusedV1, ReleaseV1, StepV1, SubCaseV1, Text,
 };
 
 /// The closed host error of a step.
@@ -258,15 +258,16 @@ pub trait StepPortV1 {
 
 /// The canonical bytes of the outcome record.
 ///
-/// It is the deterministic CBOR array `["POB1", 1,
+/// It is the deterministic CBOR array `["POB1", 2,
 /// plugin_id, pmf1_digest, release_digest, tps1_digest, execution_profile_digest, tick, mode,
-/// content_validation, result]` (ADR-061 revision 8 decision 2).
+/// content_validation, result]` (ADR-061 revision 8 decision 2; version 2 adds the trap class
+/// of a `Trapped` result, ADR-061 R13).
 #[must_use]
 pub fn outcome_bytes_of(outcome: &CommunityPluginSubjectOutcomeV1) -> Vec<u8> {
     let mut out = Vec::new();
     cbor::array(&mut out, 11);
     cbor::text(&mut out, "POB1");
-    cbor::unsigned(&mut out, 1);
+    cbor::unsigned(&mut out, 2);
     cbor::text(&mut out, &outcome.plugin_id);
     for digest in [
         outcome.pmf1_digest,
@@ -305,6 +306,14 @@ const fn validation_code(validation: ContentValidationV1) -> u64 {
 fn optional_digest(out: &mut Vec<u8>, digest: Option<[u8; 32]>) {
     match digest {
         Some(digest) => cbor::bytes(out, &digest),
+        None => out.push(NULL),
+    }
+}
+
+/// A text, or null.
+fn optional_text(out: &mut Vec<u8>, text: Option<&str>) {
+    match text {
+        Some(text) => cbor::text(out, text),
         None => out.push(NULL),
     }
 }
@@ -375,10 +384,13 @@ fn result_bytes(out: &mut Vec<u8>, result: CommunityPluginSubjectResultV1) {
             cbor::array(out, 4);
             cbor::text(out, "Refused");
             cbor::text(out, error);
-            match basis {
-                Some(basis) => cbor::text(out, basis),
-                None => out.push(NULL),
-            }
+            optional_text(out, basis);
+            cbor::text(out, class);
+        }
+        CommunityPluginSubjectResultV1::Trapped { trap_class, class } => {
+            cbor::array(out, 3);
+            cbor::text(out, "Trapped");
+            cbor::text(out, trap_class);
             cbor::text(out, class);
         }
         CommunityPluginSubjectResultV1::Failed { error, class } => {
@@ -844,8 +856,17 @@ impl Run<'_> {
         if let ExpectV1::Digest(digest) = &subcase.expect {
             self.record.computed = self.compute(&digest.compute);
         }
-        self.record.matched = self.matches(subcase, result, pieces);
+        self.record.matched = self.decides(subcase, result, pieces);
         self.record
+    }
+
+    /// Whether the sub-case matched: a trap matches only a `trapped` expectation, whatever
+    /// the record shows for a `digest`, `absent` or `malformed` one (ADR-061 R13), and every
+    /// other result is compared with [`Self::matches()`].
+    fn decides(&self, subcase: &SubCaseV1, result: Option<SubResultV1>, pieces: &PiecesV1) -> bool {
+        let trapped = matches!(result, Some(SubResultV1::Trapped { .. }));
+        let expects_trap = matches!(subcase.expect, ExpectV1::Trapped(_));
+        (!trapped || expects_trap) && self.matches(subcase, result, pieces)
     }
 
     /// The value of a `compute`; `None` when it does not exist.
@@ -865,6 +886,7 @@ impl Run<'_> {
                     SubResultV1::Committed { output_digest, .. } => Some(output_digest),
                     SubResultV1::Refused { .. }
                     | SubResultV1::Failed { .. }
+                    | SubResultV1::Trapped { .. }
                     | SubResultV1::Operational => None,
                 }),
             ComputeV1::ProfileDigest(profile) => profile_digest(profile),
@@ -885,14 +907,12 @@ impl Run<'_> {
                     class,
                     index,
                 }),
-            ) => {
-                error == expect.error.as_str()
-                    && class == expect.class.as_str()
-                    && basis == expect.basis.as_ref().map(Text::as_str)
-                    && index == expect.index.map(|index| index.0)
-            }
+            ) => refusal_matches(expect, error, basis, class, index),
             (ExpectV1::Failed(expect), Some(SubResultV1::Failed { error, class })) => {
                 error == expect.error.as_str() && class == expect.class.as_str()
+            }
+            (ExpectV1::Trapped(expect), Some(SubResultV1::Trapped { class })) => {
+                class == expect.class.as_str()
             }
             (ExpectV1::Malformed(_), _) => subcase
                 .nested
@@ -904,9 +924,29 @@ impl Run<'_> {
                 .as_ref()
                 .is_some_and(|scan| scan.found.is_empty() && scan.retained_ok),
             (ExpectV1::Digest(expect), _) => self.record.computed == Some(expect.value.0),
-            (ExpectV1::Committed(_) | ExpectV1::Refused(_) | ExpectV1::Failed(_), _) => false,
+            (
+                ExpectV1::Committed(_)
+                | ExpectV1::Refused(_)
+                | ExpectV1::Failed(_)
+                | ExpectV1::Trapped(_),
+                _,
+            ) => false,
         }
     }
+}
+
+/// Whether a refusal has the error, class, basis and index that `expect` names.
+fn refusal_matches(
+    expect: &RefusedV1,
+    error: &str,
+    basis: Option<&str>,
+    class: &str,
+    index: Option<u64>,
+) -> bool {
+    error == expect.error.as_str()
+        && class == expect.class.as_str()
+        && basis == expect.basis.as_ref().map(Text::as_str)
+        && index == expect.index.map(|index| index.0)
 }
 
 /// The unkeyed BLAKE3-256 of the UTF-8 bytes of `input`.

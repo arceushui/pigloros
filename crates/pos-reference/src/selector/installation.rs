@@ -2098,6 +2098,31 @@ pub mod tests {
     }
 
     #[test]
+    fn installed_tps1_authenticates_only_under_the_trs1_deployment_operator_key() -> TestResult {
+        for mutation in [
+            crate::selector_test_support::TrustMutation::DomainlessSignature,
+            crate::selector_test_support::TrustMutation::SignedByTrustRoot,
+        ] {
+            let corpus = crate::selector_test_support::corpus_with_trust_mutation(mutation)?;
+            let (request, bootstrap) = installed_case_bootstrap(&corpus)?;
+            assert_eq!(
+                bootstrap.resolve_installed_case(&request, 0),
+                Err(SelectorBoundaryError::ArtifactInvalid)
+            );
+        }
+        let request = EvaluationRequest::from_canonical_cbor(
+            &crate::selector_test_support::corpus()?.request,
+        )?;
+        let without_operator =
+            authenticated_state_with(Vec::new(), Vec::new())?.authenticate_bootstrap()?;
+        assert_eq!(
+            without_operator.resolve_installed_case(&request, 0),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        );
+        Ok(())
+    }
+
+    #[test]
     fn retained_sic1_descriptors_reconstruct_the_evr1_selected_case() -> TestResult {
         let corpus = crate::selector_test_support::corpus()?;
         let (request, bootstrap) = installed_case_bootstrap(&corpus)?;

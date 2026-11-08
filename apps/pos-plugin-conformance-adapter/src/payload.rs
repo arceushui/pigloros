@@ -399,6 +399,22 @@ pub struct DigestV1 {
     pub value: Hex32,
 }
 
+/// The export of a trap: a `pass` step invokes only `drive`.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum TrapExportV1 {
+    Drive,
+}
+
+/// Expect `trapped`: the pass's `drive` traps with the canonical trap class `class`
+/// (ADR-061 R13).
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct TrappedV1 {
+    pub class: Text,
+    pub export: TrapExportV1,
+}
+
 /// What a sub-case expects.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(tag = "kind", rename_all = "lowercase")]
@@ -406,6 +422,7 @@ pub enum ExpectV1 {
     Committed(CommittedV1),
     Refused(RefusedV1),
     Failed(FailedV1),
+    Trapped(TrappedV1),
     Malformed(MalformedV1),
     Absent(AbsentV1),
     Digest(DigestV1),
@@ -425,6 +442,7 @@ impl ExpectV1 {
             }
             Self::Committed(_)
             | Self::Failed(_)
+            | Self::Trapped(_)
             | Self::Malformed(_)
             | Self::Absent(_)
             | Self::Digest(_) => true,

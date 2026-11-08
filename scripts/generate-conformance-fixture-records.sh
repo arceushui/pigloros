@@ -485,7 +485,8 @@ mkdir -p "$(dirname "${generated_authority}")"
 # family: the entry's fixture bytes are that family's payload (which names its RCS1 closure
 # members by BLAKE3 digest) and its expected result is that family's oracle. The digests are
 # those of the files regenerated above, never of the checked-in ones. Materialized is not
-# executed: the evidence-status records stay pending.
+# executed: only the `deletion-redaction` evidence-status record (ERA-001, #1296) is executed,
+# for a case the evaluator passes in both ExecutionProfile runs; the others stay pending.
 declare -A w8h1_digests=()
 for family in positive denied malformed resource-exhaustion deletion-redaction downgrade independent-evaluation; do
   for kind in inputs oracles; do
@@ -545,13 +546,13 @@ generated_sha256="${generated_root}/SHA256SUMS"
 generated_blake3="${generated_root}/BLAKE3SUMS"
 (
   cd "${fixture_root}"
-  find expected-authority expected inputs matrix non-interference oracles profiles providers support -type f -print0 |
+  find erasure expected-authority expected inputs matrix non-interference oracles profiles providers support -type f -print0 |
     sort -z |
     xargs -0 b3sum
 ) > "${generated_blake3}"
 (
   cd "${fixture_root}"
-  { printf '%s\0' BLAKE3SUMS; find expected-authority expected inputs matrix non-interference oracles profiles providers support -type f -print0; } |
+  { printf '%s\0' BLAKE3SUMS; find erasure expected-authority expected inputs matrix non-interference oracles profiles providers support -type f -print0; } |
     sort -z |
     xargs -0 sha256sum
 ) > "${generated_sha256}"
@@ -559,7 +560,7 @@ if [[ "${mode}" == "--write" ]]; then
   install -m 0644 -- "${generated_blake3}" "${fixture_root}/BLAKE3SUMS"
   (
     cd "${fixture_root}"
-    { printf '%s\0' BLAKE3SUMS; find expected-authority expected inputs matrix non-interference oracles profiles providers support -type f -print0; } |
+    { printf '%s\0' BLAKE3SUMS; find erasure expected-authority expected inputs matrix non-interference oracles profiles providers support -type f -print0; } |
       sort -z |
       xargs -0 sha256sum
   ) > "${generated_sha256}"
