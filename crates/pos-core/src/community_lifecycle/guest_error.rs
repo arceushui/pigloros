@@ -92,7 +92,8 @@ pub struct CommunityGuestErrorV1<'a> {
 }
 
 impl<'a> CommunityGuestErrorV1<'a> {
-    /// Borrow the live Runtime error without allocating another private copy.
+    /// Borrow the live Runtime capability and coordinate byte ranges.
+    /// Fixed-size code and identity values are copied into this view.
     #[must_use]
     pub fn from_guest_error(error: &'a GuestPluginErrorV1) -> Self {
         let code = match &error.code {

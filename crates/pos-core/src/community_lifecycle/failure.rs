@@ -67,7 +67,8 @@ impl<'a> CommunityInvocationFailureV1<'a> {
         &self.0
     }
 
-    /// Encode exact ten-field CFI1 without copying capability/coordinate buffers.
+    /// Encode exact ten-field CFI1 into one pre-sized zeroizing output.
+    /// Capability and coordinate bytes are copied into that owned output range.
     #[must_use]
     pub fn to_canonical_cbor(&self) -> Zeroizing<Vec<u8>> {
         let input = self.as_input();
