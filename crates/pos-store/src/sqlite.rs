@@ -2071,6 +2071,8 @@ impl SqliteStore {
         flags: OpenFlags,
         initialize_schema: bool,
     ) -> Result<Self, CoreError> {
+        #[cfg(target_os = "linux")]
+        crate::protected_sqlite_namespace::refuse_reserved_filename(path)?;
         let conn = Connection::open_with_flags(path, flags)
             .map_err(|e| CoreError::Storage(e.to_string()))?;
 
@@ -2116,6 +2118,10 @@ impl SqliteStore {
     }
 
     fn open_writer_reservation_connection(path: &str, flags: OpenFlags) -> Option<Connection> {
+        #[cfg(target_os = "linux")]
+        if crate::protected_sqlite_namespace::refuse_reserved_filename(path).is_err() {
+            return None;
+        }
         if flags.contains(OpenFlags::SQLITE_OPEN_READ_ONLY) {
             Connection::open_with_flags(
                 path,
@@ -15023,6 +15029,7 @@ mod tests {
     mod protected_interval_cleanup;
 
     use super::*;
+
     use crate::classified_fork_fixture::database_rows;
     use crate::ErasureRejoinPersistencePortV1;
     use pos_core::{
@@ -15039,6 +15046,30 @@ mod tests {
         verify_authenticated_principal_evidence_v1, ForkAuthenticationAdapterSigningKeyV1,
         ForkHostSigningKeyV1,
     };
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn lower_read_only_writer_opener_independently_refuses_reserved_namespace(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // The lower factory must refuse even if the namespace became reserved
+        // after the outer opener's check. This exercises that native edge
+        // directly without racing installation or claiming atomic activation.
+        let directory = tempfile::tempdir()?;
+        std::fs::create_dir(
+            directory
+                .path()
+                .join(crate::protected_sqlite_namespace::COORDINATION_DIRECTORY),
+        )?;
+        let database = directory.path().join("main.db");
+        let path = database.to_str().ok_or("fixture path is not UTF-8")?;
+        assert!(SqliteStore::open_writer_reservation_connection(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY
+        )
+        .is_none());
+        assert!(!database.exists());
+        Ok(())
+    }
 
     // Measure the durable rewrite fixture outside the tests/ exporter filter.
     #[cfg_attr(coverage_nightly, coverage(on))]

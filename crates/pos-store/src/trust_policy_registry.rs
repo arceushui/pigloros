@@ -431,6 +431,8 @@ fn raw_digest(bytes: &[u8]) -> [u8; 32] {
 
 /// Atomically create the private state file; an existing path is never reused.
 fn create_state_file(path: &Path) -> Result<(), TrustPolicyRegistryErrorV1> {
+    crate::protected_sqlite_namespace::refuse_reserved_path(path)
+        .or(Err(TrustPolicyRegistryErrorV1::StorageUnavailable))?;
     OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -449,6 +451,8 @@ fn create_state_file(path: &Path) -> Result<(), TrustPolicyRegistryErrorV1> {
 /// Open an existing state file. Callers establish that the path exists, so an
 /// unopenable or non-database file is corrupt state, not missing state.
 fn open_connection(path: &Path) -> Result<Connection, TrustPolicyRegistryErrorV1> {
+    crate::protected_sqlite_namespace::refuse_reserved_path(path)
+        .or(Err(TrustPolicyRegistryErrorV1::StorageUnavailable))?;
     let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
         .map_err(|_| TrustPolicyRegistryErrorV1::CorruptState)?;
     connection
@@ -731,6 +735,39 @@ mod tests {
                 Ok(proof.epoch())
             })?;
         assert_eq!(epoch, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn reserved_native_namespace_refuses_provision_and_reopen_without_modifying_state(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("trust.db");
+        let snapshot = fixture_snapshot()?;
+        let genesis = signed(snapshot.clone())?;
+        let anchor = release(&snapshot, &genesis);
+        DeploymentTrustPolicyRegistryV1::provision_explicit(&path, &anchor, &genesis)?;
+        let original = std::fs::read(&path)?;
+        std::fs::create_dir(
+            directory
+                .path()
+                .join(crate::protected_sqlite_namespace::COORDINATION_DIRECTORY),
+        )?;
+        assert_eq!(
+            DeploymentTrustPolicyRegistryV1::open_current(&path, anchor).err(),
+            Some(TrustPolicyRegistryErrorV1::StorageUnavailable)
+        );
+        let new_path = directory.path().join("another.db");
+        assert_eq!(
+            DeploymentTrustPolicyRegistryV1::provision_explicit(
+                &new_path,
+                &release(&snapshot, &genesis),
+                &genesis
+            ),
+            Err(TrustPolicyRegistryErrorV1::StorageUnavailable)
+        );
+        assert_eq!(std::fs::read(&path)?, original);
+        assert!(!new_path.exists());
         Ok(())
     }
 
