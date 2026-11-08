@@ -370,13 +370,15 @@ fn read_disposition(cursor: &mut CborCursor<'_>) -> Result<CommunityQuarantineDi
 fn encode_optional_ref(out: &mut Vec<u8>, reference: Option<ArtifactRefV1>) {
     match reference {
         None => out.push(0xf6),
-        Some(reference) => {
-            out.push(0x83);
-            encode_head(out, 0, u64::from(reference.schema_id));
-            encode_head(out, 0, reference.byte_length);
-            encode_bytes(out, &reference.digest, 2);
-        }
+        Some(reference) => encode_artifact_ref(out, reference),
     }
+}
+
+pub(super) fn encode_artifact_ref(out: &mut Vec<u8>, reference: ArtifactRefV1) {
+    out.push(0x83);
+    encode_head(out, 0, u64::from(reference.schema_id));
+    encode_head(out, 0, reference.byte_length);
+    encode_bytes(out, &reference.digest, 2);
 }
 
 fn read_control_refs(cursor: &mut CborCursor<'_>) -> Result<[Option<ArtifactRefV1>; 2]> {
@@ -389,17 +391,19 @@ fn read_optional_ref(cursor: &mut CborCursor<'_>) -> Result<Option<ArtifactRefV1
     if cursor.consume_if(0xf6) {
         return Ok(None);
     }
+    read_artifact_ref(cursor).map(Some)
+}
+
+pub(super) fn read_artifact_ref(cursor: &mut CborCursor<'_>) -> Result<ArtifactRefV1> {
     cursor.fixed(&[0x83]).map_err(Error::from).and_then(|()| {
         read_head(cursor, 0)
             .and_then(|schema| u32::try_from(schema).map_err(|_| Error::BoundsExceeded))
             .and_then(|schema_id| {
                 read_head(cursor, 0).and_then(|byte_length| {
-                    fixed_bytes(cursor).map(|digest| {
-                        Some(ArtifactRefV1 {
-                            schema_id,
-                            byte_length,
-                            digest,
-                        })
+                    fixed_bytes(cursor).map(|digest| ArtifactRefV1 {
+                        schema_id,
+                        byte_length,
+                        digest,
                     })
                 })
             })

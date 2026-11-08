@@ -13,6 +13,7 @@ mod guest_claim;
 mod guest_error;
 mod host_error;
 mod invocation;
+mod prepared;
 mod progress;
 mod protected_object;
 mod quarantine;
@@ -55,6 +56,10 @@ pub use host_error::{
 pub use invocation::{
     CommunityInvocationEvidenceInputV1, CommunityInvocationEvidenceV1, CommunityOutputUsageV1,
     MeteringV1,
+};
+pub use prepared::{
+    CommunityPreparedInputSetV1, CommunityPreparedInvocationInputV1, CommunityPreparedInvocationV1,
+    TimelinePositionV1, MAX_COMMUNITY_PREPARED_INVOCATION_BYTES_V1,
 };
 pub use progress::CommunityHostProgressV1;
 pub use protected_object::{

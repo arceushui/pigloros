@@ -27,6 +27,7 @@
 
 pub use pos_core::community_lifecycle::{
     ArtifactRefV1, FieldRefV1, GuestPluginErrorV1, MeteringV1, PluginErrorCodeV1,
+    TimelinePositionV1,
 };
 use pos_crypto::plugin_execution::is_valid_id_v1;
 
@@ -39,19 +40,6 @@ pub const MAX_STATE_BYTES_V1: usize = 1_048_576;
 /// Bound on the summed `canonical-bytes` of one output's trace annotations,
 /// in bytes (1 MiB; ADR-061 revision 6).
 pub const MAX_TRACE_ANNOTATION_BYTES_V1: usize = 1_048_576;
-
-/// `contract-v1.timeline-position`.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct TimelinePositionV1 {
-    /// Timeline ID.
-    pub timeline_id: [u8; 16],
-    /// Timeline sequence number.
-    pub seq: u64,
-    /// Tick.
-    pub tick: u64,
-    /// Scheduler position inside the Tick.
-    pub scheduler_position: u32,
-}
 
 /// `contract-v1.plugin-invocation`, without its `kind`.
 ///
