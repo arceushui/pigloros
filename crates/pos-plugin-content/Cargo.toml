@@ -15,5 +15,9 @@ jsonschema = { workspace = true }
 thiserror = { workspace = true }
 wit-parser = { workspace = true }
 
+[dev-dependencies]
+pos-core = { path = "../pos-core" }
+sha2 = { workspace = true }
+
 [lints]
 workspace = true

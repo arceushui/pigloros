@@ -1,0 +1,189 @@
+//! Pinned SPDX document validation, local references and Component binding.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::OnceLock;
+
+use serde_json::Value;
+
+use crate::bundle::Refusal;
+use crate::provenance::nonempty;
+
+fn validator() -> &'static jsonschema::Validator {
+    static VALIDATOR: OnceLock<jsonschema::Validator> = OnceLock::new();
+    VALIDATOR.get_or_init(|| {
+        // Immutable, attributed SPDX 2.3.1 source, independently digest-pinned
+        // by the public fixtures. No Plugin-provided schema is compiled here.
+        let schema: Value =
+            serde_json::from_slice(include_bytes!("../resources/spdx-schema-2.3.1.json"))
+                .expect("the pinned SPDX schema is JSON");
+        jsonschema::draft201909::options()
+            .with_retriever(super::schema::Offline)
+            .should_validate_formats(true)
+            .build(&schema)
+            .expect("the pinned SPDX schema compiles offline")
+    })
+}
+
+pub(super) fn validate(value: &Value, component: &str) -> Result<(), Refusal> {
+    if nonempty(value.get("spdxVersion"))? != "SPDX-2.3" {
+        return Err(Refusal::UnsupportedFormat);
+    }
+    if !validator().is_valid(value)
+        || value.get("SPDXID").and_then(Value::as_str) != Some("SPDXRef-DOCUMENT")
+        || value.get("dataLicense").and_then(Value::as_str) != Some("CC0-1.0")
+    {
+        return Err(Refusal::Malformed);
+    }
+    for field in ["name", "documentNamespace"] {
+        nonempty(value.get(field))?;
+    }
+    let creation = &value["creationInfo"];
+    nonempty(creation.get("created"))?;
+    for creator in creation["creators"].as_array().ok_or(Refusal::Malformed)? {
+        nonempty(Some(creator))?;
+    }
+    let mut elements = BTreeMap::new();
+    elements.insert("SPDXRef-DOCUMENT", (value, false));
+    for field in ["packages", "files", "snippets"] {
+        for element in items(value, field) {
+            let id = nonempty(element.get("SPDXID"))?;
+            if elements
+                .insert(id, (element, field != "snippets"))
+                .is_some()
+            {
+                return Err(Refusal::ReferenceMismatch);
+            }
+        }
+    }
+    let external: BTreeSet<_> = items(value, "externalDocumentRefs")
+        .map(|document| nonempty(document.get("externalDocumentId")))
+        .collect::<Result<_, _>>()?;
+    if external.len() != items(value, "externalDocumentRefs").count() {
+        return Err(Refusal::ReferenceMismatch);
+    }
+    let mut described = BTreeSet::new();
+    for target in items(value, "documentDescribes") {
+        let target = nonempty(Some(target))?;
+        reference(target, &elements, &external)?;
+        described.insert(target);
+    }
+    for relationship in items(value, "relationships") {
+        let from = nonempty(relationship.get("spdxElementId"))?;
+        let to = nonempty(relationship.get("relatedSpdxElement"))?;
+        reference(from, &elements, &external)?;
+        reference(to, &elements, &external)?;
+        match relationship.get("relationshipType").and_then(Value::as_str) {
+            Some("DESCRIBES") if from == "SPDXRef-DOCUMENT" => {
+                described.insert(to);
+            }
+            Some("DESCRIBED_BY") if to == "SPDXRef-DOCUMENT" => {
+                described.insert(from);
+            }
+            _ => {}
+        }
+    }
+    for (element, _) in elements.values() {
+        for field in ["hasFiles", "fileDependencies"] {
+            for target in items(element, field) {
+                reference(nonempty(Some(target))?, &elements, &external)?;
+            }
+        }
+        if let Some(target) = element.get("snippetFromFile") {
+            reference(nonempty(Some(target))?, &elements, &external)?;
+        }
+    }
+    licences(value, &external)?;
+    if described.iter().any(|id| {
+        elements.get(id).is_some_and(|(element, eligible)| {
+            *eligible
+                && items(element, "checksums").any(|checksum| {
+                    checksum.get("algorithm").and_then(Value::as_str) == Some("SHA256")
+                        && checksum
+                            .get("checksumValue")
+                            .and_then(Value::as_str)
+                            .is_some_and(|digest| {
+                                digest.len() == 64 && digest.eq_ignore_ascii_case(component)
+                            })
+                })
+        })
+    }) {
+        Ok(())
+    } else {
+        Err(Refusal::ReferenceMismatch)
+    }
+}
+
+fn items<'a>(value: &'a Value, field: &str) -> impl Iterator<Item = &'a Value> {
+    value
+        .get(field)
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+}
+
+fn reference(
+    target: &str,
+    local: &BTreeMap<&str, (&Value, bool)>,
+    external: &BTreeSet<&str>,
+) -> Result<(), Refusal> {
+    let valid = local.contains_key(target)
+        || matches!(target, "NONE" | "NOASSERTION")
+        || target.split_once(':').is_some_and(|(document, element)| {
+            external.contains(document)
+                && element
+                    .strip_prefix("SPDXRef-")
+                    .is_some_and(|id| !id.is_empty())
+        });
+    if valid {
+        Ok(())
+    } else {
+        Err(Refusal::ReferenceMismatch)
+    }
+}
+
+fn licences(value: &Value, external: &BTreeSet<&str>) -> Result<(), Refusal> {
+    let mut extracted = BTreeSet::new();
+    for licence in items(value, "hasExtractedLicensingInfos") {
+        let id = nonempty(licence.get("licenseId"))?;
+        nonempty(licence.get("extractedText"))?;
+        if !extracted.insert(id) {
+            return Err(Refusal::ReferenceMismatch);
+        }
+    }
+    for field in ["packages", "files", "snippets"] {
+        for element in items(value, field) {
+            for field in [
+                "licenseDeclared",
+                "licenseConcluded",
+                "licenseInfoInFiles",
+                "licenseInfoFromFiles",
+                "licenseInfoInSnippets",
+            ] {
+                if let Some(metadata) = element.get(field) {
+                    let texts: Vec<_> = if let Some(array) = metadata.as_array() {
+                        array.iter().collect()
+                    } else {
+                        vec![metadata]
+                    };
+                    for text in texts {
+                        for token in nonempty(Some(text))?
+                            .split(|c: char| !(c.is_ascii_alphanumeric() || "-.:".contains(c)))
+                        {
+                            if token.starts_with("LicenseRef-") && !extracted.contains(token) {
+                                return Err(Refusal::ReferenceMismatch);
+                            }
+                            if let Some((document, licence)) = token.split_once(':') {
+                                if licence.starts_with("LicenseRef-")
+                                    && !external.contains(document)
+                                {
+                                    return Err(Refusal::ReferenceMismatch);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
