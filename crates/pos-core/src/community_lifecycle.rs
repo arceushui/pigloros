@@ -5,15 +5,21 @@
 //! source, selected generation, current head and actual protected use. These
 //! codecs cannot issue a guest permit or restore a live state cell.
 
+mod classification;
 mod envelope;
 mod error;
 mod progress;
+mod protected_object;
 mod reservation;
 mod revision;
 mod selected_head;
 mod state;
 mod terminal;
 
+pub use classification::{
+    CommunityArtifactChildrenV1, CommunityClassificationProofInputV1,
+    CommunityClassificationProofV1,
+};
 pub use envelope::{
     CommunityArtifactHeaderInputV1, CommunityArtifactHeaderV1, CommunityArtifactKindV1,
     CommunityArtifactOperationV1, CommunityArtifactPurposeV1, CommunityEncryptedEnvelopeV1,
@@ -21,6 +27,9 @@ pub use envelope::{
 };
 pub use error::CommunityLifecycleErrorV1;
 pub use progress::CommunityHostProgressV1;
+pub use protected_object::{
+    CommunityArtifactAdmissionInputV1, CommunityArtifactAdmissionV1, CommunityProtectedObjectV1,
+};
 pub use reservation::{
     CommunityReservationInputV1, CommunityReservationRequestInputV1, CommunityReservationRequestV1,
     CommunityReservationV1,

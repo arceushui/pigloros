@@ -231,14 +231,14 @@ impl<'a> CommunityEncryptedEnvelopeV1<'a> {
         nonce: [u8; 12],
         ciphertext_and_tag: &'a [u8],
     ) -> Result<Self> {
-        if !(16..=MAX_CIPHERTEXT).contains(&ciphertext_and_tag.len()) {
-            Err(Error::BoundsExceeded)
-        } else {
+        if (16..=MAX_CIPHERTEXT).contains(&ciphertext_and_tag.len()) {
             Ok(Self {
                 header,
                 nonce,
                 ciphertext_and_tag,
             })
+        } else {
+            Err(Error::BoundsExceeded)
         }
     }
 
@@ -374,7 +374,7 @@ const fn owner_error(_: KeyRegistryErrorV1) -> Error {
     Error::InvalidBinding
 }
 
-fn read_purpose(cursor: &mut CborCursor<'_>) -> Result<CommunityArtifactPurposeV1> {
+pub(super) fn read_purpose(cursor: &mut CborCursor<'_>) -> Result<CommunityArtifactPurposeV1> {
     read_head(cursor, 0).and_then(|code| match code {
         0 => Ok(CommunityArtifactPurposeV1::ExecutionState),
         1 => Ok(CommunityArtifactPurposeV1::PresentationTrace),
@@ -384,7 +384,7 @@ fn read_purpose(cursor: &mut CborCursor<'_>) -> Result<CommunityArtifactPurposeV
     })
 }
 
-fn read_kind(cursor: &mut CborCursor<'_>) -> Result<CommunityArtifactKindV1> {
+pub(super) fn read_kind(cursor: &mut CborCursor<'_>) -> Result<CommunityArtifactKindV1> {
     read_head(cursor, 0).and_then(|code| match code {
         0 => Ok(CommunityArtifactKindV1::StateContent),
         1 => Ok(CommunityArtifactKindV1::StateRevisionOrHead),
@@ -418,7 +418,7 @@ fn read_operation(cursor: &mut CborCursor<'_>) -> Result<CommunityArtifactOperat
     })
 }
 
-fn read_owner(cursor: &mut CborCursor<'_>) -> Result<OwnerIdV1> {
+pub(super) fn read_owner(cursor: &mut CborCursor<'_>) -> Result<OwnerIdV1> {
     read_head(cursor, 3).and_then(|length| {
         if length > 128 {
             return Err(Error::BoundsExceeded);
@@ -431,7 +431,7 @@ fn read_owner(cursor: &mut CborCursor<'_>) -> Result<OwnerIdV1> {
     })
 }
 
-fn read_role_epoch(cursor: &mut CborCursor<'_>) -> Result<()> {
+pub(super) fn read_role_epoch(cursor: &mut CborCursor<'_>) -> Result<()> {
     read_head(cursor, 0).and_then(|role| {
         read_head(cursor, 0).and_then(|epoch| {
             if role == 7 && epoch == 1 {
