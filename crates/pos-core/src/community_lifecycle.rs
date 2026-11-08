@@ -12,6 +12,7 @@ mod guest_claim;
 mod invocation;
 mod progress;
 mod protected_object;
+mod quarantine;
 mod recording;
 mod reservation;
 mod revision;
@@ -42,6 +43,11 @@ pub use invocation::{
 pub use progress::CommunityHostProgressV1;
 pub use protected_object::{
     CommunityArtifactAdmissionInputV1, CommunityArtifactAdmissionV1, CommunityProtectedObjectV1,
+};
+pub use quarantine::{
+    CommunityQuarantineKeyV1, CommunityQuarantineReasonEvidenceV1, CommunityQuarantineReasonV1,
+    CommunityQuarantineReasonsV1, CommunityQuarantineRevisionInputV1,
+    CommunityQuarantineRevisionV1,
 };
 pub use recording::{
     CommunityAnnotationOmissionV1, CommunityAnnotationOmissionsV1, CommunityReplayMemberBindingV1,

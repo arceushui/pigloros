@@ -90,7 +90,7 @@ impl<'a> CommunityGuestClaimReferencesV1<'a> {
     /// no unexpected parse failure is silently discarded by the iterator.
     pub fn iter(
         &self,
-    ) -> impl ExactSizeIterator<Item = Result<CommunityGuestClaimReferenceV1>> + 'a {
+    ) -> impl ExactSizeIterator<Item = Result<CommunityGuestClaimReferenceV1>> + 'a + use<'a> {
         let mut cursor = CborCursor::new(self.bytes);
         (0..self.count).map(move |_| read_reference(&mut cursor))
     }
