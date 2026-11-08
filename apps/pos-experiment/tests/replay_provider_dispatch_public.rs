@@ -33,7 +33,7 @@ use pos_reference::evaluator_protocol::{
     CaseOutcome, CaseStatus, ConformanceReport, SubjectAdapterKind,
 };
 use pos_reference::selector_test_support::{
-    real_replay_corpus, trust_policy_operator, verified_evaluator_identity, Corpus,
+    real_provider_corpus, trust_policy_operator, verified_evaluator_identity, Corpus,
     RealFamilyMembers, RealProviderFixtures,
 };
 use serde_json::{json, Value};
@@ -113,7 +113,7 @@ fn family_members(provider: &Value, name: &str) -> TestResult<RealFamilyMembers>
         evidence: read(&format!("expected/{LAYER}/{name}.json"))?,
         oracle,
         failure_code,
-        auxiliary_input: read(&text(&provider["auxiliary"][name][0], "path")?)?,
+        auxiliary_input: Some(read(&text(&provider["auxiliary"][name][0], "path")?)?),
         budget,
         watchdog_ms: number(contract, "watchdog_ms")?,
         capability_ids,
@@ -257,7 +257,8 @@ fn every_replay_family_dispatches_exactly_and_flips_only_when_verified() -> Test
     let fixtures = real_fixtures()?;
     let mut reports = Vec::new();
     for (mode, label) in MODES {
-        let corpus = real_replay_corpus(&fixtures, mode)?;
+        let corpus =
+            real_provider_corpus(&fixtures, 1, SubjectAdapterKind::ExportedArtifact, mode)?;
         let declaration = executor_declaration(corpus.subject_digest);
         let (report, executed) = evaluate_corpus(&corpus, &[declaration])?;
         assert_eq!(executed, FAMILIES.len(), "{label}");
@@ -291,7 +292,7 @@ fn every_replay_family_dispatches_exactly_and_flips_only_when_verified() -> Test
 #[test]
 fn a_missing_or_mismatched_replay_executor_launches_no_process() -> TestResult {
     let fixtures = real_fixtures()?;
-    let corpus = real_replay_corpus(&fixtures, 0)?;
+    let corpus = real_provider_corpus(&fixtures, 1, SubjectAdapterKind::ExportedArtifact, 0)?;
     let exact = executor_declaration(corpus.subject_digest);
     let mut newer_minor = exact.clone();
     newer_minor.provider.abi_minor += 1;

@@ -33,7 +33,7 @@ use pos_reference::evaluator_protocol::{
 };
 use pos_reference::profile::Profile;
 use pos_reference::selector_test_support::{
-    real_plugin_corpus, verified_evaluator_identity, Corpus, RealFamilyMembers,
+    real_provider_corpus, verified_evaluator_identity, Corpus, RealFamilyMembers,
     RealProviderFixtures,
 };
 use pos_reference::signed_bundle::verify_signed_bundle;
@@ -122,7 +122,7 @@ fn family_members(provider: &Value, name: &str) -> TestResult<RealFamilyMembers>
         evidence: read(&format!("expected/{LAYER}/{name}.json"))?,
         oracle,
         failure_code,
-        auxiliary_input: read(&auxiliary)?,
+        auxiliary_input: Some(read(&auxiliary)?),
         budget,
         watchdog_ms: number(contract, "watchdog_ms")?,
         capability_ids,
@@ -276,7 +276,8 @@ fn n6_every_family_dispatches_exactly_and_flips_only_when_verified() -> TestResu
     let fixtures = real_fixtures()?;
     let mut reports = Vec::new();
     for (mode, label) in MODES {
-        let corpus = real_plugin_corpus(&fixtures, mode)?;
+        let corpus =
+            real_provider_corpus(&fixtures, 4, SubjectAdapterKind::PublicPluginProtocol, mode)?;
         let declaration = executor_declaration(corpus.subject_digest);
         let (report, executed) = evaluate_corpus(&corpus, &[declaration])?;
         assert_eq!(executed, FAMILIES.len(), "{label}");
@@ -309,7 +310,7 @@ fn n6_every_family_dispatches_exactly_and_flips_only_when_verified() -> TestResu
 #[test]
 fn n6_a_missing_or_mismatched_plugin_executor_launches_no_worker() -> TestResult {
     let fixtures = real_fixtures()?;
-    let corpus = real_plugin_corpus(&fixtures, 0)?;
+    let corpus = real_provider_corpus(&fixtures, 4, SubjectAdapterKind::PublicPluginProtocol, 0)?;
     let exact = executor_declaration(corpus.subject_digest);
     let mut newer_minor = exact.clone();
     newer_minor.provider.abi_minor += 1;

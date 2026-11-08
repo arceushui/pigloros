@@ -1253,8 +1253,10 @@ fn gateway_action_registry_builder(
     )
 }
 
-// Unit-test behavior fixtures have no installed profile, session pin, or
-// production registration authority. They never enter the release builder.
+// Behavior fixtures have no installed profile, session pin, or production
+// registration authority. They exist only in unit tests and behind the
+// `test-support` feature, which no deployable graph enables, so they never
+// enter the release builder.
 /// Build a nonproduction Gateway registry without an installed profile or pin.
 ///
 /// It selects the same reviewed catalogue entry, factory and registration
@@ -1262,8 +1264,7 @@ fn gateway_action_registry_builder(
 ///
 /// # Errors
 /// Returns an error when canonical body validation or fixture registration fails.
-#[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
+#[cfg(any(test, feature = "test-support"))]
 fn fixture_action_registry_builder(
     bodies: impl IntoIterator<Item = EntityId>,
     authority: Option<ConsentAuthority>,
@@ -1275,13 +1276,19 @@ fn fixture_action_registry_builder(
     )
 }
 
-/// Build a nonproduction Gateway around a verified erasure host.
+/// Build a nonproduction, action-capable Gateway around a verified erasure host.
+///
+/// The action registry is the fixture registration of the reviewed Gateway
+/// entry, and `authorization` is whatever the caller pins: this composition is
+/// fixture-only and is never a source of production authority (ADR-108). It
+/// exists only in unit tests and behind the `test-support` feature, for the
+/// gateway-client-conformance subject adapter (#1295).
 ///
 /// # Errors
 /// Returns an error when the store, fixture registry, or Gateway cannot be built.
-#[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
-fn gateway_with_erasure_host_and_authorization(
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn gateway_with_erasure_host_and_authorization(
     host: ErasureExecutionHostV1,
     bodies: impl IntoIterator<Item = EntityId>,
     authorization: GatewayAuthorization,

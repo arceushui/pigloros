@@ -136,8 +136,8 @@ pub struct RealFamilyMembers {
     pub oracle: Vec<u8>,
     /// The failure code of a typed-failure oracle, owned by the provider.
     pub failure_code: Option<String>,
-    /// The provider's auxiliary input of the family.
-    pub auxiliary_input: Vec<u8>,
+    /// The provider's auxiliary input of the family, when the provider declares one.
+    pub auxiliary_input: Option<Vec<u8>>,
     /// The deterministic budget, in `ResourceUsage` order.
     pub budget: [u64; 8],
     /// The operational watchdog.
@@ -1089,39 +1089,22 @@ pub fn corpus_with_release_mutation(mutation: ReleaseMutation) -> TestResult<Cor
     })
 }
 
-/// Build a signed corpus of a real provider's checked-in fixtures in Execution Mode `mode`
-/// (0 Local, 1 Air-Gapped) for the public Plugin protocol.
+/// Build a signed corpus of a real provider's checked-in fixtures.
 ///
-/// It is `real_corpus` for the `plugin-conformance` claim layer.
-///
-/// # Errors
-/// Returns an error if canonical encoding or fixture construction fails.
-pub fn real_plugin_corpus(real: &RealProviderFixtures, mode: u64) -> TestResult<Corpus> {
-    real_corpus(real, mode, 4, SubjectAdapterKind::PublicPluginProtocol)
-}
-
-/// Build a signed corpus of a real provider's checked-in fixtures in Execution Mode `mode`
-/// (0 Local, 1 Air-Gapped) for the `exported-artifact` subject adapter.
-///
-/// It is `real_corpus` for the `replay-conformance` claim layer.
-///
-/// # Errors
-/// Returns an error if canonical encoding or fixture construction fails.
-pub fn real_replay_corpus(real: &RealProviderFixtures, mode: u64) -> TestResult<Corpus> {
-    real_corpus(real, mode, 1, SubjectAdapterKind::ExportedArtifact)
-}
-
-/// Build a signed corpus of a real provider's checked-in fixtures in Execution Mode `mode`
-/// for one claim layer and subject adapter.
+/// `claim_layer` is the CPF1 wire code of the provider's claim layer, `subject_adapter` its public
+/// protocol and `mode` the Execution Mode (0 Local, 1 Air-Gapped).
 ///
 /// Every family carries the provider's schema, payload, evidence-status record, oracle and
 /// auxiliary input bytes, its budget, watchdog and capabilities, and the provider's exact key;
 /// the downgrade family rolls back from the next minor release under a signed RAD1.
-fn real_corpus(
+///
+/// # Errors
+/// Returns an error if canonical encoding or fixture construction fails.
+pub fn real_provider_corpus(
     real: &RealProviderFixtures,
-    mode: u64,
     claim_layer: u64,
     subject_adapter: SubjectAdapterKind,
+    mode: u64,
 ) -> TestResult<Corpus> {
     let mut budgets = [[0; 8]; 7];
     for (family, budget) in (0_u64..).zip(budgets.iter_mut()) {
@@ -1966,8 +1949,8 @@ fn downgrade_bindings(
 }
 
 /// The expectation of one real-provider family: its evidence-status record, its oracle record
-/// as an auxiliary member when the oracle is a typed failure, and its auxiliary input, in member
-/// path order.
+/// as an auxiliary member when the oracle is a typed failure, and its auxiliary input when the
+/// provider declares one, in member path order.
 fn real_fixture_expectation(
     members: &mut BTreeMap<String, (Vec<u8>, u8)>,
     family: u64,
@@ -1976,26 +1959,28 @@ fn real_fixture_expectation(
     identity: ProviderIdentity<'_>,
 ) -> TestResult<FixtureExpectation> {
     let input_path = format!("fixtures/case-{family}.input-auxiliary");
-    members.insert(input_path.clone(), (real.auxiliary_input.clone(), 0));
+    let mut inputs = Vec::new();
+    if let Some(input) = &real.auxiliary_input {
+        members.insert(input_path.clone(), (input.clone(), 0));
+        inputs.push(descriptor(members, &input_path)?);
+    }
     Ok(match &real.failure_code {
         Some(code) => {
             let failure = array(vec![text(identity.id), text(identity.version), text(code)]);
+            let mut auxiliary = vec![
+                descriptor(members, evidence_path)?,
+                descriptor(members, output_path)?,
+            ];
+            auxiliary.extend(inputs);
             FixtureExpectation {
-                auxiliary: array(vec![
-                    descriptor(members, evidence_path)?,
-                    descriptor(members, output_path)?,
-                    descriptor(members, &input_path)?,
-                ]),
+                auxiliary: array(auxiliary),
                 oracle: array(vec![uint(1), Value::Null, failure.clone(), Value::Null]),
                 expected_outcome: uint(2),
                 expected_error: failure,
             }
         }
         None => FixtureExpectation {
-            auxiliary: array(vec![
-                descriptor(members, evidence_path)?,
-                descriptor(members, &input_path)?,
-            ]),
+            auxiliary: array([vec![descriptor(members, evidence_path)?], inputs].concat()),
             oracle: array(vec![
                 uint(0),
                 descriptor(members, output_path)?,
