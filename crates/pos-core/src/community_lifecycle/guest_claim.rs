@@ -88,6 +88,7 @@ impl<'a> CommunityGuestClaimReferencesV1<'a> {
 
     /// Read immutable validated rows without allocating. Fallibility is explicit;
     /// no unexpected parse failure is silently discarded by the iterator.
+    #[must_use]
     pub fn iter(
         &self,
     ) -> impl ExactSizeIterator<Item = Result<CommunityGuestClaimReferenceV1>> + 'a + use<'a> {

@@ -324,7 +324,7 @@ impl<'a> CommunityQuarantineRevisionV1<'a> {
     }
 }
 
-fn validate_reasons(reasons: CommunityQuarantineReasonsV1<'_>) -> Result<()> {
+pub(super) fn validate_reasons(reasons: CommunityQuarantineReasonsV1<'_>) -> Result<()> {
     if reasons.len() > 4 {
         return Err(Error::BoundsExceeded);
     }
@@ -341,7 +341,7 @@ fn validate_reasons(reasons: CommunityQuarantineReasonsV1<'_>) -> Result<()> {
     })
 }
 
-fn encode_reasons(out: &mut Vec<u8>, reasons: CommunityQuarantineReasonsV1<'_>) {
+pub(super) fn encode_reasons(out: &mut Vec<u8>, reasons: CommunityQuarantineReasonsV1<'_>) {
     encode_head(out, 4, reasons.len() as u64);
     for entry in reasons.iter() {
         out.extend_from_slice(&[0x82, entry.reason.code()]);
@@ -349,7 +349,9 @@ fn encode_reasons(out: &mut Vec<u8>, reasons: CommunityQuarantineReasonsV1<'_>) 
     }
 }
 
-fn read_reasons<'a>(cursor: &mut CborCursor<'a>) -> Result<CommunityQuarantineReasonsV1<'a>> {
+pub(super) fn read_reasons<'a>(
+    cursor: &mut CborCursor<'a>,
+) -> Result<CommunityQuarantineReasonsV1<'a>> {
     read_head(cursor, 4).and_then(|count| {
         let count = usize::try_from(count).unwrap_or(usize::MAX);
         if count > 4 {

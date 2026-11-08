@@ -25,7 +25,7 @@
 //!   - a record: its fields in WIT order;
 //!   - `u32`: four big-endian bytes.
 
-pub use pos_core::community_lifecycle::MeteringV1;
+pub use pos_core::community_lifecycle::{CommunityArtifactRefV1 as ArtifactRefV1, MeteringV1};
 use pos_crypto::plugin_execution::is_valid_id_v1;
 
 use super::error::CommunityPluginHostErrorV1;
@@ -37,17 +37,6 @@ pub const MAX_STATE_BYTES_V1: usize = 1_048_576;
 /// Bound on the summed `canonical-bytes` of one output's trace annotations,
 /// in bytes (1 MiB; ADR-061 revision 6).
 pub const MAX_TRACE_ANNOTATION_BYTES_V1: usize = 1_048_576;
-
-/// `contract-v1.artifact-ref`.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ArtifactRefV1 {
-    /// Registered schema ID.
-    pub schema_id: u32,
-    /// Exact artifact length.
-    pub byte_length: u64,
-    /// BLAKE3-256 artifact digest.
-    pub digest: [u8; 32],
-}
 
 /// `contract-v1.timeline-position`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

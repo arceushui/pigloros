@@ -13,6 +13,7 @@ mod invocation;
 mod progress;
 mod protected_object;
 mod quarantine;
+mod quarantine_control;
 mod recording;
 mod reservation;
 mod revision;
@@ -48,6 +49,11 @@ pub use quarantine::{
     CommunityQuarantineKeyV1, CommunityQuarantineReasonEvidenceV1, CommunityQuarantineReasonV1,
     CommunityQuarantineReasonsV1, CommunityQuarantineRevisionInputV1,
     CommunityQuarantineRevisionV1,
+};
+pub use quarantine_control::{
+    CommunityArtifactRefV1, CommunityQuarantineControlInputV1, CommunityQuarantineControlKindV1,
+    CommunityQuarantineControlV1, CommunityQuarantineDispositionV1,
+    CommunityQuarantineOutcomeInputV1, CommunityQuarantineOutcomeV1,
 };
 pub use recording::{
     CommunityAnnotationOmissionV1, CommunityAnnotationOmissionsV1, CommunityReplayMemberBindingV1,
