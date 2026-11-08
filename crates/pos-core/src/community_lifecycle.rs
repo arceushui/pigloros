@@ -11,6 +11,7 @@ mod error;
 mod invocation;
 mod progress;
 mod protected_object;
+mod recording;
 mod reservation;
 mod revision;
 mod seal;
@@ -35,6 +36,10 @@ pub use invocation::{
 pub use progress::CommunityHostProgressV1;
 pub use protected_object::{
     CommunityArtifactAdmissionInputV1, CommunityArtifactAdmissionV1, CommunityProtectedObjectV1,
+};
+pub use recording::{
+    CommunityAnnotationOmissionV1, CommunityAnnotationOmissionsV1, CommunityReplayMemberBindingV1,
+    CommunityReplayMemberV1, CommunityReplayRecordingInputV1, CommunityReplayRecordingV1,
 };
 pub use reservation::{
     CommunityReservationInputV1, CommunityReservationRequestInputV1, CommunityReservationRequestV1,

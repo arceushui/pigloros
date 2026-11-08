@@ -219,7 +219,7 @@ fn encode_list(out: &mut Vec<u8>, list: CommunityDigestListV1<'_>) {
     }
 }
 
-fn read_list<'a>(cursor: &mut CborCursor<'a>) -> Result<CommunityDigestListV1<'a>> {
+pub(super) fn read_list<'a>(cursor: &mut CborCursor<'a>) -> Result<CommunityDigestListV1<'a>> {
     read_head(cursor, 4).and_then(|count| {
         let count = usize::try_from(count).unwrap_or(usize::MAX);
         if count > MAX_COMMUNITY_MEMBERS_V1 {
