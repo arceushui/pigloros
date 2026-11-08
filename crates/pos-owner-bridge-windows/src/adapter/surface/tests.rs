@@ -167,6 +167,52 @@ fn spec(value: u8) -> SurfaceSpec {
 }
 
 #[test]
+fn outer_event_ticks_retry_failed_close_until_own_exit_without_reopening() -> TestResult {
+    for failure in ["unsubscribe_view", "close_controller"] {
+        let mut fixture = Fixture::new(Creation::Ready)?;
+        fixture.ready()?;
+        fixture.factory.failure.set(Some(failure));
+        assert!(fixture.surface.close_controller().is_err());
+        let attempts = fixture
+            .factory
+            .calls
+            .borrow()
+            .iter()
+            .filter(|call| **call == failure)
+            .count();
+        fixture.clock.advance(Duration::from_secs(8));
+        let now = fixture.clock.now();
+        let _event = fixture.surface.take_event();
+        assert!(
+            fixture
+                .factory
+                .calls
+                .borrow()
+                .iter()
+                .filter(|call| **call == failure)
+                .count()
+                > attempts
+        );
+        assert!(fixture.surface.finish().is_err());
+        fixture.factory.failure.set(None);
+        let _event = fixture.surface.take_event();
+        assert!(fixture.surface.finish().is_err());
+        assert_eq!(fixture.clock.now(), now);
+        assert!(matches!(
+            fixture.surface.open(&spec(99)),
+            Poll::Ready(Err(_))
+        ));
+        fixture.exit();
+        fixture
+            .surface
+            .finish()
+            .map_err(pos_owner_bridge::SurfaceError::error)?;
+        assert!(fixture.surface.idle());
+    }
+    Ok(())
+}
+
+#[test]
 fn native_creation_and_navigation_polls_return_before_host_dispatch() -> TestResult {
     let mut fixture = Fixture::new(Creation::Ready)?;
     fixture.factory.foreground.set(false);

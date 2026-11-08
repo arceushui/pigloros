@@ -10,7 +10,7 @@ use webview2_com::WebResourceRequestedEventHandler;
 use windows::core::w;
 use windows::Win32::Foundation::E_ABORT;
 
-use super::{action, observe, unavailable, Result, Subscriptions};
+use super::{action, observe, unavailable, Recovery, Result, Subscriptions};
 use crate::{EventKind, EventSink, NativeAction, NativeEvent};
 
 #[cfg(test)]
@@ -23,13 +23,20 @@ std::thread_local! {
 impl crate::Native {
     pub(crate) fn set_resource_denial_fixture(mode: crate::ResourceDenialFixture) {
         DENIAL_FIXTURE.with(|current| current.set(mode));
+        super::denial::reset_fixture();
     }
+}
+
+#[cfg(test)]
+pub(super) fn fixture() -> crate::ResourceDenialFixture {
+    DENIAL_FIXTURE.with(std::cell::Cell::get)
 }
 
 pub(super) fn install(
     view: &ICoreWebView2,
     environment: &ICoreWebView2Environment,
     signals: &Rc<dyn EventSink>,
+    recovery: &Rc<Recovery>,
     subscriptions: &mut Subscriptions,
 ) -> Result<()> {
     // Prepare the immutable, bodyless denial before subscribing or navigating.
@@ -46,9 +53,11 @@ pub(super) fn install(
     }
     .map_err(|_| unavailable())?;
     let observed = Rc::clone(signals);
+    let cancellation = Rc::clone(recovery);
+    let intercepted = view.clone();
     let remove = view.clone();
     let handler = WebResourceRequestedEventHandler::create(Box::new(move |_sender, args| {
-        if let Err(error) = filter(args, &response, observed.as_ref()) {
+        if let Err(error) = filter(args.clone(), &response, observed.as_ref()) {
             observed.failed(EventKind::Resource, error);
             // The negative control deliberately reproduces the former swallowed
             // failure. It exists only in the native qualification test binary.
@@ -58,6 +67,7 @@ pub(super) fn install(
             {
                 return Ok(());
             }
+            cancellation.deny(args, intercepted.clone(), Rc::clone(&observed));
             return Err(windows::core::Error::from_hresult(E_ABORT));
         }
         Ok(())

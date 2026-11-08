@@ -7,8 +7,10 @@ use std::rc::Rc;
 use webview2_com::Microsoft::Web::WebView2::Win32::{ICoreWebView2, ICoreWebView2Environment};
 
 mod controls;
+mod denial;
 mod navigation;
 mod resource;
+pub(super) use denial::{track_exit, Recovery};
 pub(super) use navigation::source;
 type Result<T> = NativeResult<T>;
 
@@ -78,10 +80,11 @@ pub(super) fn install(
     view: &ICoreWebView2,
     environment: &ICoreWebView2Environment,
     signals: &Rc<dyn EventSink>,
+    recovery: &Rc<Recovery>,
     subscriptions: &mut Subscriptions,
 ) -> Result<()> {
     navigation::install(view, signals, subscriptions)?;
-    resource::install(view, environment, signals, subscriptions)?;
+    resource::install(view, environment, signals, recovery, subscriptions)?;
     controls::install(view, signals, subscriptions)
 }
 

@@ -741,7 +741,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/resource.rs"
-line = 68
+line = 78
 function = "install"
 operation = "view.add_WebResourceRequested(&handler, token)"
 invariant = "live STA interface/handler and initialized unique token output."
@@ -749,7 +749,7 @@ hosted_test = "native_resource_denial_callback_failure_does_not_contact_listener
 
 [[block]]
 file = "src/ffi/events/resource.rs"
-line = 72
+line = 82
 function = "install"
 operation = "remove.remove_WebResourceRequested(token)"
 invariant = "exact subscription token on its retained STA interface."
@@ -757,7 +757,7 @@ hosted_test = "native_resource_denial_callback_failure_does_not_contact_listener
 
 [[block]]
 file = "src/ffi/events/resource.rs"
-line = 77
+line = 87
 function = "install"
 operation = "view.AddWebResourceRequestedFilter(w!( ), COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL)"
 invariant = "fixed wildcard and ALL context; the installed handler selects the pre-created local denial unless the exact owner document is admitted."
@@ -765,7 +765,7 @@ hosted_test = "native_resource_denial_callback_failure_does_not_contact_listener
 
 [[block]]
 file = "src/ffi/events/resource.rs"
-line = 39
+line = 46
 function = "install"
 operation = "environment.CreateWebResourceResponse( None, 403, w!( ), w!( ), )"
 invariant = "Retained STA environment; host-only fixed bodyless 403 is created before subscriptions/navigation, so response allocation failure cannot occur in an in-flight request callback."
@@ -773,7 +773,7 @@ hosted_test = "native_resource_denial_callback_failure_does_not_contact_listener
 
 [[block]]
 file = "src/ffi/events/resource.rs"
-line = 101
+line = 111
 function = "filter"
 operation = "args.SetResponse(response)"
 invariant = "live event arguments and host-created denial response; COM retains its own reference for this intercepted request."
@@ -781,7 +781,7 @@ hosted_test = "native_resource_denial_callback_failure_does_not_contact_listener
 
 [[block]]
 file = "src/ffi/events/resource.rs"
-line = 108
+line = 118
 function = "owner_request"
 operation = "args.Request()"
 invariant = "live event arguments on the callback STA; COM-owned request result."
@@ -789,7 +789,7 @@ hosted_test = "native_resource_denial_callback_failure_does_not_contact_listener
 
 [[block]]
 file = "src/ffi/events/resource.rs"
-line = 111
+line = 121
 function = "owner_request"
 operation = "request.Uri(out)"
 invariant = "the string helper provides initialized uniquely writable output."
@@ -797,7 +797,7 @@ hosted_test = "native_resource_denial_callback_failure_does_not_contact_listener
 
 [[block]]
 file = "src/ffi/events/resource.rs"
-line = 115
+line = 125
 function = "owner_request"
 operation = "args.ResourceContext(&raw mut context)"
 invariant = "live arguments and initialized writable context scalar."
@@ -861,7 +861,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/session.rs"
-line = 131
+line = 133
 function = "fit_controller"
 operation = "controller.SetBounds(bounds)"
 invariant = "retained creating-STA controller and copied initialized client RECT."
@@ -869,7 +869,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/session.rs"
-line = 136
+line = 138
 function = "focus_controller"
 operation = "controller.MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC)"
 invariant = "retained creating-STA controller; fixed programmatic focus reason."
@@ -877,7 +877,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/session.rs"
-line = 195
+line = 198
 function = "controller_completion"
 operation = "controller.CoreWebView2()"
 invariant = "successfully completed retained controller on its creating STA."
@@ -885,7 +885,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/session.rs"
-line = 207
+line = 210
 function = "browser_pid"
 operation = "view.BrowserProcessId(&raw mut pid)"
 invariant = "retained creating-STA view and initialized unique PID output."
@@ -893,7 +893,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/session.rs"
-line = 229
+line = 239
 function = "navigate_owner"
 operation = "view.Navigate(w!( ))"
 invariant = "retained creating-STA view and the fixed packaged owner document URL."
@@ -901,7 +901,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/session.rs"
-line = 288
+line = 300
 function = "close_controller"
 operation = "controller.Close()"
 invariant = "retained creating-STA controller; all buffer borrows ended. Failure retains the COM owner so the safe policy can quarantine/retry."
@@ -1418,3 +1418,27 @@ function = "centered"
 operation = "GetMonitorInfoW(monitor, &raw mut information)"
 invariant = "monitor returned by Windows, initialized MONITORINFO of its documented 40-byte layout, distinct writable output."
 hosted_test = "native_window_environment_and_buffers_lifecycle"
+
+[[block]]
+file = "src/ffi/events/denial.rs"
+line = 141
+function = "stop_fetches"
+operation = "view.Stop()"
+invariant = "Exact intercepted session's retained view on its creating STA; resource denial only. Successful HRESULT is required before controller Close or security-handler removal."
+hosted_test = "native_resource_denial_callback_failure_does_not_contact_listener"
+
+[[block]]
+file = "src/ffi/events/denial.rs"
+line = 153
+function = "defer_request"
+operation = "args.GetDeferral()"
+invariant = "Owned live resource callback arguments on their creating STA. Retain returned deferral with arguments and exact session view while cancellation is unresolved."
+hosted_test = "native_resource_denial_callback_failure_does_not_contact_listener"
+
+[[block]]
+file = "src/ffi/events/denial.rs"
+line = 166
+function = "complete_request"
+operation = "deferral.Complete()"
+invariant = "Retained resource deferral on its creating STA after successful Stop only. Mark the attempt before COM; never retry an uncertain Complete and retain owners until exact own BrowserProcessExited."
+hosted_test = "native_resource_denial_callback_failure_does_not_contact_listener"

@@ -55,6 +55,7 @@ impl NativeFactory for Factory {
             view: None,
             shared: None,
             subscriptions: events::Subscriptions::default(),
+            denials: Rc::new(events::Recovery::default()),
             buffers: None,
             close_uncertain: Rc::new(Cell::new(false)),
             sink: None,
@@ -72,6 +73,7 @@ struct Session {
     view: Option<ICoreWebView2>,
     shared: Option<ICoreWebView2_17>,
     subscriptions: events::Subscriptions,
+    denials: Rc<events::Recovery>,
     buffers: Option<Pair>,
     close_uncertain: Rc<Cell<bool>>,
     sink: Option<Rc<dyn EventSink>>,
@@ -163,7 +165,8 @@ impl NativeOperations for Session {
         self.environment_creation = None;
         Some(completed.and_then(|raw| {
             let sink = self.sink.as_ref().ok_or_else(closed)?;
-            self.environment = Some(Environment::subscribe(raw, options, sink)?);
+            let tracked = events::track_exit(Rc::clone(sink), Rc::clone(&self.denials));
+            self.environment = Some(Environment::subscribe(raw, options, &tracked)?);
             Ok(())
         }))
     }
@@ -205,6 +208,7 @@ impl NativeOperations for Session {
         let mut pid = 0;
         // SAFETY: retained creating-STA view and initialized unique PID output.
         unsafe { view.BrowserProcessId(&raw mut pid) }.map_err(failed)?;
+        self.denials.expect_browser(pid);
         Ok(pid)
     }
     fn require_shared_interfaces(&mut self) -> NativeResult<()> {
@@ -215,7 +219,13 @@ impl NativeOperations for Session {
     fn subscribe_view(&mut self, sink: Rc<dyn EventSink>) -> NativeResult<()> {
         let view = self.view_ref()?.clone();
         let environment = self.environment_ref()?.raw.clone();
-        events::install(&view, &environment, &sink, &mut self.subscriptions)
+        events::install(
+            &view,
+            &environment,
+            &sink,
+            &self.denials,
+            &mut self.subscriptions,
+        )
     }
     fn set_bool(&self, property: BoolProperty, value: bool) -> NativeResult<()> {
         settings::set_bool(self.view_ref()?, self.controller_ref()?, property, value)
@@ -278,10 +288,12 @@ impl NativeOperations for Session {
     }
     fn unsubscribe_view(&mut self) -> NativeResult<()> {
         self.check()?;
+        self.denials.retry()?;
         self.subscriptions.close()
     }
     fn close_controller(&mut self) -> NativeResult<()> {
         self.check()?;
+        self.denials.retry()?;
         if let Some(controller) = &self.controller {
             // SAFETY: retained creating-STA controller; all buffer borrows ended.
             // Failure retains the COM owner so the safe policy can quarantine/retry.

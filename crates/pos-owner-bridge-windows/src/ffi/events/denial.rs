@@ -1,0 +1,209 @@
+#![cfg(windows)]
+
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
+use webview2_com::Microsoft::Web::WebView2::Win32::{
+    ICoreWebView2, ICoreWebView2Deferral, ICoreWebView2WebResourceRequestedEventArgs,
+};
+
+use super::{unavailable, Result};
+use crate::{EventKind, EventSink, NativeAction, NativeError, NativeEvent};
+
+/// Resource-only cancellation owners. Each instance belongs to one fresh
+/// environment and is advanced only by its creating STA's outer loop.
+#[derive(Default)]
+pub(in crate::ffi) struct Recovery {
+    expected_pid: Cell<Option<u32>>,
+    exited: Cell<bool>,
+    pending: RefCell<Vec<Held>>,
+}
+
+impl Recovery {
+    pub(in crate::ffi) fn expect_browser(&self, pid: u32) {
+        self.expected_pid.set(Some(pid));
+    }
+
+    pub(super) fn deny(
+        &self,
+        args: Option<ICoreWebView2WebResourceRequestedEventArgs>,
+        view: ICoreWebView2,
+        signals: Rc<dyn EventSink>,
+    ) {
+        let deferral = args.as_ref().and_then(|args| match defer_request(args) {
+            Ok(deferral) => Some(deferral),
+            Err(error) => {
+                signals.failed(EventKind::Resource, error);
+                None
+            }
+        });
+        let mut held = Held {
+            _args: args,
+            view,
+            deferral,
+            signals,
+            stopped: false,
+            completed: false,
+            #[cfg(test)]
+            stop_failures: if super::resource::fixture() == crate::ResourceDenialFixture::RetryStop
+            {
+                3
+            } else {
+                0
+            },
+        };
+        if !held.advance() && !self.exited.get() {
+            self.pending.borrow_mut().push(held);
+        }
+    }
+
+    /// No RefCell borrow crosses a COM call: Stop/Complete can dispatch another
+    /// callback. Uncertain Complete owners remain held, but known cancellation
+    /// allows Close so the exact BrowserProcessExited can retire those owners.
+    pub(in crate::ffi) fn retry(&self) -> Result<()> {
+        if self.exited.get() {
+            return Ok(());
+        }
+        let pending = std::mem::take(&mut *self.pending.borrow_mut());
+        let retained: Vec<_> = pending
+            .into_iter()
+            .filter_map(|mut held| (!held.advance()).then_some(held))
+            .collect();
+        if self.exited.get() {
+            return Ok(());
+        }
+        self.pending.borrow_mut().extend(retained);
+        if self.pending.borrow().iter().all(|held| held.stopped) {
+            Ok(())
+        } else {
+            Err(unavailable())
+        }
+    }
+
+    fn exited(&self, pid: u32) {
+        if self.expected_pid.get() == Some(pid) {
+            self.exited.set(true);
+            let retired = std::mem::take(&mut *self.pending.borrow_mut());
+            drop(retired);
+        }
+    }
+}
+
+struct Held {
+    _args: Option<ICoreWebView2WebResourceRequestedEventArgs>,
+    view: ICoreWebView2,
+    deferral: Option<ICoreWebView2Deferral>,
+    signals: Rc<dyn EventSink>,
+    stopped: bool,
+    completed: bool,
+    #[cfg(test)]
+    stop_failures: u8,
+}
+
+impl Held {
+    // True means all owners can be released. A failed Complete is attempted
+    // once only, even when later outer-loop cleanup retries cancellation.
+    fn advance(&mut self) -> bool {
+        if !self.stopped {
+            // Model failed cancellation without invoking Stop: the acquired
+            // real deferral must itself prevent contact until the outer retry.
+            #[cfg(test)]
+            if self.stop_failures > 0 {
+                self.stop_failures -= 1;
+                self.signals.failed(EventKind::Resource, unavailable());
+                return false;
+            }
+            if let Err(error) = stop_fetches(&self.view) {
+                self.signals.failed(EventKind::Resource, error);
+                return false;
+            }
+            self.stopped = true;
+        }
+        let Some(deferral) = &self.deferral else {
+            return true;
+        };
+        if self.completed {
+            return false;
+        }
+        self.completed = true;
+        match complete_request(deferral) {
+            Ok(()) => true,
+            Err(error) => {
+                self.signals.failed(EventKind::Resource, error);
+                false
+            }
+        }
+    }
+}
+
+fn stop_fetches(view: &ICoreWebView2) -> Result<()> {
+    // SAFETY: exact intercepted session's retained view on its creating STA;
+    // resource denial only. The HRESULT determines whether Close is permitted.
+    unsafe { view.Stop() }.map_err(|_| unavailable())
+}
+
+fn defer_request(
+    args: &ICoreWebView2WebResourceRequestedEventArgs,
+) -> Result<ICoreWebView2Deferral> {
+    #[cfg(test)]
+    if super::resource::fixture() == crate::ResourceDenialFixture::MissingDeferral {
+        return Err(unavailable());
+    }
+    // SAFETY: owned arguments from the live WebResourceRequested callback on
+    // this STA. The returned deferral is retained with those arguments/view.
+    unsafe { args.GetDeferral() }.map_err(|_| unavailable())
+}
+
+fn complete_request(deferral: &ICoreWebView2Deferral) -> Result<()> {
+    #[cfg(test)]
+    {
+        COMPLETE_ATTEMPTS.with(|attempts| attempts.set(attempts.get() + 1));
+        if super::resource::fixture() == crate::ResourceDenialFixture::UncertainComplete {
+            return Err(unavailable());
+        }
+    }
+    // SAFETY: retained request deferral on its creating STA, after successful
+    // Stop only. The owner marks this attempt before COM; it cannot run twice.
+    unsafe { deferral.Complete() }.map_err(|_| unavailable())
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static COMPLETE_ATTEMPTS: Cell<u32> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(super) fn reset_fixture() {
+    COMPLETE_ATTEMPTS.with(|attempts| attempts.set(0));
+}
+
+#[cfg(test)]
+impl crate::Native {
+    pub(crate) fn resource_deferral_completion_attempts() -> u32 {
+        COMPLETE_ATTEMPTS.with(Cell::get)
+    }
+}
+
+pub(in crate::ffi) fn track_exit(
+    sink: Rc<dyn EventSink>,
+    recovery: Rc<Recovery>,
+) -> Rc<dyn EventSink> {
+    Rc::new(Exit { sink, recovery })
+}
+
+struct Exit {
+    sink: Rc<dyn EventSink>,
+    recovery: Rc<Recovery>,
+}
+
+impl EventSink for Exit {
+    fn event(&self, event: NativeEvent) -> NativeAction {
+        if let NativeEvent::BrowserExited { pid } = &event {
+            self.recovery.exited(*pid);
+        }
+        self.sink.event(event)
+    }
+
+    fn failed(&self, kind: EventKind, error: NativeError) -> NativeAction {
+        self.sink.failed(kind, error)
+    }
+}

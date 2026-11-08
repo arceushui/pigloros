@@ -217,6 +217,14 @@ impl crate::Native {
                 crate::ResourceDenialFixture::PropagateFailure,
                 0,
             ),
+            (0x24, true, crate::ResourceDenialFixture::RetryStop, 0),
+            (
+                0x25,
+                true,
+                crate::ResourceDenialFixture::UncertainComplete,
+                0,
+            ),
+            (0x26, true, crate::ResourceDenialFixture::MissingDeferral, 0),
         ] {
             let _mode = ResourceProbeGuard::new(mode);
             let received_before = listener.received_request_count();
@@ -254,11 +262,24 @@ impl crate::Native {
             listener.begin_navigation();
             probe.policy.begin();
             native.navigate_owner()?;
-            pump_until(
-                &factory,
-                "resource callback and navigation completion",
-                || probe.requested.get() && probe.completed.get(),
-            )?;
+            pump_until(&factory, "resource callback", || probe.requested.get())?;
+            if mode == crate::ResourceDenialFixture::RetryStop {
+                assert!(native.unsubscribe_view().is_err());
+                assert!(native.close_controller().is_err());
+                assert_eq!(Self::resource_deferral_completion_attempts(), 0);
+                // The real deferral remains held while both operations refuse
+                // to tear down the cancellation owners and security handlers.
+                factory.next()?;
+                assert_resource_counts(&listener, received_before, 0);
+            }
+            if matches!(
+                mode,
+                crate::ResourceDenialFixture::Normal | crate::ResourceDenialFixture::SwallowFailure
+            ) {
+                pump_until(&factory, "resource navigation completion", || {
+                    probe.completed.get()
+                })?;
+            }
             if served == 1 {
                 pump_until(&factory, "positive control reaching the listener", || {
                     listener.served().count == 1
@@ -274,6 +295,13 @@ impl crate::Native {
                 probe.policy.exited() == Some(identity.browser_pid)
             })?;
             assert_resource_counts(&listener, received_before, served);
+            let completions = u32::from(matches!(
+                mode,
+                crate::ResourceDenialFixture::PropagateFailure
+                    | crate::ResourceDenialFixture::RetryStop
+                    | crate::ResourceDenialFixture::UncertainComplete
+            ));
+            assert_eq!(Self::resource_deferral_completion_attempts(), completions);
             native.unsubscribe_exit()?;
             native.drop_environment()?;
             native.destroy_window()?;
