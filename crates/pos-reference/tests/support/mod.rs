@@ -15,6 +15,7 @@ use ciborium::value::Value;
 use ed25519_dalek::{Signer, SigningKey};
 use flate2::write::GzEncoder;
 use flate2::Compression;
+use pos_reference::evaluator::FixtureExecutorV1;
 use pos_reference::evaluator_build_identity::{
     verify_evaluator_build_identity, EvaluatorBuildEvidence, VerifiedEvaluatorBuildIdentity,
     PACKAGE_EVIDENCE_FILES,
@@ -23,6 +24,54 @@ use pos_reference::evaluator_protocol::{
     EvaluationRequest, ImplementationIdentity, IndependenceEvidence, OutputCapability,
     SubjectAdapterKind,
 };
+use pos_reference::profile::ProviderKey;
+
+/// The deployment-operator key that signs every corpus TPS1 (ADR-069 R8). The
+/// root-selector installation fixture pins the same key as its TRS1 role 6.
+pub const TRUST_POLICY_OPERATOR_SECRET: [u8; 32] = [12; 32];
+const TRUST_POLICY_OPERATOR_DOMAIN: &[u8] = b"PiglorOS.TPS1.operator-signature.v1\0";
+
+fn trust_policy_operator_signing_key() -> SigningKey {
+    SigningKey::from_bytes(&TRUST_POLICY_OPERATOR_SECRET)
+}
+
+/// The deployment-operator public key that verifies every corpus TPS1.
+#[must_use]
+pub fn trust_policy_operator_public_key() -> [u8; 32] {
+    trust_policy_operator_signing_key()
+        .verifying_key()
+        .to_bytes()
+}
+
+/// The corpus deployment-operator public key as the 64 lowercase hexadecimal
+/// characters `--trust-policy-operator-key` takes.
+#[must_use]
+pub fn trust_policy_operator_public_key_hex() -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    trust_policy_operator_public_key()
+        .iter()
+        .flat_map(|byte| {
+            [
+                char::from(HEX[usize::from(byte >> 4)]),
+                char::from(HEX[usize::from(byte & 0x0f)]),
+            ]
+        })
+        .collect()
+}
+
+/// The caller-pinned anchor that authenticates every corpus TPS1.
+///
+/// # Errors
+/// Never in practice: the fixture key is valid and the role is exact.
+pub fn trust_policy_operator() -> Result<
+    pos_reference::signed_bundle::TrustPolicyOperatorAnchor,
+    pos_reference::signed_bundle::BundleError,
+> {
+    pos_reference::signed_bundle::TrustPolicyOperatorAnchor::new(
+        pos_reference::signed_bundle::DEPLOYMENT_OPERATOR_ROLE,
+        trust_policy_operator_public_key(),
+    )
+}
 
 pub struct Corpus {
     pub request: Vec<u8>,
@@ -33,6 +82,115 @@ pub struct Corpus {
 }
 
 const SUBJECT_DIGEST: [u8; 32] = [41; 32];
+
+/// The capability every fixture of a test-provider corpus declares.
+const TEST_CAPABILITY: &str = "read-public-bundle";
+
+/// The exact fixture executor declaration of the test provider for one public protocol: the
+/// provider key, schema members and capability of every test-provider corpus, implemented by the
+/// corpus subject.
+#[must_use]
+pub fn test_executor(subject_adapter: SubjectAdapterKind) -> FixtureExecutorV1 {
+    let mut schema_digests = [[0; 32]; 7];
+    for (family, digest) in (0_u64..).zip(schema_digests.iter_mut()) {
+        *digest = hash(format!("{{\"family\":{family}}}").as_bytes());
+    }
+    FixtureExecutorV1 {
+        provider: ProviderKey {
+            provider_id: TEST_PROVIDER.id.to_owned(),
+            contract_version: TEST_PROVIDER.version.to_owned(),
+            abi_major: 1,
+            abi_minor: 1,
+        },
+        subject_adapter,
+        schema_digests,
+        implementation_digest: SUBJECT_DIGEST,
+        capability_ids: vec![TEST_CAPABILITY.to_owned()],
+    }
+}
+
+/// One exact test-provider executor declaration for each public protocol.
+#[must_use]
+pub fn test_executors() -> Vec<FixtureExecutorV1> {
+    [
+        SubjectAdapterKind::ExportedArtifact,
+        SubjectAdapterKind::PublicGatewayProtocol,
+        SubjectAdapterKind::PublicPluginProtocol,
+    ]
+    .into_iter()
+    .map(test_executor)
+    .collect()
+}
+
+/// The checked-in members of one family of a real provider's fixtures.
+pub struct RealFamilyMembers {
+    /// The fixture's case ID, which the provider's oracle names.
+    pub case_id: String,
+    /// The provider's schema member of the family.
+    pub schema: Vec<u8>,
+    /// The canonical payload.
+    pub payload: Vec<u8>,
+    /// The evidence-status record.
+    pub evidence: Vec<u8>,
+    /// The oracle record: the canonical output, or the typed-failure record.
+    pub oracle: Vec<u8>,
+    /// The failure code of a typed-failure oracle, owned by the provider.
+    pub failure_code: Option<String>,
+    /// The provider's auxiliary input of the family, when the provider declares one.
+    pub auxiliary_input: Option<Vec<u8>>,
+    /// The deterministic budget, in `ResourceUsage` order.
+    pub budget: [u64; 8],
+    /// The operational watchdog.
+    pub watchdog_ms: u64,
+    /// The ordered minimum capability IDs.
+    pub capability_ids: Vec<String>,
+}
+
+/// The checked-in fixtures of one real provider: its exact key and its seven families by code.
+pub struct RealProviderFixtures {
+    pub provider_id: String,
+    pub contract_version: String,
+    pub abi_major: u64,
+    pub abi_minor: u64,
+    pub families: Vec<RealFamilyMembers>,
+}
+
+/// The exact provider key of the corpus: the test provider, or a real provider's.
+#[derive(Clone, Copy)]
+struct ProviderIdentity<'a> {
+    id: &'a str,
+    version: &'a str,
+    abi_major: u64,
+    abi_minor: u64,
+}
+
+const TEST_PROVIDER: ProviderIdentity<'static> = ProviderIdentity {
+    id: "test-provider",
+    version: "1.0.0",
+    abi_major: 1,
+    abi_minor: 1,
+};
+
+impl ProviderIdentity<'_> {
+    /// The provider key of every fixture.
+    fn key(self) -> Value {
+        self.key_with_minor(self.abi_minor)
+    }
+
+    /// The key of the newer minor release a downgrade fixture rolls back from.
+    fn newer_key(self) -> Value {
+        self.key_with_minor(self.abi_minor + 1)
+    }
+
+    fn key_with_minor(self, minor: u64) -> Value {
+        array(vec![
+            text(self.id),
+            text(self.version),
+            uint(self.abi_major),
+            uint(minor),
+        ])
+    }
+}
 
 /// Build and verify the current public test executable's evaluator evidence package.
 ///
@@ -549,6 +707,8 @@ pub enum TrustMutation {
     PreviousInvalid,
     Signature,
     SignatureType,
+    DomainlessSignature,
+    SignedByTrustRoot,
 }
 
 #[derive(Clone, Copy)]
@@ -564,6 +724,8 @@ pub enum ReleaseMutation {
     CaseId,
     ExecutionDigest,
     TrustDigest,
+    /// CPF1 field 19 and the RAD1 snapshot field agree on a snapshot other than the pinned one.
+    PinnedSnapshot,
     FromProvider,
     ToProvider,
     AllowFallback,
@@ -604,6 +766,32 @@ struct CorpusOptions<'a> {
     /// The deterministic budget of each fixture, by family code; the execution profile's maximum
     /// is their per-counter maximum.
     fixture_budgets: &'a [[u64; 8]; 7],
+    /// The checked-in members of a real provider, which replace the test provider's.
+    real: Option<&'a RealProviderFixtures>,
+}
+
+impl CorpusOptions<'_> {
+    fn identity(&self) -> ProviderIdentity<'_> {
+        self.real.map_or(TEST_PROVIDER, |real| ProviderIdentity {
+            id: &real.provider_id,
+            version: &real.contract_version,
+            abi_major: real.abi_major,
+            abi_minor: real.abi_minor,
+        })
+    }
+
+    fn case_id(&self, family: u64) -> TestResult<String> {
+        match self.real {
+            Some(real) => Ok(real_family(real, family)?.case_id.clone()),
+            None => Ok(format!("case-{family}")),
+        }
+    }
+}
+
+fn real_family(real: &RealProviderFixtures, family: u64) -> TestResult<&RealFamilyMembers> {
+    real.families
+        .get(usize::try_from(family)?)
+        .ok_or_else(|| io::Error::other("a real provider family is missing").into())
 }
 
 impl Default for CorpusOptions<'_> {
@@ -623,6 +811,7 @@ impl Default for CorpusOptions<'_> {
             bundle_mutation: None,
             trust_mutation: None,
             fixture_budgets: &DEFAULT_FIXTURE_BUDGETS,
+            real: None,
         }
     }
 }
@@ -900,22 +1089,54 @@ pub fn corpus_with_release_mutation(mutation: ReleaseMutation) -> TestResult<Cor
     })
 }
 
-fn corpus_for_options(options: CorpusOptions<'_>) -> TestResult<Corpus> {
-    let CorpusOptions {
+/// Build a signed corpus of a real provider's checked-in fixtures.
+///
+/// `claim_layer` is the CPF1 wire code of the provider's claim layer, `subject_adapter` its public
+/// protocol and `mode` the Execution Mode (0 Local, 1 Air-Gapped).
+///
+/// Every family carries the provider's schema, payload, evidence-status record, oracle and
+/// auxiliary input bytes, its budget, watchdog and capabilities, and the provider's exact key;
+/// the downgrade family rolls back from the next minor release under a signed RAD1.
+///
+/// # Errors
+/// Returns an error if canonical encoding or fixture construction fails.
+pub fn real_provider_corpus(
+    real: &RealProviderFixtures,
+    claim_layer: u64,
+    subject_adapter: SubjectAdapterKind,
+    mode: u64,
+) -> TestResult<Corpus> {
+    let mut budgets = [[0; 8]; 7];
+    for (family, budget) in (0_u64..).zip(budgets.iter_mut()) {
+        *budget = real_family(real, family)?.budget;
+    }
+    corpus_for_options(CorpusOptions {
         mode,
         claim_layer,
+        subject_adapter,
+        fixture_budgets: &budgets,
+        real: Some(real),
+        ..CorpusOptions::default()
+    })
+}
+
+fn corpus_for_options(options: CorpusOptions<'_>) -> TestResult<Corpus> {
+    let CorpusOptions {
+        mode: _,
+        claim_layer: _,
         watchdog_ms: _,
         subject_adapter,
         extra,
         release_mutation: _,
-        mixed_oracles,
+        mixed_oracles: _,
         plugin_records: _,
         failure_outcome: _,
         failure_redaction_state: _,
         profile_mutation,
-        bundle_mutation,
+        bundle_mutation: _,
         trust_mutation,
         fixture_budgets,
+        real: _,
     } = options;
     let signing_key = SigningKey::from_bytes(&[9; 32]);
     let execution_profile = execution_profile(profile_mutation, budget_maximum(fixture_budgets))?;
@@ -926,7 +1147,7 @@ fn corpus_for_options(options: CorpusOptions<'_>) -> TestResult<Corpus> {
     let mut members = support_members(&trust_policy, &execution_profile);
     mutate_support_members(&mut members, profile_mutation)?;
     let evaluator_protocol_digest = member_hash(&members, "support/evaluator-protocol-v1.json")?;
-    add_provider_contracts(&mut members, profile_mutation, subject_adapter, claim_layer)?;
+    add_provider_contracts(&mut members, options)?;
     if let Some(bytes) = extra {
         members.insert("fixtures/prohibited.bin".to_owned(), (bytes.to_vec(), 0));
     }
@@ -942,11 +1163,9 @@ fn corpus_for_options(options: CorpusOptions<'_>) -> TestResult<Corpus> {
     let mut profile_value = profile_with_selected_closure_caps(
         &members,
         &fixtures,
-        execution_digest,
-        trust_digest,
+        [execution_digest, trust_digest],
         &mut hard_caps,
-        mixed_oracles,
-        profile_mutation,
+        options,
     )?;
     let exact_profile_byte_cap = exact_profile_byte_cap(profile_mutation, &profile_value)?;
     if let Some(mutation) = profile_mutation {
@@ -959,12 +1178,8 @@ fn corpus_for_options(options: CorpusOptions<'_>) -> TestResult<Corpus> {
     let archive = archive(
         &signing_key,
         &members,
-        profile_digest,
-        execution_digest,
-        hash(&expected_output),
-        mode,
-        claim_layer,
-        bundle_mutation,
+        [profile_digest, execution_digest, hash(&expected_output)],
+        options,
     )?;
     let archive_digest = hash(&archive);
     let hard_caps_digest = hash_contract("PiglorOS.EvaluatorHardCaps.v1", &hard_caps)?;
@@ -1396,7 +1611,12 @@ fn make_first_matrix_case_executed(
 ) -> TestResult<()> {
     set_executed_case(root, serde_json::json!("0".repeat(64)))?;
     set_nested_json(root, "rows", 0, "executed_case_count", serde_json::json!(1))?;
-    set_json(root, "executed_case_count", serde_json::json!(1));
+    // One more executed case than the checked-in matrix records.
+    let executed = root
+        .get("executed_case_count")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| io::Error::other("matrix has no executed case count"))?;
+    set_json(root, "executed_case_count", serde_json::json!(executed + 1));
     Ok(())
 }
 
@@ -1592,42 +1812,56 @@ fn fixtures(
     expected: &[u8],
     options: CorpusOptions<'_>,
 ) -> TestResult<Vec<Value>> {
+    let identity = options.identity();
     (0_u64..=6)
         .map(|family| -> TestResult<Value> {
-            let case_id = format!("case-{family}");
+            let case_id = options.case_id(family)?;
+            let real = options
+                .real
+                .map(|real| real_family(real, family))
+                .transpose()?;
             let schema_path = format!("providers/test-provider/schema-{family}.json");
-            let payload_path = format!("fixtures/{case_id}.input");
-            let evidence_path = format!("fixtures/{case_id}.evidence");
-            let output_path = format!("fixtures/{case_id}.expected");
-            members.insert(payload_path.clone(), (vec![u8::try_from(family)?], 0));
-            members.insert(evidence_path.clone(), (b"draft".to_vec(), 17));
-            let output = plugin_record(options.plugin_records, family)?.unwrap_or(expected);
-            members.insert(output_path.clone(), (output.to_vec(), 1));
-            let provider = provider_key(1);
-            let transition = if family == 5 {
-                array(vec![provider_key(2), provider.clone()])
-            } else {
-                Value::Null
-            };
-            let trust_binding = if family == 5 {
-                bytes(&trust)
-            } else {
-                Value::Null
-            };
-            let release_binding = if family == 5 {
-                release_binding(members, signing_key, &case_id, [execution, trust], options)?
-            } else {
-                Value::Null
-            };
-            let expectation = fixture_expectation(
+            let payload_path = format!("fixtures/case-{family}.input");
+            let evidence_path = format!("fixtures/case-{family}.evidence");
+            let output_path = format!("fixtures/case-{family}.expected");
+            insert_family_members(members, family, real, expected, options)?;
+            let provider = identity.key();
+            let (transition, trust_binding, release_binding) = downgrade_bindings(
                 members,
-                &evidence_path,
-                &output_path,
-                oracle_mode(options),
-                options.failure_outcome,
-                family,
+                signing_key,
+                (&case_id, family),
+                [execution, trust],
+                options,
             )?;
+            let expectation = match real {
+                Some(real) => real_fixture_expectation(
+                    members,
+                    family,
+                    [&evidence_path, &output_path],
+                    real,
+                    identity,
+                )?,
+                None => fixture_expectation(
+                    members,
+                    &evidence_path,
+                    &output_path,
+                    oracle_mode(options),
+                    options.failure_outcome,
+                    family,
+                )?,
+            };
             let replay_claim = failure_replay_claim(family, options.failure_redaction_state);
+            let budget = options.fixture_budgets[usize::try_from(family)?];
+            let watchdog_ms = real.map_or(options.watchdog_ms, |real| real.watchdog_ms);
+            let capabilities = real.map_or_else(
+                || vec![text(TEST_CAPABILITY)],
+                |real| {
+                    real.capability_ids
+                        .iter()
+                        .map(|id| text(id.as_str()))
+                        .collect()
+                },
+            );
             let mut fixture = vec![
                 text(&case_id),
                 Value::Bool(true),
@@ -1645,12 +1879,9 @@ fn fixtures(
                 expectation.expected_error,
                 uint(u64::from(replay_claim)),
                 uint(u64::from(replay_claim)),
-                budget_value(options.fixture_budgets[usize::try_from(family)?]),
-                array(vec![uint(options.watchdog_ms)]),
-                array(vec![
-                    Value::Bool(false),
-                    array(vec![text("read-public-bundle")]),
-                ]),
+                budget_value(budget),
+                array(vec![uint(watchdog_ms)]),
+                array(vec![Value::Bool(false), array(capabilities)]),
                 trust_binding,
                 release_binding,
                 provenance(),
@@ -1663,6 +1894,105 @@ fn fixtures(
         .collect()
 }
 
+/// Insert the payload, evidence-status and oracle members of `family`.
+fn insert_family_members(
+    members: &mut BTreeMap<String, (Vec<u8>, u8)>,
+    family: u64,
+    real: Option<&RealFamilyMembers>,
+    expected: &[u8],
+    options: CorpusOptions<'_>,
+) -> TestResult<()> {
+    let payload = match real {
+        Some(real) => real.payload.clone(),
+        None => vec![u8::try_from(family)?],
+    };
+    members.insert(format!("fixtures/case-{family}.input"), (payload, 0));
+    let evidence = real.map_or_else(|| b"draft".to_vec(), |real| real.evidence.clone());
+    members.insert(format!("fixtures/case-{family}.evidence"), (evidence, 17));
+    let output = match real {
+        Some(real) => real.oracle.clone(),
+        None => plugin_record(options.plugin_records, family)?
+            .unwrap_or(expected)
+            .to_vec(),
+    };
+    members.insert(format!("fixtures/case-{family}.expected"), (output, 1));
+    Ok(())
+}
+
+/// The contract transition, trust-policy binding and release-admission binding of `family`:
+/// all null except for the downgrade family.
+fn downgrade_bindings(
+    members: &mut BTreeMap<String, (Vec<u8>, u8)>,
+    signing_key: &SigningKey,
+    (case_id, family): (&str, u64),
+    [execution, trust]: [[u8; 32]; 2],
+    options: CorpusOptions<'_>,
+) -> TestResult<(Value, Value, Value)> {
+    if family != 5 {
+        return Ok((Value::Null, Value::Null, Value::Null));
+    }
+    let identity = options.identity();
+    let pinned = if matches!(
+        options.release_mutation,
+        Some(ReleaseMutation::PinnedSnapshot)
+    ) {
+        [8; 32]
+    } else {
+        trust
+    };
+    let release = release_binding(members, signing_key, case_id, [execution, pinned], options)?;
+    Ok((
+        array(vec![identity.newer_key(), identity.key()]),
+        bytes(&pinned),
+        release,
+    ))
+}
+
+/// The expectation of one real-provider family: its evidence-status record, its oracle record
+/// as an auxiliary member when the oracle is a typed failure, and its auxiliary input when the
+/// provider declares one, in member path order.
+fn real_fixture_expectation(
+    members: &mut BTreeMap<String, (Vec<u8>, u8)>,
+    family: u64,
+    [evidence_path, output_path]: [&str; 2],
+    real: &RealFamilyMembers,
+    identity: ProviderIdentity<'_>,
+) -> TestResult<FixtureExpectation> {
+    let input_path = format!("fixtures/case-{family}.input-auxiliary");
+    let mut inputs = Vec::new();
+    if let Some(input) = &real.auxiliary_input {
+        members.insert(input_path.clone(), (input.clone(), 0));
+        inputs.push(descriptor(members, &input_path)?);
+    }
+    Ok(match &real.failure_code {
+        Some(code) => {
+            let failure = array(vec![text(identity.id), text(identity.version), text(code)]);
+            let mut auxiliary = vec![
+                descriptor(members, evidence_path)?,
+                descriptor(members, output_path)?,
+            ];
+            auxiliary.extend(inputs);
+            FixtureExpectation {
+                auxiliary: array(auxiliary),
+                oracle: array(vec![uint(1), Value::Null, failure.clone(), Value::Null]),
+                expected_outcome: uint(2),
+                expected_error: failure,
+            }
+        }
+        None => FixtureExpectation {
+            auxiliary: array([vec![descriptor(members, evidence_path)?], inputs].concat()),
+            oracle: array(vec![
+                uint(0),
+                descriptor(members, output_path)?,
+                Value::Null,
+                Value::Null,
+            ]),
+            expected_outcome: uint(0),
+            expected_error: Value::Null,
+        },
+    })
+}
+
 fn release_binding(
     members: &mut BTreeMap<String, (Vec<u8>, u8)>,
     signing_key: &SigningKey,
@@ -1670,13 +2000,14 @@ fn release_binding(
     [execution, trust]: [[u8; 32]; 2],
     options: CorpusOptions<'_>,
 ) -> TestResult<Value> {
+    let identity = options.identity();
     let admission = release_admission(
         signing_key,
         case_id,
         execution,
         trust,
-        &provider_key(2),
-        &provider_key(1),
+        &identity.newer_key(),
+        &identity.key(),
         options.release_mutation,
     )?;
     let digest = hash(&admission);
@@ -1844,7 +2175,9 @@ fn release_admission(
             ReleaseMutation::Lifecycle => fields[2] = uint(1),
             ReleaseMutation::CaseId => fields[3] = text("different-case"),
             ReleaseMutation::ExecutionDigest => fields[4] = bytes(&[8; 32]),
-            ReleaseMutation::TrustDigest => fields[5] = bytes(&[8; 32]),
+            ReleaseMutation::TrustDigest | ReleaseMutation::PinnedSnapshot => {
+                fields[5] = bytes(&[8; 32]);
+            }
             ReleaseMutation::FromProvider => fields[6] = provider_key(3),
             ReleaseMutation::ToProvider => fields[7] = provider_key(0),
             ReleaseMutation::AllowFallback => fields[8] = Value::Bool(true),
@@ -1877,18 +2210,17 @@ fn release_admission(
 
 fn add_provider_contracts(
     members: &mut BTreeMap<String, (Vec<u8>, u8)>,
-    mutation: Option<ProfileMutation>,
-    subject_adapter: SubjectAdapterKind,
-    claim_layer: u64,
+    options: CorpusOptions<'_>,
 ) -> TestResult<()> {
-    add_provider_artifacts(members);
+    let mutation = options.profile_mutation;
+    add_provider_artifacts(members, options.real)?;
     let schemas = provider_schemas(members)?;
     let mut package_fields = vec![
         text("FPP1"),
         uint(1),
-        provider_key(1),
-        uint(claim_layer),
-        uint(adapter_code(subject_adapter)),
+        options.identity().key(),
+        uint(options.claim_layer),
+        uint(adapter_code(options.subject_adapter)),
         array(schemas),
         descriptor(members, "providers/test-provider/LICENSE")?,
         descriptor(members, "providers/test-provider/NOTICE")?,
@@ -1920,16 +2252,13 @@ fn add_provider_contracts(
     };
     members.insert(package_path.to_owned(), (package_bytes, 13));
 
-    add_provider_registry(
-        members,
-        package_path,
-        mutation,
-        subject_adapter,
-        claim_layer,
-    )
+    add_provider_registry(members, package_path, options)
 }
 
-fn add_provider_artifacts(members: &mut BTreeMap<String, (Vec<u8>, u8)>) {
+fn add_provider_artifacts(
+    members: &mut BTreeMap<String, (Vec<u8>, u8)>,
+    real: Option<&RealProviderFixtures>,
+) -> TestResult<()> {
     let support = [
         (
             "providers/test-provider/LICENSE",
@@ -1957,11 +2286,16 @@ fn add_provider_artifacts(members: &mut BTreeMap<String, (Vec<u8>, u8)>) {
         members.insert(path.to_owned(), (contents.to_vec(), role));
     }
     for family in 0_u64..=6 {
+        let schema = match real {
+            Some(real) => real_family(real, family)?.schema.clone(),
+            None => format!("{{\"family\":{family}}}").into_bytes(),
+        };
         members.insert(
             format!("providers/test-provider/schema-{family}.json"),
-            (format!("{{\"family\":{family}}}").into_bytes(), 4),
+            (schema, 4),
         );
     }
+    Ok(())
 }
 
 fn provider_schemas(members: &BTreeMap<String, (Vec<u8>, u8)>) -> TestResult<Vec<Value>> {
@@ -1981,20 +2315,20 @@ fn provider_schemas(members: &BTreeMap<String, (Vec<u8>, u8)>) -> TestResult<Vec
 fn add_provider_registry(
     members: &mut BTreeMap<String, (Vec<u8>, u8)>,
     package_path: &str,
-    mutation: Option<ProfileMutation>,
-    subject_adapter: SubjectAdapterKind,
-    claim_layer: u64,
+    options: CorpusOptions<'_>,
 ) -> TestResult<()> {
+    let mutation = options.profile_mutation;
+    let identity = options.identity();
     let mut registry_fields = vec![
         text("FPR1"),
         uint(1),
         array(vec![array(vec![
-            text("test-provider"),
-            text("1.0.0"),
-            uint(1),
-            uint(1),
-            uint(claim_layer),
-            uint(adapter_code(subject_adapter)),
+            text(identity.id),
+            text(identity.version),
+            uint(identity.abi_major),
+            uint(identity.abi_minor),
+            uint(options.claim_layer),
+            uint(adapter_code(options.subject_adapter)),
             descriptor_with_media(members, package_path, "application/cbor")?,
         ])]),
     ];
@@ -2179,10 +2513,9 @@ fn mutate_provider_registry(fields: &mut [Value], mutation: ProfileMutation) {
 fn profile(
     members: &BTreeMap<String, (Vec<u8>, u8)>,
     fixtures: Vec<Value>,
-    execution: [u8; 32],
-    trust: [u8; 32],
+    [execution, trust]: [[u8; 32]; 2],
     hard_caps: &Value,
-    mixed_oracles: bool,
+    options: CorpusOptions<'_>,
 ) -> TestResult<Value> {
     Ok(array(vec![
         text("CPF1"),
@@ -2199,10 +2532,10 @@ fn profile(
                 "authority/fixture-provider-registry.cbor",
                 "application/cbor",
             )?,
-            array(vec![provider_key(1)]),
+            array(vec![options.identity().key()]),
         ]),
         array(fixtures),
-        if mixed_oracles {
+        if options.mixed_oracles {
             array(vec![array(vec![uint(2), bytes(&[1, 2])])])
         } else {
             array(Vec::new())
@@ -2877,13 +3210,15 @@ fn array_fields_mut(value: &mut Value) -> TestResult<&mut Vec<Value>> {
 fn archive(
     signing_key: &SigningKey,
     members: &BTreeMap<String, (Vec<u8>, u8)>,
-    profile: [u8; 32],
-    execution: [u8; 32],
-    expected_output_digest: [u8; 32],
-    mode: u64,
-    claim_layer: u64,
-    mutation: Option<BundleMutation>,
+    [profile, execution, expected_output_digest]: [[u8; 32]; 3],
+    options: CorpusOptions<'_>,
 ) -> TestResult<Vec<u8>> {
+    let CorpusOptions {
+        mode,
+        claim_layer,
+        bundle_mutation: mutation,
+        ..
+    } = options;
     let descriptors: Vec<Value> = members
         .iter()
         .map(|(path, (member, role))| -> TestResult<Value> {
@@ -2906,9 +3241,9 @@ fn archive(
         })
         .collect();
     let expected = (0_u64..=6)
-        .map(|family| -> TestResult<(Vec<u8>, Value)> {
-            let case_id = format!("case-{family}");
-            let path = format!("fixtures/{case_id}.expected");
+        .map(|family| -> TestResult<((String, Vec<u8>), Value)> {
+            let case_id = options.case_id(family)?;
+            let path = format!("fixtures/case-{family}.expected");
             let value = array(vec![
                 text(&case_id),
                 uint(claim_layer),
@@ -2921,10 +3256,12 @@ fn archive(
                         .map_or(expected_output_digest, |(member, _)| hash(member)),
                 ),
             ]);
-            Ok((canonical(&value)?, value))
+            Ok(((case_id, canonical(&value)?), value))
         })
         .collect::<TestResult<Vec<_>>>()?;
     let mut expected = expected;
+    // CFB1 orders expected results by case ID text, then the rest of the key; the
+    // canonical CBOR bytes alone would order a shorter case ID first.
     expected.sort_by(|left, right| left.0.cmp(&right.0));
     let expected: Vec<Value> = expected.into_iter().map(|(_, value)| value).collect();
     let mut manifest = array(vec![
@@ -3223,9 +3560,16 @@ fn trust_policy(
     if let Some(mutation) = mutation {
         mutate_trust_policy(&mut fields, mutation, revoked_artifact)?;
     }
-    let signature = signing_key
-        .sign(&canonical(&array(fields.clone()))?)
-        .to_bytes();
+    let unsigned = canonical(&array(fields.clone()))?;
+    let domain_separated = [TRUST_POLICY_OPERATOR_DOMAIN, unsigned.as_slice()].concat();
+    let signature = match mutation {
+        Some(TrustMutation::DomainlessSignature) => {
+            trust_policy_operator_signing_key().sign(&unsigned)
+        }
+        Some(TrustMutation::SignedByTrustRoot) => signing_key.sign(&domain_separated),
+        _ => trust_policy_operator_signing_key().sign(&domain_separated),
+    }
+    .to_bytes();
     fields.push(if matches!(mutation, Some(TrustMutation::Signature)) {
         bytes(&[0; 64])
     } else if matches!(mutation, Some(TrustMutation::SignatureType)) {
@@ -3331,7 +3675,9 @@ fn mutate_trust_policy(
         TrustMutation::Encoding
         | TrustMutation::Shape
         | TrustMutation::Signature
-        | TrustMutation::SignatureType => {}
+        | TrustMutation::SignatureType
+        | TrustMutation::DomainlessSignature
+        | TrustMutation::SignedByTrustRoot => {}
     }
     Ok(())
 }
@@ -3642,22 +3988,12 @@ fn closure_member_bytes(members: &BTreeMap<String, (Vec<u8>, u8)>) -> TestResult
 fn profile_with_selected_closure_caps(
     members: &BTreeMap<String, (Vec<u8>, u8)>,
     fixtures: &[Value],
-    execution_digest: [u8; 32],
-    trust_digest: [u8; 32],
+    digests: [[u8; 32]; 2],
     hard_caps: &mut Value,
-    mixed_oracles: bool,
-    mutation: Option<ProfileMutation>,
+    options: CorpusOptions<'_>,
 ) -> TestResult<Value> {
-    let build_profile = |caps: &Value| {
-        profile(
-            members,
-            fixtures.to_vec(),
-            execution_digest,
-            trust_digest,
-            caps,
-            mixed_oracles,
-        )
-    };
+    let mutation = options.profile_mutation;
+    let build_profile = |caps: &Value| profile(members, fixtures.to_vec(), digests, caps, options);
     let mut profile_value = build_profile(hard_caps)?;
     if matches!(mutation, Some(ProfileMutation::SelectedProfileByteCapExact)) {
         const MAX_CONVERGENCE_STEPS: usize = 8;

@@ -32,7 +32,10 @@ use pos_core::{
     ErasureGate, ErasureHostErrorV1, ErasureProtectedOperationV1, Event, ManifestPluginRosterV1,
     PipelineSecurityRevisionsV1, ReproManifest, Seq, Timeline, TimelineMeta,
 };
-use pos_runtime::{LocalScheduledAdmissionHostV1, PluginRegistry, ScheduledAdmissionStoreV1};
+use pos_runtime::{
+    LocalScheduledAdmissionHostV1, ManifestRegistrationErrorV1, PluginExecutionModeV1,
+    PluginRegistry, ScheduledAdmissionStoreV1,
+};
 use pos_store::StoreConfig;
 use std::collections::HashSet;
 use std::fmt::{self, Debug, Formatter};
@@ -318,6 +321,10 @@ fn reject_protected_history(
 }
 
 pub mod authoritative_comparison;
+#[cfg(feature = "test-support")]
+pub mod erasure_conformance;
+#[cfg(all(feature = "test-support", target_os = "linux"))]
+pub mod fork_artifacts;
 pub mod moat_proof;
 pub mod non_interference_harness;
 pub mod profile_recomputation;
@@ -629,6 +636,8 @@ pub struct Experiment {
     registry: PluginRegistry,
     erasure_gate: Option<Arc<ErasureContainmentGateV1>>,
     fork_registry_factory: Option<ForkRegistryFactory>,
+    mode: PluginExecutionModeV1,
+    refused_mode_gated_operation: bool,
 }
 
 /// A started experiment that owns its live `EventStore` and Timeline.
@@ -1407,15 +1416,54 @@ fn fork_eval_timeline(
 // ---------------------------------------------------------------------------
 
 impl Experiment {
+    /// A host in the Local Execution Mode.
     #[must_use]
     pub fn new(config: ExperimentConfig) -> Self {
-        let registry = PluginRegistry::new();
+        Self::with_registry(config, PluginRegistry::new(), PluginExecutionModeV1::Local)
+    }
+
+    /// A host in the Air-Gapped Execution Mode: its registry refuses the
+    /// operations the ADR-024 Air-Gapped composition mode excludes (local
+    /// manifest admission and local Adapters), and the host records every
+    /// refusal ([`Self::refused_mode_gated_operation`]). It claims no network
+    /// or process isolation.
+    #[must_use]
+    pub fn new_air_gapped(config: ExperimentConfig) -> Self {
+        Self::with_registry(
+            config,
+            PluginRegistry::new_air_gapped(),
+            PluginExecutionModeV1::AirGapped,
+        )
+    }
+
+    const fn with_registry(
+        config: ExperimentConfig,
+        registry: PluginRegistry,
+        mode: PluginExecutionModeV1,
+    ) -> Self {
         Self {
             config,
             registry,
             erasure_gate: None,
             fork_registry_factory: None,
+            mode,
+            refused_mode_gated_operation: false,
         }
+    }
+
+    /// The Execution Mode this host was created in.
+    #[must_use]
+    pub const fn execution_mode(&self) -> PluginExecutionModeV1 {
+        self.mode
+    }
+
+    /// Whether the host refused an operation because of its Execution Mode.
+    ///
+    /// The record is the host's own: a caller that ignores the refused
+    /// operation's error cannot clear it.
+    #[must_use]
+    pub const fn refused_mode_gated_operation(&self) -> bool {
+        self.refused_mode_gated_operation
     }
 
     /// Configure how each runnable Fork receives fresh plugin runtime state.
@@ -1501,16 +1549,26 @@ impl Experiment {
     /// added with [`Self::register_generated`], records an empty roster, which is not a Replay
     /// claim.
     ///
+    /// An Air-Gapped host refuses the admission with
+    /// [`ManifestRegistrationErrorV1::RegistryState`] and records the refusal
+    /// ([`Self::refused_mode_gated_operation`]).
+    ///
     /// # Errors
     /// Returns the closed registration error for an empty, incomplete, unpinned or already
-    /// admitted registry.
+    /// admitted registry, or a registry whose Execution Mode is not Local.
     pub fn admit_local_manifest_registration(
         &mut self,
         owner_id: pos_core::OwnerIdV1,
         configuration_generation: u64,
-    ) -> Result<pos_runtime::AdmittedCompositionV1, pos_runtime::ManifestRegistrationErrorV1> {
-        self.registry
-            .admit_local_manifest_registration(owner_id, configuration_generation)
+    ) -> Result<pos_runtime::AdmittedCompositionV1, ManifestRegistrationErrorV1> {
+        let admitted = self
+            .registry
+            .admit_local_manifest_registration(owner_id, configuration_generation);
+        // The host's registry is always live, so a registry-state refusal is
+        // the Execution Mode refusing the admission.
+        self.refused_mode_gated_operation |=
+            admitted.as_ref().err() == Some(&ManifestRegistrationErrorV1::RegistryState);
+        admitted
     }
 
     /// Register a plugin (wires schemas + reducer + driver).
@@ -3951,6 +4009,8 @@ pub mod tests {
             registry,
             erasure_gate: Some(gate),
             fork_registry_factory: None,
+            mode: PluginExecutionModeV1::Local,
+            refused_mode_gated_operation: false,
         }
         .start_with_store(Box::new(pos_store::memory::MemoryStore::new()))
         .test_ok()
@@ -5961,6 +6021,8 @@ pub mod tests {
                     registry,
                     erasure_gate: None,
                     fork_registry_factory: None,
+                    mode: PluginExecutionModeV1::Local,
+                    refused_mode_gated_operation: false,
                 }
                 .start()
                 .test_ok();

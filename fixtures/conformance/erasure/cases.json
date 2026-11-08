@@ -1,0 +1,1915 @@
+{
+  "adr": "ADR-060; ADR-062 Revision 8 note ADR-062_R8_Erasure_Cases (#1233)",
+  "authority_kind": "repository-test-fixture-only",
+  "cases": [
+    {
+      "applicability": [
+        {
+          "category": "Artifact",
+          "decision": "Applicable",
+          "target": 0
+        },
+        {
+          "category": "Key",
+          "decision": "Applicable",
+          "target": 0
+        },
+        {
+          "category": "Replica",
+          "decision": "Applicable",
+          "target": 0
+        },
+        {
+          "category": "Backup",
+          "decision": "Applicable",
+          "target": 0
+        }
+      ],
+      "attempts": [
+        {
+          "acknowledgements": [
+            {
+              "evidence": "a202331a051aa40deeb09cf6c34508166a8f81a3d3cf7b1682d41784dd7dac95",
+              "obligation": 3,
+              "outcome": "Acknowledged"
+            },
+            {
+              "evidence": "1078025583b3cbcf083a590e17c6a351d3c45fe31d369e115f301e1ffea1a40f",
+              "obligation": 2,
+              "outcome": "Acknowledged"
+            },
+            {
+              "evidence": "1078025583b3cbcf083a590e17c6a351d3c45fe31d369e115f301e1ffea1a40f",
+              "obligation": 2,
+              "outcome": "Acknowledged"
+            },
+            {
+              "evidence": "e67da04bbfaeeba9af39f5520630d0d19c34115816ed2b0b341b00e8fe25424d",
+              "obligation": 1,
+              "outcome": "Acknowledged"
+            },
+            {
+              "evidence": "502305c060cfcf62aaf3da01f6d5df1a66455b9741d22eab5bac09093bbeb682",
+              "obligation": 0,
+              "outcome": "Acknowledged"
+            }
+          ],
+          "authorization_provenance": "1020fc26267102b1777cf1db7779efb7beb9005861951ee6ff03f4993853c1b7",
+          "rows": [
+            {
+              "acknowledgements": "2adb51459c8e842680db3aca1fb3846ba840eb0f37d7dbd39ec5cfdceaad18d4",
+              "obligation": 0,
+              "provenance": "6b79f5e0d0b36e1257d8e7e2f6ed494799f586000c0c43c6fd6e29cf37cab408",
+              "reason": "5536eb851ecbaf5fb04fa201c28133fe084fc9a72313cad260ea5ee9b12a12db",
+              "retained_disclosure": "bd5a0ce9b77682fff13ab4be41b13298eb5d6dd2c3b5eab2a2864898284ce852",
+              "rule": "RedactViews",
+              "state": "TransitionApplied"
+            },
+            {
+              "acknowledgements": "7f3336f948ccbf74909090fe38b0a3bcdaa41d2994f5910bbb29e6ed818ae624",
+              "obligation": 1,
+              "provenance": "5319b8c5f004984a4208c58268bc87cf4ec0c5b0a65ea15c96e675df35181ade",
+              "reason": "910ecf1c00ae7963a1c78b51fcb01fd05b5f5879362fb9988229533e8e765bce",
+              "retained_disclosure": "19009ad2655072c3c2bf8c736cfc23185613994c1dcf8179847adf28121a72a4",
+              "rule": "RedactViews",
+              "state": "TransitionApplied"
+            },
+            {
+              "acknowledgements": "13184442e2f76a989aa2022f11a52bf389d2f086c4c9737ce3392ccde6cad356",
+              "obligation": 2,
+              "provenance": "296db87f791e45dd7db3effc48c63fd3dda1224bf064ed63e042d8b7f9dae4be",
+              "reason": "ca53a76af8079d1351b3057e4dd3c4e3f3fedde8b8f2192db5e8d070e9aa3c42",
+              "retained_disclosure": "cf591cd0e278f13b67f681b3cf01198b4e06cc3e75fe42240481723b2e16d46d",
+              "rule": "RetainStructure",
+              "state": "TransitionApplied"
+            },
+            {
+              "acknowledgements": "31d9f78635158497acaf1548ca1fcbf570733304093595d3cccb48c7bfdf9bb2",
+              "obligation": 3,
+              "provenance": "0059f07b463cb18fa4f7c9892d0def1ee1e95ccc24f08468a22b93ebf727883c",
+              "reason": "6c559660248e3d16eb3acc5c36a1e78331048ec239a8b9841a57acd3bf98b9cf",
+              "retained_disclosure": "15e0cbe614dad9842edc5372c6caa552bc92e79987a5762fc3b8bc5c3f9105d0",
+              "rule": "RetainStructure",
+              "state": "TransitionApplied"
+            }
+          ],
+          "signature": "d9a82c951619bd2480deb83f0e4a7db5d41ab2c94f7ce7f5c8a4628cdb4266bd"
+        }
+      ],
+      "authorization_provenance": "ea1aaa9ca7a311948b99d99d69e35a8fbf882c890dd5b36a407745a6e5b1c761",
+      "case_id": "complete-all-categories",
+      "expected": {
+        "histories": [
+          {
+            "authorization_refusal": null,
+            "lifecycles": [
+              "Submitted",
+              "Authorized",
+              "AccessFrozen",
+              "DestructionDispatched",
+              "AwaitingAcknowledgements",
+              "Complete"
+            ],
+            "receipts": [
+              {
+                "acknowledgements": [
+                  {
+                    "obligation": 1,
+                    "outcome": "Acknowledged"
+                  },
+                  {
+                    "obligation": 2,
+                    "outcome": "Acknowledged"
+                  },
+                  {
+                    "obligation": 0,
+                    "outcome": "Acknowledged"
+                  },
+                  {
+                    "obligation": 3,
+                    "outcome": "Acknowledged"
+                  }
+                ],
+                "failed_owners": [],
+                "lifecycle": "Complete",
+                "pending_owners": [],
+                "replay_claim": "StructuralOnly",
+                "rows": [
+                  {
+                    "from": "Exact",
+                    "obligation": 0,
+                    "to": "ExactAuthoritativeWithRedactedViews"
+                  },
+                  {
+                    "from": "Exact",
+                    "obligation": 1,
+                    "to": "ExactAuthoritativeWithRedactedViews"
+                  },
+                  {
+                    "from": "Exact",
+                    "obligation": 2,
+                    "to": "StructuralOnly"
+                  },
+                  {
+                    "from": "Exact",
+                    "obligation": 3,
+                    "to": "StructuralOnly"
+                  }
+                ]
+              }
+            ],
+            "replay_claims": [
+              "Exact",
+              "Exact",
+              "Exact",
+              "Exact",
+              "Exact",
+              "StructuralOnly"
+            ]
+          }
+        ],
+        "rejoins": [
+          "Admitted",
+          "BackupInventoryIncomplete",
+          "Unauthorized"
+        ]
+      },
+      "freeze_provenance": "159afb863a069e98a6ce714af6ff8c130c4f63fb412b9f98d190ef0fec0c783f",
+      "obligations": [
+        {
+          "category": "Artifact",
+          "owner": "f869897d1490d0cb78db47f79badbfafdde16bf31224f1b81784096b34f969ef",
+          "target": 0
+        },
+        {
+          "category": "Key",
+          "owner": "894f93abdfea84d48419dcb01d0e528bbeb6bf425005cae7b2c3a356a7cf82c0",
+          "target": 0
+        },
+        {
+          "category": "Replica",
+          "owner": "63093a561ab14775de21a14c9f48b10f609e99a6a33c1bc9bd8be52fa14a2bfc",
+          "target": 0
+        },
+        {
+          "category": "Backup",
+          "owner": "54b195b3f16af8b0981273f3117fedd26143eb60ac60509b17f72f247869ef88",
+          "target": 0
+        }
+      ],
+      "policy_conflict": null,
+      "rejoins": [
+        {
+          "attempt": 0,
+          "attestation": "9d09fcd5a923f388dab79e2c6669cb0e36418b35222636278171a1604bf7fb04",
+          "entries": [
+            {
+              "disposition": "Tombstoned",
+              "evidence": "d58e63a545dacd6e1a7dff3e63ff5465d3450d4fadafefb9b5962a63141afdcc",
+              "obligation": 2
+            },
+            {
+              "disposition": "Unrecoverable",
+              "evidence": "c9c036c2e2490c4aa9d3ec185810249e350b363316e8b01cf8a8231aa5e69485",
+              "obligation": 3
+            }
+          ],
+          "inventory_generation": "cd4830fed1cf6bd2540dbb9e62f657e8a7fcb1d50d990e5bb05b770c6c90a08a"
+        },
+        {
+          "attempt": 0,
+          "attestation": "9d09fcd5a923f388dab79e2c6669cb0e36418b35222636278171a1604bf7fb04",
+          "entries": [
+            {
+              "disposition": "Tombstoned",
+              "evidence": "1c823a997d32031dbb5b6617345fa2b651689c4e366a46cb955ecc6dc4b30472",
+              "obligation": 2
+            }
+          ],
+          "inventory_generation": "cf7212c620c88c3f8f730f6b35ee18c1ac44f058953141b4c6bebb063f2e4bff"
+        },
+        {
+          "attempt": 0,
+          "attestation": "358d03d8ef9c82cbe2eb2c07d101660518fe3c741e2c830484d22c6d995ec1f8",
+          "entries": [
+            {
+              "disposition": "Tombstoned",
+              "evidence": "edeee682e79363c2a554eec13db507a80714e70db3393809515e7e3be099d5f2",
+              "obligation": 2
+            },
+            {
+              "disposition": "Tombstoned",
+              "evidence": "3afa128ce98d07e5c955ad7dfc94e0f9c0c76923904e9569a4dfb95d11013c70",
+              "obligation": 3
+            }
+          ],
+          "inventory_generation": "73a8a13bafc0d263f55ca4b5bbe88d4471ce5c2092f0f0bae9c8b3f49c05f94d"
+        }
+      ],
+      "request": "requests/complete-all-categories.erq1",
+      "targets": [
+        {
+          "artifact_class": "TimelineReplay",
+          "artifact_digest": "a516f1034d3418899b3cf66632580826baba0b5444ebadf170e2b7f0a80b62e4",
+          "key_digest": "1569642e55b9facfc117c9a439cee6b35da2c59fb473c81795b22e98e72f6620",
+          "key_role": "DataEncryption",
+          "replica_id": "f8db55927844b60b31ddb00c556e792d369aa0d77fe8e17d03ec4a766a3313bd",
+          "replica_set": "6b769cf15b476e74e8cf48be2523e6fb5df315e46d3d93877e2d8825d0dc119f"
+        }
+      ],
+      "title": "Complete over the artifact, key, replica and backup obligations of one target; acknowledgements arrive out of canonical order with an exact duplicate; replica and backup rejoin (not distributed)."
+    },
+    {
+      "applicability": [
+        {
+          "category": "Artifact",
+          "decision": "Applicable",
+          "target": 0
+        },
+        {
+          "category": "Key",
+          "decision": "Applicable",
+          "target": 0
+        },
+        {
+          "category": "Replica",
+          "decision": "Inapplicable",
+          "target": 0
+        },
+        {
+          "category": "Backup",
+          "decision": "Inapplicable",
+          "target": 0
+        }
+      ],
+      "attempts": [
+        {
+          "acknowledgements": [
+            {
+              "evidence": "68af8073781cb25721f70c26c1f05e954b69d3694353dfbe0ee207ba09f09ab7",
+              "obligation": 1,
+              "outcome": "Negative"
+            },
+            {
+              "evidence": "8e1beb429b8febb458b809cf816f5f0e2228a67bc1869183ec9ee515e218f925",
+              "obligation": 0,
+              "outcome": "Acknowledged"
+            }
+          ],
+          "authorization_provenance": "ca28a0ed687bd1bc68538d0f192de21fa55bbcfc06373f2f29beb5389fe3b0a8",
+          "rows": [
+            {
+              "acknowledgements": "7f6716f3bc749bee266c23cbbe1e33ddd16c9bb45f0dc60dbf1e7294afb39345",
+              "obligation": 0,
+              "provenance": "016f6c43f0e59d1dba6d5aeecaa5ab6c3454fd2ace7a6e128394c90599c4d29f",
+              "reason": "cc97c18c4b235eb290a1022f7c633de18d0d4b08b26bfba5a46f5d2b08702107",
+              "retained_disclosure": "3a90d2d978e905342ca306c64cf542c87d3cd3fd10d3a4c8a6286d3be5c4604f",
+              "rule": "RedactViews",
+              "state": "TransitionApplied"
+            },
+            {
+              "acknowledgements": "855156ed13d67efc0aa8c4e069857dafc3245f18e65c81160eb065e60665d3a4",
+              "obligation": 1,
+              "provenance": "7e7a776dbf9bb7391dbd8da9a910d5cf343795f552745d3f6cf849557d2c47e4",
+              "reason": "3111d3d3f6de28fcbb22a1e5df5790b682c3e7d3d2b3cbe8aa51322ac0884a18",
+              "retained_disclosure": "46571fd96c138e31f697f1795e381ca7b8af0d5db702123d92479177ff44a14c",
+              "rule": "RetainStructure",
+              "state": "Retained"
+            }
+          ],
+          "signature": "9ccc2fedb7c1f55d361904985391dded0905fd28afd49f37a20ffa48a0e11c76"
+        },
+        {
+          "acknowledgements": [
+            {
+              "evidence": "054821f6cab60876b54135a31e3a708728f02b191a9e32161d2c12f527a20394",
+              "obligation": 1,
+              "outcome": "Acknowledged"
+            }
+          ],
+          "authorization_provenance": "556959cc514296cd86c1dd23833c4f51284ded2ff5cd1d8e80a8cb730d959ae9",
+          "rows": [
+            {
+              "acknowledgements": "8b4c2df023fa87b39db4928a983610f65a9cf63c1ac32b41ddac58dd64b90273",
+              "obligation": 0,
+              "provenance": "efde8fabc8d915b7be85838e6a78d5a20f8a083b67c02af89b32eb2e4eaf1401",
+              "reason": "99f441870ac067e062333cf4b7e85eb937d0a9714f7d59cedd656a56bed72246",
+              "retained_disclosure": "69d1b7bbfef43e7425de91868c7e361977d333aa82856ab7a65184d11e7834c1",
+              "rule": "PreserveExact",
+              "state": "TransitionApplied"
+            },
+            {
+              "acknowledgements": "42accb3f374615cd603b97a77398cd82d4e78d33b3e8f26902f51ab32ea6b382",
+              "obligation": 1,
+              "provenance": "4ac956e8f44ff774c176d94b79f6d6d2e50953a2c382407f946d841a98b30f03",
+              "reason": "bb0fc083e4326dff80e8e78123e4014ad551393f35c2271a3eba4baf81cb2585",
+              "retained_disclosure": "f3f6ba953a111e395ddf4603bd1d069413ec505a3103b7f5379dac6e7084e955",
+              "rule": "RetainStructure",
+              "state": "TransitionApplied"
+            }
+          ],
+          "signature": "735750494697f9346067a8ae2a58d25c4e50c78e8f119188fd1b11abbd0db048"
+        }
+      ],
+      "authorization_provenance": "97c4b36244a43a5fbffef5a1f6e6b12e765c35585ccbecd44b3e20ddeff67c0f",
+      "case_id": "partial-failure-then-retry",
+      "expected": {
+        "histories": [
+          {
+            "authorization_refusal": null,
+            "lifecycles": [
+              "Submitted",
+              "Authorized",
+              "AccessFrozen",
+              "DestructionDispatched",
+              "AwaitingAcknowledgements",
+              "PartialFailure",
+              "Complete"
+            ],
+            "receipts": [
+              {
+                "acknowledgements": [
+                  {
+                    "obligation": 0,
+                    "outcome": "Acknowledged"
+                  },
+                  {
+                    "obligation": 1,
+                    "outcome": "Negative"
+                  }
+                ],
+                "failed_owners": [
+                  "7edcd709023f940cfbb242d5a27f27bb3a4831870cb7bc823e4380f98dcdd265"
+                ],
+                "lifecycle": "PartialFailure",
+                "pending_owners": [],
+                "replay_claim": "ExactAuthoritativeWithRedactedViews",
+                "rows": [
+                  {
+                    "from": "Exact",
+                    "obligation": 0,
+                    "to": "ExactAuthoritativeWithRedactedViews"
+                  },
+                  {
+                    "from": "Exact",
+                    "obligation": 1,
+                    "to": "Exact"
+                  }
+                ]
+              },
+              {
+                "acknowledgements": [
+                  {
+                    "obligation": 0,
+                    "outcome": "Acknowledged"
+                  },
+                  {
+                    "obligation": 1,
+                    "outcome": "Acknowledged"
+                  }
+                ],
+                "failed_owners": [],
+                "lifecycle": "Complete",
+                "pending_owners": [],
+                "replay_claim": "StructuralOnly",
+                "rows": [
+                  {
+                    "from": "ExactAuthoritativeWithRedactedViews",
+                    "obligation": 0,
+                    "to": "ExactAuthoritativeWithRedactedViews"
+                  },
+                  {
+                    "from": "Exact",
+                    "obligation": 1,
+                    "to": "StructuralOnly"
+                  }
+                ]
+              }
+            ],
+            "replay_claims": [
+              "Exact",
+              "Exact",
+              "Exact",
+              "Exact",
+              "Exact",
+              "ExactAuthoritativeWithRedactedViews",
+              "StructuralOnly"
+            ]
+          }
+        ],
+        "rejoins": [
+          "BackupInventoryIncomplete"
+        ]
+      },
+      "freeze_provenance": "89ab3ec2fe34655c8e478682e7a703ac3f585acdb1caae6d5cc68d52e9258c94",
+      "obligations": [
+        {
+          "category": "Artifact",
+          "owner": "50359c1d839dba33ea90cd1c2a24e29a38c22e87d847a9c9ba3e2459f8310711",
+          "target": 0
+        },
+        {
+          "category": "Key",
+          "owner": "7edcd709023f940cfbb242d5a27f27bb3a4831870cb7bc823e4380f98dcdd265",
+          "target": 0
+        }
+      ],
+      "policy_conflict": null,
+      "rejoins": [
+        {
+          "attempt": 0,
+          "attestation": "9d09fcd5a923f388dab79e2c6669cb0e36418b35222636278171a1604bf7fb04",
+          "entries": [],
+          "inventory_generation": "e8d3e1d37aac9d5d16742fc789fdf2bab3a60532ccbdc7d9ae1ba4a55a9926e6"
+        }
+      ],
+      "request": "requests/partial-failure-then-retry.erq1",
+      "targets": [
+        {
+          "artifact_class": "ReproManifest",
+          "artifact_digest": "024501ce59f0056166b827bacf91f3ae397e6b0d37201cc273744e070ed884ad",
+          "key_digest": "389aa7bd5732297cdd122d3766902517eda01b1684b6db97d623670568d8732b",
+          "key_role": "Signing",
+          "replica_id": "0412e288ddc639edb464892a222f26644fe08cf32826c77fc1a2f2359ed4a696",
+          "replica_set": "9c62068b4cafe2e31dbadfcc21cacfb87d450174c0159d7a0ecd1a7ba14eb9ca"
+        }
+      ],
+      "title": "A negative key acknowledgement gives PartialFailure; the retry closes it to Complete and a PreserveExact rule cannot restore the redacted claim."
+    },
+    {
+      "applicability": [
+        {
+          "category": "Artifact",
+          "decision": "Applicable",
+          "target": 0
+        },
+        {
+          "category": "Key",
+          "decision": "Inapplicable",
+          "target": 0
+        },
+        {
+          "category": "Replica",
+          "decision": "Applicable",
+          "target": 0
+        },
+        {
+          "category": "Backup",
+          "decision": "Applicable",
+          "target": 0
+        }
+      ],
+      "attempts": [
+        {
+          "acknowledgements": [
+            {
+              "evidence": "47e3a4e546b79f327453af857c4550be99244a02ee90114b400899c7fba4a1d4",
+              "obligation": 2,
+              "outcome": "Acknowledged"
+            },
+            {
+              "evidence": "fe2148b7b176d06da355d89dabbc6169f9178bd82c0778c014f3c1472b442fdb",
+              "obligation": 0,
+              "outcome": "Stale"
+            }
+          ],
+          "authorization_provenance": "1ed7d7a4611d7e9ba9e4975d5ff7ed89dfda414db9e42ceb341bd6506b2b3896",
+          "rows": [
+            {
+              "acknowledgements": "8053b1ab6019e3d7fdb3a2d76ef3d61ed240f1a85cd1efe6f5ae3b5d29669a14",
+              "obligation": 0,
+              "provenance": "7493d3d4c57c2838828c5587b4142c2a163d3db71c0b0b2760348bf6b0b8923f",
+              "reason": "263c103580a79d991ebdb687d772ab9c0a330fed19383aa21c88e5ec12f14aab",
+              "retained_disclosure": "7856dd8578f4b5db9e5b4f54371cc42251425afba298384e5174cb5962c2b9b2",
+              "rule": "Remove",
+              "state": "Retained"
+            },
+            {
+              "acknowledgements": "1751eef6ba5cba27d66013be87604fa5568428c9398da3f639b37ac7c953062b",
+              "obligation": 1,
+              "provenance": "8d4fd39b8e556c1a5e84462d84bceb06f4344ca85574b43f9f1b8909f90212c9",
+              "reason": "b97964333b5647bf3432833e724661d2071c1e5fb74a1900fbb4a48d739f19a0",
+              "retained_disclosure": "a9c22cd70a90c7d07dddbbc3712d5e970954a956c47e137172ee5f7d683d9028",
+              "rule": "Remove",
+              "state": "Retained"
+            },
+            {
+              "acknowledgements": "d491439430d4de478c239bfcc6abd2b6d400413e93b4949d146c3334ea767c47",
+              "obligation": 2,
+              "provenance": "24cddf542906d02895ea3cb02ea9af35c4fe513f9fc08daee6d17c60b0c16351",
+              "reason": "de454257619b6c251d31a6addf7b84a3bb945ccc7e950e3062e693a7142a7faf",
+              "retained_disclosure": "486d3426fdd888c327eaeaf23a0ca7b95404c4c41b70f6265749fff214a139ee",
+              "rule": "RetainStructure",
+              "state": "TransitionApplied"
+            }
+          ],
+          "signature": "2b0de8cfa1524a11803f08106e6a2e84a449d43cc49c5055682a6462ffaa0e00"
+        }
+      ],
+      "authorization_provenance": "4e3ee5d7bd2b6be4850660c21d23c388a49c26379c819e753e4df633f3cdbbe8",
+      "case_id": "partial-failure-stale-and-missing",
+      "expected": {
+        "histories": [
+          {
+            "authorization_refusal": null,
+            "lifecycles": [
+              "Submitted",
+              "Authorized",
+              "AccessFrozen",
+              "DestructionDispatched",
+              "AwaitingAcknowledgements",
+              "PartialFailure"
+            ],
+            "receipts": [
+              {
+                "acknowledgements": [
+                  {
+                    "obligation": 2,
+                    "outcome": "Acknowledged"
+                  },
+                  {
+                    "obligation": 0,
+                    "outcome": "Stale"
+                  }
+                ],
+                "failed_owners": [
+                  "b819ab938fe81b7657fb0abac4952c91bc0f1fafdc475d2560182523eaa8243a"
+                ],
+                "lifecycle": "PartialFailure",
+                "pending_owners": [
+                  "c0b9add73a8ef501a1b1982669e07b9a07471cf7988f3ca07ce8fe31bd607326"
+                ],
+                "replay_claim": "StructuralOnly",
+                "rows": [
+                  {
+                    "from": "Exact",
+                    "obligation": 0,
+                    "to": "Exact"
+                  },
+                  {
+                    "from": "Exact",
+                    "obligation": 1,
+                    "to": "Exact"
+                  },
+                  {
+                    "from": "Exact",
+                    "obligation": 2,
+                    "to": "StructuralOnly"
+                  }
+                ]
+              }
+            ],
+            "replay_claims": [
+              "Exact",
+              "Exact",
+              "Exact",
+              "Exact",
+              "Exact",
+              "StructuralOnly"
+            ]
+          }
+        ],
+        "rejoins": [
+          "BackupDeletionPending"
+        ]
+      },
+      "freeze_provenance": "fe66102be52adb82416e684ed1e58bdf680efb0690c56c130c7c7f3f2b9f7de5",
+      "obligations": [
+        {
+          "category": "Artifact",
+          "owner": "b819ab938fe81b7657fb0abac4952c91bc0f1fafdc475d2560182523eaa8243a",
+          "target": 0
+        },
+        {
+          "category": "Replica",
+          "owner": "c0b9add73a8ef501a1b1982669e07b9a07471cf7988f3ca07ce8fe31bd607326",
+          "target": 0
+        },
+        {
+          "category": "Backup",
+          "owner": "fda0703df661e3e37d7bd2d974e28be376c4a2d23741391554577612acb7f9a3",
+          "target": 0
+        }
+      ],
+      "policy_conflict": null,
+      "rejoins": [
+        {
+          "attempt": 0,
+          "attestation": "9d09fcd5a923f388dab79e2c6669cb0e36418b35222636278171a1604bf7fb04",
+          "entries": [
+            {
+              "disposition": "Tombstoned",
+              "evidence": "2c542c7a18a59533746303e163e0b8a3877391c46636b18f1aedc7ee1b1c105c",
+              "obligation": 1
+            },
+            {
+              "disposition": "Tombstoned",
+              "evidence": "818a99883eb52813a446497ba4aac8428708633879be5a78e2a73756c1d121fc",
+              "obligation": 2
+            }
+          ],
+          "inventory_generation": "d2ceec86a6bdd9d97a21b534c9973468aba624d147e7808da76a82437c0f10bd"
+        }
+      ],
+      "request": "requests/partial-failure-stale-and-missing.erq1",
+      "targets": [
+        {
+          "artifact_class": "CausalTrace",
+          "artifact_digest": "cf23038e951543ffbb48e1dc8d04f4b09adda117801b33e2a7f0d93e11b88a62",
+          "key_digest": "f5024a117fa5559d73118e43bb1a87c4fc8ca9a1bbd9247db7da3f118508d516",
+          "key_role": "BackupEnvelope",
+          "replica_id": "ab905920551336449964f21ad29e3b45a22f3fc0895faf34b0bd947e777d1c6c",
+          "replica_set": "52121f4c3245f120a1f8bb2c948fb871278faef2046cce16dbb7eae188847cae"
+        }
+      ],
+      "title": "A stale artifact acknowledgement and a missing replica acknowledgement leave the attempt PartialFailure at its deadline; a rejoin against it is refused."
+    },
+    {
+      "applicability": [
+        {
+          "category": "Artifact",
+          "decision": "Applicable",
+          "target": 0
+        },
+        {
+          "category": "Key",
+          "decision": "Inapplicable",
+          "target": 0
+        },
+        {
+          "category": "Replica",
+          "decision": "Inapplicable",
+          "target": 0
+        },
+        {
+          "category": "Backup",
+          "decision": "Inapplicable",
+          "target": 0
+        }
+      ],
+      "attempts": [
+        {
+          "acknowledgements": [
+            {
+              "evidence": "a1c71b26f354804c3c1aa5d73a983173f23d7fccf9cf6bf62cf5daddad64ddbf",
+              "obligation": 0,
+              "outcome": "Acknowledged"
+            }
+          ],
+          "authorization_provenance": "19caad010ed37719b0477a5cf0308f7e3b763a0c94e9c51d07180e0d8e7b31b4",
+          "rows": [
+            {
+              "acknowledgements": "5ba3ff9e3cb53ef2aa96ea2fa4df3ccded0de799f0bca191c093bcb902d87ae0",
+              "obligation": 0,
+              "provenance": "0f51718bfb3182437200670712643e200e4f62832cfafc73d5205dcfc5f67f00",
+              "reason": "4375fbd984078c5bb1881efcf98290f14a819782a09cd4e982c7dc4be297ee24",
+              "retained_disclosure": "ada653352c52429e29880bfa2f14e31628019f961f8198bd0b52ed8fd8256164",
+              "rule": "RedactViews",
+              "state": "TransitionApplied"
+            }
+          ],
+          "signature": "59367acc970b9fbad0795e8293b9b617c439c9b27bab1b624302e4f3183a71a0"
+        }
+      ],
+      "authorization_provenance": "3fa8213cb7d69b4bdba8010dcffea9ea6b7abd3a9316341838224e62f3d59303",
+      "case_id": "policy-conflict-corrected",
+      "expected": {
+        "histories": [
+          {
+            "authorization_refusal": "Conflict",
+            "lifecycles": [
+              "Submitted",
+              "Rejected"
+            ],
+            "receipts": [],
+            "replay_claims": [
+              "Exact",
+              "Exact"
+            ]
+          },
+          {
+            "authorization_refusal": null,
+            "lifecycles": [
+              "Submitted",
+              "Authorized",
+              "AccessFrozen",
+              "DestructionDispatched",
+              "AwaitingAcknowledgements",
+              "Complete"
+            ],
+            "receipts": [
+              {
+                "acknowledgements": [
+                  {
+                    "obligation": 0,
+                    "outcome": "Acknowledged"
+                  }
+                ],
+                "failed_owners": [],
+                "lifecycle": "Complete",
+                "pending_owners": [],
+                "replay_claim": "ExactAuthoritativeWithRedactedViews",
+                "rows": [
+                  {
+                    "from": "Exact",
+                    "obligation": 0,
+                    "to": "ExactAuthoritativeWithRedactedViews"
+                  }
+                ]
+              }
+            ],
+            "replay_claims": [
+              "Exact",
+              "Exact",
+              "Exact",
+              "Exact",
+              "Exact",
+              "ExactAuthoritativeWithRedactedViews"
+            ]
+          }
+        ],
+        "rejoins": []
+      },
+      "freeze_provenance": "5a96ce6509f4986e317e110a655ea0525166129a362b4f3728993a82d51c3cc0",
+      "obligations": [
+        {
+          "category": "Artifact",
+          "owner": "38d17881e4a58b044a20bec6dd6bf4e9059fb7262537a30fa01addea44ef489e",
+          "target": 0
+        }
+      ],
+      "policy_conflict": {
+        "correction_authorization": "645b5630d63bf8d9ca186787273fc1bf7fee24af90ce9b35a587cf4ea42c503b",
+        "correction_reason": "20b6572a524a7564bccedddfb213b7534c3f6b2b238643a14292d06508a1f55c",
+        "rejection_provenance": "664b346d3ede90a8db47de56a43e094547ba6382b06fe99b597721ea54139e87",
+        "request": "requests/policy-conflict-corrected.corrected.erq1"
+      },
+      "rejoins": [],
+      "request": "requests/policy-conflict-corrected.erq1",
+      "targets": [
+        {
+          "artifact_class": "CalibrationReport",
+          "artifact_digest": "ca6b6cb477ca8973efbdd5f70d4044bab466f16349223633aa046bfc47847807",
+          "key_digest": "3cf6bf4d6a5e3a2c1bcec82405791d5363d8be64f2cb682b4f853880702ff8fa",
+          "key_role": "DataEncryption",
+          "replica_id": "b33588c4a5b341ba619bdf0311eca5190d110ef5cee970af54a38da96d640aeb",
+          "replica_set": "0b6f55ef6398d03a097909ef9256e0f51ed31d84a0718a2984bb713b6977efd6"
+        }
+      ],
+      "title": "The authority refuses authorization with PolicyConflict; the request is Rejected and a corrected ERQ1 bound to its ErasureCorrectionProvenanceV1 completes."
+    },
+    {
+      "applicability": [
+        {
+          "category": "Artifact",
+          "decision": "Applicable",
+          "target": 0
+        },
+        {
+          "category": "Artifact",
+          "decision": "Applicable",
+          "target": 1
+        },
+        {
+          "category": "Key",
+          "decision": "Applicable",
+          "target": 0
+        },
+        {
+          "category": "Key",
+          "decision": "Inapplicable",
+          "target": 1
+        },
+        {
+          "category": "Replica",
+          "decision": "Inapplicable",
+          "target": 0
+        },
+        {
+          "category": "Replica",
+          "decision": "Inapplicable",
+          "target": 1
+        },
+        {
+          "category": "Backup",
+          "decision": "Inapplicable",
+          "target": 0
+        },
+        {
+          "category": "Backup",
+          "decision": "Inapplicable",
+          "target": 1
+        }
+      ],
+      "attempts": [
+        {
+          "acknowledgements": [
+            {
+              "evidence": "0b04aea2c60204fd644e944adf66ed7fcce257daeb7e34662db28b1132e2f9fd",
+              "obligation": 2,
+              "outcome": "Acknowledged"
+            },
+            {
+              "evidence": "52fcc233b6f6681de1059d104c663f234e7c4e7c97b736a272c3423d0e3ddfc5",
+              "obligation": 0,
+              "outcome": "Acknowledged"
+            },
+            {
+              "evidence": "a1ec5fb3a9801e65c8d61b5cab1a36ac30e374ca877763d6f01faf651e353bd2",
+              "obligation": 1,
+              "outcome": "Acknowledged"
+            }
+          ],
+          "authorization_provenance": "2aa3fa1e1fe624dffb4196527f15f640fbe1a72b986f1e93cf15461c727a5b72",
+          "rows": [
+            {
+              "acknowledgements": "524f6696f22ccb6df8ef2360d4f66b679a5d163750f693c5ec2e7442fb9dae1f",
+              "obligation": 0,
+              "provenance": "5e9e019f20220698469ab7cb17ef31900da19fad80963ad832c7dd713203edfa",
+              "reason": "1d64d4dfddd7f5653f6188ef8293dcd0f314aacc155a18b7970fb207a1e98b56",
+              "retained_disclosure": "208f0eb1dbb7c3cb5f17198d967d20729271a30154c0b2c3b21e4759caf71d9b",
+              "rule": "Remove",
+              "state": "TransitionApplied"
+            },
+            {
+              "acknowledgements": "fb17b04c847197c1e1419f1c35e57237d589c28de4fc1c08f370449d9c1b31a9",
+              "obligation": 1,
+              "provenance": "834d7d1346fcf0ed1b0d19f29218b8550f8de81096f554e6560a6ced356dfdeb",
+              "reason": "94fb527a1e435009a6e7fa6d3843c1c7ded9a3f0cf3c065b2b75993a8ac6b7a1",
+              "retained_disclosure": "58798b3bce3f2931801f8f1eca1dcdcaa38007b8b37b08243449665d3eb57ba1",
+              "rule": "Remove",
+              "state": "TransitionApplied"
+            },
+            {
+              "acknowledgements": "de8b3b0a4d672700c043a85fdbb9bd054915ba691b6722edbbce3df37aa7f91d",
+              "obligation": 2,
+              "provenance": "be34e32d70e2dc4367ee388421176f24ea8ebde678bbd2f6c9d602d59daad0b1",
+              "reason": "c86f0b49808aecbf152272248ced63163969c313f6baa245954dc61c7b838961",
+              "retained_disclosure": "5695f4e8c9cb6c9c8a5b169c8bbbd69c13b182f6dacdbd23afafb12967713c60",
+              "rule": "PreserveExact",
+              "state": "Retained"
+            }
+          ],
+          "signature": "3788b103ed24f4f3a04e5d6dc6b0bc165971d2195fc5e3f64c3438f000146b69"
+        }
+      ],
+      "authorization_provenance": "09d91b3d6b379ab14d67ff2beb773e2748d9100643d76ea668a6bc9ed60f100a",
+      "case_id": "legal-hold",
+      "expected": {
+        "histories": [
+          {
+            "authorization_refusal": null,
+            "lifecycles": [
+              "Submitted",
+              "Authorized",
+              "AccessFrozen",
+              "DestructionDispatched",
+              "AwaitingAcknowledgements",
+              "Complete"
+            ],
+            "receipts": [
+              {
+                "acknowledgements": [
+                  {
+                    "obligation": 1,
+                    "outcome": "Acknowledged"
+                  },
+                  {
+                    "obligation": 0,
+                    "outcome": "Acknowledged"
+                  },
+                  {
+                    "obligation": 2,
+                    "outcome": "Acknowledged"
+                  }
+                ],
+                "failed_owners": [],
+                "lifecycle": "Complete",
+                "pending_owners": [],
+                "replay_claim": "UnverifiableArtifactsMissing",
+                "rows": [
+                  {
+                    "from": "Exact",
+                    "obligation": 0,
+                    "to": "UnverifiableArtifactsMissing"
+                  },
+                  {
+                    "from": "Exact",
+                    "obligation": 2,
+                    "to": "Exact"
+                  },
+                  {
+                    "from": "Exact",
+                    "obligation": 1,
+                    "to": "UnverifiableArtifactsMissing"
+                  }
+                ]
+              }
+            ],
+            "replay_claims": [
+              "Exact",
+              "Exact",
+              "Exact",
+              "Exact",
+              "Exact",
+              "UnverifiableArtifactsMissing"
+            ]
+          }
+        ],
+        "rejoins": []
+      },
+      "freeze_provenance": "6a9dcf5597aa1b3d13cea704fa7a9e55ba07f4a7fb46cae24f024b630f1c7fd0",
+      "obligations": [
+        {
+          "category": "Artifact",
+          "owner": "036d2a73d5c502b977e8b07af9bbd6cd6f93eb203767b26a39d93ca178eb5d10",
+          "target": 0
+        },
+        {
+          "category": "Key",
+          "owner": "8c31a37b150d925180692475ecd3407e5da448b25f2649fe21aef846e9c51817",
+          "target": 0
+        },
+        {
+          "category": "Artifact",
+          "owner": "100bab2c54d5f2eeb3e1a1f59e9fc174ffcb121dc6961bf0c14d67346957e84e",
+          "target": 1
+        }
+      ],
+      "policy_conflict": null,
+      "rejoins": [],
+      "request": "requests/legal-hold.erq1",
+      "targets": [
+        {
+          "artifact_class": "Export",
+          "artifact_digest": "c16fe127c323ca2acdea65732725f3ee57962c6fa96661028d48e8ec33e1fd12",
+          "key_digest": "8a08d63b462e1ac57e1f288944ab8add7afd34c7d707215f137bb66163fea0ba",
+          "key_role": "DataEncryption",
+          "replica_id": "fdb64419e2c17f623debe13f6787ffff0ed695985bfdc8947e3e7e768a6886ca",
+          "replica_set": "1f3c58ae7d2f6c0d3e0d478b1f19e8fbed95840e0ed05eae0e5e21a5030aceb2"
+        },
+        {
+          "artifact_class": "ForkOrSnapshot",
+          "artifact_digest": "290026418f9f9ce7c556235f93b601c23b2a0b10d0236389c3c36ce095e49da5",
+          "key_digest": "e07991671804644bbf8acc2061634245313c5d8e85f2bd35c437ef81d46f10d6",
+          "key_role": "DataEncryption",
+          "replica_id": "fdb64419e2c17f623debe13f6787ffff0ed695985bfdc8947e3e7e768a6886ca",
+          "replica_set": "1f3c58ae7d2f6c0d3e0d478b1f19e8fbed95840e0ed05eae0e5e21a5030aceb2"
+        }
+      ],
+      "title": "The pinned policy holds one artifact: its key, replica and backup obligations are Inapplicable, it keeps Exact with a retained-disclosure digest, and the request completes on the remaining obligations."
+    },
+    {
+      "applicability": [
+        {
+          "category": "Artifact",
+          "decision": "Applicable",
+          "target": 0
+        },
+        {
+          "category": "Artifact",
+          "decision": "Applicable",
+          "target": 1
+        },
+        {
+          "category": "Artifact",
+          "decision": "Applicable",
+          "target": 2
+        },
+        {
+          "category": "Artifact",
+          "decision": "Applicable",
+          "target": 3
+        },
+        {
+          "category": "Artifact",
+          "decision": "Applicable",
+          "target": 4
+        },
+        {
+          "category": "Artifact",
+          "decision": "Applicable",
+          "target": 5
+        },
+        {
+          "category": "Artifact",
+          "decision": "Applicable",
+          "target": 6
+        },
+        {
+          "category": "Artifact",
+          "decision": "Applicable",
+          "target": 7
+        },
+        {
+          "category": "Artifact",
+          "decision": "Applicable",
+          "target": 8
+        },
+        {
+          "category": "Artifact",
+          "decision": "Applicable",
+          "target": 9
+        },
+        {
+          "category": "Artifact",
+          "decision": "Applicable",
+          "target": 10
+        },
+        {
+          "category": "Artifact",
+          "decision": "Applicable",
+          "target": 11
+        },
+        {
+          "category": "Artifact",
+          "decision": "Applicable",
+          "target": 12
+        },
+        {
+          "category": "Artifact",
+          "decision": "Applicable",
+          "target": 13
+        },
+        {
+          "category": "Artifact",
+          "decision": "Applicable",
+          "target": 14
+        },
+        {
+          "category": "Key",
+          "decision": "Inapplicable",
+          "target": 0
+        },
+        {
+          "category": "Key",
+          "decision": "Inapplicable",
+          "target": 1
+        },
+        {
+          "category": "Key",
+          "decision": "Inapplicable",
+          "target": 2
+        },
+        {
+          "category": "Key",
+          "decision": "Inapplicable",
+          "target": 3
+        },
+        {
+          "category": "Key",
+          "decision": "Inapplicable",
+          "target": 4
+        },
+        {
+          "category": "Key",
+          "decision": "Inapplicable",
+          "target": 5
+        },
+        {
+          "category": "Key",
+          "decision": "Inapplicable",
+          "target": 6
+        },
+        {
+          "category": "Key",
+          "decision": "Inapplicable",
+          "target": 7
+        },
+        {
+          "category": "Key",
+          "decision": "Inapplicable",
+          "target": 8
+        },
+        {
+          "category": "Key",
+          "decision": "Inapplicable",
+          "target": 9
+        },
+        {
+          "category": "Key",
+          "decision": "Inapplicable",
+          "target": 10
+        },
+        {
+          "category": "Key",
+          "decision": "Inapplicable",
+          "target": 11
+        },
+        {
+          "category": "Key",
+          "decision": "Inapplicable",
+          "target": 12
+        },
+        {
+          "category": "Key",
+          "decision": "Inapplicable",
+          "target": 13
+        },
+        {
+          "category": "Key",
+          "decision": "Inapplicable",
+          "target": 14
+        },
+        {
+          "category": "Replica",
+          "decision": "Inapplicable",
+          "target": 0
+        },
+        {
+          "category": "Replica",
+          "decision": "Inapplicable",
+          "target": 1
+        },
+        {
+          "category": "Replica",
+          "decision": "Inapplicable",
+          "target": 2
+        },
+        {
+          "category": "Replica",
+          "decision": "Inapplicable",
+          "target": 3
+        },
+        {
+          "category": "Replica",
+          "decision": "Inapplicable",
+          "target": 4
+        },
+        {
+          "category": "Replica",
+          "decision": "Inapplicable",
+          "target": 5
+        },
+        {
+          "category": "Replica",
+          "decision": "Inapplicable",
+          "target": 6
+        },
+        {
+          "category": "Replica",
+          "decision": "Inapplicable",
+          "target": 7
+        },
+        {
+          "category": "Replica",
+          "decision": "Inapplicable",
+          "target": 8
+        },
+        {
+          "category": "Replica",
+          "decision": "Inapplicable",
+          "target": 9
+        },
+        {
+          "category": "Replica",
+          "decision": "Inapplicable",
+          "target": 10
+        },
+        {
+          "category": "Replica",
+          "decision": "Inapplicable",
+          "target": 11
+        },
+        {
+          "category": "Replica",
+          "decision": "Inapplicable",
+          "target": 12
+        },
+        {
+          "category": "Replica",
+          "decision": "Inapplicable",
+          "target": 13
+        },
+        {
+          "category": "Replica",
+          "decision": "Inapplicable",
+          "target": 14
+        },
+        {
+          "category": "Backup",
+          "decision": "Inapplicable",
+          "target": 0
+        },
+        {
+          "category": "Backup",
+          "decision": "Inapplicable",
+          "target": 1
+        },
+        {
+          "category": "Backup",
+          "decision": "Inapplicable",
+          "target": 2
+        },
+        {
+          "category": "Backup",
+          "decision": "Inapplicable",
+          "target": 3
+        },
+        {
+          "category": "Backup",
+          "decision": "Inapplicable",
+          "target": 4
+        },
+        {
+          "category": "Backup",
+          "decision": "Inapplicable",
+          "target": 5
+        },
+        {
+          "category": "Backup",
+          "decision": "Inapplicable",
+          "target": 6
+        },
+        {
+          "category": "Backup",
+          "decision": "Inapplicable",
+          "target": 7
+        },
+        {
+          "category": "Backup",
+          "decision": "Inapplicable",
+          "target": 8
+        },
+        {
+          "category": "Backup",
+          "decision": "Inapplicable",
+          "target": 9
+        },
+        {
+          "category": "Backup",
+          "decision": "Inapplicable",
+          "target": 10
+        },
+        {
+          "category": "Backup",
+          "decision": "Inapplicable",
+          "target": 11
+        },
+        {
+          "category": "Backup",
+          "decision": "Inapplicable",
+          "target": 12
+        },
+        {
+          "category": "Backup",
+          "decision": "Inapplicable",
+          "target": 13
+        },
+        {
+          "category": "Backup",
+          "decision": "Inapplicable",
+          "target": 14
+        }
+      ],
+      "attempts": [
+        {
+          "acknowledgements": [
+            {
+              "evidence": "60fb77772f4e34f322c8ed1c4984a9249ad3456a1a8b07c7a6fc35fd1d5dbb0a",
+              "obligation": 0,
+              "outcome": "Acknowledged"
+            },
+            {
+              "evidence": "f48b889da7abd4fccf2422355f6ccf26c298ecd932a607274c3363aedc443e34",
+              "obligation": 1,
+              "outcome": "Acknowledged"
+            },
+            {
+              "evidence": "bf532dae1f980bb9d9e8ff711c1094e05c5d3c069ce4a5c3b4db361f51e52686",
+              "obligation": 2,
+              "outcome": "Acknowledged"
+            },
+            {
+              "evidence": "dea3b1c50fca6a983fa456a5aa0aba49a8b9adb017b7afee9ffc31bce84def05",
+              "obligation": 3,
+              "outcome": "Acknowledged"
+            },
+            {
+              "evidence": "63709ad7453dc02be9e97b62283b1a9f29a550fdd7db0a28fcf91e29429fc6af",
+              "obligation": 4,
+              "outcome": "Acknowledged"
+            },
+            {
+              "evidence": "7c491a734a2c40f3fb3e030d7e2eba514801bdff8bbb8458458927d4ed848668",
+              "obligation": 5,
+              "outcome": "Acknowledged"
+            },
+            {
+              "evidence": "f2bd850ce4829a874c180ab973e52f7f446b7ef4da465194faf52ba9d10dcfe7",
+              "obligation": 6,
+              "outcome": "Acknowledged"
+            },
+            {
+              "evidence": "035eb3e8c1f70bf67afaf401a541939964683456a5634b0ff2d1a9ee8dc61d10",
+              "obligation": 7,
+              "outcome": "Acknowledged"
+            },
+            {
+              "evidence": "e72647f8351bcf09499bf473a37545086ba9c9ddd350f22048b31c3a190b73f0",
+              "obligation": 8,
+              "outcome": "Acknowledged"
+            },
+            {
+              "evidence": "b668cfdffe99dcc0d62a5fc154488f94cd23bd16e61e57b94e58d6bb001bcce1",
+              "obligation": 9,
+              "outcome": "Acknowledged"
+            },
+            {
+              "evidence": "b8366a58a55e8116a8827b861eb4456a1c0da3090f6edbb4c123799808feebbf",
+              "obligation": 10,
+              "outcome": "Acknowledged"
+            },
+            {
+              "evidence": "95f91f915040083a747142603edb30f6b8ae7dd2867a9f2bdedd0b203ee22505",
+              "obligation": 11,
+              "outcome": "Acknowledged"
+            },
+            {
+              "evidence": "58e4983c61be9d8f11d8758b310cc5286a53715333919bec248de2be6e29da17",
+              "obligation": 12,
+              "outcome": "Acknowledged"
+            },
+            {
+              "evidence": "a5196b0cbd158b537af22a614f6d44aa6bb6e4022cd3ecc68604fce68d5afee8",
+              "obligation": 13,
+              "outcome": "Acknowledged"
+            },
+            {
+              "evidence": "5104c63340f00fda4b8cac311263a90f1f0c103db8be73c376b0bca91cf91fa1",
+              "obligation": 14,
+              "outcome": "Acknowledged"
+            }
+          ],
+          "authorization_provenance": "893cec48eb997c1dee0c2f7ee260636744fe7eec6516a6acc2475fd9626c7088",
+          "rows": [
+            {
+              "acknowledgements": "876df452c3b66a9fbd2572ef91318bc3e5144e3a787fe59e07ee2aff30ee8af7",
+              "obligation": 0,
+              "provenance": "68d7044f98cb1625e1b12317175a40fb2a06cc09919c69f1bc98a1eaf3cd75eb",
+              "reason": "f1ba132216c41460471784c87be1068ec6af32ceaa6e04c5123e90242e88fd69",
+              "retained_disclosure": "6e68e1fd9419a64e9db0bf6e328ff3367e3f4586da8ab7880e02c931f264700e",
+              "rule": "PreserveExact",
+              "state": "Retained"
+            },
+            {
+              "acknowledgements": "6a3affbb5bbdb2825b7c5262e2bc19fe6ea287c43ee7e89b544e6227982629f4",
+              "obligation": 1,
+              "provenance": "67a16fbf2b05f21a968b9ef74c47095be05e31f8bc20543ac96f7ab59825a85d",
+              "reason": "04495f83e2c80b02168d6bb1d44ad741424da570d9aaa83c0840b1182d8a1a31",
+              "retained_disclosure": "c6f17b2acc00d4acd80ccc9dca6a16db1395b9fdef3c81d8ddb6a64220390ebb",
+              "rule": "PreserveExact",
+              "state": "TransitionApplied"
+            },
+            {
+              "acknowledgements": "7deec6768bccd65560aee1102bf0184bd857f5c286065b3e0d861fd8cf1d16ff",
+              "obligation": 2,
+              "provenance": "5ca7932be8b7b77945dd96f47351d187cb6835e1c6946c7c7f61f0618ec370dc",
+              "reason": "c834fb163573ac599c378c2e80061ed47fd5465fc5b40539f1607403c6c86704",
+              "retained_disclosure": "93edeed0af3b77b92385fa3b823fa07d590ca4209b6b85cf078245574e154527",
+              "rule": "RedactViews",
+              "state": "TransitionApplied"
+            },
+            {
+              "acknowledgements": "1496eb0df2da821dcdabc852dc860d667cf936e9cf0b43d84677c6921682964b",
+              "obligation": 3,
+              "provenance": "35393f1bdd46b63056ef5d5a48505b025f7d6a61dc8e80963051afdabc413b0e",
+              "reason": "7f682bb5e2f369a750026cc426caf3020bde45562c0c8dc5ef676632fa814545",
+              "retained_disclosure": "d481b13d4d10b113ae484ad3527e619efbf159fa61ed52575aa8f582b20a8379",
+              "rule": "RetainStructure",
+              "state": "TransitionApplied"
+            },
+            {
+              "acknowledgements": "a7ef6c51f9f2234668679f2a84a4201fafb0f3221048bc8e39398d6951994e7f",
+              "obligation": 4,
+              "provenance": "4cacf8736e5f7a0cf1e052076fe5be3604a16660cc8283b23da2334e80cbff19",
+              "reason": "5bca86152f1edbe97748d01e98f0ebfd20a6c3d96a2a857512d1e7cee49deda9",
+              "retained_disclosure": "5cbc43fee227245f9f0a75794cceec35bba67d9a60682dc3ae98c3fa0f9972c4",
+              "rule": "Remove",
+              "state": "TransitionApplied"
+            },
+            {
+              "acknowledgements": "b263257fa1572be6fe27a7b5316086cdbca96e8db01ed2ba4f2c5cc430f47a1d",
+              "obligation": 5,
+              "provenance": "b6263f58a8fafa7e71ee938c2dff92b801e23a911f8ed834a930ff6fe1f899c3",
+              "reason": "da9c5db1161a4398d8596490b003706d14dd380ece8430d1d4324de77f52e1eb",
+              "retained_disclosure": "646b27c8dac1c22c702819712c3eb7176dfc79f0d97fd8c4bf349f9ab039696e",
+              "rule": "RetainStructure",
+              "state": "MissingParentCut"
+            },
+            {
+              "acknowledgements": "27a0c7617a48ff1ae29afa25384b90559c3b091e2ac798dc07082f83a8f7c2dc",
+              "obligation": 6,
+              "provenance": "ed575ed81b873945f601cfef10e1b9192c139dca667a549a40a47c35573b9875",
+              "reason": "1eefcbd87f01c358e4ff933e989975a1342ed5edca4c1181a448bda18c1d487e",
+              "retained_disclosure": "749f4d0f9765868af55ee3b01a3763a02a81eac1326c8abcb7da24451c206be9",
+              "rule": "RedactViews",
+              "state": "MissingFrozenInput"
+            },
+            {
+              "acknowledgements": "c795765d4c6e0a735348f2ff4e03e421fd0670d7c856055d50deb1c541d04d8a",
+              "obligation": 7,
+              "provenance": "903b8435e730d09fbf8d391e2ee78d4ab949932c3c85e47f12787b018b019cb2",
+              "reason": "48450d579ddb63a8afd3940c12bef9b651e2502f21c8611c3beb212ddf034a9d",
+              "retained_disclosure": "a32e892ce147d2f01ce9a1713bd52e24b9ac6af8eb6bf7cd859f52909f609e5c",
+              "rule": "PreserveExact",
+              "state": "MissingKey"
+            },
+            {
+              "acknowledgements": "7fee13dd568bf31e82e0218a00a324d818767f49c57367af3dfa61160a246a91",
+              "obligation": 8,
+              "provenance": "d58d4af7fc48e58e3126d2b2611c5aa3e0f4fd6546857745d932248b0e0914ca",
+              "reason": "6756ac5a0a4ad35afef015ddea4b301a5aaf74a949a0668726e27892c06a7c7e",
+              "retained_disclosure": "0b6dfe518801cc02f88b3b1f94fea5200b4f3eab9270ce09a70899705626b14d",
+              "rule": "RedactViews",
+              "state": "MissingSchema"
+            },
+            {
+              "acknowledgements": "52cc843cbb0fd93c3a1783a46a63838df474cfa93bee2010d0ad70d9fe55db5a",
+              "obligation": 9,
+              "provenance": "02965d8713b70a0b7cf281514d5d2860413b2775e4241f2e1bd20b1c0d306f0e",
+              "reason": "61eebd30dc2294b9c7fdf032101f192dd151f3f98075f92bc3c24cceedb21ad0",
+              "retained_disclosure": "3e4db42f3a2864c241d586c2ffebca9e61223c486b74005320a6f0720d945d48",
+              "rule": "RetainStructure",
+              "state": "MissingPlugin"
+            },
+            {
+              "acknowledgements": "336651b08f9b5b7ff437c1f1586979e001f1839f082a1afa3def8545ce234cec",
+              "obligation": 10,
+              "provenance": "1a796a850cce18f398bee8234ab804f6d45dc1964407962fe6f7ac02dcb2704b",
+              "reason": "d9c78b893d91f6818b802ff43c861631bf1232561a3c3252a053a7720ff2992f",
+              "retained_disclosure": "3df989e3601dfdcc3232d76f7f124ccbaddda70670fd1f08cd347859f4a622a8",
+              "rule": "PreserveExact",
+              "state": "MissingModel"
+            },
+            {
+              "acknowledgements": "6aceb89af5d7eb15c03d931386429cf521460d03f503c2ce3609571f350d8a52",
+              "obligation": 11,
+              "provenance": "657dbef3f897ae104dfa9c6e698c608fd55acd1f029ae7909507af5aa4cc35a2",
+              "reason": "edc054fc79c54d561adf24fbe7fc4c872a05f55b900a2d7521e32ae28fbe95df",
+              "retained_disclosure": "d4fad84cd2ffb0f410069e6a6a1d73ebd08a0f9468e95576029f077afecc3f63",
+              "rule": "RedactViews",
+              "state": "MissingRuntime"
+            },
+            {
+              "acknowledgements": "8798e25cc58339bc3f80343df66ee0eb691068c49618b231f8c03d4eb542647d",
+              "obligation": 12,
+              "provenance": "551c9e8fd3e914e11f588b0b4055c8a9c549bae25090206ffac8775dbb9857e9",
+              "reason": "0a58277e06d7601ad5f78b5de218777949580fc4d28425ae95efb703f3c7a44d",
+              "retained_disclosure": "c57c81481107c77fd625a07b16b24ca2e4c64a13f112b28182f291b3e6d4b1c7",
+              "rule": "RetainStructure",
+              "state": "MissingRequiredOutput"
+            },
+            {
+              "acknowledgements": "abcac9f275010fed38e8c8fffe158ebfb2aefb29308412e4f0df62a0dc32e582",
+              "obligation": 13,
+              "provenance": "3511f1f1d088295b5b7de3b83913531df4b8430ea06564772140586e6d5cf40c",
+              "reason": "410c17ce1af1c4041e351bf80cd20bfbf47989625720f3e7c69578f734339ada",
+              "retained_disclosure": "10baf7084464e9aaadb18b0f060905d5bd51beac5b0ca7fadfcec07dba968a38",
+              "rule": "Remove",
+              "state": "Erased"
+            },
+            {
+              "acknowledgements": "9b938f84ed123301e349518fdf4a193d8ecedd0632db9a75f1ef4a56623d684d",
+              "obligation": 14,
+              "provenance": "0b5caa0fb9dbfa890c6b9027a0138039b21aef758fdf72ac197ec3e46d6219d6",
+              "reason": "238069a63ec3d9b782a683dc0c4c7c8762a034f7fef301e46eb23b98d2b6a9c3",
+              "retained_disclosure": "02900684fa34978457f6c749b5598ac363b7fb712598db278824023675d11ac8",
+              "rule": "PreserveExact",
+              "state": "Invalidated"
+            }
+          ],
+          "signature": "853d77907b3a3e289ae2f090234213c226ff13bf9eb614ac2987e33365690a8b"
+        }
+      ],
+      "authorization_provenance": "1c17c9eb2601205c038d0c7a1836478cb5dc3a21f78082850721d45ff1f403e4",
+      "case_id": "transitions-every-class",
+      "expected": {
+        "histories": [
+          {
+            "authorization_refusal": null,
+            "lifecycles": [
+              "Submitted",
+              "Authorized",
+              "AccessFrozen",
+              "DestructionDispatched",
+              "AwaitingAcknowledgements",
+              "Complete"
+            ],
+            "receipts": [
+              {
+                "acknowledgements": [
+                  {
+                    "obligation": 0,
+                    "outcome": "Acknowledged"
+                  },
+                  {
+                    "obligation": 7,
+                    "outcome": "Acknowledged"
+                  },
+                  {
+                    "obligation": 14,
+                    "outcome": "Acknowledged"
+                  },
+                  {
+                    "obligation": 1,
+                    "outcome": "Acknowledged"
+                  },
+                  {
+                    "obligation": 8,
+                    "outcome": "Acknowledged"
+                  },
+                  {
+                    "obligation": 9,
+                    "outcome": "Acknowledged"
+                  },
+                  {
+                    "obligation": 2,
+                    "outcome": "Acknowledged"
+                  },
+                  {
+                    "obligation": 3,
+                    "outcome": "Acknowledged"
+                  },
+                  {
+                    "obligation": 10,
+                    "outcome": "Acknowledged"
+                  },
+                  {
+                    "obligation": 11,
+                    "outcome": "Acknowledged"
+                  },
+                  {
+                    "obligation": 4,
+                    "outcome": "Acknowledged"
+                  },
+                  {
+                    "obligation": 5,
+                    "outcome": "Acknowledged"
+                  },
+                  {
+                    "obligation": 12,
+                    "outcome": "Acknowledged"
+                  },
+                  {
+                    "obligation": 13,
+                    "outcome": "Acknowledged"
+                  },
+                  {
+                    "obligation": 6,
+                    "outcome": "Acknowledged"
+                  }
+                ],
+                "failed_owners": [],
+                "lifecycle": "Complete",
+                "pending_owners": [],
+                "replay_claim": "UnverifiableArtifactsMissing",
+                "rows": [
+                  {
+                    "from": "Exact",
+                    "obligation": 0,
+                    "to": "Exact"
+                  },
+                  {
+                    "from": "Exact",
+                    "obligation": 7,
+                    "to": "UnverifiableArtifactsMissing"
+                  },
+                  {
+                    "from": "Exact",
+                    "obligation": 14,
+                    "to": "UnverifiableArtifactsMissing"
+                  },
+                  {
+                    "from": "Exact",
+                    "obligation": 1,
+                    "to": "Exact"
+                  },
+                  {
+                    "from": "Exact",
+                    "obligation": 8,
+                    "to": "UnverifiableArtifactsMissing"
+                  },
+                  {
+                    "from": "Exact",
+                    "obligation": 9,
+                    "to": "UnverifiableArtifactsMissing"
+                  },
+                  {
+                    "from": "Exact",
+                    "obligation": 2,
+                    "to": "ExactAuthoritativeWithRedactedViews"
+                  },
+                  {
+                    "from": "Exact",
+                    "obligation": 3,
+                    "to": "StructuralOnly"
+                  },
+                  {
+                    "from": "Exact",
+                    "obligation": 10,
+                    "to": "UnverifiableArtifactsMissing"
+                  },
+                  {
+                    "from": "Exact",
+                    "obligation": 11,
+                    "to": "UnverifiableArtifactsMissing"
+                  },
+                  {
+                    "from": "Exact",
+                    "obligation": 4,
+                    "to": "UnverifiableArtifactsMissing"
+                  },
+                  {
+                    "from": "Exact",
+                    "obligation": 5,
+                    "to": "UnverifiableArtifactsMissing"
+                  },
+                  {
+                    "from": "Exact",
+                    "obligation": 12,
+                    "to": "UnverifiableArtifactsMissing"
+                  },
+                  {
+                    "from": "Exact",
+                    "obligation": 13,
+                    "to": "UnverifiableArtifactsMissing"
+                  },
+                  {
+                    "from": "Exact",
+                    "obligation": 6,
+                    "to": "UnverifiableArtifactsMissing"
+                  }
+                ]
+              }
+            ],
+            "replay_claims": [
+              "Exact",
+              "Exact",
+              "Exact",
+              "Exact",
+              "Exact",
+              "UnverifiableArtifactsMissing"
+            ]
+          }
+        ],
+        "rejoins": []
+      },
+      "freeze_provenance": "fddd4ce033bf83f781e4784d6f88c419a7bccd7d615656dfc63854a62d698bad",
+      "obligations": [
+        {
+          "category": "Artifact",
+          "owner": "b9eb8ecca75a8f2010badb40d18cf9787b509d93cc81519f35b022f5cf673d7d",
+          "target": 0
+        },
+        {
+          "category": "Artifact",
+          "owner": "80764eb519752b2584403cac572b1dde32b0f268180177b12af3ea6490508043",
+          "target": 3
+        },
+        {
+          "category": "Artifact",
+          "owner": "a0eeebcc526604375b4ccafd98f09656af95ac1422cd87c54ad1b187c46399b5",
+          "target": 6
+        },
+        {
+          "category": "Artifact",
+          "owner": "630201dc228de230e6f9fe0656a9be0c96466f947c6d29ed4597393db1041394",
+          "target": 7
+        },
+        {
+          "category": "Artifact",
+          "owner": "5355da67ad47e601fa59642776ada79df40e5864c6e3f51e9c6112e82e5bf422",
+          "target": 10
+        },
+        {
+          "category": "Artifact",
+          "owner": "08e9f37b2cec5fcd6ff966887800a9cabeb8ff9eda99b41c4ecbaf24bfb591e6",
+          "target": 11
+        },
+        {
+          "category": "Artifact",
+          "owner": "0923769da0b178dd0aff9ce834bb92b50f2d31b94d429e0ec2198704f0dfb161",
+          "target": 14
+        },
+        {
+          "category": "Artifact",
+          "owner": "ad7f5353f29a887d7b53aa7617e613d6d9af50b35fb389865aa62f715d08019c",
+          "target": 1
+        },
+        {
+          "category": "Artifact",
+          "owner": "fb8021746b54e467c694445df4a0af4d31f23e1bf380fda5cc4d270eb94d1148",
+          "target": 4
+        },
+        {
+          "category": "Artifact",
+          "owner": "3caaf3e327342f9a937ff18f314ed88e10e015f088e23874ecfeedf2c9e93643",
+          "target": 5
+        },
+        {
+          "category": "Artifact",
+          "owner": "f4d78fee87dfb40645d4760b4cd03f9ad0c89de2459581d8b45b3d177eb1ad7f",
+          "target": 8
+        },
+        {
+          "category": "Artifact",
+          "owner": "8be898130810ab03d55f45342339600cb55c5888ed3df5a73bbcf970c7b14796",
+          "target": 9
+        },
+        {
+          "category": "Artifact",
+          "owner": "0b70ddea482dc3d0cb0e654e9fc1034f1cb36c3c0b5a0dfb47f8352ad2538ee8",
+          "target": 12
+        },
+        {
+          "category": "Artifact",
+          "owner": "0dfac92aaf5aa35a3d9d0b3b723c632a764ec8c864a3307c07c48c2afb3eba9d",
+          "target": 13
+        },
+        {
+          "category": "Artifact",
+          "owner": "45b72b949a6e21f90e2e347ecfb5e431458e8932767cb2cf09d775bfdc39b835",
+          "target": 2
+        }
+      ],
+      "policy_conflict": null,
+      "rejoins": [],
+      "request": "requests/transitions-every-class.erq1",
+      "targets": [
+        {
+          "artifact_class": "TimelineReplay",
+          "artifact_digest": "30d0e1bf6ed05a64bf1cbc6e2f62e74a2871efe60dcad3e3388fcfabe0bc821b",
+          "key_digest": "96b959813d2672743d6749645f0eacfb9802f4067960f0c900ed30801634c451",
+          "key_role": "DataEncryption",
+          "replica_id": "f8d790dfc5c50d8e57f78eba0310ca6d6e75b289096ec2bb12fb48a888a9b692",
+          "replica_set": "a79c8c2bba1f627dd0f0383c0948bb93731e45a207087c6aae2a223299e0e9c7"
+        },
+        {
+          "artifact_class": "TimelineReplay",
+          "artifact_digest": "61161877b956709c743970a15d87e02b39a5511089bddcae2c8819e035dc2bf3",
+          "key_digest": "d2782b0ca660e2f0694fb4f3f889f320a01618fa28e83dbfa6221f8e43fd0de9",
+          "key_role": "ReplicaTransport",
+          "replica_id": "f8d790dfc5c50d8e57f78eba0310ca6d6e75b289096ec2bb12fb48a888a9b692",
+          "replica_set": "a79c8c2bba1f627dd0f0383c0948bb93731e45a207087c6aae2a223299e0e9c7"
+        },
+        {
+          "artifact_class": "TimelineReplay",
+          "artifact_digest": "65e6732d3ce0d78419fd76e006a49c44e8ba79a32c4a83145d179c0e17699f1b",
+          "key_digest": "e6b3ce73b8307df0ec6079725af5e617cd9cbafc625c83fe6188a820b89020b3",
+          "key_role": "BackupEnvelope",
+          "replica_id": "f8d790dfc5c50d8e57f78eba0310ca6d6e75b289096ec2bb12fb48a888a9b692",
+          "replica_set": "a79c8c2bba1f627dd0f0383c0948bb93731e45a207087c6aae2a223299e0e9c7"
+        },
+        {
+          "artifact_class": "ReproManifest",
+          "artifact_digest": "21f409107330df78c438e534cbc5978ac4d193841b1b702240182004c4df090a",
+          "key_digest": "87654c3f39215ce6020ca2aa2d7ee614af139a44af6431da0f7f4c84e64c474c",
+          "key_role": "Signing",
+          "replica_id": "f8d790dfc5c50d8e57f78eba0310ca6d6e75b289096ec2bb12fb48a888a9b692",
+          "replica_set": "a79c8c2bba1f627dd0f0383c0948bb93731e45a207087c6aae2a223299e0e9c7"
+        },
+        {
+          "artifact_class": "ReproManifest",
+          "artifact_digest": "8bd7d930d067b0446d79a826c31e95670cc7f07de508a9fc307285bedf60bdcf",
+          "key_digest": "9af3a45e93cb28d94aca79c24581589e1f8bb637dfd20611bf8a541e3abf10a6",
+          "key_role": "DataEncryption",
+          "replica_id": "f8d790dfc5c50d8e57f78eba0310ca6d6e75b289096ec2bb12fb48a888a9b692",
+          "replica_set": "a79c8c2bba1f627dd0f0383c0948bb93731e45a207087c6aae2a223299e0e9c7"
+        },
+        {
+          "artifact_class": "CausalTrace",
+          "artifact_digest": "267b68345b5bdd9d810782034c7954c20f961ae8f0dbec024401ee7c0b57e04e",
+          "key_digest": "eebe111e2223778e8067754dcf08893c1ba93c805f14e0fee158b383ca412b5f",
+          "key_role": "Signing",
+          "replica_id": "f8d790dfc5c50d8e57f78eba0310ca6d6e75b289096ec2bb12fb48a888a9b692",
+          "replica_set": "a79c8c2bba1f627dd0f0383c0948bb93731e45a207087c6aae2a223299e0e9c7"
+        },
+        {
+          "artifact_class": "CausalTrace",
+          "artifact_digest": "55d8b9ffb4f63410096e9d890ff4f15bd32dcbfd39e582ce4062b2f47bd27d18",
+          "key_digest": "be98cc1de15e30e1bbdd1630fb03fdfa12acb1f9bae55b6a8bab64b7ee0703bf",
+          "key_role": "BackupEnvelope",
+          "replica_id": "f8d790dfc5c50d8e57f78eba0310ca6d6e75b289096ec2bb12fb48a888a9b692",
+          "replica_set": "a79c8c2bba1f627dd0f0383c0948bb93731e45a207087c6aae2a223299e0e9c7"
+        },
+        {
+          "artifact_class": "CalibrationReport",
+          "artifact_digest": "4f3db83faf4c8ab4d729e67e6f99a72a19c57a17c685a5d004c6acbac73e380d",
+          "key_digest": "85dd043eb48f33aa5f9658f4d94a36b36789316d5a2a8d3d198988f0f9d0f6ab",
+          "key_role": "ReplicaTransport",
+          "replica_id": "f8d790dfc5c50d8e57f78eba0310ca6d6e75b289096ec2bb12fb48a888a9b692",
+          "replica_set": "a79c8c2bba1f627dd0f0383c0948bb93731e45a207087c6aae2a223299e0e9c7"
+        },
+        {
+          "artifact_class": "CalibrationReport",
+          "artifact_digest": "7919af6be9737588850ef6940d1a4bf5482c73b4e14b1829f6033413f496589f",
+          "key_digest": "3cdc951974993da95f10eb5d7dd466bf89ef74676432c589c3208f21f4d452ae",
+          "key_role": "BackupEnvelope",
+          "replica_id": "f8d790dfc5c50d8e57f78eba0310ca6d6e75b289096ec2bb12fb48a888a9b692",
+          "replica_set": "a79c8c2bba1f627dd0f0383c0948bb93731e45a207087c6aae2a223299e0e9c7"
+        },
+        {
+          "artifact_class": "Export",
+          "artifact_digest": "82475b0fb04e3b72dc65099619bce3c459ff0aef94508251f425211a12089f12",
+          "key_digest": "ea6c1d8f997f583031f49a8bd65c005701790bedd2e848bf4e157246429ecebf",
+          "key_role": "ReplicaTransport",
+          "replica_id": "f8d790dfc5c50d8e57f78eba0310ca6d6e75b289096ec2bb12fb48a888a9b692",
+          "replica_set": "a79c8c2bba1f627dd0f0383c0948bb93731e45a207087c6aae2a223299e0e9c7"
+        },
+        {
+          "artifact_class": "Export",
+          "artifact_digest": "ca33f7a691e1aef5a9d176369bc986e8ee0b1d895323f8034f72d3434ddee2e6",
+          "key_digest": "6f81f145d5225c3f851c247620802f7059c81a86b96b8a83caf201140d52d2ff",
+          "key_role": "DataEncryption",
+          "replica_id": "f8d790dfc5c50d8e57f78eba0310ca6d6e75b289096ec2bb12fb48a888a9b692",
+          "replica_set": "a79c8c2bba1f627dd0f0383c0948bb93731e45a207087c6aae2a223299e0e9c7"
+        },
+        {
+          "artifact_class": "ForkOrSnapshot",
+          "artifact_digest": "328a1b600280f8b3245e68a9d45658bc8307b16646303ef2d01023bbc4656ae2",
+          "key_digest": "0423dbd152263ad512d85846ea5ca7b7f7fcbd8931d556fa399fffa1cde05ec2",
+          "key_role": "Signing",
+          "replica_id": "f8d790dfc5c50d8e57f78eba0310ca6d6e75b289096ec2bb12fb48a888a9b692",
+          "replica_set": "a79c8c2bba1f627dd0f0383c0948bb93731e45a207087c6aae2a223299e0e9c7"
+        },
+        {
+          "artifact_class": "ForkOrSnapshot",
+          "artifact_digest": "bcedd93cce0f516e15ef35ff1705564bdf41044d10a059e2892da7be6b6fd80b",
+          "key_digest": "b332ce1535cb508d58f4795a7b9d24ad16125f3286feca572f4899425de2fabb",
+          "key_role": "DataEncryption",
+          "replica_id": "f8d790dfc5c50d8e57f78eba0310ca6d6e75b289096ec2bb12fb48a888a9b692",
+          "replica_set": "a79c8c2bba1f627dd0f0383c0948bb93731e45a207087c6aae2a223299e0e9c7"
+        },
+        {
+          "artifact_class": "ConformanceReport",
+          "artifact_digest": "00b9f21bb326a6c2009920007ac6afda0270ce0736ae99eec99870e6760ee0aa",
+          "key_digest": "20d7194c1b9ac36bdd08a3008ea3af300f7a51b253f4448c0d3f9e3d78b2c3af",
+          "key_role": "Signing",
+          "replica_id": "f8d790dfc5c50d8e57f78eba0310ca6d6e75b289096ec2bb12fb48a888a9b692",
+          "replica_set": "a79c8c2bba1f627dd0f0383c0948bb93731e45a207087c6aae2a223299e0e9c7"
+        },
+        {
+          "artifact_class": "ConformanceReport",
+          "artifact_digest": "43253e7a780ad2c4901cf889506e6c345fc09af19bc7ccc1f22e86ba7ac2dcee",
+          "key_digest": "13d751cd6416cab08304d7b2bb236e7437b02c50bf15a980db216212d47cb90c",
+          "key_role": "BackupEnvelope",
+          "replica_id": "f8d790dfc5c50d8e57f78eba0310ca6d6e75b289096ec2bb12fb48a888a9b692",
+          "replica_set": "a79c8c2bba1f627dd0f0383c0948bb93731e45a207087c6aae2a223299e0e9c7"
+        }
+      ],
+      "title": "Every artifact class, transition rule and artifact state through ReplayClaimEvaluatorV1."
+    }
+  ],
+  "coordinator": "aa9753b7b23520e8f0b409d882c46d1d9b4e43d45acda31a76654b51b8b754ed",
+  "distribution": "not-distributed",
+  "evidence": "engineering-evidence",
+  "execution": "local-in-process",
+  "lineage_rule": "6e8d4083e5acb143c76c70d59c585fbe521f05a0c14f23e00038e2c8cd4e1773",
+  "policy": "0a5a680462ce6af5c636bd1f623598f3619c9ce55999cfb02bdd41322ca50c1d",
+  "quota_reservation": "a7c6bc7592bca4554e7a7937959bc79232edc1dd539a7ce2f05bccc7fa89e7c0",
+  "rejoin_attestation": "9d09fcd5a923f388dab79e2c6669cb0e36418b35222636278171a1604bf7fb04",
+  "schema": "pigloros.erasure-conformance.cases.v1",
+  "scope_member": "cabe18c0fa16364c2f1a1bc1a1e5c1523652c3b24c2b745a994d08626c19d875",
+  "trust": "dc1b41c2100b0a26e481f1764256337f9efeb849300580b6f3dc4926de8cf85c"
+}

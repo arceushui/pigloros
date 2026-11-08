@@ -2,8 +2,22 @@
   "claim_layer": "gateway-client-conformance",
   "case_id": "gateway-client-conformance-deletion-redaction",
   "family": "deletion-redaction",
-  "input_blake3_digest": "8a1a9e77e230e5f63aecc0e762dfd8d9bc67caa731bbec259bf454cc383bc2a5",
-  "status": "pending",
-  "execution_result": null,
+  "input_blake3_digest": "e82f9c5d1160166a3c089fa9fe5ce254091bb2b51cb70a1596bdc3754b8b1200",
+  "status": "executed",
+  "execution_result": {
+    "evidence": "local-relaxation",
+    "modes": [
+      {
+        "mode": "local",
+        "outcome": "pass",
+        "actual_digest": "104b49f763feb73920ecfed27fdcf830a35e1986449263856d6aa6d19341e0e1"
+      },
+      {
+        "mode": "air-gapped",
+        "outcome": "pass",
+        "actual_digest": "104b49f763feb73920ecfed27fdcf830a35e1986449263856d6aa6d19341e0e1"
+      }
+    ]
+  },
   "executed_at": null
 }

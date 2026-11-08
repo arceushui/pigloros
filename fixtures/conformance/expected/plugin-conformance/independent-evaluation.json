@@ -3,7 +3,21 @@
   "case_id": "plugin-conformance-independent-evaluation",
   "family": "independent-evaluation",
   "input_blake3_digest": "8c9019ec9e380e9b8632b1daea4a0f729165916f4342d93f3c38b4fb898c2fc3",
-  "status": "pending",
-  "execution_result": null,
+  "status": "executed",
+  "execution_result": {
+    "evidence": "local-relaxation",
+    "modes": [
+      {
+        "mode": "local",
+        "outcome": "pass",
+        "actual_digest": "720600ee45668efb1c858a1ef7f344109ee5eb1933c56e9efc40166b732f8473"
+      },
+      {
+        "mode": "air-gapped",
+        "outcome": "pass",
+        "actual_digest": "720600ee45668efb1c858a1ef7f344109ee5eb1933c56e9efc40166b732f8473"
+      }
+    ]
+  },
   "executed_at": null
 }

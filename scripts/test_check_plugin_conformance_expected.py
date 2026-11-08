@@ -28,7 +28,7 @@ class CheckerTest(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
-        for part in ("expected", "inputs", "profiles", "matrix"):
+        for part in ("expected", "inputs", "oracles", "profiles", "matrix"):
             shutil.copytree(FIXTURES / part, self.root / part)
 
     def edit(self, relative: str, change: Callable[[Any], object]) -> None:
@@ -51,14 +51,31 @@ class CheckerTest(unittest.TestCase):
         self.record(lambda value: value.update(input_blake3_digest="0" * 64))
         self.assert_fault("resource-exhaustion: input_blake3_digest is not")
 
-    def test_an_executed_record_fails(self) -> None:
-        self.record(lambda value: value.update(status="executed", executed_at="now"))
-        self.assert_fault("resource-exhaustion: status is not 'pending'")
+    def test_a_pending_record_fails(self) -> None:
+        self.record(lambda value: value.update(status="pending", execution_result=None))
+        self.assert_fault("resource-exhaustion: status is not 'executed'")
+        self.assert_fault("resource-exhaustion: execution_result is not")
+
+    def test_an_execution_time_fails(self) -> None:
+        self.record(lambda value: value.update(executed_at="now"))
         self.assert_fault("resource-exhaustion: executed_at is not None")
 
-    def test_a_result_fails(self) -> None:
-        self.record(lambda value: value.update(execution_result="pass"))
-        self.assert_fault("resource-exhaustion: execution_result is not None")
+    def test_a_result_other_than_both_passing_runs_fails(self) -> None:
+        self.record(lambda value: value["execution_result"]["modes"].pop())
+        self.record(lambda value: value["execution_result"]["modes"][0].update(outcome="fail"), "denied")
+        self.record(lambda value: value["execution_result"].update(evidence="hosted"), "downgrade")
+        self.assert_fault("resource-exhaustion: execution_result is not")
+        self.assert_fault("denied: execution_result is not")
+        self.assert_fault("downgrade: execution_result is not")
+
+    def test_an_output_digest_that_is_not_the_oracle_fails(self) -> None:
+        oracle = self.root / f"oracles/{LAYER}/positive.json"
+        oracle.write_bytes(oracle.read_bytes() + b" ")
+        self.assert_fault("positive: execution_result is not")
+
+    def test_a_failure_code_that_is_not_the_oracle_fails(self) -> None:
+        self.edit(f"oracles/{LAYER}/malformed.json", lambda o: o["oracle"].update(code_id="x"))
+        self.assert_fault("malformed: execution_result is not")
 
     def test_an_extra_key_fails(self) -> None:
         self.record(lambda value: value.update(extra=1), "denied")
@@ -93,6 +110,49 @@ class CheckerTest(unittest.TestCase):
     def test_an_executed_row_count_fails(self) -> None:
         self.edit(MATRIX, lambda m: m["rows"][2].update(executed_case_count=1))
         self.assert_fault("rows[2]: executed_case_count is not 0")
+
+    def test_an_unexecuted_total_fails(self) -> None:
+        self.edit(MATRIX, lambda m: m.update(executed_case_count=0))
+        self.assert_fault("executed_case_count is not the 24 executed cases")
+
+    def test_an_executed_air_gapped_n1_case_fails(self) -> None:
+        index = next(
+            position
+            for position, case in enumerate(json.loads((FIXTURES / MATRIX).read_text())["cases"])
+            if case["case_id"] == "NI-PUBLIC-006-S-A"
+        )
+        self.edit(MATRIX, lambda m: m["cases"][index].update(executed=True))
+        self.assert_fault(f"cases[{index}]: executed is not false")
+
+    def case_index(self, case_id: str) -> int:
+        cases = json.loads((FIXTURES / MATRIX).read_text(encoding="utf-8"))["cases"]
+        return next(index for index, case in enumerate(cases) if case["case_id"] == case_id)
+
+    def test_an_n1_authority_result_digest_fails(self) -> None:
+        index = self.case_index("NI-EVAL-007-D-R")
+        self.edit(MATRIX, lambda m: m["cases"][index].update(authority_result_digest="ab" * 32))
+        self.assert_fault(f"cases[{index}]: authority_result_digest is not null")
+
+    def test_an_executed_n1_case_without_a_hex_digest_fails(self) -> None:
+        index = self.case_index("NI-EVAL-007-D-R")
+        for digest in (None, "AB" * 32, "ab" * 31, 7):
+            self.edit(MATRIX, lambda m, d=digest: m["cases"][index].update(expected_result_digest=d))
+            self.assert_fault(f"cases[{index}]: expected_result_digest is not 64 lowercase hex")
+
+    def test_an_open_n1_case_carrying_a_digest_fails(self) -> None:
+        index = self.case_index("NI-PUBLIC-006-W-A")
+        self.edit(MATRIX, lambda m: m["cases"][index].update(expected_result_digest="ab" * 32))
+        self.assert_fault(f"cases[{index}]: expected_result_digest is not null")
+
+    def test_an_unexecuted_n1_case_with_a_result_fails(self) -> None:
+        index = self.case_index("NI-EVAL-007-S-L")
+        self.edit(MATRIX, lambda m: m["cases"][index].update(executed=False))
+        self.assert_fault(f"cases[{index}]: expected_result_digest is not null")
+        self.assert_fault(f"cases[{index}]: expected_result is not null")
+
+    def test_an_n1_row_count_disagreeing_with_its_cases_fails(self) -> None:
+        self.edit(MATRIX, lambda m: m["rows"][5].update(executed_case_count=11))
+        self.assert_fault("rows[5]: executed_case_count is not its 12 cases")
 
     def test_inconsistent_counts_fail(self) -> None:
         self.edit(MATRIX, lambda m: m.update(row_count=11, case_count=191))

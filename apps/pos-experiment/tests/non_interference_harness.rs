@@ -6,11 +6,12 @@
 //! (ADR-062 Revision 8 slice N0, #1227).
 //!
 //! The Local runner spawns the `pos-ni-local-probe` binary (or `/bin/sh` for
-//! malformed frames) as a fresh process; the Replay and Fork runners drive a
-//! probe subject through the Experiment host. Every executed case is signed
-//! with the host executor key, published at its content address and checked
-//! by the independent #181 verifier in `pos-reference`. The probe captures
-//! prove the harness, not any ADR-059 row: they are not inventory evidence.
+//! malformed frames and for processes the runner kills) as a fresh process;
+//! the Replay and Fork runners drive a probe subject through the Experiment
+//! host. Every executed case is signed with the host executor key, published
+//! at its content address and checked by the independent #181 verifier in
+//! `pos-reference`. The probe captures prove the harness, not any ADR-059 row:
+//! they are not inventory evidence.
 
 use std::cell::RefCell;
 use std::fs;
@@ -109,6 +110,13 @@ fn probe_fixture(
 
 /// A Local runner of the probe binary. The coverage profile variable is the
 /// one declared environment variable it passes on, when the run has one.
+///
+/// Use it only where the probe runs to its own exit. The runner kills a
+/// process whose output passes the budget or that outlives the timeout, and
+/// an instrumented probe can already be writing its coverage profile at
+/// exit: a kill then leaves a truncated `.profraw` that fails the whole
+/// coverage merge (#1302). Cases that the runner kills run `/bin/sh`
+/// (`shell_runner`), which writes no profile.
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn probe_runner(work: &Path) -> TestResult<NonInterferenceLocalProcessRunnerV1> {
     let runner = NonInterferenceLocalProcessRunnerV1::new(PathBuf::from(PROBE), work.join("work"))?;
@@ -918,9 +926,10 @@ fn the_local_runner_executes_a_frame_only_from_a_successful_bounded_process() ->
         &valid,
     )?)]);
     assert_eq!(echoing.execute_case(&fixture).claim(), Some(true));
-    // Output over the budget is refused before it is decoded.
+    // Output over the budget is refused before it is decoded. The runner kills
+    // the over-budget process, so the subject is `/bin/sh`: see `probe_runner`.
     let mut bounded = harness_with(vec![Box::new(
-        probe_runner(&work.path().join("bounded"))?.with_output_budget(16),
+        shell_runner(&work.path().join("bounded"), echo, &valid)?.with_output_budget(16),
     )]);
     assert_eq!(
         cause_of(&mut bounded, &fixture),
@@ -1129,10 +1138,13 @@ fn publication_is_immutable_and_changes_no_inventory() -> TestResult {
         .join("../../fixtures/conformance/matrix/execution-matrix.json");
     let matrix_bytes = fs::read(&repository_matrix)?;
     let matrix: Value = serde_json::from_slice(&matrix_bytes)?;
-    assert_eq!(matrix["executed_case_count"], json!(0));
     let cases = matrix["cases"].as_array().ok_or("no cases")?;
     assert_eq!(cases.len(), 192);
-    assert!(cases.iter().all(|case| case["executed"] == json!(false)));
+    let executed_cases = cases
+        .iter()
+        .filter(|case| case["executed"] == json!(true))
+        .count();
+    assert_eq!(matrix["executed_case_count"], json!(executed_cases));
     let copied_matrix = root.path().join("matrix/execution-matrix.json");
     fs::create_dir_all(root.path().join("matrix"))?;
     fs::write(&copied_matrix, &matrix_bytes)?;

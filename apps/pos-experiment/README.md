@@ -29,6 +29,24 @@ failure `network-denied` of provider
 results Local-relaxation engineering evidence until the Sandbox Provider runs
 them.
 
+`pos_experiment::replay_conformance::executor_declaration` is the adapter's
+exact ADR-068 `FixtureExecutorV1` declaration (provider key, `exported-artifact`
+subject adapter, pinned schema digests and capabilities). The composition root
+of `tests/replay_provider_dispatch_public.rs` hands it to the independent
+evaluator, which runs every family through a fresh `pos-experiment` process in
+the Local and the Air-Gapped ExecutionProfile run; that test requires
+`expected/replay-conformance/deletion-redaction.json` (ERA-001, #1296) to be
+`executed` and every other replay record to stay `pending`.
+
+`pos_experiment::profile_recomputation` enforces the named EPF1 on the host
+side, independently of the subject (#1266, wiki
+`ADR-062_R8_Profile_Recomputation_Enforcement`): a network gate on the request
+inputs, the manifest Execution Mode through the composition mode of the host it
+builds (`Experiment::new` or `Experiment::new_air_gapped`), and the EPF1
+Event-count and execution-step (Tick) budgets. A cross-profile leg runs in its
+own profile's Execution Mode. It enforces no other EPF1 field and claims no
+network or process isolation.
+
 The Experiment host binary is the replay subject adapter (ADR-062 Revision 8
 section 3.1 option A). The adapter and the binary are compiled only with the
 `test-support` feature, because they run on the open fixture erasure gate and the
@@ -62,6 +80,41 @@ The harness flips no inventory: `execution-matrix.json` changes only when the
 capture adapters of slices N1 to N4 supply verifier-accepted executions. The
 `pos-ni-local-probe` binary (feature `test-support`) is the harness probe of the
 Local runner, not a capture adapter of any row.
+
+`non_interference_harness::g_pub` holds the G-PUB capture adapters of slice N1
+(#1229, wiki `ADR-062_R8_NonInterference_Executions`):
+- `NI-PUBLIC-006` speaks HTTP to a fresh `piglor-gateway` router.
+- `NI-EVAL-007` captures the `export_timeline_own` export and the EAI1 attempt
+  over it.
+
+Every mode imports the Events it produced into that public seam. The host
+places the unauthorized value in a denied sibling Timeline of the seam store.
+Run-local identities are captured position-relative. `pos-ni-g-pub-subject` is
+the Local fresh-process subject of these rows. `NI-ARCHIVE-009` is non-executed
+`Missing` until slice N1b (#1284).
+
+## ADR-064 Fork artifact comparison
+
+`pos_experiment::fork_artifacts` is ADR-062 Revision 8 slice R6 (#1225).
+`run_fork_v1` records a deterministic factual history (each pass is admitted
+with `PluginRegistry::admit_scheduled_pass` under attempt identities derived
+from the Timeline and Tick and `commit_now_secs` 0, not through
+`LocalScheduledAdmissionHostV1::admit`, whose fresh attempt ULID would enter
+the recorded provenance; time-based admission checks are not exercised), cuts an ADR-064
+counterfactual Fork from it and exports the run's `INT1` Interventions, `CFP1`
+plan, `RCF1` frontier, `SIV1` invalidation, `RCP1` checkpoints and `CFR1`
+result through their public encodings, each at the run's `WorldCut`
+coordinate. `compare_fork_artifacts_v1` compares two exports with the R1
+comparator, so a mismatching artifact is one `DVR1` at its coordinate. The
+provisional Ticks come from the records form: the host declares the
+provisional graph and a records-form stager stages it. Per owner answer Q7 such
+a run is a genuine ADR-064 Fork execution, re-run when the ADR-064 R7 steps form
+(#1204) lands. A factual suffix after the cut never reaches an artifact. Local
+and Air-Gapped runs export the same bytes; an Air-Gapped run refuses an EPF1
+that allows network (the run is in-process; no isolation is claimed). The module needs the `test-support` feature (the open
+fixture erasure gate and the generated Plugin registration) and Linux (the
+`pos-time` counterfactual module). Results are Local-relaxation engineering
+evidence, not hosted conformance.
 
 ## Sequential SQLite multi-rate demo
 

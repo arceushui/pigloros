@@ -178,7 +178,9 @@ fn valid_report() -> TestResult<ConformanceReport> {
         &corpus.request,
         &corpus.archive,
         &corpus.trust_policy,
+        &support::trust_policy_operator()?,
         &evaluator_identity()?,
+        &support::test_executors(),
         &mut adapter,
     )?
     .report)
