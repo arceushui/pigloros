@@ -2,7 +2,7 @@
 
 use ciborium::value::Value;
 use pos_core::community_lifecycle::{
-    CommunityArtifactRefV1 as Artifact, CommunityLifecycleErrorV1 as Error,
+    ArtifactRefV1 as Artifact, CommunityLifecycleErrorV1 as Error,
     CommunityQuarantineControlInputV1 as Input, CommunityQuarantineControlKindV1 as Operation,
     CommunityQuarantineControlV1 as Request, CommunityQuarantineDispositionV1 as Disposition,
     CommunityQuarantineKeyV1 as Key, CommunityQuarantineOutcomeInputV1 as OutcomeInput,

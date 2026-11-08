@@ -247,7 +247,7 @@ fn ordered_capabilities(capabilities: &[PluginCapabilityDescriptorV1]) -> bool {
         .all(|pair| capability_key(&pair[0]) < capability_key(&pair[1]))
 }
 
-fn bounded_text(text: &str, maximum: usize) -> bool {
+const fn bounded_text(text: &str, maximum: usize) -> bool {
     !text.is_empty() && text.len() <= maximum
 }
 

@@ -11,7 +11,7 @@ use zeroize::Zeroizing;
 
 /// Exact `contract-v1.artifact-ref`, shared with the live Runtime public path.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct CommunityArtifactRefV1 {
+pub struct ArtifactRefV1 {
     /// Registered schema ID.
     pub schema_id: u32,
     /// Exact artifact length.
@@ -58,9 +58,9 @@ pub struct CommunityQuarantineControlInputV1<'a> {
     /// Exact current complete selected State head.
     pub expected_state_head_digest: Hash,
     /// Required only for authenticated reset, with independently verified schema.
-    pub principal_ref: Option<CommunityArtifactRefV1>,
+    pub principal_ref: Option<ArtifactRefV1>,
     /// Required only for authenticated reset, never permission from a stored hash.
-    pub authorization_ref: Option<CommunityArtifactRefV1>,
+    pub authorization_ref: Option<ArtifactRefV1>,
     /// Current host-command bound, not permission to run a quarantined Plugin.
     pub authorization_not_after_micros: u64,
     /// Actual original host decision provenance, not a self-issued proof.
@@ -367,7 +367,7 @@ fn read_disposition(cursor: &mut CborCursor<'_>) -> Result<CommunityQuarantineDi
     })
 }
 
-fn encode_optional_ref(out: &mut Vec<u8>, reference: Option<CommunityArtifactRefV1>) {
+fn encode_optional_ref(out: &mut Vec<u8>, reference: Option<ArtifactRefV1>) {
     match reference {
         None => out.push(0xf6),
         Some(reference) => {
@@ -379,13 +379,13 @@ fn encode_optional_ref(out: &mut Vec<u8>, reference: Option<CommunityArtifactRef
     }
 }
 
-fn read_control_refs(cursor: &mut CborCursor<'_>) -> Result<[Option<CommunityArtifactRefV1>; 2]> {
+fn read_control_refs(cursor: &mut CborCursor<'_>) -> Result<[Option<ArtifactRefV1>; 2]> {
     read_optional_ref(cursor).and_then(|principal| {
         read_optional_ref(cursor).map(|authorization| [principal, authorization])
     })
 }
 
-fn read_optional_ref(cursor: &mut CborCursor<'_>) -> Result<Option<CommunityArtifactRefV1>> {
+fn read_optional_ref(cursor: &mut CborCursor<'_>) -> Result<Option<ArtifactRefV1>> {
     if cursor.consume_if(0xf6) {
         return Ok(None);
     }
@@ -395,7 +395,7 @@ fn read_optional_ref(cursor: &mut CborCursor<'_>) -> Result<Option<CommunityArti
             .and_then(|schema_id| {
                 read_head(cursor, 0).and_then(|byte_length| {
                     fixed_bytes(cursor).map(|digest| {
-                        Some(CommunityArtifactRefV1 {
+                        Some(ArtifactRefV1 {
                             schema_id,
                             byte_length,
                             digest,

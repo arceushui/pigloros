@@ -25,7 +25,7 @@
 //!   - a record: its fields in WIT order;
 //!   - `u32`: four big-endian bytes.
 
-pub use pos_core::community_lifecycle::{CommunityArtifactRefV1 as ArtifactRefV1, MeteringV1};
+pub use pos_core::community_lifecycle::{ArtifactRefV1, MeteringV1};
 use pos_crypto::plugin_execution::is_valid_id_v1;
 
 use super::error::CommunityPluginHostErrorV1;

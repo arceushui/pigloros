@@ -51,7 +51,7 @@ pub use quarantine::{
     CommunityQuarantineRevisionV1,
 };
 pub use quarantine_control::{
-    CommunityArtifactRefV1, CommunityQuarantineControlInputV1, CommunityQuarantineControlKindV1,
+    ArtifactRefV1, CommunityQuarantineControlInputV1, CommunityQuarantineControlKindV1,
     CommunityQuarantineControlV1, CommunityQuarantineDispositionV1,
     CommunityQuarantineOutcomeInputV1, CommunityQuarantineOutcomeV1,
 };
