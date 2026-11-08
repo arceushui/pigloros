@@ -19,7 +19,7 @@ use pos_owner_bridge_codec::{
 
 use super::super::{loopback::SharedLoopback, store::WindowsCleanupStore, surface::Surface};
 use super::foreground::{Foreground, Ticket};
-use super::trace::Trace;
+use super::trace::{worker_stage, Trace};
 use super::TestResult;
 use crate::{NativeFactory, NativePulse, StaPump};
 
@@ -104,12 +104,19 @@ fn run_worker(
         }
     }
     // run_ceremony also retires failed and panicking cases before returning.
+    worker_stage(worker, "dropping-surface");
     drop(surface);
+    worker_stage(worker, "surface-dropped");
     assert!(store.records()?.is_empty());
     assert!(store.folders()?.is_empty());
+    worker_stage(worker, "store-checked");
     drop(store);
+    worker_stage(worker, "store-dropped");
     let mut factory = Rc::try_unwrap(factory).map_err(|_| "readiness factory still shared")?;
     factory.stop()?;
+    worker_stage(worker, "timer-stopped");
+    drop(factory);
+    worker_stage(worker, "apartment-released");
     outcome
 }
 
@@ -124,7 +131,9 @@ fn run_ceremony(
     // Coordinate independent test STAs before constructing this synthetic plan.
     // Once T0 exists it is never reset; all native opening/foreground work and
     // receipt still share the original fifteen-second ceremony deadline.
-    let mut visible = Some(acquire_foreground(surface, foreground, number)?);
+    // Match product admission: do not start another ceremony while this one's
+    // cancellation or browser retirement is unresolved, even after receipt.
+    let _visible = acquire_foreground(surface, foreground, number)?;
     let started = Instant::now();
     let deadline = started + Duration::from_secs(15);
     surface.set_deadline(deadline);
@@ -145,7 +154,6 @@ fn run_ceremony(
                         // states and invalid values cannot satisfy this oracle.
                         receipt = Some(observed);
                         surface.controller_lost();
-                        drop(visible.take());
                     }
                 }
                 match step {
@@ -156,7 +164,6 @@ fn run_ceremony(
             }
         },
     ));
-    drop(visible);
     let (result, failure) = match attempt {
         Ok(Ok(result)) => (result, None),
         Ok(Err(error)) => (
@@ -265,11 +272,11 @@ fn acquire_foreground<'a>(
     foreground: &'a Foreground,
     number: u64,
 ) -> Result<Ticket<'a>, Box<dyn std::error::Error>> {
-    let ticket = foreground.request(number)?;
+    let ticket = foreground.request(number, Instant::now())?;
     let mut trace = Trace::new(number, Instant::now());
     loop {
         trace.queued(surface);
-        if ticket.is_next()? {
+        if ticket.is_next(Instant::now())? {
             return Ok(ticket);
         }
         pump(surface)?;

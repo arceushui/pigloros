@@ -8,6 +8,13 @@ use pos_owner_bridge::ceremony::driver::CeremonyDriver;
 
 use crate::adapter::surface::Surface;
 
+pub(super) fn worker_stage(worker: usize, stage: &str) {
+    let _logged_or_unavailable = writeln!(
+        std::io::stderr(),
+        "NATIVE_WORKER_RETIRE worker={worker} stage={stage}",
+    );
+}
+
 pub(super) struct Trace {
     case: u64,
     started: Instant,
