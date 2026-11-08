@@ -1,6 +1,9 @@
 //! Borrowed CSC1 plaintext view; retained bytes must use the protected owner.
 
-use super::{fixed_bytes, record_cursor, record_prefix, CommunityLifecycleErrorV1, Result};
+use super::{
+    canonical_end, fixed_bytes, read_head, record_cursor, record_prefix, CommunityLifecycleErrorV1,
+    Result,
+};
 use crate::{encode_head, Hash};
 use zeroize::Zeroizing;
 
@@ -15,6 +18,8 @@ const MAX_RECORD_BYTES: usize = 1_048_624;
 /// artifact or live-state restoration capability.
 /// It deliberately has no Debug/Serialize implementation that could reveal
 /// state or create another persistence encoding.
+/// Plaintext hashing belongs to the qualified protected owner, which must
+/// account for the cryptographic implementation's temporary copies.
 pub struct CommunityStateContentV1<'a> {
     schema: Hash,
     state: &'a [u8],
@@ -56,16 +61,6 @@ impl<'a> CommunityStateContentV1<'a> {
         out
     }
 
-    /// Hash the exact CSC1 encoding without copying the state plaintext.
-    #[must_use]
-    pub fn digest(&self) -> Hash {
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(b"PiglorOS.Community.CSC1.v1\0");
-        hasher.update(&self.prefix());
-        hasher.update(self.state);
-        Hash::from_bytes(*hasher.finalize().as_bytes())
-    }
-
     /// Decode a complete preferred CSC1, borrowing its exact state byte range.
     ///
     /// # Errors
@@ -74,9 +69,7 @@ impl<'a> CommunityStateContentV1<'a> {
     pub fn from_canonical_cbor(bytes: &'a [u8]) -> Result<Self> {
         record_cursor(bytes, MAX_RECORD_BYTES, 4, b"CSC1").and_then(|mut cursor| {
             fixed_bytes(&mut cursor).and_then(|schema| {
-                cursor
-                    .head(2)
-                    .map_err(CommunityLifecycleErrorV1::from)
+                read_head(&mut cursor, 2)
                     .and_then(|length| {
                         // Saturation is always above the admitted MiB bound,
                         // including an unrepresentable wire length on wasm32.
@@ -87,13 +80,7 @@ impl<'a> CommunityStateContentV1<'a> {
                         cursor.take(length).map_err(CommunityLifecycleErrorV1::from)
                     })
                     .and_then(|state| Self::new(Hash::from_bytes(schema), state))
-                    .and_then(|record| {
-                        if cursor.is_finished() && bytes.starts_with(&record.prefix()) {
-                            Ok(record)
-                        } else {
-                            Err(CommunityLifecycleErrorV1::InvalidEncoding)
-                        }
-                    })
+                    .and_then(|record| canonical_end(&cursor).map(|()| record))
             })
         })
     }

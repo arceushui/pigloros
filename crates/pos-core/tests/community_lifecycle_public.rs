@@ -170,10 +170,6 @@ fn state_content_preserves_opaque_bytes_and_borrows_the_encoded_range() -> TestR
         assert_eq!(encoded.as_slice(), expected.as_slice());
         assert_eq!(record.schema_digest(), Hash::from_bytes(SCHEMA));
         assert_eq!(record.state_bytes(), state.as_slice());
-        assert_eq!(
-            record.digest(),
-            expected_digest(b"PiglorOS.Community.CSC1.v1\0", &expected)
-        );
         let decoded = CommunityStateContentV1::from_canonical_cbor(&encoded)?;
         assert_eq!(decoded.state_bytes(), state.as_slice());
         assert_eq!(decoded.schema_digest(), Hash::from_bytes(SCHEMA));
@@ -183,6 +179,28 @@ fn state_content_preserves_opaque_bytes_and_borrows_the_encoded_range() -> TestR
             encoded[offset..].as_ptr()
         ));
     }
+    Ok(())
+}
+
+#[test]
+fn nonpreferred_heads_are_invalid_before_version_binding_or_length_semantics() -> TestResult {
+    let valid = encode(pass_value(1))?;
+    let mut long_unknown_version = valid.clone();
+    long_unknown_version.splice(6..7, [0x18, 2]);
+    let mut long_zero_ordinal = valid;
+    long_zero_ordinal.splice(41..42, [0x18, 0]);
+    for wire in [long_unknown_version, long_zero_ordinal] {
+        assert_eq!(
+            CommunityPassKeyV1::from_canonical_cbor(&wire).err(),
+            Some(Error::InvalidEncoding)
+        );
+    }
+    let mut long_oversized_state = encode(state_value(&[]))?;
+    long_oversized_state.splice(41..42, [0x5b, 0, 0, 0, 0, 0, 0x10, 0, 1]);
+    assert_eq!(
+        CommunityStateContentV1::from_canonical_cbor(&long_oversized_state).err(),
+        Some(Error::InvalidEncoding)
+    );
     Ok(())
 }
 

@@ -1,8 +1,8 @@
 //! CST1 committed host boundary; its Tick is not a factual dependency Tick.
 
 use super::{
-    canonical_end, digest, encode_coordinates, read_coordinates, record_cursor, record_prefix,
-    validate_coordinates, CommunityLifecycleErrorV1, Result,
+    canonical_end, digest, encode_coordinates, read_coordinates, read_head, record_cursor,
+    record_prefix, validate_coordinates, CommunityLifecycleErrorV1, Result,
 };
 use crate::{encode_head, CborCursor, Hash, TimelineId};
 
@@ -86,12 +86,8 @@ impl CommunityHostProgressV1 {
             read_coordinates(&mut cursor).and_then(|(timeline, generation)| {
                 read_boundary(&mut cursor).and_then(|host_tick| {
                     read_boundary(&mut cursor).and_then(|simulation_time| {
-                        Self::new(timeline, generation, host_tick, simulation_time).and_then(
-                            |record| {
-                                canonical_end(&cursor, bytes, &record.to_canonical_cbor())
-                                    .map(|()| record)
-                            },
-                        )
+                        Self::new(timeline, generation, host_tick, simulation_time)
+                            .and_then(|record| canonical_end(&cursor).map(|()| record))
                     })
                 })
             })
@@ -118,8 +114,8 @@ fn read_boundary(cursor: &mut CborCursor<'_>) -> Result<Option<u64>> {
     } else {
         cursor
             .fixed(&[0x82, 1])
-            .and_then(|()| cursor.head(0))
             .map_err(CommunityLifecycleErrorV1::from)
+            .and_then(|()| read_head(cursor, 0))
             .map(Some)
     }
 }

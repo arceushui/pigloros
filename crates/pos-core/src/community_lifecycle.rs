@@ -91,13 +91,9 @@ impl CommunityPassKeyV1 {
     pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self> {
         record_cursor(bytes, MAX_COMMUNITY_PASS_KEY_BYTES_V1, 5, b"CPK1").and_then(|mut cursor| {
             read_coordinates(&mut cursor).and_then(|(timeline, generation)| {
-                cursor
-                    .head(0)
-                    .map_err(CommunityLifecycleErrorV1::from)
+                read_head(&mut cursor, 0)
                     .and_then(|ordinal| Self::new(timeline, generation, ordinal))
-                    .and_then(|record| {
-                        canonical_end(&cursor, bytes, &record.to_canonical_cbor()).map(|()| record)
-                    })
+                    .and_then(|record| canonical_end(&cursor).map(|()| record))
             })
         })
     }
@@ -143,14 +139,29 @@ fn record_cursor<'a>(
     let mut cursor = CborCursor::new(bytes);
     cursor
         .fixed(&expected)
-        .and_then(|()| cursor.head(0))
         .map_err(CommunityLifecycleErrorV1::from)
+        .and_then(|()| read_head(&mut cursor, 0))
         .and_then(|version| {
             if version == 1 {
                 Ok(cursor)
             } else {
                 Err(CommunityLifecycleErrorV1::UnsupportedVersion)
             }
+        })
+}
+
+fn read_head(cursor: &mut CborCursor<'_>, major: u8) -> Result<u64> {
+    let mut original = cursor.clone();
+    cursor
+        .head(major)
+        .map_err(CommunityLifecycleErrorV1::from)
+        .and_then(|value| {
+            let mut preferred = Vec::with_capacity(9);
+            encode_head(&mut preferred, major, value);
+            original
+                .fixed(&preferred)
+                .map_err(CommunityLifecycleErrorV1::from)
+                .map(|()| value)
         })
 }
 
@@ -179,8 +190,8 @@ fn read_coordinates(cursor: &mut CborCursor<'_>) -> Result<(TimelineId, [u8; 16]
     })
 }
 
-fn canonical_end(cursor: &CborCursor<'_>, actual: &[u8], preferred: &[u8]) -> Result<()> {
-    if cursor.is_finished() && actual == preferred {
+fn canonical_end(cursor: &CborCursor<'_>) -> Result<()> {
+    if cursor.is_finished() {
         Ok(())
     } else {
         Err(CommunityLifecycleErrorV1::InvalidEncoding)
