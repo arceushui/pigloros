@@ -33,8 +33,8 @@ use pos_reference::evaluator_protocol::{
     CaseOutcome, CaseStatus, ConformanceReport, SubjectAdapterKind,
 };
 use pos_reference::selector_test_support::{
-    real_replay_corpus, verified_evaluator_identity, Corpus, RealFamilyMembers,
-    RealProviderFixtures,
+    real_replay_corpus, trust_policy_operator, verified_evaluator_identity, Corpus,
+    RealFamilyMembers, RealProviderFixtures,
 };
 use serde_json::{json, Value};
 
@@ -196,6 +196,7 @@ fn evaluate_corpus(
         &corpus.request,
         &corpus.archive,
         &corpus.trust_policy,
+        &trust_policy_operator()?,
         &evaluator_identity()?,
         executors,
         &mut subject,
