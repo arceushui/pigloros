@@ -18,7 +18,7 @@ const fn hash(byte: u8) -> Hash {
     Hash::from_bytes([byte; 32])
 }
 
-fn timeline(byte: u8) -> TimelineId {
+const fn timeline(byte: u8) -> TimelineId {
     TimelineId::from_ulid(ulid::Ulid::from_bytes([byte; 16]))
 }
 
@@ -30,14 +30,14 @@ fn bytes(value: &[u8]) -> Value {
     Value::Bytes(value.to_vec())
 }
 
-fn encode(value: Value) -> Fallible<Vec<u8>> {
+fn encode(value: &Value) -> Fallible<Vec<u8>> {
     let mut out = Vec::new();
-    ciborium::into_writer(&value, &mut out)?;
+    ciborium::into_writer(value, &mut out)?;
     Ok(out)
 }
 
 fn pass_bytes(ordinal: u64) -> Fallible<Vec<u8>> {
-    encode(Value::Array(vec![
+    encode(&Value::Array(vec![
         bytes(b"CPK1"),
         uint(1),
         bytes(&[7; 16]),
@@ -46,7 +46,7 @@ fn pass_bytes(ordinal: u64) -> Fallible<Vec<u8>> {
     ]))
 }
 
-fn request_input() -> RequestInput {
+const fn request_input() -> RequestInput {
     RequestInput {
         timeline: timeline(7),
         generation: [8; 16],
@@ -185,7 +185,7 @@ fn pre_reserve_identity_has_exact_twelve_fields_without_a_future_pass() -> TestR
             requested_evidence_horizon: horizon,
             ..request_input()
         };
-        let expected = encode(Value::Array(request_fields(input)))?;
+        let expected = encode(&Value::Array(request_fields(input)))?;
         let record = Request::new(input)?;
         assert!(record.as_input() == &input);
         assert_eq!(record.to_canonical_cbor().as_slice(), expected);
@@ -217,7 +217,7 @@ fn request_refuses_zero_coordinates_operation_and_every_required_digest() -> Tes
     for field in 2..=10 {
         let mut fields = request_fields(request_input());
         fields[field] = bytes(&vec![0; if field <= 4 { 16 } else { 32 }]);
-        let encoded = encode(Value::Array(fields))?;
+        let encoded = encode(&Value::Array(fields))?;
         assert!(Request::from_canonical_cbor(&encoded).err() == Some(Error::InvalidBinding));
     }
     let mut input = request_input();
@@ -234,7 +234,7 @@ fn request_horizon_is_fixed_positive_and_i64_bounded() -> TestResult {
             ..request_input()
         };
         assert!(Request::new(input).err() == Some(Error::BoundsExceeded));
-        let encoded = encode(Value::Array(request_fields(input)))?;
+        let encoded = encode(&Value::Array(request_fields(input)))?;
         assert!(Request::from_canonical_cbor(&encoded).err() == Some(Error::BoundsExceeded));
     }
     Ok(())
@@ -242,7 +242,7 @@ fn request_horizon_is_fixed_positive_and_i64_bounded() -> TestResult {
 
 #[test]
 fn request_refuses_all_truncations_and_nonpreferred_semantic_values() -> TestResult {
-    let encoded = encode(Value::Array(request_fields(request_input())))?;
+    let encoded = encode(&Value::Array(request_fields(request_input())))?;
     framing_refuses(&encoded, 1024, |bytes| {
         Request::from_canonical_cbor(bytes).map(|_| ())
     });
@@ -262,7 +262,7 @@ fn reservation_has_exact_ten_fields_and_independent_native_ordinal() -> TestResu
                 evidence_not_after_micros: u64::MAX / 2,
                 ..reservation_input(pass_ordinal)?
             };
-            let expected = encode(Value::Array(reservation_fields(input)?))?;
+            let expected = encode(&Value::Array(reservation_fields(input)?))?;
             let record = Reservation::new(input)?;
             assert!(record.as_input() == &input);
             assert_eq!(record.to_canonical_cbor().as_slice(), expected);
@@ -279,7 +279,7 @@ fn reservation_rejects_missing_links_zero_native_ordinal_and_bad_horizons() -> T
         let mut fields = reservation_fields(reservation_input(1)?)?;
         fields[field] = bytes(&[0; 32]);
         assert!(
-            Reservation::from_canonical_cbor(&encode(Value::Array(fields))?).err()
+            Reservation::from_canonical_cbor(&encode(&Value::Array(fields))?).err()
                 == Some(Error::InvalidBinding)
         );
     }
@@ -293,7 +293,7 @@ fn reservation_rejects_missing_links_zero_native_ordinal_and_bad_horizons() -> T
             evidence_not_after_micros: horizon,
             ..reservation_input(1)?
         };
-        let encoded = encode(Value::Array(reservation_fields(input)?))?;
+        let encoded = encode(&Value::Array(reservation_fields(input)?))?;
         assert!(Reservation::from_canonical_cbor(&encoded).err() == Some(Error::BoundsExceeded));
     }
     Ok(())
@@ -301,14 +301,14 @@ fn reservation_rejects_missing_links_zero_native_ordinal_and_bad_horizons() -> T
 
 #[test]
 fn reservation_refuses_all_truncations_and_invalid_nested_keys() -> TestResult {
-    let encoded = encode(Value::Array(reservation_fields(reservation_input(1)?)?))?;
+    let encoded = encode(&Value::Array(reservation_fields(reservation_input(1)?)?))?;
     framing_refuses(&encoded, 512, |bytes| {
         Reservation::from_canonical_cbor(bytes).map(|_| ())
     });
     for key in [pass_bytes(0)?, vec![0; 65], vec![]] {
         let mut fields = reservation_fields(reservation_input(1)?)?;
         fields[2] = bytes(&key);
-        assert!(Reservation::from_canonical_cbor(&encode(Value::Array(fields))?).is_err());
+        assert!(Reservation::from_canonical_cbor(&encode(&Value::Array(fields))?).is_err());
     }
     Ok(())
 }
@@ -324,7 +324,7 @@ fn complete_head_has_exact_nine_fields_and_retains_all_sixty_four_members() -> T
             let rows = members(count);
             let mut input = head_input(frontier, &rows);
             input.event_logical_head = Seq::from_u64(u64::MAX);
-            let expected = encode(Value::Array(head_fields(&input)?))?;
+            let expected = encode(&Value::Array(head_fields(&input)?))?;
             let record = Head::new(input)?;
             assert_eq!(record.to_canonical_cbor().as_slice(), expected);
             let restored = Head::from_canonical_cbor(&expected)?;
@@ -380,7 +380,7 @@ fn head_frontier_must_belong_to_the_exact_timeline_and_generation() -> TestResul
         let mut fields = head_fields(&head_input(Frontier::Initial, &rows))?;
         fields[field] = bytes(&vec![0; length]);
         assert!(
-            Head::from_canonical_cbor(&encode(Value::Array(fields))?).err()
+            Head::from_canonical_cbor(&encode(&Value::Array(fields))?).err()
                 == Some(Error::InvalidBinding)
         );
     }
@@ -392,7 +392,7 @@ fn head_refuses_empty_oversized_duplicate_unordered_or_zero_member_rows() -> Tes
     for count in [0, 65] {
         let rows = members(count);
         let input = head_input(Frontier::Initial, &rows);
-        let encoded = encode(Value::Array(head_fields(&input)?))?;
+        let encoded = encode(&Value::Array(head_fields(&input)?))?;
         assert!(Head::new(input).err() == Some(Error::BoundsExceeded));
         assert!(Head::from_canonical_cbor(&encoded).err() == Some(Error::BoundsExceeded));
     }
@@ -414,7 +414,7 @@ fn head_refuses_empty_oversized_duplicate_unordered_or_zero_member_rows() -> Tes
             rows[0].member_progress_digest = Hash::zero();
         }
         let input = head_input(Frontier::Initial, &rows);
-        let encoded = encode(Value::Array(head_fields(&input)?))?;
+        let encoded = encode(&Value::Array(head_fields(&input)?))?;
         assert!(Head::from_canonical_cbor(&encoded).err() == Some(Error::InvalidBinding));
     }
     Ok(())
@@ -427,7 +427,7 @@ fn head_refuses_all_truncations_and_closed_frontier_or_member_shapes() -> TestRe
         Frontier::Committed(Pass::new(timeline(7), [8; 16], 1)?),
         &rows,
     );
-    let encoded = encode(Value::Array(head_fields(&input)?))?;
+    let encoded = encode(&Value::Array(head_fields(&input)?))?;
     framing_refuses(&encoded, 65_536, |bytes| {
         Head::from_canonical_cbor(bytes).map(|_| ())
     });
@@ -441,7 +441,7 @@ fn head_refuses_all_truncations_and_closed_frontier_or_member_shapes() -> TestRe
     ] {
         let mut fields = head_fields(&input)?;
         fields[4] = frontier;
-        assert!(Head::from_canonical_cbor(&encode(Value::Array(fields))?).is_err());
+        assert!(Head::from_canonical_cbor(&encode(&Value::Array(fields))?).is_err());
     }
     for member in [
         Value::Null,
@@ -450,7 +450,7 @@ fn head_refuses_all_truncations_and_closed_frontier_or_member_shapes() -> TestRe
     ] {
         let mut fields = head_fields(&input)?;
         fields[5] = Value::Array(vec![member]);
-        assert!(Head::from_canonical_cbor(&encode(Value::Array(fields))?).is_err());
+        assert!(Head::from_canonical_cbor(&encode(&Value::Array(fields))?).is_err());
     }
     Ok(())
 }
@@ -459,7 +459,7 @@ fn head_refuses_all_truncations_and_closed_frontier_or_member_shapes() -> TestRe
 fn head_bounds_member_count_before_reading_or_allocating_rows() -> TestResult {
     let rows = members(1);
     let fields = head_fields(&head_input(Frontier::Initial, &rows))?;
-    let mut encoded = encode(Value::Array(fields[..5].to_vec()))?;
+    let mut encoded = encode(&Value::Array(fields[..5].to_vec()))?;
     encoded[0] = 0x89;
     encoded.extend_from_slice(&[0x9b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]);
     assert!(Head::from_canonical_cbor(&encoded).err() == Some(Error::BoundsExceeded));

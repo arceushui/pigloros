@@ -22,9 +22,9 @@ fn bytes(value: &[u8]) -> Value {
     Value::Bytes(value.to_vec())
 }
 
-fn encode(value: Value) -> Fallible<Vec<u8>> {
+fn encode(value: &Value) -> Fallible<Vec<u8>> {
     let mut out = Vec::new();
-    ciborium::into_writer(&value, &mut out)?;
+    ciborium::into_writer(value, &mut out)?;
     Ok(out)
 }
 
@@ -46,7 +46,7 @@ fn pass_value(ordinal: u64) -> Value {
     ])
 }
 
-fn initial() -> Input {
+const fn initial() -> Input {
     Input {
         producer_origin: Producer::Initialization {
             generation_request_digest: hash(1),
@@ -80,7 +80,7 @@ fn fields(input: Input) -> Fallible<Vec<Value>> {
             bytes(&operation_id),
         ]),
         Producer::Pass(key) => {
-            Value::Array(vec![uint(1), bytes(&encode(pass_value(key.ordinal()))?)])
+            Value::Array(vec![uint(1), bytes(&encode(&pass_value(key.ordinal()))?)])
         }
     };
     Ok(vec![
@@ -103,7 +103,7 @@ fn initialization_and_pass_have_exact_distinct_nine_field_encodings() -> TestRes
     for mut input in [initial(), stepped(1)?, stepped(u64::MAX)?] {
         for horizon in [1, 24, 65_536, u64::MAX / 2] {
             input.evidence_not_after_micros = horizon;
-            let expected = encode(Value::Array(fields(input)?))?;
+            let expected = encode(&Value::Array(fields(input)?))?;
             let record = Revision::new(input)?;
             let encoded = record.to_canonical_cbor();
             assert_eq!(encoded.as_slice(), expected.as_slice());
@@ -152,16 +152,16 @@ fn only_initialization_has_no_predecessor_and_a_pass_cannot_use_zero() -> TestRe
         },
     ] {
         assert_eq!(Revision::new(input).err(), Some(Error::InvalidBinding));
-        let wire = encode(Value::Array(fields(input)?))?;
+        let wire = encode(&Value::Array(fields(input)?))?;
         assert_eq!(
             Revision::from_canonical_cbor(&wire).err(),
             Some(Error::InvalidBinding)
         );
     }
     let mut zero_pass = fields(stepped(1)?)?;
-    zero_pass[2] = Value::Array(vec![uint(1), bytes(&encode(pass_value(0))?)]);
+    zero_pass[2] = Value::Array(vec![uint(1), bytes(&encode(&pass_value(0))?)]);
     assert_eq!(
-        Revision::from_canonical_cbor(&encode(Value::Array(zero_pass))?).err(),
+        Revision::from_canonical_cbor(&encode(&Value::Array(zero_pass))?).err(),
         Some(Error::InvalidBinding)
     );
     Ok(())
@@ -203,7 +203,7 @@ fn identities_and_fixed_horizons_are_validated_before_retention() -> TestResult 
     ];
     for input in inputs {
         assert_eq!(Revision::new(input).err(), Some(Error::InvalidBinding));
-        let wire = encode(Value::Array(fields(input)?))?;
+        let wire = encode(&Value::Array(fields(input)?))?;
         assert_eq!(
             Revision::from_canonical_cbor(&wire).err(),
             Some(Error::InvalidBinding)
@@ -215,7 +215,7 @@ fn identities_and_fixed_horizons_are_validated_before_retention() -> TestResult 
             ..initial()
         };
         assert_eq!(Revision::new(input).err(), Some(Error::BoundsExceeded));
-        let wire = encode(Value::Array(fields(input)?))?;
+        let wire = encode(&Value::Array(fields(input)?))?;
         assert_eq!(
             Revision::from_canonical_cbor(&wire).err(),
             Some(Error::BoundsExceeded)
@@ -227,7 +227,7 @@ fn identities_and_fixed_horizons_are_validated_before_retention() -> TestResult 
 #[test]
 fn every_truncation_trailing_input_and_outer_bound_refuses() -> TestResult {
     for input in [initial(), stepped(1)?] {
-        let valid = encode(Value::Array(fields(input)?))?;
+        let valid = encode(&Value::Array(fields(input)?))?;
         for length in 0..valid.len() {
             assert_eq!(
                 Revision::from_canonical_cbor(&valid[..length]).err(),
@@ -257,27 +257,27 @@ fn origin_tags_arity_and_nested_pass_framing_are_closed() -> TestResult {
     for origin in [
         Value::Array(vec![uint(2)]),
         Value::Array(vec![uint(0), bytes(&[1; 32])]),
-        Value::Array(vec![uint(1), bytes(&encode(pass_value(1))?), uint(0)]),
+        Value::Array(vec![uint(1), bytes(&encode(&pass_value(1))?), uint(0)]),
         Value::Null,
         Value::Array(vec![uint(1), bytes(&[0; 64])]),
     ] {
         let mut values = fields(stepped(1)?)?;
         values[2] = origin;
         assert_eq!(
-            Revision::from_canonical_cbor(&encode(Value::Array(values))?).err(),
+            Revision::from_canonical_cbor(&encode(&Value::Array(values))?).err(),
             Some(Error::InvalidEncoding)
         );
     }
     let mut oversized = fields(stepped(1)?)?;
     oversized[2] = Value::Array(vec![uint(1), bytes(&[0; 65])]);
     assert_eq!(
-        Revision::from_canonical_cbor(&encode(Value::Array(oversized))?).err(),
+        Revision::from_canonical_cbor(&encode(&Value::Array(oversized))?).err(),
         Some(Error::BoundsExceeded)
     );
     let mut version = fields(initial())?;
     version[1] = uint(2);
     assert_eq!(
-        Revision::from_canonical_cbor(&encode(Value::Array(version))?).err(),
+        Revision::from_canonical_cbor(&encode(&Value::Array(version))?).err(),
         Some(Error::UnsupportedVersion)
     );
     Ok(())

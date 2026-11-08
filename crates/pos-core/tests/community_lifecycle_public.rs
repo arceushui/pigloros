@@ -26,7 +26,7 @@ const WIDTHS: [u64; 10] = [
     u64::MAX,
 ];
 
-fn timeline(bytes: [u8; 16]) -> TimelineId {
+const fn timeline(bytes: [u8; 16]) -> TimelineId {
     TimelineId::from_ulid(ulid::Ulid::from_bytes(bytes))
 }
 
@@ -38,9 +38,9 @@ fn bytes(value: &[u8]) -> Value {
     Value::Bytes(value.to_vec())
 }
 
-fn encode(value: Value) -> Fallible<Vec<u8>> {
+fn encode(value: &Value) -> Fallible<Vec<u8>> {
     let mut out = Vec::new();
-    ciborium::into_writer(&value, &mut out)?;
+    ciborium::into_writer(value, &mut out)?;
     Ok(out)
 }
 
@@ -68,7 +68,7 @@ fn expected_digest(domain: &[u8], encoded: &[u8]) -> Hash {
 #[test]
 fn pass_key_matches_independent_wire_and_domain_at_every_integer_width() -> TestResult {
     for ordinal in WIDTHS {
-        let expected = encode(pass_value(ordinal))?;
+        let expected = encode(&pass_value(ordinal))?;
         let key = CommunityPassKeyV1::new(timeline(TIMELINE), GENERATION, ordinal)?;
         assert_eq!(key.to_canonical_cbor(), expected);
         assert!(expected.len() <= MAX_COMMUNITY_PASS_KEY_BYTES_V1);
@@ -96,7 +96,7 @@ fn pass_zero_is_not_an_initialization_or_an_event_cut() -> TestResult {
             Some(Error::InvalidBinding)
         );
     }
-    let zero_ordinal = encode(pass_value(0))?;
+    let zero_ordinal = encode(&pass_value(0))?;
     assert_eq!(
         CommunityPassKeyV1::from_canonical_cbor(&zero_ordinal).err(),
         Some(Error::InvalidBinding)
@@ -106,7 +106,7 @@ fn pass_zero_is_not_an_initialization_or_an_event_cut() -> TestResult {
 
 #[test]
 fn pass_decoder_rejects_truncation_unknown_version_and_nonpreferred_input() -> TestResult {
-    let valid = encode(pass_value(1))?;
+    let valid = encode(&pass_value(1))?;
     for end in 0..valid.len() {
         assert_eq!(
             CommunityPassKeyV1::from_canonical_cbor(&valid[..end]).err(),
@@ -164,7 +164,7 @@ fn state_content_preserves_opaque_bytes_and_borrows_the_encoded_range() -> TestR
         MAX_COMMUNITY_STATE_BYTES_V1,
     ] {
         let state = vec![0x9f; length]; // Opaque bytes need not themselves be CBOR.
-        let expected = encode(state_value(&state))?;
+        let expected = encode(&state_value(&state))?;
         let record = CommunityStateContentV1::new(Hash::from_bytes(SCHEMA), &state)?;
         let encoded = record.to_canonical_cbor();
         assert_eq!(encoded.as_slice(), expected.as_slice());
@@ -184,7 +184,7 @@ fn state_content_preserves_opaque_bytes_and_borrows_the_encoded_range() -> TestR
 
 #[test]
 fn nonpreferred_heads_are_invalid_before_version_binding_or_length_semantics() -> TestResult {
-    let valid = encode(pass_value(1))?;
+    let valid = encode(&pass_value(1))?;
     let mut long_unknown_version = valid.clone();
     long_unknown_version.splice(6..7, [0x18, 2]);
     let mut long_zero_ordinal = valid;
@@ -195,7 +195,7 @@ fn nonpreferred_heads_are_invalid_before_version_binding_or_length_semantics() -
             Some(Error::InvalidEncoding)
         );
     }
-    let mut long_oversized_state = encode(state_value(&[]))?;
+    let mut long_oversized_state = encode(&state_value(&[]))?;
     long_oversized_state.splice(41..42, [0x5b, 0, 0, 0, 0, 0, 0x10, 0, 1]);
     assert_eq!(
         CommunityStateContentV1::from_canonical_cbor(&long_oversized_state).err(),
@@ -215,7 +215,7 @@ fn state_content_checks_owning_schema_and_both_payload_and_record_bounds() -> Te
         CommunityStateContentV1::new(Hash::from_bytes(SCHEMA), &oversized).err(),
         Some(Error::BoundsExceeded)
     );
-    let record = encode(state_value(&oversized))?;
+    let record = encode(&state_value(&oversized))?;
     assert_eq!(
         CommunityStateContentV1::from_canonical_cbor(&record).err(),
         Some(Error::BoundsExceeded)
@@ -228,7 +228,7 @@ fn state_content_checks_owning_schema_and_both_payload_and_record_bounds() -> Te
         CommunityStateContentV1::from_canonical_cbor(&vec![0; 1_048_624]).err(),
         Some(Error::InvalidEncoding)
     );
-    let mut zero_schema = encode(state_value(&[]))?;
+    let mut zero_schema = encode(&state_value(&[]))?;
     zero_schema[9..41].fill(0);
     assert_eq!(
         CommunityStateContentV1::from_canonical_cbor(&zero_schema).err(),
@@ -239,7 +239,7 @@ fn state_content_checks_owning_schema_and_both_payload_and_record_bounds() -> Te
 
 #[test]
 fn state_decoder_rejects_nonpreferred_lengths_and_trailing_or_truncated_bytes() -> TestResult {
-    let valid = encode(state_value(b"sensitive input"))?;
+    let valid = encode(&state_value(b"sensitive input"))?;
     for end in 0..valid.len() {
         assert_eq!(
             CommunityStateContentV1::from_canonical_cbor(&valid[..end]).err(),
@@ -264,7 +264,7 @@ fn state_decoder_rejects_nonpreferred_lengths_and_trailing_or_truncated_bytes() 
             Some(Error::InvalidEncoding)
         );
     }
-    let mut huge = encode(state_value(&[]))?;
+    let mut huge = encode(&state_value(&[]))?;
     huge.splice(
         41..42,
         [0x5b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
@@ -295,7 +295,7 @@ fn progress_value(tick: Value, time: Value) -> Value {
 fn host_progress_preserves_initial_and_zero_boundaries_and_independent_coordinates() -> TestResult {
     for tick in [None, Some(0), Some(24), Some(u64::MAX)] {
         for time in [None, Some(0), Some(65_536), Some(u64::MAX)] {
-            let expected = encode(progress_value(boundary(tick), boundary(time)))?;
+            let expected = encode(&progress_value(boundary(tick), boundary(time)))?;
             let progress =
                 CommunityHostProgressV1::new(timeline(TIMELINE), GENERATION, tick, time)?;
             assert_eq!(progress.to_canonical_cbor(), expected);
@@ -319,7 +319,7 @@ fn host_progress_preserves_initial_and_zero_boundaries_and_independent_coordinat
 
 #[test]
 fn host_progress_rejects_unknown_tags_nonpreferred_scalars_and_partial_records() -> TestResult {
-    let valid = encode(progress_value(boundary(None), boundary(None)))?;
+    let valid = encode(&progress_value(boundary(None), boundary(None)))?;
     for end in 0..valid.len() {
         assert_eq!(
             CommunityHostProgressV1::from_canonical_cbor(&valid[..end]).err(),
@@ -335,11 +335,11 @@ fn host_progress_rejects_unknown_tags_nonpreferred_scalars_and_partial_records()
     ] {
         let value = progress_value(bad, boundary(None));
         assert_eq!(
-            CommunityHostProgressV1::from_canonical_cbor(&encode(value)?).err(),
+            CommunityHostProgressV1::from_canonical_cbor(&encode(&value)?).err(),
             Some(Error::InvalidEncoding)
         );
     }
-    let mut nonpreferred = encode(progress_value(boundary(Some(0)), boundary(None)))?;
+    let mut nonpreferred = encode(&progress_value(boundary(Some(0)), boundary(None)))?;
     nonpreferred.splice(43..44, [0x18, 0]);
     assert_eq!(
         CommunityHostProgressV1::from_canonical_cbor(&nonpreferred).err(),

@@ -284,12 +284,14 @@ fn parser_rejects_invalid_nested_owner_role_and_boolean() -> Result<(), Box<dyn 
         ArtifactRegistrationV1::from_canonical_cbor(&empty_owner),
         Err(ArtifactRegistrationErrorV1::FieldOutOfBounds)
     );
-    let mut unknown_role = canonical.clone();
-    unknown_role[80] = 7;
-    assert_eq!(
-        ArtifactRegistrationV1::from_canonical_cbor(&unknown_role),
-        Err(ArtifactRegistrationErrorV1::UnsupportedValue)
-    );
+    for code in [5, 6, 8, 23] {
+        let mut unknown_role = canonical.clone();
+        unknown_role[80] = code;
+        assert_eq!(
+            ArtifactRegistrationV1::from_canonical_cbor(&unknown_role),
+            Err(ArtifactRegistrationErrorV1::UnsupportedValue)
+        );
+    }
     let mut mismatched_role = canonical.clone();
     mismatched_role[80] = 1;
     assert_eq!(
@@ -311,6 +313,35 @@ fn parser_rejects_invalid_nested_owner_role_and_boolean() -> Result<(), Box<dyn 
         ArtifactRegistrationV1::from_canonical_cbor(&invalid_boolean),
         Err(ArtifactRegistrationErrorV1::InvalidEncoding)
     );
+    Ok(())
+}
+
+#[test]
+fn community_encryption_role_round_trips_in_required_roles_and_direct_keys(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut fields = sample_fields()?;
+    fields.data_class = ArtifactDataClassV1::PrivateSubjectData;
+    fields.required_key_roles = vec![KeyRoleV1::CommunityArtifactEncryption];
+    fields.key_dependencies.push(ArtifactKeyDependencyV1 {
+        identity: KeyIdentityV1::new(
+            "community-registry-test",
+            KeyRoleV1::CommunityArtifactEncryption,
+            1,
+        ),
+        material_digest: Hash::from_bytes([9; 32]),
+        private_material_required: true,
+    });
+    let registration = ArtifactRegistrationV1::new(fields)?;
+    // The role set precedes the direct-key array in the fixed ARD1 framing.
+    assert_eq!(registration.canonical_cbor()[80], 7);
+    let decoded = ArtifactRegistrationV1::from_canonical_cbor(registration.canonical_cbor())?;
+    assert_eq!(decoded, registration);
+    assert_eq!(
+        decoded.fields().required_key_roles,
+        [KeyRoleV1::CommunityArtifactEncryption]
+    );
+    assert_eq!(decoded.fields().key_dependencies[0].identity.role.code(), 7);
+    assert!(decoded.fields().key_dependencies[0].private_material_required);
     Ok(())
 }
 
