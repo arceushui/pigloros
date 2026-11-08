@@ -236,11 +236,31 @@ fn execute_every_coordinate(
     Ok(executed)
 }
 
+/// TEMPORARY (removed before review): the directory the matrix test exports
+/// its NIA1 to, for the recorded CI run.
+const EXPORT_ENV: &str = "PIGLOROS_NI_G_FORK_EXPORT";
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn export(
+    directory: &Path,
+    executed: &BTreeMap<Coordinate, NonInterferenceSignedExecutionV1>,
+) -> TestResult {
+    for execution in executed.values() {
+        pos_experiment::non_interference_harness::publish_non_interference_execution_v1(
+            directory, execution,
+        )?;
+    }
+    Ok(())
+}
+
 #[test]
 fn every_g_fork_coordinate_executes_or_stays_typed_non_executed_and_matches_its_nia1() -> TestResult
 {
     let work = tempfile::tempdir()?;
     let executed = execute_every_coordinate(work.path())?;
+    if let Ok(directory) = std::env::var(EXPORT_ENV) {
+        export(Path::new(&directory), &executed)?;
+    }
     assert_eq!(executed.len(), 12);
 
     let checked_in = checked_in()?;
