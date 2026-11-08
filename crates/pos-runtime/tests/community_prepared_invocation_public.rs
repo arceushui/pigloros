@@ -160,7 +160,7 @@ fn changing_any_actual_invocation_or_option_changes_prepared_identity() -> TestR
 }
 
 #[test]
-fn invalid_actual_input_refuses_before_preparation_and_original_is_preserved() -> TestResult {
+fn invalid_actual_input_refuses_before_preparation_and_original_is_preserved() {
     let member = Hash::from_bytes([1; 32]);
     let mut invocation = input();
     invocation.observation_bytes = vec![0; MAX_OBSERVATION_BYTES_V1 + 1];
@@ -192,7 +192,6 @@ fn invalid_actual_input_refuses_before_preparation_and_original_is_preserved() -
         input().prepared_record(Hash::zero(), options()).err(),
         Some(Error::InvalidBinding)
     );
-    Ok(())
 }
 
 #[test]
