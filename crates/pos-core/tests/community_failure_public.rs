@@ -559,7 +559,7 @@ fn pass_failures_keep_exact_host_value_nullable_pass_and_borrowed_cfi_order() ->
                     Value::Null
                 },
                 Value::Array(vec![bytes(&[9; 32]), bytes(&[8; 32])]),
-                value,
+                value.clone(),
                 bytes(&[7; 32]),
                 uint(8),
             ]))?;

@@ -16,8 +16,8 @@ impl PluginInvocationV1 {
     /// not source verification, current-use admission or permission to invoke.
     ///
     /// # Errors
-    /// Rejects invalid invocation bounds/ID grammar or absent member/invocation
-    /// identities. The installed owner must independently authenticate the member,
+    /// Rejects invalid invocation bounds/ID grammar or zero required identities
+    /// and digests. The installed owner must independently authenticate the member,
     /// actual source artifacts, profile, trust and provenance before Reserve.
     pub fn prepared_record(
         &self,

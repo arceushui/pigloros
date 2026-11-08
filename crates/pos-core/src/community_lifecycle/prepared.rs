@@ -78,11 +78,25 @@ impl<'a> CommunityPreparedInvocationV1<'a> {
     /// Validate local bounds and required member/invocation identities.
     ///
     /// # Errors
-    /// Rejects zero member/invocation identities, payloads over one MiB and an
+    /// Rejects zero required identities/digests, payloads over one MiB and an
     /// invalid deterministic budget ID. Existing WIT scalar/ref values are
     /// preserved; actual artifact/schema/digest equality is an owner obligation.
     pub fn new(input: CommunityPreparedInvocationInputV1<'a>) -> Result<Self> {
-        if input.member_binding_digest == Hash::zero() || input.invocation_id == [0; 16] {
+        if input.member_binding_digest == Hash::zero()
+            || input.invocation_id == [0; 16]
+            || input.timeline_position.timeline_id == [0; 16]
+            || [
+                input.principal_ref.digest,
+                input.authorization_ref.digest,
+                input.observation_snapshot_ref.digest,
+                input.prior_state_schema_digest,
+                input.execution_profile_digest,
+                input.trust_policy_snapshot_digest,
+                input.deterministic_random_domain,
+                input.provenance_root,
+            ]
+            .contains(&[0; 32])
+        {
             return Err(Error::InvalidBinding);
         }
         if input.observation_bytes.len() > MAX_COMMUNITY_STATE_BYTES_V1

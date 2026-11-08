@@ -308,10 +308,10 @@ fn encode_host(out: &mut Vec<u8>, error: Host) {
     match error {
         Host::InvalidManifest => out.extend_from_slice(&[0x81, 0]),
         Host::ArtifactTrustDenied { basis } => {
-            encode_scalar_failure(out, 1, u64::from(denial_code(basis)))
+            encode_scalar_failure(out, 1, u64::from(denial_code(basis)));
         }
         Host::ArtifactRevoked { basis } => {
-            encode_scalar_failure(out, 2, u64::from(revocation_code(basis)))
+            encode_scalar_failure(out, 2, u64::from(revocation_code(basis)));
         }
         Host::IncompatibleAbi => out.extend_from_slice(&[0x81, 3]),
         Host::MissingFeature { index } => encode_scalar_failure(out, 4, index as u64),
@@ -333,7 +333,7 @@ fn encode_host(out: &mut Vec<u8>, error: Host) {
         Host::DeterministicDeadlineExceeded => out.extend_from_slice(&[0x81, 17]),
         Host::OperationalWatchdogStop => out.extend_from_slice(&[0x81, 18]),
         Host::AtomicCommitFailed { failure } => {
-            encode_scalar_failure(out, 19, u64::from(atomic_code(failure)))
+            encode_scalar_failure(out, 19, u64::from(atomic_code(failure)));
         }
     }
 }
@@ -489,7 +489,7 @@ fn encode_guest_code(out: &mut Vec<u8>, code: CommunityGuestErrorCodeV1<'_>) {
     match code {
         CommunityGuestErrorCodeV1::InvalidInvocation(field) => encode_field(out, 0, field),
         CommunityGuestErrorCodeV1::UnsupportedSchema(schema) => {
-            encode_scalar_failure(out, 1, u64::from(schema))
+            encode_scalar_failure(out, 1, u64::from(schema));
         }
         CommunityGuestErrorCodeV1::CapabilityRequired(id) => {
             out.extend_from_slice(&[0x82, 2]);
@@ -500,12 +500,12 @@ fn encode_guest_code(out: &mut Vec<u8>, code: CommunityGuestErrorCodeV1<'_>) {
             encode_bytes(out, &hash, 2);
         }
         CommunityGuestErrorCodeV1::DeterministicBudgetExhausted => {
-            out.extend_from_slice(&[0x81, 4])
+            out.extend_from_slice(&[0x81, 4]);
         }
         CommunityGuestErrorCodeV1::InvalidState(field) => encode_field(out, 5, field),
         CommunityGuestErrorCodeV1::MigrationRejected(field) => encode_field(out, 6, field),
         CommunityGuestErrorCodeV1::GuestDeclaredFailure(code) => {
-            encode_scalar_failure(out, 7, u64::from(code))
+            encode_scalar_failure(out, 7, u64::from(code));
         }
     }
 }

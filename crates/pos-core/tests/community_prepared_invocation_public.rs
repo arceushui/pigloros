@@ -185,18 +185,37 @@ fn all_original_scalar_widths_and_zero_watchdog_are_preserved() -> TestResult {
         assert_eq!(&*Prepared::new(input)?.to_canonical_cbor(), &encoded);
         assert!(*Prepared::from_canonical_cbor(&encoded)?.as_input() == input);
     }
-    // WIT ref/schema/random/provenance values are not secretly replaced or
-    // certified here. Actual identity/source admissibility belongs to the owner.
+    Ok(())
+}
+
+#[test]
+fn all_required_durable_identity_fields_reject_zero_without_minting_authority() -> TestResult {
+    for field in 0..11 {
+        let mut original = input(b"", b"");
+        match field {
+            0 => original.member_binding_digest = Hash::zero(),
+            1 => original.invocation_id = [0; 16],
+            2 => original.timeline_position.timeline_id = [0; 16],
+            3 => original.principal_ref.digest = [0; 32],
+            4 => original.authorization_ref.digest = [0; 32],
+            5 => original.observation_snapshot_ref.digest = [0; 32],
+            6 => original.prior_state_schema_digest = [0; 32],
+            7 => original.execution_profile_digest = [0; 32],
+            8 => original.trust_policy_snapshot_digest = [0; 32],
+            9 => original.deterministic_random_domain = [0; 32],
+            _ => original.provenance_root = [0; 32],
+        }
+        assert_eq!(Prepared::new(original).err(), Some(Error::InvalidBinding));
+        assert_eq!(
+            Prepared::from_canonical_cbor(&encode(&fixture(&original))?).err(),
+            Some(Error::InvalidBinding)
+        );
+    }
+    // A zero registered schema ID or empty artifact length is still an exact
+    // WIT scalar, not an absent required digest or a source-validity certificate.
     let mut original = input(b"", b"");
-    original.timeline_position.timeline_id = [0; 16];
-    original.principal_ref = artifact(0);
-    original.authorization_ref = artifact(0);
-    original.observation_snapshot_ref = artifact(0);
-    original.prior_state_schema_digest = [0; 32];
-    original.execution_profile_digest = [0; 32];
-    original.trust_policy_snapshot_digest = [0; 32];
-    original.deterministic_random_domain = [0; 32];
-    original.provenance_root = [0; 32];
+    original.principal_ref.schema_id = 0;
+    original.principal_ref.byte_length = 0;
     let encoded = Prepared::new(original)?.to_canonical_cbor();
     assert!(*Prepared::from_canonical_cbor(&encoded)?.as_input() == original);
     Ok(())
