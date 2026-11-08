@@ -50,12 +50,14 @@ EXPECTED_NATIVE = {'name': 'owner-bridge-windows',
                                               'shell': 'pwsh',
                                               'env': {'GH_TOKEN': '${{ github.token }}'},
                                               'run': './scripts/prepare-owner-runtime.ps1 -OutputRoot "$env:RUNNER_TEMP/owner-native-runtime"'},
-                                             {'name': 'Test native adapter and portable bridge '
-                                                      'including ignored tests',
+                                             {'name': 'Test portable bridge, owner executable and native docs',
+                                              'shell': 'pwsh',
                                               'env': {'OWNER_BRIDGE_TEST_RUNTIME': '${{ steps.runtime.outputs.runtime }}'},
-                                              'run': 'cargo test -p pos-owner-bridge-windows -p '
-                                                     'pos-owner-bridge -p piglor-owner --all-features --locked -- '
-                                                     '--include-ignored'},
+                                              'run': "$ErrorActionPreference = 'Stop'\n"
+                                                     'cargo test -p pos-owner-bridge -p piglor-owner --all-features --locked -- --include-ignored\n'
+                                                     "if ($LASTEXITCODE -ne 0) { throw 'Portable bridge or owner executable tests failed' }\n"
+                                                     'cargo test -p pos-owner-bridge-windows --all-features --locked --doc -- --include-ignored\n'
+                                                     "if ($LASTEXITCODE -ne 0) { throw 'Native documentation tests failed' }\n"},
                                              {'name': 'Measure only shim source coverage',
                                               'id': 'coverage',
                                               'shell': 'pwsh',

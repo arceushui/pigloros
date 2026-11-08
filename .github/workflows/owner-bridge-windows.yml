@@ -34,8 +34,8 @@ jobs:
         run: python scripts/check_owner_bridge_unsafe_policy.py
       - name: Lint native adapter and portable bridge
         run: cargo clippy -p pos-owner-bridge-windows -p pos-owner-bridge -p piglor-owner --all-features --all-targets --locked -- -D warnings -W clippy::pedantic
-      # Run the independent probes before runtime admission. The full test and
-      # coverage steps below still require the real SDK lifecycle fixture.
+      # Run independent probes before runtime admission. The complete native
+      # suite runs once under coverage, including all 1,000 readiness cases.
       - name: Test runtime-independent native adapter
         run: cargo test -p pos-owner-bridge-windows --all-features --locked -- --include-ignored --skip tests::native_window_environment_and_buffers_lifecycle --skip tests::native_host_opens_fresh_environments_and_retires_before_reuse --skip tests::native_resource_denial_callback_failure_does_not_contact_listener
       - name: Prepare retained runtime for real native fixtures
@@ -44,10 +44,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: ./scripts/prepare-owner-runtime.ps1 -OutputRoot "$env:RUNNER_TEMP/owner-native-runtime"
-      - name: Test native adapter and portable bridge including ignored tests
+      - name: Test portable bridge, owner executable and native docs
+        shell: pwsh
         env:
           OWNER_BRIDGE_TEST_RUNTIME: ${{ steps.runtime.outputs.runtime }}
-        run: cargo test -p pos-owner-bridge-windows -p pos-owner-bridge -p piglor-owner --all-features --locked -- --include-ignored
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cargo test -p pos-owner-bridge -p piglor-owner --all-features --locked -- --include-ignored
+          if ($LASTEXITCODE -ne 0) { throw 'Portable bridge or owner executable tests failed' }
+          cargo test -p pos-owner-bridge-windows --all-features --locked --doc -- --include-ignored
+          if ($LASTEXITCODE -ne 0) { throw 'Native documentation tests failed' }
       - name: Measure only shim source coverage
         id: coverage
         shell: pwsh

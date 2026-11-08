@@ -59,6 +59,12 @@ outside `src/ffi`, 95% lines and 80% regions for `src/ffi`) in its crate-local
 `covgate.toml`, read by the Windows-only `owner-bridge-windows` CI job, so
 the Linux coverage job intentionally does not evaluate them.
 
+The Windows job runs the complete native test suite, including all 1,000 real
+readiness cases, once under coverage instrumentation. Portable bridge and owner
+executable tests run separately, along with native doctests. The earlier probes
+run before runtime admission; they do not replace the full native suite. This
+avoids repeating the entire native acceptance run before measuring coverage.
+
 `covgate` reads the detailed LLVM JSON report produced by the completed
 `cargo llvm-cov` run, so the diff gate and repository-wide gate use the same test
 execution and native coverage data. Install the local tool with:

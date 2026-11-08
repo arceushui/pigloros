@@ -800,6 +800,38 @@ class CiWorkflowPolicyTests(unittest.TestCase):
                     )
                     self.assertEqual(actual.returncode == 0, result == expected)
 
+    def test_windows_single_native_run_keeps_fixtures_and_documentation_required(self) -> None:
+        workflow = load_workflow(CI_WORKFLOW_PATH)
+        native = load_workflow(ROOT / ".github/workflows/owner-bridge-windows.yml")
+        for name, before, after in (
+            (
+                "Measure only shim source coverage",
+                "-- --include-ignored",
+                "-- --include-ignored --skip tests::native_window_environment_and_buffers_lifecycle",
+            ),
+            (
+                "Measure only shim source coverage",
+                "cargo llvm-cov -p",
+                "cargo llvm-cov report -p",
+            ),
+            (
+                "Test portable bridge, owner executable and native docs",
+                "-p pos-owner-bridge -p piglor-owner",
+                "-p pos-owner-bridge",
+            ),
+            (
+                "Test portable bridge, owner executable and native docs",
+                "--doc -- --include-ignored",
+                "--no-run -- --include-ignored",
+            ),
+        ):
+            mutated = copy.deepcopy(native)
+            step = next(s for s in mutated["jobs"]["owner-bridge-windows"]["steps"] if s.get("name") == name)
+            self.assertIn(before, step["run"])
+            step["run"] = step["run"].replace(before, after)
+            with self.subTest(name=name, before=before), self.assertRaises(AssertionError):
+                assert_owner_windows_lane(workflow, mutated)
+
     def test_windows_full_file_coverage_rejects_weakened_or_missing_scopes(self) -> None:
         workflow = load_workflow(CI_WORKFLOW_PATH)
         native = load_workflow(ROOT / ".github/workflows/owner-bridge-windows.yml")
