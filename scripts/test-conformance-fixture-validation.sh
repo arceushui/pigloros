@@ -239,6 +239,23 @@ sed -i -E "s|^[0-9a-f]{64}  BLAKE3SUMS$|${blake3_inventory_sha256}  BLAKE3SUMS|"
   "${blake3_gap_root}/SHA256SUMS"
 expect_rejection "${blake3_gap_root}" "BLAKE3SUMS does not cover the complete public fixture inventory"
 
+# ADR-062 Revision 8 slice N5 (#1233): every recorded erasure artifact is named by its BLAKE3, the
+# erasure directory holds only the declared kinds of file, and the byte inventories cover it.
+tampered_erasure_root="$(new_fixture_copy tampered-erasure-record)"
+tampered_erasure="$(find "${tampered_erasure_root}/erasure/records" -type f | sort | sed -n '1p')"
+printf '\0' >>"${tampered_erasure}"
+refresh_checksums "${tampered_erasure_root}" "${tampered_erasure}"
+expect_rejection "${tampered_erasure_root}" "erasure record is not named by its BLAKE3"
+
+unexpected_erasure_root="$(new_fixture_copy unexpected-erasure-file)"
+printf 'not an erasure record\n' >"${unexpected_erasure_root}/erasure/notes.txt"
+bash scripts/generate-conformance-fixture-records.sh "${unexpected_erasure_root}" --write
+expect_rejection "${unexpected_erasure_root}" "unexpected erasure conformance file"
+
+erasure_gap_root="$(new_fixture_copy erasure-sha256-gap)"
+sed -i '0,\|  erasure/records/|{\|  erasure/records/|d}' "${erasure_gap_root}/SHA256SUMS"
+expect_adapter_rejection "${erasure_gap_root}" "SHA256SUMS is not independently reproducible"
+
 watchdog_root="$(new_fixture_copy plugin-watchdog-drift)"
 replace_json "${watchdog_root}/providers/plugin-conformance/provider.json" \
   '.fixture_contracts.denied.watchdog_ms = 1000'

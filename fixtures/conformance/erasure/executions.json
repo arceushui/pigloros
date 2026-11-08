@@ -1,0 +1,165 @@
+{
+  "cases": [
+    {
+      "case_id": "complete-all-categories",
+      "histories": [
+        {
+          "authorization_refusal": null,
+          "receipts": [
+            "records/05f52774814e7475b77e995ac2f053868c49df00d75a08960cd0cc2867ac909f.erc1"
+          ],
+          "request": "requests/complete-all-categories.erq1",
+          "states": [
+            "records/69ecae294b83dda9622f64d52a41d592b44e8b528829262528c76842d3270bbe.ers1",
+            "records/db5f94dd9468003e092d5bdb51ee2c374e01d7fba670a6c894e03488c9379a8e.ers1",
+            "records/8b0960fd145d64d1614711041ace12ed17b93858daa9378502b29f04b9f39e2a.ers1",
+            "records/4d70a178eea05c23646f08aa789d0ce163ab728b23c884a131ba0c7553faf45c.ers1",
+            "records/a2c4e644e643cd4aeb0d819b1b107bbfd1a6299903ddfd8e8b552133eae60f1d.ers1",
+            "records/e97689d64c81e18237a98326e4fb7628101a9a0de5d12743cc24d6cff8a0559a.ers1"
+          ]
+        }
+      ],
+      "rejoins": [
+        {
+          "outcome": "Admitted",
+          "proof": "records/ebcc272e8708162f4bf598dd4e387c596a667ae0323bf91585ef4241e7e36d61.errj1"
+        },
+        {
+          "outcome": "BackupInventoryIncomplete",
+          "proof": "records/75c43528272da214c40fbfe0901bf266d311954abca98fa64be944ab88fcf40c.errj1"
+        },
+        {
+          "outcome": "Unauthorized",
+          "proof": "records/233cf44681ee44f5621eb7c124e312b99e2900d0eb77f06ca41dcf83ad276de3.errj1"
+        }
+      ]
+    },
+    {
+      "case_id": "partial-failure-then-retry",
+      "histories": [
+        {
+          "authorization_refusal": null,
+          "receipts": [
+            "records/7b81608eb19177d5a23e7feca4e5eb2607045689e05df2eb00f37d39d2d25ae2.erc1",
+            "records/e9a7821f8b6e87ba0f70965821af9586fe737ef15d7efa127aa0e0c1abe891a7.erc1"
+          ],
+          "request": "requests/partial-failure-then-retry.erq1",
+          "states": [
+            "records/a5447212a32b53ed24a49bf97f4df7bb03c548b075d8d159f64797ffcfe64638.ers1",
+            "records/6e78182c1fbb71232f7a7bf07a5d5a16ccb855faba13c16d1c3243d51ef660f4.ers1",
+            "records/f46375bb59e8c09a1f316070c2784e64c5994bbcdd40f195102c2a6b597cc2f3.ers1",
+            "records/5f5585300c9d686bd520eb4e0f522db8ebd080381b9bebc14af467c217c3eccb.ers1",
+            "records/a20c5de063da8d7ae585d4a5271af461eb214194c3440e0239689be3b1952d1f.ers1",
+            "records/d7a6929c1463f01f1f37af93a235fb3d20e9e60ed5fb88cfcf66c62a4b13d3ff.ers1",
+            "records/0cc2651d5211bd018a85fc7558802c2950eba003caad3fec864f8e6f8974e4f5.ers1"
+          ]
+        }
+      ],
+      "rejoins": [
+        {
+          "outcome": "BackupInventoryIncomplete",
+          "proof": "records/a7f5f3ae1a5fe0e3e668d101777149c8e365bc7bebfe44e140c3ffb1cc12b8db.errj1"
+        }
+      ]
+    },
+    {
+      "case_id": "partial-failure-stale-and-missing",
+      "histories": [
+        {
+          "authorization_refusal": null,
+          "receipts": [
+            "records/19cb1a64600f55884ab8dc9f6f2631ea25ed7f57002c6cdb4bfff4f1bc9ca562.erc1"
+          ],
+          "request": "requests/partial-failure-stale-and-missing.erq1",
+          "states": [
+            "records/ae6c2d6cfd3d23201f3d06e3c665137e46640bc0abf6942a9c76b367d3cffa48.ers1",
+            "records/afe0e68e7cd71d19da5216e3cc621c289aba3c1643be18db098482c61e9e053c.ers1",
+            "records/7a51ce8e1f6a27cee49676ed3f46398e8279a6f4ba6f59cd3f3e3a86c73d3bed.ers1",
+            "records/c90a36a7915d1e1137ff62cfd334d2965bb4fe051621edd0402871588b0d0e21.ers1",
+            "records/bf66fc96b430ae50fc1e71cddbe1e9e441d3fd88c26a14a1640e4f5cb2a4fcc3.ers1",
+            "records/ff817ceabaf2a635e6f16dd909b1555a8522e0732c5b439242b70d851df4c61f.ers1"
+          ]
+        }
+      ],
+      "rejoins": [
+        {
+          "outcome": "BackupDeletionPending",
+          "proof": "records/a182e2e7e34479f9ef3ddec9564e06c733d6157e984440c6360ec256d1823358.errj1"
+        }
+      ]
+    },
+    {
+      "case_id": "policy-conflict-corrected",
+      "histories": [
+        {
+          "authorization_refusal": "Conflict",
+          "receipts": [],
+          "request": "requests/policy-conflict-corrected.erq1",
+          "states": [
+            "records/c500e862e9842c62d3affba47a4c43d3adea58316ca0c5e3140b896a2534a503.ers1",
+            "records/9ef9621db6af931c5e24847624961e760b0ff3055e03ba31b931e2916cfb9e8c.ers1"
+          ]
+        },
+        {
+          "authorization_refusal": null,
+          "receipts": [
+            "records/b118a6c5cb0a7c1ebf4c9cff0fae4780767fc57918e8a54f1095cefc1be717f0.erc1"
+          ],
+          "request": "requests/policy-conflict-corrected.corrected.erq1",
+          "states": [
+            "records/a2af5b49e0398414baeb69a333a2de4896fcff5c1903514e4e3e3dc279c490ea.ers1",
+            "records/74383b34d9898f46cafddcaaf36e9cb690647ef6d1b610321b6a2a0641f35c03.ers1",
+            "records/c357fa9ffa1a985b0daf673d3dabda5b604b20e7eb0964f5857b8764de993f30.ers1",
+            "records/57dcbecc317ec2e36a31ba90919ffb4e0b63647fe407f6d5bea23ac408144f98.ers1",
+            "records/3b6db4ab6456faeee3d9b9566188daae58b951a498dcc0a5144d73d6aac53684.ers1",
+            "records/cfb0f99a072e8fa9715d0e8d13bad5a5ef89c89b0981490b3bf8b70251155371.ers1"
+          ]
+        }
+      ],
+      "rejoins": []
+    },
+    {
+      "case_id": "legal-hold",
+      "histories": [
+        {
+          "authorization_refusal": null,
+          "receipts": [
+            "records/b2ff6e68c92dccb599b8175986d670c4b9cb49df84f232274a6c49da1553df27.erc1"
+          ],
+          "request": "requests/legal-hold.erq1",
+          "states": [
+            "records/28f51f05f1505c1e99f817a65a5fb668b280d4f332df034a1b5e295592a0d69b.ers1",
+            "records/21a730631d31b3cfc1ca906d884ee42c336636edce9980b8453c26c20a954a91.ers1",
+            "records/157061000d92dc6eef1d1a132558b7c4d3fcc11c42371fe884cf366114f7c845.ers1",
+            "records/e95e5324074a701e73cf27e190a8c5faee61f5b45a7b732643d13f6337917c1d.ers1",
+            "records/97e4c37c654d2da55874d2c38dcb080f36000800d2008d8df81f7d5ba648200d.ers1",
+            "records/14938eabc8422c2c451c4e4d7e147219beacdbf39c8f9f357d44370fe710dd81.ers1"
+          ]
+        }
+      ],
+      "rejoins": []
+    },
+    {
+      "case_id": "transitions-every-class",
+      "histories": [
+        {
+          "authorization_refusal": null,
+          "receipts": [
+            "records/43e341a7e342e5af9076f4effc9098e3250a93a668b6286ffb0d5c701a73d1af.erc1"
+          ],
+          "request": "requests/transitions-every-class.erq1",
+          "states": [
+            "records/f5e7d4678a87fe513fd0122c41c931a4d9c92baffc0cf98bf0a5a64b8e331748.ers1",
+            "records/215ef0ff9704a2056ade64c01699f1ec89caa5e487a13cddd838dc031178ae20.ers1",
+            "records/1d2b3e0b895adafd32aa3eddb3a3590e89fdbae810a2ce0421677fe048cfcd7b.ers1",
+            "records/2644d90f27f5bfa77a51fc0718ad2e92966d682d75fdb5cc1749b041c0faf8d2.ers1",
+            "records/3b591f71fb87a9845ad1429ffd5731f2da436327fece480c360cbd58b7c696f7.ers1",
+            "records/4934c9162eb38d8289c2c2cdf7a72c834162864197f23228b02ce5e8fac86948.ers1"
+          ]
+        }
+      ],
+      "rejoins": []
+    }
+  ],
+  "schema": "pigloros.erasure-conformance.executions.v1"
+}

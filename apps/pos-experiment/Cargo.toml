@@ -91,6 +91,10 @@ name = "agent_provider_replay"
 required-features = ["test-support"]
 
 [[test]]
+name = "erasure_conformance"
+required-features = ["test-support"]
+
+[[test]]
 name = "factual_counterfactual_end_to_end"
 required-features = ["test-support"]
 
