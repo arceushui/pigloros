@@ -194,7 +194,12 @@ fn run_ceremony(
         return Err(error);
     }
     if receipt.is_none_or(|received| received >= deadline)
-        || result_error != Some(BridgeError::Lifecycle(LifecycleCode::ControllerLost))
+        || !matches!(
+            result_error,
+            Some(BridgeError::Lifecycle(
+                LifecycleCode::ControllerLost | LifecycleCode::ClientFailed
+            ))
+        )
     {
         return Err(format!("packaged Get readiness/cancellation failed: receipt={receipt:?}, result={result_error:?}").into());
     }
