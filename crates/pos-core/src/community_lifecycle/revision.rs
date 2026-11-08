@@ -1,9 +1,9 @@
 //! CSR1 producer identity and required predecessor; no live selection authority.
 
 use super::{
-    canonical_end, fixed_bytes, read_hash, read_hashes, read_head, read_optional_hash,
-    read_pass_key, record_cursor, record_prefix, validate_horizon, CommunityLifecycleErrorV1,
-    CommunityPassKeyV1, Result,
+    canonical_end, encode_optional_hash, fixed_bytes, read_hash, read_hashes, read_head,
+    read_optional_hash, read_pass_key, record_cursor, record_prefix, validate_horizon,
+    CommunityLifecycleErrorV1, CommunityPassKeyV1, Result,
 };
 use crate::{encode_bytes, encode_hash, encode_head, CborCursor, Hash};
 use zeroize::Zeroizing;
@@ -95,10 +95,7 @@ impl CommunityStateRevisionV1 {
         record_prefix(&mut out, 9, b"CSR1");
         encode_origin(&mut out, input.producer_origin);
         encode_hash(&mut out, input.member_binding_digest);
-        match input.predecessor_revision_digest {
-            None => out.push(0xf6),
-            Some(hash) => encode_hash(&mut out, hash),
-        }
+        encode_optional_hash(&mut out, input.predecessor_revision_digest);
         encode_hash(&mut out, input.state_content_digest);
         encode_hash(&mut out, input.producer_digest);
         encode_hash(&mut out, input.protected_owner_binding_digest);

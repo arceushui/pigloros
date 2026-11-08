@@ -11,6 +11,7 @@ mod reservation;
 mod revision;
 mod selected_head;
 mod state;
+mod terminal;
 
 pub use error::CommunityLifecycleErrorV1;
 pub use progress::CommunityHostProgressV1;
@@ -26,6 +27,10 @@ pub use selected_head::{
     CommunitySelectedHeadInputV1, CommunitySelectedHeadV1, MAX_COMMUNITY_MEMBERS_V1,
 };
 pub use state::{CommunityStateContentV1, MAX_COMMUNITY_STATE_BYTES_V1};
+pub use terminal::{
+    CommunityAbortInputV1, CommunityAbortReasonV1, CommunityAbortV1, CommunityCommitInputV1,
+    CommunityCommitV1, CommunityFactualRangeV1,
+};
 
 use crate::{encode_bytes, encode_head, CborCursor, CborReadError, Hash, TimelineId};
 
@@ -234,6 +239,13 @@ fn read_optional_hash(cursor: &mut CborCursor<'_>) -> Result<Option<Hash>> {
         Ok(None)
     } else {
         read_hash(cursor).map(Some)
+    }
+}
+
+fn encode_optional_hash(out: &mut Vec<u8>, hash: Option<Hash>) {
+    match hash {
+        None => out.push(0xf6),
+        Some(hash) => crate::encode_hash(out, hash),
     }
 }
 
