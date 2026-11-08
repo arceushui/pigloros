@@ -14,7 +14,7 @@ use pos_owner_bridge::{
 };
 use pos_owner_bridge_codec::CeremonyId;
 
-use super::{readiness, ResourceProbeGuard, TestResult};
+use super::{readiness, trace::Trace, ResourceProbeGuard, TestResult};
 use crate::adapter::{loopback::SharedLoopback, store::WindowsCleanupStore, surface::Surface};
 use crate::NativeFactory;
 
@@ -23,6 +23,7 @@ struct Fixture {
     loopback: SharedLoopback,
     store: WindowsCleanupStore,
     factory: Rc<dyn NativeFactory>,
+    trace: Trace,
 }
 
 impl Fixture {
@@ -45,6 +46,7 @@ impl Fixture {
             loopback,
             store,
             factory,
+            trace: Trace::new(0x27, Instant::now()),
         })
     }
 
@@ -53,6 +55,7 @@ impl Fixture {
         driver: &mut CeremonyDriver,
     ) -> Result<Result<Verified, BridgeError>, Box<dyn std::error::Error>> {
         loop {
+            self.trace.update("denial-active", &self.surface, driver);
             match driver.step(&mut readiness::env(
                 &mut self.surface,
                 &mut self.loopback,
@@ -75,6 +78,8 @@ impl Fixture {
             if quarantined {
                 quarantined = keeper
                     .poll(|driver| {
+                        self.trace
+                            .update("denial-quarantine", &self.surface, driver);
                         driver.poll_cleanup(&mut readiness::env(
                             &mut self.surface,
                             &mut self.loopback,
@@ -97,6 +102,7 @@ pub(super) fn run(runtime: &Path, root: &Path) -> TestResult {
     let mut fixture = Fixture::new(runtime, root)?;
     let _mode = ResourceProbeGuard::new(crate::ResourceDenialFixture::DriverRetry);
     let started = Instant::now();
+    fixture.trace = Trace::new(0x27, started);
     fixture
         .surface
         .set_deadline(started + Duration::from_secs(15));
