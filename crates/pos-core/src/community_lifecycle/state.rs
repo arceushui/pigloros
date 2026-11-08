@@ -1,8 +1,8 @@
 //! Borrowed CSC1 plaintext view; retained bytes must use the protected owner.
 
 use super::{
-    canonical_end, fixed_bytes, read_head, record_cursor, record_prefix, CommunityLifecycleErrorV1,
-    Result,
+    bounded_bytes, canonical_end, fixed_bytes, record_cursor, record_prefix,
+    CommunityLifecycleErrorV1, Result,
 };
 use crate::{encode_head, Hash};
 use zeroize::Zeroizing;
@@ -75,16 +75,7 @@ impl<'a> CommunityStateContentV1<'a> {
     pub fn from_canonical_cbor(bytes: &'a [u8]) -> Result<Self> {
         record_cursor(bytes, MAX_RECORD_BYTES, 4, b"CSC1").and_then(|mut cursor| {
             fixed_bytes(&mut cursor).and_then(|schema| {
-                read_head(&mut cursor, 2)
-                    .and_then(|length| {
-                        // Saturation is always above the admitted MiB bound,
-                        // including an unrepresentable wire length on wasm32.
-                        let length = usize::try_from(length).unwrap_or(usize::MAX);
-                        if length > MAX_COMMUNITY_STATE_BYTES_V1 {
-                            return Err(CommunityLifecycleErrorV1::BoundsExceeded);
-                        }
-                        cursor.take(length).map_err(CommunityLifecycleErrorV1::from)
-                    })
+                bounded_bytes(&mut cursor, MAX_COMMUNITY_STATE_BYTES_V1)
                     .and_then(|state| Self::new(Hash::from_bytes(schema), state))
                     .and_then(|record| canonical_end(&cursor).map(|()| record))
             })

@@ -7,10 +7,14 @@
 
 mod error;
 mod progress;
+mod revision;
 mod state;
 
 pub use error::CommunityLifecycleErrorV1;
 pub use progress::CommunityHostProgressV1;
+pub use revision::{
+    CommunityStateProducerV1, CommunityStateRevisionInputV1, CommunityStateRevisionV1,
+};
 pub use state::{CommunityStateContentV1, MAX_COMMUNITY_STATE_BYTES_V1};
 
 use crate::{encode_bytes, encode_head, CborCursor, CborReadError, Hash, TimelineId};
@@ -177,6 +181,37 @@ fn fixed_bytes<const N: usize>(cursor: &mut CborCursor<'_>) -> Result<[u8; N]> {
             value.copy_from_slice(bytes);
             value
         })
+}
+
+fn bounded_bytes<'a>(cursor: &mut CborCursor<'a>, maximum: usize) -> Result<&'a [u8]> {
+    read_head(cursor, 2).and_then(|length| {
+        let length = usize::try_from(length).unwrap_or(usize::MAX);
+        if length > maximum {
+            Err(CommunityLifecycleErrorV1::BoundsExceeded)
+        } else {
+            cursor.take(length).map_err(CommunityLifecycleErrorV1::from)
+        }
+    })
+}
+
+fn read_hash(cursor: &mut CborCursor<'_>) -> Result<Hash> {
+    fixed_bytes(cursor).map(Hash::from_bytes)
+}
+
+fn read_hashes<const N: usize>(cursor: &mut CborCursor<'_>) -> Result<[Hash; N]> {
+    let mut hashes = [Hash::zero(); N];
+    hashes
+        .iter_mut()
+        .try_for_each(|slot| read_hash(cursor).map(|hash| *slot = hash))
+        .map(|()| hashes)
+}
+
+fn read_optional_hash(cursor: &mut CborCursor<'_>) -> Result<Option<Hash>> {
+    if cursor.consume_if(0xf6) {
+        Ok(None)
+    } else {
+        read_hash(cursor).map(Some)
+    }
 }
 
 fn read_coordinates(cursor: &mut CborCursor<'_>) -> Result<(TimelineId, [u8; 16])> {
