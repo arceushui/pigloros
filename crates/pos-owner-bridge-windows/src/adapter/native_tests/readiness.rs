@@ -5,7 +5,7 @@ use std::io::Write as _;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -21,6 +21,7 @@ use pos_owner_bridge_codec::{
 };
 
 use super::super::{loopback::SharedLoopback, store::WindowsCleanupStore, surface::Surface};
+use super::foreground::{Foreground, Ticket};
 use super::trace::Trace;
 use super::TestResult;
 use crate::{NativeFactory, NativePulse, StaPump};
@@ -30,7 +31,7 @@ const RUNS_PER_WORKER: usize = 250;
 
 pub(super) fn run(runtime_path: &Path, root: &Path) -> TestResult {
     let loopback = SharedLoopback::start()?;
-    let foreground = Arc::new(Mutex::new(()));
+    let foreground = Arc::new(Foreground::default());
     let mut workers = Vec::new();
     for worker in 0..WORKERS {
         let path = runtime_path.to_path_buf();
@@ -66,7 +67,7 @@ fn run_worker(
     runtime_path: &Path,
     root: PathBuf,
     mut loopback: SharedLoopback,
-    foreground: &Mutex<()>,
+    foreground: &Foreground,
     worker: usize,
 ) -> Result<usize, Box<dyn std::error::Error>> {
     crate::create_private_directory(&root)?;
@@ -119,7 +120,7 @@ fn run_ceremony(
     surface: &mut Surface,
     loopback: &mut SharedLoopback,
     store: &mut WindowsCleanupStore,
-    foreground: &Mutex<()>,
+    foreground: &Foreground,
     id: CeremonyId,
     number: u64,
 ) -> TestResult {
@@ -129,7 +130,7 @@ fn run_ceremony(
     let mut driver = new_driver(id, started)?;
     let mut trace = Trace::new(number, started);
     let mut visible = Some(acquire_foreground(
-        surface, foreground, deadline, &driver, &mut trace,
+        surface, foreground, deadline, &driver, &mut trace, number,
     )?);
     let mut receipt = None;
     // Keep both the driver and its native owners outside the unwind boundary.
@@ -259,19 +260,17 @@ pub(super) fn cancel_driver(
 
 fn acquire_foreground<'a>(
     surface: &Surface,
-    foreground: &'a Mutex<()>,
+    foreground: &'a Foreground,
     deadline: Instant,
     driver: &CeremonyDriver,
     trace: &mut Trace,
-) -> Result<MutexGuard<'a, ()>, Box<dyn std::error::Error>> {
+    number: u64,
+) -> Result<Ticket<'a>, Box<dyn std::error::Error>> {
+    let ticket = foreground.request(number)?;
     loop {
         trace.update("foreground", surface, driver);
-        match foreground.try_lock() {
-            Ok(visible) => return Ok(visible),
-            Err(TryLockError::WouldBlock) => {}
-            Err(TryLockError::Poisoned(_)) => {
-                return Err("readiness foreground lock poisoned".into())
-            }
+        if ticket.is_next()? {
+            return Ok(ticket);
         }
         if Instant::now() >= deadline {
             return Err("readiness expired waiting for the foreground coordination gate".into());

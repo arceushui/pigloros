@@ -23,6 +23,7 @@ use crate::{BufferSlot, EventSink, NativeOperations, NativePulse, NativeResult, 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 mod denial;
+mod foreground;
 mod readiness;
 mod session;
 mod trace;
