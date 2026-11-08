@@ -8,6 +8,7 @@
 mod classification;
 mod envelope;
 mod error;
+mod invocation;
 mod progress;
 mod protected_object;
 mod reservation;
@@ -26,6 +27,10 @@ pub use envelope::{
     MAX_COMMUNITY_ENVELOPE_PLAINTEXT_BYTES_V1,
 };
 pub use error::CommunityLifecycleErrorV1;
+pub use invocation::{
+    CommunityInvocationEvidenceInputV1, CommunityInvocationEvidenceV1, CommunityOutputUsageV1,
+    MeteringV1,
+};
 pub use progress::CommunityHostProgressV1;
 pub use protected_object::{
     CommunityArtifactAdmissionInputV1, CommunityArtifactAdmissionV1, CommunityProtectedObjectV1,

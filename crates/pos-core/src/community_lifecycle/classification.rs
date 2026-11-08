@@ -128,25 +128,22 @@ impl<'a> CommunityClassificationProofV1<'a> {
             return Err(Error::BoundsExceeded);
         }
         let mut prior = None;
-        input
-            .children
-            .iter()
-            .try_for_each(|child| {
-                let identity = (
-                    child.artifact_class,
-                    child.artifact_digest,
-                    child.registration_address,
-                );
-                if child.artifact_digest == Hash::zero()
-                    || child.registration_address == Hash::zero()
-                    || prior.is_some_and(|previous| previous >= identity)
-                {
-                    return Err(Error::InvalidBinding);
-                }
-                prior = Some(identity);
-                Ok(())
-            })
-            .map(|()| Self(input))
+        let validation = input.children.iter().try_for_each(|child| {
+            let identity = (
+                child.artifact_class,
+                child.artifact_digest,
+                child.registration_address,
+            );
+            if child.artifact_digest == Hash::zero()
+                || child.registration_address == Hash::zero()
+                || prior.is_some_and(|previous| previous >= identity)
+            {
+                return Err(Error::InvalidBinding);
+            }
+            prior = Some(identity);
+            Ok(())
+        });
+        validation.map(|()| Self(input))
     }
 
     /// Borrow proof data without authenticating its provenance or classification.

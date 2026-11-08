@@ -25,6 +25,7 @@
 //!   - a record: its fields in WIT order;
 //!   - `u32`: four big-endian bytes.
 
+pub use pos_core::community_lifecycle::MeteringV1;
 use pos_crypto::plugin_execution::is_valid_id_v1;
 
 use super::error::CommunityPluginHostErrorV1;
@@ -274,19 +275,6 @@ pub struct OperationalLogRecord {
 
 /// The guest's validated return: its value, or its own `plugin-error`.
 pub type GuestReturnV1<T> = Result<T, GuestPluginErrorV1>;
-
-/// Deterministic resource use of one completed invocation.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct MeteringV1 {
-    /// Fuel consumed while instantiating the Component.
-    pub startup_fuel: u64,
-    /// Fuel consumed by the call itself.
-    pub call_fuel: u64,
-    /// Linear memory reserved across all of the Component's memories, in bytes.
-    pub memory_bytes: u64,
-    /// `host-v1` calls made.
-    pub host_calls: u64,
-}
 
 /// One completed invocation: the guest's validated return and its metering.
 #[derive(Clone, Debug, Eq, PartialEq)]
