@@ -19,6 +19,7 @@ extern crate self as pos_core;
 
 pub(crate) mod canonical_length;
 pub mod clock;
+pub mod community_lifecycle;
 pub mod composition_fallback;
 pub mod consent;
 pub mod counterfactual_dependency;

@@ -1,0 +1,195 @@
+//! Canonical community lifecycle data records from ADR-124 and ADR-129.
+//!
+//! A decoded record proves only its wire shape and local field invariants.
+//! The installed owner must independently authorize and authenticate its
+//! source, selected generation, current head and actual protected use. These
+//! codecs cannot issue a guest permit or restore a live state cell.
+
+mod error;
+mod progress;
+mod state;
+
+pub use error::CommunityLifecycleErrorV1;
+pub use progress::CommunityHostProgressV1;
+pub use state::{CommunityStateContentV1, MAX_COMMUNITY_STATE_BYTES_V1};
+
+use crate::{encode_bytes, encode_head, CborCursor, CborReadError, Hash, TimelineId};
+
+type Result<T> = std::result::Result<T, CommunityLifecycleErrorV1>;
+
+/// Maximum accepted canonical CPK1 encoding, including its framing.
+pub const MAX_COMMUNITY_PASS_KEY_BYTES_V1: usize = 64;
+
+/// A CPK1 pass coordinate, independent of Event sequence and factual Tick.
+// No Debug/Serde implementation: this potentially personal identity must not
+// become a log field or an alternative permissive persistence codec.
+#[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct CommunityPassKeyV1 {
+    timeline: TimelineId,
+    generation: [u8; 16],
+    ordinal: u64,
+}
+
+impl CommunityPassKeyV1 {
+    /// Validate a pass coordinate without allocating or authorizing a pass.
+    ///
+    /// # Errors
+    /// Returns `InvalidBinding` for a zero Timeline, generation or ordinal.
+    pub fn new(timeline: TimelineId, generation: [u8; 16], ordinal: u64) -> Result<Self> {
+        validate_coordinates(timeline, generation).and_then(|()| {
+            if ordinal == 0 {
+                Err(CommunityLifecycleErrorV1::InvalidBinding)
+            } else {
+                Ok(Self {
+                    timeline,
+                    generation,
+                    ordinal,
+                })
+            }
+        })
+    }
+
+    /// Return the execution Timeline.
+    #[must_use]
+    pub const fn timeline(&self) -> TimelineId {
+        self.timeline
+    }
+
+    /// Return the non-reusable generation identity.
+    #[must_use]
+    pub const fn generation(&self) -> [u8; 16] {
+        self.generation
+    }
+
+    /// Return the positive pass ordinal, never an Event or Tick coordinate.
+    #[must_use]
+    pub const fn ordinal(&self) -> u64 {
+        self.ordinal
+    }
+
+    /// Encode the exact preferred five-field CPK1 record.
+    #[must_use]
+    pub fn to_canonical_cbor(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(MAX_COMMUNITY_PASS_KEY_BYTES_V1);
+        record_prefix(&mut out, 5, b"CPK1");
+        encode_coordinates(&mut out, self.timeline, self.generation);
+        encode_head(&mut out, 0, self.ordinal);
+        out
+    }
+
+    /// Derive `BLAKE3("PiglorOS.Community.CPK1.v1\0" || CPK1)`.
+    #[must_use]
+    pub fn digest(&self) -> Hash {
+        digest(b"PiglorOS.Community.CPK1.v1\0", &self.to_canonical_cbor())
+    }
+
+    /// Decode one complete preferred CPK1 record without issuing a permit.
+    ///
+    /// # Errors
+    /// Rejects malformed/nonpreferred framing, unknown versions, oversized
+    /// records, zero coordinates and trailing bytes.
+    pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self> {
+        record_cursor(bytes, MAX_COMMUNITY_PASS_KEY_BYTES_V1, 5, b"CPK1").and_then(|mut cursor| {
+            read_coordinates(&mut cursor).and_then(|(timeline, generation)| {
+                cursor
+                    .head(0)
+                    .map_err(CommunityLifecycleErrorV1::from)
+                    .and_then(|ordinal| Self::new(timeline, generation, ordinal))
+                    .and_then(|record| {
+                        canonical_end(&cursor, bytes, &record.to_canonical_cbor()).map(|()| record)
+                    })
+            })
+        })
+    }
+}
+
+impl From<CborReadError> for CommunityLifecycleErrorV1 {
+    fn from(_: CborReadError) -> Self {
+        Self::InvalidEncoding
+    }
+}
+
+fn validate_coordinates(timeline: TimelineId, generation: [u8; 16]) -> Result<()> {
+    if timeline.inner().to_bytes() == [0; 16] || generation == [0; 16] {
+        Err(CommunityLifecycleErrorV1::InvalidBinding)
+    } else {
+        Ok(())
+    }
+}
+
+fn record_prefix(out: &mut Vec<u8>, fields: u64, magic: &[u8; 4]) {
+    encode_head(out, 4, fields);
+    encode_bytes(out, magic, 2);
+    encode_head(out, 0, 1);
+}
+
+fn encode_coordinates(out: &mut Vec<u8>, timeline: TimelineId, generation: [u8; 16]) {
+    encode_bytes(out, &timeline.inner().to_bytes(), 2);
+    encode_bytes(out, &generation, 2);
+}
+
+fn record_cursor<'a>(
+    bytes: &'a [u8],
+    maximum: usize,
+    fields: u64,
+    magic: &[u8; 4],
+) -> Result<CborCursor<'a>> {
+    if bytes.len() > maximum {
+        return Err(CommunityLifecycleErrorV1::BoundsExceeded);
+    }
+    let mut expected = Vec::with_capacity(6);
+    encode_head(&mut expected, 4, fields);
+    encode_bytes(&mut expected, magic, 2);
+    let mut cursor = CborCursor::new(bytes);
+    cursor
+        .fixed(&expected)
+        .and_then(|()| cursor.head(0))
+        .map_err(CommunityLifecycleErrorV1::from)
+        .and_then(|version| {
+            if version == 1 {
+                Ok(cursor)
+            } else {
+                Err(CommunityLifecycleErrorV1::UnsupportedVersion)
+            }
+        })
+}
+
+fn fixed_bytes<const N: usize>(cursor: &mut CborCursor<'_>) -> Result<[u8; N]> {
+    let mut head = Vec::with_capacity(9);
+    encode_head(&mut head, 2, N as u64);
+    cursor
+        .fixed(&head)
+        .and_then(|()| cursor.take(N))
+        .map_err(CommunityLifecycleErrorV1::from)
+        .map(|bytes| {
+            let mut value = [0; N];
+            value.copy_from_slice(bytes);
+            value
+        })
+}
+
+fn read_coordinates(cursor: &mut CborCursor<'_>) -> Result<(TimelineId, [u8; 16])> {
+    fixed_bytes(cursor).and_then(|timeline| {
+        fixed_bytes(cursor).map(|generation| {
+            (
+                TimelineId::from_ulid(ulid::Ulid::from_bytes(timeline)),
+                generation,
+            )
+        })
+    })
+}
+
+fn canonical_end(cursor: &CborCursor<'_>, actual: &[u8], preferred: &[u8]) -> Result<()> {
+    if cursor.is_finished() && actual == preferred {
+        Ok(())
+    } else {
+        Err(CommunityLifecycleErrorV1::InvalidEncoding)
+    }
+}
+
+fn digest(domain: &[u8], bytes: &[u8]) -> Hash {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(domain);
+    hasher.update(bytes);
+    Hash::from_bytes(*hasher.finalize().as_bytes())
+}
