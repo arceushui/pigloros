@@ -23,8 +23,14 @@ Usage:
 `--check` first runs the self-tests: the BLAKE3 vectors, the ULID text codec, the canonical CBOR
 key order, the eleven W8H1 entries (each exactly in its family), every closure digest against the
 members the payload names (and the one deliberate mismatch), a second derivation of every
-expected stream from its closure member, and every payload against its schema. It then
-regenerates every output and compares it with the checked-in file.
+expected stream from its closure member, every payload against its schema, and that every
+executed family has a `canonical-output` oracle. It then regenerates every output and compares it
+with the checked-in file.
+
+The evidence-status record of `deletion-redaction` (ERA-001, degraded Replay) is `executed`
+(ADR-062 Revision 8, #1296): the independent evaluator passes the case in both the Local and the
+Air-Gapped ExecutionProfile run, with the record shape and fixed-point rule of slice N6 (#1234).
+Every other record stays `pending`.
 """
 
 from __future__ import annotations
@@ -856,6 +862,33 @@ class Outputs:
     composite: bytes
 
 
+# ADR-062 Revision 8 (#1296, the ERA-001 degraded Replay of the N5 erasure note): the families
+# whose evidence-status record is `executed`. Every other record stays `pending`.
+EXECUTED_FAMILIES = ("deletion-redaction",)
+EXECUTION_MODES = ("local", "air-gapped")
+
+
+def execution_result(oracle: bytes) -> dict[str, object]:
+    """The verifier-accepted execution result of one executed family (ADR-062 R8 provider dispatch).
+
+    The flip rule of slice N6 (#1234), applied to this layer by #1296: a record is flipped only
+    when the evaluator passes the case in both the Local and the Air-Gapped ExecutionProfile run,
+    both Local-relaxation engineering evidence. Every executed family is a `canonical-output`
+    family (`check_executed_families`), and a pass means the subject output is the exact oracle
+    member, so the actual digest is the BLAKE3 of the oracle bytes. It follows from the oracle
+    alone and the record has no time, so re-execution with the flipped record reaches the same
+    record. The Rust test `apps/pos-experiment/tests/replay_provider_dispatch_public.rs`
+    re-executes every family and requires this record.
+    """
+    digest = b3(oracle).hex()
+    return {
+        "evidence": "local-relaxation",
+        "modes": [
+            {"mode": mode, "outcome": "pass", "actual_digest": digest} for mode in EXECUTION_MODES
+        ],
+    }
+
+
 def render_family(family: str, context: Context) -> Outputs:
     subcases = subcases_of(family)
     payload = (
@@ -890,18 +923,20 @@ def render_family(family: str, context: Context) -> Outputs:
             },
             "subcases": entries,
         }
+    oracle = jcs(oracle_object) + b"\n"
+    executed = family in EXECUTED_FAMILIES
     evidence_object = {
         "claim_layer": CLAIM_LAYER,
         "case_id": context.case_id,
         "family": family,
         "input_blake3_digest": b3(payload).hex(),
-        "status": "pending",
-        "execution_result": None,
+        "status": "executed" if executed else "pending",
+        "execution_result": execution_result(oracle) if executed else None,
         "executed_at": None,
     }
     return Outputs(
         payload=payload,
-        oracle=jcs(oracle_object) + b"\n",
+        oracle=oracle,
         evidence=(json.dumps(evidence_object, indent=2) + "\n").encode("ascii"),
         composite=composite(subcases),
     )
@@ -1288,6 +1323,13 @@ def check_payload_schemas() -> None:
             raise SystemExit(f"the {family} payload violates its schema: {errors[:3]}")
 
 
+def check_executed_families() -> None:
+    """Every executed family has a `canonical-output` oracle, whose pass names an output digest."""
+    for family in EXECUTED_FAMILIES:
+        if family not in FAMILIES or provider_context(family).oracle_kind != "canonical-output":
+            raise SystemExit(f"the executed family {family} is not a canonical-output family")
+
+
 def self_test() -> None:
     check_blake3_vectors()
     check_ulid_and_cbor()
@@ -1295,6 +1337,7 @@ def self_test() -> None:
     check_closures()
     check_streams()
     check_payload_schemas()
+    check_executed_families()
 
 
 # --- Command line ---

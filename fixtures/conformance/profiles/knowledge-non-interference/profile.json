@@ -86,11 +86,11 @@
   "authority_inventory": "expected-authority/inventory.json",
   "authority_inventory_sha256_digest": "29cd583a6ffd840b4faac4240fe66d7028eab5cc4f7057dc2ea752d3caaab454",
   "adr_059_execution_matrix": "matrix/execution-matrix.json",
-  "adr_059_execution_matrix_blake3_digest": "bc9a138658ba0ba440d786c2686512419c83805e4ba03512d4580786318aba5c",
+  "adr_059_execution_matrix_blake3_digest": "9f35d2f69071e872bf13ffa6de08d92dc90eb4d78de8ae771691fc1c33f0cdc0",
   "adr_059_execution_matrix_status": "Draft",
   "matrix": "matrix/execution-matrix.json",
   "matrix_size_bytes": 91585,
-  "matrix_blake3_digest": "bc9a138658ba0ba440d786c2686512419c83805e4ba03512d4580786318aba5c",
+  "matrix_blake3_digest": "9f35d2f69071e872bf13ffa6de08d92dc90eb4d78de8ae771691fc1c33f0cdc0",
   "execution_profiles": [
     "deterministic-local-v1",
     "deterministic-air-gapped-v1"

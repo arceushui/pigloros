@@ -85,6 +85,23 @@ fn replacing_argument(command: &Command, option: &str, value: &Path) -> TestResu
     Ok(replacement)
 }
 
+fn hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    bytes
+        .iter()
+        .flat_map(|byte| {
+            [
+                char::from(HEX[usize::from(byte >> 4)]),
+                char::from(HEX[usize::from(byte & 0x0f)]),
+            ]
+        })
+        .collect()
+}
+
+fn operator_key_hex() -> String {
+    support::trust_policy_operator_public_key_hex()
+}
+
 fn complete_command(directory: &Path) -> TestResult<Command> {
     let corpus = support::corpus()?;
     command_for_corpus(directory, &corpus)
@@ -105,6 +122,7 @@ fn command_for_corpus(directory: &Path, corpus: &support::Corpus) -> TestResult<
     )?;
     let digest = "01".repeat(32);
     let declaration_digest = "2f".repeat(32);
+    let operator_key = operator_key_hex();
     let mut command = evaluator();
     command.args([
         "--request",
@@ -113,6 +131,8 @@ fn command_for_corpus(directory: &Path, corpus: &support::Corpus) -> TestResult<
         bundle.to_str().ok_or("bundle path is not UTF-8")?,
         "--trust-policy",
         policy.to_str().ok_or("policy path is not UTF-8")?,
+        "--trust-policy-operator-key",
+        operator_key.as_str(),
         "--evaluator-source",
         source.to_str().ok_or("source path is not UTF-8")?,
         "--evaluator-provenance",
@@ -133,7 +153,12 @@ fn verify_staged_corpus() -> TestResult {
     let corpus = support::corpus()?;
     let request = EvaluationRequest::from_canonical_cbor(&corpus.request)?;
     let mut archive = Cursor::new(corpus.archive);
-    let preflight = preflight_signed_bundle(&mut archive, &corpus.trust_policy, &request)?;
+    let preflight = preflight_signed_bundle(
+        &mut archive,
+        &corpus.trust_policy,
+        &support::trust_policy_operator()?,
+        &request,
+    )?;
     let caps = Profile::authenticated_hard_caps(preflight.profile_bytes(), &request)?;
     preflight.enforce_selected_caps(caps.into())?;
     Ok(())
@@ -235,6 +260,16 @@ fn command_rejects_incomplete_duplicate_and_noncanonical_identity_arguments() ->
         .args(["--request", "one", "--request", "two"])
         .output()?;
     assert!(!duplicated.status.success());
+    let operator_key = operator_key_hex();
+    let duplicated_operator_key = evaluator()
+        .args([
+            "--trust-policy-operator-key",
+            operator_key.as_str(),
+            "--trust-policy-operator-key",
+            operator_key.as_str(),
+        ])
+        .output()?;
+    assert!(!duplicated_operator_key.status.success());
 
     let unknown = evaluator().arg("--legacy-protocol").output()?;
     assert!(!unknown.status.success());
@@ -243,6 +278,7 @@ fn command_rejects_incomplete_duplicate_and_noncanonical_identity_arguments() ->
         "--request",
         "--bundle",
         "--trust-policy",
+        "--trust-policy-operator-key",
         "--evaluator-source",
         "--evaluator-provenance",
         "--declaration-digest",
@@ -355,6 +391,40 @@ fn command_rejects_each_missing_required_option() -> TestResult {
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn command_requires_a_valid_pinned_trust_policy_operator_key() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let command = complete_command(directory.path())?;
+    let mut missing = evaluator();
+    missing.args(command.get_args().filter(|argument| {
+        argument.to_str() != Some("--trust-policy-operator-key")
+            && argument.to_str() != Some(operator_key_hex().as_str())
+    }));
+    let output = missing.output()?;
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+
+    let mut invalid_point = [0; 32];
+    invalid_point[0] = 2;
+    let trust_root = ed25519_dalek::SigningKey::from_bytes(&[9; 32])
+        .verifying_key()
+        .to_bytes();
+    for key in [
+        "zz".repeat(32),
+        "0".repeat(64),
+        "ab".repeat(31),
+        hex(&invalid_point),
+        hex(&trust_root),
+    ] {
+        let output = replacing_argument(&command, "--trust-policy-operator-key", Path::new(&key))?
+            .output()?;
+        assert!(!output.status.success(), "accepted operator key {key}");
+        assert!(output.stdout.is_empty());
+    }
+    Ok(())
+}
+
 #[test]
 fn command_bounds_files_before_decoding_untrusted_requests() -> TestResult {
     let directory = tempfile::tempdir()?;
@@ -365,6 +435,7 @@ fn command_bounds_files_before_decoding_untrusted_requests() -> TestResult {
     fs::write(&bundle, [0xff])?;
     fs::write(&policy, [0xff])?;
     let digest = "01".repeat(32);
+    let operator_key = operator_key_hex();
     let output = evaluator()
         .args([
             "--request",
@@ -373,6 +444,8 @@ fn command_bounds_files_before_decoding_untrusted_requests() -> TestResult {
             bundle.to_str().ok_or("bundle path is not UTF-8")?,
             "--trust-policy",
             policy.to_str().ok_or("policy path is not UTF-8")?,
+            "--trust-policy-operator-key",
+            operator_key.as_str(),
             "--evaluator-source",
             "source",
             "--evaluator-provenance",
@@ -398,6 +471,8 @@ fn command_bounds_files_before_decoding_untrusted_requests() -> TestResult {
             bundle.to_str().ok_or("bundle path is not UTF-8")?,
             "--trust-policy",
             policy.to_str().ok_or("policy path is not UTF-8")?,
+            "--trust-policy-operator-key",
+            operator_key.as_str(),
             "--evaluator-source",
             "source",
             "--evaluator-provenance",

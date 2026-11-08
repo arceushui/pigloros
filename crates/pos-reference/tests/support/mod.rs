@@ -26,6 +26,53 @@ use pos_reference::evaluator_protocol::{
 };
 use pos_reference::profile::ProviderKey;
 
+/// The deployment-operator key that signs every corpus TPS1 (ADR-069 R8). The
+/// root-selector installation fixture pins the same key as its TRS1 role 6.
+pub const TRUST_POLICY_OPERATOR_SECRET: [u8; 32] = [12; 32];
+const TRUST_POLICY_OPERATOR_DOMAIN: &[u8] = b"PiglorOS.TPS1.operator-signature.v1\0";
+
+fn trust_policy_operator_signing_key() -> SigningKey {
+    SigningKey::from_bytes(&TRUST_POLICY_OPERATOR_SECRET)
+}
+
+/// The deployment-operator public key that verifies every corpus TPS1.
+#[must_use]
+pub fn trust_policy_operator_public_key() -> [u8; 32] {
+    trust_policy_operator_signing_key()
+        .verifying_key()
+        .to_bytes()
+}
+
+/// The corpus deployment-operator public key as the 64 lowercase hexadecimal
+/// characters `--trust-policy-operator-key` takes.
+#[must_use]
+pub fn trust_policy_operator_public_key_hex() -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    trust_policy_operator_public_key()
+        .iter()
+        .flat_map(|byte| {
+            [
+                char::from(HEX[usize::from(byte >> 4)]),
+                char::from(HEX[usize::from(byte & 0x0f)]),
+            ]
+        })
+        .collect()
+}
+
+/// The caller-pinned anchor that authenticates every corpus TPS1.
+///
+/// # Errors
+/// Never in practice: the fixture key is valid and the role is exact.
+pub fn trust_policy_operator() -> Result<
+    pos_reference::signed_bundle::TrustPolicyOperatorAnchor,
+    pos_reference::signed_bundle::BundleError,
+> {
+    pos_reference::signed_bundle::TrustPolicyOperatorAnchor::new(
+        pos_reference::signed_bundle::DEPLOYMENT_OPERATOR_ROLE,
+        trust_policy_operator_public_key(),
+    )
+}
+
 pub struct Corpus {
     pub request: Vec<u8>,
     pub archive: Vec<u8>,
@@ -89,8 +136,8 @@ pub struct RealFamilyMembers {
     pub oracle: Vec<u8>,
     /// The failure code of a typed-failure oracle, owned by the provider.
     pub failure_code: Option<String>,
-    /// The provider's auxiliary input of the family.
-    pub auxiliary_input: Vec<u8>,
+    /// The provider's auxiliary input of the family, when the provider declares one.
+    pub auxiliary_input: Option<Vec<u8>>,
     /// The deterministic budget, in `ResourceUsage` order.
     pub budget: [u64; 8],
     /// The operational watchdog.
@@ -660,6 +707,8 @@ pub enum TrustMutation {
     PreviousInvalid,
     Signature,
     SignatureType,
+    DomainlessSignature,
+    SignedByTrustRoot,
 }
 
 #[derive(Clone, Copy)]
@@ -1040,8 +1089,10 @@ pub fn corpus_with_release_mutation(mutation: ReleaseMutation) -> TestResult<Cor
     })
 }
 
-/// Build a signed corpus of a real provider's checked-in fixtures in Execution Mode `mode`
-/// (0 Local, 1 Air-Gapped) for the public Plugin protocol.
+/// Build a signed corpus of a real provider's checked-in fixtures.
+///
+/// `claim_layer` is the CPF1 wire code of the provider's claim layer, `subject_adapter` its public
+/// protocol and `mode` the Execution Mode (0 Local, 1 Air-Gapped).
 ///
 /// Every family carries the provider's schema, payload, evidence-status record, oracle and
 /// auxiliary input bytes, its budget, watchdog and capabilities, and the provider's exact key;
@@ -1049,15 +1100,20 @@ pub fn corpus_with_release_mutation(mutation: ReleaseMutation) -> TestResult<Cor
 ///
 /// # Errors
 /// Returns an error if canonical encoding or fixture construction fails.
-pub fn real_plugin_corpus(real: &RealProviderFixtures, mode: u64) -> TestResult<Corpus> {
+pub fn real_provider_corpus(
+    real: &RealProviderFixtures,
+    claim_layer: u64,
+    subject_adapter: SubjectAdapterKind,
+    mode: u64,
+) -> TestResult<Corpus> {
     let mut budgets = [[0; 8]; 7];
     for (family, budget) in (0_u64..).zip(budgets.iter_mut()) {
         *budget = real_family(real, family)?.budget;
     }
     corpus_for_options(CorpusOptions {
         mode,
-        claim_layer: 4,
-        subject_adapter: SubjectAdapterKind::PublicPluginProtocol,
+        claim_layer,
+        subject_adapter,
         fixture_budgets: &budgets,
         real: Some(real),
         ..CorpusOptions::default()
@@ -1893,8 +1949,8 @@ fn downgrade_bindings(
 }
 
 /// The expectation of one real-provider family: its evidence-status record, its oracle record
-/// as an auxiliary member when the oracle is a typed failure, and its auxiliary input, in member
-/// path order.
+/// as an auxiliary member when the oracle is a typed failure, and its auxiliary input when the
+/// provider declares one, in member path order.
 fn real_fixture_expectation(
     members: &mut BTreeMap<String, (Vec<u8>, u8)>,
     family: u64,
@@ -1903,26 +1959,28 @@ fn real_fixture_expectation(
     identity: ProviderIdentity<'_>,
 ) -> TestResult<FixtureExpectation> {
     let input_path = format!("fixtures/case-{family}.input-auxiliary");
-    members.insert(input_path.clone(), (real.auxiliary_input.clone(), 0));
+    let mut inputs = Vec::new();
+    if let Some(input) = &real.auxiliary_input {
+        members.insert(input_path.clone(), (input.clone(), 0));
+        inputs.push(descriptor(members, &input_path)?);
+    }
     Ok(match &real.failure_code {
         Some(code) => {
             let failure = array(vec![text(identity.id), text(identity.version), text(code)]);
+            let mut auxiliary = vec![
+                descriptor(members, evidence_path)?,
+                descriptor(members, output_path)?,
+            ];
+            auxiliary.extend(inputs);
             FixtureExpectation {
-                auxiliary: array(vec![
-                    descriptor(members, evidence_path)?,
-                    descriptor(members, output_path)?,
-                    descriptor(members, &input_path)?,
-                ]),
+                auxiliary: array(auxiliary),
                 oracle: array(vec![uint(1), Value::Null, failure.clone(), Value::Null]),
                 expected_outcome: uint(2),
                 expected_error: failure,
             }
         }
         None => FixtureExpectation {
-            auxiliary: array(vec![
-                descriptor(members, evidence_path)?,
-                descriptor(members, &input_path)?,
-            ]),
+            auxiliary: array([vec![descriptor(members, evidence_path)?], inputs].concat()),
             oracle: array(vec![
                 uint(0),
                 descriptor(members, output_path)?,
@@ -3502,9 +3560,16 @@ fn trust_policy(
     if let Some(mutation) = mutation {
         mutate_trust_policy(&mut fields, mutation, revoked_artifact)?;
     }
-    let signature = signing_key
-        .sign(&canonical(&array(fields.clone()))?)
-        .to_bytes();
+    let unsigned = canonical(&array(fields.clone()))?;
+    let domain_separated = [TRUST_POLICY_OPERATOR_DOMAIN, unsigned.as_slice()].concat();
+    let signature = match mutation {
+        Some(TrustMutation::DomainlessSignature) => {
+            trust_policy_operator_signing_key().sign(&unsigned)
+        }
+        Some(TrustMutation::SignedByTrustRoot) => signing_key.sign(&domain_separated),
+        _ => trust_policy_operator_signing_key().sign(&domain_separated),
+    }
+    .to_bytes();
     fields.push(if matches!(mutation, Some(TrustMutation::Signature)) {
         bytes(&[0; 64])
     } else if matches!(mutation, Some(TrustMutation::SignatureType)) {
@@ -3610,7 +3675,9 @@ fn mutate_trust_policy(
         TrustMutation::Encoding
         | TrustMutation::Shape
         | TrustMutation::Signature
-        | TrustMutation::SignatureType => {}
+        | TrustMutation::SignatureType
+        | TrustMutation::DomainlessSignature
+        | TrustMutation::SignedByTrustRoot => {}
     }
     Ok(())
 }
