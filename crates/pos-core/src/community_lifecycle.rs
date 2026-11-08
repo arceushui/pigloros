@@ -8,6 +8,7 @@
 mod classification;
 mod envelope;
 mod error;
+mod guest_claim;
 mod invocation;
 mod progress;
 mod protected_object;
@@ -29,6 +30,11 @@ pub use envelope::{
     MAX_COMMUNITY_ENVELOPE_PLAINTEXT_BYTES_V1,
 };
 pub use error::CommunityLifecycleErrorV1;
+pub use guest_claim::{
+    CommunityClaimArtifactV1, CommunityGuestClaimContextV1, CommunityGuestClaimKindV1,
+    CommunityGuestClaimReferenceV1, CommunityGuestClaimReferencesV1, CommunityGuestClaimV1,
+    COMMUNITY_CLAIM_STATE_SCHEMA_V1, COMMUNITY_GUEST_CLAIM_SCHEMA_V1,
+};
 pub use invocation::{
     CommunityInvocationEvidenceInputV1, CommunityInvocationEvidenceV1, CommunityOutputUsageV1,
     MeteringV1,
