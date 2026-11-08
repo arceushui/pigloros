@@ -154,12 +154,12 @@ fn encode_coordinates(out: &mut Vec<u8>, timeline: TimelineId, generation: [u8; 
     encode_bytes(out, &generation, 2);
 }
 
-fn record_cursor<'a>(
-    bytes: &'a [u8],
+fn record_cursor(
+    bytes: &[u8],
     maximum: usize,
     fields: u64,
     magic: [u8; 4],
-) -> Result<CborCursor<'a>> {
+) -> Result<CborCursor<'_>> {
     if bytes.len() > maximum {
         return Err(CommunityLifecycleErrorV1::BoundsExceeded);
     }
