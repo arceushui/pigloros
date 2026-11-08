@@ -56,7 +56,13 @@ impl<'a> CommunityStateContentV1<'a> {
     /// Encode into an owned zeroizing buffer; the host still inventories copies.
     #[must_use]
     pub fn to_canonical_cbor(&self) -> Zeroizing<Vec<u8>> {
-        let mut out = Zeroizing::new(self.prefix());
+        // Validation bounds the payload to one MiB. The accepted 48-byte
+        // framing allowance covers every preferred header, so no growth can
+        // leave a previous prefix allocation outside the zeroizing owner.
+        let mut out = Zeroizing::new(Vec::with_capacity(self.state.len() + 48));
+        record_prefix(&mut out, 4, b"CSC1");
+        crate::encode_hash(&mut out, self.schema);
+        encode_head(&mut out, 2, self.state.len() as u64);
         out.extend_from_slice(self.state);
         out
     }
@@ -83,13 +89,5 @@ impl<'a> CommunityStateContentV1<'a> {
                     .and_then(|record| canonical_end(&cursor).map(|()| record))
             })
         })
-    }
-
-    fn prefix(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(48);
-        record_prefix(&mut out, 4, b"CSC1");
-        crate::encode_hash(&mut out, self.schema);
-        encode_head(&mut out, 2, self.state.len() as u64);
-        out
     }
 }
