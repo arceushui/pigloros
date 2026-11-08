@@ -147,15 +147,15 @@ fn state_envelope_authenticates_exact_scope_horizon_kind_and_purpose(
             sealed.ciphertext_and_tag(),
         )?;
         assert_ne!(changed.address(), envelope.address());
-        assert!(
+        assert_eq!(
             cipher
                 .open(
                     changed.nonce(),
                     changed.ciphertext_and_tag(),
                     changed.header().associated_data_digest().as_bytes()
                 )
-                .err()
-                == Some(CommunityCipherErrorV1::AuthenticationFailed)
+                .err(),
+            Some(CommunityCipherErrorV1::AuthenticationFailed)
         );
     }
     Ok(())
