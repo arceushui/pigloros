@@ -156,6 +156,22 @@ participant Driver `beta` writes the fixture's hidden participant field into
 its factual Events after the cut; like the factual suffix it never reaches an
 artifact.
 
+`non_interference_harness::g_ops` (Linux only) holds the G-OPS capture adapters
+of slice N3 (#1231, wiki `ADR-062_R8_NonInterference_Operations`) for
+`NI-CACHE-002`, `NI-OBS-004`, `NI-TIME-005` and `NI-CRASH-012`:
+- The subject is an Experiment whose one Driver is a supervisor-backed community
+  Plugin Driver running the checked-in WAT guest `g_ops_guest.wat` in a fresh
+  `pos-ni-g-ops-worker` process.
+- The host places the unauthorized value in denied sibling work: cached sibling
+  decisions of a host `ErasureExecutionHostV1` authorization cache, a sibling
+  invocation's log message, declared-failure coordinate and trap, a support
+  archive name, and a wall-clock offset and watchdog margin.
+- Only the excluded bytes of each row's typed operational capture carry those
+  values. The support bundle, crash report and support archive are capture
+  records, not product features.
+
+`pos-ni-g-ops-subject` is the Local fresh-process subject of these rows.
+
 ## Sequential SQLite multi-rate demo
 
 Start the local-only Gateway with an explicit SQLite file:

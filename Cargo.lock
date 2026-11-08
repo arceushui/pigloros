@@ -5612,6 +5612,7 @@ dependencies = [
  "pos-plugin-society",
  "pos-plugin-supervisor",
  "pos-plugin-synthetic-obs",
+ "pos-plugin-worker",
  "pos-plugin-world",
  "pos-reference",
  "pos-runtime",
@@ -5627,6 +5628,7 @@ dependencies = [
  "tokio",
  "tower",
  "ulid",
+ "wat",
 ]
 
 [[package]]
