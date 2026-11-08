@@ -48,8 +48,10 @@ Rust and uses fixed public fixture seeds ("repository-test-fixture-only"); `--ch
 PMF1, PTR1, PRV1, TPS1 and execution-profile vectors of the repository and the official BLAKE3
 vectors (`scripts/data/blake3_test_vectors.json`) before it compares every output. The composites
 carry every sub-case of the catalogue: `pos.1` to `pos.3`, `den.01` to `den.22`, `mal.1a` to
-`mal.6`, `res.1` to `res.7`, `del.1`, `del.2`, `dgr.1` to `dgr.6` and `ind.1` to `ind.4`; `dgr.1`,
-`dgr.2`, `dgr.5` and `dgr.6` roll back through the production entry (ADR-103 revision 7). Every
+`mal.6`, `res.1` to `res.7`, `del.1`, `del.2`, `dgr.1` to `dgr.6` and `ind.1` to `ind.5`; `dgr.1`,
+`dgr.2`, `dgr.5` and `dgr.6` roll back through the production entry (ADR-103 revision 7), and
+`ind.5` is a `ComponentTrap` of the class `unreachable` at the probe guest's `drive`, which the
+evaluator compares with its oracle entry (ADR-061 R13). Every
 `expected/plugin-conformance/*.json` is `executed` (ADR-062 Revision 8 slice N6, #1234): the
 independent evaluator dispatches the family through the adapter's exact `FixtureExecutorV1`
 declaration and passes it in both the Local and the Air-Gapped ExecutionProfile run, which are
