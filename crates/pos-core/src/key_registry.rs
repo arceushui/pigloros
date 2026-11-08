@@ -21,7 +21,7 @@ pub use read_guard::{
 };
 use read_guard::{OrdinaryReadGuard, ReadContext};
 
-/// The five independent key roles required by the Wave 8 boundary.
+/// Closed independent key roles, with stable codes preserved across additions.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 pub enum KeyRoleV1 {
     /// Encrypts subject data at rest.
@@ -34,6 +34,8 @@ pub enum KeyRoleV1 {
     PluginReleaseSigning,
     /// Encrypts exported data for recipients.
     ExportRecipientEncryption,
+    /// Encrypts community artifacts under the dedicated ADR-128 owner.
+    CommunityArtifactEncryption,
 }
 
 impl KeyRoleV1 {
@@ -46,6 +48,7 @@ impl KeyRoleV1 {
             Self::TimelineIntegritySigning => 2,
             Self::PluginReleaseSigning => 3,
             Self::ExportRecipientEncryption => 4,
+            Self::CommunityArtifactEncryption => 7,
         }
     }
 
@@ -61,6 +64,7 @@ impl KeyRoleV1 {
             2 => Ok(Self::TimelineIntegritySigning),
             3 => Ok(Self::PluginReleaseSigning),
             4 => Ok(Self::ExportRecipientEncryption),
+            7 => Ok(Self::CommunityArtifactEncryption),
             _ => Err(KeyRegistryErrorV1::InvalidRoleCode),
         }
     }
@@ -83,7 +87,9 @@ impl KeyRoleV1 {
     pub const fn is_encryption(self) -> bool {
         matches!(
             self,
-            Self::SubjectDataEncryption | Self::ExportRecipientEncryption
+            Self::SubjectDataEncryption
+                | Self::ExportRecipientEncryption
+                | Self::CommunityArtifactEncryption
         )
     }
 }
@@ -202,7 +208,8 @@ impl KeyIdentityV1 {
     /// Check the role and epoch admitted for retained-epoch decryption.
     ///
     /// ADR-091 admits `SubjectDataEncryption`; ADR-098 explicitly extends the
-    /// same decryption-only policy to `ExportRecipientEncryption`. Adapters
+    /// same decryption-only policy to `ExportRecipientEncryption`; ADR-128
+    /// admits retained `CommunityArtifactEncryption` identities. Adapters
     /// call this before reading the registry or taking the `SQLite` writer
     /// reservation, preserving error precedence at every boundary.
     ///
@@ -213,7 +220,9 @@ impl KeyIdentityV1 {
             return Err(KeyRegistryErrorV1::InvalidEpoch);
         }
         match self.role {
-            KeyRoleV1::SubjectDataEncryption | KeyRoleV1::ExportRecipientEncryption => Ok(()),
+            KeyRoleV1::SubjectDataEncryption
+            | KeyRoleV1::ExportRecipientEncryption
+            | KeyRoleV1::CommunityArtifactEncryption => Ok(()),
             KeyRoleV1::SubjectAttributionSigning
             | KeyRoleV1::TimelineIntegritySigning
             | KeyRoleV1::PluginReleaseSigning => {
@@ -517,9 +526,11 @@ pub trait KeyRegistryEncryptionPortV1 {
 /// fingerprint while holding its registry transaction/lock through the
 /// non-escaping callback. An older live epoch may decrypt after rotation;
 /// this port never authorizes new encryption or restores destroyed material.
-/// Exactly two roles are admitted, each by its own accepted policy:
+/// Three roles are admitted, each by its own accepted policy:
 /// `SubjectDataEncryption` under ADR-091 and `ExportRecipientEncryption`
-/// under ADR-098. Signing roles are always rejected.
+/// under ADR-098, and `CommunityArtifactEncryption` under ADR-128. Signing
+/// roles are always rejected. This registry check does not qualify a material
+/// owner or restore its permission to encrypt after a process restart.
 pub trait KeyRegistryHistoricalDecryptionPortV1 {
     /// Run one decryption operation under a live retained key identity.
     ///
@@ -1097,8 +1108,7 @@ impl KeyRegistryStateV1 {
         Ok(operation())
     }
 
-    /// Run one decryption-only operation for a live subject-data or
-    /// export-recipient key epoch.
+    /// Run one decryption-only operation for a retained live encryption role.
     ///
     /// Unlike encryption authorization, this permits a retained old epoch
     /// after rotation. The mutable borrow holds the reference registry state
@@ -1534,6 +1544,7 @@ mod tests {
             KeyRoleV1::TimelineIntegritySigning,
             KeyRoleV1::PluginReleaseSigning,
             KeyRoleV1::ExportRecipientEncryption,
+            KeyRoleV1::CommunityArtifactEncryption,
         ] {
             assert_eq!(KeyRoleV1::from_code(role.code()), Ok(role));
         }

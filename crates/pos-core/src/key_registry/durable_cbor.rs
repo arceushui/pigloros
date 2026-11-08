@@ -267,6 +267,7 @@ impl Cursor<'_> {
                     b"TimelineIntegritySigning" => 2,
                     b"PluginReleaseSigning" => 3,
                     b"ExportRecipientEncryption" => 4,
+                    b"CommunityArtifactEncryption" => 7,
                     _ => return Err(Error::InvalidSnapshot),
                 };
                 context.materialize(1).map(|()| match code {
@@ -274,7 +275,8 @@ impl Cursor<'_> {
                     1 => KeyRoleV1::SubjectAttributionSigning,
                     2 => KeyRoleV1::TimelineIntegritySigning,
                     3 => KeyRoleV1::PluginReleaseSigning,
-                    _ => KeyRoleV1::ExportRecipientEncryption,
+                    4 => KeyRoleV1::ExportRecipientEncryption,
+                    _ => KeyRoleV1::CommunityArtifactEncryption,
                 })
             })
         })
