@@ -22,8 +22,8 @@ pub use revision::{
     CommunityStateProducerV1, CommunityStateRevisionInputV1, CommunityStateRevisionV1,
 };
 pub use selected_head::{
-    CommunityMemberHeadV1, CommunityPassFrontierV1, CommunitySelectedHeadInputV1,
-    CommunitySelectedHeadV1, MAX_COMMUNITY_MEMBERS_V1,
+    CommunityMemberHeadV1, CommunityMemberHeadsV1, CommunityPassFrontierV1,
+    CommunitySelectedHeadInputV1, CommunitySelectedHeadV1, MAX_COMMUNITY_MEMBERS_V1,
 };
 pub use state::{CommunityStateContentV1, MAX_COMMUNITY_STATE_BYTES_V1};
 

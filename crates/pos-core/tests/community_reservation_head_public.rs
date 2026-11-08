@@ -3,8 +3,8 @@
 use ciborium::value::Value;
 use pos_core::community_lifecycle::{
     CommunityLifecycleErrorV1 as Error, CommunityMemberHeadV1 as Member,
-    CommunityPassFrontierV1 as Frontier, CommunityPassKeyV1 as Pass,
-    CommunityReservationInputV1 as ReservationInput,
+    CommunityMemberHeadsV1 as Members, CommunityPassFrontierV1 as Frontier,
+    CommunityPassKeyV1 as Pass, CommunityReservationInputV1 as ReservationInput,
     CommunityReservationRequestInputV1 as RequestInput, CommunityReservationRequestV1 as Request,
     CommunityReservationV1 as Reservation, CommunitySelectedHeadInputV1 as HeadInput,
     CommunitySelectedHeadV1 as Head, MAX_COMMUNITY_MEMBERS_V1,
@@ -106,24 +106,28 @@ fn reservation_fields(input: ReservationInput) -> Fallible<Vec<Value>> {
     ])
 }
 
-fn head_input(frontier: Frontier, count: u8) -> HeadInput {
+fn members(count: u8) -> Vec<Member> {
+    (1..=count)
+        .map(|byte| Member {
+            member_binding_digest: hash(byte),
+            member_progress_digest: hash(100),
+        })
+        .collect()
+}
+
+fn head_input(frontier: Frontier, members: &[Member]) -> HeadInput<'_> {
     HeadInput {
         timeline: timeline(7),
         generation: [8; 16],
         frontier,
-        member_heads: (1..=count)
-            .map(|byte| Member {
-                member_binding_digest: hash(byte),
-                member_progress_digest: hash(100),
-            })
-            .collect(),
+        member_heads: Members::from_members(members),
         event_logical_head: Seq::ZERO,
         profile_digest: hash(4),
         host_progress_digest: hash(5),
     }
 }
 
-fn head_fields(input: &HeadInput) -> Fallible<Vec<Value>> {
+fn head_fields(input: &HeadInput<'_>) -> Fallible<Vec<Value>> {
     let frontier = match input.frontier {
         Frontier::Initial => Value::Array(vec![uint(0)]),
         Frontier::Committed(key) => Value::Array(vec![uint(1), bytes(&pass_bytes(key.ordinal())?)]),
@@ -317,7 +321,8 @@ fn complete_head_has_exact_nine_fields_and_retains_all_sixty_four_members() -> T
             Frontier::Initial,
             Frontier::Committed(Pass::new(timeline(7), [8; 16], u64::MAX)?),
         ] {
-            let mut input = head_input(frontier, count);
+            let rows = members(count);
+            let mut input = head_input(frontier, &rows);
             input.event_logical_head = Seq::from_u64(u64::MAX);
             let expected = encode(Value::Array(head_fields(&input)?))?;
             let record = Head::new(input)?;
@@ -337,14 +342,15 @@ fn complete_head_has_exact_nine_fields_and_retains_all_sixty_four_members() -> T
 
 #[test]
 fn committed_frontiers_encode_independently_of_the_event_logical_head() -> TestResult {
-    let initial = Head::new(head_input(Frontier::Initial, 1))?;
+    let rows = members(1);
+    let initial = Head::new(head_input(Frontier::Initial, &rows))?;
     let first = Head::new(head_input(
         Frontier::Committed(Pass::new(timeline(7), [8; 16], 1)?),
-        1,
+        &rows,
     ))?;
     let second = Head::new(head_input(
         Frontier::Committed(Pass::new(timeline(7), [8; 16], 2)?),
-        1,
+        &rows,
     ))?;
     for record in [&initial, &first, &second] {
         assert_eq!(record.as_input().event_logical_head, Seq::ZERO);
@@ -362,12 +368,16 @@ fn committed_frontiers_encode_independently_of_the_event_logical_head() -> TestR
 
 #[test]
 fn head_frontier_must_belong_to_the_exact_timeline_and_generation() -> TestResult {
+    let rows = members(1);
     for (timeline, generation) in [(timeline(9), [8; 16]), (timeline(7), [9; 16])] {
-        let input = head_input(Frontier::Committed(Pass::new(timeline, generation, 1)?), 1);
+        let input = head_input(
+            Frontier::Committed(Pass::new(timeline, generation, 1)?),
+            &rows,
+        );
         assert!(Head::new(input).err() == Some(Error::InvalidBinding));
     }
     for (field, length) in [(2, 16), (3, 16), (7, 32), (8, 32)] {
-        let mut fields = head_fields(&head_input(Frontier::Initial, 1))?;
+        let mut fields = head_fields(&head_input(Frontier::Initial, &rows))?;
         fields[field] = bytes(&vec![0; length]);
         assert!(
             Head::from_canonical_cbor(&encode(Value::Array(fields))?).err()
@@ -380,24 +390,30 @@ fn head_frontier_must_belong_to_the_exact_timeline_and_generation() -> TestResul
 #[test]
 fn head_refuses_empty_oversized_duplicate_unordered_or_zero_member_rows() -> TestResult {
     for count in [0, 65] {
-        let input = head_input(Frontier::Initial, count);
+        let rows = members(count);
+        let input = head_input(Frontier::Initial, &rows);
         let encoded = encode(Value::Array(head_fields(&input)?))?;
         assert!(Head::new(input).err() == Some(Error::BoundsExceeded));
         assert!(Head::from_canonical_cbor(&encoded).err() == Some(Error::BoundsExceeded));
     }
-    let mut duplicate = head_input(Frontier::Initial, 2);
-    duplicate.member_heads[1] = duplicate.member_heads[0];
-    assert!(Head::new(duplicate).err() == Some(Error::InvalidBinding));
-    let mut unordered = head_input(Frontier::Initial, 2);
-    unordered.member_heads.reverse();
-    assert!(Head::new(unordered).err() == Some(Error::InvalidBinding));
+    let mut duplicate = members(2);
+    duplicate[1] = duplicate[0];
+    assert!(
+        Head::new(head_input(Frontier::Initial, &duplicate)).err() == Some(Error::InvalidBinding)
+    );
+    let mut unordered = members(2);
+    unordered.reverse();
+    assert!(
+        Head::new(head_input(Frontier::Initial, &unordered)).err() == Some(Error::InvalidBinding)
+    );
     for zero_member in [true, false] {
-        let mut input = head_input(Frontier::Initial, 1);
+        let mut rows = members(1);
         if zero_member {
-            input.member_heads[0].member_binding_digest = Hash::zero();
+            rows[0].member_binding_digest = Hash::zero();
         } else {
-            input.member_heads[0].member_progress_digest = Hash::zero();
+            rows[0].member_progress_digest = Hash::zero();
         }
+        let input = head_input(Frontier::Initial, &rows);
         let encoded = encode(Value::Array(head_fields(&input)?))?;
         assert!(Head::from_canonical_cbor(&encoded).err() == Some(Error::InvalidBinding));
     }
@@ -406,7 +422,11 @@ fn head_refuses_empty_oversized_duplicate_unordered_or_zero_member_rows() -> Tes
 
 #[test]
 fn head_refuses_all_truncations_and_closed_frontier_or_member_shapes() -> TestResult {
-    let input = head_input(Frontier::Committed(Pass::new(timeline(7), [8; 16], 1)?), 1);
+    let rows = members(1);
+    let input = head_input(
+        Frontier::Committed(Pass::new(timeline(7), [8; 16], 1)?),
+        &rows,
+    );
     let encoded = encode(Value::Array(head_fields(&input)?))?;
     framing_refuses(&encoded, 65_536, |bytes| {
         Head::from_canonical_cbor(bytes).map(|_| ())
@@ -437,10 +457,40 @@ fn head_refuses_all_truncations_and_closed_frontier_or_member_shapes() -> TestRe
 
 #[test]
 fn head_bounds_member_count_before_reading_or_allocating_rows() -> TestResult {
-    let fields = head_fields(&head_input(Frontier::Initial, 1))?;
+    let rows = members(1);
+    let fields = head_fields(&head_input(Frontier::Initial, &rows))?;
     let mut encoded = encode(Value::Array(fields[..5].to_vec()))?;
     encoded[0] = 0x89;
     encoded.extend_from_slice(&[0x9b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]);
     assert!(Head::from_canonical_cbor(&encoded).err() == Some(Error::BoundsExceeded));
+    Ok(())
+}
+
+#[test]
+fn head_roster_decode_borrows_exact_original_wire_rows() -> TestResult {
+    let rows = members(64);
+    let original = Head::new(head_input(Frontier::Initial, &rows))?;
+    assert!(original
+        .as_input()
+        .member_heads
+        .as_canonical_rows()
+        .is_none());
+    let encoded = original.to_canonical_cbor();
+    let restored = Head::from_canonical_cbor(&encoded)?;
+    let borrowed = restored
+        .as_input()
+        .member_heads
+        .as_canonical_rows()
+        .ok_or("missing borrowed rows")?;
+    assert_eq!(borrowed.len(), 64 * 69);
+    let offset = 45;
+    assert_eq!(borrowed.as_ptr(), encoded[offset..].as_ptr());
+    assert_eq!(borrowed, &encoded[offset..offset + 64 * 69]);
+    assert!(restored
+        .as_input()
+        .member_heads
+        .iter()
+        .eq(rows.iter().copied()));
+    assert!(original.as_input() == restored.as_input());
     Ok(())
 }
