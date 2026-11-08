@@ -44,8 +44,10 @@ impl Recovery {
             stopped: false,
             completed: false,
             #[cfg(test)]
-            stop_failures: if super::resource::fixture() == crate::ResourceDenialFixture::RetryStop
-            {
+            stop_failures: if matches!(
+                super::resource::fixture(),
+                crate::ResourceDenialFixture::RetryStop | crate::ResourceDenialFixture::DriverRetry
+            ) {
                 3
             } else {
                 0

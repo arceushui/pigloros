@@ -95,6 +95,14 @@ fn filter(
 ) -> Result<()> {
     let args = args.ok_or_else(unavailable)?;
     let selected = observe(signals, EventKind::Resource, owner_request(&args));
+    // Reach the production Surface/driver/keeper cleanup chain with a real
+    // request/deferral, without changing the pinned owner asset or network URL.
+    #[cfg(test)]
+    let selected = if fixture() == crate::ResourceDenialFixture::DriverRetry {
+        NativeAction::BlockResource
+    } else {
+        selected
+    };
     if selected != NativeAction::Allow {
         action(
             signals,

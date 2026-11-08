@@ -124,25 +124,7 @@ fn run_ceremony(
     let deadline = started + Duration::from_secs(15);
     surface.set_deadline(deadline);
     let mut visible = Some(acquire_foreground(surface, foreground, deadline)?);
-    let stored = StoredGet::new(
-        vec![0x80, 0x81],
-        OwnerUserHandle::from_bytes([4; 32]),
-        CoseEs256PublicKey::from_canonical_encoding(&FIXTURE_COSE_KEY)
-            .map_err(|error| error.to_string())?,
-        false,
-        false,
-        0,
-    );
-    let plan = CeremonyPlan::for_test(
-        CeremonyKind::Get,
-        id,
-        WebAuthnChallenge::from_bytes([2; 32]),
-        OwnerUserHandle::from_bytes([4; 32]),
-        PrfInput::from_bytes([3; 32]),
-        started,
-    )
-    .with_stored(Some(stored));
-    let mut driver = CeremonyDriver::for_test(plan);
+    let mut driver = new_driver(id, started)?;
     let mut receipt = None;
     // Keep both the driver and its native owners outside the unwind boundary.
     // An assertion failure must enter the same release/exit path as an error.
@@ -211,7 +193,32 @@ fn run_ceremony(
     Ok(())
 }
 
-fn env<'a>(
+pub(super) fn new_driver(
+    id: CeremonyId,
+    started: Instant,
+) -> Result<CeremonyDriver, Box<dyn std::error::Error>> {
+    let stored = StoredGet::new(
+        vec![0x80, 0x81],
+        OwnerUserHandle::from_bytes([4; 32]),
+        CoseEs256PublicKey::from_canonical_encoding(&FIXTURE_COSE_KEY)
+            .map_err(|error| error.to_string())?,
+        false,
+        false,
+        0,
+    );
+    let plan = CeremonyPlan::for_test(
+        CeremonyKind::Get,
+        id,
+        WebAuthnChallenge::from_bytes([2; 32]),
+        OwnerUserHandle::from_bytes([4; 32]),
+        PrfInput::from_bytes([3; 32]),
+        started,
+    )
+    .with_stored(Some(stored));
+    Ok(CeremonyDriver::for_test(plan))
+}
+
+pub(super) fn env<'a>(
     surface: &'a mut Surface,
     loopback: &'a mut SharedLoopback,
     store: &'a mut WindowsCleanupStore,
@@ -224,7 +231,7 @@ fn env<'a>(
     }
 }
 
-fn cancel_driver(
+pub(super) fn cancel_driver(
     driver: &mut CeremonyDriver,
     surface: &mut Surface,
     loopback: &mut SharedLoopback,
@@ -260,14 +267,14 @@ fn acquire_foreground<'a>(
     }
 }
 
-fn pump(surface: &Surface) -> TestResult {
+pub(super) fn pump(surface: &Surface) -> TestResult {
     if surface.pump()? == NativePulse::Quit {
         return Err("native readiness STA received quit".into());
     }
     Ok(())
 }
 
-fn pump_retaining(surface: &Surface) {
+pub(super) fn pump_retaining(surface: &Surface) {
     if pump(surface).is_err() {
         // Match the host's retention behavior after a pump failure. No owner is
         // discarded merely because the event loop is temporarily unavailable.

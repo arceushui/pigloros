@@ -114,6 +114,7 @@ enum ResourceDenialFixture {
     RetryStop,
     UncertainComplete,
     MissingDeferral,
+    DriverRetry,
 }
 
 /// Native extraction bounds the UTF-16 scan before allocation. This owned value

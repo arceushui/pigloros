@@ -15,6 +15,14 @@ impl SharedLoopback {
         )
         .map(|listener| Self(Arc::new(Mutex::new(listener))))
     }
+
+    #[cfg(test)]
+    pub(super) fn received_request_count(&self) -> Result<u64, BridgeError> {
+        self.0
+            .lock()
+            .map(|listener| listener.received_request_count())
+            .map_err(|_| BridgeError::Unavailable(UnavailableCode::InterfaceUnavailable))
+    }
 }
 
 impl Clone for SharedLoopback {

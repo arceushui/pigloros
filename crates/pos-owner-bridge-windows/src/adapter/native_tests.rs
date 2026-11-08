@@ -22,6 +22,7 @@ use crate::{BufferSlot, EventSink, NativeOperations, NativePulse, NativeResult, 
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
+mod denial;
 mod readiness;
 mod session;
 
@@ -308,7 +309,12 @@ impl crate::Native {
             native.destroy_window()?;
         }
         factory.stop()?;
+        drop(factory);
         listener.shutdown();
+        drop(listener);
+        let driver_root = root.0.join("resource-driver");
+        crate::create_private_directory(&driver_root)?;
+        denial::run(&runtime_path, &driver_root)?;
         root.remove()?;
         Ok(())
     }
