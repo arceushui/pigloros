@@ -41,7 +41,7 @@ pub struct LegEvidenceV1 {
     /// The sub-case of the leg.
     pub subcase_id: String,
     /// The manifest the preflight of the leg checked; its Execution Mode is
-    /// the attempt's.
+    /// the attempt's, or a cross-profile leg's own profile's mode.
     pub manifest: ReproManifestV1,
     /// The sealed `VRR1` of the leg.
     pub result: VerificationResultV1,
@@ -69,7 +69,8 @@ pub struct LegEvidenceV1 {
 /// mismatch and expected and actual digests of a divergence. No excluded
 /// field is produced by the run, so leaving them out cannot hide a
 /// divergence. The paired tests show that the two manifests of a leg differ
-/// only in their Execution Mode.
+/// only in their Execution Mode, and that a cross-profile leg, whose mode is
+/// its profile's, has the same manifest in both attempts.
 #[derive(Eq, PartialEq)]
 struct AuthoritativeResultV1<'a> {
     subcase_id: &'a str,

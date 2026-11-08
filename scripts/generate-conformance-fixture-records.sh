@@ -545,13 +545,13 @@ generated_sha256="${generated_root}/SHA256SUMS"
 generated_blake3="${generated_root}/BLAKE3SUMS"
 (
   cd "${fixture_root}"
-  find expected-authority expected inputs matrix oracles profiles providers support -type f -print0 |
+  find erasure expected-authority expected inputs matrix non-interference oracles profiles providers support -type f -print0 |
     sort -z |
     xargs -0 b3sum
 ) > "${generated_blake3}"
 (
   cd "${fixture_root}"
-  { printf '%s\0' BLAKE3SUMS; find expected-authority expected inputs matrix oracles profiles providers support -type f -print0; } |
+  { printf '%s\0' BLAKE3SUMS; find erasure expected-authority expected inputs matrix non-interference oracles profiles providers support -type f -print0; } |
     sort -z |
     xargs -0 sha256sum
 ) > "${generated_sha256}"
@@ -559,7 +559,7 @@ if [[ "${mode}" == "--write" ]]; then
   install -m 0644 -- "${generated_blake3}" "${fixture_root}/BLAKE3SUMS"
   (
     cd "${fixture_root}"
-    { printf '%s\0' BLAKE3SUMS; find expected-authority expected inputs matrix oracles profiles providers support -type f -print0; } |
+    { printf '%s\0' BLAKE3SUMS; find erasure expected-authority expected inputs matrix non-interference oracles profiles providers support -type f -print0; } |
       sort -z |
       xargs -0 sha256sum
   ) > "${generated_sha256}"

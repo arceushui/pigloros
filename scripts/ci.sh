@@ -45,6 +45,9 @@ python3 "$ROOT/scripts/generate_metric_conformance_fixtures.py" --check
 echo "==> replay conformance fixtures match their independent generator"
 python3 "$ROOT/scripts/generate_replay_conformance_fixtures.py" --check
 
+echo "==> erasure conformance cases and recorded artifacts match their independent generator"
+python3 "$ROOT/scripts/generate_erasure_conformance_fixtures.py" --check
+
 echo "==> gateway conformance fixtures match their independent generator"
 python3 "$ROOT/scripts/generate_gateway_conformance_fixtures.py" --check
 

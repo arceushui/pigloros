@@ -98,6 +98,25 @@ and oracle of one family, and its `materialization_status` is `materialized`. Ev
 `expected/replay-conformance/*.json` stays `pending`: materialized is not executed. The profile text
 is `profiles/replay-conformance/normative-requirements.md`.
 
+The `erasure/` directory holds the ADR-060 erasure conformance cases (ADR-062 Revision 8 slice
+N5, #1233; owner note `ADR-062_R8_Erasure_Cases` on the Redmine wiki). It is not a CPF1 claim
+layer and is not a member of any bundle: `SHA256SUMS`, `BLAKE3SUMS` and the verify script cover
+it, and `crates/pos-conformance/build.rs` leaves it out of the materialization closure.
+`scripts/generate_erasure_conformance_fixtures.py` is the only writer of `erasure/cases.json` (the
+case definitions and the independently derived expected projection of every case) and of the exact
+`ERQ1` requests under `erasure/requests/`. It runs offline and calls no Rust. `erasure/executions.json`
+and `erasure/records/` (the `ERS1`, `ERC1` and `ERRJ1` artifacts, each named by its BLAKE3) are the
+recorded artifacts of one run of `apps/pos-experiment/tests/erasure_conformance.rs`, which executes
+every case through the public `ErasureExecutionHostV1` over `MemoryStore` and `SQLite` and requires
+byte equality with these files. The generator's `--check` decodes every recorded artifact,
+recomputes its digests and links, derives the ERFP1/ERFA1 applicability matrix and the
+ERAO1/ERPR1 provenance from the case inputs and compares them with the recorded bindings, compares
+everything with the expected projection, scans the directory for the erased canary bytes and pins
+that the erasure path writes no log. The cases cover every lifecycle terminal state, canonical
+acknowledgement ordering, retry, legal hold and policy conflict, and replica, backup and rejoin
+evidence of one host (not distributed). They are engineering evidence, make no ADR-059 mode claim
+and do not change `expected/replay-conformance/deletion-redaction.json`.
+
 The `gateway-http-v1` adapter (`scripts/conformance-fixture-adapters/gateway-http-v1.sh`) owns the
 `gateway-client-conformance` layer (#1295); provider
 `pigloros.fixture.gateway-client-conformance@2.0.0` replaces the 1.0.0 placeholder with no reader or
@@ -174,8 +193,21 @@ immutable bundle manifest must declare.
 The Draft `matrix/execution-matrix.json` records all twelve accepted
 non-interference rows and their 192 required Local/Air-Gapped/Replay/Fork
 variant cases, with the row-specific AuthEq/PublicEq/OpEq predicates from
-ADR-059. Every coordinate is deliberately `executed: false` and has no result
-digest until #193 supplies independently produced execution evidence.
+ADR-059. A coordinate stays `executed: false`, with no result digest, until #193
+supplies execution evidence that the independent verifier accepts.
+
+ADR-062 Revision 8 slice N1 (#1229, owner note `ADR-062_R8_NonInterference_Executions`)
+flips the 24 cases of `NI-PUBLIC-006` and `NI-EVAL-007` in modes L, R and F.
+- Each flipped case has one checked-in NIA1 at
+  `non-interference/executions/<content address>.nia1`.
+- The NIA1 are signed with the repository test-fixture-only executor key in
+  `non-interference/executor.json`. They are engineering evidence, not an
+  attestation.
+- Each flipped case's `expected_result_digest` is its NIA1 result digest, derived
+  independently by `scripts/generate_non_interference_g_pub_fixtures.py`.
+  `executed: true` never implies a pass.
+- Air-Gapped cases stay non-executed until N7 (#1235), and `NI-ARCHIVE-009` until
+  N1b (#1284).
 `expected-authority/inventory.json` records the eleven #172 handoff slots. Its
 `expected_outcome` values are planned authority targets, not observed results.
 Since ADR-062 Revision 8 slice R4 (#1222) every slot is `materialized`: its
