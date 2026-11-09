@@ -205,7 +205,8 @@ mod tests {
             assert_eq!(filename_path(filename)?.as_os_str().as_bytes(), expected);
         }
         for filename in [b"file://foreign/db".as_slice(), b"file://foreign"] {
-            assert_eq!(filename_path(filename), Err(refused()));
+            assert!(matches!(filename_path(filename),
+                Err(CoreError::Storage(message)) if message == REFUSAL));
         }
         Ok(())
     }
@@ -270,7 +271,8 @@ mod tests {
                 resolved_ancestor(parent.join("link1"))?,
                 std::fs::canonicalize(&target)?
             );
-            assert_eq!(resolved_ancestor(parent.join("link0")), Err(refused()));
+            assert!(matches!(resolved_ancestor(parent.join("link0")),
+                Err(CoreError::Storage(message)) if message == REFUSAL));
         }
         let mut missing = directory.path().to_path_buf();
         for _ in 0..63 {
@@ -278,7 +280,8 @@ mod tests {
         }
         assert_eq!(resolved_ancestor(missing.clone())?, canonical);
         missing.push("missing");
-        assert_eq!(resolved_ancestor(missing), Err(refused()));
+        assert!(matches!(resolved_ancestor(missing),
+            Err(CoreError::Storage(message)) if message == REFUSAL));
         Ok(())
     }
 }

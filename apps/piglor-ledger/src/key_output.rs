@@ -1005,11 +1005,14 @@ mod binding_tests {
         install_faults(&key, &[FaultStage::BindRead]);
         let result = bind_owned_secret_key(&database, &key, identity(1), digest());
         clear_faults();
-        let expected = pos_core::CoreError::Storage(format!(
+        let expected = format!(
             "owned signing-key binding: {}",
             std::io::Error::from(rustix::io::Errno::LOOP)
-        ));
-        assert_eq!(result, Err(expected));
+        );
+        assert!(
+            matches!(&result, Err(pos_core::CoreError::Storage(message)) if message == &expected),
+            "unexpected key binding result: {result:?}"
+        );
         assert!(!database.exists());
         Ok(())
     }
@@ -1027,12 +1030,10 @@ mod binding_tests {
                 identity(1),
                 digest(),
             );
-            assert_eq!(
-                result,
-                Err(pos_core::CoreError::Storage(
-                    "owned signing-key binding: key is not a private single-link regular file"
-                        .to_owned()
-                ))
+            assert!(
+                matches!(&result, Err(pos_core::CoreError::Storage(message))
+                    if message == "owned signing-key binding: key is not a private single-link regular file"),
+                "unexpected FIFO key binding result: {result:?}"
             );
             std::fs::write(directory.join("fifo-refused"), b"refused")?;
             return Ok(());
