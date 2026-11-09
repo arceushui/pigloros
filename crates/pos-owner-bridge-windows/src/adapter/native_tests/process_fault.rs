@@ -3303,48 +3303,80 @@ impl Drop for CreationOrderGuard {
     }
 }
 
-fn async_environment_result(
+fn sdk_environment_result(
     order: &[crate::NativeCreationMoment],
     callback: crate::CreationCallback,
 ) -> bool {
     use crate::NativeCreationMoment::{EnvironmentCallback, EnvironmentReturned};
     order == [EnvironmentReturned(true), EnvironmentCallback(callback)]
+        || order == [EnvironmentCallback(callback), EnvironmentReturned(true)]
 }
 
 #[test]
 fn creation_witness_rejects_sync_error_and_false_failure() {
     use crate::CreationCallback::{Inconsistent, MissingInterface, NativeFailure, Success};
     use crate::NativeCreationMoment::{EnvironmentCallback, EnvironmentReturned};
-    assert!(async_environment_result(
+    assert!(sdk_environment_result(
         &[
             EnvironmentReturned(true),
             EnvironmentCallback(NativeFailure)
         ],
         NativeFailure
     ));
-    assert!(!async_environment_result(
+    assert!(!sdk_environment_result(
         &[EnvironmentReturned(false)],
         NativeFailure
     ));
-    assert!(!async_environment_result(
+    assert!(!sdk_environment_result(
+        &[
+            EnvironmentReturned(false),
+            EnvironmentCallback(NativeFailure)
+        ],
+        NativeFailure,
+    ));
+    assert!(!sdk_environment_result(
+        &[
+            EnvironmentReturned(true),
+            EnvironmentCallback(NativeFailure),
+            crate::NativeCreationMoment::Overflow
+        ],
+        NativeFailure,
+    ));
+    assert!(!sdk_environment_result(
+        &[
+            EnvironmentReturned(true),
+            EnvironmentCallback(NativeFailure),
+            crate::NativeCreationMoment::ControllerReturned(true)
+        ],
+        NativeFailure,
+    ));
+    assert!(!sdk_environment_result(
+        &[
+            EnvironmentReturned(true),
+            EnvironmentCallback(NativeFailure),
+            EnvironmentCallback(NativeFailure)
+        ],
+        NativeFailure,
+    ));
+    assert!(sdk_environment_result(
         &[
             EnvironmentCallback(NativeFailure),
             EnvironmentReturned(true)
         ],
         NativeFailure
     ));
-    assert!(!async_environment_result(
+    assert!(!sdk_environment_result(
         &[
             EnvironmentReturned(true),
             EnvironmentCallback(MissingInterface)
         ],
         NativeFailure
     ));
-    assert!(!async_environment_result(
+    assert!(!sdk_environment_result(
         &[EnvironmentReturned(true), EnvironmentCallback(Inconsistent)],
         NativeFailure
     ));
-    assert!(!async_environment_result(
+    assert!(!sdk_environment_result(
         &[EnvironmentReturned(true), EnvironmentCallback(Success)],
         NativeFailure
     ));
@@ -3464,7 +3496,7 @@ fn run_environment_obstruction(
     } else {
         crate::CreationCallback::Success
     };
-    let ordered = async_environment_result(&order, expected);
+    let ordered = sdk_environment_result(&order, expected);
     let no_record = fixture.store.records()?.is_empty();
     let retained_orphan = fixture.store.folders()?.len() == 1;
     let idle = fixture.surface.idle();

@@ -1237,6 +1237,20 @@ def _check_fault_authority(root: Path, scans: dict[str, tuple[Scan, tuple[Attrib
             allowed |= relative == "src/lib.rs" and callback_begin <= reference.start() < callback_end
             if not allowed:
                 found.append(f"{SHIM}/{relative}: callback evidence references belong only in reviewed paths")
+    fixture_root_item = scans.get("src/adapter/native_tests.rs")
+    fixture_root_code = fixture_root_item[0].code if fixture_root_item else ""
+    root_impls = list(re.finditer(r"(?<!\w)impl\s+FixtureRoot\s*\{", fixture_root_code))
+    root_start = root_impls[0].start() if len(root_impls) == 1 else -1
+    root_open = fixture_root_code.find("{", root_start) if root_start >= 0 else -1
+    root_end = _matching_brace(fixture_root_code, root_open) if root_open >= 0 else -1
+    root_body = fixture_root_code[root_start:root_end + 1] if root_end >= 0 else ""
+    if hashlib.sha256(re.sub(r"\s+", "", root_body).encode()).hexdigest() != "e0d192838ffc3bbbeb4313c07e1e421b0de552068d917e7e57d4e1cd76d99e05":
+        found.append(f"{SHIM}/src/adapter/native_tests.rs: fixture root differs from reviewed private temporary directory")
+    root_format = list(re.finditer(r"(?<!\w)format!\s*\(", root_body))
+    expected_root = re.compile(r'format!\s*\(\s*"piglor-native-\{\}-\{\}-\{\}"')
+    if (len(root_format) != 1 or not fixture_root_item or
+            not expected_root.match(fixture_root_item[0].source, root_start + root_format[0].start())):
+        found.append(f"{SHIM}/src/adapter/native_tests.rs: fixture root must use its fixed temporary name")
     obstruction_path = "src/adapter/native_tests/process_fault/obstruction.rs"
     obstruction = scans.get(obstruction_path)
     obstruction_code = obstruction[0].code if obstruction else ""
@@ -1277,7 +1291,7 @@ def _check_fault_authority(root: Path, scans: dict[str, tuple[Scan, tuple[Attrib
     relative = "src/adapter/native_tests/process_fault.rs"
     item = scans.get(relative)
     code = item[0].code if item else ""
-    if hashlib.sha256(re.sub(r"\s+", "", code).encode()).hexdigest() != "ccdb0fc47d9e5e96c3550e30de35aae4ab364272bbc4b750c783fa7d21eaa6b4":
+    if hashlib.sha256(re.sub(r"\s+", "", code).encode()).hexdigest() != "d60a3dd6c666d5e857e65a138f5b29b17ea6fc188af3fdd60ab5dea8bc66a957":
         found.append(f"{SHIM}/{relative}: process fault fixture differs from reviewed sealed caller")
 
 

@@ -1543,6 +1543,24 @@ def test_owned_process_fault_authority() -> None:
     CHECKER._check_fault_authority(ROOT, scans, found)
     if f"{SHIM}/src/adapter/native_tests/process_fault.rs: UDF obstruction root must use its fixed fixture child" not in found:
         raise SystemExit(f"UDF root substitution was accepted: {found}")
+    root_path = "src/adapter/native_tests.rs"
+    root_source = (ROOT / SHIM / root_path).read_text()
+    for old, new, expected in (
+        ('"piglor-native-{}-{}-{}"', '"../escape-{}-{}-{}"', "fixture root must use its fixed temporary name"),
+        ('crate::create_private_directory(&path)?', 'std::fs::create_dir_all(&path)?', "fixture root differs from reviewed private temporary directory"),
+    ):
+        if old not in root_source:
+            raise SystemExit(f"missing fixture provenance mutation target: {old}")
+        changed = dict(files)
+        changed[root_path] = root_source.replace(old, new, 1)
+        scans = {}
+        for relative, source in changed.items():
+            scanned = CHECKER.scan(source)
+            scans[relative] = (scanned, CHECKER._attributes(scanned.code))
+        found = []
+        CHECKER._check_fault_authority(ROOT, scans, found)
+        if f"{SHIM}/{root_path}: {expected}" not in found:
+            raise SystemExit(f"fixture provenance bypass accepted: {old}: {found}")
     # The source-controlled owned-folder obstruction must remain a new,
     # fixed child file; comments cannot stand in for the actual literal.
     obstruction_path = "src/adapter/native_tests/process_fault/obstruction.rs"
