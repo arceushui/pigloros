@@ -1634,10 +1634,10 @@ osf_link = \"https://osf.io/example\"\n";
         assert_eq!(problem["code"], "resource-limit-exceeded");
     }
 
-    #[test]
+    /// Gateway failures with their expected problem family and retry hint.
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn gateway_failures_map_to_their_problem_families() {
-        let cases: [(GatewayError, &str, bool); 19] = [
+    fn problem_cases() -> [(GatewayError, &'static str, bool); 19] {
+        [
             (
                 GatewayError::DependencySetExhausted,
                 "resource-limit-exceeded",
@@ -1717,7 +1717,13 @@ osf_link = \"https://osf.io/example\"\n";
                 "admission-rejected",
                 false,
             ),
-        ];
+        ]
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn gateway_failures_map_to_their_problem_families() {
+        let cases = problem_cases();
         let registry: serde_json::Value = serde_json::from_str(include_str!(
             "../../../contracts/gateway/v1/problem-types.json"
         ))
