@@ -115,7 +115,7 @@ fn members(count: u8) -> Vec<Member> {
         .collect()
 }
 
-fn head_input(frontier: Frontier, members: &[Member]) -> HeadInput<'_> {
+const fn head_input(frontier: Frontier, members: &[Member]) -> HeadInput<'_> {
     HeadInput {
         timeline: timeline(7),
         generation: [8; 16],
@@ -456,7 +456,7 @@ fn head_refuses_all_truncations_and_closed_frontier_or_member_shapes() -> TestRe
         Value::Array(vec![uint(0), Value::Null]),
         Value::Array(vec![uint(1)]),
         Value::Array(vec![uint(1), bytes(&pass_bytes(0)?)]),
-        Value::Array(vec![uint(1), bytes(&vec![0; 65])]),
+        Value::Array(vec![uint(1), bytes(&[0; 65])]),
         Value::Null,
     ] {
         let mut fields = head_fields(&input)?;

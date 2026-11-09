@@ -411,7 +411,7 @@ fn control_outcomes_have_exact_original_links_and_disposition_codes() -> TestRes
 }
 
 #[test]
-fn already_quarantined_preserves_selection_and_checks_fixed_fields() -> TestResult {
+fn already_quarantined_preserves_selection_and_checks_fixed_fields() {
     for prior in [None, Some(hash(6))] {
         assert_eq!(
             Outcome::new(outcome_input(prior, Disposition::AlreadyQuarantined)).err(),
@@ -454,7 +454,6 @@ fn already_quarantined_preserves_selection_and_checks_fixed_fields() -> TestResu
         ..base
     })
     .is_ok());
-    Ok(())
 }
 
 #[test]
