@@ -821,7 +821,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/session.rs"
-line = 133
+line = 162
 function = "fit_controller"
 operation = "controller.SetBounds(bounds)"
 invariant = "retained creating-STA controller and copied initialized client RECT."
@@ -829,7 +829,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/session.rs"
-line = 138
+line = 167
 function = "focus_controller"
 operation = "controller.MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC)"
 invariant = "retained creating-STA controller; fixed programmatic focus reason."
@@ -837,7 +837,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/session.rs"
-line = 198
+line = 227
 function = "controller_completion"
 operation = "controller.CoreWebView2()"
 invariant = "successfully completed retained controller on its creating STA."
@@ -845,7 +845,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/session.rs"
-line = 210
+line = 239
 function = "browser_pid"
 operation = "view.BrowserProcessId(&raw mut pid)"
 invariant = "retained creating-STA view and initialized unique PID output."
@@ -853,7 +853,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/session.rs"
-line = 239
+line = 268
 function = "navigate_owner"
 operation = "view.Navigate(w!( ))"
 invariant = "retained creating-STA view and the fixed packaged owner document URL."
@@ -861,7 +861,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/session.rs"
-line = 300
+line = 329
 function = "close_controller"
 operation = "controller.Close()"
 invariant = "retained creating-STA controller; all buffer borrows ended. Failure retains the COM owner so the safe policy can quarantine/retry."
@@ -1538,3 +1538,91 @@ function = "process_failed"
 operation = "ICoreWebView2ProcessFailedEventArgs::ProcessFailedKind"
 invariant = "Actual invoking-STA ProcessFailed callback arguments on the exact owned view, with initialized typed enum output. Unit-test-only ADR-131 observation distinguishes main-renderer exit from every other failure and refuses missing/failed readback; it grants no fault or process authority."
 hosted_test = "native_readonly_write_crashes_the_exact_renderer_and_retires"
+
+[[block]]
+file = "src/ffi/process_fault.rs"
+line = 37
+function = "drop"
+operation = "CloseHandle"
+invariant = "Single close of the retained process object on every exit path."
+hosted_test = "native_verified_owned_process_faults_retire"
+
+[[block]]
+file = "src/ffi/process_fault.rs"
+line = 49
+function = "exit_code"
+operation = "GetExitCodeProcess"
+invariant = "Immediate query on the live retained process handle with a writable output."
+hosted_test = "native_verified_owned_process_faults_retire"
+
+[[block]]
+file = "src/ffi/process_fault.rs"
+line = 59
+function = "candidates"
+operation = "GetProcessInfos"
+invariant = "Current retained environment on its creating STA; no other source."
+hosted_test = "native_verified_owned_process_faults_retire"
+
+[[block]]
+file = "src/ffi/process_fault.rs"
+line = 62
+function = "candidates"
+operation = "Count"
+invariant = "Live collection and initialized count; reject more than 64."
+hosted_test = "native_verified_owned_process_faults_retire"
+
+[[block]]
+file = "src/ffi/process_fault.rs"
+line = 69
+function = "candidates"
+operation = "GetValueAtIndex"
+invariant = "Index stays within the checked bounded collection."
+hosted_test = "native_verified_owned_process_faults_retire"
+
+[[block]]
+file = "src/ffi/process_fault.rs"
+line = 73
+function = "candidates"
+operation = "ProcessId"
+invariant = "Live collection item and initialized unique output."
+hosted_test = "native_verified_owned_process_faults_retire"
+
+[[block]]
+file = "src/ffi/process_fault.rs"
+line = 75
+function = "candidates"
+operation = "Kind"
+invariant = "Live collection item and initialized unique output."
+hosted_test = "native_verified_owned_process_faults_retire"
+
+[[block]]
+file = "src/ffi/process_fault.rs"
+line = 103
+function = "identity"
+operation = "GetProcessTimes"
+invariant = "Live retained process object and four distinct writable outputs."
+hosted_test = "native_verified_owned_process_faults_retire"
+
+[[block]]
+file = "src/ffi/process_fault.rs"
+line = 116
+function = "identity"
+operation = "QueryFullProcessImageNameW"
+invariant = "Live retained handle, bounded UTF-16 buffer, initialized length."
+hosted_test = "native_verified_owned_process_faults_retire"
+
+[[block]]
+file = "src/ffi/process_fault.rs"
+line = 167
+function = "inject"
+operation = "OpenProcess"
+invariant = "Only an environment-discovered unique candidate, fixed query and terminate rights, no inheritance."
+hosted_test = "native_verified_owned_process_faults_retire"
+
+[[block]]
+file = "src/ffi/process_fault.rs"
+line = 202
+function = "inject"
+operation = "TerminateProcess"
+invariant = "One declared fault after retained-handle identity, class, topology and membership revalidation; fixed exit code 0x535."
+hosted_test = "native_verified_owned_process_faults_retire"

@@ -30,9 +30,13 @@ mod adapter {
     mod socket;
     mod store;
     mod surface;
+    #[cfg(test)]
+    pub(crate) use surface::FaultAuthority;
 
     #[cfg(test)]
     mod native_tests;
+    #[cfg(test)]
+    pub(crate) use native_tests::process_fault::FaultSeal;
 
     pub use directory::{create_private_directory, verify_private_directory};
     pub use host::WindowsOwnerHost;
@@ -363,7 +367,67 @@ pub(crate) trait NativeFactory: StaPump {
 /// Native ownership operations; lifecycle outcomes are selected by the adapter.
 /// No SDK pointer, HRESULT, token, arbitrary property ID, script, header, URL,
 /// buffer offset, or caller-provided COM callback crosses this interface.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ProcessFaultTarget {
+    Browser,
+    Renderer,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ProcessFaultPhase {
+    PostedReceipt,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ProcessFaultTopology {
+    SealedSingleViewFrameFree,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ProcessFaultState {
+    pub(crate) phase: ProcessFaultPhase,
+    pub(crate) topology: ProcessFaultTopology,
+    pub(crate) generation: u32,
+    pub(crate) reply_state: u32,
+    pub(crate) record_count: usize,
+    pub(crate) posts: u8,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ProcessFaultMark {
+    Reached(ProcessFaultState),
+    Selected(pos_owner_bridge::ProcessIdentity),
+    TerminationCall,
+    MainRendererExited,
+    OwnBrowserExited,
+    ExitCode(u32),
+}
+
+#[cfg(test)]
+pub(crate) trait ProcessFaultHandle {
+    fn identity(&self) -> pos_owner_bridge::ProcessIdentity;
+    fn exit_code(&self) -> Result<Option<u32>, ()>;
+}
+
 pub(crate) trait NativeOperations {
+    #[cfg(test)]
+    fn inject_process_fault(
+        &self,
+        _authority: &crate::adapter::FaultAuthority,
+    ) -> Result<Box<dyn ProcessFaultHandle>, ()> {
+        Err(())
+    }
+
+    #[cfg(test)]
+    fn fault_owners_retained(&self) -> bool {
+        false
+    }
+
     fn create_window(
         &mut self,
         owner: Option<u64>,
@@ -473,6 +537,11 @@ mod tests {
     fn native_delivery_adversaries_retry_without_stale_receipt(
     ) -> Result<(), Box<dyn std::error::Error>> {
         crate::Native::native_delivery_adversaries()
+    }
+
+    #[test]
+    fn native_verified_owned_process_faults_retire() -> Result<(), Box<dyn std::error::Error>> {
+        crate::Native::native_verified_owned_process_faults_retire()
     }
 
     #[test]

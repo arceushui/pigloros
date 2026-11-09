@@ -108,6 +108,35 @@ impl Session {
 }
 
 impl NativeOperations for Session {
+    #[cfg(test)]
+    fn inject_process_fault(
+        &self,
+        authority: &crate::adapter::FaultAuthority,
+    ) -> Result<Box<dyn crate::ProcessFaultHandle>, ()> {
+        self.check().map_err(|_| ())?;
+        let environment = self.environment_ref().map_err(|_| ())?;
+        if !environment.subscribed() || self.controller.is_none() || self.view.is_none() {
+            return Err(());
+        }
+        let browser_pid = self.browser_pid().map_err(|_| ())?;
+        if browser_pid != authority.browser().browser_pid {
+            return Err(());
+        }
+        super::process_fault::inject(&environment.raw, authority)
+    }
+
+    #[cfg(test)]
+    fn fault_owners_retained(&self) -> bool {
+        self.check().is_ok()
+            && self
+                .environment
+                .as_ref()
+                .is_some_and(Environment::subscribed)
+            && self.controller.is_some()
+            && self.view.is_some()
+            && self.buffers.is_some()
+    }
+
     fn create_window(&mut self, owner: Option<u64>, width: u32, height: u32) -> NativeResult<()> {
         self.check()?;
         if self.window.is_some() {

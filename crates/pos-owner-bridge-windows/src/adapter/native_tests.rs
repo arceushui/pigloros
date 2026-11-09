@@ -25,7 +25,9 @@ type TestResult = Result<(), Box<dyn std::error::Error>>;
 mod controls;
 mod denial;
 mod foreground;
+pub(crate) mod process_fault;
 mod readiness;
+mod retirement;
 mod session;
 mod trace;
 

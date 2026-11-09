@@ -69,7 +69,7 @@ impl Surface {
         Ok(Poll::Ready(identity))
     }
 
-    fn admit_environment(&self, folder: &std::path::Path) -> Result<()> {
+    pub(super) fn admit_environment(&self, folder: &std::path::Path) -> Result<()> {
         let snapshot = self.native.environment().map_err(unavailable)?;
         settings::verify_options(&snapshot)?;
         if snapshot.version.as_str() != "153.0.4234.48"

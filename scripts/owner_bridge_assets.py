@@ -55,10 +55,13 @@ def delivery_port(profile: str) -> str:
             "          }\n"
             # Receipt must imply the declared insertion actually ran, even if
             # the SDK delivers the first reply after a complete newer pair.
-            "          if (!done && generation !== first && event.additionalData.role === \"reply\") { return; }\n"
+            "          if (!done && generation !== first && event.additionalData.role === \"reply\") {\n"
+            "            waiting.push(event); return;\n"
+            "          }\n"
             "          listener(event);\n"
             "          if (!done && generation !== first && held && event.additionalData.role === \"request\") {\n"
             "            done = true; var delayed = held; held = null; listener(delayed);\n"
+            "            var queued = waiting; waiting = []; queued.forEach(listener);\n"
             "          }\n"
         ),
         "delayed_delivery": (
@@ -73,7 +76,7 @@ def delivery_port(profile: str) -> str:
     }
     declarations = {
         "duplicate_request": "done = false",
-        "interleaved_pair": "done = false, first = null, held = null",
+        "interleaved_pair": "done = false, first = null, held = null, waiting = []",
         "delayed_delivery": "done = false, queue = []",
     }
     return (

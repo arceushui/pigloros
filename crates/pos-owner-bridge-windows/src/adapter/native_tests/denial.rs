@@ -10,9 +10,7 @@ use std::time::{Duration, Instant};
 use pos_owner_bridge::ceremony::driver::{CeremonyDriver, Step};
 use pos_owner_bridge::ceremony::plan::Verified;
 use pos_owner_bridge::listener::FixtureProfile;
-use pos_owner_bridge::{
-    BridgeError, CleanupStore, LoopbackPort, QuarantineCode, QuarantineKeeper, SystemClock,
-};
+use pos_owner_bridge::{BridgeError, CleanupStore, LoopbackPort, QuarantineCode, SystemClock};
 use pos_owner_bridge_codec::CeremonyId;
 
 use super::{readiness, trace::Trace, ResourceProbeGuard, TestResult};
@@ -85,36 +83,17 @@ impl Fixture {
     }
 
     fn retire(&mut self, driver: CeremonyDriver, result: Result<Verified, BridgeError>) -> bool {
-        let mut keeper = QuarantineKeeper::new();
-        let reply = keeper.finish(driver, result);
-        let was_quarantined = reply.driver.is_none();
-        let mut quarantined = was_quarantined;
-        self.surface.abandon_opening();
-        while quarantined || !self.surface.idle() {
-            if quarantined {
-                quarantined = keeper
-                    .poll(|driver| {
-                        self.trace.update(
-                            "denial-quarantine",
-                            &self.surface,
-                            driver,
-                            &self.loopback,
-                        );
-                        driver.poll_cleanup(&mut readiness::env(
-                            &mut self.surface,
-                            &mut self.loopback,
-                            &mut self.store,
-                        ))
-                    })
-                    .remaining;
-            } else {
-                let _retired_or_retained = self.surface.poll_failed_open();
-            }
-            if quarantined || !self.surface.idle() {
-                readiness::pump_retaining(&self.surface);
-            }
-        }
-        was_quarantined
+        let trace = &mut self.trace;
+        super::retirement::retire(
+            &mut self.surface,
+            &mut self.loopback,
+            &mut self.store,
+            driver,
+            result,
+            |surface, driver, loopback| {
+                trace.update("denial-quarantine", surface, driver, loopback);
+            },
+        )
     }
 
     fn attempt(

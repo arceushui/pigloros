@@ -114,11 +114,11 @@ pub(super) const DUPLICATE_REQUEST: Response = Response {
 
 pub(super) const INTERLEAVED_PAIR: Response = Response {
     body: include_bytes!("../../assets/qualification/interleaved_pair.html"),
-    head: "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: 14448\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nCross-Origin-Opener-Policy: same-origin\r\nCross-Origin-Resource-Policy: same-origin\r\nPermissions-Policy: publickey-credentials-create=(self), publickey-credentials-get=(self), clipboard-read=(), clipboard-write=(), camera=(), microphone=(), geolocation=()\r\nConnection: close\r\nContent-Security-Policy: default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; script-src 'sha256-VI6RysaG8MPIkoxvWHlHdmt5gJYx9jWFM0y1JXL2WTE='; style-src 'sha256-Q5v//7IetSl8ReqUsE3bO7kt7fOgIkckocSNwunJJmk='; img-src 'none'; connect-src 'none'\r\n\r\n",
+    head: "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: 14579\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nCross-Origin-Opener-Policy: same-origin\r\nCross-Origin-Resource-Policy: same-origin\r\nPermissions-Policy: publickey-credentials-create=(self), publickey-credentials-get=(self), clipboard-read=(), clipboard-write=(), camera=(), microphone=(), geolocation=()\r\nConnection: close\r\nContent-Security-Policy: default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; script-src 'sha256-SO8C6ZIPfDtNBRatu/chzyhUwARuluScrupnqOXaJ1A='; style-src 'sha256-Q5v//7IetSl8ReqUsE3bO7kt7fOgIkckocSNwunJJmk='; img-src 'none'; connect-src 'none'\r\n\r\n",
     digest: [
-        0xfb, 0xae, 0x03, 0x42, 0x24, 0xc7, 0xce, 0xcc, 0x5b, 0x25, 0x1a, 0x64, 0x6e, 0xcd, 0x6c,
-        0xaa, 0xd1, 0xb5, 0xef, 0x57, 0x31, 0xac, 0x8a, 0x9c, 0xf0, 0x1a, 0x3c, 0x22, 0xe0, 0x21,
-        0x27, 0xb2,
+        0x19, 0xf1, 0x6e, 0x2e, 0xa7, 0x5f, 0x08, 0xd6, 0x19, 0xbe, 0x30, 0xd6, 0x08, 0xd4, 0x22,
+        0x38, 0x25, 0x79, 0x97, 0x4a, 0xb5, 0x9f, 0x15, 0x83, 0xbb, 0x89, 0xec, 0x04, 0x64, 0x3e,
+        0xb5, 0x17,
     ],
 };
 

@@ -88,6 +88,32 @@ pub(super) struct Surface {
     client: Cell<Option<ClientBounds>>,
 }
 
+/// A fault authority is minted only from the live admitted Surface, and retains
+/// its event observer so a callback can invalidate topology during discovery.
+#[cfg(test)]
+pub(crate) struct FaultAuthority {
+    browser: ProcessIdentity,
+    target: crate::ProcessFaultTarget,
+    events: Rc<Events>,
+    trace: Rc<std::cell::RefCell<Vec<crate::ProcessFaultMark>>>,
+}
+
+#[cfg(test)]
+impl FaultAuthority {
+    pub(crate) const fn browser(&self) -> ProcessIdentity {
+        self.browser
+    }
+    pub(crate) const fn target(&self) -> crate::ProcessFaultTarget {
+        self.target
+    }
+    pub(crate) fn valid(&self) -> bool {
+        !self.events.invalid() && self.events.exited().is_none()
+    }
+    pub(crate) fn record(&self, mark: crate::ProcessFaultMark) {
+        self.trace.borrow_mut().push(mark);
+    }
+}
+
 impl Surface {
     pub(super) fn new(
         factory: Rc<dyn NativeFactory>,
@@ -123,6 +149,126 @@ impl Surface {
             dpi: Cell::new(None),
             client: Cell::new(None),
         })
+    }
+
+    #[cfg(test)]
+    pub(in crate::adapter) fn posted_fault_state(
+        &self,
+        posts: u8,
+    ) -> std::result::Result<crate::ProcessFaultState, ()> {
+        if self.ownership != Ownership::Controller
+            || self.close != CloseState::Idle
+            || self.failed_open
+            || self.events.invalid()
+            || self.events.exited().is_some()
+            || !self.buffers
+            || !self.navigation_issued
+            || self.events.loaded().is_none()
+            || self.loopback.served().count != 1
+            || !self.loopback.served().integrity_ok
+            || !crate::Native::process_failure_observations().is_empty()
+        {
+            return Err(());
+        }
+        let folder = self.root.join(self.folder.as_ref().ok_or(())?);
+        crate::verify_private_directory(&folder).map_err(|_| ())?;
+        self.admit_environment(&folder).map_err(|_| ())?;
+        let browser = self.identity.ok_or(())?;
+        if self.runtime.identity(browser.browser_pid).map_err(|_| ())? != browser {
+            return Err(());
+        }
+        // The caller is the sealed single-view fixture; subscriptions were
+        // installed before its only navigation, and every frame/popup callback
+        // invalidates these events. The policy binds the fixture asset bytes.
+        let state = crate::ProcessFaultState {
+            phase: crate::ProcessFaultPhase::PostedReceipt,
+            topology: crate::ProcessFaultTopology::SealedSingleViewFrameFree,
+            generation: self.generation.ok_or(())?,
+            reply_state: self.native.load_state().map_err(|_| ())?,
+            record_count: self.store.records().map_err(|_| ())?.len(),
+            posts,
+        };
+        if state.generation != 1 || state.record_count != 1 || state.posts != 1 {
+            return Err(());
+        }
+        Ok(state)
+    }
+
+    #[cfg(test)]
+    pub(in crate::adapter) fn posted_fault_event(
+        &self,
+        target: crate::ProcessFaultTarget,
+    ) -> std::result::Result<Option<crate::ProcessFaultMark>, ()> {
+        match target {
+            crate::ProcessFaultTarget::Renderer => {
+                let failures = crate::Native::process_failure_observations();
+                if failures.is_empty() {
+                    return Ok(None);
+                }
+                if failures != [Some(true)] || !self.events.renderer_failure_pending() {
+                    return Err(());
+                }
+                Ok(Some(crate::ProcessFaultMark::MainRendererExited))
+            }
+            crate::ProcessFaultTarget::Browser => {
+                let browser = self.identity.ok_or(())?;
+                match self.events.exited() {
+                    None => Ok(None),
+                    Some(pid) if pid == browser.browser_pid => {
+                        Ok(Some(crate::ProcessFaultMark::OwnBrowserExited))
+                    }
+                    Some(_) => Err(()),
+                }
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(in crate::adapter) fn fault_owners_retained(&self) -> bool {
+        self.ownership == Ownership::Controller
+            && self.folder.is_some()
+            && self.identity.is_some()
+            && self.buffers
+            && self.store.records().is_ok_and(|records| records.len() == 1)
+            && self.native.fault_owners_retained()
+    }
+
+    /// Declared post-receipt fault only; this is never a cleanup operation.
+    #[cfg(test)]
+    pub(in crate::adapter) fn inject_posted_fault(
+        &self,
+        target: crate::ProcessFaultTarget,
+        seal: crate::adapter::FaultSeal,
+    ) -> std::result::Result<Box<dyn crate::ProcessFaultHandle>, ()> {
+        if self.ownership != Ownership::Controller
+            || self.close != CloseState::Idle
+            || self.failed_open
+            || self.events.invalid()
+            || self.events.exited().is_some()
+            || self.generation != Some(1)
+            || !self.buffers
+            || !self.navigation_issued
+            || self.events.loaded().is_none()
+            || self.loopback.served().count != 1
+            || !self.loopback.served().integrity_ok
+        {
+            return Err(());
+        }
+        let folder = self.folder.as_ref().ok_or(())?;
+        let folder = self.root.join(folder);
+        crate::verify_private_directory(&folder).map_err(|_| ())?;
+        self.admit_environment(&folder).map_err(|_| ())?;
+        let browser = self.identity.ok_or(())?;
+        if self.runtime.identity(browser.browser_pid).map_err(|_| ())? != browser {
+            return Err(());
+        }
+        let authority = FaultAuthority {
+            browser,
+            target,
+            events: Rc::clone(&self.events),
+            trace: seal.trace(),
+        };
+        self.native.inject_process_fault(&authority)
     }
 
     pub(super) const fn set_deadline(&mut self, deadline: Instant) {

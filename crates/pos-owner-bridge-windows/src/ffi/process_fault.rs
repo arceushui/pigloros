@@ -1,0 +1,204 @@
+#![cfg(windows)]
+#![cfg(test)]
+
+//! Declared faults on processes discovered from the current owned environment.
+
+use std::ffi::OsString;
+use std::os::windows::ffi::OsStringExt;
+use std::path::PathBuf;
+
+use pos_owner_bridge::ProcessIdentity;
+use pos_owner_bridge_codec::ImagePathSha256;
+use sha2::{Digest, Sha256};
+use webview2_com::Microsoft::Web::WebView2::Win32::{
+    ICoreWebView2Environment, ICoreWebView2Environment8, COREWEBVIEW2_PROCESS_KIND,
+    COREWEBVIEW2_PROCESS_KIND_BROWSER, COREWEBVIEW2_PROCESS_KIND_RENDERER,
+};
+use windows::core::{Interface, PWSTR};
+use windows::Win32::Foundation::{CloseHandle, FILETIME, HANDLE};
+use windows::Win32::System::Threading::{
+    GetExitCodeProcess, GetProcessTimes, OpenProcess, QueryFullProcessImageNameW, TerminateProcess,
+    PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
+};
+
+use crate::{ProcessFaultHandle, ProcessFaultTarget};
+
+const ACTIVE: u32 = 259;
+const FAULT_EXIT: u32 = 0x535;
+
+struct Retained {
+    handle: HANDLE,
+    identity: ProcessIdentity,
+}
+
+impl Drop for Retained {
+    fn drop(&mut self) {
+        // SAFETY: this owner holds the one handle returned by OpenProcess.
+        let _closed = unsafe { CloseHandle(self.handle) };
+    }
+}
+
+impl ProcessFaultHandle for Retained {
+    fn identity(&self) -> ProcessIdentity {
+        self.identity
+    }
+
+    fn exit_code(&self) -> Result<Option<u32>, ()> {
+        let mut code = 0;
+        // SAFETY: the owned process handle stays live and the output is writable.
+        unsafe { GetExitCodeProcess(self.handle, &raw mut code) }.map_err(|_| ())?;
+        Ok((code != ACTIVE).then_some(code))
+    }
+}
+
+fn candidates(
+    environment: &ICoreWebView2Environment,
+) -> Result<Vec<(u32, COREWEBVIEW2_PROCESS_KIND)>, ()> {
+    let environment: ICoreWebView2Environment8 = environment.cast().map_err(|_| ())?;
+    // SAFETY: retained environment is called on its creating STA.
+    let collection = unsafe { environment.GetProcessInfos() }.map_err(|_| ())?;
+    let mut count = 0;
+    // SAFETY: the collection is live and count is a unique output.
+    unsafe { collection.Count(&raw mut count) }.map_err(|_| ())?;
+    if count > 64 {
+        return Err(());
+    }
+    let mut entries = Vec::new();
+    for index in 0..count {
+        // SAFETY: index is within the checked collection count on the creating STA.
+        let info = unsafe { collection.GetValueAtIndex(index) }.map_err(|_| ())?;
+        let mut pid = 0;
+        let mut kind = COREWEBVIEW2_PROCESS_KIND::default();
+        // SAFETY: live item and distinct initialized output pointers.
+        unsafe { info.ProcessId(&raw mut pid) }.map_err(|_| ())?;
+        // SAFETY: live item and initialized unique kind output.
+        unsafe { info.Kind(&raw mut kind) }.map_err(|_| ())?;
+        let pid = u32::try_from(pid).ok().filter(|pid| *pid != 0).ok_or(())?;
+        if entries.iter().any(|(existing, _)| *existing == pid) {
+            return Err(());
+        }
+        entries.push((pid, kind));
+    }
+    Ok(entries)
+}
+
+fn select(
+    entries: &[(u32, COREWEBVIEW2_PROCESS_KIND)],
+    kind: COREWEBVIEW2_PROCESS_KIND,
+) -> Result<u32, ()> {
+    let mut matches = entries.iter().filter(|(_, entry_kind)| *entry_kind == kind);
+    let pid = matches.next().ok_or(())?.0;
+    if matches.next().is_some() {
+        return Err(());
+    }
+    Ok(pid)
+}
+
+fn identity(handle: HANDLE, pid: u32) -> Result<(ProcessIdentity, PathBuf), ()> {
+    let mut creation = FILETIME::default();
+    let mut exit = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    // SAFETY: the retained handle is live and outputs are distinct writable values.
+    unsafe {
+        GetProcessTimes(
+            handle,
+            &raw mut creation,
+            &raw mut exit,
+            &raw mut kernel,
+            &raw mut user,
+        )
+    }
+    .map_err(|_| ())?;
+    let mut image = vec![0_u16; 32_768];
+    let mut length = 32_768_u32;
+    // SAFETY: the fixed-size UTF-16 buffer and its initialized in/out length are live.
+    unsafe {
+        QueryFullProcessImageNameW(
+            handle,
+            PROCESS_NAME_WIN32,
+            PWSTR(image.as_mut_ptr()),
+            &raw mut length,
+        )
+    }
+    .map_err(|_| ())?;
+    let units = image
+        .get(..length as usize)
+        .filter(|units| !units.is_empty())
+        .ok_or(())?;
+    let mut digest = Sha256::new();
+    for unit in units {
+        digest.update(unit.to_le_bytes());
+    }
+    Ok((
+        ProcessIdentity {
+            browser_pid: pid,
+            creation_filetime: (u64::from(creation.dwHighDateTime) << 32)
+                | u64::from(creation.dwLowDateTime),
+            image_path_sha256: ImagePathSha256::from_bytes(digest.finalize().into()),
+        },
+        PathBuf::from(OsString::from_wide(units)),
+    ))
+}
+
+pub(super) fn inject(
+    environment: &ICoreWebView2Environment,
+    authority: &crate::adapter::FaultAuthority,
+) -> Result<Box<dyn ProcessFaultHandle>, ()> {
+    if !authority.valid() {
+        return Err(());
+    }
+    let first = candidates(environment)?;
+    let browser_pid = select(&first, COREWEBVIEW2_PROCESS_KIND_BROWSER)?;
+    let expected = authority.browser();
+    if browser_pid != expected.browser_pid {
+        return Err(());
+    }
+    let (browser, browser_path) = super::process::inspect(browser_pid)?.ok_or(())?;
+    if browser != expected {
+        return Err(());
+    }
+    let kind = match authority.target() {
+        ProcessFaultTarget::Browser => COREWEBVIEW2_PROCESS_KIND_BROWSER,
+        ProcessFaultTarget::Renderer => COREWEBVIEW2_PROCESS_KIND_RENDERER,
+    };
+    let pid = select(&first, kind)?;
+    // SAFETY: PID was selected only from this environment; rights and inheritance are fixed.
+    let handle = unsafe {
+        OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE,
+            false,
+            pid,
+        )
+    }
+    .map_err(|_| ())?;
+    // Retain the handle on every subsequent failure path.
+    let mut retained = Retained {
+        handle,
+        identity: expected,
+    };
+    let (observed, path) = identity(handle, pid)?;
+    if path != browser_path || (kind == COREWEBVIEW2_PROCESS_KIND_BROWSER && observed != expected) {
+        return Err(());
+    }
+    retained.identity = observed;
+    if retained.exit_code()?.is_some() {
+        return Err(());
+    }
+    let second = candidates(environment)?;
+    if select(&second, COREWEBVIEW2_PROCESS_KIND_BROWSER)? != browser_pid
+        || super::process::inspect(browser_pid)?.ok_or(())? != (browser, browser_path)
+        || select(&second, kind)? != pid
+        || identity(handle, pid)? != (observed, path)
+        || !authority.valid()
+        || retained.exit_code()?.is_some()
+    {
+        return Err(());
+    }
+    authority.record(crate::ProcessFaultMark::Selected(observed));
+    authority.record(crate::ProcessFaultMark::TerminationCall);
+    // SAFETY: this is the retained, revalidated process object from the owned
+    // environment, at the declared fault point, with a fixed non-active code.
+    unsafe { TerminateProcess(handle, FAULT_EXIT) }.map_err(|_| ())?;
+    Ok(Box::new(retained))
+}

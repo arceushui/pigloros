@@ -109,6 +109,7 @@ carry ``#[test]``.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import re
 import tomllib
@@ -909,6 +910,12 @@ def _check_shim_macros(label: str, scanned: Scan, found: list[str]) -> None:
             )
 
 
+def _reviewed_fault_code(code: str) -> bool:
+    """Accept only the reviewed test-only fixed process-fault implementation."""
+    normalized = re.sub(r"\s+", "", code).encode()
+    return hashlib.sha256(normalized).hexdigest() == "01629b9bbbfc270c358f8dd22320e194ffdc0beb41a045d8eb3e02856be544e0"
+
+
 def _check_shim_sources(shim: Path, scanned_dirs: tuple[Path, ...], found: list[str]) -> ShimScan:
     blocks: dict[tuple[str, int], UnsafeBlock] = {}
     scans: dict[str, tuple[Scan, tuple[Attribute, ...]]] = {}
@@ -947,6 +954,39 @@ def _check_shim_sources(shim: Path, scanned_dirs: tuple[Path, ...], found: list[
                 guards = _outer_attributes_before(code, attributes, declaration.start())
                 if declaration.group("visibility") or "cfg(test)" not in guards:
                     found.append(f"{label}: ADR-131 control_fixture must be a private cfg(test) module")
+        # The termination authority is confined to one test-only reviewed file.
+        # Hashing masked, whitespace-free source makes any semantic change to
+        # that narrow primitive require an explicit policy review and update.
+        fault_file = "src/ffi/process_fault.rs"
+        if relative == fault_file:
+            if "cfg(test)" not in leading:
+                found.append(f"{label}: process fault helper requires file-scope cfg(test)")
+            if not _reviewed_fault_code(code):
+                found.append(f"{label}: process fault implementation differs from the reviewed fixed authority")
+        else:
+            for authority in re.finditer(r"(?<!\w)(?:TerminateProcess|PROCESS_TERMINATE|GetProcessInfos|GetExitCodeProcess)(?!\w)", code):
+                found.append(f"{label}:{_line_of(code, authority.start())}: process fault authority belongs only in the test helper")
+        process_open = list(re.finditer(r"(?<!\w)OpenProcess\s*\(", code))
+        if relative == "src/ffi/process.rs":
+            expected_open = re.compile(r"OpenProcess\s*\(\s*PROCESS_QUERY_LIMITED_INFORMATION\s*,\s*false\s*,\s*pid\s*\)")
+            if len(process_open) != 1 or len(re.findall(r"(?<!\w)OpenProcess(?!\w)", code)) != 2 or not expected_open.search(code):
+                found.append(f"{label}: product process probe must use its fixed query-only OpenProcess")
+        elif relative != fault_file and process_open:
+            found.append(f"{label}: OpenProcess is confined to the fixed probe and fault helper")
+        if re.search(r"(?<!\w)(?:NtTerminateProcess|ZwTerminateProcess|LoadLibrary\w*)(?!\w)", code):
+            found.append(f"{label}: indirect process termination authority is forbidden")
+        if re.search(r"(?<!\w)GetProcAddress(?!\w)", code):
+            # The one pre-existing dynamic lookup resolves only DefWindowProcW.
+            lookup = re.compile(r'GetProcAddress\s*\(\s*module\s*,\s*PCSTR\s*\(\s*c"DefWindowProcW"\.as_ptr\(\)\.cast\(\)\s*\)\s*\)')
+            calls = list(re.finditer(r"(?<!\w)GetProcAddress\s*\(", code))
+            if relative != "src/ffi/window.rs" or len(calls) != 1 or len(re.findall(r"(?<!\w)GetProcAddress(?!\w)", code)) != 2 or not lookup.search(text):
+                found.append(f"{label}: dynamic lookup must remain the fixed DefWindowProcW lookup")
+        if relative == "src/ffi/mod.rs":
+            for declaration in MOD_DECLARATION.finditer(code):
+                if declaration.group("name") == "process_fault":
+                    guards = _outer_attributes_before(code, attributes, declaration.start())
+                    if declaration.group("visibility") or "cfg(test)" not in guards:
+                        found.append(f"{label}: process_fault must be a private cfg(test) module")
         if relative != "src/ffi/events/control_fixture.rs":
             for readback in re.finditer(r"(?:\.|::)\s*(Handled|State|Cancel|ProcessFailedKind)\s*\(", code):
                 found.append(f"{label}:{_line_of(code, readback.start())}: ADR-131 control readback belongs only in control_fixture")
@@ -996,7 +1036,105 @@ def _check_shim_sources(shim: Path, scanned_dirs: tuple[Path, ...], found: list[
                     found.append(f"{label}:{line}: unsafe block lacks // SAFETY:")
                 functions = tuple(name for name, begin, end in spans if begin < token.start() < end)
                 blocks[(relative, line)] = UnsafeBlock(relative, line, functions)
+    if "src/ffi/process_fault.rs" in scans:
+        _check_fault_authority(shim.parent.parent, scans, found)
     return ShimScan(blocks, scans)
+
+
+def _check_fault_authority(root: Path, scans: dict[str, tuple[Scan, tuple[Attribute, ...]]], found: list[str]) -> None:
+    asset = root / "crates/pos-owner-bridge/assets/qualification/pending.html"
+    try:
+        asset_digest = hashlib.sha256(asset.read_bytes()).hexdigest()
+    except OSError:
+        asset_digest = ""
+    if asset_digest != "592560cb9ec82f5a93945c0b04ec6ed38b5bf78215eca0dad8eb9730c2918479":
+        found.append(f"{asset.relative_to(root).as_posix()}: process fault topology requires the reviewed no-frame asset")
+    catalogue = root / "crates/pos-owner-bridge/src/listener/fixtures.rs"
+    responses = root / "crates/pos-owner-bridge/src/listener/fixture_assets.rs"
+    try:
+        catalogue_code = scan(catalogue.read_text()).code
+        response_text = responses.read_text()
+    except OSError:
+        catalogue_code, response_text = "", ""
+    if not re.search(r"Self\s*::\s*Pending\s*=>\s*&\s*fixture_assets\s*::\s*PENDING", catalogue_code):
+        found.append(f"{catalogue.relative_to(root).as_posix()}: process fault must select the sealed Pending response")
+    if not re.search(r'const\s+PENDING\s*:\s*Response\s*=\s*Response\s*\{\s*body\s*:\s*include_bytes!\(\s*"\.\./\.\./assets/qualification/pending\.html"\s*\)', response_text):
+        found.append(f"{responses.relative_to(root).as_posix()}: Pending response must embed the reviewed asset")
+    ffi_parent = scans.get("src/ffi/mod.rs")
+    ffi_code = ffi_parent[0].code if ffi_parent else ""
+    declarations = [match for match in MOD_DECLARATION.finditer(ffi_code) if match.group("name") == "process_fault"]
+    if len(declarations) != 1:
+        found.append(f"{SHIM}/src/ffi/mod.rs: process fault helper must have exactly one private cfg(test) declaration")
+    test_parent = scans.get("src/adapter/native_tests.rs")
+    test_code = test_parent[0].code if test_parent else ""
+    if len([match for match in MOD_DECLARATION.finditer(test_code) if match.group("name") == "process_fault"]) != 1:
+        found.append(f"{SHIM}/src/adapter/native_tests.rs: process fault fixture declaration is missing or ambiguous")
+    root_item = scans.get("src/lib.rs")
+    root_code = root_item[0].code if root_item else ""
+    wrappers = list(re.finditer(r"(?<!\w)fn\s+native_verified_owned_process_faults_retire\s*\(", root_code))
+    if len(wrappers) != 1:
+        found.append(f"{SHIM}/src/lib.rs: process fault hosted test is missing or ambiguous")
+    else:
+        opening = root_code.find("{", wrappers[0].end())
+        body = root_code[opening:_matching_brace(root_code, opening) + 1] if opening >= 0 else ""
+        if re.sub(r"\s+", "", body) != "{crate::Native::native_verified_owned_process_faults_retire()}":
+            found.append(f"{SHIM}/src/lib.rs: process fault hosted test must call the real fixture")
+    retirement = scans.get("src/adapter/native_tests/retirement.rs")
+    retirement_code = retirement[0].code if retirement else ""
+    if hashlib.sha256(re.sub(r"\s+", "", retirement_code).encode()).hexdigest() != "27dc83f227c3815086a893f4deaaa9a5a5d9e9c994428469b1be6a7790f8bbfa":
+        found.append(f"{SHIM}/src/adapter/native_tests/retirement.rs: shared retirement differs from reviewed code")
+    if len([match for match in MOD_DECLARATION.finditer(test_code) if match.group("name") == "retirement"]) != 1:
+        found.append(f"{SHIM}/src/adapter/native_tests.rs: shared retirement declaration is missing or ambiguous")
+    type_start = root_code.find("pub(crate) enum ProcessFaultTarget")
+    type_end = root_code.find("pub(crate) trait NativeOperations", type_start) if type_start >= 0 else -1
+    types = root_code[type_start:type_end] if type_end >= 0 else ""
+    if hashlib.sha256(re.sub(r"\s+", "", types).encode()).hexdigest() != "aca99e152105d3a4ddeadeeb709579cfdddfb32bac641c165cffdbf55ee0cc89":
+        found.append(f"{SHIM}/src/lib.rs: process fault capability types differ from reviewed test-only code")
+    elif "cfg(test)" not in _outer_attributes_before(root_code, root_item[1], type_start):
+        found.append(f"{SHIM}/src/lib.rs: process fault capability types require cfg(test)")
+    # The seal is created only by the declared sealed-asset native fixture;
+    # these fixed boundaries prevent bypassing lifecycle/identity checks.
+    specifications = (
+        ("src/ffi/session.rs", "fault_owners_retained", "eccda5bd1bc5847953133394e934a30276c539d09fa2842f0e3ad42722556f69"),
+        ("src/adapter/surface/mod.rs", "fault_owners_retained", "23e6c92ae1dfe2ef9ccf05f2640f3b77e05e6c47f97ab396951666e9748e2af2"),
+        ("src/ffi/session.rs", "inject_process_fault", "38016888d1dfc8370da65108b31e8099a06f15b851540567311472d002238197"),
+        ("src/adapter/surface/mod.rs", "posted_fault_state", "5531110237abd228ee71561b3c71494ae96aa1fd010173ad5f45bd23cb4a06e9"),
+        ("src/adapter/surface/mod.rs", "posted_fault_event", "9997eb9c0ff65871d2253e99fbe0cde02f599225d18c07e2dfc4c25e1c71d36f"),
+        ("src/adapter/surface/mod.rs", "inject_posted_fault", "e739161b3f331ba0c83ee45e52f979f5c3d4ad951976c9028abbed8bb67570e8"),
+    )
+    for relative, name, digest in specifications:
+        item = scans.get(relative)
+        code = item[0].code if item else ""
+        matches = list(re.finditer(rf"(?<!\w)fn\s+{name}\s*\(", code))
+        if len(matches) != 1:
+            found.append(f"{SHIM}/{relative}: process fault authority function {name} is missing or ambiguous")
+            continue
+        match = matches[0]
+        opening = code.find("{", match.end())
+        body = code[match.start():_matching_brace(code, opening) + 1] if opening >= 0 else ""
+        if hashlib.sha256(re.sub(r"\s+", "", body).encode()).hexdigest() != digest:
+            found.append(f"{SHIM}/{relative}: process fault authority function {name} differs from reviewed code")
+        if "cfg(test)" not in _outer_attributes_before(code, item[1], match.start()):
+            # A visibility modifier can occur between the attribute and fn.
+            modifiers = FUNCTION_MODIFIERS.search(code[:match.start()])
+            start = modifiers.start() if modifiers else match.start()
+            if "cfg(test)" not in _outer_attributes_before(code, item[1], start):
+                found.append(f"{SHIM}/{relative}: process fault authority function {name} requires cfg(test)")
+    relative = "src/adapter/surface/mod.rs"
+    item = scans.get(relative)
+    code = item[0].code if item else ""
+    start = code.find("pub(crate) struct FaultAuthority")
+    end = code.find("impl Surface", start) if start >= 0 else -1
+    authority = code[start:end] if end >= 0 else ""
+    if hashlib.sha256(re.sub(r"\s+", "", authority).encode()).hexdigest() != "1b591fd7be468c8aa610b1aa201bfb10fd797c98f104b836afecc0243485bf54":
+        found.append(f"{SHIM}/{relative}: process fault authority type differs from reviewed code")
+    elif "cfg(test)" not in _outer_attributes_before(code, item[1], start):
+        found.append(f"{SHIM}/{relative}: process fault authority type requires cfg(test)")
+    relative = "src/adapter/native_tests/process_fault.rs"
+    item = scans.get(relative)
+    code = item[0].code if item else ""
+    if hashlib.sha256(re.sub(r"\s+", "", code).encode()).hexdigest() != "da23ffaf74b5ad838d71052d59ad4a0a88cc82e2197917af14a358e7f5d93cb6":
+        found.append(f"{SHIM}/{relative}: process fault fixture differs from reviewed sealed caller")
 
 
 def _check_member_sources(root: Path, directory: Path, scanned_dirs: tuple[Path, ...], found: list[str]) -> None:

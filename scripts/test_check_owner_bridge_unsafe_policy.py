@@ -1358,6 +1358,93 @@ def test_control_observations_cannot_ship_in_product_builds() -> None:
         ])
 
 
+def test_owned_process_fault_authority() -> None:
+    path = ROOT / SHIM / "src/ffi/process_fault.rs"
+    original = path.read_text()
+    if not CHECKER._reviewed_fault_code(CHECKER.scan(original).code):
+        raise SystemExit("the reviewed process fault source is not admitted")
+    mutations = {
+        "arbitrary pid": ("let pid = select(&first, kind)?;", "let pid = 1234;"),
+        "extra rights": ("PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE,", "PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE | 0x400,"),
+        "wrong exit code": ("const FAULT_EXIT: u32 = 0x535;", "const FAULT_EXIT: u32 = 0;"),
+        "disabled authority": ("if !authority.valid()", "if false"),
+        "different source": ("candidates(environment)?", "other_candidates(environment)?"),
+        "indirect termination": ("TerminateProcess(handle, FAULT_EXIT)", "hidden(handle, FAULT_EXIT)"),
+        "membership gate suppressed": ("select(&second, kind)? != pid", "false"),
+        "fault call evidence suppressed": ("authority.record(crate::ProcessFaultMark::TerminationCall);", ""),
+        "selected process evidence suppressed": ("authority.record(crate::ProcessFaultMark::Selected(observed));", ""),
+    }
+    for name, (old, new) in mutations.items():
+        if old not in original:
+            raise SystemExit(f"missing adversarial mutation target: {name}")
+        changed = original.replace(old, new, 1)
+        if CHECKER._reviewed_fault_code(CHECKER.scan(changed).code):
+            raise SystemExit(f"process fault policy accepted {name}")
+    helper = f"{SHIM}/src/ffi/process_fault.rs"
+    for text in (original.replace("#![cfg(test)]", "", 1),):
+        found = fixture({helper: text})
+        if f"{helper}: process fault helper requires file-scope cfg(test)" not in found:
+            raise SystemExit(f"product fault helper was accepted: {found}")
+    parent = f"{SHIM}/src/ffi/mod.rs"
+    for declaration in ("mod process_fault;", "#[cfg(test)]\npub mod process_fault;"):
+        found = fixture({parent: CFG + declaration})
+        if f"{parent}: process_fault must be a private cfg(test) module" not in found:
+            raise SystemExit(f"product or exported fault module was accepted: {found}")
+    for api in ("TerminateProcess", "PROCESS_TERMINATE", "GetProcessInfos", "GetExitCodeProcess"):
+        source = CFG + f"fn forbidden() {{ {api}(); }}\n"
+        found = fixture({OPS: source})
+        message = at(OPS, 2, "process fault authority belongs only in the test helper")
+        if message not in found:
+            raise SystemExit(f"relocated fault authority {api} was accepted: {found}")
+    # Removing any recorded event or the pre-cleanup evidence gate changes
+    # the reviewed fixture and must be rejected even if the test still exists.
+    fixture_path = ROOT / SHIM / "src/adapter/native_tests/process_fault.rs"
+    fixture_source = fixture_path.read_text()
+    surface_path = ROOT / SHIM / "src/adapter/surface/mod.rs"
+    files = {
+        "src/ffi/session.rs": (ROOT / SHIM / "src/ffi/session.rs").read_text(),
+        "src/adapter/surface/mod.rs": surface_path.read_text(),
+        "src/adapter/native_tests/process_fault.rs": fixture_source,
+        "src/adapter/native_tests/retirement.rs": (ROOT / SHIM / "src/adapter/native_tests/retirement.rs").read_text(),
+    }
+    for old, new in (
+        ("ProcessFaultMark::ExitCode(code)", "ProcessFaultMark::TerminationCall"),
+        ("self.evidence_complete = true;", "self.evidence_complete = false;"),
+        (".posted_fault_event(target)", ".posted_fault_event(ProcessFaultTarget::Browser)"),
+    ):
+        if old not in fixture_source:
+            raise SystemExit(f"missing ordered-evidence mutation target: {old}")
+        changed = dict(files)
+        changed["src/adapter/native_tests/process_fault.rs"] = fixture_source.replace(old, new, 1)
+        scans = {}
+        for relative, text in changed.items():
+            scanned = CHECKER.scan(text)
+            scans[relative] = (scanned, CHECKER._attributes(scanned.code))
+        found = []
+        CHECKER._check_fault_authority(ROOT, scans, found)
+        if f"{SHIM}/src/adapter/native_tests/process_fault.rs: process fault fixture differs from reviewed sealed caller" not in found:
+            raise SystemExit(f"ordered evidence mutation was accepted: {old}: {found}")
+    # A removed module or an inert hosted test must not disable the gate.
+    found = fixture({helper: original})
+    if f"{SHIM}/src/ffi/mod.rs: process fault helper must have exactly one private cfg(test) declaration" not in found:
+        raise SystemExit(f"missing fault module declaration was accepted: {found}")
+    inert = SHIM_LIB + "#[cfg(test)]\n#[forbid(unsafe_code)]\nmod tests { #[test] fn native_verified_owned_process_faults_retire() { } }\n"
+    found = fixture({helper: original, LIB: inert})
+    expected = f"{LIB}: process fault hosted test must call the real fixture"
+    if expected not in found:
+        raise SystemExit(f"inert process fault test was accepted: {found}")
+    indirect = (
+        (OPS, "fn f() { OpenProcess(1, false, 7); }", "OpenProcess is confined to the fixed probe and fault helper"),
+        (OPS, "fn f() { LoadLibraryW(); }", "indirect process termination authority is forbidden"),
+        (OPS, "fn f() { GetProcAddress(); }", "dynamic lookup must remain the fixed DefWindowProcW lookup"),
+        (f"{SHIM}/src/ffi/process.rs", "use x::OpenProcess; fn f() { OpenProcess(1, false, 7); }", "product process probe must use its fixed query-only OpenProcess"),
+    )
+    for source_path, statement, expected in indirect:
+        found = fixture({source_path: CFG + statement + "\n"})
+        if f"{source_path}: {expected}" not in found:
+            raise SystemExit(f"indirect authority was accepted: {statement}: {found}")
+
+
 def main() -> None:
     test_masker()
     test_accepted()
@@ -1371,6 +1458,7 @@ def main() -> None:
     test_cli()
     test_forbidden_webview_authority()
     test_control_observations_cannot_ship_in_product_builds()
+    test_owned_process_fault_authority()
     test_windows_case_insensitive_source_suffix_cannot_hide_code()
     test_hardening()
     test_symlinks()
