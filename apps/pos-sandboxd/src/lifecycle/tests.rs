@@ -5,11 +5,34 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::time::Duration;
 
 use super::*;
-use crate::root_attachment::{attached_fixture_root, fake_root_release, FakeRootRelease};
+use crate::root_attachment::{attached_fixture_root, release_fake_root};
 use crate::system_bus::{TeardownFixture, TeardownReset, TeardownStop};
 use crate::{PlannedAttemptIntent, SystemdAttemptRegistry};
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
+/// A fixture root released through the controller's root port.
+struct FakeRootRelease(crate::root_attachment::FakeRootRelease);
+
+impl RootRelease for FakeRootRelease {
+    fn release(
+        self,
+        directory: &PreparedAttemptDirectory,
+        deadline: Instant,
+    ) -> impl Future<Output = Result<ReleasedAttemptRoot, ImageActivationError>> + Send + '_ {
+        release_fake_root(self.0, directory, deadline)
+    }
+}
+
+/// A fake root release; unless `absent`, the device-absence probe fails.
+fn fake_root_release(
+    directory: &PreparedAttemptDirectory,
+    absent: bool,
+) -> TestResult<FakeRootRelease> {
+    Ok(FakeRootRelease(crate::root_attachment::fake_root_release(
+        directory, absent,
+    )?))
+}
 
 /// One prepared attempt keyed by `[1; 16]` in a private runtime tree.
 struct Attempt {
