@@ -46,12 +46,13 @@ impl PreparedAttemptDirectory {
     /// The supplied evidence must already cover the earlier ADR-087 §3 steps:
     /// `unit` proves that the exact unit cannot hold processes, and `root`
     /// proves detachment and original loop/dm absence of the single root
-    /// activated on this tree. A tree on which no activation began needs no
-    /// root evidence; a tree with more than one activation, or one activation
-    /// without its released root, is refused. Under registry ownership, this
-    /// then verifies the exact record and unmounted tree, removes the root and
-    /// attempt directories while synchronizing each held parent, reads the
-    /// exact record back, unlinks it and synchronizes the registry parent.
+    /// activated on this tree. A tree on which no activation reached mountfsd
+    /// needs no root evidence; a tree with more than one such activation, or
+    /// one activation without its released root, is refused. Under registry
+    /// ownership, this then verifies the exact record and unmounted tree,
+    /// removes the root and attempt directories while synchronizing each held
+    /// parent, reads the exact record back, unlinks it and synchronizes the
+    /// registry parent.
     ///
     /// The lifecycle controller must retain exclusive attempt ownership and
     /// obtain both observations before calling. A quarantined owner may finish
@@ -96,13 +97,19 @@ impl PreparedAttemptDirectory {
             AttemptUnitTermination::Unclaimed => self.execution.claim().is_ok(),
             AttemptUnitTermination::Stopped(observed) => {
                 self.execution.close();
-                // Teardown takes both observations' name from one bound cgroup.
-                observed.unit_absence().unit_name() == name
+                // Teardown takes both observations' name from one bound
+                // cgroup; each must still name this attempt's exact unit.
+                (
+                    observed.unit_absence().unit_name(),
+                    observed.cgroup_empty().unit_name(),
+                ) == (name, name)
             }
         };
         let activations = self.activations.load(Ordering::Acquire);
+        // Released-root evidence exists only after an activation reached
+        // mountfsd, so it is accepted for exactly one activation.
         let root_released = root.map_or(activations == 0, |released| {
-            activations <= 1 && released.owner() == &self.execution
+            activations == 1 && released.owner() == &self.execution
         });
         (unit_ended && root_released)
             .then_some(())
