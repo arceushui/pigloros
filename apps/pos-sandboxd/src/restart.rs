@@ -77,9 +77,10 @@ impl ReconciledRestart {
 /// provider image.
 ///
 /// Only restart reconciliation's device proof creates it, so registry removal
-/// cannot be handed released-root evidence that no probe produced.
+/// cannot be handed released-root evidence that no probe produced. It has no
+/// public constructor and grants nothing by itself.
 #[derive(Debug)]
-pub(super) struct RootsReleased(Vec<[u8; 16]>);
+pub struct RootsReleased(Vec<[u8; 16]>);
 
 impl RootsReleased {
     /// Whether the recorded root of `attempt_id` was observed released.
