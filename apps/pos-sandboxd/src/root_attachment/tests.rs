@@ -87,19 +87,21 @@ pub(crate) struct FakeRootRelease {
     root: VerifiedRootMount,
 }
 
-impl crate::lifecycle::RootRelease for FakeRootRelease {
-    fn release(
-        self,
-        directory: &PreparedAttemptDirectory,
-        deadline: tokio::time::Instant,
-    ) -> impl Future<Output = Result<ReleasedAttemptRoot, ImageActivationError>> + Send + '_ {
-        async move {
-            let released = super::release::Release::new(self.root, directory, deadline)
-                .finish(&self.kernel)
-                .await;
-            released
-        }
-    }
+/// Detach the fake root and observe its fake devices, for the lifecycle
+/// controller's root port.
+///
+/// # Errors
+/// Returns the release's error.
+pub(crate) async fn release_fake_root(
+    fake: FakeRootRelease,
+    directory: &PreparedAttemptDirectory,
+    deadline: tokio::time::Instant,
+) -> Result<ReleasedAttemptRoot, ImageActivationError> {
+    let FakeRootRelease { kernel, root } = fake;
+    let released = super::release::Release::new(root, directory, deadline)
+        .finish(&kernel)
+        .await;
+    released
 }
 
 /// A fake root release; unless `absent`, the device-absence probe fails.
