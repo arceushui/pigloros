@@ -8,27 +8,31 @@ use serde_json::Value;
 use crate::bundle::Refusal;
 use crate::provenance::nonempty;
 
-fn validator() -> &'static jsonschema::Validator {
-    static VALIDATOR: OnceLock<jsonschema::Validator> = OnceLock::new();
-    VALIDATOR.get_or_init(|| {
-        // Immutable, attributed SPDX 2.3.1 source, independently digest-pinned
-        // by the public fixtures. No Plugin-provided schema is compiled here.
-        let schema: Value =
-            serde_json::from_slice(include_bytes!("../resources/spdx-schema-2.3.1.json"))
-                .expect("the pinned SPDX schema is JSON");
-        jsonschema::draft201909::options()
-            .with_retriever(super::schema::Offline)
-            .should_validate_formats(true)
-            .build(&schema)
-            .expect("the pinned SPDX schema compiles offline")
-    })
+fn validator() -> Result<&'static jsonschema::Validator, Refusal> {
+    static VALIDATOR: OnceLock<Option<jsonschema::Validator>> = OnceLock::new();
+    VALIDATOR
+        .get_or_init(|| {
+            // Immutable, attributed SPDX 2.3.1 source, independently digest-pinned
+            // by the public fixtures. No Plugin-provided schema is compiled here.
+            serde_json::from_slice::<Value>(include_bytes!("../resources/spdx-schema-2.3.1.json"))
+                .ok()
+                .and_then(|schema| {
+                    jsonschema::draft201909::options()
+                        .with_retriever(super::schema::Offline)
+                        .should_validate_formats(true)
+                        .build(&schema)
+                        .ok()
+                })
+        })
+        .as_ref()
+        .ok_or(Refusal::Malformed)
 }
 
-pub(super) fn validate(value: &Value, component: &str) -> Result<(), Refusal> {
+pub fn validate(value: &Value, component: &str) -> Result<(), Refusal> {
     if nonempty(value.get("spdxVersion"))? != "SPDX-2.3" {
         return Err(Refusal::UnsupportedFormat);
     }
-    if !validator().is_valid(value)
+    if !validator()?.is_valid(value)
         || value.get("SPDXID").and_then(Value::as_str) != Some("SPDXRef-DOCUMENT")
         || value.get("dataLicense").and_then(Value::as_str) != Some("CC0-1.0")
     {
@@ -164,11 +168,9 @@ fn licences(value: &Value, external: &BTreeSet<&str>) -> Result<(), Refusal> {
                 "licenseInfoInSnippets",
             ] {
                 if let Some(metadata) = element.get(field) {
-                    let texts: Vec<_> = if let Some(array) = metadata.as_array() {
-                        array.iter().collect()
-                    } else {
-                        vec![metadata]
-                    };
+                    let texts: Vec<_> = metadata
+                        .as_array()
+                        .map_or_else(|| vec![metadata], |array| array.iter().collect());
                     for text in texts {
                         for token in nonempty(Some(text))?
                             .split(|c: char| !(c.is_ascii_alphanumeric() || "-.:".contains(c)))

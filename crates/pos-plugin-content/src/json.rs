@@ -21,16 +21,16 @@ struct Node<'a> {
     depth: usize,
 }
 
-pub(super) fn read(bytes: &[u8]) -> Result<Value, Refusal> {
+pub fn read(bytes: &[u8]) -> Result<Value, Refusal> {
     let mut budget = Budget::default();
     let mut decoder = serde_json::Deserializer::from_slice(bytes);
-    let decoded = Node {
+    let outcome = Node {
         budget: &mut budget,
         depth: 0,
     }
     .deserialize(&mut decoder)
     .and_then(|value| decoder.end().map(|()| value));
-    decoded.map_err(|_| {
+    outcome.map_err(|_| {
         if budget.exceeded {
             Refusal::BoundsExceeded
         } else {
@@ -72,9 +72,9 @@ impl<'de> Visitor<'de> for Node<'_> {
     }
 
     fn visit_f64<E: de::Error>(self, value: f64) -> Result<Value, E> {
-        Ok(Value::Number(
-            Number::from_f64(value).expect("JSON numbers are finite"),
-        ))
+        Number::from_f64(value)
+            .map(Value::Number)
+            .ok_or_else(|| de::Error::custom("non-finite JSON number"))
     }
 
     fn visit_str<E: de::Error>(self, value: &str) -> Result<Value, E> {

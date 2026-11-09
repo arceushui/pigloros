@@ -18,15 +18,16 @@ impl From<PluginWitContentErrorV1> for Refusal {
     }
 }
 
-pub(super) fn validate(bundle: &VerifiedReleaseBundleV1) -> Result<(), Error> {
+pub fn validate(bundle: &VerifiedReleaseBundleV1) -> Result<(), Error> {
     // Complete PMF1 validation has established the exact semantic member order,
     // required member presence, list bounds, dual digests and content sizes.
     let component = &bundle.members()[1].digest()[7..];
-    let wit = bundle
-        .member_bytes()
-        .nth(2)
-        .expect("validated PMF1 has WIT");
-    validate_plugin_wit_v1(wit).map_err(|error| Refusal::from(error).at(Artifact::Wit))?;
+    for (member, bytes) in bundle.members().iter().zip(bundle.member_bytes()) {
+        if member.member() == "wit" {
+            validate_plugin_wit_v1(bytes)
+                .map_err(|error| Refusal::from(error).at(Artifact::Wit))?;
+        }
+    }
 
     let mut documents = Vec::new();
     let mut index = 0_u16;

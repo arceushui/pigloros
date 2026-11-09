@@ -11,7 +11,7 @@ const DIALECT: &str = "https://json-schema.org/draft/2020-12/schema";
 const MAX_IDENTIFIERS: usize = 65_536;
 const MAX_REFERENCES: usize = 65_536;
 
-pub(super) struct Offline;
+pub struct Offline;
 
 impl Retrieve for Offline {
     fn retrieve(&self, _: &Uri<String>) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
@@ -19,7 +19,7 @@ impl Retrieve for Offline {
     }
 }
 
-pub(super) struct Document {
+pub struct Document {
     pub(super) index: u16,
     pub(super) base: Uri<String>,
     pub(super) value: Value,
@@ -38,7 +38,7 @@ impl Document {
             return Err(Refusal::Malformed);
         }
         let base = uri::from_str(&format!("urn:pigloros:plugin-schema:sha256:{digest}"))
-            .expect("the validated SHA-256 produces a fixed absolute URI");
+            .map_err(|_| Refusal::Malformed)?;
         Ok(Self { index, base, value })
     }
 }
@@ -146,7 +146,7 @@ impl Index {
     }
 }
 
-pub(super) fn validate(documents: &[Document]) -> Result<(), (u16, Refusal)> {
+pub fn validate(documents: &[Document]) -> Result<(), (u16, Refusal)> {
     let mut index = Index::default();
     let mut registry = Registry::new().draft(Draft::Draft202012).retriever(Offline);
     for document in documents {

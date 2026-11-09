@@ -317,7 +317,7 @@ fn spdx_schema_is_the_exact_attributed_upstream_resource() {
     use sha2::{Digest as _, Sha256};
     let schema = include_bytes!("../resources/spdx-schema-2.3.1.json");
     assert_eq!(
-        format!("{:x}", Sha256::digest(schema)),
+        fixture::hex(&Sha256::digest(schema)),
         "4126dc29f15e92feec92e9622f4939131ad58b125d6f578aa93e980a6e6f3212"
     );
 }

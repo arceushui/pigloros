@@ -49,7 +49,7 @@ pub enum PluginBundleContentErrorV1 {
 }
 
 #[derive(Clone, Copy)]
-pub(super) enum Refusal {
+pub enum Refusal {
     BoundsExceeded,
     UnsupportedFormat,
     Malformed,
@@ -102,7 +102,7 @@ impl ValidatedPluginBundleContentV1 {
     }
 }
 
-/// Check every required artifact using the fixed offline BasicPackageV1 rule.
+/// Check every required artifact using the fixed offline `BasicPackageV1` rule.
 ///
 /// Complete PMF1 validation precedes WIT, schemas in closure order, provenance,
 /// SBOM and licences in closure order. No retrieval, extraction, clock, guest
