@@ -258,7 +258,7 @@ impl ExpectedNamespace {
         let mut output = vec![
             FirewallRule::SendNeighbourDiscovery {
                 destination: SOLICITED_NODE,
-                length: 16,
+                length: 104,
             },
             FirewallRule::SendNeighbourDiscovery {
                 destination: addresses.ipv6,
@@ -296,25 +296,26 @@ impl ExpectedNamespace {
     }
 }
 
-/// The link-scope multicast network that holds every solicited-node address.
-const SOLICITED_NODE: Ipv6Addr = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 0);
+/// The solicited-node multicast network `ff02::1:ff00:0/104`, to which the
+/// namespace sends its neighbour solicitations.
+const SOLICITED_NODE: Ipv6Addr = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 1, 0xff00, 0);
 
 /// Whether `endpoint` is a unicast address and nonzero port a route through
 /// the host end can reach.
+///
+/// IPv4 refuses `0.0.0.0/8` ("this network"), loopback, link-local,
+/// multicast, and `240.0.0.0/4` with the broadcast address. IPv6 refuses
+/// `::/96`, which holds the unspecified, loopback and deprecated
+/// IPv4-compatible addresses, link-local unicast and multicast.
 const fn reachable(endpoint: &SocketAddr) -> bool {
     let unicast = match endpoint.ip() {
         IpAddr::V4(address) => {
-            !(address.is_loopback()
-                || address.is_unspecified()
-                || address.is_multicast()
-                || address.is_broadcast()
-                || address.is_link_local())
+            let first = address.octets()[0];
+            first != 0 && first < 224 && !(address.is_loopback() || address.is_link_local())
         }
         IpAddr::V6(address) => {
-            !(address.is_loopback()
-                || address.is_unspecified()
-                || address.is_multicast()
-                || address.is_unicast_link_local())
+            address.to_bits() >> 32 != 0
+                && !(address.is_multicast() || address.is_unicast_link_local())
         }
     };
     unicast && endpoint.port() != 0

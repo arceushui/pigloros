@@ -166,8 +166,8 @@ fn only_the_endpoints_are_routed_and_allowed() -> TestResult {
                 base: drop(FirewallHook::Output),
                 rules: vec![
                     FirewallRule::SendNeighbourDiscovery {
-                        destination: v6(0xff02, 0, 0),
-                        length: 16,
+                        destination: SOLICITED_NODE,
+                        length: 104,
                     },
                     FirewallRule::SendNeighbourDiscovery {
                         destination: v6(0xfd00, 0x77, 0),
@@ -193,8 +193,8 @@ fn an_attempt_without_endpoints_reaches_nothing() -> TestResult {
         expected.chains[2].rules,
         [
             FirewallRule::SendNeighbourDiscovery {
-                destination: v6(0xff02, 0, 0),
-                length: 16,
+                destination: SOLICITED_NODE,
+                length: 104,
             },
             FirewallRule::SendNeighbourDiscovery {
                 destination: v6(0xfd00, 0x77, 2),
@@ -221,6 +221,10 @@ fn the_highest_slot_name_fits_an_interface_name() -> TestResult {
     let range = NetworkRange::new(v4(10, 0, 0, 0), 14, v6(0xfd00, 0, 0), 111)?;
     assert_eq!(range.slots(), 65_536);
     let expected = ExpectedNamespace::for_attempt(ATTEMPT, &range, u16::MAX, &[])?;
+    assert_eq!(
+        expected.host_addresses[0],
+        on(IpAddr::V4(v4(10, 3, 255, 253)), 30)
+    );
     assert_eq!(expected.inner_link, LinkName::new("piglor-n65535")?);
     assert_eq!(expected.host_link, LinkName::new("piglor-h65535")?);
     assert_eq!(
@@ -372,9 +376,15 @@ fn endpoints_at_the_range_edges_are_refused() -> TestResult {
             "{endpoint}"
         );
     }
+    let below_ipv6 = Ipv6Addr::new(0xfd00, 0x76, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff);
     for endpoint in [
         SocketAddr::new(IpAddr::V4(v4(10, 76, 255, 255)), 80),
         SocketAddr::new(IpAddr::V6(v6(0xfd00, 0x76, 0xffff)), 80),
+        // Adjacent to the range: just below its first and above its last
+        // address.
+        SocketAddr::new(IpAddr::V6(below_ipv6), 80),
+        SocketAddr::new(IpAddr::V4(v4(10, 77, 1, 0)), 80),
+        SocketAddr::new(IpAddr::V6(v6(0xfd00, 0x77, 0x100)), 80),
     ] {
         assert!(ExpectedNamespace::for_attempt(ATTEMPT, &range, 0, &[endpoint]).is_ok());
     }
@@ -414,10 +424,36 @@ fn unreachable_endpoints_are_refused() -> TestResult {
         SocketAddr::new(IpAddr::V6(v6(0xfd12, 0, 5)), 0),
         // A mapped loopback address is loopback.
         SocketAddr::new(IpAddr::V6(Ipv4Addr::LOCALHOST.to_ipv6_mapped()), 80),
+        // "This network", reserved space and IPv4-compatible IPv6.
+        SocketAddr::new(IpAddr::V4(v4(0, 1, 2, 3)), 80),
+        SocketAddr::new(IpAddr::V4(v4(240, 0, 0, 1)), 80),
+        SocketAddr::new(IpAddr::V4(v4(255, 255, 255, 254)), 80),
+        SocketAddr::new(IpAddr::V6(v4(192, 168, 1, 10).to_ipv6_compatible()), 80),
     ] {
         assert_eq!(
             ExpectedNamespace::for_attempt(ATTEMPT, &range, 0, &[endpoint]),
             Err(NetworkPlanError::Endpoint),
+            "{endpoint}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn unicast_neighbours_of_refused_blocks_are_reachable() -> TestResult {
+    let range = range()?;
+    for endpoint in [
+        SocketAddr::new(IpAddr::V4(v4(1, 0, 0, 0)), 80),
+        SocketAddr::new(IpAddr::V4(v4(223, 255, 255, 255)), 80),
+        SocketAddr::new(IpAddr::V4(v4(126, 255, 255, 255)), 80),
+        SocketAddr::new(IpAddr::V4(v4(169, 253, 255, 255)), 80),
+        // The first address above `::/96`.
+        SocketAddr::new(IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 1, 0, 0)), 80),
+        SocketAddr::new(IpAddr::V6(v6(0xfe7f, 0, 1)), 80),
+        SocketAddr::new(IpAddr::V6(v6(0xfec0, 0, 1)), 80),
+    ] {
+        assert!(
+            ExpectedNamespace::for_attempt(ATTEMPT, &range, 0, &[endpoint]).is_ok(),
             "{endpoint}"
         );
     }
