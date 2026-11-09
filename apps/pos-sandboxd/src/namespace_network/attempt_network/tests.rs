@@ -181,21 +181,26 @@ fn range(ipv4_length: u8, ipv6_length: u8) -> TestResult<NetworkRange> {
 const ENDPOINT: SocketAddr =
     SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)), 443);
 
-/// A network over `control` and `egress`, which share one journal, whose
-/// namespaces are pinned in `directory`.
+/// A network over fakes, with the journal they share.
+type FakeNetwork = (
+    NamespacedLocalNetwork<FakeControl, FakeEgress>,
+    Arc<Mutex<Journal>>,
+);
+
+/// A network over `control` and an egress refusing as `egress` does, which
+/// share one journal, whose namespaces are pinned in `directory`.
 fn network_with(
     directory: &std::path::Path,
     control: FakeControl,
-    egress: FakeEgress,
+    egress: &FakeEgress,
     ipv4_length: u8,
-) -> TestResult<(
-    NamespacedLocalNetwork<FakeControl, FakeEgress>,
-    Arc<Mutex<Journal>>,
-)> {
+) -> TestResult<FakeNetwork> {
     let journal = Arc::clone(&control.journal);
     let egress = FakeEgress {
         journal: Arc::clone(&journal),
-        ..egress
+        refuse_admission: egress.refuse_admission,
+        refuse_install: egress.refuse_install,
+        refuse_removal: egress.refuse_removal,
     };
     Ok((
         NamespacedLocalNetwork::new(
@@ -213,11 +218,8 @@ fn network(
     directory: &std::path::Path,
     control: FakeControl,
     ipv4_length: u8,
-) -> TestResult<(
-    NamespacedLocalNetwork<FakeControl, FakeEgress>,
-    Arc<Mutex<Journal>>,
-)> {
-    network_with(directory, control, FakeEgress::default(), ipv4_length)
+) -> TestResult<FakeNetwork> {
+    network_with(directory, control, &FakeEgress::default(), ipv4_length)
 }
 
 /// A kernel that pins every namespace it installs in `directory`.
@@ -368,7 +370,7 @@ fn refused_egress_establishes_nothing_and_a_failed_egress_removal_quarantines() 
         ..FakeEgress::default()
     };
     let (refusing, journal) =
-        network_with(directory.path(), pinning(directory.path()), unadmitted, 24)?;
+        network_with(directory.path(), pinning(directory.path()), &unadmitted, 24)?;
     let refused = refusing.establish([1; 16], &[ENDPOINT]).map(drop);
     // Nothing was installed for an endpoint the host cannot reach.
     assert!(matches!(refused, Err(AttemptNetworkError::Egress(_))));
@@ -395,7 +397,12 @@ fn refused_egress_establishes_nothing_and_a_failed_egress_removal_quarantines() 
         refuse_removal: true,
         ..FakeEgress::default()
     };
-    let (stuck, _) = network_with(directory.path(), pinning(directory.path()), unremovable, 24)?;
+    let (stuck, _) = network_with(
+        directory.path(),
+        pinning(directory.path()),
+        &unremovable,
+        24,
+    )?;
     drop(stuck.establish([3; 16], &[ENDPOINT])?);
     assert!(matches!(
         stuck.establish([4; 16], &[ENDPOINT]),
@@ -624,7 +631,7 @@ mod privileged {
         let network = NamespacedLocalNetwork::new(
             control.clone(),
             HostEgress::new(),
-            namespaces.clone(),
+            namespaces,
             range(24, 120)?,
         );
         let outcome = network.connector([7; 16], &[TARGET]).map(|mut connector| {

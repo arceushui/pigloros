@@ -287,7 +287,7 @@ fn other_tables_are_not_read_and_an_absent_table_reads_as_none() -> TestResult {
 }
 
 #[test]
-fn unrepresentable_or_foreign_replies_fail_the_read() -> TestResult {
+fn unrepresentable_or_foreign_replies_fail_the_read() {
     let ours = || {
         inet(NfTablesMessage::NewTable(TableMessage {
             attributes: vec![TableAttribute::Name(HOST_TABLE.to_owned())],
@@ -342,7 +342,6 @@ fn unrepresentable_or_foreign_replies_fail_the_read() -> TestResult {
     for failure in failures {
         assert!(failure.is_err(), "{failure:?}");
     }
-    Ok(())
 }
 
 #[test]
