@@ -223,14 +223,29 @@ mod cases {
     }
 
     #[test]
-    fn a_closed_exhausted_or_poisoned_owner_records_no_request() -> TestResult {
-        for fault in 0..3 {
+    fn a_closed_owner_still_records_the_request_and_stays_closed() -> TestResult {
+        let runtime = runtime()?;
+        let registry = open_registry(runtime.path())?;
+        let prepared = prepared(&registry)?;
+        registry.state.lock().map_err(|_| "owner")?.failed = true;
+        prepared.record_activation_request()?;
+        assert_eq!(read_marker(runtime.path())?.boot, boot_instant()?.0);
+        assert!(registry.commit_planned(&intent(2)?).is_err());
+        // A failed write on a closed owner leaves it closed.
+        let (failed, _) = with_io_fault(Some(0), || prepared.record_activation_request());
+        assert!(failed.is_err());
+        assert!(registry.commit_planned(&intent(2)?).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn an_exhausted_or_poisoned_owner_records_no_request() -> TestResult {
+        for fault in 0..2 {
             let runtime = runtime()?;
             let registry = open_registry(runtime.path())?;
             let prepared = prepared(&registry)?;
             match fault {
-                0 => registry.state.lock().map_err(|_| "owner")?.failed = true,
-                1 => registry.state.lock().map_err(|_| "owner")?.next_sequence = u64::MAX,
+                0 => registry.state.lock().map_err(|_| "owner")?.next_sequence = u64::MAX,
                 _ => assert!(std::panic::catch_unwind(|| {
                     let _guard = registry.state.lock();
                     std::panic::resume_unwind(Box::new(()));

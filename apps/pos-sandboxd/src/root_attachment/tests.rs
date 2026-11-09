@@ -1685,9 +1685,10 @@ async fn the_admitted_chain_reaches_attachment_only_through_every_gate() -> Test
     assert_eq!(kernel.detached(), 2);
     peer.join().map_err(|_| "the fake mountfsd panicked")??;
 
-    // A closed registry owner cannot record the request, so it is refused
-    // before it is sent.
-    prepared.quarantine();
+    // A marker that cannot be replaced refuses the request before it is sent.
+    let marker = Path::new("/run/pigloros/sandbox/registry/activation");
+    fs::remove_file(marker)?;
+    fs::create_dir(marker)?;
     assert_eq!(
         activate(&kernel, &admission, &prepared, || std::future::ready(Ok(
             RejectingActivator
