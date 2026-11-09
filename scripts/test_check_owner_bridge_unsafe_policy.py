@@ -1561,6 +1561,28 @@ def test_owned_process_fault_authority() -> None:
         CHECKER._check_fault_authority(ROOT, scans, found)
         if f"{SHIM}/{root_path}: {expected}" not in found:
             raise SystemExit(f"fixture provenance bypass accepted: {old}: {found}")
+    # Both refusal probes must use the real Surface and preserve its retained
+    # folder, window, ceremony and pre-buffer state around the attempt.
+    for relative, old, new, expected in (
+        ("src/adapter/native_tests/process_fault.rs", "fixture.pre_environment_competitor_blocked(", "fixture.discard_competitor_check(", "process fault fixture differs from reviewed sealed caller"),
+        ("src/adapter/surface/mod.rs", "!self.native.window().ok()?.exists", "false", "process fault authority function pre_environment_retention differs from reviewed code"),
+        ("src/adapter/surface/mod.rs", "opening != spec || self.failed_open", "false", "competing-admission observation open differs from reviewed code"),
+        ("src/ffi/session.rs", "self.window_ref()?.snapshot()", "unavailable_window()", "competing-admission observation window differs from reviewed code"),
+        ("src/ffi/window.rs", "IsWindow(Some(self.hwnd))", "IsWindow(None)", "competing-admission observation snapshot differs from reviewed code"),
+    ):
+        changed = dict(files)
+        source = (ROOT / SHIM / relative).read_text()
+        if old not in source:
+            raise SystemExit(f"missing competing-admission mutation target: {old}")
+        changed[relative] = source.replace(old, new, 1)
+        scans = {}
+        for item, text in changed.items():
+            scanned = CHECKER.scan(text)
+            scans[item] = (scanned, CHECKER._attributes(scanned.code))
+        found = []
+        CHECKER._check_fault_authority(ROOT, scans, found)
+        if f"{SHIM}/{relative}: {expected}" not in found:
+            raise SystemExit(f"competing-admission witness bypass accepted: {old}: {found}")
     # The source-controlled owned-folder obstruction must remain a new,
     # fixed child file; comments cannot stand in for the actual literal.
     obstruction_path = "src/adapter/native_tests/process_fault/obstruction.rs"
