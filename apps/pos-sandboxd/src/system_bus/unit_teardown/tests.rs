@@ -247,6 +247,9 @@ pub(super) mod cases {
         ///
         /// # Errors
         /// Returns a fixture setup failure.
+        ///
+        /// # Panics
+        /// Panics if the transport did not subscribe to manager signals.
         pub async fn new(id: u8, stop: Stop, reset: Reset) -> TestResult<Self> {
             let root = tempfile::tempdir()?;
             let directory = root.path().join("attempt");
