@@ -90,7 +90,7 @@ fn select(
 
 pub(super) fn inject(
     environment: &ICoreWebView2Environment,
-    authority: &crate::adapter::FaultAuthority,
+    authority: &crate::FaultAuthority,
 ) -> Result<Box<dyn ProcessFaultHandle>, ()> {
     if !authority.valid() {
         return Err(());

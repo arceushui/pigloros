@@ -30,13 +30,9 @@ mod adapter {
     mod socket;
     mod store;
     mod surface;
-    #[cfg(test)]
-    pub(crate) use surface::FaultAuthority;
 
     #[cfg(test)]
     mod native_tests;
-    #[cfg(test)]
-    pub(crate) use native_tests::process_fault::FaultSeal;
 
     pub use directory::{create_private_directory, verify_private_directory};
     pub use host::WindowsOwnerHost;
@@ -244,6 +240,17 @@ pub(crate) enum BufferSlot {
     Reply,
 }
 
+/// Unit-test evidence captured from live native mappings before Close.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct NativeZeroObservation {
+    pub(crate) slot: BufferSlot,
+    pub(crate) before_nonzero: Option<bool>,
+    pub(crate) zeroed: Option<bool>,
+    pub(crate) header_present: Option<bool>,
+    pub(crate) header_unchanged: Option<bool>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum NativePulse {
     Timer,
@@ -411,6 +418,42 @@ pub(crate) trait ProcessFaultHandle {
     fn exit_code(&self) -> Result<Option<u32>, ()>;
 }
 
+/// A one-use test capability constructed only by the sealed fault fixture.
+#[cfg(test)]
+struct FaultSeal(Rc<std::cell::RefCell<Vec<ProcessFaultMark>>>);
+
+#[cfg(test)]
+impl FaultSeal {
+    const fn into_trace(self) -> Rc<std::cell::RefCell<Vec<ProcessFaultMark>>> {
+        self.0
+    }
+}
+
+/// Bound to the exact Surface observer and validated process identity.
+#[cfg(test)]
+struct FaultAuthority {
+    browser: pos_owner_bridge::ProcessIdentity,
+    target: ProcessFaultTarget,
+    valid: Rc<dyn Fn() -> bool>,
+    trace: Rc<std::cell::RefCell<Vec<ProcessFaultMark>>>,
+}
+
+#[cfg(test)]
+impl FaultAuthority {
+    const fn browser(&self) -> pos_owner_bridge::ProcessIdentity {
+        self.browser
+    }
+    const fn target(&self) -> ProcessFaultTarget {
+        self.target
+    }
+    fn valid(&self) -> bool {
+        (self.valid)()
+    }
+    fn record(&self, mark: ProcessFaultMark) {
+        self.trace.borrow_mut().push(mark);
+    }
+}
+
 /// Native ownership operations; lifecycle outcomes are selected by the adapter.
 /// No SDK pointer, HRESULT, token, arbitrary property ID, script, header, URL,
 /// buffer offset, or caller-provided COM callback crosses this interface.
@@ -418,7 +461,7 @@ pub(crate) trait NativeOperations {
     #[cfg(test)]
     fn inject_process_fault(
         &self,
-        _authority: &crate::adapter::FaultAuthority,
+        _authority: &FaultAuthority,
     ) -> Result<Box<dyn ProcessFaultHandle>, ()> {
         Err(())
     }

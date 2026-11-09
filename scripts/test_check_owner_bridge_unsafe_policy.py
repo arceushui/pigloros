@@ -1456,6 +1456,113 @@ def test_owned_process_fault_authority() -> None:
             if message not in fixture({window: source}):
                 raise SystemExit("a non-executable decoy satisfied the fixed lookup policy")
 
+    observer = "src/ffi/process.rs"
+    observer_source = (ROOT / SHIM / observer).read_text()
+    observer_message = f"{SHIM}/{observer}: shared process identity differs from the reviewed read-only observer"
+
+    def observer_errors(source: str) -> list[str]:
+        scanned = CHECKER.scan(source)
+        found: list[str] = []
+        CHECKER._check_fault_authority(
+            ROOT, {observer: (scanned, CHECKER._attributes(scanned.code))}, found
+        )
+        return found
+
+    if observer_message in observer_errors(observer_source):
+        raise SystemExit("the actual shared identity observer was rejected")
+    for old, new in (
+        ("times.map_err(|_| ()).and_then(|()| {", "Ok::<(), ()>(()).and_then(|()| {"),
+        ("queried.map_err(|_| ()).and_then(|()| {", "Ok::<(), ()>(()).and_then(|()| {"),
+        ("browser_pid: pid,", "browser_pid: 1,"),
+        ("digest.update(unit.to_le_bytes());", "digest.update(unit.to_be_bytes());"),
+        ("PathBuf::from(OsString::from_wide(image))", 'PathBuf::from("unrelated")'),
+    ):
+        if observer_source.count(old) != 1:
+            raise SystemExit(f"missing shared identity mutation target: {old}")
+        if observer_message not in observer_errors(observer_source.replace(old, new, 1)):
+            raise SystemExit(f"the shared identity policy accepted {old} -> {new}")
+
+
+def test_private_fault_capability_construction() -> None:
+    root = (ROOT / LIB).read_text()
+    surface = "src/adapter/surface/mod.rs"
+    sources = {
+        "src/lib.rs": root,
+        surface: (ROOT / SHIM / surface).read_text(),
+        "src/adapter/native_tests/process_fault.rs": (ROOT / SHIM / "src/adapter/native_tests/process_fault.rs").read_text(),
+    }
+
+    def errors(files: dict[str, str]) -> list[str]:
+        scans = {}
+        for relative, text in files.items():
+            scanned = CHECKER.scan(text)
+            scans[relative] = (scanned, CHECKER._attributes(scanned.code))
+        found: list[str] = []
+        CHECKER._check_fault_capabilities(scans, found)
+        return found
+
+    if errors(sources):
+        raise SystemExit(f"the private root capabilities were rejected: {errors(sources)}")
+    for marker in ("struct FaultSeal", "impl FaultSeal", "struct FaultAuthority", "impl FaultAuthority"):
+        old = f"#[cfg(test)]\n{marker}"
+        if root.count(old) != 1:
+            raise SystemExit(f"missing capability cfg mutation: {marker}")
+        changed = dict(sources)
+        changed["src/lib.rs"] = root.replace(old, marker, 1)
+        if not errors(changed):
+            raise SystemExit(f"product capability was accepted: {marker}")
+    for statement, expected in (
+        ("fn f() { let _seal = crate::FaultSeal(Default::default()); }", "FaultSeal construction belongs only in the sealed fixture"),
+        ("fn f() { let _authority = crate::FaultAuthority {}; }", "FaultAuthority construction belongs only in the validated Surface path"),
+        ("use crate::FaultSeal as Other;", "fault capabilities may not be aliased"),
+        ("use crate::FaultAuthority as Other;", "fault capabilities may not be aliased"),
+        ("impl crate::FaultSeal { fn forged() -> Self { Self(Default::default()) } }", "fault capability implementations belong only in the reviewed root types"),
+        ("impl Default for crate::FaultAuthority { fn default() -> Self { Self {} } }", "fault capability implementations belong only in the reviewed root types"),
+    ):
+        changed = dict(sources)
+        changed["src/adapter/other.rs"] = CFG + statement
+        if f"{SHIM}/src/adapter/other.rs: {expected}" not in errors(changed):
+            raise SystemExit(f"capability construction bypass was accepted: {statement}")
+
+
+def test_live_mapping_witness_boundary() -> None:
+    path = "src/ffi/buffers.rs"
+    buffers = (ROOT / SHIM / path).read_text()
+    root = (ROOT / LIB).read_text()
+
+    def errors(buffer_source: str, root_source: str = root) -> list[str]:
+        scans = {}
+        for relative, text in ((path, buffer_source), ("src/lib.rs", root_source)):
+            scanned = CHECKER.scan(text)
+            scans[relative] = (scanned, CHECKER._attributes(scanned.code))
+        found: list[str] = []
+        CHECKER._check_zero_witness(scans, found)
+        return found
+
+    if errors(buffers):
+        raise SystemExit(f"the live atomic witness was rejected: {errors(buffers)}")
+    for old, new in (
+        ("#[cfg(test)]\nmod zero_witness", "mod zero_witness"),
+        ("#[cfg(test)]\n        let witness =", "let witness ="),
+        ("#[cfg(test)]\n        zero_witness::after", "zero_witness::after"),
+        ("let zeroed = self.zero_from(start);", "let zeroed = Ok(());"),
+        ("zero_witness::after(self, start, witness, zeroed.is_ok());", ""),
+        ("zero_witness::after(self, start, witness, zeroed.is_ok());", "self.base = None; zero_witness::after(self, start, witness, zeroed.is_ok());"),
+        ("before_nonzero: before.before_nonzero,", "before_nonzero: Some(true),"),
+    ):
+        if buffers.count(old) != 1:
+            raise SystemExit(f"missing native witness mutation: {old}")
+        if not errors(buffers.replace(old, new, 1)):
+            raise SystemExit(f"disabled/product/late native witness was accepted: {old}")
+    for old, new in (
+        ("#[cfg(test)]\n#[derive(Clone, Copy, Debug, Eq, PartialEq)]\npub(crate) struct NativeZeroObservation", "#[derive(Clone, Copy, Debug, Eq, PartialEq)]\npub(crate) struct NativeZeroObservation"),
+        ("pub(crate) zeroed: Option<bool>,", "pub(crate) zeroed: bool,"),
+    ):
+        if root.count(old) != 1:
+            raise SystemExit(f"missing native observation mutation: {old}")
+        if not errors(buffers, root.replace(old, new, 1)):
+            raise SystemExit(f"native observation boundary change was accepted: {old}")
+
 
 def main() -> None:
     test_masker()
@@ -1471,6 +1578,8 @@ def main() -> None:
     test_forbidden_webview_authority()
     test_control_observations_cannot_ship_in_product_builds()
     test_owned_process_fault_authority()
+    test_private_fault_capability_construction()
+    test_live_mapping_witness_boundary()
     test_windows_case_insensitive_source_suffix_cannot_hide_code()
     test_hardening()
     test_symlinks()

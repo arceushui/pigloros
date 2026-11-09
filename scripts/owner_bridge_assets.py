@@ -14,10 +14,17 @@ import json
 import re
 from pathlib import Path
 
+from owner_bridge_webauthn_fixtures import N, ecdsa_der_signature, ecdsa_signature_values
+
 ROOT = Path(__file__).resolve().parent.parent
 BRIDGE = ROOT / "crates/pos-owner-bridge"
 ASSETS = BRIDGE / "assets"
-PROFILES = ("pending", "popup", "popup_receipt", "permission", "external", "navigation", "download", "authentication", "readonly_write", "readonly_control", "duplicate_request", "interleaved_pair", "delayed_delivery")
+PROFILES = (
+    "pending", "popup", "popup_receipt", "permission", "external", "navigation",
+    "download", "authentication", "readonly_write", "readonly_control",
+    "duplicate_request", "interleaved_pair", "delayed_delivery", "successful_get",
+    "successful_get_release_delay",
+)
 TRIGGERS = {
     "popup": 'window.open("http://localhost:49291/denied-popup", "_blank");',
     "permission": "navigator.geolocation.getCurrentPosition(function () {}, function () {});",
@@ -96,7 +103,69 @@ def delivery_port(profile: str) -> str:
     )
 
 
+def successful_get_bootstrap(release_delay: bool = False) -> str:
+    """One fixed public test-key assertion, never real-authenticator PRF qualification."""
+    challenge = bytes([2]) * 32
+    client = (
+        b'{"type":"webauthn.get","challenge":"'
+        + base64.urlsafe_b64encode(challenge).rstrip(b"=")
+        + b'","origin":"http://localhost:49291"}'
+    )
+    auth = digest(b"localhost") + b"\x05\x00\x00\x00\x01"
+    r, s = ecdsa_signature_values(auth + digest(client))
+    signature = ecdsa_der_signature(r, min(s, N - s))
+    # The adversarial variant deliberately holds the page's next task after
+    # READY, leaving real native reply bytes for the host's 2 s release expiry.
+    # It changes no shared-core bytes, host clocks, or normal G3 delivery.
+    stall = (
+        "          queueMicrotask(function () {\n"
+        "            var until = performance.now() + 2500;\n"
+        "            while (performance.now() < until) { /* declared release delay */ }\n"
+        "          });\n"
+        if release_delay else ""
+    )
+    return (
+        "(function () {\n"
+        "  function bytes(hex) {\n"
+        "    return new Uint8Array(hex.match(/../g).map(function (pair) { return parseInt(pair, 16); })).buffer;\n"
+        "  }\n"
+        "  function equal(value, hex) {\n"
+        "    var actual = new Uint8Array(value), expected = new Uint8Array(bytes(hex));\n"
+        "    return actual.length === expected.length && actual.every(function (byte, index) { return byte === expected[index]; });\n"
+        "  }\n"
+        "  function unsupported() { return Promise.reject(new DOMException(\"Sealed Get fixture\", \"NotSupportedError\")); }\n"
+        "  function get(options) {\n"
+        "    var key = options.publicKey;\n"
+        f"    if (key.rpId !== \"localhost\" || !equal(key.challenge, \"{challenge.hex()}\") ||\n"
+        "        key.allowCredentials.length !== 1 || !equal(key.allowCredentials[0].id, \"8081\") ||\n"
+        f"        !equal(key.extensions.prf.eval.first, \"{(bytes([3]) * 32).hex()}\")) {{ return unsupported(); }}\n"
+        "    return new Promise(function (resolve, reject) {\n"
+        "      function aborted() { clearTimeout(timer); reject(new DOMException(\"Fixture aborted\", \"AbortError\")); }\n"
+        "      var timer = setTimeout(function () {\n"
+        "        options.signal.removeEventListener(\"abort\", aborted);\n"
+        "        resolve({ rawId: bytes(\"8081\"), response: {\n"
+        f"          clientDataJSON: bytes(\"{client.hex()}\"),\n"
+        f"          authenticatorData: bytes(\"{auth.hex()}\"),\n"
+        f"          signature: bytes(\"{signature.hex()}\"),\n"
+        f"          userHandle: bytes(\"{(bytes([4]) * 32).hex()}\")\n"
+        "        }, getClientExtensionResults: function () {\n"
+        + stall
+        + f"          return {{ prf: {{ results: {{ first: bytes(\"{bytes(range(0xA0, 0xC0)).hex()}\") }} }} }};\n"
+        "        } });\n"
+        "      }, 100);\n"
+        "      if (options.signal.aborted) { aborted(); }\n"
+        "      else { options.signal.addEventListener(\"abort\", aborted, { once: true }); }\n"
+        "    });\n"
+        "  }\n"
+        "  ownerProtocol({ create: unsupported, get: get },\n"
+        "    function () { return window.chrome && window.chrome.webview; });\n"
+        "})();\n"
+    )
+
+
 def fixture_bootstrap(profile: str) -> str:
+    if profile in ("successful_get", "successful_get_release_delay"):
+        return successful_get_bootstrap(profile == "successful_get_release_delay")
     # The credential adapter only waits for abort and never invokes a real
     # authenticator. Separate native-event adapters below induce declared faults.
     trigger = TRIGGERS.get(profile, "")

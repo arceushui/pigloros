@@ -131,3 +131,23 @@ pub(super) const DELAYED_DELIVERY: Response = Response {
         0xe6, 0x04,
     ],
 };
+
+pub(super) const SUCCESSFUL_GET: Response = Response {
+    body: include_bytes!("../../assets/qualification/successful_get.html"),
+    head: "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: 15437\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nCross-Origin-Opener-Policy: same-origin\r\nCross-Origin-Resource-Policy: same-origin\r\nPermissions-Policy: publickey-credentials-create=(self), publickey-credentials-get=(self), clipboard-read=(), clipboard-write=(), camera=(), microphone=(), geolocation=()\r\nConnection: close\r\nContent-Security-Policy: default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; script-src 'sha256-P4h/RiUG1ahJgWqIU2Hsdbucc5MgkijBox2BEuB9gQ0='; style-src 'sha256-Q5v//7IetSl8ReqUsE3bO7kt7fOgIkckocSNwunJJmk='; img-src 'none'; connect-src 'none'\r\n\r\n",
+    digest: [
+        0x2d, 0x6e, 0xc8, 0xf2, 0x52, 0x5f, 0xb9, 0x6f, 0x01, 0x8a, 0x6d, 0xb3, 0xc8, 0xe1, 0x96,
+        0xd2, 0xe0, 0xde, 0x60, 0x74, 0xb2, 0x92, 0x02, 0x13, 0xc9, 0x78, 0x77, 0x57, 0x0e, 0xb0,
+        0x83, 0x33,
+    ],
+};
+
+pub(super) const SUCCESSFUL_GET_RELEASE_DELAY: Response = Response {
+    body: include_bytes!("../../assets/qualification/successful_get_release_delay.html"),
+    head: "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: 15619\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nCross-Origin-Opener-Policy: same-origin\r\nCross-Origin-Resource-Policy: same-origin\r\nPermissions-Policy: publickey-credentials-create=(self), publickey-credentials-get=(self), clipboard-read=(), clipboard-write=(), camera=(), microphone=(), geolocation=()\r\nConnection: close\r\nContent-Security-Policy: default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; script-src 'sha256-mpE6qDdLEL4DK2Tne3XEc7yxxJaIzy7qmU0D0XNj9R8='; style-src 'sha256-Q5v//7IetSl8ReqUsE3bO7kt7fOgIkckocSNwunJJmk='; img-src 'none'; connect-src 'none'\r\n\r\n",
+    digest: [
+        0x81, 0x3e, 0xb4, 0x48, 0x09, 0xe9, 0xa5, 0xb1, 0x4b, 0x78, 0xa4, 0xe9, 0xc3, 0x29, 0x5a,
+        0x71, 0x7a, 0xa0, 0xb7, 0xe8, 0x2b, 0x22, 0x68, 0x1b, 0x04, 0xa1, 0x75, 0x3e, 0xb4, 0xc9,
+        0xa7, 0x0d,
+    ],
+};

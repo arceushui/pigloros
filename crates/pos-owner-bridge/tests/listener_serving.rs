@@ -70,6 +70,8 @@ fn sealed_qualification_profiles_serve_their_exact_bound_bytes() -> TestResult {
         FixtureProfile::DuplicateRequest,
         FixtureProfile::InterleavedPair,
         FixtureProfile::DelayedDelivery,
+        FixtureProfile::SuccessfulGet,
+        FixtureProfile::SuccessfulGetReleaseDelay,
     ] {
         let config = ListenerConfig::fixture(profile);
         let listener = start(config)?;

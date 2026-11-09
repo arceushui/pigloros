@@ -36,6 +36,12 @@ pub enum FixtureProfile {
     InterleavedPair,
     /// Hold real SDK deliveries for 700 ms, crossing the first two retry windows.
     DelayedDelivery,
+    /// Fixed public test-key assertion for the native Get plan, resolved after 100 ms.
+    /// Exercises successful protocol completion; no real authenticator is used.
+    SuccessfulGet,
+    /// The same assertion, with a declared 2.5 s page stall after `READY`.
+    /// Exercises release expiry and host zeroization of a nonzero reply.
+    SuccessfulGetReleaseDelay,
 }
 
 impl FixtureProfile {
@@ -54,6 +60,8 @@ impl FixtureProfile {
             Self::DuplicateRequest => &fixture_assets::DUPLICATE_REQUEST,
             Self::InterleavedPair => &fixture_assets::INTERLEAVED_PAIR,
             Self::DelayedDelivery => &fixture_assets::DELAYED_DELIVERY,
+            Self::SuccessfulGet => &fixture_assets::SUCCESSFUL_GET,
+            Self::SuccessfulGetReleaseDelay => &fixture_assets::SUCCESSFUL_GET_RELEASE_DELAY,
         }
     }
 }

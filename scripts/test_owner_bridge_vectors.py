@@ -23,6 +23,7 @@ BRIDGE = "crates/pos-owner-bridge"
 COPIED = (
     CHECKER,
     "scripts/owner_bridge_assets.py",
+    "scripts/owner_bridge_webauthn_fixtures.py",
     f"{BRIDGE}/assets/owner-core.js",
     f"{BRIDGE}/assets/owner-shell.html",
     f"{BRIDGE}/assets/owner-production.js",

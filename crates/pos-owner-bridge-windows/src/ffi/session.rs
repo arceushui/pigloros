@@ -111,7 +111,7 @@ impl NativeOperations for Session {
     #[cfg(test)]
     fn inject_process_fault(
         &self,
-        authority: &crate::adapter::FaultAuthority,
+        authority: &crate::FaultAuthority,
     ) -> Result<Box<dyn crate::ProcessFaultHandle>, ()> {
         self.check().map_err(|_| ())?;
         let environment = self.environment_ref().map_err(|_| ())?;

@@ -88,32 +88,6 @@ pub(super) struct Surface {
     client: Cell<Option<ClientBounds>>,
 }
 
-/// A fault authority is minted only from the live admitted Surface, and retains
-/// its event observer so a callback can invalidate topology during discovery.
-#[cfg(test)]
-pub(crate) struct FaultAuthority {
-    browser: ProcessIdentity,
-    target: crate::ProcessFaultTarget,
-    events: Rc<Events>,
-    trace: Rc<std::cell::RefCell<Vec<crate::ProcessFaultMark>>>,
-}
-
-#[cfg(test)]
-impl FaultAuthority {
-    pub(crate) const fn browser(&self) -> ProcessIdentity {
-        self.browser
-    }
-    pub(crate) const fn target(&self) -> crate::ProcessFaultTarget {
-        self.target
-    }
-    pub(crate) fn valid(&self) -> bool {
-        !self.events.invalid() && self.events.exited().is_none()
-    }
-    pub(crate) fn record(&self, mark: crate::ProcessFaultMark) {
-        self.trace.borrow_mut().push(mark);
-    }
-}
-
 impl Surface {
     pub(super) fn new(
         factory: Rc<dyn NativeFactory>,
@@ -238,7 +212,7 @@ impl Surface {
     pub(in crate::adapter) fn inject_posted_fault(
         &self,
         target: crate::ProcessFaultTarget,
-        seal: crate::adapter::FaultSeal,
+        seal: crate::FaultSeal,
     ) -> std::result::Result<Box<dyn crate::ProcessFaultHandle>, ()> {
         if self.ownership != Ownership::Controller
             || self.close != CloseState::Idle
@@ -262,11 +236,12 @@ impl Surface {
         if self.runtime.identity(browser.browser_pid).map_err(|_| ())? != browser {
             return Err(());
         }
-        let authority = FaultAuthority {
+        let events = Rc::clone(&self.events);
+        let authority = crate::FaultAuthority {
             browser,
             target,
-            events: Rc::clone(&self.events),
-            trace: seal.trace(),
+            valid: Rc::new(move || !events.invalid() && events.exited().is_none()),
+            trace: seal.into_trace(),
         };
         self.native.inject_process_fault(&authority)
     }

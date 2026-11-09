@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 
 use std::cell::Cell;
+use std::io::Write as _;
 use std::path::Path;
 use std::rc::Rc;
 
@@ -61,7 +62,9 @@ impl Drop for Fault {
     }
 }
 
-const CASES: [(FixtureProfile, EventKind, ControlFault); 9] = [
+type Case = (FixtureProfile, EventKind, ControlFault);
+
+const CASES: [Case; 9] = [
     (
         FixtureProfile::Popup,
         EventKind::NewWindow,
@@ -112,7 +115,12 @@ const CASES: [(FixtureProfile, EventKind, ControlFault); 9] = [
 pub(super) fn run(runtime_path: &Path, root: &Path) -> TestResult {
     let runtime = crate::verify_fixed_runtime(runtime_path, root)?;
     let mut factory = crate::Native::owner_factory()?;
-    for (index, (profile, kind, mode)) in CASES.into_iter().enumerate() {
+    for (index, case) in CASES.into_iter().enumerate() {
+        let (profile, kind, mode) = case;
+        writeln!(
+            std::io::stderr(),
+            "NATIVE_CONTROL case={index} profile={profile:?} kind={kind:?} mode={mode:?} stage=start"
+        )?;
         let _fault = Fault::new(kind, mode);
         let folder = root.join(format!("control-{index}"));
         crate::create_private_directory(&folder)?;
@@ -152,9 +160,15 @@ pub(super) fn run(runtime_path: &Path, root: &Path) -> TestResult {
         listener.begin_navigation();
         probe.events.begin();
         native.navigate_owner()?;
-        pump_until(&factory, "actual native control callback", || {
+        let callback = pump_until(&factory, "actual native control callback", || {
             probe.delivered.get()
-        })?;
+        });
+        log_callback(index, case, &probe, &listener, &callback)?;
+        if let Err(error) = callback {
+            drop(native);
+            log_retired(index, identity.browser_pid, &probe)?;
+            return Err(error);
+        }
         if mode == ControlFault::RetryDenial {
             for attempts in [2, 3] {
                 // Repeated teardown and event-drain calls in one progression
@@ -203,6 +217,39 @@ pub(super) fn run(runtime_path: &Path, root: &Path) -> TestResult {
     let composed_root = root.join("composed-control");
     crate::create_private_directory(&composed_root)?;
     super::denial::run_control(runtime_path, &composed_root)?;
+    Ok(())
+}
+
+fn log_callback(
+    index: usize,
+    (profile, kind, mode): Case,
+    probe: &Probe,
+    listener: &LoopbackListener,
+    callback: &TestResult,
+) -> TestResult {
+    let served = listener.served();
+    writeln!(
+        std::io::stderr(),
+        "NATIVE_CONTROL case={index} profile={profile:?} kind={kind:?} mode={mode:?} stage=callback-wait delivered={} failures={} requests={} served={} integrity={} started={:?} loaded={:?} invalid={} result={:?}",
+        probe.delivered.get(),
+        probe.failures.get(),
+        listener.received_request_count(),
+        served.count,
+        served.integrity_ok,
+        probe.events.started(),
+        probe.events.loaded(),
+        probe.events.invalid(),
+        callback.as_ref().map(|()| ()).map_err(ToString::to_string)
+    )?;
+    Ok(())
+}
+
+fn log_retired(index: usize, expected_pid: u32, probe: &Probe) -> TestResult {
+    writeln!(
+        std::io::stderr(),
+        "NATIVE_CONTROL case={index} stage=retired expected_pid={expected_pid} exited={:?}",
+        probe.events.exited()
+    )?;
     Ok(())
 }
 

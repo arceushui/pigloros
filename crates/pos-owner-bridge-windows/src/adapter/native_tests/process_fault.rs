@@ -19,19 +19,90 @@ use pos_owner_bridge_codec::{CeremonyId, ControlState};
 use super::{readiness, retirement, FixtureRoot, TestResult};
 use crate::adapter::{loopback::SharedLoopback, store::WindowsCleanupStore, surface::Surface};
 use crate::{
-    NativeFactory, ProcessFaultHandle, ProcessFaultMark, ProcessFaultState, ProcessFaultTarget,
+    BufferSlot, NativeFactory, NativeZeroObservation, ProcessFaultHandle, ProcessFaultMark,
+    ProcessFaultState, ProcessFaultTarget,
 };
 
 type Trace = Rc<RefCell<Vec<ProcessFaultMark>>>;
 
-/// Only this sealed fixture module constructs this one-use authority, after
-/// choosing the fixed Pending asset with no frame or auxiliary-view trigger.
-pub(crate) struct FaultSeal(Trace);
+struct ZeroWitness;
 
-impl FaultSeal {
-    pub(crate) fn trace(&self) -> Rc<RefCell<Vec<ProcessFaultMark>>> {
-        Rc::clone(&self.0)
+impl ZeroWitness {
+    fn arm() -> Self {
+        crate::Native::arm_native_zero_observations();
+        Self
     }
+}
+
+impl Drop for ZeroWitness {
+    fn drop(&mut self) {
+        let _discarded = crate::Native::take_native_zero_observations();
+    }
+}
+
+fn native_zeroing_observed(observations: &[NativeZeroObservation]) -> bool {
+    let [request, reply] = observations else {
+        return false;
+    };
+    request.slot == BufferSlot::Request
+        && request.before_nonzero == Some(true)
+        && request.zeroed == Some(true)
+        && request.header_present.is_none()
+        && request.header_unchanged.is_none()
+        && reply.slot == BufferSlot::Reply
+        && reply.before_nonzero.is_some()
+        && reply.zeroed == Some(true)
+        && reply.header_present == Some(true)
+        && reply.header_unchanged == Some(true)
+}
+
+#[test]
+fn native_zeroing_evidence_rejects_missing_or_changed_readback() {
+    let request = NativeZeroObservation {
+        slot: BufferSlot::Request,
+        before_nonzero: Some(true),
+        zeroed: Some(true),
+        header_present: None,
+        header_unchanged: None,
+    };
+    let reply = NativeZeroObservation {
+        slot: BufferSlot::Reply,
+        before_nonzero: Some(false),
+        zeroed: Some(true),
+        header_present: Some(true),
+        header_unchanged: Some(true),
+    };
+    assert!(native_zeroing_observed(&[request, reply]));
+    assert!(!native_zeroing_observed(&[request]));
+    for bad in [None, Some(false)] {
+        let mut changed_request = request;
+        changed_request.zeroed = bad;
+        assert!(!native_zeroing_observed(&[changed_request, reply]));
+        let mut changed_reply = reply;
+        changed_reply.zeroed = bad;
+        assert!(!native_zeroing_observed(&[request, changed_reply]));
+        changed_reply = reply;
+        changed_reply.header_unchanged = bad;
+        assert!(!native_zeroing_observed(&[request, changed_reply]));
+        changed_reply = reply;
+        changed_reply.header_present = bad;
+        assert!(!native_zeroing_observed(&[request, changed_reply]));
+    }
+    for before in [None, Some(false)] {
+        let mut changed_request = request;
+        changed_request.before_nonzero = before;
+        assert!(!native_zeroing_observed(&[changed_request, reply]));
+    }
+    let mut changed_request = request;
+    changed_request.header_present = Some(true);
+    assert!(!native_zeroing_observed(&[changed_request, reply]));
+    changed_request = request;
+    changed_request.header_unchanged = Some(true);
+    assert!(!native_zeroing_observed(&[changed_request, reply]));
+    let mut changed_reply = reply;
+    changed_reply.before_nonzero = None;
+    assert!(!native_zeroing_observed(&[request, changed_reply]));
+    assert!(!native_zeroing_observed(&[reply, request]));
 }
 
 impl crate::Native {
@@ -151,7 +222,7 @@ impl Fixture {
             .borrow_mut()
             .push(ProcessFaultMark::Reached(state));
         if inject {
-            let seal = FaultSeal(Rc::clone(&self.trace));
+            let seal = crate::FaultSeal(Rc::clone(&self.trace));
             self.handle = Some(
                 self.surface
                     .inject_posted_fault(target, seal)
@@ -276,6 +347,7 @@ fn run_case(
 ) -> Result<ProcessFaultState, Box<dyn std::error::Error>> {
     crate::Native::reset_process_failure_observations();
     let mut fixture = Fixture::new(runtime, root, number)?;
+    let _zero_witness = ZeroWitness::arm();
     let started = Instant::now();
     let mut driver = readiness::new_driver(CeremonyId::from_bytes([number; 16]), started)?;
     let attempt = catch_unwind(AssertUnwindSafe(|| {
@@ -312,6 +384,7 @@ fn run_case(
     let reached = fixture.reached;
     let complete_before_cleanup = fixture.evidence_complete;
     let failures = crate::Native::process_failure_observations();
+    let native_zeroed = native_zeroing_observed(&crate::Native::take_native_zero_observations());
     fixture.retire(driver, result)?;
     if let Some(error) = failure {
         return Err(error);
@@ -321,6 +394,9 @@ fn run_case(
     }
     if !slot_wiped || !plan_wiped_if_quarantined {
         return Err("failed ceremony secrets were not wiped at their required boundary".into());
+    }
+    if !native_zeroed {
+        return Err("live native mappings did not prove zeroization and retained header".into());
     }
     if inject && target == ProcessFaultTarget::Renderer {
         assert_eq!(failures, [Some(true)]);

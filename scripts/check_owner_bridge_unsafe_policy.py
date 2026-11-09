@@ -913,7 +913,7 @@ def _check_shim_macros(label: str, scanned: Scan, found: list[str]) -> None:
 def _reviewed_fault_code(code: str) -> bool:
     """Accept only the reviewed test-only fixed process-fault implementation."""
     normalized = re.sub(r"\s+", "", code).encode()
-    return hashlib.sha256(normalized).hexdigest() == "e265a3c2400a307205995b7c8619731aba80f961cc019074098ad271bbdfdb23"
+    return hashlib.sha256(normalized).hexdigest() == "f857fbfecc4e70ebf9087bead24e8f58c9b87e97b9c0ec39593a66ef66055fc3"
 
 
 def _check_shim_sources(shim: Path, scanned_dirs: tuple[Path, ...], found: list[str]) -> ShimScan:
@@ -1045,6 +1045,12 @@ def _check_shim_sources(shim: Path, scanned_dirs: tuple[Path, ...], found: list[
 
 
 def _check_fault_authority(root: Path, scans: dict[str, tuple[Scan, tuple[Attribute, ...]]], found: list[str]) -> None:
+    # The fault helper delegates identity/path observation to this shared
+    # query-only implementation. Bind its callees as well as the fault caller.
+    shared = scans.get("src/ffi/process.rs")
+    shared_code = shared[0].code if shared else ""
+    if hashlib.sha256(re.sub(r"\s+", "", shared_code).encode()).hexdigest() != "fd3d6f7a3900e52ebbaf8818104f7436aeba899fc783a31824d7bb162497dab0":
+        found.append(f"{SHIM}/src/ffi/process.rs: shared process identity differs from the reviewed read-only observer")
     asset = root / "crates/pos-owner-bridge/assets/qualification/pending.html"
     try:
         asset_digest = hashlib.sha256(asset.read_bytes()).hexdigest()
@@ -1091,7 +1097,7 @@ def _check_fault_authority(root: Path, scans: dict[str, tuple[Scan, tuple[Attrib
     type_start = root_code.find("pub(crate) enum ProcessFaultTarget")
     type_end = root_code.find("pub(crate) trait NativeOperations", type_start) if type_start >= 0 else -1
     types = root_code[type_start:type_end] if type_end >= 0 else ""
-    if hashlib.sha256(re.sub(r"\s+", "", types).encode()).hexdigest() != "aca99e152105d3a4ddeadeeb709579cfdddfb32bac641c165cffdbf55ee0cc89":
+    if hashlib.sha256(re.sub(r"\s+", "", types).encode()).hexdigest() != "4a90b6debe4969bbdd6bbbf52265c75bca50e9dcf552502b3185dc99e717e3b4":
         found.append(f"{SHIM}/src/lib.rs: process fault capability types differ from reviewed test-only code")
     elif "cfg(test)" not in _outer_attributes_before(root_code, root_item[1], type_start):
         found.append(f"{SHIM}/src/lib.rs: process fault capability types require cfg(test)")
@@ -1100,10 +1106,10 @@ def _check_fault_authority(root: Path, scans: dict[str, tuple[Scan, tuple[Attrib
     specifications = (
         ("src/ffi/session.rs", "fault_owners_retained", "eccda5bd1bc5847953133394e934a30276c539d09fa2842f0e3ad42722556f69"),
         ("src/adapter/surface/mod.rs", "fault_owners_retained", "f5b290213a5da3871f225e3abbba1e1f61c7ae0b021766b7d9a3f63f05b14b9f"),
-        ("src/ffi/session.rs", "inject_process_fault", "38016888d1dfc8370da65108b31e8099a06f15b851540567311472d002238197"),
+        ("src/ffi/session.rs", "inject_process_fault", "1118d97c270aec4755012b9d6d91216173207455032796f58ce5abb912475ab5"),
         ("src/adapter/surface/mod.rs", "posted_fault_state", "6bedb3fc63d1f1ecbe0e5c4bf8b5831d87262fb38faa49439f214c34ac659c50"),
         ("src/adapter/surface/mod.rs", "posted_fault_event", "9997eb9c0ff65871d2253e99fbe0cde02f599225d18c07e2dfc4c25e1c71d36f"),
-        ("src/adapter/surface/mod.rs", "inject_posted_fault", "e739161b3f331ba0c83ee45e52f979f5c3d4ad951976c9028abbed8bb67570e8"),
+        ("src/adapter/surface/mod.rs", "inject_posted_fault", "77289d24f18004f458bfe9b1accc90750dc70811d14e71c81629cc0086bf24ba"),
     )
     for relative, name, digest in specifications:
         item = scans.get(relative)
@@ -1123,21 +1129,64 @@ def _check_fault_authority(root: Path, scans: dict[str, tuple[Scan, tuple[Attrib
             start = modifiers.start() if modifiers else match.start()
             if "cfg(test)" not in _outer_attributes_before(code, item[1], start):
                 found.append(f"{SHIM}/{relative}: process fault authority function {name} requires cfg(test)")
-    relative = "src/adapter/surface/mod.rs"
-    item = scans.get(relative)
-    code = item[0].code if item else ""
-    start = code.find("pub(crate) struct FaultAuthority")
-    end = code.find("impl Surface", start) if start >= 0 else -1
-    authority = code[start:end] if end >= 0 else ""
-    if hashlib.sha256(re.sub(r"\s+", "", authority).encode()).hexdigest() != "1b591fd7be468c8aa610b1aa201bfb10fd797c98f104b836afecc0243485bf54":
-        found.append(f"{SHIM}/{relative}: process fault authority type differs from reviewed code")
-    elif "cfg(test)" not in _outer_attributes_before(code, item[1], start):
-        found.append(f"{SHIM}/{relative}: process fault authority type requires cfg(test)")
+    _check_fault_capabilities(scans, found)
+    _check_zero_witness(scans, found)
     relative = "src/adapter/native_tests/process_fault.rs"
     item = scans.get(relative)
     code = item[0].code if item else ""
-    if hashlib.sha256(re.sub(r"\s+", "", code).encode()).hexdigest() != "13734bdeb83aaae975fe8247649e7507ba1422881d445cf049b6e005326bd208":
+    if hashlib.sha256(re.sub(r"\s+", "", code).encode()).hexdigest() != "d6464d0d538dccebcd10ec25422d428326f04c9907244521979265684363d1b3":
         found.append(f"{SHIM}/{relative}: process fault fixture differs from reviewed sealed caller")
+
+
+def _check_fault_capabilities(scans: dict[str, tuple[Scan, tuple[Attribute, ...]]], found: list[str]) -> None:
+    root = scans.get("src/lib.rs")
+    code = root[0].code if root else ""
+    begin = code.find("pub(crate) enum ProcessFaultTarget")
+    end = code.find("pub(crate) trait NativeOperations", begin) if begin >= 0 else -1
+    for marker in ("struct FaultSeal", "impl FaultSeal", "struct FaultAuthority", "impl FaultAuthority"):
+        start = code.find(marker)
+        if start < 0 or not root or "cfg(test)" not in _outer_attributes_before(code, root[1], start):
+            found.append(f"{SHIM}/src/lib.rs: {marker} requires its private cfg(test) declaration")
+    for relative, (scanned, _) in scans.items():
+        source = scanned.code
+        if re.search(r"(?<!\w)(?:FaultSeal|FaultAuthority)\s+as\s", source):
+            found.append(f"{SHIM}/{relative}: fault capabilities may not be aliased")
+        for implementation in re.finditer(r"\bimpl\b[^{;]*\b(?:FaultSeal|FaultAuthority)\b[^{;]*\{", source):
+            if relative != "src/lib.rs" or not begin <= implementation.start() < end:
+                found.append(f"{SHIM}/{relative}: fault capability implementations belong only in the reviewed root types")
+        for match in re.finditer(r"(?<!\w)FaultSeal\s*\(", source):
+            root_declaration = relative == "src/lib.rs" and begin <= match.start() < end
+            if not root_declaration and relative != "src/adapter/native_tests/process_fault.rs":
+                found.append(f"{SHIM}/{relative}: FaultSeal construction belongs only in the sealed fixture")
+        for match in re.finditer(r"(?<!\w)FaultAuthority\s*\{", source):
+            root_declaration = relative == "src/lib.rs" and begin <= match.start() < end
+            surface_construction = relative == "src/adapter/surface/mod.rs" and any(
+                name == "inject_posted_fault" and start < match.start() < stop
+                for name, start, stop in _function_spans(source)
+            )
+            if not root_declaration and not surface_construction:
+                found.append(f"{SHIM}/{relative}: FaultAuthority construction belongs only in the validated Surface path")
+
+
+def _check_zero_witness(scans: dict[str, tuple[Scan, tuple[Attribute, ...]]], found: list[str]) -> None:
+    relative = "src/ffi/buffers.rs"
+    item = scans.get(relative)
+    code = item[0].code if item else ""
+    if hashlib.sha256(re.sub(r"\s+", "", code).encode()).hexdigest() != "b8217d306105774e36aaa690fa9744764526c37f89573060ca1d5ca2f16525a7":
+        found.append(f"{SHIM}/{relative}: live mapping witness differs from the reviewed atomic readback")
+    for pattern in (r"mod\s+zero_witness", r"let\s+witness\s*=\s*zero_witness::before", r"zero_witness::after\s*\("):
+        matches = list(re.finditer(pattern, code))
+        if len(matches) != 1 or not item or "cfg(test)" not in _outer_attributes_before(code, item[1], matches[0].start()):
+            found.append(f"{SHIM}/{relative}: live mapping witness module and both call sites require cfg(test)")
+    root = scans.get("src/lib.rs")
+    root_code = root[0].code if root else ""
+    start = root_code.find("pub(crate) struct NativeZeroObservation")
+    if start < 0 or not root or "cfg(test)" not in _outer_attributes_before(root_code, root[1], start):
+        found.append(f"{SHIM}/src/lib.rs: native zero observations require cfg(test)")
+    opening = root_code.find("{", start) if start >= 0 else -1
+    body = root_code[start:_matching_brace(root_code, opening) + 1] if opening >= 0 else ""
+    if hashlib.sha256(re.sub(r"\s+", "", body).encode()).hexdigest() != "e73ff178509c2658db05d26e183da64f05a0a1f7b57187e80b7b73f7fa838871":
+        found.append(f"{SHIM}/src/lib.rs: native zero observation fields differ from the reviewed booleans")
 
 
 def _check_member_sources(root: Path, directory: Path, scanned_dirs: tuple[Path, ...], found: list[str]) -> None:
