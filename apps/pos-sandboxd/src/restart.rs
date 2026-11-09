@@ -75,7 +75,7 @@ impl ReconciledRestart {
 /// Only restart reconciliation's device proof creates it, so registry removal
 /// cannot be handed released-root evidence that no probe produced.
 #[derive(Debug)]
-pub(crate) struct RootsReleased(Vec<[u8; 16]>);
+pub struct RootsReleased(Vec<[u8; 16]>);
 
 impl RootsReleased {
     /// Whether the recorded root of `attempt_id` was observed released.
