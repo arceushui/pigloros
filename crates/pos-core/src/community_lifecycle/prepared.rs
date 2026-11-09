@@ -116,15 +116,19 @@ impl<'a> CommunityPreparedInvocationV1<'a> {
         &self.0
     }
 
+    // Fixed fields, maximal integer widths, a 128-byte budget ID and all
+    // framing fit in 1024 bytes. Keep the actual reservation request available
+    // to check against encoded lengths without assuming allocator behavior.
+    const fn staging_capacity(&self) -> usize {
+        1024 + self.0.observation_bytes.len() + self.0.prior_state_bytes.len()
+    }
+
     /// Copy private bytes into one fully pre-sized zeroizing CIN1 output buffer.
     /// The installed owner must still inventory the original and encoded copies.
     #[must_use]
     pub fn to_canonical_cbor(&self) -> Zeroizing<Vec<u8>> {
         let input = self.as_input();
-        // Fixed fields, maximal integer widths, a 128-byte budget ID and all
-        // framing fit in 1024 bytes; reserve before writing any private byte.
-        let capacity = 1024 + input.observation_bytes.len() + input.prior_state_bytes.len();
-        let mut out = Zeroizing::new(Vec::with_capacity(capacity));
+        let mut out = Zeroizing::new(Vec::with_capacity(self.staging_capacity()));
         record_prefix(&mut out, 20, *b"CIN1");
         encode_hash(&mut out, input.member_binding_digest);
         encode_head(&mut out, 0, 0);
@@ -398,4 +402,67 @@ fn read_environment<'a>(cursor: &mut CborCursor<'a>) -> Result<Environment<'a>> 
             })
         })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reservation_covers_encoded_inputs_without_exceeding_the_record_budget() -> Result<()> {
+        let payload = Zeroizing::new(vec![7; MAX_COMMUNITY_STATE_BYTES_V1]);
+        let budget = "b".repeat(128);
+        let reference = ArtifactRefV1 {
+            schema_id: u32::MAX,
+            byte_length: u64::MAX,
+            digest: [1; 32],
+        };
+        for length in [
+            0,
+            23,
+            24,
+            255,
+            256,
+            8192,
+            65_535,
+            65_536,
+            MAX_COMMUNITY_STATE_BYTES_V1,
+        ] {
+            for (observation, state) in [(length, 0), (0, length), (length, length)] {
+                let input = CommunityPreparedInvocationInputV1 {
+                    member_binding_digest: Hash::from_bytes([1; 32]),
+                    invocation_id: [2; 16],
+                    timeline_position: TimelinePositionV1 {
+                        timeline_id: [3; 16],
+                        seq: u64::MAX,
+                        tick: u64::MAX,
+                        scheduler_position: u32::MAX,
+                    },
+                    output_base_ordinal: u32::MAX,
+                    principal_ref: reference,
+                    authorization_ref: reference,
+                    observation_snapshot_ref: reference,
+                    observation_bytes: &payload[..observation],
+                    prior_state_schema_digest: [4; 32],
+                    prior_state_bytes: &payload[..state],
+                    execution_profile_digest: [5; 32],
+                    trust_policy_snapshot_digest: [6; 32],
+                    deterministic_budget_id: &budget,
+                    deterministic_random_domain: [7; 32],
+                    provenance_root: [8; 32],
+                    simulation_time: u64::MAX,
+                    watchdog_epochs: u32::MAX,
+                };
+                let record = CommunityPreparedInvocationV1::new(input)?;
+                let encoded = record.to_canonical_cbor();
+                assert!(encoded.len() <= record.staging_capacity());
+                assert!(record.staging_capacity() <= MAX_COMMUNITY_PREPARED_INVOCATION_BYTES_V1);
+                assert!(
+                    *CommunityPreparedInvocationV1::from_canonical_cbor(&encoded)?.as_input()
+                        == input
+                );
+            }
+        }
+        Ok(())
+    }
 }

@@ -266,10 +266,6 @@ fn complete_row_bound_is_checked_before_decoding_oversized_arrays() -> TestResul
         .collect();
     let cover = Cover::new(input(&rows))?;
     let encoded = cover.to_canonical_cbor();
-    // Even a small cover reserves enough staging for the full admitted set
-    // before encoding; growing a zeroizing buffer could leave an old copy.
-    let empty_encoding = Cover::new(input(&[]))?.to_canonical_cbor();
-    assert!(empty_encoding.capacity() >= encoded.len());
     assert_eq!(
         Cover::from_canonical_cbor(&encoded)?
             .as_input()

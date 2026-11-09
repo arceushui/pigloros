@@ -144,10 +144,11 @@ fn array_heads_use_the_shortest_head() {
 #[test]
 fn the_wide_heads_of_every_major_type_are_encoded_by_one_routine() {
     let mut out = Vec::new();
-    head(&mut out, UNSIGNED, 1 << 32);
-    head(&mut out, BYTES, 1 << 32);
-    head(&mut out, TEXT, 1 << 32);
-    head(&mut out, ARRAY, 1 << 32);
+    let mut encoder = Encoder::writing(&mut out);
+    head(&mut encoder, UNSIGNED, 1 << 32);
+    head(&mut encoder, BYTES, 1 << 32);
+    head(&mut encoder, TEXT, 1 << 32);
+    head(&mut encoder, ARRAY, 1 << 32);
     let wide = [0, 0, 0, 1, 0, 0, 0, 0];
     let expected: Vec<u8> = [0x1b_u8, 0x5b, 0x7b, 0x9b]
         .iter()

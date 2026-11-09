@@ -353,7 +353,44 @@ fn read_members<'a>(cursor: &mut CborCursor<'a>) -> Result<CommunityScopeMembers
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_members, CommunityScopeMembersV1, ScopeRows};
+    use super::{
+        validate_members, CommunityMetadataScopeInputV1, CommunityMetadataScopeV1,
+        CommunityScopeMemberV1, CommunityScopeMembersV1, Hash, ScopeRows, TimelineId,
+        MAX_COMMUNITY_SCOPE_MEMBERS_V1, MAX_SCOPE_ENCODING,
+    };
+
+    #[test]
+    fn maximum_scope_encoding_fits_the_enclosing_record_size_proof() -> super::Result<()> {
+        let timeline = TimelineId::from_ulid(ulid::Ulid::from_bytes([1; 16]));
+        let rows: Vec<_> = (1..=MAX_COMMUNITY_SCOPE_MEMBERS_V1)
+            .map(|index| {
+                let mut reference = [0; 32];
+                reference[24..].copy_from_slice(&(index as u64).to_be_bytes());
+                CommunityScopeMemberV1 {
+                    scope_reference: Hash::from_bytes(reference),
+                    source_timeline: timeline,
+                    owner_reference: Hash::from_bytes([2; 32]),
+                    retention_lease_reference: Hash::from_bytes([3; 32]),
+                    not_after_micros: i64::MAX as u64,
+                }
+            })
+            .collect();
+        let record = CommunityMetadataScopeV1::new(CommunityMetadataScopeInputV1 {
+            store_incarnation: [1; 16],
+            metadata_anchor_timeline: timeline,
+            metadata_anchor_generation: [2; 16],
+            protection_operation_id: [3; 16],
+            scope_members: CommunityScopeMembersV1::from_members(&rows),
+            metadata_not_after_micros: i64::MAX as u64,
+        })?;
+        let encoded = record.to_canonical_cbor();
+        assert!(encoded.len() <= MAX_SCOPE_ENCODING);
+        assert!(
+            CommunityMetadataScopeV1::from_canonical_cbor(&encoded)?.as_input()
+                == record.as_input()
+        );
+        Ok(())
+    }
 
     #[test]
     fn corrupt_internal_borrowed_rows_remain_fallible() {
