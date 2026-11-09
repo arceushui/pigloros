@@ -151,15 +151,16 @@ pub enum FirewallRule {
     /// `ct state established,related accept`: return traffic of a connection
     /// the namespace opened.
     AcceptEstablished,
-    /// `ip6 hoplimit 255 icmpv6 type nd-neighbor-solicit-nd-neighbor-advert
-    /// accept`: neighbour discovery arriving on the veth. A hop limit of 255
-    /// proves the packet was not routed, so it came from the host end.
+    /// Accept IPv6 with hop limit 255 carrying ICMPv6 type 135 or 136
+    /// (neighbour solicitation or advertisement): neighbour discovery
+    /// arriving on the veth. A hop limit of 255 proves the packet was not
+    /// routed, so it came from the host end.
     AcceptNeighbourDiscovery,
-    /// `ip6 daddr <destination>/<length> ip6 hoplimit 255 icmpv6 type
-    /// nd-neighbor-solicit-nd-neighbor-advert accept`: neighbour discovery
-    /// the namespace sends, only to `destination/length`. The namespace uses
-    /// it for the solicited-node multicast range `ff02::/16` and for the host
-    /// end's address, so it can never carry data to an endpoint.
+    /// Accept IPv6 to `destination/length` with hop limit 255 carrying ICMPv6
+    /// type 135 or 136: neighbour discovery the namespace sends, only to
+    /// `destination/length`. The namespace uses it for the solicited-node
+    /// multicast range `ff02::1:ff00:0/104` and for the host end's address,
+    /// so it can never carry data to an endpoint.
     SendNeighbourDiscovery {
         /// The destination network.
         destination: Ipv6Addr,
@@ -283,8 +284,16 @@ pub struct ObservedNamespace {
     /// Every address on that host link, of both families.
     pub host_addresses: Vec<ObservedAddress>,
     /// The identifier the host namespace assigns to the attempt namespace.
+    /// The adapter resolves it from the host namespace with `RTM_GETNSID`
+    /// on a descriptor of namespace `name` itself (`NETNSA_FD`), never from
+    /// a link attribute, so it names that namespace and no other.
     pub namespace_netnsid: i32,
-    /// The identifier the attempt namespace assigns to the host namespace.
+    /// The identifier the attempt namespace assigns to the host namespace,
+    /// resolved the same way from inside the attempt namespace on a
+    /// descriptor of the host namespace.
+    ///
+    /// Both identifiers must be assigned: a negative identifier, such as
+    /// `NETNSA_NSID_NOT_ASSIGNED` (-1), never verifies.
     pub host_netnsid: i32,
 }
 
@@ -384,7 +393,8 @@ impl ExpectedNamespace {
             (true, None, _) => Err(ReadbackMismatch::InnerLink),
             (true, Some(_), None) => Err(ReadbackMismatch::HostLink),
             (true, Some((inner, inner_peer)), Some((host, host_peer))) => holds(
-                inner_peer == (host, Some(observed.host_netnsid))
+                observed.host_netnsid.min(observed.namespace_netnsid) >= 0
+                    && inner_peer == (host, Some(observed.host_netnsid))
                     && host_peer == (inner, Some(observed.namespace_netnsid)),
                 ReadbackMismatch::Peer,
             )
@@ -461,6 +471,9 @@ pub trait NamespaceControl {
     /// `expected`.
     ///
     /// The adapter must:
+    /// - create the namespace exclusively, and fail if a namespace named
+    ///   `name` exists, so [`NamespaceControl::remove`] never deletes a
+    ///   namespace this attempt does not own;
     /// - create the veth pair in one request, so it never adopts an existing
     ///   `host_link`, and fail if that name exists;
     /// - assign each namespace an identifier for the other, so both veth
@@ -469,7 +482,11 @@ pub trait NamespaceControl {
     ///   the kernel adds no link-local address or route, and add the
     ///   addresses with `IFA_F_NODAD`, so none is tentative;
     /// - install the firewall before either end is up, so no packet passes
-    ///   before the policy exists.
+    ///   before the policy exists;
+    /// - encode each [`FirewallRule`] with the protocol matches its other
+    ///   matches depend on: the `nfproto` match before an IPv6 address or
+    ///   hop-limit match, and the `l4proto` match before a TCP port or
+    ///   ICMPv6 type match.
     ///
     /// Host forwarding, `rp_filter` and the host firewall are not part of
     /// this namespace.

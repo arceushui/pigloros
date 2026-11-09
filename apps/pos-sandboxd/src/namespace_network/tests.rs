@@ -59,8 +59,8 @@ fn chains() -> Vec<FirewallChain> {
             FirewallHook::Output,
             vec![
                 FirewallRule::SendNeighbourDiscovery {
-                    destination: Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 0),
-                    length: 16,
+                    destination: Ipv6Addr::new(0xff02, 0, 0, 0, 0, 1, 0xff00, 0),
+                    length: 104,
                 },
                 FirewallRule::SendNeighbourDiscovery {
                     destination: Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 0),
@@ -318,6 +318,38 @@ fn veth_ends_that_are_not_each_others_peer_are_refused() -> TestResult {
     ] {
         assert_eq!(mismatch(change)?, Err(ReadbackMismatch::Peer));
     }
+    Ok(())
+}
+
+#[test]
+fn unassigned_namespace_identifiers_are_refused() -> TestResult {
+    // Both ends agree, but on `NETNSA_NSID_NOT_ASSIGNED`, which names no
+    // namespace.
+    let unassigned = |namespace: i32, host: i32| {
+        move |observed: &mut ObservedNamespace| {
+            observed.links[0].kind = LinkKind::Veth {
+                peer_index: HOST,
+                peer_netnsid: Some(host),
+            };
+            if let Some(link) = observed.host_link.as_mut() {
+                link.kind = LinkKind::Veth {
+                    peer_index: INNER,
+                    peer_netnsid: Some(namespace),
+                };
+            }
+            observed.namespace_netnsid = namespace;
+            observed.host_netnsid = host;
+        }
+    };
+    assert_eq!(
+        mismatch(unassigned(-1, HOST_ID))?,
+        Err(ReadbackMismatch::Peer)
+    );
+    assert_eq!(
+        mismatch(unassigned(NAMESPACE_ID, -1))?,
+        Err(ReadbackMismatch::Peer)
+    );
+    assert_eq!(mismatch(unassigned(NAMESPACE_ID, HOST_ID))?, Ok(()));
     Ok(())
 }
 
