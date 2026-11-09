@@ -229,25 +229,7 @@ pub(super) fn run(runtime_path: &Path, root: &Path) -> TestResult {
         probe.events.begin();
         native.navigate_owner()?;
         let mut armed = false;
-        let callback = pump_until(&factory, "actual native control callback", || {
-            let served = listener.served();
-            let generation = probe.events.loaded().filter(|_| {
-                probe.external_profile
-                    && probe.verified_owner.get().is_none()
-                    && !probe.events.invalid()
-                    && !probe.unexpected_navigation.get()
-                    && served.count == 1
-                    && served.integrity_ok
-            });
-            if let Some(generation) = generation {
-                probe.verified_owner.set(Some(generation));
-                if probe.isolated_external {
-                    *probe.allowance.borrow_mut() = Some(ExternalAllowance { generation });
-                    armed = true;
-                }
-            }
-            probe.delivered.get()
-        });
+        let callback = wait_for_control(&factory, &probe, &listener, &mut armed);
         log_callback(index, case, &probe, &listener, &callback)?;
         if let Err(error) = callback {
             drop(native);
@@ -278,31 +260,7 @@ pub(super) fn run(runtime_path: &Path, root: &Path) -> TestResult {
             probe.events.exited() == Some(identity.browser_pid)
         })?;
         let after_exit = crate::Native::control_observations();
-        // Every assertion after observing actual retirement; Session also
-        // retains on every error/unwind before this point.
-        assert_denials(&before_exit, &after_exit, kind, mode);
-        if probe.external_profile {
-            assert!(probe.verified_owner.get().is_some());
-            assert_eq!(probe.verified_owner.get(), probe.events.loaded());
-            assert_eq!(listener.served().count, 1);
-            assert!(listener.served().integrity_ok);
-            assert!(probe.external_navigation_seen.get());
-            assert!(!probe.unexpected_navigation.get());
-            if probe.isolated_external {
-                assert!(armed);
-                assert!(probe.allowance.borrow().is_none());
-            }
-        }
-        assert_eq!(
-            probe.failures.get(),
-            match mode {
-                ControlFault::Normal => 0,
-                ControlFault::RetryDenial => 3,
-                ControlFault::MissingDeferral | ControlFault::UncertainComplete => 1,
-            }
-        );
-        assert!(listener.received_request_count() >= 1);
-        assert!(listener.served().integrity_ok);
+        assert_control_retired(&probe, &listener, &before_exit, &after_exit, case, armed);
         native.unsubscribe_exit()?;
         native.drop_environment()?;
         native.destroy_window()?;
@@ -315,6 +273,68 @@ pub(super) fn run(runtime_path: &Path, root: &Path) -> TestResult {
     crate::create_private_directory(&composed_root)?;
     super::denial::run_control(runtime_path, &composed_root)?;
     Ok(())
+}
+
+fn wait_for_control(
+    factory: &dyn StaPump,
+    probe: &Probe,
+    listener: &LoopbackListener,
+    armed: &mut bool,
+) -> TestResult {
+    pump_until(factory, "actual native control callback", || {
+        let served = listener.served();
+        let generation = probe.events.loaded().filter(|_| {
+            probe.external_profile
+                && probe.verified_owner.get().is_none()
+                && !probe.events.invalid()
+                && !probe.unexpected_navigation.get()
+                && served.count == 1
+                && served.integrity_ok
+        });
+        if let Some(generation) = generation {
+            probe.verified_owner.set(Some(generation));
+            if probe.isolated_external {
+                *probe.allowance.borrow_mut() = Some(ExternalAllowance { generation });
+                *armed = true;
+            }
+        }
+        probe.delivered.get()
+    })
+}
+
+fn assert_control_retired(
+    probe: &Probe,
+    listener: &LoopbackListener,
+    before_exit: &[ControlObservation],
+    after_exit: &[ControlObservation],
+    (_, kind, mode): Case,
+    armed: bool,
+) {
+    // Every assertion after observing actual retirement; Session also
+    // retains on every error/unwind before this point.
+    assert_denials(before_exit, after_exit, kind, mode);
+    if probe.external_profile {
+        assert!(probe.verified_owner.get().is_some());
+        assert_eq!(probe.verified_owner.get(), probe.events.loaded());
+        assert_eq!(listener.served().count, 1);
+        assert!(listener.served().integrity_ok);
+        assert!(probe.external_navigation_seen.get());
+        assert!(!probe.unexpected_navigation.get());
+        if probe.isolated_external {
+            assert!(armed);
+            assert!(probe.allowance.borrow().is_none());
+        }
+    }
+    assert_eq!(
+        probe.failures.get(),
+        match mode {
+            ControlFault::Normal => 0,
+            ControlFault::RetryDenial => 3,
+            ControlFault::MissingDeferral | ControlFault::UncertainComplete => 1,
+        }
+    );
+    assert!(listener.received_request_count() >= 1);
+    assert!(listener.served().integrity_ok);
 }
 
 fn prepare_control_view(native: &dyn crate::NativeOperations) -> TestResult {
