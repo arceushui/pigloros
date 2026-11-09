@@ -159,7 +159,6 @@ pub(super) fn pending_browser_candidate(
     environment: &ICoreWebView2Environment,
 ) -> Result<Option<ProcessIdentity>, ()> {
     let Some(first) = pending_snapshot(|| candidates(environment))? else {
-        pending_opening_diagnostic("NATIVE_PROCESS_SNAPSHOT pending=two-complete-empty");
         return Ok(None);
     };
     browser_candidate_from_first(environment, first).map(Some)

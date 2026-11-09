@@ -1438,6 +1438,7 @@ def test_owned_process_fault_authority() -> None:
         ("previous.len() != usize::from(point.post() - 1) * 2", "false"),
         ("self.prior_native_wipe = true;", "self.prior_native_wipe = false;"),
         ("pos_owner_bridge::ceremony::timing::FAST_POLL", "std::time::Duration::ZERO"),
+        ("if !pending_reported {", "if true {"),
         ("!self.surface.recordless_opening_ready()\n                        || self.surface.pending_opening_completion().is_some()", "false"),
         ("Instant::now() >= self.deadline", "false"),
     ):

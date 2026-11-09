@@ -1807,6 +1807,7 @@ impl Fixture {
     ) -> Result<Result<Verified, BridgeError>, Box<dyn std::error::Error>> {
         let mut reached = false;
         let mut cancelled = false;
+        let mut pending_reported = false;
         loop {
             let step = driver.step(&mut readiness::env(
                 &mut self.surface,
@@ -1828,6 +1829,14 @@ impl Fixture {
                 let Some(browser) = candidate else {
                     if Instant::now() >= self.deadline {
                         return Err("pending-opening browser observation timed out".into());
+                    }
+                    if !pending_reported {
+                        pending_reported = true;
+                        let _logged_or_unavailable = writeln!(
+                            std::io::stderr(),
+                            "NATIVE_PENDING_OPENING case={} pending=two-complete-empty",
+                            self.number
+                        );
                     }
                     readiness::pump(&self.surface)?;
                     if !self.surface.recordless_opening_ready()

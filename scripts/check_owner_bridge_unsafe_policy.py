@@ -914,7 +914,7 @@ def _check_shim_macros(label: str, scanned: Scan, found: list[str]) -> None:
 def _reviewed_fault_code(code: str) -> bool:
     """Accept only the reviewed test-only fixed process-fault implementation."""
     normalized = re.sub(r"\s+", "", code).encode()
-    return hashlib.sha256(normalized).hexdigest() == "f1b5c571ba52bc032682276c1ba56ff281e4b47656eaa9cda9ef7752aba306c6"
+    return hashlib.sha256(normalized).hexdigest() == "4cdb841bc26f1c79c67145344e0bd32bb6982334aa2a595aee7ae37a5ec4ae37"
 
 
 def _check_shim_sources(shim: Path, scanned_dirs: tuple[Path, ...], found: list[str]) -> ShimScan:
@@ -1154,7 +1154,7 @@ def _check_fault_authority(root: Path, scans: dict[str, tuple[Scan, tuple[Attrib
         ('src/lib.rs', 'pending_opening_browser_candidate', '468186693170c9279a597590155e5ae3ef6ce261a96a02141dcb7fa9f69b5aa0'),
         ('src/ffi/session.rs', 'pending_opening_owners_retained', '6ba3a7de9b084a2df4b09c8cf7dbc9740941cee9fd482e880691aa9c760127d7'),
         ('src/ffi/session.rs', 'pending_opening_browser_candidate', '30a035b3984afc3a1e7db3fb92e45c0eef327f6b196a39b620ae280212d3cd2c'),
-        ('src/adapter/surface/mod.rs', 'prepare_pending_opening_browser', '30b31fa8c5406deac26241ea5ae4364585bf0661ad9f8293f1867aa914d39ace'),
+        ('src/adapter/surface/mod.rs', 'prepare_pending_opening_browser', '9ac7b4b60533b37509faafe6c44e780d6ba39a4c72891f5b3225224bf85f7754'),
         ('src/adapter/surface/mod.rs', 'pending_opening_owners_retained', '8953566b940f807ca8fc90295b23c15dd8a12777b4c9365543acfbff10aa869f'),
         ('src/adapter/surface/mod.rs', 'pending_opening_completion', 'afb594852028158432b1193ab7b648cc2c1f481540d0053164baa664e05bd1ee'),
         ('src/adapter/surface/mod.rs', 'inject_pending_opening_browser', 'ddc7aaefd114c22d4b18fa5fdc7ab1cf0d9b0f6b3b52315ac2185aa2dd394588'),
@@ -1308,7 +1308,7 @@ def _check_fault_authority(root: Path, scans: dict[str, tuple[Scan, tuple[Attrib
     relative = "src/adapter/native_tests/process_fault.rs"
     item = scans.get(relative)
     code = item[0].code if item else ""
-    if hashlib.sha256(re.sub(r"\s+", "", code).encode()).hexdigest() != "3fcb0f0c8e1602360912c61530891a370f2da9d704dfb00cc253fd0478b2bac8":
+    if hashlib.sha256(re.sub(r"\s+", "", code).encode()).hexdigest() != "acb3a3d39cbc9fc0904169502c24f78ae874449deefc87a2897368a52ae4d351":
         found.append(f"{SHIM}/{relative}: process fault fixture differs from reviewed sealed caller")
 
 
@@ -1532,8 +1532,8 @@ def _check_owned_parent_boundary(sources: dict[str, str], found: list[str]) -> N
 # and the accepted External URI profile.
 # Full text binds attributes, literal URI, handler/denial observations and scope.
 EXTERNAL_FIXTURE_SOURCES = {
-    'crates/pos-owner-bridge-windows/src/ffi/process_fault.rs': 'bdbfe52ec1ee8ee7324604468f6ce0cb0e5cc8e05eb0ae566bc9e7edc0f85b07',
-    'crates/pos-owner-bridge-windows/src/adapter/surface/mod.rs': 'b53665ec194d8f46528c880878d18671c4f1faccb99e0607e7d1ec44103e845f',
+    'crates/pos-owner-bridge-windows/src/ffi/process_fault.rs': '5f41366ac4d64a87ff3ae6c6493e49515cdd86bf984d8a7cca6892642f9ed6d6',
+    'crates/pos-owner-bridge-windows/src/adapter/surface/mod.rs': 'bac10398c6a03974fa061b5752cc616362aa7d0de1e508a127f8810c560f842c',
     'crates/pos-owner-bridge-windows/src/ffi/events/controls.rs': '8c53ef70d3d845bebd2a1d84976765e4a37beafb44ba3a0eb5359b2725c91d29',
     'crates/pos-owner-bridge-windows/src/ffi/events/mod.rs': '7fc36286ad4b27ced12deb75768e3309d4e92fb31aa9f45d15d08753da176836',
     'crates/pos-owner-bridge-windows/src/ffi/events/denial.rs': '5b5152942f17630af41b044c53c80403ac5f4cfaef267bfbe4e5fc3207988820',

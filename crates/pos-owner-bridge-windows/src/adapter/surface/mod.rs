@@ -353,9 +353,6 @@ impl Surface {
         self.admit_environment(&folder).map_err(|_| {
             pending_opening_diagnostic("NATIVE_PENDING_OPENING failure=environment-admission");
         })?;
-        pending_opening_diagnostic(
-            "NATIVE_PENDING_OPENING before-candidate=owners-retained-callback-pending",
-        );
         let browser = self
             .native
             .pending_opening_browser_candidate()
