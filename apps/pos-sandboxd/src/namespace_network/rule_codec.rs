@@ -3,7 +3,7 @@
 //!
 //! Every rule loads into register 1 and ends in an `accept` verdict. A match
 //! on an IPv6 address or hop limit follows a `meta nfproto` match, and a
-//! match on a TCP port or ICMPv6 type follows a `meta l4proto` match, so no
+//! match on a TCP port or `ICMPv6` type follows a `meta l4proto` match, so no
 //! payload is read from a packet of another protocol.
 //!
 //! `netlink-packet-netfilter` has no typed conntrack expression, so the `ct
@@ -47,9 +47,9 @@ const IPV6_DESTINATION: u32 = 24;
 const IPV6_HOP_LIMIT: u32 = 7;
 /// The offset of the destination port in a TCP header.
 const TCP_DESTINATION_PORT: u32 = 2;
-/// ICMPv6 neighbour solicitation.
+/// `ICMPv6` neighbour solicitation.
 const NEIGHBOUR_SOLICITATION: u8 = 135;
-/// ICMPv6 neighbour advertisement.
+/// `ICMPv6` neighbour advertisement.
 const NEIGHBOUR_ADVERTISEMENT: u8 = 136;
 /// The `ct` expression's `NFTA_CT_DREG` attribute.
 const NFTA_CT_DREG: u16 = 1;
