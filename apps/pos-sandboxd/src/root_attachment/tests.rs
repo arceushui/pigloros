@@ -82,7 +82,7 @@ pub async fn released_root(
 ///
 /// It is released through the lifecycle controller's root port. The
 /// activation is recorded first, as the mountfsd request would.
-pub(crate) struct FakeRootRelease {
+pub struct FakeRootRelease {
     kernel: FakeKernel,
     root: VerifiedRootMount,
 }
@@ -92,7 +92,7 @@ pub(crate) struct FakeRootRelease {
 ///
 /// # Errors
 /// Returns the release's error.
-pub(crate) async fn release_fake_root(
+pub async fn release_fake_root(
     fake: FakeRootRelease,
     directory: &PreparedAttemptDirectory,
     deadline: tokio::time::Instant,
@@ -108,7 +108,7 @@ pub(crate) async fn release_fake_root(
 ///
 /// # Errors
 /// Returns the attachment fixture's error.
-pub(crate) fn fake_root_release(
+pub fn fake_root_release(
     directory: &PreparedAttemptDirectory,
     absent: bool,
 ) -> Result<FakeRootRelease, String> {
@@ -132,7 +132,7 @@ pub(crate) fn fake_root_release(
 ///
 /// # Errors
 /// Returns the attachment fixture's error.
-pub(crate) fn attached_fixture_root(
+pub fn attached_fixture_root(
     directory: &PreparedAttemptDirectory,
 ) -> Result<VerifiedRootMount, String> {
     directory.begin_activation();
