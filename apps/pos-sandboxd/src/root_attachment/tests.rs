@@ -1552,11 +1552,11 @@ fn corrupt_held_image(snapshot: &ProviderImageSnapshot) -> TestResult {
 struct RejectingActivator;
 
 impl ImageActivator for RejectingActivator {
-    async fn mount_image(
+    fn mount_image(
         self,
         _: ActivationImage,
-    ) -> Result<QuarantinedRootMount, ImageActivationError> {
-        Err(ImageActivationError::MethodRejected)
+    ) -> impl Future<Output = Result<QuarantinedRootMount, ImageActivationError>> + Send {
+        std::future::ready(Err(ImageActivationError::MethodRejected))
     }
 }
 
