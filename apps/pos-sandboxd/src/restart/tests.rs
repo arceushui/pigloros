@@ -158,9 +158,10 @@ async fn host(listing: Listing, loaded: Vec<String>) -> TestResult<Host> {
     };
     let (server, client) =
         peer_connections(|server| server.serve_at("/org/freedesktop/systemd1", manager)).await?;
+    let transport = SystemdTransientUnitTransport::from_connection(client).await?;
     Ok(Host {
         _server: server,
-        transport: SystemdTransientUnitTransport::from_connection(client).await?,
+        transport,
         lookups,
     })
 }
