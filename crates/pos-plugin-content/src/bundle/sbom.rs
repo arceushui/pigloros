@@ -68,17 +68,27 @@ pub(super) fn validate(value: &Value, component: &str) -> Result<(), Refusal> {
     if external.len() != items(value, "externalDocumentRefs").count() {
         return Err(Refusal::ReferenceMismatch);
     }
+    let described = described_targets(value, &elements, &external)?;
+    licences(value, &external)?;
+    bind_component(&described, &elements, component)
+}
+
+fn described_targets<'a>(
+    value: &'a Value,
+    elements: &BTreeMap<&'a str, (&'a Value, bool)>,
+    external: &BTreeSet<&'a str>,
+) -> Result<BTreeSet<&'a str>, Refusal> {
     let mut described = BTreeSet::new();
     for target in items(value, "documentDescribes") {
         let target = nonempty(Some(target))?;
-        reference(target, &elements, &external)?;
+        reference(target, elements, external)?;
         described.insert(target);
     }
     for relationship in items(value, "relationships") {
         let from = nonempty(relationship.get("spdxElementId"))?;
         let to = nonempty(relationship.get("relatedSpdxElement"))?;
-        reference(from, &elements, &external)?;
-        reference(to, &elements, &external)?;
+        reference(from, elements, external)?;
+        reference(to, elements, external)?;
         match relationship.get("relationshipType").and_then(Value::as_str) {
             Some("DESCRIBES") if from == "SPDXRef-DOCUMENT" => {
                 described.insert(to);
@@ -92,15 +102,14 @@ pub(super) fn validate(value: &Value, component: &str) -> Result<(), Refusal> {
     for (element, _) in elements.values() {
         for field in ["hasFiles", "fileDependencies"] {
             for target in items(element, field) {
-                reference(nonempty(Some(target))?, &elements, &external)?;
+                reference(nonempty(Some(target))?, elements, external)?;
             }
         }
         if let Some(target) = element.get("snippetFromFile") {
-            reference(nonempty(Some(target))?, &elements, &external)?;
+            reference(nonempty(Some(target))?, elements, external)?;
         }
     }
-    licences(value, &external)?;
-    bind_component(&described, &elements, component)
+    Ok(described)
 }
 
 fn bind_component(
