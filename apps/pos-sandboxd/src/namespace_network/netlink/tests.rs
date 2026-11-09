@@ -272,7 +272,9 @@ fn a_refused_interrupted_or_foreign_dump_fails() {
 
 #[test]
 fn a_socket_of_no_netlink_protocol_is_refused() {
-    let protocol = rustix::net::Protocol::from_raw(rustix::net::RawProtocol::MAX);
+    let protocol = Some(rustix::net::Protocol::from_raw(
+        rustix::net::RawProtocol::MAX,
+    ));
     assert!(matches!(
         NetlinkSocket::open(protocol, RECEIVE_TIMEOUT),
         Err(NetlinkError::Io(_))
