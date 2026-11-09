@@ -138,8 +138,9 @@ impl PreparedAttemptDirectory {
         self.execution.clone()
     }
 
-    /// Record that root activation began before any mountfsd resource exists.
-    /// Intent deletion then requires released-root evidence for that one root.
+    /// Record that a root activation is about to send its mountfsd request,
+    /// before any loop/dm resource can exist. Intent deletion then requires
+    /// released-root evidence for exactly that one root.
     pub(crate) fn begin_activation(&self) {
         self.activations.fetch_add(1, Ordering::AcqRel);
     }

@@ -346,8 +346,9 @@ mod cases {
         tree.registry
             .commit_planned(&PlannedAttemptIntent::new([10; 16], [9; 32])?)?;
 
-        // Foreign evidence, a missing root and an ambiguous repeat activation.
-        for case in 0..3 {
+        // Foreign evidence, a missing root, an ambiguous repeat activation and
+        // a released root on a tree whose activation never reached mountfsd.
+        for case in 0..4 {
             let tree = prepared_tree()?;
             let other = tree
                 .registry
@@ -357,15 +358,13 @@ mod cases {
             let foreign = release_owned(root, &kernel, &other).await?;
             let (kernel, root) = attached_root(&tree.prepared)?;
             let own = release_owned(root, &kernel, &tree.prepared).await?;
-            tree.prepared.begin_activation();
-            let evidence = match case {
-                0 => Some(foreign),
-                1 => None,
-                _ => {
-                    tree.prepared.begin_activation();
-                    Some(own)
-                }
+            let (activations, evidence) = match case {
+                0 => (1, Some(foreign)),
+                1 => (1, None),
+                2 => (2, Some(own)),
+                _ => (0, Some(own)),
             };
+            (0..activations).for_each(|_| tree.prepared.begin_activation());
             let key = component(&tree.prepared);
             let record = tree.runtime.path().join("registry").join(&key);
             let bytes = fs::read(&record)?;

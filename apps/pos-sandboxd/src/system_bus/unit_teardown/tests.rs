@@ -743,4 +743,36 @@ mod cases {
         }
         Ok(())
     }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stopped_unit_still_needs_the_released_root_of_its_activated_tree() -> TestResult {
+        // The exact unit with its root, the exact unit without its root, and
+        // another unit's evidence beside this tree's correct root.
+        for (unit_id, released) in [(1, true), (1, false), (2, true)] {
+            let mut fixture = Fixture::new(unit_id, Stop::Empty, Reset::Unload).await?;
+            let (shutdown, deadline) = budgets()?;
+            let observed = fixture
+                .transport
+                .stop_attempt_unit(&mut fixture.bound, shutdown, deadline)
+                .await?;
+            let (runtime, registry, prepared) = prepared_attempt(1)?;
+            let root = crate::test_fixtures::released_root(&prepared).await?;
+            let key = prepared.intent().unit_name().attempt_component().to_owned();
+            let result = prepared.finish_terminal_cleanup(
+                crate::AttemptUnitTermination::Stopped(&observed),
+                released.then_some(root),
+            );
+            let exact = unit_id == 1 && released;
+            assert_eq!(result.is_ok(), exact, "unit {unit_id}: {result:?}");
+            assert_eq!(runtime.path().join("registry").join(&key).exists(), !exact);
+            assert_eq!(runtime.path().join("attempts").join(&key).exists(), !exact);
+            assert_eq!(
+                registry
+                    .commit_planned(&crate::PlannedAttemptIntent::new([3; 16], [9; 32])?)
+                    .is_ok(),
+                exact
+            );
+        }
+        Ok(())
+    }
 }
