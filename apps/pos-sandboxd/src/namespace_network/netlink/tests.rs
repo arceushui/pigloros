@@ -122,6 +122,21 @@ fn an_acknowledged_request_waits_for_its_acknowledgement() -> TestResult {
 }
 
 #[test]
+fn request_flags_add_to_the_request_and_acknowledgement_flags() -> TestResult {
+    // Flags that repeat a bit the session sets leave it set.
+    let session = NetlinkSession::new(Scripted::replying(vec![ack(1, 0)]));
+    session.execute(vec![Request::acknowledged(
+        get_link(),
+        NLM_F_REQUEST | NLM_F_ACK,
+    )])?;
+    assert_eq!(
+        sent_headers(&session.transport)?[0].flags,
+        NLM_F_REQUEST | NLM_F_ACK
+    );
+    Ok(())
+}
+
+#[test]
 fn a_batch_waits_only_for_its_acknowledged_requests() -> TestResult {
     // Sequence 1 and 4 delimit the batch; 2 and 3 are acknowledged in two
     // datagrams, in either order.
