@@ -321,7 +321,7 @@ fn plan_errors_say_what_is_wrong() {
 }
 
 #[test]
-fn other_private_ipv4_blocks_and_unique_local_edges_are_ranges() -> TestResult {
+fn other_private_ipv4_blocks_and_unique_local_edges_are_ranges() {
     let ipv6 = v6(0xfd00, 0, 0);
     for (address, length) in [(v4(172, 16, 0, 0), 12), (v4(192, 168, 0, 0), 16)] {
         assert!(
@@ -344,7 +344,6 @@ fn other_private_ipv4_blocks_and_unique_local_edges_are_ranges() -> TestResult {
             "{address}"
         );
     }
-    Ok(())
 }
 
 #[test]
