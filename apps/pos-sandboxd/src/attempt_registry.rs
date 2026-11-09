@@ -861,10 +861,11 @@ mod tests {
                     assert_eq!(bytes, intent.encode());
                 } else {
                     observed_temporary = true;
+                    // Sequence 1 named the initial activation marker write.
                     assert_eq!(
                         name,
                         format!(
-                            ".planned-{}-{}-1",
+                            ".planned-{}-{}-2",
                             intent.unit_name.attempt_component(),
                             std::process::id()
                         )
