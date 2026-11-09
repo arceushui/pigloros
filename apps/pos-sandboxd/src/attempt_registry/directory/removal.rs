@@ -1,7 +1,8 @@
 //! Exact unmounted directory removal, retaining durable intent for recovery.
 
-use rustix::fs::{unlinkat, AtFlags, Dir};
+use rustix::fs::Dir;
 
+use super::super::remove_empty;
 use super::{registry_io, File, PreparedAttemptDirectory, SystemdAttemptRegistryError};
 
 type RemovalResult = Result<(), SystemdAttemptRegistryError>;
@@ -74,12 +75,6 @@ fn require_only_root(directory: &File) -> RemovalResult {
         })
 }
 
-fn remove_empty(parent: &File, component: &str) -> RemovalResult {
-    registry_io(|| unlinkat(parent, component, AtFlags::REMOVEDIR).map_err(std::io::Error::from))
-        .and_then(|()| registry_io(|| parent.sync_all()))
-        .map_err(Into::into)
-}
-
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
@@ -115,7 +110,7 @@ mod tests {
                 fs::read_dir(runtime.path().join("attempts"))?.count(),
                 8 - usize::from(id)
             );
-            assert_eq!(fs::read_dir(runtime.path().join("registry"))?.count(), 8);
+            assert_eq!(fs::read_dir(runtime.path().join("registry"))?.count(), 9);
         }
         // Directory removal neither deletes intents nor quarantines a clean owner.
         registry.commit_planned(&intent(9)?)?;
