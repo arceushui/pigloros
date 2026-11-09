@@ -10,7 +10,9 @@ failure code (the oracle's), both derived here from the oracle alone; the time s
 record binds the BLAKE3 digest of its payload (`inputs/plugin-conformance/<family>.json`).
 The Local and Air-Gapped bundles are materialized from this one record per family, so their
 digests are equal by construction; the profile must list exactly one `expected` path per family
-and nothing else. The execution matrix holds no executed case and no Plugin row.
+and nothing else. The execution matrix holds no Plugin row, and no executed case outside the
+non-interference rows declared in `non_interference_executed_rows.json` (ADR-062 Revision 8
+slices N1-N4); those cases are owned and checked by `generate_non_interference_fixtures.py`.
 """
 
 from __future__ import annotations
@@ -25,6 +27,12 @@ sys.path.insert(0, str(HERE))
 import generate_pmf1_golden_vectors as golden  # noqa: E402
 
 LAYER = "plugin-conformance"
+# The rows whose verifier-accepted cases the non-interference slices flip (owner answer Q9);
+# this checker does not own their execution fields.
+NON_INTERFERENCE_EXECUTED_ROWS = tuple(
+    json.loads((HERE / "non_interference_executed_rows.json").read_text(encoding="utf-8"))["rows"]
+)
+HEX = "0123456789abcdef"
 MODES = ("local", "air-gapped")
 FAMILIES = (
     "positive",
@@ -104,9 +112,37 @@ def profile_errors(root: Path) -> list[str]:
     return [f"the profile binds {bound}, not one record per family {wanted}"]
 
 
+def executed_row_case_errors(label: str, case: dict[str, object]) -> list[str]:
+    """The faults of one case of an executed non-interference row: only an L, R or F case may be
+    executed, and then with a 64-hex expected result digest; every other case stays open."""
+    faults = []
+    if case.get("authority_result_digest") is not None:
+        faults.append(f"{label}: authority_result_digest is not null")
+    digest = case.get("expected_result_digest")
+    if case.get("executed") is True and case.get("mode") in ("L", "R", "F"):
+        if not (isinstance(digest, str) and len(digest) == 64 and all(c in HEX for c in digest)):
+            faults.append(f"{label}: expected_result_digest is not 64 lowercase hex digits")
+        return faults
+    if case.get("executed") is not False:
+        faults.append(f"{label}: executed is not false")
+    for key in ("expected_result_digest", "expected_result"):
+        if case.get(key) is not None:
+            faults.append(f"{label}: {key} is not null")
+    return faults
+
+
 def row_errors(label: str, row: dict[str, object]) -> list[str]:
     """The faults of one matrix row or case: executed, digest-bearing or Plugin layer."""
     faults = []
+    if LAYER in (row.get("claim_layer"), row.get("authority_fixture_id"), row.get("fixture_id")):
+        faults.append(f"{label}: a {LAYER} row")
+    if row.get("fixture_id") in NON_INTERFERENCE_EXECUTED_ROWS:
+        # An executed row's count is checked against its cases by `count_errors`.
+        if "case_id" in row:
+            faults.extend(executed_row_case_errors(label, row))
+        elif row.get("authority_result_digest") is not None:
+            faults.append(f"{label}: authority_result_digest is not null")
+        return faults
     if row.get("executed") is not False and "executed" in row:
         faults.append(f"{label}: executed is not false")
     for key in ("expected_result_digest", "expected_result", "authority_result_digest"):
@@ -114,8 +150,6 @@ def row_errors(label: str, row: dict[str, object]) -> list[str]:
             faults.append(f"{label}: {key} is not null")
     if row.get("executed_case_count", 0) != 0:
         faults.append(f"{label}: executed_case_count is not 0")
-    if LAYER in (row.get("claim_layer"), row.get("authority_fixture_id"), row.get("fixture_id")):
-        faults.append(f"{label}: a {LAYER} row")
     return faults
 
 
@@ -126,13 +160,19 @@ def count_errors(matrix: dict[str, object]) -> list[str]:
     for key, size in (("row_count", len(rows)), ("case_count", len(cases))):
         if matrix.get(key) != size:
             faults.append(f"{key} is {matrix.get(key)!r}, the list has {size}")
-    if matrix.get("executed_case_count") != 0:
-        faults.append("executed_case_count is not 0")
+    executed = [case for case in cases if isinstance(case, dict) and case.get("executed") is True]
+    if matrix.get("executed_case_count") != len(executed):
+        faults.append(f"executed_case_count is not the {len(executed)} executed cases")
+    for index, row in enumerate(rows):
+        if isinstance(row, dict) and row.get("fixture_id") in NON_INTERFERENCE_EXECUTED_ROWS:
+            count = sum(1 for case in executed if case.get("fixture_id") == row["fixture_id"])
+            if row.get("executed_case_count") != count:
+                faults.append(f"rows[{index}]: executed_case_count is not its {count} cases")
     return faults
 
 
 def matrix_errors(root: Path) -> list[str]:
-    """No executed case, no digest and no Plugin conformance row in the execution matrix."""
+    """No Plugin conformance row, and no executed case or digest outside the executed rows."""
     matrix = as_dict(load(root / "matrix/execution-matrix.json"))
     faults = count_errors(matrix)
     for kind in ("rows", "cases"):

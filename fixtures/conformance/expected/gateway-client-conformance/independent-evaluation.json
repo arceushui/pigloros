@@ -2,8 +2,22 @@
   "claim_layer": "gateway-client-conformance",
   "case_id": "gateway-client-conformance-independent-evaluation",
   "family": "independent-evaluation",
-  "input_blake3_digest": "42a6d35ed81e6f1a9dab3ee7f0c603ea1a6f70f2686806c59ca529ea38800ad8",
-  "status": "pending",
-  "execution_result": null,
+  "input_blake3_digest": "37a477a8c65b73d23fd9ce680ba4f0f6b95b1aad0c916b457cd70d9a065af6c8",
+  "status": "executed",
+  "execution_result": {
+    "evidence": "local-relaxation",
+    "modes": [
+      {
+        "mode": "local",
+        "outcome": "pass",
+        "actual_digest": "e5b7f06f7b738eb7b872a38d6c33d9ea660c93c85a54cf77f05cba0e5e1d248e"
+      },
+      {
+        "mode": "air-gapped",
+        "outcome": "pass",
+        "actual_digest": "e5b7f06f7b738eb7b872a38d6c33d9ea660c93c85a54cf77f05cba0e5e1d248e"
+      }
+    ]
+  },
   "executed_at": null
 }
