@@ -105,10 +105,10 @@ pub use local_network::{
 
 #[cfg(target_os = "linux")]
 pub use attempt_registry::{
-    CommittedPlannedAttempt, PlannedAttemptIntent, PreparedAttemptDirectory,
-    RecoveredAttemptIntent, RecoveredUnmountedDirectory, RegistryRecoveryEntry,
-    SystemdAttemptRecovery, SystemdAttemptRegistry, SystemdAttemptRegistryError,
-    UnmountedDirectoryInventory,
+    AttemptUnitTermination, CommittedPlannedAttempt, CompletedAttemptCleanup, PlannedAttemptIntent,
+    PreparedAttemptDirectory, RecoveredAttemptIntent, RecoveredUnmountedDirectory,
+    RegistryRecoveryEntry, SystemdAttemptRecovery, SystemdAttemptRegistry,
+    SystemdAttemptRegistryError, UnmountedDirectoryInventory,
 };
 
 #[cfg(target_os = "linux")]
@@ -117,7 +117,9 @@ pub use image_activator::{
     QuarantinedRootMount,
 };
 #[cfg(target_os = "linux")]
-pub use root_attachment::{activate_admitted_root, RootResourceIdentity, VerifiedRootMount};
+pub use root_attachment::{
+    activate_admitted_root, ReleasedAttemptRoot, RootResourceIdentity, VerifiedRootMount,
+};
 
 #[cfg(target_os = "linux")]
 pub use provider_barrier::{

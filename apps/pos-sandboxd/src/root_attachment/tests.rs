@@ -61,6 +61,23 @@ pub fn recorded_identity(
         .map_err(|error| error.to_string())
 }
 
+/// Released-root evidence for the single activation of `directory`.
+///
+/// It comes from the existing fake attachment and release fixtures. The
+/// activation is recorded first, as the mountfsd request would; this grants
+/// no other authority.
+///
+/// # Errors
+/// Returns the attachment or release fixture's error.
+pub async fn released_root(
+    directory: &PreparedAttemptDirectory,
+) -> Result<ReleasedAttemptRoot, String> {
+    directory.begin_activation();
+    let (kernel, root) = attached_root(directory).map_err(|error| error.to_string())?;
+    let released = release_owned(root, &kernel, directory).await;
+    released.map_err(|error| error.to_string())
+}
+
 fn cleanup_deadline() -> tokio::time::Instant {
     tokio::time::Instant::now() + std::time::Duration::from_secs(1)
 }
@@ -84,6 +101,14 @@ async fn detach_owned(
     kernel: &impl AttachmentKernel,
     directory: &PreparedAttemptDirectory,
 ) -> Result<(), ImageActivationError> {
+    release_owned(root, kernel, directory).await.map(drop)
+}
+
+async fn release_owned(
+    root: VerifiedRootMount,
+    kernel: &impl AttachmentKernel,
+    directory: &PreparedAttemptDirectory,
+) -> Result<ReleasedAttemptRoot, ImageActivationError> {
     super::release::Release::new(root, directory, cleanup_deadline())
         .finish(kernel)
         .await
@@ -1315,72 +1340,8 @@ fn fixed_registry() -> TestResult {
     Ok(())
 }
 
-#[tokio::test]
-async fn the_admitted_chain_reaches_attachment_only_through_every_gate() -> TestResult {
-    if std::env::var_os(PRIVILEGED_COMPOSITION_TEST).is_none() {
-        return run_isolated(
-            "root_attachment::tests::the_admitted_chain_reaches_attachment_only_through_every_gate",
-        );
-    }
-    let staged = StagedInstallation::stage_execution().map_err(|error| error.to_string())?;
-    let snapshot = ProviderImageSnapshot::open(staged.request())?;
-    let admission = snapshot.admit_held_image()?;
-    fixed_registry()?;
-    let registry = SystemdAttemptRegistry::open()?;
-    let prepared = registry
-        .commit_planned(&PlannedAttemptIntent::new(
-            snapshot.request().attempt_id,
-            snapshot.request().authority.sim1_digest,
-        )?)?
-        .prepare_directory()?;
-    let root_directory = ActivatedRootDirectory::for_attempt(&component(&prepared));
-    let expected = Expected::for_admission(&admission, root_directory.clone())
-        .ok_or("the held image identity")?;
-
-    // The isolated runner shares the hosted kernel's command line, which
-    // does not veto userspace Verity: the public entry fails closed.
-    assert_eq!(
-        activate_admitted_root(&admission, &prepared).await.err(),
-        Some(ImageActivationError::HostFeatureUnavailable)
-    );
-    // With the veto, a missing mountfsd is still unavailable.
-    let kernel = FakeKernel::accepting(matching(&expected));
-    assert_eq!(
-        activate(
-            &kernel,
-            &admission,
-            &prepared,
-            MountfsdImageActivator::connect
-        )
-        .await
-        .err(),
-        Some(ImageActivationError::HostFeatureUnavailable)
-    );
-
-    fs::create_dir("/run/systemd")?;
-    let listener = UnixListener::bind("/run/systemd/io.systemd.MountFileSystem")?;
-    let root = expected.root;
-    let peer = thread::spawn(move || serve(&listener, root, 2));
-
-    // Every gate passes: the verified root names the attempt path.
-    let verified = activate(
-        &kernel,
-        &admission,
-        &prepared,
-        MountfsdImageActivator::connect,
-    )
-    .await?;
-    assert_eq!(verified.root_directory(), &root_directory);
-    assert_eq!(verified.mount_id(), 41);
-    assert_eq!(kernel.detached(), 0);
-
-    // The entry reservation consumes a fresh admission. The public recheck
-    // re-reads the real host kernel: the fake descriptor is no attached EROFS
-    // mount, so it refuses.
-    check_admitted_recheck(&verified, &kernel, &registry, &snapshot, &staged, &prepared)?;
-
-    // The held image changes after admission: re-admission rejects and the
-    // attached root is detached again.
+/// Overwrite the first byte of the admitted, installed image.
+fn corrupt_held_image(snapshot: &ProviderImageSnapshot) -> TestResult {
     let image = Path::new("/var/lib/pigloros/sandbox/images").join(
         snapshot
             .image()
@@ -1396,6 +1357,101 @@ async fn the_admitted_chain_reaches_attachment_only_through_every_gate() -> Test
         .write(true)
         .open(&image)?
         .write_all(&[0xff])?;
+    Ok(())
+}
+
+/// Activate `prepared` once more, release its root and finish its cleanup.
+async fn retry_and_clean(
+    kernel: &FakeKernel,
+    admission: &HeldImageAdmission<'_>,
+    prepared: PreparedAttemptDirectory,
+) -> TestResult {
+    let retried = activate(
+        kernel,
+        admission,
+        &prepared,
+        MountfsdImageActivator::connect,
+    )
+    .await?;
+    let released = release_owned(retried, kernel, &prepared).await?;
+    prepared.finish_terminal_cleanup(crate::AttemptUnitTermination::Unclaimed, Some(released))?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_admitted_chain_reaches_attachment_only_through_every_gate() -> TestResult {
+    if std::env::var_os(PRIVILEGED_COMPOSITION_TEST).is_none() {
+        return run_isolated(
+            "root_attachment::tests::the_admitted_chain_reaches_attachment_only_through_every_gate",
+        );
+    }
+    let staged = StagedInstallation::stage_execution().map_err(|error| error.to_string())?;
+    let snapshot = ProviderImageSnapshot::open(staged.request())?;
+    let admission = snapshot.admit_held_image()?;
+    fixed_registry()?;
+    let registry = SystemdAttemptRegistry::open()?;
+    let planned = PlannedAttemptIntent::new(
+        snapshot.request().attempt_id,
+        snapshot.request().authority.sim1_digest,
+    )?;
+    let prepared = registry.commit_planned(&planned)?.prepare_directory()?;
+    let root_directory = ActivatedRootDirectory::for_attempt(&component(&prepared));
+    let expected = Expected::for_admission(&admission, root_directory.clone())
+        .ok_or("the held image identity")?;
+
+    // The isolated runner shares the hosted kernel's command line, which
+    // does not veto userspace Verity: the public entry fails closed.
+    assert_eq!(
+        activate_admitted_root(&admission, &prepared).await.err(),
+        Some(ImageActivationError::HostFeatureUnavailable)
+    );
+    // With the veto, a missing mountfsd is still unavailable.
+    let kernel = FakeKernel {
+        mount_path: Some(tempfile::NamedTempFile::new()?.into_temp_path()),
+        ..FakeKernel::accepting(matching(&expected))
+    };
+    assert_eq!(
+        activate(
+            &kernel,
+            &admission,
+            &prepared,
+            MountfsdImageActivator::connect
+        )
+        .await
+        .err(),
+        Some(ImageActivationError::HostFeatureUnavailable)
+    );
+
+    fs::create_dir("/run/systemd")?;
+    let listener = UnixListener::bind("/run/systemd/io.systemd.MountFileSystem")?;
+    let root = expected.root;
+    let peer = thread::spawn(move || serve(&listener, root, 3));
+
+    // Neither early failure reached mountfsd, so after one successful retry
+    // the released root alone lets terminal cleanup delete intent last.
+    retry_and_clean(&kernel, &admission, prepared).await?;
+    let prepared = registry.commit_planned(&planned)?.prepare_directory()?;
+
+    // Every gate passes: the verified root names the attempt path.
+    let verified = activate(
+        &kernel,
+        &admission,
+        &prepared,
+        MountfsdImageActivator::connect,
+    )
+    .await?;
+    assert_eq!(verified.root_directory(), &root_directory);
+    assert_eq!(verified.mount_id(), 41);
+    assert_eq!(kernel.detached(), 1);
+
+    // The entry reservation consumes a fresh admission. The public recheck
+    // re-reads the real host kernel: the fake descriptor is no attached EROFS
+    // mount, so it refuses.
+    check_admitted_recheck(&verified, &kernel, &registry, &snapshot, &staged, &prepared)?;
+
+    // The held image changes after admission: re-admission rejects and the
+    // attached root is detached again.
+    corrupt_held_image(&snapshot)?;
     assert_eq!(
         activate(
             &kernel,
@@ -1407,7 +1463,7 @@ async fn the_admitted_chain_reaches_attachment_only_through_every_gate() -> Test
         .err(),
         Some(ImageActivationError::EvidenceMismatch)
     );
-    assert_eq!(kernel.detached(), 1);
+    assert_eq!(kernel.detached(), 2);
     peer.join().map_err(|_| "the fake mountfsd panicked")??;
 
     // A replaced attempt root rejects before mountfsd is called.
@@ -1426,6 +1482,12 @@ async fn the_admitted_chain_reaches_attachment_only_through_every_gate() -> Test
         .err(),
         Some(ImageActivationError::AttachFailure)
     );
+    // The activation that reached mountfsd retains intent until its one root
+    // is released; the later early failure does not change that.
+    assert!(matches!(
+        prepared.finish_terminal_cleanup(crate::AttemptUnitTermination::Unclaimed, None),
+        Err(crate::SystemdAttemptRegistryError::CleanupEvidence)
+    ));
     Ok(())
 }
 
