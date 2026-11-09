@@ -302,10 +302,7 @@ impl Shape {
 ///
 /// # Errors
 /// Returns the owner identifier error.
-pub fn make_draft<'a>(
-    shape: Shape,
-    content: &'a FixtureContent,
-) -> BoxResult<PluginReleaseDraftV1<'a>> {
+pub fn make_draft(shape: Shape, content: &FixtureContent) -> BoxResult<PluginReleaseDraftV1<'_>> {
     Ok(PluginReleaseDraftV1 {
         plugin_id: shape.plugin_id.to_owned(),
         release_version: shape.version.to_owned(),
