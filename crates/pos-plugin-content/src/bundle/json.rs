@@ -119,3 +119,38 @@ impl<'de> Visitor<'de> for Node<'_> {
         Ok(Value::Object(values))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{Budget, Node};
+    use serde::de::{
+        value::{BorrowedBytesDeserializer, Error},
+        DeserializeSeed, Visitor,
+    };
+
+    // Serde requires expecting and supports non-JSON deserializers too. JSON
+    // bytes cannot represent byte strings or infinities; exercise that narrow
+    // trait contract without adding a product parser override.
+    #[test]
+    fn the_serde_visitor_refuses_byte_strings_and_nonfinite_numbers(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut budget = Budget::default();
+        let error = Node {
+            budget: &mut budget,
+            depth: 0,
+        }
+        .deserialize(BorrowedBytesDeserializer::<Error>::new(b"not JSON"))
+        .err()
+        .ok_or("byte string unexpectedly accepted")?;
+        assert!(error.to_string().contains("bounded JSON"));
+        for value in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+            assert!(Node {
+                budget: &mut budget,
+                depth: 0
+            }
+            .visit_f64::<Error>(value)
+            .is_err());
+        }
+        Ok(())
+    }
+}

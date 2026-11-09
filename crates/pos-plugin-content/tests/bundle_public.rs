@@ -1,6 +1,7 @@
 //! Complete checks use verified real closures; no unchecked content proof exists.
 
 mod cases {
+    mod content_negatives;
     mod fixture;
 
     use fixture::{bytes, Fixture, TestResult};
