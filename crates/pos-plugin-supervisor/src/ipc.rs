@@ -124,6 +124,8 @@ impl Zeroize for WorkerCallV1 {
 impl Drop for WorkerCallV1 {
     fn drop(&mut self) {
         self.zeroize();
+        #[cfg(test)]
+        tests::observe_call_erasure(self);
     }
 }
 

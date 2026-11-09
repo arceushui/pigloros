@@ -772,10 +772,9 @@ impl Driver for GPlugDriver {
                 self.observation.clone(),
                 Vec::new(),
             ))
-            .map(|output| {
+            .map(|mut output| {
                 StepOutput::new(
-                    output
-                        .event_drafts
+                    std::mem::take(&mut output.event_drafts)
                         .into_iter()
                         .map(|draft| {
                             EventDraft::new(
@@ -1101,7 +1100,7 @@ fn rebuild(
                         Value::Bytes(digest(&invocation.prior_state_bytes).to_vec()),
                     ]));
                     match result {
-                        Ok(output) => {
+                        Ok(mut output) => {
                             let consumed = Value::Array(
                                 output
                                     .consumed_dependencies
@@ -1118,7 +1117,7 @@ fn rebuild(
                             rebuilt
                                 .edges
                                 .push(Value::Array(vec![uint(ordinal), consumed]));
-                            rebuilt.state = output.next_state_bytes;
+                            rebuilt.state = std::mem::take(&mut output.next_state_bytes);
                         }
                         Err(error) => {
                             let record = Value::Array(vec![

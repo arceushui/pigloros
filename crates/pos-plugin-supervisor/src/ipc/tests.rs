@@ -7,6 +7,37 @@ use crate::test_support::{descriptor, invocation, log, negotiated, ok, output, M
 
 type Error = CommunityPluginHostErrorV1;
 
+thread_local! {
+    static CALL_ERASURE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+// Observe the still-live value at the actual destructor boundary. No test
+// reads freed memory or treats this logical observation as physical wipe proof.
+pub(super) fn observe_call_erasure(call: &WorkerCallV1) {
+    let erased = match call {
+        WorkerCallV1::Describe => true,
+        WorkerCallV1::Reduce(input) | WorkerCallV1::Drive(input) => {
+            input.observation_bytes.is_empty()
+                && input.prior_state_bytes.is_empty()
+                && input.deterministic_budget_id.is_empty()
+        }
+    };
+    CALL_ERASURE.set(Some(erased));
+}
+
+#[test]
+fn dropping_each_owned_worker_call_reaches_erasure_before_releasing_its_payloads() {
+    for call in [
+        WorkerCallV1::Describe,
+        WorkerCallV1::Reduce(invocation(b"private observation")),
+        WorkerCallV1::Drive(invocation(b"private observation")),
+    ] {
+        CALL_ERASURE.set(None);
+        drop(call);
+        assert_eq!(CALL_ERASURE.get(), Some(true));
+    }
+}
+
 /// An invocation whose numbers need every CBOR head width.
 fn wide_invocation() -> PluginInvocationV1 {
     let mut wide = invocation(b"observation");
@@ -341,6 +372,29 @@ fn produced(result: GuestReturnV1<PluginOutputV1>) -> WorkerReturnV1 {
 
 fn round_trip_response(outcome: &WorkerOutcomeV1) -> Decoded<WorkerOutcomeV1> {
     encode_worker_response_v1(outcome).and_then(|bytes| decode_worker_response_v1(&bytes))
+}
+
+#[test]
+fn partial_private_output_lists_and_trailing_responses_are_refused() {
+    let mut value = output(&invocation(b"observation"));
+    value.event_drafts.push(value.event_drafts[0].clone());
+    value
+        .trace_annotations
+        .push(value.trace_annotations[0].clone());
+    let outcome = Ok(produced(Ok(value)));
+    let encoded = ok(encode_worker_response_v1(&outcome));
+    for end in 0..encoded.len() {
+        assert_eq!(
+            decode_worker_response_v1(&encoded[..end]),
+            Err(WorkerEnvelopeErrorV1)
+        );
+    }
+    let trailing = [encoded.as_slice(), &[0]].concat();
+    assert_eq!(
+        decode_worker_response_v1(&trailing),
+        Err(WorkerEnvelopeErrorV1)
+    );
+    assert_eq!(decode_worker_response_v1(&encoded).as_ref(), Ok(&outcome));
 }
 
 #[test]

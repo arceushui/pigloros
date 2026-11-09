@@ -142,6 +142,16 @@ pub struct EventDraftV1 {
     pub dependency_digests: Vec<[u8; 32]>,
 }
 
+impl Zeroize for EventDraftV1 {
+    fn zeroize(&mut self) {
+        self.event_schema_id.zeroize();
+        self.entity_id.zeroize();
+        self.event_type.zeroize();
+        self.canonical_payload.zeroize();
+        self.dependency_digests.zeroize();
+    }
+}
+
 /// `contract-v1.trace-annotation`, validated.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TraceAnnotationV1 {
@@ -153,10 +163,20 @@ pub struct TraceAnnotationV1 {
     pub dependency_digests: Vec<[u8; 32]>,
 }
 
+impl Zeroize for TraceAnnotationV1 {
+    fn zeroize(&mut self) {
+        self.annotation_schema_id.zeroize();
+        self.canonical_bytes.zeroize();
+        self.dependency_digests.zeroize();
+    }
+}
+
 /// `contract-v1.plugin-output`, fully validated against its invocation.
 ///
 /// Nothing in it is committed by the engine: the supervisor approves and
 /// commits it as one value at the Tick Boundary.
+/// Dropping an owned output erases its retained payloads, State, annotations
+/// and identities. A consumer transferring a field must own that copy's cleanup.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PluginOutputV1 {
     /// The invocation's ID, echoed.
@@ -173,6 +193,26 @@ pub struct PluginOutputV1 {
     pub consumed_dependencies: Vec<[u8; 32]>,
     /// The output digest, equal to [`plugin_output_digest_v1`].
     pub output_digest: [u8; 32],
+}
+
+impl Zeroize for PluginOutputV1 {
+    fn zeroize(&mut self) {
+        self.invocation_id.zeroize();
+        self.event_drafts.zeroize();
+        self.next_state_schema.zeroize();
+        self.next_state_bytes.zeroize();
+        self.trace_annotations.zeroize();
+        self.consumed_dependencies.zeroize();
+        self.output_digest.zeroize();
+    }
+}
+
+impl Drop for PluginOutputV1 {
+    fn drop(&mut self) {
+        self.zeroize();
+        #[cfg(test)]
+        tests::observe_output_erasure(self);
+    }
 }
 
 /// `contract-v1.plugin-descriptor`, checked against the negotiated release.
@@ -310,6 +350,21 @@ fn put_digests(hasher: &mut blake3::Hasher, digests: &[[u8; 32]]) {
 mod tests {
     use super::*;
 
+    thread_local! {
+        static OUTPUT_ERASURE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+    }
+
+    // Borrow only the still-live value after real drop cleanup. This records
+    // logical erasure, without inspecting freed storage or claiming a wipe proof.
+    pub(super) fn observe_output_erasure(output: &PluginOutputV1) {
+        OUTPUT_ERASURE.set(Some(
+            output.event_drafts.is_empty()
+                && output.next_state_bytes.is_empty()
+                && output.trace_annotations.is_empty()
+                && output.consumed_dependencies.is_empty(),
+        ));
+    }
+
     const ARTIFACT: ArtifactRefV1 = ArtifactRefV1 {
         schema_id: 1,
         byte_length: 0,
@@ -429,6 +484,60 @@ mod tests {
             consumed_dependencies: vec![[11; 32]],
             output_digest: [0; 32],
         }
+    }
+
+    #[test]
+    fn output_erasure_clears_nested_payloads_annotations_and_state() {
+        let source = output();
+        let mut draft = source.event_drafts[0].clone();
+        draft.zeroize();
+        assert_eq!(
+            draft,
+            EventDraftV1 {
+                event_schema_id: 0,
+                entity_id: [0; 16],
+                event_type: String::new(),
+                canonical_payload: Vec::new(),
+                dependency_digests: Vec::new(),
+            }
+        );
+        let mut annotation = source.trace_annotations[0].clone();
+        annotation.dependency_digests = vec![[0x39; 32]];
+        annotation.zeroize();
+        assert_eq!(
+            annotation,
+            TraceAnnotationV1 {
+                annotation_schema_id: 0,
+                canonical_bytes: Vec::new(),
+                dependency_digests: Vec::new(),
+            }
+        );
+        let mut owned = source.clone();
+        owned.output_digest = [0x7b; 32];
+        owned.zeroize();
+        assert_eq!(
+            owned,
+            PluginOutputV1 {
+                invocation_id: [0; 16],
+                event_drafts: Vec::new(),
+                next_state_schema: [0; 32],
+                next_state_bytes: Vec::new(),
+                trace_annotations: Vec::new(),
+                consumed_dependencies: Vec::new(),
+                output_digest: [0; 32],
+            }
+        );
+        assert_eq!(source.event_drafts[0].canonical_payload, [3]);
+        assert_eq!(source.trace_annotations[0].canonical_bytes, [10]);
+        assert_eq!(source.next_state_bytes, [6, 7]);
+    }
+
+    #[test]
+    fn dropping_an_output_reaches_erasure_before_releasing_its_payloads() {
+        let owned = output();
+        OUTPUT_ERASURE.set(None);
+        drop(owned);
+        assert_eq!(OUTPUT_ERASURE.get(), Some(true));
     }
 
     const fn len(count: u64) -> [u8; 8] {
