@@ -10,7 +10,7 @@ use std::time::Duration;
 use zbus::{fdo, BoxDBusError, OwnedObjectPath};
 
 use super::*;
-use crate::system_bus::test_support::peer_connections;
+use crate::system_bus::peer_connections;
 use crate::test_fixtures::in_lock_test_process;
 use crate::SystemdAttemptRegistry;
 

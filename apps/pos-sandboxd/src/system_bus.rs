@@ -1137,8 +1137,11 @@ fn unix_socket(address: Address) -> zbus::Result<Address> {
 mod tests;
 
 #[cfg(test)]
+pub(super) use test_support::peer_connections;
+
+#[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
-pub(super) mod test_support {
+mod test_support {
     use zbus::{
         connection::{socket::channel::Channel, Builder},
         Connection, Guid,
