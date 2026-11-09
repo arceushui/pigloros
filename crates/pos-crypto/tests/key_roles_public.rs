@@ -179,15 +179,20 @@ fn public_role_bound_signing_covers_authorization_edges() -> Result<(), Box<dyn 
         ),
         Err(pos_core::KeyRegistryErrorV1::InvalidEpoch)
     );
-    assert_eq!(
-        sign_for_registered_role(
-            &mut registry,
-            &signing_material,
-            encryption_identity,
-            &payload,
-        ),
-        Err(pos_core::KeyRegistryErrorV1::SigningRoleRequired)
-    );
+    for role in [
+        KeyRoleV1::SubjectDataEncryption,
+        KeyRoleV1::ExportRecipientEncryption,
+        KeyRoleV1::CommunityArtifactEncryption,
+    ] {
+        let identity = KeyIdentityV1::new("ledger-owner", role, 1);
+        assert_eq!(
+            sign_for_registered_role(&mut registry, &signing_material, identity, &payload),
+            Err(pos_core::KeyRegistryErrorV1::SigningRoleRequired)
+        );
+        assert!(
+            verify_for_role(&signing_key.verifying_key(), identity, &payload, &signature).is_err()
+        );
+    }
 
     Ok(())
 }

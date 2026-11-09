@@ -25,7 +25,10 @@ other platforms the library is empty and `main` does nothing.
   (`CommunityPluginSupervisorV1::worker_launches()`) across each pass, not an inference from the
   outcome records.
 - The outcome record of a pass is mapped to an EAO1 result as ADR-061 revision 8 decision 3
-  states: an operational fault is `Unavailable`, never a typed failure and never an output.
+  states: an operational fault is `Unavailable`, never a typed failure and never an output. A
+  `ComponentTrap` is the outcome result `Trapped` with its trap class; it is a result only for a
+  sub-case of `independent-evaluation` that expects it with that class
+  (`{"kind":"trapped","class","export":"drive"}`), and is otherwise operational (ADR-061 R13).
 - The payload grammar, the `PCW2` composite, the `PCA1` anchor and the oracle record are those of
   ADR-061 revision 8 decisions 7 and 8.
 

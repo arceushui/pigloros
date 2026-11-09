@@ -17,6 +17,7 @@ import unittest
 
 import yaml
 
+import test_check_owner_runtime_custody_policy as custody_policy_tests
 from check_asan_ci_policy import EXPECTED_SDK_HEADROOM_STEP
 
 
@@ -433,9 +434,9 @@ def assert_codeql_preparation_contract(workflow: dict) -> None:
     if job["timeout-minutes"] != 30 or len(steps) != 5:
         raise AssertionError("retain the analysis deadline and complete step inventory")
     if steps[3:] != [
-        {"uses": "github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2",
+        {"uses": "github/codeql-action/init@9b3254085494b55a0f7c4c2b3d2d52cc712ce370",
          "with": {"languages": "rust", "build-mode": "none"}},
-        {"uses": "github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2",
+        {"uses": "github/codeql-action/analyze@9b3254085494b55a0f7c4c2b3d2d52cc712ce370",
          "with": {"category": "/language:rust"}},
     ]:
         raise AssertionError("retain the unchanged full CodeQL initialization and analysis")
@@ -1166,7 +1167,7 @@ STATIC_LAUNCHER_JOB = {'name': 'static-launcher',
          'CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER': 'aarch64-linux-gnu-gcc'},
  'steps': [{'uses': 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1',
             'with': {'fetch-depth': 0, 'persist-credentials': False}},
-           {'uses': 'dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de',
+           {'uses': 'dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8',
             'with': {'toolchain': '1.97.1',
                      'targets': 'x86_64-unknown-linux-musl,aarch64-unknown-linux-musl'}},
            {'uses': 'Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16',
@@ -1391,6 +1392,13 @@ class StaticLauncherPolicyTests(unittest.TestCase):
                 environment["STATIC_LAUNCHER_RESULT"] = result
                 completed = subprocess.run(["bash", "-c", gate["run"]], env=environment, capture_output=True, check=False)
                 self.assertEqual(completed.returncode == 0, result == "success")
+
+
+def load_tests(loader, tests, pattern):
+    # The required central CI policy step also exercises the separately
+    # triggered custody workflow, including its producer indirection.
+    tests.addTests(loader.loadTestsFromModule(custody_policy_tests))
+    return tests
 
 
 if __name__ == "__main__":

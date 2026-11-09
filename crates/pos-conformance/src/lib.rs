@@ -23,7 +23,17 @@ pub(crate) const TPS1_MAX_REVOKED_ARTIFACTS: usize = 4_096;
 mod bundle_contract;
 #[cfg(test)]
 pub mod catalog_auxiliary;
+mod conformance_conflict;
+mod conformance_correction;
+mod conformance_history;
+mod conformance_impact_analysis;
+mod conformance_promotion;
+mod conformance_promotion_gate;
+mod conformance_retention;
 mod conformance_trust_admission;
+mod conformance_trust_policy;
+mod conformance_waiver;
+mod conformance_withdrawal;
 pub mod counterfactual;
 mod execution_profile;
 mod non_interference;
@@ -37,7 +47,19 @@ mod trust_policy_snapshot;
 mod verification_preflight;
 mod verification_request;
 include!("wire_syntax.rs");
+include!("governance_codec.rs");
 include!(concat!(env!("OUT_DIR"), "/draft_authority.rs"));
+
+/// The release-pinned deployment-operator public key of the Draft authority
+/// (DFA1, `support/draft-execution-authority.json`), as the build pins it.
+///
+/// It authenticates the operator signature of
+/// [`draft_trust_policy_snapshot_bytes_v1`] through
+/// [`TrustPolicySnapshotV1::verify_operator_signature_v1`]. The Draft authority
+/// is repository-test-fixture-only: this key proves Draft trust, never a
+/// production release. A host pins it as its own input; it is never read from
+/// the TPS1's `trust_roots`.
+pub const DRAFT_TRUST_POLICY_OPERATOR_KEY_V1: [u8; 32] = DRAFT_AUTHORITY_PUBLIC_KEY_BYTES;
 
 pub(crate) const MAX_PROVIDER_ENTRIES: usize = 4096;
 
@@ -54,7 +76,7 @@ pub(crate) fn domain_digest(domain: &[u8], value: &[u8]) -> [u8; 32] {
 }
 
 pub use bundle_contract::{
-    draft_execution_profile_bytes_v1, draft_release_admission_bytes_v1,
+    archive_release_filename, draft_execution_profile_bytes_v1, draft_release_admission_bytes_v1,
     draft_trust_policy_snapshot_bytes_v1, expected_result_member_path, fixture_input_member_path,
     host_verified_execution_profile_bytes_v1, verify_archive_independently,
     verify_archive_release_filename, verify_release_tree_independently, BundleContractErrorV1,
@@ -62,9 +84,43 @@ pub use bundle_contract::{
     BundleMemberV1, BundleModeV1, ConformanceBundlePairV1, ConformanceBundleV1,
     CONFORMANCE_BUNDLE_MAGIC_V1, MAX_CONFORMANCE_BUNDLE_BYTES_V1,
 };
+pub use conformance_conflict::{
+    ConformanceConflictV1, CONFORMANCE_CONFLICT_MAGIC_V1,
+    MAX_CONFORMANCE_CONFLICT_COORDINATE_BYTES_V1, MAX_CONFORMANCE_CONFLICT_REPORTS_V1,
+};
+pub use conformance_correction::{ConformanceCorrectionV1, CONFORMANCE_CORRECTION_MAGIC_V1};
+pub use conformance_history::{
+    ConformanceHistoryEntryV1, ConformanceHistoryStateV1, ConformanceHistoryV1,
+    CONFORMANCE_HISTORY_MAGIC_V1,
+};
+pub use conformance_impact_analysis::{
+    ConformanceAffectedReportV1, ConformanceImpactAnalysisV1, CONFORMANCE_IMPACT_ANALYSIS_MAGIC_V1,
+};
+pub use conformance_promotion::{
+    ConformancePromotionReportsV1, ConformancePromotionV1, CONFORMANCE_PROMOTION_MAGIC_V1,
+};
+pub use conformance_promotion_gate::{
+    check_stable_promotion_v1, ConformancePromotionGateInputV1,
+    ConformancePromotionImplementationEvidenceV1, ConformancePromotionRefusalV1,
+    ConformancePromotionReportEvidenceV1,
+};
+pub use conformance_retention::{ConformanceRetentionV1, CONFORMANCE_RETENTION_MAGIC_V1};
 pub use conformance_trust_admission::{
-    ConformanceArtifactRefusalV1, ConformanceKeyRefusalV1, ConformanceTrustAdmissionPortV1,
-    ConformanceTrustRoleV1,
+    conformance_revoked_key_id_v1, ConformanceArtifactRefusalV1, ConformanceKeyRefusalV1,
+    ConformanceTrustAdmissionErrorV1, ConformanceTrustAdmissionPortV1, ConformanceTrustAdmissionV1,
+    ConformanceTrustAnchorV1, ConformanceTrustRoleV1,
+};
+pub use conformance_trust_policy::{
+    ConformanceTrustPolicyContractErrorV1, ConformanceTrustPolicyV1,
+    CONFORMANCE_TRUST_POLICY_MAGIC_V1, MAX_CONFORMANCE_TRUST_POLICY_BYTES_V1,
+    MAX_CONFORMANCE_TRUST_REVOCATIONS_V1, MAX_CONFORMANCE_TRUST_ROOTS_V1,
+};
+pub use conformance_waiver::{
+    ConformanceWaiverEffectV1, ConformanceWaiverV1, CONFORMANCE_WAIVER_MAGIC_V1,
+};
+pub use conformance_withdrawal::{
+    ConformanceWithdrawalSourceV1, ConformanceWithdrawalV1, ConformanceWithdrawnReportV1,
+    CONFORMANCE_WITHDRAWAL_MAGIC_V1,
 };
 pub use execution_profile::{
     ExecutionProfileCapabilitiesV1, ExecutionProfileCompatibilityV1,
@@ -95,8 +151,9 @@ pub use plugin_trust_bridge::{
     plugin_revoked_key_id_v1, plugin_root_key_id_v1, verify_plugin_tps1_policy_v1,
     AuthenticatedPluginTps1V1, PluginFloorErrorV1, PluginFloorKindV1, PluginFloorPlanV1,
     PluginFloorStateV1, PluginFloorTransitionV1, PluginTrustBridgeErrorV1,
-    PluginTrustPolicyAnchorV1, OFFLINE_VALID_THROUGH_BYTES_V1, PLUGIN_OPERATOR_ROLE_V1,
-    PLUGIN_REVOKED_KEY_ID_PREFIX_V1, PLUGIN_ROOT_KEY_ID_PREFIX_V1, PLUGIN_TPS1_BRIDGE_ID_BYTES_V1,
+    PluginTrustPolicyAnchorV1, CONFORMANCE_REVOKED_KEY_ID_PREFIX_V1,
+    OFFLINE_VALID_THROUGH_BYTES_V1, PLUGIN_OPERATOR_ROLE_V1, PLUGIN_REVOKED_KEY_ID_PREFIX_V1,
+    PLUGIN_ROOT_KEY_ID_PREFIX_V1, PLUGIN_TPS1_BRIDGE_ID_BYTES_V1,
 };
 pub use profile_contract::{
     AllowedDivergenceV1, CapabilityPolicyV1, ConformanceContractError, ConformanceProfileV1,
@@ -365,6 +422,31 @@ pub enum ExecutionModeV1 {
     Replay,
     /// Re-execution of an immutable counterfactual Fork.
     Fork,
+}
+
+impl ExecutionModeV1 {
+    /// Decode the canonical `mode` wire code shared by every record that carries a mode.
+    #[must_use]
+    pub(crate) const fn from_wire_code(code: u8) -> Option<Self> {
+        match code {
+            0 => Some(Self::Local),
+            1 => Some(Self::AirGapped),
+            2 => Some(Self::Replay),
+            3 => Some(Self::Fork),
+            _ => None,
+        }
+    }
+
+    /// The canonical `mode` wire code: `Local=0 | AirGapped=1 | Replay=2 | Fork=3`.
+    #[must_use]
+    pub(crate) const fn wire_code(self) -> u8 {
+        match self {
+            Self::Local => 0,
+            Self::AirGapped => 1,
+            Self::Replay => 2,
+            Self::Fork => 3,
+        }
+    }
 }
 
 /// The independently reportable conformance claim layers.
@@ -2755,24 +2837,17 @@ pub mod strict_codec {
     }
 
     fn enum_mode(value: ExecutionModeV1) -> Value {
-        uint(match value {
-            ExecutionModeV1::Local => 0,
-            ExecutionModeV1::AirGapped => 1,
-            ExecutionModeV1::Replay => 2,
-            ExecutionModeV1::Fork => 3,
-        })
+        uint(u64::from(value.wire_code()))
     }
 
     fn decode_mode(value: &Value) -> Result<ExecutionModeV1, StrictCborError> {
-        match uint_value(value, "execution_mode")? {
-            0 => Ok(ExecutionModeV1::Local),
-            1 => Ok(ExecutionModeV1::AirGapped),
-            2 => Ok(ExecutionModeV1::Replay),
-            3 => Ok(ExecutionModeV1::Fork),
-            _ => Err(StrictCborError::InvalidField {
+        let code = uint_value(value, "execution_mode")?;
+        u8::try_from(code)
+            .ok()
+            .and_then(ExecutionModeV1::from_wire_code)
+            .ok_or_else(|| StrictCborError::InvalidField {
                 field: "execution_mode".to_owned(),
-            }),
-        }
+            })
     }
 
     fn enum_claim_layer(value: ClaimLayerV1) -> Value {
@@ -7103,98 +7178,103 @@ pub mod tests {
 
     #[test]
     fn public_cnr1_codec_validates_shape_and_fields_zero_through_twenty_two() {
-        let report = test_report();
-        let bytes = report.to_canonical_cbor().unwrap_or_default();
-        assert_eq!(
-            ConformanceReportV1::from_canonical_cbor(&bytes),
-            Ok(report.clone())
-        );
+        // The two domain-maximum reports are built and checked while the other cases run.
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let (at_limit, at_limit_bytes) = report_at_canonical_byte_limit();
+                assert_eq!(at_limit_bytes.len(), 16 * 1024 * 1024);
+                assert_eq!(at_limit.to_canonical_cbor(), Ok(at_limit_bytes.clone()));
+                assert_eq!(
+                    ConformanceReportV1::from_canonical_cbor(&at_limit_bytes),
+                    Ok(at_limit)
+                );
+            });
+            scope.spawn(|| {
+                let mut oversized_report = test_report();
+                let template = oversized_report.cases[0].clone();
+                oversized_report.cases = (0..=65_535)
+                    .map(|index| {
+                        let mut case = template.clone();
+                        case.case_id = format!("{index:05}{}", "x".repeat(123));
+                        case.outcome = CaseOutcomeStatusV1::Fail;
+                        case.actual_digest = Some([99; 32]);
+                        case.first_coordinate = Some(vec![b'x'; 128]);
+                        case
+                    })
+                    .collect();
+                refresh_test_report(&mut oversized_report);
+                assert_eq!(
+                    oversized_report.to_canonical_cbor(),
+                    Err(EvidenceError::InvalidConformanceReport)
+                );
+            });
+            let report = test_report();
+            let bytes = report.to_canonical_cbor().unwrap_or_default();
+            assert_eq!(
+                ConformanceReportV1::from_canonical_cbor(&bytes),
+                Ok(report.clone())
+            );
 
-        let mut trailing = bytes.clone();
-        trailing.push(0);
-        assert_eq!(
-            ConformanceReportV1::from_canonical_cbor(&trailing),
-            Err(EvidenceError::InvalidConformanceReport)
-        );
+            let mut trailing = bytes.clone();
+            trailing.push(0);
+            assert_eq!(
+                ConformanceReportV1::from_canonical_cbor(&trailing),
+                Err(EvidenceError::InvalidConformanceReport)
+            );
 
-        for index in 0..23 {
-            let mut fields =
+            for index in 0..23 {
+                let mut fields =
+                    ciborium::from_reader::<Value, _>(Cursor::new(&bytes)).unwrap_or(Value::Null);
+                if let Value::Array(ref mut values) = fields {
+                    values[index] = Value::Null;
+                }
+                let mut malformed = Vec::new();
+                ciborium::into_writer(&fields, &mut malformed).unwrap_or_default();
+                assert_eq!(
+                    ConformanceReportV1::from_canonical_cbor(&malformed),
+                    Err(EvidenceError::InvalidConformanceReport)
+                );
+            }
+
+            let mut tampered_digest =
                 ciborium::from_reader::<Value, _>(Cursor::new(&bytes)).unwrap_or(Value::Null);
-            if let Value::Array(ref mut values) = fields {
-                values[index] = Value::Null;
+            if let Value::Array(ref mut values) = tampered_digest {
+                values[22] = Value::Bytes(vec![0; 32]);
             }
             let mut malformed = Vec::new();
-            ciborium::into_writer(&fields, &mut malformed).unwrap_or_default();
+            ciborium::into_writer(&tampered_digest, &mut malformed).unwrap_or_default();
             assert_eq!(
                 ConformanceReportV1::from_canonical_cbor(&malformed),
                 Err(EvidenceError::InvalidConformanceReport)
             );
-        }
 
-        let mut tampered_digest =
-            ciborium::from_reader::<Value, _>(Cursor::new(&bytes)).unwrap_or(Value::Null);
-        if let Value::Array(ref mut values) = tampered_digest {
-            values[22] = Value::Bytes(vec![0; 32]);
-        }
-        let mut malformed = Vec::new();
-        ciborium::into_writer(&tampered_digest, &mut malformed).unwrap_or_default();
-        assert_eq!(
-            ConformanceReportV1::from_canonical_cbor(&malformed),
-            Err(EvidenceError::InvalidConformanceReport)
-        );
+            let oversized = vec![0; 16 * 1024 * 1024 + 1];
+            assert_eq!(
+                ConformanceReportV1::from_canonical_cbor(&oversized),
+                Err(EvidenceError::InvalidConformanceReport)
+            );
 
-        let (at_limit, at_limit_bytes) = report_at_canonical_byte_limit();
-        assert_eq!(at_limit_bytes.len(), 16 * 1024 * 1024);
-        assert_eq!(at_limit.to_canonical_cbor(), Ok(at_limit_bytes.clone()));
-        assert_eq!(
-            ConformanceReportV1::from_canonical_cbor(&at_limit_bytes),
-            Ok(at_limit)
-        );
+            let mut mixed_profile_report = report;
+            mixed_profile_report.cases[0].execution_profile_digest = [99; 32];
+            mixed_profile_report.report_digest = mixed_profile_report.digest().unwrap_or([0; 32]);
+            // CNR1 permits a per-case execution-profile matrix; CPF1 performs
+            // the authoritative fixture/profile membership check.
+            assert_eq!(mixed_profile_report.validate(), Ok(()));
 
-        let oversized = vec![0; 16 * 1024 * 1024 + 1];
-        assert_eq!(
-            ConformanceReportV1::from_canonical_cbor(&oversized),
-            Err(EvidenceError::InvalidConformanceReport)
-        );
-
-        let mut mixed_profile_report = report;
-        mixed_profile_report.cases[0].execution_profile_digest = [99; 32];
-        mixed_profile_report.report_digest = mixed_profile_report.digest().unwrap_or([0; 32]);
-        // CNR1 permits a per-case execution-profile matrix; CPF1 performs
-        // the authoritative fixture/profile membership check.
-        assert_eq!(mixed_profile_report.validate(), Ok(()));
-
-        let mut unordered_cases =
-            ciborium::from_reader::<Value, _>(Cursor::new(&bytes)).unwrap_or(Value::Null);
-        if let Value::Array(ref mut values) = unordered_cases {
-            if let Value::Array(ref mut cases) = values[13] {
-                cases.swap(0, 1);
+            let mut unordered_cases =
+                ciborium::from_reader::<Value, _>(Cursor::new(&bytes)).unwrap_or(Value::Null);
+            if let Value::Array(ref mut values) = unordered_cases {
+                if let Value::Array(ref mut cases) = values[13] {
+                    cases.swap(0, 1);
+                }
             }
-        }
-        let mut malformed = Vec::new();
-        ciborium::into_writer(&unordered_cases, &mut malformed).unwrap_or_default();
-        assert_eq!(
-            ConformanceReportV1::from_canonical_cbor(&malformed),
-            Err(EvidenceError::InvalidConformanceReport)
-        );
-
-        let mut oversized_report = test_report();
-        let template = oversized_report.cases[0].clone();
-        oversized_report.cases = (0..=65_535)
-            .map(|index| {
-                let mut case = template.clone();
-                case.case_id = format!("{index:05}{}", "x".repeat(123));
-                case.outcome = CaseOutcomeStatusV1::Fail;
-                case.actual_digest = Some([99; 32]);
-                case.first_coordinate = Some(vec![b'x'; 128]);
-                case
-            })
-            .collect();
-        refresh_test_report(&mut oversized_report);
-        assert_eq!(
-            oversized_report.to_canonical_cbor(),
-            Err(EvidenceError::InvalidConformanceReport)
-        );
+            let mut malformed = Vec::new();
+            ciborium::into_writer(&unordered_cases, &mut malformed).unwrap_or_default();
+            assert_eq!(
+                ConformanceReportV1::from_canonical_cbor(&malformed),
+                Err(EvidenceError::InvalidConformanceReport)
+            );
+        });
     }
 
     fn test_contract() -> Wave8ProofContractV1 {

@@ -139,12 +139,12 @@ EXPECTED_BUILD_JOB = {
         EXPECTED_SDK_HEADROOM_STEP,
         {"run": "rm -f rust-toolchain.toml"},
         {
-            "uses": "dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de",
+            "uses": "dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8",
             "with": {"toolchain": "nightly-2026-07-01", "components": "rust-src"},
         },
         {
             "name": "Install cargo-nextest for the ASan archive",
-            "uses": "taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29",
+            "uses": "taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32",
             "with": {"tool": "cargo-nextest@0.9.146", "fallback": "none"},
         },
         {
@@ -161,7 +161,7 @@ EXPECTED_BUILD_JOB = {
         },
         {
             "name": "Upload ASan test archive",
-            "uses": "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+            "uses": "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9",
             "with": {
                 "name": ARCHIVE_ARTIFACT,
                 "path": "${{ runner.temp }}/asan-tests.tar.zst",
@@ -254,12 +254,12 @@ EXPECTED_SETUP_STEPS = [
     EXPECTED_SDK_HEADROOM_STEP,
     {"run": "rm -f rust-toolchain.toml"},
     {
-        "uses": "dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de",
+        "uses": "dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8",
         "with": {"toolchain": "nightly-2026-07-01"},
     },
     {
         "name": "Install cargo-nextest for partitioned ASan tests",
-        "uses": "taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29",
+        "uses": "taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32",
         "with": {"tool": "cargo-nextest@0.9.146", "fallback": "none"},
     },
     {
@@ -272,7 +272,7 @@ grep -Fqx "Ubuntu LLVM version 18.1.3" <<<"${symbolizer_version}"
     },
     {
         "name": "Download ASan test archive",
-        "uses": "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
+        "uses": "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333",
         "with": {"name": ARCHIVE_ARTIFACT, "path": "${{ runner.temp }}/asan-archive"},
     },
 ]

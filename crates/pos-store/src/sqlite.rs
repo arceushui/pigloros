@@ -1846,12 +1846,12 @@ impl SqliteStore {
         self
     }
 
-    fn configure_busy_timeout(conn: &Connection) -> rusqlite::Result<()> {
+    fn configure_busy_timeout(conn: &Connection, busy_timeout: Duration) -> rusqlite::Result<()> {
         #[cfg(test)]
         if FAIL_BUSY_TIMEOUT.with(std::cell::Cell::get) {
             return Err(rusqlite::Error::InvalidQuery);
         }
-        conn.busy_timeout(SQLITE_BUSY_TIMEOUT)
+        conn.busy_timeout(busy_timeout)
     }
 
     fn geo_cell_consent_in_transaction(
@@ -2042,11 +2042,12 @@ impl SqliteStore {
     /// Returns `CoreError::Storage` if the database cannot be opened, has an
     /// unsupported encoding/schema, or fails invariant validation.
     pub fn open_read_only(path: &str) -> Result<Self, CoreError> {
-        Self::open_with_options(
+        Self::open_connections(
             path,
             Box::new(pos_crypto::chain::Blake3Hasher),
             OpenFlags::SQLITE_OPEN_READ_ONLY.union(OpenFlags::SQLITE_OPEN_URI),
             false,
+            SqliteStoreOpenOptionsV1::default(),
         )
     }
 
@@ -2055,30 +2056,55 @@ impl SqliteStore {
     /// # Errors
     /// Returns `CoreError::Storage` if the database cannot be opened or schema initialisation fails.
     pub fn open_with_hasher(path: &str, hasher: Box<dyn Hasher>) -> Result<Self, CoreError> {
-        Self::open_with_options(
+        Self::open_read_write(path, hasher, SqliteStoreOpenOptionsV1::default())
+    }
+
+    /// Open a `SQLite` WAL store with explicit connection options. [`Self::open`] uses
+    /// [`SqliteStoreOpenOptionsV1::default`].
+    ///
+    /// # Errors
+    /// Returns `CoreError::Storage` if the database cannot be opened or schema initialisation fails.
+    pub fn open_with_options(
+        path: &str,
+        options: SqliteStoreOpenOptionsV1,
+    ) -> Result<Self, CoreError> {
+        Self::open_read_write(path, Box::new(pos_crypto::chain::Blake3Hasher), options)
+    }
+
+    fn open_read_write(
+        path: &str,
+        hasher: Box<dyn Hasher>,
+        options: SqliteStoreOpenOptionsV1,
+    ) -> Result<Self, CoreError> {
+        Self::open_connections(
             path,
             hasher,
             OpenFlags::SQLITE_OPEN_READ_WRITE
                 | OpenFlags::SQLITE_OPEN_CREATE
                 | OpenFlags::SQLITE_OPEN_URI,
             true,
+            options,
         )
     }
 
-    fn open_with_options(
+    fn open_connections(
         path: &str,
         hasher: Box<dyn Hasher>,
         flags: OpenFlags,
         initialize_schema: bool,
+        options: SqliteStoreOpenOptionsV1,
     ) -> Result<Self, CoreError> {
         #[cfg(target_os = "linux")]
         crate::protected_sqlite_namespace::refuse_reserved_filename(path)?;
         let conn = Connection::open_with_flags(path, flags)
             .map_err(|e| CoreError::Storage(e.to_string()))?;
+        conn.set_prepared_statement_cache_capacity(SQLITE_STATEMENT_CACHE_CAPACITY);
 
-        let writer_reservation_connection = Self::open_writer_reservation_connection(path, flags);
+        let writer_reservation_connection =
+            Self::open_writer_reservation_connection(path, flags, options);
 
-        Self::configure_busy_timeout(&conn).map_err(|e| CoreError::Storage(e.to_string()))?;
+        Self::configure_busy_timeout(&conn, options.busy_timeout)
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
 
         Self::require_utf8_encoding(&conn)?;
         let erasure_inventory_data_version =
@@ -2117,7 +2143,11 @@ impl SqliteStore {
         Ok(store)
     }
 
-    fn open_writer_reservation_connection(path: &str, flags: OpenFlags) -> Option<Connection> {
+    fn open_writer_reservation_connection(
+        path: &str,
+        flags: OpenFlags,
+        options: SqliteStoreOpenOptionsV1,
+    ) -> Option<Connection> {
         #[cfg(target_os = "linux")]
         if crate::protected_sqlite_namespace::refuse_reserved_filename(path).is_err() {
             return None;
@@ -2129,7 +2159,7 @@ impl SqliteStore {
             )
             .ok()
             .and_then(|connection| {
-                Self::configure_busy_timeout(&connection)
+                Self::configure_busy_timeout(&connection, options.busy_timeout)
                     .ok()
                     .map(|()| connection)
             })
@@ -15016,6 +15046,28 @@ fn parse_entity_id(s: &str) -> Result<EntityId, CoreError> {
 
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(4);
 
+/// Connection options of a [`SqliteStore`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SqliteStoreOpenOptionsV1 {
+    /// How long a store connection waits for a lock held by another connection before the
+    /// operation fails closed. The default is four seconds.
+    pub busy_timeout: Duration,
+}
+
+impl Default for SqliteStoreOpenOptionsV1 {
+    fn default() -> Self {
+        Self {
+            busy_timeout: SQLITE_BUSY_TIMEOUT,
+        }
+    }
+}
+
+/// Prepared statements kept per store connection. A protected Replay read alone cycles through
+/// more distinct cached statements than rusqlite's default of 16, and a least-recently-used
+/// cache smaller than such a cycle misses on every lookup, so each read re-parsed its SQL.
+/// The cache holds compiled SQL only; every execution still binds and steps its own rows.
+const SQLITE_STATEMENT_CACHE_CAPACITY: usize = 128;
+
 #[cfg(test)]
 use pos_core::geo_cell_admission::{
     hash_admission_consent_record_bytes, AdmissionEntitlementDraftV1, GeoCellAdmissionInputV1,
@@ -15064,7 +15116,8 @@ mod tests {
         let path = database.to_str().ok_or("fixture path is not UTF-8")?;
         assert!(SqliteStore::open_writer_reservation_connection(
             path,
-            OpenFlags::SQLITE_OPEN_READ_ONLY
+            OpenFlags::SQLITE_OPEN_READ_ONLY,
+            SqliteStoreOpenOptionsV1::default(),
         )
         .is_none());
         assert!(!database.exists());
@@ -15447,7 +15500,7 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         use rusqlite::hooks::{AuthAction, AuthContext, Authorization, TransactionOperation};
 
-        let (store, session, fork, source) = classified_registration_fixture()?;
+        let (mut store, session, fork, source) = classified_registration_fixture()?;
         store.conn.authorizer(Some(|context: AuthContext<'_>| {
             if matches!(
                 context.action,
@@ -15564,7 +15617,7 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         use rusqlite::hooks::{AuthAction, AuthContext, Authorization, TransactionOperation};
 
-        let store = tests::new_store();
+        let mut store = tests::new_store();
         store.conn.authorizer(Some(|context: AuthContext<'_>| {
             if matches!(
                 context.action,
@@ -15995,7 +16048,7 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         use rusqlite::hooks::{AuthAction, AuthContext, Authorization, TransactionOperation};
 
-        let conn = Connection::open_in_memory()?;
+        let mut conn = Connection::open_in_memory()?;
         conn.authorizer(Some(|context: AuthContext<'_>| {
             if matches!(
                 context.action,
@@ -16629,7 +16682,7 @@ mod tests {
     }
 
     fn deny_transaction_step(
-        store: &SqliteStore,
+        store: &mut SqliteStore,
         denied: fn(&rusqlite::hooks::AuthAction<'_>) -> bool,
     ) -> rusqlite::Result<()> {
         store
@@ -16682,7 +16735,7 @@ mod tests {
         );
         store.conn.commit_hook::<fn() -> bool>(None)?;
 
-        deny_transaction_step(&store, |action| {
+        deny_transaction_step(&mut store, |action| {
             matches!(
                 action,
                 AuthAction::Transaction {
@@ -16695,7 +16748,7 @@ mod tests {
             (Err(ForkDeliveryJournalErrorV1::StorageIndeterminate), true)
         );
 
-        deny_transaction_step(&store, |action| {
+        deny_transaction_step(&mut store, |action| {
             matches!(
                 action,
                 AuthAction::Savepoint {
@@ -16715,7 +16768,7 @@ mod tests {
         let stale_command = sqlite_fork_command(
             &store, &host, &adapter, &policy, &session, [112; 32], parent,
         )?;
-        deny_transaction_step(&store, |action| {
+        deny_transaction_step(&mut store, |action| {
             matches!(
                 action,
                 AuthAction::Transaction {
@@ -16774,7 +16827,7 @@ mod tests {
         store.conn.commit_hook::<fn() -> bool>(None)?;
         assert_eq!(fork_operation_rows(&store)?, 0);
 
-        deny_transaction_step(&store, |action| {
+        deny_transaction_step(&mut store, |action| {
             matches!(
                 action,
                 AuthAction::Savepoint {
@@ -16796,7 +16849,7 @@ mod tests {
         let command = sqlite_fork_command(
             &store, &host, &adapter, &policy, &session, [122; 32], parent,
         )?;
-        deny_transaction_step(&store, |action| {
+        deny_transaction_step(&mut store, |action| {
             matches!(
                 action,
                 AuthAction::Savepoint {
@@ -17281,7 +17334,7 @@ mod tests {
     fn protected_interval_rejects_denied_begin() {
         use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
 
-        let store = new_store();
+        let mut store = new_store();
         store
             .conn
             .authorizer(Some(|context: AuthContext<'_>| {
@@ -17414,7 +17467,7 @@ mod tests {
     fn immediate_scope_rejects_denied_begin_and_savepoint() {
         use rusqlite::hooks::{AuthContext, Authorization};
 
-        let store = new_store();
+        let mut store = new_store();
         let deny = |_context: AuthContext<'_>| Authorization::Deny;
         store.conn.authorizer(Some(deny)).test_ok();
         assert!(begin_immediate_scope(&store.conn).is_err());
@@ -17494,7 +17547,7 @@ mod tests {
     fn bounded_read_rejects_a_denied_snapshot_transaction() {
         use rusqlite::hooks::{AuthContext, Authorization};
 
-        let store = new_store();
+        let mut store = new_store();
         store
             .conn
             .authorizer(Some(|_context: AuthContext<'_>| Authorization::Deny))
@@ -17607,7 +17660,7 @@ mod tests {
     fn timeline_creation_rejects_a_denied_existence_check() {
         use rusqlite::hooks::{AuthContext, Authorization};
 
-        let store = new_store();
+        let mut store = new_store();
         store
             .conn
             .authorizer(Some(|_context: AuthContext<'_>| Authorization::Deny))
@@ -17914,7 +17967,7 @@ mod tests {
             .create_timeline_with_meta_for_host_transition_unchecked(&duplicate_meta)
             .is_err());
 
-        let denied_begin = new_store();
+        let mut denied_begin = new_store();
         denied_begin
             .conn
             .authorizer(Some(|context: rusqlite::hooks::AuthContext<'_>| {
@@ -22146,7 +22199,11 @@ mod tests {
     fn append_fails_when_database_is_locked() {
         let tmp = tempfile::NamedTempFile::new().test_ok();
         let path = tmp.path().to_str().test_ok().to_owned();
-        let mut store = open_store_at(&path);
+        // The lock is held throughout, so a short wait fails exactly as the default one.
+        let options = SqliteStoreOpenOptionsV1 {
+            busy_timeout: std::time::Duration::from_millis(100),
+        };
+        let mut store = fixture_store(SqliteStore::open_with_options(&path, options).test_ok());
         let tl = store.create_timeline("main").test_ok();
         let locker = Connection::open(&path).test_ok();
         locker.execute("BEGIN IMMEDIATE", []).test_ok();
@@ -22155,6 +22212,56 @@ mod tests {
         let result = store.append(tl.id(), &[make_draft(entity, b"x")]);
         locker.execute("ROLLBACK", []).test_ok();
         assert_storage_err(result.map(|_| ()));
+    }
+
+    fn busy_timeout_millis(connection: &Connection) -> i64 {
+        connection
+            .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+            .test_ok()
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn a_default_store_waits_four_seconds_for_a_held_lock() {
+        let store = SqliteStore::open_in_memory().test_ok();
+        assert_eq!(busy_timeout_millis(&store.conn), 4_000);
+        assert_eq!(
+            SqliteStoreOpenOptionsV1::default().busy_timeout,
+            std::time::Duration::from_secs(4)
+        );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn open_options_set_the_wait_of_the_store_and_writer_reservation_connections() {
+        let tmp = tempfile::NamedTempFile::new().test_ok();
+        let path = tmp.path().to_str().test_ok().to_owned();
+        let options = SqliteStoreOpenOptionsV1 {
+            busy_timeout: std::time::Duration::from_millis(250),
+        };
+        let store = SqliteStore::open_with_options(&path, options).test_ok();
+        assert_eq!(busy_timeout_millis(&store.conn), 250);
+        assert!(store.writer_reservation_connection.is_none());
+        drop(store);
+
+        let read_only = SqliteStore::open_connections(
+            &path,
+            Box::new(pos_crypto::chain::Blake3Hasher),
+            OpenFlags::SQLITE_OPEN_READ_ONLY.union(OpenFlags::SQLITE_OPEN_URI),
+            false,
+            options,
+        )
+        .test_ok();
+        assert_eq!(busy_timeout_millis(&read_only.conn), 250);
+        let reservation = read_only.writer_reservation_connection.as_ref().test_ok();
+        assert_eq!(busy_timeout_millis(reservation), 250);
+
+        let default_read_only = SqliteStore::open_read_only(&path).test_ok();
+        let reservation = default_read_only
+            .writer_reservation_connection
+            .as_ref()
+            .test_ok();
+        assert_eq!(busy_timeout_millis(reservation), 4_000);
     }
 
     #[test]
@@ -24441,7 +24548,7 @@ mod tests {
             .to_string()
             .contains("transaction commit failed"));
 
-        let rollback_conn = Connection::open_in_memory().test_ok();
+        let mut rollback_conn = Connection::open_in_memory().test_ok();
         rollback_conn
             .execute_batch(
                 "BEGIN;
@@ -25032,7 +25139,7 @@ mod tests {
 
     #[test]
     fn erasure_transaction_finish_reports_commit_and_rollback_failures() {
-        let conn = Connection::open_in_memory().test_ok();
+        let mut conn = Connection::open_in_memory().test_ok();
         conn.execute_batch("BEGIN IMMEDIATE").test_ok();
         conn.commit_hook(Some(|| true)).test_ok();
         assert_eq!(
@@ -28532,7 +28639,7 @@ pub(super) mod key_registry_coverage {
         }
 
         fn deny_reads(
-            store: &SqliteStore,
+            store: &mut SqliteStore,
             table: &'static str,
             column: &'static str,
             allowed: usize,
@@ -28556,7 +28663,7 @@ pub(super) mod key_registry_coverage {
             }))
         }
 
-        fn deny_savepoint_rollback(store: &SqliteStore) -> rusqlite::Result<()> {
+        fn deny_savepoint_rollback(store: &mut SqliteStore) -> rusqlite::Result<()> {
             store.conn.authorizer(Some(|context: AuthContext<'_>| {
                 if matches!(
                     context.action,
@@ -28572,7 +28679,7 @@ pub(super) mod key_registry_coverage {
             }))
         }
 
-        fn allow_all(store: &SqliteStore) -> rusqlite::Result<()> {
+        fn allow_all(store: &mut SqliteStore) -> rusqlite::Result<()> {
             store
                 .conn
                 .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
@@ -28624,9 +28731,9 @@ pub(super) mod key_registry_coverage {
             assert_eq!(closed, Err(RecorderError::StorageFailure));
             assert_eq!(aborted, failure);
 
-            deny_reads(&store, SCHEMA, "name", 0)?;
+            deny_reads(&mut store, SCHEMA, "name", 0)?;
             let denied = store.abort_adapter_recording_session(owner, run);
-            allow_all(&store)?;
+            allow_all(&mut store)?;
             assert_eq!(denied, failure);
 
             run_sql(&store, "DROP TABLE adapter_recording_calls")?;
@@ -28763,9 +28870,9 @@ pub(super) mod key_registry_coverage {
         fn reserving_a_new_call_maps_count_and_insert_faults() -> TestResult {
             for allowed in [1, 2] {
                 let (mut store, owner, run, reservation) = open_recording(186)?;
-                deny_reads(&store, CALLS, "run_operation_id", allowed)?;
+                deny_reads(&mut store, CALLS, "run_operation_id", allowed)?;
                 let denied = store.reserve_adapter_call(owner, run, reservation);
-                allow_all(&store)?;
+                allow_all(&mut store)?;
                 assert_eq!(denied, Err(RecorderError::StorageFailure));
             }
             let (mut store, owner, run, reservation) = open_recording(186)?;
@@ -28832,9 +28939,9 @@ pub(super) mod key_registry_coverage {
                 );
             }
             let (mut store, owner, run, _) = open_recording(189)?;
-            deny_reads(&store, CALLS, "global_call_index", 0)?;
+            deny_reads(&mut store, CALLS, "global_call_index", 0)?;
             let denied = store.close_adapter_recording_session(owner, run);
-            allow_all(&store)?;
+            allow_all(&mut store)?;
             assert_eq!(denied, Err(RecorderError::StorageFailure));
             run_sql(&store, SESSION_UPDATE_FAULT)?;
             assert_eq!(
@@ -28876,22 +28983,22 @@ pub(super) mod key_registry_coverage {
 
         #[test]
         fn savepoint_rollback_faults_become_storage_failures() -> TestResult {
-            let store = open_store()?;
+            let mut store = open_store()?;
             run_sql(&store, "BEGIN")?;
             let scope = begin_immediate_scope(&store.conn)?;
-            deny_savepoint_rollback(&store)?;
+            deny_savepoint_rollback(&mut store)?;
             let recorder_error = Err::<(), _>(RecorderError::InvalidState);
             let recorder = finish_adapter_recording_scope(&store.conn, scope, recorder_error);
-            allow_all(&store)?;
+            allow_all(&mut store)?;
             run_sql(&store, "ROLLBACK")?;
             assert_eq!(recorder, Err(RecorderError::StorageFailure));
 
             run_sql(&store, "BEGIN")?;
             let scope = begin_immediate_scope(&store.conn)?;
-            deny_savepoint_rollback(&store)?;
+            deny_savepoint_rollback(&mut store)?;
             let catalog_error = Err::<(), _>(CatalogError::CorruptCatalog);
             let catalog = finish_artifact_registration_scope(&store.conn, scope, catalog_error);
-            allow_all(&store)?;
+            allow_all(&mut store)?;
             run_sql(&store, "ROLLBACK")?;
             assert_eq!(catalog, Err(CatalogError::StorageFailure));
             Ok(())
@@ -28906,9 +29013,9 @@ pub(super) mod key_registry_coverage {
             assert_eq!(begin, Err(CatalogError::StorageFailure));
             for allowed in 0..4 {
                 let (mut store, fixture) = closed_catalog(0x61)?;
-                deny_reads(&store, OPERATIONS, "owner_id", allowed)?;
+                deny_reads(&mut store, OPERATIONS, "owner_id", allowed)?;
                 let denied = commit_catalog(&mut store, fixture.batch);
-                allow_all(&store)?;
+                allow_all(&mut store)?;
                 assert_eq!(denied, Err(CatalogError::StorageFailure));
             }
             Ok(())
@@ -29035,9 +29142,9 @@ pub(super) mod key_registry_coverage {
         fn catalog_commit_maps_alternate_and_foreign_operation_roots() -> TestResult {
             let (mut store, first) = committed_catalog(0x65)?;
             let alternate = catalog_fixture(0x65, Some("alternate root"))?;
-            deny_reads(&store, OPERATIONS, "owner_id", 2)?;
+            deny_reads(&mut store, OPERATIONS, "owner_id", 2)?;
             let denied = commit_catalog(&mut store, alternate.batch.clone());
-            allow_all(&store)?;
+            allow_all(&mut store)?;
             assert_eq!(denied, Err(CatalogError::StorageFailure));
             assert_eq!(
                 commit_catalog(&mut store, alternate.batch),
@@ -29066,21 +29173,21 @@ pub(super) mod key_registry_coverage {
 
         #[test]
         fn catalog_reads_map_schema_and_operation_read_faults() -> TestResult {
-            let (store, fixture) = committed_catalog(0x67)?;
+            let (mut store, fixture) = committed_catalog(0x67)?;
             let (owner_id, root) = (fixture.owner_id, fixture.root_address);
             for (table, column, allowed) in [
                 (SCHEMA, "name", 0),
                 (SCHEMA, "name", 1),
                 (OPERATIONS, "owner_id", 0),
             ] {
-                deny_reads(&store, table, column, allowed)?;
+                deny_reads(&mut store, table, column, allowed)?;
                 let denied = read_catalog(&store, &owner_id, root);
-                allow_all(&store)?;
+                allow_all(&mut store)?;
                 assert_eq!(denied, Err(CatalogError::StorageFailure));
             }
-            deny_reads(&store, OPERATIONS, "owner_id", 0)?;
+            deny_reads(&mut store, OPERATIONS, "owner_id", 0)?;
             let missing = read_catalog(&store, &owner_id, Hash::from_bytes([0x68; 32]));
-            allow_all(&store)?;
+            allow_all(&mut store)?;
             assert_eq!(missing, Err(CatalogError::StorageFailure));
             run_sql(&store, "DROP TABLE artifact_registration_operations")?;
             assert_eq!(
@@ -29208,7 +29315,7 @@ pub(super) mod key_registry_coverage {
 
         #[test]
         fn catalog_closure_helpers_map_direct_read_faults() -> TestResult {
-            let (store, fixture) = committed_catalog(0x6c)?;
+            let (mut store, fixture) = committed_catalog(0x6c)?;
             let recording = record_address(&fixture, b"WCR1");
             let admission = record_address(&fixture, b"MAA1");
             let child = read_catalog(&store, &fixture.owner_id, admission)?;
@@ -29218,14 +29325,14 @@ pub(super) mod key_registry_coverage {
                 Ok(())
             );
             for (address, allowed) in [(fixture.root_address, 1), (recording, 2)] {
-                deny_reads(&store, CATALOG, "registration_address", allowed)?;
+                deny_reads(&mut store, CATALOG, "registration_address", allowed)?;
                 let denied = sqlite_validate_artifact_registration_closure(&store.conn, address);
-                allow_all(&store)?;
+                allow_all(&mut store)?;
                 assert_eq!(denied, Err(CatalogError::StorageFailure));
             }
-            deny_reads(&store, SCHEMA, "name", 0)?;
+            deny_reads(&mut store, SCHEMA, "name", 0)?;
             let denied = sqlite_load_artifact_registration_by_address(&store.conn, recording);
-            allow_all(&store)?;
+            allow_all(&mut store)?;
             assert_eq!(denied, Err(CatalogError::StorageFailure));
             run_sql(&store, "DROP TABLE artifact_registrations")?;
             assert_eq!(
@@ -29586,7 +29693,7 @@ mod manifest_owner_admission_coverage {
     }
 
     fn deny_action(
-        store: &SqliteStore,
+        store: &mut SqliteStore,
         denied: fn(&AuthAction<'_>) -> bool,
     ) -> rusqlite::Result<()> {
         store.conn.authorizer(Some(move |context: AuthContext<'_>| {
@@ -29599,7 +29706,7 @@ mod manifest_owner_admission_coverage {
     }
 
     fn deny_reads(
-        store: &SqliteStore,
+        store: &mut SqliteStore,
         table: &'static str,
         column: &'static str,
         allowed: usize,
@@ -29623,7 +29730,7 @@ mod manifest_owner_admission_coverage {
         }))
     }
 
-    fn allow_all(store: &SqliteStore) -> rusqlite::Result<()> {
+    fn allow_all(store: &mut SqliteStore) -> rusqlite::Result<()> {
         store
             .conn
             .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
@@ -29806,10 +29913,10 @@ mod manifest_owner_admission_coverage {
         let prepared = prepare(genesis_request()?, None)?;
         let digest = prepared.intent_digest();
         for denied in [begins_transaction, commits_transaction] {
-            deny_action(&store, denied)?;
+            deny_action(&mut store, denied)?;
             let state = store.read_manifest_owner_state_v1(OWNER);
             let resolved = retry(&store, digest);
-            allow_all(&store)?;
+            allow_all(&mut store)?;
             assert_eq!(state, Err(STORAGE));
             assert_eq!(resolved, Err(STORAGE));
             assert!(store.conn.is_autocommit());
@@ -29869,9 +29976,9 @@ mod manifest_owner_admission_coverage {
         let mut store = keyed_store()?;
         let prepared = prepare(genesis_request()?, None)?;
         run_sql(&store, "BEGIN")?;
-        deny_action(&store, releases_savepoint)?;
+        deny_action(&mut store, releases_savepoint)?;
         let unreleased = store.commit_manifest_owner_admission_v1(prepared.clone());
-        allow_all(&store)?;
+        allow_all(&mut store)?;
         run_sql(&store, "ROLLBACK")?;
         assert_eq!(unreleased, Err(STORAGE));
 
@@ -29883,9 +29990,9 @@ mod manifest_owner_admission_coverage {
         let changed = prepare(changed_genesis_request()?, None)?;
         run_sql(&store, "BEGIN")?;
         let rejected = store.commit_manifest_owner_admission_v1(changed.clone());
-        deny_action(&store, rolls_back_savepoint)?;
+        deny_action(&mut store, rolls_back_savepoint)?;
         let stranded = store.commit_manifest_owner_admission_v1(changed);
-        allow_all(&store)?;
+        allow_all(&mut store)?;
         run_sql(&store, "ROLLBACK")?;
         assert_eq!(rejected, Err(CONFLICT));
         assert_eq!(stranded, Err(STORAGE));
@@ -29895,7 +30002,7 @@ mod manifest_owner_admission_coverage {
 
     #[test]
     fn generation_operation_validation_maps_direct_faults() -> TestResult {
-        let store = admitted_store()?;
+        let mut store = admitted_store()?;
         let receipts = operation_receipts(&store)?;
         let operation = GENESIS.operation_id;
         assert_eq!(validate_generation(&store, operation, &receipts), Ok(()));
@@ -29907,9 +30014,9 @@ mod manifest_owner_admission_coverage {
         // Sweep the denial past the operation lookup into the generation count.
         let mut failures = 0_usize;
         for allowed in 0..8 {
-            deny_reads(&store, OPERATIONS, "configuration_generation", allowed)?;
+            deny_reads(&mut store, OPERATIONS, "configuration_generation", allowed)?;
             let result = validate_generation(&store, operation, &receipts);
-            allow_all(&store)?;
+            allow_all(&mut store)?;
             if let Err(error) = result {
                 assert_eq!(error, STORAGE);
                 failures += 1;
@@ -29935,13 +30042,13 @@ mod manifest_owner_admission_coverage {
     #[test]
     fn retry_resolution_maps_direct_faults() -> TestResult {
         let digest = prepare(genesis_request()?, None)?.intent_digest();
-        let store = admitted_store()?;
+        let mut store = admitted_store()?;
         // Sweep the denial past the receipt reads into the row count.
         let mut failures = 0_usize;
         for allowed in 0..8 {
-            deny_reads(&store, ADMISSIONS, "configuration_generation", allowed)?;
+            deny_reads(&mut store, ADMISSIONS, "configuration_generation", allowed)?;
             let result = resolve(&store, digest);
-            allow_all(&store)?;
+            allow_all(&mut store)?;
             if let Err(error) = result {
                 assert_eq!(error, STORAGE);
                 failures += 1;

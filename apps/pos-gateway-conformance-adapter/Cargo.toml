@@ -1,0 +1,57 @@
+[package]
+name = "pos-gateway-conformance-adapter"
+edition.workspace = true
+version.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# The gateway-client-conformance subject adapter of apps/piglor-gateway (provider contract 2.0.0,
+# #1295): it reads one EAI1 attempt, runs the HTTP exchanges of its payload on fresh in-process
+# Gateways through the public router, and writes one EAO1 observation. It speaks the
+# pos-reference codec; pos-reference does not import it.
+
+[features]
+# The whole crate: its `authorized` composition uses the nonproduction fixture registration of
+# the Gateway action registry, which exists only behind this feature.
+test-support = ["piglor-gateway/test-support"]
+
+[[bin]]
+name = "pos-gateway-conformance-adapter"
+path = "src/main.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "adapter_public"
+path = "tests/adapter_public.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "provider_dispatch_public"
+path = "tests/provider_dispatch_public.rs"
+required-features = ["test-support"]
+
+[dependencies]
+axum = { workspace = true }
+blake3 = { workspace = true }
+piglor-gateway = { path = "../piglor-gateway" }
+piglor-ledger = { path = "../piglor-ledger" }
+pos-core = { path = "../../crates/pos-core" }
+pos-reference = { path = "../../crates/pos-reference" }
+pos-runtime = { path = "../../crates/pos-runtime" }
+pos-store = { path = "../../crates/pos-store" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tower = { workspace = true }
+ulid = { workspace = true }
+
+[dev-dependencies]
+# The provider-dispatch test builds signed CFB1 corpora with the public corpus builder.
+pos-reference = { path = "../../crates/pos-reference", features = [
+  "test-support",
+] }
+
+[lints]
+workspace = true

@@ -284,7 +284,7 @@ fn parser_rejects_invalid_nested_owner_role_and_boolean() -> Result<(), Box<dyn 
         ArtifactRegistrationV1::from_canonical_cbor(&empty_owner),
         Err(ArtifactRegistrationErrorV1::FieldOutOfBounds)
     );
-    for code in [5, 6, 8, 23] {
+    for code in [8, 23] {
         let mut unknown_role = canonical.clone();
         unknown_role[80] = code;
         assert_eq!(
@@ -292,12 +292,14 @@ fn parser_rejects_invalid_nested_owner_role_and_boolean() -> Result<(), Box<dyn 
             Err(ArtifactRegistrationErrorV1::UnsupportedValue)
         );
     }
-    let mut mismatched_role = canonical.clone();
-    mismatched_role[80] = 1;
-    assert_eq!(
-        ArtifactRegistrationV1::from_canonical_cbor(&mismatched_role),
-        Err(ArtifactRegistrationErrorV1::InvalidOrder)
-    );
+    for code in [1, 5, 6] {
+        let mut mismatched_role = canonical.clone();
+        mismatched_role[80] = code;
+        assert_eq!(
+            ArtifactRegistrationV1::from_canonical_cbor(&mismatched_role),
+            Err(ArtifactRegistrationErrorV1::InvalidOrder)
+        );
+    }
     let mut oversized_role_code = canonical.clone();
     oversized_role_code[80] = 0x19;
     oversized_role_code.insert(81, 1);

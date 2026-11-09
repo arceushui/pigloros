@@ -21,13 +21,15 @@ fn identity() -> KeyIdentityV1 {
 }
 
 #[test]
-fn role_seven_preserves_existing_codes_and_keeps_reserved_codes_closed() -> TestResult {
+fn role_seven_preserves_existing_codes_and_keeps_unknown_codes_closed() -> TestResult {
     for (code, role, signing) in [
         (0, KeyRoleV1::SubjectDataEncryption, false),
         (1, KeyRoleV1::SubjectAttributionSigning, true),
         (2, KeyRoleV1::TimelineIntegritySigning, true),
         (3, KeyRoleV1::PluginReleaseSigning, true),
         (4, KeyRoleV1::ExportRecipientEncryption, false),
+        (5, KeyRoleV1::ConformanceEvaluatorSigning, true),
+        (6, KeyRoleV1::ConformanceReportSigning, true),
         (7, KeyRoleV1::CommunityArtifactEncryption, false),
     ] {
         assert_eq!(role.code(), code);
@@ -35,7 +37,7 @@ fn role_seven_preserves_existing_codes_and_keeps_reserved_codes_closed() -> Test
         assert_eq!(role.is_signing(), signing);
         assert_eq!(role.is_encryption(), !signing);
     }
-    for code in [5, 6, 8, 255] {
+    for code in [8, 255] {
         assert_eq!(KeyRoleV1::from_code(code), Err(Error::InvalidRoleCode));
     }
     Ok(())

@@ -32,6 +32,8 @@ members = [
   "apps/pos-sandboxd",
   "apps/pos-plugin-worker",
   "apps/pos-plugin-conformance-adapter",
+  "apps/pos-metric-conformance-adapter",
+  "apps/pos-gateway-conformance-adapter",
   "apps/piglor-gateway",
   "apps/piglor-ledger",
   "apps/piglor-world-client",
@@ -61,7 +63,7 @@ serde_bytes = "0.11"
 # Crypto
 blake3 = { version = "1", features = ["zeroize"] }
 ed25519-dalek = { version = "3", features = ["serde", "rand_core", "zeroize"] }
-hpke = { version = "=0.14.1", default-features = false, features = [
+hpke = { version = "=0.15.0", default-features = false, features = [
   "alloc",
   "getrandom",
   "x25519",
@@ -102,7 +104,7 @@ indexmap = "2"
 num-traits = "0.2"
 
 # SQLite
-rusqlite = { version = "0.40", features = ["bundled", "hooks", "functions"] }
+rusqlite = { version = "0.41", features = ["bundled", "hooks", "functions"] }
 
 # Community Plugin Component host (ADR-061 revision 4, decision 2): an exact
 # pin with default features off. `runtime` is the feature that lets the
@@ -168,6 +170,15 @@ opt-level = 3
 # pos-store worker baselines approach the 120-second mutation test limit (#399).
 # Workspace crates retain their default coverage and debugging profile.
 [profile.dev.package.libsqlite3-sys]
+opt-level = 3
+
+# The rusqlite wrapper and its statement-cache map run on every prepare, bind
+# and row step of the store tests; optimizing them trims the pos-store worker
+# baselines further (#1279).
+[profile.dev.package.rusqlite]
+opt-level = 3
+
+[profile.dev.package.hashlink]
 opt-level = 3
 
 # P-256 (WebAuthn) and its arithmetic stack.

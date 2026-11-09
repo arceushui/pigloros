@@ -46,7 +46,11 @@ pos-plugin-conformance-adapter = { path = "../pos-plugin-conformance-adapter" }
 pos-plugin-publisher = { path = "../../crates/pos-plugin-publisher", features = [
   "test-support",
 ] }
-pos-reference = { path = "../../crates/pos-reference" }
+# `test-support` gives the provider-dispatch vectors (ADR-062 Revision 8 slice N6, #1234) the
+# signed in-memory CFB1 corpus builder of `pos-reference`'s public tests.
+pos-reference = { path = "../../crates/pos-reference", features = [
+  "test-support",
+] }
 # The ADR-119 declaration cases of `PCH1` version 2 (#665) run the runtime `declare` over the
 # composition fallback registry of `MemoryStore` and of a file-backed `SqliteStore`: the registry
 # requires WAL, which an in-memory database cannot use, so the file lives in a `tempfile`

@@ -46,7 +46,17 @@ pub enum CommunityPluginSubjectResultV1 {
         /// The `HostFailureClassV1` variant name.
         class: &'static str,
     },
-    /// A failure of the class `Authoritative` or `Operational`.
+    /// A `ComponentTrap`: the guest trapped with this canonical trap class (ADR-061 revision 4
+    /// decision 6). The invocation coordinate is the record's own fields and the `drive`
+    /// export of the pass (ADR-061 R13).
+    Trapped {
+        /// The exact ADR-061 trap class name (`ComponentTrapClassV1::name()`).
+        trap_class: &'static str,
+        /// The `HostFailureClassV1` variant name: `Operational` while the host reports the trap
+        /// `Unverified`.
+        class: &'static str,
+    },
+    /// A failure of the class `Authoritative` or `Operational` that is not a trap.
     Failed {
         /// The closed error name.
         error: &'static str,
@@ -97,10 +107,10 @@ impl CommunityPluginSubjectOutcomeV1 {
     ///
     /// The result precedence is:
     /// - a gate error is `Refused`;
-    /// - else a receipt governs: its failure is `Refused` for the class `PreExecutionRejection`
-    ///   and `Failed` otherwise, and with no failure its disposition gives `Staged`,
-    ///   `Committed` or `Discarded`;
-    /// - else the pass's `launch_failure` is `Refused` or `Failed` by class;
+    /// - else a receipt governs: its failure is `Trapped` for a `ComponentTrap`, `Refused` for
+    ///   the class `PreExecutionRejection` and `Failed` otherwise, and with no failure its
+    ///   disposition gives `Staged`, `Committed` or `Discarded`;
+    /// - else the pass's `launch_failure` is `Trapped`, `Refused` or `Failed` the same way;
     /// - else `NotRun`.
     #[must_use]
     pub fn assemble(
@@ -136,13 +146,13 @@ fn result_of(
         .err()
         .map(|error| refused(*error))
         .or_else(|| receipt.map(receipt_result))
-        .or_else(|| entry.launch_failure.map(by_class))
+        .or_else(|| entry.launch_failure.map(of_failure))
         .unwrap_or(CommunityPluginSubjectResultV1::NotRun)
 }
 
 /// The result a receipt governs: its failure by class, else its disposition.
 fn receipt_result(receipt: &CommunityInvocationReceiptV1) -> CommunityPluginSubjectResultV1 {
-    receipt.failure.map_or_else(|| settled(receipt), by_class)
+    receipt.failure.map_or_else(|| settled(receipt), of_failure)
 }
 
 /// The result of a receipt that records no failure.
@@ -159,6 +169,19 @@ const fn settled(receipt: &CommunityInvocationReceiptV1) -> CommunityPluginSubje
             output_usage: receipt.output_usage,
         },
         ReceiptDispositionV1::Discarded => CommunityPluginSubjectResultV1::Discarded,
+    }
+}
+
+/// `Trapped` for a trap with its trap class (ADR-061 R13), else the result of `by_class`.
+const fn of_failure(error: CommunityPluginHostErrorV1) -> CommunityPluginSubjectResultV1 {
+    match error {
+        CommunityPluginHostErrorV1::ComponentTrap { class, .. } => {
+            CommunityPluginSubjectResultV1::Trapped {
+                trap_class: class.name(),
+                class: error.class().name(),
+            }
+        }
+        _ => by_class(error),
     }
 }
 

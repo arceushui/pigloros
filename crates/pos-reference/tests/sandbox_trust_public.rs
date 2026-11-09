@@ -404,6 +404,90 @@ fn revocation_enforces_roles_registry_binding_and_revoked_keys() -> TestResult {
     Ok(())
 }
 
+fn operator_registry(keys: Vec<Value>) -> TestResult<SandboxTrustSnapshot> {
+    let root = SigningKey::from_bytes(&[1; 32]);
+    let mut keys = keys
+        .into_iter()
+        .chain([key_record("policy", 1)])
+        .map(|key| encode(&key).map(|bytes| (bytes, key)))
+        .collect::<TestResult<Vec<_>>>()?;
+    keys.sort_by(|left, right| left.0.cmp(&right.0));
+    let bytes = sign_trust_snapshot(
+        snapshot(
+            keys.into_iter().map(|(_, key)| key).collect(),
+            vec![],
+            "root",
+        ),
+        &root,
+    )?;
+    Ok(SandboxTrustSnapshot::authenticate(
+        &bytes,
+        "root",
+        &root.verifying_key(),
+    )?)
+}
+
+fn operator_revocation(
+    trust: &SandboxTrustSnapshot,
+    revoked: &[&str],
+) -> TestResult<SandboxRevocationSnapshot> {
+    let keys = revoked
+        .iter()
+        .map(|id| Value::Text((*id).to_owned()))
+        .collect();
+    Ok(SandboxRevocationSnapshot::authenticate(
+        &sign_record(
+            "RVS1",
+            revocation(trust, 1, keys),
+            &SigningKey::from_bytes(&[7; 32]),
+        )?,
+        trust,
+    )?)
+}
+
+#[test]
+fn deployment_operator_key_is_the_single_unrevoked_role_six_record() -> TestResult {
+    let operator = SigningKey::from_bytes(&[7; 32]).verifying_key();
+    let single = operator_registry(vec![key_record("operator", 6)])?;
+    assert_eq!(
+        operator_revocation(&single, &[])?.deployment_operator_key(&single),
+        Ok(operator)
+    );
+    assert_eq!(
+        operator_revocation(&single, &["operator"])?.deployment_operator_key(&single),
+        Err(SandboxTrustError::Revoked)
+    );
+    let two = operator_registry(vec![key_record("new", 6), key_record("old", 6)])?;
+    for revoked in [&[][..], &["old"][..]] {
+        assert_eq!(
+            operator_revocation(&two, revoked)?.deployment_operator_key(&two),
+            Err(SandboxTrustError::AmbiguousRole)
+        );
+    }
+    let none = operator_registry(vec![key_record("image", 5)])?;
+    assert_eq!(
+        operator_revocation(&none, &[])?.deployment_operator_key(&none),
+        Err(SandboxTrustError::UnknownKey)
+    );
+    assert_eq!(
+        operator_revocation(&none, &[])?.deployment_operator_key(&single),
+        Err(SandboxTrustError::AuthorityMismatch)
+    );
+    let mut invalid_point = [0; 32];
+    invalid_point[0] = 2;
+    let invalid = operator_registry(vec![Value::Array(vec![
+        Value::Text("operator".to_owned()),
+        integer(6),
+        Value::Bytes(invalid_point.to_vec()),
+        integer(2),
+    ])])?;
+    assert_eq!(
+        operator_revocation(&invalid, &[])?.deployment_operator_key(&invalid),
+        Err(SandboxTrustError::Protocol(ProtocolError::SignatureInvalid))
+    );
+    Ok(())
+}
+
 #[test]
 fn revocation_rejects_untrusted_signatures_roles_and_epoch_gaps() -> TestResult {
     let trust = trusted_registry(1)?;
@@ -459,6 +543,7 @@ fn authenticates_each_role_and_certificate_with_external_root() -> TestResult {
         SandboxTrustRole::ProviderRuntimeAttestation,
         SandboxTrustRole::IndependentConformanceReviewer,
         SandboxTrustRole::ImageProject,
+        SandboxTrustRole::DeploymentOperator,
     ];
     for (code, expected) in (0_u64..).zip(roles) {
         let bytes = sign_trust_snapshot(
@@ -537,7 +622,7 @@ fn rejects_ambiguous_registry_identities_even_with_valid_root_signature() -> Tes
 #[test]
 fn rejects_unknown_roles_malformed_fields_and_tampering() -> TestResult {
     let root = SigningKey::from_bytes(&[1; 32]);
-    let unknown = sign_trust_snapshot(snapshot(vec![key_record("key", 6)], vec![], "root"), &root)?;
+    let unknown = sign_trust_snapshot(snapshot(vec![key_record("key", 7)], vec![], "root"), &root)?;
     assert_eq!(
         SandboxTrustSnapshot::authenticate(&unknown, "root", &root.verifying_key()),
         Err(ProtocolError::FieldOutOfBounds)

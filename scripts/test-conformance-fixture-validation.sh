@@ -203,6 +203,67 @@ rm -- "${opaque_auxiliary_root}/inputs/artifact-integrity/positive.pcw2"
 bash scripts/generate-conformance-fixture-records.sh "${opaque_auxiliary_root}" --write
 expect_rejection "${opaque_auxiliary_root}" "empty conformance fixture"
 
+# ADR-062 Revision 8 slice N1 (#1229): only a verifier-backed G-PUB case in mode L, R or F is
+# flipped, and every checked-in NIA1 is named by its content address.
+air_gapped_flip_root="$(new_fixture_copy air-gapped-matrix-flip)"
+replace_json "${air_gapped_flip_root}/matrix/execution-matrix.json" \
+  '(.cases[] | select(.case_id == "NI-PUBLIC-006-S-A")) |= (
+     .executed = true | .expected_result_digest = ("0" * 64) |
+     .expected_result = {equal: true, first_divergence: null, nia1_content_digest: ("0" * 64)})'
+expect_rejection "${air_gapped_flip_root}" "invalid ADR-059 matrix inventory"
+
+# ADR-062 Revision 8 slice N4 (#1232): a G-FORK Air-Gapped case stays non-executed until N7.
+fork_air_gapped_flip_root="$(new_fixture_copy fork-air-gapped-matrix-flip)"
+replace_json "${fork_air_gapped_flip_root}/matrix/execution-matrix.json" \
+  '(.cases[] | select(.case_id == "NI-FORK-008-W-A")) |= (
+     .executed = true | .expected_result_digest = ("0" * 64) |
+     .expected_result = {equal: true, first_divergence: null, nia1_content_digest: ("0" * 64)})'
+expect_rejection "${fork_air_gapped_flip_root}" "invalid ADR-059 matrix inventory"
+
+archive_flip_root="$(new_fixture_copy archive-matrix-flip)"
+replace_json "${archive_flip_root}/matrix/execution-matrix.json" \
+  '(.cases[] | select(.case_id == "NI-ARCHIVE-009-S-L")) |= (
+     .executed = true | .expected_result_digest = ("0" * 64) |
+     .expected_result = {equal: true, first_divergence: null, nia1_content_digest: ("0" * 64)})'
+expect_rejection "${archive_flip_root}" "invalid ADR-059 matrix inventory"
+
+tampered_nia1_root="$(new_fixture_copy tampered-nia1)"
+tampered_nia1="$(find "${tampered_nia1_root}/non-interference/executions" -type f | sort | sed -n '1p')"
+printf '\0' >>"${tampered_nia1}"
+refresh_checksums "${tampered_nia1_root}" "${tampered_nia1}"
+expect_rejection "${tampered_nia1_root}" "NIA1 file name is not its content address"
+
+# build.rs leaves non-interference/ out of the bundle closure, so the checksum inventories must
+# still cover it: a NIA1 missing from SHA256SUMS is not reproducible, and one missing from
+# BLAKE3SUMS leaves the inventory incomplete.
+sha256_gap_root="$(new_fixture_copy non-interference-sha256-gap)"
+sed -i '0,\|  non-interference/executions/|{\|  non-interference/executions/|d}' "${sha256_gap_root}/SHA256SUMS"
+expect_adapter_rejection "${sha256_gap_root}" "SHA256SUMS is not independently reproducible"
+
+blake3_gap_root="$(new_fixture_copy non-interference-blake3-gap)"
+sed -i '0,\|  non-interference/executions/|{\|  non-interference/executions/|d}' "${blake3_gap_root}/BLAKE3SUMS"
+blake3_inventory_sha256="$(sha256sum "${blake3_gap_root}/BLAKE3SUMS" | awk '{print $1}')"
+sed -i -E "s|^[0-9a-f]{64}  BLAKE3SUMS$|${blake3_inventory_sha256}  BLAKE3SUMS|" \
+  "${blake3_gap_root}/SHA256SUMS"
+expect_rejection "${blake3_gap_root}" "BLAKE3SUMS does not cover the complete public fixture inventory"
+
+# ADR-062 Revision 8 slice N5 (#1233): every recorded erasure artifact is named by its BLAKE3, the
+# erasure directory holds only the declared kinds of file, and the byte inventories cover it.
+tampered_erasure_root="$(new_fixture_copy tampered-erasure-record)"
+tampered_erasure="$(find "${tampered_erasure_root}/erasure/records" -type f | sort | sed -n '1p')"
+printf '\0' >>"${tampered_erasure}"
+refresh_checksums "${tampered_erasure_root}" "${tampered_erasure}"
+expect_rejection "${tampered_erasure_root}" "erasure record is not named by its BLAKE3"
+
+unexpected_erasure_root="$(new_fixture_copy unexpected-erasure-file)"
+printf 'not an erasure record\n' >"${unexpected_erasure_root}/erasure/notes.txt"
+bash scripts/generate-conformance-fixture-records.sh "${unexpected_erasure_root}" --write
+expect_rejection "${unexpected_erasure_root}" "unexpected erasure conformance file"
+
+erasure_gap_root="$(new_fixture_copy erasure-sha256-gap)"
+sed -i '0,\|  erasure/records/|{\|  erasure/records/|d}' "${erasure_gap_root}/SHA256SUMS"
+expect_adapter_rejection "${erasure_gap_root}" "SHA256SUMS is not independently reproducible"
+
 watchdog_root="$(new_fixture_copy plugin-watchdog-drift)"
 replace_json "${watchdog_root}/providers/plugin-conformance/provider.json" \
   '.fixture_contracts.denied.watchdog_ms = 1000'
@@ -238,7 +299,7 @@ expect_adapter_rejection "${divergent_positive_root}" \
 plugin_provider="providers/plugin-conformance/provider.json"
 
 # R8-F3: the checked-in Plugin provider declares the v2 contract, and nothing names the old one.
-jq -e '.contract_version == "2.1.0" and .abi_major == 0 and .abi_minor == 0 and
+jq -e '.contract_version == "2.2.0" and .abi_major == 0 and .abi_minor == 0 and
   has("auxiliary") and .fixture_adapter.id == "plugin-signed-v1"' \
   "${source_root}/${plugin_provider}" >/dev/null
 if git grep -nIF -e 'plugin-conformance@1.0.0' -- . \

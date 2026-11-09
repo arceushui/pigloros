@@ -20,7 +20,10 @@ use pos_reference::evaluator_protocol::{
 use pos_reference::profile::{
     DeterministicBudget, EvaluatorHardCaps, NamespacedFailure, Profile, ProfileError,
 };
-use pos_reference::signed_bundle::{preflight_signed_bundle, verify_signed_bundle, BundleError};
+use pos_reference::signed_bundle::{
+    preflight_signed_bundle, verify_signed_bundle, BundleError, TrustPolicyOperatorAnchor,
+    DEPLOYMENT_OPERATOR_ROLE,
+};
 use support::cbor::rewrite_fields;
 use support::{BundleMutation, ClosureCap, ProfileMutation, ReleaseMutation, TrustMutation};
 
@@ -393,7 +396,9 @@ fn signed_public_corpus_produces_deterministic_self_verified_cnr1() -> TestResul
         &corpus.request,
         &corpus.archive,
         &corpus.trust_policy,
+        &support::trust_policy_operator()?,
         &evaluator_identity()?,
+        &support::test_executors(),
         &mut first_adapter,
     )?;
     let mut second_adapter = PublicAdapter {
@@ -404,7 +409,9 @@ fn signed_public_corpus_produces_deterministic_self_verified_cnr1() -> TestResul
         &corpus.request,
         &corpus.archive,
         &corpus.trust_policy,
+        &support::trust_policy_operator()?,
         &evaluator_identity()?,
+        &support::test_executors(),
         &mut second_adapter,
     )?;
 
@@ -450,7 +457,9 @@ fn sandbox_cases_bind_authenticated_spr1_provenance() -> TestResult {
         &request,
         &corpus.archive,
         &corpus.trust_policy,
+        &support::trust_policy_operator()?,
         &evaluator_identity()?,
+        &support::test_executors(),
         &mut admitted,
     )?
     .report;
@@ -468,7 +477,9 @@ fn sandbox_cases_bind_authenticated_spr1_provenance() -> TestResult {
             &request,
             &corpus.archive,
             &corpus.trust_policy,
+            &support::trust_policy_operator()?,
             &evaluator_identity()?,
+            &support::test_executors(),
             &mut missing,
         ),
         Err(EvaluatorError::AdapterIdentity)
@@ -480,7 +491,9 @@ fn sandbox_cases_bind_authenticated_spr1_provenance() -> TestResult {
             &request,
             &corpus.archive,
             &corpus.trust_policy,
+            &support::trust_policy_operator()?,
             &evaluator_identity()?,
+            &support::test_executors(),
             &mut admitted,
         ),
         Err(EvaluatorError::AdapterIdentity)
@@ -493,7 +506,9 @@ fn sandbox_cases_bind_authenticated_spr1_provenance() -> TestResult {
         &request,
         &corpus.archive,
         &corpus.trust_policy,
+        &support::trust_policy_operator()?,
         &evaluator_identity()?,
+        &support::test_executors(),
         &mut unavailable,
     )
     .is_ok());
@@ -506,7 +521,9 @@ fn sandbox_cases_bind_authenticated_spr1_provenance() -> TestResult {
             &request,
             &corpus.archive,
             &corpus.trust_policy,
+            &support::trust_policy_operator()?,
             &evaluator_identity()?,
+            &support::test_executors(),
             &mut unauthenticated,
         ),
         Err(EvaluatorError::AdapterIdentity)
@@ -526,7 +543,9 @@ fn evaluator_accepts_every_current_profile_claim_layer() -> TestResult {
             &corpus.request,
             &corpus.archive,
             &corpus.trust_policy,
+            &support::trust_policy_operator()?,
             &evaluator_identity()?,
+            &support::test_executors(),
             &mut adapter,
         )?;
         assert!(result
@@ -578,7 +597,9 @@ fn evaluator_enforces_profile_independence_requirements() -> TestResult {
                 &corpus.request,
                 &corpus.archive,
                 &corpus.trust_policy,
+                &support::trust_policy_operator()?,
                 &identity,
+                &support::test_executors(),
                 &mut adapter,
             ),
             Err(EvaluatorError::Independence)
@@ -595,7 +616,9 @@ fn evaluator_enforces_profile_independence_requirements() -> TestResult {
             &corpus.request,
             &corpus.archive,
             &corpus.trust_policy,
+            &support::trust_policy_operator()?,
             &evaluator_identity()?,
+            &support::test_executors(),
             &mut adapter,
         ),
         Err(EvaluatorError::Independence)
@@ -616,7 +639,9 @@ fn evaluator_identity_is_verified_before_cnr1_emission() -> TestResult {
         &corpus.request,
         &corpus.archive,
         &corpus.trust_policy,
+        &support::trust_policy_operator()?,
         &evaluator_identity()?,
+        &support::test_executors(),
         &mut adapter,
     )?
     .report;
@@ -640,7 +665,9 @@ fn public_gateway_and_plugin_protocols_execute_complete_profiles() -> TestResult
             &corpus.request,
             &corpus.archive,
             &corpus.trust_policy,
+            &support::trust_policy_operator()?,
             &evaluator_identity()?,
+            &support::test_executors(),
             &mut adapter,
         )?;
         assert!(output
@@ -706,7 +733,9 @@ fn replay_claims_accept_each_matching_redaction_state() -> TestResult {
             &corpus.request,
             &corpus.archive,
             &corpus.trust_policy,
+            &support::trust_policy_operator()?,
             &evaluator_identity()?,
+            &support::test_executors(),
             &mut adapter,
         )?;
         let affected = output
@@ -785,7 +814,9 @@ fn signed_bundle_rejects_structured_and_prefixed_secret_material() -> TestResult
                 &corpus.request,
                 &corpus.archive,
                 &corpus.trust_policy,
+                &support::trust_policy_operator()?,
                 &evaluator_identity()?,
+                &support::test_executors(),
                 &mut adapter,
             ),
             Err(EvaluatorError::Bundle)
@@ -815,7 +846,9 @@ fn signed_bundle_allows_empty_secret_slots_and_noncredential_text() -> TestResul
             &corpus.request,
             &corpus.archive,
             &corpus.trust_policy,
+            &support::trust_policy_operator()?,
             &evaluator_identity()?,
+            &support::test_executors(),
             &mut adapter,
         )?;
         assert!(artifacts
@@ -853,7 +886,9 @@ fn evaluator_rejects_empty_archives_and_mismatched_trust_snapshots() -> TestResu
                 request,
                 archive,
                 &corpus.trust_policy,
+                &support::trust_policy_operator()?,
                 &evaluator_identity()?,
+                &support::test_executors(),
                 &mut adapter,
             ),
             Err(EvaluatorError::Bundle)
@@ -878,7 +913,9 @@ fn evaluator_returns_typed_nonpass_for_an_unsupported_request_version() -> TestR
             &request_bytes,
             &corpus.archive,
             &corpus.trust_policy,
+            &support::trust_policy_operator()?,
             &evaluator_identity()?,
+            &support::test_executors(),
             &mut adapter,
         ),
         Err(EvaluatorError::UnsupportedVersion)
@@ -899,7 +936,9 @@ fn air_gapped_evaluation_preserves_declared_non_network_capabilities() -> TestRe
         &corpus.request,
         &corpus.archive,
         &corpus.trust_policy,
+        &support::trust_policy_operator()?,
         &evaluator_identity()?,
+        &support::test_executors(),
         &mut adapter,
     )?;
     assert_eq!(result.report.cases.len(), 7);
@@ -941,7 +980,12 @@ fn sandbox_attempts_translate_authenticated_transport_caps_before_execution() ->
             })?;
             let request = EvaluationRequest::from_canonical_cbor(&request_bytes)?;
             let mut archive = Cursor::new(&corpus.archive);
-            let preflight = preflight_signed_bundle(&mut archive, &corpus.trust_policy, &request)?;
+            let preflight = preflight_signed_bundle(
+                &mut archive,
+                &corpus.trust_policy,
+                &support::trust_policy_operator()?,
+                &request,
+            )?;
             let caps = Profile::authenticated_hard_caps(preflight.profile_bytes(), &request)?;
             let mut adapter = RecordingAdapter {
                 subject_digest: corpus.subject_digest,
@@ -953,7 +997,9 @@ fn sandbox_attempts_translate_authenticated_transport_caps_before_execution() ->
                 &request_bytes,
                 &corpus.archive,
                 &corpus.trust_policy,
+                &support::trust_policy_operator()?,
                 &evaluator_identity()?,
+                &support::test_executors(),
                 &mut adapter,
             );
             if sandboxed {
@@ -992,24 +1038,54 @@ fn sandbox_attempts_translate_authenticated_transport_caps_before_execution() ->
     Ok(())
 }
 
-#[test]
-fn evaluator_rejects_semantically_invalid_signed_release_admission() -> TestResult {
-    let corpus = support::corpus_with_invalid_release_admission()?;
-    let mut adapter = PublicAdapter {
+/// ADR-068 (ADR-062 R8 N6 decision 8): a downgrade fixture whose RAD1 does not authorize
+/// it is non-executed and never dispatched; every other case still executes.
+fn assert_downgrade_not_dispatched(corpus: &support::Corpus, label: &str) -> TestResult {
+    let mut adapter = RecordingAdapter {
         subject_digest: corpus.subject_digest,
-        output: corpus.expected_output,
+        output: corpus.expected_output.clone(),
+        attempts: Vec::new(),
+        case_ordinals: Vec::new(),
     };
-    assert_eq!(
-        evaluate(
-            &corpus.request,
-            &corpus.archive,
-            &corpus.trust_policy,
-            &evaluator_identity()?,
-            &mut adapter,
-        ),
-        Err(EvaluatorError::Profile)
-    );
+    let report = evaluate(
+        &corpus.request,
+        &corpus.archive,
+        &corpus.trust_policy,
+        &support::trust_policy_operator()?,
+        &evaluator_identity()?,
+        &support::test_executors(),
+        &mut adapter,
+    )?
+    .report;
+    for case in &report.cases {
+        let expected = if case.case_id == "case-5" {
+            CaseStatus::Unavailable
+        } else {
+            CaseStatus::Pass
+        };
+        assert_eq!(case.outcome, expected, "{label}: {}", case.case_id);
+    }
+    let downgrade = report
+        .cases
+        .iter()
+        .find(|case| case.case_id == "case-5")
+        .ok_or("the downgrade case is absent")?;
+    assert_eq!(downgrade.actual_digest, None, "{label}");
+    assert_eq!(downgrade.actual_error, None, "{label}");
+    let dispatched: Vec<&str> = adapter
+        .attempts
+        .iter()
+        .map(|attempt| attempt.case_id.as_str())
+        .collect();
+    assert_eq!(dispatched.len(), 6, "{label}");
+    assert!(!dispatched.contains(&"case-5"), "{label}");
     Ok(())
+}
+
+#[test]
+fn a_signed_release_admission_that_enables_fallback_is_not_dispatched() -> TestResult {
+    let corpus = support::corpus_with_invalid_release_admission()?;
+    assert_downgrade_not_dispatched(&corpus, "allow fallback")
 }
 
 #[test]
@@ -1024,7 +1100,9 @@ fn evaluator_accepts_every_current_profile_lifecycle() -> TestResult {
             &corpus.request,
             &corpus.archive,
             &corpus.trust_policy,
+            &support::trust_policy_operator()?,
             &evaluator_identity()?,
+            &support::test_executors(),
             &mut adapter,
         )
         .is_ok());
@@ -1044,7 +1122,9 @@ fn evaluator_matches_output_failure_and_divergence_oracles() -> TestResult {
         &corpus.request,
         &corpus.archive,
         &corpus.trust_policy,
+        &support::trust_policy_operator()?,
         &evaluator_identity()?,
+        &support::test_executors(),
         &mut adapter,
     )?;
     assert!(result
@@ -1074,7 +1154,9 @@ fn evaluator_reports_typed_failure_oracles_with_closed_safe_errors() -> TestResu
             &corpus.request,
             &corpus.archive,
             &corpus.trust_policy,
+            &support::trust_policy_operator()?,
             &evaluator_identity()?,
+            &support::test_executors(),
             &mut adapter,
         )?;
         let failure = result
@@ -1109,7 +1191,9 @@ fn evaluator_omits_typed_failure_evidence_when_redacted() -> TestResult {
             &corpus.request,
             &corpus.archive,
             &corpus.trust_policy,
+            &support::trust_policy_operator()?,
             &evaluator_identity()?,
+            &support::test_executors(),
             &mut adapter,
         )?;
         let failure = result
@@ -1140,7 +1224,9 @@ fn evaluator_reports_mismatched_failure_and_divergence_oracles() -> TestResult {
         &corpus.request,
         &corpus.archive,
         &corpus.trust_policy,
+        &support::trust_policy_operator()?,
         &evaluator_identity()?,
+        &support::test_executors(),
         &mut adapter,
     )?;
     assert_eq!(
@@ -1185,7 +1271,9 @@ fn evaluator_reports_each_closed_adverse_subject_result() -> TestResult {
             &corpus.request,
             &corpus.archive,
             &corpus.trust_policy,
+            &support::trust_policy_operator()?,
             &evaluator_identity()?,
+            &support::test_executors(),
             &mut adapter,
         )?;
         assert!(result
@@ -1211,7 +1299,9 @@ fn evaluator_enforces_adapter_identity_and_bounded_outputs() -> TestResult {
             &corpus.request,
             &corpus.archive,
             &corpus.trust_policy,
+            &support::trust_policy_operator()?,
             &evaluator_identity()?,
+            &support::test_executors(),
             &mut wrong_kind,
         ),
         Err(EvaluatorError::AdapterIdentity)
@@ -1225,7 +1315,9 @@ fn evaluator_enforces_adapter_identity_and_bounded_outputs() -> TestResult {
             &corpus.request,
             &corpus.archive,
             &corpus.trust_policy,
+            &support::trust_policy_operator()?,
             &evaluator_identity()?,
+            &support::test_executors(),
             &mut wrong_adapter,
         ),
         Err(EvaluatorError::AdapterIdentity)
@@ -1241,7 +1333,9 @@ fn evaluator_enforces_adapter_identity_and_bounded_outputs() -> TestResult {
             &request,
             &corpus.archive,
             &corpus.trust_policy,
+            &support::trust_policy_operator()?,
             &evaluator_identity()?,
+            &support::test_executors(),
             &mut adapter,
         ),
         Err(EvaluatorError::OutputLimit)
@@ -1258,7 +1352,9 @@ fn evaluator_enforces_adapter_identity_and_bounded_outputs() -> TestResult {
             &request,
             &corpus.archive,
             &corpus.trust_policy,
+            &support::trust_policy_operator()?,
             &evaluator_identity()?,
+            &support::test_executors(),
             &mut adapter,
         )?
         .diagnostic_bytes
@@ -1375,7 +1471,9 @@ fn evaluator_rejects_each_cryptographically_bound_profile_contract_mutation() ->
                 &corpus.request,
                 &corpus.archive,
                 &corpus.trust_policy,
+                &support::trust_policy_operator()?,
                 &evaluator_identity()?,
+                &support::test_executors(),
                 &mut adapter,
             ),
             Err(EvaluatorError::Profile)
@@ -1388,12 +1486,22 @@ fn evaluator_rejects_each_cryptographically_bound_profile_contract_mutation() ->
 fn profile_decoder_rejects_malformed_bytes_from_an_authenticated_bundle() -> TestResult {
     let corpus = support::corpus_with_profile_mutation(ProfileMutation::RawProfileField(0))?;
     let request = EvaluationRequest::from_canonical_cbor(&corpus.request)?;
-    let bundle = verify_signed_bundle(&corpus.archive, &corpus.trust_policy, &request)?;
+    let bundle = verify_signed_bundle(
+        &corpus.archive,
+        &corpus.trust_policy,
+        &support::trust_policy_operator()?,
+        &request,
+    )?;
     assert!(Profile::from_bundle(&bundle, &request).is_err());
 
     let corpus = support::corpus()?;
     let request = EvaluationRequest::from_canonical_cbor(&corpus.request)?;
-    let mut bundle = verify_signed_bundle(&corpus.archive, &corpus.trust_policy, &request)?;
+    let mut bundle = verify_signed_bundle(
+        &corpus.archive,
+        &corpus.trust_policy,
+        &support::trust_policy_operator()?,
+        &request,
+    )?;
     bundle.profile_digest = [90; 32];
     assert_eq!(
         Profile::from_bundle(&bundle, &request),
@@ -1415,7 +1523,9 @@ fn evaluator_rejects_each_execution_matrix_contract_boundary() -> TestResult {
                 &corpus.request,
                 &corpus.archive,
                 &corpus.trust_policy,
+                &support::trust_policy_operator()?,
                 &evaluator_identity()?,
+                &support::test_executors(),
                 &mut adapter,
             ),
             Err(EvaluatorError::Profile),
@@ -1436,7 +1546,9 @@ fn evaluator_accepts_an_executed_matrix_case_with_consistent_counts() -> TestRes
         &corpus.request,
         &corpus.archive,
         &corpus.trust_policy,
+        &support::trust_policy_operator()?,
         &evaluator_identity()?,
+        &support::test_executors(),
         &mut adapter,
     )?;
     Ok(())
@@ -1491,7 +1603,9 @@ fn evaluator_rejects_wrong_types_at_each_required_profile_contract_field() -> Te
                 &corpus.request,
                 &corpus.archive,
                 &corpus.trust_policy,
+                &support::trust_policy_operator()?,
                 &evaluator_identity()?,
+                &support::test_executors(),
                 &mut adapter,
             ),
             Err(EvaluatorError::Profile)
@@ -1521,7 +1635,9 @@ fn evaluator_rejects_malformed_profile_contract_containers() -> TestResult {
                 &corpus.request,
                 &corpus.archive,
                 &corpus.trust_policy,
+                &support::trust_policy_operator()?,
                 &evaluator_identity()?,
+                &support::test_executors(),
                 &mut adapter,
             ),
             Err(EvaluatorError::Profile)
@@ -1549,7 +1665,9 @@ fn evaluator_rejects_each_profile_textual_contract_boundary() -> TestResult {
                 &corpus.request,
                 &corpus.archive,
                 &corpus.trust_policy,
+                &support::trust_policy_operator()?,
                 &evaluator_identity()?,
+                &support::test_executors(),
                 &mut adapter,
             ),
             Err(EvaluatorError::Profile)
@@ -1594,7 +1712,9 @@ fn evaluator_rejects_each_profile_numeric_and_relationship_boundary() -> TestRes
                 &corpus.request,
                 &corpus.archive,
                 &corpus.trust_policy,
+                &support::trust_policy_operator()?,
                 &evaluator_identity()?,
+                &support::test_executors(),
                 &mut adapter,
             ),
             expected
@@ -1619,7 +1739,9 @@ fn evaluator_accepts_exact_authenticated_closure_caps() -> TestResult {
             &corpus.request,
             &corpus.archive,
             &corpus.trust_policy,
+            &support::trust_policy_operator()?,
             &evaluator_identity()?,
+            &support::test_executors(),
             &mut adapter,
         )
         .is_ok());
@@ -1642,7 +1764,9 @@ fn public_evaluator_enforces_selected_caps_before_full_materialization() -> Test
             &corpus.request,
             &corpus.archive,
             &corpus.trust_policy,
+            &support::trust_policy_operator()?,
             &evaluator_identity()?,
+            &support::test_executors(),
             &mut adapter,
         ),
         Err(EvaluatorError::Profile)
@@ -1673,7 +1797,9 @@ fn public_evaluator_rejects_profile_local_caps_before_full_materialization() -> 
                 &corpus.request,
                 &corpus.archive,
                 &corpus.trust_policy,
+                &support::trust_policy_operator()?,
                 &evaluator_identity()?,
+                &support::test_executors(),
                 &mut adapter,
             ),
             Err(EvaluatorError::Profile)
@@ -1696,7 +1822,9 @@ fn public_evaluator_enforces_selected_coordinate_cap_on_adapter_output() -> Test
                 &corpus.request,
                 &corpus.archive,
                 &corpus.trust_policy,
+                &support::trust_policy_operator()?,
                 &evaluator_identity()?,
+                &support::test_executors(),
                 &mut adapter,
             )
             .is_ok(),
@@ -1712,7 +1840,12 @@ fn staged_preflight_enforces_selected_caps_before_archive_materialization() -> T
         let corpus = support::corpus_with_profile_mutation(mutation)?;
         let request = EvaluationRequest::from_canonical_cbor(&corpus.request)?;
         let mut archive = Cursor::new(&corpus.archive);
-        let preflight = preflight_signed_bundle(&mut archive, &corpus.trust_policy, &request)?;
+        let preflight = preflight_signed_bundle(
+            &mut archive,
+            &corpus.trust_policy,
+            &support::trust_policy_operator()?,
+            &request,
+        )?;
         let caps = Profile::authenticated_hard_caps(preflight.profile_bytes(), &request)?;
         assert_eq!(
             preflight.enforce_selected_caps(caps.into()),
@@ -1723,7 +1856,12 @@ fn staged_preflight_enforces_selected_caps_before_archive_materialization() -> T
         let corpus = support::corpus_with_profile_mutation(mutation)?;
         let request = EvaluationRequest::from_canonical_cbor(&corpus.request)?;
         let mut archive = Cursor::new(&corpus.archive);
-        let preflight = preflight_signed_bundle(&mut archive, &corpus.trust_policy, &request)?;
+        let preflight = preflight_signed_bundle(
+            &mut archive,
+            &corpus.trust_policy,
+            &support::trust_policy_operator()?,
+            &request,
+        )?;
         let caps = Profile::authenticated_hard_caps(preflight.profile_bytes(), &request)?;
         preflight.enforce_selected_caps(caps.into())?;
     }
@@ -1731,7 +1869,12 @@ fn staged_preflight_enforces_selected_caps_before_archive_materialization() -> T
         support::corpus_with_profile_mutation(ProfileMutation::SelectedProfileByteCapExact)?;
     let request = EvaluationRequest::from_canonical_cbor(&corpus.request)?;
     let mut archive = Cursor::new(&corpus.archive);
-    let preflight = preflight_signed_bundle(&mut archive, &corpus.trust_policy, &request)?;
+    let preflight = preflight_signed_bundle(
+        &mut archive,
+        &corpus.trust_policy,
+        &support::trust_policy_operator()?,
+        &request,
+    )?;
     let caps = Profile::authenticated_hard_caps(preflight.profile_bytes(), &request)?;
     assert_eq!(
         caps.max_profile_bytes,
@@ -1754,7 +1897,9 @@ fn evaluator_rejects_deeply_malformed_profile_values() -> TestResult {
                 &corpus.request,
                 &corpus.archive,
                 &corpus.trust_policy,
+                &support::trust_policy_operator()?,
                 &evaluator_identity()?,
+                &support::test_executors(),
                 &mut adapter,
             ),
             Err(EvaluatorError::Profile)
@@ -1786,7 +1931,9 @@ fn evaluator_rejects_request_identities_not_admitted_by_the_profile() -> TestRes
                 &request,
                 &corpus.archive,
                 &corpus.trust_policy,
+                &support::trust_policy_operator()?,
                 &evaluator_identity()?,
+                &support::test_executors(),
                 &mut adapter,
             ),
             Err(EvaluatorError::Profile)
@@ -1841,7 +1988,13 @@ fn evaluator_rejects_each_request_bound_archive_attack() -> TestResult {
     for mutation in mutations {
         let corpus = support::corpus_with_bundle_mutation(mutation)?;
         let request = EvaluationRequest::from_canonical_cbor(&corpus.request)?;
-        assert!(verify_signed_bundle(&corpus.archive, &corpus.trust_policy, &request).is_err());
+        assert!(verify_signed_bundle(
+            &corpus.archive,
+            &corpus.trust_policy,
+            &support::trust_policy_operator()?,
+            &request
+        )
+        .is_err());
         let mut adapter = PublicAdapter {
             subject_digest: corpus.subject_digest,
             output: corpus.expected_output,
@@ -1851,7 +2004,9 @@ fn evaluator_rejects_each_request_bound_archive_attack() -> TestResult {
                 &corpus.request,
                 &corpus.archive,
                 &corpus.trust_policy,
+                &support::trust_policy_operator()?,
                 &evaluator_identity()?,
+                &support::test_executors(),
                 &mut adapter,
             ),
             Err(EvaluatorError::Bundle)
@@ -1912,7 +2067,13 @@ fn staged_preflight_rejects_untrusted_structure_before_member_allocation() -> Te
         let corpus = support::corpus_with_bundle_mutation(mutation)?;
         let request = EvaluationRequest::from_canonical_cbor(&corpus.request)?;
         let mut archive = Cursor::new(&corpus.archive);
-        assert!(preflight_signed_bundle(&mut archive, &corpus.trust_policy, &request).is_err());
+        assert!(preflight_signed_bundle(
+            &mut archive,
+            &corpus.trust_policy,
+            &support::trust_policy_operator()?,
+            &request
+        )
+        .is_err());
     }
     Ok(())
 }
@@ -2002,10 +2163,13 @@ fn staged_preflight_rejects_recursive_framing_and_profile_substitution() -> Test
         substituted_profile,
     ] {
         let request = request_for_archive(&corpus.request, &archive)?;
-        assert!(
-            preflight_signed_bundle(&mut Cursor::new(archive), &corpus.trust_policy, &request,)
-                .is_err()
-        );
+        assert!(preflight_signed_bundle(
+            &mut Cursor::new(archive),
+            &corpus.trust_policy,
+            &support::trust_policy_operator()?,
+            &request,
+        )
+        .is_err());
     }
     Ok(())
 }
@@ -2046,7 +2210,12 @@ fn staged_preflight_rejects_truncated_cfb1_at_each_streaming_boundary() -> TestR
     ] {
         let request = request_for_archive(&corpus.request, &archive)?;
         assert_eq!(
-            preflight_signed_bundle(&mut Cursor::new(archive), &corpus.trust_policy, &request,),
+            preflight_signed_bundle(
+                &mut Cursor::new(archive),
+                &corpus.trust_policy,
+                &support::trust_policy_operator()?,
+                &request,
+            ),
             Err(pos_reference::signed_bundle::BundleError::InvalidEncoding)
         );
     }
@@ -2072,12 +2241,14 @@ fn signed_bundle_verifiers_reject_invalid_member_paths_and_noncanonical_manifest
     assert!(verify_signed_bundle(
         &invalid_member_path,
         &corpus.trust_policy,
+        &support::trust_policy_operator()?,
         &invalid_path_request,
     )
     .is_err());
     assert!(preflight_signed_bundle(
         &mut Cursor::new(invalid_member_path),
         &corpus.trust_policy,
+        &support::trust_policy_operator()?,
         &invalid_path_request,
     )
     .is_err());
@@ -2095,6 +2266,7 @@ fn signed_bundle_verifiers_reject_invalid_member_paths_and_noncanonical_manifest
     assert!(preflight_signed_bundle(
         &mut Cursor::new(noncanonical_manifest),
         &corpus.trust_policy,
+        &support::trust_policy_operator()?,
         &request,
     )
     .is_err());
@@ -2102,9 +2274,9 @@ fn signed_bundle_verifiers_reject_invalid_member_paths_and_noncanonical_manifest
 }
 
 #[test]
-fn staged_preflight_closes_authenticated_identity_and_io_failures() -> TestResult {
+fn staged_preflight_closes_authenticated_identity_failures() -> TestResult {
     let corpus = support::corpus()?;
-    let request = EvaluationRequest::from_canonical_cbor(&corpus.request)?;
+    let operator = support::trust_policy_operator()?;
 
     let mismatched_archive_request = request_with(&corpus.request, |request| {
         request.fixture_bundle_digest = [90; 32];
@@ -2115,6 +2287,7 @@ fn staged_preflight_closes_authenticated_identity_and_io_failures() -> TestResul
         verify_signed_bundle(
             &corpus.archive,
             &corpus.trust_policy,
+            &operator,
             &mismatched_archive_request,
         ),
         Err(BundleError::DigestMismatch)
@@ -2122,6 +2295,7 @@ fn staged_preflight_closes_authenticated_identity_and_io_failures() -> TestResul
     assert!(preflight_signed_bundle(
         &mut Cursor::new(&corpus.archive),
         &corpus.trust_policy,
+        &operator,
         &mismatched_archive_request,
     )
     .is_err());
@@ -2135,6 +2309,7 @@ fn staged_preflight_closes_authenticated_identity_and_io_failures() -> TestResul
         verify_signed_bundle(
             &corpus.archive,
             &corpus.trust_policy,
+            &operator,
             &mismatched_trust_request,
         ),
         Err(BundleError::TrustPolicyMismatch)
@@ -2142,6 +2317,7 @@ fn staged_preflight_closes_authenticated_identity_and_io_failures() -> TestResul
     assert!(preflight_signed_bundle(
         &mut Cursor::new(&corpus.archive),
         &corpus.trust_policy,
+        &operator,
         &mismatched_trust_request,
     )
     .is_err());
@@ -2149,29 +2325,43 @@ fn staged_preflight_closes_authenticated_identity_and_io_failures() -> TestResul
     let revoked = support::corpus_with_trust_mutation(TrustMutation::RevokedArtifact)?;
     let revoked_request = EvaluationRequest::from_canonical_cbor(&revoked.request)?;
     assert_eq!(
-        verify_signed_bundle(&revoked.archive, &revoked.trust_policy, &revoked_request),
+        verify_signed_bundle(
+            &revoked.archive,
+            &revoked.trust_policy,
+            &operator,
+            &revoked_request
+        ),
         Err(BundleError::TrustPolicyMismatch)
     );
     assert!(preflight_signed_bundle(
         &mut Cursor::new(&revoked.archive),
         &revoked.trust_policy,
+        &operator,
         &revoked_request,
     )
     .is_err());
 
+    Ok(())
+}
+
+#[test]
+fn staged_preflight_closes_snapshot_io_and_size_failures() -> TestResult {
+    let corpus = support::corpus()?;
+    let request = EvaluationRequest::from_canonical_cbor(&corpus.request)?;
+    let operator = support::trust_policy_operator()?;
     for failing_seek in 1..=2 {
         let mut archive = FaultingArchive::new(corpus.archive.clone(), None, Some(failing_seek));
         assert_eq!(
-            preflight_signed_bundle(&mut archive, &corpus.trust_policy, &request),
+            preflight_signed_bundle(&mut archive, &corpus.trust_policy, &operator, &request),
             Err(BundleError::SnapshotUnavailable)
         );
     }
     let mut counted = FaultingArchive::new(corpus.archive.clone(), None, None);
-    preflight_signed_bundle(&mut counted, &corpus.trust_policy, &request)?;
+    preflight_signed_bundle(&mut counted, &corpus.trust_policy, &operator, &request)?;
     for failing_read in 1..=counted.reads {
         let mut archive = FaultingArchive::new(corpus.archive.clone(), Some(failing_read), None);
         assert_eq!(
-            preflight_signed_bundle(&mut archive, &corpus.trust_policy, &request),
+            preflight_signed_bundle(&mut archive, &corpus.trust_policy, &operator, &request),
             Err(BundleError::SnapshotUnavailable)
         );
     }
@@ -2181,25 +2371,37 @@ fn staged_preflight_closes_authenticated_identity_and_io_failures() -> TestResul
         replacement: vec![0; corpus.archive.len()],
         starts: 0,
     };
-    preflight_signed_bundle(&mut changing, &corpus.trust_policy, &request)?;
+    preflight_signed_bundle(&mut changing, &corpus.trust_policy, &operator, &request)?;
 
     let mut changed_length = LengthMismatchArchive {
         inner: Cursor::new(corpus.archive.clone()),
     };
-    assert!(preflight_signed_bundle(&mut changed_length, &corpus.trust_policy, &request,).is_err());
+    assert!(preflight_signed_bundle(
+        &mut changed_length,
+        &corpus.trust_policy,
+        &operator,
+        &request,
+    )
+    .is_err());
 
-    assert!(
-        preflight_signed_bundle(&mut Cursor::new(Vec::new()), &corpus.trust_policy, &request,)
-            .is_err()
-    );
+    assert!(preflight_signed_bundle(
+        &mut Cursor::new(Vec::new()),
+        &corpus.trust_policy,
+        &operator,
+        &request,
+    )
+    .is_err());
     assert_eq!(
-        verify_signed_bundle(&[], &corpus.trust_policy, &request),
+        verify_signed_bundle(&[], &corpus.trust_policy, &operator, &request),
         Err(BundleError::FieldOutOfBounds)
     );
 
     let mut oversized = tempfile::tempfile()?;
     oversized.set_len(1024 * 1024 * 1024 + 1)?;
-    assert!(preflight_signed_bundle(&mut oversized, &corpus.trust_policy, &request,).is_err());
+    assert!(
+        preflight_signed_bundle(&mut oversized, &corpus.trust_policy, &operator, &request,)
+            .is_err()
+    );
     Ok(())
 }
 
@@ -2211,10 +2413,13 @@ fn staged_preflight_rejects_manifest_and_profile_compiled_bounds() -> TestResult
     archive.extend_from_slice(&manifest_size.to_be_bytes());
     archive.resize(archive.len() + usize::try_from(manifest_size)?, 0);
     let request = request_for_archive(&corpus.request, &archive)?;
-    assert!(
-        preflight_signed_bundle(&mut Cursor::new(archive), &corpus.trust_policy, &request,)
-            .is_err()
-    );
+    assert!(preflight_signed_bundle(
+        &mut Cursor::new(archive),
+        &corpus.trust_policy,
+        &support::trust_policy_operator()?,
+        &request,
+    )
+    .is_err());
 
     let profile_size = 16_u64 * 1024 * 1024 + 1;
     let mut oversized_profile = vec![0x84, 0xf6, 0x81, 0x83, 0x71];
@@ -2226,6 +2431,7 @@ fn staged_preflight_rejects_manifest_and_profile_compiled_bounds() -> TestResult
         preflight_signed_bundle(
             &mut Cursor::new(oversized_profile),
             &corpus.trust_policy,
+            &support::trust_policy_operator()?,
             &request,
         ),
         Err(pos_reference::signed_bundle::BundleError::FieldOutOfBounds)
@@ -2238,7 +2444,12 @@ fn authenticated_caps_reject_request_identity_and_size_mismatches() -> TestResul
     let corpus = support::corpus()?;
     let request = EvaluationRequest::from_canonical_cbor(&corpus.request)?;
     let mut archive = Cursor::new(&corpus.archive);
-    let preflight = preflight_signed_bundle(&mut archive, &corpus.trust_policy, &request)?;
+    let preflight = preflight_signed_bundle(
+        &mut archive,
+        &corpus.trust_policy,
+        &support::trust_policy_operator()?,
+        &request,
+    )?;
 
     for request_bytes in [
         request_with(&corpus.request, |request| {
@@ -2259,8 +2470,12 @@ fn authenticated_caps_reject_request_identity_and_size_mismatches() -> TestResul
         support::corpus_with_profile_mutation(ProfileMutation::SelectedProfileByteCapBoundary)?;
     let undersized_request = EvaluationRequest::from_canonical_cbor(&undersized.request)?;
     let mut archive = Cursor::new(&undersized.archive);
-    let preflight =
-        preflight_signed_bundle(&mut archive, &undersized.trust_policy, &undersized_request)?;
+    let preflight = preflight_signed_bundle(
+        &mut archive,
+        &undersized.trust_policy,
+        &support::trust_policy_operator()?,
+        &undersized_request,
+    )?;
     assert!(
         Profile::authenticated_hard_caps(preflight.profile_bytes(), &undersized_request).is_err()
     );
@@ -2269,8 +2484,12 @@ fn authenticated_caps_reject_request_identity_and_size_mismatches() -> TestResul
         let changed = support::corpus_with_profile_mutation(mutation)?;
         let changed_request = EvaluationRequest::from_canonical_cbor(&changed.request)?;
         let mut archive = Cursor::new(&changed.archive);
-        let preflight =
-            preflight_signed_bundle(&mut archive, &changed.trust_policy, &changed_request)?;
+        let preflight = preflight_signed_bundle(
+            &mut archive,
+            &changed.trust_policy,
+            &support::trust_policy_operator()?,
+            &changed_request,
+        )?;
         assert_eq!(
             Profile::authenticated_hard_caps(preflight.profile_bytes(), &changed_request),
             Err(ProfileError::UnsupportedVersion)
@@ -2297,7 +2516,9 @@ fn evaluator_rejects_profile_inconsistent_expected_result_records() -> TestResul
                 &corpus.request,
                 &corpus.archive,
                 &corpus.trust_policy,
+                &support::trust_policy_operator()?,
                 &evaluator_identity()?,
+                &support::test_executors(),
                 &mut adapter,
             ),
             Err(EvaluatorError::Profile)
@@ -2317,7 +2538,13 @@ fn evaluator_rejects_wrong_types_at_each_required_archive_field() -> TestResult 
     for mutation in mutations {
         let corpus = support::corpus_with_bundle_mutation(mutation)?;
         let request = EvaluationRequest::from_canonical_cbor(&corpus.request)?;
-        assert!(verify_signed_bundle(&corpus.archive, &corpus.trust_policy, &request).is_err());
+        assert!(verify_signed_bundle(
+            &corpus.archive,
+            &corpus.trust_policy,
+            &support::trust_policy_operator()?,
+            &request
+        )
+        .is_err());
         let mut adapter = PublicAdapter {
             subject_digest: corpus.subject_digest,
             output: corpus.expected_output,
@@ -2327,7 +2554,9 @@ fn evaluator_rejects_wrong_types_at_each_required_archive_field() -> TestResult 
                 &corpus.request,
                 &corpus.archive,
                 &corpus.trust_policy,
+                &support::trust_policy_operator()?,
                 &evaluator_identity()?,
+                &support::test_executors(),
                 &mut adapter,
             ),
             Err(EvaluatorError::Bundle)
@@ -2352,7 +2581,9 @@ fn evaluator_rejects_each_archive_textual_contract_boundary() -> TestResult {
                 &corpus.request,
                 &corpus.archive,
                 &corpus.trust_policy,
+                &support::trust_policy_operator()?,
                 &evaluator_identity()?,
+                &support::test_executors(),
                 &mut adapter,
             ),
             Err(EvaluatorError::Bundle)
@@ -2394,6 +2625,8 @@ fn evaluator_rejects_each_request_bound_trust_policy_attack() -> TestResult {
         TrustMutation::PreviousInvalid,
         TrustMutation::Signature,
         TrustMutation::SignatureType,
+        TrustMutation::DomainlessSignature,
+        TrustMutation::SignedByTrustRoot,
     ];
     for mutation in mutations {
         let corpus = support::corpus_with_trust_mutation(mutation)?;
@@ -2406,13 +2639,87 @@ fn evaluator_rejects_each_request_bound_trust_policy_attack() -> TestResult {
                 &corpus.request,
                 &corpus.archive,
                 &corpus.trust_policy,
+                &support::trust_policy_operator()?,
                 &evaluator_identity()?,
+                &support::test_executors(),
                 &mut adapter,
             ),
             Err(EvaluatorError::Bundle)
         );
     }
     Ok(())
+}
+
+#[test]
+fn tps1_authenticates_only_under_the_pinned_deployment_operator_key() -> TestResult {
+    let corpus = support::corpus()?;
+    let request = EvaluationRequest::from_canonical_cbor(&corpus.request)?;
+    let operator = support::trust_policy_operator()?;
+    assert!(
+        verify_signed_bundle(&corpus.archive, &corpus.trust_policy, &operator, &request).is_ok()
+    );
+    for mutation in [
+        TrustMutation::DomainlessSignature,
+        TrustMutation::SignedByTrustRoot,
+    ] {
+        let attacked = support::corpus_with_trust_mutation(mutation)?;
+        let attacked_request = EvaluationRequest::from_canonical_cbor(&attacked.request)?;
+        assert_eq!(
+            verify_signed_bundle(
+                &attacked.archive,
+                &attacked.trust_policy,
+                &operator,
+                &attacked_request,
+            ),
+            Err(BundleError::TrustPolicyMismatch)
+        );
+        assert_eq!(
+            preflight_signed_bundle(
+                &mut Cursor::new(&attacked.archive),
+                &attacked.trust_policy,
+                &operator,
+                &attacked_request,
+            )
+            .map(|_| ()),
+            Err(BundleError::TrustPolicyMismatch)
+        );
+    }
+    // The corpus trust root also signs CFB1; pinning it as the operator still
+    // refuses the operator-signed TPS1, so no other key substitutes.
+    let trust_root = TrustPolicyOperatorAnchor::new(
+        DEPLOYMENT_OPERATOR_ROLE,
+        ed25519_dalek::SigningKey::from_bytes(&[9; 32])
+            .verifying_key()
+            .to_bytes(),
+    )?;
+    assert_eq!(
+        verify_signed_bundle(&corpus.archive, &corpus.trust_policy, &trust_root, &request),
+        Err(BundleError::TrustPolicyMismatch)
+    );
+    Ok(())
+}
+
+#[test]
+fn operator_anchor_refuses_other_roles_and_invalid_keys() {
+    let key = support::trust_policy_operator_public_key();
+    for role in [
+        "",
+        "deployment-operator ",
+        "plugin-operator",
+        "Deployment-Operator",
+    ] {
+        assert_eq!(
+            TrustPolicyOperatorAnchor::new(role, key),
+            Err(BundleError::OperatorAnchorInvalid)
+        );
+    }
+    let mut invalid_point = [0; 32];
+    invalid_point[0] = 2;
+    assert_eq!(
+        TrustPolicyOperatorAnchor::new(DEPLOYMENT_OPERATOR_ROLE, invalid_point),
+        Err(BundleError::OperatorAnchorInvalid)
+    );
+    assert!(TrustPolicyOperatorAnchor::new(DEPLOYMENT_OPERATOR_ROLE, key).is_ok());
 }
 
 #[test]
@@ -2432,7 +2739,9 @@ fn evaluator_rejects_wrong_types_at_each_required_trust_policy_field() -> TestRe
                 &corpus.request,
                 &corpus.archive,
                 &corpus.trust_policy,
+                &support::trust_policy_operator()?,
                 &evaluator_identity()?,
+                &support::test_executors(),
                 &mut adapter,
             ),
             Err(EvaluatorError::Bundle)
@@ -2458,7 +2767,9 @@ fn evaluator_rejects_each_trust_policy_textual_contract_boundary() -> TestResult
                 &corpus.request,
                 &corpus.archive,
                 &corpus.trust_policy,
+                &support::trust_policy_operator()?,
                 &evaluator_identity()?,
+                &support::test_executors(),
                 &mut adapter,
             ),
             Err(EvaluatorError::Bundle)
@@ -2484,7 +2795,9 @@ fn evaluator_accepts_supported_trust_policy_evolution() -> TestResult {
             &corpus.request,
             &corpus.archive,
             &corpus.trust_policy,
+            &support::trust_policy_operator()?,
             &evaluator_identity()?,
+            &support::test_executors(),
             &mut adapter,
         )?;
         assert!(report
@@ -2497,7 +2810,7 @@ fn evaluator_accepts_supported_trust_policy_evolution() -> TestResult {
 }
 
 #[test]
-fn evaluator_rejects_each_signed_release_admission_attack() -> TestResult {
+fn each_signed_release_admission_attack_leaves_the_downgrade_case_non_executed() -> TestResult {
     let mutations = [
         ReleaseMutation::Magic,
         ReleaseMutation::Version,
@@ -2505,11 +2818,23 @@ fn evaluator_rejects_each_signed_release_admission_attack() -> TestResult {
         ReleaseMutation::CaseId,
         ReleaseMutation::ExecutionDigest,
         ReleaseMutation::TrustDigest,
+        ReleaseMutation::PinnedSnapshot,
         ReleaseMutation::FromProvider,
         ReleaseMutation::ToProvider,
         ReleaseMutation::AllowFallback,
         ReleaseMutation::SignerId,
         ReleaseMutation::Signature,
+    ];
+    for mutation in mutations {
+        let corpus = support::corpus_with_release_mutation(mutation)?;
+        assert_downgrade_not_dispatched(&corpus, "release admission attack")?;
+    }
+    Ok(())
+}
+
+#[test]
+fn evaluator_rejects_an_incomplete_release_admission_closure() -> TestResult {
+    let mutations = [
         ReleaseMutation::MissingMember,
         ReleaseMutation::ExtraMember,
         ReleaseMutation::MissingBinding,
@@ -2525,7 +2850,9 @@ fn evaluator_rejects_each_signed_release_admission_attack() -> TestResult {
                 &corpus.request,
                 &corpus.archive,
                 &corpus.trust_policy,
+                &support::trust_policy_operator()?,
                 &evaluator_identity()?,
+                &support::test_executors(),
                 &mut adapter,
             ),
             Err(EvaluatorError::Profile)
@@ -2535,7 +2862,7 @@ fn evaluator_rejects_each_signed_release_admission_attack() -> TestResult {
 }
 
 #[test]
-fn evaluator_rejects_malformed_release_admission_fields() -> TestResult {
+fn malformed_release_admission_fields_leave_the_downgrade_case_non_executed() -> TestResult {
     let mutations = [ReleaseMutation::Encoding, ReleaseMutation::Shape]
         .into_iter()
         .chain((0..11).map(ReleaseMutation::RawField))
@@ -2543,20 +2870,7 @@ fn evaluator_rejects_malformed_release_admission_fields() -> TestResult {
         .chain((0..4).map(ReleaseMutation::RawToProviderField));
     for mutation in mutations {
         let corpus = support::corpus_with_release_mutation(mutation)?;
-        let mut adapter = PublicAdapter {
-            subject_digest: corpus.subject_digest,
-            output: corpus.expected_output,
-        };
-        assert_eq!(
-            evaluate(
-                &corpus.request,
-                &corpus.archive,
-                &corpus.trust_policy,
-                &evaluator_identity()?,
-                &mut adapter,
-            ),
-            Err(EvaluatorError::Profile)
-        );
+        assert_downgrade_not_dispatched(&corpus, "malformed release admission")?;
     }
     Ok(())
 }
