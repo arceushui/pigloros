@@ -19,6 +19,7 @@ mod cases {
         AttemptUnitTermination, PlannedAttemptIntent, RegistryDirectory, SystemdAttemptRecovery,
         SystemdAttemptRegistry,
     };
+    use crate::restart::RootsReleased;
     use crate::SystemdAttemptUnitAbsenceObservation;
 
     type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
@@ -108,7 +109,7 @@ mod cases {
             .iter()
             .map(|entry| SystemdAttemptUnitAbsenceObservation::for_test(entry.unit_name().clone()))
             .collect::<Vec<_>>();
-        recovery.remove_reconciled(&absent, &[ATTEMPT])?;
+        recovery.remove_reconciled(&absent, &RootsReleased::for_test(vec![ATTEMPT]))?;
         Ok(())
     }
 

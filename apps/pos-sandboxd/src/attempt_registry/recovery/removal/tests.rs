@@ -10,6 +10,7 @@ mod cases {
     use super::super::super::super::tests::{in_lock_test_process, with_io_fault};
     use super::super::super::super::RegistryDirectory;
     use super::super::*;
+    use crate::restart::RootsReleased;
     use crate::{SystemdAttemptRegistry, SystemdAttemptUnitAbsenceObservation};
 
     type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
@@ -97,6 +98,11 @@ mod cases {
             .collect()
     }
 
+    /// Released-root evidence for exactly `attempt_ids`.
+    fn released(attempt_ids: &[[u8; 16]]) -> RootsReleased {
+        RootsReleased::for_test(attempt_ids.to_vec())
+    }
+
     fn count(path: &Path) -> TestResult<usize> {
         Ok(fs::read_dir(path)?.count())
     }
@@ -111,7 +117,8 @@ mod cases {
         let runtime = seed()?;
         let recovery = recovery(runtime.path())?;
         assert_eq!(recovery.entries().len(), 9);
-        let attempts = recovery.remove_reconciled(&absences(&recovery), &[ROOT_ATTEMPT])?;
+        let attempts =
+            recovery.remove_reconciled(&absences(&recovery), &released(&[ROOT_ATTEMPT]))?;
         // The committed intents, in canonical order; temporary writes are not
         // committed ownership.
         let expected = (1..=7).map(intent).collect::<Result<Vec<_>, _>>()?;
@@ -136,7 +143,12 @@ mod cases {
         let recovery = recovery(runtime.path())?;
         let mut partial = absences(&recovery);
         partial.remove(0);
-        for (units, roots) in [(partial, vec![ROOT_ATTEMPT]), (absences(&recovery), vec![])] {
+        // A missing unit; no released root; only another attempt's root.
+        for (units, roots) in [
+            (partial, released(&[ROOT_ATTEMPT])),
+            (absences(&recovery), released(&[])),
+            (absences(&recovery), released(&[[1; 16]])),
+        ] {
             assert!(matches!(
                 recovery.remove_reconciled(&units, &roots),
                 Err(SystemdAttemptRegistryError::CleanupEvidence)
@@ -163,7 +175,7 @@ mod cases {
         )?;
         let recovery = recovery(runtime.path())?;
         assert!(recovery
-            .remove_reconciled(&absences(&recovery), &[ROOT_ATTEMPT])
+            .remove_reconciled(&absences(&recovery), &released(&[ROOT_ATTEMPT]))
             .is_err());
         assert_eq!(count(&runtime.path().join("registry"))?, 9);
         assert_eq!(count(&runtime.path().join("attempts"))?, 6);
@@ -182,7 +194,7 @@ mod cases {
             let recovery = recovery(runtime.path())?;
             let evidence = absences(&recovery);
             let (result, count) = with_io_fault(None, || {
-                recovery.remove_reconciled(&evidence, &[ROOT_ATTEMPT])
+                recovery.remove_reconciled(&evidence, &released(&[ROOT_ATTEMPT]))
             });
             result?;
             count
@@ -192,13 +204,13 @@ mod cases {
             let interrupted = recovery(runtime.path())?;
             let evidence = absences(&interrupted);
             let (result, _) = with_io_fault(Some(fail_at), || {
-                interrupted.remove_reconciled(&evidence, &[ROOT_ATTEMPT])
+                interrupted.remove_reconciled(&evidence, &released(&[ROOT_ATTEMPT]))
             });
             assert!(result.is_err(), "step {fail_at}");
             drop(interrupted);
             // The restarted owner inventories whatever survived and finishes it.
             let restarted = recovery(runtime.path())?;
-            restarted.remove_reconciled(&absences(&restarted), &[ROOT_ATTEMPT])?;
+            restarted.remove_reconciled(&absences(&restarted), &released(&[ROOT_ATTEMPT]))?;
             assert_eq!(
                 count(&runtime.path().join("registry"))?,
                 0,

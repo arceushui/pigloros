@@ -413,14 +413,21 @@ mod tests {
     fn malformed_complete_root_claims_never_enter_recovery_inventory() -> TestResult {
         let (runtime, held) = fixture()?;
         let valid = root_record()?;
-        for value in [0, u64::from(u32::MAX)] {
+        // Device components at either end of `u32` decode to exactly that
+        // value, so the recorded generations carry the bound as a type fact.
+        for (value, component) in [(0, 0), (u64::from(u32::MAX), u32::MAX)] {
             let mut bytes = valid.clone();
             for index in [1, 2, 6, 7, 9, 10] {
                 bytes[84 + index * 8..84 + (index + 1) * 8].copy_from_slice(&value.to_le_bytes());
             }
             write_record(runtime.path(), KEY, &bytes)?;
-            assert!(
-                read_entry(&held, KEY)?.intent().is_some(),
+            let devices = read_entry(&held, KEY)?
+                .intent()
+                .and_then(RecoveredAttemptIntent::recorded_generations)
+                .map(|[(mapper, _), (loop_device, _)]| [mapper, loop_device]);
+            assert_eq!(
+                devices,
+                Some([(component, component); 2]),
                 "device limit {value}"
             );
         }

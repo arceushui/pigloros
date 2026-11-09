@@ -13,13 +13,16 @@
 //! 4. every PAI3 root's recorded loop/dm generations are absent now.
 //!
 //! Only then are the unmounted directories removed and each intent deleted
-//! last. Every recognized pre-launch crash state is covered: a temporary write,
+//! last. That removal is local, bounded filesystem work under the held
+//! registry lock, done after the deadline-bound proofs; the deadline does
+//! not interrupt it. Every recognized pre-launch crash state is covered: a temporary write,
 //! a planned-only intent, a directory created before its identity extension,
 //! and a recorded tree with its root, its root removed but its attempt
 //! directory present, or both removed. A loaded unit, a mounted or unknown
 //! directory, a contradiction or the deadline keeps admission closed and
 //! removes nothing; stopping a surviving unit and detaching a mounted root are
-//! not attempted here.
+//! not attempted here, so either keeps admission closed until the remaining
+//! #1200 recovery lands.
 
 use std::error::Error;
 use std::future::Future;
@@ -63,6 +66,27 @@ impl ReconciledRestart {
     #[must_use]
     pub fn attempts(&self) -> &[PlannedAttemptIntent] {
         &self.attempts
+    }
+}
+
+/// The attempts whose recorded roots' loop/dm generations were observed
+/// absent by a fresh probe.
+///
+/// Only restart reconciliation's device proof creates it, so registry removal
+/// cannot be handed released-root evidence that no probe produced.
+#[derive(Debug)]
+pub(crate) struct RootsReleased(Vec<[u8; 16]>);
+
+impl RootsReleased {
+    /// Whether the recorded root of `attempt_id` was observed released.
+    pub(crate) fn contains(&self, attempt_id: [u8; 16]) -> bool {
+        self.0.contains(&attempt_id)
+    }
+
+    /// Evidence for registry tests that have no devices to probe.
+    #[cfg(test)]
+    pub(crate) const fn for_test(attempt_ids: Vec<[u8; 16]>) -> Self {
+        Self(attempt_ids)
     }
 }
 
@@ -144,14 +168,14 @@ where
         Err(error) => Err(error),
     };
     let released = match cleaned {
-        Ok(absent) => roots_released(&recovery, probe)
+        Ok(absent) => roots_released(&recovery, probe, deadline)
             .await
-            .map(|ids| (absent, ids)),
+            .map(|roots| (absent, roots)),
         Err(error) => Err(error),
     };
-    released.and_then(|(absent, ids)| {
+    released.and_then(|(absent, roots)| {
         recovery
-            .remove_reconciled(&absent, &ids)
+            .remove_reconciled(&absent, &roots)
             .map(|attempts| ReconciledRestart { attempts })
             .map_err(RestartReconciliationError::from)
     })
@@ -202,7 +226,17 @@ async fn remove_network<N: OrphanNetworkCleanup + Sync>(
 async fn roots_released<P, F>(
     recovery: &SystemdAttemptRecovery,
     probe: P,
-) -> Reconciled<Vec<[u8; 16]>>
+    deadline: Instant,
+) -> Reconciled<RootsReleased>
+where
+    P: Fn(Generations) -> F,
+    F: Future<Output = Result<bool, ImageActivationError>>,
+{
+    let probed = timeout_at(deadline, probe_roots(recovery, probe)).await;
+    probed.unwrap_or(Err(RestartReconciliationError::DeadlineElapsed))
+}
+
+async fn probe_roots<P, F>(recovery: &SystemdAttemptRecovery, probe: P) -> Reconciled<RootsReleased>
 where
     P: Fn(Generations) -> F,
     F: Future<Output = Result<bool, ImageActivationError>>,
@@ -222,7 +256,7 @@ where
             Err(error) => return Err(RestartReconciliationError::Devices(Some(error))),
         }
     }
-    Ok(released)
+    Ok(RootsReleased(released))
 }
 
 #[cfg(test)]
