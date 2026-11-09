@@ -61,9 +61,11 @@ pub fn recorded_identity(
         .map_err(|error| error.to_string())
 }
 
-/// Released-root evidence for the single activation of `directory`, from the
-/// existing fake attachment and release fixtures. The activation is recorded
-/// first, as the mountfsd request would; this grants no other authority.
+/// Released-root evidence for the single activation of `directory`.
+///
+/// It comes from the existing fake attachment and release fixtures. The
+/// activation is recorded first, as the mountfsd request would; this grants
+/// no other authority.
 ///
 /// # Errors
 /// Returns the attachment or release fixture's error.
@@ -72,9 +74,8 @@ pub async fn released_root(
 ) -> Result<ReleasedAttemptRoot, String> {
     directory.begin_activation();
     let (kernel, root) = attached_root(directory).map_err(|error| error.to_string())?;
-    release_owned(root, &kernel, directory)
-        .await
-        .map_err(|error| error.to_string())
+    let released = release_owned(root, &kernel, directory).await;
+    released.map_err(|error| error.to_string())
 }
 
 fn cleanup_deadline() -> tokio::time::Instant {
@@ -1339,6 +1340,24 @@ fn fixed_registry() -> TestResult {
     Ok(())
 }
 
+/// Activate `prepared` once more, release its root and finish its cleanup.
+async fn retry_and_clean(
+    kernel: &FakeKernel,
+    admission: &HeldImageAdmission<'_>,
+    prepared: PreparedAttemptDirectory,
+) -> TestResult {
+    let retried = activate(
+        kernel,
+        admission,
+        &prepared,
+        MountfsdImageActivator::connect,
+    )
+    .await?;
+    let released = release_owned(retried, kernel, &prepared).await?;
+    prepared.finish_terminal_cleanup(crate::AttemptUnitTermination::Unclaimed, Some(released))?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn the_admitted_chain_reaches_attachment_only_through_every_gate() -> TestResult {
     if std::env::var_os(PRIVILEGED_COMPOSITION_TEST).is_none() {
@@ -1390,15 +1409,7 @@ async fn the_admitted_chain_reaches_attachment_only_through_every_gate() -> Test
 
     // Neither early failure reached mountfsd, so after one successful retry
     // the released root alone lets terminal cleanup delete intent last.
-    let retried = activate(
-        &kernel,
-        &admission,
-        &prepared,
-        MountfsdImageActivator::connect,
-    )
-    .await?;
-    let released = release_owned(retried, &kernel, &prepared).await?;
-    prepared.finish_terminal_cleanup(crate::AttemptUnitTermination::Unclaimed, Some(released))?;
+    retry_and_clean(&kernel, &admission, prepared).await?;
     let prepared = registry.commit_planned(&planned)?.prepare_directory()?;
 
     // Every gate passes: the verified root names the attempt path.
