@@ -255,6 +255,7 @@ mod native_tests {
     use super::*;
     use std::ffi::OsString;
     use std::os::windows::ffi::OsStringExt;
+    use std::os::windows::fs::symlink_file;
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -391,6 +392,10 @@ mod native_tests {
         fs::remove_file(hardlink)?;
         drop(ledger);
         let temporary = base.join("PiglorOS").join(TEMPORARY);
+        symlink_file(&path, &temporary)?;
+        assert!(guard.open_nonce_ledger().is_err());
+        assert!(fs::symlink_metadata(&temporary)?.file_type().is_symlink());
+        fs::remove_file(&temporary)?;
         let mut stale = crate::Native::create_private_ledger_file(&temporary)
             .map_err(|()| "create stale test file")?;
         stale.write_all(b"stale")?;
