@@ -1532,9 +1532,9 @@ def _check_owned_parent_boundary(sources: dict[str, str], found: list[str]) -> N
 # Full text binds attributes, literal URI, handler/denial observations and scope.
 EXTERNAL_FIXTURE_SOURCES = {
     'crates/pos-owner-bridge-windows/src/ffi/events/controls.rs': '8c53ef70d3d845bebd2a1d84976765e4a37beafb44ba3a0eb5359b2725c91d29',
-    'crates/pos-owner-bridge-windows/src/ffi/events/mod.rs': 'aeb346b5b8052549e712b7c64157a376ceb18c429ee3eb768863660d9a527448',
+    'crates/pos-owner-bridge-windows/src/ffi/events/mod.rs': 'c56e620dba19376362218eed74d3b3406dfc90b2b1e55234942d249cc4603fe3',
     'crates/pos-owner-bridge-windows/src/ffi/events/denial.rs': '5b5152942f17630af41b044c53c80403ac5f4cfaef267bfbe4e5fc3207988820',
-    'crates/pos-owner-bridge-windows/src/ffi/session.rs': 'd81399e27791e3c873968d1e811069ae65d92835a63aa4efaf8d5f32efcf2581',
+    'crates/pos-owner-bridge-windows/src/ffi/session.rs': 'a4e1901d2f1e4b94c16187ef83811820c8c7e650a0e5b1c98b285f105933bf85',
     'crates/pos-owner-bridge-windows/src/lib.rs': '20f169f7ba4e78339eacba3d332d4f01514fd0ee0b02d3a8f190191d2c5ce54c',
     'crates/pos-owner-bridge-windows/src/adapter/native_tests/controls.rs': 'aba89304f72a45a9abc2d7bba58e20161c2019a5db053988214640e342332c10',
     'crates/pos-owner-bridge-windows/src/adapter/native_tests.rs': '2e3ec6d4daa853395812f19ab4599cc937e8b13243d0daf75de71da93b85f349',

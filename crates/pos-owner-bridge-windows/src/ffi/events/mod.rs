@@ -55,6 +55,12 @@ impl Subscriptions {
         Ok(())
     }
 
+    /// A successful controller Close releases the WebView's event handlers.
+    /// Drop only the retained view removers; environment and denial owners are separate.
+    pub(super) fn view_closed(&mut self) {
+        self.removers.clear();
+    }
+
     pub(super) fn close(&mut self) -> Result<()> {
         let mut pending = Vec::new();
         for mut remove in self.removers.drain(..).rev() {

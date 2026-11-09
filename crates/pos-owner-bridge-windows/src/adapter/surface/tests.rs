@@ -202,6 +202,11 @@ fn outer_event_ticks_retry_failed_close_until_own_exit_without_reopening() -> Te
             fixture.surface.open(&spec(99)),
             Poll::Ready(Err(_))
         ));
+        if let Some(sink) = fixture.factory.sink.borrow().as_ref() {
+            sink.event(NativeEvent::BrowserExited { pid: 43 });
+        }
+        assert!(fixture.surface.finish().is_err());
+        assert!(!fixture.surface.idle());
         fixture.exit();
         fixture
             .surface

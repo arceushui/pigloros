@@ -488,6 +488,10 @@ impl NativeOperations for Session {
             // SAFETY: retained creating-STA controller; all buffer borrows ended.
             // Failure retains the COM owner so the safe policy can quarantine/retry.
             unsafe { controller.Close() }.map_err(failed)?;
+            // Close has released the view's handlers. Retrying removers on the
+            // closed view can fail forever; the earlier unsubscribe error is
+            // still returned by the surface and follows its quarantine path.
+            self.subscriptions.view_closed();
             self.shared = None;
             self.view = None;
             self.controller = None;
