@@ -147,12 +147,12 @@ pub enum FirewallRule {
     /// `ct state established,related accept`: return traffic of a connection
     /// the namespace opened.
     AcceptEstablished,
-    /// Accept IPv6 with hop limit 255 carrying ICMPv6 type 135 or 136
+    /// Accept IPv6 with hop limit 255 carrying `ICMPv6` type 135 or 136
     /// (neighbour solicitation or advertisement): neighbour discovery
     /// arriving on the veth. A hop limit of 255 proves the packet was not
     /// routed, so it came from the host end.
     AcceptNeighbourDiscovery,
-    /// Accept IPv6 to `destination/length` with hop limit 255 carrying ICMPv6
+    /// Accept IPv6 to `destination/length` with hop limit 255 carrying `ICMPv6`
     /// type 135 or 136: neighbour discovery the namespace sends, only to
     /// `destination/length`. The namespace uses it for the solicited-node
     /// multicast range `ff02::1:ff00:0/104` and for the host end's address,
@@ -482,7 +482,7 @@ pub trait NamespaceControl {
     /// - encode each [`FirewallRule`] with the protocol matches its other
     ///   matches depend on: the `nfproto` match before an IPv6 address or
     ///   hop-limit match, and the `l4proto` match before a TCP port or
-    ///   ICMPv6 type match.
+    ///   `ICMPv6` type match.
     ///
     /// Host forwarding, `rp_filter` and the host firewall are not part of
     /// this namespace.
