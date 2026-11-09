@@ -194,9 +194,15 @@ impl<'guard> WindowsNonceLedger<'guard> {
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(_) => Err(()),
             Ok(_) => {
-                let file = self.open_existing(TEMPORARY)?;
-                Self::same_name(&file, &path)?;
-                drop(file);
+                let primary = self.open_existing(LEDGER)?;
+                let temporary = self.open_existing(TEMPORARY)?;
+                read_bounded(primary.try_clone().map_err(|_| ())?)?;
+                read_bounded(temporary.try_clone().map_err(|_| ())?)?;
+                self.admit_directory()?;
+                Self::same_name(&primary, &self.path.join(LEDGER))?;
+                Self::same_name(&temporary, &path)?;
+                drop(primary);
+                drop(temporary);
                 fs::remove_file(path).map_err(|_| ())
             }
         }
@@ -340,6 +346,7 @@ mod native_tests {
             .open_nonce_ledger()
             .map_err(|_| "open initial raw directory")?;
         let path = base.join("PiglorOS").join(LEDGER);
+        recovery_requires_admitted_primary(&guard, base, &path)?;
         assert_eq!(ledger.read_nonce_ledger_bytes(), Err(unavailable()));
         assert_eq!(
             ledger.replace_nonce_ledger_bytes(b"missing"),
@@ -401,7 +408,7 @@ mod native_tests {
         fs::write(&unrelated, b"retained")?;
         let temporary_alias = base.join("PiglorOS").join("stale-alias");
         fs::hard_link(&temporary, &temporary_alias)?;
-        assert!(guard.open_nonce_ledger().is_err());
+        assert_eq!(guard.open_nonce_ledger().err(), Some(unavailable()));
         assert!(temporary.exists());
         fs::remove_file(temporary_alias)?;
         ledger = guard.open_nonce_ledger()?;
@@ -423,6 +430,53 @@ mod native_tests {
             ledger = guard.open_nonce_ledger()?;
             assert_eq!(ledger.read_nonce_ledger_bytes()?, expected_after(failure));
         }
+        Ok(())
+    }
+
+    fn recovery_requires_admitted_primary(
+        guard: &WindowsSubjectEncryptorLock,
+        base: &Path,
+        primary: &Path,
+    ) -> TestResult {
+        let temporary = base.join("PiglorOS").join(TEMPORARY);
+        let mut staged = crate::Native::create_private_ledger_file(&temporary)
+            .map_err(|()| "create recovery staging fixture")?;
+        staged.write_all(b"staged")?;
+        drop(staged);
+        assert_eq!(guard.open_nonce_ledger().err(), Some(unavailable()));
+        assert!(!primary.exists());
+        assert_eq!(fs::read(&temporary)?, b"staged");
+        assert!(WindowsSubjectEncryptorLock::acquire(base).is_err());
+
+        let mut file = crate::Native::create_private_ledger_file(primary)
+            .map_err(|()| "create recovery primary fixture")?;
+        file.write_all(b"primary")?;
+        drop(file);
+        let alias = base.join("PiglorOS").join("primary-alias");
+        fs::hard_link(primary, &alias)?;
+        assert_eq!(guard.open_nonce_ledger().err(), Some(unavailable()));
+        assert_eq!(fs::read(primary)?, b"primary");
+        assert_eq!(fs::read(&temporary)?, b"staged");
+        assert!(WindowsSubjectEncryptorLock::acquire(base).is_err());
+        fs::remove_file(alias)?;
+
+        let held = OpenOptions::new().read(true).share_mode(0).open(primary)?;
+        assert_eq!(guard.open_nonce_ledger().err(), Some(unavailable()));
+        drop(held);
+        assert_eq!(fs::read(primary)?, b"primary");
+        assert_eq!(fs::read(&temporary)?, b"staged");
+        assert!(WindowsSubjectEncryptorLock::acquire(base).is_err());
+        fs::write(primary, vec![0x5a; LIMIT + 1])?;
+        assert_eq!(guard.open_nonce_ledger().err(), Some(unavailable()));
+        assert_eq!(fs::read(primary)?, vec![0x5a; LIMIT + 1]);
+        assert_eq!(fs::read(&temporary)?, b"staged");
+        assert!(WindowsSubjectEncryptorLock::acquire(base).is_err());
+        fs::write(primary, b"primary")?;
+        let recovered = guard.open_nonce_ledger()?;
+        assert_eq!(recovered.read_nonce_ledger_bytes()?, b"primary");
+        assert!(!temporary.exists());
+        drop(recovered);
+        fs::remove_file(primary)?;
         Ok(())
     }
 

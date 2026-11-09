@@ -436,6 +436,203 @@ def _function_spans(code: str) -> tuple[tuple[str, int, int], ...]:
     return tuple(spans)
 
 
+# ADR-132's exclusive creator is a deliberately narrow native capability.
+# Compare its executable tokens, not comments or an operation-name inventory.
+LEDGER_CREATOR_BODY = r'''
+{
+ let path: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+ if path[..path.len() - 1].contains(&0) { return Err(()); }
+ let sid = super::directory::current_sid()?;
+ let text: Vec<u16> = format!("O:{sid}D:P(A;;FA;;;{sid})").encode_utf16().chain([0]).collect();
+ let mut output = PSECURITY_DESCRIPTOR::default();
+ unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(PCWSTR(text.as_ptr()), SDDL_REVISION_1, &raw mut output, None,) }.map_err(|_| ())?;
+ let security = LocalMemory(HLOCAL(output.0));
+ let attributes = SECURITY_ATTRIBUTES {
+  nLength: u32::try_from(std::mem::size_of::<SECURITY_ATTRIBUTES>()).map_err(|_| ())?,
+  lpSecurityDescriptor: security.0 .0,
+  bInheritHandle: false.into(),
+ };
+ let handle = unsafe { CreateFileW(PCWSTR(path.as_ptr()), (GENERIC_READ | GENERIC_WRITE).0,
+  FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, Some(&raw const attributes), CREATE_NEW,
+  FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_WRITE_THROUGH, None,) }.map_err(|_| ())?;
+ let owned = unsafe { OwnedHandle::from_raw_handle(handle.0) };
+ Ok(File::from(owned))
+}
+'''
+
+LEDGER_OPEN_BODY = r'''
+{
+ let path = guard.test_directory.join("PiglorOS");
+ require_dos_path(&path)?;
+ match fs::symlink_metadata(&path) {
+  Ok(_) => crate::verify_private_directory(&path).map_err(|_| ())?,
+  Err(error) if error.kind() == io::ErrorKind::NotFound => {
+   crate::create_private_directory(&path).map_err(|_| ())?;
+  }
+  Err(_) => return Err(()),
+ }
+ crate::Native::cleanup_path_ntfs(&path)?;
+ let directory = open_directory(&path)?;
+ let volume = crate::Native::cleanup_file_volume(&directory)?;
+ let store = Self { _guard: guard, directory, path, volume, };
+ store.admit_directory()?;
+ store.remove_stale_temporary()?;
+ Ok(store)
+}
+'''
+
+LEDGER_GUARD_ACQUIRE_BODY = r'''
+{
+ if !test_directory.is_absolute() || !test_directory.is_dir() { return Err(unavailable()); }
+ crate::SubjectMutex::acquire().map(|mutex| Self { mutex, test_directory: test_directory.to_owned(), }).map_err(|()| unavailable())
+}
+'''
+
+LEDGER_ADMISSION_BODIES = {
+    "admit_directory": r'''{ crate::verify_private_directory(&self.path).map_err(|_| ())?;
+      if crate::Native::cleanup_file_volume(&self.directory)? != self.volume { return Err(()); }
+      let reopened = open_directory(&self.path)?;
+      if crate::Native::file_identity(&self.directory)? != crate::Native::file_identity(&reopened)? { return Err(()); }
+      Ok(()) }''',
+    "validate_file": r'''{ let metadata = file.metadata().map_err(|_| ())?;
+      if !metadata.is_file() || metadata.file_attributes() & REPARSE_POINT != 0 { return Err(()); }
+      crate::Native::require_private_file(file)?;
+      if crate::Native::file_link_count(file)? != 1 || crate::Native::cleanup_file_volume(file)? != self.volume { return Err(()); }
+      Self::same_name(file, path) }''',
+    "same_name": r'''{ let reopened = open_file(path)?;
+      if crate::Native::file_identity(file)? != crate::Native::file_identity(&reopened)? { return Err(()); }
+      Ok(()) }''',
+    "open_existing": r'''{ let path = self.path.join(name); let file = open_file(&path)?;
+      self.validate_file(&file, &path)?; Ok(file) }''',
+    "open_directory": r'''{ OpenOptions::new().read(true).share_mode(SHARE_ALL)
+      .custom_flags(FILE_FLAG_BACKUP_SEMANTICS.0 | FILE_FLAG_OPEN_REPARSE_POINT.0).open(path).map_err(|_| ()) }''',
+    "open_file": r'''{ OpenOptions::new().read(true).write(true).share_mode(SHARE_ALL)
+      .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0 | FILE_FLAG_WRITE_THROUGH.0).open(path).map_err(|_| ()) }''',
+    "read_bounded": r'''{ let mut bytes = Vec::new(); file.take((LIMIT + 1) as u64).read_to_end(&mut bytes).map_err(|_| ())?;
+      if bytes.len() > LIMIT { return Err(()); } Ok(bytes) }''',
+    "require_dos_path": r'''{ let mut components = path.components();
+      if !matches!(components.next(), Some(Component::Prefix(prefix))
+       if matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_)))
+       || components.next() != Some(Component::RootDir)
+       || components.any(|component| !matches!(component, Component::Normal(_))) { return Err(()); }
+      Ok(()) }''',
+}
+
+
+def _literal_at(code: str, text: str, anchor: str, literal: str) -> bool:
+    matches = list(re.finditer(anchor, code))
+    return len(matches) == 1 and bool(re.match(r"\s*" + re.escape(literal), text[matches[0].end() :]))
+
+
+def _check_ledger_origin(relative: str, label: str, text: str, code: str, spans: tuple[tuple[str, int, int], ...], found: list[str]) -> None:
+    if relative == "src/adapter/ledger_storage.rs" and "create_private_ledger_file" in code:
+        openings = [(begin, end) for name, begin, end in spans if name == "open"]
+        impls = []
+        for item in re.finditer(r"\bimpl\s*<\s*'guard\s*>\s*WindowsNonceLedger\s*<\s*'guard\s*>\s*\{", code):
+            opening = item.end() - 1
+            impls.append((opening, _matching_brace(code, opening)))
+        if len(openings) != 1 or not any(begin < openings[0][0] < end for begin, end in impls) or _normalized(code[openings[0][0] : openings[0][1] + 1]) != _normalized(scan(LEDGER_OPEN_BODY).code):
+            found.append(f"{label}: ADR-132 ledger directory must derive from the held guard and be admitted")
+        elif not _literal_at(code[openings[0][0] : openings[0][1]], text[openings[0][0] : openings[0][1]], r"\bjoin\s*\(", '"PiglorOS"'):
+            found.append(f"{label}: ADR-132 ledger directory must use the fixed leaf")
+        if not _literal_at(code, text, r"\bconst\s+TEMPORARY\s*:\s*&\s*str\s*=", '"subject-nonce-ledger.v1.tmp"'):
+            found.append(f"{label}: ADR-132 staging name must remain fixed")
+        if not _literal_at(code, text, r"\bconst\s+LEDGER\s*:\s*&\s*str\s*=", '"subject-nonce-ledger.v1"'):
+            found.append(f"{label}: ADR-132 primary ledger name must remain fixed")
+        for name, expected in LEDGER_ADMISSION_BODIES.items():
+            matches = [(begin, end) for candidate, begin, end in spans if candidate == name]
+            if len(matches) != 1 or _normalized(code[matches[0][0] : matches[0][1] + 1]) != _normalized(scan(expected).code):
+                found.append(f"{label}: ADR-132 ledger admission helper {name} changed")
+        compact = _normalized(code)
+        if any(item not in compact for item in ("constSHARE_ALL:u32=7;", "constREPARSE_POINT:u32=0x400;", "constLIMIT:usize=1_048_576;")):
+            found.append(f"{label}: ADR-132 ledger admission constants changed")
+    if relative == "src/adapter/nonce_ledger.rs":
+        acquire = [(begin, end) for name, begin, end in spans if name == "acquire"]
+        guard = _normalized("pub struct WindowsSubjectEncryptorLock { mutex: crate::SubjectMutex, pub(super) test_directory: PathBuf, }")
+        if guard not in _normalized(code) or len(acquire) != 1 or _normalized(code[acquire[0][0] : acquire[0][1] + 1]) != _normalized(scan(LEDGER_GUARD_ACQUIRE_BODY).code):
+            found.append(f"{label}: ADR-132 ledger guard must acquire and retain the subject mutex")
+
+
+def _check_ledger_creator(label: str, text: str, code: str, spans: tuple[tuple[str, int, int], ...], found: list[str]) -> None:
+    creators = [(begin, end) for name, begin, end in spans if name == "create_private_ledger_file"]
+    if len(creators) != 1:
+        found.append(f"{label}: ADR-132 requires exactly one ledger creator")
+        return
+    begin, end = creators[0]
+    function = next((item for item in FUNCTION.finditer(code) if item.group(1) == "create_private_ledger_file" and item.start() < begin), None)
+    start = code.rfind("\n", 0, function.start()) + 1 if function else begin
+    signature = "pub(crate)fncreate_private_ledger_file(path:&Path)->Result<File,()>"
+    if function is None or _normalized(code[start:begin]) != signature:
+        found.append(f"{label}: ADR-132 ledger creator signature and visibility changed")
+    actual = code[begin : end + 1]
+    if _normalized(actual) != _normalized(scan(LEDGER_CREATOR_BODY).code):
+        found.append(f"{label}: ADR-132 ledger creator executable body differs from the authorized boundary")
+    format_call = re.search(r"\bformat\s*!\s*\(", actual)
+    if format_call is None or not re.match(r'\s*"O:\{sid\}D:P\(A;;FA;;;\{sid\}\)"\s*\)', text[begin + format_call.end() : end]):
+        found.append(f"{label}: ADR-132 ledger creator must use the exact current-SID owner and DACL")
+    imports = (
+        "use std::os::windows::io::{FromRawHandle, OwnedHandle};",
+        "use windows::core::PCWSTR;",
+        "use windows::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE, HLOCAL};",
+        "use windows::Win32::Security::Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,};",
+        "use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};",
+        "use windows::Win32::Storage::FileSystem::{CreateFileW, MoveFileExW, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAG_WRITE_THROUGH, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,};",
+        "use super::directory::LocalMemory;",
+    )
+    compact = _normalized(code)
+    if any(_normalized(item) not in compact for item in imports):
+        found.append(f"{label}: ADR-132 creator must use the pinned SDK and shared allocation owner")
+
+
+def _test_only_regions(code: str, attributes: tuple[Attribute, ...], header: str) -> tuple[tuple[int, int], ...]:
+    regions = []
+    for match in re.finditer(header, code):
+        start = code.rfind("\n", 0, match.start()) + 1
+        if "cfg(test)" in _outer_attributes_before(code, attributes, start):
+            opening = match.end() - 1
+            regions.append((opening, _matching_brace(code, opening)))
+    return tuple(regions)
+
+
+def _check_ledger_creator_calls(relative: str, label: str, code: str, attributes: tuple[Attribute, ...], spans: tuple[tuple[str, int, int], ...], found: list[str]) -> None:
+    fixture_regions: tuple[tuple[int, int], ...] = ()
+    if relative == "src/adapter/ledger_storage.rs":
+        fixture_regions = _test_only_regions(code, attributes, r"\bmod\s+native_tests\s*\{")
+    elif relative == "src/adapter/store_file_identity.rs":
+        fixture_regions = _test_only_regions(code, attributes, r"\bimpl\s+crate\s*::\s*Native\s*\{")
+    ledger_impls = []
+    for item in re.finditer(r"\bimpl\s*<\s*'guard\s*>\s*WindowsNonceLedger\s*<\s*'guard\s*>\s*\{", code):
+        opening = item.end() - 1
+        ledger_impls.append((opening, _matching_brace(code, opening)))
+    production_calls = 0
+    for occurrence in re.finditer(r"\bcreate_private_ledger_file\b", code):
+        before = code[max(0, occurrence.start() - 100) : occurrence.start()]
+        after = code[occurrence.end() :]
+        if re.search(r"\bfn\s*$", before):
+            if relative != "src/ffi/ledger_storage.rs":
+                found.append(f"{label}: ADR-132 ledger creator declaration is restricted")
+            continue
+        is_call = bool(re.match(r"\s*\(", after)) and bool(re.search(r"(?:crate\s*::\s*Native|Self)\s*::\s*$", before))
+        fixture = any(begin < occurrence.start() < end for begin, end in fixture_regions)
+        production = relative == "src/adapter/ledger_storage.rs" and any(
+            name == "replace_observing" and begin < occurrence.start() < end for name, begin, end in spans
+        ) and any(begin < occurrence.start() < end for begin, end in ledger_impls)
+        if not is_call or not (fixture or production):
+            found.append(f"{label}:{_line_of(code, occurrence.start())}: ADR-132 ledger creator caller is not an admitted staging or cfg(test) fixture")
+        if production:
+            production_calls += 1
+    if production_calls:
+        compact = _normalized(code)
+        required = _normalized('''self.admit_directory()?;
+            let previous = self.open_existing(LEDGER)?;
+            let temporary_path = self.path.join(TEMPORARY);
+            let mut temporary = crate::Native::create_private_ledger_file(&temporary_path)?;
+            self.validate_file(&temporary, &temporary_path)?;''')
+        owner = _normalized("pub struct WindowsNonceLedger<'guard> { _guard: &'guard WindowsSubjectEncryptorLock, directory: File, path: PathBuf, volume: u32, }")
+        if production_calls != 1 or required not in compact or owner not in compact:
+            found.append(f"{label}: ADR-132 creator must use the held-guard admitted staging path")
+
+
 def _toml(root: Path, path: Path, found: list[str]) -> dict[str, object] | None:
     try:
         return tomllib.loads(path.read_text(encoding="utf-8-sig"))
@@ -974,6 +1171,19 @@ def _check_shim_sources(shim: Path, scanned_dirs: tuple[Path, ...], found: list[
             found.append(f"{label}: non-ffi module must forbid unsafe_code")
         block_starts = {match.start() for match in UNSAFE_BLOCK.finditer(code)}
         spans = _function_spans(code)
+        if relative == "src/ffi/ledger_storage.rs" and any(name == "create_private_ledger_file" for name, _, _ in spans):
+            _check_ledger_creator(label, text, code, spans, found)
+        _check_ledger_origin(relative, label, text, code, spans, found)
+        _check_ledger_creator_calls(relative, label, code, attributes, spans, found)
+        imports = tuple((item.start(), item.end()) for item in USE_STATEMENT.finditer(code))
+        for reference in re.finditer(r"\bCreateFileW\b", code):
+            imported = any(begin < reference.start() < end for begin, end in imports)
+            inside_creator = any(
+                name == "create_private_ledger_file" and begin < reference.start() < end
+                for name, begin, end in spans
+            )
+            if relative != "src/ffi/ledger_storage.rs" or not (imported or inside_creator):
+                found.append(f"{label}:{_line_of(code, reference.start())}: ADR-132 CreateFileW reference is outside the creator")
         for create in re.finditer(r"\bCreateFileW\s*\(", code):
             inside_creator = any(
                 name == "create_private_ledger_file" and begin < create.start() < end

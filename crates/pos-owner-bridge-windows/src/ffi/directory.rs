@@ -22,7 +22,7 @@ use windows::Win32::Storage::FileSystem::{
 };
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
-struct LocalMemory(HLOCAL);
+pub(super) struct LocalMemory(pub(super) HLOCAL);
 
 impl Drop for LocalMemory {
     fn drop(&mut self) {

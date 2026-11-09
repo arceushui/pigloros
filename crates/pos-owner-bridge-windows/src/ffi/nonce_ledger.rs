@@ -4,9 +4,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use windows::core::{PCWSTR, PWSTR};
-use windows::Win32::Foundation::{
-    CloseHandle, LocalFree, HANDLE, HLOCAL, WAIT_ABANDONED, WAIT_OBJECT_0,
-};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, HLOCAL, WAIT_ABANDONED, WAIT_OBJECT_0};
 use windows::Win32::Security::Authorization::{
     ConvertSecurityDescriptorToStringSecurityDescriptorW,
     ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo, SDDL_REVISION_1,
@@ -18,18 +16,9 @@ use windows::Win32::Security::{
 };
 use windows::Win32::System::Threading::{CreateMutexW, ReleaseMutex, WaitForSingleObject};
 
-use super::directory::current_sid;
+use super::directory::{current_sid, LocalMemory};
 
 static PROCESS_ADMISSION: AtomicBool = AtomicBool::new(false);
-
-struct LocalMemory(HLOCAL);
-
-impl Drop for LocalMemory {
-    fn drop(&mut self) {
-        // SAFETY: this wrapper owns exactly one successful LocalAlloc output.
-        let _released = unsafe { LocalFree(Some(self.0)) };
-    }
-}
 
 fn descriptor(sid: &str) -> Result<LocalMemory, ()> {
     descriptor_for(sid, sid)

@@ -1360,15 +1360,23 @@ def test_control_observations_cannot_ship_in_product_builds() -> None:
 
 def test_ledger_creation_boundary() -> None:
     path = f"{SHIM}/src/ffi/ledger_storage.rs"
-    require_accepted("ledger creator call", {path: CFG + "fn create_private_ledger_file() { CreateFileW(); }\n"})
+    require_rejected("unconstrained ledger creator", {path: CFG + "fn create_private_ledger_file() { CreateFileW(); }\n"}, [
+        f"{path}: ADR-132 ledger creator executable body differs from the authorized boundary",
+        f"{path}: ADR-132 ledger creator signature and visibility changed",
+        f"{path}: ADR-132 ledger creator must use the exact current-SID owner and DACL",
+        f"{path}: ADR-132 creator must use the pinned SDK and shared allocation owner",
+    ])
     require_rejected("relocated CreateFileW", {OPS: CFG + "fn elsewhere() { CreateFileW(); }\n"}, [
+        at(OPS, 2, "ADR-132 CreateFileW reference is outside the creator"),
         at(OPS, 2, "ADR-132 CreateFileW is restricted to the ledger creator"),
     ])
     require_rejected("other function CreateFileW", {path: CFG + "fn elsewhere() { CreateFileW(); }\n"}, [
+        at(path, 2, "ADR-132 CreateFileW reference is outside the creator"),
         at(path, 2, "ADR-132 CreateFileW is restricted to the ledger creator"),
     ])
     require_rejected("aliased CreateFileW", {OPS: CFG + "use api::CreateFileW as Hidden;\n"}, [
         at(OPS, 2, "ADR-132 CreateFileW aliases are forbidden"),
+        at(OPS, 2, "ADR-132 CreateFileW reference is outside the creator"),
     ])
     require_accepted("test-only handle query", {path: CFG + "#[cfg(test)]\nfn fixture_handle_not_inheritable() { GetHandleInformation(); }\n"})
     require_rejected("product handle query", {path: CFG + "fn fixture_handle_not_inheritable() { GetHandleInformation(); }\n"}, [
@@ -1383,6 +1391,70 @@ def test_ledger_creation_boundary() -> None:
     require_rejected("aliased handle query", {OPS: CFG + "use api::GetHandleInformation as Hidden;\n"}, [
         at(OPS, 2, "ADR-132 handle query aliases are forbidden"),
     ])
+
+    creator_source = (ROOT / SHIM / "src/ffi/ledger_storage.rs").read_text(encoding="utf-8")
+    adapter_source = (ROOT / SHIM / "src/adapter/ledger_storage.rs").read_text(encoding="utf-8")
+
+    def creator_errors(source: str) -> list[str]:
+        scanned = CHECKER.scan(source)
+        found: list[str] = []
+        CHECKER._check_ledger_creator(path, source, scanned.code, CHECKER._function_spans(scanned.code), found)
+        return found
+
+    def caller_errors(source: str) -> list[str]:
+        scanned = CHECKER.scan(source)
+        found: list[str] = []
+        CHECKER._check_ledger_creator_calls(
+            "src/adapter/ledger_storage.rs", "adapter", scanned.code,
+            CHECKER._attributes(scanned.code), CHECKER._function_spans(scanned.code), found,
+        )
+        return found
+
+    def origin_errors(relative: str, source: str) -> list[str]:
+        scanned = CHECKER.scan(source)
+        found: list[str] = []
+        CHECKER._check_ledger_origin(relative, "origin", source, scanned.code, CHECKER._function_spans(scanned.code), found)
+        return found
+
+    assert not creator_errors(creator_source)
+    for old, new in [
+        ("FILE_FLAG_WRITE_THROUGH,\n                None,", "FILE_ATTRIBUTE_NORMAL,\n                None,"),
+        ("CREATE_NEW,\n                FILE_ATTRIBUTE_NORMAL", "OPEN_ALWAYS,\n                FILE_ATTRIBUTE_NORMAL"),
+        ("bInheritHandle: false.into()", "bInheritHandle: true.into()"),
+        ('O:{sid}D:P(A;;FA;;;{sid})', 'O:{sid}D:P(A;;FA;;;WD)'),
+        ("let sid = super::directory::current_sid()?;", "let sid = supplied_sid()?;"),
+        ("pub(crate) fn create_private_ledger_file", "pub fn create_private_ledger_file"),
+        ("use super::directory::LocalMemory;", "use crate::OtherMemory as LocalMemory;"),
+    ]:
+        assert old in creator_source, old
+        assert creator_errors(creator_source.replace(old, new, 1)), old
+
+    assert not caller_errors(adapter_source)
+    for old, new in [
+        ("create_private_ledger_file(&temporary_path)", "create_private_ledger_file(&self.path)"),
+        ("let previous = self.open_existing(LEDGER)?;", "let previous = self.open_existing(TEMPORARY)?;"),
+        ("_guard: &'guard WindowsSubjectEncryptorLock", "_guard: &'guard ()"),
+        ("#[cfg(test)]\nmod native_tests", "#[cfg(feature = \"test-support\")]\nmod native_tests"),
+    ]:
+        assert old in adapter_source, old
+        assert caller_errors(adapter_source.replace(old, new, 1)), old
+    assert caller_errors(adapter_source + "\nfn forged() { crate::Native::create_private_ledger_file(path); }\n")
+    assert creator_errors(creator_source.replace("bInheritHandle: false.into()", "bInheritHandle: true.into() // bInheritHandle: false.into()", 1))
+    assert caller_errors(adapter_source.replace("create_private_ledger_file(&temporary_path)", "create_private_ledger_file(&self.path) /* create_private_ledger_file(&temporary_path) */", 1))
+    assert not origin_errors("src/adapter/ledger_storage.rs", adapter_source)
+    for old, new in [
+        ('join("PiglorOS")', 'join("Other")'),
+        ('"subject-nonce-ledger.v1.tmp"', '"different.tmp"'),
+        ('"subject-nonce-ledger.v1"', '"different-primary"'),
+        ("require_dos_path(&path)?;", "let _ = &path;"),
+        ("crate::Native::require_private_file(file)?;", "let _ = file;"),
+        ("const REPARSE_POINT: u32 = 0x400;", "const REPARSE_POINT: u32 = 0;"),
+    ]:
+        assert old in adapter_source, old
+        assert origin_errors("src/adapter/ledger_storage.rs", adapter_source.replace(old, new, 1)), old
+    guard_source = (ROOT / SHIM / "src/adapter/nonce_ledger.rs").read_text(encoding="utf-8")
+    assert not origin_errors("src/adapter/nonce_ledger.rs", guard_source)
+    assert origin_errors("src/adapter/nonce_ledger.rs", guard_source.replace("crate::SubjectMutex::acquire()", "other_mutex()", 1))
 
 
 def main() -> None:

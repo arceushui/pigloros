@@ -5,7 +5,7 @@ use std::fs::File;
 use std::os::windows::io::AsRawHandle;
 
 use windows::core::{PCWSTR, PWSTR};
-use windows::Win32::Foundation::{LocalFree, HANDLE, HLOCAL};
+use windows::Win32::Foundation::{HANDLE, HLOCAL};
 use windows::Win32::Security::Authorization::{
     ConvertSecurityDescriptorToStringSecurityDescriptorW,
     ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo, SDDL_REVISION_1,
@@ -18,16 +18,7 @@ use windows::Win32::Security::{
 };
 use windows::Win32::Storage::FileSystem::{GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION};
 
-use super::directory::current_sid;
-
-struct LocalMemory(HLOCAL);
-
-impl Drop for LocalMemory {
-    fn drop(&mut self) {
-        // SAFETY: this owner frees exactly one successful LocalAlloc output.
-        let _released = unsafe { LocalFree(Some(self.0)) };
-    }
-}
+use super::directory::{current_sid, LocalMemory};
 
 fn descriptor_text(descriptor: &LocalMemory) -> Result<String, ()> {
     // Normalize automatic-inheritance bookkeeping on this allocated copy only;

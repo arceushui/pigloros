@@ -11,7 +11,7 @@ use std::path::Path;
 use windows::core::PCWSTR;
 #[cfg(test)]
 use windows::Win32::Foundation::{GetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT};
-use windows::Win32::Foundation::{LocalFree, GENERIC_READ, GENERIC_WRITE, HLOCAL};
+use windows::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE, HLOCAL};
 use windows::Win32::Security::Authorization::{
     ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
 };
@@ -22,14 +22,7 @@ use windows::Win32::Storage::FileSystem::{
     MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
 };
 
-struct LocalMemory(HLOCAL);
-
-impl Drop for LocalMemory {
-    fn drop(&mut self) {
-        // SAFETY: this owner frees the one successful descriptor allocation.
-        let _released = unsafe { LocalFree(Some(self.0)) };
-    }
-}
+use super::directory::LocalMemory;
 
 impl crate::Native {
     #[cfg(test)]
