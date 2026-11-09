@@ -87,12 +87,12 @@ struct SlotLease {
 impl SlotLease {
     /// Keep the slot taken, because its namespace could not be removed, and
     /// close the port with `error`.
-    fn quarantine(&mut self, error: &NetlinkError) {
+    fn quarantine(&mut self, reason: String) {
         self.quarantined = true;
         self.slots
             .holders()
             .quarantined
-            .get_or_insert_with(|| (self.slot, error.to_string()));
+            .get_or_insert((self.slot, reason));
     }
 }
 
@@ -188,7 +188,7 @@ impl<C: NamespaceControl> Drop for Teardown<C> {
             _ => remove(),
         };
         if let Err(error) = removed {
-            self.slot.quarantine(&error);
+            self.slot.quarantine(error.to_string());
         }
     }
 }
