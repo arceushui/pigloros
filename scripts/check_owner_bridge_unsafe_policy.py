@@ -1528,6 +1528,39 @@ def _check_owned_parent_boundary(sources: dict[str, str], found: list[str]) -> N
                 found.append(f"{path}: owned-parent capability {name} outside reviewed fixture")
 
 
+# Exact source/asset custody for the accepted test-only External URI profile.
+# Full text binds attributes, literal URI, handler/denial observations and scope.
+EXTERNAL_FIXTURE_SOURCES = {
+    'crates/pos-owner-bridge-windows/src/ffi/events/controls.rs': '8c53ef70d3d845bebd2a1d84976765e4a37beafb44ba3a0eb5359b2725c91d29',
+    'crates/pos-owner-bridge-windows/src/ffi/events/mod.rs': 'aeb346b5b8052549e712b7c64157a376ceb18c429ee3eb768863660d9a527448',
+    'crates/pos-owner-bridge-windows/src/ffi/events/denial.rs': '5b5152942f17630af41b044c53c80403ac5f4cfaef267bfbe4e5fc3207988820',
+    'crates/pos-owner-bridge-windows/src/ffi/session.rs': 'd81399e27791e3c873968d1e811069ae65d92835a63aa4efaf8d5f32efcf2581',
+    'crates/pos-owner-bridge-windows/src/lib.rs': '20f169f7ba4e78339eacba3d332d4f01514fd0ee0b02d3a8f190191d2c5ce54c',
+    'crates/pos-owner-bridge-windows/src/adapter/native_tests/controls.rs': '3bf251b2b5a6c3af3bdc76b2d1e1b1be58026f3190984e85ec0a748c2b27312a',
+    'crates/pos-owner-bridge-windows/src/adapter/native_tests.rs': '2e3ec6d4daa853395812f19ab4599cc937e8b13243d0daf75de71da93b85f349',
+    'crates/pos-owner-bridge-windows/src/adapter/events.rs': '7500dd634adfe7b3cd6b53ed92175749fd02e144d7f3b4b99957727761159f3a',
+    'crates/pos-owner-bridge-windows/src/ffi/events/navigation.rs': '8fd0927c7e99e9f65abf6aebd4a347e5b3f1f0d29828f695a1f8a382d85d787f',
+    'crates/pos-owner-bridge-windows/src/ffi/events/control_fixture.rs': '3f461807a6362e771c37015b42d3e33bfdb1ba911b408f35dddd98f4286b0f79',
+    'crates/pos-owner-bridge-windows/src/ffi/events/control_denial.rs': '9c29db3c19998534c3b80c71f31afd0977106b574de062cc93f6cc291c4d9dc7',
+    'scripts/owner_bridge_assets.py': '8be7cf5afd2c9fd534989a02bb0766f9faf3994c018264efbbaa33fa74a40cb5',
+    'crates/pos-owner-bridge/assets/qualification/external.html': '45c476fa75fd4ac257c62148a1b288eb7f13ab411d371d8b8842eec48a9e96b4',
+    'crates/pos-owner-bridge/assets/qualification/manifest.json': '4d37c95ce8fd82b2bc183cffdee8ee11a164f4c534e12a09b87a35780e193811',
+    'crates/pos-owner-bridge/src/listener/fixture_assets.rs': '7891ff7491e638fb11ecdb54f04b8270cf5a24c5c80b46971402d0064c971c3d',
+    'crates/pos-owner-bridge/src/listener/fixtures.rs': '2487177ab012dad956a79396d87714e4a7aaacbf897d44e8cbc801bb893cb998',
+}
+
+
+def _check_external_fixture(sources: dict[str, str], found: list[str]) -> None:
+    for path, expected in EXTERNAL_FIXTURE_SOURCES.items():
+        digest = hashlib.sha256(sources.get(path, "").replace("\r\n", "\n").encode()).hexdigest()
+        if digest != expected:
+            found.append(f"{path}: External URI qualification differs from reviewed source")
+    controls = "crates/pos-owner-bridge-windows/src/adapter/native_tests/controls.rs"
+    for path, source in sources.items():
+        if path != controls and path.endswith(".rs") and re.search(r"\b(?:ExternalAllowance|EXTERNAL_URI)\b", scan(source).code):
+            found.append(f"{path}: External allowance capability outside private fixture")
+
+
 def violations(root: Path, *, component_fixture: bool = False) -> list[str]:
     """Return every source-policy violation beneath ``root``, sorted."""
     root = root.resolve()
@@ -1596,6 +1629,11 @@ def violations(root: Path, *, component_fixture: bool = False) -> list[str]:
     }
     if not component_fixture:
         _check_owned_parent_boundary(owned_sources, found)
+        external_sources = dict(owned_sources)
+        for path in EXTERNAL_FIXTURE_SOURCES:
+            source = root / path
+            external_sources[path] = _read(source) if source.is_file() else ""
+        _check_external_fixture(external_sources, found)
     return sorted(set(found))
 
 

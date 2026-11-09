@@ -1979,6 +1979,51 @@ def test_owned_parent_fixture_is_test_only_and_exactly_bound() -> None:
         raise SystemExit("owned-parent test under a disabled nested module was accepted")
 
 
+def test_external_qualification_is_sealed() -> None:
+    sources = {name: (ROOT / name).read_text(encoding="utf-8") for name in CHECKER.EXTERNAL_FIXTURE_SOURCES}
+    controls = f"{SHIM}/src/adapter/native_tests/controls.rs"
+    assets = "scripts/owner_bridge_assets.py"
+    navigation = f"{SHIM}/src/ffi/events/navigation.rs"
+    fixture = f"{SHIM}/src/ffi/events/control_fixture.rs"
+    helper = f"{SHIM}/src/lib.rs"
+
+    def errors(values: dict[str, str]) -> list[str]:
+        found: list[str] = []
+        CHECKER._check_external_fixture(values, found)
+        return found
+
+    if errors(sources):
+        raise SystemExit(f"External fixture baseline rejected: {errors(sources)}")
+    mutations = (
+        (controls, '"ms-settings:privacy-location"', '"ms-settings:privacy-location?x=1"'),
+        (assets, 'ms-settings:privacy-location', 'ms-settings:privacy-location#x'),
+        (controls, 'self.allowance.borrow_mut().take()', 'self.allowance.borrow_mut().clone()'),
+        (controls, 'self.events.loaded() == Some(marker.generation)', 'true'),
+        (controls, 'profile == FixtureProfile::External', 'true'),
+        (controls, '&& !*redirected', ''),
+        (controls, 'if valid {', 'if true {'),
+        (controls, 'self.events.event(event)', 'NativeAction::Observe'),
+        (controls, 'assert_eq!(before.readback, Some(true));', ''),
+        (controls, 'assert_eq!(before.completions, u32::from(before.deferred));', ''),
+        (controls, '!probe.events.invalid()', 'true'),
+        (controls, 'probe.delivered.get()', 'true'),
+        (controls, 'assert_denials(&before_exit, &after_exit, kind, mode);', ''),
+        (controls, 'probe.events.exited() == Some(identity.browser_pid)', 'true'),
+        (navigation, 'args.SetCancel(!allow)', 'args.SetCancel(false)'),
+        (f"{SHIM}/src/ffi/events/mod.rs", 'controls::install(view, signals, recovery, subscriptions)', 'Ok(())'),
+        (f"{SHIM}/src/ffi/events/controls.rs", 'add_LaunchingExternalUriScheme', 'add_DisabledExternalUriScheme'),
+        (fixture, 'value.as_bool()', 'true'),
+        (helper, '#[cfg(test)]\n    mod native_tests;', 'mod native_tests;'),
+    )
+    for path, old, new in mutations:
+        if old not in sources[path]:
+            raise SystemExit(f"External mutation anchor missing: {old}")
+        if not errors(dict(sources, **{path: sources[path].replace(old, new, 1)})):
+            raise SystemExit(f"External fixture accepted mutation: {old}")
+    if not errors(dict(sources, **{"crates/product/src/lib.rs": "fn use_it(_: ExternalAllowance) {}"})):
+        raise SystemExit("External allowance escaped into product source")
+
+
 def main() -> None:
     test_masker()
     test_accepted()
@@ -1999,6 +2044,7 @@ def main() -> None:
     test_private_fault_capability_construction()
     test_live_mapping_witness_boundary()
     test_owned_parent_fixture_is_test_only_and_exactly_bound()
+    test_external_qualification_is_sealed()
     test_windows_case_insensitive_source_suffix_cannot_hide_code()
     test_hardening()
     test_symlinks()

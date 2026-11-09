@@ -41,7 +41,7 @@ TRIGGERS = {
         "}, function () { report(\"http://localhost:49291/permission-diag/rejected\"); }); } } "
         "catch (_) { report(\"http://localhost:49291/permission-diag/exception\"); }"
     ),
-    "external": 'window.location.href = "pigloros-qualification-denied://attempt";',
+    "external": 'setTimeout(function () { window.location.href = "ms-settings:privacy-location"; }, 1000);',
     "navigation": 'window.location.href = "http://localhost:49291/denied-navigation";',
 }
 

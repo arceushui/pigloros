@@ -1,7 +1,7 @@
 #![cfg(windows)]
 #![forbid(unsafe_code)]
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::io::Write as _;
 use std::path::Path;
 use std::rc::Rc;
@@ -15,15 +15,67 @@ use crate::{
     StaPump,
 };
 
+const EXTERNAL_URI: &str = "ms-settings:privacy-location";
+
+// Held by one fresh Probe, whose sink is installed on one fresh owned view.
+// The owner navigation ID binds the allowance to that document generation.
+struct ExternalAllowance {
+    generation: pos_owner_bridge::NavigationId,
+}
+
 struct Probe {
     events: Rc<Events>,
     kind: EventKind,
     delivered: Cell<bool>,
     failures: Cell<u32>,
+    external_profile: bool,
+    isolated_external: bool,
+    allowance: RefCell<Option<ExternalAllowance>>,
+    external_navigation_seen: Cell<bool>,
+    unexpected_navigation: Cell<bool>,
+}
+
+impl Probe {
+    fn external_navigation(&self, event: &NativeEvent) -> Option<NativeAction> {
+        let NativeEvent::Navigation {
+            uri, redirected, ..
+        } = event
+        else {
+            return None;
+        };
+        if !self.external_profile || self.events.started().is_none() {
+            return None;
+        }
+        let expected = uri.as_str() == EXTERNAL_URI && !*redirected;
+        if !expected || self.external_navigation_seen.get() {
+            self.unexpected_navigation.set(true);
+        }
+        if !self.isolated_external {
+            self.external_navigation_seen.set(true);
+            return None;
+        }
+        let allowance = self.allowance.borrow_mut().take();
+        let valid = allowance.is_some_and(|marker| {
+            self.events.loaded() == Some(marker.generation)
+                && uri.as_str() == EXTERNAL_URI
+                && !*redirected
+                && !self.external_navigation_seen.replace(true)
+        });
+        if valid {
+            // Consumed before returning to the native setter or any reentry.
+            Some(NativeAction::Allow)
+        } else {
+            self.unexpected_navigation.set(true);
+            None
+        }
+    }
 }
 
 impl EventSink for Probe {
     fn event(&self, event: NativeEvent) -> NativeAction {
+        if let Some(action) = self.external_navigation(&event) {
+            return action;
+        }
         let kind = match &event {
             NativeEvent::NewWindow => Some(EventKind::NewWindow),
             NativeEvent::Permission => Some(EventKind::Permission),
@@ -64,7 +116,7 @@ impl Drop for Fault {
 
 type Case = (FixtureProfile, EventKind, ControlFault);
 
-const CASES: [Case; 9] = [
+const CASES: [Case; 10] = [
     (
         FixtureProfile::Popup,
         EventKind::NewWindow,
@@ -83,6 +135,11 @@ const CASES: [Case; 9] = [
     (
         FixtureProfile::External,
         EventKind::ExternalUri,
+        ControlFault::Normal,
+    ),
+    (
+        FixtureProfile::External,
+        EventKind::Navigation,
         ControlFault::Normal,
     ),
     (
@@ -131,6 +188,12 @@ pub(super) fn run(runtime_path: &Path, root: &Path) -> TestResult {
             kind,
             delivered: Cell::new(false),
             failures: Cell::new(0),
+            external_profile: profile == FixtureProfile::External,
+            isolated_external: profile == FixtureProfile::External
+                && kind == EventKind::ExternalUri,
+            allowance: RefCell::new(None),
+            external_navigation_seen: Cell::new(false),
+            unexpected_navigation: Cell::new(false),
         });
         let mut native = session::Session::new(&factory, events)?;
         native.create_window(None, 480, 640)?;
@@ -156,7 +219,21 @@ pub(super) fn run(runtime_path: &Path, root: &Path) -> TestResult {
         listener.begin_navigation();
         probe.events.begin();
         native.navigate_owner()?;
+        let mut armed = false;
         let callback = pump_until(&factory, "actual native control callback", || {
+            let served = listener.served();
+            let generation = probe.events.loaded().filter(|_| {
+                probe.isolated_external
+                    && !armed
+                    && !probe.events.invalid()
+                    && !probe.unexpected_navigation.get()
+                    && served.count > 0
+                    && served.integrity_ok
+            });
+            if let Some(generation) = generation {
+                *probe.allowance.borrow_mut() = Some(ExternalAllowance { generation });
+                armed = true;
+            }
             probe.delivered.get()
         });
         log_callback(index, case, &probe, &listener, &callback)?;
@@ -192,6 +269,14 @@ pub(super) fn run(runtime_path: &Path, root: &Path) -> TestResult {
         // Every assertion after observing actual retirement; Session also
         // retains on every error/unwind before this point.
         assert_denials(&before_exit, &after_exit, kind, mode);
+        if probe.external_profile {
+            assert!(probe.external_navigation_seen.get());
+            assert!(!probe.unexpected_navigation.get());
+            if probe.isolated_external {
+                assert!(armed);
+                assert!(probe.allowance.borrow().is_none());
+            }
+        }
         assert_eq!(
             probe.failures.get(),
             match mode {
@@ -292,5 +377,82 @@ fn assert_denials(
         assert_eq!(before.retired, mode != ControlFault::UncertainComplete);
         assert!(after.retired);
         assert_eq!(after.completions, before.completions);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Events, ExternalAllowance, Probe, EXTERNAL_URI};
+    use crate::{EventKind, EventSink, NativeAction, NativeEvent, NativeText, OWNER_URL};
+    use std::cell::{Cell, RefCell};
+    use std::rc::Rc;
+
+    fn probe() -> Probe {
+        let events = Rc::new(Events::default());
+        events.begin();
+        assert_eq!(
+            navigation(events.as_ref(), OWNER_URL, false),
+            NativeAction::Allow
+        );
+        events.event(NativeEvent::DomLoaded {
+            id: 1,
+            uri: NativeText::fixture(OWNER_URL),
+        });
+        Probe {
+            events,
+            kind: EventKind::ExternalUri,
+            delivered: Cell::new(false),
+            failures: Cell::new(0),
+            external_profile: true,
+            isolated_external: true,
+            allowance: RefCell::new(None),
+            external_navigation_seen: Cell::new(false),
+            unexpected_navigation: Cell::new(false),
+        }
+    }
+
+    fn navigation(sink: &dyn EventSink, uri: &str, redirected: bool) -> NativeAction {
+        sink.event(NativeEvent::Navigation {
+            uri: NativeText::fixture(uri),
+            id: 1,
+            redirected,
+        })
+    }
+
+    #[test]
+    fn external_allowance_is_owned_once_and_rejects_mismatch() {
+        let allowed = probe();
+        *allowed.allowance.borrow_mut() = Some(ExternalAllowance {
+            generation: pos_owner_bridge::NavigationId(1),
+        });
+        assert_eq!(
+            navigation(&allowed, EXTERNAL_URI, false),
+            NativeAction::Allow
+        );
+        assert_eq!(
+            navigation(&allowed, EXTERNAL_URI, false),
+            NativeAction::Cancel
+        );
+        assert!(allowed.unexpected_navigation.get());
+
+        for (uri, redirected, generation) in [
+            (EXTERNAL_URI, true, 1),
+            ("ms-settings:privacy-location?x=1", false, 1),
+            (EXTERNAL_URI, false, 2),
+        ] {
+            let denied = probe();
+            *denied.allowance.borrow_mut() = Some(ExternalAllowance {
+                generation: pos_owner_bridge::NavigationId(generation),
+            });
+            assert_eq!(navigation(&denied, uri, redirected), NativeAction::Cancel);
+            assert!(denied.unexpected_navigation.get());
+            assert!(denied.allowance.borrow().is_none());
+        }
+        let other_view = probe();
+        assert_eq!(
+            navigation(&other_view, EXTERNAL_URI, false),
+            NativeAction::Cancel
+        );
+        assert!(other_view.unexpected_navigation.get());
     }
 }

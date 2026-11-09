@@ -16,7 +16,7 @@ pub enum FixtureProfile {
     PopupReceipt,
     /// Request notification permission; the real permission handler must deny it.
     Permission,
-    /// Attempt one fixed denied URI scheme.
+    /// Attempt the fixed Settings URI for isolated External and composed denial cases.
     External,
     /// Attempt navigation to one fixed disallowed loopback path.
     Navigation,
