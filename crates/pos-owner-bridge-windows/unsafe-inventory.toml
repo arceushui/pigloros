@@ -1701,7 +1701,7 @@ hosted_test = "windows_nonce_ledger_storage_native"
 
 [[block]]
 file = "src/ffi/ledger_storage.rs"
-line = 30
+line = 35
 function = "drop"
 operation = "LocalFree"
 invariant = "Owned descriptor allocation is freed exactly once after creation finishes."
@@ -1709,7 +1709,7 @@ hosted_test = "windows_nonce_ledger_storage_native"
 
 [[block]]
 file = "src/ffi/ledger_storage.rs"
-line = 57
+line = 67
 function = "create_private_ledger_file"
 operation = "ConvertStringSecurityDescriptorToSecurityDescriptorW"
 invariant = "Terminated current-SID SDDL and initialized output remain live; successful descriptor transfers to one owner."
@@ -1717,7 +1717,7 @@ hosted_test = "windows_nonce_ledger_storage_native"
 
 [[block]]
 file = "src/ffi/ledger_storage.rs"
-line = 40
+line = 50
 function = "fixture_handle_not_inheritable"
 operation = "GetHandleInformation"
 invariant = "Test-only read of a live borrowed file handle and initialized flags; query does not transfer, mutate or close it."
@@ -1725,7 +1725,7 @@ hosted_test = "windows_nonce_ledger_storage_native"
 
 [[block]]
 file = "src/ffi/ledger_storage.rs"
-line = 74
+line = 84
 function = "create_private_ledger_file"
 operation = "CreateFileW CREATE_NEW explicit security"
 invariant = "Live terminated path and non-inheritable explicit current-SID descriptor; CREATE_NEW never opens an existing object."
@@ -1733,7 +1733,7 @@ hosted_test = "windows_nonce_ledger_storage_native"
 
 [[block]]
 file = "src/ffi/ledger_storage.rs"
-line = 88
+line = 98
 function = "create_private_ledger_file"
 operation = "OwnedHandle.from_raw_handle"
 invariant = "Only a successful valid CreateFileW handle transfers exactly once to OwnedHandle and then File."
@@ -1741,7 +1741,7 @@ hosted_test = "windows_nonce_ledger_storage_native"
 
 [[block]]
 file = "src/ffi/ledger_storage.rs"
-line = 102
+line = 112
 function = "replace_ledger"
 operation = "MoveFileExW MOVEFILE_REPLACE_EXISTING MOVEFILE_WRITE_THROUGH"
 invariant = "Owned terminated same-directory names; caller flushed and closed files and does not request copy."

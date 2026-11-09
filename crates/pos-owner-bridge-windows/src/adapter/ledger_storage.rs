@@ -459,7 +459,12 @@ mod native_tests {
                 .unwrap_or("unknown");
             Ok(())
         });
-        result.map_err(|()| format!("replace while old file handle retained; last={last}"))?;
+        result.map_err(|()| {
+            format!(
+                "replace while old file handle retained; last={last}; HRESULT={}",
+                crate::Native::last_move_hresult()
+            )
+        })?;
         let new_file = File::open(path)?;
         let new_identity =
             crate::Native::file_identity(&new_file).map_err(|()| "new file identity")?;

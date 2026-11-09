@@ -7,6 +7,8 @@ use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::AsRawHandle;
 use std::os::windows::io::{FromRawHandle, OwnedHandle};
 use std::path::Path;
+#[cfg(test)]
+use std::sync::atomic::{AtomicI32, Ordering};
 
 use windows::core::PCWSTR;
 #[cfg(test)]
@@ -24,6 +26,9 @@ use windows::Win32::Storage::FileSystem::{
 
 struct LocalMemory(HLOCAL);
 
+#[cfg(test)]
+static LAST_MOVE_HRESULT: AtomicI32 = AtomicI32::new(0);
+
 impl Drop for LocalMemory {
     fn drop(&mut self) {
         // SAFETY: this owner frees the one successful descriptor allocation.
@@ -32,6 +37,11 @@ impl Drop for LocalMemory {
 }
 
 impl crate::Native {
+    #[cfg(test)]
+    pub(crate) fn last_move_hresult() -> i32 {
+        LAST_MOVE_HRESULT.load(Ordering::Relaxed)
+    }
+
     #[cfg(test)]
     pub(crate) fn fixture_handle_not_inheritable(file: &File) -> bool {
         let mut flags = 0_u32;
@@ -99,13 +109,17 @@ impl crate::Native {
         // SAFETY: both terminated paths remain live through the call; the caller
         // qualified their same directory and flushed and closed the temporary file.
         // No cross-volume copy is requested; uncertainty is left for recovery.
-        unsafe {
+        let result = unsafe {
             MoveFileExW(
                 PCWSTR(temporary.as_ptr()),
                 PCWSTR(ledger.as_ptr()),
                 MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
             )
+        };
+        #[cfg(test)]
+        if let Err(error) = &result {
+            LAST_MOVE_HRESULT.store(error.code().0, Ordering::Relaxed);
         }
-        .map_err(|_| ())
+        result.map_err(|_| ())
     }
 }
