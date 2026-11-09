@@ -657,8 +657,8 @@ mod cases {
         Ok(())
     }
 
-    /// The second sweep after the wait: passes, passes within the time the
-    /// first sweep left, finds a provider loop, or hangs.
+    /// The sweep after the wait: passes, passes within the time the deadline
+    /// left, finds a provider loop, or hangs.
     #[derive(Clone, Copy, Debug)]
     enum Resweep {
         Passes,
@@ -667,7 +667,7 @@ mod cases {
         Hangs,
     }
 
-    /// Sweep times, the second sweep behaving as `resweep`.
+    /// Sweep times, the first sweep behaving as `resweep`.
     async fn timed_sweep(
         sweeps: &Mutex<Vec<Instant>>,
         resweep: Resweep,
@@ -680,21 +680,21 @@ mod cases {
             })
             .ok();
         match (swept, resweep) {
-            (Some(2), Resweep::Hangs) => std::future::pending().await,
-            (Some(2), Resweep::Slow) => {
+            (Some(1), Resweep::Hangs) => std::future::pending().await,
+            (Some(1), Resweep::Slow) => {
                 tokio::time::sleep(Duration::from_millis(400)).await;
                 Ok(true)
             }
-            (Some(2), Resweep::Finds) => Ok(false),
+            (Some(1), Resweep::Finds) => Ok(false),
             (Some(_), _) => Ok(true),
             (None, _) => Err(ImageActivationError::Transport),
         }
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_recent_request_of_this_boot_is_waited_out_before_a_second_sweep() -> TestResult {
+    async fn a_recent_request_of_this_boot_is_waited_out_before_the_sweep() -> TestResult {
         if !in_lock_test_process(
-            "restart::tests::cases::a_recent_request_of_this_boot_is_waited_out_before_a_second_sweep",
+            "restart::tests::cases::a_recent_request_of_this_boot_is_waited_out_before_the_sweep",
         )? {
             return Ok(());
         }
@@ -733,9 +733,10 @@ mod cases {
                     )
             );
             assert!(outcome, "{resweep:?}: {released:?}");
-            // The second sweep runs exactly when the 60 s deadline has passed.
+            // The only sweep runs exactly when the 60 s activator deadline and
+            // the 10 s server margin have passed.
             let times = sweeps.lock().map_err(|_| "sweeps")?.clone();
-            assert_eq!(times, vec![start, start + Duration::from_secs(50)]);
+            assert_eq!(times, vec![start + Duration::from_secs(60)]);
         }
         Ok(())
     }
@@ -747,8 +748,14 @@ mod cases {
         )? {
             return Ok(());
         }
-        // Another boot 1 s ago, this boot exactly 60 s ago and 90 s ago.
-        for (boot, seconds) in [(OTHER_BOOT, 99), (THIS_BOOT, 40), (THIS_BOOT, 10)] {
+        // No request yet, another boot 1 s ago, and this boot exactly 70 s
+        // and 90 s ago.
+        for (boot, seconds) in [
+            ([0; 16], 0),
+            (OTHER_BOOT, 99),
+            (THIS_BOOT, 30),
+            (THIS_BOOT, 10),
+        ] {
             let runtime = seed(false)?;
             mark(runtime.path(), boot, seconds)?;
             let recovery = recovery(runtime.path())?;
@@ -758,7 +765,7 @@ mod cases {
                 &recovery,
                 (
                     |_| std::future::ready(Ok(true)),
-                    || timed_sweep(&sweeps, Resweep::Finds),
+                    || timed_sweep(&sweeps, Resweep::Passes),
                     this_boot(),
                 ),
                 start + Duration::from_millis(500),
@@ -767,6 +774,34 @@ mod cases {
             assert_eq!(*sweeps.lock().map_err(|_| "sweeps")?, vec![start]);
             assert_eq!(Instant::now(), start);
         }
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_wait_past_the_latest_instant_keeps_admission_closed() -> TestResult {
+        if !in_lock_test_process(
+            "restart::tests::cases::a_wait_past_the_latest_instant_keeps_admission_closed",
+        )? {
+            return Ok(());
+        }
+        // A request sent on this boot 10 s ago, and a deadline so late that
+        // no wait fits after it.
+        let runtime = seed(false)?;
+        mark(runtime.path(), THIS_BOOT, 90)?;
+        let latest = (0..64).rev().fold(Instant::now(), |at, bit| {
+            at.checked_add(Duration::from_secs(1 << bit)).unwrap_or(at)
+        });
+        let released = roots_released(
+            &recovery(runtime.path())?,
+            (|_| std::future::ready(Ok(true)), swept(), this_boot()),
+            latest,
+        )
+        .await;
+        assert!(
+            matches!(released, Err(RestartReconciliationError::DeadlineElapsed)),
+            "{released:?}"
+        );
+        assert_untouched(runtime.path(), 4)?;
         Ok(())
     }
 

@@ -1,18 +1,30 @@
 //! The durable marker of the last `MountImage` request (owner decision D2).
 //!
 //! A previous runtime's request may still be served by systemd-mountfsd after
-//! a restart's provider loop sweep, so a loop device could appear after that
-//! sweep passed. Before every request, the registry therefore replaces its one
-//! `activation` marker durably, with the current boot ID and the
-//! `CLOCK_MONOTONIC` time. Restart reconciliation waits until a marker of the
-//! current boot is older than the activator deadline before it sweeps again.
+//! a restart's inventory, so a loop device could appear after it. Before every
+//! request, the registry therefore replaces its one `activation` marker
+//! durably, with the current boot ID and the `CLOCK_MONOTONIC` time. Restart
+//! reconciliation waits until a marker of the current boot is older than the
+//! activator deadline plus [`SERVER_MARGIN`] before it sweeps the provider
+//! loops.
+//!
+//! The time is `CLOCK_MONOTONIC`, not `CLOCK_BOOTTIME`: the monotonic clock
+//! stops during suspend, so the age it measures is never larger than the real
+//! age of the request, and the wait can only err long.
 //!
 //! The private PAA1 format is exactly the tag, the 16-byte boot ID, and the
-//! time as little-endian u64 seconds and nanoseconds. Like an intent, the
-//! marker is written and fsynced as a unique `.activation-<pid>-<sequence>`
-//! temporary file, renamed over `activation`, and the registry is fsynced. It is
-//! not an attempt key: reconciliation keeps it, so within one boot it exists
-//! once any request was sent.
+//! time as little-endian u64 seconds and nanoseconds. An all-zero boot ID and
+//! time is the explicit "no request yet" record: a new registry owner writes
+//! it before it can commit any intent, when no marker exists, so a crash
+//! before the first request still leaves a marker. A host boot ID is a random
+//! UUID and never all zero, and any other record with a zero boot ID is
+//! malformed. Like an intent, the marker is written and fsynced as a unique
+//! `.activation-<pid>-<sequence>` temporary file, renamed to `activation`, and
+//! the registry is fsynced. It is not an attempt key: reconciliation keeps it.
+//!
+//! The registry lives on the tmpfs `/run`, so these fsyncs order the marker
+//! before the request across a daemon crash; a reboot empties the registry,
+//! and a marker could not outlive its boot anyway because the boot ID changes.
 
 use std::io;
 use std::time::Duration;
@@ -23,7 +35,7 @@ use rustix::time::{clock_gettime, ClockId};
 use super::{
     publish_named, read_named_bytes, registry_io, RegistryDirectory, SystemdAttemptRegistryError,
 };
-use crate::MountfsdImageActivator;
+use crate::{BootInstant, MountfsdImageActivator};
 
 /// The committed marker's registry component.
 pub(super) const MARKER_NAME: &str = "activation";
@@ -32,12 +44,18 @@ pub(super) const TEMPORARY_PREFIX: &str = ".activation-";
 const MARKER_SIZE: usize = 36;
 const TAG: &[u8; 4] = b"PAA1";
 const BOOT_ID: &str = "/proc/sys/kernel/random/boot_id";
+/// The boot ID of the "no request yet" record; no host boot has it.
+const NO_BOOT: [u8; 16] = [0; 16];
 
-/// A boot ID and a `CLOCK_MONOTONIC` time on that boot.
-pub(super) type BootInstant = ([u8; 16], Duration);
+/// How long systemd-mountfsd may still complete a request after the client
+/// connection was lost at its deadline: the server-side work is not cancelled
+/// with the client, so restart waits this long beyond the activator deadline.
+const SERVER_MARGIN: Duration = Duration::from_secs(10);
+/// How long after it was sent a request can still attach a loop device.
+const REQUEST_BOUND: Duration = MountfsdImageActivator::DEADLINE.saturating_add(SERVER_MARGIN);
 
 /// The boot and time at which the last `MountImage` request was about to be
-/// sent.
+/// sent, or [`ActivationMarker::UNREQUESTED`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct ActivationMarker {
     boot: [u8; 16],
@@ -45,6 +63,12 @@ pub(super) struct ActivationMarker {
 }
 
 impl ActivationMarker {
+    /// No `MountImage` request was sent since the registry was created.
+    const UNREQUESTED: Self = Self {
+        boot: NO_BOOT,
+        sent: Duration::ZERO,
+    };
+
     fn encode(self) -> [u8; MARKER_SIZE] {
         let mut bytes = [0; MARKER_SIZE];
         bytes[..4].copy_from_slice(TAG);
@@ -70,13 +94,15 @@ impl ActivationMarker {
                 boot,
                 sent: Duration::new(seconds, nanoseconds),
             })
+            .filter(|marker| marker.boot != NO_BOOT || *marker == Self::UNREQUESTED)
             .ok_or(SystemdAttemptRegistryError::InvalidIntent)
     }
 
     /// How long restart must still wait for the recorded request's deadline.
     ///
-    /// `None` when the request was sent on another boot or at least the
-    /// activator deadline ago. A time in this boot's future is a
+    /// `None` for [`Self::UNREQUESTED`], whose boot is no host's, and when
+    /// the request was sent on another boot or at least the activator deadline
+    /// plus [`SERVER_MARGIN`] ago. A time in this boot's future is a
     /// contradiction.
     pub(super) fn remaining(
         self,
@@ -87,7 +113,7 @@ impl ActivationMarker {
         }
         now.checked_sub(self.sent)
             .map(|elapsed| {
-                MountfsdImageActivator::DEADLINE
+                REQUEST_BOUND
                     .checked_sub(elapsed)
                     .filter(|remaining| !remaining.is_zero())
             })
@@ -120,7 +146,7 @@ pub(super) fn parse_content(
 ///
 /// # Errors
 /// Returns the read failure, or `InvalidData` for a boot ID that is not one
-/// canonical UUID line.
+/// canonical, nonzero UUID line.
 pub(super) fn boot_instant() -> io::Result<BootInstant> {
     registry_io(|| std::fs::read(BOOT_ID)).and_then(|text| instant_on(&text))
 }
@@ -137,7 +163,7 @@ fn instant_on(text: &[u8]) -> io::Result<BootInstant> {
     ))
 }
 
-/// The 16 bytes of one `8-4-4-4-12` hexadecimal UUID line.
+/// The 16 bytes of one `8-4-4-4-12` hexadecimal UUID line, never all zero.
 fn parse_boot_id(text: &[u8]) -> Option<[u8; 16]> {
     let line = text.strip_suffix(b"\n")?;
     if line
@@ -160,7 +186,7 @@ fn parse_boot_id(text: &[u8]) -> Option<[u8; 16]> {
     for (slot, pair) in boot.iter_mut().zip(nibbles.chunks_exact(2)) {
         *slot = pair[0] * 16 + pair[1];
     }
-    Some(boot)
+    Some(boot).filter(|boot| *boot != NO_BOOT)
 }
 
 /// Durably replace the marker with the current boot and time, then read it
@@ -171,16 +197,37 @@ pub(super) fn publish(
     sequence: u64,
 ) -> Result<(), SystemdAttemptRegistryError> {
     let (boot, sent) = boot_instant()?;
-    let bytes = ActivationMarker { boot, sent }.encode();
-    let temporary = format!("{TEMPORARY_PREFIX}{}-{sequence}", std::process::id());
-    publish_named(
+    write(
         directory,
-        &temporary,
-        MARKER_NAME,
-        &bytes,
+        sequence,
+        ActivationMarker { boot, sent },
         RenameFlags::empty(),
-        || {},
-    )?;
+    )
+}
+
+/// Durably create the "no request yet" marker of a registry that has none,
+/// then read it back. The caller is the new owner, before any commit.
+pub(super) fn initialize(
+    directory: &RegistryDirectory,
+    sequence: u64,
+) -> Result<(), SystemdAttemptRegistryError> {
+    write(
+        directory,
+        sequence,
+        ActivationMarker::UNREQUESTED,
+        RenameFlags::NOREPLACE,
+    )
+}
+
+fn write(
+    directory: &RegistryDirectory,
+    sequence: u64,
+    marker: ActivationMarker,
+    rename: RenameFlags,
+) -> Result<(), SystemdAttemptRegistryError> {
+    let bytes = marker.encode();
+    let temporary = format!("{TEMPORARY_PREFIX}{}-{sequence}", std::process::id());
+    publish_named(directory, &temporary, MARKER_NAME, &bytes, rename, || {})?;
     read_named_bytes::<MARKER_SIZE>(directory, MARKER_NAME).and_then(|observed| {
         (observed == bytes)
             .then_some(())

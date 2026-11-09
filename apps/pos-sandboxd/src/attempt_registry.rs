@@ -8,7 +8,8 @@
 //! PAI3 records verified root facts before launch; none of these private stages
 //! substitutes for the separate ADR-069 lifecycle binding. Beside the intent
 //! keys, the registry retains one `activation` marker of the last `MountImage`
-//! request (see `activation`).
+//! request, which an owner creates as "no request yet" before its first
+//! commit when none exists (see `activation`).
 
 use std::fs::File;
 use std::io::{self, Write};
@@ -203,7 +204,9 @@ impl SystemdAttemptRegistry {
     /// # Errors
     /// Rejects missing/unsafe directories, symlinks, writable ancestors, a
     /// mount crossing beneath `/run`, permissions other than 0700, another
-    /// live owner, or any unreconciled record left by a previous owner.
+    /// live owner, or any unreconciled record left by a previous owner. A
+    /// failure to create the missing activation marker may leave its
+    /// recognizable temporary write, which reconciliation removes.
     pub fn open() -> Result<Self, SystemdAttemptRegistryError> {
         Self::from_directory(RegistryDirectory::open()?)
     }
@@ -219,10 +222,18 @@ impl SystemdAttemptRegistry {
 
     fn from_directory(directory: RegistryDirectory) -> Result<Self, SystemdAttemptRegistryError> {
         // Reconciliation removes every attempt record and keeps the marker.
-        require_only(&directory.file, Some(activation::MARKER_NAME))?;
+        let marked = require_only(&directory.file, Some(activation::MARKER_NAME))?;
+        let mut state = RegistryState::default();
+        // Before any commit, record that no request was sent yet, so a crash
+        // before this owner's first request still leaves a marker (D2).
+        if !marked {
+            state
+                .reserve_sequence()
+                .and_then(|sequence| activation::initialize(&directory, sequence))?;
+        }
         Ok(Self {
             directory: Arc::new(directory),
-            state: Arc::new(Mutex::new(RegistryState::default())),
+            state: Arc::new(Mutex::new(state)),
         })
     }
 
@@ -432,23 +443,27 @@ fn delete_record(
 }
 
 fn require_empty(directory: &File) -> Result<(), SystemdAttemptRegistryError> {
-    require_only(directory, None)
+    require_only(directory, None).map(|_| ())
 }
 
-/// Require that `directory` holds nothing but, optionally, `retained`.
+/// Require that `directory` holds nothing but, optionally, `retained`;
+/// returns whether `retained` is present.
 fn require_only(
     directory: &File,
     retained: Option<&str>,
-) -> Result<(), SystemdAttemptRegistryError> {
+) -> Result<bool, SystemdAttemptRegistryError> {
     let entries = registry_io(|| Dir::read_from(directory).map_err(io::Error::from))?;
+    let mut found = false;
     for entry in entries {
         let entry = registry_io(|| entry.map_err(io::Error::from))?;
         let name = entry.file_name().to_bytes();
-        if name != b"." && name != b".." && retained.map(str::as_bytes) != Some(name) {
+        let kept = retained.map(str::as_bytes) == Some(name);
+        found |= kept;
+        if name != b"." && name != b".." && !kept {
             return Err(SystemdAttemptRegistryError::ReconciliationRequired);
         }
     }
-    Ok(())
+    Ok(found)
 }
 
 fn validate_directory(
@@ -694,13 +709,17 @@ mod tests {
             "/run/pigloros/sandbox/held",
             "/run/pigloros/sandbox/registry",
         )?;
+        // Opening an empty registry creates its "no request yet" marker.
         let (opened, operation_count) = with_io_fault(None, SystemdAttemptRegistry::open);
         drop(opened?);
+        empty_fixed_registry()?;
         for fail_at in 0..operation_count {
             let (result, observed) = with_io_fault(Some(fail_at), SystemdAttemptRegistry::open);
             assert!(matches!(result, Err(SystemdAttemptRegistryError::Io(_))));
             assert_eq!(observed, fail_at + 1);
-            assert_eq!(fs::read_dir("/run/pigloros/sandbox/registry")?.count(), 0);
+            // At most the marker or its interrupted write remains.
+            assert!(fs::read_dir("/run/pigloros/sandbox/registry")?.count() <= 1);
+            empty_fixed_registry()?;
         }
         let registry = SystemdAttemptRegistry::open()?;
         let intent = PlannedAttemptIntent::new([1; 16], [2; 32])?;
@@ -714,6 +733,17 @@ mod tests {
             SystemdAttemptRegistry::open(),
             Err(SystemdAttemptRegistryError::ReconciliationRequired)
         ));
+        Ok(())
+    }
+
+    /// Replace the fixed registry with an empty private directory.
+    fn empty_fixed_registry() -> TestResult {
+        fs::remove_dir_all("/run/pigloros/sandbox/registry")?;
+        fs::create_dir("/run/pigloros/sandbox/registry")?;
+        fs::set_permissions(
+            "/run/pigloros/sandbox/registry",
+            fs::Permissions::from_mode(0o700),
+        )?;
         Ok(())
     }
 
@@ -763,9 +793,10 @@ mod tests {
                 .join(intent.unit_name().attempt_component());
             assert_eq!(fs::read(path)?, intent.encode());
         }
+        // The intents beside the activation marker.
         assert_eq!(
             fs::read_dir(directory.path().join(REGISTRY_NAME))?.count(),
-            8
+            9
         );
         assert_eq!(fs::read_dir(directory.path())?.count(), 1);
         Ok(())
@@ -786,7 +817,8 @@ mod tests {
         let names = fs::read_dir(directory.path().join(REGISTRY_NAME))?
             .map(|entry| entry.map(|entry| entry.file_name()))
             .collect::<Result<Vec<_>, _>>()?;
-        assert_eq!(names.len(), 2);
+        // The record, the activation marker and the refused temporary write.
+        assert_eq!(names.len(), 3);
         assert!(names
             .iter()
             .any(|name| name.to_string_lossy().starts_with(".planned-")));
@@ -811,6 +843,8 @@ mod tests {
         for fail_at in 0..operation_count {
             let (directory, parent, owner) = fixture()?;
             let registry = SystemdAttemptRegistry::from_runtime_directory(&parent, owner)?;
+            // Inventory only what the commit leaves below.
+            fs::remove_file(directory.path().join(REGISTRY_NAME).join("activation"))?;
             let (result, observed) =
                 with_io_fault(Some(fail_at), || registry.commit_planned(&intent));
             assert!(matches!(result, Err(SystemdAttemptRegistryError::Io(_))));

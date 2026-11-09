@@ -49,6 +49,10 @@ mod system_bus;
 pub mod test_fixtures;
 mod transient_unit;
 
+/// A boot ID and a `CLOCK_MONOTONIC` time on that boot.
+#[cfg(target_os = "linux")]
+type BootInstant = ([u8; 16], std::time::Duration);
+
 #[derive(Debug)]
 struct CgroupRoot(std::fs::File);
 

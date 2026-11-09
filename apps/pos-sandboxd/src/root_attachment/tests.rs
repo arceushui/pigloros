@@ -1670,8 +1670,11 @@ async fn the_admitted_chain_reaches_attachment_only_through_every_gate() -> Test
         .err(),
         Some(ImageActivationError::HostFeatureUnavailable)
     );
-    // No request was sent, so none was recorded.
-    assert!(!Path::new("/run/pigloros/sandbox/registry/activation").exists());
+    // No request was sent, so the marker still records none.
+    assert_eq!(
+        fs::read("/run/pigloros/sandbox/registry/activation")?,
+        [b"PAA1".as_slice(), &[0; 32]].concat()
+    );
 
     fs::create_dir("/run/systemd")?;
     let listener = UnixListener::bind("/run/systemd/io.systemd.MountFileSystem")?;

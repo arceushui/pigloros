@@ -41,7 +41,8 @@ mod cases {
     /// before the identity extension; 4 the recorded tree; 5 its root removed but
     /// its attempt directory present (#721); 6 both removed, record present;
     /// 7 a recorded PAI3 root, unmounted; 8 an interrupted temporary write;
-    /// 9 a complete temporary write that was never renamed.
+    /// 9 a complete temporary write that was never renamed. Beside them, the
+    /// owner's activation marker and an interrupted write of its replacement.
     fn seed() -> TestResult<tempfile::TempDir> {
         let runtime = tempfile::tempdir()?;
         fs::set_permissions(runtime.path(), fs::Permissions::from_mode(0o700))?;
@@ -80,6 +81,9 @@ mod cases {
         drop(registry);
         temporary(runtime.path(), 8, &intent(8)?.encode()[..30])?;
         temporary(runtime.path(), 9, &intent(9)?.encode())?;
+        let marker = runtime.path().join("registry/.activation-1-2");
+        fs::write(&marker, b"PAA1")?;
+        fs::set_permissions(marker, fs::Permissions::from_mode(0o600))?;
         Ok(runtime)
     }
 
@@ -123,7 +127,9 @@ mod cases {
         // committed ownership.
         let expected = (1..=7).map(intent).collect::<Result<Vec<_>, _>>()?;
         assert_eq!(attempts, expected);
-        assert_eq!(count(&runtime.path().join("registry"))?, 0);
+        // Only the committed activation marker is kept.
+        assert_eq!(count(&runtime.path().join("registry"))?, 1);
+        assert!(runtime.path().join("registry/activation").is_file());
         assert_eq!(count(&runtime.path().join("attempts"))?, 0);
         drop(recovery);
         let parent = File::open(runtime.path())?;
@@ -177,7 +183,7 @@ mod cases {
         assert!(recovery
             .remove_reconciled(&absences(&recovery), &released(&[ROOT_ATTEMPT]))
             .is_err());
-        assert_eq!(count(&runtime.path().join("registry"))?, 9);
+        assert_eq!(count(&runtime.path().join("registry"))?, 11);
         assert_eq!(count(&runtime.path().join("attempts"))?, 6);
         Ok(())
     }
@@ -213,7 +219,7 @@ mod cases {
             restarted.remove_reconciled(&absences(&restarted), &released(&[ROOT_ATTEMPT]))?;
             assert_eq!(
                 count(&runtime.path().join("registry"))?,
-                0,
+                1,
                 "step {fail_at}"
             );
             assert_eq!(

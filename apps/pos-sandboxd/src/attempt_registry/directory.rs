@@ -457,7 +457,8 @@ mod tests {
                 assert_eq!(record, planned.encode());
             }
             let records = fs::read_dir(directory.path().join("registry"))?.count();
-            assert!((1..=2).contains(&records));
+            // The intent, the activation marker and an interrupted extension.
+            assert!((2..=3).contains(&records));
             drop(registry);
             assert_eq!(fs::read(record_path)?, record);
             assert_eq!([attempt.exists(), root.exists()], existed);
@@ -585,7 +586,7 @@ mod tests {
             assert_eq!(bytes, expected);
             assert_eq!(fs::read_dir(path.join("root"))?.count(), 0);
         }
-        assert_eq!(fs::read_dir(directory.path().join("registry"))?.count(), 8);
+        assert_eq!(fs::read_dir(directory.path().join("registry"))?.count(), 9);
         assert_eq!(fs::read_dir(directory.path().join("attempts"))?.count(), 8);
         Ok(())
     }
