@@ -173,8 +173,11 @@ fn all_thirty_six_purpose_kind_pairs_follow_the_closed_admission_table() -> Test
                 assert_eq!(Header::new(value)?.to_canonical_cbor().as_slice(), encoded);
                 assert!(Header::from_canonical_cbor(&encoded)?.as_input() == &value);
             } else {
-                assert!(Header::new(value).err() == Some(Error::InvalidBinding));
-                assert!(Header::from_canonical_cbor(&encoded).err() == Some(Error::InvalidBinding));
+                assert_eq!(Header::new(value).err(), Some(Error::InvalidBinding));
+                assert_eq!(
+                    Header::from_canonical_cbor(&encoded).err(),
+                    Some(Error::InvalidBinding)
+                );
             }
         }
     }
@@ -216,8 +219,11 @@ fn zero_foreign_coordinates_operation_ids_scope_and_bad_horizons_refuse() -> Tes
         ),
     ] {
         let encoded = encode(&Value::Array(header_fields(value, 0, 0)?))?;
-        assert!(Header::new(value).err() == Some(Error::InvalidBinding));
-        assert!(Header::from_canonical_cbor(&encoded).err() == Some(Error::InvalidBinding));
+        assert_eq!(Header::new(value).err(), Some(Error::InvalidBinding));
+        assert_eq!(
+            Header::from_canonical_cbor(&encoded).err(),
+            Some(Error::InvalidBinding)
+        );
     }
     for horizon in [0, (u64::MAX / 2) + 1, u64::MAX] {
         let value = Input {
@@ -225,7 +231,10 @@ fn zero_foreign_coordinates_operation_ids_scope_and_bad_horizons_refuse() -> Tes
             ..execution_input()?
         };
         let encoded = encode(&Value::Array(header_fields(value, 0, 0)?))?;
-        assert!(Header::from_canonical_cbor(&encoded).err() == Some(Error::BoundsExceeded));
+        assert_eq!(
+            Header::from_canonical_cbor(&encoded).err(),
+            Some(Error::BoundsExceeded)
+        );
     }
     Ok(())
 }
@@ -246,14 +255,17 @@ fn header_rejects_owner_aliases_and_any_other_role_or_epoch() -> TestResult {
         } else {
             Error::InvalidBinding
         };
-        assert!(Header::from_canonical_cbor(&encode(&Value::Array(fields))?).err() == Some(error));
+        assert_eq!(
+            Header::from_canonical_cbor(&encode(&Value::Array(fields))?).err(),
+            Some(error)
+        );
     }
     for (field, value) in [(9, 0), (9, 8), (10, 0), (10, 2)] {
         let mut fields = original.clone();
         fields[field] = uint(value);
-        assert!(
-            Header::from_canonical_cbor(&encode(&Value::Array(fields))?).err()
-                == Some(Error::InvalidBinding)
+        assert_eq!(
+            Header::from_canonical_cbor(&encode(&Value::Array(fields))?).err(),
+            Some(Error::InvalidBinding)
         );
     }
     let mut invalid_utf8 = encode(&Value::Array(original))?;
@@ -262,7 +274,10 @@ fn header_rejects_owner_aliases_and_any_other_role_or_epoch() -> TestResult {
         .position(|bytes| bytes == b"community:")
         .ok_or("missing owner")?;
     invalid_utf8[at] = 0xff;
-    assert!(Header::from_canonical_cbor(&invalid_utf8).err() == Some(Error::InvalidEncoding));
+    assert_eq!(
+        Header::from_canonical_cbor(&invalid_utf8).err(),
+        Some(Error::InvalidEncoding)
+    );
     Ok(())
 }
 
@@ -272,9 +287,9 @@ fn unknown_enum_tags_and_wrong_operation_payloads_are_closed() -> TestResult {
     for (field, value) in [(4, 4), (5, 3), (7, 9)] {
         let mut fields = original.clone();
         fields[field] = uint(value);
-        assert!(
-            Header::from_canonical_cbor(&encode(&Value::Array(fields))?).err()
-                == Some(Error::InvalidEncoding)
+        assert_eq!(
+            Header::from_canonical_cbor(&encode(&Value::Array(fields))?).err(),
+            Some(Error::InvalidEncoding)
         );
     }
     for operation in [1, 2] {
@@ -287,9 +302,9 @@ fn unknown_enum_tags_and_wrong_operation_payloads_are_closed() -> TestResult {
             } else {
                 Error::InvalidEncoding
             };
-            assert!(
-                Header::from_canonical_cbor(&encode(&Value::Array(fields))?).err()
-                    == Some(expected)
+            assert_eq!(
+                Header::from_canonical_cbor(&encode(&Value::Array(fields))?).err(),
+                Some(expected)
             );
         }
     }
@@ -301,9 +316,9 @@ fn unknown_enum_tags_and_wrong_operation_payloads_are_closed() -> TestResult {
         bytes(&[8; 16]),
         uint(0),
     ]))?);
-    assert!(
-        Header::from_canonical_cbor(&encode(&Value::Array(fields))?).err()
-            == Some(Error::InvalidBinding)
+    assert_eq!(
+        Header::from_canonical_cbor(&encode(&Value::Array(fields))?).err(),
+        Some(Error::InvalidBinding)
     );
     Ok(())
 }
@@ -326,7 +341,10 @@ fn header_rejects_every_truncation_trailing_and_nonpreferred_input() -> TestResu
     }
     let mut wide_purpose = encode(&Value::Array(header_fields(execution_input()?, 0, 0)?))?;
     wide_purpose.splice(41..42, [0x18, 0]);
-    assert!(Header::from_canonical_cbor(&wide_purpose).err() == Some(Error::InvalidEncoding));
+    assert_eq!(
+        Header::from_canonical_cbor(&wide_purpose).err(),
+        Some(Error::InvalidEncoding)
+    );
     Ok(())
 }
 
@@ -373,14 +391,23 @@ fn envelope_refuses_missing_tags_bad_nonces_and_oversized_nested_records() -> Te
     let header_bytes = encode(&Value::Array(header_fields(execution_input()?, 0, 0)?))?;
     for length in [0, 15, MAX_PLAINTEXT + 17] {
         let encoded = envelope_wire(&header_bytes, &[12; 12], &vec![0; length])?;
-        assert!(Envelope::from_canonical_cbor(&encoded).err() == Some(Error::BoundsExceeded));
+        assert_eq!(
+            Envelope::from_canonical_cbor(&encoded).err(),
+            Some(Error::BoundsExceeded)
+        );
     }
     for length in [11, 13] {
         let encoded = envelope_wire(&header_bytes, &vec![12; length], &[0; 16])?;
-        assert!(Envelope::from_canonical_cbor(&encoded).err() == Some(Error::InvalidEncoding));
+        assert_eq!(
+            Envelope::from_canonical_cbor(&encoded).err(),
+            Some(Error::InvalidEncoding)
+        );
     }
     let header_too_large = envelope_wire(&[0; 1025], &[12; 12], &[0; 16])?;
-    assert!(Envelope::from_canonical_cbor(&header_too_large).err() == Some(Error::BoundsExceeded));
+    assert_eq!(
+        Envelope::from_canonical_cbor(&header_too_large).err(),
+        Some(Error::BoundsExceeded)
+    );
     let valid = envelope_wire(&header_bytes, &[12; 12], &[0; 16])?;
     framing_refuses(&valid, 3_147_840, |bytes| {
         Envelope::from_canonical_cbor(bytes).map(|_| ())

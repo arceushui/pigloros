@@ -52,9 +52,12 @@ fn partial_nonce_entropy_failure_closes_encryption_and_preserves_old_decryption(
         },
         aes_seal,
     );
-    assert!(result.err() == Some(Error::EntropyUnavailable));
+    assert_eq!(result.err(), Some(Error::EntropyUnavailable));
     assert_eq!(cipher.remaining_encryptions(), 0);
-    assert!(cipher.seal(b"retry", &[2; 32]).err() == Some(Error::EncryptionClosed));
+    assert_eq!(
+        cipher.seal(b"retry", &[2; 32]).err(),
+        Some(Error::EncryptionClosed)
+    );
     assert_eq!(
         cipher
             .open(retained.nonce(), retained.ciphertext_and_tag(), &[2; 32])?
@@ -70,8 +73,11 @@ fn primitive_refusal_closes_remaining_credits_without_returning_a_candidate() ->
     let result = cipher.seal_with(b"candidate", &[4; 32], getrandom::fill, |_, _, _, _| {
         Err(aes_gcm_siv::Error)
     });
-    assert!(result.err() == Some(Error::EncryptionFailed));
+    assert_eq!(result.err(), Some(Error::EncryptionFailed));
     assert_eq!(cipher.remaining_encryptions(), 0);
-    assert!(cipher.seal(b"retry", &[4; 32]).err() == Some(Error::EncryptionClosed));
+    assert_eq!(
+        cipher.seal(b"retry", &[4; 32]).err(),
+        Some(Error::EncryptionClosed)
+    );
     Ok(())
 }

@@ -244,7 +244,7 @@ fn complete_wrapper_rejects_malformed_nested_or_outer_framing() -> TestResult {
     let mut trailing = canonical.clone();
     trailing.push(0);
     assert!(Metadata::from_canonical_cbor(&trailing).is_err());
-    let mut nonpreferred = canonical.clone();
+    let mut nonpreferred = canonical;
     nonpreferred.splice(6..7, [0x18, 1]);
     assert!(Metadata::from_canonical_cbor(&nonpreferred).is_err());
     for field in 0..5 {

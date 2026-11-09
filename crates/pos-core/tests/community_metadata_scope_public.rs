@@ -306,7 +306,7 @@ fn scope_parser_refuses_incomplete_nonpreferred_and_wrong_grammar() -> TestResul
     let mut trailing = canonical.clone();
     trailing.push(0);
     assert!(Cover::from_canonical_cbor(&trailing).is_err());
-    let mut nonpreferred = canonical.clone();
+    let mut nonpreferred = canonical;
     nonpreferred.splice(6..7, [0x18, 1]);
     assert!(Cover::from_canonical_cbor(&nonpreferred).is_err());
     for field in 0..8 {

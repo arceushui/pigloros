@@ -176,9 +176,9 @@ fn commit_refuses_zero_required_links_and_nonpositive_or_reversed_ranges() -> Te
     for field in [3, 4, 5, 7, 8] {
         let mut fields = commit_fields(commit_input()?)?;
         fields[field] = bytes(&[0; 32]);
-        assert!(
-            Commit::from_canonical_cbor(&encode(&Value::Array(fields))?).err()
-                == Some(Error::InvalidBinding)
+        assert_eq!(
+            Commit::from_canonical_cbor(&encode(&Value::Array(fields))?).err(),
+            Some(Error::InvalidBinding)
         );
     }
     for factual in [
@@ -192,8 +192,11 @@ fn commit_refuses_zero_required_links_and_nonpositive_or_reversed_ranges() -> Te
             ..commit_input()?
         };
         let encoded = encode(&Value::Array(commit_fields(input)?))?;
-        assert!(Commit::new(input).err() == Some(Error::InvalidBinding));
-        assert!(Commit::from_canonical_cbor(&encoded).err() == Some(Error::InvalidBinding));
+        assert_eq!(Commit::new(input).err(), Some(Error::InvalidBinding));
+        assert_eq!(
+            Commit::from_canonical_cbor(&encoded).err(),
+            Some(Error::InvalidBinding)
+        );
     }
     Ok(())
 }
@@ -206,7 +209,10 @@ fn commit_refuses_invalid_horizons_and_every_truncation() -> TestResult {
             ..commit_input()?
         };
         let encoded = encode(&Value::Array(commit_fields(input)?))?;
-        assert!(Commit::from_canonical_cbor(&encoded).err() == Some(Error::BoundsExceeded));
+        assert_eq!(
+            Commit::from_canonical_cbor(&encoded).err(),
+            Some(Error::BoundsExceeded)
+        );
     }
     for factual in [None, Some(range(1, 1, 2))] {
         let input = CommitInput {
@@ -230,9 +236,9 @@ fn factual_range_arity_type_and_integer_framing_are_closed() -> TestResult {
     ] {
         let mut fields = commit_fields(commit_input()?)?;
         fields[6] = factual;
-        assert!(
-            Commit::from_canonical_cbor(&encode(&Value::Array(fields))?).err()
-                == Some(Error::InvalidEncoding)
+        assert_eq!(
+            Commit::from_canonical_cbor(&encode(&Value::Array(fields))?).err(),
+            Some(Error::InvalidEncoding)
         );
     }
     let mut fields = commit_fields(commit_input()?)?;
@@ -243,7 +249,10 @@ fn factual_range_arity_type_and_integer_framing_are_closed() -> TestResult {
     for field in &fields[7..] {
         encoded.extend_from_slice(&encode(field)?);
     }
-    assert!(Commit::from_canonical_cbor(&encoded).err() == Some(Error::InvalidEncoding));
+    assert_eq!(
+        Commit::from_canonical_cbor(&encoded).err(),
+        Some(Error::InvalidEncoding)
+    );
     Ok(())
 }
 
@@ -288,8 +297,11 @@ fn failure_and_refusal_reasons_require_their_exact_evidence_link() -> TestResult
             ..abort_input(reason)?
         };
         let encoded = encode(&Value::Array(abort_fields(input, code)?))?;
-        assert!(Abort::new(input).err() == Some(Error::InvalidBinding));
-        assert!(Abort::from_canonical_cbor(&encoded).err() == Some(Error::InvalidBinding));
+        assert_eq!(Abort::new(input).err(), Some(Error::InvalidBinding));
+        assert_eq!(
+            Abort::from_canonical_cbor(&encoded).err(),
+            Some(Error::InvalidBinding)
+        );
     }
     for (code, reason) in [
         (0, Reason::AuthenticatedCancellation),
@@ -310,9 +322,9 @@ fn abort_refuses_zero_links_horizon_errors_and_unknown_reasons() -> TestResult {
     for field in [3, 4, 6, 7] {
         let mut fields = abort_fields(abort_input(Reason::ValidatedInvocationFailure)?, 1)?;
         fields[field] = bytes(&[0; 32]);
-        assert!(
-            Abort::from_canonical_cbor(&encode(&Value::Array(fields))?).err()
-                == Some(Error::InvalidBinding)
+        assert_eq!(
+            Abort::from_canonical_cbor(&encode(&Value::Array(fields))?).err(),
+            Some(Error::InvalidBinding)
         );
     }
     for horizon in [0, (u64::MAX / 2) + 1, u64::MAX] {
@@ -320,9 +332,9 @@ fn abort_refuses_zero_links_horizon_errors_and_unknown_reasons() -> TestResult {
             evidence_not_after_micros: horizon,
             ..abort_input(Reason::ValidatedInvocationFailure)?
         };
-        assert!(
-            Abort::from_canonical_cbor(&encode(&Value::Array(abort_fields(input, 1)?))?).err()
-                == Some(Error::BoundsExceeded)
+        assert_eq!(
+            Abort::from_canonical_cbor(&encode(&Value::Array(abort_fields(input, 1)?))?).err(),
+            Some(Error::BoundsExceeded)
         );
     }
     for code in [5, 24, u64::MAX] {
@@ -330,7 +342,10 @@ fn abort_refuses_zero_links_horizon_errors_and_unknown_reasons() -> TestResult {
             abort_input(Reason::AuthenticatedCancellation)?,
             code,
         )?))?;
-        assert!(Abort::from_canonical_cbor(&encoded).err() == Some(Error::InvalidEncoding));
+        assert_eq!(
+            Abort::from_canonical_cbor(&encoded).err(),
+            Some(Error::InvalidEncoding)
+        );
     }
     Ok(())
 }
@@ -353,9 +368,9 @@ fn abort_rejects_every_truncation_and_malformed_optional_fields() -> TestResult 
     for field in [4, 6, 7] {
         let mut fields = abort_fields(abort_input(Reason::ValidatedInvocationFailure)?, 1)?;
         fields[field] = Value::Bool(false);
-        assert!(
-            Abort::from_canonical_cbor(&encode(&Value::Array(fields))?).err()
-                == Some(Error::InvalidEncoding)
+        assert_eq!(
+            Abort::from_canonical_cbor(&encode(&Value::Array(fields))?).err(),
+            Some(Error::InvalidEncoding)
         );
     }
     let fields = abort_fields(abort_input(Reason::ValidatedInvocationFailure)?, 1)?;
@@ -365,7 +380,10 @@ fn abort_rejects_every_truncation_and_malformed_optional_fields() -> TestResult 
     for field in &fields[6..] {
         encoded.extend_from_slice(&encode(field)?);
     }
-    assert!(Abort::from_canonical_cbor(&encoded).err() == Some(Error::InvalidEncoding));
+    assert_eq!(
+        Abort::from_canonical_cbor(&encoded).err(),
+        Some(Error::InvalidEncoding)
+    );
     Ok(())
 }
 

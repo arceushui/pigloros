@@ -218,11 +218,14 @@ fn request_refuses_zero_coordinates_operation_and_every_required_digest() -> Tes
         let mut fields = request_fields(request_input());
         fields[field] = bytes(&vec![0; if field <= 4 { 16 } else { 32 }]);
         let encoded = encode(&Value::Array(fields))?;
-        assert!(Request::from_canonical_cbor(&encoded).err() == Some(Error::InvalidBinding));
+        assert_eq!(
+            Request::from_canonical_cbor(&encoded).err(),
+            Some(Error::InvalidBinding)
+        );
     }
     let mut input = request_input();
     input.reservation_operation_id = [0; 16];
-    assert!(Request::new(input).err() == Some(Error::InvalidBinding));
+    assert_eq!(Request::new(input).err(), Some(Error::InvalidBinding));
     Ok(())
 }
 
@@ -233,9 +236,12 @@ fn request_horizon_is_fixed_positive_and_i64_bounded() -> TestResult {
             requested_evidence_horizon: horizon,
             ..request_input()
         };
-        assert!(Request::new(input).err() == Some(Error::BoundsExceeded));
+        assert_eq!(Request::new(input).err(), Some(Error::BoundsExceeded));
         let encoded = encode(&Value::Array(request_fields(input)))?;
-        assert!(Request::from_canonical_cbor(&encoded).err() == Some(Error::BoundsExceeded));
+        assert_eq!(
+            Request::from_canonical_cbor(&encoded).err(),
+            Some(Error::BoundsExceeded)
+        );
     }
     Ok(())
 }
@@ -249,7 +255,10 @@ fn request_refuses_all_truncations_and_nonpreferred_semantic_values() -> TestRes
     let mut overlong_zero = encoded;
     let last = overlong_zero.len() - 1;
     overlong_zero.splice(last.., [0x18, 0]);
-    assert!(Request::from_canonical_cbor(&overlong_zero).err() == Some(Error::InvalidEncoding));
+    assert_eq!(
+        Request::from_canonical_cbor(&overlong_zero).err(),
+        Some(Error::InvalidEncoding)
+    );
     Ok(())
 }
 
@@ -278,23 +287,26 @@ fn reservation_rejects_missing_links_zero_native_ordinal_and_bad_horizons() -> T
     for field in [3, 5, 6, 7, 8] {
         let mut fields = reservation_fields(reservation_input(1)?)?;
         fields[field] = bytes(&[0; 32]);
-        assert!(
-            Reservation::from_canonical_cbor(&encode(&Value::Array(fields))?).err()
-                == Some(Error::InvalidBinding)
+        assert_eq!(
+            Reservation::from_canonical_cbor(&encode(&Value::Array(fields))?).err(),
+            Some(Error::InvalidBinding)
         );
     }
     let input = ReservationInput {
         native_producer_ordinal: 0,
         ..reservation_input(1)?
     };
-    assert!(Reservation::new(input).err() == Some(Error::InvalidBinding));
+    assert_eq!(Reservation::new(input).err(), Some(Error::InvalidBinding));
     for horizon in [0, (u64::MAX / 2) + 1, u64::MAX] {
         let input = ReservationInput {
             evidence_not_after_micros: horizon,
             ..reservation_input(1)?
         };
         let encoded = encode(&Value::Array(reservation_fields(input)?))?;
-        assert!(Reservation::from_canonical_cbor(&encoded).err() == Some(Error::BoundsExceeded));
+        assert_eq!(
+            Reservation::from_canonical_cbor(&encoded).err(),
+            Some(Error::BoundsExceeded)
+        );
     }
     Ok(())
 }
@@ -374,14 +386,14 @@ fn head_frontier_must_belong_to_the_exact_timeline_and_generation() -> TestResul
             Frontier::Committed(Pass::new(timeline, generation, 1)?),
             &rows,
         );
-        assert!(Head::new(input).err() == Some(Error::InvalidBinding));
+        assert_eq!(Head::new(input).err(), Some(Error::InvalidBinding));
     }
     for (field, length) in [(2, 16), (3, 16), (7, 32), (8, 32)] {
         let mut fields = head_fields(&head_input(Frontier::Initial, &rows))?;
         fields[field] = bytes(&vec![0; length]);
-        assert!(
-            Head::from_canonical_cbor(&encode(&Value::Array(fields))?).err()
-                == Some(Error::InvalidBinding)
+        assert_eq!(
+            Head::from_canonical_cbor(&encode(&Value::Array(fields))?).err(),
+            Some(Error::InvalidBinding)
         );
     }
     Ok(())
@@ -393,18 +405,23 @@ fn head_refuses_empty_oversized_duplicate_unordered_or_zero_member_rows() -> Tes
         let rows = members(count);
         let input = head_input(Frontier::Initial, &rows);
         let encoded = encode(&Value::Array(head_fields(&input)?))?;
-        assert!(Head::new(input).err() == Some(Error::BoundsExceeded));
-        assert!(Head::from_canonical_cbor(&encoded).err() == Some(Error::BoundsExceeded));
+        assert_eq!(Head::new(input).err(), Some(Error::BoundsExceeded));
+        assert_eq!(
+            Head::from_canonical_cbor(&encoded).err(),
+            Some(Error::BoundsExceeded)
+        );
     }
     let mut duplicate = members(2);
     duplicate[1] = duplicate[0];
-    assert!(
-        Head::new(head_input(Frontier::Initial, &duplicate)).err() == Some(Error::InvalidBinding)
+    assert_eq!(
+        Head::new(head_input(Frontier::Initial, &duplicate)).err(),
+        Some(Error::InvalidBinding)
     );
     let mut unordered = members(2);
     unordered.reverse();
-    assert!(
-        Head::new(head_input(Frontier::Initial, &unordered)).err() == Some(Error::InvalidBinding)
+    assert_eq!(
+        Head::new(head_input(Frontier::Initial, &unordered)).err(),
+        Some(Error::InvalidBinding)
     );
     for zero_member in [true, false] {
         let mut rows = members(1);
@@ -415,7 +432,10 @@ fn head_refuses_empty_oversized_duplicate_unordered_or_zero_member_rows() -> Tes
         }
         let input = head_input(Frontier::Initial, &rows);
         let encoded = encode(&Value::Array(head_fields(&input)?))?;
-        assert!(Head::from_canonical_cbor(&encoded).err() == Some(Error::InvalidBinding));
+        assert_eq!(
+            Head::from_canonical_cbor(&encoded).err(),
+            Some(Error::InvalidBinding)
+        );
     }
     Ok(())
 }
@@ -462,7 +482,10 @@ fn head_bounds_member_count_before_reading_or_allocating_rows() -> TestResult {
     let mut encoded = encode(&Value::Array(fields[..5].to_vec()))?;
     encoded[0] = 0x89;
     encoded.extend_from_slice(&[0x9b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]);
-    assert!(Head::from_canonical_cbor(&encoded).err() == Some(Error::BoundsExceeded));
+    assert_eq!(
+        Head::from_canonical_cbor(&encoded).err(),
+        Some(Error::BoundsExceeded)
+    );
     Ok(())
 }
 

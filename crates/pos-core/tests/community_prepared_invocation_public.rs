@@ -438,7 +438,7 @@ fn prepared_set_derives_each_exact_cin_hash_and_domain_in_member_order() -> Test
             logical_digest(b"PiglorOS.Community.PreparedInputSet.v1\0", &expected)
         );
         set.validate_canonical_cbor(&expected)?;
-        let mut trailing = expected.clone();
+        let mut trailing = expected;
         trailing.push(0);
         assert_eq!(
             set.validate_canonical_cbor(&trailing),

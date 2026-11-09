@@ -236,7 +236,7 @@ fn object_rejects_framing_and_invalid_nested_records() -> TestResult {
         Object::from_canonical_cbor(&encode(&unsupported)?).err(),
         Some(Error::UnsupportedVersion)
     );
-    let mut nonpreferred = encoded.clone();
+    let mut nonpreferred = encoded;
     nonpreferred.splice(6..7, [0x18, 1]);
     assert_eq!(
         Object::from_canonical_cbor(&nonpreferred).err(),

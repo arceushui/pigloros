@@ -355,7 +355,7 @@ fn every_record_refuses_prefixes_trailers_nonpreferred_versions_and_oversize() -
         (policy_value(11), 1024),
         (anchor_value(policy.digest(), 11), 1024),
     ];
-    for (index, (value, maximum)) in cases.into_iter().enumerate() {
+    for (index, (mut value, maximum)) in cases.into_iter().enumerate() {
         let validate = |bytes: &[u8]| match index {
             0 => Owner::from_canonical_cbor(bytes).map(drop),
             1 => Policy::from_canonical_cbor(bytes).map(drop),
@@ -368,7 +368,7 @@ fn every_record_refuses_prefixes_trailers_nonpreferred_versions_and_oversize() -
         let mut trailing = canonical.clone();
         trailing.push(0);
         assert!(validate(&trailing).is_err());
-        let mut nonpreferred = canonical.clone();
+        let mut nonpreferred = canonical;
         nonpreferred.splice(6..7, [0x18, 1]);
         assert_eq!(validate(&nonpreferred), Err(Error::InvalidEncoding));
         for version in [0, 2, u64::MAX] {
@@ -376,7 +376,7 @@ fn every_record_refuses_prefixes_trailers_nonpreferred_versions_and_oversize() -
             fields(&mut changed)?[1] = uint(version);
             assert_eq!(validate(&encode(&changed)?), Err(Error::UnsupportedVersion));
         }
-        for field in 0..fields(&mut value.clone())?.len() {
+        for field in 0..fields(&mut value)?.len() {
             let mut changed = value.clone();
             fields(&mut changed)?[field] = Value::Null;
             assert!(validate(&encode(&changed)?).is_err());
