@@ -27,6 +27,9 @@ pub(super) enum Creation {
 
 pub(super) struct Factory {
     pub(super) creation: Cell<Creation>,
+    pub(super) environment_creation: Cell<Creation>,
+    pub(super) environment_completions: Cell<u32>,
+    pub(super) controller_completions: Cell<u32>,
     pub(super) calls: RefCell<Vec<&'static str>>,
     pub(super) sink: RefCell<Option<Rc<dyn EventSink>>>,
     pub(super) foreground: Cell<bool>,
@@ -47,6 +50,9 @@ impl Factory {
     pub(super) fn new(creation: Creation, clock: FakeClock) -> Rc<Self> {
         Rc::new(Self {
             creation: Cell::new(creation),
+            environment_creation: Cell::new(Creation::Ready),
+            environment_completions: Cell::new(0),
+            controller_completions: Cell::new(0),
             calls: RefCell::new(Vec::new()),
             sink: RefCell::new(None),
             foreground: Cell::new(true),
@@ -183,7 +189,21 @@ impl NativeOperations for Session {
         Ok(())
     }
     fn environment_completion(&mut self) -> Option<NativeResult<()>> {
-        std::mem::take(&mut self.environment_pending).then_some(Ok(()))
+        if self.factory.environment_creation.get() == Creation::Pending
+            || !std::mem::take(&mut self.environment_pending)
+        {
+            return None;
+        }
+        self.factory
+            .environment_completions
+            .set(self.factory.environment_completions.get().saturating_add(1));
+        Some(
+            if self.factory.environment_creation.get() == Creation::CallbackFailure {
+                Err(failed())
+            } else {
+                Ok(())
+            },
+        )
     }
     fn environment(&self) -> NativeResult<EnvironmentSnapshot> {
         self.check("environment")?;
@@ -211,6 +231,9 @@ impl NativeOperations for Session {
         if !std::mem::take(&mut self.controller_pending) {
             return None;
         }
+        self.factory
+            .controller_completions
+            .set(self.factory.controller_completions.get().saturating_add(1));
         let creation = self.factory.creation.get();
         self.controller = creation != Creation::CallbackFailure;
         Some(if creation == Creation::Ready {
