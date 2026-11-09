@@ -157,7 +157,8 @@ mod cases {
                 (false, None, false, false),
                 "step {fail_at}"
             );
-            assert_eq!(fs::read_dir(runtime.path().join("registry"))?.count(), 0);
+            // Only the owner's activation marker is kept.
+            assert_eq!(fs::read_dir(runtime.path().join("registry"))?.count(), 1);
             // Admission reopens over the reconciled registry.
             registry(runtime.path())?.commit_planned(&intent()?)?;
         }

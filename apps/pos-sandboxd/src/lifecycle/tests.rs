@@ -436,7 +436,8 @@ mod cases {
             // Stop, failed-state reset and the fresh absence lookup.
             assert_eq!(calls.count()?, 3);
         }
-        assert_eq!(fs::read_dir(runtime.path().join("registry"))?.count(), 0);
+        // Only the owner's activation marker is left in the registry.
+        assert_eq!(fs::read_dir(runtime.path().join("registry"))?.count(), 1);
         assert_eq!(fs::read_dir(runtime.path().join("attempts"))?.count(), 0);
         registry.commit_planned(&PlannedAttemptIntent::new([9; 16], [9; 32])?)?;
         Ok(())
