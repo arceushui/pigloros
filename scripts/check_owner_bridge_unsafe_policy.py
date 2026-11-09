@@ -1132,6 +1132,7 @@ def _check_fault_authority(root: Path, scans: dict[str, tuple[Scan, tuple[Attrib
     # The seal is created only by the declared sealed-asset native fixture;
     # these fixed boundaries prevent bypassing lifecycle/identity checks.
     specifications = (
+        ('src/adapter/surface/mod.rs', 'pre_environment_retention', '1cb427754f0a7c3675063890f5fac1eeea50f342ff3988bfe2f6532c65e5bc6d'),
         ('src/adapter/surface/mod.rs', 'early_renderer_presence', '1f0f23a60d23aa258a7c4b2ddf7079540d4f841ee87719c1474d7ad1759b0f6f'),
         ('src/adapter/surface/mod.rs', 'pre_environment_completion', '3566802f65e63c69f642d7b4b5a070e0b802945847e0a24d8a0637b08f8a3fd7'),
         ('src/ffi/session.rs', 'early_renderer_presence', '98d418a783a187e248b5843d15de972346d8efb5907253b6287fe3bb310b00b7'),
@@ -1278,6 +1279,22 @@ def _check_fault_authority(root: Path, scans: dict[str, tuple[Scan, tuple[Attrib
         for reference in re.finditer(r"(?<!\w)(?:ObstructionFactory|ObstructionSession)(?!\w)", scanned.code):
             if relative not in (obstruction_path, "src/adapter/native_tests/process_fault.rs"):
                 found.append(f"{SHIM}/{relative}: UDF obstruction capability belongs only in the sealed test fixture")
+    surface_item = scans.get("src/adapter/surface/mod.rs")
+    surface_text = surface_item[0].code if surface_item else ""
+    enum_start = surface_text.find("pub(in crate::adapter) enum PreEnvironmentRetention")
+    enum_open = surface_text.find("{", enum_start) if enum_start >= 0 else -1
+    enum_body = surface_text[enum_start:_matching_brace(surface_text, enum_open) + 1] if enum_open >= 0 else ""
+    if (hashlib.sha256(re.sub(r"\s+", "", enum_body).encode()).hexdigest() != "9c39e796aa826523970cae61c061a219c7b0fb4a3f3ded23b586954bed10d395" or not surface_item or
+            "cfg(test)" not in _outer_attributes_before(surface_text, surface_item[1], enum_start)):
+        found.append(f"{SHIM}/src/adapter/surface/mod.rs: pre-environment retention type must be reviewed and test-only")
+    for relative, name, digest in (('src/adapter/surface/mod.rs', 'open', 'ef643ba74f211ae6c018e175e1b48a57ce9d7ad94d8d02a1657a359ebce9c044'), ('src/ffi/session.rs', 'window', 'b25f4191690ca7a0aed740988fa01e94b213cc219a584c9111056ce155d1b79f'), ('src/ffi/window.rs', 'snapshot', 'a7ee6e1a5515f4cf82fd01e16a70cc5cf818c6fdf5016f4afcf3e554fd415727'),):
+        item = scans.get(relative)
+        source = item[0].code if item else ""
+        matches = list(re.finditer(rf"(?<!\w)fn\s+{name}\s*\(", source))
+        opening = source.find("{", matches[0].end()) if len(matches) == 1 else -1
+        body = source[matches[0].start():_matching_brace(source, opening) + 1] if opening >= 0 else ""
+        if hashlib.sha256(re.sub(r"\s+", "", body).encode()).hexdigest() != digest:
+            found.append(f"{SHIM}/{relative}: competing-admission observation {name} differs from reviewed code")
     _check_fault_capabilities(scans, found)
     surface = scans.get("src/adapter/surface/mod.rs")
     surface_code = surface[0].code if surface else ""
@@ -1291,7 +1308,7 @@ def _check_fault_authority(root: Path, scans: dict[str, tuple[Scan, tuple[Attrib
     relative = "src/adapter/native_tests/process_fault.rs"
     item = scans.get(relative)
     code = item[0].code if item else ""
-    if hashlib.sha256(re.sub(r"\s+", "", code).encode()).hexdigest() != "d60a3dd6c666d5e857e65a138f5b29b17ea6fc188af3fdd60ab5dea8bc66a957":
+    if hashlib.sha256(re.sub(r"\s+", "", code).encode()).hexdigest() != "797f24dc0247d2b5811b4067d2ab473fe5cbf605327fad8f9d950de76c2cdae7":
         found.append(f"{SHIM}/{relative}: process fault fixture differs from reviewed sealed caller")
 
 

@@ -63,6 +63,13 @@ enum CloseState {
     Pending,
 }
 
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::adapter) enum PreEnvironmentRetention {
+    Active,
+    Abandoned,
+}
+
 pub(super) struct Surface {
     factory: Rc<dyn NativeFactory>,
     clock: Box<dyn MonotonicClock>,
@@ -127,6 +134,33 @@ impl Surface {
             dpi: Cell::new(None),
             client: Cell::new(None),
         })
+    }
+
+    #[cfg(test)]
+    pub(in crate::adapter) fn pre_environment_retention(
+        &mut self,
+        ceremony: &pos_owner_bridge_codec::CeremonyId,
+    ) -> Option<PreEnvironmentRetention> {
+        let opening = self.opening_spec.as_ref()?;
+        if &opening.ceremony_id != ceremony
+            || self.folder.as_ref()? != &pos_owner_bridge::folder_name(ceremony)
+            || self.identity.is_some()
+            || self.buffers
+            || self.generation.is_some()
+            || !self.native.window().ok()?.exists
+            || !self.store.records().ok()?.is_empty()
+        {
+            return None;
+        }
+        let folder = self.root.join(self.folder.as_ref()?);
+        crate::verify_private_directory(&folder).ok()?;
+        match (self.ownership, self.failed_open) {
+            (Ownership::CreatingEnvironment, false) => Some(PreEnvironmentRetention::Active),
+            (Ownership::CreatingEnvironment | Ownership::Environment, true) => {
+                Some(PreEnvironmentRetention::Abandoned)
+            }
+            _ => None,
+        }
     }
 
     #[cfg(test)]
