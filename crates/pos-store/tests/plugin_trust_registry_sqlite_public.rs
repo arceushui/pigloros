@@ -130,7 +130,7 @@ fn committed_state_survives_a_restart_and_a_retry_replays() -> TestResult {
         &genesis.tps1,
         &genesis.evidence,
         &one.projection()?,
-        &one.release_proof()?,
+        (&one.release_proof()?, &one.content_proof()?),
         TrustEvaluationPointV1::new(genesis.trusted()?, genesis.tick),
         activation(timeline, 1),
     )?;
