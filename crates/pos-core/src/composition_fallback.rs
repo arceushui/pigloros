@@ -349,7 +349,7 @@ impl ImplementationKeyV1 {
         Ok(key)
     }
 
-    pub(crate) fn write(&self, out: &mut Vec<u8>) {
+    fn write(&self, out: &mut Vec<u8>) {
         out.extend_from_slice(&IMK1_HEADER);
         write_text(out, &self.plugin_id);
         write_text(out, &self.version);

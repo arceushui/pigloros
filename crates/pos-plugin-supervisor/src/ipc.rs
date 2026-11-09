@@ -34,8 +34,6 @@
 mod contract;
 mod wire;
 
-use zeroize::{Zeroize, Zeroizing};
-
 use pos_crypto::plugin_execution::{DeterministicBudgetV1, PluginCapabilityDescriptorV1};
 use pos_runtime::community_plugin_host::{
     CommunityPluginHostErrorV1, CommunityPluginModeV1, ComponentTrapClassV1, GuestReturnV1,
@@ -100,8 +98,6 @@ pub struct WorkerEnvelopeErrorV1;
 /// The export one worker invokes, with its input.
 ///
 /// `migrate-state` has no call: a V1 host never invokes it.
-/// Every owned `reduce`/`drive` input is erased on drop, including a decoded
-/// input rejected by a later envelope check.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum WorkerCallV1 {
     /// `describe`.
@@ -112,28 +108,11 @@ pub enum WorkerCallV1 {
     Drive(PluginInvocationV1),
 }
 
-impl Zeroize for WorkerCallV1 {
-    fn zeroize(&mut self) {
-        match self {
-            Self::Describe => {}
-            Self::Reduce(invocation) | Self::Drive(invocation) => invocation.zeroize(),
-        }
-    }
-}
-
-impl Drop for WorkerCallV1 {
-    fn drop(&mut self) {
-        self.zeroize();
-        #[cfg(test)]
-        tests::observe_call_erasure(self);
-    }
-}
-
 /// One invocation request from the supervisor to a fresh worker.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkerRequestV1 {
-    /// The verified Component bytes, erased when their owned staging is dropped.
-    pub component: Zeroizing<Vec<u8>>,
+    /// The verified Component bytes.
+    pub component: Vec<u8>,
     /// The supervisor's negotiated record.
     pub negotiation: NegotiatedTransportV1,
     /// The supervisor's wall-time watchdog, in milliseconds.
@@ -158,8 +137,8 @@ pub type WorkerOutcomeV1 = Result<WorkerReturnV1, CommunityPluginHostErrorV1>;
 
 /// Encode one request envelope.
 ///
-/// The encoder checks the Component size and counts the complete frame before
-/// allocating its zeroizing output. Every other field bound holds by construction: the negotiated record
+/// The encoder checks only the Component size, the one large field, before it
+/// writes. Every other bound holds by construction: the negotiated record
 /// comes from negotiation, the invocation from `PluginInvocationV1::validate`,
 /// and the fixed-size fields from their types. The worker's decoder enforces
 /// all of them again, so a value that broke one would be a protocol fault at
@@ -168,25 +147,18 @@ pub type WorkerOutcomeV1 = Result<WorkerReturnV1, CommunityPluginHostErrorV1>;
 ///
 /// # Errors
 /// Returns [`WorkerEnvelopeErrorV1`] when the Component exceeds
-/// [`MAX_WORKER_COMPONENT_BYTES_V1`] or the encoded request exceeds the frame bound.
+/// [`MAX_WORKER_COMPONENT_BYTES_V1`].
 pub fn encode_worker_request_v1(
     request: &WorkerRequestV1,
-) -> Result<zeroize::Zeroizing<Vec<u8>>, WorkerEnvelopeErrorV1> {
-    require(request.component.len() <= MAX_WORKER_COMPONENT_BYTES_V1).and_then(|()| {
-        Writer::encode(crate::frame::WorkerFrameLimitsV1::REQUEST_BYTES, |writer| {
-            write_request(writer, request);
-            Ok(())
-        })
-    })
-}
-
-fn write_request(writer: &mut Writer, request: &WorkerRequestV1) {
+) -> Result<Vec<u8>, WorkerEnvelopeErrorV1> {
+    require(request.component.len() <= MAX_WORKER_COMPONENT_BYTES_V1)?;
+    let mut writer = Writer::default();
     writer
         .array(7)
         .text(WORKER_REQUEST_MAGIC_V1)
         .unsigned(VERSION)
         .bytes(&request.component);
-    write_negotiation(writer, &request.negotiation);
+    write_negotiation(&mut writer, &request.negotiation);
     writer
         .unsigned(request.watchdog_millis)
         .unsigned(request.host_inputs.simulation_time);
@@ -196,13 +168,14 @@ fn write_request(writer: &mut Writer, request: &WorkerRequestV1) {
         }
         WorkerCallV1::Reduce(invocation) => {
             writer.array(2).unsigned(1);
-            write_invocation(writer, invocation);
+            write_invocation(&mut writer, invocation);
         }
         WorkerCallV1::Drive(invocation) => {
             writer.array(2).unsigned(2);
-            write_invocation(writer, invocation);
+            write_invocation(&mut writer, invocation);
         }
     }
+    Ok(writer.bytes)
 }
 
 /// Decode one complete request envelope.
@@ -215,7 +188,7 @@ pub fn decode_worker_request_v1(bytes: &[u8]) -> Result<WorkerRequestV1, WorkerE
     reader.fixed_array(7)?;
     header(&mut reader, WORKER_REQUEST_MAGIC_V1)?;
     let request = WorkerRequestV1 {
-        component: read_bytes(&mut reader, MAX_WORKER_COMPONENT_BYTES_V1)?.into(),
+        component: read_bytes(&mut reader, MAX_WORKER_COMPONENT_BYTES_V1)?,
         negotiation: read_negotiation(&mut reader)?,
         watchdog_millis: reader.unsigned()?,
         host_inputs: HostInputs {
@@ -373,31 +346,23 @@ fn read_limits(reader: &mut EnvelopeReader<'_>) -> Decoded<DeterministicBudgetV1
 ///
 /// # Errors
 /// Returns [`WorkerEnvelopeErrorV1`] for an error the wire cannot carry (one
-/// outside [`WORKER_FAILURES_V1`], or a reproduced trap), or an encoding above
-/// the maximum response-frame allowance. The output is sized before copying
-/// and stays zeroizing through its worker/supervisor handoff.
+/// outside [`WORKER_FAILURES_V1`], or a reproduced trap).
 pub fn encode_worker_response_v1(
     outcome: &WorkerOutcomeV1,
-) -> Result<zeroize::Zeroizing<Vec<u8>>, WorkerEnvelopeErrorV1> {
-    let limit = crate::frame::WorkerFrameLimitsV1::for_limits(&DeterministicBudgetV1::MAXIMA);
-    Writer::encode(limit.response_bytes(), |writer| {
-        write_response(writer, outcome)
-    })
-}
-
-fn write_response(writer: &mut Writer, outcome: &WorkerOutcomeV1) -> Decoded<()> {
+) -> Result<Vec<u8>, WorkerEnvelopeErrorV1> {
+    let mut writer = Writer::default();
     writer
         .array(3)
         .text(WORKER_RESPONSE_MAGIC_V1)
         .unsigned(VERSION);
     match outcome {
         Ok(WorkerReturnV1::Described(report)) => {
-            write_report(writer, 0, report, write_descriptor);
+            write_report(&mut writer, 0, report, write_descriptor);
         }
-        Ok(WorkerReturnV1::Produced(report)) => write_report(writer, 1, report, write_output),
-        Err(error) => write_error(writer, *error)?,
+        Ok(WorkerReturnV1::Produced(report)) => write_report(&mut writer, 1, report, write_output),
+        Err(error) => write_error(&mut writer, *error)?,
     }
-    Ok(())
+    Ok(writer.bytes)
 }
 
 fn write_report<T>(

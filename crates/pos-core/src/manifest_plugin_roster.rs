@@ -437,7 +437,7 @@ impl ManifestPluginRosterV1 {
     }
 }
 
-pub(crate) fn valid_slot(slot: &str) -> bool {
+fn valid_slot(slot: &str) -> bool {
     (1..=MAX_SLOT_BYTES).contains(&slot.len())
         && slot
             .bytes()

@@ -1475,54 +1475,6 @@ type ForkEventSuffixV1 = Vec<(
     ForkAppendOperationV1,
 )>;
 
-/// Ordinary native entry shared by the store and trusted-clock adapter. Keep
-/// namespace refusal with the effect so callers cannot open before screening.
-/// This does not qualify protected ownership or make installation atomic.
-pub(crate) fn open_ordinary_filename(
-    filename: &str,
-    flags: OpenFlags,
-) -> Result<Connection, CoreError> {
-    #[cfg(target_os = "linux")]
-    crate::protected_sqlite_namespace::refuse_reserved_filename(filename)?;
-    Connection::open_with_flags(filename, flags)
-        .map_err(|error| CoreError::Storage(error.to_string()))
-}
-
-/// Preserve adapter-specific errors for namespace refusal versus a failed
-/// filesystem/native operation, without an unchecked path callback.
-#[cfg(target_os = "linux")]
-pub(crate) enum DatabasePathError<E> {
-    NamespaceRefused,
-    Operation(E),
-}
-
-#[cfg(target_os = "linux")]
-pub(crate) fn open_database_path(
-    path: &std::path::Path,
-    flags: OpenFlags,
-) -> Result<Connection, DatabasePathError<rusqlite::Error>> {
-    crate::protected_sqlite_namespace::refuse_reserved_database_path(path)
-        .map_err(|_| DatabasePathError::NamespaceRefused)?;
-    Connection::open_with_flags(path, flags).map_err(DatabasePathError::Operation)
-}
-
-#[cfg(target_os = "linux")]
-pub(crate) fn create_private_database_file(
-    path: &std::path::Path,
-) -> Result<(), DatabasePathError<std::io::Error>> {
-    use std::os::unix::fs::OpenOptionsExt;
-
-    crate::protected_sqlite_namespace::refuse_reserved_database_path(path)
-        .map_err(|_| DatabasePathError::NamespaceRefused)?;
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)
-        .map(drop)
-        .map_err(DatabasePathError::Operation)
-}
-
 impl SqliteStore {
     pub(crate) fn require_live_fork_event_session(
         &self,
@@ -2142,7 +2094,8 @@ impl SqliteStore {
         initialize_schema: bool,
         options: SqliteStoreOpenOptionsV1,
     ) -> Result<Self, CoreError> {
-        let conn = open_ordinary_filename(path, flags)?;
+        let conn = Connection::open_with_flags(path, flags)
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
         conn.set_prepared_statement_cache_capacity(SQLITE_STATEMENT_CACHE_CAPACITY);
 
         let writer_reservation_connection =
@@ -2194,7 +2147,7 @@ impl SqliteStore {
         options: SqliteStoreOpenOptionsV1,
     ) -> Option<Connection> {
         if flags.contains(OpenFlags::SQLITE_OPEN_READ_ONLY) {
-            open_ordinary_filename(
+            Connection::open_with_flags(
                 path,
                 OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_URI,
             )
@@ -15122,7 +15075,6 @@ mod tests {
     mod protected_interval_cleanup;
 
     use super::*;
-
     use crate::classified_fork_fixture::database_rows;
     use crate::ErasureRejoinPersistencePortV1;
     use pos_core::{
@@ -15139,31 +15091,6 @@ mod tests {
         verify_authenticated_principal_evidence_v1, ForkAuthenticationAdapterSigningKeyV1,
         ForkHostSigningKeyV1,
     };
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn lower_read_only_writer_opener_independently_refuses_reserved_namespace(
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        // The lower factory must refuse even if the namespace became reserved
-        // after the outer opener's check. This exercises that native edge
-        // directly without racing installation or claiming atomic activation.
-        let directory = tempfile::tempdir()?;
-        std::fs::create_dir(
-            directory
-                .path()
-                .join(crate::protected_sqlite_namespace::COORDINATION_DIRECTORY),
-        )?;
-        let database = directory.path().join("main.db");
-        let path = database.to_str().ok_or("fixture path is not UTF-8")?;
-        assert!(SqliteStore::open_writer_reservation_connection(
-            path,
-            OpenFlags::SQLITE_OPEN_READ_ONLY,
-            SqliteStoreOpenOptionsV1::default(),
-        )
-        .is_none());
-        assert!(!database.exists());
-        Ok(())
-    }
 
     // Measure the durable rewrite fixture outside the tests/ exporter filter.
     #[cfg_attr(coverage_nightly, coverage(on))]

@@ -6,7 +6,6 @@
 //! bytes.
 
 use pos_crypto::strict_cbor::{Reader, StrictCborError};
-use zeroize::Zeroizing;
 
 use super::WorkerEnvelopeErrorV1;
 
@@ -89,54 +88,16 @@ pub(super) fn read_code(reader: &mut EnvelopeReader<'_>, count: usize) -> Decode
 /// shortest-form widths.
 #[derive(Default)]
 pub(super) struct Writer {
-    pub(super) bytes: Zeroizing<Vec<u8>>,
-    length: usize,
-    counting: bool,
+    pub(super) bytes: Vec<u8>,
 }
 
 impl Writer {
-    /// Count the immutable envelope before allocating or copying its bytes.
-    /// Both passes use the same grammar, and any refused/partial staging is
-    /// owned by a zeroizing buffer through its complete lifetime.
-    pub(super) fn encode(
-        limit: usize,
-        write: impl Fn(&mut Self) -> Decoded<()>,
-    ) -> Decoded<Zeroizing<Vec<u8>>> {
-        let mut counter = Self {
-            counting: true,
-            ..Self::default()
-        };
-        write(&mut counter)
-            .and_then(|()| require((1..=limit).contains(&counter.length)))
-            .and_then(|()| {
-                let mut writer = Self {
-                    bytes: Zeroizing::new(Vec::with_capacity(counter.length)),
-                    ..Self::default()
-                };
-                write(&mut writer).map(|()| writer.bytes)
-            })
-    }
-
-    fn push(&mut self, byte: u8) {
-        self.length += 1;
-        if !self.counting {
-            self.bytes.push(byte);
-        }
-    }
-
-    fn extend(&mut self, bytes: &[u8]) {
-        self.length += bytes.len();
-        if !self.counting {
-            self.bytes.extend_from_slice(bytes);
-        }
-    }
-
     fn head(&mut self, major: u8, value: u64) {
         let tag = major << 5;
         let bytes = value.to_be_bytes();
         let (code, width) = match value {
             0..=23 => {
-                self.push(tag | bytes[7]);
+                self.bytes.push(tag | bytes[7]);
                 return;
             }
             24..=0xff => (0x18, 1),
@@ -144,8 +105,8 @@ impl Writer {
             0x1_0000..=0xffff_ffff => (0x1a, 4),
             _ => (0x1b, 8),
         };
-        self.push(tag | code);
-        self.extend(&bytes[8 - width..]);
+        self.bytes.push(tag | code);
+        self.bytes.extend_from_slice(&bytes[8 - width..]);
     }
 
     pub(super) fn unsigned(&mut self, value: u64) -> &mut Self {
@@ -155,13 +116,13 @@ impl Writer {
 
     pub(super) fn bytes(&mut self, value: &[u8]) -> &mut Self {
         self.head(2, value.len() as u64);
-        self.extend(value);
+        self.bytes.extend_from_slice(value);
         self
     }
 
     pub(super) fn text(&mut self, value: &str) -> &mut Self {
         self.head(3, value.len() as u64);
-        self.extend(value.as_bytes());
+        self.bytes.extend_from_slice(value.as_bytes());
         self
     }
 
@@ -171,12 +132,12 @@ impl Writer {
     }
 
     pub(super) fn boolean(&mut self, value: bool) -> &mut Self {
-        self.push(if value { 0xf5 } else { 0xf4 });
+        self.bytes.push(if value { 0xf5 } else { 0xf4 });
         self
     }
 
     pub(super) fn null(&mut self) -> &mut Self {
-        self.push(0xf6);
+        self.bytes.push(0xf6);
         self
     }
 
@@ -197,70 +158,5 @@ impl Writer {
         self.list(digests, |writer, digest| {
             writer.bytes(digest);
         })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn private_frames_count_exact_bytes_before_writing_without_reallocation() {
-        for (size, head) in [
-            (0, vec![0x40]),
-            (23, vec![0x57]),
-            (24, vec![0x58, 24]),
-            (255, vec![0x58, 255]),
-            (256, vec![0x59, 1, 0]),
-            (65_535, vec![0x59, 255, 255]),
-            (65_536, vec![0x5a, 0, 1, 0, 0]),
-        ] {
-            let payload = vec![0x9a; size];
-            let mut expected = vec![0x84];
-            expected.extend_from_slice(&head);
-            expected.extend_from_slice(&payload);
-            expected.extend_from_slice(&[0x1b, 255, 255, 255, 255, 255, 255, 255, 255, 0xf5, 0xf6]);
-            let encoded = Writer::encode(expected.len(), |writer| {
-                let allocation = (!writer.counting).then(|| writer.bytes.as_ptr());
-                writer
-                    .array(4)
-                    .bytes(&payload)
-                    .unsigned(u64::MAX)
-                    .boolean(true)
-                    .null();
-                assert_eq!(writer.length, expected.len());
-                if let Some(allocation) = allocation {
-                    assert_eq!(writer.bytes.as_ptr(), allocation);
-                } else {
-                    assert!(writer.bytes.is_empty());
-                }
-                Ok(())
-            });
-            assert_eq!(
-                encoded.as_ref().map(|bytes| bytes.as_slice()),
-                Ok(expected.as_slice())
-            );
-        }
-    }
-
-    #[test]
-    fn oversized_or_failed_encodings_do_not_escape_owned_staging() {
-        let over = Writer::encode(1, |writer| {
-            assert!(writer.counting);
-            writer.bytes(b"private");
-            assert!(writer.bytes.is_empty());
-            Ok(())
-        });
-        assert_eq!(over, Err(WorkerEnvelopeErrorV1));
-        assert_eq!(Writer::encode(1, |_| Ok(())), Err(WorkerEnvelopeErrorV1));
-        let failed = Writer::encode(64, |writer| {
-            writer.bytes(b"private");
-            if writer.counting {
-                Ok(())
-            } else {
-                Err(WorkerEnvelopeErrorV1)
-            }
-        });
-        assert_eq!(failed, Err(WorkerEnvelopeErrorV1));
     }
 }

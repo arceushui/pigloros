@@ -766,13 +766,6 @@ fn every_role_code_and_purpose_is_closed() {
         (4, KeyRoleV1::ExportRecipientEncryption, false, true, false),
         (5, KeyRoleV1::ConformanceEvaluatorSigning, true, false, true),
         (6, KeyRoleV1::ConformanceReportSigning, true, false, true),
-        (
-            7,
-            KeyRoleV1::CommunityArtifactEncryption,
-            false,
-            true,
-            false,
-        ),
     ];
     for (code, role, signing, encryption, conformance) in role_cases {
         assert_eq!(role.code(), code);
@@ -790,7 +783,7 @@ fn every_role_code_and_purpose_is_closed() {
         assert_eq!(role.require_role_bound_signing(), role_bound, "{role:?}");
     }
     assert_eq!(
-        KeyRoleV1::from_code(8),
+        KeyRoleV1::from_code(7),
         Err(pos_core::KeyRegistryErrorV1::InvalidRoleCode)
     );
 }

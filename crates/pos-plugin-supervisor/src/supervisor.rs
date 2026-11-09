@@ -237,17 +237,14 @@ impl CommunityPluginSupervisorV1 {
         call: WorkerCallV1,
     ) -> Result<WorkerReturnV1, Error> {
         let limits = negotiated.limits().values();
-        let request = {
-            let request = WorkerRequestV1 {
-                component: component.to_vec().into(),
-                negotiation: negotiated.to_transport(),
-                watchdog_millis: u64::try_from(self.watchdog.as_millis()).unwrap_or(u64::MAX),
-                host_inputs,
-                call,
-            };
-            encode_worker_request_v1(&request).map_err(|_| Error::InvalidInvocation)
+        let request = WorkerRequestV1 {
+            component: component.to_vec(),
+            negotiation: negotiated.to_transport(),
+            watchdog_millis: u64::try_from(self.watchdog.as_millis()).unwrap_or(u64::MAX),
+            host_inputs,
+            call,
         };
-        let request = request?;
+        let request = encode_worker_request_v1(&request).map_err(|_| Error::InvalidInvocation)?;
         let ceilings = WorkerResourceCeilingsV1::for_invocation(&limits, self.watchdog);
         let deadline = Instant::now() + self.watchdog;
         let worker =
@@ -292,7 +289,7 @@ fn checked<T>(
 /// How the worker side of one invocation ended.
 enum Ending {
     /// One complete frame, then end of output, then a successful exit.
-    Replied(zeroize::Zeroizing<Vec<u8>>),
+    Replied(Vec<u8>),
     /// The worker or its IPC failed.
     Crashed,
     /// The deadline passed first.
@@ -309,7 +306,7 @@ fn supervise(
     request: &[u8],
     frames: WorkerFrameLimitsV1,
     deadline: Instant,
-) -> Result<zeroize::Zeroizing<Vec<u8>>, Error> {
+) -> Result<Vec<u8>, Error> {
     let LaunchedWorker {
         mut process,
         mut stdin,
@@ -338,7 +335,7 @@ fn supervise(
 }
 
 fn await_reply(
-    receiver: &mpsc::Receiver<Result<zeroize::Zeroizing<Vec<u8>>, FrameFaultV1>>,
+    receiver: &mpsc::Receiver<Result<Vec<u8>, FrameFaultV1>>,
     child: &mut std::process::Child,
     deadline: Instant,
 ) -> Ending {
