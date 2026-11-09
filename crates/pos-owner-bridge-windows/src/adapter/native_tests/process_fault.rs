@@ -3620,3 +3620,132 @@ fn run_environment_obstruction(
     }
     Ok(())
 }
+
+fn sdk_controller_result(
+    order: &[crate::NativeCreationMoment],
+    callback: crate::CreationCallback,
+) -> bool {
+    use crate::CreationCallback::Success;
+    use crate::NativeCreationMoment::{ControllerCallback, ControllerReturned};
+    let [environment_a, environment_b, controller_a, controller_b] = order else {
+        return false;
+    };
+    sdk_environment_result(&[*environment_a, *environment_b], Success)
+        && ((*controller_a == ControllerReturned(true)
+            && *controller_b == ControllerCallback(callback))
+            || (*controller_a == ControllerCallback(callback)
+                && *controller_b == ControllerReturned(true)))
+}
+
+#[test]
+fn controller_failure_witness_rejects_missing_or_untrusted_completion() {
+    use crate::CreationCallback::{Inconsistent, MissingInterface, NativeFailure, Success};
+    use crate::NativeCreationMoment::{
+        ControllerCallback, ControllerReturned, EnvironmentCallback, EnvironmentReturned,
+    };
+    let environment = [EnvironmentReturned(true), EnvironmentCallback(Success)];
+    let expected = [
+        environment[0],
+        environment[1],
+        ControllerReturned(true),
+        ControllerCallback(NativeFailure),
+    ];
+    assert!(sdk_controller_result(&expected, NativeFailure));
+    assert!(sdk_controller_result(
+        &[
+            environment[0],
+            environment[1],
+            ControllerCallback(NativeFailure),
+            ControllerReturned(true)
+        ],
+        NativeFailure
+    ));
+    for callback in [Success, MissingInterface, Inconsistent] {
+        assert!(!sdk_controller_result(
+            &[
+                environment[0],
+                environment[1],
+                ControllerReturned(true),
+                ControllerCallback(callback)
+            ],
+            NativeFailure
+        ));
+    }
+    assert!(!sdk_controller_result(
+        &[environment[0], environment[1], ControllerReturned(false)],
+        NativeFailure
+    ));
+    assert!(!sdk_controller_result(
+        &[
+            environment[0],
+            environment[1],
+            ControllerReturned(false),
+            ControllerCallback(NativeFailure)
+        ],
+        NativeFailure,
+    ));
+    assert!(!sdk_controller_result(
+        &[
+            environment[0],
+            environment[1],
+            ControllerReturned(true),
+            crate::NativeCreationMoment::Overflow
+        ],
+        NativeFailure,
+    ));
+    assert!(!sdk_controller_result(
+        &[
+            EnvironmentReturned(true),
+            EnvironmentCallback(NativeFailure),
+            ControllerReturned(true),
+            ControllerCallback(NativeFailure)
+        ],
+        NativeFailure,
+    ));
+    assert!(!sdk_controller_result(
+        &[
+            expected[0],
+            expected[1],
+            expected[2],
+            expected[3],
+            expected[3]
+        ],
+        NativeFailure
+    ));
+}
+
+#[test]
+fn native_pending_controller_failure_after_owned_browser_exit() -> TestResult {
+    let _port = crate::Native::fixed_port_fixture();
+    let root = FixtureRoot::new()?;
+    let runtime = std::env::var_os("OWNER_BRIDGE_TEST_RUNTIME")
+        .ok_or("canonical retained runtime is required by process qualification")?;
+    let control = {
+        let _creation = CreationOrderGuard::arm();
+        let reached = run_pending_opening(Path::new(&runtime), &root.0, 0x82, false)?;
+        let order = crate::Native::creation_order();
+        if !sdk_controller_result(&order, crate::CreationCallback::Success) {
+            return Err(format!(
+                "pending-controller control callback was not established: {order:?}"
+            )
+            .into());
+        }
+        reached
+    };
+    let fault = {
+        let _creation = CreationOrderGuard::arm();
+        let reached = run_pending_opening(Path::new(&runtime), &root.0, 0x83, true)?;
+        let order = crate::Native::creation_order();
+        if !sdk_controller_result(&order, crate::CreationCallback::NativeFailure) {
+            return Err(format!(
+                "pending-controller native failure callback was not established: {order:?}"
+            )
+            .into());
+        }
+        reached
+    };
+    if control != fault {
+        return Err("pending-controller control and fault reached different states".into());
+    }
+    root.remove()
+}
