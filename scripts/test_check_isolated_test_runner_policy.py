@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -56,6 +57,100 @@ def copy_fixture(root: Path) -> None:
         destination = root / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(ROOT / relative, destination)
+
+
+def run_runner(
+    root: Path, binary: Path, name: str, environment: dict[str, str]
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [str(root / NET_ADMIN_RUNNER), str(binary), name],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={"PATH": os.environ["PATH"], **environment},
+    )
+
+
+def check_net_admin_runner_guards(temporary: Path) -> None:
+    """The NET_ADMIN runner refuses, before Docker, everything but a named
+    privileged test of a pos-sandboxd test harness under target/."""
+    root = temporary / "net-admin-guards"
+    (root / "scripts").mkdir(parents=True)
+    shutil.copy2(ROOT / NET_ADMIN_RUNNER, root / NET_ADMIN_RUNNER)
+    deps = root / "target/debug/deps"
+    deps.mkdir(parents=True)
+    harness = deps / "pos_sandboxd-0123456789abcdef"
+    harness.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    harness.chmod(0o755)
+    misnamed = deps / "pos_sandboxd-daemon"
+    shutil.copy2(harness, misnamed)
+    outside = deps / "pos_sandboxd-fedcba9876543210"
+    outside.symlink_to(shutil.which("true") or "/bin/true")
+    # Cargo hard-links the daemon from its hashed copy in deps/.
+    daemon_harness = deps / "pos_sandboxd-00112233445566aa"
+    shutil.copy2(harness, daemon_harness)
+    os.link(daemon_harness, root / "target/debug/pos-sandboxd")
+    named = "namespace_network::netlink::tests::privileged::a_test"
+    profiles = temporary / "profiles"
+    profiles.mkdir()
+    comma = temporary / "a,b"
+    shutil.copytree(root, comma, symlinks=True)
+    binary_refusal = "only the pos-sandboxd library test harness may use this runner"
+    name_refusal = "only the #911 namespace adapter tests may use this runner"
+    true = Path(shutil.which("true") or "/bin/true")
+    refused = {
+        "a test outside the privileged module": (
+            root,
+            harness,
+            "namespace_network::netlink::tests::a_test",
+            {},
+            name_refusal,
+        ),
+        "an extra flag after the test name": (
+            root,
+            harness,
+            f"{named} --ignored",
+            {},
+            name_refusal,
+        ),
+        "a binary outside the repository": (
+            root,
+            true,
+            named,
+            {},
+            "test binary must be inside the repository worktree",
+        ),
+        "a symlink that leaves the repository": (
+            root,
+            outside,
+            named,
+            {},
+            "test binary must be inside the repository worktree",
+        ),
+        "another binary name": (root, misnamed, named, {}, binary_refusal),
+        "the daemon binary": (root, daemon_harness, named, {}, binary_refusal),
+        "a profile outside target/": (
+            root,
+            harness,
+            named,
+            {"LLVM_PROFILE_FILE": str(profiles / "x.profraw")},
+            "LLVM profile output must be inside the worktree target directory",
+        ),
+        "a comma in the repository path": (
+            comma,
+            comma / harness.relative_to(root),
+            named,
+            {},
+            "the repository path must not contain a comma",
+        ),
+    }
+    for description, (runner_root, binary, name, environment, message) in refused.items():
+        result = run_runner(runner_root, binary, name, environment)
+        if result.returncode != 2 or message not in result.stderr:
+            raise SystemExit(
+                f"NET_ADMIN runner did not refuse {description}:"
+                f" exit {result.returncode}: {result.stderr}"
+            )
 
 
 def main() -> None:
@@ -171,17 +266,84 @@ def main() -> None:
         ),
         (
             NET_ADMIN_RUNNER,
-            "namespace_network::netlink::tests::privileged::*) ;;",
-            "*) ;;",
+            "readonly TEST_PATTERN='^namespace_network::netlink::tests::privileged::[a-z0-9_]+$'",
+            "readonly TEST_PATTERN='^namespace_network::'",
         ),
         (
             NET_ADMIN_RUNNER,
             "--network none",
             "--network host",
         ),
+        # A commented-out capability cannot stand in for a widened one.
+        (
+            NET_ADMIN_RUNNER,
+            "  --cap-add NET_ADMIN\n",
+            "  # --cap-add NET_ADMIN\n  --cap-add ALL\n",
+        ),
+        (
+            NET_ADMIN_RUNNER,
+            "  --cap-add SYS_ADMIN\n",
+            "  --cap-add=ALL\n",
+        ),
+        (
+            NET_ADMIN_RUNNER,
+            " ||\n  $TEST_BINARY -ef $TEST_DIRECTORY/../pos-sandboxd ]]; then",
+            " ]]; then",
+        ),
+        (
+            NET_ADMIN_RUNNER,
+            "pos_sandboxd-[0-9a-f]{16}$'",
+            "pos_sandboxd-.*$'",
+        ),
+        (
+            NET_ADMIN_RUNNER,
+            "if [ -w \"$1\" ]; then",
+            "if false; then",
+        ),
+        (
+            NET_ADMIN_RUNNER,
+            "if [[ $REPOSITORY_ROOT == *,* ]]; then",
+            "if false; then",
+        ),
+        (
+            NET_ADMIN_RUNNER,
+            "  --rm\n",
+            "  --rm\n  --device /dev/kmsg\n",
+        ),
+        (
+            NET_ADMIN_RUNNER,
+            "  --rm\n",
+            "  --rm\n  --pid host\n",
+        ),
+        (
+            NET_ADMIN_RUNNER,
+            "  --rm\n",
+            "  --rm\n  -v /:/host\n",
+        ),
+        (
+            NET_ADMIN_RUNNER,
+            "  --rm\n",
+            "  --rm\n  --mount type=bind,source=/,target=/host\n",
+        ),
+        (
+            NET_ADMIN_RUNNER,
+            "  --rm\n",
+            "  --rm\n  --userns host\n",
+        ),
+        (
+            NET_ADMIN_RUNNER,
+            "  --rm\n",
+            "  --rm\n  --env-file /etc/environment\n",
+        ),
+        (
+            PRIMARY_RUNNER,
+            "  --rm\n",
+            "  --rm\n  --security-opt apparmor=unconfined\n",
+        ),
     )
     with tempfile.TemporaryDirectory() as directory:
         temporary = Path(directory)
+        check_net_admin_runner_guards(temporary)
         # A changed caller must still be rejected when another caller retains
         # the valid runner reference, so owner discovery cannot hide the fault.
         multiple_owners = temporary / "multiple-owners"

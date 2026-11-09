@@ -1,5 +1,6 @@
 use std::{
     cell::RefCell, collections::VecDeque, error::Error, fs::File, num::NonZeroI32, os::fd::AsFd,
+    time::Duration,
 };
 
 use netlink_packet_core::{DoneMessage, ErrorMessage, NLM_F_CREATE, NLM_F_EXCL, NLM_F_MULTIPART};
@@ -29,7 +30,7 @@ impl Scripted {
 impl NetlinkTransport for Scripted {
     fn send(&self, datagram: &[u8]) -> Result<(), NetlinkError> {
         if self.refuse_send {
-            return Err(NetlinkError::ShortSend);
+            return Err(NetlinkError::Io(Errno::MSGSIZE));
         }
         self.sent.borrow_mut().push(datagram.to_vec());
         Ok(())
@@ -171,6 +172,10 @@ fn refusals_and_unattributable_replies_fail() {
         (vec![vec![1, 2, 3]], |error| {
             matches!(error, NetlinkError::Decode)
         }),
+        // A header whose length is below the header's own size.
+        (vec![vec![0; 16]], |error| {
+            matches!(error, NetlinkError::Decode)
+        }),
         (Vec::new(), |error| matches!(error, NetlinkError::Truncated)),
     ];
     for (replies, expected) in cases {
@@ -184,12 +189,18 @@ fn refusals_and_unattributable_replies_fail() {
     });
     assert!(matches!(
         refusing.execute(vec![Request::acknowledged(get_link(), 0)]),
-        Err(NetlinkError::ShortSend)
+        Err(NetlinkError::Io(Errno::MSGSIZE))
     ));
     assert!(matches!(
         refusing.dump(get_link()),
-        Err(NetlinkError::ShortSend)
+        Err(NetlinkError::Io(Errno::MSGSIZE))
     ));
+    let empty = NetlinkSession::new(Scripted::default());
+    assert!(matches!(
+        empty.execute(Vec::<Request<RouteNetlinkMessage>>::new()),
+        Err(NetlinkError::Empty)
+    ));
+    assert!(empty.transport.sent.borrow().is_empty());
 }
 
 #[test]
@@ -244,12 +255,50 @@ fn a_refused_interrupted_or_foreign_dump_fails() {
         (reply(1, 0, NetlinkPayload::Noop), |error| {
             matches!(error, NetlinkError::Unexpected)
         }),
+        (vec![1, 2, 3], |error| matches!(error, NetlinkError::Decode)),
     ];
     for (datagram, expected) in cases {
         let session = NetlinkSession::new(Scripted::replying(vec![datagram]));
         let result = session.dump(get_link());
         assert!(result.as_ref().is_err_and(expected), "{result:?}");
     }
+    // A dump whose reply never arrives.
+    let silent = NetlinkSession::new(Scripted::default());
+    assert!(matches!(
+        silent.dump(get_link()),
+        Err(NetlinkError::Truncated)
+    ));
+}
+
+#[test]
+fn a_socket_of_no_netlink_protocol_is_refused() {
+    let protocol = rustix::net::Protocol::from_raw(rustix::net::RawProtocol::MAX);
+    assert!(matches!(
+        NetlinkSocket::open(protocol, RECEIVE_TIMEOUT),
+        Err(NetlinkError::Io(_))
+    ));
+}
+
+#[test]
+fn a_socket_fails_on_an_oversized_request_a_silent_kernel_and_an_oversized_reply() -> TestResult {
+    let socket = NetlinkSocket::open(ROUTE, Duration::from_millis(1))?;
+    // Larger than the socket's send buffer.
+    assert!(matches!(
+        socket.send(&vec![0; 1 << 20]),
+        Err(NetlinkError::Io(Errno::MSGSIZE))
+    ));
+    // Nothing was sent, so the receive times out.
+    assert!(matches!(socket.receive(), Err(NetlinkError::Io(_))));
+    // An `RTM_NEWLINK` request of 100 000 bytes that the kernel refuses: its
+    // error reply echoes the whole request, which exceeds the receive buffer.
+    let mut request = vec![0; 100_000];
+    request[..4].copy_from_slice(&100_000_u32.to_ne_bytes());
+    request[4..6].copy_from_slice(&16_u16.to_ne_bytes());
+    request[6..8].copy_from_slice(&(NLM_F_REQUEST | NLM_F_ACK).to_ne_bytes());
+    let socket = NetlinkSocket::open(ROUTE, RECEIVE_TIMEOUT)?;
+    socket.send(&request)?;
+    assert!(matches!(socket.receive(), Err(NetlinkError::Truncated)));
+    Ok(())
 }
 
 #[test]
@@ -365,10 +414,7 @@ fn netlink_errors_say_what_failed() {
             NetlinkError::Io(Errno::PERM),
             "a netlink socket call failed",
         ),
-        (
-            NetlinkError::ShortSend,
-            "the kernel accepted only part of a netlink request",
-        ),
+        (NetlinkError::Empty, "a netlink exchange held no request"),
         (
             NetlinkError::Truncated,
             "a netlink reply did not fit the receive buffer",
