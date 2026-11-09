@@ -1801,21 +1801,20 @@ fn run_posted_writing(
         fixture.drive_posted_writing(&mut driver, target, inject)
     }));
     let (result, failure) = fixture.resolve_attempt(&mut driver, attempt);
-    let wiped = driver.request_clear() && driver.prf().iter().all(|byte| *byte == 0);
-    let plan_wiped =
-        !matches!(&result, Err(BridgeError::Quarantine(_))) || driver.plan_secrets_clear();
-    let failed = result.is_err();
-    let complete = fixture.evidence_complete;
     let state = fixture.reached;
     let native_zeroed = native_zeroing_observed(&crate::Native::take_native_zero_observations());
-    fixture.retire(driver, result, None)?;
-    check_final_process_failures(inject.then_some(target))?;
-    if let Some(error) = failure {
-        return Err(error);
-    }
-    if !failed || !wiped || !plan_wiped || !complete || !native_zeroed {
-        return Err("writing failure, wipe, or evidence was not established".into());
-    }
+    fixture.finish_failed_case(
+        driver,
+        result,
+        failure,
+        FailureFinish {
+            target,
+            inject,
+            actual_fault: inject,
+            native_zeroed: Some(native_zeroed),
+            message: "writing failure, wipe, or evidence was not established",
+        },
+    )?;
     state.ok_or_else(|| "writing state was not reached".into())
 }
 
@@ -1921,25 +1920,24 @@ fn run_posted_ready(
         fixture.drive_posted_ready(&mut driver, target, inject)
     }));
     let (result, failure) = fixture.resolve_attempt(&mut driver, attempt);
-    let wiped = driver.request_clear() && driver.prf().iter().all(|byte| *byte == 0);
-    let plan_wiped =
-        !matches!(&result, Err(BridgeError::Quarantine(_))) || driver.plan_secrets_clear();
-    let failed = result.is_err();
-    let complete = fixture.evidence_complete;
     let state = fixture.reached;
     let observations = crate::Native::take_native_zero_observations();
     let native_zeroed = native_zeroing_observed(&observations)
         && observations
             .get(1)
             .is_some_and(|reply| reply.before_nonzero == Some(true));
-    fixture.retire(driver, result, None)?;
-    check_final_process_failures(inject.then_some(target))?;
-    if let Some(error) = failure {
-        return Err(error);
-    }
-    if !failed || !wiped || !plan_wiped || !complete || !native_zeroed {
-        return Err("ready failure, wipe, or evidence was not established".into());
-    }
+    fixture.finish_failed_case(
+        driver,
+        result,
+        failure,
+        FailureFinish {
+            target,
+            inject,
+            actual_fault: inject,
+            native_zeroed: Some(native_zeroed),
+            message: "ready failure, wipe, or evidence was not established",
+        },
+    )?;
     state.ok_or_else(|| "ready state was not reached".into())
 }
 
@@ -2058,22 +2056,21 @@ fn run_posted_retry(
         fixture.drive_posted_retry(&mut driver, target, point, inject)
     }));
     let (result, failure) = fixture.resolve_attempt(&mut driver, attempt);
-    let wiped = driver.request_clear() && driver.prf().iter().all(|byte| *byte == 0);
-    let plan_wiped =
-        !matches!(&result, Err(BridgeError::Quarantine(_))) || driver.plan_secrets_clear();
-    let failed = result.is_err();
-    let complete = fixture.evidence_complete;
     let state = fixture.reached;
     let native_zeroed = fixture.prior_native_wipe
         && native_zeroing_observed(&crate::Native::take_native_zero_observations());
-    fixture.retire(driver, result, None)?;
-    check_final_process_failures(inject.then_some(target))?;
-    if let Some(error) = failure {
-        return Err(error);
-    }
-    if !failed || !wiped || !plan_wiped || !complete || !native_zeroed {
-        return Err("retry empty-reply failure, wipe, or evidence was not established".into());
-    }
+    fixture.finish_failed_case(
+        driver,
+        result,
+        failure,
+        FailureFinish {
+            target,
+            inject,
+            actual_fault: inject,
+            native_zeroed: Some(native_zeroed),
+            message: "retry empty-reply failure, wipe, or evidence was not established",
+        },
+    )?;
     state.ok_or_else(|| "retry empty-reply state was not reached".into())
 }
 
