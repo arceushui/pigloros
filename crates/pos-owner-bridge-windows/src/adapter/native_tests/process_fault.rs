@@ -3287,7 +3287,7 @@ impl Fixture {
 fn run_pre_environment(runtime: &Path, number: u8, case: EnvironmentCase) -> TestResult {
     use pos_owner_bridge::LifecycleCode;
     let root = FixtureRoot::new()?;
-    let _callback_order = CallbackOrderGuard::arm();
+    let callback_order_guard = CallbackOrderGuard::arm();
     let mut fixture = Fixture::new(runtime, &root.0, number, FixtureProfile::Pending)?;
     let started = Instant::now();
     let mut driver = readiness::new_driver(CeremonyId::from_bytes([number; 16]), started)?;
@@ -3363,6 +3363,10 @@ fn run_pre_environment(runtime: &Path, number: u8, case: EnvironmentCase) -> Tes
         || !idle
     {
         return Err(format!("pre-environment witness failed: driver_pending={driver_pending} active_blocked={active_blocked} abandoned_blocked={abandoned_blocked} initial_completion={initial_completion:?} completion={at_deadline:?} timeout={timed_out} wiped={wiped} ordered={ordered} no_record={no_record} retained_orphan={retained_orphan} idle={idle}").into());
+    }
+    drop(callback_order_guard);
+    if matches!(case, EnvironmentCase::LateInvocation) {
+        fresh_success_after_retirement(runtime, &root.0, 0xd2)?;
     }
     Ok(())
 }
@@ -3619,4 +3623,142 @@ fn run_environment_obstruction(
         );
     }
     Ok(())
+}
+
+fn sdk_controller_result(
+    order: &[crate::NativeCreationMoment],
+    callback: crate::CreationCallback,
+) -> bool {
+    use crate::CreationCallback::Success;
+    use crate::NativeCreationMoment::{ControllerCallback, ControllerReturned};
+    let [environment_a, environment_b, controller_a, controller_b] = order else {
+        return false;
+    };
+    sdk_environment_result(&[*environment_a, *environment_b], Success)
+        && ((*controller_a == ControllerReturned(true)
+            && *controller_b == ControllerCallback(callback))
+            || (*controller_a == ControllerCallback(callback)
+                && *controller_b == ControllerReturned(true)))
+}
+
+#[test]
+fn controller_failure_witness_rejects_missing_or_untrusted_completion() {
+    use crate::CreationCallback::{Inconsistent, MissingInterface, NativeFailure, Success};
+    use crate::NativeCreationMoment::{
+        ControllerCallback, ControllerReturned, EnvironmentCallback, EnvironmentReturned,
+    };
+    let environment = [EnvironmentReturned(true), EnvironmentCallback(Success)];
+    let expected = [
+        environment[0],
+        environment[1],
+        ControllerReturned(true),
+        ControllerCallback(NativeFailure),
+    ];
+    assert!(sdk_controller_result(&expected, NativeFailure));
+    assert!(sdk_controller_result(
+        &[
+            environment[0],
+            environment[1],
+            ControllerCallback(NativeFailure),
+            ControllerReturned(true)
+        ],
+        NativeFailure
+    ));
+    for callback in [Success, MissingInterface, Inconsistent] {
+        assert!(!sdk_controller_result(
+            &[
+                environment[0],
+                environment[1],
+                ControllerReturned(true),
+                ControllerCallback(callback)
+            ],
+            NativeFailure
+        ));
+    }
+    assert!(!sdk_controller_result(
+        &[environment[0], environment[1], ControllerReturned(false)],
+        NativeFailure
+    ));
+    assert!(!sdk_controller_result(
+        &[
+            environment[0],
+            environment[1],
+            ControllerReturned(false),
+            ControllerCallback(NativeFailure)
+        ],
+        NativeFailure,
+    ));
+    assert!(!sdk_controller_result(
+        &[
+            environment[0],
+            environment[1],
+            ControllerReturned(true),
+            crate::NativeCreationMoment::Overflow
+        ],
+        NativeFailure,
+    ));
+    assert!(!sdk_controller_result(
+        &[
+            EnvironmentReturned(true),
+            EnvironmentCallback(NativeFailure),
+            ControllerReturned(true),
+            ControllerCallback(NativeFailure)
+        ],
+        NativeFailure,
+    ));
+    assert!(!sdk_controller_result(
+        &[
+            expected[0],
+            expected[1],
+            expected[2],
+            expected[3],
+            expected[3]
+        ],
+        NativeFailure
+    ));
+}
+
+fn fresh_success_after_retirement(runtime: &Path, root: &Path, number: u8) -> TestResult {
+    let reached = run_success_exit(runtime, root, number, false)?;
+    if reached.generation != 1 || reached.record_count != 1 {
+        return Err("fresh ceremony state after retirement was not established".into());
+    }
+    Ok(())
+}
+
+#[test]
+fn native_pending_controller_failure_after_owned_browser_exit() -> TestResult {
+    let _port = crate::Native::fixed_port_fixture();
+    let root = FixtureRoot::new()?;
+    let runtime = std::env::var_os("OWNER_BRIDGE_TEST_RUNTIME")
+        .ok_or("canonical retained runtime is required by process qualification")?;
+    let control = {
+        let _creation = CreationOrderGuard::arm();
+        let reached = run_pending_opening(Path::new(&runtime), &root.0, 0xd0, false)?;
+        let order = crate::Native::creation_order();
+        if !sdk_controller_result(&order, crate::CreationCallback::Success) {
+            return Err(format!(
+                "pending-controller control callback was not established: {order:?}"
+            )
+            .into());
+        }
+        reached
+    };
+    let fault = {
+        let _creation = CreationOrderGuard::arm();
+        let reached = run_pending_opening(Path::new(&runtime), &root.0, 0xd1, true)?;
+        let order = crate::Native::creation_order();
+        if !sdk_controller_result(&order, crate::CreationCallback::NativeFailure) {
+            return Err(format!(
+                "pending-controller native failure callback was not established: {order:?}"
+            )
+            .into());
+        }
+        reached
+    };
+    if control != fault {
+        return Err("pending-controller control and fault reached different states".into());
+    }
+    fresh_success_after_retirement(Path::new(&runtime), &root.0, 0xd3)?;
+    root.remove()
 }
