@@ -88,8 +88,28 @@ impl crate::Native {
     }
 
     #[cfg(test)]
-    pub(crate) fn diagnose_private_file(file: &File) -> Result<(), &'static str> {
-        private_file_check(file)
+    pub(crate) fn diagnose_private_file(file: &File) -> Result<(), String> {
+        match private_file_check(file) {
+            Ok(()) => Ok(()),
+            Err("file owner or DACL mismatch") => {
+                let (actual, sid) = observe_file_descriptor(file).map_err(str::to_owned)?;
+                let mut variants = Vec::new();
+                for protected in [false, true] {
+                    for inherited in [false, true] {
+                        variants.push(redact_sids(
+                            &expected(&sid, protected, inherited)
+                                .map_err(|()| "expected file descriptor formatting")?,
+                            &sid,
+                        ));
+                    }
+                }
+                Err(format!(
+                    "file owner or DACL mismatch: actual={} expected={variants:?}",
+                    redact_sids(&actual, &sid)
+                ))
+            }
+            Err(error) => Err(error.to_owned()),
+        }
     }
 
     pub(crate) fn file_link_count(file: &File) -> Result<u32, ()> {
@@ -102,7 +122,7 @@ impl crate::Native {
     }
 }
 
-fn private_file_check(file: &File) -> Result<(), &'static str> {
+fn observe_file_descriptor(file: &File) -> Result<(String, String), &'static str> {
     let mut output = PSECURITY_DESCRIPTOR::default();
     // SAFETY: the borrowed File keeps its handle live throughout this query;
     // output is uniquely writable and its successful allocation is freed once.
@@ -123,6 +143,11 @@ fn private_file_check(file: &File) -> Result<(), &'static str> {
     let actual = descriptor_text(&LocalMemory(HLOCAL(output.0)))
         .map_err(|()| "file descriptor formatting")?;
     let sid = current_sid().map_err(|()| "current SID query")?;
+    Ok((actual, sid))
+}
+
+fn private_file_check(file: &File) -> Result<(), &'static str> {
+    let (actual, sid) = observe_file_descriptor(file)?;
     for protected in [false, true] {
         for inherited in [false, true] {
             if actual
@@ -134,4 +159,26 @@ fn private_file_check(file: &File) -> Result<(), &'static str> {
         }
     }
     Err("file owner or DACL mismatch")
+}
+
+#[cfg(test)]
+fn redact_sids(text: &str, current_sid: &str) -> String {
+    let mut remaining = text;
+    let mut result = String::new();
+    while let Some(start) = remaining.find("S-") {
+        result.push_str(&remaining[..start]);
+        let sid = &remaining[start + 2..];
+        let end = sid
+            .find(|character: char| !character.is_ascii_digit() && character != '-')
+            .unwrap_or(sid.len());
+        let full_sid = &remaining[start..start + 2 + end];
+        result.push_str(if full_sid == current_sid {
+            "<CURRENT>"
+        } else {
+            "<OTHER>"
+        });
+        remaining = &sid[end..];
+    }
+    result.push_str(remaining);
+    result
 }
