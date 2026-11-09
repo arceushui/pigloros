@@ -23,7 +23,7 @@ struct Journal {
 }
 
 /// Host egress that records what it is asked to do, or refuses.
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct FakeEgress {
     journal: Arc<Mutex<Journal>>,
     refuse_admission: bool,
