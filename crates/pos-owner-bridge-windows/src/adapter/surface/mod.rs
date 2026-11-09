@@ -23,6 +23,9 @@ mod opening;
 mod retirement;
 
 #[cfg(test)]
+mod diagnostics;
+
+#[cfg(test)]
 mod tests;
 
 const WIDTH: u32 = 480;
@@ -95,6 +98,8 @@ pub(super) struct Surface {
     close: CloseState,
     dpi: Cell<Option<u32>>,
     client: Cell<Option<ClientBounds>>,
+    #[cfg(test)]
+    cleanup_trace: diagnostics::CleanupTrace,
 }
 
 impl Surface {
@@ -133,6 +138,8 @@ impl Surface {
             close: CloseState::Idle,
             dpi: Cell::new(None),
             client: Cell::new(None),
+            #[cfg(test)]
+            cleanup_trace: diagnostics::CleanupTrace::default(),
         })
     }
 
@@ -1214,8 +1221,20 @@ impl OwnerWebSurface for Surface {
     fn close_controller(&mut self) -> Result<()> {
         self.close = CloseState::Pending;
         let buffers = self.zero_close_buffers();
-        let removed = self.native.unsubscribe_view().map_err(unavailable);
-        let closed = self.native.close_controller().map_err(unavailable);
+        #[cfg(test)]
+        self.cleanup_trace.enter("close.unsubscribe_view");
+        let removed = self.native.unsubscribe_view();
+        #[cfg(test)]
+        self.cleanup_trace
+            .returned("close.unsubscribe_view", removed);
+        let removed = removed.map_err(unavailable);
+        #[cfg(test)]
+        self.cleanup_trace.enter("close.close_controller");
+        let closed = self.native.close_controller();
+        #[cfg(test)]
+        self.cleanup_trace
+            .returned("close.close_controller", closed);
+        let closed = closed.map_err(unavailable);
         if closed.is_ok() {
             self.ownership = Ownership::ControllerClosed;
         }
@@ -1257,9 +1276,27 @@ impl OwnerWebSurface for Surface {
         if self.events.exited() != Some(identity.browser_pid) {
             return Err(unavailable(()));
         }
-        self.native.unsubscribe_view().map_err(unavailable)?;
-        self.native.unsubscribe_exit().map_err(unavailable)?;
-        self.native.drop_environment().map_err(unavailable)?;
+        #[cfg(test)]
+        self.cleanup_trace.enter("finish.unsubscribe_view");
+        let removed = self.native.unsubscribe_view();
+        #[cfg(test)]
+        self.cleanup_trace
+            .returned("finish.unsubscribe_view", removed);
+        removed.map_err(unavailable)?;
+        #[cfg(test)]
+        self.cleanup_trace.enter("finish.unsubscribe_exit");
+        let removed = self.native.unsubscribe_exit();
+        #[cfg(test)]
+        self.cleanup_trace
+            .returned("finish.unsubscribe_exit", removed);
+        removed.map_err(unavailable)?;
+        #[cfg(test)]
+        self.cleanup_trace.enter("finish.drop_environment");
+        let dropped = self.native.drop_environment();
+        #[cfg(test)]
+        self.cleanup_trace
+            .returned("finish.drop_environment", dropped);
+        dropped.map_err(unavailable)?;
         self.ownership = Ownership::EnvironmentDropped;
         self.finish_folder()?;
         self.identity = None;
