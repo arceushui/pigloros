@@ -21,6 +21,13 @@ pub mod bind;
 mod ledger;
 mod serve;
 
+#[cfg(feature = "test-support")]
+mod fixture_assets;
+#[cfg(feature = "test-support")]
+mod fixtures;
+#[cfg(feature = "test-support")]
+pub use fixtures::FixtureProfile;
+
 #[cfg(all(test, feature = "test-support"))]
 mod tests;
 
@@ -32,7 +39,6 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use crate::{BridgeError, LoopbackPort, ServedSnapshot, UnavailableCode};
-use assets::OWNER_RESPONSE_SHA256;
 use bind::{bind_loopback, check_ipv6_absent, Ipv6Mode, LoopbackBinder};
 use ledger::ServedLedger;
 use serve::{serve_connection, ServeContext};
@@ -72,6 +78,7 @@ const ADR_TIMEOUTS: ListenerTimeouts = ListenerTimeouts {
 pub struct ListenerConfig {
     timeouts: ListenerTimeouts,
     expected_digest: [u8; 32],
+    response: &'static assets::Response,
 }
 
 impl ListenerConfig {
@@ -80,7 +87,8 @@ impl ListenerConfig {
     pub const fn adr() -> Self {
         Self {
             timeouts: ADR_TIMEOUTS,
-            expected_digest: OWNER_RESPONSE_SHA256,
+            expected_digest: assets::OWNER.digest,
+            response: &assets::OWNER,
         }
     }
 
@@ -91,6 +99,20 @@ impl ListenerConfig {
         Self {
             timeouts,
             expected_digest,
+            response: &assets::OWNER,
+        }
+    }
+
+    /// Select immutable qualification bytes, headers and digest together.
+    /// This never changes the production host's asset selection.
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub const fn fixture(profile: FixtureProfile) -> Self {
+        let response = profile.response();
+        Self {
+            timeouts: ADR_TIMEOUTS,
+            expected_digest: response.digest,
+            response,
         }
     }
 
@@ -258,6 +280,7 @@ impl LoopbackListener {
             ledger: Arc::clone(&ledger),
             timeouts: config.timeouts,
             expected_digest: config.expected_digest,
+            response: config.response,
             #[cfg(feature = "test-support")]
             received: Arc::clone(&received),
         });

@@ -52,6 +52,47 @@ fn serves_the_exact_pinned_owner_response_once() -> TestResult {
 }
 
 #[test]
+fn sealed_qualification_profiles_serve_their_exact_bound_bytes() -> TestResult {
+    use pos_owner_bridge::listener::FixtureProfile;
+
+    let core = include_str!("../assets/owner-core.js");
+    for profile in [
+        FixtureProfile::Pending,
+        FixtureProfile::Popup,
+        FixtureProfile::PopupReceipt,
+        FixtureProfile::Permission,
+        FixtureProfile::External,
+        FixtureProfile::Navigation,
+        FixtureProfile::Download,
+        FixtureProfile::Authentication,
+    ] {
+        let config = ListenerConfig::fixture(profile);
+        let listener = start(config)?;
+        let response = exchange(listener.v4_addr(), OWNER_REQUEST)?;
+        let digest: [u8; 32] = Sha256::digest(&response).into();
+        assert_eq!(&digest, config.expected_digest());
+        assert_ne!(
+            config.expected_digest(),
+            ListenerConfig::adr().expected_digest()
+        );
+        let text = std::str::from_utf8(&response)?;
+        assert!(text.contains(core));
+        assert!(!text.contains("navigator.credentials"));
+        assert!(text.contains("connect-src 'none'"));
+        assert_eq!(listener.served().count, 1);
+        assert!(listener.served().integrity_ok);
+        assert_eq!(listener.received_request_count(), 1);
+        let other = exchange(
+            listener.v4_addr(),
+            b"GET /denied-navigation HTTP/1.1\r\nHost: localhost:49291\r\n\r\n",
+        )?;
+        assert!(other.starts_with(b"HTTP/1.1 404 Not Found\r\n"));
+        assert_eq!(listener.served().count, 1);
+    }
+    Ok(())
+}
+
+#[test]
 fn serves_over_ipv6_when_the_ipv6_loopback_is_held() -> TestResult {
     let listener = start(ListenerConfig::adr())?;
     // This only exercises the IPv6 serve path on a host that has an IPv6 loopback; the held-v6

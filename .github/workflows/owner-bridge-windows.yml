@@ -37,7 +37,7 @@ jobs:
       # Run independent probes before runtime admission. The complete native
       # suite runs once under coverage, including all 1,000 readiness cases.
       - name: Test runtime-independent native adapter
-        run: cargo test -p pos-owner-bridge-windows --all-features --locked -- --include-ignored --skip tests::native_window_environment_and_buffers_lifecycle --skip tests::native_host_opens_fresh_environments_and_retires_before_reuse --skip tests::native_resource_denial_callback_failure_does_not_contact_listener
+        run: cargo test -p pos-owner-bridge-windows --all-features --locked -- --include-ignored --skip tests::native_window_environment_and_buffers_lifecycle --skip tests::native_host_opens_fresh_environments_and_retires_before_reuse --skip tests::native_resource_denial_callback_failure_does_not_contact_listener --skip tests::native_control_callbacks_deny_and_retain_through_own_exit
       - name: Prepare retained runtime for real native fixtures
         id: runtime
         shell: pwsh

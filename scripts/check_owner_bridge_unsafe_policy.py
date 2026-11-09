@@ -940,6 +940,16 @@ def _check_shim_sources(shim: Path, scanned_dirs: tuple[Path, ...], found: list[
         _check_surface(label, source, shim, text, scanned, attributes, scanned_dirs, True, found, asm_spans)
         _check_shim_macros(label, scanned, found)
         leading = _leading_inner_attributes(code, attributes)
+        if relative == "src/ffi/events/control_fixture.rs" and "cfg(test)" not in leading:
+            found.append(f"{label}: ADR-131 control observations require file-scope cfg(test)")
+        for declaration in MOD_DECLARATION.finditer(code):
+            if declaration.group("name") == "control_fixture":
+                guards = _outer_attributes_before(code, attributes, declaration.start())
+                if declaration.group("visibility") or "cfg(test)" not in guards:
+                    found.append(f"{label}: ADR-131 control_fixture must be a private cfg(test) module")
+        if relative != "src/ffi/events/control_fixture.rs":
+            for readback in re.finditer(r"(?:\.|::)\s*(Handled|State|Cancel)\s*\(", code):
+                found.append(f"{label}:{_line_of(code, readback.start())}: ADR-131 control readback belongs only in control_fixture")
         if "cfg(windows)" not in leading:
             found.append(f"{label}: must start with #![cfg(windows)]")
         if relative == "src/lib.rs":

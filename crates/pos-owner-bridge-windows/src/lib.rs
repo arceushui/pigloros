@@ -263,6 +263,26 @@ pub(crate) enum EventKind {
     BrowserExited,
 }
 
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ControlFault {
+    Normal,
+    RetryDenial,
+    MissingDeferral,
+    UncertainComplete,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ControlObservation {
+    pub(crate) kind: EventKind,
+    pub(crate) deferred: bool,
+    pub(crate) attempts: u32,
+    pub(crate) readback: Option<bool>,
+    pub(crate) completions: u32,
+    pub(crate) retired: bool,
+}
+
 pub(crate) enum NativeEvent {
     Navigation {
         uri: NativeText,
@@ -427,6 +447,12 @@ mod tests {
     fn native_resource_denial_callback_failure_does_not_contact_listener(
     ) -> Result<(), Box<dyn std::error::Error>> {
         crate::Native::native_resource_denial_failure()
+    }
+
+    #[test]
+    fn native_control_callbacks_deny_and_retain_through_own_exit(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        crate::Native::native_control_denials()
     }
 
     #[test]

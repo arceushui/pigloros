@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use pos_owner_bridge::ceremony::driver::{CeremonyDriver, Step};
 use pos_owner_bridge::ceremony::plan::Verified;
+use pos_owner_bridge::listener::FixtureProfile;
 use pos_owner_bridge::{
     BridgeError, CleanupStore, LoopbackPort, QuarantineCode, QuarantineKeeper, SystemClock,
 };
@@ -27,11 +28,18 @@ struct Fixture {
 }
 
 impl Fixture {
-    fn new(runtime: &Path, root: &Path) -> Result<Self, Box<dyn std::error::Error>> {
+    fn new(
+        runtime: &Path,
+        root: &Path,
+        profile: Option<FixtureProfile>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let runtime = Arc::new(crate::verify_fixed_runtime(runtime, root)?);
         let factory: Rc<dyn NativeFactory> = Rc::new(crate::Native::owner_factory()?);
         let store = WindowsCleanupStore::open(root.to_path_buf())?;
-        let loopback = SharedLoopback::start()?;
+        let loopback = match profile {
+            Some(profile) => SharedLoopback::start_fixture(profile)?,
+            None => SharedLoopback::start()?,
+        };
         let surface = Surface::new(
             Rc::clone(&factory),
             runtime,
@@ -104,7 +112,7 @@ impl Fixture {
 }
 
 pub(super) fn run(runtime: &Path, root: &Path) -> TestResult {
-    let mut fixture = Fixture::new(runtime, root)?;
+    let mut fixture = Fixture::new(runtime, root, None)?;
     let _mode = ResourceProbeGuard::new(crate::ResourceDenialFixture::DriverRetry);
     let started = Instant::now();
     fixture.trace = Trace::new(0x27, started);
@@ -165,6 +173,77 @@ pub(super) fn run(runtime: &Path, root: &Path) -> TestResult {
     drop(fixture.surface);
     Rc::get_mut(&mut fixture.factory)
         .ok_or("denial factory still shared")?
+        .stop()?;
+    Ok(())
+}
+
+pub(super) fn run_control(runtime: &Path, root: &Path) -> TestResult {
+    let mut fixture = Fixture::new(runtime, root, Some(FixtureProfile::PopupReceipt))?;
+    let _fault = super::controls::Fault::new(
+        crate::EventKind::NewWindow,
+        crate::ControlFault::RetryDenial,
+    );
+    let started = Instant::now();
+    fixture
+        .surface
+        .set_deadline(started + Duration::from_secs(15));
+    let mut driver = readiness::new_driver(CeremonyId::from_bytes([0x28; 16]), started)?;
+    let attempt = catch_unwind(AssertUnwindSafe(|| fixture.drive(&mut driver)));
+    let (result, failure) = match attempt {
+        Ok(Ok(result)) => (result, None),
+        Ok(Err(error)) => (
+            readiness::cancel_driver(
+                &mut driver,
+                &mut fixture.surface,
+                &mut fixture.loopback,
+                &mut fixture.store,
+            ),
+            Some(error),
+        ),
+        Err(_) => (
+            readiness::cancel_driver(
+                &mut driver,
+                &mut fixture.surface,
+                &mut fixture.loopback,
+                &mut fixture.store,
+            ),
+            Some("control driver panicked".into()),
+        ),
+    };
+    let error = result.as_ref().err().copied();
+    let records = fixture.store.records();
+    let observations = crate::Native::control_observations();
+    let request_clear = driver.request_clear();
+    let quarantined = fixture.retire(driver, result);
+    if let Some(failure) = failure {
+        return Err(failure);
+    }
+    assert_eq!(
+        error,
+        Some(BridgeError::Quarantine(
+            QuarantineCode::ControllerCloseFailed
+        ))
+    );
+    assert!(quarantined);
+    assert!(request_clear);
+    assert_eq!(records?.len(), 1);
+    assert_eq!(observations.len(), 1);
+    assert!(observations[0].deferred);
+    assert_eq!(observations[0].attempts, 3);
+    assert_eq!(observations[0].completions, 0);
+    assert!(!observations[0].retired);
+    let retired = crate::Native::control_observations();
+    assert_eq!(retired.len(), 1);
+    assert_eq!(retired[0].attempts, 4);
+    assert_eq!(retired[0].readback, Some(true));
+    assert_eq!(retired[0].completions, 1);
+    assert!(retired[0].retired);
+    assert_eq!(fixture.loopback.served().count, 1);
+    assert!(fixture.store.records()?.is_empty());
+    assert!(fixture.store.folders()?.is_empty());
+    drop(fixture.surface);
+    Rc::get_mut(&mut fixture.factory)
+        .ok_or("control factory still shared")?
         .stop()?;
     Ok(())
 }

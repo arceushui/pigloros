@@ -1,13 +1,11 @@
 #![cfg(windows)]
 
-use super::{action, unavailable, Result, Subscriptions};
+use super::control_denial::Control;
+use super::{action, unavailable, Recovery, Result, Subscriptions};
 use crate::{EventKind, EventSink, NativeAction, NativeEvent};
 use std::rc::Rc;
 use webview2_com::Microsoft::Web::WebView2::Win32::{
-    ICoreWebView2, ICoreWebView2BasicAuthenticationRequestedEventArgs,
-    ICoreWebView2DownloadStartingEventArgs, ICoreWebView2LaunchingExternalUriSchemeEventArgs,
-    ICoreWebView2NewWindowRequestedEventArgs, ICoreWebView2PermissionRequestedEventArgs,
-    ICoreWebView2_10, ICoreWebView2_18, ICoreWebView2_4, COREWEBVIEW2_PERMISSION_STATE_DENY,
+    ICoreWebView2, ICoreWebView2_10, ICoreWebView2_18, ICoreWebView2_4,
 };
 use webview2_com::{
     BasicAuthenticationRequestedEventHandler, DownloadStartingEventHandler,
@@ -20,13 +18,14 @@ use windows::core::Interface;
 pub(super) fn install(
     view: &ICoreWebView2,
     signals: &Rc<dyn EventSink>,
+    recovery: &Rc<Recovery>,
     subscriptions: &mut Subscriptions,
 ) -> Result<()> {
-    new_window(view, signals, subscriptions)?;
-    permission(view, signals, subscriptions)?;
-    download(view, signals, subscriptions)?;
-    external(view, signals, subscriptions)?;
-    authentication(view, signals, subscriptions)?;
+    new_window(view, signals, recovery, subscriptions)?;
+    permission(view, signals, recovery, subscriptions)?;
+    download(view, signals, recovery, subscriptions)?;
+    external(view, signals, recovery, subscriptions)?;
+    authentication(view, signals, recovery, subscriptions)?;
     dialog(view, signals, subscriptions)?;
     close_request(view, signals, subscriptions)
 }
@@ -34,11 +33,14 @@ pub(super) fn install(
 fn new_window(
     view: &ICoreWebView2,
     signals: &Rc<dyn EventSink>,
+    recovery: &Rc<Recovery>,
     subscriptions: &mut Subscriptions,
 ) -> Result<()> {
     let view: ICoreWebView2 = view.cast().map_err(|_| unavailable())?;
     let remove = view.clone();
     let observed = Rc::clone(signals);
+    let cancellation = Rc::clone(recovery);
+    let intercepted: ICoreWebView2 = view.clone();
     let handler = NewWindowRequestedEventHandler::create(Box::new(move |_sender, args| {
         let selected = observed.event(NativeEvent::NewWindow);
         action(
@@ -47,9 +49,11 @@ fn new_window(
             selected,
             NativeAction::Handled,
         );
-        if let Err(error) = block_new_window(args) {
-            observed.failed(EventKind::NewWindow, error);
-        }
+        cancellation.control(
+            Control::NewWindow(args),
+            intercepted.clone(),
+            Rc::clone(&observed),
+        );
         Ok(())
     }));
     subscriptions.register(
@@ -64,20 +68,17 @@ fn new_window(
     )
 }
 
-fn block_new_window(args: Option<ICoreWebView2NewWindowRequestedEventArgs>) -> Result<()> {
-    let args = args.ok_or_else(unavailable)?;
-    // SAFETY: live event arguments on the invoking STA; fixed fail-closed setting.
-    unsafe { args.SetHandled(true) }.map_err(|_| unavailable())
-}
-
 fn permission(
     view: &ICoreWebView2,
     signals: &Rc<dyn EventSink>,
+    recovery: &Rc<Recovery>,
     subscriptions: &mut Subscriptions,
 ) -> Result<()> {
     let view: ICoreWebView2 = view.cast().map_err(|_| unavailable())?;
     let remove = view.clone();
     let observed = Rc::clone(signals);
+    let cancellation = Rc::clone(recovery);
+    let intercepted: ICoreWebView2 = view.clone();
     let handler = PermissionRequestedEventHandler::create(Box::new(move |_sender, args| {
         let selected = observed.event(NativeEvent::Permission);
         action(
@@ -86,9 +87,11 @@ fn permission(
             selected,
             NativeAction::Deny,
         );
-        if let Err(error) = block_permission(args) {
-            observed.failed(EventKind::Permission, error);
-        }
+        cancellation.control(
+            Control::Permission(args),
+            intercepted.clone(),
+            Rc::clone(&observed),
+        );
         Ok(())
     }));
     subscriptions.register(
@@ -103,20 +106,17 @@ fn permission(
     )
 }
 
-fn block_permission(args: Option<ICoreWebView2PermissionRequestedEventArgs>) -> Result<()> {
-    let args = args.ok_or_else(unavailable)?;
-    // SAFETY: live event arguments on the invoking STA; fixed fail-closed setting.
-    unsafe { args.SetState(COREWEBVIEW2_PERMISSION_STATE_DENY) }.map_err(|_| unavailable())
-}
-
 fn download(
     view: &ICoreWebView2,
     signals: &Rc<dyn EventSink>,
+    recovery: &Rc<Recovery>,
     subscriptions: &mut Subscriptions,
 ) -> Result<()> {
     let view: ICoreWebView2_4 = view.cast().map_err(|_| unavailable())?;
     let remove = view.clone();
     let observed = Rc::clone(signals);
+    let cancellation = Rc::clone(recovery);
+    let intercepted: ICoreWebView2 = view.cast().map_err(|_| unavailable())?;
     let handler = DownloadStartingEventHandler::create(Box::new(move |_sender, args| {
         let selected = observed.event(NativeEvent::Download);
         action(
@@ -125,9 +125,11 @@ fn download(
             selected,
             NativeAction::Cancel,
         );
-        if let Err(error) = block_download(args) {
-            observed.failed(EventKind::Download, error);
-        }
+        cancellation.control(
+            Control::Download(args),
+            intercepted.clone(),
+            Rc::clone(&observed),
+        );
         Ok(())
     }));
     subscriptions.register(
@@ -142,20 +144,17 @@ fn download(
     )
 }
 
-fn block_download(args: Option<ICoreWebView2DownloadStartingEventArgs>) -> Result<()> {
-    let args = args.ok_or_else(unavailable)?;
-    // SAFETY: live event arguments on the invoking STA; fixed fail-closed setting.
-    unsafe { args.SetCancel(true) }.map_err(|_| unavailable())
-}
-
 fn external(
     view: &ICoreWebView2,
     signals: &Rc<dyn EventSink>,
+    recovery: &Rc<Recovery>,
     subscriptions: &mut Subscriptions,
 ) -> Result<()> {
     let view: ICoreWebView2_18 = view.cast().map_err(|_| unavailable())?;
     let remove = view.clone();
     let observed = Rc::clone(signals);
+    let cancellation = Rc::clone(recovery);
+    let intercepted: ICoreWebView2 = view.cast().map_err(|_| unavailable())?;
     let handler = LaunchingExternalUriSchemeEventHandler::create(Box::new(move |_sender, args| {
         let selected = observed.event(NativeEvent::ExternalUri);
         action(
@@ -164,9 +163,11 @@ fn external(
             selected,
             NativeAction::Cancel,
         );
-        if let Err(error) = block_external(args) {
-            observed.failed(EventKind::ExternalUri, error);
-        }
+        cancellation.control(
+            Control::External(args),
+            intercepted.clone(),
+            Rc::clone(&observed),
+        );
         Ok(())
     }));
     subscriptions.register(
@@ -181,20 +182,17 @@ fn external(
     )
 }
 
-fn block_external(args: Option<ICoreWebView2LaunchingExternalUriSchemeEventArgs>) -> Result<()> {
-    let args = args.ok_or_else(unavailable)?;
-    // SAFETY: live event arguments on the invoking STA; fixed fail-closed setting.
-    unsafe { args.SetCancel(true) }.map_err(|_| unavailable())
-}
-
 fn authentication(
     view: &ICoreWebView2,
     signals: &Rc<dyn EventSink>,
+    recovery: &Rc<Recovery>,
     subscriptions: &mut Subscriptions,
 ) -> Result<()> {
     let view: ICoreWebView2_10 = view.cast().map_err(|_| unavailable())?;
     let remove = view.clone();
     let observed = Rc::clone(signals);
+    let cancellation = Rc::clone(recovery);
+    let intercepted: ICoreWebView2 = view.cast().map_err(|_| unavailable())?;
     let handler =
         BasicAuthenticationRequestedEventHandler::create(Box::new(move |_sender, args| {
             let selected = observed.event(NativeEvent::Authentication);
@@ -204,9 +202,11 @@ fn authentication(
                 selected,
                 NativeAction::Cancel,
             );
-            if let Err(error) = block_authentication(args) {
-                observed.failed(EventKind::Authentication, error);
-            }
+            cancellation.control(
+                Control::Authentication(args),
+                intercepted.clone(),
+                Rc::clone(&observed),
+            );
             Ok(())
         }));
     subscriptions.register(
@@ -219,14 +219,6 @@ fn authentication(
             unsafe { remove.remove_BasicAuthenticationRequested(token) }
         },
     )
-}
-
-fn block_authentication(
-    args: Option<ICoreWebView2BasicAuthenticationRequestedEventArgs>,
-) -> Result<()> {
-    let args = args.ok_or_else(unavailable)?;
-    // SAFETY: live event arguments on the invoking STA; fixed fail-closed setting.
-    unsafe { args.SetCancel(true) }.map_err(|_| unavailable())
 }
 
 fn dialog(

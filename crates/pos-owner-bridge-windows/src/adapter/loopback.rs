@@ -9,11 +9,19 @@ pub(super) struct SharedLoopback(Arc<Mutex<LoopbackListener>>);
 
 impl SharedLoopback {
     pub(super) fn start() -> Result<Self, BridgeError> {
-        LoopbackListener::start(
-            Box::new(crate::WindowsLoopbackBinder::default()),
-            ListenerConfig::adr(),
-        )
-        .map(|listener| Self(Arc::new(Mutex::new(listener))))
+        Self::with_config(ListenerConfig::adr())
+    }
+
+    #[cfg(test)]
+    pub(super) fn start_fixture(
+        profile: pos_owner_bridge::listener::FixtureProfile,
+    ) -> Result<Self, BridgeError> {
+        Self::with_config(ListenerConfig::fixture(profile))
+    }
+
+    fn with_config(config: ListenerConfig) -> Result<Self, BridgeError> {
+        LoopbackListener::start(Box::new(crate::WindowsLoopbackBinder::default()), config)
+            .map(|listener| Self(Arc::new(Mutex::new(listener))))
     }
 
     #[cfg(test)]

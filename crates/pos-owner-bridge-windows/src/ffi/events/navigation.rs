@@ -1,6 +1,7 @@
 #![cfg(windows)]
 
-use super::{action, observe, unavailable, Result, Subscriptions};
+use super::control_denial::Control;
+use super::{action, observe, unavailable, Recovery, Result, Subscriptions};
 use crate::{EventKind, EventSink, NativeAction, NativeEvent, NativeText};
 use std::rc::Rc;
 use webview2_com::Microsoft::Web::WebView2::Win32::{
@@ -18,9 +19,10 @@ use windows::core::{Interface, BOOL};
 pub(super) fn install(
     view: &ICoreWebView2,
     signals: &Rc<dyn EventSink>,
+    recovery: &Rc<Recovery>,
     subscriptions: &mut Subscriptions,
 ) -> Result<()> {
-    starting(view, signals, subscriptions)?;
+    starting(view, signals, recovery, subscriptions)?;
     source_changed(view, signals, subscriptions)?;
     content(view, signals, subscriptions)?;
     loaded(view, signals, subscriptions)?;
@@ -32,13 +34,21 @@ pub(super) fn install(
 fn starting(
     view: &ICoreWebView2,
     signals: &Rc<dyn EventSink>,
+    recovery: &Rc<Recovery>,
     subscriptions: &mut Subscriptions,
 ) -> Result<()> {
     let view: ICoreWebView2 = view.cast().map_err(|_| unavailable())?;
     let remove = view.clone();
     let observed = Rc::clone(signals);
+    let cancellation = Rc::clone(recovery);
+    let intercepted = view.clone();
     let handler = NavigationStartingEventHandler::create(Box::new(move |_sender, args| {
-        navigation_start(args, observed.as_ref());
+        navigation_start(
+            args,
+            intercepted.clone(),
+            Rc::clone(&observed),
+            &cancellation,
+        );
         Ok(())
     }));
     subscriptions.register(
@@ -209,20 +219,39 @@ fn process(
     )
 }
 
-fn navigation_start(args: Option<ICoreWebView2NavigationStartingEventArgs>, sink: &dyn EventSink) {
+fn navigation_start(
+    args: Option<ICoreWebView2NavigationStartingEventArgs>,
+    view: ICoreWebView2,
+    sink: Rc<dyn EventSink>,
+    recovery: &Recovery,
+) {
     let Some(args) = args else {
         sink.failed(EventKind::Navigation, unavailable());
+        recovery.control(Control::Navigation { _args: None }, view, sink);
         return;
     };
     let result = navigation_snapshot(&args);
-    let selected = observe(sink, EventKind::Navigation, result);
+    let selected = observe(sink.as_ref(), EventKind::Navigation, result);
     let allow = selected == NativeAction::Allow;
     if !allow {
-        action(sink, EventKind::Navigation, selected, NativeAction::Cancel);
+        action(
+            sink.as_ref(),
+            EventKind::Navigation,
+            selected,
+            NativeAction::Cancel,
+        );
     }
     // SAFETY: live invoking-STA arguments; only the safe policy can select Allow.
     if unsafe { args.SetCancel(!allow) }.is_err() {
         sink.failed(EventKind::Navigation, unavailable());
+        if !allow {
+            recovery.control(Control::Navigation { _args: Some(args) }, view, sink);
+        }
+    } else if !allow {
+        #[cfg(test)]
+        if let Err(error) = super::control_fixture::navigation(&args) {
+            sink.failed(EventKind::Navigation, error);
+        }
     }
 }
 

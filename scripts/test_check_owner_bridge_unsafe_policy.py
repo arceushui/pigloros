@@ -1338,6 +1338,26 @@ def test_cli() -> None:
         raise SystemExit(f"CLI did not report malformed TOML cleanly: {malformed}")
 
 
+def test_control_observations_cannot_ship_in_product_builds() -> None:
+    path = f"{SHIM}/src/ffi/events/control_fixture.rs"
+    parent = f"{SHIM}/src/ffi/events/mod.rs"
+    require_accepted("test-only control readbacks", {
+        path: CFG + "#![cfg(test)]\nfn readback() { args.Cancel(output); }\n",
+        parent: CFG + "#[cfg(test)]\nmod control_fixture;\n",
+    })
+    require_rejected("product control readback helper", {path: CFG}, [
+        f"{path}: ADR-131 control observations require file-scope cfg(test)",
+    ])
+    for declaration in ["mod control_fixture;", "#[cfg(test)]\npub mod control_fixture;"]:
+        require_rejected("exported or product control fixture", {parent: CFG + declaration}, [
+            f"{parent}: ADR-131 control_fixture must be a private cfg(test) module",
+        ])
+    for call in ["args.Cancel(output)", "ICoreWebView2PermissionRequestedEventArgs::State(args, output)"]:
+        require_rejected("relocated native observation", {OPS: CFG + f"fn readback() {{ {call}; }}\n"}, [
+            at(OPS, 2, "ADR-131 control readback belongs only in control_fixture"),
+        ])
+
+
 def main() -> None:
     test_masker()
     test_accepted()
@@ -1350,6 +1370,7 @@ def main() -> None:
     test_manifests()
     test_cli()
     test_forbidden_webview_authority()
+    test_control_observations_cannot_ship_in_product_builds()
     test_windows_case_insensitive_source_suffix_cannot_hide_code()
     test_hardening()
     test_symlinks()

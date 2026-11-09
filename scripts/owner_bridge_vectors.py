@@ -316,6 +316,9 @@ def _rust_text(source: str, name: str) -> str:
 
 def check_assets() -> None:
     """Fail closed if the packaged page, its manifest, or the Rust constants drift."""
+    from owner_bridge_assets import check as check_bundles
+
+    check_bundles()
     expected = owner_asset_values()
     source = ASSET_SOURCE.read_text(encoding="utf-8")
     manifest = (BRIDGE_ROOT / "assets" / "manifest.v1").read_text(encoding="utf-8")

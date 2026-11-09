@@ -397,7 +397,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/controls.rs"
-line = 58
+line = 62
 function = "new_window"
 operation = "view.add_NewWindowRequested(&handler, token)"
 invariant = "live STA interface/handler; initialized token output, retained by Subscriptions."
@@ -405,7 +405,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/controls.rs"
-line = 62
+line = 66
 function = "new_window"
 operation = "remove.remove_NewWindowRequested(token)"
 invariant = "this exact token belongs to the retained live interface on its creating STA."
@@ -413,15 +413,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/controls.rs"
-line = 70
-function = "block_new_window"
-operation = "args.SetHandled(true)"
-invariant = "live event arguments on the invoking STA; fixed fail-closed setting."
-hosted_test = "native_window_environment_and_buffers_lifecycle"
-
-[[block]]
-file = "src/ffi/events/controls.rs"
-line = 97
+line = 100
 function = "permission"
 operation = "view.add_PermissionRequested(&handler, token)"
 invariant = "live STA interface/handler; initialized token output, retained by Subscriptions."
@@ -429,7 +421,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/controls.rs"
-line = 101
+line = 104
 function = "permission"
 operation = "remove.remove_PermissionRequested(token)"
 invariant = "this exact token belongs to the retained live interface on its creating STA."
@@ -437,15 +429,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/controls.rs"
-line = 109
-function = "block_permission"
-operation = "args.SetState(COREWEBVIEW2_PERMISSION_STATE_DENY)"
-invariant = "live event arguments on the invoking STA; fixed fail-closed setting."
-hosted_test = "native_window_environment_and_buffers_lifecycle"
-
-[[block]]
-file = "src/ffi/events/controls.rs"
-line = 136
+line = 138
 function = "download"
 operation = "view.add_DownloadStarting(&handler, token)"
 invariant = "live STA interface/handler; initialized token output, retained by Subscriptions."
@@ -453,7 +437,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/controls.rs"
-line = 140
+line = 142
 function = "download"
 operation = "remove.remove_DownloadStarting(token)"
 invariant = "this exact token belongs to the retained live interface on its creating STA."
@@ -461,15 +445,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/controls.rs"
-line = 148
-function = "block_download"
-operation = "args.SetCancel(true)"
-invariant = "live event arguments on the invoking STA; fixed fail-closed setting."
-hosted_test = "native_window_environment_and_buffers_lifecycle"
-
-[[block]]
-file = "src/ffi/events/controls.rs"
-line = 175
+line = 176
 function = "external"
 operation = "view.add_LaunchingExternalUriScheme(&handler, token)"
 invariant = "live STA interface/handler; initialized token output, retained by Subscriptions."
@@ -477,18 +453,10 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/controls.rs"
-line = 179
+line = 180
 function = "external"
 operation = "remove.remove_LaunchingExternalUriScheme(token)"
 invariant = "this exact token belongs to the retained live interface on its creating STA."
-hosted_test = "native_window_environment_and_buffers_lifecycle"
-
-[[block]]
-file = "src/ffi/events/controls.rs"
-line = 187
-function = "block_external"
-operation = "args.SetCancel(true)"
-invariant = "live event arguments on the invoking STA; fixed fail-closed setting."
 hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
@@ -509,15 +477,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/controls.rs"
-line = 229
-function = "block_authentication"
-operation = "args.SetCancel(true)"
-invariant = "live event arguments on the invoking STA; fixed fail-closed setting."
-hosted_test = "native_window_environment_and_buffers_lifecycle"
-
-[[block]]
-file = "src/ffi/events/controls.rs"
-line = 248
+line = 240
 function = "dialog"
 operation = "view.add_ScriptDialogOpening(&handler, token)"
 invariant = "live STA interface/handler and initialized token output."
@@ -525,7 +485,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/controls.rs"
-line = 252
+line = 244
 function = "dialog"
 operation = "remove.remove_ScriptDialogOpening(token)"
 invariant = "matching token on the retained interface's creating STA."
@@ -533,7 +493,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/controls.rs"
-line = 271
+line = 263
 function = "close_request"
 operation = "view.add_WindowCloseRequested(&handler, token)"
 invariant = "live STA interface/handler and initialized token output."
@@ -541,7 +501,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/controls.rs"
-line = 275
+line = 267
 function = "close_request"
 operation = "remove.remove_WindowCloseRequested(token)"
 invariant = "matching token on the retained interface's creating STA."
@@ -549,7 +509,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 47
+line = 57
 function = "starting"
 operation = "view.add_NavigationStarting(&handler, token)"
 invariant = "live STA interface/handler and initialized unique token output."
@@ -557,7 +517,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 51
+line = 61
 function = "starting"
 operation = "remove.remove_NavigationStarting(token)"
 invariant = "exact registered token on its retained creating-STA interface."
@@ -565,7 +525,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 75
+line = 85
 function = "source_changed"
 operation = "view.add_SourceChanged(&handler, token)"
 invariant = "live STA interface/handler and initialized unique token output."
@@ -573,7 +533,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 79
+line = 89
 function = "source_changed"
 operation = "remove.remove_SourceChanged(token)"
 invariant = "exact registered token on its retained creating-STA interface."
@@ -581,7 +541,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 99
+line = 109
 function = "content"
 operation = "view.add_ContentLoading(&handler, token)"
 invariant = "live STA interface/handler and initialized unique token output."
@@ -589,7 +549,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 103
+line = 113
 function = "content"
 operation = "remove.remove_ContentLoading(token)"
 invariant = "exact registered token on its retained creating-STA interface."
@@ -597,7 +557,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 127
+line = 137
 function = "loaded"
 operation = "view.add_DOMContentLoaded(&handler, token)"
 invariant = "live STA interface/handler and initialized unique token output."
@@ -605,7 +565,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 131
+line = 141
 function = "loaded"
 operation = "remove.remove_DOMContentLoaded(token)"
 invariant = "exact registered token on its retained creating-STA interface."
@@ -613,7 +573,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 155
+line = 165
 function = "completed"
 operation = "view.add_NavigationCompleted(&handler, token)"
 invariant = "live STA interface/handler and initialized unique token output."
@@ -621,7 +581,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 159
+line = 169
 function = "completed"
 operation = "remove.remove_NavigationCompleted(token)"
 invariant = "exact registered token on its retained creating-STA interface."
@@ -629,7 +589,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 179
+line = 189
 function = "frame"
 operation = "view.add_FrameCreated(&handler, token)"
 invariant = "live STA interface/handler and initialized unique token output."
@@ -637,7 +597,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 183
+line = 193
 function = "frame"
 operation = "remove.remove_FrameCreated(token)"
 invariant = "exact registered token on its retained creating-STA interface."
@@ -645,7 +605,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 203
+line = 213
 function = "process"
 operation = "view.add_ProcessFailed(&handler, token)"
 invariant = "live STA interface/handler and initialized unique token output."
@@ -653,7 +613,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 207
+line = 217
 function = "process"
 operation = "remove.remove_ProcessFailed(token)"
 invariant = "exact registered token on its retained creating-STA interface."
@@ -661,7 +621,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 224
+line = 245
 function = "navigation_start"
 operation = "args.SetCancel(!allow)"
 invariant = "live invoking-STA arguments; only the safe policy can select Allow."
@@ -669,7 +629,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 232
+line = 261
 function = "navigation_snapshot"
 operation = "args.Uri(out)"
 invariant = "live arguments and helper-owned initialized writable string output."
@@ -677,7 +637,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 236
+line = 265
 function = "navigation_snapshot"
 operation = "args.IsRedirected(&raw mut redirected)"
 invariant = "live invoking-STA arguments and initialized unique BOOL output."
@@ -685,7 +645,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 239
+line = 268
 function = "navigation_snapshot"
 operation = "args.NavigationId(&raw mut id)"
 invariant = "live invoking-STA arguments and initialized unique navigation-ID output."
@@ -693,7 +653,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 250
+line = 279
 function = "source"
 operation = "view.Source(out)"
 invariant = "retained live STA view and helper-owned initialized string output."
@@ -701,7 +661,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 258
+line = 287
 function = "content_loading"
 operation = "args.NavigationId(&raw mut id)"
 invariant = "live invoking-STA arguments and initialized unique navigation-ID output."
@@ -709,7 +669,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 261
+line = 290
 function = "content_loading"
 operation = "args.IsErrorPage(&raw mut error_page)"
 invariant = "live invoking-STA arguments and initialized unique BOOL output."
@@ -717,7 +677,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 276
+line = 305
 function = "dom_loaded"
 operation = "args.NavigationId(&raw mut id)"
 invariant = "live invoking-STA arguments and initialized unique navigation-ID output."
@@ -725,7 +685,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 289
+line = 318
 function = "navigation_completed"
 operation = "args.NavigationId(&raw mut id)"
 invariant = "live invoking-STA arguments and initialized unique navigation-ID output."
@@ -733,7 +693,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 292
+line = 321
 function = "navigation_completed"
 operation = "args.IsSuccess(&raw mut success)"
 invariant = "live invoking-STA arguments and initialized unique BOOL output."
@@ -1421,15 +1381,15 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/denial.rs"
-line = 143
+line = 170
 function = "stop_fetches"
 operation = "view.Stop()"
-invariant = "Exact intercepted session's retained view on its creating STA; resource denial only. Successful HRESULT is required before controller Close or security-handler removal."
+invariant = "Exact retained session view on its creating STA; resource denial or failed mandatory navigation cancellation only. Stop HRESULT guards security-subscription removal and Close; it grants no control-family permission."
 hosted_test = "native_resource_denial_callback_failure_does_not_contact_listener"
 
 [[block]]
 file = "src/ffi/events/denial.rs"
-line = 155
+line = 182
 function = "defer_request"
 operation = "args.GetDeferral()"
 invariant = "Owned live resource callback arguments on their creating STA. Retain returned deferral with arguments and exact session view while cancellation is unresolved."
@@ -1437,8 +1397,136 @@ hosted_test = "native_resource_denial_callback_failure_does_not_contact_listener
 
 [[block]]
 file = "src/ffi/events/denial.rs"
-line = 168
+line = 196
 function = "complete_request"
 operation = "deferral.Complete()"
-invariant = "Retained resource deferral on its creating STA after successful Stop only. Mark the attempt before COM; never retry an uncertain Complete and retain owners until exact own BrowserProcessExited."
+invariant = "Retained creating-STA deferral; Complete at most once, marked before COM, only after successful resource Stop or ADR-130 mandatory control denial. An uncertain result keeps the event owners until the matching own browser exit."
 hosted_test = "native_resource_denial_callback_failure_does_not_contact_listener"
+
+[[block]]
+file = "src/ffi/events/control_denial.rs"
+line = 50
+function = "defer"
+operation = "NewWindow::GetDeferral"
+invariant = "owned invoking-STA popup arguments, before SetHandled; retain this event-specific deferral with args and exact view. ADR-130: acquire before the mandatory denial and retain with exact args and view until resolved or own exit."
+hosted_test = "native_control_callbacks_deny_and_retain_through_own_exit"
+
+[[block]]
+file = "src/ffi/events/control_denial.rs"
+line = 56
+function = "defer"
+operation = "Permission::GetDeferral"
+invariant = "owned invoking-STA permission arguments, before DENY; this hold is for this request, not a global permission grant. ADR-130: acquire before the mandatory denial and retain with exact args and view until resolved or own exit."
+hosted_test = "native_control_callbacks_deny_and_retain_through_own_exit"
+
+[[block]]
+file = "src/ffi/events/control_denial.rs"
+line = 62
+function = "defer"
+operation = "Download::GetDeferral"
+invariant = "owned invoking-STA download arguments, before Cancel; no path, acceptance or download operation is requested. ADR-130: acquire before the mandatory denial and retain with exact args and view until resolved or own exit."
+hosted_test = "native_control_callbacks_deny_and_retain_through_own_exit"
+
+[[block]]
+file = "src/ffi/events/control_denial.rs"
+line = 68
+function = "defer"
+operation = "External::GetDeferral"
+invariant = "owned invoking-STA external-URI arguments, before Cancel; no external application launch is authorized. ADR-130: acquire before the mandatory denial and retain with exact args and view until resolved or own exit."
+hosted_test = "native_control_callbacks_deny_and_retain_through_own_exit"
+
+[[block]]
+file = "src/ffi/events/control_denial.rs"
+line = 74
+function = "defer"
+operation = "Authentication::GetDeferral"
+invariant = "owned invoking-STA authentication arguments, before Cancel; no credentials are read, written or accepted. ADR-130: acquire before the mandatory denial and retain with exact args and view until resolved or own exit."
+hosted_test = "native_control_callbacks_deny_and_retain_through_own_exit"
+
+[[block]]
+file = "src/ffi/events/control_denial.rs"
+line = 87
+function = "deny"
+operation = "NewWindow::SetHandled"
+invariant = "retained invoking-STA args; fixed Handled=true and no assigned NewWindow suppress this pending popup request. SDK success precedes Complete; unresolved failure retains owners and vetoes Close/removal."
+hosted_test = "native_control_callbacks_deny_and_retain_through_own_exit"
+
+[[block]]
+file = "src/ffi/events/control_denial.rs"
+line = 92
+function = "deny"
+operation = "Permission::SetState"
+invariant = "retained invoking-STA args; the only state is DENY. SDK success precedes Complete; unresolved failure retains owners and vetoes Close/removal."
+hosted_test = "native_control_callbacks_deny_and_retain_through_own_exit"
+
+[[block]]
+file = "src/ffi/events/control_denial.rs"
+line = 98
+function = "deny"
+operation = "Download::SetCancel"
+invariant = "retained invoking-STA args; Cancel=true, never a path change or acceptance of the download. SDK success precedes Complete; unresolved failure retains owners and vetoes Close/removal."
+hosted_test = "native_control_callbacks_deny_and_retain_through_own_exit"
+
+[[block]]
+file = "src/ffi/events/control_denial.rs"
+line = 104
+function = "deny"
+operation = "External::SetCancel"
+invariant = "retained invoking-STA args; Cancel=true prevents the external launch. No untrusted URI is passed to an OS launcher. SDK success precedes Complete; unresolved failure retains owners and vetoes Close/removal."
+hosted_test = "native_control_callbacks_deny_and_retain_through_own_exit"
+
+[[block]]
+file = "src/ffi/events/control_denial.rs"
+line = 110
+function = "deny"
+operation = "Authentication::SetCancel"
+invariant = "retained invoking-STA args; Cancel=true, no credential or response object is read or provided. SDK success precedes Complete; unresolved failure retains owners and vetoes Close/removal."
+hosted_test = "native_control_callbacks_deny_and_retain_through_own_exit"
+
+[[block]]
+file = "src/ffi/events/control_fixture.rs"
+line = 57
+function = "readback"
+operation = "NewWindow::Handled"
+invariant = "exact retained callback args, same STA; initialized BOOL output, read only after the real Handled setter succeeded. ADR-131: unit-test-only typed readback; no COM interface or untrusted string leaves this helper."
+hosted_test = "native_control_callbacks_deny_and_retain_through_own_exit"
+
+[[block]]
+file = "src/ffi/events/control_fixture.rs"
+line = 64
+function = "readback"
+operation = "Permission::State"
+invariant = "exact retained callback args on this STA and initialized enum output. No permission state is granted by this observation. ADR-131: unit-test-only typed readback; no COM interface or untrusted string leaves this helper."
+hosted_test = "native_control_callbacks_deny_and_retain_through_own_exit"
+
+[[block]]
+file = "src/ffi/events/control_fixture.rs"
+line = 71
+function = "readback"
+operation = "Download::Cancel"
+invariant = "exact retained callback args on this STA; initialized BOOL output, no download path or operation is read or accepted. ADR-131: unit-test-only typed readback; no COM interface or untrusted string leaves this helper."
+hosted_test = "native_control_callbacks_deny_and_retain_through_own_exit"
+
+[[block]]
+file = "src/ffi/events/control_fixture.rs"
+line = 77
+function = "readback"
+operation = "External::Cancel"
+invariant = "exact retained callback args on this STA; initialized BOOL output only, no URI is passed to an application launcher. ADR-131: unit-test-only typed readback; no COM interface or untrusted string leaves this helper."
+hosted_test = "native_control_callbacks_deny_and_retain_through_own_exit"
+
+[[block]]
+file = "src/ffi/events/control_fixture.rs"
+line = 83
+function = "readback"
+operation = "Authentication::Cancel"
+invariant = "exact retained callback args on this STA; initialized BOOL output only, no credential/response object is accessed. ADR-131: unit-test-only typed readback; no COM interface or untrusted string leaves this helper."
+hosted_test = "native_control_callbacks_deny_and_retain_through_own_exit"
+
+[[block]]
+file = "src/ffi/events/control_fixture.rs"
+line = 97
+function = "navigation"
+operation = "Navigation::Cancel"
+invariant = "Actual invoking-STA navigation args, after Cancel=true succeeded; initialized BOOL output. The observation never authorizes navigation. ADR-131: unit-test-only typed readback; no COM interface or untrusted string leaves this helper."
+hosted_test = "native_control_callbacks_deny_and_retain_through_own_exit"

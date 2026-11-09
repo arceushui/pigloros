@@ -6,6 +6,9 @@ use crate::{
 use std::rc::Rc;
 use webview2_com::Microsoft::Web::WebView2::Win32::{ICoreWebView2, ICoreWebView2Environment};
 
+mod control_denial;
+#[cfg(test)]
+mod control_fixture;
 mod controls;
 mod denial;
 mod navigation;
@@ -83,9 +86,9 @@ pub(super) fn install(
     recovery: &Rc<Recovery>,
     subscriptions: &mut Subscriptions,
 ) -> Result<()> {
-    navigation::install(view, signals, subscriptions)?;
+    navigation::install(view, signals, recovery, subscriptions)?;
     resource::install(view, environment, signals, recovery, subscriptions)?;
-    controls::install(view, signals, subscriptions)
+    controls::install(view, signals, recovery, subscriptions)
 }
 
 pub(super) const fn unavailable() -> NativeError {

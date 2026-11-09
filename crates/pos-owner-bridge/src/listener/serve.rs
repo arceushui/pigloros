@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use pos_owner_bridge_codec::{admit_loopback_http_request, LoopbackRequestDisposition};
 use sha2::{Digest, Sha256};
 
-use super::assets::{BAD_REQUEST_RESPONSE, NOT_FOUND_RESPONSE, OWNER_HTML, OWNER_RESPONSE_HEAD};
+use super::assets::{Response, BAD_REQUEST_RESPONSE, NOT_FOUND_RESPONSE};
 use super::ledger::ServedLedger;
 use super::ListenerTimeouts;
 
@@ -24,6 +24,8 @@ pub(super) struct ServeContext {
     pub(super) timeouts: ListenerTimeouts,
     /// The digest every completed owner response must match.
     pub(super) expected_digest: [u8; 32],
+    /// One immutable compiled response; never supplied by network input.
+    pub(super) response: &'static Response,
     /// Test-only count of connections that supplied at least one request byte.
     #[cfg(feature = "test-support")]
     pub(super) received: Arc<std::sync::atomic::AtomicU64>,
@@ -131,10 +133,11 @@ pub(super) enum OwnerWrite {
 pub(super) fn write_owner_response<W: Write>(
     writer: &mut W,
     expected_digest: &[u8; 32],
+    response: &Response,
 ) -> OwnerWrite {
     let mut hasher = Sha256::new();
-    let head_sent = write_hashed(writer, OWNER_RESPONSE_HEAD.as_bytes(), &mut hasher);
-    if !head_sent || !write_hashed(writer, OWNER_HTML, &mut hasher) {
+    let head_sent = write_hashed(writer, response.head.as_bytes(), &mut hasher);
+    if !head_sent || !write_hashed(writer, response.body, &mut hasher) {
         return OwnerWrite::Incomplete;
     }
     let digest: [u8; 32] = hasher.finalize().into();
@@ -161,7 +164,7 @@ pub(super) fn respond<W: Write>(
         }
         Some(LoopbackRequestDisposition::OwnerDocument) => {
             if let OwnerWrite::Complete { digest_ok } =
-                write_owner_response(writer, &context.expected_digest)
+                write_owner_response(writer, &context.expected_digest, context.response)
             {
                 context.ledger.complete(digest_ok);
             }

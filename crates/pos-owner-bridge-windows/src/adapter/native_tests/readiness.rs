@@ -27,7 +27,8 @@ const WORKERS: usize = 4;
 const RUNS_PER_WORKER: usize = 250;
 
 pub(super) fn run(runtime_path: &Path, root: &Path) -> TestResult {
-    let loopback = SharedLoopback::start()?;
+    let loopback =
+        SharedLoopback::start_fixture(pos_owner_bridge::listener::FixtureProfile::Pending)?;
     let foreground = Arc::new(Foreground::default());
     let mut workers = Vec::new();
     for worker in 0..WORKERS {

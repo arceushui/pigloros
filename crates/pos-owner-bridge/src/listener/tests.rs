@@ -288,18 +288,18 @@ fn only_the_bytes_the_writer_accepted_are_hashed() {
 #[test]
 fn a_failed_or_mismatched_owner_response_never_counts_as_served() {
     let mut whole = flaky(64, usize::MAX, false);
-    let complete = write_owner_response(&mut whole, &ADR_DIGEST);
+    let complete = write_owner_response(&mut whole, &ADR_DIGEST, &super::assets::OWNER);
     assert_eq!(complete, OwnerWrite::Complete { digest_ok: true });
     assert_eq!(whole.accepted, expected_owner_response());
     let mut mismatched = flaky(4_096, usize::MAX, false);
     assert_eq!(
-        write_owner_response(&mut mismatched, &[0; 32]),
+        write_owner_response(&mut mismatched, &[0; 32], &super::assets::OWNER),
         OwnerWrite::Complete { digest_ok: false }
     );
     for budget in [10, OWNER_RESPONSE_HEAD.len() + 10] {
         let mut cut = flaky(100, budget, true);
         assert_eq!(
-            write_owner_response(&mut cut, &ADR_DIGEST),
+            write_owner_response(&mut cut, &ADR_DIGEST, &super::assets::OWNER),
             OwnerWrite::Incomplete
         );
     }
@@ -315,6 +315,7 @@ fn responses_to_a_broken_peer_leave_the_ledger_untouched() {
         received: Arc::default(),
         timeouts: ADR_TIMEOUTS,
         expected_digest: ADR_DIGEST,
+        response: &super::assets::OWNER,
     };
     for disposition in [
         Some(LoopbackRequestDisposition::OwnerDocument),
@@ -526,6 +527,7 @@ fn the_fixed_error_responses_are_written_exactly() {
         received: Arc::default(),
         timeouts: ADR_TIMEOUTS,
         expected_digest: ADR_DIGEST,
+        response: &super::assets::OWNER,
     };
     let cases = [
         (None, BAD_REQUEST_RESPONSE),
@@ -568,6 +570,7 @@ fn serve_context() -> Arc<ServeContext> {
         received: Arc::default(),
         timeouts: ADR_TIMEOUTS,
         expected_digest: ADR_DIGEST,
+        response: &super::assets::OWNER,
     })
 }
 

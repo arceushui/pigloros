@@ -9,18 +9,31 @@ use webview2_com::Microsoft::Web::WebView2::Win32::{
 use super::{unavailable, Result};
 use crate::{EventKind, EventSink, NativeAction, NativeError, NativeEvent};
 
-/// Resource-only cancellation owners. Each instance belongs to one fresh
+/// Resource and ADR-130 control owners. Each instance belongs to one fresh
 /// environment and is advanced only by its creating STA's outer loop.
 #[derive(Default)]
 pub(in crate::ffi) struct Recovery {
     expected_pid: Cell<Option<u32>>,
     exited: Cell<bool>,
     pending: RefCell<Vec<Held>>,
+    controls: RefCell<Vec<super::control_denial::Held>>,
 }
 
 impl Recovery {
     pub(in crate::ffi) fn expect_browser(&self, pid: u32) {
         self.expected_pid.set(Some(pid));
+    }
+
+    pub(super) fn control(
+        &self,
+        control: super::control_denial::Control,
+        view: ICoreWebView2,
+        sink: Rc<dyn EventSink>,
+    ) {
+        let mut held = super::control_denial::Held::new(control, view, sink);
+        if !held.advance() && !self.exited.get() {
+            self.controls.borrow_mut().push(held);
+        }
     }
 
     pub(super) fn deny(
@@ -74,7 +87,18 @@ impl Recovery {
             return Ok(());
         }
         self.pending.borrow_mut().extend(retained);
-        if self.pending.borrow().iter().all(|held| held.stopped) {
+        let controls = std::mem::take(&mut *self.controls.borrow_mut());
+        let retained: Vec<_> = controls
+            .into_iter()
+            .filter_map(|mut held| (!held.advance()).then_some(held))
+            .collect();
+        if self.exited.get() {
+            return Ok(());
+        }
+        self.controls.borrow_mut().extend(retained);
+        if self.pending.borrow().iter().all(|held| held.stopped)
+            && self.controls.borrow().iter().all(|held| held.denied)
+        {
             Ok(())
         } else {
             Err(unavailable())
@@ -85,7 +109,9 @@ impl Recovery {
         if self.expected_pid.get() == Some(pid) {
             self.exited.set(true);
             let retired = std::mem::take(&mut *self.pending.borrow_mut());
+            let controls = std::mem::take(&mut *self.controls.borrow_mut());
             drop(retired);
+            drop(controls);
         }
     }
 }
@@ -137,9 +163,10 @@ impl Held {
     }
 }
 
-fn stop_fetches(view: &ICoreWebView2) -> Result<()> {
+pub(super) fn stop_fetches(view: &ICoreWebView2) -> Result<()> {
     // SAFETY: exact intercepted session's retained view on its creating STA;
-    // resource denial only. The HRESULT determines whether Close is permitted.
+    // resource denial or failed mandatory navigation Cancel (ADR-130) only.
+    // The HRESULT determines whether Close/subscription removal is permitted.
     unsafe { view.Stop() }.map_err(|_| unavailable())
 }
 
@@ -155,7 +182,7 @@ fn defer_request(
     unsafe { args.GetDeferral() }.map_err(|_| unavailable())
 }
 
-fn complete_request(deferral: &ICoreWebView2Deferral) -> Result<()> {
+pub(super) fn complete_request(deferral: &ICoreWebView2Deferral) -> Result<()> {
     #[cfg(test)]
     {
         COMPLETE_ATTEMPTS.with(|attempts| attempts.set(attempts.get() + 1));
@@ -164,7 +191,8 @@ fn complete_request(deferral: &ICoreWebView2Deferral) -> Result<()> {
         }
     }
     // SAFETY: retained request deferral on its creating STA, after successful
-    // Stop only. The owner marks this attempt before COM; it cannot run twice.
+    // Stop or the event's mandatory denial only (ADR-130). The owner marks
+    // this attempt before COM; it cannot run twice.
     unsafe { deferral.Complete() }.map_err(|_| unavailable())
 }
 
