@@ -118,11 +118,14 @@ fn selecting_prior_state_moves_its_allocation_and_clears_the_replaced_slot() {
     invocation.prior_state_schema = [7; 32];
     invocation.prior_state_bytes = b"replaced private State".to_vec();
     state::tests::reset_observation();
-    let invocation = Zeroizing::new(with_prior_state(invocation, selected));
+    let mut invocation: Zeroizing<PluginInvocationV1> = with_prior_state(invocation, selected);
     assert_eq!(invocation.prior_state_schema, [9; 32]);
     assert_eq!(invocation.prior_state_bytes, b"initial");
     assert_eq!(invocation.prior_state_bytes.as_ptr(), allocation);
     assert_eq!(state::tests::observation(), (1, true, true));
+    invocation.zeroize();
+    assert_eq!(invocation.prior_state_schema, [0; 32]);
+    assert!(invocation.prior_state_bytes.is_empty());
 }
 
 #[test]
