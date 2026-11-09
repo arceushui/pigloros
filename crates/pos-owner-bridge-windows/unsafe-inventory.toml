@@ -509,7 +509,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 57
+line = 61
 function = "starting"
 operation = "view.add_NavigationStarting(&handler, token)"
 invariant = "live STA interface/handler and initialized unique token output."
@@ -517,7 +517,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 61
+line = 65
 function = "starting"
 operation = "remove.remove_NavigationStarting(token)"
 invariant = "exact registered token on its retained creating-STA interface."
@@ -525,7 +525,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 85
+line = 89
 function = "source_changed"
 operation = "view.add_SourceChanged(&handler, token)"
 invariant = "live STA interface/handler and initialized unique token output."
@@ -533,7 +533,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 89
+line = 93
 function = "source_changed"
 operation = "remove.remove_SourceChanged(token)"
 invariant = "exact registered token on its retained creating-STA interface."
@@ -541,7 +541,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 109
+line = 113
 function = "content"
 operation = "view.add_ContentLoading(&handler, token)"
 invariant = "live STA interface/handler and initialized unique token output."
@@ -549,7 +549,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 113
+line = 117
 function = "content"
 operation = "remove.remove_ContentLoading(token)"
 invariant = "exact registered token on its retained creating-STA interface."
@@ -557,7 +557,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 137
+line = 141
 function = "loaded"
 operation = "view.add_DOMContentLoaded(&handler, token)"
 invariant = "live STA interface/handler and initialized unique token output."
@@ -565,7 +565,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 141
+line = 145
 function = "loaded"
 operation = "remove.remove_DOMContentLoaded(token)"
 invariant = "exact registered token on its retained creating-STA interface."
@@ -573,7 +573,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 165
+line = 169
 function = "completed"
 operation = "view.add_NavigationCompleted(&handler, token)"
 invariant = "live STA interface/handler and initialized unique token output."
@@ -581,7 +581,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 169
+line = 173
 function = "completed"
 operation = "remove.remove_NavigationCompleted(token)"
 invariant = "exact registered token on its retained creating-STA interface."
@@ -589,7 +589,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 189
+line = 193
 function = "frame"
 operation = "view.add_FrameCreated(&handler, token)"
 invariant = "live STA interface/handler and initialized unique token output."
@@ -597,7 +597,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 193
+line = 197
 function = "frame"
 operation = "remove.remove_FrameCreated(token)"
 invariant = "exact registered token on its retained creating-STA interface."
@@ -605,7 +605,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 216
+line = 220
 function = "process"
 operation = "view.add_ProcessFailed(&handler, token)"
 invariant = "live STA interface/handler and initialized unique token output."
@@ -613,7 +613,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 220
+line = 224
 function = "process"
 operation = "remove.remove_ProcessFailed(token)"
 invariant = "exact registered token on its retained creating-STA interface."
@@ -621,7 +621,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 248
+line = 265
 function = "navigation_start"
 operation = "args.SetCancel(!allow)"
 invariant = "live invoking-STA arguments; only the safe policy can select Allow."
@@ -629,7 +629,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 264
+line = 298
 function = "navigation_snapshot"
 operation = "args.Uri(out)"
 invariant = "live arguments and helper-owned initialized writable string output."
@@ -637,7 +637,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 268
+line = 302
 function = "navigation_snapshot"
 operation = "args.IsRedirected(&raw mut redirected)"
 invariant = "live invoking-STA arguments and initialized unique BOOL output."
@@ -645,7 +645,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 271
+line = 305
 function = "navigation_snapshot"
 operation = "args.NavigationId(&raw mut id)"
 invariant = "live invoking-STA arguments and initialized unique navigation-ID output."
@@ -653,7 +653,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 282
+line = 316
 function = "source"
 operation = "view.Source(out)"
 invariant = "retained live STA view and helper-owned initialized string output."
@@ -661,7 +661,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 290
+line = 324
 function = "content_loading"
 operation = "args.NavigationId(&raw mut id)"
 invariant = "live invoking-STA arguments and initialized unique navigation-ID output."
@@ -669,7 +669,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 293
+line = 327
 function = "content_loading"
 operation = "args.IsErrorPage(&raw mut error_page)"
 invariant = "live invoking-STA arguments and initialized unique BOOL output."
@@ -677,7 +677,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 308
+line = 342
 function = "dom_loaded"
 operation = "args.NavigationId(&raw mut id)"
 invariant = "live invoking-STA arguments and initialized unique navigation-ID output."
@@ -685,7 +685,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 321
+line = 355
 function = "navigation_completed"
 operation = "args.NavigationId(&raw mut id)"
 invariant = "live invoking-STA arguments and initialized unique navigation-ID output."
@@ -693,7 +693,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 324
+line = 358
 function = "navigation_completed"
 operation = "args.IsSuccess(&raw mut success)"
 invariant = "live invoking-STA arguments and initialized unique BOOL output."

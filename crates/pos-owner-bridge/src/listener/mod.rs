@@ -129,11 +129,41 @@ impl ListenerConfig {
     }
 }
 
+/// Aggregate diagnostic counters across the shared listener, not per navigation.
+#[cfg(feature = "test-support")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ListenerObservation {
+    /// Accepted connections.
+    pub accepted: usize,
+    /// Accepted connections still holding a slot.
+    pub handling: usize,
+    /// Slots reserved, including transient accept-loop reservations.
+    pub reserved: usize,
+    /// Connections ending without a complete header.
+    pub silent: usize,
+    /// Connections with a complete header.
+    pub complete: usize,
+    /// Connections whose header filled the buffer.
+    pub too_large: usize,
+}
+
+#[cfg(feature = "test-support")]
+#[derive(Debug, Default)]
+struct Observations {
+    accepted: AtomicUsize,
+    handling: AtomicUsize,
+    silent: AtomicUsize,
+    complete: AtomicUsize,
+    too_large: AtomicUsize,
+}
+
 /// State shared by the accept threads.
 #[derive(Debug, Default)]
 struct Shared {
     stop: AtomicBool,
     active: AtomicUsize,
+    #[cfg(feature = "test-support")]
+    observations: Arc<Observations>,
 }
 
 impl Shared {
@@ -152,17 +182,32 @@ impl Shared {
 
 /// One of the concurrency slots. Dropping it frees the slot, also when the worker that holds it
 /// panics or could not be spawned.
-struct SlotGuard(Arc<Shared>);
+struct SlotGuard {
+    shared: Arc<Shared>,
+    #[cfg(feature = "test-support")]
+    accepted: bool,
+}
 
 impl SlotGuard {
     fn acquire(shared: &Arc<Shared>) -> Option<Self> {
-        shared.try_acquire().then(|| Self(Arc::clone(shared)))
+        shared.try_acquire().then(|| Self {
+            shared: Arc::clone(shared),
+            #[cfg(feature = "test-support")]
+            accepted: false,
+        })
     }
 }
 
 impl Drop for SlotGuard {
     fn drop(&mut self) {
-        self.0.release();
+        #[cfg(feature = "test-support")]
+        if self.accepted {
+            self.shared
+                .observations
+                .handling
+                .fetch_sub(1, Ordering::SeqCst);
+        }
+        self.shared.release();
     }
 }
 
@@ -235,9 +280,19 @@ fn accept_loop(listener: &TcpListener, context: &Arc<ServeContext>, shared: &Arc
             thread::sleep(ACCEPT_POLL);
             continue;
         };
+        #[cfg(feature = "test-support")]
+        let mut slot = slot;
         let accepted = listener.accept();
         match accepted {
-            Ok((stream, _)) => dispatch(stream, slot, context, spawn_thread),
+            Ok((stream, _)) => {
+                #[cfg(feature = "test-support")]
+                {
+                    slot.accepted = true;
+                    shared.observations.accepted.fetch_add(1, Ordering::SeqCst);
+                    shared.observations.handling.fetch_add(1, Ordering::SeqCst);
+                }
+                dispatch(stream, slot, context, spawn_thread);
+            }
             Err(_) => thread::sleep(ACCEPT_POLL),
         }
     }
@@ -276,6 +331,7 @@ impl LoopbackListener {
         let ledger = Arc::new(ServedLedger::default());
         #[cfg(feature = "test-support")]
         let received = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let shared = Arc::new(Shared::default());
         let context = Arc::new(ServeContext {
             ledger: Arc::clone(&ledger),
             timeouts: config.timeouts,
@@ -283,8 +339,9 @@ impl LoopbackListener {
             response: config.response,
             #[cfg(feature = "test-support")]
             received: Arc::clone(&received),
+            #[cfg(feature = "test-support")]
+            observations: Arc::clone(&shared.observations),
         });
-        let shared = Arc::new(Shared::default());
         let accepting = std::iter::once(sockets.v4).chain(sockets.v6);
         let workers = start_accept_threads(
             accepting,
@@ -320,6 +377,21 @@ impl LoopbackListener {
     #[must_use]
     pub fn received_request_count(&self) -> u64 {
         self.received.load(Ordering::SeqCst)
+    }
+
+    /// Aggregate test observations; snapshots may race connection transitions.
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn observation(&self) -> ListenerObservation {
+        let o = &self.shared.observations;
+        ListenerObservation {
+            accepted: o.accepted.load(Ordering::SeqCst),
+            handling: o.handling.load(Ordering::SeqCst),
+            reserved: self.shared.active.load(Ordering::SeqCst),
+            silent: o.silent.load(Ordering::SeqCst),
+            complete: o.complete.load(Ordering::SeqCst),
+            too_large: o.too_large.load(Ordering::SeqCst),
+        }
     }
 
     /// The bound IPv6 loopback address, when IPv6 is held.

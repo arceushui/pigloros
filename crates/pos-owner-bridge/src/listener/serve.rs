@@ -29,6 +29,9 @@ pub(super) struct ServeContext {
     /// Test-only count of connections that supplied at least one request byte.
     #[cfg(feature = "test-support")]
     pub(super) received: Arc<std::sync::atomic::AtomicU64>,
+    /// Aggregate test-only connection outcomes.
+    #[cfg(feature = "test-support")]
+    pub(super) observations: Arc<super::Observations>,
 }
 
 /// How reading one request ended.
@@ -181,6 +184,15 @@ pub(super) fn serve_connection(mut stream: TcpStream, context: &ServeContext) {
             .received
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     });
+    #[cfg(feature = "test-support")]
+    {
+        let counter = match outcome {
+            ReadOutcome::Silent => &context.observations.silent,
+            ReadOutcome::Complete(_) => &context.observations.complete,
+            ReadOutcome::TooLarge => &context.observations.too_large,
+        };
+        counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
     let admitted = match outcome {
         ReadOutcome::Silent => return,
         ReadOutcome::TooLarge => None,

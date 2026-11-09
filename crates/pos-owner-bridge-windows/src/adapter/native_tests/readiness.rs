@@ -137,6 +137,7 @@ fn run_ceremony(
     let _visible = acquire_foreground(surface, foreground, number)?;
     let started = Instant::now();
     surface.begin_readiness_timing(number, started);
+    crate::Native::readiness_navigation_case(Some((number, started)));
     let deadline = started + Duration::from_secs(15);
     surface.set_deadline(deadline);
     let mut driver = new_driver(id, started)?;
@@ -200,6 +201,7 @@ fn run_ceremony(
         }
     }
     surface.report_readiness_timing();
+    crate::Native::readiness_navigation_case(None);
     if let Some(error) = failure {
         return Err(error);
     }

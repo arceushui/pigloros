@@ -42,12 +42,16 @@ fn starting(
     let observed = Rc::clone(signals);
     let cancellation = Rc::clone(recovery);
     let intercepted = view.clone();
+    #[cfg(test)]
+    let allow_reports = std::cell::Cell::new(0_u8);
     let handler = NavigationStartingEventHandler::create(Box::new(move |_sender, args| {
         navigation_start(
             args,
             intercepted.clone(),
             Rc::clone(&observed),
             &cancellation,
+            #[cfg(test)]
+            &allow_reports,
         );
         Ok(())
     }));
@@ -222,11 +226,24 @@ fn process(
     )
 }
 
+#[cfg(test)]
+thread_local! {
+    static READINESS_CASE: std::cell::Cell<Option<(u64, std::time::Instant)>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+impl crate::Native {
+    pub(crate) fn readiness_navigation_case(case: Option<(u64, std::time::Instant)>) {
+        READINESS_CASE.with(|current| current.set(case));
+    }
+}
+
 fn navigation_start(
     args: Option<ICoreWebView2NavigationStartingEventArgs>,
     view: ICoreWebView2,
     sink: Rc<dyn EventSink>,
     recovery: &Recovery,
+    #[cfg(test)] allow_reports: &std::cell::Cell<u8>,
 ) {
     let Some(args) = args else {
         sink.failed(EventKind::Navigation, unavailable());
@@ -245,7 +262,24 @@ fn navigation_start(
         );
     }
     // SAFETY: live invoking-STA arguments; only the safe policy can select Allow.
-    if unsafe { args.SetCancel(!allow) }.is_err() {
+    let set_cancel = unsafe { args.SetCancel(!allow) };
+    #[cfg(test)]
+    if allow && allow_reports.get() < 16 {
+        use std::io::Write as _;
+        allow_reports.set(allow_reports.get() + 1);
+        READINESS_CASE.with(|current| {
+            if let Some((case, started)) = current.get() {
+                let _logged_or_unavailable = writeln!(
+                    std::io::stderr(),
+                    "NATIVE_NAVIGATION_ALLOW case={case} elapsed={:?} view={:p} success={}",
+                    started.elapsed(),
+                    view.as_raw(),
+                    set_cancel.is_ok()
+                );
+            }
+        });
+    }
+    if set_cancel.is_err() {
         sink.failed(EventKind::Navigation, unavailable());
         if !allow {
             recovery.control(Control::Navigation { _args: Some(args) }, view, sink);

@@ -219,6 +219,44 @@ fn silent_preconnect_sockets_cannot_starve_a_real_navigation() -> TestResult {
 }
 
 #[test]
+fn aggregate_connection_observations_track_silent_and_served_sockets() -> TestResult {
+    let listener = start(ListenerConfig::adr())?;
+    let silent = TcpStream::connect(listener.v4_addr())?;
+    let limit = Instant::now() + Duration::from_secs(5);
+    loop {
+        let observation = listener.observation();
+        if observation.accepted >= 1 && observation.handling >= 1 {
+            break;
+        }
+        if Instant::now() >= limit {
+            return Err("silent socket was not accepted".into());
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    drop(silent);
+    let limit = Instant::now() + Duration::from_secs(5);
+    loop {
+        let observation = listener.observation();
+        if observation.silent >= 1 && observation.handling == 0 {
+            break;
+        }
+        if Instant::now() >= limit {
+            return Err("silent socket did not retire".into());
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let response = exchange(listener.v4_addr(), OWNER_REQUEST)?;
+    assert!(is_the_pinned_owner_response(&response));
+    let observation = listener.observation();
+    assert_eq!(observation.accepted, 2);
+    assert_eq!(observation.silent, 1);
+    assert_eq!(observation.complete, 1);
+    assert_eq!(listener.received_request_count(), 1);
+    assert_eq!(listener.served().count, 1);
+    Ok(())
+}
+
+#[test]
 fn a_digest_mismatch_fails_the_integrity_verdict() -> TestResult {
     let config = ListenerConfig::new(ListenerConfig::adr().timeouts(), [0; 32]);
     let listener = start(config)?;

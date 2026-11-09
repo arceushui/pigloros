@@ -313,6 +313,7 @@ fn responses_to_a_broken_peer_leave_the_ledger_untouched() {
     let context = ServeContext {
         ledger: Arc::clone(&ledger),
         received: Arc::default(),
+        observations: Arc::default(),
         timeouts: ADR_TIMEOUTS,
         expected_digest: ADR_DIGEST,
         response: &super::assets::OWNER,
@@ -525,6 +526,7 @@ fn the_fixed_error_responses_are_written_exactly() {
     let context = ServeContext {
         ledger: Arc::new(ServedLedger::default()),
         received: Arc::default(),
+        observations: Arc::default(),
         timeouts: ADR_TIMEOUTS,
         expected_digest: ADR_DIGEST,
         response: &super::assets::OWNER,
@@ -568,6 +570,7 @@ fn serve_context() -> Arc<ServeContext> {
     Arc::new(ServeContext {
         ledger: Arc::new(ServedLedger::default()),
         received: Arc::default(),
+        observations: Arc::default(),
         timeouts: ADR_TIMEOUTS,
         expected_digest: ADR_DIGEST,
         response: &super::assets::OWNER,
