@@ -347,8 +347,11 @@ mod cases {
         Ok(())
     }
 
+    /// Eight full lifecycles joined on one paused current-thread runtime. This
+    /// checks that the attempts' cleanups stay independent when interleaved;
+    /// it is not a concurrency stress test.
     #[tokio::test(start_paused = true)]
-    async fn eight_concurrent_lifecycles_each_end_with_their_intent_deleted_last() -> TestResult {
+    async fn eight_joined_lifecycles_each_end_with_their_intent_deleted_last() -> TestResult {
         let runtime = tempfile::tempdir()?;
         fs::set_permissions(runtime.path(), fs::Permissions::from_mode(0o700))?;
         for child in ["registry", "attempts"] {

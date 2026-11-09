@@ -1,10 +1,16 @@
-//! Crash-frontier conformance: a restart reconciles every registry transition.
+//! Pre-launch crash frontiers of the registry and attempt directories.
 //!
 //! The live lifecycle of one attempt is replayed with an injected failure at
 //! each registry I/O step in turn: every temporary write, fsync, rename, mkdir,
 //! PAI2 and PAI3 extension, directory removal and the intent-last unlink. The
 //! failed process state is then abandoned, as a crash would leave it, and a
-//! restarted recovery owner must remove whatever survived.
+//! restarted recovery owner must remove whatever survived. At every step the
+//! intent must still exist while any attempt directory remains.
+//!
+//! Scope: only registry and directory frontiers before any unit exists. The
+//! restart's unit, network and device proofs are given here as evidence; their
+//! gating of removal is covered by the `restart` tests. Unit and mount
+//! transitions are not reconciled positively yet (remaining #1200).
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -98,8 +104,9 @@ mod cases {
         ))
     }
 
-    /// Restart: exact unit absence is assumed proved for every entry and the
-    /// recorded root's devices observed released, as `reconcile_restart` proves.
+    /// Restart with its proofs given: exact unit absence for every entry and
+    /// the recorded root's devices released. `restart` tests cover how those
+    /// proofs gate removal.
     fn reconcile(runtime: &Path) -> TestResult {
         let parent = File::open(runtime)?;
         let held = RegistryDirectory::from_runtime_directory(&parent, parent.metadata()?.uid())?;
@@ -113,10 +120,16 @@ mod cases {
         Ok(())
     }
 
+    /// Whether the intent outlives the directories: a surviving attempt
+    /// directory, with or without its root, always has its committed record.
+    fn intent_covers_directories(frontier: &Frontier) -> bool {
+        frontier.1.is_some() || !frontier.3
+    }
+
     #[test]
-    fn a_crash_at_every_registry_step_of_a_lifecycle_is_reconciled() -> TestResult {
+    fn a_crash_at_every_registry_step_leaves_a_pre_launch_frontier_restart_removes() -> TestResult {
         if !in_lock_test_process(
-        "attempt_registry::frontiers::cases::a_crash_at_every_registry_step_of_a_lifecycle_is_reconciled",
+        "attempt_registry::frontiers::cases::a_crash_at_every_registry_step_leaves_a_pre_launch_frontier_restart_removes",
     )? {
         return Ok(());
     }
@@ -132,7 +145,12 @@ mod cases {
             let runtime = runtime()?;
             let (result, _) = run(Some(fail_at), runtime.path())?;
             assert!(result.is_err(), "step {fail_at}");
-            frontiers.insert(frontier(runtime.path())?);
+            let crashed = frontier(runtime.path())?;
+            assert!(
+                intent_covers_directories(&crashed),
+                "step {fail_at}: {crashed:?}"
+            );
+            frontiers.insert(crashed);
             reconcile(runtime.path())?;
             assert_eq!(
                 frontier(runtime.path())?,
