@@ -1581,7 +1581,7 @@ hosted_test = "nonce_lock_native"
 
 [[block]]
 file = "src/ffi/nonce_ledger.rs"
-line = 179
+line = 184
 function = "create_wrong_acl_fixture"
 operation = "CreateMutexW"
 invariant = "Test-only explicit wrong ACL and terminated name; initial owner false; retained handle is closed once."
@@ -1589,7 +1589,7 @@ hosted_test = "nonce_lock_native"
 
 [[block]]
 file = "src/ffi/nonce_ledger.rs"
-line = 201
+line = 206
 function = "open_verified"
 operation = "CreateMutexW"
 invariant = "Terminated SID name and live security attributes; initial owner false; handle non-inheritable."
@@ -1597,7 +1597,7 @@ hosted_test = "nonce_lock_native"
 
 [[block]]
 file = "src/ffi/nonce_ledger.rs"
-line = 206
+line = 211
 function = "open_verified"
 operation = "CloseHandle"
 invariant = "Security validation failed before any wait; close unowned mutex handle once."
@@ -1605,7 +1605,7 @@ hosted_test = "nonce_lock_native"
 
 [[block]]
 file = "src/ffi/nonce_ledger.rs"
-line = 215
+line = 220
 function = "acquire_inner"
 operation = "WaitForSingleObject"
 invariant = "Live handle; zero timeout; only successful or abandoned wait acquires ownership."
@@ -1613,7 +1613,7 @@ hosted_test = "nonce_lock_native"
 
 [[block]]
 file = "src/ffi/nonce_ledger.rs"
-line = 221
+line = 226
 function = "acquire_inner"
 operation = "CloseHandle"
 invariant = "Failed wait has no ownership; close unowned handle once."
@@ -1621,7 +1621,7 @@ hosted_test = "nonce_lock_native"
 
 [[block]]
 file = "src/ffi/nonce_ledger.rs"
-line = 235
+line = 240
 function = "drop"
 operation = "CloseHandle"
 invariant = "Test fixture never waits; closes its separate unowned handle once."
@@ -1629,7 +1629,7 @@ hosted_test = "nonce_lock_native"
 
 [[block]]
 file = "src/ffi/nonce_ledger.rs"
-line = 243
+line = 248
 function = "drop"
 operation = "ReleaseMutex"
 invariant = "Non-Send guard is released by owning thread exactly once after its single wait."
@@ -1637,7 +1637,7 @@ hosted_test = "nonce_lock_native"
 
 [[block]]
 file = "src/ffi/nonce_ledger.rs"
-line = 245
+line = 250
 function = "drop"
 operation = "CloseHandle"
 invariant = "Guard owns one handle, closed once after release attempt."

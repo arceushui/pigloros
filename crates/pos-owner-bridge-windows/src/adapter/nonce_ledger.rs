@@ -14,7 +14,7 @@ use pos_owner_bridge::{BridgeError, UnavailableCode};
 /// It is thread-bound and must remain held through quarantine and recovery.
 #[must_use = "retain the lock for the owner lifetime"]
 pub struct WindowsSubjectEncryptorLock {
-    _mutex: crate::ffi::SubjectMutex,
+    mutex: crate::ffi::SubjectMutex,
 }
 
 impl WindowsSubjectEncryptorLock {
@@ -29,7 +29,7 @@ impl WindowsSubjectEncryptorLock {
             return Err(unavailable());
         }
         crate::ffi::SubjectMutex::acquire()
-            .map(|mutex| Self { _mutex: mutex })
+            .map(|mutex| Self { mutex })
             .map_err(|()| unavailable())
     }
 }
@@ -38,6 +38,7 @@ impl fmt::Debug for WindowsSubjectEncryptorLock {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("WindowsSubjectEncryptorLock")
+            .field("mutex", &self.mutex)
             .finish_non_exhaustive()
     }
 }
@@ -47,8 +48,8 @@ const fn unavailable() -> BridgeError {
 }
 
 #[cfg(test)]
-pub(crate) fn exercise_native_lock() -> Result<(), Box<dyn std::error::Error>> {
-    use std::io::{self, BufRead as _, Write as _};
+pub fn exercise_native_lock() -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::{self, Write as _};
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
 
@@ -133,6 +134,17 @@ pub(crate) fn exercise_native_lock() -> Result<(), Box<dyn std::error::Error>> {
     probe("acquire")?;
     drop(retained);
 
+    exercise_abandonment(&directory)
+}
+
+#[cfg(test)]
+fn exercise_abandonment(directory: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::{self, BufRead as _};
+    use std::process::{Command, Stdio};
+    use std::time::Duration;
+
+    const CASE: &str = "PIGLOROS_WINDOWS_NONCE_LOCK_CASE";
+    const MARKER: &str = "WINDOWS_NONCE_LOCK_PROBE_EXECUTED";
     let mut child = Command::new(std::env::current_exe()?)
         .args([
             "--exact",
@@ -176,8 +188,8 @@ pub(crate) fn exercise_native_lock() -> Result<(), Box<dyn std::error::Error>> {
     let retained = crate::ffi::SubjectMutex::retain_second_handle().map_err(|()| unavailable())?;
     child.kill()?;
     child.wait()?;
-    let guard = WindowsSubjectEncryptorLock::acquire(&directory)?;
-    assert!(guard._mutex.was_abandoned());
+    let guard = WindowsSubjectEncryptorLock::acquire(directory)?;
+    assert!(guard.mutex.was_abandoned());
     drop(guard);
     drop(retained);
     Ok(())

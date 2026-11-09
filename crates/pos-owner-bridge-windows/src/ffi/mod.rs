@@ -18,7 +18,7 @@ mod text;
 mod window;
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use nonce_ledger::SubjectMutex;
+pub use nonce_ledger::SubjectMutex;
 
 impl crate::Native {
     pub(super) fn inspect_process(

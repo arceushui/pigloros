@@ -105,11 +105,19 @@ fn validate_descriptor(handle: HANDLE, expected: &LocalMemory) -> Result<(), ()>
 }
 
 /// One acquired mutex, pinned to the calling thread until its single release.
-pub(crate) struct SubjectMutex {
+pub struct SubjectMutex {
     handle: HANDLE,
     #[cfg(test)]
     abandoned: bool,
     _thread_bound: PhantomData<Rc<()>>,
+}
+
+impl std::fmt::Debug for SubjectMutex {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SubjectMutex")
+            .finish_non_exhaustive()
+    }
 }
 
 impl SubjectMutex {
@@ -120,21 +128,18 @@ impl SubjectMutex {
         {
             return Err(());
         }
-        match acquire_inner() {
-            Ok((handle, abandoned)) => {
-                #[cfg(not(test))]
-                let _ = abandoned;
-                Ok(Self {
-                    handle,
-                    #[cfg(test)]
-                    abandoned,
-                    _thread_bound: PhantomData,
-                })
-            }
-            Err(()) => {
-                PROCESS_ADMISSION.store(false, Ordering::Release);
-                Err(())
-            }
+        if let Ok((handle, abandoned)) = acquire_inner() {
+            #[cfg(not(test))]
+            let _ = abandoned;
+            Ok(Self {
+                handle,
+                #[cfg(test)]
+                abandoned,
+                _thread_bound: PhantomData,
+            })
+        } else {
+            PROCESS_ADMISSION.store(false, Ordering::Release);
+            Err(())
         }
     }
 
@@ -225,7 +230,7 @@ fn acquire_inner() -> Result<(HANDLE, bool), ()> {
 }
 
 #[cfg(test)]
-pub(crate) struct RetainedMutex(HANDLE);
+pub struct RetainedMutex(HANDLE);
 
 #[cfg(test)]
 impl Drop for RetainedMutex {

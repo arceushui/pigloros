@@ -37,7 +37,7 @@ mod adapter {
     mod native_tests;
 
     #[cfg(test)]
-    pub(crate) use nonce_ledger::exercise_native_lock;
+    pub use nonce_ledger::exercise_native_lock;
     #[cfg(any(test, feature = "test-support"))]
     pub use nonce_ledger::WindowsSubjectEncryptorLock;
 
