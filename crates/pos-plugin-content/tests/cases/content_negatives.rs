@@ -442,3 +442,70 @@ fn explicit_schema_id_cannot_collide_with_a_later_implicit_base() -> TestResult 
     );
     Ok(())
 }
+
+#[test]
+fn second_licence_refusal_reports_its_index() -> TestResult {
+    let mut fixture = Fixture::new();
+    fixture.licences.push(b" \n".to_vec());
+    assert_eq!(
+        result(&fixture)?,
+        Err(Error::Malformed {
+            artifact: Artifact::Licence { index: 1 }
+        })
+    );
+    Ok(())
+}
+
+#[test]
+fn explicit_current_dialect_and_negative_schema_numbers_are_preserved() -> TestResult {
+    let mut fixture = Fixture::new();
+    fixture.schemas = vec![bytes(
+        &json!({"$schema":"https://json-schema.org/draft/2020-12/schema", "minimum":-1}),
+    )];
+    assert_eq!(result(&fixture)?, Ok(()));
+    Ok(())
+}
+
+#[test]
+fn null_values_count_toward_the_json_node_limit() -> TestResult {
+    for (count, expected) in [
+        (262_142, Ok(())),
+        (
+            262_143,
+            Err(Error::BoundsExceeded {
+                artifact: Artifact::Schema { index: 0 },
+            }),
+        ),
+    ] {
+        let mut fixture = Fixture::new();
+        fixture.schemas = vec![bytes(&json!({"examples": vec![Value::Null; count]}))];
+        assert_eq!(result(&fixture)?, expected);
+    }
+    Ok(())
+}
+
+#[test]
+fn spdx_description_relationship_requires_the_document_endpoint() -> TestResult {
+    for inverse in [false, true] {
+        let mut fixture = Fixture::new();
+        fixture.sbom(|value| {
+            let mut parent = value["packages"][0].clone();
+            parent["SPDXID"] = json!("SPDXRef-parent");
+            assert!(parent.as_object_mut().and_then(|object| object.remove("checksums")).is_some());
+            value["packages"] = json!([value["packages"][0].clone(), parent]);
+            assert!(value.as_object_mut().and_then(|object| object.remove("documentDescribes")).is_some());
+            value["relationships"] = if inverse {
+                json!([{"spdxElementId":"SPDXRef-component", "relationshipType":"DESCRIBED_BY", "relatedSpdxElement":"SPDXRef-parent"}])
+            } else {
+                json!([{"spdxElementId":"SPDXRef-parent", "relationshipType":"DESCRIBES", "relatedSpdxElement":"SPDXRef-component"}])
+            };
+        })?;
+        assert_eq!(
+            result(&fixture)?,
+            Err(Error::ReferenceMismatch {
+                artifact: Artifact::Sbom
+            })
+        );
+    }
+    Ok(())
+}

@@ -43,13 +43,17 @@ impl<'de> DeserializeSeed<'de> for Node<'_> {
     type Value = Value;
 
     fn deserialize<D: de::Deserializer<'de>>(self, decoder: D) -> Result<Value, D::Error> {
-        if self.budget.nodes == MAX_NODES {
-            self.budget.exceeded = true;
-            return Err(de::Error::custom("JSON bound"));
-        }
-        self.budget.nodes += 1;
         decoder.deserialize_any(self)
     }
+}
+
+fn count_node<E: de::Error>(budget: &mut Budget) -> Result<(), E> {
+    if budget.nodes == MAX_NODES {
+        budget.exceeded = true;
+        return Err(de::Error::custom("JSON bound"));
+    }
+    budget.nodes += 1;
+    Ok(())
 }
 
 impl<'de> Visitor<'de> for Node<'_> {
@@ -60,32 +64,39 @@ impl<'de> Visitor<'de> for Node<'_> {
     }
 
     fn visit_bool<E: de::Error>(self, value: bool) -> Result<Value, E> {
+        count_node(self.budget)?;
         Ok(Value::Bool(value))
     }
 
     fn visit_i64<E: de::Error>(self, value: i64) -> Result<Value, E> {
+        count_node(self.budget)?;
         Ok(Value::Number(value.into()))
     }
 
     fn visit_u64<E: de::Error>(self, value: u64) -> Result<Value, E> {
+        count_node(self.budget)?;
         Ok(Value::Number(value.into()))
     }
 
     fn visit_f64<E: de::Error>(self, value: f64) -> Result<Value, E> {
+        count_node(self.budget)?;
         Number::from_f64(value)
             .map(Value::Number)
             .ok_or_else(|| de::Error::custom("non-finite JSON number"))
     }
 
     fn visit_str<E: de::Error>(self, value: &str) -> Result<Value, E> {
+        count_node(self.budget)?;
         Ok(Value::String(value.to_owned()))
     }
 
     fn visit_unit<E: de::Error>(self) -> Result<Value, E> {
+        count_node(self.budget)?;
         Ok(Value::Null)
     }
 
     fn visit_seq<A: SeqAccess<'de>>(self, mut sequence: A) -> Result<Value, A::Error> {
+        count_node(self.budget)?;
         if self.depth == MAX_DEPTH {
             self.budget.exceeded = true;
             return Err(de::Error::custom("JSON depth"));
@@ -101,6 +112,7 @@ impl<'de> Visitor<'de> for Node<'_> {
     }
 
     fn visit_map<A: MapAccess<'de>>(self, mut object: A) -> Result<Value, A::Error> {
+        count_node(self.budget)?;
         if self.depth == MAX_DEPTH {
             self.budget.exceeded = true;
             return Err(de::Error::custom("JSON depth"));
