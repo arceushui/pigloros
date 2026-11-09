@@ -9,6 +9,7 @@ mod classification;
 mod envelope;
 mod error;
 mod guest_error;
+mod invocation;
 mod member;
 mod metadata_envelope;
 mod metadata_scope;
@@ -19,8 +20,10 @@ mod progress;
 mod protected_object;
 mod quarantine;
 mod quarantine_control;
+mod recording;
 mod reservation;
 mod revision;
+mod seal;
 mod selected_head;
 mod state;
 mod step;
@@ -37,6 +40,10 @@ pub use envelope::{
 };
 pub use error::CommunityLifecycleErrorV1;
 pub use guest_error::is_valid_community_id_v1;
+pub use invocation::{
+    CommunityInvocationEvidenceInputV1, CommunityInvocationEvidenceV1, CommunityOutputUsageV1,
+    MeteringV1,
+};
 pub use member::{CommunityMemberBindingInputV1, CommunityMemberBindingV1};
 pub use metadata_envelope::{CommunityMetadataEnvelopeV1, CommunityMetadataSchemaV1};
 pub use metadata_scope::{
@@ -69,6 +76,10 @@ pub use quarantine_control::{
     CommunityQuarantineControlV1, CommunityQuarantineDispositionV1,
     CommunityQuarantineOutcomeInputV1, CommunityQuarantineOutcomeV1,
 };
+pub use recording::{
+    CommunityAnnotationOmissionV1, CommunityAnnotationOmissionsV1, CommunityReplayMemberBindingV1,
+    CommunityReplayMemberV1, CommunityReplayRecordingInputV1, CommunityReplayRecordingV1,
+};
 pub use reservation::{
     CommunityReservationInputV1, CommunityReservationRequestInputV1, CommunityReservationRequestV1,
     CommunityReservationV1,
@@ -76,6 +87,7 @@ pub use reservation::{
 pub use revision::{
     CommunityStateProducerV1, CommunityStateRevisionInputV1, CommunityStateRevisionV1,
 };
+pub use seal::{CommunityDigestListV1, CommunitySealedResultInputV1, CommunitySealedResultV1};
 pub use selected_head::{
     CommunityMemberHeadV1, CommunityMemberHeadsV1, CommunityPassFrontierV1,
     CommunitySelectedHeadInputV1, CommunitySelectedHeadV1, MAX_COMMUNITY_MEMBERS_V1,
