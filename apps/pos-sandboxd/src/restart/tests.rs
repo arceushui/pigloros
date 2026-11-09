@@ -267,7 +267,7 @@ mod cases {
     }
 
     /// A provider loop sweep that finds no loop over a provider image.
-    fn swept() -> impl Fn() -> std::future::Ready<Result<bool, ImageActivationError>> {
+    fn swept() -> impl Fn() -> std::future::Ready<Result<bool, ImageActivationError>> + Sync {
         || std::future::ready(Ok(true))
     }
 

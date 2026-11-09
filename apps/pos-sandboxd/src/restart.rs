@@ -88,8 +88,10 @@ impl ReconciledRestart {
 
 /// The attempts whose recorded roots' loop/dm generations were observed
 /// absent by a fresh probe, after which no loop device was found backed by a
-/// provider image, also once no previous-runtime `MountImage` request could
-/// still attach one.
+/// provider image.
+///
+/// That sweep is repeated once no previous-runtime `MountImage` request can
+/// still attach a loop device.
 ///
 /// Only restart reconciliation's device proof creates it, so registry removal
 /// cannot be handed released-root evidence that no probe produced. It has no
@@ -190,7 +192,7 @@ where
     N: OrphanNetworkCleanup + Sync,
     P: Fn(Generations) -> F,
     F: Future<Output = Result<bool, ImageActivationError>>,
-    L: Fn() -> G,
+    L: Fn() -> G + Sync,
     G: Future<Output = Result<bool, ImageActivationError>>,
     C: FnOnce() -> io::Result<BootInstant>,
 {
@@ -270,7 +272,7 @@ async fn roots_released<P, F, L, G, C>(
 where
     P: Fn(Generations) -> F,
     F: Future<Output = Result<bool, ImageActivationError>>,
-    L: Fn() -> G,
+    L: Fn() -> G + Sync,
     G: Future<Output = Result<bool, ImageActivationError>>,
     C: FnOnce() -> io::Result<BootInstant>,
 {
@@ -301,7 +303,7 @@ where
 /// Prove that no loop device is backed by a provider image.
 async fn sweep_loops<L, G>(sweep: &L) -> Reconciled<()>
 where
-    L: Fn() -> G,
+    L: Fn() -> G + Sync,
     G: Future<Output = Result<bool, ImageActivationError>>,
 {
     let swept = sweep().await;
