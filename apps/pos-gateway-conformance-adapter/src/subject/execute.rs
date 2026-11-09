@@ -292,9 +292,9 @@ fn request(exchange: &ExchangeV2, timeline: Option<&str>, key: &str) -> Request<
             .insert(ACTOR_HEADER, HeaderValue::from_static(ACTOR_ENTITY_ID));
     }
     if exchange.route() == RouteV2::Actions {
-        HeaderValue::from_str(key).into_iter().for_each(|value| {
+        if let Ok(value) = HeaderValue::from_str(key) {
             request.headers_mut().insert(IDEMPOTENCY_KEY_HEADER, value);
-        });
+        }
     }
     request
 }
