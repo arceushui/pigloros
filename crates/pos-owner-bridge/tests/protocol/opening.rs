@@ -23,6 +23,7 @@ struct DelayedOpening<'a> {
     open_pending: u32,
     navigation_pending: u32,
     navigation: Poll<Result<NavigationId, SurfaceError>>,
+    owner_observation: Option<&'a mut Vec<Option<u64>>>,
 }
 
 impl OwnerWebSurface for DelayedOpening<'_> {
@@ -30,6 +31,9 @@ impl OwnerWebSurface for DelayedOpening<'_> {
         &mut self,
         spec: &SurfaceSpec,
     ) -> std::task::Poll<Result<ProcessIdentity, SurfaceError>> {
+        if let Some(observed) = self.owner_observation.as_deref_mut() {
+            observed.push(spec.owner_window);
+        }
         if self.open_pending > 0 {
             self.open_pending -= 1;
             return Poll::Pending;
@@ -109,6 +113,40 @@ impl CleanupStore for DelayedStore {
 }
 
 #[test]
+fn test_plan_owner_window_reaches_the_surface_open_port() -> TestResult {
+    for owner in [None, Some(0x1234_5678_9abc_def0)] {
+        let mut rig = DriverRig::new(honest(0), SurfaceConfig::default())?;
+        let plan = create_plan(&rig.clock);
+        let plan = match owner {
+            Some(value) => plan.with_test_owner_window(value),
+            None => plan,
+        };
+        let mut driver = new_driver(plan);
+        let mut store = rig.store.clone();
+        let mut loopback = rig.loopback.clone();
+        let mut observed = Vec::new();
+        let mut surface = DelayedOpening {
+            inner: &mut rig.surface,
+            clock: rig.clock.clone(),
+            delay: Duration::ZERO,
+            open_pending: 1,
+            navigation_pending: 0,
+            navigation: Poll::Pending,
+            owner_observation: Some(&mut observed),
+        };
+        let mut env = StepEnv {
+            surface: &mut surface,
+            clock: &rig.clock,
+            loopback: &mut loopback,
+            store: &mut store,
+        };
+        assert!(matches!(driver.step(&mut env), Step::Pending));
+        assert_eq!(observed, vec![owner]);
+    }
+    Ok(())
+}
+
+#[test]
 fn pending_open_and_navigation_return_control_and_preserve_early_load() -> TestResult {
     let mut rig = DriverRig::new(
         honest(0),
@@ -127,6 +165,7 @@ fn pending_open_and_navigation_return_control_and_preserve_early_load() -> TestR
         open_pending: 2,
         navigation_pending: 2,
         navigation: Poll::Pending,
+        owner_observation: None,
     };
     let mut env = StepEnv {
         surface: &mut surface,
@@ -173,6 +212,7 @@ fn pending_stages_do_not_restart_the_readiness_deadline() -> TestResult {
             open_pending: if opening { u32::MAX } else { 0 },
             navigation_pending: if opening { 0 } else { u32::MAX },
             navigation: Poll::Pending,
+            owner_observation: None,
         };
         let mut env = StepEnv {
             surface: &mut surface,
@@ -213,6 +253,7 @@ fn duplicate_document_completion_while_navigation_is_pending_prevents_posting() 
         open_pending: 0,
         navigation_pending: 2,
         navigation: Poll::Pending,
+        owner_observation: None,
     };
     let mut env = StepEnv {
         surface: &mut surface,
@@ -264,6 +305,7 @@ fn opening_and_durable_write_time_expire_before_navigation_or_buffer_creation() 
                 open_pending: 0,
                 navigation_pending: 0,
                 navigation: Poll::Pending,
+                owner_observation: None,
             };
             let mut store = DelayedStore {
                 inner: rig.store.clone(),

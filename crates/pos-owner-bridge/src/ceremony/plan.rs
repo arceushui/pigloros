@@ -200,6 +200,15 @@ impl CeremonyPlan {
         Self { stored, ..self }
     }
 
+    /// Supply the existing owner-window input for an isolated host fixture.
+    #[must_use]
+    pub fn with_test_owner_window(self, owner_window: u64) -> Self {
+        Self {
+            owner_window: Some(owner_window),
+            ..self
+        }
+    }
+
     /// Start at `generation`.
     #[must_use]
     pub fn with_generation(self, generation: u32) -> Self {

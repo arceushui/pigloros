@@ -1883,6 +1883,44 @@ def test_live_mapping_witness_boundary() -> None:
             raise SystemExit(f"native observation boundary change was accepted: {old}")
 
 
+def test_owned_parent_fixture_is_test_only_and_exactly_bound() -> None:
+    paths = (
+        f"{SHIM}/src/lib.rs",
+        f"{SHIM}/src/ffi/mod.rs",
+        f"{SHIM}/src/ffi/fixture_parent.rs",
+        f"{SHIM}/src/adapter/native_tests.rs",
+        "crates/pos-owner-bridge/src/ceremony/plan.rs",
+    )
+    sources = {path: (ROOT / path).read_text(encoding="utf-8") for path in paths}
+
+    def errors(values: dict[str, str]) -> list[str]:
+        found: list[str] = []
+        CHECKER._check_owned_parent_boundary(values, found)
+        return found
+
+    if errors(sources):
+        raise SystemExit(f"owned-parent baseline rejected: {errors(sources)}")
+    mutations = (
+        (paths[1], "#[cfg(test)]\npub(crate) mod fixture_parent;", "pub(crate) mod fixture_parent;"),
+        (paths[2], '"PIGLOR_HOST_FIXTURE_PARENT"', '"UNREVIEWED_PARENT"'),
+        (paths[2], "self.window.handle().0 as usize", "123_usize"),
+        (paths[2], "self.pump.token.check()?;", ""),
+        (paths[0], "parent.finish()?;", "drop(parent);"),
+        (paths[0], "parent.pump()", "Ok(crate::NativePulse::Timer)"),
+        (paths[3], ".with_test_owner_window(owner_window)", ".with_test_owner_window(123)"),
+        (paths[4], '#[cfg(feature = "test-support")]\nimpl CeremonyPlan {', 'impl CeremonyPlan {'),
+    )
+    for path, old, new in mutations:
+        if old not in sources[path]:
+            raise SystemExit(f"owned-parent mutation anchor missing: {old}")
+        changed = dict(sources, **{path: sources[path].replace(old, new, 1)})
+        if not errors(changed):
+            raise SystemExit(f"owned-parent boundary accepted mutation: {old}")
+    changed = dict(sources, **{"crates/product/src/lib.rs": "fn f(p: CeremonyPlan) { p.with_test_owner_window(1); }"})
+    if not errors(changed):
+        raise SystemExit("owned-parent fixture capability accepted in product source")
+
+
 def main() -> None:
     test_masker()
     test_accepted()
@@ -1902,6 +1940,7 @@ def main() -> None:
     test_typed_process_failure_evidence()
     test_private_fault_capability_construction()
     test_live_mapping_witness_boundary()
+    test_owned_parent_fixture_is_test_only_and_exactly_bound()
     test_windows_case_insensitive_source_suffix_cannot_hide_code()
     test_hardening()
     test_symlinks()
