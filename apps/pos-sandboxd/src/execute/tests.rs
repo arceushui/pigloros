@@ -234,6 +234,7 @@ fn extra_descriptors(request: &TransientUnitRequest) -> &[(OwnedFd, String)] {
         .unwrap_or_default()
 }
 
+#[derive(Debug)]
 struct FakeCgroup {
     log: Log,
     polls: Arc<AtomicUsize>,
@@ -527,7 +528,7 @@ impl LocalNetworkPort for TornDownNetwork {
     }
 }
 
-type Outcome = Result<AttemptExecution<String, FakeCgroup>, ExecuteFailure>;
+type Outcome = Result<AttemptExecution<String, FakeCgroup>, ExecuteFailure<FakeCgroup>>;
 
 fn root_for(
     log: &Log,
@@ -555,7 +556,9 @@ fn names(entries: &[&str]) -> Vec<String> {
     entries.iter().map(|entry| (*entry).to_owned()).collect()
 }
 
-fn failure<T>(result: Result<T, ExecuteFailure>) -> TestResult<ExecuteFailure> {
+fn failure<T>(
+    result: Result<T, ExecuteFailure<FakeCgroup>>,
+) -> TestResult<ExecuteFailure<FakeCgroup>> {
     result
         .err()
         .ok_or_else(|| "the execution unexpectedly succeeded".into())
@@ -658,7 +661,7 @@ impl Scenario {
             .await
     }
 
-    async fn fails(&mut self) -> TestResult<ExecuteFailure> {
+    async fn fails(&mut self) -> TestResult<ExecuteFailure<FakeCgroup>> {
         let outcome = self.air_gapped().await?;
         failure(outcome)
     }
@@ -912,7 +915,7 @@ async fn an_unencodable_launch_never_reaches_the_recheck() -> TestResult {
 
 async fn recheck_failure(
     substitute: impl FnOnce(&AdmittedAttempt) -> Result<CheckedRoot, ImageActivationError>,
-) -> TestResult<(Scenario, ExecuteFailure)> {
+) -> TestResult<(Scenario, ExecuteFailure<FakeCgroup>)> {
     let mut scenario = Scenario::new()?;
     let job = scenario.job(
         ATTEMPT,
@@ -1009,7 +1012,7 @@ async fn the_same_ids_and_authority_cannot_substitute_limits_or_readback_policy(
 }
 
 /// Run an Air-Gapped attempt whose host fails with `faults`.
-async fn faulted(faults: &[Fault]) -> TestResult<(Scenario, ExecuteFailure)> {
+async fn faulted(faults: &[Fault]) -> TestResult<(Scenario, ExecuteFailure<FakeCgroup>)> {
     let mut scenario = Scenario::new()?;
     scenario.host.faults.extend_from_slice(faults);
     let failed = scenario.fails().await?;
@@ -1023,6 +1026,7 @@ async fn a_unit_that_fails_to_start_is_killed() -> TestResult {
     assert_eq!(failed.unit, UnitState::Killed);
     assert!(scenario.entries().ends_with(&names(&["kill", "stop"])));
     assert_eq!(scenario.cgroup_kills(), 0);
+    assert!(failed.cgroup.is_none());
     Ok(())
 }
 
@@ -1049,6 +1053,8 @@ async fn a_unit_whose_cgroup_cannot_be_bound_is_killed_before_release() -> TestR
     assert_eq!(failed.unit, UnitState::Killed);
     assert!(!scenario.entries().iter().any(|entry| entry == "release"));
     assert_eq!(scenario.cgroup_kills(), 0);
+    // No cgroup was bound, so none can be handed to terminal cleanup.
+    assert!(failed.cgroup.is_none());
     Ok(())
 }
 
@@ -1064,6 +1070,9 @@ async fn a_barrier_that_never_answers_is_cut_off_at_the_deadline() -> TestResult
     assert!(matches!(failed.error, ExecuteError::ReleaseTimeout));
     assert_eq!(failed.unit, UnitState::Killed);
     assert_eq!(scenario.cgroup_kills(), 1);
+    // The bound cgroup that was killed is retained for the emptiness proof.
+    let retained = failed.cgroup.ok_or("the bound cgroup was not retained")?;
+    assert!(Arc::ptr_eq(&retained.kills, &scenario.host.cgroup_kills));
     Ok(())
 }
 
@@ -1080,7 +1089,7 @@ fn release_fault(refuse_release: bool) -> BarrierFault {
 async fn timed_out(
     faults: &[Fault],
     refuse_release: bool,
-) -> TestResult<(Scenario, ExecuteFailure)> {
+) -> TestResult<(Scenario, ExecuteFailure<FakeCgroup>)> {
     let mut scenario = Scenario::new()?;
     scenario.host.faults.extend_from_slice(faults);
     scenario.barrier.fault = release_fault(refuse_release);
@@ -1237,7 +1246,7 @@ async fn a_refused_release_kills_the_unit_and_its_cgroup() -> TestResult {
 async fn local_failure<N: LocalNetworkPort + Sync>(
     network: &N,
     admission_attempt: [u8; 16],
-) -> TestResult<(Scenario, ExecuteFailure)> {
+) -> TestResult<(Scenario, ExecuteFailure<FakeCgroup>)> {
     let plan = plan()?;
     let admission = crate::test_fixtures::admission(
         admission_attempt,
@@ -1298,7 +1307,7 @@ async fn a_network_that_cannot_be_established_never_submits_a_unit() -> TestResu
 async fn teardowns(
     configure: impl FnOnce(&mut Scenario),
     network_attempt: [u8; 16],
-) -> TestResult<(usize, ExecuteFailure)> {
+) -> TestResult<(usize, ExecuteFailure<FakeCgroup>)> {
     let torn_down = Arc::new(AtomicUsize::new(0));
     let network = TornDownNetwork {
         torn_down: Arc::clone(&torn_down),
@@ -1592,14 +1601,16 @@ async fn a_failed_proxy_task_terminates_the_unit() -> TestResult {
     assert!(matches!(failed.error, ExecuteError::Serve(_)));
     assert_eq!(failed.unit, UnitState::Killed);
     assert_eq!(scenario.cgroup_kills(), 1);
+    assert!(failed.cgroup.is_some());
     Ok(())
 }
 
 #[test]
 fn the_failure_names_its_cause_and_the_unit_state() {
-    let failure = ExecuteFailure {
+    let failure = ExecuteFailure::<FakeCgroup> {
         error: ExecuteError::ModeMismatch,
         unit: UnitState::KillFailed,
+        cgroup: None,
     };
     assert_eq!(
         failure.to_string(),

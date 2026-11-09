@@ -282,15 +282,21 @@ pub enum UnitState {
     Unknown,
 }
 
-/// A failed execution and the state of its unit.
+/// A failed execution, the state of its unit and its retained cgroup.
 #[derive(Debug, thiserror::Error)]
 #[error("execution failed with the unit {unit:?}")]
-pub struct ExecuteFailure {
+pub struct ExecuteFailure<C> {
     /// Why the execution failed.
     #[source]
     pub error: ExecuteError,
     /// What is known of the unit.
     pub unit: UnitState,
+    /// The attempt cgroup bound before the failure, if binding completed.
+    ///
+    /// The lifecycle controller needs it to prove process emptiness before
+    /// terminal cleanup. `None` means no cgroup was bound by this call, so
+    /// only restart reconciliation can establish the unit's absence.
+    pub cgroup: Option<C>,
 }
 
 /// How a released attempt ended.
@@ -434,14 +440,15 @@ struct Prepared<C> {
 ///
 /// # Errors
 /// An [`ExecuteFailure`] names the error and what is known of the unit. Any
-/// failure after the unit was submitted kills it.
+/// failure after the unit was submitted kills it. A failure after the cgroup
+/// was bound returns that cgroup, so the controller can prove it empty.
 pub async fn execute<H, B, N>(
     host: &H,
     barrier: &mut B,
     network: &N,
     job: ExecuteJob,
     recheck: impl FnOnce() -> Result<CheckedRoot, ImageActivationError> + Send,
-) -> Result<AttemptExecution<H::Started, H::Cgroup>, ExecuteFailure>
+) -> Result<AttemptExecution<H::Started, H::Cgroup>, ExecuteFailure<H::Cgroup>>
 where
     H: UnitHost + Sync,
     B: LaunchBarrier + Send,
@@ -453,6 +460,7 @@ where
             .map_err(|error| ExecuteFailure {
                 error,
                 unit: UnitState::NotStarted,
+                cgroup: None,
             }),
     )
     .and_then(|()| async move {
@@ -490,7 +498,7 @@ async fn drive<H, B, N>(
     job: ExecuteJob,
     recheck: impl FnOnce() -> Result<CheckedRoot, ImageActivationError> + Send,
     guard: &mut SubmissionGuard<H::Killer>,
-) -> Result<AttemptExecution<H::Started, H::Cgroup>, ExecuteFailure>
+) -> Result<AttemptExecution<H::Started, H::Cgroup>, ExecuteFailure<H::Cgroup>>
 where
     H: UnitHost + Sync,
     B: LaunchBarrier + Send,
@@ -499,6 +507,7 @@ where
     let prepared = prepare(barrier, network, job, recheck).map_err(|error| ExecuteFailure {
         error,
         unit: UnitState::NotStarted,
+        cgroup: None,
     })?;
     let Prepared {
         attempt,
@@ -529,7 +538,7 @@ where
         let aborted = abort(
             host,
             &unit,
-            Some(&mut cgroup),
+            Some(cgroup),
             error,
             Submission::Confirmed,
             bounds,
@@ -543,7 +552,7 @@ where
             let aborted = abort(
                 host,
                 &unit,
-                Some(&mut cgroup),
+                Some(cgroup),
                 error,
                 Submission::Confirmed,
                 bounds,
@@ -568,7 +577,7 @@ async fn submit<H>(
     unit: &TransientServiceUnitName,
     request: TransientUnitRequest,
     bounds: Bounds,
-) -> Result<(H::Started, H::Cgroup), ExecuteFailure>
+) -> Result<(H::Started, H::Cgroup), ExecuteFailure<H::Cgroup>>
 where
     H: UnitHost + Sync,
 {
@@ -859,19 +868,19 @@ where
     }
 }
 
-/// Terminate the unit after `error`.
+/// Terminate the unit after `error`, retaining any bound cgroup.
 async fn abort<H>(
     host: &H,
     unit: &TransientServiceUnitName,
-    cgroup: Option<&mut H::Cgroup>,
+    mut cgroup: Option<H::Cgroup>,
     error: ExecuteError,
     submission: Submission,
     bounds: Bounds,
-) -> ExecuteFailure
+) -> ExecuteFailure<H::Cgroup>
 where
     H: UnitHost + Sync,
 {
-    let killed = kill_everything(host, unit, cgroup, bounds.call).await;
+    let killed = kill_everything(host, unit, cgroup.as_mut(), bounds.call).await;
     ExecuteFailure {
         error,
         unit: match (killed, submission) {
@@ -879,6 +888,7 @@ where
             (false, Submission::Confirmed) => UnitState::KillFailed,
             (false, Submission::Unconfirmed) => UnitState::Unknown,
         },
+        cgroup,
     }
 }
 
