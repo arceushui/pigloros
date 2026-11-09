@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import shlex
 import stat
 from pathlib import Path
 
@@ -14,19 +15,143 @@ def require(text: str, fragment: str, source: Path) -> None:
         raise SystemExit(f"{source}: missing required policy fragment: {fragment}")
 
 
-def require_option_once(text: str, option: str, source: Path) -> None:
-    pattern = rf"(?<![A-Za-z0-9_-]){re.escape(option)}(?=$|[=\s])"
-    count = len(re.findall(pattern, text, flags=re.MULTILINE))
-    if count != 1:
-        raise SystemExit(
-            f"{source}: protected Docker option {option} must occur exactly once; found {count}"
-        )
+def strip_comments(text: str) -> str:
+    """The shell code of `text` without its comments.
+
+    A `#` starts a comment where it starts a word outside quotes, as in bash,
+    so a guard or an option that is only mentioned in a comment is absent.
+    """
+    code = []
+    quote = ""
+    escaped = False
+    in_comment = False
+    previous = "\n"
+    for character in text:
+        if in_comment:
+            if character == "\n":
+                in_comment = False
+                code.append(character)
+            previous = character
+            continue
+        if escaped:
+            escaped = False
+        elif quote == "'":
+            quote = "" if character == "'" else quote
+        elif character == "\\":
+            escaped = True
+        elif quote == '"':
+            quote = "" if character == '"' else quote
+        elif character in "'\"":
+            quote = character
+        elif character == "#" and previous in " \t\n;&|(":
+            in_comment = True
+            previous = character
+            continue
+        code.append(character)
+        previous = character
+    return "".join(code)
+
+
+def closing_parenthesis(code: str, start: int, source: Path) -> int:
+    """The index of the `)` that closes the array opened just before `start`."""
+    quote = ""
+    for index in range(start, len(code)):
+        character = code[index]
+        if quote:
+            quote = "" if character == quote else quote
+        elif character in "'\"":
+            quote = character
+        elif character == ")":
+            return index
+    raise SystemExit(f"{source}: unterminated Docker argument array")
+
+
+# Docker options that take no value.
+DOCKER_FLAGS = {"--rm", "--read-only"}
+# Owner decisions Q9.x and 2026-11-09 (#911): every Docker option an isolated
+# runner passes, exactly and nothing else. Any other option, such as
+# `--net`, `--volumes-from`, `--sysctl`, `--cgroup-parent`, `--runtime`,
+# another `--tmpfs` or `--mount`, or a short option, is refused.
+DOCKER_OPTIONS = [
+    ("--rm", None),
+    ("--network", "none"),
+    ("--read-only", None),
+    ("--cap-drop", "ALL"),
+    ("--security-opt", "no-new-privileges"),
+    ("--pids-limit", "256"),
+    ("--memory", "2g"),
+    ("--memory-swap", "2g"),
+    ("--ulimit", "fsize=268435456:268435456"),
+    ("--tmpfs", "/tmp:rw,nosuid,nodev,mode=1777,size=512m"),
+    ("--tmpfs", "/var/lib:rw,nosuid,nodev,mode=0755,size=64m"),
+    ("--tmpfs", "/run:rw,nosuid,nodev,mode=0755,size=64m"),
+    ("--mount", "type=bind,source=$REPOSITORY_ROOT,target=$REPOSITORY_ROOT,readonly"),
+    ("--workdir", "$REPOSITORY_ROOT"),
+    ("--env", "PIGLOROS_PRIVILEGED_COMPOSITION_TEST=1"),
+    ("--env", "$variable=${!variable}"),
+    ("--env", "LLVM_PROFILE_FILE=/pigloros-profile.profraw"),
+    ("--mount", "type=bind,source=$profile_output,target=/pigloros-profile.profraw"),
+]
+
+
+def docker_options(code: str, source: Path) -> list[tuple[str, str | None]]:
+    """Every Docker option the runner can pass, read from its argument array.
+
+    The array may only be assigned once, appended to, and expanded once as
+    the whole of `docker run`'s options; `docker` runs nowhere else.
+    """
+    references = re.findall(r"(.{0,3})\bdocker_arguments\b(.{0,6})", code)
+    assignments = [after for _, after in references if after.startswith("=(")]
+    expansions = [
+        (before, after)
+        for before, after in references
+        if before.endswith('"${') and after.startswith('[@]}"')
+    ]
+    appends = [after for _, after in references if after.startswith("+=(")]
+    if len(assignments) != 1 or len(expansions) != 1 or len(references) != 2 + len(appends):
+        raise SystemExit(f"{source}: the Docker argument array is used in an unrecognised way")
+    if len(re.findall(r"\bdocker\b(?!_)", code)) != 1:
+        raise SystemExit(f"{source}: docker must run exactly once")
+    invocation = re.search(r"\bdocker\s+run\s+(.*?)\"\$ISOLATION_IMAGE\"", code, re.DOTALL)
+    if invocation is None or shlex.split(invocation.group(1).replace("\\\n", " ")) != [
+        "${docker_arguments[@]}"
+    ]:
+        raise SystemExit(f"{source}: docker run must take exactly the argument array")
+    tokens: list[str] = []
+    for match in re.finditer(r"\bdocker_arguments\+?=\(", code):
+        tokens.extend(shlex.split(code[match.end() : closing_parenthesis(code, match.end(), source)]))
+    options: list[tuple[str, str | None]] = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if not token.startswith("--"):
+            raise SystemExit(f"{source}: unrecognised Docker argument {token}")
+        if "=" in token:
+            option, value = token.split("=", 1)
+            options.append((option, value))
+        elif token in DOCKER_FLAGS:
+            options.append((token, None))
+        elif index + 1 < len(tokens):
+            index += 1
+            options.append((token, tokens[index]))
+        else:
+            raise SystemExit(f"{source}: Docker option {token} has no value")
+        index += 1
+    return options
+
+
+def option_key(option: tuple[str, str | None]) -> tuple[str, str]:
+    return (option[0], option[1] or "")
 
 
 # Owner decision 2026-11-09 (#911): the one runner that may add capabilities,
 # exactly these, for the Local namespace adapter tests that own it.
 NET_ADMIN_RUNNER = "run-isolated-with-net-admin-test.sh"
-NET_ADMIN_CAPABILITIES = ["NET_ADMIN", "SYS_ADMIN"]
+NET_ADMIN_DOCKER_OPTIONS = [
+    *DOCKER_OPTIONS,
+    ("--cap-add", "NET_ADMIN"),
+    ("--cap-add", "SYS_ADMIN"),
+]
 NET_ADMIN_OWNER_ROOT = "apps/pos-sandboxd/src/namespace_network/"
 # The exact guards that run before Docker: only a pos-sandboxd test harness
 # under target/, never the daemon, only the named privileged tests, no comma
@@ -52,26 +177,6 @@ NET_ADMIN_GUARDS = (
     '/bin/sh -c "$READ_ONLY_PROBE" read-only-probe "$REPOSITORY_ROOT" \\\n'
     '  "$TEST_BINARY" --exact "$TEST_NAME" --nocapture',
 )
-CAP_ADD = r"(?<![A-Za-z0-9_-])--cap-add(?=$|[=\s])"
-CAP_ADD_VALUE = r"(?<![A-Za-z0-9_-])--cap-add[ =]+(\S+)"
-# Options that would widen what a test container sees or may do.
-FORBIDDEN_OPTIONS = (
-    "--device",
-    "--pid",
-    "--ipc",
-    "--uts",
-    "--userns",
-    "--cgroupns",
-    "-v",
-    "--volume",
-    "--user",
-    "-u",
-    "--env-file",
-    "--privileged",
-    "--group-add",
-)
-
-
 def reject(text: str, pattern: str, description: str, source: Path) -> None:
     if re.search(pattern, text, flags=re.MULTILINE):
         raise SystemExit(f"{source}: forbidden Docker policy override: {description}")
@@ -123,7 +228,7 @@ def main() -> None:
                 )
 
     for runner_path in runners:
-        runner = runner_path.read_text(encoding="utf-8")
+        runner = strip_comments(runner_path.read_text(encoding="utf-8"))
         if not runner_path.stat().st_mode & stat.S_IXUSR:
             raise SystemExit(f"{runner_path}: isolated test runner must be executable")
         if re.search(r"\bsudo\b", runner):
@@ -159,64 +264,21 @@ def main() -> None:
             'chmod 0600 "$profile_output"',
             '[[ -n $profile_output && ! -s $profile_output ]]',
             '"$TEST_BINARY" --exact "$TEST_NAME" --nocapture',
+            "for variable in ASAN_OPTIONS LSAN_OPTIONS; do",
         ):
             require(runner, fragment, runner_path)
 
-        for option in (
-            "--network",
-            "--read-only",
-            "--cap-drop",
-            "--security-opt",
-            "--pids-limit",
-            "--memory",
-            "--memory-swap",
-            "--ulimit",
-        ):
-            require_option_once(runner, option, runner_path)
-        reject(
-            runner,
-            r"(?<![A-Za-z0-9_-])-m(?=$|[=\s])",
-            "short memory option",
-            runner_path,
-        )
-        reject(
-            runner,
-            r"(?<![A-Za-z0-9_-])--read-write(?=$|[=\s])",
-            "writable root filesystem",
-            runner_path,
-        )
+        expected = DOCKER_OPTIONS
         if runner_path.name == NET_ADMIN_RUNNER:
+            expected = NET_ADMIN_DOCKER_OPTIONS
             for fragment in NET_ADMIN_GUARDS:
                 require(runner, fragment, runner_path)
-            capabilities = sorted(re.findall(CAP_ADD_VALUE, runner, flags=re.MULTILINE))
-            if (
-                capabilities != NET_ADMIN_CAPABILITIES
-                or len(re.findall(CAP_ADD, runner, flags=re.MULTILINE)) != 2
-            ):
-                raise SystemExit(
-                    f"{runner_path}: only {', '.join(NET_ADMIN_CAPABILITIES)} may be added;"
-                    f" found {capabilities}"
-                )
-        else:
-            reject(runner, CAP_ADD, "capability addition", runner_path)
-        for option in FORBIDDEN_OPTIONS:
-            reject(
-                runner,
-                rf"(?<![A-Za-z0-9_-]){re.escape(option)}(?=$|[=\s])",
-                f"option {option}",
-                runner_path,
-            )
-        mounts = len(re.findall(r"(?<![A-Za-z0-9_-])--mount(?=$|[=\s])", runner))
-        if mounts != 2:
+        options = sorted(map(option_key, docker_options(runner, runner_path)))
+        if options != sorted(map(option_key, expected)):
+            unexpected = [option for option in options if option not in map(option_key, expected)]
             raise SystemExit(
-                f"{runner_path}: only the worktree and profile binds may be mounted; found {mounts}"
+                f"{runner_path}: Docker options differ from the allowlist; unexpected: {unexpected}"
             )
-        reject(
-            runner,
-            r"source=\$profile_directory,target=/pigloros-profile(?:[,\"\s]|$)",
-            "writable profile directory bind",
-            runner_path,
-        )
 
         sources = rust_sources
         if runner_path.name == NET_ADMIN_RUNNER:
