@@ -10,7 +10,8 @@ use pos_owner_bridge::LoopbackPort;
 
 use super::{completion, pump_until, session, Events, TestResult};
 use crate::{
-    ControlFault, EventKind, EventSink, NativeAction, NativeError, NativeEvent, NativeFactory,
+    ControlFault, ControlObservation, EventKind, EventSink, NativeAction, NativeError, NativeEvent,
+    StaPump,
 };
 
 struct Probe {
@@ -155,14 +156,21 @@ pub(super) fn run(runtime_path: &Path, root: &Path) -> TestResult {
             probe.delivered.get()
         })?;
         if mode == ControlFault::RetryDenial {
-            assert!(native.unsubscribe_view().is_err());
-            assert!(native.close_controller().is_err());
-            let observations = crate::Native::control_observations();
-            assert_eq!(observations.len(), 1);
-            assert!(observations[0].deferred);
-            assert_eq!(observations[0].attempts, 3);
-            assert_eq!(observations[0].completions, 0);
-            assert!(!observations[0].retired);
+            for attempts in [2, 3] {
+                // Repeated teardown and event-drain calls in one progression
+                // cannot authorize extra retries or release any owner.
+                for _ in 0..3 {
+                    assert!(native.unsubscribe_view().is_err());
+                    assert!(native.close_controller().is_err());
+                    let observations = crate::Native::control_observations();
+                    assert_eq!(observations.len(), 1);
+                    assert!(observations[0].deferred);
+                    assert_eq!(observations[0].attempts, attempts);
+                    assert_eq!(observations[0].completions, 0);
+                    assert!(!observations[0].retired);
+                }
+                factory.next()?;
+            }
         }
         native.unsubscribe_view()?;
         let before_exit = crate::Native::control_observations();
@@ -173,28 +181,7 @@ pub(super) fn run(runtime_path: &Path, root: &Path) -> TestResult {
         let after_exit = crate::Native::control_observations();
         // Every assertion after observing actual retirement; Session also
         // retains on every error/unwind before this point.
-        assert!(!before_exit.is_empty());
-        assert_eq!(before_exit.len(), after_exit.len());
-        for (before, after) in before_exit.iter().zip(&after_exit) {
-            assert_eq!(before.kind, kind);
-            assert_eq!(before.readback, Some(true));
-            assert_eq!(
-                before.attempts,
-                if mode == ControlFault::RetryDenial {
-                    4
-                } else {
-                    1
-                }
-            );
-            assert_eq!(
-                before.deferred,
-                kind != EventKind::Navigation && mode != ControlFault::MissingDeferral
-            );
-            assert_eq!(before.completions, u32::from(before.deferred));
-            assert_eq!(before.retired, mode != ControlFault::UncertainComplete);
-            assert!(after.retired);
-            assert_eq!(after.completions, before.completions);
-        }
+        assert_denials(&before_exit, &after_exit, kind, mode);
         assert_eq!(
             probe.failures.get(),
             match mode {
@@ -217,4 +204,34 @@ pub(super) fn run(runtime_path: &Path, root: &Path) -> TestResult {
     crate::create_private_directory(&composed_root)?;
     super::denial::run_control(runtime_path, &composed_root)?;
     Ok(())
+}
+
+fn assert_denials(
+    before_exit: &[ControlObservation],
+    after_exit: &[ControlObservation],
+    kind: EventKind,
+    mode: ControlFault,
+) {
+    assert!(!before_exit.is_empty());
+    assert_eq!(before_exit.len(), after_exit.len());
+    for (before, after) in before_exit.iter().zip(after_exit) {
+        assert_eq!(before.kind, kind);
+        assert_eq!(before.readback, Some(true));
+        assert_eq!(
+            before.attempts,
+            if mode == ControlFault::RetryDenial {
+                4
+            } else {
+                1
+            }
+        );
+        assert_eq!(
+            before.deferred,
+            kind != EventKind::Navigation && mode != ControlFault::MissingDeferral
+        );
+        assert_eq!(before.completions, u32::from(before.deferred));
+        assert_eq!(before.retired, mode != ControlFault::UncertainComplete);
+        assert!(after.retired);
+        assert_eq!(after.completions, before.completions);
+    }
 }

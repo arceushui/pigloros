@@ -279,13 +279,17 @@ impl crate::Native {
             native.navigate_owner()?;
             pump_until(&factory, "resource callback", || probe.requested.get())?;
             if mode == crate::ResourceDenialFixture::RetryStop {
-                assert!(native.unsubscribe_view().is_err());
-                assert!(native.close_controller().is_err());
-                assert_eq!(Self::resource_deferral_completion_attempts(), 0);
-                // The real deferral remains held while both operations refuse
-                // to tear down the cancellation owners and security handlers.
-                factory.next()?;
-                assert_resource_counts(&listener, received_before, 0);
+                for _ in 0..2 {
+                    // One retry per outer progression, even when teardown is
+                    // requested repeatedly before the next existing STA tick.
+                    for _ in 0..3 {
+                        assert!(native.unsubscribe_view().is_err());
+                        assert!(native.close_controller().is_err());
+                        assert_eq!(Self::resource_deferral_completion_attempts(), 0);
+                    }
+                    factory.next()?;
+                    assert_resource_counts(&listener, received_before, 0);
+                }
             }
             if matches!(
                 mode,

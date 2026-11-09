@@ -1,5 +1,6 @@
 #![cfg(windows)]
 
+use std::cell::Cell;
 use std::marker::PhantomData;
 use std::rc::Rc;
 
@@ -37,11 +38,16 @@ impl Drop for Apartment {
 
 pub(super) struct StaToken {
     thread: std::thread::ThreadId,
+    progress: Cell<u64>,
     // The final session/factory token is released after every COM owner.
     _apartment: Apartment,
 }
 
 impl StaToken {
+    pub(super) const fn progress(&self) -> u64 {
+        self.progress.get()
+    }
+
     pub(super) fn check(&self) -> Result<()> {
         if std::thread::current().id() == self.thread {
             Ok(())
@@ -73,6 +79,7 @@ impl Pump {
             timer,
             token: Rc::new(StaToken {
                 thread: std::thread::current().id(),
+                progress: Cell::new(0),
                 _apartment: apartment,
             }),
         })
@@ -80,6 +87,12 @@ impl Pump {
 
     pub(super) fn next(&self) -> Result<NativePulse> {
         self.token.check()?;
+        // One sequence for the existing outer pump invocation, including COM
+        // callbacks dispatched by GetMessage. Cleanup and queue-drain calls
+        // within that progression cannot create additional retry authority.
+        self.token
+            .progress
+            .set(self.token.progress.get().wrapping_add(1));
         let mut message = MSG::default();
         // SAFETY: initialized writable MSG; this dedicated STA owns this queue;
         // no HWND restriction, so thread timers and COM callbacks are serviced.

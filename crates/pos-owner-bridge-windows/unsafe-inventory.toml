@@ -765,7 +765,7 @@ hosted_test = "native_resource_denial_callback_failure_does_not_contact_listener
 
 [[block]]
 file = "src/ffi/pump.rs"
-line = 23
+line = 24
 function = "new"
 operation = "CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE)"
 invariant = "initialize this dedicated surface thread as a COM STA. Both S_OK and S_FALSE require one matching CoUninitialize on this thread; an existing incompatible apartment is refused."
@@ -773,7 +773,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/pump.rs"
-line = 34
+line = 35
 function = "drop"
 operation = "CoUninitialize()"
 invariant = "!Send affinity and stack/field order keep this on the thread initialized above, after every WebView COM owner has been released."
@@ -781,7 +781,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/pump.rs"
-line = 68
+line = 74
 function = "new"
 operation = "SetTimer(None, 0, 10, None)"
 invariant = "create a thread timer without any callback pointer or HWND. Its WM_TIMER messages survive ceremony-window loss, so every release and browser-exit timeout can still advance the portable driver."
@@ -789,7 +789,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/pump.rs"
-line = 86
+line = 99
 function = "next"
 operation = "GetMessageW(&raw mut message, None, 0, 0)"
 invariant = "initialized writable MSG; this dedicated STA owns this queue; no HWND restriction, so thread timers and COM callbacks are serviced."
@@ -797,7 +797,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/pump.rs"
-line = 102
+line = 115
 function = "next"
 operation = "TranslateMessage(&raw const message)"
 invariant = "only a successful GetMessage result is translated. Its BOOL reports whether translation occurred, not success/failure."
@@ -805,7 +805,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/pump.rs"
-line = 105
+line = 118
 function = "next"
 operation = "DispatchMessageW(&raw const message)"
 invariant = "the same valid initialized message is dispatched on its owning STA. The LRESULT is the procedure's message-specific result."
@@ -813,7 +813,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/pump.rs"
-line = 113
+line = 126
 function = "stop_timer"
 operation = "KillTimer(None, self.timer)"
 invariant = "this thread owns the still-live timer identifier."
@@ -1381,7 +1381,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/denial.rs"
-line = 170
+line = 193
 function = "stop_fetches"
 operation = "view.Stop()"
 invariant = "Exact retained session view on its creating STA; resource denial or failed mandatory navigation cancellation only. Stop HRESULT guards security-subscription removal and Close; it grants no control-family permission."
@@ -1389,7 +1389,7 @@ hosted_test = "native_resource_denial_callback_failure_does_not_contact_listener
 
 [[block]]
 file = "src/ffi/events/denial.rs"
-line = 182
+line = 205
 function = "defer_request"
 operation = "args.GetDeferral()"
 invariant = "Owned live resource callback arguments on their creating STA. Retain returned deferral with arguments and exact session view while cancellation is unresolved."
@@ -1397,7 +1397,7 @@ hosted_test = "native_resource_denial_callback_failure_does_not_contact_listener
 
 [[block]]
 file = "src/ffi/events/denial.rs"
-line = 196
+line = 219
 function = "complete_request"
 operation = "deferral.Complete()"
 invariant = "Retained creating-STA deferral; Complete at most once, marked before COM, only after successful resource Stop or ADR-130 mandatory control denial. An uncertain result keeps the event owners until the matching own browser exit."

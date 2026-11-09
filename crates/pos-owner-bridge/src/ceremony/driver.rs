@@ -838,11 +838,13 @@ impl CeremonyDriver {
     }
 
     fn awaiting_exit(&mut self, env: &mut StepEnv<'_>, now: Instant, since: Instant) -> Step {
-        if self.exit_seen {
-            return self.complete(env);
-        }
+        // A matching exit first observed at/after the deadline can retire the
+        // quarantine, but cannot turn a missed caller deadline into success.
         if expired(now, since, EXIT_WINDOW) {
             return self.quarantine(QuarantineCode::CleanupTimeout);
+        }
+        if self.exit_seen {
+            return self.complete(env);
         }
         Step::Pending
     }

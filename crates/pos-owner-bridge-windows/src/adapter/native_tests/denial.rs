@@ -109,6 +109,28 @@ impl Fixture {
         }
         was_quarantined
     }
+
+    fn attempt(
+        &mut self,
+        driver: &mut CeremonyDriver,
+    ) -> (
+        Result<Verified, BridgeError>,
+        Option<Box<dyn std::error::Error>>,
+    ) {
+        let attempt = catch_unwind(AssertUnwindSafe(|| self.drive(driver)));
+        let failure = match attempt {
+            Ok(Ok(result)) => return (result, None),
+            Ok(Err(error)) => error,
+            Err(_) => "native denial driver panicked".into(),
+        };
+        let result = readiness::cancel_driver(
+            driver,
+            &mut self.surface,
+            &mut self.loopback,
+            &mut self.store,
+        );
+        (result, Some(failure))
+    }
 }
 
 pub(super) fn run(runtime: &Path, root: &Path) -> TestResult {
@@ -122,30 +144,10 @@ pub(super) fn run(runtime: &Path, root: &Path) -> TestResult {
     let mut driver = readiness::new_driver(CeremonyId::from_bytes([0x27; 16]), started)?;
     // A modeled policy denial and failed SetResponse run in the real callback.
     // Real GetDeferral holds it while the first three Stop attempts fail without
-    // side effects: callback, driver unsubscribe, driver Close. The keeper's
-    // normal Surface.take_event continuation performs actual Stop/Complete.
-    let attempt = catch_unwind(AssertUnwindSafe(|| fixture.drive(&mut driver)));
-    let (result, failure) = match attempt {
-        Ok(Ok(result)) => (result, None),
-        Ok(Err(error)) => (
-            readiness::cancel_driver(
-                &mut driver,
-                &mut fixture.surface,
-                &mut fixture.loopback,
-                &mut fixture.store,
-            ),
-            Some(error),
-        ),
-        Err(_) => (
-            readiness::cancel_driver(
-                &mut driver,
-                &mut fixture.surface,
-                &mut fixture.loopback,
-                &mut fixture.store,
-            ),
-            Some("denial driver panicked".into()),
-        ),
-    };
+    // side effects: callback, one driver retry, one keeper retry. Repeated Close
+    // and event draining in one progression cannot add retries. The keeper's
+    // later normal STA progression performs actual Stop/Complete.
+    let (result, failure) = fixture.attempt(&mut driver);
     let error = result.as_ref().err().copied();
     let records = fixture.store.records();
     let received = fixture.loopback.received_request_count();
@@ -184,32 +186,12 @@ pub(super) fn run_control(runtime: &Path, root: &Path) -> TestResult {
         crate::ControlFault::RetryDenial,
     );
     let started = Instant::now();
+    fixture.trace = Trace::new(0x28, started);
     fixture
         .surface
         .set_deadline(started + Duration::from_secs(15));
     let mut driver = readiness::new_driver(CeremonyId::from_bytes([0x28; 16]), started)?;
-    let attempt = catch_unwind(AssertUnwindSafe(|| fixture.drive(&mut driver)));
-    let (result, failure) = match attempt {
-        Ok(Ok(result)) => (result, None),
-        Ok(Err(error)) => (
-            readiness::cancel_driver(
-                &mut driver,
-                &mut fixture.surface,
-                &mut fixture.loopback,
-                &mut fixture.store,
-            ),
-            Some(error),
-        ),
-        Err(_) => (
-            readiness::cancel_driver(
-                &mut driver,
-                &mut fixture.surface,
-                &mut fixture.loopback,
-                &mut fixture.store,
-            ),
-            Some("control driver panicked".into()),
-        ),
-    };
+    let (result, failure) = fixture.attempt(&mut driver);
     let error = result.as_ref().err().copied();
     let records = fixture.store.records();
     let observations = crate::Native::control_observations();
@@ -229,7 +211,7 @@ pub(super) fn run_control(runtime: &Path, root: &Path) -> TestResult {
     assert_eq!(records?.len(), 1);
     assert_eq!(observations.len(), 1);
     assert!(observations[0].deferred);
-    assert_eq!(observations[0].attempts, 3);
+    assert_eq!(observations[0].attempts, 2);
     assert_eq!(observations[0].completions, 0);
     assert!(!observations[0].retired);
     let retired = crate::Native::control_observations();

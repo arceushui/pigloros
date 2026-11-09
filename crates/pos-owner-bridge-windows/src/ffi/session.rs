@@ -55,7 +55,7 @@ impl NativeFactory for Factory {
             view: None,
             shared: None,
             subscriptions: events::Subscriptions::default(),
-            denials: Rc::new(events::Recovery::default()),
+            denials: Rc::new(events::Recovery::new(Rc::clone(&self.0.token))),
             buffers: None,
             close_uncertain: Rc::new(Cell::new(false)),
             sink: None,

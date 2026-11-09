@@ -474,13 +474,14 @@ mod tests {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
         loop {
             if let Some(status) = child.try_wait()? {
+                // Retain the child through its ordinary native retirement.
+                // A late exit still fails this deadline; killing the host
+                // would destroy its STA owners while a browser may live.
+                if std::time::Instant::now() >= deadline {
+                    return Err("native host fixture exceeded its independent wall deadline".into());
+                }
                 assert!(status.success());
                 return Ok(());
-            }
-            if std::time::Instant::now() >= deadline {
-                let _stopped = child.kill();
-                let _reaped = child.wait();
-                return Err("native host fixture exceeded its independent wall deadline".into());
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
         }

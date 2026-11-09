@@ -11,15 +11,28 @@ use crate::{EventKind, EventSink, NativeAction, NativeError, NativeEvent};
 
 /// Resource and ADR-130 control owners. Each instance belongs to one fresh
 /// environment and is advanced only by its creating STA's outer loop.
-#[derive(Default)]
 pub(in crate::ffi) struct Recovery {
+    last_retry: Cell<Option<u64>>,
     expected_pid: Cell<Option<u32>>,
     exited: Cell<bool>,
     pending: RefCell<Vec<Held>>,
     controls: RefCell<Vec<super::control_denial::Held>>,
+    // Keep the creator apartment alive through every retained COM release.
+    token: Rc<super::super::pump::StaToken>,
 }
 
 impl Recovery {
+    pub(in crate::ffi) fn new(token: Rc<super::super::pump::StaToken>) -> Self {
+        Self {
+            token,
+            last_retry: Cell::new(None),
+            expected_pid: Cell::new(None),
+            exited: Cell::new(false),
+            pending: RefCell::new(Vec::new()),
+            controls: RefCell::new(Vec::new()),
+        }
+    }
+
     pub(in crate::ffi) fn expect_browser(&self, pid: u32) {
         self.expected_pid.set(Some(pid));
     }
@@ -78,6 +91,12 @@ impl Recovery {
         if self.exited.get() {
             return Ok(());
         }
+        // Stamp before any COM call, which may dispatch reentrant callbacks.
+        // Unsubscribe, Close and repeated event draining within the same outer
+        // pump progression only inspect containment after this first retry.
+        if self.last_retry.replace(Some(self.token.progress())) == Some(self.token.progress()) {
+            return self.contained();
+        }
         let pending = std::mem::take(&mut *self.pending.borrow_mut());
         let retained: Vec<_> = pending
             .into_iter()
@@ -96,6 +115,10 @@ impl Recovery {
             return Ok(());
         }
         self.controls.borrow_mut().extend(retained);
+        self.contained()
+    }
+
+    fn contained(&self) -> Result<()> {
         if self.pending.borrow().iter().all(|held| held.stopped)
             && self.controls.borrow().iter().all(|held| held.denied)
         {

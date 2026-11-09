@@ -26,7 +26,7 @@ pub(super) enum Control {
 }
 
 impl Control {
-    fn kind(&self) -> EventKind {
+    const fn kind(&self) -> EventKind {
         match self {
             Self::NewWindow(_) => EventKind::NewWindow,
             Self::Permission(_) => EventKind::Permission,

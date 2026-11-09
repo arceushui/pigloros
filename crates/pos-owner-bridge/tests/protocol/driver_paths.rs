@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use pos_owner_bridge::ceremony::driver::Step;
 use pos_owner_bridge::ceremony::plan::{Budget, CeremonyPlan, Registration, Verified};
-use pos_owner_bridge::ceremony::timing::SERVED_SETTLE;
+use pos_owner_bridge::ceremony::timing::{EXIT_WINDOW, SERVED_SETTLE};
 use pos_owner_bridge::fake::buffers::{Actor, LogEntry};
 use pos_owner_bridge::fake::honest::{AbortBehavior, CreatePrf, Delivery, HonestConfig, Tamper};
 use pos_owner_bridge::fake::signer::{ReplyShape, FIXTURE_COSE_KEY};
@@ -934,6 +934,55 @@ fn an_exit_timeout_quarantines_and_a_late_exit_completes_cleanup() -> TestResult
     assert!(driver.poll_cleanup(&mut rig.env()));
     assert!(rig.store.records_now().is_empty());
     assert!(!driver.poll_cleanup(&mut rig.env()));
+    Ok(())
+}
+
+#[test]
+fn a_late_exit_dispatched_on_the_deadline_step_cannot_win_over_expiry() -> TestResult {
+    for delay in [
+        EXIT_WINDOW - Duration::from_nanos(1),
+        EXIT_WINDOW,
+        EXIT_WINDOW + Duration::from_nanos(1),
+    ] {
+        let mut rig = DriverRig::new(
+            honest(0),
+            SurfaceConfig {
+                exit_delay: None,
+                ..SurfaceConfig::default()
+            },
+        )?;
+        let mut driver = new_driver(create_plan(&rig.clock));
+        for _ in 0..1_000 {
+            driver.step(&mut rig.env());
+            if controller_closed(&rig) {
+                break;
+            }
+            rig.clock.advance(Duration::from_millis(10));
+        }
+        assert!(controller_closed(&rig));
+        assert_eq!(driver.next_wake(), Some(rig.clock.now() + EXIT_WINDOW));
+        // No intermediate polling: the matching exit and elapsed deadline are
+        // first visible together in one public driver step.
+        rig.handle.schedule(
+            rig.clock.elapsed() + delay,
+            SurfaceEvent::BrowserExited { browser_pid: 4242 },
+        );
+        rig.clock.advance(delay);
+        let result = rig.step_to_end(&mut driver);
+        if delay < EXIT_WINDOW {
+            assert!(result.is_ok());
+        } else {
+            assert_eq!(
+                failure(&result)?,
+                BridgeError::Quarantine(QuarantineCode::CleanupTimeout)
+            );
+            assert_eq!(rig.store.records_now().len(), 1);
+            assert!(driver.poll_cleanup(&mut rig.env()));
+        }
+        assert!(driver.request_clear());
+        assert!(driver.plan_secrets_clear());
+        assert!(rig.store.records_now().is_empty());
+    }
     Ok(())
 }
 
