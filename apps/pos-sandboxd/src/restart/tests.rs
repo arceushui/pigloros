@@ -263,6 +263,11 @@ mod cases {
         Ok(fs::read_dir(path)?.count())
     }
 
+    /// A provider loop sweep that finds no loop over a provider image.
+    fn swept() -> impl FnOnce() -> std::future::Ready<Result<bool, ImageActivationError>> {
+        || std::future::ready(Ok(true))
+    }
+
     fn deadline() -> Instant {
         Instant::now() + Duration::from_millis(500)
     }
@@ -285,19 +290,26 @@ mod cases {
         let host = host(Listing::Empty, Vec::new()).await?;
         let network = Network::new(Cleanup::Removes);
         let probed = Mutex::new(Vec::new());
+        let sweeps = AtomicUsize::new(0);
         let reconciled = reconcile_with(
             &host.transport,
             recovery(runtime.path())?,
             &network,
             deadline(),
-            |generations| {
-                let pushed = probed.lock().map(|mut probed| probed.push(generations));
-                std::future::ready(
-                    pushed
-                        .map(|()| true)
-                        .map_err(|_| ImageActivationError::Transport),
-                )
-            },
+            (
+                |generations| {
+                    let pushed = probed.lock().map(|mut probed| probed.push(generations));
+                    std::future::ready(
+                        pushed
+                            .map(|()| true)
+                            .map_err(|_| ImageActivationError::Transport),
+                    )
+                },
+                || {
+                    sweeps.fetch_add(1, Ordering::SeqCst);
+                    std::future::ready(Ok(true))
+                },
+            ),
         )
         .await?;
         let expected = (1..=4).map(intent).collect::<Result<Vec<_>, _>>()?;
@@ -305,6 +317,7 @@ mod cases {
         assert_eq!(count(&runtime.path().join("registry"))?, 0);
         assert_eq!(count(&runtime.path().join("attempts"))?, 0);
         assert_eq!(network.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(sweeps.load(Ordering::SeqCst), 1);
         assert_eq!(
             *probed.lock().map_err(|_| "probes")?,
             vec![FIXTURE_GENERATIONS]
@@ -404,14 +417,17 @@ mod cases {
                 recovery(runtime.path())?,
                 &network,
                 deadline(),
-                |_| {
-                    std::future::ready(
-                        [
-                            Ok(false),
-                            Err(ImageActivationError::ResourceAbsenceUnverified),
-                        ][usize::from(case == 3)],
-                    )
-                },
+                (
+                    |_| {
+                        std::future::ready(
+                            [
+                                Ok(false),
+                                Err(ImageActivationError::ResourceAbsenceUnverified),
+                            ][usize::from(case == 3)],
+                        )
+                    },
+                    swept(),
+                ),
             )
             .await;
             let refused = matches!(
@@ -441,7 +457,10 @@ mod cases {
             recovery(runtime.path())?,
             &Network::new(Cleanup::Removes),
             deadline(),
-            |_| std::future::pending::<Result<bool, ImageActivationError>>(),
+            (
+                |_| std::future::pending::<Result<bool, ImageActivationError>>(),
+                swept(),
+            ),
         )
         .await;
         assert!(
@@ -453,12 +472,12 @@ mod cases {
     }
 
     #[tokio::test]
-    async fn a_unit_start_without_a_bound_cgroup_waits_for_its_unit_to_be_absent() -> TestResult {
+    async fn an_unbound_unit_start_waits_for_unit_absence() -> TestResult {
         if !in_lock_test_process(
-        "restart::tests::cases::a_unit_start_without_a_bound_cgroup_waits_for_its_unit_to_be_absent",
-    )? {
-        return Ok(());
-    }
+            "restart::tests::cases::an_unbound_unit_start_waits_for_unit_absence",
+        )? {
+            return Ok(());
+        }
         let runtime = seed_with(Some(started_without_cgroup))?;
         // The unit that the requested start may have created is still loaded:
         // nothing is removed and admission stays closed.
@@ -468,7 +487,7 @@ mod cases {
             recovery(runtime.path())?,
             &Network::new(Cleanup::Removes),
             deadline(),
-            |_| std::future::ready(Ok(true)),
+            (|_| std::future::ready(Ok(true)), swept()),
         )
         .await;
         assert!(
@@ -484,12 +503,84 @@ mod cases {
             recovery(runtime.path())?,
             &Network::new(Cleanup::Removes),
             deadline(),
-            |_| std::future::ready(Ok(true)),
+            (|_| std::future::ready(Ok(true)), swept()),
         )
         .await?;
         assert_eq!(reconciled.attempts().len(), 4);
         assert_eq!(count(&runtime.path().join("registry"))?, 0);
         assert_eq!(count(&runtime.path().join("attempts"))?, 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_provider_loop_or_an_unverifiable_sweep_keeps_pai2_intents() -> TestResult {
+        if !in_lock_test_process(
+            "restart::tests::cases::a_provider_loop_or_an_unverifiable_sweep_keeps_pai2_intents",
+        )? {
+            return Ok(());
+        }
+        // Without a recorded root, only the sweep can prove that an activation
+        // which crashed before its PAI3 record left no loop/dm devices.
+        for unverified in [false, true] {
+            let runtime = seed(false)?;
+            let host = host(Listing::Empty, Vec::new()).await?;
+            let result = reconcile_with(
+                &host.transport,
+                recovery(runtime.path())?,
+                &Network::new(Cleanup::Removes),
+                deadline(),
+                (
+                    |_| std::future::ready(Ok(true)),
+                    || {
+                        std::future::ready(
+                            [
+                                Ok(false),
+                                Err(ImageActivationError::ResourceAbsenceUnverified),
+                            ][usize::from(unverified)],
+                        )
+                    },
+                ),
+            )
+            .await;
+            let refused = matches!(
+                (unverified, &result),
+                (false, Err(RestartReconciliationError::ProviderLoops(None)))
+                    | (
+                        true,
+                        Err(RestartReconciliationError::ProviderLoops(Some(_)))
+                    )
+            );
+            assert!(refused, "unverified {unverified}: {result:?}");
+            assert_untouched(runtime.path(), 4)?;
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_loop_sweep_past_the_deadline_keeps_admission_closed() -> TestResult {
+        if !in_lock_test_process(
+            "restart::tests::cases::a_loop_sweep_past_the_deadline_keeps_admission_closed",
+        )? {
+            return Ok(());
+        }
+        let runtime = seed(false)?;
+        let host = host(Listing::Empty, Vec::new()).await?;
+        let result = reconcile_with(
+            &host.transport,
+            recovery(runtime.path())?,
+            &Network::new(Cleanup::Removes),
+            deadline(),
+            (
+                |_| std::future::ready(Ok(true)),
+                std::future::pending::<Result<bool, ImageActivationError>>,
+            ),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(RestartReconciliationError::DeadlineElapsed)),
+            "{result:?}"
+        );
+        assert_untouched(runtime.path(), 4)?;
         Ok(())
     }
 
@@ -514,7 +605,7 @@ mod cases {
             recovery(runtime.path())?,
             &Network::new(Cleanup::Removes),
             deadline(),
-            |_| std::future::ready(Ok(true)),
+            (|_| std::future::ready(Ok(true)), swept()),
         )
         .await;
         assert!(
