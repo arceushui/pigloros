@@ -232,7 +232,7 @@ fn recheck<K: AttachmentKernel>(
 /// # Errors
 /// [`ImageActivationError::ResourceAbsenceUnverified`] for a contradictory
 /// generation stamp, an unreadable device index or a zero sequence.
-pub(crate) async fn recorded_generations_absent(
+pub(super) async fn recorded_generations_absent(
     generations: [((u32, u32), u64); 2],
 ) -> Result<bool, ImageActivationError> {
     generations_absent(&HostKernel::system(), generations).await
@@ -371,6 +371,6 @@ fn attach_and_verify<K: AttachmentKernel>(
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests;
 #[cfg(test)]
-pub(crate) use tests::{attached_fixture_root, fake_root_release, FakeRootRelease};
+pub(super) use tests::{attached_fixture_root, fake_root_release, FakeRootRelease};
 #[cfg(test)]
 pub use tests::{recorded_identity, released_root};

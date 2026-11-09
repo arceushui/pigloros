@@ -40,7 +40,7 @@ mod unit_teardown;
 #[cfg(target_os = "linux")]
 pub use unit_teardown::{SystemdAttemptUnitTeardownError, SystemdAttemptUnitTeardownObservation};
 #[cfg(all(test, target_os = "linux"))]
-pub(crate) use unit_teardown::{TeardownFixture, TeardownReset, TeardownStop};
+pub(super) use unit_teardown::{TeardownFixture, TeardownReset, TeardownStop};
 
 /// The deterministic transient service-unit name for one sandbox attempt.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -359,7 +359,7 @@ impl SystemdTransientUnitTransport {
         Self::from_connection(connection).await
     }
 
-    async fn from_connection(
+    pub(crate) async fn from_connection(
         connection: Connection,
     ) -> Result<Self, SystemdTransientUnitTransportError> {
         let subscription = Self::subscribe_manager(ManagerProxy::new(&connection).await).await;
@@ -1138,7 +1138,7 @@ mod tests;
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
-pub(crate) mod test_support {
+pub(super) mod test_support {
     use zbus::{
         connection::{socket::channel::Channel, Builder},
         Connection, Guid,

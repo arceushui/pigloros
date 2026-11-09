@@ -107,7 +107,7 @@ pub async fn finish_attempt(
 }
 
 /// The root step, behind a port so that it can be faked without a kernel.
-pub(crate) trait RootRelease: Send {
+pub(super) trait RootRelease: Send {
     /// Detach the root and observe its original loop/dm generations absent.
     fn release(
         self,
