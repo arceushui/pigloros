@@ -21,6 +21,8 @@ mod adapter {
     mod directory;
     mod events;
     mod host;
+    #[cfg(any(test, feature = "test-support"))]
+    mod ledger_storage;
     mod loopback;
     #[cfg(any(test, feature = "test-support"))]
     mod nonce_ledger;
@@ -31,15 +33,25 @@ mod adapter {
     mod settings;
     mod socket;
     mod store;
+    #[cfg(any(test, feature = "test-support"))]
+    mod store_file_identity;
     mod surface;
 
     #[cfg(test)]
     mod native_tests;
 
     #[cfg(test)]
+    pub use ledger_storage::exercise_ledger_storage;
+    #[cfg(any(test, feature = "test-support"))]
+    pub use ledger_storage::WindowsNonceLedger;
+    #[cfg(test)]
     pub use nonce_ledger::exercise_native_lock;
     #[cfg(any(test, feature = "test-support"))]
     pub use nonce_ledger::WindowsSubjectEncryptorLock;
+    #[cfg(test)]
+    pub use store_file_identity::exercise_store_file_identity;
+    #[cfg(any(test, feature = "test-support"))]
+    pub use store_file_identity::store_file_id;
 
     pub use directory::{create_private_directory, verify_private_directory};
     pub use host::WindowsOwnerHost;
@@ -60,6 +72,8 @@ pub use adapter::{
 
 #[cfg(any(test, feature = "test-support"))]
 pub use adapter::WindowsSubjectEncryptorLock;
+#[cfg(any(test, feature = "test-support"))]
+pub use adapter::{store_file_id, WindowsNonceLedger};
 
 // Private, SDK-neutral capabilities shared by sibling safe/native modules.
 // Root declarations avoid contradictory private-module visibility lints while
@@ -446,6 +460,16 @@ mod tests {
     #[test]
     fn nonce_lock_native() -> Result<(), Box<dyn std::error::Error>> {
         crate::adapter::exercise_native_lock()
+    }
+
+    #[test]
+    fn windows_store_file_identity_native() -> Result<(), Box<dyn std::error::Error>> {
+        crate::adapter::exercise_store_file_identity()
+    }
+
+    #[test]
+    fn windows_nonce_ledger_storage_native() -> Result<(), Box<dyn std::error::Error>> {
+        crate::adapter::exercise_ledger_storage()
     }
 
     impl crate::Native {

@@ -3,9 +3,12 @@
 #![forbid(unsafe_code)]
 
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use pos_owner_bridge::{BridgeError, UnavailableCode};
+
+#[cfg(test)]
+pub(super) static NONCE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Test-support access to the per-user named encryptor lock.
 ///
@@ -15,6 +18,7 @@ use pos_owner_bridge::{BridgeError, UnavailableCode};
 #[must_use = "retain the lock for the owner lifetime"]
 pub struct WindowsSubjectEncryptorLock {
     mutex: crate::ffi::SubjectMutex,
+    pub(super) test_directory: PathBuf,
 }
 
 impl WindowsSubjectEncryptorLock {
@@ -29,7 +33,10 @@ impl WindowsSubjectEncryptorLock {
             return Err(unavailable());
         }
         crate::ffi::SubjectMutex::acquire()
-            .map(|mutex| Self { mutex })
+            .map(|mutex| Self {
+                mutex,
+                test_directory: test_directory.to_owned(),
+            })
             .map_err(|()| unavailable())
     }
 }
@@ -55,6 +62,9 @@ pub fn exercise_native_lock() -> Result<(), Box<dyn std::error::Error>> {
 
     const CASE: &str = "PIGLOROS_WINDOWS_NONCE_LOCK_CASE";
     const MARKER: &str = "WINDOWS_NONCE_LOCK_PROBE_EXECUTED";
+    let _serial = NONCE_TEST_LOCK
+        .lock()
+        .map_err(|_| "nonce test lock poisoned")?;
     let directory = std::env::temp_dir();
     if let Ok(case) = std::env::var(CASE) {
         match case.as_str() {

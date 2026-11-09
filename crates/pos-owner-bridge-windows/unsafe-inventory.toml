@@ -1642,3 +1642,67 @@ function = "drop"
 operation = "CloseHandle"
 invariant = "Guard owns one handle, closed once after release attempt."
 hosted_test = "nonce_lock_native"
+
+[[block]]
+file = "src/ffi/store_file_identity.rs"
+line = 28
+function = "drop"
+operation = "LocalFree"
+invariant = "One uniquely owned successful Windows allocation is freed once."
+hosted_test = "windows_store_file_identity_native"
+
+[[block]]
+file = "src/ffi/store_file_identity.rs"
+line = 36
+function = "descriptor_text"
+operation = "SetSecurityDescriptorControl"
+invariant = "Unique allocated descriptor copy; only auto-inheritance bookkeeping bits are cleared."
+hosted_test = "windows_store_file_identity_native"
+
+[[block]]
+file = "src/ffi/store_file_identity.rs"
+line = 47
+function = "descriptor_text"
+operation = "ConvertSecurityDescriptorToStringSecurityDescriptorW"
+invariant = "Live descriptor and uniquely writable output; successful string allocation has one owner."
+hosted_test = "windows_store_file_identity_native"
+
+[[block]]
+file = "src/ffi/store_file_identity.rs"
+line = 60
+function = "descriptor_text"
+operation = "PWSTR.to_string"
+invariant = "Successful Windows string remains allocated and terminated during copy."
+hosted_test = "windows_store_file_identity_native"
+
+[[block]]
+file = "src/ffi/store_file_identity.rs"
+line = 73
+function = "expected"
+operation = "ConvertStringSecurityDescriptorToSecurityDescriptorW"
+invariant = "SID-derived terminated SDDL and writable output remain live; successful allocation is owned."
+hosted_test = "windows_store_file_identity_native"
+
+[[block]]
+file = "src/ffi/store_file_identity.rs"
+line = 89
+function = "require_private_file"
+operation = "GetSecurityInfo"
+invariant = "Borrowed File owns a live handle; query returns one owned descriptor output."
+hosted_test = "windows_store_file_identity_native"
+
+[[block]]
+file = "src/ffi/store_file_identity.rs"
+line = 119
+function = "file_link_count"
+operation = "GetFileInformationByHandle"
+invariant = "Borrowed File owns the live handle and initialized output remains uniquely writable."
+hosted_test = "windows_nonce_ledger_storage_native"
+
+[[block]]
+file = "src/ffi/ledger_storage.rs"
+line = 21
+function = "replace_ledger"
+operation = "MoveFileExW MOVEFILE_REPLACE_EXISTING MOVEFILE_WRITE_THROUGH"
+invariant = "Owned terminated same-directory names; caller flushed and closed files and does not request copy."
+hosted_test = "windows_nonce_ledger_storage_native"

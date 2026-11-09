@@ -11,6 +11,7 @@ description = "Windows-only WebView2 owner-bridge shim (ADR-110)"
 test-support = []
 
 [target.'cfg(windows)'.dev-dependencies]
+pos-crypto = { path = "../pos-crypto" }
 pos-owner-bridge = { path = "../pos-owner-bridge", features = ["test-support"] }
 
 [target.'cfg(windows)'.dependencies]
