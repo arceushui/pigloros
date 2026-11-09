@@ -23,6 +23,15 @@ def require_option_once(text: str, option: str, source: Path) -> None:
         )
 
 
+# Owner decision 2026-11-09 (#911): the one runner that may add capabilities,
+# exactly these, for the Local namespace adapter tests that own it.
+NET_ADMIN_RUNNER = "run-isolated-with-net-admin-test.sh"
+NET_ADMIN_CAPABILITIES = ("--cap-add NET_ADMIN", "--cap-add SYS_ADMIN")
+NET_ADMIN_OWNER_ROOT = "apps/pos-sandboxd/src/namespace_network/"
+NET_ADMIN_TEST_PREFIX = "namespace_network::netlink::tests::privileged::*) ;;"
+CAP_ADD = r"(?<![A-Za-z0-9_-])--cap-add(?=$|[=\s])"
+
+
 def reject(text: str, pattern: str, description: str, source: Path) -> None:
     if re.search(pattern, text, flags=re.MULTILINE):
         raise SystemExit(f"{source}: forbidden Docker policy override: {description}")
@@ -60,6 +69,10 @@ def main() -> None:
     rust_sources = {
         source: source.read_text(encoding="utf-8")
         for source in (root / "crates").glob("**/*.rs")
+    }
+    net_admin_sources = {
+        source: source.read_text(encoding="utf-8")
+        for source in (root / "apps").glob("**/*.rs")
     }
     runner_names = {runner.name for runner in runners}
     for source, text in rust_sources.items():
@@ -132,12 +145,17 @@ def main() -> None:
             "writable root filesystem",
             runner_path,
         )
-        reject(
-            runner,
-            r"(?<![A-Za-z0-9_-])--cap-add(?=$|[=\s])",
-            "capability addition",
-            runner_path,
-        )
+        if runner_path.name == NET_ADMIN_RUNNER:
+            for fragment in (*NET_ADMIN_CAPABILITIES, NET_ADMIN_TEST_PREFIX):
+                require(runner, fragment, runner_path)
+            if len(re.findall(CAP_ADD, runner, flags=re.MULTILINE)) != len(
+                NET_ADMIN_CAPABILITIES
+            ):
+                raise SystemExit(
+                    f"{runner_path}: only {', '.join(NET_ADMIN_CAPABILITIES)} may be added"
+                )
+        else:
+            reject(runner, CAP_ADD, "capability addition", runner_path)
         reject(
             runner,
             r"(?<![A-Za-z0-9_-])--privileged(?=$|[=\s])",
@@ -151,11 +169,20 @@ def main() -> None:
             runner_path,
         )
 
+        sources = rust_sources
+        if runner_path.name == NET_ADMIN_RUNNER:
+            sources = {**rust_sources, **net_admin_sources}
         owners = [
             (source, text)
-            for source, text in rust_sources.items()
+            for source, text in sources.items()
             if runner_path.name in text
         ]
+        if runner_path.name == NET_ADMIN_RUNNER:
+            for source, _ in owners:
+                if not source.relative_to(root).as_posix().startswith(NET_ADMIN_OWNER_ROOT):
+                    raise SystemExit(
+                        f"{source}: only the Local namespace adapter may own {NET_ADMIN_RUNNER}"
+                    )
         if not owners:
             raise SystemExit(f"{runner_path}: no Rust test self-locates this runner")
         for source, text in owners:
