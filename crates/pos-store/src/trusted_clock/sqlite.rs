@@ -260,12 +260,10 @@ fn commit_unless(
 }
 
 fn connect(path: &str) -> Result<Connection, CoreError> {
-    #[cfg(target_os = "linux")]
-    crate::protected_sqlite_namespace::refuse_reserved_filename(path)?;
     let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
         | OpenFlags::SQLITE_OPEN_CREATE
         | OpenFlags::SQLITE_OPEN_URI;
-    Connection::open_with_flags(path, flags).map_err(|error| CoreError::Storage(error.to_string()))
+    crate::ordinary_sqlite::open_filename(path, flags)
 }
 
 fn port_error(error: &rusqlite::Error) -> TrustedClockPortErrorV1 {

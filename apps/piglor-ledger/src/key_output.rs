@@ -46,6 +46,35 @@ struct StoredOwnedKeyBinding {
     inode: Vec<u8>,
 }
 
+/// Both binding operations must screen the database before resolving or reading
+/// the key path. Keeping the pair together prevents verification and creation
+/// from applying different path rules. This is a refusal check, not a protected
+/// native-connection qualification or an atomic namespace-installation proof.
+#[cfg(unix)]
+struct OwnedKeyBindingPaths<'a> {
+    database: &'a Path,
+    key: std::path::PathBuf,
+}
+
+#[cfg(unix)]
+impl<'a> OwnedKeyBindingPaths<'a> {
+    fn new(database: &'a Path, key: &Path) -> Result<Self, pos_core::CoreError> {
+        #[cfg(target_os = "linux")]
+        pos_store::protected_sqlite_namespace::refuse_reserved_database_path(database)?;
+        absolute_output(key)
+            .map(|key| Self { database, key })
+            .map_err(binding_error)
+    }
+
+    fn open_database(&self) -> Result<rusqlite::Connection, pos_core::CoreError> {
+        rusqlite::Connection::open_with_flags(
+            self.database,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+        )
+        .map_err(binding_error)
+    }
+}
+
 #[cfg(unix)]
 impl BoundFileIdentity {
     fn from_metadata(metadata: &std::fs::Metadata) -> Self {
@@ -101,30 +130,29 @@ pub(crate) fn bind_owned_secret_key(
     identity: pos_core::KeyIdentityV1,
     material_digest: pos_core::Hash,
 ) -> Result<(), pos_core::CoreError> {
-    use rusqlite::{params, Connection, OpenFlags};
+    use rusqlite::params;
     use std::io::Read;
     use std::os::unix::fs::OpenOptionsExt;
 
-    #[cfg(target_os = "linux")]
-    pos_store::protected_sqlite_namespace::refuse_reserved_database_path(database)?;
-    let absolute = absolute_output(path).map_err(binding_error)?;
+    let paths = OwnedKeyBindingPaths::new(database, path)?;
+    let absolute = paths.key.as_path();
     let parent = absolute
         .parent()
         .ok_or_else(|| binding_error("key path has no parent"))?;
-    validate_ancestors(&absolute, parent).map_err(binding_error)?;
+    validate_ancestors(absolute, parent).map_err(binding_error)?;
     let mut file = std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(&absolute)
+        .open(absolute)
         .map_err(binding_error)?;
-    let metadata = fault!(&absolute, FaultStage::BindMetadata)
+    let metadata = fault!(absolute, FaultStage::BindMetadata)
         .and_then(|()| file.metadata())
         .map_err(binding_error)?;
     if let Err(reason) = validate_owned_key_file(&metadata) {
         return Err(binding_error(reason));
     }
     let mut encoded = zeroize::Zeroizing::new(Vec::new());
-    fault!(&absolute, FaultStage::BindRead)
+    fault!(absolute, FaultStage::BindRead)
         .and_then(|()| file.read_to_end(&mut encoded))
         .map_err(binding_error)?;
     if owned_key_material_digest(&encoded).map_err(binding_error)? != material_digest {
@@ -134,15 +162,14 @@ pub(crate) fn bind_owned_secret_key(
     }
     let file_identity = BoundFileIdentity::from_metadata(&metadata);
     #[cfg(test)]
-    swap_binding_target_for_test(&absolute, FaultStage::BindSwapBeforeInspect);
-    let current = fault!(&absolute, FaultStage::BindInspectCurrent)
-        .and_then(|()| std::fs::symlink_metadata(&absolute))
+    swap_binding_target_for_test(absolute, FaultStage::BindSwapBeforeInspect);
+    let current = fault!(absolute, FaultStage::BindInspectCurrent)
+        .and_then(|()| std::fs::symlink_metadata(absolute))
         .map_err(binding_error)?;
     if BoundFileIdentity::from_metadata(&current) != file_identity {
         return Err(binding_error("owned key changed before binding"));
     }
-    let connection = Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_WRITE)
-        .map_err(binding_error)?;
+    let connection = paths.open_database()?;
     connection
         .execute_batch(
             "PRAGMA synchronous=FULL;
@@ -175,14 +202,14 @@ pub(crate) fn bind_owned_secret_key(
             ],
         )
         .map_err(binding_error)?;
-    verify_owned_secret_key_binding(&connection, &absolute, identity, material_digest).and_then(
+    verify_owned_secret_key_binding(&connection, absolute, identity, material_digest).and_then(
         |bound| {
             if bound != file_identity {
                 return Err(binding_error(
                     "owned key file identity differs from durable binding",
                 ));
             }
-            verify_owned_secret_key_path_after_binding(&absolute, file_identity)
+            verify_owned_secret_key_path_after_binding(absolute, file_identity)
         },
     )
 }
@@ -266,16 +293,11 @@ fn require_owned_secret_key_binding(
     path: &Path,
     request: pos_core::KeyDestructionRequestV1,
 ) -> Result<BoundFileIdentity, pos_core::CoreError> {
-    use rusqlite::{Connection, OpenFlags};
-
-    #[cfg(target_os = "linux")]
-    pos_store::protected_sqlite_namespace::refuse_reserved_database_path(database)?;
-    let absolute = absolute_output(path).map_err(binding_error)?;
-    let connection = Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_WRITE)
-        .map_err(binding_error)?;
+    let paths = OwnedKeyBindingPaths::new(database, path)?;
+    let connection = paths.open_database()?;
     verify_owned_secret_key_binding(
         &connection,
-        &absolute,
+        &paths.key,
         request.identity,
         request.expected_material_digest,
     )

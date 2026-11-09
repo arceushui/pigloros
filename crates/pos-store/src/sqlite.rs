@@ -2094,10 +2094,7 @@ impl SqliteStore {
         initialize_schema: bool,
         options: SqliteStoreOpenOptionsV1,
     ) -> Result<Self, CoreError> {
-        #[cfg(target_os = "linux")]
-        crate::protected_sqlite_namespace::refuse_reserved_filename(path)?;
-        let conn = Connection::open_with_flags(path, flags)
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
+        let conn = crate::ordinary_sqlite::open_filename(path, flags)?;
         conn.set_prepared_statement_cache_capacity(SQLITE_STATEMENT_CACHE_CAPACITY);
 
         let writer_reservation_connection =
@@ -2148,12 +2145,8 @@ impl SqliteStore {
         flags: OpenFlags,
         options: SqliteStoreOpenOptionsV1,
     ) -> Option<Connection> {
-        #[cfg(target_os = "linux")]
-        if crate::protected_sqlite_namespace::refuse_reserved_filename(path).is_err() {
-            return None;
-        }
         if flags.contains(OpenFlags::SQLITE_OPEN_READ_ONLY) {
-            Connection::open_with_flags(
+            crate::ordinary_sqlite::open_filename(
                 path,
                 OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_URI,
             )

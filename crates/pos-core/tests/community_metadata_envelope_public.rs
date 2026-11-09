@@ -103,13 +103,45 @@ fn exact_native_envelope_domain_and_borrowed_original_nested_ranges() -> TestRes
 fn whitelist_is_exactly_the_31_accepted_native_metadata_schemas() -> TestResult {
     let scope = scope_bytes()?;
     let envelope = envelope(header(&scope)?)?;
-    for magic in [
-        *b"COB1", *b"CSB1", *b"CPV1", *b"CAU1", *b"CAV1", *b"CSI1", *b"CCI1", *b"CMI1", *b"CPD1",
-        *b"CBQ1", *b"CDP1", *b"CMB1", *b"CNT1", *b"CMS1", *b"CSH1", *b"CST1", *b"CGI1", *b"CGA1",
-        *b"CGC1", *b"CRI1", *b"CPR1", *b"CPS1", *b"CPC1", *b"CAB1", *b"CQK1", *b"CQC1", *b"CQR1",
-        *b"CQO1", *b"CGR1", *b"CTB1", *b"NMP1",
+    for (expected_schema, magic) in [
+        (Schema::Cob1, *b"COB1"),
+        (Schema::Csb1, *b"CSB1"),
+        (Schema::Cpv1, *b"CPV1"),
+        (Schema::Cau1, *b"CAU1"),
+        (Schema::Cav1, *b"CAV1"),
+        (Schema::Csi1, *b"CSI1"),
+        (Schema::Cci1, *b"CCI1"),
+        (Schema::Cmi1, *b"CMI1"),
+        (Schema::Cpd1, *b"CPD1"),
+        (Schema::Cbq1, *b"CBQ1"),
+        (Schema::Cdp1, *b"CDP1"),
+        (Schema::Cmb1, *b"CMB1"),
+        (Schema::Cnt1, *b"CNT1"),
+        (Schema::Cms1, *b"CMS1"),
+        (Schema::Csh1, *b"CSH1"),
+        (Schema::Cst1, *b"CST1"),
+        (Schema::Cgi1, *b"CGI1"),
+        (Schema::Cga1, *b"CGA1"),
+        (Schema::Cgc1, *b"CGC1"),
+        (Schema::Cri1, *b"CRI1"),
+        (Schema::Cpr1, *b"CPR1"),
+        (Schema::Cps1, *b"CPS1"),
+        (Schema::Cpc1, *b"CPC1"),
+        (Schema::Cab1, *b"CAB1"),
+        (Schema::Cqk1, *b"CQK1"),
+        (Schema::Cqc1, *b"CQC1"),
+        (Schema::Cqr1, *b"CQR1"),
+        (Schema::Cqo1, *b"CQO1"),
+        (Schema::Cgr1, *b"CGR1"),
+        (Schema::Ctb1, *b"CTB1"),
+        (Schema::Nmp1, *b"NMP1"),
     ] {
         let schema = Schema::from_magic(magic).ok_or("accepted schema missing")?;
+        assert_eq!(
+            std::mem::discriminant(&schema),
+            std::mem::discriminant(&expected_schema)
+        );
+        assert_eq!(expected_schema.magic(), magic);
         assert_eq!(schema.magic(), magic);
         let metadata = Metadata::new(schema, &scope, &envelope)?;
         assert_eq!(

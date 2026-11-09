@@ -14,151 +14,111 @@ const MAX_RECORD: usize = 4_194_304;
 const MAX_ENVELOPE: usize = 3_147_840;
 const _: () = assert!(MAX_SCOPE_ENCODING + MAX_ENVELOPE + 32 < MAX_RECORD);
 
-/// Exact ADR-129 native metadata whitelist, not an extensible decoder registry.
-/// The schema label alone does not verify a decrypted body's semantics.
-#[derive(Clone, Copy, Eq, PartialEq)]
-pub enum CommunityMetadataSchemaV1 {
+// Generate declarations only: enum and table cannot drift on insertion or
+// reordering. Both lookup algorithms remain ordinary functions below.
+macro_rules! metadata_schemas {
+    ($($(#[$doc:meta])* $schema:ident => $label:literal),+ $(,)?) => {
+        /// Exact ADR-129 native metadata whitelist, not an extensible registry.
+        /// The schema label does not verify a decrypted body's semantics.
+        #[derive(Clone, Copy, Eq, PartialEq)]
+        pub enum CommunityMetadataSchemaV1 {
+            $($(#[$doc])* $schema,)+
+        }
+
+        impl CommunityMetadataSchemaV1 {
+            // Ordinals index only this private table, never a wire encoding.
+            const LABELS: [(Self, [u8; 4]); 31] = [
+                $((Self::$schema, *$label),)+
+            ];
+        }
+    };
+}
+
+metadata_schemas! {
     /// Original owner binding.
-    Cob1,
+    Cob1 => b"COB1",
     /// Actual input scope binding.
-    Csb1,
+    Csb1 => b"CSB1",
     /// Original provenance.
-    Cpv1,
+    Cpv1 => b"CPV1",
     /// Current authority evidence.
-    Cau1,
+    Cau1 => b"CAU1",
     /// Current view, transient by default.
-    Cav1,
+    Cav1 => b"CAV1",
     /// Identity/allocation selection.
-    Csi1,
+    Csi1 => b"CSI1",
     /// Copy inventory.
-    Cci1,
+    Cci1 => b"CCI1",
     /// Materialization binding.
-    Cmi1,
+    Cmi1 => b"CMI1",
     /// Dependency commit.
-    Cpd1,
+    Cpd1 => b"CPD1",
     /// Pre-Reserve budget forecast.
-    Cbq1,
+    Cbq1 => b"CBQ1",
     /// Durable profile.
-    Cdp1,
+    Cdp1 => b"CDP1",
     /// Member binding.
-    Cmb1,
+    Cmb1 => b"CMB1",
     /// Negotiated tuple.
-    Cnt1,
+    Cnt1 => b"CNT1",
     /// Member State/progress.
-    Cms1,
+    Cms1 => b"CMS1",
     /// Selected head.
-    Csh1,
+    Csh1 => b"CSH1",
     /// Host progress.
-    Cst1,
+    Cst1 => b"CST1",
     /// Generation request.
-    Cgi1,
+    Cgi1 => b"CGI1",
     /// Generation admission.
-    Cga1,
+    Cga1 => b"CGA1",
     /// Generation control.
-    Cgc1,
+    Cgc1 => b"CGC1",
     /// Reservation request.
-    Cri1,
+    Cri1 => b"CRI1",
     /// Reservation result.
-    Cpr1,
+    Cpr1 => b"CPR1",
     /// Sealed result.
-    Cps1,
+    Cps1 => b"CPS1",
     /// Committed pass.
-    Cpc1,
+    Cpc1 => b"CPC1",
     /// Aborted pass.
-    Cab1,
+    Cab1 => b"CAB1",
     /// Quarantine key.
-    Cqk1,
+    Cqk1 => b"CQK1",
     /// Quarantine control.
-    Cqc1,
+    Cqc1 => b"CQC1",
     /// Quarantine revision.
-    Cqr1,
+    Cqr1 => b"CQR1",
     /// Quarantine outcome.
-    Cqo1,
+    Cqo1 => b"CQO1",
     /// Native graph root.
-    Cgr1,
+    Cgr1 => b"CGR1",
     /// Factual Tick bridge.
-    Ctb1,
+    Ctb1 => b"CTB1",
     /// Original metadata policy.
-    Nmp1,
+    Nmp1 => b"NMP1",
 }
 
 impl CommunityMetadataSchemaV1 {
     /// Exact four-byte wire label, never a Rust discriminant or debug spelling.
     #[must_use]
     pub const fn magic(self) -> [u8; 4] {
-        match self {
-            Self::Cob1 => *b"COB1",
-            Self::Csb1 => *b"CSB1",
-            Self::Cpv1 => *b"CPV1",
-            Self::Cau1 => *b"CAU1",
-            Self::Cav1 => *b"CAV1",
-            Self::Csi1 => *b"CSI1",
-            Self::Cci1 => *b"CCI1",
-            Self::Cmi1 => *b"CMI1",
-            Self::Cpd1 => *b"CPD1",
-            Self::Cbq1 => *b"CBQ1",
-            Self::Cdp1 => *b"CDP1",
-            Self::Cmb1 => *b"CMB1",
-            Self::Cnt1 => *b"CNT1",
-            Self::Cms1 => *b"CMS1",
-            Self::Csh1 => *b"CSH1",
-            Self::Cst1 => *b"CST1",
-            Self::Cgi1 => *b"CGI1",
-            Self::Cga1 => *b"CGA1",
-            Self::Cgc1 => *b"CGC1",
-            Self::Cri1 => *b"CRI1",
-            Self::Cpr1 => *b"CPR1",
-            Self::Cps1 => *b"CPS1",
-            Self::Cpc1 => *b"CPC1",
-            Self::Cab1 => *b"CAB1",
-            Self::Cqk1 => *b"CQK1",
-            Self::Cqc1 => *b"CQC1",
-            Self::Cqr1 => *b"CQR1",
-            Self::Cqo1 => *b"CQO1",
-            Self::Cgr1 => *b"CGR1",
-            Self::Ctb1 => *b"CTB1",
-            Self::Nmp1 => *b"NMP1",
-        }
+        Self::LABELS[self as usize].1
     }
 
     /// Resolve only an exact admitted metadata label. Data/failure/claim and
     /// clear bootstrap schemas cannot be imported under this wrapper.
     #[must_use]
     pub const fn from_magic(magic: [u8; 4]) -> Option<Self> {
-        match &magic {
-            b"COB1" => Some(Self::Cob1),
-            b"CSB1" => Some(Self::Csb1),
-            b"CPV1" => Some(Self::Cpv1),
-            b"CAU1" => Some(Self::Cau1),
-            b"CAV1" => Some(Self::Cav1),
-            b"CSI1" => Some(Self::Csi1),
-            b"CCI1" => Some(Self::Cci1),
-            b"CMI1" => Some(Self::Cmi1),
-            b"CPD1" => Some(Self::Cpd1),
-            b"CBQ1" => Some(Self::Cbq1),
-            b"CDP1" => Some(Self::Cdp1),
-            b"CMB1" => Some(Self::Cmb1),
-            b"CNT1" => Some(Self::Cnt1),
-            b"CMS1" => Some(Self::Cms1),
-            b"CSH1" => Some(Self::Csh1),
-            b"CST1" => Some(Self::Cst1),
-            b"CGI1" => Some(Self::Cgi1),
-            b"CGA1" => Some(Self::Cga1),
-            b"CGC1" => Some(Self::Cgc1),
-            b"CRI1" => Some(Self::Cri1),
-            b"CPR1" => Some(Self::Cpr1),
-            b"CPS1" => Some(Self::Cps1),
-            b"CPC1" => Some(Self::Cpc1),
-            b"CAB1" => Some(Self::Cab1),
-            b"CQK1" => Some(Self::Cqk1),
-            b"CQC1" => Some(Self::Cqc1),
-            b"CQR1" => Some(Self::Cqr1),
-            b"CQO1" => Some(Self::Cqo1),
-            b"CGR1" => Some(Self::Cgr1),
-            b"CTB1" => Some(Self::Ctb1),
-            b"NMP1" => Some(Self::Nmp1),
-            _ => None,
+        let mut index = 0;
+        while index < Self::LABELS.len() {
+            let (schema, label) = Self::LABELS[index];
+            if u32::from_be_bytes(label) == u32::from_be_bytes(magic) {
+                return Some(schema);
+            }
+            index += 1;
         }
+        None
     }
 }
 
