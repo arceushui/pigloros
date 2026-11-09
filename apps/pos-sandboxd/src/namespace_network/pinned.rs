@@ -21,6 +21,10 @@ use super::NamespaceName;
 const THREAD_NAMESPACE: &str = "/proc/thread-self/ns/net";
 /// `NSFS_MAGIC`: the filesystem of a namespace file.
 const NSFS_MAGIC: i128 = 0x6e73_6673;
+/// Open read-only and close on exec.
+pub(super) const READ_ONLY: OFlags = OFlags::RDONLY.union(OFlags::CLOEXEC);
+/// Create a new entry, read-only and close on exec, and fail if it exists.
+const CREATE_NEW: OFlags = READ_ONLY.union(OFlags::CREATE).union(OFlags::EXCL);
 
 /// The directory where namespaces are pinned by name.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -59,13 +63,7 @@ impl NetworkNamespaces {
         let pin = self.pin(name);
         mkdir(&self.directory, Mode::from_raw_mode(0o755))
             .or_else(|errno| (errno == Errno::EXIST).then_some(()).ok_or(errno))
-            .and_then(|()| {
-                open(
-                    &pin,
-                    OFlags::CREATE | OFlags::EXCL | OFlags::RDONLY | OFlags::CLOEXEC,
-                    Mode::empty(),
-                )
-            })
+            .and_then(|()| open(&pin, CREATE_NEW, Mode::empty()))
             .map_err(NetlinkError::from)
             .and_then(|_| {
                 std::thread::scope(|scope| {
@@ -83,11 +81,7 @@ impl NetworkNamespaces {
     /// # Errors
     /// Fails if the entry exists but cannot be opened or examined.
     pub fn open(&self, name: &NamespaceName) -> Result<Option<OwnedFd>, NetlinkError> {
-        match open(
-            self.pin(name),
-            OFlags::RDONLY | OFlags::CLOEXEC,
-            Mode::empty(),
-        ) {
+        match open(self.pin(name), READ_ONLY, Mode::empty()) {
             Err(Errno::NOENT) => Ok(None),
             opened => opened
                 .and_then(|file| {
@@ -125,13 +119,7 @@ fn absent(errno: Errno, absent: &[Errno]) -> Result<(), Errno> {
 fn pin_new_namespace(pin: &Path) -> Result<OwnedFd, NetlinkError> {
     unshare_network()
         .and_then(|()| mount_bind(THREAD_NAMESPACE, pin))
-        .and_then(|()| {
-            open(
-                THREAD_NAMESPACE,
-                OFlags::RDONLY | OFlags::CLOEXEC,
-                Mode::empty(),
-            )
-        })
+        .and_then(|()| open(THREAD_NAMESPACE, READ_ONLY, Mode::empty()))
         .map_err(NetlinkError::from)
 }
 

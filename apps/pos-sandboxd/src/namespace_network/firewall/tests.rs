@@ -190,6 +190,18 @@ fn other_families_regular_chains_and_flags_read_back() -> TestResult {
             }),
         )
     };
+    let accepting = nft(NfTablesMessage::NewChain(ChainMessage {
+        attributes: vec![
+            ChainAttribute::Table("t".to_owned()),
+            ChainAttribute::Name("a".to_owned()),
+            ChainAttribute::Hook(vec![
+                Hook::Number(HookNumber::Inet(InetHookNumber::LocalOut)),
+                Hook::Priority(u32::from_ne_bytes((-150_i32).to_ne_bytes())),
+            ]),
+            ChainAttribute::Policy(1),
+            ChainAttribute::Type("filter".to_owned()),
+        ],
+    }));
     let regular = nft(NfTablesMessage::NewChain(ChainMessage {
         attributes: vec![
             ChainAttribute::Table("t".to_owned()),
@@ -204,7 +216,7 @@ fn other_families_regular_chains_and_flags_read_back() -> TestResult {
             table(NetfilterProtoFamily::IPv4, TableFlags::empty()),
             table(NetfilterProtoFamily::Inet, TableFlags::Dormant),
         ],
-        vec![regular],
+        vec![regular, accepting],
         Vec::new(),
     )?;
     assert_eq!(observed[0].family, FirewallTableFamily::Other);
@@ -212,11 +224,22 @@ fn other_families_regular_chains_and_flags_read_back() -> TestResult {
     assert_eq!(observed[1].flags, 1);
     assert_eq!(
         observed[1].chains,
-        [FirewallChain {
-            name: "r".to_owned(),
-            base: None,
-            rules: Vec::new(),
-        }]
+        [
+            FirewallChain {
+                name: "r".to_owned(),
+                base: None,
+                rules: Vec::new(),
+            },
+            FirewallChain {
+                name: "a".to_owned(),
+                base: Some(FirewallBaseChain {
+                    hook: FirewallHook::Output,
+                    priority: -150,
+                    policy: FirewallVerdict::Accept,
+                }),
+                rules: Vec::new(),
+            },
+        ]
     );
     Ok(())
 }
@@ -289,9 +312,11 @@ fn unrepresentable_tables_and_chains_fail() {
             attributes: vec![ChainAttribute::Name("c".to_owned())],
         })),
     ];
+    // The table exists, so each chain fails on its own.
     for chain in chains {
+        let table = table_named(vec![TableAttribute::Name("t".to_owned())]);
         assert!(matches!(
-            observed_tables(Vec::new(), vec![chain], Vec::new()),
+            observed_tables(vec![table], vec![chain], Vec::new()),
             Err(NetlinkError::Unrepresentable)
         ));
     }
