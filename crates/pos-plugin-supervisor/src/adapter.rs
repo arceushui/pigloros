@@ -439,10 +439,12 @@ impl ReceiptParts {
 /// `invocation` with the Plugin state the adapter holds.
 fn with_prior_state(
     mut invocation: PluginInvocationV1,
-    state: CommunityStateV1,
+    mut state: CommunityStateV1,
 ) -> PluginInvocationV1 {
-    invocation.prior_state_schema = state.schema;
-    invocation.prior_state_bytes = state.bytes;
+    // The consumed State owns the replaced slot and clears it on drop. The
+    // invocation receives the selected State allocation without another copy.
+    std::mem::swap(&mut invocation.prior_state_schema, &mut state.schema);
+    std::mem::swap(&mut invocation.prior_state_bytes, &mut state.bytes);
     invocation
 }
 
