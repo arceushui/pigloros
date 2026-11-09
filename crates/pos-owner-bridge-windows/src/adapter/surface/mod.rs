@@ -1171,6 +1171,8 @@ impl OwnerWebSurface for Surface {
             #[cfg(test)]
             {
                 self.recordless_fault = None;
+                self.initial_buffer_close = None;
+                self.initial_close = None;
             }
             self.generation = None;
             self.foreground_deadline = None;

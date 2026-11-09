@@ -218,6 +218,45 @@ fn outer_event_ticks_retry_failed_close_until_own_exit_without_reopening() -> Te
 }
 
 #[test]
+fn reused_surface_observes_only_the_admitted_opening() -> TestResult {
+    let mut fixture = Fixture::new(Creation::Ready)?;
+    fixture.ready()?;
+    fixture.factory.failure.set(Some("close_buffers"));
+    assert!(fixture.surface.close_controller().is_err());
+    let first = fixture
+        .surface
+        .initial_close_observation()
+        .ok_or("missing close observation")?;
+    assert!(!first.buffers_closed);
+    assert!(matches!(
+        fixture.surface.open(&spec(41)),
+        Poll::Ready(Err(_))
+    ));
+    assert_eq!(fixture.surface.initial_close_observation(), Some(first));
+    fixture.finish()?;
+    fixture
+        .open(&spec(41))
+        .map_err(pos_owner_bridge::SurfaceError::error)?;
+    assert_eq!(fixture.surface.initial_close_observation(), None);
+    fixture
+        .surface
+        .close_controller()
+        .map_err(pos_owner_bridge::SurfaceError::error)?;
+    let second = fixture
+        .surface
+        .initial_close_observation()
+        .ok_or("missing new close observation")?;
+    assert!(second.removed.is_ok());
+    assert!(second.buffers_closed);
+    fixture.exit();
+    fixture
+        .surface
+        .finish()
+        .map_err(pos_owner_bridge::SurfaceError::error)?;
+    Ok(())
+}
+
+#[test]
 fn native_creation_and_navigation_polls_return_before_host_dispatch() -> TestResult {
     let mut fixture = Fixture::new(Creation::Ready)?;
     fixture.factory.foreground.set(false);

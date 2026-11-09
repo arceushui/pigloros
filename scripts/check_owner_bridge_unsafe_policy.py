@@ -1287,7 +1287,7 @@ def _check_fault_authority(root: Path, scans: dict[str, tuple[Scan, tuple[Attrib
     if (hashlib.sha256(re.sub(r"\s+", "", enum_body).encode()).hexdigest() != "9c39e796aa826523970cae61c061a219c7b0fb4a3f3ded23b586954bed10d395" or not surface_item or
             "cfg(test)" not in _outer_attributes_before(surface_text, surface_item[1], enum_start)):
         found.append(f"{SHIM}/src/adapter/surface/mod.rs: pre-environment retention type must be reviewed and test-only")
-    for relative, name, digest in (('src/adapter/surface/mod.rs', 'open', 'ef643ba74f211ae6c018e175e1b48a57ce9d7ad94d8d02a1657a359ebce9c044'), ('src/ffi/session.rs', 'window', 'b25f4191690ca7a0aed740988fa01e94b213cc219a584c9111056ce155d1b79f'), ('src/ffi/window.rs', 'snapshot', 'a7ee6e1a5515f4cf82fd01e16a70cc5cf818c6fdf5016f4afcf3e554fd415727'),):
+    for relative, name, digest in (('src/adapter/surface/mod.rs', 'open', 'a66114d4bb87c4ee914d75cbb116ba90d6851d0442eaef60383fa2d53cb4a158'), ('src/ffi/session.rs', 'window', 'b25f4191690ca7a0aed740988fa01e94b213cc219a584c9111056ce155d1b79f'), ('src/ffi/window.rs', 'snapshot', 'a7ee6e1a5515f4cf82fd01e16a70cc5cf818c6fdf5016f4afcf3e554fd415727'),):
         item = scans.get(relative)
         source = item[0].code if item else ""
         matches = list(re.finditer(rf"(?<!\w)fn\s+{name}\s*\(", source))
@@ -1531,7 +1531,7 @@ def _check_owned_parent_boundary(sources: dict[str, str], found: list[str]) -> N
 # Exact source/asset custody for the accepted test-only External URI profile.
 # Full text binds attributes, literal URI, handler/denial observations and scope.
 EXTERNAL_FIXTURE_SOURCES = {
-    'crates/pos-owner-bridge-windows/src/adapter/surface/mod.rs': '2d0babe984b66e2503eaf4fcfd1374df9960ed1741cc975a7ac8c9c3b78037fa',
+    'crates/pos-owner-bridge-windows/src/adapter/surface/mod.rs': 'b34859000ea78ae472cdef75ec39ce6c90a491126757842bfb9973eea02a7300',
     'crates/pos-owner-bridge-windows/src/ffi/events/controls.rs': '8c53ef70d3d845bebd2a1d84976765e4a37beafb44ba3a0eb5359b2725c91d29',
     'crates/pos-owner-bridge-windows/src/ffi/events/mod.rs': '7fc36286ad4b27ced12deb75768e3309d4e92fb31aa9f45d15d08753da176836',
     'crates/pos-owner-bridge-windows/src/ffi/events/denial.rs': '5b5152942f17630af41b044c53c80403ac5f4cfaef267bfbe4e5fc3207988820',
