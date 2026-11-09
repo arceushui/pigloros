@@ -22,7 +22,7 @@ use crate::TransientServiceUnitName;
 mod directory;
 mod recovery;
 mod root;
-pub use directory::PreparedAttemptDirectory;
+pub use directory::{AttemptUnitTermination, CompletedAttemptCleanup, PreparedAttemptDirectory};
 pub use recovery::{
     RecoveredAttemptIntent, RecoveredUnmountedDirectory, RegistryRecoveryEntry,
     SystemdAttemptRecovery, UnmountedDirectoryInventory,
@@ -115,6 +115,9 @@ pub enum SystemdAttemptRegistryError {
     /// A previous uncertain write or poisoned lock has closed new commits.
     #[error("systemd attempt registry requires reconciliation")]
     ReconciliationRequired,
+    /// Terminal cleanup lacks matching unit or released-root evidence.
+    #[error("terminal attempt cleanup evidence is missing or mismatched")]
+    CleanupEvidence,
     /// An operating-system operation failed; no successful commit is claimed.
     #[error(transparent)]
     Io(#[from] io::Error),
