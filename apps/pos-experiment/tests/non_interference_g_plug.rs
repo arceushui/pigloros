@@ -663,12 +663,12 @@ fn invocation() -> pos_runtime::community_plugin_host::PluginInvocationV1 {
 
 /// Answers every request with a `describe` report.
 fn describes_everything(_: &[u8]) -> Option<zeroize::Zeroizing<Vec<u8>>> {
-    serve_g_plug_fixture_guest_v1(&request_bytes(WorkerCallV1::Describe))
+    serve_g_plug_fixture_guest_v1(&request_bytes(&WorkerCallV1::Describe))
 }
 
 /// Answers every request with a `reduce` report.
 fn produces_everything(_: &[u8]) -> Option<zeroize::Zeroizing<Vec<u8>>> {
-    serve_g_plug_fixture_guest_v1(&request_bytes(WorkerCallV1::Reduce(invocation())))
+    serve_g_plug_fixture_guest_v1(&request_bytes(&WorkerCallV1::Reduce(invocation())))
 }
 
 /// Answers with the guest's output, its output digest tampered.
@@ -714,9 +714,9 @@ fn seen() -> Vec<u8> {
 
 /// A PWQ1 request the real host sends for `call`, taken from what the host
 /// hands its endpoint.
-fn request_bytes(call: WorkerCallV1) -> Vec<u8> {
+fn request_bytes(call: &WorkerCallV1) -> Vec<u8> {
     let host = GPlugProtocolHostV1::new(record);
-    match &call {
+    match call {
         WorkerCallV1::Describe => {
             assert!(host.describe().is_none());
         }
@@ -775,8 +775,8 @@ fn the_fixture_guest_answers_describe_reduce_and_drive_over_the_protocol() -> Te
         WorkerCallV1::Reduce(invocation()),
         WorkerCallV1::Drive(invocation()),
     ] {
-        let decoded = decode_worker_request_v1(&request_bytes(call.clone()))
-            .map_err(|_| "undecodable request")?;
+        let decoded =
+            decode_worker_request_v1(&request_bytes(&call)).map_err(|_| "undecodable request")?;
         assert_eq!(decoded.component.as_slice(), G_PLUG_COMPONENT_V1);
         assert_eq!(decoded.call, call);
         assert_eq!(decoded.negotiation.not_granted_capabilities.len(), 4);
@@ -798,11 +798,11 @@ fn a_migrate_state_request_is_refused_by_the_protocol() -> TestResult {
     );
     // The migrate-state request is the reduce envelope with call code 3,
     // which the codec refuses.
-    let reduce = request_bytes(WorkerCallV1::Reduce(invocation()));
+    let reduce = request_bytes(&WorkerCallV1::Reduce(invocation()));
     let mut migrate = reduce.clone();
     let code = reduce
         .iter()
-        .zip(&request_bytes(WorkerCallV1::Drive(invocation())))
+        .zip(&request_bytes(&WorkerCallV1::Drive(invocation())))
         .position(|(left, right)| left != right)
         .ok_or("no call code")?;
     assert_eq!(reduce[code], 1);
@@ -844,7 +844,7 @@ fn the_host_admits_only_a_response_for_the_export_it_invoked() -> TestResult {
     assert_eq!(GPlugProtocolHostV1::new(answers_garbage).describe(), None);
     // The guest answers only its own Component and a well-formed envelope.
     assert_eq!(serve_g_plug_fixture_guest_v1(b"not a request"), None);
-    let mut foreign = request_bytes(WorkerCallV1::Describe);
+    let mut foreign = request_bytes(&WorkerCallV1::Describe);
     let at = foreign
         .windows(G_PLUG_COMPONENT_V1.len())
         .position(|window| window == G_PLUG_COMPONENT_V1)
