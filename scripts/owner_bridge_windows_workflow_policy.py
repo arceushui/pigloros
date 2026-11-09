@@ -229,7 +229,7 @@ try {
 }
 if ($nativeResult -ne 0) { throw 'Native coverage execution failed' }
 """
-PRODUCER_SHA256 = {'scripts/check_owner_bridge_unsafe_policy.py': 'efda7dfc09a69cea0877ae17e768a45e55adfaf606565720c5602dc1f3a40e8a',
+PRODUCER_SHA256 = {'scripts/check_owner_bridge_unsafe_policy.py': 'f22821040caf632399faa0f150ce87f2b73b8478cefba60a8be257c47697f4ce',
  'scripts/owner_bridge_windows_cov_ignore.py': '82f97a7eb43588f05c469fe72d22c78c4a78d56f0033e6b25cc6277a8f3f24a6',
  'scripts/observe-owner-desktop.ps1': '5d0999f0ced7700148ed6fd3a7b0e1b44a5c242067af36488b1dd7bda13ce77d'}
 

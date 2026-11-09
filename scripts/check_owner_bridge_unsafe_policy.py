@@ -1482,8 +1482,8 @@ def _check_owned_parent_boundary(sources: dict[str, str], found: list[str]) -> N
     # module scopes. Function-body-only hashes cannot detect a removed #[test]
     # or a disabled enclosing cfg. _read normalizes platform line endings.
     complete_sources = {
-        lib: "440e03beed354aa3c419de88b712b8740af3249e18ea583965e5504e53984138",
-        prefix + "ffi/mod.rs": "b522502e7cbbfceea558049a8ca3021f9e8371f0d7dc5bceb62dc14a895ffe46",
+        lib: "20f169f7ba4e78339eacba3d332d4f01514fd0ee0b02d3a8f190191d2c5ce54c",
+        prefix + "ffi/mod.rs": "e0d5c4aa2ad33f5d68df91fded5e57c6ce7f9e3d908aef88ff8b275810eec68c",
         prefix + "adapter/native_tests.rs": "2e3ec6d4daa853395812f19ab4599cc937e8b13243d0daf75de71da93b85f349",
         "crates/pos-owner-bridge/src/ceremony/plan.rs": "4e743b55408a42c1f757d27d0d8b47c091dcb026953824b9cc1dec37121182b4",
     }
@@ -1491,11 +1491,11 @@ def _check_owned_parent_boundary(sources: dict[str, str], found: list[str]) -> N
         if hashlib.sha256(sources.get(path, "").replace("\r\n", "\n").encode()).hexdigest() != digest:
             found.append(f"{path}: owned-parent source and hosted-test scope differ from reviewed code")
     helper = prefix + "ffi/fixture_parent.rs"
-    expected = "c096977ee429e7ea426de557947eac10c9374d0997f42c31ecf238602f6911b6"
+    expected = "2049df6953f4b3a249686872dd8152f96843934c821e3df588838f398917748c"
     if hashlib.sha256(sources.get(helper, "").encode()).hexdigest() != expected:
         found.append(f"{helper}: owned-parent fixture differs from reviewed test-only code")
     module = sources.get(prefix + "ffi/mod.rs", "")
-    if len(re.findall(r"#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]\s*pub\s+mod\s+fixture_parent\s*;", module)) != 1:
+    if len(re.findall(r"#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]\s*mod\s+fixture_parent\s*;", module)) != 1:
         found.append(f"{prefix}ffi/mod.rs: owned-parent module must be cfg(test)")
     plan = "crates/pos-owner-bridge/src/ceremony/plan.rs"
     if not re.search(r"#\s*\[\s*cfg\s*\(\s*feature\s*=\s*\"test-support\"\s*\)\s*\]\s*impl\s+CeremonyPlan\s*\{", sources.get(plan, "")):
@@ -1504,8 +1504,8 @@ def _check_owned_parent_boundary(sources: dict[str, str], found: list[str]) -> N
         found.append(f"{lib}: native host fixture must remain in the test module")
     specs = (
         (plan, "with_test_owner_window", "df7788308f2149191a92004d4d57598c85c4036d2dc60cb106d1bccba6367606"),
-        (lib, "native_host_fixture_child", "542668f47ced5ff6eb0da4780909421bd6c10abe7b585dbf01690f60873200f4"),
-        (lib, "native_host_opens_fresh_environments_and_retires_before_reuse", "b722d38606e0efef415d10734c3c56e66b74b6299a29db9e272a7f058ae4e75b"),
+        (lib, "native_host_fixture_child", "00c2d4140ff13359ffdcb7c81f100b6452ff07538e1c6e9ad08c5a8daf011c75"),
+        (lib, "native_host_opens_fresh_environments_and_retires_before_reuse", "59cbe1ca5074bdb5088a7c318424844127288858c7318f4341bb0b08db449ce7"),
         (prefix + "adapter/native_tests.rs", "native_host_lifecycle", "2ebf81ffbcae9bf98e9fb57a6ba28efc59bb40adfa972b5d463ead557a6f15e4"),
     )
     for path, name, digest in specs:
@@ -1514,11 +1514,12 @@ def _check_owned_parent_boundary(sources: dict[str, str], found: list[str]) -> N
         if len(spans) != 1 or hashlib.sha256(re.sub(r"\s+", "", raw[spans[0][0]:spans[0][1]]).encode()).hexdigest() != digest:
             found.append(f"{path}: owned-parent function {name} differs from reviewed code")
     uses = {
-        "fixture_parent": {prefix + "ffi/mod.rs", helper, lib},
-        "OwnedParent": {helper, lib},
-        "child_owner": {helper, lib},
+        "fixture_parent": {prefix + "ffi/mod.rs", helper},
+        "OwnedParent": {helper},
+        "child_owner": {helper},
         "with_test_owner_window": {plan, prefix + "adapter/native_tests.rs", "crates/pos-owner-bridge/tests/protocol/opening.rs"},
-        "native_host_lifecycle": {lib, prefix + "adapter/native_tests.rs"},
+        "native_host_parent_fixture": {helper, lib},
+        "native_host_lifecycle": {helper, prefix + "adapter/native_tests.rs"},
     }
     for path, raw in sources.items():
         code = scan(raw).code
