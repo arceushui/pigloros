@@ -1011,7 +1011,7 @@ mod binding_tests {
         );
         assert!(
             matches!(&result, Err(pos_core::CoreError::Storage(message)) if message == &expected),
-            "unexpected key binding result: {result:?}"
+            "symlink key binding did not return the expected refusal"
         );
         assert!(!database.exists());
         Ok(())
@@ -1033,7 +1033,7 @@ mod binding_tests {
             assert!(
                 matches!(&result, Err(pos_core::CoreError::Storage(message))
                     if message == "owned signing-key binding: key is not a private single-link regular file"),
-                "unexpected FIFO key binding result: {result:?}"
+                "FIFO key binding did not return the expected refusal"
             );
             std::fs::write(directory.join("fifo-refused"), b"refused")?;
             return Ok(());
