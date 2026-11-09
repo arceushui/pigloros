@@ -204,10 +204,11 @@ pub(super) fn read_output(reader: &mut EnvelopeReader<'_>) -> Decoded<PluginOutp
 }
 
 /// Keep completed private items owned if a later item fails to decode.
-fn read_private_list<T: Zeroize>(
-    reader: &mut EnvelopeReader<'_>,
+/// The callback reads this envelope's input, not every possible input lifetime.
+fn read_private_list<'input, T: Zeroize>(
+    reader: &mut EnvelopeReader<'input>,
     max: usize,
-    mut item: impl FnMut(&mut EnvelopeReader<'_>) -> Decoded<T>,
+    mut item: impl FnMut(&mut EnvelopeReader<'input>) -> Decoded<T>,
 ) -> Decoded<Zeroizing<Vec<T>>> {
     let count = reader.array(max)?;
     let mut items = Zeroizing::new(Vec::with_capacity(count));
