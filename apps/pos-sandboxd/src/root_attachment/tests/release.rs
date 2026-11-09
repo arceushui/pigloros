@@ -348,6 +348,9 @@ mod cases {
 
         // Foreign evidence, a missing root, an ambiguous repeat activation and
         // a released root on a tree whose activation never reached mountfsd.
+        // The repeat is a mountfsd request that failed followed by a
+        // successful retry: the count never decreases, so the one released
+        // root cannot cover the failed request's possible resources.
         for case in 0..4 {
             let tree = prepared_tree()?;
             let other = tree

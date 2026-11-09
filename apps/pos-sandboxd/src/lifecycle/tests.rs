@@ -29,6 +29,20 @@ mod cases {
         }
     }
 
+    /// A root release that never completes.
+    struct HangingRelease;
+
+    impl RootRelease for HangingRelease {
+        fn release(
+            self,
+            _directory: &PreparedAttemptDirectory,
+            _deadline: Instant,
+        ) -> impl Future<Output = Result<ReleasedAttemptRoot, ImageActivationError>> + Send + '_
+        {
+            std::future::pending()
+        }
+    }
+
     /// A fake root release; unless `absent`, the device-absence probe fails.
     fn fake_root_release(
         directory: &PreparedAttemptDirectory,
@@ -329,6 +343,29 @@ mod cases {
         // The reset hangs; give up on the cleanup before its deadline.
         let abandoned = tokio::time::timeout(Duration::from_millis(400), cleanup).await;
         assert!(abandoned.is_err());
+        assert_retained(&record, &attempt.registry)?;
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dropping_a_cleanup_during_root_release_quarantines_the_attempt() -> TestResult {
+        let attempt = Attempt::new()?;
+        let fixture = TeardownFixture::new(1, TeardownStop::Empty, TeardownReset::Unload).await?;
+        attempt.submitted(&fixture.bound)?;
+        let record = attempt.record();
+        let calls = fixture.calls();
+        let cleanup = finish_with(
+            &fixture.transport,
+            attempt.directory,
+            Some(fixture.bound),
+            Some(HangingRelease),
+            deadlines()?,
+        );
+        // The unit stops at once; give up on the root release that follows.
+        let abandoned = tokio::time::timeout(Duration::from_millis(600), cleanup).await;
+        assert!(abandoned.is_err());
+        // The unit step had completed: stop, failed-state reset and absence.
+        assert_eq!(calls.count()?, 3);
         assert_retained(&record, &attempt.registry)?;
         Ok(())
     }
