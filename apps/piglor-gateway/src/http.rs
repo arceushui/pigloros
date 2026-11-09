@@ -600,12 +600,23 @@ impl From<GatewayError> for ProblemV1 {
         let Some((code, status, retryable)) = gateway_problem(&error) else {
             return Self::internal(StatusCode::INTERNAL_SERVER_ERROR);
         };
-        let problem = Self::new(code, status, error.to_string());
+        let problem = Self::new(code, status, public_detail(&error));
         if retryable {
             problem.retryable()
         } else {
             problem
         }
+    }
+}
+
+/// The `detail` of a Gateway failure. A missing Timeline may be a Fork ancestor the caller never
+/// named, so its id never leaves the Gateway and every not-found reads alike.
+fn public_detail(error: &GatewayError) -> String {
+    match error {
+        GatewayError::Store(CoreError::TimelineNotFound(_)) => {
+            GatewayError::ResourceUnavailable.to_string()
+        }
+        other => other.to_string(),
     }
 }
 
@@ -2503,6 +2514,11 @@ osf_link = \"https://osf.io/example\"\n";
         assert_eq!(r.status(), StatusCode::FORBIDDEN);
         let r = GatewayError::Store(CoreError::TimelineNotFound(TimelineId::new())).into_response();
         assert_eq!(r.status(), StatusCode::NOT_FOUND);
+        let ancestor = TimelineId::new();
+        let missing = ProblemV1::from(GatewayError::Store(CoreError::TimelineNotFound(ancestor)));
+        let body = missing.body("/v1/timelines/{timeline_id}/events");
+        assert_eq!(body["detail"], "resource not found");
+        assert!(!body.to_string().contains(&ancestor.to_string()));
         let r = GatewayError::StoreExecutorClosed.into_response();
         assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
         let r = GatewayError::LedgerWriteDisabled.into_response();
