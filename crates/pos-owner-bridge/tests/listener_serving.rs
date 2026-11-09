@@ -73,6 +73,7 @@ fn sealed_qualification_profiles_serve_their_exact_bound_bytes() -> TestResult {
         FixtureProfile::SuccessfulGet,
         FixtureProfile::SuccessfulGetReleaseDelay,
         FixtureProfile::SuccessfulGetWritingDelay,
+        FixtureProfile::WithheldDelivery,
     ] {
         let config = ListenerConfig::fixture(profile);
         let listener = start(config)?;
@@ -100,6 +101,15 @@ Sec-Fetch-Dest: document\r\nSec-Fetch-Mode: navigate\r\n\r\n",
             "{profile:?}: {other:?}"
         );
         assert_eq!(listener.served().count, 1);
+        if profile == FixtureProfile::Permission {
+            let diagnostic = exchange(
+                listener.v4_addr(),
+                b"GET /permission-diag/noresult HTTP/1.1\r\nHost: localhost:49291\r\n\
+Sec-Fetch-Dest: document\r\nSec-Fetch-Mode: navigate\r\n\r\n",
+            )?;
+            assert!(diagnostic.starts_with(b"HTTP/1.1 404 Not Found\r\n"));
+            assert_eq!(listener.served().count, 1);
+        }
     }
     Ok(())
 }

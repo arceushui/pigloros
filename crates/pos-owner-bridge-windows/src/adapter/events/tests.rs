@@ -17,6 +17,32 @@ fn start(events: &Events, uri: &str, id: u64, redirected: bool) -> NativeAction 
 }
 
 #[test]
+fn permission_diagnostic_navigations_are_closed_and_still_denied() {
+    for stage in [
+        "permissiondenied",
+        "positionunavailable",
+        "timeout",
+        "exception",
+        "unavailable",
+        "noresult",
+        "success",
+        "unknown",
+    ] {
+        let uri = format!("http://localhost:49291/permission-diag/{stage}");
+        assert_eq!(permission_diagnostic(&uri), Some(stage));
+        let events = Events::default();
+        events.begin();
+        assert_eq!(start(&events, OWNER_URL, 1, false), NativeAction::Allow);
+        assert_eq!(start(&events, &uri, 2, false), NativeAction::Cancel);
+        assert!(events.invalid());
+    }
+    assert_eq!(
+        permission_diagnostic("http://localhost:49291/permission-diag/private"),
+        None
+    );
+}
+
+#[test]
 fn exactly_one_initial_navigation_and_matching_document_are_admitted() {
     let events = Events::default();
     events.begin();

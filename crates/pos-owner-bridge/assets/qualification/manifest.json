@@ -15,8 +15,8 @@
       "response_sha256": "b3be505b89691ee36938d9d51d03c6c248ca6ba527b7653b1660ce0029068fa2"
     },
     "permission": {
-      "html_sha256": "5e97496b6d18b732e3045d361626c5425f3373eb21945aee047b892cfc3db866",
-      "response_sha256": "48b92ddd2a3430e837192a905fee4c61db958f2ba57743bda3cb438fceed6a8c"
+      "html_sha256": "8db4c838094f02eebd9e58b984e99d11aa038262afb4b252816101e7aa27d847",
+      "response_sha256": "1bf73dd330e616287b48ae15193734f165add8251459f0bf3efa64e19cb6628b"
     },
     "external": {
       "html_sha256": "f4ddacd17cb9003e8569e9b8a809ad2e837ced9f533c6e775a7921b4866720ae",
@@ -65,6 +65,10 @@
     "successful_get_writing_delay": {
       "html_sha256": "835d8dcc1fb948e541e4c05bed41ef528adbf6dbc9c48ef09e5f07a5a8f35b65",
       "response_sha256": "3b4162f9fca0d6a658dd43a56d92d6ad7b8916873491941d530ea2f2b4bc2967"
+    },
+    "withheld_delivery": {
+      "html_sha256": "cd8dfa06a751630390ab12db964bb347862671a8b75fa31a214e8cd814ea841a",
+      "response_sha256": "330a585ee7fcee1c74a37b2d46379d548b5b737c9c170fbce9623cff41317d0f"
     }
   }
 }

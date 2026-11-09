@@ -45,6 +45,9 @@ pub enum FixtureProfile {
     /// Hold the getter for 1.5 s after the core enters `WRITING`, before encoding.
     /// Adversarial fault scheduling; never part of normal G3 delivery.
     SuccessfulGetWritingDelay,
+    /// Retain real SDK events until teardown, exercising all real EMPTY retries.
+    /// Adversarial delivery withholding; never a normal G3 delivery case.
+    WithheldDelivery,
 }
 
 impl FixtureProfile {
@@ -66,6 +69,7 @@ impl FixtureProfile {
             Self::SuccessfulGet => &fixture_assets::SUCCESSFUL_GET,
             Self::SuccessfulGetReleaseDelay => &fixture_assets::SUCCESSFUL_GET_RELEASE_DELAY,
             Self::SuccessfulGetWritingDelay => &fixture_assets::SUCCESSFUL_GET_WRITING_DELAY,
+            Self::WithheldDelivery => &fixture_assets::WITHHELD_DELIVERY,
         }
     }
 }

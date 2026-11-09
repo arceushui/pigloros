@@ -1491,6 +1491,7 @@ def test_fault_profile_bindings() -> None:
         f"{directory}/assets/qualification/pending.html",
         f"{directory}/assets/qualification/successful_get_release_delay.html",
         f"{directory}/assets/qualification/successful_get_writing_delay.html",
+        f"{directory}/assets/qualification/withheld_delivery.html",
     )
     sources = {path: (ROOT / path).read_text() for path in paths}
 
@@ -1514,6 +1515,7 @@ def test_fault_profile_bindings() -> None:
         ("Pending", "PENDING", "pending"),
         ("SuccessfulGetReleaseDelay", "SUCCESSFUL_GET_RELEASE_DELAY", "successful_get_release_delay"),
         ("SuccessfulGetWritingDelay", "SUCCESSFUL_GET_WRITING_DELAY", "successful_get_writing_delay"),
+        ("WithheldDelivery", "WITHHELD_DELIVERY", "withheld_delivery"),
     ):
         catalogue, responses = paths[:2]
         mapping = f"Self::{variant} => &fixture_assets::{constant}"

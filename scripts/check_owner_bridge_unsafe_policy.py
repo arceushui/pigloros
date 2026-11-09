@@ -1052,13 +1052,14 @@ def _check_fault_assets(root: Path, found: list[str]) -> None:
         response_text = responses.read_text()
     except OSError:
         catalogue_code, response_text = "", ""
-    if hashlib.sha256(re.sub(r"\s+", "", catalogue_code).encode()).hexdigest() != "10199faa89432904442e0724281103d56ef9d645d364ec1e4dc270b800dd69ca":
+    if hashlib.sha256(re.sub(r"\s+", "", catalogue_code).encode()).hexdigest() != "064e4f1625847db44246768eaa33e3b147a3641340511aab602898abcbf53520":
         found.append(f"{catalogue.relative_to(root).as_posix()}: process fault catalogue differs from reviewed sealed response selection")
     response_code = scan(response_text).code
     for variant, constant, filename, digest in (
         ("Pending", "PENDING", "pending", "592560cb9ec82f5a93945c0b04ec6ed38b5bf78215eca0dad8eb9730c2918479"),
         ("SuccessfulGetReleaseDelay", "SUCCESSFUL_GET_RELEASE_DELAY", "successful_get_release_delay", "1d09cd8be58999eaec6b3d602873c0ec52c01db407a82faac424cde1a48076e1"),
         ("SuccessfulGetWritingDelay", "SUCCESSFUL_GET_WRITING_DELAY", "successful_get_writing_delay", "835d8dcc1fb948e541e4c05bed41ef528adbf6dbc9c48ef09e5f07a5a8f35b65"),
+        ("WithheldDelivery", "WITHHELD_DELIVERY", "withheld_delivery", "cd8dfa06a751630390ab12db964bb347862671a8b75fa31a214e8cd814ea841a"),
     ):
         asset = root / f"crates/pos-owner-bridge/assets/qualification/{filename}.html"
         try:

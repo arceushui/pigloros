@@ -95,6 +95,11 @@ impl Events {
     }
 
     fn navigation(&self, uri: &str, id: u64, redirected: bool) -> NativeAction {
+        #[cfg(test)]
+        if let Some(stage) = permission_diagnostic(uri) {
+            use std::io::Write as _;
+            let _written = writeln!(std::io::stderr(), "NATIVE_PERMISSION stage={stage}");
+        }
         if self.allow_start.replace(false)
             && self.started.get().is_none()
             && uri == OWNER_URL
@@ -157,6 +162,21 @@ impl Events {
             self.exited.set(Some(pid));
         }
         self.emit(SurfaceEvent::BrowserExited { browser_pid: pid });
+    }
+}
+
+#[cfg(test)]
+fn permission_diagnostic(uri: &str) -> Option<&'static str> {
+    match uri {
+        "http://localhost:49291/permission-diag/permissiondenied" => Some("permissiondenied"),
+        "http://localhost:49291/permission-diag/positionunavailable" => Some("positionunavailable"),
+        "http://localhost:49291/permission-diag/timeout" => Some("timeout"),
+        "http://localhost:49291/permission-diag/exception" => Some("exception"),
+        "http://localhost:49291/permission-diag/unavailable" => Some("unavailable"),
+        "http://localhost:49291/permission-diag/noresult" => Some("noresult"),
+        "http://localhost:49291/permission-diag/success" => Some("success"),
+        "http://localhost:49291/permission-diag/unknown" => Some("unknown"),
+        _ => None,
     }
 }
 

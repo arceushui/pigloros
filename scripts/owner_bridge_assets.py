@@ -23,11 +23,23 @@ PROFILES = (
     "pending", "popup", "popup_receipt", "permission", "external", "navigation",
     "download", "authentication", "readonly_write", "readonly_control",
     "duplicate_request", "interleaved_pair", "delayed_delivery", "successful_get",
-    "successful_get_release_delay", "successful_get_writing_delay",
+    "successful_get_release_delay", "successful_get_writing_delay", "withheld_delivery",
 )
 TRIGGERS = {
     "popup": 'window.open("http://localhost:49291/denied-popup", "_blank");',
-    "permission": "navigator.geolocation.getCurrentPosition(function () {}, function () {});",
+    "permission": (
+        "var reported = false; "
+        "function report(uri) { if (!reported) { reported = true; window.location.href = uri; } } "
+        "setTimeout(function () { report(\"http://localhost:49291/permission-diag/noresult\"); }, 12000); "
+        "try { if (!navigator.geolocation) { report(\"http://localhost:49291/permission-diag/unavailable\"); } "
+        "else { navigator.geolocation.getCurrentPosition("
+        "function () { report(\"http://localhost:49291/permission-diag/success\"); }, "
+        "function (error) { if (error.code === 1) { report(\"http://localhost:49291/permission-diag/permissiondenied\"); } "
+        "else if (error.code === 2) { report(\"http://localhost:49291/permission-diag/positionunavailable\"); } "
+        "else if (error.code === 3) { report(\"http://localhost:49291/permission-diag/timeout\"); } "
+        "else { report(\"http://localhost:49291/permission-diag/unknown\"); } }); } } "
+        "catch (_) { report(\"http://localhost:49291/permission-diag/exception\"); }"
+    ),
     "external": 'window.location.href = "pigloros-qualification-denied://attempt";',
     "navigation": 'window.location.href = "http://localhost:49291/denied-navigation";',
 }
@@ -80,11 +92,13 @@ def delivery_port(profile: str) -> str:
             "            }, 700);\n"
             "          }\n"
         ),
+        "withheld_delivery": "          queue.push(event);\n",
     }
     declarations = {
         "duplicate_request": "done = false",
         "interleaved_pair": "done = false, first = null, held = null, waiting = []",
         "delayed_delivery": "done = false, queue = []",
+        "withheld_delivery": "queue = []",
     }
     return (
         "  function deliveryPort() {\n"
@@ -182,7 +196,7 @@ def fixture_bootstrap(profile: str) -> str:
     trigger = TRIGGERS.get(profile, "")
     native = "function () { return window.chrome && window.chrome.webview; }"
     prelude = ""
-    if profile in ("duplicate_request", "interleaved_pair", "delayed_delivery"):
+    if profile in ("duplicate_request", "interleaved_pair", "delayed_delivery", "withheld_delivery"):
         prelude = delivery_port(profile)
         native = "deliveryPort"
     if profile in ("readonly_write", "readonly_control"):
