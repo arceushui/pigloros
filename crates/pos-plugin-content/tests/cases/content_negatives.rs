@@ -323,6 +323,12 @@ fn malformed_nested_json_and_map_depth_are_refused_before_content_checks() -> Te
             },
         ),
         (
+            json!({"$defs":{"nested":{"$id":"https://example.invalid/schema#fragment"}}}),
+            Error::Malformed {
+                artifact: Artifact::Schema { index: 0 },
+            },
+        ),
+        (
             json!({"$defs":{"nested":{"$schema":"https://json-schema.org/draft/2019-09/schema"}}}),
             Error::UnsupportedFormat {
                 artifact: Artifact::Schema { index: 0 },

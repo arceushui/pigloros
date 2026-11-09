@@ -87,12 +87,8 @@ impl Index {
         if let Some(id) = value.get("$id").and_then(Value::as_str) {
             base =
                 uri::resolve_against(&base.borrow(), id).map_err(|_| Refusal::ReferenceMismatch)?;
-            if base
-                .fragment()
-                .is_some_and(|fragment| !fragment.as_str().is_empty())
-            {
-                return Err(Refusal::Malformed);
-            }
+            // The pinned 2020-12 meta-schema rejects nonempty `$id` fragments
+            // in every schema-valued location before this traversal.
             base.set_fragment(None);
             self.identifier(base.as_str().to_owned())?;
         } else if root {
