@@ -100,6 +100,14 @@ pub(super) fn validate(value: &Value, component: &str) -> Result<(), Refusal> {
         }
     }
     licences(value, &external)?;
+    bind_component(&described, &elements, component)
+}
+
+fn bind_component(
+    described: &BTreeSet<&str>,
+    elements: &BTreeMap<&str, (&Value, bool)>,
+    component: &str,
+) -> Result<(), Refusal> {
     if described.iter().any(|id| {
         elements.get(id).is_some_and(|(element, eligible)| {
             *eligible
