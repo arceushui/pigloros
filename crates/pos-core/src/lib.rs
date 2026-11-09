@@ -19,6 +19,7 @@ extern crate self as pos_core;
 
 pub(crate) mod canonical_length;
 pub mod clock;
+pub mod community_lifecycle;
 pub mod composition_fallback;
 pub mod consent;
 pub mod counterfactual_dependency;
@@ -144,6 +145,10 @@ impl<'a> CborCursor<'a> {
 
     pub(crate) const fn is_finished(&self) -> bool {
         self.offset == self.bytes.len()
+    }
+
+    pub(crate) const fn position(&self) -> usize {
+        self.offset
     }
 
     pub(crate) fn consume_if(&mut self, byte: u8) -> bool {
