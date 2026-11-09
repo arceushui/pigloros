@@ -51,3 +51,22 @@ fn missing_entries_open_as_none_and_delete_as_nothing() -> TestResult {
     );
     Ok(())
 }
+
+#[test]
+fn only_attempt_entries_are_listed() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let name = NamespaceName::for_attempt([3; 16]);
+    for entry in [name.as_str(), "piglor-short", "other"] {
+        std::fs::write(directory.path().join(entry), b"")?;
+    }
+    let namespaces = NetworkNamespaces::pinned_under(directory.path());
+    assert_eq!(namespaces.attempt_names().ok(), Some(vec![name]));
+    let missing = NetworkNamespaces::pinned_under(directory.path().join("missing"));
+    assert_eq!(missing.attempt_names().ok(), Some(Vec::new()));
+    let file = NetworkNamespaces::pinned_under(directory.path().join("other"));
+    assert!(matches!(
+        file.attempt_names(),
+        Err(NetlinkError::Io(Errno::NOTDIR))
+    ));
+    Ok(())
+}

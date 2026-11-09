@@ -68,6 +68,9 @@ pub enum NetlinkError {
     /// The thread that entered a namespace panicked.
     #[error("the thread inside the network namespace panicked")]
     Panicked,
+    /// Provider-owned network state remained after it was removed.
+    #[error("provider network state remained after its removal")]
+    Residual,
 }
 
 /// One netlink socket: whole datagrams out, whole datagrams in.

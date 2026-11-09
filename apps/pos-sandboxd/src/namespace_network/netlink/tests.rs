@@ -524,6 +524,10 @@ fn netlink_errors_say_what_failed() {
             NetlinkError::Panicked,
             "the thread inside the network namespace panicked",
         ),
+        (
+            NetlinkError::Residual,
+            "provider network state remained after its removal",
+        ),
     ] {
         assert_eq!(error.to_string(), message);
     }

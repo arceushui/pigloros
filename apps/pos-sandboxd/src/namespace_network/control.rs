@@ -289,6 +289,60 @@ fn remove_attempt_link(
     })
 }
 
+/// The prefix of every provider-owned host veth end.
+const HOST_LINK_PREFIX: &str = "piglor-h";
+
+/// Every provider-owned host veth end the session's namespace holds.
+fn attempt_host_links<T: NetlinkTransport>(
+    session: &NetlinkSession<T>,
+) -> Result<Vec<ObservedLink>, NetlinkError> {
+    links(session).map(|links| {
+        links
+            .into_iter()
+            .filter(|link| {
+                link.name.starts_with(HOST_LINK_PREFIX)
+                    && matches!(link.kind, LinkKind::Veth { .. })
+            })
+            .collect()
+    })
+}
+
+impl NetlinkNamespaceControl {
+    /// Remove every attempt namespace pinned in this adapter's directory and
+    /// every host veth end named `piglor-h…`, whichever attempt owned them,
+    /// and read their absence back.
+    ///
+    /// Restart reconciliation calls this before admission opens, once every
+    /// attempt unit is known to be gone, so nothing removed is in use.
+    ///
+    /// # Errors
+    /// Fails if any of them cannot be removed, or remains afterwards.
+    pub fn remove_orphans(&self) -> Result<(), NetlinkError> {
+        self.namespaces
+            .attempt_names()
+            .and_then(|names| {
+                names
+                    .iter()
+                    .try_for_each(|name| self.namespaces.delete(name))
+            })
+            .and_then(|()| {
+                consistent(|| with_session(ROUTE, attempt_host_links)).and_then(|orphans| {
+                    orphans.iter().try_for_each(|link| {
+                        with_session(ROUTE, |session| {
+                            session.execute(vec![route::delete_link(link.index)])
+                        })
+                    })
+                })
+            })
+            .and_then(|()| self.namespaces.attempt_names())
+            .and_then(|names| {
+                consistent(|| with_session(ROUTE, attempt_host_links))
+                    .map(|links| names.is_empty() && links.is_empty())
+            })
+            .and_then(|absent| absent.then_some(()).ok_or(NetlinkError::Residual))
+    }
+}
+
 impl NamespaceControl for NetlinkNamespaceControl {
     type Error = NetlinkError;
 
