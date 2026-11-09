@@ -8,8 +8,8 @@ use rustix::io::Errno;
 
 use super::*;
 use crate::namespace_network::{
-    FirewallTableFamily, IpPrefix, LinkKind, ObservedAddress, ObservedLink, ObservedNamespace,
-    ObservedRoute, ObservedTable,
+    FirewallTableFamily, IpPrefix, LinkKind, LinkName, NamespaceName, ObservedAddress,
+    ObservedLink, ObservedNamespace, ObservedRoute, ObservedTable,
 };
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
