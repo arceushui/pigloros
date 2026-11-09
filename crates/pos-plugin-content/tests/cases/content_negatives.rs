@@ -469,16 +469,18 @@ fn explicit_current_dialect_and_negative_schema_numbers_are_preserved() -> TestR
 #[test]
 fn null_values_count_toward_the_json_node_limit() -> TestResult {
     for (count, expected) in [
-        (262_142, Ok(())),
+        (262_141, Ok(())),
         (
-            262_143,
+            262_142,
             Err(Error::BoundsExceeded {
                 artifact: Artifact::Schema { index: 0 },
             }),
         ),
     ] {
         let mut fixture = Fixture::new();
-        fixture.schemas = vec![bytes(&json!({"examples": vec![Value::Null; count]}))];
+        let mut examples = vec![json!(0); count];
+        examples.push(Value::Null);
+        fixture.schemas = vec![bytes(&json!({"examples": examples}))];
         assert_eq!(result(&fixture)?, expected);
     }
     Ok(())
