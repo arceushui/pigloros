@@ -187,6 +187,22 @@ struct RegistryState {
 }
 
 impl RegistryState {
+    /// A new owner's state over a reconciled registry.
+    ///
+    /// Reconciliation removes every attempt record and keeps the activation
+    /// marker. Before any commit, a missing marker is created as "no request
+    /// yet", so a crash before this owner's first request still leaves one
+    /// (owner decision D2).
+    fn opened(directory: &RegistryDirectory) -> Result<Self, SystemdAttemptRegistryError> {
+        let mut state = Self::default();
+        if !require_only(&directory.file, Some(activation::MARKER_NAME))? {
+            state
+                .reserve_sequence()
+                .and_then(|sequence| activation::initialize(directory, sequence))?;
+        }
+        Ok(state)
+    }
+
     fn reserve_sequence(&mut self) -> Result<u64, SystemdAttemptRegistryError> {
         self.next_sequence
             .checked_add(1)
@@ -218,16 +234,7 @@ impl SystemdAttemptRegistry {
     }
 
     fn from_directory(directory: RegistryDirectory) -> Result<Self, SystemdAttemptRegistryError> {
-        // Reconciliation removes every attempt record and keeps the marker.
-        let marked = require_only(&directory.file, Some(activation::MARKER_NAME))?;
-        let mut state = RegistryState::default();
-        // Before any commit, record that no request was sent yet, so a crash
-        // before this owner's first request still leaves a marker (D2).
-        if !marked {
-            state
-                .reserve_sequence()
-                .and_then(|sequence| activation::initialize(&directory, sequence))?;
-        }
+        let state = RegistryState::opened(&directory)?;
         Ok(Self {
             directory: Arc::new(directory),
             state: Arc::new(Mutex::new(state)),
