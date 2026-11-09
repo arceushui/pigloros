@@ -382,7 +382,7 @@ fn refused_egress_establishes_nothing_and_a_failed_egress_removal_quarantines() 
     let (failing, journal) = network_with(
         directory.path(),
         pinning(directory.path()),
-        uninstallable,
+        &uninstallable,
         24,
     )?;
     let failed = failing.establish([2; 16], &[ENDPOINT]).map(drop);
