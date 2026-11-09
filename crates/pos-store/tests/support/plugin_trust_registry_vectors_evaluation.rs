@@ -513,13 +513,14 @@ fn a_tps1_only_artifact_denial_refuses_the_release() -> TestResult {
 
 #[test]
 fn an_expired_unknown_or_ungranted_release_is_refused_without_any_adoption() -> TestResult {
-    let h = admitted()?;
+    let mut h = Harness::<Store>::open()?;
     let genesis = h.env.genesis()?;
-    let at_sixty = h.same_policy(60, 5)?;
     let short_lived = ManifestSpec {
         not_after: 55,
         ..release_one()
     };
+    h.admit(&genesis, &short_lived, 1)??;
+    let at_sixty = h.same_policy(60, 5)?;
     h.assert_evaluate_denied(
         &at_sixty,
         &short_lived,
