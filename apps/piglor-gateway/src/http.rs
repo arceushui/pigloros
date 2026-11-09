@@ -491,7 +491,7 @@ fn serialized_len(value: &serde_json::Value) -> usize {
 }
 
 /// The header that carries the caller-generated idempotency key of a mutation.
-pub(crate) const IDEMPOTENCY_KEY_HEADER: &str = "idempotency-key";
+const IDEMPOTENCY_KEY_HEADER: &str = "idempotency-key";
 
 /// The longest idempotency key the contract admits.
 const MAX_IDEMPOTENCY_KEY_BYTES: usize = 128;
@@ -606,7 +606,7 @@ type ProblemShape = (ProblemCodeV1, StatusCode, bool);
 
 /// The public shape of a Gateway failure; `None` is an internal fault whose description never
 /// leaves the Gateway.
-fn gateway_problem(error: &GatewayError) -> Option<ProblemShape> {
+const fn gateway_problem(error: &GatewayError) -> Option<ProblemShape> {
     match error {
         GatewayError::Store(error) => store_problem(error),
         GatewayError::ActionRegistry(_) => None,
