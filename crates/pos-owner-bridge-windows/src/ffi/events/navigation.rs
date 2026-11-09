@@ -271,9 +271,8 @@ fn navigation_start(
             if let Some((case, started)) = current.get() {
                 let _logged_or_unavailable = writeln!(
                     std::io::stderr(),
-                    "NATIVE_NAVIGATION_ALLOW case={case} elapsed={:?} view={:p} success={}",
+                    "NATIVE_NAVIGATION_ALLOW case={case} elapsed={:?} success={}",
                     started.elapsed(),
-                    view.as_raw(),
                     set_cancel.is_ok()
                 );
             }
