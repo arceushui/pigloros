@@ -274,7 +274,7 @@ pub fn destroy_registered_encryption_key<P: KeyDestructionPersistence>(
 /// registry identity and by [`sign_for_registered_role`].
 #[must_use]
 pub fn key_material_digest(private_material: &[u8; 32]) -> Hash {
-    let mut hasher = blake3::Hasher::new();
+    let mut hasher = Zeroizing::new(blake3::Hasher::new());
     hasher.update(KEY_MATERIAL_DOMAIN);
     hasher.update(private_material);
     Hash::from_bytes(*hasher.finalize().as_bytes())
