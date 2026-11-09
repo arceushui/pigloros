@@ -487,6 +487,30 @@ fn null_values_count_toward_the_json_node_limit() -> TestResult {
 }
 
 #[test]
+fn each_json_node_kind_obeys_the_node_limit() -> TestResult {
+    for last in [
+        json!(true),
+        json!(-1),
+        json!(1),
+        json!(1.5),
+        json!([]),
+        json!({}),
+    ] {
+        let mut fixture = Fixture::new();
+        let mut examples = vec![json!(0); 262_142];
+        examples.push(last);
+        fixture.schemas = vec![bytes(&json!({"examples": examples}))];
+        assert_eq!(
+            result(&fixture)?,
+            Err(Error::BoundsExceeded {
+                artifact: Artifact::Schema { index: 0 },
+            })
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn spdx_description_relationship_requires_the_document_endpoint() -> TestResult {
     for inverse in [false, true] {
         let mut fixture = Fixture::new();
