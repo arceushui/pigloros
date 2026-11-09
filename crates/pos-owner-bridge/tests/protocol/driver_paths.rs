@@ -940,7 +940,9 @@ fn an_exit_timeout_quarantines_and_a_late_exit_completes_cleanup() -> TestResult
 #[test]
 fn a_late_exit_dispatched_on_the_deadline_step_cannot_win_over_expiry() -> TestResult {
     for delay in [
-        EXIT_WINDOW - Duration::from_nanos(1),
+        EXIT_WINDOW
+            .checked_sub(Duration::from_nanos(1))
+            .ok_or("exit window is shorter than one nanosecond")?,
         EXIT_WINDOW,
         EXIT_WINDOW + Duration::from_nanos(1),
     ] {
