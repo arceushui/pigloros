@@ -30,6 +30,7 @@ struct Probe {
     failures: Cell<u32>,
     external_profile: bool,
     isolated_external: bool,
+    verified_owner: Cell<Option<pos_owner_bridge::NavigationId>>,
     allowance: RefCell<Option<ExternalAllowance>>,
     external_navigation_seen: Cell<bool>,
     unexpected_navigation: Cell<bool>,
@@ -43,11 +44,17 @@ impl Probe {
         else {
             return None;
         };
-        if !self.external_profile || self.events.started().is_none() {
+        if !self.external_profile {
             return None;
         }
+        if uri.as_str() == crate::OWNER_URL && self.events.started().is_none() {
+            return None;
+        }
+        let verified = self.verified_owner.get().is_some()
+            && self.verified_owner.get() == self.events.loaded()
+            && !self.events.invalid();
         let expected = uri.as_str() == EXTERNAL_URI && !*redirected;
-        if !expected || self.external_navigation_seen.get() {
+        if !verified || !expected || self.external_navigation_seen.get() {
             self.unexpected_navigation.set(true);
         }
         if !self.isolated_external {
@@ -56,7 +63,8 @@ impl Probe {
         }
         let allowance = self.allowance.borrow_mut().take();
         let valid = allowance.is_some_and(|marker| {
-            self.events.loaded() == Some(marker.generation)
+            verified
+                && self.events.loaded() == Some(marker.generation)
                 && uri.as_str() == EXTERNAL_URI
                 && !*redirected
                 && !self.external_navigation_seen.replace(true)
@@ -191,6 +199,7 @@ pub(super) fn run(runtime_path: &Path, root: &Path) -> TestResult {
             external_profile: profile == FixtureProfile::External,
             isolated_external: profile == FixtureProfile::External
                 && kind == EventKind::ExternalUri,
+            verified_owner: Cell::new(None),
             allowance: RefCell::new(None),
             external_navigation_seen: Cell::new(false),
             unexpected_navigation: Cell::new(false),
@@ -223,16 +232,19 @@ pub(super) fn run(runtime_path: &Path, root: &Path) -> TestResult {
         let callback = pump_until(&factory, "actual native control callback", || {
             let served = listener.served();
             let generation = probe.events.loaded().filter(|_| {
-                probe.isolated_external
-                    && !armed
+                probe.external_profile
+                    && probe.verified_owner.get().is_none()
                     && !probe.events.invalid()
                     && !probe.unexpected_navigation.get()
                     && served.count == 1
                     && served.integrity_ok
             });
             if let Some(generation) = generation {
-                *probe.allowance.borrow_mut() = Some(ExternalAllowance { generation });
-                armed = true;
+                probe.verified_owner.set(Some(generation));
+                if probe.isolated_external {
+                    *probe.allowance.borrow_mut() = Some(ExternalAllowance { generation });
+                    armed = true;
+                }
             }
             probe.delivered.get()
         });
@@ -270,6 +282,10 @@ pub(super) fn run(runtime_path: &Path, root: &Path) -> TestResult {
         // retains on every error/unwind before this point.
         assert_denials(&before_exit, &after_exit, kind, mode);
         if probe.external_profile {
+            assert!(probe.verified_owner.get().is_some());
+            assert_eq!(probe.verified_owner.get(), probe.events.loaded());
+            assert_eq!(listener.served().count, 1);
+            assert!(listener.served().integrity_ok);
             assert!(probe.external_navigation_seen.get());
             assert!(!probe.unexpected_navigation.get());
             if probe.isolated_external {
@@ -405,6 +421,7 @@ mod tests {
             failures: Cell::new(0),
             external_profile: true,
             isolated_external: true,
+            verified_owner: Cell::new(Some(pos_owner_bridge::NavigationId(1))),
             allowance: RefCell::new(None),
             external_navigation_seen: Cell::new(false),
             unexpected_navigation: Cell::new(false),
@@ -448,6 +465,58 @@ mod tests {
             assert!(denied.unexpected_navigation.get());
             assert!(denied.allowance.borrow().is_none());
         }
+        let invalidated = probe();
+        *invalidated.allowance.borrow_mut() = Some(ExternalAllowance {
+            generation: pos_owner_bridge::NavigationId(1),
+        });
+        // Defensive logical-event test: no claim that this sequence occurred on WebView2.
+        invalidated.events.event(NativeEvent::Frame);
+        assert_eq!(
+            navigation(&invalidated, EXTERNAL_URI, false),
+            NativeAction::Cancel
+        );
+        assert!(invalidated.unexpected_navigation.get());
+        assert!(invalidated.allowance.borrow().is_none());
+
+        let early = probe();
+        early.verified_owner.set(None);
+        assert_eq!(
+            navigation(&early, EXTERNAL_URI, false),
+            NativeAction::Cancel
+        );
+        assert!(early.unexpected_navigation.get());
+        early
+            .verified_owner
+            .set(Some(pos_owner_bridge::NavigationId(1)));
+        assert!(early.unexpected_navigation.get());
+
+        let composed_early = Probe {
+            isolated_external: false,
+            ..probe()
+        };
+        composed_early.verified_owner.set(None);
+        assert_eq!(
+            navigation(&composed_early, EXTERNAL_URI, false),
+            NativeAction::Cancel
+        );
+        composed_early
+            .verified_owner
+            .set(Some(pos_owner_bridge::NavigationId(1)));
+        assert!(composed_early.unexpected_navigation.get());
+
+        let composed = probe();
+        // The composed case uses the unchanged real policy after recording its precondition.
+        let composed = Probe {
+            isolated_external: false,
+            ..composed
+        };
+        assert_eq!(
+            navigation(&composed, EXTERNAL_URI, false),
+            NativeAction::Cancel
+        );
+        assert!(composed.external_navigation_seen.get());
+        assert!(!composed.unexpected_navigation.get());
+
         let other_view = probe();
         assert_eq!(
             navigation(&other_view, EXTERNAL_URI, false),
