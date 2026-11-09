@@ -1632,6 +1632,14 @@ fn a_namespace_reaches_each_distinct_admitted_endpoint_once() -> TestResult {
             (plan()?, endpoint(ipv6.to_vec(), 8443)),
             (plan()?, endpoint(vec![192, 0, 2, 10], 443)),
             (plan()?, endpoint(vec![192, 0, 2, 10], 443)),
+            // The same endpoint as an IPv4-mapped IPv6 address.
+            (
+                plan()?,
+                endpoint(
+                    vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 192, 0, 2, 10],
+                    443,
+                ),
+            ),
         ],
     );
     assert_eq!(

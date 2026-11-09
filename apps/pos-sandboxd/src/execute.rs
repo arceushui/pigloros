@@ -643,7 +643,8 @@ impl<K: UnitKiller> Drop for SubmissionGuard<K> {
     }
 }
 
-/// The distinct endpoints `admission` plans exchanges with, in order.
+/// The distinct endpoints `admission` plans exchanges with, in order, each
+/// in canonical form.
 ///
 /// LPS1 decoding admits only four- and sixteen-byte addresses, so every
 /// admitted capability names one.
@@ -657,7 +658,11 @@ fn admitted_endpoints(admission: &LocalNetworkAdmission) -> Vec<std::net::Socket
                     <[u8; 16]>::try_from(capability.address.as_slice()).map(std::net::IpAddr::from)
                 })
                 .ok()
-                .map(|address| std::net::SocketAddr::new(address, capability.destination_port))
+                // An IPv4-mapped IPv6 address is the IPv4 endpoint it maps,
+                // as the namespace plan reads it.
+                .map(|address| {
+                    std::net::SocketAddr::new(address.to_canonical(), capability.destination_port)
+                })
         })
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
