@@ -236,6 +236,9 @@ fn vanished_current_directory_refuses_without_native_open() -> TestResult {
         std::fs::create_dir(&working)?;
         std::env::set_current_dir(&working)?;
         std::fs::remove_dir(&working)?;
+        // Native memory names need no filesystem view; literal paths do.
+        refuse_reserved_filename("")?;
+        refuse_reserved_filename(":memory:")?;
         closed(refuse_reserved_path(Path::new("main.db")));
         assert_eq!(std::fs::read_dir(root.path())?.count(), 0);
         return Ok(());

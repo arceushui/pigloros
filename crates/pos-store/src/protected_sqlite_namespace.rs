@@ -80,7 +80,7 @@ pub fn refuse_reserved_path(path: &Path) -> Result<(), CoreError> {
     };
     absolute.and_then(|absolute| {
         check_ancestors(&absolute).and_then(|()| {
-            resolved_ancestor(absolute, 64).and_then(|resolved| check_ancestors(&resolved))
+            resolved_ancestor(absolute).and_then(|resolved| check_ancestors(&resolved))
         })
     })
 }
@@ -100,29 +100,28 @@ fn closed<T>(result: std::io::Result<T>) -> Result<T, CoreError> {
     result.map_err(|_| refused())
 }
 
-fn resolved_ancestor(mut path: PathBuf, remaining: usize) -> Result<PathBuf, CoreError> {
+fn resolved_ancestor(mut path: PathBuf) -> Result<PathBuf, CoreError> {
     // Resolve within a finite budget, including missing leaf names. Exhaustion
     // denies an unknown path before any native connection can be created.
-    if remaining == 0 {
-        return Err(refused());
-    }
-    match std::fs::symlink_metadata(&path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => closed(std::fs::read_link(&path))
-            .and_then(|target| {
+    for _ in 0..64 {
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                let target = closed(std::fs::read_link(&path))?;
                 if target.is_absolute() {
-                    resolved_ancestor(target, remaining - 1)
+                    path = target;
                 } else {
                     path.pop();
-                    resolved_ancestor(path.join(target), remaining - 1)
+                    path.push(target);
                 }
-            }),
-        Ok(_) => closed(std::fs::canonicalize(path)),
-        Err(error) if error.kind() == ErrorKind::NotFound => {
-            path.pop();
-            resolved_ancestor(path, remaining - 1)
+            }
+            Ok(_) => return closed(std::fs::canonicalize(path)),
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                path.pop();
+            }
+            Err(_) => return Err(refused()),
         }
-        Err(_) => Err(refused()),
     }
+    Err(refused())
 }
 
 fn filename_path(filename: &[u8]) -> Result<PathBuf, CoreError> {
@@ -149,14 +148,11 @@ fn filename_path(filename: &[u8]) -> Result<PathBuf, CoreError> {
     let mut position = 0;
     while position < raw.len() {
         let octet = if raw[position] == b'%' {
-            raw.get(position + 1)
-                .and_then(|first| hex(*first))
-                .zip(raw.get(position + 2).and_then(|second| hex(*second)))
+            raw.get(position + 1..position + 3).and_then(percent_octet)
         } else {
             None
         };
-        if let Some((first, second)) = octet {
-            let byte = (first << 4) | second;
+        if let Some(byte) = octet {
             if byte == 0 {
                 break;
             }
@@ -170,11 +166,119 @@ fn filename_path(filename: &[u8]) -> Result<PathBuf, CoreError> {
     Ok(PathBuf::from(OsString::from_vec(decoded)))
 }
 
-const fn hex(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
+fn percent_octet(digits: &[u8]) -> Option<u8> {
+    let digits = std::str::from_utf8(digits).ok()?;
+    // Integer parsing permits a leading plus; SQLite percent escapes do not.
+    if digits.starts_with('+') {
+        None
+    } else {
+        u8::from_str_radix(digits, 16).ok()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    #[test]
+    fn native_uri_path_is_byte_exact_before_filesystem_refusal() -> TestResult {
+        for (filename, expected) in [
+            (&b"plain?#%20\xff"[..], &b"plain?#%20\xff"[..]),
+            (b"file:relative.db?mode=ro", b"relative.db"),
+            (b"file:relative.db#fragment", b"relative.db"),
+            (b"file:///absolute.db?mode=ro#fragment", b"/absolute.db"),
+            (
+                b"file://localhost/absolute.db#fragment?mode=ro",
+                b"/absolute.db",
+            ),
+            (b"file://localhost", b""),
+            (b"file://", b""),
+            (b"file:", b""),
+            (b"file:%3f%23%2f%Af%ff", b"?#/\xaf\xff"),
+            (b"file:x%00ignored.db", b"x"),
+            (b"file:%+1%G0%0G%", b"%+1%G0%0G%"),
+            (b"file:%\xff\xfe", b"%\xff\xfe"),
+            (b"file:%\xc3\xa9", b"%\xc3\xa9"),
+        ] {
+            assert_eq!(filename_path(filename)?.as_os_str().as_bytes(), expected);
+        }
+        for filename in [b"file://foreign/db".as_slice(), b"file://foreign"] {
+            assert_eq!(filename_path(filename), Err(refused()));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn every_percent_octet_preserves_case_independent_native_bytes() -> TestResult {
+        for byte in 0..=u8::MAX {
+            for escape in [format!("%{byte:02x}"), format!("%{byte:02X}")] {
+                let filename = format!("file:a{escape}z");
+                let expected = if byte == 0 {
+                    vec![b'a']
+                } else {
+                    vec![b'a', byte, b'z']
+                };
+                assert_eq!(
+                    filename_path(filename.as_bytes())?.as_os_str().as_bytes(),
+                    expected
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn unmarked_dangling_links_resolve_without_qualifying_a_native_connection() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        for (name, target) in [
+            ("absolute", directory.path().join("missing.db")),
+            ("relative", PathBuf::from("missing.db")),
+        ] {
+            let alias = directory.path().join(name);
+            std::os::unix::fs::symlink(target, &alias)?;
+            refuse_reserved_path(&alias)?;
+        }
+        assert!(!directory.path().join("missing.db").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn resolver_budget_includes_absolute_relative_and_missing_path_steps() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        let canonical = std::fs::canonicalize(directory.path())?;
+        for kind in ["absolute", "relative"] {
+            let parent = directory.path().join(kind);
+            std::fs::create_dir(&parent)?;
+            let target = parent.join("target");
+            std::fs::write(&target, b"ordinary file")?;
+            for index in 0..64 {
+                let name = if index == 63 {
+                    "target".to_owned()
+                } else {
+                    format!("link{}", index + 1)
+                };
+                let next = if kind == "absolute" {
+                    parent.join(name)
+                } else {
+                    PathBuf::from(name)
+                };
+                std::os::unix::fs::symlink(next, parent.join(format!("link{index}")))?;
+            }
+            assert_eq!(
+                resolved_ancestor(parent.join("link1"))?,
+                std::fs::canonicalize(&target)?
+            );
+            assert_eq!(resolved_ancestor(parent.join("link0")), Err(refused()));
+        }
+        let mut missing = directory.path().to_path_buf();
+        for _ in 0..63 {
+            missing.push("missing");
+        }
+        assert_eq!(resolved_ancestor(missing.clone())?, canonical);
+        missing.push("missing");
+        assert_eq!(resolved_ancestor(missing), Err(refused()));
+        Ok(())
     }
 }
