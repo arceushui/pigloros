@@ -325,20 +325,7 @@ mod native_tests {
     }
 
     fn raw_boundaries(base: &Path) -> TestResult {
-        let invalid = PathBuf::from(OsString::from_wide(&[b'x'.into(), 0, b'y'.into()]));
-        assert!(crate::Native::create_private_ledger_file(&invalid).is_err());
-        for path in [
-            r"relative\path",
-            r"C:relative",
-            r"\\server\share\PiglorOS",
-            r"\\?\GLOBALROOT\Device\HarddiskVolume1\PiglorOS",
-            r"C:\base\..\PiglorOS",
-        ] {
-            assert!(require_dos_path(Path::new(path)).is_err(), "{path}");
-        }
-        for path in [r"C:\base\PiglorOS", r"\\?\C:\base\PiglorOS"] {
-            assert!(require_dos_path(Path::new(path)).is_ok(), "{path}");
-        }
+        assert_path_admission();
         let guard = WindowsSubjectEncryptorLock::acquire(base).map_err(|_| "raw fixture lock")?;
         let mut ledger = guard
             .open_nonce_ledger()
@@ -391,6 +378,7 @@ mod native_tests {
         fs::hard_link(&path, &hardlink)?;
         assert_eq!(ledger.read_nonce_ledger_bytes(), Err(unavailable()));
         fs::remove_file(hardlink)?;
+        retained_old_image(&ledger, &path)?;
         refuse_occupied_temporary(&ledger, base)?;
         refuse_replaced_directory(&ledger, base)?;
         drop(ledger);
@@ -400,6 +388,8 @@ mod native_tests {
             .map_err(|()| "create stale test file")?;
         stale.write_all(b"stale")?;
         drop(stale);
+        let unrelated = base.join("PiglorOS").join("unrelated.tmp");
+        fs::write(&unrelated, b"retained")?;
         let temporary_alias = base.join("PiglorOS").join("stale-alias");
         fs::hard_link(&temporary, &temporary_alias)?;
         assert!(guard.open_nonce_ledger().is_err());
@@ -407,6 +397,7 @@ mod native_tests {
         fs::remove_file(temporary_alias)?;
         ledger = guard.open_nonce_ledger()?;
         assert!(!temporary.exists());
+        assert_eq!(fs::read(&unrelated)?, b"retained");
         assert_eq!(ledger.read_nonce_ledger_bytes()?, b"replacement");
         for (_, failure) in STAGES {
             ledger.replace_nonce_ledger_bytes(b"old")?;
@@ -423,6 +414,41 @@ mod native_tests {
             ledger = guard.open_nonce_ledger()?;
             assert_eq!(ledger.read_nonce_ledger_bytes()?, expected_after(failure));
         }
+        Ok(())
+    }
+
+    fn assert_path_admission() {
+        let invalid = PathBuf::from(OsString::from_wide(&[b'x'.into(), 0, b'y'.into()]));
+        assert!(crate::Native::create_private_ledger_file(&invalid).is_err());
+        for path in [
+            r"relative\path",
+            r"C:relative",
+            r"\\server\share\PiglorOS",
+            r"\\?\GLOBALROOT\Device\HarddiskVolume1\PiglorOS",
+            r"C:\base\..\PiglorOS",
+        ] {
+            assert!(require_dos_path(Path::new(path)).is_err(), "{path}");
+        }
+        for path in [r"C:\base\PiglorOS", r"\\?\C:\base\PiglorOS"] {
+            assert!(require_dos_path(Path::new(path)).is_ok(), "{path}");
+        }
+    }
+
+    fn retained_old_image(ledger: &WindowsNonceLedger<'_>, path: &Path) -> TestResult {
+        use std::io::Read as _;
+
+        let mut held = File::open(path)?;
+        let old_identity = crate::Native::file_identity(&held).map_err(|()| "old file identity")?;
+        let before = ledger.read_nonce_ledger_bytes()?;
+        ledger.replace_nonce_ledger_bytes(&before)?;
+        let new_file = File::open(path)?;
+        let new_identity =
+            crate::Native::file_identity(&new_file).map_err(|()| "new file identity")?;
+        assert_ne!(old_identity, new_identity);
+        let mut old_bytes = Vec::new();
+        held.read_to_end(&mut old_bytes)?;
+        assert_eq!(old_bytes, before);
+        assert_eq!(ledger.read_nonce_ledger_bytes()?, before);
         Ok(())
     }
 
