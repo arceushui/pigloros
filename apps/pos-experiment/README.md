@@ -119,6 +119,23 @@ snapshots and ReproManifest are empty until #1204. The shared executor key and
 capture helpers live in `non_interference_harness::fixture_evidence` and the
 private `capture` module.
 
+`non_interference_harness::g_plug` holds the G-PLUG capture adapters of slice N2
+(#1230, wiki `ADR-062_R8_NonInterference_Plugin`) for `NI-TOOL-001`,
+`NI-STATE-003` (state members), `NI-NET-010` and `NI-SERVICE-011`:
+- The Plugin is reached only through the PWQ1/PWR1 public Plugin protocol codec
+  of `pos-plugin-supervisor`, answered by an in-process deterministic fixture
+  guest (`describe`, `reduce`, `drive`). A migrate-state request is refused.
+- Every mode produces the Events of the guest's `drive`; the capture rebuilds
+  the Plugin's state from them through `reduce` alone.
+- Tools, frozen services and the network sequence are host-owned records. A
+  lookup without a frozen record is a live call: non-executed `LiveCall`.
+- The host writes the unauthorized value only to its own record file.
+- The `NI-STATE-003` migration-only canary is non-executed `Unsupported` until
+  PMF1 v2 (#621, wiki `ADR-059_R9_State_Migration_Scoping`).
+
+`pos-ni-g-plug-subject` is the Local fresh-process subject of these rows. The
+executions are engineering evidence, re-run on the Wasm worker path later.
+
 ## ADR-064 Fork artifact comparison
 
 `pos_experiment::fork_artifacts` is ADR-062 Revision 8 slice R6 (#1225).
@@ -146,6 +163,22 @@ evidence, not hosted conformance.
 participant Driver `beta` writes the fixture's hidden participant field into
 its factual Events after the cut; like the factual suffix it never reaches an
 artifact.
+
+`non_interference_harness::g_ops` (Linux only) holds the G-OPS capture adapters
+of slice N3 (#1231, wiki `ADR-062_R8_NonInterference_Operations`) for
+`NI-CACHE-002`, `NI-OBS-004`, `NI-TIME-005` and `NI-CRASH-012`:
+- The subject is an Experiment whose one Driver is a supervisor-backed community
+  Plugin Driver running the checked-in WAT guest `g_ops_guest.wat` in a fresh
+  `pos-ni-g-ops-worker` process.
+- The host places the unauthorized value in denied sibling work: cached sibling
+  decisions of a host `ErasureExecutionHostV1` authorization cache, a sibling
+  invocation's log message, declared-failure coordinate and trap, a support
+  archive name, and a wall-clock offset and watchdog margin.
+- Only the excluded bytes of each row's typed operational capture carry those
+  values. The support bundle, crash report and support archive are capture
+  records, not product features.
+
+`pos-ni-g-ops-subject` is the Local fresh-process subject of these rows.
 
 ## Sequential SQLite multi-rate demo
 

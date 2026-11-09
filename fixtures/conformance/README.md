@@ -231,6 +231,20 @@ ADR-064 Fork artifacts of slice R6. Their expected result digests are derived by
 `INT1`, `CFP1`, `RCF1`, `SIV1`, `RCP1` and `CFR1` byte in pure Python. The F-mode
 evidence is re-run when #1204 lands.
 
+ADR-062 Revision 8 slice N2 (#1230, owner note `ADR-062_R8_NonInterference_Plugin`)
+flips the 48 cases of `NI-TOOL-001`, `NI-STATE-003`, `NI-NET-010` and
+`NI-SERVICE-011` in modes L, R and F the same way, derived by
+`scripts/generate_non_interference_g_plug_fixtures.py`. The `NI-STATE-003` cases
+cover its state members only; its migration surfaces and migration-only canary
+stay non-executed until PMF1 v2 (#621, wiki `ADR-059_R9_State_Migration_Scoping`).
+
+ADR-062 Revision 8 slice N3 (#1231, owner note `ADR-062_R8_NonInterference_Operations`)
+flips the 48 cases of `NI-CACHE-002`, `NI-OBS-004`, `NI-TIME-005` and `NI-CRASH-012`
+in modes L, R and F, under the same rules. Their oracle is
+`scripts/generate_non_interference_g_ops_fixtures.py`; only each row's #181
+operational normalization is applied, and their Air-Gapped cases stay non-executed
+until N7.
+
 ADR-062 Revision 8 slice N1b (#1284, wiki `ADR-127_Deterministic_Run_Evidence_Archive`)
 flips the 12 cases of `NI-ARCHIVE-009` in modes L, R and F the same way, over the
 canonical RVA1 run-evidence archive of the G-PUB subject's export. Their expected
