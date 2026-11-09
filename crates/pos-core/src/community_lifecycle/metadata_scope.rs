@@ -375,21 +375,20 @@ mod tests {
                 }
             })
             .collect();
-        let record = CommunityMetadataScopeV1::new(CommunityMetadataScopeInputV1 {
+        CommunityMetadataScopeV1::new(CommunityMetadataScopeInputV1 {
             store_incarnation: [1; 16],
             metadata_anchor_timeline: timeline,
             metadata_anchor_generation: [2; 16],
             protection_operation_id: [3; 16],
             scope_members: CommunityScopeMembersV1::from_members(&rows),
             metadata_not_after_micros: i64::MAX as u64,
-        })?;
-        let encoded = record.to_canonical_cbor();
-        assert!(encoded.len() <= MAX_SCOPE_ENCODING);
-        assert!(
-            CommunityMetadataScopeV1::from_canonical_cbor(&encoded)?.as_input()
-                == record.as_input()
-        );
-        Ok(())
+        })
+        .and_then(|record| {
+            let encoded = record.to_canonical_cbor();
+            assert!(encoded.len() <= MAX_SCOPE_ENCODING);
+            CommunityMetadataScopeV1::from_canonical_cbor(&encoded)
+                .map(|decoded| assert!(decoded.as_input() == record.as_input()))
+        })
     }
 
     #[test]
