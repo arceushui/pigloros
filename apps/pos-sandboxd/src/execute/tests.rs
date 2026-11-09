@@ -1043,6 +1043,8 @@ async fn an_unacknowledged_kill_after_a_started_unit_is_reported_as_running() ->
     let (_scenario, failed) = faulted(&[Fault::Bind, Fault::Kill]).await?;
     assert!(matches!(failed.error, ExecuteError::Cgroup(_)));
     assert_eq!(failed.unit, UnitState::KillFailed);
+    // The unit may still run, but no cgroup was bound to hand over.
+    assert!(failed.cgroup.is_none());
     Ok(())
 }
 
@@ -1123,6 +1125,8 @@ async fn a_kill_that_never_answers_is_reported_as_unacknowledged() -> TestResult
     let started = Instant::now();
     let (_scenario, failed) = timed_out(&[Fault::HangKill], true).await?;
     assert_eq!(failed.unit, UnitState::KillFailed);
+    // An unacknowledged kill still returns the bound cgroup for teardown.
+    assert!(failed.cgroup.is_some());
     assert!(started.elapsed() >= Duration::from_millis(100));
     Ok(())
 }
@@ -1226,6 +1230,7 @@ async fn a_refused_release_kills_the_unit_and_its_cgroup() -> TestResult {
     let failed = scenario.fails().await?;
     assert!(matches!(failed.error, ExecuteError::Barrier(_)));
     assert_eq!(failed.unit, UnitState::Killed);
+    assert!(failed.cgroup.is_some());
     assert_eq!(
         scenario.entries(),
         [

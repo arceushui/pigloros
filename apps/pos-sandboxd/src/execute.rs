@@ -283,6 +283,9 @@ pub enum UnitState {
 }
 
 /// A failed execution, the state of its unit and its retained cgroup.
+///
+/// Like any error, it is `Send`, `Sync` or `'static` only when the cgroup
+/// handle `C` is; the production `BoundAttemptCgroup` is all three.
 #[derive(Debug, thiserror::Error)]
 #[error("execution failed with the unit {unit:?}")]
 pub struct ExecuteFailure<C> {
