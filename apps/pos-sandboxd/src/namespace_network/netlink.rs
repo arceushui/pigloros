@@ -255,18 +255,16 @@ impl<T: NetlinkTransport> NetlinkSession<T> {
         let mut datagram = Vec::new();
         emit(header, request, &mut datagram);
         self.transport.send(&datagram)?;
-        let mut replies = parse::<I>(&self.transport.receive()?)?.into_iter();
-        match (replies.next(), replies.next()) {
-            (Some(reply), None) if reply.header.sequence_number == sequence => {
-                match reply.payload {
-                    NetlinkPayload::InnerMessage(message) => Ok(message),
-                    NetlinkPayload::Error(error) => {
-                        Err(error.code.map_or(NetlinkError::Unexpected, |code| {
-                            NetlinkError::Kernel(code.get())
-                        }))
-                    }
-                    _ => Err(NetlinkError::Unexpected),
-                }
+        let replies = parse::<I>(&self.transport.receive()?)?;
+        let [reply] =
+            <[NetlinkMessage<I>; 1]>::try_from(replies).map_err(|_| NetlinkError::Unexpected)?;
+        let answered = reply.header.sequence_number == sequence;
+        match reply.payload {
+            NetlinkPayload::InnerMessage(message) if answered => Ok(message),
+            NetlinkPayload::Error(error) if answered => {
+                Err(error.code.map_or(NetlinkError::Unexpected, |code| {
+                    NetlinkError::Kernel(code.get())
+                }))
             }
             _ => Err(NetlinkError::Unexpected),
         }
@@ -315,7 +313,9 @@ impl<T: NetlinkTransport> NetlinkSession<T> {
 const DUMP_ATTEMPTS: usize = 3;
 
 /// Run `read`, which opens its own session, again while a dump it makes is
-/// interrupted by a concurrent change, at most three times in all. Another namespace's changes interrupt dumps of the shared host
+/// interrupted by a concurrent change, at most three times in all.
+///
+/// Another namespace's changes interrupt dumps of the shared host
 /// namespace; a fresh session discards the interrupted dump's replies.
 ///
 /// # Errors
