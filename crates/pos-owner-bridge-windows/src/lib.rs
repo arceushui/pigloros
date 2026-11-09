@@ -364,9 +364,6 @@ pub(crate) trait NativeFactory: StaPump {
     fn session(&self) -> NativeResult<Box<dyn NativeOperations>>;
 }
 
-/// Native ownership operations; lifecycle outcomes are selected by the adapter.
-/// No SDK pointer, HRESULT, token, arbitrary property ID, script, header, URL,
-/// buffer offset, or caller-provided COM callback crosses this interface.
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ProcessFaultTarget {
@@ -414,6 +411,9 @@ pub(crate) trait ProcessFaultHandle {
     fn exit_code(&self) -> Result<Option<u32>, ()>;
 }
 
+/// Native ownership operations; lifecycle outcomes are selected by the adapter.
+/// No SDK pointer, HRESULT, token, arbitrary property ID, script, header, URL,
+/// buffer offset, or caller-provided COM callback crosses this interface.
 pub(crate) trait NativeOperations {
     #[cfg(test)]
     fn inject_process_fault(

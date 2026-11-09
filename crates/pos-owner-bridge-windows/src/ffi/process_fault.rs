@@ -3,22 +3,16 @@
 
 //! Declared faults on processes discovered from the current owned environment.
 
-use std::ffi::OsString;
-use std::os::windows::ffi::OsStringExt;
-use std::path::PathBuf;
-
 use pos_owner_bridge::ProcessIdentity;
-use pos_owner_bridge_codec::ImagePathSha256;
-use sha2::{Digest, Sha256};
 use webview2_com::Microsoft::Web::WebView2::Win32::{
     ICoreWebView2Environment, ICoreWebView2Environment8, COREWEBVIEW2_PROCESS_KIND,
     COREWEBVIEW2_PROCESS_KIND_BROWSER, COREWEBVIEW2_PROCESS_KIND_RENDERER,
 };
-use windows::core::{Interface, PWSTR};
-use windows::Win32::Foundation::{CloseHandle, FILETIME, HANDLE};
+use windows::core::Interface;
+use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::System::Threading::{
-    GetExitCodeProcess, GetProcessTimes, OpenProcess, QueryFullProcessImageNameW, TerminateProcess,
-    PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
+    GetExitCodeProcess, OpenProcess, TerminateProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    PROCESS_TERMINATE,
 };
 
 use crate::{ProcessFaultHandle, ProcessFaultTarget};
@@ -94,53 +88,6 @@ fn select(
     Ok(pid)
 }
 
-fn identity(handle: HANDLE, pid: u32) -> Result<(ProcessIdentity, PathBuf), ()> {
-    let mut creation = FILETIME::default();
-    let mut exit = FILETIME::default();
-    let mut kernel = FILETIME::default();
-    let mut user = FILETIME::default();
-    // SAFETY: the retained handle is live and outputs are distinct writable values.
-    unsafe {
-        GetProcessTimes(
-            handle,
-            &raw mut creation,
-            &raw mut exit,
-            &raw mut kernel,
-            &raw mut user,
-        )
-    }
-    .map_err(|_| ())?;
-    let mut image = vec![0_u16; 32_768];
-    let mut length = 32_768_u32;
-    // SAFETY: the fixed-size UTF-16 buffer and its initialized in/out length are live.
-    unsafe {
-        QueryFullProcessImageNameW(
-            handle,
-            PROCESS_NAME_WIN32,
-            PWSTR(image.as_mut_ptr()),
-            &raw mut length,
-        )
-    }
-    .map_err(|_| ())?;
-    let units = image
-        .get(..length as usize)
-        .filter(|units| !units.is_empty())
-        .ok_or(())?;
-    let mut digest = Sha256::new();
-    for unit in units {
-        digest.update(unit.to_le_bytes());
-    }
-    Ok((
-        ProcessIdentity {
-            browser_pid: pid,
-            creation_filetime: (u64::from(creation.dwHighDateTime) << 32)
-                | u64::from(creation.dwLowDateTime),
-            image_path_sha256: ImagePathSha256::from_bytes(digest.finalize().into()),
-        },
-        PathBuf::from(OsString::from_wide(units)),
-    ))
-}
-
 pub(super) fn inject(
     environment: &ICoreWebView2Environment,
     authority: &crate::adapter::FaultAuthority,
@@ -177,7 +124,7 @@ pub(super) fn inject(
         handle,
         identity: expected,
     };
-    let (observed, path) = identity(handle, pid)?;
+    let (observed, path) = super::process::read_identity(handle, pid)?;
     if path != browser_path || (kind == COREWEBVIEW2_PROCESS_KIND_BROWSER && observed != expected) {
         return Err(());
     }
@@ -189,7 +136,7 @@ pub(super) fn inject(
     if select(&second, COREWEBVIEW2_PROCESS_KIND_BROWSER)? != browser_pid
         || super::process::inspect(browser_pid)?.ok_or(())? != (browser, browser_path)
         || select(&second, kind)? != pid
-        || identity(handle, pid)? != (observed, path)
+        || super::process::read_identity(handle, pid)? != (observed, path)
         || !authority.valid()
         || retained.exit_code()?.is_some()
     {

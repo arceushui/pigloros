@@ -7,12 +7,13 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::task::Poll;
 use std::time::{Duration, Instant};
 
 use pos_owner_bridge::ceremony::driver::{CeremonyDriver, Step};
 use pos_owner_bridge::ceremony::plan::Verified;
 use pos_owner_bridge::listener::FixtureProfile;
-use pos_owner_bridge::{BridgeError, CleanupStore, SystemClock};
+use pos_owner_bridge::{BridgeError, CleanupStore, OwnerWebSurface, SurfaceSpec, SystemClock};
 use pos_owner_bridge_codec::{CeremonyId, ControlState};
 
 use super::{readiness, retirement, FixtureRoot, TestResult};
@@ -166,6 +167,7 @@ impl Fixture {
         if !self.evidence_complete || !self.surface.fault_owners_retained() {
             return Err("fault evidence or native owners missing before cleanup".into());
         }
+        self.check_blocked_admission()?;
         if !inject {
             self.surface.controller_lost();
         }
@@ -174,6 +176,23 @@ impl Fixture {
             "NATIVE_PROCESS_FAULT target={target:?} injected={inject} trace={:?}",
             self.trace.borrow()
         )?;
+        Ok(())
+    }
+
+    fn check_blocked_admission(&mut self) -> TestResult {
+        // Use a different real ceremony on the same Surface while the original
+        // owners and durable record are still unresolved.
+        let ceremony_id = CeremonyId::from_bytes([0x7f; 16]);
+        let attempted = SurfaceSpec {
+            ceremony_id,
+            folder_name: pos_owner_bridge::folder_name(&ceremony_id),
+            owner_window: None,
+        };
+        if !matches!(self.surface.open(&attempted), Poll::Ready(Err(_)))
+            || !self.surface.fault_owners_retained()
+        {
+            return Err("a competing Surface opening was not blocked".into());
+        }
         Ok(())
     }
 
@@ -283,6 +302,12 @@ fn run_case(
             Some("process fault fixture panicked".into()),
         ),
     };
+    // Record wipe evidence before moving the driver to its retirement owner.
+    // A normal plan is dropped at driver consumption; only a quarantined plan
+    // is required to have its own secrets wiped immediately.
+    let slot_wiped = driver.request_clear() && driver.prf().iter().all(|byte| *byte == 0);
+    let plan_wiped_if_quarantined =
+        !matches!(&result, Err(BridgeError::Quarantine(_))) || driver.plan_secrets_clear();
     let error = result.as_ref().err().copied();
     let reached = fixture.reached;
     let complete_before_cleanup = fixture.evidence_complete;
@@ -293,6 +318,9 @@ fn run_case(
     }
     if !complete_before_cleanup {
         return Err("fault evidence was not established before cleanup".into());
+    }
+    if !slot_wiped || !plan_wiped_if_quarantined {
+        return Err("failed ceremony secrets were not wiped at their required boundary".into());
     }
     if inject && target == ProcessFaultTarget::Renderer {
         assert_eq!(failures, [Some(true)]);

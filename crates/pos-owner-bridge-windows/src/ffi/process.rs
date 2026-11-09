@@ -38,12 +38,12 @@ pub(super) fn inspect(pid: u32) -> Result<Option<(ProcessIdentity, PathBuf)>, ()
     observed.and_then(|identity| closed.map(|()| Some(identity)).map_err(|_| ()))
 }
 
-fn read_identity(handle: HANDLE, pid: u32) -> Result<(ProcessIdentity, PathBuf), ()> {
+pub(super) fn read_identity(handle: HANDLE, pid: u32) -> Result<(ProcessIdentity, PathBuf), ()> {
     let mut creation = FILETIME::default();
     let mut exit = FILETIME::default();
     let mut kernel = FILETIME::default();
     let mut user = FILETIME::default();
-    // SAFETY: the live query-only handle outlives this call; the four output
+    // SAFETY: the live handle with query rights outlives this call; the four output
     // pointers refer to distinct initialized, writable FILETIME values.
     let times = unsafe {
         GetProcessTimes(

@@ -1444,6 +1444,18 @@ def test_owned_process_fault_authority() -> None:
         if f"{source_path}: {expected}" not in found:
             raise SystemExit(f"indirect authority was accepted: {statement}: {found}")
 
+    window = f"{SHIM}/src/ffi/window.rs"
+    approved = 'GetProcAddress(module, PCSTR(c"DefWindowProcW".as_ptr().cast()))'
+    live = CFG + f"use x::GetProcAddress; fn f() {{ let _p = {approved}; }}\n"
+    message = f"{window}: dynamic lookup must remain the fixed DefWindowProcW lookup"
+    if message in fixture({window: live}):
+        raise SystemExit("the fixed executable lookup was rejected")
+    changed = live.replace('c"DefWindowProcW"', 'c"TerminateProcess"')
+    for decoy in (f"// {approved}\n", f"/* {approved} */\n", f'const TEXT: &str = r#"{approved}"#;\n'):
+        for source in (decoy + changed, changed + decoy):
+            if message not in fixture({window: source}):
+                raise SystemExit("a non-executable decoy satisfied the fixed lookup policy")
+
 
 def main() -> None:
     test_masker()

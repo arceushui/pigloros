@@ -153,7 +153,7 @@ impl Surface {
 
     #[cfg(test)]
     pub(in crate::adapter) fn posted_fault_state(
-        &self,
+        &mut self,
         posts: u8,
     ) -> std::result::Result<crate::ProcessFaultState, ()> {
         if self.ownership != Ownership::Controller
@@ -224,7 +224,7 @@ impl Surface {
     }
 
     #[cfg(test)]
-    pub(in crate::adapter) fn fault_owners_retained(&self) -> bool {
+    pub(in crate::adapter) fn fault_owners_retained(&mut self) -> bool {
         self.ownership == Ownership::Controller
             && self.folder.is_some()
             && self.identity.is_some()

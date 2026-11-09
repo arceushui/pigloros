@@ -913,7 +913,7 @@ def _check_shim_macros(label: str, scanned: Scan, found: list[str]) -> None:
 def _reviewed_fault_code(code: str) -> bool:
     """Accept only the reviewed test-only fixed process-fault implementation."""
     normalized = re.sub(r"\s+", "", code).encode()
-    return hashlib.sha256(normalized).hexdigest() == "01629b9bbbfc270c358f8dd22320e194ffdc0beb41a045d8eb3e02856be544e0"
+    return hashlib.sha256(normalized).hexdigest() == "e265a3c2400a307205995b7c8619731aba80f961cc019074098ad271bbdfdb23"
 
 
 def _check_shim_sources(shim: Path, scanned_dirs: tuple[Path, ...], found: list[str]) -> ShimScan:
@@ -979,7 +979,10 @@ def _check_shim_sources(shim: Path, scanned_dirs: tuple[Path, ...], found: list[
             # The one pre-existing dynamic lookup resolves only DefWindowProcW.
             lookup = re.compile(r'GetProcAddress\s*\(\s*module\s*,\s*PCSTR\s*\(\s*c"DefWindowProcW"\.as_ptr\(\)\.cast\(\)\s*\)\s*\)')
             calls = list(re.finditer(r"(?<!\w)GetProcAddress\s*\(", code))
-            if relative != "src/ffi/window.rs" or len(calls) != 1 or len(re.findall(r"(?<!\w)GetProcAddress(?!\w)", code)) != 2 or not lookup.search(text):
+            # Masking preserves offsets: bind the required literal to the real
+            # code call, so an approved expression in a comment cannot stand in
+            # for a different symbol at the executable call site.
+            if relative != "src/ffi/window.rs" or len(calls) != 1 or len(re.findall(r"(?<!\w)GetProcAddress(?!\w)", code)) != 2 or not lookup.match(text, calls[0].start()):
                 found.append(f"{label}: dynamic lookup must remain the fixed DefWindowProcW lookup")
         if relative == "src/ffi/mod.rs":
             for declaration in MOD_DECLARATION.finditer(code):
@@ -1081,7 +1084,7 @@ def _check_fault_authority(root: Path, scans: dict[str, tuple[Scan, tuple[Attrib
             found.append(f"{SHIM}/src/lib.rs: process fault hosted test must call the real fixture")
     retirement = scans.get("src/adapter/native_tests/retirement.rs")
     retirement_code = retirement[0].code if retirement else ""
-    if hashlib.sha256(re.sub(r"\s+", "", retirement_code).encode()).hexdigest() != "27dc83f227c3815086a893f4deaaa9a5a5d9e9c994428469b1be6a7790f8bbfa":
+    if hashlib.sha256(re.sub(r"\s+", "", retirement_code).encode()).hexdigest() != "269968fdb17c819dcb52f04ba6ece90897994157f4a4c352a7a53419dbd4a92e":
         found.append(f"{SHIM}/src/adapter/native_tests/retirement.rs: shared retirement differs from reviewed code")
     if len([match for match in MOD_DECLARATION.finditer(test_code) if match.group("name") == "retirement"]) != 1:
         found.append(f"{SHIM}/src/adapter/native_tests.rs: shared retirement declaration is missing or ambiguous")
@@ -1096,9 +1099,9 @@ def _check_fault_authority(root: Path, scans: dict[str, tuple[Scan, tuple[Attrib
     # these fixed boundaries prevent bypassing lifecycle/identity checks.
     specifications = (
         ("src/ffi/session.rs", "fault_owners_retained", "eccda5bd1bc5847953133394e934a30276c539d09fa2842f0e3ad42722556f69"),
-        ("src/adapter/surface/mod.rs", "fault_owners_retained", "23e6c92ae1dfe2ef9ccf05f2640f3b77e05e6c47f97ab396951666e9748e2af2"),
+        ("src/adapter/surface/mod.rs", "fault_owners_retained", "f5b290213a5da3871f225e3abbba1e1f61c7ae0b021766b7d9a3f63f05b14b9f"),
         ("src/ffi/session.rs", "inject_process_fault", "38016888d1dfc8370da65108b31e8099a06f15b851540567311472d002238197"),
-        ("src/adapter/surface/mod.rs", "posted_fault_state", "5531110237abd228ee71561b3c71494ae96aa1fd010173ad5f45bd23cb4a06e9"),
+        ("src/adapter/surface/mod.rs", "posted_fault_state", "6bedb3fc63d1f1ecbe0e5c4bf8b5831d87262fb38faa49439f214c34ac659c50"),
         ("src/adapter/surface/mod.rs", "posted_fault_event", "9997eb9c0ff65871d2253e99fbe0cde02f599225d18c07e2dfc4c25e1c71d36f"),
         ("src/adapter/surface/mod.rs", "inject_posted_fault", "e739161b3f331ba0c83ee45e52f979f5c3d4ad951976c9028abbed8bb67570e8"),
     )
@@ -1133,7 +1136,7 @@ def _check_fault_authority(root: Path, scans: dict[str, tuple[Scan, tuple[Attrib
     relative = "src/adapter/native_tests/process_fault.rs"
     item = scans.get(relative)
     code = item[0].code if item else ""
-    if hashlib.sha256(re.sub(r"\s+", "", code).encode()).hexdigest() != "da23ffaf74b5ad838d71052d59ad4a0a88cc82e2197917af14a358e7f5d93cb6":
+    if hashlib.sha256(re.sub(r"\s+", "", code).encode()).hexdigest() != "13734bdeb83aaae975fe8247649e7507ba1422881d445cf049b6e005326bd208":
         found.append(f"{SHIM}/{relative}: process fault fixture differs from reviewed sealed caller")
 
 
