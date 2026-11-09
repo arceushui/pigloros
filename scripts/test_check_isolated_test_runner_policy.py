@@ -151,6 +151,7 @@ def check_net_admin_runner_guards(temporary: Path) -> None:
             "the repository path must not contain a comma",
         ),
     }
+    check_net_admin_runner_happy_path(root, harness, named)
     for description, (runner_root, binary, name, environment, message) in refused.items():
         result = run_runner(runner_root, binary, name, environment)
         if result.returncode != 2 or message not in result.stderr:
@@ -158,6 +159,79 @@ def check_net_admin_runner_guards(temporary: Path) -> None:
                 f"NET_ADMIN runner did not refuse {description}:"
                 f" exit {result.returncode}: {result.stderr}"
             )
+
+
+def docker_run_arguments(
+    root: Path, harness: Path, name: str, environment: dict[str, str]
+) -> list[str]:
+    """Run the NET_ADMIN runner against a fake `docker` and return the
+    arguments it passed, after requiring that the runner succeeded."""
+    fake = root / "fake-bin"
+    fake.mkdir(exist_ok=True)
+    log = root / "docker-arguments"
+    docker = fake / "docker"
+    docker.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os, sys\n"
+        f"open({str(log)!r}, 'w').write('\\0'.join(sys.argv[1:]))\n"
+        "for argument in sys.argv[1:]:\n"
+        "    if argument.endswith(',target=/pigloros-profile.profraw'):\n"
+        "        source = argument.split('source=', 1)[1].split(',', 1)[0]\n"
+        "        open(source, 'w').write('profile')\n",
+        encoding="utf-8",
+    )
+    docker.chmod(0o755)
+    result = run_runner(
+        root,
+        harness,
+        name,
+        {**environment, "PATH": f"{fake}:{os.environ['PATH']}"},
+    )
+    if result.returncode != 0:
+        raise SystemExit(f"NET_ADMIN runner failed on its happy path: {result.stderr}")
+    return log.read_text(encoding="utf-8").split("\0")
+
+
+def check_net_admin_runner_happy_path(root: Path, harness: Path, named: str) -> None:
+    """The runner passes exactly its pinned options to `docker run`."""
+    profiles = root / "target/llvm-cov-target"
+    profiles.mkdir(parents=True, exist_ok=True)
+    arguments = docker_run_arguments(
+        root,
+        harness,
+        named,
+        {"LLVM_PROFILE_FILE": str(profiles / "x.profraw"), "ASAN_OPTIONS": "detect_leaks=1"},
+    )
+    expected_tail = [
+        "/bin/sh",
+        "-c",
+        'if [ -w "$1" ]; then echo "the worktree bind is writable" >&2; exit 1; fi; shift; exec "$@"',
+        "read-only-probe",
+        str(root),
+        str(harness),
+        "--exact",
+        named,
+        "--nocapture",
+    ]
+    if arguments[0] != "run" or arguments[-len(expected_tail) :] != expected_tail:
+        raise SystemExit(f"NET_ADMIN runner ran docker unexpectedly: {arguments}")
+    options = arguments[1 : -len(expected_tail) - 1]
+    for required in (
+        ["--cap-drop", "ALL"],
+        ["--cap-add", "NET_ADMIN"],
+        ["--cap-add", "SYS_ADMIN"],
+        ["--network", "none"],
+        ["--env", "ASAN_OPTIONS=detect_leaks=1"],
+    ):
+        if not any(options[i : i + 2] == required for i in range(len(options))):
+            raise SystemExit(f"NET_ADMIN runner omitted {required}: {options}")
+    if any(option.startswith("apparmor") for option in options):
+        raise SystemExit(f"NET_ADMIN runner dropped AppArmor for {named}: {options}")
+    # The namespace-pinning tests, and only they, run without AppArmor.
+    pinning = named.replace("::netlink::", "::control::")
+    pinned = docker_run_arguments(root, harness, pinning, {})
+    if "apparmor=unconfined" not in pinned or pinned.count("--security-opt") != 2:
+        raise SystemExit(f"NET_ADMIN runner kept AppArmor for {pinning}: {pinned}")
 
 
 def main() -> None:
@@ -368,6 +442,53 @@ def main() -> None:
             NET_ADMIN_RUNNER,
             "  --rm\n",
             "  --rm\n  --security-opt=apparmor=unconfined\n",
+        ),
+        # The allowlist refuses every option it does not name.
+        *(
+            (runner, "  --rm\n", f"  --rm\n  {option}\n")
+            for runner in (PRIMARY_RUNNER, NET_ADMIN_RUNNER)
+            for option in (
+                "--net host",
+                "--net=host",
+                "--volumes-from other",
+                "--sysctl net.ipv4.ip_forward=1",
+                "--cgroup-parent /",
+                "--runtime runc",
+                "--tmpfs /dev/shm",
+                "-e DOCKER=1",
+            )
+        ),
+        (
+            NET_ADMIN_RUNNER,
+            'docker run "${docker_arguments[@]}" "$ISOLATION_IMAGE"',
+            'docker run "${docker_arguments[@]}" --net host "$ISOLATION_IMAGE"',
+        ),
+        (
+            NET_ADMIN_RUNNER,
+            "profile_output=\n",
+            "profile_output=\ndocker_arguments[0]=--privileged\n",
+        ),
+        (
+            NET_ADMIN_RUNNER,
+            "profile_output=\n",
+            "profile_output=\nextra=(--privileged)\ndocker_arguments+=(\"${extra[@]}\")\n",
+        ),
+        (
+            NET_ADMIN_RUNNER,
+            "set +e\n",
+            "set +e\ndocker create --privileged \"$ISOLATION_IMAGE\"\n",
+        ),
+        # A guard that only a comment mentions is absent.
+        (
+            NET_ADMIN_RUNNER,
+            "if [[ $REPOSITORY_ROOT == *,* ]]; then",
+            "# if [[ $REPOSITORY_ROOT == *,* ]]; then\nif false; then",
+        ),
+        (
+            NET_ADMIN_RUNNER,
+            "readonly TEST_PATTERN=",
+            "# readonly TEST_PATTERN='^namespace_network::netlink::tests::privileged::[a-z0-9_]+$'\n"
+            "readonly TEST_PATTERN='.*'\n# readonly TEST_PATTERN=",
         ),
     )
     with tempfile.TemporaryDirectory() as directory:
