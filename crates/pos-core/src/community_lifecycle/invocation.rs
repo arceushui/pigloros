@@ -38,7 +38,7 @@ pub struct CommunityInvocationEvidenceInputV1 {
     pub pass_key: CommunityPassKeyV1,
     /// Exact admitted CMB1.
     pub member_binding_digest: Hash,
-    /// Actual fresh nonzero16-byte invocation identity prepared before Reserve.
+    /// Actual fresh nonzero 16-byte invocation identity prepared before Reserve.
     pub invocation_id: [u8; 16],
     /// Exact complete CNT1 including all eight effective limits.
     pub negotiated_tuple_digest: Hash,
@@ -93,7 +93,7 @@ impl CommunityInvocationEvidenceV1 {
         &self.0
     }
 
-    /// Encode exact15-field CIV1 with two required null failure fields.
+    /// Encode exact 15-field CIV1 with two required null failure fields.
     #[must_use]
     pub fn to_canonical_cbor(&self) -> Zeroizing<Vec<u8>> {
         let input = self.as_input();

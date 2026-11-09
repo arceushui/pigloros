@@ -102,7 +102,7 @@ pub struct CommunitySealedResultInputV1<'a> {
 pub struct CommunitySealedResultV1<'a>(CommunitySealedResultInputV1<'a>);
 
 impl<'a> CommunitySealedResultV1<'a> {
-    /// Validate local links and all three64-entry list bounds.
+    /// Validate local links and all three 64-entry list bounds.
     ///
     /// # Errors
     /// Rejects zero required/present optional links, oversized lists or an
@@ -139,7 +139,7 @@ impl<'a> CommunitySealedResultV1<'a> {
         &self.0
     }
 
-    /// Encode exact14-field CPS1 in a fully reserved zeroizing buffer.
+    /// Encode exact 14-field CPS1 in a fully reserved zeroizing buffer.
     #[must_use]
     pub fn to_canonical_cbor(&self) -> Zeroizing<Vec<u8>> {
         let input = self.as_input();
