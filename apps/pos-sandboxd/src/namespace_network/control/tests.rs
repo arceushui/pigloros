@@ -28,6 +28,16 @@ fn a_link_already_gone_counts_as_deleted() {
     ));
 }
 
+#[tokio::test]
+async fn the_reconciliation_sweep_fails_closed_without_privilege() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let control = NetlinkNamespaceControl::new(NetworkNamespaces::pinned_under(directory.path()));
+    // nf_tables refuses every request without `CAP_NET_ADMIN`.
+    let swept = crate::OrphanNetworkCleanup::remove_orphans(&control).await;
+    assert!(swept.is_err(), "{swept:?}");
+    Ok(())
+}
+
 /// Tests that need `NET_ADMIN`, `SYS_ADMIN` and mounts. Each re-runs itself
 /// in the isolated container that grants exactly those, and runs its body
 /// there, where the container's own network namespace is the host's.
@@ -243,6 +253,23 @@ mod privileged {
         assert!(matches!(host_link(&first.host_link), Ok(None)));
         // A veth end of another name is not the provider's.
         assert!(matches!(host_link(&other_host), Ok(Some(_))));
+        Ok(())
+    }
+
+    #[test]
+    fn the_reconciliation_sweep_removes_orphans_on_the_blocking_pool() -> TestResult {
+        if !isolated("the_reconciliation_sweep_removes_orphans_on_the_blocking_pool")? {
+            return Ok(());
+        }
+        let namespaces = NetworkNamespaces::system();
+        let control = NetlinkNamespaceControl::new(namespaces.clone());
+        let orphan = planned(9, 11)?;
+        let created = namespaces.create(&orphan.name);
+        let runtime = tokio::runtime::Builder::new_current_thread().build()?;
+        let swept = runtime.block_on(crate::OrphanNetworkCleanup::remove_orphans(&control));
+        assert!(created.is_ok(), "{created:?}");
+        assert!(swept.is_ok(), "{swept:?}");
+        assert!(matches!(namespaces.attempt_names(), Ok(names) if names.is_empty()));
         Ok(())
     }
 }

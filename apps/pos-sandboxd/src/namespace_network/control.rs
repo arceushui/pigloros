@@ -9,6 +9,7 @@
 //! pair, then each end's `addr_gen_mode`, addresses and link state, and the
 //! namespace's routes once its end is up.
 
+use std::future::Future;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 
 use rustix::fs::{open, Mode};
@@ -343,6 +344,22 @@ impl NetlinkNamespaceControl {
                     _ => Err(NetlinkError::Residual),
                 },
             )
+    }
+}
+
+/// Restart reconciliation's network sweep (#1200): the blocking
+/// [`NetlinkNamespaceControl::remove_orphans`] on Tokio's blocking pool, so
+/// the reconciling task's worker keeps running other tasks.
+impl crate::OrphanNetworkCleanup for NetlinkNamespaceControl {
+    type Error = NetlinkError;
+
+    fn remove_orphans(&self) -> impl Future<Output = Result<(), NetlinkError>> + Send {
+        let control = self.clone();
+        async move {
+            tokio::task::spawn_blocking(move || control.remove_orphans())
+                .await
+                .unwrap_or(Err(NetlinkError::Panicked))
+        }
     }
 }
 
