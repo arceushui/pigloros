@@ -56,6 +56,53 @@ impl Native {
         CALLBACK_ORDER.with(|order| *order.borrow_mut() = None);
     }
 }
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NativeCreationMoment {
+    EnvironmentReturned(bool),
+    EnvironmentCallback(CreationCallback),
+    ControllerReturned(bool),
+    ControllerCallback(CreationCallback),
+    Overflow,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CreationCallback {
+    Success,
+    NativeFailure,
+    MissingInterface,
+    Inconsistent,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static CREATION_ORDER: std::cell::RefCell<Option<Vec<NativeCreationMoment>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+impl Native {
+    fn arm_creation_order() {
+        CREATION_ORDER.with(|order| *order.borrow_mut() = Some(Vec::new()));
+    }
+    fn creation_moment(moment: NativeCreationMoment) {
+        CREATION_ORDER.with(|order| {
+            if let Some(order) = order.borrow_mut().as_mut() {
+                if order.len() < 32 {
+                    order.push(moment);
+                } else if order.last() != Some(&NativeCreationMoment::Overflow) {
+                    order.push(NativeCreationMoment::Overflow);
+                }
+            }
+        });
+    }
+    fn creation_order() -> Vec<NativeCreationMoment> {
+        CREATION_ORDER.with(|order| order.borrow().as_ref().cloned().unwrap_or_default())
+    }
+    fn disarm_creation_order() {
+        CREATION_ORDER.with(|order| *order.borrow_mut() = None);
+    }
+}
 #[forbid(unsafe_code)]
 mod adapter {
     // The inline boundary and each child file are separate lint scopes. This

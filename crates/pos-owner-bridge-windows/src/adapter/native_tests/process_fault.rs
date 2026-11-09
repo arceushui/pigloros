@@ -23,6 +23,8 @@ use crate::{
     ProcessFaultMark, ProcessFaultState, ProcessFaultTarget,
 };
 
+mod obstruction;
+
 type Trace = Rc<RefCell<Vec<ProcessFaultMark>>>;
 type CeremonyResult = Result<Verified, BridgeError>;
 type DriveResult = Result<CeremonyResult, Box<dyn std::error::Error>>;
@@ -416,6 +418,51 @@ struct FailureFinish {
 }
 
 impl Fixture {
+    fn new_obstructed(
+        runtime_path: &Path,
+        root: &Path,
+        number: u8,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let root = root.join("environment-obstruction");
+        crate::create_private_directory(&root)?;
+        let runtime = Arc::new(crate::verify_fixed_runtime(runtime_path, &root)?);
+        let id = CeremonyId::from_bytes([number; 16]);
+        let expected = root.join(pos_owner_bridge::folder_name(&id));
+        let factory: Rc<dyn NativeFactory> = Rc::new(obstruction::ObstructionFactory::new(
+            crate::Native::owner_factory()?,
+            expected,
+        ));
+        let store = WindowsCleanupStore::open(root.clone())?;
+        let loopback = SharedLoopback::start_fixture(FixtureProfile::Pending)?;
+        let mut surface = Surface::new(
+            Rc::clone(&factory),
+            runtime,
+            root,
+            Box::new(loopback.clone()),
+            Box::new(store.clone()),
+            Box::new(SystemClock),
+        )
+        .map_err(pos_owner_bridge::SurfaceError::error)?;
+        let deadline = Instant::now() + Duration::from_secs(15);
+        surface.set_deadline(deadline);
+        Ok(Self {
+            number,
+            profile: FixtureProfile::Pending,
+            surface,
+            loopback,
+            store,
+            factory,
+            trace: Rc::new(RefCell::new(Vec::new())),
+            handle: None,
+            reached: None,
+            exit_reached: None,
+            evidence_complete: false,
+            early_presence: None,
+            prior_native_wipe: false,
+            deadline,
+        })
+    }
+
     fn finish_failed_case(
         self,
         driver: CeremonyDriver,
@@ -3237,6 +3284,211 @@ fn run_pre_environment(runtime: &Path, number: u8, case: EnvironmentCase) -> Tes
         || !idle
     {
         return Err(format!("pre-environment witness failed: driver_pending={driver_pending} initial_completion={initial_completion:?} completion={at_deadline:?} timeout={timed_out} wiped={wiped} ordered={ordered} no_record={no_record} retained_orphan={retained_orphan} idle={idle}").into());
+    }
+    Ok(())
+}
+
+struct CreationOrderGuard;
+
+impl CreationOrderGuard {
+    fn arm() -> Self {
+        crate::Native::arm_creation_order();
+        Self
+    }
+}
+
+impl Drop for CreationOrderGuard {
+    fn drop(&mut self) {
+        crate::Native::disarm_creation_order();
+    }
+}
+
+fn async_environment_result(
+    order: &[crate::NativeCreationMoment],
+    callback: crate::CreationCallback,
+) -> bool {
+    use crate::NativeCreationMoment::{EnvironmentCallback, EnvironmentReturned};
+    order == [EnvironmentReturned(true), EnvironmentCallback(callback)]
+}
+
+#[test]
+fn creation_witness_rejects_sync_error_and_false_failure() {
+    use crate::CreationCallback::{Inconsistent, MissingInterface, NativeFailure, Success};
+    use crate::NativeCreationMoment::{EnvironmentCallback, EnvironmentReturned};
+    assert!(async_environment_result(
+        &[
+            EnvironmentReturned(true),
+            EnvironmentCallback(NativeFailure)
+        ],
+        NativeFailure
+    ));
+    assert!(!async_environment_result(
+        &[EnvironmentReturned(false)],
+        NativeFailure
+    ));
+    assert!(!async_environment_result(
+        &[
+            EnvironmentCallback(NativeFailure),
+            EnvironmentReturned(true)
+        ],
+        NativeFailure
+    ));
+    assert!(!async_environment_result(
+        &[
+            EnvironmentReturned(true),
+            EnvironmentCallback(MissingInterface)
+        ],
+        NativeFailure
+    ));
+    assert!(!async_environment_result(
+        &[EnvironmentReturned(true), EnvironmentCallback(Inconsistent)],
+        NativeFailure
+    ));
+    assert!(!async_environment_result(
+        &[EnvironmentReturned(true), EnvironmentCallback(Success)],
+        NativeFailure
+    ));
+}
+
+#[test]
+fn native_obstructed_environment_creation_and_retirement() -> TestResult {
+    let _port = crate::Native::fixed_port_fixture();
+    let root = FixtureRoot::new()?;
+    let runtime = std::env::var_os("OWNER_BRIDGE_TEST_RUNTIME")
+        .ok_or("canonical retained runtime is required by process qualification")?;
+    run_environment_obstruction(Path::new(&runtime), &root.0, 0x80, false)?;
+    run_environment_obstruction(Path::new(&runtime), &root.0, 0x81, true)
+}
+
+type EnvironmentDriveResult =
+    Result<(CeremonyResult, bool, Result<Option<bool>, ()>), Box<dyn std::error::Error>>;
+
+impl Fixture {
+    fn drive_environment_obstruction(
+        &mut self,
+        driver: &mut CeremonyDriver,
+        obstruct: bool,
+    ) -> EnvironmentDriveResult {
+        let initial = driver.step(&mut readiness::env(
+            &mut self.surface,
+            &mut self.loopback,
+            &mut self.store,
+        ));
+        let driver_pending = matches!(initial, Step::Pending);
+        let mut observation = self.surface.pre_environment_completion();
+        while matches!(observation, Ok(None)) && Instant::now() < self.deadline {
+            readiness::pump(&self.surface)?;
+            observation = self.surface.pre_environment_completion();
+        }
+        let result = if obstruct && observation == Ok(Some(false)) {
+            match driver.step(&mut readiness::env(
+                &mut self.surface,
+                &mut self.loopback,
+                &mut self.store,
+            )) {
+                Step::Finished(result) => result,
+                _ => readiness::cancel_driver(
+                    driver,
+                    &mut self.surface,
+                    &mut self.loopback,
+                    &mut self.store,
+                ),
+            }
+        } else {
+            readiness::cancel_driver(
+                driver,
+                &mut self.surface,
+                &mut self.loopback,
+                &mut self.store,
+            )
+        };
+        Ok::<_, Box<dyn std::error::Error>>((result, driver_pending, observation))
+    }
+}
+
+fn run_environment_obstruction(
+    runtime: &Path,
+    root: &Path,
+    number: u8,
+    obstruct: bool,
+) -> TestResult {
+    let _creation = CreationOrderGuard::arm();
+    let mut fixture = if obstruct {
+        Fixture::new_obstructed(runtime, root, number)?
+    } else {
+        Fixture::new(runtime, root, number, FixtureProfile::Pending)?
+    };
+    let started = Instant::now();
+    let mut driver = readiness::new_driver(CeremonyId::from_bytes([number; 16]), started)?;
+    let attempt = catch_unwind(AssertUnwindSafe(|| {
+        fixture.drive_environment_obstruction(&mut driver, obstruct)
+    }));
+    let (result, driver_pending, observation, failed) = match attempt {
+        Ok(Ok((result, pending, observation))) => (result, pending, observation, false),
+        _ => (
+            readiness::cancel_driver(
+                &mut driver,
+                &mut fixture.surface,
+                &mut fixture.loopback,
+                &mut fixture.store,
+            ),
+            false,
+            Err(()),
+            true,
+        ),
+    };
+    let wiped = driver.request_clear() && driver.prf().iter().all(|byte| *byte == 0);
+    let result_failed = if obstruct {
+        matches!(
+            &result,
+            Err(BridgeError::Unavailable(
+                pos_owner_bridge::UnavailableCode::InterfaceUnavailable
+            ))
+        )
+    } else {
+        result.is_err()
+    };
+    let plan_wiped =
+        !matches!(&result, Err(BridgeError::Quarantine(_))) || driver.plan_secrets_clear();
+    retirement::retire(
+        &mut fixture.surface,
+        &mut fixture.loopback,
+        &mut fixture.store,
+        driver,
+        result,
+        |_, _, _| {},
+    );
+    let order = crate::Native::creation_order();
+    let expected = if obstruct {
+        crate::CreationCallback::NativeFailure
+    } else {
+        crate::CreationCallback::Success
+    };
+    let ordered = async_environment_result(&order, expected);
+    let no_record = fixture.store.records()?.is_empty();
+    let retained_orphan = fixture.store.folders()?.len() == 1;
+    let idle = fixture.surface.idle();
+    let expected_observation = Ok(Some(!obstruct));
+    let _written = writeln!(std::io::stderr(), "NATIVE_UDF_OBSTRUCTION obstruct={obstruct} pending={driver_pending} completion={observation:?} order={order:?} wiped={wiped} idle={idle} orphan={retained_orphan}");
+    drop(fixture.surface);
+    Rc::get_mut(&mut fixture.factory)
+        .ok_or("obstructed factory still shared")?
+        .stop()?;
+    if failed
+        || !driver_pending
+        || observation != expected_observation
+        || !ordered
+        || !wiped
+        || !result_failed
+        || !plan_wiped
+        || !no_record
+        || !retained_orphan
+        || !idle
+    {
+        return Err(
+            "native environment obstruction did not establish the declared asynchronous outcome"
+                .into(),
+        );
     }
     Ok(())
 }

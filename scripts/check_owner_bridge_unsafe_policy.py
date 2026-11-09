@@ -176,6 +176,7 @@ class Scan:
     code_lines: tuple[str, ...]
     comments: dict[int, str]
     raw_identifiers: tuple[int, ...] = ()
+    source: str = ""
 
 
 @dataclass(frozen=True)
@@ -346,7 +347,7 @@ def scan(text: str) -> Scan:
         else:
             emit(index + 1, "keep")
     code = "".join(pieces)
-    return Scan(code, tuple(code.split("\n")), comments, tuple(raw_identifiers))
+    return Scan(code, tuple(code.split("\n")), comments, tuple(raw_identifiers), text)
 
 
 def _line_of(code: str, offset: int) -> int:
@@ -1223,19 +1224,46 @@ def _check_fault_authority(root: Path, scans: dict[str, tuple[Scan, tuple[Attrib
     callback_begin = root_code.find("#[cfg(test)]", root_code.find("struct Native;"))
     callback_end = root_code.find("#[forbid(unsafe_code)]", callback_begin)
     callback_block = root_code[callback_begin:callback_end] if callback_begin >= 0 and callback_end >= 0 else ""
-    if hashlib.sha256(re.sub(r"\s+", "", callback_block).encode()).hexdigest() != "104d01018f0f872ff8432cc4de3d14af7e866af2b92988d05b15b94e3a49e963":
+    if hashlib.sha256(re.sub(r"\s+", "", callback_block).encode()).hexdigest() != "671b74e45e73bea3a430fb1c093e4fae333c98f2bed44b18a7867877228563e6":
         found.append(f"{SHIM}/src/lib.rs: callback ordering recorder differs from reviewed test-only code")
-    for relative, digest in (("src/ffi/creation.rs", "b9aedaa7f6c824a740b0bc7050a32b5e141588c13c69ca2969e5d42bd100b0d5"), ("src/ffi/environment.rs", "0156bc784e8ad321e8873180333ddd4a73675c1a2b38ee123df7b59334091016")):
+    for relative, digest in (("src/ffi/creation.rs", "fb272314f1c1d0320ea5e25d294ef7b4db16c970aa0b33b7bfb152cf0a32b21f"), ("src/ffi/environment.rs", "0156bc784e8ad321e8873180333ddd4a73675c1a2b38ee123df7b59334091016")):
         item = scans.get(relative)
         body = item[0].code if item else ""
         if hashlib.sha256(re.sub(r"\s+", "", body).encode()).hexdigest() != digest:
             found.append(f"{SHIM}/{relative}: callback invocation differs from reviewed SDK path")
     for relative, (scanned, _) in scans.items():
-        for reference in re.finditer(r"(?<!\w)(?:NativeCallbackMoment|CALLBACK_ORDER|record_callback|callback_order|arm_callback_order|disarm_callback_order)(?!\w)", scanned.code):
+        for reference in re.finditer(r"(?<!\w)(?:NativeCallbackMoment|CALLBACK_ORDER|record_callback|callback_order|arm_callback_order|disarm_callback_order|NativeCreationMoment|CreationCallback|CREATION_ORDER|creation_moment|creation_order|arm_creation_order|disarm_creation_order)(?!\w)", scanned.code):
             allowed = relative in ("src/ffi/creation.rs", "src/ffi/environment.rs", "src/adapter/native_tests/process_fault.rs")
             allowed |= relative == "src/lib.rs" and callback_begin <= reference.start() < callback_end
             if not allowed:
                 found.append(f"{SHIM}/{relative}: callback evidence references belong only in reviewed paths")
+    obstruction_path = "src/adapter/native_tests/process_fault/obstruction.rs"
+    obstruction = scans.get(obstruction_path)
+    obstruction_code = obstruction[0].code if obstruction else ""
+    if hashlib.sha256(re.sub(r"\s+", "", obstruction_code).encode()).hexdigest() != "962ba1faaeae5456fa1a38e4dfaab2aa63d85bf55e8859415745d9b2ac5a3c44":
+        found.append(f"{SHIM}/{obstruction_path}: owned UDF obstruction differs from reviewed fixed fixture")
+    join_calls = list(re.finditer(r"(?<!\w)folder\s*\.\s*join\s*\(", obstruction_code))
+    fixed_join = re.compile(r'folder\s*\.\s*join\s*\(\s*"EBWebView"\s*\)')
+    if (len(join_calls) != 1 or not obstruction or
+            not fixed_join.match(obstruction[0].source, join_calls[0].start())):
+        found.append(f"{SHIM}/{obstruction_path}: UDF obstruction must use its fixed EBWebView child")
+    fixture = scans.get("src/adapter/native_tests/process_fault.rs")
+    fixture_code = fixture[0].code if fixture else ""
+    constructor = list(re.finditer(r"(?<!\w)fn\s+new_obstructed\s*\(", fixture_code))
+    opening = fixture_code.find("{", constructor[0].end()) if len(constructor) == 1 else -1
+    ending = _matching_brace(fixture_code, opening) if opening >= 0 else -1
+    root_calls = [match for match in re.finditer(r"(?<!\w)let\s+root\s*=\s*root\s*\.\s*join\s*\(", fixture_code)
+                  if opening < match.start() < ending]
+    fixed_root = re.compile(r'let\s+root\s*=\s*root\s*\.\s*join\s*\(\s*"environment-obstruction"\s*\)')
+    if (len(root_calls) != 1 or not fixture or not fixed_root.match(fixture[0].source, root_calls[0].start())):
+        found.append(f"{SHIM}/src/adapter/native_tests/process_fault.rs: UDF obstruction root must use its fixed fixture child")
+    declarations = [match for match in MOD_DECLARATION.finditer(fixture_code) if match.group("name") == "obstruction"]
+    if len(declarations) != 1 or declarations[0].group("visibility"):
+        found.append(f"{SHIM}/src/adapter/native_tests/process_fault.rs: obstruction module must be unique and private")
+    for relative, (scanned, _) in scans.items():
+        for reference in re.finditer(r"(?<!\w)(?:ObstructionFactory|ObstructionSession)(?!\w)", scanned.code):
+            if relative not in (obstruction_path, "src/adapter/native_tests/process_fault.rs"):
+                found.append(f"{SHIM}/{relative}: UDF obstruction capability belongs only in the sealed test fixture")
     _check_fault_capabilities(scans, found)
     surface = scans.get("src/adapter/surface/mod.rs")
     surface_code = surface[0].code if surface else ""
@@ -1249,7 +1277,7 @@ def _check_fault_authority(root: Path, scans: dict[str, tuple[Scan, tuple[Attrib
     relative = "src/adapter/native_tests/process_fault.rs"
     item = scans.get(relative)
     code = item[0].code if item else ""
-    if hashlib.sha256(re.sub(r"\s+", "", code).encode()).hexdigest() != "c011c056e9807f37700988aae6572b02c0520aa5358ce165c80ec73e9a621142":
+    if hashlib.sha256(re.sub(r"\s+", "", code).encode()).hexdigest() != "ccdb0fc47d9e5e96c3550e30de35aae4ab364272bbc4b750c783fa7d21eaa6b4":
         found.append(f"{SHIM}/{relative}: process fault fixture differs from reviewed sealed caller")
 
 

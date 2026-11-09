@@ -50,6 +50,18 @@ impl EnvironmentCreation {
         let completed = Rc::clone(&result);
         let callback =
             CreateCoreWebView2EnvironmentCompletedHandler::create(Box::new(move |hr, value| {
+                #[cfg(test)]
+                crate::Native::creation_moment(crate::NativeCreationMoment::EnvironmentCallback(
+                    if hr.is_err() && value.is_some() {
+                        crate::CreationCallback::Inconsistent
+                    } else if hr.is_err() {
+                        crate::CreationCallback::NativeFailure
+                    } else if value.is_none() {
+                        crate::CreationCallback::MissingInterface
+                    } else {
+                        crate::CreationCallback::Success
+                    },
+                ));
                 let result = hr.and_then(|()| value.ok_or_else(|| E_POINTER.into()));
                 #[cfg(test)]
                 crate::Native::record_callback(crate::NativeCallbackMoment::EnvironmentCompletion(
@@ -60,15 +72,19 @@ impl EnvironmentCreation {
             }));
         // SAFETY: fixed verified runtime and fresh protected folder, live STA
         // options/callback, all UTF-16 inputs retained in this owner until completion.
-        unsafe {
+        let call = unsafe {
             CreateCoreWebView2EnvironmentWithOptions(
                 PCWSTR(runtime.as_ptr()),
                 PCWSTR(folder.as_ptr()),
                 &options,
                 &callback,
             )
-        }
-        .map_err(|_| unavailable())?;
+        };
+        #[cfg(test)]
+        crate::Native::creation_moment(crate::NativeCreationMoment::EnvironmentReturned(
+            call.is_ok(),
+        ));
+        call.map_err(|_| unavailable())?;
         Ok(Self {
             result,
             _runtime: runtime,
@@ -106,6 +122,18 @@ impl ControllerCreation {
         let completed = Rc::clone(&result);
         let callback =
             CreateCoreWebView2ControllerCompletedHandler::create(Box::new(move |hr, value| {
+                #[cfg(test)]
+                crate::Native::creation_moment(crate::NativeCreationMoment::ControllerCallback(
+                    if hr.is_err() && value.is_some() {
+                        crate::CreationCallback::Inconsistent
+                    } else if hr.is_err() {
+                        crate::CreationCallback::NativeFailure
+                    } else if value.is_none() {
+                        crate::CreationCallback::MissingInterface
+                    } else {
+                        crate::CreationCallback::Success
+                    },
+                ));
                 let result = hr.and_then(|()| value.ok_or_else(|| E_POINTER.into()));
                 #[cfg(test)]
                 crate::Native::record_callback(crate::NativeCallbackMoment::ControllerCompletion(
@@ -116,8 +144,12 @@ impl ControllerCreation {
             }));
         // SAFETY: retained live STA environment and callback; the surface keeps
         // its owned top-level HWND alive until this async operation completes.
-        unsafe { environment.CreateCoreWebView2Controller(hwnd, &callback) }
-            .map_err(|_| unavailable())?;
+        let call = unsafe { environment.CreateCoreWebView2Controller(hwnd, &callback) };
+        #[cfg(test)]
+        crate::Native::creation_moment(crate::NativeCreationMoment::ControllerReturned(
+            call.is_ok(),
+        ));
+        call.map_err(|_| unavailable())?;
         Ok(Self {
             result,
             _environment: environment.clone(),
