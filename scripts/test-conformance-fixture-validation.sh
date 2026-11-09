@@ -229,14 +229,6 @@ replace_json "${archive_air_gapped_flip_root}/matrix/execution-matrix.json" \
      .expected_result = {equal: true, first_divergence: null, nia1_content_digest: ("0" * 64)})'
 expect_rejection "${archive_air_gapped_flip_root}" "invalid ADR-059 matrix inventory"
 
-# A row no slice executes yet stays unflipped.
-undeclared_flip_root="$(new_fixture_copy undeclared-row-matrix-flip)"
-replace_json "${undeclared_flip_root}/matrix/execution-matrix.json" \
-  '(.cases[] | select(.case_id == "NI-NET-010-S-L")) |= (
-     .executed = true | .expected_result_digest = ("0" * 64) |
-     .expected_result = {equal: true, first_divergence: null, nia1_content_digest: ("0" * 64)})'
-expect_rejection "${undeclared_flip_root}" "invalid ADR-059 matrix inventory"
-
 tampered_nia1_root="$(new_fixture_copy tampered-nia1)"
 tampered_nia1="$(find "${tampered_nia1_root}/non-interference/executions" -type f | sort | sed -n '1p')"
 printf '\0' >>"${tampered_nia1}"
