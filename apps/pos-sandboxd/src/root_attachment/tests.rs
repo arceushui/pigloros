@@ -1576,6 +1576,26 @@ fn assert_request_recorded() -> TestResult {
     Ok(())
 }
 
+/// A marker that cannot be replaced refuses the request before it is sent.
+async fn unreplaceable_marker_refuses(
+    kernel: &FakeKernel,
+    admission: &HeldImageAdmission<'_>,
+    prepared: &PreparedAttemptDirectory,
+) -> TestResult {
+    let marker = Path::new("/run/pigloros/sandbox/registry/activation");
+    fs::remove_file(marker)?;
+    fs::create_dir(marker)?;
+    assert_eq!(
+        activate(kernel, admission, prepared, || std::future::ready(Ok(
+            RejectingActivator
+        )))
+        .await
+        .err(),
+        Some(ImageActivationError::AttachFailure)
+    );
+    Ok(())
+}
+
 /// Activate `prepared` once more, release its root and finish its cleanup.
 async fn retry_and_clean(
     kernel: &FakeKernel,
@@ -1685,18 +1705,7 @@ async fn the_admitted_chain_reaches_attachment_only_through_every_gate() -> Test
     assert_eq!(kernel.detached(), 2);
     peer.join().map_err(|_| "the fake mountfsd panicked")??;
 
-    // A marker that cannot be replaced refuses the request before it is sent.
-    let marker = Path::new("/run/pigloros/sandbox/registry/activation");
-    fs::remove_file(marker)?;
-    fs::create_dir(marker)?;
-    assert_eq!(
-        activate(&kernel, &admission, &prepared, || std::future::ready(Ok(
-            RejectingActivator
-        )))
-        .await
-        .err(),
-        Some(ImageActivationError::AttachFailure)
-    );
+    unreplaceable_marker_refuses(&kernel, &admission, &prepared).await?;
 
     // A replaced attempt root rejects before mountfsd is called.
     let attempt = Path::new("/run/pigloros/sandbox/attempts").join(component(&prepared));
