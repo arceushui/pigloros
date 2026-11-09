@@ -7,27 +7,27 @@ use pos_plugin_release::{build_oci_closure_v1, ReleaseClosureInputV1, VerifiedRe
 use serde_json::{json, Value};
 use sha2::{Digest as _, Sha256};
 
-pub type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+pub(super) type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 const COMPONENT: &[u8] = b"\0asm\x0d\0\x01\0";
 
-pub struct Fixture {
-    pub wit: Vec<u8>,
-    pub schemas: Vec<Vec<u8>>,
-    pub provenance: Vec<u8>,
-    pub sbom: Vec<u8>,
-    pub licences: Vec<Vec<u8>>,
+pub(super) struct Fixture {
+    pub(super) wit: Vec<u8>,
+    pub(super) schemas: Vec<Vec<u8>>,
+    pub(super) provenance: Vec<u8>,
+    pub(super) sbom: Vec<u8>,
+    pub(super) licences: Vec<Vec<u8>>,
 }
 
-pub fn bytes(value: &Value) -> Vec<u8> {
+pub(super) fn bytes(value: &Value) -> Vec<u8> {
     value.to_string().into_bytes()
 }
 
-pub fn component_digest() -> String {
+pub(super) fn component_digest() -> String {
     hex(&Sha256::digest(COMPONENT))
 }
 
-pub fn hex(bytes: &[u8]) -> String {
+pub(super) fn hex(bytes: &[u8]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
     bytes
         .iter()
@@ -41,7 +41,7 @@ pub fn hex(bytes: &[u8]) -> String {
 }
 
 impl Fixture {
-    pub fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             wit: archive(),
             schemas: vec![b"true".to_vec()],
@@ -69,7 +69,7 @@ impl Fixture {
         }
     }
 
-    pub fn bundle(&self) -> TestResult<VerifiedReleaseBundleV1> {
+    pub(super) fn bundle(&self) -> TestResult<VerifiedReleaseBundleV1> {
         let event_schemas = self
             .schemas
             .iter()
@@ -116,14 +116,14 @@ impl Fixture {
         .map_err(Into::into)
     }
 
-    pub fn provenance(&mut self, change: impl FnOnce(&mut Value)) -> TestResult {
+    pub(super) fn provenance(&mut self, change: impl FnOnce(&mut Value)) -> TestResult {
         let mut value = serde_json::from_slice(&self.provenance)?;
         change(&mut value);
         self.provenance = bytes(&value);
         Ok(())
     }
 
-    pub fn sbom(&mut self, change: impl FnOnce(&mut Value)) -> TestResult {
+    pub(super) fn sbom(&mut self, change: impl FnOnce(&mut Value)) -> TestResult {
         let mut value = serde_json::from_slice(&self.sbom)?;
         change(&mut value);
         self.sbom = bytes(&value);
