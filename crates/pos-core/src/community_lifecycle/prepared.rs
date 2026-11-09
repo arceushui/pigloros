@@ -417,7 +417,7 @@ mod tests {
             byte_length: u64::MAX,
             digest: [1; 32],
         };
-        for length in [
+        [
             0,
             23,
             24,
@@ -427,42 +427,46 @@ mod tests {
             65_535,
             65_536,
             MAX_COMMUNITY_STATE_BYTES_V1,
-        ] {
-            for (observation, state) in [(length, 0), (0, length), (length, length)] {
-                let input = CommunityPreparedInvocationInputV1 {
-                    member_binding_digest: Hash::from_bytes([1; 32]),
-                    invocation_id: [2; 16],
-                    timeline_position: TimelinePositionV1 {
-                        timeline_id: [3; 16],
-                        seq: u64::MAX,
-                        tick: u64::MAX,
-                        scheduler_position: u32::MAX,
-                    },
-                    output_base_ordinal: u32::MAX,
-                    principal_ref: reference,
-                    authorization_ref: reference,
-                    observation_snapshot_ref: reference,
-                    observation_bytes: &payload[..observation],
-                    prior_state_schema_digest: [4; 32],
-                    prior_state_bytes: &payload[..state],
-                    execution_profile_digest: [5; 32],
-                    trust_policy_snapshot_digest: [6; 32],
-                    deterministic_budget_id: &budget,
-                    deterministic_random_domain: [7; 32],
-                    provenance_root: [8; 32],
-                    simulation_time: u64::MAX,
-                    watchdog_epochs: u32::MAX,
-                };
-                let record = CommunityPreparedInvocationV1::new(input)?;
-                let encoded = record.to_canonical_cbor();
-                assert!(encoded.len() <= record.staging_capacity());
-                assert!(record.staging_capacity() <= MAX_COMMUNITY_PREPARED_INVOCATION_BYTES_V1);
-                assert!(
-                    *CommunityPreparedInvocationV1::from_canonical_cbor(&encoded)?.as_input()
-                        == input
-                );
-            }
-        }
-        Ok(())
+        ]
+        .into_iter()
+        .try_for_each(|length| {
+            [(length, 0), (0, length), (length, length)]
+                .into_iter()
+                .try_for_each(|(observation, state)| {
+                    let input = CommunityPreparedInvocationInputV1 {
+                        member_binding_digest: Hash::from_bytes([1; 32]),
+                        invocation_id: [2; 16],
+                        timeline_position: TimelinePositionV1 {
+                            timeline_id: [3; 16],
+                            seq: u64::MAX,
+                            tick: u64::MAX,
+                            scheduler_position: u32::MAX,
+                        },
+                        output_base_ordinal: u32::MAX,
+                        principal_ref: reference,
+                        authorization_ref: reference,
+                        observation_snapshot_ref: reference,
+                        observation_bytes: &payload[..observation],
+                        prior_state_schema_digest: [4; 32],
+                        prior_state_bytes: &payload[..state],
+                        execution_profile_digest: [5; 32],
+                        trust_policy_snapshot_digest: [6; 32],
+                        deterministic_budget_id: &budget,
+                        deterministic_random_domain: [7; 32],
+                        provenance_root: [8; 32],
+                        simulation_time: u64::MAX,
+                        watchdog_epochs: u32::MAX,
+                    };
+                    CommunityPreparedInvocationV1::new(input).and_then(|record| {
+                        let encoded = record.to_canonical_cbor();
+                        assert!(encoded.len() <= record.staging_capacity());
+                        assert!(
+                            record.staging_capacity() <= MAX_COMMUNITY_PREPARED_INVOCATION_BYTES_V1
+                        );
+                        CommunityPreparedInvocationV1::from_canonical_cbor(&encoded)
+                            .map(|decoded| assert!(*decoded.as_input() == input))
+                    })
+                })
+        })
     }
 }
