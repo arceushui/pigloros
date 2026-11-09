@@ -7,7 +7,7 @@ mod directory;
 mod environment;
 mod events;
 #[cfg(test)]
-pub mod fixture_parent;
+mod fixture_parent;
 mod process;
 #[cfg(test)]
 mod process_fault;

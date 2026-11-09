@@ -837,60 +837,13 @@ mod tests {
 
     #[test]
     fn native_host_fixture_child() -> Result<(), Box<dyn std::error::Error>> {
-        if std::env::var_os("PIGLOR_HOST_LIFECYCLE_CHILD").is_some() {
-            let owner = crate::ffi::fixture_parent::child_owner()?;
-            crate::Native::native_host_lifecycle(owner)?;
-        }
-        Ok(())
+        crate::Native::native_host_fixture_child()
     }
 
     #[test]
     fn native_host_opens_fresh_environments_and_retires_before_reuse(
     ) -> Result<(), Box<dyn std::error::Error>> {
-        use std::io::Write as _;
-        let _port = crate::Native::fixed_port_fixture();
-        let parent = crate::ffi::fixture_parent::OwnedParent::new()?;
-        writeln!(
-            std::io::stderr(),
-            "NATIVE_PARENT stage=before-child foreground={}",
-            parent.foreground()?
-        )?;
-        let mut child = parent.spawn_child()?;
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-        let mut observation_failed = false;
-        loop {
-            let status = child.try_wait().unwrap_or_else(|_| {
-                observation_failed = true;
-                None
-            });
-            if let Some(status) = status {
-                // Retain the child through its ordinary native retirement.
-                // A late exit still fails this deadline; killing the host
-                // would destroy its STA owners while a browser may live.
-                let late = std::time::Instant::now() >= deadline;
-                writeln!(
-                    std::io::stderr(),
-                    "NATIVE_PARENT stage=after-child foreground={}",
-                    parent.foreground()?
-                )?;
-                parent.finish()?;
-                if observation_failed {
-                    return Err("native host fixture parent observation failed".into());
-                }
-                if late {
-                    return Err("native host fixture exceeded its independent wall deadline".into());
-                }
-                assert!(status.success());
-                return Ok(());
-            }
-            if !matches!(
-                parent.pump(),
-                Ok(crate::NativePulse::Timer | crate::NativePulse::Dispatched)
-            ) {
-                observation_failed = true;
-                std::thread::sleep(std::time::Duration::from_millis(5));
-            }
-        }
+        crate::Native::native_host_parent_fixture()
     }
 
     #[test]
