@@ -17,12 +17,18 @@
 //! a host rule that drops only traffic leaving by one particular uplink
 //! passes the probe; the installation requirement still forbids such rules.
 
+use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener};
 use std::os::fd::{AsFd, BorrowedFd};
+use std::time::Duration;
 
-use super::*;
-use crate::namespace_network::netlink::{NetlinkSession, NetlinkTransport, ROUTE};
-use crate::namespace_network::{route, IpPrefix};
+use pos_reference::sandbox_provider_protocol::NetworkEndpointConnector;
+
+use super::{AttemptNetworkError, EgressControl, NamespacedLocalNetwork, NetworkNamespaces};
+use crate::namespace_network::netlink::{
+    in_namespace, NetlinkError, NetlinkSession, NetlinkTransport, ROUTE,
+};
+use crate::namespace_network::{route, IpPrefix, LinkName, NamespaceControl, NamespaceName};
 
 /// The reserved attempt identity of the probe's attempt network.
 const PROBE_ATTEMPT: [u8; 16] = [0xff; 16];
