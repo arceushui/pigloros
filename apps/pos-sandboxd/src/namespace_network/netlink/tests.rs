@@ -576,11 +576,14 @@ mod privileged {
             .stdout(Stdio::piped())
             .spawn()?;
         let mut ready = String::new();
-        BufReader::new(holder.stdout.take().ok_or("no holder output")?).read_line(&mut ready)?;
+        let read = holder
+            .stdout
+            .take()
+            .map_or(Ok(0), |stdout| BufReader::new(stdout).read_line(&mut ready));
         let namespace = File::open(format!("/proc/{}/ns/net", holder.id()));
-        holder.kill()?;
-        holder.wait()?;
-        assert_eq!(ready, "ready\n");
+        let stopped = holder.kill().and_then(|()| holder.wait());
+        assert_eq!(ready, "ready\n", "{read:?}");
+        assert!(stopped.is_ok(), "{stopped:?}");
         Ok(namespace?)
     }
 
