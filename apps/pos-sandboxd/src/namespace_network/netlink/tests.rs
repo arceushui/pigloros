@@ -10,6 +10,9 @@ use super::*;
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
+/// Whether an error is the one a case expects.
+type Expected = fn(&NetlinkError) -> bool;
+
 /// A transport that records every datagram and replays scripted replies.
 #[derive(Default)]
 struct Scripted {
@@ -77,9 +80,11 @@ fn link_reply(sequence: u32, flags: u16, link: LinkMessage) -> Vec<u8> {
 }
 
 fn link(index: u32, flags: LinkFlags, attributes: Vec<LinkAttribute>) -> LinkMessage {
-    let mut header = LinkHeader::default();
-    header.index = index;
-    header.flags = flags;
+    let header = LinkHeader {
+        index,
+        flags,
+        ..LinkHeader::default()
+    };
     let mut message = LinkMessage::default();
     message.header = header;
     message.attributes = attributes;
@@ -155,7 +160,7 @@ fn a_batch_waits_only_for_its_acknowledged_requests() -> TestResult {
 
 #[test]
 fn refusals_and_unattributable_replies_fail() {
-    let cases: Vec<(Vec<Vec<u8>>, fn(&NetlinkError) -> bool)> = vec![
+    let cases: Vec<(Vec<Vec<u8>>, Expected)> = vec![
         (vec![ack(1, -17)], |error| {
             matches!(error, NetlinkError::Kernel(-17))
         }),
@@ -238,7 +243,7 @@ fn a_dump_collects_every_reply_until_done() -> TestResult {
 
 #[test]
 fn a_refused_interrupted_or_foreign_dump_fails() {
-    let cases: Vec<(Vec<u8>, fn(&NetlinkError) -> bool)> = vec![
+    let cases: Vec<(Vec<u8>, Expected)> = vec![
         (done(1, -4), |error| {
             matches!(error, NetlinkError::Kernel(-4))
         }),
@@ -322,7 +327,7 @@ fn a_request_returns_its_one_reply() -> TestResult {
 fn a_refused_foreign_or_ambiguous_request_fails() {
     let mut two = link_reply(1, 0, LinkMessage::default());
     two.extend(link_reply(1, 0, LinkMessage::default()));
-    let cases: Vec<(Vec<Vec<u8>>, fn(&NetlinkError) -> bool)> = vec![
+    let cases: Vec<(Vec<Vec<u8>>, Expected)> = vec![
         (vec![ack(1, -19)], |error| {
             matches!(error, NetlinkError::Kernel(-19))
         }),
