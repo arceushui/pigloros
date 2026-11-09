@@ -1,5 +1,11 @@
 //! A bound result exists only after every required artifact passes.
 
+mod checks;
+mod json;
+mod provenance;
+mod sbom;
+mod schema;
+
 use pos_crypto::plugin_execution::PluginExecutionProjectionV1;
 use pos_crypto::plugin_manifest::PluginManifestErrorV1;
 use pos_plugin_release::VerifiedReleaseBundleV1;
@@ -49,7 +55,7 @@ pub enum PluginBundleContentErrorV1 {
 }
 
 #[derive(Clone, Copy)]
-pub enum Refusal {
+enum Refusal {
     BoundsExceeded,
     UnsupportedFormat,
     Malformed,
@@ -57,10 +63,7 @@ pub enum Refusal {
 }
 
 impl Refusal {
-    pub(super) const fn at(
-        self,
-        artifact: PluginBundleContentArtifactV1,
-    ) -> PluginBundleContentErrorV1 {
+    const fn at(self, artifact: PluginBundleContentArtifactV1) -> PluginBundleContentErrorV1 {
         match self {
             Self::BoundsExceeded => PluginBundleContentErrorV1::BoundsExceeded { artifact },
             Self::UnsupportedFormat => PluginBundleContentErrorV1::UnsupportedFormat { artifact },
@@ -115,7 +118,7 @@ pub fn validate_plugin_bundle_content_v1(
 ) -> Result<ValidatedPluginBundleContentV1, PluginBundleContentErrorV1> {
     let projection = PluginExecutionProjectionV1::from_verified_bundle(bundle)
         .map_err(PluginBundleContentErrorV1::Manifest)?;
-    super::checks::validate(bundle)?;
+    checks::validate(bundle)?;
     Ok(ValidatedPluginBundleContentV1 {
         pmf1_digest: projection.pmf1_digest(),
         release_digest: projection.release_digest(),

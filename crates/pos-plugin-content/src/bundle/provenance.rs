@@ -4,7 +4,7 @@ use serde_json::Value;
 
 use crate::bundle::Refusal;
 
-pub fn validate(value: &Value, component: &str) -> Result<(), Refusal> {
+pub(super) fn validate(value: &Value, component: &str) -> Result<(), Refusal> {
     let object = value.as_object().ok_or(Refusal::Malformed)?;
     if nonempty(object.get("_type"))? != "https://in-toto.io/Statement/v1"
         || nonempty(object.get("predicateType"))? != "https://slsa.dev/provenance/v1"
@@ -71,7 +71,7 @@ pub fn validate(value: &Value, component: &str) -> Result<(), Refusal> {
     }
 }
 
-pub fn nonempty(value: Option<&Value>) -> Result<&str, Refusal> {
+pub(super) fn nonempty(value: Option<&Value>) -> Result<&str, Refusal> {
     value
         .and_then(Value::as_str)
         .filter(|text| !text.trim().is_empty())

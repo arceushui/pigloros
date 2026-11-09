@@ -21,7 +21,7 @@ struct Node<'a> {
     depth: usize,
 }
 
-pub fn read(bytes: &[u8]) -> Result<Value, Refusal> {
+pub(super) fn read(bytes: &[u8]) -> Result<Value, Refusal> {
     let mut budget = Budget::default();
     let mut decoder = serde_json::Deserializer::from_slice(bytes);
     let outcome = Node {

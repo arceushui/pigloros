@@ -5,8 +5,8 @@ use std::sync::OnceLock;
 
 use serde_json::Value;
 
+use super::provenance::nonempty;
 use crate::bundle::Refusal;
-use crate::provenance::nonempty;
 
 fn validator() -> Result<&'static jsonschema::Validator, Refusal> {
     static VALIDATOR: OnceLock<Option<jsonschema::Validator>> = OnceLock::new();
@@ -14,21 +14,23 @@ fn validator() -> Result<&'static jsonschema::Validator, Refusal> {
         .get_or_init(|| {
             // Immutable, attributed SPDX 2.3.1 source, independently digest-pinned
             // by the public fixtures. No Plugin-provided schema is compiled here.
-            serde_json::from_slice::<Value>(include_bytes!("../resources/spdx-schema-2.3.1.json"))
-                .ok()
-                .and_then(|schema| {
-                    jsonschema::draft201909::options()
-                        .with_retriever(super::schema::Offline)
-                        .should_validate_formats(true)
-                        .build(&schema)
-                        .ok()
-                })
+            serde_json::from_slice::<Value>(include_bytes!(
+                "../../resources/spdx-schema-2.3.1.json"
+            ))
+            .ok()
+            .and_then(|schema| {
+                jsonschema::draft201909::options()
+                    .with_retriever(super::schema::Offline)
+                    .should_validate_formats(true)
+                    .build(&schema)
+                    .ok()
+            })
         })
         .as_ref()
         .ok_or(Refusal::Malformed)
 }
 
-pub fn validate(value: &Value, component: &str) -> Result<(), Refusal> {
+pub(super) fn validate(value: &Value, component: &str) -> Result<(), Refusal> {
     if nonempty(value.get("spdxVersion"))? != "SPDX-2.3" {
         return Err(Refusal::UnsupportedFormat);
     }

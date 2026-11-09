@@ -18,7 +18,7 @@ impl From<PluginWitContentErrorV1> for Refusal {
     }
 }
 
-pub fn validate(bundle: &VerifiedReleaseBundleV1) -> Result<(), Error> {
+pub(super) fn validate(bundle: &VerifiedReleaseBundleV1) -> Result<(), Error> {
     // Complete PMF1 validation has established the exact semantic member order,
     // required member presence, list bounds, dual digests and content sizes.
     let component = &bundle.members()[1].digest()[7..];

@@ -9,11 +9,6 @@
 //! admission/launch authority or certifies Plugin safety or licensing.
 
 mod bundle;
-mod checks;
-mod json;
-mod provenance;
-mod sbom;
-mod schema;
 mod wit;
 
 pub use bundle::{
