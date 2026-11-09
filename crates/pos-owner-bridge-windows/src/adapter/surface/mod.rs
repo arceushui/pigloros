@@ -130,6 +130,25 @@ impl Surface {
     }
 
     #[cfg(test)]
+    pub(in crate::adapter) fn pre_environment_completion(
+        &mut self,
+    ) -> std::result::Result<Option<bool>, ()> {
+        if self.ownership != Ownership::CreatingEnvironment
+            || self.failed_open
+            || self.identity.is_some()
+            || self.buffers
+            || !self.native.pending()
+            || self.folder.is_none()
+            || !self.store.records().map_err(|_| ())?.is_empty()
+            || self.events.invalid()
+            || self.events.exited().is_some()
+        {
+            return Err(());
+        }
+        Ok(self.native.environment_creation_completion())
+    }
+
+    #[cfg(test)]
     pub(in crate::adapter) fn recordless_opening_ready(&self) -> bool {
         self.ownership == Ownership::CreatingController
             && !self.failed_open
@@ -319,6 +338,35 @@ impl Surface {
     }
 
     #[cfg(test)]
+    pub(in crate::adapter) fn early_renderer_presence(
+        &self,
+    ) -> std::result::Result<crate::RendererPresence, ()> {
+        if self.ownership != Ownership::Controller
+            || self.close != CloseState::Idle
+            || self.failed_open
+            || self.events.invalid()
+            || self.events.exited().is_some()
+            || self.buffers
+            || !self.native.preload_fault_owners_retained()
+            || !crate::Native::process_failure_observations().is_empty()
+        {
+            return Err(());
+        }
+        let browser = self.identity.ok_or(())?;
+        if self.runtime.identity(browser.browser_pid).map_err(|_| ())? != browser {
+            return Err(());
+        }
+        let presence = self.native.early_renderer_presence()?;
+        if self.runtime.identity(browser.browser_pid).map_err(|_| ())? != browser
+            || self.events.invalid()
+            || self.events.exited().is_some()
+        {
+            return Err(());
+        }
+        Ok(presence)
+    }
+
+    #[cfg(test)]
     pub(in crate::adapter) fn awaiting_load_fault_ready(&self) -> bool {
         self.ownership == Ownership::Controller
             && self.close == CloseState::Idle
@@ -374,6 +422,7 @@ impl Surface {
     #[cfg(test)]
     pub(in crate::adapter) fn inject_awaiting_load_fault(
         &mut self,
+        target: crate::ProcessFaultTarget,
         seal: crate::FaultSeal,
     ) -> std::result::Result<Box<dyn crate::ProcessFaultHandle>, ()> {
         self.awaiting_load_fault_state(1, 0)?;
@@ -382,7 +431,7 @@ impl Surface {
         let (trace, deadline) = seal.into_parts();
         let authority = crate::FaultAuthority {
             browser,
-            target: crate::ProcessFaultTarget::Browser,
+            target,
             lifecycle: crate::ProcessFaultLifecycle::AwaitingLoad,
             valid: Rc::new(move || {
                 std::time::Instant::now() < deadline
@@ -452,6 +501,7 @@ impl Surface {
     #[cfg(test)]
     pub(in crate::adapter) fn inject_navigating_fault(
         &mut self,
+        target: crate::ProcessFaultTarget,
         seal: crate::FaultSeal,
     ) -> std::result::Result<Box<dyn crate::ProcessFaultHandle>, ()> {
         self.navigating_fault_state(1, 0)?;
@@ -460,7 +510,7 @@ impl Surface {
         let (trace, deadline) = seal.into_parts();
         let authority = crate::FaultAuthority {
             browser,
-            target: crate::ProcessFaultTarget::Browser,
+            target,
             lifecycle: crate::ProcessFaultLifecycle::Navigating,
             valid: Rc::new(move || {
                 std::time::Instant::now() < deadline
@@ -516,6 +566,7 @@ impl Surface {
     #[cfg(test)]
     pub(in crate::adapter) fn inject_before_record_fault(
         &mut self,
+        target: crate::ProcessFaultTarget,
         seal: crate::FaultSeal,
     ) -> std::result::Result<Box<dyn crate::ProcessFaultHandle>, ()> {
         let browser = self.before_record_fault_state()?;
@@ -523,7 +574,7 @@ impl Surface {
         let (trace, deadline) = seal.into_parts();
         let authority = crate::FaultAuthority {
             browser,
-            target: crate::ProcessFaultTarget::Browser,
+            target,
             lifecycle: crate::ProcessFaultLifecycle::BeforeRecord,
             valid: Rc::new(move || {
                 std::time::Instant::now() < deadline

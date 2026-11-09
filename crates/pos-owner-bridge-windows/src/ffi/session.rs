@@ -136,8 +136,7 @@ impl NativeOperations for Session {
             crate::ProcessFaultLifecycle::AwaitingLoad
             | crate::ProcessFaultLifecycle::Navigating
             | crate::ProcessFaultLifecycle::BeforeRecord => {
-                if authority.target() != crate::ProcessFaultTarget::Browser
-                    || !self.preload_fault_owners_retained()
+                if !self.preload_fault_owners_retained()
                     || self.browser_pid().map_err(|_| ())? != authority.browser().browser_pid
                 {
                     return Err(());
@@ -181,6 +180,25 @@ impl NativeOperations for Session {
             authority,
             self.buffers.as_ref(),
             self.controller_creation.as_ref(),
+        )
+    }
+
+    #[cfg(test)]
+    fn environment_creation_completion(&self) -> Option<bool> {
+        self.check().ok()?;
+        self.environment_creation.as_ref()?.environment_succeeded()
+    }
+
+    #[cfg(test)]
+    fn early_renderer_presence(&self) -> Result<crate::RendererPresence, ()> {
+        if !self.preload_fault_owners_retained() {
+            return Err(());
+        }
+        let pid = self.browser_pid().map_err(|_| ())?;
+        let browser = super::process::inspect(pid)?.ok_or(())?.0;
+        super::process_fault::renderer_presence(
+            &self.environment_ref().map_err(|_| ())?.raw,
+            browser,
         )
     }
 

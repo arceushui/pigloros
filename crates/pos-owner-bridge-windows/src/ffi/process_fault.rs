@@ -76,16 +76,65 @@ fn candidates(
     Ok(entries)
 }
 
+fn select_optional(
+    entries: &[(u32, COREWEBVIEW2_PROCESS_KIND)],
+    kind: COREWEBVIEW2_PROCESS_KIND,
+) -> Result<Option<u32>, ()> {
+    let mut matches = entries.iter().filter(|(_, entry_kind)| *entry_kind == kind);
+    let Some((pid, _)) = matches.next() else {
+        return Ok(None);
+    };
+    if matches.next().is_some() {
+        return Err(());
+    }
+    Ok(Some(*pid))
+}
+
 fn select(
     entries: &[(u32, COREWEBVIEW2_PROCESS_KIND)],
     kind: COREWEBVIEW2_PROCESS_KIND,
 ) -> Result<u32, ()> {
-    let mut matches = entries.iter().filter(|(_, entry_kind)| *entry_kind == kind);
-    let pid = matches.next().ok_or(())?.0;
-    if matches.next().is_some() {
+    select_optional(entries, kind)?.ok_or(())
+}
+
+/// A successful, stable complete snapshot; no target or termination capability escapes.
+pub(super) fn renderer_presence(
+    environment: &ICoreWebView2Environment,
+    expected: ProcessIdentity,
+) -> Result<crate::RendererPresence, ()> {
+    let first = candidates(environment)?;
+    if select(&first, COREWEBVIEW2_PROCESS_KIND_BROWSER)? != expected.browser_pid {
         return Err(());
     }
-    Ok(pid)
+    let (browser, browser_path) = super::process::inspect(expected.browser_pid)?.ok_or(())?;
+    if browser != expected {
+        return Err(());
+    }
+    let renderer = select_optional(&first, COREWEBVIEW2_PROCESS_KIND_RENDERER)?;
+    let observed = match renderer {
+        Some(pid) => {
+            let (identity, path) = super::process::inspect(pid)?.ok_or(())?;
+            if path != browser_path {
+                return Err(());
+            }
+            Some((identity, path))
+        }
+        None => None,
+    };
+    let second = candidates(environment)?;
+    if select(&second, COREWEBVIEW2_PROCESS_KIND_BROWSER)? != expected.browser_pid
+        || super::process::inspect(expected.browser_pid)?.ok_or(())? != (browser, browser_path)
+        || select_optional(&second, COREWEBVIEW2_PROCESS_KIND_RENDERER)? != renderer
+    {
+        return Err(());
+    }
+    match (renderer, observed) {
+        (None, None) => Ok(crate::RendererPresence::Absent),
+        (Some(pid), Some(observed)) if super::process::inspect(pid)?.ok_or(())? == observed => {
+            Ok(crate::RendererPresence::Unique)
+        }
+        _ => Err(()),
+    }
 }
 
 /// Discovery has no caller-provided PID and confers no termination authority.
@@ -192,11 +241,18 @@ pub(super) fn inject(
 
 #[cfg(test)]
 mod tests {
-    use super::{select, COREWEBVIEW2_PROCESS_KIND_BROWSER, COREWEBVIEW2_PROCESS_KIND_RENDERER};
+    use super::{
+        select, select_optional, COREWEBVIEW2_PROCESS_KIND_BROWSER,
+        COREWEBVIEW2_PROCESS_KIND_RENDERER,
+    };
 
     #[test]
     fn selection_refuses_absent_and_ambiguous_process_classes() {
         assert!(select(&[], COREWEBVIEW2_PROCESS_KIND_BROWSER).is_err());
+        assert_eq!(
+            select_optional(&[], COREWEBVIEW2_PROCESS_KIND_RENDERER),
+            Ok(None)
+        );
         let one_browser = [(11, COREWEBVIEW2_PROCESS_KIND_BROWSER)];
         assert_eq!(
             select(&one_browser, COREWEBVIEW2_PROCESS_KIND_BROWSER),
@@ -208,5 +264,6 @@ mod tests {
             (12, COREWEBVIEW2_PROCESS_KIND_BROWSER),
         ];
         assert!(select(&ambiguous, COREWEBVIEW2_PROCESS_KIND_BROWSER).is_err());
+        assert!(select_optional(&ambiguous, COREWEBVIEW2_PROCESS_KIND_BROWSER).is_err());
     }
 }
