@@ -14,6 +14,18 @@
 //! 5. no loop device is backed by a provider image. An activation that
 //!    reached mountfsd but crashed before its PAI3 record left no recorded
 //!    generations, so this sweep is what proves its devices absent.
+//! 6. no `MountImage` request of the previous runtime can still attach a
+//!    loop device (owner decision D2). The registry's activation marker
+//!    records the boot and `CLOCK_MONOTONIC` time of the last request, written
+//!    durably before it was sent. When that request was sent on this boot
+//!    less than the activator deadline (60 s) ago, admission stays closed
+//!    until the deadline has passed, and the provider loops are swept again.
+//!    Only in that recent-activation case does reconciliation outlast
+//!    ADR-069's 10 s restart bound, by at most that remaining wait; the second
+//!    sweep has the time the first one had left. A request of another boot,
+//!    or one at least the deadline old, needs no wait. A missing marker while
+//!    a directory stage is recorded, a malformed marker, or an unreadable boot
+//!    ID or clock fails closed.
 //!
 //! Only then are the unmounted directories removed and each intent deleted
 //! last. That removal is local, bounded filesystem work under the held
@@ -29,8 +41,10 @@
 
 use std::error::Error;
 use std::future::Future;
+use std::io;
+use std::time::Duration;
 
-use tokio::time::{timeout_at, Instant};
+use tokio::time::{sleep, timeout_at, Instant};
 
 use crate::{
     ImageActivationError, PlannedAttemptIntent, SystemdAttemptRecovery,
@@ -74,7 +88,8 @@ impl ReconciledRestart {
 
 /// The attempts whose recorded roots' loop/dm generations were observed
 /// absent by a fresh probe, after which no loop device was found backed by a
-/// provider image.
+/// provider image, also once no previous-runtime `MountImage` request could
+/// still attach one.
 ///
 /// Only restart reconciliation's device proof creates it, so registry removal
 /// cannot be handed released-root evidence that no probe produced. It has no
@@ -150,6 +165,7 @@ pub async fn reconcile_restart<N: OrphanNetworkCleanup + Sync>(
         (
             crate::RootResourceIdentity::recorded_generations_absent,
             crate::RootResourceIdentity::provider_loops_absent,
+            SystemdAttemptRecovery::boot_instant,
         ),
     )
     .await
@@ -158,20 +174,25 @@ pub async fn reconcile_restart<N: OrphanNetworkCleanup + Sync>(
 /// The recorded loop/dm generations of one root, mapper first.
 type Generations = [((u32, u32), u64); 2];
 
-/// `probes` are the recorded-generation probe and the provider loop sweep.
-async fn reconcile_with<N, P, F, L, G>(
+/// A boot ID and a `CLOCK_MONOTONIC` time on that boot.
+type BootInstant = ([u8; 16], Duration);
+
+/// `probes` are the recorded-generation probe, the provider loop sweep and
+/// the boot clock.
+async fn reconcile_with<N, P, F, L, G, C>(
     transport: &SystemdTransientUnitTransport,
     recovery: SystemdAttemptRecovery,
     network: &N,
     deadline: Instant,
-    probes: (P, L),
+    probes: (P, L, C),
 ) -> Reconciled<ReconciledRestart>
 where
     N: OrphanNetworkCleanup + Sync,
     P: Fn(Generations) -> F,
     F: Future<Output = Result<bool, ImageActivationError>>,
-    L: FnOnce() -> G,
+    L: Fn() -> G,
     G: Future<Output = Result<bool, ImageActivationError>>,
+    C: FnOnce() -> io::Result<BootInstant>,
 {
     let units = observe_units(transport, deadline).await;
     let absent = match units {
@@ -238,38 +259,54 @@ async fn remove_network<N: OrphanNetworkCleanup + Sync>(
     }
 }
 
-async fn roots_released<P, F, L, G>(
+/// Mint the released-root evidence only once no loop device is backed by a
+/// provider image, and none can still be attached by a previous-runtime
+/// `MountImage` request.
+async fn roots_released<P, F, L, G, C>(
     recovery: &SystemdAttemptRecovery,
-    (probe, sweep): (P, L),
+    (probe, sweep, now): (P, L, C),
     deadline: Instant,
 ) -> Reconciled<RootsReleased>
 where
     P: Fn(Generations) -> F,
     F: Future<Output = Result<bool, ImageActivationError>>,
-    L: FnOnce() -> G,
+    L: Fn() -> G,
     G: Future<Output = Result<bool, ImageActivationError>>,
+    C: FnOnce() -> io::Result<BootInstant>,
 {
     let probed = timeout_at(deadline, async {
         let released = probe_roots(recovery, probe).await;
         match released {
-            Ok(released) => sweep_loops(released, sweep).await,
+            Ok(released) => sweep_loops(&sweep).await.map(|()| released),
             Err(error) => Err(error),
         }
     })
     .await;
-    probed.unwrap_or(Err(RestartReconciliationError::DeadlineElapsed))
+    let released = probed.unwrap_or(Err(RestartReconciliationError::DeadlineElapsed))?;
+    let wait = now()
+        .map_err(SystemdAttemptRegistryError::from)
+        .and_then(|now| recovery.activation_wait(now))?;
+    match wait {
+        None => Ok(RootsReleased(released)),
+        Some(wait) => {
+            sleep(wait).await;
+            timeout_at(deadline + wait, sweep_loops(&sweep))
+                .await
+                .unwrap_or(Err(RestartReconciliationError::DeadlineElapsed))
+                .map(|()| RootsReleased(released))
+        }
+    }
 }
 
-/// Mint the released-root evidence only once no loop device is backed by a
-/// provider image.
-async fn sweep_loops<L, G>(released: Vec<[u8; 16]>, sweep: L) -> Reconciled<RootsReleased>
+/// Prove that no loop device is backed by a provider image.
+async fn sweep_loops<L, G>(sweep: &L) -> Reconciled<()>
 where
-    L: FnOnce() -> G,
+    L: Fn() -> G,
     G: Future<Output = Result<bool, ImageActivationError>>,
 {
     let swept = sweep().await;
     match swept {
-        Ok(true) => Ok(RootsReleased(released)),
+        Ok(true) => Ok(()),
         Ok(false) => Err(RestartReconciliationError::ProviderLoops(None)),
         Err(error) => Err(RestartReconciliationError::ProviderLoops(Some(error))),
     }

@@ -165,6 +165,30 @@ impl PreparedAttemptDirectory {
         self.activations.fetch_add(1, Ordering::AcqRel);
     }
 
+    /// Durably record the boot and time of a `MountImage` request that is
+    /// about to be sent, before it is sent (owner decision D2). Restart
+    /// reconciliation uses it to wait out a request that may still be served.
+    ///
+    /// # Errors
+    /// Refuses a closed or poisoned registry owner, and any boot ID, write,
+    /// rename, fsync or readback failure. A failure closes further commits,
+    /// and the request must not be sent.
+    pub(crate) fn record_activation_request(&self) -> Result<(), SystemdAttemptRegistryError> {
+        let mut state = self
+            .planned
+            .state
+            .lock()
+            .map_err(|_| SystemdAttemptRegistryError::ReconciliationRequired)?;
+        if state.failed {
+            return Err(SystemdAttemptRegistryError::ReconciliationRequired);
+        }
+        let result = state
+            .reserve_sequence()
+            .and_then(|sequence| super::activation::publish(&self.planned.directory, sequence));
+        state.failed = result.is_err();
+        result
+    }
+
     /// The exact original planned ownership, preserved by the extension.
     #[must_use]
     pub const fn intent(&self) -> &PlannedAttemptIntent {

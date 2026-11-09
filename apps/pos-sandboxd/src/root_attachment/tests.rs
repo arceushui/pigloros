@@ -1548,6 +1548,37 @@ fn corrupt_held_image(snapshot: &ProviderImageSnapshot) -> TestResult {
     Ok(())
 }
 
+/// An activator that rejects every request it is sent.
+struct RejectingActivator;
+
+impl ImageActivator for RejectingActivator {
+    async fn mount_image(
+        self,
+        _: ActivationImage,
+    ) -> Result<QuarantinedRootMount, ImageActivationError> {
+        Err(ImageActivationError::MethodRejected)
+    }
+}
+
+/// The registry's activation marker records a request sent on this boot.
+fn assert_request_recorded() -> TestResult {
+    let marker = fs::read("/run/pigloros/sandbox/registry/activation")?;
+    let boot = fs::read_to_string("/proc/sys/kernel/random/boot_id")?
+        .trim_end()
+        .replace('-', "");
+    let recorded = marker
+        .get(4..20)
+        .unwrap_or_default()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    assert_eq!(
+        (marker.get(..4), marker.len(), recorded),
+        (Some(b"PAA1".as_slice()), 36, boot)
+    );
+    Ok(())
+}
+
 /// Activate `prepared` once more, release its root and finish its cleanup.
 async fn retry_and_clean(
     kernel: &FakeKernel,
@@ -1609,6 +1640,8 @@ async fn the_admitted_chain_reaches_attachment_only_through_every_gate() -> Test
         .err(),
         Some(ImageActivationError::HostFeatureUnavailable)
     );
+    // No request was sent, so none was recorded.
+    assert!(!Path::new("/run/pigloros/sandbox/registry/activation").exists());
 
     fs::create_dir("/run/systemd")?;
     let listener = UnixListener::bind("/run/systemd/io.systemd.MountFileSystem")?;
@@ -1618,6 +1651,7 @@ async fn the_admitted_chain_reaches_attachment_only_through_every_gate() -> Test
     // Neither early failure reached mountfsd, so after one successful retry
     // the released root alone lets terminal cleanup delete intent last.
     retry_and_clean(&kernel, &admission, prepared).await?;
+    assert_request_recorded()?;
     let prepared = registry.commit_planned(&planned)?.prepare_directory()?;
 
     // Every gate passes: the verified root names the attempt path.
@@ -1653,6 +1687,18 @@ async fn the_admitted_chain_reaches_attachment_only_through_every_gate() -> Test
     );
     assert_eq!(kernel.detached(), 2);
     peer.join().map_err(|_| "the fake mountfsd panicked")??;
+
+    // A closed registry owner cannot record the request, so it is refused
+    // before it is sent.
+    prepared.quarantine();
+    assert_eq!(
+        activate(&kernel, &admission, &prepared, || std::future::ready(Ok(
+            RejectingActivator
+        )))
+        .await
+        .err(),
+        Some(ImageActivationError::AttachFailure)
+    );
 
     // A replaced attempt root rejects before mountfsd is called.
     let attempt = Path::new("/run/pigloros/sandbox/attempts").join(component(&prepared));

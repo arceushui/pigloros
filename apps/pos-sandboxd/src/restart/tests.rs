@@ -4,6 +4,7 @@
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod cases {
     use std::fs::{self, File};
+    use std::io;
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     use std::path::Path;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -248,6 +249,8 @@ mod cases {
         // An interrupted PAI1 write: its tag and the first attempt-ID bytes.
         fs::write(&temporary, [b"PAI1".as_slice(), &[5; 26]].concat())?;
         fs::set_permissions(temporary, fs::Permissions::from_mode(0o600))?;
+        // The last request was sent on another boot: no wait.
+        mark(runtime.path(), OTHER_BOOT, 5)?;
         Ok(runtime)
     }
 
@@ -264,17 +267,44 @@ mod cases {
     }
 
     /// A provider loop sweep that finds no loop over a provider image.
-    fn swept() -> impl FnOnce() -> std::future::Ready<Result<bool, ImageActivationError>> {
+    fn swept() -> impl Fn() -> std::future::Ready<Result<bool, ImageActivationError>> {
         || std::future::ready(Ok(true))
+    }
+
+    /// The boot the seeded activation marker was not written on.
+    const THIS_BOOT: [u8; 16] = [0x11; 16];
+    /// The boot of the seeded activation marker.
+    const OTHER_BOOT: [u8; 16] = [0xee; 16];
+
+    /// This boot's clock, 100 s after it started.
+    fn this_boot() -> impl FnOnce() -> io::Result<BootInstant> {
+        || Ok((THIS_BOOT, Duration::from_secs(100)))
+    }
+
+    /// Replace the registry's activation marker: a request sent on `boot`,
+    /// `seconds` after it started. An independent PAA1 byte oracle.
+    fn mark(runtime: &Path, boot: [u8; 16], seconds: u64) -> TestResult {
+        let path = runtime.join("registry").join("activation");
+        let bytes = [
+            b"PAA1".as_slice(),
+            &boot,
+            &seconds.to_le_bytes(),
+            &0_u64.to_le_bytes(),
+        ]
+        .concat();
+        fs::write(&path, bytes)?;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+        Ok(())
     }
 
     fn deadline() -> Instant {
         Instant::now() + Duration::from_millis(500)
     }
 
-    /// After a refused reconciliation nothing was removed.
+    /// After a refused reconciliation nothing was removed; the activation
+    /// marker is always kept.
     fn assert_untouched(runtime: &Path, records: usize) -> TestResult {
-        assert_eq!(count(&runtime.join("registry"))?, records);
+        assert_eq!(count(&runtime.join("registry"))?, records + 1);
         assert_eq!(count(&runtime.join("attempts"))?, records - 2);
         Ok(())
     }
@@ -309,12 +339,15 @@ mod cases {
                     sweeps.fetch_add(1, Ordering::SeqCst);
                     std::future::ready(Ok(true))
                 },
+                this_boot(),
             ),
         )
         .await?;
         let expected = (1..=4).map(intent).collect::<Result<Vec<_>, _>>()?;
         assert_eq!(reconciled.attempts(), expected.as_slice());
-        assert_eq!(count(&runtime.path().join("registry"))?, 0);
+        // Only the activation marker remains in the registry.
+        assert_eq!(count(&runtime.path().join("registry"))?, 1);
+        assert!(runtime.path().join("registry/activation").is_file());
         assert_eq!(count(&runtime.path().join("attempts"))?, 0);
         assert_eq!(network.calls.load(Ordering::SeqCst), 1);
         assert_eq!(sweeps.load(Ordering::SeqCst), 1);
@@ -326,7 +359,7 @@ mod cases {
         let mut names = (1..=5).map(unit).collect::<Result<Vec<_>, _>>()?;
         names.rotate_right(1);
         assert_eq!(*host.lookups.lock().map_err(|_| "lookups")?, names);
-        // Admission can reopen: a new owner commits over the empty registry.
+        // Admission can reopen: a new owner commits beside the marker.
         let parent = File::open(runtime.path())?;
         SystemdAttemptRegistry::from_runtime_directory(&parent, parent.metadata()?.uid())?
             .commit_planned(&intent(9)?)?;
@@ -353,7 +386,7 @@ mod cases {
         let reconciled = result
             .as_ref()
             .is_ok_and(|reconciled| reconciled.attempts().len() == 3);
-        let removed = count(&runtime.path().join("registry"))? == 0;
+        let removed = count(&runtime.path().join("registry"))? == 1;
         assert_eq!(removed, reconciled, "{result:?}");
         Ok(())
     }
@@ -431,6 +464,7 @@ mod cases {
                         )
                     },
                     swept(),
+                    this_boot(),
                 ),
             )
             .await;
@@ -464,6 +498,7 @@ mod cases {
             (
                 |_| std::future::pending::<Result<bool, ImageActivationError>>(),
                 swept(),
+                this_boot(),
             ),
         )
         .await;
@@ -491,7 +526,7 @@ mod cases {
             recovery(runtime.path())?,
             &Network::new(Cleanup::Removes),
             deadline(),
-            (|_| std::future::ready(Ok(true)), swept()),
+            (|_| std::future::ready(Ok(true)), swept(), this_boot()),
         )
         .await;
         assert!(
@@ -507,11 +542,11 @@ mod cases {
             recovery(runtime.path())?,
             &Network::new(Cleanup::Removes),
             deadline(),
-            (|_| std::future::ready(Ok(true)), swept()),
+            (|_| std::future::ready(Ok(true)), swept(), this_boot()),
         )
         .await?;
         assert_eq!(reconciled.attempts().len(), 4);
-        assert_eq!(count(&runtime.path().join("registry"))?, 0);
+        assert_eq!(count(&runtime.path().join("registry"))?, 1);
         assert_eq!(count(&runtime.path().join("attempts"))?, 0);
         Ok(())
     }
@@ -543,6 +578,7 @@ mod cases {
                             ][usize::from(unverified)],
                         )
                     },
+                    this_boot(),
                 ),
             )
             .await;
@@ -577,6 +613,7 @@ mod cases {
             (
                 |_| std::future::ready(Ok(true)),
                 std::future::pending::<Result<bool, ImageActivationError>>,
+                this_boot(),
             ),
         )
         .await;
@@ -609,14 +646,179 @@ mod cases {
             recovery(runtime.path())?,
             &Network::new(Cleanup::Removes),
             deadline(),
-            (|_| std::future::ready(Ok(true)), swept()),
+            (|_| std::future::ready(Ok(true)), swept(), this_boot()),
         )
         .await;
         assert!(
             matches!(result, Err(RestartReconciliationError::Registry(_))),
             "{result:?}"
         );
-        assert_eq!(count(&runtime.path().join("registry"))?, 5);
+        assert_eq!(count(&runtime.path().join("registry"))?, 6);
+        Ok(())
+    }
+
+    /// The second sweep after the wait: passes, passes within the time the
+    /// first sweep left, finds a provider loop, or hangs.
+    #[derive(Clone, Copy, Debug)]
+    enum Resweep {
+        Passes,
+        Slow,
+        Finds,
+        Hangs,
+    }
+
+    /// Sweep times, the second sweep behaving as `resweep`.
+    async fn timed_sweep(
+        sweeps: &Mutex<Vec<Instant>>,
+        resweep: Resweep,
+    ) -> Result<bool, ImageActivationError> {
+        let swept = sweeps.lock().map(|mut sweeps| {
+            sweeps.push(Instant::now());
+            sweeps.len()
+        });
+        match (swept, resweep) {
+            (Ok(2), Resweep::Hangs) => std::future::pending().await,
+            (Ok(2), Resweep::Slow) => {
+                tokio::time::sleep(Duration::from_millis(400)).await;
+                Ok(true)
+            }
+            (Ok(2), Resweep::Finds) => Ok(false),
+            (Ok(_), _) => Ok(true),
+            (Err(_), _) => Err(ImageActivationError::Transport),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_recent_request_of_this_boot_is_waited_out_before_a_second_sweep() -> TestResult {
+        if !in_lock_test_process(
+            "restart::tests::cases::a_recent_request_of_this_boot_is_waited_out_before_a_second_sweep",
+        )? {
+            return Ok(());
+        }
+        for resweep in [
+            Resweep::Passes,
+            Resweep::Slow,
+            Resweep::Finds,
+            Resweep::Hangs,
+        ] {
+            // PAI2 intents, and a request sent on this boot 10 s ago.
+            let runtime = seed(false)?;
+            mark(runtime.path(), THIS_BOOT, 90)?;
+            let recovery = recovery(runtime.path())?;
+            let sweeps = Mutex::new(Vec::new());
+            let start = Instant::now();
+            let released = roots_released(
+                &recovery,
+                (
+                    |_| std::future::ready(Ok(true)),
+                    || timed_sweep(&sweeps, resweep),
+                    this_boot(),
+                ),
+                start + Duration::from_millis(500),
+            )
+            .await;
+            let outcome = matches!(
+                (resweep, &released),
+                (Resweep::Passes | Resweep::Slow, Ok(_))
+                    | (
+                        Resweep::Finds,
+                        Err(RestartReconciliationError::ProviderLoops(None))
+                    )
+                    | (
+                        Resweep::Hangs,
+                        Err(RestartReconciliationError::DeadlineElapsed)
+                    )
+            );
+            assert!(outcome, "{resweep:?}: {released:?}");
+            // The second sweep runs exactly when the 60 s deadline has passed.
+            let times = sweeps.lock().map_err(|_| "sweeps")?.clone();
+            assert_eq!(times, vec![start, start + Duration::from_secs(50)]);
+        }
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_request_of_another_boot_or_past_its_deadline_needs_no_wait() -> TestResult {
+        if !in_lock_test_process(
+            "restart::tests::cases::a_request_of_another_boot_or_past_its_deadline_needs_no_wait",
+        )? {
+            return Ok(());
+        }
+        // Another boot 1 s ago, this boot exactly 60 s ago and 90 s ago.
+        for (boot, seconds) in [(OTHER_BOOT, 99), (THIS_BOOT, 40), (THIS_BOOT, 10)] {
+            let runtime = seed(false)?;
+            mark(runtime.path(), boot, seconds)?;
+            let recovery = recovery(runtime.path())?;
+            let sweeps = Mutex::new(Vec::new());
+            let start = Instant::now();
+            roots_released(
+                &recovery,
+                (
+                    |_| std::future::ready(Ok(true)),
+                    || timed_sweep(&sweeps, Resweep::Finds),
+                    this_boot(),
+                ),
+                start + Duration::from_millis(500),
+            )
+            .await?;
+            assert_eq!(*sweeps.lock().map_err(|_| "sweeps")?, vec![start]);
+            assert_eq!(Instant::now(), start);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_missing_future_or_malformed_marker_or_an_unread_clock_fails_closed() -> TestResult {
+        if !in_lock_test_process(
+            "restart::tests::cases::a_missing_future_or_malformed_marker_or_an_unread_clock_fails_closed",
+        )? {
+            return Ok(());
+        }
+        let registry = |result: &Reconciled<RootsReleased>| match result {
+            Err(RestartReconciliationError::Registry(error)) => Some(error.to_string()),
+            _ => None,
+        };
+        // PAI2 intents without any marker.
+        let runtime = seed(false)?;
+        fs::remove_file(runtime.path().join("registry/activation"))?;
+        let missing = roots_released(
+            &recovery(runtime.path())?,
+            (|_| std::future::ready(Ok(true)), swept(), this_boot()),
+            deadline(),
+        )
+        .await;
+        assert_eq!(
+            registry(&missing),
+            Some(SystemdAttemptRegistryError::ActivationMarker.to_string())
+        );
+        // A request in this boot's future.
+        mark(runtime.path(), THIS_BOOT, 101)?;
+        let future = roots_released(
+            &recovery(runtime.path())?,
+            (|_| std::future::ready(Ok(true)), swept(), this_boot()),
+            deadline(),
+        )
+        .await;
+        assert_eq!(registry(&future), registry(&missing));
+        // An unreadable boot ID or clock.
+        let unread = roots_released(
+            &recovery(runtime.path())?,
+            (
+                |_| std::future::ready(Ok(true)),
+                swept(),
+                || Err(io::Error::other("no boot ID")),
+            ),
+            deadline(),
+        )
+        .await;
+        assert_eq!(registry(&unread), Some("no boot ID".to_owned()));
+        // A malformed marker never enters the recovery inventory.
+        fs::write(runtime.path().join("registry/activation"), b"PAA1")?;
+        assert!(matches!(
+            recovery(runtime.path()).map_err(|error| error.to_string()),
+            Err(message) if message == SystemdAttemptRegistryError::InvalidIntent.to_string()
+        ));
+        assert_untouched(runtime.path(), 4)?;
         Ok(())
     }
 }
