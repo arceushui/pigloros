@@ -1524,6 +1524,22 @@ def test_private_fault_capability_construction() -> None:
         if f"{SHIM}/src/adapter/other.rs: {expected}" not in errors(changed):
             raise SystemExit(f"capability construction bypass was accepted: {statement}")
 
+    for statement in (
+        "type Alias = crate::FaultAuthority; fn forge() -> Alias { Alias { browser, target, valid, trace } }",
+        "type Alias<T> = T; fn forge() { let _ = Alias::<crate::FaultAuthority> { browser, target, valid, trace }; }",
+        "use crate::{FaultAuthority as Other};",
+        "use crate::FaultAuthority::{self as Other};",
+        "use crate::{self as Root}; type Alias = Root::FaultAuthority;",
+        "type Alias = crate::FaultSeal;",
+        "type Alias<T = crate::FaultAuthority> = T;",
+    ):
+        for relative in ("src/lib.rs", surface, "src/adapter/other.rs"):
+            changed = dict(sources)
+            changed[relative] = changed.get(relative, CFG) + "\n" + statement
+            expected = f"{SHIM}/{relative}: fault capability references belong only in reviewed authority paths"
+            if expected not in errors(changed):
+                raise SystemExit(f"capability alias bypass was accepted in {relative}: {statement}")
+
 
 def test_live_mapping_witness_boundary() -> None:
     path = "src/ffi/buffers.rs"

@@ -1104,6 +1104,7 @@ def _check_fault_authority(root: Path, scans: dict[str, tuple[Scan, tuple[Attrib
     # The seal is created only by the declared sealed-asset native fixture;
     # these fixed boundaries prevent bypassing lifecycle/identity checks.
     specifications = (
+        ("src/lib.rs", "inject_process_fault", "294b987cde982e756d951216a786fbf47cddcb352b67d16b5fb3e343644662ed"),
         ("src/ffi/session.rs", "fault_owners_retained", "eccda5bd1bc5847953133394e934a30276c539d09fa2842f0e3ad42722556f69"),
         ("src/adapter/surface/mod.rs", "fault_owners_retained", "f5b290213a5da3871f225e3abbba1e1f61c7ae0b021766b7d9a3f63f05b14b9f"),
         ("src/ffi/session.rs", "inject_process_fault", "1118d97c270aec4755012b9d6d91216173207455032796f58ce5abb912475ab5"),
@@ -1149,6 +1150,26 @@ def _check_fault_capabilities(scans: dict[str, tuple[Scan, tuple[Attribute, ...]
             found.append(f"{SHIM}/src/lib.rs: {marker} requires its private cfg(test) declaration")
     for relative, (scanned, _) in scans.items():
         source = scanned.code
+        # A named struct can also be constructed through a type alias. Confine
+        # every reference to these types to already hash-bound source regions,
+        # so imports, aliases, generic aliases and extra implementations cannot
+        # introduce an unreviewed route around the literal constructor checks.
+        regions = [(begin, end)] if relative == "src/lib.rs" else []
+        reviewed_function = {
+            "src/lib.rs": "inject_process_fault",
+            "src/ffi/session.rs": "inject_process_fault",
+            "src/adapter/surface/mod.rs": "inject_posted_fault",
+        }.get(relative)
+        if reviewed_function:
+            for function in re.finditer(rf"(?<!\w)fn\s+{reviewed_function}\s*\(", source):
+                opening = source.find("{", function.end())
+                if opening >= 0:
+                    regions.append((function.start(), _matching_brace(source, opening) + 1))
+        if relative in ("src/ffi/process_fault.rs", "src/adapter/native_tests/process_fault.rs"):
+            regions.append((0, len(source)))
+        for reference in re.finditer(r"(?<!\w)(?:FaultSeal|FaultAuthority)(?!\w)", source):
+            if not any(start <= reference.start() < stop for start, stop in regions):
+                found.append(f"{SHIM}/{relative}: fault capability references belong only in reviewed authority paths")
         if re.search(r"(?<!\w)(?:FaultSeal|FaultAuthority)\s+as\s", source):
             found.append(f"{SHIM}/{relative}: fault capabilities may not be aliased")
         for implementation in re.finditer(r"\bimpl\b[^{;]*\b(?:FaultSeal|FaultAuthority)\b[^{;]*\{", source):
