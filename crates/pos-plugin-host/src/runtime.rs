@@ -25,7 +25,7 @@ use crate::lift::widen;
 /// Exact Wasmtime release of the host (ADR-061 revision 4, decision 2).
 ///
 /// A new pin is a new execution-profile version.
-pub const WASMTIME_VERSION: &str = "49.0.5";
+pub const WASMTIME_VERSION: &str = "50.0.1";
 
 /// Pinned Wasm stack ceiling, in bytes, for every invocation.
 ///
@@ -103,7 +103,7 @@ fn trap_table() -> Vec<TrapTableEntryV1> {
 
 /// The ADR-061 revision 4 decision 6 outcome of one pinned trap code.
 ///
-/// Revision 5 decision 3 applies the table to the codes Wasmtime 49.0.5
+/// Revision 5 decision 3 applies the table to the codes Wasmtime 50.0.1
 /// defines, so `AlwaysTrapAdapter` is absent and every unlisted code is
 /// `other`. A canonical-ABI lift failure of a guest return is not a trap at
 /// all: the host's lift reports it without a trap code, and the engine maps
@@ -137,8 +137,8 @@ mod tests {
 
     use ComponentTrapClassV1 as Class;
 
-    /// Every Wasmtime 49.0.5 trap code, in code order.
-    const PINNED_TRAP_CODES: [&str; 50] = [
+    /// Every Wasmtime 50.0.1 trap code, in code order.
+    const PINNED_TRAP_CODES: [&str; 54] = [
         "StackOverflow",
         "MemoryOutOfBounds",
         "HeapMisaligned",
@@ -189,6 +189,10 @@ mod tests {
         "StreamOpTooBig",
         "WaitableSyncAndAsync",
         "UncaughtException",
+        "ReadFromDroppedStream",
+        "WriteToDroppedStream",
+        "WriteToDroppedFuture",
+        "LiftDroppedStream",
     ];
 
     /// Every row whose outcome is not the `other` class.
@@ -282,7 +286,7 @@ mod tests {
     #[test]
     fn the_runtime_records_the_pin_features_and_engine_config() {
         let runtime = ok(derived_runtime());
-        assert_eq!(runtime.wasmtime_version(), "49.0.5");
+        assert_eq!(runtime.wasmtime_version(), "50.0.1");
         assert_eq!(runtime.resolved_features(), RESOLVED_WASMTIME_FEATURES);
         assert_eq!(
             runtime.engine(),

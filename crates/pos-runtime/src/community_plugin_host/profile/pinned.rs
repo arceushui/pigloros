@@ -14,7 +14,7 @@ use super::{
 };
 
 /// Exact Wasmtime release of the worker.
-const PINNED_WASMTIME_VERSION: &str = "49.0.5";
+const PINNED_WASMTIME_VERSION: &str = "50.0.1";
 
 /// The resolved Wasmtime feature set, sorted.
 const PINNED_RESOLVED_FEATURES: [&str; 6] = [
@@ -44,8 +44,8 @@ const OTHER: TrapOutcomeV1 = TrapOutcomeV1::Trap(ComponentTrapClassV1::Other);
 const FUEL: TrapOutcomeV1 = TrapOutcomeV1::FuelExhausted;
 const WATCHDOG: TrapOutcomeV1 = TrapOutcomeV1::WatchdogStop;
 
-/// Every trap code of Wasmtime 49.0.5, in code order, with its outcome.
-const PINNED_TRAP_TABLE: [(&str, TrapOutcomeV1); 50] = [
+/// Every trap code of Wasmtime 50.0.1, in code order, with its outcome.
+const PINNED_TRAP_TABLE: [(&str, TrapOutcomeV1); 54] = [
     ("StackOverflow", STACK),
     ("MemoryOutOfBounds", MEMORY),
     ("HeapMisaligned", MEMORY),
@@ -96,6 +96,10 @@ const PINNED_TRAP_TABLE: [(&str, TrapOutcomeV1); 50] = [
     ("StreamOpTooBig", OTHER),
     ("WaitableSyncAndAsync", OTHER),
     ("UncaughtException", OTHER),
+    ("ReadFromDroppedStream", OTHER),
+    ("WriteToDroppedStream", OTHER),
+    ("WriteToDroppedFuture", OTHER),
+    ("LiftDroppedStream", OTHER),
 ];
 
 /// The closed outcomes of ADR-061 revision 4 decision 6, for reading a name.
