@@ -187,3 +187,35 @@ fn registry_failures_use_the_registry_rows() {
     ];
     assert_rows(&rows);
 }
+
+#[test]
+fn content_refusals_keep_their_closed_host_reason() {
+    let artifact = PluginBundleContentArtifactV1::Sbom;
+    let rows = [
+        (
+            PluginBundleContentErrorV1::BoundsExceeded { artifact },
+            Host::InvalidBundleContent {
+                reason: BundleContentReasonV1::BoundsExceeded,
+            },
+        ),
+        (
+            PluginBundleContentErrorV1::UnsupportedFormat { artifact },
+            Host::InvalidBundleContent {
+                reason: BundleContentReasonV1::UnsupportedFormat,
+            },
+        ),
+        (
+            PluginBundleContentErrorV1::ReferenceMismatch { artifact },
+            Host::InvalidBundleContent {
+                reason: BundleContentReasonV1::ReferenceMismatch,
+            },
+        ),
+        (PluginBundleContentErrorV1::Manifest(MANIFEST), INVALID),
+    ];
+    for (error, expected) in rows {
+        assert_eq!(
+            host_error_for_install_v1(wrapped(Installer::Content(error))),
+            expected
+        );
+    }
+}
