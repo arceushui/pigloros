@@ -48,6 +48,7 @@ enum ManagerError {
 
 /// Lists units by `listing`; `GetUnit` finds only the `loaded` names.
 struct Manager {
+    subscriptions: AtomicUsize,
     listing: Listing,
     loaded: Vec<String>,
     lookups: Arc<Mutex<Vec<String>>>,
@@ -71,13 +72,16 @@ fn row(name: &str) -> TestResult<UnitRow> {
 
 #[zbus::interface(name = "org.freedesktop.systemd1.Manager")]
 impl Manager {
-    fn subscribe(&self) {}
+    fn subscribe(&self) {
+        self.subscriptions.fetch_add(1, Ordering::SeqCst);
+    }
 
     async fn list_units_by_patterns(
         &self,
-        _states: Vec<String>,
-        _patterns: Vec<String>,
+        states: Vec<String>,
+        patterns: Vec<String>,
     ) -> fdo::Result<Vec<UnitRow>> {
+        drop((states, patterns));
         match self.listing {
             Listing::Empty => Ok(Vec::new()),
             Listing::Surviving => self
@@ -151,6 +155,7 @@ struct Host {
 async fn host(listing: Listing, loaded: Vec<String>) -> TestResult<Host> {
     let lookups = Arc::new(Mutex::new(Vec::new()));
     let manager = Manager {
+        subscriptions: AtomicUsize::new(0),
         listing,
         loaded,
         lookups: Arc::clone(&lookups),
