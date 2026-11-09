@@ -71,8 +71,19 @@ mod cases {
             .map_err(|error| fdo::Error::Failed(error.to_string()))
     }
 
+    /// Each loaded unit's own object path, named by its attempt component.
+    fn unit_path(name: &str) -> TestResult<OwnedObjectPath> {
+        let component = name
+            .strip_prefix("pigloros-attempt-")
+            .and_then(|rest| rest.strip_suffix(".service"))
+            .ok_or("not an attempt unit")?;
+        Ok(OwnedObjectPath::try_from(format!(
+            "/org/freedesktop/systemd1/unit/survivor_{component}"
+        ))?)
+    }
+
     fn row(name: &str) -> TestResult<UnitRow> {
-        let path = OwnedObjectPath::try_from("/org/freedesktop/systemd1/unit/survivor")?;
+        let path = unit_path(name)?;
         Ok((
             name.to_owned(),
             String::new(),
@@ -116,8 +127,7 @@ mod cases {
                 .map_err(|error| fdo::Error::Failed(error.to_string()))?
                 .push(name.clone());
             if loaded_names(&self.loaded)?.contains(&name) {
-                OwnedObjectPath::try_from("/org/freedesktop/systemd1/unit/survivor")
-                    .map_err(|error| fdo::Error::Failed(error.to_string()).into())
+                unit_path(&name).map_err(|error| fdo::Error::Failed(error.to_string()).into())
             } else {
                 Err(Box::new(ManagerError::NoSuchUnit(name)))
             }
