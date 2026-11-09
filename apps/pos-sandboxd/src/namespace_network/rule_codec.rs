@@ -69,6 +69,8 @@ const NF_ACCEPT: u32 = 1;
 const NFTA_BITWISE_OP: u16 = 6;
 /// `NFT_BITWISE_BOOL`, the operation of a mask-and-xor `bitwise`.
 const NFT_BITWISE_BOOL: u32 = 0;
+/// The attribute type that stands for an attribute that does not parse.
+const UNPARSED: u16 = u16::MAX;
 
 /// A read-back rule that is not the encoding of any [`FirewallRule`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
@@ -276,9 +278,15 @@ fn canonical(elements: &[(&str, &Expressions)]) -> Vec<CanonicalExpression> {
         .map(|&(name, data)| {
             let mut bytes = vec![0; data.buffer_len()];
             data.emit(&mut bytes);
+            // An attribute that does not parse becomes a type no attribute
+            // has (`NLA_TYPE_MASK` clears the top bits of every real one), so
+            // the expression can match no encoding.
             let mut attributes: Vec<(u16, Vec<u8>)> = NlasIterator::new(&bytes)
-                .flatten()
-                .map(|attribute| (attribute.kind(), attribute.value().to_vec()))
+                .map(|attribute| {
+                    attribute
+                        .map(|attribute| (attribute.kind(), attribute.value().to_vec()))
+                        .unwrap_or((UNPARSED, Vec::new()))
+                })
                 .filter(|attribute| name != "bitwise" || *attribute != boolean)
                 .collect();
             attributes.sort_unstable();
