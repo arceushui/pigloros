@@ -193,39 +193,76 @@ fn fake_block(block: &Path, name: &str, bound: bool, backing: Option<&str>) -> T
 
 #[tokio::test]
 async fn only_a_loop_over_a_provider_image_or_an_unreadable_loop_refuses() -> TestResult {
-    const IMAGES: &str = "/var/lib/pigloros/sandbox/images/";
+    use std::os::unix::ffi::OsStrExt;
+
     let host = tempfile::tempdir()?;
-    let block = host.path().join("sys/block");
-    let kernel = HostKernel::at(&host.path().join("proc"), &host.path().join("sys"));
+    let root = host.path();
+    let block = root.join("sys/block");
+    let kernel = HostKernel::at(&root.join("proc"), &root.join("sys"));
+    // The image directory is reached through a symlinked root, as it would
+    // be through a symlinked or bind-mounted parent.
+    for directory in ["real/images", "real/images-other"] {
+        fs::create_dir_all(root.join(directory))?;
+        fs::write(root.join(directory).join("ab"), b"image")?;
+    }
+    std::os::unix::fs::symlink("real", root.join("link"))?;
+    std::os::unix::fs::symlink("real", root.join("bind"))?;
+    let images = root.join("link/images");
+    let (lexical, canonical, bound) = (
+        images.display().to_string(),
+        root.join("real/images").display().to_string(),
+        root.join("bind/images").display().to_string(),
+    );
     // No block class to list.
-    assert_eq!(kernel.provider_loops_absent(IMAGES), None);
-    // Unbound loops, other disks and unrelated or deleted backing files.
+    assert_eq!(kernel.provider_loops_absent(&images), None);
+    // Unbound loops, other disks, non-loop or non-UTF-8 names and an
+    // unrelated backing file are ignored.
     fake_block(&block, "loop0", false, None)?;
-    fake_block(
-        &block,
-        "sda",
-        true,
-        Some("/var/lib/pigloros/sandbox/images/x\n"),
-    )?;
+    fake_block(&block, "sda", true, Some(&format!("{lexical}/ab\n")))?;
     fake_block(&block, "loopx", true, None)?;
+    fs::create_dir(block.join(std::ffi::OsStr::from_bytes(b"loop\xff")))?;
     fake_block(&block, "loop1", true, Some("/srv/other.img\n"))?;
-    fake_block(&block, "loop2", true, Some("/srv/gone.img (deleted)\n"))?;
-    assert_eq!(kernel.provider_loops_absent(IMAGES), Some(true));
-    // A loop over a provider image, also once the image is deleted.
-    for text in ["ab12\n", "ab12 (deleted)\n"] {
+    fake_block(&block, "loop2", true, Some("/srv/other.img\n"))?;
+    // An image directory that cannot be resolved refuses.
+    assert_eq!(kernel.provider_loops_absent(&root.join("missing")), None);
+    let real = root.join("real").display().to_string();
+    for (printed, absent) in [
+        // Each rule alone: beneath the fixed path, beneath the canonical path
+        // (both one level down, so the parent is not the image directory), or
+        // a parent with the image directory's identity. Deleted images still
+        // match.
+        (format!("{lexical}/sub/ab"), false),
+        (format!("{canonical}/sub/ab"), false),
+        (format!("{bound}/ab"), false),
+        (format!("{lexical}/sub/gone (deleted)"), false),
+        (format!("{bound}/gone (deleted)"), false),
+        // A prefix in the middle, a sibling directory and unrelated files.
+        (format!("/srv{canonical}/ab"), true),
+        (format!("{real}/images-other/ab"), true),
+        ("/srv/gone.img (deleted)".to_owned(), true),
+        ("/srv/other.img".to_owned(), true),
+    ] {
         fs::write(
             block.join("loop2/loop/backing_file"),
-            format!("{IMAGES}{text}"),
+            format!("{printed}\n"),
         )?;
-        assert_eq!(kernel.provider_loops_absent(IMAGES), Some(false), "{text}");
+        assert_eq!(
+            kernel.provider_loops_absent(&images),
+            Some(absent),
+            "{printed}"
+        );
     }
-    // A bound loop whose backing file is empty, then missing.
+    // An unobservable `loop` entry, then an empty and a missing backing file.
+    fs::write(block.join("loop3"), b"not a device directory")?;
+    assert_eq!(kernel.provider_loops_absent(&images), None);
+    fs::remove_file(block.join("loop3"))?;
     fs::write(block.join("loop2/loop/backing_file"), "\n")?;
-    assert_eq!(kernel.provider_loops_absent(IMAGES), None);
+    assert_eq!(kernel.provider_loops_absent(&images), None);
     fs::remove_file(block.join("loop2/loop/backing_file"))?;
-    assert_eq!(kernel.provider_loops_absent(IMAGES), None);
-    // The real host's sweep reads its own sysfs.
-    assert!(RootResourceIdentity::provider_loops_absent().await.is_ok());
+    assert_eq!(kernel.provider_loops_absent(&images), None);
+    // The production entry sweeps the real host, whose installation and
+    // loop devices vary; it must only return.
+    let _swept = RootResourceIdentity::provider_loops_absent().await;
     Ok(())
 }
 

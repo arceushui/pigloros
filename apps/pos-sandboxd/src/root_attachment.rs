@@ -249,13 +249,13 @@ impl RootResourceIdentity {
     /// No block-device descriptor is opened.
     ///
     /// # Errors
-    /// [`ImageActivationError::ResourceAbsenceUnverified`] when the block class
-    /// or a bound loop device's backing file cannot be read.
+    /// [`ImageActivationError::ResourceAbsenceUnverified`] when the image
+    /// directory cannot be resolved, or the block class or a bound loop
+    /// device's backing file cannot be read.
     pub(crate) async fn provider_loops_absent() -> Result<bool, ImageActivationError> {
-        let images = format!(
-            "{}/images/",
-            pos_reference::selector::installation::SANDBOX_ARTIFACT_ROOT
-        );
+        let images =
+            std::path::Path::new(pos_reference::selector::installation::SANDBOX_ARTIFACT_ROOT)
+                .join("images");
         let swept = tokio::task::spawn_blocking(move || {
             HostKernel::system().provider_loops_absent(&images)
         })
