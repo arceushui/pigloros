@@ -12,6 +12,54 @@ fn replace(value: &mut Value, pointer: &str, replacement: Value) {
 }
 
 #[test]
+fn whole_bundle_preserves_each_wit_refusal_class() -> TestResult {
+    let mut fixture = Fixture::new();
+    fixture.wit[..100].fill(0);
+    let path = format!("{}main.wit", "d/".repeat(32));
+    fixture.wit[..path.len()].copy_from_slice(path.as_bytes());
+    checksum_wit_header(&mut fixture.wit);
+    assert_eq!(
+        result(&fixture)?,
+        Err(Error::BoundsExceeded {
+            artifact: Artifact::Wit
+        })
+    );
+
+    let mut fixture = Fixture::new();
+    fixture.wit[156] = b'2';
+    checksum_wit_header(&mut fixture.wit);
+    assert_eq!(
+        result(&fixture)?,
+        Err(Error::UnsupportedFormat {
+            artifact: Artifact::Wit
+        })
+    );
+
+    let mut fixture = Fixture::new();
+    let original = b"community-plugin";
+    let replacement = b"different-plugin";
+    let position = fixture
+        .wit
+        .windows(original.len())
+        .position(|part| part == original)
+        .ok_or("world missing")?;
+    fixture.wit[position..position + original.len()].copy_from_slice(replacement);
+    assert_eq!(
+        result(&fixture)?,
+        Err(Error::ReferenceMismatch {
+            artifact: Artifact::Wit
+        })
+    );
+    Ok(())
+}
+
+fn checksum_wit_header(archive: &mut [u8]) {
+    archive[148..156].fill(b' ');
+    let sum: usize = archive[..512].iter().map(|byte| usize::from(*byte)).sum();
+    archive[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
+}
+
+#[test]
 fn provenance_required_fields_fail_with_their_closed_artifact_error() -> TestResult {
     for (pointer, replacement) in [
         ("/_type", json!(null)),
