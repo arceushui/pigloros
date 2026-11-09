@@ -387,7 +387,7 @@ mod native_tests {
         fs::hard_link(&path, &hardlink)?;
         assert_eq!(ledger.read_nonce_ledger_bytes(), Err(unavailable()));
         fs::remove_file(hardlink)?;
-        retained_old_image(&ledger, &path)?;
+        retained_old_image(&guard, &ledger, base, &path)?;
         refuse_occupied_temporary(&ledger, base)?;
         refuse_replaced_directory(&ledger, base)?;
         drop(ledger);
@@ -443,41 +443,46 @@ mod native_tests {
         }
     }
 
-    fn retained_old_image(ledger: &WindowsNonceLedger<'_>, path: &Path) -> TestResult {
+    fn retained_old_image(
+        guard: &WindowsSubjectEncryptorLock,
+        ledger: &WindowsNonceLedger<'_>,
+        base: &Path,
+        path: &Path,
+    ) -> TestResult {
         use std::io::Read as _;
 
         let mut held = File::open(path)?;
         let old_identity = crate::Native::file_identity(&held).map_err(|()| "old file identity")?;
-        let before = ledger
-            .read_nonce_ledger_bytes()
-            .map_err(|_| "read while old file handle retained")?;
-        let mut last = "before create";
-        let result = ledger.replace_observing(&before, |stage| {
-            last = STAGES
-                .iter()
-                .find_map(|(name, candidate)| (*candidate == stage).then_some(*name))
-                .unwrap_or("unknown");
-            Ok(())
-        });
-        result.map_err(|()| {
-            format!(
-                "replace while old file handle retained; last={last}; HRESULT={}",
-                crate::Native::last_move_hresult()
-            )
-        })?;
-        let new_file = File::open(path)?;
-        let new_identity =
-            crate::Native::file_identity(&new_file).map_err(|()| "new file identity")?;
-        assert_ne!(old_identity, new_identity);
+        let before = ledger.read_nonce_ledger_bytes()?;
+        let candidate = b"candidate while old file is held";
+        let result = ledger.replace_nonce_ledger_bytes(candidate);
         let mut old_bytes = Vec::new();
         held.read_to_end(&mut old_bytes)?;
         assert_eq!(old_bytes, before);
-        assert_eq!(
-            ledger
-                .read_nonce_ledger_bytes()
-                .map_err(|_| "read new image while old handle retained")?,
-            before
-        );
+        assert!(WindowsSubjectEncryptorLock::acquire(base).is_err());
+        if result.is_ok() {
+            let new_file = File::open(path)?;
+            let new_identity =
+                crate::Native::file_identity(&new_file).map_err(|()| "new file identity")?;
+            assert_ne!(old_identity, new_identity);
+            assert_eq!(ledger.read_nonce_ledger_bytes()?, candidate);
+            drop(new_file);
+            drop(held);
+            ledger.replace_nonce_ledger_bytes(&before)?;
+        } else {
+            assert_eq!(result, Err(unavailable()));
+            assert_eq!(ledger.read_nonce_ledger_bytes()?, before);
+            let temporary = base.join("PiglorOS").join(TEMPORARY);
+            assert_eq!(fs::read(&temporary)?, candidate);
+            drop(held);
+            let recovered = guard.open_nonce_ledger()?;
+            assert!(!temporary.exists());
+            assert_eq!(recovered.read_nonce_ledger_bytes()?, before);
+            let later = b"later independent raw commit";
+            recovered.replace_nonce_ledger_bytes(later)?;
+            assert_eq!(recovered.read_nonce_ledger_bytes()?, later);
+            recovered.replace_nonce_ledger_bytes(&before)?;
+        }
         Ok(())
     }
 
