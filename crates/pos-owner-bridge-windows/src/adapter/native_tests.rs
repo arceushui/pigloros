@@ -214,6 +214,26 @@ fn empty_session(native: &mut dyn NativeOperations) {
     assert!(!native.buffer_close_uncertain());
 }
 
+fn hold_resource_denial(
+    native: &mut dyn NativeOperations,
+    factory: &dyn StaPump,
+    listener: &LoopbackListener,
+    received_before: u64,
+) -> TestResult {
+    for _ in 0..2 {
+        // Only another existing STA progression permits another retry; every
+        // teardown request within one progression must keep the owners held.
+        for _ in 0..3 {
+            assert!(native.unsubscribe_view().is_err());
+            assert!(native.close_controller().is_err());
+            assert_eq!(crate::Native::resource_deferral_completion_attempts(), 0);
+        }
+        factory.next()?;
+        assert_resource_counts(listener, received_before, 0);
+    }
+    Ok(())
+}
+
 /// Real SDK ownership and mappings, with deliberately malformed input and
 /// bounded host cleanup without a page acknowledgement. Malformed CBOR is
 /// discarded before EMPTY -> RECEIVED, so it cannot produce FAILED/RELEASING.
@@ -279,17 +299,7 @@ impl crate::Native {
             native.navigate_owner()?;
             pump_until(&factory, "resource callback", || probe.requested.get())?;
             if mode == crate::ResourceDenialFixture::RetryStop {
-                for _ in 0..2 {
-                    // One retry per outer progression, even when teardown is
-                    // requested repeatedly before the next existing STA tick.
-                    for _ in 0..3 {
-                        assert!(native.unsubscribe_view().is_err());
-                        assert!(native.close_controller().is_err());
-                        assert_eq!(Self::resource_deferral_completion_attempts(), 0);
-                    }
-                    factory.next()?;
-                    assert_resource_counts(&listener, received_before, 0);
-                }
+                hold_resource_denial(native.as_mut(), &factory, &listener, received_before)?;
             }
             if matches!(
                 mode,

@@ -22,7 +22,7 @@ pub(in crate::ffi) struct Recovery {
 }
 
 impl Recovery {
-    pub(in crate::ffi) fn new(token: Rc<super::super::pump::StaToken>) -> Self {
+    pub(in crate::ffi) const fn new(token: Rc<super::super::pump::StaToken>) -> Self {
         Self {
             token,
             last_retry: Cell::new(None),

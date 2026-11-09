@@ -183,7 +183,7 @@ impl Held {
             #[cfg(test)]
             match super::control_fixture::readback(&self.control) {
                 Ok(denied) => super::control_fixture::update(self.observation, |record| {
-                    record.readback = Some(denied)
+                    record.readback = Some(denied);
                 }),
                 Err(error) => {
                     self.sink.failed(self.control.kind(), error);
