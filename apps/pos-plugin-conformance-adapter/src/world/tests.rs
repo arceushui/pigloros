@@ -1055,6 +1055,54 @@ fn found_by(fake: &mut Fake, marker: &str) -> Result<Found, Box<dyn std::error::
     Ok((scan.found, record.matched))
 }
 
+// From the predecessor #893 golden, before the POB2 producer migration.
+const HISTORICAL_HEX: &str = "8b64504f4231026170f6f6f6f600000081664e6f7452756e";
+const HISTORICAL_BLAKE3: &str = "3ebf809ae8a23bd46133852fde36fa87cbf9ff1daaffbf99707642d777f2f149";
+
+/// Resolve the historical bytes through the existing digest-addressed composite.
+fn historical_outcome_piece() -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let historical = hex::decode(HISTORICAL_HEX).ok_or("historical POB1 hex")?;
+    let composite = crate::test_support::composite(&[&historical])?;
+    let pieces = PiecesV1::from_bytes(&composite)?;
+    let digest = *blake3::hash(&historical).as_bytes();
+    let archived = pieces.get(&digest).ok_or("historical outcome piece")?;
+    assert_eq!(archived, historical);
+    Ok(archived.to_vec())
+}
+
+/// Inspect historical field meanings only in the test, without an upcaster.
+fn check_historical_outcome_fields(retained: &[u8]) -> TestResult {
+    let value: ciborium::value::Value = ciborium::from_reader(retained)?;
+    let fields = value.as_array().ok_or("historical POB1 array")?;
+    assert_eq!(fields.len(), 11);
+    assert_eq!(fields[0], ciborium::value::Value::Text("POB1".to_owned()));
+    assert_eq!(fields[1], ciborium::value::Value::Integer(2_u8.into()));
+    assert_eq!(fields[9], ciborium::value::Value::Integer(0_u8.into()));
+    // R13 code 0 means the content check was not performed.
+    Ok(())
+}
+
+/// The original R13 NotRun POB1 v2 golden remains opaque outcome evidence when scanned.
+#[test]
+fn historical_pob1_outcome_is_scanned_without_reencoding() -> TestResult {
+    let historical = historical_outcome_piece()?;
+    let mut fake = Fake {
+        outcome: historical.clone(),
+        ..Fake::default()
+    };
+    assert_eq!(found_by(&mut fake, "POB1")?.0, [ScanSource::Outcome]);
+    let retained = fake.outcome_bytes();
+    assert_eq!(retained, historical);
+    assert_eq!(hex::encode(&retained), HISTORICAL_HEX);
+    assert_eq!(
+        hex::encode(blake3::hash(&retained).as_bytes()),
+        HISTORICAL_BLAKE3
+    );
+
+    check_historical_outcome_fields(&retained)?;
+    Ok(())
+}
+
 #[test]
 fn a_scan_finds_the_marker_in_the_source_that_holds_it() -> TestResult {
     let mut events = Fake {

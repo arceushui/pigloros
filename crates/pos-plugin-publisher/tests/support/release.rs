@@ -60,8 +60,35 @@ impl FixtureContent {
                 ]
             })
             .collect();
-        let provenance = format!(r#"{{"_type":"https://in-toto.io/Statement/v1","predicateType":"https://slsa.dev/provenance/v1","subject":[{{"digest":{{"sha256":"{digest}"}}}}],"predicate":{{"buildDefinition":{{"buildType":"https://pigloros.invalid/build","externalParameters":{{}}}},"runDetails":{{"builder":{{"id":"https://pigloros.invalid/builder"}}}}}}}}"#).into_bytes();
-        let sbom = format!(r#"{{"spdxVersion":"SPDX-2.3","dataLicense":"CC0-1.0","SPDXID":"SPDXRef-DOCUMENT","name":"test component","documentNamespace":"https://pigloros.invalid/spdx/test","creationInfo":{{"creators":["Tool: PiglorOS test fixture"],"created":"2026-11-01T00:00:00Z"}},"documentDescribes":["SPDXRef-component"],"packages":[{{"SPDXID":"SPDXRef-component","name":"component","downloadLocation":"NOASSERTION","filesAnalyzed":false,"licenseConcluded":"MIT","licenseDeclared":"MIT","copyrightText":"NOASSERTION","checksums":[{{"algorithm":"SHA256","checksumValue":"{digest}"}}]}}]}}"#).into_bytes();
+        let provenance = format!(
+            concat!(
+                r#"{{"_type":"https://in-toto.io/Statement/v1","#,
+                r#""predicateType":"https://slsa.dev/provenance/v1","#,
+                r#""subject":[{{"digest":{{"sha256":"{}"}}}}],"#,
+                r#""predicate":{{"buildDefinition":{{"buildType":"https://pigloros.invalid/build","#,
+                r#""externalParameters":{{}}}},"runDetails":{{"builder":{{"#,
+                r#""id":"https://pigloros.invalid/builder"}}}}}}}}"#,
+            ),
+            digest,
+        )
+        .into_bytes();
+        let sbom = format!(
+            concat!(
+                r#"{{"spdxVersion":"SPDX-2.3","dataLicense":"CC0-1.0","#,
+                r#""SPDXID":"SPDXRef-DOCUMENT","name":"test component","#,
+                r#""documentNamespace":"https://pigloros.invalid/spdx/test","#,
+                r#""creationInfo":{{"creators":["Tool: PiglorOS test fixture"],"#,
+                r#""created":"2026-11-01T00:00:00Z"}},"#,
+                r#""documentDescribes":["SPDXRef-component"],"packages":[{{"#,
+                r#""SPDXID":"SPDXRef-component","name":"component","#,
+                r#""downloadLocation":"NOASSERTION","filesAnalyzed":false,"#,
+                r#""licenseConcluded":"MIT","licenseDeclared":"MIT","#,
+                r#""copyrightText":"NOASSERTION","checksums":[{{"#,
+                r#""algorithm":"SHA256","checksumValue":"{}"}}]}}]}}"#,
+            ),
+            digest,
+        )
+        .into_bytes();
         let mut header = [0; 512];
         header[..8].copy_from_slice(b"main.wit");
         header[100..108].copy_from_slice(b"0000644\0");

@@ -78,6 +78,8 @@ pub struct SpyRegistry {
     pub calls: RefCell<Vec<Call>>,
     /// The clock that stamps evaluations; `None` records stamp 0.
     pub clock: Option<Arc<AtomicU64>>,
+    /// Previously observed evaluation used only to model a pre-content-rule registry.
+    historical_evaluation: Option<CurrentReleaseEvaluationV1>,
 }
 
 impl SpyRegistry {
@@ -91,6 +93,7 @@ impl SpyRegistry {
             forced: None,
             calls: RefCell::new(Vec::new()),
             clock: None,
+            historical_evaluation: None,
         }
     }
 
@@ -104,7 +107,15 @@ impl SpyRegistry {
             forced: None,
             calls: RefCell::new(Vec::new()),
             clock: Some(clock),
+            historical_evaluation: None,
         }
+    }
+
+    /// Model a historical registry that still reports an admitted release as active.
+    /// The supplied evaluation must come from a real registry evaluation; this
+    /// fixture does not issue a content or signature proof.
+    pub fn simulate_historical_evaluation(&mut self, evaluation: CurrentReleaseEvaluationV1) {
+        self.historical_evaluation = Some(evaluation);
     }
 
     /// The stamp of the next evaluation: 0 without a clock, else the clock's next 1-based value.
@@ -244,6 +255,9 @@ impl PluginTrustPolicyRegistryV1 for SpyRegistry {
             tick,
         };
         self.calls.borrow_mut().push(call);
+        if let Some(evaluation) = &self.historical_evaluation {
+            return Ok(evaluation.clone());
+        }
         self.store.evaluate_current_release(
             anchor,
             tps1_bytes,

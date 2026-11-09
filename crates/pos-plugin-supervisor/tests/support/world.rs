@@ -258,6 +258,8 @@ pub struct GatedMember {
     pub handle: CommunityPluginHandleV1,
     /// The Plugin ID text and release pair the Driver was built for.
     pub expected: CommunityPluginExpectationV1,
+    /// Shared supervisor counter for observing actual worker launches.
+    pub supervisor: CommunityPluginSupervisorV1,
 }
 
 /// A registry over an in-memory store, and the Drivers registered in it.
@@ -417,6 +419,7 @@ impl World {
             has_driver: true,
         };
         let settings = self.settings_for(&plugin, watchdog, source);
+        let supervisor = settings.supervisor.clone();
         let config = CommunityDriverConfigV1::from_gated(
             gated,
             &host_abi(),
@@ -428,7 +431,11 @@ impl World {
         if register {
             self.register(&plugin, driver);
         }
-        Ok(GatedMember { handle, expected })
+        Ok(GatedMember {
+            handle,
+            expected,
+            supervisor,
+        })
     }
 
     /// Start a pass for every member added by [`Self::add`]: drop what the last pass left in its
