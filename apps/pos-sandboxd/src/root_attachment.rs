@@ -35,7 +35,7 @@ mod release;
 mod verify;
 
 pub use identity::RootResourceIdentity;
-pub(crate) use recovered::detach_recovered_root;
+pub use recovered::detach_recovered_root;
 pub use release::ReleasedAttemptRoot;
 
 use std::{

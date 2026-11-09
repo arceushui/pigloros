@@ -20,7 +20,7 @@ const MAX_RECORD_SIZE: usize = ROOT_RECORD_SIZE;
 
 mod directories;
 mod removal;
-pub(crate) use directories::RecordedRootEntry;
+pub use directories::RecordedRootEntry;
 pub use directories::{RecoveredUnmountedDirectory, UnmountedDirectoryInventory};
 
 /// A complete recorded intent observed during recovery, not activation authority.

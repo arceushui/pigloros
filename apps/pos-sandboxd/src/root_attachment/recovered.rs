@@ -39,17 +39,18 @@ use crate::{
 /// [`ImageActivationError::TeardownFailure`] for a failed detach, and
 /// [`ImageActivationError::ResourceAbsenceUnverified`] for devices not
 /// observed absent before the deadline.
-pub(crate) async fn detach_recovered_root(
+pub async fn detach_recovered_root(
     entry: RecordedRootEntry,
     deadline: Instant,
 ) -> Result<(), ImageActivationError> {
-    detach_with(
+    let detached = detach_with(
         &HostKernel::system(),
         entry,
         &super::images_directory(),
         deadline,
     )
-    .await
+    .await;
+    detached
 }
 
 pub(super) async fn detach_with(
@@ -136,7 +137,7 @@ fn provider_root(
         && kernel.provider_image(loop_name, images);
     let as_recorded = recorded.is_none_or(|recorded| {
         recorded.mount_id == mount.mount_id
-            && recorded.root_inode == mount.inode
+            && recorded.inode == mount.inode
             && recorded.mapper == (mapper_identity.device, mapper_identity.diskseq.get())
             && recorded.mapper_uuid == uuid
             && recorded.loop_name == loop_name

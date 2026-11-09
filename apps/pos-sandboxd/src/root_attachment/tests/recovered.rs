@@ -63,7 +63,10 @@ mod cases {
         entry: RecordedRootEntry,
         deadline: tokio::time::Instant,
     ) -> Result<(), ImageActivationError> {
-        super::super::super::recovered::detach_with(kernel, entry, Path::new("/"), deadline).await
+        let detached =
+            super::super::super::recovered::detach_with(kernel, entry, Path::new("/"), deadline)
+                .await;
+        detached
     }
 
     fn edit_both_loops(observed: &mut Observations, edit: impl Fn(&mut Slave)) {

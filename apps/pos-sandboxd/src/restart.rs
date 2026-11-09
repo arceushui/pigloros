@@ -334,10 +334,11 @@ async fn stop_units<S: Survivors>(
         )
     }))
     .await;
-    stopped.into_iter().try_for_each(|stopped| match stopped {
+    let stopped = stopped.into_iter().try_for_each(|stopped| match stopped {
         Err(_elapsed) => Err(RestartReconciliationError::DeadlineElapsed),
         Ok(result) => result.map_err(RestartReconciliationError::UnitStop),
-    })
+    });
+    stopped
 }
 
 /// Whether a committed intent, not an interrupted write, records `attempt_id`.
@@ -361,12 +362,13 @@ async fn detach_roots<S: Survivors>(
             .map(|entry| timeout_at(deadline, survivors.detach(entry, deadline))),
     )
     .await;
-    detached
+    let detached = detached
         .into_iter()
         .try_for_each(|detached| match detached {
             Err(_elapsed) => Err(RestartReconciliationError::DeadlineElapsed),
             Ok(result) => result.map_err(RestartReconciliationError::Root),
-        })
+        });
+    detached
 }
 
 async fn units_absent(

@@ -147,7 +147,7 @@ impl UnmountedDirectoryInventory<'_> {
 /// grants no detach authority: the mount must still be correlated with fresh
 /// kernel readback, and the directory inventory must later find it unmounted.
 #[derive(Debug)]
-pub(crate) struct RecordedRootEntry {
+pub struct RecordedRootEntry {
     /// The committed intent, which recorded both directory identities.
     pub(crate) intent: RecoveredAttemptIntent,
     /// The held attempt directory, with its recorded identity.

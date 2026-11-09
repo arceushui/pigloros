@@ -143,13 +143,15 @@ impl SystemdTransientUnitTransport {
         shutdown: AttemptShutdownDeadlines,
         deadline: Instant,
     ) -> Result<(), SystemdAttemptUnitTeardownError> {
-        self.stop_listed_with_root(
-            unit.unit_name(),
-            unit.unit_object_path(),
-            CgroupRoot::system(),
-            (shutdown, deadline),
-        )
-        .await
+        let stopped = self
+            .stop_listed_with_root(
+                unit.unit_name(),
+                unit.unit_object_path(),
+                CgroupRoot::system(),
+                (shutdown, deadline),
+            )
+            .await;
+        stopped
     }
 
     async fn stop_listed_with_root(
@@ -163,13 +165,15 @@ impl SystemdTransientUnitTransport {
             Ok(root) => self.bind_unit_cgroup(unit_name, unit_path, root).await,
             Err(error) => Err(error.into()),
         };
-        match bound {
-            Ok(mut cgroup) => self
-                .stop_attempt_unit(&mut cgroup, shutdown, deadline)
-                .await
-                .map(drop),
-            Err(error) => Err(SystemdAttemptUnitTeardownError::Transport(error)),
-        }
+        let mut cgroup = match bound {
+            Ok(cgroup) => cgroup,
+            Err(error) => return Err(SystemdAttemptUnitTeardownError::Transport(error)),
+        };
+        let stopped = self
+            .stop_attempt_unit(&mut cgroup, shutdown, deadline)
+            .await
+            .map(drop);
+        stopped
     }
 }
 

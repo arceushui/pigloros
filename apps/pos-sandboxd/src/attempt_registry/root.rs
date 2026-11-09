@@ -31,11 +31,11 @@ pub(super) struct RootRecord {
 /// The root facts a PAI3 record retained at activation, decoded for
 /// comparison with a fresh kernel readback. These are claims, not evidence.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct RecordedRoot {
+pub struct RecordedRoot {
     /// The attached root's mount ID.
     pub(crate) mount_id: u64,
     /// The root inode on the mapper device.
-    pub(crate) root_inode: u64,
+    pub(crate) inode: u64,
     /// The held image's device and inode.
     pub(crate) image: (u64, u64),
     /// The mapper's device and disk sequence.
@@ -137,7 +137,7 @@ impl RootRecord {
                 bytes: *bytes,
                 recorded: RecordedRoot {
                     mount_id,
-                    root_inode,
+                    inode: root_inode,
                     image: (image_device, image_inode),
                     mapper: (mapper, mapper_sequence),
                     mapper_uuid: mapper_uuid.to_owned(),
