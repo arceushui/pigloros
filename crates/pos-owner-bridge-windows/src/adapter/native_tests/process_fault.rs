@@ -3287,7 +3287,7 @@ impl Fixture {
 fn run_pre_environment(runtime: &Path, number: u8, case: EnvironmentCase) -> TestResult {
     use pos_owner_bridge::LifecycleCode;
     let root = FixtureRoot::new()?;
-    let _callback_order = CallbackOrderGuard::arm();
+    let callback_order_guard = CallbackOrderGuard::arm();
     let mut fixture = Fixture::new(runtime, &root.0, number, FixtureProfile::Pending)?;
     let started = Instant::now();
     let mut driver = readiness::new_driver(CeremonyId::from_bytes([number; 16]), started)?;
@@ -3363,6 +3363,10 @@ fn run_pre_environment(runtime: &Path, number: u8, case: EnvironmentCase) -> Tes
         || !idle
     {
         return Err(format!("pre-environment witness failed: driver_pending={driver_pending} active_blocked={active_blocked} abandoned_blocked={abandoned_blocked} initial_completion={initial_completion:?} completion={at_deadline:?} timeout={timed_out} wiped={wiped} ordered={ordered} no_record={no_record} retained_orphan={retained_orphan} idle={idle}").into());
+    }
+    drop(callback_order_guard);
+    if matches!(case, EnvironmentCase::LateInvocation) {
+        fresh_success_after_retirement(runtime, &root.0, 0xd2)?;
     }
     Ok(())
 }
@@ -3714,6 +3718,14 @@ fn controller_failure_witness_rejects_missing_or_untrusted_completion() {
     ));
 }
 
+fn fresh_success_after_retirement(runtime: &Path, root: &Path, number: u8) -> TestResult {
+    let reached = run_success_exit(runtime, root, number, false)?;
+    if reached.generation != 1 || reached.record_count != 1 {
+        return Err("fresh ceremony state after retirement was not established".into());
+    }
+    Ok(())
+}
+
 #[test]
 fn native_pending_controller_failure_after_owned_browser_exit() -> TestResult {
     let _port = crate::Native::fixed_port_fixture();
@@ -3722,7 +3734,7 @@ fn native_pending_controller_failure_after_owned_browser_exit() -> TestResult {
         .ok_or("canonical retained runtime is required by process qualification")?;
     let control = {
         let _creation = CreationOrderGuard::arm();
-        let reached = run_pending_opening(Path::new(&runtime), &root.0, 0x82, false)?;
+        let reached = run_pending_opening(Path::new(&runtime), &root.0, 0xd0, false)?;
         let order = crate::Native::creation_order();
         if !sdk_controller_result(&order, crate::CreationCallback::Success) {
             return Err(format!(
@@ -3734,7 +3746,7 @@ fn native_pending_controller_failure_after_owned_browser_exit() -> TestResult {
     };
     let fault = {
         let _creation = CreationOrderGuard::arm();
-        let reached = run_pending_opening(Path::new(&runtime), &root.0, 0x83, true)?;
+        let reached = run_pending_opening(Path::new(&runtime), &root.0, 0xd1, true)?;
         let order = crate::Native::creation_order();
         if !sdk_controller_result(&order, crate::CreationCallback::NativeFailure) {
             return Err(format!(
@@ -3747,5 +3759,6 @@ fn native_pending_controller_failure_after_owned_browser_exit() -> TestResult {
     if control != fault {
         return Err("pending-controller control and fault reached different states".into());
     }
+    fresh_success_after_retirement(Path::new(&runtime), &root.0, 0xd3)?;
     root.remove()
 }
