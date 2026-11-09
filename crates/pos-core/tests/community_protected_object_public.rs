@@ -1,5 +1,8 @@
 //! Independent COW1/CAR1/COA1 oracles; parsed records never authorize use.
 
+#[path = "support/community_nonce_properties.rs"]
+mod nonce_properties;
+
 use ciborium::value::Value;
 use pos_core::community_lifecycle::{
     CommunityArtifactAdmissionInputV1 as AdmissionInput, CommunityArtifactAdmissionV1 as Admission,
@@ -14,6 +17,7 @@ use pos_core::community_lifecycle::{
 use pos_core::{
     ArtifactChildEdgeV1, ArtifactRegistrationV1, ErasureArtifactClassV1 as Class, Hash, TimelineId,
 };
+use proptest::arbitrary::any;
 
 type Fallible<T> = Result<T, Box<dyn std::error::Error>>;
 type TestResult = Fallible<()>;
@@ -43,9 +47,9 @@ fn encode(value: &Value) -> Fallible<Vec<u8>> {
     ciborium::into_writer(value, &mut out)?;
     Ok(out)
 }
-fn envelope(input: HeaderInput, length: usize) -> Result<Vec<u8>, Error> {
+fn envelope(input: HeaderInput, length: usize, nonce: [u8; 12]) -> Result<Vec<u8>, Error> {
     let ciphertext = vec![6; length];
-    let envelope = Envelope::new(Header::new(input)?, [7; 12], &ciphertext)?;
+    let envelope = Envelope::new(Header::new(input)?, nonce, &ciphertext)?;
     Ok(envelope.to_canonical_cbor().to_vec())
 }
 const fn proof_header() -> HeaderInput {
@@ -148,104 +152,112 @@ fn fields(value: &mut Value) -> Fallible<&mut Vec<Value>> {
 
 #[test]
 fn object_exact_wire_domains_and_borrowed_ranges() -> TestResult {
-    let content = envelope(header_input(), 16)?;
-    let companion = envelope(proof_header(), 16)?;
-    let expected = encode(&object_value(&content, &companion))?;
-    let object = Object::new(&content, &companion)?;
-    assert_eq!(&*object.to_canonical_cbor(), &expected);
-    assert_eq!(
-        object.address(),
-        domain_hash(b"PiglorOS.Community.ProtectedObject.v1", &expected)
-    );
-    assert_ne!(
-        object.address(),
-        ArtifactRegistrationV1::artifact_digest(Class::TimelineReplay, &expected)
-    );
-    let decoded = Object::from_canonical_cbor(&expected)?;
-    assert_eq!(decoded.content_envelope(), &content);
-    assert_eq!(decoded.proof_envelope(), &companion);
-    let start = expected.as_ptr() as usize;
-    for borrowed in [decoded.content_envelope(), decoded.proof_envelope()] {
-        let offset = borrowed.as_ptr() as usize - start;
-        assert!(offset + borrowed.len() <= expected.len());
-        assert_eq!(&expected[offset..offset + borrowed.len()], borrowed);
-    }
-    Ok(())
+    nonce_properties::check(any::<[u8; 12]>(), |nonce| {
+        let content = envelope(header_input(), 16, nonce)?;
+        let companion = envelope(proof_header(), 16, nonce)?;
+        let expected = encode(&object_value(&content, &companion))?;
+        let object = Object::new(&content, &companion)?;
+        assert_eq!(&*object.to_canonical_cbor(), &expected);
+        assert_eq!(
+            object.address(),
+            domain_hash(b"PiglorOS.Community.ProtectedObject.v1", &expected)
+        );
+        assert_ne!(
+            object.address(),
+            ArtifactRegistrationV1::artifact_digest(Class::TimelineReplay, &expected)
+        );
+        let decoded = Object::from_canonical_cbor(&expected)?;
+        assert_eq!(decoded.content_envelope(), &content);
+        assert_eq!(decoded.proof_envelope(), &companion);
+        let start = expected.as_ptr() as usize;
+        for borrowed in [decoded.content_envelope(), decoded.proof_envelope()] {
+            let offset = borrowed.as_ptr() as usize - start;
+            assert!(offset + borrowed.len() <= expected.len());
+            assert_eq!(&expected[offset..offset + borrowed.len()], borrowed);
+        }
+        Ok(())
+    })
 }
 
 #[test]
 fn object_rejects_every_companion_context_substitution() -> TestResult {
-    let content = envelope(header_input(), 16)?;
-    let mut substitutions = [proof_header(); 7];
-    substitutions[0].timeline = TimelineId::from_ulid(ulid::Ulid::from_bytes([9; 16]));
-    substitutions[1].generation = [9; 16];
-    substitutions[2].purpose = Purpose::ReplayEvidence;
-    substitutions[3].operation = Operation::Initialization([3; 16]);
-    substitutions[4].record_kind = Kind::StateContent;
-    substitutions[5].scope_cover_digest = hash(9);
-    substitutions[6].evidence_not_after_micros = 9;
-    for input in substitutions {
-        let companion = envelope(input, 16)?;
-        assert_eq!(
-            Object::new(&content, &companion).err(),
-            Some(Error::InvalidBinding)
-        );
-    }
-    Ok(())
+    nonce_properties::check(any::<[u8; 12]>(), |nonce| {
+        let content = envelope(header_input(), 16, nonce)?;
+        let mut substitutions = [proof_header(); 7];
+        substitutions[0].timeline = TimelineId::from_ulid(ulid::Ulid::from_bytes([9; 16]));
+        substitutions[1].generation = [9; 16];
+        substitutions[2].purpose = Purpose::ReplayEvidence;
+        substitutions[3].operation = Operation::Initialization([3; 16]);
+        substitutions[4].record_kind = Kind::StateContent;
+        substitutions[5].scope_cover_digest = hash(9);
+        substitutions[6].evidence_not_after_micros = 9;
+        for input in substitutions {
+            let companion = envelope(input, 16, nonce)?;
+            assert_eq!(
+                Object::new(&content, &companion).err(),
+                Some(Error::InvalidBinding)
+            );
+        }
+        Ok(())
+    })
 }
 
 #[test]
 fn object_accepts_payload_limits_and_refuses_larger_proof() -> TestResult {
-    let content = envelope(header_input(), MAX_PLAINTEXT + 16)?;
-    let companion = envelope(proof_header(), 512 * 1024 + 16)?;
-    let encoded = Object::new(&content, &companion)?.to_canonical_cbor();
-    assert!(encoded.len() < 4 * 1024 * 1024);
-    assert_eq!(
-        Object::from_canonical_cbor(&encoded)?.content_envelope(),
-        &content
-    );
-    let too_large = envelope(proof_header(), 512 * 1024 + 17)?;
-    assert_eq!(
-        Object::new(&content, &too_large).err(),
-        Some(Error::BoundsExceeded)
-    );
-    assert_eq!(
-        Object::from_canonical_cbor(&vec![0; 4 * 1024 * 1024 + 1]).err(),
-        Some(Error::BoundsExceeded)
-    );
-    Ok(())
+    nonce_properties::check(any::<[u8; 12]>(), |nonce| {
+        let content = envelope(header_input(), MAX_PLAINTEXT + 16, nonce)?;
+        let companion = envelope(proof_header(), 512 * 1024 + 16, nonce)?;
+        let encoded = Object::new(&content, &companion)?.to_canonical_cbor();
+        assert!(encoded.len() < 4 * 1024 * 1024);
+        assert_eq!(
+            Object::from_canonical_cbor(&encoded)?.content_envelope(),
+            &content
+        );
+        let too_large = envelope(proof_header(), 512 * 1024 + 17, nonce)?;
+        assert_eq!(
+            Object::new(&content, &too_large).err(),
+            Some(Error::BoundsExceeded)
+        );
+        assert_eq!(
+            Object::from_canonical_cbor(&vec![0; 4 * 1024 * 1024 + 1]).err(),
+            Some(Error::BoundsExceeded)
+        );
+        Ok(())
+    })
 }
 
 #[test]
 fn object_rejects_framing_and_invalid_nested_records() -> TestResult {
-    let content = envelope(header_input(), 16)?;
-    let companion = envelope(proof_header(), 16)?;
-    let encoded = encode(&object_value(&content, &companion))?;
-    for end in 0..encoded.len() {
-        assert!(Object::from_canonical_cbor(&encoded[..end]).is_err());
-    }
-    let mut trailing = encoded.clone();
-    trailing.push(0);
-    assert_eq!(
-        Object::from_canonical_cbor(&trailing).err(),
-        Some(Error::InvalidEncoding)
-    );
-    let mut unsupported = object_value(&content, &companion);
-    fields(&mut unsupported)?[1] = uint(2);
-    assert_eq!(
-        Object::from_canonical_cbor(&encode(&unsupported)?).err(),
-        Some(Error::UnsupportedVersion)
-    );
-    let mut nonpreferred = encoded;
-    nonpreferred.splice(6..7, [0x18, 1]);
-    assert_eq!(
-        Object::from_canonical_cbor(&nonpreferred).err(),
-        Some(Error::InvalidEncoding)
-    );
-    for value in [object_value(&[], &companion), object_value(&content, &[])] {
-        assert!(Object::from_canonical_cbor(&encode(&value)?).is_err());
-    }
-    Ok(())
+    nonce_properties::check(any::<[u8; 12]>(), |nonce| {
+        let content = envelope(header_input(), 16, nonce)?;
+        let companion = envelope(proof_header(), 16, nonce)?;
+        let encoded = encode(&object_value(&content, &companion))?;
+        for end in 0..encoded.len() {
+            assert!(Object::from_canonical_cbor(&encoded[..end]).is_err());
+        }
+        let mut trailing = encoded.clone();
+        trailing.push(0);
+        assert_eq!(
+            Object::from_canonical_cbor(&trailing).err(),
+            Some(Error::InvalidEncoding)
+        );
+        let mut unsupported = object_value(&content, &companion);
+        fields(&mut unsupported)?[1] = uint(2);
+        assert_eq!(
+            Object::from_canonical_cbor(&encode(&unsupported)?).err(),
+            Some(Error::UnsupportedVersion)
+        );
+        let mut nonpreferred = encoded;
+        nonpreferred.splice(6..7, [0x18, 1]);
+        assert_eq!(
+            Object::from_canonical_cbor(&nonpreferred).err(),
+            Some(Error::InvalidEncoding)
+        );
+        for value in [object_value(&[], &companion), object_value(&content, &[])] {
+            assert!(Object::from_canonical_cbor(&encode(&value)?).is_err());
+        }
+        Ok(())
+    })
 }
 
 #[test]

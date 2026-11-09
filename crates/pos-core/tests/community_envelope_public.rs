@@ -1,5 +1,8 @@
 //! Independent COH1/COE1 wire fixtures; parsing is not authenticated admission.
 
+#[path = "support/community_nonce_properties.rs"]
+mod nonce_properties;
+
 use ciborium::value::Value;
 use pos_core::community_lifecycle::{
     CommunityArtifactHeaderInputV1 as Input, CommunityArtifactHeaderV1 as Header,
@@ -9,6 +12,7 @@ use pos_core::community_lifecycle::{
     MAX_COMMUNITY_ENVELOPE_PLAINTEXT_BYTES_V1 as MAX_PLAINTEXT,
 };
 use pos_core::{Hash, TimelineId};
+use proptest::arbitrary::any;
 
 type Fallible<T> = Result<T, Box<dyn std::error::Error>>;
 type TestResult = Fallible<()>;
@@ -356,57 +360,65 @@ fn envelope_wire(header: &[u8], nonce: &[u8], ciphertext: &[u8]) -> Fallible<Vec
 
 #[test]
 fn envelope_has_exact_five_fields_and_borrows_its_cipher_range() -> TestResult {
-    let header_bytes = encode(&Value::Array(header_fields(execution_input()?, 0, 0)?))?;
-    for length in [16, 17, MAX_PLAINTEXT + 16] {
-        let ciphertext = vec![0x42; length];
-        let expected = envelope_wire(&header_bytes, &[12; 12], &ciphertext)?;
-        let value = Envelope::new(Header::new(execution_input()?)?, [12; 12], &ciphertext)?;
-        assert_eq!(value.to_canonical_cbor().as_slice(), expected);
-        let mut preimage = b"PiglorOS.Community.Envelope.v1\0".to_vec();
-        preimage.extend_from_slice(&expected);
-        assert_eq!(
-            value.address(),
-            Hash::from_bytes(*blake3::hash(&preimage).as_bytes())
-        );
-        assert_eq!(value.ciphertext_and_tag().as_ptr(), ciphertext.as_ptr());
-        let decoded = Envelope::from_canonical_cbor(&expected)?;
-        assert_eq!(decoded.nonce(), &[12; 12]);
-        assert!(decoded.header().as_input() == &execution_input()?);
-        assert_eq!(decoded.ciphertext_and_tag(), ciphertext);
-        assert_eq!(
-            decoded.ciphertext_and_tag().as_ptr(),
-            expected[expected.len() - length..].as_ptr()
-        );
-        assert!(expected.len() <= 3_147_840);
-    }
-    Ok(())
+    nonce_properties::check(any::<[u8; 12]>(), |nonce| {
+        assert_eq!(MAX_PLAINTEXT, 3_145_728);
+        let header_bytes = encode(&Value::Array(header_fields(execution_input()?, 0, 0)?))?;
+        for length in [16, 17, 3_145_744] {
+            let ciphertext = vec![0x42; length];
+            let expected = envelope_wire(&header_bytes, &nonce, &ciphertext)?;
+            let value = Envelope::new(Header::new(execution_input()?)?, nonce, &ciphertext)?;
+            assert_eq!(value.to_canonical_cbor().as_slice(), expected);
+            let mut preimage = b"PiglorOS.Community.Envelope.v1\0".to_vec();
+            preimage.extend_from_slice(&expected);
+            assert_eq!(
+                value.address(),
+                Hash::from_bytes(*blake3::hash(&preimage).as_bytes())
+            );
+            assert_eq!(value.ciphertext_and_tag().as_ptr(), ciphertext.as_ptr());
+            let decoded = Envelope::from_canonical_cbor(&expected)?;
+            assert_eq!(decoded.nonce(), &nonce);
+            assert!(decoded.header().as_input() == &execution_input()?);
+            assert_eq!(decoded.ciphertext_and_tag(), ciphertext);
+            assert_eq!(
+                decoded.ciphertext_and_tag().as_ptr(),
+                expected[expected.len() - length..].as_ptr()
+            );
+            assert!(expected.len() <= 3_147_840);
+        }
+        Ok(())
+    })
 }
 
 #[test]
 fn envelope_refuses_missing_tags_bad_nonces_and_oversized_nested_records() -> TestResult {
-    let header_bytes = encode(&Value::Array(header_fields(execution_input()?, 0, 0)?))?;
-    for length in [0, 15, MAX_PLAINTEXT + 17] {
-        let encoded = envelope_wire(&header_bytes, &[12; 12], &vec![0; length])?;
-        assert_eq!(
-            Envelope::from_canonical_cbor(&encoded).err(),
-            Some(Error::BoundsExceeded)
-        );
-    }
-    for length in [11, 13] {
-        let encoded = envelope_wire(&header_bytes, &vec![12; length], &[0; 16])?;
-        assert_eq!(
-            Envelope::from_canonical_cbor(&encoded).err(),
-            Some(Error::InvalidEncoding)
-        );
-    }
-    let header_too_large = envelope_wire(&[0; 1025], &[12; 12], &[0; 16])?;
-    assert_eq!(
-        Envelope::from_canonical_cbor(&header_too_large).err(),
-        Some(Error::BoundsExceeded)
-    );
-    let valid = envelope_wire(&header_bytes, &[12; 12], &[0; 16])?;
-    framing_refuses(&valid, 3_147_840, |bytes| {
-        Envelope::from_canonical_cbor(bytes).map(|_| ())
-    });
-    Ok(())
+    nonce_properties::check(
+        (any::<[u8; 12]>(), any::<[u8; 13]>()),
+        |(nonce, invalid_nonce)| {
+            let header_bytes = encode(&Value::Array(header_fields(execution_input()?, 0, 0)?))?;
+            for length in [0, 15, MAX_PLAINTEXT + 17] {
+                let encoded = envelope_wire(&header_bytes, &nonce, &vec![0; length])?;
+                assert_eq!(
+                    Envelope::from_canonical_cbor(&encoded).err(),
+                    Some(Error::BoundsExceeded)
+                );
+            }
+            for length in [11, 13] {
+                let encoded = envelope_wire(&header_bytes, &invalid_nonce[..length], &[0; 16])?;
+                assert_eq!(
+                    Envelope::from_canonical_cbor(&encoded).err(),
+                    Some(Error::InvalidEncoding)
+                );
+            }
+            let header_too_large = envelope_wire(&[0; 1025], &nonce, &[0; 16])?;
+            assert_eq!(
+                Envelope::from_canonical_cbor(&header_too_large).err(),
+                Some(Error::BoundsExceeded)
+            );
+            let valid = envelope_wire(&header_bytes, &nonce, &[0; 16])?;
+            framing_refuses(&valid, 3_147_840, |bytes| {
+                Envelope::from_canonical_cbor(bytes).map(|_| ())
+            });
+            Ok(())
+        },
+    )
 }
