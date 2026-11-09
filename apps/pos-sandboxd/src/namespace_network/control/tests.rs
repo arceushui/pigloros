@@ -153,13 +153,14 @@ mod privileged {
             .as_ref()
             .map_err(|_| NetlinkError::Unexpected)
             .and_then(|peer| {
-                namespaces.create(&attempt.name).and_then(|_| {
+                namespaces.create(&attempt.name).and_then(|own| {
+                    // The attempt's own namespace has an identifier too, so
+                    // only the comparison tells the namespaces apart.
                     with_session(ROUTE, |session| {
-                        session.execute(vec![route::veth_pair(
-                            &attempt.host_link,
-                            &foreign.inner_link,
-                            peer.as_fd(),
-                        )])
+                        session.execute(vec![
+                            route::assign_nsid(own.as_fd()),
+                            route::veth_pair(&attempt.host_link, &foreign.inner_link, peer.as_fd()),
+                        ])
                     })
                 })
             });

@@ -39,6 +39,10 @@ fn missing_entries_open_as_none_and_delete_as_nothing() -> TestResult {
         NetworkNamespaces::pinned_under(&file).open(&name),
         Err(NetlinkError::Io(Errno::NOTDIR))
     ));
+    assert!(matches!(
+        NetworkNamespaces::pinned_under(&file).delete(&name),
+        Err(NetlinkError::Io(Errno::NOTDIR))
+    ));
     assert_eq!(
         NetworkNamespaces::system(),
         NetworkNamespaces::pinned_under("/run/netns")

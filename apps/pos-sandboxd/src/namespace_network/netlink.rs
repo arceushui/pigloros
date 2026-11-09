@@ -35,6 +35,11 @@ use super::{LinkKind, ObservedLink};
 /// well below it; a larger one is refused as truncated.
 const RECEIVE_BUFFER: usize = 1 << 16;
 
+/// The flags of a request the kernel acknowledges.
+const ACKNOWLEDGED_REQUEST: u16 = NLM_F_REQUEST | NLM_F_ACK;
+/// The flags of a dump request.
+const DUMP_REQUEST: u16 = NLM_F_REQUEST | NLM_F_DUMP;
+
 /// How long a session waits for any one reply datagram before it fails.
 pub const RECEIVE_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -227,8 +232,12 @@ impl<T: NetlinkTransport> NetlinkSession<T> {
         let mut datagram = Vec::new();
         let mut outstanding = BTreeSet::new();
         for request in requests {
-            let ack = if request.acknowledged { NLM_F_ACK } else { 0 };
-            let header = self.header(NLM_F_REQUEST | ack | request.flags);
+            let base = if request.acknowledged {
+                ACKNOWLEDGED_REQUEST
+            } else {
+                NLM_F_REQUEST
+            };
+            let header = self.header(base | request.flags);
             if request.acknowledged {
                 outstanding.insert(header.sequence_number);
             }
@@ -282,7 +291,7 @@ impl<T: NetlinkTransport> NetlinkSession<T> {
     where
         I: NetlinkSerializable + NetlinkDeserializable,
     {
-        let header = self.header(NLM_F_REQUEST | NLM_F_DUMP);
+        let header = self.header(DUMP_REQUEST);
         let sequence = header.sequence_number;
         let mut datagram = Vec::new();
         emit(header, request, &mut datagram);

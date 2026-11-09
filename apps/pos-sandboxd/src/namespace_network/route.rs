@@ -35,6 +35,10 @@ const NO_SUCH_LINK: i32 = -19;
 const MAIN_TABLE: u32 = 254;
 /// `NETNSA_NSID_NOT_ASSIGNED`: let the kernel choose the identifier.
 const ANY_NSID: i32 = -1;
+/// Create an object, and fail if it exists.
+const CREATE_NEW: u16 = NLM_F_CREATE | NLM_F_EXCL;
+/// The states of an address that is not usable yet, or never will be.
+const UNSETTLED: AddressFlags = AddressFlags::Tentative.union(AddressFlags::Dadfailed);
 
 /// A link message for `name` with `attributes`.
 fn named_link(name: &LinkName, attributes: Vec<LinkAttribute>) -> LinkMessage {
@@ -61,10 +65,7 @@ pub(super) fn veth_pair(
             LinkInfo::Data(InfoData::Veth(InfoVeth::Peer(peer))),
         ])],
     );
-    Request::acknowledged(
-        RouteNetlinkMessage::NewLink(pair),
-        NLM_F_CREATE | NLM_F_EXCL,
-    )
+    Request::acknowledged(RouteNetlinkMessage::NewLink(pair), CREATE_NEW)
 }
 
 /// Set `addr_gen_mode` of link `name` to `none`, so bringing it up adds no
@@ -140,10 +141,7 @@ pub(super) fn address(index: u32, prefix: IpPrefix) -> Request<RouteNetlinkMessa
         ],
         IpAddr::V6(_) => vec![AddressAttribute::Address(prefix.address)],
     };
-    Request::acknowledged(
-        RouteNetlinkMessage::NewAddress(message),
-        NLM_F_CREATE | NLM_F_EXCL,
-    )
+    Request::acknowledged(RouteNetlinkMessage::NewAddress(message), CREATE_NEW)
 }
 
 /// Add `route` through link `index` to the main table, if it has a gateway.
@@ -162,10 +160,7 @@ pub(super) fn route(index: u32, route: &NamespaceRoute) -> Option<Request<RouteN
             RouteAttribute::Gateway(RouteAddress::from(gateway)),
             RouteAttribute::Oif(index),
         ];
-        Request::acknowledged(
-            RouteNetlinkMessage::NewRoute(message),
-            NLM_F_CREATE | NLM_F_EXCL,
-        )
+        Request::acknowledged(RouteNetlinkMessage::NewRoute(message), CREATE_NEW)
     })
 }
 
@@ -246,7 +241,7 @@ fn observed_address(message: AddressMessage) -> Result<ObservedAddress, NetlinkE
             _ => {}
         }
     }
-    let settled = !flags.intersects(AddressFlags::Tentative | AddressFlags::Dadfailed);
+    let settled = !flags.intersects(UNSETTLED);
     match (local, address) {
         // IPv4 reports the local address twice; IPv6 only as the address.
         // A different peer address is a point-to-point link.

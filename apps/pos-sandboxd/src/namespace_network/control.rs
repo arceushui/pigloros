@@ -11,17 +11,17 @@
 
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 
-use rustix::fs::{open, Mode, OFlags};
+use rustix::fs::{open, Mode};
 use rustix::io::Errno;
 
 use super::netlink::{
     consistent, in_namespace, links, NetlinkError, NetlinkSession, NetlinkSocket, NetlinkTransport,
     Request, NETFILTER, ROUTE,
 };
-use super::pinned::NetworkNamespaces;
+use super::pinned::{NetworkNamespaces, READ_ONLY};
 use super::{
     firewall, route, ExpectedNamespace, IpPrefix, LinkKind, LinkName, NamespaceControl,
-    NamespaceName, NamespaceRoute, ObservedAddress, ObservedLink, ObservedNamespace,
+    NamespaceName, NamespaceRoute, ObservedAddress, ObservedLink, ObservedNamespace, ObservedRoute,
 };
 
 /// The calling thread's network namespace file.
@@ -43,12 +43,7 @@ impl NetlinkNamespaceControl {
 
 /// A descriptor of the calling thread's network namespace.
 fn host_namespace() -> Result<OwnedFd, NetlinkError> {
-    open(
-        THREAD_NAMESPACE,
-        OFlags::RDONLY | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .map_err(NetlinkError::from)
+    open(THREAD_NAMESPACE, READ_ONLY, Mode::empty()).map_err(NetlinkError::from)
 }
 
 /// Run `work` with a new session of `protocol` in the calling thread's
@@ -178,37 +173,38 @@ fn host_view<T: NetlinkTransport>(
     })
 }
 
-/// Read everything inside the session's namespace, which the thread entered,
-/// into `observed`, with the identifier it assigns to the host namespace
-/// `host`.
+/// What the attempt namespace holds, apart from its firewall: its links,
+/// addresses and main-table routes, and the identifier it assigns to the
+/// host namespace.
+type InnerView = (
+    Vec<ObservedLink>,
+    Vec<ObservedAddress>,
+    Vec<ObservedRoute>,
+    i32,
+);
+
+/// Read the session's namespace, which the thread entered, and the
+/// identifier it assigns to the host namespace `host`.
 fn inner_view<T: NetlinkTransport>(
     session: &NetlinkSession<T>,
     host: BorrowedFd<'_>,
-    mut observed: ObservedNamespace,
-) -> Result<ObservedNamespace, NetlinkError> {
-    links(session)
-        .map(|links| observed.links = links)
-        .and_then(|()| {
-            session
-                .dump(route::addresses())
-                .and_then(route::observed_addresses)
-        })
-        .map(|addresses| observed.addresses = addresses)
-        .and_then(|()| {
-            session
-                .dump(route::routes())
-                .and_then(route::observed_routes)
-        })
-        .map(|routes| observed.routes = routes)
-        .and_then(|()| {
-            session
-                .request(route::get_nsid(host))
-                .and_then(route::nsid_reply)
-        })
-        .map(|netnsid| {
-            observed.host_netnsid = netnsid;
-            observed
-        })
+) -> Result<InnerView, NetlinkError> {
+    links(session).and_then(|links| {
+        session
+            .dump(route::addresses())
+            .and_then(route::observed_addresses)
+            .and_then(|addresses| {
+                session
+                    .dump(route::routes())
+                    .and_then(route::observed_routes)
+                    .and_then(|routes| {
+                        session
+                            .request(route::get_nsid(host))
+                            .and_then(route::nsid_reply)
+                            .map(|netnsid| (links, addresses, routes, netnsid))
+                    })
+            })
+    })
 }
 
 /// Read every nftables table of the session's namespace.
@@ -234,25 +230,21 @@ fn observe_from(
 ) -> Result<ObservedNamespace, NetlinkError> {
     consistent(|| with_session(ROUTE, |session| host_view(session, namespace, host_link))).and_then(
         |(host_link, host_addresses, namespace_netnsid)| {
-            let observed = ObservedNamespace {
-                links: Vec::new(),
-                addresses: Vec::new(),
-                routes: Vec::new(),
-                tables: Vec::new(),
-                host_link,
-                host_addresses,
-                namespace_netnsid,
-                host_netnsid: -1,
-            };
             inside(namespace, || {
-                with_session(ROUTE, |session| inner_view(session, host, observed)).and_then(
-                    |mut observed| {
-                        with_session(NETFILTER, tables).map(|tables| {
-                            observed.tables = tables;
-                            observed
-                        })
-                    },
-                )
+                with_session(ROUTE, |session| inner_view(session, host))
+                    .and_then(|inner| with_session(NETFILTER, tables).map(|tables| (inner, tables)))
+            })
+            .map(|((links, addresses, routes, host_netnsid), tables)| {
+                ObservedNamespace {
+                    links,
+                    addresses,
+                    routes,
+                    tables,
+                    host_link,
+                    host_addresses,
+                    namespace_netnsid,
+                    host_netnsid,
+                }
             })
         },
     )
