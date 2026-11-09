@@ -1378,6 +1378,8 @@ def test_owned_process_fault_authority() -> None:
         "disabled authority": ("if !authority.valid()", "if false"),
         "removed empty-state recheck": ("buffers.ok_or(())?.load_state().map_err(|_| ())?", "0"),
         "removed pending-controller recheck": ("pending_controller.ok_or(())?.succeeded().is_some()", "false"),
+        "incomplete second snapshot accepted": ("if !observe()?.is_empty()", "if false"),
+        "first snapshot failure swallowed": ("let first = observe()?;", "let first = observe().unwrap_or_default();"),
         "writing-state recheck": ("ControlState::Writing as u32", "ControlState::Empty as u32"),
         "ready-state recheck": ("ControlState::Ready as u32", "ControlState::Empty as u32"),
         "consuming-state recheck": ("ControlState::Consuming as u32", "ControlState::Empty as u32"),
@@ -1436,6 +1438,8 @@ def test_owned_process_fault_authority() -> None:
         ("previous.len() != usize::from(point.post() - 1) * 2", "false"),
         ("self.prior_native_wipe = true;", "self.prior_native_wipe = false;"),
         ("pos_owner_bridge::ceremony::timing::FAST_POLL", "std::time::Duration::ZERO"),
+        ("!self.surface.recordless_opening_ready()\n                        || self.surface.pending_opening_completion().is_some()", "false"),
+        ("Instant::now() >= self.deadline", "false"),
     ):
         if old not in fixture_source:
             raise SystemExit(f"missing ordered-evidence mutation target: {old}")

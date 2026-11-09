@@ -1821,10 +1821,22 @@ impl Fixture {
                 {
                     return Err("controller creation was not pending".into());
                 }
-                let browser = self
+                let candidate = self
                     .surface
                     .prepare_pending_opening_browser()
                     .map_err(|()| "pending-opening browser or callback indeterminate")?;
+                let Some(browser) = candidate else {
+                    if Instant::now() >= self.deadline {
+                        return Err("pending-opening browser observation timed out".into());
+                    }
+                    readiness::pump(&self.surface)?;
+                    if !self.surface.recordless_opening_ready()
+                        || self.surface.pending_opening_completion().is_some()
+                    {
+                        return Err("controller completed before browser observation".into());
+                    }
+                    continue;
+                };
                 let first = ProcessFaultMark::PendingOpening {
                     generation: 1,
                     record_count: 0,

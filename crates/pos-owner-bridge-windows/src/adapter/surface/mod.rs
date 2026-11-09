@@ -315,7 +315,7 @@ impl Surface {
     #[cfg(test)]
     pub(in crate::adapter) fn prepare_pending_opening_browser(
         &mut self,
-    ) -> std::result::Result<ProcessIdentity, ()> {
+    ) -> std::result::Result<Option<ProcessIdentity>, ()> {
         if !self.recordless_opening_ready() {
             let _logged_or_unavailable =
                 writeln!(std::io::stderr(), "NATIVE_PENDING_OPENING failure=phase");
@@ -362,6 +362,17 @@ impl Surface {
             .map_err(|()| {
                 pending_opening_diagnostic("NATIVE_PENDING_OPENING failure=candidate");
             })?;
+        let Some(browser) = browser else {
+            if !self.recordless_opening_ready()
+                || !self.native.pending_opening_owners_retained()
+                || self.native.recordless_controller_completion().is_some()
+                || self.events.invalid()
+                || self.events.exited().is_some()
+            {
+                return Err(());
+            }
+            return Ok(None);
+        };
         let actual = self.runtime.identity(browser.browser_pid).map_err(|_| {
             pending_opening_diagnostic("NATIVE_PENDING_OPENING failure=runtime-identity-read");
         })?;
@@ -378,7 +389,7 @@ impl Surface {
         );
         self.events.expect_browser(browser.browser_pid);
         self.recordless_fault = Some(browser);
-        Ok(browser)
+        Ok(Some(browser))
     }
 
     #[cfg(test)]
@@ -415,7 +426,7 @@ impl Surface {
         crate::verify_private_directory(&folder).map_err(|_| ())?;
         self.admit_environment(&folder).map_err(|_| ())?;
         if self.runtime.identity(browser.browser_pid).map_err(|_| ())? != browser
-            || self.native.pending_opening_browser_candidate()? != browser
+            || self.native.pending_opening_browser_candidate()? != Some(browser)
         {
             return Err(());
         }

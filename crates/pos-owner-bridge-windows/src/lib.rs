@@ -680,7 +680,9 @@ pub(crate) trait NativeOperations {
     }
 
     #[cfg(test)]
-    fn pending_opening_browser_candidate(&self) -> Result<pos_owner_bridge::ProcessIdentity, ()> {
+    fn pending_opening_browser_candidate(
+        &self,
+    ) -> Result<Option<pos_owner_bridge::ProcessIdentity>, ()> {
         Err(())
     }
 

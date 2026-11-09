@@ -164,7 +164,7 @@ impl NativeOperations for Session {
                 if authority.target() != crate::ProcessFaultTarget::Browser
                     || !self.pending_opening_owners_retained()
                     || self.recordless_controller_completion().is_some()
-                    || self.pending_opening_browser_candidate()? != authority.browser()
+                    || self.pending_opening_browser_candidate()? != Some(authority.browser())
                 {
                     return Err(());
                 }
@@ -258,7 +258,9 @@ impl NativeOperations for Session {
     }
 
     #[cfg(test)]
-    fn pending_opening_browser_candidate(&self) -> Result<pos_owner_bridge::ProcessIdentity, ()> {
+    fn pending_opening_browser_candidate(
+        &self,
+    ) -> Result<Option<pos_owner_bridge::ProcessIdentity>, ()> {
         if !self.pending_opening_owners_retained() {
             pending_opening_diagnostic("NATIVE_PENDING_OPENING failure=candidate-owners");
             return Err(());
@@ -267,7 +269,15 @@ impl NativeOperations for Session {
             pending_opening_diagnostic("NATIVE_PENDING_OPENING failure=candidate-callback");
             return Err(());
         }
-        super::process_fault::browser_candidate(&self.environment_ref().map_err(|_| ())?.raw)
+        let candidate = super::process_fault::pending_browser_candidate(
+            &self.environment_ref().map_err(|_| ())?.raw,
+        )?;
+        if !self.pending_opening_owners_retained()
+            || self.recordless_controller_completion().is_some()
+        {
+            return Err(());
+        }
+        Ok(candidate)
     }
 
     #[cfg(test)]
