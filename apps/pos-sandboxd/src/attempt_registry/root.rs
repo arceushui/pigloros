@@ -9,7 +9,7 @@ use super::{
     directory::{PreparedAttemptDirectory, DIRECTORY_RECORD_SIZE},
     PlannedAttemptIntent, SystemdAttemptRegistryError,
 };
-use crate::{ActivatedRootDirectory, RootResourceIdentity};
+use crate::{ActivatedRootDirectory, RecordedRoot, RootResourceIdentity};
 
 const VALUES_END: usize = DIRECTORY_RECORD_SIZE + 12 * 8;
 const PATH_END: usize = VALUES_END + 68;
@@ -26,26 +26,6 @@ pub(super) type Generations = [((u32, u32), u64); 2];
 pub(super) struct RootRecord {
     bytes: [u8; ROOT_RECORD_SIZE],
     recorded: RecordedRoot,
-}
-
-/// The root facts a PAI3 record retained at activation, decoded for
-/// comparison with a fresh kernel readback. These are claims, not evidence.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RecordedRoot {
-    /// The attached root's mount ID.
-    pub(crate) mount_id: u64,
-    /// The root inode on the mapper device.
-    pub(crate) inode: u64,
-    /// The held image's device and inode.
-    pub(crate) image: (u64, u64),
-    /// The mapper's device and disk sequence.
-    pub(crate) mapper: ((u32, u32), u64),
-    /// The mapper's UUID.
-    pub(crate) mapper_uuid: String,
-    /// The loop device's name.
-    pub(crate) loop_name: String,
-    /// The loop device's device and disk sequence.
-    pub(crate) loop_device: ((u32, u32), u64),
 }
 
 impl RootRecord {

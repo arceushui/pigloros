@@ -24,33 +24,35 @@ use super::{
     AttachmentKernel,
 };
 use crate::{
-    attempt_registry::{RecordedRoot, RecordedRootEntry},
-    ActivatedRootDirectory, ImageActivationError,
+    ActivatedRootDirectory, ImageActivationError, RecordedRoot, RecordedRootEntry,
+    RootResourceIdentity,
 };
 
-/// Detach the previous runtime's root still mounted on `entry`, if any, and
-/// observe its mapper and loop generations ended before `deadline`.
-///
-/// An unmounted root is left to the directory inventory.
-///
-/// # Errors
-/// [`ImageActivationError::EvidenceMismatch`] for a root that cannot be
-/// observed or is not exactly a provider root; nothing is detached.
-/// [`ImageActivationError::TeardownFailure`] for a failed detach, and
-/// [`ImageActivationError::ResourceAbsenceUnverified`] for devices not
-/// observed absent before the deadline.
-pub async fn detach_recovered_root(
-    entry: RecordedRootEntry,
-    deadline: Instant,
-) -> Result<(), ImageActivationError> {
-    let detached = detach_with(
-        &HostKernel::system(),
-        entry,
-        &super::images_directory(),
-        deadline,
-    )
-    .await;
-    detached
+impl RootResourceIdentity {
+    /// Detach the previous runtime's root still mounted on `entry`, if any, and
+    /// observe its mapper and loop generations ended before `deadline`.
+    ///
+    /// An unmounted root is left to the directory inventory.
+    ///
+    /// # Errors
+    /// [`ImageActivationError::EvidenceMismatch`] for a root that cannot be
+    /// observed or is not exactly a provider root; nothing is detached.
+    /// [`ImageActivationError::TeardownFailure`] for a failed detach, and
+    /// [`ImageActivationError::ResourceAbsenceUnverified`] for devices not
+    /// observed absent before the deadline.
+    pub(crate) async fn detach_recovered(
+        entry: RecordedRootEntry,
+        deadline: Instant,
+    ) -> Result<(), ImageActivationError> {
+        let detached = detach_with(
+            &HostKernel::system(),
+            entry,
+            &super::images_directory(),
+            deadline,
+        )
+        .await;
+        detached
+    }
 }
 
 pub(super) async fn detach_with(

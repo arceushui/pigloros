@@ -65,10 +65,9 @@ use std::io;
 use futures_util::future::join_all;
 use tokio::time::{sleep, timeout_at, Instant};
 
-use crate::attempt_registry::RecordedRootEntry;
 use crate::{
     AttemptCleanupDeadlines, AttemptShutdownDeadlines, BootInstant, ImageActivationError,
-    PlannedAttemptIntent, SystemdAttemptRecovery, SystemdAttemptRegistryError,
+    PlannedAttemptIntent, RecordedRootEntry, SystemdAttemptRecovery, SystemdAttemptRegistryError,
     SystemdAttemptUnitObservation, SystemdAttemptUnitTeardownError, SystemdTransientUnitTransport,
     SystemdTransientUnitTransportError, TransientServiceUnitName,
 };
@@ -248,7 +247,7 @@ impl Survivors for Host<'_> {
         entry: RecordedRootEntry,
         deadline: Instant,
     ) -> impl Future<Output = Result<(), ImageActivationError>> + Send {
-        crate::root_attachment::detach_recovered_root(entry, deadline)
+        crate::RootResourceIdentity::detach_recovered(entry, deadline)
     }
 }
 

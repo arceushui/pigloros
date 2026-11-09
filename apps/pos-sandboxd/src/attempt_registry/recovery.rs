@@ -20,7 +20,6 @@ const MAX_RECORD_SIZE: usize = ROOT_RECORD_SIZE;
 
 mod directories;
 mod removal;
-pub use directories::RecordedRootEntry;
 pub use directories::{RecoveredUnmountedDirectory, UnmountedDirectoryInventory};
 
 /// A complete recorded intent observed during recovery, not activation authority.
@@ -56,7 +55,7 @@ impl RecoveredAttemptIntent {
 
     /// The root facts of a PAI3 stage, if any: retained claims for
     /// correlation with a still-mounted root, not evidence.
-    pub(crate) fn recorded_root(&self) -> Option<&super::root::RecordedRoot> {
+    pub(crate) fn recorded_root(&self) -> Option<&crate::RecordedRoot> {
         self.root.as_ref().map(RootRecord::recorded)
     }
 

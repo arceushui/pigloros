@@ -30,12 +30,10 @@ mod frontiers;
 mod recovery;
 mod root;
 pub use directory::{AttemptUnitTermination, CompletedAttemptCleanup, PreparedAttemptDirectory};
-pub use recovery::RecordedRootEntry;
 pub use recovery::{
     RecoveredAttemptIntent, RecoveredUnmountedDirectory, RegistryRecoveryEntry,
     SystemdAttemptRecovery, UnmountedDirectoryInventory,
 };
-pub use root::RecordedRoot;
 #[cfg(test)]
 pub use tests::{in_lock_test_process, root_record_fixture, with_io_fault};
 

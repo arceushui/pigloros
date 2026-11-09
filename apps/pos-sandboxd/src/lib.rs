@@ -152,6 +152,44 @@ pub(crate) struct LauncherFacts {
 }
 
 #[cfg(target_os = "linux")]
+/// The root facts a PAI3 record retained at activation, decoded for
+/// comparison with a fresh kernel readback. These are claims, not evidence.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RecordedRoot {
+    /// The attached root's mount ID.
+    pub(crate) mount_id: u64,
+    /// The root inode on the mapper device.
+    pub(crate) inode: u64,
+    /// The held image's device and inode.
+    pub(crate) image: (u64, u64),
+    /// The mapper's device and disk sequence.
+    pub(crate) mapper: ((u32, u32), u64),
+    /// The mapper's UUID.
+    pub(crate) mapper_uuid: String,
+    /// The loop device's name.
+    pub(crate) loop_name: String,
+    /// The loop device's device and disk sequence.
+    pub(crate) loop_device: ((u32, u32), u64),
+}
+
+#[cfg(target_os = "linux")]
+/// One recorded attempt directory and its `root` entry, held by path only
+/// and opened across a mount.
+///
+/// The root may still carry the previous runtime's root mount. Holding it
+/// grants no detach authority: the mount must still be correlated with fresh
+/// kernel readback, and the directory inventory must later find it unmounted.
+#[derive(Debug)]
+pub(crate) struct RecordedRootEntry {
+    /// The committed intent, which recorded both directory identities.
+    pub(crate) intent: RecoveredAttemptIntent,
+    /// The held attempt directory, with its recorded identity.
+    pub(crate) attempt: std::fs::File,
+    /// `<attempt>/root`, opened as a path beneath the held attempt directory.
+    pub(crate) root: std::os::fd::OwnedFd,
+}
+
+#[cfg(target_os = "linux")]
 pub use attempt::{ActiveAttempt, AdmittedAttempt};
 #[cfg(target_os = "linux")]
 pub use execute::{

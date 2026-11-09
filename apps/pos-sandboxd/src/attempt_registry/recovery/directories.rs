@@ -1,7 +1,5 @@
 //! Correlation of registry claims with held, unmounted attempt directories.
 
-use std::os::fd::OwnedFd;
-
 use rustix::fs::{openat2, Mode, OFlags};
 
 use super::super::{open_directory, remove_empty, require_empty};
@@ -10,6 +8,7 @@ use super::{
     RecoveredAttemptIntent, RegistryResult, ResolveFlags, SystemdAttemptRecovery,
     SystemdAttemptRegistryError,
 };
+use crate::RecordedRootEntry;
 
 #[derive(Debug, Eq, PartialEq)]
 struct DirectoryObservation {
@@ -138,22 +137,6 @@ impl UnmountedDirectoryInventory<'_> {
                 .and_then(|()| remove_empty(&self.parent, component))
         })
     }
-}
-
-/// One recorded attempt directory and its `root` entry, held by path only
-/// and opened across a mount.
-///
-/// The root may still carry the previous runtime's root mount. Holding it
-/// grants no detach authority: the mount must still be correlated with fresh
-/// kernel readback, and the directory inventory must later find it unmounted.
-#[derive(Debug)]
-pub struct RecordedRootEntry {
-    /// The committed intent, which recorded both directory identities.
-    pub(crate) intent: RecoveredAttemptIntent,
-    /// The held attempt directory, with its recorded identity.
-    pub(crate) attempt: File,
-    /// `<attempt>/root`, opened as a path beneath the held attempt directory.
-    pub(crate) root: OwnedFd,
 }
 
 impl SystemdAttemptRecovery {

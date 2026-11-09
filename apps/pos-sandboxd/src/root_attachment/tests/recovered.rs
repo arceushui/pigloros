@@ -5,7 +5,7 @@
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod cases {
     use super::super::*;
-    use crate::attempt_registry::RecordedRootEntry;
+    use crate::RecordedRootEntry;
     use crate::{SystemdAttemptRecovery, TransientServiceUnitName};
 
     /// The recorded root entry of attempt `[7; 16]` after its owner crashed;
@@ -458,7 +458,7 @@ mod cases {
         }
         // An unmounted root is left to the directory inventory.
         let (runtime, entry) = recovered_entry(true)?;
-        crate::root_attachment::detach_recovered_root(entry, cleanup_deadline()).await?;
+        crate::RootResourceIdentity::detach_recovered(entry, cleanup_deadline()).await?;
         let root = runtime
             .path()
             .join("attempts")
@@ -479,7 +479,7 @@ mod cases {
             ..entry
         };
         assert_eq!(
-            crate::root_attachment::detach_recovered_root(foreign, cleanup_deadline()).await,
+            crate::RootResourceIdentity::detach_recovered(foreign, cleanup_deadline()).await,
             Err(ImageActivationError::EvidenceMismatch)
         );
         Ok(())
