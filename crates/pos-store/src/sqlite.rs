@@ -1475,6 +1475,54 @@ type ForkEventSuffixV1 = Vec<(
     ForkAppendOperationV1,
 )>;
 
+/// Ordinary native entry shared by the store and trusted-clock adapter. Keep
+/// namespace refusal with the effect so callers cannot open before screening.
+/// This does not qualify protected ownership or make installation atomic.
+pub(crate) fn open_ordinary_filename(
+    filename: &str,
+    flags: OpenFlags,
+) -> Result<Connection, CoreError> {
+    #[cfg(target_os = "linux")]
+    crate::protected_sqlite_namespace::refuse_reserved_filename(filename)?;
+    Connection::open_with_flags(filename, flags)
+        .map_err(|error| CoreError::Storage(error.to_string()))
+}
+
+/// Preserve adapter-specific errors for namespace refusal versus a failed
+/// filesystem/native operation, without an unchecked path callback.
+#[cfg(target_os = "linux")]
+pub(crate) enum DatabasePathError<E> {
+    NamespaceRefused,
+    Operation(E),
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn open_database_path(
+    path: &std::path::Path,
+    flags: OpenFlags,
+) -> Result<Connection, DatabasePathError<rusqlite::Error>> {
+    crate::protected_sqlite_namespace::refuse_reserved_database_path(path)
+        .map_err(|_| DatabasePathError::NamespaceRefused)?;
+    Connection::open_with_flags(path, flags).map_err(DatabasePathError::Operation)
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn create_private_database_file(
+    path: &std::path::Path,
+) -> Result<(), DatabasePathError<std::io::Error>> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    crate::protected_sqlite_namespace::refuse_reserved_database_path(path)
+        .map_err(|_| DatabasePathError::NamespaceRefused)?;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .map(drop)
+        .map_err(DatabasePathError::Operation)
+}
+
 impl SqliteStore {
     pub(crate) fn require_live_fork_event_session(
         &self,
@@ -2094,7 +2142,7 @@ impl SqliteStore {
         initialize_schema: bool,
         options: SqliteStoreOpenOptionsV1,
     ) -> Result<Self, CoreError> {
-        let conn = crate::ordinary_sqlite::open_filename(path, flags)?;
+        let conn = open_ordinary_filename(path, flags)?;
         conn.set_prepared_statement_cache_capacity(SQLITE_STATEMENT_CACHE_CAPACITY);
 
         let writer_reservation_connection =
@@ -2146,7 +2194,7 @@ impl SqliteStore {
         options: SqliteStoreOpenOptionsV1,
     ) -> Option<Connection> {
         if flags.contains(OpenFlags::SQLITE_OPEN_READ_ONLY) {
-            crate::ordinary_sqlite::open_filename(
+            open_ordinary_filename(
                 path,
                 OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_URI,
             )

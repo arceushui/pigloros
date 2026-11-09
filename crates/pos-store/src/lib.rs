@@ -89,8 +89,6 @@ pub mod fork_event_authority;
 pub mod fork_manifest_publication;
 pub mod fork_replay;
 pub mod memory;
-#[cfg(feature = "sqlite")]
-mod ordinary_sqlite;
 #[cfg(any(test, feature = "test-support"))]
 pub mod owner_store_admission;
 #[cfg(all(target_os = "linux", any(test, feature = "test-support")))]

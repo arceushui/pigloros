@@ -263,7 +263,7 @@ fn connect(path: &str) -> Result<Connection, CoreError> {
     let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
         | OpenFlags::SQLITE_OPEN_CREATE
         | OpenFlags::SQLITE_OPEN_URI;
-    crate::ordinary_sqlite::open_filename(path, flags)
+    crate::sqlite::open_ordinary_filename(path, flags)
 }
 
 fn port_error(error: &rusqlite::Error) -> TrustedClockPortErrorV1 {

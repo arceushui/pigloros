@@ -430,9 +430,9 @@ fn raw_digest(bytes: &[u8]) -> [u8; 32] {
 
 /// Atomically create the private state file; an existing path is never reused.
 fn create_state_file(path: &Path) -> Result<(), TrustPolicyRegistryErrorV1> {
-    use crate::ordinary_sqlite::DatabasePathError;
+    use crate::sqlite::DatabasePathError;
 
-    crate::ordinary_sqlite::create_private_database_file(path).map_err(|error| match error {
+    crate::sqlite::create_private_database_file(path).map_err(|error| match error {
         DatabasePathError::Operation(error) if error.kind() == ErrorKind::AlreadyExists => {
             TrustPolicyRegistryErrorV1::AlreadyProvisioned
         }
@@ -445,16 +445,13 @@ fn create_state_file(path: &Path) -> Result<(), TrustPolicyRegistryErrorV1> {
 /// Open an existing state file. Callers establish that the path exists, so an
 /// unopenable or non-database file is corrupt state, not missing state.
 fn open_connection(path: &Path) -> Result<Connection, TrustPolicyRegistryErrorV1> {
-    use crate::ordinary_sqlite::DatabasePathError;
+    use crate::sqlite::DatabasePathError;
 
-    let connection =
-        crate::ordinary_sqlite::open_database_path(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
-            .map_err(|error| match error {
-                DatabasePathError::NamespaceRefused => {
-                    TrustPolicyRegistryErrorV1::StorageUnavailable
-                }
-                DatabasePathError::Operation(_) => TrustPolicyRegistryErrorV1::CorruptState,
-            })?;
+    let connection = crate::sqlite::open_database_path(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
+        .map_err(|error| match error {
+            DatabasePathError::NamespaceRefused => TrustPolicyRegistryErrorV1::StorageUnavailable,
+            DatabasePathError::Operation(_) => TrustPolicyRegistryErrorV1::CorruptState,
+        })?;
     connection
         .query_row("PRAGMA schema_version", [], |row| row.get::<_, i64>(0))
         .map_err(|error| {

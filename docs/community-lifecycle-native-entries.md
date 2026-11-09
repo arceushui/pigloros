@@ -11,7 +11,7 @@ passing refusal test is not native owner qualification.
 
 | File / function | Native entry and callers | Namespace refusal |
 | --- | --- | --- |
-| `crates/pos-store/src/sqlite.rs`, `SqliteStore::open_connections` | `ordinary_sqlite::open_filename`; `open`, `open_read_only`, `open_with_hasher`, `open_with_clock`, Memory SQLite wrappers | The private factory checks the filename before each connection; callers configure/schema-initialize only afterward |
+| `crates/pos-store/src/sqlite.rs`, `SqliteStore::open_connections` | Crate-internal `sqlite::open_ordinary_filename`; `open`, `open_read_only`, `open_with_hasher`, `open_with_clock`, Memory SQLite wrappers | The shared factory checks the filename before each connection; callers configure/schema-initialize only afterward |
 | Same file, `open_writer_reservation_connection` | A second read-write connection for a read-only store | Independent filename check before this native edge; forbidden entirely in the qualified one-connection factory |
 | `crates/pos-store/src/trusted_clock/sqlite.rs`, `connect` | Separate trusted-clock reservation/guard connections, including reopen and maintenance | Check filename before native open; the protected composition must use its own same-context clock operations |
 | `crates/pos-store/src/trust_policy_registry.rs`, `open_connection` | Independent deployment TPS1 policy database for `open_current` and explicit provisioning | Check literal path before native open; `create_state_file` also checks before creating a provisioning file |
@@ -22,16 +22,17 @@ The two ledger constructors are production entries in addition to the
 illustrative ADR-129 baseline table. They must not bypass the reserved namespace
 merely because the key owner is a different role.
 
-`crates/pos-store/src/ordinary_sqlite.rs` owns the store's ordinary native
-opening and private provisioning-file creation effects. Its filename factory is
+The crate-internal factories in `crates/pos-store/src/sqlite.rs` own the store's
+ordinary native opening and private provisioning-file creation effects. The filename factory is
 shared by the main store, the secondary writer-reservation connection and the
 trusted-clock adapter. The deployment policy registry uses its literal/native
 path factory and create-new, mode-`0600` provisioning operation. Every factory
 performs its own namespace refusal before its effect; the secondary connection
 does not reuse a stale outer check. Error classification stays with the adapter.
-This module is private to `pos-store` and exposes no raw connection API outside
-the crate. The ledger keeps its earlier pre-secret check in its own private path
-pair. Neither boundary claims atomic installation or protected native ownership.
+These factories live with the existing `sqlite` adapter and have crate-only
+visibility; they expose no raw connection API outside the crate. The ledger
+keeps its earlier pre-secret check in its own private path pair. Neither
+boundary claims atomic installation or protected native ownership.
 
 ## Wrapper reachability
 
