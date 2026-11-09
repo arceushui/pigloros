@@ -283,9 +283,9 @@ fn canonical(elements: &[(&str, &Expressions)]) -> Vec<CanonicalExpression> {
             // the expression can match no encoding.
             let mut attributes: Vec<(u16, Vec<u8>)> = NlasIterator::new(&bytes)
                 .map(|attribute| {
-                    attribute
-                        .map(|attribute| (attribute.kind(), attribute.value().to_vec()))
-                        .unwrap_or((UNPARSED, Vec::new()))
+                    attribute.map_or((UNPARSED, Vec::new()), |attribute| {
+                        (attribute.kind(), attribute.value().to_vec())
+                    })
                 })
                 .filter(|attribute| name != "bitwise" || *attribute != boolean)
                 .collect();
