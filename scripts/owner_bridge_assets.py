@@ -23,7 +23,7 @@ PROFILES = (
     "pending", "popup", "popup_receipt", "permission", "external", "navigation",
     "download", "authentication", "readonly_write", "readonly_control",
     "duplicate_request", "interleaved_pair", "delayed_delivery", "successful_get",
-    "successful_get_release_delay",
+    "successful_get_release_delay", "successful_get_writing_delay",
 )
 TRIGGERS = {
     "popup": 'window.open("http://localhost:49291/denied-popup", "_blank");',
@@ -103,7 +103,7 @@ def delivery_port(profile: str) -> str:
     )
 
 
-def successful_get_bootstrap(release_delay: bool = False) -> str:
+def successful_get_bootstrap(pause: str = "none") -> str:
     """One fixed public test-key assertion, never real-authenticator PRF qualification."""
     challenge = bytes([2]) * 32
     client = (
@@ -114,16 +114,22 @@ def successful_get_bootstrap(release_delay: bool = False) -> str:
     auth = digest(b"localhost") + b"\x05\x00\x00\x00\x01"
     r, s = ecdsa_signature_values(auth + digest(client))
     signature = ecdsa_der_signature(r, min(s, N - s))
-    # The adversarial variant deliberately holds the page's next task after
-    # READY, leaving real native reply bytes for the host's 2 s release expiry.
-    # It changes no shared-core bytes, host clocks, or normal G3 delivery.
-    stall = (
-        "          queueMicrotask(function () {\n"
-        "            var until = performance.now() + 2500;\n"
-        "            while (performance.now() < until) { /* declared release delay */ }\n"
-        "          });\n"
-        if release_delay else ""
-    )
+    # One adversarial variant holds the next task after READY for release expiry;
+    # the other holds this getter after the core's real WRITING CAS, before bytes
+    # are encoded. Neither changes core bytes, host clocks, or normal G3 delivery.
+    stalls = {
+        "none": "",
+        "release": (
+            "          queueMicrotask(function () {\n"
+            "            var until = performance.now() + 2500;\n"
+            "            while (performance.now() < until) { /* declared release delay */ }\n"
+            "          });\n"
+        ),
+        "writing": (
+            "          var until = performance.now() + 1500;\n"
+            "          while (performance.now() < until) { /* declared writing delay */ }\n"
+        ),
+    }
     return (
         "(function () {\n"
         "  function bytes(hex) {\n"
@@ -149,7 +155,7 @@ def successful_get_bootstrap(release_delay: bool = False) -> str:
         f"          signature: bytes(\"{signature.hex()}\"),\n"
         f"          userHandle: bytes(\"{(bytes([4]) * 32).hex()}\")\n"
         "        }, getClientExtensionResults: function () {\n"
-        + stall
+        + stalls[pause]
         + f"          return {{ prf: {{ results: {{ first: bytes(\"{bytes(range(0xA0, 0xC0)).hex()}\") }} }} }};\n"
         "        } });\n"
         "      }, 100);\n"
@@ -164,8 +170,13 @@ def successful_get_bootstrap(release_delay: bool = False) -> str:
 
 
 def fixture_bootstrap(profile: str) -> str:
-    if profile in ("successful_get", "successful_get_release_delay"):
-        return successful_get_bootstrap(profile == "successful_get_release_delay")
+    success_modes = {
+        "successful_get": "none",
+        "successful_get_release_delay": "release",
+        "successful_get_writing_delay": "writing",
+    }
+    if profile in success_modes:
+        return successful_get_bootstrap(success_modes[profile])
     # The credential adapter only waits for abort and never invokes a real
     # authenticator. Separate native-event adapters below induce declared faults.
     trigger = TRIGGERS.get(profile, "")

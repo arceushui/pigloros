@@ -1490,6 +1490,7 @@ def test_fault_profile_bindings() -> None:
         f"{directory}/src/listener/fixture_assets.rs",
         f"{directory}/assets/qualification/pending.html",
         f"{directory}/assets/qualification/successful_get_release_delay.html",
+        f"{directory}/assets/qualification/successful_get_writing_delay.html",
     )
     sources = {path: (ROOT / path).read_text() for path in paths}
 
@@ -1512,6 +1513,7 @@ def test_fault_profile_bindings() -> None:
     for variant, constant, filename in (
         ("Pending", "PENDING", "pending"),
         ("SuccessfulGetReleaseDelay", "SUCCESSFUL_GET_RELEASE_DELAY", "successful_get_release_delay"),
+        ("SuccessfulGetWritingDelay", "SUCCESSFUL_GET_WRITING_DELAY", "successful_get_writing_delay"),
     ):
         catalogue, responses = paths[:2]
         mapping = f"Self::{variant} => &fixture_assets::{constant}"

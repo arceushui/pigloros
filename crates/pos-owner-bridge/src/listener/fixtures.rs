@@ -42,6 +42,9 @@ pub enum FixtureProfile {
     /// The same assertion, with a declared 2.5 s page stall after `READY`.
     /// Exercises release expiry and host zeroization of a nonzero reply.
     SuccessfulGetReleaseDelay,
+    /// Hold the getter for 1.5 s after the core enters `WRITING`, before encoding.
+    /// Adversarial fault scheduling; never part of normal G3 delivery.
+    SuccessfulGetWritingDelay,
 }
 
 impl FixtureProfile {
@@ -62,6 +65,7 @@ impl FixtureProfile {
             Self::DelayedDelivery => &fixture_assets::DELAYED_DELIVERY,
             Self::SuccessfulGet => &fixture_assets::SUCCESSFUL_GET,
             Self::SuccessfulGetReleaseDelay => &fixture_assets::SUCCESSFUL_GET_RELEASE_DELAY,
+            Self::SuccessfulGetWritingDelay => &fixture_assets::SUCCESSFUL_GET_WRITING_DELAY,
         }
     }
 }

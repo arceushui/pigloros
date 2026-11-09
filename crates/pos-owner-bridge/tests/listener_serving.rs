@@ -72,6 +72,7 @@ fn sealed_qualification_profiles_serve_their_exact_bound_bytes() -> TestResult {
         FixtureProfile::DelayedDelivery,
         FixtureProfile::SuccessfulGet,
         FixtureProfile::SuccessfulGetReleaseDelay,
+        FixtureProfile::SuccessfulGetWritingDelay,
     ] {
         let config = ListenerConfig::fixture(profile);
         let listener = start(config)?;

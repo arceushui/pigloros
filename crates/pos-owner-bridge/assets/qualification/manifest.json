@@ -61,6 +61,10 @@
     "successful_get_release_delay": {
       "html_sha256": "1d09cd8be58999eaec6b3d602873c0ec52c01db407a82faac424cde1a48076e1",
       "response_sha256": "813eb44809e9a5b14b78a4e9c3295a717aa0b7e82b22681b04a1753eb4c9a70d"
+    },
+    "successful_get_writing_delay": {
+      "html_sha256": "835d8dcc1fb948e541e4c05bed41ef528adbf6dbc9c48ef09e5f07a5a8f35b65",
+      "response_sha256": "3b4162f9fca0d6a658dd43a56d92d6ad7b8916873491941d530ea2f2b4bc2967"
     }
   }
 }

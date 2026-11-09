@@ -151,3 +151,13 @@ pub(super) const SUCCESSFUL_GET_RELEASE_DELAY: Response = Response {
         0xa7, 0x0d,
     ],
 };
+
+pub(super) const SUCCESSFUL_GET_WRITING_DELAY: Response = Response {
+    body: include_bytes!("../../assets/qualification/successful_get_writing_delay.html"),
+    head: "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: 15562\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nCross-Origin-Opener-Policy: same-origin\r\nCross-Origin-Resource-Policy: same-origin\r\nPermissions-Policy: publickey-credentials-create=(self), publickey-credentials-get=(self), clipboard-read=(), clipboard-write=(), camera=(), microphone=(), geolocation=()\r\nConnection: close\r\nContent-Security-Policy: default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; script-src 'sha256-dWbBlJuyFJx0Cy8SeM6tGxmdqDoy0kN2d1+QmZgSe80='; style-src 'sha256-Q5v//7IetSl8ReqUsE3bO7kt7fOgIkckocSNwunJJmk='; img-src 'none'; connect-src 'none'\r\n\r\n",
+    digest: [
+        0x3b, 0x41, 0x62, 0xf9, 0xfc, 0xa0, 0xd6, 0xa6, 0x58, 0xdd, 0x43, 0xa5, 0x6d, 0x92, 0xd6,
+        0xad, 0x7b, 0x89, 0x16, 0x87, 0x34, 0x91, 0x94, 0x1d, 0x53, 0x0e, 0xa2, 0xf2, 0xb4, 0xbc,
+        0x29, 0x67,
+    ],
+};
