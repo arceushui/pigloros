@@ -568,9 +568,12 @@ mod privileged {
         Ok(())
     }
 
-    /// The off-host endpoint, in a target namespace behind the host.
+    /// The off-host endpoint, in a target namespace behind the host, on an
+    /// unprivileged port: the target's fresh namespace keeps the default
+    /// `ip_unprivileged_port_start`, and the container grants no
+    /// `CAP_NET_BIND_SERVICE`.
     const TARGET: SocketAddr =
-        SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::new(198, 51, 100, 10)), 443);
+        SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::new(198, 51, 100, 10)), 8443);
 
     /// Give link `name` of the session's namespace `address` and bring it up.
     fn link_up<T: crate::namespace_network::netlink::NetlinkTransport>(
