@@ -1566,7 +1566,7 @@
       "expected_result": {
         "equal": true,
         "first_divergence": null,
-        "nia1_content_digest": "f43c5a57cbade7d187ab095098d5fd5dc2b51227b26b49ff71db816faeb9085e"
+        "nia1_content_digest": "355fbe3fc08ca381eaec40625ffe1b22c6d167e277a1973f9f77d25e5d96eabe"
       }
     },
     {
@@ -1616,13 +1616,13 @@
       "variant": "D",
       "mode": "L",
       "executed": true,
-      "expected_result_digest": "025b6d181100f007b3967da8ee8f2b50318a18f5ce614d61c29e7660b6b8e9db",
+      "expected_result_digest": "e8c69750dc88106c0e2609846eddbc65ba418ade31b3df84f6628f0033b818e1",
       "authority_fixture_id": null,
       "authority_result_digest": null,
       "expected_result": {
         "equal": true,
         "first_divergence": null,
-        "nia1_content_digest": "6f7d4754462edc9161ef5cfc60d3452ba4c138419cc94f0deb15f2d282cbdd05"
+        "nia1_content_digest": "8333c00884fba671f00f3292fac0029003558b2075b517c97136761a6a519cfa"
       }
     },
     {
@@ -1642,13 +1642,13 @@
       "variant": "D",
       "mode": "R",
       "executed": true,
-      "expected_result_digest": "025b6d181100f007b3967da8ee8f2b50318a18f5ce614d61c29e7660b6b8e9db",
+      "expected_result_digest": "e8c69750dc88106c0e2609846eddbc65ba418ade31b3df84f6628f0033b818e1",
       "authority_fixture_id": null,
       "authority_result_digest": null,
       "expected_result": {
         "equal": true,
         "first_divergence": null,
-        "nia1_content_digest": "5f8a45c99b7f940ea16944470c9548a3e55e8b36411360dbf54f3e7bdf841170"
+        "nia1_content_digest": "10d3f70258c35d770945375b138d51b12d2770209b0923b6ced92d2f60930376"
       }
     },
     {
@@ -1657,13 +1657,13 @@
       "variant": "D",
       "mode": "F",
       "executed": true,
-      "expected_result_digest": "025b6d181100f007b3967da8ee8f2b50318a18f5ce614d61c29e7660b6b8e9db",
+      "expected_result_digest": "e8c69750dc88106c0e2609846eddbc65ba418ade31b3df84f6628f0033b818e1",
       "authority_fixture_id": null,
       "authority_result_digest": null,
       "expected_result": {
         "equal": true,
         "first_divergence": null,
-        "nia1_content_digest": "e9f343c59163dab6e8c4c17e2615e0362cf5145facfe14cb463f1d8a7b4f2bbb"
+        "nia1_content_digest": "b70192c77036dd526237bdfaf4298f0c00b315c3e202a2ffb0bc2e95227363b7"
       }
     },
     {
@@ -1678,7 +1678,7 @@
       "expected_result": {
         "equal": true,
         "first_divergence": null,
-        "nia1_content_digest": "e87b850a8cbf3301d4669ae5387d3c0913f1baae1b6f6d468829c843dfe3ae43"
+        "nia1_content_digest": "e003eef68fbea48808e67e50c417f28f7149a45c8e2c6a364003eaa516d8ca4e"
       }
     },
     {
@@ -1734,7 +1734,7 @@
       "expected_result": {
         "equal": true,
         "first_divergence": null,
-        "nia1_content_digest": "e6862f7220d5977c30f88d3f2eaa3098ee761e257ec0f1fdbcc012e61813ba9c"
+        "nia1_content_digest": "764fefffbb18642ffde7e94f126d3f9dfa4125437039c7718ce1640dd53125bf"
       }
     },
     {
@@ -1790,7 +1790,7 @@
       "expected_result": {
         "equal": true,
         "first_divergence": null,
-        "nia1_content_digest": "2ae847a5e3f46a89c1145ecac0970619463331424353b9ff426ffb5e53ff9361"
+        "nia1_content_digest": "4ee9f45e8c91c63665e60aa41e0792ffc740ebbe52d40347e3ff68eb42f7959c"
       }
     },
     {
@@ -1846,7 +1846,7 @@
       "expected_result": {
         "equal": true,
         "first_divergence": null,
-        "nia1_content_digest": "8e48461e5d830e0e342cda5d619423087b7c64bfa7b6bbe4cc569fb00b302344"
+        "nia1_content_digest": "ab7ea36655008056f4d3e0ded6f88c58ac055f6a7033620dd2cee4ee8e4eaca7"
       }
     },
     {
@@ -1902,7 +1902,7 @@
       "expected_result": {
         "equal": true,
         "first_divergence": null,
-        "nia1_content_digest": "1a9335dc3bf9cb33cacc6e6d2390db7a7c7cf63acec7756cedafdb150bd62499"
+        "nia1_content_digest": "dd9f71100be5575db67738a3fd4fc5cbc2a696a210d617db52c9a1d67483000b"
       }
     },
     {
@@ -1958,7 +1958,7 @@
       "expected_result": {
         "equal": true,
         "first_divergence": null,
-        "nia1_content_digest": "e8145f5f5a2c01cc58da010f3055acbf2be4c14f88994763e9f02d68a2019803"
+        "nia1_content_digest": "39e0b34738d26cdd25d369d42f73c74eb99574d853c2da5519c2fb0108545e9b"
       }
     },
     {

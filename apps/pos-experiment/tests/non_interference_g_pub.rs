@@ -80,8 +80,9 @@ const MODES: [ExecutionModeV1; 4] = [
     ExecutionModeV1::Fork,
 ];
 const EXECUTED_ROWS: [&str; 2] = [G_PUB_PUBLIC_FIXTURE_ID_V1, G_PUB_EVAL_FIXTURE_ID_V1];
-/// The closed body of the Gateway's page-bound error.
-const PAGE_LIMIT_ERROR: &[u8] = b"{\"error\":\"event poll limit must be between 1 and 100\"}";
+/// The Gateway v1 problem body of the over-limit page request: sorted keys and the matched
+/// route template as `instance`, so it carries no run-local identity.
+const PAGE_LIMIT_ERROR: &[u8] = b"{\"code\":\"invalid-request\",\"detail\":\"event poll limit must be between 1 and 100\",\"instance\":\"/v1/timelines/{timeline_id}/events\",\"retryable\":false,\"schema_id\":\"urn:pigloros:gateway:v1:schema:problem\",\"status\":400,\"title\":\"Invalid request\",\"type\":\"urn:pigloros:gateway:v1:problem:invalid-request\"}";
 
 fn fixtures_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/conformance")
@@ -262,18 +263,6 @@ fn every_g_pub_coordinate_executes_or_stays_typed_non_executed_and_matches_its_n
 {
     let work = tempfile::tempdir()?;
     let executed = execute_every_coordinate(work.path())?;
-    // TEMPORARY (#1312; removed before review): export every executed NIA1 so one CI run can
-    // re-record the NI-PUBLIC-006 cases whose Gateway error body became a v1 problem.
-    if let Ok(directory) = std::env::var("PIGLOROS_NI_G_PUB_EXPORT") {
-        fs::create_dir_all(Path::new(&directory).join(NON_INTERFERENCE_PUBLICATION_DIRECTORY_V1))?;
-        for execution in executed.values() {
-            pos_experiment::non_interference_harness::publish_non_interference_execution_v1(
-                Path::new(&directory),
-                execution,
-            )
-            .map_err(|error| format!("{error:?}"))?;
-        }
-    }
     assert_eq!(executed.len(), 24);
 
     let matrix = matrix()?;
