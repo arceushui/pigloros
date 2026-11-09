@@ -213,7 +213,8 @@ fn seed(with_root: bool) -> TestResult<tempfile::TempDir> {
         .path()
         .join("registry")
         .join(format!(".planned-{key}-1-1"));
-    fs::write(&temporary, &intent(5)?.encode()[..30])?;
+    // An interrupted PAI1 write: its tag and the first attempt-ID bytes.
+    fs::write(&temporary, [b"PAI1".as_slice(), &[5; 26]].concat())?;
     fs::set_permissions(temporary, fs::Permissions::from_mode(0o600))?;
     Ok(runtime)
 }
