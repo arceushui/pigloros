@@ -1,5 +1,8 @@
 //! Unqualified primitive tests; no native vault, owner or authority is implied.
 
+#[path = "support/community_cipher_vectors.rs"]
+mod known_answers;
+
 use pos_crypto::community_cipher::{
     CommunityArtifactCipherV1 as Cipher, CommunityCipherErrorV1 as Error,
     MAX_COMMUNITY_ENVELOPE_PLAINTEXT_BYTES_V1 as MAX_PLAINTEXT,
@@ -11,40 +14,24 @@ type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 #[test]
 fn retained_key_opens_pinned_external_vector_through_the_public_api() -> TestResult {
-    // C2SP/wycheproof AES-GCM-SIV tcId139, commit:
-    // d17cc89fa5c8f4f4d378b5385ebf75da5d0926c9; published independent test data.
-    // https://github.com/C2SP/wycheproof/blob/d17cc89fa5c8f4f4d378b5385ebf75da5d0926c9/testvectors_v1/aes_gcm_siv_test.json
-    let key = [
-        0x39, 0x37, 0x98, 0x6a, 0xf8, 0x6d, 0xaf, 0xc1, 0xba, 0x0c, 0x46, 0x72, 0xd8, 0xab, 0xc4,
-        0x6c, 0x20, 0x70, 0x62, 0x68, 0x2d, 0x9c, 0x26, 0x4a, 0xb0, 0x6d, 0x6c, 0x58, 0x07, 0x20,
-        0x51, 0x30,
-    ];
-    let nonce = [
-        0x8d, 0xf4, 0xb1, 0x5a, 0x88, 0x8c, 0x33, 0x28, 0x6a, 0x7b, 0x76, 0x51,
-    ];
-    let aad = [
-        0xba, 0x44, 0x6f, 0x6f, 0x9a, 0x0c, 0xed, 0x22, 0x45, 0x0f, 0xeb, 0x10, 0x73, 0x7d, 0x90,
-        0x07, 0xfd, 0x69, 0xab, 0xc1, 0x9b, 0x1d, 0x4d, 0x90, 0x49, 0xa5, 0x55, 0x1e, 0x86, 0xec,
-        0x2b, 0x37,
-    ];
-    let ciphertext_and_tag = [
-        0x97, 0xdb, 0x4d, 0x85, 0x04, 0x42, 0xeb, 0x33, 0xe6, 0x08, 0x9a, 0xf6, 0xf3, 0xca, 0xdf,
-        0x7b, 0x3c, 0xcb, 0xb1, 0x25, 0xb2, 0x83, 0x57, 0x54, 0xc1, 0x40, 0x9d, 0x22, 0x7e, 0x37,
-        0x4d, 0x0b,
-    ];
-    let plaintext = [
-        0xdc, 0x9e, 0x9e, 0xaf, 0x11, 0xe3, 0x14, 0x18, 0x2d, 0xf6, 0xa4, 0xeb, 0xa1, 0x7a, 0xec,
-        0x9c,
-    ];
-    let cipher = Cipher::from_retained_material(Box::new(Zeroizing::new(key)));
+    let [_, _, vector] = known_answers::load()?;
+    let aad: [u8; 32] = vector
+        .aad
+        .try_into()
+        .map_err(|_| "vector AAD must have 32 bytes")?;
+    let cipher = Cipher::from_retained_material(Box::new(Zeroizing::new(vector.key)));
     assert_eq!(
-        cipher.open(&nonce, &ciphertext_and_tag, &aad)?.as_slice(),
-        plaintext
+        cipher
+            .open(&vector.nonce, &vector.ciphertext_and_tag, &aad)?
+            .as_slice(),
+        vector.plaintext
     );
     let mut changed_aad = aad;
     changed_aad[0] ^= 1;
     assert_eq!(
-        cipher.open(&nonce, &ciphertext_and_tag, &changed_aad).err(),
+        cipher
+            .open(&vector.nonce, &vector.ciphertext_and_tag, &changed_aad)
+            .err(),
         Some(Error::AuthenticationFailed)
     );
     assert_eq!(cipher.remaining_encryptions(), 0);
@@ -207,11 +194,13 @@ fn oversized_plaintext_does_not_consume_a_primitive_credit() -> TestResult {
         Some(Error::BoundsExceeded)
     );
     assert_eq!(cipher.remaining_encryptions(), 1);
-    cipher.seal(b"still available", &[9; 32])?;
+    let retained = cipher.seal(b"still available", &[9; 32])?;
     assert_eq!(cipher.remaining_encryptions(), 0);
     for length in [0, 15, MAX_PLAINTEXT + 17] {
         assert_eq!(
-            cipher.open(&[0; 12], &vec![0; length], &[9; 32]).err(),
+            cipher
+                .open(retained.nonce(), &vec![0; length], &[9; 32])
+                .err(),
             Some(Error::BoundsExceeded)
         );
     }
