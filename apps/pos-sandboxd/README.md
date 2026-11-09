@@ -324,6 +324,26 @@ The kernel should not create fallback tunnel devices in new namespaces
 `ip6_tunnel` modules are loaded), because the read-back accepts only the
 loopback and the attempt's veth end.
 
+Host egress (owner decisions of 2026-11-09 and 2026-11-10) is IPv4 only:
+an IPv6 endpoint is admitted only when it is an address of the host itself,
+and the provider changes no IPv6 setting. The provider owns one host table,
+`inet piglor_sandbox`: its `forward` chain (filter, policy accept, so other
+host traffic is untouched) jumps from each attempt's `piglor-h<slot>` end to
+that attempt's own chain, which accepts TCP to exactly its endpoints, and
+then drops anything else from any `piglor-h*` end; its `postrouting` chain
+(nat) masquerades exactly that traffic. IPv4 forwarding is turned on only for
+the devices attempt traffic enters by: each attempt's veth end and the device
+each off-host endpoint's replies return on. The table and the forwarding are
+read back after every change, and restart reconciliation deletes the table
+with the other orphaned state. The provider never reads another table for
+policy and never changes one.
+
+Installation requirement: no other host firewall (Docker's, ufw's, an
+`iptables` FORWARD policy of DROP) may drop forwarded traffic from the
+`piglor-h*` ends to the authenticated endpoints or its replies. Host egress
+additionally needs nf_tables NAT (`CONFIG_NFT_NAT`, `CONFIG_NFT_MASQ`,
+`CONFIG_NF_NAT`).
+
 The privileged tests run in `scripts/run-isolated-with-net-admin-test.sh`,
 which adds exactly `NET_ADMIN` and `SYS_ADMIN` to an isolated container
 without network, and drops Docker's AppArmor profile only for the tests that

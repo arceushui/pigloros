@@ -108,13 +108,14 @@ pub use local_network::{
 pub use namespace_network::netlink;
 #[cfg(target_os = "linux")]
 pub use namespace_network::{
-    decode_firewall_rule, encode_firewall_rule, establish_namespace, AttemptNetworkError,
-    EstablishError, EstablishFailure, ExpectedNamespace, FirewallBaseChain, FirewallChain,
-    FirewallHook, FirewallRule, FirewallTableFamily, FirewallVerdict, InvalidLinkName, IpPrefix,
-    LinkKind, LinkName, NamespaceConnector, NamespaceControl, NamespaceName, NamespaceRoute,
-    NamespacedLocalNetwork, NetlinkNamespaceControl, NetworkNamespaces, NetworkPlanError,
-    NetworkRange, ObservedAddress, ObservedLink, ObservedNamespace, ObservedRoute, ObservedTable,
-    ReadbackMismatch, UndecodableRule, NAMESPACE_TABLE,
+    decode_firewall_rule, encode_firewall_rule, establish_namespace, AttemptEgress,
+    AttemptNetworkError, EgressControl, EstablishError, EstablishFailure, ExpectedNamespace,
+    FirewallBaseChain, FirewallChain, FirewallHook, FirewallRule, FirewallTableFamily,
+    FirewallVerdict, HostEgress, HostEgressError, InvalidLinkName, IpPrefix, LinkKind, LinkName,
+    NamespaceConnector, NamespaceControl, NamespaceName, NamespaceRoute, NamespacedLocalNetwork,
+    NetlinkNamespaceControl, NetworkNamespaces, NetworkPlanError, NetworkRange, ObservedAddress,
+    ObservedLink, ObservedNamespace, ObservedRoute, ObservedTable, ReadbackMismatch,
+    UndecodableRule, HOST_TABLE, NAMESPACE_TABLE,
 };
 
 #[cfg(target_os = "linux")]

@@ -1,0 +1,871 @@
+//! Host egress for attempt namespaces (#911, owner decisions 2026-11-09 and
+//! 2026-11-10): the provider-owned host table `inet piglor_sandbox`, IPv4
+//! forwarding on exactly the devices the attempts' traffic enters by, and
+//! masquerade, all limited to each attempt's veth end and its exact
+//! authenticated endpoints, and read back whole after every change.
+//!
+//! The table holds a `forward` base chain (filter, policy accept, so other
+//! host traffic is untouched) that jumps from each attempt's veth end to that
+//! attempt's own chain and ends by dropping anything else from any
+//! `piglor-h*` end, the attempt chains themselves, which accept TCP to the
+//! attempt's endpoints, and a `postrouting` base chain (nat, policy accept)
+//! that masquerades exactly that traffic. Egress is IPv4 only: an IPv6
+//! endpoint is reached only when it is an address of the host itself, which
+//! needs no forwarding. No other table is ever read for policy or changed.
+
+use std::collections::BTreeMap;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::{Mutex, PoisonError};
+
+use netlink_packet_core::{
+    DefaultNla, Emitable, NlasIterator, NLM_F_APPEND, NLM_F_CREATE, NLM_F_EXCL,
+};
+use netlink_packet_netfilter::nftables::{
+    ChainAttribute, ChainMessage, Cmp, DataAttribute, ExpressionAttribute, Expressions, Hook,
+    HookNumber, Immediate, InetHookNumber, ListAttribute, Meta, MetaKey, NfTablesMessage, Operator,
+    Register, RuleAttribute, RuleMessage, TableAttribute, TableMessage, Verdict, VerdictAttribute,
+};
+use netlink_packet_netfilter::none::ControlMessage;
+use netlink_packet_netfilter::{
+    NetfilterHeader, NetfilterMessage, NetfilterMessageInner, NetfilterProtoFamily,
+};
+use netlink_packet_route::link::{AfSpecInet, AfSpecUnspec, LinkAttribute, LinkMessage};
+use netlink_packet_route::route::{RouteAddress, RouteAttribute, RouteMessage, RouteType};
+use netlink_packet_route::{AddressFamily, RouteNetlinkMessage};
+
+use super::netlink::{
+    consistent, NetlinkError, NetlinkSession, NetlinkTransport, Request, NETFILTER, ROUTE,
+};
+use super::{encode_firewall_rule, FirewallRule, LinkName, NamespaceName};
+
+/// The provider's host table, of family `inet`.
+pub const HOST_TABLE: &str = "piglor_sandbox";
+/// The base chain every forwarded attempt packet passes.
+const FORWARD: &str = "forward";
+/// The base chain that masquerades attempt traffic.
+const POSTROUTING: &str = "postrouting";
+/// The name prefix of every attempt's host veth end.
+const ATTEMPT_LINK_PREFIX: &[u8] = b"piglor-h";
+/// `IFNAMSIZ`: an interface name as `meta iifname` loads it.
+const IFNAMSIZ: usize = 16;
+/// `NFNL_SUBSYS_NFTABLES`, the resource a batch's delimiters name.
+const NFTABLES: u16 = 10;
+/// `NF_DROP`.
+const NF_DROP: u32 = 0;
+/// `NF_ACCEPT`.
+const NF_ACCEPT: u32 = 1;
+/// The priority of the forward chain (`filter`).
+const FILTER_PRIORITY: u32 = 0;
+/// The priority of the postrouting chain (`srcnat`).
+const SRCNAT_PRIORITY: u32 = 100;
+/// `IFLA_INET_CONF`.
+const IFLA_INET_CONF: u16 = 1;
+/// `IPV4_DEVCONF_FORWARDING`.
+const IPV4_DEVCONF_FORWARDING: u16 = 1;
+/// `-ENOENT`: the kernel has no such table.
+const NO_SUCH_OBJECT: i32 = -2;
+// The flag sets add disjoint single-bit flags, so each sum is their union
+// and, unlike `|`, no mutation of the operator leaves it unchanged.
+/// Create an object, and fail if it exists.
+const CREATE_NEW: u16 = NLM_F_CREATE + NLM_F_EXCL;
+/// Create a rule after the chain's last.
+const APPEND: u16 = NLM_F_CREATE + NLM_F_APPEND;
+
+/// Why host egress could not be established or removed.
+#[derive(Debug, thiserror::Error)]
+pub enum HostEgressError {
+    /// A netlink exchange failed.
+    #[error("a host egress netlink exchange failed")]
+    Netlink(#[from] NetlinkError),
+    /// An IPv6 endpoint is not an address of the host, and egress is IPv4
+    /// only.
+    #[error("an IPv6 endpoint is not on this host, and egress is IPv4 only")]
+    Ipv6Egress,
+    /// The host table read back differently from the installed attempts.
+    #[error("the host egress table read back differently")]
+    Readback,
+    /// A device the attempt's traffic enters by does not forward.
+    #[error("a device the attempt's traffic enters by does not forward IPv4")]
+    Forwarding,
+}
+
+/// One attempt's egress: its chain, named after its namespace, its host veth
+/// end and the exact endpoints it may reach.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AttemptEgress {
+    /// The attempt's namespace, which names its chain.
+    pub namespace: NamespaceName,
+    /// The attempt's host veth end.
+    pub host_link: LinkName,
+    /// The authenticated endpoints, IPv4 or on-host IPv6.
+    pub endpoints: Vec<SocketAddr>,
+}
+
+/// One rule of the host table.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum HostRule {
+    /// `iifname <link> jump <chain>`.
+    Dispatch { link: LinkName, chain: String },
+    /// `iifname "piglor-h*" drop`.
+    DropUnmatched,
+    /// TCP to exactly `endpoint`, accepted.
+    Allow(SocketAddr),
+    /// `iifname <link>` TCP to exactly `endpoint`, masqueraded.
+    Masquerade {
+        link: LinkName,
+        endpoint: SocketAddr,
+    },
+}
+
+/// An expression with its name and data.
+fn expression(data: Expressions) -> ListAttribute<ExpressionAttribute> {
+    ListAttribute::from(data)
+}
+
+/// Load the input interface name and compare it with `name`.
+fn input_link_is(name: &[u8]) -> [ListAttribute<ExpressionAttribute>; 2] {
+    [
+        expression(Expressions::Meta(vec![
+            Meta::Key(MetaKey::Iifname),
+            Meta::DestinationRegister(Register::Reg1),
+        ])),
+        expression(Expressions::Cmp(vec![
+            Cmp::SourceRegister(Register::Reg1),
+            Cmp::Op(Operator::Equal),
+            Cmp::Data(DataAttribute::Value(name.to_vec())),
+        ])),
+    ]
+}
+
+/// The name of `link` as `meta iifname` loads it, padded with NUL bytes.
+fn padded(link: &LinkName) -> Vec<u8> {
+    let mut name = link.as_str().as_bytes().to_vec();
+    name.resize(IFNAMSIZ, 0);
+    name
+}
+
+/// A verdict expression.
+fn verdict(attributes: Vec<VerdictAttribute>) -> ListAttribute<ExpressionAttribute> {
+    expression(Expressions::Immediate(vec![
+        Immediate::DestinationRegister(Register::Verdict),
+        Immediate::Data(DataAttribute::Verdict(attributes)),
+    ]))
+}
+
+/// TCP to exactly `endpoint`, without a verdict.
+fn tcp_to(endpoint: SocketAddr) -> Vec<ListAttribute<ExpressionAttribute>> {
+    let mut expressions = encode_firewall_rule(&FirewallRule::AcceptTcp(endpoint));
+    expressions.pop();
+    expressions
+}
+
+/// The expressions of `rule`.
+fn expressions(rule: &HostRule) -> Vec<ListAttribute<ExpressionAttribute>> {
+    match rule {
+        HostRule::Dispatch { link, chain } => input_link_is(&padded(link))
+            .into_iter()
+            .chain([verdict(vec![
+                VerdictAttribute::Code(Verdict::Jump),
+                VerdictAttribute::Chain(chain.clone()),
+            ])])
+            .collect(),
+        HostRule::DropUnmatched => input_link_is(ATTEMPT_LINK_PREFIX)
+            .into_iter()
+            .chain([verdict(vec![VerdictAttribute::Code(Verdict::Other(
+                NF_DROP,
+            ))])])
+            .collect(),
+        HostRule::Allow(endpoint) => encode_firewall_rule(&FirewallRule::AcceptTcp(*endpoint)),
+        HostRule::Masquerade { link, endpoint } => input_link_is(&padded(link))
+            .into_iter()
+            .chain(tcp_to(*endpoint))
+            .chain([expression(Expressions::Other {
+                expression_type: "masq".to_owned(),
+                attributes: Vec::new(),
+            })])
+            .collect(),
+    }
+}
+
+/// One expression reduced to what decides it: its name and its attributes
+/// as `(type, value)` pairs, sorted.
+type CanonicalExpression = (String, Vec<(u16, Vec<u8>)>);
+
+/// The canonical form of `expressions`, or `None` if an element is not
+/// exactly one named expression.
+fn canonical(
+    expressions: &[ListAttribute<ExpressionAttribute>],
+) -> Option<Vec<CanonicalExpression>> {
+    expressions
+        .iter()
+        .map(|element| match element {
+            ListAttribute::Element(attributes) => match attributes.as_slice() {
+                [ExpressionAttribute::Name(name), ExpressionAttribute::Data(data)] => {
+                    let mut bytes = vec![0; data.buffer_len()];
+                    data.emit(&mut bytes);
+                    let mut values: Vec<(u16, Vec<u8>)> = NlasIterator::new(&bytes)
+                        .map(|attribute| {
+                            attribute.map_or((u16::MAX, Vec::new()), |attribute| {
+                                (attribute.kind(), attribute.value().to_vec())
+                            })
+                        })
+                        .collect();
+                    values.sort_unstable();
+                    Some((name.clone(), values))
+                }
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
+}
+
+/// The canonical form of `rule`.
+fn canonical_rule(rule: &HostRule) -> Vec<CanonicalExpression> {
+    canonical(&expressions(rule)).unwrap_or_default()
+}
+
+/// A netfilter message of family `inet`.
+fn inet(message: NfTablesMessage) -> NetfilterMessage {
+    NetfilterMessage::new(
+        NetfilterHeader::new(NetfilterProtoFamily::Inet, 0, 0),
+        message,
+    )
+}
+
+/// A batch of `requests`.
+fn batch(requests: Vec<Request<NetfilterMessage>>) -> Vec<Request<NetfilterMessage>> {
+    let delimiter = |control| {
+        Request::unacknowledged(NetfilterMessage::new(
+            NetfilterHeader::new(NetfilterProtoFamily::Unspec, 0, NFTABLES),
+            control,
+        ))
+    };
+    std::iter::once(delimiter(ControlMessage::BatchBegin))
+        .chain(requests)
+        .chain([delimiter(ControlMessage::BatchEnd)])
+        .collect()
+}
+
+/// A base chain of the host table.
+fn base_chain(name: &str, hook: InetHookNumber, priority: u32, kind: &str) -> NfTablesMessage {
+    NfTablesMessage::NewChain(ChainMessage {
+        attributes: vec![
+            ChainAttribute::Table(HOST_TABLE.to_owned()),
+            ChainAttribute::Name(name.to_owned()),
+            ChainAttribute::Hook(vec![
+                Hook::Number(HookNumber::Inet(hook)),
+                Hook::Priority(priority),
+            ]),
+            ChainAttribute::Policy(NF_ACCEPT),
+            ChainAttribute::Type(kind.to_owned()),
+        ],
+    })
+}
+
+/// A rule of chain `chain`.
+fn new_rule(chain: &str, rule: &HostRule) -> NfTablesMessage {
+    NfTablesMessage::NewRule(RuleMessage {
+        attributes: vec![
+            RuleAttribute::Table(HOST_TABLE.to_owned()),
+            RuleAttribute::Chain(chain.to_owned()),
+            RuleAttribute::Expressions(expressions(rule)),
+        ],
+    })
+}
+
+/// Create the host table with its base chains and the final drop.
+fn create_table() -> Vec<Request<NetfilterMessage>> {
+    batch(vec![
+        Request::acknowledged(
+            inet(NfTablesMessage::NewTable(TableMessage {
+                attributes: vec![TableAttribute::Name(HOST_TABLE.to_owned())],
+            })),
+            CREATE_NEW,
+        ),
+        Request::acknowledged(
+            inet(base_chain(
+                FORWARD,
+                InetHookNumber::Forward,
+                FILTER_PRIORITY,
+                "filter",
+            )),
+            CREATE_NEW,
+        ),
+        Request::acknowledged(
+            inet(base_chain(
+                POSTROUTING,
+                InetHookNumber::PostRouting,
+                SRCNAT_PRIORITY,
+                "nat",
+            )),
+            CREATE_NEW,
+        ),
+        Request::acknowledged(inet(new_rule(FORWARD, &HostRule::DropUnmatched)), APPEND),
+    ])
+}
+
+/// The rules of `attempt`: its dispatch, its chain's and its masquerades.
+fn attempt_rules(attempt: &AttemptEgress) -> (HostRule, Vec<HostRule>, Vec<HostRule>) {
+    let forwarded: Vec<SocketAddr> = attempt
+        .endpoints
+        .iter()
+        .copied()
+        .filter(SocketAddr::is_ipv4)
+        .collect();
+    (
+        HostRule::Dispatch {
+            link: attempt.host_link.clone(),
+            chain: attempt.namespace.as_str().to_owned(),
+        },
+        forwarded.iter().copied().map(HostRule::Allow).collect(),
+        forwarded
+            .iter()
+            .map(|&endpoint| HostRule::Masquerade {
+                link: attempt.host_link.clone(),
+                endpoint,
+            })
+            .collect(),
+    )
+}
+
+/// Install `attempt`'s chain and rules. The dispatch rule goes to the head
+/// of the forward chain, before the final drop.
+fn install_attempt(attempt: &AttemptEgress) -> Vec<Request<NetfilterMessage>> {
+    let chain = attempt.namespace.as_str();
+    let (dispatch, allowed, masquerades) = attempt_rules(attempt);
+    let mut requests = vec![Request::acknowledged(
+        inet(NfTablesMessage::NewChain(ChainMessage {
+            attributes: vec![
+                ChainAttribute::Table(HOST_TABLE.to_owned()),
+                ChainAttribute::Name(chain.to_owned()),
+            ],
+        })),
+        CREATE_NEW,
+    )];
+    requests.extend(
+        allowed
+            .iter()
+            .map(|rule| Request::acknowledged(inet(new_rule(chain, rule)), APPEND)),
+    );
+    requests.extend(
+        masquerades
+            .iter()
+            .map(|rule| Request::acknowledged(inet(new_rule(POSTROUTING, rule)), APPEND)),
+    );
+    // Without `NLM_F_APPEND` a rule is inserted at the chain's head.
+    requests.push(Request::acknowledged(
+        inet(new_rule(FORWARD, &dispatch)),
+        NLM_F_CREATE,
+    ));
+    batch(requests)
+}
+
+/// One chain of the host table as read back.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct ReadChain {
+    /// Hook number, priority, policy and type of a base chain.
+    base: Option<(u32, u32, u32, String)>,
+    /// Each rule's handle and canonical expressions, in order.
+    rules: Vec<(u64, Vec<CanonicalExpression>)>,
+}
+
+/// The host table as read back, by chain name, with its flags.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct ReadTable {
+    flags: u32,
+    chains: BTreeMap<String, ReadChain>,
+}
+
+/// Whether an object of `family` in table `table` belongs to the host table.
+fn ours(table: Option<&String>, family: NetfilterProtoFamily) -> bool {
+    family == NetfilterProtoFamily::Inet && table.is_some_and(|table| table == HOST_TABLE)
+}
+
+/// The host table the three dumps report, or `None` if it does not exist.
+///
+/// # Errors
+/// Fails on another reply, and on a chain or rule of the host table that is
+/// not representable.
+fn read_table(
+    tables: Vec<NetfilterMessage>,
+    chains: Vec<NetfilterMessage>,
+    rules: Vec<NetfilterMessage>,
+) -> Result<Option<ReadTable>, NetlinkError> {
+    let mut table: Option<ReadTable> = None;
+    for reply in tables {
+        let family = reply.header.family;
+        let NetfilterMessageInner::NfTables(NfTablesMessage::NewTable(message)) = reply.inner
+        else {
+            return Err(NetlinkError::Unexpected);
+        };
+        let name = message
+            .attributes
+            .iter()
+            .find_map(|attribute| match attribute {
+                TableAttribute::Name(name) => Some(name.clone()),
+                _ => None,
+            });
+        if ours(name.as_ref(), family) {
+            let flags = message
+                .attributes
+                .iter()
+                .find_map(|attribute| match attribute {
+                    TableAttribute::Flags(flags) => Some(flags.bits()),
+                    _ => None,
+                });
+            table = Some(ReadTable {
+                flags: flags.unwrap_or(0),
+                chains: BTreeMap::new(),
+            });
+        }
+    }
+    let Some(mut table) = table else {
+        return Ok(None);
+    };
+    for reply in chains {
+        let family = reply.header.family;
+        let NetfilterMessageInner::NfTables(NfTablesMessage::NewChain(message)) = reply.inner
+        else {
+            return Err(NetlinkError::Unexpected);
+        };
+        let (mut owner, mut name, mut hook, mut priority, mut policy, mut kind) =
+            (None, None, None, None, None, None);
+        for attribute in message.attributes {
+            match attribute {
+                ChainAttribute::Table(value) => owner = Some(value),
+                ChainAttribute::Name(value) => name = Some(value),
+                ChainAttribute::Hook(hooks) => {
+                    for part in hooks {
+                        match part {
+                            Hook::Number(HookNumber::Inet(number)) => {
+                                hook = Some(u32::from(number))
+                            }
+                            Hook::Priority(value) => priority = Some(value),
+                            _ => return Err(NetlinkError::Unrepresentable),
+                        }
+                    }
+                }
+                ChainAttribute::Policy(value) => policy = Some(value),
+                ChainAttribute::Type(value) => kind = Some(value),
+                _ => {}
+            }
+        }
+        if ours(owner.as_ref(), family) {
+            let base = match (hook, priority, policy, kind) {
+                (None, None, None, None) => None,
+                (Some(hook), Some(priority), Some(policy), Some(kind)) => {
+                    Some((hook, priority, policy, kind))
+                }
+                _ => return Err(NetlinkError::Unrepresentable),
+            };
+            table.chains.insert(
+                name.ok_or(NetlinkError::Unrepresentable)?,
+                ReadChain {
+                    base,
+                    rules: Vec::new(),
+                },
+            );
+        }
+    }
+    for reply in rules {
+        let family = reply.header.family;
+        let NetfilterMessageInner::NfTables(NfTablesMessage::NewRule(message)) = reply.inner else {
+            return Err(NetlinkError::Unexpected);
+        };
+        let (mut owner, mut chain, mut handle, mut found) = (None, None, None, None);
+        for attribute in message.attributes {
+            match attribute {
+                RuleAttribute::Table(value) => owner = Some(value),
+                RuleAttribute::Chain(value) => chain = Some(value),
+                RuleAttribute::Handle(value) => handle = Some(value),
+                RuleAttribute::Expressions(value) => found = Some(canonical(&value)),
+                _ => {}
+            }
+        }
+        if ours(owner.as_ref(), family) {
+            let read = chain
+                .and_then(|chain| table.chains.get_mut(&chain))
+                .zip(handle.zip(found.flatten()))
+                .ok_or(NetlinkError::Unrepresentable)?;
+            read.0.rules.push(read.1);
+        }
+    }
+    Ok(Some(table))
+}
+
+/// Whether `observed` holds exactly the rules of `expected`, each as often,
+/// in any order.
+fn same_rules(expected: &[HostRule], observed: &[(u64, Vec<CanonicalExpression>)]) -> bool {
+    let mut expected: Vec<Vec<CanonicalExpression>> = expected.iter().map(canonical_rule).collect();
+    let mut observed: Vec<Vec<CanonicalExpression>> =
+        observed.iter().map(|(_, rule)| rule.clone()).collect();
+    expected.sort_unstable();
+    observed.sort_unstable();
+    expected == observed
+}
+
+/// Whether `table` is exactly the host table of `attempts`.
+fn is_exact(table: &ReadTable, attempts: &BTreeMap<String, AttemptEgress>) -> bool {
+    let forward_base = Some((
+        u32::from(InetHookNumber::Forward),
+        FILTER_PRIORITY,
+        NF_ACCEPT,
+        "filter".to_owned(),
+    ));
+    let postrouting_base = Some((
+        u32::from(InetHookNumber::PostRouting),
+        SRCNAT_PRIORITY,
+        NF_ACCEPT,
+        "nat".to_owned(),
+    ));
+    let mut dispatches = Vec::new();
+    let mut masquerades = Vec::new();
+    let attempt_chains = attempts.iter().all(|(chain, attempt)| {
+        let (dispatch, allowed, masquerade) = attempt_rules(attempt);
+        dispatches.push(dispatch);
+        masquerades.extend(masquerade);
+        table.chains.get(chain).is_some_and(|read| {
+            read.base.is_none()
+                && read.rules.len() == allowed.len()
+                && read
+                    .rules
+                    .iter()
+                    .zip(&allowed)
+                    .all(|((_, observed), rule)| *observed == canonical_rule(rule))
+        })
+    });
+    let forward = table.chains.get(FORWARD).is_some_and(|read| {
+        read.base == forward_base
+            && read.rules.split_last().is_some_and(|(last, dispatched)| {
+                last.1 == canonical_rule(&HostRule::DropUnmatched)
+                    && same_rules(&dispatches, dispatched)
+            })
+    });
+    let postrouting = table
+        .chains
+        .get(POSTROUTING)
+        .is_some_and(|read| read.base == postrouting_base && same_rules(&masquerades, &read.rules));
+    table.flags == 0
+        && table.chains.len() == attempts.len() + 2
+        && attempt_chains
+        && forward
+        && postrouting
+}
+
+/// The dumps of every table, chain and rule.
+fn dumps() -> [NetfilterMessage; 3] {
+    let unspec = |message| {
+        NetfilterMessage::new(
+            NetfilterHeader::new(NetfilterProtoFamily::Unspec, 0, 0),
+            message,
+        )
+    };
+    [
+        unspec(NfTablesMessage::GetTable(TableMessage {
+            attributes: Vec::new(),
+        })),
+        unspec(NfTablesMessage::GetChain(ChainMessage {
+            attributes: Vec::new(),
+        })),
+        unspec(NfTablesMessage::GetRule(RuleMessage {
+            attributes: Vec::new(),
+        })),
+    ]
+}
+
+/// Read the host table through `session`.
+fn observe<T: NetlinkTransport>(
+    session: &NetlinkSession<T>,
+) -> Result<Option<ReadTable>, NetlinkError> {
+    let [tables, chains, rules] = dumps();
+    session.dump(tables).and_then(|tables| {
+        session.dump(chains).and_then(|chains| {
+            session
+                .dump(rules)
+                .and_then(|rules| read_table(tables, chains, rules))
+        })
+    })
+}
+
+/// Remove `attempt`'s dispatch and masquerade rules, by the handles `table`
+/// reports, its chain's rules and its chain.
+fn remove_attempt(table: &ReadTable, attempt: &AttemptEgress) -> Vec<Request<NetfilterMessage>> {
+    let (dispatch, _, masquerades) = attempt_rules(attempt);
+    let by_handle = |chain: &str, rules: &[HostRule]| -> Vec<Request<NetfilterMessage>> {
+        let wanted: Vec<Vec<CanonicalExpression>> = rules.iter().map(canonical_rule).collect();
+        table
+            .chains
+            .get(chain)
+            .map(|read| {
+                read.rules
+                    .iter()
+                    .filter(|(_, rule)| wanted.contains(rule))
+                    .map(|&(handle, _)| {
+                        Request::acknowledged(
+                            inet(NfTablesMessage::DeleteRule(RuleMessage {
+                                attributes: vec![
+                                    RuleAttribute::Table(HOST_TABLE.to_owned()),
+                                    RuleAttribute::Chain(chain.to_owned()),
+                                    RuleAttribute::Handle(handle),
+                                ],
+                            })),
+                            0,
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let chain = attempt.namespace.as_str();
+    let mut requests = by_handle(FORWARD, &[dispatch]);
+    requests.extend(by_handle(POSTROUTING, &masquerades));
+    // A rule deletion without a handle flushes the chain.
+    requests.push(Request::acknowledged(
+        inet(NfTablesMessage::DeleteRule(RuleMessage {
+            attributes: vec![
+                RuleAttribute::Table(HOST_TABLE.to_owned()),
+                RuleAttribute::Chain(chain.to_owned()),
+            ],
+        })),
+        0,
+    ));
+    requests.push(Request::acknowledged(
+        inet(NfTablesMessage::DeleteChain(ChainMessage {
+            attributes: vec![
+                ChainAttribute::Table(HOST_TABLE.to_owned()),
+                ChainAttribute::Name(chain.to_owned()),
+            ],
+        })),
+        0,
+    ));
+    batch(requests)
+}
+
+/// Delete the host table and everything in it.
+fn delete_table() -> Vec<Request<NetfilterMessage>> {
+    batch(vec![Request::acknowledged(
+        inet(NfTablesMessage::DeleteTable(TableMessage {
+            attributes: vec![TableAttribute::Name(HOST_TABLE.to_owned())],
+        })),
+        0,
+    )])
+}
+
+/// A route lookup of `address` in the session's namespace.
+fn route_to(address: IpAddr) -> RouteNetlinkMessage {
+    let mut message = RouteMessage::default();
+    message.header.address_family = match address {
+        IpAddr::V4(_) => AddressFamily::Inet,
+        IpAddr::V6(_) => AddressFamily::Inet6,
+    };
+    message.header.destination_prefix_length = if address.is_ipv4() { 32 } else { 128 };
+    message.attributes = vec![RouteAttribute::Destination(RouteAddress::from(address))];
+    RouteNetlinkMessage::GetRoute(message)
+}
+
+/// Whether a [`route_to`] reply delivers locally, and the link it leaves
+/// by.
+fn route_reply(reply: RouteNetlinkMessage) -> Result<(bool, u32), NetlinkError> {
+    match reply {
+        RouteNetlinkMessage::NewRoute(message) => message
+            .attributes
+            .iter()
+            .find_map(|attribute| match attribute {
+                RouteAttribute::Oif(index) => Some(*index),
+                _ => None,
+            })
+            .map(|index| (message.header.kind == RouteType::Local, index))
+            .ok_or(NetlinkError::Unrepresentable),
+        _ => Err(NetlinkError::Unexpected),
+    }
+}
+
+/// Turn IPv4 forwarding on for packets that enter by link `index`.
+fn forward_from(index: u32) -> Request<RouteNetlinkMessage> {
+    let forwarding = DefaultNla::new(IPV4_DEVCONF_FORWARDING, 1_u32.to_ne_bytes().to_vec());
+    let mut nested = vec![0; forwarding.buffer_len()];
+    forwarding.emit(&mut nested);
+    let mut message = LinkMessage::default();
+    message.header.index = index;
+    message.attributes = vec![LinkAttribute::AfSpecUnspec(vec![AfSpecUnspec::Inet(vec![
+        AfSpecInet::Other(DefaultNla::new(IFLA_INET_CONF, nested)),
+    ])])];
+    Request::acknowledged(RouteNetlinkMessage::SetLink(message), 0)
+}
+
+/// The link of index `index`.
+fn get_link(index: u32) -> RouteNetlinkMessage {
+    let mut message = LinkMessage::default();
+    message.header.index = index;
+    RouteNetlinkMessage::GetLink(message)
+}
+
+/// Whether a [`get_link`] reply reports IPv4 forwarding on.
+fn forwards(reply: RouteNetlinkMessage) -> Result<bool, NetlinkError> {
+    match reply {
+        RouteNetlinkMessage::NewLink(message) => Ok(message.attributes.iter().any(|attribute| {
+            matches!(attribute, LinkAttribute::AfSpecUnspec(specs) if specs.iter().any(|spec| {
+                matches!(spec, AfSpecUnspec::Inet(inet) if inet.iter().any(|value| {
+                    matches!(value, AfSpecInet::DevConf(conf) if conf.forwarding == 1)
+                }))
+            }))
+        })),
+        _ => Err(NetlinkError::Unexpected),
+    }
+}
+
+/// Every link index the IPv4 traffic of `attempt` enters the host by, or
+/// [`HostEgressError::Ipv6Egress`] for an IPv6 endpoint the host does not
+/// hold: the attempt's veth end, `host_link`, and the link each off-host
+/// endpoint's replies come back by.
+fn ingress_links<T: NetlinkTransport>(
+    session: &NetlinkSession<T>,
+    host_link: u32,
+    endpoints: &[SocketAddr],
+) -> Result<Vec<u32>, HostEgressError> {
+    let mut links = vec![host_link];
+    for endpoint in endpoints {
+        let (local, link) = session
+            .request(route_to(endpoint.ip()))
+            .and_then(route_reply)?;
+        match (local, endpoint.is_ipv4()) {
+            (true, _) => {}
+            (false, true) => links.push(link),
+            (false, false) => return Err(HostEgressError::Ipv6Egress),
+        }
+    }
+    links.sort_unstable();
+    links.dedup();
+    Ok(links)
+}
+
+/// The host side of attempt networks: it admits endpoints, gives an
+/// installed attempt egress and takes it away again.
+pub trait EgressControl {
+    /// Check that `endpoints` can be reached: IPv4 endpoints, and IPv6
+    /// endpoints that are addresses of the host.
+    ///
+    /// # Errors
+    /// Fails on an IPv6 endpoint off the host, before anything changes.
+    fn admit(&self, endpoints: &[SocketAddr]) -> Result<(), HostEgressError>;
+
+    /// Give `attempt`, whose namespace and veth pair exist, egress, and read
+    /// it back.
+    ///
+    /// # Errors
+    /// Fails on any refused change or differing read-back; the caller then
+    /// removes the attempt.
+    fn install(&self, attempt: &AttemptEgress) -> Result<(), HostEgressError>;
+
+    /// Take `attempt`'s egress away, whichever part exists, and read it back.
+    ///
+    /// # Errors
+    /// Fails on a refused change or a differing read-back.
+    fn remove(&self, attempt: &AttemptEgress) -> Result<(), HostEgressError>;
+}
+
+/// The provider's host egress in the calling thread's network namespace:
+/// the attempts it installed, whose table it reads back after every change.
+/// One change runs at a time.
+#[derive(Debug, Default)]
+pub struct HostEgress {
+    attempts: Mutex<BTreeMap<String, AttemptEgress>>,
+}
+
+impl HostEgress {
+    /// No attempt has egress yet.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Give `attempt`, whose host veth end has index `host_link`, egress
+    /// through `route` and `netfilter`.
+    fn install_with<R: NetlinkTransport, N: NetlinkTransport>(
+        &self,
+        route: &NetlinkSession<R>,
+        netfilter: &NetlinkSession<N>,
+        host_link: u32,
+        attempt: &AttemptEgress,
+    ) -> Result<(), HostEgressError> {
+        let mut attempts = self.attempts.lock().unwrap_or_else(PoisonError::into_inner);
+        let links = ingress_links(route, host_link, &attempt.endpoints)?;
+        route.execute(links.iter().map(|&link| forward_from(link)).collect())?;
+        for &link in &links {
+            if !route.request(get_link(link)).and_then(forwards)? {
+                return Err(HostEgressError::Forwarding);
+            }
+        }
+        if observe(netfilter)?.is_none() {
+            netfilter.execute(create_table())?;
+        }
+        attempts.insert(attempt.namespace.as_str().to_owned(), attempt.clone());
+        netfilter.execute(install_attempt(attempt))?;
+        observe(netfilter)?
+            .is_some_and(|table| is_exact(&table, &attempts))
+            .then_some(())
+            .ok_or(HostEgressError::Readback)
+    }
+
+    /// Take `attempt`'s egress away through `netfilter`.
+    fn remove_with<N: NetlinkTransport>(
+        &self,
+        netfilter: &NetlinkSession<N>,
+        attempt: &AttemptEgress,
+    ) -> Result<(), HostEgressError> {
+        let mut attempts = self.attempts.lock().unwrap_or_else(PoisonError::into_inner);
+        attempts.remove(attempt.namespace.as_str());
+        if let Some(table) = observe(netfilter)? {
+            if table.chains.contains_key(attempt.namespace.as_str()) {
+                netfilter.execute(remove_attempt(&table, attempt))?;
+            }
+        }
+        observe(netfilter)?
+            .is_none_or(|table| is_exact(&table, &attempts))
+            .then_some(())
+            .ok_or(HostEgressError::Readback)
+    }
+}
+
+impl EgressControl for HostEgress {
+    fn admit(&self, endpoints: &[SocketAddr]) -> Result<(), HostEgressError> {
+        let session = NetlinkSession::open(ROUTE)?;
+        ingress_links(&session, 0, endpoints).map(drop)
+    }
+
+    fn install(&self, attempt: &AttemptEgress) -> Result<(), HostEgressError> {
+        let route = NetlinkSession::open(ROUTE)?;
+        let netfilter = NetlinkSession::open(NETFILTER)?;
+        let host_link =
+            super::route::link_reply(route.request(super::route::get_link(&attempt.host_link)))?
+                .ok_or(NetlinkError::Unrepresentable)?;
+        self.install_with(&route, &netfilter, host_link.index, attempt)
+    }
+
+    fn remove(&self, attempt: &AttemptEgress) -> Result<(), HostEgressError> {
+        let netfilter = NetlinkSession::open(NETFILTER)?;
+        self.remove_with(&netfilter, attempt)
+    }
+}
+
+/// Delete the whole host table, if it exists, and read its absence back.
+/// Restart reconciliation calls this with the other orphan removals.
+///
+/// # Errors
+/// Fails if the table cannot be deleted or remains.
+pub(super) fn remove_table<N: NetlinkTransport>(
+    netfilter_session: impl Fn() -> Result<NetlinkSession<N>, NetlinkError>,
+) -> Result<(), NetlinkError> {
+    netfilter_session()
+        .and_then(|session| match session.execute(delete_table()) {
+            Err(NetlinkError::Kernel(NO_SUCH_OBJECT)) => Ok(()),
+            deleted => deleted,
+        })
+        .and_then(|()| consistent(|| netfilter_session().and_then(|session| observe(&session))))
+        .and_then(|table| table.map_or(Ok(()), |_| Err(NetlinkError::Residual)))
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests;

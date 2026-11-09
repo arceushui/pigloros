@@ -308,9 +308,9 @@ fn already_gone(deleted: Result<(), NetlinkError>) -> Result<(), NetlinkError> {
 }
 
 impl NetlinkNamespaceControl {
-    /// Remove every host veth end named `piglor-h…` and every attempt
-    /// namespace pinned in this adapter's directory, whichever attempt owned
-    /// them, and read their absence back.
+    /// Remove the host egress table, every host veth end named `piglor-h…`
+    /// and every attempt namespace pinned in this adapter's directory,
+    /// whichever attempt owned them, and read their absence back.
     ///
     /// Only restart reconciliation may call this, before admission opens and
     /// once every attempt unit is known to be gone: it removes the network of
@@ -323,7 +323,8 @@ impl NetlinkNamespaceControl {
     /// # Errors
     /// Fails if any of them cannot be removed, or remains afterwards.
     pub fn remove_orphans(&self) -> Result<(), NetlinkError> {
-        consistent(|| with_session(ROUTE, attempt_host_links))
+        super::host_egress::remove_table(|| NetlinkSession::open(NETFILTER))
+            .and_then(|()| consistent(|| with_session(ROUTE, attempt_host_links)))
             .and_then(|orphans| {
                 orphans.iter().try_for_each(|link| {
                     already_gone(with_session(ROUTE, |session| {

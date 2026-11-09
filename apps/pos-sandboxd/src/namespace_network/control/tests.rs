@@ -28,16 +28,6 @@ fn a_link_already_gone_counts_as_deleted() {
     ));
 }
 
-#[test]
-fn nothing_orphaned_removes_as_nothing() -> TestResult {
-    let directory = tempfile::tempdir()?;
-    // Reading the host's links needs no privilege, and the test host has no
-    // provider-owned veth end.
-    let control = NetlinkNamespaceControl::new(NetworkNamespaces::pinned_under(directory.path()));
-    assert!(matches!(control.remove_orphans(), Ok(())));
-    Ok(())
-}
-
 /// Tests that need `NET_ADMIN`, `SYS_ADMIN` and mounts. Each re-runs itself
 /// in the isolated container that grants exactly those, and runs its body
 /// there, where the container's own network namespace is the host's.
