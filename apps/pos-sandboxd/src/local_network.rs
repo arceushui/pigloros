@@ -124,7 +124,7 @@ pub trait LocalNetworkPort {
 ///
 /// LPS1 decoding admits only four- and sixteen-byte addresses, so every
 /// admitted capability names one.
-pub(crate) fn admitted_endpoints(admission: &LocalNetworkAdmission) -> Vec<SocketAddr> {
+pub(super) fn admitted_endpoints(admission: &LocalNetworkAdmission) -> Vec<SocketAddr> {
     admission
         .exchanges()
         .filter_map(|(_, capability)| {
