@@ -136,6 +136,7 @@ fn run_ceremony(
     // cancellation or browser retirement is unresolved, even after receipt.
     let _visible = acquire_foreground(surface, foreground, number)?;
     let started = Instant::now();
+    surface.begin_readiness_timing(number, started);
     let deadline = started + Duration::from_secs(15);
     surface.set_deadline(deadline);
     let mut driver = new_driver(id, started)?;
@@ -198,6 +199,7 @@ fn run_ceremony(
             pump_retaining(surface);
         }
     }
+    surface.report_readiness_timing();
     if let Some(error) = failure {
         return Err(error);
     }

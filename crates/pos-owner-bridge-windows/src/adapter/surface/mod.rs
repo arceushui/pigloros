@@ -114,6 +114,8 @@ pub(super) struct Surface {
     initial_buffer_close: Option<bool>,
     #[cfg(test)]
     initial_close: Option<CloseObservation>,
+    #[cfg(test)]
+    readiness_timing: diagnostics::ReadinessTiming,
 }
 
 impl Surface {
@@ -158,7 +160,19 @@ impl Surface {
             initial_buffer_close: None,
             #[cfg(test)]
             initial_close: None,
+            #[cfg(test)]
+            readiness_timing: diagnostics::ReadinessTiming::default(),
         })
+    }
+
+    #[cfg(test)]
+    pub(in crate::adapter) fn begin_readiness_timing(&mut self, case: u64, started: Instant) {
+        self.readiness_timing.begin(case, started);
+    }
+
+    #[cfg(test)]
+    pub(in crate::adapter) fn report_readiness_timing(&mut self) {
+        self.readiness_timing.report();
     }
 
     #[cfg(test)]
@@ -1239,9 +1253,30 @@ impl OwnerWebSurface for Surface {
     }
 
     fn reply_load_state(&self) -> Result<u32> {
+        #[cfg(test)]
+        {
+            let state = self.native.load_state().map_err(unavailable);
+            if matches!(state.as_ref(), Ok(value) if *value == ControlState::Releasing as u32) {
+                self.readiness_timing.releasing();
+            }
+            state
+        }
+        #[cfg(not(test))]
         self.native.load_state().map_err(unavailable)
     }
     fn reply_compare_exchange(&self, current: u32, new: u32) -> Result<bool> {
+        #[cfg(test)]
+        {
+            let result = self
+                .native
+                .compare_exchange(current, new)
+                .map_err(unavailable);
+            if new == ControlState::ReleaseRequested as u32 && matches!(result.as_ref(), Ok(true)) {
+                self.readiness_timing.cas();
+            }
+            result
+        }
+        #[cfg(not(test))]
         self.native
             .compare_exchange(current, new)
             .map_err(unavailable)
@@ -1260,6 +1295,8 @@ impl OwnerWebSurface for Surface {
     }
 
     fn close_controller(&mut self) -> Result<()> {
+        #[cfg(test)]
+        self.readiness_timing.close_enter();
         self.close = CloseState::Pending;
         let buffers = self.zero_close_buffers();
         #[cfg(test)]
@@ -1276,6 +1313,8 @@ impl OwnerWebSurface for Surface {
         #[cfg(test)]
         self.cleanup_trace.enter("close.close_controller");
         let closed = self.native.close_controller();
+        #[cfg(test)]
+        self.readiness_timing.close_return();
         #[cfg(test)]
         self.cleanup_trace
             .returned("close.close_controller", closed);

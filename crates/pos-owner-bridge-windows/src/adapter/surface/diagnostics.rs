@@ -51,3 +51,55 @@ impl CleanupTrace {
         step.result = Some(result);
     }
 }
+
+/// One readiness case's host-side transitions; each instant is recorded at most once.
+#[derive(Default)]
+pub(super) struct ReadinessTiming {
+    case: Option<u64>,
+    started: Option<std::time::Instant>,
+    cas: std::cell::Cell<Option<std::time::Instant>>,
+    releasing: std::cell::Cell<Option<std::time::Instant>>,
+    close_enter: std::cell::Cell<Option<std::time::Instant>>,
+    close_return: std::cell::Cell<Option<std::time::Instant>>,
+}
+
+impl ReadinessTiming {
+    pub(super) fn begin(&mut self, case: u64, started: std::time::Instant) {
+        *self = Self {
+            case: Some(case),
+            started: Some(started),
+            ..Self::default()
+        };
+    }
+
+    fn mark(&self, slot: &std::cell::Cell<Option<std::time::Instant>>) {
+        if self.case.is_some() && slot.get().is_none() {
+            slot.set(Some(std::time::Instant::now()));
+        }
+    }
+
+    pub(super) fn cas(&self) {
+        self.mark(&self.cas);
+    }
+    pub(super) fn releasing(&self) {
+        self.mark(&self.releasing);
+    }
+    pub(super) fn close_enter(&self) {
+        self.mark(&self.close_enter);
+    }
+    pub(super) fn close_return(&self) {
+        self.mark(&self.close_return);
+    }
+
+    pub(super) fn report(&mut self) {
+        if let (Some(case), Some(started)) = (self.case, self.started) {
+            let elapsed = |slot: &std::cell::Cell<Option<std::time::Instant>>| {
+                slot.get().map(|at| at.saturating_duration_since(started))
+            };
+            let _logged_or_unavailable = writeln!(std::io::stderr(),
+                "NATIVE_READINESS_TIMING case={case} release_cas={:?} releasing={:?} close_enter={:?} native_close_return={:?}",
+                elapsed(&self.cas), elapsed(&self.releasing), elapsed(&self.close_enter), elapsed(&self.close_return));
+        }
+        *self = Self::default();
+    }
+}
