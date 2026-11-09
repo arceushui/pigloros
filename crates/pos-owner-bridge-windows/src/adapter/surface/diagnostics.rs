@@ -16,6 +16,7 @@ pub(super) struct CleanupTrace(RefCell<BTreeMap<&'static str, Step>>);
 struct Step {
     attempts: u64,
     result: Option<NativeResult<()>>,
+    transitions: u8,
 }
 
 impl CleanupTrace {
@@ -36,7 +37,11 @@ impl CleanupTrace {
     pub(super) fn returned(&self, stage: &'static str, result: NativeResult<()>) {
         let mut steps = self.0.borrow_mut();
         let step = steps.entry(stage).or_default();
-        if step.attempts.is_power_of_two() || step.result != Some(result) {
+        let report_transition = step.result != Some(result) && step.transitions < 8;
+        if report_transition {
+            step.transitions += 1;
+        }
+        if step.attempts.is_power_of_two() || report_transition {
             let _logged_or_unavailable = writeln!(
                 std::io::stderr(),
                 "NATIVE_CLEANUP_PROBE stage={stage} attempt={} result={result:?}",
