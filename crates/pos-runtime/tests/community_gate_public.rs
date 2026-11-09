@@ -610,6 +610,64 @@ fn gate_rechecks_content_even_if_the_registry_reports_a_release_active() -> Test
     Ok(())
 }
 
+/// Admission survives a registry and OCI source restart, and the reopened gate rechecks content.
+#[test]
+fn validated_admission_gates_after_sqlite_and_source_reopen() -> TestResult {
+    use std::sync::Arc;
+
+    use pos_core::{store::EventStore, ErasureContainmentGateV1};
+    use pos_plugin_publisher::test_support::world::activation;
+    use pos_plugin_publisher::{install_plugin_release_v1, PluginInstallRequestV1};
+    use pos_store::sqlite::SqliteStore;
+
+    let mut world = World::new()?;
+    let release = world.publish(Shape::first())?;
+    let material = world.material()?;
+    let source = Source::of(current(&world)?);
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("registry.db");
+    let path = path.to_str().ok_or("non-UTF-8 registry path")?;
+    let mut registry = SqliteStore::open(path)?;
+    registry.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
+    let timeline = registry.create_timeline("plugin-activation")?.id();
+    let (anchor, genesis) = world.policy.anchor()?;
+    registry.provision(&anchor, &genesis)?;
+    let installed = install_plugin_release_v1(
+        &world.store,
+        release.address(),
+        &mut registry,
+        &mut wall(material.utc)?,
+        PluginInstallRequestV1 {
+            anchor: &anchor,
+            tps1_bytes: &material.tps1,
+            evidence: &material.evidence,
+            activation: activation(timeline, 1),
+        },
+    )?;
+    assert_eq!(
+        installed.content_validation(),
+        ContentValidationV1::BasicPackageV1
+    );
+    drop(registry);
+    let reopened_registry = SqliteStore::open(path)?;
+    let reopened_source = world.root.store()?;
+    let pass = open_pass(50, TICK)?;
+    let (gated, _) = gate_community_release_v1(
+        &reopened_registry,
+        &expectation(PLUGIN_ID),
+        &reopened_source,
+        release.address(),
+        &source,
+        &pass,
+    )?;
+    assert_eq!(
+        gated.content_validation(),
+        ContentValidationV1::BasicPackageV1
+    );
+    assert_eq!(gated.release_digest(), release.release_digest());
+    Ok(())
+}
+
 /// R7-G13: seconds inside the manifest interval `[40, 60)`, with the highest second 55.
 #[test]
 fn a_clock_below_the_committed_second_is_refused_and_above_it_accepted() -> TestResult {
