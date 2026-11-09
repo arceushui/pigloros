@@ -736,21 +736,57 @@ impl Fixture {
         result: Result<Verified, BridgeError>,
         restart_orphans: Option<CeremonyId>,
     ) -> TestResult {
+        let mut progress = super::trace::Trace::new(u64::from(self.number), Instant::now());
+        let _logged = writeln!(
+            std::io::stderr(),
+            "NATIVE_FAULT_RETIRE case={} stage=enter",
+            self.number
+        );
         retirement::retire(
             &mut self.surface,
             &mut self.loopback,
             &mut self.store,
             driver,
             result,
-            |_, _, _| {},
+            |surface, driver, loopback| progress.update("retirement", surface, driver, loopback),
+        );
+        let _logged = writeln!(
+            std::io::stderr(),
+            "NATIVE_FAULT_RETIRE case={} stage=retired",
+            self.number
         );
         // Retain the process object and its creating STA through actual retirement.
+        let _logged = writeln!(
+            std::io::stderr(),
+            "NATIVE_FAULT_RETIRE case={} stage=handle-drop-enter",
+            self.number
+        );
         drop(self.handle.take());
+        let _logged = writeln!(
+            std::io::stderr(),
+            "NATIVE_FAULT_RETIRE case={} stage=handle-drop-return surface-drop-enter",
+            self.number
+        );
         drop(self.surface);
+        let _logged = writeln!(
+            std::io::stderr(),
+            "NATIVE_FAULT_RETIRE case={} stage=surface-drop-return",
+            self.number
+        );
         assert!(self.store.records()?.is_empty());
+        let _logged = writeln!(
+            std::io::stderr(),
+            "NATIVE_FAULT_RETIRE case={} stage=factory-stop-enter",
+            self.number
+        );
         Rc::get_mut(&mut self.factory)
             .ok_or("fault factory still shared")?
             .stop()?;
+        let _logged = writeln!(
+            std::io::stderr(),
+            "NATIVE_FAULT_RETIRE case={} stage=factory-stop-return",
+            self.number
+        );
         if let Some(ceremony_id) = restart_orphans {
             let expected = pos_owner_bridge::folder_name(&ceremony_id);
             if self
@@ -3345,6 +3381,7 @@ fn run_pre_environment(runtime: &Path, number: u8, case: EnvironmentCase) -> Tes
     let no_record = fixture.store.records()?.is_empty();
     let retained_orphan = fixture.store.folders()?.len() == 1;
     let idle = fixture.surface.idle();
+    let _logged = writeln!(std::io::stderr(), "NATIVE_PRE_ENV_VERDICT case={number} initial_witness={initial_witness} driver_pending={driver_pending} active_blocked={active_blocked} abandoned_blocked={abandoned_blocked} initial_completion={initial_completion:?} deadline_completion={at_deadline:?} pump_failed={pump_failed} timed_out={timed_out} wiped={wiped} order={order:?} ordered={ordered} no_record={no_record} orphan={retained_orphan} idle={idle}");
     drop(fixture.surface);
     Rc::get_mut(&mut fixture.factory)
         .ok_or("pre-environment factory still shared")?
@@ -3599,7 +3636,7 @@ fn run_environment_obstruction(
     let retained_orphan = fixture.store.folders()?.len() == 1;
     let idle = fixture.surface.idle();
     let expected_observation = Ok(Some(!obstruct));
-    let _written = writeln!(std::io::stderr(), "NATIVE_UDF_OBSTRUCTION obstruct={obstruct} pending={driver_pending} active_blocked={active_blocked} abandoned_blocked={abandoned_blocked} completion={observation:?} order={order:?} wiped={wiped} idle={idle} orphan={retained_orphan}");
+    let _written = writeln!(std::io::stderr(), "NATIVE_UDF_OBSTRUCTION fixed_ebwebview_file_requested={obstruct} obstruct={obstruct} pending={driver_pending} active_blocked={active_blocked} abandoned_blocked={abandoned_blocked} completion={observation:?} order={order:?} wiped={wiped} idle={idle} orphan={retained_orphan}");
     drop(fixture.surface);
     Rc::get_mut(&mut fixture.factory)
         .ok_or("obstructed factory still shared")?

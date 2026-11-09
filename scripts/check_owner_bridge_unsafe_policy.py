@@ -1118,7 +1118,7 @@ def _check_fault_authority(root: Path, scans: dict[str, tuple[Scan, tuple[Attrib
             found.append(f"{SHIM}/src/lib.rs: process fault hosted test must call the real fixture")
     retirement = scans.get("src/adapter/native_tests/retirement.rs")
     retirement_code = retirement[0].code if retirement else ""
-    if hashlib.sha256(re.sub(r"\s+", "", retirement_code).encode()).hexdigest() != "269968fdb17c819dcb52f04ba6ece90897994157f4a4c352a7a53419dbd4a92e":
+    if hashlib.sha256(re.sub(r"\s+", "", retirement_code).encode()).hexdigest() != "eb6e478e963eb5c7d03378be4106380321fd851cb6238c080e3e0395f8e784aa":
         found.append(f"{SHIM}/src/adapter/native_tests/retirement.rs: shared retirement differs from reviewed code")
     if len([match for match in MOD_DECLARATION.finditer(test_code) if match.group("name") == "retirement"]) != 1:
         found.append(f"{SHIM}/src/adapter/native_tests.rs: shared retirement declaration is missing or ambiguous")
@@ -1308,7 +1308,7 @@ def _check_fault_authority(root: Path, scans: dict[str, tuple[Scan, tuple[Attrib
     relative = "src/adapter/native_tests/process_fault.rs"
     item = scans.get(relative)
     code = item[0].code if item else ""
-    if hashlib.sha256(re.sub(r"\s+", "", code).encode()).hexdigest() != "3fcacac8d80d958b87f5fb8e07c841c6cc39e789afc5ce9e76412596b427bcc2":
+    if hashlib.sha256(re.sub(r"\s+", "", code).encode()).hexdigest() != "bc980859a47985abf276a3bb4fa15c69570ec212b2b1246902eccdc669a8ce0c":
         found.append(f"{SHIM}/{relative}: process fault fixture differs from reviewed sealed caller")
 
 
