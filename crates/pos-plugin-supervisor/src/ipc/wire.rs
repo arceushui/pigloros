@@ -132,11 +132,13 @@ impl Writer {
     }
 
     fn head(&mut self, major: u8, value: u64) {
+        // CBOR's major tag and additional information occupy disjoint bit
+        // ranges; addition expresses the canonical initial-byte composition.
         let tag = major << 5;
         let bytes = value.to_be_bytes();
         let (code, width) = match value {
             0..=23 => {
-                self.push(tag | bytes[7]);
+                self.push(tag + bytes[7]);
                 return;
             }
             24..=0xff => (0x18, 1),
@@ -144,7 +146,7 @@ impl Writer {
             0x1_0000..=0xffff_ffff => (0x1a, 4),
             _ => (0x1b, 8),
         };
-        self.push(tag | code);
+        self.push(tag + code);
         self.extend(&bytes[8 - width..]);
     }
 
