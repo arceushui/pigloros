@@ -61,7 +61,7 @@ fn checksum_wit_header(archive: &mut [u8]) {
 
 #[test]
 fn provenance_required_fields_fail_with_their_closed_artifact_error() -> TestResult {
-    for root in [json!(null), json!([]), json!(true)] {
+    for root in [json!(null), json!([]), json!(false)] {
         let mut fixture = Fixture::new();
         fixture.provenance = bytes(&root);
         assert_eq!(
