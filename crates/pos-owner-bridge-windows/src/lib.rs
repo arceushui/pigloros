@@ -395,6 +395,8 @@ pub(crate) enum ProcessFaultLifecycle {
     PostedEmpty,
     PostedWriting,
     PostedReady,
+    PostedConsuming,
+    BeforeRecord,
     PostedRetry(RetryPoint),
     AwaitingLoad,
     Navigating,
@@ -438,6 +440,7 @@ pub(crate) enum ProcessFaultPhase {
     PostedEmpty,
     PostedWriting,
     PostedReady,
+    PostedConsuming,
     PostedRetry,
     ReleasingSuccess,
 }
@@ -488,6 +491,11 @@ pub(crate) enum ProcessFaultMark {
         record_count: usize,
     },
     ControllerCompletion(bool),
+    RecordWritten,
+    BeforeRecord {
+        generation: u32,
+        record_count: usize,
+    },
     Selected(pos_owner_bridge::ProcessIdentity),
     TerminationCall,
     MainRendererExited,

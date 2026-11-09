@@ -1372,6 +1372,7 @@ def test_owned_process_fault_authority() -> None:
         "removed pending-controller recheck": ("pending_controller.ok_or(())?.succeeded().is_some()", "false"),
         "writing-state recheck": ("ControlState::Writing as u32", "ControlState::Empty as u32"),
         "ready-state recheck": ("ControlState::Ready as u32", "ControlState::Empty as u32"),
+        "consuming-state recheck": ("ControlState::Consuming as u32", "ControlState::Empty as u32"),
         "different source": ("candidates(environment)?", "other_candidates(environment)?"),
         "indirect termination": ("TerminateProcess(handle, FAULT_EXIT)", "hidden(handle, FAULT_EXIT)"),
         "membership gate suppressed": ("select(&second, kind)? != pid", "false"),
@@ -1416,6 +1417,12 @@ def test_owned_process_fault_authority() -> None:
         ("self.evidence_complete = true;", "self.evidence_complete = false;"),
         (".posted_fault_event(target)", ".posted_fault_event(ProcessFaultTarget::Browser)"),
         ("ProcessFaultMark::ControllerCompletion(success)", "ProcessFaultMark::TerminationCall"),
+        ("self.on_consuming().is_err()", "false"),
+        ("let won = self.inner.borrow().reply_compare_exchange(current, new)?;", "let won = true;"),
+        ("Ok(won)", "Ok(true)"),
+        ("self.inner.write_record(record)", "Ok(())"),
+        ("decoded.browser_pid() != browser.browser_pid", "false"),
+        (".push(ProcessFaultMark::RecordWritten)", ".push(ProcessFaultMark::TerminationCall)"),
         ("previous.len() != usize::from(point.post() - 1) * 2", "false"),
         ("self.prior_native_wipe = true;", "self.prior_native_wipe = false;"),
         ("pos_owner_bridge::ceremony::timing::FAST_POLL", "std::time::Duration::ZERO"),
@@ -1438,6 +1445,7 @@ def test_owned_process_fault_authority() -> None:
         ("src/adapter/surface/mod.rs", "&& events.loaded().is_none()", "&& true", "process fault authority function inject_awaiting_load_fault differs from reviewed code"),
         ("src/adapter/surface/mod.rs", "&& events.started().is_none()", "&& true", "process fault authority function inject_navigating_fault differs from reviewed code"),
         ("src/adapter/surface/mod.rs", "state.generation != u32::from(point.post())", "state.generation != 1", "process fault authority function posted_retry_fault_state differs from reviewed code"),
+        ("src/adapter/surface/mod.rs", "self.activation_error.is_some()", "false", "process fault authority function before_record_fault_state differs from reviewed code"),
         ("src/adapter/surface/mod.rs", "generation != 1 || posts != 0", "generation != 1", "process fault authority function awaiting_load_fault_state differs from reviewed code"),
         ("src/adapter/native_tests/process_fault.rs", ".inject_awaiting_load_fault(seal)", ".inject_exit_fault(seal)", "process fault fixture differs from reviewed sealed caller"),
     ):
@@ -1454,7 +1462,7 @@ def test_owned_process_fault_authority() -> None:
         if f"{SHIM}/{relative}: {expected}" not in found:
             raise SystemExit(f"awaiting-load authority mutation was accepted: {old}: {found}")
     # Each new phase must classify ProcessFailed through completed retirement.
-    for function in ("run_awaiting_load", "run_navigating", "run_posted_empty", "run_pending_opening", "run_posted_writing", "run_posted_ready", "run_posted_retry"):
+    for function in ("run_awaiting_load", "run_navigating", "run_posted_empty", "run_pending_opening", "run_posted_writing", "run_posted_ready", "run_posted_retry", "run_consuming", "run_before_record"):
         start = fixture_source.find(f"fn {function}(")
         end = fixture_source.find("\n}", start)
         body = fixture_source[start:end]

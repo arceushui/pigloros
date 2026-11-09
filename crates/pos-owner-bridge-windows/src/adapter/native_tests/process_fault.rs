@@ -279,6 +279,8 @@ fn run() -> TestResult {
         );
     }
     run_retries(Path::new(&runtime), &root.0)?;
+    run_consuming_cases(Path::new(&runtime), &root.0)?;
+    run_before_record_cases(Path::new(&runtime), &root.0)?;
     root.remove()
 }
 
@@ -1909,4 +1911,656 @@ fn run_posted_retry(
         return Err("retry empty-reply failure, wipe, or evidence was not established".into());
     }
     state.ok_or_else(|| "retry empty-reply state was not reached".into())
+}
+
+// The wrapper delegates the real Surface CAS. Its only intervention is after
+// the driver's successful READY -> CONSUMING exchange, before it returns.
+struct ConsumingPort<'a> {
+    inner: RefCell<&'a mut Surface>,
+    target: ProcessFaultTarget,
+    inject: bool,
+    deadline: Instant,
+    trace: Trace,
+    state: ProcessFaultState,
+    handle: RefCell<Option<Box<dyn ProcessFaultHandle>>>,
+    failure: RefCell<Option<&'static str>>,
+    reached: RefCell<bool>,
+}
+
+impl ConsumingPort<'_> {
+    fn on_consuming(&self) -> TestResult {
+        if *self.reached.borrow() {
+            return Err("consuming CAS was observed twice".into());
+        }
+        let mut state = self.state;
+        state.phase = crate::ProcessFaultPhase::PostedConsuming;
+        state.reply_state = ControlState::Consuming as u32;
+        self.trace
+            .borrow_mut()
+            .push(ProcessFaultMark::Reached(state));
+        *self.reached.borrow_mut() = true;
+        if !self.inject {
+            return Ok(());
+        }
+        let seal = crate::FaultSeal {
+            trace: Rc::clone(&self.trace),
+            deadline: self.deadline,
+        };
+        let handle = self
+            .inner
+            .borrow()
+            .inject_posted_consuming_fault(self.target, seal)
+            .map_err(|()| "consuming fault refused")?;
+        *self.handle.borrow_mut() = Some(handle);
+        self.observe_consuming(state)
+    }
+
+    fn observe_consuming(&self, state: ProcessFaultState) -> TestResult {
+        loop {
+            if let Some(event) = self
+                .inner
+                .borrow()
+                .posted_fault_event(self.target)
+                .map_err(|()| "consuming fault event mismatched")?
+            {
+                let held = self.handle.borrow();
+                let handle = held.as_ref().ok_or("consuming fault handle missing")?;
+                let identity = handle.identity();
+                let code = handle
+                    .exit_code()
+                    .map_err(|()| "consuming exit query failed")?
+                    .ok_or("consuming exit still pending")?;
+                self.trace
+                    .borrow_mut()
+                    .extend([event, ProcessFaultMark::ExitCode(code)]);
+                let expected = match self.target {
+                    ProcessFaultTarget::Renderer => ProcessFaultMark::MainRendererExited,
+                    ProcessFaultTarget::Browser => ProcessFaultMark::OwnBrowserExited,
+                };
+                if self.trace.borrow().as_slice()
+                    != [
+                        ProcessFaultMark::Reached(state),
+                        ProcessFaultMark::Selected(identity),
+                        ProcessFaultMark::TerminationCall,
+                        expected,
+                        ProcessFaultMark::ExitCode(0x535),
+                    ]
+                {
+                    return Err("consuming fault evidence incomplete".into());
+                }
+                return Ok(());
+            }
+            if Instant::now() >= self.deadline {
+                return Err("consuming event timed out".into());
+            }
+            readiness::pump(&self.inner.borrow())?;
+        }
+    }
+}
+
+impl OwnerWebSurface for ConsumingPort<'_> {
+    fn open(
+        &mut self,
+        spec: &SurfaceSpec,
+    ) -> Poll<Result<pos_owner_bridge::ProcessIdentity, pos_owner_bridge::SurfaceError>> {
+        self.inner.borrow_mut().open(spec)
+    }
+    fn navigate(
+        &mut self,
+    ) -> Poll<Result<pos_owner_bridge::NavigationId, pos_owner_bridge::SurfaceError>> {
+        self.inner.borrow_mut().navigate()
+    }
+    fn create_and_write(
+        &mut self,
+        request: &pos_owner_bridge::RequestImage,
+        header: &[u8; 64],
+    ) -> Result<(), pos_owner_bridge::SurfaceError> {
+        self.inner.borrow_mut().create_and_write(request, header)
+    }
+    fn post(
+        &mut self,
+        guard: &pos_owner_bridge::PostGuard,
+    ) -> Result<(), pos_owner_bridge::SurfaceError> {
+        self.inner.borrow_mut().post(guard)
+    }
+    fn reply_load_state(&self) -> Result<u32, pos_owner_bridge::SurfaceError> {
+        self.inner.borrow().reply_load_state()
+    }
+    fn reply_compare_exchange(
+        &self,
+        current: u32,
+        new: u32,
+    ) -> Result<bool, pos_owner_bridge::SurfaceError> {
+        let won = self.inner.borrow().reply_compare_exchange(current, new)?;
+        if won
+            && current == ControlState::Ready as u32
+            && new == ControlState::Consuming as u32
+            && self.on_consuming().is_err()
+        {
+            *self.failure.borrow_mut() = Some("consuming fault evidence failed");
+        }
+        Ok(won)
+    }
+    fn reply_copy(
+        &self,
+        out: &mut pos_owner_bridge::ReplyImage,
+    ) -> Result<(), pos_owner_bridge::SurfaceError> {
+        self.inner.borrow().reply_copy(out)
+    }
+    fn zero_close_buffers(&mut self) -> Result<(), pos_owner_bridge::SurfaceError> {
+        self.inner.borrow_mut().zero_close_buffers()
+    }
+    fn close_controller(&mut self) -> Result<(), pos_owner_bridge::SurfaceError> {
+        self.inner.borrow_mut().close_controller()
+    }
+    fn take_event(&mut self) -> Option<pos_owner_bridge::SurfaceEvent> {
+        self.inner.borrow_mut().take_event()
+    }
+    fn finish(&mut self) -> Result<(), pos_owner_bridge::SurfaceError> {
+        self.inner.borrow_mut().finish()
+    }
+}
+
+fn run_consuming_cases(runtime: &Path, root: &Path) -> TestResult {
+    for (number, target) in [
+        (0x74, ProcessFaultTarget::Renderer),
+        (0x76, ProcessFaultTarget::Browser),
+    ] {
+        let control = run_consuming(runtime, root, number, target, false)?;
+        let fault = run_consuming(runtime, root, number + 1, target, true)?;
+        assert_eq!(
+            control, fault,
+            "consuming control and fault reached different states"
+        );
+    }
+    Ok(())
+}
+
+impl Fixture {
+    fn drive_consuming(
+        &mut self,
+        driver: &mut CeremonyDriver,
+        target: ProcessFaultTarget,
+        inject: bool,
+    ) -> DriveResult {
+        loop {
+            if self.reached.is_none()
+                && driver.first_receipt_at().is_some()
+                && self
+                    .surface
+                    .reply_load_state()
+                    .map_err(|_| "consuming reply read failed")?
+                    == ControlState::Ready as u32
+            {
+                let state = self
+                    .surface
+                    .posted_ready_fault_state(driver.posts())
+                    .map_err(|()| "pre-consuming state unavailable")?;
+                let deadline = self
+                    .deadline
+                    .min(driver.next_wake().ok_or("consuming deadline missing")?);
+                if Instant::now() >= deadline {
+                    return Err("consuming fault point expired".into());
+                }
+                let step = self.consuming_step(driver, target, inject, state, deadline)?;
+                match step {
+                    Step::Finished(result) => return Ok(result),
+                    Step::Done => return Err("consuming driver ended without result".into()),
+                    Step::Pending => readiness::pump(&self.surface)?,
+                }
+            } else {
+                let step = driver.step(&mut readiness::env(
+                    &mut self.surface,
+                    &mut self.loopback,
+                    &mut self.store,
+                ));
+                match step {
+                    Step::Finished(result) => return Ok(result),
+                    Step::Done => return Err("consuming driver ended without result".into()),
+                    Step::Pending => readiness::pump(&self.surface)?,
+                }
+            }
+        }
+    }
+
+    fn consuming_step(
+        &mut self,
+        driver: &mut CeremonyDriver,
+        target: ProcessFaultTarget,
+        inject: bool,
+        state: ProcessFaultState,
+        deadline: Instant,
+    ) -> Result<Step, Box<dyn std::error::Error>> {
+        let (attempt, handle, failure, reached) = {
+            let mut port = ConsumingPort {
+                inner: RefCell::new(&mut self.surface),
+                target,
+                inject,
+                deadline,
+                trace: Rc::clone(&self.trace),
+                state,
+                handle: RefCell::new(None),
+                failure: RefCell::new(None),
+                reached: RefCell::new(false),
+            };
+            let attempt = catch_unwind(AssertUnwindSafe(|| {
+                driver.step(&mut pos_owner_bridge::ceremony::driver::StepEnv {
+                    surface: &mut port,
+                    clock: &SystemClock,
+                    loopback: &mut self.loopback,
+                    store: &mut self.store,
+                })
+            }));
+            let handle = port.handle.borrow_mut().take();
+            let failure = port.failure.borrow_mut().take();
+            let reached = *port.reached.borrow();
+            (attempt, handle, failure, reached)
+        };
+        self.handle = handle;
+        let step = match attempt {
+            Ok(step) => step,
+            Err(payload) => std::panic::resume_unwind(payload),
+        };
+        if let Some(error) = failure {
+            return Err(error.into());
+        }
+        if !reached {
+            return Ok(step);
+        }
+        let mut state = state;
+        state.phase = crate::ProcessFaultPhase::PostedConsuming;
+        state.reply_state = ControlState::Consuming as u32;
+        self.reached = Some(state);
+        self.evidence_complete = true;
+        if !self.surface.fault_owners_retained() {
+            return Err("consuming owners missing".into());
+        }
+        self.check_blocked_admission()?;
+        Ok(step)
+    }
+}
+
+fn run_consuming(
+    runtime: &Path,
+    root: &Path,
+    number: u8,
+    target: ProcessFaultTarget,
+    inject: bool,
+) -> Result<ProcessFaultState, Box<dyn std::error::Error>> {
+    crate::Native::reset_process_failure_observations();
+    let mut fixture = Fixture::new(
+        runtime,
+        root,
+        number,
+        FixtureProfile::SuccessfulGetReleaseDelay,
+    )?;
+    let _zero_witness = ZeroWitness::arm();
+    let mut driver = readiness::new_driver(CeremonyId::from_bytes([number; 16]), Instant::now())?;
+    let attempt = catch_unwind(AssertUnwindSafe(|| {
+        fixture.drive_consuming(&mut driver, target, inject)
+    }));
+    let (result, failure) = fixture.resolve_attempt(&mut driver, attempt);
+    let accepted = result.is_ok();
+    let expected_prf = has_synthetic_success_prf(&driver);
+    let prf_clear = driver.prf().iter().all(|byte| *byte == 0);
+    let plan_wiped =
+        !matches!(&result, Err(BridgeError::Quarantine(_))) || driver.plan_secrets_clear();
+    let slot_clear = driver.request_clear();
+    let complete = fixture.evidence_complete;
+    let state = fixture.reached;
+    let observations = crate::Native::take_native_zero_observations();
+    let native_zeroed = native_zeroing_observed(&observations)
+        && observations
+            .get(1)
+            .is_some_and(|reply| reply.before_nonzero == Some(true));
+    fixture.retire(driver, result, None)?;
+    check_final_process_failures(inject.then_some(target))?;
+    if let Some(error) = failure {
+        return Err(error);
+    }
+    if !complete
+        || !slot_clear
+        || !native_zeroed
+        || !plan_wiped
+        || (inject && (accepted || !prf_clear))
+        || (!inject && (!accepted || !expected_prf))
+    {
+        return Err("consuming result, wipe, or evidence was not established".into());
+    }
+    state.ok_or_else(|| "consuming state was not reached".into())
+}
+
+// Both ports borrow the same real Surface; the driver's open call has returned
+// before it calls the record store, so their RefCell borrows never overlap.
+struct SharedSurfacePort<'a, 's> {
+    inner: &'a RefCell<&'s mut Surface>,
+}
+
+impl OwnerWebSurface for SharedSurfacePort<'_, '_> {
+    fn open(
+        &mut self,
+        spec: &SurfaceSpec,
+    ) -> Poll<Result<pos_owner_bridge::ProcessIdentity, pos_owner_bridge::SurfaceError>> {
+        self.inner.borrow_mut().open(spec)
+    }
+    fn navigate(
+        &mut self,
+    ) -> Poll<Result<pos_owner_bridge::NavigationId, pos_owner_bridge::SurfaceError>> {
+        self.inner.borrow_mut().navigate()
+    }
+    fn create_and_write(
+        &mut self,
+        request: &pos_owner_bridge::RequestImage,
+        header: &[u8; 64],
+    ) -> Result<(), pos_owner_bridge::SurfaceError> {
+        self.inner.borrow_mut().create_and_write(request, header)
+    }
+    fn post(
+        &mut self,
+        guard: &pos_owner_bridge::PostGuard,
+    ) -> Result<(), pos_owner_bridge::SurfaceError> {
+        self.inner.borrow_mut().post(guard)
+    }
+    fn reply_load_state(&self) -> Result<u32, pos_owner_bridge::SurfaceError> {
+        self.inner.borrow().reply_load_state()
+    }
+    fn reply_compare_exchange(
+        &self,
+        current: u32,
+        new: u32,
+    ) -> Result<bool, pos_owner_bridge::SurfaceError> {
+        self.inner.borrow().reply_compare_exchange(current, new)
+    }
+    fn reply_copy(
+        &self,
+        out: &mut pos_owner_bridge::ReplyImage,
+    ) -> Result<(), pos_owner_bridge::SurfaceError> {
+        self.inner.borrow().reply_copy(out)
+    }
+    fn zero_close_buffers(&mut self) -> Result<(), pos_owner_bridge::SurfaceError> {
+        self.inner.borrow_mut().zero_close_buffers()
+    }
+    fn close_controller(&mut self) -> Result<(), pos_owner_bridge::SurfaceError> {
+        self.inner.borrow_mut().close_controller()
+    }
+    fn take_event(&mut self) -> Option<pos_owner_bridge::SurfaceEvent> {
+        self.inner.borrow_mut().take_event()
+    }
+    fn finish(&mut self) -> Result<(), pos_owner_bridge::SurfaceError> {
+        self.inner.borrow_mut().finish()
+    }
+}
+
+struct BeforeRecordStore<'a, 's> {
+    inner: &'a mut WindowsCleanupStore,
+    surface: &'a RefCell<&'s mut Surface>,
+    inject: bool,
+    deadline: Instant,
+    trace: Trace,
+    handle: Option<Box<dyn ProcessFaultHandle>>,
+    failure: Option<&'static str>,
+    reached: bool,
+    written: bool,
+    generation: u32,
+    posts: u8,
+    ceremony_id: CeremonyId,
+}
+
+impl BeforeRecordStore<'_, '_> {
+    fn on_write(&mut self, record: &[u8]) -> TestResult {
+        if self.reached {
+            return Err("record write observed twice".into());
+        }
+        if Instant::now() >= self.deadline {
+            return Err("pre-record point expired".into());
+        }
+        let browser = self
+            .surface
+            .borrow_mut()
+            .before_record_fault_state()
+            .map_err(|()| "pre-record ownership indeterminate")?;
+        let decoded = pos_owner_bridge_codec::decode_cleanup_record(record)
+            .map_err(|_| "pre-record bytes failed to decode")?;
+        if self.generation != 1
+            || self.posts != 0
+            || decoded.ceremony_id() != self.ceremony_id
+            || decoded.folder_name() != pos_owner_bridge::folder_name(&self.ceremony_id)
+            || decoded.browser_pid() != browser.browser_pid
+            || decoded.creation_filetime() != browser.creation_filetime
+            || decoded.image_path_sha256() != browser.image_path_sha256
+        {
+            return Err("pre-record proposed identity or driver state mismatched".into());
+        }
+        let mark = ProcessFaultMark::BeforeRecord {
+            generation: 1,
+            record_count: 0,
+        };
+        self.trace.borrow_mut().push(mark);
+        self.reached = true;
+        if self.inject {
+            let seal = crate::FaultSeal {
+                trace: Rc::clone(&self.trace),
+                deadline: self.deadline,
+            };
+            self.handle = Some(
+                self.surface
+                    .borrow_mut()
+                    .inject_before_record_fault(seal)
+                    .map_err(|()| "pre-record fault refused")?,
+            );
+            self.observe_before_record(browser, mark)?;
+        }
+        let owners_before = self.surface.borrow_mut().before_record_owners_retained();
+        let blocked = matches!(
+            self.surface.borrow_mut().open(&competing_spec()),
+            Poll::Ready(Err(_))
+        );
+        let owners_after = self.surface.borrow_mut().before_record_owners_retained();
+        if !owners_before || !blocked || !owners_after {
+            return Err("pre-record owners or blocked admission missing".into());
+        }
+        Ok(())
+    }
+
+    fn observe_before_record(
+        &self,
+        browser: pos_owner_bridge::ProcessIdentity,
+        first: ProcessFaultMark,
+    ) -> TestResult {
+        loop {
+            if let Some(event) = self
+                .surface
+                .borrow()
+                .posted_fault_event(ProcessFaultTarget::Browser)
+                .map_err(|()| "pre-record browser exit mismatched")?
+            {
+                let handle = self
+                    .handle
+                    .as_ref()
+                    .ok_or("pre-record fault handle missing")?;
+                let code = handle
+                    .exit_code()
+                    .map_err(|()| "pre-record exit query failed")?
+                    .ok_or("pre-record process exit pending")?;
+                self.trace
+                    .borrow_mut()
+                    .extend([event, ProcessFaultMark::ExitCode(code)]);
+                if handle.identity() != browser
+                    || self.trace.borrow().as_slice()
+                        != [
+                            first,
+                            ProcessFaultMark::Selected(browser),
+                            ProcessFaultMark::TerminationCall,
+                            ProcessFaultMark::OwnBrowserExited,
+                            ProcessFaultMark::ExitCode(0x535),
+                        ]
+                {
+                    return Err("pre-record fault evidence incomplete".into());
+                }
+                return Ok(());
+            }
+            if Instant::now() >= self.deadline {
+                return Err("pre-record browser exit timed out".into());
+            }
+            readiness::pump(&self.surface.borrow())?;
+        }
+    }
+}
+
+impl CleanupStore for BeforeRecordStore<'_, '_> {
+    fn write_record(&mut self, record: &[u8]) -> Result<(), pos_owner_bridge::CleanupError> {
+        if self.on_write(record).is_err() {
+            self.failure = Some("pre-record fault evidence failed");
+        }
+        // Always return the result of the real durable store operation.
+        let result = self.inner.write_record(record);
+        self.written = result.is_ok();
+        if self.written {
+            self.trace
+                .borrow_mut()
+                .push(ProcessFaultMark::RecordWritten);
+        }
+        result
+    }
+    fn delete_record(&mut self, record: &[u8]) -> Result<(), pos_owner_bridge::CleanupError> {
+        self.inner.delete_record(record)
+    }
+    fn records(&mut self) -> Result<Vec<Vec<u8>>, pos_owner_bridge::CleanupError> {
+        self.inner.records()
+    }
+    fn folders(&mut self) -> Result<Vec<String>, pos_owner_bridge::CleanupError> {
+        self.inner.folders()
+    }
+    fn remove_folder(&mut self, folder: &str) -> Result<(), pos_owner_bridge::CleanupError> {
+        self.inner.remove_folder(folder)
+    }
+}
+
+fn run_before_record_cases(runtime: &Path, root: &Path) -> TestResult {
+    let control = run_before_record(runtime, root, 0x78, false)?;
+    let fault = run_before_record(runtime, root, 0x79, true)?;
+    assert_eq!(
+        control, fault,
+        "pre-record control and fault reached different states"
+    );
+    Ok(())
+}
+
+impl Fixture {
+    fn before_record_step(
+        &mut self,
+        driver: &mut CeremonyDriver,
+        ceremony_id: CeremonyId,
+        inject: bool,
+    ) -> Result<Step, Box<dyn std::error::Error>> {
+        let (attempt, handle, failure, reached, written) = {
+            let shared = RefCell::new(&mut self.surface);
+            let mut surface = SharedSurfacePort { inner: &shared };
+            let mut store = BeforeRecordStore {
+                inner: &mut self.store,
+                surface: &shared,
+                inject,
+                deadline: self.deadline,
+                trace: Rc::clone(&self.trace),
+                handle: None,
+                failure: None,
+                reached: false,
+                written: false,
+                generation: driver.generation(),
+                posts: driver.posts(),
+                ceremony_id,
+            };
+            let attempt = catch_unwind(AssertUnwindSafe(|| {
+                driver.step(&mut pos_owner_bridge::ceremony::driver::StepEnv {
+                    surface: &mut surface,
+                    clock: &SystemClock,
+                    loopback: &mut self.loopback,
+                    store: &mut store,
+                })
+            }));
+            let handle = store.handle.take();
+            let failure = store.failure;
+            let reached = store.reached;
+            let written = store.written;
+            (attempt, handle, failure, reached, written)
+        };
+        self.handle = handle;
+        let step = match attempt {
+            Ok(step) => step,
+            Err(payload) => std::panic::resume_unwind(payload),
+        };
+        if let Some(error) = failure {
+            return Err(error.into());
+        }
+        if reached {
+            if !written
+                || self.trace.borrow().last() != Some(&ProcessFaultMark::RecordWritten)
+                || self.store.records()?.len() != 1
+            {
+                return Err("real pre-record durable write was not established".into());
+            }
+            self.evidence_complete = true;
+        }
+        Ok(step)
+    }
+
+    fn drive_before_record(
+        &mut self,
+        driver: &mut CeremonyDriver,
+        ceremony_id: CeremonyId,
+        inject: bool,
+    ) -> DriveResult {
+        let mut cancelled = false;
+        loop {
+            let step = if self.evidence_complete {
+                driver.step(&mut readiness::env(
+                    &mut self.surface,
+                    &mut self.loopback,
+                    &mut self.store,
+                ))
+            } else {
+                self.before_record_step(driver, ceremony_id, inject)?
+            };
+            if self.evidence_complete && !inject && !cancelled {
+                self.surface.controller_lost();
+                cancelled = true;
+            }
+            match step {
+                Step::Finished(result) => return Ok(result),
+                Step::Done => return Err("pre-record driver ended without result".into()),
+                Step::Pending => readiness::pump(&self.surface)?,
+            }
+        }
+    }
+}
+
+fn run_before_record(
+    runtime: &Path,
+    root: &Path,
+    number: u8,
+    inject: bool,
+) -> Result<ProcessFaultMark, Box<dyn std::error::Error>> {
+    crate::Native::reset_process_failure_observations();
+    let mut fixture = Fixture::new(runtime, root, number, FixtureProfile::Pending)?;
+    let ceremony_id = CeremonyId::from_bytes([number; 16]);
+    let mut driver = readiness::new_driver(ceremony_id, Instant::now())?;
+    let attempt = catch_unwind(AssertUnwindSafe(|| {
+        fixture.drive_before_record(&mut driver, ceremony_id, inject)
+    }));
+    let (result, failure) = fixture.resolve_attempt(&mut driver, attempt);
+    let wiped = driver.request_clear() && driver.prf().iter().all(|byte| *byte == 0);
+    let plan_wiped =
+        !matches!(&result, Err(BridgeError::Quarantine(_))) || driver.plan_secrets_clear();
+    let failed = result.is_err();
+    let complete = fixture.evidence_complete;
+    let mark = fixture.trace.borrow().first().copied();
+    fixture.retire(driver, result, None)?;
+    check_final_process_failures(inject.then_some(ProcessFaultTarget::Browser))?;
+    if let Some(error) = failure {
+        return Err(error);
+    }
+    if !failed || !wiped || !plan_wiped || !complete {
+        return Err("pre-record failure, wipe, or evidence was not established".into());
+    }
+    mark.ok_or_else(|| "pre-record point was not reached".into())
 }

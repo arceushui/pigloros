@@ -222,3 +222,32 @@ fn an_rng_failure_refuses_unlock_before_any_environment_exists() -> TestResult {
     assert!(rig.surface.log().is_empty());
     Ok(())
 }
+
+#[test]
+fn consuming_lifecycle_events_never_call_the_authenticated_owner_port() -> TestResult {
+    for event in [
+        pos_owner_bridge::SurfaceEvent::RendererFailed,
+        pos_owner_bridge::SurfaceEvent::BrowserExited { browser_pid: 4242 },
+    ] {
+        let mut rig = Rig::with_hook(
+            honest(0),
+            Hook::LifecycleAfterCas { event, new: 3 },
+            FakeRandom::seeded(9),
+            BridgeConfig::default(),
+        )?;
+        let mut port = FakeUnlock::new();
+        let outcome = rig
+            .bridge
+            .unlock(&binding("owner", 0)?, &bytes32(0x60), &mut port);
+        assert_eq!(
+            outcome.err(),
+            Some(BridgeError::Lifecycle(
+                pos_owner_bridge::LifecycleCode::RendererFailed
+            )),
+            "{event:?}"
+        );
+        assert!(port.calls.is_empty(), "{event:?}");
+        assert!(port.prf.is_none(), "{event:?}");
+    }
+    Ok(())
+}

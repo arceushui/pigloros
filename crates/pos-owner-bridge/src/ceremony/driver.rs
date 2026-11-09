@@ -725,7 +725,15 @@ impl CeremonyDriver {
             Err(error) => return self.fail_unexpected(error.error(), now),
         }
         match self.verify_reply(env) {
-            Ok(verified) => self.finish_success(env, now, verified),
+            Ok(verified) => {
+                // A surface callback may be delivered reentrantly during the
+                // successful consume/verify step. It still precedes release.
+                if let Some(error) = self.drain_events(env.surface) {
+                    let error = self.bump_generation().err().unwrap_or(error);
+                    return self.fail(env, now, error);
+                }
+                self.finish_success(env, now, verified)
+            }
             Err(error) => self.fail(env, now, error),
         }
     }

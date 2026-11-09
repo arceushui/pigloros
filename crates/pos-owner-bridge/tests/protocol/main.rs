@@ -540,6 +540,11 @@ enum Hook {
         from: u32,
         to: u32,
     },
+    /// A lifecycle event reaches the surface after the selected host CAS wins.
+    LifecycleAfterCas {
+        event: SurfaceEvent,
+        new: u32,
+    },
     /// This lifecycle event surfaces right after the page starts its `WebAuthn` call.
     LifecycleAfterReceived(SurfaceEvent),
     /// The listener reports a second document completion at this moment.
@@ -657,6 +662,21 @@ impl PageModel for Wrapped {
         self.inner.on_host_op(buffers, now, op, phase);
         self.complete_again(op, phase);
         match (&self.hook, op, phase) {
+            (
+                Hook::LifecycleAfterCas {
+                    event,
+                    new: expected,
+                },
+                HostOp::Cas {
+                    new,
+                    won: Some(true),
+                    ..
+                },
+                HookPhase::After,
+            ) if new == *expected && !self.injected => {
+                self.injected = true;
+                buffers.schedule(now, *event);
+            }
             (Hook::TearBetweenCopies, HostOp::Copy { pair, count: 1 }, HookPhase::After) => {
                 buffers.set_reply_byte(pair, 80, 0xee);
             }
