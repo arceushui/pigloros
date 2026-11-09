@@ -57,6 +57,10 @@ impl Events {
     pub(super) fn take(&self) -> Option<SurfaceEvent> {
         self.queue.borrow_mut().pop_front()
     }
+    #[cfg(test)]
+    pub(super) fn renderer_failure_pending(&self) -> bool {
+        self.queue.borrow().front() == Some(&SurfaceEvent::RendererFailed)
+    }
     pub(super) fn controller_lost(&self) {
         self.emit(SurfaceEvent::ControllerLost);
     }

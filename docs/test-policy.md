@@ -61,9 +61,9 @@ the Linux coverage job intentionally does not evaluate them.
 
 The Windows job runs the complete native test suite, including all 1,000 real
 readiness cases, once under coverage instrumentation. Portable bridge and owner
-executable tests run separately, along with native doctests. The earlier probes
-run before runtime admission; they do not replace the full native suite. This
-avoids repeating the entire native acceptance run before measuring coverage.
+executable tests run separately, along with native doctests. The retained runtime
+is prepared before these tests. No test-exclusion filters are used; the complete
+native suite executes once while producing its coverage evidence.
 
 `covgate` reads the detailed LLVM JSON report produced by the completed
 `cargo llvm-cov` run, so the diff gate and repository-wide gate use the same test

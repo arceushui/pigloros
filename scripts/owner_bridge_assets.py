@@ -39,8 +39,8 @@ def document(core: str, shell: str, bootstrap: str) -> bytes:
 
 
 def fixture_bootstrap(profile: str) -> str:
-    # This adapter only waits for abort. It never calls navigator.credentials,
-    # emits SDK events, changes a buffer or rewrites the shared protocol core.
+    # The credential adapter only waits for abort and never invokes a real
+    # authenticator. Separate native-event adapters below induce declared faults.
     trigger = TRIGGERS.get(profile, "")
     native = "function () { return window.chrome && window.chrome.webview; }"
     prelude = ""
@@ -49,7 +49,7 @@ def fixture_bootstrap(profile: str) -> str:
         # SDK event and ArrayBuffers; after core receipt, attempt exactly one
         # prohibited write to the request mapping. Require actual native crash.
         prelude = (
-            f"  var request = null, reply = null, attempted = {'true' if profile == 'readonly_control' else 'false'};\n"
+            "  var request = null, reply = null, attempted = false;\n"
             "  function faultPort() {\n"
             "    var port = window.chrome && window.chrome.webview;\n"
             "    if (!port) { return null; }\n"
@@ -63,8 +63,13 @@ def fixture_bootstrap(profile: str) -> str:
             "          listener(event);\n"
             "          if (!attempted && request && reply && Atomics.load(new Int32Array(reply, 0, 16), 10) === 7) {\n"
             "            attempted = true;\n"
-            "            new Uint8Array(request)[64] = 0;\n"
-            "          }\n"
+            "            if (Atomics.compareExchange(new Int32Array(reply, 0, 16), 10, 7, 1) !== 7) { return; }\n"
+            + (
+                "            new Uint8Array(request)[64] = 0;\n"
+                if profile == "readonly_write"
+                else ""
+            )
+            + "          }\n"
             "        });\n"
             "      }\n"
             "    };\n"

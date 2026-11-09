@@ -271,6 +271,8 @@ pub(super) fn run_renderer(runtime: &Path, root: &Path) -> TestResult {
         let (result, failure) = fixture.attempt(&mut driver);
         let error = result.as_ref().err().copied();
         let request_clear = driver.request_clear();
+        let posts = driver.posts();
+        let receipt = driver.first_receipt_at();
         let quarantined = fixture.retire(driver, result);
         if let Some(failure) = failure {
             return Err(failure);
@@ -291,9 +293,20 @@ pub(super) fn run_renderer(runtime: &Path, root: &Path) -> TestResult {
         let observed = crate::Native::process_failure_observations();
         if control {
             assert!(observed.is_empty());
+            assert!(receipt.is_some());
+            assert!(crate::Native::renderer_state_observations().is_empty());
         } else {
             assert_eq!(observed, [Some(true)]);
+            assert_eq!(
+                crate::Native::renderer_state_observations(),
+                [crate::RendererStateObservation {
+                    generation: Some(1),
+                    reply_state: Some(1),
+                    record_count: Some(1),
+                }]
+            );
         }
+        assert_eq!(posts, 1);
         assert_eq!(fixture.loopback.served().count, 1);
         assert!(fixture.store.records()?.is_empty());
         assert!(fixture.store.folders()?.is_empty());
