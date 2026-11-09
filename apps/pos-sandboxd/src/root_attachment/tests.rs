@@ -180,6 +180,55 @@ async fn recorded_generations_are_absent_only_when_neither_device_remains() -> T
     Ok(())
 }
 
+/// One fake `/sys/block/<name>` entry, with a `loop` directory when `bound`
+/// and a backing file when `backing` is given.
+fn fake_block(block: &Path, name: &str, bound: bool, backing: Option<&str>) -> TestResult {
+    let directory = block.join(name).join(if bound { "loop" } else { "" });
+    fs::create_dir_all(&directory)?;
+    if let Some(text) = backing {
+        fs::write(directory.join("backing_file"), text)?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn only_a_loop_over_a_provider_image_or_an_unreadable_loop_refuses() -> TestResult {
+    const IMAGES: &str = "/var/lib/pigloros/sandbox/images/";
+    let host = tempfile::tempdir()?;
+    let block = host.path().join("sys/block");
+    let kernel = HostKernel::at(&host.path().join("proc"), &host.path().join("sys"));
+    // No block class to list.
+    assert_eq!(kernel.provider_loops_absent(IMAGES), None);
+    // Unbound loops, other disks and unrelated or deleted backing files.
+    fake_block(&block, "loop0", false, None)?;
+    fake_block(
+        &block,
+        "sda",
+        true,
+        Some("/var/lib/pigloros/sandbox/images/x\n"),
+    )?;
+    fake_block(&block, "loopx", true, None)?;
+    fake_block(&block, "loop1", true, Some("/srv/other.img\n"))?;
+    fake_block(&block, "loop2", true, Some("/srv/gone.img (deleted)\n"))?;
+    assert_eq!(kernel.provider_loops_absent(IMAGES), Some(true));
+    // A loop over a provider image, also once the image is deleted.
+    for text in ["ab12\n", "ab12 (deleted)\n"] {
+        fs::write(
+            block.join("loop2/loop/backing_file"),
+            format!("{IMAGES}{text}"),
+        )?;
+        assert_eq!(kernel.provider_loops_absent(IMAGES), Some(false), "{text}");
+    }
+    // A bound loop whose backing file is empty, then missing.
+    fs::write(block.join("loop2/loop/backing_file"), "\n")?;
+    assert_eq!(kernel.provider_loops_absent(IMAGES), None);
+    fs::remove_file(block.join("loop2/loop/backing_file"))?;
+    assert_eq!(kernel.provider_loops_absent(IMAGES), None);
+    // The real host's sweep reads its own sysfs.
+    assert!(RootResourceIdentity::provider_loops_absent().await.is_ok());
+    Ok(())
+}
+
 fn cleanup_deadline() -> tokio::time::Instant {
     tokio::time::Instant::now() + std::time::Duration::from_secs(1)
 }

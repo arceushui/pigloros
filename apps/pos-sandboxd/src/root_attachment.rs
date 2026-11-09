@@ -238,6 +238,33 @@ impl RootResourceIdentity {
     ) -> Result<bool, ImageActivationError> {
         generations_absent(&HostKernel::system(), generations).await
     }
+
+    /// Whether no loop device is backed by a provider image now, by a fresh
+    /// sysfs sweep of every bound loop device's backing file.
+    ///
+    /// Restart reconciliation uses this after every attempt unit was observed
+    /// absent, so a remaining loop over an image belongs to no live attempt,
+    /// including one whose activation crashed before its root was recorded.
+    /// The sweep runs on a blocking thread so the caller's deadline bounds it.
+    /// No block-device descriptor is opened.
+    ///
+    /// # Errors
+    /// [`ImageActivationError::ResourceAbsenceUnverified`] when the block class
+    /// or a bound loop device's backing file cannot be read.
+    pub(crate) async fn provider_loops_absent() -> Result<bool, ImageActivationError> {
+        let images = format!(
+            "{}/images/",
+            pos_reference::selector::installation::SANDBOX_ARTIFACT_ROOT
+        );
+        let swept = tokio::task::spawn_blocking(move || {
+            HostKernel::system().provider_loops_absent(&images)
+        })
+        .await;
+        swept
+            .ok()
+            .flatten()
+            .ok_or(ImageActivationError::ResourceAbsenceUnverified)
+    }
 }
 
 async fn generations_absent(

@@ -10,15 +10,18 @@
 //! 3. orphaned provider network state is removed through
 //!    [`OrphanNetworkCleanup`], the seam for the #911 enumerate-and-remove
 //!    primitive;
-//! 4. every PAI3 root's recorded loop/dm generations are absent now.
+//! 4. every PAI3 root's recorded loop/dm generations are absent now;
+//! 5. no loop device is backed by a provider image. An activation that
+//!    reached mountfsd but crashed before its PAI3 record left no recorded
+//!    generations, so this sweep is what proves its devices absent.
 //!
 //! Only then are the unmounted directories removed and each intent deleted
 //! last. That removal is local, bounded filesystem work under the held
 //! registry lock, done after the deadline-bound proofs; the deadline does
-//! not interrupt it. Every recognized pre-launch crash state is covered: a temporary write,
-//! a planned-only intent, a directory created before its identity extension,
-//! and a recorded tree with its root, its root removed but its attempt
-//! directory present, or both removed. A loaded unit, a mounted or unknown
+//! not interrupt it. Every recognized pre-launch crash state is covered: a
+//! temporary write, a planned-only intent, a directory created before its
+//! identity extension, and a recorded tree with its root, its root removed but
+//! its attempt directory present, or both removed. A loaded unit, a mounted or unknown
 //! directory, a contradiction or the deadline keeps admission closed and
 //! removes nothing; stopping a surviving unit and detaching a mounted root are
 //! not attempted here, so either keeps admission closed until the remaining
@@ -70,7 +73,8 @@ impl ReconciledRestart {
 }
 
 /// The attempts whose recorded roots' loop/dm generations were observed
-/// absent by a fresh probe.
+/// absent by a fresh probe, after which no loop device was found backed by a
+/// provider image.
 ///
 /// Only restart reconciliation's device proof creates it, so registry removal
 /// cannot be handed released-root evidence that no probe produced.
@@ -111,6 +115,10 @@ pub enum RestartReconciliationError {
     /// A recorded root's loop/dm generations were not observed absent.
     #[error("a recorded root's devices were not observed absent")]
     Devices(#[source] Option<ImageActivationError>),
+    /// A loop device is still backed by a provider image (`None`), or the
+    /// loop devices could not be swept.
+    #[error("a loop device backed by a provider image was not observed absent")]
+    ProviderLoops(#[source] Option<ImageActivationError>),
     /// The deadline elapsed.
     #[error("restart reconciliation deadline elapsed")]
     DeadlineElapsed,
@@ -138,7 +146,10 @@ pub async fn reconcile_restart<N: OrphanNetworkCleanup + Sync>(
         recovery,
         network,
         deadline,
-        crate::RootResourceIdentity::recorded_generations_absent,
+        (
+            crate::RootResourceIdentity::recorded_generations_absent,
+            crate::RootResourceIdentity::provider_loops_absent,
+        ),
     )
     .await
 }
@@ -146,17 +157,20 @@ pub async fn reconcile_restart<N: OrphanNetworkCleanup + Sync>(
 /// The recorded loop/dm generations of one root, mapper first.
 type Generations = [((u32, u32), u64); 2];
 
-async fn reconcile_with<N, P, F>(
+/// `probes` are the recorded-generation probe and the provider loop sweep.
+async fn reconcile_with<N, P, F, L, G>(
     transport: &SystemdTransientUnitTransport,
     recovery: SystemdAttemptRecovery,
     network: &N,
     deadline: Instant,
-    probe: P,
+    probes: (P, L),
 ) -> Reconciled<ReconciledRestart>
 where
     N: OrphanNetworkCleanup + Sync,
     P: Fn(Generations) -> F,
     F: Future<Output = Result<bool, ImageActivationError>>,
+    L: FnOnce() -> G,
+    G: Future<Output = Result<bool, ImageActivationError>>,
 {
     let units = observe_units(transport, deadline).await;
     let absent = match units {
@@ -168,7 +182,7 @@ where
         Err(error) => Err(error),
     };
     let released = match cleaned {
-        Ok(absent) => roots_released(&recovery, probe, deadline)
+        Ok(absent) => roots_released(&recovery, probes, deadline)
             .await
             .map(|roots| (absent, roots)),
         Err(error) => Err(error),
@@ -223,20 +237,44 @@ async fn remove_network<N: OrphanNetworkCleanup + Sync>(
     }
 }
 
-async fn roots_released<P, F>(
+async fn roots_released<P, F, L, G>(
     recovery: &SystemdAttemptRecovery,
-    probe: P,
+    (probe, sweep): (P, L),
     deadline: Instant,
 ) -> Reconciled<RootsReleased>
 where
     P: Fn(Generations) -> F,
     F: Future<Output = Result<bool, ImageActivationError>>,
+    L: FnOnce() -> G,
+    G: Future<Output = Result<bool, ImageActivationError>>,
 {
-    let probed = timeout_at(deadline, probe_roots(recovery, probe)).await;
+    let probed = timeout_at(deadline, async {
+        let released = probe_roots(recovery, probe).await;
+        match released {
+            Ok(released) => sweep_loops(released, sweep).await,
+            Err(error) => Err(error),
+        }
+    })
+    .await;
     probed.unwrap_or(Err(RestartReconciliationError::DeadlineElapsed))
 }
 
-async fn probe_roots<P, F>(recovery: &SystemdAttemptRecovery, probe: P) -> Reconciled<RootsReleased>
+/// Mint the released-root evidence only once no loop device is backed by a
+/// provider image.
+async fn sweep_loops<L, G>(released: Vec<[u8; 16]>, sweep: L) -> Reconciled<RootsReleased>
+where
+    L: FnOnce() -> G,
+    G: Future<Output = Result<bool, ImageActivationError>>,
+{
+    let swept = sweep().await;
+    match swept {
+        Ok(true) => Ok(RootsReleased(released)),
+        Ok(false) => Err(RestartReconciliationError::ProviderLoops(None)),
+        Err(error) => Err(RestartReconciliationError::ProviderLoops(Some(error))),
+    }
+}
+
+async fn probe_roots<P, F>(recovery: &SystemdAttemptRecovery, probe: P) -> Reconciled<Vec<[u8; 16]>>
 where
     P: Fn(Generations) -> F,
     F: Future<Output = Result<bool, ImageActivationError>>,
@@ -256,7 +294,7 @@ where
             Err(error) => return Err(RestartReconciliationError::Devices(Some(error))),
         }
     }
-    Ok(RootsReleased(released))
+    Ok(released)
 }
 
 #[cfg(test)]
