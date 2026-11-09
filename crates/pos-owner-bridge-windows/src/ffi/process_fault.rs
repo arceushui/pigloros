@@ -172,10 +172,12 @@ fn pending_snapshot(
     if !first.is_empty() {
         return Ok(Some(first));
     }
-    if !observe()?.is_empty() {
-        return Err(());
+    let second = observe()?;
+    if second.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(second))
     }
-    Ok(None)
 }
 
 #[test]
@@ -187,7 +189,10 @@ fn pending_snapshot_requires_two_complete_empty_observations() {
         Ok(None)
     ));
     let mut observations = [Ok(Vec::new()), Ok(browser.clone())].into_iter();
-    assert!(pending_snapshot(|| observations.next().unwrap_or(Err(()))).is_err());
+    assert!(matches!(
+        pending_snapshot(|| observations.next().unwrap_or(Err(()))),
+        Ok(Some(result)) if result == browser
+    ));
     let mut observations = [Ok(Vec::new()), Err(())].into_iter();
     assert!(pending_snapshot(|| observations.next().unwrap_or(Err(()))).is_err());
     assert!(pending_snapshot(|| Err(())).is_err());

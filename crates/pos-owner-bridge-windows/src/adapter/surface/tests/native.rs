@@ -125,6 +125,25 @@ impl Session {
 }
 
 impl NativeOperations for Session {
+    fn pending_opening_owners_retained(&self) -> bool {
+        self.controller_pending
+            && (self.factory.failure.get() != Some("pending-owner-after")
+                || !self.factory.calls.borrow().contains(&"pending_candidate"))
+    }
+
+    fn pending_opening_browser_candidate(
+        &self,
+    ) -> Result<Option<pos_owner_bridge::ProcessIdentity>, ()> {
+        self.call("pending_candidate");
+        Ok(None)
+    }
+
+    fn recordless_controller_completion(&self) -> Option<bool> {
+        (self.factory.failure.get() == Some("pending-callback-after")
+            && self.factory.calls.borrow().contains(&"pending_candidate"))
+        .then_some(true)
+    }
+
     fn create_window(&mut self, _: Option<u64>, _: u32, _: u32) -> NativeResult<()> {
         self.effect("create_window")
     }

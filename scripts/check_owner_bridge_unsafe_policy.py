@@ -914,7 +914,7 @@ def _check_shim_macros(label: str, scanned: Scan, found: list[str]) -> None:
 def _reviewed_fault_code(code: str) -> bool:
     """Accept only the reviewed test-only fixed process-fault implementation."""
     normalized = re.sub(r"\s+", "", code).encode()
-    return hashlib.sha256(normalized).hexdigest() == "65c75a3be906727c659c4dd8c002cbd38c3b763a95b5b8a95bd9219d6ef6eae3"
+    return hashlib.sha256(normalized).hexdigest() == "f1b5c571ba52bc032682276c1ba56ff281e4b47656eaa9cda9ef7752aba306c6"
 
 
 def _check_shim_sources(shim: Path, scanned_dirs: tuple[Path, ...], found: list[str]) -> ShimScan:
@@ -1532,7 +1532,7 @@ def _check_owned_parent_boundary(sources: dict[str, str], found: list[str]) -> N
 # and the accepted External URI profile.
 # Full text binds attributes, literal URI, handler/denial observations and scope.
 EXTERNAL_FIXTURE_SOURCES = {
-    'crates/pos-owner-bridge-windows/src/ffi/process_fault.rs': 'ffd0518fadbb33aaf8e3bef0b3993bab2303e4e4c82b8d373c185aa9416d62ae',
+    'crates/pos-owner-bridge-windows/src/ffi/process_fault.rs': 'bdbfe52ec1ee8ee7324604468f6ce0cb0e5cc8e05eb0ae566bc9e7edc0f85b07',
     'crates/pos-owner-bridge-windows/src/adapter/surface/mod.rs': 'b53665ec194d8f46528c880878d18671c4f1faccb99e0607e7d1ec44103e845f',
     'crates/pos-owner-bridge-windows/src/ffi/events/controls.rs': '8c53ef70d3d845bebd2a1d84976765e4a37beafb44ba3a0eb5359b2725c91d29',
     'crates/pos-owner-bridge-windows/src/ffi/events/mod.rs': '7fc36286ad4b27ced12deb75768e3309d4e92fb31aa9f45d15d08753da176836',

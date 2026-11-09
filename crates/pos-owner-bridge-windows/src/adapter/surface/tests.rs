@@ -319,6 +319,49 @@ fn native_creation_and_navigation_polls_return_before_host_dispatch() -> TestRes
 }
 
 #[test]
+fn pending_browser_observation_rechecks_controller_ownership_and_completion() -> TestResult {
+    for failure in [
+        None,
+        Some("pending-owner-after"),
+        Some("pending-callback-after"),
+    ] {
+        let mut fixture = Fixture::new(Creation::Pending)?;
+        let selected = spec(6);
+        assert!(fixture.surface.open(&selected).is_pending());
+        assert!(fixture.surface.open(&selected).is_pending());
+        fixture.factory.failure.set(failure);
+        let observation = fixture.surface.prepare_pending_opening_browser();
+        if failure.is_none() {
+            assert!(matches!(observation, Ok(None)));
+        } else {
+            assert!(observation.is_err());
+        }
+        assert_eq!(
+            fixture
+                .factory
+                .calls
+                .borrow()
+                .iter()
+                .filter(|call| **call == "create_controller")
+                .count(),
+            1
+        );
+        assert_eq!(
+            fixture
+                .factory
+                .calls
+                .borrow()
+                .iter()
+                .filter(|call| **call == "pending_candidate")
+                .count(),
+            1
+        );
+        fixture.assert_no_ceremony_data();
+    }
+    Ok(())
+}
+
+#[test]
 fn abandoned_pending_open_keeps_the_original_completion_owned() -> TestResult {
     let mut fixture = Fixture::new(Creation::Pending)?;
     let selected = spec(7);

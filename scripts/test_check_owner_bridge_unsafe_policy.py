@@ -1378,7 +1378,7 @@ def test_owned_process_fault_authority() -> None:
         "disabled authority": ("if !authority.valid()", "if false"),
         "removed empty-state recheck": ("buffers.ok_or(())?.load_state().map_err(|_| ())?", "0"),
         "removed pending-controller recheck": ("pending_controller.ok_or(())?.succeeded().is_some()", "false"),
-        "incomplete second snapshot accepted": ("if !observe()?.is_empty()", "if false"),
+        "incomplete second snapshot accepted": ("let second = observe()?;", "let second = observe().unwrap_or_default();"),
         "first snapshot failure swallowed": ("let first = observe()?;", "let first = observe().unwrap_or_default();"),
         "writing-state recheck": ("ControlState::Writing as u32", "ControlState::Empty as u32"),
         "ready-state recheck": ("ControlState::Ready as u32", "ControlState::Empty as u32"),
