@@ -824,6 +824,13 @@ class CiWorkflowPolicyTests(unittest.TestCase):
     def test_windows_single_native_run_keeps_fixtures_and_documentation_required(self) -> None:
         workflow = load_workflow(CI_WORKFLOW_PATH)
         native = load_workflow(ROOT / ".github/workflows/owner-bridge-windows.yml")
+        steps = native["jobs"]["owner-bridge-windows"]["steps"]
+        self.assertFalse(any("--skip" in step.get("run", "") for step in steps))
+        commands = [step.get("run", "") for step in steps]
+        self.assertEqual(sum("cargo llvm-cov -p pos-owner-bridge-windows" in run for run in commands), 1)
+        runtime_at = next(index for index, step in enumerate(steps) if step.get("id") == "runtime")
+        native_tests_at = next(index for index, step in enumerate(steps) if step.get("id") == "coverage")
+        self.assertLess(runtime_at, native_tests_at)
         for name, before, after in (
             (
                 "Measure only shim source coverage",

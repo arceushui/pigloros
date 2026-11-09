@@ -238,6 +238,16 @@ fn hold_resource_denial(
 /// bounded host cleanup without a page acknowledgement. Malformed CBOR is
 /// discarded before EMPTY -> RECEIVED, so it cannot produce FAILED/RELEASING.
 impl crate::Native {
+    pub(crate) fn native_readonly_renderer_failure() -> TestResult {
+        let _port = Self::fixed_port_fixture();
+        let root = FixtureRoot::new()?;
+        let runtime = std::env::var_os("OWNER_BRIDGE_TEST_RUNTIME")
+            .map(PathBuf::from)
+            .ok_or("canonical retained runtime is required by renderer qualification")?;
+        denial::run_renderer(&runtime, &root.0)?;
+        root.remove()
+    }
+
     pub(crate) fn native_control_denials() -> TestResult {
         let _port = Self::fixed_port_fixture();
         let root = FixtureRoot::new()?;

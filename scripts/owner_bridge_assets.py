@@ -17,7 +17,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 BRIDGE = ROOT / "crates/pos-owner-bridge"
 ASSETS = BRIDGE / "assets"
-PROFILES = ("pending", "popup", "popup_receipt", "permission", "external", "navigation", "download", "authentication")
+PROFILES = ("pending", "popup", "popup_receipt", "permission", "external", "navigation", "download", "authentication", "readonly_write", "readonly_control")
 TRIGGERS = {
     "popup": 'window.open("http://localhost:49291/denied-popup", "_blank");',
     "permission": "navigator.geolocation.getCurrentPosition(function () {}, function () {});",
@@ -42,8 +42,39 @@ def fixture_bootstrap(profile: str) -> str:
     # This adapter only waits for abort. It never calls navigator.credentials,
     # emits SDK events, changes a buffer or rewrites the shared protocol core.
     trigger = TRIGGERS.get(profile, "")
+    native = "function () { return window.chrome && window.chrome.webview; }"
+    prelude = ""
+    if profile in ("readonly_write", "readonly_control"):
+        # This adversarial profile is never part of normal G3. Keep the real
+        # SDK event and ArrayBuffers; after core receipt, attempt exactly one
+        # prohibited write to the request mapping. Require actual native crash.
+        prelude = (
+            f"  var request = null, reply = null, attempted = {'true' if profile == 'readonly_control' else 'false'};\n"
+            "  function faultPort() {\n"
+            "    var port = window.chrome && window.chrome.webview;\n"
+            "    if (!port) { return null; }\n"
+            "    return {\n"
+            "      releaseBuffer: function (buffer) { port.releaseBuffer(buffer); },\n"
+            "      addEventListener: function (name, listener) {\n"
+            "        port.addEventListener(name, function (event) {\n"
+            "          var buffer = event.getBuffer();\n"
+            "          if (event.additionalData.role === \"request\") { request = buffer; }\n"
+            "          else if (event.additionalData.role === \"reply\") { reply = buffer; }\n"
+            "          listener(event);\n"
+            "          if (!attempted && request && reply && Atomics.load(new Int32Array(reply, 0, 16), 10) === 7) {\n"
+            "            attempted = true;\n"
+            "            new Uint8Array(request)[64] = 0;\n"
+            "          }\n"
+            "        });\n"
+            "      }\n"
+            "    };\n"
+            "  }\n"
+        )
+        native = "faultPort"
     return (
         "(function () {\n"
+        + prelude
+        +
         "  function pending(options) {\n"
         + (f"    {TRIGGERS['popup']}\n" if profile == "popup_receipt" else "")
         +
@@ -54,7 +85,7 @@ def fixture_bootstrap(profile: str) -> str:
         "    });\n"
         "  }\n"
         "  ownerProtocol({ create: pending, get: pending },\n"
-        "    function () { return window.chrome && window.chrome.webview; });\n"
+        f"    {native});\n"
         + (f'  window.addEventListener("DOMContentLoaded", function () {{ {trigger} }}, {{ once: true }});\n' if trigger else "")
         + "})();\n"
     )

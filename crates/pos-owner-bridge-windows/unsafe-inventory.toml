@@ -605,7 +605,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 213
+line = 216
 function = "process"
 operation = "view.add_ProcessFailed(&handler, token)"
 invariant = "live STA interface/handler and initialized unique token output."
@@ -613,7 +613,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 217
+line = 220
 function = "process"
 operation = "remove.remove_ProcessFailed(token)"
 invariant = "exact registered token on its retained creating-STA interface."
@@ -621,7 +621,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 245
+line = 248
 function = "navigation_start"
 operation = "args.SetCancel(!allow)"
 invariant = "live invoking-STA arguments; only the safe policy can select Allow."
@@ -629,7 +629,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 261
+line = 264
 function = "navigation_snapshot"
 operation = "args.Uri(out)"
 invariant = "live arguments and helper-owned initialized writable string output."
@@ -637,7 +637,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 265
+line = 268
 function = "navigation_snapshot"
 operation = "args.IsRedirected(&raw mut redirected)"
 invariant = "live invoking-STA arguments and initialized unique BOOL output."
@@ -645,7 +645,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 268
+line = 271
 function = "navigation_snapshot"
 operation = "args.NavigationId(&raw mut id)"
 invariant = "live invoking-STA arguments and initialized unique navigation-ID output."
@@ -653,7 +653,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 279
+line = 282
 function = "source"
 operation = "view.Source(out)"
 invariant = "retained live STA view and helper-owned initialized string output."
@@ -661,7 +661,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 287
+line = 290
 function = "content_loading"
 operation = "args.NavigationId(&raw mut id)"
 invariant = "live invoking-STA arguments and initialized unique navigation-ID output."
@@ -669,7 +669,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 290
+line = 293
 function = "content_loading"
 operation = "args.IsErrorPage(&raw mut error_page)"
 invariant = "live invoking-STA arguments and initialized unique BOOL output."
@@ -677,7 +677,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 305
+line = 308
 function = "dom_loaded"
 operation = "args.NavigationId(&raw mut id)"
 invariant = "live invoking-STA arguments and initialized unique navigation-ID output."
@@ -685,7 +685,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 318
+line = 321
 function = "navigation_completed"
 operation = "args.NavigationId(&raw mut id)"
 invariant = "live invoking-STA arguments and initialized unique navigation-ID output."
@@ -693,7 +693,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/events/navigation.rs"
-line = 321
+line = 324
 function = "navigation_completed"
 operation = "args.IsSuccess(&raw mut success)"
 invariant = "live invoking-STA arguments and initialized unique BOOL output."
@@ -1485,7 +1485,7 @@ hosted_test = "native_control_callbacks_deny_and_retain_through_own_exit"
 
 [[block]]
 file = "src/ffi/events/control_fixture.rs"
-line = 57
+line = 72
 function = "readback"
 operation = "NewWindow::Handled"
 invariant = "exact retained callback args, same STA; initialized BOOL output, read only after the real Handled setter succeeded. ADR-131: unit-test-only typed readback; no COM interface or untrusted string leaves this helper."
@@ -1493,7 +1493,7 @@ hosted_test = "native_control_callbacks_deny_and_retain_through_own_exit"
 
 [[block]]
 file = "src/ffi/events/control_fixture.rs"
-line = 64
+line = 79
 function = "readback"
 operation = "Permission::State"
 invariant = "exact retained callback args on this STA and initialized enum output. No permission state is granted by this observation. ADR-131: unit-test-only typed readback; no COM interface or untrusted string leaves this helper."
@@ -1501,7 +1501,7 @@ hosted_test = "native_control_callbacks_deny_and_retain_through_own_exit"
 
 [[block]]
 file = "src/ffi/events/control_fixture.rs"
-line = 71
+line = 86
 function = "readback"
 operation = "Download::Cancel"
 invariant = "exact retained callback args on this STA; initialized BOOL output, no download path or operation is read or accepted. ADR-131: unit-test-only typed readback; no COM interface or untrusted string leaves this helper."
@@ -1509,7 +1509,7 @@ hosted_test = "native_control_callbacks_deny_and_retain_through_own_exit"
 
 [[block]]
 file = "src/ffi/events/control_fixture.rs"
-line = 77
+line = 92
 function = "readback"
 operation = "External::Cancel"
 invariant = "exact retained callback args on this STA; initialized BOOL output only, no URI is passed to an application launcher. ADR-131: unit-test-only typed readback; no COM interface or untrusted string leaves this helper."
@@ -1517,7 +1517,7 @@ hosted_test = "native_control_callbacks_deny_and_retain_through_own_exit"
 
 [[block]]
 file = "src/ffi/events/control_fixture.rs"
-line = 83
+line = 98
 function = "readback"
 operation = "Authentication::Cancel"
 invariant = "exact retained callback args on this STA; initialized BOOL output only, no credential/response object is accessed. ADR-131: unit-test-only typed readback; no COM interface or untrusted string leaves this helper."
@@ -1525,8 +1525,16 @@ hosted_test = "native_control_callbacks_deny_and_retain_through_own_exit"
 
 [[block]]
 file = "src/ffi/events/control_fixture.rs"
-line = 97
+line = 112
 function = "navigation"
 operation = "Navigation::Cancel"
 invariant = "Actual invoking-STA navigation args, after Cancel=true succeeded; initialized BOOL output. The observation never authorizes navigation. ADR-131: unit-test-only typed readback; no COM interface or untrusted string leaves this helper."
 hosted_test = "native_control_callbacks_deny_and_retain_through_own_exit"
+
+[[block]]
+file = "src/ffi/events/control_fixture.rs"
+line = 27
+function = "process_failed"
+operation = "ICoreWebView2ProcessFailedEventArgs::ProcessFailedKind"
+invariant = "Actual invoking-STA ProcessFailed callback arguments on the exact owned view, with initialized typed enum output. Unit-test-only ADR-131 observation distinguishes main-renderer exit from every other failure and refuses missing/failed readback; it grants no fault or process authority."
+hosted_test = "native_readonly_write_crashes_the_exact_renderer_and_retires"

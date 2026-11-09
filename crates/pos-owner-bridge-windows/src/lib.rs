@@ -456,6 +456,12 @@ mod tests {
     }
 
     #[test]
+    fn native_readonly_write_crashes_the_exact_renderer_and_retires(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        crate::Native::native_readonly_renderer_failure()
+    }
+
+    #[test]
     fn native_host_fixture_child() -> Result<(), Box<dyn std::error::Error>> {
         if std::env::var_os("PIGLOR_HOST_LIFECYCLE_CHILD").is_some() {
             crate::Native::native_host_lifecycle()?;

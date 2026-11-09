@@ -6,14 +6,29 @@ use std::cell::{Cell, RefCell};
 use super::{control_denial::Control, unavailable, Result};
 use crate::{ControlFault, ControlObservation, EventKind};
 use webview2_com::Microsoft::Web::WebView2::Win32::{
-    ICoreWebView2NavigationStartingEventArgs, COREWEBVIEW2_PERMISSION_STATE,
-    COREWEBVIEW2_PERMISSION_STATE_DENY,
+    ICoreWebView2NavigationStartingEventArgs, ICoreWebView2ProcessFailedEventArgs,
+    COREWEBVIEW2_PERMISSION_STATE, COREWEBVIEW2_PERMISSION_STATE_DENY,
+    COREWEBVIEW2_PROCESS_FAILED_KIND, COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED,
 };
 use windows::core::BOOL;
 
 std::thread_local! {
     static FAULT: Cell<(EventKind, ControlFault)> = const { Cell::new((EventKind::NewWindow, ControlFault::Normal)) };
     static OBSERVATIONS: RefCell<Vec<ControlObservation>> = const { RefCell::new(Vec::new()) };
+    static PROCESS_FAILURES: RefCell<Vec<Option<bool>>> = const { RefCell::new(Vec::new()) };
+}
+
+pub(super) fn process_failed(args: Option<&ICoreWebView2ProcessFailedEventArgs>) {
+    let result = args.and_then(|args| {
+        let mut kind = COREWEBVIEW2_PROCESS_FAILED_KIND::default();
+        // SAFETY: actual ProcessFailed callback args on the invoking STA and
+        // initialized enum output. This test-only read distinguishes the exact
+        // owned view's main renderer exit from other native failure kinds.
+        unsafe { args.ProcessFailedKind(&raw mut kind) }
+            .ok()
+            .map(|()| kind == COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED)
+    });
+    PROCESS_FAILURES.with(|failures| failures.borrow_mut().push(result));
 }
 
 pub(super) fn mode(kind: EventKind) -> ControlFault {
@@ -104,6 +119,14 @@ pub(super) fn navigation(args: &ICoreWebView2NavigationStartingEventArgs) -> Res
 }
 
 impl crate::Native {
+    pub(crate) fn reset_process_failure_observations() {
+        PROCESS_FAILURES.with(|failures| failures.borrow_mut().clear());
+    }
+
+    pub(crate) fn process_failure_observations() -> Vec<Option<bool>> {
+        PROCESS_FAILURES.with(|failures| failures.borrow().clone())
+    }
+
     pub(crate) fn set_control_fault(kind: EventKind, mode: ControlFault) {
         FAULT.with(|fault| fault.set((kind, mode)));
         OBSERVATIONS.with(|observations| observations.borrow_mut().clear());

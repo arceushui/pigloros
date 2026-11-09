@@ -40,12 +40,6 @@ EXPECTED_NATIVE = {'name': 'owner-bridge-windows',
                                                      'pos-owner-bridge -p piglor-owner --all-features '
                                                      '--all-targets --locked -- -D warnings -W '
                                                      'clippy::pedantic'},
-                                             {'name': 'Test runtime-independent native adapter',
-                                              'run': 'cargo test -p pos-owner-bridge-windows --all-features --locked -- '
-                                                     '--include-ignored --skip tests::native_window_environment_and_buffers_lifecycle '
-                                                     '--skip tests::native_host_opens_fresh_environments_and_retires_before_reuse '
-                                                     '--skip tests::native_resource_denial_callback_failure_does_not_contact_listener '
-                                                     '--skip tests::native_control_callbacks_deny_and_retain_through_own_exit'},
                                              {'name': 'Prepare retained runtime for real native fixtures',
                                               'id': 'runtime',
                                               'shell': 'pwsh',
@@ -208,7 +202,7 @@ EXPECTED_NATIVE = {'name': 'owner-bridge-windows',
                                                                '${{ runner.temp '
                                                                '}}/owner-windows-ffi-full.json\n',
                                                        'if-no-files-found': 'error'}}]}}}
-PRODUCER_SHA256 = {'scripts/check_owner_bridge_unsafe_policy.py': '94ea339e5d2070ae1261576f5f620be300d3cbffc47406b0eef05e60114859f4',
+PRODUCER_SHA256 = {'scripts/check_owner_bridge_unsafe_policy.py': '5303bc961df1d36c389e18d0681731dead98b8debbd9d05b5067f7434e384954',
  'scripts/owner_bridge_windows_cov_ignore.py': '82f97a7eb43588f05c469fe72d22c78c4a78d56f0033e6b25cc6277a8f3f24a6'}
 
 

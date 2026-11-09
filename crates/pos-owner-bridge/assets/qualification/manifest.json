@@ -33,6 +33,14 @@
     "authentication": {
       "html_sha256": "592560cb9ec82f5a93945c0b04ec6ed38b5bf78215eca0dad8eb9730c2918479",
       "response_sha256": "83aa9a4f676c99055999618bfd61498fb63da0f9ba6c5e6f4ce377e615f14dab"
+    },
+    "readonly_write": {
+      "html_sha256": "3c0e175e11799508ed081725905df67a46d6ca91031d32d0b7b72c4ebcb5e8f9",
+      "response_sha256": "059b4cc6fd5ef17fae97eb0440cd02e82bb1aa90aff09c71e680be92383b0d34"
+    },
+    "readonly_control": {
+      "html_sha256": "72531a9cd3b3ea78961894e3479a77f37dd20ec995488b88a7b449e0dedd57fc",
+      "response_sha256": "5dea77d676835d72bee705af63a77971375dbc26ad2d18c5844cafebb6516fb4"
     }
   }
 }

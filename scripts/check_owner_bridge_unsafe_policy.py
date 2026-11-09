@@ -948,7 +948,7 @@ def _check_shim_sources(shim: Path, scanned_dirs: tuple[Path, ...], found: list[
                 if declaration.group("visibility") or "cfg(test)" not in guards:
                     found.append(f"{label}: ADR-131 control_fixture must be a private cfg(test) module")
         if relative != "src/ffi/events/control_fixture.rs":
-            for readback in re.finditer(r"(?:\.|::)\s*(Handled|State|Cancel)\s*\(", code):
+            for readback in re.finditer(r"(?:\.|::)\s*(Handled|State|Cancel|ProcessFailedKind)\s*\(", code):
                 found.append(f"{label}:{_line_of(code, readback.start())}: ADR-131 control readback belongs only in control_fixture")
         if "cfg(windows)" not in leading:
             found.append(f"{label}: must start with #![cfg(windows)]")

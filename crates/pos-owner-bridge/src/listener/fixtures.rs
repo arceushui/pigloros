@@ -24,6 +24,11 @@ pub enum FixtureProfile {
     Download,
     /// Serve one fixed Basic challenge, without supplying credentials.
     Authentication,
+    /// After valid receipt, write the SDK request buffer posted READ_ONLY.
+    /// Adversarial renderer-crash evidence; never a normal G3 delivery case.
+    ReadOnlyWrite,
+    /// The same event adapter with its write disarmed, as a no-crash control.
+    ReadOnlyControl,
 }
 
 impl FixtureProfile {
@@ -37,6 +42,8 @@ impl FixtureProfile {
             Self::Navigation => &fixture_assets::NAVIGATION,
             Self::Download => &fixture_assets::DOWNLOAD,
             Self::Authentication => &fixture_assets::AUTHENTICATION,
+            Self::ReadOnlyWrite => &fixture_assets::READONLY_WRITE,
+            Self::ReadOnlyControl => &fixture_assets::READONLY_CONTROL,
         }
     }
 }

@@ -81,3 +81,23 @@ pub(super) const AUTHENTICATION: Response = Response {
         0x4d, 0xab,
     ],
 };
+
+pub(super) const READONLY_WRITE: Response = Response {
+    body: include_bytes!("../../assets/qualification/readonly_write.html"),
+    head: "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: 14283\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nCross-Origin-Opener-Policy: same-origin\r\nCross-Origin-Resource-Policy: same-origin\r\nPermissions-Policy: publickey-credentials-create=(self), publickey-credentials-get=(self), clipboard-read=(), clipboard-write=(), camera=(), microphone=(), geolocation=()\r\nConnection: close\r\nContent-Security-Policy: default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; script-src 'sha256-WW7q32+VmdC7ADJtzanWMCyqShdfUzQZNjtc5A8Kmyk='; style-src 'sha256-Q5v//7IetSl8ReqUsE3bO7kt7fOgIkckocSNwunJJmk='; img-src 'none'; connect-src 'none'\r\n\r\n",
+    digest: [
+        0x05, 0x9b, 0x4c, 0xc6, 0xfd, 0x5e, 0xf1, 0x7f, 0xae, 0x97, 0xeb, 0x04, 0x40, 0xcd, 0x02,
+        0xe8, 0x2b, 0xb1, 0xaa, 0x90, 0xaf, 0xf0, 0x9c, 0x71, 0xe6, 0x80, 0xbe, 0x92, 0x38, 0x3b,
+        0x0d, 0x34,
+    ],
+};
+
+pub(super) const READONLY_CONTROL: Response = Response {
+    body: include_bytes!("../../assets/qualification/readonly_control.html"),
+    head: "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: 14282\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nCross-Origin-Opener-Policy: same-origin\r\nCross-Origin-Resource-Policy: same-origin\r\nPermissions-Policy: publickey-credentials-create=(self), publickey-credentials-get=(self), clipboard-read=(), clipboard-write=(), camera=(), microphone=(), geolocation=()\r\nConnection: close\r\nContent-Security-Policy: default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; script-src 'sha256-eFIuy9Fdhtr7l77On0YLvqEx9dv3lRAY5JWCb/XAD5M='; style-src 'sha256-Q5v//7IetSl8ReqUsE3bO7kt7fOgIkckocSNwunJJmk='; img-src 'none'; connect-src 'none'\r\n\r\n",
+    digest: [
+        0x5d, 0xea, 0x77, 0xd6, 0x76, 0x83, 0x5d, 0x72, 0xbe, 0xe7, 0x05, 0xaf, 0x63, 0xa7, 0x79,
+        0x71, 0x37, 0x5d, 0xbc, 0x26, 0xad, 0x2d, 0x18, 0xc5, 0x84, 0x4c, 0xaf, 0xeb, 0xb6, 0x51,
+        0x6f, 0xb4,
+    ],
+};

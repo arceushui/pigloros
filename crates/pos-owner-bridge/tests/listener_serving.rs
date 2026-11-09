@@ -65,6 +65,8 @@ fn sealed_qualification_profiles_serve_their_exact_bound_bytes() -> TestResult {
         FixtureProfile::Navigation,
         FixtureProfile::Download,
         FixtureProfile::Authentication,
+        FixtureProfile::ReadOnlyWrite,
+        FixtureProfile::ReadOnlyControl,
     ] {
         let config = ListenerConfig::fixture(profile);
         let listener = start(config)?;

@@ -203,7 +203,10 @@ fn process(
     let view: ICoreWebView2 = view.cast().map_err(|_| unavailable())?;
     let remove = view.clone();
     let observed = Rc::clone(signals);
-    let handler = ProcessFailedEventHandler::create(Box::new(move |_sender, _args| {
+    let handler = ProcessFailedEventHandler::create(Box::new(move |_sender, args| {
+        #[cfg(test)]
+        super::control_fixture::process_failed(args.as_ref());
+        drop(args);
         observed.event(NativeEvent::ProcessFailed);
         Ok(())
     }));

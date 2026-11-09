@@ -25,6 +25,7 @@ struct Fixture {
     store: WindowsCleanupStore,
     factory: Rc<dyn NativeFactory>,
     trace: Trace,
+    lose_after_receipt: bool,
 }
 
 impl Fixture {
@@ -55,6 +56,7 @@ impl Fixture {
             store,
             factory,
             trace: Trace::new(0x27, Instant::now()),
+            lose_after_receipt: false,
         })
     }
 
@@ -65,11 +67,16 @@ impl Fixture {
         loop {
             self.trace
                 .update("denial-active", &self.surface, driver, &self.loopback);
-            match driver.step(&mut readiness::env(
+            let step = driver.step(&mut readiness::env(
                 &mut self.surface,
                 &mut self.loopback,
                 &mut self.store,
-            )) {
+            ));
+            if self.lose_after_receipt && driver.first_receipt_at().is_some() {
+                self.lose_after_receipt = false;
+                self.surface.controller_lost();
+            }
+            match step {
                 Step::Finished(result) => return Ok(result),
                 Step::Done => return Err("denial driver finished without result".into()),
                 Step::Pending => readiness::pump(&self.surface)?,
@@ -227,5 +234,73 @@ pub(super) fn run_control(runtime: &Path, root: &Path) -> TestResult {
     Rc::get_mut(&mut fixture.factory)
         .ok_or("control factory still shared")?
         .stop()?;
+    Ok(())
+}
+
+struct ProcessObservations;
+
+impl ProcessObservations {
+    fn new() -> Self {
+        crate::Native::reset_process_failure_observations();
+        Self
+    }
+}
+
+impl Drop for ProcessObservations {
+    fn drop(&mut self) {
+        crate::Native::reset_process_failure_observations();
+    }
+}
+
+pub(super) fn run_renderer(runtime: &Path, root: &Path) -> TestResult {
+    for (value, profile, control) in [
+        (0x29, FixtureProfile::ReadOnlyControl, true),
+        (0x2a, FixtureProfile::ReadOnlyWrite, false),
+    ] {
+        let _observations = ProcessObservations::new();
+        let case_root = root.join(format!("renderer-{value}"));
+        crate::create_private_directory(&case_root)?;
+        let mut fixture = Fixture::new(runtime, &case_root, Some(profile))?;
+        fixture.lose_after_receipt = control;
+        let started = Instant::now();
+        fixture.trace = Trace::new(u64::from(value), started);
+        fixture
+            .surface
+            .set_deadline(started + Duration::from_secs(15));
+        let mut driver = readiness::new_driver(CeremonyId::from_bytes([value; 16]), started)?;
+        let (result, failure) = fixture.attempt(&mut driver);
+        let error = result.as_ref().err().copied();
+        let request_clear = driver.request_clear();
+        let quarantined = fixture.retire(driver, result);
+        if let Some(failure) = failure {
+            return Err(failure);
+        }
+        assert!(
+            !quarantined,
+            "this case requires timely ordinary retirement"
+        );
+        assert!(request_clear);
+        assert_eq!(
+            error,
+            Some(BridgeError::Lifecycle(if control {
+                pos_owner_bridge::LifecycleCode::ControllerLost
+            } else {
+                pos_owner_bridge::LifecycleCode::RendererFailed
+            }))
+        );
+        let observed = crate::Native::process_failure_observations();
+        if control {
+            assert!(observed.is_empty());
+        } else {
+            assert_eq!(observed, [Some(true)]);
+        }
+        assert_eq!(fixture.loopback.served().count, 1);
+        assert!(fixture.store.records()?.is_empty());
+        assert!(fixture.store.folders()?.is_empty());
+        drop(fixture.surface);
+        Rc::get_mut(&mut fixture.factory)
+            .ok_or("renderer factory still shared")?
+            .stop()?;
+    }
     Ok(())
 }

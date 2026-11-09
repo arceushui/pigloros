@@ -1352,7 +1352,7 @@ def test_control_observations_cannot_ship_in_product_builds() -> None:
         require_rejected("exported or product control fixture", {parent: CFG + declaration}, [
             f"{parent}: ADR-131 control_fixture must be a private cfg(test) module",
         ])
-    for call in ["args.Cancel(output)", "ICoreWebView2PermissionRequestedEventArgs::State(args, output)"]:
+    for call in ["args.Cancel(output)", "ICoreWebView2PermissionRequestedEventArgs::State(args, output)", "args.ProcessFailedKind(output)"]:
         require_rejected("relocated native observation", {OPS: CFG + f"fn readback() {{ {call}; }}\n"}, [
             at(OPS, 2, "ADR-131 control readback belongs only in control_fixture"),
         ])
