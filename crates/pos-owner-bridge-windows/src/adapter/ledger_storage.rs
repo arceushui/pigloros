@@ -5,7 +5,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read as _, Write as _};
 use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf, Prefix};
 
 use pos_owner_bridge::{BridgeError, UnavailableCode};
 use windows::Win32::Storage::FileSystem::{
@@ -54,6 +54,7 @@ impl WindowsSubjectEncryptorLock {
 impl<'guard> WindowsNonceLedger<'guard> {
     fn open(guard: &'guard WindowsSubjectEncryptorLock) -> Result<Self, ()> {
         let path = guard.test_directory.join("PiglorOS");
+        require_dos_path(&path)?;
         match fs::symlink_metadata(&path) {
             Ok(_) => crate::verify_private_directory(&path).map_err(|_| ())?,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -205,6 +206,18 @@ fn open_directory(path: &Path) -> Result<File, ()> {
         .map_err(|_| ())
 }
 
+fn require_dos_path(path: &Path) -> Result<(), ()> {
+    let mut components = path.components();
+    if !matches!(components.next(), Some(Component::Prefix(prefix))
+        if matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_)))
+        || components.next() != Some(Component::RootDir)
+        || components.any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(());
+    }
+    Ok(())
+}
+
 fn open_file(path: &Path, create: bool) -> Result<File, ()> {
     OpenOptions::new()
         .read(true)
@@ -303,6 +316,18 @@ mod native_tests {
     }
 
     fn raw_boundaries(base: &Path) -> TestResult {
+        for path in [
+            r"relative\path",
+            r"C:relative",
+            r"\\server\share\PiglorOS",
+            r"\\?\GLOBALROOT\Device\HarddiskVolume1\PiglorOS",
+            r"C:\base\..\PiglorOS",
+        ] {
+            assert!(require_dos_path(Path::new(path)).is_err(), "{path}");
+        }
+        for path in [r"C:\base\PiglorOS", r"\\?\C:\base\PiglorOS"] {
+            assert!(require_dos_path(Path::new(path)).is_ok(), "{path}");
+        }
         let guard = WindowsSubjectEncryptorLock::acquire(base)?;
         let mut ledger = guard.open_nonce_ledger()?;
         let path = base.join("PiglorOS").join(LEDGER);
