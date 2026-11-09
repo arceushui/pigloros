@@ -117,10 +117,7 @@ pub(super) fn run(runtime_path: &Path, root: &Path) -> TestResult {
     let mut factory = crate::Native::owner_factory()?;
     for (index, case) in CASES.into_iter().enumerate() {
         let (profile, kind, mode) = case;
-        writeln!(
-            std::io::stderr(),
-            "NATIVE_CONTROL case={index} profile={profile:?} kind={kind:?} mode={mode:?} stage=start"
-        )?;
+        log_start(index, case)?;
         let _fault = Fault::new(kind, mode);
         let folder = root.join(format!("control-{index}"));
         crate::create_private_directory(&folder)?;
@@ -220,6 +217,14 @@ pub(super) fn run(runtime_path: &Path, root: &Path) -> TestResult {
     Ok(())
 }
 
+fn log_start(index: usize, (profile, kind, mode): Case) -> TestResult {
+    writeln!(
+        std::io::stderr(),
+        "NATIVE_CONTROL case={index} profile={profile:?} kind={kind:?} mode={mode:?} stage=start"
+    )?;
+    Ok(())
+}
+
 fn log_callback(
     index: usize,
     (profile, kind, mode): Case,
@@ -239,7 +244,7 @@ fn log_callback(
         probe.events.started(),
         probe.events.loaded(),
         probe.events.invalid(),
-        callback.as_ref().map(|()| ()).map_err(ToString::to_string)
+        callback.as_ref().map_err(ToString::to_string)
     )?;
     Ok(())
 }

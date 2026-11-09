@@ -1517,6 +1517,12 @@ def test_fault_profile_bindings() -> None:
         mapping = f"Self::{variant} => &fixture_assets::{constant}"
         if not errors({catalogue: sources[catalogue].replace(mapping, f"Self::{variant} => &fixture_assets::OTHER", 1)}):
             raise SystemExit(f"redirected fault catalogue was accepted: {variant}")
+        redirected = sources[catalogue].replace(mapping, f"Self::{variant} => &fixture_assets::OTHER", 1)
+        decoy = f"std::hint::black_box(match self {{ Self::{variant} => &fixture_assets::{constant}, _ => &fixture_assets::{constant} }});"
+        for text in (redirected + "\n" + decoy, redirected.replace("match self {", decoy + "\nmatch self {", 1)):
+            expected = f"{catalogue}: process fault catalogue differs from reviewed sealed response selection"
+            if expected not in errors({catalogue: text}):
+                raise SystemExit(f"executable catalogue decoy was accepted: {variant}")
         original = sources[responses]
         wrong = original.replace(f'qualification/{filename}.html', 'qualification/other.html', 1)
         decoy = f'const {constant}: Response = Response {{ body: include_bytes!("../../assets/qualification/{filename}.html") }};'
@@ -1563,6 +1569,36 @@ def test_recordless_and_release_authority() -> None:
         CHECKER._check_fault_authority(ROOT, {relative: (changed, CHECKER._attributes(changed.code))}, found)
         if f"{SHIM}/{relative}: recordless fixture identity and initialization require cfg(test)" not in found:
             raise SystemExit(f"product recordless fixture state was accepted: {declaration}")
+
+
+def test_typed_process_failure_evidence() -> None:
+    relative = "src/ffi/events/control_fixture.rs"
+    source = (ROOT / SHIM / relative).read_text()
+    message = f"{SHIM}/{relative}: process failure observations differ from reviewed typed callbacks"
+    for old, new in (
+        ("_ => NativeProcessFailure::Other", "_ => NativeProcessFailure::BrowserExited"),
+        (".unwrap_or(NativeProcessFailure::Unavailable)", ".unwrap_or(NativeProcessFailure::BrowserExited)"),
+        ("failures.borrow_mut().push(result)", "failures.borrow_mut().clear()"),
+        ("PROCESS_FAILURES.with(|failures| failures.borrow().clone())", "Vec::new()"),
+    ):
+        if source.count(old) != 1:
+            raise SystemExit(f"missing typed process failure mutation: {old}")
+        changed = CHECKER.scan(source.replace(old, new, 1))
+        found: list[str] = []
+        CHECKER._check_fault_authority(ROOT, {relative: (changed, CHECKER._attributes(changed.code))}, found)
+        if message not in found:
+            raise SystemExit(f"typed process failure evidence bypass was accepted: {old}")
+
+    relative = "src/lib.rs"
+    source = (ROOT / SHIM / relative).read_text()
+    guarded = "#[cfg(test)]\n#[derive(Clone, Copy, Debug, Eq, PartialEq)]\npub(crate) enum NativeProcessFailure"
+    if source.count(guarded) != 1:
+        raise SystemExit("missing native failure classification cfg mutation")
+    changed = CHECKER.scan(source.replace(guarded, guarded.removeprefix("#[cfg(test)]\n"), 1))
+    found = []
+    CHECKER._check_fault_authority(ROOT, {relative: (changed, CHECKER._attributes(changed.code))}, found)
+    if f"{SHIM}/{relative}: native failure classifications require cfg(test)" not in found:
+        raise SystemExit("product native failure classification was accepted")
 
 
 def test_private_fault_capability_construction() -> None:
@@ -1679,6 +1715,7 @@ def main() -> None:
     test_owned_process_fault_authority()
     test_fault_profile_bindings()
     test_recordless_and_release_authority()
+    test_typed_process_failure_evidence()
     test_private_fault_capability_construction()
     test_live_mapping_witness_boundary()
     test_windows_case_insensitive_source_suffix_cannot_hide_code()

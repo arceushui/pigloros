@@ -15,20 +15,32 @@ use windows::core::BOOL;
 std::thread_local! {
     static FAULT: Cell<(EventKind, ControlFault)> = const { Cell::new((EventKind::NewWindow, ControlFault::Normal)) };
     static OBSERVATIONS: RefCell<Vec<ControlObservation>> = const { RefCell::new(Vec::new()) };
-    static PROCESS_FAILURES: RefCell<Vec<Option<bool>>> = const { RefCell::new(Vec::new()) };
+    static PROCESS_FAILURES: RefCell<Vec<crate::NativeProcessFailure>> = const { RefCell::new(Vec::new()) };
     static RENDERER_STATES: RefCell<Vec<crate::RendererStateObservation>> = const { RefCell::new(Vec::new()) };
 }
 
 pub(super) fn process_failed(args: Option<&ICoreWebView2ProcessFailedEventArgs>) {
-    let result = args.and_then(|args| {
-        let mut kind = COREWEBVIEW2_PROCESS_FAILED_KIND::default();
-        // SAFETY: actual ProcessFailed callback args on the invoking STA and
-        // initialized enum output. This test-only read distinguishes the exact
-        // owned view's main renderer exit from other native failure kinds.
-        unsafe { args.ProcessFailedKind(&raw mut kind) }
-            .ok()
-            .map(|()| kind == COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED)
-    });
+    use crate::NativeProcessFailure;
+    use webview2_com::Microsoft::Web::WebView2::Win32::COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED;
+    let result = args
+        .and_then(|args| {
+            let mut kind = COREWEBVIEW2_PROCESS_FAILED_KIND::default();
+            // SAFETY: actual ProcessFailed callback args on the invoking STA and
+            // initialized enum output. This test-only read distinguishes the exact
+            // owned view's main renderer exit from other native failure kinds.
+            unsafe { args.ProcessFailedKind(&raw mut kind) }
+                .ok()
+                .map(|()| match kind {
+                    COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED => {
+                        NativeProcessFailure::MainRendererExited
+                    }
+                    COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED => {
+                        NativeProcessFailure::BrowserExited
+                    }
+                    _ => NativeProcessFailure::Other,
+                })
+        })
+        .unwrap_or(NativeProcessFailure::Unavailable);
     PROCESS_FAILURES.with(|failures| failures.borrow_mut().push(result));
 }
 
@@ -134,6 +146,23 @@ impl crate::Native {
     }
 
     pub(crate) fn process_failure_observations() -> Vec<Option<bool>> {
+        use crate::NativeProcessFailure;
+        PROCESS_FAILURES.with(|failures| {
+            failures
+                .borrow()
+                .iter()
+                .map(|failure| match failure {
+                    NativeProcessFailure::MainRendererExited => Some(true),
+                    NativeProcessFailure::BrowserExited | NativeProcessFailure::Other => {
+                        Some(false)
+                    }
+                    NativeProcessFailure::Unavailable => None,
+                })
+                .collect()
+        })
+    }
+
+    pub(crate) fn classified_process_failure_observations() -> Vec<crate::NativeProcessFailure> {
         PROCESS_FAILURES.with(|failures| failures.borrow().clone())
     }
 

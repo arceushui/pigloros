@@ -24,6 +24,78 @@ use crate::{
 };
 
 type Trace = Rc<RefCell<Vec<ProcessFaultMark>>>;
+type CeremonyResult = Result<Verified, BridgeError>;
+type DriveResult = Result<CeremonyResult, Box<dyn std::error::Error>>;
+type AttemptResult = (CeremonyResult, Option<Box<dyn std::error::Error>>);
+
+fn expected_process_failures(
+    observed: &[crate::NativeProcessFailure],
+    expected: Option<ProcessFaultTarget>,
+) -> bool {
+    use crate::NativeProcessFailure::{BrowserExited, MainRendererExited};
+    match expected {
+        None => observed.is_empty(),
+        Some(ProcessFaultTarget::Renderer) => observed == [MainRendererExited],
+        Some(ProcessFaultTarget::Browser) => observed.is_empty() || observed == [BrowserExited],
+    }
+}
+
+fn check_final_process_failures(expected: Option<ProcessFaultTarget>) -> TestResult {
+    let observed = crate::Native::classified_process_failure_observations();
+    if !expected_process_failures(&observed, expected) {
+        return Err(
+            "unexpected or unclassified native process failure during complete case".into(),
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn final_failure_evidence_rejects_late_and_unclassified_events() {
+    use crate::NativeProcessFailure::{BrowserExited, MainRendererExited, Other, Unavailable};
+    assert!(expected_process_failures(&[], None));
+    assert!(expected_process_failures(
+        &[MainRendererExited],
+        Some(ProcessFaultTarget::Renderer)
+    ));
+    assert!(expected_process_failures(
+        &[],
+        Some(ProcessFaultTarget::Browser)
+    ));
+    assert!(expected_process_failures(
+        &[BrowserExited],
+        Some(ProcessFaultTarget::Browser)
+    ));
+    for expected in [
+        None,
+        Some(ProcessFaultTarget::Renderer),
+        Some(ProcessFaultTarget::Browser),
+    ] {
+        for late in [Other, Unavailable, BrowserExited, MainRendererExited] {
+            assert!(!expected_process_failures(
+                &[MainRendererExited, late],
+                expected
+            ));
+            assert!(!expected_process_failures(&[BrowserExited, late], expected));
+        }
+        assert!(!expected_process_failures(&[Other], expected));
+        assert!(!expected_process_failures(&[Unavailable], expected));
+    }
+    assert!(!expected_process_failures(&[BrowserExited], None));
+    assert!(!expected_process_failures(&[MainRendererExited], None));
+    assert!(!expected_process_failures(
+        &[],
+        Some(ProcessFaultTarget::Renderer)
+    ));
+    assert!(!expected_process_failures(
+        &[BrowserExited],
+        Some(ProcessFaultTarget::Renderer)
+    ));
+    assert!(!expected_process_failures(
+        &[MainRendererExited],
+        Some(ProcessFaultTarget::Browser)
+    ));
+}
 
 fn competing_spec() -> SurfaceSpec {
     let ceremony_id = CeremonyId::from_bytes([0x7f; 16]);
@@ -172,6 +244,25 @@ struct Fixture {
 }
 
 impl Fixture {
+    fn resolve_attempt(
+        &mut self,
+        driver: &mut CeremonyDriver,
+        attempt: std::thread::Result<DriveResult>,
+    ) -> AttemptResult {
+        let failure = match attempt {
+            Ok(Ok(result)) => return (result, None),
+            Ok(Err(error)) => error,
+            Err(_) => "process fault fixture panicked".into(),
+        };
+        let result = readiness::cancel_driver(
+            driver,
+            &mut self.surface,
+            &mut self.loopback,
+            &mut self.store,
+        );
+        (result, Some(failure))
+    }
+
     fn new(
         runtime_path: &Path,
         root: &Path,
@@ -401,27 +492,7 @@ fn run_case(
     let attempt = catch_unwind(AssertUnwindSafe(|| {
         fixture.drive(&mut driver, target, inject)
     }));
-    let (result, failure) = match attempt {
-        Ok(Ok(result)) => (result, None),
-        Ok(Err(error)) => (
-            readiness::cancel_driver(
-                &mut driver,
-                &mut fixture.surface,
-                &mut fixture.loopback,
-                &mut fixture.store,
-            ),
-            Some(error),
-        ),
-        Err(_) => (
-            readiness::cancel_driver(
-                &mut driver,
-                &mut fixture.surface,
-                &mut fixture.loopback,
-                &mut fixture.store,
-            ),
-            Some("process fault fixture panicked".into()),
-        ),
-    };
+    let (result, failure) = fixture.resolve_attempt(&mut driver, attempt);
     let slot_wiped = driver.request_clear() && driver.prf().iter().all(|byte| *byte == 0);
     let plan_wiped_if_quarantined =
         !matches!(&result, Err(BridgeError::Quarantine(_))) || driver.plan_secrets_clear();
@@ -431,6 +502,7 @@ fn run_case(
     let failures = crate::Native::process_failure_observations();
     let native_zeroed = native_zeroing_observed(&crate::Native::take_native_zero_observations());
     fixture.retire(driver, result, None)?;
+    check_final_process_failures(inject.then_some(target))?;
     if let Some(error) = failure {
         return Err(error);
     }
@@ -632,33 +704,10 @@ fn run_recordless_case(runtime: &Path, root: &Path, number: u8, inject: bool) ->
     let attempt = catch_unwind(AssertUnwindSafe(|| {
         fixture.drive_recordless(&mut driver, inject)
     }));
-    let (result, failure) = match attempt {
-        Ok(Ok(result)) => (result, None),
-        Ok(Err(error)) => (
-            {
-                fixture.retain_recordless_until_exit();
-                readiness::cancel_driver(
-                    &mut driver,
-                    &mut fixture.surface,
-                    &mut fixture.loopback,
-                    &mut fixture.store,
-                )
-            },
-            Some(error),
-        ),
-        Err(_) => (
-            {
-                fixture.retain_recordless_until_exit();
-                readiness::cancel_driver(
-                    &mut driver,
-                    &mut fixture.surface,
-                    &mut fixture.loopback,
-                    &mut fixture.store,
-                )
-            },
-            Some("recordless fault fixture panicked".into()),
-        ),
-    };
+    if !matches!(&attempt, Ok(Ok(_))) {
+        fixture.retain_recordless_until_exit();
+    }
+    let (result, failure) = fixture.resolve_attempt(&mut driver, attempt);
     let slot_wiped = driver.request_clear() && driver.prf().iter().all(|byte| *byte == 0);
     let plan_wiped_if_quarantined =
         !matches!(&result, Err(BridgeError::Quarantine(_))) || driver.plan_secrets_clear();
@@ -669,6 +718,7 @@ fn run_recordless_case(runtime: &Path, root: &Path, number: u8, inject: bool) ->
     // orphan sweep. A failed case preserves its folder and returns an error.
     let restart = (inject && evidence_complete).then_some(CeremonyId::from_bytes([number; 16]));
     fixture.retire(driver, result, restart)?;
+    check_final_process_failures(inject.then_some(ProcessFaultTarget::Browser))?;
     if let Some(error) = failure {
         return Err(error);
     }
@@ -785,27 +835,7 @@ fn run_success_releasing(
     let attempt = catch_unwind(AssertUnwindSafe(|| {
         fixture.drive_success_releasing(&mut driver, target, inject)
     }));
-    let (result, failure) = match attempt {
-        Ok(Ok(result)) => (result, None),
-        Ok(Err(error)) => (
-            readiness::cancel_driver(
-                &mut driver,
-                &mut fixture.surface,
-                &mut fixture.loopback,
-                &mut fixture.store,
-            ),
-            Some(error),
-        ),
-        Err(_) => (
-            readiness::cancel_driver(
-                &mut driver,
-                &mut fixture.surface,
-                &mut fixture.loopback,
-                &mut fixture.store,
-            ),
-            Some("successful release fixture panicked".into()),
-        ),
-    };
+    let (result, failure) = fixture.resolve_attempt(&mut driver, attempt);
     let verified = result.is_ok() && has_synthetic_success_prf(&driver) && driver.request_clear();
     let reached = fixture.reached;
     let complete = fixture.evidence_complete;
@@ -815,6 +845,7 @@ fn run_success_releasing(
             .get(1)
             .is_some_and(|reply| reply.before_nonzero == Some(true));
     fixture.retire(driver, result, None)?;
+    check_final_process_failures(inject.then_some(target))?;
     if let Some(error) = failure {
         return Err(error);
     }
@@ -921,27 +952,7 @@ fn run_success_exit(
     let attempt = catch_unwind(AssertUnwindSafe(|| {
         fixture.drive_success_exit(&mut driver, inject)
     }));
-    let (result, failure) = match attempt {
-        Ok(Ok(result)) => (result, None),
-        Ok(Err(error)) => (
-            readiness::cancel_driver(
-                &mut driver,
-                &mut fixture.surface,
-                &mut fixture.loopback,
-                &mut fixture.store,
-            ),
-            Some(error),
-        ),
-        Err(_) => (
-            readiness::cancel_driver(
-                &mut driver,
-                &mut fixture.surface,
-                &mut fixture.loopback,
-                &mut fixture.store,
-            ),
-            Some("successful exit fixture panicked".into()),
-        ),
-    };
+    let (result, failure) = fixture.resolve_attempt(&mut driver, attempt);
     let verified = result.is_ok() && has_synthetic_success_prf(&driver) && driver.request_clear();
     let reached = fixture.exit_reached;
     let complete = fixture.evidence_complete;
@@ -951,6 +962,7 @@ fn run_success_exit(
             .get(1)
             .is_some_and(|reply| reply.before_nonzero == Some(true));
     fixture.retire(driver, result, None)?;
+    check_final_process_failures(inject.then_some(ProcessFaultTarget::Browser))?;
     if let Some(error) = failure {
         return Err(error);
     }

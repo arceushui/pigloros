@@ -1052,6 +1052,8 @@ def _check_fault_assets(root: Path, found: list[str]) -> None:
         response_text = responses.read_text()
     except OSError:
         catalogue_code, response_text = "", ""
+    if hashlib.sha256(re.sub(r"\s+", "", catalogue_code).encode()).hexdigest() != "2bcdce169ab112e184c6b43058e975d2cd8b3c968b5b78484ade77597a41d414":
+        found.append(f"{catalogue.relative_to(root).as_posix()}: process fault catalogue differs from reviewed sealed response selection")
     response_code = scan(response_text).code
     for variant, constant, filename, digest in (
         ("Pending", "PENDING", "pending", "592560cb9ec82f5a93945c0b04ec6ed38b5bf78215eca0dad8eb9730c2918479"),
@@ -1080,6 +1082,10 @@ def _check_fault_authority(root: Path, scans: dict[str, tuple[Scan, tuple[Attrib
     if hashlib.sha256(re.sub(r"\s+", "", shared_code).encode()).hexdigest() != "fd3d6f7a3900e52ebbaf8818104f7436aeba899fc783a31824d7bb162497dab0":
         found.append(f"{SHIM}/src/ffi/process.rs: shared process identity differs from the reviewed read-only observer")
     _check_fault_assets(root, found)
+    callbacks = scans.get("src/ffi/events/control_fixture.rs")
+    callback_code = callbacks[0].code if callbacks else ""
+    if hashlib.sha256(re.sub(r"\s+", "", callback_code).encode()).hexdigest() != "cbcea875ac432de858b9318cb7cac8489d8fbea3f42b08bf3f9d367fadaa3789":
+        found.append(f"{SHIM}/src/ffi/events/control_fixture.rs: process failure observations differ from reviewed typed callbacks")
     ffi_parent = scans.get("src/ffi/mod.rs")
     ffi_code = ffi_parent[0].code if ffi_parent else ""
     declarations = [match for match in MOD_DECLARATION.finditer(ffi_code) if match.group("name") == "process_fault"]
@@ -1091,6 +1097,13 @@ def _check_fault_authority(root: Path, scans: dict[str, tuple[Scan, tuple[Attrib
         found.append(f"{SHIM}/src/adapter/native_tests.rs: process fault fixture declaration is missing or ambiguous")
     root_item = scans.get("src/lib.rs")
     root_code = root_item[0].code if root_item else ""
+    failure_type = root_code.find("pub(crate) enum NativeProcessFailure")
+    opening = root_code.find("{", failure_type) if failure_type >= 0 else -1
+    body = root_code[failure_type:_matching_brace(root_code, opening) + 1] if opening >= 0 else ""
+    if hashlib.sha256(re.sub(r"\s+", "", body).encode()).hexdigest() != "17da8bd84053875a19b3507ac07b8692b2a1938eccc4c73928584c53ee48095b":
+        found.append(f"{SHIM}/src/lib.rs: native failure classifications differ from reviewed variants")
+    if failure_type < 0 or not root_item or "cfg(test)" not in _outer_attributes_before(root_code, root_item[1], failure_type):
+        found.append(f"{SHIM}/src/lib.rs: native failure classifications require cfg(test)")
     wrappers = list(re.finditer(r"(?<!\w)fn\s+native_verified_owned_process_faults_retire\s*\(", root_code))
     if len(wrappers) != 1:
         found.append(f"{SHIM}/src/lib.rs: process fault hosted test is missing or ambiguous")
@@ -1178,7 +1191,7 @@ def _check_fault_authority(root: Path, scans: dict[str, tuple[Scan, tuple[Attrib
     relative = "src/adapter/native_tests/process_fault.rs"
     item = scans.get(relative)
     code = item[0].code if item else ""
-    if hashlib.sha256(re.sub(r"\s+", "", code).encode()).hexdigest() != "0225c98b8b6cff38b728d597236c1b9d709258d9a6561aba89efafbec52e3c74":
+    if hashlib.sha256(re.sub(r"\s+", "", code).encode()).hexdigest() != "d9716937b4fd1fe01b7fec9cb213abb7851605e9765301b7f8beed97d8478cb4":
         found.append(f"{SHIM}/{relative}: process fault fixture differs from reviewed sealed caller")
 
 

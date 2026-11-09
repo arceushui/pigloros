@@ -251,6 +251,16 @@ pub(crate) struct NativeZeroObservation {
     pub(crate) header_unchanged: Option<bool>,
 }
 
+/// Classified callback evidence; a normal matching browser-exit event is separate.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum NativeProcessFailure {
+    MainRendererExited,
+    BrowserExited,
+    Other,
+    Unavailable,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum NativePulse {
     Timer,
