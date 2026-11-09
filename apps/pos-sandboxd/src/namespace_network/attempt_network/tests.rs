@@ -15,7 +15,7 @@ use crate::namespace_network::{
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
 /// What the fake kernel was asked to do.
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct Journal {
     installed: Vec<String>,
     removed: Vec<String>,
@@ -24,7 +24,7 @@ struct Journal {
 /// A kernel that installs exactly what it is asked to, pinning each
 /// namespace in `pins` as this process's own, or refuses to install or to
 /// remove.
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct FakeControl {
     journal: Arc<Mutex<Journal>>,
     pins: Option<std::path::PathBuf>,
