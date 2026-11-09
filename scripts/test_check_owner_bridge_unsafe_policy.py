@@ -188,7 +188,7 @@ def tree(extra: dict[str, str | None] | None = None, links: dict[str, str] | Non
 
 def fixture(extra: dict[str, str | None] | None = None, links: dict[str, str] | None = None) -> list[str]:
     with tree(extra, links) as root:
-        return CHECKER.violations(root)
+        return CHECKER.violations(root, component_fixture=True)
 
 
 def require_accepted(
@@ -1325,13 +1325,21 @@ def test_forbidden_webview_authority() -> None:
 
 
 def test_cli() -> None:
-    clean = run_cli()
+    clean = subprocess.run(
+        [sys.executable, str(CHECKER_PATH), "--root", str(ROOT)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
     if clean.returncode != 0 or "owner-bridge Windows unsafe policy holds" not in clean.stdout:
         raise SystemExit(f"CLI rejected a clean tree: {clean}")
+    incomplete = run_cli()
+    if incomplete.returncode == 0 or "owned-parent" not in incomplete.stderr:
+        raise SystemExit(f"CLI accepted a component fixture as a complete project: {incomplete}")
     dirty = run_cli({SAFE_LIB_PATH: FORBID + "fn f() { unsafe {} }\n", HOST: FORBID + CFG + "pub fn host() {}\n"})
     expected = [at(SAFE_LIB_PATH, 2, RESERVED)]
     lines = dirty.stderr.strip().splitlines()
-    if dirty.returncode == 0 or dirty.stdout or lines != expected:
+    if dirty.returncode == 0 or dirty.stdout or any(line not in lines for line in expected):
         raise SystemExit(f"CLI did not report the expected violation {expected}: {dirty}")
     malformed = run_cli({INV: "[[block\n"})
     if malformed.returncode == 0 or "Traceback" in malformed.stderr or "malformed TOML" not in malformed.stderr:
@@ -1923,7 +1931,15 @@ def test_owned_parent_fixture_is_test_only_and_exactly_bound() -> None:
     if errors(sources):
         raise SystemExit(f"owned-parent baseline rejected: {errors(sources)}")
     mutations = (
-        (paths[1], "#[cfg(test)]\npub(crate) mod fixture_parent;", "pub(crate) mod fixture_parent;"),
+        (paths[0], "native_host_fixture_child", "renamed_host_fixture_child"),
+        (paths[0], "native_host_fixture_child", ""),
+        (paths[0], "#[test]\n    fn native_host_fixture_child", "fn native_host_fixture_child"),
+        (paths[0], "#[test]\n    fn native_host_fixture_child", "#[test]\n    #[ignore]\n    fn native_host_fixture_child"),
+        (paths[0], "#[test]\n    fn native_host_fixture_child", "#[test]\n    #[cfg(any())]\n    fn native_host_fixture_child"),
+        (paths[0], "#[test]\n    fn native_host_fixture_child", "#[test]\n    #[should_panic]\n    fn native_host_fixture_child"),
+        (paths[0], "#[test]\n    fn native_host_fixture_child", "#[test]\n    #[cfg_attr(test, ignore)]\n    fn native_host_fixture_child"),
+        (paths[0], "#[cfg(test)]\n#[forbid(unsafe_code)]\nmod tests {", "#[cfg(any())]\n#[forbid(unsafe_code)]\nmod tests {"),
+        (paths[1], "#[cfg(test)]\npub mod fixture_parent;", "pub mod fixture_parent;"),
         (paths[2], '"PIGLOR_HOST_FIXTURE_PARENT"', '"UNREVIEWED_PARENT"'),
         (paths[2], "self.window.handle().0 as usize", "123_usize"),
         (paths[2], "self.pump.token.check()?;", ""),
@@ -1941,6 +1957,22 @@ def test_owned_parent_fixture_is_test_only_and_exactly_bound() -> None:
     changed = dict(sources, **{"crates/product/src/lib.rs": "fn f(p: CeremonyPlan) { p.with_test_owner_window(1); }"})
     if not errors(changed):
         raise SystemExit("owned-parent fixture capability accepted in product source")
+    removed = dict(sources, **{paths[0]: sources[paths[0]].replace("native_host_fixture_child", "removed_child") + "\n// native_host_fixture_child\n"})
+    if not errors(removed):
+        raise SystemExit("owned-parent marker in a comment disabled the required guard")
+    removed = dict(sources, **{paths[0]: sources[paths[0]].replace("native_host_fixture_child", "removed_child") + '\nconst DECOY: &str = "native_host_fixture_child";\n'})
+    if not errors(removed):
+        raise SystemExit("owned-parent marker in a string disabled the required guard")
+    source = sources[paths[0]]
+    marker = "    #[test]\n    fn native_host_fixture_child"
+    start = source.index(marker)
+    spans = [(a, b) for name, a, b in CHECKER._function_spans(CHECKER.scan(source).code) if name == "native_host_fixture_child"]
+    if len(spans) != 1:
+        raise SystemExit("owned-parent child test is missing or ambiguous")
+    end = spans[0][1]
+    nested = source[:start] + "    #[cfg(any())]\n    mod disabled {\n" + source[start:end] + "\n    }" + source[end:]
+    if not errors(dict(sources, **{paths[0]: nested})):
+        raise SystemExit("owned-parent test under a disabled nested module was accepted")
 
 
 def main() -> None:
