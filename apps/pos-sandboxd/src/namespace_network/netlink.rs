@@ -35,10 +35,14 @@ use super::{LinkKind, ObservedLink};
 /// well below it; a larger one is refused as truncated.
 const RECEIVE_BUFFER: usize = 1 << 16;
 
+// Each flag set below adds disjoint single-bit flags, so the sum is their
+// union; `|` would read the same, but `^` would too, and a mutation of it
+// could never be told apart.
 /// The flags of a request the kernel acknowledges.
-const ACKNOWLEDGED_REQUEST: u16 = NLM_F_REQUEST | NLM_F_ACK;
-/// The flags of a dump request.
-const DUMP_REQUEST: u16 = NLM_F_REQUEST | NLM_F_DUMP;
+const ACKNOWLEDGED_REQUEST: u16 = NLM_F_REQUEST + NLM_F_ACK;
+/// The flags of a dump request (`NLM_F_DUMP` is `NLM_F_ROOT` and
+/// `NLM_F_MATCH`, neither of which is `NLM_F_REQUEST`).
+const DUMP_REQUEST: u16 = NLM_F_REQUEST + NLM_F_DUMP;
 
 /// How long a session waits for any one reply datagram before it fails.
 pub const RECEIVE_TIMEOUT: Duration = Duration::from_secs(10);
