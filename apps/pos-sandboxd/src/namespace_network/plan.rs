@@ -8,7 +8,8 @@
 //! namespace's end the next one. Inside the namespace, only the
 //! authenticated endpoints are routed, through the host end, and the
 //! firewall drops everything except TCP to those endpoints, return traffic of
-//! connections the namespace opened, and IPv6 neighbour discovery.
+//! connections the namespace opened, and IPv6 neighbour discovery with the
+//! host end.
 
 use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -46,6 +47,10 @@ pub enum NetworkPlanError {
     /// The slot lies outside the range.
     #[error("the attempt slot lies outside the reserved range")]
     Slot,
+    /// An endpoint is not a reachable unicast address: it is loopback,
+    /// unspecified, multicast, broadcast or link-local, or its port is zero.
+    #[error("an endpoint is not a reachable unicast address and port")]
+    Endpoint,
     /// An endpoint lies inside the reserved range.
     #[error("an endpoint lies inside the reserved range")]
     EndpointInRange,
@@ -188,22 +193,28 @@ impl ExpectedNamespace {
     /// The namespace of `attempt_id` in `slot` of `range`, reaching exactly
     /// `endpoints`.
     ///
+    /// Endpoints are canonicalised first: an IPv4-mapped IPv6 address is the
+    /// IPv4 address it maps, and IPv6 flow information and scope, which the
+    /// kernel does not read back, are dropped.
+    ///
     /// # Errors
-    /// Rejects a slot outside the range, an endpoint inside it and an
-    /// endpoint listed twice.
+    /// Rejects, in this order, an endpoint that is not a reachable unicast
+    /// address and port, an endpoint inside the range, an endpoint listed
+    /// twice and a slot outside the range.
     pub fn for_attempt(
         attempt_id: [u8; 16],
         range: &NetworkRange,
         slot: u16,
         endpoints: &[SocketAddr],
     ) -> Result<Self, NetworkPlanError> {
-        // The kernel reads back neither IPv6 flow information nor scope.
         let endpoints: Vec<SocketAddr> = endpoints
             .iter()
-            .map(|endpoint| SocketAddr::new(endpoint.ip(), endpoint.port()))
+            .map(|endpoint| SocketAddr::new(endpoint.ip().to_canonical(), endpoint.port()))
             .collect();
         let distinct: BTreeSet<&SocketAddr> = endpoints.iter().collect();
-        let checked = if endpoints
+        let checked = if endpoints.iter().any(|endpoint| !reachable(endpoint)) {
+            Err(NetworkPlanError::Endpoint)
+        } else if endpoints
             .iter()
             .any(|endpoint| range.contains(endpoint.ip()))
         {
@@ -244,7 +255,16 @@ impl ExpectedNamespace {
             },
         ];
         routes.extend(endpoint_routes);
-        let mut output = vec![FirewallRule::AcceptNeighbourDiscovery];
+        let mut output = vec![
+            FirewallRule::SendNeighbourDiscovery {
+                destination: SOLICITED_NODE,
+                length: 16,
+            },
+            FirewallRule::SendNeighbourDiscovery {
+                destination: addresses.ipv6,
+                length: 128,
+            },
+        ];
         output.extend(endpoints.iter().copied().map(FirewallRule::AcceptTcp));
         Self {
             name: NamespaceName::for_attempt(attempt_id),
@@ -274,6 +294,30 @@ impl ExpectedNamespace {
             ],
         }
     }
+}
+
+/// The link-scope multicast network that holds every solicited-node address.
+const SOLICITED_NODE: Ipv6Addr = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 0);
+
+/// Whether `endpoint` is a unicast address and nonzero port a route through
+/// the host end can reach.
+const fn reachable(endpoint: &SocketAddr) -> bool {
+    let unicast = match endpoint.ip() {
+        IpAddr::V4(address) => {
+            !(address.is_loopback()
+                || address.is_unspecified()
+                || address.is_multicast()
+                || address.is_broadcast()
+                || address.is_link_local())
+        }
+        IpAddr::V6(address) => {
+            !(address.is_loopback()
+                || address.is_unspecified()
+                || address.is_multicast()
+                || address.is_unicast_link_local())
+        }
+    };
+    unicast && endpoint.port() != 0
 }
 
 /// The prefix length of a single host of `address`'s family.
