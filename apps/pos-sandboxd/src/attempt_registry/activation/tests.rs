@@ -214,7 +214,8 @@ mod cases {
         let second = read_marker(runtime.path())?;
         let after = boot_instant()?;
         assert_eq!([first.boot, second.boot], [before.0; 2]);
-        assert!(before.1 <= first.sent && first.sent <= second.sent && second.sent <= after.1);
+        let times = [before.1, first.sent, second.sent, after.1];
+        assert!(times.windows(2).all(|pair| pair[0] <= pair[1]), "{times:?}");
         // Only the intent and the marker remain, and the owner still commits.
         assert_eq!(fs::read_dir(runtime.path().join("registry"))?.count(), 2);
         registry.commit_planned(&intent(2)?)?;

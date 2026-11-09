@@ -1563,18 +1563,15 @@ impl ImageActivator for RejectingActivator {
 /// The registry's activation marker records a request sent on this boot.
 fn assert_request_recorded() -> TestResult {
     let marker = fs::read("/run/pigloros/sandbox/registry/activation")?;
-    let boot = fs::read_to_string("/proc/sys/kernel/random/boot_id")?
+    let hex = fs::read_to_string("/proc/sys/kernel/random/boot_id")?
         .trim_end()
         .replace('-', "");
-    let recorded = marker
-        .get(4..20)
-        .unwrap_or_default()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
+    let boot = (0..16)
+        .map(|index| u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16))
+        .collect::<Result<Vec<_>, _>>()?;
     assert_eq!(
-        (marker.get(..4), marker.len(), recorded),
-        (Some(b"PAA1".as_slice()), 36, boot)
+        (marker.get(..4), marker.len(), marker.get(4..20)),
+        (Some(b"PAA1".as_slice()), 36, Some(boot.as_slice()))
     );
     Ok(())
 }
