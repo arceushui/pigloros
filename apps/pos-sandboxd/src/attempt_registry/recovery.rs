@@ -960,6 +960,15 @@ mod tests {
     }
 
     #[test]
+    fn the_recovery_clock_is_the_host_boot_instant() -> TestResult {
+        let (boot, now) = SystemdAttemptRecovery::boot_instant()?;
+        let (host, later) = activation::boot_instant()?;
+        assert_eq!(boot, host);
+        assert!(Duration::ZERO < now && now <= later);
+        Ok(())
+    }
+
+    #[test]
     fn only_canonical_marker_names_are_activation_markers() {
         assert_eq!(parse_marker_name("activation"), Some(false));
         assert_eq!(parse_marker_name(".activation-1-2"), Some(true));
