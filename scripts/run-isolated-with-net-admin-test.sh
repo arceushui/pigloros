@@ -5,11 +5,16 @@
 # state. The container has no network, drops every other capability, keeps
 # no-new-privileges and a read-only root, and sees the worktree read-only.
 #
+# The adapter's own tests (namespace_network::control) pin namespaces with
+# bind mounts under /run/netns, which Docker's AppArmor profile refuses, so
+# they alone also run unconfined by AppArmor.
+#
 # Residual risk: SYS_ADMIN lets the test remount filesystems inside its own
 # mount namespace, and Docker's AppArmor profile is what normally refuses
-# that. The runner therefore accepts only a pos-sandboxd test harness built
-# under target/, only the named privileged tests, and verifies inside the
-# container that the worktree bind is read-only before the test starts.
+# that; the unconfined tests keep only the capability bound. The runner
+# therefore accepts only a pos-sandboxd test harness built under target/,
+# only the named privileged tests, and verifies inside the container that
+# the worktree bind is read-only before the test starts.
 set -euo pipefail
 
 if [[ $# -ne 2 ]]; then
@@ -44,7 +49,7 @@ if [[ ! $TEST_RELATIVE =~ $TEST_TARGET || ! -f $TEST_BINARY || ! -x $TEST_BINARY
   echo "only the pos-sandboxd library test harness may use this runner" >&2
   exit 2
 fi
-readonly TEST_PATTERN='^namespace_network::netlink::tests::privileged::[a-z0-9_]+$'
+readonly TEST_PATTERN='^namespace_network::(netlink|control)::tests::privileged::[a-z0-9_]+$'
 if [[ ! $TEST_NAME =~ $TEST_PATTERN ]]; then
   echo "only the #911 namespace adapter tests may use this runner" >&2
   exit 2
@@ -75,6 +80,13 @@ docker_arguments=(
   --env PIGLOROS_PRIVILEGED_COMPOSITION_TEST=1
 )
 profile_output=
+
+# Owner decision 2026-11-09 (#911): only the tests that pin namespaces run
+# without Docker's AppArmor profile.
+readonly UNCONFINED_PATTERN='^namespace_network::control::tests::privileged::[a-z0-9_]+$'
+if [[ $TEST_NAME =~ $UNCONFINED_PATTERN ]]; then
+  docker_arguments+=(--security-opt apparmor=unconfined)
+fi
 
 for variable in ASAN_OPTIONS LSAN_OPTIONS; do
   if [[ -n ${!variable:-} ]]; then

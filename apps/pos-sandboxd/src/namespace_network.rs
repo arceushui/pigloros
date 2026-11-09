@@ -16,10 +16,16 @@ use std::error::Error;
 use std::fmt;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 
+mod control;
+mod firewall;
 pub mod netlink;
+mod pinned;
 mod plan;
+mod route;
 mod rule_codec;
 
+pub use control::NetlinkNamespaceControl;
+pub use pinned::NetworkNamespaces;
 pub use plan::{NetworkPlanError, NetworkRange, NAMESPACE_TABLE};
 pub use rule_codec::{decode_firewall_rule, encode_firewall_rule, UndecodableRule};
 

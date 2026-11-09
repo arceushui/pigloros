@@ -106,6 +106,13 @@ def check_net_admin_runner_guards(temporary: Path) -> None:
             {},
             name_refusal,
         ),
+        "a privileged test of another module": (
+            root,
+            harness,
+            "namespace_network::route::tests::privileged::a_test",
+            {},
+            name_refusal,
+        ),
         "an extra flag after the test name": (
             root,
             harness,
@@ -266,7 +273,7 @@ def main() -> None:
         ),
         (
             NET_ADMIN_RUNNER,
-            "readonly TEST_PATTERN='^namespace_network::netlink::tests::privileged::[a-z0-9_]+$'",
+            "readonly TEST_PATTERN='^namespace_network::(netlink|control)::tests::privileged::[a-z0-9_]+$'",
             "readonly TEST_PATTERN='^namespace_network::'",
         ),
         (
@@ -339,6 +346,28 @@ def main() -> None:
             PRIMARY_RUNNER,
             "  --rm\n",
             "  --rm\n  --security-opt apparmor=unconfined\n",
+        ),
+        # AppArmor stays for every other test, and no other confinement is
+        # dropped.
+        (
+            NET_ADMIN_RUNNER,
+            "readonly UNCONFINED_PATTERN='^namespace_network::control::tests::privileged::[a-z0-9_]+$'",
+            "readonly UNCONFINED_PATTERN='^namespace_network::'",
+        ),
+        (
+            NET_ADMIN_RUNNER,
+            "if [[ $TEST_NAME =~ $UNCONFINED_PATTERN ]]; then",
+            "if true; then",
+        ),
+        (
+            NET_ADMIN_RUNNER,
+            "  docker_arguments+=(--security-opt apparmor=unconfined)\n",
+            "  docker_arguments+=(--security-opt seccomp=unconfined)\n",
+        ),
+        (
+            NET_ADMIN_RUNNER,
+            "  --rm\n",
+            "  --rm\n  --security-opt=apparmor=unconfined\n",
         ),
     )
     with tempfile.TemporaryDirectory() as directory:

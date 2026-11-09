@@ -302,6 +302,88 @@ fn a_socket_fails_on_an_oversized_request_a_silent_kernel_and_an_oversized_reply
 }
 
 #[test]
+fn a_request_returns_its_one_reply() -> TestResult {
+    let session = NetlinkSession::new(Scripted::replying(vec![link_reply(
+        1,
+        0,
+        LinkMessage::default(),
+    )]));
+    assert_eq!(
+        session.request(get_link())?,
+        RouteNetlinkMessage::NewLink(LinkMessage::default())
+    );
+    assert_eq!(sent_headers(&session.transport)?[0].flags, NLM_F_REQUEST);
+    Ok(())
+}
+
+#[test]
+fn a_refused_foreign_or_ambiguous_request_fails() {
+    let mut two = link_reply(1, 0, LinkMessage::default());
+    two.extend(link_reply(1, 0, LinkMessage::default()));
+    let cases: Vec<(Vec<Vec<u8>>, fn(&NetlinkError) -> bool)> = vec![
+        (vec![ack(1, -19)], |error| {
+            matches!(error, NetlinkError::Kernel(-19))
+        }),
+        // An acknowledgement answers no `GET`.
+        (vec![ack(1, 0)], |error| {
+            matches!(error, NetlinkError::Unexpected)
+        }),
+        (vec![reply(1, 0, NetlinkPayload::Noop)], |error| {
+            matches!(error, NetlinkError::Unexpected)
+        }),
+        (vec![link_reply(2, 0, LinkMessage::default())], |error| {
+            matches!(error, NetlinkError::Unexpected)
+        }),
+        (vec![two], |error| matches!(error, NetlinkError::Unexpected)),
+        (vec![vec![1, 2, 3]], |error| {
+            matches!(error, NetlinkError::Decode)
+        }),
+        (Vec::new(), |error| matches!(error, NetlinkError::Truncated)),
+    ];
+    for (replies, expected) in cases {
+        let session = NetlinkSession::new(Scripted::replying(replies));
+        let result = session.request(get_link());
+        assert!(result.as_ref().is_err_and(expected), "{result:?}");
+    }
+    let refusing = NetlinkSession::new(Scripted {
+        refuse_send: true,
+        ..Scripted::default()
+    });
+    assert!(matches!(
+        refusing.request(get_link()),
+        Err(NetlinkError::Io(Errno::MSGSIZE))
+    ));
+}
+
+#[test]
+fn consistent_reads_retry_only_interrupted_dumps_and_at_most_three_times() {
+    let attempts = RefCell::new(0);
+    let interrupted_once = consistent(|| {
+        *attempts.borrow_mut() += 1;
+        if *attempts.borrow() == 1 {
+            Err(NetlinkError::Interrupted)
+        } else {
+            Ok(*attempts.borrow())
+        }
+    });
+    assert!(matches!(interrupted_once, Ok(2)));
+    let attempts = RefCell::new(0);
+    let always = consistent(|| -> Result<(), NetlinkError> {
+        *attempts.borrow_mut() += 1;
+        Err(NetlinkError::Interrupted)
+    });
+    assert!(matches!(always, Err(NetlinkError::Interrupted)));
+    assert_eq!(*attempts.borrow(), 3);
+    let attempts = RefCell::new(0);
+    let refused = consistent(|| -> Result<(), NetlinkError> {
+        *attempts.borrow_mut() += 1;
+        Err(NetlinkError::Kernel(-1))
+    });
+    assert!(matches!(refused, Err(NetlinkError::Kernel(-1))));
+    assert_eq!(*attempts.borrow(), 1);
+}
+
+#[test]
 fn links_decode_loopback_veth_and_other_kinds() -> TestResult {
     let veth = vec![
         LinkAttribute::IfName("piglor-n0".to_owned()),

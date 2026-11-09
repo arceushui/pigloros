@@ -40,13 +40,17 @@ NET_ADMIN_GUARDS = (
     '  echo "only the pos-sandboxd library test harness may use this runner" >&2\n'
     "  exit 2\n"
     "fi",
-    "readonly TEST_PATTERN='^namespace_network::netlink::tests::privileged::[a-z0-9_]+$'",
+    "readonly TEST_PATTERN='^namespace_network::(netlink|control)::tests::privileged::[a-z0-9_]+$'",
     "if [[ ! $TEST_NAME =~ $TEST_PATTERN ]]; then\n"
     '  echo "only the #911 namespace adapter tests may use this runner" >&2\n'
     "  exit 2\n"
     "fi",
     "if [[ $REPOSITORY_ROOT == *,* ]]; then",
     "  if [[ $profile_directory == *,* ]]; then",
+    "readonly UNCONFINED_PATTERN='^namespace_network::control::tests::privileged::[a-z0-9_]+$'\n"
+    "if [[ $TEST_NAME =~ $UNCONFINED_PATTERN ]]; then\n"
+    "  docker_arguments+=(--security-opt apparmor=unconfined)\n"
+    "fi",
     "readonly READ_ONLY_PROBE='if [ -w \"$1\" ]; then echo \"the worktree bind is writable\" >&2; "
     "exit 1; fi; shift; exec \"$@\"'",
     '/bin/sh -c "$READ_ONLY_PROBE" read-only-probe "$REPOSITORY_ROOT" \\\n'
@@ -54,6 +58,12 @@ NET_ADMIN_GUARDS = (
 )
 CAP_ADD = r"(?<![A-Za-z0-9_-])--cap-add(?=$|[=\s])"
 CAP_ADD_VALUE = r"(?<![A-Za-z0-9_-])--cap-add[ =]+(\S+)"
+SECURITY_OPT = r"(?<![A-Za-z0-9_-])--security-opt(?=$|[=\s])"
+SECURITY_OPT_VALUE = r"(?<![A-Za-z0-9_-])--security-opt[ =]+([^\s)]+)"
+# Owner decision 2026-11-09 (#911): only the NET_ADMIN runner, and there only
+# for the namespace-pinning tests, may drop Docker's AppArmor profile.
+SECURITY_OPTIONS = ["no-new-privileges"]
+NET_ADMIN_SECURITY_OPTIONS = ["apparmor=unconfined", "no-new-privileges"]
 # Options that would widen what a test container sees or may do.
 FORBIDDEN_OPTIONS = (
     "--device",
@@ -162,11 +172,23 @@ def main() -> None:
         ):
             require(runner, fragment, runner_path)
 
+        security_options = sorted(re.findall(SECURITY_OPT_VALUE, runner, flags=re.MULTILINE))
+        allowed_security_options = (
+            NET_ADMIN_SECURITY_OPTIONS
+            if runner_path.name == NET_ADMIN_RUNNER
+            else SECURITY_OPTIONS
+        )
+        if security_options != allowed_security_options or len(
+            re.findall(SECURITY_OPT, runner, flags=re.MULTILINE)
+        ) != len(allowed_security_options):
+            raise SystemExit(
+                f"{runner_path}: security options must be exactly {allowed_security_options};"
+                f" found {security_options}"
+            )
         for option in (
             "--network",
             "--read-only",
             "--cap-drop",
-            "--security-opt",
             "--pids-limit",
             "--memory",
             "--memory-swap",
