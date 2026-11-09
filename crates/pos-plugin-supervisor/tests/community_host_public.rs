@@ -26,7 +26,7 @@ use pos_plugin_publisher::test_support::{
 use pos_plugin_release::{BundleAddressV1, ReleaseSourceV1};
 use pos_plugin_supervisor::pass_harness::{
     initial, FailingPort, GatedSpec, LostPort, PanickingSource, RefusingPort, Source, StampedPort,
-    World as PassWorld,
+    StoreKind, World as PassWorld,
 };
 use pos_plugin_supervisor::test_support::{self, err};
 use pos_plugin_supervisor::{
@@ -274,12 +274,16 @@ impl Rig {
     }
 
     fn build(specs: &[Spec], clock: Option<Arc<AtomicU64>>) -> BoxResult<Self> {
+        Self::build_on(StoreKind::Memory, specs, clock)
+    }
+
+    fn build_on(kind: StoreKind, specs: &[Spec], clock: Option<Arc<AtomicU64>>) -> BoxResult<Self> {
         let mut signed = SignedWorld::with_config(Config {
             extra_plugin_ids: GRANTED,
             clock,
             ..Config::default()
         })?;
-        let mut pass = PassWorld::new(PROBE);
+        let mut pass = PassWorld::on(kind, PROBE);
         let material = trust_material(&signed, &signed.material()?);
         let refuse = Arc::new(AtomicBool::new(false));
         let mut parts = Vec::new();
@@ -860,7 +864,14 @@ fn lost_commit(rig: &mut Rig) -> BoxResult<CommunityPassOutcomeV1> {
 /// `recover_scheduled_pass`.
 #[test]
 fn a_lost_commit_is_in_doubt_and_keeps_the_staged_state() -> TestResult {
-    let mut rig = Rig::new(&[CHAIN_ALPHA, BETA])?;
+    for kind in [StoreKind::Memory, StoreKind::Sqlite] {
+        lost_commit_keeps_the_staged_state_on(kind)?;
+    }
+    Ok(())
+}
+
+fn lost_commit_keeps_the_staged_state_on(kind: StoreKind) -> TestResult {
+    let mut rig = Rig::build_on(kind, &[CHAIN_ALPHA, BETA], None)?;
     let outcome = lost_commit(&mut rig)?;
     assert!(is_in_doubt(&outcome), "{outcome:?}");
     for handle in [rig.handle(0), rig.handle(1)] {
