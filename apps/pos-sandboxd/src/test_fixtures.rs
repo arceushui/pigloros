@@ -28,7 +28,9 @@ pub use crate::root_attachment::{
     attached_fixture_root, fake_root_release, recorded_identity, release_fake_root, released_root,
     FakeRootRelease,
 };
-pub use crate::system_bus::{TeardownFixture, TeardownManagerCalls, TeardownReset, TeardownStop};
+pub use crate::system_bus::{
+    peer_connections, TeardownFixture, TeardownManagerCalls, TeardownReset, TeardownStop,
+};
 
 /// A complete recheck token for in-process port tests without a kernel mount.
 pub(crate) fn checked_root(attempt: &AdmittedAttempt) -> crate::CheckedRoot {

@@ -114,7 +114,7 @@ pub async fn reconcile_restart<N: OrphanNetworkCleanup + Sync>(
         recovery,
         network,
         deadline,
-        crate::root_attachment::recorded_generations_absent,
+        crate::RootResourceIdentity::recorded_generations_absent,
     )
     .await
 }

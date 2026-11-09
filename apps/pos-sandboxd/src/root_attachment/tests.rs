@@ -170,7 +170,11 @@ async fn recorded_generations_are_absent_only_when_neither_device_remains() -> T
     );
     // The real host has no device under the largest major and minor numbers.
     assert_eq!(
-        recorded_generations_absent([((4095, 1_048_575), 1), ((4095, 1_048_574), 1)]).await,
+        RootResourceIdentity::recorded_generations_absent([
+            ((4095, 1_048_575), 1),
+            ((4095, 1_048_574), 1)
+        ])
+        .await,
         Ok(true)
     );
     Ok(())

@@ -1137,7 +1137,7 @@ fn unix_socket(address: Address) -> zbus::Result<Address> {
 mod tests;
 
 #[cfg(test)]
-pub(super) use test_support::peer_connections;
+pub use test_support::peer_connections;
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -1148,7 +1148,10 @@ mod test_support {
     };
 
     /// Connect authenticated peers after registering the fixture's interfaces.
-    pub(crate) async fn peer_connections(
+    ///
+    /// # Errors
+    /// Returns a connection setup failure.
+    pub async fn peer_connections(
         configure_server: impl FnOnce(Builder<'static>) -> Builder<'static>,
     ) -> zbus::Result<(Connection, Connection)> {
         let guid = Guid::generate();
