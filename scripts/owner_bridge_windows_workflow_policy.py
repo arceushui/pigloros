@@ -202,8 +202,36 @@ EXPECTED_NATIVE = {'name': 'owner-bridge-windows',
                                                                '${{ runner.temp '
                                                                '}}/owner-windows-ffi-full.json\n',
                                                        'if-no-files-found': 'error'}}]}}}
+EXPECTED_NATIVE['jobs']['owner-bridge-windows']['steps'][8]['run'] = """$ErrorActionPreference = 'Stop'
+$metadata = cargo metadata --locked --no-deps --format-version 1
+if ($LASTEXITCODE -ne 0) { throw 'Cargo metadata failed' }
+$metadata | Set-Content -Encoding utf8 "$env:RUNNER_TEMP/owner-windows-metadata.json"
+$ignore = $metadata | python scripts/owner_bridge_windows_cov_ignore.py
+if ($LASTEXITCODE -ne 0 -or -not $ignore) { throw 'Unsafe coverage scope' }
+$marker = Join-Path $env:RUNNER_TEMP ("owner-desktop-stop-" + [guid]::NewGuid().ToString('N'))
+$observer = $null
+try {
+  $observer = Start-Job -FilePath (Join-Path $env:GITHUB_WORKSPACE 'scripts/observe-owner-desktop.ps1') -ArgumentList $marker
+} catch { Write-Output 'NATIVE_DESKTOP observer=unknown' }
+try {
+  cargo llvm-cov -p pos-owner-bridge-windows --all-features --locked --json --output-path "$env:RUNNER_TEMP/owner-windows-coverage.json" --ignore-filename-regex "$ignore" -- --include-ignored
+  $nativeResult = $LASTEXITCODE
+} finally {
+  try {
+    [System.IO.File]::WriteAllText($marker, 'stop')
+    if ($null -ne $observer) {
+      $finished = Wait-Job -Job $observer -Timeout 6
+      if ($null -eq $finished) { Write-Output 'NATIVE_DESKTOP observer_stop=unknown' }
+      if ($observer.State -ne 'Completed') { Write-Output 'NATIVE_DESKTOP observer_state=unknown' }
+      Receive-Job -Job $observer -ErrorAction SilentlyContinue
+    }
+  } catch { Write-Output 'NATIVE_DESKTOP observer_output=unknown' }
+}
+if ($nativeResult -ne 0) { throw 'Native coverage execution failed' }
+"""
 PRODUCER_SHA256 = {'scripts/check_owner_bridge_unsafe_policy.py': '7d714c852bfd3d992f6f92bd338d6a8a10f1af72a8692d1fe3a95ef96b8a8df9',
- 'scripts/owner_bridge_windows_cov_ignore.py': '82f97a7eb43588f05c469fe72d22c78c4a78d56f0033e6b25cc6277a8f3f24a6'}
+ 'scripts/owner_bridge_windows_cov_ignore.py': '82f97a7eb43588f05c469fe72d22c78c4a78d56f0033e6b25cc6277a8f3f24a6',
+ 'scripts/observe-owner-desktop.ps1': '5d0999f0ced7700148ed6fd3a7b0e1b44a5c242067af36488b1dd7bda13ce77d'}
 
 
 def producer_sources(root=ROOT):

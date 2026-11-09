@@ -787,6 +787,28 @@ class CiWorkflowPolicyTests(unittest.TestCase):
         with self.assertRaises(native_policy.PolicyError):
             native_policy.check(native, {})
 
+    def test_desktop_observer_cannot_change_native_evidence_or_control_processes(self) -> None:
+        native = load_workflow(ROOT / ".github/workflows/owner-bridge-windows.yml")
+        coverage = native["jobs"]["owner-bridge-windows"]["steps"][8]
+        for before, after in (
+            ("--include-ignored", "--include-ignored --skip native"),
+            ("$nativeResult = $LASTEXITCODE", "$nativeResult = 0"),
+            ("[System.IO.File]::WriteAllText($marker, 'stop')", "Write-Output 'not stopped'"),
+        ):
+            changed = copy.deepcopy(native)
+            run = changed["jobs"]["owner-bridge-windows"]["steps"][8]["run"]
+            self.assertEqual(run.count(before), 1)
+            changed["jobs"]["owner-bridge-windows"]["steps"][8]["run"] = run.replace(before, after)
+            with self.assertRaises(native_policy.PolicyError):
+                native_policy.check(changed)
+        self.assertIn("cargo llvm-cov", coverage["run"])
+        sources = native_policy.producer_sources()
+        name = "scripts/observe-owner-desktop.ps1"
+        for payload in ("Stop-Process -Id 1", "Get-CimInstance Win32_Process | Select-Object CommandLine"):
+            altered = dict(sources, **{name: sources[name] + "\n" + payload})
+            with self.assertRaises(native_policy.PolicyError):
+                native_policy.check(native, altered)
+
     def test_windows_owner_lane_rejects_missing_or_weakened_gates(self) -> None:
         workflow = load_workflow(CI_WORKFLOW_PATH)
         native = load_workflow(ROOT / ".github/workflows/owner-bridge-windows.yml")
