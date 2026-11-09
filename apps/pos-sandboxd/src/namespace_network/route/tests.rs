@@ -462,27 +462,22 @@ fn unusual_main_table_routes_fail() {
     ));
 }
 
+/// A tentative link-local address of link `index`.
+fn tentative_on(index: u32) -> RouteNetlinkMessage {
+    let mut message = AddressMessage::default();
+    message.header.family = AddressFamily::Inet6;
+    message.header.prefix_len = 64;
+    message.header.flags = AddressHeaderFlags::Tentative;
+    message.header.index = index;
+    message.attributes = vec![AddressAttribute::Address(v6([0xfe80, 0, 0, 0, 0, 0, 0, 1]))];
+    RouteNetlinkMessage::NewAddress(message)
+}
+
 #[test]
 fn the_host_read_back_keeps_only_its_own_links_addresses() {
-    let on = |index| {
-        address_reply(
-            AddressFamily::Inet6,
-            AddressHeaderFlags::Tentative,
-            vec![AddressAttribute::Address(v6([
-                0xfe80, 0, 0, 0, 0, 0, 0, index,
-            ]))],
-        )
-    };
-    let with_index = |index| {
-        let RouteNetlinkMessage::NewAddress(mut message) = on(0) else {
-            return routes();
-        };
-        message.header.index = u32::from(index);
-        RouteNetlinkMessage::NewAddress(message)
-    };
-    let kept = of_link(vec![with_index(3), with_index(4), routes()], Some(4));
-    assert_eq!(kept, [with_index(4), routes()]);
-    assert_eq!(of_link(vec![with_index(4)], None), []);
+    let kept = of_link(vec![tentative_on(3), tentative_on(4), routes()], Some(4));
+    assert_eq!(kept, [tentative_on(4), routes()]);
+    assert_eq!(of_link(vec![tentative_on(4)], None), []);
 }
 
 #[test]
