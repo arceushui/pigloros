@@ -25,6 +25,10 @@
 //!   - a record: its fields in WIT order;
 //!   - `u32`: four big-endian bytes.
 
+pub use pos_core::community_lifecycle::{
+    ArtifactRefV1, FieldRefV1, GuestPluginErrorV1, MeteringV1, PluginErrorCodeV1,
+    TimelinePositionV1,
+};
 use pos_crypto::plugin_execution::is_valid_id_v1;
 
 use super::error::CommunityPluginHostErrorV1;
@@ -36,30 +40,6 @@ pub const MAX_STATE_BYTES_V1: usize = 1_048_576;
 /// Bound on the summed `canonical-bytes` of one output's trace annotations,
 /// in bytes (1 MiB; ADR-061 revision 6).
 pub const MAX_TRACE_ANNOTATION_BYTES_V1: usize = 1_048_576;
-
-/// `contract-v1.artifact-ref`.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ArtifactRefV1 {
-    /// Registered schema ID.
-    pub schema_id: u32,
-    /// Exact artifact length.
-    pub byte_length: u64,
-    /// BLAKE3-256 artifact digest.
-    pub digest: [u8; 32],
-}
-
-/// `contract-v1.timeline-position`.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct TimelinePositionV1 {
-    /// Timeline ID.
-    pub timeline_id: [u8; 16],
-    /// Timeline sequence number.
-    pub seq: u64,
-    /// Tick.
-    pub tick: u64,
-    /// Scheduler position inside the Tick.
-    pub scheduler_position: u32,
-}
 
 /// `contract-v1.plugin-invocation`, without its `kind`.
 ///
@@ -199,50 +179,6 @@ pub struct PluginDescriptorV1 {
     pub release_digest: [u8; 32],
 }
 
-/// `contract-v1.field-ref`.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct FieldRefV1 {
-    /// Schema ID.
-    pub schema_id: u32,
-    /// Field ordinal.
-    pub field_ordinal: u16,
-}
-
-/// `contract-v1.plugin-error-code`.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum PluginErrorCodeV1 {
-    /// `invalid-invocation`.
-    InvalidInvocation(FieldRefV1),
-    /// `unsupported-schema`.
-    UnsupportedSchema(u32),
-    /// `capability-required`, with an ADR-061 capability ID.
-    CapabilityRequired(String),
-    /// `dependency-missing`.
-    DependencyMissing([u8; 32]),
-    /// `deterministic-budget-exhausted`.
-    DeterministicBudgetExhausted,
-    /// `invalid-state`.
-    InvalidState(FieldRefV1),
-    /// `migration-rejected`.
-    MigrationRejected(FieldRefV1),
-    /// `guest-declared-failure`.
-    GuestDeclaredFailure(u16),
-}
-
-/// `contract-v1.plugin-error`: the guest's own typed failure, validated.
-///
-/// ADR-061 records the exact variant, ordinal, coordinate and digest as the
-/// outcome. No `EventDraft` or state accompanies it.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct GuestPluginErrorV1 {
-    /// The error code.
-    pub code: PluginErrorCodeV1,
-    /// Canonical coordinate, at most 128 bytes.
-    pub canonical_coordinate: Option<Vec<u8>>,
-    /// Related digest.
-    pub related_digest: Option<[u8; 32]>,
-}
-
 /// Deterministic values that `host-v1` exposes to one invocation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HostInputs {
@@ -274,8 +210,6 @@ pub struct OperationalLogRecord {
 
 /// The guest's validated return: its value, or its own `plugin-error`.
 pub type GuestReturnV1<T> = Result<T, GuestPluginErrorV1>;
-
-pub use pos_core::community_lifecycle::MeteringV1;
 
 /// One completed invocation: the guest's validated return and its metering.
 #[derive(Clone, Debug, Eq, PartialEq)]
