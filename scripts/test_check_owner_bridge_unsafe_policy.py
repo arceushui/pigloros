@@ -1470,6 +1470,7 @@ def test_owned_process_fault_authority() -> None:
         body = fixture_source[start:end]
         marker = ("finish_failed_case(" if function in (
             "run_awaiting_load", "run_navigating", "run_posted_empty", "run_before_record",
+            "run_posted_writing", "run_posted_ready", "run_posted_retry",
         ) else "check_final_process_failures(")
         if start < 0 or end < 0 or marker not in body:
             raise SystemExit(f"missing final process failure classifier: {function}")
