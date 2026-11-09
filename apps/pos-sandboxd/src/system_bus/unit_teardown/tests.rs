@@ -683,4 +683,64 @@ mod cases {
         ));
         Ok(())
     }
+
+    /// A prepared attempt in a fresh private runtime tree, keyed by `[id; 16]`.
+    fn prepared_attempt(
+        id: u8,
+    ) -> TestResult<(
+        tempfile::TempDir,
+        crate::SystemdAttemptRegistry,
+        crate::PreparedAttemptDirectory,
+    )> {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let runtime = tempfile::tempdir()?;
+        fs::set_permissions(runtime.path(), fs::Permissions::from_mode(0o700))?;
+        for directory in ["registry", "attempts"] {
+            let path = runtime.path().join(directory);
+            fs::create_dir(&path)?;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?;
+        }
+        let parent = File::open(runtime.path())?;
+        let registry = crate::SystemdAttemptRegistry::from_runtime_directory(
+            &parent,
+            parent.metadata()?.uid(),
+        )?;
+        let prepared = registry
+            .commit_planned(&crate::PlannedAttemptIntent::new([id; 16], [9; 32])?)?
+            .prepare_directory()?;
+        Ok((runtime, registry, prepared))
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn only_the_exact_stopped_unit_lets_terminal_cleanup_delete_intent() -> TestResult {
+        for (unit_id, claimed) in [(1, true), (1, false), (2, true)] {
+            let mut fixture = Fixture::new(unit_id, Stop::Empty, Reset::Unload).await?;
+            let (shutdown, deadline) = budgets()?;
+            let observed = fixture
+                .transport
+                .stop_attempt_unit(&mut fixture.bound, shutdown, deadline)
+                .await?;
+            let (runtime, registry, prepared) = prepared_attempt(1)?;
+            let ownership = prepared.execution_ownership();
+            if claimed {
+                ownership.claim()?;
+            }
+            let key = prepared.intent().unit_name().attempt_component().to_owned();
+            let result = prepared
+                .finish_terminal_cleanup(crate::AttemptUnitTermination::Stopped(&observed), None);
+            let exact = unit_id == 1;
+            assert_eq!(result.is_ok(), exact, "unit {unit_id}: {result:?}");
+            assert_eq!(runtime.path().join("registry").join(&key).exists(), !exact);
+            assert_eq!(runtime.path().join("attempts").join(&key).exists(), !exact);
+            assert_eq!(
+                registry
+                    .commit_planned(&crate::PlannedAttemptIntent::new([3; 16], [9; 32])?)
+                    .is_ok(),
+                exact
+            );
+            // Stop evidence closes an unclaimed start permission either way.
+            assert!(ownership.claim().is_err());
+        }
+        Ok(())
+    }
 }

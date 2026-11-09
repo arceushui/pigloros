@@ -33,6 +33,7 @@ mod release;
 mod verify;
 
 pub use identity::RootResourceIdentity;
+pub use release::ReleasedAttemptRoot;
 
 use std::{
     fs::File,
@@ -260,6 +261,7 @@ where
     F: Future<Output = Result<A, ImageActivationError>> + Send,
     A: ImageActivator + Send,
 {
+    directory.begin_activation();
     let prepared = directory
         .verify_directory()
         .map_err(|_| ImageActivationError::AttachFailure)

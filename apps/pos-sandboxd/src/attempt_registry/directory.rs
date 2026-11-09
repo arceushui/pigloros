@@ -1,9 +1,13 @@
 //! Planned ownership extended with the exact, still-unmounted directory tree.
 
 use rustix::fs::mkdirat;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
 
 mod removal;
+mod terminal;
+
+pub use terminal::{AttemptUnitTermination, CompletedAttemptCleanup};
 
 use super::root::{RootRecord, ROOT_RECORD_SIZE};
 use super::{
@@ -49,6 +53,8 @@ pub struct PreparedAttemptDirectory {
     // This permits verified cleanup without acknowledging durability or launch.
     recorded_root: OnceLock<RootRecord>,
     execution: ExecutionOwnership,
+    // Root activations begun on this tree; each may leave loop/dm resources.
+    activations: AtomicUsize,
 }
 
 impl Drop for PreparedAttemptDirectory {
@@ -110,6 +116,7 @@ impl CommittedPlannedAttempt {
             identities,
             recorded_root: OnceLock::new(),
             execution: ExecutionOwnership::default(),
+            activations: AtomicUsize::new(0),
         };
         prepared.verify_tree()?;
         verify_intent(&prepared.planned.directory, &prepared.planned.intent)?;
@@ -129,6 +136,12 @@ impl CommittedPlannedAttempt {
 impl PreparedAttemptDirectory {
     pub(crate) fn execution_ownership(&self) -> ExecutionOwnership {
         self.execution.clone()
+    }
+
+    /// Record that root activation began before any mountfsd resource exists.
+    /// Intent deletion then requires released-root evidence for that one root.
+    pub(crate) fn begin_activation(&self) {
+        self.activations.fetch_add(1, Ordering::AcqRel);
     }
 
     /// The exact original planned ownership, preserved by the extension.

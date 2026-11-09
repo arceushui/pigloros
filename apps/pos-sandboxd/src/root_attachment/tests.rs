@@ -84,6 +84,14 @@ async fn detach_owned(
     kernel: &impl AttachmentKernel,
     directory: &PreparedAttemptDirectory,
 ) -> Result<(), ImageActivationError> {
+    release_owned(root, kernel, directory).await.map(drop)
+}
+
+async fn release_owned(
+    root: VerifiedRootMount,
+    kernel: &impl AttachmentKernel,
+    directory: &PreparedAttemptDirectory,
+) -> Result<ReleasedAttemptRoot, ImageActivationError> {
     super::release::Release::new(root, directory, cleanup_deadline())
         .finish(kernel)
         .await
@@ -1426,6 +1434,12 @@ async fn the_admitted_chain_reaches_attachment_only_through_every_gate() -> Test
         .err(),
         Some(ImageActivationError::AttachFailure)
     );
+    // Every activation that began retains intent until its one root is
+    // released; repeated activations of a tree can never delete it.
+    assert!(matches!(
+        prepared.finish_terminal_cleanup(crate::AttemptUnitTermination::Unclaimed, None),
+        Err(crate::SystemdAttemptRegistryError::CleanupEvidence)
+    ));
     Ok(())
 }
 

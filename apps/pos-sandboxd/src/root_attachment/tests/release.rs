@@ -324,4 +324,74 @@ mod cases {
         tree.prepared.verify_directory()?;
         Ok(())
     }
+
+    #[tokio::test]
+    async fn only_the_single_released_root_of_its_tree_lets_intent_go_last() -> TestResult {
+        let tree = prepared_tree()?;
+        tree.prepared.begin_activation();
+        let (kernel, root) = attached_root(&tree.prepared)?;
+        recheck(&kernel, &root, &tree.prepared, Some(&root.expected), || {
+            Ok(())
+        })?;
+        let key = component(&tree.prepared);
+        let record = tree.runtime.path().join("registry").join(&key);
+        assert_eq!(fs::read(&record)?.len(), 393);
+        let released = release_owned(root, &kernel, &tree.prepared).await?;
+        let completed = tree
+            .prepared
+            .finish_terminal_cleanup(crate::AttemptUnitTermination::Unclaimed, Some(released))?;
+        assert_eq!(completed.intent().unit_name().attempt_component(), key);
+        assert!(!record.exists());
+        assert!(!tree.runtime.path().join("attempts").join(&key).exists());
+        tree.registry
+            .commit_planned(&PlannedAttemptIntent::new([10; 16], [9; 32])?)?;
+
+        // Foreign evidence, a missing root and an ambiguous repeat activation.
+        for case in 0..3 {
+            let tree = prepared_tree()?;
+            let other = tree
+                .registry
+                .commit_planned(&PlannedAttemptIntent::new([10; 16], [9; 32])?)?
+                .prepare_directory()?;
+            let (kernel, root) = attached_root(&other)?;
+            let foreign = release_owned(root, &kernel, &other).await?;
+            let (kernel, root) = attached_root(&tree.prepared)?;
+            let own = release_owned(root, &kernel, &tree.prepared).await?;
+            tree.prepared.begin_activation();
+            let evidence = match case {
+                0 => Some(foreign),
+                1 => None,
+                _ => {
+                    tree.prepared.begin_activation();
+                    Some(own)
+                }
+            };
+            let key = component(&tree.prepared);
+            let record = tree.runtime.path().join("registry").join(&key);
+            let bytes = fs::read(&record)?;
+            let result = tree
+                .prepared
+                .finish_terminal_cleanup(crate::AttemptUnitTermination::Unclaimed, evidence);
+            assert!(
+                matches!(
+                    result,
+                    Err(crate::SystemdAttemptRegistryError::CleanupEvidence)
+                ),
+                "case {case}: {result:?}"
+            );
+            assert_eq!(fs::read(&record)?, bytes);
+            assert!(tree
+                .runtime
+                .path()
+                .join("attempts")
+                .join(&key)
+                .join("root")
+                .exists());
+            assert!(tree
+                .registry
+                .commit_planned(&PlannedAttemptIntent::new([11; 16], [9; 32])?)
+                .is_err());
+        }
+        Ok(())
+    }
 }
