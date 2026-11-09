@@ -338,6 +338,17 @@ read back after every change, and restart reconciliation deletes the table
 with the other orphaned state. The provider never reads another table for
 policy and never changes one.
 
+Before admission opens, the startup composition runs
+`NamespacedLocalNetwork::probe_egress` with an installation-configured,
+otherwise unused IPv4 /30. The probe establishes a real attempt network for a
+reserved probe attempt whose one endpoint is a target namespace behind the
+host on its own veth pair (`piglor-t0`), connects, and requires the
+connection to arrive from the host's address, so forwarding and masquerade
+both work. Any failure keeps admission closed (ADR-069 section 6). The probe
+removes everything it made. Because its target sits behind a veth pair rather
+than the host's real uplink, a rule that drops only traffic leaving by one
+particular uplink is not detected; the requirement below still forbids it.
+
 Installation requirement: no other host firewall (Docker's, ufw's, an
 `iptables` FORWARD policy of DROP) may drop forwarded traffic from the
 `piglor-h*` ends to the authenticated endpoints or its replies. Host egress

@@ -404,6 +404,61 @@ fn refused_egress_establishes_nothing_and_a_failed_egress_removal_quarantines() 
     Ok(())
 }
 
+#[test]
+fn the_probe_target_takes_the_second_address_of_its_slash_30() {
+    let probe = EgressProbe {
+        network: Ipv4Addr::new(198, 18, 0, 4),
+        port: 7000,
+    };
+    assert_eq!(probe.host(), Ipv4Addr::new(198, 18, 0, 5));
+    assert_eq!(
+        probe.target(),
+        std::net::SocketAddrV4::new(Ipv4Addr::new(198, 18, 0, 6), 7000)
+    );
+}
+
+#[test]
+fn a_probe_that_cannot_create_its_target_fails_closed() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (network, journal) = network(directory.path(), pinning(directory.path()), 24)?;
+    let probe = EgressProbe {
+        network: Ipv4Addr::new(198, 18, 0, 4),
+        port: 7000,
+    };
+    // Unsharing a namespace needs `CAP_SYS_ADMIN`.
+    let probed = network.probe_egress(probe);
+    assert!(
+        matches!(probed, Err(EgressProbeError::Target(_))),
+        "{probed:?}"
+    );
+    assert!(entries(&journal).installed.is_empty());
+    Ok(())
+}
+
+#[test]
+fn probe_errors_say_what_failed() {
+    for (error, message) in [
+        (
+            EgressProbeError::Target(NetlinkError::Unexpected),
+            "the egress probe's target could not be set up or removed",
+        ),
+        (
+            EgressProbeError::Establish(AttemptNetworkError::InUse),
+            "the egress probe's attempt network could not be established",
+        ),
+        (
+            EgressProbeError::Blocked(io::ErrorKind::TimedOut.into()),
+            "forwarded sandbox traffic did not pass the host",
+        ),
+        (
+            EgressProbeError::NotMasqueraded,
+            "forwarded sandbox traffic was not masqueraded",
+        ),
+    ] {
+        assert_eq!(error.to_string(), message);
+    }
+}
+
 // A current-thread runtime has no other worker to hand its tasks to, so
 // removal runs in place there.
 #[tokio::test]
@@ -640,6 +695,66 @@ mod privileged {
             "{outcome:?}"
         );
         assert!(swept.is_ok(), "{swept:?}");
+        Ok(())
+    }
+
+    /// The probe's dedicated /30.
+    const PROBE: EgressProbe = EgressProbe {
+        network: Ipv4Addr::new(198, 18, 0, 4),
+        port: 7000,
+    };
+
+    /// A network over the real kernel, pinned in `/run/netns`.
+    fn real_network() -> TestResult<NamespacedLocalNetwork<NetlinkNamespaceControl>> {
+        let namespaces = NetworkNamespaces::system();
+        Ok(NamespacedLocalNetwork::new(
+            NetlinkNamespaceControl::new(namespaces.clone()),
+            HostEgress::new(),
+            namespaces,
+            range(24, 120)?,
+        ))
+    }
+
+    #[test]
+    fn the_egress_probe_passes_and_leaves_nothing() -> TestResult {
+        if !isolated("the_egress_probe_passes_and_leaves_nothing")? {
+            return Ok(());
+        }
+        let probed = real_network()?.probe_egress(PROBE);
+        assert!(probed.is_ok(), "{probed:?}");
+        let left = NetworkNamespaces::system().attempt_names();
+        assert!(matches!(&left, Ok(names) if names.is_empty()), "{left:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn a_foreign_forward_drop_fails_the_egress_probe() -> TestResult {
+        if !isolated("a_foreign_forward_drop_fails_the_egress_probe")? {
+            return Ok(());
+        }
+        // Another owner's table, as Docker or ufw would install it.
+        let foreign = crate::namespace_network::FirewallChain {
+            name: "forward".to_owned(),
+            base: Some(crate::namespace_network::FirewallBaseChain {
+                hook: crate::namespace_network::FirewallHook::Forward,
+                priority: 0,
+                policy: crate::namespace_network::FirewallVerdict::Drop,
+            }),
+            rules: Vec::new(),
+        };
+        let installed = NetlinkSession::open(crate::namespace_network::netlink::NETFILTER)
+            .and_then(|session| {
+                session.execute(crate::namespace_network::firewall::install(
+                    "foreign",
+                    &[foreign],
+                ))
+            });
+        let probed = real_network()?.probe_egress(PROBE);
+        assert!(installed.is_ok(), "{installed:?}");
+        assert!(
+            matches!(probed, Err(EgressProbeError::Blocked(_))),
+            "{probed:?}"
+        );
         Ok(())
     }
 }

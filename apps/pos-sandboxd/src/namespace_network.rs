@@ -26,7 +26,9 @@ mod plan;
 mod route;
 mod rule_codec;
 
-pub use attempt_network::{AttemptNetworkError, NamespaceConnector, NamespacedLocalNetwork};
+pub use attempt_network::{
+    AttemptNetworkError, EgressProbe, EgressProbeError, NamespaceConnector, NamespacedLocalNetwork,
+};
 pub use control::NetlinkNamespaceControl;
 pub use host_egress::{AttemptEgress, EgressControl, HostEgress, HostEgressError, HOST_TABLE};
 pub use pinned::NetworkNamespaces;

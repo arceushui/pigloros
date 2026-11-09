@@ -313,6 +313,10 @@ where
     }
 }
 
+mod probe;
+
+pub use probe::{EgressProbe, EgressProbeError};
+
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests;
