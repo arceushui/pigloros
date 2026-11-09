@@ -212,20 +212,26 @@ impl SystemdAttemptRecovery {
     /// changed contents. Recovery must stop on any contradiction.
     pub fn verify_unchanged(&self) -> Result<(), SystemdAttemptRegistryError> {
         let (entries, markers) = inventory(&self.directory)?;
-        if entries
-            .iter()
-            .map(|entry| &entry.observation)
-            .eq(self.entries.iter().map(|entry| &entry.observation))
-            && markers
-                .iter()
-                .map(|marker| &marker.observation)
-                .eq(self.markers.iter().map(|marker| &marker.observation))
-        {
+        if observations(&entries, &markers) == observations(&self.entries, &self.markers) {
             Ok(())
         } else {
             Err(SystemdAttemptRegistryError::ReconciliationRequired)
         }
     }
+}
+
+/// The comparable observations of one inventory.
+fn observations<'a>(
+    entries: &'a [RegistryRecoveryEntry],
+    markers: &'a [MarkerEntry],
+) -> (
+    Vec<&'a RegistryEntryObservation>,
+    Vec<&'a MarkerObservation>,
+) {
+    (
+        entries.iter().map(|entry| &entry.observation).collect(),
+        markers.iter().map(|marker| &marker.observation).collect(),
+    )
 }
 
 impl SystemdAttemptRecovery {
