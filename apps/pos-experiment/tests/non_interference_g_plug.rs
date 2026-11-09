@@ -794,7 +794,7 @@ fn a_migrate_state_request_is_refused_by_the_protocol() -> TestResult {
     // The host still sends it: an endpoint that answers everything answers it.
     assert_eq!(
         GPlugProtocolHostV1::new(answers_garbage).migrate_state(&invocation()),
-        Some(b"not a response".to_vec())
+        Some(zeroize::Zeroizing::new(b"not a response".to_vec()))
     );
     // The migrate-state request is the reduce envelope with call code 3,
     // which the codec refuses.
