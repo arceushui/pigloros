@@ -439,8 +439,12 @@ mod native_tests {
 
         let mut held = File::open(path)?;
         let old_identity = crate::Native::file_identity(&held).map_err(|()| "old file identity")?;
-        let before = ledger.read_nonce_ledger_bytes()?;
-        ledger.replace_nonce_ledger_bytes(&before)?;
+        let before = ledger
+            .read_nonce_ledger_bytes()
+            .map_err(|_| "read while old file handle retained")?;
+        ledger
+            .replace_nonce_ledger_bytes(&before)
+            .map_err(|_| "replace while old file handle retained")?;
         let new_file = File::open(path)?;
         let new_identity =
             crate::Native::file_identity(&new_file).map_err(|()| "new file identity")?;
@@ -448,7 +452,12 @@ mod native_tests {
         let mut old_bytes = Vec::new();
         held.read_to_end(&mut old_bytes)?;
         assert_eq!(old_bytes, before);
-        assert_eq!(ledger.read_nonce_ledger_bytes()?, before);
+        assert_eq!(
+            ledger
+                .read_nonce_ledger_bytes()
+                .map_err(|_| "read new image while old handle retained")?,
+            before
+        );
         Ok(())
     }
 
