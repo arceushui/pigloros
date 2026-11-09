@@ -77,9 +77,10 @@ pub async fn released_root(
         .map_err(|error| error.to_string())
 }
 
-/// One attached fixture root of `directory` with its fake kernel, released
-/// through the lifecycle controller's root port. The activation is recorded
-/// first, as the mountfsd request would.
+/// One attached fixture root of `directory` with its fake kernel.
+///
+/// It is released through the lifecycle controller's root port. The
+/// activation is recorded first, as the mountfsd request would.
 pub(crate) struct FakeRootRelease {
     kernel: FakeKernel,
     root: VerifiedRootMount,
@@ -92,9 +93,10 @@ impl crate::lifecycle::RootRelease for FakeRootRelease {
         deadline: tokio::time::Instant,
     ) -> impl Future<Output = Result<ReleasedAttemptRoot, ImageActivationError>> + Send + '_ {
         async move {
-            super::release::Release::new(self.root, directory, deadline)
+            let released = super::release::Release::new(self.root, directory, deadline)
                 .finish(&self.kernel)
-                .await
+                .await;
+            released
         }
     }
 }
@@ -121,8 +123,9 @@ pub(crate) fn fake_root_release(
     Ok(FakeRootRelease { kernel, root })
 }
 
-/// One attached fixture root of `directory`, for the real host kernel to
-/// contradict. The activation is recorded first.
+/// One attached fixture root of `directory`, for the host to contradict.
+///
+/// The activation is recorded first.
 ///
 /// # Errors
 /// Returns the attachment fixture's error.

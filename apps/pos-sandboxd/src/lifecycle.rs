@@ -195,16 +195,19 @@ async fn stop_unit(
     deadlines: AttemptCleanupDeadlines,
 ) -> Result<Option<SystemdAttemptUnitTeardownObservation>, AttemptCleanupError> {
     let refused = AttemptCleanupError::Registry(SystemdAttemptRegistryError::CleanupEvidence);
-    match cgroup {
-        // Never stop a unit through a cgroup this execution did not bind.
-        Some(cgroup) if !directory.bound_cgroup_is(cgroup.identity()) => Err(refused),
-        Some(mut cgroup) => transport
-            .stop_attempt_unit(&mut cgroup, deadlines.shutdown, deadlines.unit_absent)
-            .await
-            .map(Some)
-            .map_err(AttemptCleanupError::from),
-        None => directory.fence_unsubmitted().then_some(None).ok_or(refused),
+    let Some(mut cgroup) = cgroup else {
+        return directory.fence_unsubmitted().then_some(None).ok_or(refused);
+    };
+    // Never stop a unit through a cgroup this execution did not bind.
+    if !directory.bound_cgroup_is(cgroup.identity()) {
+        return Err(refused);
     }
+    let stopped = transport
+        .stop_attempt_unit(&mut cgroup, deadlines.shutdown, deadlines.unit_absent)
+        .await
+        .map(Some)
+        .map_err(AttemptCleanupError::from);
+    stopped
 }
 
 async fn release_root<R: RootRelease>(
@@ -212,14 +215,15 @@ async fn release_root<R: RootRelease>(
     root: Option<R>,
     deadline: Instant,
 ) -> Result<Option<ReleasedAttemptRoot>, AttemptCleanupError> {
-    match root {
-        Some(root) => root
-            .release(directory, deadline)
-            .await
-            .map(Some)
-            .map_err(AttemptCleanupError::Root),
-        None => Ok(None),
-    }
+    let Some(root) = root else {
+        return Ok(None);
+    };
+    let released = root
+        .release(directory, deadline)
+        .await
+        .map(Some)
+        .map_err(AttemptCleanupError::Root);
+    released
 }
 
 #[cfg(test)]

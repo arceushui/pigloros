@@ -16,8 +16,9 @@ pub enum AttemptUnitTermination<'a> {
     /// No unit start was ever requested for this attempt, whether or not an
     /// execution claimed it. Cleanup fences every later start atomically.
     Unsubmitted,
-    /// The exact unit was stopped, observed unloaded, and the very cgroup the
-    /// claimed execution bound was observed empty afterwards. Cleanup closes
+    /// The exact unit was stopped and observed unloaded, then its cgroup empty.
+    ///
+    /// The cgroup must be the one the claimed execution bound. Cleanup closes
     /// any unclaimed start permission.
     Stopped(&'a SystemdAttemptUnitTeardownObservation),
 }
