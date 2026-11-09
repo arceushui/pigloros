@@ -1,5 +1,13 @@
 #![cfg(windows)]
 
+#[cfg(test)]
+use std::io::Write as _;
+
+#[cfg(test)]
+fn pending_opening_diagnostic(message: &'static str) {
+    let _logged_or_unavailable = writeln!(std::io::stderr(), "{message}");
+}
+
 use std::cell::Cell;
 use std::path::Path;
 use std::rc::Rc;
@@ -251,9 +259,12 @@ impl NativeOperations for Session {
 
     #[cfg(test)]
     fn pending_opening_browser_candidate(&self) -> Result<pos_owner_bridge::ProcessIdentity, ()> {
-        if !self.pending_opening_owners_retained()
-            || self.recordless_controller_completion().is_some()
-        {
+        if !self.pending_opening_owners_retained() {
+            pending_opening_diagnostic("NATIVE_PENDING_OPENING failure=candidate-owners");
+            return Err(());
+        }
+        if self.recordless_controller_completion().is_some() {
+            pending_opening_diagnostic("NATIVE_PENDING_OPENING failure=candidate-callback");
             return Err(());
         }
         super::process_fault::browser_candidate(&self.environment_ref().map_err(|_| ())?.raw)

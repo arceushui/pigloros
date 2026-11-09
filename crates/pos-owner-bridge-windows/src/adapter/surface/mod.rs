@@ -1,6 +1,14 @@
 #![cfg(windows)]
 #![forbid(unsafe_code)]
 
+#[cfg(test)]
+use std::io::Write as _;
+
+#[cfg(test)]
+fn pending_opening_diagnostic(message: &'static str) {
+    let _logged_or_unavailable = writeln!(std::io::stderr(), "{message}");
+}
+
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -308,24 +316,66 @@ impl Surface {
     pub(in crate::adapter) fn prepare_pending_opening_browser(
         &mut self,
     ) -> std::result::Result<ProcessIdentity, ()> {
-        if !self.recordless_opening_ready()
-            || !self.native.pending_opening_owners_retained()
-            || self.native.recordless_controller_completion().is_some()
-            || self.events.invalid()
-            || self.events.exited().is_some()
-            || !self.store.records().map_err(|_| ())?.is_empty()
-        {
+        if !self.recordless_opening_ready() {
+            let _logged_or_unavailable =
+                writeln!(std::io::stderr(), "NATIVE_PENDING_OPENING failure=phase");
             return Err(());
         }
-        let folder = self.root.join(self.folder.as_ref().ok_or(())?);
-        crate::verify_private_directory(&folder).map_err(|_| ())?;
-        self.admit_environment(&folder).map_err(|_| ())?;
-        let browser = self.native.pending_opening_browser_candidate()?;
-        if self.runtime.identity(browser.browser_pid).map_err(|_| ())? != browser
-            || self.native.recordless_controller_completion().is_some()
-        {
+        if !self.native.pending_opening_owners_retained() {
+            pending_opening_diagnostic("NATIVE_PENDING_OPENING failure=native-owners");
             return Err(());
         }
+        if self.native.recordless_controller_completion().is_some() {
+            pending_opening_diagnostic("NATIVE_PENDING_OPENING failure=callback-before");
+            return Err(());
+        }
+        if self.events.invalid() {
+            pending_opening_diagnostic("NATIVE_PENDING_OPENING failure=invalid-event");
+            return Err(());
+        }
+        if self.events.exited().is_some() {
+            pending_opening_diagnostic("NATIVE_PENDING_OPENING failure=prior-exit");
+            return Err(());
+        }
+        let records = self.store.records().map_err(|_| {
+            pending_opening_diagnostic("NATIVE_PENDING_OPENING failure=records-unreadable");
+        })?;
+        if !records.is_empty() {
+            pending_opening_diagnostic("NATIVE_PENDING_OPENING failure=records-present");
+            return Err(());
+        }
+        let folder = self.root.join(self.folder.as_ref().ok_or_else(|| {
+            pending_opening_diagnostic("NATIVE_PENDING_OPENING failure=folder-missing");
+        })?);
+        crate::verify_private_directory(&folder).map_err(|_| {
+            pending_opening_diagnostic("NATIVE_PENDING_OPENING failure=folder-verification");
+        })?;
+        self.admit_environment(&folder).map_err(|_| {
+            pending_opening_diagnostic("NATIVE_PENDING_OPENING failure=environment-admission");
+        })?;
+        pending_opening_diagnostic(
+            "NATIVE_PENDING_OPENING before-candidate=owners-retained-callback-pending",
+        );
+        let browser = self
+            .native
+            .pending_opening_browser_candidate()
+            .map_err(|()| {
+                pending_opening_diagnostic("NATIVE_PENDING_OPENING failure=candidate");
+            })?;
+        let actual = self.runtime.identity(browser.browser_pid).map_err(|_| {
+            pending_opening_diagnostic("NATIVE_PENDING_OPENING failure=runtime-identity-read");
+        })?;
+        if actual != browser {
+            pending_opening_diagnostic("NATIVE_PENDING_OPENING failure=runtime-identity-mismatch");
+            return Err(());
+        }
+        if self.native.recordless_controller_completion().is_some() {
+            pending_opening_diagnostic("NATIVE_PENDING_OPENING failure=callback-after");
+            return Err(());
+        }
+        pending_opening_diagnostic(
+            "NATIVE_PENDING_OPENING after-candidate=identity-matched-callback-pending",
+        );
         self.events.expect_browser(browser.browser_pid);
         self.recordless_fault = Some(browser);
         Ok(browser)

@@ -3,6 +3,14 @@
 
 //! Declared faults on processes discovered from the current owned environment.
 
+#[cfg(test)]
+use std::io::Write as _;
+
+#[cfg(test)]
+fn pending_opening_diagnostic(message: &'static str) {
+    let _logged_or_unavailable = writeln!(std::io::stderr(), "{message}");
+}
+
 use pos_owner_bridge::ProcessIdentity;
 use webview2_com::Microsoft::Web::WebView2::Win32::{
     ICoreWebView2Environment, ICoreWebView2Environment8, COREWEBVIEW2_PROCESS_KIND,
@@ -141,13 +149,72 @@ pub(super) fn renderer_presence(
 pub(super) fn browser_candidate(
     environment: &ICoreWebView2Environment,
 ) -> Result<ProcessIdentity, ()> {
-    let first = candidates(environment)?;
-    let pid = select(&first, COREWEBVIEW2_PROCESS_KIND_BROWSER)?;
-    let (identity, image) = super::process::inspect(pid)?.ok_or(())?;
-    let second = candidates(environment)?;
-    if select(&second, COREWEBVIEW2_PROCESS_KIND_BROWSER)? != pid
-        || super::process::inspect(pid)?.ok_or(())? != (identity, image)
-    {
+    let first = candidates(environment).map_err(|()| {
+        pending_opening_diagnostic("NATIVE_PROCESS_SNAPSHOT failure=first-snapshot-incomplete");
+    })?;
+    let _logged_or_unavailable = writeln!(
+        std::io::stderr(),
+        "NATIVE_PROCESS_SNAPSHOT first-snapshot={}",
+        if first.is_empty() {
+            "empty"
+        } else {
+            "nonempty"
+        }
+    );
+    let pid = select(&first, COREWEBVIEW2_PROCESS_KIND_BROWSER).map_err(|()| {
+        let count = first
+            .iter()
+            .filter(|(_, kind)| *kind == COREWEBVIEW2_PROCESS_KIND_BROWSER)
+            .count();
+        let _logged_or_unavailable = writeln!(
+            std::io::stderr(),
+            "NATIVE_PROCESS_SNAPSHOT first-browser={}",
+            if count == 0 { "zero" } else { "multiple" }
+        );
+    })?;
+    let (identity, image) = super::process::inspect(pid)
+        .map_err(|()| {
+            pending_opening_diagnostic("NATIVE_PROCESS_SNAPSHOT failure=first-identity-error");
+        })?
+        .ok_or_else(|| {
+            pending_opening_diagnostic("NATIVE_PROCESS_SNAPSHOT failure=first-identity-absent");
+        })?;
+    let second = candidates(environment).map_err(|()| {
+        pending_opening_diagnostic("NATIVE_PROCESS_SNAPSHOT failure=second-snapshot-incomplete");
+    })?;
+    let _logged_or_unavailable = writeln!(
+        std::io::stderr(),
+        "NATIVE_PROCESS_SNAPSHOT second-snapshot={}",
+        if second.is_empty() {
+            "empty"
+        } else {
+            "nonempty"
+        }
+    );
+    let second_pid = select(&second, COREWEBVIEW2_PROCESS_KIND_BROWSER).map_err(|()| {
+        let count = second
+            .iter()
+            .filter(|(_, kind)| *kind == COREWEBVIEW2_PROCESS_KIND_BROWSER)
+            .count();
+        let _logged_or_unavailable = writeln!(
+            std::io::stderr(),
+            "NATIVE_PROCESS_SNAPSHOT second-browser={}",
+            if count == 0 { "zero" } else { "multiple" }
+        );
+    })?;
+    if second_pid != pid {
+        pending_opening_diagnostic("NATIVE_PROCESS_SNAPSHOT failure=browser-changed");
+        return Err(());
+    }
+    let second_identity = super::process::inspect(pid)
+        .map_err(|()| {
+            pending_opening_diagnostic("NATIVE_PROCESS_SNAPSHOT failure=second-identity-error");
+        })?
+        .ok_or_else(|| {
+            pending_opening_diagnostic("NATIVE_PROCESS_SNAPSHOT failure=second-identity-absent");
+        })?;
+    if second_identity != (identity, image) {
+        pending_opening_diagnostic("NATIVE_PROCESS_SNAPSHOT failure=identity-changed");
         return Err(());
     }
     Ok(identity)

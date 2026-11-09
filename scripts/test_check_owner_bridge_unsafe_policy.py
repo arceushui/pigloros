@@ -1995,6 +1995,8 @@ def test_external_qualification_is_sealed() -> None:
     if errors(sources):
         raise SystemExit(f"External fixture baseline rejected: {errors(sources)}")
     mutations = (
+        (f"{SHIM}/src/ffi/process_fault.rs", 'failure=first-snapshot-incomplete', 'failure=first-snapshot-empty'),
+        (f"{SHIM}/src/adapter/surface/mod.rs", 'failure=callback-after', 'failure=callback-before'),
         (controls, '"ms-settings:privacy-location"', '"ms-settings:privacy-location?x=1"'),
         (assets, 'ms-settings:privacy-location', 'ms-settings:privacy-location#x'),
         (controls, 'self.allowance.borrow_mut().take()', 'self.allowance.borrow_mut().clone()'),
