@@ -169,8 +169,12 @@ impl PreparedAttemptDirectory {
     /// about to be sent, before it is sent (owner decision D2). Restart
     /// reconciliation uses it to wait out a request that may still be served.
     ///
+    /// The marker only makes restart more conservative, so an owner closed
+    /// to new commits still records it: an activation it allows is never
+    /// sent unrecorded.
+    ///
     /// # Errors
-    /// Refuses a closed or poisoned registry owner, and any boot ID, write,
+    /// Refuses a poisoned or exhausted registry owner, and any boot ID, write,
     /// rename, fsync or readback failure. A failure closes further commits,
     /// and the request must not be sent.
     pub(crate) fn record_activation_request(&self) -> Result<(), SystemdAttemptRegistryError> {
@@ -179,13 +183,10 @@ impl PreparedAttemptDirectory {
             .state
             .lock()
             .map_err(|_| SystemdAttemptRegistryError::ReconciliationRequired)?;
-        if state.failed {
-            return Err(SystemdAttemptRegistryError::ReconciliationRequired);
-        }
         let result = state
             .reserve_sequence()
             .and_then(|sequence| super::activation::publish(&self.planned.directory, sequence));
-        state.failed = result.is_err();
+        state.failed |= result.is_err();
         result
     }
 
