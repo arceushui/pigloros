@@ -20,6 +20,9 @@ use rustix::fs::{
 use crate::TransientServiceUnitName;
 
 mod directory;
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod frontiers;
 mod recovery;
 mod root;
 pub use directory::{AttemptUnitTermination, CompletedAttemptCleanup, PreparedAttemptDirectory};

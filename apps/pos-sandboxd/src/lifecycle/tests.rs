@@ -304,6 +304,58 @@ async fn dropping_an_unfinished_cleanup_quarantines_the_attempt() -> TestResult 
     Ok(())
 }
 
+#[tokio::test(start_paused = true)]
+async fn eight_concurrent_lifecycles_each_end_with_their_intent_deleted_last() -> TestResult {
+    let runtime = tempfile::tempdir()?;
+    fs::set_permissions(runtime.path(), fs::Permissions::from_mode(0o700))?;
+    for child in ["registry", "attempts"] {
+        fs::create_dir(runtime.path().join(child))?;
+        fs::set_permissions(
+            runtime.path().join(child),
+            fs::Permissions::from_mode(0o700),
+        )?;
+    }
+    let parent = File::open(runtime.path())?;
+    let registry =
+        SystemdAttemptRegistry::from_runtime_directory(&parent, parent.metadata()?.uid())?;
+    let mut attempts = Vec::new();
+    for id in 1..=8 {
+        let directory = registry
+            .commit_planned(&PlannedAttemptIntent::new([id; 16], [9; 32])?)?
+            .prepare_directory()?;
+        let fixture = TeardownFixture::new(id, TeardownStop::Empty, TeardownReset::Unload).await?;
+        let ownership = directory.execution_ownership();
+        ownership.claim()?;
+        ownership.submit()?;
+        ownership.bind_cgroup(fixture.bound.identity());
+        let root = fake_root_release(&directory, true)?;
+        attempts.push((fixture, directory, root));
+    }
+    let deadlines = deadlines()?;
+    // Each cleanup keeps its fake manager alive while it runs.
+    let finished = futures_util::future::join_all(attempts.into_iter().map(
+        |(fixture, directory, root)| async move {
+            let completed = finish_with(
+                &fixture.transport,
+                directory,
+                Some(fixture.bound),
+                Some(root),
+                deadlines,
+            )
+            .await;
+            completed
+        },
+    ))
+    .await;
+    for (id, completed) in (1..=8).zip(finished) {
+        assert_eq!(completed?.intent().attempt_id(), [id; 16]);
+    }
+    assert_eq!(fs::read_dir(runtime.path().join("registry"))?.count(), 0);
+    assert_eq!(fs::read_dir(runtime.path().join("attempts"))?.count(), 0);
+    registry.commit_planned(&PlannedAttemptIntent::new([9; 16], [9; 32])?)?;
+    Ok(())
+}
+
 #[test]
 fn cleanup_phases_must_be_strictly_increasing() -> TestResult {
     let now = Instant::now();
