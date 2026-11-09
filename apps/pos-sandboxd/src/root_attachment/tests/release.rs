@@ -339,7 +339,7 @@ mod cases {
         let released = release_owned(root, &kernel, &tree.prepared).await?;
         let completed = tree
             .prepared
-            .finish_terminal_cleanup(crate::AttemptUnitTermination::Unclaimed, Some(released))?;
+            .finish_terminal_cleanup(crate::AttemptUnitTermination::Unsubmitted, Some(released))?;
         assert_eq!(completed.intent().unit_name().attempt_component(), key);
         assert!(!record.exists());
         assert!(!tree.runtime.path().join("attempts").join(&key).exists());
@@ -373,7 +373,7 @@ mod cases {
             let bytes = fs::read(&record)?;
             let result = tree
                 .prepared
-                .finish_terminal_cleanup(crate::AttemptUnitTermination::Unclaimed, evidence);
+                .finish_terminal_cleanup(crate::AttemptUnitTermination::Unsubmitted, evidence);
             assert!(
                 matches!(
                     result,

@@ -343,4 +343,6 @@ fn attach_and_verify<K: AttachmentKernel>(
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests;
 #[cfg(test)]
+pub use tests::{attached_fixture_root, fake_root_release, release_fake_root, FakeRootRelease};
+#[cfg(test)]
 pub use tests::{recorded_identity, released_root};

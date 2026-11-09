@@ -139,6 +139,16 @@ impl PreparedAttemptDirectory {
         self.execution.clone()
     }
 
+    /// Fence every later unit start; `false` when one was already requested.
+    pub(crate) fn fence_unsubmitted(&self) -> bool {
+        self.execution.fence_unsubmitted()
+    }
+
+    /// Whether `identity` is the cgroup this attempt's execution bound.
+    pub(crate) fn bound_cgroup_is(&self, identity: (u64, u64)) -> bool {
+        self.execution.bound_cgroup_is(identity)
+    }
+
     /// Record that a root activation is about to send its mountfsd request,
     /// before any loop/dm resource can exist. Intent deletion then requires
     /// released-root evidence for exactly that one root.

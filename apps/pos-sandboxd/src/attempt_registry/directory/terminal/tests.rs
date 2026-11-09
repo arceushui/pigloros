@@ -11,7 +11,7 @@ use crate::{SystemdAttemptRecovery, SystemdAttemptRegistry};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
-const UNCLAIMED: AttemptUnitTermination<'static> = AttemptUnitTermination::Unclaimed;
+const UNSUBMITTED: AttemptUnitTermination<'static> = AttemptUnitTermination::Unsubmitted;
 
 #[test]
 fn eight_lifecycles_delete_each_intent_last_and_a_restarted_owner_opens_empty() -> TestResult {
@@ -29,7 +29,7 @@ fn eight_lifecycles_delete_each_intent_last_and_a_restarted_owner_opens_empty() 
         let planned = intent(id)?;
         let key = planned.unit_name().attempt_component();
         let ownership = directory.execution_ownership();
-        let completed = directory.finish_terminal_cleanup(UNCLAIMED, None)?;
+        let completed = directory.finish_terminal_cleanup(UNSUBMITTED, None)?;
         assert_eq!(completed.intent(), &planned);
         assert!(!runtime.path().join("attempts").join(key).exists());
         assert!(!runtime.path().join("registry").join(key).exists());
@@ -48,7 +48,7 @@ fn eight_lifecycles_delete_each_intent_last_and_a_restarted_owner_opens_empty() 
     registry
         .commit_planned(&intent(9)?)?
         .prepare_directory()?
-        .finish_terminal_cleanup(UNCLAIMED, None)?;
+        .finish_terminal_cleanup(UNSUBMITTED, None)?;
     drop(registry);
     let parent = File::open(runtime.path())?;
     let restarted =
@@ -65,10 +65,19 @@ fn missing_unit_or_root_evidence_removes_nothing_and_closes_commits() -> TestRes
         let key = planned.unit_name().attempt_component();
         let directory = registry.commit_planned(&planned)?.prepare_directory()?;
         match case {
-            // An execution owner may have submitted the unit.
-            0 => directory.execution_ownership().claim()?,
-            // A closed start permission is not proof that no unit was submitted.
-            1 => directory.execution_ownership().close(),
+            // The claimed execution requested its unit start.
+            0 => {
+                let ownership = directory.execution_ownership();
+                ownership.claim()?;
+                ownership.submit()?;
+            }
+            // Its bound cgroup still needs stop evidence.
+            1 => {
+                let ownership = directory.execution_ownership();
+                ownership.claim()?;
+                ownership.submit()?;
+                ownership.bind_cgroup((1, 2));
+            }
             // mountfsd may have created loop/dm resources for this tree.
             2 => directory.begin_activation(),
             _ => {
@@ -78,7 +87,7 @@ fn missing_unit_or_root_evidence_removes_nothing_and_closes_commits() -> TestRes
         }
         let record = runtime.path().join("registry").join(key);
         let bytes = fs::read(&record)?;
-        let result = directory.finish_terminal_cleanup(UNCLAIMED, None);
+        let result = directory.finish_terminal_cleanup(UNSUBMITTED, None);
         assert!(
             matches!(result, Err(SystemdAttemptRegistryError::CleanupEvidence)),
             "case {case}: {result:?}"
@@ -91,6 +100,30 @@ fn missing_unit_or_root_evidence_removes_nothing_and_closes_commits() -> TestRes
             .exists());
         assert_eq!(fs::read(&record)?, bytes);
         assert!(registry.commit_planned(&intent(2)?).is_err());
+    }
+    Ok(())
+}
+
+#[test]
+fn an_attempt_whose_unit_start_was_never_requested_is_fenced_and_cleaned() -> TestResult {
+    // Unclaimed, claimed but not yet submitted, and closed by abandonment.
+    for case in 0..3 {
+        let (runtime, registry) = fixture()?;
+        let planned = intent(1)?;
+        let key = planned.unit_name().attempt_component();
+        let directory = registry.commit_planned(&planned)?.prepare_directory()?;
+        let ownership = directory.execution_ownership();
+        match case {
+            0 => {}
+            1 => ownership.claim()?,
+            _ => ownership.close(),
+        }
+        directory.finish_terminal_cleanup(UNSUBMITTED, None)?;
+        assert!(!runtime.path().join("registry").join(key).exists());
+        // A claimed execution can no longer request its unit start.
+        assert!(ownership.submit().is_err(), "case {case}");
+        assert!(ownership.claim().is_err(), "case {case}");
+        registry.commit_planned(&intent(2)?)?;
     }
     Ok(())
 }
@@ -115,7 +148,9 @@ fn changed_record_or_tree_is_refused_before_intent_deletion() -> TestResult {
         }
         let bytes = fs::read(&record)?;
         assert!(
-            directory.finish_terminal_cleanup(UNCLAIMED, None).is_err(),
+            directory
+                .finish_terminal_cleanup(UNSUBMITTED, None)
+                .is_err(),
             "case {case}"
         );
         assert!(attempt.join("root").exists(), "case {case}");
@@ -136,7 +171,7 @@ fn every_terminal_io_failure_leaves_a_recoverable_frontier() -> TestResult {
         let (_runtime, registry) = fixture()?;
         let prepared = registry.commit_planned(&intent(1)?)?.prepare_directory()?;
         let (result, count) =
-            with_io_fault(None, || prepared.finish_terminal_cleanup(UNCLAIMED, None));
+            with_io_fault(None, || prepared.finish_terminal_cleanup(UNSUBMITTED, None));
         result?;
         count
     };
@@ -152,7 +187,7 @@ fn every_terminal_io_failure_leaves_a_recoverable_frontier() -> TestResult {
         let record = runtime.path().join("registry").join(key);
         let bytes = fs::read(&record)?;
         let (result, count) = with_io_fault(Some(fail_at), || {
-            directory.finish_terminal_cleanup(UNCLAIMED, None)
+            directory.finish_terminal_cleanup(UNSUBMITTED, None)
         });
         assert!(
             matches!(result, Err(SystemdAttemptRegistryError::Io(_))),
@@ -206,7 +241,7 @@ fn quarantine_is_kept_and_poisoned_ownership_never_deletes_intent() -> TestResul
                 .map_err(|_| "poisoned fixture")?
                 .failed = true;
         }
-        let result = directory.finish_terminal_cleanup(UNCLAIMED, None);
+        let result = directory.finish_terminal_cleanup(UNSUBMITTED, None);
         assert_eq!(
             matches!(
                 result,

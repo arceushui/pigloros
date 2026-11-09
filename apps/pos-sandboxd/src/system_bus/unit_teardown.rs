@@ -151,3 +151,8 @@ async fn remove_with_proxy(
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests;
+#[cfg(test)]
+pub use tests::cases::{
+    Fixture as TeardownFixture, ManagerCalls as TeardownManagerCalls, Reset as TeardownReset,
+    Stop as TeardownStop,
+};

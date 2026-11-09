@@ -78,6 +78,69 @@ pub async fn released_root(
     released.map_err(|error| error.to_string())
 }
 
+/// One attached fixture root of `directory` with its fake kernel.
+///
+/// It is released through the lifecycle controller's root port. The
+/// activation is recorded first, as the mountfsd request would.
+pub struct FakeRootRelease {
+    kernel: FakeKernel,
+    root: VerifiedRootMount,
+}
+
+/// Detach the fake root and observe its fake devices, for the lifecycle
+/// controller's root port.
+///
+/// # Errors
+/// Returns the release's error.
+pub async fn release_fake_root(
+    fake: FakeRootRelease,
+    directory: &PreparedAttemptDirectory,
+    deadline: tokio::time::Instant,
+) -> Result<ReleasedAttemptRoot, ImageActivationError> {
+    let FakeRootRelease { kernel, root } = fake;
+    let released = super::release::Release::new(root, directory, deadline)
+        .finish(&kernel)
+        .await;
+    released
+}
+
+/// A fake root release; unless `absent`, the device-absence probe fails.
+///
+/// # Errors
+/// Returns the attachment fixture's error.
+pub fn fake_root_release(
+    directory: &PreparedAttemptDirectory,
+    absent: bool,
+) -> Result<FakeRootRelease, String> {
+    directory.begin_activation();
+    let (kernel, root) = attached_root(directory).map_err(|error| error.to_string())?;
+    let probes = [(
+        std::time::Duration::ZERO,
+        Err(ImageActivationError::ResourceAbsenceUnverified),
+    )];
+    kernel
+        .absence
+        .lock()
+        .map_err(|_| "poisoned fixture")?
+        .extend(probes.into_iter().filter(|_| !absent));
+    Ok(FakeRootRelease { kernel, root })
+}
+
+/// One attached fixture root of `directory`, for the host to contradict.
+///
+/// The activation is recorded first.
+///
+/// # Errors
+/// Returns the attachment fixture's error.
+pub fn attached_fixture_root(
+    directory: &PreparedAttemptDirectory,
+) -> Result<VerifiedRootMount, String> {
+    directory.begin_activation();
+    attached_root(directory)
+        .map(|(_kernel, root)| root)
+        .map_err(|error| error.to_string())
+}
+
 fn cleanup_deadline() -> tokio::time::Instant {
     tokio::time::Instant::now() + std::time::Duration::from_secs(1)
 }
@@ -1374,7 +1437,7 @@ async fn retry_and_clean(
     )
     .await?;
     let released = release_owned(retried, kernel, &prepared).await?;
-    prepared.finish_terminal_cleanup(crate::AttemptUnitTermination::Unclaimed, Some(released))?;
+    prepared.finish_terminal_cleanup(crate::AttemptUnitTermination::Unsubmitted, Some(released))?;
     Ok(())
 }
 
@@ -1485,7 +1548,7 @@ async fn the_admitted_chain_reaches_attachment_only_through_every_gate() -> Test
     // The activation that reached mountfsd retains intent until its one root
     // is released; the later early failure does not change that.
     assert!(matches!(
-        prepared.finish_terminal_cleanup(crate::AttemptUnitTermination::Unclaimed, None),
+        prepared.finish_terminal_cleanup(crate::AttemptUnitTermination::Unsubmitted, None),
         Err(crate::SystemdAttemptRegistryError::CleanupEvidence)
     ));
     Ok(())

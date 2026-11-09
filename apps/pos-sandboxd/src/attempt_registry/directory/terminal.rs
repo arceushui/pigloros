@@ -13,11 +13,13 @@ type TerminalResult<T = ()> = Result<T, SystemdAttemptRegistryError>;
 /// How the live owner knows that no attempt process can hold its resources.
 #[derive(Clone, Copy, Debug)]
 pub enum AttemptUnitTermination<'a> {
-    /// No execution was ever claimed. Cleanup consumes the one start
-    /// permission atomically, so no later execution can submit the unit.
-    Unclaimed,
-    /// The exact unit was stopped, observed unloaded, and its retained cgroup
-    /// observed empty afterwards. Cleanup closes any unclaimed start permission.
+    /// No unit start was ever requested for this attempt, whether or not an
+    /// execution claimed it. Cleanup fences every later start atomically.
+    Unsubmitted,
+    /// The exact unit was stopped and observed unloaded, then its cgroup empty.
+    ///
+    /// The cgroup must be the one the claimed execution bound. Cleanup closes
+    /// any unclaimed start permission.
     Stopped(&'a SystemdAttemptUnitTeardownObservation),
 }
 
@@ -60,13 +62,14 @@ impl PreparedAttemptDirectory {
     /// admission.
     ///
     /// # Errors
-    /// [`SystemdAttemptRegistryError::CleanupEvidence`] rejects claimed
-    /// execution without stop evidence, evidence for another unit or tree, and
-    /// missing or ambiguous root evidence before anything is removed. Changed
-    /// records or trees, poisoned ownership and every removal, unlink or fsync
-    /// failure are also refused. Every failure closes new commits; directories
-    /// or the record may already be gone, so restart reconciliation must
-    /// inspect the surviving state rather than treat an error as no change.
+    /// [`SystemdAttemptRegistryError::CleanupEvidence`] rejects a requested
+    /// unit start without stop evidence, evidence for another unit, cgroup or
+    /// tree, and missing or ambiguous root evidence before anything is
+    /// removed. Changed records or trees, poisoned ownership and every
+    /// removal, unlink or fsync failure are also refused. Every failure closes
+    /// new commits; directories or the record may already be gone, so restart
+    /// reconciliation must inspect the surviving state rather than treat an
+    /// error as no change.
     ///
     /// # Exclusion from root activation
     /// Cleanup takes the directory by value and every root activation borrows
@@ -130,15 +133,19 @@ impl PreparedAttemptDirectory {
     ) -> TerminalResult {
         let name = self.intent().unit_name();
         let unit_ended = match unit {
-            AttemptUnitTermination::Unclaimed => self.execution.claim().is_ok(),
+            AttemptUnitTermination::Unsubmitted => self.execution.fence_unsubmitted(),
             AttemptUnitTermination::Stopped(observed) => {
                 self.execution.close();
                 // Teardown takes both observations' name from one bound
-                // cgroup; each must still name this attempt's exact unit.
+                // cgroup; each must name this attempt's exact unit, and the
+                // cgroup must be the one this attempt's execution bound.
                 (
                     observed.unit_absence().unit_name(),
                     observed.cgroup_empty().unit_name(),
                 ) == (name, name)
+                    && self
+                        .execution
+                        .bound_cgroup_is(observed.cgroup_empty().cgroup_identity())
             }
         };
         let activations = self.activations.load(Ordering::Acquire);
