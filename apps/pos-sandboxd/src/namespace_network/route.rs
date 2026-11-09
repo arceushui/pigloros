@@ -338,7 +338,7 @@ fn observed_route(message: RouteMessage) -> Result<Option<ObservedRoute>, Netlin
 }
 
 /// The IP address `address` holds, if any.
-fn ip(address: &RouteAddress) -> Option<IpAddr> {
+const fn ip(address: &RouteAddress) -> Option<IpAddr> {
     match *address {
         RouteAddress::Inet(address) => Some(IpAddr::V4(address)),
         RouteAddress::Inet6(address) => Some(IpAddr::V6(address)),
