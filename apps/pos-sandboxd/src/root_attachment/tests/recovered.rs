@@ -114,7 +114,7 @@ mod cases {
         let unmounted = |observed: &mut Observations| observed.parent_mount_id = Some(41);
         let no_mount = |observed: &mut Observations| observed.mount = None;
         let no_parent = |observed: &mut Observations| observed.parent_mount_id = None;
-        let cases: [(&dyn Fn(&mut Observations), Result<(), ImageActivationError>); 3] = [
+        let cases: [Case<'_>; 3] = [
             (&unmounted, Ok(())),
             (&no_mount, Err(ImageActivationError::EvidenceMismatch)),
             (&no_parent, Err(ImageActivationError::EvidenceMismatch)),
@@ -130,6 +130,12 @@ mod cases {
         }
         Ok(())
     }
+
+    /// One readback edit and the detach result it must give.
+    type Case<'a> = (
+        &'a dyn Fn(&mut Observations),
+        Result<(), ImageActivationError>,
+    );
 
     /// One readback edit and whether a PAI2 attempt, which recorded no root
     /// facts, still accepts it.
@@ -188,7 +194,7 @@ mod cases {
             edit(
                 |observed| {
                     edit_entry(observed, |entry| {
-                        entry.optional = vec!["shared:5".to_owned()]
+                        entry.optional = vec!["shared:5".to_owned()];
                     });
                 },
                 false,

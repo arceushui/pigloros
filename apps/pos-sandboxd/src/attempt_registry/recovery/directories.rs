@@ -560,6 +560,7 @@ mod tests {
     #[test]
     fn recorded_root_entries_hold_only_recorded_attempt_roots() -> TestResult {
         use std::os::fd::AsFd;
+        type Change = fn(&std::path::Path, &std::path::Path) -> TestResult;
 
         if !in_lock_test_process("attempt_registry::recovery::directories::tests::recorded_root_entries_hold_only_recorded_attempt_roots")? {
             return Ok(());
@@ -591,7 +592,6 @@ mod tests {
         drop(entries);
         // An unexpected child, a symlinked root, a replaced attempt directory,
         // an unsafe attempt directory and a changed registry each refuse.
-        type Change = fn(&std::path::Path, &std::path::Path) -> TestResult;
         let changes: [Change; 5] = [
             |_, attempt| Ok(fs::write(attempt.join("extra"), b"")?),
             |_, attempt| {

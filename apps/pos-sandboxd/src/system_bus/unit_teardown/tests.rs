@@ -220,13 +220,15 @@ pub(super) mod cases {
     const UNIT_PATH: &str = "/org/freedesktop/systemd1/unit/attempt";
 
     /// The attempt unit's service object, reporting the fixture cgroup.
-    struct Service;
+    struct Service {
+        control_group: String,
+    }
 
     #[zbus::interface(name = "org.freedesktop.systemd1.Service", spawn = false)]
     impl Service {
         #[zbus(property, name = "ControlGroup")]
         fn control_group(&self) -> String {
-            "/attempt".to_owned()
+            self.control_group.clone()
         }
     }
 
@@ -304,7 +306,12 @@ pub(super) mod cases {
             let (server, client) = peer_connections(|server| {
                 server
                     .serve_at("/org/freedesktop/systemd1", manager)
-                    .serve_at(UNIT_PATH, Service)
+                    .serve_at(
+                        UNIT_PATH,
+                        Service {
+                            control_group: "/attempt".to_owned(),
+                        },
+                    )
             })
             .await?;
             let transport = SystemdTransientUnitTransport::from_connection(client).await?;
