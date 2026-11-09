@@ -5,8 +5,12 @@ use pos_core::community_lifecycle::{
     CommunityArtifactHeaderV1 as Header, CommunityArtifactKindV1 as Kind,
     CommunityArtifactOperationV1 as Operation, CommunityArtifactPurposeV1 as Purpose,
     CommunityClassificationProofInputV1 as ProofInput, CommunityClassificationProofV1 as Proof,
-    CommunityEncryptedEnvelopeV1 as Envelope, CommunityProtectedObjectV1 as Object,
-    CommunityStateContentV1 as State,
+    CommunityEncryptedEnvelopeV1 as Envelope, CommunityMetadataEnvelopeV1 as Metadata,
+    CommunityMetadataPolicyInputV1 as PolicyInput, CommunityMetadataPolicyV1 as Policy,
+    CommunityMetadataSchemaV1 as MetadataSchema, CommunityMetadataScopeInputV1 as ScopeInput,
+    CommunityMetadataScopeV1 as Scope, CommunityOwnerBindingV1 as Owner,
+    CommunityProtectedObjectV1 as Object, CommunityScopeMemberV1 as ScopeMember,
+    CommunityScopeMembersV1 as ScopeMembers, CommunityStateContentV1 as State,
 };
 use pos_core::{Hash, TimelineId};
 use pos_crypto::community_cipher::{CommunityArtifactCipherV1 as Cipher, CommunityCipherErrorV1};
@@ -22,6 +26,98 @@ const fn context() -> Input {
         scope_cover_digest: Hash::from_bytes([4; 32]),
         evidence_not_after_micros: 5,
     }
+}
+
+#[test]
+fn metadata_policy_authenticates_before_schema_validation_without_granting_service_authority(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let rows = [ScopeMember {
+        scope_reference: Hash::from_bytes([11; 32]),
+        source_timeline: context().timeline,
+        owner_reference: Hash::from_bytes([12; 32]),
+        retention_lease_reference: Hash::from_bytes([13; 32]),
+        not_after_micros: 90,
+    }];
+    let scope = Scope::new(ScopeInput {
+        store_incarnation: [14; 16],
+        metadata_anchor_timeline: context().timeline,
+        metadata_anchor_generation: [15; 16],
+        protection_operation_id: [16; 16],
+        scope_members: ScopeMembers::from_members(&rows),
+        metadata_not_after_micros: 100,
+    })?;
+    let scope_bytes = scope.to_canonical_cbor();
+    let policy = Policy::new(PolicyInput {
+        metadata_owner_registry_binding: Hash::from_bytes([17; 32]),
+        metadata_authority_leaf_grant: Hash::from_bytes([18; 32]),
+        compiled_schema_catalogue_digest: Hash::from_bytes([19; 32]),
+        metadata_not_after_micros: 100,
+    })?;
+    let plaintext = policy.to_canonical_cbor();
+    let header = Header::new(Input {
+        timeline: scope.as_input().metadata_anchor_timeline,
+        generation: scope.as_input().metadata_anchor_generation,
+        purpose: Purpose::LifecycleControl,
+        record_kind: Kind::LifecycleControl,
+        operation: Operation::Control(scope.as_input().protection_operation_id),
+        scope_cover_digest: scope.digest(),
+        evidence_not_after_micros: 100,
+    })?;
+    let mut cipher = Cipher::from_staged_material(Box::new(Zeroizing::new([20; 32])), 1)?;
+    let sealed = cipher.seal(&plaintext, header.associated_data_digest().as_bytes())?;
+    let envelope = Envelope::new(header, *sealed.nonce(), sealed.ciphertext_and_tag())?;
+    let envelope_bytes = envelope.to_canonical_cbor();
+    let metadata = Metadata::new(MetadataSchema::Nmp1, &scope_bytes, &envelope_bytes)?;
+    let bytes = metadata.to_canonical_cbor();
+    let decoded = Metadata::from_canonical_cbor(&bytes)?;
+    let inner = decoded.envelope();
+    cipher.close_encryption();
+    let staging = cipher.open(
+        inner.nonce(),
+        inner.ciphertext_and_tag(),
+        inner.header().associated_data_digest().as_bytes(),
+    )?;
+    assert_eq!(
+        Policy::from_canonical_cbor(&staging)?.digest(),
+        policy.digest()
+    );
+    assert_eq!(cipher.remaining_encryptions(), 0);
+
+    // A closed framing label is not an authenticated schema/body validator.
+    let relabeled = Metadata::new(MetadataSchema::Cob1, &scope_bytes, &envelope_bytes)?;
+    assert_ne!(relabeled.address(), metadata.address());
+    assert!(Owner::from_canonical_cbor(&staging).is_err());
+    let altered_header = Header::new(Input {
+        evidence_not_after_micros: 99,
+        ..*inner.header().as_input()
+    })?;
+    let altered = Envelope::new(altered_header, *sealed.nonce(), sealed.ciphertext_and_tag())?;
+    let altered_bytes = altered.to_canonical_cbor();
+    let admitted_shape = Metadata::new(MetadataSchema::Nmp1, &scope_bytes, &altered_bytes)?;
+    let inner = admitted_shape.envelope();
+    assert_eq!(
+        cipher
+            .open(
+                inner.nonce(),
+                inner.ciphertext_and_tag(),
+                inner.header().associated_data_digest().as_bytes()
+            )
+            .err(),
+        Some(CommunityCipherErrorV1::AuthenticationFailed)
+    );
+    let mut bad_tag = sealed.ciphertext_and_tag().to_vec();
+    *bad_tag.last_mut().ok_or("missing tag")? ^= 1;
+    assert_eq!(
+        cipher
+            .open(
+                sealed.nonce(),
+                &bad_tag,
+                envelope.header().associated_data_digest().as_bytes()
+            )
+            .err(),
+        Some(CommunityCipherErrorV1::AuthenticationFailed)
+    );
+    Ok(())
 }
 
 #[test]

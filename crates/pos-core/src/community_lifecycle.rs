@@ -14,6 +14,8 @@ mod guest_error;
 mod host_error;
 mod invocation;
 mod member;
+mod metadata_envelope;
+mod metadata_scope;
 mod owner_binding;
 mod prepared;
 mod profile;
@@ -62,6 +64,11 @@ pub use invocation::{
     MeteringV1,
 };
 pub use member::{CommunityMemberBindingInputV1, CommunityMemberBindingV1};
+pub use metadata_envelope::{CommunityMetadataEnvelopeV1, CommunityMetadataSchemaV1};
+pub use metadata_scope::{
+    CommunityMetadataScopeInputV1, CommunityMetadataScopeV1, CommunityScopeMemberV1,
+    CommunityScopeMembersIterV1, CommunityScopeMembersV1, MAX_COMMUNITY_SCOPE_MEMBERS_V1,
+};
 pub use owner_binding::{
     CommunityMetadataAnchorInputV1, CommunityMetadataAnchorV1, CommunityMetadataPolicyInputV1,
     CommunityMetadataPolicyV1, CommunityOwnerBindingInputV1, CommunityOwnerBindingV1,
