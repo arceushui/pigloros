@@ -13,7 +13,7 @@ use pos_runtime::community_plugin_host::{
     TrapReproductionV1, TrustDenialBasisV1,
 };
 use ulid::Ulid;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use super::output::{map_draft, mapped_drafts, mapped_output};
 use super::*;
