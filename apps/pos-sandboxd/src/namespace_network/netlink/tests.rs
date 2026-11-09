@@ -327,7 +327,7 @@ fn a_request_returns_its_one_reply() -> TestResult {
 fn a_refused_foreign_or_ambiguous_request_fails() {
     let mut two = link_reply(1, 0, LinkMessage::default());
     two.extend(link_reply(1, 0, LinkMessage::default()));
-    let cases: Vec<(Vec<Vec<u8>>, fn(&NetlinkError) -> bool)> = vec![
+    let cases: Vec<(Vec<Vec<u8>>, Expected)> = vec![
         (vec![ack(1, -19)], |error| {
             matches!(error, NetlinkError::Kernel(-19))
         }),
