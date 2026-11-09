@@ -9,6 +9,7 @@ mod classification;
 mod envelope;
 mod error;
 mod guest_error;
+mod host_error;
 mod member;
 mod metadata_envelope;
 mod metadata_scope;
@@ -17,6 +18,7 @@ mod prepared;
 mod profile;
 mod progress;
 mod protected_object;
+mod quarantine;
 mod quarantine_control;
 mod reservation;
 mod revision;
@@ -36,6 +38,10 @@ pub use envelope::{
 };
 pub use error::CommunityLifecycleErrorV1;
 pub use guest_error::is_valid_community_id_v1;
+pub use host_error::{
+    AtomicCommitFailureV1, CommunityPluginHostErrorV1, ComponentTrapClassV1, HostFailureClassV1,
+    RevocationBasisV1, TrapReproductionV1, TrustDenialBasisV1,
+};
 pub use member::{CommunityMemberBindingInputV1, CommunityMemberBindingV1};
 pub use metadata_envelope::{CommunityMetadataEnvelopeV1, CommunityMetadataSchemaV1};
 pub use metadata_scope::{
@@ -58,7 +64,16 @@ pub use progress::CommunityHostProgressV1;
 pub use protected_object::{
     CommunityArtifactAdmissionInputV1, CommunityArtifactAdmissionV1, CommunityProtectedObjectV1,
 };
-pub use quarantine_control::ArtifactRefV1;
+pub use quarantine::{
+    CommunityQuarantineKeyV1, CommunityQuarantineReasonEvidenceV1, CommunityQuarantineReasonV1,
+    CommunityQuarantineReasonsV1, CommunityQuarantineRevisionInputV1,
+    CommunityQuarantineRevisionV1,
+};
+pub use quarantine_control::{
+    ArtifactRefV1, CommunityQuarantineControlInputV1, CommunityQuarantineControlKindV1,
+    CommunityQuarantineControlV1, CommunityQuarantineDispositionV1,
+    CommunityQuarantineOutcomeInputV1, CommunityQuarantineOutcomeV1,
+};
 pub use reservation::{
     CommunityReservationInputV1, CommunityReservationRequestInputV1, CommunityReservationRequestV1,
     CommunityReservationV1,
