@@ -672,19 +672,22 @@ mod cases {
         sweeps: &Mutex<Vec<Instant>>,
         resweep: Resweep,
     ) -> Result<bool, ImageActivationError> {
-        let swept = sweeps.lock().map(|mut sweeps| {
-            sweeps.push(Instant::now());
-            sweeps.len()
-        });
+        let swept = sweeps
+            .lock()
+            .map(|mut sweeps| {
+                sweeps.push(Instant::now());
+                sweeps.len()
+            })
+            .ok();
         match (swept, resweep) {
-            (Ok(2), Resweep::Hangs) => std::future::pending().await,
-            (Ok(2), Resweep::Slow) => {
+            (Some(2), Resweep::Hangs) => std::future::pending().await,
+            (Some(2), Resweep::Slow) => {
                 tokio::time::sleep(Duration::from_millis(400)).await;
                 Ok(true)
             }
-            (Ok(2), Resweep::Finds) => Ok(false),
-            (Ok(_), _) => Ok(true),
-            (Err(_), _) => Err(ImageActivationError::Transport),
+            (Some(2), Resweep::Finds) => Ok(false),
+            (Some(_), _) => Ok(true),
+            (None, _) => Err(ImageActivationError::Transport),
         }
     }
 
