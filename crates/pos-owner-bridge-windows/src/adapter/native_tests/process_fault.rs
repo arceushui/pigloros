@@ -3161,9 +3161,7 @@ fn run_pre_environment(runtime: &Path, number: u8, case: EnvironmentCase) -> Tes
         let deadline = started + pos_owner_bridge::ceremony::timing::READINESS;
         let mut pump_failed = false;
         while Instant::now() < deadline {
-            if readiness::pump(&fixture.surface).is_err() {
-                pump_failed = true;
-            }
+            pump_failed |= readiness::pump(&fixture.surface).is_err();
         }
         let at_deadline = fixture.surface.pre_environment_completion();
         let result = match driver.step(&mut readiness::env(
