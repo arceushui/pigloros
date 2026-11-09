@@ -154,21 +154,16 @@ fn host_view<T: NetlinkTransport>(
     host_link: &LinkName,
 ) -> Result<HostView, NetlinkError> {
     route::link_reply(session.request(route::get_link(host_link))).and_then(|link| {
+        let index = link.as_ref().map(|link| link.index);
         session
             .dump(route::addresses())
+            .map(|replies| route::of_link(replies, index))
             .and_then(route::observed_addresses)
             .and_then(|addresses| {
                 session
                     .request(route::get_nsid(namespace))
                     .and_then(route::nsid_reply)
-                    .map(|netnsid| {
-                        let index = link.as_ref().map(|link| link.index);
-                        let addresses = addresses
-                            .into_iter()
-                            .filter(|address| Some(address.link_index) == index)
-                            .collect();
-                        (link, addresses, netnsid)
-                    })
+                    .map(|netnsid| (link, addresses, netnsid))
             })
     })
 }
