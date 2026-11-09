@@ -675,7 +675,7 @@ jobs:
         run: bash scripts/check-no-new-lint-suppressions.sh origin/main
       - name: cargo clippy (workspace lint policy, pedantic, deny warnings)
         run: >
-          cargo clippy --workspace --all-features --all-targets --locked --
+          cargo clippy --keep-going --workspace --all-features --all-targets --locked --
           -D warnings -W clippy::pedantic
       - name: Staged reducer purity guard (ADR-113 §7)
         run: bash scripts/check-reducer-purity-guard.sh
