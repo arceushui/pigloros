@@ -441,16 +441,7 @@ impl ExpectV1 {
                     "ArtifactTrustDenied" | "ArtifactRevoked" | "InvalidBundleContent"
                 );
                 let index = matches!(name, "CapabilityDenied" | "MissingFeature");
-                let content_reason_valid = name != "InvalidBundleContent"
-                    || matches!(
-                        refused.basis.as_ref().map(Text::as_str),
-                        Some(
-                            "BoundsExceeded"
-                                | "UnsupportedFormat"
-                                | "Malformed"
-                                | "ReferenceMismatch"
-                        )
-                    );
+                let content_reason_valid = valid_content_basis(name, refused.basis.as_ref());
                 refused.basis.is_some() == basis
                     && refused.index.is_some() == index
                     && content_reason_valid
@@ -463,6 +454,15 @@ impl ExpectV1 {
             | Self::Digest(_) => true,
         }
     }
+}
+
+/// Content refusals carry one of the closed basic-package reasons.
+fn valid_content_basis(name: &str, basis: Option<&Text>) -> bool {
+    name != "InvalidBundleContent"
+        || matches!(
+            basis.map(Text::as_str),
+            Some("BoundsExceeded" | "UnsupportedFormat" | "Malformed" | "ReferenceMismatch")
+        )
 }
 
 /// One sub-case.

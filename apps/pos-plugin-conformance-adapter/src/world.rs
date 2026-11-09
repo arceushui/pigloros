@@ -278,8 +278,7 @@ pub fn outcome_bytes_of(outcome: &CommunityPluginSubjectOutcomeV1) -> Vec<u8> {
         optional_digest(&mut out, digest);
     }
     cbor::unsigned(&mut out, outcome.tick);
-    cbor::unsigned(&mut out, mode_code(outcome.mode));
-    cbor::unsigned(&mut out, validation_code(outcome.content_validation));
+    execution_evidence_bytes(&mut out, outcome.mode, outcome.content_validation);
     result_bytes(&mut out, outcome.result);
     out
 }
@@ -287,20 +286,22 @@ pub fn outcome_bytes_of(outcome: &CommunityPluginSubjectOutcomeV1) -> Vec<u8> {
 /// The CBOR null.
 const NULL: u8 = 0xf6;
 
-/// The wire code of an Execution Mode: 0 Local, 1 Air-Gapped.
-const fn mode_code(mode: CommunityPluginModeV1) -> u64 {
-    match mode {
+/// Write the adjacent Execution Mode and content-validation evidence fields.
+fn execution_evidence_bytes(
+    out: &mut Vec<u8>,
+    mode: CommunityPluginModeV1,
+    validation: ContentValidationV1,
+) {
+    let mode_code = match mode {
         CommunityPluginModeV1::Local => 0,
         CommunityPluginModeV1::AirGapped => 1,
-    }
-}
-
-/// The wire code of the content validation: 0 `NotPerformed`, 1 `BasicPackageV1`.
-const fn validation_code(validation: ContentValidationV1) -> u64 {
-    match validation {
+    };
+    let validation_code = match validation {
         ContentValidationV1::NotPerformed => 0,
         ContentValidationV1::BasicPackageV1 => 1,
-    }
+    };
+    cbor::unsigned(out, mode_code);
+    cbor::unsigned(out, validation_code);
 }
 
 /// A 32-byte digest, or null.

@@ -18,14 +18,7 @@ type R = CommunityPluginSubjectResultV1;
 /// Every closed error with every basis, class and reproduction.
 fn every_error() -> Vec<E> {
     let mut all = vec![E::InvalidManifest];
-    for reason in [
-        BundleContentReasonV1::BoundsExceeded,
-        BundleContentReasonV1::UnsupportedFormat,
-        BundleContentReasonV1::Malformed,
-        BundleContentReasonV1::ReferenceMismatch,
-    ] {
-        all.push(E::InvalidBundleContent { reason });
-    }
+    all.extend(content_refusals());
     for basis in [
         TrustDenialBasisV1::Expired,
         TrustDenialBasisV1::NotActive,
@@ -77,6 +70,17 @@ fn every_error() -> Vec<E> {
         all.push(E::AtomicCommitFailed { failure });
     }
     all
+}
+
+fn content_refusals() -> impl Iterator<Item = E> {
+    [
+        BundleContentReasonV1::BoundsExceeded,
+        BundleContentReasonV1::UnsupportedFormat,
+        BundleContentReasonV1::Malformed,
+        BundleContentReasonV1::ReferenceMismatch,
+    ]
+    .into_iter()
+    .map(|reason| E::InvalidBundleContent { reason })
 }
 
 fn outcome(result: R) -> CommunityPluginSubjectOutcomeV1 {

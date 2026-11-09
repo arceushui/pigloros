@@ -280,29 +280,7 @@ impl CommunityPluginHostErrorV1 {
     /// The exact closed ADR-061 error name.
     #[must_use]
     pub const fn name(self) -> &'static str {
-        match self {
-            Self::InvalidManifest => "InvalidManifest",
-            Self::InvalidBundleContent { .. } => "InvalidBundleContent",
-            Self::ArtifactTrustDenied { .. } => "ArtifactTrustDenied",
-            Self::ArtifactRevoked { .. } => "ArtifactRevoked",
-            Self::IncompatibleAbi => "IncompatibleAbi",
-            Self::MissingFeature { .. } => "MissingFeature",
-            Self::CapabilityDenied { .. } => "CapabilityDenied",
-            Self::InvalidInvocation => "InvalidInvocation",
-            Self::InvalidGuestOutput => "InvalidGuestOutput",
-            Self::UnsupportedSchema => "UnsupportedSchema",
-            Self::StateMigrationFailed => "StateMigrationFailed",
-            Self::GuestDeclaredFailure => "GuestDeclaredFailure",
-            Self::ComponentTrap { .. } => "ComponentTrap",
-            Self::WorkerCrashed => "WorkerCrashed",
-            Self::FuelExhausted => "FuelExhausted",
-            Self::MemoryLimitExceeded => "MemoryLimitExceeded",
-            Self::HostCallLimitExceeded => "HostCallLimitExceeded",
-            Self::OutputLimitExceeded => "OutputLimitExceeded",
-            Self::DeterministicDeadlineExceeded => "DeterministicDeadlineExceeded",
-            Self::OperationalWatchdogStop => "OperationalWatchdogStop",
-            Self::AtomicCommitFailed { .. } => "AtomicCommitFailed",
-        }
+        self.description().0
     }
 
     /// The basis name of a trust, revocation, or content refusal, if present.
@@ -311,28 +289,33 @@ impl CommunityPluginHostErrorV1 {
     /// reported next to the name, never in place of it.
     #[must_use]
     pub const fn basis_name(self) -> Option<&'static str> {
+        self.description().1
+    }
+
+    /// The closed outcome name and its optional basis, kept in one mapping.
+    const fn description(self) -> (&'static str, Option<&'static str>) {
         match self {
-            Self::ArtifactTrustDenied { basis } => Some(basis.name()),
-            Self::ArtifactRevoked { basis } => Some(basis.name()),
-            Self::InvalidBundleContent { reason } => Some(reason.name()),
-            Self::InvalidManifest
-            | Self::IncompatibleAbi
-            | Self::MissingFeature { .. }
-            | Self::CapabilityDenied { .. }
-            | Self::InvalidInvocation
-            | Self::InvalidGuestOutput
-            | Self::UnsupportedSchema
-            | Self::StateMigrationFailed
-            | Self::GuestDeclaredFailure
-            | Self::ComponentTrap { .. }
-            | Self::WorkerCrashed
-            | Self::FuelExhausted
-            | Self::MemoryLimitExceeded
-            | Self::HostCallLimitExceeded
-            | Self::OutputLimitExceeded
-            | Self::DeterministicDeadlineExceeded
-            | Self::OperationalWatchdogStop
-            | Self::AtomicCommitFailed { .. } => None,
+            Self::InvalidManifest => ("InvalidManifest", None),
+            Self::InvalidBundleContent { reason } => ("InvalidBundleContent", Some(reason.name())),
+            Self::ArtifactTrustDenied { basis } => ("ArtifactTrustDenied", Some(basis.name())),
+            Self::ArtifactRevoked { basis } => ("ArtifactRevoked", Some(basis.name())),
+            Self::IncompatibleAbi => ("IncompatibleAbi", None),
+            Self::MissingFeature { .. } => ("MissingFeature", None),
+            Self::CapabilityDenied { .. } => ("CapabilityDenied", None),
+            Self::InvalidInvocation => ("InvalidInvocation", None),
+            Self::InvalidGuestOutput => ("InvalidGuestOutput", None),
+            Self::UnsupportedSchema => ("UnsupportedSchema", None),
+            Self::StateMigrationFailed => ("StateMigrationFailed", None),
+            Self::GuestDeclaredFailure => ("GuestDeclaredFailure", None),
+            Self::ComponentTrap { .. } => ("ComponentTrap", None),
+            Self::WorkerCrashed => ("WorkerCrashed", None),
+            Self::FuelExhausted => ("FuelExhausted", None),
+            Self::MemoryLimitExceeded => ("MemoryLimitExceeded", None),
+            Self::HostCallLimitExceeded => ("HostCallLimitExceeded", None),
+            Self::OutputLimitExceeded => ("OutputLimitExceeded", None),
+            Self::DeterministicDeadlineExceeded => ("DeterministicDeadlineExceeded", None),
+            Self::OperationalWatchdogStop => ("OperationalWatchdogStop", None),
+            Self::AtomicCommitFailed { .. } => ("AtomicCommitFailed", None),
         }
     }
 

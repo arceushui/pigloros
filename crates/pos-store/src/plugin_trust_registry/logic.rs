@@ -375,14 +375,25 @@ fn check_proven_release(
     content_proof: &ValidatedPluginBundleContentV1,
 ) -> RegistryResult<ResolvedPluginTrustAuthorizationV1> {
     let authorization = input.evidence.authorize_release(projection)?;
-    check_release_proof(release_proof, &authorization)?;
-    if (content_proof.pmf1_digest(), content_proof.release_digest())
-        != (authorization.pmf1_digest(), authorization.release_digest())
-    {
-        return Err(PluginTrustPolicyRegistryErrorV1::ContentProofMismatch);
-    }
+    check_release_proofs(release_proof, content_proof, &authorization)?;
     check_authorized_release(checked, input, &authorization)?;
     Ok(authorization)
+}
+
+/// Bind both proofs to the exact release authorized by the registry.
+fn check_release_proofs(
+    release_proof: &VerifiedPluginReleaseSignatureV1,
+    content_proof: &ValidatedPluginBundleContentV1,
+    authorization: &ResolvedPluginTrustAuthorizationV1,
+) -> RegistryResult<()> {
+    check_release_proof(release_proof, authorization)?;
+    if (content_proof.pmf1_digest(), content_proof.release_digest())
+        == (authorization.pmf1_digest(), authorization.release_digest())
+    {
+        Ok(())
+    } else {
+        Err(PluginTrustPolicyRegistryErrorV1::ContentProofMismatch)
+    }
 }
 
 /// The release-dependent prefix of `admit` and `rollback`.

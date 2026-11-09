@@ -147,6 +147,20 @@ fn proven_projection(
     Ok((projection, proof))
 }
 
+/// The same closure's projected release and independently validated proofs.
+fn proven_artifacts(
+    material: &Material,
+    bundle: &VerifiedReleaseBundleV1,
+) -> BoxResult<(
+    ValidatedPluginManifestProjectionV1,
+    VerifiedPluginReleaseSignatureV1,
+    ValidatedPluginBundleContentV1,
+)> {
+    let (projection, proof) = proven_projection(material, bundle)?;
+    let content = validate_plugin_bundle_content_v1(bundle)?;
+    Ok((projection, proof, content))
+}
+
 /// The PMF1 digest, projection, signature and content proofs, and trusted second.
 fn release_inputs(
     world: &World,
@@ -160,8 +174,7 @@ fn release_inputs(
     TrustedUtcSecondV1,
 )> {
     let bundle = world.store.read_verified(address)?;
-    let (projection, proof) = proven_projection(material, &bundle)?;
-    let content = validate_plugin_bundle_content_v1(&bundle)?;
+    let (projection, proof, content) = proven_artifacts(material, &bundle)?;
     let utc = TrustedUtcSecondV1::from_source(&mut wall(material.utc)?)?;
     Ok((pmf1_digest(&bundle), projection, proof, content, utc))
 }

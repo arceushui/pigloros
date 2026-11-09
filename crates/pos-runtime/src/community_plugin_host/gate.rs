@@ -97,8 +97,7 @@ pub fn gate_community_release_v1(
             pass.tick(),
         )
         .map_err(host_error_for_registry_v1)?;
-    verify_signature(&bundle, &evidence, &projection)?;
-    validate_plugin_bundle_content_v1(&bundle).map_err(host_error_for_content_v1)?;
+    verify_release_artifacts(&bundle, &evidence, &projection)?;
     let gated = GatedCommunityReleaseV1::new(
         execution,
         component_bytes(&bundle),
@@ -109,6 +108,18 @@ pub fn gate_community_release_v1(
     );
     let authorization = CommunityPassAuthorizationV1::issue(&gated, pass);
     Ok((gated, authorization))
+}
+
+/// Verify the signature before validating the same closure's content.
+fn verify_release_artifacts(
+    bundle: &VerifiedReleaseBundleV1,
+    evidence: &VerifiedPluginTrustEvidenceV1,
+    projection: &ValidatedPluginManifestProjectionV1,
+) -> Result<(), CommunityPluginHostErrorV1> {
+    verify_signature(bundle, evidence, projection)?;
+    validate_plugin_bundle_content_v1(bundle)
+        .map(|_| ())
+        .map_err(host_error_for_content_v1)
 }
 
 pub(super) const fn host_error_for_content_v1(

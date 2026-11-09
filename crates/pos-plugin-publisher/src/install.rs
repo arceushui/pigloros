@@ -39,7 +39,8 @@ use pos_crypto::plugin_manifest::{
     VerifiedPluginReleaseSignatureV1,
 };
 use pos_crypto::plugin_trust::{
-    PluginTrustErrorV1, ValidatedPluginManifestProjectionV1, VerifiedPluginTrustEvidenceV1,
+    PluginTrustErrorV1, ResolvedPluginTrustAuthorizationV1, ValidatedPluginManifestProjectionV1,
+    VerifiedPluginTrustEvidenceV1,
 };
 use pos_plugin_content::{
     validate_plugin_bundle_content_v1, PluginBundleContentErrorV1, ValidatedPluginBundleContentV1,
@@ -237,8 +238,7 @@ where
     let bundle = source.read_verified(address)?;
     let (projection, execution) = project(&bundle)?;
     let authorization = evidence.authorize_release(&projection)?;
-    let signature = verify_plugin_release_signature_v1(&bundle, &authorization)?;
-    let content = validate_plugin_bundle_content_v1(&bundle)?;
+    let (signature, content) = verify_release_artifacts::<E>(&bundle, &authorization)?;
     let trusted_utc = TrustedUtcSecondV1::from_source(wall)?;
     let (_, tick) = evidence.evaluation_coordinates();
     Ok(VerifiedReleaseV1 {
@@ -248,6 +248,25 @@ where
         content,
         point: TrustEvaluationPointV1::new(trusted_utc, tick),
     })
+}
+
+/// Verify both facts against the same authorized release, in signature-first order.
+fn verify_release_artifacts<E>(
+    bundle: &VerifiedReleaseBundleV1,
+    authorization: &ResolvedPluginTrustAuthorizationV1,
+) -> Result<
+    (
+        VerifiedPluginReleaseSignatureV1,
+        ValidatedPluginBundleContentV1,
+    ),
+    E,
+>
+where
+    E: From<PluginReleaseSignatureErrorV1> + From<PluginBundleContentErrorV1>,
+{
+    let signature = verify_plugin_release_signature_v1(bundle, authorization)?;
+    let content = validate_plugin_bundle_content_v1(bundle)?;
+    Ok((signature, content))
 }
 
 /// The trust projection and the execution projection of one closure.
