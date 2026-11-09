@@ -974,6 +974,29 @@ def _check_shim_sources(shim: Path, scanned_dirs: tuple[Path, ...], found: list[
             found.append(f"{label}: non-ffi module must forbid unsafe_code")
         block_starts = {match.start() for match in UNSAFE_BLOCK.finditer(code)}
         spans = _function_spans(code)
+        for create in re.finditer(r"\bCreateFileW\s*\(", code):
+            inside_creator = any(
+                name == "create_private_ledger_file" and begin < create.start() < end
+                for name, begin, end in spans
+            )
+            if relative != "src/ffi/ledger_storage.rs" or not inside_creator:
+                found.append(f"{label}:{_line_of(code, create.start())}: ADR-132 CreateFileW is restricted to the ledger creator")
+        for alias in re.finditer(r"\bCreateFileW\s+as\s+", code):
+            found.append(f"{label}:{_line_of(code, alias.start())}: ADR-132 CreateFileW aliases are forbidden")
+        for query in re.finditer(r"\bGetHandleInformation\s*\(", code):
+            inside_witness = any(
+                name == "fixture_handle_not_inheritable" and begin < query.start() < end
+                for name, begin, end in spans
+            )
+            if relative != "src/ffi/ledger_storage.rs" or not inside_witness:
+                found.append(f"{label}:{_line_of(code, query.start())}: ADR-132 handle query belongs only in the fixture witness")
+        for alias in re.finditer(r"\bGetHandleInformation\s+as\s+", code):
+            found.append(f"{label}:{_line_of(code, alias.start())}: ADR-132 handle query aliases are forbidden")
+        for function in FUNCTION.finditer(code):
+            if function.group(1) == "fixture_handle_not_inheritable":
+                start = code.rfind("\n", 0, function.start()) + 1
+                if relative != "src/ffi/ledger_storage.rs" or "cfg(test)" not in _outer_attributes_before(code, attributes, start):
+                    found.append(f"{label}:{_line_of(code, function.start())}: ADR-132 handle witness requires cfg(test)")
         for token in UNSAFE_TOKEN.finditer(code):
             line = _line_of(code, token.start())
             if token.start() not in block_starts:

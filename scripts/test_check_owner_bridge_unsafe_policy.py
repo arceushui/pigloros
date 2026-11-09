@@ -1358,6 +1358,33 @@ def test_control_observations_cannot_ship_in_product_builds() -> None:
         ])
 
 
+def test_ledger_creation_boundary() -> None:
+    path = f"{SHIM}/src/ffi/ledger_storage.rs"
+    require_accepted("ledger creator call", {path: CFG + "fn create_private_ledger_file() { CreateFileW(); }\n"})
+    require_rejected("relocated CreateFileW", {OPS: CFG + "fn elsewhere() { CreateFileW(); }\n"}, [
+        at(OPS, 2, "ADR-132 CreateFileW is restricted to the ledger creator"),
+    ])
+    require_rejected("other function CreateFileW", {path: CFG + "fn elsewhere() { CreateFileW(); }\n"}, [
+        at(path, 2, "ADR-132 CreateFileW is restricted to the ledger creator"),
+    ])
+    require_rejected("aliased CreateFileW", {OPS: CFG + "use api::CreateFileW as Hidden;\n"}, [
+        at(OPS, 2, "ADR-132 CreateFileW aliases are forbidden"),
+    ])
+    require_accepted("test-only handle query", {path: CFG + "#[cfg(test)]\nfn fixture_handle_not_inheritable() { GetHandleInformation(); }\n"})
+    require_rejected("product handle query", {path: CFG + "fn fixture_handle_not_inheritable() { GetHandleInformation(); }\n"}, [
+        at(path, 2, "ADR-132 handle witness requires cfg(test)"),
+    ])
+    require_rejected("feature-gated handle query", {path: CFG + '#[cfg(feature = "test-support")]\nfn fixture_handle_not_inheritable() { GetHandleInformation(); }\n'}, [
+        at(path, 3, "ADR-132 handle witness requires cfg(test)"),
+    ])
+    require_rejected("relocated handle query", {OPS: CFG + "fn elsewhere() { GetHandleInformation(); }\n"}, [
+        at(OPS, 2, "ADR-132 handle query belongs only in the fixture witness"),
+    ])
+    require_rejected("aliased handle query", {OPS: CFG + "use api::GetHandleInformation as Hidden;\n"}, [
+        at(OPS, 2, "ADR-132 handle query aliases are forbidden"),
+    ])
+
+
 def main() -> None:
     test_masker()
     test_accepted()
@@ -1371,6 +1398,7 @@ def main() -> None:
     test_cli()
     test_forbidden_webview_authority()
     test_control_observations_cannot_ship_in_product_builds()
+    test_ledger_creation_boundary()
     test_windows_case_insensitive_source_suffix_cannot_hide_code()
     test_hardening()
     test_symlinks()

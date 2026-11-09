@@ -62,11 +62,8 @@ impl crate::Native {
         crate::create_private_directory(&private)
             .map_err(|_| "create private fixture directory")?;
         let original = private.join("store.db");
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .open(&original)?;
+        let file =
+            Self::create_private_ledger_file(&original).map_err(|()| "create identity fixture")?;
         Self::diagnose_private_file(&file)?;
         Self::cleanup_file_volume(&file).map_err(|()| "original file NTFS admission")?;
         Self::file_identity(&file).map_err(|()| "original file identity observation")?;
@@ -82,18 +79,18 @@ impl crate::Native {
             identity
         );
         let copied = private.join("copy.db");
-        fs::copy(&original, &copied)?;
+        let copied_file =
+            Self::create_private_ledger_file(&copied).map_err(|()| "create copy fixture")?;
+        drop(copied_file);
+        fs::write(&copied, fs::read(&original)?)?;
         assert_ne!(
             store_file_id(&File::open(&copied)?).map_err(|_| "copied file identity")?,
             identity
         );
         let moved = private.join("moved.db");
         fs::rename(&original, &moved)?;
-        let replacement = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .open(&original)?;
+        let replacement = Self::create_private_ledger_file(&original)
+            .map_err(|()| "create replacement fixture")?;
         assert_eq!(
             store_file_id(&file).map_err(|_| "moved handle identity")?,
             identity

@@ -116,7 +116,7 @@ impl<'guard> WindowsNonceLedger<'guard> {
         self.admit_directory()?;
         let previous = self.open_existing(LEDGER)?;
         let temporary_path = self.path.join(TEMPORARY);
-        let mut temporary = open_file(&temporary_path, true)?;
+        let mut temporary = crate::Native::create_private_ledger_file(&temporary_path)?;
         self.validate_file(&temporary, &temporary_path)?;
         after(CommitStage::Created)?;
         temporary.write_all(bytes).map_err(|_| ())?;
@@ -168,7 +168,7 @@ impl<'guard> WindowsNonceLedger<'guard> {
     }
 
     fn same_name(file: &File, path: &Path) -> Result<(), ()> {
-        let reopened = open_file(path, false)?;
+        let reopened = open_file(path)?;
         if crate::Native::file_identity(file)? != crate::Native::file_identity(&reopened)? {
             return Err(());
         }
@@ -177,7 +177,7 @@ impl<'guard> WindowsNonceLedger<'guard> {
 
     fn open_existing(&self, name: &str) -> Result<File, ()> {
         let path = self.path.join(name);
-        let file = open_file(&path, false)?;
+        let file = open_file(&path)?;
         self.validate_file(&file, &path)?;
         Ok(file)
     }
@@ -218,11 +218,10 @@ fn require_dos_path(path: &Path) -> Result<(), ()> {
     Ok(())
 }
 
-fn open_file(path: &Path, create: bool) -> Result<File, ()> {
+fn open_file(path: &Path) -> Result<File, ()> {
     OpenOptions::new()
         .read(true)
         .write(true)
-        .create_new(create)
         .share_mode(SHARE_ALL)
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0 | FILE_FLAG_WRITE_THROUGH.0)
         .open(path)
@@ -254,6 +253,8 @@ impl crate::Native {
 #[cfg(test)]
 mod native_tests {
     use super::*;
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStringExt;
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -323,6 +324,8 @@ mod native_tests {
     }
 
     fn raw_boundaries(base: &Path) -> TestResult {
+        let invalid = PathBuf::from(OsString::from_wide(&[b'x'.into(), 0, b'y'.into()]));
+        assert!(crate::Native::create_private_ledger_file(&invalid).is_err());
         for path in [
             r"relative\path",
             r"C:relative",
@@ -346,7 +349,12 @@ mod native_tests {
             Err(unavailable())
         );
         assert!(!path.exists());
-        fs::write(&path, b"untrusted bytes")?;
+        let mut initial = crate::Native::create_private_ledger_file(&path)
+            .map_err(|()| "create initial test file")?;
+        assert!(crate::Native::fixture_handle_not_inheritable(&initial));
+        initial.write_all(b"untrusted bytes")?;
+        assert!(crate::Native::create_private_ledger_file(&path).is_err());
+        drop(initial);
         assert_eq!(
             ledger
                 .read_nonce_ledger_bytes()
@@ -383,7 +391,10 @@ mod native_tests {
         fs::remove_file(hardlink)?;
         drop(ledger);
         let temporary = base.join("PiglorOS").join(TEMPORARY);
-        fs::write(&temporary, b"stale")?;
+        let mut stale = crate::Native::create_private_ledger_file(&temporary)
+            .map_err(|()| "create stale test file")?;
+        stale.write_all(b"stale")?;
+        drop(stale);
         let temporary_alias = base.join("PiglorOS").join("stale-alias");
         fs::hard_link(&temporary, &temporary_alias)?;
         assert!(guard.open_nonce_ledger().is_err());
@@ -467,7 +478,10 @@ mod native_tests {
         let mut ledger = guard.open_nonce_ledger()?;
         let path = base.join("PiglorOS").join(LEDGER);
         let store_path = base.join("PiglorOS").join("fixture-store.db");
-        fs::write(&store_path, b"fixture store")?;
+        let mut fixture_store = crate::Native::create_private_ledger_file(&store_path)
+            .map_err(|()| "create fixture store")?;
+        fixture_store.write_all(b"fixture store")?;
+        drop(fixture_store);
         let store_file = File::open(&store_path)?;
         let store_id = super::super::store_file_identity::store_file_id(&store_file)?;
         let expected_row = SubjectNonceLedgerRowV1 {
