@@ -21,11 +21,15 @@ struct Journal {
     removed: Vec<String>,
 }
 
-/// A kernel that installs exactly what it is asked to, or refuses.
+/// A kernel that installs exactly what it is asked to, pinning each
+/// namespace in `pins` as this process's own, or refuses to install or to
+/// remove.
 #[derive(Default)]
 struct FakeControl {
     journal: Arc<Mutex<Journal>>,
+    pins: Option<std::path::PathBuf>,
     refuse: bool,
+    refuse_removal: bool,
     current: Mutex<Option<ExpectedNamespace>>,
 }
 
@@ -93,7 +97,12 @@ impl NamespaceControl for FakeControl {
             .installed
             .push(expected.host_link.as_str().to_owned());
         *self.current.lock().unwrap_or_else(PoisonError::into_inner) = Some(expected.clone());
-        (!self.refuse).then_some(()).ok_or(NetlinkError::Kernel(-1))
+        let pinned = self.pins.as_ref().map_or(Ok(()), |pins| {
+            std::os::unix::fs::symlink("/proc/self/ns/net", pins.join(expected.name.as_str()))
+        });
+        (!self.refuse && pinned.is_ok())
+            .then_some(())
+            .ok_or(NetlinkError::Kernel(-1))
     }
 
     fn observe(
@@ -109,11 +118,17 @@ impl NamespaceControl for FakeControl {
             .ok_or(NetlinkError::Unexpected)
     }
 
-    fn remove(&self, _name: &NamespaceName, host_link: &LinkName) -> Result<(), NetlinkError> {
+    fn remove(&self, name: &NamespaceName, host_link: &LinkName) -> Result<(), NetlinkError> {
         entries(&self.journal)
             .removed
             .push(host_link.as_str().to_owned());
-        Ok(())
+        if let Some(pins) = &self.pins {
+            // A pin that was never made is not there to remove.
+            std::fs::remove_file(pins.join(name.as_str())).ok();
+        }
+        (!self.refuse_removal)
+            .then_some(())
+            .ok_or(NetlinkError::Kernel(-16))
     }
 }
 
@@ -129,16 +144,12 @@ fn range(ipv4_length: u8, ipv6_length: u8) -> TestResult<NetworkRange> {
 const ENDPOINT: SocketAddr =
     SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)), 443);
 
-/// A network over a fake kernel whose namespaces are pinned in `directory`.
+/// A network over `control`, whose namespaces are pinned in `directory`.
 fn network(
     directory: &std::path::Path,
-    refuse: bool,
+    control: FakeControl,
     ipv4_length: u8,
 ) -> TestResult<(NamespacedLocalNetwork<FakeControl>, Arc<Mutex<Journal>>)> {
-    let control = FakeControl {
-        refuse,
-        ..FakeControl::default()
-    };
     let journal = Arc::clone(&control.journal);
     Ok((
         NamespacedLocalNetwork::new(
@@ -150,41 +161,52 @@ fn network(
     ))
 }
 
+/// A kernel that pins every namespace it installs in `directory`.
+fn pinning(directory: &std::path::Path) -> FakeControl {
+    FakeControl {
+        pins: Some(directory.to_owned()),
+        ..FakeControl::default()
+    }
+}
+
 #[test]
 fn an_established_network_holds_its_slot_until_its_connector_is_dropped() -> TestResult {
     let directory = tempfile::tempdir()?;
-    // The fake kernel pins nothing, so the pin of the first attempt is this
-    // process's own namespace, and the second attempt has none.
+    let (network, journal) = network(directory.path(), pinning(directory.path()), 24)?;
+    let first = network.establish([1; 16], &[ENDPOINT]);
+    // An attempt holds one network at a time.
+    let again = network.establish([1; 16], &[ENDPOINT]);
+    let second = network.establish([2; 16], &[ENDPOINT]);
+    let removed_while_held = entries(&journal).removed.clone();
+    let held = first.is_ok() && second.is_ok();
+    drop(first);
+    // The freed slot is the lowest again.
+    let third = network.establish([3; 16], &[ENDPOINT]);
+    assert!(held && third.is_ok());
+    assert!(matches!(again, Err(AttemptNetworkError::InUse)));
+    assert!(removed_while_held.is_empty());
+    assert_eq!(
+        entries(&journal).installed,
+        ["piglor-h0", "piglor-h1", "piglor-h0"]
+    );
+    assert_eq!(entries(&journal).removed, ["piglor-h0"]);
+    Ok(())
+}
+
+#[test]
+fn an_existing_namespace_of_the_attempt_is_neither_installed_nor_removed() -> TestResult {
+    let directory = tempfile::tempdir()?;
     std::os::unix::fs::symlink(
         "/proc/self/ns/net",
         directory
             .path()
             .join(NamespaceName::for_attempt([1; 16]).as_str()),
     )?;
-    let (network, journal) = network(directory.path(), false, 24)?;
-    let first = network.establish([1; 16], &[ENDPOINT]);
-    // The second attempt takes the next slot; without a pin it is removed
-    // and its slot freed at once.
-    let second = network.establish([2; 16], &[ENDPOINT]);
-    let removed_while_held = entries(&journal).removed.clone();
-    let first_established = first.is_ok();
-    drop(first);
-    let third = network.establish([2; 16], &[ENDPOINT]);
-    assert!(first_established);
-    assert!(matches!(
-        second,
-        Err(AttemptNetworkError::Open(NetlinkError::Io(Errno::NOENT)))
-    ));
-    assert!(matches!(third, Err(AttemptNetworkError::Open(_))));
-    assert_eq!(removed_while_held, ["piglor-h1"]);
-    assert_eq!(
-        entries(&journal).installed,
-        ["piglor-h0", "piglor-h1", "piglor-h0"]
-    );
-    assert_eq!(
-        entries(&journal).removed,
-        ["piglor-h1", "piglor-h0", "piglor-h0"]
-    );
+    let (network, journal) = network(directory.path(), pinning(directory.path()), 24)?;
+    let existing = network.establish([1; 16], &[ENDPOINT]);
+    assert!(matches!(existing, Err(AttemptNetworkError::Exists)));
+    assert!(entries(&journal).installed.is_empty());
+    assert!(entries(&journal).removed.is_empty());
     Ok(())
 }
 
@@ -192,22 +214,88 @@ fn an_established_network_holds_its_slot_until_its_connector_is_dropped() -> Tes
 fn a_full_range_bad_endpoints_and_a_refusing_kernel_establish_nothing() -> TestResult {
     let directory = tempfile::tempdir()?;
     // One /30 holds one slot.
-    let (single, _) = network(directory.path(), false, 30)?;
-    let (refusing, journal) = network(directory.path(), true, 24)?;
-    let taken = single.slots.take();
+    let (single, _) = network(directory.path(), FakeControl::default(), 30)?;
+    let refusing_kernel = FakeControl {
+        refuse: true,
+        ..FakeControl::default()
+    };
+    let (refusing, journal) = network(directory.path(), refusing_kernel, 24)?;
+    let taken = single.slots.take([9; 16]);
     let exhausted = single.establish([1; 16], &[ENDPOINT]);
     drop(taken);
     let unroutable = single.establish([1; 16], &[SocketAddr::from(([192, 0, 2, 10], 0))]);
     let refused = refusing.establish([1; 16], &[ENDPOINT]);
+    // Without a pin, the installed namespace cannot be opened, and is
+    // removed again.
+    let unpinned = single.establish([1; 16], &[ENDPOINT]);
     assert!(matches!(exhausted, Err(AttemptNetworkError::Exhausted)));
     assert!(matches!(
         unroutable,
         Err(AttemptNetworkError::Plan(NetworkPlanError::Endpoint))
     ));
     assert!(matches!(refused, Err(AttemptNetworkError::Establish(_))));
+    assert!(matches!(
+        unpinned,
+        Err(AttemptNetworkError::Open(NetlinkError::Io(Errno::NOENT)))
+    ));
     // The refused installation is removed, and the slot is free again.
     assert_eq!(entries(&journal).removed, ["piglor-h0"]);
-    assert!(single.slots.take().is_some_and(|lease| lease.slot == 0));
+    assert!(single
+        .slots
+        .take([1; 16])
+        .is_ok_and(|lease| lease.slot == 0));
+    Ok(())
+}
+
+#[test]
+fn a_failed_removal_quarantines_its_slot_and_closes_the_port() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let stuck = FakeControl {
+        refuse_removal: true,
+        ..pinning(directory.path())
+    };
+    let (network, journal) = network(directory.path(), stuck, 24)?;
+    let established = network.establish([1; 16], &[ENDPOINT]).map(drop);
+    let refused = network.establish([2; 16], &[ENDPOINT]);
+    assert!(established.is_ok(), "{established:?}");
+    assert!(
+        matches!(
+            &refused,
+            Err(AttemptNetworkError::Quarantined { slot: 0, .. })
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(
+        refused.map(drop).map_err(|error| error.to_string()).err(),
+        Some(
+            "the attempt namespace of slot 0 could not be removed (the kernel refused a \
+             netlink request with error -16); restart reconciliation must remove it"
+                .to_owned()
+        )
+    );
+    // Nothing more was installed, and the slot stays taken.
+    assert_eq!(entries(&journal).installed, ["piglor-h0"]);
+    assert!(network.slots.holders().attempts.contains_key(&0));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_connector_dropped_on_a_runtime_worker_is_removed() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (network, journal) = network(directory.path(), pinning(directory.path()), 24)?;
+    drop(network.establish([1; 16], &[ENDPOINT]));
+    assert_eq!(entries(&journal).removed, ["piglor-h0"]);
+    Ok(())
+}
+
+// A current-thread runtime has no other worker to hand its tasks to, so
+// removal runs in place there.
+#[tokio::test]
+async fn a_connector_dropped_on_a_current_thread_runtime_is_removed() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (network, journal) = network(directory.path(), pinning(directory.path()), 24)?;
+    drop(network.establish([1; 16], &[ENDPOINT]));
+    assert_eq!(entries(&journal).removed, ["piglor-h0"]);
     Ok(())
 }
 
@@ -216,7 +304,7 @@ fn a_connector_that_cannot_enter_its_namespace_fails_the_connection() -> TestRes
     let control = Arc::new(FakeControl::default());
     let slots = Arc::new(Slots {
         count: 1,
-        taken: Mutex::new(BTreeSet::new()),
+        holders: Mutex::new(Holders::default()),
     });
     let mut connector = NamespaceConnector {
         namespace: std::fs::File::open("/proc/self/ns/net").map(OwnedFd::from)?,
@@ -224,7 +312,7 @@ fn a_connector_that_cannot_enter_its_namespace_fails_the_connection() -> TestRes
             control: Arc::clone(&control),
             name: NamespaceName::for_attempt([1; 16]),
             host_link: LinkName::new("piglor-h0")?,
-            _slot: slots.take().ok_or("no slot")?,
+            slot: slots.take([1; 16])?,
         },
     };
     // Entering a namespace needs `CAP_SYS_ADMIN`, which the workspace tests
@@ -236,7 +324,7 @@ fn a_connector_that_cannot_enter_its_namespace_fails_the_connection() -> TestRes
         Some(io::ErrorKind::Other)
     );
     assert_eq!(entries(&control.journal).removed, ["piglor-h0"]);
-    assert!(slots.take().is_some());
+    assert!(slots.take([1; 16]).is_ok());
     Ok(())
 }
 
@@ -254,6 +342,14 @@ fn errors_say_what_failed() {
         (
             AttemptNetworkError::Open(NetlinkError::Unexpected),
             "the attempt namespace could not be opened",
+        ),
+        (
+            AttemptNetworkError::InUse,
+            "the attempt holds an attempt network already",
+        ),
+        (
+            AttemptNetworkError::Exists,
+            "an attempt namespace of this name exists",
         ),
     ] {
         assert_eq!(error.to_string(), message);

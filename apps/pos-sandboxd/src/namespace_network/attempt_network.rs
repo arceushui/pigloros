@@ -4,10 +4,12 @@
 //! that opens every connection from inside that namespace.
 //!
 //! Teardown is RAII. Dropping the connector removes the namespace and frees
-//! the slot; a removal that fails leaves the state for restart
-//! reconciliation, which sweeps every `piglor-` namespace and host link.
+//! the slot. A removal that fails quarantines the slot and closes the port:
+//! every later establishment fails, naming the slot, until restart
+//! reconciliation removes the remaining state (ADR-069 section 6: an
+//! ineffective property closes admission).
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::io;
 use std::net::{SocketAddr, TcpStream};
 use std::os::fd::{AsFd, OwnedFd};
@@ -15,6 +17,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use pos_reference::sandbox_provider_protocol::NetworkEndpointConnector;
+use tokio::runtime::RuntimeFlavor;
 
 use super::netlink::{in_namespace, NetlinkError};
 use super::pinned::NetworkNamespaces;
@@ -24,41 +27,80 @@ use super::{
 };
 use crate::{EstablishedNetwork, LocalNetworkPort};
 
+/// Which attempt holds each slot, and the first slot whose namespace could
+/// not be removed.
+#[derive(Debug, Default)]
+struct Holders {
+    attempts: BTreeMap<u16, [u8; 16]>,
+    quarantined: Option<(u16, String)>,
+}
+
 /// The slots of the reserved range that established networks hold.
 #[derive(Debug)]
 struct Slots {
     count: u16,
-    taken: Mutex<BTreeSet<u16>>,
+    holders: Mutex<Holders>,
 }
 
 impl Slots {
-    /// Take the lowest free slot.
-    fn take(self: &Arc<Self>) -> Option<SlotLease> {
-        let mut taken = self.taken.lock().unwrap_or_else(PoisonError::into_inner);
-        let slot = (0..self.count).find(|slot| !taken.contains(slot))?;
-        taken.insert(slot);
-        drop(taken);
-        Some(SlotLease {
+    fn holders(&self) -> std::sync::MutexGuard<'_, Holders> {
+        self.holders.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Take the lowest free slot for `attempt_id`.
+    ///
+    /// # Errors
+    /// Fails once a slot is quarantined, while `attempt_id` holds a slot
+    /// already, and when every slot is taken.
+    fn take(self: &Arc<Self>, attempt_id: [u8; 16]) -> Result<SlotLease, AttemptNetworkError> {
+        let mut holders = self.holders();
+        if let Some((slot, reason)) = &holders.quarantined {
+            return Err(AttemptNetworkError::Quarantined {
+                slot: *slot,
+                reason: reason.clone(),
+            });
+        }
+        if holders.attempts.values().any(|held| *held == attempt_id) {
+            return Err(AttemptNetworkError::InUse);
+        }
+        let slot = (0..self.count)
+            .find(|slot| !holders.attempts.contains_key(slot))
+            .ok_or(AttemptNetworkError::Exhausted)?;
+        holders.attempts.insert(slot, attempt_id);
+        drop(holders);
+        Ok(SlotLease {
             slots: Arc::clone(self),
             slot,
+            quarantined: false,
         })
     }
 }
 
-/// One taken slot, freed when dropped.
+/// One taken slot, freed when dropped unless it was quarantined.
 #[derive(Debug)]
 struct SlotLease {
     slots: Arc<Slots>,
     slot: u16,
+    quarantined: bool,
+}
+
+impl SlotLease {
+    /// Keep the slot taken, because its namespace could not be removed, and
+    /// close the port with `error`.
+    fn quarantine(&mut self, error: &NetlinkError) {
+        self.quarantined = true;
+        self.slots
+            .holders()
+            .quarantined
+            .get_or_insert_with(|| (self.slot, error.to_string()));
+    }
 }
 
 impl Drop for SlotLease {
     fn drop(&mut self) {
-        self.slots
-            .taken
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(&self.slot);
+        if !self.quarantined {
+            self.slots.holders().attempts.remove(&self.slot);
+        }
     }
 }
 
@@ -77,6 +119,22 @@ pub enum AttemptNetworkError {
     /// The established namespace could not be opened for its connector.
     #[error("the attempt namespace could not be opened")]
     Open(#[source] NetlinkError),
+    /// The attempt holds a slot already.
+    #[error("the attempt holds an attempt network already")]
+    InUse,
+    /// A namespace of the attempt's name exists, so this establishment
+    /// installed nothing and removes nothing.
+    #[error("an attempt namespace of this name exists")]
+    Exists,
+    /// The namespace of `slot` could not be removed, so no attempt network
+    /// is established until restart reconciliation removes it.
+    #[error("the attempt namespace of slot {slot} could not be removed ({reason}); restart reconciliation must remove it")]
+    Quarantined {
+        /// The quarantined slot.
+        slot: u16,
+        /// Why its namespace could not be removed.
+        reason: String,
+    },
 }
 
 /// The Local network port over attempt namespaces that `control` installs,
@@ -102,7 +160,7 @@ impl<C> NamespacedLocalNetwork<C> {
             range,
             slots: Arc::new(Slots {
                 count,
-                taken: Mutex::new(BTreeSet::new()),
+                holders: Mutex::new(Holders::default()),
             }),
         }
     }
@@ -114,15 +172,24 @@ struct Teardown<C: NamespaceControl> {
     control: Arc<C>,
     name: NamespaceName,
     host_link: LinkName,
-    _slot: SlotLease,
+    slot: SlotLease,
 }
 
 impl<C: NamespaceControl> Drop for Teardown<C> {
     fn drop(&mut self) {
-        // A removal that fails leaves the namespace to restart
-        // reconciliation; the slot is free again either way, because a
-        // reinstallation in it would fail on the remaining host link.
-        self.control.remove(&self.name, &self.host_link).ok();
+        // Removal waits on the kernel, a few netlink replies each bounded by
+        // the receive timeout. On a Tokio worker it gives the worker's other
+        // tasks to another thread first.
+        let remove = || self.control.remove(&self.name, &self.host_link);
+        let removed = match tokio::runtime::Handle::try_current() {
+            Ok(runtime) if runtime.runtime_flavor() == RuntimeFlavor::MultiThread => {
+                tokio::task::block_in_place(remove)
+            }
+            _ => remove(),
+        };
+        if let Err(error) = removed {
+            self.slot.quarantine(&error);
+        }
     }
 }
 
@@ -175,16 +242,27 @@ where
         attempt_id: [u8; 16],
         endpoints: &[SocketAddr],
     ) -> Result<NamespaceConnector<C>, AttemptNetworkError> {
-        let slot = self.slots.take().ok_or(AttemptNetworkError::Exhausted)?;
+        let slot = self.slots.take(attempt_id)?;
         let expected =
             ExpectedNamespace::for_attempt(attempt_id, &self.range, slot.slot, endpoints)
                 .map_err(AttemptNetworkError::Plan)?;
+        // An existing namespace of this name belongs to an earlier run of the
+        // attempt that only restart reconciliation may remove: installing
+        // would fail and the cleanup after it would delete that namespace.
+        if self
+            .namespaces
+            .open(&expected.name)
+            .map_err(AttemptNetworkError::Open)?
+            .is_some()
+        {
+            return Err(AttemptNetworkError::Exists);
+        }
         establish_namespace(&*self.control, &expected).map_err(AttemptNetworkError::Establish)?;
         let teardown = Teardown {
             control: Arc::clone(&self.control),
             name: expected.name,
             host_link: expected.host_link,
-            _slot: slot,
+            slot,
         };
         self.namespaces
             .open(&teardown.name)
