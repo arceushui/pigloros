@@ -73,7 +73,6 @@ impl<'a> CommunityScopeMembersV1<'a> {
     }
 
     /// Iterate original rows without cloning a metadata buffer.
-    #[must_use]
     pub fn iter(&self) -> CommunityScopeMembersIterV1<'a> {
         match self.0 {
             ScopeRows::Typed(rows) => {
@@ -95,6 +94,15 @@ impl<'a> CommunityScopeMembersV1<'a> {
             ScopeRows::Typed(_) => None,
             ScopeRows::Canonical { bytes, .. } => Some(bytes),
         }
+    }
+}
+
+impl<'a> IntoIterator for &CommunityScopeMembersV1<'a> {
+    type Item = Result<CommunityScopeMemberV1>;
+    type IntoIter = CommunityScopeMembersIterV1<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
     }
 }
 

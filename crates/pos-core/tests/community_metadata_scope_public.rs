@@ -88,6 +88,17 @@ fn exact_scope_cover_and_exception_domain_borrow_original_rows() -> TestResult {
     );
     let decoded = Cover::from_canonical_cbor(&expected)?;
     assert!(*decoded.as_input() == input(&rows));
+    for members in [
+        &cover.as_input().scope_members,
+        &decoded.as_input().scope_members,
+    ] {
+        let mut count = 0;
+        for row in members {
+            assert!(row? == member());
+            count += 1;
+        }
+        assert_eq!(count, 1);
+    }
     let encoded_rows = decoded
         .as_input()
         .scope_members

@@ -124,7 +124,7 @@ impl CommunityMetadataSchemaV1 {
     /// Resolve only an exact admitted metadata label. Data/failure/claim and
     /// clear bootstrap schemas cannot be imported under this wrapper.
     #[must_use]
-    pub fn from_magic(magic: [u8; 4]) -> Option<Self> {
+    pub const fn from_magic(magic: [u8; 4]) -> Option<Self> {
         match &magic {
             b"COB1" => Some(Self::Cob1),
             b"CSB1" => Some(Self::Csb1),
