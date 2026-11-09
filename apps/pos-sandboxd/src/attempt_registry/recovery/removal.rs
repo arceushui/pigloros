@@ -15,8 +15,10 @@ impl SystemdAttemptRecovery {
     /// root's recorded loop/dm generations observed released. Under the held
     /// recovery lock, the registry and every unmounted attempt directory are
     /// inventoried again and must be unchanged. Directories are removed first,
-    /// through held parents that are synchronized, and then every record is
-    /// unlinked with the registry synchronized after each, so intent goes last.
+    /// through held parents that are synchronized, then every interrupted
+    /// marker write, and then every record is unlinked with the registry
+    /// synchronized after each, so intent goes last. The committed activation
+    /// marker is kept.
     ///
     /// # Errors
     /// [`SystemdAttemptRegistryError::CleanupEvidence`] for missing unit or
@@ -36,6 +38,7 @@ impl SystemdAttemptRecovery {
             .then_some(())
             .ok_or(SystemdAttemptRegistryError::CleanupEvidence)
             .and_then(|()| inventory.remove_directories())
+            .and_then(|()| self.remove_temporary_markers())
             .and_then(|()| {
                 self.entries
                     .iter()

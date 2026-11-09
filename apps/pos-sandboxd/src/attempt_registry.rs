@@ -6,7 +6,9 @@
 //! replace ADR-069 lifecycle evidence or authorize image activation. The PAI2
 //! directory stage adds the held attempt/root device and inode identities.
 //! PAI3 records verified root facts before launch; none of these private stages
-//! substitutes for the separate ADR-069 lifecycle binding.
+//! substitutes for the separate ADR-069 lifecycle binding. Beside the intent
+//! keys, the registry retains one `activation` marker of the last `MountImage`
+//! request (see `activation`).
 
 use std::fs::File;
 use std::io::{self, Write};
@@ -19,6 +21,7 @@ use rustix::fs::{
 
 use crate::TransientServiceUnitName;
 
+mod activation;
 mod directory;
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -121,6 +124,10 @@ pub enum SystemdAttemptRegistryError {
     /// Terminal cleanup lacks matching unit or released-root evidence.
     #[error("terminal attempt cleanup evidence is missing or mismatched")]
     CleanupEvidence,
+    /// The last activation request marker is missing while a directory stage
+    /// is recorded, or it lies in this boot's future.
+    #[error("the last activation request marker is missing or contradictory")]
+    ActivationMarker,
     /// An operating-system operation failed; no successful commit is claimed.
     #[error(transparent)]
     Io(#[from] io::Error),
@@ -211,7 +218,8 @@ impl SystemdAttemptRegistry {
     }
 
     fn from_directory(directory: RegistryDirectory) -> Result<Self, SystemdAttemptRegistryError> {
-        require_empty(&directory.file)?;
+        // Reconciliation removes every attempt record and keeps the marker.
+        require_only(&directory.file, Some(activation::MARKER_NAME))?;
         Ok(Self {
             directory: Arc::new(directory),
             state: Arc::new(Mutex::new(RegistryState::default())),
@@ -311,16 +319,35 @@ fn publish_record(
     rename: RenameFlags,
     on_replaced: impl FnOnce(),
 ) -> Result<(), SystemdAttemptRegistryError> {
-    validate_directory(&directory.file, directory.owner, true)?;
     let temporary = format!(
         ".planned-{}-{}-{sequence}",
         intent.unit_name.attempt_component(),
         std::process::id()
     );
+    publish_named(
+        directory,
+        &temporary,
+        intent.unit_name.attempt_component(),
+        bytes,
+        rename,
+        on_replaced,
+    )
+}
+
+/// Write and fsync `temporary`, rename it to `name`, then fsync the registry.
+fn publish_named(
+    directory: &RegistryDirectory,
+    temporary: &str,
+    name: &str,
+    bytes: &[u8],
+    rename: RenameFlags,
+    on_replaced: impl FnOnce(),
+) -> Result<(), SystemdAttemptRegistryError> {
+    validate_directory(&directory.file, directory.owner, true)?;
     let mut file = File::from(registry_io(|| {
         openat2(
             &directory.file,
-            temporary.as_str(),
+            temporary,
             OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC | OFlags::NOFOLLOW,
             Mode::RUSR | Mode::WUSR,
             ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_XDEV,
@@ -330,14 +357,8 @@ fn publish_record(
     registry_io(|| file.write_all(bytes))?;
     registry_io(|| file.sync_all())?;
     registry_io(|| {
-        renameat_with(
-            &directory.file,
-            temporary.as_str(),
-            &directory.file,
-            intent.unit_name.attempt_component(),
-            rename,
-        )
-        .map_err(io::Error::from)
+        renameat_with(&directory.file, temporary, &directory.file, name, rename)
+            .map_err(io::Error::from)
     })?;
     // Replacement is visible even if synchronizing its parent later fails.
     // Retain that exact expectation before returning any durability error.
@@ -411,10 +432,19 @@ fn delete_record(
 }
 
 fn require_empty(directory: &File) -> Result<(), SystemdAttemptRegistryError> {
+    require_only(directory, None)
+}
+
+/// Require that `directory` holds nothing but, optionally, `retained`.
+fn require_only(
+    directory: &File,
+    retained: Option<&str>,
+) -> Result<(), SystemdAttemptRegistryError> {
     let entries = registry_io(|| Dir::read_from(directory).map_err(io::Error::from))?;
     for entry in entries {
         let entry = registry_io(|| entry.map_err(io::Error::from))?;
-        if entry.file_name().to_bytes() != b"." && entry.file_name().to_bytes() != b".." {
+        let name = entry.file_name().to_bytes();
+        if name != b"." && name != b".." && retained.map(str::as_bytes) != Some(name) {
             return Err(SystemdAttemptRegistryError::ReconciliationRequired);
         }
     }
@@ -455,11 +485,19 @@ fn read_record_bytes<const N: usize>(
     directory: &RegistryDirectory,
     unit: &TransientServiceUnitName,
 ) -> Result<[u8; N], SystemdAttemptRegistryError> {
+    read_named_bytes(directory, unit.attempt_component())
+}
+
+/// Read exactly `N` bytes of the private, singly linked registry file `name`.
+fn read_named_bytes<const N: usize>(
+    directory: &RegistryDirectory,
+    name: &str,
+) -> Result<[u8; N], SystemdAttemptRegistryError> {
     validate_directory(&directory.file, directory.owner, true)?;
     let file = File::from(registry_io(|| {
         openat2(
             &directory.file,
-            unit.attempt_component(),
+            name,
             OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK,
             Mode::empty(),
             ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_XDEV,

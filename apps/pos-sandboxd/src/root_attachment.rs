@@ -3,8 +3,9 @@
 //!
 //! Before mountfsd is called, the prepared attempt directory is verified
 //! again. The kernel command line must also veto systemd's userspace Verity
-//! fallback (ADR-087 Part C.3, accepted revision 31; owner decision Q7.8). One
-//! bounded `MountImage` call then activates the admitted image. Its single
+//! fallback (ADR-087 Part C.3, accepted revision 31; owner decision Q7.8). The
+//! registry durably records the request's boot and time (owner decision D2),
+//! and one bounded `MountImage` call then activates the admitted image. Its single
 //! sealed root mount descriptor is attached by descriptor with `move_mount`
 //! onto the held root directory descriptor, so no path is resolved. It is
 //! then made private, and detached on rejection, through that descriptor's
@@ -342,12 +343,17 @@ where
                 .await
                 .unwrap_or(Err(ImageActivationError::Transport));
             let mounted = match connected {
-                Ok(activator) => {
-                    // Only a request that reaches mountfsd can leave loop/dm
-                    // resources, so only it binds intent to a released root.
-                    directory.begin_activation();
-                    activator.mount_image(image).await
-                }
+                // The request's boot and time are durable before it is sent,
+                // so a restart can wait it out (owner decision D2).
+                Ok(activator) => match directory.record_activation_request() {
+                    Ok(()) => {
+                        // Only a request that reaches mountfsd can leave loop/dm
+                        // resources, so only it binds intent to a released root.
+                        directory.begin_activation();
+                        activator.mount_image(image).await
+                    }
+                    Err(_) => Err(ImageActivationError::AttachFailure),
+                },
                 Err(error) => Err(error),
             };
             mounted.and_then(|mount| {
