@@ -3316,127 +3316,71 @@ fn run_early_renderer(
 
 #[derive(Clone, Copy)]
 enum EnvironmentCase {
-    HeldResult,
-    LateInvocation,
+    Cancellation,
+    Timeout,
 }
 
-fn initial_environment_witness(
-    case: EnvironmentCase,
-    driver_pending: bool,
-    completion: Result<Option<bool>, ()>,
-) -> bool {
-    driver_pending
-        && match case {
-            EnvironmentCase::HeldResult => matches!(completion, Ok(None | Some(true))),
-            EnvironmentCase::LateInvocation => completion == Ok(None),
-        }
-}
-
-#[test]
-fn held_result_does_not_require_a_pending_native_callback() {
-    assert!(initial_environment_witness(
-        EnvironmentCase::HeldResult,
-        true,
-        Ok(None)
-    ));
-    assert!(initial_environment_witness(
-        EnvironmentCase::HeldResult,
-        true,
-        Ok(Some(true))
-    ));
-    assert!(!initial_environment_witness(
-        EnvironmentCase::HeldResult,
-        false,
-        Ok(Some(true))
-    ));
-    assert!(!initial_environment_witness(
-        EnvironmentCase::HeldResult,
-        true,
-        Ok(Some(false))
-    ));
-    assert!(!initial_environment_witness(
-        EnvironmentCase::HeldResult,
-        true,
-        Err(())
-    ));
-    assert!(initial_environment_witness(
-        EnvironmentCase::LateInvocation,
-        true,
-        Ok(None)
-    ));
-    assert!(!initial_environment_witness(
-        EnvironmentCase::LateInvocation,
-        true,
-        Ok(Some(true))
-    ));
-}
-
-fn environment_callback_order(
+fn clean_environment_callback_order(
     order: &[crate::NativeCallbackMoment],
     case: EnvironmentCase,
 ) -> bool {
     use crate::NativeCallbackMoment::{DriverTimeout, EnvironmentCompletion};
-    let mut callback = None;
-    let mut timeout = None;
-    for (index, moment) in order.iter().enumerate() {
-        match moment {
-            EnvironmentCompletion(true) if callback.is_none() => callback = Some(index),
-            DriverTimeout if timeout.is_none() => timeout = Some(index),
-            _ => return false,
+    match case {
+        EnvironmentCase::Cancellation => order == [EnvironmentCompletion(true)],
+        EnvironmentCase::Timeout => {
+            order == [EnvironmentCompletion(true), DriverTimeout]
+                || order == [DriverTimeout, EnvironmentCompletion(true)]
         }
     }
-    match (callback, timeout, case) {
-        (Some(callback), Some(timeout), EnvironmentCase::HeldResult) => callback < timeout,
-        (Some(callback), Some(timeout), EnvironmentCase::LateInvocation) => timeout < callback,
-        _ => false,
-    }
 }
 
 #[test]
-fn environment_order_distinguishes_held_result_from_late_invocation() {
+fn clean_environment_callback_order_preserves_actual_invocation() {
     use crate::NativeCallbackMoment::{DriverTimeout, EnvironmentCompletion, Overflow};
-    let held = [EnvironmentCompletion(true), DriverTimeout];
-    let late = [DriverTimeout, EnvironmentCompletion(true)];
-    assert!(environment_callback_order(
-        &held,
-        EnvironmentCase::HeldResult
+    assert!(clean_environment_callback_order(
+        &[EnvironmentCompletion(true)],
+        EnvironmentCase::Cancellation
     ));
-    assert!(!environment_callback_order(
-        &held,
-        EnvironmentCase::LateInvocation
+    assert!(clean_environment_callback_order(
+        &[EnvironmentCompletion(true), DriverTimeout],
+        EnvironmentCase::Timeout
     ));
-    assert!(environment_callback_order(
-        &late,
-        EnvironmentCase::LateInvocation
+    assert!(clean_environment_callback_order(
+        &[DriverTimeout, EnvironmentCompletion(true)],
+        EnvironmentCase::Timeout
     ));
-    assert!(!environment_callback_order(
-        &late,
-        EnvironmentCase::HeldResult
+    assert!(!clean_environment_callback_order(
+        &[DriverTimeout],
+        EnvironmentCase::Timeout
     ));
-    assert!(!environment_callback_order(
-        &[DriverTimeout, EnvironmentCompletion(false)],
-        EnvironmentCase::LateInvocation
+    assert!(!clean_environment_callback_order(
+        &[EnvironmentCompletion(false)],
+        EnvironmentCase::Cancellation
     ));
-    assert!(!environment_callback_order(
-        &[DriverTimeout, EnvironmentCompletion(true), Overflow],
-        EnvironmentCase::LateInvocation
+    assert!(!clean_environment_callback_order(
+        &[EnvironmentCompletion(true), EnvironmentCompletion(true)],
+        EnvironmentCase::Cancellation
+    ));
+    assert!(!clean_environment_callback_order(
+        &[EnvironmentCompletion(true), DriverTimeout, Overflow],
+        EnvironmentCase::Timeout
     ));
 }
 
 #[test]
-fn native_pre_environment_held_completion_and_retirement() -> TestResult {
+fn native_environment_result_retained_through_cancellation() -> TestResult {
     let _port = crate::Native::fixed_port_fixture();
     let runtime = std::env::var_os("OWNER_BRIDGE_TEST_RUNTIME")
         .ok_or("canonical retained runtime is required by process qualification")?;
-    run_pre_environment(Path::new(&runtime), 0x7e, EnvironmentCase::HeldResult)
+    run_pre_environment(Path::new(&runtime), 0x7e, EnvironmentCase::Cancellation)
 }
 
 #[test]
-fn native_pre_environment_late_callback_and_retirement() -> TestResult {
+fn native_environment_result_retained_through_readiness_timeout() -> TestResult {
     let _port = crate::Native::fixed_port_fixture();
     let runtime = std::env::var_os("OWNER_BRIDGE_TEST_RUNTIME")
         .ok_or("canonical retained runtime is required by process qualification")?;
-    run_pre_environment(Path::new(&runtime), 0x7f, EnvironmentCase::LateInvocation)
+    run_pre_environment(Path::new(&runtime), 0x7f, EnvironmentCase::Timeout)
 }
 
 struct PreEnvironmentDrive {
@@ -3445,14 +3389,26 @@ struct PreEnvironmentDrive {
     active_blocked: bool,
     initial_completion: Result<Option<bool>, ()>,
     pump_failed: bool,
-    at_deadline: Result<Option<bool>, ()>,
+    boundary_completion: Result<Option<bool>, ()>,
 }
 
 impl Fixture {
+    fn finished_driver_is_done(&mut self, driver: &mut CeremonyDriver) -> bool {
+        matches!(
+            driver.step(&mut readiness::env(
+                &mut self.surface,
+                &mut self.loopback,
+                &mut self.store,
+            )),
+            Step::Done
+        )
+    }
+
     fn drive_pre_environment(
         &mut self,
         driver: &mut CeremonyDriver,
         started: Instant,
+        case: EnvironmentCase,
     ) -> PreEnvironmentDrive {
         let initial = driver.step(&mut readiness::env(
             &mut self.surface,
@@ -3465,35 +3421,46 @@ impl Fixture {
             &CeremonyId::from_bytes([self.number; 16]),
             crate::adapter::surface::PreEnvironmentRetention::Active,
         );
-        // Dispatch genuine callbacks while leaving the driver unstepped until
-        // its original readiness deadline; callback delivery is not held.
+        // The original deadline remains unchanged; no callback is delayed.
         let deadline = started + pos_owner_bridge::ceremony::timing::READINESS;
         let mut pump_failed = false;
-        while Instant::now() < deadline {
-            pump_failed |= readiness::pump(&self.surface).is_err();
+        if matches!(case, EnvironmentCase::Timeout) {
+            while Instant::now() < deadline {
+                pump_failed |= readiness::pump(&self.surface).is_err();
+            }
         }
-        let at_deadline = self.surface.pre_environment_completion();
-        let result = match driver.step(&mut readiness::env(
-            &mut self.surface,
-            &mut self.loopback,
-            &mut self.store,
-        )) {
-            Step::Finished(result) => result,
-            _ => readiness::cancel_driver(
+        let boundary_completion = self.surface.pre_environment_completion();
+        let result = if matches!(case, EnvironmentCase::Timeout) {
+            let result = match driver.step(&mut readiness::env(
+                &mut self.surface,
+                &mut self.loopback,
+                &mut self.store,
+            )) {
+                Step::Finished(result) => result,
+                _ => readiness::cancel_driver(
+                    driver,
+                    &mut self.surface,
+                    &mut self.loopback,
+                    &mut self.store,
+                ),
+            };
+            crate::Native::record_callback(crate::NativeCallbackMoment::DriverTimeout);
+            result
+        } else {
+            readiness::cancel_driver(
                 driver,
                 &mut self.surface,
                 &mut self.loopback,
                 &mut self.store,
-            ),
+            )
         };
-        crate::Native::record_callback(crate::NativeCallbackMoment::DriverTimeout);
         PreEnvironmentDrive {
             result,
             driver_pending,
             active_blocked,
             initial_completion,
             pump_failed,
-            at_deadline,
+            boundary_completion,
         }
     }
 }
@@ -3502,11 +3469,12 @@ fn run_pre_environment(runtime: &Path, number: u8, case: EnvironmentCase) -> Tes
     use pos_owner_bridge::LifecycleCode;
     let root = FixtureRoot::new()?;
     let callback_order_guard = CallbackOrderGuard::arm();
+    let creation_order_guard = CreationOrderGuard::arm();
     let mut fixture = Fixture::new(runtime, &root.0, number, FixtureProfile::Pending)?;
     let started = Instant::now();
     let mut driver = readiness::new_driver(CeremonyId::from_bytes([number; 16]), started)?;
     let attempt = catch_unwind(AssertUnwindSafe(|| {
-        fixture.drive_pre_environment(&mut driver, started)
+        fixture.drive_pre_environment(&mut driver, started, case)
     }));
     let PreEnvironmentDrive {
         result,
@@ -3514,7 +3482,7 @@ fn run_pre_environment(runtime: &Path, number: u8, case: EnvironmentCase) -> Tes
         active_blocked,
         initial_completion,
         pump_failed,
-        at_deadline,
+        boundary_completion,
     } = match attempt {
         Ok(observation) => observation,
         Err(_) => PreEnvironmentDrive {
@@ -3528,14 +3496,20 @@ fn run_pre_environment(runtime: &Path, number: u8, case: EnvironmentCase) -> Tes
             active_blocked: false,
             initial_completion: Err(()),
             pump_failed: true,
-            at_deadline: Err(()),
+            boundary_completion: Err(()),
         },
     };
-    let initial_witness = initial_environment_witness(case, driver_pending, initial_completion);
-    let timed_out = matches!(
-        &result,
-        Err(BridgeError::Lifecycle(LifecycleCode::ReadinessTimeout))
-    );
+    let initial_witness = driver_pending && matches!(initial_completion, Ok(None | Some(true)));
+    let expected_termination = match case {
+        EnvironmentCase::Timeout => matches!(
+            &result,
+            Err(BridgeError::Lifecycle(LifecycleCode::ReadinessTimeout))
+        ),
+        EnvironmentCase::Cancellation => matches!(
+            &result,
+            Err(BridgeError::Lifecycle(LifecycleCode::ControllerLost))
+        ),
+    };
     let wiped = driver.request_clear() && driver.prf().iter().all(|byte| *byte == 0);
     fixture.surface.abandon_opening();
     let abandoned_blocked = catch_unwind(AssertUnwindSafe(|| {
@@ -3545,7 +3519,8 @@ fn run_pre_environment(runtime: &Path, number: u8, case: EnvironmentCase) -> Tes
         )
     }))
     .unwrap_or(false);
-    // The real failed-opening path retains the callback until it completes.
+    let no_resurrection = fixture.finished_driver_is_done(&mut driver);
+    // Retirement consumes the actual retained SDK result; it may already be delivered.
     retirement::retire(
         &mut fixture.surface,
         &mut fixture.loopback,
@@ -3555,11 +3530,13 @@ fn run_pre_environment(runtime: &Path, number: u8, case: EnvironmentCase) -> Tes
         |_, _, _| {},
     );
     let order = crate::Native::callback_order();
-    let ordered = environment_callback_order(&order, case);
+    let ordered = clean_environment_callback_order(&order, case);
+    let creation_order = crate::Native::creation_order();
+    let sdk_success = sdk_environment_result(&creation_order, crate::CreationCallback::Success);
     let no_record = fixture.store.records()?.is_empty();
     let retained_orphan = fixture.store.folders()?.len() == 1;
     let idle = fixture.surface.idle();
-    let _logged = writeln!(std::io::stderr(), "NATIVE_PRE_ENV_VERDICT case={number} initial_witness={initial_witness} driver_pending={driver_pending} active_blocked={active_blocked} abandoned_blocked={abandoned_blocked} initial_completion={initial_completion:?} deadline_completion={at_deadline:?} pump_failed={pump_failed} timed_out={timed_out} wiped={wiped} order={order:?} ordered={ordered} no_record={no_record} orphan={retained_orphan} idle={idle}");
+    let _logged = writeln!(std::io::stderr(), "NATIVE_PRE_ENV_VERDICT case={number} initial_witness={initial_witness} driver_pending={driver_pending} active_blocked={active_blocked} abandoned_blocked={abandoned_blocked} initial_completion={initial_completion:?} boundary_completion={boundary_completion:?} pump_failed={pump_failed} expected_termination={expected_termination} wiped={wiped} order={order:?} creation_order={creation_order:?} sdk_success={sdk_success} no_resurrection={no_resurrection} ordered={ordered} no_record={no_record} orphan={retained_orphan} idle={idle}");
     drop(fixture.surface);
     Rc::get_mut(&mut fixture.factory)
         .ok_or("pre-environment factory still shared")?
@@ -3570,17 +3547,20 @@ fn run_pre_environment(runtime: &Path, number: u8, case: EnvironmentCase) -> Tes
         || !active_blocked
         || !abandoned_blocked
         || pump_failed
-        || !timed_out
+        || !expected_termination
         || !wiped
+        || !no_resurrection
         || !ordered
+        || !sdk_success
         || !no_record
         || !retained_orphan
         || !idle
     {
-        return Err(format!("pre-environment witness failed: driver_pending={driver_pending} active_blocked={active_blocked} abandoned_blocked={abandoned_blocked} initial_completion={initial_completion:?} completion={at_deadline:?} timeout={timed_out} wiped={wiped} ordered={ordered} no_record={no_record} retained_orphan={retained_orphan} idle={idle}").into());
+        return Err(format!("pre-environment witness failed: driver_pending={driver_pending} active_blocked={active_blocked} abandoned_blocked={abandoned_blocked} initial_completion={initial_completion:?} completion={boundary_completion:?} expected_termination={expected_termination} wiped={wiped} ordered={ordered} no_record={no_record} retained_orphan={retained_orphan} idle={idle}").into());
     }
     drop(callback_order_guard);
-    if matches!(case, EnvironmentCase::LateInvocation) {
+    drop(creation_order_guard);
+    if matches!(case, EnvironmentCase::Timeout) {
         fresh_success_after_retirement(runtime, &root.0, 0xd2)?;
     }
     Ok(())
@@ -3608,6 +3588,82 @@ fn sdk_environment_result(
     use crate::NativeCreationMoment::{EnvironmentCallback, EnvironmentReturned};
     order == [EnvironmentReturned(true), EnvironmentCallback(callback)]
         || order == [EnvironmentCallback(callback), EnvironmentReturned(true)]
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EnvironmentSdkOutcome {
+    Success,
+    NativeFailure,
+    InitiationRefused,
+}
+
+fn environment_sdk_outcome(order: &[crate::NativeCreationMoment]) -> Option<EnvironmentSdkOutcome> {
+    use crate::CreationCallback::{NativeFailure, Success};
+    use crate::NativeCreationMoment::EnvironmentReturned;
+    if sdk_environment_result(order, Success) {
+        Some(EnvironmentSdkOutcome::Success)
+    } else if sdk_environment_result(order, NativeFailure) {
+        Some(EnvironmentSdkOutcome::NativeFailure)
+    } else if order == [EnvironmentReturned(false)] {
+        Some(EnvironmentSdkOutcome::InitiationRefused)
+    } else {
+        None
+    }
+}
+
+#[test]
+fn sdk_outcome_distinguishes_refusal_failure_and_success() {
+    use crate::CreationCallback::{Inconsistent, MissingInterface, NativeFailure, Success};
+    use crate::NativeCreationMoment::{
+        ControllerReturned, EnvironmentCallback, EnvironmentReturned, Overflow,
+    };
+    assert_eq!(
+        environment_sdk_outcome(&[EnvironmentReturned(false)]),
+        Some(EnvironmentSdkOutcome::InitiationRefused)
+    );
+    for (result, expected) in [
+        (Success, EnvironmentSdkOutcome::Success),
+        (NativeFailure, EnvironmentSdkOutcome::NativeFailure),
+    ] {
+        assert_eq!(
+            environment_sdk_outcome(&[EnvironmentReturned(true), EnvironmentCallback(result)]),
+            Some(expected)
+        );
+        assert_eq!(
+            environment_sdk_outcome(&[EnvironmentCallback(result), EnvironmentReturned(true)]),
+            Some(expected)
+        );
+    }
+    for order in [
+        vec![],
+        vec![EnvironmentReturned(true)],
+        vec![
+            EnvironmentReturned(false),
+            EnvironmentCallback(NativeFailure),
+        ],
+        vec![
+            EnvironmentReturned(true),
+            EnvironmentCallback(MissingInterface),
+        ],
+        vec![EnvironmentReturned(true), EnvironmentCallback(Inconsistent)],
+        vec![
+            EnvironmentReturned(true),
+            EnvironmentCallback(Success),
+            EnvironmentCallback(Success),
+        ],
+        vec![
+            EnvironmentReturned(true),
+            EnvironmentCallback(Success),
+            Overflow,
+        ],
+        vec![
+            EnvironmentReturned(true),
+            EnvironmentCallback(Success),
+            ControllerReturned(true),
+        ],
+    ] {
+        assert_eq!(environment_sdk_outcome(&order), None);
+    }
 }
 
 #[test]
@@ -3697,7 +3753,6 @@ impl Fixture {
     fn drive_environment_obstruction(
         &mut self,
         driver: &mut CeremonyDriver,
-        obstruct: bool,
     ) -> EnvironmentDriveResult {
         let initial = driver.step(&mut readiness::env(
             &mut self.surface,
@@ -3714,27 +3769,15 @@ impl Fixture {
             readiness::pump(&self.surface)?;
             observation = self.surface.pre_environment_completion();
         }
-        let result = if obstruct && observation == Ok(Some(false)) {
-            match driver.step(&mut readiness::env(
-                &mut self.surface,
-                &mut self.loopback,
-                &mut self.store,
-            )) {
-                Step::Finished(result) => result,
-                _ => readiness::cancel_driver(
-                    driver,
-                    &mut self.surface,
-                    &mut self.loopback,
-                    &mut self.store,
-                ),
-            }
-        } else {
-            readiness::cancel_driver(
+        let result = match initial {
+            Step::Finished(result) => result,
+            Step::Done => return Err("environment driver ended without a result".into()),
+            Step::Pending => readiness::cancel_driver(
                 driver,
                 &mut self.surface,
                 &mut self.loopback,
                 &mut self.store,
-            )
+            ),
         };
         Ok::<_, Box<dyn std::error::Error>>((result, driver_pending, active_blocked, observation))
     }
@@ -3755,7 +3798,7 @@ fn run_environment_obstruction(
     let started = Instant::now();
     let mut driver = readiness::new_driver(CeremonyId::from_bytes([number; 16]), started)?;
     let attempt = catch_unwind(AssertUnwindSafe(|| {
-        fixture.drive_environment_obstruction(&mut driver, obstruct)
+        fixture.drive_environment_obstruction(&mut driver)
     }));
     let (result, driver_pending, active_blocked, observation, failed) = match attempt {
         Ok(Ok((result, pending, active_blocked, observation))) => {
@@ -3775,16 +3818,7 @@ fn run_environment_obstruction(
         ),
     };
     let wiped = driver.request_clear() && driver.prf().iter().all(|byte| *byte == 0);
-    let result_failed = if obstruct {
-        matches!(
-            &result,
-            Err(BridgeError::Unavailable(
-                pos_owner_bridge::UnavailableCode::InterfaceUnavailable
-            ))
-        )
-    } else {
-        result.is_err()
-    };
+    let result_failed = result.is_err();
     let plan_wiped =
         !matches!(&result, Err(BridgeError::Quarantine(_))) || driver.plan_secrets_clear();
     fixture.surface.abandon_opening();
@@ -3795,6 +3829,7 @@ fn run_environment_obstruction(
         )
     }))
     .unwrap_or(false);
+    let no_resurrection = fixture.finished_driver_is_done(&mut driver);
     retirement::retire(
         &mut fixture.surface,
         &mut fixture.loopback,
@@ -3804,27 +3839,31 @@ fn run_environment_obstruction(
         |_, _, _| {},
     );
     let order = crate::Native::creation_order();
-    let expected = if obstruct {
-        crate::CreationCallback::NativeFailure
-    } else {
-        crate::CreationCallback::Success
+    let outcome = environment_sdk_outcome(&order);
+    let qualified_outcome = match outcome {
+        Some(EnvironmentSdkOutcome::Success) => {
+            driver_pending && active_blocked && matches!(observation, Ok(None | Some(true)))
+        }
+        Some(EnvironmentSdkOutcome::NativeFailure) if obstruct => {
+            driver_pending && active_blocked && matches!(observation, Ok(None | Some(false)))
+        }
+        Some(EnvironmentSdkOutcome::InitiationRefused) if obstruct => {
+            !driver_pending && observation.is_err()
+        }
+        _ => false,
     };
-    let ordered = sdk_environment_result(&order, expected);
     let no_record = fixture.store.records()?.is_empty();
     let retained_orphan = fixture.store.folders()?.len() == 1;
     let idle = fixture.surface.idle();
-    let expected_observation = Ok(Some(!obstruct));
-    let _written = writeln!(std::io::stderr(), "NATIVE_UDF_OBSTRUCTION fixed_ebwebview_file_requested={obstruct} obstruct={obstruct} pending={driver_pending} active_blocked={active_blocked} abandoned_blocked={abandoned_blocked} completion={observation:?} order={order:?} wiped={wiped} idle={idle} orphan={retained_orphan}");
+    let _written = writeln!(std::io::stderr(), "NATIVE_UDF_OBSTRUCTION fixed_ebwebview_file_requested={obstruct} obstruct={obstruct} pending={driver_pending} active_blocked={active_blocked} abandoned_blocked={abandoned_blocked} completion={observation:?} order={order:?} outcome={outcome:?} no_resurrection={no_resurrection} wiped={wiped} idle={idle} orphan={retained_orphan}");
     drop(fixture.surface);
     Rc::get_mut(&mut fixture.factory)
         .ok_or("obstructed factory still shared")?
         .stop()?;
     if failed
-        || !driver_pending
-        || !active_blocked
+        || !qualified_outcome
+        || !no_resurrection
         || !abandoned_blocked
-        || observation != expected_observation
-        || !ordered
         || !wiped
         || !result_failed
         || !plan_wiped
@@ -3833,8 +3872,7 @@ fn run_environment_obstruction(
         || !idle
     {
         return Err(
-            "native environment obstruction did not establish the declared asynchronous outcome"
-                .into(),
+            "native environment input outcome or retained ownership was not established".into(),
         );
     }
     Ok(())

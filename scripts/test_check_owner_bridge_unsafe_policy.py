@@ -1507,6 +1507,10 @@ def test_owned_process_fault_authority() -> None:
         ("check_final_process_failures(finish.actual_fault", "discard_final_process_failures(finish.actual_fault"),
         ("controller_invoked_after_exit(", "discard_callback_order("),
         ("RendererPresence::Absent", "RendererPresence::Unique"),
+        ("|| !sdk_success", "|| false"),
+        ("|| !no_resurrection", "|| false"),
+        ("Some(EnvironmentSdkOutcome::NativeFailure) if obstruct", "Some(EnvironmentSdkOutcome::NativeFailure)"),
+        ("Some(EnvironmentSdkOutcome::InitiationRefused) if obstruct", "Some(EnvironmentSdkOutcome::InitiationRefused)"),
     ):
         if old not in fixture_source:
             raise SystemExit(f"missing new evidence mutation target: {old}")
