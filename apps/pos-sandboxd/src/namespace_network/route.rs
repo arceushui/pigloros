@@ -35,8 +35,10 @@ const NO_SUCH_LINK: i32 = -19;
 const MAIN_TABLE: u32 = 254;
 /// `NETNSA_NSID_NOT_ASSIGNED`: let the kernel choose the identifier.
 const ANY_NSID: i32 = -1;
+// The flags are disjoint single bits, so the sum is their union and, unlike
+// `|`, no mutation of the operator leaves it unchanged.
 /// Create an object, and fail if it exists.
-const CREATE_NEW: u16 = NLM_F_CREATE | NLM_F_EXCL;
+const CREATE_NEW: u16 = NLM_F_CREATE + NLM_F_EXCL;
 /// The states of an address that is not usable yet, or never will be.
 const UNSETTLED: AddressFlags = AddressFlags::Tentative.union(AddressFlags::Dadfailed);
 

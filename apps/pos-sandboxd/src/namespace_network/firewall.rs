@@ -34,10 +34,12 @@ const NF_DROP: u32 = 0;
 const NF_ACCEPT: u32 = 1;
 /// The type of every provider chain.
 const FILTER: &str = "filter";
+// The flag sets add disjoint single-bit flags, so each sum is their union
+// and, unlike `|`, no mutation of the operator leaves it unchanged.
 /// Create an object, and fail if it exists.
-const CREATE_NEW: u16 = NLM_F_CREATE | NLM_F_EXCL;
+const CREATE_NEW: u16 = NLM_F_CREATE + NLM_F_EXCL;
 /// Create a rule after the chain's last.
-const APPEND: u16 = NLM_F_CREATE | NLM_F_APPEND;
+const APPEND: u16 = NLM_F_CREATE + NLM_F_APPEND;
 
 /// A netfilter message of `family` carrying `message`.
 fn message(family: NetfilterProtoFamily, message: NfTablesMessage) -> NetfilterMessage {
