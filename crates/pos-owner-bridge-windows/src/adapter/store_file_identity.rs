@@ -67,9 +67,9 @@ impl crate::Native {
             .write(true)
             .create_new(true)
             .open(&original)?;
-        crate::Native::diagnose_private_file(&file)?;
-        crate::Native::cleanup_file_volume(&file).map_err(|()| "original file NTFS admission")?;
-        crate::Native::file_identity(&file).map_err(|()| "original file identity observation")?;
+        Self::diagnose_private_file(&file)?;
+        Self::cleanup_file_volume(&file).map_err(|()| "original file NTFS admission")?;
+        Self::file_identity(&file).map_err(|()| "original file identity observation")?;
         let identity = store_file_id(&file).map_err(|_| "original candidate identity")?;
         assert_eq!(
             store_file_id(&file.try_clone()?).map_err(|_| "cloned handle identity")?,
