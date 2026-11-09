@@ -1511,6 +1511,8 @@ def test_owned_process_fault_authority() -> None:
     # bounded test-only recorder, not an invented event or a comment decoy.
     for relative, old, new, expected in (
         ("src/ffi/creation.rs", "result.is_ok(),", "true,", "callback invocation differs from reviewed SDK path"),
+        ("src/ffi/creation.rs", "hr.is_err() && value.is_some()", "false", "callback invocation differs from reviewed SDK path"),
+        ("src/ffi/creation.rs", "crate::CreationCallback::NativeFailure", "crate::CreationCallback::Success", "callback invocation differs from reviewed SDK path"),
         ("src/ffi/environment.rs", "crate::Native::record_callback(", "crate::Native::discard_callback(", "callback invocation differs from reviewed SDK path"),
         ("src/lib.rs", "if order.len() < 64", "if order.len() < 640", "callback ordering recorder differs from reviewed test-only code"),
     ):
@@ -1527,6 +1529,59 @@ def test_owned_process_fault_authority() -> None:
         CHECKER._check_fault_authority(ROOT, scans, found)
         if f"{SHIM}/{relative}: {expected}" not in found:
             raise SystemExit(f"callback evidence bypass accepted: {relative}: {found}")
+    root_target = 'root.join("environment-obstruction")'
+    if root_target not in fixture_source:
+        raise SystemExit("missing UDF fixture root literal")
+    changed = dict(files)
+    changed["src/adapter/native_tests/process_fault.rs"] = fixture_source.replace(
+        root_target, 'root.join("../other") /* root.join("environment-obstruction") */', 1)
+    scans = {}
+    for relative, source in changed.items():
+        scanned = CHECKER.scan(source)
+        scans[relative] = (scanned, CHECKER._attributes(scanned.code))
+    found = []
+    CHECKER._check_fault_authority(ROOT, scans, found)
+    if f"{SHIM}/src/adapter/native_tests/process_fault.rs: UDF obstruction root must use its fixed fixture child" not in found:
+        raise SystemExit(f"UDF root substitution was accepted: {found}")
+    root_path = "src/adapter/native_tests.rs"
+    root_source = (ROOT / SHIM / root_path).read_text()
+    for old, new, expected in (
+        ('"piglor-native-{}-{}-{}"', '"../escape-{}-{}-{}"', "fixture root must use its fixed temporary name"),
+        ('crate::create_private_directory(&path)?', 'std::fs::create_dir_all(&path)?', "fixture root differs from reviewed private temporary directory"),
+    ):
+        if old not in root_source:
+            raise SystemExit(f"missing fixture provenance mutation target: {old}")
+        changed = dict(files)
+        changed[root_path] = root_source.replace(old, new, 1)
+        scans = {}
+        for relative, source in changed.items():
+            scanned = CHECKER.scan(source)
+            scans[relative] = (scanned, CHECKER._attributes(scanned.code))
+        found = []
+        CHECKER._check_fault_authority(ROOT, scans, found)
+        if f"{SHIM}/{root_path}: {expected}" not in found:
+            raise SystemExit(f"fixture provenance bypass accepted: {old}: {found}")
+    # The source-controlled owned-folder obstruction must remain a new,
+    # fixed child file; comments cannot stand in for the actual literal.
+    obstruction_path = "src/adapter/native_tests/process_fault/obstruction.rs"
+    original_obstruction = (ROOT / SHIM / obstruction_path).read_text()
+    for old, new, expected in (
+        ('folder.join("EBWebView")', 'folder.join("other") /* folder.join("EBWebView") */', "UDF obstruction must use its fixed EBWebView child"),
+        ('.create_new(true)', '.create_new(false)', "owned UDF obstruction differs from reviewed fixed fixture"),
+        ('folder != self.expected.as_path()', 'false', "owned UDF obstruction differs from reviewed fixed fixture"),
+    ):
+        if old not in original_obstruction:
+            raise SystemExit(f"missing obstruction mutation target: {old}")
+        changed = dict(files)
+        changed[obstruction_path] = original_obstruction.replace(old, new, 1)
+        scans = {}
+        for relative, source in changed.items():
+            scanned = CHECKER.scan(source)
+            scans[relative] = (scanned, CHECKER._attributes(scanned.code))
+        found = []
+        CHECKER._check_fault_authority(ROOT, scans, found)
+        if f"{SHIM}/{obstruction_path}: {expected}" not in found:
+            raise SystemExit(f"UDF obstruction boundary bypass accepted: {old}: {found}")
     # Taking the retired pairs disarms observation; the live pair must be
     # re-armed before injection and before its later native close.
     retry = fixture_source.find("fn drive_posted_retry(")
