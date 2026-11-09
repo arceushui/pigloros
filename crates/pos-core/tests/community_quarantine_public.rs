@@ -276,6 +276,14 @@ fn ledger_borrows_reason_rows_and_does_not_mint_reset_from_empty_set() -> TestRe
         .is_none());
     let encoded = revision.to_canonical_cbor();
     let decoded = Revision::from_canonical_cbor(&encoded, &implementation)?;
+    let original_reasons = revision.as_input().active_reasons;
+    assert!(!original_reasons.is_empty());
+    assert!(!decoded.as_input().active_reasons.is_empty());
+    assert!(original_reasons.eq(&decoded.as_input().active_reasons));
+    let mut changed_reasons = reasons;
+    changed_reasons[0].failure_evidence_digest = hash(11);
+    assert!(!original_reasons.eq(&Reasons::from_reasons(&changed_reasons)));
+    assert!(!original_reasons.eq(&Reasons::from_reasons(&[])));
     let rows = decoded
         .as_input()
         .active_reasons

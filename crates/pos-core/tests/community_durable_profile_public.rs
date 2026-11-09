@@ -423,6 +423,10 @@ fn retained_profile_requires_exact_policy_bytes_and_all_fourteen_fields() -> Tes
         Some(Error::InvalidBinding)
     );
     assert_eq!(
+        Profile::validate_canonical_cbor(&vec![0; 1_048_576], input).err(),
+        Some(Error::InvalidBinding)
+    );
+    assert_eq!(
         Profile::validate_canonical_cbor(&vec![0; 1_048_577], input).err(),
         Some(Error::BoundsExceeded)
     );

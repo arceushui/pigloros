@@ -69,8 +69,9 @@ Literal filesystem provisioning checks those names like any other path before
 creating a file; it cannot use a SQLite special name to escape a reserved cwd.
 
 SQLite URI semantics are grounded in the [official URI specification](https://sqlite.org/uri.html)
-and the pinned `libsqlite3-sys 0.38.2` amalgamation's `sqlite3ParseUri`. The
-guard only denies; it does not implement a new VFS or certify a native file.
+and the locked `libsqlite3-sys 0.39.1` package's bundled `SQLite 3.54.1`
+amalgamation's `sqlite3ParseUri`. The guard only denies; it does not implement
+a new VFS or certify a native file.
 
 ## Remaining activation obligations
 

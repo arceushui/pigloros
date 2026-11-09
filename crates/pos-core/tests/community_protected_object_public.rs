@@ -404,6 +404,8 @@ fn classification_children_use_existing_class_order_and_borrow_original_bytes() 
     let proof = Proof::new(proof_input(&header, &children))?;
     let encoded = proof.to_canonical_cbor();
     let decoded = Proof::from_canonical_cbor(&encoded, &header)?;
+    assert!(!proof.as_input().children.is_empty());
+    assert!(!decoded.as_input().children.is_empty());
     assert_eq!(
         decoded.as_input().children.iter().collect::<Vec<_>>(),
         children

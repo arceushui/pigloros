@@ -452,6 +452,18 @@ fn unknown_host_codes_payloads_and_wrong_tuple_shapes_are_rejected() -> TestResu
             Some(error)
         );
     }
+    // An out-of-range PMF1 index is rejected before decoding a later guest
+    // payload, even when that payload is malformed.
+    for code in [4, 5] {
+        assert_eq!(
+            Failure::from_canonical_cbor(&encode(&fixture(
+                array(&[code, 256]),
+                Value::Bool(true),
+            )?)?)
+            .err(),
+            Some(Error::BoundsExceeded)
+        );
+    }
     Ok(())
 }
 

@@ -493,19 +493,20 @@ impl CommunityPluginExecutionProfileV1 {
 }
 
 /// The canonical CBOR `[ceilings, runtime]` of the profile digest.
-fn profile_body(ceilings: CeilingValuesV1, runtime: &PinnedComponentRuntimeV1) -> Vec<u8> {
-    let mut out = Vec::new();
-    write_profile_body(&mut out, ceilings, runtime);
-    out
+fn profile_body(
+    ceilings: CeilingValuesV1,
+    runtime: &PinnedComponentRuntimeV1,
+) -> zeroize::Zeroizing<Vec<u8>> {
+    cbor::encode_zeroizing(|out| write_profile_body(out, ceilings, runtime))
 }
 
 pub(super) fn write_profile_body(
-    out: &mut Vec<u8>,
+    out: &mut cbor::Encoder<'_>,
     ceilings: CeilingValuesV1,
     runtime: &PinnedComponentRuntimeV1,
 ) {
-    cbor::array(out, 2);
-    cbor::array(out, 5);
+    out.array(2);
+    out.array(5);
     for member in [
         ceilings.memory_bytes,
         ceilings.fuel,
@@ -513,32 +514,32 @@ pub(super) fn write_profile_body(
         ceilings.event_bytes,
         ceilings.log_bytes,
     ] {
-        cbor::unsigned(out, member);
+        out.unsigned(member);
     }
-    cbor::array(out, 4);
-    cbor::text(out, runtime.wasmtime_version());
+    out.array(4);
+    out.text(runtime.wasmtime_version());
     let mut features: Vec<&str> = runtime
         .resolved_features()
         .iter()
         .map(String::as_str)
         .collect();
     features.sort_unstable();
-    cbor::array(out, features.len());
+    out.array(features.len());
     for feature in features {
-        cbor::text(out, feature);
+        out.text(feature);
     }
     let engine = runtime.engine();
-    cbor::array(out, 3);
-    cbor::unsigned(out, engine.max_wasm_stack);
-    cbor::boolean(out, engine.consume_fuel);
-    cbor::boolean(out, engine.epoch_interruption);
+    out.array(3);
+    out.unsigned(engine.max_wasm_stack);
+    out.boolean(engine.consume_fuel);
+    out.boolean(engine.epoch_interruption);
     let mut rows: Vec<&TrapTableEntryV1> = runtime.trap_table().iter().collect();
     rows.sort_unstable_by(|left, right| left.trap_code.cmp(&right.trap_code));
-    cbor::array(out, rows.len());
+    out.array(rows.len());
     for row in rows {
-        cbor::array(out, 2);
-        cbor::text(out, &row.trap_code);
-        cbor::text(out, row.outcome.name());
+        out.array(2);
+        out.text(&row.trap_code);
+        out.text(row.outcome.name());
     }
 }
 

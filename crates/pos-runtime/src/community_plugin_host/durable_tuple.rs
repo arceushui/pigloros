@@ -21,8 +21,8 @@ const MAX_RECORD: usize = 1_048_576;
 const MAX_ROWS: usize = 256;
 const MAX_LABEL: usize = 128;
 
-// Maximum permitted strings, numeric widths, array heads and fixed fields fit
-// before writing. Each buffer reserves its full row-count bound before copies.
+// The largest valid record fits the retained-format limit. Private staging uses
+// a counting pass of the actual encoder, rather than this conservative bound.
 const _: () = assert!(
     1024 + MAX_ROWS * (512 + 4 * 128 + 3 * 9 + 32)
         + MAX_ROWS * 137
@@ -63,12 +63,9 @@ impl<'a> CommunityNegotiatedTupleV1<'a> {
                     {
                         return Err(Error::InvalidBinding);
                     }
-                    let capacity = 1024
-                        + 64
-                        + runtime.resolved_features().len() * (MAX_LABEL + 9)
-                        + runtime.trap_table().len() * (2 * MAX_LABEL + 27);
-                    let mut body = Zeroizing::new(Vec::with_capacity(capacity));
-                    write_profile_body(&mut body, profile.ceilings().values(), runtime);
+                    let body = cbor::encode_zeroizing(|out| {
+                        write_profile_body(out, profile.ceilings().values(), runtime);
+                    });
                     let profile_digest = profile_body_digest(&body);
                     if negotiated.execution_profile_digest() == Some(*profile_digest.as_bytes()) {
                         Ok(Self {
@@ -155,43 +152,42 @@ impl<'a> CommunityNegotiatedTupleV1<'a> {
     }
 
     /// Encode exact16-field CNT1 with all eight limits and explicit live mode.
+    /// Count the same immutable record first so private copies never need a
+    /// growing allocation, without reserving unrelated maximum-size metadata.
     #[must_use]
     pub fn to_canonical_cbor(&self) -> Zeroizing<Vec<u8>> {
+        let profile_digest = profile_body_digest(&self.profile_body);
+        cbor::encode_zeroizing(|out| self.write_canonical(out, profile_digest))
+    }
+
+    fn write_canonical(&self, out: &mut cbor::Encoder<'_>, profile_digest: Hash) {
         let tuple = self.negotiated;
-        let capacity = 1024
-            + self.profile_body.len()
-            + tuple.required_features().len() * (MAX_LABEL + 9)
-            + tuple.not_granted_capabilities().len() * (512 + 4 * MAX_LABEL + 3 * 9 + 32);
-        let mut out = Zeroizing::new(Vec::with_capacity(capacity));
-        cbor::array(&mut out, 16);
-        cbor::bytes(&mut out, b"CNT1");
-        cbor::unsigned(&mut out, 1);
-        cbor::text(&mut out, tuple.world());
-        cbor::text(&mut out, tuple.plugin_id());
-        cbor::bytes(&mut out, &tuple.pmf1_digest());
-        cbor::bytes(&mut out, &tuple.release_digest());
+        out.array(16);
+        out.bytes(b"CNT1");
+        out.unsigned(1);
+        out.text(tuple.world());
+        out.text(tuple.plugin_id());
+        out.bytes(&tuple.pmf1_digest());
+        out.bytes(&tuple.release_digest());
         let (major, minor) = tuple.abi();
         let (minimum, maximum) = tuple.declared_minor_range();
         for value in [major, minor, minimum, maximum] {
-            cbor::unsigned(&mut out, u64::from(value));
+            out.unsigned(u64::from(value));
         }
-        cbor::array(&mut out, tuple.required_features().len());
+        out.array(tuple.required_features().len());
         for feature in tuple.required_features() {
-            cbor::text(&mut out, feature);
+            out.text(feature);
         }
-        cbor::array(&mut out, tuple.not_granted_capabilities().len());
+        out.array(tuple.not_granted_capabilities().len());
         for capability in tuple.not_granted_capabilities() {
-            encode_capability(&mut out, capability);
+            encode_capability(out, capability);
         }
-        cbor::unsigned(
-            &mut out,
-            match tuple.mode() {
-                CommunityPluginModeV1::Local => 0,
-                CommunityPluginModeV1::AirGapped => 1,
-            },
-        );
+        out.unsigned(match tuple.mode() {
+            CommunityPluginModeV1::Local => 0,
+            CommunityPluginModeV1::AirGapped => 1,
+        });
         let limits = tuple.limits().values();
-        cbor::array(&mut out, 8);
+        out.array(8);
         for limit in [
             limits.memory_bytes,
             limits.fuel,
@@ -202,13 +198,12 @@ impl<'a> CommunityNegotiatedTupleV1<'a> {
             limits.log_calls,
             limits.log_bytes,
         ] {
-            cbor::unsigned(&mut out, limit);
+            out.unsigned(limit);
         }
-        cbor::bytes(&mut out, &self.profile_body);
+        out.bytes(&self.profile_body);
         // Constructor checked Some and its exact preimage; derive from retained
         // bytes directly rather than inventing a zero for an absent digest.
-        cbor::bytes(&mut out, profile_body_digest(&self.profile_body).as_bytes());
-        out
+        out.bytes(profile_digest.as_bytes());
     }
 
     /// Protected logical CNT1 identity, including mode excluded by profile hash.
@@ -320,8 +315,8 @@ const fn bounded_text(text: &str, maximum: usize) -> bool {
     !text.is_empty() && text.len() <= maximum
 }
 
-fn encode_capability(out: &mut Vec<u8>, capability: &PluginCapabilityDescriptorV1) {
-    cbor::array(out, 9);
+fn encode_capability(out: &mut cbor::Encoder<'_>, capability: &PluginCapabilityDescriptorV1) {
+    out.array(9);
     for text in [
         &capability.capability_id,
         &capability.operation,
@@ -329,14 +324,14 @@ fn encode_capability(out: &mut Vec<u8>, capability: &PluginCapabilityDescriptorV
         &capability.purpose,
         &capability.audience,
     ] {
-        cbor::text(out, text);
+        out.text(text);
     }
-    cbor::boolean(out, capability.required);
+    out.boolean(capability.required);
     for value in [
         capability.max_calls,
         capability.max_request_bytes,
         capability.max_response_bytes,
     ] {
-        cbor::unsigned(out, value);
+        out.unsigned(value);
     }
 }

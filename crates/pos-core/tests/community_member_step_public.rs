@@ -389,6 +389,10 @@ fn retained_step_requires_exact_original_preimages_and_canonical_bytes() -> Test
         Err(Error::InvalidBinding)
     );
     assert_eq!(
+        step.validate_canonical_cbor(&vec![0; 1024]),
+        Err(Error::InvalidBinding)
+    );
+    assert_eq!(
         step.validate_canonical_cbor(&vec![0; 1025]),
         Err(Error::BoundsExceeded)
     );

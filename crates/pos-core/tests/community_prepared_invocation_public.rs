@@ -250,6 +250,18 @@ fn complete_megabyte_payloads_are_preserved_and_oversize_refused() -> TestResult
 }
 
 #[test]
+fn private_input_staging_stays_inside_the_admitted_record_budget() -> TestResult {
+    let payload = vec![7; 8192];
+    for (observation, state) in [(payload.as_slice(), &[][..]), (&[][..], payload.as_slice())] {
+        let original = input(observation, state);
+        let encoded = Prepared::new(original)?.to_canonical_cbor();
+        assert!(encoded.capacity() <= MAX_RECORD);
+        assert!(*Prepared::from_canonical_cbor(&encoded)?.as_input() == original);
+    }
+    Ok(())
+}
+
+#[test]
 fn required_identities_and_exact_budget_grammar_are_enforced() -> TestResult {
     let mut original = input(b"", b"");
     original.member_binding_digest = Hash::zero();
@@ -442,6 +454,10 @@ fn prepared_set_derives_each_exact_cin_hash_and_domain_in_member_order() -> Test
         trailing.push(0);
         assert_eq!(
             set.validate_canonical_cbor(&trailing),
+            Err(Error::InvalidBinding)
+        );
+        assert_eq!(
+            set.validate_canonical_cbor(&vec![0; 9 + 64 * 69]),
             Err(Error::InvalidBinding)
         );
         assert_eq!(

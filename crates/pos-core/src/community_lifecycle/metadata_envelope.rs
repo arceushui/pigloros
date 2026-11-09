@@ -110,13 +110,13 @@ impl CommunityMetadataSchemaV1 {
     /// clear bootstrap schemas cannot be imported under this wrapper.
     #[must_use]
     pub const fn from_magic(magic: [u8; 4]) -> Option<Self> {
-        let mut index = 0;
-        while index < Self::LABELS.len() {
-            let (schema, label) = Self::LABELS[index];
+        let mut remaining: &[(Self, [u8; 4])] = &Self::LABELS;
+        while let Some((entry, rest)) = remaining.split_first() {
+            let (schema, label) = *entry;
             if u32::from_be_bytes(label) == u32::from_be_bytes(magic) {
                 return Some(schema);
             }
-            index += 1;
+            remaining = rest;
         }
         None
     }

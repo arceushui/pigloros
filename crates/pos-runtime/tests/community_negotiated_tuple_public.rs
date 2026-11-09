@@ -464,10 +464,15 @@ fn tuple_rejects_any_truncation_nonpreferred_field_or_default_substitution() -> 
         Tuple::validate_canonical_cbor(&other, &negotiated, &profile).err(),
         Some(Error::InvalidBinding)
     );
-    assert_eq!(
-        Tuple::validate_canonical_cbor(&vec![0; 1_048_577], &negotiated, &profile).err(),
-        Some(Error::BoundsExceeded)
-    );
+    for (length, expected) in [
+        (1_048_576, Error::InvalidBinding),
+        (1_048_577, Error::BoundsExceeded),
+    ] {
+        assert_eq!(
+            Tuple::validate_canonical_cbor(&vec![0; length], &negotiated, &profile).err(),
+            Some(expected)
+        );
+    }
     Ok(())
 }
 

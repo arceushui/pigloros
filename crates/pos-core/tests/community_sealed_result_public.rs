@@ -118,6 +118,9 @@ fn digest_lists_preserve_roster_order_and_borrow_original_ranges() -> TestResult
     ] {
         assert_eq!(list.len(), 2);
         assert_eq!(list.iter().collect::<Vec<_>>(), digests);
+        assert!(list.eq(&Digests::from_digests(&digests)));
+        assert!(!list.eq(&Digests::from_digests(&[hash(12), hash(3)])));
+        assert!(!list.eq(&Digests::from_digests(&[])));
         let rows = list
             .as_canonical_rows()
             .ok_or("missing borrowed digest rows")?;

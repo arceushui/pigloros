@@ -259,12 +259,17 @@ fn complete_row_bound_is_checked_before_decoding_oversized_arrays() -> TestResul
             reference[24..].copy_from_slice(&(n as u64).to_be_bytes());
             Member {
                 scope_reference: Hash::from_bytes(reference),
+                not_after_micros: i64::MAX as u64,
                 ..member()
             }
         })
         .collect();
     let cover = Cover::new(input(&rows))?;
     let encoded = cover.to_canonical_cbor();
+    // Even a small cover reserves enough staging for the full admitted set
+    // before encoding; growing a zeroizing buffer could leave an old copy.
+    let empty_encoding = Cover::new(input(&[]))?.to_canonical_cbor();
+    assert!(empty_encoding.capacity() >= encoded.len());
     assert_eq!(
         Cover::from_canonical_cbor(&encoded)?
             .as_input()
@@ -294,6 +299,24 @@ fn complete_row_bound_is_checked_before_decoding_oversized_arrays() -> TestResul
         Cover::from_canonical_cbor(&vec![0; 1_048_577]).err(),
         Some(Error::BoundsExceeded)
     );
+    Ok(())
+}
+
+#[test]
+fn member_equality_distinguishes_retention_and_membership_changes() -> TestResult {
+    let original = [member()];
+    let changed_deadline = [Member {
+        not_after_micros: 10,
+        ..member()
+    }];
+    let original_cover = Cover::new(input(&original))?;
+    let changed_cover = Cover::new(input(&changed_deadline))?;
+    let wire = original_cover.to_canonical_cbor();
+    let decoded = Cover::from_canonical_cbor(&wire)?;
+    let left = original_cover.as_input().scope_members;
+    assert!(left.eq(&decoded.as_input().scope_members));
+    assert!(!left.eq(&changed_cover.as_input().scope_members));
+    assert!(!left.eq(&Members::from_members(&[])));
     Ok(())
 }
 

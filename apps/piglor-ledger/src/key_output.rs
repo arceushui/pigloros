@@ -46,6 +46,29 @@ struct StoredOwnedKeyBinding {
     inode: Vec<u8>,
 }
 
+#[cfg(unix)]
+#[derive(Clone, Copy)]
+enum OwnedKeyAccess {
+    ReadOnly,
+    ReadWrite,
+}
+
+/// Binding and destruction share the same no-follow/nonblocking file policy;
+/// only destruction requests write access. Keep standard-library opening and
+/// error conversion while constructing the Unix mask with typed OS flags.
+#[cfg(unix)]
+fn open_owned_key_file(path: &Path, access: OwnedKeyAccess) -> std::io::Result<std::fs::File> {
+    use rustix::fs::OFlags;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let flags = OFlags::NOFOLLOW.union(OFlags::NONBLOCK);
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(matches!(access, OwnedKeyAccess::ReadWrite))
+        .custom_flags(i32::from_ne_bytes(flags.bits().to_ne_bytes()))
+        .open(path)
+}
+
 /// Both binding operations must screen the database before resolving or reading
 /// the key path. Keeping the pair together prevents verification and creation
 /// from applying different path rules. This is a refusal check, not a protected
@@ -132,7 +155,6 @@ pub(crate) fn bind_owned_secret_key(
 ) -> Result<(), pos_core::CoreError> {
     use rusqlite::params;
     use std::io::Read;
-    use std::os::unix::fs::OpenOptionsExt;
 
     let paths = OwnedKeyBindingPaths::new(database, path)?;
     let absolute = paths.key.as_path();
@@ -140,11 +162,8 @@ pub(crate) fn bind_owned_secret_key(
         .parent()
         .ok_or_else(|| binding_error("key path has no parent"))?;
     validate_ancestors(absolute, parent).map_err(binding_error)?;
-    let mut file = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(absolute)
-        .map_err(binding_error)?;
+    let mut file =
+        open_owned_key_file(absolute, OwnedKeyAccess::ReadOnly).map_err(binding_error)?;
     let metadata = fault!(absolute, FaultStage::BindMetadata)
         .and_then(|()| file.metadata())
         .map_err(binding_error)?;
@@ -342,7 +361,7 @@ fn delete_owned_secret_key_with_identity(
     expected_file: Option<BoundFileIdentity>,
 ) -> Result<pos_core::Hash, pos_core::CoreError> {
     use std::io::Read;
-    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    use std::os::unix::fs::MetadataExt;
 
     let storage_error = |error: &dyn std::fmt::Display| {
         pos_core::CoreError::Storage(format!("owned signing-key deletion: {error}"))
@@ -355,13 +374,8 @@ fn delete_owned_secret_key_with_identity(
     let parent = fault!(&absolute, FaultStage::DeleteOpenParent)
         .and_then(|()| std::fs::File::open(parent_path))
         .map_err(|error| storage_error(&error))?;
-    let opened = fault!(&absolute, FaultStage::DeleteOpenFile).and_then(|()| {
-        std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-            .open(&absolute)
-    });
+    let opened = fault!(&absolute, FaultStage::DeleteOpenFile)
+        .and_then(|()| open_owned_key_file(&absolute, OwnedKeyAccess::ReadWrite));
     let mut file = match opened {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -963,6 +977,100 @@ mod binding_tests {
 
     fn request(epoch: u64, material_digest: Hash) -> KeyDestructionRequestV1 {
         KeyDestructionRequestV1::new(identity(epoch), material_digest, Hash::from_bytes([7; 32]))
+    }
+
+    #[test]
+    fn binding_a_read_only_owned_key_does_not_request_write_access(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let database = directory.path().join("ledger.db");
+        let key = directory.path().join("secret.key");
+        owned_key(&key, 9)?;
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o400))?;
+        drop(rusqlite::Connection::open(&database)?);
+        bind_owned_secret_key(&database, &key, identity(1), digest())?;
+        assert!(require_owned_secret_key_binding(&database, &key, request(1, digest())).is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn a_symlink_substitution_is_rejected_before_reading_loaded_key_bytes(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let database = directory.path().join("not-opened.db");
+        let target = directory.path().join("actual.key");
+        let key = directory.path().join("substituted.key");
+        owned_key(&target, 9)?;
+        std::os::unix::fs::symlink(&target, &key)?;
+        install_faults(&key, &[FaultStage::BindRead]);
+        let result = bind_owned_secret_key(&database, &key, identity(1), digest());
+        clear_faults();
+        let expected = pos_core::CoreError::Storage(format!(
+            "owned signing-key binding: {}",
+            std::io::Error::from(rustix::io::Errno::LOOP)
+        ));
+        assert_eq!(result, Err(expected));
+        assert!(!database.exists());
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn binding_fifo_rejection_does_not_wait_for_a_writer() -> Result<(), Box<dyn std::error::Error>>
+    {
+        const CHILD: &str = "PIGLOR_LEDGER_BIND_FIFO_CHILD";
+        if let Some(directory) = std::env::var_os(CHILD) {
+            let directory = Path::new(&directory);
+            let result = bind_owned_secret_key(
+                &directory.join("not-opened.db"),
+                &directory.join("key.fifo"),
+                identity(1),
+                digest(),
+            );
+            assert_eq!(
+                result,
+                Err(pos_core::CoreError::Storage(
+                    "owned signing-key binding: key is not a private single-link regular file"
+                        .to_owned()
+                ))
+            );
+            std::fs::write(directory.join("fifo-refused"), b"refused")?;
+            return Ok(());
+        }
+
+        let directory = tempfile::tempdir()?;
+        rustix::fs::mkfifoat(
+            rustix::fs::CWD,
+            directory.path().join("key.fifo"),
+            rustix::fs::Mode::RUSR.union(rustix::fs::Mode::WUSR),
+        )?;
+        let mut child = std::process::Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "key_output::binding_tests::binding_fifo_rejection_does_not_wait_for_a_writer",
+                "--nocapture",
+            ])
+            .env(CHILD, directory.path())
+            .spawn()?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if let Some(status) = child.try_wait()? {
+                assert!(status.success(), "FIFO key binding child failed: {status}");
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                child.kill()?;
+                child.wait()?;
+                return Err("key binding waited for a FIFO writer".into());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(
+            std::fs::read(directory.path().join("fifo-refused"))?,
+            b"refused"
+        );
+        assert!(!directory.path().join("not-opened.db").exists());
+        Ok(())
     }
 
     #[cfg(target_os = "linux")]

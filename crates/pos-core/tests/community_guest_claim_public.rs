@@ -236,6 +236,22 @@ fn actual_comparison_context_requires_state_schemas_and_nonzero_identities() -> 
 }
 
 #[test]
+fn reference_count_limit_is_inclusive_and_precedes_element_decoding() -> TestResult {
+    let context = claim_context(&[]);
+    for (count, expected) in [
+        (4096, Error::InvalidEncoding),
+        (4097, Error::BoundsExceeded),
+    ] {
+        let encoded = encode(&fixture(0, vec![Value::Null; count], vec![]))?;
+        assert_eq!(
+            Claim::validate_annotation(CLAIM_SCHEMA, &encoded, &context).err(),
+            Some(expected)
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn all_actual_drafts_fit_the_shared_claim_reference_bound() -> TestResult {
     let drafts = vec![artifact(20, 7); 1024];
     let context = claim_context(&drafts);

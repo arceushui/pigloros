@@ -341,6 +341,20 @@ fn complete_head_has_exact_nine_fields_and_retains_all_sixty_four_members() -> T
             assert_eq!(record.to_canonical_cbor().as_slice(), expected);
             let restored = Head::from_canonical_cbor(&expected)?;
             assert!(record.as_input() == restored.as_input());
+            assert!(restored
+                .as_input()
+                .member_heads
+                .eq(&Members::from_members(&rows)));
+            assert!(!restored
+                .as_input()
+                .member_heads
+                .eq(&Members::from_members(&[])));
+            let mut changed_rows = rows.clone();
+            changed_rows[0].member_progress_digest = hash(99);
+            assert!(!restored
+                .as_input()
+                .member_heads
+                .eq(&Members::from_members(&changed_rows)));
             assert_eq!(restored.as_input().member_heads.len(), usize::from(count));
             assert_eq!(
                 restored.as_input().event_logical_head,
@@ -375,6 +389,30 @@ fn committed_frontiers_encode_independently_of_the_event_logical_head() -> TestR
         first.to_canonical_cbor().as_slice(),
         second.to_canonical_cbor().as_slice()
     );
+    Ok(())
+}
+
+#[test]
+fn each_member_pair_framing_component_is_required_independently() -> TestResult {
+    let rows = members(1);
+    let original = Head::new(head_input(Frontier::Initial, &rows))?.to_canonical_cbor();
+    let pair = encode(&Value::Array(vec![
+        bytes(rows[0].member_binding_digest.as_bytes()),
+        bytes(rows[0].member_progress_digest.as_bytes()),
+    ]))?;
+    assert_eq!(pair.len(), 69);
+    let start = original
+        .windows(pair.len())
+        .position(|candidate| candidate == pair)
+        .ok_or("missing member pair")?;
+    for (offset, replacement) in [(0, 0x83), (2, 0x1f), (35, 0x59), (36, 0x1f)] {
+        let mut changed = original.to_vec();
+        changed[start + offset] = replacement;
+        assert_eq!(
+            Head::from_canonical_cbor(&changed).err(),
+            Some(Error::InvalidEncoding)
+        );
+    }
     Ok(())
 }
 

@@ -242,19 +242,15 @@ fn zero_foreign_coordinates_operation_ids_scope_and_bad_horizons_refuse() -> Tes
 #[test]
 fn header_rejects_owner_aliases_and_any_other_role_or_epoch() -> TestResult {
     let original = header_fields(execution_input()?, 0, 0)?;
-    for alias in [
-        String::new(),
-        "x".repeat(129),
-        owner(0, pass(1)?).to_uppercase(),
-        format!(" {}", owner(0, pass(1)?)),
+    for (alias, error) in [
+        (String::new(), Error::InvalidBinding),
+        ("x".repeat(128), Error::InvalidBinding),
+        ("x".repeat(129), Error::BoundsExceeded),
+        (owner(0, pass(1)?).to_uppercase(), Error::InvalidBinding),
+        (format!(" {}", owner(0, pass(1)?)), Error::InvalidBinding),
     ] {
         let mut fields = original.clone();
         fields[8] = Value::Text(alias.clone());
-        let error = if alias.len() > 128 {
-            Error::BoundsExceeded
-        } else {
-            Error::InvalidBinding
-        };
         assert_eq!(
             Header::from_canonical_cbor(&encode(&Value::Array(fields))?).err(),
             Some(error)
