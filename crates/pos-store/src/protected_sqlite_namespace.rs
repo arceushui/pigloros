@@ -308,7 +308,7 @@ mod tests {
         std::os::unix::fs::symlink("unopened-target", &alias).expect("real symlink fixture");
         let attempts = std::cell::Cell::new(0);
         let result = resolved_ancestor_reading_links(alias.clone(), |path| {
-            assert_eq!(path, alias);
+            assert_eq!(path, alias.as_path());
             attempts.set(attempts.get() + 1);
             Err(std::io::Error::new(
                 ErrorKind::PermissionDenied,
