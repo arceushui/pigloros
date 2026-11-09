@@ -26,8 +26,8 @@ use super::host_egress::{AttemptEgress, EgressControl, HostEgress, HostEgressErr
 use super::netlink::{in_namespace, NetlinkError};
 use super::pinned::NetworkNamespaces;
 use super::{
-    establish_namespace, EstablishError, ExpectedNamespace, LinkName, NamespaceControl,
-    NamespaceName, NetworkPlanError, NetworkRange,
+    establish_namespace, EstablishError, ExpectedNamespace, NamespaceControl, NetworkPlanError,
+    NetworkRange,
 };
 use crate::{EstablishedNetwork, LocalNetworkPort};
 

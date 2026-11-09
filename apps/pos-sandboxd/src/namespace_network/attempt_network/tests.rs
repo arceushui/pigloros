@@ -8,14 +8,14 @@ use rustix::io::Errno;
 
 use super::*;
 use crate::namespace_network::{
-    FirewallTableFamily, IpPrefix, LinkKind, ObservedAddress, ObservedLink, ObservedNamespace,
-    ObservedRoute, ObservedTable,
+    FirewallTableFamily, IpPrefix, LinkKind, LinkName, NamespaceName, ObservedAddress,
+    ObservedLink, ObservedNamespace, ObservedRoute, ObservedTable,
 };
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
 /// What the fake kernel was asked to do.
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct Journal {
     installed: Vec<String>,
     removed: Vec<String>,
@@ -23,7 +23,7 @@ struct Journal {
 }
 
 /// Host egress that records what it is asked to do, or refuses.
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct FakeEgress {
     journal: Arc<Mutex<Journal>>,
     refuse_admission: bool,
@@ -61,7 +61,7 @@ impl EgressControl for FakeEgress {
 /// A kernel that installs exactly what it is asked to, pinning each
 /// namespace in `pins` as this process's own, or refuses to install or to
 /// remove.
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct FakeControl {
     journal: Arc<Mutex<Journal>>,
     pins: Option<std::path::PathBuf>,

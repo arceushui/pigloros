@@ -439,7 +439,7 @@ fn read_table(
                     for part in hooks {
                         match part {
                             Hook::Number(HookNumber::Inet(number)) => {
-                                hook = Some(u32::from(number))
+                                hook = Some(u32::from(number));
                             }
                             Hook::Priority(value) => priority = Some(value),
                             _ => return Err(NetlinkError::Unrepresentable),
@@ -781,7 +781,8 @@ impl HostEgress {
     }
 
     /// Give `attempt`, whose host veth end has index `host_link`, egress
-    /// through `route` and `netfilter`.
+    /// through `route` and `netfilter`, holding the installed attempts for
+    /// the whole change.
     fn install_with<R: NetlinkTransport, N: NetlinkTransport>(
         &self,
         route: &NetlinkSession<R>,
@@ -789,43 +790,72 @@ impl HostEgress {
         host_link: u32,
         attempt: &AttemptEgress,
     ) -> Result<(), HostEgressError> {
-        let mut attempts = self.attempts.lock().unwrap_or_else(PoisonError::into_inner);
-        let links = ingress_links(route, host_link, &attempt.endpoints)?;
-        route.execute(links.iter().map(|&link| forward_from(link)).collect())?;
-        for &link in &links {
-            if !route.request(get_link(link)).and_then(forwards)? {
-                return Err(HostEgressError::Forwarding);
-            }
-        }
-        if observe(netfilter)?.is_none() {
-            netfilter.execute(create_table())?;
-        }
-        attempts.insert(attempt.namespace.as_str().to_owned(), attempt.clone());
-        netfilter.execute(install_attempt(attempt))?;
-        observe(netfilter)?
-            .is_some_and(|table| is_exact(&table, &attempts))
-            .then_some(())
-            .ok_or(HostEgressError::Readback)
+        install_locked(
+            &mut self.attempts.lock().unwrap_or_else(PoisonError::into_inner),
+            route,
+            netfilter,
+            host_link,
+            attempt,
+        )
     }
 
-    /// Take `attempt`'s egress away through `netfilter`.
+    /// Take `attempt`'s egress away through `netfilter`, holding the
+    /// installed attempts for the whole change.
     fn remove_with<N: NetlinkTransport>(
         &self,
         netfilter: &NetlinkSession<N>,
         attempt: &AttemptEgress,
     ) -> Result<(), HostEgressError> {
-        let mut attempts = self.attempts.lock().unwrap_or_else(PoisonError::into_inner);
-        attempts.remove(attempt.namespace.as_str());
-        if let Some(table) = observe(netfilter)? {
-            if table.chains.contains_key(attempt.namespace.as_str()) {
-                netfilter.execute(remove_attempt(&table, attempt))?;
-            }
-        }
-        observe(netfilter)?
-            .is_none_or(|table| is_exact(&table, &attempts))
-            .then_some(())
-            .ok_or(HostEgressError::Readback)
+        remove_locked(
+            &mut self.attempts.lock().unwrap_or_else(PoisonError::into_inner),
+            netfilter,
+            attempt,
+        )
     }
+}
+
+/// [`HostEgress::install_with`] with the installed `attempts`.
+fn install_locked<R: NetlinkTransport, N: NetlinkTransport>(
+    attempts: &mut BTreeMap<String, AttemptEgress>,
+    route: &NetlinkSession<R>,
+    netfilter: &NetlinkSession<N>,
+    host_link: u32,
+    attempt: &AttemptEgress,
+) -> Result<(), HostEgressError> {
+    let links = ingress_links(route, host_link, &attempt.endpoints)?;
+    route.execute(links.iter().map(|&link| forward_from(link)).collect())?;
+    for &link in &links {
+        if !route.request(get_link(link)).and_then(forwards)? {
+            return Err(HostEgressError::Forwarding);
+        }
+    }
+    if observe(netfilter)?.is_none() {
+        netfilter.execute(create_table())?;
+    }
+    attempts.insert(attempt.namespace.as_str().to_owned(), attempt.clone());
+    netfilter.execute(install_attempt(attempt))?;
+    observe(netfilter)?
+        .is_some_and(|table| is_exact(&table, attempts))
+        .then_some(())
+        .ok_or(HostEgressError::Readback)
+}
+
+/// [`HostEgress::remove_with`] with the installed `attempts`.
+fn remove_locked<N: NetlinkTransport>(
+    attempts: &mut BTreeMap<String, AttemptEgress>,
+    netfilter: &NetlinkSession<N>,
+    attempt: &AttemptEgress,
+) -> Result<(), HostEgressError> {
+    attempts.remove(attempt.namespace.as_str());
+    if let Some(table) = observe(netfilter)? {
+        if table.chains.contains_key(attempt.namespace.as_str()) {
+            netfilter.execute(remove_attempt(&table, attempt))?;
+        }
+    }
+    observe(netfilter)?
+        .is_none_or(|table| is_exact(&table, attempts))
+        .then_some(())
+        .ok_or(HostEgressError::Readback)
 }
 
 impl EgressControl for HostEgress {
