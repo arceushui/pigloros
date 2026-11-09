@@ -152,8 +152,7 @@ pub(super) fn run(runtime_path: &Path, root: &Path) -> TestResult {
         native.require_shared_interfaces()?;
         let sink: Rc<dyn EventSink> = probe.clone();
         native.subscribe_view(sink)?;
-        super::super::settings::apply(native.as_ref())
-            .map_err(pos_owner_bridge::SurfaceError::error)?;
+        prepare_control_view(native.as_ref())?;
         listener.begin_navigation();
         probe.events.begin();
         native.navigate_owner()?;
@@ -214,6 +213,14 @@ pub(super) fn run(runtime_path: &Path, root: &Path) -> TestResult {
     let composed_root = root.join("composed-control");
     crate::create_private_directory(&composed_root)?;
     super::denial::run_control(runtime_path, &composed_root)?;
+    Ok(())
+}
+
+fn prepare_control_view(native: &dyn crate::NativeOperations) -> TestResult {
+    super::super::settings::apply(native).map_err(pos_owner_bridge::SurfaceError::error)?;
+    native.fit_controller()?;
+    native.show_window()?;
+    native.focus_controller()?;
     Ok(())
 }
 
