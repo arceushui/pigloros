@@ -1071,8 +1071,9 @@ async fn a_barrier_that_never_answers_is_cut_off_at_the_deadline() -> TestResult
     assert_eq!(failed.unit, UnitState::Killed);
     assert_eq!(scenario.cgroup_kills(), 1);
     // The bound cgroup that was killed is retained for the emptiness proof.
-    let retained = failed.cgroup.ok_or("the bound cgroup was not retained")?;
-    assert!(Arc::ptr_eq(&retained.kills, &scenario.host.cgroup_kills));
+    assert!(failed
+        .cgroup
+        .is_some_and(|retained| Arc::ptr_eq(&retained.kills, &scenario.host.cgroup_kills)));
     Ok(())
 }
 
