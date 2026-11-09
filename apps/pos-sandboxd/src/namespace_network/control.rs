@@ -328,10 +328,14 @@ impl NetlinkNamespaceControl {
             })
             .and_then(|()| self.namespaces.attempt_names())
             .and_then(|names| {
-                consistent(|| with_session(ROUTE, attempt_host_links))
-                    .map(|links| names.is_empty() && links.is_empty())
+                consistent(|| with_session(ROUTE, attempt_host_links)).map(|links| (names, links))
             })
-            .and_then(|absent| absent.then_some(()).ok_or(NetlinkError::Residual))
+            .and_then(
+                |(names, links)| match (names.as_slice(), links.as_slice()) {
+                    ([], []) => Ok(()),
+                    _ => Err(NetlinkError::Residual),
+                },
+            )
     }
 }
 
