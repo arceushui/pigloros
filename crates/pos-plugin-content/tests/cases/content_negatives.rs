@@ -274,6 +274,28 @@ fn spdx_refuses_duplicate_external_documents_and_extracted_licences() -> TestRes
 }
 
 #[test]
+fn spdx_rejects_blank_version_and_reference_fields() -> TestResult {
+    for (pointer, replacement) in [
+        ("/spdxVersion", json!(" ")),
+        ("/documentDescribes/0", json!(" ")),
+        ("/relationships/0/spdxElementId", json!(" ")),
+        ("/relationships/0/relatedSpdxElement", json!(" ")),
+        ("/packages/0/hasFiles/0", json!(" ")),
+        ("/snippets/0/snippetFromFile", json!(" ")),
+    ] {
+        let mut fixture = references_fixture()?;
+        fixture.sbom(|value| replace(value, pointer, replacement))?;
+        assert_eq!(
+            result(&fixture)?,
+            Err(Error::Malformed {
+                artifact: Artifact::Sbom
+            })
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn malformed_nested_json_and_map_depth_are_refused_before_content_checks() -> TestResult {
     for bytes in [b"{1:true}".as_slice(), b"{\"x\":]}", b"[true,]"] {
         let mut fixture = Fixture::new();
@@ -364,6 +386,25 @@ fn schema_vocabularies_and_global_index_budgets_are_explicit() -> TestResult {
         result(&fixture)?,
         Err(Error::BoundsExceeded {
             artifact: Artifact::Schema { index: 3 }
+        })
+    );
+    Ok(())
+}
+
+#[test]
+fn explicit_schema_id_cannot_collide_with_a_later_implicit_base() -> TestResult {
+    use sha2::{Digest as _, Sha256};
+    let second = b"true".to_vec();
+    let digest = fixture::hex(&Sha256::digest(&second));
+    let mut fixture = Fixture::new();
+    fixture.schemas = vec![
+        bytes(&json!({"$id": format!("urn:pigloros:plugin-schema:sha256:{digest}")})),
+        second,
+    ];
+    assert_eq!(
+        result(&fixture)?,
+        Err(Error::ReferenceMismatch {
+            artifact: Artifact::Schema { index: 1 }
         })
     );
     Ok(())
