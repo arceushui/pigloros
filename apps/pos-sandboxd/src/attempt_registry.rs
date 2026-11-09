@@ -28,7 +28,7 @@ pub use recovery::{
     SystemdAttemptRecovery, UnmountedDirectoryInventory,
 };
 #[cfg(test)]
-pub use tests::{root_record_fixture, with_io_fault};
+pub use tests::{in_lock_test_process, root_record_fixture, with_io_fault};
 
 const RECORD_SIZE: usize = 52;
 const REGISTRY_NAME: &str = "registry";
@@ -384,6 +384,29 @@ fn open_directory(
     .map_err(Into::into)
 }
 
+/// Remove one empty child directory, then synchronize its held parent.
+fn remove_empty(parent: &File, component: &str) -> Result<(), SystemdAttemptRegistryError> {
+    registry_io(|| {
+        rustix::fs::unlinkat(parent, component, rustix::fs::AtFlags::REMOVEDIR)
+            .map_err(io::Error::from)
+    })
+    .and_then(|()| registry_io(|| parent.sync_all()))
+    .map_err(Into::into)
+}
+
+/// Unlink one registry record, then synchronize the registry directory.
+fn delete_record(
+    directory: &RegistryDirectory,
+    component: &str,
+) -> Result<(), SystemdAttemptRegistryError> {
+    registry_io(|| {
+        rustix::fs::unlinkat(&directory.file, component, rustix::fs::AtFlags::empty())
+            .map_err(io::Error::from)
+    })
+    .and_then(|()| registry_io(|| directory.file.sync_all()))
+    .map_err(Into::into)
+}
+
 fn require_empty(directory: &File) -> Result<(), SystemdAttemptRegistryError> {
     let entries = registry_io(|| Dir::read_from(directory).map_err(io::Error::from))?;
     for entry in entries {
@@ -524,7 +547,14 @@ mod tests {
     // A concurrent test's fork can retain an O_CLOEXEC flock descriptor until
     // exec. Run lock-release assertions alone in a fresh process, opening their
     // fixtures only after exec; do not accept lock contention as reconciliation.
-    pub(super) fn in_lock_test_process(name: &str) -> TestResult<bool> {
+    /// Run the named test alone in a fresh process; `true` inside that child.
+    ///
+    /// # Errors
+    /// Returns a failure to start the child process.
+    ///
+    /// # Panics
+    /// Panics unless the child ran the named test exactly once and passed.
+    pub fn in_lock_test_process(name: &str) -> TestResult<bool> {
         const CHILD: &str = "PIGLOROS_REGISTRY_LOCK_TEST";
         if std::env::var(CHILD).as_deref() == Ok(name) {
             return Ok(true);

@@ -16,6 +16,7 @@ type RegistryResult<T> = Result<T, SystemdAttemptRegistryError>;
 const MAX_RECORD_SIZE: usize = ROOT_RECORD_SIZE;
 
 mod directories;
+mod removal;
 pub use directories::{RecoveredUnmountedDirectory, UnmountedDirectoryInventory};
 
 /// A complete recorded intent observed during recovery, not activation authority.
@@ -40,6 +41,13 @@ impl RecoveredAttemptIntent {
     #[must_use]
     pub const fn directory_identities(&self) -> Option<[(u64, u64); 2]> {
         self.directory_identities
+    }
+
+    /// The recorded mapper and loop generations of a PAI3 stage, if any.
+    ///
+    /// These are retained claims for a fresh absence probe, not evidence.
+    pub(crate) fn recorded_generations(&self) -> Option<[((u32, u32), u64); 2]> {
+        self.root.as_ref().map(RootRecord::generations)
     }
 
     fn decode(bytes: &[u8]) -> RegistryResult<Self> {
@@ -84,6 +92,7 @@ pub struct RegistryRecoveryEntry {
 struct RegistryEntryObservation {
     name: String,
     attempt_id: [u8; 16],
+    unit_name: TransientServiceUnitName,
     temporary: bool,
     intent: Option<RecoveredAttemptIntent>,
     device: u64,
@@ -102,6 +111,12 @@ impl RegistryRecoveryEntry {
     #[must_use]
     pub const fn attempt_id(&self) -> [u8; 16] {
         self.observation.attempt_id
+    }
+
+    /// The deterministic unit name derived from the canonical filename.
+    #[must_use]
+    pub const fn unit_name(&self) -> &TransientServiceUnitName {
+        &self.observation.unit_name
     }
 
     /// Whether this is an unpublished temporary write.
@@ -191,7 +206,7 @@ fn inventory(directory: &RegistryDirectory) -> RegistryResult<Vec<RegistryRecove
 }
 
 fn read_entry(directory: &RegistryDirectory, name: &str) -> RegistryResult<RegistryRecoveryEntry> {
-    let (attempt_id, temporary) = parse_name(name)?;
+    let (attempt_id, unit_name, temporary) = parse_name(name)?;
     let file = File::from(registry_io(|| {
         openat2(
             &directory.file,
@@ -218,6 +233,7 @@ fn read_entry(directory: &RegistryDirectory, name: &str) -> RegistryResult<Regis
         observation: RegistryEntryObservation {
             name: name.to_owned(),
             attempt_id,
+            unit_name,
             temporary,
             intent,
             device: metadata.dev(),
@@ -242,7 +258,7 @@ fn read_record_content(file: &File, expected_length: u64) -> RegistryResult<Vec<
     Ok(bytes)
 }
 
-fn parse_name(name: &str) -> RegistryResult<([u8; 16], bool)> {
+fn parse_name(name: &str) -> RegistryResult<([u8; 16], TransientServiceUnitName, bool)> {
     let (component, temporary) = if let Some(rest) = name.strip_prefix(".planned-") {
         let (component, suffix) = rest
             .split_once('-')
@@ -270,7 +286,7 @@ fn parse_name(name: &str) -> RegistryResult<([u8; 16], bool)> {
     if unit.attempt_component() != component {
         return Err(SystemdAttemptRegistryError::InvalidIntent);
     }
-    Ok((attempt_id, temporary))
+    Ok((attempt_id, unit, temporary))
 }
 
 fn canonical_positive<T: std::str::FromStr + std::fmt::Display>(text: &str) -> bool {

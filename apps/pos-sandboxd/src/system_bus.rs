@@ -1138,14 +1138,14 @@ mod tests;
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
-mod test_support {
+pub(crate) mod test_support {
     use zbus::{
         connection::{socket::channel::Channel, Builder},
         Connection, Guid,
     };
 
     /// Connect authenticated peers after registering the fixture's interfaces.
-    pub(super) async fn peer_connections(
+    pub(crate) async fn peer_connections(
         configure_server: impl FnOnce(Builder<'static>) -> Builder<'static>,
     ) -> zbus::Result<(Connection, Connection)> {
         let guid = Guid::generate();

@@ -119,6 +119,24 @@ impl RootRecord {
     pub(super) const fn bytes(&self) -> &[u8; ROOT_RECORD_SIZE] {
         &self.0
     }
+
+    /// The recorded mapper and loop generations, in that order. Decoding
+    /// already bounded each device component to `u32` and each sequence above
+    /// zero.
+    pub(super) fn generations(&self) -> [((u32, u32), u64); 2] {
+        let value = |index: usize| {
+            let mut word = [0; 8];
+            word.copy_from_slice(&self.0[DIRECTORY_RECORD_SIZE + index * 8..][..8]);
+            u64::from_le_bytes(word)
+        };
+        let device = |major: usize| {
+            (
+                u32::try_from(value(major)).unwrap_or(u32::MAX),
+                u32::try_from(value(major + 1)).unwrap_or(u32::MAX),
+            )
+        };
+        [(device(6), value(8)), (device(9), value(11))]
+    }
 }
 
 fn write_text(slot: &mut [u8], value: &str) -> Result<(), SystemdAttemptRegistryError> {

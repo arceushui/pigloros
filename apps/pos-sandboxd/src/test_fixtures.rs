@@ -23,7 +23,7 @@ use pos_reference::{
 use crate::{ActiveAttempt, AdmittedAttempt};
 
 // Shared test helpers remain reachable through this public, test-only module.
-pub use crate::attempt_registry::{root_record_fixture, with_io_fault};
+pub use crate::attempt_registry::{in_lock_test_process, root_record_fixture, with_io_fault};
 pub use crate::root_attachment::{recorded_identity, released_root};
 
 /// A complete recheck token for in-process port tests without a kernel mount.

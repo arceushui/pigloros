@@ -2,11 +2,9 @@
 
 use std::sync::atomic::Ordering;
 
-use rustix::fs::{unlinkat, AtFlags};
-
-use super::super::{registry_io, RegistryDirectory};
+use super::super::delete_record;
 use super::{PlannedAttemptIntent, PreparedAttemptDirectory, SystemdAttemptRegistryError};
-use crate::{ReleasedAttemptRoot, SystemdAttemptUnitTeardownObservation, TransientServiceUnitName};
+use crate::{ReleasedAttemptRoot, SystemdAttemptUnitTeardownObservation};
 
 type TerminalResult<T = ()> = Result<T, SystemdAttemptRegistryError>;
 
@@ -82,7 +80,12 @@ impl PreparedAttemptDirectory {
             .require_terminal_evidence(unit, root)
             .and_then(|()| self.remove_tree())
             .and_then(|()| self.verify_record())
-            .and_then(|()| delete_record(&self.planned.directory, self.intent().unit_name()));
+            .and_then(|()| {
+                delete_record(
+                    &self.planned.directory,
+                    self.intent().unit_name().attempt_component(),
+                )
+            });
         state.failed |= result.is_err();
         drop(state);
         result.map(|()| CompletedAttemptCleanup {
@@ -122,15 +125,6 @@ impl PreparedAttemptDirectory {
             .then_some(())
             .ok_or(SystemdAttemptRegistryError::CleanupEvidence)
     }
-}
-
-fn delete_record(directory: &RegistryDirectory, unit: &TransientServiceUnitName) -> TerminalResult {
-    registry_io(|| {
-        unlinkat(&directory.file, unit.attempt_component(), AtFlags::empty())
-            .map_err(std::io::Error::from)
-    })
-    .and_then(|()| registry_io(|| directory.file.sync_all()))
-    .map_err(Into::into)
 }
 
 #[cfg(test)]

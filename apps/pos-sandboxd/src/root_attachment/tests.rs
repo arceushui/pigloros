@@ -139,6 +139,41 @@ pub(crate) fn attached_fixture_root(
         .map_err(|error| error.to_string())
 }
 
+#[tokio::test]
+async fn recorded_generations_are_absent_only_when_neither_device_remains() -> TestResult {
+    let host = tempfile::tempdir()?;
+    let block = host.path().join("sys/dev/block");
+    fs::create_dir_all(&block)?;
+    let kernel = HostKernel::at(&host.path().join("proc"), &host.path().join("sys"));
+    let recorded = [((253, 3), 102), ((7, 7), 101)];
+    assert_eq!(generations_absent(&kernel, recorded).await, Ok(true));
+    // The loop is still present with its recorded generation, then with an
+    // older, contradictory one.
+    fs::create_dir(block.join("7:7"))?;
+    fs::write(block.join("7:7/dev"), "7:7\n")?;
+    for (diskseq, expected) in [
+        ("101\n", Ok(false)),
+        (
+            "100\n",
+            Err(ImageActivationError::ResourceAbsenceUnverified),
+        ),
+    ] {
+        fs::write(block.join("7:7/diskseq"), diskseq)?;
+        assert_eq!(generations_absent(&kernel, recorded).await, expected);
+    }
+    // A zero sequence is never a recorded generation.
+    assert_eq!(
+        generations_absent(&kernel, [((253, 3), 102), ((7, 7), 0)]).await,
+        Err(ImageActivationError::ResourceAbsenceUnverified)
+    );
+    // The real host has no device under the largest major and minor numbers.
+    assert_eq!(
+        recorded_generations_absent([((4095, 1_048_575), 1), ((4095, 1_048_574), 1)]).await,
+        Ok(true)
+    );
+    Ok(())
+}
+
 fn cleanup_deadline() -> tokio::time::Instant {
     tokio::time::Instant::now() + std::time::Duration::from_secs(1)
 }

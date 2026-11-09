@@ -35,6 +35,8 @@ mod release_barrier;
 #[cfg(target_os = "linux")]
 mod release_signer;
 #[cfg(target_os = "linux")]
+mod restart;
+#[cfg(target_os = "linux")]
 mod root_attachment;
 #[cfg(target_os = "linux")]
 mod staging;
@@ -157,6 +159,10 @@ pub use local_network::{
     BoundLocalProxy, CheckedLocal, EstablishedNetwork, FailClosedLocalNetwork, HostServiceChannel,
     HostServiceStream, LocalNetworkPort, LocalProxyBindError, RefusingConnector, ServeError,
     ServedProxy,
+};
+#[cfg(target_os = "linux")]
+pub use restart::{
+    reconcile_restart, OrphanNetworkCleanup, ReconciledRestart, RestartReconciliationError,
 };
 
 #[cfg(target_os = "linux")]
