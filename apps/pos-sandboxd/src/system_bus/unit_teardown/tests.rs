@@ -63,6 +63,7 @@ pub(super) mod cases {
         Kill(String, String, i32),
         Reset(String, Option<Vec<u8>>),
         Get(String),
+        ByCgroup(String),
     }
 
     struct State {
@@ -196,6 +197,16 @@ pub(super) mod cases {
             }
         }
 
+        #[zbus(name = "GetUnitByControlGroup")]
+        fn get_unit_by_control_group(&self, cgroup: String) -> fdo::Result<OwnedObjectPath> {
+            self.state
+                .lock()
+                .map_err(failed)?
+                .calls
+                .push(Call::ByCgroup(cgroup));
+            OwnedObjectPath::try_from(UNIT_PATH).map_err(failed)
+        }
+
         #[zbus(signal)]
         async fn job_removed(
             emitter: &SignalEmitter<'_>,
@@ -206,13 +217,26 @@ pub(super) mod cases {
         ) -> zbus::Result<()>;
     }
 
+    const UNIT_PATH: &str = "/org/freedesktop/systemd1/unit/attempt";
+
+    /// The attempt unit's service object, reporting the fixture cgroup.
+    struct Service;
+
+    #[zbus::interface(name = "org.freedesktop.systemd1.Service", spawn = false)]
+    impl Service {
+        #[zbus(property, name = "ControlGroup")]
+        fn control_group(&self) -> String {
+            "/attempt".to_owned()
+        }
+    }
+
     fn failed(error: impl std::fmt::Display) -> fdo::Error {
         fdo::Error::Failed(error.to_string())
     }
 
     /// A fake systemd manager peer and one retained attempt cgroup.
     pub struct Fixture {
-        _root: tempfile::TempDir,
+        cgroups: tempfile::TempDir,
         _server: zbus::Connection,
         directory: PathBuf,
         unit: TransientServiceUnitName,
@@ -277,13 +301,16 @@ pub(super) mod cases {
                 stop,
                 reset,
             };
-            let (server, client) =
-                peer_connections(|server| server.serve_at("/org/freedesktop/systemd1", manager))
-                    .await?;
+            let (server, client) = peer_connections(|server| {
+                server
+                    .serve_at("/org/freedesktop/systemd1", manager)
+                    .serve_at(UNIT_PATH, Service)
+            })
+            .await?;
             let transport = SystemdTransientUnitTransport::from_connection(client).await?;
             assert!(state.lock().map_err(|_| "poisoned fixture")?.subscribed);
             Ok(Self {
-                _root: root,
+                cgroups: root,
                 _server: server,
                 directory,
                 unit,
@@ -817,6 +844,84 @@ pub(super) mod cases {
                     .commit_planned(&crate::PlannedAttemptIntent::new([3; 16], [9; 32])?)
                     .is_ok(),
                 exact
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_listed_unit_is_bound_through_its_listing_before_it_is_stopped() -> TestResult {
+        let fixture = Fixture::new(5, Stop::Empty, Reset::Unload).await?;
+        let (shutdown, deadline) = budgets()?;
+        let listed = OwnedObjectPath::try_from(UNIT_PATH)?;
+        let root = CgroupRoot::for_test(File::open(fixture.cgroups.path())?);
+        fixture
+            .transport
+            .stop_listed_with_root(&fixture.unit, &listed, Ok(root), (shutdown, deadline))
+            .await?;
+        let name = fixture.unit.as_str().to_owned();
+        let cgroup = "/attempt".to_owned();
+        assert_eq!(
+            fixture.state.lock().map_err(|_| "poisoned fixture")?.calls,
+            vec![
+                Call::Get(name.clone()),
+                Call::ByCgroup(cgroup.clone()),
+                Call::ByCgroup(cgroup),
+                Call::Get(name.clone()),
+                Call::Stop(name.clone(), "replace".to_owned()),
+                Call::Reset(name.clone(), Some(b"populated 0\n".to_vec())),
+                Call::Get(name),
+            ]
+        );
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_unbindable_listed_unit_is_never_stopped() -> TestResult {
+        // The cgroup hierarchy cannot be opened, or the listed object is not
+        // the manager's current unit.
+        for substituted in [false, true] {
+            let fixture = Fixture::new(6, Stop::Empty, Reset::Unload).await?;
+            let (shutdown, deadline) = budgets()?;
+            let (listed, root) = if substituted {
+                (
+                    OwnedObjectPath::try_from("/org/freedesktop/systemd1/unit/other")?,
+                    Ok(CgroupRoot::for_test(File::open(fixture.cgroups.path())?)),
+                )
+            } else {
+                (
+                    OwnedObjectPath::try_from(UNIT_PATH)?,
+                    Err(crate::AttemptCgroupError::WrongFilesystem),
+                )
+            };
+            let result = fixture
+                .transport
+                .stop_listed_with_root(&fixture.unit, &listed, root, (shutdown, deadline))
+                .await;
+            let refused = matches!(
+                (substituted, &result),
+                (
+                    true,
+                    Err(SystemdAttemptUnitTeardownError::Transport(
+                        SystemdTransientUnitTransportError::CgroupUnitMismatch
+                    ))
+                ) | (
+                    false,
+                    Err(SystemdAttemptUnitTeardownError::Transport(
+                        SystemdTransientUnitTransportError::CgroupKernel(_)
+                    ))
+                )
+            );
+            assert!(refused, "{result:?}");
+            let calls = fixture.state.lock().map_err(|_| "poisoned fixture")?;
+            assert!(!calls
+                .calls
+                .iter()
+                .any(|call| matches!(call, Call::Stop(..) | Call::Kill(..) | Call::Reset(..))));
+            drop(calls);
+            assert_eq!(
+                fs::read(fixture.directory.join("cgroup.events"))?,
+                b"populated 1\n"
             );
         }
         Ok(())

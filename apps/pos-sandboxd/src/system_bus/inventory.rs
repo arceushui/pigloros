@@ -84,6 +84,12 @@ impl SystemdAttemptUnitObservation {
         self.row.6.as_str()
     }
 
+    /// The listed object path, for binding the unit's cgroup.
+    #[cfg(target_os = "linux")]
+    pub(crate) const fn unit_object_path(&self) -> &OwnedObjectPath {
+        &self.row.6
+    }
+
     /// Manager-reported job ID; zero denotes no queued job in the observation.
     #[must_use]
     pub const fn job_id(&self) -> u32 {

@@ -20,6 +20,7 @@ const MAX_RECORD_SIZE: usize = ROOT_RECORD_SIZE;
 
 mod directories;
 mod removal;
+pub(crate) use directories::RecordedRootEntry;
 pub use directories::{RecoveredUnmountedDirectory, UnmountedDirectoryInventory};
 
 /// A complete recorded intent observed during recovery, not activation authority.
@@ -51,6 +52,12 @@ impl RecoveredAttemptIntent {
     /// These are retained claims for a fresh absence probe, not evidence.
     pub(crate) fn recorded_generations(&self) -> Option<[((u32, u32), u64); 2]> {
         self.root.as_ref().map(RootRecord::generations)
+    }
+
+    /// The root facts of a PAI3 stage, if any: retained claims for
+    /// correlation with a still-mounted root, not evidence.
+    pub(crate) fn recorded_root(&self) -> Option<&super::root::RecordedRoot> {
+        self.root.as_ref().map(RootRecord::recorded)
     }
 
     fn decode(bytes: &[u8]) -> RegistryResult<Self> {

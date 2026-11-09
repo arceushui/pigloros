@@ -11,9 +11,9 @@ use super::observe::{BlockIdentity, LoopDevice, MountEntry, Node, Observations, 
 use crate::{ActivatedRootDirectory, ImageActivationError};
 
 /// `EROFS_SUPER_MAGIC_V1` (Linux `include/uapi/linux/magic.h`).
-const EROFS_MAGIC: u64 = 0xE0F5_E1E2;
+pub(super) const EROFS_MAGIC: u64 = 0xE0F5_E1E2;
 /// cryptsetup names every dm-verity device's UUID `CRYPT-VERITY-...`.
-const VERITY_UUID_PREFIX: &str = "CRYPT-VERITY-";
+pub(super) const VERITY_UUID_PREFIX: &str = "CRYPT-VERITY-";
 /// sysfs reports partition extents in 512-byte sectors.
 const SECTOR: u64 = 512;
 

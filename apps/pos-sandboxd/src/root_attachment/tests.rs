@@ -46,6 +46,7 @@ type AbsenceProbe = (std::time::Duration, Result<bool, ImageActivationError>);
 mod absence;
 mod generations;
 mod intent;
+mod recovered;
 mod release;
 
 /// Retained value facts for the registry owner's impossible-state fault tests.
@@ -541,6 +542,7 @@ struct FakeKernel {
     attach: Result<(), ImageActivationError>,
     private: Result<(), ImageActivationError>,
     observations: Observations,
+    provider_image: bool,
     detach: Result<(), ImageActivationError>,
     detached: AtomicUsize,
     readbacks: AtomicUsize,
@@ -561,6 +563,7 @@ impl FakeKernel {
             attach: Ok(()),
             private: Ok(()),
             observations,
+            provider_image: true,
             detach: Ok(()),
             detached: AtomicUsize::new(0),
             readbacks: AtomicUsize::new(0),
@@ -605,6 +608,10 @@ impl AttachmentKernel for FakeKernel {
     fn observe(&self, _: BorrowedFd<'_>, _: &File, _: &File, _: &str) -> Observations {
         self.readbacks.fetch_add(1, Ordering::SeqCst);
         self.observations.clone()
+    }
+
+    fn provider_image(&self, _: &str, _: &Path) -> bool {
+        self.provider_image
     }
 
     fn detach(&self, mount: BorrowedFd<'_>) -> Result<(), ImageActivationError> {

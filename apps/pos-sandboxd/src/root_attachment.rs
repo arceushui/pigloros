@@ -30,10 +30,12 @@
 mod cmdline;
 mod identity;
 mod observe;
+mod recovered;
 mod release;
 mod verify;
 
 pub use identity::RootResourceIdentity;
+pub(crate) use recovered::detach_recovered_root;
 pub use release::ReleasedAttemptRoot;
 
 use std::{
@@ -78,6 +80,11 @@ trait AttachmentKernel: Sync {
         root: &File,
         executable: &str,
     ) -> Observations;
+    /// Whether the bound loop device `loop_name` is backed by a file in the
+    /// `images` directory, by the rules of the provider loop sweep. An
+    /// unresolvable image directory or an unreadable or empty backing file is
+    /// not a provider image.
+    fn provider_image(&self, loop_name: &str, images: &std::path::Path) -> bool;
     /// Detach an owned, attached mount.
     fn detach(&self, mount: BorrowedFd<'_>) -> Result<(), ImageActivationError>;
     /// Independently observe whether both original block generations ended.
@@ -254,9 +261,7 @@ impl RootResourceIdentity {
     /// directory cannot be resolved, or the block class or a bound loop
     /// device's backing file cannot be read.
     pub(crate) async fn provider_loops_absent() -> Result<bool, ImageActivationError> {
-        let images =
-            std::path::Path::new(pos_reference::selector::installation::SANDBOX_ARTIFACT_ROOT)
-                .join("images");
+        let images = images_directory();
         let swept = tokio::task::spawn_blocking(move || {
             HostKernel::system().provider_loops_absent(&images)
         })
@@ -266,6 +271,12 @@ impl RootResourceIdentity {
             .flatten()
             .ok_or(ImageActivationError::ResourceAbsenceUnverified)
     }
+}
+
+/// The fixed directory of installed provider images.
+fn images_directory() -> std::path::PathBuf {
+    std::path::Path::new(pos_reference::selector::installation::SANDBOX_ARTIFACT_ROOT)
+        .join("images")
 }
 
 async fn generations_absent(

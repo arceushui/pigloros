@@ -460,18 +460,30 @@ impl SystemdTransientUnitTransport {
         verified: &SystemdVerifiedStart,
         root: CgroupRoot,
     ) -> Result<BoundAttemptCgroup, SystemdTransientUnitTransportError> {
+        self.bind_unit_cgroup(&verified.unit_name, &verified.unit_path, root)
+            .await
+    }
+
+    /// Bind the cgroup of the unit `unit_name` loaded at `unit_path`, checking
+    /// the manager-to-cgroup mapping in both directions around the kernel open.
+    async fn bind_unit_cgroup(
+        &self,
+        unit_name: &TransientServiceUnitName,
+        unit_path: &OwnedObjectPath,
+        root: CgroupRoot,
+    ) -> Result<BoundAttemptCgroup, SystemdTransientUnitTransportError> {
         let manager = ManagerProxy::new(&self.connection)
             .await
             .map_err(SystemdTransientUnitTransportError::Proxy)?;
         let current_unit = manager
-            .get_unit(verified.unit_name.as_str().to_owned())
+            .get_unit(unit_name.as_str().to_owned())
             .await
             .map_err(SystemdTransientUnitTransportError::UnitLookup)?;
-        if current_unit != verified.unit_path {
+        if current_unit != *unit_path {
             return Err(SystemdTransientUnitTransportError::CgroupUnitMismatch);
         }
         let service = ServiceProxy::builder(&self.connection)
-            .path(verified.unit_path.clone())
+            .path(unit_path.clone())
             // The second ControlGroup read must reach systemd, not a proxy cache.
             .cache_properties(CacheProperties::No)
             .build()
@@ -485,15 +497,11 @@ impl SystemdTransientUnitTransport {
             .get_unit_by_control_group(path.clone())
             .await
             .map_err(SystemdTransientUnitTransportError::CgroupReverseLookup)?;
-        if reverse != verified.unit_path {
+        if reverse != *unit_path {
             return Err(SystemdTransientUnitTransportError::CgroupUnitMismatch);
         }
-        let bound = BoundAttemptCgroup::open(
-            root,
-            verified.unit_name.clone(),
-            verified.unit_path.clone(),
-            path.clone(),
-        )?;
+        let bound =
+            BoundAttemptCgroup::open(root, unit_name.clone(), unit_path.clone(), path.clone())?;
         let reread = service
             .control_group()
             .await
@@ -505,14 +513,14 @@ impl SystemdTransientUnitTransport {
             .get_unit_by_control_group(reread)
             .await
             .map_err(SystemdTransientUnitTransportError::CgroupReverseLookup)?;
-        if reverse_again != verified.unit_path {
+        if reverse_again != *unit_path {
             return Err(SystemdTransientUnitTransportError::CgroupUnitMismatch);
         }
         let current_unit_again = manager
-            .get_unit(verified.unit_name.as_str().to_owned())
+            .get_unit(unit_name.as_str().to_owned())
             .await
             .map_err(SystemdTransientUnitTransportError::UnitLookup)?;
-        if current_unit_again != verified.unit_path {
+        if current_unit_again != *unit_path {
             return Err(SystemdTransientUnitTransportError::CgroupUnitMismatch);
         }
         Ok(bound)

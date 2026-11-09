@@ -2,14 +2,16 @@
 
 use tokio::time::{timeout_at, Instant};
 
+use zbus::OwnedObjectPath;
+
 use super::{
     unit_absence::{wait_with_proxy, NO_SUCH_UNIT},
-    ManagerProxy, SystemdAttemptUnitAbsenceObservation, SystemdTransientUnitTransport,
-    SystemdTransientUnitTransportError, TransientServiceUnitName,
+    ManagerProxy, SystemdAttemptUnitAbsenceObservation, SystemdAttemptUnitObservation,
+    SystemdTransientUnitTransport, SystemdTransientUnitTransportError, TransientServiceUnitName,
 };
 use crate::{
-    AttemptCgroupEmptyObservation, AttemptShutdownDeadlines, AttemptShutdownError,
-    BoundAttemptCgroup,
+    AttemptCgroupEmptyObservation, AttemptCgroupError, AttemptShutdownDeadlines,
+    AttemptShutdownError, BoundAttemptCgroup, CgroupRoot,
 };
 
 /// Fresh observations of an unloaded unit and its retained process-empty cgroup.
@@ -118,6 +120,56 @@ impl SystemdTransientUnitTransport {
             return Err(SystemdAttemptUnitTeardownError::DeadlineElapsed);
         }
         observed
+    }
+}
+
+impl SystemdTransientUnitTransport {
+    /// Stop a listed attempt unit that no start of this runtime bound.
+    ///
+    /// Restart reconciliation calls this for a previous runtime's unit whose
+    /// name and `AttemptId` match a committed intent. Its cgroup is bound from
+    /// the listed object path exactly as for a verified start: the manager's
+    /// unit-to-cgroup mapping is checked in both directions around the kernel
+    /// open. The unit is then stopped, emptied and removed as by
+    /// [`Self::stop_attempt_unit`] with the same deadlines.
+    ///
+    /// # Errors
+    /// A unit, cgroup or binding that cannot be verified, including a unit
+    /// that has no cgroup, is a [`SystemdAttemptUnitTeardownError::Transport`]
+    /// failure; nothing is stopped. Teardown failures are returned as they occur.
+    pub(crate) async fn stop_listed_unit(
+        &self,
+        unit: &SystemdAttemptUnitObservation,
+        shutdown: AttemptShutdownDeadlines,
+        deadline: Instant,
+    ) -> Result<(), SystemdAttemptUnitTeardownError> {
+        self.stop_listed_with_root(
+            unit.unit_name(),
+            unit.unit_object_path(),
+            CgroupRoot::system(),
+            (shutdown, deadline),
+        )
+        .await
+    }
+
+    async fn stop_listed_with_root(
+        &self,
+        unit_name: &TransientServiceUnitName,
+        unit_path: &OwnedObjectPath,
+        root: Result<CgroupRoot, AttemptCgroupError>,
+        (shutdown, deadline): (AttemptShutdownDeadlines, Instant),
+    ) -> Result<(), SystemdAttemptUnitTeardownError> {
+        let bound = match root {
+            Ok(root) => self.bind_unit_cgroup(unit_name, unit_path, root).await,
+            Err(error) => Err(error.into()),
+        };
+        match bound {
+            Ok(mut cgroup) => self
+                .stop_attempt_unit(&mut cgroup, shutdown, deadline)
+                .await
+                .map(drop),
+            Err(error) => Err(SystemdAttemptUnitTeardownError::Transport(error)),
+        }
     }
 }
 
