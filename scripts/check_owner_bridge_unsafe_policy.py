@@ -913,7 +913,7 @@ def _check_shim_macros(label: str, scanned: Scan, found: list[str]) -> None:
 def _reviewed_fault_code(code: str) -> bool:
     """Accept only the reviewed test-only fixed process-fault implementation."""
     normalized = re.sub(r"\s+", "", code).encode()
-    return hashlib.sha256(normalized).hexdigest() == "fb23ade1eb867992fb6fca5d0b1ba29b7ace123a945bb20451d6f9abe3dbdfb6"
+    return hashlib.sha256(normalized).hexdigest() == "dd2b207795b61568515a92c60085c892f407d6544f0c64f809671e1c7bdb8303"
 
 
 def _check_shim_sources(shim: Path, scanned_dirs: tuple[Path, ...], found: list[str]) -> ShimScan:
@@ -1056,6 +1056,7 @@ def _check_fault_assets(root: Path, found: list[str]) -> None:
         found.append(f"{catalogue.relative_to(root).as_posix()}: process fault catalogue differs from reviewed sealed response selection")
     response_code = scan(response_text).code
     for variant, constant, filename, digest in (
+        ("DelayedDelivery", "DELAYED_DELIVERY", "delayed_delivery", "1bf521a4a1ff47ccf652d1ec9859c717b169412fde00e4ab3e743e9f8f31e653"),
         ("Pending", "PENDING", "pending", "592560cb9ec82f5a93945c0b04ec6ed38b5bf78215eca0dad8eb9730c2918479"),
         ("SuccessfulGetReleaseDelay", "SUCCESSFUL_GET_RELEASE_DELAY", "successful_get_release_delay", "1d09cd8be58999eaec6b3d602873c0ec52c01db407a82faac424cde1a48076e1"),
         ("SuccessfulGetWritingDelay", "SUCCESSFUL_GET_WRITING_DELAY", "successful_get_writing_delay", "835d8dcc1fb948e541e4c05bed41ef528adbf6dbc9c48ef09e5f07a5a8f35b65"),
@@ -1123,18 +1124,44 @@ def _check_fault_authority(root: Path, scans: dict[str, tuple[Scan, tuple[Attrib
     type_start = root_code.find("pub(crate) enum ProcessFaultTarget")
     type_end = root_code.find("pub(crate) trait NativeOperations", type_start) if type_start >= 0 else -1
     types = root_code[type_start:type_end] if type_end >= 0 else ""
-    if hashlib.sha256(re.sub(r"\s+", "", types).encode()).hexdigest() != "ee8b9e361a793fe28e2541503ddc6606fd661ab9bb9464d4fd795decd7d3f621":
+    if hashlib.sha256(re.sub(r"\s+", "", types).encode()).hexdigest() != "d70df208dd00514b3e8d4a148c05860a7dead9a73e7f7d91ee6e631795fe1815":
         found.append(f"{SHIM}/src/lib.rs: process fault capability types differ from reviewed test-only code")
     elif "cfg(test)" not in _outer_attributes_before(root_code, root_item[1], type_start):
         found.append(f"{SHIM}/src/lib.rs: process fault capability types require cfg(test)")
     # The seal is created only by the declared sealed-asset native fixture;
     # these fixed boundaries prevent bypassing lifecycle/identity checks.
     specifications = (
+        ('src/adapter/surface/mod.rs', 'posted_ready_fault_state', '338bbaa04356e3f9d6e235d859e1427608723276a67ba1a17da3ea1abc0e143a'),
+        ('src/adapter/surface/mod.rs', 'inject_posted_ready_fault', '43214afa0e0beb3daf39dc3ad67d4b3dc3a985f5299362e169cac58c141e1820'),
+        ('src/adapter/surface/mod.rs', 'posted_retry_fault_state', '21e04f9cd0e24ca2af57f54efa6ac0eacf10ddeb1b230a31b3e9f05cd6e9dcea'),
+        ('src/adapter/surface/mod.rs', 'inject_posted_retry_fault', '0ce323d34f99595ccb3bf45db32abff3a0d1fb636a7f20be5864941a32505926'),
+        ('src/adapter/surface/mod.rs', 'posted_writing_fault_state', '5be6d3f63972546114c8ce0fb27c34bd28f63434ee4c702b6649a23f0b502a16'),
+        ('src/adapter/surface/mod.rs', 'inject_posted_writing_fault', 'a6c54d48ab66301c9c77e8e3282ff609dd28143ae27b625bf5ba66b60746c33d'),
+        ('src/lib.rs', 'pending_opening_owners_retained', '41a133b45f8a9ca9bb050a8836d59fe0aed4c3bcfb52774daf7c0dd179c95713'),
+        ('src/lib.rs', 'pending_opening_browser_candidate', '154210339558372ea4d2daa84cfa2ed1feb850662cc9026632314d7742115f0f'),
+        ('src/ffi/session.rs', 'pending_opening_owners_retained', '6ba3a7de9b084a2df4b09c8cf7dbc9740941cee9fd482e880691aa9c760127d7'),
+        ('src/ffi/session.rs', 'pending_opening_browser_candidate', 'd2c74b34a3797b93f6282170085dde4bb41d693442be9db1a3e70c27a3b4ceff'),
+        ('src/adapter/surface/mod.rs', 'prepare_pending_opening_browser', 'b468e59eb0cc1da75180163982d3cbca3bc85dd794922f8054382fefbd5eb6d9'),
+        ('src/adapter/surface/mod.rs', 'pending_opening_owners_retained', '8953566b940f807ca8fc90295b23c15dd8a12777b4c9365543acfbff10aa869f'),
+        ('src/adapter/surface/mod.rs', 'pending_opening_completion', 'afb594852028158432b1193ab7b648cc2c1f481540d0053164baa664e05bd1ee'),
+        ('src/adapter/surface/mod.rs', 'inject_pending_opening_browser', '78dbd2f9e4a7a83a79597ed03a10c3048a820bebea5e3e98b4798b609c8ceb76'),
+        ('src/adapter/surface/mod.rs', 'posted_empty_fault_state', '10559b7e88c8b25629c3d18b8498b69bd74523fee31aaae735e577fd21dc42fc'),
+        ('src/adapter/surface/mod.rs', 'inject_posted_empty_fault', 'd3bcfb4dc6cba0703788cd1eb68cdd2bbf487ef7f1a84edfbf883bd0e1fb30b2'),
+        ('src/adapter/surface/mod.rs', 'navigating_fault_ready', '170f33d3143a5c334f9bfedeaaa3fb1920f4d8811baa46dd2ad2abf7ad4226aa'),
+        ('src/adapter/surface/mod.rs', 'navigating_fault_state', 'd6de42b2ce32c2d27068bfbb0652433e1d61aa517009d6b6a2d3909fc38e7b76'),
+        ('src/adapter/surface/mod.rs', 'navigating_fault_owners_retained', 'abcc8f41aef3b7577e9900b4279f36a5c89485a4b193850e7227fc83ee6e7ea1'),
+        ('src/adapter/surface/mod.rs', 'inject_navigating_fault', '66339eb65c6269261e85c5091179fbbcbc63382025744f749a0990e1bed4eaeb'),
+        ('src/lib.rs', 'preload_fault_owners_retained', 'da2364753998997805c42fd95372b5675dc6623e00a3fdd36b208f65f2193e12'),
+        ('src/ffi/session.rs', 'preload_fault_owners_retained', 'dd2db1b06d35a3a2b71399e52e861c2736c60c16555972199721b48edaacfad6'),
+        ('src/adapter/surface/mod.rs', 'awaiting_load_fault_ready', '9c02146d3c7413eadec419859cb15ff50021afc4c68e0b93a00a332cc6064d6b'),
+        ('src/adapter/surface/mod.rs', 'awaiting_load_fault_state', 'fafcc4256742a7180c886b0166eab7eed95f994f5407cc0c763c72adbdc5d6dc'),
+        ('src/adapter/surface/mod.rs', 'awaiting_load_fault_owners_retained', 'fe4c7bf1d40e90f372500ce3700d5955844d2ca432167590d31feee3df60bf66'),
+        ('src/adapter/surface/mod.rs', 'inject_awaiting_load_fault', 'd4c811752e55968eb63625207cc46d9ee117e609957ec1fc75d170ed8748515d'),
         ("src/ffi/session.rs", "exit_browser_candidate", "7532fd44a7c1edaaf88c1a256c8c544b198d1e7572d774e01a9d4f4ab3fbbe3f"),
         ("src/ffi/session.rs", "exit_fault_owners_retained", "ae49036aef686da2490d2183714887582f362bf7deebf771f7ea3c1f241dd149"),
         ("src/adapter/surface/mod.rs", "releasing_fault_state", "13227b1d97e85f6b4e67a55fbddd45ed434d2a2fdeccfc95cb00b757e23e4010"),
         ("src/adapter/surface/mod.rs", "inject_releasing_fault", "b595eec3a4611cfd5adc730043826329a78216878a1eff8d5c4539ae1fbc7abd"),
-        ("src/adapter/surface/mod.rs", "inject_view_fault", "406510f2a1780ff0088321be79fa3328ecb5fd8d23ad170dc5633e688d6b4991"),
+        ("src/adapter/surface/mod.rs", "inject_view_fault", "46e4f6c4a8743a011753cee29d8b18067e16f5c179946c347fd13c3dabdd1f47"),
         ("src/adapter/surface/mod.rs", "exit_fault_phase_reached", "3507e06bb9ab7006e1d3303184163c8f5466f34b560b8165f50f4ec8cf23d0dc"),
         ("src/adapter/surface/mod.rs", "exit_fault_state", "94397e816db9d8b4ca3572852bf4fffa9961e301f5e68f676c6d93e2ba9dd332"),
         ("src/adapter/surface/mod.rs", "inject_exit_fault", "73f36366a6281ff5cfaaaf4e988c7e55b08717c888dbb76dbf181499b673037e"),
@@ -1147,7 +1174,7 @@ def _check_fault_authority(root: Path, scans: dict[str, tuple[Scan, tuple[Attrib
         ("src/lib.rs", "inject_process_fault", "294b987cde982e756d951216a786fbf47cddcb352b67d16b5fb3e343644662ed"),
         ("src/ffi/session.rs", "fault_owners_retained", "eccda5bd1bc5847953133394e934a30276c539d09fa2842f0e3ad42722556f69"),
         ("src/adapter/surface/mod.rs", "fault_owners_retained", "f5b290213a5da3871f225e3abbba1e1f61c7ae0b021766b7d9a3f63f05b14b9f"),
-        ("src/ffi/session.rs", "inject_process_fault", "db1cfba6bf76d09ea360bec309aad6821e0ee6a2643a39e39e30db2b5faf872a"),
+        ("src/ffi/session.rs", "inject_process_fault", "adb8618ee8b2225717ec5bba204972a31458a30e6c59b71ff118fc8d9fb09dfb"),
         ("src/ffi/creation.rs", "succeeded", "abd90b783da539c962504dcb63f9a6f467fcbf0bf213e251f9b94c309a1f35f8"),
         ("src/ffi/session.rs", "recordless_controller_completion", "29b41776eba0afe06f194a40aa7d1fed581daa6b3c50e61394d884b8b203c3b1"),
         ("src/ffi/session.rs", "recordless_browser_candidate", "f9b8af0278a6b4f1ffe01a4c6483c9d204f574345270b49183a9f25a087052d7"),
@@ -1193,7 +1220,7 @@ def _check_fault_authority(root: Path, scans: dict[str, tuple[Scan, tuple[Attrib
     relative = "src/adapter/native_tests/process_fault.rs"
     item = scans.get(relative)
     code = item[0].code if item else ""
-    if hashlib.sha256(re.sub(r"\s+", "", code).encode()).hexdigest() != "d9716937b4fd1fe01b7fec9cb213abb7851605e9765301b7f8beed97d8478cb4":
+    if hashlib.sha256(re.sub(r"\s+", "", code).encode()).hexdigest() != "2055590c14748671fb5d315191372ed21aad9fc0d2385ede606ee3934e2ca422":
         found.append(f"{SHIM}/{relative}: process fault fixture differs from reviewed sealed caller")
 
 
@@ -1218,7 +1245,7 @@ def _check_fault_capabilities(scans: dict[str, tuple[Scan, tuple[Attribute, ...]
             "src/ffi/session.rs": ("inject_process_fault",),
             "src/adapter/surface/mod.rs": (
                 "inject_posted_fault", "inject_recordless_browser", "inject_releasing_fault",
-                "inject_view_fault", "inject_exit_fault",
+                "inject_view_fault", "inject_exit_fault", "inject_awaiting_load_fault", "inject_navigating_fault", "inject_posted_empty_fault", "inject_pending_opening_browser", "inject_posted_writing_fault", "inject_posted_ready_fault", "inject_posted_retry_fault",
             ),
         }.get(relative, ())
         for reviewed_function in reviewed_functions:
@@ -1243,7 +1270,7 @@ def _check_fault_capabilities(scans: dict[str, tuple[Scan, tuple[Attribute, ...]
         for match in re.finditer(r"(?<!\w)FaultAuthority\s*\{", source):
             root_declaration = relative == "src/lib.rs" and begin <= match.start() < end
             surface_construction = relative == "src/adapter/surface/mod.rs" and any(
-                name in ("inject_view_fault", "inject_recordless_browser", "inject_exit_fault") and start < match.start() < stop
+                name in ("inject_view_fault", "inject_recordless_browser", "inject_exit_fault", "inject_awaiting_load_fault", "inject_navigating_fault", "inject_pending_opening_browser") and start < match.start() < stop
                 for name, start, stop in _function_spans(source)
             )
             if not root_declaration and not surface_construction:

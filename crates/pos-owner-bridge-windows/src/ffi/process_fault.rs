@@ -107,6 +107,8 @@ pub(super) fn browser_candidate(
 pub(super) fn inject(
     environment: &ICoreWebView2Environment,
     authority: &crate::FaultAuthority,
+    buffers: Option<&super::buffers::Pair>,
+    pending_controller: Option<&super::creation::ControllerCreation>,
 ) -> Result<Box<dyn ProcessFaultHandle>, ()> {
     if !authority.valid() {
         return Err(());
@@ -154,6 +156,24 @@ pub(super) fn inject(
         || select(&second, kind)? != pid
         || super::process::read_identity(handle, pid)? != (observed, path)
         || !authority.valid()
+        || match authority.lifecycle() {
+            crate::ProcessFaultLifecycle::PostedEmpty
+            | crate::ProcessFaultLifecycle::PostedRetry(_) => {
+                buffers.ok_or(())?.load_state().map_err(|_| ())?
+                    != pos_owner_bridge_codec::ControlState::Empty as u32
+            }
+            crate::ProcessFaultLifecycle::PostedWriting => {
+                buffers.ok_or(())?.load_state().map_err(|_| ())?
+                    != pos_owner_bridge_codec::ControlState::Writing as u32
+            }
+            crate::ProcessFaultLifecycle::PostedReady => {
+                buffers.ok_or(())?.load_state().map_err(|_| ())?
+                    != pos_owner_bridge_codec::ControlState::Ready as u32
+            }
+            _ => false,
+        }
+        || (authority.lifecycle() == crate::ProcessFaultLifecycle::PendingOpening
+            && pending_controller.ok_or(())?.succeeded().is_some())
         || retained.exit_code()?.is_some()
     {
         return Err(());

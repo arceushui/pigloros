@@ -392,15 +392,53 @@ pub(crate) enum ProcessFaultTarget {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ProcessFaultLifecycle {
     PostedReceipt,
+    PostedEmpty,
+    PostedWriting,
+    PostedReady,
+    PostedRetry(RetryPoint),
+    AwaitingLoad,
+    Navigating,
     ReleasingSuccess,
     AwaitingExitSuccess,
     RecordlessOpening,
+    PendingOpening,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RetryPoint {
+    Second,
+    Third,
+    Fourth,
+    Fifth,
+    Sixth,
+    Seventh,
+    Eighth,
+}
+
+#[cfg(test)]
+impl RetryPoint {
+    const fn post(self) -> u8 {
+        match self {
+            Self::Second => 2,
+            Self::Third => 3,
+            Self::Fourth => 4,
+            Self::Fifth => 5,
+            Self::Sixth => 6,
+            Self::Seventh => 7,
+            Self::Eighth => 8,
+        }
+    }
 }
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ProcessFaultPhase {
     PostedReceipt,
+    PostedEmpty,
+    PostedWriting,
+    PostedReady,
+    PostedRetry,
     ReleasingSuccess,
 }
 
@@ -433,10 +471,23 @@ pub(crate) struct ProcessExitState {
 pub(crate) enum ProcessFaultMark {
     Reached(ProcessFaultState),
     ReachedExit(ProcessExitState),
+    AwaitingLoad {
+        generation: u32,
+        record_count: usize,
+    },
+    Navigating {
+        generation: u32,
+        record_count: usize,
+    },
     RecordlessOpening {
         generation: u32,
         record_count: usize,
     },
+    PendingOpening {
+        generation: u32,
+        record_count: usize,
+    },
+    ControllerCompletion(bool),
     Selected(pos_owner_bridge::ProcessIdentity),
     TerminationCall,
     MainRendererExited,
@@ -509,8 +560,23 @@ pub(crate) trait NativeOperations {
     }
 
     #[cfg(test)]
+    fn pending_opening_owners_retained(&self) -> bool {
+        false
+    }
+
+    #[cfg(test)]
+    fn pending_opening_browser_candidate(&self) -> Result<pos_owner_bridge::ProcessIdentity, ()> {
+        Err(())
+    }
+
+    #[cfg(test)]
     fn recordless_controller_completion(&self) -> Option<bool> {
         None
+    }
+
+    #[cfg(test)]
+    fn preload_fault_owners_retained(&self) -> bool {
+        false
     }
 
     #[cfg(test)]

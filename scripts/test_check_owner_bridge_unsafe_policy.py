@@ -1368,6 +1368,10 @@ def test_owned_process_fault_authority() -> None:
         "extra rights": ("PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE,", "PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE | 0x400,"),
         "wrong exit code": ("const FAULT_EXIT: u32 = 0x535;", "const FAULT_EXIT: u32 = 0;"),
         "disabled authority": ("if !authority.valid()", "if false"),
+        "removed empty-state recheck": ("buffers.ok_or(())?.load_state().map_err(|_| ())?", "0"),
+        "removed pending-controller recheck": ("pending_controller.ok_or(())?.succeeded().is_some()", "false"),
+        "writing-state recheck": ("ControlState::Writing as u32", "ControlState::Empty as u32"),
+        "ready-state recheck": ("ControlState::Ready as u32", "ControlState::Empty as u32"),
         "different source": ("candidates(environment)?", "other_candidates(environment)?"),
         "indirect termination": ("TerminateProcess(handle, FAULT_EXIT)", "hidden(handle, FAULT_EXIT)"),
         "membership gate suppressed": ("select(&second, kind)? != pid", "false"),
@@ -1411,6 +1415,10 @@ def test_owned_process_fault_authority() -> None:
         ("ProcessFaultMark::ExitCode(code)", "ProcessFaultMark::TerminationCall"),
         ("self.evidence_complete = true;", "self.evidence_complete = false;"),
         (".posted_fault_event(target)", ".posted_fault_event(ProcessFaultTarget::Browser)"),
+        ("ProcessFaultMark::ControllerCompletion(success)", "ProcessFaultMark::TerminationCall"),
+        ("previous.len() != usize::from(point.post() - 1) * 2", "false"),
+        ("self.prior_native_wipe = true;", "self.prior_native_wipe = false;"),
+        ("pos_owner_bridge::ceremony::timing::FAST_POLL", "std::time::Duration::ZERO"),
     ):
         if old not in fixture_source:
             raise SystemExit(f"missing ordered-evidence mutation target: {old}")
@@ -1424,6 +1432,67 @@ def test_owned_process_fault_authority() -> None:
         CHECKER._check_fault_authority(ROOT, scans, found)
         if f"{SHIM}/src/adapter/native_tests/process_fault.rs: process fault fixture differs from reviewed sealed caller" not in found:
             raise SystemExit(f"ordered evidence mutation was accepted: {old}: {found}")
+    # AwaitingLoad can advance during process discovery. The final retained
+    # event guard and the fixture's pre-fault phase observation are both bound.
+    for relative, old, new, expected in (
+        ("src/adapter/surface/mod.rs", "&& events.loaded().is_none()", "&& true", "process fault authority function inject_awaiting_load_fault differs from reviewed code"),
+        ("src/adapter/surface/mod.rs", "&& events.started().is_none()", "&& true", "process fault authority function inject_navigating_fault differs from reviewed code"),
+        ("src/adapter/surface/mod.rs", "state.generation != u32::from(point.post())", "state.generation != 1", "process fault authority function posted_retry_fault_state differs from reviewed code"),
+        ("src/adapter/surface/mod.rs", "generation != 1 || posts != 0", "generation != 1", "process fault authority function awaiting_load_fault_state differs from reviewed code"),
+        ("src/adapter/native_tests/process_fault.rs", ".inject_awaiting_load_fault(seal)", ".inject_exit_fault(seal)", "process fault fixture differs from reviewed sealed caller"),
+    ):
+        changed = dict(files)
+        if old not in changed[relative]:
+            raise SystemExit(f"missing awaiting-load mutation target: {old}")
+        changed[relative] = changed[relative].replace(old, new, 1)
+        scans = {}
+        for item, text in changed.items():
+            scanned = CHECKER.scan(text)
+            scans[item] = (scanned, CHECKER._attributes(scanned.code))
+        found = []
+        CHECKER._check_fault_authority(ROOT, scans, found)
+        if f"{SHIM}/{relative}: {expected}" not in found:
+            raise SystemExit(f"awaiting-load authority mutation was accepted: {old}: {found}")
+    # Each new phase must classify ProcessFailed through completed retirement.
+    for function in ("run_awaiting_load", "run_navigating", "run_posted_empty", "run_pending_opening", "run_posted_writing", "run_posted_ready", "run_posted_retry"):
+        start = fixture_source.find(f"fn {function}(")
+        end = fixture_source.find("\n}", start)
+        body = fixture_source[start:end]
+        marker = "check_final_process_failures("
+        if start < 0 or end < 0 or marker not in body:
+            raise SystemExit(f"missing final process failure classifier: {function}")
+        mutated = body.replace(marker, "discard_final_process_failures(", 1)
+        changed = dict(files)
+        changed["src/adapter/native_tests/process_fault.rs"] = fixture_source[:start] + mutated + fixture_source[end:]
+        scans = {}
+        for relative, text in changed.items():
+            scanned = CHECKER.scan(text)
+            scans[relative] = (scanned, CHECKER._attributes(scanned.code))
+        found = []
+        CHECKER._check_fault_authority(ROOT, scans, found)
+        expected = f"{SHIM}/src/adapter/native_tests/process_fault.rs: process fault fixture differs from reviewed sealed caller"
+        if expected not in found:
+            raise SystemExit(f"final process failure classifier bypass was accepted: {function}: {found}")
+    # Taking the retired pairs disarms observation; the live pair must be
+    # re-armed before injection and before its later native close.
+    retry = fixture_source.find("fn drive_posted_retry(")
+    arm = fixture_source.find("crate::Native::arm_native_zero_observations();", retry)
+    inject = fixture_source.find(".inject_posted_retry_fault(", retry)
+    if not 0 <= retry < arm < inject:
+        raise SystemExit("retry witness is not re-armed before the fault")
+    changed = dict(files)
+    changed["src/adapter/native_tests/process_fault.rs"] = (
+        fixture_source[:arm] + fixture_source[arm:].replace("crate::Native::arm_native_zero_observations();", "", 1)
+    )
+    scans = {}
+    for relative, text in changed.items():
+        scanned = CHECKER.scan(text)
+        scans[relative] = (scanned, CHECKER._attributes(scanned.code))
+    found = []
+    CHECKER._check_fault_authority(ROOT, scans, found)
+    expected = f"{SHIM}/src/adapter/native_tests/process_fault.rs: process fault fixture differs from reviewed sealed caller"
+    if expected not in found:
+        raise SystemExit(f"retry witness disarming was accepted: {found}")
     # A removed module or an inert hosted test must not disable the gate.
     found = fixture({helper: original})
     if f"{SHIM}/src/ffi/mod.rs: process fault helper must have exactly one private cfg(test) declaration" not in found:
@@ -1489,6 +1558,7 @@ def test_fault_profile_bindings() -> None:
         f"{directory}/src/listener/fixtures.rs",
         f"{directory}/src/listener/fixture_assets.rs",
         f"{directory}/assets/qualification/pending.html",
+        f"{directory}/assets/qualification/delayed_delivery.html",
         f"{directory}/assets/qualification/successful_get_release_delay.html",
         f"{directory}/assets/qualification/successful_get_writing_delay.html",
         f"{directory}/assets/qualification/withheld_delivery.html",
@@ -1513,6 +1583,7 @@ def test_fault_profile_bindings() -> None:
             raise SystemExit(f"changed fault topology was accepted: {path}")
     for variant, constant, filename in (
         ("Pending", "PENDING", "pending"),
+        ("DelayedDelivery", "DELAYED_DELIVERY", "delayed_delivery"),
         ("SuccessfulGetReleaseDelay", "SUCCESSFUL_GET_RELEASE_DELAY", "successful_get_release_delay"),
         ("SuccessfulGetWritingDelay", "SUCCESSFUL_GET_WRITING_DELAY", "successful_get_writing_delay"),
         ("WithheldDelivery", "WITHHELD_DELIVERY", "withheld_delivery"),

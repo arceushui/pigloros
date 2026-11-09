@@ -120,9 +120,22 @@ impl NativeOperations for Session {
         }
         match authority.lifecycle() {
             crate::ProcessFaultLifecycle::PostedReceipt
+            | crate::ProcessFaultLifecycle::PostedEmpty
+            | crate::ProcessFaultLifecycle::PostedWriting
+            | crate::ProcessFaultLifecycle::PostedReady
+            | crate::ProcessFaultLifecycle::PostedRetry(_)
             | crate::ProcessFaultLifecycle::ReleasingSuccess => {
                 if self.controller.is_none()
                     || self.view.is_none()
+                    || self.browser_pid().map_err(|_| ())? != authority.browser().browser_pid
+                {
+                    return Err(());
+                }
+            }
+            crate::ProcessFaultLifecycle::AwaitingLoad
+            | crate::ProcessFaultLifecycle::Navigating => {
+                if authority.target() != crate::ProcessFaultTarget::Browser
+                    || !self.preload_fault_owners_retained()
                     || self.browser_pid().map_err(|_| ())? != authority.browser().browser_pid
                 {
                     return Err(());
@@ -133,6 +146,16 @@ impl NativeOperations for Session {
                     || !self.exit_fault_owners_retained()
                     || super::process_fault::browser_candidate(&environment.raw)?
                         != authority.browser()
+                {
+                    return Err(());
+                }
+                self.denials.expect_browser(authority.browser().browser_pid);
+            }
+            crate::ProcessFaultLifecycle::PendingOpening => {
+                if authority.target() != crate::ProcessFaultTarget::Browser
+                    || !self.pending_opening_owners_retained()
+                    || self.recordless_controller_completion().is_some()
+                    || self.pending_opening_browser_candidate()? != authority.browser()
                 {
                     return Err(());
                 }
@@ -151,7 +174,25 @@ impl NativeOperations for Session {
                 self.denials.expect_browser(authority.browser().browser_pid);
             }
         }
-        super::process_fault::inject(&environment.raw, authority)
+        super::process_fault::inject(
+            &environment.raw,
+            authority,
+            self.buffers.as_ref(),
+            self.controller_creation.as_ref(),
+        )
+    }
+
+    #[cfg(test)]
+    fn preload_fault_owners_retained(&self) -> bool {
+        self.check().is_ok()
+            && self
+                .environment
+                .as_ref()
+                .is_some_and(Environment::subscribed)
+            && self.controller_creation.is_none()
+            && self.controller.is_some()
+            && self.view.is_some()
+            && self.buffers.is_none()
     }
 
     #[cfg(test)]
@@ -173,6 +214,29 @@ impl NativeOperations for Session {
             && self.controller.is_none()
             && self.view.is_none()
             && self.buffers.is_none()
+    }
+
+    #[cfg(test)]
+    fn pending_opening_owners_retained(&self) -> bool {
+        self.check().is_ok()
+            && self
+                .environment
+                .as_ref()
+                .is_some_and(Environment::subscribed)
+            && self.controller_creation.is_some()
+            && self.controller.is_none()
+            && self.view.is_none()
+            && self.buffers.is_none()
+    }
+
+    #[cfg(test)]
+    fn pending_opening_browser_candidate(&self) -> Result<pos_owner_bridge::ProcessIdentity, ()> {
+        if !self.pending_opening_owners_retained()
+            || self.recordless_controller_completion().is_some()
+        {
+            return Err(());
+        }
+        super::process_fault::browser_candidate(&self.environment_ref().map_err(|_| ())?.raw)
     }
 
     #[cfg(test)]
