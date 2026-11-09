@@ -177,6 +177,15 @@ async fn recorded_generations_are_absent_only_when_neither_device_remains() -> T
         .await,
         Ok(true)
     );
+    // The production entry refuses a zero sequence.
+    assert_eq!(
+        RootResourceIdentity::recorded_generations_absent([
+            ((4095, 1_048_575), 1),
+            ((4095, 1_048_574), 0)
+        ])
+        .await,
+        Err(ImageActivationError::ResourceAbsenceUnverified)
+    );
     Ok(())
 }
 
@@ -261,8 +270,12 @@ async fn only_a_loop_over_a_provider_image_or_an_unreadable_loop_refuses() -> Te
     fs::remove_file(block.join("loop2/loop/backing_file"))?;
     assert_eq!(kernel.provider_loops_absent(&images), None);
     // The production entry sweeps the real host, whose installation and
-    // loop devices vary; it must only return.
-    let _swept = RootResourceIdentity::provider_loops_absent().await;
+    // loop devices vary. Without an installed image directory it refuses.
+    let swept = RootResourceIdentity::provider_loops_absent().await;
+    let installed = Path::new(pos_reference::selector::installation::SANDBOX_ARTIFACT_ROOT)
+        .join("images")
+        .exists();
+    assert!(installed || swept == Err(ImageActivationError::ResourceAbsenceUnverified));
     Ok(())
 }
 
