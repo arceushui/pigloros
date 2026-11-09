@@ -280,16 +280,12 @@ where
         Err(error) => Err(error),
     };
     let cleaned = match absent {
-        Ok(absent) => remove_network(network, deadline).await.map(|()| absent),
-        Err(error) => Err(error),
-    };
-    let detached = match cleaned {
-        Ok(absent) => detach_roots(&recovery, survivors, cleanup.released().min(deadline))
+        Ok(absent) => release_survivors(&recovery, network, survivors, cleanup, deadline)
             .await
             .map(|()| absent),
         Err(error) => Err(error),
     };
-    let released = match detached {
+    let released = match cleaned {
         Ok(absent) => roots_released(&recovery, probes, deadline)
             .await
             .map(|roots| (absent, roots)),
@@ -346,6 +342,21 @@ fn committed(recovery: &SystemdAttemptRecovery, attempt_id: [u8; 16]) -> bool {
         .entries()
         .iter()
         .any(|entry| !entry.is_temporary() && entry.attempt_id() == attempt_id)
+}
+
+/// Remove orphaned network state, then detach every still-mounted root by
+/// the cleanup's release deadline.
+async fn release_survivors<N: OrphanNetworkCleanup + Sync, S: Survivors>(
+    recovery: &SystemdAttemptRecovery,
+    network: &N,
+    survivors: &S,
+    cleanup: AttemptCleanupDeadlines,
+    deadline: Instant,
+) -> Reconciled<()> {
+    match remove_network(network, deadline).await {
+        Ok(()) => detach_roots(recovery, survivors, cleanup.released().min(deadline)).await,
+        Err(error) => Err(error),
+    }
 }
 
 /// Detach every root still mounted on a recorded attempt directory.
