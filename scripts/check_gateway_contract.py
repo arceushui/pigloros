@@ -125,7 +125,10 @@ class Contract:
                 return template, operation
         raise ContractError(f"{method} {base} names no operation of the contract")
 
-    def response_errors(self, operation: dict, status: int, body: object) -> list[str]:
+    def response_errors(
+        self, operation: dict, status: int, body: object, template: str, path: str = ""
+    ) -> list[str]:
+        """Check a response; a problem names the route template, or its request path if unrouted."""
         responses = operation["responses"]
         response = self.resolve(responses.get(str(status), responses.get("default", {})))
         content = response.get("content")
@@ -136,12 +139,15 @@ class Contract:
             return [f"status {status} does not answer {media}"]
         errors = self.schema_errors(body, content[media]["schema"])
         if not errors and media == "application/problem+json":
-            errors = self.problem_errors(status, body)  # type: ignore[arg-type]
+            errors = self.problem_errors(status, body, template, path)  # type: ignore[arg-type]
         return errors
 
-    def problem_errors(self, status: int, body: dict) -> list[str]:
+    def problem_errors(self, status: int, body: dict, template: str, path: str) -> list[str]:
         code = body["code"]
         errors = []
+        unrouted = code == "not-found-or-unavailable" and body["instance"] == path
+        if body["instance"] != template and not unrouted:
+            errors.append(f"problem instance {body['instance']} is not the route {template}")
         if body["status"] != status:
             errors.append(f"problem status {body['status']} is not the HTTP status {status}")
         if status not in self.statuses[code]:
@@ -239,13 +245,15 @@ def parameter_errors(operation: dict, contract: Contract, location: str, values:
 
 
 def check_examples(contract: Contract) -> int:
-    operations = {op["operationId"]: op for op in contract.operations().values()}
+    operations = {
+        op["operationId"]: (template, op) for (_, template), op in contract.operations().items()
+    }
     count = 0
     for path in sorted(EXAMPLES.glob("*.json")):
         example = load(path)
-        operation = operations.get(example["operation_id"])
-        if operation is None:
+        if example["operation_id"] not in operations:
             raise ContractError(f"{path.name}: unknown operation {example['operation_id']}")
+        template, operation = operations[example["operation_id"]]
         request = example["request"]
         errors = parameter_errors(operation, contract, "header", request.get("headers", {}))
         errors += parameter_errors(operation, contract, "query", request.get("query", {}))
@@ -255,7 +263,9 @@ def check_examples(contract: Contract) -> int:
         if (not errors) != example["request_valid"]:
             raise ContractError(f"{path.name}: request validity is not {example['request_valid']}")
         response = example["response"]
-        errors = contract.response_errors(operation, response["status"], response["body"])
+        errors = contract.response_errors(
+            operation, response["status"], response["body"], template
+        )
         if errors:
             raise ContractError(f"{path.name}: response invalid: {errors[:3]}")
         count += 1
@@ -290,9 +300,11 @@ def check_fixtures(contract: Contract) -> int:
                 if not isinstance(expect["body"], dict):
                     raise ContractError(f"{where}: every contract response is JSON")
                 concrete = exchange["path"].replace("{timeline}", SAMPLE_ULID)
-                _, operation = contract.operation_for(exchange["method"], concrete)
+                template, operation = contract.operation_for(exchange["method"], concrete)
                 body = restore(expect["body"]["json"])
-                errors = contract.response_errors(operation, expect["status"], body)
+                errors = contract.response_errors(
+                    operation, expect["status"], body, template, concrete.split("?", 1)[0]
+                )
                 if errors:
                     raise ContractError(f"{where}: {errors[:3]}")
                 count += 1

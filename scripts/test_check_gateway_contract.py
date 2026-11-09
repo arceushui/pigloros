@@ -23,14 +23,18 @@ def contract(document: dict | None = None, registry: dict | None = None) -> chec
     )
 
 
-def problem(status: int, code: str) -> dict:
+TIMELINES = "/v1/timelines"
+EVENTS = "/v1/timelines/{timeline_id}/events"
+
+
+def problem(status: int, code: str, instance: str = TIMELINES) -> dict:
     title = {entry["code"]: entry["title"] for entry in REGISTRY["problem_types"]}[code]
     return {
         "type": checker.PROBLEM_TYPE_PREFIX + code,
         "title": title,
         "status": status,
         "detail": "detail",
-        "instance": "/v1/timelines",
+        "instance": instance,
         "code": code,
         "schema_id": "urn:pigloros:gateway:v1:schema:problem",
         "retryable": False,
@@ -88,27 +92,54 @@ class CheckGatewayContractTest(unittest.TestCase):
         subject = contract()
         operation = self.operation(subject, "POST", "/v1/timelines")
         self.assertEqual(
-            subject.response_errors(operation, 429, problem(429, "resource-limit-exceeded")), []
+            subject.response_errors(
+                operation, 429, problem(429, "resource-limit-exceeded"), TIMELINES
+            ),
+            [],
         )
-        self.assertTrue(subject.response_errors(operation, 418, problem(418, "unauthorized")))
+        self.assertTrue(
+            subject.response_errors(operation, 418, problem(418, "unauthorized"), TIMELINES)
+        )
 
     def test_a_problem_whose_status_differs_from_the_http_status_is_rejected(self) -> None:
         subject = contract()
         operation = self.operation(subject, "POST", "/v1/timelines")
         self.assertTrue(
-            subject.response_errors(operation, 429, problem(413, "resource-limit-exceeded"))
+            subject.response_errors(
+                operation, 429, problem(413, "resource-limit-exceeded"), TIMELINES
+            )
         )
 
     def test_an_undocumented_member_in_a_served_response_is_rejected(self) -> None:
         subject = contract()
         operation = self.operation(subject, "GET", "/health")
-        self.assertEqual(subject.response_errors(operation, 200, {"ok": True}), [])
-        self.assertTrue(subject.response_errors(operation, 200, {"ok": True, "extra": 1}))
+        self.assertEqual(subject.response_errors(operation, 200, {"ok": True}, "/health"), [])
+        extra = {"ok": True, "extra": 1}
+        self.assertTrue(subject.response_errors(operation, 200, extra, "/health"))
 
     def test_an_old_error_envelope_is_rejected(self) -> None:
         subject = contract()
         operation = self.operation(subject, "POST", "/v1/timelines")
-        self.assertTrue(subject.response_errors(operation, 429, {"error": "limit"}))
+        self.assertTrue(subject.response_errors(operation, 429, {"error": "limit"}, TIMELINES))
+
+    def test_a_problem_naming_a_concrete_path_is_rejected(self) -> None:
+        subject = contract()
+        concrete = f"/v1/timelines/{checker.SAMPLE_ULID}/events"
+        template, operation = subject.operation_for("GET", concrete)
+        self.assertEqual(template, EVENTS)
+        invalid = problem(400, "invalid-request", concrete)
+        self.assertTrue(subject.response_errors(operation, 400, invalid, template, concrete))
+        valid = problem(400, "invalid-request", EVENTS)
+        self.assertEqual(subject.response_errors(operation, 400, valid, template, concrete), [])
+
+    def test_only_an_unrouted_not_found_names_its_request_path(self) -> None:
+        subject = contract()
+        concrete = f"/v1/timelines/{checker.SAMPLE_ULID}/events"
+        template, operation = subject.operation_for("GET", concrete)
+        unrouted = problem(404, "not-found-or-unavailable", concrete)
+        self.assertEqual(subject.response_errors(operation, 404, unrouted, template, concrete), [])
+        elsewhere = problem(404, "not-found-or-unavailable", "/v1/timelines/other/events")
+        self.assertTrue(subject.response_errors(operation, 404, elsewhere, template, concrete))
 
     def test_an_unknown_path_names_no_operation(self) -> None:
         with self.assertRaises(checker.ContractError):

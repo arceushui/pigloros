@@ -603,7 +603,7 @@
           "instance": {
             "type": "string",
             "pattern": "^/",
-            "description": "The request path of the failed request."
+            "description": "The matched route template of the failed request; the request path only for an unrouted request."
           },
           "code": {
             "enum": [
