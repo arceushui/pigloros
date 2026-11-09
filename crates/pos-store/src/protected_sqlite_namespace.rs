@@ -100,13 +100,22 @@ fn closed<T>(result: std::io::Result<T>) -> Result<T, CoreError> {
     result.map_err(|_| refused())
 }
 
-fn resolved_ancestor(mut path: PathBuf) -> Result<PathBuf, CoreError> {
+fn resolved_ancestor(path: PathBuf) -> Result<PathBuf, CoreError> {
+    resolved_ancestor_reading_links(path, |path| std::fs::read_link(path))
+}
+
+// Keep link-read failure injectable after a real successful metadata lookup;
+// otherwise exercising that refusal would require a nondeterministic FS race.
+fn resolved_ancestor_reading_links(
+    mut path: PathBuf,
+    mut read_link: impl FnMut(&Path) -> std::io::Result<PathBuf>,
+) -> Result<PathBuf, CoreError> {
     // Resolve within a finite budget, including missing leaf names. Exhaustion
     // denies an unknown path before any native connection can be created.
     for _ in 0..64 {
         match std::fs::symlink_metadata(&path) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
-                let target = closed(std::fs::read_link(&path))?;
+                let target = closed(read_link(&path))?;
                 if target.is_absolute() {
                     path = target;
                 } else {
@@ -180,10 +189,8 @@ fn percent_octet(digits: &[u8]) -> Option<u8> {
 mod tests {
     use super::*;
 
-    type TestResult = Result<(), Box<dyn std::error::Error>>;
-
     #[test]
-    fn native_uri_path_is_byte_exact_before_filesystem_refusal() -> TestResult {
+    fn native_uri_path_is_byte_exact_before_filesystem_refusal() {
         for (filename, expected) in [
             (&b"plain?#%20\xff"[..], &b"plain?#%20\xff"[..]),
             (b"file:relative.db?mode=ro", b"relative.db"),
@@ -202,17 +209,22 @@ mod tests {
             (b"file:%\xff\xfe", b"%\xff\xfe"),
             (b"file:%\xc3\xa9", b"%\xc3\xa9"),
         ] {
-            assert_eq!(filename_path(filename)?.as_os_str().as_bytes(), expected);
+            assert_eq!(
+                filename_path(filename)
+                    .expect("valid filename fixture")
+                    .as_os_str()
+                    .as_bytes(),
+                expected
+            );
         }
         for filename in [b"file://foreign/db".as_slice(), b"file://foreign"] {
             assert!(matches!(filename_path(filename),
                 Err(CoreError::Storage(message)) if message == REFUSAL));
         }
-        Ok(())
     }
 
     #[test]
-    fn every_percent_octet_preserves_case_independent_native_bytes() -> TestResult {
+    fn every_percent_octet_preserves_case_independent_native_bytes() {
         for byte in 0..=u8::MAX {
             for escape in [format!("%{byte:02x}"), format!("%{byte:02X}")] {
                 let filename = format!("file:a{escape}z");
@@ -222,38 +234,39 @@ mod tests {
                     vec![b'a', byte, b'z']
                 };
                 assert_eq!(
-                    filename_path(filename.as_bytes())?.as_os_str().as_bytes(),
+                    filename_path(filename.as_bytes())
+                        .expect("percent-escape fixture")
+                        .as_os_str()
+                        .as_bytes(),
                     expected
                 );
             }
         }
-        Ok(())
     }
 
     #[test]
-    fn unmarked_dangling_links_resolve_without_qualifying_a_native_connection() -> TestResult {
-        let directory = tempfile::tempdir()?;
+    fn unmarked_dangling_links_resolve_without_qualifying_a_native_connection() {
+        let directory = tempfile::tempdir().expect("temporary alias directory");
         for (name, target) in [
             ("absolute", directory.path().join("missing.db")),
             ("relative", PathBuf::from("missing.db")),
         ] {
             let alias = directory.path().join(name);
-            std::os::unix::fs::symlink(target, &alias)?;
-            refuse_reserved_path(&alias)?;
+            std::os::unix::fs::symlink(target, &alias).expect("dangling alias fixture");
+            refuse_reserved_path(&alias).expect("unmarked dangling alias remains ordinary");
         }
         assert!(!directory.path().join("missing.db").exists());
-        Ok(())
     }
 
     #[test]
-    fn resolver_budget_includes_absolute_relative_and_missing_path_steps() -> TestResult {
-        let directory = tempfile::tempdir()?;
-        let canonical = std::fs::canonicalize(directory.path())?;
+    fn resolver_budget_includes_absolute_relative_and_missing_path_steps() {
+        let directory = tempfile::tempdir().expect("temporary resolver directory");
+        let canonical = std::fs::canonicalize(directory.path()).expect("canonical fixture root");
         for kind in ["absolute", "relative"] {
             let parent = directory.path().join(kind);
-            std::fs::create_dir(&parent)?;
+            std::fs::create_dir(&parent).expect("resolver case directory");
             let target = parent.join("target");
-            std::fs::write(&target, b"ordinary file")?;
+            std::fs::write(&target, b"ordinary file").expect("ordinary target fixture");
             for index in 0..64 {
                 let name = if index == 63 {
                     "target".to_owned()
@@ -265,11 +278,12 @@ mod tests {
                 } else {
                     PathBuf::from(name)
                 };
-                std::os::unix::fs::symlink(next, parent.join(format!("link{index}")))?;
+                std::os::unix::fs::symlink(next, parent.join(format!("link{index}")))
+                    .expect("bounded symlink-chain fixture");
             }
             assert_eq!(
-                resolved_ancestor(parent.join("link1"))?,
-                std::fs::canonicalize(&target)?
+                resolved_ancestor(parent.join("link1")).expect("63-link chain is within budget"),
+                std::fs::canonicalize(&target).expect("canonical target fixture")
             );
             assert!(matches!(resolved_ancestor(parent.join("link0")),
                 Err(CoreError::Storage(message)) if message == REFUSAL));
@@ -278,10 +292,32 @@ mod tests {
         for _ in 0..63 {
             missing.push("missing");
         }
-        assert_eq!(resolved_ancestor(missing.clone())?, canonical);
+        assert_eq!(
+            resolved_ancestor(missing.clone()).expect("63 missing components are within budget"),
+            canonical
+        );
         missing.push("missing");
         assert!(matches!(resolved_ancestor(missing),
             Err(CoreError::Storage(message)) if message == REFUSAL));
-        Ok(())
+    }
+
+    #[test]
+    fn link_read_failure_after_observed_symlink_is_closed_without_retry() {
+        let directory = tempfile::tempdir().expect("temporary link-read directory");
+        let alias = directory.path().join("alias");
+        std::os::unix::fs::symlink("unopened-target", &alias).expect("real symlink fixture");
+        let attempts = std::cell::Cell::new(0);
+        let result = resolved_ancestor_reading_links(alias.clone(), |path| {
+            assert_eq!(path, alias);
+            attempts.set(attempts.get() + 1);
+            Err(std::io::Error::new(
+                ErrorKind::PermissionDenied,
+                "injected link read refusal",
+            ))
+        });
+        assert!(matches!(result,
+            Err(CoreError::Storage(message)) if message == REFUSAL));
+        assert_eq!(attempts.get(), 1);
+        assert!(!directory.path().join("unopened-target").exists());
     }
 }
