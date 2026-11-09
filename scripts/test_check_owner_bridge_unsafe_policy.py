@@ -1432,6 +1432,7 @@ def test_ledger_creation_boundary() -> None:
     assert not caller_errors(adapter_source)
     for old, new in [
         ("create_private_ledger_file(&temporary_path)", "create_private_ledger_file(&self.path)"),
+        ("create_private_ledger_file(&temporary_path)", "other_creator(&temporary_path)"),
         ("let previous = self.open_existing(LEDGER)?;", "let previous = self.open_existing(TEMPORARY)?;"),
         ("_guard: &'guard WindowsSubjectEncryptorLock", "_guard: &'guard ()"),
         ("#[cfg(test)]\nmod native_tests", "#[cfg(feature = \"test-support\")]\nmod native_tests"),
@@ -1441,6 +1442,37 @@ def test_ledger_creation_boundary() -> None:
     assert caller_errors(adapter_source + "\nfn forged() { crate::Native::create_private_ledger_file(path); }\n")
     assert creator_errors(creator_source.replace("bInheritHandle: false.into()", "bInheritHandle: true.into() // bInheritHandle: false.into()", 1))
     assert caller_errors(adapter_source.replace("create_private_ledger_file(&temporary_path)", "create_private_ledger_file(&self.path) /* create_private_ledger_file(&temporary_path) */", 1))
+    executable_decoy = '''
+    impl WindowsNonceLedger<'_> {
+        fn unused_correct_sequence(&self) -> Result<(), ()> {
+            self.admit_directory()?;
+            let previous = self.open_existing(LEDGER)?;
+            let temporary_path = self.path.join(TEMPORARY);
+            let mut temporary = crate::Native::create_private_ledger_file(&temporary_path)?;
+            self.validate_file(&temporary, &temporary_path)?;
+            let _ = (&previous, &mut temporary);
+            Ok(())
+        }
+    }
+    '''
+    wrong_real_path = adapter_source.replace("let temporary_path = self.path.join(TEMPORARY);", "let temporary_path = self.path.join(LEDGER);", 1)
+    decoy_source = wrong_real_path.replace("mod native_tests {\n    use super::*;", "mod native_tests {\n    use super::*;\n" + executable_decoy, 1)
+    assert decoy_source != wrong_real_path
+    assert any("held-guard admitted staging path" in error for error in caller_errors(decoy_source))
+    real_sequence = '''self.admit_directory()?;
+        let previous = self.open_existing(LEDGER)?;
+        let temporary_path = self.path.join(TEMPORARY);
+        let mut temporary = crate::Native::create_private_ledger_file(&temporary_path)?;
+        self.validate_file(&temporary, &temporary_path)?;'''
+    assert real_sequence in adapter_source
+    inactive_sequence = adapter_source.replace(real_sequence, "if false { " + real_sequence + " }", 1)
+    assert any("held-guard admitted staging path" in error for error in caller_errors(inactive_sequence))
+    for old, new in [
+        ("fn replace_observing(\n", "#[cfg(test)]\n    fn replace_observing(\n"),
+        ("impl<'guard> WindowsNonceLedger<'guard> {", "#[cfg(test)]\nimpl<'guard> WindowsNonceLedger<'guard> {"),
+    ]:
+        assert old in adapter_source, old
+        assert caller_errors(adapter_source.replace(old, new, 1)), old
     assert not origin_errors("src/adapter/ledger_storage.rs", adapter_source)
     for old, new in [
         ('join("PiglorOS")', 'join("Other")'),

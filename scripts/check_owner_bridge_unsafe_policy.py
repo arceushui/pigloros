@@ -603,7 +603,26 @@ def _check_ledger_creator_calls(relative: str, label: str, code: str, attributes
     ledger_impls = []
     for item in re.finditer(r"\bimpl\s*<\s*'guard\s*>\s*WindowsNonceLedger\s*<\s*'guard\s*>\s*\{", code):
         opening = item.end() - 1
-        ledger_impls.append((opening, _matching_brace(code, opening)))
+        start = code.rfind("\n", 0, item.start()) + 1
+        guards = _outer_attributes_before(code, attributes, start)
+        if code[:item.start()].count("{") == code[:item.start()].count("}") and not any(
+            guard.startswith(("cfg(", "cfg_attr(")) for guard in guards
+        ):
+            ledger_impls.append((opening, _matching_brace(code, opening)))
+    replacements = [(begin, end) for name, begin, end in spans if name == "replace_observing"]
+    declarations = [item for item in FUNCTION.finditer(code) if item.group(1) == "replace_observing"]
+    active_replacement = None
+    if len(ledger_impls) == len(replacements) == len(declarations) == 1:
+        impl_begin, impl_end = ledger_impls[0]
+        begin, end = replacements[0]
+        declaration = declarations[0]
+        start = code.rfind("\n", 0, declaration.start()) + 1
+        guards = _outer_attributes_before(code, attributes, start)
+        prefix = code[impl_begin + 1 : declaration.start()]
+        if (impl_begin < declaration.start() < begin < end < impl_end
+                and prefix.count("{") == prefix.count("}")
+                and not any(guard.startswith(("cfg(", "cfg_attr(")) for guard in guards)):
+            active_replacement = (begin, end)
     production_calls = 0
     for occurrence in re.finditer(r"\bcreate_private_ledger_file\b", code):
         before = code[max(0, occurrence.start() - 100) : occurrence.start()]
@@ -614,22 +633,24 @@ def _check_ledger_creator_calls(relative: str, label: str, code: str, attributes
             continue
         is_call = bool(re.match(r"\s*\(", after)) and bool(re.search(r"(?:crate\s*::\s*Native|Self)\s*::\s*$", before))
         fixture = any(begin < occurrence.start() < end for begin, end in fixture_regions)
-        production = relative == "src/adapter/ledger_storage.rs" and any(
-            name == "replace_observing" and begin < occurrence.start() < end for name, begin, end in spans
-        ) and any(begin < occurrence.start() < end for begin, end in ledger_impls)
+        production = (relative == "src/adapter/ledger_storage.rs" and active_replacement is not None
+                      and active_replacement[0] < occurrence.start() < active_replacement[1])
         if not is_call or not (fixture or production):
             found.append(f"{label}:{_line_of(code, occurrence.start())}: ADR-132 ledger creator caller is not an admitted staging or cfg(test) fixture")
         if production:
             production_calls += 1
-    if production_calls:
-        compact = _normalized(code)
-        required = _normalized('''self.admit_directory()?;
+    if relative == "src/adapter/ledger_storage.rs" and active_replacement is None:
+        found.append(f"{label}: ADR-132 requires one active ledger replacement method")
+    elif relative == "src/adapter/ledger_storage.rs" and active_replacement is not None:
+        compact = _normalized(code[active_replacement[0] : active_replacement[1] + 1])
+        required = _normalized('''{ if bytes.len() > LIMIT { return Err(()); }
+            self.admit_directory()?;
             let previous = self.open_existing(LEDGER)?;
             let temporary_path = self.path.join(TEMPORARY);
             let mut temporary = crate::Native::create_private_ledger_file(&temporary_path)?;
             self.validate_file(&temporary, &temporary_path)?;''')
         owner = _normalized("pub struct WindowsNonceLedger<'guard> { _guard: &'guard WindowsSubjectEncryptorLock, directory: File, path: PathBuf, volume: u32, }")
-        if production_calls != 1 or required not in compact or owner not in compact:
+        if production_calls != 1 or not compact.startswith(required) or owner not in _normalized(code):
             found.append(f"{label}: ADR-132 creator must use the held-guard admitted staging path")
 
 
