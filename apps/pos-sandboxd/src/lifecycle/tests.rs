@@ -5,14 +5,15 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::time::Duration;
 
 use super::*;
-use crate::root_attachment::{attached_fixture_root, release_fake_root};
-use crate::system_bus::{TeardownFixture, TeardownReset, TeardownStop};
+use crate::test_fixtures::{
+    attached_fixture_root, release_fake_root, TeardownFixture, TeardownReset, TeardownStop,
+};
 use crate::{PlannedAttemptIntent, SystemdAttemptRegistry};
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 /// A fixture root released through the controller's root port.
-struct FakeRootRelease(crate::root_attachment::FakeRootRelease);
+struct FakeRootRelease(crate::test_fixtures::FakeRootRelease);
 
 impl RootRelease for FakeRootRelease {
     fn release(
@@ -29,7 +30,7 @@ fn fake_root_release(
     directory: &PreparedAttemptDirectory,
     absent: bool,
 ) -> TestResult<FakeRootRelease> {
-    Ok(FakeRootRelease(crate::root_attachment::fake_root_release(
+    Ok(FakeRootRelease(crate::test_fixtures::fake_root_release(
         directory, absent,
     )?))
 }

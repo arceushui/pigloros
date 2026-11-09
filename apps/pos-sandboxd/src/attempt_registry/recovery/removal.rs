@@ -57,15 +57,15 @@ fn proven(
     units_absent: &[SystemdAttemptUnitAbsenceObservation],
     roots_released: &[[u8; 16]],
 ) -> bool {
-    let unit_absent = units_absent
+    let unit_proved = units_absent
         .iter()
         .any(|absent| absent.unit_name() == entry.unit_name());
-    let root_released = entry
+    let root_proved = entry
         .intent()
         .and_then(super::RecoveredAttemptIntent::recorded_generations)
         .is_none()
         || roots_released.contains(&entry.attempt_id());
-    unit_absent && root_released
+    unit_proved && root_proved
 }
 
 #[cfg(test)]

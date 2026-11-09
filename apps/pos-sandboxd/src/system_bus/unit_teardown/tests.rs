@@ -31,13 +31,15 @@ pub(super) mod cases {
     type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
     #[derive(Clone, Copy)]
-    pub(crate) enum Stop {
+    /// How the fake manager's stop job affects the cgroup.
+    pub enum Stop {
         Empty,
         LeavesPopulated,
     }
 
     #[derive(Clone, Copy)]
-    pub(crate) enum Reset {
+    /// How the fake manager answers the failed-state reset.
+    pub enum Reset {
         Unload,
         Missing,
         KeepLoaded,
@@ -209,31 +211,43 @@ pub(super) mod cases {
     }
 
     /// A fake systemd manager peer and one retained attempt cgroup.
-    pub(crate) struct Fixture {
+    pub struct Fixture {
         _root: tempfile::TempDir,
         _server: zbus::Connection,
         directory: PathBuf,
         unit: TransientServiceUnitName,
-        pub(crate) bound: BoundAttemptCgroup,
-        pub(crate) transport: SystemdTransientUnitTransport,
+        /// The retained attempt cgroup.
+        pub bound: BoundAttemptCgroup,
+        /// The transport connected to the fake manager.
+        pub transport: SystemdTransientUnitTransport,
         state: Arc<Mutex<State>>,
     }
 
     /// Counts the manager calls one fixture records, after its cgroup moved.
-    pub(crate) struct ManagerCalls(Arc<Mutex<State>>);
+    pub struct ManagerCalls(Arc<Mutex<State>>);
 
     impl ManagerCalls {
-        pub(crate) fn count(&self) -> TestResult<usize> {
+        /// The number of manager calls recorded so far.
+        ///
+        /// # Errors
+        /// Returns a poisoned fixture lock.
+        pub fn count(&self) -> TestResult<usize> {
             Ok(self.0.lock().map_err(|_| "poisoned fixture")?.calls.len())
         }
     }
 
     impl Fixture {
-        pub(crate) fn calls(&self) -> ManagerCalls {
+        /// A counter of this fixture's manager calls.
+        #[must_use]
+        pub fn calls(&self) -> ManagerCalls {
             ManagerCalls(Arc::clone(&self.state))
         }
 
-        pub(crate) async fn new(id: u8, stop: Stop, reset: Reset) -> TestResult<Self> {
+        /// A fake manager for the attempt `[id; 16]` and its cgroup.
+        ///
+        /// # Errors
+        /// Returns a fixture setup failure.
+        pub async fn new(id: u8, stop: Stop, reset: Reset) -> TestResult<Self> {
             let root = tempfile::tempdir()?;
             let directory = root.path().join("attempt");
             fs::create_dir(&directory)?;
