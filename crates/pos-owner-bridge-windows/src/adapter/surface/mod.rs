@@ -73,6 +73,16 @@ pub(in crate::adapter) enum PreEnvironmentRetention {
     Abandoned,
 }
 
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::adapter) struct CloseObservation {
+    pub(in crate::adapter) removed: crate::NativeResult<()>,
+    pub(in crate::adapter) closed: crate::NativeResult<()>,
+    pub(in crate::adapter) buffers_closed: bool,
+    pub(in crate::adapter) buffers_uncertain: bool,
+    pub(in crate::adapter) had_controller: bool,
+}
+
 pub(super) struct Surface {
     factory: Rc<dyn NativeFactory>,
     clock: Box<dyn MonotonicClock>,
@@ -100,6 +110,10 @@ pub(super) struct Surface {
     client: Cell<Option<ClientBounds>>,
     #[cfg(test)]
     cleanup_trace: diagnostics::CleanupTrace,
+    #[cfg(test)]
+    initial_buffer_close: Option<bool>,
+    #[cfg(test)]
+    initial_close: Option<CloseObservation>,
 }
 
 impl Surface {
@@ -140,6 +154,10 @@ impl Surface {
             client: Cell::new(None),
             #[cfg(test)]
             cleanup_trace: diagnostics::CleanupTrace::default(),
+            #[cfg(test)]
+            initial_buffer_close: None,
+            #[cfg(test)]
+            initial_close: None,
         })
     }
 
@@ -1090,6 +1108,23 @@ impl Surface {
         Ok(())
     }
 
+    #[cfg(test)]
+    pub(in crate::adapter) fn release_quarantine_owners_retained(&mut self) -> bool {
+        self.ownership == Ownership::ControllerClosed
+            && self.close == CloseState::Pending
+            && self.folder.is_some()
+            && self
+                .identity
+                .is_some_and(|id| self.events.exited() == Some(id.browser_pid))
+            && !self.buffers
+            && self.store.records().is_ok_and(|records| records.len() == 1)
+    }
+
+    #[cfg(test)]
+    pub(in crate::adapter) const fn initial_close_observation(&self) -> Option<CloseObservation> {
+        self.initial_close
+    }
+
     fn guarded(&self, guard: &PostGuard) -> Result<()> {
         self.refresh()?;
         let served = self.loopback.served();
@@ -1214,6 +1249,10 @@ impl OwnerWebSurface for Surface {
     }
     fn zero_close_buffers(&mut self) -> Result<()> {
         let result = self.native.close_buffers().map_err(unavailable);
+        #[cfg(test)]
+        if self.initial_buffer_close.is_none() {
+            self.initial_buffer_close = Some(result.is_ok());
+        }
         self.buffers = false;
         result
     }
@@ -1227,13 +1266,27 @@ impl OwnerWebSurface for Surface {
         #[cfg(test)]
         self.cleanup_trace
             .returned("close.unsubscribe_view", removed);
+        #[cfg(test)]
+        let observed_removed = removed;
         let removed = removed.map_err(unavailable);
+        #[cfg(test)]
+        let had_controller = self.native.has_controller() == Ok(true);
         #[cfg(test)]
         self.cleanup_trace.enter("close.close_controller");
         let closed = self.native.close_controller();
         #[cfg(test)]
         self.cleanup_trace
             .returned("close.close_controller", closed);
+        #[cfg(test)]
+        if self.initial_close.is_none() {
+            self.initial_close = Some(CloseObservation {
+                removed: observed_removed,
+                closed,
+                buffers_closed: self.initial_buffer_close == Some(true) && buffers.is_ok(),
+                buffers_uncertain: self.native.buffer_close_uncertain(),
+                had_controller,
+            });
+        }
         let closed = closed.map_err(unavailable);
         if closed.is_ok() {
             self.ownership = Ownership::ControllerClosed;

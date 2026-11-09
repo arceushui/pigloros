@@ -1168,6 +1168,136 @@ impl Fixture {
     }
 }
 
+#[derive(Clone, Copy)]
+enum ReleaseMode {
+    Standard,
+    BrowserFault,
+}
+
+struct ReleaseVerdict {
+    mode: ReleaseMode,
+    error: Option<BridgeError>,
+    verified: bool,
+    complete: bool,
+    blocked: bool,
+    wipe: WipeObservation,
+    close: Option<crate::adapter::surface::CloseObservation>,
+}
+
+impl ReleaseVerdict {
+    fn valid(&self) -> bool {
+        if !self.complete || !self.wipe.native {
+            return false;
+        }
+        if self.verified && self.error.is_none() {
+            return true;
+        }
+        matches!(self.mode, ReleaseMode::BrowserFault)
+            && self.error
+                == Some(BridgeError::Quarantine(
+                    pos_owner_bridge::QuarantineCode::ControllerCloseFailed,
+                ))
+            && self.wipe.request_and_prf
+            && self.wipe.plan_if_quarantined
+            && self.blocked
+            && self.close.is_some_and(|close| {
+                close.removed
+                    == Err(crate::NativeError {
+                        operation: crate::Operation::Subscription,
+                        failure: crate::Failure::CallFailed,
+                    })
+                    && close.closed.is_ok()
+                    && close.buffers_closed
+                    && !close.buffers_uncertain
+                    && close.had_controller
+            })
+    }
+}
+
+#[test]
+fn release_verdict_requires_the_exact_observed_quarantine_evidence() {
+    use crate::adapter::surface::CloseObservation;
+    let close = CloseObservation {
+        removed: Err(crate::NativeError {
+            operation: crate::Operation::Subscription,
+            failure: crate::Failure::CallFailed,
+        }),
+        closed: Ok(()),
+        buffers_closed: true,
+        buffers_uncertain: false,
+        had_controller: true,
+    };
+    let mut verdict = ReleaseVerdict {
+        mode: ReleaseMode::BrowserFault,
+        error: Some(BridgeError::Quarantine(
+            pos_owner_bridge::QuarantineCode::ControllerCloseFailed,
+        )),
+        verified: false,
+        complete: true,
+        blocked: true,
+        wipe: WipeObservation {
+            request_and_prf: true,
+            plan_if_quarantined: true,
+            native: true,
+        },
+        close: Some(close),
+    };
+    assert!(verdict.valid());
+    verdict.mode = ReleaseMode::Standard;
+    assert!(!verdict.valid());
+    verdict.mode = ReleaseMode::BrowserFault;
+    verdict.close = None;
+    assert!(!verdict.valid());
+    verdict.close = Some(CloseObservation {
+        closed: Err(crate::NativeError {
+            operation: crate::Operation::Controller,
+            failure: crate::Failure::CallFailed,
+        }),
+        ..close
+    });
+    assert!(!verdict.valid());
+    verdict.close = Some(CloseObservation {
+        removed: Ok(()),
+        ..close
+    });
+    assert!(!verdict.valid());
+    verdict.close = Some(CloseObservation {
+        buffers_uncertain: true,
+        ..close
+    });
+    assert!(!verdict.valid());
+    verdict.close = Some(CloseObservation {
+        buffers_closed: false,
+        ..close
+    });
+    assert!(!verdict.valid());
+    verdict.close = Some(CloseObservation {
+        had_controller: false,
+        ..close
+    });
+    assert!(!verdict.valid());
+    verdict.close = Some(close);
+    verdict.complete = false;
+    assert!(!verdict.valid());
+    verdict.complete = true;
+    verdict.wipe.request_and_prf = false;
+    assert!(!verdict.valid());
+    verdict.wipe.request_and_prf = true;
+    verdict.wipe.plan_if_quarantined = false;
+    assert!(!verdict.valid());
+    verdict.wipe.plan_if_quarantined = true;
+    verdict.wipe.native = false;
+    assert!(!verdict.valid());
+    verdict.wipe.native = true;
+    verdict.blocked = false;
+    assert!(!verdict.valid());
+    verdict.blocked = true;
+    verdict.error = Some(BridgeError::Quarantine(
+        pos_owner_bridge::QuarantineCode::CleanupTimeout,
+    ));
+    assert!(!verdict.valid());
+}
+
 fn run_success_releasing(
     runtime: &Path,
     root: &Path,
@@ -1196,12 +1326,39 @@ fn run_success_releasing(
         && observations
             .get(1)
             .is_some_and(|reply| reply.before_nonzero == Some(true));
+    let error = result.as_ref().err().copied();
+    let blocked = if error.is_some() {
+        fixture.handle.is_some()
+            && fixture.surface.release_quarantine_owners_retained()
+            && matches!(fixture.surface.open(&competing_spec()), Poll::Ready(Err(_)))
+            && fixture.surface.release_quarantine_owners_retained()
+    } else {
+        true
+    };
+    let verdict = ReleaseVerdict {
+        mode: if inject && target == ProcessFaultTarget::Browser {
+            ReleaseMode::BrowserFault
+        } else {
+            ReleaseMode::Standard
+        },
+        error,
+        verified,
+        complete,
+        blocked,
+        wipe: WipeObservation {
+            request_and_prf: driver.request_clear() && driver.prf().iter().all(|byte| *byte == 0),
+            plan_if_quarantined: driver.plan_secrets_clear(),
+            native: native_zeroed,
+        },
+        close: fixture.surface.initial_close_observation(),
+    };
+    let _logged = writeln!(std::io::stderr(), "NATIVE_RELEASE_VERDICT case={number} error={error:?} verified={verified} complete={complete} blocked={blocked} wiped={} plan_wiped={} native_zeroed={native_zeroed} close={:?}", verdict.wipe.request_and_prf, verdict.wipe.plan_if_quarantined, verdict.close);
     fixture.retire(driver, result, None)?;
     check_final_process_failures(inject.then_some(target))?;
     if let Some(error) = failure {
         return Err(error);
     }
-    if !verified || !complete || !native_zeroed {
+    if !verdict.valid() {
         return Err("successful release or nonzero native reply wipe was not established".into());
     }
     reached.ok_or_else(|| "successful release point was not reached".into())
