@@ -227,7 +227,7 @@ pub(super) fn run(runtime_path: &Path, root: &Path) -> TestResult {
                     && !armed
                     && !probe.events.invalid()
                     && !probe.unexpected_navigation.get()
-                    && served.count > 0
+                    && served.count == 1
                     && served.integrity_ok
             });
             if let Some(generation) = generation {

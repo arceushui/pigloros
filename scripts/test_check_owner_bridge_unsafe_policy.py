@@ -2006,6 +2006,8 @@ def test_external_qualification_is_sealed() -> None:
         (controls, 'assert_eq!(before.readback, Some(true));', ''),
         (controls, 'assert_eq!(before.completions, u32::from(before.deferred));', ''),
         (controls, '!probe.events.invalid()', 'true'),
+        (controls, 'served.count == 1', 'served.count > 0'),
+        (controls, 'served.count == 1', 'true'),
         (controls, 'probe.delivered.get()', 'true'),
         (controls, 'assert_denials(&before_exit, &after_exit, kind, mode);', ''),
         (controls, 'probe.events.exited() == Some(identity.browser_pid)', 'true'),
