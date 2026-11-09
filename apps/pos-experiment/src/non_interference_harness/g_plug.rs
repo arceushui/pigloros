@@ -409,7 +409,7 @@ fn host_record(row: RowV1, run: &GPlugRunV1<'_>, state: &[u8]) -> Value {
 
 /// The endpoint the host sends one PWQ1 request to; it returns one PWR1
 /// response, or nothing for a refused request.
-pub type GPlugEndpointV1 = fn(&[u8]) -> Option<Vec<u8>>;
+pub type GPlugEndpointV1 = fn(&[u8]) -> Option<zeroize::Zeroizing<Vec<u8>>>;
 
 /// The host side of the public Plugin protocol.
 ///
@@ -456,7 +456,10 @@ impl GPlugProtocolHostV1 {
     /// The protocol has no migrate-state call: the request is the `reduce`
     /// envelope with the call code set to 3, which the codec refuses.
     #[must_use]
-    pub fn migrate_state(&self, invocation: &PluginInvocationV1) -> Option<Vec<u8>> {
+    pub fn migrate_state(
+        &self,
+        invocation: &PluginInvocationV1,
+    ) -> Option<zeroize::Zeroizing<Vec<u8>>> {
         let reduce = encode_worker_request_v1(&request(WorkerCallV1::Reduce(invocation.clone())));
         let drive = encode_worker_request_v1(&request(WorkerCallV1::Drive(invocation.clone())));
         reduce
@@ -465,7 +468,7 @@ impl GPlugProtocolHostV1 {
             .and_then(|(mut migrate, drive)| {
                 migrate
                     .iter()
-                    .zip(&drive)
+                    .zip(drive.iter())
                     .position(|(left, right)| left != right)
                     .map(|code| {
                         migrate[code] = 3;
@@ -488,7 +491,7 @@ impl GPlugProtocolHostV1 {
 /// record with every G-PLUG capability not granted, and Local mode.
 fn request(call: WorkerCallV1) -> WorkerRequestV1 {
     WorkerRequestV1 {
-        component: G_PLUG_COMPONENT_V1.to_vec(),
+        component: G_PLUG_COMPONENT_V1.to_vec().into(),
         negotiation: NegotiatedTransportV1 {
             world: WORLD.to_owned(),
             plugin_id: G_PLUG_GUEST_PLUGIN_ID_V1.to_owned(),
@@ -615,21 +618,21 @@ pub fn g_plug_invocation_v1(
 ///   observation; an observation with [`G_PLUG_PROBE_PREFIX_V1`] is answered
 ///   with `capability-required` for the capability that follows it.
 #[must_use]
-pub fn serve_g_plug_fixture_guest_v1(request: &[u8]) -> Option<Vec<u8>> {
+pub fn serve_g_plug_fixture_guest_v1(request: &[u8]) -> Option<zeroize::Zeroizing<Vec<u8>>> {
     decode_worker_request_v1(request)
         .ok()
-        .filter(|request| request.component == G_PLUG_COMPONENT_V1)
-        .and_then(|request| encode_worker_response_v1(&Ok(guest_return(request.call))).ok())
+        .filter(|request| request.component.as_slice() == G_PLUG_COMPONENT_V1)
+        .and_then(|request| encode_worker_response_v1(&Ok(guest_return(&request.call))).ok())
 }
 
-fn guest_return(call: WorkerCallV1) -> WorkerReturnV1 {
+fn guest_return(call: &WorkerCallV1) -> WorkerReturnV1 {
     match call {
         WorkerCallV1::Describe => WorkerReturnV1::Described(report(Ok(descriptor()))),
         WorkerCallV1::Drive(invocation) => {
-            WorkerReturnV1::Produced(report(Ok(drive_output(&invocation))))
+            WorkerReturnV1::Produced(report(Ok(drive_output(invocation))))
         }
         WorkerCallV1::Reduce(invocation) => {
-            WorkerReturnV1::Produced(report(reduce_output(&invocation)))
+            WorkerReturnV1::Produced(report(reduce_output(invocation)))
         }
     }
 }
@@ -769,10 +772,9 @@ impl Driver for GPlugDriver {
                 self.observation.clone(),
                 Vec::new(),
             ))
-            .map(|output| {
+            .map(|mut output| {
                 StepOutput::new(
-                    output
-                        .event_drafts
+                    std::mem::take(&mut output.event_drafts)
                         .into_iter()
                         .map(|draft| {
                             EventDraft::new(
@@ -1098,7 +1100,7 @@ fn rebuild(
                         Value::Bytes(digest(&invocation.prior_state_bytes).to_vec()),
                     ]));
                     match result {
-                        Ok(output) => {
+                        Ok(mut output) => {
                             let consumed = Value::Array(
                                 output
                                     .consumed_dependencies
@@ -1115,7 +1117,7 @@ fn rebuild(
                             rebuilt
                                 .edges
                                 .push(Value::Array(vec![uint(ordinal), consumed]));
-                            rebuilt.state = output.next_state_bytes;
+                            rebuilt.state = std::mem::take(&mut output.next_state_bytes);
                         }
                         Err(error) => {
                             let record = Value::Array(vec![
