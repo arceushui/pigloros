@@ -49,6 +49,7 @@ pub mod provider_transport;
 #[cfg(unix)]
 #[doc(hidden)]
 pub mod root_selector;
+pub mod run_evidence_archive;
 pub mod sandbox_provider_protocol;
 #[cfg(unix)]
 pub mod selector;
