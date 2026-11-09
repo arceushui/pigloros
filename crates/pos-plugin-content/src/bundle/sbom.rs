@@ -44,12 +44,9 @@ pub(super) fn validate(value: &Value, component: &str) -> Result<(), Refusal> {
         nonempty(value.get(field))?;
     }
     let creation = &value["creationInfo"];
-    nonempty(creation.get("created"))?;
-    let creators = creation["creators"]
-        .as_array()
-        .filter(|creators| !creators.is_empty())
-        .ok_or(Refusal::Malformed)?;
-    for creator in creators {
+    // The pinned schema requires the timestamp and a nonempty creator array.
+    // Its string items may still be blank, which this profile rejects.
+    for creator in items(creation, "creators") {
         nonempty(Some(creator))?;
     }
     let mut elements = BTreeMap::new();
