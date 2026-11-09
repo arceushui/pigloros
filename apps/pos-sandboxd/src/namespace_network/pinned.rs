@@ -93,8 +93,9 @@ impl NetworkNamespaces {
         }
     }
 
-    /// Every attempt namespace entry: each entry whose name
-    /// [`NamespaceName::parse`] accepts. A missing directory holds none.
+    /// Every attempt namespace entry: each entry that is no directory and
+    /// whose name [`NamespaceName::parse`] accepts. A missing directory holds
+    /// none.
     ///
     /// # Errors
     /// Fails if the directory exists but cannot be read.
@@ -105,8 +106,14 @@ impl NetworkNamespaces {
                 .and_then(|entries| {
                     entries
                         .map(|entry| {
-                            entry.map(|entry| {
-                                entry.file_name().to_str().and_then(NamespaceName::parse)
+                            entry.and_then(|entry| {
+                                entry.file_type().map(|kind| {
+                                    entry
+                                        .file_name()
+                                        .to_str()
+                                        .filter(|_| !kind.is_dir())
+                                        .and_then(NamespaceName::parse)
+                                })
                             })
                         })
                         .filter_map(Result::transpose)

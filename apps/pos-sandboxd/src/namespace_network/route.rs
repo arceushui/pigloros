@@ -30,7 +30,7 @@ use super::netlink::{observed_link, NetlinkError, Request};
 use super::{IpPrefix, LinkName, NamespaceRoute, ObservedAddress, ObservedLink, ObservedRoute};
 
 /// `-ENODEV`: the kernel has no link of the requested name.
-const NO_SUCH_LINK: i32 = -19;
+pub(super) const NO_SUCH_LINK: i32 = -19;
 /// `RT_TABLE_MAIN`, as a 32-bit `RTA_TABLE` reports it.
 const MAIN_TABLE: u32 = 254;
 /// `NETNSA_NSID_NOT_ASSIGNED`: let the kernel choose the identifier.

@@ -19,6 +19,16 @@ fn a_missing_namespace_is_not_observed_and_removes_as_nothing() -> TestResult {
 }
 
 #[test]
+fn a_link_already_gone_counts_as_deleted() {
+    assert!(already_gone(Ok(())).is_ok());
+    assert!(already_gone(Err(NetlinkError::Kernel(-19))).is_ok());
+    assert!(matches!(
+        already_gone(Err(NetlinkError::Kernel(-1))),
+        Err(NetlinkError::Kernel(-1))
+    ));
+}
+
+#[test]
 fn nothing_orphaned_removes_as_nothing() -> TestResult {
     let directory = tempfile::tempdir()?;
     // Reading the host's links needs no privilege, and the test host has no

@@ -57,6 +57,12 @@ fn only_attempt_entries_are_listed() -> TestResult {
     for entry in [name.as_str(), "piglor-short", "other"] {
         std::fs::write(directory.path().join(entry), b"")?;
     }
+    // A directory of an attempt's name is no pin.
+    std::fs::create_dir(
+        directory
+            .path()
+            .join(NamespaceName::for_attempt([4; 16]).as_str()),
+    )?;
     let namespaces = NetworkNamespaces::pinned_under(directory.path());
     assert_eq!(namespaces.attempt_names().ok(), Some(vec![name]));
     let missing = NetworkNamespaces::pinned_under(directory.path().join("missing"));
