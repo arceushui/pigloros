@@ -141,6 +141,144 @@ pub fn attached_fixture_root(
         .map_err(|error| error.to_string())
 }
 
+#[tokio::test]
+async fn recorded_generations_are_absent_only_when_neither_device_remains() -> TestResult {
+    let host = tempfile::tempdir()?;
+    let block = host.path().join("sys/dev/block");
+    fs::create_dir_all(&block)?;
+    let kernel = HostKernel::at(&host.path().join("proc"), &host.path().join("sys"));
+    let recorded = [((253, 3), 102), ((7, 7), 101)];
+    assert_eq!(generations_absent(&kernel, recorded).await, Ok(true));
+    // The loop is still present with its recorded generation, then with an
+    // older, contradictory one.
+    fs::create_dir(block.join("7:7"))?;
+    fs::write(block.join("7:7/dev"), "7:7\n")?;
+    for (diskseq, expected) in [
+        ("101\n", Ok(false)),
+        (
+            "100\n",
+            Err(ImageActivationError::ResourceAbsenceUnverified),
+        ),
+    ] {
+        fs::write(block.join("7:7/diskseq"), diskseq)?;
+        assert_eq!(generations_absent(&kernel, recorded).await, expected);
+    }
+    // A zero sequence is never a recorded generation.
+    assert_eq!(
+        generations_absent(&kernel, [((253, 3), 102), ((7, 7), 0)]).await,
+        Err(ImageActivationError::ResourceAbsenceUnverified)
+    );
+    // The real host has no device under the largest major and minor numbers.
+    assert_eq!(
+        RootResourceIdentity::recorded_generations_absent([
+            ((4095, 1_048_575), 1),
+            ((4095, 1_048_574), 1)
+        ])
+        .await,
+        Ok(true)
+    );
+    // The production entry refuses a zero sequence.
+    assert_eq!(
+        RootResourceIdentity::recorded_generations_absent([
+            ((4095, 1_048_575), 1),
+            ((4095, 1_048_574), 0)
+        ])
+        .await,
+        Err(ImageActivationError::ResourceAbsenceUnverified)
+    );
+    Ok(())
+}
+
+/// One fake `/sys/block/<name>` entry, with a `loop` directory when `bound`
+/// and a backing file when `backing` is given.
+fn fake_block(block: &Path, name: &str, bound: bool, backing: Option<&str>) -> TestResult {
+    let directory = block.join(name).join(if bound { "loop" } else { "" });
+    fs::create_dir_all(&directory)?;
+    if let Some(text) = backing {
+        fs::write(directory.join("backing_file"), text)?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn only_a_loop_over_a_provider_image_or_an_unreadable_loop_refuses() -> TestResult {
+    use std::os::unix::ffi::OsStrExt;
+
+    let host = tempfile::tempdir()?;
+    let root = host.path();
+    let block = root.join("sys/block");
+    let kernel = HostKernel::at(&root.join("proc"), &root.join("sys"));
+    // The image directory is reached through a symlinked root, as it would
+    // be through a symlinked or bind-mounted parent.
+    for directory in ["real/images", "real/images-other"] {
+        fs::create_dir_all(root.join(directory))?;
+        fs::write(root.join(directory).join("ab"), b"image")?;
+    }
+    std::os::unix::fs::symlink("real", root.join("link"))?;
+    std::os::unix::fs::symlink("real", root.join("bind"))?;
+    let images = root.join("link/images");
+    let (lexical, canonical, bound) = (
+        images.display().to_string(),
+        root.join("real/images").display().to_string(),
+        root.join("bind/images").display().to_string(),
+    );
+    // No block class to list.
+    assert_eq!(kernel.provider_loops_absent(&images), None);
+    // Unbound loops, other disks, non-loop or non-UTF-8 names and an
+    // unrelated backing file are ignored.
+    fake_block(&block, "loop0", false, None)?;
+    fake_block(&block, "sda", true, Some(&format!("{lexical}/ab\n")))?;
+    fake_block(&block, "loopx", true, None)?;
+    fs::create_dir(block.join(std::ffi::OsStr::from_bytes(b"loop\xff")))?;
+    fake_block(&block, "loop1", true, Some("/srv/other.img\n"))?;
+    fake_block(&block, "loop2", true, Some("/srv/other.img\n"))?;
+    // An image directory that cannot be resolved refuses.
+    assert_eq!(kernel.provider_loops_absent(&root.join("missing")), None);
+    let real = root.join("real").display().to_string();
+    for (printed, absent) in [
+        // Each rule alone: beneath the fixed path, beneath the canonical path
+        // (both one level down, so the parent is not the image directory), or
+        // a parent with the image directory's identity. Deleted images still
+        // match.
+        (format!("{lexical}/sub/ab"), false),
+        (format!("{canonical}/sub/ab"), false),
+        (format!("{bound}/ab"), false),
+        (format!("{lexical}/sub/gone (deleted)"), false),
+        (format!("{bound}/gone (deleted)"), false),
+        // A prefix in the middle, a sibling directory and unrelated files.
+        (format!("/srv{canonical}/ab"), true),
+        (format!("{real}/images-other/ab"), true),
+        ("/srv/gone.img (deleted)".to_owned(), true),
+        ("/srv/other.img".to_owned(), true),
+    ] {
+        fs::write(
+            block.join("loop2/loop/backing_file"),
+            format!("{printed}\n"),
+        )?;
+        assert_eq!(
+            kernel.provider_loops_absent(&images),
+            Some(absent),
+            "{printed}"
+        );
+    }
+    // An unobservable `loop` entry, then an empty and a missing backing file.
+    fs::write(block.join("loop3"), b"not a device directory")?;
+    assert_eq!(kernel.provider_loops_absent(&images), None);
+    fs::remove_file(block.join("loop3"))?;
+    fs::write(block.join("loop2/loop/backing_file"), "\n")?;
+    assert_eq!(kernel.provider_loops_absent(&images), None);
+    fs::remove_file(block.join("loop2/loop/backing_file"))?;
+    assert_eq!(kernel.provider_loops_absent(&images), None);
+    // The production entry sweeps the real host, whose installation and
+    // loop devices vary. Without an installed image directory it refuses.
+    let swept = RootResourceIdentity::provider_loops_absent().await;
+    let installed = Path::new(pos_reference::selector::installation::SANDBOX_ARTIFACT_ROOT)
+        .join("images")
+        .exists();
+    assert!(installed || swept == Err(ImageActivationError::ResourceAbsenceUnverified));
+    Ok(())
+}
+
 fn cleanup_deadline() -> tokio::time::Instant {
     tokio::time::Instant::now() + std::time::Duration::from_secs(1)
 }
@@ -1423,6 +1561,54 @@ fn corrupt_held_image(snapshot: &ProviderImageSnapshot) -> TestResult {
     Ok(())
 }
 
+/// An activator that rejects every request it is sent.
+struct RejectingActivator;
+
+impl ImageActivator for RejectingActivator {
+    fn mount_image(
+        self,
+        _: ActivationImage,
+    ) -> impl Future<Output = Result<QuarantinedRootMount, ImageActivationError>> + Send {
+        std::future::ready(Err(ImageActivationError::MethodRejected))
+    }
+}
+
+/// The registry's activation marker records a request sent on this boot.
+fn assert_request_recorded() -> TestResult {
+    let marker = fs::read("/run/pigloros/sandbox/registry/activation")?;
+    let hex = fs::read_to_string("/proc/sys/kernel/random/boot_id")?
+        .trim_end()
+        .replace('-', "");
+    let boot = (0..16)
+        .map(|index| u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16))
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(
+        (marker.get(..4), marker.len(), marker.get(4..20)),
+        (Some(b"PAA1".as_slice()), 36, Some(boot.as_slice()))
+    );
+    Ok(())
+}
+
+/// A marker that cannot be replaced refuses the request before it is sent.
+async fn unreplaceable_marker_refuses(
+    kernel: &FakeKernel,
+    admission: &HeldImageAdmission<'_>,
+    prepared: &PreparedAttemptDirectory,
+) -> TestResult {
+    let marker = Path::new("/run/pigloros/sandbox/registry/activation");
+    fs::remove_file(marker)?;
+    fs::create_dir(marker)?;
+    assert_eq!(
+        activate(kernel, admission, prepared, || std::future::ready(Ok(
+            RejectingActivator
+        )))
+        .await
+        .err(),
+        Some(ImageActivationError::AttachFailure)
+    );
+    Ok(())
+}
+
 /// Activate `prepared` once more, release its root and finish its cleanup.
 async fn retry_and_clean(
     kernel: &FakeKernel,
@@ -1484,6 +1670,11 @@ async fn the_admitted_chain_reaches_attachment_only_through_every_gate() -> Test
         .err(),
         Some(ImageActivationError::HostFeatureUnavailable)
     );
+    // No request was sent, so the marker still records none.
+    assert_eq!(
+        fs::read("/run/pigloros/sandbox/registry/activation")?,
+        [b"PAA1".as_slice(), &[0; 32]].concat()
+    );
 
     fs::create_dir("/run/systemd")?;
     let listener = UnixListener::bind("/run/systemd/io.systemd.MountFileSystem")?;
@@ -1493,6 +1684,7 @@ async fn the_admitted_chain_reaches_attachment_only_through_every_gate() -> Test
     // Neither early failure reached mountfsd, so after one successful retry
     // the released root alone lets terminal cleanup delete intent last.
     retry_and_clean(&kernel, &admission, prepared).await?;
+    assert_request_recorded()?;
     let prepared = registry.commit_planned(&planned)?.prepare_directory()?;
 
     // Every gate passes: the verified root names the attempt path.
@@ -1528,6 +1720,8 @@ async fn the_admitted_chain_reaches_attachment_only_through_every_gate() -> Test
     );
     assert_eq!(kernel.detached(), 2);
     peer.join().map_err(|_| "the fake mountfsd panicked")??;
+
+    unreplaceable_marker_refuses(&kernel, &admission, &prepared).await?;
 
     // A replaced attempt root rejects before mountfsd is called.
     let attempt = Path::new("/run/pigloros/sandbox/attempts").join(component(&prepared));

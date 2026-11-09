@@ -35,6 +35,8 @@ mod release_barrier;
 #[cfg(target_os = "linux")]
 mod release_signer;
 #[cfg(target_os = "linux")]
+mod restart;
+#[cfg(target_os = "linux")]
 mod root_attachment;
 #[cfg(target_os = "linux")]
 mod staging;
@@ -46,6 +48,10 @@ mod system_bus;
 #[doc(hidden)]
 pub mod test_fixtures;
 mod transient_unit;
+
+/// A boot ID and a `CLOCK_MONOTONIC` time on that boot.
+#[cfg(target_os = "linux")]
+type BootInstant = ([u8; 16], std::time::Duration);
 
 #[derive(Debug)]
 struct CgroupRoot(std::fs::File);
@@ -160,6 +166,11 @@ pub use local_network::{
     BoundLocalProxy, CheckedLocal, EstablishedNetwork, FailClosedLocalNetwork, HostServiceChannel,
     HostServiceStream, LocalNetworkPort, LocalProxyBindError, RefusingConnector, ServeError,
     ServedProxy,
+};
+#[cfg(target_os = "linux")]
+pub use restart::{
+    reconcile_restart, OrphanNetworkCleanup, ReconciledRestart, RestartReconciliationError,
+    RootsReleased,
 };
 
 #[cfg(target_os = "linux")]

@@ -16,8 +16,17 @@ const PATH_END: usize = VALUES_END + 68;
 const UUID_END: usize = PATH_END + 129;
 pub(super) const ROOT_RECORD_SIZE: usize = UUID_END + 16;
 
+/// The recorded loop/dm generations of one root, mapper first.
+pub(super) type Generations = [((u32, u32), u64); 2];
+
+/// Exact PAI3 bytes and the generations decoded from them. Every value is
+/// built by [`RootRecord::decode`], so each device component fits `u32` and
+/// each sequence is above zero by construction.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct RootRecord([u8; ROOT_RECORD_SIZE]);
+pub(super) struct RootRecord {
+    bytes: [u8; ROOT_RECORD_SIZE],
+    generations: Generations,
+}
 
 impl RootRecord {
     pub(super) fn new(
@@ -88,7 +97,7 @@ impl RootRecord {
         let [mount_id, root_major, root_minor, root_inode, _, image_inode, mapper_major, mapper_minor, mapper_sequence, loop_major, loop_minor, loop_sequence] =
             values;
         let root = ActivatedRootDirectory::path_for_attempt(intent.unit_name().attempt_component());
-        if [
+        let consistent = ![
             mount_id,
             root_inode,
             image_inode,
@@ -96,29 +105,34 @@ impl RootRecord {
             loop_sequence,
         ]
         .contains(&0)
-            || [
-                root_major,
-                root_minor,
-                mapper_major,
-                mapper_minor,
-                loop_major,
-                loop_minor,
-            ]
-            .iter()
-            .any(|component| *component > u64::from(u32::MAX))
-            || (root_major, root_minor) != (mapper_major, mapper_minor)
-            || bytes[VALUES_END..PATH_END] != *root.as_bytes()
-            || read_text(&bytes[PATH_END..UUID_END]).is_none()
-            || read_text(&bytes[UUID_END..]).is_none()
-        {
-            return Err(SystemdAttemptRegistryError::InvalidIntent);
-        }
-        Ok(Self(*bytes))
+            // The root device is the mapper, so the mapper's bound covers it.
+            && (root_major, root_minor) == (mapper_major, mapper_minor)
+            && bytes[VALUES_END..PATH_END] == *root.as_bytes()
+            && read_text(&bytes[PATH_END..UUID_END]).is_some()
+            && read_text(&bytes[UUID_END..]).is_some();
+        device(mapper_major, mapper_minor)
+            .zip(device(loop_major, loop_minor))
+            .filter(|_| consistent)
+            .map(|(mapper, loop_device)| Self {
+                bytes: *bytes,
+                generations: [(mapper, mapper_sequence), (loop_device, loop_sequence)],
+            })
+            .ok_or(SystemdAttemptRegistryError::InvalidIntent)
     }
 
     pub(super) const fn bytes(&self) -> &[u8; ROOT_RECORD_SIZE] {
-        &self.0
+        &self.bytes
     }
+
+    /// The recorded mapper and loop generations, in that order.
+    pub(super) const fn generations(&self) -> Generations {
+        self.generations
+    }
+}
+
+/// A recorded device number, only when both components fit `u32`.
+fn device(major: u64, minor: u64) -> Option<(u32, u32)> {
+    u32::try_from(major).ok().zip(u32::try_from(minor).ok())
 }
 
 fn write_text(slot: &mut [u8], value: &str) -> Result<(), SystemdAttemptRegistryError> {
