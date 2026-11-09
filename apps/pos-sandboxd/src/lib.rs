@@ -105,6 +105,8 @@ pub use local_network::{
     ServedProxy,
 };
 #[cfg(target_os = "linux")]
+pub use namespace_network::netlink;
+#[cfg(target_os = "linux")]
 pub use namespace_network::{
     decode_firewall_rule, encode_firewall_rule, establish_namespace, EstablishError,
     EstablishFailure, ExpectedNamespace, FirewallBaseChain, FirewallChain, FirewallHook,

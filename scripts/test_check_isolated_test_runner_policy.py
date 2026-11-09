@@ -21,12 +21,21 @@ OWNER_PATHS = tuple(
     for source in sorted((ROOT / "crates").glob("**/*.rs"))
     if any(runner.name in source.read_text(encoding="utf-8") for runner in RUNNERS)
 )
+NET_ADMIN_RUNNER = Path("scripts/run-isolated-with-net-admin-test.sh")
+NET_ADMIN_OWNER_PATHS = tuple(
+    source.relative_to(ROOT)
+    for source in sorted((ROOT / "apps").glob("**/*.rs"))
+    if NET_ADMIN_RUNNER.name in source.read_text(encoding="utf-8")
+)
+if not NET_ADMIN_OWNER_PATHS:
+    raise SystemExit("no Rust owner of the NET_ADMIN isolated test runner was discovered")
 if not OWNER_PATHS:
     raise SystemExit("no Rust owners of delegated isolated test runners were discovered")
 FIXTURES = (
     Path(".github/workflows/ci.yml"),
     Path(".github/workflows/mutation.yml"),
     *OWNER_PATHS,
+    *NET_ADMIN_OWNER_PATHS,
     *RUNNER_PATHS,
 )
 PRIMARY_OWNER = OWNER_PATHS[0]
@@ -150,6 +159,26 @@ def main() -> None:
             "set +e",
             "docker_arguments+=(--cap-add SYS_ADMIN)\nset +e",
         ),
+        (
+            NET_ADMIN_RUNNER,
+            "set +e",
+            "docker_arguments+=(--cap-add SYS_PTRACE)\nset +e",
+        ),
+        (
+            NET_ADMIN_RUNNER,
+            "  --cap-add NET_ADMIN\n",
+            "  --cap-add NET_RAW\n",
+        ),
+        (
+            NET_ADMIN_RUNNER,
+            "namespace_network::netlink::tests::privileged::*) ;;",
+            "*) ;;",
+        ),
+        (
+            NET_ADMIN_RUNNER,
+            "--network none",
+            "--network host",
+        ),
     )
     with tempfile.TemporaryDirectory() as directory:
         temporary = Path(directory)
@@ -169,6 +198,15 @@ def main() -> None:
         )
         if invoke(multiple_owners).returncode == 0:
             raise SystemExit("another valid caller concealed an unrecognized runner")
+        # Only the Local namespace adapter may own the NET_ADMIN runner.
+        foreign_owner = temporary / "foreign-net-admin-owner"
+        copy_fixture(foreign_owner)
+        (foreign_owner / "apps/pos-sandboxd/src/foreign_owner.rs").write_text(
+            (foreign_owner / NET_ADMIN_OWNER_PATHS[0]).read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        if invoke(foreign_owner).returncode == 0:
+            raise SystemExit("a foreign owner of the NET_ADMIN runner was accepted")
         for index, (relative, old, new) in enumerate(mutations):
             fixture_root = temporary / str(index)
             copy_fixture(fixture_root)
