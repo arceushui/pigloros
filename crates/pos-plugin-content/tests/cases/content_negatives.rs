@@ -336,6 +336,11 @@ fn schema_vocabularies_and_global_index_budgets_are_explicit() -> TestResult {
     fixture.schemas = vec![bytes(&json!({"$vocabulary":vocabulary}))];
     assert_eq!(result(&fixture)?, Ok(()));
 
+    fixture.schemas = vec![bytes(&json!({"$defs":{"nested":{
+        "$schema":"https://json-schema.org/draft/2020-12/schema"
+    }}}))];
+    assert_eq!(result(&fixture)?, Ok(()));
+
     for count in [65_536, 65_537] {
         let mut fixture = Fixture::new();
         fixture.schemas = vec![bytes(&json!({"allOf":vec![json!({"$ref":"#"});count]}))];

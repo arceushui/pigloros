@@ -186,3 +186,18 @@ pub(super) fn validate(documents: &[Document]) -> Result<(), (u16, Refusal)> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use jsonschema::{uri, Retrieve};
+
+    use super::Offline;
+
+    #[test]
+    fn offline_retriever_refuses_even_when_called_directly(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let target = uri::from_str("https://example.invalid/never-fetch")?;
+        assert!(Offline.retrieve(&target).is_err());
+        Ok(())
+    }
+}
