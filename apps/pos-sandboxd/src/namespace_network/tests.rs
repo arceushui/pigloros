@@ -13,6 +13,10 @@ const ATTEMPT: [u8; 16] = [
 ];
 const INNER: u32 = 2;
 const HOST: u32 = 41;
+/// The identifier the host assigns to the attempt namespace.
+const NAMESPACE_ID: i32 = 5;
+/// The identifier the attempt namespace assigns to the host namespace.
+const HOST_ID: i32 = 0;
 
 const fn v4(last: u8) -> IpAddr {
     IpAddr::V4(Ipv4Addr::new(10, 77, 0, last))
@@ -54,7 +58,14 @@ fn chains() -> Vec<FirewallChain> {
         base(
             FirewallHook::Output,
             vec![
-                FirewallRule::AcceptNeighbourDiscovery,
+                FirewallRule::SendNeighbourDiscovery {
+                    destination: Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 0),
+                    length: 16,
+                },
+                FirewallRule::SendNeighbourDiscovery {
+                    destination: Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 0),
+                    length: 128,
+                },
                 FirewallRule::AcceptTcp(endpoint()),
             ],
         ),
@@ -130,7 +141,10 @@ fn observed() -> ObservedNamespace {
             link(
                 INNER,
                 "piglor-n0",
-                LinkKind::Veth { peer_index: HOST },
+                LinkKind::Veth {
+                    peer_index: HOST,
+                    peer_netnsid: Some(HOST_ID),
+                },
                 true,
             ),
             link(1, "lo", LinkKind::Loopback, false),
@@ -140,15 +154,21 @@ fn observed() -> ObservedNamespace {
         tables: vec![ObservedTable {
             family: FirewallTableFamily::Inet,
             name: "piglor_attempt".to_owned(),
+            flags: 0,
             chains,
         }],
         host_link: Some(link(
             HOST,
             "piglor-h0",
-            LinkKind::Veth { peer_index: INNER },
+            LinkKind::Veth {
+                peer_index: INNER,
+                peer_netnsid: Some(NAMESPACE_ID),
+            },
             true,
         )),
         host_addresses: vec![on(HOST, prefix(v6(0), 127)), on(HOST, prefix(v4(1), 30))],
+        namespace_netnsid: NAMESPACE_ID,
+        host_netnsid: HOST_ID,
     }
 }
 
@@ -258,19 +278,44 @@ fn a_missing_down_or_foreign_host_veth_is_refused() -> TestResult {
 
 #[test]
 fn veth_ends_that_are_not_each_others_peer_are_refused() -> TestResult {
-    let inner_peer = |observed: &mut ObservedNamespace| {
-        observed.links[0].kind = LinkKind::Veth {
-            peer_index: HOST + 1,
-        };
-    };
-    let host_peer = |observed: &mut ObservedNamespace| {
-        if let Some(host) = observed.host_link.as_mut() {
-            host.kind = LinkKind::Veth {
-                peer_index: INNER + 1,
+    let inner = |peer_index, peer_netnsid| {
+        move |observed: &mut ObservedNamespace| {
+            observed.links[0].kind = LinkKind::Veth {
+                peer_index,
+                peer_netnsid,
             };
         }
     };
-    for change in [&inner_peer as &dyn Fn(&mut ObservedNamespace), &host_peer] {
+    let host = |peer_index, peer_netnsid| {
+        move |observed: &mut ObservedNamespace| {
+            if let Some(host) = observed.host_link.as_mut() {
+                host.kind = LinkKind::Veth {
+                    peer_index,
+                    peer_netnsid,
+                };
+            }
+        }
+    };
+    // Interface indexes are per namespace: the same index in another
+    // namespace is another link.
+    let inner_index = inner(HOST + 1, Some(HOST_ID));
+    let inner_namespace = inner(HOST, Some(HOST_ID + 1));
+    let inner_unnamed = inner(HOST, None);
+    let host_index = host(INNER + 1, Some(NAMESPACE_ID));
+    let host_namespace = host(INNER, Some(NAMESPACE_ID + 1));
+    let host_unnamed = host(INNER, None);
+    let renumbered_namespace = |observed: &mut ObservedNamespace| observed.namespace_netnsid = 6;
+    let renumbered_host = |observed: &mut ObservedNamespace| observed.host_netnsid = 1;
+    for change in [
+        &inner_index as &dyn Fn(&mut ObservedNamespace),
+        &inner_namespace,
+        &inner_unnamed,
+        &host_index,
+        &host_namespace,
+        &host_unnamed,
+        &renumbered_namespace,
+        &renumbered_host,
+    ] {
         assert_eq!(mismatch(change)?, Err(ReadbackMismatch::Peer));
     }
     Ok(())
@@ -358,6 +403,8 @@ fn another_table_chain_or_rule_is_refused() -> TestResult {
         observed.tables[0].family = FirewallTableFamily::Other;
     };
     let name = |observed: &mut ObservedNamespace| observed.tables[0].name = "filter".into();
+    // `NFT_TABLE_F_DORMANT`: the rules would filter nothing.
+    let dormant = |observed: &mut ObservedNamespace| observed.tables[0].flags = 1;
     let missing_chain = |observed: &mut ObservedNamespace| {
         observed.tables[0].chains.pop();
     };
@@ -384,8 +431,23 @@ fn another_table_chain_or_rule_is_refused() -> TestResult {
         observed.tables[0].chains[1].rules.reverse();
     };
     let other_endpoint = |observed: &mut ObservedNamespace| {
-        observed.tables[0].chains[1].rules[1] =
+        observed.tables[0].chains[1].rules[2] =
             FirewallRule::AcceptTcp(SocketAddr::new(endpoint().ip(), 8444));
+    };
+    let wider_discovery = |observed: &mut ObservedNamespace| {
+        observed.tables[0].chains[1].rules[1] = FirewallRule::SendNeighbourDiscovery {
+            destination: Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 0),
+            length: 64,
+        };
+    };
+    let discovery_elsewhere = |observed: &mut ObservedNamespace| {
+        observed.tables[0].chains[1].rules[0] = FirewallRule::SendNeighbourDiscovery {
+            destination: Ipv6Addr::new(0xff05, 0, 0, 0, 0, 0, 0, 0),
+            length: 16,
+        };
+    };
+    let unrestricted_discovery = |observed: &mut ObservedNamespace| {
+        observed.tables[0].chains[1].rules[0] = FirewallRule::AcceptNeighbourDiscovery;
     };
     let extra_rule = |observed: &mut ObservedNamespace| {
         observed.tables[0].chains[0]
@@ -397,6 +459,7 @@ fn another_table_chain_or_rule_is_refused() -> TestResult {
         &second_table,
         &family,
         &name,
+        &dormant,
         &missing_chain,
         &regular_chain,
         &accept_policy,
@@ -404,6 +467,9 @@ fn another_table_chain_or_rule_is_refused() -> TestResult {
         &hook,
         &reordered_rules,
         &other_endpoint,
+        &wider_discovery,
+        &discovery_elsewhere,
+        &unrestricted_discovery,
         &extra_rule,
     ] {
         assert_eq!(mismatch(change)?, Err(ReadbackMismatch::Firewall));
@@ -453,11 +519,13 @@ fn mismatches_name_the_part_that_differs() {
 #[error("kernel refused {0}")]
 struct KernelError(&'static str);
 
-/// A namespace control that records every call and fails where told to.
+/// A namespace control that records every call, fails where told to, and
+/// models host links as `(name, peer namespace)` pairs.
 struct FakeControl {
     fail: Vec<&'static str>,
     observed: ObservedNamespace,
     calls: RefCell<Vec<(&'static str, String, String)>>,
+    host_links: RefCell<Vec<(String, String)>>,
 }
 
 impl FakeControl {
@@ -466,6 +534,7 @@ impl FakeControl {
             fail: fail.to_vec(),
             observed: observed(),
             calls: RefCell::default(),
+            host_links: RefCell::default(),
         }
     }
 
@@ -496,7 +565,21 @@ impl NamespaceControl for FakeControl {
     type Error = KernelError;
 
     fn install(&self, expected: &ExpectedNamespace) -> Result<(), KernelError> {
+        let host = expected.host_link.as_str().to_owned();
+        let taken = self.host_links.borrow().iter().any(|link| link.0 == host);
         self.call("install", &expected.name, &expected.host_link)
+            .and_then(|()| {
+                if taken {
+                    Err(KernelError("existing host link"))
+                } else {
+                    Ok(())
+                }
+            })
+            .map(|()| {
+                self.host_links
+                    .borrow_mut()
+                    .push((host, expected.name.as_str().to_owned()));
+            })
     }
 
     fn observe(
@@ -509,7 +592,11 @@ impl NamespaceControl for FakeControl {
     }
 
     fn remove(&self, name: &NamespaceName, host_link: &LinkName) -> Result<(), KernelError> {
-        self.call("remove", name, host_link)
+        self.call("remove", name, host_link).map(|()| {
+            self.host_links.borrow_mut().retain(|link| {
+                (link.0.as_str(), link.1.as_str()) != (host_link.as_str(), name.as_str())
+            });
+        })
     }
 }
 
@@ -546,6 +633,7 @@ fn a_failed_install_is_removed() -> TestResult {
         error.to_string(),
         "the attempt namespace could not be established"
     );
+    assert!(control.host_links.borrow().is_empty());
     assert_eq!(
         error.source().map(ToString::to_string).as_deref(),
         Some("the attempt namespace could not be installed")
@@ -569,6 +657,8 @@ fn a_failed_readback_is_removed() -> TestResult {
         error.failure.to_string(),
         "the attempt namespace could not be read back"
     );
+    // The removal took the link this install created.
+    assert!(control.host_links.borrow().is_empty());
     Ok(())
 }
 
@@ -606,5 +696,28 @@ fn a_failed_removal_is_reported_for_reconciliation() -> TestResult {
         Some("kernel refused remove")
     );
     assert_eq!(control.steps(), ["install", "remove"]);
+    assert_eq!(
+        error.to_string(),
+        "the attempt namespace could not be established, and removing it failed: \
+         kernel refused remove"
+    );
+    Ok(())
+}
+
+#[test]
+fn another_attempts_host_link_survives_a_failed_establish() -> TestResult {
+    let control = FakeControl::new(&[]);
+    let other = ("piglor-h0".to_owned(), "piglor-other".to_owned());
+    control.host_links.borrow_mut().push(other.clone());
+    let error = establish_namespace(&control, &expected()?)
+        .err()
+        .ok_or("a taken host link must not establish")?;
+    assert!(matches!(
+        error.failure,
+        EstablishFailure::Install(KernelError("existing host link"))
+    ));
+    assert!(error.removal.is_none());
+    assert_eq!(control.steps(), ["install", "remove"]);
+    assert_eq!(*control.host_links.borrow(), [other]);
     Ok(())
 }
