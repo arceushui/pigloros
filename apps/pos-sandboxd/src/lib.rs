@@ -109,8 +109,8 @@ pub use namespace_network::{
     establish_namespace, EstablishError, EstablishFailure, ExpectedNamespace, FirewallBaseChain,
     FirewallChain, FirewallHook, FirewallRule, FirewallTableFamily, FirewallVerdict,
     InvalidLinkName, IpPrefix, LinkKind, LinkName, NamespaceControl, NamespaceName, NamespaceRoute,
-    ObservedAddress, ObservedLink, ObservedNamespace, ObservedRoute, ObservedTable,
-    ReadbackMismatch,
+    NetworkPlanError, NetworkRange, ObservedAddress, ObservedLink, ObservedNamespace,
+    ObservedRoute, ObservedTable, ReadbackMismatch, NAMESPACE_TABLE,
 };
 
 #[cfg(target_os = "linux")]
