@@ -7,12 +7,13 @@ use std::time::Duration;
 
 use rustix::fs::{openat2, Dir, Mode, OFlags, ResolveFlags};
 
-use super::activation::{self, ActivationMarker, BootInstant};
+use super::activation::{self, ActivationMarker};
 use super::root::{RootRecord, ROOT_RECORD_SIZE};
 use super::{
     registry_io, validate_directory, PlannedAttemptIntent, RegistryDirectory,
     SystemdAttemptRegistryError, TransientServiceUnitName,
 };
+use crate::BootInstant;
 
 type RegistryResult<T> = Result<T, SystemdAttemptRegistryError>;
 const MAX_RECORD_SIZE: usize = ROOT_RECORD_SIZE;
@@ -236,16 +237,18 @@ fn observations<'a>(
 
 impl SystemdAttemptRecovery {
     /// How long admission must stay closed for the previous runtime's last
-    /// `MountImage` request, before the provider loops are swept again
-    /// (owner decision D2), given the current boot and time `now`.
+    /// `MountImage` request, before the provider loops are swept (owner
+    /// decision D2), given the current boot and time `now`.
     ///
-    /// `None` when no request of this boot is younger than the activator
-    /// deadline, or no request was recorded and no directory stage exists.
+    /// `None` for an explicit "no request yet" marker, when no request of
+    /// this boot is younger than the activator deadline plus the server
+    /// margin, or when no marker exists and no directory stage does either.
     ///
     /// # Errors
     /// [`SystemdAttemptRegistryError::ActivationMarker`] when a committed
     /// directory stage exists but no marker does, or the marker lies in this
-    /// boot's future.
+    /// boot's future. Every owner creates the marker before its first commit,
+    /// so a missing one means the registry was altered.
     pub(crate) fn activation_wait(&self, now: BootInstant) -> RegistryResult<Option<Duration>> {
         let recorded = self
             .markers
@@ -701,7 +704,7 @@ mod tests {
             let (result, observed) = with_io_fault(Some(fail_at), SystemdAttemptRecovery::open);
             assert!(matches!(result, Err(SystemdAttemptRegistryError::Io(_))));
             assert_eq!(observed, fail_at + 1);
-            assert_eq!(fs::read_dir("/run/pigloros/sandbox/registry")?.count(), 2);
+            assert_eq!(fs::read_dir("/run/pigloros/sandbox/registry")?.count(), 3);
         }
         let recovery = SystemdAttemptRecovery::open()?;
         assert_eq!(recovery.entries().len(), 2);
@@ -1050,7 +1053,7 @@ mod tests {
                 KEY,
                 directory_record()?,
                 Some("activation"),
-                Some(Some(Duration::from_secs(50))),
+                Some(Some(Duration::from_secs(60))),
             ),
         ];
         for (name, record, marker_name, expected) in cases {

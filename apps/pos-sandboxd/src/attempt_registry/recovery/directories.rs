@@ -325,7 +325,7 @@ mod tests {
         }
         inventory.verify_unchanged()?;
         drop(inventory);
-        assert_eq!(fs::read_dir(runtime.join("registry"))?.count(), 8);
+        assert_eq!(fs::read_dir(runtime.join("registry"))?.count(), 9);
         assert_eq!(fs::read_dir(runtime.join("attempts"))?.count(), 7);
         assert!(SystemdAttemptRegistry::open().is_err());
         Ok(())
@@ -368,7 +368,7 @@ mod tests {
                 _ => fs::write(attempts.join("not-a-directory"), b"unexpected")?,
             }
             assert!(recovery.inventory_unmounted_directories().is_err());
-            assert_eq!(fs::read_dir(directory.path().join("registry"))?.count(), 8);
+            assert_eq!(fs::read_dir(directory.path().join("registry"))?.count(), 9);
         }
         Ok(())
     }
@@ -400,7 +400,7 @@ mod tests {
         assert_ne!(identity(&File::open(&root)?)?, identity(&held_root)?);
         assert!(partial.verify_unchanged().is_err());
         assert!(recovery.inventory_unmounted_directories().is_err());
-        assert_eq!(fs::read_dir(directory.path().join("registry"))?.count(), 8);
+        assert_eq!(fs::read_dir(directory.path().join("registry"))?.count(), 9);
         Ok(())
     }
 
@@ -470,7 +470,7 @@ mod tests {
                 with_io_fault(Some(fail_at), || recovery.inventory_unmounted_directories());
             assert!(matches!(result, Err(SystemdAttemptRegistryError::Io(_))));
             assert_eq!(observed, fail_at + 1);
-            assert_eq!(fs::read_dir(directory.path().join("registry"))?.count(), 8);
+            assert_eq!(fs::read_dir(directory.path().join("registry"))?.count(), 9);
             assert_eq!(fs::read_dir(directory.path().join("attempts"))?.count(), 7);
         }
         Ok(())

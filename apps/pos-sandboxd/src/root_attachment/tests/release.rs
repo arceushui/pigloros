@@ -55,7 +55,7 @@ mod cases {
         }
         assert_eq!(
             fs::read_dir(tree.runtime.path().join("registry"))?.count(),
-            8
+            9
         );
         tree.registry
             .commit_planned(&PlannedAttemptIntent::new([10; 16], [9; 32])?)?;

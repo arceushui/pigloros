@@ -35,7 +35,7 @@ fn eight_lifecycles_delete_each_intent_last_and_a_restarted_owner_opens_empty() 
         assert!(!runtime.path().join("registry").join(key).exists());
         assert_eq!(
             fs::read_dir(runtime.path().join("registry"))?.count(),
-            8 - usize::from(id)
+            9 - usize::from(id)
         );
         assert_eq!(
             fs::read_dir(runtime.path().join("attempts"))?.count(),

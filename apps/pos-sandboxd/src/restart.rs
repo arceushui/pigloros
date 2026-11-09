@@ -11,21 +11,25 @@
 //!    [`OrphanNetworkCleanup`], the seam for the #911 enumerate-and-remove
 //!    primitive;
 //! 4. every PAI3 root's recorded loop/dm generations are absent now;
-//! 5. no loop device is backed by a provider image. An activation that
-//!    reached mountfsd but crashed before its PAI3 record left no recorded
-//!    generations, so this sweep is what proves its devices absent.
-//! 6. no `MountImage` request of the previous runtime can still attach a
+//! 5. no `MountImage` request of the previous runtime can still attach a
 //!    loop device (owner decision D2). The registry's activation marker
 //!    records the boot and `CLOCK_MONOTONIC` time of the last request, written
-//!    durably before it was sent. When that request was sent on this boot
-//!    less than the activator deadline (60 s) ago, admission stays closed
-//!    until the deadline has passed, and the provider loops are swept again.
+//!    durably before it was sent. mountfsd may still complete a request after
+//!    the client lost its connection, so a request can attach a loop device
+//!    until the activator deadline (60 s) plus a fixed server margin (10 s)
+//!    after it was sent. When the last request was sent on this boot less
+//!    than those 70 s ago, admission stays closed until they have passed.
 //!    Only in that recent-activation case does reconciliation outlast
-//!    ADR-069's 10 s restart bound, by at most that remaining wait; the second
-//!    sweep has the time the first one had left. A request of another boot,
-//!    or one at least the deadline old, needs no wait. A missing marker while
-//!    a directory stage is recorded, a malformed marker, or an unreadable boot
-//!    ID or clock fails closed.
+//!    ADR-069's 10 s restart bound, by at most that remaining wait of 70 s;
+//!    the sweep below then has the time the deadline had left. An explicit
+//!    "no request yet" marker, a request of another boot, or one at least
+//!    70 s old needs no wait. A missing marker while a directory stage is
+//!    recorded, which only an altered registry can show, a malformed marker,
+//!    or an unreadable boot ID or clock fails closed.
+//! 6. no loop device is backed by a provider image, swept once after that
+//!    wait. An activation that reached mountfsd but crashed before its PAI3
+//!    record left no recorded generations, so this sweep is what proves its
+//!    devices absent.
 //!
 //! Only then are the unmounted directories removed and each intent deleted
 //! last. That removal is local, bounded filesystem work under the held
@@ -42,12 +46,11 @@
 use std::error::Error;
 use std::future::Future;
 use std::io;
-use std::time::Duration;
 
 use tokio::time::{sleep, timeout_at, Instant};
 
 use crate::{
-    ImageActivationError, PlannedAttemptIntent, SystemdAttemptRecovery,
+    BootInstant, ImageActivationError, PlannedAttemptIntent, SystemdAttemptRecovery,
     SystemdAttemptRegistryError, SystemdTransientUnitTransport, SystemdTransientUnitTransportError,
     TransientServiceUnitName,
 };
@@ -90,7 +93,7 @@ impl ReconciledRestart {
 /// absent by a fresh probe, after which no loop device was found backed by a
 /// provider image.
 ///
-/// That sweep is repeated once no previous-runtime `MountImage` request can
+/// That sweep runs only once no previous-runtime `MountImage` request can
 /// still attach a loop device.
 ///
 /// Only restart reconciliation's device proof creates it, so registry removal
@@ -176,9 +179,6 @@ pub async fn reconcile_restart<N: OrphanNetworkCleanup + Sync>(
 /// The recorded loop/dm generations of one root, mapper first.
 type Generations = [((u32, u32), u64); 2];
 
-/// A boot ID and a `CLOCK_MONOTONIC` time on that boot.
-type BootInstant = ([u8; 16], Duration);
-
 /// `probes` are the recorded-generation probe, the provider loop sweep and
 /// the boot clock.
 async fn reconcile_with<N, P, F, L, G, C>(
@@ -192,7 +192,7 @@ where
     N: OrphanNetworkCleanup + Sync,
     P: Fn(Generations) -> F,
     F: Future<Output = Result<bool, ImageActivationError>>,
-    L: Fn() -> G + Sync,
+    L: FnOnce() -> G,
     G: Future<Output = Result<bool, ImageActivationError>>,
     C: FnOnce() -> io::Result<BootInstant>,
 {
@@ -272,38 +272,31 @@ async fn roots_released<P, F, L, G, C>(
 where
     P: Fn(Generations) -> F,
     F: Future<Output = Result<bool, ImageActivationError>>,
-    L: Fn() -> G + Sync,
+    L: FnOnce() -> G,
     G: Future<Output = Result<bool, ImageActivationError>>,
     C: FnOnce() -> io::Result<BootInstant>,
 {
-    let probed = timeout_at(deadline, async {
-        let released = probe_roots(recovery, probe).await;
-        match released {
-            Ok(released) => sweep_loops(&sweep).await.map(|()| released),
-            Err(error) => Err(error),
-        }
-    })
-    .await;
+    let probed = timeout_at(deadline, probe_roots(recovery, probe)).await;
     let released = probed.unwrap_or(Err(RestartReconciliationError::DeadlineElapsed))?;
     let wait = now()
         .map_err(SystemdAttemptRegistryError::from)
-        .and_then(|now| recovery.activation_wait(now))?;
-    match wait {
-        None => Ok(RootsReleased(released)),
-        Some(wait) => {
-            sleep(wait).await;
-            timeout_at(deadline + wait, sweep_loops(&sweep))
-                .await
-                .unwrap_or(Err(RestartReconciliationError::DeadlineElapsed))
-                .map(|()| RootsReleased(released))
-        }
-    }
+        .and_then(|now| recovery.activation_wait(now))?
+        .unwrap_or_default();
+    // The sweep keeps the time the deadline had left, after the wait.
+    let swept_by = deadline
+        .checked_add(wait)
+        .ok_or(RestartReconciliationError::DeadlineElapsed)?;
+    sleep(wait).await;
+    timeout_at(swept_by, sweep_loops(sweep))
+        .await
+        .unwrap_or(Err(RestartReconciliationError::DeadlineElapsed))
+        .map(|()| RootsReleased(released))
 }
 
 /// Prove that no loop device is backed by a provider image.
-async fn sweep_loops<L, G>(sweep: &L) -> Reconciled<()>
+async fn sweep_loops<L, G>(sweep: L) -> Reconciled<()>
 where
-    L: Fn() -> G + Sync,
+    L: FnOnce() -> G,
     G: Future<Output = Result<bool, ImageActivationError>>,
 {
     let swept = sweep().await;

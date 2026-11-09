@@ -110,7 +110,7 @@ mod tests {
                 fs::read_dir(runtime.path().join("attempts"))?.count(),
                 8 - usize::from(id)
             );
-            assert_eq!(fs::read_dir(runtime.path().join("registry"))?.count(), 8);
+            assert_eq!(fs::read_dir(runtime.path().join("registry"))?.count(), 9);
         }
         // Directory removal neither deletes intents nor quarantines a clean owner.
         registry.commit_planned(&intent(9)?)?;
