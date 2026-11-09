@@ -361,6 +361,7 @@ function ownerProtocol(credentials, nativePort) {
           if (!done && generation === first && event.additionalData.role === "reply") {
             held = event; return;
           }
+          if (!done && generation !== first && event.additionalData.role === "reply") { return; }
           listener(event);
           if (!done && generation !== first && held && event.additionalData.role === "request") {
             done = true; var delayed = held; held = null; listener(delayed);

@@ -114,11 +114,11 @@ pub(super) const DUPLICATE_REQUEST: Response = Response {
 
 pub(super) const INTERLEAVED_PAIR: Response = Response {
     body: include_bytes!("../../assets/qualification/interleaved_pair.html"),
-    head: "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: 14350\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nCross-Origin-Opener-Policy: same-origin\r\nCross-Origin-Resource-Policy: same-origin\r\nPermissions-Policy: publickey-credentials-create=(self), publickey-credentials-get=(self), clipboard-read=(), clipboard-write=(), camera=(), microphone=(), geolocation=()\r\nConnection: close\r\nContent-Security-Policy: default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; script-src 'sha256-X4SKZktDxvJc8Eh0gdaWcghQO3eJH3EH6oZKbWUfkW0='; style-src 'sha256-Q5v//7IetSl8ReqUsE3bO7kt7fOgIkckocSNwunJJmk='; img-src 'none'; connect-src 'none'\r\n\r\n",
+    head: "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: 14448\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nCross-Origin-Opener-Policy: same-origin\r\nCross-Origin-Resource-Policy: same-origin\r\nPermissions-Policy: publickey-credentials-create=(self), publickey-credentials-get=(self), clipboard-read=(), clipboard-write=(), camera=(), microphone=(), geolocation=()\r\nConnection: close\r\nContent-Security-Policy: default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; script-src 'sha256-VI6RysaG8MPIkoxvWHlHdmt5gJYx9jWFM0y1JXL2WTE='; style-src 'sha256-Q5v//7IetSl8ReqUsE3bO7kt7fOgIkckocSNwunJJmk='; img-src 'none'; connect-src 'none'\r\n\r\n",
     digest: [
-        0x09, 0xf8, 0x6c, 0xf5, 0xe5, 0x72, 0x98, 0xd4, 0x1f, 0xf8, 0xf9, 0x5e, 0x9a, 0xb0, 0x53,
-        0x2a, 0x7a, 0xdb, 0x7e, 0x5a, 0x3f, 0xb6, 0xe0, 0xcd, 0x96, 0xe9, 0x63, 0xcf, 0x18, 0xa5,
-        0x75, 0x06,
+        0xfb, 0xae, 0x03, 0x42, 0x24, 0xc7, 0xce, 0xcc, 0x5b, 0x25, 0x1a, 0x64, 0x6e, 0xcd, 0x6c,
+        0xaa, 0xd1, 0xb5, 0xef, 0x57, 0x31, 0xac, 0x8a, 0x9c, 0xf0, 0x1a, 0x3c, 0x22, 0xe0, 0x21,
+        0x27, 0xb2,
     ],
 };
 

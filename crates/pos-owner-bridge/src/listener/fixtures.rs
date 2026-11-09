@@ -32,6 +32,7 @@ pub enum FixtureProfile {
     /// Duplicate the first real request event before its matching reply.
     DuplicateRequest,
     /// Deliver a retired reply between a newer request and its matching reply.
+    /// Withhold newer replies until that insertion actually occurs.
     InterleavedPair,
     /// Hold real SDK deliveries for 700 ms, crossing the first two retry windows.
     DelayedDelivery,

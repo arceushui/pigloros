@@ -53,6 +53,9 @@ def delivery_port(profile: str) -> str:
             "          if (!done && generation === first && event.additionalData.role === \"reply\") {\n"
             "            held = event; return;\n"
             "          }\n"
+            # Receipt must imply the declared insertion actually ran, even if
+            # the SDK delivers the first reply after a complete newer pair.
+            "          if (!done && generation !== first && event.additionalData.role === \"reply\") { return; }\n"
             "          listener(event);\n"
             "          if (!done && generation !== first && held && event.additionalData.role === \"request\") {\n"
             "            done = true; var delayed = held; held = null; listener(delayed);\n"
