@@ -99,8 +99,8 @@ fn final_failure_evidence_rejects_late_and_unclassified_events() {
     ));
 }
 
-fn competing_spec() -> SurfaceSpec {
-    let ceremony_id = CeremonyId::from_bytes([0x7f; 16]);
+fn fixed_competing_spec(byte: u8) -> SurfaceSpec {
+    let ceremony_id = CeremonyId::from_bytes([byte; 16]);
     SurfaceSpec {
         ceremony_id,
         folder_name: pos_owner_bridge::folder_name(&ceremony_id),
@@ -108,13 +108,12 @@ fn competing_spec() -> SurfaceSpec {
     }
 }
 
+fn competing_spec() -> SurfaceSpec {
+    fixed_competing_spec(0x7f)
+}
+
 fn pre_environment_competing_spec() -> SurfaceSpec {
-    let ceremony_id = CeremonyId::from_bytes([0x7c; 16]);
-    SurfaceSpec {
-        ceremony_id,
-        folder_name: pos_owner_bridge::folder_name(&ceremony_id),
-        owner_window: None,
-    }
+    fixed_competing_spec(0x7c)
 }
 
 #[test]
@@ -3226,14 +3225,14 @@ fn native_pre_environment_late_callback_and_retirement() -> TestResult {
     run_pre_environment(Path::new(&runtime), 0x7f, EnvironmentCase::LateInvocation)
 }
 
-type PreEnvironmentDrive = (
-    CeremonyResult,
-    bool,
-    bool,
-    Result<Option<bool>, ()>,
-    bool,
-    Result<Option<bool>, ()>,
-);
+struct PreEnvironmentDrive {
+    result: CeremonyResult,
+    driver_pending: bool,
+    active_blocked: bool,
+    initial_completion: Result<Option<bool>, ()>,
+    pump_failed: bool,
+    at_deadline: Result<Option<bool>, ()>,
+}
 
 impl Fixture {
     fn drive_pre_environment(
@@ -3274,14 +3273,14 @@ impl Fixture {
             ),
         };
         crate::Native::record_callback(crate::NativeCallbackMoment::DriverTimeout);
-        (
+        PreEnvironmentDrive {
             result,
             driver_pending,
             active_blocked,
             initial_completion,
             pump_failed,
             at_deadline,
-        )
+        }
     }
 }
 
@@ -3295,23 +3294,29 @@ fn run_pre_environment(runtime: &Path, number: u8, case: EnvironmentCase) -> Tes
     let attempt = catch_unwind(AssertUnwindSafe(|| {
         fixture.drive_pre_environment(&mut driver, started)
     }));
-    let (result, driver_pending, active_blocked, initial_completion, pump_failed, at_deadline) =
-        match attempt {
-            Ok(observation) => observation,
-            Err(_) => (
-                readiness::cancel_driver(
-                    &mut driver,
-                    &mut fixture.surface,
-                    &mut fixture.loopback,
-                    &mut fixture.store,
-                ),
-                false,
-                false,
-                Err(()),
-                true,
-                Err(()),
+    let PreEnvironmentDrive {
+        result,
+        driver_pending,
+        active_blocked,
+        initial_completion,
+        pump_failed,
+        at_deadline,
+    } = match attempt {
+        Ok(observation) => observation,
+        Err(_) => PreEnvironmentDrive {
+            result: readiness::cancel_driver(
+                &mut driver,
+                &mut fixture.surface,
+                &mut fixture.loopback,
+                &mut fixture.store,
             ),
-        };
+            driver_pending: false,
+            active_blocked: false,
+            initial_completion: Err(()),
+            pump_failed: true,
+            at_deadline: Err(()),
+        },
+    };
     let initial_witness = initial_environment_witness(case, driver_pending, initial_completion);
     let timed_out = matches!(
         &result,
