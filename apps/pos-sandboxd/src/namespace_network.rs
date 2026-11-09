@@ -13,7 +13,8 @@
 //! installed.
 
 use std::error::Error;
-use std::net::{IpAddr, SocketAddr};
+use std::fmt;
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 
 /// The name of one attempt's network namespace: `piglor-` followed by the
 /// attempt identity in lowercase hexadecimal.
@@ -146,9 +147,21 @@ pub enum FirewallRule {
     /// `ct state established,related accept`: return traffic of a connection
     /// the namespace opened.
     AcceptEstablished,
-    /// `icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert } accept`: the
-    /// minimum neighbour discovery IPv6 needs on the veth.
+    /// `ip6 hoplimit 255 icmpv6 type nd-neighbor-solicit-nd-neighbor-advert
+    /// accept`: neighbour discovery arriving on the veth. A hop limit of 255
+    /// proves the packet was not routed, so it came from the host end.
     AcceptNeighbourDiscovery,
+    /// `ip6 daddr <destination>/<length> ip6 hoplimit 255 icmpv6 type
+    /// nd-neighbor-solicit-nd-neighbor-advert accept`: neighbour discovery
+    /// the namespace sends, only to `destination/length`. The namespace uses
+    /// it for the solicited-node multicast range `ff02::/16` and for the host
+    /// end's address, so it can never carry data to an endpoint.
+    SendNeighbourDiscovery {
+        /// The destination network.
+        destination: Ipv6Addr,
+        /// Its prefix length.
+        length: u8,
+    },
     /// Accept TCP to exactly this authenticated endpoint address and port.
     AcceptTcp(SocketAddr),
 }
@@ -196,6 +209,10 @@ pub enum LinkKind {
     Veth {
         /// The interface index of the other end, in that end's namespace.
         peer_index: u32,
+        /// The identifier of the other end's namespace, as the namespace of
+        /// this end numbers it (`IFLA_LINK_NETNSID`); `None` when the kernel
+        /// reports none.
+        peer_netnsid: Option<i32>,
     },
     /// Any other kind.
     Other,
@@ -239,6 +256,9 @@ pub struct ObservedTable {
     pub family: FirewallTableFamily,
     /// Its name.
     pub name: String,
+    /// Its `NFTA_TABLE_FLAGS`. A provider-owned table sets none: a dormant
+    /// table, for example, would install rules that filter nothing.
+    pub flags: u32,
     /// Every chain it holds.
     pub chains: Vec<FirewallChain>,
 }
@@ -258,6 +278,10 @@ pub struct ObservedNamespace {
     pub host_link: Option<ObservedLink>,
     /// Every address on that host link, of both families.
     pub host_addresses: Vec<ObservedAddress>,
+    /// The identifier the host namespace assigns to the attempt namespace.
+    pub namespace_netnsid: i32,
+    /// The identifier the attempt namespace assigns to the host namespace.
+    pub host_netnsid: i32,
 }
 
 /// The first part of a read-back that differs from its expectation.
@@ -273,7 +297,8 @@ pub enum ReadbackMismatch {
     /// The host veth end is missing, down or not a veth.
     #[error("the host's veth end is missing, down or not a veth")]
     HostLink,
-    /// The two veth ends are not each other's peer.
+    /// The two veth ends are not each other's peer, by interface index and
+    /// namespace.
     #[error("the veth ends are not each other's peer")]
     Peer,
     /// The inner veth end holds other addresses, or another link holds one.
@@ -355,7 +380,8 @@ impl ExpectedNamespace {
             (true, None, _) => Err(ReadbackMismatch::InnerLink),
             (true, Some(_), None) => Err(ReadbackMismatch::HostLink),
             (true, Some((inner, inner_peer)), Some((host, host_peer))) => holds(
-                inner_peer == host && host_peer == inner,
+                inner_peer == (host, Some(observed.host_netnsid))
+                    && host_peer == (inner, Some(observed.namespace_netnsid)),
                 ReadbackMismatch::Peer,
             )
             .map(|()| (inner, host)),
@@ -368,6 +394,7 @@ impl ExpectedNamespace {
             [table] => {
                 table.family == FirewallTableFamily::Inet
                     && table.name == self.table
+                    && table.flags == 0
                     && same_set(&self.chains, table.chains.iter().cloned())
             }
             _ => false,
@@ -384,10 +411,13 @@ const fn holds(condition: bool, mismatch: ReadbackMismatch) -> Result<(), Readba
     }
 }
 
-/// The index and peer index of a veth end that is up.
-const fn up_veth(link: &ObservedLink) -> Option<(u32, u32)> {
+/// The index of a veth end that is up, with its peer's index and namespace.
+const fn up_veth(link: &ObservedLink) -> Option<(u32, (u32, Option<i32>))> {
     match link.kind {
-        LinkKind::Veth { peer_index } if link.up => Some((link.index, peer_index)),
+        LinkKind::Veth {
+            peer_index,
+            peer_netnsid,
+        } if link.up => Some((link.index, (peer_index, peer_netnsid))),
         _ => None,
     }
 }
@@ -412,14 +442,33 @@ fn same_set<T: Clone + Ord>(expected: &[T], observed: impl Iterator<Item = T>) -
 /// The kernel-facing port of one attempt's namespace.
 ///
 /// An adapter changes and reads kernel state only; it never decides what the
-/// state should be. It must remove whatever part of a namespace exists, so a
-/// failed install can be undone.
+/// state should be. It must remove whatever part of its own namespace exists,
+/// so a failed install can be undone, and never touch another attempt's.
+///
+/// A crash between install and removal leaves no journal. Restart
+/// reconciliation therefore sweeps every `piglor-` namespace and every
+/// `piglor-` host link whose peer namespace is gone, by name prefix, before
+/// admission opens.
 pub trait NamespaceControl {
     /// Why the kernel refused or could not report a change.
     type Error: Error + Send + Sync + 'static;
 
     /// Create the namespace, veth pair, addresses, routes and firewall of
     /// `expected`.
+    ///
+    /// The adapter must:
+    /// - create the veth pair in one request, so it never adopts an existing
+    ///   `host_link`, and fail if that name exists;
+    /// - assign each namespace an identifier for the other, so both veth
+    ///   ends report their peer's namespace;
+    /// - set `addr_gen_mode` to `none` on both ends before either is up, so
+    ///   the kernel adds no link-local address or route, and add the
+    ///   addresses with `IFA_F_NODAD`, so none is tentative;
+    /// - install the firewall before either end is up, so no packet passes
+    ///   before the policy exists.
+    ///
+    /// Host forwarding, `rp_filter` and the host firewall are not part of
+    /// this namespace.
     ///
     /// # Errors
     /// Fails if any part cannot be created. A partial namespace may remain.
@@ -437,8 +486,12 @@ pub trait NamespaceControl {
         host_link: &LinkName,
     ) -> Result<ObservedNamespace, Self::Error>;
 
-    /// Remove namespace `name` and the host veth end `host_link`, whichever
-    /// parts of them exist.
+    /// Remove namespace `name`, whichever parts of it exist.
+    ///
+    /// A host link named `host_link` is removed only while its peer lies in
+    /// namespace `name`. A host link of that name whose peer lies elsewhere
+    /// belongs to another attempt, or to an orphan reconciliation owns, and is
+    /// left untouched.
     ///
     /// # Errors
     /// Fails if a part that exists cannot be removed.
@@ -460,15 +513,31 @@ pub enum EstablishFailure<E> {
 }
 
 /// A namespace that could not be established.
-#[derive(Debug, thiserror::Error)]
-#[error("the attempt namespace could not be established")]
+#[derive(Debug)]
 pub struct EstablishError<E> {
     /// What failed.
-    #[source]
     pub failure: EstablishFailure<E>,
     /// Why the namespace could not be removed afterwards, if it could not.
     /// Restart reconciliation must then remove it.
     pub removal: Option<E>,
+}
+
+impl<E: fmt::Display> fmt::Display for EstablishError<E> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .write_str("the attempt namespace could not be established")
+            .and_then(|()| {
+                self.removal.as_ref().map_or(Ok(()), |removal| {
+                    write!(formatter, ", and removing it failed: {removal}")
+                })
+            })
+    }
+}
+
+impl<E: Error + 'static> Error for EstablishError<E> {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        Some(&self.failure)
+    }
 }
 
 /// Install `expected` through `control`, read it back, and accept it only if
