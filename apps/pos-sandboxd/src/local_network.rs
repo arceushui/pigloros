@@ -17,11 +17,10 @@
 //! Local attempt that plans an exchange then ends as unavailable rather than
 //! reaching the host network.
 
-use std::collections::BTreeSet;
 use std::error::Error;
 use std::future::{poll_fn, Future};
 use std::io::{self, Read, Write};
-use std::net::{IpAddr, Shutdown, SocketAddr, TcpStream};
+use std::net::{Shutdown, SocketAddr, TcpStream};
 use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::net::UnixStream;
 use std::pin::pin;
@@ -118,25 +117,6 @@ pub trait LocalNetworkPort {
         attempt_id: [u8; 16],
         endpoints: &[SocketAddr],
     ) -> Result<EstablishedNetwork<Self::Connector>, Self::Error>;
-}
-
-/// The distinct endpoints `admission` plans exchanges with, in order.
-///
-/// LPS1 decoding admits only four- and sixteen-byte addresses, so every
-/// admitted capability names one.
-pub(super) fn admitted_endpoints(admission: &LocalNetworkAdmission) -> Vec<SocketAddr> {
-    admission
-        .exchanges()
-        .filter_map(|(_, capability)| {
-            <[u8; 4]>::try_from(capability.address.as_slice())
-                .map(IpAddr::from)
-                .or_else(|_| <[u8; 16]>::try_from(capability.address.as_slice()).map(IpAddr::from))
-                .ok()
-                .map(|address| SocketAddr::new(address, capability.destination_port))
-        })
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
 }
 
 /// The Local network adapter until a real namespace exists.
