@@ -9,7 +9,6 @@ mod classification;
 mod envelope;
 mod error;
 mod guest_error;
-mod host_error;
 mod member;
 mod metadata_envelope;
 mod metadata_scope;
@@ -38,10 +37,6 @@ pub use envelope::{
 };
 pub use error::CommunityLifecycleErrorV1;
 pub use guest_error::is_valid_community_id_v1;
-pub use host_error::{
-    AtomicCommitFailureV1, CommunityPluginHostErrorV1, ComponentTrapClassV1, HostFailureClassV1,
-    RevocationBasisV1, TrapReproductionV1, TrustDenialBasisV1,
-};
 pub use member::{CommunityMemberBindingInputV1, CommunityMemberBindingV1};
 pub use metadata_envelope::{CommunityMetadataEnvelopeV1, CommunityMetadataSchemaV1};
 pub use metadata_scope::{

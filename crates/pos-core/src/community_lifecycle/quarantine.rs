@@ -22,7 +22,7 @@ impl<'a> CommunityQuarantineKeyV1<'a> {
     /// Validate the exact ADR-088 stable entry and a retained implementation key.
     ///
     /// # Errors
-    /// Rejects a zero Timeline/release or an invalid1..64-byte stable slot.
+    /// Rejects a zero Timeline/release or an invalid 1..64-byte stable slot.
     /// Installation/composition and current release trust remain owner checks.
     pub fn new(
         timeline: TimelineId,
