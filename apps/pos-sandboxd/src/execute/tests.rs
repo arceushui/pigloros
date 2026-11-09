@@ -450,6 +450,7 @@ impl LocalNetworkPort for LoopbackNetwork {
     fn establish(
         &self,
         attempt_id: [u8; 16],
+        _endpoints: &[SocketAddr],
     ) -> Result<EstablishedNetwork<LoopbackConnector>, Injected> {
         Ok(EstablishedNetwork::new(attempt_id, LoopbackConnector))
     }
@@ -465,6 +466,7 @@ impl LocalNetworkPort for ForeignNetwork {
     fn establish(
         &self,
         _attempt_id: [u8; 16],
+        _endpoints: &[SocketAddr],
     ) -> Result<EstablishedNetwork<LoopbackConnector>, Injected> {
         Ok(EstablishedNetwork::new(OTHER, LoopbackConnector))
     }
@@ -480,6 +482,7 @@ impl LocalNetworkPort for BrokenNetwork {
     fn establish(
         &self,
         _attempt_id: [u8; 16],
+        _endpoints: &[SocketAddr],
     ) -> Result<EstablishedNetwork<LoopbackConnector>, Injected> {
         Err(Injected)
     }
@@ -517,6 +520,7 @@ impl LocalNetworkPort for TornDownNetwork {
     fn establish(
         &self,
         attempt_id: [u8; 16],
+        _endpoints: &[SocketAddr],
     ) -> Result<EstablishedNetwork<TornDownConnector>, Injected> {
         Ok(EstablishedNetwork::new(
             attempt_id,
@@ -1461,6 +1465,7 @@ impl LocalNetworkPort for PanickingNetwork {
     fn establish(
         &self,
         attempt_id: [u8; 16],
+        _endpoints: &[SocketAddr],
     ) -> Result<EstablishedNetwork<PanickingConnector>, Injected> {
         Ok(EstablishedNetwork::new(attempt_id, PanickingConnector))
     }
@@ -1539,6 +1544,7 @@ impl LocalNetworkPort for KillAwareNetwork {
     fn establish(
         &self,
         attempt_id: [u8; 16],
+        _endpoints: &[SocketAddr],
     ) -> Result<EstablishedNetwork<KillAwareConnector>, Injected> {
         Ok(EstablishedNetwork::new(
             attempt_id,

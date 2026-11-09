@@ -273,7 +273,7 @@ def main() -> None:
         ),
         (
             NET_ADMIN_RUNNER,
-            "readonly TEST_PATTERN='^namespace_network::(netlink|control)::tests::privileged::[a-z0-9_]+$'",
+            "readonly TEST_PATTERN='^namespace_network::(netlink|control|attempt_network)::tests::privileged::[a-z0-9_]+$'",
             "readonly TEST_PATTERN='^namespace_network::'",
         ),
         (
@@ -351,7 +351,7 @@ def main() -> None:
         # dropped.
         (
             NET_ADMIN_RUNNER,
-            "readonly UNCONFINED_PATTERN='^namespace_network::control::tests::privileged::[a-z0-9_]+$'",
+            "readonly UNCONFINED_PATTERN='^namespace_network::(control|attempt_network)::tests::privileged::[a-z0-9_]+$'",
             "readonly UNCONFINED_PATTERN='^namespace_network::'",
         ),
         (

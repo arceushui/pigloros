@@ -41,6 +41,7 @@ use pos_reference::sandbox_provider_protocol::{
 };
 use zbus::OwnedFd;
 
+use crate::local_network::admitted_endpoints;
 use crate::{
     ActiveAttempt, AdmittedAttempt, BoundLocalProxy, CheckedLocal, CheckedRoot, HostServiceChannel,
     ImageActivationError, LaunchMode, LauncherInvocation, LocalNetworkPort, LocalProxyBindError,
@@ -667,7 +668,7 @@ where
             let (adapter_end, channel) = HostServiceChannel::pair(attempt.attempt_id())
                 .map_err(ExecuteError::HostService)?;
             let established = network
-                .establish(attempt.attempt_id())
+                .establish(attempt.attempt_id(), &admitted_endpoints(&admission))
                 .map_err(|error| ExecuteError::Network(Box::new(error)))?;
             // A bad admission, namespace or channel never reaches the start.
             let checked = attempt.check_local(*admission, established, channel)?;

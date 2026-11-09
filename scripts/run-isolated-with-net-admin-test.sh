@@ -5,7 +5,8 @@
 # state. The container has no network, drops every other capability, keeps
 # no-new-privileges and a read-only root, and sees the worktree read-only.
 #
-# The adapter's own tests (namespace_network::control) pin namespaces with
+# The adapter's own tests (namespace_network::control and
+# namespace_network::attempt_network) pin namespaces with
 # bind mounts under /run/netns, which Docker's AppArmor profile refuses, so
 # they alone also run unconfined by AppArmor.
 #
@@ -49,7 +50,7 @@ if [[ ! $TEST_RELATIVE =~ $TEST_TARGET || ! -f $TEST_BINARY || ! -x $TEST_BINARY
   echo "only the pos-sandboxd library test harness may use this runner" >&2
   exit 2
 fi
-readonly TEST_PATTERN='^namespace_network::(netlink|control)::tests::privileged::[a-z0-9_]+$'
+readonly TEST_PATTERN='^namespace_network::(netlink|control|attempt_network)::tests::privileged::[a-z0-9_]+$'
 if [[ ! $TEST_NAME =~ $TEST_PATTERN ]]; then
   echo "only the #911 namespace adapter tests may use this runner" >&2
   exit 2
@@ -83,7 +84,7 @@ profile_output=
 
 # Owner decision 2026-11-09 (#911): only the tests that pin namespaces run
 # without Docker's AppArmor profile.
-readonly UNCONFINED_PATTERN='^namespace_network::control::tests::privileged::[a-z0-9_]+$'
+readonly UNCONFINED_PATTERN='^namespace_network::(control|attempt_network)::tests::privileged::[a-z0-9_]+$'
 if [[ $TEST_NAME =~ $UNCONFINED_PATTERN ]]; then
   docker_arguments+=(--security-opt apparmor=unconfined)
 fi

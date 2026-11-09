@@ -40,14 +40,14 @@ NET_ADMIN_GUARDS = (
     '  echo "only the pos-sandboxd library test harness may use this runner" >&2\n'
     "  exit 2\n"
     "fi",
-    "readonly TEST_PATTERN='^namespace_network::(netlink|control)::tests::privileged::[a-z0-9_]+$'",
+    "readonly TEST_PATTERN='^namespace_network::(netlink|control|attempt_network)::tests::privileged::[a-z0-9_]+$'",
     "if [[ ! $TEST_NAME =~ $TEST_PATTERN ]]; then\n"
     '  echo "only the #911 namespace adapter tests may use this runner" >&2\n'
     "  exit 2\n"
     "fi",
     "if [[ $REPOSITORY_ROOT == *,* ]]; then",
     "  if [[ $profile_directory == *,* ]]; then",
-    "readonly UNCONFINED_PATTERN='^namespace_network::control::tests::privileged::[a-z0-9_]+$'\n"
+    "readonly UNCONFINED_PATTERN='^namespace_network::(control|attempt_network)::tests::privileged::[a-z0-9_]+$'\n"
     "if [[ $TEST_NAME =~ $UNCONFINED_PATTERN ]]; then\n"
     "  docker_arguments+=(--security-opt apparmor=unconfined)\n"
     "fi",

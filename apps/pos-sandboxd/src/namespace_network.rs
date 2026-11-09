@@ -16,6 +16,7 @@ use std::error::Error;
 use std::fmt;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 
+mod attempt_network;
 mod control;
 mod firewall;
 pub mod netlink;
@@ -24,6 +25,7 @@ mod plan;
 mod route;
 mod rule_codec;
 
+pub use attempt_network::{AttemptNetworkError, NamespaceConnector, NamespacedLocalNetwork};
 pub use control::NetlinkNamespaceControl;
 pub use pinned::NetworkNamespaces;
 pub use plan::{NetworkPlanError, NetworkRange, NAMESPACE_TABLE};

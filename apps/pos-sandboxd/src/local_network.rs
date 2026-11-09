@@ -10,16 +10,18 @@
 //! ([`HostServiceChannel`]) were checked together. A bare admission and an
 //! arbitrary channel cannot be bound.
 //!
-//! The namespace, veth and nftables state behind a real Local network belong
-//! to a separate ticket (owner decision Q9.5). Until that adapter exists,
-//! [`FailClosedLocalNetwork`] establishes no namespace and refuses every
-//! outbound connection, so a Local attempt that plans an exchange ends as
-//! unavailable rather than reaching the host network.
+//! The namespace, veth and nftables state behind a real Local network come
+//! from `NamespacedLocalNetwork` (#911), which reaches exactly the admitted
+//! endpoints. [`FailClosedLocalNetwork`] establishes no namespace and refuses
+//! every outbound connection, for a provider that runs no Local network: a
+//! Local attempt that plans an exchange then ends as unavailable rather than
+//! reaching the host network.
 
+use std::collections::BTreeSet;
 use std::error::Error;
 use std::future::{poll_fn, Future};
 use std::io::{self, Read, Write};
-use std::net::{Shutdown, SocketAddr, TcpStream};
+use std::net::{IpAddr, Shutdown, SocketAddr, TcpStream};
 use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::net::UnixStream;
 use std::pin::pin;
@@ -105,7 +107,8 @@ pub trait LocalNetworkPort {
     /// Why a namespace could not be established or read back.
     type Error: Error + Send + Sync + 'static;
 
-    /// Establish and read back the namespace of `attempt_id`.
+    /// Establish and read back the namespace of `attempt_id`, which reaches
+    /// exactly `endpoints`, the attempt's admitted LPS1 endpoints.
     ///
     /// # Errors
     /// Fails, leaving nothing behind, if the namespace, veth pair or firewall
@@ -113,7 +116,27 @@ pub trait LocalNetworkPort {
     fn establish(
         &self,
         attempt_id: [u8; 16],
+        endpoints: &[SocketAddr],
     ) -> Result<EstablishedNetwork<Self::Connector>, Self::Error>;
+}
+
+/// The distinct endpoints `admission` plans exchanges with, in order.
+///
+/// LPS1 decoding admits only four- and sixteen-byte addresses, so every
+/// admitted capability names one.
+pub(crate) fn admitted_endpoints(admission: &LocalNetworkAdmission) -> Vec<SocketAddr> {
+    admission
+        .exchanges()
+        .filter_map(|(_, capability)| {
+            <[u8; 4]>::try_from(capability.address.as_slice())
+                .map(IpAddr::from)
+                .or_else(|_| <[u8; 16]>::try_from(capability.address.as_slice()).map(IpAddr::from))
+                .ok()
+                .map(|address| SocketAddr::new(address, capability.destination_port))
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 /// The Local network adapter until a real namespace exists.
@@ -130,6 +153,7 @@ impl LocalNetworkPort for FailClosedLocalNetwork {
     fn establish(
         &self,
         attempt_id: [u8; 16],
+        _endpoints: &[SocketAddr],
     ) -> Result<EstablishedNetwork<RefusingConnector>, std::convert::Infallible> {
         Ok(EstablishedNetwork::new(attempt_id, RefusingConnector))
     }

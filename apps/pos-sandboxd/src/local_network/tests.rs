@@ -31,7 +31,7 @@ fn bind(
     Ok(admitted
         .check_local(
             admission(attempt, authority, epochs, Vec::new()),
-            FailClosedLocalNetwork.establish(namespace)?,
+            FailClosedLocalNetwork.establish(namespace, &[])?,
             channel,
         )
         .map(CheckedLocal::bind))
@@ -94,7 +94,7 @@ fn refusal_with(
     Ok(admitted
         .check_local(
             admission,
-            FailClosedLocalNetwork.establish(ATTEMPT)?,
+            FailClosedLocalNetwork.establish(ATTEMPT, &[])?,
             channel,
         )
         .err())
@@ -426,5 +426,35 @@ async fn a_failed_proxy_task_is_reported() -> TestResult {
     assert!(error.is_some_and(|error| error.source().is_some()));
     // The task died with the channel, so the adapter saw no reply.
     assert!(adapter.join().map_err(|_| "adapter thread")?.is_err());
+    Ok(())
+}
+
+#[test]
+fn a_namespace_reaches_each_distinct_admitted_endpoint_once() -> TestResult {
+    let endpoint = |address: Vec<u8>, destination_port| NetworkCapability {
+        address,
+        destination_port,
+        ..capability(SocketAddr::from(([127, 0, 0, 1], 1)))
+    };
+    let ipv6 = [
+        0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10,
+    ];
+    let admission = admission(
+        ATTEMPT,
+        grant_authority(),
+        EPOCHS,
+        vec![
+            (plan()?, endpoint(ipv6.to_vec(), 8443)),
+            (plan()?, endpoint(vec![192, 0, 2, 10], 443)),
+            (plan()?, endpoint(vec![192, 0, 2, 10], 443)),
+        ],
+    );
+    assert_eq!(
+        admitted_endpoints(&admission),
+        [
+            SocketAddr::from(([192, 0, 2, 10], 443)),
+            SocketAddr::from((ipv6, 8443)),
+        ]
+    );
     Ok(())
 }
