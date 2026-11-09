@@ -226,10 +226,7 @@ mod tests {
     }
 
     use super::{basic_credentials, minimize_location, owntracks_response, post_owntracks};
-    use crate::{
-        problem::{ProblemCodeV1, ProblemV1},
-        Gateway, GatewayError, OwnTracksIngressResult,
-    };
+    use crate::{Gateway, GatewayError, OwnTracksIngressResult};
     use axum::{
         body::{to_bytes, Body},
         http::{header, HeaderMap, HeaderValue, StatusCode},
