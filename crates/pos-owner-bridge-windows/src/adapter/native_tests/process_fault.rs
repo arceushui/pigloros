@@ -185,6 +185,12 @@ fn callback_order_requires_actual_unique_exit_before_controller_invocation() {
     ));
 }
 
+struct WipeObservation {
+    request_and_prf: bool,
+    plan_if_quarantined: bool,
+    native: bool,
+}
+
 struct FailedCaseDiagnostic {
     number: u8,
     profile: FixtureProfile,
@@ -192,10 +198,8 @@ struct FailedCaseDiagnostic {
     inject: bool,
     reached: Option<ProcessFaultState>,
     error: Option<BridgeError>,
-    wiped: bool,
-    plan_wiped: bool,
+    wipe: WipeObservation,
     complete: bool,
-    native_zeroed: bool,
 }
 
 impl FailedCaseDiagnostic {
@@ -203,7 +207,7 @@ impl FailedCaseDiagnostic {
         let _written = writeln!(std::io::stderr(),
             "NATIVE_FAULT_FINAL case={} profile={:?} target={:?} inject={} reached={:?} error={:?} wiped={} plan_wiped={} complete={} native_zeroed={}",
             self.number, self.profile, self.target, self.inject, self.reached, self.error,
-            self.wiped, self.plan_wiped, self.complete, self.native_zeroed);
+            self.wipe.request_and_prf, self.wipe.plan_if_quarantined, self.complete, self.wipe.native);
     }
 }
 
@@ -402,6 +406,7 @@ struct Fixture {
     deadline: Instant,
 }
 
+#[derive(Clone, Copy)]
 struct FailureFinish {
     target: ProcessFaultTarget,
     inject: bool,
@@ -712,10 +717,12 @@ fn run_case(
         inject,
         reached,
         error,
-        wiped: slot_wiped,
-        plan_wiped: plan_wiped_if_quarantined,
+        wipe: WipeObservation {
+            request_and_prf: slot_wiped,
+            plan_if_quarantined: plan_wiped_if_quarantined,
+            native: native_zeroed,
+        },
         complete: complete_before_cleanup,
-        native_zeroed,
     }
     .report();
     fixture.retire(driver, result, None)?;
