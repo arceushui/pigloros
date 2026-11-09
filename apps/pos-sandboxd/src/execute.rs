@@ -532,15 +532,7 @@ where
         call: watchdog.clamp(MIN_TERMINATION_CALL, MAX_TERMINATION_CALL),
     };
     let deadline = bounds.deadline;
-    // Terminal cleanup may have fenced the attempt since it was claimed.
-    attempt.submit_execution().map_err(|error| ExecuteFailure {
-        error,
-        unit: UnitState::NotStarted,
-        cgroup: None,
-    })?;
-    guard.arm(host.killer(), unit.clone(), bounds.call);
-    let (started, mut cgroup) = submit(host, &unit, request, bounds).await?;
-    attempt.bind_execution_cgroup(cgroup.identity());
+    let (started, mut cgroup) = submit_claimed(host, &attempt, request, bounds, guard).await?;
     let attempt_id = attempt.attempt_id();
     let active = ActiveAttempt::record(attempt, deadline);
     let bound = bind_planned(planned);
@@ -584,6 +576,35 @@ where
         cgroup,
         ending,
         network,
+    })
+}
+
+/// Record the submission of the claimed attempt, then submit its unit and
+/// record the cgroup it bound. Terminal cleanup may have fenced the attempt
+/// since it was claimed; then nothing is submitted.
+async fn submit_claimed<H>(
+    host: &H,
+    attempt: &AdmittedAttempt,
+    request: TransientUnitRequest,
+    bounds: Bounds,
+    guard: &mut SubmissionGuard<H::Killer>,
+) -> Result<(H::Started, H::Cgroup), ExecuteFailure<H::Cgroup>>
+where
+    H: UnitHost + Sync,
+{
+    if let Err(error) = attempt.submit_execution() {
+        return Err(ExecuteFailure {
+            error,
+            unit: UnitState::NotStarted,
+            cgroup: None,
+        });
+    }
+    let unit = attempt.unit_name();
+    guard.arm(host.killer(), unit.clone(), bounds.call);
+    let submitted = submit(host, unit, request, bounds).await;
+    submitted.map(|(started, cgroup)| {
+        attempt.bind_execution_cgroup(cgroup.identity());
+        (started, cgroup)
     })
 }
 
