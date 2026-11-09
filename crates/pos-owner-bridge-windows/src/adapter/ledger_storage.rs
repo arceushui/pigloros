@@ -362,6 +362,7 @@ mod native_tests {
                 .map_err(|_| "read initial raw file")?,
             b"untrusted bytes"
         );
+        raw_untrusted_values(&ledger)?;
         let limit = vec![0x5a; LIMIT];
         ledger
             .replace_nonce_ledger_bytes(&limit)
@@ -390,6 +391,8 @@ mod native_tests {
         fs::hard_link(&path, &hardlink)?;
         assert_eq!(ledger.read_nonce_ledger_bytes(), Err(unavailable()));
         fs::remove_file(hardlink)?;
+        refuse_occupied_temporary(&ledger, base)?;
+        refuse_replaced_directory(&ledger, base)?;
         drop(ledger);
         refuse_reparse_files(&guard, base, &path)?;
         let temporary = base.join("PiglorOS").join(TEMPORARY);
@@ -420,6 +423,50 @@ mod native_tests {
             ledger = guard.open_nonce_ledger()?;
             assert_eq!(ledger.read_nonce_ledger_bytes()?, expected_after(failure));
         }
+        Ok(())
+    }
+
+    fn raw_untrusted_values(ledger: &WindowsNonceLedger<'_>) -> TestResult {
+        for bytes in [b"".as_slice(), b"not SNL1", b"\x83\x44SNL1\x02\x80"] {
+            ledger.replace_nonce_ledger_bytes(bytes)?;
+            let read = ledger.read_nonce_ledger_bytes()?;
+            assert_eq!(read, bytes);
+            assert!(SubjectNonceLedgerV1::from_bytes(&read).is_err());
+        }
+        Ok(())
+    }
+
+    fn refuse_occupied_temporary(ledger: &WindowsNonceLedger<'_>, base: &Path) -> TestResult {
+        let temporary = base.join("PiglorOS").join(TEMPORARY);
+        let mut occupied = crate::Native::create_private_ledger_file(&temporary)
+            .map_err(|()| "create occupied staging fixture")?;
+        occupied.write_all(b"occupied")?;
+        let before = ledger.read_nonce_ledger_bytes()?;
+        assert_eq!(
+            ledger.replace_nonce_ledger_bytes(b"refused"),
+            Err(unavailable())
+        );
+        assert_eq!(fs::read(&temporary)?, b"occupied");
+        assert_eq!(ledger.read_nonce_ledger_bytes()?, before);
+        drop(occupied);
+        fs::remove_file(temporary)?;
+        Ok(())
+    }
+
+    fn refuse_replaced_directory(ledger: &WindowsNonceLedger<'_>, base: &Path) -> TestResult {
+        let path = base.join("PiglorOS");
+        let moved = base.join("moved-ledger-directory");
+        let before = ledger.read_nonce_ledger_bytes()?;
+        fs::rename(&path, &moved)?;
+        crate::create_private_directory(&path).map_err(|_| "create replacement directory")?;
+        assert_eq!(ledger.read_nonce_ledger_bytes(), Err(unavailable()));
+        assert_eq!(
+            ledger.replace_nonce_ledger_bytes(b"refused"),
+            Err(unavailable())
+        );
+        fs::remove_dir(&path)?;
+        fs::rename(moved, &path)?;
+        assert_eq!(ledger.read_nonce_ledger_bytes()?, before);
         Ok(())
     }
 
