@@ -24,6 +24,9 @@ use crate::TransientServiceUnitName;
 
 mod activation;
 mod directory;
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod frontiers;
 mod recovery;
 mod root;
 pub use directory::{AttemptUnitTermination, CompletedAttemptCleanup, PreparedAttemptDirectory};
