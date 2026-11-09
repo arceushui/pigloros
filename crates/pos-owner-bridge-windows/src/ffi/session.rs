@@ -115,14 +115,91 @@ impl NativeOperations for Session {
     ) -> Result<Box<dyn crate::ProcessFaultHandle>, ()> {
         self.check().map_err(|_| ())?;
         let environment = self.environment_ref().map_err(|_| ())?;
-        if !environment.subscribed() || self.controller.is_none() || self.view.is_none() {
+        if !environment.subscribed() {
             return Err(());
         }
-        let browser_pid = self.browser_pid().map_err(|_| ())?;
-        if browser_pid != authority.browser().browser_pid {
-            return Err(());
+        match authority.lifecycle() {
+            crate::ProcessFaultLifecycle::PostedReceipt
+            | crate::ProcessFaultLifecycle::ReleasingSuccess => {
+                if self.controller.is_none()
+                    || self.view.is_none()
+                    || self.browser_pid().map_err(|_| ())? != authority.browser().browser_pid
+                {
+                    return Err(());
+                }
+            }
+            crate::ProcessFaultLifecycle::AwaitingExitSuccess => {
+                if authority.target() != crate::ProcessFaultTarget::Browser
+                    || !self.exit_fault_owners_retained()
+                    || super::process_fault::browser_candidate(&environment.raw)?
+                        != authority.browser()
+                {
+                    return Err(());
+                }
+                self.denials.expect_browser(authority.browser().browser_pid);
+            }
+            crate::ProcessFaultLifecycle::RecordlessOpening => {
+                if authority.target() != crate::ProcessFaultTarget::Browser
+                    || !self.recordless_fault_owners_retained()
+                    || super::process_fault::browser_candidate(&environment.raw)?
+                        != authority.browser()
+                {
+                    return Err(());
+                }
+                // The exact environment subscription already exists; arm its
+                // recovery observer before the fixed fault can be invoked.
+                self.denials.expect_browser(authority.browser().browser_pid);
+            }
         }
         super::process_fault::inject(&environment.raw, authority)
+    }
+
+    #[cfg(test)]
+    fn exit_browser_candidate(&self) -> Result<pos_owner_bridge::ProcessIdentity, ()> {
+        if !self.exit_fault_owners_retained() {
+            return Err(());
+        }
+        super::process_fault::browser_candidate(&self.environment_ref().map_err(|_| ())?.raw)
+    }
+
+    #[cfg(test)]
+    fn exit_fault_owners_retained(&self) -> bool {
+        self.check().is_ok()
+            && self
+                .environment
+                .as_ref()
+                .is_some_and(Environment::subscribed)
+            && self.controller_creation.is_none()
+            && self.controller.is_none()
+            && self.view.is_none()
+            && self.buffers.is_none()
+    }
+
+    #[cfg(test)]
+    fn recordless_controller_completion(&self) -> Option<bool> {
+        self.check().ok()?;
+        self.controller_creation.as_ref()?.succeeded()
+    }
+
+    #[cfg(test)]
+    fn recordless_browser_candidate(&self) -> Result<pos_owner_bridge::ProcessIdentity, ()> {
+        if !self.recordless_fault_owners_retained() {
+            return Err(());
+        }
+        super::process_fault::browser_candidate(&self.environment_ref().map_err(|_| ())?.raw)
+    }
+
+    #[cfg(test)]
+    fn recordless_fault_owners_retained(&self) -> bool {
+        self.check().is_ok()
+            && self
+                .environment
+                .as_ref()
+                .is_some_and(Environment::subscribed)
+            && self.recordless_controller_completion() == Some(true)
+            && self.controller.is_none()
+            && self.view.is_none()
+            && self.buffers.is_none()
     }
 
     #[cfg(test)]

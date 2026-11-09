@@ -167,22 +167,23 @@ impl Window {
         // SAFETY: live owned top-level window on this STA. This return value
         // reports prior visibility, not whether showing succeeded.
         let _previous_visibility = unsafe { ShowWindow(self.hwnd, SW_SHOWNORMAL) };
-        // SAFETY: live owned window. Foreground rights may deny the request;
-        // the caller independently verifies the actual foreground within 1s.
-        let requested = unsafe { SetForegroundWindow(self.hwnd) };
-        #[cfg(test)]
-        {
-            use std::io::Write as _;
-            let _written = writeln!(
-                std::io::stderr(),
-                "NATIVE_FOREGROUND show hwnd={:#x} requested={}",
-                self.hwnd.0 as usize,
-                requested.as_bool()
-            );
-            let _observed = self.foreground();
-        }
-        #[cfg(not(test))]
-        let _requested = requested;
+        let _requested = {
+            // SAFETY: live owned window. Foreground rights may deny the request;
+            // the caller independently verifies the actual foreground within 1s.
+            let requested = unsafe { SetForegroundWindow(self.hwnd) };
+            #[cfg(test)]
+            {
+                use std::io::Write as _;
+                let _written = writeln!(
+                    std::io::stderr(),
+                    "NATIVE_FOREGROUND show hwnd={:#x} requested={}",
+                    self.hwnd.0 as usize,
+                    requested.as_bool()
+                );
+                let _observed = self.foreground();
+            }
+            requested
+        };
     }
 
     pub(super) fn foreground(&self) -> bool {

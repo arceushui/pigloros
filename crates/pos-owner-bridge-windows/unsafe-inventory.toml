@@ -821,7 +821,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/session.rs"
-line = 162
+line = 239
 function = "fit_controller"
 operation = "controller.SetBounds(bounds)"
 invariant = "retained creating-STA controller and copied initialized client RECT."
@@ -829,7 +829,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/session.rs"
-line = 167
+line = 244
 function = "focus_controller"
 operation = "controller.MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC)"
 invariant = "retained creating-STA controller; fixed programmatic focus reason."
@@ -837,7 +837,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/session.rs"
-line = 227
+line = 304
 function = "controller_completion"
 operation = "controller.CoreWebView2()"
 invariant = "successfully completed retained controller on its creating STA."
@@ -845,7 +845,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/session.rs"
-line = 239
+line = 316
 function = "browser_pid"
 operation = "view.BrowserProcessId(&raw mut pid)"
 invariant = "retained creating-STA view and initialized unique PID output."
@@ -853,7 +853,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/session.rs"
-line = 268
+line = 345
 function = "navigate_owner"
 operation = "view.Navigate(w!( ))"
 invariant = "retained creating-STA view and the fixed packaged owner document URL."
@@ -861,7 +861,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/session.rs"
-line = 329
+line = 406
 function = "close_controller"
 operation = "controller.Close()"
 invariant = "retained creating-STA controller; all buffer borrows ended. Failure retains the COM owner so the safe policy can quarantine/retry."
@@ -1277,7 +1277,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/window.rs"
-line = 172
+line = 173
 function = "show"
 operation = "SetForegroundWindow(self.hwnd)"
 invariant = "live owned window. Foreground rights may deny the request; the caller independently verifies the actual foreground within 1s."
@@ -1285,7 +1285,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/window.rs"
-line = 190
+line = 191
 function = "foreground"
 operation = "GetForegroundWindow()"
 invariant = "a scalar observation of the current foreground HWND."
@@ -1293,7 +1293,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/window.rs"
-line = 202
+line = 203
 function = "foreground"
 operation = "GetWindow(foreground, GW_OWNER)"
 invariant = "HWNDs are opaque identifiers checked by Windows. This queries the owner chain without dereferencing process memory."
@@ -1301,7 +1301,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/window.rs"
-line = 235
+line = 236
 function = "bounds"
 operation = "GetClientRect(self.hwnd, &raw mut rectangle)"
 invariant = "live owned window and distinct initialized writable RECT."
@@ -1309,7 +1309,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/window.rs"
-line = 242
+line = 243
 function = "snapshot"
 operation = "IsWindow(Some(self.hwnd))"
 invariant = "scalar existence observation of our STA-owned HWND. No new ceremony window is created before this session's retirement ends."
@@ -1317,7 +1317,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/window.rs"
-line = 259
+line = 260
 function = "snapshot"
 operation = "GetDpiForWindow(self.hwnd)"
 invariant = "our still-live creating-STA HWND; scalar observation only."
@@ -1325,7 +1325,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/window.rs"
-line = 279
+line = 280
 function = "resize"
 operation = "SetWindowPos( self.hwnd, None, 0, 0, width, height, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE, )"
 invariant = "checked dimensions and live STA HWND, preserving position, stacking and activation. No retained application pointer."
@@ -1333,7 +1333,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/window.rs"
-line = 300
+line = 301
 function = "destroy"
 operation = "DestroyWindow(self.hwnd)"
 invariant = "exactly one successful destruction of this STA-owned window after normal controller/buffer/environment cleanup."
@@ -1341,7 +1341,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/window.rs"
-line = 317
+line = 318
 function = "initial_dpi"
 operation = "GetDpiForWindow(owner)"
 invariant = "query the supplied opaque owner HWND; a zero readback fails later checked dimension conversion rather than selecting a fallback."
@@ -1349,7 +1349,7 @@ hosted_test = "native_owned_window_reads_owner_dpi"
 
 [[block]]
 file = "src/ffi/window.rs"
-line = 312
+line = 313
 function = "initial_dpi"
 operation = "GetDpiForSystem()"
 invariant = "scalar system DPI query for placement on the primary monitor."
@@ -1357,7 +1357,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/window.rs"
-line = 337
+line = 338
 function = "outer_rectangle"
 operation = "AdjustWindowRectExForDpi( &raw mut rectangle, WS_OVERLAPPEDWINDOW, false, WINDOW_EX_STYLE(0), dpi, )"
 invariant = "initialized writable client RECT, fixed top-level style, no menu, checked nonzero DPI and no retained pointer."
@@ -1365,7 +1365,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/window.rs"
-line = 362
+line = 363
 function = "centered"
 operation = "MonitorFromWindow(owner.unwrap_or_default(), MONITOR_DEFAULTTOPRIMARY)"
 invariant = "opaque optional owner HWND; Windows selects its monitor or the primary monitor when no window is supplied. No application pointer."
@@ -1373,7 +1373,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/window.rs"
-line = 369
+line = 370
 function = "centered"
 operation = "GetMonitorInfoW(monitor, &raw mut information)"
 invariant = "monitor returned by Windows, initialized MONITORINFO of its documented 40-byte layout, distinct writable output."
@@ -1597,7 +1597,7 @@ hosted_test = "native_verified_owned_process_faults_retire"
 
 [[block]]
 file = "src/ffi/process_fault.rs"
-line = 114
+line = 130
 function = "inject"
 operation = "OpenProcess"
 invariant = "Only an environment-discovered unique candidate, fixed query and terminate rights, no inheritance."
@@ -1605,7 +1605,7 @@ hosted_test = "native_verified_owned_process_faults_retire"
 
 [[block]]
 file = "src/ffi/process_fault.rs"
-line = 149
+line = 165
 function = "inject"
 operation = "TerminateProcess"
 invariant = "One declared fault after retained-handle identity, class, topology and membership revalidation; fixed exit code 0x535."

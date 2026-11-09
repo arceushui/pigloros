@@ -88,6 +88,22 @@ fn select(
     Ok(pid)
 }
 
+/// Discovery has no caller-provided PID and confers no termination authority.
+pub(super) fn browser_candidate(
+    environment: &ICoreWebView2Environment,
+) -> Result<ProcessIdentity, ()> {
+    let first = candidates(environment)?;
+    let pid = select(&first, COREWEBVIEW2_PROCESS_KIND_BROWSER)?;
+    let (identity, image) = super::process::inspect(pid)?.ok_or(())?;
+    let second = candidates(environment)?;
+    if select(&second, COREWEBVIEW2_PROCESS_KIND_BROWSER)? != pid
+        || super::process::inspect(pid)?.ok_or(())? != (identity, image)
+    {
+        return Err(());
+    }
+    Ok(identity)
+}
+
 pub(super) fn inject(
     environment: &ICoreWebView2Environment,
     authority: &crate::FaultAuthority,
@@ -148,4 +164,25 @@ pub(super) fn inject(
     // environment, at the declared fault point, with a fixed non-active code.
     unsafe { TerminateProcess(handle, FAULT_EXIT) }.map_err(|_| ())?;
     Ok(Box::new(retained))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{select, COREWEBVIEW2_PROCESS_KIND_BROWSER, COREWEBVIEW2_PROCESS_KIND_RENDERER};
+
+    #[test]
+    fn selection_refuses_absent_and_ambiguous_process_classes() {
+        assert!(select(&[], COREWEBVIEW2_PROCESS_KIND_BROWSER).is_err());
+        let one_browser = [(11, COREWEBVIEW2_PROCESS_KIND_BROWSER)];
+        assert_eq!(
+            select(&one_browser, COREWEBVIEW2_PROCESS_KIND_BROWSER),
+            Ok(11)
+        );
+        assert!(select(&one_browser, COREWEBVIEW2_PROCESS_KIND_RENDERER).is_err());
+        let ambiguous = [
+            (11, COREWEBVIEW2_PROCESS_KIND_BROWSER),
+            (12, COREWEBVIEW2_PROCESS_KIND_BROWSER),
+        ];
+        assert!(select(&ambiguous, COREWEBVIEW2_PROCESS_KIND_BROWSER).is_err());
+    }
 }

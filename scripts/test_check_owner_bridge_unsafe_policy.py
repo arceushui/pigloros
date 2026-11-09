@@ -1483,6 +1483,88 @@ def test_owned_process_fault_authority() -> None:
             raise SystemExit(f"the shared identity policy accepted {old} -> {new}")
 
 
+def test_fault_profile_bindings() -> None:
+    directory = "crates/pos-owner-bridge"
+    paths = (
+        f"{directory}/src/listener/fixtures.rs",
+        f"{directory}/src/listener/fixture_assets.rs",
+        f"{directory}/assets/qualification/pending.html",
+        f"{directory}/assets/qualification/successful_get_release_delay.html",
+    )
+    sources = {path: (ROOT / path).read_text() for path in paths}
+
+    def errors(changes: dict[str, str]) -> list[str]:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for relative, text in {**sources, **changes}.items():
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(text)
+            found: list[str] = []
+            CHECKER._check_fault_assets(root, found)
+            return found
+
+    if errors({}):
+        raise SystemExit("the actual sealed fault profile bindings were rejected")
+    for path in paths[2:]:
+        if not errors({path: sources[path] + "<iframe></iframe>"}):
+            raise SystemExit(f"changed fault topology was accepted: {path}")
+    for variant, constant, filename in (
+        ("Pending", "PENDING", "pending"),
+        ("SuccessfulGetReleaseDelay", "SUCCESSFUL_GET_RELEASE_DELAY", "successful_get_release_delay"),
+    ):
+        catalogue, responses = paths[:2]
+        mapping = f"Self::{variant} => &fixture_assets::{constant}"
+        if not errors({catalogue: sources[catalogue].replace(mapping, f"Self::{variant} => &fixture_assets::OTHER", 1)}):
+            raise SystemExit(f"redirected fault catalogue was accepted: {variant}")
+        original = sources[responses]
+        wrong = original.replace(f'qualification/{filename}.html', 'qualification/other.html', 1)
+        decoy = f'const {constant}: Response = Response {{ body: include_bytes!("../../assets/qualification/{filename}.html") }};'
+        for text in (wrong, f"/* {decoy} */\n" + wrong, wrong + f'\nconst TEXT: &str = r#"{decoy}"#;'):
+            expected = f"{responses}: {variant} response must embed the reviewed asset"
+            if expected not in errors({responses: text}):
+                raise SystemExit(f"non-executable fault response decoy was accepted: {variant}")
+
+
+def test_recordless_and_release_authority() -> None:
+    cases = (
+        ("src/ffi/creation.rs", "succeeded", "Result::is_ok", "Result::is_err"),
+        ("src/ffi/session.rs", "recordless_fault_owners_retained", "== Some(true)", "== Some(false)"),
+        ("src/ffi/session.rs", "exit_fault_owners_retained", "self.view.is_none()", "self.view.is_some()"),
+        ("src/adapter/surface/mod.rs", "recordless_opening_ready", "self.identity.is_none()", "self.identity.is_some()"),
+        ("src/adapter/surface/mod.rs", "inject_recordless_browser", "ProcessFaultTarget::Browser", "ProcessFaultTarget::Renderer"),
+        ("src/adapter/surface/mod.rs", "inject_view_fault", "std::time::Instant::now() < deadline", "true"),
+        ("src/adapter/surface/mod.rs", "exit_fault_state", "self.native.exit_browser_candidate()? != browser", "self.native.exit_browser_candidate()? == browser"),
+    )
+    for relative, name, old, new in cases:
+        source = (ROOT / SHIM / relative).read_text()
+        marker = source.index(f"fn {name}(")
+        opening = source.index("{", marker)
+        scanned = CHECKER.scan(source)
+        end = CHECKER._matching_brace(scanned.code, opening) + 1
+        body = source[marker:end]
+        if body.count(old) != 1:
+            raise SystemExit(f"missing authority mutation: {relative}::{name}: {old}")
+        mutated = source[:marker] + body.replace(old, new, 1) + source[end:]
+        changed = CHECKER.scan(mutated)
+        found: list[str] = []
+        CHECKER._check_fault_authority(ROOT, {relative: (changed, CHECKER._attributes(changed.code))}, found)
+        expected = f"{SHIM}/{relative}: process fault authority function {name} differs from reviewed code"
+        if expected not in found:
+            raise SystemExit(f"authority bypass was accepted: {relative}::{name}")
+    relative = "src/adapter/surface/mod.rs"
+    source = (ROOT / SHIM / relative).read_text()
+    for declaration in ("recordless_fault: Option<ProcessIdentity>", "recordless_fault: None"):
+        guarded = "#[cfg(test)]\n" + ("    " if "Option" in declaration else "            ") + declaration
+        if source.count(guarded) != 1:
+            raise SystemExit(f"missing recordless field guard: {declaration}")
+        changed = CHECKER.scan(source.replace(guarded, declaration, 1))
+        found = []
+        CHECKER._check_fault_authority(ROOT, {relative: (changed, CHECKER._attributes(changed.code))}, found)
+        if f"{SHIM}/{relative}: recordless fixture identity and initialization require cfg(test)" not in found:
+            raise SystemExit(f"product recordless fixture state was accepted: {declaration}")
+
+
 def test_private_fault_capability_construction() -> None:
     root = (ROOT / LIB).read_text()
     surface = "src/adapter/surface/mod.rs"
@@ -1513,6 +1595,7 @@ def test_private_fault_capability_construction() -> None:
             raise SystemExit(f"product capability was accepted: {marker}")
     for statement, expected in (
         ("fn f() { let _seal = crate::FaultSeal(Default::default()); }", "FaultSeal construction belongs only in the sealed fixture"),
+        ("fn f() { let _seal = crate::FaultSeal { trace, deadline }; }", "FaultSeal construction belongs only in the sealed fixture"),
         ("fn f() { let _authority = crate::FaultAuthority {}; }", "FaultAuthority construction belongs only in the validated Surface path"),
         ("use crate::FaultSeal as Other;", "fault capabilities may not be aliased"),
         ("use crate::FaultAuthority as Other;", "fault capabilities may not be aliased"),
@@ -1594,6 +1677,8 @@ def main() -> None:
     test_forbidden_webview_authority()
     test_control_observations_cannot_ship_in_product_builds()
     test_owned_process_fault_authority()
+    test_fault_profile_bindings()
+    test_recordless_and_release_authority()
     test_private_fault_capability_construction()
     test_live_mapping_witness_boundary()
     test_windows_case_insensitive_source_suffix_cannot_hide_code()

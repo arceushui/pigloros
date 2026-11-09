@@ -109,6 +109,14 @@ impl ControllerCreation {
         })
     }
 
+    #[cfg(test)]
+    pub(super) fn succeeded(&self) -> Option<bool> {
+        self.result
+            .borrow()
+            .as_ref()
+            .map(std::result::Result::is_ok)
+    }
+
     pub(super) fn take(&self) -> Option<Result<ICoreWebView2Controller>> {
         self.result
             .borrow_mut()

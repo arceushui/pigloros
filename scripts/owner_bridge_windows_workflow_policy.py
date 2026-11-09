@@ -202,7 +202,7 @@ EXPECTED_NATIVE = {'name': 'owner-bridge-windows',
                                                                '${{ runner.temp '
                                                                '}}/owner-windows-ffi-full.json\n',
                                                        'if-no-files-found': 'error'}}]}}}
-PRODUCER_SHA256 = {'scripts/check_owner_bridge_unsafe_policy.py': '79d7f945842ab2968d6c8135b5ad45e43c41debc47c483c5a4fb5726c7488050',
+PRODUCER_SHA256 = {'scripts/check_owner_bridge_unsafe_policy.py': '25b652bbfe05c8bc5c09937ca5b74adce7da32b4311ff657973e9bb102867f44',
  'scripts/owner_bridge_windows_cov_ignore.py': '82f97a7eb43588f05c469fe72d22c78c4a78d56f0033e6b25cc6277a8f3f24a6'}
 
 

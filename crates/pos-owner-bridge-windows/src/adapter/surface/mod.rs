@@ -75,6 +75,8 @@ pub(super) struct Surface {
     events: Rc<Events>,
     folder: Option<String>,
     identity: Option<ProcessIdentity>,
+    #[cfg(test)]
+    recordless_fault: Option<ProcessIdentity>,
     ownership: Ownership,
     generation: Option<u32>,
     buffers: bool,
@@ -111,6 +113,8 @@ impl Surface {
             events: Rc::new(Events::default()),
             folder: None,
             identity: None,
+            #[cfg(test)]
+            recordless_fault: None,
             ownership: Ownership::Idle,
             generation: None,
             buffers: false,
@@ -123,6 +127,114 @@ impl Surface {
             dpi: Cell::new(None),
             client: Cell::new(None),
         })
+    }
+
+    #[cfg(test)]
+    pub(in crate::adapter) fn recordless_opening_ready(&self) -> bool {
+        self.ownership == Ownership::CreatingController
+            && !self.failed_open
+            && self.identity.is_none()
+            && self.recordless_fault.is_none()
+            && !self.buffers
+            && self.native.pending()
+    }
+
+    #[cfg(test)]
+    pub(in crate::adapter) fn recordless_controller_completion(&self) -> Option<bool> {
+        if !self.recordless_opening_ready() {
+            return None;
+        }
+        self.native.recordless_controller_completion()
+    }
+
+    #[cfg(test)]
+    pub(in crate::adapter) fn prepare_recordless_browser(
+        &mut self,
+    ) -> std::result::Result<ProcessIdentity, ()> {
+        if !self.recordless_opening_ready()
+            || !self.native.recordless_fault_owners_retained()
+            || self.events.invalid()
+            || self.events.exited().is_some()
+            || !self.store.records().map_err(|_| ())?.is_empty()
+        {
+            return Err(());
+        }
+        let folder = self.root.join(self.folder.as_ref().ok_or(())?);
+        crate::verify_private_directory(&folder).map_err(|_| ())?;
+        self.admit_environment(&folder).map_err(|_| ())?;
+        let browser = self.native.recordless_browser_candidate()?;
+        if self.runtime.identity(browser.browser_pid).map_err(|_| ())? != browser {
+            return Err(());
+        }
+        self.events.expect_browser(browser.browser_pid);
+        self.recordless_fault = Some(browser);
+        Ok(browser)
+    }
+
+    #[cfg(test)]
+    pub(in crate::adapter) fn inject_recordless_browser(
+        &mut self,
+        seal: crate::FaultSeal,
+    ) -> std::result::Result<Box<dyn crate::ProcessFaultHandle>, ()> {
+        if self.ownership != Ownership::CreatingController
+            || self.failed_open
+            || self.identity.is_some()
+            || self.buffers
+            || self.events.invalid()
+            || self.events.exited().is_some()
+            || !self.native.recordless_fault_owners_retained()
+            || !self.store.records().map_err(|_| ())?.is_empty()
+        {
+            return Err(());
+        }
+        let browser = self.recordless_fault.ok_or(())?;
+        let folder = self.root.join(self.folder.as_ref().ok_or(())?);
+        crate::verify_private_directory(&folder).map_err(|_| ())?;
+        self.admit_environment(&folder).map_err(|_| ())?;
+        if self.runtime.identity(browser.browser_pid).map_err(|_| ())? != browser
+            || self.native.recordless_browser_candidate()? != browser
+        {
+            return Err(());
+        }
+        let events = Rc::clone(&self.events);
+        let (trace, deadline) = seal.into_parts();
+        let authority = crate::FaultAuthority {
+            browser,
+            target: crate::ProcessFaultTarget::Browser,
+            lifecycle: crate::ProcessFaultLifecycle::RecordlessOpening,
+            valid: Rc::new(move || {
+                std::time::Instant::now() < deadline
+                    && !events.invalid()
+                    && events.exited().is_none()
+            }),
+            trace,
+        };
+        self.native.inject_process_fault(&authority)
+    }
+
+    #[cfg(test)]
+    pub(in crate::adapter) fn recordless_fault_event(
+        &self,
+    ) -> std::result::Result<Option<crate::ProcessFaultMark>, ()> {
+        let browser = self.recordless_fault.ok_or(())?;
+        match self.events.exited() {
+            None => Ok(None),
+            Some(pid) if pid == browser.browser_pid => {
+                Ok(Some(crate::ProcessFaultMark::OwnBrowserExited))
+            }
+            Some(_) => Err(()),
+        }
+    }
+
+    #[cfg(test)]
+    pub(in crate::adapter) fn recordless_fault_owners_retained(&mut self) -> bool {
+        self.ownership == Ownership::CreatingController
+            && self.folder.is_some()
+            && self.identity.is_none()
+            && self.recordless_fault.is_some()
+            && !self.buffers
+            && self.store.records().is_ok_and(|records| records.is_empty())
+            && self.native.recordless_fault_owners_retained()
     }
 
     #[cfg(test)]
@@ -166,6 +278,91 @@ impl Surface {
             return Err(());
         }
         Ok(state)
+    }
+
+    #[cfg(test)]
+    pub(in crate::adapter) fn releasing_fault_state(
+        &mut self,
+        posts: u8,
+    ) -> std::result::Result<crate::ProcessFaultState, ()> {
+        let mut state = self.posted_fault_state(posts)?;
+        if ControlState::try_from(state.reply_state).ok() != Some(ControlState::ReleaseRequested) {
+            return Err(());
+        }
+        state.phase = crate::ProcessFaultPhase::ReleasingSuccess;
+        Ok(state)
+    }
+
+    #[cfg(test)]
+    pub(in crate::adapter) fn exit_fault_phase_reached(&self) -> bool {
+        self.ownership == Ownership::ControllerClosed
+    }
+
+    #[cfg(test)]
+    pub(in crate::adapter) fn exit_fault_state(
+        &mut self,
+    ) -> std::result::Result<crate::ProcessExitState, ()> {
+        if !self.exit_fault_phase_reached()
+            || self.close != CloseState::Idle
+            || self.failed_open
+            || self.events.invalid()
+            || self.events.exited().is_some()
+            || self.buffers
+            || !self.native.exit_fault_owners_retained()
+            || !crate::Native::process_failure_observations().is_empty()
+        {
+            return Err(());
+        }
+        let browser = self.identity.ok_or(())?;
+        let folder = self.root.join(self.folder.as_ref().ok_or(())?);
+        crate::verify_private_directory(&folder).map_err(|_| ())?;
+        self.admit_environment(&folder).map_err(|_| ())?;
+        if self.runtime.identity(browser.browser_pid).map_err(|_| ())? != browser
+            || self.native.exit_browser_candidate()? != browser
+        {
+            return Err(());
+        }
+        let state = crate::ProcessExitState {
+            generation: self.generation.ok_or(())?,
+            record_count: self.store.records().map_err(|_| ())?.len(),
+        };
+        if state.generation != 1 || state.record_count != 1 {
+            return Err(());
+        }
+        Ok(state)
+    }
+
+    #[cfg(test)]
+    pub(in crate::adapter) fn exit_fault_owners_retained(&mut self) -> bool {
+        self.exit_fault_phase_reached()
+            && self.folder.is_some()
+            && self.identity.is_some()
+            && !self.buffers
+            && self.store.records().is_ok_and(|records| records.len() == 1)
+            && self.native.exit_fault_owners_retained()
+    }
+
+    #[cfg(test)]
+    pub(in crate::adapter) fn inject_exit_fault(
+        &mut self,
+        seal: crate::FaultSeal,
+    ) -> std::result::Result<Box<dyn crate::ProcessFaultHandle>, ()> {
+        self.exit_fault_state()?;
+        let browser = self.identity.ok_or(())?;
+        let events = Rc::clone(&self.events);
+        let (trace, deadline) = seal.into_parts();
+        let authority = crate::FaultAuthority {
+            browser,
+            target: crate::ProcessFaultTarget::Browser,
+            lifecycle: crate::ProcessFaultLifecycle::AwaitingExitSuccess,
+            valid: Rc::new(move || {
+                std::time::Instant::now() < deadline
+                    && !events.invalid()
+                    && events.exited().is_none()
+            }),
+            trace,
+        };
+        self.native.inject_process_fault(&authority)
     }
 
     #[cfg(test)]
@@ -214,6 +411,35 @@ impl Surface {
         target: crate::ProcessFaultTarget,
         seal: crate::FaultSeal,
     ) -> std::result::Result<Box<dyn crate::ProcessFaultHandle>, ()> {
+        if ControlState::try_from(self.native.load_state().map_err(|_| ())?).ok()
+            != Some(ControlState::Received)
+        {
+            return Err(());
+        }
+        self.inject_view_fault(target, seal, crate::ProcessFaultLifecycle::PostedReceipt)
+    }
+
+    #[cfg(test)]
+    pub(in crate::adapter) fn inject_releasing_fault(
+        &self,
+        target: crate::ProcessFaultTarget,
+        seal: crate::FaultSeal,
+    ) -> std::result::Result<Box<dyn crate::ProcessFaultHandle>, ()> {
+        if ControlState::try_from(self.native.load_state().map_err(|_| ())?).ok()
+            != Some(ControlState::ReleaseRequested)
+        {
+            return Err(());
+        }
+        self.inject_view_fault(target, seal, crate::ProcessFaultLifecycle::ReleasingSuccess)
+    }
+
+    #[cfg(test)]
+    fn inject_view_fault(
+        &self,
+        target: crate::ProcessFaultTarget,
+        seal: crate::FaultSeal,
+        lifecycle: crate::ProcessFaultLifecycle,
+    ) -> std::result::Result<Box<dyn crate::ProcessFaultHandle>, ()> {
         if self.ownership != Ownership::Controller
             || self.close != CloseState::Idle
             || self.failed_open
@@ -237,11 +463,17 @@ impl Surface {
             return Err(());
         }
         let events = Rc::clone(&self.events);
+        let (trace, deadline) = seal.into_parts();
         let authority = crate::FaultAuthority {
             browser,
             target,
-            valid: Rc::new(move || !events.invalid() && events.exited().is_none()),
-            trace: seal.into_trace(),
+            lifecycle,
+            valid: Rc::new(move || {
+                std::time::Instant::now() < deadline
+                    && !events.invalid()
+                    && events.exited().is_none()
+            }),
+            trace,
         };
         self.native.inject_process_fault(&authority)
     }
@@ -345,6 +577,10 @@ impl OwnerWebSurface for Surface {
             };
             self.events = Rc::new(Events::default());
             self.activation_error = None;
+            #[cfg(test)]
+            {
+                self.recordless_fault = None;
+            }
             self.generation = None;
             self.foreground_deadline = None;
             self.navigation_issued = false;

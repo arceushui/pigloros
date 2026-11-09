@@ -380,8 +380,18 @@ pub(crate) enum ProcessFaultTarget {
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ProcessFaultLifecycle {
+    PostedReceipt,
+    ReleasingSuccess,
+    AwaitingExitSuccess,
+    RecordlessOpening,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ProcessFaultPhase {
     PostedReceipt,
+    ReleasingSuccess,
 }
 
 #[cfg(test)]
@@ -403,8 +413,20 @@ pub(crate) struct ProcessFaultState {
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ProcessExitState {
+    pub(crate) generation: u32,
+    pub(crate) record_count: usize,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ProcessFaultMark {
     Reached(ProcessFaultState),
+    ReachedExit(ProcessExitState),
+    RecordlessOpening {
+        generation: u32,
+        record_count: usize,
+    },
     Selected(pos_owner_bridge::ProcessIdentity),
     TerminationCall,
     MainRendererExited,
@@ -418,14 +440,20 @@ pub(crate) trait ProcessFaultHandle {
     fn exit_code(&self) -> Result<Option<u32>, ()>;
 }
 
+#[cfg(test)]
+type FaultTrace = Rc<std::cell::RefCell<Vec<ProcessFaultMark>>>;
+
 /// A one-use test capability constructed only by the sealed fault fixture.
 #[cfg(test)]
-struct FaultSeal(Rc<std::cell::RefCell<Vec<ProcessFaultMark>>>);
+struct FaultSeal {
+    trace: FaultTrace,
+    deadline: std::time::Instant,
+}
 
 #[cfg(test)]
 impl FaultSeal {
-    const fn into_trace(self) -> Rc<std::cell::RefCell<Vec<ProcessFaultMark>>> {
-        self.0
+    fn into_parts(self) -> (FaultTrace, std::time::Instant) {
+        (self.trace, self.deadline)
     }
 }
 
@@ -434,8 +462,9 @@ impl FaultSeal {
 struct FaultAuthority {
     browser: pos_owner_bridge::ProcessIdentity,
     target: ProcessFaultTarget,
+    lifecycle: ProcessFaultLifecycle,
     valid: Rc<dyn Fn() -> bool>,
-    trace: Rc<std::cell::RefCell<Vec<ProcessFaultMark>>>,
+    trace: FaultTrace,
 }
 
 #[cfg(test)]
@@ -445,6 +474,9 @@ impl FaultAuthority {
     }
     const fn target(&self) -> ProcessFaultTarget {
         self.target
+    }
+    const fn lifecycle(&self) -> ProcessFaultLifecycle {
+        self.lifecycle
     }
     fn valid(&self) -> bool {
         (self.valid)()
@@ -464,6 +496,31 @@ pub(crate) trait NativeOperations {
         _authority: &FaultAuthority,
     ) -> Result<Box<dyn ProcessFaultHandle>, ()> {
         Err(())
+    }
+
+    #[cfg(test)]
+    fn recordless_controller_completion(&self) -> Option<bool> {
+        None
+    }
+
+    #[cfg(test)]
+    fn exit_browser_candidate(&self) -> Result<pos_owner_bridge::ProcessIdentity, ()> {
+        Err(())
+    }
+
+    #[cfg(test)]
+    fn exit_fault_owners_retained(&self) -> bool {
+        false
+    }
+
+    #[cfg(test)]
+    fn recordless_browser_candidate(&self) -> Result<pos_owner_bridge::ProcessIdentity, ()> {
+        Err(())
+    }
+
+    #[cfg(test)]
+    fn recordless_fault_owners_retained(&self) -> bool {
+        false
     }
 
     #[cfg(test)]
