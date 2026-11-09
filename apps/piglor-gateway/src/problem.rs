@@ -217,7 +217,7 @@ impl ProblemV1 {
     }
 }
 
-/// A handler answer carries the problem as an extension; [`problem_instance`] renders it with
+/// A handler answer carries the problem as an extension; the `problem_instance` layer renders it with
 /// the request path. Every Gateway router installs that layer.
 impl IntoResponse for ProblemV1 {
     fn into_response(self) -> Response {
