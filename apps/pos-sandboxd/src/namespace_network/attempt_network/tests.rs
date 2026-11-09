@@ -177,9 +177,14 @@ fn an_established_network_holds_its_slot_until_its_connector_is_dropped() -> Tes
     ));
     assert!(matches!(third, Err(AttemptNetworkError::Open(_))));
     assert_eq!(removed_while_held, ["piglor-h1"]);
-    let entries = entries(&journal);
-    assert_eq!(entries.installed, ["piglor-h0", "piglor-h1", "piglor-h0"]);
-    assert_eq!(entries.removed, ["piglor-h1", "piglor-h0", "piglor-h0"]);
+    assert_eq!(
+        entries(&journal).installed,
+        ["piglor-h0", "piglor-h1", "piglor-h0"]
+    );
+    assert_eq!(
+        entries(&journal).removed,
+        ["piglor-h1", "piglor-h0", "piglor-h0"]
+    );
     Ok(())
 }
 
