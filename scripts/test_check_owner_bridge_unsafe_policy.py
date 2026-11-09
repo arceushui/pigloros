@@ -1917,7 +1917,7 @@ def test_owned_parent_fixture_is_test_only_and_exactly_bound() -> None:
         (paths[0], "#[test]\n    fn native_host_fixture_child", "#[test]\n    #[should_panic]\n    fn native_host_fixture_child"),
         (paths[0], "#[test]\n    fn native_host_fixture_child", "#[test]\n    #[cfg_attr(test, ignore)]\n    fn native_host_fixture_child"),
         (paths[0], "#[cfg(test)]\n#[forbid(unsafe_code)]\nmod tests {", "#[cfg(any())]\n#[forbid(unsafe_code)]\nmod tests {"),
-        (paths[1], "#[cfg(test)]\npub(crate) mod fixture_parent;", "pub(crate) mod fixture_parent;"),
+        (paths[1], "#[cfg(test)]\npub mod fixture_parent;", "pub mod fixture_parent;"),
         (paths[2], '"PIGLOR_HOST_FIXTURE_PARENT"', '"UNREVIEWED_PARENT"'),
         (paths[2], "self.window.handle().0 as usize", "123_usize"),
         (paths[2], "self.pump.token.check()?;", ""),

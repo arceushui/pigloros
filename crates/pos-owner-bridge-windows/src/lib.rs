@@ -859,13 +859,10 @@ mod tests {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
         let mut observation_failed = false;
         loop {
-            let status = match child.try_wait() {
-                Ok(status) => status,
-                Err(_) => {
-                    observation_failed = true;
-                    None
-                }
-            };
+            let status = child.try_wait().unwrap_or_else(|_| {
+                observation_failed = true;
+                None
+            });
             if let Some(status) = status {
                 // Retain the child through its ordinary native retirement.
                 // A late exit still fails this deadline; killing the host

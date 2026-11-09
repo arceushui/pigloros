@@ -1465,8 +1465,8 @@ def _check_owned_parent_boundary(sources: dict[str, str], found: list[str]) -> N
     # module scopes. Function-body-only hashes cannot detect a removed #[test]
     # or a disabled enclosing cfg. _read normalizes platform line endings.
     complete_sources = {
-        lib: "c19c34a30ba5f1a68141e7a0c0be729b55d2e0ef964b7a4e6a1edf2264f6a605",
-        prefix + "ffi/mod.rs": "d2af1c3ebd471af70ce2ff6429a6d69f14cac82e9b6f1446ec2555c664604f32",
+        lib: "440e03beed354aa3c419de88b712b8740af3249e18ea583965e5504e53984138",
+        prefix + "ffi/mod.rs": "b522502e7cbbfceea558049a8ca3021f9e8371f0d7dc5bceb62dc14a895ffe46",
         prefix + "adapter/native_tests.rs": "2e3ec6d4daa853395812f19ab4599cc937e8b13243d0daf75de71da93b85f349",
         "crates/pos-owner-bridge/src/ceremony/plan.rs": "4e743b55408a42c1f757d27d0d8b47c091dcb026953824b9cc1dec37121182b4",
     }
@@ -1474,11 +1474,11 @@ def _check_owned_parent_boundary(sources: dict[str, str], found: list[str]) -> N
         if hashlib.sha256(sources.get(path, "").replace("\r\n", "\n").encode()).hexdigest() != digest:
             found.append(f"{path}: owned-parent source and hosted-test scope differ from reviewed code")
     helper = prefix + "ffi/fixture_parent.rs"
-    expected = "4dca6c8ea4653046c7c867cf0fdba656c3bf7ae04ab74620e7bd2c1658a49852"
+    expected = "c096977ee429e7ea426de557947eac10c9374d0997f42c31ecf238602f6911b6"
     if hashlib.sha256(sources.get(helper, "").encode()).hexdigest() != expected:
         found.append(f"{helper}: owned-parent fixture differs from reviewed test-only code")
     module = sources.get(prefix + "ffi/mod.rs", "")
-    if len(re.findall(r"#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]\s*pub\s*\(\s*crate\s*\)\s*mod\s+fixture_parent\s*;", module)) != 1:
+    if len(re.findall(r"#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]\s*pub\s+mod\s+fixture_parent\s*;", module)) != 1:
         found.append(f"{prefix}ffi/mod.rs: owned-parent module must be cfg(test)")
     plan = "crates/pos-owner-bridge/src/ceremony/plan.rs"
     if not re.search(r"#\s*\[\s*cfg\s*\(\s*feature\s*=\s*\"test-support\"\s*\)\s*\]\s*impl\s+CeremonyPlan\s*\{", sources.get(plan, "")):
@@ -1488,7 +1488,7 @@ def _check_owned_parent_boundary(sources: dict[str, str], found: list[str]) -> N
     specs = (
         (plan, "with_test_owner_window", "df7788308f2149191a92004d4d57598c85c4036d2dc60cb106d1bccba6367606"),
         (lib, "native_host_fixture_child", "542668f47ced5ff6eb0da4780909421bd6c10abe7b585dbf01690f60873200f4"),
-        (lib, "native_host_opens_fresh_environments_and_retires_before_reuse", "3c933b802adc837a96f269346e13ed951782feb860e41e62626a0c0ec9bed3ec"),
+        (lib, "native_host_opens_fresh_environments_and_retires_before_reuse", "b722d38606e0efef415d10734c3c56e66b74b6299a29db9e272a7f058ae4e75b"),
         (prefix + "adapter/native_tests.rs", "native_host_lifecycle", "2ebf81ffbcae9bf98e9fb57a6ba28efc59bb40adfa972b5d463ead557a6f15e4"),
     )
     for path, name, digest in specs:
