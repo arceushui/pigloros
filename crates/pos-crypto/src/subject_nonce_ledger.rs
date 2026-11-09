@@ -35,7 +35,8 @@ pub enum SubjectNonceLedgerErrorV1 {
     /// The complete encoding, declared collection or owner text is too large.
     #[error("SNL1 bound exceeded")]
     BoundsExceeded,
-    /// An invalid subject owner, role, zero epoch or out-of-range next counter.
+    /// An invalid subject owner, role, zero epoch, out-of-range next counter,
+    /// or out-of-range Windows volume serial.
     #[error("invalid SNL1 row")]
     InvalidRow,
     /// Row identities repeat or are not strictly increasing in wire order.

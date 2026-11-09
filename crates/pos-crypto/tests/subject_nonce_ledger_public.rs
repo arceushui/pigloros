@@ -50,7 +50,7 @@ fn wire_row(row: &Row) -> Value {
 }
 
 fn wire_fields(row: &Row) -> Vec<Value> {
-    let (tag, device, inode) = match row.store_file_id {
+    let (tag, first, second) = match row.store_file_id {
         SubjectStoreFileIdV1::Linux { device, inode } => (1, device, inode),
         SubjectStoreFileIdV1::Windows {
             volume_serial,
@@ -64,8 +64,8 @@ fn wire_fields(row: &Row) -> Vec<Value> {
         Value::Bytes(row.root_material_digest.to_vec()),
         Value::Array(vec![
             Value::Integer(tag.into()),
-            Value::Integer(device.into()),
-            Value::Integer(inode.into()),
+            Value::Integer(first.into()),
+            Value::Integer(second.into()),
         ]),
         Value::Integer(row.data_next.into()),
         Value::Integer(row.bootstrap_next.into()),
