@@ -1,9 +1,13 @@
 //! Planned ownership extended with the exact, still-unmounted directory tree.
 
 use rustix::fs::mkdirat;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
 
 mod removal;
+mod terminal;
+
+pub use terminal::{AttemptUnitTermination, CompletedAttemptCleanup};
 
 use super::root::{RootRecord, ROOT_RECORD_SIZE};
 use super::{
@@ -49,6 +53,9 @@ pub struct PreparedAttemptDirectory {
     // This permits verified cleanup without acknowledging durability or launch.
     recorded_root: OnceLock<RootRecord>,
     execution: ExecutionOwnership,
+    // Root activations begun on this tree; each may leave loop/dm resources.
+    // It only grows: see `begin_activation`.
+    activations: AtomicUsize,
 }
 
 impl Drop for PreparedAttemptDirectory {
@@ -110,6 +117,7 @@ impl CommittedPlannedAttempt {
             identities,
             recorded_root: OnceLock::new(),
             execution: ExecutionOwnership::default(),
+            activations: AtomicUsize::new(0),
         };
         prepared.verify_tree()?;
         verify_intent(&prepared.planned.directory, &prepared.planned.intent)?;
@@ -129,6 +137,32 @@ impl CommittedPlannedAttempt {
 impl PreparedAttemptDirectory {
     pub(crate) fn execution_ownership(&self) -> ExecutionOwnership {
         self.execution.clone()
+    }
+
+    /// Fence every later unit start; `false` when one was already requested.
+    pub(crate) fn fence_unsubmitted(&self) -> bool {
+        self.execution.fence_unsubmitted()
+    }
+
+    /// Whether `identity` is the cgroup this attempt's execution bound.
+    pub(crate) fn bound_cgroup_is(&self, identity: (u64, u64)) -> bool {
+        self.execution.bound_cgroup_is(identity)
+    }
+
+    /// Record that a root activation is about to send its mountfsd request,
+    /// before any loop/dm resource can exist. Intent deletion then requires
+    /// released-root evidence for exactly that one root.
+    ///
+    /// The count never decreases. A request that reached mountfsd and failed
+    /// may still have left loop/dm resources that no released root covers, so
+    /// after a successful retry the count is two and live terminal cleanup is
+    /// refused; the intent stays for restart reconciliation (fail closed).
+    ///
+    /// No activation can begin after terminal cleanup reads this count:
+    /// [`Self::finish_terminal_cleanup`] consumes the directory by value while
+    /// every activation borrows it, so the two cannot interleave.
+    pub(crate) fn begin_activation(&self) {
+        self.activations.fetch_add(1, Ordering::AcqRel);
     }
 
     /// The exact original planned ownership, preserved by the extension.
