@@ -265,7 +265,14 @@ impl UnitCgroup for FakeCgroup {
             Ok(())
         }
     }
+
+    fn identity(&self) -> (u64, u64) {
+        FAKE_CGROUP
+    }
 }
+
+/// The device and inode every fake cgroup reports.
+const FAKE_CGROUP: (u64, u64) = (0x63, 0x67);
 
 impl UnitHost for FakeHost {
     type Started = String;

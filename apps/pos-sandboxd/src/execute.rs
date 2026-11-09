@@ -20,9 +20,9 @@
 //! Any failure after the unit was started terminates it. The result carries
 //! the evidence the later signed records need: the ordered NXT1 transcript
 //! digests for SPR1 and the proxy termination for the SAU1 terminal
-//! classification (#443 signs and classifies). Unmounting the root, removing
-//! the attempt directory and releasing the reservation stay with the attempt
-//! lifecycle (#442).
+//! classification (#443 signs and classifies). Stopping the unit, unmounting
+//! the root, removing the attempt directory and deleting its intent follow in
+//! [`crate::finish_attempt`], through the cgroup this call returns.
 //!
 //! The unit host, the launcher barrier and the Local network are ports, so the
 //! composition is exercised without systemd, a launcher or a namespace.
@@ -125,6 +125,12 @@ pub trait UnitCgroup {
     /// # Errors
     /// Fails if the kill cannot be issued.
     fn kill_all(&mut self) -> Result<(), Self::Error>;
+
+    /// The device and inode of the cgroup directory bound to the unit.
+    ///
+    /// The prepared directory records it, so its terminal cleanup accepts
+    /// stop evidence only for the cgroup this execution bound.
+    fn identity(&self) -> (u64, u64);
 }
 
 /// The launcher barrier of ADR-069 section 6, behind one port.
@@ -214,7 +220,8 @@ pub struct ExecuteJob {
 /// Why an execution could not start or continue.
 #[derive(Debug, thiserror::Error)]
 pub enum ExecuteError {
-    /// This prepared directory's execution ownership was already consumed.
+    /// This prepared directory's execution ownership was already consumed,
+    /// or terminal cleanup fenced it before the unit start was requested.
     #[error("the attempt already has an execution owner")]
     AttemptAlreadyClaimed,
     /// The authenticated limits cannot be enforced exactly on systemd.
@@ -525,8 +532,15 @@ where
         call: watchdog.clamp(MIN_TERMINATION_CALL, MAX_TERMINATION_CALL),
     };
     let deadline = bounds.deadline;
+    // Terminal cleanup may have fenced the attempt since it was claimed.
+    attempt.submit_execution().map_err(|error| ExecuteFailure {
+        error,
+        unit: UnitState::NotStarted,
+        cgroup: None,
+    })?;
     guard.arm(host.killer(), unit.clone(), bounds.call);
     let (started, mut cgroup) = submit(host, &unit, request, bounds).await?;
+    attempt.bind_execution_cgroup(cgroup.identity());
     let attempt_id = attempt.attempt_id();
     let active = ActiveAttempt::record(attempt, deadline);
     let bound = bind_planned(planned);

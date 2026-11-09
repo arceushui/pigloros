@@ -1,7 +1,7 @@
 //! Exact transport ordering and retained-kernel observations at the public seam.
 
 #[cfg(test)]
-mod cases {
+pub(super) mod cases {
     use std::{
         error::Error,
         fs::{self, File},
@@ -31,13 +31,13 @@ mod cases {
     type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
     #[derive(Clone, Copy)]
-    enum Stop {
+    pub(crate) enum Stop {
         Empty,
         LeavesPopulated,
     }
 
     #[derive(Clone, Copy)]
-    enum Reset {
+    pub(crate) enum Reset {
         Unload,
         Missing,
         KeepLoaded,
@@ -208,18 +208,32 @@ mod cases {
         fdo::Error::Failed(error.to_string())
     }
 
-    struct Fixture {
+    /// A fake systemd manager peer and one retained attempt cgroup.
+    pub(crate) struct Fixture {
         _root: tempfile::TempDir,
         _server: zbus::Connection,
         directory: PathBuf,
         unit: TransientServiceUnitName,
-        bound: BoundAttemptCgroup,
-        transport: SystemdTransientUnitTransport,
+        pub(crate) bound: BoundAttemptCgroup,
+        pub(crate) transport: SystemdTransientUnitTransport,
         state: Arc<Mutex<State>>,
     }
 
+    /// Counts the manager calls one fixture records, after its cgroup moved.
+    pub(crate) struct ManagerCalls(Arc<Mutex<State>>);
+
+    impl ManagerCalls {
+        pub(crate) fn count(&self) -> TestResult<usize> {
+            Ok(self.0.lock().map_err(|_| "poisoned fixture")?.calls.len())
+        }
+    }
+
     impl Fixture {
-        async fn new(id: u8, stop: Stop, reset: Reset) -> TestResult<Self> {
+        pub(crate) fn calls(&self) -> ManagerCalls {
+            ManagerCalls(Arc::clone(&self.state))
+        }
+
+        pub(crate) async fn new(id: u8, stop: Stop, reset: Reset) -> TestResult<Self> {
             let root = tempfile::tempdir()?;
             let directory = root.path().join("attempt");
             fs::create_dir(&directory)?;
@@ -711,9 +725,23 @@ mod cases {
         Ok((runtime, registry, prepared))
     }
 
+    /// Record that `prepared`'s execution submitted its unit and bound `cgroup`.
+    fn submitted(
+        prepared: &crate::PreparedAttemptDirectory,
+        cgroup: &BoundAttemptCgroup,
+    ) -> TestResult {
+        let ownership = prepared.execution_ownership();
+        ownership.claim()?;
+        ownership.submit()?;
+        ownership.bind_cgroup(crate::UnitCgroup::identity(cgroup));
+        Ok(())
+    }
+
     #[tokio::test(start_paused = true)]
     async fn only_the_exact_stopped_unit_lets_terminal_cleanup_delete_intent() -> TestResult {
-        for (unit_id, claimed) in [(1, true), (1, false), (2, true)] {
+        // The bound cgroup of this attempt's execution, an unrecorded cgroup,
+        // and another unit's cgroup recorded as if this execution bound it.
+        for (unit_id, recorded) in [(1, true), (1, false), (2, true)] {
             let mut fixture = Fixture::new(unit_id, Stop::Empty, Reset::Unload).await?;
             let (shutdown, deadline) = budgets()?;
             let observed = fixture
@@ -722,13 +750,13 @@ mod cases {
                 .await?;
             let (runtime, registry, prepared) = prepared_attempt(1)?;
             let ownership = prepared.execution_ownership();
-            if claimed {
-                ownership.claim()?;
+            if recorded {
+                submitted(&prepared, &fixture.bound)?;
             }
             let key = prepared.intent().unit_name().attempt_component().to_owned();
             let result = prepared
                 .finish_terminal_cleanup(crate::AttemptUnitTermination::Stopped(&observed), None);
-            let exact = unit_id == 1;
+            let exact = unit_id == 1 && recorded;
             assert_eq!(result.is_ok(), exact, "unit {unit_id}: {result:?}");
             assert_eq!(runtime.path().join("registry").join(&key).exists(), !exact);
             assert_eq!(runtime.path().join("attempts").join(&key).exists(), !exact);
@@ -756,6 +784,7 @@ mod cases {
                 .stop_attempt_unit(&mut fixture.bound, shutdown, deadline)
                 .await?;
             let (runtime, registry, prepared) = prepared_attempt(1)?;
+            submitted(&prepared, &fixture.bound)?;
             let root = crate::test_fixtures::released_root(&prepared).await?;
             let key = prepared.intent().unit_name().attempt_component().to_owned();
             let result = prepared.finish_terminal_cleanup(
