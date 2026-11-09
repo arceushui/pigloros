@@ -22,6 +22,8 @@ mod adapter {
     mod events;
     mod host;
     mod loopback;
+    #[cfg(any(test, feature = "test-support"))]
+    mod nonce_ledger;
     mod overrides;
     mod platform;
     mod process;
@@ -33,6 +35,11 @@ mod adapter {
 
     #[cfg(test)]
     mod native_tests;
+
+    #[cfg(test)]
+    pub(crate) use nonce_ledger::exercise_native_lock;
+    #[cfg(any(test, feature = "test-support"))]
+    pub use nonce_ledger::WindowsSubjectEncryptorLock;
 
     pub use directory::{create_private_directory, verify_private_directory};
     pub use host::WindowsOwnerHost;
@@ -50,6 +57,9 @@ pub use adapter::{
     VerifiedRuntime, WindowsCleanupStore, WindowsLoopbackBinder, WindowsOwnerHost,
     WindowsProcessProbe,
 };
+
+#[cfg(any(test, feature = "test-support"))]
+pub use adapter::WindowsSubjectEncryptorLock;
 
 // Private, SDK-neutral capabilities shared by sibling safe/native modules.
 // Root declarations avoid contradictory private-module visibility lints while
@@ -432,6 +442,11 @@ mod tests {
     use crate::WindowsLoopbackBinder;
 
     mod native_api;
+
+    #[test]
+    fn nonce_lock_native() -> Result<(), Box<dyn std::error::Error>> {
+        crate::adapter::exercise_native_lock()
+    }
 
     impl crate::Native {
         pub(crate) fn fixed_port_fixture() -> std::sync::MutexGuard<'static, ()> {

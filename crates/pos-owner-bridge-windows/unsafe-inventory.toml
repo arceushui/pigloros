@@ -1538,3 +1538,107 @@ function = "process_failed"
 operation = "ICoreWebView2ProcessFailedEventArgs::ProcessFailedKind"
 invariant = "Actual invoking-STA ProcessFailed callback arguments on the exact owned view, with initialized typed enum output. Unit-test-only ADR-131 observation distinguishes main-renderer exit from every other failure and refuses missing/failed readback; it grants no fault or process authority."
 hosted_test = "native_readonly_write_crashes_the_exact_renderer_and_retires"
+
+[[block]]
+file = "src/ffi/nonce_ledger.rs"
+line = 32
+function = "drop"
+operation = "LocalFree"
+invariant = "Windows allocation held uniquely until drop."
+hosted_test = "nonce_lock_native"
+
+[[block]]
+file = "src/ffi/nonce_ledger.rs"
+line = 50
+function = "descriptor_for"
+operation = "ConvertStringSecurityDescriptorToSecurityDescriptorW"
+invariant = "SID-derived terminated SDDL and uniquely writable output outlive call; allocation is owned."
+hosted_test = "nonce_lock_native"
+
+[[block]]
+file = "src/ffi/nonce_ledger.rs"
+line = 66
+function = "descriptor_text"
+operation = "ConvertSecurityDescriptorToStringSecurityDescriptorW"
+invariant = "Live valid descriptor and uniquely writable output; output is owned."
+hosted_test = "nonce_lock_native"
+
+[[block]]
+file = "src/ffi/nonce_ledger.rs"
+line = 79
+function = "descriptor_text"
+operation = "PWSTR.to_string"
+invariant = "Successful Windows string remains allocated and terminated during copy."
+hosted_test = "nonce_lock_native"
+
+[[block]]
+file = "src/ffi/nonce_ledger.rs"
+line = 86
+function = "validate_descriptor"
+operation = "GetSecurityInfo"
+invariant = "Live mutex handle and uniquely writable descriptor output; allocation is owned."
+hosted_test = "nonce_lock_native"
+
+[[block]]
+file = "src/ffi/nonce_ledger.rs"
+line = 179
+function = "create_wrong_acl_fixture"
+operation = "CreateMutexW"
+invariant = "Test-only explicit wrong ACL and terminated name; initial owner false; retained handle is closed once."
+hosted_test = "nonce_lock_native"
+
+[[block]]
+file = "src/ffi/nonce_ledger.rs"
+line = 201
+function = "open_verified"
+operation = "CreateMutexW"
+invariant = "Terminated SID name and live security attributes; initial owner false; handle non-inheritable."
+hosted_test = "nonce_lock_native"
+
+[[block]]
+file = "src/ffi/nonce_ledger.rs"
+line = 206
+function = "open_verified"
+operation = "CloseHandle"
+invariant = "Security validation failed before any wait; close unowned mutex handle once."
+hosted_test = "nonce_lock_native"
+
+[[block]]
+file = "src/ffi/nonce_ledger.rs"
+line = 215
+function = "acquire_inner"
+operation = "WaitForSingleObject"
+invariant = "Live handle; zero timeout; only successful or abandoned wait acquires ownership."
+hosted_test = "nonce_lock_native"
+
+[[block]]
+file = "src/ffi/nonce_ledger.rs"
+line = 221
+function = "acquire_inner"
+operation = "CloseHandle"
+invariant = "Failed wait has no ownership; close unowned handle once."
+hosted_test = "nonce_lock_native"
+
+[[block]]
+file = "src/ffi/nonce_ledger.rs"
+line = 235
+function = "drop"
+operation = "CloseHandle"
+invariant = "Test fixture never waits; closes its separate unowned handle once."
+hosted_test = "nonce_lock_native"
+
+[[block]]
+file = "src/ffi/nonce_ledger.rs"
+line = 243
+function = "drop"
+operation = "ReleaseMutex"
+invariant = "Non-Send guard is released by owning thread exactly once after its single wait."
+hosted_test = "nonce_lock_native"
+
+[[block]]
+file = "src/ffi/nonce_ledger.rs"
+line = 245
+function = "drop"
+operation = "CloseHandle"
+invariant = "Guard owns one handle, closed once after release attempt."
+hosted_test = "nonce_lock_native"

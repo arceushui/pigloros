@@ -39,7 +39,7 @@ fn allocated_text(text: PWSTR) -> Result<String, ()> {
     unsafe { text.to_string() }.map_err(|_| ())
 }
 
-fn current_sid() -> Result<String, ()> {
+pub(super) fn current_sid() -> Result<String, ()> {
     // SAFETY: this API returns a borrowed pseudo-handle for the current process.
     let process = unsafe { GetCurrentProcess() };
     let mut token = HANDLE::default();

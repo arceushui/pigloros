@@ -6,6 +6,8 @@ mod creation;
 mod directory;
 mod environment;
 mod events;
+#[cfg(any(test, feature = "test-support"))]
+mod nonce_ledger;
 mod process;
 mod pump;
 mod registry;
@@ -14,6 +16,9 @@ mod settings;
 mod socket;
 mod text;
 mod window;
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use nonce_ledger::SubjectMutex;
 
 impl crate::Native {
     pub(super) fn inspect_process(
