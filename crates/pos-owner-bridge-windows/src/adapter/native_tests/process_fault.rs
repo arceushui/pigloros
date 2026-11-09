@@ -3022,6 +3022,57 @@ enum EnvironmentCase {
     LateInvocation,
 }
 
+fn initial_environment_witness(
+    case: EnvironmentCase,
+    driver_pending: bool,
+    completion: Result<Option<bool>, ()>,
+) -> bool {
+    driver_pending
+        && match case {
+            EnvironmentCase::HeldResult => matches!(completion, Ok(None | Some(true))),
+            EnvironmentCase::LateInvocation => completion == Ok(None),
+        }
+}
+
+#[test]
+fn held_result_does_not_require_a_pending_native_callback() {
+    assert!(initial_environment_witness(
+        EnvironmentCase::HeldResult,
+        true,
+        Ok(None)
+    ));
+    assert!(initial_environment_witness(
+        EnvironmentCase::HeldResult,
+        true,
+        Ok(Some(true))
+    ));
+    assert!(!initial_environment_witness(
+        EnvironmentCase::HeldResult,
+        false,
+        Ok(Some(true))
+    ));
+    assert!(!initial_environment_witness(
+        EnvironmentCase::HeldResult,
+        true,
+        Ok(Some(false))
+    ));
+    assert!(!initial_environment_witness(
+        EnvironmentCase::HeldResult,
+        true,
+        Err(())
+    ));
+    assert!(initial_environment_witness(
+        EnvironmentCase::LateInvocation,
+        true,
+        Ok(None)
+    ));
+    assert!(!initial_environment_witness(
+        EnvironmentCase::LateInvocation,
+        true,
+        Ok(Some(true))
+    ));
+}
+
 fn environment_callback_order(
     order: &[crate::NativeCallbackMoment],
     case: EnvironmentCase,
@@ -3103,8 +3154,8 @@ fn run_pre_environment(runtime: &Path, number: u8, case: EnvironmentCase) -> Tes
             &mut fixture.loopback,
             &mut fixture.store,
         ));
-        let pending = matches!(initial, Step::Pending)
-            && fixture.surface.pre_environment_completion() == Ok(None);
+        let driver_pending = matches!(initial, Step::Pending);
+        let initial_completion = fixture.surface.pre_environment_completion();
         // Dispatch genuine callbacks while leaving the driver unstepped until
         // its original readiness deadline; callback delivery is not held.
         let deadline = started + pos_owner_bridge::ceremony::timing::READINESS;
@@ -3129,9 +3180,15 @@ fn run_pre_environment(runtime: &Path, number: u8, case: EnvironmentCase) -> Tes
             ),
         };
         crate::Native::record_callback(crate::NativeCallbackMoment::DriverTimeout);
-        (result, pending, pump_failed, at_deadline)
+        (
+            result,
+            driver_pending,
+            initial_completion,
+            pump_failed,
+            at_deadline,
+        )
     }));
-    let (result, pending, pump_failed, at_deadline) = match attempt {
+    let (result, driver_pending, initial_completion, pump_failed, at_deadline) = match attempt {
         Ok(observation) => observation,
         Err(_) => (
             readiness::cancel_driver(
@@ -3141,10 +3198,12 @@ fn run_pre_environment(runtime: &Path, number: u8, case: EnvironmentCase) -> Tes
                 &mut fixture.store,
             ),
             false,
+            Err(()),
             true,
             Err(()),
         ),
     };
+    let initial_witness = initial_environment_witness(case, driver_pending, initial_completion);
     let timed_out = matches!(
         &result,
         Err(BridgeError::Lifecycle(LifecycleCode::ReadinessTimeout))
@@ -3170,7 +3229,7 @@ fn run_pre_environment(runtime: &Path, number: u8, case: EnvironmentCase) -> Tes
         .stop()?;
     // No process/exit was established. Preserve the recordless folder for real
     // later recovery; neither an orphan sweep nor remove_dir_all is evidence.
-    if !pending
+    if !initial_witness
         || pump_failed
         || !timed_out
         || !wiped
@@ -3179,7 +3238,7 @@ fn run_pre_environment(runtime: &Path, number: u8, case: EnvironmentCase) -> Tes
         || !retained_orphan
         || !idle
     {
-        return Err(format!("pre-environment witness failed: pending={pending} completion={at_deadline:?} timeout={timed_out} wiped={wiped} ordered={ordered} no_record={no_record} retained_orphan={retained_orphan} idle={idle}").into());
+        return Err(format!("pre-environment witness failed: driver_pending={driver_pending} initial_completion={initial_completion:?} completion={at_deadline:?} timeout={timed_out} wiped={wiped} ordered={ordered} no_record={no_record} retained_orphan={retained_orphan} idle={idle}").into());
     }
     Ok(())
 }
