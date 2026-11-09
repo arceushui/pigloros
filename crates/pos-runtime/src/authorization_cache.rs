@@ -87,6 +87,20 @@ impl AuthorizationCacheEntryV1 {
     }
 }
 
+/// The bounded hit-class counters of one authorization cache: the operational
+/// cache channel of the ADR-059 row `NI-CACHE-002`. They carry no key, value
+/// or latency.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct AuthorizationCacheCountsV1 {
+    /// Lookups that returned a cached decision.
+    pub hits: u64,
+    /// Lookups that returned nothing, an evicted stale entry included.
+    pub misses: u64,
+    /// Entries removed by a lookup, an invalidation or an explicit eviction.
+    pub evictions: u64,
+}
+
 /// Current authorized-decision projection with explicit expiry and revocation indexes.
 ///
 /// Only active decisions are admitted. Every lookup supplies the current wall-time and
@@ -96,6 +110,8 @@ impl AuthorizationCacheEntryV1 {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct AuthorizationCacheV1 {
     entries: HashMap<AuthorizationCacheKeyV1, AuthorizationCacheEntryV1>,
+    #[cfg(any(test, feature = "test-support"))]
+    counts: AuthorizationCacheCountsV1,
 }
 
 impl AuthorizationCacheV1 {
@@ -199,12 +215,30 @@ impl AuthorizationCacheV1 {
                 || current_decision != entry.decision
         });
         if should_evict {
-            self.entries.remove(key);
-            None
-        } else {
-            self.entries.get(key).map(|entry| &entry.decision)
+            self.evict(key);
         }
+        let hit = self.entries.contains_key(key);
+        self.count(u64::from(hit), u64::from(!hit), 0);
+        self.entries.get(key).map(|entry| &entry.decision)
     }
+
+    /// The hit, miss and eviction counts since this cache was created.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) const fn counts(&self) -> AuthorizationCacheCountsV1 {
+        self.counts
+    }
+
+    /// Add to the hit, miss and eviction counts.
+    #[cfg(any(test, feature = "test-support"))]
+    const fn count(&mut self, hits: u64, misses: u64, evictions: u64) {
+        self.counts.hits += hits;
+        self.counts.misses += misses;
+        self.counts.evictions += evictions;
+    }
+
+    /// The counts are read only through the `test-support` seam.
+    #[cfg(not(any(test, feature = "test-support")))]
+    const fn count(&mut self, _hits: u64, _misses: u64, _evictions: u64) {}
 
     /// Invalidate every leaf decision derived from this grant or any parent grant.
     pub(crate) fn invalidate_grant(&mut self, grant_id: Hash) -> usize {
@@ -229,7 +263,7 @@ impl AuthorizationCacheV1 {
             key.authority_timeline() != authority_timeline
                 || key.revocation_epoch() == current_epoch
         });
-        before.saturating_sub(self.entries.len())
+        self.count_evicted(before)
     }
 
     #[must_use]
@@ -245,7 +279,8 @@ impl AuthorizationCacheV1 {
     }
 
     pub(crate) fn evict(&mut self, key: &AuthorizationCacheKeyV1) {
-        self.entries.remove(key);
+        let evicted = self.entries.remove(key).is_some();
+        self.count(0, 0, u64::from(evicted));
     }
 
     fn retain_and_count_evicted(
@@ -254,7 +289,14 @@ impl AuthorizationCacheV1 {
     ) -> usize {
         let before = self.entries.len();
         self.entries.retain(|_, entry| keep(entry));
-        before.saturating_sub(self.entries.len())
+        self.count_evicted(before)
+    }
+
+    /// Count the entries removed since the cache held `before` entries.
+    fn count_evicted(&mut self, before: usize) -> usize {
+        let evicted = before.saturating_sub(self.entries.len());
+        self.count(0, 0, evicted as u64);
+        evicted
     }
 }
 
@@ -891,6 +933,75 @@ mod tests {
                 &fixture.registry,
             )
             .is_err());
+    }
+
+    #[test]
+    fn host_cache_counts_hits_misses_and_evictions() {
+        let mut host = test_ok(ErasureExecutionHostV1::open_verified_empty(
+            StoreConfig::Memory,
+            test_ok(ErasureRecoveryLimitsV1::new(4, 4, 4)),
+        ));
+        let timeline = test_ok(test_ok(host.command_sender()).create_timeline("authority"));
+        let fixture = active_decision(timeline.id());
+        let counts = |host: &ErasureExecutionHostV1| {
+            let counts = host.authorization_cache_counts();
+            (counts.hits, counts.misses, counts.evictions)
+        };
+        let cache = |host: &mut ErasureExecutionHostV1| {
+            test_ok(test_ok(host.command_sender()).cache_authorization(
+                timeline.id(),
+                &fixture.request,
+                &fixture.authority,
+                &fixture.registry,
+            ))
+            .unwrap_or_else(|| std::panic::resume_unwind(Box::new("active decision rejected")))
+        };
+        let lookup = |host: &mut ErasureExecutionHostV1,
+                      key: &AuthorizationCacheKeyV1,
+                      authority: &PersistedAuthorityV1| {
+            test_ok(test_ok(host.command_sender()).cached_authorization(
+                key,
+                WallTime::from_micros(20),
+                Seq::from_u64(20),
+                &fixture.request,
+                authority,
+                &fixture.registry,
+            ))
+        };
+        assert_eq!(counts(&host), (0, 0, 0));
+        let key = cache(&mut host);
+        // Inserting is neither a hit nor a miss.
+        assert_eq!(counts(&host), (0, 0, 0));
+        assert!(lookup(&mut host, &key, &fixture.authority).is_some());
+        assert_eq!(counts(&host), (1, 0, 0));
+        // A stale entry is evicted, then missed.
+        let changed = decision_with_capability_trust(timeline.id(), test_hash(15), true);
+        assert!(lookup(&mut host, &key, &changed.authority).is_none());
+        assert_eq!(counts(&host), (1, 1, 1));
+        // An absent entry is only missed.
+        assert!(lookup(&mut host, &key, &fixture.authority).is_none());
+        assert_eq!(counts(&host), (1, 2, 1));
+        // Every invalidation counts the entries it removes.
+        cache(&mut host);
+        assert_eq!(
+            test_ok(host.command_sender()).invalidate_cached_grant(fixture.parent_grant_id),
+            1
+        );
+        assert_eq!(counts(&host), (1, 2, 2));
+        cache(&mut host);
+        assert_eq!(
+            test_ok(host.command_sender()).invalidate_cached_consent(fixture.consent_reference),
+            1
+        );
+        assert_eq!(counts(&host), (1, 2, 3));
+        cache(&mut host);
+        for evicted in [1, 0] {
+            assert_eq!(
+                test_ok(host.command_sender()).retain_cached_revocation_epoch(timeline.id(), 1),
+                evicted
+            );
+        }
+        assert_eq!(counts(&host), (1, 2, 4));
     }
 
     #[test]

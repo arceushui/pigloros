@@ -92,9 +92,9 @@ class CheckerTest(unittest.TestCase):
         self.assert_fault("malformed: case_id is not 'plugin-conformance-malformed'")
 
     def test_an_executed_matrix_case_fails(self) -> None:
-        # cases[16] is NI-CACHE-002-S-L, of a row no slice flips yet.
-        self.edit(MATRIX, lambda m: m["cases"][16].update(executed=True))
-        self.assert_fault("cases[16]: executed is not false")
+        # cases[128] is NI-ARCHIVE-009-S-L, of a row no slice flips yet.
+        self.edit(MATRIX, lambda m: m["cases"][128].update(executed=True))
+        self.assert_fault("cases[128]: executed is not false")
 
     def test_a_digest_in_the_matrix_fails(self) -> None:
         self.edit(MATRIX, lambda m: m["cases"][1].update(expected_result_digest="ab" * 32))
@@ -109,8 +109,8 @@ class CheckerTest(unittest.TestCase):
         self.assert_fault(f"rows[0]: a {LAYER} row")
 
     def test_an_executed_row_count_fails(self) -> None:
-        self.edit(MATRIX, lambda m: m["rows"][1].update(executed_case_count=1))
-        self.assert_fault("rows[1]: executed_case_count is not 0")
+        self.edit(MATRIX, lambda m: m["rows"][8].update(executed_case_count=1))
+        self.assert_fault("rows[8]: executed_case_count is not 0")
 
     def test_an_unexecuted_total_fails(self) -> None:
         cases = json.loads((FIXTURES / MATRIX).read_text(encoding="utf-8"))["cases"]
