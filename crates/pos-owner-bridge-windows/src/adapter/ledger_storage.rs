@@ -25,6 +25,9 @@ enum CommitStage {
     Created,
     Written,
     FileSynced,
+    DirectoryChecked,
+    LedgerChecked,
+    TemporaryChecked,
     Renamed,
     ReadBack,
 }
@@ -124,8 +127,11 @@ impl<'guard> WindowsNonceLedger<'guard> {
         temporary.sync_all().map_err(|_| ())?;
         after(CommitStage::FileSynced)?;
         self.admit_directory()?;
+        after(CommitStage::DirectoryChecked)?;
         Self::same_name(&previous, &self.path.join(LEDGER))?;
+        after(CommitStage::LedgerChecked)?;
         Self::same_name(&temporary, &temporary_path)?;
+        after(CommitStage::TemporaryChecked)?;
         drop(previous);
         drop(temporary);
         crate::Native::replace_ledger(&temporary_path, &self.path.join(LEDGER))?;
@@ -269,10 +275,13 @@ mod native_tests {
     const PROBE: &str = "PIGLOROS_WINDOWS_NONCE_STORAGE_PROBE";
     const BASE: &str = "PIGLOROS_WINDOWS_NONCE_STORAGE_BASE";
     const MARKER: &str = "PIGLOROS_WINDOWS_NONCE_STORAGE_MARKER";
-    const STAGES: [(&str, CommitStage); 5] = [
+    const STAGES: [(&str, CommitStage); 8] = [
         ("created", CommitStage::Created),
         ("written", CommitStage::Written),
         ("synced", CommitStage::FileSynced),
+        ("directory-checked", CommitStage::DirectoryChecked),
+        ("ledger-checked", CommitStage::LedgerChecked),
+        ("temporary-checked", CommitStage::TemporaryChecked),
         ("renamed", CommitStage::Renamed),
         ("readback", CommitStage::ReadBack),
     ];
