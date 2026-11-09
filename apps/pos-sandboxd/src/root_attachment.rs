@@ -33,6 +33,7 @@ mod release;
 mod verify;
 
 pub use identity::RootResourceIdentity;
+pub use release::ReleasedAttemptRoot;
 
 use std::{
     fs::File,
@@ -284,7 +285,12 @@ where
                 .await
                 .unwrap_or(Err(ImageActivationError::Transport));
             let mounted = match connected {
-                Ok(activator) => activator.mount_image(image).await,
+                Ok(activator) => {
+                    // Only a request that reaches mountfsd can leave loop/dm
+                    // resources, so only it binds intent to a released root.
+                    directory.begin_activation();
+                    activator.mount_image(image).await
+                }
                 Err(error) => Err(error),
             };
             mounted.and_then(|mount| {
@@ -337,4 +343,6 @@ fn attach_and_verify<K: AttachmentKernel>(
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests;
 #[cfg(test)]
-pub use tests::recorded_identity;
+pub use tests::{attached_fixture_root, fake_root_release, release_fake_root, FakeRootRelease};
+#[cfg(test)]
+pub use tests::{recorded_identity, released_root};
