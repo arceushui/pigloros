@@ -20,8 +20,8 @@ fn named(name: &str, attributes: Vec<LinkAttribute>) -> LinkMessage {
     message
 }
 
-fn v4(a: u8, b: u8, c: u8, d: u8) -> IpAddr {
-    IpAddr::V4(Ipv4Addr::new(a, b, c, d))
+fn v4(octets: [u8; 4]) -> IpAddr {
+    IpAddr::from(octets)
 }
 
 fn v6(segments: [u16; 8]) -> IpAddr {
@@ -84,10 +84,10 @@ fn link_settings_name_the_link() -> TestResult {
 
 #[test]
 fn addresses_are_added_exclusively_without_duplicate_detection() {
-    let ipv4 = address(
+    let unicast_request = address(
         4,
         IpPrefix {
-            address: v4(10, 213, 0, 14),
+            address: v4([10, 213, 0, 14]),
             length: 30,
         },
     );
@@ -98,15 +98,15 @@ fn addresses_are_added_exclusively_without_duplicate_detection() {
     expected.header.scope = AddressScope::Universe;
     expected.header.index = 4;
     expected.attributes = vec![
-        AddressAttribute::Local(v4(10, 213, 0, 14)),
-        AddressAttribute::Address(v4(10, 213, 0, 14)),
+        AddressAttribute::Local(v4([10, 213, 0, 14])),
+        AddressAttribute::Address(v4([10, 213, 0, 14])),
     ];
     assert_eq!(
-        ipv4.message,
+        unicast_request.message,
         RouteNetlinkMessage::NewAddress(expected.clone())
     );
-    assert_eq!(ipv4.flags, NLM_F_CREATE | NLM_F_EXCL);
-    let ipv6 = address(
+    assert_eq!(unicast_request.flags, NLM_F_CREATE | NLM_F_EXCL);
+    let unique_request = address(
         4,
         IpPrefix {
             address: v6([0xfd00, 0x913, 0, 0, 0, 0, 0, 7]),
@@ -118,15 +118,18 @@ fn addresses_are_added_exclusively_without_duplicate_detection() {
     expected.attributes = vec![AddressAttribute::Address(v6([
         0xfd00, 0x913, 0, 0, 0, 0, 0, 7,
     ]))];
-    assert_eq!(ipv6.message, RouteNetlinkMessage::NewAddress(expected));
-    assert!(ipv6.acknowledged);
+    assert_eq!(
+        unique_request.message,
+        RouteNetlinkMessage::NewAddress(expected)
+    );
+    assert!(unique_request.acknowledged);
 }
 
 #[test]
 fn only_gateway_routes_are_added_and_through_the_link() {
     let connected = NamespaceRoute {
         destination: IpPrefix {
-            address: v4(10, 213, 0, 12),
+            address: v4([10, 213, 0, 12]),
             length: 30,
         },
         gateway: None,
@@ -254,7 +257,7 @@ fn address_reply(
 
 #[test]
 fn addresses_decode_their_local_address_and_prefix() -> TestResult {
-    let local = v4(10, 213, 0, 14);
+    let local = v4([10, 213, 0, 14]);
     let unique = v6([0xfd00, 0x913, 0, 0, 0, 0, 0, 7]);
     let observed = observed_addresses(vec![
         address_reply(
@@ -297,7 +300,7 @@ fn addresses_decode_their_local_address_and_prefix() -> TestResult {
 
 #[test]
 fn peer_tentative_and_addressless_replies_fail() {
-    let local = v4(10, 213, 0, 14);
+    let local = v4([10, 213, 0, 14]);
     let unique = v6([0xfd00, 0x913, 0, 0, 0, 0, 0, 7]);
     let undecodable = [
         address_reply(
@@ -305,7 +308,7 @@ fn peer_tentative_and_addressless_replies_fail() {
             AddressHeaderFlags::empty(),
             vec![
                 AddressAttribute::Local(local),
-                AddressAttribute::Address(v4(10, 213, 0, 13)),
+                AddressAttribute::Address(v4([10, 213, 0, 13])),
             ],
         ),
         address_reply(
@@ -400,13 +403,13 @@ fn main_table_routes_decode_and_others_are_left_out() -> TestResult {
     assert_eq!(
         observed,
         [
-            route(v4(10, 213, 0, 12), 30, None),
+            route(v4([10, 213, 0, 12]), 30, None),
             route(
                 v6([0x2001, 0xdb8, 0, 0, 0, 0, 0, 0x10]),
                 128,
                 Some(v6([0xfd00, 0x913, 0, 0, 0, 0, 0, 6]))
             ),
-            route(v4(0, 0, 0, 0), 0, None),
+            route(v4([0, 0, 0, 0]), 0, None),
         ]
     );
     Ok(())

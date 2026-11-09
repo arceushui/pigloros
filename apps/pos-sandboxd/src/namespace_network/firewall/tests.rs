@@ -234,10 +234,6 @@ fn chain_with(attributes: Vec<ChainAttribute>) -> NetfilterMessage {
     nft(NfTablesMessage::NewChain(ChainMessage { attributes: all }))
 }
 
-fn base_hook(hooks: Vec<Hook>) -> ChainAttribute {
-    ChainAttribute::Hook(hooks)
-}
-
 fn rule_with(attributes: Vec<RuleAttribute>) -> NetfilterMessage {
     nft(NfTablesMessage::NewRule(RuleMessage { attributes }))
 }
@@ -262,28 +258,28 @@ fn unrepresentable_tables_and_chains_fail() {
         // A base chain of another type, policy or hook, or without part of
         // its hook, flags beyond the base flag, and unknown attributes.
         chain_with(vec![
-            base_hook(vec![input.clone(), Hook::Priority(0)]),
+            ChainAttribute::Hook(vec![input.clone(), Hook::Priority(0)]),
             ChainAttribute::Policy(0),
             ChainAttribute::Type("nat".to_owned()),
         ]),
         chain_with(vec![
-            base_hook(vec![input.clone(), Hook::Priority(0)]),
+            ChainAttribute::Hook(vec![input.clone(), Hook::Priority(0)]),
             ChainAttribute::Policy(3),
             ChainAttribute::Type("filter".to_owned()),
         ]),
         chain_with(vec![
-            base_hook(vec![input.clone(), Hook::Priority(0)]),
+            ChainAttribute::Hook(vec![input.clone(), Hook::Priority(0)]),
             ChainAttribute::Type("filter".to_owned()),
         ]),
-        chain_with(vec![base_hook(vec![
+        chain_with(vec![ChainAttribute::Hook(vec![
             Hook::Number(HookNumber::Inet(InetHookNumber::PreRouting)),
             Hook::Priority(0),
         ])]),
-        chain_with(vec![base_hook(vec![
+        chain_with(vec![ChainAttribute::Hook(vec![
             Hook::Number(HookNumber::Dev(DevHookNumber::Ingress)),
             Hook::Priority(0),
         ])]),
-        chain_with(vec![base_hook(vec![input.clone()])]),
+        chain_with(vec![ChainAttribute::Hook(vec![input])]),
         chain_with(vec![ChainAttribute::Policy(0)]),
         chain_with(vec![ChainAttribute::Flags(
             ChainFlags::Base | ChainFlags::HwOffload,
