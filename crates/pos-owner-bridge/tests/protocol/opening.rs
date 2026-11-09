@@ -235,6 +235,81 @@ fn pending_stages_do_not_restart_the_readiness_deadline() -> TestResult {
 }
 
 #[test]
+fn late_open_results_do_not_resurrect_a_cancelled_or_timed_out_driver() -> TestResult {
+    for cancelled in [false, true] {
+        for failed in [false, true] {
+            let mut rig = DriverRig::new(honest(0), SurfaceConfig::default())?;
+            let started = rig.clock.now();
+            let mut driver = new_driver(create_plan(&rig.clock));
+            let mut store = rig.store.clone();
+            let mut loopback = rig.loopback.clone();
+            let mut observed = Vec::new();
+            {
+                let mut surface = DelayedOpening {
+                    inner: &mut rig.surface,
+                    clock: rig.clock.clone(),
+                    delay: Duration::ZERO,
+                    open_pending: u32::MAX,
+                    navigation_pending: 0,
+                    navigation: Poll::Pending,
+                    owner_observation: Some(&mut observed),
+                };
+                {
+                    let mut env = StepEnv {
+                        surface: &mut surface,
+                        clock: &rig.clock,
+                        loopback: &mut loopback,
+                        store: &mut store,
+                    };
+                    assert!(matches!(driver.step(&mut env), Step::Pending));
+                    let expected = if cancelled {
+                        rig.handle
+                            .schedule(Duration::ZERO, SurfaceEvent::ControllerLost);
+                        LifecycleCode::ControllerLost
+                    } else {
+                        rig.clock.advance(READINESS);
+                        LifecycleCode::ReadinessTimeout
+                    };
+                    let result = FakeStepper::new(rig.clock.clone()).run(&mut driver, &mut env);
+                    assert_eq!(result.err(), Some(BridgeError::Lifecycle(expected)));
+                }
+                // Supply a modeled late port result only after the caller has
+                // finished. Native handler custody is tested at the Windows seam.
+                surface.open_pending = 0;
+                rig.handle.set_faults(SurfaceFaults {
+                    open: failed.then_some(BridgeError::Unavailable(
+                        UnavailableCode::InterfaceUnavailable,
+                    )),
+                    ..SurfaceFaults::default()
+                });
+                let before = rig.handle.log();
+                let generation = driver.generation();
+                let mut env = StepEnv {
+                    surface: &mut surface,
+                    clock: &rig.clock,
+                    loopback: &mut loopback,
+                    store: &mut store,
+                };
+                for _ in 0..2 {
+                    assert!(matches!(driver.step(&mut env), Step::Done));
+                }
+                assert_eq!(driver.generation(), generation);
+                assert_eq!(rig.handle.log(), before);
+            }
+            assert_eq!(observed.len(), 1);
+            assert_eq!(driver.t0(), started);
+            assert!(driver.request_clear());
+            assert!(driver.prf().iter().all(|byte| *byte == 0));
+            assert_eq!(driver.posts(), 0);
+            assert_eq!(rig.handle.pair_count(), 0);
+            assert_eq!(rig.loopback.resets(), 0);
+            assert!(rig.store.records_now().is_empty());
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn duplicate_document_completion_while_navigation_is_pending_prevents_posting() -> TestResult {
     let mut rig = DriverRig::new(
         honest(0),
