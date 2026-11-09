@@ -913,7 +913,7 @@ def _check_shim_macros(label: str, scanned: Scan, found: list[str]) -> None:
 def _reviewed_fault_code(code: str) -> bool:
     """Accept only the reviewed test-only fixed process-fault implementation."""
     normalized = re.sub(r"\s+", "", code).encode()
-    return hashlib.sha256(normalized).hexdigest() == "dd2b207795b61568515a92c60085c892f407d6544f0c64f809671e1c7bdb8303"
+    return hashlib.sha256(normalized).hexdigest() == "3e2f283260deabeba74f82af80666967120270004082440bd821fe697deb05c7"
 
 
 def _check_shim_sources(shim: Path, scanned_dirs: tuple[Path, ...], found: list[str]) -> ShimScan:
@@ -1124,13 +1124,17 @@ def _check_fault_authority(root: Path, scans: dict[str, tuple[Scan, tuple[Attrib
     type_start = root_code.find("pub(crate) enum ProcessFaultTarget")
     type_end = root_code.find("pub(crate) trait NativeOperations", type_start) if type_start >= 0 else -1
     types = root_code[type_start:type_end] if type_end >= 0 else ""
-    if hashlib.sha256(re.sub(r"\s+", "", types).encode()).hexdigest() != "d70df208dd00514b3e8d4a148c05860a7dead9a73e7f7d91ee6e631795fe1815":
+    if hashlib.sha256(re.sub(r"\s+", "", types).encode()).hexdigest() != "1f8edc4b5db2aa6b4d945df95354e4074c6f12378b632957babd74e947b4a2ce":
         found.append(f"{SHIM}/src/lib.rs: process fault capability types differ from reviewed test-only code")
     elif "cfg(test)" not in _outer_attributes_before(root_code, root_item[1], type_start):
         found.append(f"{SHIM}/src/lib.rs: process fault capability types require cfg(test)")
     # The seal is created only by the declared sealed-asset native fixture;
     # these fixed boundaries prevent bypassing lifecycle/identity checks.
     specifications = (
+        ('src/adapter/surface/mod.rs', 'before_record_fault_state', '49205841cf6005a43cd32dc1175026713fd3792d8f86b4e93718f35ee8614466'),
+        ('src/adapter/surface/mod.rs', 'before_record_owners_retained', '502ed68d263fce4656e16380d091e1efd621ed8d740508dfd42f37ff759427e3'),
+        ('src/adapter/surface/mod.rs', 'inject_before_record_fault', '4cd03ee5c769b794fbc7812bf4e8d7869a1202887ada56eefe49e69d438f7252'),
+        ('src/adapter/surface/mod.rs', 'inject_posted_consuming_fault', '8d2a7e8a867ac336094f4bfdc45194220735cd8e709c28d12d7e07c7422e4427'),
         ('src/adapter/surface/mod.rs', 'posted_ready_fault_state', '338bbaa04356e3f9d6e235d859e1427608723276a67ba1a17da3ea1abc0e143a'),
         ('src/adapter/surface/mod.rs', 'inject_posted_ready_fault', '43214afa0e0beb3daf39dc3ad67d4b3dc3a985f5299362e169cac58c141e1820'),
         ('src/adapter/surface/mod.rs', 'posted_retry_fault_state', '21e04f9cd0e24ca2af57f54efa6ac0eacf10ddeb1b230a31b3e9f05cd6e9dcea'),
@@ -1174,7 +1178,7 @@ def _check_fault_authority(root: Path, scans: dict[str, tuple[Scan, tuple[Attrib
         ("src/lib.rs", "inject_process_fault", "294b987cde982e756d951216a786fbf47cddcb352b67d16b5fb3e343644662ed"),
         ("src/ffi/session.rs", "fault_owners_retained", "eccda5bd1bc5847953133394e934a30276c539d09fa2842f0e3ad42722556f69"),
         ("src/adapter/surface/mod.rs", "fault_owners_retained", "f5b290213a5da3871f225e3abbba1e1f61c7ae0b021766b7d9a3f63f05b14b9f"),
-        ("src/ffi/session.rs", "inject_process_fault", "adb8618ee8b2225717ec5bba204972a31458a30e6c59b71ff118fc8d9fb09dfb"),
+        ("src/ffi/session.rs", "inject_process_fault", "e7c80f6df74ced6b16fc7aedc535e7d0c383602504915ccfa93c8cd4d641f786"),
         ("src/ffi/creation.rs", "succeeded", "abd90b783da539c962504dcb63f9a6f467fcbf0bf213e251f9b94c309a1f35f8"),
         ("src/ffi/session.rs", "recordless_controller_completion", "29b41776eba0afe06f194a40aa7d1fed581daa6b3c50e61394d884b8b203c3b1"),
         ("src/ffi/session.rs", "recordless_browser_candidate", "f9b8af0278a6b4f1ffe01a4c6483c9d204f574345270b49183a9f25a087052d7"),
@@ -1220,7 +1224,7 @@ def _check_fault_authority(root: Path, scans: dict[str, tuple[Scan, tuple[Attrib
     relative = "src/adapter/native_tests/process_fault.rs"
     item = scans.get(relative)
     code = item[0].code if item else ""
-    if hashlib.sha256(re.sub(r"\s+", "", code).encode()).hexdigest() != "2055590c14748671fb5d315191372ed21aad9fc0d2385ede606ee3934e2ca422":
+    if hashlib.sha256(re.sub(r"\s+", "", code).encode()).hexdigest() != "190b5ca009f7764b5843cd1a3ebee36cfb217bb345f034bc9248fcd33b5d863a":
         found.append(f"{SHIM}/{relative}: process fault fixture differs from reviewed sealed caller")
 
 
@@ -1245,7 +1249,7 @@ def _check_fault_capabilities(scans: dict[str, tuple[Scan, tuple[Attribute, ...]
             "src/ffi/session.rs": ("inject_process_fault",),
             "src/adapter/surface/mod.rs": (
                 "inject_posted_fault", "inject_recordless_browser", "inject_releasing_fault",
-                "inject_view_fault", "inject_exit_fault", "inject_awaiting_load_fault", "inject_navigating_fault", "inject_posted_empty_fault", "inject_pending_opening_browser", "inject_posted_writing_fault", "inject_posted_ready_fault", "inject_posted_retry_fault",
+                "inject_view_fault", "inject_exit_fault", "inject_awaiting_load_fault", "inject_navigating_fault", "inject_posted_empty_fault", "inject_pending_opening_browser", "inject_posted_writing_fault", "inject_posted_ready_fault", "inject_posted_retry_fault", "inject_posted_consuming_fault", "inject_before_record_fault",
             ),
         }.get(relative, ())
         for reviewed_function in reviewed_functions:
@@ -1270,7 +1274,7 @@ def _check_fault_capabilities(scans: dict[str, tuple[Scan, tuple[Attribute, ...]
         for match in re.finditer(r"(?<!\w)FaultAuthority\s*\{", source):
             root_declaration = relative == "src/lib.rs" and begin <= match.start() < end
             surface_construction = relative == "src/adapter/surface/mod.rs" and any(
-                name in ("inject_view_fault", "inject_recordless_browser", "inject_exit_fault", "inject_awaiting_load_fault", "inject_navigating_fault", "inject_pending_opening_browser") and start < match.start() < stop
+                name in ("inject_view_fault", "inject_recordless_browser", "inject_exit_fault", "inject_awaiting_load_fault", "inject_navigating_fault", "inject_pending_opening_browser", "inject_before_record_fault") and start < match.start() < stop
                 for name, start, stop in _function_spans(source)
             )
             if not root_declaration and not surface_construction:

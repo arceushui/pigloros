@@ -123,6 +123,7 @@ impl NativeOperations for Session {
             | crate::ProcessFaultLifecycle::PostedEmpty
             | crate::ProcessFaultLifecycle::PostedWriting
             | crate::ProcessFaultLifecycle::PostedReady
+            | crate::ProcessFaultLifecycle::PostedConsuming
             | crate::ProcessFaultLifecycle::PostedRetry(_)
             | crate::ProcessFaultLifecycle::ReleasingSuccess => {
                 if self.controller.is_none()
@@ -133,7 +134,8 @@ impl NativeOperations for Session {
                 }
             }
             crate::ProcessFaultLifecycle::AwaitingLoad
-            | crate::ProcessFaultLifecycle::Navigating => {
+            | crate::ProcessFaultLifecycle::Navigating
+            | crate::ProcessFaultLifecycle::BeforeRecord => {
                 if authority.target() != crate::ProcessFaultTarget::Browser
                     || !self.preload_fault_owners_retained()
                     || self.browser_pid().map_err(|_| ())? != authority.browser().browser_pid

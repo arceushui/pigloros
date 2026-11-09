@@ -475,6 +475,67 @@ impl Surface {
     }
 
     #[cfg(test)]
+    pub(in crate::adapter) fn before_record_fault_state(
+        &mut self,
+    ) -> std::result::Result<ProcessIdentity, ()> {
+        if self.ownership != Ownership::Controller
+            || self.close != CloseState::Idle
+            || self.failed_open
+            || self.activation_error.is_some()
+            || self.events.invalid()
+            || self.events.exited().is_some()
+            || self.navigation_issued
+            || self.buffers
+            || !self.native.preload_fault_owners_retained()
+            || !self.store.records().map_err(|_| ())?.is_empty()
+            || !crate::Native::process_failure_observations().is_empty()
+        {
+            return Err(());
+        }
+        let folder = self.root.join(self.folder.as_ref().ok_or(())?);
+        crate::verify_private_directory(&folder).map_err(|_| ())?;
+        self.admit_environment(&folder).map_err(|_| ())?;
+        let browser = self.identity.ok_or(())?;
+        if self.runtime.identity(browser.browser_pid).map_err(|_| ())? != browser {
+            return Err(());
+        }
+        Ok(browser)
+    }
+
+    #[cfg(test)]
+    pub(in crate::adapter) fn before_record_owners_retained(&mut self) -> bool {
+        self.ownership == Ownership::Controller
+            && self.folder.is_some()
+            && self.identity.is_some()
+            && !self.navigation_issued
+            && !self.buffers
+            && self.store.records().is_ok_and(|records| records.is_empty())
+            && self.native.preload_fault_owners_retained()
+    }
+
+    #[cfg(test)]
+    pub(in crate::adapter) fn inject_before_record_fault(
+        &mut self,
+        seal: crate::FaultSeal,
+    ) -> std::result::Result<Box<dyn crate::ProcessFaultHandle>, ()> {
+        let browser = self.before_record_fault_state()?;
+        let events = Rc::clone(&self.events);
+        let (trace, deadline) = seal.into_parts();
+        let authority = crate::FaultAuthority {
+            browser,
+            target: crate::ProcessFaultTarget::Browser,
+            lifecycle: crate::ProcessFaultLifecycle::BeforeRecord,
+            valid: Rc::new(move || {
+                std::time::Instant::now() < deadline
+                    && !events.invalid()
+                    && events.exited().is_none()
+            }),
+            trace,
+        };
+        self.native.inject_process_fault(&authority)
+    }
+
+    #[cfg(test)]
     pub(in crate::adapter) fn posted_fault_state(
         &mut self,
         posts: u8,
@@ -802,6 +863,20 @@ impl Surface {
             seal,
             crate::ProcessFaultLifecycle::PostedRetry(point),
         )
+    }
+
+    #[cfg(test)]
+    pub(in crate::adapter) fn inject_posted_consuming_fault(
+        &self,
+        target: crate::ProcessFaultTarget,
+        seal: crate::FaultSeal,
+    ) -> std::result::Result<Box<dyn crate::ProcessFaultHandle>, ()> {
+        if ControlState::try_from(self.native.load_state().map_err(|_| ())?).ok()
+            != Some(ControlState::Consuming)
+        {
+            return Err(());
+        }
+        self.inject_view_fault(target, seal, crate::ProcessFaultLifecycle::PostedConsuming)
     }
 
     #[cfg(test)]

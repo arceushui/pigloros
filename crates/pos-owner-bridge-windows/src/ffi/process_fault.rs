@@ -170,6 +170,10 @@ pub(super) fn inject(
                 buffers.ok_or(())?.load_state().map_err(|_| ())?
                     != pos_owner_bridge_codec::ControlState::Ready as u32
             }
+            crate::ProcessFaultLifecycle::PostedConsuming => {
+                buffers.ok_or(())?.load_state().map_err(|_| ())?
+                    != pos_owner_bridge_codec::ControlState::Consuming as u32
+            }
             _ => false,
         }
         || (authority.lifecycle() == crate::ProcessFaultLifecycle::PendingOpening

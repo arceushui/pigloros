@@ -1514,3 +1514,89 @@ fn a_posted_pair_keeps_its_request_payload_after_the_host_zeroes_the_buffer() ->
     assert_eq!(options.ceremony_id(), CeremonyId::from_bytes(bytes16(0)));
     Ok(())
 }
+
+#[test]
+fn events_queued_at_the_consuming_cas_fail_and_wipe_before_release() -> TestResult {
+    for event in [
+        SurfaceEvent::RendererFailed,
+        SurfaceEvent::BrowserExited { browser_pid: 4242 },
+    ] {
+        let mut rig = DriverRig::with_hook(
+            honest(0),
+            Hook::LifecycleAfterCas { event, new: 3 },
+            SurfaceConfig::default(),
+        )?;
+        let plan = get_plan(&rig.clock, stored_fixture(0)?);
+        let (result, driver) = rig.run(plan);
+        assert_eq!(
+            failure(&result)?,
+            lifecycle(LifecycleCode::RendererFailed),
+            "{event:?}"
+        );
+        assert!(driver.request_clear(), "{event:?}");
+        assert_eq!(*driver.prf(), [0; 32], "{event:?}");
+        assert!(rig
+            .handle
+            .log()
+            .iter()
+            .any(|entry| matches!(entry, LogEntry::HostCopy { state: 3, .. })));
+    }
+    Ok(())
+}
+
+#[test]
+fn events_queued_after_the_release_cas_preserve_a_verified_result() -> TestResult {
+    for event in [
+        SurfaceEvent::RendererFailed,
+        SurfaceEvent::BrowserExited { browser_pid: 4242 },
+    ] {
+        let mut rig = DriverRig::with_hook(
+            honest(0),
+            Hook::LifecycleAfterCas { event, new: 4 },
+            SurfaceConfig::default(),
+        )?;
+        let plan = get_plan(&rig.clock, stored_fixture(0)?);
+        let (result, driver) = rig.run(plan);
+        assert!(result.is_ok(), "{event:?}: {result:?}");
+        assert!(driver.request_clear(), "{event:?}");
+        assert_ne!(*driver.prf(), [0; 32], "{event:?}");
+    }
+    Ok(())
+}
+
+#[test]
+fn another_browsers_exit_at_consuming_does_not_discard_success() -> TestResult {
+    let event = SurfaceEvent::BrowserExited { browser_pid: 7 };
+    let mut rig = DriverRig::with_hook(
+        honest(0),
+        Hook::LifecycleAfterCas { event, new: 3 },
+        SurfaceConfig::default(),
+    )?;
+    let plan = get_plan(&rig.clock, stored_fixture(0)?);
+    let (result, driver) = rig.run(plan);
+    assert!(result.is_ok(), "{result:?}");
+    assert!(driver.request_clear());
+    assert_ne!(*driver.prf(), [0; 32]);
+    Ok(())
+}
+
+#[test]
+fn consuming_event_at_the_generation_limit_fails_closed() -> TestResult {
+    let mut rig = DriverRig::with_hook(
+        honest(0),
+        Hook::LifecycleAfterCas {
+            event: SurfaceEvent::RendererFailed,
+            new: 3,
+        },
+        SurfaceConfig::default(),
+    )?;
+    let plan = get_plan(&rig.clock, stored_fixture(0)?).with_generation(u32::MAX);
+    let (result, driver) = rig.run(plan);
+    assert_eq!(
+        failure(&result)?,
+        BridgeError::Unavailable(UnavailableCode::GenerationExhausted)
+    );
+    assert!(driver.request_clear());
+    assert_eq!(*driver.prf(), [0; 32]);
+    Ok(())
+}
