@@ -54,6 +54,7 @@ pub struct PreparedAttemptDirectory {
     recorded_root: OnceLock<RootRecord>,
     execution: ExecutionOwnership,
     // Root activations begun on this tree; each may leave loop/dm resources.
+    // It only grows: see `begin_activation`.
     activations: AtomicUsize,
 }
 
@@ -141,6 +142,15 @@ impl PreparedAttemptDirectory {
     /// Record that a root activation is about to send its mountfsd request,
     /// before any loop/dm resource can exist. Intent deletion then requires
     /// released-root evidence for exactly that one root.
+    ///
+    /// The count never decreases. A request that reached mountfsd and failed
+    /// may still have left loop/dm resources that no released root covers, so
+    /// after a successful retry the count is two and live terminal cleanup is
+    /// refused; the intent stays for restart reconciliation (fail closed).
+    ///
+    /// No activation can begin after terminal cleanup reads this count:
+    /// [`Self::finish_terminal_cleanup`] consumes the directory by value while
+    /// every activation borrows it, so the two cannot interleave.
     pub(crate) fn begin_activation(&self) {
         self.activations.fetch_add(1, Ordering::AcqRel);
     }
