@@ -1304,7 +1304,8 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(json["ok"], false);
+        assert_eq!(json["code"], "temporarily-unavailable");
+        assert_eq!(json["retryable"], true);
     }
 
     #[tokio::test]
@@ -1330,7 +1331,8 @@ mod tests {
         .await;
         drop(gateway);
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(json["ok"], false);
+        assert_eq!(json["code"], "temporarily-unavailable");
+        assert_eq!(json["retryable"], true);
     }
 
     #[tokio::test]
