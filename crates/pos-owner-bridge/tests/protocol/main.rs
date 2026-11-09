@@ -603,7 +603,7 @@ impl Wrapped {
         op: HostOp,
         phase: HookPhase,
     ) {
-        if let (
+        let (
             Hook::LifecycleAfterCas {
                 event,
                 new: expected,
@@ -615,9 +615,10 @@ impl Wrapped {
             },
             HookPhase::After,
         ) = (&self.hook, op, phase)
-            && new == *expected
-            && !self.injected
-        {
+        else {
+            return;
+        };
+        if new == *expected && !self.injected {
             self.injected = true;
             buffers.schedule(now, *event);
         }
