@@ -362,11 +362,11 @@ mod cases {
         assert_eq!(recovery.activation_wait(boot_instant()?)?, None);
         drop(recovery);
         // An owner beside an existing marker keeps it.
-        let runtime = runtime()?;
-        write_marker(runtime.path(), &marker_bytes(OTHER_BOOT, 5, 0))?;
-        drop(open_registry(runtime.path())?);
+        let marked = self::runtime()?;
+        write_marker(marked.path(), &marker_bytes(OTHER_BOOT, 5, 0))?;
+        drop(open_registry(marked.path())?);
         assert_eq!(
-            fs::read(runtime.path().join("registry").join(MARKER_NAME))?,
+            fs::read(marked.path().join("registry").join(MARKER_NAME))?,
             marker_bytes(OTHER_BOOT, 5, 0)
         );
         Ok(())
