@@ -1161,6 +1161,8 @@ mod tests {
         let input = activation(TimelineId::new(), 1);
         let policy = policy_input(&env, &genesis)?;
         let projection = release_one().projection()?;
+        let first_pmf1 = release_one().pmf1_digest()?;
+        let first_release = release_one().release_digest()?;
         let retained = RetainedScopeV1 {
             anchor: env.anchor.clone(),
             policy: RetainedPolicyStateV1 {
@@ -1177,13 +1179,13 @@ mod tests {
         let active = ActiveReleaseV1 {
             scope: "scope".to_owned(),
             plugin_id: "plugin-a".to_owned(),
-            pmf1_digest: projection.pmf1_digest(),
-            release_digest: projection.release_digest(),
+            pmf1_digest: first_pmf1,
+            release_digest: first_release,
             activation_event: identity(&input),
         };
         let decision = RetainedReleaseDecisionV1 {
-            pmf1_digest: projection.pmf1_digest(),
-            release_digest: projection.release_digest(),
+            pmf1_digest: first_pmf1,
+            release_digest: first_release,
             ..decision_of(&tps1, &genesis, &input)
         };
         let tx = |fail: Read| FailingTx {
@@ -1199,7 +1201,7 @@ mod tests {
         }
         // No evaluation read touches the ledger: the same transaction otherwise evaluates.
         let evaluation = plan_evaluate(&tx(Read::LatestRow), &policy, &projection)?;
-        assert_eq!(evaluation.pmf1_digest(), projection.pmf1_digest());
+        assert_eq!(evaluation.pmf1_digest(), first_pmf1);
         assert_eq!(evaluation.activation_event(), &active.activation_event);
         Ok(())
     }
@@ -1212,7 +1214,10 @@ mod tests {
         let input = activation(TimelineId::new(), 1);
         let policy = policy_input(&env, &genesis)?;
         let projection = release_one().projection()?;
-        let next_projection = release_two().projection()?;
+        let first_pmf1 = release_one().pmf1_digest()?;
+        let first_release = release_one().release_digest()?;
+        let next_pmf1 = release_two().pmf1_digest()?;
+        let next_release = release_two().release_digest()?;
         let retained = RetainedScopeV1 {
             anchor: env.anchor.clone(),
             policy: RetainedPolicyStateV1 {
@@ -1227,22 +1232,18 @@ mod tests {
             },
         };
         let decision = RetainedReleaseDecisionV1 {
-            pmf1_digest: projection.pmf1_digest(),
-            release_digest: projection.release_digest(),
+            pmf1_digest: first_pmf1,
+            release_digest: first_release,
             ..decision_of(&tps1, &genesis, &input)
         };
         let active = |pmf1: u8| ActiveReleaseV1 {
             scope: "scope".to_owned(),
             plugin_id: "plugin-a".to_owned(),
-            pmf1_digest: if pmf1 == 0x01 {
-                projection.pmf1_digest()
-            } else {
-                next_projection.pmf1_digest()
-            },
+            pmf1_digest: if pmf1 == 0x01 { first_pmf1 } else { next_pmf1 },
             release_digest: if pmf1 == 0x01 {
-                projection.release_digest()
+                first_release
             } else {
-                next_projection.release_digest()
+                next_release
             },
             activation_event: identity(&input),
         };

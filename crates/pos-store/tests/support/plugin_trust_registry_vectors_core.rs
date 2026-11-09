@@ -38,7 +38,10 @@ use pos_store::plugin_trust_registry::{
 fn genuine_registry_fixtures_have_content_proofs_bound_to_their_manifests() -> TestResult {
     for fixture in [release_one(), release_two(), release_three()] {
         let bundle = fixture.content_bundle()?;
-        let projection = fixture.content_projection()?;
+        let projection =
+            pos_crypto::plugin_execution::PluginExecutionProjectionV1::from_verified_bundle(
+                &bundle,
+            )?;
         let proof = pos_plugin_content::validate_plugin_bundle_content_v1(&bundle)?;
         assert_eq!(proof.pmf1_digest(), projection.pmf1_digest());
         assert_eq!(proof.release_digest(), projection.release_digest());
@@ -59,10 +62,10 @@ fn genuine_registry_fixtures_have_content_proofs_bound_to_their_manifests() -> T
         TrustEvaluationPointV1::new(trusted(UTC)?, TICK),
         activation(h.timeline, 1),
     )?;
-    assert_eq!(receipt.decision().pmf1_digest(), projection.pmf1_digest());
+    assert_eq!(receipt.decision().pmf1_digest(), content.pmf1_digest());
     assert_eq!(
         receipt.decision().release_digest(),
-        projection.release_digest()
+        content.release_digest()
     );
     Ok(())
 }
