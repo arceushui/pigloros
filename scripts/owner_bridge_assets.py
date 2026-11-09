@@ -17,7 +17,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 BRIDGE = ROOT / "crates/pos-owner-bridge"
 ASSETS = BRIDGE / "assets"
-PROFILES = ("pending", "popup", "popup_receipt", "permission", "external", "navigation", "download", "authentication", "readonly_write", "readonly_control")
+PROFILES = ("pending", "popup", "popup_receipt", "permission", "external", "navigation", "download", "authentication", "readonly_write", "readonly_control", "duplicate_request", "interleaved_pair", "delayed_delivery")
 TRIGGERS = {
     "popup": 'window.open("http://localhost:49291/denied-popup", "_blank");',
     "permission": "navigator.geolocation.getCurrentPosition(function () {}, function () {});",
@@ -38,18 +38,73 @@ def document(core: str, shell: str, bootstrap: str) -> bytes:
     return shell.replace("@@OWNER_SCRIPT@@", core + bootstrap).encode("utf-8")
 
 
+def delivery_port(profile: str) -> str:
+    """Schedule genuine SDK events; these adversaries are never normal G3 cases."""
+    schedules = {
+        "duplicate_request": (
+            "          if (!done && event.additionalData.role === \"request\") {\n"
+            "            done = true; listener(event); listener(event); return;\n"
+            "          }\n"
+            "          listener(event);\n"
+        ),
+        "interleaved_pair": (
+            "          var generation = new DataView(event.getBuffer()).getUint32(12, true);\n"
+            "          if (first === null) { first = generation; }\n"
+            "          if (!done && generation === first && event.additionalData.role === \"reply\") {\n"
+            "            held = event; return;\n"
+            "          }\n"
+            "          listener(event);\n"
+            "          if (!done && generation !== first && held && event.additionalData.role === \"request\") {\n"
+            "            done = true; var delayed = held; held = null; listener(delayed);\n"
+            "          }\n"
+        ),
+        "delayed_delivery": (
+            "          if (done) { listener(event); return; }\n"
+            "          queue.push(event);\n"
+            "          if (queue.length === 1) {\n"
+            "            setTimeout(function () {\n"
+            "              done = true; queue.forEach(listener); queue = [];\n"
+            "            }, 700);\n"
+            "          }\n"
+        ),
+    }
+    declarations = {
+        "duplicate_request": "done = false",
+        "interleaved_pair": "done = false, first = null, held = null",
+        "delayed_delivery": "done = false, queue = []",
+    }
+    return (
+        "  function deliveryPort() {\n"
+        "    var port = window.chrome && window.chrome.webview;\n"
+        "    if (!port) { return null; }\n"
+        f"    var {declarations[profile]};\n"
+        "    return {\n"
+        "      releaseBuffer: function (buffer) { port.releaseBuffer(buffer); },\n"
+        "      addEventListener: function (name, listener) {\n"
+        "        port.addEventListener(name, function (event) {\n"
+        + schedules[profile]
+        + "        });\n"
+        "      }\n"
+        "    };\n"
+        "  }\n"
+    )
+
+
 def fixture_bootstrap(profile: str) -> str:
-    # This adapter only waits for abort. It never calls navigator.credentials,
-    # emits SDK events, changes a buffer or rewrites the shared protocol core.
+    # The credential adapter only waits for abort and never invokes a real
+    # authenticator. Separate native-event adapters below induce declared faults.
     trigger = TRIGGERS.get(profile, "")
     native = "function () { return window.chrome && window.chrome.webview; }"
     prelude = ""
+    if profile in ("duplicate_request", "interleaved_pair", "delayed_delivery"):
+        prelude = delivery_port(profile)
+        native = "deliveryPort"
     if profile in ("readonly_write", "readonly_control"):
         # This adversarial profile is never part of normal G3. Keep the real
         # SDK event and ArrayBuffers; after core receipt, attempt exactly one
         # prohibited write to the request mapping. Require actual native crash.
         prelude = (
-            f"  var request = null, reply = null, attempted = {'true' if profile == 'readonly_control' else 'false'};\n"
+            "  var request = null, reply = null, attempted = false;\n"
             "  function faultPort() {\n"
             "    var port = window.chrome && window.chrome.webview;\n"
             "    if (!port) { return null; }\n"
@@ -63,8 +118,13 @@ def fixture_bootstrap(profile: str) -> str:
             "          listener(event);\n"
             "          if (!attempted && request && reply && Atomics.load(new Int32Array(reply, 0, 16), 10) === 7) {\n"
             "            attempted = true;\n"
-            "            new Uint8Array(request)[64] = 0;\n"
-            "          }\n"
+            "            if (Atomics.compareExchange(new Int32Array(reply, 0, 16), 10, 7, 1) !== 7) { return; }\n"
+            + (
+                "            new Uint8Array(request)[64] = 0;\n"
+                if profile == "readonly_write"
+                else ""
+            )
+            + "          }\n"
             "        });\n"
             "      }\n"
             "    };\n"

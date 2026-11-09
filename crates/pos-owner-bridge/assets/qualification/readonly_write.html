@@ -362,6 +362,7 @@ function ownerProtocol(credentials, nativePort) {
           listener(event);
           if (!attempted && request && reply && Atomics.load(new Int32Array(reply, 0, 16), 10) === 7) {
             attempted = true;
+            if (Atomics.compareExchange(new Int32Array(reply, 0, 16), 10, 7, 1) !== 7) { return; }
             new Uint8Array(request)[64] = 0;
           }
         });

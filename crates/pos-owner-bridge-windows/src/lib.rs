@@ -283,6 +283,14 @@ pub(crate) struct ControlObservation {
     pub(crate) retired: bool,
 }
 
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct RendererStateObservation {
+    pub(crate) generation: Option<u32>,
+    pub(crate) reply_state: Option<u32>,
+    pub(crate) record_count: Option<usize>,
+}
+
 pub(crate) enum NativeEvent {
     Navigation {
         uri: NativeText,
@@ -459,6 +467,12 @@ mod tests {
     fn native_readonly_write_crashes_the_exact_renderer_and_retires(
     ) -> Result<(), Box<dyn std::error::Error>> {
         crate::Native::native_readonly_renderer_failure()
+    }
+
+    #[test]
+    fn native_delivery_adversaries_retry_without_stale_receipt(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        crate::Native::native_delivery_adversaries()
     }
 
     #[test]

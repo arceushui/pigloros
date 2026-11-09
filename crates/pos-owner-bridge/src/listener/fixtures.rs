@@ -24,11 +24,17 @@ pub enum FixtureProfile {
     Download,
     /// Serve one fixed Basic challenge, without supplying credentials.
     Authentication,
-    /// After valid receipt, write the SDK request buffer posted READ_ONLY.
+    /// After valid receipt, write the SDK request buffer posted `READ_ONLY`.
     /// Adversarial renderer-crash evidence; never a normal G3 delivery case.
     ReadOnlyWrite,
     /// The same event adapter with its write disarmed, as a no-crash control.
     ReadOnlyControl,
+    /// Duplicate the first real request event before its matching reply.
+    DuplicateRequest,
+    /// Deliver a retired reply between a newer request and its matching reply.
+    InterleavedPair,
+    /// Hold real SDK deliveries for 700 ms, crossing the first two retry windows.
+    DelayedDelivery,
 }
 
 impl FixtureProfile {
@@ -44,6 +50,9 @@ impl FixtureProfile {
             Self::Authentication => &fixture_assets::AUTHENTICATION,
             Self::ReadOnlyWrite => &fixture_assets::READONLY_WRITE,
             Self::ReadOnlyControl => &fixture_assets::READONLY_CONTROL,
+            Self::DuplicateRequest => &fixture_assets::DUPLICATE_REQUEST,
+            Self::InterleavedPair => &fixture_assets::INTERLEAVED_PAIR,
+            Self::DelayedDelivery => &fixture_assets::DELAYED_DELIVERY,
         }
     }
 }

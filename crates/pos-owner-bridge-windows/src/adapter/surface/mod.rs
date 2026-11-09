@@ -331,6 +331,18 @@ impl OwnerWebSurface for Surface {
         if self.refresh().is_err() {
             self.events.controller_lost();
         }
+        #[cfg(test)]
+        if self.events.renderer_failure_pending() {
+            // Capture before the driver handles this event and wipes mappings.
+            // A crash before posting cannot produce this generation/state/record
+            // evidence. The sealed fault page marks WRITING immediately before
+            // its prohibited request-buffer write; normal G3 is unchanged.
+            crate::Native::record_renderer_state(crate::RendererStateObservation {
+                generation: self.generation,
+                reply_state: self.native.load_state().ok(),
+                record_count: self.store.records().ok().map(|records| records.len()),
+            });
+        }
         self.events.take()
     }
 

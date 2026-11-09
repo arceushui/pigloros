@@ -16,6 +16,7 @@ std::thread_local! {
     static FAULT: Cell<(EventKind, ControlFault)> = const { Cell::new((EventKind::NewWindow, ControlFault::Normal)) };
     static OBSERVATIONS: RefCell<Vec<ControlObservation>> = const { RefCell::new(Vec::new()) };
     static PROCESS_FAILURES: RefCell<Vec<Option<bool>>> = const { RefCell::new(Vec::new()) };
+    static RENDERER_STATES: RefCell<Vec<crate::RendererStateObservation>> = const { RefCell::new(Vec::new()) };
 }
 
 pub(super) fn process_failed(args: Option<&ICoreWebView2ProcessFailedEventArgs>) {
@@ -121,6 +122,15 @@ pub(super) fn navigation(args: &ICoreWebView2NavigationStartingEventArgs) -> Res
 impl crate::Native {
     pub(crate) fn reset_process_failure_observations() {
         PROCESS_FAILURES.with(|failures| failures.borrow_mut().clear());
+        RENDERER_STATES.with(|states| states.borrow_mut().clear());
+    }
+
+    pub(crate) fn record_renderer_state(state: crate::RendererStateObservation) {
+        RENDERER_STATES.with(|states| states.borrow_mut().push(state));
+    }
+
+    pub(crate) fn renderer_state_observations() -> Vec<crate::RendererStateObservation> {
+        RENDERER_STATES.with(|states| states.borrow().clone())
     }
 
     pub(crate) fn process_failure_observations() -> Vec<Option<bool>> {
