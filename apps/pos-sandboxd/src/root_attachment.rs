@@ -343,17 +343,7 @@ where
                 .await
                 .unwrap_or(Err(ImageActivationError::Transport));
             let mounted = match connected {
-                // The request's boot and time are durable before it is sent,
-                // so a restart can wait it out (owner decision D2).
-                Ok(activator) => match directory.record_activation_request() {
-                    Ok(()) => {
-                        // Only a request that reaches mountfsd can leave loop/dm
-                        // resources, so only it binds intent to a released root.
-                        directory.begin_activation();
-                        activator.mount_image(image).await
-                    }
-                    Err(_) => Err(ImageActivationError::AttachFailure),
-                },
+                Ok(activator) => send_recorded(directory, activator, image).await,
                 Err(error) => Err(error),
             };
             mounted.and_then(|mount| {
@@ -367,6 +357,24 @@ where
             })
         }
         Err(error) => Err(error),
+    }
+}
+
+/// Durably record the request's boot and time, so a restart can wait it out
+/// (owner decision D2), and only then send it.
+async fn send_recorded<A: ImageActivator>(
+    directory: &PreparedAttemptDirectory,
+    activator: A,
+    image: ActivationImage,
+) -> Result<QuarantinedRootMount, ImageActivationError> {
+    match directory.record_activation_request() {
+        Ok(()) => {
+            // Only a request that reaches mountfsd can leave loop/dm
+            // resources, so only it binds intent to a released root.
+            directory.begin_activation();
+            activator.mount_image(image).await
+        }
+        Err(_) => Err(ImageActivationError::AttachFailure),
     }
 }
 
