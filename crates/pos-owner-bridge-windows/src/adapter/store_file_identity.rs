@@ -59,21 +59,34 @@ impl crate::Native {
         fs::create_dir(&path)?;
         let fixture = Fixture(path);
         let private = fixture.0.join("private");
-        crate::create_private_directory(&private)?;
+        crate::create_private_directory(&private)
+            .map_err(|_| "create private fixture directory")?;
         let original = private.join("store.db");
         let file = OpenOptions::new()
             .read(true)
             .write(true)
             .create_new(true)
             .open(&original)?;
-        let identity = store_file_id(&file)?;
-        assert_eq!(store_file_id(&file.try_clone()?)?, identity);
+        crate::Native::diagnose_private_file(&file)?;
+        crate::Native::cleanup_file_volume(&file).map_err(|()| "original file NTFS admission")?;
+        crate::Native::file_identity(&file).map_err(|()| "original file identity observation")?;
+        let identity = store_file_id(&file).map_err(|_| "original candidate identity")?;
+        assert_eq!(
+            store_file_id(&file.try_clone()?).map_err(|_| "cloned handle identity")?,
+            identity
+        );
         let alias = private.join("alias.db");
         fs::hard_link(&original, &alias)?;
-        assert_eq!(store_file_id(&File::open(&alias)?)?, identity);
+        assert_eq!(
+            store_file_id(&File::open(&alias)?).map_err(|_| "hardlink identity")?,
+            identity
+        );
         let copied = private.join("copy.db");
         fs::copy(&original, &copied)?;
-        assert_ne!(store_file_id(&File::open(&copied)?)?, identity);
+        assert_ne!(
+            store_file_id(&File::open(&copied)?).map_err(|_| "copied file identity")?,
+            identity
+        );
         let moved = private.join("moved.db");
         fs::rename(&original, &moved)?;
         let replacement = OpenOptions::new()
@@ -81,8 +94,14 @@ impl crate::Native {
             .write(true)
             .create_new(true)
             .open(&original)?;
-        assert_eq!(store_file_id(&file)?, identity);
-        assert_ne!(store_file_id(&replacement)?, identity);
+        assert_eq!(
+            store_file_id(&file).map_err(|_| "moved handle identity")?,
+            identity
+        );
+        assert_ne!(
+            store_file_id(&replacement).map_err(|_| "replacement file identity")?,
+            identity
+        );
         let directory = OpenOptions::new()
             .read(true)
             .custom_flags(FILE_FLAG_BACKUP_SEMANTICS.0)

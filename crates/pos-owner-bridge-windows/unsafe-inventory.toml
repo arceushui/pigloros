@@ -1685,15 +1685,15 @@ hosted_test = "windows_store_file_identity_native"
 
 [[block]]
 file = "src/ffi/store_file_identity.rs"
-line = 90
-function = "require_private_file"
+line = 109
+function = "private_file_check"
 operation = "GetSecurityInfo"
 invariant = "Borrowed File owns a live handle; query returns one owned descriptor output."
 hosted_test = "windows_store_file_identity_native"
 
 [[block]]
 file = "src/ffi/store_file_identity.rs"
-line = 120
+line = 99
 function = "file_link_count"
 operation = "GetFileInformationByHandle"
 invariant = "Borrowed File owns the live handle and initialized output remains uniquely writable."

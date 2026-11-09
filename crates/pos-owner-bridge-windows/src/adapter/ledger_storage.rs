@@ -335,8 +335,10 @@ mod native_tests {
         for path in [r"C:\base\PiglorOS", r"\\?\C:\base\PiglorOS"] {
             assert!(require_dos_path(Path::new(path)).is_ok(), "{path}");
         }
-        let guard = WindowsSubjectEncryptorLock::acquire(base)?;
-        let mut ledger = guard.open_nonce_ledger()?;
+        let guard = WindowsSubjectEncryptorLock::acquire(base).map_err(|_| "raw fixture lock")?;
+        let mut ledger = guard
+            .open_nonce_ledger()
+            .map_err(|_| "open initial raw directory")?;
         let path = base.join("PiglorOS").join(LEDGER);
         assert_eq!(ledger.read_nonce_ledger_bytes(), Err(unavailable()));
         assert_eq!(
@@ -345,10 +347,22 @@ mod native_tests {
         );
         assert!(!path.exists());
         fs::write(&path, b"untrusted bytes")?;
-        assert_eq!(ledger.read_nonce_ledger_bytes()?, b"untrusted bytes");
+        assert_eq!(
+            ledger
+                .read_nonce_ledger_bytes()
+                .map_err(|_| "read initial raw file")?,
+            b"untrusted bytes"
+        );
         let limit = vec![0x5a; LIMIT];
-        ledger.replace_nonce_ledger_bytes(&limit)?;
-        assert_eq!(ledger.read_nonce_ledger_bytes()?, limit);
+        ledger
+            .replace_nonce_ledger_bytes(&limit)
+            .map_err(|_| "replace raw file at byte limit")?;
+        assert_eq!(
+            ledger
+                .read_nonce_ledger_bytes()
+                .map_err(|_| "read raw file at byte limit")?,
+            limit
+        );
         fs::write(&path, vec![0x5a; LIMIT + 1])?;
         assert_eq!(ledger.read_nonce_ledger_bytes(), Err(unavailable()));
         fs::write(&path, &limit)?;

@@ -84,33 +84,12 @@ fn expected(sid: &str, protected: bool, inherited: bool) -> Result<String, ()> {
 
 impl crate::Native {
     pub(crate) fn require_private_file(file: &File) -> Result<(), ()> {
-        let mut output = PSECURITY_DESCRIPTOR::default();
-        // SAFETY: the borrowed File keeps its handle live throughout this query;
-        // output is uniquely writable and its successful allocation is freed once.
-        unsafe {
-            GetSecurityInfo(
-                HANDLE(file.as_raw_handle()),
-                SE_FILE_OBJECT,
-                OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
-                None,
-                None,
-                None,
-                None,
-                Some(&raw mut output),
-            )
-        }
-        .ok()
-        .map_err(|_| ())?;
-        let actual = descriptor_text(&LocalMemory(HLOCAL(output.0)))?;
-        let sid = current_sid()?;
-        for protected in [false, true] {
-            for inherited in [false, true] {
-                if actual == expected(&sid, protected, inherited)? {
-                    return Ok(());
-                }
-            }
-        }
-        Err(())
+        private_file_check(file).map_err(|_| ())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn diagnose_private_file(file: &File) -> Result<(), &'static str> {
+        private_file_check(file)
     }
 
     pub(crate) fn file_link_count(file: &File) -> Result<u32, ()> {
@@ -121,4 +100,38 @@ impl crate::Native {
             .map_err(|_| ())?;
         Ok(information.nNumberOfLinks)
     }
+}
+
+fn private_file_check(file: &File) -> Result<(), &'static str> {
+    let mut output = PSECURITY_DESCRIPTOR::default();
+    // SAFETY: the borrowed File keeps its handle live throughout this query;
+    // output is uniquely writable and its successful allocation is freed once.
+    unsafe {
+        GetSecurityInfo(
+            HANDLE(file.as_raw_handle()),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            None,
+            None,
+            None,
+            None,
+            Some(&raw mut output),
+        )
+    }
+    .ok()
+    .map_err(|_| "file security query")?;
+    let actual = descriptor_text(&LocalMemory(HLOCAL(output.0)))
+        .map_err(|()| "file descriptor formatting")?;
+    let sid = current_sid().map_err(|()| "current SID query")?;
+    for protected in [false, true] {
+        for inherited in [false, true] {
+            if actual
+                == expected(&sid, protected, inherited)
+                    .map_err(|()| "expected file descriptor formatting")?
+            {
+                return Ok(());
+            }
+        }
+    }
+    Err("file owner or DACL mismatch")
 }
