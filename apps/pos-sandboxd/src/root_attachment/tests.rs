@@ -1401,6 +1401,26 @@ fn fixed_registry() -> TestResult {
     Ok(())
 }
 
+/// Overwrite the first byte of the admitted, installed image.
+fn corrupt_held_image(snapshot: &ProviderImageSnapshot) -> TestResult {
+    let image = Path::new("/var/lib/pigloros/sandbox/images").join(
+        snapshot
+            .image()
+            .manifest()
+            .root_image_blake3_digest
+            .iter()
+            .flat_map(|byte| [byte >> 4, byte & 0x0f])
+            .map(|nibble| char::from_digit(u32::from(nibble), 16).unwrap_or('0'))
+            .collect::<String>(),
+    );
+    fs::set_permissions(&image, fs::Permissions::from_mode(0o600))?;
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&image)?
+        .write_all(&[0xff])?;
+    Ok(())
+}
+
 /// Activate `prepared` once more, release its root and finish its cleanup.
 async fn retry_and_clean(
     kernel: &FakeKernel,
@@ -1492,21 +1512,7 @@ async fn the_admitted_chain_reaches_attachment_only_through_every_gate() -> Test
 
     // The held image changes after admission: re-admission rejects and the
     // attached root is detached again.
-    let image = Path::new("/var/lib/pigloros/sandbox/images").join(
-        snapshot
-            .image()
-            .manifest()
-            .root_image_blake3_digest
-            .iter()
-            .flat_map(|byte| [byte >> 4, byte & 0x0f])
-            .map(|nibble| char::from_digit(u32::from(nibble), 16).unwrap_or('0'))
-            .collect::<String>(),
-    );
-    fs::set_permissions(&image, fs::Permissions::from_mode(0o600))?;
-    fs::OpenOptions::new()
-        .write(true)
-        .open(&image)?
-        .write_all(&[0xff])?;
+    corrupt_held_image(&snapshot)?;
     assert_eq!(
         activate(
             &kernel,
