@@ -54,7 +54,7 @@ fn host_namespace() -> Result<OwnedFd, NetlinkError> {
 /// Run `work` with a new session of `protocol` in the calling thread's
 /// namespace, which ends with `work`.
 fn with_session<R>(
-    protocol: rustix::net::Protocol,
+    protocol: Option<rustix::net::Protocol>,
     work: impl FnOnce(&NetlinkSession<NetlinkSocket>) -> Result<R, NetlinkError>,
 ) -> Result<R, NetlinkError> {
     NetlinkSession::open(protocol).and_then(|session| work(&session))
