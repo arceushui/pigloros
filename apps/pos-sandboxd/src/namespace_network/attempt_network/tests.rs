@@ -29,7 +29,7 @@ struct FakeControl {
     current: Mutex<Option<ExpectedNamespace>>,
 }
 
-fn journal(journal: &Mutex<Journal>) -> MutexGuard<'_, Journal> {
+fn entries(journal: &Mutex<Journal>) -> MutexGuard<'_, Journal> {
     journal.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
@@ -89,7 +89,7 @@ impl NamespaceControl for FakeControl {
     type Error = NetlinkError;
 
     fn install(&self, expected: &ExpectedNamespace) -> Result<(), NetlinkError> {
-        journal(&self.journal)
+        entries(&self.journal)
             .installed
             .push(expected.host_link.as_str().to_owned());
         *self.current.lock().unwrap_or_else(PoisonError::into_inner) = Some(expected.clone());
@@ -110,7 +110,7 @@ impl NamespaceControl for FakeControl {
     }
 
     fn remove(&self, _name: &NamespaceName, host_link: &LinkName) -> Result<(), NetlinkError> {
-        journal(&self.journal)
+        entries(&self.journal)
             .removed
             .push(host_link.as_str().to_owned());
         Ok(())
@@ -166,7 +166,7 @@ fn an_established_network_holds_its_slot_until_its_connector_is_dropped() -> Tes
     // The second attempt takes the next slot; without a pin it is removed
     // and its slot freed at once.
     let second = network.establish([2; 16], &[ENDPOINT]);
-    let removed_while_held = journal(&journal).removed.clone();
+    let removed_while_held = entries(&journal).removed.clone();
     let first_established = first.is_ok();
     drop(first);
     let third = network.establish([2; 16], &[ENDPOINT]);
@@ -177,9 +177,9 @@ fn an_established_network_holds_its_slot_until_its_connector_is_dropped() -> Tes
     ));
     assert!(matches!(third, Err(AttemptNetworkError::Open(_))));
     assert_eq!(removed_while_held, ["piglor-h1"]);
-    let journal = journal(&journal);
-    assert_eq!(journal.installed, ["piglor-h0", "piglor-h1", "piglor-h0"]);
-    assert_eq!(journal.removed, ["piglor-h1", "piglor-h0", "piglor-h0"]);
+    let entries = entries(&journal);
+    assert_eq!(entries.installed, ["piglor-h0", "piglor-h1", "piglor-h0"]);
+    assert_eq!(entries.removed, ["piglor-h1", "piglor-h0", "piglor-h0"]);
     Ok(())
 }
 
@@ -201,7 +201,7 @@ fn a_full_range_bad_endpoints_and_a_refusing_kernel_establish_nothing() -> TestR
     ));
     assert!(matches!(refused, Err(AttemptNetworkError::Establish(_))));
     // The refused installation is removed, and the slot is free again.
-    assert_eq!(journal(&journal).removed, ["piglor-h0"]);
+    assert_eq!(entries(&journal).removed, ["piglor-h0"]);
     assert!(single.slots.take().is_some_and(|lease| lease.slot == 0));
     Ok(())
 }
@@ -230,7 +230,7 @@ fn a_connector_that_cannot_enter_its_namespace_fails_the_connection() -> TestRes
         connected.map_err(|error| error.kind()).err(),
         Some(io::ErrorKind::Other)
     );
-    assert_eq!(journal(&control.journal).removed, ["piglor-h0"]);
+    assert_eq!(entries(&control.journal).removed, ["piglor-h0"]);
     assert!(slots.take().is_some());
     Ok(())
 }

@@ -37,6 +37,7 @@ impl Slots {
         let mut taken = self.taken.lock().unwrap_or_else(PoisonError::into_inner);
         let slot = (0..self.count).find(|slot| !taken.contains(slot))?;
         taken.insert(slot);
+        drop(taken);
         Some(SlotLease {
             slots: Arc::clone(self),
             slot,
