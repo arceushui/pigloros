@@ -357,6 +357,20 @@ fn pending_browser_observation_rechecks_controller_ownership_and_completion() ->
             1
         );
         fixture.assert_no_ceremony_data();
+        fixture.factory.failure.set(None);
+        fixture.surface.abandon_opening();
+        assert!(!fixture
+            .surface
+            .poll_failed_open()
+            .map_err(pos_owner_bridge::SurfaceError::error)?);
+        assert!(!fixture.surface.idle());
+        fixture.factory.creation.set(Creation::CallbackFailure);
+        assert!(fixture
+            .surface
+            .poll_failed_open()
+            .map_err(pos_owner_bridge::SurfaceError::error)?);
+        assert!(fixture.surface.idle());
+        fixture.assert_no_ceremony_data();
     }
     Ok(())
 }
