@@ -978,11 +978,13 @@ fn a_late_exit_dispatched_on_the_deadline_step_cannot_win_over_expiry() -> TestR
                 failure(&result)?,
                 BridgeError::Quarantine(QuarantineCode::CleanupTimeout)
             );
+            // Quarantine wipes the live plan immediately. A successful driver
+            // retains its Zeroizing plan until the driver is consumed/dropped.
+            assert!(driver.plan_secrets_clear());
             assert_eq!(rig.store.records_now().len(), 1);
             assert!(driver.poll_cleanup(&mut rig.env()));
         }
         assert!(driver.request_clear());
-        assert!(driver.plan_secrets_clear());
         assert!(rig.store.records_now().is_empty());
     }
     Ok(())
