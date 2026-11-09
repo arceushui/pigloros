@@ -29,7 +29,7 @@ use ulid::Ulid;
 
 use super::payload::{CompositionV2, ExchangeV2, MethodV2, RouterV2, SubCaseV2, TIMELINE_SLOT};
 use super::{ACTOR_ENTITY_ID, BODY_ENTITY_ID};
-use crate::normalize_response_v1;
+use crate::observation_v1;
 
 /// The header an exchange with `actor` sends.
 const ACTOR_HEADER: &str = "x-piglor-actor-entity";
@@ -362,11 +362,7 @@ async fn exchange_all(
                     .and_then(Value::as_str)
                     .map(str::to_owned);
             }
-            let body = parsed.map_or_else(
-                || Value::from("non-json"),
-                |value| json!({"json": normalize_response_v1(value)}),
-            );
-            json!({"status": status, "body": body})
+            observation_v1(status, parsed)
         } else {
             json!({"refused": "capability-denied"})
         };

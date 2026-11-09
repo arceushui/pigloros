@@ -6,10 +6,21 @@
 //! replaced by placeholders, and every ULID segment of a problem `instance` path becomes
 //! `<ulid>`. Every other value stays as it is, so a malformed ID or cursor cannot match.
 
-use serde_json::Value;
+use serde_json::{json, Value};
 
 /// The Crockford base-32 alphabet of a ULID.
 const CROCKFORD: &[u8] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+
+/// The observation of one sent exchange: `{"status", "body"}`, whose body is `{"json": <the
+/// normalized value>}` when the response bytes parsed as one JSON value, else `"non-json"`.
+#[must_use]
+pub fn observation_v1(status: u16, parsed: Option<Value>) -> Value {
+    let body = parsed.map_or_else(
+        || Value::from("non-json"),
+        |value| json!({"json": normalize_response_v1(value)}),
+    );
+    json!({"status": status, "body": body})
+}
 
 /// Normalize one parsed JSON response value.
 #[must_use]
