@@ -14,7 +14,7 @@ pub enum FixtureProfile {
     Popup,
     /// Attempt a popup only after the shared protocol receives a valid pair.
     PopupReceipt,
-    /// Request geolocation, which the real permission handler must deny.
+    /// Request notification permission; the real permission handler must deny it.
     Permission,
     /// Attempt one fixed denied URI scheme.
     External,

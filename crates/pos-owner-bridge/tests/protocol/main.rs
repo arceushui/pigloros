@@ -595,7 +595,7 @@ impl Wrapped {
         })
     }
 
-    /// A second document completion reaches the listener at its scripted moment.
+    /// Queue one lifecycle event after the selected successful host CAS.
     fn queue_lifecycle_after_cas(
         &mut self,
         buffers: &mut Buffers,

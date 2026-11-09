@@ -168,13 +168,14 @@ impl Events {
 #[cfg(test)]
 fn permission_diagnostic(uri: &str) -> Option<&'static str> {
     match uri {
-        "http://localhost:49291/permission-diag/permissiondenied" => Some("permissiondenied"),
-        "http://localhost:49291/permission-diag/positionunavailable" => Some("positionunavailable"),
-        "http://localhost:49291/permission-diag/timeout" => Some("timeout"),
+        "http://localhost:49291/permission-diag/denied" => Some("denied"),
+        "http://localhost:49291/permission-diag/default" => Some("default"),
+        "http://localhost:49291/permission-diag/unexpectedgranted" => Some("unexpectedgranted"),
+        "http://localhost:49291/permission-diag/unexpectedstate" => Some("unexpectedstate"),
+        "http://localhost:49291/permission-diag/rejected" => Some("rejected"),
         "http://localhost:49291/permission-diag/exception" => Some("exception"),
         "http://localhost:49291/permission-diag/unavailable" => Some("unavailable"),
         "http://localhost:49291/permission-diag/noresult" => Some("noresult"),
-        "http://localhost:49291/permission-diag/success" => Some("success"),
         "http://localhost:49291/permission-diag/unknown" => Some("unknown"),
         _ => None,
     }

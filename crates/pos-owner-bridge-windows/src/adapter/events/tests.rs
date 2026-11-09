@@ -19,13 +19,14 @@ fn start(events: &Events, uri: &str, id: u64, redirected: bool) -> NativeAction 
 #[test]
 fn permission_diagnostic_navigations_are_closed_and_still_denied() {
     for stage in [
-        "permissiondenied",
-        "positionunavailable",
-        "timeout",
+        "denied",
+        "default",
+        "unexpectedgranted",
+        "unexpectedstate",
+        "rejected",
         "exception",
         "unavailable",
         "noresult",
-        "success",
         "unknown",
     ] {
         let uri = format!("http://localhost:49291/permission-diag/{stage}");

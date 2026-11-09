@@ -31,13 +31,14 @@ TRIGGERS = {
         "var reported = false; "
         "function report(uri) { if (!reported) { reported = true; window.location.href = uri; } } "
         "setTimeout(function () { report(\"http://localhost:49291/permission-diag/noresult\"); }, 12000); "
-        "try { if (!navigator.geolocation) { report(\"http://localhost:49291/permission-diag/unavailable\"); } "
-        "else { navigator.geolocation.getCurrentPosition("
-        "function () { report(\"http://localhost:49291/permission-diag/success\"); }, "
-        "function (error) { if (error.code === 1) { report(\"http://localhost:49291/permission-diag/permissiondenied\"); } "
-        "else if (error.code === 2) { report(\"http://localhost:49291/permission-diag/positionunavailable\"); } "
-        "else if (error.code === 3) { report(\"http://localhost:49291/permission-diag/timeout\"); } "
-        "else { report(\"http://localhost:49291/permission-diag/unknown\"); } }); } } "
+        "try { if (!window.Notification || !window.Notification.requestPermission) { report(\"http://localhost:49291/permission-diag/unavailable\"); } "
+        "else if (window.Notification.permission !== \"default\") { report(\"http://localhost:49291/permission-diag/unexpectedstate\"); } "
+        "else { window.Notification.requestPermission().then(function (state) { "
+        "if (state === \"denied\") { report(\"http://localhost:49291/permission-diag/denied\"); } "
+        "else if (state === \"default\") { report(\"http://localhost:49291/permission-diag/default\"); } "
+        "else if (state === \"granted\") { report(\"http://localhost:49291/permission-diag/unexpectedgranted\"); } "
+        "else { report(\"http://localhost:49291/permission-diag/unknown\"); } "
+        "}, function () { report(\"http://localhost:49291/permission-diag/rejected\"); }); } } "
         "catch (_) { report(\"http://localhost:49291/permission-diag/exception\"); }"
     ),
     "external": 'window.location.href = "pigloros-qualification-denied://attempt";',
@@ -259,7 +260,6 @@ def response_head(body: bytes, profile: str) -> str:
         "download": 'Content-Disposition: attachment; filename="denied-fixture.txt"\r\n',
         "authentication": 'WWW-Authenticate: Basic realm="sealed-owner-qualification"\r\n',
     }.get(profile, "")
-    geolocation = "(self)" if profile == "permission" else "()"
     return (
         f"HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\n"
         f"Content-Length: {len(body)}\r\n{extra}"
@@ -267,7 +267,7 @@ def response_head(body: bytes, profile: str) -> str:
         "Referrer-Policy: no-referrer\r\nCross-Origin-Opener-Policy: same-origin\r\n"
         "Cross-Origin-Resource-Policy: same-origin\r\n"
         "Permissions-Policy: publickey-credentials-create=(self), publickey-credentials-get=(self), "
-        f"clipboard-read=(), clipboard-write=(), camera=(), microphone=(), geolocation={geolocation}\r\n"
+        "clipboard-read=(), clipboard-write=(), camera=(), microphone=(), geolocation=()\r\n"
         "Connection: close\r\n"
         "Content-Security-Policy: default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; "
         f"script-src 'sha256-{csp_hash(script)}'; style-src 'sha256-{csp_hash(style)}'; "
