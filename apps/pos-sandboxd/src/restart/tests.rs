@@ -189,37 +189,30 @@ mod cases {
     }
 
     /// How the live owner left the recorded PAI3 attempt before the crash.
-    type RootEnding = fn(PreparedAttemptDirectory) -> TestResult;
-
-    /// The owner crashed with the recorded attempt still prepared.
-    fn abandoned(prepared: PreparedAttemptDirectory) -> TestResult {
-        drop(prepared);
-        Ok(())
-    }
+    type RootEnding = fn(PreparedAttemptDirectory);
 
     /// The execution requested its unit start but failed before binding the
     /// unit's cgroup, so the live owner's cleanup is refused and the intent is
     /// left for restart reconciliation.
-    fn started_without_cgroup(prepared: PreparedAttemptDirectory) -> TestResult {
+    fn started_without_cgroup(prepared: PreparedAttemptDirectory) {
         let ownership = prepared.execution_ownership();
-        ownership.claim()?;
-        ownership.submit()?;
+        let started = ownership.claim().and_then(|()| ownership.submit());
         let refused = prepared.finish_terminal_cleanup(AttemptUnitTermination::Unsubmitted, None);
         assert!(
-            matches!(refused, Err(SystemdAttemptRegistryError::CleanupEvidence)),
-            "{refused:?}"
+            started.is_ok() && matches!(refused, Err(SystemdAttemptRegistryError::CleanupEvidence)),
+            "{started:?} {refused:?}"
         );
-        Ok(())
     }
 
     /// 1 planned only; 2 the recorded tree; 3 its root removed but its attempt
     /// directory present (#721); 4 a recorded PAI3 root, unmounted; 5 an
     /// interrupted temporary write. With `with_root` false, attempt 4 is omitted.
     fn seed(with_root: bool) -> TestResult<tempfile::TempDir> {
-        seed_with(with_root.then_some::<RootEnding>(abandoned))
+        // The owner crashed with the recorded attempt still prepared.
+        seed_with(with_root.then_some::<RootEnding>(drop))
     }
 
-    /// [`seed`], with attempt 4 left by `root`, if any.
+    /// `seed`, with attempt 4 left by `root`, if any.
     fn seed_with(root: Option<RootEnding>) -> TestResult<tempfile::TempDir> {
         let runtime = tempfile::tempdir()?;
         fs::set_permissions(runtime.path(), fs::Permissions::from_mode(0o700))?;
@@ -244,7 +237,7 @@ mod cases {
                 .prepare_directory()?;
             let identity = crate::test_fixtures::recorded_identity(&prepared)?;
             prepared.record_root(&identity, || Ok(()))?;
-            ending(prepared)?;
+            ending(prepared);
         }
         drop(registry);
         let key = intent(5)?.unit_name().attempt_component().to_owned();
