@@ -152,7 +152,7 @@ pub(super) fn browser_candidate(
     let first = candidates(environment).map_err(|()| {
         pending_opening_diagnostic("NATIVE_PROCESS_SNAPSHOT failure=first-snapshot-incomplete");
     })?;
-    browser_candidate_from_first(environment, first)
+    browser_candidate_from_first(environment, &first)
 }
 
 pub(super) fn pending_browser_candidate(
@@ -161,7 +161,7 @@ pub(super) fn pending_browser_candidate(
     let Some(first) = pending_snapshot(|| candidates(environment))? else {
         return Ok(None);
     };
-    browser_candidate_from_first(environment, first).map(Some)
+    browser_candidate_from_first(environment, &first).map(Some)
 }
 
 fn pending_snapshot(
@@ -195,7 +195,7 @@ fn pending_snapshot_requires_two_complete_empty_observations() {
     let mut observations = [Ok(Vec::new()), Err(())].into_iter();
     assert!(pending_snapshot(|| observations.next().unwrap_or(Err(()))).is_err());
     assert!(pending_snapshot(|| Err(())).is_err());
-    let mut observations = [Ok(browser)].into_iter();
+    let mut observations = std::iter::once(Ok(browser));
     assert!(matches!(
         pending_snapshot(|| observations.next().unwrap_or(Err(()))),
         Ok(Some(_))
@@ -204,7 +204,7 @@ fn pending_snapshot_requires_two_complete_empty_observations() {
 
 fn browser_candidate_from_first(
     environment: &ICoreWebView2Environment,
-    first: Vec<(u32, COREWEBVIEW2_PROCESS_KIND)>,
+    first: &[(u32, COREWEBVIEW2_PROCESS_KIND)],
 ) -> Result<ProcessIdentity, ()> {
     let _logged_or_unavailable = writeln!(
         std::io::stderr(),
@@ -215,7 +215,7 @@ fn browser_candidate_from_first(
             "nonempty"
         }
     );
-    let pid = select(&first, COREWEBVIEW2_PROCESS_KIND_BROWSER).map_err(|()| {
+    let pid = select(first, COREWEBVIEW2_PROCESS_KIND_BROWSER).map_err(|()| {
         let count = first
             .iter()
             .filter(|(_, kind)| *kind == COREWEBVIEW2_PROCESS_KIND_BROWSER)
