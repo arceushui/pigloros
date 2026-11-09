@@ -245,14 +245,29 @@ pub fn g_pub_capture_v1(
     events: &[Event],
     store: &Path,
 ) -> Result<NonInterferenceRawCaptureV1, NonInterferenceNonExecutedCauseV1> {
-    match run.fixture_id {
-        G_PUB_PUBLIC_FIXTURE_ID_V1 => public_surfaces(run, events, store),
-        G_PUB_EVAL_FIXTURE_ID_V1 => evaluator_surfaces(run, events, store),
-        G_PUB_ARCHIVE_FIXTURE_ID_V1 => super::g_archive::archive_surfaces(run, events, store),
-        _ => Err(NonInterferenceNonExecutedCauseV1::Missing),
-    }
-    .map(|surfaces| surfaces.into_capture(run.fixture_id))
+    SURFACE_ADAPTERS
+        .iter()
+        .find(|(fixture_id, _)| *fixture_id == run.fixture_id)
+        .map_or(
+            Err(NonInterferenceNonExecutedCauseV1::Missing),
+            |(_, adapter)| adapter(run, events, store),
+        )
+        .map(|surfaces| surfaces.into_capture(run.fixture_id))
 }
+
+/// One G-PUB row's capture adapter.
+type SurfaceAdapterV1 =
+    fn(&GPubRunV1<'_>, &[Event], &Path) -> Result<SurfacesV1, NonInterferenceNonExecutedCauseV1>;
+
+/// The capture adapter of each G-PUB row.
+const SURFACE_ADAPTERS: [(&str, SurfaceAdapterV1); 3] = [
+    (G_PUB_PUBLIC_FIXTURE_ID_V1, public_surfaces),
+    (G_PUB_EVAL_FIXTURE_ID_V1, evaluator_surfaces),
+    (
+        G_PUB_ARCHIVE_FIXTURE_ID_V1,
+        super::g_archive::archive_surfaces,
+    ),
+];
 
 /// Serve one Local run of the G-PUB subject in a fresh host process whose
 /// working directory is `directory`.
