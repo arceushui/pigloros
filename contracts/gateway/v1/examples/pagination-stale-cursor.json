@@ -1,0 +1,23 @@
+{
+  "name": "pagination-stale-cursor",
+  "operation_id": "listEvents",
+  "request": {
+    "query": {
+      "cursor": "v1.abababababababababababababababababababababababababababababababab.01JC0GATEWAYEXAMPTMESH0000.2"
+    }
+  },
+  "request_valid": true,
+  "response": {
+    "status": 409,
+    "body": {
+      "type": "urn:pigloros:gateway:v1:problem:append-conflict",
+      "title": "Append conflict",
+      "status": 409,
+      "detail": "event cursor generation is stale",
+      "instance": "/v1/timelines/{timeline_id}/events",
+      "code": "append-conflict",
+      "schema_id": "urn:pigloros:gateway:v1:schema:problem",
+      "retryable": false
+    }
+  }
+}

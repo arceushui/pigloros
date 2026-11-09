@@ -2,7 +2,7 @@
   "claim_layer": "gateway-client-conformance",
   "case_id": "gateway-client-conformance-downgrade",
   "family": "downgrade",
-  "input_blake3_digest": "027761dc9308b47b1369abc2e280f29ee9cf1aaae1c5722a4d7b48b72c0f2765",
+  "input_blake3_digest": "12df7011666b5898e633a09a4e0b7aa26d00931f0328e11e839ba16060fe82ea",
   "status": "executed",
   "execution_result": {
     "evidence": "local-relaxation",

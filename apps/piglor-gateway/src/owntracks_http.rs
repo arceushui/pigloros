@@ -1,6 +1,9 @@
 //! Strict local HTTP decoding for V1 `OwnTracks` ingress.
 
-use crate::{Gateway, GatewayError, OwnTracksIngressResult};
+use crate::{
+    problem::{ProblemCodeV1, ProblemV1},
+    Gateway, GatewayError, OwnTracksIngressResult,
+};
 use axum::{
     body::{to_bytes, Body},
     http::{header, HeaderMap, HeaderValue, StatusCode},
@@ -187,8 +190,26 @@ const fn base64_value(value: u8) -> Option<u8> {
     }
 }
 
-fn error(status: StatusCode, code: &'static str) -> Response {
-    (status, format!("{{\"error\":\"{code}\"}}")).into_response()
+/// An `OwnTracks` ingress failure as a v1 problem; the Gateway router renders its body.
+fn error(status: StatusCode, detail: &'static str) -> Response {
+    let code = match status {
+        StatusCode::PAYLOAD_TOO_LARGE | StatusCode::TOO_MANY_REQUESTS => {
+            ProblemCodeV1::ResourceLimitExceeded
+        }
+        StatusCode::UNAUTHORIZED => ProblemCodeV1::Unauthenticated,
+        StatusCode::FORBIDDEN => ProblemCodeV1::Unauthorized,
+        StatusCode::SERVICE_UNAVAILABLE => ProblemCodeV1::TemporarilyUnavailable,
+        _ => ProblemCodeV1::InvalidRequest,
+    };
+    let problem = ProblemV1::new(code, status, detail);
+    if matches!(
+        status,
+        StatusCode::TOO_MANY_REQUESTS | StatusCode::SERVICE_UNAVAILABLE
+    ) {
+        problem.retryable().into_response()
+    } else {
+        problem.into_response()
+    }
 }
 
 #[cfg(test)]
@@ -205,7 +226,10 @@ mod tests {
     }
 
     use super::{basic_credentials, minimize_location, owntracks_response, post_owntracks};
-    use crate::{Gateway, GatewayError, OwnTracksIngressResult};
+    use crate::{
+        problem::{ProblemCodeV1, ProblemV1},
+        Gateway, GatewayError, OwnTracksIngressResult,
+    };
     use axum::{
         body::{to_bytes, Body},
         http::{header, HeaderMap, HeaderValue, StatusCode},

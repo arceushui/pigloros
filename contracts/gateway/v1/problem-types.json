@@ -1,0 +1,219 @@
+{
+  "$comment": "Not a schema: the closed RFC 9457 problem-type registry of the PiglorOS Gateway v1 contract (#301). Validated by scripts/check_gateway_contract.py.",
+  "registry": "urn:pigloros:gateway:v1:problem-types",
+  "contract_version": "1.0.0-draft",
+  "media_type": "application/problem+json",
+  "schema_id": "urn:pigloros:gateway:v1:schema:problem",
+  "type_prefix": "urn:pigloros:gateway:v1:problem:",
+  "problem_types": [
+    {
+      "code": "invalid-request",
+      "type": "urn:pigloros:gateway:v1:problem:invalid-request",
+      "title": "Invalid request",
+      "statuses": [
+        400,
+        405,
+        413,
+        415,
+        422
+      ],
+      "description": "The request does not meet the published request schema, header, path or query rules. Correct the request before retrying."
+    },
+    {
+      "code": "unsupported-version",
+      "type": "urn:pigloros:gateway:v1:problem:unsupported-version",
+      "title": "Unsupported version",
+      "statuses": [
+        400
+      ],
+      "description": "The request names an API, schema or Event type version this Gateway does not support. Unknown required versions fail closed; there is no fallback."
+    },
+    {
+      "code": "incompatible-profile",
+      "type": "urn:pigloros:gateway:v1:problem:incompatible-profile",
+      "title": "Incompatible profile",
+      "statuses": [
+        409
+      ],
+      "description": "The request binds an execution or conformance profile this deployment cannot serve."
+    },
+    {
+      "code": "unauthenticated",
+      "type": "urn:pigloros:gateway:v1:problem:unauthenticated",
+      "title": "Unauthenticated",
+      "statuses": [
+        401
+      ],
+      "description": "No authenticated Principal or host authority is available for the request."
+    },
+    {
+      "code": "unauthorized",
+      "type": "urn:pigloros:gateway:v1:problem:unauthorized",
+      "title": "Unauthorized",
+      "statuses": [
+        403
+      ],
+      "description": "The authenticated Principal holds no grant or capability for the operation."
+    },
+    {
+      "code": "consent-invalid",
+      "type": "urn:pigloros:gateway:v1:problem:consent-invalid",
+      "title": "Consent invalid",
+      "statuses": [
+        400,
+        403
+      ],
+      "description": "The consent state required by the operation is absent, malformed or does not bind the current Timeline position."
+    },
+    {
+      "code": "revoked",
+      "type": "urn:pigloros:gateway:v1:problem:revoked",
+      "title": "Revoked",
+      "statuses": [
+        403
+      ],
+      "description": "The authority or consent the operation depends on was revoked before the accepted boundary. Exposed only to the authenticated subject."
+    },
+    {
+      "code": "deleted",
+      "type": "urn:pigloros:gateway:v1:problem:deleted",
+      "title": "Deleted",
+      "statuses": [
+        403,
+        410
+      ],
+      "description": "The protected data the operation depends on is frozen for or completed erasure. Exposed only where the caller may learn the erasure state."
+    },
+    {
+      "code": "not-found-or-unavailable",
+      "type": "urn:pigloros:gateway:v1:problem:not-found-or-unavailable",
+      "title": "Not found or unavailable",
+      "statuses": [
+        404
+      ],
+      "description": "The resource does not exist or the caller may not learn whether it exists. The answer is identical in both cases and never enumerates resources."
+    },
+    {
+      "code": "admission-rejected",
+      "type": "urn:pigloros:gateway:v1:problem:admission-rejected",
+      "title": "Admission rejected",
+      "statuses": [
+        422
+      ],
+      "description": "The request is well formed but the typed domain validation at admission rejected it. Nothing was committed."
+    },
+    {
+      "code": "approval-rejected",
+      "type": "urn:pigloros:gateway:v1:problem:approval-rejected",
+      "title": "Approval rejected",
+      "statuses": [
+        422
+      ],
+      "description": "The host-owned ActionApprover rejected the proposed simulated action. Nothing was committed."
+    },
+    {
+      "code": "append-conflict",
+      "type": "urn:pigloros:gateway:v1:problem:append-conflict",
+      "title": "Append conflict",
+      "statuses": [
+        409
+      ],
+      "description": "The Timeline state changed between the caller's observation and the serialization point (a stale observation or a stale Event cursor). Read the current state and decide again."
+    },
+    {
+      "code": "idempotency-conflict",
+      "type": "urn:pigloros:gateway:v1:problem:idempotency-conflict",
+      "title": "Idempotency conflict",
+      "statuses": [
+        409
+      ],
+      "description": "The Idempotency-Key was already used for a request with different bytes. An exact retry returns the original result instead."
+    },
+    {
+      "code": "artifact-missing",
+      "type": "urn:pigloros:gateway:v1:problem:artifact-missing",
+      "title": "Artifact missing",
+      "statuses": [
+        404,
+        409
+      ],
+      "description": "A content-addressed artifact the operation requires is absent from the deployment."
+    },
+    {
+      "code": "artifact-untrusted",
+      "type": "urn:pigloros:gateway:v1:problem:artifact-untrusted",
+      "title": "Artifact untrusted",
+      "statuses": [
+        409
+      ],
+      "description": "A required artifact failed its integrity or trust-policy admission."
+    },
+    {
+      "code": "replay-claim-insufficient",
+      "type": "urn:pigloros:gateway:v1:problem:replay-claim-insufficient",
+      "title": "Replay claim insufficient",
+      "statuses": [
+        409
+      ],
+      "description": "The ReplayClaim of the requested closure is weaker than the operation requires; erasure never strengthens it."
+    },
+    {
+      "code": "dependency-graph-incomplete",
+      "type": "urn:pigloros:gateway:v1:problem:dependency-graph-incomplete",
+      "title": "Dependency graph incomplete",
+      "statuses": [
+        409
+      ],
+      "description": "The recorded dependency graph of the requested Fork or Replay is incomplete under the declared frontier rule."
+    },
+    {
+      "code": "mixed-fork-generation",
+      "type": "urn:pigloros:gateway:v1:problem:mixed-fork-generation",
+      "title": "Mixed Fork generation",
+      "statuses": [
+        409
+      ],
+      "description": "The request would combine outputs of different Fork generations; quarantined generations are never authoritative."
+    },
+    {
+      "code": "counterfactual-incomplete",
+      "type": "urn:pigloros:gateway:v1:problem:counterfactual-incomplete",
+      "title": "Counterfactual incomplete",
+      "statuses": [
+        409
+      ],
+      "description": "The counterfactual recomputation did not complete; no partial suffix is exposed as authoritative."
+    },
+    {
+      "code": "resource-limit-exceeded",
+      "type": "urn:pigloros:gateway:v1:problem:resource-limit-exceeded",
+      "title": "Resource limit exceeded",
+      "statuses": [
+        409,
+        413,
+        429,
+        507
+      ],
+      "description": "A request, response, quota or storage bound was reached. The `retryable` member states whether an identical retry may succeed later."
+    },
+    {
+      "code": "temporarily-unavailable",
+      "type": "urn:pigloros:gateway:v1:problem:temporarily-unavailable",
+      "title": "Temporarily unavailable",
+      "statuses": [
+        503,
+        504
+      ],
+      "description": "A host dependency cannot serve the request now. An identical retry may succeed."
+    },
+    {
+      "code": "internal-safe-failure",
+      "type": "urn:pigloros:gateway:v1:problem:internal-safe-failure",
+      "title": "Internal safe failure",
+      "statuses": [
+        500
+      ],
+      "description": "The Gateway could not complete the request. The detail is a fixed safe text; no host fault description leaves the Gateway."
+    }
+  ]
+}

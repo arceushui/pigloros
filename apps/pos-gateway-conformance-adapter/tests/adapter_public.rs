@@ -517,13 +517,17 @@ fn normalization_replaces_only_well_formed_ids_cursors_and_messages() {
         normalize_response_v1(json!({
             "events": [{"id": ulid, "entity": ulid, "seq": 1, "ok": true, "none": null}],
             "next_cursor": cursor(ulid, "10"),
-            "error": "anything",
+            "detail": "anything",
+            "instance": format!("/v1/timelines/{ulid}/not-a-ulid/events"),
+            "error": "kept",
             "name": ulid,
         })),
         json!({
             "events": [{"id": "<ulid>", "entity": ulid, "seq": 1, "ok": true, "none": null}],
             "next_cursor": "<cursor>",
-            "error": "<message>",
+            "detail": "<message>",
+            "instance": "/v1/timelines/<ulid>/not-a-ulid/events",
+            "error": "kept",
             "name": ulid,
         })
     );

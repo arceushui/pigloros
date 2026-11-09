@@ -27,7 +27,9 @@ use tokio::runtime::Runtime;
 use tower::ServiceExt;
 use ulid::Ulid;
 
-use super::payload::{CompositionV2, ExchangeV2, MethodV2, RouterV2, SubCaseV2, TIMELINE_SLOT};
+use super::payload::{
+    CompositionV2, ExchangeV2, MethodV2, RouteV2, RouterV2, SubCaseV2, TIMELINE_SLOT,
+};
 use super::{ACTOR_ENTITY_ID, BODY_ENTITY_ID};
 use crate::normalize_response_v1;
 
@@ -259,8 +261,12 @@ fn pinned_authorization(
         })
 }
 
-/// The raw HTTP request of an exchange, with `{timeline}` replaced by the captured ID.
-fn request(exchange: &ExchangeV2, timeline: Option<&str>) -> Request<Body> {
+/// The header that carries the idempotency key of an actions request.
+const IDEMPOTENCY_KEY_HEADER: &str = "idempotency-key";
+
+/// The raw HTTP request of an exchange, with `{timeline}` replaced by the captured ID. An
+/// actions request carries the idempotency key `<sub-case id>.<1-based exchange index>`.
+fn request(exchange: &ExchangeV2, timeline: Option<&str>, key: &str) -> Request<Body> {
     let body = exchange
         .body
         .as_ref()
@@ -284,6 +290,11 @@ fn request(exchange: &ExchangeV2, timeline: Option<&str>) -> Request<Body> {
         request
             .headers_mut()
             .insert(ACTOR_HEADER, HeaderValue::from_static(ACTOR_ENTITY_ID));
+    }
+    if exchange.route() == RouteV2::Actions {
+        HeaderValue::from_str(key).into_iter().for_each(|value| {
+            request.headers_mut().insert(IDEMPOTENCY_KEY_HEADER, value);
+        });
     }
     request
 }
@@ -322,7 +333,7 @@ async fn exchange_all(
         events: 0,
     };
     let mut present = false;
-    for exchange in &subcase.exchanges {
+    for (index, exchange) in subcase.exchanges.iter().enumerate() {
         let route = exchange.route();
         let observation = if capabilities.iter().any(|held| held == route.capability()) {
             let service = match exchange.router {
@@ -330,7 +341,11 @@ async fn exchange_all(
                 RouterV2::Spectator => spectator.clone(),
             };
             let Ok(response) = service
-                .oneshot(request(exchange, timeline.as_deref()))
+                .oneshot(request(
+                    exchange,
+                    timeline.as_deref(),
+                    &format!("{}.{}", subcase.id, index + 1),
+                ))
                 .await;
             let status = response.status().as_u16();
             let bytes = axum::body::to_bytes(response.into_body(), RESPONSE_LIMIT)

@@ -1,9 +1,10 @@
 //! The response normalization of the requirements text (section 4).
 //!
-//! The documentation fixes neither Timeline and Event IDs, nor cursors, nor error messages, so
+//! The contract fixes neither Timeline and Event IDs, nor cursors, nor problem detail text, so
 //! they are permitted nondeterministic operational fields: an `id` member that is a ULID, a
-//! `next_cursor` member that is a well-formed cursor and every `error` text member are replaced
-//! by placeholders. Every other value stays as it is, so a malformed ID or cursor cannot match.
+//! `next_cursor` member that is a well-formed cursor and every problem `detail` text member are
+//! replaced by placeholders, and every ULID segment of a problem `instance` path becomes
+//! `<ulid>`. Every other value stays as it is, so a malformed ID or cursor cannot match.
 
 use serde_json::Value;
 
@@ -42,9 +43,18 @@ fn normalize_text(key: Option<&str>, text: String) -> String {
     match key {
         Some("id") if is_ulid(&text) => "<ulid>".to_owned(),
         Some("next_cursor") if is_cursor(&text) => "<cursor>".to_owned(),
-        Some("error") => "<message>".to_owned(),
+        Some("detail") => "<message>".to_owned(),
+        Some("instance") => normalize_instance(&text),
         _ => text,
     }
+}
+
+/// A problem `instance` is the request path; a path segment that is a ULID becomes `<ulid>`.
+fn normalize_instance(path: &str) -> String {
+    path.split('/')
+        .map(|segment| if is_ulid(segment) { "<ulid>" } else { segment })
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// A canonical (upper-case) ULID: 26 Crockford characters, the first at most `7`.

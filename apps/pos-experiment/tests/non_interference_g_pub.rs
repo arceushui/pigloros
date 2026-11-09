@@ -262,6 +262,18 @@ fn every_g_pub_coordinate_executes_or_stays_typed_non_executed_and_matches_its_n
 {
     let work = tempfile::tempdir()?;
     let executed = execute_every_coordinate(work.path())?;
+    // TEMPORARY (#1312; removed before review): export every executed NIA1 so one CI run can
+    // re-record the NI-PUBLIC-006 cases whose Gateway error body became a v1 problem.
+    if let Ok(directory) = std::env::var("PIGLOROS_NI_G_PUB_EXPORT") {
+        fs::create_dir_all(Path::new(&directory).join(NON_INTERFERENCE_PUBLICATION_DIRECTORY_V1))?;
+        for execution in executed.values() {
+            pos_experiment::non_interference_harness::publish_non_interference_execution_v1(
+                Path::new(&directory),
+                execution,
+            )
+            .map_err(|error| format!("{error:?}"))?;
+        }
+    }
     assert_eq!(executed.len(), 24);
 
     let matrix = matrix()?;

@@ -1,0 +1,19 @@
+{
+  "name": "not-found-or-unavailable",
+  "operation_id": "listEvents",
+  "request": {},
+  "request_valid": true,
+  "response": {
+    "status": 404,
+    "body": {
+      "type": "urn:pigloros:gateway:v1:problem:not-found-or-unavailable",
+      "title": "Not found or unavailable",
+      "status": 404,
+      "detail": "resource not found",
+      "instance": "/v1/timelines/{timeline_id}/events",
+      "code": "not-found-or-unavailable",
+      "schema_id": "urn:pigloros:gateway:v1:schema:problem",
+      "retryable": false
+    }
+  }
+}
