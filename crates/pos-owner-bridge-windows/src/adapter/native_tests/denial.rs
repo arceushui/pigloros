@@ -138,6 +138,16 @@ impl Fixture {
         );
         (result, Some(failure))
     }
+
+    fn finish(mut self) -> TestResult {
+        assert!(self.store.records()?.is_empty());
+        assert!(self.store.folders()?.is_empty());
+        drop(self.surface);
+        Rc::get_mut(&mut self.factory)
+            .ok_or("native fixture factory still shared")?
+            .stop()?;
+        Ok(())
+    }
 }
 
 pub(super) fn run(runtime: &Path, root: &Path) -> TestResult {
@@ -177,13 +187,7 @@ pub(super) fn run(runtime: &Path, root: &Path) -> TestResult {
     assert_eq!(crate::Native::resource_deferral_completion_attempts(), 1);
     assert_eq!(fixture.loopback.received_request_count()?, 0);
     assert_eq!(fixture.loopback.served().count, 0);
-    assert!(fixture.store.records()?.is_empty());
-    assert!(fixture.store.folders()?.is_empty());
-    drop(fixture.surface);
-    Rc::get_mut(&mut fixture.factory)
-        .ok_or("denial factory still shared")?
-        .stop()?;
-    Ok(())
+    fixture.finish()
 }
 
 pub(super) fn run_control(runtime: &Path, root: &Path) -> TestResult {
@@ -228,13 +232,7 @@ pub(super) fn run_control(runtime: &Path, root: &Path) -> TestResult {
     assert_eq!(retired[0].completions, 1);
     assert!(retired[0].retired);
     assert_eq!(fixture.loopback.served().count, 1);
-    assert!(fixture.store.records()?.is_empty());
-    assert!(fixture.store.folders()?.is_empty());
-    drop(fixture.surface);
-    Rc::get_mut(&mut fixture.factory)
-        .ok_or("control factory still shared")?
-        .stop()?;
-    Ok(())
+    fixture.finish()
 }
 
 struct ProcessObservations;
@@ -308,12 +306,59 @@ pub(super) fn run_renderer(runtime: &Path, root: &Path) -> TestResult {
         }
         assert_eq!(posts, 1);
         assert_eq!(fixture.loopback.served().count, 1);
-        assert!(fixture.store.records()?.is_empty());
-        assert!(fixture.store.folders()?.is_empty());
-        drop(fixture.surface);
-        Rc::get_mut(&mut fixture.factory)
-            .ok_or("renderer factory still shared")?
-            .stop()?;
+        fixture.finish()?;
+    }
+    Ok(())
+}
+
+pub(super) fn run_delivery(runtime: &Path, root: &Path) -> TestResult {
+    for (value, profile, minimum_posts) in [
+        (0x2b, FixtureProfile::Pending, 1),
+        (0x2c, FixtureProfile::DuplicateRequest, 2),
+        (0x2d, FixtureProfile::InterleavedPair, 2),
+        (0x2e, FixtureProfile::DelayedDelivery, 3),
+    ] {
+        let _observations = ProcessObservations::new();
+        let case_root = root.join(format!("delivery-{value}"));
+        crate::create_private_directory(&case_root)?;
+        let mut fixture = Fixture::new(runtime, &case_root, Some(profile))?;
+        fixture.lose_after_receipt = true;
+        let started = Instant::now();
+        fixture.trace = Trace::new(u64::from(value), started);
+        let deadline = started + Duration::from_secs(15);
+        fixture.surface.set_deadline(deadline);
+        let mut driver = readiness::new_driver(CeremonyId::from_bytes([value; 16]), started)?;
+        let (result, failure) = fixture.attempt(&mut driver);
+        let error = result.as_ref().err().copied();
+        let posts = driver.posts();
+        let receipt = driver.first_receipt_at();
+        let request_clear = driver.request_clear();
+        let quarantined = fixture.retire(driver, result);
+        if let Some(failure) = failure {
+            return Err(failure);
+        }
+        assert!(
+            !quarantined,
+            "delivery case requires timely ordinary retirement"
+        );
+        assert_eq!(
+            error,
+            Some(BridgeError::Lifecycle(
+                pos_owner_bridge::LifecycleCode::ControllerLost
+            ))
+        );
+        assert!(receipt.is_some_and(|received| received < deadline));
+        if profile == FixtureProfile::Pending {
+            assert_eq!(posts, 1);
+        } else {
+            // An accepted receipt from the intentionally rejected/retired first
+            // pair would finish before these required reposts and fail the case.
+            assert!(posts >= minimum_posts, "{profile:?}: posts={posts}");
+        }
+        assert!(request_clear);
+        assert!(crate::Native::process_failure_observations().is_empty());
+        assert_eq!(fixture.loopback.served().count, 1);
+        fixture.finish()?;
     }
     Ok(())
 }

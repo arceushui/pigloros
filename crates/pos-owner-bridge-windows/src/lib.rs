@@ -470,6 +470,12 @@ mod tests {
     }
 
     #[test]
+    fn native_delivery_adversaries_retry_without_stale_receipt(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        crate::Native::native_delivery_adversaries()
+    }
+
+    #[test]
     fn native_host_fixture_child() -> Result<(), Box<dyn std::error::Error>> {
         if std::env::var_os("PIGLOR_HOST_LIFECYCLE_CHILD").is_some() {
             crate::Native::native_host_lifecycle()?;

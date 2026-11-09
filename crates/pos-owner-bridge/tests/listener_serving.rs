@@ -67,6 +67,9 @@ fn sealed_qualification_profiles_serve_their_exact_bound_bytes() -> TestResult {
         FixtureProfile::Authentication,
         FixtureProfile::ReadOnlyWrite,
         FixtureProfile::ReadOnlyControl,
+        FixtureProfile::DuplicateRequest,
+        FixtureProfile::InterleavedPair,
+        FixtureProfile::DelayedDelivery,
     ] {
         let config = ListenerConfig::fixture(profile);
         let listener = start(config)?;
@@ -86,9 +89,13 @@ fn sealed_qualification_profiles_serve_their_exact_bound_bytes() -> TestResult {
         assert_eq!(listener.received_request_count(), 1);
         let other = exchange(
             listener.v4_addr(),
-            b"GET /denied-navigation HTTP/1.1\r\nHost: localhost:49291\r\n\r\n",
+            b"GET /denied-navigation HTTP/1.1\r\nHost: localhost:49291\r\n\
+Sec-Fetch-Dest: document\r\nSec-Fetch-Mode: navigate\r\n\r\n",
         )?;
-        assert!(other.starts_with(b"HTTP/1.1 404 Not Found\r\n"));
+        assert!(
+            other.starts_with(b"HTTP/1.1 404 Not Found\r\n"),
+            "{profile:?}: {other:?}"
+        );
         assert_eq!(listener.served().count, 1);
     }
     Ok(())

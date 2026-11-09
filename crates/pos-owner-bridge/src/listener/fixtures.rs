@@ -29,6 +29,12 @@ pub enum FixtureProfile {
     ReadOnlyWrite,
     /// The same event adapter with its write disarmed, as a no-crash control.
     ReadOnlyControl,
+    /// Duplicate the first real request event before its matching reply.
+    DuplicateRequest,
+    /// Deliver a retired reply between a newer request and its matching reply.
+    InterleavedPair,
+    /// Hold real SDK deliveries for 700 ms, crossing the first two retry windows.
+    DelayedDelivery,
 }
 
 impl FixtureProfile {
@@ -44,6 +50,9 @@ impl FixtureProfile {
             Self::Authentication => &fixture_assets::AUTHENTICATION,
             Self::ReadOnlyWrite => &fixture_assets::READONLY_WRITE,
             Self::ReadOnlyControl => &fixture_assets::READONLY_CONTROL,
+            Self::DuplicateRequest => &fixture_assets::DUPLICATE_REQUEST,
+            Self::InterleavedPair => &fixture_assets::INTERLEAVED_PAIR,
+            Self::DelayedDelivery => &fixture_assets::DELAYED_DELIVERY,
         }
     }
 }

@@ -101,3 +101,33 @@ pub(super) const READONLY_CONTROL: Response = Response {
         0xd2, 0xea,
     ],
 };
+
+pub(super) const DUPLICATE_REQUEST: Response = Response {
+    body: include_bytes!("../../assets/qualification/duplicate_request.html"),
+    head: "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: 14013\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nCross-Origin-Opener-Policy: same-origin\r\nCross-Origin-Resource-Policy: same-origin\r\nPermissions-Policy: publickey-credentials-create=(self), publickey-credentials-get=(self), clipboard-read=(), clipboard-write=(), camera=(), microphone=(), geolocation=()\r\nConnection: close\r\nContent-Security-Policy: default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; script-src 'sha256-8HmS2GDosiiiTi9uNJcTCd2IqahOrPJOLMgV+6ajzwI='; style-src 'sha256-Q5v//7IetSl8ReqUsE3bO7kt7fOgIkckocSNwunJJmk='; img-src 'none'; connect-src 'none'\r\n\r\n",
+    digest: [
+        0x06, 0xc9, 0x0d, 0x54, 0x0c, 0x93, 0x91, 0xc7, 0x18, 0xd9, 0x71, 0x11, 0x10, 0xc4, 0xf4,
+        0x2b, 0xc7, 0xb0, 0xd2, 0x6d, 0xdb, 0x8c, 0x85, 0xf4, 0x3b, 0xdf, 0x75, 0xe8, 0xb4, 0x8b,
+        0x42, 0xf9,
+    ],
+};
+
+pub(super) const INTERLEAVED_PAIR: Response = Response {
+    body: include_bytes!("../../assets/qualification/interleaved_pair.html"),
+    head: "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: 14350\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nCross-Origin-Opener-Policy: same-origin\r\nCross-Origin-Resource-Policy: same-origin\r\nPermissions-Policy: publickey-credentials-create=(self), publickey-credentials-get=(self), clipboard-read=(), clipboard-write=(), camera=(), microphone=(), geolocation=()\r\nConnection: close\r\nContent-Security-Policy: default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; script-src 'sha256-X4SKZktDxvJc8Eh0gdaWcghQO3eJH3EH6oZKbWUfkW0='; style-src 'sha256-Q5v//7IetSl8ReqUsE3bO7kt7fOgIkckocSNwunJJmk='; img-src 'none'; connect-src 'none'\r\n\r\n",
+    digest: [
+        0x09, 0xf8, 0x6c, 0xf5, 0xe5, 0x72, 0x98, 0xd4, 0x1f, 0xf8, 0xf9, 0x5e, 0x9a, 0xb0, 0x53,
+        0x2a, 0x7a, 0xdb, 0x7e, 0x5a, 0x3f, 0xb6, 0xe0, 0xcd, 0x96, 0xe9, 0x63, 0xcf, 0x18, 0xa5,
+        0x75, 0x06,
+    ],
+};
+
+pub(super) const DELAYED_DELIVERY: Response = Response {
+    body: include_bytes!("../../assets/qualification/delayed_delivery.html"),
+    head: "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: 14101\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nCross-Origin-Opener-Policy: same-origin\r\nCross-Origin-Resource-Policy: same-origin\r\nPermissions-Policy: publickey-credentials-create=(self), publickey-credentials-get=(self), clipboard-read=(), clipboard-write=(), camera=(), microphone=(), geolocation=()\r\nConnection: close\r\nContent-Security-Policy: default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; script-src 'sha256-B5hnqaiRuelDITQ8NZmONwYkwsVSVmC7HrUmGek+wfU='; style-src 'sha256-Q5v//7IetSl8ReqUsE3bO7kt7fOgIkckocSNwunJJmk='; img-src 'none'; connect-src 'none'\r\n\r\n",
+    digest: [
+        0xa4, 0x46, 0xfa, 0x29, 0xd2, 0x37, 0x78, 0x86, 0xb4, 0x34, 0xb0, 0x5c, 0x04, 0x58, 0xfa,
+        0x64, 0x9f, 0x35, 0x4b, 0x74, 0x21, 0xb5, 0x7d, 0xc5, 0x5d, 0x78, 0xb2, 0xf0, 0x21, 0xb0,
+        0xe6, 0x04,
+    ],
+};
