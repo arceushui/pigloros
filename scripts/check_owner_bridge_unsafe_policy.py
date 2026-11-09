@@ -1461,8 +1461,18 @@ def _check_owned_parent_boundary(sources: dict[str, str], found: list[str]) -> N
     """Bind the private parent/child fixture and its only test-support plan call."""
     prefix = "crates/pos-owner-bridge-windows/src/"
     lib = prefix + "lib.rs"
-    if "native_host_fixture_child" not in sources.get(lib, ""):
-        return  # Minimal independent checker fixtures have no native host test.
+    # Pin complete source text, including literals, attributes and enclosing
+    # module scopes. Function-body-only hashes cannot detect a removed #[test]
+    # or a disabled enclosing cfg. _read normalizes platform line endings.
+    complete_sources = {
+        lib: "c19c34a30ba5f1a68141e7a0c0be729b55d2e0ef964b7a4e6a1edf2264f6a605",
+        prefix + "ffi/mod.rs": "d2af1c3ebd471af70ce2ff6429a6d69f14cac82e9b6f1446ec2555c664604f32",
+        prefix + "adapter/native_tests.rs": "2e3ec6d4daa853395812f19ab4599cc937e8b13243d0daf75de71da93b85f349",
+        "crates/pos-owner-bridge/src/ceremony/plan.rs": "4e743b55408a42c1f757d27d0d8b47c091dcb026953824b9cc1dec37121182b4",
+    }
+    for path, digest in complete_sources.items():
+        if hashlib.sha256(sources.get(path, "").replace("\r\n", "\n").encode()).hexdigest() != digest:
+            found.append(f"{path}: owned-parent source and hosted-test scope differ from reviewed code")
     helper = prefix + "ffi/fixture_parent.rs"
     expected = "4dca6c8ea4653046c7c867cf0fdba656c3bf7ae04ab74620e7bd2c1658a49852"
     if hashlib.sha256(sources.get(helper, "").encode()).hexdigest() != expected:
@@ -1500,7 +1510,7 @@ def _check_owned_parent_boundary(sources: dict[str, str], found: list[str]) -> N
                 found.append(f"{path}: owned-parent capability {name} outside reviewed fixture")
 
 
-def violations(root: Path) -> list[str]:
+def violations(root: Path, *, component_fixture: bool = False) -> list[str]:
     """Return every source-policy violation beneath ``root``, sorted."""
     root = root.resolve()
     found: list[str] = []
@@ -1566,7 +1576,8 @@ def violations(root: Path) -> list[str]:
         for source in _walk(directory)[0]
         if source.suffix == ".rs"
     }
-    _check_owned_parent_boundary(owned_sources, found)
+    if not component_fixture:
+        _check_owned_parent_boundary(owned_sources, found)
     return sorted(set(found))
 
 
