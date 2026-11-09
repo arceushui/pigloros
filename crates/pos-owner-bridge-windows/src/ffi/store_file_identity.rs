@@ -82,41 +82,43 @@ fn expected(sid: &str, protected: bool, inherited: bool) -> Result<String, ()> {
     descriptor_text(&LocalMemory(HLOCAL(output.0)))
 }
 
-pub fn require_private_file(file: &File) -> Result<(), ()> {
-    let mut output = PSECURITY_DESCRIPTOR::default();
-    // SAFETY: the borrowed File keeps its handle live throughout this query;
-    // output is uniquely writable and its successful allocation is freed once.
-    unsafe {
-        GetSecurityInfo(
-            HANDLE(file.as_raw_handle()),
-            SE_FILE_OBJECT,
-            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
-            None,
-            None,
-            None,
-            None,
-            Some(&raw mut output),
-        )
-    }
-    .ok()
-    .map_err(|_| ())?;
-    let actual = descriptor_text(&LocalMemory(HLOCAL(output.0)))?;
-    let sid = current_sid()?;
-    for protected in [false, true] {
-        for inherited in [false, true] {
-            if actual == expected(&sid, protected, inherited)? {
-                return Ok(());
+impl crate::Native {
+    pub(crate) fn require_private_file(file: &File) -> Result<(), ()> {
+        let mut output = PSECURITY_DESCRIPTOR::default();
+        // SAFETY: the borrowed File keeps its handle live throughout this query;
+        // output is uniquely writable and its successful allocation is freed once.
+        unsafe {
+            GetSecurityInfo(
+                HANDLE(file.as_raw_handle()),
+                SE_FILE_OBJECT,
+                OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                None,
+                None,
+                None,
+                None,
+                Some(&raw mut output),
+            )
+        }
+        .ok()
+        .map_err(|_| ())?;
+        let actual = descriptor_text(&LocalMemory(HLOCAL(output.0)))?;
+        let sid = current_sid()?;
+        for protected in [false, true] {
+            for inherited in [false, true] {
+                if actual == expected(&sid, protected, inherited)? {
+                    return Ok(());
+                }
             }
         }
+        Err(())
     }
-    Err(())
-}
 
-pub fn file_link_count(file: &File) -> Result<u32, ()> {
-    let mut information = BY_HANDLE_FILE_INFORMATION::default();
-    // SAFETY: the borrowed File keeps its handle live, and the initialized
-    // output is uniquely writable for the duration of this synchronous query.
-    unsafe { GetFileInformationByHandle(HANDLE(file.as_raw_handle()), &raw mut information) }
-        .map_err(|_| ())?;
-    Ok(information.nNumberOfLinks)
+    pub(crate) fn file_link_count(file: &File) -> Result<u32, ()> {
+        let mut information = BY_HANDLE_FILE_INFORMATION::default();
+        // SAFETY: the borrowed File keeps its handle live, and the initialized
+        // output is uniquely writable for the duration of this synchronous query.
+        unsafe { GetFileInformationByHandle(HANDLE(file.as_raw_handle()), &raw mut information) }
+            .map_err(|_| ())?;
+        Ok(information.nNumberOfLinks)
+    }
 }

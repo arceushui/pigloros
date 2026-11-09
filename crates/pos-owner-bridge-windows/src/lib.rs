@@ -14,6 +14,17 @@ mod ffi;
 // Safe entry points implemented by the private native boundary. The type and
 // its associated operations are accessible only inside this crate.
 struct Native;
+
+#[cfg(any(test, feature = "test-support"))]
+struct SubjectMutex {
+    handle: windows::Win32::Foundation::HANDLE,
+    #[cfg(test)]
+    abandoned: bool,
+    _thread_bound: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+#[cfg(test)]
+struct RetainedMutex(windows::Win32::Foundation::HANDLE);
 #[forbid(unsafe_code)]
 mod adapter {
     // The inline boundary and each child file are separate lint scopes. This
@@ -40,16 +51,10 @@ mod adapter {
     #[cfg(test)]
     mod native_tests;
 
-    #[cfg(test)]
-    pub use ledger_storage::exercise_ledger_storage;
     #[cfg(any(test, feature = "test-support"))]
     pub use ledger_storage::WindowsNonceLedger;
-    #[cfg(test)]
-    pub use nonce_ledger::exercise_native_lock;
     #[cfg(any(test, feature = "test-support"))]
     pub use nonce_ledger::WindowsSubjectEncryptorLock;
-    #[cfg(test)]
-    pub use store_file_identity::exercise_store_file_identity;
     #[cfg(any(test, feature = "test-support"))]
     pub use store_file_identity::store_file_id;
 
@@ -459,17 +464,17 @@ mod tests {
 
     #[test]
     fn nonce_lock_native() -> Result<(), Box<dyn std::error::Error>> {
-        crate::adapter::exercise_native_lock()
+        crate::Native::exercise_native_lock()
     }
 
     #[test]
     fn windows_store_file_identity_native() -> Result<(), Box<dyn std::error::Error>> {
-        crate::adapter::exercise_store_file_identity()
+        crate::Native::exercise_store_file_identity()
     }
 
     #[test]
     fn windows_nonce_ledger_storage_native() -> Result<(), Box<dyn std::error::Error>> {
-        crate::adapter::exercise_ledger_storage()
+        crate::Native::exercise_ledger_storage()
     }
 
     impl crate::Native {

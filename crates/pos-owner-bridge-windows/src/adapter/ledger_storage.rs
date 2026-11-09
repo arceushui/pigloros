@@ -124,11 +124,11 @@ impl<'guard> WindowsNonceLedger<'guard> {
         temporary.sync_all().map_err(|_| ())?;
         after(CommitStage::FileSynced)?;
         self.admit_directory()?;
-        self.same_name(&previous, &self.path.join(LEDGER))?;
-        self.same_name(&temporary, &temporary_path)?;
+        Self::same_name(&previous, &self.path.join(LEDGER))?;
+        Self::same_name(&temporary, &temporary_path)?;
         drop(previous);
         drop(temporary);
-        crate::ffi::replace_ledger(&temporary_path, &self.path.join(LEDGER))?;
+        crate::Native::replace_ledger(&temporary_path, &self.path.join(LEDGER))?;
         after(CommitStage::Renamed)?;
         self.admit_directory()?;
         let observed = self.open_existing(LEDGER)?;
@@ -158,16 +158,16 @@ impl<'guard> WindowsNonceLedger<'guard> {
         if !metadata.is_file() || metadata.file_attributes() & REPARSE_POINT != 0 {
             return Err(());
         }
-        crate::ffi::require_private_file(file)?;
-        if crate::ffi::file_link_count(file)? != 1
+        crate::Native::require_private_file(file)?;
+        if crate::Native::file_link_count(file)? != 1
             || crate::Native::cleanup_file_volume(file)? != self.volume
         {
             return Err(());
         }
-        self.same_name(file, path)
+        Self::same_name(file, path)
     }
 
-    fn same_name(&self, file: &File, path: &Path) -> Result<(), ()> {
+    fn same_name(file: &File, path: &Path) -> Result<(), ()> {
         let reopened = open_file(path, false)?;
         if crate::Native::file_identity(file)? != crate::Native::file_identity(&reopened)? {
             return Err(());
@@ -189,7 +189,7 @@ impl<'guard> WindowsNonceLedger<'guard> {
             Err(_) => Err(()),
             Ok(_) => {
                 let file = self.open_existing(TEMPORARY)?;
-                self.same_name(&file, &path)?;
+                Self::same_name(&file, &path)?;
                 drop(file);
                 fs::remove_file(path).map_err(|_| ())
             }
@@ -242,6 +242,13 @@ fn read_bounded(file: File) -> Result<Vec<u8>, ()> {
 
 const fn unavailable() -> BridgeError {
     BridgeError::Unavailable(UnavailableCode::InterfaceUnavailable)
+}
+
+#[cfg(test)]
+impl crate::Native {
+    pub(crate) fn exercise_ledger_storage() -> Result<(), Box<dyn std::error::Error>> {
+        native_tests::exercise()
+    }
 }
 
 #[cfg(test)]
@@ -516,9 +523,4 @@ mod native_tests {
         );
         Ok(())
     }
-}
-
-#[cfg(test)]
-pub fn exercise_ledger_storage() -> Result<(), Box<dyn std::error::Error>> {
-    native_tests::exercise()
 }

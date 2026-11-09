@@ -21,13 +21,6 @@ mod store_file_identity;
 mod text;
 mod window;
 
-#[cfg(any(test, feature = "test-support"))]
-pub use ledger_storage::replace_ledger;
-#[cfg(any(test, feature = "test-support"))]
-pub use nonce_ledger::SubjectMutex;
-#[cfg(any(test, feature = "test-support"))]
-pub use store_file_identity::{file_link_count, require_private_file};
-
 impl crate::Native {
     pub(super) fn inspect_process(
         pid: u32,

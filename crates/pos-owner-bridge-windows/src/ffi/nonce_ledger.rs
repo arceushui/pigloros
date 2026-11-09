@@ -1,8 +1,6 @@
 #![cfg(windows)]
 #![cfg(any(test, feature = "test-support"))]
 
-use std::marker::PhantomData;
-use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use windows::core::{PCWSTR, PWSTR};
@@ -104,15 +102,7 @@ fn validate_descriptor(handle: HANDLE, expected: &LocalMemory) -> Result<(), ()>
     Ok(())
 }
 
-/// One acquired mutex, pinned to the calling thread until its single release.
-pub struct SubjectMutex {
-    handle: HANDLE,
-    #[cfg(test)]
-    abandoned: bool,
-    _thread_bound: PhantomData<Rc<()>>,
-}
-
-impl std::fmt::Debug for SubjectMutex {
+impl std::fmt::Debug for crate::SubjectMutex {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("SubjectMutex")
@@ -120,7 +110,7 @@ impl std::fmt::Debug for SubjectMutex {
     }
 }
 
-impl SubjectMutex {
+impl crate::SubjectMutex {
     pub(crate) fn acquire() -> Result<Self, ()> {
         if PROCESS_ADMISSION
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -135,7 +125,7 @@ impl SubjectMutex {
                 handle,
                 #[cfg(test)]
                 abandoned,
-                _thread_bound: PhantomData,
+                _thread_bound: std::marker::PhantomData,
             })
         } else {
             PROCESS_ADMISSION.store(false, Ordering::Release);
@@ -144,8 +134,8 @@ impl SubjectMutex {
     }
 
     #[cfg(test)]
-    pub(crate) fn retain_second_handle() -> Result<RetainedMutex, ()> {
-        open_verified().map(RetainedMutex)
+    pub(crate) fn retain_second_handle() -> Result<crate::RetainedMutex, ()> {
+        open_verified().map(crate::RetainedMutex)
     }
 
     #[cfg(test)]
@@ -166,7 +156,7 @@ impl SubjectMutex {
     }
 
     #[cfg(test)]
-    pub(crate) fn create_wrong_acl_fixture() -> Result<RetainedMutex, ()> {
+    pub(crate) fn create_wrong_acl_fixture() -> Result<crate::RetainedMutex, ()> {
         let sid = current_sid()?;
         let security = descriptor_for(&sid, "S-1-1-0")?;
         let name: Vec<u16> = format!("Global\\pigloros.subject-encryptor.v1.{sid}")
@@ -183,7 +173,7 @@ impl SubjectMutex {
         let handle =
             unsafe { CreateMutexW(Some(&raw const attributes), false, PCWSTR(name.as_ptr())) }
                 .map_err(|_| ())?;
-        let fixture = RetainedMutex(handle);
+        let fixture = crate::RetainedMutex(handle);
         validate_descriptor(handle, &security)?;
         Ok(fixture)
     }
@@ -230,10 +220,7 @@ fn acquire_inner() -> Result<(HANDLE, bool), ()> {
 }
 
 #[cfg(test)]
-pub struct RetainedMutex(HANDLE);
-
-#[cfg(test)]
-impl Drop for RetainedMutex {
+impl Drop for crate::RetainedMutex {
     fn drop(&mut self) {
         // SAFETY: this fixture never waited on its separately opened handle;
         // its sole ownership is the handle and it is closed exactly once.
@@ -241,7 +228,7 @@ impl Drop for RetainedMutex {
     }
 }
 
-impl Drop for SubjectMutex {
+impl Drop for crate::SubjectMutex {
     fn drop(&mut self) {
         // SAFETY: the non-Send guard is dropped by its owning thread, after
         // exactly one successful or abandoned wait and before handle close.
