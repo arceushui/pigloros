@@ -213,6 +213,23 @@ pub(super) fn routes() -> RouteNetlinkMessage {
     RouteNetlinkMessage::GetRoute(RouteMessage::default())
 }
 
+/// The replies of an [`addresses`] dump that are not addresses of another
+/// link than `index`, so another link's state, such as a tentative address
+/// still in duplicate detection, never fails the read-back; no address is
+/// kept when `index` is `None`.
+pub(super) fn of_link(
+    replies: Vec<RouteNetlinkMessage>,
+    index: Option<u32>,
+) -> Vec<RouteNetlinkMessage> {
+    replies
+        .into_iter()
+        .filter(|reply| match reply {
+            RouteNetlinkMessage::NewAddress(message) => Some(message.header.index) == index,
+            _ => true,
+        })
+        .collect()
+}
+
 /// Every address an [`addresses`] dump reports.
 ///
 /// # Errors
