@@ -70,6 +70,42 @@ impl PreparedAttemptDirectory {
     /// new commits; directories or the record may already be gone, so restart
     /// reconciliation must inspect the surviving state rather than treat an
     /// error as no change.
+    ///
+    /// # Exclusion from root activation
+    /// Cleanup takes the directory by value and every root activation borrows
+    /// it, so the activation count read here is final. An activation still in
+    /// flight cannot be overtaken by cleanup:
+    ///
+    /// ```compile_fail,E0505
+    /// use pos_reference::provider_admission::HeldImageAdmission;
+    /// use pos_sandboxd::{activate_admitted_root, AttemptUnitTermination, PreparedAttemptDirectory};
+    ///
+    /// async fn overtaken(
+    ///     admission: &HeldImageAdmission<'_>,
+    ///     directory: PreparedAttemptDirectory,
+    ///     unit: AttemptUnitTermination<'_>,
+    /// ) {
+    ///     let activation = activate_admitted_root(admission, &directory);
+    ///     let _cleaned = directory.finish_terminal_cleanup(unit, None);
+    ///     let _root = activation.await;
+    /// }
+    /// ```
+    ///
+    /// and no activation can begin after cleanup:
+    ///
+    /// ```compile_fail,E0382
+    /// use pos_reference::provider_admission::HeldImageAdmission;
+    /// use pos_sandboxd::{activate_admitted_root, AttemptUnitTermination, PreparedAttemptDirectory};
+    ///
+    /// async fn after(
+    ///     admission: &HeldImageAdmission<'_>,
+    ///     directory: PreparedAttemptDirectory,
+    ///     unit: AttemptUnitTermination<'_>,
+    /// ) {
+    ///     let _cleaned = directory.finish_terminal_cleanup(unit, None);
+    ///     let _root = activate_admitted_root(admission, &directory).await;
+    /// }
+    /// ```
     pub fn finish_terminal_cleanup(
         self,
         unit: AttemptUnitTermination<'_>,
