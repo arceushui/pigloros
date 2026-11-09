@@ -601,11 +601,9 @@ impl NamespaceControl for FakeControl {
         let taken = self.host_links.borrow().iter().any(|link| link.0 == host);
         self.call("install", &expected.name, &expected.host_link)
             .and_then(|()| {
-                if taken {
-                    Err(KernelError("existing host link"))
-                } else {
-                    Ok(())
-                }
+                (!taken)
+                    .then_some(())
+                    .ok_or(KernelError("existing host link"))
             })
             .map(|()| {
                 self.host_links
