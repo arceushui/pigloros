@@ -346,6 +346,10 @@ fn a_refused_foreign_or_ambiguous_request_fails() {
         (vec![ack(1, -19)], |error| {
             matches!(error, NetlinkError::Kernel(-19))
         }),
+        // A refusal of another request.
+        (vec![ack(2, -19)], |error| {
+            matches!(error, NetlinkError::Unexpected)
+        }),
         // An acknowledgement answers no `GET`.
         (vec![ack(1, 0)], |error| {
             matches!(error, NetlinkError::Unexpected)

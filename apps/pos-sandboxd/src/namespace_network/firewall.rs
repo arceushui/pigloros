@@ -34,6 +34,10 @@ const NF_DROP: u32 = 0;
 const NF_ACCEPT: u32 = 1;
 /// The type of every provider chain.
 const FILTER: &str = "filter";
+/// Create an object, and fail if it exists.
+const CREATE_NEW: u16 = NLM_F_CREATE | NLM_F_EXCL;
+/// Create a rule after the chain's last.
+const APPEND: u16 = NLM_F_CREATE | NLM_F_APPEND;
 
 /// A netfilter message of `family` carrying `message`.
 fn message(family: NetfilterProtoFamily, message: NfTablesMessage) -> NetfilterMessage {
@@ -100,7 +104,6 @@ fn new_rule(table: &str, chain: &str, rule: &FirewallRule) -> NfTablesMessage {
 /// table or chain, so the batch never extends another firewall.
 pub(super) fn install(table: &str, chains: &[FirewallChain]) -> Vec<Request<NetfilterMessage>> {
     let inet = NetfilterProtoFamily::Inet;
-    let create = NLM_F_CREATE | NLM_F_EXCL;
     let mut requests = vec![
         delimiter(ControlMessage::BatchBegin),
         Request::acknowledged(
@@ -110,19 +113,16 @@ pub(super) fn install(table: &str, chains: &[FirewallChain]) -> Vec<Request<Netf
                     attributes: vec![TableAttribute::Name(table.to_owned())],
                 }),
             ),
-            create,
+            CREATE_NEW,
         ),
     ];
     for chain in chains {
         requests.push(Request::acknowledged(
             message(inet, new_chain(table, chain)),
-            create,
+            CREATE_NEW,
         ));
         requests.extend(chain.rules.iter().map(|rule| {
-            Request::acknowledged(
-                message(inet, new_rule(table, &chain.name, rule)),
-                NLM_F_CREATE | NLM_F_APPEND,
-            )
+            Request::acknowledged(message(inet, new_rule(table, &chain.name, rule)), APPEND)
         }));
     }
     requests.push(delimiter(ControlMessage::BatchEnd));
