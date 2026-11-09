@@ -207,6 +207,40 @@ mod cases {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn a_requested_start_without_its_cgroup_is_refused_before_the_root() -> TestResult {
+        let attempt = Attempt::new()?;
+        let fixture = TeardownFixture::new(1, TeardownStop::Empty, TeardownReset::Unload).await?;
+        let ownership = attempt.directory.execution_ownership();
+        ownership.claim()?;
+        ownership.submit()?;
+        let record = attempt.record();
+        // A root release that never completes: the fence refusal must come
+        // first, so the root is never touched.
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            finish_with(
+                &fixture.transport,
+                attempt.directory,
+                None,
+                Some(HangingRelease),
+                deadlines()?,
+            ),
+        )
+        .await;
+        assert!(
+            matches!(
+                result,
+                Ok(Err(AttemptCleanupError::Registry(
+                    SystemdAttemptRegistryError::CleanupEvidence
+                )))
+            ),
+            "{result:?}"
+        );
+        assert_retained(&record, &attempt.registry)?;
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn a_unit_that_is_not_removed_in_time_keeps_its_root_and_intent() -> TestResult {
         let attempt = Attempt::new()?;
         let fixture = TeardownFixture::new(1, TeardownStop::Empty, TeardownReset::Hang).await?;
