@@ -913,7 +913,7 @@ def _check_shim_macros(label: str, scanned: Scan, found: list[str]) -> None:
 def _reviewed_fault_code(code: str) -> bool:
     """Accept only the reviewed test-only fixed process-fault implementation."""
     normalized = re.sub(r"\s+", "", code).encode()
-    return hashlib.sha256(normalized).hexdigest() == "3e2f283260deabeba74f82af80666967120270004082440bd821fe697deb05c7"
+    return hashlib.sha256(normalized).hexdigest() == "c2362a5f6582562997e8a2f119535ff1f2a7255f9ca2abedfae980bb0bb3b9f9"
 
 
 def _check_shim_sources(shim: Path, scanned_dirs: tuple[Path, ...], found: list[str]) -> ShimScan:
@@ -1124,16 +1124,23 @@ def _check_fault_authority(root: Path, scans: dict[str, tuple[Scan, tuple[Attrib
     type_start = root_code.find("pub(crate) enum ProcessFaultTarget")
     type_end = root_code.find("pub(crate) trait NativeOperations", type_start) if type_start >= 0 else -1
     types = root_code[type_start:type_end] if type_end >= 0 else ""
-    if hashlib.sha256(re.sub(r"\s+", "", types).encode()).hexdigest() != "1f8edc4b5db2aa6b4d945df95354e4074c6f12378b632957babd74e947b4a2ce":
+    if hashlib.sha256(re.sub(r"\s+", "", types).encode()).hexdigest() != "ff52e736dfb173f52af1ca90ea4d14012a745bb204ba0351d967883dc3ad2ff3":
         found.append(f"{SHIM}/src/lib.rs: process fault capability types differ from reviewed test-only code")
     elif "cfg(test)" not in _outer_attributes_before(root_code, root_item[1], type_start):
         found.append(f"{SHIM}/src/lib.rs: process fault capability types require cfg(test)")
     # The seal is created only by the declared sealed-asset native fixture;
     # these fixed boundaries prevent bypassing lifecycle/identity checks.
     specifications = (
+        ('src/adapter/surface/mod.rs', 'early_renderer_presence', '1f0f23a60d23aa258a7c4b2ddf7079540d4f841ee87719c1474d7ad1759b0f6f'),
+        ('src/adapter/surface/mod.rs', 'pre_environment_completion', '3566802f65e63c69f642d7b4b5a070e0b802945847e0a24d8a0637b08f8a3fd7'),
+        ('src/ffi/session.rs', 'early_renderer_presence', '98d418a783a187e248b5843d15de972346d8efb5907253b6287fe3bb310b00b7'),
+        ('src/ffi/session.rs', 'environment_creation_completion', '67cc92ce1948741f3ff340e49e8ea613ff06dca426ab11fad87ec168837fd9b9'),
+        ('src/ffi/creation.rs', 'environment_succeeded', 'f74a4b5856d90f5c1d9f12fddd61c5c160fdd1bd35121507c3f6f5126cf4ae24'),
+        ('src/lib.rs', 'early_renderer_presence', 'ce782283a5686cc23a94ade4be891c7b67587d5c412271dc3fb6c670d906a415'),
+        ('src/lib.rs', 'environment_creation_completion', '518311d3b890a07c23d1739324d01c59d531ab29ba00025651466be8c0fd5f9c'),
         ('src/adapter/surface/mod.rs', 'before_record_fault_state', '49205841cf6005a43cd32dc1175026713fd3792d8f86b4e93718f35ee8614466'),
         ('src/adapter/surface/mod.rs', 'before_record_owners_retained', '502ed68d263fce4656e16380d091e1efd621ed8d740508dfd42f37ff759427e3'),
-        ('src/adapter/surface/mod.rs', 'inject_before_record_fault', '4cd03ee5c769b794fbc7812bf4e8d7869a1202887ada56eefe49e69d438f7252'),
+        ('src/adapter/surface/mod.rs', 'inject_before_record_fault', 'bd47d1b628ba6dd12d0286ddf101e8bb8f7c3b181f68ee3d019f1205c49f227f'),
         ('src/adapter/surface/mod.rs', 'inject_posted_consuming_fault', '8d2a7e8a867ac336094f4bfdc45194220735cd8e709c28d12d7e07c7422e4427'),
         ('src/adapter/surface/mod.rs', 'posted_ready_fault_state', '338bbaa04356e3f9d6e235d859e1427608723276a67ba1a17da3ea1abc0e143a'),
         ('src/adapter/surface/mod.rs', 'inject_posted_ready_fault', '43214afa0e0beb3daf39dc3ad67d4b3dc3a985f5299362e169cac58c141e1820'),
@@ -1154,13 +1161,13 @@ def _check_fault_authority(root: Path, scans: dict[str, tuple[Scan, tuple[Attrib
         ('src/adapter/surface/mod.rs', 'navigating_fault_ready', '170f33d3143a5c334f9bfedeaaa3fb1920f4d8811baa46dd2ad2abf7ad4226aa'),
         ('src/adapter/surface/mod.rs', 'navigating_fault_state', 'd6de42b2ce32c2d27068bfbb0652433e1d61aa517009d6b6a2d3909fc38e7b76'),
         ('src/adapter/surface/mod.rs', 'navigating_fault_owners_retained', 'abcc8f41aef3b7577e9900b4279f36a5c89485a4b193850e7227fc83ee6e7ea1'),
-        ('src/adapter/surface/mod.rs', 'inject_navigating_fault', '66339eb65c6269261e85c5091179fbbcbc63382025744f749a0990e1bed4eaeb'),
+        ('src/adapter/surface/mod.rs', 'inject_navigating_fault', 'b7791d7cf75b7d40c5f41511903a92734bc5b2058596d2ba21209cadd40d61e0'),
         ('src/lib.rs', 'preload_fault_owners_retained', 'da2364753998997805c42fd95372b5675dc6623e00a3fdd36b208f65f2193e12'),
         ('src/ffi/session.rs', 'preload_fault_owners_retained', 'dd2db1b06d35a3a2b71399e52e861c2736c60c16555972199721b48edaacfad6'),
         ('src/adapter/surface/mod.rs', 'awaiting_load_fault_ready', '9c02146d3c7413eadec419859cb15ff50021afc4c68e0b93a00a332cc6064d6b'),
         ('src/adapter/surface/mod.rs', 'awaiting_load_fault_state', 'fafcc4256742a7180c886b0166eab7eed95f994f5407cc0c763c72adbdc5d6dc'),
         ('src/adapter/surface/mod.rs', 'awaiting_load_fault_owners_retained', 'fe4c7bf1d40e90f372500ce3700d5955844d2ca432167590d31feee3df60bf66'),
-        ('src/adapter/surface/mod.rs', 'inject_awaiting_load_fault', 'd4c811752e55968eb63625207cc46d9ee117e609957ec1fc75d170ed8748515d'),
+        ('src/adapter/surface/mod.rs', 'inject_awaiting_load_fault', '45efb89f8c5c2b93a9d2c4a27f5d97e597334c65a6fe9d2356e6913bf89278c8'),
         ("src/ffi/session.rs", "exit_browser_candidate", "7532fd44a7c1edaaf88c1a256c8c544b198d1e7572d774e01a9d4f4ab3fbbe3f"),
         ("src/ffi/session.rs", "exit_fault_owners_retained", "ae49036aef686da2490d2183714887582f362bf7deebf771f7ea3c1f241dd149"),
         ("src/adapter/surface/mod.rs", "releasing_fault_state", "13227b1d97e85f6b4e67a55fbddd45ed434d2a2fdeccfc95cb00b757e23e4010"),
@@ -1178,7 +1185,7 @@ def _check_fault_authority(root: Path, scans: dict[str, tuple[Scan, tuple[Attrib
         ("src/lib.rs", "inject_process_fault", "294b987cde982e756d951216a786fbf47cddcb352b67d16b5fb3e343644662ed"),
         ("src/ffi/session.rs", "fault_owners_retained", "eccda5bd1bc5847953133394e934a30276c539d09fa2842f0e3ad42722556f69"),
         ("src/adapter/surface/mod.rs", "fault_owners_retained", "f5b290213a5da3871f225e3abbba1e1f61c7ae0b021766b7d9a3f63f05b14b9f"),
-        ("src/ffi/session.rs", "inject_process_fault", "e7c80f6df74ced6b16fc7aedc535e7d0c383602504915ccfa93c8cd4d641f786"),
+        ("src/ffi/session.rs", "inject_process_fault", "274209ebe7e9936da35c09c97c9e361bba89c01d9bc440b4f2bb1115ab7f709a"),
         ("src/ffi/creation.rs", "succeeded", "abd90b783da539c962504dcb63f9a6f467fcbf0bf213e251f9b94c309a1f35f8"),
         ("src/ffi/session.rs", "recordless_controller_completion", "29b41776eba0afe06f194a40aa7d1fed581daa6b3c50e61394d884b8b203c3b1"),
         ("src/ffi/session.rs", "recordless_browser_candidate", "f9b8af0278a6b4f1ffe01a4c6483c9d204f574345270b49183a9f25a087052d7"),
@@ -1211,6 +1218,24 @@ def _check_fault_authority(root: Path, scans: dict[str, tuple[Scan, tuple[Attrib
             start = modifiers.start() if modifiers else match.start()
             if "cfg(test)" not in _outer_attributes_before(code, item[1], start):
                 found.append(f"{SHIM}/{relative}: process fault authority function {name} requires cfg(test)")
+    # Actual callback invocation markers and their bounded private recorder are
+    # evidence only when both SDK call sites and the test caller are reviewed.
+    callback_begin = root_code.find("#[cfg(test)]", root_code.find("struct Native;"))
+    callback_end = root_code.find("#[forbid(unsafe_code)]", callback_begin)
+    callback_block = root_code[callback_begin:callback_end] if callback_begin >= 0 and callback_end >= 0 else ""
+    if hashlib.sha256(re.sub(r"\s+", "", callback_block).encode()).hexdigest() != "104d01018f0f872ff8432cc4de3d14af7e866af2b92988d05b15b94e3a49e963":
+        found.append(f"{SHIM}/src/lib.rs: callback ordering recorder differs from reviewed test-only code")
+    for relative, digest in (("src/ffi/creation.rs", "b9aedaa7f6c824a740b0bc7050a32b5e141588c13c69ca2969e5d42bd100b0d5"), ("src/ffi/environment.rs", "0156bc784e8ad321e8873180333ddd4a73675c1a2b38ee123df7b59334091016")):
+        item = scans.get(relative)
+        body = item[0].code if item else ""
+        if hashlib.sha256(re.sub(r"\s+", "", body).encode()).hexdigest() != digest:
+            found.append(f"{SHIM}/{relative}: callback invocation differs from reviewed SDK path")
+    for relative, (scanned, _) in scans.items():
+        for reference in re.finditer(r"(?<!\w)(?:NativeCallbackMoment|CALLBACK_ORDER|record_callback|callback_order|arm_callback_order|disarm_callback_order)(?!\w)", scanned.code):
+            allowed = relative in ("src/ffi/creation.rs", "src/ffi/environment.rs", "src/adapter/native_tests/process_fault.rs")
+            allowed |= relative == "src/lib.rs" and callback_begin <= reference.start() < callback_end
+            if not allowed:
+                found.append(f"{SHIM}/{relative}: callback evidence references belong only in reviewed paths")
     _check_fault_capabilities(scans, found)
     surface = scans.get("src/adapter/surface/mod.rs")
     surface_code = surface[0].code if surface else ""
@@ -1224,7 +1249,7 @@ def _check_fault_authority(root: Path, scans: dict[str, tuple[Scan, tuple[Attrib
     relative = "src/adapter/native_tests/process_fault.rs"
     item = scans.get(relative)
     code = item[0].code if item else ""
-    if hashlib.sha256(re.sub(r"\s+", "", code).encode()).hexdigest() != "190b5ca009f7764b5843cd1a3ebee36cfb217bb345f034bc9248fcd33b5d863a":
+    if hashlib.sha256(re.sub(r"\s+", "", code).encode()).hexdigest() != "7699cf388b2caf79b66dd3600810c04270cceaf08e16d9d51fea89bd0c788ae5":
         found.append(f"{SHIM}/{relative}: process fault fixture differs from reviewed sealed caller")
 
 

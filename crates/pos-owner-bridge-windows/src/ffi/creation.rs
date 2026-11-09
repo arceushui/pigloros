@@ -50,8 +50,12 @@ impl EnvironmentCreation {
         let completed = Rc::clone(&result);
         let callback =
             CreateCoreWebView2EnvironmentCompletedHandler::create(Box::new(move |hr, value| {
-                *completed.borrow_mut() =
-                    Some(hr.and_then(|()| value.ok_or_else(|| E_POINTER.into())));
+                let result = hr.and_then(|()| value.ok_or_else(|| E_POINTER.into()));
+                #[cfg(test)]
+                crate::Native::record_callback(crate::NativeCallbackMoment::EnvironmentCompletion(
+                    result.is_ok(),
+                ));
+                *completed.borrow_mut() = Some(result);
                 Ok(())
             }));
         // SAFETY: fixed verified runtime and fresh protected folder, live STA
@@ -74,6 +78,14 @@ impl EnvironmentCreation {
         })
     }
 
+    #[cfg(test)]
+    pub(super) fn environment_succeeded(&self) -> Option<bool> {
+        self.result
+            .borrow()
+            .as_ref()
+            .map(std::result::Result::is_ok)
+    }
+
     pub(super) fn take(&self) -> Option<Result<ICoreWebView2Environment>> {
         self.result
             .borrow_mut()
@@ -94,8 +106,12 @@ impl ControllerCreation {
         let completed = Rc::clone(&result);
         let callback =
             CreateCoreWebView2ControllerCompletedHandler::create(Box::new(move |hr, value| {
-                *completed.borrow_mut() =
-                    Some(hr.and_then(|()| value.ok_or_else(|| E_POINTER.into())));
+                let result = hr.and_then(|()| value.ok_or_else(|| E_POINTER.into()));
+                #[cfg(test)]
+                crate::Native::record_callback(crate::NativeCallbackMoment::ControllerCompletion(
+                    result.is_ok(),
+                ));
+                *completed.borrow_mut() = Some(result);
                 Ok(())
             }));
         // SAFETY: retained live STA environment and callback; the surface keeps

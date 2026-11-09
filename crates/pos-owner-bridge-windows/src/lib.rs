@@ -14,6 +14,48 @@ mod ffi;
 // Safe entry points implemented by the private native boundary. The type and
 // its associated operations are accessible only inside this crate.
 struct Native;
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NativeCallbackMoment {
+    EnvironmentCompletion(bool),
+    ControllerCompletion(bool),
+    BrowserExit(u32),
+    DriverTimeout,
+    Overflow,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static CALLBACK_ORDER: std::cell::RefCell<Option<Vec<NativeCallbackMoment>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+impl Native {
+    fn arm_callback_order() {
+        CALLBACK_ORDER.with(|order| *order.borrow_mut() = Some(Vec::new()));
+    }
+
+    fn record_callback(moment: NativeCallbackMoment) {
+        CALLBACK_ORDER.with(|order| {
+            if let Some(order) = order.borrow_mut().as_mut() {
+                if order.len() < 64 {
+                    order.push(moment);
+                } else if order.last() != Some(&NativeCallbackMoment::Overflow) {
+                    order.push(NativeCallbackMoment::Overflow);
+                }
+            }
+        });
+    }
+
+    fn callback_order() -> Vec<NativeCallbackMoment> {
+        CALLBACK_ORDER.with(|order| order.borrow().as_ref().cloned().unwrap_or_default())
+    }
+
+    fn disarm_callback_order() {
+        CALLBACK_ORDER.with(|order| *order.borrow_mut() = None);
+    }
+}
 #[forbid(unsafe_code)]
 mod adapter {
     // The inline boundary and each child file are separate lint scopes. This
@@ -390,6 +432,13 @@ pub(crate) enum ProcessFaultTarget {
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RendererPresence {
+    Absent,
+    Unique,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ProcessFaultLifecycle {
     PostedReceipt,
     PostedEmpty,
@@ -474,6 +523,7 @@ pub(crate) struct ProcessExitState {
 pub(crate) enum ProcessFaultMark {
     Reached(ProcessFaultState),
     ReachedExit(ProcessExitState),
+    RendererPresence(RendererPresence),
     AwaitingLoad {
         generation: u32,
         record_count: usize,
@@ -564,6 +614,16 @@ pub(crate) trait NativeOperations {
         &self,
         _authority: &FaultAuthority,
     ) -> Result<Box<dyn ProcessFaultHandle>, ()> {
+        Err(())
+    }
+
+    #[cfg(test)]
+    fn environment_creation_completion(&self) -> Option<bool> {
+        None
+    }
+
+    #[cfg(test)]
+    fn early_renderer_presence(&self) -> Result<RendererPresence, ()> {
         Err(())
     }
 

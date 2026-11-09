@@ -1375,6 +1375,8 @@ def test_owned_process_fault_authority() -> None:
         "consuming-state recheck": ("ControlState::Consuming as u32", "ControlState::Empty as u32"),
         "different source": ("candidates(environment)?", "other_candidates(environment)?"),
         "indirect termination": ("TerminateProcess(handle, FAULT_EXIT)", "hidden(handle, FAULT_EXIT)"),
+        "ambiguous renderer treated as absence": ("if matches.next().is_some() {\n        return Err(());", "if matches.next().is_some() {\n        return Ok(None);"),
+        "second renderer snapshot suppressed": ("select_optional(&second, COREWEBVIEW2_PROCESS_KIND_RENDERER)? != renderer", "false"),
         "membership gate suppressed": ("select(&second, kind)? != pid", "false"),
         "fault call evidence suppressed": ("authority.record(crate::ProcessFaultMark::TerminationCall);", ""),
         "selected process evidence suppressed": ("authority.record(crate::ProcessFaultMark::Selected(observed));", ""),
@@ -1447,7 +1449,7 @@ def test_owned_process_fault_authority() -> None:
         ("src/adapter/surface/mod.rs", "state.generation != u32::from(point.post())", "state.generation != 1", "process fault authority function posted_retry_fault_state differs from reviewed code"),
         ("src/adapter/surface/mod.rs", "self.activation_error.is_some()", "false", "process fault authority function before_record_fault_state differs from reviewed code"),
         ("src/adapter/surface/mod.rs", "generation != 1 || posts != 0", "generation != 1", "process fault authority function awaiting_load_fault_state differs from reviewed code"),
-        ("src/adapter/native_tests/process_fault.rs", ".inject_awaiting_load_fault(seal)", ".inject_exit_fault(seal)", "process fault fixture differs from reviewed sealed caller"),
+        ("src/adapter/native_tests/process_fault.rs", ".inject_awaiting_load_fault(ProcessFaultTarget::Browser, seal)", ".inject_exit_fault(seal)", "process fault fixture differs from reviewed sealed caller"),
     ):
         changed = dict(files)
         if old not in changed[relative]:
@@ -1466,10 +1468,12 @@ def test_owned_process_fault_authority() -> None:
         start = fixture_source.find(f"fn {function}(")
         end = fixture_source.find("\n}", start)
         body = fixture_source[start:end]
-        marker = "check_final_process_failures("
+        marker = ("finish_failed_case(" if function in (
+            "run_awaiting_load", "run_navigating", "run_posted_empty", "run_before_record",
+        ) else "check_final_process_failures(")
         if start < 0 or end < 0 or marker not in body:
             raise SystemExit(f"missing final process failure classifier: {function}")
-        mutated = body.replace(marker, "discard_final_process_failures(", 1)
+        mutated = body.replace(marker, "discard_final_assessment(", 1)
         changed = dict(files)
         changed["src/adapter/native_tests/process_fault.rs"] = fixture_source[:start] + mutated + fixture_source[end:]
         scans = {}
@@ -1481,6 +1485,47 @@ def test_owned_process_fault_authority() -> None:
         expected = f"{SHIM}/src/adapter/native_tests/process_fault.rs: process fault fixture differs from reviewed sealed caller"
         if expected not in found:
             raise SystemExit(f"final process failure classifier bypass was accepted: {function}: {found}")
+    finish = fixture_source[fixture_source.find("fn finish_failed_case("):]
+    if not 0 <= finish.find("self.retire(") < finish.find("check_final_process_failures("):
+        raise SystemExit("shared failed-case classification must follow retirement")
+    for old, new in (
+        ("self.retire(", "self.discard_retire("),
+        ("check_final_process_failures(finish.actual_fault", "discard_final_process_failures(finish.actual_fault"),
+        ("controller_invoked_after_exit(", "discard_callback_order("),
+        ("RendererPresence::Absent", "RendererPresence::Unique"),
+    ):
+        if old not in fixture_source:
+            raise SystemExit(f"missing new evidence mutation target: {old}")
+        changed = dict(files)
+        changed["src/adapter/native_tests/process_fault.rs"] = fixture_source.replace(old, new, 1)
+        scans = {}
+        for relative, text in changed.items():
+            scanned = CHECKER.scan(text)
+            scans[relative] = (scanned, CHECKER._attributes(scanned.code))
+        found = []
+        CHECKER._check_fault_authority(ROOT, scans, found)
+        if f"{SHIM}/src/adapter/native_tests/process_fault.rs: process fault fixture differs from reviewed sealed caller" not in found:
+            raise SystemExit(f"new evidence bypass accepted: {old}: {found}")
+    # The ordered evidence must come from the actual SDK handlers and a
+    # bounded test-only recorder, not an invented event or a comment decoy.
+    for relative, old, new, expected in (
+        ("src/ffi/creation.rs", "result.is_ok(),", "true,", "callback invocation differs from reviewed SDK path"),
+        ("src/ffi/environment.rs", "crate::Native::record_callback(", "crate::Native::discard_callback(", "callback invocation differs from reviewed SDK path"),
+        ("src/lib.rs", "if order.len() < 64", "if order.len() < 640", "callback ordering recorder differs from reviewed test-only code"),
+    ):
+        changed = dict(files)
+        text = (ROOT / SHIM / relative).read_text()
+        if old not in text:
+            raise SystemExit(f"missing callback evidence mutation target: {old}")
+        changed[relative] = text.replace(old, new, 1)
+        scans = {}
+        for item, source in changed.items():
+            scanned = CHECKER.scan(source)
+            scans[item] = (scanned, CHECKER._attributes(scanned.code))
+        found = []
+        CHECKER._check_fault_authority(ROOT, scans, found)
+        if f"{SHIM}/{relative}: {expected}" not in found:
+            raise SystemExit(f"callback evidence bypass accepted: {relative}: {found}")
     # Taking the retired pairs disarms observation; the live pair must be
     # re-armed before injection and before its later native close.
     retry = fixture_source.find("fn drive_posted_retry(")

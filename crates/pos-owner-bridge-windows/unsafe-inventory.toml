@@ -341,7 +341,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/creation.rs"
-line = 59
+line = 63
 function = "start"
 operation = "CreateCoreWebView2EnvironmentWithOptions( PCWSTR(runtime.as_ptr()), PCWSTR(folder.as_ptr()), &options, &callback, )"
 invariant = "fixed verified runtime and fresh protected folder, live STA options/callback, all UTF-16 inputs retained in this owner until completion."
@@ -349,7 +349,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/creation.rs"
-line = 103
+line = 119
 function = "start"
 operation = "environment.CreateCoreWebView2Controller(hwnd, &callback)"
 invariant = "retained live STA environment and callback; the surface keeps its owned top-level HWND alive until this async operation completes."
@@ -357,7 +357,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/environment.rs"
-line = 47
+line = 53
 function = "subscribe"
 operation = "exit.add_BrowserProcessExited(&callback, &raw mut token)"
 invariant = "newly-created retained STA environment and live callback; initialized unique token output, subscription precedes controller creation."
@@ -365,7 +365,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/environment.rs"
-line = 60
+line = 66
 function = "snapshot"
 operation = "self.raw.BrowserVersionString(out)"
 invariant = "retained STA environment and initialized helper-owned string output."
@@ -373,7 +373,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/environment.rs"
-line = 65
+line = 71
 function = "snapshot"
 operation = "environment7.UserDataFolder(out)"
 invariant = "retained STA environment and initialized helper-owned string output."
@@ -381,7 +381,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/environment.rs"
-line = 84
+line = 90
 function = "unsubscribe"
 operation = "self.exit.remove_BrowserProcessExited(token)"
 invariant = "exact retained environment and registration token on its creating STA; successful removal is recorded before any retry."
@@ -389,7 +389,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/environment.rs"
-line = 99
+line = 105
 function = "browser_exited"
 operation = "args.BrowserProcessId(&raw mut pid)"
 invariant = "retained invoking-STA arguments and initialized unique PID output."
@@ -821,7 +821,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/session.rs"
-line = 305
+line = 323
 function = "fit_controller"
 operation = "controller.SetBounds(bounds)"
 invariant = "retained creating-STA controller and copied initialized client RECT."
@@ -829,7 +829,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/session.rs"
-line = 310
+line = 328
 function = "focus_controller"
 operation = "controller.MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC)"
 invariant = "retained creating-STA controller; fixed programmatic focus reason."
@@ -837,7 +837,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/session.rs"
-line = 370
+line = 388
 function = "controller_completion"
 operation = "controller.CoreWebView2()"
 invariant = "successfully completed retained controller on its creating STA."
@@ -845,7 +845,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/session.rs"
-line = 382
+line = 400
 function = "browser_pid"
 operation = "view.BrowserProcessId(&raw mut pid)"
 invariant = "retained creating-STA view and initialized unique PID output."
@@ -853,7 +853,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/session.rs"
-line = 411
+line = 429
 function = "navigate_owner"
 operation = "view.Navigate(w!( ))"
 invariant = "retained creating-STA view and the fixed packaged owner document URL."
@@ -861,7 +861,7 @@ hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]
 file = "src/ffi/session.rs"
-line = 472
+line = 490
 function = "close_controller"
 operation = "controller.Close()"
 invariant = "retained creating-STA controller; all buffer borrows ended. Failure retains the COM owner so the safe policy can quarantine/retry."
@@ -1597,7 +1597,7 @@ hosted_test = "native_verified_owned_process_faults_retire"
 
 [[block]]
 file = "src/ffi/process_fault.rs"
-line = 132
+line = 181
 function = "inject"
 operation = "OpenProcess"
 invariant = "Only an environment-discovered unique candidate, fixed query and terminate rights, no inheritance."
@@ -1605,7 +1605,7 @@ hosted_test = "native_verified_owned_process_faults_retire"
 
 [[block]]
 file = "src/ffi/process_fault.rs"
-line = 189
+line = 238
 function = "inject"
 operation = "TerminateProcess"
 invariant = "One declared fault after retained-handle identity, class, topology and membership revalidation; fixed exit code 0x535."

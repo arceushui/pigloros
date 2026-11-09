@@ -33,6 +33,12 @@ impl Environment {
         let callback = BrowserProcessExitedEventHandler::create(Box::new(move |_sender, args| {
             match browser_exited(args) {
                 Ok(event) => {
+                    #[cfg(test)]
+                    if let NativeEvent::BrowserExited { pid } = &event {
+                        crate::Native::record_callback(crate::NativeCallbackMoment::BrowserExit(
+                            *pid,
+                        ));
+                    }
                     observed.event(event);
                 }
                 Err(error) => {

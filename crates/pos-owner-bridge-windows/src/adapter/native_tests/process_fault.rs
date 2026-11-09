@@ -106,6 +106,107 @@ fn competing_spec() -> SurfaceSpec {
     }
 }
 
+struct CallbackOrderGuard;
+
+impl CallbackOrderGuard {
+    fn arm() -> Self {
+        crate::Native::arm_callback_order();
+        Self
+    }
+}
+
+impl Drop for CallbackOrderGuard {
+    fn drop(&mut self) {
+        crate::Native::disarm_callback_order();
+    }
+}
+
+fn controller_invoked_after_exit(order: &[crate::NativeCallbackMoment], pid: u32) -> bool {
+    use crate::NativeCallbackMoment::{BrowserExit, ControllerCompletion, Overflow};
+    let mut exit = None;
+    let mut controller = None;
+    for (index, moment) in order.iter().enumerate() {
+        match moment {
+            BrowserExit(observed) if *observed == pid && exit.is_none() => exit = Some(index),
+            ControllerCompletion(_) if controller.is_none() => controller = Some(index),
+            BrowserExit(_) | ControllerCompletion(_) | Overflow => return false,
+            _ => {}
+        }
+    }
+    matches!((exit, controller), (Some(exit), Some(controller)) if exit < controller)
+}
+
+fn controller_held_before_exit(order: &[crate::NativeCallbackMoment]) -> bool {
+    use crate::NativeCallbackMoment::{BrowserExit, ControllerCompletion, Overflow};
+    let mut held = false;
+    for moment in order {
+        match moment {
+            ControllerCompletion(true) if !held => held = true,
+            BrowserExit(_) | ControllerCompletion(_) | Overflow => return false,
+            _ => {}
+        }
+    }
+    held
+}
+
+#[test]
+fn held_controller_result_requires_its_real_callback_before_exit() {
+    use crate::NativeCallbackMoment::{BrowserExit, ControllerCompletion};
+    assert!(controller_held_before_exit(&[ControllerCompletion(true)]));
+    assert!(!controller_held_before_exit(&[]));
+    assert!(!controller_held_before_exit(&[ControllerCompletion(false)]));
+    assert!(!controller_held_before_exit(&[
+        ControllerCompletion(true),
+        BrowserExit(42)
+    ]));
+}
+
+#[test]
+fn callback_order_requires_actual_unique_exit_before_controller_invocation() {
+    use crate::NativeCallbackMoment::{BrowserExit, ControllerCompletion, Overflow};
+    let late = [BrowserExit(42), ControllerCompletion(false)];
+    assert!(controller_invoked_after_exit(&late, 42));
+    assert!(!controller_invoked_after_exit(
+        &[ControllerCompletion(true), BrowserExit(42)],
+        42
+    ));
+    assert!(!controller_invoked_after_exit(
+        &[BrowserExit(7), ControllerCompletion(true)],
+        42
+    ));
+    assert!(!controller_invoked_after_exit(&[BrowserExit(42)], 42));
+    assert!(!controller_invoked_after_exit(
+        &[BrowserExit(42), ControllerCompletion(true), Overflow],
+        42
+    ));
+    assert!(!controller_invoked_after_exit(
+        &[BrowserExit(42), BrowserExit(42), ControllerCompletion(true)],
+        42
+    ));
+}
+
+struct FailedCaseDiagnostic {
+    number: u8,
+    profile: FixtureProfile,
+    target: ProcessFaultTarget,
+    inject: bool,
+    reached: Option<ProcessFaultState>,
+    error: Option<BridgeError>,
+    wiped: bool,
+    plan_wiped: bool,
+    complete: bool,
+    native_zeroed: bool,
+}
+
+impl FailedCaseDiagnostic {
+    fn report(&self) {
+        let _written = writeln!(std::io::stderr(),
+            "NATIVE_FAULT_FINAL case={} profile={:?} target={:?} inject={} reached={:?} error={:?} wiped={} plan_wiped={} complete={} native_zeroed={}",
+            self.number, self.profile, self.target, self.inject, self.reached, self.error,
+            self.wiped, self.plan_wiped, self.complete, self.native_zeroed);
+    }
+}
+
 struct ZeroWitness;
 
 impl ZeroWitness {
@@ -285,6 +386,8 @@ fn run() -> TestResult {
 }
 
 struct Fixture {
+    number: u8,
+    profile: FixtureProfile,
     surface: Surface,
     loopback: SharedLoopback,
     store: WindowsCleanupStore,
@@ -294,11 +397,53 @@ struct Fixture {
     reached: Option<ProcessFaultState>,
     exit_reached: Option<ProcessExitState>,
     evidence_complete: bool,
+    early_presence: Option<crate::RendererPresence>,
     prior_native_wipe: bool,
     deadline: Instant,
 }
 
+struct FailureFinish {
+    target: ProcessFaultTarget,
+    inject: bool,
+    actual_fault: bool,
+    native_zeroed: Option<bool>,
+    message: &'static str,
+}
+
 impl Fixture {
+    fn finish_failed_case(
+        self,
+        driver: CeremonyDriver,
+        result: Result<Verified, BridgeError>,
+        failure: Option<Box<dyn std::error::Error>>,
+        finish: FailureFinish,
+    ) -> TestResult {
+        let wiped = driver.request_clear() && driver.prf().iter().all(|byte| *byte == 0);
+        let plan_wiped =
+            !matches!(&result, Err(BridgeError::Quarantine(_))) || driver.plan_secrets_clear();
+        let error = result.as_ref().err().copied();
+        let complete = self.evidence_complete;
+        let mark = self.trace.borrow().first().copied();
+        let _written = writeln!(std::io::stderr(),
+            "NATIVE_FAULT_FINAL case={} profile={:?} target={:?} inject={} reached={:?} error={:?} wiped={} plan_wiped={} complete={} native_zeroed={:?}",
+            self.number, self.profile, finish.target, finish.inject, mark, error, wiped, plan_wiped, complete, finish.native_zeroed);
+        self.retire(driver, result, None)?;
+        let classification =
+            check_final_process_failures(finish.actual_fault.then_some(finish.target));
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        if error.is_none()
+            || !wiped
+            || !plan_wiped
+            || !complete
+            || finish.native_zeroed == Some(false)
+        {
+            return Err(format!("{}; driver error: {error:?}", finish.message).into());
+        }
+        classification
+    }
+
     fn resolve_attempt(
         &mut self,
         driver: &mut CeremonyDriver,
@@ -342,6 +487,8 @@ impl Fixture {
         let deadline = Instant::now() + Duration::from_secs(15);
         surface.set_deadline(deadline);
         Ok(Self {
+            number,
+            profile,
             surface,
             loopback,
             store,
@@ -351,6 +498,7 @@ impl Fixture {
             reached: None,
             exit_reached: None,
             evidence_complete: false,
+            early_presence: None,
             prior_native_wipe: false,
             deadline,
         })
@@ -557,14 +705,31 @@ fn run_case(
     let complete_before_cleanup = fixture.evidence_complete;
     let failures = crate::Native::process_failure_observations();
     let native_zeroed = native_zeroing_observed(&crate::Native::take_native_zero_observations());
+    FailedCaseDiagnostic {
+        number,
+        profile: FixtureProfile::Pending,
+        target,
+        inject,
+        reached,
+        error,
+        wiped: slot_wiped,
+        plan_wiped: plan_wiped_if_quarantined,
+        complete: complete_before_cleanup,
+        native_zeroed,
+    }
+    .report();
     fixture.retire(driver, result, None)?;
-    check_final_process_failures(inject.then_some(target))?;
+    let classification = check_final_process_failures(inject.then_some(target));
     if let Some(error) = failure {
         return Err(error);
     }
     if !complete_before_cleanup {
-        return Err("fault evidence was not established before cleanup".into());
+        return Err(format!(
+            "fault evidence was not established before cleanup; driver error: {error:?}"
+        )
+        .into());
     }
+    classification?;
     if !slot_wiped || !plan_wiped_if_quarantined {
         return Err("failed ceremony secrets were not wiped at their required boundary".into());
     }
@@ -688,7 +853,10 @@ impl Fixture {
         // the driver; the held callback still owns its result and STA.
         loop {
             match self.surface.recordless_controller_completion() {
-                Some(true) => return Ok(()),
+                Some(true) if controller_held_before_exit(&crate::Native::callback_order()) => {
+                    return Ok(())
+                }
+                Some(true) => return Err("recordless callback order was not established".into()),
                 Some(false) => return Err("recordless controller creation failed".into()),
                 None if Instant::now() >= self.deadline => {
                     return Err("recordless controller completion timed out".into())
@@ -754,6 +922,7 @@ impl Fixture {
 }
 
 fn run_recordless_case(runtime: &Path, root: &Path, number: u8, inject: bool) -> TestResult {
+    let _callback_order = CallbackOrderGuard::arm();
     crate::Native::reset_process_failure_observations();
     let mut fixture = Fixture::new(runtime, root, number, FixtureProfile::Pending)?;
     let mut driver = readiness::new_driver(CeremonyId::from_bytes([number; 16]), Instant::now())?;
@@ -1084,7 +1253,7 @@ impl Fixture {
                     };
                     self.handle = Some(
                         self.surface
-                            .inject_awaiting_load_fault(seal)
+                            .inject_awaiting_load_fault(ProcessFaultTarget::Browser, seal)
                             .map_err(|()| "awaiting-load process fault refused")?,
                     );
                     self.observe_fault_from(ProcessFaultTarget::Browser, mark)?;
@@ -1142,21 +1311,17 @@ fn run_awaiting_load(
         })
     });
     let (result, failure) = fixture.resolve_attempt(&mut driver, attempt);
-    let wiped = driver.request_clear() && driver.prf().iter().all(|byte| *byte == 0);
-    let plan_wiped =
-        !matches!(&result, Err(BridgeError::Quarantine(_))) || driver.plan_secrets_clear();
-    let failed = result.is_err();
-    let complete = fixture.evidence_complete;
-    fixture.retire(driver, result, None)?;
-    check_final_process_failures(inject.then_some(ProcessFaultTarget::Browser))?;
-    if let Some(error) = failure {
-        return Err(error);
-    }
-    if !failed || !wiped || !plan_wiped || !complete {
-        return Err("awaiting-load failure, wipe, or evidence was not established".into());
-    }
+    let finish = FailureFinish {
+        target: ProcessFaultTarget::Browser,
+        inject,
+        actual_fault: inject,
+        native_zeroed: None,
+        message: "awaiting-load failure, wipe, or evidence was not established",
+    };
+    fixture.finish_failed_case(driver, result, failure, finish)?;
     mark.ok_or_else(|| "awaiting-load state was not reached".into())
 }
+
 impl Fixture {
     fn drive_navigating(
         &mut self,
@@ -1186,7 +1351,7 @@ impl Fixture {
                     };
                     self.handle = Some(
                         self.surface
-                            .inject_navigating_fault(seal)
+                            .inject_navigating_fault(ProcessFaultTarget::Browser, seal)
                             .map_err(|()| "navigating process fault refused")?,
                     );
                     self.observe_fault_from(ProcessFaultTarget::Browser, mark)?;
@@ -1241,19 +1406,14 @@ fn run_navigating(
         })
     });
     let (result, failure) = fixture.resolve_attempt(&mut driver, attempt);
-    let wiped = driver.request_clear() && driver.prf().iter().all(|byte| *byte == 0);
-    let plan_wiped =
-        !matches!(&result, Err(BridgeError::Quarantine(_))) || driver.plan_secrets_clear();
-    let failed = result.is_err();
-    let complete = fixture.evidence_complete;
-    fixture.retire(driver, result, None)?;
-    check_final_process_failures(inject.then_some(ProcessFaultTarget::Browser))?;
-    if let Some(error) = failure {
-        return Err(error);
-    }
-    if !failed || !wiped || !plan_wiped || !complete {
-        return Err("navigating failure, wipe, or evidence was not established".into());
-    }
+    let finish = FailureFinish {
+        target: ProcessFaultTarget::Browser,
+        inject,
+        actual_fault: inject,
+        native_zeroed: None,
+        message: "navigating failure, wipe, or evidence was not established",
+    };
+    fixture.finish_failed_case(driver, result, failure, finish)?;
     mark.ok_or_else(|| "navigating state was not reached".into())
 }
 
@@ -1342,21 +1502,16 @@ fn run_posted_empty(
         fixture.drive_posted_empty(&mut driver, target, inject)
     }));
     let (result, failure) = fixture.resolve_attempt(&mut driver, attempt);
-    let wiped = driver.request_clear() && driver.prf().iter().all(|byte| *byte == 0);
-    let plan_wiped =
-        !matches!(&result, Err(BridgeError::Quarantine(_))) || driver.plan_secrets_clear();
-    let failed = result.is_err();
-    let complete = fixture.evidence_complete;
     let state = fixture.reached;
     let native_zeroed = native_zeroing_observed(&crate::Native::take_native_zero_observations());
-    fixture.retire(driver, result, None)?;
-    check_final_process_failures(inject.then_some(target))?;
-    if let Some(error) = failure {
-        return Err(error);
-    }
-    if !failed || !wiped || !plan_wiped || !complete || !native_zeroed {
-        return Err("empty-reply failure, wipe, or evidence was not established".into());
-    }
+    let finish = FailureFinish {
+        target,
+        inject,
+        actual_fault: inject,
+        native_zeroed: Some(native_zeroed),
+        message: "empty-reply failure, wipe, or evidence was not established",
+    };
+    fixture.finish_failed_case(driver, result, failure, finish)?;
     state.ok_or_else(|| "empty-reply state was not reached".into())
 }
 
@@ -1472,6 +1627,14 @@ impl Fixture {
         }
         loop {
             if let Some(success) = self.surface.pending_opening_completion() {
+                if !controller_invoked_after_exit(
+                    &crate::Native::callback_order(),
+                    browser.browser_pid,
+                ) {
+                    return Err(
+                        "controller completion was not invoked after the matching exit".into(),
+                    );
+                }
                 self.trace
                     .borrow_mut()
                     .push(ProcessFaultMark::ControllerCompletion(success));
@@ -1493,6 +1656,7 @@ fn run_pending_opening(
     inject: bool,
 ) -> Result<ProcessFaultMark, Box<dyn std::error::Error>> {
     crate::Native::reset_process_failure_observations();
+    let _callback_order = CallbackOrderGuard::arm();
     let mut fixture = Fixture::new(runtime, root, number, FixtureProfile::Pending)?;
     let ceremony_id = CeremonyId::from_bytes([number; 16]);
     let mut driver = readiness::new_driver(ceremony_id, Instant::now())?;
@@ -2295,6 +2459,8 @@ struct BeforeRecordStore<'a, 's> {
     inner: &'a mut WindowsCleanupStore,
     surface: &'a RefCell<&'s mut Surface>,
     inject: bool,
+    target: ProcessFaultTarget,
+    presence: Option<crate::RendererPresence>,
     deadline: Instant,
     trace: Trace,
     handle: Option<Box<dyn ProcessFaultHandle>>,
@@ -2331,13 +2497,35 @@ impl BeforeRecordStore<'_, '_> {
         {
             return Err("pre-record proposed identity or driver state mismatched".into());
         }
+        if self.target == ProcessFaultTarget::Renderer {
+            let presence = self
+                .surface
+                .borrow()
+                .early_renderer_presence()
+                .map_err(|()| "pre-record renderer snapshot unavailable or ambiguous")?;
+            if self
+                .surface
+                .borrow_mut()
+                .before_record_fault_state()
+                .map_err(|()| "pre-record state advanced")?
+                != browser
+            {
+                return Err("pre-record browser changed during renderer discovery".into());
+            }
+            self.presence = Some(presence);
+        }
         let mark = ProcessFaultMark::BeforeRecord {
             generation: 1,
             record_count: 0,
         };
         self.trace.borrow_mut().push(mark);
+        if let Some(presence) = self.presence {
+            self.trace
+                .borrow_mut()
+                .push(ProcessFaultMark::RendererPresence(presence));
+        }
         self.reached = true;
-        if self.inject {
+        if self.inject && self.presence != Some(crate::RendererPresence::Absent) {
             let seal = crate::FaultSeal {
                 trace: Rc::clone(&self.trace),
                 deadline: self.deadline,
@@ -2345,7 +2533,7 @@ impl BeforeRecordStore<'_, '_> {
             self.handle = Some(
                 self.surface
                     .borrow_mut()
-                    .inject_before_record_fault(seal)
+                    .inject_before_record_fault(self.target, seal)
                     .map_err(|()| "pre-record fault refused")?,
             );
             self.observe_before_record(browser, mark)?;
@@ -2371,7 +2559,7 @@ impl BeforeRecordStore<'_, '_> {
             if let Some(event) = self
                 .surface
                 .borrow()
-                .posted_fault_event(ProcessFaultTarget::Browser)
+                .posted_fault_event(self.target)
                 .map_err(|()| "pre-record browser exit mismatched")?
             {
                 let handle = self
@@ -2385,15 +2573,22 @@ impl BeforeRecordStore<'_, '_> {
                 self.trace
                     .borrow_mut()
                     .extend([event, ProcessFaultMark::ExitCode(code)]);
-                if handle.identity() != browser
-                    || self.trace.borrow().as_slice()
-                        != [
-                            first,
-                            ProcessFaultMark::Selected(browser),
-                            ProcessFaultMark::TerminationCall,
-                            ProcessFaultMark::OwnBrowserExited,
-                            ProcessFaultMark::ExitCode(0x535),
-                        ]
+                let selected = handle.identity();
+                let mut expected = vec![first];
+                if let Some(presence) = self.presence {
+                    expected.push(ProcessFaultMark::RendererPresence(presence));
+                }
+                expected.extend([
+                    ProcessFaultMark::Selected(selected),
+                    ProcessFaultMark::TerminationCall,
+                    match self.target {
+                        ProcessFaultTarget::Browser => ProcessFaultMark::OwnBrowserExited,
+                        ProcessFaultTarget::Renderer => ProcessFaultMark::MainRendererExited,
+                    },
+                    ProcessFaultMark::ExitCode(0x535),
+                ]);
+                if (self.target == ProcessFaultTarget::Browser && selected != browser)
+                    || self.trace.borrow().as_slice() != expected.as_slice()
                 {
                     return Err("pre-record fault evidence incomplete".into());
                 }
@@ -2437,13 +2632,40 @@ impl CleanupStore for BeforeRecordStore<'_, '_> {
 }
 
 fn run_before_record_cases(runtime: &Path, root: &Path) -> TestResult {
-    let control = run_before_record(runtime, root, 0x78, false)?;
-    let fault = run_before_record(runtime, root, 0x79, true)?;
+    let control = run_before_record(runtime, root, 0x78, ProcessFaultTarget::Browser, false)?;
+    let fault = run_before_record(runtime, root, 0x79, ProcessFaultTarget::Browser, true)?;
     assert_eq!(
         control, fault,
-        "pre-record control and fault reached different states"
+        "pre-record browser control and fault reached different states"
     );
     Ok(())
+}
+
+#[test]
+fn native_before_record_renderer_classification_and_fault() -> TestResult {
+    let _port = crate::Native::fixed_port_fixture();
+    let root = FixtureRoot::new()?;
+    let runtime = std::env::var_os("OWNER_BRIDGE_TEST_RUNTIME")
+        .ok_or("canonical retained runtime is required by process qualification")?;
+    let control = run_before_record(
+        Path::new(&runtime),
+        &root.0,
+        0x7a,
+        ProcessFaultTarget::Renderer,
+        false,
+    )?;
+    let fault = run_before_record(
+        Path::new(&runtime),
+        &root.0,
+        0x7b,
+        ProcessFaultTarget::Renderer,
+        true,
+    )?;
+    assert_eq!(
+        control, fault,
+        "pre-record renderer control and fault reached different states or observations"
+    );
+    root.remove()
 }
 
 impl Fixture {
@@ -2451,15 +2673,18 @@ impl Fixture {
         &mut self,
         driver: &mut CeremonyDriver,
         ceremony_id: CeremonyId,
+        target: ProcessFaultTarget,
         inject: bool,
     ) -> Result<Step, Box<dyn std::error::Error>> {
-        let (attempt, handle, failure, reached, written) = {
+        let (attempt, handle, failure, reached, written, presence) = {
             let shared = RefCell::new(&mut self.surface);
             let mut surface = SharedSurfacePort { inner: &shared };
             let mut store = BeforeRecordStore {
                 inner: &mut self.store,
                 surface: &shared,
                 inject,
+                target,
+                presence: None,
                 deadline: self.deadline,
                 trace: Rc::clone(&self.trace),
                 handle: None,
@@ -2482,7 +2707,8 @@ impl Fixture {
             let failure = store.failure;
             let reached = store.reached;
             let written = store.written;
-            (attempt, handle, failure, reached, written)
+            let presence = store.presence;
+            (attempt, handle, failure, reached, written, presence)
         };
         self.handle = handle;
         let step = match attempt {
@@ -2493,6 +2719,7 @@ impl Fixture {
             return Err(error.into());
         }
         if reached {
+            self.early_presence = presence;
             if !written
                 || self.trace.borrow().last() != Some(&ProcessFaultMark::RecordWritten)
                 || self.store.records()?.len() != 1
@@ -2508,6 +2735,7 @@ impl Fixture {
         &mut self,
         driver: &mut CeremonyDriver,
         ceremony_id: CeremonyId,
+        target: ProcessFaultTarget,
         inject: bool,
     ) -> DriveResult {
         let mut cancelled = false;
@@ -2519,9 +2747,9 @@ impl Fixture {
                     &mut self.store,
                 ))
             } else {
-                self.before_record_step(driver, ceremony_id, inject)?
+                self.before_record_step(driver, ceremony_id, target, inject)?
             };
-            if self.evidence_complete && !inject && !cancelled {
+            if self.evidence_complete && self.handle.is_none() && !cancelled {
                 self.surface.controller_lost();
                 cancelled = true;
             }
@@ -2538,29 +2766,416 @@ fn run_before_record(
     runtime: &Path,
     root: &Path,
     number: u8,
+    target: ProcessFaultTarget,
     inject: bool,
-) -> Result<ProcessFaultMark, Box<dyn std::error::Error>> {
+) -> Result<(ProcessFaultMark, Option<crate::RendererPresence>), Box<dyn std::error::Error>> {
     crate::Native::reset_process_failure_observations();
     let mut fixture = Fixture::new(runtime, root, number, FixtureProfile::Pending)?;
     let ceremony_id = CeremonyId::from_bytes([number; 16]);
     let mut driver = readiness::new_driver(ceremony_id, Instant::now())?;
     let attempt = catch_unwind(AssertUnwindSafe(|| {
-        fixture.drive_before_record(&mut driver, ceremony_id, inject)
+        fixture.drive_before_record(&mut driver, ceremony_id, target, inject)
     }));
     let (result, failure) = fixture.resolve_attempt(&mut driver, attempt);
-    let wiped = driver.request_clear() && driver.prf().iter().all(|byte| *byte == 0);
-    let plan_wiped =
-        !matches!(&result, Err(BridgeError::Quarantine(_))) || driver.plan_secrets_clear();
-    let failed = result.is_err();
-    let complete = fixture.evidence_complete;
     let mark = fixture.trace.borrow().first().copied();
-    fixture.retire(driver, result, None)?;
-    check_final_process_failures(inject.then_some(ProcessFaultTarget::Browser))?;
-    if let Some(error) = failure {
-        return Err(error);
+    let presence = fixture.early_presence;
+    let actual_fault = fixture.handle.is_some();
+    let _written = writeln!(std::io::stderr(), "NATIVE_EARLY_RENDERER phase=before_record presence={presence:?} declared_fault={inject} actual_fault={actual_fault}");
+    let finish = FailureFinish {
+        target,
+        inject,
+        actual_fault,
+        native_zeroed: None,
+        message: "pre-record failure, wipe, or evidence was not established",
+    };
+    fixture.finish_failed_case(driver, result, failure, finish)?;
+    Ok((mark.ok_or("pre-record point was not reached")?, presence))
+}
+
+#[derive(Clone, Copy, Debug)]
+enum EarlyRendererPhase {
+    Navigating,
+    AwaitingLoad,
+}
+
+#[test]
+fn native_early_renderer_classification_and_faults() -> TestResult {
+    let _port = crate::Native::fixed_port_fixture();
+    let root = FixtureRoot::new()?;
+    let runtime = std::env::var_os("OWNER_BRIDGE_TEST_RUNTIME")
+        .ok_or("canonical retained runtime is required by process qualification")?;
+    run_early_renderer_cases(Path::new(&runtime), &root.0)?;
+    root.remove()
+}
+
+fn run_early_renderer_cases(runtime: &Path, root: &Path) -> TestResult {
+    for (number, phase) in [
+        (0x80, EarlyRendererPhase::Navigating),
+        (0x82, EarlyRendererPhase::AwaitingLoad),
+    ] {
+        let control = run_early_renderer(runtime, root, number, phase, false)?;
+        let fault = run_early_renderer(runtime, root, number + 1, phase, true)?;
+        assert_eq!(
+            control, fault,
+            "early renderer control and fault reached different states or observations"
+        );
     }
-    if !failed || !wiped || !plan_wiped || !complete {
-        return Err("pre-record failure, wipe, or evidence was not established".into());
+    Ok(())
+}
+
+impl Fixture {
+    fn early_renderer_state(
+        &mut self,
+        driver: &CeremonyDriver,
+        phase: EarlyRendererPhase,
+    ) -> Result<Option<ProcessFaultMark>, Box<dyn std::error::Error>> {
+        match phase {
+            EarlyRendererPhase::Navigating if self.surface.navigating_fault_ready() => self
+                .surface
+                .navigating_fault_state(driver.generation(), driver.posts())
+                .map(Some)
+                .map_err(|()| "renderer navigation state indeterminate".into()),
+            EarlyRendererPhase::AwaitingLoad if self.surface.awaiting_load_fault_ready() => self
+                .surface
+                .awaiting_load_fault_state(driver.generation(), driver.posts())
+                .map(Some)
+                .map_err(|()| "renderer load state indeterminate".into()),
+            _ => Ok(None),
+        }
     }
-    mark.ok_or_else(|| "pre-record point was not reached".into())
+
+    fn drive_early_renderer(
+        &mut self,
+        driver: &mut CeremonyDriver,
+        phase: EarlyRendererPhase,
+        inject: bool,
+    ) -> Result<(Result<Verified, BridgeError>, ProcessFaultMark), Box<dyn std::error::Error>> {
+        let mut reached = None;
+        loop {
+            let step = driver.step(&mut readiness::env(
+                &mut self.surface,
+                &mut self.loopback,
+                &mut self.store,
+            ));
+            if reached.is_none() && matches!(&step, Step::Pending) {
+                if let Some(mark) = self.early_renderer_state(driver, phase)? {
+                    let presence = self
+                        .surface
+                        .early_renderer_presence()
+                        .map_err(|()| "renderer snapshot unavailable or ambiguous")?;
+                    // Recheck the phase after the complete pair of snapshots.
+                    if self.early_renderer_state(driver, phase)? != Some(mark) {
+                        return Err("renderer phase advanced during discovery".into());
+                    }
+                    self.early_presence = Some(presence);
+                    self.trace
+                        .borrow_mut()
+                        .extend([mark, ProcessFaultMark::RendererPresence(presence)]);
+                    if inject && presence == crate::RendererPresence::Unique {
+                        let seal = crate::FaultSeal {
+                            trace: Rc::clone(&self.trace),
+                            deadline: self.deadline,
+                        };
+                        self.handle = Some(
+                            match phase {
+                                EarlyRendererPhase::Navigating => self
+                                    .surface
+                                    .inject_navigating_fault(ProcessFaultTarget::Renderer, seal),
+                                EarlyRendererPhase::AwaitingLoad => self
+                                    .surface
+                                    .inject_awaiting_load_fault(ProcessFaultTarget::Renderer, seal),
+                            }
+                            .map_err(|()| "early renderer fault refused")?,
+                        );
+                        self.observe_early_renderer(mark)?;
+                    } else {
+                        self.evidence_complete = true;
+                    }
+                    let owners = match phase {
+                        EarlyRendererPhase::Navigating => {
+                            self.surface.navigating_fault_owners_retained()
+                        }
+                        EarlyRendererPhase::AwaitingLoad => {
+                            self.surface.awaiting_load_fault_owners_retained()
+                        }
+                    };
+                    if !self.evidence_complete
+                        || !owners
+                        || !matches!(self.surface.open(&competing_spec()), Poll::Ready(Err(_)))
+                    {
+                        return Err("early renderer owners or blocked admission missing".into());
+                    }
+                    let owners_after = match phase {
+                        EarlyRendererPhase::Navigating => {
+                            self.surface.navigating_fault_owners_retained()
+                        }
+                        EarlyRendererPhase::AwaitingLoad => {
+                            self.surface.awaiting_load_fault_owners_retained()
+                        }
+                    };
+                    if !owners_after {
+                        return Err("early renderer owners changed during blocked admission".into());
+                    }
+                    if self.handle.is_none() {
+                        self.surface.controller_lost();
+                    }
+                    reached = Some(mark);
+                }
+            }
+            match step {
+                Step::Finished(result) => {
+                    return Ok((result, reached.ok_or("early renderer phase not reached")?))
+                }
+                Step::Done => return Err("early renderer driver ended without result".into()),
+                Step::Pending => readiness::pump(&self.surface)?,
+            }
+        }
+    }
+
+    fn observe_early_renderer(&mut self, first: ProcessFaultMark) -> TestResult {
+        loop {
+            if let Some(event) = self
+                .surface
+                .posted_fault_event(ProcessFaultTarget::Renderer)
+                .map_err(|()| "early renderer event mismatched")?
+            {
+                let held = self
+                    .handle
+                    .as_ref()
+                    .ok_or("early renderer handle missing")?;
+                let identity = held.identity();
+                let code = held
+                    .exit_code()
+                    .map_err(|()| "early renderer exit query failed")?
+                    .ok_or("early renderer exit pending")?;
+                self.trace
+                    .borrow_mut()
+                    .extend([event, ProcessFaultMark::ExitCode(code)]);
+                if self.trace.borrow().as_slice()
+                    != [
+                        first,
+                        ProcessFaultMark::RendererPresence(crate::RendererPresence::Unique),
+                        ProcessFaultMark::Selected(identity),
+                        ProcessFaultMark::TerminationCall,
+                        ProcessFaultMark::MainRendererExited,
+                        ProcessFaultMark::ExitCode(0x535),
+                    ]
+                {
+                    return Err("early renderer ordered evidence incomplete".into());
+                }
+                self.evidence_complete = true;
+                return Ok(());
+            }
+            if Instant::now() >= self.deadline {
+                return Err("early renderer event timed out".into());
+            }
+            readiness::pump(&self.surface)?;
+        }
+    }
+}
+
+fn run_early_renderer(
+    runtime: &Path,
+    root: &Path,
+    number: u8,
+    phase: EarlyRendererPhase,
+    inject: bool,
+) -> Result<(ProcessFaultMark, crate::RendererPresence), Box<dyn std::error::Error>> {
+    crate::Native::reset_process_failure_observations();
+    let mut fixture = Fixture::new(runtime, root, number, FixtureProfile::Pending)?;
+    let mut driver = readiness::new_driver(CeremonyId::from_bytes([number; 16]), Instant::now())?;
+    let attempt = catch_unwind(AssertUnwindSafe(|| {
+        fixture.drive_early_renderer(&mut driver, phase, inject)
+    }));
+    let mut mark = None;
+    let attempt = attempt.map(|result| {
+        result.map(|(outcome, state)| {
+            mark = Some(state);
+            outcome
+        })
+    });
+    let (result, failure) = fixture.resolve_attempt(&mut driver, attempt);
+    let presence = fixture.early_presence;
+    let actual_fault = fixture.handle.is_some();
+    let _written = writeln!(std::io::stderr(), "NATIVE_EARLY_RENDERER phase={phase:?} presence={presence:?} declared_fault={inject} actual_fault={actual_fault}");
+    let finish = FailureFinish {
+        target: ProcessFaultTarget::Renderer,
+        inject,
+        actual_fault,
+        native_zeroed: None,
+        message: "early renderer failure, wipe, or evidence missing",
+    };
+    fixture.finish_failed_case(driver, result, failure, finish)?;
+    Ok((
+        mark.ok_or("early renderer state missing")?,
+        presence.ok_or("early renderer snapshot missing")?,
+    ))
+}
+
+#[derive(Clone, Copy)]
+enum EnvironmentCase {
+    HeldResult,
+    LateInvocation,
+}
+
+fn environment_callback_order(
+    order: &[crate::NativeCallbackMoment],
+    case: EnvironmentCase,
+) -> bool {
+    use crate::NativeCallbackMoment::{DriverTimeout, EnvironmentCompletion};
+    let mut callback = None;
+    let mut timeout = None;
+    for (index, moment) in order.iter().enumerate() {
+        match moment {
+            EnvironmentCompletion(true) if callback.is_none() => callback = Some(index),
+            DriverTimeout if timeout.is_none() => timeout = Some(index),
+            _ => return false,
+        }
+    }
+    match (callback, timeout, case) {
+        (Some(callback), Some(timeout), EnvironmentCase::HeldResult) => callback < timeout,
+        (Some(callback), Some(timeout), EnvironmentCase::LateInvocation) => timeout < callback,
+        _ => false,
+    }
+}
+
+#[test]
+fn environment_order_distinguishes_held_result_from_late_invocation() {
+    use crate::NativeCallbackMoment::{DriverTimeout, EnvironmentCompletion, Overflow};
+    let held = [EnvironmentCompletion(true), DriverTimeout];
+    let late = [DriverTimeout, EnvironmentCompletion(true)];
+    assert!(environment_callback_order(
+        &held,
+        EnvironmentCase::HeldResult
+    ));
+    assert!(!environment_callback_order(
+        &held,
+        EnvironmentCase::LateInvocation
+    ));
+    assert!(environment_callback_order(
+        &late,
+        EnvironmentCase::LateInvocation
+    ));
+    assert!(!environment_callback_order(
+        &late,
+        EnvironmentCase::HeldResult
+    ));
+    assert!(!environment_callback_order(
+        &[DriverTimeout, EnvironmentCompletion(false)],
+        EnvironmentCase::LateInvocation
+    ));
+    assert!(!environment_callback_order(
+        &[DriverTimeout, EnvironmentCompletion(true), Overflow],
+        EnvironmentCase::LateInvocation
+    ));
+}
+
+#[test]
+fn native_pre_environment_held_completion_and_retirement() -> TestResult {
+    let _port = crate::Native::fixed_port_fixture();
+    let runtime = std::env::var_os("OWNER_BRIDGE_TEST_RUNTIME")
+        .ok_or("canonical retained runtime is required by process qualification")?;
+    run_pre_environment(Path::new(&runtime), 0x7e, EnvironmentCase::HeldResult)
+}
+
+#[test]
+fn native_pre_environment_late_callback_and_retirement() -> TestResult {
+    let _port = crate::Native::fixed_port_fixture();
+    let runtime = std::env::var_os("OWNER_BRIDGE_TEST_RUNTIME")
+        .ok_or("canonical retained runtime is required by process qualification")?;
+    run_pre_environment(Path::new(&runtime), 0x7f, EnvironmentCase::LateInvocation)
+}
+
+fn run_pre_environment(runtime: &Path, number: u8, case: EnvironmentCase) -> TestResult {
+    use pos_owner_bridge::LifecycleCode;
+    let root = FixtureRoot::new()?;
+    let _callback_order = CallbackOrderGuard::arm();
+    let mut fixture = Fixture::new(runtime, &root.0, number, FixtureProfile::Pending)?;
+    let started = Instant::now();
+    let mut driver = readiness::new_driver(CeremonyId::from_bytes([number; 16]), started)?;
+    let attempt = catch_unwind(AssertUnwindSafe(|| {
+        let initial = driver.step(&mut readiness::env(
+            &mut fixture.surface,
+            &mut fixture.loopback,
+            &mut fixture.store,
+        ));
+        let pending = matches!(initial, Step::Pending)
+            && fixture.surface.pre_environment_completion() == Ok(None);
+        // Dispatch genuine callbacks while leaving the driver unstepped until
+        // its original readiness deadline; callback delivery is not held.
+        let deadline = started + pos_owner_bridge::ceremony::timing::READINESS;
+        let mut pump_failed = false;
+        while Instant::now() < deadline {
+            if readiness::pump(&fixture.surface).is_err() {
+                pump_failed = true;
+            }
+        }
+        let at_deadline = fixture.surface.pre_environment_completion();
+        let result = match driver.step(&mut readiness::env(
+            &mut fixture.surface,
+            &mut fixture.loopback,
+            &mut fixture.store,
+        )) {
+            Step::Finished(result) => result,
+            _ => readiness::cancel_driver(
+                &mut driver,
+                &mut fixture.surface,
+                &mut fixture.loopback,
+                &mut fixture.store,
+            ),
+        };
+        crate::Native::record_callback(crate::NativeCallbackMoment::DriverTimeout);
+        (result, pending, pump_failed, at_deadline)
+    }));
+    let (result, pending, pump_failed, at_deadline) = match attempt {
+        Ok(observation) => observation,
+        Err(_) => (
+            readiness::cancel_driver(
+                &mut driver,
+                &mut fixture.surface,
+                &mut fixture.loopback,
+                &mut fixture.store,
+            ),
+            false,
+            true,
+            Err(()),
+        ),
+    };
+    let timed_out = matches!(
+        &result,
+        Err(BridgeError::Lifecycle(LifecycleCode::ReadinessTimeout))
+    );
+    let wiped = driver.request_clear() && driver.prf().iter().all(|byte| *byte == 0);
+    // The real failed-opening path retains the callback until it completes.
+    retirement::retire(
+        &mut fixture.surface,
+        &mut fixture.loopback,
+        &mut fixture.store,
+        driver,
+        result,
+        |_, _, _| {},
+    );
+    let order = crate::Native::callback_order();
+    let ordered = environment_callback_order(&order, case);
+    let no_record = fixture.store.records()?.is_empty();
+    let retained_orphan = fixture.store.folders()?.len() == 1;
+    let idle = fixture.surface.idle();
+    drop(fixture.surface);
+    Rc::get_mut(&mut fixture.factory)
+        .ok_or("pre-environment factory still shared")?
+        .stop()?;
+    // No process/exit was established. Preserve the recordless folder for real
+    // later recovery; neither an orphan sweep nor remove_dir_all is evidence.
+    if !pending
+        || pump_failed
+        || !timed_out
+        || !wiped
+        || !ordered
+        || !no_record
+        || !retained_orphan
+        || !idle
+    {
+        return Err(format!("pre-environment witness failed: pending={pending} completion={at_deadline:?} timeout={timed_out} wiped={wiped} ordered={ordered} no_record={no_record} retained_orphan={retained_orphan} idle={idle}").into());
+    }
+    Ok(())
 }
