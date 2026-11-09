@@ -1,13 +1,18 @@
 {
-  "description": "The ADR-059 rows whose verifier-accepted NIA1 may flip a matrix case to executed (ADR-062 Revision 8 slices N1-N4, owner answer Q9). Only the listed modes are ever flipped; Air-Gapped stays non-executed until slice N7. Read by generate_non_interference_fixtures.py, check_plugin_conformance_expected.py, verify-conformance-fixtures.sh and the pos-experiment evidence test.",
+  "description": "The ADR-059 rows whose verifier-accepted NIA1 may flip a matrix case to executed (ADR-062 Revision 8 slices N1-N4 and N1b, owner answer Q9). Only the listed modes are ever flipped; Air-Gapped stays non-executed until slice N7. Read by generate_non_interference_fixtures.py, check_plugin_conformance_expected.py, verify-conformance-fixtures.sh and the pos-experiment evidence test.",
   "rows": [
     "NI-TOOL-001",
+    "NI-CACHE-002",
     "NI-STATE-003",
+    "NI-OBS-004",
+    "NI-TIME-005",
     "NI-PUBLIC-006",
     "NI-EVAL-007",
     "NI-FORK-008",
+    "NI-ARCHIVE-009",
     "NI-NET-010",
-    "NI-SERVICE-011"
+    "NI-SERVICE-011",
+    "NI-CRASH-012"
   ],
   "modes": [
     "L",
