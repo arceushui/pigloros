@@ -190,8 +190,7 @@ pub(super) fn read_output(reader: &mut EnvelopeReader<'_>) -> Decoded<PluginOutp
     let next_state_schema = reader.bytes()?;
     let mut next_state_bytes = Zeroizing::new(read_bytes(reader, MAX_STATE_BYTES_V1)?);
     let mut trace_annotations = read_private_list(reader, MAX_RECORDS, read_annotation)?;
-    let mut consumed_dependencies =
-        read_private_list(reader, MAX_DIGESTS, |reader| reader.bytes())?;
+    let mut consumed_dependencies = read_private_list(reader, MAX_DIGESTS, EnvelopeReader::bytes)?;
     let output_digest = reader.bytes()?;
     Ok(PluginOutputV1 {
         invocation_id,
@@ -223,7 +222,7 @@ fn read_draft(reader: &mut EnvelopeReader<'_>) -> Decoded<EventDraftV1> {
     let entity_id = reader.bytes()?;
     let mut event_type = Zeroizing::new(read_text(reader, MAX_TEXT_BYTES)?);
     let mut canonical_payload = Zeroizing::new(read_bytes(reader, MAX_EVENT_PAYLOAD_BYTES)?);
-    let mut dependency_digests = read_private_list(reader, MAX_DIGESTS, |reader| reader.bytes())?;
+    let mut dependency_digests = read_private_list(reader, MAX_DIGESTS, EnvelopeReader::bytes)?;
     Ok(EventDraftV1 {
         event_schema_id,
         entity_id,
@@ -237,7 +236,7 @@ fn read_annotation(reader: &mut EnvelopeReader<'_>) -> Decoded<TraceAnnotationV1
     reader.fixed_array(3)?;
     let annotation_schema_id = read_u32(reader)?;
     let mut canonical_bytes = Zeroizing::new(read_bytes(reader, MAX_TRACE_ANNOTATION_BYTES_V1)?);
-    let mut dependency_digests = read_private_list(reader, MAX_DIGESTS, |reader| reader.bytes())?;
+    let mut dependency_digests = read_private_list(reader, MAX_DIGESTS, EnvelopeReader::bytes)?;
     Ok(TraceAnnotationV1 {
         annotation_schema_id,
         canonical_bytes: std::mem::take(&mut *canonical_bytes),
