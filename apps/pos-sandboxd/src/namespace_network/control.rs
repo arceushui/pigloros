@@ -300,7 +300,7 @@ fn attempt_host_links<T: NetlinkTransport>(
 }
 
 /// `deleted`, with a link that no longer exists counted as deleted.
-fn already_gone(deleted: Result<(), NetlinkError>) -> Result<(), NetlinkError> {
+const fn already_gone(deleted: Result<(), NetlinkError>) -> Result<(), NetlinkError> {
     match deleted {
         Err(NetlinkError::Kernel(route::NO_SUCH_LINK)) => Ok(()),
         other => other,
