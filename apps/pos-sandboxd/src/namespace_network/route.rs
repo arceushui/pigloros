@@ -302,8 +302,8 @@ fn observed_route(message: RouteMessage) -> Result<Option<ObservedRoute>, Netlin
     for attribute in message.attributes {
         match attribute {
             RouteAttribute::Table(value) => table = value,
-            RouteAttribute::Destination(value) => destination = ip(value),
-            RouteAttribute::Gateway(value) => gateway = Some(ip(value)),
+            RouteAttribute::Destination(value) => destination = ip(&value),
+            RouteAttribute::Gateway(value) => gateway = Some(ip(&value)),
             RouteAttribute::Oif(value) => link = Some(value),
             RouteAttribute::PrefSource(_)
             | RouteAttribute::Priority(_)
@@ -338,8 +338,8 @@ fn observed_route(message: RouteMessage) -> Result<Option<ObservedRoute>, Netlin
 }
 
 /// The IP address `address` holds, if any.
-fn ip(address: RouteAddress) -> Option<IpAddr> {
-    match address {
+fn ip(address: &RouteAddress) -> Option<IpAddr> {
+    match *address {
         RouteAddress::Inet(address) => Some(IpAddr::V4(address)),
         RouteAddress::Inet6(address) => Some(IpAddr::V6(address)),
         _ => None,
