@@ -26,10 +26,50 @@ def require_option_once(text: str, option: str, source: Path) -> None:
 # Owner decision 2026-11-09 (#911): the one runner that may add capabilities,
 # exactly these, for the Local namespace adapter tests that own it.
 NET_ADMIN_RUNNER = "run-isolated-with-net-admin-test.sh"
-NET_ADMIN_CAPABILITIES = ("--cap-add NET_ADMIN", "--cap-add SYS_ADMIN")
+NET_ADMIN_CAPABILITIES = ["NET_ADMIN", "SYS_ADMIN"]
 NET_ADMIN_OWNER_ROOT = "apps/pos-sandboxd/src/namespace_network/"
-NET_ADMIN_TEST_PREFIX = "namespace_network::netlink::tests::privileged::*) ;;"
+# The exact guards that run before Docker: only a pos-sandboxd test harness
+# under target/, never the daemon, only the named privileged tests, no comma
+# in a bind source, and a read-only worktree bind checked inside the container.
+NET_ADMIN_GUARDS = (
+    "readonly TEST_DIRECTORY=$(dirname -- \"$TEST_BINARY\")",
+    "readonly TEST_RELATIVE=${TEST_BINARY#\"$REPOSITORY_ROOT\"/}",
+    "readonly TEST_TARGET='^target/([A-Za-z0-9_-]+/){1,2}deps/pos_sandboxd-[0-9a-f]{16}$'",
+    "if [[ ! $TEST_RELATIVE =~ $TEST_TARGET || ! -f $TEST_BINARY || ! -x $TEST_BINARY ||\n"
+    "  $TEST_BINARY -ef $TEST_DIRECTORY/../pos-sandboxd ]]; then\n"
+    '  echo "only the pos-sandboxd library test harness may use this runner" >&2\n'
+    "  exit 2\n"
+    "fi",
+    "readonly TEST_PATTERN='^namespace_network::netlink::tests::privileged::[a-z0-9_]+$'",
+    "if [[ ! $TEST_NAME =~ $TEST_PATTERN ]]; then\n"
+    '  echo "only the #911 namespace adapter tests may use this runner" >&2\n'
+    "  exit 2\n"
+    "fi",
+    "if [[ $REPOSITORY_ROOT == *,* ]]; then",
+    "  if [[ $profile_directory == *,* ]]; then",
+    "readonly READ_ONLY_PROBE='if [ -w \"$1\" ]; then echo \"the worktree bind is writable\" >&2; "
+    "exit 1; fi; shift; exec \"$@\"'",
+    '/bin/sh -c "$READ_ONLY_PROBE" read-only-probe "$REPOSITORY_ROOT" \\\n'
+    '  "$TEST_BINARY" --exact "$TEST_NAME" --nocapture',
+)
 CAP_ADD = r"(?<![A-Za-z0-9_-])--cap-add(?=$|[=\s])"
+CAP_ADD_VALUE = r"(?<![A-Za-z0-9_-])--cap-add[ =]+(\S+)"
+# Options that would widen what a test container sees or may do.
+FORBIDDEN_OPTIONS = (
+    "--device",
+    "--pid",
+    "--ipc",
+    "--uts",
+    "--userns",
+    "--cgroupns",
+    "-v",
+    "--volume",
+    "--user",
+    "-u",
+    "--env-file",
+    "--privileged",
+    "--group-add",
+)
 
 
 def reject(text: str, pattern: str, description: str, source: Path) -> None:
@@ -146,22 +186,31 @@ def main() -> None:
             runner_path,
         )
         if runner_path.name == NET_ADMIN_RUNNER:
-            for fragment in (*NET_ADMIN_CAPABILITIES, NET_ADMIN_TEST_PREFIX):
+            for fragment in NET_ADMIN_GUARDS:
                 require(runner, fragment, runner_path)
-            if len(re.findall(CAP_ADD, runner, flags=re.MULTILINE)) != len(
-                NET_ADMIN_CAPABILITIES
+            capabilities = sorted(re.findall(CAP_ADD_VALUE, runner, flags=re.MULTILINE))
+            if (
+                capabilities != NET_ADMIN_CAPABILITIES
+                or len(re.findall(CAP_ADD, runner, flags=re.MULTILINE)) != 2
             ):
                 raise SystemExit(
-                    f"{runner_path}: only {', '.join(NET_ADMIN_CAPABILITIES)} may be added"
+                    f"{runner_path}: only {', '.join(NET_ADMIN_CAPABILITIES)} may be added;"
+                    f" found {capabilities}"
                 )
         else:
             reject(runner, CAP_ADD, "capability addition", runner_path)
-        reject(
-            runner,
-            r"(?<![A-Za-z0-9_-])--privileged(?=$|[=\s])",
-            "privileged container",
-            runner_path,
-        )
+        for option in FORBIDDEN_OPTIONS:
+            reject(
+                runner,
+                rf"(?<![A-Za-z0-9_-]){re.escape(option)}(?=$|[=\s])",
+                f"option {option}",
+                runner_path,
+            )
+        mounts = len(re.findall(r"(?<![A-Za-z0-9_-])--mount(?=$|[=\s])", runner))
+        if mounts != 2:
+            raise SystemExit(
+                f"{runner_path}: only the worktree and profile binds may be mounted; found {mounts}"
+            )
         reject(
             runner,
             r"source=\$profile_directory,target=/pigloros-profile(?:[,\"\s]|$)",

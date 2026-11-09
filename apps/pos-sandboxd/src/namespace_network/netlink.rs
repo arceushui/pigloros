@@ -5,7 +5,8 @@
 //! kernel's replies until every acknowledged request is answered or a dump
 //! ends. Any reply it cannot attribute to an outstanding request, any
 //! interrupted dump and any truncated datagram is an error: the session never
-//! guesses. [`in_namespace`] runs work on a dedicated thread that has entered
+//! guesses. A session that returned an error may still have replies queued,
+//! so its caller discards it and opens a new one. [`in_namespace`] runs work on a dedicated thread that has entered
 //! a namespace, so a socket opened there stays bound to that namespace.
 //!
 //! No other netlink crate performs I/O: `netlink-packet-*` only encodes and
@@ -14,6 +15,7 @@
 use std::collections::BTreeSet;
 use std::os::fd::{BorrowedFd, OwnedFd};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::Duration;
 
 use netlink_packet_core::{
     NetlinkDeserializable, NetlinkHeader, NetlinkMessage, NetlinkPayload, NetlinkSerializable,
@@ -21,8 +23,9 @@ use netlink_packet_core::{
 };
 use netlink_packet_route::link::{InfoKind, LinkAttribute, LinkFlags, LinkInfo, LinkMessage};
 use netlink_packet_route::RouteNetlinkMessage;
-use rustix::io::Errno;
+use rustix::io::{retry_on_intr, Errno};
 use rustix::net::netlink::{self, SocketAddrNetlink};
+use rustix::net::sockopt::{set_socket_timeout, Timeout};
 use rustix::net::{AddressFamily, RecvFlags, SendFlags, SocketFlags, SocketType};
 use rustix::thread::{move_into_link_name_space, LinkNameSpaceType};
 
@@ -32,15 +35,18 @@ use super::{LinkKind, ObservedLink};
 /// well below it; a larger one is refused as truncated.
 const RECEIVE_BUFFER: usize = 1 << 16;
 
+/// How long a session waits for any one reply datagram before it fails.
+pub const RECEIVE_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Why a netlink exchange failed.
 #[derive(Debug, thiserror::Error)]
 pub enum NetlinkError {
-    /// A socket call failed.
+    /// A socket call failed, or no reply arrived in time.
     #[error("a netlink socket call failed")]
     Io(#[from] Errno),
-    /// The kernel accepted only part of a datagram.
-    #[error("the kernel accepted only part of a netlink request")]
-    ShortSend,
+    /// An exchange held no request.
+    #[error("a netlink exchange held no request")]
+    Empty,
     /// A reply did not fit the receive buffer.
     #[error("a netlink reply did not fit the receive buffer")]
     Truncated,
@@ -69,13 +75,14 @@ pub trait NetlinkTransport {
     /// Send one datagram to the kernel.
     ///
     /// # Errors
-    /// Fails if the kernel does not accept the whole datagram.
+    /// Fails if the kernel does not accept the datagram.
     fn send(&self, datagram: &[u8]) -> Result<(), NetlinkError>;
 
     /// Receive one datagram from the kernel.
     ///
     /// # Errors
-    /// Fails if the socket call fails or the datagram does not fit.
+    /// Fails if the socket call fails, no datagram arrives in time, or the
+    /// datagram does not fit.
     fn receive(&self) -> Result<Vec<u8>, NetlinkError>;
 }
 
@@ -85,34 +92,42 @@ pub struct NetlinkSocket(OwnedFd);
 
 impl NetlinkSocket {
     /// Open a socket of `protocol`, such as [`netlink::ROUTE`] or
-    /// [`netlink::NETFILTER`], in the calling thread's network namespace.
+    /// [`netlink::NETFILTER`], in the calling thread's network namespace,
+    /// whose receives fail after `receive_timeout`.
     ///
     /// # Errors
-    /// Fails if the socket cannot be created or bound.
-    pub fn open(protocol: rustix::net::Protocol) -> Result<Self, NetlinkError> {
+    /// Fails if the socket cannot be created, bound or given its timeout.
+    pub fn open(
+        protocol: rustix::net::Protocol,
+        receive_timeout: Duration,
+    ) -> Result<Self, NetlinkError> {
         let socket = rustix::net::socket_with(
             AddressFamily::NETLINK,
             SocketType::RAW,
             SocketFlags::CLOEXEC,
             Some(protocol),
         )?;
-        rustix::net::bind(&socket, &SocketAddrNetlink::new(0, 0))?;
-        Ok(Self(socket))
+        rustix::net::bind(&socket, &SocketAddrNetlink::new(0, 0))
+            .and_then(|()| set_socket_timeout(&socket, Timeout::Recv, Some(receive_timeout)))
+            .map(|()| Self(socket))
+            .map_err(NetlinkError::from)
     }
 }
 
 impl NetlinkTransport for NetlinkSocket {
     fn send(&self, datagram: &[u8]) -> Result<(), NetlinkError> {
-        let sent = rustix::net::send(&self.0, datagram, SendFlags::empty())?;
-        (sent == datagram.len())
-            .then_some(())
-            .ok_or(NetlinkError::ShortSend)
+        // A netlink socket sends a datagram whole or not at all, so the
+        // count it returns is always the datagram's length.
+        retry_on_intr(|| rustix::net::send(&self.0, datagram, SendFlags::empty()))
+            .map(drop)
+            .map_err(NetlinkError::from)
     }
 
     fn receive(&self) -> Result<Vec<u8>, NetlinkError> {
         let mut buffer = vec![0; RECEIVE_BUFFER];
         // With `MSG_TRUNC` the kernel reports the whole datagram's length.
-        let (_, length) = rustix::net::recv(&self.0, &mut buffer[..], RecvFlags::TRUNC)?;
+        let (_, length) =
+            retry_on_intr(|| rustix::net::recv(&self.0, &mut buffer[..], RecvFlags::TRUNC))?;
         buffer.truncate(length);
         (length <= RECEIVE_BUFFER)
             .then_some(buffer)
@@ -151,6 +166,10 @@ impl<I> Request<I> {
 }
 
 /// Numbered requests and their replies over one transport.
+///
+/// After an error, replies to the failed exchange may still be queued and
+/// would be misread as replies to the next one, so a caller discards a
+/// session that returned an error.
 #[derive(Debug)]
 pub struct NetlinkSession<T> {
     transport: T,
@@ -159,12 +178,12 @@ pub struct NetlinkSession<T> {
 
 impl NetlinkSession<NetlinkSocket> {
     /// A session over a new socket of `protocol` in the calling thread's
-    /// network namespace.
+    /// network namespace, waiting at most [`RECEIVE_TIMEOUT`] for each reply.
     ///
     /// # Errors
     /// Fails if the socket cannot be opened.
     pub fn open(protocol: rustix::net::Protocol) -> Result<Self, NetlinkError> {
-        NetlinkSocket::open(protocol).map(Self::new)
+        NetlinkSocket::open(protocol, RECEIVE_TIMEOUT).map(Self::new)
     }
 }
 
@@ -192,13 +211,16 @@ impl<T: NetlinkTransport> NetlinkSession<T> {
     /// acknowledged every acknowledged one.
     ///
     /// # Errors
-    /// Fails on the first refusal, which the kernel may report for any
-    /// request of the datagram, and on any reply that acknowledges no
-    /// outstanding request.
+    /// Fails if `requests` is empty, on the first refusal, which the kernel
+    /// may report for any request of the datagram, and on any reply that
+    /// acknowledges no outstanding request.
     pub fn execute<I>(&self, requests: Vec<Request<I>>) -> Result<(), NetlinkError>
     where
         I: NetlinkSerializable + NetlinkDeserializable,
     {
+        if requests.is_empty() {
+            return Err(NetlinkError::Empty);
+        }
         let mut datagram = Vec::new();
         let mut outstanding = BTreeSet::new();
         for request in requests {
@@ -274,8 +296,9 @@ fn parse<I: NetlinkDeserializable>(
     let mut rest = datagram;
     while !rest.is_empty() {
         let message = NetlinkMessage::<I>::deserialize(rest).map_err(|_| NetlinkError::Decode)?;
-        // The header length is at least the header's own 16 bytes, so every
-        // step advances; the last message may omit its padding.
+        // `deserialize` refuses a header length below the header's own 16
+        // bytes, so every step advances; the last message may omit its
+        // padding.
         let aligned = (message.header.length as usize).next_multiple_of(4);
         rest = rest.get(aligned..).unwrap_or_default();
         messages.push(message);

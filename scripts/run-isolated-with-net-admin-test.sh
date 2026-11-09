@@ -1,4 +1,15 @@
 #!/usr/bin/env bash
+# Owner decision 2026-11-09 (#911): run one pos-sandboxd library test of the
+# Local attempt namespace adapter in a container that adds NET_ADMIN and
+# SYS_ADMIN, so it can create network namespaces, veth pairs and nftables
+# state. The container has no network, drops every other capability, keeps
+# no-new-privileges and a read-only root, and sees the worktree read-only.
+#
+# Residual risk: SYS_ADMIN lets the test remount filesystems inside its own
+# mount namespace, and Docker's AppArmor profile is what normally refuses
+# that. The runner therefore accepts only a pos-sandboxd test harness built
+# under target/, only the named privileged tests, and verifies inside the
+# container that the worktree bind is read-only before the test starts.
 set -euo pipefail
 
 if [[ $# -ne 2 ]]; then
@@ -24,20 +35,25 @@ esac
 # Local attempt namespace adapter may run with NET_ADMIN and SYS_ADMIN, to
 # create veth pairs and nftables state in network namespaces they create. The
 # container keeps no network and drops every other capability.
-case "$TEST_BINARY" in
-  */deps/pos_sandboxd-*) ;;
-  *)
-    echo "only the pos-sandboxd library tests may use this runner" >&2
-    exit 2
-    ;;
-esac
-case "$TEST_NAME" in
-  namespace_network::netlink::tests::privileged::*) ;;
-  *)
-    echo "only the #911 namespace adapter tests may use this runner" >&2
-    exit 2
-    ;;
-esac
+readonly TEST_DIRECTORY=$(dirname -- "$TEST_BINARY")
+readonly TEST_RELATIVE=${TEST_BINARY#"$REPOSITORY_ROOT"/}
+# target/<profile>/deps, or target/<triple or llvm-cov-target>/<profile>/deps.
+readonly TEST_TARGET='^target/([A-Za-z0-9_-]+/){1,2}deps/pos_sandboxd-[0-9a-f]{16}$'
+if [[ ! $TEST_RELATIVE =~ $TEST_TARGET || ! -f $TEST_BINARY || ! -x $TEST_BINARY ||
+  $TEST_BINARY -ef $TEST_DIRECTORY/../pos-sandboxd ]]; then
+  echo "only the pos-sandboxd library test harness may use this runner" >&2
+  exit 2
+fi
+readonly TEST_PATTERN='^namespace_network::netlink::tests::privileged::[a-z0-9_]+$'
+if [[ ! $TEST_NAME =~ $TEST_PATTERN ]]; then
+  echo "only the #911 namespace adapter tests may use this runner" >&2
+  exit 2
+fi
+# A comma would end the bind mount's source and start another option.
+if [[ $REPOSITORY_ROOT == *,* ]]; then
+  echo "the repository path must not contain a comma" >&2
+  exit 2
+fi
 
 docker_arguments=(
   --rm
@@ -75,6 +91,10 @@ if [[ -n ${LLVM_PROFILE_FILE:-} ]]; then
       exit 2
       ;;
   esac
+  if [[ $profile_directory == *,* ]]; then
+    echo "the LLVM profile path must not contain a comma" >&2
+    exit 2
+  fi
   profile_output=$(mktemp "$profile_directory/isolated-profile.XXXXXX.profraw")
   chmod 0666 "$profile_output"
   docker_arguments+=(
@@ -83,9 +103,14 @@ if [[ -n ${LLVM_PROFILE_FILE:-} ]]; then
   )
 fi
 
+# access(2) reports a read-only filesystem even to root, so the test starts
+# only while the worktree bind refuses writes.
+readonly READ_ONLY_PROBE='if [ -w "$1" ]; then echo "the worktree bind is writable" >&2; exit 1; fi; shift; exec "$@"'
+
 set +e
 timeout --signal=TERM --kill-after=5s 30s \
   docker run "${docker_arguments[@]}" "$ISOLATION_IMAGE" \
+  /bin/sh -c "$READ_ONLY_PROBE" read-only-probe "$REPOSITORY_ROOT" \
   "$TEST_BINARY" --exact "$TEST_NAME" --nocapture
 status=$?
 set -e
