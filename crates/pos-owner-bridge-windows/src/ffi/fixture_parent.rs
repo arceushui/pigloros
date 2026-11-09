@@ -62,14 +62,14 @@ impl crate::Native {
     pub(crate) fn native_host_fixture_child() -> Result<(), Box<dyn std::error::Error>> {
         if std::env::var_os("PIGLOR_HOST_LIFECYCLE_CHILD").is_some() {
             let owner = child_owner()?;
-            crate::Native::native_host_lifecycle(owner)?;
+            Self::native_host_lifecycle(owner)?;
         }
         Ok(())
     }
 
     pub(crate) fn native_host_parent_fixture() -> Result<(), Box<dyn std::error::Error>> {
         use std::io::Write as _;
-        let _port = crate::Native::fixed_port_fixture();
+        let _port = Self::fixed_port_fixture();
         let parent = OwnedParent::new()?;
         writeln!(
             std::io::stderr(),
