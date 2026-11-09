@@ -67,6 +67,9 @@ struct ExecutionState {
     cgroup: OnceLock<(u64, u64)>,
 }
 
+// Phase tags, not an order: FENCED (2) and SUBMITTED (3) are both terminal and
+// neither follows the other. Compare phases only with compare-and-swap or
+// `==`/`!=`, never with `<`/`>`.
 #[cfg(target_os = "linux")]
 const EXECUTION_OPEN: u8 = 0;
 #[cfg(target_os = "linux")]
