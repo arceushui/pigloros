@@ -61,6 +61,7 @@ impl crate::Native {
         let private = fixture.0.join("private");
         crate::create_private_directory(&private)
             .map_err(|_| "create private fixture directory")?;
+        Self::exercise_default_owner_refusal(&private)?;
         let original = private.join("store.db");
         let file =
             Self::create_private_ledger_file(&original).map_err(|()| "create identity fixture")?;
@@ -123,6 +124,44 @@ impl crate::Native {
         );
         drop(replacement);
         drop(file);
+        Ok(())
+    }
+
+    fn exercise_default_owner_refusal(
+        private: &std::path::Path,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use std::io::Write as _;
+
+        let path = private.join("default-owner-fixture.db");
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
+        let wrong_owner = match Self::diagnose_private_file(&file) {
+            Ok(()) => false,
+            Err(detail) => {
+                let actual = detail
+                    .split_once("actual=O:")
+                    .and_then(|(_, tail)| tail.split_once("D:"))
+                    .ok_or("default fixture security observation failed")?
+                    .0;
+                let expected = detail
+                    .split_once("expected=[\"O:")
+                    .and_then(|(_, tail)| tail.split_once("D:"))
+                    .ok_or("default fixture expected owner unavailable")?
+                    .0;
+                actual != expected
+            }
+        };
+        if wrong_owner {
+            assert!(store_file_id(&file).is_err());
+            writeln!(std::io::stderr(), "SNL1_WRONG_OWNER_CASE=qualified")?;
+        } else {
+            writeln!(std::io::stderr(), "SNL1_WRONG_OWNER_CASE=unqualified")?;
+        }
+        drop(file);
+        std::fs::remove_file(path)?;
         Ok(())
     }
 }

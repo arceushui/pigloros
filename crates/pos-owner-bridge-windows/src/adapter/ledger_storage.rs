@@ -391,11 +391,8 @@ mod native_tests {
         assert_eq!(ledger.read_nonce_ledger_bytes(), Err(unavailable()));
         fs::remove_file(hardlink)?;
         drop(ledger);
+        refuse_reparse_files(&guard, base, &path)?;
         let temporary = base.join("PiglorOS").join(TEMPORARY);
-        symlink_file(&path, &temporary)?;
-        assert!(guard.open_nonce_ledger().is_err());
-        assert!(fs::symlink_metadata(&temporary)?.file_type().is_symlink());
-        fs::remove_file(&temporary)?;
         let mut stale = crate::Native::create_private_ledger_file(&temporary)
             .map_err(|()| "create stale test file")?;
         stale.write_all(b"stale")?;
@@ -423,6 +420,32 @@ mod native_tests {
             ledger = guard.open_nonce_ledger()?;
             assert_eq!(ledger.read_nonce_ledger_bytes()?, expected_after(failure));
         }
+        Ok(())
+    }
+
+    fn refuse_reparse_files(
+        guard: &WindowsSubjectEncryptorLock,
+        base: &Path,
+        path: &Path,
+    ) -> TestResult {
+        let backup = base.join("PiglorOS").join("ledger-fixture-backup");
+        fs::rename(path, &backup)?;
+        symlink_file(&backup, path)?;
+        let ledger = guard.open_nonce_ledger()?;
+        assert_eq!(ledger.read_nonce_ledger_bytes(), Err(unavailable()));
+        assert_eq!(
+            ledger.replace_nonce_ledger_bytes(b"refused"),
+            Err(unavailable())
+        );
+        drop(ledger);
+        assert!(fs::symlink_metadata(path)?.file_type().is_symlink());
+        fs::remove_file(path)?;
+        fs::rename(&backup, path)?;
+        let temporary = base.join("PiglorOS").join(TEMPORARY);
+        symlink_file(path, &temporary)?;
+        assert!(guard.open_nonce_ledger().is_err());
+        assert!(fs::symlink_metadata(&temporary)?.file_type().is_symlink());
+        fs::remove_file(temporary)?;
         Ok(())
     }
 
