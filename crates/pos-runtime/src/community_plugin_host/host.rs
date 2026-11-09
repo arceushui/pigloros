@@ -197,8 +197,8 @@ impl<M: CommunityPluginMemberV1> CommunityPluginHostV1<M> {
     ///
     /// One trusted UTC second is sampled for the whole pass. A failed sample refuses every
     /// member; a gate refusal or a failed offer refuses the whole pass before anything is
-    /// staged. The pass is closed on every exit, a panic that unwinds out of a member included;
-    /// the registry is synced with every member after each pass that returns.
+    /// staged. Once a pass opens, it is closed on every exit, a panic that unwinds out of a
+    /// member included; the registry is synced with every member after each opened pass returns.
     ///
     /// An unfinished pass or poisoned Driver rejects the request before a pass opens: no clock
     /// sample, member access, authorization, cleanup or sync occurs. The outcome has no UTC
