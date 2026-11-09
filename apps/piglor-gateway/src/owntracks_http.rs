@@ -92,14 +92,6 @@ fn owntracks_response(result: &Result<OwnTracksIngressResult, GatewayError>) -> 
                 "forbidden",
             ))
         }
-        Ok(OwnTracksIngressResult::Unavailable) => error(
-            ProblemV1::new(
-                ProblemCodeV1::TemporarilyUnavailable,
-                StatusCode::SERVICE_UNAVAILABLE,
-                "unavailable",
-            )
-            .retryable(),
-        ),
         Err(GatewayError::Store(CoreError::GeographicAdmissionAuthenticationFailed)) => {
             error(ProblemV1::new(
                 ProblemCodeV1::Unauthenticated,
@@ -107,7 +99,7 @@ fn owntracks_response(result: &Result<OwnTracksIngressResult, GatewayError>) -> 
                 "unauthorized",
             ))
         }
-        Err(_) => error(
+        Ok(OwnTracksIngressResult::Unavailable) | Err(_) => error(
             ProblemV1::new(
                 ProblemCodeV1::TemporarilyUnavailable,
                 StatusCode::SERVICE_UNAVAILABLE,
