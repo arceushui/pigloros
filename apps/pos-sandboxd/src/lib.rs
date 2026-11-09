@@ -166,6 +166,7 @@ pub use local_network::{
 #[cfg(target_os = "linux")]
 pub use restart::{
     reconcile_restart, OrphanNetworkCleanup, ReconciledRestart, RestartReconciliationError,
+    RootsReleased,
 };
 
 #[cfg(target_os = "linux")]
