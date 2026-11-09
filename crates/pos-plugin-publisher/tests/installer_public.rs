@@ -112,14 +112,18 @@ fn registry_refuses_a_content_proof_from_another_verified_release() -> TestResul
     let bundle = world.store.read_verified(first.address())?;
     let other = world.store.read_verified(second.address())?;
     let projection = ValidatedPluginManifestProjectionV1::from_verified_bundle(&bundle)?;
+    let original_content = validate_plugin_bundle_content_v1(&bundle)?;
     let content = validate_plugin_bundle_content_v1(&other)?;
     let same_release = validate_plugin_bundle_content_v1(&world.store.read_verified(&resigned)?)?;
-    assert_eq!(same_release.release_digest(), projection.release_digest());
-    assert_ne!(same_release.pmf1_digest(), projection.pmf1_digest());
+    assert_eq!(
+        same_release.release_digest(),
+        original_content.release_digest()
+    );
+    assert_ne!(same_release.pmf1_digest(), original_content.pmf1_digest());
     let material = world.material()?;
     let authorization = material.evidence.authorize_release(&projection)?;
     let signature = verify_plugin_release_signature_v1(&bundle, &authorization)?;
-    let before = world.snapshot(&[projection.pmf1_digest()])?;
+    let before = world.snapshot(&[original_content.pmf1_digest()])?;
     let utc = trusted_utc(material.utc)?;
     for substituted in [&content, &same_release] {
         let result = world.registry.admit(
@@ -136,7 +140,7 @@ fn registry_refuses_a_content_proof_from_another_verified_release() -> TestResul
             Some(PluginTrustPolicyRegistryErrorV1::ContentProofMismatch)
         );
     }
-    assert_eq!(world.snapshot(&[projection.pmf1_digest()])?, before);
+    assert_eq!(world.snapshot(&[original_content.pmf1_digest()])?, before);
     Ok(())
 }
 

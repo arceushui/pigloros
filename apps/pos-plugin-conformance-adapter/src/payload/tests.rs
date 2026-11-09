@@ -567,7 +567,7 @@ fn bundle_content_refusal_requires_a_closed_reason() {
         let result = changed(|value| {
             *at(value, "/subcases/3/expect") = json!({
                 "kind":"refused", "error":"InvalidBundleContent", "class":"PreExecutionRejection", "basis":reason
-            })
+            });
         });
         assert!(result.is_ok(), "{reason}");
     }

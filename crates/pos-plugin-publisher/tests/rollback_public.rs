@@ -122,11 +122,12 @@ fn rollback_refuses_a_content_proof_from_the_other_release() -> TestResult {
     let bundle = world.store.read_verified(first.address())?;
     let other = world.store.read_verified(second.address())?;
     let projection = ValidatedPluginManifestProjectionV1::from_verified_bundle(&bundle)?;
+    let original_content = validate_plugin_bundle_content_v1(&bundle)?;
     let content = validate_plugin_bundle_content_v1(&other)?;
     let material = world.material()?;
     let authorization = material.evidence.authorize_release(&projection)?;
     let signature = verify_plugin_release_signature_v1(&bundle, &authorization)?;
-    let before = world.snapshot(&[projection.pmf1_digest()])?;
+    let before = world.snapshot(&[original_content.pmf1_digest()])?;
     let utc = trusted_utc(material.utc)?;
     let result = world.registry.rollback(
         &world.anchor,
@@ -141,7 +142,7 @@ fn rollback_refuses_a_content_proof_from_the_other_release() -> TestResult {
         result.err(),
         Some(PluginTrustPolicyRegistryErrorV1::ContentProofMismatch)
     );
-    assert_eq!(world.snapshot(&[projection.pmf1_digest()])?, before);
+    assert_eq!(world.snapshot(&[original_content.pmf1_digest()])?, before);
     Ok(())
 }
 
