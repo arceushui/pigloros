@@ -736,7 +736,7 @@ mod cases {
             // The only sweep runs exactly when the 60 s activator deadline and
             // the 10 s server margin have passed.
             let times = sweeps.lock().map_err(|_| "sweeps")?.clone();
-            assert_eq!(times, vec![start + Duration::from_secs(60)]);
+            assert_eq!(times, vec![start + Duration::from_mins(1)]);
         }
         Ok(())
     }

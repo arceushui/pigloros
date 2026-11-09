@@ -1053,7 +1053,7 @@ mod tests {
                 KEY,
                 directory_record()?,
                 Some("activation"),
-                Some(Some(Duration::from_secs(60))),
+                Some(Some(Duration::from_mins(1))),
             ),
         ];
         for (name, record, marker_name, expected) in cases {
