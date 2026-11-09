@@ -2,7 +2,7 @@
   "claim_layer": "plugin-conformance",
   "case_id": "plugin-conformance-denied",
   "family": "denied",
-  "input_blake3_digest": "9200f5cec8ee2d46104415e36939fd44f38216c9ede0217d65102520dd81cbe8",
+  "input_blake3_digest": "994dc8a90f71efa50c65fb53f8ff9c941cc808c545aa0077a36a763b856ff082",
   "status": "executed",
   "execution_result": {
     "evidence": "local-relaxation",

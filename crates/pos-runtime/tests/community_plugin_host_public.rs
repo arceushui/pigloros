@@ -17,13 +17,13 @@ use pos_crypto::plugin_execution::{
 };
 use pos_runtime::community_plugin_host::{
     classify_pass_failure, negotiate_community_plugin_v1, quarantine_for, AtomicCommitFailureV1,
-    CeilingValuesV1, CommunityPluginCeilingsV1, CommunityPluginExecutionProfileV1,
-    CommunityPluginHostAbiErrorV1, CommunityPluginHostAbiV1, CommunityPluginHostErrorV1,
-    CommunityPluginModeV1, CommunityPluginProfileErrorV1, ComponentTrapClassV1,
-    EffectiveExecutionLimitsV1, ExecutionLimitV1, GatedCommunityReleaseV1, HostFailureClassV1,
-    NegotiatedCommunityPluginV1, PassFailureV1, PinnedComponentRuntimeV1, PinnedEngineConfigV1,
-    RevocationBasisV1, TrapOutcomeV1, TrapReproductionV1, TrapTableEntryV1, TrustDenialBasisV1,
-    COMMUNITY_PLUGIN_ABI_MAJOR_V1,
+    BundleContentReasonV1, CeilingValuesV1, CommunityPluginCeilingsV1,
+    CommunityPluginExecutionProfileV1, CommunityPluginHostAbiErrorV1, CommunityPluginHostAbiV1,
+    CommunityPluginHostErrorV1, CommunityPluginModeV1, CommunityPluginProfileErrorV1,
+    ComponentTrapClassV1, EffectiveExecutionLimitsV1, ExecutionLimitV1, GatedCommunityReleaseV1,
+    HostFailureClassV1, NegotiatedCommunityPluginV1, PassFailureV1, PinnedComponentRuntimeV1,
+    PinnedEngineConfigV1, RevocationBasisV1, TrapOutcomeV1, TrapReproductionV1, TrapTableEntryV1,
+    TrustDenialBasisV1, COMMUNITY_PLUGIN_ABI_MAJOR_V1,
 };
 use pos_runtime::{PluginAvailabilityV1, PluginExecutionModeV1, RuntimeError};
 
@@ -82,8 +82,16 @@ const REVOCATION_BASES: [(RevocationBasisV1, &str); 3] = [
     (RevocationBasisV1::OperatorDenial, "OperatorDenial"),
 ];
 /// Every closed error with its ADR name, class and V1 production.
-const ERRORS: [(Error, &str, HostFailureClassV1, bool); 22] = [
+const ERRORS: [(Error, &str, HostFailureClassV1, bool); 23] = [
     (Error::InvalidManifest, "InvalidManifest", REJECTION, true),
+    (
+        Error::InvalidBundleContent {
+            reason: BundleContentReasonV1::Malformed,
+        },
+        "InvalidBundleContent",
+        REJECTION,
+        true,
+    ),
     (
         Error::ArtifactTrustDenied {
             basis: TRUST_EXPIRED,
@@ -326,9 +334,9 @@ fn every_closed_error_has_its_adr_name_class_and_v1_production() {
         messages.push(error.to_string());
     }
     let distinct = messages.iter().collect::<std::collections::BTreeSet<_>>();
-    // 22 rows name 20 errors: the two ComponentTrap and the two
+    // 23 rows name 21 errors: the two ComponentTrap and the two
     // AtomicCommitFailed rows share one message each.
-    assert_eq!(distinct.len(), 20);
+    assert_eq!(distinct.len(), 21);
     assert_eq!(
         Error::ComponentTrap {
             class: TRAP,
@@ -363,6 +371,15 @@ fn every_error_with_every_basis() -> Vec<Error> {
         Error::DeterministicDeadlineExceeded,
         Error::OperationalWatchdogStop,
     ];
+    errors.extend(
+        [
+            BundleContentReasonV1::BoundsExceeded,
+            BundleContentReasonV1::UnsupportedFormat,
+            BundleContentReasonV1::Malformed,
+            BundleContentReasonV1::ReferenceMismatch,
+        ]
+        .map(|reason| Error::InvalidBundleContent { reason }),
+    );
     errors.extend(TRUST_BASES.map(|(basis, _)| Error::ArtifactTrustDenied { basis }));
     errors.extend(REVOCATION_BASES.map(|(basis, _)| Error::ArtifactRevoked { basis }));
     for reproduction in [REPRODUCED, UNVERIFIED] {
@@ -380,11 +397,12 @@ fn every_error_with_every_basis() -> Vec<Error> {
 
 const fn assert_copy<T: Copy>() {}
 
-/// R7-F1: the class over all 20 names with every basis value.
+/// R7-F1 and R12: the class over all names with every basis value.
 #[test]
-fn pre_execution_rejection_is_exactly_the_seven_names() {
+fn pre_execution_rejection_has_exactly_the_declared_names() {
     let rejections = [
         "InvalidManifest",
+        "InvalidBundleContent",
         "ArtifactTrustDenied",
         "ArtifactRevoked",
         "IncompatibleAbi",
@@ -411,6 +429,22 @@ fn pre_execution_rejection_is_exactly_the_seven_names() {
 #[test]
 fn basis_names_are_exact_and_the_error_name_ignores_the_basis() {
     assert_copy::<Error>();
+    for (reason, name) in [
+        (BundleContentReasonV1::BoundsExceeded, "BoundsExceeded"),
+        (
+            BundleContentReasonV1::UnsupportedFormat,
+            "UnsupportedFormat",
+        ),
+        (BundleContentReasonV1::Malformed, "Malformed"),
+        (
+            BundleContentReasonV1::ReferenceMismatch,
+            "ReferenceMismatch",
+        ),
+    ] {
+        let error = Error::InvalidBundleContent { reason };
+        assert_eq!(error.name(), "InvalidBundleContent");
+        assert_eq!(error.basis_name(), Some(name));
+    }
     for (basis, name) in TRUST_BASES {
         assert_eq!(basis.name(), name);
         let denied = Error::ArtifactTrustDenied { basis };
@@ -426,11 +460,13 @@ fn basis_names_are_exact_and_the_error_name_ignores_the_basis() {
     let every = every_error_with_every_basis();
     let names = every.iter().copied().map(Error::name);
     let distinct = names.collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(distinct.len(), 20);
+    assert_eq!(distinct.len(), 21);
     for error in every {
         let has_basis = matches!(
             error,
-            Error::ArtifactTrustDenied { .. } | Error::ArtifactRevoked { .. }
+            Error::ArtifactTrustDenied { .. }
+                | Error::ArtifactRevoked { .. }
+                | Error::InvalidBundleContent { .. }
         );
         assert_eq!(error.basis_name().is_some(), has_basis, "{error:?}");
     }

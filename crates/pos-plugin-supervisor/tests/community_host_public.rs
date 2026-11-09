@@ -23,7 +23,7 @@ use pos_plugin_publisher::test_support::{
     world::{wall, Config, World as SignedWorld},
     BoxResult, ScriptedTrustedWallSourceV1,
 };
-use pos_plugin_release::{BundleAddressV1, ReleaseSourceV1};
+use pos_plugin_release::{BundleAddressV1, ContentValidationV1, ReleaseSourceV1};
 use pos_plugin_supervisor::pass_harness::{
     initial, FailingPort, GatedSpec, LostPort, PanickingSource, RefusingPort, Source, StampedPort,
     World as PassWorld,
@@ -1109,6 +1109,10 @@ fn an_occupied_slot_refuses_the_whole_pass() -> TestResult {
     let outcome = rig.run()?;
     assert!(is_refused(&outcome), "{outcome:?}");
     assert_eq!(gate_errors(&outcome), [None, Some(INVALID), None]);
+    assert!(outcome
+        .gates
+        .iter()
+        .all(|entry| entry.content_validation == ContentValidationV1::BasicPackageV1));
     assert_eq!(launch_failures(&outcome), [None, Some(INVALID), None]);
     // Nothing was launched or staged, and the earlier offer was dropped with the held one.
     assert!(rig.nothing_launched());

@@ -90,13 +90,13 @@ pub enum FallbackTriggerCauseV1 {
 /// guards it with two exhaustive `match`es with no wildcard arm: one gives
 /// every variant a distinct index and one its expected cause. A new variant
 /// therefore fails to compile until both are extended, and the test then fails
-/// until a sample of it classifies through this table to its expected cause;
-/// no expected cause is `Unrelated`, so a variant missing here or renamed
-/// fails. A future variant that should be `Unrelated` is still listed here,
-/// with `Cause::Unrelated`. The unit test of the parent module checks that the
+/// until a sample of it classifies through this table to its expected cause.
+/// Errors mapped to `Unrelated` are explicitly listed here. The unit test of
+/// the parent module checks that the
 /// names are distinct, so with one row per variant no stale row can remain.
-pub(super) const HOST_CAUSES: [(&str, Cause); 20] = [
+pub(super) const HOST_CAUSES: [(&str, Cause); 21] = [
     ("InvalidManifest", Cause::InvalidManifest),
+    ("InvalidBundleContent", Cause::Unrelated),
     ("ArtifactTrustDenied", Cause::ArtifactTrustDenied),
     ("ArtifactRevoked", Cause::ArtifactRevoked),
     ("IncompatibleAbi", Cause::IncompatibleAbi),

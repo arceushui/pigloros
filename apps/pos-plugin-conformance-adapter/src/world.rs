@@ -258,15 +258,15 @@ pub trait StepPortV1 {
 
 /// The canonical bytes of the outcome record.
 ///
-/// It is the deterministic CBOR array `["POB1", 2,
+/// It is the deterministic CBOR array `["POB2", 2,
 /// plugin_id, pmf1_digest, release_digest, tps1_digest, execution_profile_digest, tick, mode,
-/// content_validation, result]` (ADR-061 revision 8 decision 2; version 2 adds the trap class
-/// of a `Trapped` result, ADR-061 R13).
+/// content_validation, result]` (ADR-061 R12; a `Trapped` result retains the
+/// trap class introduced by ADR-061 R13). Historical POB1 bytes remain unchanged.
 #[must_use]
 pub fn outcome_bytes_of(outcome: &CommunityPluginSubjectOutcomeV1) -> Vec<u8> {
     let mut out = Vec::new();
     cbor::array(&mut out, 11);
-    cbor::text(&mut out, "POB1");
+    cbor::text(&mut out, "POB2");
     cbor::unsigned(&mut out, 2);
     cbor::text(&mut out, &outcome.plugin_id);
     for digest in [
@@ -295,10 +295,11 @@ const fn mode_code(mode: CommunityPluginModeV1) -> u64 {
     }
 }
 
-/// The wire code of the content validation: 0 `NotPerformed`.
+/// The wire code of the content validation: 0 `NotPerformed`, 1 `BasicPackageV1`.
 const fn validation_code(validation: ContentValidationV1) -> u64 {
     match validation {
         ContentValidationV1::NotPerformed => 0,
+        ContentValidationV1::BasicPackageV1 => 1,
     }
 }
 

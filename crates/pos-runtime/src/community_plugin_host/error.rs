@@ -152,6 +152,32 @@ pub enum AtomicCommitFailureV1 {
     Operational,
 }
 
+/// The closed reason a required basic package check refused the closure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BundleContentReasonV1 {
+    /// A fixed input or traversal bound was exceeded.
+    BoundsExceeded,
+    /// An artifact format is unsupported.
+    UnsupportedFormat,
+    /// An artifact is malformed.
+    Malformed,
+    /// An internal identity or reference differs.
+    ReferenceMismatch,
+}
+
+impl BundleContentReasonV1 {
+    /// The closed outcome basis name.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::BoundsExceeded => "BoundsExceeded",
+            Self::UnsupportedFormat => "UnsupportedFormat",
+            Self::Malformed => "Malformed",
+            Self::ReferenceMismatch => "ReferenceMismatch",
+        }
+    }
+}
+
 /// The closed community Plugin host error (ADR-061 corrective amendment).
 ///
 /// Each variant carries only a closed class, a safe index or a trap class:
@@ -162,6 +188,12 @@ pub enum CommunityPluginHostErrorV1 {
     /// The release manifest failed PMF1 V1 validation.
     #[error("invalid community Plugin manifest")]
     InvalidManifest,
+    /// A required basic package content check refused the release.
+    #[error("invalid community Plugin bundle content")]
+    InvalidBundleContent {
+        /// The closed content failure reason.
+        reason: BundleContentReasonV1,
+    },
     /// The release is not authorized by the admitted trust evidence.
     #[error("community Plugin artifact trust denied")]
     ArtifactTrustDenied {
@@ -250,6 +282,7 @@ impl CommunityPluginHostErrorV1 {
     pub const fn name(self) -> &'static str {
         match self {
             Self::InvalidManifest => "InvalidManifest",
+            Self::InvalidBundleContent { .. } => "InvalidBundleContent",
             Self::ArtifactTrustDenied { .. } => "ArtifactTrustDenied",
             Self::ArtifactRevoked { .. } => "ArtifactRevoked",
             Self::IncompatibleAbi => "IncompatibleAbi",
@@ -272,8 +305,7 @@ impl CommunityPluginHostErrorV1 {
         }
     }
 
-    /// The basis name of a trust denial or a revocation, if this error has
-    /// one (ADR-061 revision 7 decision 3).
+    /// The basis name of a trust, revocation, or content refusal, if present.
     ///
     /// Every other error has none. [`Self::name()`] is unchanged: the basis is
     /// reported next to the name, never in place of it.
@@ -282,6 +314,7 @@ impl CommunityPluginHostErrorV1 {
         match self {
             Self::ArtifactTrustDenied { basis } => Some(basis.name()),
             Self::ArtifactRevoked { basis } => Some(basis.name()),
+            Self::InvalidBundleContent { reason } => Some(reason.name()),
             Self::InvalidManifest
             | Self::IncompatibleAbi
             | Self::MissingFeature { .. }
@@ -306,7 +339,7 @@ impl CommunityPluginHostErrorV1 {
     /// The ADR-061 classification of this error.
     ///
     /// - Pre-execution rejections are host refusals before any guest code
-    ///   runs (revision 7 decision 5): exactly `InvalidManifest`,
+    ///   runs (revision 7 decision 5 and R12): `InvalidManifest`, `InvalidBundleContent`,
     ///   `ArtifactTrustDenied`, `ArtifactRevoked`, `IncompatibleAbi`,
     ///   `MissingFeature`, `CapabilityDenied` and `InvalidInvocation`.
     /// - The guest-output and deterministic-limit rows of the failure table
@@ -325,6 +358,7 @@ impl CommunityPluginHostErrorV1 {
     pub const fn class(self) -> HostFailureClassV1 {
         match self {
             Self::InvalidManifest
+            | Self::InvalidBundleContent { .. }
             | Self::ArtifactTrustDenied { .. }
             | Self::ArtifactRevoked { .. }
             | Self::IncompatibleAbi

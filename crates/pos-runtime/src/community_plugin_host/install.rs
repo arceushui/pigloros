@@ -33,7 +33,7 @@ use thiserror::Error;
 
 use super::error::CommunityPluginHostErrorV1;
 use super::gate::{
-    host_error_for_registry_v1, host_error_for_release_signature_v1,
+    host_error_for_content_v1, host_error_for_registry_v1, host_error_for_release_signature_v1,
     host_error_for_release_source_v1, host_error_for_trust_authorization_v1,
 };
 use super::{cbor, PLUGIN_RELEASE_ACTIVATED_EVENT_TYPE_V1};
@@ -241,6 +241,7 @@ const fn host_error_for_installer_v1(
             host_error_for_trust_authorization_v1(inner)
         }
         PluginReleaseInstallErrorV1::Signature(inner) => host_error_for_release_signature_v1(inner),
+        PluginReleaseInstallErrorV1::Content(inner) => host_error_for_content_v1(inner),
         PluginReleaseInstallErrorV1::Registry(inner) => host_error_for_registry_v1(inner),
     }
 }
@@ -279,6 +280,7 @@ const fn host_error_for_rollback_entry_v1(
         PluginReleaseRollbackErrorV1::Signature(inner) => {
             host_error_for_release_signature_v1(inner)
         }
+        PluginReleaseRollbackErrorV1::Content(inner) => host_error_for_content_v1(inner),
         PluginReleaseRollbackErrorV1::Registry(inner) => host_error_for_registry_v1(inner),
     }
 }

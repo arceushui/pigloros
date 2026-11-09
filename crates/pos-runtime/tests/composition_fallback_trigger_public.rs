@@ -6,8 +6,8 @@
 
 use pos_core::{FallbackActivationOriginV1, FallbackTriggerCodeV1 as Code};
 use pos_runtime::community_plugin_host::{
-    AtomicCommitFailureV1, CommunityPluginHostErrorV1, ComponentTrapClassV1, PassFailureV1,
-    RevocationBasisV1, TrapReproductionV1, TrustDenialBasisV1,
+    AtomicCommitFailureV1, BundleContentReasonV1, CommunityPluginHostErrorV1, ComponentTrapClassV1,
+    PassFailureV1, RevocationBasisV1, TrapReproductionV1, TrustDenialBasisV1,
 };
 use pos_runtime::composition_fallback::{
     classify_fallback_trigger_v1, declared_fallback_trigger_v1, FallbackTriggerCauseV1 as Cause,
@@ -26,6 +26,12 @@ fn host_table() -> Vec<(Error, Cause)> {
     let commit = |failure| Error::AtomicCommitFailed { failure };
     let mut table = vec![
         (Error::InvalidManifest, Cause::InvalidManifest),
+        (
+            Error::InvalidBundleContent {
+                reason: BundleContentReasonV1::Malformed,
+            },
+            Cause::Unrelated,
+        ),
         (Error::IncompatibleAbi, Cause::IncompatibleAbi),
         (Error::MissingFeature { index: 0 }, Cause::MissingFeature),
         (
@@ -81,7 +87,7 @@ fn host_table() -> Vec<(Error, Cause)> {
 }
 
 /// The number of `CommunityPluginHostErrorV1` variants.
-const VARIANTS: usize = 20;
+const VARIANTS: usize = 21;
 
 /// A distinct index in `0..VARIANTS` for every variant, as an exhaustive
 /// `match` with no wildcard arm: a new variant does not compile until it gets
@@ -89,6 +95,7 @@ const VARIANTS: usize = 20;
 const fn variant_index(error: Error) -> usize {
     match error {
         Error::InvalidManifest => 0,
+        Error::InvalidBundleContent { .. } => 20,
         Error::ArtifactTrustDenied { .. } => 1,
         Error::ArtifactRevoked { .. } => 2,
         Error::IncompatibleAbi => 3,
@@ -118,6 +125,7 @@ const fn variant_index(error: Error) -> usize {
 const fn expected_cause(error: Error) -> Cause {
     match error {
         Error::InvalidManifest => Cause::InvalidManifest,
+        Error::InvalidBundleContent { .. } => Cause::Unrelated,
         Error::ArtifactTrustDenied { .. } => Cause::ArtifactTrustDenied,
         Error::ArtifactRevoked { .. } => Cause::ArtifactRevoked,
         Error::IncompatibleAbi => Cause::IncompatibleAbi,

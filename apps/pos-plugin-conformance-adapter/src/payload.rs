@@ -430,15 +430,30 @@ pub enum ExpectV1 {
 
 impl ExpectV1 {
     /// Whether the conditional keys of the expectation are present exactly when required:
-    /// `basis` for `ArtifactTrustDenied` and `ArtifactRevoked`, `index` for `CapabilityDenied`
-    /// and `MissingFeature`.
+    /// `basis` for trust, revocation, and content refusals; `index` for capability and feature
+    /// refusals. Content bases use the four closed ADR-061 R12 reasons.
     fn is_valid(&self) -> bool {
         match self {
             Self::Refused(refused) => {
                 let name = refused.error.as_str();
-                let basis = matches!(name, "ArtifactTrustDenied" | "ArtifactRevoked");
+                let basis = matches!(
+                    name,
+                    "ArtifactTrustDenied" | "ArtifactRevoked" | "InvalidBundleContent"
+                );
                 let index = matches!(name, "CapabilityDenied" | "MissingFeature");
-                refused.basis.is_some() == basis && refused.index.is_some() == index
+                let content_reason_valid = name != "InvalidBundleContent"
+                    || matches!(
+                        refused.basis.as_ref().map(Text::as_str),
+                        Some(
+                            "BoundsExceeded"
+                                | "UnsupportedFormat"
+                                | "Malformed"
+                                | "ReferenceMismatch"
+                        )
+                    );
+                refused.basis.is_some() == basis
+                    && refused.index.is_some() == index
+                    && content_reason_valid
             }
             Self::Committed(_)
             | Self::Failed(_)

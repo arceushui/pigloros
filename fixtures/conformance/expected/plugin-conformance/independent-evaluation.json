@@ -2,7 +2,7 @@
   "claim_layer": "plugin-conformance",
   "case_id": "plugin-conformance-independent-evaluation",
   "family": "independent-evaluation",
-  "input_blake3_digest": "8c9019ec9e380e9b8632b1daea4a0f729165916f4342d93f3c38b4fb898c2fc3",
+  "input_blake3_digest": "ed210f54e0015cafdbfc6abae82ce9b0f6c110b86d14854427ad54d5a8118bfc",
   "status": "executed",
   "execution_result": {
     "evidence": "local-relaxation",
@@ -10,12 +10,12 @@
       {
         "mode": "local",
         "outcome": "pass",
-        "actual_digest": "720600ee45668efb1c858a1ef7f344109ee5eb1933c56e9efc40166b732f8473"
+        "actual_digest": "052facfcc7d5060a9056cc3cc757f904f991f2829abc5618df2f3c757f0ba442"
       },
       {
         "mode": "air-gapped",
         "outcome": "pass",
-        "actual_digest": "720600ee45668efb1c858a1ef7f344109ee5eb1933c56e9efc40166b732f8473"
+        "actual_digest": "052facfcc7d5060a9056cc3cc757f904f991f2829abc5618df2f3c757f0ba442"
       }
     ]
   },

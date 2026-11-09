@@ -1227,7 +1227,7 @@ fn r8_s10_the_outcome_record_has_exactly_the_r7_h3_fields() -> TestResult {
     assert!(matches!(mode, CommunityPluginModeV1::Local));
     assert!(matches!(
         content_validation,
-        ContentValidationV1::NotPerformed
+        ContentValidationV1::BasicPackageV1
     ));
     assert!(matches!(result, Verdict::Committed { .. }));
     // The canonical record is CBOR with no key names; it also holds no such word.
