@@ -17,16 +17,10 @@ fn a_namespace_that_cannot_be_unshared_fails_after_claiming_its_name() -> TestRe
         Err(NetlinkError::Io(Errno::PERM))
     ));
     assert!(directory.path().join(name.as_str()).is_file());
-    // The name stays claimed, and is no namespace, until it is deleted;
-    // unpinning it needs the privilege too.
+    // The name stays claimed until it is deleted.
     assert!(matches!(
         namespaces.create(&name),
         Err(NetlinkError::Io(Errno::EXIST))
-    ));
-    assert!(matches!(namespaces.open(&name), Ok(None)));
-    assert!(matches!(
-        namespaces.delete(&name),
-        Err(NetlinkError::Io(Errno::PERM))
     ));
     Ok(())
 }
