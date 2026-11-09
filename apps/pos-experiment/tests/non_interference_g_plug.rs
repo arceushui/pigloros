@@ -662,17 +662,17 @@ fn invocation() -> pos_runtime::community_plugin_host::PluginInvocationV1 {
 }
 
 /// Answers every request with a `describe` report.
-fn describes_everything(_: &[u8]) -> Option<Vec<u8>> {
+fn describes_everything(_: &[u8]) -> Option<zeroize::Zeroizing<Vec<u8>>> {
     serve_g_plug_fixture_guest_v1(&request_bytes(WorkerCallV1::Describe))
 }
 
 /// Answers every request with a `reduce` report.
-fn produces_everything(_: &[u8]) -> Option<Vec<u8>> {
+fn produces_everything(_: &[u8]) -> Option<zeroize::Zeroizing<Vec<u8>>> {
     serve_g_plug_fixture_guest_v1(&request_bytes(WorkerCallV1::Reduce(invocation())))
 }
 
 /// Answers with the guest's output, its output digest tampered.
-fn tampers_outputs(request: &[u8]) -> Option<Vec<u8>> {
+fn tampers_outputs(request: &[u8]) -> Option<zeroize::Zeroizing<Vec<u8>>> {
     serve_g_plug_fixture_guest_v1(request)
         .and_then(|bytes| decode_worker_response_v1(&bytes).ok())
         .and_then(Result::ok)
@@ -688,13 +688,13 @@ fn tampers_outputs(request: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// Answers every request with a closed engine failure.
-fn fails_everything(_: &[u8]) -> Option<Vec<u8>> {
+fn fails_everything(_: &[u8]) -> Option<zeroize::Zeroizing<Vec<u8>>> {
     encode_worker_response_v1(&Err(CommunityPluginHostErrorV1::FuelExhausted)).ok()
 }
 
 /// Answers every request, even one the codec refuses, with garbage.
-fn answers_garbage(request: &[u8]) -> Option<Vec<u8>> {
-    (!request.is_empty()).then(|| b"not a response".to_vec())
+fn answers_garbage(request: &[u8]) -> Option<zeroize::Zeroizing<Vec<u8>>> {
+    (!request.is_empty()).then(|| zeroize::Zeroizing::new(b"not a response".to_vec()))
 }
 
 thread_local! {
@@ -703,7 +703,7 @@ thread_local! {
 }
 
 /// Records the request it receives and answers nothing.
-fn record(request: &[u8]) -> Option<Vec<u8>> {
+fn record(request: &[u8]) -> Option<zeroize::Zeroizing<Vec<u8>>> {
     SEEN.with(|seen| *seen.borrow_mut() = request.to_vec());
     None
 }

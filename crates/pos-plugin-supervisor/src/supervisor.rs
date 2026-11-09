@@ -289,7 +289,7 @@ fn checked<T>(
 /// How the worker side of one invocation ended.
 enum Ending {
     /// One complete frame, then end of output, then a successful exit.
-    Replied(Vec<u8>),
+    Replied(zeroize::Zeroizing<Vec<u8>>),
     /// The worker or its IPC failed.
     Crashed,
     /// The deadline passed first.
@@ -306,7 +306,7 @@ fn supervise(
     request: &[u8],
     frames: WorkerFrameLimitsV1,
     deadline: Instant,
-) -> Result<Vec<u8>, Error> {
+) -> Result<zeroize::Zeroizing<Vec<u8>>, Error> {
     let LaunchedWorker {
         mut process,
         mut stdin,
@@ -335,7 +335,7 @@ fn supervise(
 }
 
 fn await_reply(
-    receiver: &mpsc::Receiver<Result<Vec<u8>, FrameFaultV1>>,
+    receiver: &mpsc::Receiver<Result<zeroize::Zeroizing<Vec<u8>>, FrameFaultV1>>,
     child: &mut std::process::Child,
     deadline: Instant,
 ) -> Ending {

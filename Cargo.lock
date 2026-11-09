@@ -5648,6 +5648,7 @@ dependencies = [
  "tokio",
  "tower",
  "ulid",
+ "zeroize",
 ]
 
 [[package]]
@@ -5905,6 +5906,7 @@ dependencies = [
  "rustix 1.1.6",
  "thiserror 2.0.21",
  "ulid",
+ "zeroize",
 ]
 
 [[package]]

@@ -96,6 +96,24 @@ fn every_head_width_is_written_in_shortest_form() {
 }
 
 #[test]
+fn complete_envelope_bounds_are_checked_before_frame_allocation() {
+    let mut oversized = request(WorkerCallV1::Describe);
+    oversized.negotiation.world = "w".repeat(crate::frame::WorkerFrameLimitsV1::REQUEST_BYTES);
+    assert_eq!(
+        encode_worker_request_v1(&oversized),
+        Err(WorkerEnvelopeErrorV1)
+    );
+    let response_limit =
+        crate::frame::WorkerFrameLimitsV1::for_limits(&DeterministicBudgetV1::MAXIMA);
+    let mut oversized = output(&invocation(b"observation"));
+    oversized.next_state_bytes = vec![7; response_limit.response_bytes()];
+    assert_eq!(
+        encode_worker_response_v1(&Ok(produced(Ok(oversized)))),
+        Err(WorkerEnvelopeErrorV1)
+    );
+}
+
+#[test]
 fn the_describe_request_has_its_golden_prefix_and_suffix() {
     let bytes = ok(encode_worker_request_v1(&request(WorkerCallV1::Describe)));
     let mut prefix = vec![0x87, 0x64];
@@ -214,8 +232,8 @@ fn malformed_requests_are_envelope_faults() {
         wrong_version,
         wrong_count,
         unknown_mode,
-        [valid.as_slice(), &[0]].concat(),
-        valid[..valid.len() - 1].to_vec(),
+        zeroize::Zeroizing::new([valid.as_slice(), &[0]].concat()),
+        zeroize::Zeroizing::new(valid[..valid.len() - 1].to_vec()),
     ]
     .iter()
     .enumerate()
@@ -308,7 +326,12 @@ fn response_wire_codes_follow_their_lists() {
     let prefix = [0x83, 0x64, b'P', b'W', b'R', b'1', 0x01, 0x82];
     for (code, failure) in (0_u8..).zip(WORKER_FAILURES_V1) {
         let bytes = encode_worker_response_v1(&Err(failure));
-        assert_eq!(bytes, Ok([&prefix[..], &[0x02, code]].concat()));
+        assert_eq!(
+            bytes,
+            Ok(zeroize::Zeroizing::new(
+                [&prefix[..], &[0x02, code]].concat()
+            ))
+        );
     }
     for (code, class) in (0_u8..).zip(WORKER_TRAP_CLASSES_V1) {
         let trap = Err(Error::ComponentTrap {
@@ -316,7 +339,12 @@ fn response_wire_codes_follow_their_lists() {
             reproduction: TrapReproductionV1::Unverified,
         });
         let bytes = encode_worker_response_v1(&trap);
-        assert_eq!(bytes, Ok([&prefix[..], &[0x03, code]].concat()));
+        assert_eq!(
+            bytes,
+            Ok(zeroize::Zeroizing::new(
+                [&prefix[..], &[0x03, code]].concat()
+            ))
+        );
     }
     let metering = MeteringV1 {
         startup_fuel: 1,
@@ -338,7 +366,12 @@ fn response_wire_codes_follow_their_lists() {
         0x83, 0x64, b'P', b'W', b'R', b'1', 0x01, 0x84, 0x00, 0x82, 0x01, 0x83, 0x81, 0x04, 0xf6,
         0xf6, 0x84, 0x01, 0x02, 0x03, 0x04, 0x80,
     ];
-    assert_eq!(encode_worker_response_v1(&declared), Ok(expected.to_vec()));
+    assert_eq!(
+        encode_worker_response_v1(&declared)
+            .as_ref()
+            .map(|bytes| bytes.as_slice()),
+        Ok(expected.as_slice())
+    );
 }
 
 #[test]
