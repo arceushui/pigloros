@@ -41,16 +41,16 @@ fn normalize(value: Value, key: Option<&str>) -> Value {
 
 fn normalize_text(key: Option<&str>, text: String) -> String {
     match key {
-        Some("id") if is_ulid(&text) => "<ulid>".to_owned(),
+        Some("id" | "instance") => normalize_ulid_segments(&text),
         Some("next_cursor") if is_cursor(&text) => "<cursor>".to_owned(),
         Some("detail") => "<message>".to_owned(),
-        Some("instance") => normalize_instance(&text),
         _ => text,
     }
 }
 
-/// A problem `instance` is the request path; a path segment that is a ULID becomes `<ulid>`.
-fn normalize_instance(path: &str) -> String {
+/// Every `/`-separated segment of an `id` or a problem `instance` that is a ULID becomes
+/// `<ulid>`; an `id` that is one ULID becomes `<ulid>`, any other value keeps its other bytes.
+fn normalize_ulid_segments(path: &str) -> String {
     path.split('/')
         .map(|segment| if is_ulid(segment) { "<ulid>" } else { segment })
         .collect::<Vec<_>>()

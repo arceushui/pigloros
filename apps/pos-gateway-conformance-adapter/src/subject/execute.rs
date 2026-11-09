@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use axum::body::Body;
-use axum::http::{header, HeaderValue, Method, Request, Uri};
+use axum::http::{header, HeaderName, HeaderValue, Method, Request, Uri};
 use axum::Router;
 use piglor_gateway::{
     gateway_with_erasure_host_and_authorization, router, spectator_router, AppState, Gateway,
@@ -27,9 +27,7 @@ use tokio::runtime::Runtime;
 use tower::ServiceExt;
 use ulid::Ulid;
 
-use super::payload::{
-    CompositionV2, ExchangeV2, MethodV2, RouteV2, RouterV2, SubCaseV2, TIMELINE_SLOT,
-};
+use super::payload::{CompositionV2, ExchangeV2, MethodV2, RouterV2, SubCaseV2, TIMELINE_SLOT};
 use super::{ACTOR_ENTITY_ID, BODY_ENTITY_ID};
 use crate::normalize_response_v1;
 
@@ -261,11 +259,11 @@ fn pinned_authorization(
         })
 }
 
-/// The header that carries the idempotency key of an actions request.
+/// The header that carries the idempotency key of every request.
 const IDEMPOTENCY_KEY_HEADER: &str = "idempotency-key";
 
-/// The raw HTTP request of an exchange, with `{timeline}` replaced by the captured ID. An
-/// actions request carries the idempotency key `<sub-case id>.<1-based exchange index>`.
+/// The raw HTTP request of an exchange, with `{timeline}` replaced by the captured ID. Every
+/// request carries the sub-case ID as its idempotency key; routes without one ignore it.
 fn request(exchange: &ExchangeV2, timeline: Option<&str>, key: &str) -> Request<Body> {
     let body = exchange
         .body
@@ -291,11 +289,11 @@ fn request(exchange: &ExchangeV2, timeline: Option<&str>, key: &str) -> Request<
             .headers_mut()
             .insert(ACTOR_HEADER, HeaderValue::from_static(ACTOR_ENTITY_ID));
     }
-    if exchange.route() == RouteV2::Actions {
-        if let Ok(value) = HeaderValue::from_str(key) {
-            request.headers_mut().insert(IDEMPOTENCY_KEY_HEADER, value);
-        }
-    }
+    request.headers_mut().extend(
+        HeaderValue::from_str(key)
+            .ok()
+            .map(|value| (HeaderName::from_static(IDEMPOTENCY_KEY_HEADER), value)),
+    );
     request
 }
 
@@ -333,7 +331,7 @@ async fn exchange_all(
         events: 0,
     };
     let mut present = false;
-    for (index, exchange) in subcase.exchanges.iter().enumerate() {
+    for exchange in &subcase.exchanges {
         let route = exchange.route();
         let observation = if capabilities.iter().any(|held| held == route.capability()) {
             let service = match exchange.router {
@@ -341,11 +339,7 @@ async fn exchange_all(
                 RouterV2::Spectator => spectator.clone(),
             };
             let Ok(response) = service
-                .oneshot(request(
-                    exchange,
-                    timeline.as_deref(),
-                    &format!("{}.{}", subcase.id, index + 1),
-                ))
+                .oneshot(request(exchange, timeline.as_deref(), &subcase.id))
                 .await;
             let status = response.status().as_u16();
             let bytes = axum::body::to_bytes(response.into_body(), RESPONSE_LIMIT)

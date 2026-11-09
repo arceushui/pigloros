@@ -11,9 +11,10 @@ use crate::{
     MAX_EVENTS_RESPONSE_BYTES, MAX_HTTP_BODY_BYTES,
 };
 use axum::{
-    extract::{DefaultBodyLimit, RawQuery, State},
+    extract::{DefaultBodyLimit, FromRequestParts, RawQuery, State},
     http::{
         header::{self, CONTENT_SECURITY_POLICY},
+        request::Parts,
         HeaderMap, HeaderValue, StatusCode,
     },
     middleware,
@@ -515,16 +516,23 @@ fn idempotency_key(headers: &HeaderMap) -> Result<&str, ProblemV1> {
         })
 }
 
+/// The validated `Idempotency-Key` of a mutation, rejected as an `invalid-request` problem.
+struct IdempotencyKey(String);
+
+impl<S: Send + Sync> FromRequestParts<S> for IdempotencyKey {
+    type Rejection = ProblemV1;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        idempotency_key(&parts.headers).map(|key| Self(key.to_owned()))
+    }
+}
+
 async fn post_action(
     State(state): State<AppState>,
     ContractPath(id): ContractPath<String>,
-    headers: HeaderMap,
+    IdempotencyKey(key): IdempotencyKey,
     ContractJson(body): ContractJson<ActionRequest>,
 ) -> Result<Response, ProblemV1> {
-    let key = match idempotency_key(&headers) {
-        Ok(key) => key,
-        Err(problem) => return Err(problem),
-    };
     let result = match state
         .gateway
         .submit_identified_json_action(
@@ -533,7 +541,7 @@ async fn post_action(
             &body.event_type,
             &body.payload,
             &body.capability,
-            key,
+            &key,
         )
         .await
     {

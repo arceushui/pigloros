@@ -861,13 +861,11 @@ def normalize(value: object, key: str | None = None) -> object:
     if isinstance(value, list):
         return [normalize(item) for item in value]
     if isinstance(value, str):
-        if key == "id" and re.fullmatch(ULID_PATTERN, value):
-            return "<ulid>"
         if key == "next_cursor" and re.fullmatch(CURSOR_PATTERN, value):
             return "<cursor>"
         if key == "detail":
             return "<message>"
-        if key == "instance":
+        if key in ("id", "instance"):
             return "/".join(
                 "<ulid>" if re.fullmatch(ULID_PATTERN, part) else part for part in value.split("/")
             )

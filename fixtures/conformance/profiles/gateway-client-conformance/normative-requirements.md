@@ -59,8 +59,9 @@ in either execution mode, so Local and Air-Gapped executions are the same.
   The fixture World body is `01JC0GATEWAYF1XTVREB0DY000`. An exchange with `actor` sends
   `x-piglor-actor-entity: 01JC0GATEWAYF1XTVREACT0R00`.
 
-A request `body` is sent as compact JSON with `content-type: application/json`. A request on
-the actions route carries `idempotency-key: <sub-case id>.<1-based exchange index>`.
+A request `body` is sent as compact JSON with `content-type: application/json`. Every request
+carries `idempotency-key: <sub-case id>`; routes without an idempotency key ignore it, and two
+identical actions of one sub-case are an exact retry.
 
 ## 4. Observations and normalization
 
@@ -69,13 +70,12 @@ The observation of a sent exchange is `{"status": <code>, "body": <body>}`. The 
 The value is normalized; the identities, cursors and messages the documentation does not fix
 are permitted nondeterministic operational fields:
 
-- a member `id` whose value is a ULID becomes `"<ulid>"`;
 - a member `next_cursor` whose value is `v1.<64 lowercase hex>.<ULID>.<positive integer>`
   becomes `"<cursor>"`;
 - a member `detail` with a text value becomes `"<message>"`;
-- in a member `instance` with a text value, every path segment that is a ULID becomes `<ulid>`
-  (a routed problem names its route template and carries no ID; only the path of a request no
-  route serves can carry one).
+- in a member `id` or `instance` with a text value, every `/`-separated segment that is a ULID
+  becomes `<ulid>`, so an `id` that is a ULID becomes `"<ulid>"` (a routed problem names its
+  route template and carries no ID; only the path of a request no route serves can carry one).
 
 Any other value, including a malformed ID or cursor, stays as it is, so the exchange does not
 match. An exchange matches when its observation equals `expect`.
