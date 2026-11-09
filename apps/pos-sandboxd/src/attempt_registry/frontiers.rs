@@ -122,7 +122,7 @@ mod cases {
 
     /// Whether the intent outlives the directories: a surviving attempt
     /// directory, with or without its root, always has its committed record.
-    fn intent_covers_directories(frontier: &Frontier) -> bool {
+    const fn intent_covers_directories(frontier: Frontier) -> bool {
         frontier.1.is_some() || !frontier.3
     }
 
@@ -147,7 +147,7 @@ mod cases {
             assert!(result.is_err(), "step {fail_at}");
             let crashed = frontier(runtime.path())?;
             assert!(
-                intent_covers_directories(&crashed),
+                intent_covers_directories(crashed),
                 "step {fail_at}: {crashed:?}"
             );
             frontiers.insert(crashed);
