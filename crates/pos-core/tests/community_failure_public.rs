@@ -282,9 +282,8 @@ fn decoded_guest_labels_and_coordinate_ranges_borrow_the_original_private_input(
         .as_input()
         .guest_error
         .ok_or("missing decoded guest")?;
-    let id = match guest.code {
-        GuestCode::CapabilityRequired(id) => id,
-        _ => return Err("wrong guest code".into()),
+    let GuestCode::CapabilityRequired(id) = guest.code else {
+        return Err("wrong guest code".into());
     };
     for bytes in [
         id.as_bytes(),

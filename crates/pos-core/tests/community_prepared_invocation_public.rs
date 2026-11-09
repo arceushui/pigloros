@@ -375,8 +375,8 @@ fn truncation_trailing_nonpreferred_and_future_versions_are_not_inputs() -> Test
             if field_bytes[0] & 0x1f < 24 {
                 let mut changed = encoded.clone();
                 changed.splice(
-                    offset..offset + 1,
-                    [(field_bytes[0] & 0xe0) | 24, field_bytes[0] & 0x1f],
+                    offset..=offset,
+                    [(field_bytes[0] & 0xe0) | 0x18, field_bytes[0] & 0x1f],
                 );
                 assert_invalid_bytes(&changed);
             }

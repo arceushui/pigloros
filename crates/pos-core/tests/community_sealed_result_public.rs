@@ -259,7 +259,7 @@ fn seal_rejects_truncations_trailers_versions_bounds_and_nonpreferred() -> TestR
         .position(|value| value == [0x81, 0x58, 0x20, 9, 9])
         .ok_or("missing fixture list")?;
     let mut wide_list = encoded;
-    wide_list.splice(list_start..list_start + 1, [0x98, 1]);
+    wide_list.splice(list_start..=list_start, [0x98, 1]);
     assert_eq!(
         Seal::from_canonical_cbor(&wide_list).err(),
         Some(Error::InvalidEncoding)
