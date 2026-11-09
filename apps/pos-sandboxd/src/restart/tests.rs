@@ -14,7 +14,7 @@ mod cases {
 
     use super::super::*;
     use crate::test_fixtures::{in_lock_test_process, peer_connections};
-    use crate::SystemdAttemptRegistry;
+    use crate::{AttemptUnitTermination, PreparedAttemptDirectory, SystemdAttemptRegistry};
 
     type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
     type UnitRow = (
@@ -188,10 +188,39 @@ mod cases {
         Ok(())
     }
 
+    /// How the live owner left the recorded PAI3 attempt before the crash.
+    type RootEnding = fn(PreparedAttemptDirectory) -> TestResult;
+
+    /// The owner crashed with the recorded attempt still prepared.
+    fn abandoned(prepared: PreparedAttemptDirectory) -> TestResult {
+        drop(prepared);
+        Ok(())
+    }
+
+    /// The execution requested its unit start but failed before binding the
+    /// unit's cgroup, so the live owner's cleanup is refused and the intent is
+    /// left for restart reconciliation.
+    fn started_without_cgroup(prepared: PreparedAttemptDirectory) -> TestResult {
+        let ownership = prepared.execution_ownership();
+        ownership.claim()?;
+        ownership.submit()?;
+        let refused = prepared.finish_terminal_cleanup(AttemptUnitTermination::Unsubmitted, None);
+        assert!(
+            matches!(refused, Err(SystemdAttemptRegistryError::CleanupEvidence)),
+            "{refused:?}"
+        );
+        Ok(())
+    }
+
     /// 1 planned only; 2 the recorded tree; 3 its root removed but its attempt
     /// directory present (#721); 4 a recorded PAI3 root, unmounted; 5 an
     /// interrupted temporary write. With `with_root` false, attempt 4 is omitted.
     fn seed(with_root: bool) -> TestResult<tempfile::TempDir> {
+        seed_with(with_root.then_some::<RootEnding>(abandoned))
+    }
+
+    /// [`seed`], with attempt 4 left by `root`, if any.
+    fn seed_with(root: Option<RootEnding>) -> TestResult<tempfile::TempDir> {
         let runtime = tempfile::tempdir()?;
         fs::set_permissions(runtime.path(), fs::Permissions::from_mode(0o700))?;
         private_directory(&runtime.path().join("registry"))?;
@@ -209,11 +238,13 @@ mod cases {
                 .join(intent(3)?.unit_name().attempt_component())
                 .join("root"),
         )?;
-        let ids: &[u8] = if with_root { &[ROOT_ATTEMPT] } else { &[] };
-        for &id in ids {
-            let prepared = registry.commit_planned(&intent(id)?)?.prepare_directory()?;
+        if let Some(ending) = root {
+            let prepared = registry
+                .commit_planned(&intent(ROOT_ATTEMPT)?)?
+                .prepare_directory()?;
             let identity = crate::test_fixtures::recorded_identity(&prepared)?;
             prepared.record_root(&identity, || Ok(()))?;
+            ending(prepared)?;
         }
         drop(registry);
         let key = intent(5)?.unit_name().attempt_component().to_owned();
@@ -400,6 +431,72 @@ mod cases {
             assert!(refused, "case {case}: {result:?}");
             assert_untouched(runtime.path(), 5)?;
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_device_probe_past_the_deadline_keeps_admission_closed() -> TestResult {
+        if !in_lock_test_process(
+            "restart::tests::cases::a_device_probe_past_the_deadline_keeps_admission_closed",
+        )? {
+            return Ok(());
+        }
+        let runtime = seed(true)?;
+        let host = host(Listing::Empty, Vec::new()).await?;
+        let result = reconcile_with(
+            &host.transport,
+            recovery(runtime.path())?,
+            &Network::new(Cleanup::Removes),
+            deadline(),
+            |_| std::future::pending::<Result<bool, ImageActivationError>>(),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(RestartReconciliationError::DeadlineElapsed)),
+            "{result:?}"
+        );
+        assert_untouched(runtime.path(), 5)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_unit_start_without_a_bound_cgroup_waits_for_its_unit_to_be_absent() -> TestResult {
+        if !in_lock_test_process(
+        "restart::tests::cases::a_unit_start_without_a_bound_cgroup_waits_for_its_unit_to_be_absent",
+    )? {
+        return Ok(());
+    }
+        let runtime = seed_with(Some(started_without_cgroup))?;
+        // The unit that the requested start may have created is still loaded:
+        // nothing is removed and admission stays closed.
+        let host_with_unit = host(Listing::Surviving, vec![unit(ROOT_ATTEMPT)?]).await?;
+        let result = reconcile_with(
+            &host_with_unit.transport,
+            recovery(runtime.path())?,
+            &Network::new(Cleanup::Removes),
+            deadline(),
+            |_| std::future::ready(Ok(true)),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(RestartReconciliationError::SurvivingUnit(_))),
+            "{result:?}"
+        );
+        assert_untouched(runtime.path(), 5)?;
+        // Once the unit is absent, the next restart removes the attempt with
+        // its intent last.
+        let host = host(Listing::Empty, Vec::new()).await?;
+        let reconciled = reconcile_with(
+            &host.transport,
+            recovery(runtime.path())?,
+            &Network::new(Cleanup::Removes),
+            deadline(),
+            |_| std::future::ready(Ok(true)),
+        )
+        .await?;
+        assert_eq!(reconciled.attempts().len(), 4);
+        assert_eq!(count(&runtime.path().join("registry"))?, 0);
+        assert_eq!(count(&runtime.path().join("attempts"))?, 0);
         Ok(())
     }
 

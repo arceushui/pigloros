@@ -5,6 +5,7 @@ use super::{
     PlannedAttemptIntent, RegistryRecoveryEntry, RegistryResult, SystemdAttemptRecovery,
     SystemdAttemptRegistryError,
 };
+use crate::restart::RootsReleased;
 use crate::SystemdAttemptUnitAbsenceObservation;
 
 impl SystemdAttemptRecovery {
@@ -26,7 +27,7 @@ impl SystemdAttemptRecovery {
     pub(crate) fn remove_reconciled(
         &self,
         units_absent: &[SystemdAttemptUnitAbsenceObservation],
-        roots_released: &[[u8; 16]],
+        roots_released: &RootsReleased,
     ) -> RegistryResult<Vec<PlannedAttemptIntent>> {
         let inventory = self.inventory_unmounted_directories()?;
         self.entries
@@ -55,7 +56,7 @@ impl SystemdAttemptRecovery {
 fn proven(
     entry: &RegistryRecoveryEntry,
     units_absent: &[SystemdAttemptUnitAbsenceObservation],
-    roots_released: &[[u8; 16]],
+    roots_released: &RootsReleased,
 ) -> bool {
     let unit_proved = units_absent
         .iter()
@@ -64,7 +65,7 @@ fn proven(
         .intent()
         .and_then(super::RecoveredAttemptIntent::recorded_generations)
         .is_none()
-        || roots_released.contains(&entry.attempt_id());
+        || roots_released.contains(entry.attempt_id());
     unit_proved && root_proved
 }
 
