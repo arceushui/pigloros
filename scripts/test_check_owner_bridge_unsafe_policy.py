@@ -1598,6 +1598,7 @@ def test_owned_process_fault_authority() -> None:
     for old, new, expected in (
         ('folder.join("EBWebView")', 'folder.join("other") /* folder.join("EBWebView") */', "UDF obstruction must use its fixed EBWebView child"),
         ('.create_new(true)', '.create_new(false)', "owned UDF obstruction differs from reviewed fixed fixture"),
+        ('.create_environment(runtime, &target, options, sink)', '.create_environment(runtime, folder, options, sink)', "owned UDF obstruction differs from reviewed fixed fixture"),
         ('folder != self.expected.as_path()', 'false', "owned UDF obstruction differs from reviewed fixed fixture"),
     ):
         if old not in original_obstruction:

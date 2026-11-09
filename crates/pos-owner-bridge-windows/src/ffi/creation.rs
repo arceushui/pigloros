@@ -70,8 +70,8 @@ impl EnvironmentCreation {
                 *completed.borrow_mut() = Some(result);
                 Ok(())
             }));
-        // SAFETY: fixed verified runtime and fresh protected folder, live STA
-        // options/callback, all UTF-16 inputs retained in this owner until completion.
+        // SAFETY: verified runtime, owned UDF path, STA options/callback and UTF-16
+        // inputs stay live; product uses protected folder, test may use its owned file.
         let call = unsafe {
             CreateCoreWebView2EnvironmentWithOptions(
                 PCWSTR(runtime.as_ptr()),

@@ -344,7 +344,7 @@ file = "src/ffi/creation.rs"
 line = 75
 function = "start"
 operation = "CreateCoreWebView2EnvironmentWithOptions( PCWSTR(runtime.as_ptr()), PCWSTR(folder.as_ptr()), &options, &callback, )"
-invariant = "fixed verified runtime and fresh protected folder, live STA options/callback, all UTF-16 inputs retained in this owner until completion."
+invariant = "Verified runtime, owned UDF path, STA options/callback and UTF-16 inputs remain live; production uses a protected folder and the bounded negative fixture uses its owned file."
 hosted_test = "native_window_environment_and_buffers_lifecycle"
 
 [[block]]

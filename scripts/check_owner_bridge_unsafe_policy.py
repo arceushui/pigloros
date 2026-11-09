@@ -1255,7 +1255,7 @@ def _check_fault_authority(root: Path, scans: dict[str, tuple[Scan, tuple[Attrib
     obstruction_path = "src/adapter/native_tests/process_fault/obstruction.rs"
     obstruction = scans.get(obstruction_path)
     obstruction_code = obstruction[0].code if obstruction else ""
-    if hashlib.sha256(re.sub(r"\s+", "", obstruction_code).encode()).hexdigest() != "962ba1faaeae5456fa1a38e4dfaab2aa63d85bf55e8859415745d9b2ac5a3c44":
+    if hashlib.sha256(re.sub(r"\s+", "", obstruction_code).encode()).hexdigest() != "bfdbfdc271211d895e0aeb946e46030400ddb109b9c5ab6c023e549f37497964":
         found.append(f"{SHIM}/{obstruction_path}: owned UDF obstruction differs from reviewed fixed fixture")
     join_calls = list(re.finditer(r"(?<!\w)folder\s*\.\s*join\s*\(", obstruction_code))
     fixed_join = re.compile(r'folder\s*\.\s*join\s*\(\s*"EBWebView"\s*\)')

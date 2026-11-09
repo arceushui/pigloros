@@ -106,8 +106,10 @@ impl NativeOperations for ObstructionSession {
             return Err(invalid());
         }
         drop(file);
+        // Probe the documented existing-file UDF failure using only the fixed,
+        // exclusively created child; the Surface still owns its parent folder.
         self.inner
-            .create_environment(runtime, folder, options, sink)
+            .create_environment(runtime, &target, options, sink)
     }
     fn environment_completion(&mut self) -> Option<NativeResult<()>> {
         self.inner.environment_completion()
