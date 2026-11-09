@@ -368,7 +368,7 @@ impl crate::Native {
         Ok(())
     }
 
-    pub(crate) fn native_host_lifecycle() -> TestResult {
+    pub(crate) fn native_host_lifecycle(owner_window: u64) -> TestResult {
         let _port = Self::fixed_port_fixture();
         let root = FixtureRoot::new()?;
         let runtime_path = std::env::var_os("OWNER_BRIDGE_TEST_RUNTIME")
@@ -410,7 +410,8 @@ impl crate::Native {
                 OwnerUserHandle::from_bytes([2; 32]),
                 PrfInput::from_bytes([3; 32]),
                 Instant::now(),
-            );
+            )
+            .with_test_owner_window(owner_window);
             let reply = host.run(CeremonyDriver::for_test(plan));
             assert!(matches!(
                 reply.result,

@@ -1415,6 +1415,49 @@ def _check_inventory(shim: Path, root: Path, shim_scan: ShimScan, found: list[st
             )
 
 
+def _check_owned_parent_boundary(sources: dict[str, str], found: list[str]) -> None:
+    """Bind the private parent/child fixture and its only test-support plan call."""
+    prefix = "crates/pos-owner-bridge-windows/src/"
+    lib = prefix + "lib.rs"
+    if "native_host_fixture_child" not in sources.get(lib, ""):
+        return  # Minimal independent checker fixtures have no native host test.
+    helper = prefix + "ffi/fixture_parent.rs"
+    expected = "4dca6c8ea4653046c7c867cf0fdba656c3bf7ae04ab74620e7bd2c1658a49852"
+    if hashlib.sha256(sources.get(helper, "").encode()).hexdigest() != expected:
+        found.append(f"{helper}: owned-parent fixture differs from reviewed test-only code")
+    module = sources.get(prefix + "ffi/mod.rs", "")
+    if len(re.findall(r"#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]\s*pub\s*\(\s*crate\s*\)\s*mod\s+fixture_parent\s*;", module)) != 1:
+        found.append(f"{prefix}ffi/mod.rs: owned-parent module must be cfg(test)")
+    plan = "crates/pos-owner-bridge/src/ceremony/plan.rs"
+    if not re.search(r"#\s*\[\s*cfg\s*\(\s*feature\s*=\s*\"test-support\"\s*\)\s*\]\s*impl\s+CeremonyPlan\s*\{", sources.get(plan, "")):
+        found.append(f"{plan}: owned-parent plan builder must be test-support only")
+    if not re.search(r"#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]\s*#\s*\[\s*forbid\s*\(\s*unsafe_code\s*\)\s*\]\s*mod\s+tests\s*\{", sources.get(lib, "")):
+        found.append(f"{lib}: native host fixture must remain in the test module")
+    specs = (
+        (plan, "with_test_owner_window", "df7788308f2149191a92004d4d57598c85c4036d2dc60cb106d1bccba6367606"),
+        (lib, "native_host_fixture_child", "542668f47ced5ff6eb0da4780909421bd6c10abe7b585dbf01690f60873200f4"),
+        (lib, "native_host_opens_fresh_environments_and_retires_before_reuse", "3c933b802adc837a96f269346e13ed951782feb860e41e62626a0c0ec9bed3ec"),
+        (prefix + "adapter/native_tests.rs", "native_host_lifecycle", "2ebf81ffbcae9bf98e9fb57a6ba28efc59bb40adfa972b5d463ead557a6f15e4"),
+    )
+    for path, name, digest in specs:
+        raw = sources.get(path, "")
+        spans = [(start, end) for found_name, start, end in _function_spans(scan(raw).code) if found_name == name]
+        if len(spans) != 1 or hashlib.sha256(re.sub(r"\s+", "", raw[spans[0][0]:spans[0][1]]).encode()).hexdigest() != digest:
+            found.append(f"{path}: owned-parent function {name} differs from reviewed code")
+    uses = {
+        "fixture_parent": {prefix + "ffi/mod.rs", helper, lib},
+        "OwnedParent": {helper, lib},
+        "child_owner": {helper, lib},
+        "with_test_owner_window": {plan, prefix + "adapter/native_tests.rs", "crates/pos-owner-bridge/tests/protocol/opening.rs"},
+        "native_host_lifecycle": {lib, prefix + "adapter/native_tests.rs"},
+    }
+    for path, raw in sources.items():
+        code = scan(raw).code
+        for name, allowed in uses.items():
+            if path not in allowed and re.search(rf"(?<!\w){name}(?!\w)", code):
+                found.append(f"{path}: owned-parent capability {name} outside reviewed fixture")
+
+
 def violations(root: Path) -> list[str]:
     """Return every source-policy violation beneath ``root``, sorted."""
     root = root.resolve()
@@ -1475,6 +1518,13 @@ def violations(root: Path) -> list[str]:
             if _contains_unsafe_code_lint(manifest.get("lints", {})):
                 found.append(f"{member}/Cargo.toml: non-shim crate configures unsafe_code")
         _check_member_sources(root, directory, scanned_dirs, found)
+    owned_sources = {
+        source.relative_to(root).as_posix(): _read(source)
+        for directory in scanned_dirs
+        for source in _walk(directory)[0]
+        if source.suffix == ".rs"
+    }
+    _check_owned_parent_boundary(owned_sources, found)
     return sorted(set(found))
 
 
