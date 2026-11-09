@@ -52,7 +52,7 @@ pub enum CommunityGuestClaimKindV1 {
 /// One exact canonical reference triple.
 #[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
 pub struct CommunityGuestClaimReferenceV1 {
-    /// Used0..3, or generated0 next State and generated1..k original drafts.
+    /// Used 0..3, or generated 0 next State and generated 1..k original drafts.
     pub position: u64,
     /// Exact actual artifact schema.
     pub schema: u32,

@@ -85,9 +85,9 @@ pub enum CommunityGuestErrorCodeV1<'a> {
 pub struct CommunityGuestErrorV1<'a> {
     /// Exact closed code and associated payload.
     pub code: CommunityGuestErrorCodeV1<'a>,
-    /// Original0..128-byte coordinate when present, never decoded as free text.
+    /// Original 0..128-byte coordinate when present, never decoded as free text.
     pub canonical_coordinate: Option<&'a [u8]>,
-    /// Original optional32-byte payload, including zero if the guest schema allows.
+    /// Original optional 32-byte payload, including zero if the guest schema allows.
     pub related_digest: Option<[u8; 32]>,
 }
 

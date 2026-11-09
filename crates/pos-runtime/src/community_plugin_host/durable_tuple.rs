@@ -151,7 +151,7 @@ impl<'a> CommunityNegotiatedTupleV1<'a> {
         }
     }
 
-    /// Encode exact16-field CNT1 with all eight limits and explicit live mode.
+    /// Encode exact 16-field CNT1 with all eight limits and explicit live mode.
     /// Count the same immutable record first so private copies never need a
     /// growing allocation, without reserving unrelated maximum-size metadata.
     #[must_use]
